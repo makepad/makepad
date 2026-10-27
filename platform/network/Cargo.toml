@@ -17,3 +17,7 @@ makepad-apple-sys = { path = "../../libs/apple_sys", version = "1.0.0" }
 package = "makepad-windows-sys"
 path = "../../libs/windows/sys"
 version = "0.1.0"
+
+[[bin]]
+name = "fleet-id"
+path = "src/bin/fleet_id.rs"

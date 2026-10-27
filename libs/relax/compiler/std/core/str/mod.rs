@@ -734,8 +734,17 @@ pub fn cmp_str(a: &str, b: &str) -> crate::cmp::Ordering {
     let x = a.as_bytes();
     let y = b.as_bytes();
     let n = if x.len() < y.len() { x.len() } else { y.len() };
-    // the first 8-byte word that differs (or the tail), then its first differing byte
-    let mut i = same_words(x.as_ptr(), y.as_ptr(), n);
+    // 8-byte words; the first that differs decides at once: its bytes in big-endian order
+    // compare like the strings (memcmp's word step), no byte loop over it
+    let mut i = 0;
+    while i + 8 <= n {
+        // SAFETY: bytes i..i + 8 are inside both strings
+        let (p, q) = unsafe { (crate::intrinsics_mem::ptr_read(x.as_ptr().add(i) as *const u64), crate::intrinsics_mem::ptr_read(y.as_ptr().add(i) as *const u64)) };
+        if p != q {
+            return if p.swap_bytes() < q.swap_bytes() { crate::cmp::Ordering::Less } else { crate::cmp::Ordering::Greater };
+        }
+        i += 8;
+    }
     while i < n {
         // SAFETY: i < n <= both lengths
         let (p, q) = unsafe { (*x.as_ptr().add(i), *y.as_ptr().add(i)) };

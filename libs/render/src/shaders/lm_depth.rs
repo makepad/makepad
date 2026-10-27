@@ -293,6 +293,85 @@ script_mod! {
         }
     }
 
+    // A far stand-in (impostor.rs) casting: its quad turned to face the
+    // sun, cut by the coverage of the baked view nearest to the sun's
+    // direction, so the shadow of a far tree is that tree's silhouette as
+    // the sun sees it (the stand-in's quad itself lies in the model's XY
+    // plane and would cast a square). The quad carries centre and radius
+    // (positions = centre + corner x radius, uv = corner x radius). Depth
+    // is the crown centre's: at the outer cascades' texel size the crown's
+    // own depth range does not matter.
+    mod.draw.DrawLmSunDepthImpostor = mod.std.set_type_default() do #(DrawLmSunDepthImpostor::script_shader(vm)){
+        ..mod.draw.DrawLmSunDepthCutout
+
+        vertex: fn() {
+            let corner_r = unpack2f16(self.geom.uv)
+            let r = max(abs(corner_r.x), 0.001)
+            let corner = vec2(corner_r.x / r, corner_r.y / r)
+            let center = vec3(self.geom.px - corner_r.x, self.geom.py - corner_r.y, self.geom.pz)
+            let ax = (self.transform * vec4(1.0, 0.0, 0.0, 0.0)).xyz
+            let ay = (self.transform * vec4(0.0, 1.0, 0.0, 0.0)).xyz
+            let az = (self.transform * vec4(0.0, 0.0, 1.0, 0.0)).xyz
+            let s = length(ax)
+            let cw = (self.transform * vec4(center.x, center.y, center.z, 1.0)).xyz
+            let rx = normalize(self.sun_rx.xyz)
+            let ry = normalize(self.sun_ry.xyz)
+            // Depth grows away from the sun: the view toward the sun is -rz.
+            let ts = 0.0 - normalize(self.sun_rz.xyz)
+            let vd = normalize(vec3(dot(ax, ts), dot(ay, ts), dot(az, ts)))
+            let rl = normalize(vec3(dot(ax, rx), dot(ay, rx), dot(az, rx)))
+            let ul = normalize(vec3(dot(ax, ry), dot(ay, ry), dot(az, ry)))
+            let off = (rl * corner.x + ul * corner.y) * r
+            // The nearest baked view (impostor.rs frame_dir / frame_basis).
+            let hv = normalize(vec3(vd.x, max(vd.y, 0.0), vd.z))
+            let hs = abs(hv.x) + abs(hv.y) + abs(hv.z)
+            let g = floor(clamp((vec2(hv.x / hs + hv.z / hs, hv.x / hs - hv.z / hs) * 0.5 + vec2(0.5, 0.5)) * #(crate::impostor::GRID_LAST_F), vec2(0.0, 0.0), vec2(#(crate::impostor::GRID_LAST_F), #(crate::impostor::GRID_LAST_F))) + vec2(0.5, 0.5))
+            let fuv = g * (2.0 / #(crate::impostor::GRID_LAST_F)) - vec2(1.0, 1.0)
+            let fx = (fuv.x + fuv.y) * 0.5
+            let fz = (fuv.x - fuv.y) * 0.5
+            let f = normalize(vec3(fx, max(1.0 - abs(fx) - abs(fz), 0.0), fz))
+            var right = vec3(1.0, 0.0, 0.0)
+            if f.y < 0.999 { right = normalize(cross(vec3(0.0, 1.0, 0.0), f)) }
+            let up = cross(f, right)
+            let cuv = clamp(vec2(dot(off, right) / r * (0.5 * #(crate::impostor::FILL_F)) + 0.5, 0.5 - dot(off, up) / r * (0.5 * #(crate::impostor::FILL_F))), vec2(0.0, 0.0), vec2(1.0, 1.0))
+            self.v_uv = (g + cuv) / #(crate::impostor::GRID_F)
+            let wp = cw + (rx * corner.x + ry * corner.y) * (r * s)
+            let nx = dot(self.sun_rx.xyz, wp) + self.sun_rx.w
+            let ny = dot(self.sun_ry.xyz, wp) + self.sun_ry.w
+            let nz = dot(self.sun_rz.xyz, cw) + self.sun_rz.w
+            self.v_d = nz
+            self.v_clip = vec2(nx, ny)
+            let zq = nz + self.flip_a.x * (1.0 - 2.0 * nz)
+            self.vertex_pos = vec4(
+                nx * self.tile_a.x + self.tile_a.z,
+                ny * self.tile_a.y + self.tile_a.w,
+                zq * (1.0 - self.flip_a.y) + self.flip_a.z,
+                1.0
+            )
+        }
+
+        pixel: fn() {
+            if abs(self.v_clip.x) > 1.001 || abs(self.v_clip.y) > 1.001 {
+                discard()
+            }
+            let a = self.tex.sample(self.v_uv).w
+            if a < 0.5 {
+                discard()
+            }
+            // Leaf texels (impostor.rs LEAF_ALPHA, below the core's 1.0) let
+            // the sun through a third of the time, at a fixed per-texel hash:
+            // a far crown's shadow is dappled like the near cascade's cards,
+            // not a solid blob.
+            if a < 0.9 {
+                let tp = floor(self.v_uv * self.tex.size())
+                if fract(sin(dot(tp, vec2(12.9898, 78.233))) * 43758.5453) < 0.34 {
+                    discard()
+                }
+            }
+            return vec4(self.v_d, 0.0, 0.0, 1.0)
+        }
+    }
+
     mod.draw.DrawLmLampDepth = mod.std.set_type_default() do #(DrawLmLampDepth::script_shader(vm)){
         alpha_blend: false
         backface_culling: false

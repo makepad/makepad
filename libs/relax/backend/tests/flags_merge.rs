@@ -47,7 +47,7 @@ fn merge_fn() -> Func {
 #[test]
 fn branch_at_block_start_compares_again() {
     let f = merge_fn();
-    let env = x64::Env { slots: relax_backend::rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: false, syms: 0, sym_class: 0 };
+    let env = x64::Env { slots: relax_backend::rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: false, syms: 0, sym_class: 0, near: false };
     let c = x64::compile(&relax_session::Options::default(), &f, &env).unwrap();
     assert!(c.relocs.is_empty());
     let code = relax_backend::exec::Code::new(&c.code).unwrap();

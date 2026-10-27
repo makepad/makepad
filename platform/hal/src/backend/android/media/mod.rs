@@ -25,6 +25,7 @@ mod midi;
 mod video;
 mod mediacodec;
 pub mod hevc;
+pub mod stream_encode;
 pub mod video_file;
 
 use crate::{

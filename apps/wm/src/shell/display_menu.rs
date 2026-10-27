@@ -15,9 +15,11 @@
 //! Pure: no `Cx`, no files. Linux only, like `display_layout`.
 #![cfg(target_os = "linux")]
 
-use makepad_widgets::makepad_platform::linux_display::{DisplayArrangement, DisplayPacing, LinuxDisplayOutput, LinuxDisplaySnapshot};
+use makepad_widgets::makepad_platform::linux_display::{
+    DisplayArrangement, DisplayPacing, LinuxDisplayOutput, LinuxDisplaySnapshot, VirtualDisplay, VIRTUAL_OUTPUT,
+};
 
-use super::display_layout::{connector_suffix, PEER_PENDING_STATUS};
+use super::display_layout::{connector_suffix, SavedVirtual, VirtualSize, PEER_PENDING_STATUS};
 
 /// How long a change waits for Keep before it is reverted.
 pub const CONFIRM_SECONDS: f64 = 15.0;
@@ -160,12 +162,95 @@ pub fn rate_after_resolution(modes: &[(u32, u32, f64)], width: u32, height: u32,
     rates.iter().copied().find(|r| r.round() == hz_now.round()).or_else(|| rates.first().copied())
 }
 
+// ------------------------------------------------------------- virtual
+
+/// The Size picker's presets: width, height, refresh in Hz.
+pub const VIRTUAL_PRESETS: [(u32, u32, u32); 6] =
+    [(7680, 2160, 120), (5120, 1440, 120), (3840, 2160, 120), (3840, 1600, 120), (2560, 1440, 120), (1920, 1080, 60)];
+
+/// The refresh rates the Custom stepper walks through, in Hz.
+const CUSTOM_RATES: [u32; 14] = [24, 30, 48, 50, 60, 75, 90, 100, 120, 144, 165, 200, 240, 360];
+/// How much one press of a Custom width or height stepper changes it.
+const CUSTOM_STEP: u32 = 160;
+
+/// A field of the Custom size entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CustomField {
+    Width,
+    Height,
+    Refresh,
+}
+
+/// `7680\u{d7}2160 \u{b7} 120 Hz`.
+pub fn virtual_mode_label(mode: &VirtualDisplay) -> String {
+    format!("{} \u{b7} {}", resolution_label(mode.width, mode.height), rate_label(mode.refresh_hz()))
+}
+
+/// The Size picker's face: the viewer's size while following (when it
+/// has reported, else the fallback), else the fixed size.
+pub fn virtual_size_label(saved: &SavedVirtual, shown: Option<&VirtualDisplay>) -> String {
+    if saved.follow {
+        match shown {
+            Some(mode) => format!("Follow Desk Link viewer \u{b7} {}", virtual_mode_label(mode)),
+            None => "Follow Desk Link viewer".into(),
+        }
+    } else {
+        virtual_mode_label(&saved.mode)
+    }
+}
+
+/// The Size picker's chips: Follow, the presets, then Custom (the fixed
+/// size as it stands, which shows its stepper row). `(label, choice,
+/// current)`.
+pub fn virtual_size_choices(saved: &SavedVirtual) -> Vec<(String, VirtualSize, bool)> {
+    let preset = |w, h, hz| (w, h, hz * 1000) == (saved.mode.width, saved.mode.height, saved.mode.refresh_mhz);
+    let is_preset = VIRTUAL_PRESETS.iter().any(|&(w, h, hz)| preset(w, h, hz));
+    let mut out = vec![("Follow viewer".to_string(), VirtualSize::Follow, saved.follow)];
+    for (w, h, hz) in VIRTUAL_PRESETS {
+        let size = VirtualSize::Fixed { width: w, height: h, refresh_mhz: hz * 1000 };
+        out.push((format!("{w}\u{d7}{h}@{hz}"), size, !saved.follow && preset(w, h, hz)));
+    }
+    let fixed = VirtualSize::Fixed { width: saved.mode.width, height: saved.mode.height, refresh_mhz: saved.mode.refresh_mhz };
+    out.push(("Custom".to_string(), fixed, !saved.follow && !is_preset));
+    out
+}
+
+/// The fixed size after one press of a Custom stepper (`dir` -1 or +1):
+/// width and height by `CUSTOM_STEP` within the display's limits, the
+/// refresh to the next rate of `CUSTOM_RATES`.
+pub fn step_custom(mode: &VirtualDisplay, field: CustomField, dir: i32) -> VirtualSize {
+    let (mut width, mut height, mut refresh_mhz) = (mode.width, mode.height, mode.refresh_mhz);
+    let step = |value: u32| {
+        let moved = if dir < 0 { value.saturating_sub(CUSTOM_STEP) } else { value.saturating_add(CUSTOM_STEP) };
+        moved.clamp(VirtualDisplay::MIN_SIZE, VirtualDisplay::MAX_SIZE)
+    };
+    match field {
+        CustomField::Width => width = step(width),
+        CustomField::Height => height = step(height),
+        CustomField::Refresh => {
+            let now = refresh_mhz / 1000;
+            let next = if dir < 0 {
+                CUSTOM_RATES.iter().rev().copied().find(|&hz| hz < now)
+            } else {
+                CUSTOM_RATES.iter().copied().find(|&hz| hz > now)
+            };
+            if let Some(hz) = next {
+                refresh_mhz = hz * 1000;
+            }
+        }
+    }
+    VirtualSize::Fixed { width, height, refresh_mhz }
+}
+
 // --------------------------------------------------------------- screens
 
 /// `Built-in · eDP-1` for a laptop panel; `HDMI · 3840×2160`,
 /// `DisplayPort · 2560×1440` for a monitor (its native resolution), or the
 /// connector when nothing better is known.
 pub fn screen_title(output: &LinuxDisplayOutput) -> String {
+    if is_virtual(output) {
+        return "Virtual display".into();
+    }
     let connector = connector_suffix(&output.name);
     let Some(name) = screen_kind(output) else { return connector };
     if is_built_in(output) {
@@ -177,6 +262,12 @@ pub fn screen_title(output: &LinuxDisplayOutput) -> String {
     }
 }
 
+/// The virtual display's row (the desktop while Virtual is on): it has no
+/// modes to pick, no place to move and no Pace by.
+pub fn is_virtual(output: &LinuxDisplayOutput) -> bool {
+    output.name == VIRTUAL_OUTPUT
+}
+
 /// The laptop's own panel.
 pub fn is_built_in(output: &LinuxDisplayOutput) -> bool {
     let connector = connector_suffix(&output.name);
@@ -186,6 +277,9 @@ pub fn is_built_in(output: &LinuxDisplayOutput) -> bool {
 
 /// `Built-in`, `HDMI`, `DisplayPort`, `DVI`, `VGA`; `None` for anything else.
 pub fn screen_kind(output: &LinuxDisplayOutput) -> Option<&'static str> {
+    if is_virtual(output) {
+        return Some("Virtual");
+    }
     if is_built_in(output) {
         return Some("Built-in");
     }
@@ -640,6 +734,56 @@ fn other_mode(change: &Change, snapshot: &LinuxDisplaySnapshot) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_widgets::makepad_platform::linux_display::VirtualPanels;
+
+    fn saved(follow: bool, width: u32, height: u32, hz: u32) -> SavedVirtual {
+        SavedVirtual {
+            mode: VirtualDisplay { width, height, refresh_mhz: hz * 1000, panels: VirtualPanels::Mirror },
+            scale: 200,
+            follow,
+        }
+    }
+
+    #[test]
+    fn the_virtual_row_is_titled_and_has_no_per_screen_pickers() {
+        let row = LinuxDisplayOutput { name: VIRTUAL_OUTPUT.into(), width: 7680, height: 2160, refresh_hz: 120.0, desktop_position: Some((0, 0)), primary: true, active: true, ..Default::default() };
+        assert!(is_virtual(&row));
+        assert_eq!(screen_title(&row), "Virtual display");
+        assert_eq!(screen_kind(&row), Some("Virtual"));
+        assert!(!is_virtual(&LinuxDisplayOutput { name: "card0-HDMI-A-1".into(), ..Default::default() }));
+    }
+
+    #[test]
+    fn size_choices_mark_follow_a_preset_or_custom() {
+        let current = |s: &SavedVirtual| virtual_size_choices(s).into_iter().filter(|c| c.2).map(|c| c.0).collect::<Vec<_>>();
+        assert_eq!(virtual_size_choices(&saved(true, 7680, 2160, 120)).len(), 8);
+        assert_eq!(current(&saved(true, 7680, 2160, 120)), vec!["Follow viewer"]);
+        assert_eq!(current(&saved(false, 5120, 1440, 120)), vec!["5120\u{d7}1440@120"]);
+        assert_eq!(current(&saved(false, 3000, 1000, 75)), vec!["Custom"]);
+    }
+
+    #[test]
+    fn size_label_reads_the_viewer_while_following() {
+        let s = saved(true, 7680, 2160, 120);
+        assert_eq!(virtual_size_label(&s, None), "Follow Desk Link viewer");
+        let shown = VirtualDisplay { width: 3840, height: 2160, refresh_mhz: 60_000, panels: VirtualPanels::Mirror };
+        assert!(virtual_size_label(&s, Some(&shown)).starts_with("Follow Desk Link viewer \u{b7} 3840"));
+        assert_eq!(virtual_size_label(&saved(false, 2560, 1440, 120), Some(&shown)), virtual_mode_label(&saved(false, 2560, 1440, 120).mode));
+    }
+
+    #[test]
+    fn custom_steppers_stay_in_limits_and_walk_the_rates() {
+        let mode = saved(false, 1920, 1080, 60).mode;
+        assert_eq!(step_custom(&mode, CustomField::Width, 1), VirtualSize::Fixed { width: 2080, height: 1080, refresh_mhz: 60_000 });
+        assert_eq!(step_custom(&mode, CustomField::Height, -1), VirtualSize::Fixed { width: 1920, height: 920, refresh_mhz: 60_000 });
+        assert_eq!(step_custom(&mode, CustomField::Refresh, 1), VirtualSize::Fixed { width: 1920, height: 1080, refresh_mhz: 75_000 });
+        assert_eq!(step_custom(&mode, CustomField::Refresh, -1), VirtualSize::Fixed { width: 1920, height: 1080, refresh_mhz: 50_000 });
+        let tiny = saved(false, 64, 64, 24).mode;
+        assert_eq!(step_custom(&tiny, CustomField::Width, -1), VirtualSize::Fixed { width: 64, height: 64, refresh_mhz: 24_000 });
+        assert_eq!(step_custom(&tiny, CustomField::Refresh, -1), VirtualSize::Fixed { width: 64, height: 64, refresh_mhz: 24_000 });
+        let huge = saved(false, 16384, 16384, 360).mode;
+        assert_eq!(step_custom(&huge, CustomField::Height, 1), VirtualSize::Fixed { width: 16384, height: 16384, refresh_mhz: 360_000 });
+    }
 
     const HDMI: &[(u32, u32, f64)] = &[
         (3840, 2160, 239.995),

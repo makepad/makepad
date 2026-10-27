@@ -111,7 +111,7 @@ impl DemandPart {
                 put_surface(path, (*hash)?, &scan.src, &scan.toks, &mut w, images)?;
                 put_defs(scan.defs.iter(), &mut w, images)?;
                 scan.children.put(&mut w); scan.aliases.put(&mut w); scan.macro_use.put(&mut w);
-                scan.uses.put(&mut w); scan.mods.put(&mut w); scan.mod_items.put(&mut w);
+                scan.uses.put(&mut w); scan.mods.put(&mut w); scan.mod_items.put(&mut w); scan.recursion_limit.put(&mut w);
             }
             parameters.put(&mut w); positions.put(&mut w);
         }
@@ -183,6 +183,14 @@ impl DemandPart {
         Self { key, inputs: self.inputs.clone(), probes: self.probes.clone(),
             late_inputs: self.late_inputs.clone(), ..Self::default() }
     }
+    /// The crate store a part's payload takes its images from (its sources, tokens, macro
+    /// definitions): the front store it was encoded against.
+    pub fn image_store(bytes: &[u8]) -> Option<String> {
+        let mut r = Decode::new(bytes);
+        if u32::get(&mut r)? != PART_VERSION { return None; }
+        let _: Self = Self { inputs: Codec::get(&mut r)?, probes: Codec::get(&mut r)?, late_inputs: Codec::get(&mut r)?, ..Self::default() };
+        String::get(&mut r)
+    }
     pub fn read_header(key: u128, bytes: &[u8]) -> Option<Self> {
         let mut r = Decode::new(bytes);
         if u32::get(&mut r)? != PART_VERSION { return None; }
@@ -210,7 +218,7 @@ impl DemandPart {
                 if source_path != path || Some(source_hash) != hash { return None; }
                 Some(Arc::new(Scanned { src_len, probes, src, toks,
                     defs: get_defs(&mut r, &store, images, &mut definitions)?.into_iter().map(|def| (*def).clone()).collect(), children: Codec::get(&mut r)?,
-                    aliases: Codec::get(&mut r)?, macro_use: Codec::get(&mut r)?, uses: Codec::get(&mut r)?, mods: Codec::get(&mut r)?, mod_items: Codec::get(&mut r)? }))
+                    aliases: Codec::get(&mut r)?, macro_use: Codec::get(&mut r)?, uses: Codec::get(&mut r)?, mods: Codec::get(&mut r)?, mod_items: Codec::get(&mut r)?, recursion_limit: Codec::get(&mut r)? }))
             } else { None };
             part.scans.push((path, module, hash, scan, Codec::get(&mut r)?, Codec::get(&mut r)?));
         }

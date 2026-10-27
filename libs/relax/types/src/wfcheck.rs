@@ -292,6 +292,7 @@ impl Tcx {
         };
         let Some(sig) = self.fn_sig(prog, m) else { return Vec::new() };
         let Some(&recv) = sig.params.first() else { return Vec::new() };
+        let (recv_full, self_full) = (crate::next_solver::dyn_compatibility::liberate_late_bound_regions(self, m, recv), self_ty);
         let (recv, self_ty) = (self.tys.erase_all_regions(recv), self.tys.erase_all_regions(self_ty));
         for t in [recv, self_ty] {
             if self.tys.has_error(t) || self.tys.has_assoc(t) || self.tys.has_opaque(t) || self.tys.has_infer(t) { return Vec::new(); }
@@ -299,17 +300,18 @@ impl Tcx {
         let Some(legacy) = self.lang_items.get(crate::lang_items::LangItem::LegacyReceiver) else { return Vec::new() };
         let env = self.param_env_id(prog, m);
         let parent_params = self.generic_indices_of(prog, def.parent).types_consts.len() as u32;
-        // 0: neither feature, 1: arbitrary_self_types, 2: with pointers
-        let valid = |level: u8| -> Result<(), bool> {
+        // 0: neither feature, 1: arbitrary_self_types, 2: with pointers. Ok: the step of the
+        // autoderef chain (with its regions) that is `Self`.
+        let valid = |level: u8| -> Result<TyId, bool> {
             let infcx = crate::infer::InferCtxt::for_item(self, prog, crate::tcx::TypingMode::non_body_analysis(), m);
             let same = |a: TyId, b: TyId| infcx.at(prog, env.clone()).eq(a, b).is_ok();
-            if same(self_ty, recv) { return Ok(()); }
+            if same(self_ty, recv) { return Ok(recv_full); }
             let generic_param = |t: TyId| matches!(self.tys.kind(t), TyKind::Param(i) if *i >= parent_params);
             if generic_param(recv) { return Err(true); }
-            let mut cur = recv;
+            let (mut cur, mut cur_full) = (recv, recv_full);
             for _ in 0..32 {
                 if generic_param(cur) { return Err(true); }
-                if same(self_ty, cur) { return Ok(()); }
+                if same(self_ty, cur) { return Ok(cur_full); }
                 if level == 0 {
                     // (a trait object implements no `LegacyReceiver`; asking would need the dyn
                     // compatibility of a trait whose own signature is being checked)
@@ -317,18 +319,47 @@ impl Tcx {
                     let goal = Goal { param_env: env.clone(), predicate: collect::trait_predicate(legacy, vec![GenericArg::Type(cur)]) };
                     if !infcx.evaluate_obligation(prog, goal).must_apply_modulo_regions() { break; }
                 }
-                let next = match self.tys.kind(cur) {
+                let next = match self.tys.kind(cur_full) {
                     TyKind::Ref(_, t, _) => Some(*t),
                     TyKind::Ptr(_, t) if level == 2 => Some(*t),
                     TyKind::Ptr(..) | TyKind::Error | TyKind::Infer(_) | TyKind::Dyn(..) => None,
-                    _ => crate::typeck::probe::overloaded_deref_ty(&infcx, prog, &env, cur),
+                    _ => crate::typeck::probe::overloaded_deref_ty(&infcx, prog, &env, cur_full),
                 };
                 let Some(next) = next else { break };
+                cur_full = next;
                 cur = self.tys.erase_all_regions(next);
             }
             Err(false)
         };
-        let Err(generic) = valid(0) else { return Vec::new() };
+        let step = match valid(0) {
+            Ok(step) => step,
+            Err(generic) => return self.invalid_receiver(prog, m, recv, &valid, generic),
+        };
+        // receiver_is_valid: `wfcx.eq(MethodReceiver, self_ty, step)` with the regions; the region
+        // checker of the fn's well-formedness (its assumed well-formed types) then reports a region
+        // that cannot be equal as "mismatched `self` parameter type" (E0308)
+        if !self.tys.has_infer(step) && self.tys.flags(step).contains(crate::types::TypeFlags::HAS_FREE_REGIONS) {
+            let infcx = crate::infer::InferCtxt::for_item(self, prog, crate::tcx::TypingMode::non_body_analysis(), m);
+            if infcx.at(prog, env.clone()).eq(self_full, step).is_ok() {
+                let mut wf: Vec<TyId> = Vec::new();
+                if parent.kind == DefKind::Impl {
+                    wf.push(self_full);
+                    if let Some(args) = self.impl_trait_args.get(&def.parent) { wf.extend_from_slice(args); }
+                }
+                wf.extend(sig.params.iter().map(|&t| crate::next_solver::dyn_compatibility::liberate_late_bound_regions(self, m, t)));
+                wf.push(crate::next_solver::dyn_compatibility::liberate_late_bound_regions(self, m, sig.ret));
+                if !infcx.resolve_regions(prog, env.clone(), &wf).is_empty() {
+                    let pos = self_param_pos(prog, def.file, item.lo, item.name.hi);
+                    return vec![prog.record_error(def.file, pos, "typeck", "E0308: mismatched `self` parameter type".to_string())];
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    fn invalid_receiver(&self, prog: &Program, m: DefId, recv: TyId, valid: &dyn Fn(u8) -> Result<TyId, bool>, generic: bool) -> Vec<String> {
+        let def = prog.def(m);
+        let item = prog.files[def.file as usize].ast.item(def.item);
         let shown = crate::typeck::ty_to_string(false, prog, self, recv);
         let pos = self_param_pos(prog, def.file, item.lo, item.name.hi);
         let crate_features = prog.crates[def.krate as usize].features(prog);
@@ -381,6 +412,8 @@ pub mod obligations {
         ocx: ObligationCtxt<'a, 'tcx>,
         env: ParamEnvId,
         def: DefId,
+        /// the item whose position the errors take (`def`, or an RPITIT's fn)
+        at: DefId,
         /// errors of checks that are not obligations (region outlives)
         extra: Vec<String>,
         /// rustc `assumed_wf_types`: the types whose well-formedness the item's regions may assume
@@ -523,13 +556,51 @@ pub mod obligations {
             // under the item's outlives environment and the types it may assume well formed.
             if fulfilled {
                 let outlives = self.outlives_environment();
-                for e in self.infcx.resolve_regions_with_outlives_env(self.prog, &outlives) {
-                    if let crate::infer::lexical_region_resolve::RegionResolutionError::GenericBoundFailure(ty, sub, span) = e {
-                        if let Some(msg) = self.generic_bound_failure(ty, sub) {
-                            let span = if span == 0 { self.prog.files[file as usize].ast.item(self.prog.def(self.def).item).lo } else { span };
-                            if seen.insert((span, msg.clone())) { out.push(self.prog.record_error(file, span, "typeck", msg)); }
-                        }
+                let errors = self.infcx.resolve_regions_with_outlives_env(self.prog, &outlives);
+                if !errors.is_empty() && !self.infcx.tainted_by_errors() {
+                    for (span, msg) in self.region_error_messages(errors) {
+                        let span = if span == 0 { self.prog.files[file as usize].ast.item(self.prog.def(self.at).item).lo } else { span };
+                        if seen.insert((span, msg.clone())) { out.push(self.prog.record_error(file, span, "typeck", msg)); }
                     }
+                }
+            }
+            out
+        }
+
+        /// error_reporting/infer/region.rs report_region_errors (without the "nice" region errors of
+        /// try_report_nice_region_error): process_errors drops the generic bound failures when there
+        /// are other errors and orders them by span; each is reported by its origin
+        /// (report_concrete_failure, report_placeholder_failure, report_sub_sup_conflict).
+        fn region_error_messages(&self, errors: Vec<crate::infer::lexical_region_resolve::RegionResolutionError>) -> Vec<(u32, String)> {
+            use crate::infer::lexical_region_resolve::RegionResolutionError as E;
+            use crate::infer::region_constraints::SubregionOrigin as O;
+            let tys = &self.tcx.tys;
+            let placeholder = |r| matches!(tys.region_kind(r), crate::types::RegionKind::RePlaceholder { .. });
+            let bound_failure = |e: &E| matches!(e, E::GenericBoundFailure(..));
+            let mut errors: Vec<E> = if errors.iter().all(bound_failure) { errors } else { errors.into_iter().filter(|e| !bound_failure(e)).collect() };
+            errors.sort_by_key(|e| match *e {
+                E::ConcreteFailure(o, ..) => o.span(),
+                E::GenericBoundFailure(_, _, span) => span,
+                E::SubSupConflict(_, var_span, ..) | E::UpperBoundUniverseConflict(_, var_span, ..) => var_span,
+            });
+            // report_concrete_failure (report_placeholder_failure gives the same codes for these origins)
+            let concrete = |o: O| -> (u32, String) {
+                let msg = match o {
+                    O::Subtype(_) => "E0308: lifetime mismatch".to_string(),
+                    O::RelateParamBound(_, ty) => format!("E0477: the type `{}` does not fulfill the required lifetime", crate::typeck::ty_to_string(false, self.prog, self.tcx, self.infcx.deeply_resolve_ignoring_regions(ty))),
+                    O::RelateRegionParamBound(_) | O::Misc => "E0478: lifetime bound not satisfied".to_string(),
+                };
+                (o.span(), msg)
+            };
+            let mut out = Vec::new();
+            for e in errors {
+                match e {
+                    E::ConcreteFailure(o, ..) => out.push(concrete(o)),
+                    E::GenericBoundFailure(ty, sub, span) => { if let Some(msg) = self.generic_bound_failure(ty, sub) { out.push((span, msg)); } }
+                    E::SubSupConflict(_, _, sub_origin, sub_r, _, _) if placeholder(sub_r) => out.push(concrete(sub_origin)),
+                    E::SubSupConflict(_, _, _, _, sup_origin, sup_r) if placeholder(sup_r) => out.push(concrete(sup_origin)),
+                    E::SubSupConflict(_, var_span, ..) => out.push((var_span, "E0803: cannot infer an appropriate lifetime due to conflicting requirements".to_string())),
+                    E::UpperBoundUniverseConflict(_, _, _, sup_origin, _) => out.push(concrete(sup_origin)),
                 }
             }
             out
@@ -563,6 +634,14 @@ pub mod obligations {
                 for p in crate::borrowck::implied_bounds::ImpliedBounds::inferred_outlives(tcx, self.prog, self.def) {
                     match p {
                         OutlivesPredicate::Region(a, b) => bounds.push(OutlivesBound::RegionSubRegion(b, a)),
+                        // (rustc's param env is normalized: normalize_param_env_or_error turns an inferred
+                        // `<X as Tr>::A: 'a` into the bound its normalization names)
+                        OutlivesPredicate::Type(t, r) if tys.flags(t).intersects(crate::types::TypeFlags::HAS_ALIAS) => {
+                            let normalized = self.infcx.probe(|_| crate::next_solver::fulfill::ObligationCtxt::new(self.infcx, self.prog).deeply_normalize_ty(&self.env, t).ok()).unwrap_or(t);
+                            let mut parts = Vec::new();
+                            crate::infer::outlives::components::push_outlives_components(tcx, self.prog, normalized, &mut parts);
+                            crate::next_solver::implied_outlives_bounds::push_component_bounds(&mut pairs, r, parts);
+                        }
                         OutlivesPredicate::Type(t, r) => pairs.push(if matches!(tys.kind(t), TyKind::Alias(..)) { OutlivesBound::RegionSubAlias(r, t) } else { OutlivesBound::RegionSubParam(r, t) }),
                     }
                 }
@@ -674,9 +753,30 @@ pub mod obligations {
             if let Some(args) = tcx.impl_trait_args.get(&imp) { v.extend_from_slice(args); }
             v
         };
+        // a trait's RPITIT associated type assumes its fn's types, the fn's late-bound lifetimes
+        // the opaque captures mapped to the RPITIT's own early-bound copies of them (its
+        // early-bound ones are tied to their copies by the bidirectional outlives clauses)
+        if let Some(&relax_front::assoc::ImplTraitInTraitData::Trait { fn_def_id, opaque_def_id }) = prog.impl_trait_in_trait_data.get(&def) {
+            use crate::types::RegionKind;
+            let data = tcx.opaque_generics(prog, opaque_def_id);
+            let offset = (data.parent.lifetimes.len() + data.parent.types_consts.len()) as u32;
+            let mut mapping = std::collections::HashMap::new();
+            for (index, &orig) in tcx.opaque_captured_parent_lifetimes(prog, opaque_def_id).iter().enumerate() {
+                if matches!(tcx.tys.region_kind(orig), RegionKind::ReLateParam(..)) {
+                    mapping.insert(orig, tcx.tys.intern_region(RegionKind::ReEarlyParam(offset + index as u32)));
+                }
+            }
+            struct Remap<'m>(&'m std::collections::HashMap<crate::types::RegionId, crate::types::RegionId>);
+            impl crate::types::fold::TypeFolder for Remap<'_> {
+                fn fold_region(&mut self, _: &crate::types::Types, r: crate::types::RegionId, _: u32) -> crate::types::RegionId { self.0.get(&r).copied().unwrap_or(r) }
+            }
+            use crate::types::fold::TypeFolder;
+            return assumed_wf_types(w, fn_def_id).into_iter().map(|t| Remap(&mapping).fold_ty(&tcx.tys, t, 0)).collect();
+        }
         let parent_impl = (d.parent != crate::program::NO_DEF && prog.def(d.parent).kind == DefKind::Impl).then_some(d.parent);
         match d.kind {
-            DefKind::Fn | DefKind::AssocFn => {
+            // (a foreign fn is rustc's DefKind::Fn)
+            DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn => {
                 if let Some(imp) = parent_impl { out.extend(header(imp)); }
                 if let Some(sig) = tcx.fn_sig(prog, def) {
                     let liberate = |t: TyId| crate::next_solver::dyn_compatibility::liberate_late_bound_regions(tcx, def, t);
@@ -692,13 +792,20 @@ pub mod obligations {
     }
 
     fn with_wfcx(prog: &Program, tcx: &Tcx, def: DefId, f: impl FnOnce(&mut Wfcx<'_, '_>)) -> Vec<String> {
+        with_wfcx_of(prog, tcx, def, def, f)
+    }
+
+    /// enter_wf_checking_ctxt for `def`; its errors are reported at `item` (a synthesized RPITIT
+    /// associated type has no item of its own: its fn's). The false global bounds of an RPITIT are
+    /// its fn's, which the fn's own check reports (rustc reports the same diagnostic once).
+    fn with_wfcx_of(prog: &Program, tcx: &Tcx, def: DefId, item: DefId, f: impl FnOnce(&mut Wfcx<'_, '_>)) -> Vec<String> {
         let infcx = crate::infer::InferCtxt::for_item(tcx, prog, crate::tcx::TypingMode::non_body_analysis(), def);
         let env = tcx.param_env_id(prog, def);
-        let mut w = Wfcx { prog, tcx, infcx: &infcx, ocx: ObligationCtxt::new(&infcx, prog), env, def, extra: Vec::new(), assumed_wf: Vec::new(), normalized: Default::default() };
+        let mut w = Wfcx { prog, tcx, infcx: &infcx, ocx: ObligationCtxt::new(&infcx, prog), env, def, at: item, extra: Vec::new(), assumed_wf: Vec::new(), normalized: Default::default() };
         w.assumed_wf = assumed_wf_types(&mut w, def);
-        w.check_false_global_bounds();
+        if def == item { w.check_false_global_bounds(); }
         f(&mut w);
-        w.finish(prog.def(def).file)
+        w.finish(prog.def(item).file)
     }
 
     /// check_well_formed for one definition (a body-less, header-level check: bodies are the
@@ -709,9 +816,34 @@ pub mod obligations {
         let ast = &prog.files[def.file as usize].ast;
         let item = ast.item(def.item);
         match def.kind {
-            DefKind::Struct | DefKind::Enum | DefKind::Union => with_wfcx(prog, tcx, did, |w| { check_type_defn(w, ast, item); check_defaults(w, ast, item); }),
+            DefKind::Struct | DefKind::Enum | DefKind::Union => {
+                // rustc implicit_infer.rs `infer_predicates`: a set of inferred outlives predicates that
+                // still grows at the recursion limit is a fatal error at the ADT
+                let _ = crate::borrowck::implied_bounds::ImpliedBounds::inferred_outlives(tcx, prog, did);
+                if tcx.inferred_outlives_overflow.contains_key(&did) {
+                    return vec![prog.record_error(def.file, item.lo, "typeck", format!("overflow computing implied lifetime bounds for `{}`", tcx.def_path_str(prog, did)))];
+                }
+                with_wfcx(prog, tcx, did, |w| { check_type_defn(w, ast, item); check_defaults(w, ast, item); })
+            }
             DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn => {
+                // wfcheck.rs check_trait_item: the associated types a trait method's `impl Trait`s
+                // become (ImplTraitInTraitData::Trait) are checked as associated items of their own
+                // (check_associated_item: check_associated_type_bounds), each under its own
+                // environment -- the fn's clauses and the bidirectional outlives clauses between the
+                // captured lifetimes and their copies -- and assumed well-formed types
+                let mut rpitits: Vec<DefId> = Vec::new();
+                if def.kind == DefKind::AssocFn && prog.def(def.parent).kind == DefKind::Trait {
+                    rpitits = prog.impl_trait_in_trait_data.iter().filter_map(|(&a, v)| match v {
+                        relax_front::assoc::ImplTraitInTraitData::Trait { fn_def_id, .. } if *fn_def_id == did => Some(a),
+                        _ => None,
+                    }).collect();
+                    rpitits.sort_unstable_by_key(|d| d.0);
+                }
                 let mut errors = with_wfcx(prog, tcx, did, |w| check_fn(w, ast, item));
+                for &a in &rpitits {
+                    let bounds = tcx.explicit_item_bounds(prog, a).to_vec();
+                    errors.extend(with_wfcx_of(prog, tcx, a, did, |w| for b in &bounds { w.clause_obligations(b, item.lo) }));
+                }
                 if def.kind != DefKind::ForeignFn { errors.extend(check_opaque_cycles(prog, tcx, did, item.lo)); }
                 if matches!(item.kind, ItemKind::Fn(sig, _, _) if ast.fn_sig(sig).asyncness) { errors.extend(check_async_recursion(prog, tcx, did, item.lo)); }
                 errors
@@ -721,7 +853,11 @@ pub mod obligations {
                 errors.extend(with_wfcx(prog, tcx, did, |w| check_impl(w, ast, item)));
                 errors
             }
-            DefKind::Trait => with_wfcx(prog, tcx, did, |w| { check_defaults(w, ast, item); w.check_where_clauses(item.lo); }),
+            DefKind::Trait => {
+                let mut errors = with_wfcx(prog, tcx, did, |w| { check_defaults(w, ast, item); w.check_where_clauses(item.lo); });
+                errors.extend(crate::gat_bounds::check(prog, tcx, did));
+                errors
+            }
             DefKind::Static | DefKind::ForeignStatic => with_wfcx(prog, tcx, did, |w| check_static(w, ast, item)),
             DefKind::AssocConst => with_wfcx(prog, tcx, did, |w| check_assoc_const(w, ast, item)),
             DefKind::AssocTy => with_wfcx(prog, tcx, did, |w| check_assoc_ty(w, ast, item)),
@@ -919,7 +1055,13 @@ pub mod obligations {
                 if matches!(&q.kind, PredicateKind::Clause(ClauseKind::Trait(u)) if matches!(u.trait_ref.args.first(), Some(GenericArg::Type(t)) if matches!(w.tcx.tys.kind(*t), TyKind::Alias(..)))) { continue; }
                 let q = w.tcx.instantiate_predicate(w.prog, def, &tc.trait_ref.args, &q);
                 if crate::next_solver::wf::predicate_has_escaping_bound_vars(&w.tcx.tys, &q) { continue; }
-                if matches!(&q.kind, PredicateKind::Clause(ClauseKind::Trait(u)) if u.trait_ref.def_id == def) { continue; }
+                // rustc predicates_of adds `Self: Trait` to a trait's predicates: the impl's own trait
+                // ref is proven (with the impl's where clauses as the environment). Its elaboration is
+                // the trait's supertrait clauses, which this loop registers by themselves.
+                if matches!(&q.kind, PredicateKind::Clause(ClauseKind::Trait(u)) if u.trait_ref.def_id == def) {
+                    w.register(Goal { param_env: w.env.clone(), predicate: q }, self_pos);
+                    continue;
+                }
                 // Elaborate::All: what the trait's bounds imply holds too
                 for e in w.tcx.supertraits(w.prog, q) {
                     if matches!(&e.kind, PredicateKind::Clause(ClauseKind::Trait(u)) if u.trait_ref.def_id == def) { continue; }
@@ -939,6 +1081,21 @@ pub mod obligations {
     fn check_static(w: &mut Wfcx<'_, '_>, ast: &ast::Ast, item: &ast::Item) {
         let ItemKind::Static(mutable, _, _) = &item.kind else { return };
         let Some(ty) = w.tcx.const_ty(w.prog, w.def) else { return };
+        if w.prog.def(w.def).kind == DefKind::ForeignStatic {
+            // rustc check.rs check_static_inhabited: an `extern` static whose layout is a SizeOverflow
+            let env = crate::tcx::TypingEnv::fully_monomorphized(w.prog);
+            let bad = crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_ERROR | crate::types::TypeFlags::HAS_INFER | crate::types::TypeFlags::HAS_ALIAS;
+            if let Ok(t) = w.tcx.try_normalize_erasing_regions(w.prog, env, ty) {
+                // (a field type that does not normalize has no layout: rustc's layout_of fails with
+                // NormalizationFailure, which this check leaves to the well-formedness errors)
+                if !w.tcx.tys.flags(t).intersects(bad) && fields_normalize(w.prog, w.tcx, env, t, &mut Default::default())
+                    && crate::layout::Layouts::new().size_overflows(&crate::layout::LayoutCx::new(w.prog), w.tcx, t) {
+                    let file = w.prog.def(w.def).file;
+                    w.extra.push(w.prog.record_uncoded_error(file, item.lo, "typeck", "extern static is too large for the target architecture".to_string()));
+                    return;
+                }
+            }
+        }
         // (a type with an unevaluated constant, `[u8; len(NAME)]`, is evaluated by the constant check)
         if w.tcx.tys.flags(ty).contains(crate::types::TypeFlags::HAS_ALIAS) { return; }
         let ty = w.normalize(ty);
@@ -953,6 +1110,29 @@ pub mod obligations {
         if !*mutable && !thread_local {
             let sync = w.tcx.lang_items.get(crate::lang_items::LangItem::Sync);
             w.register_bound(ty, sync, item.name.lo);
+        }
+    }
+
+    /// Do the field types a layout of `t` reads normalize?
+    fn fields_normalize(prog: &Program, tcx: &Tcx, env: crate::tcx::TypingEnv, t: TyId, seen: &mut crate::fxhash::HashSet<TyId>) -> bool {
+        if !seen.insert(t) { return true; }
+        match tcx.tys.kind(t).clone() {
+            TyKind::Adt(d, args, _) => {
+                let Some(adt) = tcx.adts.get(&d) else { return true };
+                let args = tcx.tys.list(args).to_vec();
+                for v in &adt.variants {
+                    for f in &v.fields {
+                        match tcx.try_normalize_erasing_regions(prog, env, tcx.tys.subst(f.ty, &args)) {
+                            Ok(ft) => { if !fields_normalize(prog, tcx, env, ft, seen) { return false; } }
+                            Err(_) => return false,
+                        }
+                    }
+                }
+                true
+            }
+            TyKind::Array(e, _) | TyKind::Slice(e) => fields_normalize(prog, tcx, env, e, seen),
+            TyKind::Tuple(ts) => tcx.tys.list(ts).to_vec().into_iter().all(|x| fields_normalize(prog, tcx, env, x, seen)),
+            _ => true,
         }
     }
 
@@ -1058,7 +1238,7 @@ pub mod obligations {
     }
 
     /// Where a written type starts: types carry no span of their own, a path its position.
-    fn ty_pos(ast: &ast::Ast, t: ast::TyId) -> Option<u32> {
+    pub(crate) fn ty_pos(ast: &ast::Ast, t: ast::TyId) -> Option<u32> {
         match ast.ty(t) {
             ast::Ty::Path(p) => Some(p.lo),
             ast::Ty::Ref(_, _, i) | ast::Ty::Ptr(_, i) | ast::Ty::Slice(i) | ast::Ty::Array(i, _) | ast::Ty::Paren(i) => ty_pos(ast, *i),
@@ -1095,8 +1275,20 @@ pub mod obligations {
         let ret = ocx.normalize_ty(&env, sig.ret);
         ocx.register_obligation(Goal { param_env: env.clone(), predicate: collect::trait_predicate(term, vec![GenericArg::Type(ret)]) });
         let bad = ocx.try_evaluate_obligations().into_iter().any(|e| matches!(e, NextSolverError::TrueError(_)));
-        if !bad { return Vec::new(); }
         let pos = ast.fn_sig(*s).ret.and_then(|t| ty_pos(ast, t)).unwrap_or(item.name.lo);
+        if !bad {
+            // the region constraints of the `Termination` proof hold too (resolve_regions; a
+            // placeholder one is "implementation of `..` is not general enough")
+            let errors = infcx.resolve_regions(prog, env, &[]);
+            if errors.is_empty() { return Vec::new(); }
+            let placeholder = errors.iter().any(|e| matches!(e, crate::infer::lexical_region_resolve::RegionResolutionError::UpperBoundUniverseConflict(..)))
+                || errors.iter().any(|e| match e {
+                    crate::infer::lexical_region_resolve::RegionResolutionError::ConcreteFailure(_, a, b) => [a, b].iter().any(|r| matches!(tcx.tys.region_kind(**r), crate::types::RegionKind::RePlaceholder { .. })),
+                    _ => false,
+                });
+            let msg = if placeholder { "higher-ranked lifetime error" } else { "lifetime may not live long enough" };
+            return vec![prog.record_uncoded_error(def.file, pos, "typeck", msg.to_string())];
+        }
         let shown = crate::typeck::ty_to_string(false, prog, tcx, infcx.deeply_resolve_ignoring_regions(ret));
         vec![prog.record_error(def.file, pos, "typeck", format!("E0277: `main` has invalid return type `{}`", shown))]
     }
@@ -1226,7 +1418,7 @@ pub mod obligations {
                         if nf == file && nce == start && no == owner {
                             return vec![prog.record_error(file, pos, "typeck", "E0733: recursion in an async fn requires boxing".to_string())];
                         }
-                        if !seen.contains(&(nf, nce)) { seen.push((nf, nce)); stack.push((nf, nce, no)); }
+                        if tcx.validates(prog, nf) && !seen.contains(&(nf, nce)) { seen.push((nf, nce)); stack.push((nf, nce, no)); }
                     }
                 }
                 let _ = f;

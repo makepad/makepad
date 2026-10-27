@@ -1,7 +1,7 @@
 //! The NDK media plumbing the phone's codecs share (libmediandk): owned MediaCodec, MediaFormat,
 //! MediaExtractor, ImageReader and Image handles that free themselves, and a decoded picture out
-//! of a YUV_420_888 image as tightly packed NV12. Used by `hevc` (single stills) and `video_file`
-//! (makepad_video's file decoder on Android).
+//! of a YUV_420_888 image as tightly packed NV12. Used by `hevc` (single stills), `stream_encode`
+//! (the live stream encoder) and `video_file` (makepad_video's file decoder on Android).
 use std::ffi::{c_char, c_void, CStr};
 use std::time::{Duration, Instant};
 
@@ -243,6 +243,9 @@ pub mod ndk {
         pub fn AMediaCodec_dequeueOutputBuffer(codec: *mut c_void, info: *mut BufferInfo, timeout_us: i64) -> isize;
         pub fn AMediaCodec_getOutputBuffer(codec: *mut c_void, index: usize, size: *mut usize) -> *mut u8;
         pub fn AMediaCodec_releaseOutputBuffer(codec: *mut c_void, index: usize, render: bool) -> i32;
+        pub fn AMediaCodec_setParameters(codec: *mut c_void, params: *const c_void) -> i32;
+        pub fn AMediaCodec_getName(codec: *mut c_void, name: *mut *mut c_char) -> i32;
+        pub fn AMediaCodec_releaseName(codec: *mut c_void, name: *mut c_char);
         pub fn AMediaExtractor_new() -> *mut c_void;
         pub fn AMediaExtractor_delete(ex: *mut c_void) -> i32;
         pub fn AMediaExtractor_setDataSourceFd(ex: *mut c_void, fd: i32, offset: i64, length: i64) -> i32;

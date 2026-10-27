@@ -11,6 +11,9 @@
 #   MAKEPAD_DISPLAY_ORDER            this-boot output names, left to right
 #   MAKEPAD_DRM_MODES                per-screen modes
 #   MAKEPAD_VULKAN_COMPOSITOR_PCI    the render-on GPU's PCI address
+#   MAKEPAD_VIRTUAL_DISPLAY          "WxH@Hz panels" from the `virtual` line
+#                                    (the virtual desktop's fallback size and
+#                                    what the panels show: mirror or off)
 #
 # File format and the screen-key resolution rule are in
 # apps/wm/src/shell/display_layout.rs (the pure model). A screen's
@@ -66,6 +69,11 @@
 # restore. Both markers are always unset first, same reason as the GPU
 # one.
 #
+# `MAKEPAD_VIRTUAL_DISPLAY` follows the same rules, with the marker
+# `MAKEPAD_WM_VIRTUAL_FROM_SAVED=1`: `virtual WxH@Hz panels=mirror|off ...`
+# (the first valid line wins; the scale= and follow= tokens are the WM's
+# own, not the renderer's).
+#
 # One line per export/skip decision is logged to stderr, prefixed
 # `display-layout:`.
 
@@ -73,6 +81,11 @@
 # `dddd:bb:ss.f`, 4-8 hex digits for the domain, lowercase.
 _mdl_is_pci_address() {
     [[ "$1" =~ ^[0-9a-f]{4,8}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]$ ]]
+}
+
+# `WxH` or `WxH@Hz` (Hz may be fractional), digits only.
+_mdl_virtual_mode_is_valid() {
+    [[ "$1" =~ ^[0-9]+x[0-9]+(@[0-9]+(\.[0-9]+)?)?$ ]]
 }
 
 # `vvvv:dddd`, lowercase hex, as `validate_gpu_choice` requires.
@@ -178,6 +191,7 @@ _mdl_main() {
     local layout_exists=0 layout_readable=0
     local render_on_pci="" render_on_ids=""
     local order_list="" modes_list=""
+    local virtual_mode="" virtual_panels="mirror"
     local card_table=""
     local had_noglob=0
     local line keyword pci connector token mode value name card
@@ -228,6 +242,23 @@ _mdl_main() {
                     else
                         echo "display-layout: malformed render-on line; skipped" >&2
                     fi
+                    ;;
+                virtual)
+                    if [ -n "$virtual_mode" ]; then
+                        continue
+                    fi
+                    if [ "$#" -lt 2 ] || ! _mdl_virtual_mode_is_valid "$2"; then
+                        echo "display-layout: malformed virtual line; skipped" >&2
+                        continue
+                    fi
+                    virtual_mode=$2
+                    shift 2
+                    for token in "$@"; do
+                        case "$token" in
+                            panels=mirror) virtual_panels=mirror ;;
+                            panels=off) virtual_panels=off ;;
+                        esac
+                    done
                     ;;
                 screen)
                     if [ "$#" -lt 3 ]; then
@@ -297,6 +328,15 @@ _mdl_main() {
         echo "display-layout: no saved modes; MAKEPAD_DRM_MODES left to the platform" >&2
     fi
 
+    unset MAKEPAD_WM_VIRTUAL_FROM_SAVED
+    if [ -n "$virtual_mode" ]; then
+        if _mdl_set_env MAKEPAD_VIRTUAL_DISPLAY "$virtual_mode $virtual_panels" "from display-layout"; then
+            export MAKEPAD_WM_VIRTUAL_FROM_SAVED=1
+        fi
+    else
+        echo "display-layout: no saved virtual display; MAKEPAD_VIRTUAL_DISPLAY left to the platform" >&2
+    fi
+
     # render-on: display-layout (even with no render-on line, meaning
     # Auto) always decides once it exists; the legacy display-gpu file is
     # only consulted when display-layout does not exist at all -- the
@@ -333,5 +373,5 @@ if ! _mdl_main; then
 fi
 
 unset -f _mdl_main _mdl_set_env _mdl_legacy_gpu_choice _mdl_table_has_match \
-    _mdl_card_for_pci _mdl_build_card_table _mdl_mode_is_valid _mdl_is_pci_ids \
+    _mdl_card_for_pci _mdl_build_card_table _mdl_mode_is_valid _mdl_virtual_mode_is_valid _mdl_is_pci_ids \
     _mdl_is_pci_address

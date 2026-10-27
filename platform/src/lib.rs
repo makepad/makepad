@@ -57,6 +57,7 @@ pub mod video_encode;
 pub mod video_file;
 
 mod draw_list;
+pub mod draw_owners;
 pub mod retained_instances;
 pub mod recording_buffer;
 pub mod shared_instances;
@@ -99,9 +100,11 @@ mod id_pool;
 pub mod ime;
 pub mod live_reload;
 mod macos_menu;
+pub mod tray;
 mod performance_stats;
 pub mod memory_watchdog;
 pub mod perf_monitor;
+pub mod thread_counters;
 pub mod gpu_frame_timer;
 pub mod gpu_admission;
 pub mod sploded;
@@ -135,6 +138,12 @@ pub mod font_policy;
 mod app_main;
 pub mod remote;
 pub mod remote_schema;
+// the profiler stream of a native build (a `makepad run` app serves it from relax inspect)
+#[cfg(all(not(relax), any(target_os = "macos", target_os = "linux")))]
+pub mod prof_native;
+// `prof` / `why-slow` of a native build (inspect's sampler and buckets; a `makepad run` app gets them from relax inspect)
+#[cfg(all(not(relax), target_os = "macos"))]
+pub mod prof_sampler;
 pub mod devtools;
 pub mod pixel_probe;
 pub mod screen_capture;
@@ -180,7 +189,7 @@ pub fn host_dark() -> Option<bool> {
 #[cfg(all(target_os = "android", not(relax)))]
 pub use crate::app_main::android_on_load;
 pub use crate::app_main::{
-    admitted_by_window_manager, attach_parent_console, discover_window_manager, is_window_manager, launched_by_host,
+    admitted_by_window_manager, attach_parent_console, discover_window_manager, hosted_by_window_manager, is_window_manager, launched_by_host, set_menu_bar_app, set_outlives_window_manager,
     new_cx_with_font_set, resolve_studio_http, run_app, set_window_manager, should_run_stdin_loop_from_env, WmAdmission,
 };
 // Working-tree startup instrumentation (`MAKEPAD_TRACE=startup`).
@@ -206,6 +215,14 @@ pub use ::windows;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use makepad_hal;
+
+/// The window-controls table of a desktop family: the HAL's, compiled in directly on the web
+/// (no HAL there), so widgets' caption code has one table on every target.
+#[cfg(not(target_arch = "wasm32"))]
+pub use makepad_hal::window_controls;
+#[cfg(target_arch = "wasm32")]
+#[path = "../hal/src/window_controls.rs"]
+pub mod window_controls;
 
 pub use makepad_futures;
 pub use makepad_script_std::makepad_network;
@@ -246,7 +263,7 @@ pub use {
             CxDrawPassParent, CxDrawPassRect, DrawPass, DrawPassClearColor, DrawPassClearDepth,
             DrawPassId, ScriptDrawPass, union_rects,
         },
-        draw_vars::{DrawVars, DRAW_CALL_MAX_UNIFORM_FLOATS},
+        draw_vars::{DrawVars, DRAW_CALL_MAX_UNIFORM_FLOATS, DRAW_CALL_TEXTURE_SLOTS},
         sploded::{SplodedParams, SplodedView},
         event::{
             AppOpenEvent,
@@ -262,8 +279,13 @@ pub use {
             DragEvent,
             DragHit,
             DragHitEvent,
+            DragImage,
             DragItem,
+            DragOut,
+            DragOutFile,
+            DragOutItem,
             DragResponse,
+            FilePromise,
             DragState,
             DrawEvent,
             DropEvent,
@@ -354,6 +376,7 @@ pub use {
             TextInputConfig,
         },
         macos_menu::MacosMenu,
+        tray::{TrayClickEvent, TrayIcon, TrayImage, TrayMenuEvent, TrayMenuItem},
         media_api::CxMediaApi,
         media_host::{MediaControlBridge, MediaEventBridge, MediaTextureBridge, MediaTextureInfo},
         media_plugin::{
@@ -431,6 +454,7 @@ pub use {
 /// The compiled-shader handle the const-table API is keyed by
 /// (`Cx::shader_const_table`, `shader_const_patch`, `shader_const_reset`).
 pub use crate::draw_shader::DrawShaderId;
+pub use crate::draw_owners::DrawLabel;
 pub use crate::pick::{PickError, PickImage, PickTicket};
 /// Edit mode's literal-site map (`Cx::set_live_literals`,
 /// `set_literal_source`, `patch_literal`).
@@ -438,3 +462,4 @@ pub use makepad_script_std::makepad_script::literal::{LiteralOrigin, LiteralReac
 pub use crate::collect::{ScanEvent, Scanner};
 
 pub mod restart;
+pub mod engine_request;

@@ -20,6 +20,10 @@ impl OpcodeArgs {
     /// missing field or element, or one of nil, reads as nil without an
     /// error.
     pub const OPTIONAL_FIELD: Self = Self(Self::TYPE_NUMBER | 1);
+    /// RANGE's argument when its range is the source of the `for` right after
+    /// it (`for i in a..b`): only that loop ever sees the range object, so the
+    /// loop reads its bounds and frees it at once.
+    pub const RANGE_FOR_SOURCE: Self = Self(Self::TYPE_NUMBER | 1);
 
     #[inline]
     pub fn raw(&self) -> u32 {

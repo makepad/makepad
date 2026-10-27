@@ -119,6 +119,8 @@ fn format_name(format: &TextureFormat) -> &'static str {
         TextureFormat::VecMipBGRAu8_32 { .. } => "VecMipBGRAu8_32",
         TextureFormat::VecMipRGBAf32 { .. } => "VecMipRGBAf32",
         TextureFormat::VecMipCompressed { .. } => "VecMipCompressed",
+        TextureFormat::VecArrayMipBGRAu8_32 { .. } => "VecArrayMipBGRAu8_32",
+        TextureFormat::VecArrayMipCompressed { .. } => "VecArrayMipCompressed",
         TextureFormat::VecRGBAf32 { .. } => "VecRGBAf32",
         TextureFormat::VecRu8 { .. } => "VecRu8",
         TextureFormat::VecRGu8 { .. } => "VecRGu8",
@@ -146,6 +148,7 @@ fn texel_size(format: &TextureFormat) -> u64 {
         TextureFormat::VecBGRAu8_32 { .. }
         | TextureFormat::VecCubeBGRAu8_32 { .. }
         | TextureFormat::VecMipBGRAu8_32 { .. }
+        | TextureFormat::VecArrayMipBGRAu8_32 { .. }
         | TextureFormat::RenderBGRAu8 { .. }
         | TextureFormat::RenderCubeBGRAu8 { .. }
         | TextureFormat::SharedBGRAu8 { .. }
@@ -325,18 +328,24 @@ impl Cx {
             let mip_levels = match &texture.format {
                 TextureFormat::VecMipBGRAu8_32 { max_level, .. }
                 | TextureFormat::VecMipRGBAf32 { max_level, .. }
-                | TextureFormat::VecMipCompressed { max_level, .. } => {
+                | TextureFormat::VecMipCompressed { max_level, .. }
+                | TextureFormat::VecArrayMipBGRAu8_32 { max_level, .. }
+                | TextureFormat::VecArrayMipCompressed { max_level, .. } => {
                     max_level.map_or(full_chain(width, height), |m| (m + 1).min(full_chain(width, height)))
                 }
                 f if f.is_render() && texture.render_mips => full_chain(width, height),
                 _ => 1,
             };
-            let faces: u64 = if matches!(texture.format, TextureFormat::VecCubeBGRAu8_32 { .. } | TextureFormat::RenderCubeBGRAu8 { .. }) { 6 } else { 1 };
+            let faces: u64 = match &texture.format {
+                TextureFormat::VecCubeBGRAu8_32 { .. } | TextureFormat::RenderCubeBGRAu8 { .. } => 6,
+                TextureFormat::VecArrayMipBGRAu8_32 { layers, .. } | TextureFormat::VecArrayMipCompressed { layers, .. } => (*layers).max(1) as u64,
+                _ => 1,
+            };
             let mut texel_bytes = 0u64;
             for level in 0..mip_levels.max(1) {
                 let (w, h) = ((width >> level).max(1), (height >> level).max(1));
                 texel_bytes += match &texture.format {
-                    TextureFormat::VecMipCompressed { .. } => crate::texture::CompressedTextureFormat::level_bytes(w, h) as u64,
+                    TextureFormat::VecMipCompressed { .. } | TextureFormat::VecArrayMipCompressed { .. } => crate::texture::CompressedTextureFormat::level_bytes(w, h) as u64,
                     f => (w * h) as u64 * texel_size(f),
                 };
             }

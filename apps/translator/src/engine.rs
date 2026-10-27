@@ -64,7 +64,7 @@ pub enum Update {
     Partial { id: u64, text: String },
     Done { id: u64, text: String },
     Failed { id: u64, error: String },
-    /// The remembered hub answered at another address (same certificate):
+    /// The remembered hub answered at another address (same fleet credential):
     /// remember this `host:port` instead.
     HubMoved { addr: String },
 }
@@ -244,11 +244,11 @@ fn run(job: &Job, picks: &Arc<FleetPickCache>, latest: &AtomicU64, send: &impl F
                 .with_max_tokens(Some(job.max_tokens.unwrap_or(4096)));
             match provider.availability() {
                 ProviderAvailability::Available { model, detail } => {
-                    // The remembered hub found elsewhere: the same node (its
-                    // certificate) is remembered at its new address.
+                    // The remembered hub found elsewhere: the same node (its fleet
+                    // credential) is remembered at its new address.
                     if let Some(hint) = hub_base(&job.settings.hub).filter(|_| hint_dead) {
                         let (old, new) = (host_of(&hint), host_of(&detail));
-                        if old != new && makepad_ai_hub::fleet_auth::same_node(old, new) {
+                        if old != new && makepad_network::fleet::id::same_node(old, new) {
                             makepad_widgets::log!("translator: hub {old} is now at {new}");
                             send(Update::HubMoved { addr: new.to_string() });
                         }

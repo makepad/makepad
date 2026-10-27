@@ -376,6 +376,14 @@ impl Session {
             // The edited versions' body inputs, as reload.rs publish_reload.
             self.unit.tcx.queries.register_files(self.unit.prog.files.len());
             self.unit.tcx.publish_file_bodies(&body_files);
+            // the commits' new defs (closures of the edited bodies) have declaration cells
+            self.unit.tcx.grow_to(&self.unit.prog);
+            // items added inside an edited body (a `use` in a closure) got defs at the commit
+            let body_added = self.unit.prog.take_body_added();
+            if !body_added.is_empty() {
+                // (its errors stay in tcx.errors, where collect_added put them)
+                let _ = self.unit.tcx.collect_added(&self.unit.prog, &body_added, false);
+            }
             self.refresh_front();
             // Include callers before invalidating hidden opaque types: an unchanged
             // caller's inferred return can change when its callee's body changes.
@@ -453,7 +461,7 @@ impl Session {
                 match self.unit.prog.recollect_check_crate(krate, files) {
                     Ok(defs) => {
                         self.unit.tcx.errors.retain(|e| !self.files.iter().any(|(p, f)| self.unit.prog.file_crate[*f as usize] == krate && e.starts_with(p)));
-                        self.unit.consts.clear(); self.unit.statics.clear(); self.unit.static_spans.clear();
+                        self.unit.consts.clear(); self.unit.statics.clear(); self.unit.static_spans.clear(); self.unit.tls_places.clear();
                         self.unit.tcx.collect_check(&self.unit.prog, &defs);
                     }
                     Err(e) => { self.parse_errors.insert(String::new(), crate::diag::from_legacy(&e, "resolve")); }
@@ -499,7 +507,16 @@ impl Session {
     fn rebuild_sources(&mut self, edits: Vec<(String, std::io::Result<Vec<u8>>)>, check_bodies: bool, force_eager: bool) {
         let start = Instant::now();
         for (path, text) in edits {
-            let path = self.file(&path).map(|f| self.unit.prog.file_paths[f as usize].clone()).unwrap_or_else(|| crate::vfs::normalize_path(&path));
+            // the program's own spelling of the file: the overlay is looked up by it. A skipped
+            // file has no id: an alias (macOS /var -> /private/var) maps to the path the program
+            // knows it by, else the edit would sit under a name the rebuild never reads.
+            let path = match self.file(&path) {
+                Some(f) => self.unit.prog.file_paths[f as usize].clone(),
+                None => {
+                    let spelling = Self::source_spelling(&path);
+                    self.paths().into_iter().find(|p| Self::source_spelling(p) == spelling).unwrap_or_else(|| crate::vfs::normalize_path(&path))
+                }
+            };
             let canonical = Self::source_spelling(&path);
             // Skipped files have no file ID yet. Remove old aliases too, so an
             // earlier overlay cannot overwrite the newest edit.

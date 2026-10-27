@@ -74,12 +74,25 @@ struct Opts {
     ignored: bool,
     include_ignored: bool,
     list: bool,
+    /// libtest OutputFormat::Terse (`-q` / `--format=terse`): one character per test
     quiet: bool,
     threads: usize,
 }
 
+/// libtest cli.rs get_format: `--format` (pretty, terse; json and junit only on nightly with
+/// -Z unstable-options), terse also with `--quiet`.
+fn format_terse(v: &str) -> Result<bool, String> {
+    match v {
+        "pretty" => Ok(false),
+        "terse" => Ok(true),
+        "json" | "junit" => Err(format!("The \"{}\" format is only accepted on the nightly compiler with -Z unstable-options", v)),
+        _ => Err(format!("argument for --format must be pretty, terse, json or junit (was {})", v)),
+    }
+}
+
 fn parse_args() -> Result<Opts, String> {
     let mut o = Opts { filters: Vec::new(), skip: Vec::new(), exact: false, ignored: false, include_ignored: false, list: false, quiet: false, threads: 0 };
+    let mut format: Option<bool> = None;
     let mut args = crate::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -94,9 +107,15 @@ fn parse_args() -> Result<Opts, String> {
             "--test-threads" => o.threads = args.next().and_then(|v| v.parse().ok()).filter(|&n| n > 0).ok_or("--test-threads must be a positive integer")?,
             _ if a.starts_with("--test-threads=") => o.threads = a[15..].parse().ok().filter(|&n| n > 0).ok_or("--test-threads must be a positive integer")?,
             _ if a.starts_with("--skip=") => o.skip.push(a[7..].into()),
+            "--format" => format = Some(format_terse(&args.next().ok_or("--format needs a value")?)?),
+            _ if a.starts_with("--format=") => format = Some(format_terse(&a[9..])?),
             _ if a.starts_with('-') => return Err(format!("Unrecognized option: '{}'", a.trim_start_matches('-'))),
             _ => o.filters.push(a),
         }
+    }
+    // an explicit --format wins over --quiet (get_format: `None if quiet => Terse`)
+    if let Some(terse) = format {
+        o.quiet = terse;
     }
     if o.threads == 0 {
         o.threads = match crate::env::var("RUST_TEST_THREADS") {
@@ -216,6 +235,9 @@ fn run(t: &Tests) -> i32 {
     let mut passed = 0usize;
     let mut ignored = 0usize;
     let mut failures: Vec<(String, Option<String>)> = Vec::new();
+    // libtest formatters/terse.rs: the tests reported so far and the characters on this line
+    let (mut test_count, mut test_column) = (0usize, 0usize);
+    let total_count = all.len();
     // libtest's pretty formatter names the mode of a `#[should_panic]` test
     let mut report = |name: &str, should_panic: bool, o: Outcome, failures: &mut Vec<(String, Option<String>)>| {
         let mode = if should_panic { " - should panic" } else { "" };
@@ -225,7 +247,28 @@ fn run(t: &Tests) -> i32 {
             Outcome::Ignored => "ignored",
         };
         if opts.quiet {
-            print!("{}", match &o { Outcome::Ok => ".", Outcome::Failed(_) => "F", Outcome::Ignored => "i" });
+            // TerseFormatter: a character per passed / ignored test, the progress every 88
+            // columns, a line per failed one
+            const QUIET_MODE_MAX_COLUMN: usize = 88;
+            match &o {
+                Outcome::Failed(_) => {
+                    if test_column != 0 {
+                        print!(" {}/{}\n", test_count, total_count);
+                        test_column = 0;
+                    }
+                    test_count += 1;
+                    println!("{} --- FAILED", name);
+                }
+                _ => {
+                    print!("{}", if matches!(o, Outcome::Ok) { "." } else { "i" });
+                    test_count += 1;
+                    test_column += 1;
+                    if test_column % QUIET_MODE_MAX_COLUMN == QUIET_MODE_MAX_COLUMN - 1 {
+                        print!(" {}/{}\n", test_count, total_count);
+                        test_column = 0;
+                    }
+                }
+            }
         } else {
             println!("test {}{} ... {}", name, mode, word);
         }
@@ -287,9 +330,7 @@ fn run(t: &Tests) -> i32 {
         done += 1;
         report(&descs[i].name, descs[i].should_panic != 0, o, &mut failures);
     }
-    if opts.quiet {
-        println!();
-    }
+    // (terse: the line of characters ends with the next section's leading newline)
     let ok = failures.is_empty();
     if !ok {
         println!();

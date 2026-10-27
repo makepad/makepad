@@ -94,8 +94,18 @@ impl<'a> ScriptVm<'a> {
                 let ip = self.bx.threads.cur_ref().trap.ip;
                 // Pause thread before native call so re-entrant calls get a different thread
                 self.bx.threads.cur().is_paused = true;
+                // makepad inspect `trace verbs`: the call with its arguments (one load when off)
+                let traced = if crate::inspect_query::trace_on() {
+                    let ty = crate::inspect_query::handle_type_name(&self.bx.code.native.borrow(), type_index);
+                    crate::inspect_query::trace_wants(&ty, method)
+                } else {
+                    None
+                };
                 // SAFETY: The call pointer is valid as long as native calls aren't removed during execution
                 let ret = unsafe { call.call(self, args, method) };
+                if let Some(verb) = traced {
+                    crate::inspect_query::trace_record(&self.bx, verb, ip, args, ret);
+                }
 
                 // Check if call explicitly paused (via pause() which sets trap.on to Pause)
                 if matches!(

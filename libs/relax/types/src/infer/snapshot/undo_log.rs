@@ -10,6 +10,7 @@ pub(crate) enum UndoLog {
     OpaqueTypes(opaque_types::OpaqueTypeKey, Option<opaque_types::ProvisionalHiddenType>),
     DuplicateOpaqueType,
     PushRegionObligation,
+    PushHirTypeckPotentiallyRegionDependentGoal,
 }
 
 pub(crate) struct Snapshot { undo_len: usize }
@@ -56,6 +57,7 @@ impl InferCtxtInner {
             UndoLog::OpaqueTypes(key, previous) => self.opaque_type_storage.remove(key, previous),
             UndoLog::DuplicateOpaqueType => self.opaque_type_storage.pop_duplicate_entry(),
             UndoLog::PushRegionObligation => { self.region_obligations.pop().unwrap(); }
+            UndoLog::PushHirTypeckPotentiallyRegionDependentGoal => { self.hir_typeck_potentially_region_dependent_goals.pop().unwrap(); }
         }
     }
     pub(crate) fn rollback_to(&mut self, snapshot: Snapshot) {

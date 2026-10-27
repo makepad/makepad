@@ -345,7 +345,7 @@ impl Product for u64 { fn product<I: Iterator<Item = u64>>(iter: I) -> u64 { cra
 impl<'a> Product<&'a u64> for u64 { fn product<I: Iterator<Item = &'a u64>>(iter: I) -> u64 { crate::iter::product_from(1 as u64, iter.copied()) } }
 impl FromStr for u64 { type Err = ParseIntError; fn from_str(src: &str) -> Result<u64, ParseIntError> { u64::from_str_radix(src, 10) } }
 impl Step for u64 {
-    fn steps_between(start: &u64, end: &u64) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u64).wrapping_sub(*start as u64) as usize; (s, Some(s)) } else { (0, None) } }
+    fn steps_between(start: &u64, end: &u64) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u64).wrapping_sub(*start as u64); if s <= usize::MAX as u64 { (s as usize, Some(s as usize)) } else { (usize::MAX, None) } } else { (0, None) } }
     fn forward_checked(start: u64, n: usize) -> Option<u64> { if false { return None; } start.checked_add(n as u64) }
     fn backward_checked(start: u64, n: usize) -> Option<u64> { if false { return None; } start.checked_sub(n as u64) }
     unsafe fn forward_unchecked(start: u64, n: usize) -> u64 { start.wrapping_add(n as u64) }
@@ -867,7 +867,7 @@ impl Product for i64 { fn product<I: Iterator<Item = i64>>(iter: I) -> i64 { cra
 impl<'a> Product<&'a i64> for i64 { fn product<I: Iterator<Item = &'a i64>>(iter: I) -> i64 { crate::iter::product_from(1 as i64, iter.copied()) } }
 impl FromStr for i64 { type Err = ParseIntError; fn from_str(src: &str) -> Result<i64, ParseIntError> { i64::from_str_radix(src, 10) } }
 impl Step for i64 {
-    fn steps_between(start: &i64, end: &i64) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u64).wrapping_sub(*start as u64) as usize; (s, Some(s)) } else { (0, None) } }
+    fn steps_between(start: &i64, end: &i64) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u64).wrapping_sub(*start as u64); if s <= usize::MAX as u64 { (s as usize, Some(s as usize)) } else { (usize::MAX, None) } } else { (0, None) } }
     fn forward_checked(start: i64, n: usize) -> Option<i64> { if false { return None; } let w = start.wrapping_add(n as u64 as i64); if w >= start { Some(w) } else { None } }
     fn backward_checked(start: i64, n: usize) -> Option<i64> { if false { return None; } let w = start.wrapping_sub(n as u64 as i64); if w <= start { Some(w) } else { None } }
     unsafe fn forward_unchecked(start: i64, n: usize) -> i64 { start.wrapping_add(n as i64) }
@@ -1179,84 +1179,153 @@ impl From<u8> for u16 { fn from(v: u8) -> u16 { v as u16 } }
 impl From<u8> for u32 { fn from(v: u8) -> u32 { v as u32 } }
 impl From<u8> for u64 { fn from(v: u8) -> u64 { v as u64 } }
 impl From<u8> for u128 { fn from(v: u8) -> u128 { v as u128 } }
+#[cfg(target_pointer_width = "64")]
+impl From<u8> for usize { fn from(v: u8) -> usize { v as usize } }
+#[cfg(target_pointer_width = "32")]
 impl From<u8> for usize { fn from(v: u8) -> usize { v as usize } }
 impl TryFrom<u8> for i8 { type Error = TryFromIntError; fn try_from(v: u8) -> Result<i8, TryFromIntError> { if v > 127i8 as u8 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i8) } }
 impl From<u8> for i16 { fn from(v: u8) -> i16 { v as i16 } }
 impl From<u8> for i32 { fn from(v: u8) -> i32 { v as i32 } }
 impl From<u8> for i64 { fn from(v: u8) -> i64 { v as i64 } }
 impl From<u8> for i128 { fn from(v: u8) -> i128 { v as i128 } }
+#[cfg(target_pointer_width = "64")]
+impl From<u8> for isize { fn from(v: u8) -> isize { v as isize } }
+#[cfg(target_pointer_width = "32")]
 impl From<u8> for isize { fn from(v: u8) -> isize { v as isize } }
 impl From<bool> for u8 { fn from(v: bool) -> u8 { v as u8 } }
 impl TryFrom<u16> for u8 { type Error = TryFromIntError; fn try_from(v: u16) -> Result<u8, TryFromIntError> { if v > 255u8 as u16 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u8) } }
 impl From<u16> for u32 { fn from(v: u16) -> u32 { v as u32 } }
 impl From<u16> for u64 { fn from(v: u16) -> u64 { v as u64 } }
 impl From<u16> for u128 { fn from(v: u16) -> u128 { v as u128 } }
+#[cfg(target_pointer_width = "64")]
+impl From<u16> for usize { fn from(v: u16) -> usize { v as usize } }
+#[cfg(target_pointer_width = "32")]
 impl From<u16> for usize { fn from(v: u16) -> usize { v as usize } }
 impl TryFrom<u16> for i8 { type Error = TryFromIntError; fn try_from(v: u16) -> Result<i8, TryFromIntError> { if v > 127i8 as u16 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i8) } }
 impl TryFrom<u16> for i16 { type Error = TryFromIntError; fn try_from(v: u16) -> Result<i16, TryFromIntError> { if v > 32767i16 as u16 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i16) } }
 impl From<u16> for i32 { fn from(v: u16) -> i32 { v as i32 } }
 impl From<u16> for i64 { fn from(v: u16) -> i64 { v as i64 } }
 impl From<u16> for i128 { fn from(v: u16) -> i128 { v as i128 } }
+#[cfg(target_pointer_width = "64")]
+impl TryFrom<u16> for isize { type Error = TryFromIntError; fn try_from(v: u16) -> Result<isize, TryFromIntError> { Ok(v as isize) } }
+#[cfg(target_pointer_width = "32")]
 impl TryFrom<u16> for isize { type Error = TryFromIntError; fn try_from(v: u16) -> Result<isize, TryFromIntError> { Ok(v as isize) } }
 impl From<bool> for u16 { fn from(v: bool) -> u16 { v as u16 } }
 impl TryFrom<u32> for u8 { type Error = TryFromIntError; fn try_from(v: u32) -> Result<u8, TryFromIntError> { if v > 255u8 as u32 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u8) } }
 impl TryFrom<u32> for u16 { type Error = TryFromIntError; fn try_from(v: u32) -> Result<u16, TryFromIntError> { if v > 65535u16 as u32 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u16) } }
 impl From<u32> for u64 { fn from(v: u32) -> u64 { v as u64 } }
 impl From<u32> for u128 { fn from(v: u32) -> u128 { v as u128 } }
+#[cfg(target_pointer_width = "64")]
+impl TryFrom<u32> for usize { type Error = TryFromIntError; fn try_from(v: u32) -> Result<usize, TryFromIntError> { Ok(v as usize) } }
+#[cfg(target_pointer_width = "32")]
 impl TryFrom<u32> for usize { type Error = TryFromIntError; fn try_from(v: u32) -> Result<usize, TryFromIntError> { Ok(v as usize) } }
 impl TryFrom<u32> for i8 { type Error = TryFromIntError; fn try_from(v: u32) -> Result<i8, TryFromIntError> { if v > 127i8 as u32 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i8) } }
 impl TryFrom<u32> for i16 { type Error = TryFromIntError; fn try_from(v: u32) -> Result<i16, TryFromIntError> { if v > 32767i16 as u32 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i16) } }
 impl TryFrom<u32> for i32 { type Error = TryFromIntError; fn try_from(v: u32) -> Result<i32, TryFromIntError> { if v > 2147483647i32 as u32 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i32) } }
 impl From<u32> for i64 { fn from(v: u32) -> i64 { v as i64 } }
 impl From<u32> for i128 { fn from(v: u32) -> i128 { v as i128 } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<u32> for isize { type Error = TryFromIntError; fn try_from(v: u32) -> Result<isize, TryFromIntError> { Ok(v as isize) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<u32> for isize { type Error = TryFromIntError; fn try_from(v: u32) -> Result<isize, TryFromIntError> { if v > 2147483647isize as u32 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as isize) } }
 impl From<bool> for u32 { fn from(v: bool) -> u32 { v as u32 } }
 impl TryFrom<u64> for u8 { type Error = TryFromIntError; fn try_from(v: u64) -> Result<u8, TryFromIntError> { if v > 255u8 as u64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u8) } }
 impl TryFrom<u64> for u16 { type Error = TryFromIntError; fn try_from(v: u64) -> Result<u16, TryFromIntError> { if v > 65535u16 as u64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u16) } }
 impl TryFrom<u64> for u32 { type Error = TryFromIntError; fn try_from(v: u64) -> Result<u32, TryFromIntError> { if v > 4294967295u32 as u64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u32) } }
 impl From<u64> for u128 { fn from(v: u64) -> u128 { v as u128 } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<u64> for usize { type Error = TryFromIntError; fn try_from(v: u64) -> Result<usize, TryFromIntError> { Ok(v as usize) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<u64> for usize { type Error = TryFromIntError; fn try_from(v: u64) -> Result<usize, TryFromIntError> { if v > 4294967295usize as u64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as usize) } }
 impl TryFrom<u64> for i8 { type Error = TryFromIntError; fn try_from(v: u64) -> Result<i8, TryFromIntError> { if v > 127i8 as u64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i8) } }
 impl TryFrom<u64> for i16 { type Error = TryFromIntError; fn try_from(v: u64) -> Result<i16, TryFromIntError> { if v > 32767i16 as u64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i16) } }
 impl TryFrom<u64> for i32 { type Error = TryFromIntError; fn try_from(v: u64) -> Result<i32, TryFromIntError> { if v > 2147483647i32 as u64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i32) } }
 impl TryFrom<u64> for i64 { type Error = TryFromIntError; fn try_from(v: u64) -> Result<i64, TryFromIntError> { if v > 9223372036854775807i64 as u64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i64) } }
 impl From<u64> for i128 { fn from(v: u64) -> i128 { v as i128 } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<u64> for isize { type Error = TryFromIntError; fn try_from(v: u64) -> Result<isize, TryFromIntError> { if v > 9223372036854775807isize as u64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as isize) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<u64> for isize { type Error = TryFromIntError; fn try_from(v: u64) -> Result<isize, TryFromIntError> { if v > 2147483647isize as u64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as isize) } }
 impl From<bool> for u64 { fn from(v: bool) -> u64 { v as u64 } }
 impl TryFrom<u128> for u8 { type Error = TryFromIntError; fn try_from(v: u128) -> Result<u8, TryFromIntError> { if v > 255u8 as u128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u8) } }
 impl TryFrom<u128> for u16 { type Error = TryFromIntError; fn try_from(v: u128) -> Result<u16, TryFromIntError> { if v > 65535u16 as u128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u16) } }
 impl TryFrom<u128> for u32 { type Error = TryFromIntError; fn try_from(v: u128) -> Result<u32, TryFromIntError> { if v > 4294967295u32 as u128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u32) } }
 impl TryFrom<u128> for u64 { type Error = TryFromIntError; fn try_from(v: u128) -> Result<u64, TryFromIntError> { if v > 18446744073709551615u64 as u128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u64) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<u128> for usize { type Error = TryFromIntError; fn try_from(v: u128) -> Result<usize, TryFromIntError> { if v > 18446744073709551615usize as u128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as usize) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<u128> for usize { type Error = TryFromIntError; fn try_from(v: u128) -> Result<usize, TryFromIntError> { if v > 4294967295usize as u128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as usize) } }
 impl TryFrom<u128> for i8 { type Error = TryFromIntError; fn try_from(v: u128) -> Result<i8, TryFromIntError> { if v > 127i8 as u128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i8) } }
 impl TryFrom<u128> for i16 { type Error = TryFromIntError; fn try_from(v: u128) -> Result<i16, TryFromIntError> { if v > 32767i16 as u128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i16) } }
 impl TryFrom<u128> for i32 { type Error = TryFromIntError; fn try_from(v: u128) -> Result<i32, TryFromIntError> { if v > 2147483647i32 as u128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i32) } }
 impl TryFrom<u128> for i64 { type Error = TryFromIntError; fn try_from(v: u128) -> Result<i64, TryFromIntError> { if v > 9223372036854775807i64 as u128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i64) } }
 impl TryFrom<u128> for i128 { type Error = TryFromIntError; fn try_from(v: u128) -> Result<i128, TryFromIntError> { if v > 170141183460469231731687303715884105727i128 as u128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i128) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<u128> for isize { type Error = TryFromIntError; fn try_from(v: u128) -> Result<isize, TryFromIntError> { if v > 9223372036854775807isize as u128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as isize) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<u128> for isize { type Error = TryFromIntError; fn try_from(v: u128) -> Result<isize, TryFromIntError> { if v > 2147483647isize as u128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as isize) } }
 impl From<bool> for u128 { fn from(v: bool) -> u128 { v as u128 } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<usize> for u8 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<u8, TryFromIntError> { if v > 255u8 as usize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u8) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<usize> for u16 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<u16, TryFromIntError> { if v > 65535u16 as usize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u16) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<usize> for u32 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<u32, TryFromIntError> { if v > 4294967295u32 as usize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u32) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<usize> for u64 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<u64, TryFromIntError> { Ok(v as u64) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<usize> for u128 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<u128, TryFromIntError> { Ok(v as u128) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<usize> for i8 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<i8, TryFromIntError> { if v > 127i8 as usize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i8) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<usize> for i16 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<i16, TryFromIntError> { if v > 32767i16 as usize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i16) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<usize> for i32 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<i32, TryFromIntError> { if v > 2147483647i32 as usize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i32) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<usize> for i64 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<i64, TryFromIntError> { if v > 9223372036854775807i64 as usize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i64) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<usize> for i128 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<i128, TryFromIntError> { Ok(v as i128) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<usize> for isize { type Error = TryFromIntError; fn try_from(v: usize) -> Result<isize, TryFromIntError> { if v > 9223372036854775807isize as usize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as isize) } }
 impl From<bool> for usize { fn from(v: bool) -> usize { v as usize } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<usize> for u8 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<u8, TryFromIntError> { if v > 255u8 as usize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u8) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<usize> for u16 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<u16, TryFromIntError> { if v > 65535u16 as usize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u16) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<usize> for u32 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<u32, TryFromIntError> { Ok(v as u32) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<usize> for u64 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<u64, TryFromIntError> { Ok(v as u64) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<usize> for u128 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<u128, TryFromIntError> { Ok(v as u128) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<usize> for i8 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<i8, TryFromIntError> { if v > 127i8 as usize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i8) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<usize> for i16 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<i16, TryFromIntError> { if v > 32767i16 as usize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i16) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<usize> for i32 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<i32, TryFromIntError> { if v > 2147483647i32 as usize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i32) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<usize> for i64 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<i64, TryFromIntError> { Ok(v as i64) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<usize> for i128 { type Error = TryFromIntError; fn try_from(v: usize) -> Result<i128, TryFromIntError> { Ok(v as i128) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<usize> for isize { type Error = TryFromIntError; fn try_from(v: usize) -> Result<isize, TryFromIntError> { if v > 2147483647isize as usize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as isize) } }
 impl TryFrom<i8> for u8 { type Error = TryFromIntError; fn try_from(v: i8) -> Result<u8, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u8) } }
 impl TryFrom<i8> for u16 { type Error = TryFromIntError; fn try_from(v: i8) -> Result<u16, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u16) } }
 impl TryFrom<i8> for u32 { type Error = TryFromIntError; fn try_from(v: i8) -> Result<u32, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u32) } }
 impl TryFrom<i8> for u64 { type Error = TryFromIntError; fn try_from(v: i8) -> Result<u64, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u64) } }
 impl TryFrom<i8> for u128 { type Error = TryFromIntError; fn try_from(v: i8) -> Result<u128, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u128) } }
+#[cfg(target_pointer_width = "64")]
+impl TryFrom<i8> for usize { type Error = TryFromIntError; fn try_from(v: i8) -> Result<usize, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as usize) } }
+#[cfg(target_pointer_width = "32")]
 impl TryFrom<i8> for usize { type Error = TryFromIntError; fn try_from(v: i8) -> Result<usize, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as usize) } }
 impl From<i8> for i16 { fn from(v: i8) -> i16 { v as i16 } }
 impl From<i8> for i32 { fn from(v: i8) -> i32 { v as i32 } }
 impl From<i8> for i64 { fn from(v: i8) -> i64 { v as i64 } }
 impl From<i8> for i128 { fn from(v: i8) -> i128 { v as i128 } }
+#[cfg(target_pointer_width = "64")]
+impl From<i8> for isize { fn from(v: i8) -> isize { v as isize } }
+#[cfg(target_pointer_width = "32")]
 impl From<i8> for isize { fn from(v: i8) -> isize { v as isize } }
 impl From<bool> for i8 { fn from(v: bool) -> i8 { v as i8 } }
 impl TryFrom<i16> for u8 { type Error = TryFromIntError; fn try_from(v: i16) -> Result<u8, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 255u8 as i16 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u8) } }
@@ -1264,11 +1333,17 @@ impl TryFrom<i16> for u16 { type Error = TryFromIntError; fn try_from(v: i16) ->
 impl TryFrom<i16> for u32 { type Error = TryFromIntError; fn try_from(v: i16) -> Result<u32, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u32) } }
 impl TryFrom<i16> for u64 { type Error = TryFromIntError; fn try_from(v: i16) -> Result<u64, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u64) } }
 impl TryFrom<i16> for u128 { type Error = TryFromIntError; fn try_from(v: i16) -> Result<u128, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u128) } }
+#[cfg(target_pointer_width = "64")]
+impl TryFrom<i16> for usize { type Error = TryFromIntError; fn try_from(v: i16) -> Result<usize, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as usize) } }
+#[cfg(target_pointer_width = "32")]
 impl TryFrom<i16> for usize { type Error = TryFromIntError; fn try_from(v: i16) -> Result<usize, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as usize) } }
 impl TryFrom<i16> for i8 { type Error = TryFromIntError; fn try_from(v: i16) -> Result<i8, TryFromIntError> { if v < (-127i8 - 1) as i16 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 127i8 as i16 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i8) } }
 impl From<i16> for i32 { fn from(v: i16) -> i32 { v as i32 } }
 impl From<i16> for i64 { fn from(v: i16) -> i64 { v as i64 } }
 impl From<i16> for i128 { fn from(v: i16) -> i128 { v as i128 } }
+#[cfg(target_pointer_width = "64")]
+impl From<i16> for isize { fn from(v: i16) -> isize { v as isize } }
+#[cfg(target_pointer_width = "32")]
 impl From<i16> for isize { fn from(v: i16) -> isize { v as isize } }
 impl From<bool> for i16 { fn from(v: bool) -> i16 { v as i16 } }
 impl TryFrom<i32> for u8 { type Error = TryFromIntError; fn try_from(v: i32) -> Result<u8, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 255u8 as i32 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u8) } }
@@ -1276,11 +1351,17 @@ impl TryFrom<i32> for u16 { type Error = TryFromIntError; fn try_from(v: i32) ->
 impl TryFrom<i32> for u32 { type Error = TryFromIntError; fn try_from(v: i32) -> Result<u32, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u32) } }
 impl TryFrom<i32> for u64 { type Error = TryFromIntError; fn try_from(v: i32) -> Result<u64, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u64) } }
 impl TryFrom<i32> for u128 { type Error = TryFromIntError; fn try_from(v: i32) -> Result<u128, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u128) } }
+#[cfg(target_pointer_width = "64")]
+impl TryFrom<i32> for usize { type Error = TryFromIntError; fn try_from(v: i32) -> Result<usize, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as usize) } }
+#[cfg(target_pointer_width = "32")]
 impl TryFrom<i32> for usize { type Error = TryFromIntError; fn try_from(v: i32) -> Result<usize, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as usize) } }
 impl TryFrom<i32> for i8 { type Error = TryFromIntError; fn try_from(v: i32) -> Result<i8, TryFromIntError> { if v < (-127i8 - 1) as i32 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 127i8 as i32 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i8) } }
 impl TryFrom<i32> for i16 { type Error = TryFromIntError; fn try_from(v: i32) -> Result<i16, TryFromIntError> { if v < (-32767i16 - 1) as i32 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 32767i16 as i32 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i16) } }
 impl From<i32> for i64 { fn from(v: i32) -> i64 { v as i64 } }
 impl From<i32> for i128 { fn from(v: i32) -> i128 { v as i128 } }
+#[cfg(target_pointer_width = "64")]
+impl TryFrom<i32> for isize { type Error = TryFromIntError; fn try_from(v: i32) -> Result<isize, TryFromIntError> { Ok(v as isize) } }
+#[cfg(target_pointer_width = "32")]
 impl TryFrom<i32> for isize { type Error = TryFromIntError; fn try_from(v: i32) -> Result<isize, TryFromIntError> { Ok(v as isize) } }
 impl From<bool> for i32 { fn from(v: bool) -> i32 { v as i32 } }
 impl TryFrom<i64> for u8 { type Error = TryFromIntError; fn try_from(v: i64) -> Result<u8, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 255u8 as i64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u8) } }
@@ -1288,37 +1369,82 @@ impl TryFrom<i64> for u16 { type Error = TryFromIntError; fn try_from(v: i64) ->
 impl TryFrom<i64> for u32 { type Error = TryFromIntError; fn try_from(v: i64) -> Result<u32, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 4294967295u32 as i64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u32) } }
 impl TryFrom<i64> for u64 { type Error = TryFromIntError; fn try_from(v: i64) -> Result<u64, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u64) } }
 impl TryFrom<i64> for u128 { type Error = TryFromIntError; fn try_from(v: i64) -> Result<u128, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u128) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<i64> for usize { type Error = TryFromIntError; fn try_from(v: i64) -> Result<usize, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as usize) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<i64> for usize { type Error = TryFromIntError; fn try_from(v: i64) -> Result<usize, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 4294967295usize as i64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as usize) } }
 impl TryFrom<i64> for i8 { type Error = TryFromIntError; fn try_from(v: i64) -> Result<i8, TryFromIntError> { if v < (-127i8 - 1) as i64 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 127i8 as i64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i8) } }
 impl TryFrom<i64> for i16 { type Error = TryFromIntError; fn try_from(v: i64) -> Result<i16, TryFromIntError> { if v < (-32767i16 - 1) as i64 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 32767i16 as i64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i16) } }
 impl TryFrom<i64> for i32 { type Error = TryFromIntError; fn try_from(v: i64) -> Result<i32, TryFromIntError> { if v < (-2147483647i32 - 1) as i64 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 2147483647i32 as i64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i32) } }
 impl From<i64> for i128 { fn from(v: i64) -> i128 { v as i128 } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<i64> for isize { type Error = TryFromIntError; fn try_from(v: i64) -> Result<isize, TryFromIntError> { Ok(v as isize) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<i64> for isize { type Error = TryFromIntError; fn try_from(v: i64) -> Result<isize, TryFromIntError> { if v < (-2147483647isize - 1) as i64 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 2147483647isize as i64 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as isize) } }
 impl From<bool> for i64 { fn from(v: bool) -> i64 { v as i64 } }
 impl TryFrom<i128> for u8 { type Error = TryFromIntError; fn try_from(v: i128) -> Result<u8, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 255u8 as i128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u8) } }
 impl TryFrom<i128> for u16 { type Error = TryFromIntError; fn try_from(v: i128) -> Result<u16, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 65535u16 as i128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u16) } }
 impl TryFrom<i128> for u32 { type Error = TryFromIntError; fn try_from(v: i128) -> Result<u32, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 4294967295u32 as i128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u32) } }
 impl TryFrom<i128> for u64 { type Error = TryFromIntError; fn try_from(v: i128) -> Result<u64, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 18446744073709551615u64 as i128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u64) } }
 impl TryFrom<i128> for u128 { type Error = TryFromIntError; fn try_from(v: i128) -> Result<u128, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u128) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<i128> for usize { type Error = TryFromIntError; fn try_from(v: i128) -> Result<usize, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 18446744073709551615usize as i128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as usize) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<i128> for usize { type Error = TryFromIntError; fn try_from(v: i128) -> Result<usize, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 4294967295usize as i128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as usize) } }
 impl TryFrom<i128> for i8 { type Error = TryFromIntError; fn try_from(v: i128) -> Result<i8, TryFromIntError> { if v < (-127i8 - 1) as i128 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 127i8 as i128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i8) } }
 impl TryFrom<i128> for i16 { type Error = TryFromIntError; fn try_from(v: i128) -> Result<i16, TryFromIntError> { if v < (-32767i16 - 1) as i128 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 32767i16 as i128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i16) } }
 impl TryFrom<i128> for i32 { type Error = TryFromIntError; fn try_from(v: i128) -> Result<i32, TryFromIntError> { if v < (-2147483647i32 - 1) as i128 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 2147483647i32 as i128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i32) } }
 impl TryFrom<i128> for i64 { type Error = TryFromIntError; fn try_from(v: i128) -> Result<i64, TryFromIntError> { if v < (-9223372036854775807i64 - 1) as i128 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 9223372036854775807i64 as i128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i64) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<i128> for isize { type Error = TryFromIntError; fn try_from(v: i128) -> Result<isize, TryFromIntError> { if v < (-9223372036854775807isize - 1) as i128 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 9223372036854775807isize as i128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as isize) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<i128> for isize { type Error = TryFromIntError; fn try_from(v: i128) -> Result<isize, TryFromIntError> { if v < (-2147483647isize - 1) as i128 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 2147483647isize as i128 { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as isize) } }
 impl From<bool> for i128 { fn from(v: bool) -> i128 { v as i128 } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<isize> for u8 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<u8, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 255u8 as isize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u8) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<isize> for u16 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<u16, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 65535u16 as isize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u16) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<isize> for u32 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<u32, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 4294967295u32 as isize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u32) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<isize> for u64 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<u64, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u64) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<isize> for u128 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<u128, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u128) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<isize> for usize { type Error = TryFromIntError; fn try_from(v: isize) -> Result<usize, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as usize) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<isize> for i8 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<i8, TryFromIntError> { if v < (-127i8 - 1) as isize { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 127i8 as isize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i8) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<isize> for i16 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<i16, TryFromIntError> { if v < (-32767i16 - 1) as isize { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 32767i16 as isize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i16) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<isize> for i32 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<i32, TryFromIntError> { if v < (-2147483647i32 - 1) as isize { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 2147483647i32 as isize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i32) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<isize> for i64 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<i64, TryFromIntError> { Ok(v as i64) } }
+#[cfg(target_pointer_width = "64")]
 impl TryFrom<isize> for i128 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<i128, TryFromIntError> { Ok(v as i128) } }
 impl From<bool> for isize { fn from(v: bool) -> isize { v as isize } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<isize> for u8 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<u8, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 255u8 as isize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u8) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<isize> for u16 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<u16, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 65535u16 as isize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as u16) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<isize> for u32 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<u32, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u32) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<isize> for u64 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<u64, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u64) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<isize> for u128 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<u128, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as u128) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<isize> for usize { type Error = TryFromIntError; fn try_from(v: isize) -> Result<usize, TryFromIntError> { if v < 0 { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } Ok(v as usize) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<isize> for i8 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<i8, TryFromIntError> { if v < (-127i8 - 1) as isize { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 127i8 as isize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i8) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<isize> for i16 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<i16, TryFromIntError> { if v < (-32767i16 - 1) as isize { return Err(TryFromIntError(IntErrorKind::NegOverflow)); } if v > 32767i16 as isize { return Err(TryFromIntError(IntErrorKind::PosOverflow)); } Ok(v as i16) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<isize> for i32 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<i32, TryFromIntError> { Ok(v as i32) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<isize> for i64 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<i64, TryFromIntError> { Ok(v as i64) } }
+#[cfg(target_pointer_width = "32")]
+impl TryFrom<isize> for i128 { type Error = TryFromIntError; fn try_from(v: isize) -> Result<i128, TryFromIntError> { Ok(v as i128) } }
 impl From<i8> for f32 { fn from(v: i8) -> f32 { v as f32 } }
 impl From<i16> for f32 { fn from(v: i16) -> f32 { v as f32 } }
 impl From<u8> for f32 { fn from(v: u8) -> f32 { v as f32 } }
@@ -1332,3 +1458,401 @@ impl From<u32> for f64 { fn from(v: u32) -> f64 { v as f64 } }
 impl From<f32> for f64 { fn from(v: f32) -> f64 { v as f64 } }
 impl From<bool> for f32 { fn from(v: bool) -> f32 { v as u8 as f32 } }
 impl From<bool> for f64 { fn from(v: bool) -> f64 { v as u8 as f64 } }
+
+// ---- additional integer shift impls
+impl Shl<u16> for u8 { type Output = u8; fn shl(self, rhs: u16) -> u8 { self << rhs } }
+impl ShlAssign<u16> for u8 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl Shr<u16> for u8 { type Output = u8; fn shr(self, rhs: u16) -> u8 { self >> rhs } }
+impl ShrAssign<u16> for u8 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl Shl<u64> for u8 { type Output = u8; fn shl(self, rhs: u64) -> u8 { self << rhs } }
+impl ShlAssign<u64> for u8 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl Shr<u64> for u8 { type Output = u8; fn shr(self, rhs: u64) -> u8 { self >> rhs } }
+impl ShrAssign<u64> for u8 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl Shl<u128> for u8 { type Output = u8; fn shl(self, rhs: u128) -> u8 { self << rhs } }
+impl ShlAssign<u128> for u8 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl Shr<u128> for u8 { type Output = u8; fn shr(self, rhs: u128) -> u8 { self >> rhs } }
+impl ShrAssign<u128> for u8 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl Shl<i8> for u8 { type Output = u8; fn shl(self, rhs: i8) -> u8 { self << rhs } }
+impl ShlAssign<i8> for u8 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl Shr<i8> for u8 { type Output = u8; fn shr(self, rhs: i8) -> u8 { self >> rhs } }
+impl ShrAssign<i8> for u8 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl Shl<i16> for u8 { type Output = u8; fn shl(self, rhs: i16) -> u8 { self << rhs } }
+impl ShlAssign<i16> for u8 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl Shr<i16> for u8 { type Output = u8; fn shr(self, rhs: i16) -> u8 { self >> rhs } }
+impl ShrAssign<i16> for u8 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl Shl<i64> for u8 { type Output = u8; fn shl(self, rhs: i64) -> u8 { self << rhs } }
+impl ShlAssign<i64> for u8 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl Shr<i64> for u8 { type Output = u8; fn shr(self, rhs: i64) -> u8 { self >> rhs } }
+impl ShrAssign<i64> for u8 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl Shl<i128> for u8 { type Output = u8; fn shl(self, rhs: i128) -> u8 { self << rhs } }
+impl ShlAssign<i128> for u8 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl Shr<i128> for u8 { type Output = u8; fn shr(self, rhs: i128) -> u8 { self >> rhs } }
+impl ShrAssign<i128> for u8 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl Shl<isize> for u8 { type Output = u8; fn shl(self, rhs: isize) -> u8 { self << rhs } }
+impl ShlAssign<isize> for u8 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl Shr<isize> for u8 { type Output = u8; fn shr(self, rhs: isize) -> u8 { self >> rhs } }
+impl ShrAssign<isize> for u8 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl Shl<u8> for u16 { type Output = u16; fn shl(self, rhs: u8) -> u16 { self << rhs } }
+impl ShlAssign<u8> for u16 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl Shr<u8> for u16 { type Output = u16; fn shr(self, rhs: u8) -> u16 { self >> rhs } }
+impl ShrAssign<u8> for u16 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl Shl<u64> for u16 { type Output = u16; fn shl(self, rhs: u64) -> u16 { self << rhs } }
+impl ShlAssign<u64> for u16 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl Shr<u64> for u16 { type Output = u16; fn shr(self, rhs: u64) -> u16 { self >> rhs } }
+impl ShrAssign<u64> for u16 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl Shl<u128> for u16 { type Output = u16; fn shl(self, rhs: u128) -> u16 { self << rhs } }
+impl ShlAssign<u128> for u16 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl Shr<u128> for u16 { type Output = u16; fn shr(self, rhs: u128) -> u16 { self >> rhs } }
+impl ShrAssign<u128> for u16 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl Shl<i8> for u16 { type Output = u16; fn shl(self, rhs: i8) -> u16 { self << rhs } }
+impl ShlAssign<i8> for u16 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl Shr<i8> for u16 { type Output = u16; fn shr(self, rhs: i8) -> u16 { self >> rhs } }
+impl ShrAssign<i8> for u16 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl Shl<i16> for u16 { type Output = u16; fn shl(self, rhs: i16) -> u16 { self << rhs } }
+impl ShlAssign<i16> for u16 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl Shr<i16> for u16 { type Output = u16; fn shr(self, rhs: i16) -> u16 { self >> rhs } }
+impl ShrAssign<i16> for u16 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl Shl<i64> for u16 { type Output = u16; fn shl(self, rhs: i64) -> u16 { self << rhs } }
+impl ShlAssign<i64> for u16 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl Shr<i64> for u16 { type Output = u16; fn shr(self, rhs: i64) -> u16 { self >> rhs } }
+impl ShrAssign<i64> for u16 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl Shl<i128> for u16 { type Output = u16; fn shl(self, rhs: i128) -> u16 { self << rhs } }
+impl ShlAssign<i128> for u16 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl Shr<i128> for u16 { type Output = u16; fn shr(self, rhs: i128) -> u16 { self >> rhs } }
+impl ShrAssign<i128> for u16 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl Shl<isize> for u16 { type Output = u16; fn shl(self, rhs: isize) -> u16 { self << rhs } }
+impl ShlAssign<isize> for u16 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl Shr<isize> for u16 { type Output = u16; fn shr(self, rhs: isize) -> u16 { self >> rhs } }
+impl ShrAssign<isize> for u16 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl Shl<u8> for u32 { type Output = u32; fn shl(self, rhs: u8) -> u32 { self << rhs } }
+impl ShlAssign<u8> for u32 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl Shr<u8> for u32 { type Output = u32; fn shr(self, rhs: u8) -> u32 { self >> rhs } }
+impl ShrAssign<u8> for u32 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl Shl<u16> for u32 { type Output = u32; fn shl(self, rhs: u16) -> u32 { self << rhs } }
+impl ShlAssign<u16> for u32 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl Shr<u16> for u32 { type Output = u32; fn shr(self, rhs: u16) -> u32 { self >> rhs } }
+impl ShrAssign<u16> for u32 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl Shl<u64> for u32 { type Output = u32; fn shl(self, rhs: u64) -> u32 { self << rhs } }
+impl ShlAssign<u64> for u32 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl Shr<u64> for u32 { type Output = u32; fn shr(self, rhs: u64) -> u32 { self >> rhs } }
+impl ShrAssign<u64> for u32 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl Shl<u128> for u32 { type Output = u32; fn shl(self, rhs: u128) -> u32 { self << rhs } }
+impl ShlAssign<u128> for u32 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl Shr<u128> for u32 { type Output = u32; fn shr(self, rhs: u128) -> u32 { self >> rhs } }
+impl ShrAssign<u128> for u32 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl Shl<i8> for u32 { type Output = u32; fn shl(self, rhs: i8) -> u32 { self << rhs } }
+impl ShlAssign<i8> for u32 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl Shr<i8> for u32 { type Output = u32; fn shr(self, rhs: i8) -> u32 { self >> rhs } }
+impl ShrAssign<i8> for u32 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl Shl<i16> for u32 { type Output = u32; fn shl(self, rhs: i16) -> u32 { self << rhs } }
+impl ShlAssign<i16> for u32 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl Shr<i16> for u32 { type Output = u32; fn shr(self, rhs: i16) -> u32 { self >> rhs } }
+impl ShrAssign<i16> for u32 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl Shl<i64> for u32 { type Output = u32; fn shl(self, rhs: i64) -> u32 { self << rhs } }
+impl ShlAssign<i64> for u32 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl Shr<i64> for u32 { type Output = u32; fn shr(self, rhs: i64) -> u32 { self >> rhs } }
+impl ShrAssign<i64> for u32 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl Shl<i128> for u32 { type Output = u32; fn shl(self, rhs: i128) -> u32 { self << rhs } }
+impl ShlAssign<i128> for u32 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl Shr<i128> for u32 { type Output = u32; fn shr(self, rhs: i128) -> u32 { self >> rhs } }
+impl ShrAssign<i128> for u32 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl Shl<isize> for u32 { type Output = u32; fn shl(self, rhs: isize) -> u32 { self << rhs } }
+impl ShlAssign<isize> for u32 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl Shr<isize> for u32 { type Output = u32; fn shr(self, rhs: isize) -> u32 { self >> rhs } }
+impl ShrAssign<isize> for u32 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl Shl<u8> for u64 { type Output = u64; fn shl(self, rhs: u8) -> u64 { self << rhs } }
+impl ShlAssign<u8> for u64 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl Shr<u8> for u64 { type Output = u64; fn shr(self, rhs: u8) -> u64 { self >> rhs } }
+impl ShrAssign<u8> for u64 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl Shl<u16> for u64 { type Output = u64; fn shl(self, rhs: u16) -> u64 { self << rhs } }
+impl ShlAssign<u16> for u64 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl Shr<u16> for u64 { type Output = u64; fn shr(self, rhs: u16) -> u64 { self >> rhs } }
+impl ShrAssign<u16> for u64 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl Shl<u128> for u64 { type Output = u64; fn shl(self, rhs: u128) -> u64 { self << rhs } }
+impl ShlAssign<u128> for u64 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl Shr<u128> for u64 { type Output = u64; fn shr(self, rhs: u128) -> u64 { self >> rhs } }
+impl ShrAssign<u128> for u64 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl Shl<i8> for u64 { type Output = u64; fn shl(self, rhs: i8) -> u64 { self << rhs } }
+impl ShlAssign<i8> for u64 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl Shr<i8> for u64 { type Output = u64; fn shr(self, rhs: i8) -> u64 { self >> rhs } }
+impl ShrAssign<i8> for u64 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl Shl<i16> for u64 { type Output = u64; fn shl(self, rhs: i16) -> u64 { self << rhs } }
+impl ShlAssign<i16> for u64 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl Shr<i16> for u64 { type Output = u64; fn shr(self, rhs: i16) -> u64 { self >> rhs } }
+impl ShrAssign<i16> for u64 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl Shl<i64> for u64 { type Output = u64; fn shl(self, rhs: i64) -> u64 { self << rhs } }
+impl ShlAssign<i64> for u64 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl Shr<i64> for u64 { type Output = u64; fn shr(self, rhs: i64) -> u64 { self >> rhs } }
+impl ShrAssign<i64> for u64 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl Shl<i128> for u64 { type Output = u64; fn shl(self, rhs: i128) -> u64 { self << rhs } }
+impl ShlAssign<i128> for u64 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl Shr<i128> for u64 { type Output = u64; fn shr(self, rhs: i128) -> u64 { self >> rhs } }
+impl ShrAssign<i128> for u64 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl Shl<isize> for u64 { type Output = u64; fn shl(self, rhs: isize) -> u64 { self << rhs } }
+impl ShlAssign<isize> for u64 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl Shr<isize> for u64 { type Output = u64; fn shr(self, rhs: isize) -> u64 { self >> rhs } }
+impl ShrAssign<isize> for u64 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl Shl<u8> for u128 { type Output = u128; fn shl(self, rhs: u8) -> u128 { self << rhs } }
+impl ShlAssign<u8> for u128 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl Shr<u8> for u128 { type Output = u128; fn shr(self, rhs: u8) -> u128 { self >> rhs } }
+impl ShrAssign<u8> for u128 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl Shl<u16> for u128 { type Output = u128; fn shl(self, rhs: u16) -> u128 { self << rhs } }
+impl ShlAssign<u16> for u128 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl Shr<u16> for u128 { type Output = u128; fn shr(self, rhs: u16) -> u128 { self >> rhs } }
+impl ShrAssign<u16> for u128 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl Shl<u64> for u128 { type Output = u128; fn shl(self, rhs: u64) -> u128 { self << rhs } }
+impl ShlAssign<u64> for u128 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl Shr<u64> for u128 { type Output = u128; fn shr(self, rhs: u64) -> u128 { self >> rhs } }
+impl ShrAssign<u64> for u128 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl Shl<i8> for u128 { type Output = u128; fn shl(self, rhs: i8) -> u128 { self << rhs } }
+impl ShlAssign<i8> for u128 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl Shr<i8> for u128 { type Output = u128; fn shr(self, rhs: i8) -> u128 { self >> rhs } }
+impl ShrAssign<i8> for u128 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl Shl<i16> for u128 { type Output = u128; fn shl(self, rhs: i16) -> u128 { self << rhs } }
+impl ShlAssign<i16> for u128 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl Shr<i16> for u128 { type Output = u128; fn shr(self, rhs: i16) -> u128 { self >> rhs } }
+impl ShrAssign<i16> for u128 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl Shl<i64> for u128 { type Output = u128; fn shl(self, rhs: i64) -> u128 { self << rhs } }
+impl ShlAssign<i64> for u128 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl Shr<i64> for u128 { type Output = u128; fn shr(self, rhs: i64) -> u128 { self >> rhs } }
+impl ShrAssign<i64> for u128 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl Shl<i128> for u128 { type Output = u128; fn shl(self, rhs: i128) -> u128 { self << rhs } }
+impl ShlAssign<i128> for u128 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl Shr<i128> for u128 { type Output = u128; fn shr(self, rhs: i128) -> u128 { self >> rhs } }
+impl ShrAssign<i128> for u128 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl Shl<isize> for u128 { type Output = u128; fn shl(self, rhs: isize) -> u128 { self << rhs } }
+impl ShlAssign<isize> for u128 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl Shr<isize> for u128 { type Output = u128; fn shr(self, rhs: isize) -> u128 { self >> rhs } }
+impl ShrAssign<isize> for u128 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl Shl<u8> for usize { type Output = usize; fn shl(self, rhs: u8) -> usize { self << rhs } }
+impl ShlAssign<u8> for usize { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl Shr<u8> for usize { type Output = usize; fn shr(self, rhs: u8) -> usize { self >> rhs } }
+impl ShrAssign<u8> for usize { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl Shl<u16> for usize { type Output = usize; fn shl(self, rhs: u16) -> usize { self << rhs } }
+impl ShlAssign<u16> for usize { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl Shr<u16> for usize { type Output = usize; fn shr(self, rhs: u16) -> usize { self >> rhs } }
+impl ShrAssign<u16> for usize { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl Shl<u64> for usize { type Output = usize; fn shl(self, rhs: u64) -> usize { self << rhs } }
+impl ShlAssign<u64> for usize { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl Shr<u64> for usize { type Output = usize; fn shr(self, rhs: u64) -> usize { self >> rhs } }
+impl ShrAssign<u64> for usize { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl Shl<u128> for usize { type Output = usize; fn shl(self, rhs: u128) -> usize { self << rhs } }
+impl ShlAssign<u128> for usize { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl Shr<u128> for usize { type Output = usize; fn shr(self, rhs: u128) -> usize { self >> rhs } }
+impl ShrAssign<u128> for usize { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl Shl<i8> for usize { type Output = usize; fn shl(self, rhs: i8) -> usize { self << rhs } }
+impl ShlAssign<i8> for usize { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl Shr<i8> for usize { type Output = usize; fn shr(self, rhs: i8) -> usize { self >> rhs } }
+impl ShrAssign<i8> for usize { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl Shl<i16> for usize { type Output = usize; fn shl(self, rhs: i16) -> usize { self << rhs } }
+impl ShlAssign<i16> for usize { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl Shr<i16> for usize { type Output = usize; fn shr(self, rhs: i16) -> usize { self >> rhs } }
+impl ShrAssign<i16> for usize { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl Shl<i64> for usize { type Output = usize; fn shl(self, rhs: i64) -> usize { self << rhs } }
+impl ShlAssign<i64> for usize { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl Shr<i64> for usize { type Output = usize; fn shr(self, rhs: i64) -> usize { self >> rhs } }
+impl ShrAssign<i64> for usize { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl Shl<i128> for usize { type Output = usize; fn shl(self, rhs: i128) -> usize { self << rhs } }
+impl ShlAssign<i128> for usize { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl Shr<i128> for usize { type Output = usize; fn shr(self, rhs: i128) -> usize { self >> rhs } }
+impl ShrAssign<i128> for usize { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl Shl<isize> for usize { type Output = usize; fn shl(self, rhs: isize) -> usize { self << rhs } }
+impl ShlAssign<isize> for usize { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl Shr<isize> for usize { type Output = usize; fn shr(self, rhs: isize) -> usize { self >> rhs } }
+impl ShrAssign<isize> for usize { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl Shl<u8> for i8 { type Output = i8; fn shl(self, rhs: u8) -> i8 { self << rhs } }
+impl ShlAssign<u8> for i8 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl Shr<u8> for i8 { type Output = i8; fn shr(self, rhs: u8) -> i8 { self >> rhs } }
+impl ShrAssign<u8> for i8 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl Shl<u16> for i8 { type Output = i8; fn shl(self, rhs: u16) -> i8 { self << rhs } }
+impl ShlAssign<u16> for i8 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl Shr<u16> for i8 { type Output = i8; fn shr(self, rhs: u16) -> i8 { self >> rhs } }
+impl ShrAssign<u16> for i8 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl Shl<u64> for i8 { type Output = i8; fn shl(self, rhs: u64) -> i8 { self << rhs } }
+impl ShlAssign<u64> for i8 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl Shr<u64> for i8 { type Output = i8; fn shr(self, rhs: u64) -> i8 { self >> rhs } }
+impl ShrAssign<u64> for i8 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl Shl<u128> for i8 { type Output = i8; fn shl(self, rhs: u128) -> i8 { self << rhs } }
+impl ShlAssign<u128> for i8 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl Shr<u128> for i8 { type Output = i8; fn shr(self, rhs: u128) -> i8 { self >> rhs } }
+impl ShrAssign<u128> for i8 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl Shl<i16> for i8 { type Output = i8; fn shl(self, rhs: i16) -> i8 { self << rhs } }
+impl ShlAssign<i16> for i8 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl Shr<i16> for i8 { type Output = i8; fn shr(self, rhs: i16) -> i8 { self >> rhs } }
+impl ShrAssign<i16> for i8 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl Shl<i64> for i8 { type Output = i8; fn shl(self, rhs: i64) -> i8 { self << rhs } }
+impl ShlAssign<i64> for i8 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl Shr<i64> for i8 { type Output = i8; fn shr(self, rhs: i64) -> i8 { self >> rhs } }
+impl ShrAssign<i64> for i8 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl Shl<i128> for i8 { type Output = i8; fn shl(self, rhs: i128) -> i8 { self << rhs } }
+impl ShlAssign<i128> for i8 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl Shr<i128> for i8 { type Output = i8; fn shr(self, rhs: i128) -> i8 { self >> rhs } }
+impl ShrAssign<i128> for i8 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl Shl<isize> for i8 { type Output = i8; fn shl(self, rhs: isize) -> i8 { self << rhs } }
+impl ShlAssign<isize> for i8 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl Shr<isize> for i8 { type Output = i8; fn shr(self, rhs: isize) -> i8 { self >> rhs } }
+impl ShrAssign<isize> for i8 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl Shl<u8> for i16 { type Output = i16; fn shl(self, rhs: u8) -> i16 { self << rhs } }
+impl ShlAssign<u8> for i16 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl Shr<u8> for i16 { type Output = i16; fn shr(self, rhs: u8) -> i16 { self >> rhs } }
+impl ShrAssign<u8> for i16 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl Shl<u16> for i16 { type Output = i16; fn shl(self, rhs: u16) -> i16 { self << rhs } }
+impl ShlAssign<u16> for i16 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl Shr<u16> for i16 { type Output = i16; fn shr(self, rhs: u16) -> i16 { self >> rhs } }
+impl ShrAssign<u16> for i16 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl Shl<u64> for i16 { type Output = i16; fn shl(self, rhs: u64) -> i16 { self << rhs } }
+impl ShlAssign<u64> for i16 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl Shr<u64> for i16 { type Output = i16; fn shr(self, rhs: u64) -> i16 { self >> rhs } }
+impl ShrAssign<u64> for i16 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl Shl<u128> for i16 { type Output = i16; fn shl(self, rhs: u128) -> i16 { self << rhs } }
+impl ShlAssign<u128> for i16 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl Shr<u128> for i16 { type Output = i16; fn shr(self, rhs: u128) -> i16 { self >> rhs } }
+impl ShrAssign<u128> for i16 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl Shl<i8> for i16 { type Output = i16; fn shl(self, rhs: i8) -> i16 { self << rhs } }
+impl ShlAssign<i8> for i16 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl Shr<i8> for i16 { type Output = i16; fn shr(self, rhs: i8) -> i16 { self >> rhs } }
+impl ShrAssign<i8> for i16 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl Shl<i64> for i16 { type Output = i16; fn shl(self, rhs: i64) -> i16 { self << rhs } }
+impl ShlAssign<i64> for i16 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl Shr<i64> for i16 { type Output = i16; fn shr(self, rhs: i64) -> i16 { self >> rhs } }
+impl ShrAssign<i64> for i16 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl Shl<i128> for i16 { type Output = i16; fn shl(self, rhs: i128) -> i16 { self << rhs } }
+impl ShlAssign<i128> for i16 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl Shr<i128> for i16 { type Output = i16; fn shr(self, rhs: i128) -> i16 { self >> rhs } }
+impl ShrAssign<i128> for i16 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl Shl<isize> for i16 { type Output = i16; fn shl(self, rhs: isize) -> i16 { self << rhs } }
+impl ShlAssign<isize> for i16 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl Shr<isize> for i16 { type Output = i16; fn shr(self, rhs: isize) -> i16 { self >> rhs } }
+impl ShrAssign<isize> for i16 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl Shl<u8> for i32 { type Output = i32; fn shl(self, rhs: u8) -> i32 { self << rhs } }
+impl ShlAssign<u8> for i32 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl Shr<u8> for i32 { type Output = i32; fn shr(self, rhs: u8) -> i32 { self >> rhs } }
+impl ShrAssign<u8> for i32 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl Shl<u16> for i32 { type Output = i32; fn shl(self, rhs: u16) -> i32 { self << rhs } }
+impl ShlAssign<u16> for i32 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl Shr<u16> for i32 { type Output = i32; fn shr(self, rhs: u16) -> i32 { self >> rhs } }
+impl ShrAssign<u16> for i32 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl Shl<u64> for i32 { type Output = i32; fn shl(self, rhs: u64) -> i32 { self << rhs } }
+impl ShlAssign<u64> for i32 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl Shr<u64> for i32 { type Output = i32; fn shr(self, rhs: u64) -> i32 { self >> rhs } }
+impl ShrAssign<u64> for i32 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl Shl<u128> for i32 { type Output = i32; fn shl(self, rhs: u128) -> i32 { self << rhs } }
+impl ShlAssign<u128> for i32 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl Shr<u128> for i32 { type Output = i32; fn shr(self, rhs: u128) -> i32 { self >> rhs } }
+impl ShrAssign<u128> for i32 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl Shl<i8> for i32 { type Output = i32; fn shl(self, rhs: i8) -> i32 { self << rhs } }
+impl ShlAssign<i8> for i32 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl Shr<i8> for i32 { type Output = i32; fn shr(self, rhs: i8) -> i32 { self >> rhs } }
+impl ShrAssign<i8> for i32 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl Shl<i16> for i32 { type Output = i32; fn shl(self, rhs: i16) -> i32 { self << rhs } }
+impl ShlAssign<i16> for i32 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl Shr<i16> for i32 { type Output = i32; fn shr(self, rhs: i16) -> i32 { self >> rhs } }
+impl ShrAssign<i16> for i32 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl Shl<i64> for i32 { type Output = i32; fn shl(self, rhs: i64) -> i32 { self << rhs } }
+impl ShlAssign<i64> for i32 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl Shr<i64> for i32 { type Output = i32; fn shr(self, rhs: i64) -> i32 { self >> rhs } }
+impl ShrAssign<i64> for i32 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl Shl<i128> for i32 { type Output = i32; fn shl(self, rhs: i128) -> i32 { self << rhs } }
+impl ShlAssign<i128> for i32 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl Shr<i128> for i32 { type Output = i32; fn shr(self, rhs: i128) -> i32 { self >> rhs } }
+impl ShrAssign<i128> for i32 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl Shl<isize> for i32 { type Output = i32; fn shl(self, rhs: isize) -> i32 { self << rhs } }
+impl ShlAssign<isize> for i32 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl Shr<isize> for i32 { type Output = i32; fn shr(self, rhs: isize) -> i32 { self >> rhs } }
+impl ShrAssign<isize> for i32 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl Shl<u8> for i64 { type Output = i64; fn shl(self, rhs: u8) -> i64 { self << rhs } }
+impl ShlAssign<u8> for i64 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl Shr<u8> for i64 { type Output = i64; fn shr(self, rhs: u8) -> i64 { self >> rhs } }
+impl ShrAssign<u8> for i64 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl Shl<u16> for i64 { type Output = i64; fn shl(self, rhs: u16) -> i64 { self << rhs } }
+impl ShlAssign<u16> for i64 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl Shr<u16> for i64 { type Output = i64; fn shr(self, rhs: u16) -> i64 { self >> rhs } }
+impl ShrAssign<u16> for i64 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl Shl<u64> for i64 { type Output = i64; fn shl(self, rhs: u64) -> i64 { self << rhs } }
+impl ShlAssign<u64> for i64 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl Shr<u64> for i64 { type Output = i64; fn shr(self, rhs: u64) -> i64 { self >> rhs } }
+impl ShrAssign<u64> for i64 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl Shl<u128> for i64 { type Output = i64; fn shl(self, rhs: u128) -> i64 { self << rhs } }
+impl ShlAssign<u128> for i64 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl Shr<u128> for i64 { type Output = i64; fn shr(self, rhs: u128) -> i64 { self >> rhs } }
+impl ShrAssign<u128> for i64 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl Shl<i8> for i64 { type Output = i64; fn shl(self, rhs: i8) -> i64 { self << rhs } }
+impl ShlAssign<i8> for i64 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl Shr<i8> for i64 { type Output = i64; fn shr(self, rhs: i8) -> i64 { self >> rhs } }
+impl ShrAssign<i8> for i64 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl Shl<i16> for i64 { type Output = i64; fn shl(self, rhs: i16) -> i64 { self << rhs } }
+impl ShlAssign<i16> for i64 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl Shr<i16> for i64 { type Output = i64; fn shr(self, rhs: i16) -> i64 { self >> rhs } }
+impl ShrAssign<i16> for i64 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl Shl<i128> for i64 { type Output = i64; fn shl(self, rhs: i128) -> i64 { self << rhs } }
+impl ShlAssign<i128> for i64 { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl Shr<i128> for i64 { type Output = i64; fn shr(self, rhs: i128) -> i64 { self >> rhs } }
+impl ShrAssign<i128> for i64 { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }
+impl Shl<isize> for i64 { type Output = i64; fn shl(self, rhs: isize) -> i64 { self << rhs } }
+impl ShlAssign<isize> for i64 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl Shr<isize> for i64 { type Output = i64; fn shr(self, rhs: isize) -> i64 { self >> rhs } }
+impl ShrAssign<isize> for i64 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl Shl<u8> for i128 { type Output = i128; fn shl(self, rhs: u8) -> i128 { self << rhs } }
+impl ShlAssign<u8> for i128 { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl Shr<u8> for i128 { type Output = i128; fn shr(self, rhs: u8) -> i128 { self >> rhs } }
+impl ShrAssign<u8> for i128 { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl Shl<u16> for i128 { type Output = i128; fn shl(self, rhs: u16) -> i128 { self << rhs } }
+impl ShlAssign<u16> for i128 { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl Shr<u16> for i128 { type Output = i128; fn shr(self, rhs: u16) -> i128 { self >> rhs } }
+impl ShrAssign<u16> for i128 { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl Shl<u64> for i128 { type Output = i128; fn shl(self, rhs: u64) -> i128 { self << rhs } }
+impl ShlAssign<u64> for i128 { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl Shr<u64> for i128 { type Output = i128; fn shr(self, rhs: u64) -> i128 { self >> rhs } }
+impl ShrAssign<u64> for i128 { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl Shl<u128> for i128 { type Output = i128; fn shl(self, rhs: u128) -> i128 { self << rhs } }
+impl ShlAssign<u128> for i128 { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl Shr<u128> for i128 { type Output = i128; fn shr(self, rhs: u128) -> i128 { self >> rhs } }
+impl ShrAssign<u128> for i128 { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl Shl<i8> for i128 { type Output = i128; fn shl(self, rhs: i8) -> i128 { self << rhs } }
+impl ShlAssign<i8> for i128 { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl Shr<i8> for i128 { type Output = i128; fn shr(self, rhs: i8) -> i128 { self >> rhs } }
+impl ShrAssign<i8> for i128 { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl Shl<i16> for i128 { type Output = i128; fn shl(self, rhs: i16) -> i128 { self << rhs } }
+impl ShlAssign<i16> for i128 { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl Shr<i16> for i128 { type Output = i128; fn shr(self, rhs: i16) -> i128 { self >> rhs } }
+impl ShrAssign<i16> for i128 { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl Shl<i64> for i128 { type Output = i128; fn shl(self, rhs: i64) -> i128 { self << rhs } }
+impl ShlAssign<i64> for i128 { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl Shr<i64> for i128 { type Output = i128; fn shr(self, rhs: i64) -> i128 { self >> rhs } }
+impl ShrAssign<i64> for i128 { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl Shl<isize> for i128 { type Output = i128; fn shl(self, rhs: isize) -> i128 { self << rhs } }
+impl ShlAssign<isize> for i128 { fn shl_assign(&mut self, rhs: isize) { *self = *self << rhs; } }
+impl Shr<isize> for i128 { type Output = i128; fn shr(self, rhs: isize) -> i128 { self >> rhs } }
+impl ShrAssign<isize> for i128 { fn shr_assign(&mut self, rhs: isize) { *self = *self >> rhs; } }
+impl Shl<u8> for isize { type Output = isize; fn shl(self, rhs: u8) -> isize { self << rhs } }
+impl ShlAssign<u8> for isize { fn shl_assign(&mut self, rhs: u8) { *self = *self << rhs; } }
+impl Shr<u8> for isize { type Output = isize; fn shr(self, rhs: u8) -> isize { self >> rhs } }
+impl ShrAssign<u8> for isize { fn shr_assign(&mut self, rhs: u8) { *self = *self >> rhs; } }
+impl Shl<u16> for isize { type Output = isize; fn shl(self, rhs: u16) -> isize { self << rhs } }
+impl ShlAssign<u16> for isize { fn shl_assign(&mut self, rhs: u16) { *self = *self << rhs; } }
+impl Shr<u16> for isize { type Output = isize; fn shr(self, rhs: u16) -> isize { self >> rhs } }
+impl ShrAssign<u16> for isize { fn shr_assign(&mut self, rhs: u16) { *self = *self >> rhs; } }
+impl Shl<u64> for isize { type Output = isize; fn shl(self, rhs: u64) -> isize { self << rhs } }
+impl ShlAssign<u64> for isize { fn shl_assign(&mut self, rhs: u64) { *self = *self << rhs; } }
+impl Shr<u64> for isize { type Output = isize; fn shr(self, rhs: u64) -> isize { self >> rhs } }
+impl ShrAssign<u64> for isize { fn shr_assign(&mut self, rhs: u64) { *self = *self >> rhs; } }
+impl Shl<u128> for isize { type Output = isize; fn shl(self, rhs: u128) -> isize { self << rhs } }
+impl ShlAssign<u128> for isize { fn shl_assign(&mut self, rhs: u128) { *self = *self << rhs; } }
+impl Shr<u128> for isize { type Output = isize; fn shr(self, rhs: u128) -> isize { self >> rhs } }
+impl ShrAssign<u128> for isize { fn shr_assign(&mut self, rhs: u128) { *self = *self >> rhs; } }
+impl Shl<i8> for isize { type Output = isize; fn shl(self, rhs: i8) -> isize { self << rhs } }
+impl ShlAssign<i8> for isize { fn shl_assign(&mut self, rhs: i8) { *self = *self << rhs; } }
+impl Shr<i8> for isize { type Output = isize; fn shr(self, rhs: i8) -> isize { self >> rhs } }
+impl ShrAssign<i8> for isize { fn shr_assign(&mut self, rhs: i8) { *self = *self >> rhs; } }
+impl Shl<i16> for isize { type Output = isize; fn shl(self, rhs: i16) -> isize { self << rhs } }
+impl ShlAssign<i16> for isize { fn shl_assign(&mut self, rhs: i16) { *self = *self << rhs; } }
+impl Shr<i16> for isize { type Output = isize; fn shr(self, rhs: i16) -> isize { self >> rhs } }
+impl ShrAssign<i16> for isize { fn shr_assign(&mut self, rhs: i16) { *self = *self >> rhs; } }
+impl Shl<i64> for isize { type Output = isize; fn shl(self, rhs: i64) -> isize { self << rhs } }
+impl ShlAssign<i64> for isize { fn shl_assign(&mut self, rhs: i64) { *self = *self << rhs; } }
+impl Shr<i64> for isize { type Output = isize; fn shr(self, rhs: i64) -> isize { self >> rhs } }
+impl ShrAssign<i64> for isize { fn shr_assign(&mut self, rhs: i64) { *self = *self >> rhs; } }
+impl Shl<i128> for isize { type Output = isize; fn shl(self, rhs: i128) -> isize { self << rhs } }
+impl ShlAssign<i128> for isize { fn shl_assign(&mut self, rhs: i128) { *self = *self << rhs; } }
+impl Shr<i128> for isize { type Output = isize; fn shr(self, rhs: i128) -> isize { self >> rhs } }
+impl ShrAssign<i128> for isize { fn shr_assign(&mut self, rhs: i128) { *self = *self >> rhs; } }

@@ -1,11 +1,11 @@
 //! Disk cache store files (plans/relax-cache.md): ONE file per crate version under
-//! `<target>/relax/cache/<crate>-<16 hex>.rcs` (dirs.rs) (the hex: Relax build id, target and the crate's
+//! `<target>/relax/cache/<crate>-<16 hex>.rcs` (dirs.rs) (the hex: Relax codegen identity (codegen_id.rs), target and the crate's
 //! fingerprint), shared by every program that uses that crate.
 //!
 //! Layout:
 //!   header (HEADER bytes): magic "RCS1", format u32, active slot u32, slot capacity u32 (index
 //!     entries per slot), then per slot: entry count u64, data end u64, index checksum u64;
-//!     header checksum u64 last
+//!     the writing Relax build u64 (the codegen identity's low half, codegen_id.rs: build_of); header checksum u64 last
 //!   index slot 0, index slot 1 (capacity x INDEX_ENTRY bytes each): sorted (key u128, offset u64,
 //!     length u32, kind u32, payload checksum u64)
 //!   entries (8-byte aligned payloads) up to the active slot's data end
@@ -38,6 +38,15 @@ const FORMAT: u32 = 1;
 const HEADER: usize = 80;
 const INDEX_ENTRY: usize = 40;
 const MIN_CAP: u32 = 256;
+/// Where the header names the Relax build that wrote the store.
+const BUILD_AT: usize = 64;
+
+/// This Relax build's codegen identity (codegen_id.rs) as store headers carry it. Every store name hashes it
+/// (cache.rs front_store_name, code_store_name, front_graph_key; run stores are one process's),
+/// so a store is only ever written by one build.
+pub fn this_build() -> u64 {
+    crate::codegen_id::id() as u64
+}
 
 /// One index entry: (key, offset, length, kind, checksum).
 #[derive(Clone, Copy)]
@@ -183,6 +192,7 @@ impl Header {
             b[24 + k * 24..32 + k * 24].copy_from_slice(&end.to_le_bytes());
             b[32 + k * 24..40 + k * 24].copy_from_slice(&sum.to_le_bytes());
         }
+        b[BUILD_AT..BUILD_AT + 8].copy_from_slice(&this_build().to_le_bytes());
         let s = sum64(&b[..HEADER - 8]);
         b[HEADER - 8..].copy_from_slice(&s.to_le_bytes());
         b
@@ -310,6 +320,7 @@ fn current_gen(path: &Path) -> (u32, PathBuf) {
     let mut guard = GENS.lock().unwrap_or_else(|e| e.into_inner());
     let (gens, listed) = guard.get_or_insert_with(Default::default);
     if listed.insert(dir.clone()) {
+        hold_build(&dir);
         list_gens(&dir, gens);
     }
     let mut g = gens.get(&base).copied().unwrap_or(0);
@@ -388,6 +399,8 @@ impl ReadSource {
 pub struct Store {
     /// the store's generation 0 path (its identity; the file read is its current generation)
     pub path: PathBuf,
+    /// the generation file mapped
+    file: PathBuf,
     pub index: crate::arena::Arena<Ix>,
     pub(crate) generation: u64,
     data: Bytes,
@@ -397,8 +410,21 @@ pub struct Store {
 }
 
 impl Store {
-    /// Opens `path` (None: missing, unreadable or not a valid store).
+    /// Opens `path` (None: missing, unreadable or not a valid store), as used by this run.
     pub fn open(path: &Path) -> Option<Store> {
+        let st = Self::open_unmarked(path)?;
+        st.mark_used();
+        Some(st)
+    }
+
+    /// Records this store as used by this run (mark_live): the cap and the replaced-variant
+    /// retirement keep it, other runs see it stamped.
+    pub fn mark_used(&self) {
+        mark_live(&self.path, &self.file, true);
+    }
+
+    /// Opens `path` without marking it used: a scan that may reject it (cache.rs candidate).
+    pub fn open_unmarked(path: &Path) -> Option<Store> {
         let base = base_path(path);
         let file = current(&base);
         let mut f = std::fs::File::open(&file).ok()?;
@@ -421,14 +447,11 @@ impl Store {
             if (data.len() as u64) < end {
                 return None;
             }
-            Some(Store { path: base.clone(), index: decode_index(&ib).into(), generation: sum64(&hb), data,
+            Some(Store { path: base.clone(), file: file.clone(), index: decode_index(&ib).into(), generation: sum64(&hb), data,
                 #[cfg(unix)] source: ReadSource::new(&file, &f),
                 data_end: end })
         })();
         let _ = f.unlock();
-        if r.is_some() {
-            mark_live(&base, &file, true);
-        }
         r
     }
 
@@ -447,12 +470,12 @@ impl Store {
             if sum64(hb) != generation { return None; }
             let (n, end, _) = h.slots[h.active as usize];
             if n != index.len() as u64 || n > h.cap as u64 || end > data.len() as u64 { return None; }
-            Some(Self { path: base.clone(), index: crate::arena::Arena::Mapped(index), generation, data,
+            Some(Self { path: base.clone(), file: file.clone(), index: crate::arena::Arena::Mapped(index), generation, data,
                 #[cfg(unix)] source: ReadSource::new(&file, &f),
                 data_end: end })
         })();
         let _ = f.unlock();
-        if result.is_some() { mark_live(&base, &file, true); }
+        if let Some(st) = &result { st.mark_used(); }
         result
     }
 
@@ -468,6 +491,20 @@ impl Store {
         }
         let p = self.data.get(e.off as usize..e.off as usize + e.len as usize)?;
         Some((e.kind, p))
+    }
+
+    /// `get_at`, with the payload's checksum verified over the mapped bytes the caller then uses:
+    /// for payloads that become executable code or are linked as data (code entries, the startup
+    /// manifest and its image). A mismatch is a miss: never executed.
+    pub fn get_checked_at(&self, i: usize, key: u128) -> Option<(u32, &[u8])> {
+        let (kind, p) = self.get_at(i, key)?;
+        (sum64(p) == self.index[i].sum).then_some((kind, p))
+    }
+
+    /// `get` with the payload checksum verified (`get_checked_at`).
+    pub fn get_checked(&self, key: u128) -> Option<(u32, &[u8])> {
+        let i = self.index.binary_search_by(|e| { let k = e.key; k.cmp(&key) }).ok()?;
+        self.get_checked_at(i, key)
     }
 
     /// Whether index entry `i`'s payload matches its checksum.
@@ -782,6 +819,7 @@ impl RunStore {
     pub fn create(dir: &Path, prefix: &str, cap: u32) -> std::io::Result<RunStore> {
         let name = format!("{}-{:016x}.rcs", prefix, crate::pack::nonce());
         let path = dir.join(&name);
+        hold_build(dir);
         let mut o = std::fs::OpenOptions::new();
         o.read(true).write(true).create_new(true);
         #[cfg(unix)]
@@ -952,6 +990,156 @@ fn write_at(file: &std::fs::File, mut b: &[u8], mut off: u64) -> std::io::Result
     Ok(())
 }
 
+/// The Relax build that wrote the store file `p` (its header; 0: written before headers named
+/// the build). None: unreadable, not a store, or locked by a writer right now.
+pub fn build_of(p: &Path) -> Option<u64> {
+    let mut f = std::fs::File::open(p).ok()?;
+    f.try_lock_shared().ok()?;
+    let mut hb = [0u8; HEADER];
+    let r = f.read_exact(&mut hb).ok().and_then(|_| Header::parse(&hb)).map(|_| u64_at(&hb, BUILD_AT));
+    let _ = f.unlock();
+    r
+}
+
+/// Which builds run: every process holds a shared lock on `<cache dir>/live/<build hex>` from
+/// the first store it touches in that folder until it exits (the OS drops the lock with the
+/// process, also on a crash). retire_build takes a build's lock exclusively, so no process of
+/// that build is running while its stores go, and none can start using them meanwhile.
+static HELD: relax_session::sync::Mutex<Option<std::collections::HashMap<PathBuf, std::fs::File>>> = relax_session::sync::Mutex::new(None);
+
+fn live_lock(dir: &Path, build: u64) -> PathBuf {
+    dir.join("live").join(format!("{build:016x}"))
+}
+
+/// Whether the open file `f` still is the file at `p` (retire_build removes a lock file).
+fn still_at(f: &std::fs::File, p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let (Ok(a), Ok(b)) = (f.metadata(), std::fs::metadata(p)) else { return false };
+        (a.dev(), a.ino()) == (b.dev(), b.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (f, p);
+        true
+    }
+}
+
+/// Marks this process as a running user of `dir`'s stores of this build (until it exits). A
+/// folder it cannot lock in (read-only) is used unmarked.
+pub fn hold_build(dir: &Path) {
+    let _k = crate::zone_alloc::kept();
+    let mut guard = HELD.lock().unwrap_or_else(|e| e.into_inner());
+    let held = guard.get_or_insert_with(Default::default);
+    if held.contains_key(dir) {
+        return;
+    }
+    let p = live_lock(dir, this_build());
+    loop {
+        if std::fs::create_dir_all(dir.join("live")).is_err() {
+            return;
+        }
+        let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&p) else { return };
+        if f.lock_shared().is_err() {
+            return;
+        }
+        // a prune that retired this build meanwhile removed the file it held: lock the new one
+        if still_at(&f, &p) {
+            held.insert(dir.to_path_buf(), f);
+            return;
+        }
+    }
+}
+
+/// The builds with a live lock file in `dir` (running, or ended since the last prune).
+pub fn lock_builds(dir: &Path) -> Vec<u64> {
+    std::fs::read_dir(dir.join("live")).into_iter().flatten().flatten()
+        .filter_map(|e| e.file_name().to_str().filter(|n| n.len() == 16).and_then(|n| u64::from_str_radix(n, 16).ok()))
+        .collect()
+}
+
+/// When no process of `build` is running (its live lock in `dir` is free), runs `retire` under
+/// that lock held exclusively, then removes the lock file; false: the build is running.
+pub fn retire_build(dir: &Path, build: u64, retire: impl FnOnce()) -> bool {
+    let p = live_lock(dir, build);
+    let _ = std::fs::create_dir_all(dir.join("live"));
+    let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&p) else { return false };
+    if f.try_lock().is_err() || !still_at(&f, &p) {
+        return false;
+    }
+    retire();
+    // holders check the file is still there after locking (hold_build); on Windows an open
+    // file's name stays taken until it closes, so the empty lock file stays
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(&p);
+    let _ = f.unlock();
+    true
+}
+
+/// The programs this process runs (each one's root crate identity, cache.rs open) with the
+/// store each of their roles uses (role -> store file name: a crate's front or code store, the
+/// program's graph stores): their store sets (cache.rs write_sets).
+static PROGRAMS: relax_session::sync::Mutex<Option<std::collections::BTreeMap<u64, std::collections::BTreeMap<String, String>>>> = relax_session::sync::Mutex::new(None);
+
+/// Records the stores program `key` uses, by role (a later call for the same program, after a
+/// live edit, replaces them).
+pub fn note_program(key: u64, roles: &std::collections::BTreeMap<String, String>) {
+    // process state: copied on the kept heap
+    let _k = crate::zone_alloc::kept();
+    let roles: std::collections::BTreeMap<String, String> = roles.iter().map(|(r, n)| (r.as_str().to_owned(), n.as_str().to_owned())).collect();
+    PROGRAMS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(key, roles);
+}
+
+/// The programs this process runs, with their stores by role.
+pub fn programs() -> Vec<(u64, std::collections::BTreeMap<String, String>)> {
+    PROGRAMS.lock().unwrap_or_else(|e| e.into_inner()).iter().flatten().map(|(k, v)| (*k, v.clone())).collect()
+}
+
+/// The payloads of the entries of `kind` in the store file `p`, read (not mapped, and not marking
+/// the store as used by this run); None when it is unreadable or locked by a writer right now.
+pub fn peek(p: &Path, kind: u32) -> Option<Vec<Vec<u8>>> {
+    let mut f = std::fs::File::open(p).ok()?;
+    f.try_lock_shared().ok()?;
+    let r = (|| -> Option<Vec<Vec<u8>>> {
+        let mut hb = [0u8; HEADER];
+        f.read_exact(&mut hb).ok()?;
+        let h = Header::parse(&hb)?;
+        let (n, end, sum) = h.slots[h.active as usize];
+        if n > h.cap as u64 {
+            return None;
+        }
+        let mut ib = vec![0u8; n as usize * INDEX_ENTRY];
+        f.seek(SeekFrom::Start(h.slot_off(h.active))).ok()?;
+        f.read_exact(&mut ib).ok()?;
+        if sum64(&ib) != sum {
+            return None;
+        }
+        let mut out = Vec::new();
+        for e in decode_index(&ib).into_iter().filter(|e| e.kind == kind && e.off + e.len as u64 <= end) {
+            let mut b = vec![0u8; e.len as usize];
+            f.seek(SeekFrom::Start(e.off)).ok()?;
+            f.read_exact(&mut b).ok()?;
+            if sum64(&b) == e.sum {
+                out.push(b);
+            }
+        }
+        Some(out)
+    })();
+    let _ = f.unlock();
+    r
+}
+
+/// Test only: rewrites `p`'s header as if `build` had written it.
+#[cfg(test)]
+pub fn set_build_for_test(p: &Path, build: u64) {
+    let mut b = std::fs::read(p).unwrap();
+    b[BUILD_AT..BUILD_AT + 8].copy_from_slice(&build.to_le_bytes());
+    let s = sum64(&b[..HEADER - 8]);
+    b[HEADER - 8..HEADER].copy_from_slice(&s.to_le_bytes());
+    std::fs::write(p, b).unwrap();
+}
+
 /// A store file name this cache writes: `<crate name>-<16 hex>.rcs` (crate names: letters,
 /// digits, `_`), with or without a generation suffix (`.<g>`).
 pub fn name_ours(n: &str) -> bool {
@@ -1010,6 +1198,26 @@ mod tests {
     }
 
     #[test]
+    fn a_corrupt_payload_is_a_checked_miss() {
+        let d = tmpdir("checked");
+        let p = d.join("core-00112233445566aa.rcs");
+        append(&p, vec![NewEntry { key: 7, kind: 1, payload: b"code bytes that run".to_vec() }], false).unwrap();
+        let off = {
+            let s = Store::open(&p).unwrap();
+            assert_eq!(s.get_checked(7).unwrap().1, b"code bytes that run");
+            s.index[0].off as usize
+        };
+        // one flipped payload byte: the header and index checksums still pass
+        let mut b = std::fs::read(&p).unwrap();
+        b[off + 3] ^= 0x40;
+        std::fs::write(&p, &b).unwrap();
+        let s = Store::open(&p).unwrap();
+        assert!(s.get(7).is_some(), "the unchecked read still finds it");
+        assert!(s.get_checked(7).is_none(), "a corrupt payload must never be linked");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn append_compact_newest_wins() {
         let d = tmpdir("a");
         let p = d.join("core-0123456789abcdef.rcs");
@@ -1048,7 +1256,8 @@ mod tests {
         for g in 0..3 {
             assert!(delete_checked(&gen_path(&p, g)));
         }
-        std::fs::remove_dir(&d).unwrap();
+        // the folder also holds this process's live lock (hold_build)
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1108,7 +1317,8 @@ mod tests {
         assert!(after.get(42).is_none());
         // A failed rewrite must leave the original inode and no temporary file behind.
         assert!(append(&p, vec![Fails], true).is_err());
-        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1);
+        // (the store and this process's live lock folder, hold_build)
+        assert_eq!(std::fs::read_dir(&d).unwrap().flatten().filter(|e| e.file_name() != "live").count(), 1);
         assert!(Store::open(&p).unwrap().get(2).is_some());
         // Corrupt a retained payload and force capacity growth; only that entry is dropped.
         let mut file = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
@@ -1131,7 +1341,8 @@ mod tests {
             let f = gen_path(&p, g);
             assert!(!f.exists() || delete_checked(&f));
         }
-        std::fs::remove_dir(d).unwrap();
+        // the folder also holds this process's live lock (hold_build)
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]
@@ -1171,6 +1382,7 @@ mod tests {
         for g in 0..2 {
             assert!(delete_checked(&gen_path(&p, g)));
         }
-        std::fs::remove_dir(&d).unwrap();
+        // the folder also holds this process's live lock (hold_build)
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

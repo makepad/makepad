@@ -152,7 +152,9 @@ fn io_loop<S: Read + Write>(mut s: S, pipe: Arc<Pipe>, close: impl FnOnce(&mut S
     close(&mut s);
 }
 
-fn carrier<S: Read + Write + Send + 'static>(s: S, hooks: crate::conn::Hooks, close: impl FnOnce(&mut S) + Send + 'static) -> Carrier {
+/// Wraps an authenticated stream (TLS done, any pre-HELLO exchange done) as a carrier: one I/O
+/// thread owns it (see the module doc). Set short read/write timeouts on it first.
+pub fn carrier<S: Read + Write + Send + 'static>(s: S, hooks: crate::conn::Hooks, close: impl FnOnce(&mut S) + Send + 'static) -> Carrier {
     let pipe = Arc::new(Pipe::default());
     let p = pipe.clone();
     let _ = std::thread::Builder::new().name("makepad-remote-io".into()).spawn(move || {
@@ -178,11 +180,40 @@ pub type KeySource = Arc<dyn Fn() -> Vec<Psk> + Send + Sync>;
 /// Called with the key a peer proved and its connection, once the handshake is done.
 pub type Bound = Arc<dyn Fn(&Psk, &crate::conn::Conn) + Send + Sync>;
 
-/// Accepts paired peers on `bind` (`host:port`): each connection does the TLS handshake with
-/// `identity` and must prove one of `keys` before anything else is read. Peers that fail are
-/// dropped and logged. Returns the bound address.
-pub fn listen(endpoint: &Endpoint, bind: &str, identity: TlsIdentity, keys: KeySource, bound: Option<Bound>) -> io::Result<std::net::SocketAddr> {
+/// A loopback, private or link-local address (a LAN): what a paired-peer listener may bind.
+pub fn is_lan(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_lan(IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            v6.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// The address a paired-peer listener binds: `bind` resolved, refused unless it is a LAN or
+/// loopback address (never the wildcard or a public address: a leaked key would expose remote
+/// eval / probes of every paired device to the internet).
+pub fn lan_bind_addr(bind: &str) -> io::Result<std::net::SocketAddr> {
     let addr = bind.to_socket_addrs()?.next().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no address to bind"))?;
+    if addr.ip().is_unspecified() || !is_lan(addr.ip()) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("refusing to listen on {}: paired devices dial a LAN (private) or loopback address only", addr.ip()),
+        ));
+    }
+    Ok(addr)
+}
+
+/// Accepts paired peers on `bind` (`host:port`, a LAN or loopback address: `lan_bind_addr`): each
+/// connection does the TLS handshake with `identity` and must prove one of `keys` before anything
+/// else is read. Peers that fail are dropped and logged. Returns the bound address.
+pub fn listen(endpoint: &Endpoint, bind: &str, identity: TlsIdentity, keys: KeySource, bound: Option<Bound>) -> io::Result<std::net::SocketAddr> {
+    let addr = lan_bind_addr(bind)?;
     let listener = TcpListener::bind(addr)?;
     let local = listener.local_addr()?;
     let fingerprint = identity.fingerprint;

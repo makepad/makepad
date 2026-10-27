@@ -59,15 +59,24 @@ impl fmt::Write for StackBuf {
     }
 }
 
+#[inline(never)]
+#[cold]
 #[track_caller]
 #[cfg_attr(not(relax_check), lang = "panic_fmt")]
 pub const fn panic_fmt(args: fmt::Arguments<'_>) -> ! {
     panic_at(args, Location::caller())
 }
 
+#[inline(never)]
+#[cold]
+#[cfg_attr(relax_web, relax(keep_reachable))]
 pub const fn panic_at(args: fmt::Arguments<'_>, loc: &Location<'_>) -> ! {
     unsafe {
         let depth = depth_step(1);
+        #[cfg(relax_web)]
+        if depth > 1 {
+            crate::intrinsics_rt::abort();
+        }
         if depth > 2 {
             crate::intrinsics_rt::abort();
         }
@@ -76,6 +85,12 @@ pub const fn panic_at(args: fmt::Arguments<'_>, loc: &Location<'_>) -> ! {
                 h(&PanicInfo::new(args, loc));
             }
         }
+        // wasm panic=abort: the installed hook formats and logs in program code;
+        // there is no unwind payload or second host report after the hook.
+        #[cfg(relax_web)]
+        crate::intrinsics_rt::abort();
+        #[cfg(not(relax_web))]
+        {
         let mut sb = StackBuf { buf: [0; 4096], len: 0 };
         let _ = fmt::write(&mut sb, args);
         depth_step(-1);
@@ -88,10 +103,13 @@ pub const fn panic_at(args: fmt::Arguments<'_>, loc: &Location<'_>) -> ! {
             loc.line(),
             loc.column(),
         )
+        }
     }
 }
 
 /// A constant message: like real core's `panic(&'static str)` its payload is the `&'static str`.
+#[inline(never)]
+#[cold]
 #[track_caller]
 pub const fn panic_str(msg: &'static str) -> ! {
     let pieces = [msg];
@@ -104,27 +122,37 @@ pub const fn panic_display<T: fmt::Display>(x: &T) -> ! {
     panic_fmt(format_args!("{}", x))
 }
 
+#[inline(never)]
+#[cold]
 #[track_caller]
 pub fn panic_bounds(index: usize, len: usize) -> ! {
     panic_fmt(format_args!("index out of bounds: the len is {} but the index is {}", len, index))
 }
 
+#[inline(never)]
+#[cold]
 #[track_caller]
 pub fn slice_index_order_fail(index: usize, end: usize) -> ! {
     panic_fmt(format_args!("slice index starts at {} but ends at {}", index, end))
 }
 
+#[inline(never)]
+#[cold]
 #[track_caller]
 pub fn slice_start_index_len_fail(index: usize, len: usize) -> ! {
     panic_fmt(format_args!("range start index {} out of range for slice of length {}", index, len))
 }
 
+#[inline(never)]
+#[cold]
 #[track_caller]
 pub fn slice_end_index_len_fail(index: usize, len: usize) -> ! {
     panic_fmt(format_args!("range end index {} out of range for slice of length {}", index, len))
 }
 
 /// `assert_eq!` (kind 0) / `assert_ne!` (kind 1) failure.
+#[inline(never)]
+#[cold]
 #[track_caller]
 pub fn assert_failed(kind: u8, left: &dyn fmt::Debug, right: &dyn fmt::Debug, args: Option<fmt::Arguments<'_>>) -> ! {
     let op = if kind == 0 { "==" } else { "!=" };

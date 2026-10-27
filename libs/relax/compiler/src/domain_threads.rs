@@ -38,7 +38,7 @@ pub(crate) unsafe fn data(block: u64) -> &'static mut ThreadData {
     let slot = (block as *mut u64).add(1);
     if *slot == 0 {
         // the thread's record lives as long as the thread, whatever phase it is in when it is
-        // first asked for: the kept heap (the settle swap destroys the compiler generation)
+        // first asked for: the kept heap
         let _kept = crate::zone_alloc::kept();
         *slot = Box::into_raw(Box::new(ThreadData {
             cache_base: 0,

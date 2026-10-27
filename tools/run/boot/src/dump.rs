@@ -1,5 +1,6 @@
 //! `MAKEPAD_RUN_BOOT_DUMP=<dir>[@<ms>]`: the boot window's frames as PNG files, for looking at a
-//! hidden run (the HAL's snapshot of the presented window, answered by a `Readback` event).
+//! hidden run (the HAL's snapshot of the presented window, answered by a `Readback` event). While
+//! the JIT ring shows, the window's snapshot has it (the HAL's badge layer, as presented).
 use makepad_hal::{format, usage, Attr, CmdWriter, Id};
 use std::{path::PathBuf, time::Instant};
 
@@ -16,6 +17,14 @@ pub struct Dump {
     target: Option<[u32; 2]>,
     /// `MAKEPAD_RUN_BOOT_HOLD=1`: keep drawing (into a texture) after the app has the window
     pub hold: bool,
+    /// `MAKEPAD_RUN_BOOT_CHROME=client|wm:<family>|<x>,<y>,<w>,<h>`: the window chrome a hidden run
+    /// (which has no window system, so no window buttons) lays its caption out for: app-drawn
+    /// buttons, a makepad WM's controls in that desktop family, or native ones at that rect (points)
+    pub chrome: Option<crate::caption::Chrome>,
+    /// `MAKEPAD_RUN_RING_HOVER=1`: the JIT ring is drawn hovered, its tooltip showing (a hidden
+    /// run has no pointer); `MAKEPAD_RUN_RING_ALERT=stale|panic`: its dot shows
+    pub ring_hover: bool,
+    pub ring_alert: Option<crate::ring::Alert>,
 }
 
 impl Dump {
@@ -35,6 +44,25 @@ impl Dump {
             pending: Vec::new(),
             target: None,
             hold: std::env::var_os("MAKEPAD_RUN_BOOT_HOLD").is_some(),
+            chrome: std::env::var("MAKEPAD_RUN_BOOT_CHROME").ok().and_then(|spec| {
+                if spec == "client" {
+                    return Some(crate::caption::Chrome { client: true, ..Default::default() });
+                }
+                // a makepad WM's family's controls (`wm:macos`, `wm:windows`, `wm:omarchy`)
+                if let Some(family) = spec.strip_prefix("wm:") {
+                    let hosted = Some(makepad_hal::WindowControls::of_family(family));
+                    return Some(crate::caption::Chrome { client: true, hosted, ..Default::default() });
+                }
+                let v: Vec<f32> = spec.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                let native: [f32; 4] = v.try_into().ok()?;
+                Some(crate::caption::Chrome { native, ..Default::default() })
+            }),
+            ring_hover: std::env::var("MAKEPAD_RUN_RING_HOVER").as_deref() == Ok("1"),
+            ring_alert: match std::env::var("MAKEPAD_RUN_RING_ALERT").as_deref() {
+                Ok("stale") => Some(crate::ring::Alert::Stale),
+                Ok("panic") => Some(crate::ring::Alert::Panic),
+                _ => None,
+            },
         })
     }
 
@@ -81,13 +109,19 @@ impl Dump {
         TARGET
     }
 
+    /// ms on the dump's clock (its frames' file names)
+    pub fn ms(&self) -> u128 {
+        self.began.elapsed().as_millis()
+    }
+
     pub fn ready(&mut self, req: u32, rect: [u32; 4], pixels: &[u8]) {
         let Some(at) = self.pending.iter().position(|p| p.0 == req) else {
             return;
         };
         let (_, ms) = self.pending.remove(at);
         let [_, _, w, h] = rect;
-        if pixels.len() < (w * h * 4) as usize {
+        // a window that keeps no frame answers with nothing
+        if pixels.len() < (w * h * 4) as usize || w == 0 || h == 0 {
             return;
         }
         let path = self.dir.join(format!("frame-{ms:06}.png"));

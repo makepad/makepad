@@ -238,6 +238,11 @@ impl IDataObjectImpl for Files {
         if ok != S_OK {
             return Err(ok);
         }
+        // promised files are handed over once they are written
+        let items: Vec<(u32, String)> = self.0.iter().map(|p| (input::drag_item::FILE, p.clone())).collect();
+        if !crate::drag_promise::wait_promised(&items) {
+            return Err(E_UNEXPECTED);
+        }
         // the receiver owns the block (ReleaseStgMedium frees it)
         let mem = dropfiles(&self.0).ok_or(E_UNEXPECTED)?;
         Ok(STGMEDIUM { tymed: TYMED_HGLOBAL.0 as u32, u: STGMEDIUM_0 { hGlobal: mem }, pUnkForRelease: std::ptr::null_mut() })
@@ -341,7 +346,7 @@ pub(super) fn start(w: &Win, items: &[(u32, String)]) {
             eprintln!("[hal-win32] an external drag accepts only file paths");
             false
         }
-        Some(p) if p.is_empty() || p.iter().any(|p| !std::path::Path::new(p).is_absolute() || !std::path::Path::new(p).is_file()) => {
+        Some(p) if p.is_empty() || p.iter().any(|p| !std::path::Path::new(p).is_absolute() || !(std::path::Path::new(p).is_file() || crate::drag_promise::is_promised(p))) => {
             eprintln!("[hal-win32] an external drag requires absolute paths to existing files");
             false
         }

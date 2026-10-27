@@ -1,6 +1,5 @@
-//~ msg: inline assembly is not supported; use core::arch intrinsics
-// Relax has no assembler (user decision 2026-10-05): asm! is a compile error naming the
-// alternative. (rustc accepts this on aarch64; Relax rejects it on every target.)
+//~ msg: inline assembly (asm!, global_asm!, naked_asm!) in crate `test_crate` is blocked by `--no-asm` (MAKEPAD_RUN_NO_ASM=1)
+// Run with --no-asm (MAKEPAD_RUN_NO_ASM=1): asm! is then a compile error naming the crate and the flag.
 fn read() -> u64 {
     let v: u64;
     unsafe { std::arch::asm!("mov {0}, #7", out(reg) v) };

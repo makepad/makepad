@@ -24,9 +24,7 @@ impl Program {
         if !md.import_pub.contains_key(&(name, ns_type)) {
             let def = self.def(d);
             if def.krate == md.krate && def.scope == m && def.item.0 != u32::MAX {
-                if let Some((f, it)) = self.files.get(def.file as usize).and_then(|f| f.ast.items.get(def.item.0 as usize).map(|it| (f, it))) {
-                    // (generated text -- macro output -- declares what its macro says it does)
-                    if it.lo >= f.src_len { return None; }
+                if let Some(it) = self.files.get(def.file as usize).and_then(|f| f.ast.items.get(def.item.0 as usize)) {
                     return self.vis_module(def.file, def.scope, &it.vis);
                 }
             }
@@ -290,8 +288,7 @@ impl Program {
     pub fn def_item_vis(&self, d: DefId) -> BindVis {
         let def = self.def(d);
         if def.item.0 != u32::MAX {
-            if let Some((f, it)) = self.files.get(def.file as usize).and_then(|f| f.ast.items.get(def.item.0 as usize).map(|it| (f, it))) {
-                if it.lo >= f.src_len { return None; }
+            if let Some(it) = self.files.get(def.file as usize).and_then(|f| f.ast.items.get(def.item.0 as usize)) {
                 return self.vis_module(def.file, def.scope, &it.vis);
             }
         }

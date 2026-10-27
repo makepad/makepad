@@ -27,6 +27,8 @@ pub struct GameInput {
     gc_gamepads: Vec<GameInfo>,
     controllers: Vec<ObjcId>,
     gc_states: Vec<GameState>,
+    /// Each pad's last look (`observe`), shared with its value-changed handler.
+    observed: Vec<Arc<Mutex<GamepadState>>>,
     haptics: Vec<Option<AppleControllerHaptics>>,
     #[cfg(target_os = "macos")]
     raw_hid: AppleRawHidInput,
@@ -84,6 +86,7 @@ impl GameInput {
             gc_gamepads: Vec::new(),
             controllers: Vec::new(),
             gc_states: Vec::new(),
+            observed: Vec::new(),
             haptics: Vec::new(),
             #[cfg(target_os = "macos")]
             raw_hid: AppleRawHidInput::new(signal.clone()),
@@ -134,12 +137,17 @@ impl GameInput {
         unsafe {
             let _: ObjcId = msg_send![ptr, retain];
         }
+        let observed = Arc::new(Mutex::new(GamepadState::default()));
         unsafe {
-            // the pad rings the session whenever a value changes: no polling timer
+            // the pad rings the session whenever a value changes: no polling timer. The handler
+            // also looks at the pad, so a press released before the next poll still counts.
             let extended: ObjcId = msg_send![ptr, extendedGamepad];
             if extended != nil {
-                let ring = self.signal.clone();
-                let handler = objc_block!(move |_gamepad: ObjcId, _element: ObjcId| {
+                let (ring, seen) = (self.signal.clone(), observed.clone());
+                let handler = objc_block!(move |gamepad: ObjcId, _element: ObjcId| {
+                    if gamepad != nil {
+                        observe(&seen, gamepad);
+                    }
                     ring.set();
                 });
                 let () = msg_send![extended, setValueChangedHandler: &handler];
@@ -148,6 +156,7 @@ impl GameInput {
         self.gc_gamepads.push(info.clone());
         self.controllers.push(ptr);
         self.gc_states.push(GameState::Gamepad(GamepadState::default()));
+        self.observed.push(observed);
         self.haptics.push(unsafe { AppleControllerHaptics::new(ptr) });
     }
 
@@ -157,6 +166,7 @@ impl GameInput {
             self.gc_gamepads.remove(index);
             self.controllers.remove(index);
             self.gc_states.remove(index);
+            self.observed.remove(index);
             self.haptics.remove(index);
             unsafe {
                 let _: () = msg_send![ptr, release];
@@ -248,79 +258,94 @@ impl GameInput {
             unsafe {
                 let extended_gamepad: ObjcId = msg_send![*controller, extendedGamepad];
                 if extended_gamepad != nil {
-                    if let GameState::Gamepad(state) = &mut self.gc_states[i] {
-                        let get_val = |btn: ObjcId| -> f32 {
-                            if btn != nil {
-                                let val: f32 = msg_send![btn, value];
-                                if val == 0.0 {
-                                    let pressed: BOOL = msg_send![btn, isPressed];
-                                    if pressed == YES {
-                                        return 1.0;
-                                    }
-                                }
-                                val
-                            } else {
-                                0.0
-                            }
-                        };
-
-                        let get_axis = |input: ObjcId| -> f32 {
-                            if input != nil {
-                                let val: f32 = msg_send![input, value];
-                                val
-                            } else {
-                                0.0
-                            }
-                        };
-
-                        state.a = get_val(msg_send![extended_gamepad, buttonA]);
-                        state.b = get_val(msg_send![extended_gamepad, buttonB]);
-                        state.x = get_val(msg_send![extended_gamepad, buttonX]);
-                        state.y = get_val(msg_send![extended_gamepad, buttonY]);
-
-                        state.left_shoulder = get_val(msg_send![extended_gamepad, leftShoulder]);
-                        state.right_shoulder = get_val(msg_send![extended_gamepad, rightShoulder]);
-
-                        state.left_trigger = get_val(msg_send![extended_gamepad, leftTrigger]);
-                        state.right_trigger = get_val(msg_send![extended_gamepad, rightTrigger]);
-
-                        state.select = get_val(msg_send![extended_gamepad, buttonOptions]);
-                        state.start = get_val(msg_send![extended_gamepad, buttonMenu]);
-                        let home = if msg_send![extended_gamepad, respondsToSelector: sel!(buttonHome)]
-                        {
-                            msg_send![extended_gamepad, buttonHome]
-                        } else {
-                            nil
-                        };
-                        state.home = get_val(home);
-
-                        state.left_thumb =
-                            get_val(msg_send![extended_gamepad, leftThumbstickButton]);
-                        state.right_thumb =
-                            get_val(msg_send![extended_gamepad, rightThumbstickButton]);
-
-                        let dpad: ObjcId = msg_send![extended_gamepad, dpad];
-                        if dpad != nil {
-                            state.dpad_up = get_axis(msg_send![dpad, up]);
-                            state.dpad_down = get_axis(msg_send![dpad, down]);
-                            state.dpad_left = get_axis(msg_send![dpad, left]);
-                            state.dpad_right = get_axis(msg_send![dpad, right]);
-                        }
-
-                        let left_stick: ObjcId = msg_send![extended_gamepad, leftThumbstick];
-                        if left_stick != nil {
-                            state.left_stick = [get_axis(msg_send![left_stick, xAxis]), get_axis(msg_send![left_stick, yAxis])];
-                        }
-
-                        let right_stick: ObjcId = msg_send![extended_gamepad, rightThumbstick];
-                        if right_stick != nil {
-                            state.right_stick = [get_axis(msg_send![right_stick, xAxis]), get_axis(msg_send![right_stick, yAxis])];
-                        }
-                    }
+                    self.gc_states[i] = GameState::Gamepad(observe(&self.observed[i], extended_gamepad));
                 }
             }
         }
         self.refresh_combined_states();
+    }
+}
+
+/// One look at a pad: its state now, with the presses counted since the last look. The pad's
+/// value-changed handler looks on every change GameController reports, the poll on every poll,
+/// so a tap between two polls still counts.
+unsafe fn observe(observed: &Mutex<GamepadState>, extended_gamepad: ObjcId) -> GamepadState {
+    let mut seen = observed.lock().unwrap_or_else(|e| e.into_inner());
+    let mut next = seen.clone();
+    read_extended(extended_gamepad, &mut next);
+    next.count_presses_since(&seen);
+    *seen = next.clone();
+    next
+}
+
+/// The extended gamepad's values into `state` (its press counts untouched).
+unsafe fn read_extended(extended_gamepad: ObjcId, state: &mut GamepadState) {
+    let get_val = |btn: ObjcId| -> f32 {
+        if btn != nil {
+            let val: f32 = msg_send![btn, value];
+            if val == 0.0 {
+                let pressed: BOOL = msg_send![btn, isPressed];
+                if pressed == YES {
+                    return 1.0;
+                }
+            }
+            val
+        } else {
+            0.0
+        }
+    };
+
+    let get_axis = |input: ObjcId| -> f32 {
+        if input != nil {
+            let val: f32 = msg_send![input, value];
+            val
+        } else {
+            0.0
+        }
+    };
+
+    state.a = get_val(msg_send![extended_gamepad, buttonA]);
+    state.b = get_val(msg_send![extended_gamepad, buttonB]);
+    state.x = get_val(msg_send![extended_gamepad, buttonX]);
+    state.y = get_val(msg_send![extended_gamepad, buttonY]);
+
+    state.left_shoulder = get_val(msg_send![extended_gamepad, leftShoulder]);
+    state.right_shoulder = get_val(msg_send![extended_gamepad, rightShoulder]);
+
+    state.left_trigger = get_val(msg_send![extended_gamepad, leftTrigger]);
+    state.right_trigger = get_val(msg_send![extended_gamepad, rightTrigger]);
+
+    state.select = get_val(msg_send![extended_gamepad, buttonOptions]);
+    state.start = get_val(msg_send![extended_gamepad, buttonMenu]);
+    let home = if msg_send![extended_gamepad, respondsToSelector: sel!(buttonHome)]
+    {
+        msg_send![extended_gamepad, buttonHome]
+    } else {
+        nil
+    };
+    state.home = get_val(home);
+
+    state.left_thumb =
+        get_val(msg_send![extended_gamepad, leftThumbstickButton]);
+    state.right_thumb =
+        get_val(msg_send![extended_gamepad, rightThumbstickButton]);
+
+    let dpad: ObjcId = msg_send![extended_gamepad, dpad];
+    if dpad != nil {
+        state.dpad_up = get_axis(msg_send![dpad, up]);
+        state.dpad_down = get_axis(msg_send![dpad, down]);
+        state.dpad_left = get_axis(msg_send![dpad, left]);
+        state.dpad_right = get_axis(msg_send![dpad, right]);
+    }
+
+    let left_stick: ObjcId = msg_send![extended_gamepad, leftThumbstick];
+    if left_stick != nil {
+        state.left_stick = [get_axis(msg_send![left_stick, xAxis]), get_axis(msg_send![left_stick, yAxis])];
+    }
+
+    let right_stick: ObjcId = msg_send![extended_gamepad, rightThumbstick];
+    if right_stick != nil {
+        state.right_stick = [get_axis(msg_send![right_stick, xAxis]), get_axis(msg_send![right_stick, yAxis])];
     }
 }
 #[link(name = "GameController", kind = "framework")]
@@ -1045,11 +1070,14 @@ mod raw_hid {
             };
 
             let report_kind = report.first().copied().unwrap_or(report_id as u8);
+            let prev = entry.state.clone();
             match report_kind {
                 XBOX_ONE_REPORT_BUTTONS => Self::parse_xbox_one_buttons(&mut entry.state, report),
                 XBOX_ONE_REPORT_HOME => Self::parse_xbox_one_home(&mut entry.state, report),
                 _ => {}
             }
+            // every report is looked at: a tap between two snapshots still counts
+            entry.state.count_presses_since(&prev);
             if let Some(signal) = &shared.signal {
                 signal.set();
             }

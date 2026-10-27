@@ -15,11 +15,16 @@ fn main() {
 }
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 4 {
-        return Err("usage: makepad-vulkan-codegen <vk.xml> <apis.txt> <output directory>".into());
+    if args.len() != 4 && args.len() != 5 {
+        return Err("usage: makepad-vulkan-codegen <vk.xml> <apis.txt> <output directory> [video.xml]".into());
     }
     let source = std::fs::read_to_string(&args[1]).map_err(|e| e.to_string())?;
-    let r = Registry::parse(&source);
+    let mut r = Registry::parse(&source);
+    // The codec Std types (StdVideoH264*) live in video.xml next to vk.xml.
+    if let Some(video) = args.get(4) {
+        let source = std::fs::read_to_string(video).map_err(|e| format!("{video}: {e}"))?;
+        r.merge(Registry::parse(&source));
+    }
     let roots = std::fs::read_to_string(&args[2]).map_err(|e| e.to_string())?;
     let mut selected: BTreeSet<String> = BTreeSet::new();
     let mut constants: BTreeSet<String> = BTreeSet::new();

@@ -15,14 +15,14 @@ fn placeholder_outliving_outer_region_leaks_but_reverse_does_not() {
     let tcx = Tcx::new();
     let tys = &tcx.tys;
     let infcx = InferCtxt::new(&tcx, TypingMode::PostAnalysis, Default::default());
-    let outer = infcx.inner.borrow_mut().unwrap_region_constraints().new_region_var(tys, UniverseIndex::ROOT);
+    let outer = infcx.inner.borrow_mut().unwrap_region_constraints().new_region_var(tys, UniverseIndex::ROOT, 0);
     let p = placeholder(tys, 0);
     let snapshot = infcx.start_snapshot();
-    infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(tys, p, outer, true);
+    infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(tys, crate::infer::region_constraints::SubregionOrigin::Misc, p, outer, true);
     assert!(infcx.inner.borrow_mut().unwrap_region_constraints().leak_check(tys, UniverseIndex::ROOT, UniverseIndex(1), Some(&snapshot)).is_ok());
     infcx.rollback_to(snapshot);
     let snapshot = infcx.start_snapshot();
-    infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(tys, outer, p, true);
+    infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(tys, crate::infer::region_constraints::SubregionOrigin::Misc, outer, p, true);
     assert!(infcx.inner.borrow_mut().unwrap_region_constraints().leak_check(tys, UniverseIndex::ROOT, UniverseIndex(1), Some(&snapshot)).is_err());
     infcx.rollback_to(snapshot);
 }
@@ -34,7 +34,7 @@ fn distinct_placeholders_cannot_outlive_each_other() {
     let infcx = InferCtxt::new(&tcx, TypingMode::PostAnalysis, Default::default());
     let p = placeholder(tys, 0);
     let q = placeholder(tys, 1);
-    infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(tys, p, q, true);
+    infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(tys, crate::infer::region_constraints::SubregionOrigin::Misc, p, q, true);
     assert!(infcx.inner.borrow_mut().unwrap_region_constraints().leak_check(tys, UniverseIndex::ROOT, UniverseIndex(1), None).is_err());
 }
 
@@ -45,7 +45,7 @@ fn static_equality_is_visible_and_snapshot_scoped() {
     let infcx = InferCtxt::new(&tcx, TypingMode::PostAnalysis, Default::default());
     let p = placeholder(tys, 0);
     let static_ = tys.intern_region(RegionKind::ReStatic);
-    infcx.inner.borrow_mut().unwrap_region_constraints().make_eqregion(tys, p, static_, true);
+    infcx.inner.borrow_mut().unwrap_region_constraints().make_eqregion(tys, crate::infer::region_constraints::SubregionOrigin::Misc, p, static_, true);
     assert!(infcx.inner.borrow_mut().unwrap_region_constraints().leak_check(tys, UniverseIndex::ROOT, UniverseIndex(1), None).is_err());
     let snapshot = infcx.start_snapshot();
     assert!(infcx.inner.borrow_mut().unwrap_region_constraints().leak_check(tys, UniverseIndex::ROOT, UniverseIndex(1), Some(&snapshot)).is_ok());
@@ -57,9 +57,9 @@ fn failed_opportunistic_unification_retains_leak_constraint() {
     let tcx = Tcx::new();
     let tys = &tcx.tys;
     let infcx = InferCtxt::new(&tcx, TypingMode::PostAnalysis, Default::default());
-    let outer = infcx.inner.borrow_mut().unwrap_region_constraints().new_region_var(tys, UniverseIndex::ROOT);
+    let outer = infcx.inner.borrow_mut().unwrap_region_constraints().new_region_var(tys, UniverseIndex::ROOT, 0);
     let snapshot = infcx.start_snapshot();
-    infcx.inner.borrow_mut().unwrap_region_constraints().make_eqregion(tys, outer, placeholder(tys, 0), true);
+    infcx.inner.borrow_mut().unwrap_region_constraints().make_eqregion(tys, crate::infer::region_constraints::SubregionOrigin::Misc, outer, placeholder(tys, 0), true);
     assert_eq!(infcx.inner.borrow_mut().unwrap_region_constraints().shallow_resolve_region_var(tys, 0), outer);
     assert!(infcx.inner.borrow_mut().unwrap_region_constraints().leak_check(tys, UniverseIndex::ROOT, UniverseIndex(1), None).is_err());
     infcx.rollback_to(snapshot);
@@ -72,9 +72,9 @@ fn invisible_constraints_and_outer_placeholders_are_not_leaks() {
     let tcx = Tcx::new();
     let tys = &tcx.tys;
     let infcx = InferCtxt::new(&tcx, TypingMode::PostAnalysis, Default::default());
-    infcx.inner.borrow_mut().unwrap_region_constraints().make_eqregion(tys, placeholder(tys, 0), placeholder(tys, 1), false);
+    infcx.inner.borrow_mut().unwrap_region_constraints().make_eqregion(tys, crate::infer::region_constraints::SubregionOrigin::Misc, placeholder(tys, 0), placeholder(tys, 1), false);
     assert!(infcx.inner.borrow_mut().unwrap_region_constraints().leak_check(tys, UniverseIndex::ROOT, UniverseIndex(1), None).is_ok());
-    infcx.inner.borrow_mut().unwrap_region_constraints().make_eqregion(tys, placeholder(tys, 0), placeholder(tys, 1), true);
+    infcx.inner.borrow_mut().unwrap_region_constraints().make_eqregion(tys, crate::infer::region_constraints::SubregionOrigin::Misc, placeholder(tys, 0), placeholder(tys, 1), true);
     assert!(infcx.inner.borrow_mut().unwrap_region_constraints().leak_check(tys, UniverseIndex(1), UniverseIndex(2), None).is_ok());
 }
 
@@ -110,7 +110,7 @@ fn combined_nested_commit_rolls_back_with_outer_snapshot() {
             let region = infcx.next_region_var();
             let universe = infcx.create_next_universe();
             let p = tcx.tys.intern_region(RegionKind::RePlaceholder { universe, var: BoundVar(0) });
-            infcx.inner.borrow_mut().unwrap_region_constraints().make_eqregion(&tcx.tys, region, p, true);
+            infcx.inner.borrow_mut().unwrap_region_constraints().make_eqregion(&tcx.tys, crate::infer::region_constraints::SubregionOrigin::Misc, region, p, true);
             assert_eq!(infcx.inner.borrow_mut().opaque_types().register(key.clone(), ProvisionalHiddenType::new(tcx.tys.char_)), Some(tcx.tys.bool_));
             infcx.inner.borrow_mut().opaque_types().add_duplicate(key.clone(), original);
             Ok(())
@@ -503,7 +503,7 @@ fn round10_leak_check_does_not_resolve_free_region_obligations() {
     let b = tcx.tys.intern_region(RegionKind::ReLateParam(RegionScope::Item(DefId(1)), LateParamKind::Anon(1)));
     let ty = tcx.tys.intern(TyKind::Ref(false, tcx.tys.bool_, b));
     infcx.register_ty_outlives(ty, a);
-    infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(&tcx.tys, a, b, true);
+    infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(&tcx.tys, crate::infer::region_constraints::SubregionOrigin::Misc, a, b, true);
     // compare_impl_item.rs:697 needs resolve_regions_and_report_errors here.
     // A leak check only checks universe escape; these are ordinary free regions.
     assert!(infcx.leak_check(UniverseIndex::ROOT, None).is_ok());
@@ -518,7 +518,7 @@ fn round28_skip_leak_check_is_explicit() {
     let variable = infcx.next_region_var();
     let universe = infcx.create_next_universe();
     let p = tcx.tys.intern_region(RegionKind::RePlaceholder { universe, var: BoundVar(0) });
-    infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(&tcx.tys, variable, p, true);
+    infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(&tcx.tys, crate::infer::region_constraints::SubregionOrigin::Misc, variable, p, true);
     assert!(infcx.leak_check(UniverseIndex::ROOT, None).is_err());
     infcx.skip_leak_check = true;
     assert!(infcx.leak_check(UniverseIndex::ROOT, None).is_ok());

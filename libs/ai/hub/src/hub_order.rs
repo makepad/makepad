@@ -26,13 +26,15 @@ pub fn host_of(base: &str) -> &str {
     rest.rsplit_once(':').map_or(rest, |(host, port)| if port.chars().all(|c| c.is_ascii_digit()) { host } else { rest })
 }
 
-/// This host's primary LAN address (the one a packet to the LAN would leave from).
+/// This host's primary address (the one a packet off this machine would leave from).
 fn own_lan_ip() -> Option<IpAddr> {
     static IP: std::sync::OnceLock<Option<IpAddr>> = std::sync::OnceLock::new();
     *IP.get_or_init(|| {
         let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-        // A UDP connect sends nothing; it only picks the outgoing interface.
-        socket.connect("10.255.255.255:9").ok()?;
+        // A UDP connect sends nothing; it only picks the outgoing interface. The target is
+        // TEST-NET-1 (RFC 5737): routed, never a local-network address, so connecting asks
+        // nothing of macOS's Local Network privacy (a 10/8 target can be on-link).
+        socket.connect("192.0.2.1:9").ok()?;
         socket.local_addr().ok().map(|a| a.ip())
     })
 }
@@ -52,7 +54,7 @@ fn pinned_entries() -> Vec<String> {
     }
     // A browser has no ~/.makepad: on the web only MAKEPAD_AI_HUB pins.
     #[cfg(not(target_arch = "wasm32"))]
-    if let Ok(text) = std::fs::read_to_string(crate::fleet_auth::client_dir().join("pinned")) {
+    if let Ok(text) = std::fs::read_to_string(makepad_network::fleet::makepad_home().join("ai-hub").join("pinned")) {
         out.extend(text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(str::to_string));
     }
     out

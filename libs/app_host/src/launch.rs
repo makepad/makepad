@@ -6,7 +6,7 @@ use std::process::Command;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use makepad_platform::thread::{CancellationToken, Lane, SignalToUI, TaskHandle, TaskPool, ThreadOptions, ThreadSpawner};
+use makepad_platform::thread::{CancellationToken, Lane, SignalToUI, TaskHandle, TaskPool, ThreadSpawner};
 use makepad_platform::Cx;
 
 use crate::hub::ClientId;
@@ -105,6 +105,7 @@ fn wait_exit_handle(child: &Child) -> Option<impl FnOnce() + Send + 'static> {
 /// Wake the UI loop when `child` exits (a build ends, an app dies before
 /// it ever connected): the owner then polls its exit, so no timer has to
 /// watch for it. The worker blocks in the OS; it ends with the process.
+#[cfg(any(unix, windows))]
 pub fn signal_on_exit(spawner: &ThreadSpawner, child: &Child, name: String) -> Result<(), String> {
     #[cfg(unix)]
     let wait = {
@@ -114,13 +115,19 @@ pub fn signal_on_exit(spawner: &ThreadSpawner, child: &Child, name: String) -> R
     #[cfg(windows)]
     let Some(wait) = wait_exit_handle(child) else { return Err("exit watch: no handle".to_string()) };
     let task = spawner
-        .spawn_worker(ThreadOptions { name: Some(name.into()), ..Default::default() }, move || {
+        .spawn_worker(makepad_platform::thread::ThreadOptions { name: Some(name.into()), ..Default::default() }, move || {
             wait();
             SignalToUI::set_ui_signal();
         })
         .map_err(|error| format!("exit watch: {error}"))?;
     task.detach();
     Ok(())
+}
+
+/// The web has no child processes to watch.
+#[cfg(not(any(unix, windows)))]
+pub fn signal_on_exit(_spawner: &ThreadSpawner, _child: &Child, _name: String) -> Result<(), String> {
+    Err("exit watch: no child processes on this platform".to_string())
 }
 
 /// What a child needs to find the hub as client `id`: `STUDIO_HOST`,
@@ -148,6 +155,24 @@ pub fn configure(cmd: &mut Command, hub_port: u16, id: ClientId, bin: &str) {
 #[cfg(unix)]
 pub fn own_process_group(cmd: &mut Command) {
     cmd.process_group(0);
+}
+
+/// The child (and everything it starts: a build's rustc) runs at `nice` (a lower priority than
+/// its host; lowering needs no privilege), so a desktop's own work -- its compositor, a remote
+/// desktop stream -- keeps the CPU while its apps and their builds take the rest.
+#[cfg(unix)]
+pub fn lower_priority(cmd: &mut Command, nice: i32) {
+    extern "C" {
+        fn setpriority(which: i32, who: u32, prio: i32) -> i32;
+    }
+    const PRIO_PROCESS: i32 = 0;
+    // SAFETY: setpriority is async-signal-safe; who 0 is the calling (child) process.
+    unsafe {
+        cmd.pre_exec(move || {
+            setpriority(PRIO_PROCESS, 0, nice);
+            Ok(())
+        });
+    }
 }
 
 /// Linux: the child gets SIGTERM when the thread that spawns it ends (the
@@ -228,6 +253,12 @@ mod signal {
         unsafe { kill(-pid, sig) };
     }
 
+    pub fn kill_one(pid: i32, sig: i32) {
+        if pid > 0 {
+            unsafe { kill(pid, sig) };
+        }
+    }
+
     /// `kill(pid, 0)` sends nothing; a zero return means the process (or
     /// group leader) still exists.
     pub fn alive(pid: i32) -> bool {
@@ -265,7 +296,26 @@ pub fn process_alive(pid: u32) -> bool {
 /// blocks on it. Windows keeps the plain `Child::kill()` this replaced.
 #[cfg(unix)]
 pub fn kill_child_group(child: &mut Child, grace: std::time::Duration, pool: &TaskPool) {
-    let pid = child.id() as i32;
+    kill_group_pid(child.id(), grace, pool);
+}
+
+/// SIGTERM (or with `kill`, SIGKILL) to the process group `pid` leads, at once and once.
+#[cfg(unix)]
+pub fn signal_group(pid: u32, kill: bool) {
+    signal::kill_group(pid as i32, if kill { signal::SIGKILL } else { signal::SIGTERM });
+}
+
+/// SIGTERM (or with `kill`, SIGKILL) to the one process `pid`, at once and once.
+#[cfg(unix)]
+pub fn signal_pid(pid: u32, kill: bool) {
+    signal::kill_one(pid as i32, if kill { signal::SIGKILL } else { signal::SIGTERM });
+}
+
+/// [`kill_child_group`] for a group leader that is not our child (a process an earlier
+/// instance started and this one adopted by its pid).
+#[cfg(unix)]
+pub fn kill_group_pid(pid: u32, grace: std::time::Duration, pool: &TaskPool) {
+    let pid = pid as i32;
     signal::kill_group(pid, signal::SIGTERM);
     let wait = CancellationToken::new();
     let submitted = pool.submit(Lane::Heavy, move || {

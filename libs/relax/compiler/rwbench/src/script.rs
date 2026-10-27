@@ -1,7 +1,8 @@
 // The Splash script VM (platform/script, makepad-script) evaluating a compute-heavy script: the
 // bytecode loop over arithmetic, locals, array and object access, loops and recursive calls. The
 // script is parsed and evaluated once in setup (it defines `bench`); an iteration is one
-// `vm.call(bench)`, so the timed work is the interpreter, not the parser.
+// `vm.call(bench)` plus the host's GC when the heap asks for one, so the timed work is the
+// interpreter, not the parser.
 use crate::fold;
 use makepad_script::*;
 
@@ -67,10 +68,17 @@ pub fn setup() -> Box<dyn FnMut() -> u64> {
     let bench = vm.eval(ScriptMod::new("", "", "rwbench.splash", 0, 0, SCRIPT, &[]));
     let errors = vm.take_errors();
     assert!(errors.is_empty(), "splash_eval: {errors:?}");
-    assert!(bench.as_object().is_some(), "splash_eval: script did not return its entry fn");
+    let entry = bench.as_object().expect("splash_eval: script did not return its entry fn");
+    let root = vm.new_object_ref(entry);
     Box::new(move || {
+        let _ = &root;
         let v = vm.call(bench, &[]);
         let n = v.as_number().expect("splash_eval: bench returned a number");
+        // The host's GC cadence (the event loop's per-frame `needs_gc` -> `gc`): a long-running VM
+        // collects what escaped (the arrays and point objects each call builds) between calls.
+        if vm.heap().needs_gc() {
+            vm.gc();
+        }
         fold(0, n.to_bits())
     })
 }

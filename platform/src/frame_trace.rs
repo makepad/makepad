@@ -34,6 +34,19 @@ pub fn presented_frames() -> u64 {
     PRESENTED.load(Ordering::Relaxed)
 }
 
+/// Draw events dispatched since start (one per drawn frame, every platform): the frame clock
+/// input record / replay and the flight recorder pin input events to.
+static DRAWN: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn note_drawn() {
+    DRAWN.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Draw events dispatched since start.
+pub fn drawn_frames() -> u64 {
+    DRAWN.load(Ordering::Relaxed)
+}
+
 /// What woke a paint tick.
 #[derive(Clone, Copy)]
 pub enum TickSource {

@@ -117,6 +117,40 @@ impl crate::fmt::Display for Infallible {
     }
 }
 
+impl crate::error::Error for Infallible {}
+
 pub const fn identity<T>(x: T) -> T {
     x
 }
+
+pub mod num {
+    pub trait FloatToInt<Int>: Sized {
+        unsafe fn to_int_unchecked(self) -> Int;
+    }
+    impl FloatToInt<u8> for f32 { unsafe fn to_int_unchecked(self) -> u8 { self as u8 } }
+    impl FloatToInt<u16> for f32 { unsafe fn to_int_unchecked(self) -> u16 { self as u16 } }
+    impl FloatToInt<u32> for f32 { unsafe fn to_int_unchecked(self) -> u32 { self as u32 } }
+    impl FloatToInt<u64> for f32 { unsafe fn to_int_unchecked(self) -> u64 { self as u64 } }
+    impl FloatToInt<u128> for f32 { unsafe fn to_int_unchecked(self) -> u128 { self as u128 } }
+    impl FloatToInt<usize> for f32 { unsafe fn to_int_unchecked(self) -> usize { self as usize } }
+    impl FloatToInt<i8> for f32 { unsafe fn to_int_unchecked(self) -> i8 { self as i8 } }
+    impl FloatToInt<i16> for f32 { unsafe fn to_int_unchecked(self) -> i16 { self as i16 } }
+    impl FloatToInt<i32> for f32 { unsafe fn to_int_unchecked(self) -> i32 { self as i32 } }
+    impl FloatToInt<i64> for f32 { unsafe fn to_int_unchecked(self) -> i64 { self as i64 } }
+    impl FloatToInt<i128> for f32 { unsafe fn to_int_unchecked(self) -> i128 { self as i128 } }
+    impl FloatToInt<isize> for f32 { unsafe fn to_int_unchecked(self) -> isize { self as isize } }
+    impl FloatToInt<u8> for f64 { unsafe fn to_int_unchecked(self) -> u8 { self as u8 } }
+    impl FloatToInt<u16> for f64 { unsafe fn to_int_unchecked(self) -> u16 { self as u16 } }
+    impl FloatToInt<u32> for f64 { unsafe fn to_int_unchecked(self) -> u32 { self as u32 } }
+    impl FloatToInt<u64> for f64 { unsafe fn to_int_unchecked(self) -> u64 { self as u64 } }
+    impl FloatToInt<u128> for f64 { unsafe fn to_int_unchecked(self) -> u128 { self as u128 } }
+    impl FloatToInt<usize> for f64 { unsafe fn to_int_unchecked(self) -> usize { self as usize } }
+    impl FloatToInt<i8> for f64 { unsafe fn to_int_unchecked(self) -> i8 { self as i8 } }
+    impl FloatToInt<i16> for f64 { unsafe fn to_int_unchecked(self) -> i16 { self as i16 } }
+    impl FloatToInt<i32> for f64 { unsafe fn to_int_unchecked(self) -> i32 { self as i32 } }
+    impl FloatToInt<i64> for f64 { unsafe fn to_int_unchecked(self) -> i64 { self as i64 } }
+    impl FloatToInt<i128> for f64 { unsafe fn to_int_unchecked(self) -> i128 { self as i128 } }
+    impl FloatToInt<isize> for f64 { unsafe fn to_int_unchecked(self) -> isize { self as isize } }
+}
+
+pub use self::num::FloatToInt;

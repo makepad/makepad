@@ -159,12 +159,12 @@ pub fn unroll_loops(options: &relax_session::Options, f: &mut Func) -> bool {
             hi.push(Inst::Iconst(bvreg, kc));
         }
         hi.push(Inst::ICmp(if lt { Cond::Lt } else { Cond::Ne }, signed, g1, iv, bvreg));
-        let hb = Block { insts: hi.clone(), pos: vec![pos; hi.len()], term: Term::Branch(g1, h + 1, bi as u32), term_pos: pos };
+        let hb = Block { insts: hi.clone(), pos: vec![pos; hi.len()], term: Term::Branch(g1, h + 1, bi as u32), term_pos: pos, count: -1.0 };
         // H2: n - i >= K (unsigned; i < n, so no wrap)
         let (rem, g2, lim) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
         // lim = n - K: U runs while i <= lim (n - i >= K here, so n - K does not overflow)
         let h2i = vec![Inst::IBin(IOp::Sub, U64_TY, rem, bvreg, iv), Inst::IBinI(IOp::Sub, U64_TY, lim, bvreg, k), Inst::ICmpI(Cond::Ge, false, g2, rem, k)];
-        let h2 = Block { insts: h2i.clone(), pos: vec![pos; h2i.len()], term: Term::Branch(g2, h + 2, bi as u32), term_pos: pos };
+        let h2 = Block { insts: h2i.clone(), pos: vec![pos; h2i.len()], term: Term::Branch(g2, h + 2, bi as u32), term_pos: pos, count: -1.0 };
         // U: t_j = i + j up front; copy c of the body reads i as t_(c + increments so far);
         // the increments go; i += K; loop while n - i >= K
         let tv: Vec<VReg> = (0..=k).map(|j| if j == 0 { iv } else { f.vreg(Cls::I) }).collect();
@@ -254,11 +254,11 @@ pub fn unroll_loops(options: &relax_session::Options, f: &mut Func) -> bool {
         ui.push(Inst::IBinI(IOp::Add, it, iv, iv, k));
         ui.push(Inst::ICmp(Cond::Le, signed, g4, iv, lim));
         up.extend([pos, pos]);
-        let ub = Block { insts: ui, pos: up, term: Term::Branch(g4, h + 2, h + 3), term_pos: pos };
+        let ub = Block { insts: ui, pos: up, term: Term::Branch(g4, h + 2, h + 3), term_pos: pos, count: -1.0 };
         // HL: the rest (< K iterations) in B, or none
         let g3 = f.vreg(Cls::I);
         let hl = vec![Inst::ICmp(if lt { Cond::Lt } else { Cond::Ne }, signed, g3, iv, bvreg)];
-        let hlb = Block { insts: hl, pos: vec![pos], term: Term::Branch(g3, bi as u32, exit), term_pos: pos };
+        let hlb = Block { insts: hl, pos: vec![pos], term: Term::Branch(g3, bi as u32, exit), term_pos: pos, count: -1.0 };
         // outside entries into B now enter H
         for pb in 0..nb0 {
             if pb != bi {
@@ -374,6 +374,8 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
     let mut transformed = vec![false; f.blocks.len()];
     'candidate: for (head, members) in loops {
         if members.iter().zip(&transformed).any(|(a, b)| *a && *b) { continue; }
+        // makepad inspect remarks: the last check passed (stages 1..4) or vectorised
+        relax_backend::remark::loop_try("stream-map", head_pos(f, head as usize));
         // Only a linear cycle: guards exit the loop, and the sole back edge follows
         // the store. No interior entries or nested control flow can be bypassed.
         let mut chain = Vec::new();
@@ -405,6 +407,7 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
             }
         }
         if definitions.iter().any(|n| *n > 1) { continue; }
+        relax_backend::remark::loop_stage(1);
         let roots: Vec<_> = (0..nv).filter(|v| inputs[*v]).map(|v| VReg(v as u32)).collect();
         // Symbolically execute the body. Every address must be the current element of a
         // one-element-per-iteration recurrence; every length guard a -1 recurrence.
@@ -551,6 +554,17 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
                         wops.push(WOp::Int(o, x, c));
                         sv[d.0 as usize] = Sv::Lane(wops.len() - 1);
                     }
+                    // 32-bit shifts by a constant below 32: the lane shift (immediate forms)
+                    Inst::IBinI(op @ (IOp::Shl | IOp::Shr), it, d, a, k) if store.is_none() && kind == Some(Lane::I32) && it.bits == 32 && (1..32).contains(&k) => {
+                        let x = operand!(a, Lane::I32);
+                        let o = match (op, it.signed) {
+                            (IOp::Shl, _) => VX::ShlI(VW::S, k as u8),
+                            (_, false) => VX::ShrUI(VW::S, k as u8),
+                            _ => VX::ShrSI(VW::S, k as u8),
+                        };
+                        wops.push(WOp::Un(o, x));
+                        sv[d.0 as usize] = Sv::Lane(wops.len() - 1);
+                    }
                     Inst::FBin(op, false, d, a, b2) if store.is_none() && kind == Some(Lane::F32) => {
                         let o = match op { FOp::Add => VX::FAdd(VW::S, NanBits::Host), FOp::Sub => VX::FSub(VW::S, NanBits::Host), FOp::Mul => VX::FMul(VW::S, NanBits::Host), FOp::Div => VX::FDiv(VW::S, NanBits::Host), FOp::MinLt => VX::FMinLt(VW::S), FOp::MaxGt => VX::FMaxGt(VW::S), _ => continue 'candidate };
                         let (x, y) = (operand!(a, Lane::F32), operand!(b2, Lane::F32));
@@ -579,12 +593,14 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
         }
         let (Some((dst, value)), Some(kind)) = (store, kind) else { continue };
         if loads.is_empty() { continue; }
+        relax_backend::remark::loop_stage(2);
         let sz = kind.bytes();
         let lanes = 16 / sz;
         let shift = sz.trailing_zeros() as i64;
         let streams: Vec<Stream> = loads.iter().map(|x| x.0).chain(std::iter::once(dst)).collect();
         // indexed streams scale by the element size
         if streams.iter().any(|s| s.iv.is_some() && 1i64 << s.sh != sz) { continue; }
+        relax_backend::remark::loop_stage(3);
         let ptr_roots: Vec<VReg> = streams.iter().filter(|s| s.iv.is_none()).map(|s| s.root).collect();
         let base_roots: Vec<VReg> = streams.iter().filter(|s| s.iv.is_some()).map(|s| s.root).collect();
         let mut iv_roots: Vec<VReg> = streams.iter().filter_map(|s| s.iv).collect();
@@ -635,6 +651,7 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
             if !(ivs.contains(&a) && oa >= 0 && match b2 { Bound::Reg(r) => !walkers.contains(&r) && !ivs.contains(&r) && !counts.contains(&r), Bound::Imm(_) => true }) { continue 'candidate; }
         }
         if counts.is_empty() && end_guards.is_empty() && lt_guards.is_empty() { continue; }
+        relax_backend::remark::loop_stage(4);
         // dependencies between the store and the loads that a vector would reorder, when their
         // distance is known
         for l in loads.iter().map(|x| x.0) {
@@ -850,12 +867,19 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
                 block.term.map_succs(|s| if s == head { entry } else { s });
             }
         }
-        f.blocks.push(Block { pos: vec![pos; init.len()], insts: init, term: Term::Branch(ok, body, head), term_pos: pos });
-        f.blocks.push(Block { pos: vec![pos; wide.len()], insts: wide, term: Term::Branch(again, body, head), term_pos: pos });
+        f.blocks.push(Block { pos: vec![pos; init.len()], insts: init, term: Term::Branch(ok, body, head), term_pos: pos, count: -1.0 });
+        f.blocks.push(Block { pos: vec![pos; wide.len()], insts: wide, term: Term::Branch(again, body, head), term_pos: pos, count: -1.0 });
         for (done, member) in transformed.iter_mut().zip(&members) { *done |= *member; }
+        relax_backend::remark::loop_done();
         changed = true;
     }
     changed
+}
+
+/// A loop head's source position (makepad inspect remarks): its first instruction's, else its
+/// terminator's.
+fn head_pos(f: &Func, head: usize) -> u64 {
+    f.blocks.get(head).map_or(0, |b| b.pos.first().copied().unwrap_or(b.term_pos))
 }
 
 /// Integer sum reductions over a contiguous array, vectorised: a single-block counted loop
@@ -905,6 +929,7 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
             Term::Branch(c, t, e) if e as usize == bi && t as usize != bi => (c, false, t),
             _ => continue,
         };
+        relax_backend::remark::loop_try("reduction", head_pos(f, bi));
         if f.blocks.iter().any(|x| matches!(x.term, Term::Invoke(_, w) if w as usize == bi)) {
             continue;
         }
@@ -923,6 +948,7 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
             (Cond::Ne, true) | (Cond::Eq, false) => false,
             _ => continue,
         };
+        relax_backend::remark::loop_stage(1);
         let defined_in = |v: VReg| b.insts.iter().any(|i| {
             let mut d = false;
             for_defs(i, |x| d |= x == v);
@@ -1120,12 +1146,12 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
             hi.push(Inst::Iconst(bvreg, kc));
         }
         hi.push(Inst::ICmp(if lt { Cond::Lt } else { Cond::Ne }, signed, g1, iv, bvreg));
-        let hb = Block { insts: hi.clone(), pos: vec![pos; hi.len()], term: Term::Branch(g1, h + 1, bi as u32), term_pos: pos };
+        let hb = Block { insts: hi.clone(), pos: vec![pos; hi.len()], term: Term::Branch(g1, h + 1, bi as u32), term_pos: pos, count: -1.0 };
         // H2
         let (rem, g2, va, vb, lim) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::V128), f.vreg(Cls::V128), f.vreg(Cls::I));
         // lim = n - K: the vector loop runs while i <= lim (n - i >= K here, so no wrap)
         let h2i = vec![Inst::VConst(va, 0), Inst::VConst(vb, 0), Inst::IBin(IOp::Sub, U64_TY, rem, bvreg, iv), Inst::IBinI(IOp::Sub, U64_TY, lim, bvreg, kk), Inst::ICmpI(Cond::Ge, false, g2, rem, kk)];
-        let h2 = Block { insts: h2i.clone(), pos: vec![pos; h2i.len()], term: Term::Branch(g2, h + 2, bi as u32), term_pos: pos };
+        let h2 = Block { insts: h2i.clone(), pos: vec![pos; h2i.len()], term: Term::Branch(g2, h + 2, bi as u32), term_pos: pos, count: -1.0 };
         // V
         let (s1, p, g3) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
         let mut vi = vec![Inst::IBinI(IOp::Shl, U64_TY, s1, iv, sh), Inst::IBin(IOp::Add, U64_TY, p, base, s1)];
@@ -1144,7 +1170,7 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
         vi.push(Inst::IBinI(IOp::Add, it, iv, iv, kk));
         // the loop's own signedness (n - i >= K here: n - K does not overflow either way)
         vi.push(Inst::ICmp(Cond::Le, signed, g3, iv, lim));
-        let vb_ = Block { insts: vi.clone(), pos: vec![pos; vi.len()], term: Term::Branch(g3, h + 2, h + 3), term_pos: pos };
+        let vb_ = Block { insts: vi.clone(), pos: vec![pos; vi.len()], term: Term::Branch(g3, h + 2, h + 3), term_pos: pos, count: -1.0 };
         // VE
         let (vs, s, g4) = (f.vreg(Cls::V128), f.vreg(Cls::I), f.vreg(Cls::I));
         let mut ve = vec![Inst::VX(VX::Add(VW::D), vs, va, vb), Inst::VX(VX::AddAcross(VW::D), s, vs, vs)];
@@ -1157,7 +1183,7 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
         };
         ve.push(Inst::IBin(IOp::Add, U64_TY, acc, acc, s_fin));
         ve.push(Inst::ICmp(if lt { Cond::Lt } else { Cond::Ne }, signed, g4, iv, bvreg));
-        let veb = Block { insts: ve.clone(), pos: vec![pos; ve.len()], term: Term::Branch(g4, bi as u32, exit), term_pos: pos };
+        let veb = Block { insts: ve.clone(), pos: vec![pos; ve.len()], term: Term::Branch(g4, bi as u32, exit), term_pos: pos, count: -1.0 };
         for pb in 0..nb0 {
             if pb != bi {
                 f.blocks[pb].term.map_succs(|s2| if s2 as usize == bi { h } else { s2 });
@@ -1167,6 +1193,7 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
         f.blocks.push(h2);
         f.blocks.push(vb_);
         f.blocks.push(veb);
+        relax_backend::remark::loop_done();
         changed = true;
     }
     changed
@@ -1633,7 +1660,7 @@ fn apply_lane_group(f: &mut Func, head: u32, members: &[bool], preds: &[Vec<u32>
         }
         let nb = f.blocks.len() as u32;
         let tp = f.blocks[head as usize].term_pos;
-        f.blocks.push(Block { insts: enter.clone(), pos: vec![tp; enter.len()], term: Term::Jump(head), term_pos: tp });
+        f.blocks.push(Block { insts: enter.clone(), pos: vec![tp; enter.len()], term: Term::Jump(head), term_pos: tp, count: -1.0 });
         f.blocks[p as usize].term.map_succs(|s| if s == head { nb } else { s });
     }
     // leaving it: back out of the vector on every exit edge
@@ -1650,10 +1677,135 @@ fn apply_lane_group(f: &mut Func, head: u32, members: &[bool], preds: &[Vec<u32>
         for x in exits {
             let nb = f.blocks.len() as u32;
             let tp = f.blocks[u].term_pos;
-            f.blocks.push(Block { insts: leave.clone(), pos: vec![tp; leave.len()], term: Term::Jump(x), term_pos: tp });
+            f.blocks.push(Block { insts: leave.clone(), pos: vec![tp; leave.len()], term: Term::Jump(x), term_pos: tp, count: -1.0 });
             f.blocks[u].term.map_succs(|s| if s == x { nb } else { s });
         }
     }
+}
+
+/// Four consecutive f32 stores to the lanes of one 16 bytes, `[p + o + 4j] = v_j` (j = 0..3, no
+/// other instruction between them), become one vector store of the four values (splat v0, insert
+/// v1..v3): core::arch `_mm_setr_ps` and lane setters write a vector a lane at a time, and the
+/// 16-byte load that reads it back cannot forward from four 4-byte stores (a store-forwarding
+/// stall per vector; LLVM's DAG combiner merges such stores the same way). Returns whether
+/// anything changed.
+pub fn merge_lane_stores(options: &relax_session::Options, f: &mut Func) -> bool {
+    if !merge_stores_on(options) {
+        return false;
+    }
+    let mut changed = false;
+    // use / def counts: a lane value loaded right before the stores, used only there, is loaded
+    // next to its insert instead (x64 folds the load into vinsertps)
+    let nv = f.vregs.len();
+    let mut nuse = vec![0u32; nv];
+    let mut ndef = vec![0u32; nv];
+    for b in &f.blocks {
+        for i in &b.insts {
+            for_uses(i, |u| nuse[u.0 as usize] += 1);
+            for_defs(i, |d| ndef[d.0 as usize] += 1);
+        }
+        let mut tu = Vec::new();
+        relax_backend::regalloc::term_uses(&b.term, &mut tu);
+        tu.iter().for_each(|v| nuse[v.0 as usize] += 1);
+    }
+    for bi in 0..f.blocks.len() {
+        if f.blocks[bi].insts.iter().filter(|i| matches!(i, Inst::Store(Mem::F32, ..))).count() < 4 {
+            continue;
+        }
+        let old = std::mem::take(&mut f.blocks[bi].insts);
+        let old_pos = std::mem::take(&mut f.blocks[bi].pos);
+        let mut out = Vec::with_capacity(old.len());
+        let mut pos = Vec::with_capacity(old.len());
+        let mut k = 0;
+        while k < old.len() {
+            let lanes = (k + 4 <= old.len()).then(|| {
+                let Inst::Store(Mem::F32, base, o, _) = old[k] else { return None };
+                let mut vs = [VReg(0); 4];
+                for j in 0..4 {
+                    match old[k + j] {
+                        Inst::Store(Mem::F32, b2, o2, v) if b2 == base && o2 as i64 == o as i64 + 4 * j as i64 => vs[j] = v,
+                        _ => return None,
+                    }
+                }
+                Some((base, o, vs))
+            }).flatten();
+            let p = old_pos.get(k).copied().unwrap_or(0);
+            // only when it saves instructions (LLVM SLP's build-vector cost): 4 stores (+ the m
+            // single-use lane loads right before) against splat + inserts + 1 store, the m loads
+            // folded into their inserts and lanes equal to lane 0 needing none. Lanes computed in
+            // registers gain nothing and cost twice: the store waits for the whole insert chain,
+            // and scalar reloads of its lanes forward from a 128-bit store slowly (sdfer esdt1d
+            // pushes a CriticalMinimum whose four f32 the next iteration rereads as scalars:
+            // sdf_glyphs 1.27x slower on x64 at equal instruction counts)
+            let lanes = lanes.filter(|(base, _, vs)| {
+                let mut back = out.len();
+                while back > 0 && matches!(out[back - 1], Inst::Load(..)) {
+                    back -= 1;
+                }
+                let folded = (1..4)
+                    .filter(|&j| {
+                        vs[j] == vs[0]
+                            || (vs[1..j].iter().all(|v| *v != vs[j])
+                                && out[back..].iter().any(|i| matches!(i, Inst::Load(Mem::F32, d, ..) if *d == vs[j] && nuse[d.0 as usize] == 1 && ndef[d.0 as usize] == 1 && base != d)))
+                    })
+                    .count();
+                folded >= 2
+            });
+            if let Some((base, o, vs)) = lanes {
+                // the loads of v1..v3 among the instructions right before (only loads there):
+                // each goes next to its insert
+                let mut moved: [Option<(Inst, u64)>; 4] = [None, None, None, None];
+                let mut back = out.len();
+                while back > 0 && matches!(out[back - 1], Inst::Load(..)) {
+                    back -= 1;
+                }
+                let mut keep = Vec::new();
+                for (q, i) in out.drain(back..).enumerate() {
+                    let pq = pos[back + q];
+                    match i {
+                        Inst::Load(Mem::F32, d, ..) if vs[1..].contains(&d) && nuse[d.0 as usize] == 1 && ndef[d.0 as usize] == 1 && base != d => {
+                            let j = vs.iter().position(|v| *v == d).unwrap();
+                            moved[j] = Some((i, pq));
+                        }
+                        i => keep.push((i, pq)),
+                    }
+                }
+                pos.truncate(back);
+                for (i, pq) in keep {
+                    out.push(i);
+                    pos.push(pq);
+                }
+                let mut t = f.vreg(Cls::V128);
+                out.push(Inst::VSplat(t, vs[0]));
+                pos.push(p);
+                for j in 1..4 {
+                    if let Some((l, pq)) = moved[j].take() {
+                        out.push(l);
+                        pos.push(pq);
+                    }
+                    // the splat already holds lane 0's value in every lane (a zeroed vector)
+                    if vs[j] == vs[0] {
+                        continue;
+                    }
+                    let t2 = f.vreg(Cls::V128);
+                    out.push(Inst::VInsert(t2, t, j as u8, vs[j]));
+                    pos.push(p);
+                    t = t2;
+                }
+                out.push(Inst::VStore(base, o, t));
+                pos.push(p);
+                changed = true;
+                k += 4;
+                continue;
+            }
+            out.push(old[k].clone());
+            pos.push(p);
+            k += 1;
+        }
+        f.blocks[bi].insts = out;
+        f.blocks[bi].pos = pos;
+    }
+    changed
 }
 
 fn merge_stores_on(options: &relax_session::Options) -> bool {
@@ -1665,7 +1817,10 @@ fn merge_stores_on(options: &relax_session::Options) -> bool {
 /// memory access between them, become `[p + off] = x` as 8, 4 or 2 bytes (little-endian: byte j
 /// of the wide store is bits 8j.. of x). Frontends split `[u8; N]` copies and byte-wise writes
 /// this way (inflate's match copy: 8 byte stores of one u64 load, whose byte temporaries also
-/// spilled). Shifts and truncations left without uses go. Returns whether anything changed.
+/// spilled). Byte stores of constants (an unrolled `[0u8; 8]` fill) become 8-, 4- and 2-byte
+/// stores of the combined constant (LLVM: memset formation / MergeConsecutiveStores): a slot
+/// filled byte-wise and read as a word is then one cell for sroa. Shifts and truncations left
+/// without uses go. Returns whether anything changed.
 pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
     if !merge_stores_on(options) {
         return false;
@@ -1684,10 +1839,24 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
             _ => {}
         }
     }
+    // single-definition integer constants (stored bytes of a fill)
+    let mut kconst: Vec<Option<i64>> = vec![None; nv];
+    for b in &f.blocks {
+        for i in &b.insts {
+            if let Inst::Iconst(d, k) = *i {
+                if ndef[d.0 as usize] == 1 {
+                    kconst[d.0 as usize] = Some(k);
+                }
+            }
+        }
+    }
+    // merged constants: one definition each, at the top of the entry block
+    let mut consts: std::collections::HashMap<i64, VReg> = std::collections::HashMap::new();
+    let mut new_consts: Vec<(VReg, i64)> = Vec::new();
     let mut changed = false;
     for bi in 0..f.blocks.len() {
         let n = f.blocks[bi].insts.len();
-        if n < 2 || !f.blocks[bi].insts.iter().any(|i| matches!(i, Inst::Store(Mem::Int(1, _), ..))) {
+        if n < 2 || !f.blocks[bi].insts.iter().any(|i| matches!(i, Inst::Store(Mem::Int(1, _), ..)) || matches!(*i, Inst::Store(Mem::Int(2 | 4, _), _, _, v) if kconst[v.0 as usize].is_some())) {
             continue;
         }
         // single-def values defined in this block: index of their def
@@ -1719,9 +1888,54 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
         // groups: (store indices, base, start offset, x)
         let mut groups: Vec<(Vec<usize>, VReg, i32, VReg)> = Vec::new();
         let mut cur: Option<(Vec<usize>, VReg, i32, VReg)> = None;
+        // runs of constant byte stores: (store indices, base, start offset, bytes)
+        let mut cgroups: Vec<(Vec<usize>, VReg, i32, Vec<u8>)> = Vec::new();
+        let mut ccur: Option<(Vec<usize>, VReg, i32, Vec<u8>)> = None;
         for (k, i) in insts.iter().enumerate() {
             let touches = matches!(i, Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::VGather(..) | Inst::VTbl(..)) || crate::opt::is_mem_effect_pub(i);
+            // 2- and 4-byte stores of constants join a run of constant stores too (two zeroed
+            // u32 fields are one 8-byte store of 0: LLVM MergeConsecutiveStores)
+            if let Inst::Store(Mem::Int(w @ (2 | 4), _), p, off, v) = *i {
+                if let Some(c) = kconst[v.0 as usize].filter(|_| !relax_backend::stats::opt_off(options, "-cstores")) {
+                    if let Some(g) = cur.take() {
+                        groups.push(g);
+                    }
+                    let cont = matches!(&ccur, Some((ks, bp, st, _)) if *bp == p && off == st + ks.len() as i32);
+                    if !cont {
+                        if let Some(g) = ccur.take() {
+                            cgroups.push(g);
+                        }
+                        ccur = Some((Vec::new(), p, off, Vec::new()));
+                    }
+                    let g = ccur.as_mut().unwrap();
+                    for b in 0..w as usize {
+                        g.0.push(k);
+                        g.3.push((c as u64 >> (8 * b)) as u8);
+                    }
+                    continue;
+                }
+            }
             if let Inst::Store(Mem::Int(1, _), p, off, v) = *i {
+                if let Some(c) = kconst[v.0 as usize].filter(|_| !relax_backend::stats::opt_off(options, "-cstores")) {
+                    if let Some(g) = cur.take() {
+                        groups.push(g);
+                    }
+                    let cont = matches!(&ccur, Some((ks, bp, st, _)) if *bp == p && off == st + ks.len() as i32);
+                    if cont {
+                        let g = ccur.as_mut().unwrap();
+                        g.0.push(k);
+                        g.3.push(c as u8);
+                    } else {
+                        if let Some(g) = ccur.take() {
+                            cgroups.push(g);
+                        }
+                        ccur = Some((vec![k], p, off, vec![c as u8]));
+                    }
+                    continue;
+                }
+                if let Some(g) = ccur.take() {
+                    cgroups.push(g);
+                }
                 let (x, sh) = source(v);
                 let cont = match &cur {
                     Some((ks, bp, st, cx)) => *bp == p && *cx == x && off == st + ks.len() as i32 && sh == 8 * ks.len() as i64,
@@ -1744,6 +1958,9 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
                 if let Some(g) = cur.take() {
                     groups.push(g);
                 }
+                if let Some(g) = ccur.take() {
+                    cgroups.push(g);
+                }
             } else {
                 // the base or x redefined in between: the group ends
                 let mut redef = false;
@@ -1753,10 +1970,20 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
                 if redef {
                     groups.push(cur.take().unwrap());
                 }
+                let mut redef = false;
+                if let Some((_, bp, _, _)) = &ccur {
+                    for_defs(i, |d| redef |= d == *bp);
+                }
+                if redef {
+                    cgroups.push(ccur.take().unwrap());
+                }
             }
         }
         if let Some(g) = cur.take() {
             groups.push(g);
+        }
+        if let Some(g) = ccur.take() {
+            cgroups.push(g);
         }
         let mut remove: Vec<usize> = Vec::new();
         let mut replace: Vec<(usize, Inst)> = Vec::new();
@@ -1765,6 +1992,44 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
             let last = ks[w - 1];
             replace.push((last, Inst::Store(Mem::Int(w as u8, false), p, st, x)));
             remove.extend_from_slice(&ks[..w - 1]);
+        }
+        for (ks, p, st, bytes) in cgroups {
+            // ks: per byte, the store that writes it; a wide store covers whole stores only
+            let boundary = |q: usize| q == 0 || q == ks.len() || ks[q] != ks[q - 1];
+            let mut j = 0;
+            while ks.len() - j >= 2 {
+                let Some(w) = [8usize, 4, 2].into_iter().find(|&w| ks.len() - j >= w && boundary(j + w) && ks[j] != ks[j + w - 1]) else {
+                    // no wider store starts here: step over this store's bytes
+                    let mut e = j + 1;
+                    while !boundary(e) {
+                        e += 1;
+                    }
+                    j = e;
+                    continue;
+                };
+                let mut val = 0u64;
+                for (b, &x) in bytes[j..j + w].iter().enumerate() {
+                    val |= (x as u64) << (8 * b);
+                }
+                // sign-extended to the register: the store writes the low w bytes
+                let val = ((val << (64 - 8 * w)) as i64) >> (64 - 8 * w);
+                let kv = match consts.get(&val) {
+                    Some(v) => *v,
+                    None => {
+                        let v = f.vreg(Cls::I);
+                        nuse.push(0);
+                        ndef.push(1);
+                        new_consts.push((v, val));
+                        consts.insert(val, v);
+                        v
+                    }
+                };
+                replace.push((ks[j + w - 1], Inst::Store(Mem::Int(w as u8, false), p, st + j as i32, kv)));
+                let mut gone: Vec<usize> = ks[j..j + w - 1].iter().copied().filter(|&x| x != ks[j + w - 1]).collect();
+                gone.dedup();
+                remove.extend_from_slice(&gone);
+                j += w;
+            }
         }
         if replace.is_empty() {
             continue;
@@ -1811,6 +2076,17 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
             k2 += 1;
             !dead[k2 - 1]
         });
+    }
+    if !new_consts.is_empty() {
+        let b0 = &mut f.blocks[0];
+        let has_pos = b0.pos.len() == b0.insts.len();
+        let p0 = b0.pos.first().copied().unwrap_or(b0.term_pos);
+        for (k, (v, val)) in new_consts.into_iter().enumerate() {
+            b0.insts.insert(k, Inst::Iconst(v, val));
+            if has_pos {
+                b0.pos.insert(k, p0);
+            }
+        }
     }
     changed
 }
@@ -1861,8 +2137,8 @@ fn retarget(t: &mut Term, mut m: impl FnMut(u32) -> u32) {
 
 /// Full unrolling of loops with a small constant trip count (`for _ in 0..3`, deflate's hash-chain
 /// probes): an innermost loop with one latch whose counter `c` is set once outside the loop by a
-/// constant and stepped once in the latch by `c = c + s` (c read nowhere outside the loop, no
-/// calls in the loop) and whose latch decides "again" by `c' cmp k` with constants, runs T <= 4
+/// constant and stepped once in the latch by `c = c + s` (c read nowhere outside the loop; calls
+/// in the body are copied with it) and whose latch decides "again" by `c' cmp k` with constants, runs T <= 4
 /// times; it gets T copies in front of it, copy j reading c as the constant c0 + j*s (a fresh
 /// vreg each, so constant folding sees single definitions). Copy j's back edge enters copy j+1;
 /// the last copy's back edge enters the original loop with c restored (never taken: its compare
@@ -1898,10 +2174,16 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         let h = *h;
         let core: Vec<u32> = (0..m0.len() as u32).filter(|b| m0[*b as usize]).collect();
         if core.iter().any(|b| touched[*b as usize]) {
+            if tr {
+                eprintln!("full-unroll {}: loop b{}: overlaps a changed loop", f.name, h);
+            }
             continue;
         }
         // innermost: no other loop's header inside
         if loops.iter().any(|(h2, _)| *h2 != h && m0[*h2 as usize]) {
+            if tr {
+                eprintln!("full-unroll {}: loop b{} ({} blocks): not innermost (headers {:?})", f.name, h, core.len(), loops.iter().filter(|(h2, _)| *h2 != h && m0[*h2 as usize]).map(|x| x.0).collect::<Vec<_>>());
+            }
             continue;
         }
         // The loop's panic exits (a bounds check's failing edge: a small block that calls the panic
@@ -1927,35 +2209,75 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         let mut members = core.clone();
         members.extend(tails.iter().copied());
         members.sort_unstable();
-        let size: usize = members.iter().map(|b| f.blocks[*b as usize].insts.len() + 1).sum();
+        // The size that runs: a counted build's blocks the counts never saw run (the rare arms of
+        // a loop body, inlined) are copied but cost no time; the copies' code is O3 tier growth,
+        // capped by `all` (sandbox reconcile's loop over two borrowed shape fields: 330 insts with
+        // its never-taken create/destroy arms, about 100 that run; GAPB)
+        let all: usize = members.iter().map(|b| f.blocks[*b as usize].insts.len() + 1).sum();
+        let run_only = !relax_backend::stats::opt_off(options, "-unrollrun");
+        let size: usize = members.iter().filter(|b| !run_only || f.blocks[**b as usize].count != 0.0).map(|b| f.blocks[*b as usize].insts.len() + 1).sum();
         if tr {
-            eprintln!("full-unroll {}: loop b{} {} blocks {} insts", f.name, h, members.len(), size);
+            eprintln!("full-unroll {}: loop b{} {} blocks {} insts ({} run)", f.name, h, members.len(), all, size);
         }
         // (the function's budget below bounds the total growth)
-        if size > 160 {
+        if size > 160 || all > 640 {
+            if tr {
+                eprintln!("  too large");
+            }
             continue;
         }
-        if core.iter().any(|b| f.blocks[*b as usize].insts.iter().any(|i| matches!(i, Inst::Call(..))) || matches!(f.blocks[*b as usize].term, Term::Invoke(..) | Term::Resume)) {
+        // Calls in the body are copied with it, as LLVM's full unroll does (a call is part of the
+        // body's cost, not a bar): reconcile's `for (shape, applied, wanted, solid) in [(&mut
+        // entry.a, ..), (..)]` holds the shape calls of the rare changed case, and only unrolled
+        // do the array's borrows become constant-offset stores that forward, so `entry` stops
+        // escaping and its copies join (GAPB). An invoke's unwind edge leaves for the shared
+        // cleanup: each copy keeps it, it is no early exit.
+        // MAKEPAD_RUN_OPT=-unrollcalls: loops with calls stay rolled
+        if relax_backend::stats::opt_off(options, "-unrollcalls") && core.iter().any(|b| f.blocks[*b as usize].insts.iter().any(|i| matches!(i, Inst::Call(..))) || matches!(f.blocks[*b as usize].term, Term::Invoke(..) | Term::Resume)) {
             continue;
         }
         let latches: Vec<u32> = members.iter().copied().filter(|b| f.blocks[*b as usize].term.succs().any(|s| s == h)).collect();
         // only loops that leave from the header or the latch: a body with early exits (a search
         // loop returning from inside) grows by every copy of its exit paths for little gain
         // (deflate's probe loop measured slower unrolled on x64)
-        let early_exit = members.iter().any(|b| *b != h && !latches.contains(b) && f.blocks[*b as usize].term.succs().any(|s| !m.get(s as usize).copied().unwrap_or(false)));
+        // An edge to the block the header leaves for is no early exit: it is the loop's own end,
+        // tested in two steps (a `for` over an array: the header's `start == end`, then the
+        // loaded Option's tag in the next block, which only the copies' constant loads fold).
+        let h_exit: Vec<u32> = f.blocks[h as usize].term.succs().filter(|s| !m.get(*s as usize).copied().unwrap_or(false)).collect();
+        let split_ok = !relax_backend::stats::opt_off(options, "-unrollmulti");
+        let early_exit = members.iter().any(|b| *b != h && !latches.contains(b) && {
+            let t = &f.blocks[*b as usize].term;
+            let unwind = if let Term::Invoke(_, u) = *t { Some(u) } else { None };
+            t.succs().any(|s| Some(s) != unwind && !(split_ok && h_exit.contains(&s)) && !m.get(s as usize).copied().unwrap_or(false))
+        });
+        let split_used = !early_exit && members.iter().any(|b| *b != h && !latches.contains(b) && f.blocks[*b as usize].term.succs().any(|s| h_exit.contains(&s)));
+        // Early exits are worth their copies where the counter indexes a local array that the
+        // copies turn into plain values: camera_path_limit's `for a in 0..3` over `[o.x, o.y,
+        // o.z]`-style arrays with a `continue 'entities` from two tests stayed a loop of indexed
+        // stack loads and six stores per entity; unrolled, every access has a constant offset and
+        // the slots go to registers (rustc: no arrays left, the axis tests hoisted out of the
+        // entity loop). Only short trips (checked with the trip count below).
+        let early_ok = early_exit && !relax_backend::stats::opt_off(options, "-unrollearly");
+        let early_exit = early_exit && !early_ok;
         if early_exit {
             if tr {
-                eprintln!("  early exits from the body");
+                eprintln!("  early exits from the body (header b{}, latches {:?})", h, latches);
+                for &b in &members {
+                    eprintln!("    b{}: {:?} -> {:?}", b, f.blocks[b as usize].insts, f.blocks[b as usize].term);
+                }
             }
             continue;
         }
-        if latches.len() != 1 {
-            if tr {
-                eprintln!("  {} latches", latches.len());
-            }
+        // Several latches (a `continue` in the body) are fine when the header decides and the
+        // counter's step dominates every latch: each back edge enters the next copy.
+        if latches.is_empty() || (latches.len() > 1 && relax_backend::stats::opt_off(options, "-unrollmulti")) {
             continue;
         }
         let l = latches[0];
+        let multi = latches.len() > 1;
+        // (the entries of the pass start: a copy of an earlier loop that leaves into this one keeps
+        // entering the original. Taking the current entries instead made the race's draw +11..30%
+        // instructions: the newly live copies of consecutive loops; GAPB2 racebisect)
         let outside: Vec<u32> = preds[h as usize].iter().copied().filter(|p| !m[*p as usize]).collect();
         if outside.is_empty() {
             continue;
@@ -1965,7 +2287,7 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         let lb = &f.blocks[l as usize];
         let mut found = None;
         // (block, k, type, counter, step, the step's value made at k is a constant in each copy)
-        for &sb in std::iter::once(&l).chain(members.iter().filter(|b| **b != l)) {
+        for &sb in std::iter::once(&l).filter(|_| !multi).chain(members.iter().filter(|b| multi || **b != l)) {
             if found.is_some() {
                 break;
             }
@@ -1995,6 +2317,12 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         };
         // a step outside the latch: it must dominate the latch, and blocks it dominates read the
         // stepped counter in the copies
+        if multi && latches.contains(&sb) {
+            if tr {
+                eprintln!("  {} latches and the step in latch b{}", latches.len(), sb);
+            }
+            continue;
+        }
         let idom = if sb != l { relax_backend::dom::idoms(f) } else { Vec::new() };
         let dominated = |b: u32| -> bool {
             if sb == l {
@@ -2013,14 +2341,44 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
             }
             false
         };
-        if sb != l && (sb == h || !dominated(l)) {
+        if sb != l && (sb == h || !latches.iter().all(|&x| dominated(x))) {
             if tr {
-                eprintln!("  step in b{} does not dominate the latch b{}", sb, l);
+                eprintln!("  step in b{} does not dominate the latches {:?}", sb, latches);
             }
             continue;
         }
         if !f.vregs.get(c.0 as usize).map_or(false, |x| *x == Cls::I) {
             continue;
+        }
+        // The two generalisations (several latches, an exit split over two blocks) pay only where
+        // the copies remove an escape: reconcile's `[(&mut entry.a, ..), (..)]` array read by its
+        // IntoIter (`data + start * stride`) becomes constant-offset loads that forward the
+        // borrows, and `entry` stops escaping (LLVM's full-unroll analysis grants the same bonus
+        // for allocas SROA can then split). box3d's scatter_bodies (`for lane in 0..4` with a
+        // `continue`, reading `simd_body.v.x.get(lane)` from a slot of floats, inlined twice in
+        // solve_contacts_convex) only saves an index add per access: unrolled, it cost +277
+        // static insts and +1.8..11% instructions on box3d_physics (GAPB2). The copies of such
+        // loops also stay within a tighter budget.
+        if early_ok && !counter_indexes_local_values(f, &members, c, tr) {
+            if tr {
+                eprintln!("  early exits from the body and no local array indexed by the counter (header b{})", h);
+            }
+            continue;
+        }
+        let general = multi || split_used;
+        // a loop whose latches leave too (`continue 'outer` from the test that ends an iteration):
+        // its copies pay where the counter indexes a local array of plain values (camera_path_limit's
+        // slab test over `[f32; 3]`s), as for early exits; short trips only (checked below)
+        let mut local_gain = early_ok;
+        if general {
+            let gain = counter_indexes_fixed_memory(f, &members, c);
+            local_gain = local_gain || (!gain && !relax_backend::stats::opt_off(options, "-unrollearly") && counter_indexes_local_values(f, &members, c, tr));
+            if tr {
+                eprintln!("  several latches {} / split exit {}: fixed-address gain {} local-values gain {}", multi, split_used, gain, local_gain);
+            }
+            if !gain && !local_gain {
+                continue;
+            }
         }
         // the decision: in the latch after the step (`Branch(c' cmp k, h, exit)`: iteration j
         // runs again iff cmp(c0 + (j+1)s)), or in the header before anything redefines c
@@ -2043,8 +2401,8 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
             }
             cmp
         };
-        let latch_cmp = if sb == l && matches!(lb.term, Term::Branch(_, a, b) if a == h || b == h) { find_cmp(lb, ak + 1) } else { None };
-        let header_cmp = if latch_cmp.is_none() && h != l {
+        let latch_cmp = if !multi && sb == l && matches!(lb.term, Term::Branch(_, a, b) if a == h || b == h) { find_cmp(lb, ak + 1) } else { None };
+        let header_cmp = if latch_cmp.is_none() && !latches.contains(&h) {
             let hb = &f.blocks[h as usize];
             if hb.insts.iter().any(|i| { let mut r = false; for_defs(i, |d| r |= d == c); r }) { None } else { find_cmp(hb, 0) }
         } else {
@@ -2129,10 +2487,22 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
                 continue 'next;
             }
         }
-        if size * t > budget {
+        if local_gain && t > 4 {
+            if tr {
+                eprintln!("  early exits: {} copies, over 4", t);
+            }
+            continue;
+        }
+        if size * t > budget || all * t > 2400 || ((general || early_ok) && size * t > 400) {
+            if tr {
+                eprintln!("  {} copies of {} insts over the budget {}", t, size, budget);
+            }
             continue;
         }
         budget -= size * t;
+        if tr {
+            eprintln!("  unrolled {}: {} copies", f.name, t);
+        }
         // iteration-local values: single-definition vregs defined in the loop whose every use is
         // in the loop, in a block the definition's block dominates (after it, in its own block).
         // Each copy gets its own: as clones of one definition they would be defined T+1 times,
@@ -2154,7 +2524,7 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
             }
             for (q, &b) in idx.iter().enumerate() {
                 let mut blk = f.blocks[b as usize].clone();
-                let latch = b == l;
+                let latch = latches.contains(&b);
                 // the block holding the step: after it, the copy's next counter; blocks the step
                 // dominates: the next counter throughout
                 let step_blk = b == sb;
@@ -2192,10 +2562,12 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
                     }
                 });
                 if latch && last {
-                    // the original loop continues from the counter this copy reached
+                    // the original loop continues from the counter this copy reached (in front of
+                    // an invoke's call, which ends its block; nothing in the copy reads c)
                     let p = blk.term_pos;
-                    blk.insts.push(Inst::Mov(c, rj2));
-                    blk.pos.push(p);
+                    let at = blk.insts.len() - usize::from(matches!(blk.term, Term::Invoke(..)) && !blk.insts.is_empty());
+                    blk.insts.insert(at, Inst::Mov(c, rj2));
+                    if blk.pos.len() >= at { blk.pos.insert(at, p); }
                 }
                 if b == h {
                     let p = blk.pos.first().copied().unwrap_or(blk.term_pos);
@@ -2218,6 +2590,227 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         changed = true;
     }
     changed
+}
+
+/// Whether the loop indexes, with its counter `c`, a stack slot that every other access reaches at
+/// a constant offset: a local array (`let d = [dir.x, dir.y, dir.z]; .. d[a] ..`) whose address
+/// goes nowhere but load and store bases (directly, plus constants) and the counter-indexed
+/// addresses of the loop, which in turn are only load and store bases. In the copies the index is
+/// a constant, every access has a fixed offset, and the slot's values forward to registers.
+fn counter_indexes_local_values(f: &Func, members: &[u32], c: VReg, tr: bool) -> bool {
+    const NONE: u32 = u32::MAX;
+    let nv = f.vregs.len();
+    // definitions counted now (the pass's counts predate copies made earlier in this pass)
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            for_defs(i, |d| ndef[d.0 as usize] += 1);
+        }
+    }
+    let inloop = |b: usize| members.contains(&(b as u32));
+    // values computed from the counter inside the loop (not through memory)
+    let mut ctr = vec![false; nv];
+    ctr[c.0 as usize] = true;
+    loop {
+        let mut grew = false;
+        for &b in members {
+            for i in &f.blocks[b as usize].insts {
+                let d = match *i {
+                    Inst::Mov(d, a) | Inst::IBinI(_, _, d, a, _) | Inst::Conv(Conv::IntToInt(_), d, a) if ctr[a.0 as usize] => d,
+                    _ => continue,
+                };
+                if !ctr[d.0 as usize] && d != c {
+                    ctr[d.0 as usize] = true;
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    // the slot a single-definition vreg points into at a constant offset (SlotAddr, moves, + k)
+    let mut root = vec![NONE; nv];
+    loop {
+        let mut grew = false;
+        for b in &f.blocks {
+            for i in &b.insts {
+                let (d, r) = match *i {
+                    Inst::SlotAddr(d, sl) => (d, sl),
+                    Inst::Mov(d, a) | Inst::IBinI(IOp::Add | IOp::Sub, _, d, a, _) if root[a.0 as usize] != NONE => (d, root[a.0 as usize]),
+                    _ => continue,
+                };
+                if ndef[d.0 as usize] == 1 && root[d.0 as usize] == NONE {
+                    root[d.0 as usize] = r;
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    // addresses `slot + counter value` made in the loop (single definitions)
+    let mut indexed = vec![NONE; nv];
+    for &b in members {
+        for i in &f.blocks[b as usize].insts {
+            if let Inst::IBin(IOp::Add, _, d, a, x) = *i {
+                let r = if root[a.0 as usize] != NONE && ctr[x.0 as usize] {
+                    root[a.0 as usize]
+                } else if root[x.0 as usize] != NONE && ctr[a.0 as usize] {
+                    root[x.0 as usize]
+                } else {
+                    continue;
+                };
+                if ndef[d.0 as usize] == 1 {
+                    indexed[d.0 as usize] = r;
+                }
+            }
+        }
+    }
+    if indexed.iter().all(|r| *r == NONE) {
+        if tr {
+            eprintln!("  local-values: counter {:?}: no slot + counter address", c);
+        }
+        return false;
+    }
+    // each slot's address may only be a load / store base, the source of a fixed-offset address,
+    // or (in the loop) the base of an indexed address that is itself only a load / store base
+    let ns = f.slots.len();
+    let mut bad = vec![false; ns];
+    let mut uses = Vec::new();
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for i in &b.insts {
+            let mut check = |u: VReg, ok: bool| {
+                let r = if root[u.0 as usize] != NONE { root[u.0 as usize] } else { indexed[u.0 as usize] };
+                if r != NONE && !ok {
+                    if tr && !bad[r as usize] {
+                        eprintln!("  local-values: slot {} escapes at b{}: {:?}", r, bi, i);
+                    }
+                    bad[r as usize] = true;
+                }
+            };
+            match *i {
+                Inst::Load(_, _, base, _) => check(base, true),
+                Inst::Store(_, base, _, src) => {
+                    check(base, true);
+                    check(src, false);
+                }
+                Inst::Mov(_, a) | Inst::IBinI(IOp::Add | IOp::Sub, _, _, a, _) => check(a, indexed[a.0 as usize] == NONE),
+                Inst::IBin(IOp::Add, _, d, a, x) if indexed[d.0 as usize] != NONE && inloop(bi) => {
+                    check(a, true);
+                    check(x, true);
+                }
+                _ => for_uses(i, |u| check(u, false)),
+            }
+        }
+        uses.clear();
+        relax_backend::regalloc::term_uses(&b.term, &mut uses);
+        for u in &uses {
+            let r = if root[u.0 as usize] != NONE { root[u.0 as usize] } else { indexed[u.0 as usize] };
+            if r != NONE {
+                bad[r as usize] = true;
+            }
+        }
+    }
+    indexed.iter().any(|r| *r != NONE && !bad[*r as usize])
+}
+
+/// Whether the loop reads, at `slot + (value of the counter c)`, a stack slot that holds addresses of
+/// other slots (stored there, or copied in from such a slot): an array of borrows (`[(&mut e.a, ..),
+/// (..)]`) walked by its IntoIter. The copies make those reads fixed-offset loads that forward the
+/// stored addresses, so the borrowed slots stop escaping and their copies can join (SROA's bonus in
+/// LLVM's full-unroll analysis). A counter indexing memory behind a pointer, or a slot of plain
+/// values (box3d scatter_bodies' `simd_body.v.x.get(lane)`), gains only an index add per access.
+fn counter_indexes_fixed_memory(f: &Func, members: &[u32], c: VReg) -> bool {
+    const NONE: u32 = u32::MAX;
+    let nv = f.vregs.len();
+    // definitions counted now: the pass's own counts predate the copies of loops it already
+    // unrolled in this function (their fresh vregs: an out-of-range index that panicked the O3
+    // build and dropped it -- piano_render's render_chunk stayed below O3, +7.6%)
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            for_defs(i, |d| ndef[d.0 as usize] += 1);
+        }
+    }
+    // the slot a single-definition vreg points into (its address plus constant offsets)
+    let mut root = vec![NONE; nv];
+    loop {
+        let mut grew = false;
+        for b in &f.blocks {
+            for i in &b.insts {
+                let (d, r) = match *i {
+                    Inst::SlotAddr(d, s) => (d, s),
+                    Inst::Mov(d, a) | Inst::IBinI(IOp::Add | IOp::Sub, _, d, a, _) if root[a.0 as usize] != NONE => (d, root[a.0 as usize]),
+                    _ => continue,
+                };
+                if ndef[d.0 as usize] == 1 && root[d.0 as usize] == NONE {
+                    root[d.0 as usize] = r;
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    // slots holding slot addresses
+    let mut holds = vec![false; f.slots.len()];
+    loop {
+        let mut grew = false;
+        for b in &f.blocks {
+            for i in &b.insts {
+                let (to, yes) = match *i {
+                    Inst::Store(_, base, _, src) => (root[base.0 as usize], root[src.0 as usize] != NONE),
+                    Inst::Copy(dst, src, _) => (root[dst.0 as usize], root[src.0 as usize] != NONE && holds[root[src.0 as usize] as usize]),
+                    _ => continue,
+                };
+                if yes && to != NONE && !holds[to as usize] {
+                    holds[to as usize] = true;
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    // values computed from the counter inside the loop (not through memory)
+    let mut ctr = vec![false; nv];
+    ctr[c.0 as usize] = true;
+    loop {
+        let mut grew = false;
+        for &b in members {
+            for i in &f.blocks[b as usize].insts {
+                let d = match *i {
+                    Inst::Mov(d, a) | Inst::IBinI(_, _, d, a, _) | Inst::Conv(Conv::IntToInt(_), d, a) | Inst::INeg(_, d, a) if ctr[a.0 as usize] => d,
+                    Inst::IBin(_, _, d, a, x) if ctr[a.0 as usize] || ctr[x.0 as usize] => d,
+                    _ => continue,
+                };
+                if !ctr[d.0 as usize] {
+                    ctr[d.0 as usize] = true;
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let held = |v: VReg| root[v.0 as usize] != NONE && holds[root[v.0 as usize] as usize];
+    members.iter().any(|&b| {
+        f.blocks[b as usize].insts.iter().any(|i| match *i {
+            Inst::IBin(IOp::Add, _, _, a, x) => (held(a) && ctr[x.0 as usize]) || (ctr[a.0 as usize] && held(x)),
+            _ => false,
+        })
+    })
 }
 
 /// `c = conv(conv(c) + s)` ending in `Mov(c, x)` at `k` of block `b`: the counter step of a
@@ -2325,4 +2918,230 @@ pub fn clear_unreachable(f: &mut Func) -> bool {
         }
     }
     any
+}
+
+static MEMSET: std::sync::OnceLock<Sym> = std::sync::OnceLock::new();
+
+/// The host memset (the runtime registers it once): zero_fill_loops calls it.
+pub fn set_memset(memset: Sym) {
+    let _ = MEMSET.set(memset);
+}
+
+/// Counted loops that only store zeros over each element of an array become one memset (LLVM
+/// LoopIdiomRecognize): a header `c = i < N; branch c -> B, X` (N a constant) and one body block
+/// `B: off = i * S; p = a + off; stores of zero at p + k...; i += 1; jump H` whose stores cover
+/// bytes 0..S of every element (a loop-invariant base `a`, `i` set to 0 outside the loop and read
+/// nowhere else, nothing else in the body but constants it reads) is `memset(a, 0, N * S)` in the
+/// header, which then jumps to X. `[T::default(); 64]` of an all-zero T (box3d's mover plane
+/// buffer, 1792 bytes per collide_mover call) ran 64 iterations of 7 instructions. Fills under 128
+/// bytes stay loops (unrolling and store merging make them a few wide stores). MAKEPAD_RUN_OPT=-zerofill
+/// off. Returns whether anything changed; the body is left unreachable (clear_unreachable).
+pub fn zero_fill_loops(options: &relax_session::Options, f: &mut Func) -> bool {
+    let Some(ms) = MEMSET.get().copied() else { return false };
+    if relax_backend::stats::opt_off(options, "-zerofill") || f.blocks.len() < 3 {
+        return false;
+    }
+    // a cheap screen: a zero vector / float / int constant stored in some loop body
+    if !f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::Store(..) | Inst::VStore(..))) && matches!(b.term, Term::Jump(_))) {
+        return false;
+    }
+    // MAKEPAD_RUN_ZEROFILL_TRACE=<fn name part>: the loops looked at, appended to
+    // $MAKEPAD_RUN_DUMP_DIR/zerofill.txt (stderr of compile threads is not kept)
+    let tr = std::env::var("MAKEPAD_RUN_ZEROFILL_TRACE").map_or(false, |w| f.name.contains(w.as_str()));
+    let mut log = String::new();
+    let reach = relax_backend::regalloc::reachable(f);
+    let preds = relax_backend::regalloc::preds_of(f, &reach);
+    let loops = relax_backend::regalloc::natural_loops(f, &reach, &preds, false);
+    if loops.is_empty() {
+        return false;
+    }
+    let nv = f.vregs.len();
+    let mut ndef = vec![0u32; nv];
+    let mut nuse = vec![0u32; nv];
+    // the block of each definition (the last one seen)
+    let mut def_blk = vec![u32::MAX; nv];
+    let mut kconst: Vec<Option<i64>> = vec![None; nv];
+    let mut zero = vec![false; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for i in &b.insts {
+            for_defs(i, |d| {
+                ndef[d.0 as usize] += 1;
+                def_blk[d.0 as usize] = bi as u32;
+            });
+            for_uses(i, |u| nuse[u.0 as usize] += 1);
+            match *i {
+                Inst::Iconst(d, k) => {
+                    kconst[d.0 as usize] = Some(k);
+                    zero[d.0 as usize] = k == 0;
+                }
+                Inst::Fconst(d, 0, _) | Inst::VConst(d, 0) => zero[d.0 as usize] = true,
+                _ => {}
+            }
+        }
+        match &b.term {
+            Term::Branch(c, _, _) | Term::Switch(c, _) => nuse[c.0 as usize] += 1,
+            Term::Ret(vs) => vs.iter().for_each(|v| nuse[v.0 as usize] += 1),
+            _ => {}
+        }
+    }
+    let single_k = |v: VReg| if ndef[v.0 as usize] == 1 { kconst[v.0 as usize] } else { None };
+    let mut changed = false;
+    'next: for (h, m) in &loops {
+        let h = *h as usize;
+        let members: Vec<usize> = (0..m.len()).filter(|b| m[*b]).collect();
+        if tr {
+            log.push_str(&format!("zero-fill {}: loop b{} blocks {:?}\n", f.name, h, members));
+            for &bb in &members {
+                log.push_str(&format!("  b{}: {:?} -> {:?}\n", bb, f.blocks[bb].insts, f.blocks[bb].term));
+            }
+        }
+        if members.len() != 2 {
+            continue;
+        }
+        let body = if members[0] == h { members[1] } else { members[0] };
+        let Term::Branch(c, t, x) = f.blocks[h].term else { continue };
+        if t as usize != body || m[x as usize] || nuse[c.0 as usize] != 1 || !matches!(f.blocks[body].term, Term::Jump(j) if j as usize == h) {
+            continue;
+        }
+        let (iv, n) = match f.blocks[h].insts.as_slice() {
+            [Inst::ICmp(Cond::Lt, false, d, i, n)] if *d == c => match single_k(*n) {
+                Some(n) => (*i, n),
+                None => continue,
+            },
+            [Inst::ICmpI(Cond::Lt, false, d, i, n)] if *d == c => (*i, *n),
+            _ => continue,
+        };
+        // the counter: 0 outside the loop, + 1 in the body, read only by the loop
+        if ndef[iv.0 as usize] != 2 || n <= 0 {
+            continue;
+        }
+        let outside: Vec<u32> = preds[h].iter().copied().filter(|p| !m[*p as usize]).collect();
+        let [pre] = outside.as_slice() else { continue };
+        if !f.blocks[*pre as usize].insts.iter().any(|i| matches!(*i, Inst::Iconst(d, 0) if d == iv)) {
+            continue;
+        }
+        let mut iv_uses = 0u32;
+        let mut step = false;
+        let (mut off, mut addr, mut base, mut stride): (Option<VReg>, Option<VReg>, Option<VReg>, Option<i64>) = (None, None, None, None);
+        // a slot's address made in the body (Alloc remat leaves it there): (vreg, slot)
+        let mut slot_base: Option<(VReg, u32)> = None;
+        let mut spans: Vec<(i64, i64)> = Vec::new();
+        let in_body = |v: VReg| def_blk[v.0 as usize] == body as u32 && ndef[v.0 as usize] == 1;
+        for i in &f.blocks[body].insts {
+            match *i {
+                Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::VConst(d, _) if ndef[d.0 as usize] == 1 => {}
+                Inst::SlotAddr(d, sl) if slot_base.is_none() && in_body(d) && nuse[d.0 as usize] == 1 => slot_base = Some((d, sl)),
+                Inst::IBinI(IOp::Add, it, d, a, 1) if d == iv && a == iv && it.bits == 64 && !step => {
+                    step = true;
+                    iv_uses += 1;
+                }
+                Inst::IBin(IOp::Add, it, d, a, one) if d == iv && a == iv && it.bits == 64 && single_k(one) == Some(1) && !step => {
+                    step = true;
+                    iv_uses += 1;
+                }
+                Inst::IBin(IOp::Mul, it, d, a, s) if a == iv && off.is_none() && it.bits == 64 && in_body(d) => match single_k(s) {
+                    Some(s) => {
+                        off = Some(d);
+                        stride = Some(s);
+                        iv_uses += 1;
+                    }
+                    None => continue 'next,
+                },
+                Inst::IBinI(IOp::Mul, it, d, a, s) if a == iv && off.is_none() && it.bits == 64 && in_body(d) => {
+                    off = Some(d);
+                    stride = Some(s);
+                    iv_uses += 1;
+                }
+                Inst::IBin(IOp::Add, it, d, a, b) if addr.is_none() && it.bits == 64 && in_body(d) && off.is_some() && (b == off.unwrap() || a == off.unwrap()) => {
+                    let a = if b == off.unwrap() { a } else { b };
+                    // the base: defined outside the loop, or the body's slot address
+                    if a == iv || (def_blk[a.0 as usize] != u32::MAX && m[def_blk[a.0 as usize] as usize] && slot_base.map(|s| s.0) != Some(a)) {
+                        continue 'next;
+                    }
+                    addr = Some(d);
+                    base = Some(a);
+                }
+                Inst::Store(mm, p, k, z) if Some(p) == addr && zero[z.0 as usize] && ndef[z.0 as usize] == 1 => {
+                    let size = match mm {
+                        Mem::Int(b, _) => b as i64,
+                        Mem::F32 => 4,
+                        Mem::F64 => 8,
+                    };
+                    spans.push((k as i64, k as i64 + size));
+                }
+                Inst::VStore(p, k, z) if Some(p) == addr && zero[z.0 as usize] && ndef[z.0 as usize] == 1 => spans.push((k as i64, k as i64 + 16)),
+                _ => continue 'next,
+            }
+        }
+        let (Some(off), Some(addr), Some(base), Some(stride)) = (off, addr, base, stride) else { continue };
+        if !step || stride <= 0 || nuse[iv.0 as usize] != iv_uses + 1 {
+            continue;
+        }
+        // the body's temporaries are read only in the body: off by addr, addr by the stores
+        if nuse[off.0 as usize] != 1 || nuse[addr.0 as usize] as usize != spans.len() {
+            continue;
+        }
+        let consts_local = f.blocks[body].insts.iter().all(|i| match *i {
+            Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::VConst(d, _) => {
+                let mut inner = 0u32;
+                for j in &f.blocks[body].insts {
+                    for_uses(j, |u| inner += (u == d) as u32);
+                }
+                inner == nuse[d.0 as usize]
+            }
+            _ => true,
+        });
+        if !consts_local {
+            continue;
+        }
+        // the stores cover each element's bytes 0..stride exactly
+        spans.sort();
+        let mut covered = 0i64;
+        for (lo, hi) in &spans {
+            if *lo > covered || *hi > stride {
+                continue 'next;
+            }
+            covered = covered.max(*hi);
+        }
+        if covered != stride {
+            continue;
+        }
+        let Some(len) = n.checked_mul(stride) else { continue };
+        if len < 128 {
+            continue;
+        }
+        let tp = f.blocks[h].term_pos;
+        let zr = f.vreg(Cls::I);
+        let ln = f.vreg(Cls::I);
+        let mut ins = Vec::new();
+        let base = match slot_base {
+            Some((sv, sl)) if sv == base => {
+                let p = f.vreg(Cls::I);
+                ins.push(Inst::SlotAddr(p, sl));
+                p
+            }
+            _ => base,
+        };
+        ins.extend([Inst::Iconst(zr, 0), Inst::Iconst(ln, len), Inst::Call(Callee::Host(ms), vec![base, zr, ln], Vec::new())]);
+        let hb = &mut f.blocks[h];
+        hb.pos = vec![tp; ins.len()];
+        hb.insts = ins;
+        hb.term = Term::Jump(x);
+        changed = true;
+        if tr {
+            log.push_str(&format!("  -> memset {} bytes\n", len));
+        }
+    }
+    if tr {
+        if let Ok(d) = std::env::var("MAKEPAD_RUN_DUMP_DIR") {
+            use std::io::Write;
+            if let Ok(mut o) = std::fs::OpenOptions::new().create(true).append(true).open(format!("{}/zerofill.txt", d)) {
+                let _ = o.write_all(format!("zero-fill {}: {} loops\n{}", f.name, loops.len(), log).as_bytes());
+            }
+        }
+    }
+    changed
 }

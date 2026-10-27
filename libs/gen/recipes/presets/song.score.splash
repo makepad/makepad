@@ -1,0 +1,15 @@
+use mod.flow.*
+
+/** The style as comma-separated tags: genre, mood, instruments, vocal. */
+let prompt = Input{ type: @text default: "city pop, upbeat, groovy bass, electric guitar, synth, female vocal, neon night" }
+/** The words, section-tagged: [Verse], [Chorus], [Bridge]; the song's length follows them. */
+let lyrics = Input{ type: @text default: "" }
+let song = Song{ prompt: prompt.text() lyrics: lyrics.text() }
+let published = Publish{ value: song.out(@audio) tags: ["music", "song"] }
+let sheet = Publish{ value: song.out(@sheet) tags: ["score", "abc"] }
+
+Flow{
+    label: "Song with score"
+    brief: "A full sung song (YuE2, up to 6 minutes) and its editable melody-and-chords score; set `score` to an edited score to sing it again."
+    prompt, lyrics, song, published, sheet
+}

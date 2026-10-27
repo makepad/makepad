@@ -1,7 +1,7 @@
 //! std::path: Path (unsized newtype over OsStr, coord.md F-OS3) and PathBuf. The component
 //! parser is real std's double-ended state machine, written once for both platforms over the
 //! same hooks as real std (`is_sep_byte`, `is_verbatim_sep`, `parse_prefix`, `HAS_PREFIXES`):
-//! on unix there are no prefixes and only '/' separates; on Windows both '/' and '\' separate
+//! on unix and the web targets (rustc's sys/path/unix.rs serves them) there are no prefixes and only '/' separates; on Windows both '/' and '\' separate
 //! (only '\' after a verbatim `\\?\` prefix) and `C:`, `\\server\share`, `\\?\..`, `\\.\..`
 //! prefixes are parsed (real std path.rs + sys/path/windows_prefix.rs, MIT/Apache-2.0).
 
@@ -20,16 +20,16 @@ use crate::ffi::{OsStr, OsString};
 use crate::fs;
 use crate::io;
 
-#[cfg(unix)]
+#[cfg(not(windows))]
 pub const MAIN_SEPARATOR: char = '/';
-#[cfg(unix)]
+#[cfg(not(windows))]
 pub const MAIN_SEPARATOR_STR: &str = "/";
 #[cfg(windows)]
 pub const MAIN_SEPARATOR: char = '\\';
 #[cfg(windows)]
 pub const MAIN_SEPARATOR_STR: &str = "\\";
 
-#[cfg(unix)]
+#[cfg(not(windows))]
 const HAS_PREFIXES: bool = false;
 #[cfg(windows)]
 const HAS_PREFIXES: bool = true;
@@ -38,18 +38,18 @@ pub const fn is_separator(c: char) -> bool {
     c.is_ascii() && is_sep_byte(c as u8)
 }
 
-#[cfg(unix)]
+#[cfg(not(windows))]
 const fn is_sep_byte(b: u8) -> bool {
     b == b'/'
 }
 
-#[cfg(unix)]
+#[cfg(not(windows))]
 const fn is_verbatim_sep(b: u8) -> bool {
     b == b'/'
 }
 
 /// unix paths have no prefix.
-#[cfg(unix)]
+#[cfg(not(windows))]
 fn parse_prefix(_path: &OsStr) -> Option<Prefix<'_>> {
     None
 }
@@ -738,9 +738,11 @@ impl Path {
         PathBuf { inner: self.inner.to_os_string() }
     }
     /// unix: rooted. Windows: rooted and prefixed (`C:\x`, `\\server\share`, `\\?\x`), so
-    /// `\x` (root, no prefix) and `C:x` (prefix, no root) are relative.
+    /// `\x` (root, no prefix) and `C:x` (prefix, no root) are relative. The web targets are
+    /// neither unix nor wasi: rustc's sys/path/unix.rs asks for a prefix there too, which a unix-style
+    /// path never has, so no path is absolute.
     pub fn is_absolute(&self) -> bool {
-        if HAS_PREFIXES {
+        if HAS_PREFIXES || cfg!(target_family = "wasm") {
             self.has_root() && self.prefix().is_some()
         } else {
             self.has_root()
@@ -1253,7 +1255,7 @@ impl<'a> fmt::Debug for Display<'a> {
 
 /// `std::path::absolute`: joins relative paths onto the current directory without
 /// touching the filesystem (unix keeps `..`, drops `.` and repeated separators).
-#[cfg(unix)]
+#[cfg(not(windows))]
 pub fn absolute<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
     let path = path.as_ref();
     if path.as_os_str().is_empty() {

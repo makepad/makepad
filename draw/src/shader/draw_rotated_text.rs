@@ -575,7 +575,9 @@ impl DrawRotatedText {
             let normal = dvec2(-tangent.y, tangent.x);
             let baseline_pen_origin = pen_point + normal * baseline_shift as f64;
             let baseline_center = center_point + normal * baseline_shift as f64;
-            let glyph_origin = baseline_pen_origin + tangent * glyph.offset_x_in_lpxs as f64;
+            let glyph_origin = baseline_pen_origin
+                + tangent * glyph.offset_x_in_lpxs as f64
+                + normal * glyph.offset_y_in_lpxs as f64;
 
             let half_width = (glyph.advance_in_lpxs.abs() as f64 * 0.62).max(2.0);
             min_x = min_x.min(baseline_center.x - half_width);

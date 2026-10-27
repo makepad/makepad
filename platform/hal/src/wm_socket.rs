@@ -218,8 +218,10 @@ pub fn adopt(path: &Path, wire: u64, pid: u32, crate_name: &str) -> Result<Admis
 static CLIENT_NAME: OnceLock<String> = OnceLock::new();
 
 /// The name a process gives the WM when it asks to be hosted (the WM finds the app's label
-/// and icon by it): its package. A host running someone else's code (`makepad run`) names
-/// the app it runs before opening the HAL; otherwise the executable's name.
+/// and icon by it): its package. An app's `app_main` names its package
+/// (`discover_window_manager`) and a host running someone else's code (`makepad run`) names the
+/// app it runs, both before opening the HAL; only a process that does neither falls back to the
+/// executable's name.
 pub fn set_client_name(name: &str) {
     let _ = CLIENT_NAME.set(name.to_string());
 }

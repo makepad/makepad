@@ -12,7 +12,7 @@
   },
   {
     "id": "ai-hub",
-    "title": "AI Hub",
+    "title": "AI Hub (headless)",
     "package": "makepad-app-ai-hub",
     "binary": "makepad-app-ai-hub",
     "workspace": "makepad/apps/ai-hub",
@@ -44,11 +44,39 @@
     ]
   },
   {
+    "id": "aihub",
+    "title": "AI Hub",
+    "package": "makepad-app-aihub",
+    "binary": "makepad-app-aihub",
+    "workspace": "makepad/apps/aihub",
+    "features": [
+      "localai"
+    ]
+  },
+  {
     "id": "amp",
     "title": "Amp",
     "package": "makepad-app-amp",
     "binary": "makepad-app-amp",
     "workspace": "makepad/apps/amp",
+    "features": [],
+    "menu": "other"
+  },
+  {
+    "id": "flow",
+    "title": "Flow",
+    "package": "makepad-app-flow",
+    "binary": "makepad-app-flow",
+    "workspace": "makepad/apps/flow",
+    "features": [],
+    "menu": "other"
+  },
+  {
+    "id": "synth",
+    "title": "Synth",
+    "package": "makepad-app-synth",
+    "binary": "makepad-app-synth",
+    "workspace": "makepad/apps/synth",
     "features": [],
     "menu": "other"
   },

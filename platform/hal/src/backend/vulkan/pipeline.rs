@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub(super) const ABSENT: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
-pub(super) struct PassKey { pub colors: [u32; 4], pub depth: u32, pub load: [u8; 5] }
+pub(super) struct PassKey { pub colors: [u32; 4], pub depth: u32, pub load: [u8; 5], /** 1, or 2: a multiview pass */ pub views: u8 }
 
 pub(super) struct RenderPass { pub dev: Arc<Device>, pub raw: vk::RenderPass, pub key: PassKey }
 
@@ -49,7 +49,14 @@ impl RenderPass {
         let mut subpass = vk::SubpassDescription::default().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&colors);
         if key.depth != ABSENT { subpass = subpass.depth_stencil_attachment(&depth); }
         let subpasses = [subpass];
-        let raw = unsafe { dev.raw.create_render_pass(&vk::RenderPassCreateInfo::default().attachments(&attachments).subpasses(&subpasses), None) }.map_err(error)?;
+        let mut info = vk::RenderPassCreateInfo::default().attachments(&attachments).subpasses(&subpasses);
+        // a multiview pass renders every view's layer (view mask: the low `views` bits); the
+        // views are correlated (the eyes see nearly the same scene)
+        let mask = [(1u32 << key.views.max(1)) - 1];
+        let mut multiview = vk::RenderPassMultiviewCreateInfo { subpass_count: 1, p_view_masks: mask.as_ptr(), correlation_mask_count: 1,
+            p_correlation_masks: mask.as_ptr(), ..Default::default() };
+        if key.views > 1 { info = info.next_render_pass_multiview_create_info(&mut multiview); }
+        let raw = unsafe { dev.raw.create_render_pass(&info, None) }.map_err(error)?;
         Ok(Arc::new(Self { dev, raw, key }))
     }
 }
@@ -65,9 +72,16 @@ pub(super) struct Program {
     pub layout: vk::PipelineLayout,
     pub descriptors: vk::DescriptorSetLayout,
     pub descriptor_types: Vec<(u32, vk::DescriptorType)>,
+    /// The bindings fed from the batch's upload arena (the uniform blocks, the pick block and
+    /// the instance storage), by binding number: dynamic, so one written set serves every draw
+    /// with the same buffers and textures and a draw binds it with its own offsets.
+    pub dynamic: Vec<u32>,
     pub samplers: Vec<vk::Sampler>,
     vertex: vk::ShaderModule,
     fragment: vk::ShaderModule,
+    /// the multiview stages (null without them)
+    xr_vertex: vk::ShaderModule,
+    xr_fragment: vk::ShaderModule,
 }
 
 impl Program {
@@ -77,11 +91,14 @@ impl Program {
             return Err("SPIR-V pipeline binding/layout mismatch".into());
         }
         let mut out = Self { dev, desc, code, bindings, vertex_stride, layout: vk::PipelineLayout::null(),
-            descriptors: vk::DescriptorSetLayout::null(), descriptor_types: Vec::new(), samplers: Vec::new(),
-            vertex: vk::ShaderModule::null(), fragment: vk::ShaderModule::null() };
+            descriptors: vk::DescriptorSetLayout::null(), descriptor_types: Vec::new(), dynamic: Vec::new(), samplers: Vec::new(),
+            vertex: vk::ShaderModule::null(), fragment: vk::ShaderModule::null(),
+            xr_vertex: vk::ShaderModule::null(), xr_fragment: vk::ShaderModule::null() };
         for (i, slot) in out.bindings.iter().enumerate() {
             if i != pipeline_binding::TEXTURES && *slot != pipeline_binding::NONE {
-                out.descriptor_types.push((*slot, vk::DescriptorType::UNIFORM_BUFFER));
+                // the fixed blocks come from the arena; custom uniform buffers are bound whole
+                let ty = if i < pipeline_binding::BUFFERS { vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC } else { vk::DescriptorType::UNIFORM_BUFFER };
+                out.descriptor_types.push((*slot, ty));
             }
         }
         for i in 0..out.code.textures.len() as u32 {
@@ -94,18 +111,23 @@ impl Program {
             out.descriptor_types.push((out.code.sampler_base.checked_add(i).ok_or("sampler binding overflow")?, vk::DescriptorType::SAMPLER));
         }
         if out.code.depth_binding != ABSENT { out.descriptor_types.push((out.code.depth_binding, vk::DescriptorType::SAMPLED_IMAGE)); }
-        if out.code.instance_binding != ABSENT { out.descriptor_types.push((out.code.instance_binding, vk::DescriptorType::STORAGE_BUFFER)); }
-        if out.code.pick_binding != ABSENT { out.descriptor_types.push((out.code.pick_binding, vk::DescriptorType::UNIFORM_BUFFER)); }
+        if out.code.instance_binding != ABSENT { out.descriptor_types.push((out.code.instance_binding, vk::DescriptorType::STORAGE_BUFFER_DYNAMIC)); }
+        if out.code.pick_binding != ABSENT { out.descriptor_types.push((out.code.pick_binding, vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC)); }
         out.descriptor_types.sort_by_key(|b| b.0);
+        out.dynamic = out.descriptor_types.iter().filter(|(_, ty)| matches!(*ty, vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC | vk::DescriptorType::STORAGE_BUFFER_DYNAMIC))
+            .map(|(slot, _)| *slot).collect();
         if out.descriptor_types.windows(2).any(|p| p[0].0 == p[1].0) { return Err("overlapping Vulkan descriptor bindings".into()); }
         // every binding is visible to both stages: the per-stage limits apply to the whole set (a
         // driver that is not told refuses the pipeline with an unexplained error: PowerVR, ERROR_UNKNOWN)
         let limits = &out.dev.properties.limits;
-        let count = |t: vk::DescriptorType| out.descriptor_types.iter().filter(|(_, ty)| *ty == t).count() as u32;
-        for (t, max, what) in [(vk::DescriptorType::SAMPLED_IMAGE, limits.max_per_stage_descriptor_sampled_images, "sampled images"),
-            (vk::DescriptorType::SAMPLER, limits.max_per_stage_descriptor_samplers, "samplers"),
-            (vk::DescriptorType::UNIFORM_BUFFER, limits.max_per_stage_descriptor_uniform_buffers, "uniform buffers"),
-            (vk::DescriptorType::STORAGE_BUFFER, limits.max_per_stage_descriptor_storage_buffers, "storage buffers")] {
+        let count = |t: &[vk::DescriptorType]| out.descriptor_types.iter().filter(|(_, ty)| t.contains(ty)).count() as u32;
+        let (uniform, storage) = ([vk::DescriptorType::UNIFORM_BUFFER, vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC], [vk::DescriptorType::STORAGE_BUFFER, vk::DescriptorType::STORAGE_BUFFER_DYNAMIC]);
+        for (t, max, what) in [(&[vk::DescriptorType::SAMPLED_IMAGE][..], limits.max_per_stage_descriptor_sampled_images, "sampled images"),
+            (&[vk::DescriptorType::SAMPLER][..], limits.max_per_stage_descriptor_samplers, "samplers"),
+            (&uniform[..], limits.max_per_stage_descriptor_uniform_buffers, "uniform buffers"),
+            (&storage[..], limits.max_per_stage_descriptor_storage_buffers, "storage buffers"),
+            (&uniform[1..], limits.max_descriptor_set_uniform_buffers_dynamic, "dynamic uniform buffers"),
+            (&storage[1..], limits.max_descriptor_set_storage_buffers_dynamic, "dynamic storage buffers")] {
             let n = count(t);
             if n > max { return Err(format!("the shader binds {n} {what} per stage, the device allows {max}")); }
         }
@@ -119,6 +141,10 @@ impl Program {
             out.layout = out.dev.raw.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts), None).map_err(error)?;
             out.vertex = out.dev.raw.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&out.code.vertex), None).map_err(error)?;
             out.fragment = out.dev.raw.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&out.code.fragment), None).map_err(error)?;
+            if out.dev.multiview && !out.code.xr_vertex.is_empty() {
+                out.xr_vertex = out.dev.raw.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&out.code.xr_vertex), None).map_err(error)?;
+                out.xr_fragment = out.dev.raw.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&out.code.xr_fragment), None).map_err(error)?;
+            }
             for s in &out.code.samplers {
                 let filter = if s.filter == 0 { vk::Filter::NEAREST } else { vk::Filter::LINEAR };
                 let address = match s.address { 0 => vk::SamplerAddressMode::REPEAT, 1 => vk::SamplerAddressMode::CLAMP_TO_EDGE,
@@ -141,6 +167,8 @@ impl Drop for Program {
         for s in self.samplers.drain(..) { self.dev.raw.destroy_sampler(s, None); }
         self.dev.raw.destroy_shader_module(self.vertex, None);
         self.dev.raw.destroy_shader_module(self.fragment, None);
+        if self.xr_vertex != vk::ShaderModule::null() { self.dev.raw.destroy_shader_module(self.xr_vertex, None); }
+        if self.xr_fragment != vk::ShaderModule::null() { self.dev.raw.destroy_shader_module(self.xr_fragment, None); }
         self.dev.raw.destroy_pipeline_layout(self.layout, None);
         self.dev.raw.destroy_descriptor_set_layout(self.descriptors, None);
     } }
@@ -150,13 +178,13 @@ pub(super) struct Pipeline { pub program: Arc<Program>, pub raw: vk::Pipeline }
 impl Drop for Pipeline { fn drop(&mut self) { unsafe { self.program.dev.raw.destroy_pipeline(self.raw, None); } } }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
-struct VariantKey { colors: [u32; 4], depth: u32, flags: u32 }
+struct VariantKey { colors: [u32; 4], depth: u32, flags: u32, views: u8 }
 
 impl VariantKey {
     fn new(pass: PassKey, flags: u32) -> Self {
-        let mut flags = flags & (Draw::BLEND | Draw::CULL | Draw::DEPTH_WRITE);
+        let mut flags = flags & (Draw::BLEND | Draw::CULL | Draw::DEPTH_WRITE | Draw::WIREFRAME);
         if pass.depth == ABSENT { flags &= !Draw::DEPTH_WRITE; } // no depth attachment: the bit changes nothing
-        Self { colors: pass.colors, depth: pass.depth, flags }
+        Self { colors: pass.colors, depth: pass.depth, flags, views: pass.views }
     }
 }
 
@@ -218,7 +246,7 @@ impl State {
         if program.desc.blend & pipeline_blend::RAW != 0 { return; }
         let mut colors = [ABSENT; 4];
         for i in 0..4 { if program.desc.outputs & (1 << i) != 0 { colors[i] = program.desc.color_formats[i]; } }
-        let key = PassKey { colors, depth: format::DEPTH32F, load: [pass_load::DONT_CARE; 5] };
+        let key = PassKey { colors, depth: format::DEPTH32F, load: [pass_load::DONT_CARE; 5], views: 1 };
         // a data target (R32F depth/shadow values, ids) is drawn without blending
         let blends = matches!(colors[0], format::BGRA8 | format::RGBA8 | format::RGBA16F);
         let flags = Draw::DEPTH_WRITE | if blends { Draw::BLEND } else { 0 };
@@ -258,8 +286,13 @@ impl State {
 
 fn create_variant(program: Arc<Program>, pass: &RenderPass, flags: u32) -> Result<Arc<Pipeline>, String> {
     let dev = &program.dev;
-    let stages = [vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(program.vertex).name(c"vertex_main"),
-        vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(program.fragment).name(c"fragment_main")];
+    // a multiview pass runs the multiview stages (each view's matrices by view index)
+    let (vertex_module, fragment_module) = if pass.key.views > 1 {
+        if program.xr_vertex == vk::ShaderModule::null() { return Err("the shader has no multiview stages for a multiview pass".into()); }
+        (program.xr_vertex, program.xr_fragment)
+    } else { (program.vertex, program.fragment) };
+    let stages = [vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vertex_module).name(c"vertex_main"),
+        vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fragment_module).name(c"fragment_main")];
     let words = program.vertex_stride / 4;
     let bindings = [vk::VertexInputBindingDescription::default().binding(0).stride(program.vertex_stride).input_rate(vk::VertexInputRate::VERTEX)];
     let attrs: Vec<_> = (0..words.div_ceil(4)).map(|i| vk::VertexInputAttributeDescription::default().location(i).binding(0).offset(i * 16)
@@ -268,7 +301,8 @@ fn create_variant(program: Arc<Program>, pass: &RenderPass, flags: u32) -> Resul
     let vertex = vk::PipelineVertexInputStateCreateInfo::default().vertex_binding_descriptions(if words == 0 { &[] } else { &bindings }).vertex_attribute_descriptions(&attrs);
     let assembly = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
     let viewport = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
-    let raster = vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(vk::PolygonMode::FILL)
+    let lines = flags & Draw::WIREFRAME != 0 && program.dev.features.fill_mode_non_solid == vk::TRUE;
+    let raster = vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(if lines { vk::PolygonMode::LINE } else { vk::PolygonMode::FILL })
         .cull_mode(if flags & Draw::CULL != 0 { vk::CullModeFlags::BACK } else { vk::CullModeFlags::NONE })
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE).line_width(1.0);
     let samples = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);

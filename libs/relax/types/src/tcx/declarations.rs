@@ -17,6 +17,8 @@ pub(crate) struct DefQueries {
     pub super_predicates: DeclarationCell<Vec<Predicate>>,
     filtered_supers: Mutex<crate::fxhash::HashMap<Sym, Arc<DeclarationCell<Vec<Predicate>>>>>,
     pub explicit_item_bounds: DeclarationCell<Vec<Predicate>>,
+    /// an opaque type's bound-lowering errors (E0412 ..), set by its explicit_item_bounds
+    pub opaque_bound_errors: OnceLock<Vec<String>>,
     pub item_bounds: DeclarationCell<Vec<Predicate>>,
     pub impl_super_outlives: DeclarationCell<Vec<Predicate>>,
     pub generics: DeclarationCell<GenericIndices>,
@@ -37,9 +39,7 @@ impl<T> DeclarationCell<T> {
         // `Self::Name`, a bound whose projection needs the bounds being lowered) would wait on its
         // own OnceLock forever. That is rustc's query cycle (E0391, reported by the item's own
         // check); the nested ask sees the empty declaration.
-        // compiler TLS: its buffer is a generation's block, so the settle swap must forget it
-        // (a plain thread_local kept the dead buffer and the next push wrote into it)
-        crate::gen_local! { static IN_FLIGHT: std::cell::RefCell<Vec<usize>>; }
+        crate::memo_local! { static IN_FLIGHT: std::cell::RefCell<Vec<usize>>; }
         let key = self as *const Self as usize;
         if self.0.get().is_none() && IN_FLIGHT.try_with(|v| v.borrow().contains(&key)).unwrap_or(false) {
             return Box::leak(Box::new(T::default()));
@@ -51,13 +51,14 @@ impl<T> DeclarationCell<T> {
         self.get_or_init(compute)
     }
     pub(crate) fn get_or_init(&self, compute: impl FnOnce() -> T) -> &T {
-        let declaration = self.0.get_or_init(|| {
+        // (computed outside the cell's Once: relax_base::query::init_once)
+        let declaration = crate::query::init_once(&self.0, || {
             let enclosing = crate::program::missing_save();
             let value = compute();
             let misses = crate::program::take_missing();
             crate::program::missing_restore(enclosing);
             Box::new(Declaration { value, misses })
-        });
+        }, |_| {});
         // Replaying nested misses makes every dependent cell retry after a module load.
         if !declaration.misses.is_empty() { crate::program::note_misses(&declaration.misses); }
         &declaration.value
@@ -110,6 +111,13 @@ impl DeclarationQueries {
     pub(super) fn invalidate(&mut self, gone: &[DefId]) {
         if let Some(cells) = self.cells.get_mut() {
             for def in gone { if let Some(cell) = cells.get_mut(def.0 as usize) { cell.take(); } }
+        }
+    }
+    /// Cells for the defs added since the table was made: a body edit's new closures, anonymous
+    /// constants and opaque types (def_collector, at the commit) and items added inside a body.
+    pub(super) fn grow(&mut self, defs: usize) {
+        if let Some(cells) = self.cells.get_mut() {
+            if cells.len() < defs { cells.resize_with(defs, OnceLock::new); }
         }
     }
     pub(super) fn retain_prefix(&mut self, first: usize) {

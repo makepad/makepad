@@ -72,6 +72,54 @@ pub struct ServiceHandle {
     /// in-process (the machine node's idle clock reads job and residency
     /// facts from here).
     pub shared: Arc<ServiceShared>,
+    /// The TLS fronts and the beacon of a network-reachable node (empty on a
+    /// loopback node): what [`ServiceHandle::stop`] closes first.
+    fleet_run: FleetRun,
+}
+
+/// What a fleet node runs on the network: its TLS front(s) and its beacon.
+#[derive(Default)]
+struct FleetRun {
+    #[cfg(not(target_arch = "wasm32"))]
+    fronts: Vec<makepad_network::fleet::front::FrontHandle>,
+    beacon: Option<crate::discovery::Beacon>,
+}
+
+impl ServiceHandle {
+    /// Stops this service in-process (the desktop AI Hub app's Enabled switch, a backend
+    /// toggle, an inactivity turn-off): admission closes and running jobs are handed back
+    /// (as [`drain_for_stop`]), the beacon stops, the TLS front closes its port, the
+    /// loopback server and every worker thread end, the loaded models are released and the
+    /// service locks are dropped. A new [`start_service`] may follow in the same process.
+    pub fn stop(self) {
+        let ServiceHandle { activity_monitor, http_thread, route_thread, worker_thread, chat_threads, singleton, shared, mut fleet_run, .. } = self;
+        drain_for_stop(&shared, Duration::from_secs(3));
+        if let Some(beacon) = fleet_run.beacon.as_mut() {
+            beacon.stop();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        for front in &mut fleet_run.fronts {
+            front.stop();
+        }
+        http_thread.stop();
+        shared.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = route_thread.join();
+        let _ = worker_thread.join();
+        for thread in chat_threads {
+            let _ = thread.join();
+        }
+        drop(activity_monitor);
+        with_backends(&shared, |backends| {
+            for (id, backend) in backends.iter_mut() {
+                if let Err(error) = backend.unload() {
+                    eprintln!("{}: stop: unload {id}: {error}", crate::SERVICE_NAME);
+                }
+            }
+            backends.clear();
+        });
+        shared.residency_claims.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        drop(singleton);
+    }
 }
 
 /// A Windows global named mutex makes the singleton independent of cache
@@ -258,6 +306,8 @@ pub struct ServiceShared {
     /// admission and load — never for generation, which runs through
     /// [`crate::backend::ConcurrentBackend`] with the lock released.
     pub backends: Mutex<HashMap<String, Box<dyn ContentBackend>>>,
+    /// Set by [`ServiceHandle::stop`]: the worker loops and the lease reaper end.
+    pub stopped: std::sync::atomic::AtomicBool,
 }
 
 pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiError> {
@@ -293,6 +343,11 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     let addr: SocketAddr = format!("{}:{}", config.host, port)
         .parse()
         .map_err(|e| AssetAiError::Http(format!("bad listen address {}:{port}: {e}", config.host)))?;
+    // A hub that serves claude-cli does so only as the enabled, LAN-bound,
+    // credentialed fleet node (see crate::claude_cli), whoever built the config.
+    if config.registry.models.iter().any(|spec| spec.backend == crate::claude_cli::BACKEND) {
+        crate::claude_cli::check_serving(addr).map_err(AssetAiError::Io)?;
+    }
 
     // Initial model states from what is already in the cache. Use the same
     // full hardware snapshot as request/discovery availability so an empty-
@@ -385,6 +440,7 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         realtime_sessions: Mutex::new(HashMap::new()),
         ws_sessions: Mutex::new(HashMap::new()),
         backends: Mutex::new(HashMap::new()),
+        stopped: std::sync::atomic::AtomicBool::new(false),
     });
     // LAN autodiscovery: announce this node so clients pick it up without a
     // fleet-file edit. Frontends keep only beacons whose fleet matches.
@@ -403,13 +459,13 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         pre_admit_posts: false,
         // Behind the front every connection comes from loopback; the
         // per-address limits key on the client the front names.
-        client_ip_resolver: fleet_mode.as_ref().map(|_| crate::front::peer_from_headers as fn(&_) -> _),
-        trusted_proxy: fleet_mode.as_ref().map(|_| crate::front::is_loopback as fn(_) -> _),
+        client_ip_resolver: fleet_mode.as_ref().map(|_| makepad_network::fleet::front::peer_from_headers as fn(&_) -> _),
+        trusted_proxy: fleet_mode.as_ref().map(|_| makepad_network::fleet::front::is_loopback as fn(_) -> _),
         allowed_methods: None,
     })
     .ok_or_else(|| AssetAiError::Http(format!("cannot bind http server at {inner_addr}")))?;
-    let addr = match fleet_mode {
-        None => addr,
+    let (addr, fleet_run) = match fleet_mode {
+        None => (addr, FleetRun::default()),
         Some(mode) => mode.start(node_id, inner_addr, &shared)?,
     };
 
@@ -422,9 +478,11 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     let reaper_shared = shared.clone();
     std::thread::Builder::new()
         .name("ai-hub-lease-reaper".into())
-        .spawn(move || loop {
-            std::thread::sleep(crate::lease::KEEPALIVE_INTERVAL);
-            let _ = reap_lapsed_leases(&reaper_shared);
+        .spawn(move || {
+            while !reaper_shared.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(crate::lease::KEEPALIVE_INTERVAL);
+                let _ = reap_lapsed_leases(&reaper_shared);
+            }
         })
         .expect("spawn lease reaper");
 
@@ -437,6 +495,11 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     // None at one lane: nothing is ever admitted into the chat class there
     // (see `route_post`), so a worker would be a thread that only ever times
     // out. A box that has not opted into lanes stays exactly as it was.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(prefetch) = crate::prefetch::PrefetchConfig::from_env() {
+        crate::prefetch::start(shared.clone(), prefetch);
+    }
+
     let chat_lanes = crate::llm_backend::configured_lane_count();
     let chat_lanes = if chat_lanes > 1 { chat_lanes } else { 0 };
     shared
@@ -461,6 +524,7 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         chat_threads,
         singleton,
         shared,
+        fleet_run,
     })
 }
 
@@ -469,27 +533,25 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
 /// under `<cache>/fleet`).
 #[cfg(not(target_arch = "wasm32"))]
 struct FleetMode {
-    verifier: Arc<crate::fleet_auth::Verifier>,
+    verifier: Arc<makepad_network::fleet::id::Verifier>,
     identity: makepad_network::tls::TlsIdentity,
     fleet: String,
     listen: SocketAddr,
     edge: Option<SocketAddr>,
     front_secret: String,
-    node_credential: Option<String>,
 }
 
-/// The node key and TLS certificate fingerprint (made on first use), for
-/// status and for checking a known-nodes record by hand.
+/// The node key (made on first use), this machine's fleet credential name
+/// and the fingerprint of a TLS certificate as the node's front would
+/// present it ([`makepad_network::fleet::id::server_identity`]; the
+/// certificate gets a fresh serial per process, its key and credential stay).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn fleet_identity(cache_dir: &Path) -> Result<(String, String), AssetAiError> {
+pub fn fleet_identity(cache_dir: &Path) -> Result<(String, String, String), AssetAiError> {
     fs::create_dir_all(cache_dir).map_err(|e| AssetAiError::Io(format!("{}: {e}", cache_dir.display())))?;
     let node_key = load_or_create_node_key(cache_dir);
-    let identity = makepad_network::tls::TlsIdentity::load_or_create(
-        &cache_dir.join("fleet").join("tls"),
-        &format!("makepad ai node {node_key}"),
-    )
-    .map_err(|e| AssetAiError::Io(format!("fleet TLS identity: {e}")))?;
-    Ok((node_key, identity.fingerprint_hex()))
+    let (identity, _verifier) = makepad_network::fleet::id::server_identity(&format!("makepad ai node {node_key}")).map_err(AssetAiError::Io)?;
+    let name = makepad_network::fleet::id::me().map(|me| me.cred.name.clone()).unwrap_or_default();
+    Ok((node_key, name, identity.fingerprint_hex()))
 }
 
 /// A browser cannot listen: no fleet mode on the web.
@@ -504,35 +566,27 @@ impl FleetMode {
         Err(AssetAiError::Io(format!("cannot serve on {addr} from a browser")))
     }
 
-    fn start(self, _node_id: u64, inner: SocketAddr, _shared: &Arc<ServiceShared>) -> Result<SocketAddr, AssetAiError> {
-        Ok(inner)
+    fn start(self, _node_id: u64, inner: SocketAddr, _shared: &Arc<ServiceShared>) -> Result<(SocketAddr, FleetRun), AssetAiError> {
+        Ok((inner, FleetRun::default()))
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl FleetMode {
-    fn load(cache_dir: &Path, node_key: &str, fleet: &str, addr: SocketAddr) -> Result<Self, AssetAiError> {
-        let dir = cache_dir.join("fleet");
+    fn load(_cache_dir: &Path, node_key: &str, fleet: &str, addr: SocketAddr) -> Result<Self, AssetAiError> {
         let refuse = |why: String| {
             AssetAiError::Io(format!(
                 "this node listens on {addr} but {why}; a network-reachable node serves only to fleet credentials \
-                 (see tools/aihub-fleet.md)"
+                 (see tools/fleet-identity.md)"
             ))
         };
-        let identity = makepad_network::tls::TlsIdentity::load_or_create(&dir.join("tls"), &format!("makepad ai node {node_key}"))
-            .map_err(|e| refuse(format!("cannot make or load its TLS identity ({e})")))?;
-        let verifier = crate::fleet_auth::Verifier::load(&dir, identity.fingerprint)
-            .map_err(|e| refuse(format!("has no fleet key ({e})")))?;
+        let (identity, verifier) = makepad_network::fleet::id::server_identity(&format!("makepad ai node {node_key}")).map_err(refuse)?;
         let edge = match std::env::var("MAKEPAD_AI_HUB_EDGE") {
             Ok(text) => Some(text.parse().map_err(|_| refuse(format!("MAKEPAD_AI_HUB_EDGE {text:?} is not an address:port")))?),
             Err(_) => None,
         };
         let mut secret = [0u8; 32];
         makepad_network::tls::os_random(&mut secret).map_err(|e| AssetAiError::Io(format!("random: {e}")))?;
-        let node_credential = fs::read_to_string(dir.join(crate::fleet_auth::NODE_CREDENTIAL))
-            .ok()
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty());
         Ok(Self {
             verifier: Arc::new(verifier),
             identity,
@@ -540,13 +594,13 @@ impl FleetMode {
             listen: addr,
             edge,
             front_secret: makepad_network::tls::to_hex(&secret),
-            node_credential,
         })
     }
 
     /// Starts the TLS front (and the edge, when configured) and the
     /// beacon; returns the public address.
-    fn start(self, node_id: u64, inner: SocketAddr, shared: &Arc<ServiceShared>) -> Result<SocketAddr, AssetAiError> {
+    fn start(self, node_id: u64, inner: SocketAddr, shared: &Arc<ServiceShared>) -> Result<(SocketAddr, FleetRun), AssetAiError> {
+        let mut run = FleetRun::default();
         let server = |identity: makepad_network::tls::TlsIdentity| {
             makepad_network::tls::TlsServer::new(identity).map_err(|e| AssetAiError::Http(format!("TLS server: {e}")))
         };
@@ -558,38 +612,50 @@ impl FleetMode {
                 fingerprint: self.identity.fingerprint,
                 dir: self.identity.dir.clone(),
             };
-            crate::front::start_front(crate::front::FrontConfig {
+            let front = makepad_network::fleet::front::start_front(makepad_network::fleet::front::FrontConfig {
                 listen: edge,
-                inner,
+                inner: std::sync::Arc::new(move |_: &str| inner),
+                inner_headers: Vec::new(),
                 tls: server(identity)?,
                 verifier: self.verifier.clone(),
                 front_secret: self.front_secret.clone(),
-                edge: true,
+                policy: std::sync::Arc::new(|peer: &makepad_network::fleet::id::Peer, method: &str, path: &str| crate::fleet_routes::route_allowed(peer, true, method, path)),
+                max_total: 64,
+                max_per_ip: 8,
+                label: "edge",
             })
             .map_err(|e| AssetAiError::Http(format!("edge bind {edge}: {e}")))?;
+            run.fronts.push(front);
             eprintln!("fleet: edge (device routes only) on {edge}");
         }
-        crate::front::start_front(crate::front::FrontConfig {
+        let front = makepad_network::fleet::front::start_front(makepad_network::fleet::front::FrontConfig {
             listen: self.listen,
-            inner,
+            inner: std::sync::Arc::new(move |_: &str| inner),
+            inner_headers: Vec::new(),
             tls: server(self.identity)?,
             verifier: self.verifier.clone(),
             front_secret: self.front_secret.clone(),
-            edge: false,
+            policy: std::sync::Arc::new(|peer: &makepad_network::fleet::id::Peer, method: &str, path: &str| crate::fleet_routes::route_allowed(peer, false, method, path)),
+            max_total: makepad_network::fleet::front::LAN_MAX_TOTAL,
+            max_per_ip: makepad_network::fleet::front::LAN_MAX_PER_IP,
+            label: "front",
         })
         .map_err(|e| AssetAiError::Http(format!("TLS front bind {}: {e}", self.listen)))?;
+        run.fronts.push(front);
         eprintln!("fleet: TLS front on {} (certificate {fp})", self.listen);
-        crate::fleet_auth::set_node_credential(self.node_credential);
-        crate::fleet_auth::install_fleet_client(&shared.cache_dir.join("fleet"));
-        crate::discovery::start_fleet_beacon(node_id, self.listen.port(), self.fleet.clone(), shared.node_key.clone());
-        Ok(self.listen)
+        // Every node beacons, a claude-cli hub too: the beacon only says where
+        // the TLS front is (the front still wants a fleet credential), and the
+        // fleet's apps find the hub's Claude the way they find its Qwen. No
+        // automatic route ever picks claude-cli (fleet::is_explicit_only).
+        run.beacon = crate::discovery::start_fleet_beacon(node_id, self.listen.port(), self.fleet.clone(), shared.node_key.clone());
+        Ok((self.listen, run))
     }
 }
 
 /// Durable worker identity: 32 lowercase hex chars persisted as `node-key`
 /// in the cache dir. Survives restarts and exe swaps; a coordinator keys a
 /// worker on this, while the per-start `node_id` reveals restarts.
-fn load_or_create_node_key(cache_dir: &Path) -> String {
+pub fn load_or_create_node_key(cache_dir: &Path) -> String {
     let path = cache_dir.join("node-key");
     if let Ok(text) = fs::read_to_string(&path) {
         let text = text.trim();
@@ -632,7 +698,9 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
             } => {
                 // Blob chunks go through their own bounded worker pool so a
                 // 32 MiB read never stalls /health, job polling or submits.
-                if headers.path.split('?').next() == Some("/control/watch") {
+                if headers.path.starts_with("/kernel") {
+                    route_kernel(&shared, &headers, "GET", Vec::new(), response_sender);
+                } else if headers.path.split('?').next() == Some("/control/watch") {
                     if caller_of(&shared, &headers).is_none() {
                         let _ = response_sender.send(unauthorized_response());
                         continue;
@@ -654,6 +722,10 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 body,
                 response,
             } => {
+                if headers.path.starts_with("/kernel") {
+                    route_kernel(&shared, &headers, "POST", body, response);
+                    continue;
+                }
                 let out = route_post_request(&shared, &headers, &body);
                 let _ = response.send(out);
             }
@@ -670,6 +742,10 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 headers,
                 response_sender,
             } => {
+                if headers.path.split('?').next() == Some("/kernel/stream") {
+                    route_kernel_stream(&shared, &headers, web_socket_id, response_sender);
+                    continue;
+                }
                 if !caller_of(&shared, &headers).is_some_and(|caller| may_read(&shared, &caller, &headers.path)) {
                     let _ = response_sender.send(Vec::new());
                     continue;
@@ -697,6 +773,11 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 response_sender,
                 data,
             } => {
+                #[cfg(feature = "kernel")]
+                if crate::kernel_compute::facility().is_stream(web_socket_id) {
+                    crate::kernel_compute::facility().stream_frame(web_socket_id, &data);
+                    continue;
+                }
                 if let Some(session) = realtime_session_for_socket(&shared, web_socket_id) {
                     if let Err(e) = session.handle_binary(&data) {
                         let _ = response_sender
@@ -717,6 +798,8 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 }
             }
             HttpServerRequest::DisconnectWebSocket { web_socket_id } => {
+                #[cfg(feature = "kernel")]
+                crate::kernel_compute::facility().stream_closed(web_socket_id);
                 if let Some(job_id) = shared.ws_sessions.lock().unwrap().remove(&web_socket_id) {
                     if let Some(session) = shared.realtime_sessions.lock().unwrap().get(&job_id).cloned() {
                         session.remove_socket(web_socket_id);
@@ -729,13 +812,94 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
 
 
 
+/// The `kernel` domain (`crate::kernel_wire`): Splash compute kernels on
+/// this node's CPUs, for LAN-role credentials only. Submits and polls answer
+/// from the facility's threads, never blocking this routing thread.
+fn route_kernel(
+    shared: &Arc<ServiceShared>,
+    headers: &HttpServerHeaders,
+    method: &str,
+    body: Vec<u8>,
+    response_sender: mpsc::Sender<HttpServerResponse>,
+) {
+    let Some(caller) = caller_of(shared, headers) else {
+        let _ = response_sender.send(unauthorized_response());
+        return;
+    };
+    if !(caller.admin || caller.role != makepad_network::fleet::id::Role::Paired) {
+        let _ = response_sender.send(error_json(403, "kernel jobs need a fleet machine credential".into()));
+        return;
+    }
+    let (path, query) = headers.path.split_once('?').unwrap_or((headers.path.as_str(), ""));
+    #[cfg(feature = "kernel")]
+    {
+        let facility = crate::kernel_compute::facility();
+        let reply = move |result: Result<Vec<u8>, (u16, String)>, content_type: &str| {
+            let response = match result {
+                Ok(body) => {
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    HttpServerResponse::new(header, body)
+                }
+                Err((status, message)) => error_json(status, message),
+            };
+            let _ = response_sender.send(response);
+        };
+        let job_route = |suffix: &str| path.strip_prefix("/kernel/job/").and_then(|r| r.strip_suffix(suffix)).and_then(|id| id.parse::<u64>().ok());
+        match method {
+            "GET" if path == "/kernel" => reply(Ok(facility.info().serialize_json().into_bytes()), "application/json"),
+            "GET" => match job_route("/tiles") {
+                Some(id) => {
+                    let timeout = query
+                        .split('&')
+                        .find_map(|kv| kv.strip_prefix("timeout_ms=").and_then(|v| v.parse::<u64>().ok()))
+                        .unwrap_or(2000);
+                    facility.poll(&caller.client_id, id, Duration::from_millis(timeout), Box::new(move |r| reply(r, "application/octet-stream")));
+                }
+                None => reply(Err((404, "no such kernel route".into())), ""),
+            },
+            "POST" if path == "/kernel/jobs" => facility.submit(&caller.client_id, body, Box::new(move |r| reply(r, "application/json"))),
+            "POST" => match job_route("/cancel") {
+                Some(id) if facility.cancel(&caller.client_id, id) => reply(Ok(b"{\"cancelled\":true}".to_vec()), "application/json"),
+                Some(_) => reply(Err((404, "no such kernel job".into())), ""),
+                None => reply(Err((404, "no such kernel route".into())), ""),
+            },
+            _ => reply(Err((404, "no such kernel route".into())), ""),
+        }
+    }
+    #[cfg(not(feature = "kernel"))]
+    {
+        let _ = (method, body, path, query);
+        let _ = response_sender.send(error_json(404, "this node does not serve kernel jobs".into()));
+    }
+}
+
+/// `GET /kernel/stream` (websocket): one long-lived stream per client and
+/// node for kernel jobs (frames: `crate::kernel_wire`). LAN credentials only.
+fn route_kernel_stream(shared: &Arc<ServiceShared>, headers: &HttpServerHeaders, web_socket_id: u64, response_sender: mpsc::Sender<Vec<u8>>) {
+    let caller = caller_of(shared, headers).filter(|c| c.admin || c.role != makepad_network::fleet::id::Role::Paired);
+    #[cfg(feature = "kernel")]
+    if let Some(caller) = caller {
+        crate::kernel_compute::facility().stream_open(web_socket_id, &caller.client_id, response_sender);
+        return;
+    }
+    #[cfg(not(feature = "kernel"))]
+    let _ = (caller, web_socket_id);
+    let _ = response_sender.send(Vec::new());
+}
+
 /// Who sent a request, or None when it is not allowed in at all.
-fn caller_of(shared: &ServiceShared, headers: &HttpServerHeaders) -> Option<crate::front::Caller> {
+fn caller_of(shared: &ServiceShared, headers: &HttpServerHeaders) -> Option<makepad_network::fleet::front::Caller> {
     let mut caller = match shared.front_secret.as_deref() {
-        None => crate::front::Caller::local(),
-        Some(secret) => crate::front::caller_from_headers(&headers.lines, secret)?,
+        None => makepad_network::fleet::front::Caller::local(),
+        Some(secret) => makepad_network::fleet::front::caller_from_headers(&headers.lines, secret)?,
     };
     caller.app = crate::control::app_from_headers(&headers.lines);
+    if shared.front_secret.is_some() {
+        crate::control::note_caller(&caller.client_id, makepad_network::fleet::front::peer_from_headers(headers), caller.app.as_deref());
+    }
     Some(caller)
 }
 
@@ -764,7 +928,73 @@ fn route_post_request(
     let Some(caller) = caller_of(shared, headers) else {
         return unauthorized_response();
     };
+    if headers.path == "/control/local-use" {
+        // Only the WM hosting this hub sets its mode and local use: a caller
+        // proven to hold this machine's own key (or a loopback-only hub's
+        // caller). A fleet credential of another machine never does.
+        if !caller.this_machine {
+            return error_json(403, "local-use is set by this machine's window manager only".to_string());
+        }
+        return control_local_use(shared, body);
+    }
     route_post_by(shared, &caller, &headers.path, body)
+}
+
+/// A control request from the host that runs this service in-process (the desktop AI Hub
+/// app's panel: Load / Unload, context and KV, the compute mode): the same handlers as the
+/// HTTP routes, as this machine. Ok(body) for a 2xx answer, Err(body) otherwise.
+pub fn control_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> Result<String, String> {
+    let response = if path == "/control/local-use" {
+        control_local_use(shared, body)
+    } else if matches!(path, "/control/model" | "/control/yield" | "/llm/context") {
+        route_post_by(shared, &makepad_network::fleet::front::Caller::local(), path, body)
+    } else {
+        return Err(format!("{path} is not a control route"));
+    };
+    let text = String::from_utf8_lossy(&response.body).to_string();
+    let ok = response.header.split_whitespace().nth(1).is_some_and(|code| code.starts_with('2'));
+    if ok { Ok(text) } else { Err(text) }
+}
+
+/// `POST /control/local-use {"mode": "auto"|"ui-first"|"ai-first"|"unavailable", "use": "gaming"|""}`:
+/// the hosting WM's report (`crate::activity::ComputeMode`). Closing admission goes the way
+/// of all local use: running jobs are cancelled as `local-use: …` (their clients reroute),
+/// queued ones wait or reroute, and the model worker unloads. AI First drops the UI reserve:
+/// it never yields GPU memory.
+fn control_local_use(shared: &Arc<ServiceShared>, body: &[u8]) -> HttpServerResponse {
+    let Ok(value) = json::parse(body) else {
+        return error_json(400, "need {\"mode\": \"auto\"|\"ui-first\"|\"ai-first\"|\"unavailable\", \"use\": \"gaming\"|\"\"}".to_string());
+    };
+    let mode = match value.get("mode").and_then(Value::as_str) {
+        None => shared.activity.mode(),
+        Some(name) => match crate::activity::ComputeMode::parse(name) {
+            Some(mode) => mode,
+            None => return error_json(400, format!("unknown mode {name:?}")),
+        },
+    };
+    let gaming = match value.get("use").and_then(Value::as_str) {
+        None => shared.activity.gaming(),
+        Some("gaming") => true,
+        Some("") => false,
+        Some(other) => return error_json(400, format!("unknown local use {other:?}")),
+    };
+    let (was_mode, was_gaming) = (shared.activity.mode(), shared.activity.gaming());
+    shared.activity.set_local_use(mode, gaming);
+    if mode == crate::activity::ComputeMode::AiFirst {
+        crate::gpu_yield::set_ui_reserve_mb(0);
+    }
+    shared.jobs.with(|store| store.interrupt_for_activity());
+    let snap = shared.activity.snapshot();
+    if (was_mode, was_gaming) != (mode, gaming) {
+        eprintln!(
+            "[local-use] mode {} {}: admission {} ({})",
+            mode.name(),
+            if gaming { "gaming" } else { "no game" },
+            if snap.admission_open { "open" } else { "closed" },
+            snap.reason
+        );
+    }
+    ok_json(snap.serialize_json())
 }
 
 /// Looks up the live session a connected websocket belongs to.
@@ -881,13 +1111,13 @@ pub(crate) fn reap_lapsed_leases(shared: &Arc<ServiceShared>) -> usize {
 
 #[cfg(test)]
 fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServerResponse {
-    route_post_by(shared, &crate::front::Caller::local(), path, body)
+    route_post_by(shared, &makepad_network::fleet::front::Caller::local(), path, body)
 }
 
-/// A device credential reads only its own jobs and their artifacts (job
-/// and artifact ids are not secrets); other roles read everything.
-fn may_read(shared: &ServiceShared, caller: &crate::front::Caller, path: &str) -> bool {
-    if caller.role != crate::fleet_auth::Role::Device {
+/// A paired phone reads only its own jobs and their artifacts (job and
+/// artifact ids are not secrets); fleet machines read everything.
+fn may_read(shared: &ServiceShared, caller: &makepad_network::fleet::front::Caller, path: &str) -> bool {
+    if caller.role != makepad_network::fleet::id::Role::Paired {
         return true;
     }
     let job = if let Some(rest) = path.strip_prefix("/job/") {
@@ -905,7 +1135,7 @@ fn may_read(shared: &ServiceShared, caller: &crate::front::Caller, path: &str) -
 /// A lease key scoped to the authenticated client: an origin key is only
 /// meaningful within the client that holds it, so one client can neither
 /// renew nor say goodbye for another's jobs.
-fn scoped_origin(caller: &crate::front::Caller, key: &str) -> String {
+fn scoped_origin(caller: &makepad_network::fleet::front::Caller, key: &str) -> String {
     if caller.client_id == "local" {
         key.to_string()
     } else {
@@ -938,7 +1168,7 @@ fn llm_context_json(shared: &Arc<ServiceShared>) -> String {
 }
 
 /// `POST /llm/context {"context": N, "kv": "q8"|"f16"}` (either field alone).
-fn set_llm_context(shared: &Arc<ServiceShared>, caller: &crate::front::Caller, body: &[u8]) -> HttpServerResponse {
+fn set_llm_context(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::front::Caller, body: &[u8]) -> HttpServerResponse {
     let Ok(value) = json::parse(body) else {
         return error_json(400, "need a JSON body {\"context\": <tokens>, \"kv\": \"q8\"|\"f16\"}".to_string());
     };
@@ -1040,14 +1270,14 @@ fn fitting_variant(shared: &Arc<ServiceShared>, spec: &ModelSpec, gpu: &crate::g
 
 /// Queue a control job from the hub itself (a yield's reload).
 fn queue_control(shared: &Arc<ServiceShared>, model: &str, action: crate::backend::ModelControl) -> Result<String, AssetAiError> {
-    submit_control(shared, &crate::front::Caller::local(), model, action)
+    submit_control(shared, &makepad_network::fleet::front::Caller::local(), model, action)
 }
 
 /// Queue a load/unload job on the model worker (loads and unloads must run
 /// on the thread that owns the device caches).
 fn submit_control(
     shared: &Arc<ServiceShared>,
-    caller: &crate::front::Caller,
+    caller: &makepad_network::fleet::front::Caller,
     model: &str,
     action: crate::backend::ModelControl,
 ) -> Result<String, AssetAiError> {
@@ -1079,7 +1309,7 @@ fn submit_control(
 }
 
 /// `POST /control/model {"model": "<id>", "action": "load"|"unload"}`.
-fn control_model(shared: &Arc<ServiceShared>, caller: &crate::front::Caller, body: &[u8]) -> HttpServerResponse {
+fn control_model(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::front::Caller, body: &[u8]) -> HttpServerResponse {
     let Ok(value) = json::parse(body) else {
         return error_json(400, "need {\"model\": <id>, \"action\": \"load\"|\"unload\"}".to_string());
     };
@@ -1111,7 +1341,7 @@ fn control_model(shared: &Arc<ServiceShared>, caller: &crate::front::Caller, bod
 /// (what was done, MB freed, MB free now).
 /// `"mb": 0` says the UI's shortage is over: the chat model grows back
 /// (`run_relief`) at its next idle moment.
-fn control_yield(shared: &Arc<ServiceShared>, caller: &crate::front::Caller, body: &[u8]) -> HttpServerResponse {
+fn control_yield(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::front::Caller, body: &[u8]) -> HttpServerResponse {
     let Ok(value) = json::parse(body) else {
         return error_json(400, "need {\"mb\": <MB wanted>, \"unload\": bool, \"reserve_mb\": <MB>}".to_string());
     };
@@ -1119,6 +1349,11 @@ fn control_yield(shared: &Arc<ServiceShared>, caller: &crate::front::Caller, bod
         return error_json(400, "need \"mb\"".to_string());
     };
     let unload = value.get("unload").and_then(Value::as_bool).unwrap_or(false);
+    if shared.activity.mode() == crate::activity::ComputeMode::AiFirst {
+        // The operator chose AI over the UI: nothing is given back.
+        eprintln!("[gpu-yield] AI First: not yielding {mb} MB to the UI");
+        return ok_json(json::obj(vec![("ai_first", Value::Bool(true))]).to_json());
+    }
     if let Some(reserve) = value.get("reserve_mb").and_then(Value::as_u64) {
         crate::gpu_yield::set_ui_reserve_mb(reserve);
     }
@@ -1310,6 +1545,15 @@ fn route_control_watch(
 }
 
 /// `GET /control`: the panel's whole picture (CONTROL_API.md).
+/// `GET /control` for a host that runs the service in-process (the desktop AI Hub app's
+/// panel reads it without a request).
+pub fn control_snapshot(shared: &Arc<ServiceShared>) -> String {
+    control_json(shared)
+}
+
+/// Fleet clients heard within this long show as connected (`GET /control` `clients`).
+pub const CLIENT_SEEN_MS: u64 = 10 * 60 * 1000;
+
 fn control_json(shared: &Arc<ServiceShared>) -> String {
     use crate::control::{job_meta, model_kind, model_mb};
     let seq = crate::control::seq();
@@ -1497,10 +1741,23 @@ fn control_json(shared: &Arc<ServiceShared>) -> String {
         })),
     ]);
 
+    let clients: Vec<Value> = crate::control::clients_seen(CLIENT_SEEN_MS)
+        .into_iter()
+        .map(|c| {
+            json::obj(vec![
+                ("client", json::s(c.client)),
+                ("addr", json::s(c.addr)),
+                ("app", text(c.app)),
+                ("requests", Value::Int(c.requests as i64)),
+                ("ago_ms", Value::Int(now_ms.saturating_sub(c.last_ms) as i64)),
+            ])
+        })
+        .collect();
     json::obj(vec![
         ("v", Value::Int(1)),
         ("seq", Value::Int(seq as i64)),
         ("now_ms", Value::Int(now_ms as i64)),
+        ("clients", Value::Arr(clients)),
         ("device", json::obj(vec![("name", json::s(device_name.clone())), ("kind", json::s(device_kind))])),
         (
             "gpu",
@@ -1514,6 +1771,7 @@ fn control_json(shared: &Arc<ServiceShared>) -> String {
             ]),
         ),
         ("llm", llm),
+        ("activity", json::parse(shared.activity.snapshot().serialize_json().as_bytes()).unwrap_or(Value::Null)),
         (
             "policy",
             Value::Arr(
@@ -1538,7 +1796,7 @@ fn control_json(shared: &Arc<ServiceShared>) -> String {
     .to_json()
 }
 
-fn route_post_by(shared: &Arc<ServiceShared>, caller: &crate::front::Caller, path: &str, body: &[u8]) -> HttpServerResponse {
+fn route_post_by(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::front::Caller, path: &str, body: &[u8]) -> HttpServerResponse {
     // POST /llm/context {"context": 32768, "kv": "q8"} -- set the chat model's
     // window and/or KV precision. Applies at the next LLM job (a one-token
     // chat job applies it at once); persisted.
@@ -1652,7 +1910,7 @@ fn route_post_by(shared: &Arc<ServiceShared>, caller: &crate::front::Caller, pat
     error_json(404, format!("no such endpoint: POST {path}"))
 }
 
-fn route_generate(shared: &Arc<ServiceShared>, caller: &crate::front::Caller, body: &[u8]) -> HttpServerResponse {
+fn route_generate(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::front::Caller, body: &[u8]) -> HttpServerResponse {
     let text = match std::str::from_utf8(body) {
         Ok(text) => text,
         Err(_) => return error_json(400, "request body is not utf-8".to_string()),
@@ -1670,6 +1928,10 @@ fn route_generate(shared: &Arc<ServiceShared>, caller: &crate::front::Caller, bo
     if spec.backend == "llm" {
         crate::llm_backend::apply_chat_thinking_control(&mut request);
     }
+    // claude-cli: every fleet caller (admin, node, paired) may USE it while the user has it
+    // switched on on this hub (off by default, idle auto-off; the backend refuses otherwise);
+    // only the admin CONTROLS it (the /control routes, fleet_routes.rs). Tool-less, sandboxed,
+    // LAN bind only, never the internet edge (claude_cli::check_serving).
     let gpu = shared.gpu.get();
     if let Err(reason) = model_availability(spec, &gpu, shared.residency.reserve_mb) {
         return error_json(503, format!("model {} is unavailable: {reason}", spec.id));
@@ -1706,7 +1968,8 @@ fn route_generate(shared: &Arc<ServiceShared>, caller: &crate::front::Caller, bo
     // not decode must be a 400, never a failed turn that tears down the
     // resident session.
     if !params.chat_images.is_empty() {
-        if spec.backend != "llm" || spec.file_by_role("mmproj").is_none() {
+        let sees = (spec.backend == "llm" && spec.file_by_role("mmproj").is_some()) || spec.backend == crate::claude_cli::BACKEND;
+        if !sees {
             return error_json(400, format!("model {} cannot look at pictures", spec.id));
         }
         for image in &params.chat_images {
@@ -1904,7 +2167,7 @@ fn health_json(shared: &Arc<ServiceShared>) -> HealthJson {
                         .is_none()
                 })
         })
-        .map(|spec| spec.domain.as_str().to_string())
+        .map(|spec| crate::claude_cli::advertised_domain(spec).to_string())
         .collect();
     // Same llm weights serve conversational chat; advertise it so FleetQwen
     // stops treating every turn as a text-expander fallback.
@@ -2031,7 +2294,7 @@ fn models_json(shared: &Arc<ServiceShared>) -> ModelsJson {
             let available = unavailable_reason.is_none() && too_small_note.is_none();
             ModelInfoJson {
                 id: spec.id.clone(),
-                domain: spec.domain.as_str().to_string(),
+                domain: crate::claude_cli::advertised_domain(spec).to_string(),
                 backend: spec.backend.clone(),
                 available,
                 gated: spec.gated,
@@ -2089,6 +2352,7 @@ fn model_inventory_json(shared: &Arc<ServiceShared>) -> ModelInventoryJson {
         node_key: shared.node_key.clone(),
         peer_serving: shared.peer.serving_enabled(),
         chunk_bytes: shared.peer.chunk_max,
+        serve_mbps: Some(shared.peer.throttle.as_ref().map_or(0.0, |t| t.mb_per_sec_value())),
         artifacts,
     }
 }
@@ -2126,7 +2390,7 @@ fn model_revision(spec: &ModelSpec) -> Option<String> {
 /// worker's business, and a chat worker doing it between turns could evict the
 /// model its own next turn needs.
 fn chat_worker_loop(shared: Arc<ServiceShared>) {
-    loop {
+    while !shared.stopped.load(std::sync::atomic::Ordering::SeqCst) {
         let Some(job_id) = shared
             .jobs
             .wait_take_next_of(crate::jobs::JobClass::Chat, Duration::from_millis(500))
@@ -2165,7 +2429,7 @@ fn worker_loop(shared: Arc<ServiceShared>) {
     // matters here — never appears, which is what lets a chat box that keeps a
     // 27B resident forever still reclaim what an image job left behind.
     let mut ran_here: std::collections::HashSet<String> = std::collections::HashSet::new();
-    loop {
+    while !shared.stopped.load(std::sync::atomic::Ordering::SeqCst) {
         release_for_local_use(&shared);
         let Some(job_id) = shared.jobs.wait_take_next(Duration::from_millis(500)) else {
             // LLM teardown completes on its owning thread. Refresh again
@@ -2206,6 +2470,19 @@ fn worker_loop(shared: Arc<ServiceShared>) {
             Err(e) => shared.jobs.with(|store| store.fail(&job_id, e.to_string())),
         }
         apply_finished_retention(&shared);
+    }
+}
+
+/// The process is told to stop (SIGTERM; a WM restarting its hub): admission closes as
+/// `local-use: restarting` (the fleet routes elsewhere, a scheduler's next /health sees it
+/// closed), running jobs are cancelled with that reason so their clients reroute them, and
+/// this returns once they have unwound, or after `max`.
+pub fn drain_for_stop(shared: &Arc<ServiceShared>, max: Duration) {
+    shared.activity.begin_stop();
+    shared.jobs.with(|store| store.interrupt_for_activity());
+    let started = Instant::now();
+    while started.elapsed() < max && !shared.jobs.with(|store| store.running_models().is_empty()) {
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -3167,6 +3444,15 @@ fn execute_live_job(
     result.map(|()| Vec::new())
 }
 
+/// A model whose files the prefetcher completed is Ready (not Absent) from now on.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn note_model_files_present(shared: &Arc<ServiceShared>, model_id: &str) {
+    let absent = matches!(shared.models.lock().unwrap().get(model_id), Some(ModelTrack::Absent));
+    if absent {
+        set_model_state(shared, model_id, ModelTrack::Ready);
+    }
+}
+
 fn set_model_state(shared: &Arc<ServiceShared>, model_id: &str, state: ModelTrack) {
     let loaded = matches!(state, ModelTrack::Loaded);
     shared
@@ -4007,10 +4293,12 @@ mod lifecycle_tests {
             realtime_sessions: Mutex::new(HashMap::new()),
             ws_sessions: Mutex::new(HashMap::new()),
             backends: Mutex::new(HashMap::new()),
+            stopped: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
-    /// `front`: (secret, client id) as the TLS front would stamp them.
+    /// `front`: (secret, client id) as the TLS front would stamp them (a
+    /// node credential: no admin; client `wm` proved this machine's own key).
     fn request_headers(verb: &str, path: &str, front: Option<(&str, &str)>) -> HttpServerHeaders {
         let mut lines = vec![
             format!("{verb} {path} HTTP/1.1\r\n"),
@@ -4019,7 +4307,9 @@ mod lifecycle_tests {
         if let Some((secret, client)) = front {
             lines.push(format!("X-Makepad-Front: {secret}\r\n"));
             lines.push(format!("X-Makepad-Client: {client}\r\n"));
-            lines.push("X-Makepad-Role: lan\r\n".to_string());
+            lines.push("X-Makepad-Role: node\r\n".to_string());
+            lines.push("X-Makepad-Admin: 0\r\n".to_string());
+            lines.push(format!("X-Makepad-This-Machine: {}\r\n", u8::from(client == "wm")));
         }
         HttpServerHeaders {
             addr: "127.0.0.1:1".parse().unwrap(),
@@ -4033,6 +4323,29 @@ mod lifecycle_tests {
             accept_encoding: None,
             sec_websocket_key: None,
         }
+    }
+
+    #[test]
+    fn local_use_is_set_from_this_machine_only() {
+        let shared = fixture_shared_with_secret(&[], Some("s3cret"));
+        let body = br#"{"mode":"unavailable","use":""}"#;
+        // A fleet credential of another machine, even stamped from this machine's address.
+        let mut remote = request_headers("POST", "/control/local-use", Some(("s3cret", "peer-node")));
+        remote.lines.push("X-Makepad-Peer: 127.0.0.1\r\n".to_string());
+        assert!(route_post_request(&shared, &remote, body).header.starts_with("HTTP/1.1 403"));
+        assert!(shared.activity.allows_work(), "a refused request changes nothing");
+        // Without the front's secret it is no caller at all.
+        let forged = request_headers("POST", "/control/local-use", Some(("guess", "wm")));
+        assert!(route_post_request(&shared, &forged, body).header.starts_with("HTTP/1.1 401"));
+        // The hosting WM (this machine's own credential), from its LAN address.
+        let mut wm = request_headers("POST", "/control/local-use", Some(("s3cret", "wm")));
+        wm.lines.push("X-Makepad-Peer: 10.0.0.217\r\n".to_string());
+        assert!(route_post_request(&shared, &wm, br#"{"mode":"auto","use":"gaming"}"#).header.starts_with("HTTP/1.1 200"));
+        assert_eq!(shared.activity.refusal().as_deref(), Some("local-use: gaming"));
+        assert!(route_post_request(&shared, &wm, br#"{"mode":"nope"}"#).header.starts_with("HTTP/1.1 400"));
+        assert!(route_post_request(&shared, &wm, br#"{"use":""}"#).header.starts_with("HTTP/1.1 200"));
+        assert!(!shared.activity.gaming(), "the game ended");
+        assert_eq!(shared.activity.mode(), crate::activity::ComputeMode::Automatic, "only `use` changed: the mode stayed");
     }
 
     #[test]
@@ -4134,7 +4447,7 @@ mod lifecycle_tests {
     }
 
     /// The blob endpoint's answer for `caller` (no peer ticket sent).
-    fn blob_status(shared: &Arc<ServiceShared>, caller: &crate::front::Caller) -> String {
+    fn blob_status(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::front::Caller) -> String {
         let headers = request_headers("GET", &format!("{}{}", crate::peer_serve::BLOB_PATH_PREFIX, "a".repeat(64)), None);
         let (tx, rx) = std::sync::mpsc::channel();
         crate::peer_serve::route_blob(shared, &headers, caller, tx);
@@ -4143,21 +4456,21 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn paired_devices_fetch_blobs_without_a_peer_ticket_nodes_still_need_one() {
+    fn paired_phones_fetch_blobs_without_a_peer_ticket_nodes_still_need_one() {
         let shared = fixture_shared_serving(&[], Some("front-secret"), true);
-        let phone = crate::front::Caller { client_id: "phone".into(), role: crate::fleet_auth::Role::Device, app: None };
-        let lan = crate::front::Caller { client_id: "rik".into(), role: crate::fleet_auth::Role::Lan, app: None };
-        let node = crate::front::Caller { client_id: "box".into(), role: crate::fleet_auth::Role::Node, app: None };
-        // The device passes the gate and reaches the digest allow-list
+        let phone = makepad_network::fleet::front::Caller { client_id: "phone".into(), role: makepad_network::fleet::id::Role::Paired, admin: false, this_machine: false, app: None };
+        let lan = makepad_network::fleet::front::Caller { client_id: "rik".into(), role: makepad_network::fleet::id::Role::Device, admin: true, this_machine: false, app: None };
+        let node = makepad_network::fleet::front::Caller { client_id: "box".into(), role: makepad_network::fleet::id::Role::Node, admin: false, this_machine: false, app: None };
+        // The paired phone passes the gate and reaches the digest allow-list
         // (nothing verified in this fixture): 404, not 401/403.
         assert!(blob_status(&shared, &phone).contains("404"), "{}", blob_status(&shared, &phone));
-        // Everyone else still needs the node-to-node transfer secret and a
-        // ticket: refused before the allow-list (this fixture has no secret).
+        // Everyone else (the admin Mac included) still needs the node-to-node
+        // transfer secret and a ticket: refused before the allow-list (this fixture has no secret).
         for caller in [&lan, &node] {
             let status = blob_status(&shared, caller);
             assert!(status.contains("401") || status.contains("403"), "{status}");
         }
-        // An operator who turned serving off turns it off for devices too.
+        // An operator who turned serving off turns it off for paired phones too.
         let off = fixture_shared_serving(&[], Some("front-secret"), false);
         assert!(blob_status(&off, &phone).contains("403"));
         // Without a front stamp (no fleet credential) nothing gets in.
@@ -4166,12 +4479,12 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn devices_read_only_their_own_jobs() {
+    fn paired_phones_read_only_their_own_jobs() {
         let shared = fixture_shared(&[]);
         shared.job_owners.lock().unwrap().insert("job-7".into(), "phone".into());
-        let phone = crate::front::Caller { client_id: "phone".into(), role: crate::fleet_auth::Role::Device, app: None };
-        let other = crate::front::Caller { client_id: "tablet".into(), role: crate::fleet_auth::Role::Device, app: None };
-        let lan = crate::front::Caller { client_id: "rik".into(), role: crate::fleet_auth::Role::Lan, app: None };
+        let phone = makepad_network::fleet::front::Caller { client_id: "phone".into(), role: makepad_network::fleet::id::Role::Paired, admin: false, this_machine: false, app: None };
+        let other = makepad_network::fleet::front::Caller { client_id: "tablet".into(), role: makepad_network::fleet::id::Role::Paired, admin: false, this_machine: false, app: None };
+        let lan = makepad_network::fleet::front::Caller { client_id: "rik".into(), role: makepad_network::fleet::id::Role::Device, admin: true, this_machine: false, app: None };
         for path in ["/job/job-7", "/artifact/job-7-0", "/realtime/job-7"] {
             assert!(may_read(&shared, &phone, path), "{path}");
             assert!(!may_read(&shared, &other, path), "{path}");
@@ -4184,8 +4497,8 @@ mod lifecycle_tests {
     #[test]
     fn leases_and_cancel_belong_to_their_client() {
         let shared = fixture_shared(&[]);
-        let alice = crate::front::Caller { client_id: "alice".into(), role: crate::fleet_auth::Role::Lan, app: None };
-        let mallory = crate::front::Caller { client_id: "mallory".into(), role: crate::fleet_auth::Role::Lan, app: None };
+        let alice = makepad_network::fleet::front::Caller { client_id: "alice".into(), role: makepad_network::fleet::id::Role::Node, admin: false, this_machine: false, app: None };
+        let mallory = makepad_network::fleet::front::Caller { client_id: "mallory".into(), role: makepad_network::fleet::id::Role::Node, admin: false, this_machine: false, app: None };
         let origin = crate::lease::Origin { node_key: scoped_origin(&alice, "origin-a"), epoch: 1 };
         shared.leases.lock().unwrap().register("job-1", origin, crate::jobs::now_ms());
         shared.job_owners.lock().unwrap().insert("job-1".into(), "alice".into());

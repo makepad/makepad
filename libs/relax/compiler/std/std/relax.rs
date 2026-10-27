@@ -23,22 +23,42 @@ extern "C" {
     /// live patch (from the watcher thread).
     #[link_name = "__relax_on_patch"]
     pub safe fn on_patch(wake: extern "C" fn());
+    /// The runner hosts the process's main thread (`makepad run` of a HAL program: the provided
+    /// HAL's main loop runs there and `main` runs on a thread of its own). False under the bare
+    /// `relax` runner, where the program's own HAL runs its main loop as in its rustc build.
+    #[link_name = "__relax_main_hosted"]
+    pub safe fn main_hosted() -> bool;
 }
 
 extern "C" {
-    fn __relax_realtime(root: usize, data: usize, meta: usize);
+    fn __relax_realtime(root: usize, data: usize, meta: usize, wake: usize) -> u64;
+    fn __relax_realtime_ready(ticket: u64) -> bool;
 }
 
 /// The type whose code `realtime` names (its address is the root's identity, not a call).
 fn __realtime_root<T: ?Sized>(_: &T) {}
 
+/// What `realtime` marked is compiled once `ready` says so.
+#[derive(Clone, Copy, Debug)]
+pub struct Realtime(u64);
+
+impl Realtime {
+    /// Hand the code to the real-time thread now: everything the mark reaches is compiled, or the
+    /// wait for it reached its bound (a few hundred ms: audio starts promptly, what is still
+    /// missing compiles on its first call there).
+    pub fn ready(&self) -> bool {
+        self.0 == 0 || unsafe { __relax_realtime_ready(self.0) }
+    }
+}
+
 /// The code reachable from `x` runs on a real-time thread (an audio device's callback, a
 /// thread with a real-time policy): it must never wait for a compile. Under Relax everything
 /// it can reach -- the closure or fn's body, what that calls, the methods of the trait objects
-/// it calls through, now and as new ones are made -- is compiled now, before the first call.
-/// Pass the closure or fn pointer itself, or `&*boxed` for a trait object. Call it where the
-/// callback is installed, before the device or thread starts.
-pub fn realtime<T: ?Sized>(x: &T) {
+/// it calls through, now and as new ones are made -- is compiled ahead of the first call, in the
+/// background: the caller does not wait. Hand the code to the real-time thread once the ticket
+/// is `ready`; `wake` (if any) is called on a thread of its own then. Pass the closure or fn
+/// itself, or `&*boxed` for a trait object; `x` is only read during this call.
+pub fn realtime<T: ?Sized>(x: &T, wake: Option<extern "C" fn()>) -> Realtime {
     let p: *const T = x;
     // a trait object's (or slice's) metadata is the word after the data pointer
     let meta = if crate::mem::size_of::<*const T>() == 2 * crate::mem::size_of::<usize>() {
@@ -47,7 +67,8 @@ pub fn realtime<T: ?Sized>(x: &T) {
         0
     };
     let root = __realtime_root::<T> as fn(&T) as usize;
-    unsafe { __relax_realtime(root, p as *const u8 as usize, meta) }
+    let wake = wake.map_or(0, |w| w as usize);
+    Realtime(unsafe { __relax_realtime(root, p as *const u8 as usize, meta, wake) })
 }
 
 extern "C" {
@@ -72,14 +93,15 @@ extern "C" {
     fn __relax_module_error(buf: *mut u8, cap: usize) -> usize;
     fn __relax_guard_enter(deadline_ms: u64) -> u64;
     fn __relax_guard_leave(token: u64);
-    fn __relax_sb_enter(module: u32, out: *mut [i64; 4]) -> u32;
-    fn __relax_sb_leave(prev: *const [i64; 4]);
+    fn __relax_sb_enter(module: u32) -> u32;
+    fn __relax_sb_leave();
     fn __relax_sb_alloca(size: usize, align: usize) -> usize;
-    fn __relax_sb_stats(out: *mut [u64; 6], recycle: u32) -> u32;
+    fn __relax_sb_stats(out: *mut [u64; 5]);
     fn __relax_domain_id() -> u32;
     fn __relax_restart_supported();
     fn __relax_restart_requested() -> u32;
     fn __relax_restart_reason(buf: *mut u8, cap: usize) -> usize;
+    fn __relax_patched_files(since: u64, buf: *mut u8, cap: usize) -> usize;
     fn __relax_restored_state(buf: *mut u8, cap: usize) -> usize;
     fn __relax_restart_now(state: *const u8, len: usize);
     fn __relax_live_stream(path: *const u8, plen: usize, text: *const u8, len: usize) -> u32;
@@ -168,6 +190,67 @@ pub fn live_log(json_line: &str) {
     unsafe { __relax_live_log(json_line.as_ptr(), json_line.len()) }
 }
 
+// ---- engine requests (the inspect channel's `engine_request` events)
+
+extern "C" {
+    fn __relax_engine_request(p: *const u8, n: usize, buf: *mut u8, cap: usize) -> usize;
+    fn __relax_engine_replies(after: u64, buf: *mut u8, cap: usize) -> usize;
+}
+
+/// A change the program needs in its engine's code, for whoever maintains that code (an
+/// in-game AI asks for a verb the engine lacks). Every field is plain text, bounded by the host.
+pub struct EngineRequest<'a> {
+    /// the game (or document) it is about
+    pub game: &'a str,
+    /// one line: what is needed
+    pub summary: &'a str,
+    /// what exactly, and why
+    pub details: &'a str,
+    /// the conversation that led to it (an excerpt)
+    pub context: &'a str,
+    /// where answers go inside the program (e.g. a chat session id); carried back verbatim
+    pub reply_route: &'a str,
+}
+
+/// Posts `req` on the observation channel (an `engine_request` event, with this app, node and
+/// pid). Returns the request's id, which every answer names.
+pub fn post_engine_request(req: &EngineRequest) -> Result<String, String> {
+    let mut record = String::new();
+    for (i, f) in [req.game, req.summary, req.details, req.context, req.reply_route].iter().enumerate() {
+        if i > 0 {
+            record.push('\0');
+        }
+        record.push_str(&f.replace('\0', ""));
+    }
+    let mut buf = [0u8; 512];
+    let n = unsafe { __relax_engine_request(record.as_ptr(), record.len(), buf.as_mut_ptr(), buf.len()) };
+    let text = String::from_utf8_lossy(&buf[..n.min(buf.len())]).into_owned();
+    match text.strip_prefix('!') {
+        Some(why) => Err(why.to_string()),
+        None => Ok(text),
+    }
+}
+
+/// This program's engine-request stream after record `after` (0: all kept), one JSON object
+/// per line: `{"seq":..,"id":..,"status":..,"summary":..,"message":..,"at_ms":..}`. Status
+/// `posted` (the request itself), `received|working|deployed|declined|note` (answers), or
+/// `code_update` (id "": a live edit was applied to this process; message says how and what).
+/// Pass the last `seq` seen to get only newer ones; 0 rebuilds the whole history.
+pub fn engine_replies(after: u64) -> String {
+    unsafe {
+        let mut cap = 4096usize;
+        loop {
+            let mut v: crate::vec::Vec<u8> = crate::vec::Vec::with_capacity(cap);
+            let n = __relax_engine_replies(after, v.as_mut_ptr(), cap);
+            if n <= cap {
+                v.set_len(n);
+                return String::from_utf8_lossy(&v).into_owned();
+            }
+            cap = n + 1024;
+        }
+    }
+}
+
 /// After a restart: when the edit that caused it was saved (unix ms), for save -> back on screen.
 pub fn restart_saved_ms() -> Option<f64> {
     crate::env::var("MAKEPAD_RUN_RESTART_T0").ok().and_then(|v| v.parse::<f64>().ok()).filter(|v| *v > 0.0)
@@ -206,6 +289,29 @@ pub fn restart_reason() -> String {
     }
 }
 
+/// The source files live patches changed since `*seen` (start it at 0; the call advances it).
+/// The patched fns run the new code at their next call; what the program built from code at run
+/// time (makepad's `script_mod!` designs, evaluated once) it builds again for these files.
+pub fn patched_files(seen: &mut u64) -> crate::vec::Vec<String> {
+    let text = unsafe {
+        let mut v: crate::vec::Vec<u8> = crate::vec::Vec::new();
+        loop {
+            let n = __relax_patched_files(*seen, v.as_mut_ptr(), v.capacity());
+            if n <= v.capacity() {
+                v.set_len(n);
+                break;
+            }
+            v.reserve(n);
+        }
+        String::from_utf8_lossy(&v).into_owned()
+    };
+    let mut lines = text.lines();
+    if let Some(n) = lines.next().and_then(|n| n.parse().ok()) {
+        *seen = n;
+    }
+    lines.map(String::from).collect()
+}
+
 /// Restarts the program with `state`, which its fresh run reads with `restored_state`.
 /// A hosted app queues a domain relaunch and returns so its event loop can finish shutdown;
 /// a directly running program replaces its process and returns only on failure.
@@ -227,15 +333,13 @@ pub fn restored_state() -> Option<String> {
     }
 }
 
-/// Sandbox code and data statistics: [recycles, code bytes in use, dead code bytes pending,
-/// image read-only bytes, image read-write bytes, live arenas]. `recycle`: rebuild the live
-/// module code first (blocking; Err when frames may still run in the space it would reuse).
-pub fn sandbox_stats(recycle: bool) -> Result<[u64; 6], String> {
-    let mut out = [0u64; 6];
-    if unsafe { __relax_sb_stats(&mut out, recycle as u32) } == 0 {
-        return Err(last_error());
-    }
-    Ok(out)
+/// Sandbox code and data statistics: [twin code bytes installed (append-only: replaced versions
+/// stay mapped), image read-only bytes, image read-write bytes, live arenas, unloaded modules'
+/// windows (reserved, inaccessible, never reused)].
+pub fn sandbox_stats() -> [u64; 5] {
+    let mut out = [0u64; 5];
+    unsafe { __relax_sb_stats(&mut out) };
+    out
 }
 
 // ---- used by the wrappers Relax generates for sandboxed modules (not an API)
@@ -270,21 +374,21 @@ impl Inst {
 }
 
 #[doc(hidden)]
-pub struct __SbFrame([i64; 4]);
+pub struct __SbFrame(());
 
 impl Drop for __SbFrame {
     fn drop(&mut self) {
-        unsafe { __relax_sb_leave(&self.0) }
+        unsafe { __relax_sb_leave() }
     }
 }
 
 #[doc(hidden)]
 pub fn __sb_enter(module: u32) -> __SbFrame {
-    let mut prev = [0i64; 4];
-    if unsafe { __relax_sb_enter(module, &mut prev) } != 0 {
-        panic!("the module was unloaded");
+    match unsafe { __relax_sb_enter(module) } {
+        0 => __SbFrame(()),
+        1 => panic!("the module was unloaded"),
+        _ => panic!("too many threads inside the module at once"),
     }
-    __SbFrame(prev)
 }
 
 fn sb_alloca<T>(n: usize) -> *mut T {
@@ -666,17 +770,46 @@ pub mod probe {
     use crate::fmt::Debug;
 
     extern "C" {
-        fn __relax_probe_emit(text: *const u8, len: usize);
+        fn __relax_probe_emit(line: u32, text: *const u8, len: usize);
         fn __relax_probe_count(key: *const u8, klen: usize);
         fn __relax_probe_hist(key: *const u8, klen: usize, x: f64);
         fn __relax_probe_sample(key: *const u8, klen: usize, text: *const u8, len: usize, keep: usize);
         fn __relax_probe_pause();
+        fn __relax_probe_result(tag: u32, text: *const u8, len: usize);
     }
 
-    /// Sends `v` (its Debug form) to the agent as one `probe` event (rate-limited).
+    /// makepad inspect `eval`: the value's type and `{:#?}` are the answer.
+    #[doc(hidden)]
+    pub fn __eval<T: ?Sized + Debug>(v: &T) {
+        let t = crate::any::type_name::<T>();
+        unsafe { __relax_probe_result(0, t.as_ptr(), t.len()) }
+        let s = crate::format!("{:#?}", v);
+        unsafe { __relax_probe_result(1, s.as_ptr(), s.len()) }
+    }
+
+    /// makepad inspect `eval` of a value that is not Debug: its type, size, address and first bytes.
+    #[doc(hidden)]
+    pub fn __eval_raw<T: ?Sized>(v: &T) {
+        let t = crate::any::type_name::<T>();
+        unsafe { __relax_probe_result(0, t.as_ptr(), t.len()) }
+        let n = crate::mem::size_of_val(v);
+        let p = v as *const T as *const u8;
+        let bytes = unsafe { crate::slice::from_raw_parts(p, n.min(256)) };
+        let mut s = crate::format!("{} bytes at {:p}:", n, p);
+        for b in bytes {
+            s.push_str(&crate::format!(" {:02x}", b));
+        }
+        unsafe { __relax_probe_result(1, s.as_ptr(), s.len()) }
+    }
+
+    /// Sends `v` (its Debug form) to the agent as one `probe` event (rate-limited) and keeps it
+    /// in the probe's recent values (`probe read`), named by the emit's own expression: the
+    /// elements of `emit((dist, config.near))` are the columns `dist`, `config.near`.
+    #[track_caller]
     pub fn emit<T: Debug>(v: T) {
+        let line = crate::panic::Location::caller().line();
         let s = crate::format!("{:?}", v);
-        unsafe { __relax_probe_emit(s.as_ptr(), s.len()) }
+        unsafe { __relax_probe_emit(line, s.as_ptr(), s.len()) }
     }
 
     /// Counts one hit under `key`.

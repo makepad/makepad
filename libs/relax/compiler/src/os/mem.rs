@@ -88,6 +88,69 @@ fn refuse_code(what: &str, addr: u64, len: usize) -> ! {
     panic!("makepad run: no-codegen mode: {} of {} bytes at {:#x} (machine code is not allowed in this mode)", what, len, addr)
 }
 
+/// Replaces the 8 code bytes at `addr` (8-aligned) with one atomic store: a thread executing
+/// them meanwhile runs the old or the new instruction, never a mix (x64 thunk heads).
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+pub unsafe fn patch_code_u64(addr: u64, w: u64) {
+    debug_assert!(addr & 7 == 0, "patch_code_u64: unaligned {:#x}", addr);
+    fill_code(addr, 8, |b| (*(b.as_mut_ptr() as *const std::sync::atomic::AtomicU64)).store(w, std::sync::atomic::Ordering::Release));
+}
+
+/// Replaces the instruction at `addr` (4-aligned) with one atomic store, then makes the
+/// instruction cache see it (arm64 thunk heads: a `b` may be modified while it runs).
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+pub unsafe fn patch_code_u32(addr: u64, w: u32) {
+    debug_assert!(addr & 3 == 0, "patch_code_u32: unaligned {:#x}", addr);
+    fill_code(addr, 4, |b| (*(b.as_mut_ptr() as *const std::sync::atomic::AtomicU32)).store(w, std::sync::atomic::Ordering::Release));
+}
+
+/// The OS page size (mprotect's granularity): 4 KB on x86-64, 16 KB on Apple arm64.
+pub fn page_size() -> u64 {
+    static PAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let p = PAGE.load(std::sync::atomic::Ordering::Relaxed);
+    if p != 0 {
+        return p;
+    }
+    #[cfg(unix)]
+    let p = {
+        extern "C" {
+            fn sysconf(name: i32) -> i64;
+        }
+        #[cfg(target_os = "macos")]
+        const SC_PAGESIZE: i32 = 29;
+        #[cfg(target_os = "android")]
+        const SC_PAGESIZE: i32 = 0x27;
+        #[cfg(not(any(target_os = "macos", target_os = "android")))]
+        const SC_PAGESIZE: i32 = 30;
+        let v = unsafe { sysconf(SC_PAGESIZE) };
+        if v > 0 { v as u64 } else { 4096 }
+    };
+    #[cfg(not(unix))]
+    let p = 4096u64;
+    PAGE.store(p, std::sync::atomic::Ordering::Relaxed);
+    p
+}
+
+/// Makes invalidated code [addr, addr + len) (whole pages that hold nothing else, invalid.rs)
+/// inaccessible for good: any fetch, read or write there faults (a stale access). Its addresses
+/// stay taken. A failure is fatal: the code would stay runnable.
+pub fn invalidate_code(addr: u64, len: usize) {
+    if no_codegen() {
+        return;
+    }
+    #[cfg(unix)]
+    let ok = unsafe { unix::mprotect(addr as *mut u8, len, 0) } == 0;
+    #[cfg(windows)]
+    let ok = {
+        let mut old = 0u32;
+        unsafe { crate::os::win32::VirtualProtect(addr as *mut u8, len, crate::os::win32::PAGE_NOACCESS, &mut old) != 0 }
+    };
+    if !ok {
+        eprintln!("makepad run: invalidated code at {:#x} ({} bytes) could not be made inaccessible", addr, len);
+        std::process::abort();
+    }
+}
+
 #[cfg(unix)]
 mod unix {
     extern "C" {
@@ -96,8 +159,6 @@ mod unix {
         pub fn mprotect(addr: *mut u8, len: usize, prot: i32) -> i32;
     }
     pub const PROT_RW: i32 = 3;
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    pub const PROT_RWX: i32 = 7;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub const MAP_PRIVATE_ANON: i32 = 0x22;
     #[cfg(target_os = "macos")]
@@ -112,6 +173,13 @@ mod unix {
         p as u64
     }
 
+    /// Makes [addr, addr+len) inaccessible (a guard page).
+    pub fn guard_page(addr: u64, len: usize) {
+        unsafe {
+            mprotect(addr as *mut u8, len, 0);
+        }
+    }
+
     /// Gives a range's pages back but keeps its addresses taken (PROT_NONE, no reserve): a
     /// retired unit's code addresses are never handed out again, so nothing that names them --
     /// a stale code pointer, a profiler's perf map / symbol table written for that unit --
@@ -123,7 +191,16 @@ mod unix {
         #[cfg(target_os = "macos")]
         const MAP_FIXED_NORESERVE: i32 = 0x10 | 0x40;
         unsafe {
-            mmap(addr as *mut u8, len, 0, MAP_PRIVATE_ANON | MAP_FIXED_NORESERVE, -1, 0);
+            if mmap(addr as *mut u8, len, 0, MAP_PRIVATE_ANON | MAP_FIXED_NORESERVE, -1, 0) as u64 == addr {
+                return;
+            }
+            // the pages stay committed, but nothing can execute or name them for other code
+            if mprotect(addr as *mut u8, len, 0) != 0 {
+                // (a failed MAP_FIXED may already have removed the old mapping: the range could be
+                // handed out again while stale return addresses name it. Never contained: abort)
+                eprintln!("makepad run: retired code memory at {:#x} ({} bytes) could not be made unreachable", addr, len);
+                std::process::abort();
+            }
         }
     }
 
@@ -175,40 +252,337 @@ mod unix {
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod imp {
-    pub use super::unix::{alloc_rw, commit, free, mem_fns, prefault, CODE_TAIL};
-    use super::unix::{mprotect, PROT_RWX};
+    pub use super::unix::{alloc_rw, commit, free, guard_page, mem_fns, CODE_TAIL};
+    use super::unix::{mmap, mprotect, munmap, PROT_RW};
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
-    pub fn reserve(code: usize, rest: usize) -> u64 {
-        let base = alloc_rw(code + rest);
-        // perf names samples in anonymous memory from /tmp/perf-<pid>.map, but only for mappings
-        // it sees as anonymous ("//anon"): a prctl-named mapping ("[anon:makepad-run-jit-code]") is a
-        // DSO to it, and the JIT's names would never appear. With the perf map on, the code
-        // stays unnamed.
-        if !crate::jit::perf_map_on() {
-            crate::memstat::name_mapping(base as usize, code, c"makepad-run-jit-code");
+    // W^X (JITSAFE fix 15): code memory is two views of one memfd -- the read-execute view at the
+    // code addresses (what everyone calls and patches by address) and a read-write alias that
+    // only `write_code` / `fill_code` write through. No page of the process is writable and
+    // executable at once, so a stray write in the program or the JIT cannot become code.
+    // MAKEPAD_RUN_WX=0 (and the perf map, whose JIT symbols perf applies only to anonymous
+    // memory) keeps the single read-write-execute view. A program's fork gives the child copies
+    // (fork_prepare / fork_child).
+
+    extern "C" {
+        fn syscall(n: i64, ...) -> i64;
+        fn ftruncate(fd: i32, len: i64) -> i32;
+        fn close(fd: i32) -> i32;
+        fn lseek(fd: i32, off: i64, whence: i32) -> i64;
+        fn pwrite(fd: i32, buf: *const u8, n: usize, off: i64) -> isize;
+        fn write(fd: i32, buf: *const u8, n: usize) -> isize;
+        fn _exit(code: i32) -> !;
+    }
+    #[cfg(target_arch = "x86_64")]
+    const SYS_MEMFD_CREATE: i64 = 319;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_MEMFD_CREATE: i64 = 279;
+    const MFD_CLOEXEC: i64 = 1;
+    const PROT_RX: i32 = 5;
+    const PROT_RWX: i32 = 7;
+    const MAP_SHARED: i32 = 0x01;
+    const MAP_FIXED: i32 = 0x10;
+    const SEEK_DATA: i32 = 3;
+    const SEEK_HOLE: i32 = 4;
+
+    /// Code regions: (RX base, size, RW base, memfd); append-only, published by REGIONS_N (a
+    /// released region keeps its entry with size 0).
+    const REGIONS_CAP: usize = 4096;
+    static REGIONS: [[AtomicU64; 3]; REGIONS_CAP] = [const { [const { AtomicU64::new(0) }; 3] }; REGIONS_CAP];
+    static REGION_FD: [AtomicI64; REGIONS_CAP] = [const { AtomicI64::new(-1) }; REGIONS_CAP];
+    static REGIONS_N: AtomicUsize = AtomicUsize::new(0);
+    static REGIONS_LOCK: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
+
+    /// W^X is on (decided once: before the first reservation).
+    fn wx() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| !std::env::var_os("MAKEPAD_RUN_WX").is_some_and(|v| v == "0") && !crate::jit::perf_map_on())
+    }
+    static WX_FAILED: AtomicBool = AtomicBool::new(false);
+
+    /// A copy of every code region in a new memfd, made by `fork_prepare` for the child of a
+    /// program's fork (jit.rs relax_fork): -1 none.
+    static FORK_FD: [AtomicI64; REGIONS_CAP] = [const { AtomicI64::new(-1) }; REGIONS_CAP];
+
+    /// A memfd holding what code region `r` (memfd `old`) holds now: the written ranges only, the
+    /// rest stays a hole (zero pages). -1: no memfd.
+    unsafe fn copy_region(r: &[AtomicU64; 3], old: i32) -> i32 {
+        let (size, rw) = (r[1].load(Ordering::Relaxed), r[2].load(Ordering::Relaxed));
+        let fd = syscall(SYS_MEMFD_CREATE, c"makepad-run-jit-code".as_ptr(), MFD_CLOEXEC) as i32;
+        let mut ok = fd >= 0 && ftruncate(fd, size as i64) == 0;
+        let mut at = 0i64;
+        while ok && (at as u64) < size {
+            let d = lseek(old, at, SEEK_DATA);
+            if d < 0 {
+                break;
+            }
+            let h = lseek(old, d, SEEK_HOLE).min(size as i64);
+            let mut o = d;
+            while ok && o < h {
+                let w = pwrite(fd, (rw + o as u64) as *const u8, (h - o) as usize, o);
+                ok = w > 0;
+                o += w.max(0) as i64;
+            }
+            at = h;
         }
-        crate::memstat::name_mapping(base as usize + code, rest, c"makepad-run-jit-data");
+        if !ok && fd >= 0 {
+            close(fd);
+            return -1;
+        }
+        fd
+    }
+
+    /// Before a program's fork (every code writer paused: jit.rs fork_prepare): each code region
+    /// is copied into a memfd of its own for the child. MAP_SHARED views would otherwise share
+    /// the parent's code pages with the child, which compiles on (a lazy compile in the child)
+    /// and would write into the parent's code. A fork of the loader's own native code execs at
+    /// once and never writes code: it shares the pages, nothing is copied.
+    pub fn fork_prepare() {
+        let n = REGIONS_N.load(Ordering::Acquire);
+        for (k, (r, fd)) in REGIONS[..n].iter().zip(&REGION_FD[..n]).enumerate() {
+            let old = fd.load(Ordering::Relaxed) as i32;
+            if r[1].load(Ordering::Acquire) != 0 && old >= 0 {
+                FORK_FD[k].store(unsafe { copy_region(r, old) } as i64, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The parent after the fork: the copies are the child's.
+    pub fn fork_parent() {
+        for fd in &FORK_FD[..REGIONS_N.load(Ordering::Acquire)] {
+            let f = fd.swap(-1, Ordering::Relaxed);
+            if f >= 0 {
+                unsafe { close(f as i32) };
+            }
+        }
+    }
+
+    /// The child after the fork (its one thread, before it writes any code): both views of every
+    /// region are mapped again, at the same addresses, from the copy fork_prepare made.
+    pub fn fork_child() {
+        let n = REGIONS_N.load(Ordering::Acquire);
+        for (k, (r, fdc)) in REGIONS[..n].iter().zip(&REGION_FD[..n]).enumerate() {
+            let (rx, size, rw) = (r[0].load(Ordering::Relaxed), r[1].load(Ordering::Relaxed), r[2].load(Ordering::Relaxed));
+            if size == 0 || fdc.load(Ordering::Relaxed) < 0 {
+                continue;
+            }
+            unsafe {
+                let fd = FORK_FD[k].swap(-1, Ordering::Relaxed) as i32;
+                let ok = fd >= 0
+                    && mmap(rx as *mut u8, size as usize, PROT_RX, MAP_SHARED | MAP_FIXED, fd, 0) as u64 == rx
+                    && mmap(rw as *mut u8, size as usize, PROT_RW, MAP_SHARED | MAP_FIXED, fd, 0) as u64 == rw;
+                if !ok {
+                    let msg = b"makepad run: the forked child has no copy of its code memory, exiting\n";
+                    write(2, msg.as_ptr(), msg.len());
+                    _exit(134);
+                }
+                close(fdc.swap(fd as i64, Ordering::Relaxed) as i32);
+            }
+        }
+    }
+
+    /// Code memory at `base` (already reserved read-write): the read-execute view of a new memfd
+    /// replaces it, and its read-write alias goes elsewhere. false: no memfd here (old kernel,
+    /// seccomp) -- the caller keeps the single read-write-execute view.
+    fn code_views(base: u64, size: usize) -> bool {
+        let _g = REGIONS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // (a region's entry is never reused: code_rw_of reads entries without the lock)
+        let n = REGIONS_N.load(Ordering::Acquire);
+        if n == REGIONS_CAP {
+            panic!("code memory: more than {} code reservations in this process", REGIONS_CAP);
+        }
+        unsafe {
+            let fd = syscall(SYS_MEMFD_CREATE, c"makepad-run-jit-code".as_ptr(), MFD_CLOEXEC) as i32;
+            if fd < 0 {
+                return false;
+            }
+            if ftruncate(fd, size as i64) != 0 {
+                close(fd);
+                return false;
+            }
+            let rw = mmap(std::ptr::null_mut(), size, PROT_RW, MAP_SHARED, fd, 0);
+            if rw as isize == -1 || rw.is_null() {
+                close(fd);
+                return false;
+            }
+            if mmap(base as *mut u8, size, PROT_RX, MAP_SHARED | MAP_FIXED, fd, 0) as u64 != base {
+                // MAP_FIXED failing may have unmapped the range: take it back as before
+                munmap(rw, size);
+                close(fd);
+                if mmap(base as *mut u8, size, PROT_RWX, super::unix::MAP_PRIVATE_ANON | MAP_FIXED, -1, 0) as u64 != base {
+                    panic!("reservation: code memory lost while mapping its views");
+                }
+                return false;
+            }
+            REGIONS[n][0].store(base, Ordering::Relaxed);
+            REGIONS[n][2].store(rw as u64, Ordering::Relaxed);
+            REGION_FD[n].store(fd as i64, Ordering::Relaxed);
+            REGIONS[n][1].store(size as u64, Ordering::Release);
+            REGIONS_N.store(n + 1, Ordering::Release);
+        }
+        true
+    }
+
+    /// The region code_rw_of found last (writes come in runs into one region: no scan then).
+    static LAST: AtomicUsize = AtomicUsize::new(0);
+
+    /// The RW alias of code address `addr` (None: no W^X view holds it).
+    #[inline]
+    fn code_rw_of(addr: u64) -> Option<u64> {
+        let hit = |r: &[AtomicU64; 3]| -> Option<u64> {
+            let size = r[1].load(Ordering::Acquire);
+            let base = r[0].load(Ordering::Relaxed);
+            (addr >= base && addr - base < size).then(|| addr - base + r[2].load(Ordering::Relaxed))
+        };
+        let n = REGIONS_N.load(Ordering::Acquire);
+        let last = LAST.load(Ordering::Relaxed);
+        if last < n {
+            if let Some(w) = hit(&REGIONS[last]) {
+                return Some(w);
+            }
+        }
+        for (k, r) in REGIONS[..n].iter().enumerate() {
+            if let Some(w) = hit(r) {
+                LAST.store(k, Ordering::Relaxed);
+                return Some(w);
+            }
+        }
+        None
+    }
+
+    /// The code part of a fresh reservation: W^X views, or (W^X off or unavailable) one RWX view.
+    fn make_code(base: u64, code: usize) {
+        if code == 0 {
+            return;
+        }
+        if wx() && !WX_FAILED.load(Ordering::Relaxed) {
+            if code_views(base, code) {
+                return;
+            }
+            WX_FAILED.store(true, Ordering::Relaxed);
+            eprintln!("makepad run: no memfd for W^X code memory here: code pages are read-write-execute");
+        }
         if unsafe { mprotect(base as *mut u8, code, PROT_RWX) } != 0 {
             panic!("reservation: mprotect RWX failed");
         }
+    }
+
+    pub fn reserve(code: usize, rest: usize) -> u64 {
+        let base = alloc_rw(code + rest);
+        crate::memstat::name_mapping(base as usize + code, rest, c"makepad-run-jit-data");
+        make_code(base, code);
+        // perf names samples in anonymous memory from /tmp/perf-<pid>.map, but only for mappings
+        // it sees as anonymous ("//anon"): a prctl-named mapping ("[anon:makepad-run-jit-code]") is a
+        // DSO to it, and the JIT's names would never appear. With the perf map on, the code
+        // stays unnamed (and W^X is off: a memfd view is a file to perf too).
+        if !crate::jit::perf_map_on() && code_rw_of(base).is_none() {
+            crate::memstat::name_mapping(base as usize, code, c"makepad-run-jit-code");
+        }
+        huge_code_pages(base, code);
         base
     }
 
-    /// Gives a reservation back.
+    /// Code memory in 2-MB pages where the kernel gives them (MADV_HUGEPAGE: THP with direct
+    /// compaction for this range, khugepaged collapses the rest): the JIT's hot code is spread
+    /// over ~1.8x the 4-KB pages of a rustc binary's (installs land in time order, between cold
+    /// code), and the race's UI thread took 2.2x native's L1 iTLB misses (RACEPAR, Zen 5). With
+    /// THP `always` but defrag `madvise` the code region stayed all 4-KB pages. A no-op where THP
+    /// is off; costs up to one partly used 2-MB page per touched region in RSS. (A W^X memfd is
+    /// shmem: its huge pages follow /sys/kernel/mm/transparent_hugepage/shmem_enabled.)
+    /// MAKEPAD_RUN_HUGE_CODE=0 keeps 4-KB pages (A/B).
+    fn huge_code_pages(addr: u64, len: usize) {
+        if std::env::var_os("MAKEPAD_RUN_HUGE_CODE").is_some_and(|v| v == "0") {
+            return;
+        }
+        extern "C" {
+            fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+        }
+        const MADV_HUGEPAGE: i32 = 14;
+        unsafe { madvise(addr as *mut u8, len, MADV_HUGEPAGE) };
+    }
+
+    /// `reserve` at exactly `at` (the wasm32 web target's window, web32.rs); 0 when the range is
+    /// taken.
+    pub fn reserve_at(at: u64, code: usize, rest: usize) -> u64 {
+        const MAP_FIXED_NOREPLACE: i32 = 0x100000;
+        let p = unsafe { super::unix::mmap(at as *mut u8, code + rest, super::unix::PROT_RW, super::unix::MAP_PRIVATE_ANON | MAP_FIXED_NOREPLACE, -1, 0) };
+        if p as isize == -1 || p as u64 != at {
+            return 0;
+        }
+        crate::memstat::name_mapping(at as usize + code, rest, c"makepad-run-jit-data");
+        make_code(at, code);
+        if code_rw_of(at).is_none() {
+            crate::memstat::name_mapping(at as usize, code, c"makepad-run-jit-code");
+        }
+        at
+    }
+
+    /// Gives a reservation back: its code views (the alias and the memfd go) and the rest.
     pub fn release(base: u64, code: usize, rest: usize) {
+        {
+            let _g = REGIONS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let n = REGIONS_N.load(Ordering::Acquire);
+            for (r, fd) in REGIONS[..n].iter().zip(&REGION_FD[..n]) {
+                if r[0].load(Ordering::Relaxed) == base && r[1].load(Ordering::Relaxed) != 0 {
+                    let rw = r[2].load(Ordering::Relaxed);
+                    r[1].store(0, Ordering::Release);
+                    unsafe {
+                        munmap(rw as *mut u8, code);
+                        close(fd.swap(-1, Ordering::Relaxed) as i32);
+                    }
+                    break;
+                }
+            }
+        }
         super::unix::retire(base, code + rest);
     }
 
-    /// Code memory is read-write-execute: a plain copy.
+    /// unix::prefault for code memory too: a W^X range's pages are made in its RW alias (which
+    /// the write goes through) and mapped in its RX view (read: the view is not writable).
+    pub fn prefault(addr: u64, len: usize) {
+        extern "C" {
+            fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+        }
+        const MADV_POPULATE_READ: i32 = 22;
+        match code_rw_of(addr) {
+            Some(w) => {
+                super::unix::prefault(w, len);
+                let lo = addr & !4095;
+                let hi = (addr + len as u64 + 4095) & !4095;
+                if hi > lo {
+                    unsafe { madvise(lo as *mut u8, (hi - lo) as usize, MADV_POPULATE_READ) };
+                }
+            }
+            None => super::unix::prefault(addr, len),
+        }
+    }
+
+    /// Where code bytes at `addr` are written: the RW alias, or (single RWX view) the address.
+    #[inline]
+    #[track_caller]
+    fn writable(addr: u64, len: usize) -> u64 {
+        match code_rw_of(addr) {
+            Some(w) => {
+                debug_assert!(code_rw_of(addr + len.max(1) as u64 - 1) == Some(w + len.max(1) as u64 - 1), "code write across regions at {:#x}", addr);
+                w
+            }
+            None if !wx() || WX_FAILED.load(Ordering::Relaxed) => addr,
+            None => panic!("write_code: {:#x} is not code memory", addr),
+        }
+    }
+
+    /// Writes machine code: a copy through the RW alias, then the icache flush for the RX range.
+    #[track_caller]
     pub unsafe fn write_code(addr: u64, b: &[u8]) {
-        std::ptr::copy_nonoverlapping(b.as_ptr(), addr as *mut u8, b.len());
+        std::ptr::copy_nonoverlapping(b.as_ptr(), writable(addr, b.len()) as *mut u8, b.len());
         flush_icache(addr, b.len());
     }
 
-    /// Writes `len` bytes of machine code at `addr` in place (`fill` gets them writable; what
-    /// they hold before is unspecified), as `write_code` would.
+    /// Writes `len` bytes of machine code at `addr` in place (`fill` gets them writable, through
+    /// the RW alias; what they hold before is unspecified), as `write_code` would.
+    #[track_caller]
     pub unsafe fn fill_code(addr: u64, len: usize, fill: impl FnOnce(&mut [u8])) {
-        fill(std::slice::from_raw_parts_mut(addr as *mut u8, len));
+        fill(std::slice::from_raw_parts_mut(writable(addr, len) as *mut u8, len));
         flush_icache(addr, len);
     }
 
@@ -255,7 +629,7 @@ mod imp {
 /// that call.
 #[cfg(target_os = "macos")]
 mod imp {
-    pub use super::unix::{alloc_rw, commit, free, mem_fns, prefault, CODE_TAIL};
+    pub use super::unix::{alloc_rw, commit, free, guard_page, mem_fns, prefault, CODE_TAIL};
     use super::unix::mprotect;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -320,6 +694,25 @@ mod imp {
             }
             let at = code_alloc_at(code, base);
             assert_eq!(at, base, "reservation: code view not at the base");
+            base
+        }
+    }
+
+    /// `reserve` at exactly `at` (the wasm32 web target's window, web32.rs); 0 when the range is
+    /// taken.
+    pub fn reserve_at(at: u64, code: usize, rest: usize) -> u64 {
+        const VM_FLAGS_FIXED: i32 = 0;
+        unsafe {
+            let task = mach_task_self();
+            let mut base: u64 = at;
+            if mach_vm_allocate(task, &mut base, (code + rest) as u64, VM_FLAGS_FIXED) != 0 || base != at {
+                return 0;
+            }
+            if super::no_codegen() {
+                return base;
+            }
+            let c = code_alloc_at(code, base);
+            assert_eq!(c, base, "reservation: code view not at the base");
             base
         }
     }
@@ -443,10 +836,99 @@ mod imp {
     const GRANULE: u64 = 1 << 20;
     /// the last page of the code area holds its unwind table entry (register_unwind)
     pub const CODE_TAIL: u64 = 4096;
-    const REGIONS: usize = 64;
-    /// (base, code bytes, total bytes) of each reservation
-    static RES: [[AtomicU64; 3]; REGIONS] = [const { [const { AtomicU64::new(0) }; 3] }; REGIONS];
+    const REGIONS: usize = 1024;
+    /// (base, code bytes, total bytes, RW alias of the code or 0, section handle) of each
+    /// reservation; append-only (lookups read entries without the lock), a released one keeps
+    /// its entry with total 0
+    static RES: [[AtomicU64; 5]; REGIONS] = [const { [const { AtomicU64::new(0) }; 5] }; REGIONS];
     static RES_N: AtomicUsize = AtomicUsize::new(0);
+
+    // W^X (JITSAFE fix 15): the code part of a reservation is two views of one pagefile-backed
+    // section -- read-execute at the code addresses (what everyone calls and patches by address)
+    // and a read-write alias elsewhere that only write_code / fill_code / the unwind entry write
+    // through. The views replace a placeholder (VirtualAlloc2 / MapViewOfFile3), so the code
+    // stays right below the reservation's data. No page is writable and executable at once.
+    // MAKEPAD_RUN_WX=0, or a system without placeholders / sections, keeps one
+    // PAGE_EXECUTE_READWRITE view.
+    fn wx() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| !std::env::var_os("MAKEPAD_RUN_WX").is_some_and(|v| v == "0"))
+    }
+    static WX_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// [base, base + code + rest) with the code part as an RX view and an RW alias of one
+    /// section: (base, alias, section). None: no placeholders here (nothing is left reserved).
+    unsafe fn reserve_views(code: usize, rest: usize) -> Option<(u64, u64, u64)> {
+        let me = GetCurrentProcess();
+        let total = code + rest;
+        let base = VirtualAlloc2(me, std::ptr::null_mut(), total, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, std::ptr::null_mut(), 0);
+        if base.is_null() {
+            return None;
+        }
+        // the code placeholder and the rest's
+        if rest != 0 && VirtualFree(base, code, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER) == 0 {
+            VirtualFree(base, 0, MEM_RELEASE);
+            return None;
+        }
+        let undo = |code_too: bool| {
+            if code_too {
+                VirtualFree(base, 0, MEM_RELEASE);
+            }
+            if rest != 0 {
+                VirtualFree(base.add(code), 0, MEM_RELEASE);
+            }
+        };
+        let sec = CreateFileMappingW(INVALID_HANDLE_VALUE, std::ptr::null(), PAGE_EXECUTE_READWRITE | SEC_RESERVE, (code as u64 >> 32) as u32, code as u32, std::ptr::null());
+        if sec == 0 {
+            undo(true);
+            return None;
+        }
+        let rx = MapViewOfFile3(sec, me, base, 0, code, MEM_REPLACE_PLACEHOLDER, PAGE_EXECUTE_READ, std::ptr::null_mut(), 0);
+        if rx != base {
+            CloseHandle(sec);
+            undo(true);
+            return None;
+        }
+        let rw = MapViewOfFile3(sec, me, std::ptr::null_mut(), 0, code, 0, PAGE_READWRITE, std::ptr::null_mut(), 0);
+        let rest_ok = rest == 0 || VirtualAlloc2(me, base.add(code), rest, MEM_RESERVE | MEM_REPLACE_PLACEHOLDER, PAGE_NOACCESS, std::ptr::null_mut(), 0) == base.add(code);
+        if rw.is_null() || !rest_ok {
+            if !rw.is_null() {
+                UnmapViewOfFile(rw);
+            }
+            UnmapViewOfFile2(me, base, 0);
+            CloseHandle(sec);
+            if !rest_ok && rest != 0 {
+                VirtualFree(base.add(code), 0, MEM_RELEASE);
+            }
+            return None;
+        }
+        Some((base as u64, rw as u64, sec as u64))
+    }
+
+    /// The RW alias of code address `addr` (None: no W^X view holds it).
+    fn code_rw_of(addr: u64) -> Option<u64> {
+        let n = RES_N.load(Ordering::Acquire);
+        for r in &RES[..n] {
+            if r[2].load(Ordering::Acquire) == 0 {
+                continue;
+            }
+            let (base, code, rw) = (r[0].load(Ordering::Relaxed), r[1].load(Ordering::Relaxed), r[3].load(Ordering::Relaxed));
+            if rw != 0 && addr >= base && addr - base < code {
+                return Some(addr - base + rw);
+            }
+        }
+        None
+    }
+
+    /// Where code bytes at `addr` are written: the RW alias, or (single RWX view) the address.
+    #[track_caller]
+    fn writable(addr: u64) -> u64 {
+        match code_rw_of(addr) {
+            Some(w) => w,
+            None if !wx() || WX_FAILED.load(Ordering::Relaxed) => addr,
+            None => panic!("write_code: {:#x} is not code memory", addr),
+        }
+    }
     /// committed granules: one bit each, per reservation (up to 4 GB each)
     static BITS: [[AtomicU64; 64]; REGIONS] = [const { [const { AtomicU64::new(0) }; 64] }; REGIONS];
 
@@ -464,12 +946,13 @@ mod imp {
         commit(at, 4096);
         let info_rva = (at - base) as u32 + 16;
         unsafe {
-            let rf = at as *mut u32;
+            // written through the RW alias (W^X); the system reads it at `at`
+            let rf = writable(at) as *mut u32;
             *rf = 0;
             *rf.add(1) = (code - 4096) as u32;
             *rf.add(2) = info_rva;
             // UNWIND_INFO: version 1, flags 0, prolog 4 bytes, 2 codes, frame register rbp (5) at offset 0
-            let ui = (at + 16) as *mut u8;
+            let ui = (rf as *mut u8).add(16);
             *ui = 1;
             *ui.add(1) = 4;
             *ui.add(2) = 2;
@@ -479,38 +962,49 @@ mod imp {
             *ui.add(5) = 3;
             *ui.add(6) = 1;
             *ui.add(7) = (5 << 4) | 0;
-            if RtlAddFunctionTable(rf, 1, base) == 0 {
+            if RtlAddFunctionTable(at as *const u32, 1, base) == 0 {
                 panic!("RtlAddFunctionTable failed");
             }
         }
     }
 
-    /// reserve / release (a released slot is reused)
+    /// reserve / release
     static RES_LOCK: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
 
     pub fn reserve(code: usize, rest: usize) -> u64 {
         let total = code + rest;
         assert!(total as u64 <= 64 * 64 * GRANULE, "reservation: too large");
-        let base = unsafe { VirtualAlloc(std::ptr::null_mut(), total, MEM_RESERVE, PAGE_NOACCESS) };
-        if base.is_null() {
-            panic!("reservation: VirtualAlloc MEM_RESERVE failed");
+        let mut views = None;
+        if code != 0 && wx() && !WX_FAILED.load(Ordering::Relaxed) {
+            views = unsafe { reserve_views(code, rest) };
+            if views.is_none() {
+                WX_FAILED.store(true, Ordering::Relaxed);
+                eprintln!("makepad run: no placeholder views for W^X code memory here: code pages are read-write-execute");
+            }
         }
+        let (base, rw, sec) = match views {
+            Some(v) => v,
+            None => {
+                let base = unsafe { VirtualAlloc(std::ptr::null_mut(), total, MEM_RESERVE, PAGE_NOACCESS) };
+                if base.is_null() {
+                    panic!("reservation: VirtualAlloc MEM_RESERVE failed");
+                }
+                (base as u64, 0, 0)
+            }
+        };
         let _g = RES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let used = RES_N.load(Ordering::Acquire);
-        let n = (0..used).find(|&r| RES[r][2].load(Ordering::Acquire) == 0).unwrap_or(used);
-        assert!(n < REGIONS, "reservation: more than {} units", REGIONS);
-        for w in &BITS[n] {
-            w.store(0, Ordering::Relaxed);
-        }
-        RES[n][0].store(base as u64, Ordering::Relaxed);
+        let n = RES_N.load(Ordering::Acquire);
+        assert!(n < REGIONS, "reservation: more than {} code reservations in this process", REGIONS);
+        RES[n][0].store(base, Ordering::Relaxed);
         RES[n][1].store(code as u64, Ordering::Relaxed);
-        // the size last: a slot with a size is live
+        RES[n][3].store(rw, Ordering::Relaxed);
+        RES[n][4].store(sec, Ordering::Relaxed);
+        // the size last: an entry with a size is live
         RES[n][2].store(total as u64, Ordering::Release);
-        if n == used {
-            RES_N.store(n + 1, Ordering::Release);
-        }
-        register_unwind(base as u64, code);
-        base as u64
+        RES_N.store(n + 1, Ordering::Release);
+        drop(_g);
+        register_unwind(base, code);
+        base
     }
 
     /// Gives a reservation back (an auxiliary unit dropped mid-run): its unwind table entry,
@@ -521,12 +1015,23 @@ mod imp {
         for r in 0..n {
             if RES[r][0].load(Ordering::Relaxed) == base && RES[r][2].load(Ordering::Relaxed) != 0 {
                 let total = RES[r][2].load(Ordering::Relaxed) as usize;
+                let (rw, sec) = (RES[r][3].load(Ordering::Relaxed), RES[r][4].load(Ordering::Relaxed));
                 RES[r][2].store(0, Ordering::Release);
                 unsafe {
                     RtlDeleteFunctionTable((base + code as u64 - 4096) as *const u32);
                     // decommitted, still reserved: its addresses are never handed out again
-                    // (see unix::retire)
-                    VirtualFree(base as *mut u8, total, MEM_DECOMMIT);
+                    // (see unix::retire); W^X views: the alias goes, the RX view becomes a
+                    // placeholder again (reserved, nothing maps there unless asked to)
+                    if rw != 0 {
+                        UnmapViewOfFile(rw as *mut u8);
+                        UnmapViewOfFile2(GetCurrentProcess(), base as *mut u8, MEM_PRESERVE_PLACEHOLDER);
+                        CloseHandle(sec as HANDLE);
+                        if total > code {
+                            VirtualFree((base + code as u64) as *mut u8, total - code, MEM_DECOMMIT);
+                        }
+                    } else {
+                        VirtualFree(base as *mut u8, total, MEM_DECOMMIT);
+                    }
                 }
                 return;
             }
@@ -544,7 +1049,7 @@ mod imp {
         let n = RES_N.load(Ordering::Acquire);
         for r in 0..n {
             let total = RES[r][2].load(Ordering::Acquire);
-            let (base, code) = (RES[r][0].load(Ordering::Relaxed), RES[r][1].load(Ordering::Relaxed));
+            let (base, code, rw) = (RES[r][0].load(Ordering::Relaxed), RES[r][1].load(Ordering::Relaxed), RES[r][3].load(Ordering::Relaxed));
             if addr < base || addr - base >= total {
                 continue;
             }
@@ -557,8 +1062,20 @@ mod imp {
                 }
                 let at = base + g * GRANULE;
                 let size = GRANULE.min(base + total - at);
-                let prot = if at - base < code { PAGE_EXECUTE_READWRITE } else { PAGE_READWRITE };
-                if unsafe { VirtualAlloc(at as *mut u8, size as usize, MEM_COMMIT, prot) }.is_null() {
+                // the granule's code part and its data part (one of them may be empty)
+                let split = (base + code).clamp(at, at + size);
+                let (csize, dsize) = ((split - at) as usize, (at + size - split) as usize);
+                let mut ok = dsize == 0 || !unsafe { VirtualAlloc(split as *mut u8, dsize, MEM_COMMIT, PAGE_READWRITE) }.is_null();
+                if csize != 0 {
+                    ok &= if rw != 0 {
+                        // the section's pages, committed through the alias (read-write) and the
+                        // code view (read-execute)
+                        unsafe { !VirtualAlloc((rw + (at - base)) as *mut u8, csize, MEM_COMMIT, PAGE_READWRITE).is_null() && !VirtualAlloc(at as *mut u8, csize, MEM_COMMIT, PAGE_EXECUTE_READ).is_null() }
+                    } else {
+                        !unsafe { VirtualAlloc(at as *mut u8, csize, MEM_COMMIT, PAGE_EXECUTE_READWRITE) }.is_null()
+                    };
+                }
+                if !ok {
                     panic!("out of memory: committing {:#x} (+{:#x})", at, size);
                 }
                 BITS[r][w].fetch_or(b, Ordering::AcqRel);
@@ -581,34 +1098,36 @@ mod imp {
         }
     }
 
-    /// Code memory is read-write-execute: a copy, then the instruction cache flush the docs ask
-    /// for after writing code (FlushInstructionCache).
+    /// Writes machine code: a copy through the RW alias (W^X; the RWX view itself without it),
+    /// then the instruction cache flush the docs ask for after writing code (FlushInstructionCache).
+    #[track_caller]
     pub unsafe fn write_code(addr: u64, b: &[u8]) {
-        std::ptr::copy_nonoverlapping(b.as_ptr(), addr as *mut u8, b.len());
+        std::ptr::copy_nonoverlapping(b.as_ptr(), writable(addr) as *mut u8, b.len());
         FlushInstructionCache(GetCurrentProcess(), addr as *const u8, b.len());
     }
 
     /// Writes `len` bytes of machine code at `addr` in place (`fill` gets them writable; what
     /// they hold before is unspecified), as `write_code` would.
+    #[track_caller]
     pub unsafe fn fill_code(addr: u64, len: usize, fill: impl FnOnce(&mut [u8])) {
-        fill(std::slice::from_raw_parts_mut(addr as *mut u8, len));
+        fill(std::slice::from_raw_parts_mut(writable(addr) as *mut u8, len));
         FlushInstructionCache(GetCurrentProcess(), addr as *const u8, len);
     }
 
     rt_fn! {
-        fn rt_memcpy(d: *mut u8, s: *const u8, n: usize) -> *mut u8 {
+        leaf fn rt_memcpy(d: *mut u8, s: *const u8, n: usize) -> *mut u8 {
             unsafe { std::ptr::copy_nonoverlapping(s, d, n) };
             d
         }
     }
     rt_fn! {
-        fn rt_memmove(d: *mut u8, s: *const u8, n: usize) -> *mut u8 {
+        leaf fn rt_memmove(d: *mut u8, s: *const u8, n: usize) -> *mut u8 {
             unsafe { std::ptr::copy(s, d, n) };
             d
         }
     }
     rt_fn! {
-        fn rt_memset(d: *mut u8, c: i32, n: usize) -> *mut u8 {
+        leaf fn rt_memset(d: *mut u8, c: i32, n: usize) -> *mut u8 {
             unsafe { std::ptr::write_bytes(d, c as u8, n) };
             d
         }

@@ -10,6 +10,7 @@
 #![allow(dangerous_implicit_autorefs)]
 // Relax core's fmt traits are `: PointeeSized` as nightly's (library/core/src/fmt/mod.rs:1053-1593).
 #![feature(sized_hierarchy)]
+#![feature(layout_for_ptr)]
 
 extern crate alloc;
 
@@ -44,6 +45,8 @@ pub mod intrinsics {
     pub unsafe fn trunc_f32(x: f32) -> f32 { x.trunc() }
     pub unsafe fn rint_f64(x: f64) -> f64 { x.round_ties_even() }
     pub unsafe fn rint_f32(x: f32) -> f32 { x.round_ties_even() }
+    pub unsafe fn round_f64(x: f64) -> f64 { x.round() }
+    pub unsafe fn round_f32(x: f32) -> f32 { x.round() }
     pub unsafe fn fabs_f64(x: f64) -> f64 { x.abs() }
     pub unsafe fn fabs_f32(x: f32) -> f32 { x.abs() }
     pub unsafe fn fmin_f64(x: f64, y: f64) -> f64 { x.min(y) }
@@ -59,13 +62,15 @@ pub mod intrinsics {
 pub mod intrinsics_mem {
     pub unsafe fn size_of<T>() -> usize { core::mem::size_of::<T>() }
     pub unsafe fn align_of<T>() -> usize { core::mem::align_of::<T>() }
-    pub unsafe fn size_of_val<T: ?Sized>(v: &T) -> usize { core::mem::size_of_val(v) }
-    pub unsafe fn align_of_val<T: ?Sized>(v: &T) -> usize { core::mem::align_of_val(v) }
+    pub const unsafe fn size_of_val<T: ?Sized>(v: *const T) -> usize { core::mem::size_of_val_raw(v) }
+    pub const unsafe fn align_of_val<T: ?Sized>(v: *const T) -> usize { core::mem::align_of_val_raw(v) }
     pub unsafe fn needs_drop<T>() -> bool { core::mem::needs_drop::<T>() }
     /// rustc cannot ask whether T: Copy without specialization: the shim takes the Clone paths.
     pub unsafe fn is_copy<T>() -> bool { false }
     /// rustc has no stable Freeze query: the shim takes the non-Freeze paths (sort tests force them with FORCE_FREEZE).
     pub unsafe fn is_freeze<T>() -> bool { false }
+    /// rustc cannot ask whether T: TrustedLen without specialization: the shim takes the general extend.
+    pub unsafe fn is_trusted_len<T>() -> bool { false }
     pub unsafe fn drop_in_place<T: ?Sized>(p: *mut T) { core::ptr::drop_in_place(p) }
     pub unsafe fn ptr_read<T>(p: *const T) -> T { core::ptr::read(p) }
     pub unsafe fn ptr_write<T>(p: *mut T, v: T) { core::ptr::write(p, v) }

@@ -5,7 +5,7 @@
 //! click or a caption drag, as on X11).
 
 use super::super::super::exec::OsCmd;
-use super::{clipboard, dialog, drag, ime, keys, lock, log_enabled, menu, rawinput, Key, Native, Op, Shared, WM_HAL_OPS};
+use super::{clipboard, dialog, drag, identity, ime, keys, lock, log_enabled, menu, rawinput, tray, Key, Native, Op, Shared, WM_HAL_OPS};
 use crate::types::*;
 use crate::Id;
 use makepad_windows_sys::core::PCWSTR;
@@ -86,6 +86,10 @@ impl Win {
     fn popup(&self) -> bool {
         self.kind & 0xff == window_kind::POPUP
     }
+    /// a tray app's dropdown: shown by `WindowAtTray`, dismissed when it is deactivated
+    fn dropdown(&self) -> bool {
+        self.kind & 0xff == window_kind::DROPDOWN
+    }
     fn maximized(&self) -> bool {
         unsafe { IsZoomed(self.hwnd.get()).as_bool() }
     }
@@ -124,8 +128,18 @@ pub(super) fn win_of(hwnd: HWND) -> Option<Rc<Win>> {
     }
 }
 
+/// The window a session's commands for `key` act on: the one it owns, or the one lent to it
+/// (`Op::Lend`: makepad run's app draws into the host's window under its own id), as the X11,
+/// Wayland and AppKit backends resolve it. Without the lent case every command of a borrowing
+/// app was dropped: its drag-query answers (no drag, no caption move: a press only became a click
+/// at its release), cursors, IME areas.
 fn find(key: Key) -> Option<Rc<Win>> {
-    APP.with_borrow(|a| a.wins.get(&key).cloned())
+    APP.with_borrow(|a| a.wins.get(&key).or_else(|| a.wins.values().find(|w| w.recipient.get() == key)).cloned())
+}
+
+/// The session's main window, owned or lent to it.
+fn session_window(a: &App, sid: u32) -> Option<&Rc<Win>> {
+    a.wins.values().find(|w| (w.own.0 == sid || w.recipient.get().0 == sid) && !w.popup())
 }
 
 /// The app theme the user chose (Settings > Personalization > Colors: AppsUseLightTheme).
@@ -222,6 +236,7 @@ pub(super) fn start(s: &'static Shared) -> Result<(), String> {
         }
         s.dispatch.store(dispatch.0 as usize, Ordering::Release);
         s.dpi.store(dpi.to_bits(), Ordering::Release);
+        identity::process_started();
         // the main thread is OLE's STA: drop targets and outgoing drags
         match OleInitialize(std::ptr::null()) {
             Ok(()) => OLE.set(true),
@@ -306,6 +321,7 @@ fn apply(s: &'static Shared, op: Op) {
                 }
             }
             menu::session_closed(sid);
+            tray::session_closed(sid);
             clipboard::session_closed(sid);
             if let Some(icon) = APP.with_borrow_mut(|a| a.icons.remove(&sid)) {
                 unsafe {
@@ -340,6 +356,8 @@ fn show(w: &Win) {
 fn style_for(kind: u32) -> (WINDOW_STYLE, WINDOW_EX_STYLE) {
     match kind & 0xff {
         window_kind::POPUP => (WS_POPUP, WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE),
+        // no taskbar button of its own, above the others; it takes the focus when shown
+        window_kind::DROPDOWN => (WS_POPUP, WS_EX_TOOLWINDOW | WS_EX_TOPMOST),
         window_kind::CHROMELESS => (WS_POPUP | WS_THICKFRAME, WS_EX_APPWINDOW),
         _ => (WS_OVERLAPPEDWINDOW, WS_EX_APPWINDOW),
     }
@@ -383,7 +401,7 @@ fn create(s: &'static Shared, sid: u32, id: Id, kind: u32, parent: Id, geom: [f3
         high_surrogate: Cell::new(0),
         cursor: Cell::new(cursor::DEFAULT),
         silent: Cell::new(false),
-        hidden_until_present: Cell::new(flags & open_flags::HIDDEN_UNTIL_PRESENT != 0 && !s.revealed.load(Ordering::Acquire)),
+        hidden_until_present: Cell::new(kind & 0xff != window_kind::DROPDOWN && flags & open_flags::HIDDEN_UNTIL_PRESENT != 0 && !s.revealed.load(Ordering::Acquire)),
         buttons: Cell::new(0),
         last_pos: Cell::new((0.0, 0.0)),
         no_focus: flags & open_flags::NO_FOCUS != 0,
@@ -430,6 +448,7 @@ fn create(s: &'static Shared, sid: u32, id: Id, kind: u32, parent: Id, geom: [f3
     win.dpi.set(dpi_of(hwnd));
     ime::window_created(&win);
     if !win.popup() {
+        identity::window_created(hwnd);
         apply_dark(hwnd);
         if OLE.get() {
             drag::register(&win);
@@ -439,7 +458,8 @@ fn create(s: &'static Shared, sid: u32, id: Id, kind: u32, parent: Id, geom: [f3
         }
     }
     publish_geom(&win);
-    if !win.hidden_until_present.get() {
+    // a dropdown waits for `WindowAtTray`
+    if !win.hidden_until_present.get() && !win.dropdown() {
         show(&win);
     }
     if log_enabled() {
@@ -523,6 +543,14 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
                 publish_geom(&w);
             }
         }
+        // the app-drawn caption's close: the window's own WM_CLOSE answers `CloseRequested`
+        OsCmd::WindowState { id, state: window_state::CLOSE } => {
+            if let Some(w) = target(id) {
+                unsafe {
+                    let _ = PostMessageW(Some(w.hwnd.get()), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+            }
+        }
         OsCmd::WindowState { id, state } => {
             if let Some(w) = target(id) {
                 // fullscreen is a maximize over the whole monitor: switching between the two
@@ -571,7 +599,7 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
             }
         }
         OsCmd::ActivateApp => {
-            if let Some(w) = APP.with_borrow(|a| a.wins.values().find(|w| w.own.0 == sid && !w.popup()).cloned()) {
+            if let Some(w) = APP.with_borrow(|a| session_window(a, sid).cloned()) {
                 unsafe {
                     let _ = SetForegroundWindow(w.hwnd.get());
                 }
@@ -603,12 +631,20 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
             }
         }
         OsCmd::MenuSet { items } => menu::set(sid, items),
+        OsCmd::TraySet { tray, w, h, alpha, tooltip, items, .. } => tray::set(sid, tray, w, h, alpha, tooltip, items),
+        OsCmd::WindowAtTray { id, tray, w, h } => {
+            if let Some(win) = target(id) {
+                tray::window_at(sid, win.hwnd.get(), tray, w, h);
+                publish_geom(&win);
+            }
+        }
+        OsCmd::TrayRemove { tray } => tray::remove(sid, tray),
         OsCmd::FileDialog { req, kind, title, location, filename, filters } => {
-            let owner = APP.with_borrow(|a| a.wins.values().find(|w| w.own.0 == sid && !w.popup()).map(|w| w.hwnd.get().0 as usize)).unwrap_or(0);
+            let owner = APP.with_borrow(|a| session_window(a, sid).map(|w| w.hwnd.get().0 as usize)).unwrap_or(0);
             dialog::open(dialog::Request { sid, req, kind, title, location, filename, filters, owner });
         }
-        OsCmd::DragStart { id, items } => match target(id) {
-            Some(w) => drag::start(&w, &items),
+        OsCmd::DragStart { id, items, .. } => match target(id) {
+            Some(w) => drag::start(&w, &crate::drag_promise::to_files(items)),
             None => s.push((sid, id), |q, id| q.drag_drop(id, -100000.0, -100000.0, false, 0, &[])),
         },
         OsCmd::PointerLock { id, mode } => {
@@ -673,6 +709,9 @@ pub(super) fn handles(cmd: &OsCmd) -> bool {
             | OsCmd::ImeHide { .. }
             | OsCmd::ImeSync { .. }
             | OsCmd::MenuSet { .. }
+            | OsCmd::TraySet { .. }
+            | OsCmd::TrayRemove { .. }
+            | OsCmd::WindowAtTray { .. }
             | OsCmd::FileDialog { .. }
             | OsCmd::AppIcon { .. }
     )
@@ -705,7 +744,7 @@ fn set_app_icon(sid: u32, w: u32, h: u32, rgba: &[u8]) {
             return;
         }
     };
-    let wins: Vec<HWND> = APP.with_borrow(|a| a.wins.values().filter(|w| w.own.0 == sid && !w.popup()).map(|w| w.hwnd.get()).collect());
+    let wins: Vec<HWND> = APP.with_borrow(|a| a.wins.values().filter(|w| (w.own.0 == sid || w.recipient.get().0 == sid) && !w.popup()).map(|w| w.hwnd.get()).collect());
     for hwnd in &wins {
         set_icon(*hwnd, icon);
     }
@@ -826,7 +865,7 @@ fn mouse_button(w: &Rc<Win>, button: u32, down: bool, lparam: LPARAM) {
         }
         w.buttons.set(w.buttons.get() | button);
         if !w.popup() {
-            dismiss_popups(w.own.0);
+            dismiss_popups(w.recipient.get().0);
         }
         if !w.popup() && matches!(button, 1 | 2) && w.pending.get().is_none() {
             let mut screen = POINT { x: px, y: py };
@@ -1014,13 +1053,13 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         }
         WM_ENTERSIZEMOVE => {
             if !w.popup() {
-                dismiss_popups(w.own.0);
+                dismiss_popups(w.recipient.get().0);
             }
             w.push(|q, id| q.resize_loop(id, true));
         }
         WM_NCLBUTTONDOWN | WM_NCRBUTTONDOWN => {
             if !w.popup() {
-                dismiss_popups(w.own.0);
+                dismiss_popups(w.recipient.get().0);
             }
         }
         WM_EXITSIZEMOVE => {
@@ -1036,7 +1075,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             w.forwarded.set([0; 4]);
             w.push(|q, id| q.focus(id, false));
         }
-        WM_ACTIVATE => rawinput::activated(hwnd, (wparam.0 & 0xffff) as u32 != WA_INACTIVE),
+        WM_ACTIVATE => {
+            let active = (wparam.0 & 0xffff) as u32 != WA_INACTIVE;
+            // a click anywhere else (or another app) took the focus from a dropdown
+            if !active && w.dropdown() && unsafe { IsWindowVisible(hwnd).as_bool() } {
+                w.push(|q, id| q.popup_dismissed(id));
+            }
+            rawinput::activated(hwnd, active)
+        }
         WM_ACTIVATEAPP => app_activation(wparam.0 != 0),
         WM_INPUT => {
             rawinput::input(&w, lparam, modifiers());
@@ -1060,6 +1106,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             return LRESULT(0);
         }
         WM_DESTROY => {
+            if !w.popup() {
+                identity::window_destroyed(hwnd);
+            }
             rawinput::destroyed(hwnd);
             drag::revoke(&w);
             let s = Shared::global();

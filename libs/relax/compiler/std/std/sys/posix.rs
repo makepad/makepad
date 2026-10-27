@@ -179,12 +179,24 @@ pub fn thread_yield() {
     }
 }
 
+/// Real std's (sys/thread/unix.rs): on Linux and Android the CPUs of the affinity mask, capped by
+/// the cgroup CPU quota; on Apple targets (no affinity masks) the online CPUs. 0: unknown.
 pub fn available_parallelism() -> usize {
+    #[allow(unused_mut)]
+    let mut quota = usize::MAX;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        quota = super::os::cgroup_quota().max(1);
+        let n = super::os::affinity_cpus();
+        if n > 0 {
+            return n.min(quota);
+        }
+    }
     let n = unsafe { sysconf(super::os::SC_NPROCESSORS_ONLN) };
     if n < 1 {
-        1
+        0
     } else {
-        n as usize
+        (n as usize).min(quota)
     }
 }
 
@@ -198,6 +210,16 @@ pub fn current_thread() -> usize {
 /// An owned thread: joining consumes it; dropping it detaches.
 pub struct NativeThread(pthread_t);
 
+impl NativeThread {
+    pub fn raw(&self) -> usize {
+        self.0
+    }
+    pub fn into_raw(self) -> usize {
+        let t = core::mem::ManuallyDrop::new(self);
+        t.0
+    }
+}
+
 struct StartArg {
     f: fn(*mut u8),
     arg: *mut u8,
@@ -207,6 +229,7 @@ struct StartArg {
 }
 
 extern "C" {
+    fn __relax_on_program_stack(f: extern "C" fn(*mut u8), arg: *mut u8);
     fn __relax_domain_base() -> u64;
     fn __relax_domain_enter(base: u64, token: u64);
     fn __relax_domain_reserve(base: u64) -> u64;
@@ -216,9 +239,15 @@ extern "C" {
 extern "C" fn posix_thread_start(p: *mut c_void) -> *mut c_void {
     // first, before anything that may name a static
     unsafe { __relax_domain_enter((*(p as *const StartArg)).domain, (*(p as *const StartArg)).token) };
+    // the thread's body runs on a program stack (a large lazily committed reservation with a guard;
+    // relax_base::stack::on_program_stack)
+    unsafe { __relax_on_program_stack(start_body, p as *mut u8) };
+    core::ptr::null_mut()
+}
+
+extern "C" fn start_body(p: *mut u8) {
     let a = unsafe { alloc::boxed::Box::from_raw(p as *mut StartArg) };
     (a.f)(a.arg);
-    core::ptr::null_mut()
 }
 
 /// Starts a thread running `f(arg)` with a stack of at least `stack_size` bytes; Err(os error).

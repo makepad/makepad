@@ -1,6 +1,6 @@
 //! Masked SPMD over a kernel's element loop: the target-independent
-//! analysis the four-wide backends share (NEON ×4 in [`crate::neon`],
-//! wasm SIMD128 in [`crate::wasm`]).
+//! analysis the four-wide backends share (SSE4.1/AVX2 / NEON in
+//! [`crate::native_vec`], wasm SIMD128 in [`crate::wasm`]).
 //!
 //! A kernel's element loop (the shape `lower_kernel` emits, [`shape`]) runs
 //! four elements per iteration, one per vector lane. [`analyse`] decides

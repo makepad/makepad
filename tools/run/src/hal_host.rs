@@ -25,7 +25,7 @@ impl Host {
         let domain = launch.domain;
         let hook = launch.clone();
         let primary = crate::hal_run::spec(domain);
-        let privileged = primary.is_some() && crate::PRIVILEGED.load(std::sync::atomic::Ordering::Relaxed);
+        let privileged = primary.is_some() && relax_runner::privileged();
         let around: Around = Arc::new(move |run: &mut dyn FnMut()| with_caps(Caps { privileged }, || with_launch(&hook, || run())));
         let mut spec = primary.unwrap_or_else(|| AppSpec {
             package: launch.app.clone(), args: launch.args.split_terminator('\0').map(str::to_string).collect(), ..Default::default()
@@ -187,8 +187,12 @@ pub fn register() {
     let _kept = relax_compiler::zone_alloc::kept();
     #[cfg(not(target_arch = "wasm32"))]
     relax_compiler::inspect::register_host_inspect("gpu", makepad_hal::inspect::dispatch);
+    relax_compiler::inspect::register_host_service("gpuprof", 1, makepad_hal::gpu_prof::stream_service());
+    makepad_hal::gpu_prof::start_from_env();
     #[cfg(not(target_arch = "wasm32"))]
     relax_compiler::inspect::register_host_inspect("hal", makepad_hal::inspect::dispatch);
+    #[cfg(not(target_arch = "wasm32"))]
+    relax_compiler::inspect::register_host_inspect("cap", makepad_hal::inspect::dispatch);
     Hal::global().set_domain_host(Arc::new(Host::default()));
     domain::set_observer(observe);
 }

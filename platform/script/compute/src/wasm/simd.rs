@@ -1740,7 +1740,8 @@ impl W<'_> {
         self.set(tc);
         const HI: [u8; 16] = [8, 9, 10, 11, 12, 13, 14, 15, 8, 9, 10, 11, 12, 13, 14, 15];
         for (hi, p, s) in [(false, plo, slo), (true, phi, shi)] {
-            for t in [ta, tb] {
+            // b * a' (product NaNs: b's first, as the native fused op, ir::fma_nan)
+            for t in [tb, ta] {
                 self.get(t);
                 if hi {
                     self.get(t);
@@ -1793,7 +1794,7 @@ impl W<'_> {
         self.fd(op::V128_OR);
         self.fd(op::V128_ANY_TRUE);
         self.open_if(op::VOID);
-        for (t, at) in [(ta, 16), (tb, 32), (tc, 48)] {
+        for (t, at) in [(tb, 16), (ta, 32), (tc, 48)] {
             self.get(P_FRAME);
             self.get(t);
             self.vmem(op::V128_STORE, 4, at);
@@ -1809,8 +1810,8 @@ impl W<'_> {
     }
 }
 
-/// The exact multiply-add's fix-up, `fix(at)`: the four lanes' a, b, c at
-/// `at + 16`, `+ 32`, `+ 48` (f32x4), each lane's fused result through the
+/// The exact multiply-add's fix-up, `fix(at)`: the four lanes' b, a, c at
+/// `at + 16`, `+ 32`, `+ 48` (f32x4; the product b * a), each lane's fused result through the
 /// scalar sequence into `at` (the rare lanes where rounding the f64 sum to
 /// f32 would round twice; the others give the same bits again). One
 /// function per module, called out of line: inlined at every multiply-add

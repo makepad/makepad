@@ -97,6 +97,16 @@ pub fn region_scope_tree(prog: &Program, body: &Body) -> Result<ScopeTree, Strin
     let d = prog.def(body.def);
     let file = &prog.files[body.file as usize];
     let mut v = Resolve { prog, file, body, tree: ScopeTree::default(), cx: Context { parent: None, var_parent: None, body: BodyId(0) } };
+    // an anonymous constant (array length, const argument or default in a signature or type) is a
+    // body of its own, resolved as a constant initializer (rustc region.rs resolve_body: a body
+    // owner that is not a fn or closure)
+    if d.kind == DefKind::AnonConst {
+        let Some((_, crate::def_collector::NodeId::AnonConst(e))) = prog.def_id_to_node_id.get(&body.def) else { return Err("anonymous constant without an expression".into()) };
+        v.enter_body(Node::Expr(e.0), BodyKind::Constant);
+        v.extend_borrows(*e, None);
+        v.expr(*e, true);
+        return Ok(v.tree);
+    }
     match file.ast.item(d.item).kind {
         ItemKind::Fn(sig, _, _) => {
             let block = prog.fn_body(body.file, d.item)?.ok_or("item has no body")?;

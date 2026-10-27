@@ -1,5 +1,5 @@
 //! The compiler's and the program's stdout/stderr go nowhere in an Android app: a pipe on both
-//! descriptors, read by a thread that writes each line to logcat (tag "makepad-host").
+//! descriptors, read by a thread that writes each line to logcat as it comes (tag "makepad-host").
 
 use std::ffi::{c_char, c_int, CString};
 
@@ -35,11 +35,25 @@ pub fn redirect_stdio() {
         dup2(fds[1], 2);
         close(fds[1]);
         let rd = fds[0];
+        // The reader allocates nothing and takes no lock: it writes each line from a fixed buffer
+        // straight to liblog. (It used to build a String and a CString per line, and its lines
+        // reached logcat in bursts up to a minute late while the JIT compiled.)
         std::thread::Builder::new()
             .name("run-logcat".into())
             .spawn(move || {
-                let mut buf = vec![0u8; 8192];
-                let mut line: Vec<u8> = Vec::new();
+                let mut buf = [0u8; 4096];
+                // one line, NUL-terminated for liblog; longer lines are split
+                let mut line = [0u8; 1024];
+                let mut len = 0;
+                let tag = c"makepad-host";
+                let flush = |line: &mut [u8; 1024], len: &mut usize| {
+                    line[*len] = 0;
+                    for b in &mut line[..*len] {
+                        if *b == 0 { *b = b' '; }
+                    }
+                    __android_log_write(ANDROID_LOG_INFO, tag.as_ptr(), line.as_ptr() as *const c_char);
+                    *len = 0;
+                };
                 loop {
                     let n = read(rd, buf.as_mut_ptr(), buf.len());
                     if n <= 0 {
@@ -47,10 +61,13 @@ pub fn redirect_stdio() {
                     }
                     for &b in &buf[..n as usize] {
                         if b == b'\n' {
-                            log(&String::from_utf8_lossy(&line));
-                            line.clear();
+                            flush(&mut line, &mut len);
                         } else {
-                            line.push(b);
+                            line[len] = b;
+                            len += 1;
+                            if len == line.len() - 1 {
+                                flush(&mut line, &mut len);
+                            }
                         }
                     }
                 }

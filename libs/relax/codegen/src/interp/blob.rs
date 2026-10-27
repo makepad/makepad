@@ -227,6 +227,7 @@ fn cond_of(k: u8) -> Option<Cond> {
 fn vx_code(op: VX) -> u64 {
     let (t, w, k): (u64, Option<VW>, u8) = match op {
         VX::Join | VX::Half(_) => unreachable!("256-bit halves exist only inside the x64 back end (pair256)"),
+        VX::ArmUShl(_) | VX::ArmSShl(_) => unreachable!("signed-amount shifts exist only inside the arm64 back end (fold_shift_amounts)"),
         VX::Add(w) => (0, Some(w), 0),
         VX::Sub(w) => (1, Some(w), 0),
         VX::MulLo(w) => (2, Some(w), 0),
@@ -405,7 +406,7 @@ fn vx_of(v: u64) -> Option<VX> {
         77 => VX::FNeg(w),
         78 => VX::FAbs(w),
         79 => VX::FSqrt(w, nan_of(k)?),
-        80 => VX::FRound(w, [RoundTo::Floor, RoundTo::Ceil, RoundTo::Trunc, RoundTo::Away].get(k as usize).copied()?),
+        80 => VX::FRound(w, [RoundTo::Floor, RoundTo::Ceil, RoundTo::Trunc, RoundTo::Away, RoundTo::Even].get(k as usize).copied()?),
         81 => VX::FToI(w),
         82 => VX::IToF(w),
         83 => VX::Neg(w),

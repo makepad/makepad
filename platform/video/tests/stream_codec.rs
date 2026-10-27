@@ -6,16 +6,21 @@
 //! produced (`MAKEPAD_H264_DEBUG` dumps them next to its trace) so a
 //! cross-platform wire problem can be reproduced offline.
 
-use makepad_video::{
-    annex_b, StreamVideoCodec, VideoStreamDecoder, VideoStreamEncoder, VideoStreamEncoderOptions,
-};
+use makepad_video::{VideoStreamEncoder, VideoStreamEncoderOptions};
+// the codec tests run where a stream codec exists (VideoToolbox, Media Foundation)
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use makepad_video::{annex_b, StreamVideoCodec, VideoStreamDecoder};
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 240;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const FRAME_COUNT: usize = 30;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const FPS: u32 = 30;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const HNS_PER_FRAME: i64 = 10_000_000 / FPS as i64;
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 /// A moving diagonal gradient — visually distinct frame to frame (encoder
 /// motion estimation actually has something to do) and cheap to generate.
 fn synthetic_frame_rgb8(frame_index: usize) -> Vec<u8> {
@@ -32,6 +37,7 @@ fn synthetic_frame_rgb8(frame_index: usize) -> Vec<u8> {
     out
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn psnr(a: &[u8], b: &[u8]) -> f64 {
     assert_eq!(a.len(), b.len());
     let sum_sq: f64 = a
@@ -96,7 +102,7 @@ fn request_keyframe_forces_the_next_packet() {
         fps: FPS,
         bitrate_kbps: 4_000,
         keyint: 300,
-        low_latency: true,
+        low_latency: true, full_chroma: false,
     })
     .expect("encoder creation");
     for index in 0..4 {
@@ -117,7 +123,7 @@ fn encode_decode_round_trip_psnr_and_keyframes() {
         fps: FPS,
         bitrate_kbps: 4_000,
         keyint: FRAME_COUNT as u32, // one GOP for this test, forced keyframe below exercises a second
-        low_latency: true,
+        low_latency: true, full_chroma: false,
     })
     .expect("encoder creation");
 
@@ -207,11 +213,12 @@ fn encode_decode_round_trip_psnr_and_keyframes() {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[test]
 fn stream_codec_is_explicitly_unsupported_elsewhere() {
-    let err = VideoStreamEncoder::new(VideoStreamEncoderOptions {
+    let Err(err) = VideoStreamEncoder::new(VideoStreamEncoderOptions {
         width: WIDTH,
         height: HEIGHT,
         ..Default::default()
-    })
-    .unwrap_err();
+    }) else {
+        panic!("a stream encoder came up where none is implemented")
+    };
     assert!(err.context.contains("not implemented"));
 }

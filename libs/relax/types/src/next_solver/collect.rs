@@ -36,7 +36,7 @@ impl crate::types::fold::TypeFolder for LateBoundRegions {
 impl Tcx {
     /// hir_ty_lowering/bounds.rs validate_late_bound_regions (E0582): a late-bound region the bound's value mentions
     /// appears in the trait's input types (not only under a projection).
-    fn validate_late_bound_regions(&self, cx: &crate::tcx::EvalCx<'_>, prog: &Program, file: u32, pos: u32, trait_args: &[GenericArg], alias_regions: &[RegionId], value: TyId) {
+    pub(crate) fn validate_late_bound_regions(&self, cx: &crate::tcx::EvalCx<'_>, prog: &Program, file: u32, pos: u32, trait_args: &[GenericArg], alias_regions: &[RegionId], value: TyId) {
         if !self.validates(prog, file) { return; }
         let mut constrained = LateBoundRegions { out: Vec::new(), constrained: true };
         for a in trait_args {

@@ -244,7 +244,12 @@ impl BorrowCheckRootCtxt<'_> {
                 let ty = parent.infcx.rvalue_query_ty(parent.body, &Rvalue::Aggregate(Box::new(kind), vec![]));
                 free_regions_in_order(self.tcx, ty).into_iter().map(|r| parent.infcx.to_region_vid(r)).collect()
             }
-            ClauseOwner::Def(_) => vec![],
+            // an inline constant: its type, the last of its arguments (InlineConstArgs)
+            ClauseOwner::Def(_) => match use_.args.last() {
+                Some(&crate::consts::GenericArg::Type(ty)) =>
+                    free_regions_in_order(self.tcx, ty).into_iter().map(|r| parent.infcx.to_region_vid(r)).collect(),
+                _ => vec![],
+            },
         };
         // the nested body numbers its own placeholders after those it inherits from this body (`UniversalRegionsBuilder::build`)
         let placeholder_base = super::universal_regions::placeholder_base(self.tcx, universals.indices.iter().map(|(r, _)| *r));

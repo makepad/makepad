@@ -585,7 +585,13 @@ impl Dispatch<wl_data_source::WlDataSource, Source> for State {
         _: &QueueHandle<Self>,
     ) {
         match e {
-            wl_data_source::Event::Send { mime_type, fd } => s.send_selection(fd, &mime_type, data),
+            wl_data_source::Event::Send { mime_type, fd } => {
+                if data.drag.is_some() {
+                    // promised files are handed over once they are written
+                    crate::drag_promise::wait_promised(&data.items);
+                }
+                s.send_selection(fd, &mime_type, data)
+            }
             wl_data_source::Event::Cancelled | wl_data_source::Event::DndFinished => {
                 let success = matches!(e, wl_data_source::Event::DndFinished);
                 if let Some(key) = data.drag {

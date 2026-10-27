@@ -80,9 +80,11 @@ impl Tcx {
         match *prog.impl_trait_in_trait_data.get(&def)? {
             ImplTraitInTraitData::Trait { fn_def_id, opaque_def_id } => {
                 let mut clauses = self.clauses_of(prog, fn_def_id);
+                // predicates_of.rs compute_bidirectional_outlives_predicates: each duplicated lifetime and
+                // the fn lifetime it stands for (map_opaque_lifetime_to_parent_lifetime) outlive each other
                 let data = self.opaque_generics(prog, opaque_def_id);
                 let offset = (data.parent.lifetimes.len() + data.parent.types_consts.len()) as u32;
-                for (index, &orig) in data.captured_lifetimes.iter().enumerate() {
+                for (index, &orig) in self.opaque_captured_parent_lifetimes(prog, opaque_def_id).iter().enumerate() {
                     if !matches!(self.tys.region_kind(orig), RegionKind::ReEarlyParam(_)) { continue; }
                     let dup = self.tys.intern_region(RegionKind::ReEarlyParam(offset + index as u32));
                     clauses.push(Predicate::dummy(PredicateKind::Clause(ClauseKind::RegionOutlives(orig, dup))));
@@ -353,6 +355,8 @@ impl Tcx {
         env.opaque_owner = Some(owner);
         env.regions = env.regions.with_binder(None);
         let state = crate::tcx::EvalState::new();
+        // (the errors belong to the opaque, whoever asks for its bounds first: reported by its check)
+        state.errors.replace(Some(Vec::new()));
         let cx = EvalCx::new(prog, self, crate::tcx::TypingEnv { param_env: Default::default(), mode: crate::tcx::TypingMode::non_body_analysis(), limit: crate::tcx::RecursionLimit::for_item(prog, owner) }, &state);
         let mut result = Vec::new();
         match prog.def_id_to_node_id[&opaque].1 {
@@ -374,6 +378,13 @@ impl Tcx {
             }
             _ => panic!("non-opaque declaration"),
         }
+        let _ = self.declaration_queries(prog, opaque).opaque_bound_errors.set(state.errors.take().unwrap_or_default());
         result
+    }
+
+    /// The errors of lowering an opaque type's bounds (`impl Deref<Target = Missing>`).
+    pub fn opaque_bound_errors(&self, prog: &Program, opaque: DefId) -> &[String] {
+        let _ = self.explicit_item_bounds(prog, opaque);
+        self.declaration_queries(prog, opaque).opaque_bound_errors.get().map_or(&[], |v| v.as_slice())
     }
 }

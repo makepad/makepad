@@ -1,0 +1,19 @@
+use mod.flow.*
+
+/** The clip whose frame cadence should be doubled. */
+let video = Input{ type: @video }
+let tween = VideoEnhance{
+    video: video.video()
+    upscale: 1
+    interpolate: 2
+    flow_map: false
+    model: "video-enhance"
+}
+/** Publish the frame-interpolated clip into the flow asset library. */
+let published = Publish{ value: tween.out(@video) namespace: "flows" tags: ["flow", "video", "tween"] }
+
+Flow{
+    label: "Video tween"
+    brief: "Doubles a supplied clip's frame cadence with RIFE and leaves its resolution unchanged."
+    video, tween, published
+}

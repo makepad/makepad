@@ -94,7 +94,7 @@ impl PlainWebSocket {
             }
         }
 
-        let mut stream = match TcpStream::connect(format!("{}:{}", split.host, split.port)) {
+        let mut stream = match split.port.parse::<u16>().map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad port")).and_then(|port| crate::lan::connect_host("web socket", &split.host, port, None)) {
             Ok(stream) => stream,
             Err(err) => {
                 let _ = rx_sender.send(WebSocketMessage::Error(format!(
@@ -269,8 +269,8 @@ impl PlainWebSocket {
 
     #[cfg(not(target_arch = "wasm32"))]
     /// `wss://` to a fleet endpoint ([`crate::tls::mark_fleet_endpoint`]):
-    /// self-signed TLS checked against the fleet known-hosts record, with
-    /// the fleet authorization bound to the certificate presented. Other
+    /// the server's certificate checked against the fleet root, with this
+    /// machine's proof bound to the certificate presented. Other
     /// TLS endpoints are refused (no CA validation here).
     fn open_pinned(request: HttpRequest, rx_sender: Sender<WebSocketMessage>) -> PlainWebSocket {
         let failed = |rx: &Sender<WebSocketMessage>, msg: String| {
@@ -282,8 +282,8 @@ impl PlainWebSocket {
         if !crate::tls::is_fleet_endpoint(&host_port) {
             return failed(&rx_sender, format!("{host_port} is not a known fleet TLS endpoint"));
         }
-        let (mut stream, authorization) = match crate::tls::connect_fleet(split.host, split.port) {
-            Ok(s) => s,
+        let (mut stream, authorization) = match crate::fleet::id::connect(split.host, split.port) {
+            Ok((stream, _server, authorization)) => (stream, Some(authorization)),
             Err(err) => return failed(&rx_sender, format!("Error connecting websocket stream: {err}")),
         };
         let path = if split.file.is_empty() { "/".to_string() } else { format!("/{}", split.file) };

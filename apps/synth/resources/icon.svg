@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="synth-bg" x1="0" y1="0" x2="0.7" y2="1"><stop offset="0" stop-color="#3a2a5c"/><stop offset="1" stop-color="#140f24"/></linearGradient>
+    <linearGradient id="synth-wave" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ffb35c"/><stop offset="1" stop-color="#ff5c8a"/></linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="230" fill="url(#synth-bg)"/>
+  <rect x="250" y="610" width="90" height="170" rx="22" fill="#efe9ff" fill-opacity="0.9"/>
+  <rect x="370" y="560" width="90" height="220" rx="22" fill="#efe9ff" fill-opacity="0.75"/>
+  <rect x="490" y="640" width="90" height="140" rx="22" fill="#efe9ff" fill-opacity="0.9"/>
+  <rect x="610" y="590" width="90" height="190" rx="22" fill="#efe9ff" fill-opacity="0.75"/>
+  <path d="M230 470 L330 270 L330 470 L450 270 L450 470 L570 270 L570 470 L690 270 L690 470 L790 330" fill="none" stroke="url(#synth-wave)" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

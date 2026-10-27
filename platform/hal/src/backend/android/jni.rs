@@ -17,6 +17,8 @@ extern "C" {
 }
 
 pub(super) fn request_frame() {
+    // an XR session paces frames itself (xrWaitFrame)
+    if super::xr::active() { return; }
     let p = CHOREOGRAPHER.load(Ordering::Acquire);
     let shared = Shared::global();
     let visible = lock(&shared.registry).window.is_some();
@@ -71,11 +73,12 @@ unsafe extern "system" fn resume(_: *mut JNIEnv, _: jclass) {
     emit_lifecycle(lifecycle::RESUME); request_frame();
 }
 unsafe extern "system" fn pause(_: *mut JNIEnv, _: jclass) {
-    lock(&Shared::global().state).active = false;
+    // an XR session keeps drawing while the Activity pauses (its state decides)
+    if !super::xr::active() { lock(&Shared::global().state).active = false; }
     emit_lifecycle(lifecycle::PAUSE);
 }
 unsafe extern "system" fn stop(_: *mut JNIEnv, _: jclass) {
-    lock(&Shared::global().state).active = false;
+    if !super::xr::active() { lock(&Shared::global().state).active = false; }
     emit_lifecycle(lifecycle::BACKGROUND);
 }
 unsafe extern "system" fn destroy(env: *mut JNIEnv, _: jclass) {
@@ -86,6 +89,8 @@ unsafe extern "system" fn destroy(env: *mut JNIEnv, _: jclass) {
     emit_lifecycle(lifecycle::DESTROYED);
 }
 unsafe extern "system" fn focus(_: *mut JNIEnv, _: jclass, on: jboolean) {
+    // the XR session's state is the focus of an immersive app
+    if super::xr::active() { return; }
     lock(&Shared::global().state).focused = on != 0;
     Shared::global().emit(clock_ns(), |q, id| { q.focus(id, on != 0); q.lifecycle(if on != 0 { lifecycle::FOCUS_GAINED } else { lifecycle::FOCUS_LOST }); });
 }
@@ -102,6 +107,8 @@ unsafe extern "system" fn choreographer(_: *mut JNIEnv, _: jclass, refresh: jflo
     Shared::global().display(); request_frame();
 }
 unsafe fn set_surface(env: *mut JNIEnv, surface: jobject, size: Option<[u32; 2]>) {
+    // an immersive app shows its window in the XR session, never on the Activity's surface
+    if super::xr::active() { return; }
     let Some(window) = Window::from_java(env, surface) else {
         eprintln!("[hal-android] ANativeWindow_fromSurface failed");
         surface_destroyed(env, std::ptr::null_mut(), surface);
@@ -120,6 +127,7 @@ unsafe fn set_surface(env: *mut JNIEnv, surface: jobject, size: Option<[u32; 2]>
 unsafe extern "system" fn surface_created(env: *mut JNIEnv, _: jclass, surface: jobject) { set_surface(env, surface, None); }
 unsafe extern "system" fn surface_changed(env: *mut JNIEnv, _: jclass, surface: jobject, w: jint, h: jint) { set_surface(env, surface, Some([w.max(0) as u32, h.max(0) as u32])); }
 unsafe extern "system" fn surface_destroyed(_: *mut JNIEnv, _: jclass, _: jobject) {
+    if super::xr::active() { return; }
     let shared = Shared::global();
     let old = { let mut r = lock(&shared.registry); r.state.destroyed(); r.window.take() };
     drop(old);
@@ -218,15 +226,58 @@ unsafe extern "system" fn selection_handle(_: *mut JNIEnv, _: jclass, handle: ji
 /// its show on every draw, and each one reaches Android's IME tracker (a show/cancel loop).
 static LAST_IME: Mutex<Option<u32>> = Mutex::new(None);
 
-/// Runs `f` with a JNI environment (the calling thread attached for the call) and the Activity; `None`
-/// before the Activity exists.
-pub(super) fn with_activity<R>(f: impl FnOnce(*mut JNIEnv, jobject) -> R) -> Option<R> {
+/// The JavaVM and the global reference to the Activity (an XR loader keeps both); `None` before
+/// the Activity exists.
+pub(super) fn vm_and_activity() -> Option<(*mut c_void, *mut c_void)> {
+    let vm = VM.load(Ordering::Acquire);
+    let activity = *lock(&ACTIVITY);
+    (vm != 0 && activity != 0).then_some((vm as *mut c_void, activity as *mut c_void))
+}
+
+type JavaJob = Box<dyn FnOnce(*mut JNIEnv) + Send>;
+
+std::thread_local! {
+    /// This thread's companion: an ordinary thread attached to the VM that makes its Java calls.
+    static COMPANION: std::cell::OnceCell<Option<std::sync::mpsc::Sender<JavaJob>>> = const { std::cell::OnceCell::new() };
+}
+
+/// Runs `f` with a JNI environment: on this thread when the VM knows it, else on the thread's
+/// companion (made at its first call, gone with the thread). A native thread is never attached
+/// here: the JIT runs programs on stacks of its own, and attaching a thread while it runs on one
+/// aborts in ART's stack check. The companion keeps the caller's blocking (a socket read waits on
+/// its own companion, not on other threads' calls). `None`: no VM yet.
+pub(super) fn on_java<R>(f: impl FnOnce(*mut JNIEnv) -> R) -> Option<R> {
     unsafe {
         let vm = VM.load(Ordering::Acquire) as *mut JavaVM;
         if vm.is_null() { return None; }
         let mut env: *mut JNIEnv = std::ptr::null_mut();
-        let attached = ((**vm).GetEnv.unwrap())(vm, &mut env as *mut _ as _, JNI_VERSION_1_6) != 0;
-        if attached && ((**vm).AttachCurrentThread.unwrap())(vm, &mut env, std::ptr::null_mut()) != 0 { return None; }
+        if ((**vm).GetEnv.unwrap())(vm, &mut env as *mut _ as _, JNI_VERSION_1_6) == 0 {
+            return Some(f(env));
+        }
+        let tx = COMPANION.with(|c| c.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<JavaJob>();
+            let vm = vm as usize;
+            std::thread::Builder::new().name("java-companion".into()).spawn(move || {
+                let vm = vm as *mut JavaVM;
+                let mut env: *mut JNIEnv = std::ptr::null_mut();
+                if ((**vm).AttachCurrentThread.unwrap())(vm, &mut env, std::ptr::null_mut()) != 0 { return; }
+                for job in rx { job(env); }
+                ((**vm).DetachCurrentThread.unwrap())(vm);
+            }).ok().map(|_| tx)
+        }).clone())?;
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<R>(1);
+        let job: Box<dyn FnOnce(*mut JNIEnv) + '_> = Box::new(move |env| { let _ = done_tx.send(f(env)); });
+        // SAFETY: the caller waits below until the job ran (or was dropped unrun), so what it
+        // borrows outlives it, and nothing it holds is used on two threads at once
+        let job: JavaJob = std::mem::transmute(job);
+        tx.send(job).ok()?;
+        done_rx.recv().ok()
+    }
+}
+
+/// Runs `f` with a JNI environment ([`on_java`]) and the Activity; `None` before the Activity exists.
+pub(super) fn with_activity<R>(f: impl FnOnce(*mut JNIEnv, jobject) -> R) -> Option<R> {
+    on_java(|env| unsafe {
         let global = *lock(&ACTIVITY);
         let out = if global == 0 { None } else {
             let activity = ((**env).NewLocalRef.unwrap())(env, global as _);
@@ -234,9 +285,8 @@ pub(super) fn with_activity<R>(f: impl FnOnce(*mut JNIEnv, jobject) -> R) -> Opt
             ((**env).DeleteLocalRef.unwrap())(env, activity);
             Some(r)
         };
-        // a native thread stays attached: a stream's reads come back on the same one
         out
-    }
+    }).flatten()
 }
 
 pub(super) fn ime_command(cmd: OsCmd) -> bool {
@@ -249,12 +299,7 @@ pub(super) fn ime_command(cmd: OsCmd) -> bool {
         OsCmd::ImeHide { .. } => *lock(&LAST_IME) = None,
         _ => {}
     }
-    unsafe {
-        let vm = VM.load(Ordering::Acquire) as *mut JavaVM;
-        if vm.is_null() { return false; }
-        let mut env: *mut JNIEnv = std::ptr::null_mut();
-        let attached = ((**vm).GetEnv.unwrap())(vm, &mut env as *mut _ as _, JNI_VERSION_1_6) != 0;
-        if attached && ((**vm).AttachCurrentThread.unwrap())(vm, &mut env, std::ptr::null_mut()) != 0 { return false; }
+    on_java(|env| unsafe {
         let activity = {
             let global = lock(&ACTIVITY);
             if *global == 0 { std::ptr::null_mut() } else { ((**env).NewLocalRef.unwrap())(env, *global as _) }
@@ -279,10 +324,9 @@ pub(super) fn ime_command(cmd: OsCmd) -> bool {
         }};
         if ((**env).ExceptionCheck.unwrap())(env) != 0 { ((**env).ExceptionDescribe.unwrap())(env); ((**env).ExceptionClear.unwrap())(env); }
         if !activity.is_null() { ((**env).DeleteLocalRef.unwrap())(env, activity); }
-        if attached { ((**vm).DetachCurrentThread.unwrap())(vm); }
         if !ok { eprintln!("[hal-android] IME command failed"); }
         ok
-    }
+    }).unwrap_or(false)
 }
 
 /// Registers the shell's, and the media services' natives in one strict pass. The
@@ -291,6 +335,14 @@ pub(super) fn ime_command(cmd: OsCmd) -> bool {
 /// # Safety
 /// Called on a JVM-attached thread with the live MakepadNative class. The host owns JNI_OnLoad.
 pub unsafe fn register_natives(env: *mut JNIEnv, class: jclass) -> Result<Vec<String>, String> {
+    // the VM from the start: Java calls work before the Activity exists (on_java)
+    let mut vm = std::ptr::null_mut();
+    ((**env).GetJavaVM.unwrap())(env, &mut vm);
+    VM.store(vm as usize, Ordering::Release);
+    // fleet crypto and device stats (FleetTls): optional, an APK without the class only lacks them
+    if let Err(e) = super::fleet::init(env) {
+        eprintln!("[hal-android] fleet: {e}");
+    }
     let natives = reg::reflect(env, class)?;
     let mut table = native_methods();
     table.extend(super::media::native_methods());

@@ -11,11 +11,13 @@
 
 mod dep_graph;
 mod job;
+mod once;
 mod table;
 
 pub use dep_graph::{DepKind, DepNode, DepNodeColor, DepNodeIndex, Fingerprint};
 pub use table::{QueryTable, RECOMPUTED_VALUES, RETIRED_VALUES};
 pub use job::{set_wait_hook, WaitHook};
+pub use once::init_once;
 pub use dep_graph::{context_ptr, swap_context};
 
 use crate::fxhash::HashMap;

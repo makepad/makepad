@@ -55,6 +55,10 @@ pub struct Pipe {
     pub bindings: Arc<[u32]>,
     /// the session was told the first outcome (variants announce readiness again)
     pub announced: bool,
+    /// the GPU profiler's cost hints of the generated source ([`crate::gpu_prof::source_stats`])
+    pub stats: Arc<str>,
+    /// the generated source, kept for `gpu prof shader` when the profiler keeps sources
+    pub source: Option<Arc<str>>,
 }
 
 /// Attachments the premultiplied-over blend applies to: four-channel formats every Metal GPU

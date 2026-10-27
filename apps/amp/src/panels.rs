@@ -21,7 +21,7 @@ struct PanelsState {
     seen: String,
     /// The list shown (a playlist, the search), to notice the person going
     /// to another: that brings the Tracks page up.
-    list: Option<(crate::model::Page, String)>,
+    list: Option<(String, String)>,
     /// The small window's docked sections: shown by the window's height
     /// until a section key is pressed (then by hand, until the class
     /// changes); the height level last used, for hysteresis.
@@ -104,6 +104,10 @@ impl App {
         // drawer) opens it.
         let host_shown = self.ui.hw_stage(cx, ids!(stage)).shown("tracks_host").is_some() || self.ui.hw_stage(cx, ids!(stage)).shown("tracks").is_some();
         let seen = std::mem::replace(&mut state(cx).seen, page.clone());
+        // The side panel offers the AI pages while the AI page is open.
+        if seen != page && (seen == "ai" || page == "ai") {
+            self.update_ai_page(cx);
+        }
         if seen != page && page != "tracks" && !host_shown && !self.up_next_open {
             self.up_next_open = true;
             self.apply_up_next(cx);
@@ -112,17 +116,23 @@ impl App {
         // Narrow: the tabs are icons alone.
         let tabs_w = self.ui.hw_stage(cx, ids!(stage)).shown("tracks_host").map(|r| r.size.x).unwrap_or(1000.0);
         let words = tabs_w >= 380.0;
-        for id in [ids!(tab_tracks), ids!(tab_eq)] {
+        for id in [ids!(tab_tracks), ids!(tab_eq), ids!(tab_ai)] {
             self.set_visible(cx, id, words);
         }
-        for (name, cap) in [("tracks", ids!(tab_tracks_cap)), ("eq", ids!(tab_eq_cap))] {
+        for (name, cap) in [("tracks", ids!(tab_tracks_cap)), ("eq", ids!(tab_eq_cap)), ("ai", ids!(tab_ai_cap))] {
             let offered = pages.len() > 1 && pages.iter().any(|p| p == name);
             self.set_visible(cx, cap, offered);
             self.ui.relief_view(cx, cap).set_lit(cx, if page == name { 1.0 } else { 0.0 });
         }
         // Going to a list (a playlist picked, a search typed) is going to the
         // tracks: the list area shows them, and that is the page kept.
-        let list_now = (self.model.page.clone(), self.model.query.clone());
+        // A playlist by its uri: a library update renumbers the playlists (an
+        // AI song's new playlist), and that is no move of the person's.
+        let page_key = match &self.model.page {
+            crate::model::Page::Playlist(at) => self.model.index.entries.get(*at).map_or_else(String::new, |e| e.uri.clone()),
+            other => format!("{other:?}"),
+        };
+        let list_now = (page_key, self.model.query.clone());
         let moved = state(cx).list.as_ref().is_some_and(|l| *l != list_now);
         state(cx).list = Some(list_now);
         if moved && page != "tracks" && pages.len() > 1 {
@@ -194,8 +204,9 @@ impl App {
     }
 
     /// Show `page` in the host: the others close.
-    pub(crate) fn show_page(&mut self, _cx: &mut Cx, page: &str) {
+    pub(crate) fn show_page(&mut self, cx: &mut Cx, page: &str) {
         let eq_open = self.model.eq.open;
+        self.ui.hw_stage(cx, ids!(stage)).set_ai_open(cx, page == "ai");
         match page {
             "eq" => {
                 if !self.model.eq.open {
@@ -437,7 +448,7 @@ impl App {
             }
             search.set_text(cx, "");
         }
-        for (page, key, icon) in [("tracks", ids!(tab_tracks), ids!(tab_tracks_icon)), ("eq", ids!(tab_eq), ids!(tab_eq_icon))] {
+        for (page, key, icon) in [("tracks", ids!(tab_tracks), ids!(tab_tracks_icon)), ("eq", ids!(tab_eq), ids!(tab_eq_icon)), ("ai", ids!(tab_ai), ids!(tab_ai_icon))] {
             if self.ui.button(cx, key).clicked(actions) || self.ui.button(cx, icon).clicked(actions) {
                 self.show_page(cx, page);
                 let s = state(cx);

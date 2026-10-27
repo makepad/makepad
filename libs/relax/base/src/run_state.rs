@@ -34,6 +34,8 @@ pub struct ParkedPanic {
     pub location: String,
     /// Exactly the choices advertised by inspect's panic event.
     pub choices: Vec<String>,
+    /// a stale access (code the JIT invalidated was run), not a panic
+    pub stale: bool,
 }
 
 /// Layout of the same run-state document before and after window handover.

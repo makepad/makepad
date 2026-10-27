@@ -44,7 +44,7 @@ impl CommandExt for Command {
     where
         F: FnMut() -> crate::io::Result<()> + Send + Sync + 'static,
     {
-        self.add_pre_exec(alloc::boxed::Box::new(f));
+        self.add_pre_exec(alloc::boxed::Box::new(f), crate::process::run_pre_exec::<F>);
         self
     }
 }

@@ -1,0 +1,38 @@
+[package]
+name = "makepad-midi-library"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The MIDI song library (an opt-in download, never shipped with Stage): the Lakh MIDI Dataset's clean subset with Million Song Dataset years, genres and Last.fm tags, installed on demand by the pinned-download installer; a searchable index (artist, title, decade, genre, tempo, key, roles, quality); the MIDI-to-Score importer; covers rendered through the engine; and short reference excerpts the music AI can be shown"
+
+[lib]
+name = "makepad_midi_library"
+
+[[bin]]
+name = "midi_library"
+path = "src/bin/midi_library.rs"
+
+[[bin]]
+name = "midi-text"
+path = "src/bin/midi_text.rs"
+
+[dependencies]
+# The one loudness meter.
+makepad-audio-dsp = { path = "../audio_dsp" }
+makepad-midi-file = { path = "../midi_file" }
+makepad-fast-inflate = { path = "../fast_inflate" }
+makepad-strict-json = { path = "../strict_json" }
+makepad-zip-file = { path = "../zip_file" }
+# The SID collection's pack (each tune LZ4-compressed).
+makepad-lz4 = { path = "../lz4" }
+# Single-song downloads from the archives' sites (chip::web).
+makepad-ai-hub = { path = "../ai/hub", default-features = false, features = ["local"] }
+# The Last.fm tag database is SQLite.
+makepad-sqlite = { path = "../sqlite_query" }
+# The installer for the library's downloads: pinned URL, size and SHA-256,
+# resumable, a provenance record beside each file.
+makepad-model-install = { path = "../model_install" }
+makepad-score-live = { path = "../score_live" }
+makepad-score-player = { path = "../score_player" }
+# Covers render as the song loop renders: the mix, its loudness and card.
+makepad-music-iter = { path = "../music_iter" }

@@ -760,6 +760,8 @@ mod tests {
             codec: String::new(),
             audio: None,
             chat_session: String::new(),
+            chat_system: String::new(),
+            chat_messages: Vec::new(),
             chat_images: Vec::new(),
             target_domain: "image".to_string(),
             identity_anchor: String::new(),

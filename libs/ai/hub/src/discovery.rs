@@ -56,9 +56,12 @@ pub fn mint_node_id() -> u64 {
     nanos ^ ((std::process::id() as u64) << 32)
 }
 
-/// The beacon of a node serving behind its TLS front. Nothing in it is
-/// trusted: a client reaches the advertised port over TLS, records the
-/// certificate (known nodes) and proves its own credential to it.
+/// The beacon payload of a node serving behind its TLS front. It travels
+/// signed by the node's fleet key ([`makepad_network::fleet::id::Me::announce`],
+/// service [`ANNOUNCE_SERVICE`]); listeners drop beacons that do not check
+/// out against the fleet root. A client then reaches the advertised port
+/// over TLS (the certificate checked against the root) and proves its own
+/// credential to it.
 #[derive(Clone, Debug, SerJson, DeJson)]
 pub struct FleetBeaconJson {
     /// Constant "makepad-ai-hub-tls".
@@ -71,12 +74,41 @@ pub struct FleetBeaconJson {
 }
 
 pub const FLEET_SERVICE: &str = "makepad-ai-hub-tls";
+/// The service name a beacon is signed for.
+pub const ANNOUNCE_SERVICE: &str = "ai-hub";
 
-pub fn start_fleet_beacon(node_id: u64, tls_port: u16, fleet: String, node_key: String) {
-    if std::env::var_os("MAKEPAD_AI_NO_BEACON").is_some_and(|v| v == "1") {
-        return;
+/// The running beacon: [`Beacon::stop`] (or a drop) ends it, so a hub switched off in-process
+/// is no longer announced (the desktop AI Hub app's Enabled switch).
+pub struct Beacon {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Beacon {
+    pub fn stop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
+            let _ = thread.join();
+        }
     }
-    std::thread::spawn(move || {
+}
+
+impl Drop for Beacon {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+pub fn start_fleet_beacon(node_id: u64, tls_port: u16, fleet: String, node_key: String) -> Option<Beacon> {
+    if std::env::var_os("MAKEPAD_AI_NO_BEACON").is_some_and(|v| v == "1")
+        || !makepad_network::lan::service("ai-hub fleet beacon")
+    {
+        return None;
+    }
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopping = stop.clone();
+    let thread = std::thread::Builder::new().name("ai-hub-beacon".into()).spawn(move || {
         let Ok(socket) = UdpSocket::bind(("0.0.0.0", 0)) else {
             eprintln!("discovery: beacon socket bind failed — no LAN announce");
             return;
@@ -84,7 +116,13 @@ pub fn start_fleet_beacon(node_id: u64, tls_port: u16, fleet: String, node_key: 
         if socket.set_broadcast(true).is_err() {
             return;
         }
-        let beacon = FleetBeaconJson {
+        // Listeners accept only beacons signed by a fleet machine: without
+        // an identity this node is not announced.
+        let Some(me) = makepad_network::fleet::id::me() else {
+            eprintln!("discovery: no LAN announce: {}", makepad_network::fleet::id::why_no_identity());
+            return;
+        };
+        let payload = FleetBeaconJson {
             service: FLEET_SERVICE.to_string(),
             node_id,
             port: tls_port,
@@ -92,17 +130,29 @@ pub fn start_fleet_beacon(node_id: u64, tls_port: u16, fleet: String, node_key: 
             node_key,
         }
         .serialize_json();
-        loop {
-            // 255.255.255.255 leaves by the default route only; each up
-            // interface's directed broadcast reaches its own subnet too (a
-            // Wi-Fi hotspot this machine hosts). Interfaces are read every
-            // round: a hotspot may come up after the node.
-            for target in beacon_targets() {
-                let _ = socket.send_to(beacon.as_bytes(), (target, DISCOVERY_PORT));
+        let mut warned_sign = false;
+        while !stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            // Signed every round: an announcement carries its time.
+            match me.announce(ANNOUNCE_SERVICE, payload.as_bytes()) {
+                Ok(beacon) => {
+                    // 255.255.255.255 leaves by the default route only; each up
+                    // interface's directed broadcast reaches its own subnet too (a
+                    // Wi-Fi hotspot this machine hosts). Interfaces are read every
+                    // round: a hotspot may come up after the node.
+                    for target in beacon_targets() {
+                        let _ = socket.send_to(&beacon, (target, DISCOVERY_PORT));
+                    }
+                }
+                Err(e) if !warned_sign => {
+                    warned_sign = true;
+                    eprintln!("discovery: signing the beacon failed: {e}");
+                }
+                Err(_) => {}
             }
-            std::thread::sleep(BEACON_INTERVAL);
+            std::thread::park_timeout(BEACON_INTERVAL);
         }
-    });
+    }).ok()?;
+    Some(Beacon { stop, thread: Some(thread) })
 }
 
 /// The TLS port a fleet node serves on unless configured otherwise.
@@ -113,9 +163,12 @@ pub const DEFAULT_TLS_PORT: u16 = 8123;
 /// host) that takes a TCP connection within `timeout`. A phone on a laptop's
 /// hotspot hears no beacon when the laptop broadcasts out of another
 /// interface, but the laptop is its gateway. The URLs are marked as fleet
-/// endpoints and reached through the same TLS / known-node / credential
+/// endpoints and reached through the same TLS / fleet-root / credential
 /// path as a beacon's: nothing is trusted for being a gateway.
 pub fn gateway_nodes(port: u16, timeout: Duration) -> Vec<String> {
+    if !makepad_network::lan::service("ai-hub gateway probe") {
+        return Vec::new();
+    }
     let candidates = makepad_core_util::netif::gateway_candidates();
     let probes: Vec<_> = candidates
         .into_iter()
@@ -130,7 +183,7 @@ pub fn gateway_nodes(port: u16, timeout: Duration) -> Vec<String> {
     for probe in probes {
         if let Ok(Some(ip)) = probe.join() {
             let host_port = format!("{ip}:{port}");
-            crate::fleet_auth::mark_fleet_endpoint(&host_port);
+            makepad_network::fleet::id::mark_fleet_endpoint(&host_port);
             out.push(format!("https://{host_port}"));
         }
     }
@@ -148,12 +201,15 @@ pub fn network_addresses() -> Vec<std::net::Ipv4Addr> {
 pub fn answers(host_port: &str, timeout: Duration) -> bool {
     use std::net::ToSocketAddrs;
     let Ok(addrs) = host_port.to_socket_addrs() else { return false };
-    addrs.into_iter().any(|addr| std::net::TcpStream::connect_timeout(&addr, timeout).is_ok())
+    addrs.into_iter().any(|addr| {
+        makepad_network::lan::check("ai-hub hint probe", addr).is_ok()
+            && std::net::TcpStream::connect_timeout(&addr, timeout).is_ok()
+    })
 }
 
-/// Where a beacon goes: the limited broadcast, then every up interface's
-/// directed broadcast.
-fn beacon_targets() -> Vec<std::net::Ipv4Addr> {
+/// Where a LAN broadcast goes (a beacon, a Sandbox room probe): the limited
+/// broadcast, then every up interface's directed broadcast.
+pub fn beacon_targets() -> Vec<std::net::Ipv4Addr> {
     let mut out = vec![std::net::Ipv4Addr::BROADCAST];
     for interface in makepad_core_util::netif::interfaces() {
         let target = interface.broadcast();
@@ -162,6 +218,16 @@ fn beacon_targets() -> Vec<std::net::Ipv4Addr> {
         }
     }
     out
+}
+
+/// The beacon payload of a signed announcement from `from` that checks out
+/// against `fleet` and is for [`ANNOUNCE_SERVICE`]; None for anything else.
+pub fn check_fleet_beacon(fleet: &makepad_network::fleet::id::Fleet, bytes: &[u8], from: std::net::IpAddr, now: u64) -> Option<FleetBeaconJson> {
+    let (_sender, service, payload) = fleet.check_announcement(bytes, from, now).ok()?;
+    if service != ANNOUNCE_SERVICE {
+        return None;
+    }
+    FleetBeaconJson::deserialize_json(std::str::from_utf8(payload).ok()?).ok()
 }
 
 /// A beacon for the wanted fleet from `from`: the node's TLS endpoint,
@@ -175,7 +241,7 @@ pub fn accept_fleet_beacon(beacon: &FleetBeaconJson, from: std::net::IpAddr, wan
         v4 => v4.to_string(),
     };
     let host_port = format!("{host}:{}", beacon.port);
-    crate::fleet_auth::mark_fleet_endpoint(&host_port);
+    makepad_network::fleet::id::mark_fleet_endpoint(&host_port);
     Some(format!("https://{host_port}"))
 }
 
@@ -239,7 +305,14 @@ impl Discovery {
 /// The filter reads `MAKEPAD_AI_FLEET` per beacon, so sharing across
 /// callers changes nothing they observe. After [`stop_listener`] the next
 /// call starts it again (the set is kept).
+///
+/// Receiving the fleet's broadcast beacons is a local-network operation: where
+/// [`makepad_network::lan::allowed`] says no (a hidden instance), discovery is
+/// unavailable and nothing binds.
 pub fn start_listener() -> Discovery {
+    if !makepad_network::lan::service("ai-hub fleet discovery") {
+        return Discovery::Unavailable { reason: "local network off for this process (MAKEPAD_LAN=1 allows it)" };
+    }
     let mut slot = LISTENER.lock().unwrap_or_else(|e| e.into_inner());
     let set = DISCOVERED.get_or_init(Discovered::default).clone();
     // a failed bind is said once and not retried until a stop (another app holds the port)
@@ -312,7 +385,7 @@ impl Listener {
             .name("ai-hub-discovery".into())
             .spawn(move || {
                 let mut buffer = [0u8; 2048];
-                let mut warned_no_credential = false;
+                let mut warned_no_identity = false;
                 loop {
                     #[cfg(unix)]
                     match makepad_core_util::udp::wait_readable(&socket, &waker) {
@@ -327,20 +400,21 @@ impl Listener {
                     let Ok((len, from)) = received else {
                         continue;
                     };
-                    let Ok(text) = std::str::from_utf8(&buffer[..len]) else {
-                        continue;
-                    };
-                    let Ok(beacon) = FleetBeaconJson::deserialize_json(text) else {
-                        continue;
-                    };
-                    // A node is only of use to a process with a fleet credential.
-                    if crate::fleet_auth::own_credential().is_none() {
-                        if !warned_no_credential {
-                            warned_no_credential = true;
-                            eprintln!("discovery: fleet nodes found, but this process has no fleet credential (~/.makepad/ai-hub/client.credential or MAKEPAD_AI_HUB_CREDENTIAL; see tools/aihub-fleet.md)");
-                        }
+                    if !makepad_network::fleet::id::is_announcement(&buffer[..len]) {
                         continue;
                     }
+                    // A node is only of use to (and checkable by) a process
+                    // with a fleet identity.
+                    let (Some(_), Some(fleet)) = (makepad_network::fleet::id::me(), makepad_network::fleet::id::fleet()) else {
+                        if !warned_no_identity {
+                            warned_no_identity = true;
+                            eprintln!("discovery: fleet nodes found, but {}", makepad_network::fleet::id::why_no_identity());
+                        }
+                        continue;
+                    };
+                    let Some(beacon) = check_fleet_beacon(fleet, &buffer[..len], from.ip(), makepad_network::fleet::id::now_secs()) else {
+                        continue;
+                    };
                     let Some(base_url) = accept_fleet_beacon(&beacon, from.ip(), &wanted_fleet()) else {
                         continue;
                     };
@@ -372,9 +446,35 @@ mod tests {
         assert_eq!(back.port, 8123);
         let from: std::net::IpAddr = "10.9.9.9".parse().unwrap();
         assert_eq!(accept_fleet_beacon(&beacon, from, "gen").as_deref(), Some("https://10.9.9.9:8123"));
-        assert!(crate::fleet_auth::is_fleet_endpoint("10.9.9.9:8123"));
+        assert!(makepad_network::fleet::id::is_fleet_endpoint("10.9.9.9:8123"));
         assert!(accept_fleet_beacon(&beacon, "10.9.9.8".parse().unwrap(), "game").is_none());
-        assert!(!crate::fleet_auth::is_fleet_endpoint("10.9.9.8:8123"));
+        assert!(!makepad_network::fleet::id::is_fleet_endpoint("10.9.9.8:8123"));
+    }
+
+    #[test]
+    fn fleet_beacons_are_signed_by_a_fleet_machine() {
+        use makepad_network::fleet::id::{generate_key, now_secs, point_of, Fleet, Me, Role, Root};
+        let root = Root::generate().unwrap();
+        let fleet = Fleet::new(root.point(), Default::default());
+        let key = generate_key().unwrap();
+        let node = Me::new(key, root.issue("n217", Role::Node, now_secs() + 3600, None, &point_of(&key)).unwrap()).unwrap();
+        let payload = FleetBeaconJson {
+            service: FLEET_SERVICE.into(),
+            node_id: 7,
+            port: 8123,
+            fleet: "gen".into(),
+            node_key: "00".into(),
+        }
+        .serialize_json();
+        let from: std::net::IpAddr = "10.9.9.7".parse().unwrap();
+        let signed = node.announce(ANNOUNCE_SERVICE, payload.as_bytes()).unwrap();
+        assert_eq!(check_fleet_beacon(&fleet, &signed, from, now_secs()).map(|b| b.node_id), Some(7));
+        // Another service, another fleet, an unsigned beacon: dropped.
+        let room = node.announce("sandbox-room", payload.as_bytes()).unwrap();
+        assert!(check_fleet_beacon(&fleet, &room, from, now_secs()).is_none());
+        let stranger = Fleet::new(Root::generate().unwrap().point(), Default::default());
+        assert!(check_fleet_beacon(&stranger, &signed, from, now_secs()).is_none());
+        assert!(check_fleet_beacon(&fleet, payload.as_bytes(), from, now_secs()).is_none());
     }
 
     #[test]
@@ -397,7 +497,9 @@ mod tests {
         let a = start_listener();
         let b = start_listener();
         let (Discovery::Available(a), Discovery::Available(b)) = (a, b) else {
-            panic!("native discovery unexpectedly unavailable");
+            // a hidden / MAKEPAD_LAN=0 test run never listens on the LAN
+            assert!(!makepad_network::lan::allowed(), "native discovery unexpectedly unavailable");
+            return;
         };
         assert!(Arc::ptr_eq(&a.nodes, &b.nodes));
     }

@@ -283,10 +283,11 @@ fn write_request(
         }
     }
 
-    if let Some(body) = &request.body {
-        if !has_content_length {
-            req.push_str(&format!("Content-Length: {}\r\n", body.len()));
-        }
+    // A POST or PUT without a body still says Content-Length: 0 (RFC 9110 8.6; servers such as
+    // makepad's own answer 411 without it), like the Apple and Windows clients.
+    let body_len = request.body.as_ref().map(Vec::len).or(matches!(method, "POST" | "PUT").then_some(0));
+    if let (Some(len), false) = (body_len, has_content_length) {
+        req.push_str(&format!("Content-Length: {len}\r\n"));
     }
     req.push_str("\r\n");
 

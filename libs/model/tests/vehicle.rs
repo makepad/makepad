@@ -40,7 +40,7 @@ fn textured_editable_vehicle_roundtrips_into_four_driven_wheels(){
     assert_eq!(model.driven_parts.len(),4);assert_eq!(model.indices.len(),36,"wheels must leave the rigid chassis stream");
     assert_eq!(model.indices.len()+model.driven_parts.iter().map(|p|p.indices.len()).sum::<usize>(),product.triangles*3);
     for (i,connection) in VEHICLE_WHEEL_CONNECTIONS.iter().enumerate(){
-        let wheel=model.driven_parts.iter().find(|p|&p.connection==connection).unwrap();
+        let wheel=model.driven_parts.iter().find(|p|&*p.connection==*connection).unwrap();
         assert_eq!(wheel.indices.len(),132);assert!(!wheel.layers.is_empty());
         let x=4.+if i%2==0{0.95}else{-0.95};let z=-2.+if i<2{1.3}else{-1.3};
         assert!((wheel.anchor.x-x).abs()<1e-5&&(wheel.anchor.y-0.65).abs()<1e-5&&(wheel.anchor.z-z).abs()<1e-5);
@@ -88,8 +88,8 @@ fn changing_a_wheel_pivot_preserves_the_exported_anchor(){
     let mut doc=vehicle();let old=StaticModel::parse_glb(&doc.compile(None).unwrap().glb).unwrap();
     apply(&mut doc,"pivot",vec![Operation::Scene(SceneOperation::Pivot{object:"tire_0".into(),position:[0.1,0.2,0.3]})]);
     let new=StaticModel::parse_glb(&doc.compile(None).unwrap().glb).unwrap();
-    let before=old.driven_parts.iter().find(|p|p.connection==VEHICLE_WHEEL_CONNECTIONS[0]).unwrap();
-    let after=new.driven_parts.iter().find(|p|p.connection==VEHICLE_WHEEL_CONNECTIONS[0]).unwrap();
+    let before=old.driven_parts.iter().find(|p|&*p.connection==VEHICLE_WHEEL_CONNECTIONS[0]).unwrap();
+    let after=new.driven_parts.iter().find(|p|&*p.connection==VEHICLE_WHEEL_CONNECTIONS[0]).unwrap();
     assert!((before.anchor-after.anchor).length()<1e-5);assert!((after.pivot.x+0.1).abs()<1e-6);
 }
 
@@ -113,7 +113,7 @@ fn visual_wheel_limits_roundtrip_without_changing_physical_connections(){
     let model=StaticModel::parse_glb(&product.glb).unwrap();
     for part in &model.driven_parts{
         let before=legacy.driven_parts.iter().find(|p|p.connection==part.connection).unwrap();
-        let expected=restored.scene().wheels.values().find(|w|w.connection==part.connection).unwrap().visual.unwrap();
+        let expected=restored.scene().wheels.values().find(|w|*w.connection==*part.connection).unwrap().visual.unwrap();
         assert_eq!(part.visual,Some(expected));
         assert_eq!(part.radius,before.radius);assert_eq!(part.width,before.width);
         assert_eq!(part.anchor,before.anchor);assert_eq!(part.pivot,before.pivot);
@@ -175,7 +175,7 @@ fn a_vehicle_laid_out_along_another_axis_with_its_sides_swapped_exports_facing_p
         let (front,bound_left)=(i<2,i%2==0);
         let (x,z)=(if front{-1.3f32}else{1.3},if bound_left{-0.95f32}else{0.95});
         let expected=format!("wheel_{}_{}",if front{"front"}else{"rear"},if bound_left{"right"}else{"left"});
-        let wheel=model.driven_parts.iter().find(|p|p.connection==expected).unwrap_or_else(||panic!("{expected} missing"));
+        let wheel=model.driven_parts.iter().find(|p|*p.connection==*expected).unwrap_or_else(||panic!("{expected} missing"));
         let anchor=[-2.+z,0.65,-(4.+x)];
         assert!((wheel.anchor.x-anchor[0]).abs()<1e-4&&(wheel.anchor.y-anchor[1]).abs()<1e-4&&(wheel.anchor.z-anchor[2]).abs()<1e-4,"{expected}: {:?}",wheel.anchor);
         let rest=wheel.rest_transform();

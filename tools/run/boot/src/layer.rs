@@ -6,10 +6,9 @@
 //! screen); at the first present a Gaussian-blurred app fades in behind the still-working galaxy
 //! (its stars glinting, the warm-up arc advancing with the functions built ahead); when the app
 //! is ready (the JIT's readiness signal) the arc closes, the sharp app fades in and the galaxy
-//! goes. Later, sustained JIT waiting of the UI thread (a tab switch's compiles) fades in the JIT
-//! loader: a small galaxy in the bottom-right corner over the sharp app, its stars glinting per
-//! compile, no blur. The run decides when it shows and goes (hysteresis); a fade is never
-//! reversed half-way. Every fade runs on this session's clock, never the app's.
+//! goes, and the layer with it. (Later JIT work shows in the JIT ring, `ring.rs`, not
+//! here.) The run decides when it shows and goes; a fade is never reversed half-way. Every fade
+//! runs on this session's clock, never the app's.
 use makepad_hal::Id;
 use std::time::Instant;
 
@@ -26,12 +25,6 @@ pub const SIGMA: f32 = 4.0;
 
 const FADE_IN: f32 = 0.5;
 const LIFT: f32 = 1.1;
-/// the JIT loader's fades
-const LOADER_IN: f32 = 0.35;
-const LOADER_OUT: f32 = 0.6;
-/// the JIT loader's square side and its margin to the window's corner (points)
-pub const LOADER_SIDE: f32 = 200.0;
-pub const LOADER_MARGIN: f32 = 12.0;
 
 /// What the run asks the layer to show (hal_run, from the JIT's signals).
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -42,9 +35,6 @@ pub enum Want {
     WarmUp { done: u64, queued: u64 },
     /// ready: the arc closes, the sharp app comes in, the galaxy goes
     Ready,
-    /// the JIT loader after the warm-up: `shown` while the run wants it; going, its fade-out holds
-    /// while the UI thread is `busy` on the JIT again (it is never reversed)
-    Loader { shown: bool, busy: bool },
 }
 
 /// What one frame of the layer draws.
@@ -55,15 +45,11 @@ pub struct Look {
     /// the field's backdrop opacity over the blurred app
     pub backdrop: f32,
     pub galaxy: f32,
-    /// the sharp app's opacity: over everything, or under the galaxy (`corner`)
+    /// the sharp app's opacity, over everything
     pub sharp: f32,
     /// the warm-up arc (-1: none) and the seconds since ready (-1: not yet)
     pub progress: f32,
     pub resolve: f32,
-    /// the HUD, the frame's brackets and the swap ring (the warm-up; the loader shows the galaxy only)
-    pub hud: bool,
-    /// the JIT loader: the galaxy alone in the bottom-right corner, over the sharp app
-    pub corner: bool,
     /// the layer has faded out: it can go
     pub done: bool,
 }
@@ -78,9 +64,6 @@ pub struct Layer {
     ready_at: Option<Instant>,
     /// the arc, never going back
     progress: f32,
-    /// the JIT loader's opacity
-    loader: f32,
-    last: Instant,
     /// the app frames blurred last (the blur is made again only for a new app frame)
     pub blurred: Option<u64>,
     pub app_frames: u64,
@@ -105,8 +88,6 @@ impl Layer {
             warm_at: None,
             ready_at: None,
             progress: 0.0,
-            loader: 0.0,
-            last: Instant::now(),
             blurred: None,
             app_frames: 0,
             ahead: 0,
@@ -140,12 +121,6 @@ impl Layer {
             Some(Want::Ready) => {
                 self.ready_at.get_or_insert_with(Instant::now);
             }
-            Some(Want::Loader { .. }) => {
-                if !matches!(self.want, Some(Want::Loader { .. })) {
-                    self.loader = 0.0;
-                    self.last = Instant::now();
-                }
-            }
         }
         if self.want.as_ref().map(std::mem::discriminant) != want.as_ref().map(std::mem::discriminant) {
             self.done = false;
@@ -161,8 +136,6 @@ impl Layer {
     /// This frame's look (advances the fades).
     pub fn look(&mut self, reduce_motion: bool) -> Look {
         let now = Instant::now();
-        let dt = now.duration_since(self.last).as_secs_f32().min(0.1);
-        self.last = now;
         let since = |at: Option<Instant>| at.map(|t| now.duration_since(t).as_secs_f32());
         let mut look = Look {
             blur: false,
@@ -171,8 +144,6 @@ impl Layer {
             sharp: 0.0,
             progress: -1.0,
             resolve: -1.0,
-            hud: true,
-            corner: false,
             done: false,
         };
         match self.want {
@@ -193,23 +164,6 @@ impl Layer {
                     look.galaxy = 1.0 - smooth(0.25 * lift, 0.9 * lift, t);
                     look.done = t >= lift;
                 }
-            }
-            Some(Want::Loader { shown, busy }) => {
-                // in while shown; going, it holds while the UI thread is busy again
-                let rate = if shown {
-                    dt / LOADER_IN
-                } else if busy {
-                    0.0
-                } else {
-                    -dt / LOADER_OUT
-                };
-                self.loader = (self.loader + rate).clamp(0.0, 1.0);
-                look.backdrop = 0.0;
-                look.hud = false;
-                look.corner = true;
-                look.sharp = 1.0;
-                look.galaxy = smooth(0.0, 1.0, self.loader);
-                look.done = !shown && self.loader <= 0.0;
             }
         }
         self.done = look.done;

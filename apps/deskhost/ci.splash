@@ -1,0 +1,11 @@
+// CI for Desk Host. It is a windowless service of the user's session (a LaunchAgent / an at-logon
+// task) that serves the screen, so the default smoke test (launch, grab a window, judge it) does
+// not apply: its checks are the other platforms' builds.
+
+use mod.std.*
+use mod.ci;
+
+ci.step("check other platforms", fn(){
+    ci.check_targets({packages: ["makepad-app-deskhost"] targets: ci.host.targets})
+})
+nil

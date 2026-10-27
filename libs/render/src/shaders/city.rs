@@ -73,21 +73,7 @@ script_mod! {
         }
 
         pixel: fn() {
-            // Streamed-LOD crossfade (stream.rs `Dither`), as DrawScenePbr.
-            if self.color_adjust_ctl.w > 0.5 {
-                let dsp = self.v_spos.xy / max(self.v_spos.w, 0.000001)
-                // A cell grid commensurate with no real target: two draws
-                // that must cover complementary pixels read the same cell
-                // (at 1920 cells a 2720-px target put every 17th column's
-                // centre exactly on a cell edge, where the two meshes'
-                // interpolated positions round apart: a hole in both).
-                let dpx = floor(vec2(dsp.x * 0.5 + 0.5, 0.5 - dsp.y * 0.5) * vec2(1913.37, 1071.93))
-                let dn = fract(52.9829189 * fract(dot(dpx, vec2(0.06711056, 0.00583715))))
-                let dv = self.color_adjust_ctl.w - 1.0
-                let dlo = floor(dv / 256.0)
-                let dhi = dv - dlo * 256.0
-                if dn < dlo / 255.0 || dn >= dhi / 255.0 { self.clip() }
-            }
+            self.door_window()
             var tex = self.base_texel()
             if tex.w < 0.5 { self.clip() }
             let kind = self.metallic

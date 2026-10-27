@@ -1,0 +1,15 @@
+[package]
+name = "relax-dsbench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Core data-structure microbenchmarks for Relax's code quality (lane DATASTRUCT): Vec, slice iterator
+# chains, HashMap/HashSet, BTreeMap, VecDeque, sort/binary_search, String building/fmt and bounds-checked
+# index loops. Same harness as rwbench (src/harness.rs by path): rustc --release vs `makepad run`, steady ms,
+# checksum, RW_ITERS/RW_PERF_CTL for progins. std only.
+[[bin]]
+name = "relax-dsbench"
+path = "src/main.rs"
+
+[dependencies]

@@ -67,9 +67,21 @@ fn inst(bytes: &[u8]) -> Instance {
 }
 
 fn run(fs: &[Func], k: usize, args: &[u64]) -> Result<Vec<u64>, Trap> {
-    let (b, _) = build(fs, opts());
+    run_o(fs, k, args, opts())
+}
+
+fn run_o(fs: &[Func], k: usize, args: &[u64], o: Options) -> Result<Vec<u64>, Trap> {
+    let (b, _) = build(fs, o);
     let mut i = inst(&b);
     i.call_export(&format!("f{}", k), args)
+}
+
+/// Runs on both memories (wasm32, wasm64): the results must agree.
+fn run2(fs: &[Func], k: usize, args: &[u64]) -> Result<Vec<u64>, Trap> {
+    let r32 = run_o(fs, k, args, opts());
+    let r64 = run_o(fs, k, args, Options { memory64: true, ..opts() });
+    assert_eq!(r32, r64, "wasm32 and wasm64 differ");
+    r32
 }
 
 struct B {
@@ -126,6 +138,56 @@ impl B {
 const U8: IntTy = IntTy { bits: 8, signed: false };
 const I8: IntTy = IntTy { bits: 8, signed: true };
 const I16: IntTy = IntTy { bits: 16, signed: true };
+
+#[test]
+fn static_tls_uses_linked_storage_and_symbol_offsets() {
+    let mut f = B::new(&[], &[Cls::I, Cls::I]);
+    let base = f.v(Cls::I);
+    f.i(Inst::TlsStatic(base, Sym::new(0)));
+    let field = f.v(Cls::I);
+    f.i(Inst::TlsStatic(field, Sym { id: 0, off: 8 }));
+    let initial = f.v(Cls::I);
+    f.i(Inst::Load(Mem::Int(8, false), initial, field, 0));
+    let value = f.iconst(123);
+    f.i(Inst::Store(Mem::Int(8, false), base, 8, value));
+    let read = f.v(Cls::I);
+    f.i(Inst::Load(Mem::Int(8, false), read, field, 0));
+    f.term(Term::Ret(vec![initial, read]));
+    let fs = [f.done()];
+    for memory64 in [false, true] {
+        for remat in [false, true] {
+            let o = Options { memory64, remat, heap_pages: 32, ..opts() };
+            assert_eq!(run_o(&fs, 0, &[], o).unwrap(), vec![0, 123]);
+        }
+    }
+}
+
+#[test]
+fn mismatched_call_signatures_remain_errors() {
+    let mut callee = B::new(&[Cls::I], &[Cls::I]);
+    callee.f.name = "integer_identity".into();
+    callee.term(Term::Ret(vec![callee.p(0)]));
+    let mut caller = B::new(&[], &[]);
+    caller.i(Inst::Call(Callee::Fn(0), vec![], vec![]));
+    caller.term(Term::Ret(vec![]));
+    let functions = [callee.done(), caller.done()];
+    for memory64 in [false, true] {
+        let mut module = Module::new(Options { memory64, ..opts() });
+        for (id, f) in functions.iter().enumerate() {
+            module.add_func(id as u32, f);
+            module.export_func(id as u32, &format!("f{id}"));
+        }
+        let out = module.finish(&relax_session::Options::default(), &L);
+        assert_eq!(out.stats.failed.len(), 1);
+        assert_eq!(out.stats.failed[0].0, 1);
+        assert!(out.stats.failed[0].1.contains("integer_identity"));
+        assert!(out.stats.failed[0].1.contains("params: []"));
+        assert!(out.stats.failed[0].1.contains("params: [I64]"));
+        let mut instance = inst(&out.bytes);
+        assert_eq!(instance.call_export("f0", &[17]).unwrap(), vec![17]);
+        assert!(instance.call_export("f1", &[]).is_err());
+    }
+}
 
 #[test]
 fn integer_ops_and_narrow_types() {
@@ -228,6 +290,49 @@ fn floats() {
     let c = a * b2;
     let got = f64::from_bits(run(&[fm], 0, &[bits(a), bits(b2), bits(c)]).unwrap()[0]);
     assert_eq!(got, a.mul_add(b2, -c));
+}
+
+/// A fused multiply-add with one NaN operand (either sign, quiet or signaling, a payload), every
+/// negation form, f32 and f64: that NaN quieted, its sign flipped when the form negates that
+/// operand (rir::fma_nan_f32 / f64; the native back ends give the same). Several NaNs: as the
+/// engine's f64 ops pick (wasm leaves NaN bits nondeterministic), not pinned.
+#[test]
+fn fma_one_nan_operand() {
+    for w in [false, true] {
+        let cls = if w { Cls::F64 } else { Cls::F32 };
+        let nans: Vec<u64> = if w {
+            vec![0x7ff8_0000_0000_0000, 0xfff8_0000_0000_0000, 0x7ff8_0000_0000_1234, 0xfff0_0000_0000_0089]
+        } else {
+            vec![0x7fc0_0000, 0xffc0_0000, 0x7fc3_872e, 0xff80_0089]
+        };
+        let others: Vec<u64> = if w { [1.5f64, -2.0, 3.0].iter().map(|x| x.to_bits()).collect() } else { [1.5f32, -2.0, 3.0].iter().map(|x| x.to_bits() as u64).collect() };
+        for (np, na) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut f = B::new(&[cls, cls, cls], &[cls]);
+            let (a, b2, c) = (f.p(0), f.p(1), f.p(2));
+            let d = f.v(cls);
+            f.i(Inst::FMulAdd(np, na, w, d, a, b2, c));
+            f.term(Term::Ret(vec![d]));
+            let fm = f.done();
+            for &q in &nans {
+                for pos in 0..3 {
+                    let mut args = [others[0], others[1], others[2]];
+                    args[pos] = q;
+                    let got = run(&[fm.clone()], 0, &args).unwrap()[0];
+                    let want = if w {
+                        let x = |k: usize| f64::from_bits(args[k]);
+                        let (a, c) = (if np { -x(0) } else { x(0) }, if na { -x(2) } else { x(2) });
+                        fma_nan_f64(a, x(1), c).unwrap()
+                    } else {
+                        let x = |k: usize| f32::from_bits(args[k] as u32);
+                        let (a, c) = (if np { -x(0) } else { x(0) }, if na { -x(2) } else { x(2) });
+                        fma_nan_f32(a, x(1), c).unwrap() as u64
+                    };
+                    let got = if w { got } else { got & 0xffff_ffff };
+                    assert_eq!(got, want, "w {} np {} na {} NaN {:x} at {}", w, np, na, q, pos);
+                }
+            }
+        }
+    }
 }
 
 /// Sum of 0..n with a loop; nested loops; early exits.
@@ -363,7 +468,31 @@ fn memory_and_slots() {
     // x = 0x1_0000_00F5: [p] = x, p[9] = 0xF5, q = copy of p, a = (i8)0xF5 = -11, b = p[8..10] = 0xF500, c = q[16..20]? (p + 3*4 + 4 = p + 16) = low 32 of x
     let xv: u64 = 0x1_0000_00F5;
     let want = (-11i64 as u64).wrapping_add(0xF500).wrapping_add(0xF5).wrapping_add(b'd' as u64);
-    assert_eq!(run(&[fu], 0, &[xv]).unwrap(), vec![want]);
+    assert_eq!(run2(&[fu], 0, &[xv]).unwrap(), vec![want]);
+}
+
+/// An atomic read-modify-write reads its address twice: an address computed just before it
+/// (one counted use) must stay in its local (the tee shortcut once dropped the set: the
+/// add went to address 0, P(DOOM)'s store_lock drop counter stayed 0).
+#[test]
+fn atomic_rmw_address_just_set() {
+    let mut f = B::new(&[Cls::I], &[Cls::I]);
+    let x = f.p(0);
+    let s = f.f.slot(16, 8);
+    let p = f.v(Cls::I);
+    f.i(Inst::SlotAddr(p, s));
+    f.i(Inst::Store(Mem::Int(8, false), p, 8, x));
+    let a = f.v(Cls::I);
+    f.i(Inst::IBinI(IOp::Add, I64, a, p, 8));
+    let one = f.iconst(1);
+    let old = f.v(Cls::I);
+    f.i(Inst::AtomicRmw(RmwOp::Add, Mem::Int(8, false), AtomOrd::SeqCst, old, a, one));
+    let r = f.v(Cls::I);
+    f.i(Inst::Load(Mem::Int(8, false), r, p, 8));
+    let sum = f.bin(IOp::Add, I64, r, old);
+    f.term(Term::Ret(vec![sum]));
+    // [p+8] = 5, old = 5, new = 6: 11
+    assert_eq!(run2(&[f.done()], 0, &[5]).unwrap(), vec![11]);
 }
 
 /// Direct, recursive, indirect, host and untraced calls; multiple results.
@@ -430,9 +559,9 @@ fn calls() {
         }
         a
     };
-    assert_eq!(run(&fs, 0, &[20]).unwrap(), vec![fibr(20)]);
-    assert_eq!(run(&fs, 2, &[9]).unwrap(), vec![fibr(10) + 18 + 7]);
-    assert_eq!(run(&fs, 3, &[]), Err(Trap::Trap("untraced 99".into())));
+    assert_eq!(run2(&fs, 0, &[20]).unwrap(), vec![fibr(20)]);
+    assert_eq!(run2(&fs, 2, &[9]).unwrap(), vec![fibr(10) + 18 + 7]);
+    assert_eq!(run2(&fs, 3, &[]), Err(Trap::Trap("untraced 99".into())));
     // without the import the untraced call is a bare trap
     let (b, st) = build(&fs, Options { untraced_import: false, ..opts() });
     assert_eq!(st.untraced_sites, 1);
@@ -491,15 +620,17 @@ fn unwinding() {
     f.term(Term::Ret(vec![r]));
     let catcher = f.done();
     let fs = [thrower, middle, inner, catcher];
-    let (b, _) = build(&fs, opts());
-    let mut i = inst(&b);
-    let sp0 = i.globals[0];
-    assert_eq!(i.call_export("f1", &[1000, 5]).unwrap(), vec![5]);
-    assert_eq!(i.globals[0], sp0);
-    assert_eq!(i.call_export("f3", &[2000]).unwrap(), vec![1]);
-    assert_eq!(&i.mem[2000..2008], &77u64.to_le_bytes());
-    assert_eq!(i.globals[0], sp0, "the catch restores the shadow stack");
-    assert_eq!(i.call_export("f1", &[1000, 0]), Err(Trap::Exception));
+    for m64 in [false, true] {
+        let (b, _) = build(&fs, Options { memory64: m64, ..opts() });
+        let mut i = inst(&b);
+        let sp0 = i.globals[0];
+        assert_eq!(i.call_export("f1", &[1000, 5]).unwrap(), vec![5]);
+        assert_eq!(i.globals[0], sp0);
+        assert_eq!(i.call_export("f3", &[2000]).unwrap(), vec![1]);
+        assert_eq!(&i.mem[2000..2008], &77u64.to_le_bytes());
+        assert_eq!(i.globals[0], sp0, "the catch restores the shadow stack");
+        assert_eq!(i.call_export("f1", &[1000, 0]), Err(Trap::Exception));
+    }
 }
 
 #[test]
@@ -697,12 +828,14 @@ fn random_programs_match_rir() {
         let args: Vec<u64> = (0..fu.params.len()).map(|_| rng.below(64).wrapping_sub(16)).collect();
         let mut fuel = 200;
         let want = eval(&fu, &args, &mut fuel);
-        let mut m = Module::new(opts());
+        // every other program on memory64 (the wasm64 target)
+        let mut m = Module::new(Options { memory64: checked % 2 == 1, ..opts() });
         m.add_func(0, &fu);
         m.export_func(0, "f");
         let out = m.finish(&options, &L);
         assert!(out.stats.failed.is_empty(), "{:?}\n{}", out.stats.failed, fu.dump());
         let mut i = inst(&out.bytes);
+        assert_eq!(i.mem64, checked % 2 == 1);
         i.max_steps = 200_000;
         let got = i.call_export("f", &args);
         match want {
@@ -735,4 +868,147 @@ fn size_basics() {
     assert_eq!(i.call_export("f3", &[40, 2]).unwrap(), vec![42]);
     let (_, st2) = build(&fs, Options { names: true, ..opts() });
     assert!(st2.names > 0);
+}
+
+/// Run `script` in Node with `bytes` on stdin. The wasm runner tests run on the Linux
+/// pool, where Node is required; on other hosts (the Macs, where Node is not run) they
+/// are reported as skipped. Returns None when skipped.
+fn node_run(script: &str, bytes: &[u8]) -> Option<bool> {
+    use std::io::Write;
+    let mut cmd = std::process::Command::new("node");
+    cmd.args(["-e", script]).stdin(std::process::Stdio::piped());
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipped: wasm runner tests need Node, which runs on the Linux pool only");
+        return None;
+    }
+    let mut child = cmd.spawn().expect("Node is required for the wasm runner tests on Linux");
+    child.stdin.take().unwrap().write_all(bytes).unwrap();
+    Some(child.wait().unwrap().success())
+}
+
+/// Exercise the architecture bindings in a real wasm validator/runtime, including
+/// memory64 and shared memory (which the small in-tree interpreter does not model).
+fn web_builtin(builtin: Builtin, arity: usize, assertion: &str) {
+    struct Binding(Builtin);
+    impl Link for Binding {
+        fn sym(&self, _: u32) -> u64 { 0 }
+        fn host(&self, _: u32) -> HostBind { HostBind::Builtin(self.0) }
+    }
+    for memory64 in [false, true] {
+        for shared in [false, true] {
+            let mut f = B::new(&vec![Cls::I; arity], &[Cls::I]);
+            let result = f.v(Cls::I);
+            f.i(Inst::Call(Callee::Host(Sym::new(0)), f.f.params.clone(), vec![result]));
+            f.term(Term::Ret(vec![result]));
+            let mut m = Module::new(Options { memory64, shared_max_pages: shared.then_some(16), ..opts() });
+            let f = f.done();
+            m.add_func(0, &f);
+            m.export_func(0, "run");
+            let out = m.finish(&relax_session::Options::default(), &Binding(builtin));
+            assert!(out.stats.failed.is_empty(), "{:?}", out.stats.failed);
+            dump(&out.bytes);
+            let script = format!("const assert=require('node:assert/strict'); const b=require('node:fs').readFileSync(0); assert(WebAssembly.validate(b)); const x=new WebAssembly.Instance(new WebAssembly.Module(b), {{}}).exports; const shared={shared}; const memory64={memory64}; {assertion}");
+            let Some(ok) = node_run(&script, &out.bytes) else { return };
+            assert!(ok, "{builtin:?}, memory64={memory64}, shared={shared}");
+        }
+    }
+}
+
+#[test]
+fn web_memory_size_builtin() {
+    web_builtin(Builtin::MemorySize, 1, "assert.equal(x.run(0n), BigInt(x.memory.buffer.byteLength / 65536));");
+}
+
+/// A real module boundary uses JS Numbers for <=32-bit integers and wasm32
+/// pointers, BigInts for u64 and memory64 pointers; table calls remain internal.
+#[test]
+fn web_c_boundary_numbers_and_bigints() {
+    for memory64 in [false, true] {
+        let pointer_bytes = if memory64 { 8 } else { 4 };
+        let signature = CSig {
+            conv: CConv::Host,
+            args: vec![CArg::Scalar(Mem::Int(4, false)), CArg::Scalar(Mem::Int(pointer_bytes, false)),
+                CArg::Scalar(Mem::Int(pointer_bytes, false)), CArg::Scalar(Mem::Int(8, false)), CArg::Scalar(Mem::F64)],
+            ret: None, n_fixed: u32::MAX, ret_narrow: Some(U32), unwinds: false,
+        };
+        let mut f = B::new(&[Cls::I, Cls::I, Cls::I, Cls::I, Cls::F64], &[Cls::I]);
+        f.f.cabi = Some(Box::new(signature.clone()));
+        let result = f.v(Cls::I);
+        f.i(Inst::Call(Callee::CHost(Sym::new(1), Box::new(signature.clone())), f.f.params.clone(), vec![result]));
+        f.term(Term::Ret(vec![result]));
+        let mut indirect = B::new(&[Cls::I, Cls::I, Cls::I, Cls::I, Cls::F64], &[Cls::I]);
+        indirect.f.cabi = Some(Box::new(signature.clone()));
+        let pointer = indirect.v(Cls::I);
+        indirect.i(Inst::FnAddr(pointer, 0));
+        let result = indirect.v(Cls::I);
+        indirect.i(Inst::Call(Callee::CIndirect(pointer, Box::new(signature)), indirect.f.params.clone(), vec![result]));
+        indirect.term(Term::Ret(vec![result]));
+        let fs = [f.done(), indirect.done()];
+        let (bytes, _) = build(&fs, Options { memory64, ..opts() });
+        let script = format!(r#"
+            const assert = require('node:assert/strict');
+            const bytes = require('node:fs').readFileSync(0);
+            assert(WebAssembly.validate(bytes));
+            const pointer = {memory64} ? 4294967297n : 4294967295;
+            let calls = 0;
+            const x = new WebAssembly.Instance(new WebAssembly.Module(bytes), {{env: {{add7(a,b,c,d,e) {{
+                assert.equal(a >>> 0, 0xfedcba98);
+                assert.equal(b, {memory64} ? pointer : -1);
+                assert.equal(c, {memory64} ? pointer : -1);
+                assert.equal(d, 0x123456789abcdefn);
+                assert.equal(e, 1.25);
+                calls++;
+                return 0xf1234567;
+            }}}}}}).exports;
+            for (const f of [x.f0, x.f1]) assert.equal(f(0xfedcba98, pointer, pointer, 0x123456789abcdefn, 1.25) >>> 0, 0xf1234567);
+            assert.equal(calls, 2);
+        "#);
+        let Some(ok) = node_run(&script, &bytes) else { return };
+        assert!(ok, "memory64={memory64}");
+    }
+}
+#[test]
+fn web_memory_grow_builtin() {
+    web_builtin(Builtin::MemoryGrow, 2, "const old=BigInt(x.memory.buffer.byteLength/65536); assert.equal(x.run(0n,1n),old); assert.equal(BigInt(x.memory.buffer.byteLength/65536),old+1n); assert.equal(x.run(0n,0n),old+1n); assert.equal(x.run(0n,-1n),memory64?-1n:4294967295n);");
+}
+
+#[test]
+fn web_c_boundary_aggregate_indirect() {
+    for memory64 in [false, true] {
+        let aggregate = CAgg { size: 16, align: 8, fields: vec![(0, Mem::Int(8, false)), (8, Mem::Int(8, false))] };
+        let signature = CSig { conv: CConv::Host, args: vec![CArg::Agg(aggregate.clone())], ret: Some(aggregate),
+            n_fixed: u32::MAX, ret_narrow: None, unwinds: false };
+        let mut f = B::new(&[Cls::I, Cls::I], &[]);
+        f.f.cabi = Some(Box::new(signature.clone()));
+        f.i(Inst::Call(Callee::CHost(Sym::new(1), Box::new(signature)), f.f.params.clone(), vec![]));
+        f.term(Term::Ret(vec![]));
+        let (bytes, _) = build(&[f.done()], Options { memory64, ..opts() });
+        let script = format!(r#"
+            const assert=require('node:assert/strict');
+            const bytes=require('node:fs').readFileSync(0);
+            assert(WebAssembly.validate(bytes));
+            let x;
+            x=new WebAssembly.Instance(new WebAssembly.Module(bytes),{{env:{{add7(out,arg){{
+                assert.equal(out,{memory64}?512n:512);
+                assert.equal(arg,{memory64}?256n:256);
+                const view=new DataView(x.memory.buffer);
+                view.setBigUint64(Number(out),view.getBigUint64(Number(arg),true)+7n,true);
+                view.setBigUint64(Number(out)+8,view.getBigUint64(Number(arg)+8,true),true);
+            }}}}}}).exports;
+            const view=new DataView(x.memory.buffer);
+            view.setBigUint64(256,123n,true);view.setBigUint64(264,456n,true);
+            assert.equal(x.f0({memory64}?512n:512,{memory64}?256n:256),undefined);
+            assert.equal(view.getBigUint64(512,true),130n);assert.equal(view.getBigUint64(520,true),456n);
+        "#);
+        let Some(ok) = node_run(&script, &bytes) else { return };
+        assert!(ok, "memory64={memory64}");
+    }
+}
+#[test]
+fn web_atomic_notify_builtin() {
+    web_builtin(Builtin::AtomicNotify, 2, "assert.equal(x.run(0n,1n),0n);");
+}
+#[test]
+fn web_atomic_wait32_builtin() {
+    web_builtin(Builtin::AtomicWait32, 3, "assert.equal(x.run(0n,1n,0n),1n); if(shared) assert.equal(x.run(0n,0n,0n),2n); else assert.throws(()=>x.run(0n,0n,0n),WebAssembly.RuntimeError);");
 }

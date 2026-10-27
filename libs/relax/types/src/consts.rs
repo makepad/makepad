@@ -114,6 +114,10 @@ pub(crate) struct ConstInterner {
 }
 
 impl Types {
+    pub(crate) fn const_count(&self) -> usize {
+        self.consts.lock().unwrap_or_else(|e| e.into_inner()).kinds.len()
+    }
+
     pub fn intern_const(&self, kind: ConstKind) -> Const {
         let mut table = self.consts.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(&id) = table.ids.get(&kind) { return id; }
@@ -251,13 +255,13 @@ mod tests {
 impl Const {
     /// rustc_middle/src/ty/consts.rs: scalar usize constants use the target width.
     pub fn from_target_usize(tys: &Types, value: u64) -> Self {
-        Self::new_value(tys, ValTree::from_scalar_int(tys, ScalarInt::try_from_uint(value as u128, 8).unwrap()), tys.usize_)
+        Self::new_value(tys, ValTree::from_scalar_int(tys, ScalarInt::try_from_uint(value as u128, tys.ptr_bytes as u8).unwrap()), tys.usize_)
     }
 
     pub fn try_to_target_usize(self, tys: &Types) -> Option<u64> {
         let value = self.try_to_value(tys)?;
         if value.ty != tys.usize_ { return None; }
-        Some(value.valtree.try_to_leaf()?.to_bits(8) as u64)
+        Some(value.valtree.try_to_leaf()?.to_bits(tys.ptr_bytes as u8) as u64)
     }
 }
 

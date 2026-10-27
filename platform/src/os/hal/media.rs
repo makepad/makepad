@@ -20,26 +20,41 @@ use makepad_hal::{media, HalEvent, Id};
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-#[cfg(any(target_vendor = "apple", target_os = "windows"))]
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
 use crate::{
-    event::game_input::{ForceTarget, GameInputConnectedEvent, GameInputForce, GameInputInfo, GameInputOutput, GameInputState, GamepadHapticCapabilities, GamepadHapticPulse, GamepadState, JoystickState, WheelState},
+    event::game_input::{PressLatch, ForceTarget, GameInputConnectedEvent, GameInputForce, GameInputInfo, GameInputOutput, GameInputState, GamepadHapticCapabilities, GamepadHapticPulse, GamepadState, JoystickState, WheelState},
     game_input::CxGameInputApi,
     makepad_math::Vec2,
 };
-#[cfg(any(target_vendor = "apple", target_os = "windows"))]
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
 use makepad_hal::media::{game, game_output};
 
 /// The controllers the HAL told the session about, in the HAL's order (the order
 /// `game_input_states` has), with their latest states.
-#[cfg(any(target_vendor = "apple", target_os = "windows"))]
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
 #[derive(Default)]
 pub(crate) struct GameClient {
     infos: Vec<GameInputInfo>,
+    /// What the app reads: `truth` with this frame's taps held (`latches`).
     states: Vec<GameInputState>,
+    /// The latest states the HAL reported.
+    truth: Vec<GameInputState>,
+    latches: Vec<PressLatch>,
     devices: Vec<game::GameDevice>,
 }
 
-#[cfg(any(target_vendor = "apple", target_os = "windows"))]
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+impl GameClient {
+    /// A frame was delivered to the app: the taps it saw as held are released.
+    pub(crate) fn frame_end(&mut self) {
+        for ((latch, truth), state) in self.latches.iter_mut().zip(&self.truth).zip(&mut self.states) {
+            latch.frame_end(truth);
+            *state = latch.view(truth);
+        }
+    }
+}
+
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
 fn cx_state(s: game::GameState) -> GameInputState {
     match s {
         game::GameState::Gamepad(p) => GameInputState::Gamepad(GamepadState {
@@ -62,6 +77,7 @@ fn cx_state(s: game::GameState) -> GameInputState {
             dpad_right: p.dpad_right,
             left_stick: Vec2 { x: p.left_stick[0], y: p.left_stick[1] },
             right_stick: Vec2 { x: p.right_stick[0], y: p.right_stick[1] },
+            presses: p.presses,
         }),
         game::GameState::Wheel(w) => GameInputState::Wheel(WheelState { steering: w.steering, throttle: w.throttle, brake: w.brake, clutch: w.clutch, steer_force: w.steer_force, buttons: w.buttons }),
         game::GameState::Joystick(j) => GameInputState::Joystick(JoystickState { x: j.x, y: j.y, twist: j.twist, throttle: j.throttle, hat: j.hat, buttons: j.buttons }),
@@ -94,6 +110,37 @@ fn audio_entry_buffer() -> AudioBuffer {
     { AudioBuffer::new_with_size(makepad_hal::backend::android::media::AUDIO_BLOCK_FRAMES, 2) }
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     { AudioBuffer::default() }
+}
+
+/// When an audio entry's real-time code is compiled (Relax; nothing to wait for in a rustc build).
+#[cfg(relax)]
+type RealtimeReady = std::relax::Realtime;
+#[cfg(not(relax))]
+type RealtimeReady = ();
+
+/// An audio entry whose real-time code Relax still compiles (`Cx::hal_audio_entry`).
+#[cfg(relax)]
+pub(crate) struct AudioWaiting {
+    dir: u32,
+    index: u32,
+    entry: u64,
+    ptr: u64,
+    ready: std::relax::Realtime,
+    /// the state of the entry the HAL calls for this slot until it has this one
+    live: Option<AudioCtx>,
+}
+
+/// The entry the HAL calls on the device's real-time thread and the app's function it calls:
+/// under Relax everything they reach is compiled before the entry goes to the HAL, in the
+/// background (a first call there would stall the device: a glitch), within a bounded wait. The UI
+/// thread is woken when it is ready.
+#[cfg(relax)]
+fn realtime_entry<F: ?Sized>(entry: &extern "C" fn(*mut c_void, *mut media::AudioBlock), f: &F) -> std::relax::Realtime {
+    extern "C" fn wake() {
+        crate::thread::SignalToUI::set_internal_signal();
+    }
+    let _ = std::relax::realtime(entry, None);
+    std::relax::realtime(f, Some(wake))
 }
 
 fn block_info(b: &media::AudioBlock) -> AudioInfo {
@@ -232,33 +279,99 @@ impl Cx {
         self.hal.frames.w.audio_use(dir, options, &media::pack_u64s(&ids));
     }
 
-    fn hal_set_audio_ctx(&mut self, dir: u32, index: usize, ctx: Option<AudioCtx>) {
-        let list = &mut self.hal.audio_ctx[dir as usize];
-        if list.len() <= index {
-            list.resize_with(index + 1, || None);
-        }
-        if let Some(old) = std::mem::replace(&mut list[index], ctx) {
-            self.hal.retired_ctx.push(old);
-        }
-    }
-
     pub(crate) fn hal_audio_output(&mut self, index: usize, f: AudioOutputFn) {
         let mut ctx = Box::new(OutputCtx { f, buffer: audio_entry_buffer() });
         let ptr = &mut *ctx as *mut OutputCtx as u64;
-        self.hal_set_audio_ctx(media::audio_dir::OUTPUT, index, Some(AudioCtx { _owner: ctx }));
-        self.hal.frames.w.audio_entry(media::audio_dir::OUTPUT, index as u32, audio_output_entry as *const () as usize as u64, ptr);
+        let entry: extern "C" fn(*mut c_void, *mut media::AudioBlock) = audio_output_entry;
+        #[cfg(relax)]
+        let ready = realtime_entry(&entry, &*ctx.f);
+        #[cfg(not(relax))]
+        let ready = ();
+        self.hal_audio_entry(media::audio_dir::OUTPUT, index, entry as usize as u64, ptr, AudioCtx { _owner: ctx }, ready);
     }
 
     pub(crate) fn hal_audio_input(&mut self, index: usize, f: AudioInputFn) {
         let mut ctx = Box::new(InputCtx { f, buffer: audio_entry_buffer() });
         let ptr = &mut *ctx as *mut InputCtx as u64;
-        self.hal_set_audio_ctx(media::audio_dir::INPUT, index, Some(AudioCtx { _owner: ctx }));
-        self.hal.frames.w.audio_entry(media::audio_dir::INPUT, index as u32, audio_input_entry as *const () as usize as u64, ptr);
+        let entry: extern "C" fn(*mut c_void, *mut media::AudioBlock) = audio_input_entry;
+        #[cfg(relax)]
+        let ready = realtime_entry(&entry, &*ctx.f);
+        #[cfg(not(relax))]
+        let ready = ();
+        self.hal_audio_entry(media::audio_dir::INPUT, index, entry as usize as u64, ptr, AudioCtx { _owner: ctx }, ready);
+    }
+
+    /// Registers an audio entry with the HAL; under Relax once the code it runs on the device's
+    /// thread is compiled, or after a bounded wait (a few hundred ms at most: audio starts
+    /// promptly). The state of the entry the HAL calls now stays alive until the HAL has the new one.
+    fn hal_audio_entry(&mut self, dir: u32, index: usize, entry: u64, ptr: u64, ctx: AudioCtx, ready: RealtimeReady) {
+        let list = &mut self.hal.audio_ctx[dir as usize];
+        if list.len() <= index {
+            list.resize_with(index + 1, || None);
+        }
+        let old = std::mem::replace(&mut list[index], Some(ctx));
+        #[cfg(relax)]
+        {
+            // a waiting entry of this slot never reached the HAL: its state goes, the state the
+            // HAL calls stays with the new one
+            let mut live = None;
+            if let Some(i) = self.hal.audio_waiting.iter().position(|w| w.dir == dir && w.index == index as u32) {
+                live = self.hal.audio_waiting.remove(i).live;
+                self.hal.retired_ctx.extend(old);
+            } else if ready.ready() {
+                self.hal.retired_ctx.extend(old);
+            } else {
+                live = old;
+            }
+            if !ready.ready() {
+                self.hal.audio_waiting.push(AudioWaiting { dir, index: index as u32, entry, ptr, ready, live });
+                return;
+            }
+            self.hal.retired_ctx.extend(live);
+        }
+        #[cfg(not(relax))]
+        {
+            let () = ready;
+            self.hal.retired_ctx.extend(old);
+        }
+        self.hal.frames.w.audio_entry(dir, index as u32, entry, ptr);
+    }
+
+    /// The waiting audio entries whose code is compiled go to the HAL (with the next batch).
+    #[cfg(relax)]
+    pub(crate) fn hal_audio_waiting_ready(&mut self) {
+        if self.hal.audio_waiting.is_empty() {
+            return;
+        }
+        let waiting = std::mem::take(&mut self.hal.audio_waiting);
+        for w in waiting {
+            if w.ready.ready() {
+                self.hal.frames.w.audio_entry(w.dir, w.index, w.entry, w.ptr);
+                self.hal.retired_ctx.extend(w.live);
+            } else {
+                self.hal.audio_waiting.push(w);
+            }
+        }
     }
 
     /// A texture whose storage the HAL makes: its HAL id.
     fn hal_external_texture(&mut self, id: TextureId) -> Id {
         self.hal.frames.external_texture(id.0, id.generation())
+    }
+
+    /// One plane of a native biplanar 4:2:0 picture the app holds, as a texture over the
+    /// picture's own memory: nothing is copied (macOS: `handle` is the picture's global
+    /// IOSurface id; luma samples as R8, chroma as RG8 at half size). The app keeps the picture
+    /// alive while frames that draw the texture may still run on the GPU.
+    pub fn import_picture_plane(&mut self, handle: u64, plane: crate::video_file::PicturePlane) -> Texture {
+        let texture = Texture::new_with_format(self, TextureFormat::VideoYuvPlane);
+        let id = self.hal_external_texture(texture.texture_id());
+        let kind = match plane {
+            crate::video_file::PicturePlane::Luma => makepad_hal::texture_handle::LUMA,
+            crate::video_file::PicturePlane::Chroma => makepad_hal::texture_handle::CHROMA,
+        };
+        self.hal.frames.w.texture_import(id, handle, kind);
+        texture
     }
 
     /// Prepares video (or an audio file when `texture` is `None`) playback. The Y / U / V
@@ -464,19 +577,34 @@ impl Cx {
                 };
                 self.call_event_handler(&Event::PermissionResult(PermissionResult { permission: permission_of(kind), request_id: req as i32, status }));
             }
-            #[cfg(any(target_vendor = "apple", target_os = "windows"))]
+            #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
             HalEvent::GameDevices { devices } => {
                 let list = game::read_devices(devices);
                 let old: Vec<GameInputInfo> = std::mem::take(&mut self.hal.game.infos);
                 let old_states = std::mem::take(&mut self.hal.game.states);
+                let old_truth = std::mem::take(&mut self.hal.game.truth);
+                let old_latches = std::mem::take(&mut self.hal.game.latches);
                 let mut infos = Vec::new();
                 let mut states = Vec::new();
+                let (mut truth, mut latches) = (Vec::new(), Vec::new());
                 for d in &list {
                     let info = GameInputInfo { id: LiveId(d.id), name: d.name.clone() };
-                    // a device that stays keeps its state until the HAL reports a new one
-                    let state = old.iter().position(|o| o.id == info.id).map(|i| old_states[i].clone()).unwrap_or_else(|| GameInputState::Gamepad(GamepadState::default()));
+                    // a device that stays keeps its state (and its latch) until the HAL reports a new one
+                    match old.iter().position(|o| o.id == info.id) {
+                        Some(i) => {
+                            states.push(old_states[i].clone());
+                            truth.push(old_truth[i].clone());
+                            latches.push(old_latches[i].clone());
+                        }
+                        None => {
+                            let idle = GameInputState::Gamepad(GamepadState::default());
+                            states.push(idle.clone());
+                            truth.push(idle);
+                            // its first report sets the latch's base: counts before it are no taps
+                            latches.push(PressLatch::default());
+                        }
+                    }
                     infos.push(info);
-                    states.push(state);
                 }
                 let announced = |l: &[game::GameDevice], id: u64| l.iter().any(|d| d.id == id && d.announce);
                 let was: Vec<game::GameDevice> = std::mem::take(&mut self.hal.game.devices);
@@ -484,6 +612,8 @@ impl Cx {
                 let new: Vec<GameInputInfo> = infos.iter().filter(|i| announced(&list, i.id.0) && !announced(&was, i.id.0)).cloned().collect();
                 self.hal.game.infos = infos;
                 self.hal.game.states = states;
+                self.hal.game.truth = truth;
+                self.hal.game.latches = latches;
                 self.hal.game.devices = list;
                 for info in gone {
                     self.call_event_handler(&Event::GameInputConnected(GameInputConnectedEvent::Disconnected(info)));
@@ -492,10 +622,12 @@ impl Cx {
                     self.call_event_handler(&Event::GameInputConnected(GameInputConnectedEvent::Connected(info)));
                 }
             }
-            #[cfg(any(target_vendor = "apple", target_os = "windows"))]
+            #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
             HalEvent::GameInput { device, state } => {
                 if let (Some(index), Some(state)) = (self.hal.game.infos.iter().position(|i| i.id.0 == device), game::read_state(state)) {
-                    self.hal.game.states[index] = cx_state(state);
+                    let truth = cx_state(state);
+                    self.hal.game.states[index] = self.hal.game.latches[index].view(&truth);
+                    self.hal.game.truth[index] = truth;
                 }
             }
             #[cfg(target_vendor = "apple")]
@@ -549,33 +681,33 @@ impl crate::screen_capture::MappedCapture for makepad_hal::backend::linux::media
     fn bgra(&self) -> bool { self.bgra() }
 }
 
-#[cfg(any(target_vendor = "apple", target_os = "windows"))]
+#[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
 impl CxGameInputApi for Cx {
     fn game_input_state(&mut self, index: usize) -> Option<&GameInputState> {
-        if self.in_makepad_studio {
+        if self.in_makepad_studio && !cfg!(target_os = "linux") {
             return self.game_input_remote.get(index);
         }
         self.hal.game.states.get(index)
     }
 
     fn game_input_state_mut(&mut self, index: usize) -> Option<&mut GameInputState> {
-        if self.in_makepad_studio {
+        if self.in_makepad_studio && !cfg!(target_os = "linux") {
             return self.game_input_remote.get_mut(index);
         }
         self.hal.game.states.get_mut(index)
     }
 
     fn game_input_states(&mut self) -> &[GameInputState] {
-        // Hosted by Studio: this process has no window, so the OS never gave it the controllers.
-        // Studio forwards them instead.
-        if self.in_makepad_studio {
+        // Apple/Windows hosted apps use forwarded input. Linux reads evdev in each
+        // process, including hosted apps; each app owns its focus/muting policy.
+        if self.in_makepad_studio && !cfg!(target_os = "linux") {
             return &self.game_input_remote;
         }
         &self.hal.game.states
     }
 
     fn game_input_states_mut(&mut self) -> &mut [GameInputState] {
-        if self.in_makepad_studio {
+        if self.in_makepad_studio && !cfg!(target_os = "linux") {
             return &mut self.game_input_remote;
         }
         &mut self.hal.game.states

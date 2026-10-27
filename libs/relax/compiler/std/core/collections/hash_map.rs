@@ -1,5 +1,5 @@
 //! HashMap over the open-addressing RawTable. Same API and semantics as real std's, except
-//! iteration order (deterministic here, see hash/fast.rs).
+//! iteration order (per process and map as in real std, but a different hash: see hash/fast.rs).
 
 use super::raw_table::{next_full, RawTable};
 use crate::borrow::Borrow;

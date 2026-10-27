@@ -1,7 +1,7 @@
 // The workspace script. It runs ALONE while it warms the cache every other
 // script reads, then gives the wall back: the app tiles start while it goes on
 // with the workspace's own checks and tests beside them.
-// A compiler warning is orange, never red: only an error fails a check.
+// A compiler warning fails its check like an error (deny_warnings, default on in ci.toml).
 use mod.std.*
 use mod.ci;
 

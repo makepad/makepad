@@ -126,8 +126,8 @@ impl Kernel {
         self.buffers.iter().position(|b| b.name == name)
     }
 
-    /// Has NEON x4 code (used for element-local calls whose outputs hold
-    /// every element).
+    /// Has vector code (4 or 8 lanes: [`Kernel::lanes`]; used for element-local calls whose
+    /// outputs hold every element).
     #[inline]
     pub fn simd(&self) -> bool {
         // SAFETY: the cell is an AtomicU8 of the body, which outlives this face.
@@ -242,10 +242,13 @@ pub struct KernelBody {
     /// (ctx `K_WORK`).
     element_work: u64,
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    native: Option<crate::host_native::Code>,
-    /// Four elements per iteration (element-local kernels only).
+    native: Option<crate::native::Code>,
+    /// Vector code and its lanes, 4 or 8 elements per iteration (element-local kernels only).
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    neon: Option<crate::host_native::Code>,
+    vector: Option<(crate::native::Code, u32)>,
+    /// The eight-lane code a four-lane install moves to once hot ([`Wide`]).
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    wide: Wide,
     /// Admission's worst-case element estimate, computed on first admit
     /// (the job path stays allocation-free).
     pub(crate) admission: std::sync::OnceLock<crate::cost::ElementCost>,
@@ -390,12 +393,18 @@ pub(crate) fn compile_items_impl(items: Vec<crate::parse::Item>, src_len: usize,
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     let native = if backend == Backend::Native {
         let writable = lowered.buffers.iter().enumerate().fold(0u64, |m, (k, b)| if b.access != Access::Read && k < 64 { m | 1 << k } else { m });
-        crate::host_native::compile_with(&flat, writable)
+        crate::native::compile_with(&flat, writable)
     } else {
         None
     };
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    let neon = if native.is_some() && lowered.parallel_safe { crate::host_simd::compile(&flat) } else { None };
+    let (install, upgrade) = crate::native_vec::install_lanes();
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    let vector = if native.is_some() && lowered.parallel_safe { crate::native_vec::compile_at(&flat, install) } else { None };
+    // four-lane code at install on an eight-lane host: eight lanes once hot (not when the frame
+    // is too large for eight)
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    let upgrade = upgrade && vector.as_ref().is_some_and(|v| v.1 == 4) && flat.frame_words <= crate::native_vec::MAX_FRAME_WORDS_X8;
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     let _ = backend;
     let live_values: Box<[AtomicU32]> = lowered.live.iter().map(|p| AtomicU32::new(lowered.params[p.param as usize].default.to_bits())).collect();
@@ -407,7 +416,7 @@ pub(crate) fn compile_items_impl(items: Vec<crate::parse::Item>, src_len: usize,
     let param_views: Box<[ParamInfoView<'static>]> = params.iter().map(|p| ParamInfoView { name: unsafe { forever(p.name.as_str()) }, default: p.default, min: p.min, max: p.max }).collect();
     let buffer_views: Box<[BufferInfoView<'static>]> = buffers.iter().map(|b| BufferInfoView { name: unsafe { forever(b.name.as_str()) }, access: b.access, stride: b.stride }).collect();
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    let simd = neon.is_some();
+    let simd = vector.is_some();
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     let simd = false;
     let cells = Box::new(KernelCells { speed: AtomicU32::new(0), simd: AtomicU8::new(simd as u8) });
@@ -441,7 +450,9 @@ pub(crate) fn compile_items_impl(items: Vec<crate::parse::Item>, src_len: usize,
             #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
             native,
             #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-            neon,
+            vector,
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            wide: Wide { code: std::sync::Arc::new(std::sync::OnceLock::new()), elements: std::sync::atomic::AtomicU64::new(if upgrade { 0 } else { u64::MAX }) },
             admission: std::sync::OnceLock::new(),
             slice_ops: std::sync::OnceLock::new(),
             wasm_slots: [AtomicU32::new(0), AtomicU32::new(0)],
@@ -681,11 +692,19 @@ impl KernelBody {
         &self.program
     }
 
-    /// The scalar and NEON ×4 machine code as instruction words (for
+    /// The lanes of the vector code that runs now (4 or 8; 0: none).
+    pub fn vector_lanes(&self) -> u32 {
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        return self.wide.code.get().or(self.vector.as_ref()).map_or(0, |c| c.1);
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        0
+    }
+
+    /// The scalar and vector machine code as instruction words (for
     /// disassembly; empty where the kernel has none).
     pub fn code_words(&self) -> (&[u32], &[u32]) {
         #[cfg(target_arch = "aarch64")]
-        return (self.native.as_ref().map_or(&[][..], |c| c.words()), self.neon.as_ref().map_or(&[][..], |c| c.words()));
+        return (self.native.as_ref().map_or(&[][..], |c| c.words()), self.vector.as_ref().map_or(&[][..], |c| c.0.words()));
         #[cfg(not(target_arch = "aarch64"))]
         (&[], &[])
     }
@@ -832,23 +851,25 @@ impl KernelBody {
             return;
         }
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-        if mode == Mode::Vector && n >= 4 {
-            if let (Some(code), Some(_)) = (&self.neon, &self.native) {
+        if let (Mode::Vector, Some((code, lanes)), Some(_)) = (mode, self.wide.code.get().or(self.vector.as_ref()), &self.native) {
+            if n >= *lanes as usize {
+                self.wide.count(n, &self.flat);
                 let mut state = [0u32; 1];
-                let n4 = n & !3;
+                // a multiple of the lanes on vector code
+                let n4 = n & !(*lanes as usize - 1);
                 // SAFETY: as below; the caller checked that the kernel is
                 // element-local and its written buffers hold every record.
                 unsafe { code.run_kernel(ctx.as_mut_ptr(), state.as_mut_ptr(), self.shared.as_ptr() as *mut u32, table.as_ptr(), n4 as u32) };
                 if n4 < n {
                     // The tail on scalar code, its loops' count added.
                     let w = kl::K_WORK as usize;
-                    let lanes = ctx[w];
+                    let counted = ctx[w];
                     let base = ctx[K_BASE as usize];
                     ctx[K_BASE as usize] = base.wrapping_add(n4 as u32);
                     ctx[w] = 0;
                     self.run_once(ctx, table, n - n4, Mode::Scalar);
                     ctx[K_BASE as usize] = base;
-                    ctx[w] = ctx[w].wrapping_add(lanes);
+                    ctx[w] = ctx[w].wrapping_add(counted);
                 }
                 return;
             }
@@ -981,11 +1002,10 @@ struct FpEnv {
     saved: u64,
 }
 
-/// The thread's FP control register (FPCR) and its write: inline assembly, so they are ops of
-/// this provided crate (Relax compiles no assembly): JIT code reaches them through the bridge.
+/// The thread's FP control register (FPCR) and its write (Relax assembles it).
 #[cfg(target_arch = "aarch64")]
-#[relax_api]
-pub fn fpcr_read() -> u64 {
+#[inline(always)]
+fn fpcr_read() -> u64 {
     let v: u64;
     // SAFETY: reads this thread's FP control bits.
     unsafe { std::arch::asm!("mrs {0}, fpcr", out(reg) v, options(nomem, nostack, preserves_flags)) };
@@ -993,8 +1013,8 @@ pub fn fpcr_read() -> u64 {
 }
 
 #[cfg(target_arch = "aarch64")]
-#[relax_api]
-pub fn fpcr_write(v: u64) {
+#[inline(always)]
+fn fpcr_write(v: u64) {
     // SAFETY: writes this thread's FP control bits; callers restore what they read.
     unsafe { std::arch::asm!("msr fpcr, {0}", in(reg) v, options(nomem, nostack, preserves_flags)) };
 }
@@ -1122,4 +1142,34 @@ pub fn wasm_module(kernels: &[&Kernel], target: crate::wasm::Target) -> Option<(
     let simd: Vec<bool> = kernels.iter().map(|k| k.parallel_safe && crate::wasm::simd_supported(&k.program)).collect();
     let entries: Vec<crate::wasm::Entry> = kernels.iter().zip(&simd).map(|(k, s)| crate::wasm::Entry { program: &k.program, simd: *s }).collect();
     crate::wasm::module(&entries, target).map(|m| (m, simd))
+}
+
+/// A four-lane install's way to eight lanes: the vector elements run so far (u64::MAX: no
+/// upgrade) and the eight-lane code once compiled. The kernel that passes
+/// [`crate::native_vec::HOT_ELEMENTS`] compiles it once, on a thread of its own; runs take it
+/// from then on (the same bits as the four-lane code).
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+struct Wide {
+    code: std::sync::Arc<std::sync::OnceLock<(crate::native::Code, u32)>>,
+    elements: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+impl Wide {
+    fn count(&self, n: usize, flat: &Program) {
+        use std::sync::atomic::Ordering;
+        if self.elements.load(Ordering::Relaxed) >= crate::native_vec::HOT_ELEMENTS {
+            return;
+        }
+        let before = self.elements.fetch_add(n as u64, Ordering::Relaxed);
+        if before < crate::native_vec::HOT_ELEMENTS && before + n as u64 >= crate::native_vec::HOT_ELEMENTS {
+            let (p, code) = (flat.clone(), self.code.clone());
+            // (no thread: the kernel keeps its four-lane code)
+            let _ = std::thread::Builder::new().name("kernel-x8".into()).spawn(move || {
+                if let Some(c) = crate::native_vec::compile_at(&p, 8).filter(|c| c.1 == 8) {
+                    let _ = code.set(c);
+                }
+            });
+        }
+    }
 }

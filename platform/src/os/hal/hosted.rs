@@ -339,6 +339,13 @@ impl Cx {
         }
     }
 
+    /// The host dismissed this app's tray dropdown (`HostedDropdown`, `dropdown_op::DISMISS`): the
+    /// app hears it as the window system's `PopupDismissed`.
+    pub(crate) fn hal_hosted_popup_dismissed(&mut self, window_id: usize) {
+        let Some(window) = self.windows.id_iter().find(|w| w.id() == window_id && self.windows[*w].is_created) else { return };
+        self.call_event_handler(&Event::PopupDismissed(crate::event::PopupDismissedEvent { window_id: window, reason: crate::event::PopupDismissReason::FocusLost }));
+    }
+
     /// The host's geometry for a window this app has made.
     fn hal_hosted_geom(&mut self, window: WindowId, geom: HostGeom) {
         let [left, top, width, height] = geom.rect;

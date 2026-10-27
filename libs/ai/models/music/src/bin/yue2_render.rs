@@ -12,7 +12,8 @@
 //! Q8 graph `--stage bench` also reports cudaEvent counts/times by kernel
 //! class and shape for one event-instrumented replay, after graph timing.
 //! SwiGLU variants sweep the same 28 packed weights; the switch is bench-only.
-//! NAR precision: MAKEPAD_YUE2_NAR_PREC=bf16|fast (default bf16).
+//! NAR precision: MAKEPAD_YUE2_NAR_PREC=bf16|fast (default fast on GeForce,
+//! bf16 on datacenter/workstation parts; see `yue2_lm.rs`).
 //!   yue2_render --model DIR --vae DIR --check ORACLE_DIR --stage acoustic [--velocity-evals 64]
 //!   yue2_render --vae DIR --check ORACLE_DIR --stage vae [--vae-frames N]
 //!     (--vae-frames limits output cores; up to 16 following latents supply the right halo)
@@ -20,8 +21,10 @@
 //! MAKEPAD_YUE2_BACKEND=graph selects ggml IR with host sampling;
 //! MAKEPAD_AI_GRAPH_BACKEND=metal|cuda selects its executor. Without a
 //! CUDA store ggml is automatic. --ar-decode controls only the CUDA store.
-//! Graph VAE/audio stages require Metal; CUDA can run the transformer and
-//! flow-latent gates through the same graphs.
+//! On Linux/Windows with a CUDA GPU the default (imperative CUDA store) runs
+//! the whole song, VAE included (`OobleckDecoder`). Only the graph backend's
+//! VAE/audio stages require Metal (the CUDA graph executor has no Im2col/Sin);
+//! CUDA can run the graph transformer and flow-latent gates.
 //! MAKEPAD_YUE2_VAE_PROFILE=1 adds completed per-block wall/GPU timings on
 //! Metal. Leave it unset for throughput (profiling waits at block boundaries).
 //!
@@ -804,7 +807,7 @@ fn check(pipe: &Yue2Pipeline, vae_dir: Option<&Path>, dir: &Path, stage: &str, b
         let sem = read_i32(&dir.join("semantic.i32"));
         println!(
             "abc duration estimate {:?} s vs oracle song {:.1} s",
-            makepad_ai_music::yue2::yue2_abc_seconds(&abc),
+            makepad_ai_music::yue2::yue2_score_timing(&abc).map(|t| t.seconds),
             sem.len() as f64 / 25.0
         );
     }

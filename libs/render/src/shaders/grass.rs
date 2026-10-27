@@ -24,8 +24,8 @@ script_mod! {
         // the PBR stream has no room for a new lane, its uniform block no
         // room for a uniform): 0 = origin x, z, 1 / width, 1 / depth;
         // 1 = texels x, z, cell metres, height min; 2 = blade height, width,
-        // radius, wind; 3, 4 = sRGB lush and dry blades (4.w = height
-        // range); 5 = eye xyz, wind clock;
+        // radius, wind; 3, 4 = sRGB lush and dry blades (3.w = the quality
+        // tier's kept blade fraction, 4.w = height range); 5 = eye xyz, wind clock;
         // 6 = this patch's corner x, z and side (w).
 
         // A height texel: 16 bits, hi byte in G and lo byte in A (grass.rs),
@@ -50,6 +50,19 @@ script_mod! {
             return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y)
         }
 
+        // Smooth value noise in [0, 1] over world metres (a hash per lattice
+        // corner, bilinear with a smoothstep): the meadow's patches.
+        grass_noise: fn(p: vec2) -> float {
+            let i = floor(p)
+            let f = p - i
+            let u = f * f * (vec2(3.0, 3.0) - f * 2.0)
+            let a = fract(sin(dot(i, vec2(127.1, 311.7))) * 43758.5453)
+            let b = fract(sin(dot(i + vec2(1.0, 0.0), vec2(127.1, 311.7))) * 43758.5453)
+            let c = fract(sin(dot(i + vec2(0.0, 1.0), vec2(127.1, 311.7))) * 43758.5453)
+            let d = fract(sin(dot(i + vec2(1.0, 1.0), vec2(127.1, 311.7))) * 43758.5453)
+            return mix(mix(a, b, u.x), mix(c, d, u.x), u.y)
+        }
+
         vertex: fn() {
             let unit = vec2(self.geom.px, self.geom.pz)
             let t = self.geom.py
@@ -65,14 +78,20 @@ script_mod! {
             // half every 0.3 radius (the ring geometries hold exactly those),
             // and none past the radius.
             let fade = exp2(0.0 - max(d - 0.1, 0.0) / 0.3) * (1.0 - smoothstep(0.8, 1.0, d))
-            if keep >= fade * cover.x || cover.x < 0.03 {
+            // Patches: a large, slow noise (drier and greener stretches of a
+            // meadow, ~12 m) and a small one (clumps and thin spots, ~2 m).
+            let patch = self.grass_noise(root * 0.083)
+            let clump = self.grass_noise(root * 0.47 + vec2(17.0, 5.0))
+            // The quality tier's kept fraction rides morph_weights3.w.
+            let density = cover.x * mix(0.45, 1.2, clump) * self.morph_weights3.w
+            if keep >= fade * density || cover.x < 0.03 {
                 // Outside clip space: the whole blade rasterises nothing.
                 self.vertex_pos = vec4(0.0, 0.0, 2.0, 1.0)
                 return
             }
             // Short where the cover is thin, and sinking into the ground
             // toward the radius so the terrain's own grass takes over.
-            let h = self.morph_weights2.x * (0.55 + 0.7 * shape) * (0.45 + 0.55 * cover.x) * (1.0 - smoothstep(0.55, 1.0, d) * 0.85)
+            let h = self.morph_weights2.x * (0.55 + 0.7 * shape) * (0.45 + 0.55 * cover.x) * mix(0.75, 1.2, clump) * (1.0 - smoothstep(0.55, 1.0, d) * 0.85)
             let across = vec2(cos(yaw), sin(yaw))
             let lean_dir = vec2(cos(yaw * 1.7 + 1.3), sin(yaw * 1.7 + 1.3))
             let clock = self.morph_weights5.w
@@ -99,8 +118,12 @@ script_mod! {
             self.v_csm = vec4(pos.x, pos.y, pos.z, max(dot(n, l), 0.0))
             self.v_csm_n = n
             // Root dark (self-shadowed thatch), tip lighter and drier.
-            let col = mix(self.morph_weights3.xyz, self.morph_weights4.xyz, clamp(cover.y + t * 0.25 * shape, 0.0, 1.0))
-            self.v_tint = vec4(col * mix(0.42, 1.12, t) * (0.82 + 0.36 * shape), t)
+            // A blade's own hue drift on top (yellower or bluer greens).
+            let dry = clamp(cover.y + (patch - 0.5) * 0.7 + t * 0.25 * shape, 0.0, 1.0)
+            let col = mix(self.morph_weights3.xyz, self.morph_weights4.xyz, dry)
+            let hue = (shape - 0.5) * 0.12 + (patch - 0.5) * 0.08
+            let tinted = col * vec3(1.0 + hue, 1.0, 1.0 - hue * 1.5)
+            self.v_tint = vec4(tinted * mix(0.42, 1.12, t) * (0.82 + 0.36 * shape), t)
             self.v_fog = 1.0 - exp(0.0 - length(view_pos.xyz) * self.fog_density)
             let clip_out = self.draw_pass.camera_projection * view_pos
             self.v_spos = clip_out

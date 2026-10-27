@@ -1936,34 +1936,11 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
-        fn makepad_cuda_pad_planar_f32_to_f16(
-            src: *const f32,
-            dst: *mut u16,
-            width: u32,
-            height: u32,
-            channels: u32,
-            pad_x: u32,
-            pad_y: u32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
-
         fn makepad_cuda_add_planes_vec_f32(
             data: *mut f32,
             vec: *const f32,
             plane: u32,
             channels: u32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
-
-        fn makepad_cuda_conv_extract_bias_f32(
-            acc: *const f32,
-            bias: *const f32,
-            out: *mut f32,
-            width: u32,
-            height: u32,
-            padded_width: u32,
-            padded_plane: u32,
-            out_channels: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 

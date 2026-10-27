@@ -70,6 +70,10 @@ mod activity;
 mod capture;
 
 #[cfg(not(target_arch = "wasm32"))]
+#[path = "remote_input_rec.rs"]
+mod input_rec;
+
+#[cfg(not(target_arch = "wasm32"))]
 mod imp {
     use super::activity;
     use super::app_clock;
@@ -105,6 +109,13 @@ mod imp {
     /// Commands built by the platform-side routes; they travel through the
     /// core queue as `Cmd::Platform`.
     enum PlatformCmd {
+        /// A command the app registered (`register_app_query`), answered on the UI thread.
+        AppQuery {
+            f: AppQueryFn,
+            words: Vec<String>,
+            kv: Vec<(String, String)>,
+            tx: Sender<Reply>,
+        },
         CapStart {
             window: usize,
             config: capture::CaptureConfig,
@@ -136,6 +147,8 @@ mod imp {
         });
         match r.key {
             "status" => route_status(p),
+            "gamepads" => reply_to_answer(ask(Cmd::Gamepads, ACTIVITY_WAIT_SECS)),
+            "focus" => reply_to_answer(ask(Cmd::Focus, 4)),
             "activity" => reply_to_answer(ask(Cmd::Activity, ACTIVITY_WAIT_SECS)),
             "mouse" => route_mouse(p, None),
             "click" => route_mouse(p, Some("click")),
@@ -143,6 +156,8 @@ mod imp {
             "text" => route_text(p),
             "drop" => route_drop(p),
             "trace" => route_trace(p),
+            // read from the runtimes' ledgers, never through the UI thread: a stuck loop is what it shows
+            "net" => Answer::Text(crate::makepad_network::ledger::report()),
             "dump" => {
                 let paths = p.flag(&["paths"]);
                 match ask(move |tx| Cmd::Dump { paths, tx }, 4) {
@@ -172,11 +187,13 @@ mod imp {
             }
             "step" => route_step(p),
             "settled" => reply_to_answer(ask(Cmd::Settled, 4)),
+            "uicounts" => reply_to_answer(ask(Cmd::UiCounts, 4)),
             "cap pause" => reply_to_answer(ask(|tx| Cmd::CapPause(true, tx), 4)),
             "cap resume" => reply_to_answer(ask(|tx| Cmd::CapPause(false, tx), 4)),
             "close" => {
                 let window = p.window();
-                reply_to_answer(ask(move |tx| Cmd::Close { window, tx }, 4))
+                let ask_app = p.flag(&["ask"]);
+                reply_to_answer(ask(move |tx| Cmd::Close { window, ask: ask_app, tx }, 4))
             }
             // A responsive layout is checked by resizing, so the bridge can:
             // `resize w= h= [window=]` in layout points, answered after the
@@ -302,6 +319,10 @@ mod imp {
             "cap start" => route_capture_start(p),
             "cap stop" => route_capture_stop(p),
             "cursor" => route_cursor(p),
+            "input record" => super::input_rec::record(p),
+            "input replay" => super::input_rec::replay(p),
+            "input stop" => super::input_rec::stop(),
+            "input status" => super::input_rec::status(),
             _ => return None,
         })
     }
@@ -525,6 +546,9 @@ mod imp {
         {
             let _ = driven;
             register_with_host();
+            for (name, _, _, _) in APP_QUERIES.lock().unwrap().iter() {
+                super::host_registration::register_with_host(name);
+            }
             // held until ACTIVE is set, so a service registered meanwhile is not lost
             let mut pending = PENDING_SERVICES.lock().unwrap();
             if serves_own_app() {
@@ -534,13 +558,22 @@ mod imp {
                 super::host_registration::register_service_with_host(&name, version, open, close);
             }
             ACTIVE.store(true, Ordering::SeqCst);
+            drop(pending);
+            super::input_rec::replay_at_start();
         }
         #[cfg(not(relax))]
         {
+            // the UI thread (start_if_requested runs in Cx::new): `prof threads=main`
+            #[cfg(target_os = "macos")]
+            crate::prof_sampler::note_main_thread();
             let endpoint = makepad_remote::Endpoint::new(&app);
             endpoint.register_cmd(dispatch);
             endpoint.set_end_fields(end_fields);
             endpoint.register("frames", 1, frames_service());
+            // the profiler stream (Scope's Live, `makepad inspect <app> pf`)
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            endpoint.register("prof", 1, crate::prof_native::service(app.clone()));
+            endpoint.register("gpuprof", 1, makepad_hal::gpu_prof::stream_service());
             // held until ACTIVE is set, so a service registered meanwhile is not lost
             let mut pending = PENDING_SERVICES.lock().unwrap();
             if serves_own_app() {
@@ -556,6 +589,7 @@ mod imp {
                     if driven {
                         println!("[makepad-remote] pid={pid} app={app} socket={}", socket.display());
                     }
+                    super::input_rec::replay_at_start();
                 }
                 Err(err) => println!("[makepad-remote] cannot listen: {err}"),
             }
@@ -577,6 +611,8 @@ mod imp {
     pub(crate) fn gpu_commands() -> Vec<crate::remote_schema::Command> {
         makepad_hal::inspect::COMMANDS
             .iter()
+            .chain(makepad_hal::framecap::COMMANDS.iter())
+            .chain(makepad_hal::gpu_prof::COMMANDS.iter())
             .map(|(words, args, answers)| crate::remote_schema::Command {
                 words,
                 args,
@@ -677,6 +713,31 @@ mod imp {
         }
     }
 
+    /// An app's own inspect command: `f(cx, words, kv)` runs on the UI thread and returns the
+    /// answer's JSON lines (an `{"err":..}` line for an error); words[0] is the command.
+    pub type AppQueryFn = fn(&mut Cx, &[String], &[(String, String)]) -> Vec<String>;
+
+    static APP_QUERIES: Mutex<Vec<(&'static str, &'static str, &'static str, AppQueryFn)>> = Mutex::new(Vec::new());
+
+    /// Registers the app's inspect command `name` (`makepad inspect <app> game actors`): what a
+    /// person or an agent asks the live app about its own state (a game's entities and actors).
+    /// `args` and `answers` are its `help` line. Read-only by convention; a later registration of
+    /// the same name replaces the earlier one.
+    pub fn register_app_query(name: &'static str, args: &'static str, answers: &'static str, f: AppQueryFn) {
+        let mut q = APP_QUERIES.lock().unwrap();
+        q.retain(|x| x.0 != name);
+        q.push((name, args, answers, f));
+        drop(q);
+        #[cfg(relax)]
+        if ACTIVE.load(Ordering::SeqCst) {
+            super::host_registration::register_with_host(name);
+        }
+    }
+
+    fn app_query(name: &str) -> Option<AppQueryFn> {
+        APP_QUERIES.lock().unwrap().iter().find(|x| x.0 == name).map(|x| x.3)
+    }
+
     extern "C" fn no_app_close(_handle: usize) {}
     static PENDING_SERVICES: Mutex<Vec<(String, u32, makepad_remote::program::ServiceOpen, makepad_remote::program::ServiceClose)>> = Mutex::new(Vec::new());
 
@@ -718,6 +779,15 @@ mod imp {
             )),
             "help" => {
                 out.measured("commands", "static", &[]);
+                for (name, args, answers, _) in APP_QUERIES.lock().unwrap().iter() {
+                    out.line(&format!(
+                        "{{\"cmd\":{},\"args\":{},\"answers\":{},\"tool\":{},\"risk\":\"Read\"}}",
+                        json_str(name),
+                        json_str(args),
+                        json_str(answers),
+                        json_str(&format!("app.{}", name))
+                    ));
+                }
                 for c in COMMANDS.iter().chain(gpu_commands().iter()) {
                     out.line(&format!(
                         "{{\"cmd\":{},\"args\":{},\"answers\":{},\"tool\":{},\"risk\":\"{:?}\"}}",
@@ -730,11 +800,34 @@ mod imp {
                 }
             }
             "" => out.err("empty request"),
+            c if app_query(c).is_some() => {
+                let f = app_query(c).unwrap();
+                let mut words = vec![req.cmd.clone()];
+                words.extend(req.pos.iter().cloned());
+                let kv = req.kv.clone();
+                out.limit = usize::MAX;
+                match ask(move |tx| Cmd::Platform(Box::new(PlatformCmd::AppQuery { f, words, kv, tx })), 6) {
+                    Reply::Text(t) => {
+                        for l in t.lines() {
+                            out.line(l);
+                        }
+                    }
+                    Reply::Err(e) | Reply::Conflict(e) => out.err(&e),
+                    Reply::Ok => out.line("{\"ok\":1}"),
+                }
+            }
             _ => {
                 // Relax dispatches GPU queries in its host; program code only serves UI commands.
                 #[cfg(not(relax))]
                 if makepad_hal::inspect::dispatch(req, out) {
                     return;
+                }
+                // the sampling profiler (inspect's `prof` / `why-slow`, same buckets and lines)
+                #[cfg(all(not(relax), target_os = "macos"))]
+                match req.cmd.as_str() {
+                    "prof" => return crate::prof_sampler::cmd_prof(req, out),
+                    "why-slow" => return crate::prof_sampler::cmd_why_slow(req, out),
+                    _ => {}
                 }
                 // a remote answer is not capped: a widget dump or a snapshot of every widget
                 out.limit = usize::MAX;
@@ -1528,6 +1621,31 @@ mod imp {
     const CAPTURE_SHUTDOWN_WAIT: Duration = Duration::from_secs(20);
 
     /// `/settled`: why the app would still change if time moved on.
+    /// The calling thread's CPU time (CLOCK_THREAD_CPUTIME_ID; 0 where there is none).
+    #[cfg(unix)]
+    fn thread_cpu_ns() -> u64 {
+        #[repr(C)]
+        struct Ts {
+            sec: i64,
+            nsec: i64,
+        }
+        extern "C" {
+            fn clock_gettime(id: i32, t: *mut Ts) -> i32;
+        }
+        #[cfg(target_os = "macos")]
+        const THREAD_CPUTIME: i32 = 16;
+        #[cfg(not(target_os = "macos"))]
+        const THREAD_CPUTIME: i32 = 3;
+        let mut t = Ts { sec: 0, nsec: 0 };
+        if unsafe { clock_gettime(THREAD_CPUTIME, &mut t) } != 0 {
+            return 0;
+        }
+        t.sec as u64 * 1_000_000_000 + t.nsec as u64
+    }
+    #[cfg(not(unix))]
+    fn thread_cpu_ns() -> u64 {
+        0
+    }
     fn settled_json(cx: &Cx) -> String {
         let mut reasons = Vec::new();
         if !cx.new_next_frames.is_empty() {
@@ -1753,6 +1871,48 @@ mod imp {
         let user_seq = cx.remote_activity.user_seq();
         let _origin = super::remote_input_scope(cx);
         match request.cmd {
+            Cmd::Focus(tx) => {
+                // The key focus as `snap` reports rects (window-local) plus the innermost widget
+                // whose rect holds it, and the window the platform last saw focused.
+                let area = cx.key_focus();
+                let key = if area.is_empty() { "null".to_string() } else {
+                    // area rects are window-local; snapshot rows have the window position folded in
+                    let rect = area.rect(cx);
+                    let window = cx.get_window_id_of(&area);
+                    let index = window.map(|id| id.id()).unwrap_or(0);
+                    let origin = window.map(|id| cx.windows[id].window_geom.position).unwrap_or_default();
+                    let center = rect.center();
+                    let path = snapshot_rows(cx).into_iter()
+                        .filter(|(w, _)| w.visible && w.window_index == index && w.width > 0 && w.height > 0)
+                        .filter(|(w, _)| {
+                            let (x, y) = (w.x as f64 - origin.x, w.y as f64 - origin.y);
+                            center.x >= x && center.y >= y && center.x <= x + w.width as f64 && center.y <= y + w.height as f64
+                        })
+                        .min_by_key(|(w, _)| w.width * w.height)
+                        .and_then(|(_, p)| p);
+                    format!("{{\"r\":[{},{},{},{}],\"w\":{index},\"p\":{}}}", num(rect.pos.x), num(rect.pos.y),
+                        num(rect.size.x), num(rect.size.y), path.map(|p| json_str(&p)).unwrap_or_else(|| "null".into()))
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                let window = cx.hal.focused.map(|w| w.id().to_string()).unwrap_or_else(|| "null".into());
+                #[cfg(target_arch = "wasm32")]
+                let window = "null";
+                let _ = tx.send(Reply::Text(format!("{{\"key\":{key},\"window\":{window}}}")));
+            }
+            Cmd::Gamepads(tx) => {
+                use crate::game_input::CxGameInputApi;
+                use crate::makepad_micro_serde::SerJson;
+                let infos = cx.game_input_infos();
+                let states = cx.game_input_states();
+                let devices: Vec<_> = states.iter().enumerate().map(|(index, state)| {
+                    let info = infos.get(index);
+                    let remote: makepad_studio_protocol::RemoteGameInput = state.into();
+                    format!("{{\"id\":{},\"name\":{},\"state\":{}}}",
+                        info.map(|i| i.id.0).unwrap_or(index as u64),
+                        json_str(info.map(|i| i.name.as_str()).unwrap_or("Controller")), remote.serialize_json())
+                }).collect();
+                let _ = tx.send(Reply::Text(format!("{{\"gamepads\":[{}]}}", devices.join(","))));
+            }
             Cmd::Activity(tx) => {
                 let _ = tx.send(Reply::Text(activity::json(cx)));
             }
@@ -2148,10 +2308,18 @@ mod imp {
             Cmd::Settled(tx) => {
                 let _ = tx.send(Reply::Text(settled_json(cx)));
             }
+            Cmd::UiCounts(tx) => {
+                let (ins, cyc) = crate::thread_counters::read().unwrap_or((0, 0));
+                let _ = tx.send(Reply::Text(format!("{{\"ins\":{ins},\"cyc\":{cyc},\"cpu_ns\":{}}}", thread_cpu_ns())));
+            }
             Cmd::Platform(payload) => match *payload
                 .downcast::<PlatformCmd>()
                 .expect("remote: a platform command from another platform")
             {
+                PlatformCmd::AppQuery { f, words, kv, tx } => {
+                    let lines = f(cx, &words, &kv);
+                    let _ = tx.send(Reply::Text(lines.join("\n")));
+                }
                 PlatformCmd::CapStart {
                     window,
                     config,
@@ -2414,7 +2582,7 @@ mod imp {
                 out.push_str("]}");
                 let _ = tx.send(Reply::Text(out));
             }
-            Cmd::Close { window, tx } => {
+            Cmd::Close { window, ask, tx } => {
                 let window_id = match resolve_window(cx, window) {
                     Ok(window_id) => window_id,
                     Err(err) => {
@@ -2422,12 +2590,24 @@ mod imp {
                         return;
                     }
                 };
-                let line = format!("[makepad-remote] remote closed window {}", window_id.id());
+                // ask=1: the window's own close button's path (HalEvent::CloseRequested): the app
+                // may keep the window by clearing accept_close
+                let accept_close = std::rc::Rc::new(std::cell::Cell::new(true));
+                if ask {
+                    cx.call_event_handler(&crate::event::Event::WindowCloseRequested(crate::event::WindowCloseRequestedEvent { window_id, accept_close: accept_close.clone() }));
+                }
+                let line = if accept_close.get() {
+                    format!("[makepad-remote] remote closed window {}", window_id.id())
+                } else {
+                    format!("[makepad-remote] remote close of window {} declined by the app", window_id.id())
+                };
                 println!("{line}");
                 let _ = std::io::stdout().flush();
                 push_log_line(line);
                 let _ = tx.send(Reply::Ok);
-                cx.push_unique_platform_op(crate::cx_api::CxOsOp::CloseWindow(window_id));
+                if accept_close.get() {
+                    cx.push_unique_platform_op(crate::cx_api::CxOsOp::CloseWindow(window_id));
+                }
             }
             Cmd::Resize { window, size, tx } => {
                 let window_id = match resolve_window(cx, window) {
@@ -3051,6 +3231,10 @@ mod imp {
 #[cfg(target_arch = "wasm32")]
 mod imp {
     use crate::cx::Cx;
+
+    pub type AppQueryFn = fn(&mut Cx, &[String], &[(String, String)]) -> Vec<String>;
+    /// No remote endpoint on the web: nothing asks.
+    pub fn register_app_query(_name: &'static str, _args: &'static str, _answers: &'static str, _f: AppQueryFn) {}
 
     pub(crate) fn note_user_event(_cx: &mut Cx, _event: &crate::event::Event) {}
     /// There is no remote bridge on these targets, so nothing ever asked for one.

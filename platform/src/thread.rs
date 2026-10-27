@@ -420,6 +420,107 @@ impl<T> TaskHandle<T> {
     }
 }
 
+// The page profile without threads (wasm32 without atomics): no worker
+// exists, so a [`FrameJob`] runs on the UI thread, one per display frame.
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+std::thread_local! {
+    static FRAME_JOB_RAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A display frame starts: the next deferred [`FrameJob`] may run. The web
+/// platform calls this at every animation frame; with threads it does nothing.
+pub fn frame_jobs_new_frame() {
+    #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+    FRAME_JOB_RAN.with(|ran| ran.set(false));
+}
+
+/// A job on the pool ([`TaskPool::submit_frame_job`]), with
+/// [`TaskHandle`]'s polling. Natively and in a threaded web build it is a
+/// pool task. Without workers (a single-threaded web build) it runs on the
+/// UI thread when its result is first asked for (`try_take`,
+/// `is_finished`), one job per display frame ([`frame_jobs_new_frame`]):
+/// a page that loads many keeps drawing between them. Poll it from a
+/// frame-driven path, since a deferred job only runs when polled.
+#[must_use = "dropping a frame job cancels or detaches it"]
+pub struct FrameJob<T> {
+    inner: FrameJobInner<T>,
+}
+
+enum FrameJobInner<T> {
+    /// A pool task (natively and in a threaded web build).
+    #[cfg_attr(all(target_arch = "wasm32", not(target_feature = "atomics")), allow(dead_code))]
+    Task(TaskHandle<T>),
+    /// Not run yet, or run and not taken (the page without threads).
+    #[cfg_attr(not(all(target_arch = "wasm32", not(target_feature = "atomics"))), allow(dead_code))]
+    Later {
+        job: Option<Box<dyn FnOnce() -> T + Send>>,
+        result: Option<Result<T, TaskError>>,
+        token: CancellationToken,
+    },
+}
+
+impl<T> fmt::Debug for FrameJob<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.inner {
+            FrameJobInner::Task(task) => task.fmt(f),
+            FrameJobInner::Later { job, .. } => f.debug_struct("FrameJob").field("ran", &job.is_none()).finish(),
+        }
+    }
+}
+
+impl<T> FrameJob<T> {
+    /// Run a deferred job here when this frame's turn is free.
+    fn run_due(&mut self) {
+        let FrameJobInner::Later { job, result, token } = &mut self.inner else { return };
+        if job.is_none() {
+            return;
+        }
+        if token.is_cancelled() {
+            *job = None;
+            *result = Some(Err(TaskError::Cancelled));
+            return;
+        }
+        #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+        if FRAME_JOB_RAN.with(|ran| ran.replace(true)) {
+            return;
+        }
+        let f = job.take().unwrap();
+        *result = Some(catch_unwind(AssertUnwindSafe(f)).map_err(|payload| TaskError::Panicked(panic_report(payload))));
+    }
+
+    /// Whether the result is there (a deferred job runs here if it may).
+    pub fn is_finished(&mut self) -> bool {
+        self.run_due();
+        match &self.inner {
+            FrameJobInner::Task(task) => task.is_finished(),
+            FrameJobInner::Later { job, .. } => job.is_none(),
+        }
+    }
+
+    /// The result once it is there, taken once (as [`TaskHandle::try_take`]).
+    pub fn try_take(&mut self) -> Option<Result<T, TaskError>> {
+        self.run_due();
+        match &mut self.inner {
+            FrameJobInner::Task(task) => task.try_take(),
+            FrameJobInner::Later { result, .. } => result.take(),
+        }
+    }
+
+    pub fn cancel(&self) {
+        match &self.inner {
+            FrameJobInner::Task(task) => task.cancel(),
+            FrameJobInner::Later { token, .. } => token.cancel(),
+        }
+    }
+
+    pub fn token(&self) -> CancellationToken {
+        match &self.inner {
+            FrameJobInner::Task(task) => task.token(),
+            FrameJobInner::Later { token, .. } => token.clone(),
+        }
+    }
+}
+
 fn panic_report(payload: Box<dyn Any + Send>) -> PanicReport {
     let message: Arc<str> = if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).into()
@@ -1767,6 +1868,24 @@ impl TaskPool {
     {
         self.try_submit_named(lane, label, f)
             .map_err(|refused| refused.error)
+    }
+
+    /// [`submit`](Self::submit) as a [`FrameJob`]: the same pool task where
+    /// there are workers; without them (a single-threaded web build) the job
+    /// waits to run on the UI thread, one per display frame, when its result
+    /// is first asked for.
+    pub fn submit_frame_job<F, T>(&self, lane: Lane, f: F) -> Result<FrameJob<T>, SubmitError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+        {
+            let _ = lane;
+            Ok(FrameJob { inner: FrameJobInner::Later { job: Some(Box::new(f)), result: None, token: CancellationToken::new() } })
+        }
+        #[cfg(not(all(target_arch = "wasm32", not(target_feature = "atomics"))))]
+        self.submit(lane, f).map(|task| FrameJob { inner: FrameJobInner::Task(task) })
     }
 
     /// [`submit`](Self::submit) for one of makepad's own jobs, whose result the

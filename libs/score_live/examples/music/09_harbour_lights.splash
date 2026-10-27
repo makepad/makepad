@@ -1,0 +1,176 @@
+// Harbour Lights: a nocturne for the modelled grand piano, E minor, 3/4
+// at 66.
+//
+// Form (50 bars): A 16 (E minor: the theme over wide left-hand arpeggios,
+// a phrase of 8 answered by a phrase of 8 that cadences) · B 16 (G major:
+// the melody moves into the tenor under a right-hand counter-voice, E7 and
+// A minor, the borrowed C minor darkens it, a crescendo to the climax at
+// bar 27 in octaves, and F#7-B7 lead home) · A' 12 (the theme returns,
+// an octave higher) · coda 6 (over an E pedal the tempo slows; a
+// Picardy E major rises to the top of the keyboard).
+// Harmony (A): Em Am/E B7/D# Em | C Am7 F#m7b5 B7 | Em D G B7/F# | C Am6
+// B7sus-B7 Em. (B): G D/F# Em Bm/D | C G/B Am7 D7 | G E7/G# Am Cm/Eb |
+// G/D Em/C F#7/C# B7.
+// The left hand spans a tenth and more: the bass in octaves, then fifth,
+// tenth, octave and back;
+// the sustain pedal changes on every downbeat under the left hand (down an
+// eighth after it).
+use mod.score.*
+
+let clock = Clock{bpm: 66 sig: [3 4] seed: 1854}
+
+let piano = Instrument{kind: @piano}
+
+// One bar each: the bass, then the left hand's arpeggio tones.
+let bars_a = [
+    [@e2 @b2 @g3 @e3], [@e2 @a2 @e3 @c4], [@ds2 @b2 @fs3 @a3], [@e2 @b2 @g3 @e3],
+    [@c2 @g2 @e3 @g3], [@a1 @e2 @c3 @g3], [@fs2 @c3 @e3 @a3], [@b1 @fs2 @ds3 @a3],
+    [@e2 @b2 @g3 @e3], [@d2 @a2 @fs3 @c4], [@g2 @d3 @b3 @d4], [@fs2 @b2 @ds3 @a3],
+    [@c2 @g2 @e3 @g3], [@a1 @e2 @c3 @fs3], [@b1 @fs2 @e3 @a3], [@e2 @b2 @g3 @e3]
+]
+let bars_b = [
+    [@g1 @d2 @b2 @g3], [@fs1 @d2 @a2 @d3], [@e2 @b2 @g3 @b3], [@d2 @b2 @fs3 @b3],
+    [@c2 @g2 @e3 @g3], [@b1 @g2 @d3 @g3], [@a1 @e2 @c3 @g3], [@d2 @a2 @c3 @fs3],
+    [@g1 @d2 @b2 @g3], [@gs1 @e2 @b2 @d3], [@a1 @e2 @c3 @a3], [@eb2 @c3 @g3 @c4],
+    [@d2 @b2 @g3 @d4], [@c2 @g2 @e3 @b3], [@cs2 @as2 @e3 @fs3], [@b1 @fs2 @ds3 @a3]
+]
+let coda_bars = [[@e2 @b2 @g3 @e3], [@e2 @c3 @a3 @e4], [@e2 @b2 @fs3 @a3], [@e2 @b2 @g3 @e4], [@e2 @b2 @gs3 @e4], [@e2 @b2 @gs3 @e4]]
+
+/// The left hand's figure for bar `b`.
+let bar_of = fn(b) {
+    if b < 16 { bars_a[b] } else { if b < 32 { bars_b[b - 16] } else { if b < 44 { bars_a[b - 32] } else { coda_bars[min(5, b - 44)] } } }
+}
+
+/// The loudness plan, per bar.
+let level = [
+    0.34 0.36 0.4 0.34 0.38 0.42 0.46 0.44 0.36 0.4 0.44 0.46 0.42 0.4 0.36 0.3
+    0.4 0.42 0.44 0.43 0.48 0.5 0.54 0.56 0.6 0.64 0.7 0.8 0.84 0.74 0.62 0.5
+    0.32 0.34 0.38 0.32 0.36 0.4 0.42 0.4 0.34 0.36 0.32 0.28
+    0.26 0.24 0.22 0.2 0.2 0.2
+]
+
+// The right hand, a bar each: notes and lengths (beats).
+let tune_a = [
+    [[@b4 @g4], [2 1]], [[@a4 @b4 @c5], [1.5 0.5 1]], [[@b4 @fs4], [2 1]], [[@g4 @r], [2.5 0.5]],
+    [[@e5 @d5 @c5], [2 0.5 0.5]], [[@c5 @b4 @a4], [1.5 0.5 1]], [[@a4 @c5 @e5], [1 1 1]], [[@ds5 @r], [2.5 0.5]],
+    [[@e5 @b4], [2 1]], [[@d5 @c5 @a4], [1.5 0.5 1]], [[@b4 @d5 @g5], [1 1 1]], [[@fs5 @e5 @ds5], [1.5 0.5 1]],
+    [[@e5 @g5 @e5], [1.5 0.5 1]], [[@c5 @b4 @a4], [1.5 0.5 1]], [[@fs4 @a4 @ds5], [1 1 1]], [[@e5 @r], [2.5 0.5]]
+]
+let tune_b = [
+    [[@d5 @b4 @g4], [1.5 0.5 1]], [[@a4 @d5 @fs5], [1 1 1]], [[@g5 @b4], [2 1]], [[@fs5 @d5 @b4], [1.5 0.5 1]],
+    [[@c5 @e5 @g5], [1 1 1]], [[@g5 @fs5 @g5], [1.5 0.5 1]], [[@e5 @c5 @a4], [1.5 0.5 1]], [[@fs5 @r], [2.5 0.5]],
+    [[@b5 @a5 @g5], [1.5 0.5 1]], [[@gs5 @b5 @d6], [1 1 1]], [[@c6 @b5 @a5], [1.5 0.5 1]], [[@g5 @eb6 @c6], [1 1 1]],
+    [[@b5 @d6 @g6], [1 1 1]], [[@e6 @b5 @g5], [1.5 0.5 1]], [[@as5 @fs5 @e5], [1.5 0.5 1]], [[@ds5 @fs5 @a5 @b5], [1 1 0.5 0.5]]
+]
+
+/// The left hand: bass, fifth, tenth, octave up, then back down, in
+/// eighths, with a swell inside the bar and a slight lean on the bass.
+let left = Loop{play: piano beats: 3 amp: 0.6 sends: {room: 0.18 hall: 0.2}
+    code: fn(i) {
+        let f = bar_of(i)
+        // Lighter under the return, so the doubled melody floats.
+        let v = level[min(i, 49)] - if i >= 32 && i < 44 { 0.16 } else { 0.1 }
+        let order = [0 1 2 3 2 1]
+        // The pedal (it holds this loop's notes): up on the downbeat, down
+        // an eighth later; held through the coda's last chord.
+        if i < 48 { pedal(0) }
+        if i >= 48 {
+            pedal(1)
+            if i == 48 { play(f[0], {dur: 8 amp: 0.3}) }
+            sleep(3)
+        } else {
+            for s in 0..6 {
+                if s == 1 { pedal(1) }
+                let r = rand(0, 0.02)
+                sleep(r)
+                play(f[order[s]], {amp: (v + if s == 0 { 0.08 } else { if s == 3 { 0.04 } else { 0 } }) * rand(0.93, 1.04) dur: if s == 0 { 2.9 } else { 1.0 }})
+                // The bass doubled an octave down on the downbeat, where the keyboard allows.
+                if s == 0 && note(f[0]) >= 33 { play(note(f[0]) - 12, {amp: v * 0.9 dur: 2.9}) }
+                sleep(0.5 - r)
+            }
+        }
+    }
+}
+
+/// Play one bar of melody at `amp`; `sixth` lifts it an octave with the
+/// old octave softly under it (the return), `octave` doubles it below (the
+/// climax).
+let tune_bar = fn(line, amp, sixth, octave) {
+    let k = 0
+    for d in line[1] {
+        let late = if k == 0 { rand(0.01, 0.05) } else { rand(0, 0.02) }
+        sleep(late)
+        let n = line[0][k]
+        if n != @r {
+            let x = note(n)
+            let a = amp + if d >= 2 { 0.06 } else { 0 } + rand(0, 0.03)
+            // The return sings an octave higher, the old octave under it.
+            play(if sixth { x + 12 } else { x }, {amp: a dur: d * 0.96})
+            if sixth { play(x, {amp: a * 0.45 dur: d * 0.96}) }
+            if octave { play(x - 12, {amp: a * 0.85 dur: d * 0.96}) }
+        }
+        sleep(d - late)
+        k = k + 1
+    }
+}
+
+let melody = Loop{play: piano beats: 3 amp: 1.0 sends: {room: 0.18 hall: 0.22}
+    code: fn(i) {
+        let v = level[min(i, 49)] + 0.24
+        if i < 16 { tune_bar(tune_a[i], v, false, false) }
+        else { if i < 32 { tune_bar(tune_b[i - 16], v, false, i >= 24 && i < 30) }
+        else { if i < 44 { tune_bar(tune_a[i - 32], v, true, false) }
+        else {
+            // The coda: a falling echo of the first phrase, then E major rising.
+            if i == 44 { tune_bar([[@b5 @g5 @e5], [1.5 0.5 1]], 0.34, false, false) }
+            if i == 45 { tune_bar([[@c6 @a5 @e5], [1.5 0.5 1]], 0.32, false, false) }
+            if i == 46 { tune_bar([[@b5 @fs5 @ds5], [1.5 0.5 1]], 0.3, false, false) }
+            if i == 47 { tune_bar([[@e5 @gs5 @b5], [1 1 1]], 0.3, false, false) }
+            if i == 48 {
+                for n in [@e5 @gs5 @b5 @e6 @gs6 @b6 @e7] { play(n, {amp: 0.28 dur: 8}) sleep(0.18) }
+            }
+            sleep(3 - beat())
+        } } }
+    }
+}
+
+/// B's counter-voice: the tenor answers the melody with a sustained line.
+let tenor = Loop{play: piano beats: 3 amp: 0.7 sends: {room: 0.18 hall: 0.22}
+    code: fn(i) {
+        let line = [@b3 @a3 @b3 @d4 @e4 @d4 @c4 @c4 @d4 @e4 @e4 @eb4 @d4 @e4 @e4 @fs4]
+        let v = level[min(i, 49)]
+        if i >= 16 && i < 32 {
+            sleep(1)
+            play(line[i - 16], {amp: v * 0.8 dur: 1.9})
+        }
+        sleep(3 - beat())
+    }
+}
+
+// ---- mix and master -------------------------------------------------------------------
+// The piano in a hall: a close room and a longer hall return, the
+// instrument itself lightly compressed; a low rumble filtered away.
+let room = Reverb{room: 0.5 mix: 1 damp: 7000}
+let hall = Reverb{room: 0.8 mix: 1 damp: 6000}
+let returns = Highpass{in: [room hall] cutoff: 150}
+let piano_hp = Highpass{in: [melody left tenor] cutoff: 35}
+let piano_comp = Comp{in: [piano_hp] threshold: -22 ratio: 2 makeup: 2}
+
+/// The master: gentle glue (the master limiter follows).
+let glue = Comp{in: [returns piano_comp] threshold: -18 ratio: 1.5 attack: 20 release: 150 knee: 6 makeup: 1}
+/// The master chain: a tonal trim (rumble out, a little low and air, a dip
+/// in the low mids), the bass kept mono under 140 Hz with a touch of width
+/// above, a fast peak compressor, and a limiter that sets the loudness.
+let master_eq = Eq{in: [glue] b1: [@highpass 28] b2: [@lowshelf 90 1] b3: [@peak, 350, -1.5, 0.9] b4: [@highshelf 10000 1.5]}
+let master_width = Width{in: [master_eq] width: 1.1 bass_mono: 140}
+let master_peak = Comp{in: [master_width] threshold: -10 ratio: 5 attack: 1 release: 80 knee: 4 makeup: 0}
+let master_limit = Limiter{in: [master_peak] ceiling: -1.5 gain: 2.12}
+/// Above 16 kHz out: the limiter\'s clipped edges would overshoot between samples.
+let master_lp = Lowpass{in: [master_limit] cutoff: 16000 res: 0.5}
+
+let a = Section{bars: 16 loops: [melody left]}
+let b = Section{bars: 16 loops: [melody left tenor]}
+let a2 = Section{bars: 12 loops: [melody left]}
+let coda = Section{bars: 6 loops: [melody left] bpm: 54 ramp: 9 next: @stop}
+
+Score{label: "Harbour Lights" clock piano left melody tenor room hall returns piano_hp piano_comp glue master_eq master_width master_peak master_limit master_lp a b a2 coda ceiling: -1 master: 1.0 arrange: [a b a2 coda]}

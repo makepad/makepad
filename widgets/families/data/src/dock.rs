@@ -1,4 +1,5 @@
 use crate::{
+    event::TouchState,
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_micro_serde::*,
@@ -193,6 +194,9 @@ pub struct Dock {
 
     #[rust]
     dock_items: HashMap<LiveId, DockItem>,
+    /// The tab most recently selected across all of the tab bars, if any.
+    #[rust]
+    current_tab: Option<LiveId>,
     #[rust]
     templates: HashMap<LiveId, ScriptObjectRef>,
     #[rust]
@@ -251,13 +255,14 @@ impl ScriptHook for Dock {
         //
         // Content templates follow both LiveEdit and style reapplication.
         // Dock items describe the layout, which may no longer contain its
-        // initial panes or tabs. ScriptReapply must not reintroduce those
+        // initial panes or tabs. ScriptReapply and Rebake (a re-run of the
+        // same DSL, e.g. on an Android rotation) must not reintroduce those
         // missing IDs: a merged-away pane would become an orphan containing
         // duplicate tabs, and a closed tab could reappear. Only a true
         // LiveEdit reload may add new default layout items; existing runtime
         // items remain unchanged as before.
         let is_reload = apply.is_reload();
-        let collect_layout = !apply.is_script_reapply();
+        let collect_layout = !apply.preserves_runtime_state();
         if !apply.is_eval() {
             if let Some(obj) = value.as_object() {
                 vm.vec_with(obj, |vm, vec| {
@@ -504,6 +509,7 @@ pub enum DockAction {
         axis: SplitterAxis,
         align: SplitterAlign,
     },
+    /// A tab was pressed, or a press elsewhere in its tab bar or contents made it current.
     TabWasPressed(LiveId),
     TabCloseWasPressed(LiveId),
     ShouldTabStartDrag(LiveId),
@@ -676,6 +682,13 @@ fn preserve_item_for_layout(
         // A container took this ID, so it cannot also name a tab.
         Some(_) => false,
     }
+}
+
+/// Returns whether the tab bar with the given tabs draws its active tab as current.
+///
+/// With no current tab, every tab bar draws its active tab as current.
+fn is_current_tab_bar(current_tab: Option<LiveId>, tabs: &[LiveId]) -> bool {
+    current_tab.is_none_or(|tab| tabs.contains(&tab))
 }
 
 /// The dump types live in the core, which prints them without naming the
@@ -1661,24 +1674,39 @@ impl Dock {
     }
 
     fn select_tab(&mut self, cx: &mut Cx, tab_id: LiveId) {
+        if self.bring_tab_to_front(cx, tab_id) && self.current_tab != Some(tab_id) {
+            self.current_tab = Some(tab_id);
+            self.area.redraw(cx);
+        }
+    }
+
+    /// Brings the given tab to the front of its tab bar.
+    ///
+    /// This only makes it the current tab if its tab bar already held the current tab.
+    /// Returns whether the tab was found in a tab bar.
+    fn bring_tab_to_front(&mut self, cx: &mut Cx, tab_id: LiveId) -> bool {
         for (tabs_id, item) in self.dock_items.iter_mut() {
             match item {
                 DockItem::Tabs { tabs, selected, .. } => {
                     if let Some(pos) = tabs.iter().position(|v| *v == tab_id) {
                         if *selected == pos {
-                            return;
+                            return true;
+                        }
+                        if self.current_tab.is_some_and(|tab| tabs.contains(&tab)) {
+                            self.current_tab = Some(tab_id);
                         }
                         self.needs_save = true;
                         *selected = pos;
                         if let Some(tab_bar) = self.tab_bars.get(&tabs_id) {
                             tab_bar.redraw_contents(cx);
                         }
-                        return;
+                        return true;
                     }
                 }
                 _ => (),
             }
         }
+        false
     }
 
     fn set_tab_title(&mut self, cx: &mut Cx, tab_id: LiveId, new_name: String) {
@@ -1733,10 +1761,19 @@ impl Dock {
                 } => {
                     if let Some(pos) = tabs.iter().position(|v| *v == tab_id) {
                         let tabs_id = *tabs_id;
+                        let has_current_tab =
+                            self.current_tab.is_some_and(|tab| tabs.contains(&tab));
                         tabs.remove(pos);
+                        // Closing a tab left of the active tab keeps that same tab active.
+                        if pos < *selected {
+                            *selected -= 1;
+                        }
                         if tabs.is_empty() {
                             if *closable {
                                 self.unsplit_tabs(cx, tabs_id);
+                            }
+                            if has_current_tab {
+                                self.current_tab = None;
                             }
                             if !keep_item {
                                 self.dock_items.remove(&tab_id);
@@ -1750,14 +1787,18 @@ impl Dock {
                             } else {
                                 tabs[*selected]
                             };
-                            self.select_tab(cx, next_tab);
+                            self.bring_tab_to_front(cx, next_tab);
                             // When the closed tab was the active one, the next tab usually
-                            // lands at the same selected index, so select_tab's
+                            // lands at the same selected index, so bring_tab_to_front's
                             // index-unchanged shortcut skips the redraw. The displayed
                             // contents still changed to a different item, so redraw them
                             // explicitly or the closed tab's pixels stay on screen.
                             if let Some(tab_bar) = self.tab_bars.get(&tabs_id) {
                                 tab_bar.redraw_contents(cx);
+                            }
+                            // Closing a tab in the current tab bar keeps that bar current.
+                            if has_current_tab {
+                                self.current_tab = Some(next_tab);
                             }
                             if !keep_item {
                                 self.dock_items.remove(&tab_id);
@@ -1815,7 +1856,21 @@ impl Dock {
         // describe it, and `drop_between` validates it for itself.
         if matches!(pos.part, DropPart::Bar) {
             self.needs_save = true;
-            return self.drop_between(cx, pos.id, item, is_move);
+            // A failed move puts the tab back in front of a tab bar,
+            // so the current tab is whatever's now in front of its bar.
+            let current_tab = self.current_tab;
+            let did_drop = self.drop_between(cx, pos.id, item, is_move);
+            self.current_tab = if did_drop {
+                Some(item)
+            } else {
+                current_tab
+                    .and_then(|tab| self.find_tab_bar_of_tab(tab))
+                    .and_then(|(tabs_id, _)| match self.dock_items.get(&tabs_id) {
+                        Some(DockItem::Tabs { tabs, selected, .. }) => tabs.get(*selected).copied(),
+                        _ => None,
+                    })
+            };
+            return did_drop;
         }
         // Validate before detaching the source. A programmatic target need not
         // have a drawn tab bar, but it must belong to the current layout.
@@ -1848,7 +1903,7 @@ impl Dock {
             }
         }
         self.needs_save = true;
-        match pos.part {
+        let did_drop = match pos.part {
             DropPart::Left | DropPart::Right | DropPart::Top | DropPart::Bottom => {
                 if is_move {
                     self.close_tab(cx, item, true);
@@ -1891,7 +1946,11 @@ impl Dock {
             }
             // Answered before anything was validated or detached.
             DropPart::Bar => false,
+        };
+        if did_drop {
+            self.current_tab = Some(item);
         }
+        did_drop
     }
 
     fn move_tab(&mut self, cx: &mut Cx, item: LiveId, target: LiveId, part: DropPart) -> bool {
@@ -2126,9 +2185,13 @@ impl Dock {
         template: LiveId,
         insert_after: Option<usize>,
     ) -> Option<WidgetRef> {
-        if let Some(DockItem::Tabs { tabs, .. }) = self.dock_items.get_mut(&parent) {
+        if let Some(DockItem::Tabs { tabs, selected, .. }) = self.dock_items.get_mut(&parent) {
             if let Some(after) = insert_after {
                 tabs.insert(after + 1, item);
+                // Inserting a tab left of the active tab keeps that same tab active.
+                if after < *selected {
+                    *selected += 1;
+                }
             } else {
                 tabs.push(item);
             }
@@ -2200,6 +2263,7 @@ impl Dock {
 
     pub fn load_state(&mut self, cx: &mut Cx, dock_items: HashMap<LiveId, DockItem>) {
         self.dock_items = dock_items;
+        self.current_tab = None;
         self.items.clear();
         self.tab_bars.clear();
         self.splitters.clear();
@@ -2224,6 +2288,7 @@ impl Dock {
         self.items
             .retain(|id, (old_kind, _)| preserve_item_for_layout(&dock_items, *id, *old_kind));
         self.dock_items = dock_items;
+        self.current_tab = None;
         self.tab_bars.clear();
         self.splitters.clear();
         // Reset so the next next_internal_id call re-seeds from loaded state.
@@ -2253,6 +2318,9 @@ impl Dock {
         bodies: BodyDispatch,
     ) {
         let uid = self.widget_uid();
+        // While an open overlay (like a menu or modal) holds the sweep lock, presses are its own,
+        // so only a press claimed inside a tab's contents can make that tab bar current.
+        let is_sweep_locked = cx.sweep_lock_area().is_some();
         let dock_items = &mut self.dock_items;
         for (panel_id, splitter) in self.splitters.iter_mut() {
             for action in cx.capture_actions(|cx| splitter.handle_event(cx, event, scope)) {
@@ -2281,8 +2349,25 @@ impl Dock {
                 }
             }
         }
+        let press_abs = match event {
+            Event::MouseDown(e) if !e.button.is_back() && !e.button.is_forward() => Some(e.abs),
+            Event::TouchUpdate(e) => e
+                .touches
+                .iter()
+                .find(|t| t.state == TouchState::Start)
+                .map(|t| t.abs),
+            _ => None,
+        };
+        let mut is_press_ignored_by_tab_bar = false;
         for (panel_id, tab_bar) in self.tab_bars.iter_mut() {
-            for action in cx.capture_actions(|cx| tab_bar.tab_bar.handle_event(cx, event, scope)) {
+            let was_claimed = !event.pointer_claimed_area().is_empty();
+            let actions = cx.capture_actions(|cx| tab_bar.tab_bar.handle_event(cx, event, scope));
+            // A tab bar can take a press without acting on it, like a right-click or touch-down on a tab.
+            is_press_ignored_by_tab_bar |= press_abs.is_some()
+                && actions.is_empty()
+                && !was_claimed
+                && !event.pointer_claimed_area().is_empty();
+            for action in actions {
                 match action.as_widget_action().cast() {
                     TabBarAction::ShouldTabStartDrag(item) => {
                         let name = if let Some(DockItem::Tab { name, .. }) = dock_items.get(&item) {
@@ -2295,7 +2380,16 @@ impl Dock {
                             .tab_rect(cx, item)
                             .map(|r| r.size)
                             .unwrap_or(dvec2(100.0, 30.0));
-                        if let Some(ghost) = tab_bar.tab_bar.create_ghost_tab(cx, item) {
+                        let (is_active, is_current) = match dock_items.get(panel_id) {
+                            Some(DockItem::Tabs { tabs, selected, .. }) => {
+                                let is_active = tabs.get(*selected) == Some(&item);
+                                (is_active, is_active && is_current_tab_bar(self.current_tab, tabs))
+                            }
+                            _ => (false, false),
+                        };
+                        if let Some(ghost) =
+                            tab_bar.tab_bar.create_ghost_tab(cx, item, is_active, is_current)
+                        {
                             self.dragging_tab = Some(DraggingTab {
                                 cursor: Vec2d::default(),
                                 name,
@@ -2314,6 +2408,7 @@ impl Dock {
                         {
                             if let Some(sel) = tabs.iter().position(|v| *v == tab_id) {
                                 *selected = sel;
+                                self.current_tab = Some(tab_id);
                                 tab_bar.redraw_contents(cx);
                                 cx.widget_action(uid, DockAction::TabWasPressed(tab_id))
                             } else {
@@ -2333,23 +2428,76 @@ impl Dock {
                 }
             }
         }
+        // A press that nothing has claimed yet isn't on an overlay, a splitter or a tab.
+        let press_abs = press_abs
+            .filter(|_| is_press_ignored_by_tab_bar || event.pointer_claimed_area().is_empty());
+
         // Drag/drop hit-testing must stay scoped to the visible tab content.
         // Otherwise hidden cached tab items can claim the drop before the
         // selected tab sees it.
         let visible_items_only = event.requires_visibility()
             || matches!(event, Event::Drag(_) | Event::Drop(_) | Event::DragEnd);
 
+        let mut claimed_by = None;
+        let mut body_actions = None;
         if bodies == BodyDispatch::Skip {
             // The caller pumps the tab bodies itself (Studio's resident pump
             // delivers async events once across several presentations).
         } else if visible_items_only {
-            for (_id, item) in self.visible_items() {
-                item.handle_event(cx, event, scope);
+            let mut dispatch_to_bodies = |cx: &mut Cx| {
+                for (id, item) in self.visible_items() {
+                    let was_claimed = !event.pointer_claimed_area().is_empty();
+                    item.handle_event(cx, event, scope);
+                    if !was_claimed && !event.pointer_claimed_area().is_empty() {
+                        claimed_by = Some(id);
+                    }
+                }
+            };
+            if press_abs.is_some() {
+                // Hold the bodies' actions until the pressed tab has become current.
+                body_actions = Some(cx.capture_actions(&mut dispatch_to_bodies));
+            } else {
+                dispatch_to_bodies(cx);
             }
         } else {
             for (_id, (_templ_id, item)) in self.items.iter_mut() {
                 item.handle_event(cx, event, scope);
             }
+        }
+        // A press claimed by a tab's contents belongs to that tab, even on a popup hanging past
+        // its tab bar, and any other press belongs to the tab bar it landed in.
+        let is_touch_press = matches!(event, Event::TouchUpdate(_));
+        let pressed_tabs_id = press_abs.and_then(|abs| match claimed_by {
+            Some(tab_id) => self.find_tab_bar_of_tab(tab_id).map(|(tabs_id, _)| tabs_id),
+            None if is_sweep_locked => None,
+            None => self
+                .tab_bars
+                .iter()
+                .find(|(_, tab_bar)| tab_bar.contents_rect.contains(abs))
+                // A tap on a background tab selects that tab once it ends,
+                // so its touch-down doesn't make the bar's front tab current first.
+                .filter(|(_, tab_bar)| {
+                    !is_touch_press
+                        || tab_bar.tab_bar.is_over_tab(cx, abs).is_none_or(|(tab_id, _)| {
+                            tab_bar.tab_bar.active_tab_id() == Some(tab_id)
+                        })
+                })
+                .map(|(tabs_id, _)| *tabs_id),
+        });
+        // A hidden tab bar has no tab to show as current, so it never takes it.
+        if let Some(DockItem::Tabs { tabs, selected, hide_tab_bar: false, .. }) =
+            pressed_tabs_id.and_then(|tabs_id| self.dock_items.get(&tabs_id))
+        {
+            if let Some(tab_id) = tabs.get(*selected).copied() {
+                if self.current_tab != Some(tab_id) {
+                    self.current_tab = Some(tab_id);
+                    self.area.redraw(cx);
+                    cx.widget_action(uid, DockAction::TabWasPressed(tab_id));
+                }
+            }
+        }
+        if let Some(body_actions) = body_actions {
+            cx.extend_actions(body_actions);
         }
 
         if let Event::DragEnd = event {
@@ -2509,6 +2657,7 @@ impl Widget for Dock {
                 }
                 Some(DrawStackItem::Tabs { id }) => {
                     if let Some(DockItem::Tabs {
+                        tabs,
                         selected,
                         hide_tab_bar,
                         ..
@@ -2528,7 +2677,8 @@ impl Widget for Dock {
                         if !*hide_tab_bar {
                             let walk = tab_bar.tab_bar.walk(cx);
                             tab_bar.tab_bar.tree_parent = dock_uid;
-                            tab_bar.tab_bar.begin(cx, Some(*selected), walk);
+                            let is_current_bar = is_current_tab_bar(self.current_tab, tabs);
+                            tab_bar.tab_bar.begin(cx, Some(*selected), is_current_bar, walk);
                             stack.push(DrawStackItem::TabLabel { id, index: 0 });
                         } else {
                             // Skip the tab bar entirely, go straight to content.
@@ -2775,10 +2925,25 @@ impl DockRef {
         None
     }
 
+    /// Brings the given tab to the front of its tab bar and makes it the current tab.
     pub fn select_tab(&self, cx: &mut Cx, item: LiveId) {
         if let Some(mut dock) = self.borrow_mut() {
             dock.select_tab(cx, item);
         }
+    }
+
+    /// Brings the given tab to the front of its tab bar.
+    ///
+    /// This only makes it the current tab if its tab bar already held the current tab.
+    pub fn bring_tab_to_front(&self, cx: &mut Cx, tab_id: LiveId) {
+        if let Some(mut dock) = self.borrow_mut() {
+            dock.bring_tab_to_front(cx, tab_id);
+        }
+    }
+
+    /// Returns the tab most recently selected across all of this dock's tab bars, if any.
+    pub fn current_tab(&self) -> Option<LiveId> {
+        self.borrow().and_then(|dock| dock.current_tab)
     }
 
     pub fn redraw_tab(&self, cx: &mut Cx, tab_id: LiveId) {
@@ -3387,6 +3552,104 @@ mod tests {
         }
     }
 
+    #[test]
+    fn current_tab_follows_selections_moves_and_closes() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (dock, _bodies) = dock_with_tabs(&mut cx);
+        assert_eq!(dock.current_tab(), None);
+
+        // Dropping `third` into its own tab bar makes it current.
+        let drop_position = DropPosition {
+            part: DropPart::Right,
+            id: id!(root),
+            rect: Rect::default(),
+        };
+        assert!(dock
+            .borrow_mut()
+            .unwrap()
+            .handle_drop_position(&mut cx, drop_position, id!(third), true));
+        assert_eq!(dock.current_tab(), Some(id!(third)));
+        // Bringing a tab forward in another tab bar leaves the current tab alone.
+        dock.bring_tab_to_front(&mut cx, id!(second));
+        assert_eq!(dock.current_tab(), Some(id!(third)));
+
+        dock.select_tab(&mut cx, id!(first));
+        assert_eq!(dock.current_tab(), Some(id!(first)));
+        // `third` is already in front of its tab bar, but selecting it still makes it current.
+        dock.select_tab(&mut cx, id!(third));
+        assert_eq!(dock.current_tab(), Some(id!(third)));
+        dock.select_tab(&mut cx, id!(missing));
+        assert_eq!(dock.current_tab(), Some(id!(third)));
+
+        // In the current tab bar, the tab brought forward becomes current.
+        dock.select_tab(&mut cx, id!(first));
+        dock.bring_tab_to_front(&mut cx, id!(second));
+        assert_eq!(dock.current_tab(), Some(id!(second)));
+
+        // Closing the current tab makes the next tab in front of its tab bar current.
+        dock.close_tab(&mut cx, id!(second));
+        assert_eq!(dock.current_tab(), Some(id!(first)));
+        // Closing a tab in another tab bar leaves the current tab alone.
+        dock.close_tab(&mut cx, id!(third));
+        assert_eq!(dock.current_tab(), Some(id!(first)));
+        // Emptying the current tab bar leaves no current tab.
+        dock.close_tab(&mut cx, id!(first));
+        assert_eq!(dock.current_tab(), None);
+    }
+
+    #[test]
+    fn closing_a_tab_left_of_the_current_tab_keeps_it_current() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (dock, _bodies) = dock_with_tabs(&mut cx);
+        dock.select_tab(&mut cx, id!(second));
+        dock.close_tab(&mut cx, id!(first));
+        assert_eq!(dock.current_tab(), Some(id!(second)));
+        let dock = dock.borrow().unwrap();
+        match dock.dock_items.get(&id!(root)).unwrap() {
+            DockItem::Tabs { tabs, selected, .. } => assert_eq!(tabs[*selected], id!(second)),
+            _ => panic!("the root should still be a tab bar"),
+        }
+    }
+
+    #[test]
+    fn a_tab_dropped_between_two_panels_becomes_current() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (dock, _bodies) = dock_with_tabs(&mut cx);
+        let mut dock = dock.borrow_mut().unwrap();
+        let drop_at = |part, id| DropPosition { part, id, rect: Rect::default() };
+        // Splitting `third` off to the right turns the root into a seam between two panels.
+        assert!(dock.handle_drop_position(&mut cx, drop_at(DropPart::Right, id!(root)), id!(third), true));
+        assert!(dock.handle_drop_position(&mut cx, drop_at(DropPart::Bar, id!(root)), id!(second), true));
+        assert_eq!(dock.current_tab, Some(id!(second)));
+        // `first` is now alone beside that seam, so dropping it there does nothing.
+        assert!(!dock.handle_drop_position(&mut cx, drop_at(DropPart::Bar, id!(root)), id!(first), true));
+        assert_eq!(dock.current_tab, Some(id!(second)));
+    }
+
+    #[test]
+    fn creating_a_tab_left_of_the_current_tab_keeps_it_current() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (dock, _bodies) = dock_with_tabs(&mut cx);
+        dock.select_tab(&mut cx, id!(third));
+        let mut dock = dock.borrow_mut().unwrap();
+        dock.create_tab(&mut cx, id!(root), id!(fourth), id!(TestBody), "fourth".into(), id!(TestTab), Some(0));
+        let Some(DockItem::Tabs { tabs, selected, .. }) = dock.dock_items.get(&id!(root)) else {
+            panic!("the root should still be a tab bar");
+        };
+        assert_eq!(tabs[*selected], id!(third));
+        assert_eq!(dock.current_tab, Some(id!(third)));
+    }
+
+    #[test]
+    fn a_failed_drop_between_panels_keeps_the_current_tab_in_front() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (dock, _bodies) = dock_with_tabs(&mut cx);
+        dock.select_tab(&mut cx, id!(first));
+        // `third` isn't a seam between two panels, so the move fails and puts `second` back in front.
+        assert!(!dock.move_tab(&mut cx, id!(second), id!(third), DropPart::Bar));
+        assert_eq!(dock.current_tab(), Some(id!(second)));
+    }
+
     fn initial_style_test_dock(vm: &mut ScriptVm) -> ScriptValue {
         crate::script_eval!(vm, {
             use mod.widgets.*
@@ -3460,29 +3723,32 @@ mod tests {
             (DesktopStyle::Macos, true),
             (DesktopStyle::Macos, false),
         ] {
-            cx.with_vm(|vm| {
-                install(vm, StyleSheet::load(style.sheet(dark)));
-                vm.with_reload(crate::script_mod);
-                let value = initial_style_test_dock(vm);
-                dock.borrow_mut().unwrap().script_apply(
-                    vm,
-                    &Apply::ScriptReapply,
-                    &mut Scope::empty(),
-                    value,
-                );
-                assert!(vm.take_errors().is_empty());
-            });
-            assert_eq!(layout_fingerprint(&dock), layout, "{}", style.id());
-            assert_intact(&dock, &bodies, id!(runtime_tab));
-            assert!(!dock.check_and_clear_need_save());
-            assert!(dock.item(id!(second)).is_empty());
-            assert_eq!(dock.item(id!(first)).text(), "unsaved live content");
-            assert_eq!(dock.item(id!(runtime_tab)).text(), "runtime tab content");
-            let dock = dock.borrow().unwrap();
-            assert!(!dock.dock_items.contains_key(&id!(project_tabs)));
-            assert!(!dock.dock_items.contains_key(&id!(work_tabs)));
-            assert!(!dock.dock_items.contains_key(&id!(second)));
-            assert!(dock.templates.contains_key(&id!(Body)));
+            // A rebake re-runs the same DSL, like an Android rotation does.
+            for (apply, kind) in [(Apply::ScriptReapply, "reapply"), (Apply::Rebake, "rebake")] {
+                cx.with_vm(|vm| {
+                    install(vm, StyleSheet::load(style.sheet(dark)));
+                    vm.with_reload(crate::script_mod);
+                    let value = initial_style_test_dock(vm);
+                    dock.borrow_mut().unwrap().script_apply(
+                        vm,
+                        &apply,
+                        &mut Scope::empty(),
+                        value,
+                    );
+                    assert!(vm.take_errors().is_empty());
+                });
+                assert_eq!(layout_fingerprint(&dock), layout, "{} {kind}", style.id());
+                assert_intact(&dock, &bodies, id!(runtime_tab));
+                assert!(!dock.check_and_clear_need_save());
+                assert!(dock.item(id!(second)).is_empty());
+                assert_eq!(dock.item(id!(first)).text(), "unsaved live content");
+                assert_eq!(dock.item(id!(runtime_tab)).text(), "runtime tab content");
+                let dock = dock.borrow().unwrap();
+                assert!(!dock.dock_items.contains_key(&id!(project_tabs)));
+                assert!(!dock.dock_items.contains_key(&id!(work_tabs)));
+                assert!(!dock.dock_items.contains_key(&id!(second)));
+                assert!(dock.templates.contains_key(&id!(Body)));
+            }
         }
     }
 

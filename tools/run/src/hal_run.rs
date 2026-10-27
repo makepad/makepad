@@ -5,11 +5,12 @@ use crate::boot_progress::{History, Progress};
 use makepad_hal::{domain_stop, open_flags, session::HOST, CmdWriter, Hal, Id, OpenReq};
 use makepad_studio_protocol::KeyCode;
 use relax_boot::{
-    Action, Boot as HostWindow, Document, Environment, Event as BootEvent, Icon, LayerWant,
+    Action, Boot as HostWindow, Document, Environment, Event as BootEvent, Icon, LayerWant, RingAlert, RingWant,
 };
 use relax_compiler::{
     diag::Diagnostic,
     domain::{AppSpec, DomainState},
+    postframe::Activity,
     run_state::{self, Mode, ParkedPanic, Phase, State},
 };
 use relax_session::sync::{Condvar, Mutex, MutexGuard};
@@ -69,22 +70,13 @@ static PANICS_CHANGED: AtomicBool = AtomicBool::new(false);
 static EXIT: AtomicI32 = AtomicI32::new(0);
 static ENVIRONMENT: Mutex<Option<Environment>> = Mutex::new(None);
 /// The UI thread began a JIT wait since the window last looked (postframe's hook): the window
-/// wakes, and shows the JIT loader once the waiting is sustained (LOADER_AFTER in LOADER_WINDOW).
+/// wakes, and shows the UI block on the JIT ring once the waiting is sustained (BLOCK_AFTER).
 static UI_WAIT_ARMED: AtomicBool = AtomicBool::new(false);
-/// The JIT loader shows for this much UI-thread JIT waiting within the sliding window (never for
-/// one short hiccup)...
-const LOADER_AFTER: Duration = Duration::from_millis(250);
-const LOADER_WINDOW_NS: u64 = 1_000_000_000;
-/// ...stays at least this long...
-const LOADER_MIN: Duration = Duration::from_millis(1000);
-/// ...and goes once the UI thread waited less than LOADER_TRICKLE in the last LOADER_QUIET_NS
-/// (the trickle of tiny waits a running app always has is quiet). Going, its fade-out holds while
-/// the UI thread waits that much in LOADER_BUSY_NS again (it never fades back in half-way).
-const LOADER_QUIET_NS: u64 = 700_000_000;
-const LOADER_BUSY_NS: u64 = 200_000_000;
-const LOADER_TRICKLE: Duration = Duration::from_millis(40);
-/// The UI thread has not waited on the JIT for this long (and nothing is left to build ahead):
-/// the warm-up is over.
+/// A true UI block: one episode of UI-thread JIT waits this long (postframe::BLOCK_SHOW_NS: one
+/// long lazy compile, or a load's thousands of short ones; never a short hiccup). The JIT ring
+/// shows only past one.
+const BLOCK_AFTER: Duration = Duration::from_nanos(relax_compiler::postframe::BLOCK_SHOW_NS);
+/// The UI has not been blocked on the JIT for this long: the warm-up is over.
 const READY_QUIET_NS: u64 = 300_000_000;
 
 fn ui_wait_began() {
@@ -93,20 +85,195 @@ fn ui_wait_began() {
     }
 }
 
-/// The JIT loader over the running app (after the warm-up).
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Loader {
-    Hidden,
-    /// shown since
-    Shown(Instant),
-    /// fading out (until the layer is done); shown since
-    Going(Instant),
+/// The JIT ring shows only past a real wait: a UI block (BLOCK_AFTER), or makepad rebuilding
+/// itself; first compiles and background tier-up alone never show it (JITLOOP-B). Once shown it
+/// stays while the JIT works, and settles (fades out) once nothing has been built or run for
+/// this long (queued builds nobody works on are not work).
+const RING_SETTLE_AFTER: Duration = Duration::from_millis(500);
+/// the build rate's smoothing (s)
+const RATE_TAU: f32 = 0.5;
+/// the run looks at the JIT's queues at most this often (the ring eases between looks)
+const WATCH_EVERY: Duration = Duration::from_millis(100);
+/// how often the run looks at the JIT while the app runs and no ring shows (new work is seen
+/// within this; a UI wait wakes it at once)
+const RING_LOOK: Duration = Duration::from_millis(500);
+
+/// Whether this run shows the JIT ring: `MAKEPAD_RUN_SETTLE_HUD=0` never, `=1` always, else not
+/// in hidden or benchmark runs (MAKEPAD_HIDE_WINDOWS, MAKEPAD_RUN_O3_PROGRESS,
+/// MAKEPAD_RUN_BOOT_DUMP).
+fn ring_on() -> bool {
+    match std::env::var("MAKEPAD_RUN_SETTLE_HUD").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => {
+            std::env::var("MAKEPAD_HIDE_WINDOWS").as_deref() != Ok("1")
+                && std::env::var_os("MAKEPAD_RUN_O3_PROGRESS").is_none()
+                && std::env::var_os("MAKEPAD_RUN_BOOT_DUMP").is_none()
+        }
+    }
+}
+
+/// What the run sees of the JIT for its ring: builds running now and finished since the last
+/// look (the work rate), the queues, the UI thread's JIT duty cycle, a true UI block. Busy means
+/// something was built or is building, never only that a queue is non-empty. Atomics and two
+/// queue locks a look; the app's threads never wait for it.
+struct Watch {
+    shown: bool,
+    busy_since: Option<Instant>,
+    /// the last time anything was running or finished
+    worked: Option<Instant>,
+    /// the last look at the JIT (at most every WATCH_EVERY), what it showed then
+    looked: Instant,
+    a: Activity,
+    /// the queues' builds finished when this busy spell began
+    done_from: Option<u64>,
+    /// a program thread's first compiles finished since the last look
+    demand: bool,
+    /// builds finished a second (smoothed), and of the last look's, warm links only
+    rate: f32,
+    linking: bool,
+    duty: f32,
+    /// the UI block shows (for the trace)
+    blocked: bool,
+    trace: bool,
+    traced: Option<Instant>,
+}
+
+impl Watch {
+    fn new(trace: bool) -> Self {
+        Self {
+            shown: false,
+            busy_since: None,
+            worked: None,
+            looked: Instant::now(),
+            a: relax_compiler::postframe::activity(),
+            done_from: None,
+            demand: false,
+            rate: 0.0,
+            linking: false,
+            duty: 0.0,
+            blocked: false,
+            trace,
+            traced: None,
+        }
+    }
+
+    /// The ring's wish now (`None`: the JIT is settled). `clock`: the frame dump's clock (ms),
+    /// for the trace.
+    fn look(&mut self, clock: Option<u128>) -> Option<RingWant> {
+        use relax_compiler::postframe::{activity, ui_blocked_ns};
+        let now = Instant::now();
+        let dt = now.duration_since(self.looked).as_secs_f32();
+        if dt >= WATCH_EVERY.as_secs_f32() {
+            let a = activity();
+            let waited = a.ui_wait_ns.saturating_sub(self.a.ui_wait_ns) as f32 / 1e9;
+            self.duty = (waited / dt).clamp(0.0, 1.0);
+            let built = a.finished().saturating_sub(self.a.finished());
+            self.linking = built > 0 && a.linked > self.a.linked && a.finished() - a.linked == self.a.finished() - self.a.linked;
+            self.demand = a.demand() > self.a.demand();
+            let k = 1.0 - (-dt / RATE_TAU).exp();
+            self.rate += (built as f32 / dt - self.rate) * k;
+            if built > 0 || a.running() || self.duty > 0.02 {
+                self.worked = Some(now);
+            }
+            self.a = a;
+            self.looked = now;
+        }
+        let a = self.a;
+        let stalled = Duration::from_nanos(ui_blocked_ns());
+        let block = stalled >= BLOCK_AFTER;
+        // a program thread compiles lazily: the UI thread's JIT duty is up, or other threads'
+        // first compiles finished
+        let lazy = self.duty > 0.02 || self.demand;
+        use relax_compiler::reload::host::{status, Phase};
+        let rebuild = match status().0 {
+            Phase::Building => 1,
+            Phase::Restarting => 2,
+            Phase::Idle | Phase::Failed => 0,
+        };
+        if block || rebuild != 0 {
+            self.worked = Some(now);
+        }
+        let busy = self.worked.is_some_and(|t| now.duration_since(t) < RING_SETTLE_AFTER);
+        if busy {
+            self.done_from.get_or_insert(a.queue_done());
+            self.busy_since.get_or_insert(now);
+            self.shown |= block || rebuild != 0;
+        } else {
+            self.shown = false;
+            self.busy_since = None;
+            self.done_from = None;
+            self.rate = 0.0;
+        }
+        if self.trace && block != self.blocked {
+            if block {
+                eprintln!("makepad-run: jit ring: UI block (the UI waited {:.0} ms on the JIT)", stalled.as_secs_f64() * 1000.0);
+            } else {
+                eprintln!("makepad-run: jit ring: UI block over");
+            }
+        }
+        self.blocked = block;
+        let want = RingWant {
+            done: a.queue_done().saturating_sub(self.done_from.unwrap_or(a.queue_done())),
+            pending: a.pending(),
+            ahead: a.ahead,
+            o2: a.o2,
+            o3: a.o3 + a.o3_running,
+            lazy,
+            block,
+            settling: a.settling,
+            linking: self.linking,
+            rate: self.rate,
+            busy: self.busy_since.map_or(Duration::ZERO, |t| now.duration_since(t)),
+            rebuild,
+        };
+        // the trace: what the ring was told, at most 4 times a second while it shows
+        if self.trace && (self.shown || self.traced.is_some()) && self.traced.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(250)) {
+            let at = clock.map_or(String::new(), |ms| format!(" @{ms}"));
+            let state = if !self.shown {
+                "settled"
+            } else if want.ahead > 0 || lazy || block {
+                "compiling"
+            } else {
+                "tier-up"
+            };
+            eprintln!(
+                "makepad-run: jit ring{at}: {state} ({}, ui duty {:.2}){}",
+                relax_boot::ring_summary(Some(want), None),
+                self.duty,
+                if block { " UI BLOCK" } else { "" }
+            );
+            self.traced = self.shown.then_some(now);
+        }
+        self.shown.then_some(want)
+    }
+
+    /// How soon to look again while the UI thread may be heading into a block (its JIT wait began).
+    fn block_wake(&self) -> Option<Duration> {
+        use relax_compiler::postframe::{ui_blocked_ns, ui_idle_ns};
+        if !UI_WAIT_ARMED.load(Ordering::Acquire) {
+            return None;
+        }
+        // once the UI thread is not waiting the window disarms (the next wait's hook wakes it)
+        if ui_idle_ns() >= BLOCK_AFTER.as_nanos() as u64 {
+            UI_WAIT_ARMED.store(false, Ordering::Release);
+            return None;
+        }
+        let stalled = Duration::from_nanos(ui_blocked_ns());
+        Some(BLOCK_AFTER.saturating_sub(stalled).max(Duration::from_millis(20)))
+    }
+}
+
+/// A rebuild of makepad failed (its dot shows in the ring until the next rebuild).
+fn rebuild_failed() -> bool {
+    use relax_compiler::reload::host::{status, Phase};
+    status().0 == Phase::Failed
 }
 
 /// Where the window layer over the app is in its sequence.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Stage {
-    /// no layer, or the JIT loader
+    /// no layer (the JIT ring may show)
     Running,
     /// the boot field, the app's first frames going under it
     Boot,
@@ -174,7 +341,7 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
     // Java owns Android's UI loop; this boot thread compiles and runs domain 0.
     if cfg!(target_os = "android") {
         // the APK's boot app is the window manager when the host was built `--privileged`
-        let privileged = crate::PRIVILEGED.load(Ordering::Relaxed);
+        let privileged = relax_runner::privileged();
         return makepad_hal::with_caps(makepad_hal::Caps { privileged }, || compile());
     }
     makepad_hal::expect_main_loop();
@@ -188,8 +355,13 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
             // main thread did): a compiler phase, not a swap-quiesced compiler worker
             let _compiler = relax_compiler::zone_alloc::compiler();
             loop {
-                let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile()))
-                    .unwrap_or(101);
+                relax_compiler::lifeline::clear_panic_at();
+                // a panic in the compiler (exit 101): its message and position go on the load
+                // screen, not only into a log nobody on the box sees
+                let (code, panicked) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile())) {
+                    Ok(code) => (code, None),
+                    Err(p) => (101, Some(relax_compiler::lifeline::panic_line(&*p))),
+                };
                 let mut guard = state();
                 let Some(run) = guard.as_mut() else {
                     EXIT.store(code, Ordering::Release);
@@ -216,7 +388,10 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
                 {
                     // With a unit already installed, retries go through domain relaunch.
                     run.initial_failed = run.spec.is_none();
-                    post(Update::Failure(format!("Compilation failed (exit {code})")));
+                    post(Update::Failure(match &panicked {
+                        Some(line) => format!("Compilation failed: the compiler panicked: {line}"),
+                        None => format!("Compilation failed (exit {code})"),
+                    }));
                     if run.spec.is_some() {
                         return;
                     }
@@ -256,18 +431,26 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
     QUIT.store(true, Ordering::Release);
     RETRY.notify_all();
     Hal::global().wake_session(HOST);
+    let mut code = None;
     if thread.join().is_err() {
         quit_trace("the compile thread panicked");
-        return 101;
+        code = Some(101);
     }
-    if let Some(pump) = PUMP.lock().unwrap_or_else(|e| e.into_inner()).take() {
+    let pump = PUMP.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(pump) = pump {
         quit_trace("the compile thread joined");
         if pump.join().is_err() {
-            return 101;
+            code = code.or(Some(101));
         }
     }
+    // Every way the run ends comes here (window close, a signal's quit, a failed boot, no window
+    // backend) and the process exits right after: the HAL's driver threads stop and are joined
+    // first. exit() runs the driver's exit handlers (NVIDIA's EGL teardown), and a Vulkan worker
+    // still in vkQueueSubmit faulted inside it (a SIGSEGV at a SIGTERM mid-frame).
+    quit_trace("before_exit");
+    Hal::global().before_exit();
     quit_trace("the run ends");
-    EXIT.load(Ordering::Acquire)
+    code.unwrap_or_else(|| EXIT.load(Ordering::Acquire))
 }
 
 fn document(package_dir: &str) -> Result<Document, String> {
@@ -390,6 +573,10 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
             (g.iter().all(|v| v.is_finite()) && g[2] > 0.0 && g[3] > 0.0).then_some(g)
         })
         .unwrap_or([f32::NAN, f32::NAN, 1280.0, 800.0]);
+    // `MAKEPAD_WINDOW=WxH@scale` sizes the app's first window, which adopts this one: it is made
+    // at that size from the start, exactly, and the size is not kept for the next run
+    let launch = launch_window(info.dpi);
+    let geometry = launch.unwrap_or(geometry);
     let history = History::load(
         relax_compiler::dirs::cache_dir()
             .join("boot")
@@ -439,7 +626,7 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
                 }
                 let _stop = StopLoop;
                 let _kept = relax_compiler::zone_alloc::kept();
-                let mut host = match HostWindow::new(info, document, initial.clone(), geometry) {
+                let mut host = match HostWindow::new(info, document, initial.clone(), geometry, launch.is_some()) {
                     Ok(host) => host,
                     Err(error) => {
                         let _ = ready.try_send(Err(error));
@@ -453,7 +640,7 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
                     host,
                     initial,
                     history,
-                    state_path,
+                    launch.is_none().then_some(state_path),
                     package_dir,
                     watched_document,
                     ready,
@@ -462,6 +649,19 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
             .map_err(|e| e.to_string())?,
     );
     first.recv().map_err(|e| e.to_string())?
+}
+
+/// The boot window's geometry for `MAKEPAD_WINDOW=WxH@scale`: the native size that gives the app's
+/// window a `W`x`H` layout at `scale` on a display running at `dpi` (the app's `--window` does the
+/// same for a native launch: `makepad_platform::remote::app_clock::LaunchWindow::native_size`).
+fn launch_window(dpi: f32) -> Option<[f32; 4]> {
+    let value = std::env::var("MAKEPAD_WINDOW").ok()?;
+    let (size, scale) = value.split_once('@')?;
+    let (w, h) = size.split_once('x')?;
+    let [w, h, scale] = [w, h, scale].map(|v| v.trim().parse::<f32>().ok().filter(|v| v.is_finite() && *v > 0.0));
+    let dpi = if dpi.is_finite() && dpi > 0.0 { dpi } else { 1.0 };
+    let scale = scale?;
+    Some([f32::NAN, f32::NAN, w? * scale / dpi, h? * scale / dpi])
 }
 
 pub fn start(spec: AppSpec) -> Result<(), String> {
@@ -619,10 +819,19 @@ fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Doc
         for error in editor.poll() {
             post(Update::Message(error));
         }
-        let work = match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(work) => work,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        // the Studio connection is polled every 100 ms while there is one; without it the
+        // worker sleeps until there is work
+        let work = if editor.has_network() {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(work) => work,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(work) => work,
+                Err(_) => break,
+            }
         };
         match work {
             Work::Save(path, text) => {
@@ -682,9 +891,21 @@ fn parked(domain: u32) -> Option<Option<ParkedPanic>> {
             message: json.get("message").map_or("", |j| j.str()).into(),
             location: json.get("location").map_or("", |j| j.str()).into(),
             choices,
+            stale: json.get("kind").is_some_and(|k| k.str() == "stale access"),
         }));
     }
     Some(None)
+}
+
+impl Work {
+    /// What the work is, for the log.
+    fn kind(&self) -> String {
+        match self {
+            Work::Save(path, _) => format!("a save of {}", path.display()),
+            Work::OpenFile { .. } => "an open-file request".into(),
+            Work::Resume { .. } => "a resume".into(),
+        }
+    }
 }
 
 fn enqueue(queue: &mut VecDeque<Work>, work: Work) {
@@ -711,7 +932,7 @@ fn pump(
     mut host: HostWindow,
     mut data: State,
     history: History,
-    geometry_path: PathBuf,
+    geometry_path: Option<PathBuf>,
     package_dir: PathBuf,
     document: Document,
     ready: std::sync::mpsc::SyncSender<Result<(), String>>,
@@ -751,15 +972,23 @@ fn pump(
     let mut diagnostics_dirty = true;
     let mut document_errors = Vec::new();
     let mut saved_geometry = None;
+    // the geometry last seen and since when: saved once it has held still (not every frame of
+    // a drag, a resize or a window animation, which kept the action worker full)
+    let mut settling_geometry: Option<([f32; 4], Instant)> = None;
     let mut next_frame = Instant::now();
     let mut next_status = Instant::now();
     let mut dirty = true;
     let mut stage = Stage::Running;
-    let mut loader = Loader::Hidden;
-    let mut loader_shows = 0u32;
+    let ring = ring_on();
+    // the run's inspect view (the halted view over the app without a stop): opened by
+    // `makepad inspect <app> session view open` (the JIT ring is display only)
+    let mut inspect_open = false;
+    // what the view over the app showed last (its `session view` answer and the log line)
+    let mut view_shown: Option<String> = None;
+    relax_compiler::inspect::run_view::set_wake(|| Hal::global().wake_session(HOST));
     let mut warm_up_at: Option<Instant> = None;
-    // MAKEPAD_RUN_POSTFRAME_LOG (the responsiveness trace): the JIT loader's comings and goings too
-    let trace_loader = std::env::var_os("MAKEPAD_RUN_POSTFRAME_LOG").is_some();
+    // MAKEPAD_RUN_POSTFRAME_LOG (the responsiveness trace): the JIT ring's UI blocks too
+    let mut watch = Watch::new(std::env::var_os("MAKEPAD_RUN_POSTFRAME_LOG").is_some());
     relax_compiler::postframe::on_ui_wait(ui_wait_began);
     loop {
         let (domain, window, relaunch, baseline, pending, stopping, initial_failed) = {
@@ -795,7 +1024,6 @@ fn pump(
             match update {
                 Update::Begin { warm } => {
                     stage = Stage::Running;
-                    loader = Loader::Hidden;
                     progress.reset();
                     data.phase = Phase::Resolve;
                     data.done = None;
@@ -996,16 +1224,22 @@ fn pump(
             lent_to_app = lent == domain && domain != 0 && !stopping && !pending;
             app_frame = borrower_frame && lent == domain && domain != 0 && !stopping && !pending;
             may_present = !borrower_frame || lent == 0;
-            if saved_geometry != Some(geom)
-                && geom.iter().all(|v| v.is_finite())
-                && geom[2] > 0.0
-                && geom[3] > 0.0
-            {
+            if settling_geometry.is_none_or(|(g, _)| g != geom) {
+                settling_geometry = Some((geom, Instant::now()));
+            }
+            let settled = settling_geometry.is_some_and(|(_, since)| since.elapsed() >= Duration::from_millis(500));
+            if let Some(path) = geometry_path.as_ref().filter(|_| {
+                settled
+                    && saved_geometry != Some(geom)
+                    && geom.iter().all(|v| v.is_finite())
+                    && geom[2] > 0.0
+                    && geom[3] > 0.0
+            }) {
                 saved_geometry = Some(geom);
                 enqueue(
                     &mut work_pending,
                     Work::Save(
-                        geometry_path.clone(),
+                        path.clone(),
                         format!("{} {} {} {}\n", geom[0], geom[1], geom[2], geom[3]),
                     ),
                 );
@@ -1041,6 +1275,21 @@ fn pump(
                 dirty = true;
             }
         }
+        match relax_compiler::inspect::run_view::take() {
+            Some(true) => {
+                inspect_open = true;
+                overlay_dismissed = false;
+                dirty = true;
+            }
+            Some(false) => {
+                overlay_dismissed = true;
+                if std::mem::take(&mut inspect_open) && data.domain.starts_with("JIT · ") {
+                    data.domain = "Running".into();
+                }
+                dirty = true;
+            }
+            None => {}
+        }
         // Errors reveal immediately. Otherwise a warm relaunch preserves the last app
         // image for 300 ms, then uses exactly the same document/context as cold boot.
         let overlay = has_window
@@ -1049,8 +1298,47 @@ fn pump(
             && (patch_failed
                 || action_failed
                 || failed
+                || inspect_open
                 || !document_errors.is_empty()
                 || data.parked.is_some());
+        // what the view over the app shows and why: `session view`, and a line when it changes
+        let why = overlay.then(|| {
+            if data.parked.as_ref().is_some_and(|p| p.stale) {
+                "paused on invalidated code"
+            } else if data.parked.is_some() {
+                "paused on a panic"
+            } else if failed {
+                "the app stopped"
+            } else if patch_failed {
+                "a live patch failed"
+            } else if action_failed {
+                "a run action failed"
+            } else if !document_errors.is_empty() {
+                "the boot document has errors"
+            } else {
+                "the inspect view (session view open)"
+            }
+        });
+        let shown = format!(
+            "\"over_app\":{},\"why\":{},\"dismissed\":{},\"pid\":{}",
+            overlay,
+            why.map_or("null".to_string(), |w| format!("\"{w}\"")),
+            overlay_dismissed,
+            std::process::id()
+        );
+        if view_shown.as_deref() != Some(shown.as_str()) {
+            let was_over = view_shown.as_deref().is_some_and(|v| v.starts_with("\"over_app\":true"));
+            match why {
+                Some(why) => eprintln!(
+                    "makepad-run: the run's view is over the app: {why}; Esc or `makepad inspect {} session view dismiss` dismisses it",
+                    std::process::id()
+                ),
+                None if was_over => eprintln!("makepad-run: the run's view is off the app"),
+                None => {}
+            }
+            relax_compiler::inspect::run_view::publish(shown.clone());
+            view_shown = Some(shown);
+        }
         let mode = if overlay { Mode::Overlay } else { Mode::Boot };
         if data.mode != mode {
             data.mode = mode;
@@ -1064,8 +1352,8 @@ fn pump(
                     || (active
                         && relaunch.is_none_or(|t| t.elapsed() >= Duration::from_millis(300)))));
         // the window layer (Metal): the boot field the app's first frames go under, the warm-up
-        // after its first present (until the JIT's readiness signal), then the JIT loader for later
-        // sustained UI-thread JIT waiting. An opaque overlay, a failure or a stop takes it away.
+        // after its first present (until the JIT's readiness signal). An opaque overlay, a failure
+        // or a stop takes it away. (Later JIT work shows in the JIT ring, below.)
         // the boot stage begins before the app has the window, once the field has presented
         // (its first frame then never reaches the window before the layer)
         let layers = host.layers() && !overlay && !failed && data.parked.is_none() && !stopping && !pending;
@@ -1103,70 +1391,38 @@ fn pump(
                 Some(LayerWant::WarmUp { done, queued })
             }
             Stage::Lift => Some(LayerWant::Ready),
-            Stage::Running if layers && lent_to_app && !active => {
-                use relax_compiler::postframe::{ui_idle_ns, ui_waited_within};
-                let waited_in = |ns| Duration::from_nanos(ui_waited_within(ns));
-                loader = match loader {
-                    Loader::Hidden => {
-                        let waited = waited_in(LOADER_WINDOW_NS);
-                        if waited >= LOADER_AFTER {
-                            loader_shows += 1;
-                            if trace_loader {
-                                eprintln!(
-                                    "makepad-run: jit loader #{} in ({:.0} ms waited in {} ms)",
-                                    loader_shows,
-                                    waited.as_secs_f64() * 1000.0,
-                                    LOADER_WINDOW_NS / 1_000_000
-                                );
-                            }
-                            Loader::Shown(Instant::now())
-                        } else {
-                            if UI_WAIT_ARMED.load(Ordering::Acquire) {
-                                // look again when the waiting would be sustained; once the UI
-                                // thread is not waiting the window disarms (the next wait's hook
-                                // wakes it)
-                                if ui_idle_ns() > 0 {
-                                    UI_WAIT_ARMED.store(false, Ordering::Release);
-                                } else {
-                                    wake_in = Some(LOADER_AFTER - waited);
-                                }
-                            }
-                            Loader::Hidden
-                        }
-                    }
-                    Loader::Shown(at) if at.elapsed() >= LOADER_MIN && waited_in(LOADER_QUIET_NS) < LOADER_TRICKLE => {
-                        Loader::Going(at)
-                    }
-                    Loader::Going(at) if host.layer_done() => {
-                        if trace_loader {
-                            eprintln!(
-                                "makepad-run: jit loader #{} out after {:.0} ms",
-                                loader_shows,
-                                at.elapsed().as_secs_f64() * 1000.0
-                            );
-                        }
-                        Loader::Hidden
-                    }
-                    loader => loader,
-                };
-                match loader {
-                    Loader::Hidden => None,
-                    Loader::Shown(_) => Some(LayerWant::Loader {
-                        shown: true,
-                        busy: true,
-                    }),
-                    Loader::Going(_) => Some(LayerWant::Loader {
-                        shown: false,
-                        busy: waited_in(LOADER_BUSY_NS) >= LOADER_TRICKLE,
-                    }),
-                }
-            }
-            Stage::Running => {
-                loader = Loader::Hidden;
-                None
-            }
+            Stage::Running => None,
         };
         host.layer(want, app_frames);
+        // the JIT ring while the app runs: the JIT's work in flight, a UI block, what the program
+        // is stopped on (while it is)
+        let running = ring && stage == Stage::Running && lent_to_app && !active && !failed;
+        let alert = data
+            .parked
+            .as_ref()
+            .map(|p| if p.stale { RingAlert::Stale } else { RingAlert::Panic })
+            .or_else(|| rebuild_failed().then_some(RingAlert::RebuildFailed));
+        if running && host.badges() {
+            let want = watch.look(host.dump_ms()).filter(|_| data.parked.is_none());
+            if inspect_open {
+                let summary = format!("JIT · {}", relax_boot::ring_summary(want, None));
+                if data.domain != summary && data.parked.is_none() && data.diagnostics.is_empty() {
+                    data.domain = summary;
+                    dirty = true;
+                }
+            }
+            let shown = host.ring(want, alert);
+            for wait in [shown, watch.block_wake(), Some(RING_LOOK)].into_iter().flatten() {
+                wake_in = Some(wake_in.map_or(wait, |w: Duration| w.min(wait)));
+            }
+        } else if let Some(wait) = host.ring(None, None) {
+            // a ring fading out
+            wake_in = Some(wake_in.map_or(wait, |w: Duration| w.min(wait)));
+        }
+        if running && host.dumping() {
+            host.dump_app();
+            wake_in = Some(wake_in.map_or(RING_LOOK, |w: Duration| w.min(RING_LOOK)));
+        }
         let layered = host.layer_on();
         if active && (dirty || Instant::now() >= next_status) {
             progress.tick(&mut data);
@@ -1391,6 +1647,9 @@ fn pump(
                 }
                 Some(Action::Dismiss) if overlay => {
                     overlay_dismissed = true;
+                    if std::mem::take(&mut inspect_open) && data.domain.starts_with("JIT · ") {
+                        data.domain = "Running".into();
+                    }
                     dirty = true;
                 }
                 Some(Action::Select(index))
@@ -1400,6 +1659,7 @@ fn pump(
                     host.choose(selected);
                 }
                 Some(Action::Close) => close = true,
+                Some(action @ (Action::Minimize | Action::Maximize)) => host.window_control(action),
                 Some(Action::Cancel) if return_entry.is_some() => {
                     return_entry = None;
                     host.input(None);
@@ -1451,7 +1711,8 @@ fn pump(
                 Err(std::sync::mpsc::TrySendError::Full(work)) => {
                     if !work_full {
                         eprintln!(
-                            "makepad: run action worker busy; retaining work for a later frame"
+                            "makepad: run action worker busy; retaining {} for a later frame",
+                            work.kind()
                         );
                         work_full = true;
                     }
@@ -1512,7 +1773,4 @@ fn pump(
     if worker.join().is_err() {
         eprintln!("makepad: run action worker panicked");
     }
-    quit_trace("before_exit");
-    // nothing draws any more: the driver's threads run out before exit() unloads it
-    hal.before_exit();
 }

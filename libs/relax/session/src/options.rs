@@ -3,12 +3,38 @@
 //! compiler/rustc_session/src/options.rs:222-259 (whole-options dependency hash).
 use crate::sip::Sip128;
 
+/// The error inline assembly in crate `krate` gets under `--no-asm`.
+pub fn asm_blocked(krate: &str) -> String {
+    format!("inline assembly (asm!, global_asm!, naked_asm!) in crate `{}` is blocked by `--no-asm` (MAKEPAD_RUN_NO_ASM=1)", krate)
+}
+/// The error a program whose dependencies compile C gets without `--allow-c`.
+pub const C_GATE: &str = "is built only with `--allow-c` (or MAKEPAD_RUN_ALLOW_C=1): cargo and the system C compiler build it, and its library is linked into the run";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Borrowck { Off, Moves, Full }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BorrowckAll { Default, Nongeneric, Std, All }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CheckTarget { Host, MacosArm64, LinuxX64, WindowsX64, AndroidArm64, Web }
+pub enum CheckTarget { Host, MacosArm64, LinuxX64, WindowsX64, AndroidArm64, Web(PtrWidth) }
+/// The web target's pointer width, a parameter of the target (`wasm32-unknown-unknown` /
+/// `wasm64-unknown-unknown`): usize, isize and pointers are 4 or 8 bytes, every layout is rustc's
+/// for that triple, and the trace host runs the program in that mode (32: pointers are offsets into
+/// the linear memory's window; 64: native pointers inside it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PtrWidth { W32, W64 }
+/// Thread profile of a web target. The default wasm target and exported pages are
+/// single-threaded; cargo-makepad-style checks opt into atomics explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebThreads { Off, On }
+impl PtrWidth {
+    /// size_of::<usize>() (and of a thin pointer)
+    pub fn bytes(self) -> u32 {
+        match self {
+            PtrWidth::W32 => 4,
+            PtrWidth::W64 => 8,
+        }
+    }
+}
 impl CheckTarget {
     /// The targets Relax runs on (and checks for), by triple: `MAKEPAD_RUN_CHECK_TARGET` and `makepad host-gen`.
     pub const TRIPLES: [(&'static str, CheckTarget); 4] = [
@@ -17,14 +43,25 @@ impl CheckTarget {
         ("x86_64-pc-windows-gnu", CheckTarget::WindowsX64),
         ("aarch64-linux-android", CheckTarget::AndroidArm64),
     ];
-    /// The web target (`wasm32-unknown-unknown`): the program's crates are read as a web build
-    /// reads them (cfg(target_arch = "wasm32"), the web platform backend) and run by this
-    /// machine's JIT; std stays the machine's (the trace host, `makepad-web-trace`). Not a
-    /// host-gen target.
-    pub const WEB_TRIPLE: &'static str = "wasm32-unknown-unknown";
+    /// The web targets, by pointer width: the program's crates are read as a web build reads
+    /// them (cfg(target_family = "wasm"), the web platform backend), every layout is rustc's for
+    /// the triple, and this machine's JIT runs them in the trace host (`makepad-web-trace`). Not
+    /// host-gen targets.
+    pub const WEB_TRIPLES: [(&'static str, PtrWidth); 2] = [("wasm32-unknown-unknown", PtrWidth::W32), ("wasm64-unknown-unknown", PtrWidth::W64)];
+    /// The web target's pointer width, None for the native targets.
+    pub fn web(self) -> Option<PtrWidth> {
+        match self {
+            CheckTarget::Web(w) => Some(w),
+            _ => None,
+        }
+    }
+    /// The triple of a web target.
+    pub fn web_triple(w: PtrWidth) -> &'static str {
+        Self::WEB_TRIPLES.iter().find(|(_, x)| *x == w).unwrap().0
+    }
     pub fn from_triple(triple: &str) -> Option<CheckTarget> {
-        if triple == Self::WEB_TRIPLE {
-            return Some(CheckTarget::Web);
+        if let Some((_, w)) = Self::WEB_TRIPLES.iter().find(|(t, _)| *t == triple) {
+            return Some(CheckTarget::Web(*w));
         }
         Self::TRIPLES.iter().find(|(t, _)| *t == triple).map(|(_, c)| *c)
     }
@@ -48,15 +85,20 @@ pub enum AheadLevel {
     Minimal,
     /// the default: a bounded, prioritised compile-ahead of what the UI is about to need
     Balanced,
-    /// a background AOT pass at worker priority: everything reachable from what ran
-    Aot,
+    /// a background AOT pass at worker priority: everything reachable from what ran, on every
+    /// worker the policy allows
+    AotMax,
+    /// the same coverage as AotMax, slowly: few workers, every background compile thread in the
+    /// OS's background class (macOS QOS_CLASS_BACKGROUND on efficiency cores, Linux SCHED_IDLE,
+    /// Windows EcoQoS); left running a few minutes, the warm cache then holds all of it
+    AotMin,
 }
 impl AheadLevel {
     pub fn name(self) -> &'static str {
-        match self { AheadLevel::Minimal => "minimal", AheadLevel::Balanced => "balanced", AheadLevel::Aot => "aot" }
+        match self { AheadLevel::Minimal => "minimal", AheadLevel::Balanced => "balanced", AheadLevel::AotMax => "aot-max", AheadLevel::AotMin => "aot-min" }
     }
     pub fn parse(v: &str) -> Option<AheadLevel> {
-        match v { "minimal" => Some(AheadLevel::Minimal), "balanced" => Some(AheadLevel::Balanced), "aot" => Some(AheadLevel::Aot), _ => None }
+        match v { "minimal" => Some(AheadLevel::Minimal), "balanced" => Some(AheadLevel::Balanced), "aot-max" => Some(AheadLevel::AotMax), "aot-min" => Some(AheadLevel::AotMin), _ => None }
     }
 }
 
@@ -72,6 +114,9 @@ pub struct CpuFeatures {
     pub fma: bool,
     /// AVX2 next to AVX: per-lane variable vector shifts (vpsllv*, vpsrlv*, vpsravd)
     pub avx2: bool,
+    /// AVX-512F + AVX-512VL (OS-enabled): EVEX encodings reach xmm16..xmm31, so the register
+    /// allocator gets 16 more float/vector registers (x64 reg_config)
+    pub avx512: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -80,12 +125,22 @@ pub struct Options {
     pub verbose: bool,
     /// `MAKEPAD_RUN_CHECK_WINDOWS`; default `false`.
     pub check_windows: bool,
+    /// `--no-asm` / `MAKEPAD_RUN_NO_ASM=1` (sandboxed uses): `asm!`, `global_asm!` and
+    /// `naked_asm!` are an error naming the crate and the flag. Default `false`: inline assembly
+    /// is assembled (backend asm).
+    pub no_asm: bool,
+    /// `--allow-c` / `MAKEPAD_RUN_ALLOW_C=1`: dependencies whose build script compiles C are built
+    /// by cargo and the system C compiler and linked in (front native.rs); without it they are an
+    /// error naming the flag. Default `false`.
+    pub allow_c: bool,
     /// `MAKEPAD_RUN_GATHER`; default `false`.
     pub gather: bool,
     /// `MAKEPAD_RUN_MEMCONST`; default `false`.
     pub memconst: bool,
     /// `MAKEPAD_RUN_NO_AVX`; default `false`.
     pub no_avx: bool,
+    /// `MAKEPAD_RUN_NO_AVX512`; default `false`: no xmm16..31 (CpuFeatures::avx512).
+    pub no_avx512: bool,
     /// `MAKEPAD_RUN_NO_BITOPS`; default `false`.
     pub no_bitops: bool,
     /// `MAKEPAD_RUN_NO_BLOCK_FREQ`; default `false`.
@@ -162,8 +217,6 @@ pub struct Options {
     pub sandbox_fuel: bool,
     /// `MAKEPAD_RUN_SPEC`; default `true`.
     pub spec: bool,
-    /// `MAKEPAD_RUN_SPEC_YIELD`; default `true`.
-    pub spec_yield: bool,
     /// `MAKEPAD_RUN_O3`; default `true`.
     pub tier1: bool,
     /// `MAKEPAD_RUN_TYCK_AHEAD`; default `true`.
@@ -212,7 +265,8 @@ pub struct Options {
     pub spec_hot_from: u8,
     /// `MAKEPAD_RUN_SPEC_TTL_MS`; default `2000`.
     pub spec_ttl_ms: u64,
-    /// `MAKEPAD_RUN_O3_CALLS`; default `2000`.
+    /// `MAKEPAD_RUN_O3_CALLS`; default `2000`: the O3 threshold as the decayed cost of this many
+    /// calls of a small fn (jit.rs Tier1Cfg).
     pub tier1_calls: u64,
     /// `MAKEPAD_RUN_CORE_HINT`; default `None`.
     pub core_hint: Option<bool>,
@@ -236,6 +290,8 @@ pub struct Options {
     pub borrowck_all: BorrowckAll,
     /// `MAKEPAD_RUN_CHECK_TARGET`; default `CheckTarget::Host`.
     pub check_target: CheckTarget,
+    /// `MAKEPAD_RUN_WEB_THREADS=1` selects atomics; the default is rustc's unthreaded wasm cfg.
+    pub web_threads: WebThreads,
     /// `MAKEPAD_RUN_CTFE`; default `Ctfe::On`.
     pub ctfe: Ctfe,
     /// Set by `makepad check` only: loops count their iterations while a constant is evaluated,
@@ -248,9 +304,20 @@ pub struct Options {
     pub ra_prio: Priority,
     /// `MAKEPAD_RUN_RA_ORDER`; default `false`.
     pub ra_order: bool,
+    /// `MAKEPAD_RUN_RA_QUICK_COALESCE`; default `false`: the quick allocation round (no live-range
+    /// splitting) also coalesces copies. Compute kernels set it.
+    pub ra_quick_coalesce: bool,
+    /// `MAKEPAD_RUN_NAN_EXACT`; default `false`: float identities that would return a NaN operand
+    /// unquieted (`x * 1.0`, `x / 1.0`, `x - 0.0`, `x + -0.0` -> x; the hardware op quiets a
+    /// signaling NaN) stay ops. Compute kernels set it: their results are bit-specified (the
+    /// interpreter's), and Rust leaves the payload unspecified, so Relax's tiers fold them.
+    pub nan_exact: bool,
     /// `MAKEPAD_RUN_SPEC_ORDER`; default `false`.
     pub spec_order: bool,
-    /// `MAKEPAD_RUN_O3_PROFILE`; default `None`.
+    /// `MAKEPAD_RUN_O3_PROFILE`; default `None`. Deterministic O3: a missing/empty file records the
+    /// run's O3 decisions (each installed build's inputs and inline set), a recorded one replays them
+    /// strictly (only its slots build O3 code, each once at its first call; its O2 slots get O2 builds);
+    /// both runs are check-first and have no baseline tier (MAKEPAD_RUN_O1=0).
     pub tier1_profile: Option<std::ffi::OsString>,
     /// Profile replay contents frozen by the driver, separately from its environment path.
     pub tier1_profile_data: Option<String>,
@@ -267,9 +334,12 @@ impl Default for Options {
         Self {
             verbose: false,
             check_windows: false,
+            no_asm: false,
+            allow_c: false,
             gather: false,
             memconst: false,
             no_avx: false,
+            no_avx512: false,
             no_bitops: false,
             no_block_freq: false,
             no_bmi2: false,
@@ -306,7 +376,6 @@ impl Default for Options {
             pre_derives: true,
             sandbox_fuel: true,
             spec: true,
-            spec_yield: true,
             tier1: true,
             tyck_ahead: true,
             unwind: true,
@@ -340,11 +409,14 @@ impl Default for Options {
             borrowck: Borrowck::Full,
             borrowck_all: BorrowckAll::Default,
             check_target: CheckTarget::Host,
+            web_threads: WebThreads::Off,
             ctfe: Ctfe::On,
             const_fuel: false,
             freq_mode: Frequency::Blend,
             ra_prio: Priority::References,
             ra_order: false,
+            ra_quick_coalesce: false,
+            nan_exact: false,
             spec_order: false,
             tier1_profile: None,
             tier1_profile_data: None,
@@ -372,9 +444,12 @@ impl Options {
         Self {
             verbose: get("MAKEPAD_RUN_VERBOSE").is_some_and(|v| v == "1"),
             check_windows: { let os = get("MAKEPAD_RUN_CHECK_WINDOWS"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
+            no_asm: get("MAKEPAD_RUN_NO_ASM").is_some_and(|v| v == "1"),
+            allow_c: get("MAKEPAD_RUN_ALLOW_C").is_some_and(|v| v == "1"),
             gather: { let os = get("MAKEPAD_RUN_GATHER"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
             memconst: { let os = get("MAKEPAD_RUN_MEMCONST"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
             no_avx: { let os = get("MAKEPAD_RUN_NO_AVX"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
+            no_avx512: { let os = get("MAKEPAD_RUN_NO_AVX512"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
             no_bitops: { let os = get("MAKEPAD_RUN_NO_BITOPS"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
             no_block_freq: { let os = get("MAKEPAD_RUN_NO_BLOCK_FREQ"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
             no_bmi2: { let os = get("MAKEPAD_RUN_NO_BMI2"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
@@ -420,7 +495,6 @@ impl Options {
             pre_derives: { let os = get("MAKEPAD_RUN_PRE_DERIVES"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             sandbox_fuel: { let os = get("MAKEPAD_RUN_SANDBOX_FUEL"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             spec: { let os = get("MAKEPAD_RUN_SPEC"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
-            spec_yield: { let os = get("MAKEPAD_RUN_SPEC_YIELD"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             tier1: { let os = get("MAKEPAD_RUN_O3"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") && !get("MAKEPAD_RUN_NO_CODEGEN").is_some_and(|v| !v.is_empty() && v != "0") },
             tyck_ahead: { let os = get("MAKEPAD_RUN_TYCK_AHEAD"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             unwind: { let os = get("MAKEPAD_RUN_UNWIND"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
@@ -454,11 +528,14 @@ impl Options {
             borrowck: { let os = get("MAKEPAD_RUN_BORROWCK"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("off") => Borrowck::Off, Some("moves") => Borrowck::Moves, _ => Borrowck::Full } },
             borrowck_all: { let os = get("MAKEPAD_RUN_BORROWCK_ALL"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("nongeneric") => BorrowckAll::Nongeneric, None => BorrowckAll::Default, Some("std") => BorrowckAll::Std, _ => BorrowckAll::All } },
             check_target: { let os = get("MAKEPAD_RUN_CHECK_TARGET"); let v = os.and_then(|v| v.into_string().ok()); CheckTarget::from_triple(v.as_deref().unwrap_or("")).unwrap_or(CheckTarget::Host) },
+            web_threads: if get("MAKEPAD_RUN_WEB_THREADS").as_deref() == Some(std::ffi::OsStr::new("1")) { WebThreads::On } else { WebThreads::Off },
             const_fuel: false,
             ctfe: { let os = get("MAKEPAD_RUN_CTFE"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("0") => Ctfe::Off, Some("check") => Ctfe::Check, _ => Ctfe::On } },
             freq_mode: { let os = get("MAKEPAD_RUN_FREQ_MODE"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("sampled") => Frequency::Sampled, Some("static") => Frequency::Static, _ => Frequency::Blend } },
             ra_prio: { let os = get("MAKEPAD_RUN_RA_PRIO"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("len") => Priority::Length, Some("sqrt") => Priority::Sqrt, _ => Priority::References } },
             ra_order: { let os = get("MAKEPAD_RUN_RA_ORDER"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() == Some("start") },
+            ra_quick_coalesce: { let os = get("MAKEPAD_RUN_RA_QUICK_COALESCE"); os.is_some() },
+            nan_exact: { let os = get("MAKEPAD_RUN_NAN_EXACT"); os.is_some() },
             spec_order: { let os = get("MAKEPAD_RUN_SPEC_ORDER"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() == Some("lifo") },
             tier1_profile: { let os = get("MAKEPAD_RUN_O3_PROFILE"); os },
             tier1_profile_data: None,
@@ -473,10 +550,14 @@ impl Options {
         let Self {
             // Logging does not change compiled code or invalidate warm caches.
             verbose: _,
+            // which dependencies cargo builds does not change the code Relax compiles from them
+            allow_c: _,
             check_windows,
+            no_asm,
             gather,
             memconst,
             no_avx,
+            no_avx512,
             no_bitops,
             no_block_freq,
             no_bmi2,
@@ -513,7 +594,6 @@ impl Options {
             pre_derives,
             sandbox_fuel,
             spec,
-            spec_yield,
             tier1,
             tyck_ahead,
             unwind,
@@ -547,11 +627,14 @@ impl Options {
             borrowck,
             borrowck_all,
             check_target,
+            web_threads,
             ctfe,
             const_fuel,
             freq_mode,
             ra_prio,
             ra_order,
+            ra_quick_coalesce,
+            nan_exact,
             spec_order,
             tier1_profile,
             tier1_profile_data, cfgs, target, cpu,
@@ -560,12 +643,16 @@ impl Options {
         h.str("relax-options-v1");
         h.str("check_windows");
         h.u8(*check_windows as u8);
+        h.str("no_asm");
+        h.u8(*no_asm as u8);
         h.str("gather");
         h.u8(*gather as u8);
         h.str("memconst");
         h.u8(*memconst as u8);
         h.str("no_avx");
         h.u8(*no_avx as u8);
+        h.str("no_avx512");
+        h.u8(*no_avx512 as u8);
         h.str("no_bitops");
         h.u8(*no_bitops as u8);
         h.str("no_block_freq");
@@ -638,8 +725,6 @@ impl Options {
         h.u8(*sandbox_fuel as u8);
         h.str("spec");
         h.u8(*spec as u8);
-        h.str("spec_yield");
-        h.u8(*spec_yield as u8);
         h.str("o3");
         h.u8(*tier1 as u8);
         h.str("tyck_ahead");
@@ -706,8 +791,18 @@ impl Options {
         h.u8(*borrowck as u8);
         h.str("borrowck_all");
         h.u8(*borrowck_all as u8);
+        h.str("web_threads");
+        h.u8(if *web_threads == WebThreads::On { 1 } else { 0 });
         h.str("check_target");
-        h.u8(*check_target as u8);
+        h.u8(match *check_target {
+            CheckTarget::Host => 0,
+            CheckTarget::MacosArm64 => 1,
+            CheckTarget::LinuxX64 => 2,
+            CheckTarget::WindowsX64 => 3,
+            CheckTarget::AndroidArm64 => 4,
+            CheckTarget::Web(PtrWidth::W32) => 5,
+            CheckTarget::Web(PtrWidth::W64) => 6,
+        });
         h.str("ctfe");
         h.u8(*ctfe as u8);
         h.str("const_fuel");
@@ -718,14 +813,21 @@ impl Options {
         h.u8(*ra_prio as u8);
         h.str("ra_order");
         h.u8(*ra_order as u8);
+        h.str("ra_quick_coalesce");
+        h.u8(*ra_quick_coalesce as u8);
+        // (only when set: the default key stays the key it was before the option existed)
+        if *nan_exact {
+            h.str("nan_exact");
+            h.u8(1);
+        }
         h.str("spec_order");
         h.u8(*spec_order as u8);
         h.str("o3_profile");
         match tier1_profile { Some(v) => { h.u8(1); h.u64(v.as_encoded_bytes().len() as u64); h.write(v.as_encoded_bytes()); }, None => h.u8(0) }
         match tier1_profile_data { Some(v) => { h.u8(1); h.str(v); }, None => h.u8(0) }
         h.str(target);
-        let CpuFeatures { avx, bmi2, popcnt, lzcnt, bmi1, fma, avx2 } = cpu;
-        for b in [avx, bmi2, popcnt, lzcnt, bmi1, fma, avx2] { h.u8(*b as u8); }
+        let CpuFeatures { avx, bmi2, popcnt, lzcnt, bmi1, fma, avx2, avx512 } = cpu;
+        for b in [avx, bmi2, popcnt, lzcnt, bmi1, fma, avx2, avx512] { h.u8(*b as u8); }
         h.finish128()
     }
 }
@@ -760,8 +862,9 @@ pub struct RuntimeOptions {
     pub settle_drop: bool,
     /// `MAKEPAD_RUN_BURST_ARENA`; default `true`.
     pub burst_arena: bool,
-    /// `MAKEPAD_RUN_O3_ADAPTIVE`; default `false`.
-    pub tier1_adaptive: bool,
+    /// `MAKEPAD_RUN_O3_BURST` (`0`: off, for A/Bs); default `true`: after the first present, while the O3
+    /// queue is not trivial, more O3 workers run (every performance core but one) until it drains.
+    pub tier1_burst: bool,
     /// `MAKEPAD_RUN_MODULE_FUEL`; default `4_000_000_000`.
     pub module_fuel: i64,
     /// `MAKEPAD_RUN_MODULE_MEM_MB`; default `256`.
@@ -798,7 +901,7 @@ impl Default for RuntimeOptions {
             mem_trim: true,
             settle_drop: true,
             burst_arena: true,
-            tier1_adaptive: false,
+            tier1_burst: true,
             module_fuel: 4_000_000_000,
             module_mem_mb: 256,
             repeat: 1,
@@ -840,7 +943,7 @@ impl RuntimeOptions {
             mem_trim: { let os = get("MAKEPAD_RUN_MEM_TRIM"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             settle_drop: { let os = get("MAKEPAD_RUN_SETTLE_DROP"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             burst_arena: { let os = get("MAKEPAD_RUN_BURST_ARENA"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
-            tier1_adaptive: { let os = get("MAKEPAD_RUN_O3_ADAPTIVE"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() == Some("1") },
+            tier1_burst: { let os = get("MAKEPAD_RUN_O3_BURST"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             module_fuel: { let os = get("MAKEPAD_RUN_MODULE_FUEL"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(4_000_000_000) },
             module_mem_mb: { let os = get("MAKEPAD_RUN_MODULE_MEM_MB"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(256) },
             repeat: { let os = get("MAKEPAD_RUN_REPEAT"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(1) },

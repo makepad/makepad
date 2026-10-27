@@ -192,6 +192,19 @@ fn is_emoji_approx(c: char) -> bool {
 
 const NUMBER_SUFFIXES: &[&str] = &["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f16", "f32", "f64", "f128"];
 
+/// rustc_session errors.rs fix_base_capitalisation: the suffix of a `0` is `B`/`O`/`X` and digits of that base.
+fn fix_base_capitalisation(suffix: &str) -> bool {
+    let mut chars = suffix.chars();
+    let base = match chars.next() { Some('B') => 2, Some('O') => 8, Some('X') => 16, _ => return false };
+    chars.filter(|c| *c != '_').take_while(|c| *c != 'i' && *c != 'u').all(|c| c.to_digit(base).is_some())
+}
+
+/// The checks rustc makes when the parser cooks a number literal (its suffix and value), for a
+/// literal the token-level validation skipped (macro arguments the parser consumes later).
+pub fn cooked_number(text: &[u8], float: bool) -> Result<(), String> {
+    number(text, 0, text.len(), float, true).map_err(|e| e.1.into_owned())
+}
+
 fn number(src: &[u8], lo: usize, hi: usize, float: bool, parse_level: bool) -> Result<(), VErr> {
     let b = &src[lo..hi];
     // the digits of the literal (suffix excluded) and, for an integer, its value
@@ -252,6 +265,10 @@ fn number(src: &[u8], lo: usize, hi: usize, float: bool, parse_level: bool) -> R
     // (an integer's digits are all the literal holds before the suffix)
     let suffix = std::str::from_utf8(&b[body_end..]).unwrap_or("?");
     if parse_level && !suffix.is_empty() && !NUMBER_SUFFIXES.contains(&suffix) {
+        // rustc_session report_lit_error: `0X1F` is a capitalised base prefix (fix_base_capitalisation)
+        if !float && &b[..body_end] == b"0" && fix_base_capitalisation(suffix) {
+            return err(lo, "invalid base prefix for number literal");
+        }
         return err(lo + body_end, format!("invalid suffix `{suffix}` for {} literal", if float { "float" } else { "number" }));
     }
     if parse_level && !float {

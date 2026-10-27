@@ -25,11 +25,9 @@ pub mod wasm;
 
 // The language, IR, interpreter and native backends are the Splash compute
 // core's; audio is one of its front ends.
-#[cfg(target_arch = "aarch64")]
-pub use makepad_script_compute::arm64;
-/// The host's native backend (compute's own on AArch64, the shared back end on x86-64).
+/// The host's native backend (the shared back end, both targets).
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-use makepad_script_compute::host_native;
+use makepad_script_compute::native;
 pub use makepad_script_compute::{ir, lower, parse, Backend, ShaderError};
 
 pub use guide::GUIDE;
@@ -84,7 +82,7 @@ pub struct AudioShaderBody {
     shared: Box<[u32]>,
     render: ir::Program,
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    native: Option<host_native::Code>,
+    native: Option<native::Code>,
     /// [`AudioShaderBody::program_key`], computed on first use.
     key: std::sync::OnceLock<u64>,
 }
@@ -174,7 +172,7 @@ pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Bac
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         {
             if native_ok {
-                if let Some(code) = host_native::compile(init) {
+                if let Some(code) = native::compile(init) {
                     // SAFETY: `shared` is this init's own table vector.
                     unsafe { code.run(&mut ctx, &mut state, shared.as_mut_ptr(), [&zeros, &zeros], [&mut o0, &mut o1], 1) };
                 } else {
@@ -191,7 +189,7 @@ pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Bac
         }
     }
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    let native = if native_ok { host_native::compile(&lowered.render) } else { None };
+    let native = if native_ok { native::compile(&lowered.render) } else { None };
     let (params, state_vars) = (lowered.params, lowered.state_vars);
     let state_init = lowered.state_init.into_boxed_slice();
     // SAFETY (all four views): the names and boxes they borrow belong to the

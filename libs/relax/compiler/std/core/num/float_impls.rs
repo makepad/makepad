@@ -45,7 +45,7 @@ impl f64 {
     pub const fn ceil(self) -> f64 { unsafe { intrinsics::ceil_f64(self) } }
     pub const fn trunc(self) -> f64 { unsafe { intrinsics::trunc_f64(self) } }
     pub const fn round_ties_even(self) -> f64 { unsafe { intrinsics::rint_f64(self) } }
-    pub const fn round(self) -> f64 { unsafe { libm::round(self) } }
+    pub const fn round(self) -> f64 { unsafe { intrinsics::round_f64(self) } }
     pub const fn fract(self) -> f64 { self - self.trunc() }
     pub const fn min(self, other: f64) -> f64 { unsafe { intrinsics::fmin_f64(self, other) } }
     pub const fn max(self, other: f64) -> f64 { unsafe { intrinsics::fmax_f64(self, other) } }
@@ -56,7 +56,7 @@ impl f64 {
     pub const fn mul_add(self, a: f64, b: f64) -> f64 { unsafe { if intrinsics::fma_native() { intrinsics::fma_f64(self, a, b) } else { libm::fma(self, a, b) } } }
     pub fn div_euclid(self, rhs: f64) -> f64 { let q = (self / rhs).trunc(); if self % rhs < 0.0 { return if rhs > 0.0 { q - 1.0 } else { q + 1.0 }; } q }
     pub fn rem_euclid(self, rhs: f64) -> f64 { let r = self % rhs; if r < 0.0 { r + rhs.abs() } else { r } }
-    pub fn powi(self, n: i32) -> f64 { if n == 2 { return self * self; } if n == 3 { return self * (self * self); } if n == -1 { return 1.0 / self; } if n == -2 { return 1.0 / (self * self); } if n == 4 { let a = self * self; return a * a; } let recip = n < 0; let mut b = n; let mut a = self; let mut r: f64 = 1.0; loop { if (b & 1) != 0 { r *= a; } b /= 2; if b == 0 { break; } a *= a; } if recip { 1.0 / r } else { r } }
+    pub fn powi(self, n: i32) -> f64 { if n == 2 { return self * self; } if n == 3 { return self * (self * self); } if n == -1 { return 1.0 / self; } if n == -2 { return 1.0 / (self * self); } if n == 4 { let a = self * self; return a * a; } let recip = n < 0; let mut b: u32 = if n < 0 { !(n as u32) + 1 } else { n as u32 }; let mut a = self; let mut r: f64 = 1.0; loop { if (b & 1) != 0 { r *= a; } b >>= 1; if b == 0 { break; } a *= a; } if recip { 1.0 / r } else { r } }
     pub fn powf(self, n: f64) -> f64 { unsafe { libm::pow(self, n) } }
     pub fn exp(self) -> f64 { unsafe { libm::exp(self) } }
     pub fn exp2(self) -> f64 { unsafe { libm::exp2(self) } }
@@ -93,6 +93,7 @@ impl f64 {
     pub const fn from_be_bytes(b: [u8; 8]) -> f64 { f64::from_bits(u64::from_be_bytes(b)) }
     pub const fn from_ne_bytes(b: [u8; 8]) -> f64 { f64::from_bits(u64::from_ne_bytes(b)) }
     pub const fn midpoint(self, other: f64) -> f64 { ((self as f64 + other as f64) / 2.0) as f64 }
+    pub unsafe fn to_int_unchecked<Int>(self) -> Int where Self: crate::convert::FloatToInt<Int> { unsafe { crate::convert::FloatToInt::<Int>::to_int_unchecked(self) } }
 }
 
 #[cfg(not(relax_check))]
@@ -133,7 +134,7 @@ impl f32 {
     pub const fn ceil(self) -> f32 { unsafe { intrinsics::ceil_f32(self) } }
     pub const fn trunc(self) -> f32 { unsafe { intrinsics::trunc_f32(self) } }
     pub const fn round_ties_even(self) -> f32 { unsafe { intrinsics::rint_f32(self) } }
-    pub const fn round(self) -> f32 { unsafe { libm::roundf(self) } }
+    pub const fn round(self) -> f32 { unsafe { intrinsics::round_f32(self) } }
     pub const fn fract(self) -> f32 { self - self.trunc() }
     pub const fn min(self, other: f32) -> f32 { unsafe { intrinsics::fmin_f32(self, other) } }
     pub const fn max(self, other: f32) -> f32 { unsafe { intrinsics::fmax_f32(self, other) } }
@@ -144,7 +145,7 @@ impl f32 {
     pub const fn mul_add(self, a: f32, b: f32) -> f32 { unsafe { if intrinsics::fma_native() { intrinsics::fma_f32(self, a, b) } else { libm::fmaf(self, a, b) } } }
     pub fn div_euclid(self, rhs: f32) -> f32 { let q = (self / rhs).trunc(); if self % rhs < 0.0 { return if rhs > 0.0 { q - 1.0 } else { q + 1.0 }; } q }
     pub fn rem_euclid(self, rhs: f32) -> f32 { let r = self % rhs; if r < 0.0 { r + rhs.abs() } else { r } }
-    pub fn powi(self, n: i32) -> f32 { if n == 2 { return self * self; } if n == 3 { return self * (self * self); } if n == -1 { return 1.0 / self; } if n == -2 { return 1.0 / (self * self); } if n == 4 { let a = self * self; return a * a; } let recip = n < 0; let mut b = n; let mut a = self; let mut r: f32 = 1.0; loop { if (b & 1) != 0 { r *= a; } b /= 2; if b == 0 { break; } a *= a; } if recip { 1.0 / r } else { r } }
+    pub fn powi(self, n: i32) -> f32 { if n == 2 { return self * self; } if n == 3 { return self * (self * self); } if n == -1 { return 1.0 / self; } if n == -2 { return 1.0 / (self * self); } if n == 4 { let a = self * self; return a * a; } let recip = n < 0; let mut b: u32 = if n < 0 { !(n as u32) + 1 } else { n as u32 }; let mut a = self; let mut r: f32 = 1.0; loop { if (b & 1) != 0 { r *= a; } b >>= 1; if b == 0 { break; } a *= a; } if recip { 1.0 / r } else { r } }
     pub fn powf(self, n: f32) -> f32 { unsafe { libm::powf(self, n) } }
     pub fn exp(self) -> f32 { unsafe { libm::expf(self) } }
     pub fn exp2(self) -> f32 { unsafe { libm::exp2f(self) } }
@@ -181,5 +182,6 @@ impl f32 {
     pub const fn from_be_bytes(b: [u8; 4]) -> f32 { f32::from_bits(u32::from_be_bytes(b)) }
     pub const fn from_ne_bytes(b: [u8; 4]) -> f32 { f32::from_bits(u32::from_ne_bytes(b)) }
     pub const fn midpoint(self, other: f32) -> f32 { ((self as f64 + other as f64) / 2.0) as f32 }
+    pub unsafe fn to_int_unchecked<Int>(self) -> Int where Self: crate::convert::FloatToInt<Int> { unsafe { crate::convert::FloatToInt::<Int>::to_int_unchecked(self) } }
 }
 

@@ -43,20 +43,6 @@ thread_local! { static MY_SLOT: usize = NEXT_SLOT.fetch_add(1, Ordering::Relaxed
 /// Items that took long enough to list: (what, name, ms).
 static SLOW: relax_session::sync::Mutex<Vec<(&'static str, String, f64)>> = relax_session::sync::Mutex::new(Vec::new());
 
-pub(crate) struct ZoneTaken(Vec<(&'static str, String, f64)>);
-
-pub(crate) fn zone_take() -> ZoneTaken {
-    let mut slow = SLOW.lock().unwrap_or_else(|e| e.into_inner());
-    let taken = ZoneTaken(std::mem::take(&mut *slow));
-    #[cfg(test)]
-    assert!(slow.is_empty());
-    taken
-}
-
-pub(crate) fn zone_put_back(taken: ZoneTaken) {
-    let mut slow = SLOW.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *slow, taken.0));
-}
 /// The crate being loaded and when it started.
 static LOADING: relax_session::sync::Mutex<(String, f64)> = relax_session::sync::Mutex::new((String::new(), 0.0));
 
@@ -160,7 +146,9 @@ pub fn crate_begin(name: &str) {
         return;
     }
     crate_end();
-    *LOADING.lock().unwrap() = (name.to_string(), crate::clock::ms_since_process_start());
+    // process state (the status line reads it in any phase)
+    let name = crate::zone_alloc::kept_with(|| name.to_string());
+    *LOADING.lock().unwrap() = (name, crate::clock::ms_since_process_start());
 }
 
 pub fn crate_end() {
@@ -173,7 +161,8 @@ pub fn crate_end() {
         if VERBOSE_LIST.load(Ordering::Relaxed) {
             SLOW.lock().unwrap().push(("crate", std::mem::take(&mut g.0), ms));
         }
-        g.0.clear();
+        // (the buffer goes: no capacity of an old generation stays behind)
+        g.0 = String::new();
     }
 }
 
@@ -249,7 +238,6 @@ pub(crate) use unix::flush;
 mod unix {
     use super::*;
     use std::io::IsTerminal;
-    use std::os::fd::IntoRawFd;
     use std::os::unix::fs::OpenOptionsExt;
     use relax_session::sync::Mutex;
 
@@ -260,16 +248,50 @@ mod unix {
         fn read(fd: i32, buf: *mut u8, n: usize) -> isize;
         fn write(fd: i32, buf: *const u8, n: usize) -> isize;
         fn atexit(f: extern "C" fn()) -> i32;
+        fn pipe(fds: *mut i32) -> i32;
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        fn poll(fds: *mut PollFd, nfds: NfdsT, timeout: i32) -> i32;
     }
+    #[repr(C)]
+    struct PollFd { fd: i32, events: i16, revents: i16 }
+    #[cfg(target_os = "linux")]
+    type NfdsT = u64;
+    #[cfg(not(target_os = "linux"))]
+    type NfdsT = u32;
+    const POLLIN: i16 = 1;
+    const F_SETFD: i32 = 2;
+    const FD_CLOEXEC: i32 = 1;
+    const F_GETFL: i32 = 3;
+    const F_SETFL: i32 = 4;
+    #[cfg(target_os = "linux")]
+    const O_NONBLOCK: i32 = 0o4000;
+    #[cfg(not(target_os = "linux"))]
+    const O_NONBLOCK: i32 = 4;
+
+    // The program's fd 2 is the write end of a pipe, not the transcript file: a full disk
+    // (ENOSPC on a tmpfs TMPDIR, 235 on 10-23) must never fail the program's own stderr writes,
+    // which panic in std's eprintln!. The tee thread copies the pipe into the transcript
+    // (write errors drop that data) and into TEE for the display. The pipe only blocks a
+    // writer while the tee thread is behind, as any piped stderr does.
+    // Lock order: STATE, then READER, then TEE.
+    struct Reader {
+        /// read end of the pipe, O_NONBLOCK
+        fd: i32,
+        /// the transcript; None once the run is over
+        file: Option<std::fs::File>,
+    }
+    static READER: Mutex<Option<Reader>> = Mutex::new(None);
+    /// bytes read from the pipe that the display has not taken yet
+    static TEE: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+    /// the real stderr, for the panic hook when the display is busy
+    static OUT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
     struct State {
         /// the real stderr (a dup of it)
         out: i32,
-        read_fd: i32,
-        /// A separate append descriptor; fd 2 writes to the same durable log.
+        /// the pipe's write end as created (fd 2 is a dup of it)
         write_fd: i32,
         path: std::path::PathBuf,
-        forwarded: u64,
         /// bytes of a line that has no newline yet
         partial: Vec<u8>,
         drawn: bool,
@@ -277,6 +299,70 @@ mod unix {
     }
     static STATE: Mutex<Option<State>> = Mutex::new(None);
     static READY_LINE: AtomicBool = AtomicBool::new(false);
+
+    /// Read everything the pipe holds now into the transcript and TEE. True at end of
+    /// stream (every write end closed) or on a read error.
+    fn drain(r: &mut Reader) -> bool {
+        use std::io::Write;
+        let mut buf = [0u8; 16384];
+        loop {
+            let n = unsafe { read(r.fd, buf.as_mut_ptr(), buf.len()) };
+            if n > 0 {
+                let chunk = &buf[..n as usize];
+                if let Some(f) = r.file.as_mut() {
+                    // a failed transcript write drops this chunk from the file only
+                    let _ = f.write_all(chunk);
+                }
+                crate::zone_alloc::kept_with(|| TEE.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(chunk));
+                continue;
+            }
+            if n == 0 {
+                return true;
+            }
+            match std::io::Error::last_os_error().kind() {
+                std::io::ErrorKind::Interrupted => continue,
+                std::io::ErrorKind::WouldBlock => return false,
+                _ => return true,
+            }
+        }
+    }
+
+    /// Drain under READER; closes the read end at end of stream.
+    fn drain_now() {
+        let mut g = READER.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(r) = g.as_mut() {
+            if drain(r) {
+                unsafe { close(r.fd) };
+                *g = None;
+            }
+        }
+    }
+
+    fn tee() {
+        loop {
+            let fd = match READER.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                Some(r) => r.fd,
+                None => return,
+            };
+            let mut p = PollFd { fd, events: POLLIN, revents: 0 };
+            // poll outside the lock: drains elsewhere never wait for new output
+            if unsafe { poll(&mut p, 1, -1) } < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                return;
+            }
+            drain_now();
+            kick_forward();
+        }
+    }
+
+    /// The display worker (`forward`), woken by new output and the ready line: with no progress bar
+    /// it sleeps until there is something to show (an idle run's log display does not poll).
+    static FORWARD: std::sync::OnceLock<std::thread::Thread> = std::sync::OnceLock::new();
+
+    fn kick_forward() {
+        if let Some(t) = FORWARD.get() {
+            t.unpark();
+        }
+    }
 
     fn out_all(fd: i32, mut b: &[u8]) {
         while !b.is_empty() {
@@ -312,7 +398,19 @@ mod unix {
         const SPIN: [&str; 10] = ["\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280f}"];
         let spin = style("1;36", SPIN[(ms / 80.0) as usize % SPIN.len()]);
         let p = PHASE.load(Ordering::Relaxed) as usize;
-        let label = LABELS[p.min(LABELS.len() - 1)];
+        let mut label = LABELS[p.min(LABELS.len() - 1)];
+        // after main: "compiling" only while something compiles (a queue, a startup compile, an
+        // item in flight); a program that never presents a frame (a terminal program, a window
+        // drawn by other means) otherwise read as compiling forever over an idle compiler (T1STUCK)
+        let (queued, active, item) = if p == 9 {
+            let (q, a) = crate::jit::compile_progress();
+            (q, a, longest_item())
+        } else {
+            (None, 0, None)
+        };
+        if p == 9 && queued == Some(0) && active == 0 && item.is_none() {
+            label = "running";
+        }
         let mut text = style("1", &format!("{label:<9}"));
         match p {
             3 => {
@@ -327,10 +425,13 @@ mod unix {
             }
             9 => {
                 let n = crate::jit::COMPILED_FNS.load(Ordering::Relaxed);
-                let (queued, active) = crate::jit::compile_progress();
-                let queued = queued.map_or_else(|| "busy".to_string(), |n| n.to_string());
-                text.push_str(&format!(" {n} fns · {queued} queued · {active} active"));
-                if let Some((name, ms)) = longest_item().filter(|x| x.1 > 500.0) {
+                if label == "running" {
+                    text.push_str(&format!(" {n} fns compiled"));
+                } else {
+                    let queued = queued.map_or_else(|| "busy".to_string(), |n| n.to_string());
+                    text.push_str(&format!(" {n} fns · {queued} queued · {active} active"));
+                }
+                if let Some((name, ms)) = item.filter(|x| x.1 > 500.0) {
                     text.push_str(&format!(" {} {} {}", style("2", "\u{b7}"), cut(&name, 40), style("2", &secs(ms))));
                 }
             }
@@ -361,17 +462,10 @@ mod unix {
     /// Drain a snapshot of the log. New writes never extend this pass indefinitely.
     /// A busy producer can leave bytes for the next tick; none are dropped or capped.
     fn pump(st: &mut State, flush_partial: bool) {
-        let end = std::fs::metadata(&st.path).map_or(st.forwarded, |m| m.len());
-        let started = std::time::Instant::now();
-        let mut buf = [0u8; 8192];
-        while st.forwarded < end {
-            let take = (end - st.forwarded).min(buf.len() as u64) as usize;
-            let n = unsafe { read(st.read_fd, buf.as_mut_ptr(), take) };
-            if n <= 0 { break; }
-            st.forwarded += n as u64;
-            crate::zone_alloc::kept_with(|| st.partial.extend_from_slice(&buf[..n as usize]));
-            // Yield display work to the ticker even when diagnostics stream continuously.
-            if !flush_partial && started.elapsed().as_millis() >= 25 { break; }
+        {
+            let mut tee = TEE.lock().unwrap_or_else(|e| e.into_inner());
+            crate::zone_alloc::kept_with(|| st.partial.extend_from_slice(&tee));
+            tee.clear();
         }
         let cut = if flush_partial { st.partial.len() } else { st.partial.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1) };
         if cut > 0 {
@@ -401,22 +495,40 @@ mod unix {
             Ok(f) => f,
             Err(e) => { eprintln!("makepad-run: cannot create session log: {e}"); return; }
         };
-        let reader = match std::fs::File::open(&path) {
-            Ok(f) => f,
-            Err(e) => { eprintln!("makepad-run: cannot read session log {}: {e}", path.display()); return; }
-        };
+        let mut fds = [-1i32; 2];
+        if unsafe { pipe(fds.as_mut_ptr()) } != 0 {
+            eprintln!("makepad-run: cannot create the session log pipe: {}", std::io::Error::last_os_error());
+            return;
+        }
+        let [read_fd, write_fd] = fds;
+        unsafe {
+            // only fd 2 (a dup, without CLOEXEC) is inherited by child processes
+            fcntl(read_fd, F_SETFD, FD_CLOEXEC);
+            fcntl(write_fd, F_SETFD, FD_CLOEXEC);
+            let fl = fcntl(read_fd, F_GETFL);
+            fcntl(read_fd, F_SETFL, fl | O_NONBLOCK);
+            // a deeper pipe (Linux: up to 1 MiB unprivileged) so a burst never waits on the tee
+            #[cfg(target_os = "linux")]
+            fcntl(write_fd, 1031 /* F_SETPIPE_SZ */, 1 << 20);
+        }
         let out = unsafe { dup(2) };
-        if out < 0 { return; }
-        let write_fd = writer.into_raw_fd();
-        let read_fd = reader.into_raw_fd();
+        if out < 0 {
+            unsafe { close(read_fd); close(write_fd); }
+            return;
+        }
         if unsafe { dup2(write_fd, 2) } < 0 {
             unsafe { close(out); close(write_fd); close(read_fd); }
             return;
         }
+        OUT.store(out, Ordering::Release);
+        *READER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Reader { fd: read_fd, file: Some(writer) });
         *super::SESSION_LOG.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::zone_alloc::kept_with(|| path.clone()));
-        let note = format!("makepad-run: session log {}\n", path.display());
-        out_all(write_fd, note.as_bytes());
-        let mut st = State { out, read_fd, write_fd, path, forwarded: 0, partial: Vec::new(), drawn: false, last_draw_ms: 0.0 };
+        // the path is named at the start with --verbose; a run that ends badly names it when it keeps the log
+        if crate::run::VERBOSE.load(Ordering::Relaxed) {
+            let note = format!("makepad-run: session log {}\n", path.display());
+            out_all(write_fd, note.as_bytes());
+        }
+        let mut st = State { out, write_fd, path, partial: Vec::new(), drawn: false, last_draw_ms: 0.0 };
         PHASE.store(1, Ordering::Relaxed);
         if progress { TRACK.store(true, Ordering::Relaxed); }
         ACTIVE.store(progress, Ordering::Relaxed);
@@ -426,9 +538,17 @@ mod unix {
         if progress { unsafe { std::env::set_var("MAKEPAD_RUN_PROGRESS", "1") }; }
         let previous = std::panic::take_hook();
         // the hook lives as long as the process: the program's heap
-        { let _k = crate::zone_alloc::kept(); std::panic::set_hook(Box::new(move |info| { abnormal(); previous(info); })); }
+        // the message reaches the transcript and the terminal before an abort can follow the hook
+        { let _k = crate::zone_alloc::kept(); std::panic::set_hook(Box::new(move |info| { abnormal(); previous(info); panic_drain(); })); }
         unsafe { atexit(at_exit) };
         { let _k = crate::zone_alloc::kept();
+        if let Err(e) = std::thread::Builder::new().name("run-log-tee".into()).spawn(tee) {
+            unsafe { dup2(out, 2) };
+            out_all(out, format!("makepad-run: cannot start the session log tee: {e}\n").as_bytes());
+            abnormal();
+            finish(false);
+            return;
+        }
         if let Err(e) = std::thread::Builder::new().name("run-progress".into()).spawn(forward) {
             eprintln!("makepad-run: cannot forward session log: {e}");
             abnormal();
@@ -438,7 +558,16 @@ mod unix {
     }
 
     fn forward() {
+        let _ = FORWARD.set(std::thread::current());
+        let mut first = true;
         loop {
+            // the bar redraws every 50 ms; without it, output wakes this thread (tee, finish).
+            // (The first round looks without a wake: output from before FORWARD was set.)
+            if !first && !ACTIVE.load(Ordering::Relaxed) {
+                std::thread::park();
+            }
+            first = false;
+            // (a burst of output is shown together, as before)
             std::thread::sleep(std::time::Duration::from_millis(50));
             let mut g = STATE.lock().unwrap();
             let Some(st) = g.as_mut() else { return };
@@ -458,7 +587,37 @@ mod unix {
     /// Called only off the UI thread and after the reload releases compiler locks.
     pub(crate) fn flush() {
         let mut g = STATE.lock().unwrap();
-        if let Some(st) = g.as_mut() { pump(st, true); }
+        if let Some(st) = g.as_mut() {
+            drain_now();
+            pump(st, true);
+        }
+    }
+
+    /// After the panic hook printed: everything in the pipe to the transcript, and to the
+    /// terminal (through the display when it is free, else raw).
+    fn panic_drain() {
+        // try_lock: a panic on the tee thread itself (inside its drain) must not wait for itself;
+        // that drain is then the one that copies this message
+        if let Ok(mut g) = READER.try_lock() {
+            if let Some(r) = g.as_mut() {
+                if drain(r) {
+                    unsafe { close(r.fd) };
+                    *g = None;
+                }
+            }
+        }
+        match STATE.try_lock() {
+            Ok(mut g) => {
+                if let Some(st) = g.as_mut() { pump(st, true); }
+            }
+            Err(_) => {
+                let out = OUT.load(Ordering::Acquire);
+                if out >= 0 {
+                    let bytes = std::mem::take(&mut *TEE.lock().unwrap_or_else(|e| e.into_inner()));
+                    out_all(out, &bytes);
+                }
+            }
+        }
     }
 
     /// Takes the bar down and gives fd 2 back its terminal. `summary`: first present, print the
@@ -468,15 +627,21 @@ mod unix {
         // wait for log I/O or a terminal reader; the display worker owns both.
         if summary {
             READY_LINE.store(true, Ordering::Release);
+            kick_forward();
             return;
         }
         let mut g = STATE.lock().unwrap();
         let Some(st) = g.as_mut() else { return };
         ACTIVE.store(false, Ordering::Relaxed);
+        drain_now();
         pump(st, true);
         erase(st);
+        // fd 2 back to the terminal and our write end closed: the pipe ends unless a child
+        // process still holds it (the tee keeps copying that child's output to the transcript)
         unsafe { dup2(st.out, 2); close(st.write_fd); }
+        drain_now();
         pump(st, true);
+        OUT.store(-1, Ordering::Release);
         let clean = EXIT_CODE.load(Ordering::Acquire) == 0 && !ABNORMAL.load(Ordering::Acquire);
         if clean {
             if let Err(e) = std::fs::remove_file(&st.path) {
@@ -485,7 +650,7 @@ mod unix {
         } else {
             out_all(st.out, format!("makepad-run: session log kept at {}\n", st.path.display()).as_bytes());
         }
-        unsafe { close(st.read_fd); close(st.out); }
+        unsafe { close(st.out) };
         *g = None;
     }
 

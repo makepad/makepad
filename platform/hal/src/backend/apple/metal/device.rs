@@ -5,7 +5,7 @@
 
 use super::timing::*;
 use makepad_apple_sys::*;
-use std::collections::HashMap;
+use crate::FastMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -102,6 +102,8 @@ pub struct Device {
     /// a GPU fault)
     pub fallback: ObjcId,
     pub name: String,
+    /// The GPU shares memory with the CPU (Apple silicon).
+    pub unified_memory: bool,
     /// highest command buffer sequence number that COMPLETED; the one queue executes buffers in
     /// enqueue order, so completion of N implies everything below it
     pub completed: Arc<AtomicU64>,
@@ -123,7 +125,7 @@ pub struct Device {
     pub clock: Option<Option<Arc<PassClock>>>,
     chunks: Vec<Chunk>,
     /// batch-local: where a (pointer, length) of the caller's memory already sits in the arena
-    pub dedup: HashMap<(usize, usize), Loc>,
+    pub dedup: FastMap<(usize, usize), Loc>,
     pub recommended_working_set: u64,
 }
 
@@ -138,6 +140,10 @@ impl Device {
             return None;
         }
         let name = nsstring_to_string(unsafe { msg_send![device, name] });
+        let unified_memory: bool = unsafe {
+            let available: bool = msg_send![device, respondsToSelector: sel!(hasUnifiedMemory)];
+            available && msg_send![device, hasUnifiedMemory]
+        };
         let recommended: u64 = unsafe {
             let available: bool = msg_send![device, respondsToSelector: sel!(recommendedMaxWorkingSetSize)];
             if available {
@@ -197,6 +203,7 @@ impl Device {
             queue,
             fallback,
             name,
+            unified_memory,
             completed,
             seq: 0,
             mailbox,
@@ -213,7 +220,7 @@ impl Device {
             descriptor,
             clock: None,
             chunks: Vec::new(),
-            dedup: HashMap::new(),
+            dedup: FastMap::default(),
             recommended_working_set: crate::gpu_limits::gpu_working_set_bytes(),
         };
         // the first batches' uniforms: two chunks, touched now so no draw waits for a page fault
@@ -402,17 +409,31 @@ impl Device {
     }
 }
 
+impl Device {
+    /// The threads that call Metal stop and are joined: the submitter commits every buffer
+    /// encoded so far (also those the saturated queue held back), the allocator runs its
+    /// compiles and releases. Afterwards `commit` keeps buffers back, `compile` drops its job and
+    /// `retire` releases on the caller. The end of the process (`Metal::before_exit`) and `Drop`.
+    pub fn stop_workers(&mut self) {
+        if let Some(tx) = self.submit_tx.take() {
+            for submission in self.submit_retry.drain(..) {
+                if tx.send(submission).is_err() { break; }
+            }
+        }
+        self.alloc_tx = None;
+        if let Some(t) = self.submit_thread.take() {
+            if t.join().is_err() { eprintln!("[hal-metal] the submit thread panicked"); }
+        }
+        if let Some(t) = self.alloc_thread.take() {
+            if t.join().is_err() { eprintln!("[hal-metal] the allocator thread panicked"); }
+        }
+    }
+}
+
 impl Drop for Device {
     fn drop(&mut self) {
         self.watchdog_stop.store(true, Ordering::Release);
-        self.submit_tx = None;
-        self.alloc_tx = None;
-        if let Some(t) = self.submit_thread.take() {
-            let _ = t.join();
-        }
-        if let Some(t) = self.alloc_thread.take() {
-            let _ = t.join();
-        }
+        self.stop_workers();
         if let Some(t) = self.watchdog_thread.take() {
             let _ = t.join();
         }

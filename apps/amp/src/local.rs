@@ -59,6 +59,9 @@ pub enum LocalCommand {
     RemoveFolder(String),
     /// Look for changes now (unless a scan ran very recently).
     Rescan,
+    /// A file was just written into an added folder (an AI song): look now,
+    /// however recent the last scan, so it is listed at once.
+    FileAdded,
 }
 
 /// One music file as last read.
@@ -462,6 +465,8 @@ pub fn run_local(data: Option<PathBuf>, rx: Receiver<LocalCommand>, tx: SyncSend
                 let soon = last_scan.map_or(Instant::now(), |at| at + RESCAN_MIN);
                 next_scan = Some(next_scan.map_or(soon, |at| at.min(soon)));
             }
+            // (A scan under way may have passed it: another follows it.)
+            Ok(LocalCommand::FileAdded) => next_scan = Some(Instant::now()),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }

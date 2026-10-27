@@ -49,6 +49,10 @@ pub(super) enum ModelLane {
     Terrain = 6,
     /// GPU-skinned characters (shaders/skinned_gpu.rs).
     SkinnedGpu = 7,
+    /// Far stand-ins drawn inside the foliage lane (shaders/impostor.rs).
+    Impostor = 8,
+    /// Generated terrain tiles' paint (shaders/splat.rs).
+    Splat = 9,
 }
 
 /// The optional features a lane's shader keeps.
@@ -270,7 +274,7 @@ fn shader_of<T: ScriptNew + ScriptApply>(vm: &mut ScriptVm, obj: Option<ScriptOb
 
 impl ModelLane {
     fn name(self) -> &'static str {
-        ["diffuse", "PBR", "city", "foliage", "cube", "alpha", "terrain", "skinned"][self as usize]
+        ["diffuse", "PBR", "city", "foliage", "cube", "alpha", "terrain", "skinned", "impostor", "splat"][self as usize]
     }
 
     fn type_id(self) -> ScriptTypeId {
@@ -283,6 +287,8 @@ impl ModelLane {
             ModelLane::Alpha => DrawSceneAlpha::script_type_id_static(),
             ModelLane::Terrain => DrawSceneTerrain::script_type_id_static(),
             ModelLane::SkinnedGpu => DrawSceneSkinnedGpu::script_type_id_static(),
+            ModelLane::Impostor => crate::shaders::DrawSceneImpostor::script_type_id_static(),
+            ModelLane::Splat => crate::shaders::DrawSceneSplat::script_type_id_static(),
         }
     }
 
@@ -297,6 +303,8 @@ impl ModelLane {
             ModelLane::Alpha => shader_of::<DrawSceneAlpha>(vm, obj, |d| &mut d.cube.cube.draw_vars),
             ModelLane::Terrain => shader_of::<DrawSceneTerrain>(vm, obj, |d| &mut d.draw_vars),
             ModelLane::SkinnedGpu => shader_of::<DrawSceneSkinnedGpu>(vm, obj, |d| &mut d.draw_vars),
+            ModelLane::Impostor => shader_of::<crate::shaders::DrawSceneImpostor>(vm, obj, |d| &mut d.pbr.skinned.draw_vars),
+            ModelLane::Splat => shader_of::<crate::shaders::DrawSceneSplat>(vm, obj, |d| &mut d.pbr.skinned.draw_vars),
         }
     }
 }
@@ -380,7 +388,7 @@ mod tests {
                 Features { csm: true, cluster: true, ..Default::default() },
                 Features { gi: true, gi_debug: true, csm: true, csm_debug: true, cluster: true, local_shadows: true, clip: false },
             ] {
-                for lane in [ModelLane::Diffuse, ModelLane::Pbr, ModelLane::City, ModelLane::Foliage, ModelLane::Cube, ModelLane::Alpha, ModelLane::Terrain, ModelLane::SkinnedGpu] {
+                for lane in [ModelLane::Diffuse, ModelLane::Pbr, ModelLane::City, ModelLane::Foliage, ModelLane::Cube, ModelLane::Alpha, ModelLane::Terrain, ModelLane::SkinnedGpu, ModelLane::Splat] {
                     let name = lane.name();
                     assert!(build(vm, lane, features).is_some(), "{name} variant {features:?}");
                     let base = vm.heap().type_default_for_id(lane.type_id()).unwrap();

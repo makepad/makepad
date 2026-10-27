@@ -363,6 +363,7 @@ impl Ex<'_> {
                     VX::FRound(_, RoundTo::Floor) => FUn::Floor,
                     VX::FRound(_, RoundTo::Ceil) => FUn::Ceil,
                     VX::FRound(_, RoundTo::Trunc) => FUn::Trunc,
+                    VX::FRound(_, RoundTo::Even) => FUn::RoundEven,
                     _ => FUn::RoundAway,
                 };
                 let fx = self.to_f(w, x);

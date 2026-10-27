@@ -45,17 +45,32 @@ mod screenshot_app;
 mod backdrop;
 mod skins;
 mod dock_warp;
+mod desk_link;
 mod dock_layout;
 mod dock_autohide;
-mod hub_control;
+mod hub_link;
+mod devhub_link;
 #[cfg(not(target_arch = "wasm32"))]
-mod hub_child;
-mod hub_glow;
+mod hub_app;
+/// The deploy's prebuild of what the WM starts (the `makepad-wm-build` binary).
+#[cfg(not(target_arch = "wasm32"))]
+mod deploy_build;
+#[cfg(not(target_arch = "wasm32"))]
+pub use deploy_build::build_launched;
+mod trays;
+mod dropdown;
 mod gpu_yield;
+mod local_use;
 mod scroll_gesture;
 use scroll_gesture::Gesture as ScrollGesture;
-use hub_control::HubLink;
+use hub_link::HubLink;
+use devhub_link::DevhubLink;
+use trays::WmTrays;
+use dropdown::Dropdowns;
+use makepad_ai_hub_panel::hub_control;
+use desk_link::DeskLink;
 use gpu_yield::YieldPolicy;
+use local_use::LocalUse;
 mod motion;
 mod spaces;
 mod spacewarp;
@@ -159,6 +174,9 @@ script_mod! {
                 // its buttons) so the window still drags.
                 show_caption_bar: false
                 body +: {
+                    // Desk Link: the whole body, captured for a viewer while one watches
+                    // (desk_link/capture.rs); drawn straight otherwise.
+                    desk_capture := DeskCapture{
                     // The bar is drawn over the column, after the scene:
                     // a strip above the desk (`bar_space` holds its place)
                     // on one screen, floating over the top of every screen
@@ -250,6 +268,7 @@ script_mod! {
                         }
                         phone_controls := PhoneSurface{visible: false}
                     }
+                }
                 }
             }
         }
@@ -575,14 +594,35 @@ pub struct App {
     shot_last: f64,
     #[rust]
     shot_pointer: Vec2d,
+    /// Files a hosted app is dragging out of its window (`ChildRelay::StartFileDrag`): the
+    /// client they came from and their paths, carried until the pointer is let go.
+    #[rust]
+    file_carry: Option<(ClientId, Vec<String>)>,
     #[rust]
     shot_thumb_screen: Rect,
-    /// The AI hub the top-bar panel controls.
+    /// This node's AI hub: the AI Hub app the WM starts, and what the WM tells it.
     #[rust]
     hub_link: HubLink,
+    #[rust]
+    devhub_link: DevhubLink,
+    /// The apps' tray icons in the bar's tray area (`trays`).
+    #[rust]
+    trays: WmTrays,
+    /// A tray app's open dropdown (`dropdown`).
+    #[rust]
+    dropdown: Dropdowns,
+    /// The remote desktop server (desk_link): off unless its settings enable it.
+    #[rust]
+    desk_link: DeskLink,
+    /// The Desk Link viewer list the bar and its panel show (its generation).
+    #[rust]
+    desk_link_shown: Option<u32>,
     /// The steps the WM takes when the GPU is short of memory for the UI (`gpu_yield`).
     #[rust]
     yield_policy: YieldPolicy,
+    /// Whether a game is being played, for the AI hub's compute admission (`local_use`).
+    #[rust]
+    local_use: LocalUse,
     #[rust]
     shelf_pointer: Vec2d,
     /// The last pointer position the dock auto-hide saw.
@@ -779,6 +819,8 @@ pub struct App {
     style_clock: TweenClock,
     #[rust] title_press: Option<(ClientId, f64, Vec2d)>,
     #[rust] stylesheet: Option<desktop_style::StyleSheet>,
+    /// The stock caption the sheet resolves, as sent (`caption_json`): (sheet name, json).
+    #[rust] caption: Option<(String, String)>,
     #[rust] phone_frame: NextFrame,
     #[rust] phone_time: f64,
     /// The storage read of the home page's order, answered in `Event::Storage`.
@@ -990,6 +1032,7 @@ impl App {
                 !slot.warm
                     && !slot.pane
                     && !slot.is_preview
+                    && !slot.service
                     && slot.closing.is_none()
                     && (clients::word_match(&slot.app, app_id) || clients::word_match(&slot.title, app_id))
             })
@@ -1001,6 +1044,21 @@ impl App {
     }
 
     fn launch_app(&mut self, cx: &mut Cx, app_id: &str) {
+        // The node's AI Hub is a service the WM supervises (hub_app): the launcher starts it
+        // again after its Quit, through the same `cargo run`, and never as a window.
+        if app_id == clients::HUB_SERVICE_APP {
+            let processes = self.processes();
+            if self.hub_link.start_from_launcher(processes, host::now()) {
+                return;
+            }
+        }
+        // devhub too: a supervised service, started again after its Quit, never a window
+        if app_id == clients::DEVHUB_SERVICE_APP {
+            let processes = self.processes();
+            if self.devhub_link.start_from_launcher(processes, host::now()) {
+                return;
+            }
+        }
         if (!self.domains_enabled() || app_id.starts_with("wl.") || app_id.starts_with("wayland="))
             && self.wayland_launch(cx, app_id) {
             return;
@@ -1057,6 +1115,7 @@ impl App {
         let id = self.next_id;
         self.next_id += 1;
         let cwd = self.launch_cwd(app_id, true);
+        let runner = self.apps.runner(app_id);
         let state = self.state_mut();
         let term_env = state.term_env.clone();
         let lines = self.line_sender();
@@ -1067,7 +1126,7 @@ impl App {
         let policy = if app.is_current() { BuildPolicy::IfMissing } else { BuildPolicy::Rebuild };
         let spawned = spawn_client(
             &pool, &cx.thread_spawner(), app, id, hub_port, cwd.as_ref(),
-            (app.id == "terminal").then_some(term_env.as_str()), &[], false, policy, lines,
+            (app.id == "terminal").then_some(term_env.as_str()), &[], false, policy, runner, lines,
         );
         match spawned {
             Ok(slot) => {
@@ -1246,6 +1305,7 @@ impl App {
         let id = self.next_id;
         self.next_id += 1;
         let cwd = self.launch_cwd(app_id, false);
+        let runner = self.apps.runner(app_id);
         let term_env = self.state_mut().term_env.clone();
         let lines = self.line_sender();
         let pool = cx.task_pool();
@@ -1260,6 +1320,7 @@ impl App {
             &[],
             true,
             BuildPolicy::IfMissing,
+            runner,
             lines,
         ) {
             Ok(slot) => {
@@ -2121,6 +2182,10 @@ impl App {
         self.forget_domain(client);
         log!("wm: removing client {}", client);
         self.relay.forget_client(cx, client);
+        if self.trays.client_gone(client) {
+            self.trays_changed(cx);
+        }
+        self.dropdown_end(cx, client);
         if let Some(mut p) = self.ui.widget(cx, ids!(file_picker)).borrow_mut::<shell::file_picker::ShellFilePicker>() {
             p.forget_client(cx, client);
         }
@@ -2237,6 +2302,7 @@ impl App {
         if !takes_focus {
             return;
         }
+        self.dropdown_focus_moved(cx, client);
         // Defensive: the menu is modal and must never still read "open"
         // once a hosted client is about to take key focus — every launch
         // path already closes it first, but force it shut here too so a
@@ -2357,6 +2423,13 @@ impl App {
         for (id, slot) in state.clients.iter_mut() {
             #[cfg(not(target_arch = "wasm32"))]
             if domain_clients.contains(id) { continue; }
+            // An app that came by itself and whose process is gone: it may never have
+            // connected its hub (a reattach whose connect failed), so no socket closes for it.
+            if slot.external.is_some_and(|pid| !makepad_app_host::launch::process_alive(pid)) {
+                log!("wm: {} (client {}, pid {}) is gone; removing its tile", slot.app, id, slot.external.unwrap_or(0));
+                dead.push(*id);
+                continue;
+            }
             // Closing a build must never launch the app on its way out.
             if slot.closing.is_some() || slot.launch.is_none() {
                 if slot.child.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))))
@@ -2540,7 +2613,8 @@ impl App {
         // Like every app: from a checkout `cargo run` compiles what changed (the pane shows
         // cargo's progress); installed, a binary out of date is built first.
         let policy = if app.is_current() { BuildPolicy::IfMissing } else { BuildPolicy::Rebuild };
-        let spawned = spawn_client(&pool, &cx.thread_spawner(), &app, id, hub_port, None, None, &[], false, policy, lines);
+        let runner = self.apps.runner(&app.id);
+        let spawned = spawn_client(&pool, &cx.thread_spawner(), &app, id, hub_port, None, None, &[], false, policy, runner, lines);
         match spawned {
             Ok(mut slot) => {
                 slot.pane = true;
@@ -2716,8 +2790,19 @@ impl App {
                         Err(e) => ToolResult::refused(&call.call_id, format!("motion_trace: {}: {e}", path.display())),
                     }
                 }
+                "headset_status" => {
+                    #[cfg(target_os = "linux")]
+                    let text = self.headset_status_text();
+                    #[cfg(not(target_os = "linux"))]
+                    let text: Option<String> = None;
+                    match text {
+                        Some(text) => ToolResult::ok(&call.call_id, text, "headset"),
+                        None => ToolResult::refused(&call.call_id, "headset_status: no system controls here".to_string()),
+                    }
+                }
                 other => ToolResult::refused(&call.call_id, format!("wm has no tool `{other}`")),
             };
+            let Some(port) = self.wm_port.as_mut() else { return };
             port.reply(result);
         }
     }
@@ -3125,7 +3210,7 @@ impl App {
                             );
                         }
                     }
-                    self.send_desktop_style(client);
+                    self.send_desktop_style(cx, client);
                     // The pane just connected (or reconnected): it learns
                     // every current registration, the WM's own first.
                     if self.ai_bus.is_pane(client) {
@@ -3151,7 +3236,7 @@ impl App {
                         if let Some(slot) = self.state_mut().clients.get_mut(&client) {
                             slot.sender = None;
                             slot.socket = None;
-                            adopted = slot.external;
+                            adopted = slot.external.is_some();
                         }
                         // An app that came by itself has no process here to reap: its
                         // socket closing is its end.
@@ -3187,7 +3272,8 @@ impl App {
         }
         let id = self.next_id;
         let Some(owner) = self.state_mut().clients.get(&client) else { return };
-        if owner.parent.is_some() || owner.window_id == window_id {
+        // (A supervised service has its dropdown only, dropdown.rs.)
+        if owner.parent.is_some() || owner.window_id == window_id || owner.service {
             return;
         }
         let slot = clients::ClientSlot::later_window(id, client, owner, window_id);
@@ -3340,7 +3426,7 @@ impl App {
                             d.with_run_view(cx, client, |cx, v| v.app_ready(cx, client, window_id))
                         });
                     }
-                    self.send_desktop_style(client);
+                    self.send_desktop_style(cx, client);
                     // A home tile's client hears which face to show before
                     // its first frame (mobile_app.rs).
                     self.replay_tile_face(cx, client);
@@ -3490,6 +3576,27 @@ impl App {
                     log!("wm: relay from unknown client {} ignored", client);
                     return;
                 }
+                // A tray: the WM's tray area shows it (trays.rs).
+                match relay {
+                    ChildRelay::SetTray(tray) => {
+                        if self.trays.set(cx, client, tray) {
+                            self.trays_changed(cx);
+                        }
+                        return;
+                    }
+                    ChildRelay::RemoveTray { tray } => {
+                        if self.trays.remove(client, tray) {
+                            self.trays_changed(cx);
+                        }
+                        return;
+                    }
+                    ChildRelay::StartFileDrag { paths } => {
+                        self.file_carry = Some((client, paths));
+                        cx.set_cursor(MouseCursor::Grabbing);
+                        return;
+                    }
+                    _ => {}
+                }
                 // A file dialog: the WM draws the picker over the window that asked
                 // (a hosted app has no display of its own to open a system one on).
                 #[cfg(not(target_os = "android"))]
@@ -3520,6 +3627,11 @@ impl App {
                 self.send_relays(answers);
             }
             AppToStudio::Custom(json) => {
+                // A tray app's dropdown window: shown under its tray item, or hidden (dropdown.rs).
+                if let Some(dropdown) = makepad_widgets::makepad_platform::studio::HostedDropdown::parse(&json) {
+                    self.dropdown_message(cx, client, dropdown);
+                    return;
+                }
                 if let Some(status) = makepad_app_host::AppStatus::parse(&json) {
                     let text = status.label();
                     if let Some(slot) = self.state_mut().clients.get_mut(&client) {
@@ -3562,6 +3674,7 @@ impl App {
                     match own_chrome::route_window_op(&op, state) {
                         Some(own_chrome::WindowAction::Close) => self.request_close(cx, client),
                         Some(own_chrome::WindowAction::Minimize) => self.minimize_desktop(cx, client),
+                        Some(own_chrome::WindowAction::Show) => self.restore_desktop(cx, client),
                         // The app's maximise button toggles maximise, as a double click on its
                         // caption does (the window keeps its caption; fullscreen is the app's
                         // own fullscreen request).
@@ -3688,7 +3801,7 @@ impl App {
         let state = self.state_mut();
         state.theme_name = name.to_string();
         let source = theme::load_theme_source(name);
-        if let Some(palette) = theme::scan_term_palette(&source) {
+        if let Some(palette) = makepad_shell_kit::theme::scan_term_palette(&source) {
             state.term_env = palette.env_value();
         }
         if let Some(rgb) = scan_theme_color(&source, "accent") {
@@ -4105,6 +4218,13 @@ impl App {
         let Some(kind) = shell::panels::PanelKind::for_module(module) else {
             return;
         };
+        // A tray's flyout is its app's menu, as the app last set it.
+        if let shell::panels::PanelKind::Tray(i) = kind {
+            let menu = self.trays.menu(i);
+            if let Some(mut p) = self.ui.widget(cx, ids!(shell_panel)).borrow_mut::<shell::panels::ShellPanel>() {
+                p.data.tray_menu = menu;
+            }
+        }
         let anchor = {
             let bar = self.ui.widget(cx, ids!(shell_bar));
             let borrowed = bar.borrow::<shell::bar::ShellBar>();
@@ -4134,33 +4254,49 @@ impl App {
         if opened_network {
             self.wifi_panel_opened(cx);
         }
-        self.hub_poll(cx);
         self.update_bar(cx);
     }
 
-    /// The AI hub: while its panel is open the whole snapshot is read into
-    /// it; otherwise only the cheap activity flag, which pulses the bar's
-    /// icon. Once a second (the status tick) and on every panel command.
+    /// This node's AI hub: the app's start and restart, the yield report, and whether a game
+    /// is being played. Once a second (the status tick).
     fn hub_poll(&mut self, cx: &mut Cx) {
         let processes = self.processes();
-        self.hub_link.tick(processes, host::now());
-        self.gpu_yield_report(cx);
-        let panel = self.ui.widget(cx, ids!(shell_panel));
-        let open = panel.borrow::<shell::panels::ShellPanel>().is_some_and(|p| p.open == Some(shell::panels::PanelKind::Hub));
-        let active = if open {
-            let snap = self.hub_link.get(processes).snapshot();
-            let busy = snap.busy();
-            if let Some(mut p) = panel.borrow_mut::<shell::panels::ShellPanel>() {
-                p.hub_update(cx, snap);
-            }
-            busy
-        } else {
-            self.hub_link.get(processes).active()
-        };
-        if self.bar_sample.hub_active != active {
-            self.bar_sample.hub_active = active;
-            self.update_bar(cx);
+        let pool = cx.task_pool();
+        self.hub_link.tick(processes, host::now(), &pool);
+        self.devhub_link.tick(processes, host::now());
+        // Off (its Quit): the bar keeps a dim slot to start it again, until its own tray is back.
+        let has_tray = |app: &str| self.state.as_ref().is_some_and(|s| s.clients.iter().any(|(id, c)| c.service && c.app == app && self.trays.has_tray(*id as u64)));
+        let (hub_tray, devhub_tray) = (has_tray(clients::HUB_SERVICE_APP), has_tray(clients::DEVHUB_SERVICE_APP));
+        let hub = self.trays.set_off(cx, trays::Service::AiHub, self.hub_link.is_off(processes), hub_tray);
+        let devhub = self.trays.set_off(cx, trays::Service::Devhub, self.devhub_link.is_off(processes), devhub_tray);
+        if hub || devhub {
+            self.trays_changed(cx);
         }
+        self.gpu_yield_report(cx);
+        let play = self.state.as_ref().and_then(|s| {
+            if s.screens.any_fullscreen() {
+                return Some("a fullscreen space".to_string());
+            }
+            let slot = s.clients.get(&s.screens.focused_client()?)?;
+            local_use::is_game(&slot.app).then(|| format!("{} in focus", slot.app))
+        });
+        let gaming = self.local_use.tick(host::now(), play, cx.game_input_states());
+        self.hub_link.set_gaming(processes, gaming);
+    }
+
+    /// An app set or removed a tray (`ChildRelay::SetTray` / `RemoveTray`) or went away: the
+    /// bar's tray area and an open tray menu follow.
+    fn trays_changed(&mut self, cx: &mut Cx) {
+        self.bar_sample.tray = self.trays.bar();
+        let panel = self.ui.widget(cx, ids!(shell_panel));
+        if let Some(mut p) = panel.borrow_mut::<shell::panels::ShellPanel>() {
+            if matches!(p.open, Some(shell::panels::PanelKind::Tray(_))) {
+                let menu = p.data.tray_menu.as_ref().and_then(|m| self.trays.menu_by(m.client, m.tray));
+                p.tray_menu_update(cx, menu);
+                self.shell_panel_open = p.open.map(|k| k.module());
+            }
+        }
+        self.update_bar(cx);
     }
 
     /// The HAL says the GPU is short of memory for the UI: ask the AI hub for room, in
@@ -4170,10 +4306,19 @@ impl App {
         let now = START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64();
         let was_exhausted = self.yield_policy.exhausted();
         let processes = self.processes();
+        if e.wanted_mb > 0 && self.hub_link.compute_mode(processes) == hub_control::ComputeMode::AiFirst {
+            // The operator chose AI First: the hub gives nothing back. The HAL's own last
+            // resort (textures handed back to their apps, made again once memory frees) goes on.
+            log!(
+                "wm: GPU allocation failure while in AI First: short {} MB for the UI ({} MB free{}); the AI hub keeps its memory",
+                e.wanted_mb, e.free_mb, if e.failed { ", a texture create failed" } else { "" }
+            );
+            return;
+        }
         match self.yield_policy.on_pressure(e.wanted_mb, e.reserve_mb, now) {
             Some(ask) if ask.mb == 0 => {
                 log!("wm: GPU memory for the UI is back ({} MB free): the AI hub may grow its model back", e.free_mb);
-                self.hub_link.get(processes).send(hub_control::HubCommand::Yield { mb: 0, unload: false, reserve_mb: ask.reserve_mb });
+                self.hub_link.send(processes, hub_control::HubCommand::Yield { mb: 0, unload: false, reserve_mb: ask.reserve_mb });
             }
             Some(ask) => {
                 log!(
@@ -4181,7 +4326,7 @@ impl App {
                     e.wanted_mb, e.free_mb, e.reserve_mb, if e.failed { ", a texture create failed" } else { "" },
                     ask.mb, if ask.unload { ", the model may be unloaded" } else { "" }
                 );
-                self.hub_link.get(processes).send(hub_control::HubCommand::Yield { mb: ask.mb, unload: ask.unload, reserve_mb: ask.reserve_mb });
+                self.hub_link.send(processes, hub_control::HubCommand::Yield { mb: ask.mb, unload: ask.unload, reserve_mb: ask.reserve_mb });
             }
             None if e.wanted_mb == 0 => log!("wm: GPU memory for the UI is back ({} MB free)", e.free_mb),
             None if self.yield_policy.exhausted() && !was_exhausted => {
@@ -4194,7 +4339,7 @@ impl App {
     /// The hub's answer to a yield: logged, and shown when the user loses something.
     fn gpu_yield_report(&mut self, cx: &mut Cx) {
         let processes = self.processes();
-        let Some(report) = self.hub_link.get(processes).take_report() else { return };
+        let Some(report) = self.hub_link.take_report(processes) else { return };
         log!("wm: AI hub: {report}");
         if let Some(notice) = gpu_yield::notice_for(&report) {
             self.notify(cx, "GPU memory", notice);
@@ -4271,6 +4416,27 @@ impl App {
     /// WM; the status modules come from `bar_sample`, refreshed on the tick
     /// (`shell/bar.rs` does the sampling — cheap things every second, the
     /// expensive ones every fifth).
+    /// Desk Link's viewers into the bar (its item shows while anyone is viewing: never silent)
+    /// and the panel. `changed`: who is connected changed, so the bar is laid out again.
+    fn sync_desk_link(&mut self, cx: &mut Cx, changed: bool) {
+        let viewers = self.desk_link.viewers();
+        if changed {
+            self.bar_sample.desk_link = viewers.iter().map(|v| (v.name.clone(), v.peer.clone())).collect();
+        }
+        let panel = self.ui.widget(cx, ids!(shell_panel));
+        let mut closed = false;
+        if let Some(mut p) = panel.borrow_mut::<shell::panels::ShellPanel>() {
+            p.desk_link_update(cx, viewers);
+            closed = self.shell_panel_open == Some(BarModule::DeskLink) && p.open.is_none();
+        }
+        if closed {
+            self.shell_panel_open = None;
+        }
+        if changed || closed {
+            self.update_bar(cx);
+        }
+    }
+
     fn update_bar(&mut self, cx: &mut Cx) {
         self.sync_bar_placement(cx);
         if let Some(clock)=self.bar_sample.clock.split_whitespace().find(|s|s.contains(':')).map(str::to_string) {
@@ -4614,6 +4780,8 @@ impl App {
             if clock.is_empty() { host::fallback_clock(self.clock_alt) } else { clock }
         };
         self.status_tick = self.status_tick.wrapping_add(1);
+        // the viewers' "connected for" in an open Desk Link panel
+        self.sync_desk_link(cx, false);
         self.bar_sample.network = s.network;
         self.bar_sample.bluetooth = s.bluetooth;
         // Keep the flyout's own copy in step with the bar's.
@@ -4628,6 +4796,11 @@ impl App {
                     if up { "Connected".to_string() } else { "Not connected".to_string() }
                 });
                 p.data.bluetooth = self.bar_sample.bluetooth;
+                #[cfg(not(target_os = "linux"))]
+                {
+                    p.data.game_controllers.controllers = cx.game_input_infos().into_iter().map(|info|
+                        shell::game_controllers::Controller { name: info.name, battery: None }).collect();
+                }
             }
         }
         #[cfg(target_os = "linux")]
@@ -5752,6 +5925,12 @@ fn wm_test_manifest() -> makepad_ai_services::wire::ServiceManifest {
             r#"{"type":"object","properties":{"path":{"type":"string","description":"absolute .jsonl path; default a new file in the temp dir"}}}"#,
             Risk::Read,
         ))
+        .with_tool(ToolDef::new(
+            "headset_status",
+            "The BlackShark V3 Pro receiver and headset as the system worker last read them: link state, battery, settings, microphone gain, edits still waiting for the headset and problems. Linux only.",
+            r#"{"type":"object","properties":{}}"#,
+            Risk::Read,
+        ))
 }
 
 /// `os.list`'s answer: one line per app, and the same rows as JSON.
@@ -5868,7 +6047,7 @@ fn scan_theme_color(source: &str, key: &str) -> Option<Vec4f> {
             continue;
         };
         if k.trim() == key {
-            let rgb = theme::parse_hex(v.trim())?;
+            let rgb = makepad_shell_kit::theme::parse_hex(v.trim())?;
             return Some(Vec4f {
                 x: rgb.r as f32 / 255.0,
                 y: rgb.g as f32 / 255.0,
@@ -5916,6 +6095,9 @@ impl MatchEvent for App {
         // Children inherit the system stylesheet at spawn; makepad_style
         // events carry subsequent sheet changes to their running windows.
         host::set_child_env("MAKEPAD_WIDGET_STYLE", std::ffi::OsStr::new(&sheet.name));
+        // Its family, for what reads the WM's window controls without the sheet catalogue
+        // (`makepad_hal::host_window_controls`: `makepad run`'s load screen).
+        host::set_child_env("MAKEPAD_WIDGET_STYLE_FAMILY", std::ffi::OsStr::new(sheet.family.id()));
         self.module_host.apply_style(cx, &sheet);
         self.stylesheet = Some(sheet);
         let source = theme::load_theme_source(&theme_name);
@@ -5932,7 +6114,7 @@ impl MatchEvent for App {
                 Err(e) => log!("wm portal: not served: {e}"),
             }
         }
-        let term_env = theme::scan_term_palette(&source)
+        let term_env = makepad_shell_kit::theme::scan_term_palette(&source)
             .map(|p| p.env_value())
             .unwrap_or_default();
         let accent = scan_theme_color(&source, "accent").unwrap_or(Vec4f {
@@ -6003,6 +6185,7 @@ impl MatchEvent for App {
             live_resize: false,
             drop_hint: None,
             pane_sliding: false,
+            dropdown_client: None,
             style: Default::default(),
             launchable: Launchable::default(),
             accessibility: desktop::Accessibility::load(&theme::makepad_home().join("wm/accessibility.splash")),
@@ -6149,6 +6332,7 @@ impl MatchEvent for App {
                     key: KeyCode::KeyQ,
                     shift: true,
                     enabled: true,
+                    dock: false,
                     name: "Quit wm".to_string(),
                 }],
             }],
@@ -6198,9 +6382,11 @@ impl MatchEvent for App {
                             self.window_control(cx, control);
                         }
                     }
+                    BarModule::Tray(i) => self.tray_press(cx, seg, i),
                     other => self.toggle_shell_panel(cx, seg, other),
                 },
                 ShellBarAction::RightPress(seg, module) => match module {
+                    BarModule::Tray(i) => self.tray_menu_press(cx, seg, i),
                     // The Omarchy button's right click opens a terminal.
                     BarModule::Style => {
                         self.bar_press_segment = seg;
@@ -6254,10 +6440,9 @@ impl MatchEvent for App {
             if wa.widget_uid == self.ui.widget(cx, ids!(shell_panel)).widget_uid() {
             match wa.cast::<ShellPanelAction>() {
                 ShellPanelAction::SetVolume(v) => self.set_volume(cx, v),
-                ShellPanelAction::Hub(command) => {
-                    let pool = cx.task_pool();
-                    self.hub_link.command(command, host::now(), &pool);
-                    self.hub_poll(cx);
+                ShellPanelAction::DeskLinkDisconnect(session) => self.desk_link.disconnect(session),
+                ShellPanelAction::TrayMenu { client, tray, item } => {
+                    self.send_relays(vec![(client, makepad_widgets::makepad_platform::studio::HostRelay::TrayMenu { tray, item })]);
                 }
                 ShellPanelAction::ToggleMute => {
                     self.toggle_output_mute(cx);
@@ -6426,7 +6611,7 @@ impl AppMain for App {
         };
         if !eval_theme(vm, "wm_theme", &source) {
             // Fall back to the bundled default so the DSL still evaluates.
-            let mut fallback = theme::BUNDLED_TOKYO_NIGHT_SPLASH.to_string();
+            let mut fallback = makepad_shell_kit::theme::BUNDLED_TOKYO_NIGHT_SPLASH.to_string();
             fallback.push_str("\ntrue\n");
             eval_theme(vm, "wm_theme_fallback", &fallback);
         }
@@ -6436,7 +6621,7 @@ impl AppMain for App {
         // unless the theme ships its own `shell: {...}` block, which
         // replaces it wholesale.
         if !theme::theme_defines_shell(&source) {
-            let mut block = theme::shell_splash_block(&source);
+            let mut block = makepad_shell_kit::theme::shell_splash_block(&source);
             block.push_str("\ntrue\n");
             eval_theme(vm, "wm_theme_shell", &block);
         }
@@ -6457,6 +6642,7 @@ impl AppMain for App {
         mobile_surface::script_mod(vm);
         desk::phone::script_mod(vm);
         dock_warp::script_mod(vm);
+        desk_link::script_mod(vm);
         backdrop::script_mod(vm);
         spacewarp::panel::script_mod(vm);
         skins::script_mod(vm);
@@ -6473,6 +6659,37 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        #[cfg(target_os = "linux")]
+        if let Event::Scroll(scroll) = event {
+            if self.linux_controls.invert_scroll && scroll.is_mouse {
+                let mut reversed = scroll.clone();
+                reversed.scroll = -reversed.scroll;
+                let reversed = Event::Scroll(reversed);
+                self.handle_wm_event(cx, &reversed);
+                if let Event::Scroll(reversed) = reversed {
+                    scroll.handled_x.set(reversed.handled_x.get());
+                    scroll.handled_y.set(reversed.handled_y.get());
+                }
+                return;
+            }
+        }
+        self.handle_wm_event(cx, event);
+    }
+}
+
+impl App {
+    fn handle_wm_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.desk_link.handle_event(cx, event);
+        // a virtual desktop that follows its viewer takes the window size of the viewer that connected last
+        #[cfg(target_os = "linux")]
+        if let Some(w) = self.desk_link.take_viewer_window() {
+            let refresh_mhz = if w.refresh_mhz != 0 { w.refresh_mhz } else { cx.linux_display_snapshot().virtual_display.map_or(60_000, |v| v.refresh_mhz) };
+            self.desk_link_viewer_window(cx, w.width, w.height, refresh_mhz, w.scale);
+        }
+        if self.state.is_some() && self.desk_link_shown != Some(self.desk_link.generation()) {
+            self.desk_link_shown = Some(self.desk_link.generation());
+            self.sync_desk_link(cx, true);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if self.state.is_some() {
             self.domain_event(cx, event);
@@ -6524,6 +6741,10 @@ impl AppMain for App {
         // A client's file dialog is modal while it is up: the pointer, the keys and the
         // typed text are its own, before the WM's binds and any client.
         if self.file_picker_event(cx, event) {
+            return;
+        }
+        // A tray app's dropdown closes on Escape and on a press outside it.
+        if self.state.is_some() && self.dropdown_event(cx, event) {
             return;
         }
         // A reconcile in the last desk draw: the bar follows it now.
@@ -6667,6 +6888,7 @@ impl AppMain for App {
         if self.state.is_some() { self.behind_observe(cx, event); }
         if self.phone_search_event(cx,event) {return;}
         if self.state.is_some() && self.phone_pointer(cx,event) {return;}
+        if self.state.is_some() && self.file_carry_event(cx, event) {return;}
         if self.state.is_some() && self.shot_event(cx, event) {return;}
         if self.state.is_some() && self.spaces_pointer(cx, event) {return;}
         if self.state.is_some() && self.snap_event(cx,event) {return;}
@@ -6816,9 +7038,10 @@ impl AppMain for App {
             }
         }
         if let Event::Shutdown = event {
-            // The WM's AI hub ends with it (hub_child).
+            // The node's AI Hub app keeps running for the next WM (hub_app; Windows: it ends).
             let pool = cx.task_pool();
             self.hub_link.shutdown(&pool);
+            self.devhub_link.shutdown(&pool);
             if self.state.is_some() {
                 self.kill_warm_previews(cx);
                 self.kill_pane_child(cx);
@@ -6935,6 +7158,49 @@ impl AppMain for App {
                     cx.set_cursor(MouseCursor::Default);
                 }
             }
+        }
+    }
+}
+
+impl App {
+    /// Files carried out of a hosted app's window: the pointer takes them to another window,
+    /// which gets them as a file drop where the pointer is let go (the drop a screenshot
+    /// thumbnail makes). Promised files are waited for first: their producer started with the
+    /// drag, so this is usually no wait at all.
+    fn file_carry_event(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        if self.file_carry.is_none() {
+            return false;
+        }
+        match event {
+            Event::MouseMove(_) => {
+                cx.set_cursor(MouseCursor::Grabbing);
+                true
+            }
+            Event::MouseUp(e) => {
+                let Some((from, paths)) = self.file_carry.take() else { return false };
+                cx.set_cursor(MouseCursor::Default);
+                let items: Vec<(u32, String)> = paths.iter().map(|p| (makepad_hal::input::drag_item::FILE, p.clone())).collect();
+                if !makepad_hal::drag_promise::wait_promised(&items) {
+                    log!("wm: a dragged file could not be made; nothing dropped");
+                    return true;
+                }
+                let target = self.desk(cx).borrow_mut::<WmDesk>().and_then(|mut d| {
+                    if d.window_at(e.abs) == Some(from) {
+                        return None;
+                    }
+                    d.drop_files_at(cx, e.abs, paths)
+                });
+                if let Some(client) = target {
+                    log!("wm: files from client {from} dropped on client {client}");
+                    self.focus_client(cx, client);
+                }
+                true
+            }
+            Event::MouseDown(_) => {
+                self.file_carry = None;
+                false
+            }
+            _ => false,
         }
     }
 }

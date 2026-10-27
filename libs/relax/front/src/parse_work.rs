@@ -18,7 +18,7 @@ struct Reusing {
     next: Reuse,
     hits: usize,
 }
-crate::gen_local! {
+crate::memo_local! {
     static REUSE: RefCell<Option<Reusing>>;
 }
 pub struct Session;
@@ -177,8 +177,8 @@ pub fn put_rules(key: Option<Vec<u8>>, x: &Rules) {
 pub const SLOTS: usize = 10;
 #[derive(Default, Clone, Copy, Debug)]
 pub struct Times(pub [f64; SLOTS]);
-crate::gen_local! {
-    static STATE: RefCell<Option<(Times, [bool; SLOTS])>>;
+thread_local! {
+    static STATE: RefCell<Option<(Times, [bool; SLOTS])>> = Default::default();
 }
 pub fn begin() { STATE.with(|s| *s.borrow_mut() = Some((Times::default(), [false; SLOTS]))); }
 pub fn finish() -> Times { STATE.with(|s| s.borrow_mut().take().map(|s| s.0).unwrap_or_default()) }

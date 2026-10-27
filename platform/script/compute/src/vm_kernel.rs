@@ -212,7 +212,7 @@ impl KernelProgram {
     }
 
     /// What a compile depends on, hashed: the syntax tree (with its spans),
-    /// the layouts, the backend and the modules.
+    /// the layouts, the backend, the modules and the vector code's lanes.
     fn key(&self, layouts: &[Layout], backend: Backend, modules: &[crate::module::Module]) -> u64 {
         use std::fmt::Write;
         struct Fnv(u64);
@@ -229,6 +229,9 @@ impl KernelProgram {
         for m in modules {
             let _ = write!(h, "\u{0}{}\u{0}{}", m.path, m.source);
         }
+        // the vector code's lanes are part of what a compile makes (native_vec::with_lanes)
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        let _ = write!(h, "\u{0}x{:?}", crate::native_vec::install_lanes());
         h.0
     }
 }

@@ -5,7 +5,11 @@ mod tests {
     use std::alloc::GlobalAlloc;
     use std::sync::{Arc, Barrier};
 
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// A job-arena scope as compile jobs open it: the arena takes compiler-phase blocks only.
+    fn test_scope() -> (crate::zone_alloc::PhaseGuard, ScratchGuard) {
+        (crate::zone_alloc::compiler(), enter_scratch())
+    }
 
     unsafe fn checked(size: usize, align: usize) -> (*mut u8, Layout) {
         let l = Layout::from_size_align(size, align).unwrap();
@@ -31,12 +35,12 @@ mod tests {
 
     #[test]
     fn sizes_alignment_zeroing_and_escape() {
-        let _serial = lock(&TEST_LOCK);
+        let _serial = crate::zone_alloc::test_serial();
         trim();
         let before = stats();
         let mut blocks = Vec::new();
         {
-            let _scope = scratch(&crate::options::RuntimeOptions::default());
+            let _scope = test_scope();
             assert!(active());
             for size in [
                 1,
@@ -75,7 +79,7 @@ mod tests {
         }
         trim();
         assert_eq!(stats(), before);
-        let _scope = scratch(&crate::options::RuntimeOptions::default());
+        let _scope = test_scope();
         unsafe {
             for size in [16, 2048, 262145, CHUNK + 1] {
                 let l = Layout::from_size_align(size, 64).unwrap();
@@ -91,7 +95,7 @@ mod tests {
 
     #[test]
     fn nested_scopes_unwind_and_realloc_between_heaps() {
-        let _serial = lock(&TEST_LOCK);
+        let _serial = crate::zone_alloc::test_serial();
         trim();
         let before = stats();
         unsafe {
@@ -99,15 +103,20 @@ mod tests {
             let heap = RelaxAlloc.alloc(l);
             assert!(!heap.is_null() && !owns(heap));
             std::ptr::write_bytes(heap, 0x3c, l.size());
-            let outer = scratch(&crate::options::RuntimeOptions::default());
-            let inner = scratch(&crate::options::RuntimeOptions::default());
+            let phase = crate::zone_alloc::compiler();
+            let outer = enter_scratch();
+            let inner = enter_scratch();
             drop(outer); // depth also tolerates guards dropped out of order
             assert!(active());
-            let arena = RelaxAlloc.realloc(heap, l, 3000);
-            assert!(!arena.is_null() && owns(arena));
-            assert!(std::slice::from_raw_parts(arena, 97)
+            // a block of another heap never moves into the job arena
+            let grown = RelaxAlloc.realloc(heap, l, 3000);
+            assert!(!grown.is_null() && !owns(grown));
+            assert!(std::slice::from_raw_parts(grown, 97)
                 .iter()
                 .all(|&b| b == 0x3c));
+            RelaxAlloc.dealloc(grown, Layout::from_size_align(3000, 64).unwrap());
+            let arena = RelaxAlloc.alloc(Layout::from_size_align(3000, 64).unwrap());
+            assert!(!arena.is_null() && owns(arena));
             let l2 = Layout::from_size_align(3000, 64).unwrap();
             std::ptr::write_bytes(arena, 0x6d, 3000);
             let big = RelaxAlloc.realloc(arena, l2, CHUNK + 7);
@@ -126,9 +135,10 @@ mod tests {
                 .iter()
                 .all(|&b| b == 0x6d));
             RelaxAlloc.dealloc(heap, Layout::from_size_align(200, 64).unwrap());
+            drop(phase);
         }
         let _ = std::panic::catch_unwind(|| {
-            let _scope = scratch(&crate::options::RuntimeOptions::default());
+            let _scope = test_scope();
             assert!(active());
             panic!("test scope unwind");
         });
@@ -139,10 +149,10 @@ mod tests {
 
     #[test]
     fn empty_current_chunk_decommits_and_stale_cache_is_safe() {
-        let _serial = lock(&TEST_LOCK);
+        let _serial = crate::zone_alloc::test_serial();
         trim();
         let before = stats();
-        let _scope = scratch(&crate::options::RuntimeOptions::default());
+        let _scope = test_scope();
         unsafe {
             let (p, l) = checked(64, 16);
             let index = (p as usize - DEFAULT.base.load(Ordering::Relaxed)) / CHUNK;
@@ -161,7 +171,7 @@ mod tests {
             let remote_barrier = barrier.clone();
             let old_address = p as usize;
             let remote = std::thread::spawn(move || {
-                let _scope = scratch(&crate::options::RuntimeOptions::default());
+                let _scope = test_scope();
                 let (other, layout) = checked(64, 16);
                 assert_eq!(other as usize, old_address);
                 remote_barrier.wait();
@@ -183,7 +193,7 @@ mod tests {
 
     #[test]
     fn remote_frees_during_allocation_and_after_owner_exit() {
-        let _serial = lock(&TEST_LOCK);
+        let _serial = crate::zone_alloc::test_serial();
         trim();
         let before = stats();
         let mut workers = Vec::new();
@@ -200,7 +210,7 @@ mod tests {
                 });
                 let mut escaped = Vec::new();
                 {
-                    let _scope = scratch(&crate::options::RuntimeOptions::default());
+                    let _scope = test_scope();
                     for i in 0..12000 {
                         unsafe {
                             let (p, l) = checked(16 << (i % 9), 16);
@@ -233,10 +243,10 @@ mod tests {
 
     #[test]
     fn warm_chunks_are_reused_without_commit_and_bounded() {
-        let _serial = lock(&TEST_LOCK);
+        let _serial = crate::zone_alloc::test_serial();
         trim();
         let before = stats();
-        let _scope = scratch(&crate::options::RuntimeOptions::default());
+        let _scope = test_scope();
         unsafe {
             // a compile-like scope: a few classes, all freed at the end
             let mut blocks = Vec::new();
@@ -279,12 +289,12 @@ mod tests {
 
     #[test]
     fn free_slots_reused_and_full_chunks_survive_escape() {
-        let _serial = lock(&TEST_LOCK);
+        let _serial = crate::zone_alloc::test_serial();
         trim();
         let before = stats();
         let mut blocks = Vec::new();
         {
-            let _scope = scratch(&crate::options::RuntimeOptions::default());
+            let _scope = test_scope();
             unsafe {
                 for _ in 0..(CHUNK / 2048 + 17) {
                     blocks.push(checked(2048, 16));
@@ -308,10 +318,10 @@ mod tests {
 
     #[test]
     fn exhausted_reservation_falls_back_and_counting_wrapper_works() {
-        let _serial = lock(&TEST_LOCK);
+        let _serial = crate::zone_alloc::test_serial();
         trim();
         let before = stats();
-        let _scope = scratch(&crate::options::RuntimeOptions::default());
+        let _scope = test_scope();
         // Requesting more than the reservation must fail without altering pool state.
         let huge = Layout::from_size_align(RESERVE + CHUNK, 16).unwrap();
         assert!(unsafe { alloc(huge) }.is_null());

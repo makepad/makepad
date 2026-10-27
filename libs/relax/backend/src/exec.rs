@@ -6,30 +6,55 @@
 #[cfg(unix)]
 mod sys {
     use std::ffi::c_void;
+    // mapping executable memory is done on macOS, Linux and Android (exec_alloc); every unix unmaps
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
     pub const PROT_READ: i32 = 1;
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
     pub const PROT_WRITE: i32 = 2;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
     pub const PROT_EXEC: i32 = 4;
-    #[cfg(not(target_os = "macos"))]
-    pub const PROT_EXEC: i32 = 4;
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
     pub const MAP_PRIVATE: i32 = 0x02;
     #[cfg(target_os = "macos")]
     pub const MAP_ANON: i32 = 0x1000;
     #[cfg(target_os = "macos")]
     pub const MAP_JIT: i32 = 0x800;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     pub const MAP_ANON: i32 = 0x20;
     extern "C" {
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
         pub fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut c_void;
         pub fn munmap(addr: *mut c_void, len: usize) -> i32;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         pub fn mprotect(addr: *mut c_void, len: usize, prot: i32) -> i32;
         #[cfg(target_os = "macos")]
         pub fn pthread_jit_write_protect_np(enabled: i32);
         #[cfg(target_os = "macos")]
         pub fn sys_icache_invalidate(start: *mut c_void, len: usize);
-        #[cfg(all(not(target_os = "macos"), target_arch = "aarch64"))]
-        pub fn __clear_cache(start: *mut c_void, end: *mut c_void);
+    }
+
+    /// Makes the instruction cache see code just written at [start, end): what libgcc's
+    /// __clear_cache does (bionic exports no such symbol). Clean the data cache to the point of
+    /// unification, then invalidate the instruction cache, by the line sizes CTR_EL0 reports.
+    #[cfg(all(any(target_os = "linux", target_os = "android"), target_arch = "aarch64"))]
+    pub unsafe fn clear_cache(start: *mut c_void, end: *mut c_void) {
+        let (start, end) = (start as usize, end as usize);
+        let ctr: usize;
+        std::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags));
+        let dline = 4usize << ((ctr >> 16) & 0xf);
+        let iline = 4usize << (ctr & 0xf);
+        let mut a = start & !(dline - 1);
+        while a < end {
+            std::arch::asm!("dc cvau, {}", in(reg) a, options(nostack, preserves_flags));
+            a += dline;
+        }
+        std::arch::asm!("dsb ish", options(nostack, preserves_flags));
+        let mut a = start & !(iline - 1);
+        while a < end {
+            std::arch::asm!("ic ivau, {}", in(reg) a, options(nostack, preserves_flags));
+            a += iline;
+        }
+        std::arch::asm!("dsb ish", "isb", options(nostack, preserves_flags));
     }
 }
 
@@ -105,7 +130,7 @@ impl Code {
                     return None;
                 }
                 #[cfg(target_arch = "aarch64")]
-                sys::__clear_cache(ptr, (ptr as *mut u8).add(len) as *mut _);
+                sys::clear_cache(ptr, (ptr as *mut u8).add(len) as *mut _);
             }
             Some(Code { ptr: ptr as *mut u8, map_len, len: bytes.len() })
         }

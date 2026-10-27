@@ -5,6 +5,11 @@ edition = "2021"
 license = "MIT"
 description = "Fast DEFLATE/zlib decompression ported from libdeflate"
 
+# files outside this crate its sources include (its tests' PNGs; makepad-source-slice ships them so makepad run's
+# source identity of this crate is the same in a slice or source archive)
+[package.metadata.commercial]
+include = ["../../examples/splash/resources/app_icon.png", "../../examples/uizoo/resources/logo_makepad.png", "../../examples/xr/resources/android/res/mipmap-mdpi/ic_launcher.png"]
+
 [dependencies]
 
 [[bench]]

@@ -34,3 +34,44 @@ path = "src/guard.rs"
 [[bin]]
 name = "relax-unwind-probe"
 path = "src/unwind_probe.rs"
+
+# a native panic in a lazy compile reaches the program as a panic of the call (compile_panic.sh)
+[[bin]]
+name = "relax-compile-panic"
+path = "src/compile_panic.rs"
+
+# the program's own stderr while the session transcript cannot be written (stderr_full.sh)
+[[bin]]
+name = "relax-stderr-flood"
+path = "src/stderr_flood.rs"
+
+# makepad inspect's code versions, inlined copies and tier pins against a live program (inspect_tiers.sh)
+[[bin]]
+name = "relax-inspect-tiers"
+path = "src/inspect_tiers.rs"
+
+# makepad inspect `locals` values at a parked panic / breakpoint, every tier (inspect_locals.sh)
+[[bin]]
+name = "relax-inspect-locals"
+path = "src/inspect_locals.rs"
+
+# makepad inspect probes / eval / static / locals against a live program (inspect_probe.sh)
+[[bin]]
+name = "relax-inspect-probe"
+path = "src/inspect_probe.rs"
+
+# the program behind makepad inspect's answer eval: known CPU, memory, panic and hang faults (inspect_eval.sh)
+[[bin]]
+name = "relax-inspect-eval"
+path = "src/inspect_eval.rs"
+
+# forks with pre_exec closures (std's fork path) while the JIT is busy: the child must reach exec (fork_busy.sh)
+[[bin]]
+name = "relax-fork-busy"
+path = "src/fork_busy.rs"
+
+# a font crate's ScaledFont<F: Font> metrics (blanket impls, dyn) in a hot layout loop: its O3
+# snapshots finish and the boot bar does not stay on them (font_tier.sh)
+[[bin]]
+name = "relax-font-tier"
+path = "src/font_tier.rs"

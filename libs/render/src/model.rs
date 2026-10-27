@@ -400,7 +400,7 @@ impl AnimPart {
 /// Where those values came from is an asset-import concern. Runtime code only
 /// consumes this generic contract and supplies a complete model-space pose.
 pub struct DrivenPart {
-    pub connection: String,
+    pub connection: std::sync::Arc<str>,
     pub pivot: Vec3f,
     pub anchor: Vec3f,
     pub radius: f32,
@@ -1710,6 +1710,7 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
         wind:term("wind"),clearcoat:term("clearcoat"),flake:term("flake"),rim:term("rim"),
         impostor:value(shading,"impostor",0.0).max(0.0),
         plate:value(shading,"plate",0.0)>0.5,
+        lamp:shading.and_then(|s|s.get("lamp")).and_then(Val::str).and_then(makepad_gltf::GlbLamp::from_name),
         fur,
         normal_png:image("normalTexture"),normal_scale:value(material.get("normalTexture"),"scale",1.0),
         occlusion_png:image("occlusionTexture"),occlusion_strength:value(material.get("occlusionTexture"),"strength",1.0),
@@ -1721,7 +1722,26 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
         // shader reads only the top projection there.
         triplanar:(material.get("extras").and_then(|e|e.get("makepadTriplanar")).and_then(Val::f64).unwrap_or(0.0).max(0.0) as f32)
             *if material.get("extras").and_then(|e|e.get("makepadTriplanarFlat")).is_some_and(|v|matches!(v,Val::Bool(true))){-1.0}else{1.0},
+        splat:material.get("extras").and_then(|e|e.get("makepadSplat")).and_then(|s|gltf_splat(json,bin,s)).map(std::sync::Arc::new),
     })
+}
+
+/// A generated terrain tile's paint (gen level glb.rs `splat_material`):
+/// `weights` (a texture index), `map` [x, z, cell, width, rows] and per
+/// layer its `albedo` (or flat sRGB `color`), `normal` and `bump`, `scale`
+/// (1/metres), `roughness`, `metallic`.
+fn gltf_splat(json:&Val,bin:&[u8],splat:&Val)->Option<crate::material_surface::SplatSurface> {
+    let texture=|v:Option<&Val>|v.and_then(Val::usize).and_then(|i|json.get("textures")?.idx(i)?.get("source")?.usize()).and_then(|i|gltf_embedded_png(json,bin,i));
+    let num=|v:&Val,key:&str,default:f32|v.get(key).and_then(Val::f64).map_or(default,|f|f as f32);
+    let map=splat.get("map")?;
+    let m=|i:usize|map.idx(i).and_then(Val::f64).map(|v|v as f32);
+    let layers=splat.get("layers")?.arr().iter().map(|l|crate::material_surface::SplatLayer{
+        albedo_png:texture(l.get("albedo")),
+        color:std::array::from_fn(|i|l.get("color").and_then(|c|c.idx(i)).and_then(Val::f64).unwrap_or(0.5) as f32),
+        normal_png:texture(l.get("normal")),
+        scale:num(l,"scale",1.0),roughness:num(l,"roughness",0.9),metallic:num(l,"metallic",0.0),bump:num(l,"bump",0.0),
+    }).collect::<Vec<_>>();
+    Some(crate::material_surface::SplatSurface{layers,weights_png:texture(splat.get("weights"))?,origin:[m(0)?,m(1)?],cell:m(2)?,width:m(3)?,rows:m(4)?})
 }
 
 impl PrimSpan {
@@ -2609,7 +2629,7 @@ fn build_driven_parts(
         }
         let layers = stream.layers(json, bin);
         out.push(DrivenPart {
-            connection: def.connection,
+            connection: def.connection.into(),
             pivot: def.pivot,
             anchor: def.anchor,
             radius: def.radius,
@@ -2902,7 +2922,8 @@ fn plain_surface_signature(json: &Val, bin: &[u8], index: usize) -> Option<Vec<u
     let material = json.get("materials")?.idx(index)?;
     let textured = material.get("pbrMetallicRoughness").is_some_and(|p| p.get("baseColorTexture").is_some() || p.get("metallicRoughnessTexture").is_some())
         || material.get("extras").is_some_and(|e| e.get("makepadMips").is_some());
-    if textured || s.fur.is_some() || s.normal_png.is_some() || s.occlusion_png.is_some() || s.emissive_png.is_some() || s.impostor > 0.0 || s.plate {
+    // A lamp keeps its own layer too: its emission changes per copy.
+    if textured || s.fur.is_some() || s.normal_png.is_some() || s.occlusion_png.is_some() || s.emissive_png.is_some() || s.impostor > 0.0 || s.plate || s.lamp.is_some() {
         return None;
     }
     let factor = |key: &str| material.get("pbrMetallicRoughness").and_then(|p| p.get(key)).and_then(Val::f64).unwrap_or(1.0) as f32;

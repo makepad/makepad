@@ -26,8 +26,6 @@
 use makepad_widgets::*;
 
 use super::bar::BarModule;
-use crate::hub_glow::GlowTracker;
-use std::time::Instant;
 use super::ui::{contains, cut_top, inset, rect, DrawShellFill, Ico, ShellDraw};
 #[cfg(target_os = "linux")]
 use super::wifi_linux::{
@@ -37,12 +35,21 @@ use super::{alpha, darker, CtrlState, ShellTokens};
 #[cfg(target_os = "linux")]
 #[path = "panels_linux.rs"]
 mod linux;
+/// The BlackShark headset's row and settings view (Controllers & devices).
+#[cfg(target_os = "linux")]
+#[path = "blackshark/panel_linux.rs"]
+mod headset;
+// Widget field types must be plain names for the derive's field parser.
+#[cfg(target_os = "linux")]
+use {headset::HeadsetDrag, super::blackshark::HeadsetEdits};
 #[cfg(target_os = "linux")]
 use {std::sync::Arc, super::system_linux::SystemSnapshot};
 #[cfg(target_os = "linux")]
 use makepad_widgets::makepad_platform::linux_display::LinuxDisplaySnapshot;
 #[cfg(target_os = "linux")]
-use {linux::{Chooser, DpiDrag}, super::display_menu::{Change, DisplayTrials}, makepad_widgets::makepad_platform::linux_display::DisplayPacing};
+use {linux::{Chooser, DpiDrag}, super::display_menu::{Change, CustomField, DisplayTrials}, makepad_widgets::makepad_platform::linux_display::DisplayPacing};
+#[cfg(target_os = "linux")]
+use super::display_layout::{SavedVirtual, VirtualSize};
 
 // ======================================================================
 // Civil dates — the calendar grid needs real date maths, no chrono.
@@ -131,6 +138,8 @@ pub fn today() -> (i64, u32, u32) {
 // The panels
 // ======================================================================
 
+/// A Desk Link viewer row in its panel.
+
 /// Which flyout is up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelKind {
@@ -140,7 +149,11 @@ pub enum PanelKind {
     Monitor,
     Network,
     Bluetooth,
-    Hub,
+    Gamepad,
+    /// An app's tray icon (the bar's `Tray(i)`): its menu (`PanelData::tray_menu`).
+    Tray(usize),
+    /// Who is viewing this desktop over Desk Link, each with Disconnect.
+    DeskLink,
 }
 
 impl PanelKind {
@@ -152,7 +165,9 @@ impl PanelKind {
             BarModule::Monitor => PanelKind::Monitor,
             BarModule::Network => PanelKind::Network,
             BarModule::Bluetooth => PanelKind::Bluetooth,
-            BarModule::Hub => PanelKind::Hub,
+            BarModule::Gamepad => PanelKind::Gamepad,
+            BarModule::Tray(i) => PanelKind::Tray(i),
+            BarModule::DeskLink => PanelKind::DeskLink,
             _ => return None,
         })
     }
@@ -165,14 +180,17 @@ impl PanelKind {
             PanelKind::Monitor => BarModule::Monitor,
             PanelKind::Network => BarModule::Network,
             PanelKind::Bluetooth => BarModule::Bluetooth,
-            PanelKind::Hub => BarModule::Hub,
+            PanelKind::Gamepad => BarModule::Gamepad,
+            PanelKind::Tray(i) => BarModule::Tray(i),
+            PanelKind::DeskLink => BarModule::DeskLink,
         }
     }
 
-    /// `contentWidth` — 560 for the calendar, 380 for the rest.
+    /// `contentWidth` — 560 for the calendar, 300 for a tray menu, 380 for the rest.
     pub fn content_width(self) -> f64 {
         match self {
             PanelKind::Clock => 560.0,
+            PanelKind::Tray(_) => 300.0,
             _ => 380.0,
         }
     }
@@ -192,11 +210,14 @@ pub struct PanelData {
     pub text_size: f64,
     pub network: Option<String>,
     pub bluetooth: Option<bool>,
+    pub game_controllers: super::game_controllers::Inventory,
     /// The month the calendar is showing.
     pub view: (i64, u32),
     pub today: (i64, u32, u32),
-    /// The AI hub, as last read (only while its panel is open).
-    pub hub: crate::hub_control::HubSnapshot,
+    /// The open tray menu: whose tray it is and what it shows (`crate::trays`).
+    pub tray_menu: Option<TrayMenu>,
+    /// Desk Link viewers connected right now.
+    pub desk_link: Vec<crate::desk_link::DeskLinkViewer>,
 }
 
 impl Default for PanelData {
@@ -214,9 +235,11 @@ impl Default for PanelData {
             text_size: 12.0,
             network: None,
             bluetooth: None,
+            game_controllers: Default::default(),
             view: (y, m),
             today: (y, m, d),
-            hub: Default::default(),
+            tray_menu: None,
+            desk_link: Vec::new(),
         }
     }
 }
@@ -242,9 +265,11 @@ impl PanelData {
             text_size: 12.0,
             network: Some("Ethernet".into()),
             bluetooth: Some(true),
+            game_controllers: Default::default(),
             view: (y, m),
             today: (y, m, d),
-            hub: Default::default(),
+            tray_menu: None,
+            desk_link: Vec::new(),
         }
     }
 
@@ -265,6 +290,22 @@ impl PanelData {
         }
     }
 }
+
+/// An app's tray menu as its flyout shows it: the owning client and tray (where a choice
+/// goes), the glyph and tooltip, and the rows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrayMenu {
+    pub client: u64,
+    pub tray: u64,
+    pub glyph: Option<Texture>,
+    pub tooltip: String,
+    pub items: Vec<makepad_widgets::makepad_platform::studio::RelayTrayItem>,
+}
+
+/// A tray menu's item row and separator heights.
+const TRAY_ROW: f64 = 30.0;
+const TRAY_LINE: f64 = 9.0;
+const TRAY_HEAD: f64 = 34.0;
 
 /// `omarchy-display-text-size`'s curated stops.
 pub const TEXT_SIZE_STOPS: [f64; 7] = [9.0, 10.0, 11.0, 12.0, 14.0, 16.0, 20.0];
@@ -288,8 +329,10 @@ pub enum ShellPanelAction {
     ToggleMute,
     SetTextSize(f64),
     Close,
-    /// A command for the AI hub.
-    Hub(crate::hub_control::HubCommand),
+    /// An item of an app's tray menu was chosen: tell the app (`HostRelay::TrayMenu`).
+    TrayMenu { client: u64, tray: u64, item: u64 },
+    /// End this Desk Link viewer's session.
+    DeskLinkDisconnect(u32),
     /// The Wi-Fi dropdown's intent (Linux). The WM turns it into a worker
     /// command; a `ConnectWithPassphrase` is completed from the panel's own
     /// field so the passphrase never rides in an action.
@@ -311,18 +354,15 @@ enum Hit {
     PrevMonth,
     NextMonth,
     Today,
-    /// A model row's Load / Unload button.
-    HubModel(usize),
-    /// The KV precision switch: true is q8.
-    HubKv(bool),
-    /// The context size's step: true is the next size up.
-    HubContext(bool),
-    /// The WM's hub child: stop and start it again.
-    HubRestart,
-    /// Open or close the list of chat models.
-    HubPickOpen,
-    /// A chat model of that list (index into `hub_chat_models`).
-    HubPick(usize),
+    /// A Desk Link viewer's Disconnect button (its session).
+    DeskLinkDisconnect(u32),
+    /// An enabled item of the open tray menu (its id).
+    TrayItem(u64),
+    #[cfg(target_os = "linux")]
+    PairXbox(usize),
+    /// The BlackShark headset's row and settings view.
+    #[cfg(target_os = "linux")]
+    Headset(headset::HeadsetHit),
     #[cfg(target_os = "linux")]
     Wifi(WifiHit),
     #[cfg(target_os = "linux")]
@@ -360,6 +400,21 @@ enum Hit {
     PacePicker,
     #[cfg(target_os = "linux")]
     PaceItem(usize),
+    /// The Desktop switch: `false` Panel, `true` Virtual.
+    #[cfg(target_os = "linux")]
+    Desktop(bool),
+    /// The virtual desktop's Size picker, and a chip of its unfolded list
+    /// (`virtual_size_targets`).
+    #[cfg(target_os = "linux")]
+    VirtualSizePicker,
+    #[cfg(target_os = "linux")]
+    VirtualSizeItem(usize),
+    /// A Custom size stepper: the field and the direction.
+    #[cfg(target_os = "linux")]
+    VirtualCustom(CustomField, i32),
+    /// The panels' switch while virtual: `false` Mirror (scaled), `true` Off.
+    #[cfg(target_os = "linux")]
+    VirtualPanels(bool),
     /// Keep or revert the change being tried.
     #[cfg(target_os = "linux")]
     TrialKeep,
@@ -380,6 +435,8 @@ enum Hit {
     /// Opens or closes the Display panel's Mouse & touchpad subview.
     #[cfg(target_os = "linux")]
     PointerSettings,
+    #[cfg(target_os = "linux")]
+    InvertScroll,
     /// Pointer speed slider: `false` mouse, `true` touchpad.
     #[cfg(target_os = "linux")]
     PointerSpeedSlider(bool),
@@ -451,17 +508,6 @@ pub struct ShellPanel {
     dragging: Option<Hit>,
     #[rust]
     pub inert: bool,
-    /// Which hub models light up (see `hub_glow`), its clock, and the frame loop that
-    /// runs only while something glows.
-    #[rust]
-    glow: GlowTracker,
-    /// The hub panel's chat model list is open (the WM's hub child: a pick restarts it).
-    #[rust]
-    hub_pick: bool,
-    #[rust]
-    glow_clock: Option<Instant>,
-    #[rust]
-    glow_frame: NextFrame,
     /// The Wi-Fi dropdown's state (Linux): the iwd snapshot, the password
     /// prompt, the notice line. Fed by the WM from the worker's events.
     #[cfg(target_os = "linux")]
@@ -479,6 +525,26 @@ pub struct ShellPanel {
     #[cfg(target_os = "linux")]
     #[rust]
     device_scroll: usize,
+    #[rust]
+    peripheral_scroll: usize,
+    #[rust]
+    peripheral_visible: usize,
+    /// Controllers & devices shows the BlackShark settings view.
+    #[cfg(target_os = "linux")]
+    #[rust]
+    headset_view: bool,
+    /// The first settings section shown when the view is taller than the card.
+    #[cfg(target_os = "linux")]
+    #[rust]
+    headset_scroll: usize,
+    #[cfg(target_os = "linux")]
+    #[rust]
+    headset_drag: Option<HeadsetDrag>,
+    /// Headset edits the headset has not confirmed yet (the WM copies them
+    /// from the system controller on each poll).
+    #[cfg(target_os = "linux")]
+    #[rust]
+    pub headset_pending: HeadsetEdits,
     /// The main window's actual layout scale as the WM last read it off the
     /// platform (`window_geom.dpi_factor`) — never the saved value. Zero
     /// until the first read; the panel then shows the launch default.
@@ -529,6 +595,18 @@ pub struct ShellPanel {
     #[cfg(target_os = "linux")]
     #[rust]
     pace_targets: Vec<DisplayPacing>,
+    /// The virtual desktop's saved choices (`None`: the Panel desktop), as
+    /// the WM last polled them; the Size list is unfolded, and the choice
+    /// behind each drawn chip.
+    #[cfg(target_os = "linux")]
+    #[rust]
+    pub virtual_saved: Option<SavedVirtual>,
+    #[cfg(target_os = "linux")]
+    #[rust]
+    virtual_size_open: bool,
+    #[cfg(target_os = "linux")]
+    #[rust]
+    virtual_size_targets: Vec<VirtualSize>,
     /// "Restart desktop now" was pressed once and asks to confirm.
     #[cfg(target_os = "linux")]
     #[rust]
@@ -564,6 +642,9 @@ pub struct ShellPanel {
     #[cfg(target_os = "linux")]
     #[rust]
     pointer_settings: bool,
+    #[cfg(target_os = "linux")]
+    #[rust]
+    pub invert_scroll: bool,
     /// A source the renderer was asked for and has not yet named as the
     /// primary, with when it was asked. The WM clears it on observation
     /// or reports it after a bounded wait.
@@ -625,23 +706,33 @@ impl ShellPanel {
         self.redraw(cx);
     }
 
-    /// Seconds on the glow clock (it starts with the first read).
-    fn glow_now(&mut self) -> f64 {
-        self.glow_clock.get_or_insert_with(Instant::now).elapsed().as_secs_f64()
+    /// The tray menu the open tray flyout shows, as the app last set it; `None` (the tray went
+    /// away) closes a tray flyout.
+    pub fn tray_menu_update(&mut self, cx: &mut Cx, menu: Option<TrayMenu>) {
+        let open = matches!(self.open, Some(PanelKind::Tray(_)));
+        if open && menu.is_none() {
+            self.data.tray_menu = None;
+            self.close(cx);
+            return;
+        }
+        if self.data.tray_menu != menu {
+            self.data.tray_menu = menu;
+            if open {
+                self.redraw(cx);
+            }
+        }
     }
 
-    /// A new hub snapshot: the glow follows it, and the panel redraws when something
-    /// changed, glows, or a "used Ns ago" note moved. An idle hub redraws nothing.
-    pub fn hub_update(&mut self, cx: &mut Cx, snap: crate::hub_control::HubSnapshot) {
-        let now = self.glow_now();
-        self.glow.update(&snap, now);
-        let notes = self.glow.notes_changed(now);
-        let changed = self.data.hub != snap;
-        if changed {
-            self.data.hub = snap;
-        }
-        if changed || notes || self.glow.animating(now) {
-            self.redraw(cx);
+    /// The Desk Link viewers now: shown when its panel is open, which closes once nobody is left.
+    pub fn desk_link_update(&mut self, cx: &mut Cx, viewers: Vec<crate::desk_link::DeskLinkViewer>) {
+        let changed = self.data.desk_link != viewers;
+        self.data.desk_link = viewers;
+        if self.open == Some(PanelKind::DeskLink) {
+            if self.data.desk_link.is_empty() {
+                self.close(cx);
+            } else if changed {
+                self.redraw(cx);
+            }
         }
     }
 
@@ -697,6 +788,7 @@ impl ShellPanel {
     /// preview) goes now.
     fn left_panel(&mut self, was_open: Option<PanelKind>) {
         self.dragging = None;
+        self.peripheral_scroll = 0;
         #[cfg(target_os = "linux")]
         {
             self.device_picker = None;
@@ -705,11 +797,16 @@ impl ShellPanel {
             self.chooser_changes.clear();
             self.pace_open = false;
             self.pace_targets.clear();
+            self.virtual_size_open = false;
+            self.virtual_size_targets.clear();
             self.restart_confirm = false;
             self.gpu_picker = false;
             self.gpu_scroll = 0;
             self.gpu_targets.clear();
             self.pointer_settings = false;
+            self.headset_view = false;
+            self.headset_scroll = 0;
+            self.headset_drag = None;
         }
         #[cfg(target_os = "linux")]
         if was_open == Some(PanelKind::Network) && self.open != Some(PanelKind::Network) {
@@ -728,6 +825,17 @@ impl ShellPanel {
         #[cfg(target_os = "linux")]
         let w = w.min((screen.size.x - margin * 2.0).max(0.0));
         panel_card_rect(self.anchor, screen, w, height, margin, self.tokens.bar.size_horizontal)
+    }
+
+    /// Where a tray dropdown `w` x `h` goes under the bar item `anchor`: a card placed as this
+    /// panel places its own (centred on the item, one margin off the bar, clamped into the
+    /// screen by the same margin), and the screen rect it was fitted into. `target` is the item's
+    /// screen on a multi-screen desktop, else the whole window as last drawn.
+    pub fn flyout_rect(&self, anchor: Rect, target: Option<Rect>, w: f64, h: f64) -> (Rect, Rect) {
+        let screen = target.unwrap_or(self.screen);
+        let margin = self.tokens.spacing.gaps_out;
+        let w = w.min((screen.size.x - margin * 2.0).max(1.0));
+        (panel_card_rect(anchor, screen, w, h, margin, self.tokens.bar.size_horizontal), screen)
     }
 
     fn section_header(&mut self, cx: &mut Cx2d, r: Rect, label: &str, value: &str) {
@@ -803,17 +911,6 @@ impl ShellPanel {
 
     /// "Not available on this OS" — the honest reading of a panel whose
     /// service does not exist here.
-    /// The hub child's Restart button at the right of `row`; its width.
-    fn hub_restart_button(&mut self, cx: &mut Cx2d, row: Rect) -> f64 {
-        let tok = self.tokens;
-        let w = self.d.button_width(cx, &tok, false, "Restart", tok.font.body_small);
-        let r = rect(row.pos.x + row.size.x - w, row.pos.y + 3.0, w, row.size.y - 6.0);
-        let state = if self.hot == Some(Hit::HubRestart) { CtrlState::Hover } else { CtrlState::Normal };
-        self.d.button(cx, r, &tok, state, None, "Restart", tok.font.body_small, tok.popups.text, true);
-        self.hits.push((Hit::HubRestart, r));
-        w
-    }
-
     fn unavailable(&mut self, cx: &mut Cx2d, r: Rect, what: &str) {
         let tok = self.tokens;
         self.d.label(
@@ -851,7 +948,13 @@ impl ShellPanel {
             PanelKind::Monitor => self.monitor_height(),
             PanelKind::Network => self.network_height(),
             PanelKind::Bluetooth => 150.0,
-            PanelKind::Hub => self.hub_height(),
+            #[cfg(target_os = "linux")]
+            PanelKind::Gamepad if self.headset_view => self.headset_height(),
+            PanelKind::Gamepad => 136.0 + 68.0 * (self.data.game_controllers.controllers.len()
+                + self.data.game_controllers.batteries.len() + self.data.game_controllers.receivers.len()
+                + self.headset_list_rows()) as f64,
+            PanelKind::Tray(_) => self.tray_menu_height(),
+            PanelKind::DeskLink => 52.0 + makepad_desk_link_panel::VIEWER_ROW * self.data.desk_link.len().max(1) as f64,
         } + pad * 2.0;
         // The body is inset by the padding AND the popup border. The
         // Display panel's plan is sized to the body, so its card asks for
@@ -902,7 +1005,9 @@ impl ShellPanel {
                     "Wi-Fi scanning and DNS switching need NetworkManager.",
                 );
             }
-            PanelKind::Hub => self.draw_hub(cx, body),
+            PanelKind::Tray(_) => self.draw_tray_menu(cx, body),
+            PanelKind::DeskLink => self.draw_desk_link(cx, body),
+            PanelKind::Gamepad => self.draw_game_controllers(cx, body),
             PanelKind::Bluetooth => {
                 let (hero, rest) = cut_top(body, 40.0);
                 let on = self.data.bluetooth.unwrap_or(false);
@@ -921,6 +1026,84 @@ impl ShellPanel {
                 self.unavailable(cx, rest, "Device pairing needs BlueZ.");
             }
         }
+    }
+
+    /// Rows the BlackShark headset adds to the device list (Linux only).
+    fn headset_list_rows(&self) -> usize {
+        #[cfg(target_os = "linux")]
+        return self.headset_rows();
+        #[cfg(not(target_os = "linux"))]
+        0
+    }
+
+    fn draw_game_controllers(&mut self, cx: &mut Cx2d, body: Rect) {
+        #[cfg(target_os = "linux")]
+        if self.headset_view {
+            self.draw_headset(cx, body);
+            return;
+        }
+        let tok = self.tokens;
+        let fg = tok.popups.text;
+        let inventory = self.data.game_controllers.clone();
+        let (hero, mut rest) = cut_top(body, 52.0);
+        // The headset row comes right after the controllers.
+        let headsets = self.headset_list_rows();
+        let count = inventory.controllers.len() + headsets + inventory.batteries.len();
+        let status = if count == 0 { "No devices detected".into() } else { format!("{count} devices") };
+        self.d.panel_hero(cx, hero, &tok, fg, Ico::Gamepad, "Controllers & devices", &status, 0.0);
+        let rows = count + inventory.receivers.len();
+        // Fit whole rows to the current screen and scroll the rest, without limiting the inventory.
+        self.peripheral_visible = ((rest.size.y - 64.0).max(0.0) / 68.0) as usize;
+        self.peripheral_scroll = self.peripheral_scroll.min(rows.saturating_sub(self.peripheral_visible));
+        let visible = self.peripheral_scroll..self.peripheral_scroll + self.peripheral_visible;
+        for (index, controller) in inventory.controllers.iter().enumerate() {
+            if !visible.contains(&index) { continue; }
+            let (row, next) = cut_top(rest, 68.0); rest = next;
+            let detail = controller.battery.as_ref().map_or("Connected".into(), |b| format!("Battery: {b}"));
+            self.d.panel_hero(cx, row, &tok, fg, Ico::Gamepad, &controller.name, &detail, 0.0);
+        }
+        #[cfg(target_os = "linux")]
+        for index in 0..headsets {
+            if !visible.contains(&(inventory.controllers.len() + index)) { continue; }
+            let (row, next) = cut_top(rest, 68.0); rest = next;
+            self.draw_headset_row(cx, row);
+        }
+        for (index, battery) in inventory.batteries.iter().enumerate() {
+            if !visible.contains(&(inventory.controllers.len() + headsets + index)) { continue; }
+            let (row, next) = cut_top(rest, 68.0); rest = next;
+            use super::game_controllers::DeviceKind;
+            let icon = match battery.kind {
+                DeviceKind::Keyboard => Ico::Keyboard,
+                DeviceKind::Mouse => Ico::Mouse,
+                DeviceKind::Headset => Ico::Headphone,
+                DeviceKind::Other => Ico::Battery,
+            };
+            self.d.panel_hero(cx, row, &tok, fg, icon, &battery.name, &battery.detail, 0.0);
+        }
+        #[cfg(target_os = "linux")]
+        for (index, receiver) in inventory.receivers.iter().enumerate() {
+            if !visible.contains(&(count + index)) { continue; }
+            let (row, next) = cut_top(rest, 68.0); rest = next;
+            let (label, button) = cut_top(row, 26.0);
+            self.d.label(cx, label, false, tok.font.body_small, fg, super::ui::HAlign::Left,
+                "Xbox wireless receiver");
+            let label = if receiver.pairing { "Pairing… hold the controller pair button" } else { "Pair Xbox controller" };
+            let hit = Hit::PairXbox(index);
+            let state = if self.hot == Some(hit) { CtrlState::Hover } else { CtrlState::Normal };
+            self.d.button(cx, button, &tok, state, Some(Ico::Gamepad), label, tok.font.body_small, fg, true);
+            self.hits.push((hit, button));
+        }
+        #[cfg(target_os = "linux")]
+        if !self.system_notice.is_empty() {
+            let (row, next) = cut_top(rest, 32.0); rest = next;
+            self.unavailable(cx, row, &self.system_notice.clone());
+        }
+        let (note, _) = cut_top(rest, 32.0);
+        self.unavailable(cx, note, if rows > self.peripheral_visible {
+            "Scroll for more devices."
+        } else if !inventory.receivers.is_empty() {
+            "Hold your controller’s pair button to connect."
+        } else { "Battery readings update automatically." });
     }
 
     // ------------------------------------------------------------- clock
@@ -1233,259 +1416,75 @@ impl ShellPanel {
 
     // ------------------------------------------------------------- power
 
-    fn hub_height(&self) -> f64 {
-        let h = &self.data.hub;
-        if !h.available {
-            return match &h.process {
-                Some(p) => 40.0 + 12.0 + p.phase.reason().map_or(0.0, |r| r.lines().take(HUB_REASON_LINES).count() as f64 * 16.0 + 6.0) + 34.0,
-                None => 40.0 + 12.0 + 40.0,
-            };
-        }
-        let policy = if h.policy.is_some() { 18.0 } else { 0.0 };
-        let process = if h.process.is_some() { 30.0 + if self.hub_pick { hub_chat_models(h).len() as f64 * 26.0 } else { 0.0 } } else { 0.0 };
-        let activity = h.activity.len().max(1) as f64 * 20.0;
-        let recent = h.recent.len().min(3) as f64 * 16.0;
-        let context = if h.models.iter().any(|m| Some(&m.id) == h.chat_model.as_ref()) { 30.0 } else { 0.0 };
-        40.0 + 12.0 + 38.0 + policy + process + 22.0 + h.models.len() as f64 * 34.0 + context + 12.0 + 22.0 + activity + 20.0 + recent
+    /// Who is viewing this desktop: a row per viewer (name, address, how long, watching or
+    /// paused) with its Disconnect button.
+    fn tray_menu_height(&self) -> f64 {
+        let rows = self.data.tray_menu.as_ref().map_or(0.0, |m| m.items.iter().map(|i| if i.line { TRAY_LINE } else { TRAY_ROW }).sum());
+        TRAY_HEAD + TRAY_LINE + rows
     }
 
-    /// The AI hub panel: GPU memory, the models with Load / Unload, what is
-    /// working now and what finished, the context size and the KV switch.
-    fn draw_hub(&mut self, cx: &mut Cx2d, body: Rect) {
-        use crate::hub_control::{KvPrecision, ModelState};
+    /// An app's tray menu: its glyph and tooltip, then its items as the app listed them (a
+    /// check mark where an item is checked, disabled ones dimmed, separator lines).
+    fn draw_tray_menu(&mut self, cx: &mut Cx2d, body: Rect) {
         use super::ui::HAlign;
         let tok = self.tokens;
         let fg = tok.popups.text;
-        let hub = self.data.hub.clone();
-        let now = self.glow_now();
-        if self.glow.animating(now) {
-            self.glow_frame = cx.new_next_frame();
+        let Some(menu) = self.data.tray_menu.clone() else { return };
+        let (head, mut rest) = cut_top(body, TRAY_HEAD);
+        let glyph = rect(head.pos.x + 2.0, head.pos.y + (head.size.y - 20.0) * 0.5, 20.0, 20.0);
+        match &menu.glyph {
+            Some(texture) => self.d.glyph(cx, texture, glyph, fg),
+            None => self.d.icon(cx, Ico::Dot, glyph, fg),
         }
-        let (hero, rest) = cut_top(body, 40.0);
-        let status = hub.status();
-        self.d.panel_hero(cx, hero, &tok, fg, Ico::Chip, "AI hub", &status, 0.0);
-        let (sep, rest) = cut_top(rest, 12.0);
-        self.d.separator(cx, rect(sep.pos.x, sep.pos.y + 6.0, sep.size.x, 1.0), fg, 0.12);
-        if !hub.available {
-            match &hub.process {
-                // The WM's own hub on its way up, or down: why, and Restart.
-                Some(p) => {
-                    let mut rest = rest;
-                    if let Some(reason) = p.phase.reason() {
-                        for line in reason.lines().take(HUB_REASON_LINES) {
-                            let (row, r2) = cut_top(rest, 16.0);
-                            rest = r2;
-                            self.d.label_elided(cx, row, false, tok.font.caption, darker(fg, 1.2), HAlign::Left, line);
-                        }
-                        rest = cut_top(rest, 6.0).1;
-                    }
-                    let (row, _) = cut_top(rest, 34.0);
-                    self.hub_restart_button(cx, row);
-                }
-                None => self.unavailable(cx, rest, "Start the AI hub to see its models."),
-            }
-            return;
-        }
-        // GPU memory.
-        let (row, rest) = cut_top(rest, 22.0);
-        let gib = |mb: u32| mb as f64 / 1024.0;
-        self.d.label(cx, row, true, tok.font.caption, darker(fg, 1.4), HAlign::Left, "GPU memory");
-        self.d.label(cx, row, false, tok.font.caption, fg, HAlign::Right,
-            &format!("{:.1} / {:.1} GiB, {:.1} free", gib(hub.gpu_used_mb), gib(hub.gpu_total_mb), gib(hub.gpu_total_mb.saturating_sub(hub.gpu_used_mb))));
-        let (bar_row, rest) = cut_top(rest, 16.0);
-        let track = rect(bar_row.pos.x, bar_row.pos.y + 4.0, bar_row.size.x, 8.0);
-        self.d.solid(cx, track, alpha(fg, 0.12));
-        let used = if hub.gpu_total_mb > 0 { (hub.gpu_used_mb as f64 / hub.gpu_total_mb as f64).clamp(0.0, 1.0) } else { 0.0 };
-        self.d.solid(cx, rect(track.pos.x, track.pos.y, track.size.x * used, track.size.y), fg);
-        // Models, grouped by what they do (the hub sorts them): a type icon, the name, one
-        // line on what it does with its state and GPU footprint, Load / Unload. The chat
-        // model's context setting sits under it, capped by what the GPU budget allows.
-        // What the hub's memory policy did last: a variant run, a chat model unloaded for a job.
-        let rest = match &hub.policy {
-            Some(note) => {
-                let (row, rest) = cut_top(rest, 18.0);
-                self.d.label_elided(cx, row, false, tok.font.caption, darker(fg, 1.2), HAlign::Left, note);
-                rest
-            }
-            None => rest,
-        };
-        // The WM's own hub: the chat model it loads at start (a pick restarts it), and Restart.
-        let rest = match &hub.process {
-            Some(p) => {
-                let (row, mut rest) = cut_top(rest, 30.0);
-                let restart_w = self.hub_restart_button(cx, row);
-                let pick_w = self.d.button_width(cx, &tok, false, "Change", tok.font.body_small);
-                let pick = rect(row.pos.x + row.size.x - restart_w - 6.0 - pick_w, row.pos.y + 3.0, pick_w, row.size.y - 6.0);
-                let state = if self.hub_pick { CtrlState::Selected } else if self.hot == Some(Hit::HubPickOpen) { CtrlState::Hover } else { CtrlState::Normal };
-                self.d.button(cx, pick, &tok, state, None, "Change", tok.font.body_small, fg, true);
-                self.hits.push((Hit::HubPickOpen, pick));
-                self.d.label(cx, rect(row.pos.x, row.pos.y, 80.0, row.size.y), false, tok.font.caption, darker(fg, 1.4), HAlign::Left, "Chat model");
-                let name = if p.model.is_empty() { "none at start" } else { p.model.as_str() };
-                self.d.label_elided(cx, rect(row.pos.x + 80.0, row.pos.y, (pick.pos.x - 8.0 - row.pos.x - 80.0).max(0.0), row.size.y), false, tok.font.body_small, fg, HAlign::Left, name);
-                if self.hub_pick {
-                    for (i, id) in hub_chat_models(&hub).iter().enumerate() {
-                        let (row, r2) = cut_top(rest, 26.0);
-                        rest = r2;
-                        let r = rect(row.pos.x + 80.0, row.pos.y + 2.0, row.size.x - 80.0, row.size.y - 4.0);
-                        let state = if *id == p.model { CtrlState::Selected } else if self.hot == Some(Hit::HubPick(i)) { CtrlState::Hover } else { CtrlState::Normal };
-                        self.d.button(cx, r, &tok, state, None, id, tok.font.body_small, fg, false);
-                        self.hits.push((Hit::HubPick(i), r));
-                    }
-                }
-                rest
-            }
-            None => rest,
-        };
-        let (head, mut rest) = cut_top(rest, 22.0);
-        self.d.section_header(cx, rect(head.pos.x, head.pos.y + 4.0, head.size.x, head.size.y - 4.0), &tok, fg, "Models");
-        for (i, m) in hub.models.iter().enumerate() {
-            let (row, r2) = cut_top(rest, 34.0);
-            rest = r2;
-            let (label, state, disabled) = match m.state {
-                ModelState::Loaded => ("Unload", CtrlState::Normal, false),
-                ModelState::Unloaded | ModelState::Error => ("Load", CtrlState::Normal, false),
-                ModelState::Loading => ("Loading", CtrlState::Disabled, true),
-                ModelState::Downloading => ("Getting", CtrlState::Disabled, true),
-            };
-            // Three columns that never overlap: [icon + name / what it does] takes what is
-            // left and elides, [state / GPU size] and [Load] have fixed widths on the right.
-            const GAP: f64 = 10.0;
-            const ICON: f64 = 18.0;
-            let g = self.glow.row(&m.id, now);
-            let k = (0.5 - 0.5 * (now * std::f64::consts::TAU / 1.4).cos()) as f32;
-            let lit = g.strength * if g.working { 0.8 + 0.2 * k } else { 1.0 };
-            if g.strength > 0.0 {
-                self.d.solid(cx, rect(row.pos.x - 6.0, row.pos.y + 1.0, row.size.x + 12.0, row.size.y - 2.0), vec4(0.30, 0.78, 0.42, 0.95 * lit));
-            }
-            let w = self.d.button_width(cx, &tok, false, "Unload", tok.font.body_small);
-            let button = rect(row.pos.x + row.size.x - w, row.pos.y + 4.0, w, row.size.y - 8.0);
-            let state = if !disabled && self.hot == Some(Hit::HubModel(i)) { CtrlState::Hover } else { state };
-            let lit_now = self.glow.row(&m.id, now).strength;
-            let label_fg = if lit_now > 0.0 { lerp_color(fg, vec4(0.02, 0.14, 0.06, 1.0), lit_now) } else { fg };
-            if lit_now > 0.0 {
-                // On the green the button is a darker pad with dark ink (the themed
-                // button's own label colour is light).
-                self.d.solid(cx, button, vec4(0.02, 0.14, 0.06, 0.14 * lit_now));
-                self.d.label(cx, button, true, tok.font.body_small, label_fg, HAlign::Center, label);
-            } else {
-                self.d.button(cx, button, &tok, state, None, label, tok.font.body_small, label_fg, true);
-            }
-            if !disabled {
-                self.hits.push((Hit::HubModel(i), button));
-            }
-            let state_w = ["downloading", "on disk", "loaded", "loading", "failed", "99.9 GiB"]
-                .iter()
-                .map(|t| self.d.measure(cx, false, tok.font.caption, t))
-                .fold(0.0f64, f64::max)
-                .ceil();
-            let state_col = rect(button.pos.x - GAP - state_w, row.pos.y, state_w, row.size.y);
-            let dim = if m.state == ModelState::Loaded { fg } else { darker(fg, 1.4) };
-            // A working model lights up: a soft wash and edge in the accent that breathes,
-            // an accent icon and name, a live line. It fades out after the work.
-            // Computing = a calm green row (brightness breathes), dark text on it.
-            let ink = vec4(0.02, 0.14, 0.06, 1.0);
-            let dim = if g.strength > 0.0 { lerp_color(dim, ink, g.strength) } else { dim };
-            let sub = if g.strength > 0.0 { lerp_color(darker(fg, 1.4), ink, g.strength) } else { darker(fg, 1.4) };
-            self.d.icon(cx, hub_icon(m.kind), rect(row.pos.x, row.pos.y + (row.size.y - ICON) * 0.5, ICON, ICON), dim);
-            let text_x = row.pos.x + ICON + 8.0;
-            let text = rect(text_x, row.pos.y, (state_col.pos.x - GAP - text_x).max(0.0), row.size.y);
-            let (top, bottom) = (rect(text.pos.x, text.pos.y + 2.0, text.size.x, 15.0), rect(text.pos.x, text.pos.y + 17.0, text.size.x, 14.0));
-            self.d.label_elided(cx, top, false, tok.font.body_small, dim, HAlign::Left, &m.name);
-            if let Some(live) = &g.live {
-                self.d.label_elided(cx, bottom, false, tok.font.caption, ink, HAlign::Left, live);
-            } else if let Some(used) = &g.used {
-                self.d.label_elided(cx, bottom, false, tok.font.caption, sub, HAlign::Left, &format!("{} \u{b7} {}", m.kind.what(), used));
-            } else {
-                self.d.label_elided(cx, bottom, false, tok.font.caption, sub, HAlign::Left, m.kind.what());
-            }
-            let state = match m.state {
-                ModelState::Loaded => "loaded",
-                ModelState::Loading => "loading",
-                ModelState::Downloading => "downloading",
-                ModelState::Error => "failed",
-                ModelState::Unloaded => "on disk",
-            };
-            let (stop, sbottom) = (rect(state_col.pos.x, top.pos.y, state_col.size.x, top.size.y), rect(state_col.pos.x, bottom.pos.y, state_col.size.x, bottom.size.y));
-            self.d.label(cx, stop, false, tok.font.caption, dim, HAlign::Right, state);
-            if m.state == ModelState::Loaded && m.gpu_mb > 0 {
-                self.d.label(cx, sbottom, false, tok.font.caption, sub, HAlign::Right, &format!("{:.1} GiB", gib(m.gpu_mb)));
-            }
-            if Some(&m.id) != hub.chat_model.as_ref() {
+        let title = rect(head.pos.x + 30.0, head.pos.y, head.size.x - 30.0, head.size.y);
+        self.d.label_elided(cx, title, true, tok.font.body, fg, HAlign::Left, &menu.tooltip);
+        let (sep, next) = cut_top(rest, TRAY_LINE);
+        rest = next;
+        self.d.separator(cx, rect(sep.pos.x, sep.pos.y + 4.0, sep.size.x, 1.0), fg, 0.12);
+        for item in &menu.items {
+            if item.line {
+                let (sep, next) = cut_top(rest, TRAY_LINE);
+                rest = next;
+                self.d.separator(cx, rect(sep.pos.x, sep.pos.y + 4.0, sep.size.x, 1.0), fg, 0.12);
                 continue;
             }
-            // This model's context: a step down / up through the sizes the hub offers, up
-            // to what fits next to the UI; then the KV precision.
-            let (row, r2) = cut_top(rest, 30.0);
-            rest = r2;
-            let step = self.d.button_width(cx, &tok, false, "+", tok.font.body_small).max(24.0);
-            let mut x = row.pos.x + 26.0;
-            self.d.label_elided(cx, rect(x, row.pos.y, 52.0, row.size.y), false, tok.font.caption, darker(fg, 1.4), HAlign::Left, "Context");
-            x += 56.0;
-            let can_up = hub_context_up(&hub).is_some();
-            for (label, up) in [("-", false), ("+", true)] {
-                let r = rect(x, row.pos.y + 3.0, step, row.size.y - 6.0);
-                let enabled = if up { can_up } else { hub.context_options.iter().any(|c| *c < hub.context) };
-                let state = if !enabled { CtrlState::Disabled } else if self.hot == Some(Hit::HubContext(up)) { CtrlState::Hover } else { CtrlState::Normal };
-                self.d.button(cx, r, &tok, state, None, label, tok.font.body_small, fg, true);
-                if enabled {
-                    self.hits.push((Hit::HubContext(up), r));
-                }
-                x += step + 4.0;
-                if !up {
-                    self.d.label(cx, rect(x, row.pos.y, 48.0, row.size.y), true, tok.font.body_small, fg, HAlign::Center, &kilo(hub.context));
-                    x += 48.0 + 4.0;
-                }
+            let (row, next) = cut_top(rest, TRAY_ROW);
+            rest = next;
+            let hit = Hit::TrayItem(item.id);
+            if item.enabled {
+                self.d.cursor_surface(cx, row, &tok.controls, self.hot == Some(hit), false);
+                self.hits.push((hit, row));
             }
-            let max = match m.context_fit {
-                Some(0) => "no room next to the UI".to_string(),
-                Some(fit) => format!("max {}", kilo(fit)),
-                None => String::new(),
-            };
-            let kw = self.d.button_width(cx, &tok, false, "f16", tok.font.body_small);
-            self.d.label_elided(cx, rect(x + 4.0, row.pos.y, ((row.pos.x + row.size.x - 2.0 * kw - 10.0) - (x + 4.0)).max(0.0), row.size.y), false, tok.font.caption, darker(fg, 1.4), HAlign::Left, &max);
-            for (k, q8) in [(KvPrecision::F16, false), (KvPrecision::Q8, true)] {
-                let kx = row.pos.x + row.size.x - kw * (2.0 - q8 as u8 as f64);
-                let r = rect(kx, row.pos.y + 3.0, kw, row.size.y - 6.0);
-                let state = if hub.kv == k { CtrlState::Selected } else if self.hot == Some(Hit::HubKv(q8)) { CtrlState::Hover } else { CtrlState::Normal };
-                self.d.button(cx, r, &tok, state, None, k.name(), tok.font.body_small, fg, true);
-                self.hits.push((Hit::HubKv(q8), r));
+            let ink = if item.enabled { fg } else { alpha(fg, 0.5) };
+            if item.checked == Some(true) {
+                self.d.icon_centered(cx, Ico::Check, rect(row.pos.x + 4.0, row.pos.y, 16.0, row.size.y), 14.0, ink);
             }
+            let text = rect(row.pos.x + 26.0, row.pos.y, row.size.x - 30.0, row.size.y);
+            self.d.label_elided(cx, text, false, tok.font.body, ink, HAlign::Left, &item.label);
         }
-        // Activity.
+    }
+
+    fn draw_desk_link(&mut self, cx: &mut Cx2d, body: Rect) {
+        let tok = self.tokens;
+        let fg = tok.popups.text;
+        let viewers = self.data.desk_link.clone();
+        let (hero, rest) = cut_top(body, 40.0);
+        let status = match viewers.len() {
+            0 => "Nobody is viewing".to_string(),
+            1 => "1 viewer".to_string(),
+            n => format!("{n} viewers"),
+        };
+        self.d.panel_hero(cx, hero, &tok, tok.bar.active, Ico::Record, "Desk Link", &status, 0.0);
         let (sep, rest) = cut_top(rest, 12.0);
         self.d.separator(cx, rect(sep.pos.x, sep.pos.y + 6.0, sep.size.x, 1.0), fg, 0.12);
-        let (head, mut rest) = cut_top(rest, 22.0);
-        self.d.section_header(cx, rect(head.pos.x, head.pos.y + 4.0, head.size.x, head.size.y - 4.0), &tok, fg, "Working now");
-        if hub.activity.is_empty() {
-            let (row, r2) = cut_top(rest, 20.0);
-            rest = r2;
-            self.d.label(cx, row, false, tok.font.body_small, darker(fg, 1.4), HAlign::Left, "Nothing");
-        }
-        for a in &hub.activity {
-            let (row, r2) = cut_top(rest, 20.0);
-            rest = r2;
-            let rate = match (a.tokens_per_s, a.progress) {
-                (Some(t), _) => format!("{:.0} tok/s", t),
-                (None, Some(p)) => format!("{:.0}%", p * 100.0),
-                _ => String::new(),
-            };
-            let rate_w = self.d.measure(cx, false, tok.font.body_small, &rate);
-            let left = rect(row.pos.x, row.pos.y, (row.size.x - rate_w - 10.0).max(0.0), row.size.y);
-            self.d.label_elided(cx, left, false, tok.font.body_small, fg, HAlign::Left, &format!("{} for {}", a.model, a.app));
-            self.d.label(cx, row, false, tok.font.body_small, fg, HAlign::Right, &rate);
-        }
-        // Recent requests.
-        let (head, mut rest) = cut_top(rest, 20.0);
-        self.d.section_header(cx, rect(head.pos.x, head.pos.y + 4.0, head.size.x, head.size.y - 4.0), &tok, fg, "Recent");
-        for q in hub.recent.iter().take(3) {
-            let (row, r2) = cut_top(rest, 16.0);
-            rest = r2;
-            let r = if q.ok { format!("{} ms", q.millis) } else { format!("{} ms, failed", q.millis) };
-            let r_w = self.d.measure(cx, false, tok.font.caption, &r);
-            let left = rect(row.pos.x, row.pos.y, (row.size.x - r_w - 10.0).max(0.0), row.size.y);
-            self.d.label_elided(cx, left, false, tok.font.caption, darker(fg, 1.4), HAlign::Left, &format!("{} for {}", q.model, q.app));
-            self.d.label(cx, row, false, tok.font.caption, darker(fg, 1.4), HAlign::Right, &r);
-        }
+        // the rows Desk Host's tray dropdown shows too
+        let hot = match self.hot {
+            Some(Hit::DeskLinkDisconnect(session)) => Some(session),
+            _ => None,
+        };
+        let mut hits = Vec::new();
+        makepad_desk_link_panel::draw_viewers(cx, &mut self.d, &tok, rest, &viewers, hot, &mut hits);
+        self.hits.extend(hits.into_iter().map(|(session, r)| (Hit::DeskLinkDisconnect(session), r)));
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -2393,6 +2392,7 @@ impl ShellPanel {
         self.open == Some(PanelKind::Network)
             || self.chooser.is_some()
             || self.pace_open
+            || self.virtual_size_open
             || self.dpi_drag.is_some()
             || self.restart_confirm
             || self.gpu_picker
@@ -2427,7 +2427,7 @@ impl ShellPanel {
         }
         // Escape folds a screen's picker, or drops a restart confirm; the
         // Display panel stays.
-        if e.key_code == KeyCode::Escape && (self.chooser.is_some() || self.pace_open || self.restart_confirm) {
+        if e.key_code == KeyCode::Escape && (self.chooser.is_some() || self.pace_open || self.virtual_size_open || self.restart_confirm) {
             self.close_chooser();
             self.restart_confirm = false;
             self.swallow_escape_up = true;
@@ -2491,6 +2491,7 @@ impl ShellPanel {
     /// dropdown shows.
     pub fn wants_scroll(&self, p: Vec2d) -> bool {
         (self.open == Some(PanelKind::Audio) && self.device_picker.is_some() && contains(self.card, p))
+            || (self.open == Some(PanelKind::Gamepad) && contains(self.card, p))
             || (self.open == Some(PanelKind::Monitor) && self.gpu_picker && self.gpu_overflow && contains(self.card, p))
             || (self.open == Some(PanelKind::Network)
             && contains(self.card, p)
@@ -2535,9 +2536,6 @@ impl Widget for ShellPanel {
         if self.inert || self.open.is_none() {
             return;
         }
-        if self.glow_frame.is_event(event).is_some() {
-            self.redraw(cx);
-        }
         match event {
             Event::MouseMove(e) => {
                 if let Some(hit) = self.dragging {
@@ -2558,6 +2556,8 @@ impl Widget for ShellPanel {
                         }
                         #[cfg(target_os = "linux")]
                         Hit::DpiScaleSlider => self.dpi_drag_to(cx, e.abs),
+                        #[cfg(target_os = "linux")]
+                        Hit::Headset(hit) => self.headset_drag_to(cx, hit, e.abs),
                         _ => {}
                     }
                     return;
@@ -2607,9 +2607,10 @@ impl Widget for ShellPanel {
                         | Hit::Arrangement(_) | Hit::OptimiseFor(_)
                         | Hit::ScreenMove(..) | Hit::ScreenMain(_) | Hit::ScreenResolution(_) | Hit::ScreenRate(_)
                         | Hit::ChooserItem(_) | Hit::TrialKeep | Hit::TrialRevert | Hit::PacePicker | Hit::PaceItem(_)
+                        | Hit::Desktop(_) | Hit::VirtualSizePicker | Hit::VirtualSizeItem(_) | Hit::VirtualCustom(..) | Hit::VirtualPanels(_)
                         | Hit::RestartDesktop | Hit::RestartConfirm | Hit::RestartCancel
                         | Hit::GpuPicker
-                        | Hit::Gpu(_) | Hit::PointerSettings)) => self.system_press(cx, hit),
+                        | Hit::Gpu(_) | Hit::PointerSettings | Hit::InvertScroll)) => self.system_press(cx, hit),
                     #[cfg(target_os = "linux")]
                     Some(Hit::DpiScaleSlider) => self.dpi_drag_begin(cx, e.abs),
                     #[cfg(target_os = "linux")]
@@ -2621,45 +2622,26 @@ impl Widget for ShellPanel {
                             value: Self::pointer_from_slider(v),
                         });
                     }
-                    Some(Hit::HubModel(i)) => {
-                        use crate::hub_control::{HubCommand, ModelState};
-                        if let Some(m) = self.data.hub.models.get(i) {
-                            let cmd = match m.state {
-                                ModelState::Loaded => Some(HubCommand::Unload(m.id.clone())),
-                                ModelState::Unloaded | ModelState::Error => Some(HubCommand::Load(m.id.clone())),
-                                ModelState::Loading | ModelState::Downloading => None,
-                            };
-                            if let Some(cmd) = cmd {
-                                cx.widget_action(self.uid, ShellPanelAction::Hub(cmd));
-                            }
+                    #[cfg(target_os = "linux")]
+                    Some(Hit::Headset(hit)) => self.headset_press(cx, hit, e.abs),
+                    #[cfg(target_os = "linux")]
+                    Some(Hit::PairXbox(index)) => {
+                        if let Some(receiver) = self.data.game_controllers.receivers.get(index) {
+                            cx.widget_action(self.uid, ShellPanelAction::System(crate::linux_controls::ControlAction::Command(
+                                super::system_linux::SystemCommand::PairXbox(receiver.id.clone()))));
                         }
                     }
-                    Some(Hit::HubContext(up)) => {
-                        let hub = &self.data.hub;
-                        let now = hub.context;
-                        let next = if up { hub_context_up(hub) } else { hub.context_options.iter().rev().copied().find(|c| *c < now) };
-                        if let Some(c) = next {
-                            cx.widget_action(self.uid, ShellPanelAction::Hub(crate::hub_control::HubCommand::SetContext(c)));
+                    Some(Hit::DeskLinkDisconnect(session)) => {
+                        cx.widget_action(self.uid, ShellPanelAction::DeskLinkDisconnect(session));
+                    }
+                    // A tray menu choice goes to its app, and the menu closes (as a menu does).
+                    Some(Hit::TrayItem(item)) => {
+                        if let Some(menu) = &self.data.tray_menu {
+                            let (client, tray) = (menu.client, menu.tray);
+                            self.close(cx);
+                            cx.widget_action(self.uid, ShellPanelAction::TrayMenu { client, tray, item });
+                            cx.widget_action(self.uid, ShellPanelAction::Close);
                         }
-                    }
-                    Some(Hit::HubRestart) => {
-                        cx.widget_action(self.uid, ShellPanelAction::Hub(crate::hub_control::HubCommand::Restart));
-                    }
-                    Some(Hit::HubPickOpen) => {
-                        self.hub_pick = !self.hub_pick;
-                        self.redraw(cx);
-                    }
-                    Some(Hit::HubPick(i)) => {
-                        let picked = hub_chat_models(&self.data.hub).get(i).cloned();
-                        self.hub_pick = false;
-                        if let Some(model) = picked.filter(|m| self.data.hub.process.as_ref().is_some_and(|p| p.model != *m)) {
-                            cx.widget_action(self.uid, ShellPanelAction::Hub(crate::hub_control::HubCommand::SetModel(model)));
-                        }
-                        self.redraw(cx);
-                    }
-                    Some(Hit::HubKv(q8)) => {
-                        let kv = if q8 { crate::hub_control::KvPrecision::Q8 } else { crate::hub_control::KvPrecision::F16 };
-                        cx.widget_action(self.uid, ShellPanelAction::Hub(crate::hub_control::HubCommand::SetKv(kv)));
                     }
                     Some(Hit::MuteToggle) => {
                         cx.widget_action(self.uid, ShellPanelAction::ToggleMute);
@@ -2684,13 +2666,24 @@ impl Widget for ShellPanel {
             }
             Event::MouseUp(_) => {
                 #[cfg(target_os = "linux")]
-                self.dpi_drag_end(cx);
+                {
+                    self.dpi_drag_end(cx);
+                    self.headset_release(cx);
+                }
                 self.dragging = None;
             }
             #[cfg(target_os = "linux")]
             Event::Scroll(e) => {
                 if self.wants_scroll(e.abs) {
-                    if self.open == Some(PanelKind::Audio) { self.device_scroll_by(cx, e.scroll.y); }
+                    if self.open == Some(PanelKind::Gamepad) && self.headset_view {
+                        self.headset_scroll_by(cx, e.scroll.y);
+                    }
+                    else if self.open == Some(PanelKind::Gamepad) {
+                        if e.scroll.y > 0.0 { self.peripheral_scroll = self.peripheral_scroll.saturating_add(1); }
+                        else if e.scroll.y < 0.0 { self.peripheral_scroll = self.peripheral_scroll.saturating_sub(1); }
+                        self.redraw(cx);
+                    }
+                    else if self.open == Some(PanelKind::Audio) { self.device_scroll_by(cx, e.scroll.y); }
                     else if self.open == Some(PanelKind::Monitor) {
                         // The unfolded Render on list is the one thing that can overflow.
                         self.gpu_scroll_by(cx, e.scroll.y);
@@ -2710,6 +2703,16 @@ impl Widget for ShellPanel {
         match self.open {
             Some(PanelKind::Network) => self.wifi.summary(),
             Some(PanelKind::Audio | PanelKind::Monitor | PanelKind::Power) => self.system_summary(),
+            Some(PanelKind::Gamepad) if self.headset_view => self.headset_text(),
+            Some(PanelKind::Gamepad) => {
+                let inv = &self.data.game_controllers;
+                let mut text = String::from("Controllers & devices");
+                for c in &inv.controllers { text.push_str(&format!("\n{}: {}", c.name, c.battery.as_deref().unwrap_or("Connected"))); }
+                if self.headset_rows() > 0 { text.push('\n'); text.push_str(&self.headset_text()); }
+                for b in &inv.batteries { text.push_str(&format!("\n{}: {}", b.name, b.detail)); }
+                for r in &inv.receivers { text.push_str(if r.pairing { "\nXbox receiver: Pairing" } else { "\nXbox receiver: Ready" }); }
+                text
+            }
             Some(kind) => format!("panel={:?}", kind).to_lowercase(),
             None => String::new(),
         }
@@ -2762,72 +2765,5 @@ mod tests {
         assert_eq!(PanelKind::for_module(BarModule::Menu), None);
         assert_eq!(PanelKind::Clock.content_width(), 560.0);
         assert_eq!(PanelKind::Audio.content_width(), 380.0);
-    }
-}
-
-fn lerp_color(a: Vec4f, b: Vec4f, t: f32) -> Vec4f {
-    let t = t.clamp(0.0, 1.0);
-    vec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t)
-}
-
-/// The panel's icon for what a hub model does.
-fn hub_icon(kind: crate::hub_control::ModelKind) -> Ico {
-    use crate::hub_control::ModelKind;
-    match kind {
-        ModelKind::Chat => Ico::Prompt,
-        ModelKind::Vision => Ico::Photo,
-        ModelKind::SpeechToText => Ico::Mic,
-        ModelKind::TextToSpeech => Ico::Speaker,
-        ModelKind::Image => Ico::Palette,
-        ModelKind::Music => Ico::Pulse,
-        ModelKind::Stems => Ico::Headphone,
-        ModelKind::Video => Ico::Play,
-        ModelKind::Mesh | ModelKind::Other => Ico::Chip,
-    }
-}
-
-/// The next larger context the hub offers that still fits next to the UI (the chat
-/// model's `context_fit`; unknown = not capped).
-fn hub_context_up(hub: &crate::hub_control::HubSnapshot) -> Option<u32> {
-    let fit = hub.models.iter().find(|m| Some(&m.id) == hub.chat_model.as_ref()).and_then(|m| m.context_fit);
-    hub.context_options.iter().copied().find(|c| *c > hub.context && fit.is_none_or(|f| *c <= f))
-}
-
-/// Lines of a hub crash's or failed build's reason the panel shows.
-const HUB_REASON_LINES: usize = 6;
-
-/// The chat models of the hub's registry, for the WM's chat model pick.
-fn hub_chat_models(hub: &crate::hub_control::HubSnapshot) -> Vec<String> {
-    hub.chat_models.clone()
-}
-
-/// 49152 -> "48k".
-fn kilo(tokens: u32) -> String {
-    if tokens >= 1024 && tokens % 1024 == 0 { format!("{}k", tokens / 1024) } else { tokens.to_string() }
-}
-
-#[cfg(test)]
-mod hub_panel_tests {
-    use super::*;
-    use crate::hub_control::{HubSnapshot, ModelInfo, ModelKind, ModelState};
-
-    fn hub(fit: Option<u32>) -> HubSnapshot {
-        HubSnapshot {
-            available: true,
-            models: vec![ModelInfo { id: "q".into(), name: "q".into(), kind: ModelKind::Chat, state: ModelState::Loaded, context_fit: fit, gpu_mb: 0, device: String::new() }],
-            context: 32768,
-            chat_model: Some("q".into()),
-            context_options: vec![16384, 32768, 49152, 65536],
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn the_context_steps_up_only_as_far_as_the_budget_allows() {
-        assert_eq!(hub_context_up(&hub(Some(57344))), Some(49152));
-        assert_eq!(hub_context_up(&hub(Some(40000))), None);
-        assert_eq!(hub_context_up(&hub(None)), Some(49152), "not known yet: not capped");
-        assert_eq!(kilo(49152), "48k");
-        assert_eq!(hub_icon(ModelKind::SpeechToText), Ico::Mic);
     }
 }

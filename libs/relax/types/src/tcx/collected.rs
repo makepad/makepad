@@ -35,14 +35,14 @@ crate::collected_fields!(crate::types::variance::GenericIndices, lifetimes, type
 crate::collected_enum!(crate::types::variance::V; 0 => Bi, 1 => Co, 2 => Contra, 3 => Inv);
 crate::collected_enum!(outlives::OutlivesPredicate; 0 => Region(a,b), 1 => Type(t,r));
 crate::collected_enum!(TyKey; 0 => Prim(p), 1 => Adt(d), 2 => Slice, 3 => Array,
-    4 => Str, 5 => Ref, 6 => Ptr, 7 => Tuple, 8 => FnPtr, 9 => Dyn(d), 10 => Other);
+    4 => Str, 5 => Ref, 6 => Ptr, 7 => Tuple, 8 => FnPtr, 9 => Dyn(d), 10 => Other, 11 => Error);
 impl crate::collected::ImageKey for TyKey {
     fn image_key(&self) -> u128 {
         let (tag, payload) = match *self {
             TyKey::Prim(p) => (0u128, p as u128), TyKey::Adt(d) => (1, d.0 as u128),
             TyKey::Slice => (2, 0), TyKey::Array => (3, 0), TyKey::Str => (4, 0), TyKey::Ref => (5, 0),
             TyKey::Ptr => (6, 0), TyKey::Tuple => (7, 0), TyKey::FnPtr => (8, 0),
-            TyKey::Dyn(d) => (9, d.0 as u128), TyKey::Other => (10, 0),
+            TyKey::Dyn(d) => (9, d.0 as u128), TyKey::Other => (10, 0), TyKey::Error => (11, 0),
         };
         tag << 32 | payload
     }
@@ -221,12 +221,15 @@ impl Tcx {
         let mut image = crate::image::Writer::default();
         image.add_bytes(0, w);
         if stop() { return None; }
-        image.add_image(1, std::sync::Arc::new(self.tys.collected_writer()?));
         let mut id = 2;
         macro_rules! table { ($($f:ident),+) => { $(if stop() { return None; } self.$f.write_image(&mut image, &mut id);)+ }; }
         tables!(table);
         self.const_tys.write_image(&mut image, &mut id);
         self.contracts_waiting.write_image(&mut image, &mut id);
+        // The interner last (its section stays the second): other threads may intern while this
+        // runs (a mid-run encode), and every type, region, list and constant the tables
+        // above name was interned before its count is read, so the image is consistent.
+        image.insert_image(1, 1, std::sync::Arc::new(self.tys.collected_writer()?));
         Some(image)
     }
 

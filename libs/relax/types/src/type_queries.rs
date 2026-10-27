@@ -591,6 +591,15 @@ impl Providers<'_> {
             q.read_owner(self.prog, def)?;
             let mark = crate::program::missing_mark();
             let mut body = crate::typeck::check_fn(self.prog, self.tcx, def);
+            // run mode (no lints: `makepad run` / `test` / `live`): the unsafety and impl-soundness
+            // errors `makepad check` reports are the body's errors too, for the crates the borrow
+            // checker covers -- safe code may not dereference raw pointers or forge Send/Sync.
+            // (Errors, not a stub body: closures' layouts still read its tables.)
+            if body.errors.is_empty() && !crate::lint::enabled() && crate::borrowck::event::admit(self.prog, self.prog.def(def).krate) {
+                let mut errors: Vec<String> = crate::unsafety::run_crate_impl_errors(self.prog, self.tcx, self.prog.def(def).krate).to_vec();
+                errors.extend(crate::unsafety::run_body_errors(self.prog, self.tcx, &body));
+                for e in errors { body.errors.push(e); }
+            }
             if !body.errors.is_empty() { body.deferred_misses = crate::program::missing_since(mark).into(); }
             Ok((self.tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst), std::sync::Arc::new(body)))
         }, &|id| self.force(id))?;

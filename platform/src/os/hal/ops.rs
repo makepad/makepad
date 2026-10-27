@@ -7,7 +7,7 @@ use crate::{
     cx_api::CxOsOp,
     makepad_live_id::*,
     event::hal_intake::hal_window_id,
-    event::DragItem,
+    event::DragOutFile,
     MouseCursor,
     macos_menu::MacosMenu,
     window::WindowId,
@@ -56,7 +56,7 @@ fn flatten_menu(menu: &MacosMenu, parent: u32, out: &mut Vec<(MenuItem, String)>
                 flatten_menu(i, me, out);
             }
         }
-        MacosMenu::Item { name, command, shift, key, enabled } => {
+        MacosMenu::Item { name, command, shift, key, enabled, dock } => {
             let mut kind = self::menu::ITEM;
             if *command == live_id!(quit) {
                 kind |= self::menu::QUIT;
@@ -66,6 +66,9 @@ fn flatten_menu(menu: &MacosMenu, parent: u32, out: &mut Vec<(MenuItem, String)>
             }
             if !*enabled {
                 kind |= self::menu::DISABLED;
+            }
+            if *dock {
+                kind |= self::menu::DOCK;
             }
             push(MenuItem { parent, kind, cmd: command.0, key: key.to_index(), str: 0 }, name.clone(), out);
         }
@@ -95,6 +98,11 @@ impl Cx {
     }
 
     fn hal_create_window(&mut self, window_id: WindowId, popup: Option<(WindowId, crate::makepad_math::Vec2d, crate::makepad_math::Vec2d)>) {
+        // A window made after the start (a tray dropdown, a second window, `create_on_start:
+        // false`): its widget drew nothing while it was not created yet (Window::draw_walk), and
+        // nothing else asks for a frame of it, so its pass would be presented without a draw list
+        // (solid black). One full redraw after the create draws it.
+        self.redraw_all();
         if self.hal.hosted.is_some() {
             self.hal_hosted_create_window(window_id);
             return;
@@ -116,7 +124,12 @@ impl Cx {
                 }
                 // no position: the window system places it (a NaN position says so)
                 let nan = crate::makepad_math::dvec2(f64::NAN, f64::NAN);
-                (window_kind::NORMAL, Id::NONE, position.unwrap_or(nan), size)
+                if window.dropdown {
+                    // placed at its tray by `WindowAtTray`
+                    (window_kind::DROPDOWN, Id::NONE, nan, size)
+                } else {
+                    (window_kind::NORMAL, Id::NONE, position.unwrap_or(nan), size)
+                }
             }
         };
         // the geometry the app lays out against until the HAL confirms the window
@@ -133,7 +146,9 @@ impl Cx {
         let visuals = window.window_visuals();
         let kind = kind | exact | macos_window_style(&window.macos);
         let fullscreen = window.is_fullscreen;
-        let adopt = !std::mem::replace(&mut self.hal.window_created, true);
+        // a dropdown never takes the host's window (`makepad run`'s load screen): the app's
+        // first regular window does
+        let adopt = kind & 0xff != window_kind::DROPDOWN && !std::mem::replace(&mut self.hal.window_created, true);
         let fb = &mut self.hal.frames;
         fb.w.window_create(id, kind, parent, [position.x as f32, position.y as f32, size.x as f32, size.y as f32], adopt);
         if !title.is_empty() {
@@ -274,9 +289,34 @@ impl Cx {
                 // The host owns these operations, including close. Keep the child's
                 // HAL window alive until the host ends the session, as in the stdin backends.
                 CxOsOp::CloseWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::CLOSE),
+                // a hosted (--stdin-loop) app's close button closes as its `close` does
+                CxOsOp::RequestCloseWindow(w) if self.hal_hosted_extra_window(w) => {
+                    if self.windows[w].is_created {
+                        self.windows[w].is_created = false;
+                        self.hal.frames.w.window_close(hal_window_id(w));
+                    }
+                }
+                CxOsOp::RequestCloseWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::CLOSE),
+                // the window system (or the parent of an embedded window) answers `CloseRequested`
+                CxOsOp::RequestCloseWindow(w) => {
+                    if self.windows[w].is_created {
+                        self.hal.frames.w.window_state(hal_window_id(w), window_state::CLOSE);
+                    }
+                }
                 CxOsOp::MinimizeWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::MINIMIZE),
                 CxOsOp::MaximizeWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::MAXIMIZE),
                 CxOsOp::RestoreWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::RESTORE),
+                // A hosted app's tray dropdown is shown by its own op (`ShowWindowAtTray`) and says when it
+                // is hidden; it is never the host's tile to minimise or show.
+                CxOsOp::HideWindow(w) if self.hal.hosted.is_some() && self.windows[w].dropdown => {
+                    Self::send_studio_message(crate::studio::AppToStudio::Custom(
+                        crate::studio::HostedDropdown::new(w.id(), crate::studio::dropdown_op::HIDE).to_json(),
+                    ));
+                }
+                CxOsOp::ShowWindow(w) if self.hal.hosted.is_some() && self.windows[w].dropdown => {}
+                // A hosted app's hidden window is a minimised one on its host; shown, it comes back.
+                CxOsOp::HideWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::MINIMIZE),
+                CxOsOp::ShowWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::SHOW),
                 CxOsOp::CloseWindow(window_id) if self.hal_is_embedded() => {
                     self.hal.frames.w.window_state(hal_window_id(window_id), window_state::CLOSE);
                 }
@@ -294,11 +334,35 @@ impl Cx {
                 CxOsOp::MaximizeWindow(w) => self.hal.frames.w.window_state(hal_window_id(w), window_state::MAXIMIZE),
                 CxOsOp::FullscreenWindow(w) => self.hal.frames.w.window_state(hal_window_id(w), window_state::FULLSCREEN),
                 CxOsOp::HideWindow(w) => self.hal.frames.w.window_state(hal_window_id(w), window_state::HIDE),
+                CxOsOp::ShowWindowAtTray(w, tray, size) => {
+                    // A hosted app (the makepad WM adopted it): the WM places the window under its
+                    // tray item (`dropdown.rs`), the size is the app's own layout points.
+                    if self.hal.hosted.is_some() {
+                        Self::send_studio_message(crate::studio::AppToStudio::Custom(
+                            crate::studio::HostedDropdown { window_id: w.id(), op: crate::studio::dropdown_op::SHOW, tray: tray.0, w: size.x, h: size.y }.to_json(),
+                        ));
+                        continue;
+                    }
+                    let size = self.windows[w].layout_vec2d_to_native_points(size);
+                    self.hal.frames.w.window_at_tray(hal_window_id(w), tray.0, size.x as f32, size.y as f32);
+                }
+                CxOsOp::ShowWindow(w) => {
+                    self.hal.frames.w.window_state(hal_window_id(w), window_state::SHOW);
+                    if self.hal.hosted.is_none() { self.hal.frames.w.activate_app(); }
+                }
                 CxOsOp::HideWindowButtons(w) => self.hal.frames.w.window_buttons(hal_window_id(w), false),
                 CxOsOp::ShowWindowButtons(w) => self.hal.frames.w.window_buttons(hal_window_id(w), true),
                 CxOsOp::CenterWindowButtons(w, y_center) => {
                     let native = self.windows[w].layout_vec2d_to_native_points(crate::makepad_math::dvec2(0.0, y_center));
                     self.hal.frames.w.window_buttons_center(hal_window_id(w), native.y as f32);
+                }
+                CxOsOp::SetWindowCaption(w, caption, buttons, dark) => {
+                    let native = |r: crate::makepad_math::Rect| {
+                        let r = self.windows[w].layout_rect_to_native_points(r);
+                        [r.pos.x as f32, r.pos.y as f32, r.size.x as f32, r.size.y as f32]
+                    };
+                    let [_, top, _, height] = native(caption);
+                    self.hal.frames.w.window_caption(hal_window_id(w), top, height, native(buttons), dark);
                 }
                 CxOsOp::SetTopmost(w, on) => self.hal.frames.w.window_topmost(hal_window_id(w), on),
                 CxOsOp::SetChromelessWhenMaximized(w, on) => self.hal.frames.w.chromeless_when_max(hal_window_id(w), on),
@@ -389,7 +453,7 @@ impl Cx {
                     // the in-window drag protocol: Drag / Drop are made from the pointer events
                     self.hal.internal_drag_items = Some(std::sync::Arc::new(items));
                 }
-                CxOsOp::StartExternalDragging { window_id, items } => {
+                CxOsOp::StartExternalDragging { window_id, items, image } => {
                     if self.hal.hosted.is_some() {
                         crate::error!("external file dragging is not available in the hosted runtime");
                         self.call_event_handler(&crate::event::Event::DragEnd);
@@ -399,14 +463,23 @@ impl Cx {
                     let flat: Vec<makepad_hal::DragItem> = items
                         .iter()
                         .map(|i| match i {
-                            DragItem::FilePath { path, .. } => makepad_hal::DragItem { kind: makepad_hal::input::drag_item::FILE, str: fb.intern(path) },
-                            DragItem::String { value, .. } => makepad_hal::DragItem { kind: makepad_hal::input::drag_item::STRING, str: fb.intern(value) },
-                            DragItem::VirtualFile(_) => makepad_hal::DragItem::default(),
+                            DragOutFile::File(path) => makepad_hal::DragItem { kind: makepad_hal::input::drag_item::FILE, str: fb.intern(path) },
+                            DragOutFile::Promise { path, mime } => makepad_hal::DragItem {
+                                kind: makepad_hal::input::drag_item::PROMISE,
+                                str: fb.intern(&makepad_hal::drag_promise::encode(path, mime)),
+                            },
                         })
                         .collect();
                     let mut bytes = Vec::new();
                     flat.iter().for_each(|i| i.write(&mut bytes));
-                    fb.w.drag_start(hal_window_id(window_id), flat.len() as u32, &bytes);
+                    let (w, h) = match &image {
+                        Some(i) if i.width > 0 && i.height > 0 && i.rgba.len() == i.width as usize * i.height as usize * 4 => {
+                            bytes.extend_from_slice(&i.rgba);
+                            (i.width, i.height)
+                        }
+                        _ => (0, 0),
+                    };
+                    fb.w.drag_start(hal_window_id(window_id), flat.len() as u32, w, h, &bytes);
                 }
                 CxOsOp::UpdateMacosMenu(menu) => {
                     if self.hal.hosted.is_some() { continue; }
@@ -420,6 +493,47 @@ impl Cx {
                     let mut bytes = Vec::new();
                     items.iter().for_each(|i| i.write(&mut bytes));
                     fb.w.menu_set(items.len() as u32, &bytes);
+                }
+                CxOsOp::SetTray(tray) => {
+                    // A hosted app's tray is its host's to show (the makepad WM's tray area).
+                    if self.hal.hosted.is_some() {
+                        Self::send_studio_message(crate::studio::AppToStudio::Relay(crate::studio::ChildRelay::SetTray(crate::tray::relay_tray(&tray))));
+                        continue;
+                    }
+                    let fb = &mut self.hal.frames;
+                    let mut data = Vec::new();
+                    let mut count = 0;
+                    for item in &tray.menu {
+                        let (kind, cmd, label) = match item {
+                            crate::tray::TrayMenuItem::Item { id, label, enabled, checked } => {
+                                let mut kind = self::menu::ITEM;
+                                if !*enabled {
+                                    kind |= self::menu::DISABLED;
+                                }
+                                if let Some(on) = checked {
+                                    kind |= self::menu::CHECKABLE | if *on { self::menu::CHECKED } else { 0 };
+                                }
+                                (kind, id.0, fb.intern(label))
+                            }
+                            crate::tray::TrayMenuItem::Line => (self::menu::LINE, 0, 0),
+                        };
+                        MenuItem { parent: 0, kind, cmd, key: 0, str: label }.write(&mut data);
+                        count += 1;
+                    }
+                    let image = &tray.image;
+                    let pixels = image.width as usize * image.height as usize;
+                    let (w, h) = if image.alpha.len() >= pixels { (image.width, image.height) } else { (0, 0) };
+                    data.extend_from_slice(&image.alpha[..w as usize * h as usize]);
+                    let tooltip = fb.intern(&tray.tooltip);
+                    let flags = if tray.dropdown { makepad_hal::tray_flags::DROPDOWN } else { 0 };
+                    fb.w.tray_set(tray.id.0, w, h, tooltip, count, flags, &data);
+                }
+                CxOsOp::RemoveTray(id) => {
+                    if self.hal.hosted.is_some() {
+                        Self::send_studio_message(crate::studio::AppToStudio::Relay(crate::studio::ChildRelay::RemoveTray { tray: id.0 }));
+                    } else {
+                        self.hal.frames.w.tray_remove(id.0);
+                    }
                 }
                 // program-side networking, as every backend does it
                 CxOsOp::HttpRequest { request_id, request } => {
@@ -516,13 +630,13 @@ impl Cx {
                 | CxOsOp::CloseSystemBrowser { .. }) => self.hal_system_browser(op),
                 // the macOS backend never had embedded web views either
                 CxOsOp::CreateWebView { .. } | CxOsOp::UpdateWebView { .. } | CxOsOp::CloseWebView { .. } => self.hal.frames.gap("web views are not implemented on macOS"),
-                CxOsOp::XrStartPresenting
-                | CxOsOp::XrSetRenderScale(_)
+                CxOsOp::XrStartPresenting => self.hal_xr_start(),
+                CxOsOp::XrStopPresenting => self.hal_xr_stop(),
+                CxOsOp::XrSetRenderScale(_)
                 | CxOsOp::XrSetLocalAnchor(_)
                 | CxOsOp::XrSetLocalFloor(_)
                 | CxOsOp::XrAdvertiseAnchor(_)
-                | CxOsOp::XrDiscoverAnchor(_)
-                | CxOsOp::XrStopPresenting => self.hal.frames.gap("XR arrives in phase 5"),
+                | CxOsOp::XrDiscoverAnchor(_) => self.hal.frames.gap("XR render scale and anchors are not on the HAL yet"),
             }
         }
         // A zoom queued layout geometry while handling these ops. Deliver it before the

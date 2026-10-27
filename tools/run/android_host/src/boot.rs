@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
 /// Where the package's source comes from.
+#[derive(Clone)]
 pub enum Source {
     /// The current directory is a checkout (the Linux probe).
     Checkout,
@@ -22,6 +23,8 @@ pub struct Boot {
     pub exe: PathBuf,
     /// the app is the window manager: it may start, stop and embed other apps as domains
     pub privileged: bool,
+    /// called with the workspace root once the archive is mounted (the embedded devhub node)
+    pub on_mounted: Option<Box<dyn FnOnce(&str) + Send>>,
 }
 
 /// What the Activity shows while the host boots.
@@ -80,22 +83,25 @@ pub fn memory_budget_mb() -> Option<u64> {
 
 /// Compiles and runs the package main on this domain thread.
 /// Runs on the boot thread: it holds the compiler's allocation zone while Relax loads the program.
-pub fn boot(b: &Boot) -> Result<(), String> {
+pub fn boot(mut b: Boot) -> Result<(), String> {
     let _zone = relax_compiler::zone_alloc::compiler();
     relax_compiler::clock::mark_process_start();
-    makepad_run::init_embedded(&b.exe);
+    relax_runner::init_embedded(&b.exe, &makepad_run::HOST);
     if b.privileged {
-        makepad_run::set_privileged();
+        relax_runner::set_privileged();
     }
     set_state("booting", String::new());
     let opts = Vec::new();
     let mut rest = vec![b.package.clone()];
     rest.extend(b.cargo_flags.iter().cloned());
-    let code = match &b.source {
-        Source::Checkout => makepad_run::run_checkout(opts, rest),
+    let code = match &b.source.clone() {
+        Source::Checkout => relax_runner::run_checkout(opts, rest),
         Source::Archive { file, offset, len } => {
-            let workspace = makepad_run::mount_archive(file, *offset, *len, None)?;
-            makepad_run::run_mounted(&workspace, opts, rest)
+            let workspace = relax_runner::mount_archive(file, *offset, *len, None)?;
+            if let Some(f) = b.on_mounted.take() {
+                f(&workspace);
+            }
+            relax_runner::run_mounted(&workspace, opts, rest)
         }
     };
     if code != 0 {

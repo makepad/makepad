@@ -4,7 +4,8 @@
 # iterators, async, panics/unwinding, integer overflow) is built once natively with `rustc -O --test` (cached by
 # source hash + rustc version) and run under `makepad test` at O1 (MAKEPAD_RUN_O1=always: the baseline code and its quick register allocator, no O3), at the default
 # O3=0 tier (O2 pipeline) and at O3
-# (MAKEPAD_RUN_O3=1, call threshold 1, rounds with sleeps so the async O3 code is installed for later rounds).
+# (MAKEPAD_RUN_O3=1, call threshold 1, rounds with sleeps so the async O3 code is installed for later rounds;
+# guards (libs/relax/compiler/src/guards.rs) on with small thresholds so every guard, guard failure and relink path runs; DIFF_GUARDS=0 turns them off).
 # stdout lines `D ...`, the exit status and a checksum of them must equal the native run's.
 # Prints `diff: N/N equal`, or per failing program a minimal diff, and exits 1.
 # Usage (workspace root, after `cargo build --release -p makepad-run`): tools/run/fixture/diff_fast.sh
@@ -22,15 +23,26 @@ T=${TARGET:-$root/target/release}
 case $T in /*) ;; *) T=$PWD/$T ;; esac
 M=$T/makepad
 [ -x "$M" ] || { echo "diff: no $M (cargo build --release -p makepad-run)"; exit 2; }
+# the std tree of the checkout being tested: a makepad binary whose target dir is outside its tree otherwise
+# looks for <target>/../src/libs/relax/compiler/std and every run exits 1 with no output
+export MAKEPAD_RUN_STD=${MAKEPAD_RUN_STD:-$root/libs/relax/compiler/std}
 cache=${DIFF_CACHE:-${TMPDIR:-/tmp}/diff_fast_cache}
 jobs=${DIFF_JOBS:-4}
+# DIFF_TIERS: the JIT tiers (default "o1 base o3"; `counted`: O3 on at call threshold 1 with every counted
+# build kept installed, MAKEPAD_RUN_PGO_HOLD=1 -- the PGO counted code itself)
+difftiers=${DIFF_TIERS:-o1 base o3}
 sleepms=${DIFF_SLEEP_MS:-250}
-work=$(mktemp -d "${TMPDIR:-/tmp}/diff_fast.XXXXXX") || exit 2
+# DIFF_VERIFY (default 1): every tier run verifies the RIR after each pass and after the rewrites
+# past the pipeline (instrument, web32, backend rewrites, split_loops); a broken function is an
+# ICE naming the pass, so the program's output differs (JITSAFE 19). DIFF_VERIFY=0: off.
+verify=; [ "${DIFF_VERIFY:-1}" = 0 ] || verify=MAKEPAD_RUN_VERIFY_PASSES=1
+# (a --job run gets the parent's work dir: no dir of its own, which every job left behind empty)
+[ "${1:-}" = "--job" ] || { work=$(mktemp -d "${TMPDIR:-/tmp}/diff_fast.XXXXXX") || exit 2; }
 mkdir -p "$cache"
 progs=${DIFF_PROGRAMS:-$(cd "$here/diff" && ls *.rs | sed 's/\.rs$//')}
 known=${DIFF_KNOWN:-$(cd "$here/known" && ls *.rs | sed 's/\.rs$//')}
 rv=$(rustc -V)
-export M here root cache work sleepms rv
+export M here root cache work sleepms rv verify
 # one job: native build (cached) + native run, or a tier run. $1 = program, $2 = native|base|o3
 job() {
     p=$1; k=$2; src=$here/diff/$p.rs; [ -f "$src" ] || src=$here/known/$p.rs; out=$work/$p.$k
@@ -53,9 +65,10 @@ job() {
         case $k in
         o1) tier="MAKEPAD_RUN_O1=always MAKEPAD_RUN_O3=0"; ms=0 ;;
         base) tier="MAKEPAD_RUN_O3=0"; ms=0 ;;
-        *) tier="MAKEPAD_RUN_O3=1"; ms=$sleepms ;;
+        counted) tier="MAKEPAD_RUN_O3=1 MAKEPAD_RUN_PGO_HOLD=1"; ms=$sleepms ;;
+        *) tier="MAKEPAD_RUN_O3=1 MAKEPAD_RUN_GUARDS=${DIFF_GUARDS:-1} MAKEPAD_RUN_GUARDS_READY=16 MAKEPAD_RUN_GUARDS_FAILS=64"; ms=$sleepms ;;
         esac
-        env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms \
+        env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms $verify \
             MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
             MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" \
             nice -n 10 "$M" test "$src" > "$out.raw" 2> "$out.err"
@@ -75,9 +88,10 @@ pkgjob() {
         case $k in
         o1) tier="MAKEPAD_RUN_O1=always MAKEPAD_RUN_O3=0"; ms=0 ;;
         base) tier="MAKEPAD_RUN_O3=0"; ms=0 ;;
-        *) tier="MAKEPAD_RUN_O3=1"; ms=$sleepms ;;
+        counted) tier="MAKEPAD_RUN_O3=1 MAKEPAD_RUN_PGO_HOLD=1"; ms=$sleepms ;;
+        *) tier="MAKEPAD_RUN_O3=1 MAKEPAD_RUN_GUARDS=${DIFF_GUARDS:-1} MAKEPAD_RUN_GUARDS_READY=16 MAKEPAD_RUN_GUARDS_FAILS=64"; ms=$sleepms ;;
         esac
-        (cd "$root" && env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms MAKEPAD_HAL_BACKEND=headless \
+        (cd "$root" && env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms $verify MAKEPAD_HAL_BACKEND=headless \
             MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
             MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" \
             nice -n 10 "$M" run --quiet "$pkg" -- "$prog") > "$out.raw" 2> "$out.err"
@@ -102,17 +116,21 @@ for dir in $pkgdirs; do
     fi
     for prog in $("$pkgtarget/release/$pkg" --list); do pkgprogs="$pkgprogs $pkg~$prog"; done
 done
-for p in $progs $known $pkgprogs; do for k in native o1 base o3; do echo "$p $k"; done; done | xargs -P "$jobs" -n 2 "$0" --job "$work"
+for p in $progs $known $pkgprogs; do for k in native $difftiers; do echo "$p $k"; done; done | xargs -P "$jobs" -n 2 "$0" --job "$work"
 check() {
     p=$1; fail=
     sed -n 's/^test [A-Za-z0-9_:]* \.\.\. //; /^D /p' "$work/$p.native.raw" > "$work/$p.native.d"
     nrc=$(cat "$work/$p.native.rc" 2>/dev/null); [ -s "$work/$p.native.d" ] || fail="native run produced no D lines (rc $nrc): $(head -3 "$work/$p.native.raw" | cut -c1-200)"
     sum=$(cksum < "$work/$p.native.d")
-    for k in o1 base o3; do
+    for k in $difftiers; do
         [ -n "$fail" ] && break
         sed -n 's/^test [A-Za-z0-9_:]* \.\.\. //; /^D /p' "$work/$p.$k.raw" > "$work/$p.$k.d"
         rc=$(cat "$work/$p.$k.rc" 2>/dev/null)
-        if ! cmp -s "$work/$p.native.d" "$work/$p.$k.d"; then
+        if [ "$rc" != "$nrc" ] && [ ! -s "$work/$p.$k.d" ] && ! grep -aq . "$work/$p.$k.raw"; then
+            # makepad itself failed (no std, bad binary, crash before main): not a codegen difference
+            fail="HARNESS ERROR: $p at tier $k: makepad exited $rc with no output: $(grep -a -m1 . "$work/$p.$k.err" | cut -c1-240)"
+            harness=1
+        elif ! cmp -s "$work/$p.native.d" "$work/$p.$k.d"; then
             fail="$p at tier $k: stdout differs from rustc (cksum native $sum, $k $(cksum < "$work/$p.$k.d"))
 $(diff "$work/$p.native.d" "$work/$p.$k.d" | head -8 | cut -c1-240)"
         elif [ "$rc" != "$nrc" ] || { case $p in *~*) false ;; *) ! grep -aq '[1-9][0-9]* passed; 0 failed' "$work/$p.$k.raw" ;; esac; }; then
@@ -120,7 +138,7 @@ $(diff "$work/$p.native.d" "$work/$p.$k.d" | head -8 | cut -c1-240)"
         fi
     done
 }
-ok=0; n=0; bad=$pkgfail; kfail=0; kfixed=
+ok=0; n=0; bad=$pkgfail; kfail=0; kfixed=; harness=
 [ -n "$pkgfail" ] && n=$(printf '%s' "$pkgfail" | grep -c .)
 for p in $progs $pkgprogs; do
     n=$((n + 1)); check "$p"
@@ -132,7 +150,21 @@ for p in $known; do
     if [ -z "$fail" ]; then kfixed="$kfixed $p"; else kfail=$((kfail + 1)); fi
 done
 [ -n "$kfixed" ] && echo "diff: known-failing programs now pass, git mv them from known/ to diff/:$kfixed"
+# per tier: programs whose D lines and exit status equal the native run's (each tier on its own)
+tiers=
+for k in $difftiers; do
+    t=0; tn=0
+    for p in $progs $pkgprogs; do
+        tn=$((tn + 1))
+        [ -s "$work/$p.native.d" ] || continue
+        sed -n 's/^test [A-Za-z0-9_:]* \.\.\. //; /^D /p' "$work/$p.$k.raw" > "$work/$p.$k.d"
+        cmp -s "$work/$p.native.d" "$work/$p.$k.d" && [ "$(cat "$work/$p.$k.rc" 2>/dev/null)" = "$(cat "$work/$p.native.rc" 2>/dev/null)" ] && t=$((t + 1))
+    done
+    tiers="$tiers $k $t/$tn"
+done
+echo "diff tiers:$tiers"
 rm -r "$work"
+[ -n "$harness" ] && { printf '%s' "$bad"; echo "diff: HARNESS ERROR (makepad runs failed without output; see above)"; exit 2; }
 if [ $ok = $n ]; then echo "diff: $ok/$n equal (known failing: $kfail)"; exit 0; fi
 printf '%s' "$bad"
 echo "diff: $ok/$n equal (known failing: $kfail)"

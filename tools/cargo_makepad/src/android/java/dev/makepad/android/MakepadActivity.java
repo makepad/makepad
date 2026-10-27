@@ -2901,12 +2901,12 @@ public class MakepadActivity
         return socket.read(maxBytes);
     }
 
-    public byte[] socketStreamPeerFingerprint(long id) {
+    public byte[] socketStreamPeerCertificate(long id) {
         MakepadSocketStream socket = mActiveSocketStreams.get(id);
         if (socket == null) {
             return null;
         }
-        return socket.peerFingerprint();
+        return socket.peerCertificate();
     }
 
     public int socketStreamWrite(long id, byte[] message) {

@@ -128,6 +128,134 @@ let backdrop_px = fn(d: vec2, half: vec2, rel: vec2, view: vec4, fault: float, c
     let cover = clamp(0.5 - rounded(d + half, half * 2.0, corner) * dp, 0.0, 1.0)
     return vec4((c.rgb + vec3(dither(px))) * cover, cover)
 }
+// a window button of the caption, drawn as the stock caption's (widgets' DesktopButton): the
+// glyph a one-pixel line in a 9-point square, the face lit on hover and press; close lights red.
+// glyph: 0 minimise, 1 maximise / restore, 2 close
+// stock: 1 on the app's caption ground (under a makepad WM): drawn as the app's own stock
+// buttons there (widgets' window.rs `windows_buttons`): glyph in `tint` at rest, hover face
+// #e9e9e9 (pressed #cccccc) with a black glyph, close #e81123 (pressed #f1707a) with a white one.
+let caption_button_px = fn(p: vec2, s: vec2, glyph: float, hover: float, down: float, stock: float, tint: vec4, dp: float, px: vec2) -> vec4 {
+    let d = p - s * 0.5
+    let h = 4.5
+    let minimise = bar(d, h, dp)
+    let q = abs(d)
+    let outline = clamp((0.5 - abs(max(q.x, q.y) - h)) * dp + 0.5, 0.0, 1.0) * box_cov(d, h + 1.0, dp)
+    let r = vec2(d.x + d.y, d.x - d.y) * 0.70710678
+    let cross = max(bar(r, h * 1.41421356, dp), bar(vec2(r.y, r.x), h * 1.41421356, dp))
+    let close = step(1.5, glyph)
+    let g = mix(mix(minimise, outline, step(0.5, glyph)), cross, close)
+    let lit = max(hover, down)
+    let field_a = mix(mix(0.0, 0.10, hover), 0.18, down) * (1.0 - close) + mix(mix(0.0, 1.0, hover), 0.75, down) * close
+    let face_a = mix(field_a, lit, stock)
+    let face = mix(mix(#ece6ff, mix(#e9e9e9, #cccccc, down), stock), mix(#e81123, #f1707a, down), close)
+    let field_ink = mix(#ece6ff * 0.85, #ffffff, close * lit)
+    let stock_ink = mix(tint, mix(#000000, #ffffff, close), lit)
+    let ink = mix(field_ink, stock_ink, stock)
+    var col = face.rgb * face_a
+    var alpha = face_a
+    col = col * (1.0 - g) + ink.rgb * g
+    alpha = alpha * (1.0 - g) + g
+    return vec4(col + vec3(dither(px) * step(0.001, alpha)), alpha)
+}
+// a traffic light of the caption under a macOS-like window manager, drawn as the app's own
+// caption draws it there (widgets' DesktopButton MacClose / MacMin / MacMax in a 20-point
+// square): a disc of radius 6 in its colour, darker pressed, grey in a window without focus
+// unless hovered; its glyph (1.1-point strokes) shows on hover. glyph: 3 close, 4 minimise,
+// 5 maximise. focus: the window has focus. Premultiplied.
+let caption_light_px = fn(p: vec2, s: vec2, glyph: float, hover: float, down: float, focus: float, dp: float) -> vec4 {
+    let d = p - s * 0.5
+    // the soft edge of Sdf2d with `aa * 3` (widgets' DesktopButton)
+    let aa = dp * 2.12132034
+    let disc = clamp((6.0 - length(d)) * aa, 0.0, 1.0)
+    let close = 1.0 - step(3.5, glyph)
+    let maxi = step(4.5, glyph)
+    let mini = 1.0 - close - maxi
+    let lit = mix(#ff5f57, #e0443e, down) * close + mix(#febc2e, #d9a020, down) * mini + mix(#28c840, #1fa733, down) * maxi
+    let face = mix(#b5b5b5, lit, max(focus, hover))
+    let ink = #4d0000 * close + #985700 * mini + #006500 * maxi
+    let r = vec2(d.x + d.y, d.x - d.y) * 0.70710678
+    let l = 2.6 * 1.41421356
+    let cross = min(length(vec2(r.x - clamp(r.x, -l, l), r.y)), length(vec2(r.y - clamp(r.y, -l, l), r.x)))
+    let dash = length(vec2(d.x - clamp(d.x, -3.2, 3.2), d.y))
+    let plus = min(length(vec2(d.x - clamp(d.x, -3.0, 3.0), d.y)), length(vec2(d.y - clamp(d.y, -3.0, 3.0), d.x)))
+    let e = cross * close + dash * mini + plus * maxi
+    let g = clamp((1.1 - e) * aa, 0.0, 1.0) * hover
+    let col = ink.rgb * g + face.rgb * disc * (1.0 - g)
+    return vec4(col, g + disc * (1.0 - g))
+}
+// the JIT ring in the running app's caption (makepad run; ring.rs), in its 24 pt badge: a ring
+// 14 pt across that moves whenever the JIT builds. A head with a fading tail turns around it
+// (spin: its turn so far) over a faint track; under it a progress arc from the top covers `fill`
+// of the ring (0: none). mode 0: work the program waits for -- bright, a 2 pt stroke; 1:
+// background tier-up -- the same motion, dimmer and 1.6 pt (0..1 blends them); 2 / 3: the program
+// is stopped on invalidated code / a panic -- a solid amber / red dot. hover 0..1 lifts it on a
+// faint disc. ink 1: on a dark caption, 0: on a light one. a: opacity. Premultiplied. GPU-only.
+let jit_ring_px = fn(p: vec2, s: vec2, fill: float, mode: float, a: float, spin: float, hover: float, ink: float, dp: float, px: vec2) -> vec4 {
+    let d = p - s * 0.5
+    let r = length(d)
+    let dot = step(1.5, mode)
+    let back = clamp(mode, 0.0, 1.0) * (1.0 - dot)
+    // the ring's centre line and stroke
+    let rad = 6.0
+    let w = mix(2.0, 1.6, back)
+    let band = clamp((w * 0.5 - abs(r - rad)) * dp + 0.5, 0.0, 1.0)
+    // where this pixel is on the ring: turns clockwise from the top
+    let t = fract(atan2(d.x, 0.0 - d.y) / 6.2831853 + 1.0)
+    let arc_px = 6.2831853 * rad * dp
+    // the progress arc: from the top to `fill` (quiet: the head is what says busy)
+    let f = clamp(fill, 0.0, 1.0)
+    let on_fill = clamp((f - t) * arc_px + 0.5, 0.0, 1.0) * step(0.004, f)
+    // the head and its tail: full at the head, fading over `tail` turns behind it, a little
+    // wider than the stroke
+    let tail = 0.35
+    let behind = fract(fract(spin) - t + 1.0)
+    let head_in = clamp(behind * arc_px + 0.5, 0.0, 1.0)
+    let fade = clamp(1.0 - behind / tail, 0.0, 1.0)
+    let head = head_in * fade * fade
+    let head_band = clamp(((w + 0.8) * 0.5 - abs(r - rad)) * dp + 0.5, 0.0, 1.0)
+    let ink_c = mix(#2a2638, #ece6ff, ink)
+    let arc_c = mix(#5b4fd0, #b8acff, ink)
+    let head_c = mix(#4433d6, #d4ccff, ink)
+    let track_a = mix(0.10, 0.13, ink)
+    let fill_a = mix(mix(0.26, 0.3, ink), mix(0.18, 0.22, ink), back)
+    let head_a = mix(1.0, 0.8, back)
+    var col = ink_c.rgb * track_a * band
+    var alpha = track_a * band
+    let fa = band * on_fill * fill_a
+    col = col * (1.0 - fa) + arc_c.rgb * fa
+    alpha = alpha * (1.0 - fa) + fa
+    let ha = head_band * head * head_a
+    col = col * (1.0 - ha) + head_c.rgb * ha
+    alpha = alpha * (1.0 - ha) + ha
+    // the dot (replaces the ring)
+    col = col * (1.0 - dot)
+    alpha = alpha * (1.0 - dot)
+    let dot_c = mix(#f5a524, #e5484d, step(2.5, mode))
+    let disc = clamp((5.0 - r) * dp + 0.5, 0.0, 1.0) * dot
+    let rim = clamp((0.6 - abs(r - 4.6)) * dp, 0.0, 1.0) * dot * (1.0 - ink) * 0.35
+    col = col + dot_c.rgb * (1.0 - rim) * disc
+    alpha = alpha + disc
+    // the hover disc under it all
+    let lift = clamp((10.5 - r) * dp + 0.5, 0.0, 1.0) * hover * mix(0.09, 0.14, ink)
+    col = col + ink_c.rgb * lift * (1.0 - alpha)
+    alpha = alpha + lift * (1.0 - alpha)
+    return vec4(col * a, alpha * a)
+}
+// the JIT ring's tooltip plate (its line is drawn over it): a rounded plate with a hairline.
+let jit_tip_px = fn(p: vec2, s: vec2, a: float, ink: float, dp: float) -> vec4 {
+    let e = rounded(p, s, 5.0)
+    let inside = clamp(0.5 - e * dp, 0.0, 1.0)
+    let hair = clamp(1.0 - abs(e + 0.5) * dp, 0.0, 1.0)
+    let plate = mix(#ffffff, #1f1b2e, ink)
+    let line = mix(vec4(0.0, 0.0, 0.0, 0.16), vec4(1.0, 1.0, 1.0, 0.14), ink)
+    let pa = inside * mix(0.97, 0.95, ink)
+    var col = plate.rgb * pa
+    var alpha = pa
+    let h = hair * line.w
+    col = col * (1.0 - h) + line.rgb * h
+    alpha = alpha * (1.0 - h) + h
+    return vec4(col * a, alpha * a)
+}
 let Quad = {
     geom: vertex_buffer(vec2f)
     rect: instance(vec4(0.0))
@@ -194,18 +322,44 @@ let Quad = {
         return_value: "Return value: "
         submit: "Enter submit · Esc cancel"
     }
-    // a card of the halted view, a row of a collapsed group, or a touch button.
-    // accent: 0 follow-on card, 1 root cause / panic card, 2 member row, 3 button
+    // a card of the halted view, a row of a collapsed group, a touch button, or a window button
+    // of the caption. accent: 0 follow-on card, 1 root cause / panic card, 2 member row, 3 button,
+    // 4 caption window button (action: its glyph, 3..5 a traffic light; selected: hover;
+    // block: the window has focus), 7 the caption's ground (tint), 5 the JIT ring (selected:
+    // its fill, block: its mode, pressed: opacity, action: its spin, beat: hover, ink: on a dark
+    // caption), 6 the ring's tooltip plate (pressed: opacity, ink)
     error_band: Quad{
+        time: uniform(0.0)
+        reduce_motion: uniform(0.0)
         selected: instance(0.0)
         action: instance(0.0)
         pressed: instance(0.0)
         accent: instance(0.0)
+        block: instance(0.0)
+        beat: instance(0.0)
+        ink: instance(0.0)
+        tint: instance(vec4(0.0))
         pixel: fn() {
             let s = self.rect.zw
             let p = self.pos * s
             let dp = max(self.dpi, 1.0)
             let px = (self.rect.xy + p) * dp
+            if self.accent > 6.5 {
+                // the caption's ground: the app's caption bar colour (`tint`, opaque)
+                return vec4(self.tint.rgb * self.tint.a, self.tint.a)
+            }
+            if self.accent > 5.5 {
+                return jit_tip_px(p, s, self.pressed, self.ink, dp)
+            }
+            if self.accent > 4.5 {
+                return jit_ring_px(p, s, self.selected, self.block, self.pressed, self.action, self.beat, self.ink, dp, px)
+            }
+            if self.accent > 3.5 {
+                if self.action > 2.5 {
+                    return caption_light_px(p, s, self.action, self.selected, self.pressed, self.block, dp)
+                }
+                return caption_button_px(p, s, self.action, self.selected, self.pressed, self.beat, self.tint, dp, px)
+            }
             let row = step(1.5, self.accent) * (1.0 - step(2.5, self.accent))
             let button = step(2.5, self.accent)
             let root = step(0.5, self.accent) * (1.0 - step(1.5, self.accent))
@@ -246,13 +400,11 @@ let Quad = {
         field_params: uniform(vec4(0.0))
         field_fall: uniform(vec4(0.0))
         // the frame the backdrop and brackets fill (points; zero: the window) and
-        // (fault, corner radius, 0, 0)
+        // (fault, corner radius, caption strip height, 0)
         field_frame: uniform(vec4(0.0))
         field_fault: uniform(vec4(0.0))
-        // over a running app (the window layer): (on: 1, or 2 for the corner JIT loader without
-        // the frame's brackets, the swap ring, the dust and the main() glow: its stars alone; galaxy
-        // opacity, backdrop opacity, arc progress or -1);
-        // zero: the boot window
+        // over a running app (the window layer): (on: 1, galaxy opacity, backdrop opacity, arc
+        // progress or -1); zero: the boot window
         field_layer: uniform(vec4(0.0))
         d: varying(vec2f)
         px: varying(vec2f)
@@ -272,12 +424,9 @@ let Quad = {
             // a twinkling star reaches out to its glint; a layer's backdrop it does not draw is empty
             let twinkling = step(0.5, self.info.z) * step(self.time - self.info.z + 1.0, 0.45)
             let gone = step(0.5, self.field_layer.x) * (1.0 - step(0.001, self.field_layer.z)) * step(5.5, k) * (1.0 - step(6.5, k))
-                + step(1.5, self.field_layer.x) * step(3.5, k) * (1.0 - step(5.5, k))
             let arc = vec2(self.view.z * 1.45 + 10.0, self.view.z * 1.45 * self.view.w + 10.0) * step(-0.5, self.field_layer.w) * step(0.5, self.field_layer.x)
             let extent = if k < 0.5 { vec2(mix(3.5, 7.0 * self.field_params.y + 1.0, twinkling)) } else if k < 1.5 { vec2(2.0) } else if k < 2.5 { vec2(10.0 * self.field_params.y) } else if k < 3.5 { vec2(self.view.z) } else if k < 4.5 { vec2(self.view.z * 1.7 + 6.0, self.view.z * 1.7 * self.view.w + 6.0) * (1.0 - gone) } else if k < 6.5 { frame.zw * 0.5 * (1.0 - gone) } else { arc }
-            // the corner JIT loader (layer 2) is the stars alone: no dust, no main() glow
-            let loose = step(1.5, self.field_layer.x) * (dust + step(2.5, k) * (1.0 - step(3.5, k)))
-            let p = center + (self.geom * 2.0 - vec2(1.0)) * extent * (1.0 - loose)
+            let p = center + (self.geom * 2.0 - vec2(1.0)) * extent
             self.d = p - center
             self.px = p * self.dpi
             self.vertex_pos = vec4(p.x / vp.x * 2.0 - 1.0, 1.0 - p.y / vp.y * 2.0, 0.0, 1.0)
@@ -309,7 +458,9 @@ let Quad = {
             } else if k < 4.5 {
                 ring_px(self.d, self.field_params.w, self.view, self.px)
             } else if k < 5.5 {
-                brackets_px(self.d, half, dp, fault)
+                // the frame's brackets start below the caption strip (field_fault.z points)
+                let below = vec2(0.0, self.field_fault.z * 0.5)
+                brackets_px(self.d - below, half - below, dp, fault)
             } else if k < 6.5 {
                 backdrop_px(self.d, half, frame.xy + half + self.d - self.view.xy, self.view, fault, self.field_fault.y, dp, self.px)
             } else {

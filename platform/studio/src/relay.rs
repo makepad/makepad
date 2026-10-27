@@ -93,6 +93,36 @@ pub struct RelayFileDialogResult {
     pub paths: Vec<String>,
 }
 
+/// One row of a tray's menu (`RelayTray::items`): an item, or a separator line.
+#[derive(Clone, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct RelayTrayItem {
+    /// The item's id (`LiveId.0`), echoed by `HostRelay::TrayMenu`; 0 on a line.
+    pub id: u64,
+    pub label: String,
+    pub enabled: bool,
+    /// A check mark: `None` for a plain item, `Some(on)` for a checkable one.
+    pub checked: Option<bool>,
+    /// A separator line (`id`, `label` unused).
+    pub line: bool,
+}
+
+/// A tray icon the child wants its host to show (`Cx::set_tray`): the host draws the glyph,
+/// the tooltip and the menu and answers a choice with `HostRelay::TrayMenu`.
+#[derive(Clone, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct RelayTray {
+    /// The tray's id (`LiveId.0`): set again with the same id updates it in place.
+    pub tray: u64,
+    /// The glyph: one alpha byte per pixel, rows top-down (a monochrome template the host tints).
+    pub width: u32,
+    pub height: u32,
+    pub alpha: Vec<u8>,
+    pub tooltip: String,
+    pub items: Vec<RelayTrayItem>,
+    /// The primary click is the app's: the host sends `HostRelay::TrayClick` with the icon's rect
+    /// and the app shows its dropdown window there; the menu opens on a secondary click.
+    pub dropdown: bool,
+}
+
 /// Child → host.
 #[derive(Clone, Debug, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub enum ChildRelay {
@@ -120,6 +150,15 @@ pub enum ChildRelay {
     /// The child selected text: it becomes the host's primary selection
     /// (Linux middle-click paste). APPENDED LAST.
     SetPrimarySelection { text: String },
+    /// Show or update a tray icon (the makepad WM's tray area). APPENDED LAST.
+    SetTray(RelayTray),
+    /// Remove tray `tray`. APPENDED LAST.
+    RemoveTray { tray: u64 },
+    /// The child started a drag of files out of its window (`Cx::start_external_dragging`): the
+    /// host carries them under the pointer from here and drops them on whatever window the
+    /// pointer is let go over. Promised files (`makepad_hal::drag_promise`) may still be being
+    /// written; the host waits for them at the drop. APPENDED LAST.
+    StartFileDrag { paths: Vec<String> },
 }
 
 /// Host → child.
@@ -137,6 +176,12 @@ pub enum HostRelay {
     /// The host clipboard's text and PNG image (empty when it has none).
     /// APPENDED LAST.
     Clipboard { request_id: u64, text: String, png: Vec<u8> },
+    /// Menu item `item` of the child's tray `tray` was chosen. APPENDED LAST.
+    TrayMenu { tray: u64, item: u64 },
+    /// The primary click on the child's `dropdown` tray `tray` (`RelayTray::dropdown`): `anchor` is
+    /// the tray item's rect in the host's window space (x, y, w, h), `screen` the visible area of
+    /// the screen it is on (the dropdown fits itself into it). APPENDED LAST.
+    TrayClick { tray: u64, anchor: [f64; 4], screen: [f64; 4] },
 }
 
 #[cfg(test)]
@@ -160,6 +205,23 @@ mod relay_tag_tests {
         assert_eq!(tag(&ChildRelay::ReadClipboard { request_id: 0 }), 8);
         assert_eq!(tag(&ChildRelay::SetPrimarySelection { text: String::new() }), 9);
         assert_eq!(tag(&HostRelay::Clipboard { request_id: 0, text: String::new(), png: Vec::new() }), 3);
+        assert_eq!(tag(&ChildRelay::SetTray(RelayTray::default())), 10);
+        assert_eq!(tag(&ChildRelay::RemoveTray { tray: 0 }), 11);
+        assert_eq!(tag(&HostRelay::TrayMenu { tray: 0, item: 0 }), 4);
+        assert_eq!(tag(&HostRelay::TrayClick { tray: 0, anchor: [0.0; 4], screen: [0.0; 4] }), 5);
+        let tray = ChildRelay::SetTray(RelayTray {
+            tray: 7,
+            width: 2,
+            height: 1,
+            alpha: vec![0, 255],
+            tooltip: "AI Hub · serving".into(),
+            dropdown: true,
+            items: vec![
+                RelayTrayItem { id: 3, label: "Enabled".into(), enabled: true, checked: Some(true), line: false },
+                RelayTrayItem { line: true, ..Default::default() },
+            ],
+        });
+        assert_eq!(ChildRelay::deserialize_bin(&tray.serialize_bin()).unwrap(), tray);
         let clip = HostRelay::Clipboard { request_id: 9, text: "pasted ✓".into(), png: vec![137, 80] };
         assert_eq!(HostRelay::deserialize_bin(&clip.serialize_bin()).unwrap(), clip);
 

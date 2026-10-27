@@ -1,0 +1,64 @@
+# Flow (makepad-app-flow): the generation studio and the graph workbench in
+# one window. The studio (makepad-flow-studio) runs preset workflows on the
+# AI Hub fleet and keeps their results as files in ~/.makepad/flow/results;
+# the workbench edits and runs workflow packages over an embedded flow
+# server (also its own binary, makepad-flow-server). `--headless`/`--check`
+# run a package without a window.
+
+[package]
+name = "makepad-app-flow"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Flow: makepad's generation studio and graph workbench over the AI Hub"
+default-run = "makepad-app-flow"
+
+[lib]
+name = "flow_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "makepad-app-flow"
+path = "src/main.rs"
+
+[[bin]]
+name = "makepad-flow-server"
+path = "src/bin/makepad-flow-server.rs"
+
+# The platforms Flow is built for (tools/ci reads this; one place): not the web -- the app is a
+# client of a flow server (libs/flow `client`/`host`, blocking sockets and an embedded server), which
+# libs/flow builds natively only.
+[package.metadata.makepad]
+platforms = ["desktop", "mobile"]
+
+[package.metadata.makepad.desktop]
+name = "Makepad Flow"
+identifier = "nl.makepad.flow"
+
+[features]
+default = ["tweaker"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
+# The chat's Local provider (a model on this machine through the AI Hub).
+localai = ["makepad-app-aichat/localai"]
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["rich_text", "fab", "editors", "media", "pickers", "dock"] }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
+makepad-widgets-sheets = { path = "../../widgets/sheets" }
+makepad-code-editor = { path = "../../code_editor" }
+makepad-strict-json = { path = "../../libs/strict_json" }
+makepad-flow = { path = "../../libs/flow", features = ["host", "live"] }
+makepad-flowgraph = { path = "../../libs/flowgraph" }
+makepad-flow-ui = { path = "../../libs/flow_ui" }
+makepad-flow-studio = { path = "../../libs/flow_studio" }
+makepad-live-frame = { path = "../../libs/live_frame" }
+makepad-look = { path = "../../libs/look" }
+makepad-media-view = { path = "../../libs/media_view" }
+makepad-app-aichat = { path = "../aichat", default-features = false, features = ["engine", "gen"] }
+makepad-ai-services = { path = "../../libs/ai/services" }
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
+
+[dev-dependencies]
+makepad-script-test = { path = "../../platform/script/test" }

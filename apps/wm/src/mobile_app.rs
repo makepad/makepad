@@ -273,7 +273,8 @@ impl App {
         self.next_id += 1;
         let lines = self.line_sender();
         let pool = cx.task_pool();
-        match spawn_client(&pool, &cx.thread_spawner(), &app, id, hub_port, None, None, &[], false, BuildPolicy::IfMissing, lines) {
+        let runner = self.apps.runner(&app.id);
+        match spawn_client(&pool, &cx.thread_spawner(), &app, id, hub_port, None, None, &[], false, BuildPolicy::IfMissing, runner, lines) {
             Ok(slot) => {
                 self.state_mut().clients.insert(id, slot);
                 // The tile widget exists from now on: its ticks drive the

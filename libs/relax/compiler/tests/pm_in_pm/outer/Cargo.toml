@@ -1,0 +1,12 @@
+[package]
+name = "pmpm-outer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+proc-macro = true
+
+[dependencies]
+pmpm-inner = { path = "../inner" }
+pmpm-hello = { path = "../hello" }

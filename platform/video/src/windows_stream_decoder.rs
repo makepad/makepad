@@ -30,7 +30,7 @@ use crate::stream_decoder::DecodedFrame;
 use crate::stream_encoder::StreamVideoCodec;
 use crate::windows_encoder::{ensure_media_foundation, hr_err};
 use crate::windows_mft;
-use crate::VideoFileError;
+use crate::{VideoColor, VideoFileError};
 use std::collections::VecDeque;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::{
@@ -128,6 +128,8 @@ pub struct WindowsStreamDecoder {
     width: u32,
     height: u32,
     output_stride: usize,
+    /// The output type's colour (the stream's VUI as the decoder reports it).
+    color: VideoColor,
     pending_pts: VecDeque<i64>,
     packets_in: u64,
     frames_out: u64,
@@ -175,6 +177,7 @@ impl WindowsStreamDecoder {
             width: 0,
             height: 0,
             output_stride: 0,
+            color: VideoColor::BT709,
             pending_pts: VecDeque::new(),
             packets_in: 0,
             frames_out: 0,
@@ -250,6 +253,7 @@ impl WindowsStreamDecoder {
         if let Some((width, height)) = frame_size_of(committed) {
             self.width = width;
             self.height = height;
+            self.color = crate::windows_decoder::media_type_color(committed, width, height);
             self.output_stride = committed
                 .as_IMFAttributes()
                 .GetUINT32(&MF_MT_DEFAULT_STRIDE)
@@ -424,7 +428,7 @@ impl WindowsStreamDecoder {
                     self.frames_out, width, height, len, stride, pts_100ns
                 )
             });
-            frames.push(DecodedFrame { width: self.width, height: self.height, nv12, pts_100ns });
+            frames.push(DecodedFrame { width: self.width, height: self.height, nv12, pts_100ns, gpu: None, color: self.color });
         }
         Ok(frames)
     }

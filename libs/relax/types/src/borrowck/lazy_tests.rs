@@ -38,12 +38,21 @@ fn named(prog: &Program, name: &str) -> DefId {
 struct TestFront {
     prog: Program, tcx: Tcx, quiet: AtomicU64, calls: AtomicU64,
     block_call: u64, entered: Barrier, release: Barrier,
+    /// the front end's lock: checks read under it, a live patch writes (lazy::carry_epoch)
+    lock: std::sync::RwLock<()>,
 }
 impl TestFront {
     fn new(block_call: u64) -> Arc<Self> {
         let (prog, tcx) = fixture("app", SOURCE);
         Arc::new(Self { prog, tcx, quiet: AtomicU64::new(0), calls: AtomicU64::new(0), block_call,
-            entered: Barrier::new(2), release: Barrier::new(2) })
+            entered: Barrier::new(2), release: Barrier::new(2), lock: std::sync::RwLock::new(()) })
+    }
+    /// A live patch: the next collect epoch, with `keep`'s owners carried, under the front end's
+    /// write lock as the driver does it (no check runs meanwhile, none sees the new epoch early).
+    fn patch(&self, keep: &dyn Fn(DefId) -> bool) {
+        let _w = self.lock.write().unwrap();
+        let from = self.tcx.collect_epoch.fetch_add(1, Ordering::SeqCst);
+        carry_epoch(self.identity(), from, from + 1, keep);
     }
     fn epoch(&self) -> u64 { self.tcx.collect_epoch.load(Ordering::SeqCst) }
     fn enqueue(self: &Arc<Self>, name: &str, cached_clean: bool) -> DefId {
@@ -56,6 +65,7 @@ impl TestFront {
 }
 impl FrontSource for TestFront {
     fn with_front(&self, f: &mut dyn FnMut(&Program, &Tcx, &crate::tcx::EvalCx<'_>)) -> bool {
+        let _r = self.lock.read().unwrap();
         if self.calls.fetch_add(1, Ordering::SeqCst) + 1 == self.block_call { self.entered.wait(); self.release.wait(); }
         let state = crate::tcx::EvalState::new();
         f(&self.prog, &self.tcx, &crate::tcx::EvalCx::new(&self.prog, &self.tcx, crate::tcx::TypingEnv::fully_monomorphized(&self.prog), &state));
@@ -65,13 +75,14 @@ impl FrontSource for TestFront {
     fn lower_priority(&self) {}
     fn identity(&self) -> usize { self as *const Self as usize }
 }
-fn event(rx: &Receiver<GandalfEvent>) -> GandalfEvent { rx.recv_timeout(Duration::from_secs(5)).expect("per-function event") }
+// The waits below have no wall-clock limit: the worker's progress depends on the machine (a
+// JIT-run test binary compiles the checker on first use, and a loaded machine runs it slower);
+// a worker that never delivers hangs the test, which the harness reports.
+fn event(rx: &Receiver<GandalfEvent>) -> GandalfEvent { rx.recv().expect("per-function event") }
 fn wait_verdict(f: &TestFront, def: DefId) -> FnVerdict {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         let v = verdict(f.identity(), def, &[], f.epoch());
         if v != FnVerdict::Pending { return v; }
-        assert!(std::time::Instant::now() < deadline, "pending verdict timed out");
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -214,6 +225,30 @@ fn verdict_states() {
 }
 
 #[test]
+fn settle_rebuild_keeps_verdicts_and_queued_checks() {
+    if child("settle_rebuild_keeps_verdicts_and_queued_checks") { return; }
+    // the worker stays gated until the rebuild is done: `clean` is still queued across it
+    let front = TestFront::new(0);
+    let clean = front.enqueue("clean", false);
+    let cached = front.enqueue("b", true);
+    let queued_before = queued();
+    // the settle rebuild: the same program at the next collect epoch, under the write lock
+    {
+        let _w = front.lock.write().unwrap();
+        let from = front.tcx.collect_epoch.fetch_add(1, Ordering::SeqCst);
+        carry_whole(front.identity(), from, from + 1);
+    }
+    assert_eq!(verdict(front.identity(), cached, &[], front.epoch()), FnVerdict::Clean, "a verdict reached before the rebuild");
+    assert_eq!(verdict(front.identity(), clean, &[], front.epoch()), FnVerdict::Pending, "a check queued before the rebuild");
+    // noting the body again at the new epoch queues nothing new
+    front.enqueue("clean", false);
+    assert_eq!(queued(), queued_before);
+    front.ungate();
+    assert_eq!(wait_verdict(&front, clean), FnVerdict::Clean);
+    stop();
+}
+
+#[test]
 fn render_matches_old() {
     if child("render_matches_old") { return; }
     let (prog, _) = fixture("app", "fn clean() {}\n"); let def = named(&prog, "clean");
@@ -248,10 +283,8 @@ fn discovery_releases_front_between_definitions_and_checks_all_owners() {
     let mut expected: Vec<_> = ["a", "b", "c", "bad"].iter().map(|name| named(&front.prog, name)).collect();
     expected.sort_unstable_by_key(|d| d.0);
     assert_eq!(checked, expected);
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let clean = named(&front.prog, "clean");
     while verdict(front.identity(), clean, &[], front.epoch()) != FnVerdict::Clean {
-        assert!(std::time::Instant::now() < deadline, "discovery lost a clean owner");
         std::thread::sleep(Duration::from_millis(5));
     }
     unsubscribe(subscription);
@@ -271,8 +304,7 @@ fn live_epoch_carries_verdicts_of_unreached_owners() {
     // queued (or already running) when the patch lands: its check counts at the new epoch
     let queued = front.enqueue("c", false);
     // a live patch of `a`: every other owner reads what it read before
-    let from = front.tcx.collect_epoch.fetch_add(1, Ordering::SeqCst);
-    carry_epoch(front.identity(), from, from + 1, &|d| d != edited);
+    front.patch(&|d| d != edited);
     assert_eq!(verdict(front.identity(), clean, &[], front.epoch()), FnVerdict::Clean);
     assert_eq!(verdict(front.identity(), fail, &[], front.epoch()), FnVerdict::Unchecked("typeck".into()));
     assert_eq!(verdict(front.identity(), edited, &[], front.epoch()), FnVerdict::Unchecked("not queued".into()));
@@ -297,9 +329,7 @@ fn round42_cancelled_gandalf_check_has_no_persisted_verdict() {
     front.entered.wait();
     let writer = crate::preempt::WriterWaiting::new();
     front.release.wait();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while PREEMPTED.load(Ordering::Relaxed) == 0 {
-        assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(verdict(front.identity(), def, &[], front.epoch()), FnVerdict::Pending);

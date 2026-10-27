@@ -137,13 +137,21 @@ impl AppleStreamEncoder {
         let shared = Box::new(Mutex::new(EncoderShared { packets: Vec::new() }));
         let refcon = shared.as_ref() as *const Mutex<EncoderShared> as *mut c_void;
         let mut session: VTCompressionSessionRef = std::ptr::null_mut();
+        // the low-latency mode of the encoder (macOS 11.3+) for a live view
+        let spec: CFDictionaryRef = if options.low_latency {
+            let keys = [unsafe { kVTVideoEncoderSpecification_EnableLowLatencyRateControl } as *const c_void];
+            let values = [unsafe { kCFBooleanTrue } as *const c_void];
+            unsafe { CFDictionaryCreate(std::ptr::null(), keys.as_ptr(), values.as_ptr(), 1, std::ptr::null(), std::ptr::null()) }
+        } else {
+            std::ptr::null()
+        };
         let status = unsafe {
             VTCompressionSessionCreate(
                 std::ptr::null(),
                 options.width,
                 options.height,
                 codec_type,
-                std::ptr::null(),
+                spec as *const c_void,
                 std::ptr::null(),
                 std::ptr::null_mut(),
                 Some(encode_output_callback),
@@ -151,19 +159,33 @@ impl AppleStreamEncoder {
                 &mut session,
             )
         };
+        if !spec.is_null() {
+            unsafe { CFRelease(spec as *const c_void) };
+        }
         if status != 0 || session.is_null() {
             return Err(VideoFileError::with_code("VTCompressionSessionCreate", status));
         }
         unsafe {
             set_bool_property(session, kVTCompressionPropertyKey_RealTime, true);
             set_bool_property(session, kVTCompressionPropertyKey_AllowFrameReordering, false);
-            set_i32_property(session, kVTCompressionPropertyKey_MaxKeyFrameInterval, options.keyint.max(1) as i32);
+            // keyint 0: no scheduled key frames (0 = no limit), only requested ones
+            set_i32_property(session, kVTCompressionPropertyKey_MaxKeyFrameInterval, options.keyint as i32);
             set_i32_property(
                 session,
                 kVTCompressionPropertyKey_AverageBitRate,
                 (options.bitrate_kbps as i64 * 1000).min(i32::MAX as i64) as i32,
             );
             set_i32_property(session, kVTCompressionPropertyKey_ExpectedFrameRate, options.fps as i32);
+            // The VUI says BT.709 (primaries, transfer, matrix) and the 420v source limited range, as
+            // the Linux and Windows hosts write it: viewers show exactly what the stream says.
+            let (p, t, m, _) = crate::VideoColor::BT709.h273();
+            for (key, value) in [
+                (kVTCompressionPropertyKey_ColorPrimaries, CVColorPrimariesGetStringForIntegerCodePoint(p as i32)),
+                (kVTCompressionPropertyKey_TransferFunction, CVTransferFunctionGetStringForIntegerCodePoint(t as i32)),
+                (kVTCompressionPropertyKey_YCbCrMatrix, CVYCbCrMatrixGetStringForIntegerCodePoint(m as i32)),
+            ] {
+                VTSessionSetProperty(session as *mut c_void, key, value as *const c_void);
+            }
             if matches!(options.codec, StreamVideoCodec::H264) {
                 VTSessionSetProperty(
                     session as *mut c_void,
@@ -237,6 +259,32 @@ impl AppleStreamEncoder {
     pub fn push_frame_nv12(&mut self, nv12: &[u8], pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
         unsafe {
             let pixel_buffer = self.make_pixel_buffer(nv12)?;
+            self.encode_pixel_buffer(pixel_buffer, pts_100ns)
+        }
+    }
+
+    /// The picture in the IOSurface `surface_id` (NV12 '420v'/'420f' or BGRA: a screen
+    /// capture's frame, a shared texture), encoded as it lies in GPU memory. The surface must
+    /// stay alive (its owner holds it) for the call.
+    pub fn push_shared_texture(&mut self, surface_id: u64, pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
+        unsafe {
+            let surface = IOSurfaceLookup(surface_id as IOSurfaceID);
+            if surface.is_null() {
+                return Err(VideoFileError::new(format!("no IOSurface {surface_id}")));
+            }
+            let mut pixel_buffer: CVPixelBufferRef = std::ptr::null_mut();
+            let status = CVPixelBufferCreateWithIOSurface(std::ptr::null(), surface, std::ptr::null(), &mut pixel_buffer);
+            CFRelease(surface as *const c_void);
+            if status != 0 || pixel_buffer.is_null() {
+                return Err(VideoFileError::with_code("CVPixelBufferCreateWithIOSurface", status));
+            }
+            self.encode_pixel_buffer(pixel_buffer, pts_100ns)
+        }
+    }
+
+    /// Encodes `pixel_buffer` (released here) and returns its packets.
+    unsafe fn encode_pixel_buffer(&mut self, pixel_buffer: CVPixelBufferRef, pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
+        {
             let pts = hns_time(pts_100ns);
             let frame_props: CFDictionaryRef = if self.force_keyframe {
                 let keys = [kVTEncodeFrameOptionKey_ForceKeyFrame as *const c_void];
@@ -281,6 +329,10 @@ impl AppleStreamEncoder {
 
     pub fn request_keyframe(&mut self) {
         self.force_keyframe = true;
+    }
+
+    pub fn set_bitrate_kbps(&mut self, kbps: u32) {
+        unsafe { set_i32_property(self.session, kVTCompressionPropertyKey_AverageBitRate, (kbps as i64 * 1000).min(i32::MAX as i64) as i32) };
     }
 }
 

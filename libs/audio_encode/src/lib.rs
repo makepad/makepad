@@ -22,6 +22,7 @@ pub mod encode;
 pub mod floor_enc;
 pub mod huffman;
 pub mod mdct;
+pub mod mp3;
 pub mod ogg;
 pub mod psy;
 pub mod setup;

@@ -31,7 +31,8 @@ fn errors(source: &str, f: &str) -> Vec<String> {
     let (prog, tcx) = program(src.as_bytes());
     let body = tcx.typeck(&prog, named(&prog, f));
     assert!(body.errors.is_empty(), "{:?}", body.errors);
-    super::check_body(&prog, &tcx, &body).into_iter().map(|e| e.splitn(4, ':').nth(3).unwrap_or("").trim().to_string()).collect()
+    let r = super::check_body(&prog, &tcx, &body);
+    r.errors.into_iter().chain(r.at_patterns).map(|e| e.splitn(4, ':').nth(3).unwrap_or("").trim().to_string()).collect()
 }
 
 const ENUM: &str = "pub enum E { A, B(bool), C { x: u8 } }\n";

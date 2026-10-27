@@ -512,7 +512,7 @@ impl TaskDeps {
 // rustc_middle/src/ty/context/tls.rs:12,27,49,63: TLS borrows the scoped
 // implicit context. This const Cell has no destructor, so a late TLS destructor
 // can start a root request just like any other caller.
-// It owns no heap state: quiescence ends the task scopes and restores null before a zone swap.
+// It owns no heap state.
 thread_local! {
     static CONTEXT: Cell<*const ()> = const { Cell::new(std::ptr::null()) };
 }

@@ -1,0 +1,41 @@
+// Techno kick: a sine sweeping from ~700 Hz down to the note with a
+// curved fall, a click, a short noise burst, all through an asymmetric
+// wavefolder at 4x (the grit), then a drive. Play it at C1..G1.
+let punch = param(700, 100, 3000)
+let sweep = param(0.05, 0.005, 0.3)
+let decay = param(0.45, 0.05, 2)
+let click = param(0.3, 0, 1)
+let grit = param(0.4, 0, 1)
+let asym = param(0.15, 0, 0.5)
+let gain = param(0.8, 0, 1)
+
+var ph = 0.0
+var t = 0.0
+var os = Os4{}
+var dc = DcBlock{}
+var noise_lp = 0.0
+
+fn fold_drive(x) { fold((x + asym) * (1.0 + grit * 3.0)) - fold(asym * (1.0 + grit * 3.0)) }
+
+fn voice() {
+    if trigger {
+        t = 0.0
+        ph = 0.0
+    }
+    t = t + 1.0 / sample_rate
+    // The pitch falls fast then settles: a power curve toward the note.
+    let k = clamp(t / sweep, 0.0, 1.0)
+    let f = mix(punch, freq, pow(k, 0.25))
+    ph = advance(ph, f / sample_rate)
+    let body = sin(TAU * ph) * exp(-t * 6.9 / decay)
+    noise_lp = noise_lp + (rand() - noise_lp) * 0.3
+    let x = body + (click * exp(-t * 80.0) + noise_lp * 0.2 * exp(-t * 40.0)) * 0.5
+    for i in 0..4 {
+        os4_push(os, fold_drive(os4_up(os, x, i)))
+    }
+    let y = dc_block(dc, os4_out(os))
+    if t > decay * 1.5 {
+        stop()
+    }
+    soft_clip(y * 1.2) * gain * velocity
+}

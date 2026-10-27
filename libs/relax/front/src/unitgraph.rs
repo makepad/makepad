@@ -21,11 +21,19 @@ mod platform_gen;
 pub struct BuildScript {
     /// crate index (into `Graph::crates`) of the lib the script belongs to
     pub krate: usize,
+    /// the package's other crates that depend on the same run of the script (its bins): cargo runs
+    /// a package's script once, every target of the package gets its output
+    pub also: Vec<usize>,
     pub src_path: String,
     pub edition: u16,
     pub features: Vec<String>,
     /// build-dependencies: (raw unit index, extern crate name), compiled with the host rustc
     pub build_deps: Vec<(usize, String)>,
+}
+
+impl BuildScript {
+    /// every crate the script's output goes to
+    pub fn krates(&self) -> Vec<usize> { std::iter::once(self.krate).chain(self.also.iter().copied()).collect() }
 }
 
 /// A unit as cargo lists it (for compiling build-dependencies with the host rustc).
@@ -56,6 +64,8 @@ pub struct Graph {
     pub env: Vec<Vec<(String, String)>>,
     /// libraries the build scripts link: (name, framework)
     pub link_libs: Vec<(String, bool)>,
+    /// `--allow-c`: the shared library the native dependencies were linked into (native.rs)
+    pub native: Option<crate::native::NativeLib>,
     pub raw: Vec<RawUnit>,
     /// `makepad check` of a package with several bins (and no --bin): every bin's crate (cargo
     /// check checks all targets); the root is the first. Empty otherwise.
@@ -86,7 +96,7 @@ fn file_url_path(p: &str) -> String {
     }
 }
 
-fn parse_pkg_id(id: &str) -> (String, String, String) {
+pub(crate) fn parse_pkg_id(id: &str) -> (String, String, String) {
     let (url, frag) = match id.rfind('#') {
         Some(i) => (&id[..i], &id[i + 1..]),
         None => (id, ""),
@@ -187,6 +197,14 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
             continue;
         }
         if is_root_bin {
+            // rustc_session output.rs validate_crate_name: non-empty, alphanumeric or `_` only
+            // (one error per offending character; the first fatal stops before any input is read)
+            if tname.is_empty() {
+                return Err("crate name must not be empty".to_string());
+            }
+            if let Some(c) = tname.chars().find(|c| !(c.is_alphanumeric() || *c == '_')) {
+                return Err(format!("invalid character '{c}' in crate name: `{tname}`"));
+            }
             root_bins.push((crates.len(), u.name.clone(), pkg_dir.clone()));
         }
         if is_root_bin || (root == usize::MAX && roots.contains(&ui)) {
@@ -196,7 +214,7 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
         if mode == "test" {
             test_crates.push(crates.len());
         }
-        crates.push(CrateUnit { name: tname, src_path, edition, features, deps: udeps,  proc_macro: pm, bin, build_script: false, version: ver.clone() });
+        crates.push(CrateUnit { name: tname, src_path, edition, features, deps: udeps,  proc_macro: pm, bin, build_script: false, version: ver.clone(), registry: !u.pkg_id.starts_with("path+") });
         crate_paths.push(norm);
         pkg.push((pkg_dir, pname, ver));
     }
@@ -231,7 +249,9 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
         }
     }
     // dependency edges: crates keep crate deps; a run-custom-build dep becomes the crate's script
-    let mut build_scripts = Vec::new();
+    let mut build_scripts: Vec<BuildScript> = Vec::new();
+    // run-custom-build unit -> its script (lib and bins of a package depend on one run)
+    let mut script_of_run: std::collections::HashMap<usize, usize> = Default::default();
     for (ci, c) in crates.iter_mut().enumerate() {
         let mut nd = Vec::new();
         for (i, n) in &c.deps {
@@ -239,8 +259,13 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
                 nd.push((map[*i], n.clone()));
             } else if let Some(Some((p, ed, f, bu))) = run_build.get(*i) {
                 c.build_script = true;
+                if let Some(&s) = script_of_run.get(i) {
+                    build_scripts[s].also.push(ci);
+                    continue;
+                }
                 let build_deps = raw.get(*bu).map(|r| r.deps.clone()).unwrap_or_default();
-                build_scripts.push(BuildScript { krate: ci, src_path: p.clone(), edition: *ed, features: f.clone(), build_deps });
+                script_of_run.insert(*i, build_scripts.len());
+                build_scripts.push(BuildScript { krate: ci, also: Vec::new(), src_path: p.clone(), edition: *ed, features: f.clone(), build_deps });
             }
         }
         c.deps = nd;
@@ -254,6 +279,53 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
     for (ci, c) in crates.iter().enumerate() {
         env[ci].push(("CARGO_CRATE_NAME".to_string(), c.name.clone()));
     }
+    // cargo's integration-test environment: CARGO_TARGET_TMPDIR and CARGO_BIN_EXE_<bin>
+    let integration_tests: Vec<usize> = test_crates.iter().copied().filter(|&ci| crates[ci].bin && units.iter().any(|u| crate::vfs::normalize_path(&u.src_path) == crate_paths[ci] && u.kind.iter().any(|k| k == "test"))).collect();
+    if !integration_tests.is_empty() {
+        let target_dir = crate::dirs::relax_dir();
+        let tmpdir = target_dir.join("tmp");
+        let _ = std::fs::create_dir_all(&tmpdir);
+        let tmpdir_str = tmpdir.display().to_string();
+        for &ci in &integration_tests {
+            env[ci].push(("CARGO_TARGET_TMPDIR".to_string(), tmpdir_str.clone()));
+        }
+        if !g.bins.is_empty() {
+            if let Ok(exe) = self_exe() {
+                let (pkg_dir, pkg_name, _) = &pkg[integration_tests[0]];
+                let bin_dir = target_dir.join("relax-bin");
+                let _ = std::fs::create_dir_all(&bin_dir);
+                let td_str = target_dir.display().to_string();
+                let exe_str = exe.display().to_string();
+                let sh_quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+                for bin_name in &g.bins {
+                    let wrapper = bin_dir.join(if cfg!(windows) { format!("{bin_name}.cmd") } else { bin_name.clone() });
+                    let script = if cfg!(windows) {
+                        format!("@echo off\r\nset MAKEPAD_RUN_SELF_EXEC=\r\nset MAKEPAD_RUN_SELF_EXEC_SILENT_ADDED=\r\n\"{}\" run --quiet --silent --no-live --run-dir \"{}\" --workspace-dir \"{}\" \"{}\" --bin \"{}\" -- %*\r\n",
+                            exe_str, td_str, pkg_dir, pkg_name, bin_name)
+                    } else {
+                        format!("#!/bin/sh\nunset MAKEPAD_RUN_SELF_EXEC MAKEPAD_RUN_SELF_EXEC_SILENT_ADDED\nexec {} run --quiet --silent --no-live --run-dir {} --workspace-dir {} {} --bin {} -- \"$@\"\n",
+                            sh_quote(&exe_str), sh_quote(&td_str), sh_quote(pkg_dir), sh_quote(pkg_name), sh_quote(bin_name))
+                    };
+                    if std::fs::read(&wrapper).ok().as_deref() != Some(script.as_bytes()) {
+                        let tmp = bin_dir.join(format!(".{}.tmp{}", bin_name, std::process::id()));
+                        if std::fs::write(&tmp, script.as_bytes()).is_ok() {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
+                            }
+                            let _ = std::fs::rename(&tmp, &wrapper);
+                        }
+                    }
+                    let wrapper_str = wrapper.display().to_string();
+                    for &ci in &integration_tests {
+                        env[ci].push((format!("CARGO_BIN_EXE_{bin_name}"), wrapper_str.clone()));
+                    }
+                }
+            }
+        }
+    }
+    crate::crates::disambiguate_multi_version_crates(&mut crates);
     let mut cfgs = vec![Vec::new(); n];
     for &ci in &test_crates {
         cfgs[ci].push("test".to_string());
@@ -262,7 +334,7 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
     if bins.is_empty() && test_crates.contains(&root) && crates[root].bin {
         bins.push(root);
     }
-    Ok(Graph { crates, root, build_scripts, pkg, cfgs, env, link_libs: Vec::new(), raw, bins })
+    Ok(Graph { crates, root, build_scripts, pkg, cfgs, env, link_libs: Vec::new(), native: None, raw, bins })
 }
 
 /// cargo's per-package compile-time environment (CARGO_MANIFEST_DIR, CARGO_PKG_*).
@@ -272,11 +344,21 @@ fn pkg_env(dir: &str, name: &str, ver: &str) -> Vec<(String, String)> {
         ("CARGO_PKG_NAME".to_string(), name.to_string()),
         ("CARGO_PKG_VERSION".to_string(), ver.to_string()),
     ];
-    let parts: Vec<&str> = ver.split(['.', '-']).collect();
+    let (core, pre) = version_parts(ver);
+    let parts: Vec<&str> = core.split('.').collect();
     for (k, key) in ["CARGO_PKG_VERSION_MAJOR", "CARGO_PKG_VERSION_MINOR", "CARGO_PKG_VERSION_PATCH"].iter().enumerate() {
         e.push((key.to_string(), parts.get(k).unwrap_or(&"0").to_string()));
     }
+    e.push(("CARGO_PKG_VERSION_PRE".to_string(), pre.to_string()));
+    e.extend(crate::resolve::package_meta_env(dir));
     e
+}
+
+/// A version's numeric core and its pre-release part (`1.2.3-rc.1+build` -> `1.2.3`, `rc.1`; the
+/// pre-release empty when none): cargo's CARGO_PKG_VERSION_{MAJOR,MINOR,PATCH,PRE} come from these.
+fn version_parts(ver: &str) -> (&str, &str) {
+    let core = ver.split('+').next().unwrap_or(ver);
+    core.split_once('-').unwrap_or((core, ""))
 }
 
 fn fnv(data: &[u8], mut h: u64) -> u64 {
@@ -344,8 +426,53 @@ pub fn script_role(pkg: &str, features: &[String]) -> ScriptRole {
 /// Packages whose build script ran although it is to be removed: (package, script path).
 pub static TO_REMOVE: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
-pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, target_dir: &str) -> Result<(), String> {
-    let results: Mutex<Vec<(usize, Result<String, String>, String)>> = Mutex::new(Vec::new());
+pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, target_dir: &str, native: Option<&crate::native::Request>) -> Result<(), String> {
+    let results: Mutex<Vec<(Vec<usize>, Result<String, String>, String)>> = Mutex::new(Vec::new());
+    // the packages whose scripts compile or link C (native.rs): built by cargo with `--allow-c`,
+    // an error naming the flag without it; Relax runs the other scripts
+    let mut native_seeds: Vec<usize> = Vec::new();
+    for (i, bs) in g.build_scripts.iter().enumerate() {
+        let (_, pname, _) = &g.pkg[bs.krate];
+        // A kept GPU-kernel script (`Artefact`) that links native code (makepad-ai-cuda's nvcc
+        // archives, `links =`) is cargo's too with `--allow-c`: its archives join the run's
+        // native library. Without the flag it runs under Relax as before.
+        let kept_native = native.is_some() && matches!(script_role(pname, &bs.features), ScriptRole::Artefact);
+        if noop::script(bs, &g.raw) || !(kept_native || matches!(script_role(pname, &bs.features), ScriptRole::ToRemove)) {
+            continue;
+        }
+        if let Some(why) = crate::native::native_reason(g, bs) {
+            if native.is_none() {
+                // a script that runs a C compiler cannot work without one; `links =` / DEP_
+                // metadata alone run under Relax as before
+                if why.contains("build-dependency") {
+                    return Err(format!("`{}` compiles C ({}): it {}", pname, why, relax_session::options::C_GATE));
+                }
+                continue;
+            }
+            if sess.runtime.profile {
+                eprintln!("makepad-run build-script: {} is native ({})", pname, why);
+            }
+            native_seeds.push(i);
+        }
+    }
+    if let (Some(req), false) = (native, native_seeds.is_empty()) {
+        let built = crate::native::build(g, &native_seeds, req)?;
+        g.native = built.lib;
+        for n in built.scripts {
+            let also = g.build_scripts.iter().find(|b| b.krate == n.krate).map(|b| b.also.clone()).unwrap_or_default();
+            for &k in std::iter::once(&n.krate).chain(&also) {
+                g.cfgs[k].extend(n.cfgs.iter().cloned());
+                g.env[k].extend(n.env.iter().cloned());
+                g.env[k].push(("OUT_DIR".to_string(), n.out_dir.clone()));
+            }
+            for l in n.system {
+                if !g.link_libs.contains(&l) {
+                    g.link_libs.push(l);
+                }
+            }
+        }
+    }
+    let native_krates: Vec<usize> = native_seeds.iter().map(|&i| g.build_scripts[i].krate).collect();
     // makepad-platform's script is answered by makepad run itself (`platform_answer`, no process);
     // in no-codegen mode (the platforms that run no generated code, iOS) no other script runs: any
     // other crate with a build script is an error.
@@ -359,6 +486,9 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
     }
     crate::pool::scope(|s| {
         for bs in &g.build_scripts {
+            if native_krates.contains(&bs.krate) {
+                continue;
+            }
             let results = &results;
             let (dir, pname, ver) = g.pkg[bs.krate].clone();
             let name = g.crates[bs.krate].name.clone();
@@ -375,7 +505,7 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
                     // cargo sets OUT_DIR for every package with a build script
                     let out_dir = format!("{}/build/{}-answered/out", target_dir, name);
                     let _ = std::fs::create_dir_all(&out_dir);
-                    results.lock().unwrap().push((bs.krate, Ok(lines.join("\n")), out_dir));
+                    results.lock().unwrap().push((bs.krates(), Ok(lines.join("\n")), out_dir));
                     continue;
                 }
                 ScriptRole::ToRemove => {
@@ -387,14 +517,14 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
                 ScriptRole::Platform => {
                     let out_dir = format!("{}/build/{}-answered/out", target_dir, name);
                     let r = std::fs::create_dir_all(&out_dir).map_err(|e| format!("{}: {}", out_dir, e)).and_then(|_| platform_answer(sess, &out_dir));
-                    results.lock().unwrap().push((bs.krate, r.map(|l| l.join("\n")), out_dir));
+                    results.lock().unwrap().push((bs.krates(), r.map(|l| l.join("\n")), out_dir));
                     continue;
                 }
                 ScriptRole::Artefact => {}
             }
             s.spawn(move || {
                 let r = run_one(sess, bs, raw, &cenv, &dir, &pname, &ver, &name, target_dir);
-                results.lock().unwrap().push((bs.krate, r.0, r.1));
+                results.lock().unwrap().push((bs.krates(), r.0, r.1));
             });
         }
     });
@@ -402,32 +532,42 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
 }
 
 /// The scripts' `cargo:` lines into the graph: cfgs, link libraries, env (OUT_DIR included).
-fn apply_script_results(g: &mut Graph, results: Vec<(usize, Result<String, String>, String)>) -> Result<(), String> {
-    for (k, r, out_dir) in results {
+fn apply_script_results(g: &mut Graph, results: Vec<(Vec<usize>, Result<String, String>, String)>) -> Result<(), String> {
+    for (krates, r, out_dir) in results {
         let stdout = r?;
-        g.env[k].push(("OUT_DIR".to_string(), out_dir));
-        for line in stdout.lines() {
-            let rest = match line.strip_prefix("cargo::").or_else(|| line.strip_prefix("cargo:")) {
-                Some(r) => r,
-                None => continue,
+        for k in krates { apply_script_output(g, k, &stdout, out_dir.clone())?; }
+    }
+    Ok(())
+}
+
+/// One crate's share of a script's output (`stdout`, its OUT_DIR).
+fn apply_script_output(g: &mut Graph, k: usize, stdout: &str, out_dir: String) -> Result<(), String> {
+    g.env[k].push(("OUT_DIR".to_string(), out_dir));
+    for line in stdout.lines() {
+        let rest = match line.strip_prefix("cargo::").or_else(|| line.strip_prefix("cargo:")) {
+            Some(r) => r,
+            None => continue,
+        };
+        if let Some(c) = rest.strip_prefix("rustc-cfg=") {
+            g.cfgs[k].push(c.to_string());
+        } else if let Some(l) = rest.strip_prefix("rustc-link-lib=") {
+            // [kind=]name[:rename]
+            let (kind, name) = match l.find('=') {
+                Some(i) => (&l[..i], &l[i + 1..]),
+                None => ("", l),
             };
-            if let Some(c) = rest.strip_prefix("rustc-cfg=") {
-                g.cfgs[k].push(c.to_string());
-            } else if let Some(l) = rest.strip_prefix("rustc-link-lib=") {
-                // [kind=]name[:rename]
-                let (kind, name) = match l.find('=') {
-                    Some(i) => (&l[..i], &l[i + 1..]),
-                    None => ("", l),
-                };
-                let name = name.split(':').next().unwrap_or(name).to_string();
-                let fw = kind == "framework";
-                if !g.link_libs.contains(&(name.clone(), fw)) {
-                    g.link_libs.push((name, fw));
-                }
-            } else if let Some(e) = rest.strip_prefix("rustc-env=") {
-                if let Some(i) = e.find('=') {
-                    g.env[k].push((e[..i].to_string(), e[i + 1..].to_string()));
-                }
+            let name = name.split(':').next().unwrap_or(name).to_string();
+            // a static library a script built (C, assembly): only `--allow-c` links one
+            if kind == "static" {
+                return Err(format!("`{}`'s build script links the static library `{}` (native code): it {}", g.pkg[k].1, name, relax_session::options::C_GATE));
+            }
+            let fw = kind == "framework";
+            if !g.link_libs.contains(&(name.clone(), fw)) {
+                g.link_libs.push((name, fw));
+            }
+        } else if let Some(e) = rest.strip_prefix("rustc-env=") {
+            if let Some(i) = e.find('=') {
+                g.env[k].push((e[..i].to_string(), e[i + 1..].to_string()));
             }
         }
     }
@@ -518,11 +658,13 @@ fn script_units(bs: &BuildScript, raw: &[RawUnit], rewrite: Option<&noop::Rewrit
     }
     // the script: a bin of its package
     let pkg_dir = manifest_dir_of(&bs.src_path);
+    let sfeats: Vec<String> = bs.features.iter().map(|f| q(f)).collect();
     let script_unit = |src_path: &str| format!(
-        "{{\"pkg_id\":{},\"target\":{{\"kind\":[\"bin\"],\"name\":\"build-script-build\",\"src_path\":{},\"edition\":\"{}\"}},\"profile\":{{\"opt_level\":\"3\"}},\"mode\":\"build\",\"features\":[],\"dependencies\":[{}]}}",
+        "{{\"pkg_id\":{},\"target\":{{\"kind\":[\"bin\"],\"name\":\"build-script-build\",\"src_path\":{},\"edition\":\"{}\"}},\"profile\":{{\"opt_level\":\"3\"}},\"mode\":\"build\",\"features\":[{}],\"dependencies\":[{}]}}",
         q(&format!("path+file://{}#build-script-build@0.0.0", pkg_dir)),
         q(src_path),
         bs.edition,
+        sfeats.join(","),
         deps_json(&build_deps)
     );
     units.push(script_unit(&bs.src_path));
@@ -622,8 +764,12 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
         .env("CARGO_MANIFEST_DIR", dir)
         .env("CARGO_PKG_NAME", pname)
         .env("CARGO_PKG_VERSION", ver)
-        // cargo gives scripts RUSTC; theirs is Relax itself, answering `--version` (relax_as_rustc)
+        .env("CARGO_PKG_VERSION_PRE", version_parts(ver).1)
+        .envs(crate::resolve::package_meta_env(dir))
+        // cargo gives scripts RUSTC; theirs is Relax itself, answering `--version` (relax_as_rustc).
+        // RUSTDOC too (the `built` crate requires it); nothing documents here
         .env("RUSTC", &exe)
+        .env("RUSTDOC", "rustdoc")
         .env("MAKEPAD_RUN_AS_RUSTC", "1")
         .env("MAKEPAD_RUN_SCRIPT_DEPTH", depth.to_string())
         .env_remove("MAKEPAD_RUN_SELF_EXEC")
@@ -833,8 +979,13 @@ fn newest_mtime(p: &std::path::Path) -> u128 {
     t
 }
 
-/// At most SCRIPT_SLOTS build scripts run at once (each is a whole Relax process).
-const SCRIPT_SLOTS: usize = 4;
+/// At most this many build scripts run at once (each is a whole Relax process, most of its time a
+/// cold boot of std on a few threads): half the cores, 2..=8. Four slots queued two of Stage's six
+/// scripts behind the others.
+fn script_slots() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| (std::thread::available_parallelism().map_or(4, |n| n.get()) / 2).clamp(2, 8))
+}
 static SCRIPT_RUNNING: Mutex<usize> = Mutex::new(0);
 static SCRIPT_FREE: relax_session::sync::Condvar = relax_session::sync::Condvar::new();
 
@@ -848,7 +999,7 @@ impl Drop for ScriptSlot {
 
 fn script_slot() -> ScriptSlot {
     let mut n = SCRIPT_RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-    while *n >= SCRIPT_SLOTS {
+    while *n >= script_slots() {
         n = SCRIPT_FREE.wait(n).unwrap_or_else(|e| e.into_inner());
     }
     *n += 1;

@@ -84,6 +84,11 @@ pub struct GenerateParams {
     /// Conversation identity for KV stickiness (wire `chat_session`).
     /// Empty on legacy clients.
     pub chat_session: String,
+    /// The chat request as sent (`chat_system`, `chat_messages`), for
+    /// backends that take a structured conversation rather than the
+    /// rendered prompt (the claude-cli backend). Empty for non-chat jobs.
+    pub chat_system: String,
+    pub chat_messages: Vec<crate::protocol::ChatMessageJson>,
     /// Pictures the chat turns carry (`chat_messages[].images`), decoded,
     /// one per distinct key; the rendered prompt holds their markers
     /// (`crate::protocol::chat_image_marker`).
@@ -412,6 +417,8 @@ impl GenerateParams {
 
             target_domain,
             chat_session: request.chat_session.clone().unwrap_or_default(),
+            chat_system: if is_chat { request.chat_system.clone().unwrap_or_default() } else { String::new() },
+            chat_messages: if is_chat { request.chat_messages.clone().unwrap_or_default() } else { Vec::new() },
             chat_images: if is_chat {
                 decode_chat_images(request.chat_messages.as_deref())?
             } else {
@@ -1688,6 +1695,9 @@ pub fn backend_live_supported(spec: &ModelSpec) -> bool {
 pub fn backend_compiled(name: &str) -> bool {
     match name {
         "testpattern" => true,
+        // Always compiled; served only when the hub enabled it (see
+        // `backend_provisioned` and `crate::claude_cli`).
+        crate::claude_cli::BACKEND => true,
         "flux" | "flux2" | "control" | "flux-fill" => cfg!(feature = "flux"),
         "llm" => cfg!(feature = "llm"),
         // The vision domain rides the same llama session + the mmproj tower,
@@ -1765,6 +1775,13 @@ pub fn backend_provisioned(name: &str) -> bool {
         #[cfg(feature = "python-backends")]
         "flashworld" => crate::world_backend::flashworld_provisioned(),
         "music3" => crate::music3_backend::music3_provisioned(),
+        // YuE2 runs on the CUDA store only (no CPU/Metal path): a hub built
+        // without the CUDA kernels, or on a box without a device, must not
+        // advertise it, so the fleet router never sends it a song.
+        #[cfg(feature = "audio")]
+        "yue2" => makepad_ai_common::backend::gpu_device_available(),
+        #[cfg(not(feature = "audio"))]
+        "yue2" => false,
         // The vision tower and its language session have no CPU path: Metal
         // on macOS, CUDA on Windows/Linux, probed once and memoised.
         "vision" => crate::vision_backend::vision_provisioned(),
@@ -1793,6 +1810,7 @@ pub fn backend_provisioned(name: &str) -> bool {
         "motion-oracle" => crate::motion_backend::motion_provisioned(),
         #[cfg(not(feature = "python-backends"))]
         "flashworld" | "depth" | "rig-oracle" | "motion-oracle" => false,
+        crate::claude_cli::BACKEND => crate::claude_cli::enabled(),
         _ => true,
     }
 }
@@ -1908,6 +1926,7 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         ))),
         #[cfg(feature = "paint")]
         "paint" | "paint-test" => Ok(Box::new(crate::paint_backend::PaintBackend::new(spec))),
+        crate::claude_cli::BACKEND => crate::claude_cli::create_backend(&spec.id),
         "testpattern" => Ok(Box::new(crate::testpattern::TestPatternBackend::new(
             &spec.id,
         ))),

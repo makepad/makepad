@@ -43,6 +43,10 @@ param(
     # Phase-1 tunnel keys and identity to carry over.
     [string]$SeedDir = (Join-Path $env:USERPROFILE '.makepad\tunnel'),
     [string]$Fleet = 'gen',
+    # This machine's fleet identity (id.key, id.cred, root.pub; tools/fleet-identity.md),
+    # installed for the installing user: the node service reads it there, whichever
+    # account it runs as.
+    [string]$FleetDir = (Join-Path $env:USERPROFILE '.makepad\fleet'),
     [string]$RemoteAddress = 'LocalSubnet',
     [int]$Port = 8123,
     [int]$TunnelPort = 8384,
@@ -273,6 +277,7 @@ if ($doNode) {
     $nodeEnv['CUDA_PATH'] = $cudaPath
     $nodeEnv['MAKEPAD_ASSET_AI_PORT'] = "$Port"
     $nodeEnv['MAKEPAD_ASSET_AI_FLEET'] = $Fleet
+    $nodeEnv['MAKEPAD_FLEET_DIR'] = $FleetDir
     $lines = @(
         "name=$NodeService", 'session=user', "cwd=$CacheDir",
         "log=$(Join-Path $logDir 'node.log')", "path=$cudaPath\bin"
@@ -320,8 +325,11 @@ if ($doTunnel) {
 
     # Rights of the tunnel account (only now does its SID resolve).
     $sid = (New-Object Security.Principal.NTAccount $TunnelAccount).Translate([Security.Principal.SecurityIdentifier]).Value
-    & icacls.exe $tunnelDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$($sid):(OI)(CI)M" /T /Q | Out-Null
+    & icacls.exe $tunnelDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "*$($sid):(OI)(CI)M" /Q | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'icacls failed on the tunnel directory' }
+    # Children inherit the directory's ACL (an explicit /T grant with (OI)(CI) leaves files with an empty DACL).
+    & icacls.exe (Join-Path $tunnelDir '*') /reset /T /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'icacls failed on the tunnel files' }
     & icacls.exe $InstallDir /grant "*$($sid):(OI)(CI)RX" /Q | Out-Null
     Grant $nodeDir '(OI)(CI)M'
     Write-Step 'granting the tunnel its working directory and cargo cache (can take a few minutes on a big checkout)'
@@ -401,16 +409,16 @@ if ($doNode) {
     }
     $result.node = [ordered]@{ pid = $process.ProcessId; version = $health.version; node_key = $health.node_key; admission_open = $health.activity.admission_open; sha256 = (Get-FileHash $nodeExe -Algorithm SHA256).Hash }
     # The node updater, run by the tunnel's account, authenticates to the
-    # node's /health with the node's own credential: it may read exactly
-    # that and the certificate fingerprint (not fleet.key, not the TLS key).
+    # node's /health as this machine (its fleet key and credential, the same
+    # identity the node serves with): it may read exactly the fleet identity.
     $tunnelSid = $null
     try { $tunnelSid = (New-Object Security.Principal.NTAccount $TunnelAccount).Translate([Security.Principal.SecurityIdentifier]).Value } catch {}
     if ($tunnelSid) {
-        foreach ($file in @((Join-Path $CacheDir 'fleet\node.credential'), (Join-Path $CacheDir 'fleet\tls\tls-fingerprint.txt'))) {
-            if (Test-Path $file) { & icacls.exe $file /grant "*$($tunnelSid):R" /Q | Out-Null }
+        foreach ($file in @('id.key', 'id.cred', 'root.pub', 'revoked')) {
+            $path = Join-Path $FleetDir $file
+            if (Test-Path $path) { & icacls.exe $path /grant "*$($tunnelSid):R" /Q | Out-Null }
         }
-        & icacls.exe (Join-Path $CacheDir 'fleet') /grant "*$($tunnelSid):(X)" /Q | Out-Null
-        & icacls.exe (Join-Path $CacheDir 'fleet\tls') /grant "*$($tunnelSid):(X)" /Q | Out-Null
+        & icacls.exe $FleetDir /grant "*$($tunnelSid):(X)" /Q | Out-Null
     }
 }
 if ($doTunnel) {

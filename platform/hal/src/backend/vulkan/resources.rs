@@ -75,7 +75,7 @@ impl Image {
         }
         if !features.contains(needed) { return Err(format!("texture format {} lacks device features {needed:?}", desc.format)); }
         let info = vk::ImageCreateInfo::default()
-            .flags(if desc.depth == 6 && desc.w == desc.h && !format::is_depth(desc.format) { vk::ImageCreateFlags::CUBE_COMPATIBLE } else { vk::ImageCreateFlags::empty() })
+            .flags(if desc.is_cube() { vk::ImageCreateFlags::CUBE_COMPATIBLE } else { vk::ImageCreateFlags::empty() })
             .image_type(vk::ImageType::TYPE_2D).format(fmt)
             .extent(vk::Extent3D { width: desc.w, height: desc.h, depth: 1 })
             .mip_levels(desc.mips).array_layers(desc.depth).samples(vk::SampleCountFlags::TYPE_1)
@@ -117,7 +117,7 @@ impl Image {
         out.array_view = out.dev.raw.create_image_view(&info, None).map_err(error)?;
         out.view = out.dev.raw.create_image_view(&info.view_type(vk::ImageViewType::TYPE_2D)
             .subresource_range(vk::ImageSubresourceRange::default().aspect_mask(sampled_aspect).level_count(out.desc.mips).layer_count(1)), None).map_err(error)?;
-        if out.desc.depth == 6 && out.desc.w == out.desc.h && !format::is_depth(out.desc.format) {
+        if out.desc.is_cube() {
             out.cube_view = out.dev.raw.create_image_view(&info.view_type(vk::ImageViewType::CUBE), None).map_err(error)?;
         }
         if out.desc.usage & usage::RENDER_TARGET != 0 {
@@ -141,6 +141,20 @@ impl Image {
             .subresource_range(vk::ImageSubresourceRange::default().aspect_mask(self.aspect).level_count(self.desc.mips).layer_count(self.desc.depth));
         unsafe { self.dev.raw.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::ALL_COMMANDS,
             vk::DependencyFlags::empty(), &[], &[], &[barrier]); }
+    }
+
+    /// Readies the image for a draw that samples it. A barrier is recorded only when its layout
+    /// changes (or another queue family owns it): every write to an image (render pass,
+    /// copy, mip chain) leaves it in its sampled layout through a barrier of its own, which
+    /// already orders the reads that follow on this queue; a read after a read needs none. A
+    /// barrier per sampled texture per draw was a full pipeline drain for each one (a scene of
+    /// 470 draws recorded 8418 of them: 20 ms in vkQueueSubmit on NVIDIA, and GPU stalls).
+    pub(super) fn to_sampled(&self, cb: vk::CommandBuffer) {
+        let to = self.sampled_layout();
+        if *lock(&self.layout) == to && !self.external_owner.load(Ordering::Acquire) {
+            return;
+        }
+        self.transition(cb, to);
     }
 
     pub(super) fn supports_transfer(&self) -> bool {
@@ -170,6 +184,9 @@ impl Image {
             _ => Err("sampled image has no matching cube/array view".into()),
         }
     }
+
+    /// The view of every array layer (one mip): a multiview pass's attachment.
+    pub(super) fn array_view(&self) -> vk::ImageView { self.array_view }
 
     pub(super) fn release_external(&self, cb: vk::CommandBuffer) {
         self.transition(cb, vk::ImageLayout::GENERAL);
@@ -206,7 +223,7 @@ impl Drop for Image {
     }
 }
 
-pub(super) struct Buffer {
+pub(crate) struct Buffer {
     pub dev: Arc<Device>,
     pub buffer: vk::Buffer,
     pub memory: vk::DeviceMemory,
@@ -304,7 +321,7 @@ impl Drop for Buffer {
     }
 }
 
-pub(super) fn buffer_usage() -> vk::BufferUsageFlags {
+pub(crate) fn buffer_usage() -> vk::BufferUsageFlags {
     vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER
         | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST
 }

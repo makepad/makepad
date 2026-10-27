@@ -123,6 +123,15 @@ pub struct Cx {
     pub signal_hooks: Vec<fn(&mut Cx)>,
 
     pub redraw_id: u64,
+    /// The drawing being recorded (`Cx::drawing_id`): one per draw event, and
+    /// one per draw context made outside a draw event.
+    pub(crate) drawing_id: u64,
+    /// `redraw_id` when that drawing began: the lists its draw contexts
+    /// recorded carry a higher one.
+    pub(crate) drawing_start: u64,
+    /// What a frame drawn again before it painted keeps of its earlier
+    /// drawings (`Cx::frame_drawn_again`).
+    pub(crate) redraw_keep: crate::os::cx_shared::RedrawKeep,
 
     /// Process-wide source of uniform block generations. A generation is
     /// issued once and never reused, so pooled draw/pass/list slots cannot
@@ -145,6 +154,8 @@ pub struct Cx {
     pub(crate) file_dialogs: FileDialogState,
 
     pub(crate) platform_ops: VecDeque<CxOsOp>,
+    /// the trays the app has (`Cx::set_tray`): while there is one the app outlives its windows
+    pub(crate) trays: Vec<LiveId>,
     pub(crate) pending_camera_playbacks: Vec<PendingCameraPlayback>,
 
     pub(crate) new_next_frames: HashSet<NextFrame>,
@@ -293,6 +304,13 @@ pub struct Cx {
     /// root (named widgets only), registered by the widgets layer; the remote
     /// bridge's `/snap` path addressing reads it.
     pub widget_paths_callback: Option<fn(&Cx) -> Vec<(WidgetSnapshot, String)>>,
+    /// The widget path and type of each given uid, registered by the widgets layer (frame capture
+    /// attribution: `draw_owners`).
+    pub widget_uid_paths_callback: Option<fn(&Cx, &[u64]) -> Vec<(u64, String, String)>>,
+    /// Per-instance widget attribution, only while a capture asks for it (`draw_owners`).
+    pub draw_owners: Option<Box<crate::draw_owners::DrawOwners>>,
+    /// The names drawers give their instances (`Cx::draw_label`), interned once.
+    pub(crate) draw_labels: crate::draw_owners::DrawLabels,
     /// Subsystems' counts of asynchronous loads in flight, by kind (see
     /// `Cx::register_async_load_probe`).
     pub(crate) async_load_probes: Vec<(&'static str, crate::cx_api::AsyncLoadProbe)>,
@@ -1005,6 +1023,9 @@ impl Cx {
             new_actions: Default::default(),
 
             redraw_id: 1,
+            drawing_id: 0,
+            drawing_start: 0,
+            redraw_keep: Default::default(),
             uniform_gen: 1,
             event_id: 1,
             repaint_id: 1,
@@ -1021,6 +1042,7 @@ impl Cx {
             ime_area: Default::default(),
             keyboard_shift: 0.0,
             platform_ops: Default::default(),
+            trays: Vec::new(),
             pending_camera_playbacks: Vec::new(),
             studio_http: "".to_string(),
             new_next_frames: Default::default(),
@@ -1087,6 +1109,9 @@ impl Cx {
             widget_query_invalidation_event: None,
             app_clock: Default::default(),
             widget_paths_callback: None,
+            widget_uid_paths_callback: None,
+            draw_owners: None,
+            draw_labels: Default::default(),
             async_load_probes: Vec::new(),
             widget_tree_ptr: std::ptr::null_mut(),
             widget_tree_dump_callback: None,

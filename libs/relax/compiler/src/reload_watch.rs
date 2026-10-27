@@ -9,6 +9,25 @@ mod native {
         fn inotify_init1(flags: i32) -> i32;
         fn inotify_add_watch(fd: i32, path: *const std::ffi::c_char, mask: u32) -> i32;
         fn read(fd: i32, buf: *mut u8, size: usize) -> isize;
+        fn write(fd: i32, buf: *const u8, size: usize) -> isize;
+        fn eventfd(initval: u32, flags: i32) -> i32;
+        fn poll(fds: *mut PollFd, nfds: std::ffi::c_ulong, timeout: i32) -> i32;
+    }
+    #[repr(C)]
+    struct PollFd { fd: i32, events: i16, revents: i16 }
+    /// The eventfd `kick` writes to (-1: none could be made; `wait` then wakes on file events and
+    /// its timeout only).
+    fn kick_fd() -> i32 {
+        static FD: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+        // EFD_NONBLOCK | EFD_CLOEXEC
+        *FD.get_or_init(|| unsafe { eventfd(0, 0x800 | 0x80000) })
+    }
+    pub fn kick() {
+        let fd = kick_fd();
+        if fd >= 0 {
+            let one = 1u64;
+            unsafe { write(fd, (&one as *const u64).cast(), 8) };
+        }
     }
     pub struct Watch {
         fd: OwnedFd,
@@ -43,6 +62,17 @@ mod native {
                 p.is_dir().then(|| dirs.get(p).map(|&wd| (wd, i))).flatten()
             }).collect();
             Some(Self { fd, names, directories })
+        }
+        /// Sleeps until the inotify fd has events, `kick` is called or `timeout` passes.
+        pub fn wait(&mut self, timeout: std::time::Duration) {
+            let k = kick_fd();
+            let mut fds = [PollFd { fd: self.fd.as_raw_fd(), events: 1, revents: 0 }, PollFd { fd: k, events: 1, revents: 0 }];
+            let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+            unsafe { poll(fds.as_mut_ptr(), if k >= 0 { 2 } else { 1 }, ms) };
+            if k >= 0 && fds[1].revents != 0 {
+                let mut n = 0u64;
+                unsafe { read(k, (&mut n as *mut u64).cast(), 8) };
+            }
         }
         /// None means events may have been lost: stat every source this round.
         pub fn changed(&mut self) -> Option<Vec<usize>> {
@@ -127,7 +157,17 @@ mod native {
     }
     // the stream is stopped and released from whichever thread owns the watch
     unsafe impl Send for Watch {}
+    /// Set by a delivery or `kick`, taken by `wait`.
+    static KICK: (std::sync::Mutex<bool>, std::sync::Condvar) = (std::sync::Mutex::new(false), std::sync::Condvar::new());
+    pub fn kick() {
+        *KICK.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        KICK.1.notify_all();
+    }
     extern "C" fn delivered(_: Stream, info: *mut c_void, n: usize, paths: *const *const c_char, flags: *const u32, _: *const u64) {
+        deliver(info, n, paths, flags);
+        kick();
+    }
+    fn deliver(info: *mut c_void, n: usize, paths: *const *const c_char, flags: *const u32) {
         let shared = unsafe { &*(info as *const Shared) };
         let mut pending = shared.pending.lock().unwrap_or_else(|e| e.into_inner());
         for k in 0..n {
@@ -185,6 +225,12 @@ mod native {
                 if FSEventStreamStart(stream) == 0 { return None; }
                 Some(watch)
             }
+        }
+        /// Sleeps until FSEvents delivers, `kick` is called or `timeout` passes.
+        pub fn wait(&mut self, timeout: std::time::Duration) {
+            let g = KICK.0.lock().unwrap_or_else(|e| e.into_inner());
+            let mut g = KICK.1.wait_timeout_while(g, timeout, |k| !*k).unwrap_or_else(|e| e.into_inner()).0;
+            *g = false;
         }
         /// None means events may have been lost: stat every source this round.
         pub fn changed(&mut self) -> Option<Vec<usize>> {
@@ -250,6 +296,9 @@ mod native {
         }
     }
     pub struct Watch { dirs: Vec<Box<Dir>> }
+    /// (Windows reads the completion status without an event to wait on: `wait` keeps the 5 ms
+    /// poll, and `kick` has nothing to wake.)
+    pub fn kick() {}
     // directory handles may be used and closed from any thread
     unsafe impl Send for Watch {}
     impl Watch {
@@ -281,6 +330,9 @@ mod native {
                 }
             }
             Some(Self { dirs })
+        }
+        pub fn wait(&mut self, timeout: std::time::Duration) {
+            std::thread::sleep(timeout.min(std::time::Duration::from_millis(5)));
         }
         /// None means events may have been lost: stat every source this round.
         pub fn changed(&mut self) -> Option<Vec<usize>> {
@@ -317,11 +369,16 @@ mod native {
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod native {
     pub struct Watch;
+    pub fn kick() {}
     impl Watch {
         pub fn new<'a>(_: impl Iterator<Item = &'a str>) -> Option<Self> { None }
+        pub fn wait(&mut self, timeout: std::time::Duration) { std::thread::sleep(timeout.min(std::time::Duration::from_millis(5))) }
         pub fn changed(&mut self) -> Option<Vec<usize>> { None }
     }
 }
+/// `Watch::wait` returns now: an input of the live watcher that is not a file event arrived (a
+/// streamed edit, a domain's new inputs, files the post-boot loader added, the startup's end).
+pub use native::kick;
 pub use native::Watch;
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
@@ -372,12 +429,17 @@ mod tests {
         let unrelated = dir.join("unrelated.rs");
         let temporary = dir.join("save.tmp");
         std::fs::write(&source, "old").unwrap();
-        let mut watch = super::Watch::new(std::iter::once(source.to_str().unwrap())).unwrap();
+        let new_watch = || super::Watch::new(std::iter::once(source.to_str().unwrap())).unwrap();
+        let mut watch = new_watch();
         if !cfg!(target_os = "linux") {
-            // FSEvents may still report the write just before the stream started (fseventsd
-            // had not processed it yet); a stray event costs the caller one stat.
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            assert!(watch.changed().is_some());
+            // FSEvents may still deliver the writes made just before the stream started (fseventsd
+            // had not processed them yet): the file's (a stray stat) or the fresh directory's own
+            // (None: events may be lost, and the caller rebuilds the watch -- as here)
+            for _ in 0..5 {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                if watch.changed().is_some() { break; }
+                watch = new_watch();
+            }
         }
         std::fs::write(&unrelated, "unrelated").unwrap();
         if !cfg!(target_os = "linux") { std::thread::sleep(std::time::Duration::from_millis(300)); }

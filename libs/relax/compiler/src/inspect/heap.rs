@@ -21,7 +21,7 @@
 
 use super::{json_str, now_ms, Out, Req};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, AtomicUsize, Ordering::{AcqRel, Acquire, Relaxed, Release}};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering::{AcqRel, Acquire, Relaxed, Release}};
 use relax_session::sync::Mutex;
 
 // ------------------------------------------------------------------ veneers and entry stubs
@@ -270,8 +270,11 @@ mod imp {
 
 // ------------------------------------------------------------------ tracking state
 
-const DEPTH: usize = 24;
+pub(crate) const DEPTH: usize = 24;
 const MAX_STACKS: usize = 1 << 16;
+/// A sample's weight bits in the live table's record (the stack id is above bit 40).
+const WEIGHT: u64 = (1 << 39) - 1;
+const AFTER_MARK: u64 = 1 << 39;
 /// live-block table: open addressing over (block, record) pairs; key 0 = empty, 1 = deleted,
 /// 2 = being written
 const LIVE_SLOTS: usize = 1 << 20;
@@ -304,6 +307,50 @@ struct Tables {
     filter: Box<[AtomicU8]>,
     rate: u64,
     started_ms: u64,
+    /// lifetime mode (`heap start life=1`): per live slot the allocating frames, per stack the
+    /// lifetime classes (STACKALLOC measurement)
+    life: Option<Box<[LifeRec]>>,
+    sites: Option<Box<[SiteLife]>>,
+    /// lifetime mode: allocations are sampled only in UI frames [start_frame, start_frame + frame_limit)
+    start_frame: u64,
+    frame_limit: u64,
+}
+
+/// Frames of a lifetime-mode allocation kept to classify its free.
+const LIFE_FRAMES: usize = DEPTH;
+/// Lifetime classes: freed while physical frame d of the allocation (0 = the frame that called the
+/// allocator) was still the same activation (d < LIFE_FRAMES), else freed elsewhere in the same UI
+/// frame, else freed in a later UI frame.
+const LIFE_CLASSES: usize = LIFE_FRAMES + 2;
+const LIFE_BUCKETS: usize = 20;
+/// sizes seen before a site's guess is fixed (the "profile")
+const LIFE_GUESS_N: u32 = 16;
+
+/// One live block in lifetime mode: frame pointers of its allocating frames (pairs with the
+/// stack's return addresses identify each activation) and its size and UI frame.
+struct LifeRec {
+    fps: [AtomicU64; LIFE_FRAMES],
+    size: AtomicU64,
+    frame: AtomicU64,
+}
+
+/// Per stack in lifetime mode.
+struct SiteLife {
+    class: [AtomicU64; LIFE_CLASSES],
+    /// final sizes per class: bucket b holds sizes in (2^(b-1), 2^b]
+    hist: [[AtomicU32; LIFE_BUCKETS]; LIFE_CLASSES],
+    bytes: AtomicU64,
+    reallocs: AtomicU64,
+    /// the profile guess: max of the first LIFE_GUESS_N final sizes, then fixed
+    guess: AtomicU64,
+    seen: AtomicU32,
+    fit: AtomicU64,
+    over: AtomicU64,
+    /// freed by the allocating physical frame itself (alloc and free in one compiled body)
+    same_body: AtomicU64,
+    /// smallest and largest final size (equal: one fixed size at this site)
+    size_min: AtomicU64,
+    size_max: AtomicU64,
 }
 
 /// One tracker: the program's heap (veneers) or Relax's own (memstat's allocator).
@@ -358,6 +405,12 @@ fn next_interval(rate: u64) -> i64 {
 
 /// The JIT call stack of a program allocator call: its return address, then frame records.
 fn capture_program(fp: u64, ra: u64, out: &mut [u64; DEPTH]) -> u8 {
+    capture_program_fps(fp, ra, out, &mut [0; LIFE_FRAMES])
+}
+
+/// `capture_program`, also keeping the frame pointer of physical frame i in `fps[i]`: frame i's
+/// activation is (fps[i], out[i + 1]) (its frame record and the return address into its caller).
+fn capture_program_fps(fp: u64, ra: u64, out: &mut [u64; DEPTH], fps: &mut [u64; LIFE_FRAMES]) -> u8 {
     let mut n = 0;
     out[0] = ra;
     n += 1;
@@ -367,6 +420,9 @@ fn capture_program(fp: u64, ra: u64, out: &mut [u64; DEPTH]) -> u8 {
         let r = unsafe { *((f + 8) as *const u64) };
         if !crate::jit::in_jit_code(r.wrapping_sub(1)) {
             break;
+        }
+        if n - 1 < LIFE_FRAMES {
+            fps[n - 1] = f;
         }
         out[n] = r;
         n += 1;
@@ -379,11 +435,80 @@ fn capture_program(fp: u64, ra: u64, out: &mut [u64; DEPTH]) -> u8 {
     n as u8
 }
 
+fn life_bucket(size: u64) -> usize {
+    ((64 - size.max(1).saturating_sub(1).leading_zeros()) as usize).min(LIFE_BUCKETS - 1)
+}
+
+/// Lifetime mode: classifies a tracked block's free (`fp`/`ra`: the freeing JIT frame) against
+/// the activations that allocated it, and counts it on its stack.
+fn life_free(t: &Tables, id: usize, rec: (&[u64; LIFE_FRAMES], u64, u64), fp: u64, ra: u64) {
+    let (Some(sites), Some(st)) = (t.sites.as_ref(), t.stacks.get(id)) else { return };
+    let (fps, size, frame) = rec;
+    let n = (st.n.load(Relaxed) as usize).saturating_sub(1).min(LIFE_FRAMES);
+    // the freeing thread's JIT activations (frame record, return address into the caller)
+    let mut class = usize::MAX;
+    let mut same_body = false;
+    let same_ui_frame = super::timeline::FRAMES.load(Relaxed) == frame;
+    if fp != 0 && ra != 0 && same_ui_frame {
+        let mut f = fp;
+        let start = fp;
+        let mut k = 0;
+        'walk: while k < 256 && f != 0 && f % 8 == 0 && f >= start && f - start < (1 << 36) {
+            let r = unsafe { *((f + 8) as *const u64) };
+            if !crate::jit::in_jit_code(r.wrapping_sub(1)) {
+                break;
+            }
+            for d in 0..n {
+                // (an activation at the same frame record and return address in a later UI frame is
+                // the same call chain run again, not the allocating one)
+                if fps[d] == f && st.frames[d + 1].load(Relaxed) == r {
+                    class = class.min(d);
+                    if d == 0 {
+                        same_body = k == 0;
+                        break 'walk;
+                    }
+                }
+            }
+            k += 1;
+            let next = unsafe { *(f as *const u64) };
+            if next <= f {
+                break;
+            }
+            f = next;
+        }
+    }
+    if class == usize::MAX {
+        class = if same_ui_frame { LIFE_FRAMES } else { LIFE_FRAMES + 1 };
+    }
+    let sl = &sites[id];
+    sl.class[class].fetch_add(1, Relaxed);
+    if same_body {
+        sl.same_body.fetch_add(1, Relaxed);
+    }
+    sl.size_min.fetch_min(size, Relaxed);
+    sl.size_max.fetch_max(size, Relaxed);
+    sl.hist[class][life_bucket(size)].fetch_add(1, Relaxed);
+    sl.bytes.fetch_add(size, Relaxed);
+    let seen = sl.seen.fetch_add(1, Relaxed);
+    if seen < LIFE_GUESS_N {
+        sl.guess.fetch_max(size.max(1).next_power_of_two(), Relaxed);
+    } else if size <= sl.guess.load(Relaxed) {
+        sl.fit.fetch_add(1, Relaxed);
+    } else {
+        sl.over.fetch_add(1, Relaxed);
+    }
+}
+
+/// The thread switched stacks (jit::program_stack_changed): the cached top is read again.
+pub(crate) fn stack_changed() {
+    let _ = STACK_HI.try_with(|h| h.set(0));
+}
+
 /// The calling thread's own stack (host and JIT frames), from inside the allocator: frame records
 /// on macOS arm64, CFI on Linux x86_64 (never refreshing the module index here: a dlopen in
 /// progress may hold the loader lock and be allocating). Return addresses only.
 #[inline(never)]
-fn capture_host(out: &mut [u64; DEPTH]) -> u8 {
+pub(crate) fn capture_host(out: &mut [u64; DEPTH]) -> u8 {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         let mut f: u64;
@@ -466,10 +591,25 @@ fn keep(tr: &Tracker, t: &Tables, p: *mut u8, size: usize, frames: &[u64; DEPTH]
     // (the stack index grows here: kept, the tracker outlives the compiler arena)
     let _k = crate::zone_alloc::kept();
     let Some(id) = intern(tr, t, frames, n, tag) else { return };
-    let w = (size as u64).max(t.rate).min((1 << 40) - 1);
+    keep_id(tr, t, p, size, id, None);
+}
+
+/// Counts a block against stack `id` and keeps its record (`life`: lifetime mode's frames, UI frame).
+fn keep_id(tr: &Tracker, t: &Tables, p: *mut u8, size: usize, id: u32, life: Option<(&[u64; LIFE_FRAMES], u64)>) {
+    keep_id_moved(tr, t, p, size, id, life, false)
+}
+
+/// `keep_id`; `moved`: the block was resized (lifetime mode), so it is not a new allocation.
+fn keep_id_moved(tr: &Tracker, t: &Tables, p: *mut u8, size: usize, id: u32, life: Option<(&[u64; LIFE_FRAMES], u64)>, moved: bool) {
+    let w = (size as u64).max(t.rate).min(WEIGHT);
+    // bit 39 of the record: sampled after the last settle rebuild's mark (`zone=cold` keeps the
+    // samples before it)
+    let mark = if crate::zone_alloc::compiler_old_marks() != 0 { AFTER_MARK } else { 0 };
     let st = &t.stacks[id as usize];
     st.alloc_bytes.fetch_add(w as i64, Relaxed);
-    st.alloc_blocks.fetch_add(1, Relaxed);
+    if !moved {
+        st.alloc_blocks.fetch_add(1, Relaxed);
+    }
     let live = st.live_bytes.fetch_add(w as i64, Relaxed) + w as i64;
     st.live_blocks.fetch_add(1, Relaxed);
     st.peak_bytes.fetch_max(live, Relaxed);
@@ -479,7 +619,15 @@ fn keep(tr: &Tracker, t: &Tables, p: *mut u8, size: usize, frames: &[u64; DEPTH]
         let k = t.keys[i].load(Relaxed);
         // claim (2), write the record, then publish the key: a free never reads a half record
         if (k == 0 || k == 1) && t.keys[i].compare_exchange(k, 2, Acquire, Relaxed).is_ok() {
-            t.vals[i].store(((id as u64) << 40) | w, Relaxed);
+            t.vals[i].store(((id as u64) << 40) | mark | w, Relaxed);
+            if let (Some(lr), Some((fps, frame))) = (t.life.as_ref(), life) {
+                let r = &lr[i];
+                for (k, f) in fps.iter().enumerate() {
+                    r.fps[k].store(*f, Relaxed);
+                }
+                r.size.store(size as u64, Relaxed);
+                r.frame.store(frame, Relaxed);
+            }
             t.keys[i].store(key, Release);
             let f = &t.filter[hash(key) % FILTER];
             if f.load(Relaxed) < 255 {
@@ -513,30 +661,59 @@ fn record(p: *mut u8, size: usize, fp: u64, ra: u64) {
         return;
     }
     let mut frames = [0u64; DEPTH];
+    if t.life.is_some() {
+        let frame = super::timeline::FRAMES.load(Relaxed);
+        if frame.wrapping_sub(t.start_frame) >= t.frame_limit {
+            return;
+        }
+        let mut fps = [0u64; LIFE_FRAMES];
+        let n = capture_program_fps(fp, ra, &mut frames, &mut fps);
+        let _k = crate::zone_alloc::kept();
+        let Some(id) = intern(&PROGRAM, t, &frames, n, 0) else { return };
+        keep_id(&PROGRAM, t, p, size, id, Some((&fps, frame)));
+        return;
+    }
     let n = capture_program(fp, ra, &mut frames);
     keep(&PROGRAM, t, p, size, &frames, n, 0);
 }
 
 /// A tracked block is freed (or moved): its stack's live bytes go down.
 fn forget(tr: &Tracker, p: *mut u8) {
+    forget_at(tr, p, 0, 0, false);
+}
+
+/// `forget` from a JIT free (`fp`/`ra`: the freeing frame, for lifetime mode). `moving`: the block
+/// moves (realloc): no lifetime class, and its stack id and lifetime record are returned for the
+/// moved block.
+fn forget_at(tr: &Tracker, p: *mut u8, fp: u64, ra: u64, moving: bool) -> Option<(u32, [u64; LIFE_FRAMES], u64)> {
     if p.is_null() {
-        return;
+        return None;
     }
-    let Some(t) = tr.tables() else { return };
+    let Some(t) = tr.tables() else { return None };
     let key = p as u64;
     let f = &t.filter[hash(key) % FILTER];
     if f.load(Relaxed) == 0 {
-        return;
+        return None;
     }
     let mut i = hash(key) % LIVE_SLOTS;
     for _ in 0..64 {
         let k = t.keys[i].load(Acquire);
         if k == 0 {
-            return;
+            return None;
         }
-        if k == key && t.keys[i].compare_exchange(key, 1, AcqRel, Relaxed).is_ok() {
+        if k == key {
+            // the slot's lifetime record is read before the slot is released (a released slot
+            // may be claimed and rewritten at once)
+            let life = t.life.as_ref().map(|lr| {
+                let r = &lr[i];
+                (std::array::from_fn::<u64, LIFE_FRAMES, _>(|d| r.fps[d].load(Relaxed)), r.size.load(Relaxed), r.frame.load(Relaxed))
+            });
             let v = t.vals[i].load(Relaxed);
-            let (id, w) = ((v >> 40) as usize, (v & ((1 << 40) - 1)) as i64);
+            if t.keys[i].compare_exchange(key, 1, AcqRel, Relaxed).is_err() {
+                i = (i + 1) % LIVE_SLOTS;
+                continue;
+            }
+            let (id, w) = ((v >> 40) as usize, (v & WEIGHT) as i64);
             if id < t.used.load(Acquire) {
                 let st = &t.stacks[id];
                 st.live_bytes.fetch_sub(w, Relaxed);
@@ -546,10 +723,18 @@ fn forget(tr: &Tracker, p: *mut u8) {
             if f.load(Relaxed) < 255 {
                 f.fetch_sub(1, Relaxed);
             }
-            return;
+            let (fps, size, frame) = life?;
+            if moving {
+                return Some((id as u32, fps, frame));
+            }
+            if id < t.used.load(Acquire) {
+                life_free(t, id, (&fps, size, frame), fp, ra);
+            }
+            return None;
         }
         i = (i + 1) % LIVE_SLOTS;
     }
+    None
 }
 
 fn real(k: usize) -> usize {
@@ -573,15 +758,24 @@ extern "C" fn track_calloc(n: usize, size: usize, fp: u64, ra: u64) -> *mut u8 {
 extern "C" fn track_realloc(p: *mut u8, size: usize, fp: u64, ra: u64) -> *mut u8 {
     let f: extern "C" fn(*mut u8, usize) -> *mut u8 = unsafe { std::mem::transmute(real(2)) };
     // the old block's record goes first: realloc may hand its address to another thread's malloc
-    forget(&PROGRAM, p);
+    let moved = forget_at(&PROGRAM, p, 0, 0, true);
     let q = f(p, size);
-    record(q, size, fp, ra);
+    match (moved, PROGRAM.tables()) {
+        (Some((id, fps, frame)), Some(t)) if !q.is_null() => {
+            if let Some(sl) = t.sites.as_ref().and_then(|s| s.get(id as usize)) {
+                sl.reallocs.fetch_add(1, Relaxed);
+            }
+            let _k = crate::zone_alloc::kept();
+            keep_id_moved(&PROGRAM, t, q, size, id, Some((&fps, frame)), true);
+        }
+        _ => record(q, size, fp, ra),
+    }
     q
 }
 
-extern "C" fn track_free(p: *mut u8, _fp: u64, _ra: u64) {
+extern "C" fn track_free(p: *mut u8, fp: u64, ra: u64) {
     let f: extern "C" fn(*mut u8) = unsafe { std::mem::transmute(real(3)) };
-    forget(&PROGRAM, p);
+    forget_at(&PROGRAM, p, fp, ra, false);
     f(p)
 }
 
@@ -606,14 +800,30 @@ extern "C" fn track_rust_zero(size: usize, align: usize, fp: u64, ra: u64) -> *m
     record(p, size, fp, ra);
     p
 }
-extern "C" fn track_rust_dealloc(p: *mut u8, size: usize, align: usize, _fp: u64, _ra: u64) {
-    forget(&PROGRAM, p);
+extern "C" fn track_rust_dealloc(p: *mut u8, size: usize, align: usize, fp: u64, ra: u64) {
+    forget_at(&PROGRAM, p, fp, ra, false);
     unsafe { crate::zone_alloc::domain::program_dealloc(p, size, align) };
 }
 extern "C" fn track_rust_resize(p: *mut u8, old: usize, align: usize, size: usize, fp: u64, ra: u64) -> *mut u8 {
-    forget(&PROGRAM, p);
+    let moved = forget_at(&PROGRAM, p, 0, 0, true);
     let q = unsafe { crate::zone_alloc::domain::program_resize(p, old, align, size) };
-    if q.is_null() { record(p, old, fp, ra); } else { record(q, size, fp, ra); }
+    match moved {
+        // lifetime mode: the block keeps its allocating site and frames (a Vec growing by push is
+        // still the allocation of the frame that made the Vec)
+        Some((id, fps, frame)) => {
+            if let Some(t) = PROGRAM.tables() {
+                let (b, sz) = if q.is_null() { (p, old) } else { (q, size) };
+                if let Some(sl) = t.sites.as_ref().and_then(|s| s.get(id as usize)) {
+                    sl.reallocs.fetch_add(1, Relaxed);
+                }
+                let _k = crate::zone_alloc::kept();
+                keep_id_moved(&PROGRAM, t, b, sz, id, Some((&fps, frame)), true);
+            }
+        }
+        None => {
+            if q.is_null() { record(p, old, fp, ra); } else { record(q, size, fp, ra); }
+        }
+    }
     q
 }
 
@@ -640,8 +850,22 @@ fn host_alloc(p: *mut u8, size: usize) {
     IN_HOST_SAMPLE.with(|b| b.set(true));
     let mut frames = [0u64; DEPTH];
     let n = capture_host(&mut frames);
+    // frames kept per host stack (MAKEPAD_RUN_HEAP_DEPTH): a whole cold start at the full depth
+    // fills the stack table before its end, and later samples go uncounted
+    let k = host_depth();
+    let n = if (n as usize) > k {
+        frames[k..].fill(0);
+        k as u8
+    } else {
+        n
+    };
     keep(&HOST, t, p, size, &frames, n, crate::memstat::current_tag());
     IN_HOST_SAMPLE.with(|b| b.set(false));
+}
+
+fn host_depth() -> usize {
+    static D: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *D.get_or_init(|| std::env::var("MAKEPAD_RUN_HEAP_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(DEPTH).clamp(1, DEPTH))
 }
 
 /// Leaves this thread's allocations out of the host heap's samples (inspect's own threads).
@@ -654,15 +878,20 @@ fn host_free(p: *mut u8) {
 }
 
 fn new_tables(rate: u64) -> *mut Tables {
+    new_tables_life(rate, None)
+}
+
+/// `life`: lifetime mode, sampling allocations in this many UI frames from now.
+fn new_tables_life(rate: u64, life: Option<u64>) -> *mut Tables {
     // the tracker's own tables are not the host heap's samples
     let was = IN_HOST_SAMPLE.with(|b| b.replace(true));
     // (kept: the tracker outlives the compiler arena)
-    let t = crate::zone_alloc::kept_with(|| new_tables_inner(rate));
+    let t = crate::zone_alloc::kept_with(|| new_tables_inner(rate, life));
     IN_HOST_SAMPLE.with(|b| b.set(was));
     t
 }
 
-fn new_tables_inner(rate: u64) -> *mut Tables {
+fn new_tables_inner(rate: u64, life: Option<u64>) -> *mut Tables {
     let mk_stack = || Stack {
         frames: [const { AtomicU64::new(0) }; DEPTH],
         n: AtomicU8::new(0),
@@ -683,12 +912,36 @@ fn new_tables_inner(rate: u64) -> *mut Tables {
         filter: (0..FILTER).map(|_| AtomicU8::new(0)).collect(),
         rate: rate.max(1),
         started_ms: now_ms(),
+        life: life.map(|_| (0..LIVE_SLOTS).map(|_| LifeRec { fps: [const { AtomicU64::new(0) }; LIFE_FRAMES], size: AtomicU64::new(0), frame: AtomicU64::new(0) }).collect()),
+        sites: life.map(|_| {
+            (0..MAX_STACKS)
+                .map(|_| SiteLife {
+                    class: [const { AtomicU64::new(0) }; LIFE_CLASSES],
+                    hist: [const { [const { AtomicU32::new(0) }; LIFE_BUCKETS] }; LIFE_CLASSES],
+                    bytes: AtomicU64::new(0),
+                    reallocs: AtomicU64::new(0),
+                    guess: AtomicU64::new(0),
+                    seen: AtomicU32::new(0),
+                    fit: AtomicU64::new(0),
+                    over: AtomicU64::new(0),
+                    same_body: AtomicU64::new(0),
+                    size_min: AtomicU64::new(u64::MAX),
+                    size_max: AtomicU64::new(0),
+                })
+                .collect()
+        }),
+        start_frame: super::timeline::FRAMES.load(Relaxed),
+        frame_limit: life.unwrap_or(u64::MAX),
     }))
 }
 
 /// Switches a tracker on with fresh tables. Old tables stay alive (leaked, ~30 MB each): a free
 /// in flight may still read them; a `heap start` replaces them at most once per call.
 fn start(host: bool, rate: u64) -> Result<(), &'static str> {
+    start_life(host, rate, None)
+}
+
+fn start_life(host: bool, rate: u64, life: Option<u64>) -> Result<(), &'static str> {
     let supported = cfg!(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")));
     if !supported {
         return Err("heap tracking needs macOS arm64 or Linux x86_64");
@@ -705,10 +958,10 @@ fn start(host: bool, rate: u64) -> Result<(), &'static str> {
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))]
     {
         if REAL[0].load(Relaxed) == 0 {
-            return Err("the program has not called the allocator through makepad run yet");
+            return Err("the program has not called the allocator through makepad run yet: ask again in a second (it hooks the allocator on its first call)");
         }
         PROGRAM.on.store(false, Release);
-        PROGRAM.tables.store(new_tables(rate), Release);
+        PROGRAM.tables.store(new_tables_life(rate, life), Release);
         PROGRAM.dropped.store(0, Relaxed);
         PROGRAM.on.store(true, Release);
         let e: [usize; 9] = [
@@ -773,6 +1026,38 @@ fn rows(t: &Tables) -> Vec<Row> {
         .collect()
 }
 
+/// The live samples whose block lies in one arena (`heap top host=1 zone=burst|compiler|old|new`), per
+/// stack: what survives there (a few surviving blocks pin a whole chunk of the burst arena).
+fn zone_rows(t: &Tables, zone: &str) -> Vec<Row> {
+    let mut r: Vec<Row> = rows(t).into_iter().map(|x| (x.0, 0, 0, x.3, x.4, x.5, x.6)).collect();
+    for (k, v) in t.keys.iter().zip(t.vals.iter()) {
+        let a = k.load(Relaxed);
+        if a <= 2 {
+            continue;
+        }
+        let inside = match zone {
+            "burst" => crate::zone_alloc::burst_owns(a as *const u8),
+            "compiler" => crate::zone_alloc::compiler_owns(a as *const u8),
+            // the compiler arena's chunks from before the last settle rebuild, and those after
+            "old" | "cold" => crate::zone_alloc::placement(a as *const u8) == 0,
+            "new" => crate::zone_alloc::placement(a as *const u8) == 1,
+            _ => !crate::zone_alloc::burst_owns(a as *const u8) && !crate::zone_alloc::compiler_owns(a as *const u8),
+        };
+        if !inside {
+            continue;
+        }
+        let v = v.load(Relaxed);
+        if zone == "cold" && v & AFTER_MARK != 0 {
+            continue;
+        }
+        if let Some(x) = r.get_mut((v >> 40) as usize) {
+            x.1 += (v & WEIGHT) as i64;
+            x.2 += 1;
+        }
+    }
+    r
+}
+
 static SNAPS: Mutex<Vec<(String, bool, u64, Vec<Row>)>> = Mutex::new(Vec::new());
 
 fn stack_names(t: &Tables, ids: &[usize], partial: &mut Vec<String>) -> Vec<Vec<super::Frame>> {
@@ -803,13 +1088,29 @@ fn plumbing(name: &str) -> bool {
 }
 
 fn site_json(frames: &[super::Frame], depth: usize) -> String {
-    let skip = frames.iter().position(|f| !plumbing(&f.name)).unwrap_or(0);
-    let what = frames.get(..skip).and_then(|v| v.last()).map(|f| super::short(&f.name, 90)).unwrap_or_default();
-    let fr: Vec<String> = frames.iter().skip(skip).take(depth).map(super::frame_json).collect();
+    // the logical frames (an inlined copy's levels, innermost first) with their physical frame:
+    // the site is the first logical frame that is not allocator plumbing (an allocation in
+    // `format!` inlined into `render_label` is render_label's)
+    let logical: Vec<(usize, &str, &str)> = frames
+        .iter()
+        .enumerate()
+        .flat_map(|(i, f)| {
+            if f.levels.is_empty() {
+                vec![(i, f.name.as_str(), f.at.as_str())]
+            } else {
+                f.levels.iter().map(|(n, at)| (i, n.as_str(), at.as_str())).collect()
+            }
+        })
+        .collect();
+    let skip = logical.iter().position(|l| !plumbing(l.1) && !l.1.starts_with("(inlined")).unwrap_or(0);
+    let what = logical.get(..skip).and_then(|v| v.iter().rev().find(|l| !l.1.starts_with("(inlined"))).map(|l| super::short(l.1, 90)).unwrap_or_default();
+    let first = logical.get(skip).map_or(0, |l| l.0);
+    let fr: Vec<String> = frames.iter().skip(first).take(depth).map(super::frame_json).collect();
+    let site = logical.get(skip).map(|l| format!("\"site\":{},\"site_at\":{},", json_str(&super::short(l.1, 140)), json_str(l.2))).unwrap_or_default();
     if what.is_empty() {
-        format!("\"frames\":[{}]", fr.join(","))
+        format!("{}\"frames\":[{}]", site, fr.join(","))
     } else {
-        format!("\"via\":{},\"frames\":[{}]", json_str(&what), fr.join(","))
+        format!("{}\"via\":{},\"frames\":[{}]", site, json_str(&what), fr.join(","))
     }
 }
 
@@ -822,7 +1123,7 @@ fn tag_name(t: &Tables, id: usize) -> &'static str {
 }
 
 /// `heap start [host=1] [rate=65536] [ttl_s=600]` | `heap stop [host=1]` | `heap status` |
-/// `heap top [host=1] [by=live|alloc|freed|peak] [n=15] [depth=5] [group=stack|tag]` |
+/// `heap top [host=1] [by=live|alloc|freed|peak] [n=15] [depth=5] [group=stack|tag] [zone=burst|compiler|old|cold|new|other]` (cold: in old chunks, sampled before the settle rebuild) |
 /// `heap snap <name> [host=1]` | `heap diff <a> <b|now>` | `heap path H<id> [host=1]`
 pub fn cmd_heap(req: &Req, out: &mut Out) {
     let host = req.get("host") == Some("1");
@@ -831,9 +1132,11 @@ pub fn cmd_heap(req: &Req, out: &mut Out) {
     let pre = if host { "R" } else { "H" };
     match req.pos.first().map(String::as_str).unwrap_or("status") {
         "start" => {
-            let rate = req.num("rate", 64 << 10);
+            // life=<frames>: lifetime mode (every allocation of the next <frames> UI frames, classified at its free)
+            let life = (!host).then(|| req.num("life", 0)).filter(|&f| f > 0);
+            let rate = if life.is_some() { 1 } else { req.num("rate", 64 << 10) };
             let ttl = req.num("ttl_s", 600);
-            match start(host, rate) {
+            match start_life(host, rate, life) {
                 Ok(()) => {
                     tr.off_at_ms.store(now_ms() + ttl * 1000, Relaxed);
                     super::mem::mark(if host { "heap start host" } else { "heap start" });
@@ -869,7 +1172,10 @@ pub fn cmd_heap(req: &Req, out: &mut Out) {
             let by = req.get("by").unwrap_or("live");
             let n = req.num("n", 15) as usize;
             let depth = req.num("depth", 5) as usize;
-            let all = rows(t);
+            let all = match req.get("zone") {
+                Some(z) => zone_rows(t, z),
+                None => rows(t),
+            };
             let key = |x: &Row| match by {
                 "alloc" => x.3,
                 "freed" | "churn" => x.5,
@@ -899,6 +1205,10 @@ pub fn cmd_heap(req: &Req, out: &mut Out) {
             }
             let mut r = all;
             r.sort_by(|a, b| key(b).cmp(&key(a)).then(a.0.cmp(&b.0)));
+            // the totals, and what the cut leaves out
+            let (tl, ta) = r.iter().fold((0i64, 0i64), |s, x| (s.0 + x.1 as i64, s.1 + x.3 as i64));
+            let (rl, ra) = r.iter().skip(n).fold((0i64, 0i64), |s, x| (s.0 + x.1 as i64, s.1 + x.3 as i64));
+            let rest = format!("{{\"sites\":{},\"total_live_mb\":{},\"total_alloc_mb\":{},\"window_s\":{:.1},\"not_shown\":{},\"not_shown_live_mb\":{},\"not_shown_alloc_mb\":{}}}", r.len(), mbs(tl), mbs(ta), secs, r.len().saturating_sub(n), mbs(rl), mbs(ra));
             r.truncate(n);
             let ids: Vec<usize> = r.iter().map(|x| x.0).collect();
             let names = stack_names(t, &ids, &mut partial);
@@ -918,6 +1228,7 @@ pub fn cmd_heap(req: &Req, out: &mut Out) {
                     site_json(&names[k], depth)
                 ));
             }
+            out.line(&rest);
         }
         "snap" => {
             let Some(t) = tr.tables() else {
@@ -933,6 +1244,158 @@ pub fn cmd_heap(req: &Req, out: &mut Out) {
             s.push((name.clone(), host, now_ms(), rows(t)));
             super::mem::mark(&format!("heap snap {}", name));
             out.line(&format!("{{\"heap_snap\":{},\"of\":{},\"stacks\":{}}}", json_str(&name), json_str(what), t.used.load(Acquire)));
+        }
+        "frame" | "rate" => {
+            // allocation per frame: the tracked stacks' allocations over a window / the UI frames in it
+            let Some(t) = tr.tables() else {
+                out.err(&format!("no {} tracking: `heap start rate=4096` first (byte sampling: a smaller rate sees more small blocks)", what));
+                return;
+            };
+            let secs = req.get("s").and_then(|v| v.parse::<f64>().ok()).unwrap_or(2.0).clamp(0.2, 30.0);
+            let n = req.num("n", 12) as usize;
+            let a = rows(t);
+            let f0 = super::timeline::FRAMES.load(Relaxed);
+            let t0 = std::time::Instant::now();
+            let gone = out.gone();
+            while t0.elapsed().as_secs_f64() < secs && !gone() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            let took = t0.elapsed().as_secs_f64();
+            let b = rows(t);
+            let frames = super::timeline::FRAMES.load(Relaxed).saturating_sub(f0);
+            let mut d: Vec<(usize, i64, i64)> = b.iter().map(|x| {
+                let (bytes0, blocks0) = a.get(x.0).map_or((0, 0), |y| (y.3, y.4));
+                (x.0, x.3 - bytes0, x.4 - blocks0)
+            }).filter(|x| x.2 > 0).collect();
+            d.sort_by(|x, y| y.2.cmp(&x.2).then(x.0.cmp(&y.0)));
+            let (tb, tn): (i64, i64) = d.iter().fold((0, 0), |s, x| (s.0 + x.1, s.1 + x.2));
+            let per = |v: i64| if frames > 0 { format!("{:.1}", v as f64 / frames as f64) } else { "-".into() };
+            out.always(&format!(
+                "{} allocations ({:.1} KB) in {:.1} s, {} frames: {} allocs/frame, {:.0} allocs/s (estimates from 1-in-{}-bytes sampling)",
+                tn, tb as f64 / 1024.0, took, frames, per(tn), tn as f64 / took.max(0.01), t.rate
+            ));
+            let ids: Vec<usize> = d.iter().take(n).map(|x| x.0).collect();
+            let mut partial = Vec::new();
+            let names = stack_names(t, &ids, &mut partial);
+            out.line("");
+            out.line("| site | allocs/frame | KB/frame | allocs/s | stack |");
+            out.line("|---|---:|---:|---:|---|");
+            for (k, x) in d.iter().take(n).enumerate() {
+                let fr = names.get(k).cloned().unwrap_or_default();
+                let site = fr.iter().find(|f| !plumbing(&f.name)).map(|f| format!("{} {}", super::short(&f.name, 70), f.at)).unwrap_or_else(|| "?".into());
+                let path: Vec<String> = fr.iter().filter(|f| !plumbing(&f.name)).take(3).map(|f| super::short(&super::asm_plain(&f.name), 40)).collect();
+                out.line(&format!(
+                    "| H{} {} | {} | {} | {:.0} | {} |",
+                    x.0,
+                    site.replace('|', "/"),
+                    per(x.2),
+                    if frames > 0 { format!("{:.2}", x.1 as f64 / 1024.0 / frames as f64) } else { "-".into() },
+                    x.2 as f64 / took.max(0.01),
+                    path.join(" < ").replace('|', "/")
+                ));
+            }
+            if d.len() > n {
+                out.line(&format!("+{} more sites", d.len() - n));
+            }
+            if frames == 0 {
+                out.always("note: no UI frames in the window (not a makepad UI app, or nothing redrew): per-second rates only");
+            }
+            for p in partial {
+                out.always(&format!("note: {}", p));
+            }
+            out.always("more: path H<n>  heap snap a; heap diff a now (leak candidates)  memory (fragmentation: malloc in use vs held free)");
+        }
+        "life" => {
+            // lifetime mode's answer (STACKALLOC.MEASURE): per allocating stack, how its blocks died
+            let Some(t) = PROGRAM.tables().filter(|t| t.sites.is_some()) else {
+                out.err("no lifetime tracking: `heap start life=<frames>` first");
+                return;
+            };
+            let sites = t.sites.as_ref().unwrap();
+            let used = t.used.load(Acquire);
+            let frames = super::timeline::FRAMES.load(Relaxed).wrapping_sub(t.start_frame).min(t.frame_limit).max(1);
+            let mut ids: Vec<usize> = (0..used).filter(|&i| t.stacks[i].alloc_blocks.load(Relaxed) > 0).collect();
+            ids.sort_by_key(|&i| (std::cmp::Reverse(t.stacks[i].alloc_blocks.load(Relaxed)), i));
+            let n = (req.num("n", 400) as usize).min(ids.len());
+            let mut partial = Vec::new();
+            let names = super::symbolise_within(
+                &ids[..n].iter().map(|&i| {
+                    let s = &t.stacks[i];
+                    (0..s.n.load(Relaxed) as usize).map(|k| s.frames[k].load(Relaxed)).enumerate().map(|(k, f)| if k == 0 { f.wrapping_sub(1) } else { f }).collect()
+                }).collect::<Vec<Vec<u64>>>(),
+                &mut partial,
+                req.num("ms", 20000),
+            );
+            // relative classes: 0 local to the site's frame, 1 returned to its caller, 2 to a caller further up,
+            // 3 freed elsewhere in the same UI frame, 4 in a later UI frame, 5 still live
+            let mut tot = [0u64; 6];
+            let mut tot_hist = [[0u64; LIFE_BUCKETS]; 6];
+            let (mut tfit, mut tover, mut treal, mut talloc) = (0u64, 0u64, 0u64, 0u64);
+            let mut lines = Vec::new();
+            for (j, &id) in ids.iter().enumerate() {
+                let st = &t.stacks[id];
+                let sl = &sites[id];
+                // physical frames of allocator plumbing above the site (its frame index)
+                let (k, site) = match names.get(j).filter(|_| j < n) {
+                    Some(fr) => {
+                        let k = fr.iter().position(|f| {
+                            if f.levels.is_empty() { !plumbing(&f.name) } else { f.levels.iter().any(|(nm, _)| !plumbing(nm) && !nm.starts_with("(inlined")) }
+                        }).unwrap_or(0);
+                        (k, site_json(fr, 4))
+                    }
+                    None => (0, String::from("\"frames\":[]")),
+                };
+                let mut rel = [0u64; 6];
+                let mut hist = [[0u64; LIFE_BUCKETS]; 6];
+                for c in 0..LIFE_CLASSES {
+                    let r = if c < LIFE_FRAMES { (c.saturating_sub(k)).min(2) } else { c - LIFE_FRAMES + 3 };
+                    rel[r] += sl.class[c].load(Relaxed);
+                    for b in 0..LIFE_BUCKETS {
+                        hist[r][b] += sl.hist[c][b].load(Relaxed) as u64;
+                    }
+                }
+                rel[5] = st.live_blocks.load(Relaxed).max(0) as u64;
+                let allocs = st.alloc_blocks.load(Relaxed).max(0) as u64;
+                talloc += allocs;
+                for r in 0..6 {
+                    tot[r] += rel[r];
+                    for b in 0..LIFE_BUCKETS {
+                        tot_hist[r][b] += hist[r][b];
+                    }
+                }
+                let (fit, over, re) = (sl.fit.load(Relaxed), sl.over.load(Relaxed), sl.reallocs.load(Relaxed));
+                tfit += fit;
+                tover += over;
+                treal += re;
+                if j < n {
+                    let h = |r: usize| hist[r].iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ");
+                    lines.push(format!(
+                        "{{\"id\":\"H{}\",\"allocs\":{},\"per_frame\":{:.2},\"k\":{},\"local\":{},\"ret1\":{},\"ret2p\":{},\"esc_same_frame\":{},\"esc_later\":{},\"live\":{},\"reallocs\":{},\"bytes\":{},\"guess\":{},\"fit\":{},\"over\":{},\"same_body\":{},\"size_min\":{},\"size_max\":{},\"hist_local\":\"{}\",\"hist_ret1\":\"{}\",\"hist_ret2p\":\"{}\",\"hist_esc_same\":\"{}\",\"hist_esc_later\":\"{}\",{}}}",
+                        id, allocs, allocs as f64 / frames as f64, k, rel[0], rel[1], rel[2], rel[3], rel[4], rel[5], re, sl.bytes.load(Relaxed), sl.guess.load(Relaxed), fit, over, sl.same_body.load(Relaxed), sl.size_min.load(Relaxed).min(sl.size_max.load(Relaxed)), sl.size_max.load(Relaxed), h(0), h(1), h(2), h(3), h(4), site
+                    ));
+                }
+            }
+            out.measured(&format!("program allocations of {} UI frames, every block, by how it died", frames), "heap hooks (lifetime mode)", &partial);
+            let th = |r: usize| tot_hist[r].iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ");
+            out.line(&format!(
+                "{{\"life_frames\":{},\"allocs\":{},\"per_frame\":{:.1},\"sites\":{},\"local\":{},\"ret1\":{},\"ret2p\":{},\"esc_same_frame\":{},\"esc_later\":{},\"live\":{},\"reallocs\":{},\"fit\":{},\"over\":{},\"dropped\":{},\"hist_local\":\"{}\",\"hist_ret1\":\"{}\",\"hist_ret2p\":\"{}\",\"hist_esc_same\":\"{}\",\"hist_esc_later\":\"{}\"}}",
+                frames, talloc, talloc as f64 / frames as f64, ids.len(), tot[0], tot[1], tot[2], tot[3], tot[4], tot[5], treal, tfit, tover, PROGRAM.dropped.load(Relaxed), th(0), th(1), th(2), th(3), th(4)
+            ));
+            // file=<path>: every site line goes to the file (JSON lines), the answer keeps the summary
+            match req.get("file") {
+                Some(f) => {
+                    let body = lines.join("\n") + "\n";
+                    match std::fs::write(f, body) {
+                        Ok(()) => out.line(&format!("{{\"written\":{},\"site_lines\":{}}}", json_str(f), lines.len())),
+                        Err(e) => out.err(&format!("write {}: {}", f, e)),
+                    }
+                }
+                None => {
+                    for l in lines {
+                        out.line(&l);
+                    }
+                }
+            }
         }
         "diff" => {
             let Some(t) = tr.tables() else {
@@ -1001,7 +1464,7 @@ pub fn cmd_heap(req: &Req, out: &mut Out) {
             let x = rows(t)[id];
             out.line(&format!("{{\"id\":{},\"live_mb\":{},\"alloc_mb\":{},\"freed_mb\":{},\"frames\":[{}]}}", json_str(id_s), mbs(x.1), mbs(x.3), mbs(x.5), fr.join(",")));
         }
-        _ => out.err("usage: heap start [host=1] [rate=] [ttl_s=] | stop | status | top [by=live|alloc|freed|peak] [group=tag] | snap <name> | diff <a> <b|now> | path H<id>|R<id>"),
+        _ => out.err("usage: heap start [host=1] [rate=] [ttl_s=] [life=<frames>] | life [n=] | stop | status | top [by=live|alloc|freed|peak] [group=tag] | snap <name> | diff <a> <b|now> | path H<id>|R<id>"),
     }
 }
 

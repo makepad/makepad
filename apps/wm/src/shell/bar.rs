@@ -44,9 +44,10 @@ pub enum BarModule {
     SystemUpdate,
     Tray(usize),
     Bluetooth,
+    Gamepad,
     Network,
-    /// The AI hub panel's button.
-    Hub,
+    /// Someone is viewing this desktop over Desk Link: shown only then, never silent.
+    DeskLink,
     Audio,
     Monitor,
     Power,
@@ -171,7 +172,8 @@ pub struct BarData {
     pub keyboard_layout: Option<String>,
     pub weather: Option<String>,
     pub system_update: bool,
-    pub tray: Vec<Ico>,
+    /// The apps' tray icons (`ChildRelay::SetTray`, `crate::trays`), in the order they came.
+    pub tray: Vec<BarTray>,
     /// `None` renders the module in its "unavailable" reading: the icon at
     /// α .45, which is what an omarchy indicator does when its service is
     /// not there.
@@ -184,8 +186,17 @@ pub struct BarData {
     pub open_panel: Option<BarModule>,
     /// The window is maximized: the middle control shows "restore".
     pub maximized: bool,
-    /// Some model of the AI hub is working: its icon pulses.
-    pub hub_active: bool,
+    /// Desk Link viewers right now (`name`, address); the bar shows its item while any is
+    /// connected.
+    pub desk_link: Vec<(String, String)>,
+}
+
+/// One app's tray icon in the bar: its glyph (an alpha texture the bar tints with its text
+/// colour) and its tooltip.
+#[derive(Clone, Debug)]
+pub struct BarTray {
+    pub glyph: Option<Texture>,
+    pub tooltip: String,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -242,7 +253,7 @@ impl BarData {
             }),
             open_panel: None,
             maximized: false,
-            hub_active: false,
+            desk_link: vec![],
         }
     }
 }
@@ -740,11 +751,6 @@ pub struct ShellBar {
     /// focused window's title); every other style has the theme button alone.
     #[rust]
     pub launcher: bool,
-    /// The hub icon's pulse: its frame loop (only while a model works) and the clock it reads.
-    #[rust]
-    pulse_frame: NextFrame,
-    #[rust]
-    pulse_t: f64,
     /// One wheel action per scroll gesture (touchpad flicks and momentum).
     #[rust]
     wheel: ScrollGesture,
@@ -768,8 +774,11 @@ impl ShellBar {
     /// icon each one shows right now.
     fn right_modules(data: &BarData) -> Vec<(BarModule, Ico, bool)> {
         let mut v: Vec<(BarModule, Ico, bool)> = Vec::new();
-        for (i, ico) in data.tray.iter().enumerate() {
-            v.push((BarModule::Tray(i), *ico, true));
+        if !data.desk_link.is_empty() {
+            v.push((BarModule::DeskLink, Ico::Record, true));
+        }
+        for i in 0..data.tray.len() {
+            v.push((BarModule::Tray(i), Ico::Dot, true));
         }
         v.push((
             BarModule::Bluetooth,
@@ -779,7 +788,7 @@ impl ShellBar {
             },
             data.bluetooth.is_some(),
         ));
-        v.push((BarModule::Hub, Ico::Chip, true));
+        v.push((BarModule::Gamepad, Ico::Gamepad, true));
         v.push((
             BarModule::Network,
             match data.network {
@@ -1044,9 +1053,6 @@ impl ShellBar {
                 cx_ctrl += WINDOW_CONTROL_WIDTH;
             }
         }
-        if data.hub_active {
-            self.pulse_frame = cx.new_next_frame();
-        }
         let modules = Self::right_modules(data);
         let mut rx = modules_right;
         for (module, ico, available) in modules.iter().rev() {
@@ -1061,9 +1067,23 @@ impl ShellBar {
                     self.hits.push((seg, *module, label_rect));
                 }
             }
+            if *module == BarModule::DeskLink {
+                // who is looking: the first viewer's address (+N more), then the live dot. Static:
+                // an animation here would repaint the very desktop the viewer is streaming
+                let first = &data.desk_link[0].1;
+                let label = if data.desk_link.len() > 1 { format!("{first} +{}", data.desk_link.len() - 1) } else { first.clone() };
+                let width = self.d.measure(cx, false, tok.font.caption, &label) + 6.0;
+                rx -= width;
+                let label_rect = rect(rx, r.pos.y, width, r.size.y);
+                self.d.label(cx, label_rect, false, tok.font.caption, fg, super::ui::HAlign::Left, &label);
+                self.hits.push((seg, *module, label_rect));
+            }
             rx -= slot;
             let cell = rect(rx, r.pos.y, slot, r.size.y);
             let mut color = if *available { fg } else { fade(fg, 0.45) };
+            if *module == BarModule::DeskLink {
+                color = accent;
+            }
             // The battery goes urgent below 20% on battery power.
             if *module == BarModule::Power {
                 if let Some(b) = data.battery {
@@ -1075,10 +1095,20 @@ impl ShellBar {
             if *module == BarModule::Audio && data.muted {
                 color = fade(fg, 0.45);
             }
-            if *module == BarModule::Hub && data.hub_active {
-                // A slow breath between the text colour and the accent.
-                let k = (0.5 - 0.5 * (self.pulse_t * std::f64::consts::TAU / 1.6).cos()) as f32;
-                color = mix_color(vec4(0.22, 0.65, 0.35, 1.0), vec4(0.40, 0.88, 0.52, 1.0), k);
+            // An app's tray glyph, tinted like the bar's own icons (a template, as macOS
+            // shows it); a tray without a glyph shows a dot.
+            if let BarModule::Tray(i) = module {
+                if let Some(glyph) = data.tray.get(*i).and_then(|t| t.glyph.as_ref()) {
+                    let g = rect(
+                        (cell.pos.x + (cell.size.x - canvas) * 0.5).floor(),
+                        (cell.pos.y + (cell.size.y - canvas) * 0.5).floor(),
+                        canvas,
+                        canvas,
+                    );
+                    self.d.glyph(cx, glyph, g, color);
+                    self.hits.push((seg, *module, cell));
+                    continue;
+                }
             }
             self.d.icon_centered(cx, *ico, cell, canvas, color);
             self.hits.push((seg, *module, cell));
@@ -1112,7 +1142,7 @@ impl ShellBar {
             BarModule::KeyboardLayout => "Keyboard layout".into(),
             BarModule::Weather => "Weather".into(),
             BarModule::SystemUpdate => "Pending updates".into(),
-            BarModule::Tray(_) => "Tray".into(),
+            BarModule::Tray(i) => data.tray.get(i).map(|t| t.tooltip.clone()).unwrap_or_default(),
             BarModule::Bluetooth => match data.bluetooth {
                 Some(true) => "Bluetooth on".into(),
                 Some(false) => "Bluetooth off".into(),
@@ -1128,7 +1158,11 @@ impl ShellBar {
                 (Some(v), _) => format!("Volume {}%", v),
                 (None, _) => "Audio unavailable".into(),
             },
-            BarModule::Hub => if data.hub_active { "AI hub: working".into() } else { "AI hub".into() },
+            BarModule::Gamepad => "Controllers & device batteries".into(),
+            BarModule::DeskLink => {
+                let who: Vec<String> = data.desk_link.iter().map(|(name, ip)| format!("{name} ({ip})")).collect();
+                format!("Desk Link: viewed by {}", who.join(", "))
+            }
             BarModule::Monitor => "Display".into(),
             BarModule::Power => match data.battery {
                 Some(b) if b.charging => format!("Battery {}%, charging", b.percent),
@@ -1223,10 +1257,6 @@ impl Widget for ShellBar {
             return;
         }
         let bar_rect = self.screen;
-        if let Some(ne) = self.pulse_frame.is_event(event) {
-            self.pulse_t = ne.time;
-            self.redraw(cx);
-        }
         if let Some(ne) = self.next_frame.is_event(event) {
             if self.hover.is_some() {
                 let dt = if self.last_time <= 0.0 {

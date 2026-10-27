@@ -54,8 +54,9 @@ pub struct ProvidedCrate {
     pub name: String,
     /// key (`type_name` of the fn item; a handle's trait ops `<path as Clone>::clone` ..) -> op
     pub shims: HashMap<String, Shim>,
-    /// opaque handles by def path: (size, align, drop)
-    pub types: HashMap<String, (u64, u64, Option<DropFn>)>,
+    /// opaque handles by def path: (size, align, drop, a struct's field offsets in declaration
+    /// order: same_layout_handles)
+    pub types: HashMap<String, (u64, u64, Option<DropFn>, &'static [u64])>,
     /// plain types by def path: rustc's (size, align, field offsets), checked against Relax's at
     /// unit creation
     pub layouts: HashMap<String, (u64, u64, &'static [u64])>,
@@ -84,7 +85,7 @@ pub(crate) fn registered(name: &str) -> bool {
 pub fn register(
     name: &str,
     shims: HashMap<String, Shim>,
-    types: HashMap<String, (u64, u64, Option<DropFn>)>,
+    types: HashMap<String, (u64, u64, Option<DropFn>, &'static [u64])>,
     layouts: HashMap<String, (u64, u64, &'static [u64])>,
     last_panic: LastPanicFn,
     source: u64,
@@ -632,3 +633,179 @@ pub fn crossing_types(prog: &Program, tcx: &Tcx, krates: &[u32], bound: &dyn Fn(
 }
 
 
+
+/// Where this binary's std keeps a `String`'s and a `Vec<T>`'s pointer, capacity and length (word
+/// indices), and the capacity word of `None` of an `Option<String>` / `Option<Vec<T>>` (the
+/// niche), read off live values. relax-compiler is rustc-built into the loader together with the
+/// provided crates, so this is the layout of their `String` and `Vec`. None: not three words, or
+/// `String` and `Vec<u64>` differ.
+fn rustc_vec_words() -> Option<([usize; 3], usize)> {
+    fn at(w: [usize; 3], ptr: usize, cap: usize, len: usize) -> Option<[usize; 3]> {
+        let f = |x: usize| w.iter().position(|y| *y == x);
+        let r = [f(ptr)?, f(cap)?, f(len)?];
+        (r[0] != r[1] && r[1] != r[2] && r[0] != r[2]).then_some(r)
+    }
+    fn words<T>(x: &T) -> [usize; 3] {
+        unsafe { *(x as *const T as *const [usize; 3]) }
+    }
+    let three = 3 * std::mem::size_of::<usize>();
+    if std::mem::size_of::<String>() != three || std::mem::size_of::<Vec<u64>>() != three || std::mem::size_of::<Option<String>>() != three || std::mem::size_of::<Option<Vec<u64>>>() != three {
+        return None;
+    }
+    let mut s = String::with_capacity(13);
+    s.push_str("ab");
+    let a = at(words(&s), s.as_ptr() as usize, s.capacity(), s.len())?;
+    let mut v: Vec<u64> = Vec::with_capacity(11);
+    v.extend([1, 2, 3]);
+    let b = at(words(&v), v.as_ptr() as usize, v.capacity(), v.len())?;
+    let (ns, nv): (Option<String>, Option<Vec<u64>>) = (std::hint::black_box(None), std::hint::black_box(None));
+    let none = words(&ns)[a[1]];
+    (a == b && words(&nv)[a[1]] == none).then_some((a, none))
+}
+
+/// What of makepad run's std is laid out as rustc's std lays it out (`rustc_vec_words`): the
+/// same bytes on both sides, so a value built by either side's std is read, grown and freed by
+/// the other's (both allocate through the loader's allocator; zone_alloc dealloc_layout frees a
+/// block of any heap).
+#[derive(Clone, Copy)]
+struct StdSame {
+    /// `Vec` (the ADT of `String`'s one field), with `String`
+    vec: DefId,
+    /// `Option<String>` / `Option<Vec<T>>`: rustc's niche (None in the capacity word)
+    option: bool,
+}
+
+fn std_vec_same(prog: &Program, tcx: &Tcx, probe: &crate::layout::Layouts) -> Option<StdSame> {
+    let lcx = crate::layout::LayoutCx::new(prog);
+    let sd = tcx.lang_items.get(LangItem::String)?;
+    let sadt = tcx.adts.get(&sd)?;
+    if sadt.variants.len() != 1 || sadt.variants[0].fields.len() != 1 {
+        return None;
+    }
+    let st = tcx.tys.intern(TyKind::Adt(sd, crate::types::List::EMPTY, crate::types::RegionArgsId::EMPTY));
+    let vt = tcx.field_ty(prog, crate::tcx::TypingEnv::fully_monomorphized(prog), sd, 0, 0, &[]);
+    let TyKind::Adt(vd, va, _) = tcx.tys.kind(vt) else { return None };
+    let (vd, va) = (*vd, *va);
+    let vadt = tcx.adts.get(&vd)?;
+    if tcx.tys.list(va).len() != 1 || vadt.variants.len() != 1 {
+        return None;
+    }
+    let pb = std::mem::size_of::<usize>() as u32;
+    let (ls, lv) = (probe.of(&lcx, tcx, st), probe.of(&lcx, tcx, vt));
+    if ls.size != 3 * pb || ls.fields.as_slice() != [0] || lv.size != 3 * pb || lv.ext.is_some() || ls.ext.is_some() {
+        return None;
+    }
+    let mut ours = [usize::MAX; 3];
+    for (i, f) in vadt.variants[0].fields.iter().enumerate() {
+        let w = match prog.syms.str(f.name) {
+            "ptr" => 0,
+            "cap" => 1,
+            "len" => 2,
+            _ => continue,
+        };
+        let off = *lv.fields.get(i)?;
+        if off % pb != 0 {
+            return None;
+        }
+        ours[w] = (off / pb) as usize;
+    }
+    let (words, none) = rustc_vec_words()?;
+    if ours != words {
+        return None;
+    }
+    // Option<String>: None is rustc's value in the capacity word, Some's payload at 0
+    let option = tcx.lang_items.get(LangItem::Option).is_some_and(|od| {
+        let ot = tcx.tys.intern(TyKind::Adt(od, tcx.tys.mk_list(&[st]), crate::types::RegionArgsId::EMPTY));
+        let lo = probe.of(&lcx, tcx, ot);
+        let none_variant = tcx.adts.get(&od).and_then(|a| a.variants.iter().position(|v| v.fields.is_empty()));
+        lo.size == 3 * pb
+            && lo.tag.is_some_and(|(off, _)| off == words[1] as u32 * pb)
+            && matches!(lo.enc, crate::layout::TagEnc::Niche { lo: l, hi: h, start, .. } if Some(l as usize) == none_variant && l == h && start as u64 == none as u64)
+            && lo.variant_fields.iter().enumerate().all(|(vi, f)| Some(vi) == none_variant || f.as_slice() == [0])
+    });
+    Some(StdSame { vec: vd, option })
+}
+
+/// The `#[relax_api(handle)]` structs among `cands` (def, rustc's size, align, field offsets)
+/// whose layout is the same on both sides: Relax lays the struct out at rustc's size, align and
+/// field offsets, and every field is the same bytes (`trusted` data, a `String` / `Vec<T>` of
+/// such data when the two stds agree (std_vec_same), or another such handle). JIT-compiled code
+/// may build these and read their fields; their drop and the trait ops the attribute lists stay
+/// rustc's. `opaque`: the types Relax uses through the crate's fns only (the candidates among
+/// them until they pass, a demoted plain type); `known`: handles found the same before (a crate
+/// an app domain added after the boot).
+pub fn same_layout_handles(prog: &Program, tcx: &Tcx, cands: &[(DefId, u32, u32, &'static [u64])], opaque: &dyn Fn(DefId) -> bool, known: &dyn Fn(DefId) -> bool) -> Vec<DefId> {
+    if cands.is_empty() {
+        return Vec::new();
+    }
+    let probe = crate::layout::Layouts::new();
+    let lcx = crate::layout::LayoutCx::new(prog);
+    let std_same = std_vec_same(prog, tcx, &probe);
+    let mut ok: std::collections::HashSet<DefId> = cands
+        .iter()
+        .filter(|(d, size, align, offs)| {
+            let adt = match tcx.adts.get(d) {
+                Some(a) if !a.is_enum && !a.is_union && a.variants.len() == 1 => a,
+                _ => return false,
+            };
+            let t = tcx.tys.intern(TyKind::Adt(*d, crate::types::List::EMPTY, crate::types::RegionArgsId::EMPTY));
+            let l = probe.of(&lcx, tcx, t);
+            !offs.is_empty()
+                && offs.len() == adt.variants[0].fields.len()
+                && l.size == *size
+                && l.align == *align
+                && l.ext.is_none()
+                && offs.len() == l.fields.len()
+                && offs.iter().zip(&l.fields).all(|(a, b)| *a == *b as u64)
+        })
+        .map(|c| c.0)
+        .collect();
+    // a field of a candidate that turns out not to be the same bytes takes its holders with it
+    loop {
+        let now = ok.clone();
+        let same = |krate: u32, t: TyId| same_bytes(prog, tcx, krate, t, &|d| now.contains(&d) || known(d), std_same, opaque, 0);
+        ok.retain(|d| {
+            let krate = prog.def(*d).krate;
+            let n = tcx.adts.get(d).map_or(0, |a| a.variants[0].fields.len());
+            (0..n).all(|fi| same(krate, tcx.field_ty(prog, crate::tcx::TypingEnv::fully_monomorphized(prog), *d, 0, fi as u32, &[])))
+        });
+        if ok.len() == now.len() {
+            break;
+        }
+    }
+    let mut v: Vec<DefId> = ok.into_iter().collect();
+    v.sort_by_key(|d| d.0);
+    v
+}
+
+/// Is a field of type `t` (in a handle of provided crate `krate`) the same bytes on both sides
+/// (same_layout_handles)?
+fn same_bytes(prog: &Program, tcx: &Tcx, krate: u32, t: TyId, ok: &dyn Fn(DefId) -> bool, std_same: Option<StdSame>, opaque: &dyn Fn(DefId) -> bool, depth: u32) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    if let TyKind::Adt(d, a, _) = tcx.tys.kind(t) {
+        if ok(*d) {
+            return true;
+        }
+        if opaque(*d) {
+            return false;
+        }
+        if let Some(std) = std_same {
+            let args = tcx.tys.list(*a);
+            let same = |x: TyId| same_bytes(prog, tcx, krate, x, ok, std_same, opaque, depth + 1);
+            // String, Vec<T> of such T
+            let vec_like = |x: TyId| match tcx.tys.kind(x) {
+                TyKind::Adt(xd, xa, _) => tcx.lang_items.get(LangItem::String) == Some(*xd) || (*xd == std.vec && tcx.tys.list(*xa).first().is_some_and(|e| same(*e))),
+                _ => false,
+            };
+            if vec_like(t) {
+                return true;
+            }
+            if std.option && tcx.lang_items.get(LangItem::Option) == Some(*d) && args.len() == 1 && vec_like(args[0]) {
+                return true;
+            }
+        }
+    }
+    trusted_in(prog, tcx, krate, t, 0, true)
+}

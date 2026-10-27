@@ -12,7 +12,7 @@ mod collected;
 mod privacy;
 pub use privacy::PrivacyError;
 mod rsim;
-pub use rsim::{SimDiag, SimKind};
+pub use rsim::{MacBinding, MacRes, SimDiag, SimKind};
 mod attrs;
 mod validate;
 
@@ -24,7 +24,7 @@ pub const BUILTIN_MACROS: &[&str] = &[
     "assert", "assert_eq", "assert_ne", "debug_assert", "debug_assert_eq", "debug_assert_ne", "matches",
     "unreachable", "todo", "unimplemented", "cfg", "concat", "stringify", "line", "file", "column",
     "module_path", "include_str", "include_bytes", "env", "option_env", "thread_local", "msg_send", "sel",
-    "class", "log", "error", "warning", "warn", "trace", "debug", "asm",
+    "class", "log", "error", "warning", "warn", "trace", "debug", "asm", "smallvec",
     // core::prelude::v1's other built-in macros (`use core::{compile_error, prelude::v1::derive}`)
     "compile_error", "include", "global_asm", "naked_asm", "derive", "test", "bench", "global_allocator",
     "test_case", "trace_macros", "log_syntax", "concat_idents", "cfg_accessible", "cfg_eval", "derive_const",
@@ -139,6 +139,8 @@ impl Interner {
     }
     /// load-time names (not the late ones)
     pub fn len(&self) -> usize { self.image.as_ref().map_or(0, |m| m.len()) + self.strs.len() }
+    /// Names interned late (through a shared reference, `late`): the settle rebuild's change check.
+    pub fn late_len(&self) -> usize { self.late.lock().unwrap_or_else(|e| e.into_inner()).1.len() }
     /// load-time names in id order
     pub fn names(&self) -> impl Iterator<Item = &str> + '_ { (0..self.len() as Sym).map(|i| self.str(i)) }
     /// (names, heap bytes: both copies of every string plus the map's and list's tables)
@@ -447,6 +449,21 @@ fn recursion_limit(file: &ParsedFile) -> usize {
 }
 
 impl CrateInfo {
+    /// rustc `tcx.crate_name(krate)`: the root's `#![crate_name = ".."]` when it has one (rustc_session
+    /// output.rs find_crate_name: the attribute names a crate built without `--crate-name`; with it, the two
+    /// must agree), else the name the crate was loaded under. Read from the root attributes on each call:
+    /// only rustc's crate-name special cases ask.
+    pub fn crate_name<'p>(&'p self, prog: &'p Program) -> std::borrow::Cow<'p, str> {
+        let file = &prog.files[prog.mods[self.root_mod as usize].file as usize];
+        for attr in &file.ast.root_attrs {
+            if attr.toks.hi == attr.toks.lo + 3 && file.tok_text(attr.toks.lo) == "crate_name" && file.tok_text(attr.toks.lo + 1) == "="
+                && matches!(file.tok(attr.toks.lo + 2).kind, crate::lexer::T::Str | crate::lexer::T::RawStr) {
+                return std::borrow::Cow::Owned(crate::lit::unescape_str(file.tok_text(attr.toks.lo + 2)));
+            }
+        }
+        std::borrow::Cow::Borrowed(crate::crates::base_crate_name(prog.syms.str(self.name)))
+    }
+
     /// The crate's `#![feature(..)]` declarations.
     pub fn features(&self, prog: &Program) -> &crate::features::Features {
         self.features.get_or_init(|| crate::features::Features::read(prog, prog.mods[self.root_mod as usize].file, &self.cfg))
@@ -569,6 +586,8 @@ pub struct Program {
     pub sim_ambiguity: Option<HashMap<(u32, Sym, bool), u8>>,
     /// what the replay reported, until the check emits it
     pub sim_diags: Option<Vec<SimDiag>>,
+    /// the import replay's macro namespace of the checked modules (rsim.rs `macro_table`)
+    pub sim_macros: Option<HashMap<(u32, Sym), rsim::MacBinding>>,
     /// lexical lookups (`lookup_in_scope`) once imports are resolved: (module, name, ns_type);
     /// cleared whenever a binding is defined or imports are resolved again
     scope_cache: crate::conc::MemoMap<(u32, Sym, bool), Option<DefId>>,
@@ -661,13 +680,19 @@ pub struct Program {
     pub files: Vec<std::sync::Arc<ParsedFile>>,
     /// the proc-macro world's program: its core/alloc/std files come from the program's load
     /// (SHARED_STD) when that load runs
+    /// The target's pointer width in bytes: 4 for the wasm32 web target, else 8 (a proc-macro
+    /// world runs on this machine: always 8).
+    pub ptr_bytes: u32,
     pub std_from_shared: bool,
     /// the std crates include core::simd / std::simd (relax_portable_simd; `std_simd_wanted`)
     pub std_simd: bool,
-    /// item-level macro calls no macro resolved at their parse (file, item, module): expanded
+    /// item-level macro calls no macro resolved at their parse (file, item, module, dir, mod_rs): expanded
     /// again once the crate is loaded (expand_pending: rustc's resolve/expand fixpoint for
     /// macros an expansion in a later file defines or imports), else errors
-    pending_macs: Vec<(u32, ItemId, u32)>,
+    pending_macs: Vec<(u32, ItemId, u32, String, bool)>,
+    /// `global_asm!` items (unless `--no-asm`): (file, item, module), assembled and placed when
+    /// the program's code is set up (compiler global_asm.rs)
+    pub global_asms: Vec<(u32, ItemId, u32)>,
     /// files whose lazily parsed part has its identifiers interned here (part_idents)
     part_interned: relax_session::sync::Mutex<crate::fxhash::HashSet<(u32, u32)>>,
     pub file_paths: Vec<String>,
@@ -688,6 +713,10 @@ pub struct Program {
     // Current ownership; old versions keep only entities not paired into the new file.
     /// Entities by file, for reloads. A restored program builds it on first use.
     reload: std::sync::OnceLock<ReloadFiles>,
+    /// Hot reload: the defs the last commits gave items added inside a paired item's body
+    /// (collect_new_body_blocks); the reload takes them (take_body_added) into the added defs
+    /// the type context collects, as it collects every added item's
+    body_added: Vec<DefId>,
     pub node_id_to_def_id: crate::collected::ImageMap<(u32, crate::def_collector::NodeId), DefId>,
     pub legacy_const_args: crate::collected::ImageMap<DefId, std::sync::Arc<crate::def_collector::LegacyOwner>>,
     pub(crate) legacy_const_attrs: std::sync::Arc<HashMap<DefId, Vec<u32>>>,
@@ -822,6 +851,14 @@ impl Drop for Program {
 }
 
 impl Program {
+    /// The name of the crate `file` belongs to ("" before the file is assigned to one).
+    pub fn file_crate_name(&self, file: u32) -> String {
+        match self.file_crate.get(file as usize).and_then(|&k| self.crates.get(k as usize)) {
+            Some(c) => self.syms.str(c.name).to_string(),
+            None => String::new(),
+        }
+    }
+
     pub fn new(sess: &std::sync::Arc<crate::Session>) -> Program {
         let mut p = Program {
             collected_starts: Vec::new(),
@@ -838,9 +875,11 @@ impl Program {
             syms: Interner::default(),
             files: Vec::new(),
             std_from_shared: false,
+            ptr_bytes: sess.options.check_target.web().map_or(8, |w| w.bytes()),
             std_simd: false,
             part_interned: Default::default(),
             pending_macs: Vec::new(),
+            global_asms: Vec::new(),
             file_paths: Vec::new(),
             file_crate: Vec::new(),
             crates: Vec::new(),
@@ -854,6 +893,7 @@ impl Program {
             block_owner: Default::default(),
             item_defs: Default::default(),
             reload: std::sync::OnceLock::from(ReloadFiles::default()),
+            body_added: Vec::new(),
             node_id_to_def_id: Default::default(),
             legacy_const_args: Default::default(),
             legacy_const_attrs: Default::default(),
@@ -883,6 +923,7 @@ impl Program {
             own_crates: Vec::new(),
             sim_ambiguity: None,
             sim_diags: None,
+            sim_macros: None,
             scope_cache: Default::default(),
             import_used: Default::default(),
             glob_used: Default::default(),
@@ -1272,7 +1313,7 @@ impl Program {
             }
             // Resolve scopes against the loader's complete dependency imports. Do not retain
             // a scope the prescan computed against its earlier macro table.
-            let mods = std::sync::Arc::new(crate::macros::CrateMods { root: ahead.mods.root.clone(), src: ahead.mods.src.clone(), mods: ahead.mods.mods.clone(), items: ahead.mods.items.clone(), uses: ahead.mods.uses.clone(), externs, renames: ahead.mods.renames.clone(), ..Default::default() });
+            let mods = std::sync::Arc::new(crate::macros::CrateMods { root: ahead.mods.root.clone(), src: ahead.mods.src.clone(), mods: ahead.mods.mods.clone(), items: ahead.mods.items.clone(), uses: ahead.mods.uses.clone(), externs, renames: ahead.mods.renames.clone(), recursion_limit: ahead.mods.recursion_limit, ..Default::default() });
             table.add_crate(ahead.name.clone(), mods);
             if !ahead.macro_use.is_empty() {
                 let v = table.macro_use.entry(ahead.name.clone()).or_default();
@@ -1288,7 +1329,7 @@ impl Program {
             // This raw-source optimization has no token-origin context. Lowered files
             // expand derives inside their normal token-input parse instead.
             let files: Vec<(&str, &[u8], &[crate::lexer::Tok])> = ahead.prelexed.iter().map(|(p, s, t)| (p.as_str(), &s[..], &t[..])).collect();
-            crate::builtins::pre_expand_derives(&files, &self.crates[krate as usize].cfg, edition);
+            crate::builtins::pre_expand_derives(&kname, &files, &self.crates[krate as usize].cfg, edition);
         }
         for (p, s, t) in ahead.prelexed {
             self.prelexed.insert(p, (s, t));
@@ -1313,6 +1354,7 @@ impl Program {
                 self.imports.push(Import { module: root_mod, global: true, segs: vec![(SegKind::Ident, inj)], bind: Some(inj), glob: false, is_pub: false, done: false, file, pos: 0, ext: true, bound: BOUND_INJECTED });
             }
         }
+        let r = r.map(|()| self.expand_pending(krate, edition));
         // files no module loads (cfg'd out in ways the scan does not see)
         let unused: Vec<String> = ahead.files.into_iter().filter(|p| self.pending.remove(&(ahead.idx, p.clone()))).collect();
         if let Some(pool) = &self.pool {
@@ -1327,12 +1369,11 @@ impl Program {
             }
             if self.demand_plan.as_ref().is_some_and(|p| p.counts().1 == 0) { self.demand_plan = None; }
         }
-        r?;
-        self.expand_pending(krate, edition);
-        std::sync::Arc::make_mut(&mut self.macros).seal_crate(&kname);
         // The image contract covers this boot load only. Later generated files and live
         // module loads must not inherit the last boot crate's no-parse assertion.
         self.cur_image = false;
+        r?;
+        std::sync::Arc::make_mut(&mut self.macros).seal_crate(&kname);
         Ok(krate)
     }
 
@@ -1784,6 +1825,60 @@ impl Program {
             previous: Some(self.files[old as usize].clone()), context: self.crates[krate as usize].context.clone() }
     }
 
+    /// A parse of a NEW file that becomes child module `child` of module `parent` (makepad
+    /// inspect's probes and `eval`: code compiled in a module's scope): the parent's crate,
+    /// edition, cfg and macro table; `module_path!()` names the child.
+    pub fn child_parse_snapshot(&self, parent: u32, child: &str, path: &str) -> ParseSnapshot {
+        let krate = self.mods[parent as usize].krate;
+        let kname = self.syms.str(self.crates[krate as usize].name).to_string();
+        let normal = self.mods[parent as usize].normal;
+        let mod_path = format!("{}::{}", self.def_path(self.mods[normal as usize].def), child);
+        ParseSnapshot { old: self.mods[normal as usize].file, path: path.to_string(), edition: self.crates[krate as usize].edition, kname, mod_path,
+            cfg: self.crates[krate as usize].cfg.clone(), macros: self.macros.clone(), reuse: Default::default(), previous: None,
+            context: self.crates[krate as usize].context.clone() }
+    }
+
+    /// Adds `v` (a child_parse_snapshot parse) as a new private module `name` of module `parent`
+    /// and collects its items there: it is the parent's child, so the parent's private items,
+    /// imports and `crate::` / `super::` paths are its own as for any child module; `name` is
+    /// not bound in the parent (nothing of the program can name it). The parent's names are in
+    /// scope unqualified through a glob of the parent (what `use super::*;` gives a child).
+    /// Returns (module, file). The caller resolves the imports it added (resolve_imports_added).
+    pub fn add_child_module(&mut self, parent: u32, name: &str, v: FileVersion) -> Result<(u32, u32), String> {
+        let parent = self.mods[parent as usize].normal;
+        let krate = self.mods[parent as usize].krate;
+        for &(lo, hi) in &v.idents {
+            let s = std::str::from_utf8(&v.pf.src[lo as usize..hi as usize]).unwrap_or("?").to_string();
+            self.syms.intern(&s);
+        }
+        let table = std::sync::Arc::make_mut(&mut self.macros);
+        for d in v.macros {
+            table.push(d);
+        }
+        self.crates[krate as usize].context = v.context;
+        let mut pf = v.pf;
+        self.map_image(&v.path, krate, &mut pf);
+        self.files.push(std::sync::Arc::new(pf));
+        self.file_paths.push(v.path);
+        self.exec_profile_file(self.file_paths.len() as u32 - 1);
+        self.file_crate.push(krate);
+        self.file_blocks.push(v.blocks);
+        let f = self.files.len() as u32 - 1;
+        let sym = self.syms.intern(name);
+        let pdef = self.mods[parent as usize].def;
+        let d = self.add_def(Def { kind: DefKind::Mod, name: sym, parent: pdef, file: f, item: ItemId(0), sub: 0, is_pub: false, krate, scope: parent });
+        let m = self.new_module(d, Some(parent), None, krate, f);
+        self.defs[d.0 as usize].sub = m;
+        self.mods[m as usize].globs.push((pdef, false));
+        if self.imports_done {
+            self.scope_cache.clear();
+        }
+        let dir = dir_of(&self.file_paths[f as usize]).to_string();
+        let items: Vec<ItemId> = self.files[f as usize].ast.root_items.iter().copied().collect();
+        self.collect_items(f, &items, m, &dir, false)?;
+        Ok((m, f))
+    }
+
     /// Item-level macro calls of crate `krate` no macro resolved at their parse, expanded again
     /// now that every file of the crate is loaded (its expansions' macro_rules! and imports are in
     /// the table), to a fixpoint -- what rustc's resolve/expand loop does for macros an expansion
@@ -1796,7 +1891,7 @@ impl Program {
         let kname = self.syms.str(self.crates[krate as usize].name).to_string();
         let mut rounds = 0;
         loop {
-            let pend: Vec<(u32, ItemId, u32)> = {
+            let pend: Vec<(u32, ItemId, u32, String, bool)> = {
                 let (mine, other): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_macs).into_iter().partition(|p| self.mods[p.2 as usize].krate == krate);
                 self.pending_macs = other;
                 mine
@@ -1807,9 +1902,9 @@ impl Program {
             rounds += 1;
             let mut still = Vec::new();
             let mut progress = false;
-            for (file, iid, module) in pend {
+            for (file, iid, module, dir, mod_rs) in pend {
                 if rounds > 16 {
-                    still.push((file, iid, module));
+                    still.push((file, iid, module, dir, mod_rs));
                     continue;
                 }
                 let (text, path) = {
@@ -1822,14 +1917,14 @@ impl Program {
                 let bctx = std::rc::Rc::new(crate::builtins::FileCtx::new(&kname, &path, &mod_path, &cfg));
                 let parsed = crate::parser::parse_owned_ctx(sess, text, None, edition, Some(crate::macros::MacroScope::new(self.macros.clone())), &kname, Some(bctx), false);
                 let Ok((mut pf, used)) = parsed else {
-                    still.push((file, iid, module));
+                    still.push((file, iid, module, dir, mod_rs));
                     continue;
                 };
                 let used = used.unwrap();
                 let items = pf.ast.root_items.clone();
                 // the same call again: nothing new resolves it yet
                 if items.len() == 1 && matches!(pf.ast.item(items[0]).kind, ItemKind::Mac(_)) {
-                    still.push((file, iid, module));
+                    still.push((file, iid, module, dir, mod_rs));
                     continue;
                 }
                 progress = true;
@@ -1853,12 +1948,12 @@ impl Program {
                 self.file_crate.push(krate);
                 self.file_blocks.push(prep.blocks);
                 let nf = self.files.len() as u32 - 1;
-                if let Err(e) = self.collect_items(nf, &items, module, "", false) {
+                if let Err(e) = self.collect_items(nf, &items, module, &dir, mod_rs) {
                     self.errors.push(e);
                 }
             }
             if !progress {
-                for (file, iid, _) in still {
+                for (file, iid, _, _, _) in still {
                     let f = &self.files[file as usize];
                     let it = f.ast.item(iid);
                     let name = match &it.kind {
@@ -1887,7 +1982,8 @@ impl Program {
                 if im.glob || bound.contains(&(im.module, b)) {
                     continue;
                 }
-                if !(set.contains(last) || self.macros.defs.contains_key(self.syms.str(*last))) {
+                let last_str = self.syms.str(*last);
+                if !(set.contains(last) || self.macros.defs.contains_key(last_str) || BUILTIN_MACROS.contains(&last_str) || crate::builtins::is_macro_name(last_str) || crate::macro_reg::has_macro(last_str)) {
                     continue;
                 }
                 // a path through a module of a crate (not its root) names a macro only when that
@@ -2032,6 +2128,14 @@ impl Program {
         self.file_crate.push(krate);
         self.file_blocks.push(v.blocks);
         self.retarget_file(old, new, pairs);
+        // items added inside a body a paired item already has (`use` in a fn or closure body,
+        // a nested fn or const): their blocks get anonymous modules as at load
+        let body_added = self.body_added.len();
+        if let Err(error) = self.collect_new_body_blocks(new, pairs) {
+            self.body_added.truncate(body_added);
+            self.revert_version(old, new, pairs);
+            return Err(error);
+        }
         self.declaration_versions.insert(new, declarations);
         let t_collect = std::time::Instant::now();
         let collected = self.collect_version_definitions(new, !same_scopes, true, visible);
@@ -2039,6 +2143,7 @@ impl Program {
             eprintln!("commit-trace: save {:.2} ms, collect definitions {:.2} ms, rest {:.2} ms", save_ms, t_collect.elapsed().as_secs_f64() * 1e3, t_save.elapsed().as_secs_f64() * 1e3 - save_ms - t_collect.elapsed().as_secs_f64() * 1e3);
         }
         if let Err(error) = collected {
+            self.body_added.truncate(body_added);
             self.revert_version(old, new, pairs);
             return Err(error);
         }
@@ -2244,7 +2349,7 @@ impl Program {
         self.trait_item_def_id.retain(|d, t| self.defs[d.0 as usize].krate != krate && self.defs[t.0 as usize].krate != krate);
         self.block_mods.retain(|_, m| self.mods[*m as usize].krate != krate);
         self.block_owner.retain(|_, d| self.defs[d.0 as usize].krate != krate);
-        self.pending_macs.retain(|(f, _, _)| self.file_crate[*f as usize] != krate);
+        self.pending_macs.retain(|(f, _, _, _, _)| self.file_crate[*f as usize] != krate);
         // Tombstones cannot be rediscovered as callable bodies by a later scan.
         for d in old { if d != root_def { self.defs[d.0 as usize].kind = DefKind::Mod; self.defs[d.0 as usize].sub = root; } }
         self.set_def_file(root_def, file);
@@ -2866,16 +2971,22 @@ impl Program {
                     if let ItemKind::Mac(m) = &it.kind {
                         let m = f.ast.row(*m);
                         let last = f.ast.segs(m.path.segs).last().map(|sg| f.text(sg.name).to_string()).unwrap_or_default();
-                        if last == "global_asm" || last == "naked_asm" {
-                            self.errors.push(self.record_error(file,it.lo,"lower","inline assembly is not supported; use core::arch intrinsics".to_string()));
+                        if last == "global_asm" && !self.session.options.no_asm {
+                            self.global_asms.push((file, iid, module));
+                        } else if last == "naked_asm" && !self.session.options.no_asm {
+                            self.errors.push(self.record_error(file, it.lo, "lower", "`naked_asm!` is allowed only as the body of a `#[unsafe(naked)]` function".to_string()));
+                        } else if last == "global_asm" || last == "naked_asm" {
+                            let e = relax_session::options::asm_blocked(&self.file_crate_name(file));
+                            self.errors.push(self.record_error(file, it.lo, "lower", e));
                         } else if last == "compile_error" && m.toks.hi > m.toks.lo {
                             let lit = f.tok_text(m.toks.lo);
                             let msg = crate::lit::unescape_str(lit);
-                            let e = self.record_error(file,it.lo,"macro",msg);
+                            // rustc words it `error: <msg>` (no code), as for every compile_error!
+                            let e = self.record_uncoded_error(file, it.lo, "macro", msg);
                             self.errors.push(e);
                         } else if !BUILTIN_MACROS.contains(&last.as_str()) && crate::builtins::macro_def(&last).is_none() && !crate::macro_reg::has_macro(&last) {
                             // no macro at the parse: maybe one a later expansion makes
-                            self.pending_macs.push((file, iid, module));
+                            self.pending_macs.push((file, iid, module, dir.to_string(), mod_rs));
                         }
                     }
                 }
@@ -2946,6 +3057,72 @@ impl Program {
         let d = self.add_def(Def { kind, name, parent: owner, file, item: si, sub: 0, is_pub, krate, scope: module });
         self.item_defs.insert((file, si.0), d);
         Ok(Some(d))
+    }
+
+    /// Hot reload: the body blocks of `file`'s paired items that hold items but have no block
+    /// module yet (a `use` or a fn added in a body) get one, under the block module or item
+    /// module around them, as collect_body_items gives at load. Blocks already mapped keep theirs.
+    fn collect_new_body_blocks(&mut self, file: u32, pairs: &[(u32, u32)]) -> Result<(), String> {
+        let first = self.defs.len() as u32;
+        let r = self.collect_new_body_blocks_in(file, pairs);
+        let last = self.defs.len() as u32;
+        self.body_added.extend((first..last).map(DefId));
+        r
+    }
+
+    /// The defs commits gave items added inside bodies since the last call (collect_new_body_blocks).
+    pub fn take_body_added(&mut self) -> Vec<DefId> {
+        std::mem::take(&mut self.body_added)
+    }
+
+    fn collect_new_body_blocks_in(&mut self, file: u32, pairs: &[(u32, u32)]) -> Result<(), String> {
+        for &(_, n) in pairs {
+            let Some(&d) = self.item_defs.get(&(file, n)) else { continue };
+            let def = self.def(d);
+            if !matches!(def.kind, DefKind::Fn | DefKind::AssocFn | DefKind::Const | DefKind::AssocConst | DefKind::Static) {
+                continue;
+            }
+            let module = def.scope;
+            let mut blocks = Vec::new();
+            {
+                let ast = &self.files[file as usize].ast;
+                let kind = &ast.item(ItemId(n)).kind;
+                blocks_in_item_signature(ast, kind, &mut blocks);
+                match kind {
+                    ItemKind::Fn(_, Some(b), _) => blocks.push(*b),
+                    ItemKind::Const(_, e) | ItemKind::Static(_, _, e) => if let Some(e) = e.get() { blocks_in_expr(ast, e, &mut blocks) },
+                    _ => {}
+                }
+            }
+            for b in blocks {
+                self.collect_new_block_items(file, b, module, Some(d))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_new_block_items(&mut self, file: u32, b: BlockId, module: u32, owner: Option<DefId>) -> Result<(), String> {
+        let Some((items, subs)) = self.file_blocks[file as usize].get(&b.0).cloned() else { return Ok(()) };
+        let inner = match self.block_mods.get(&(file, b.0)).copied() {
+            Some(m) => m,
+            None if !items.is_empty() => {
+                let krate = self.mods[module as usize].krate;
+                let mdef = self.mods[module as usize].def;
+                let inner = self.new_module(mdef, Some(module), Some(module), krate, file);
+                self.block_mods.insert((file, b.0), inner);
+                if let Some(o) = owner {
+                    self.block_owner.insert(inner, o);
+                }
+                let (dir, mod_rs) = self.mod_dirs.get(&module).cloned().unwrap_or_else(|| (".".to_string(), true));
+                self.collect_items(file, &items, inner, &dir, mod_rs)?;
+                inner
+            }
+            None => module,
+        };
+        for sb in subs {
+            self.collect_new_block_items(file, sb, inner, owner)?;
+        }
+        Ok(())
     }
 
     /// Items declared inside a fn/const body get anonymous block modules.
@@ -3658,6 +3835,13 @@ impl Program {
         true
     }
 
+    /// The imports from `i0` that are still open and name something an unresolved import is an
+    /// error for (import_reportable: not a macro, not bound in the other namespace).
+    pub fn open_reportable_imports(&self, i0: usize) -> Vec<usize> {
+        let mut macro_binds: Option<crate::fxhash::HashSet<Sym>> = None;
+        (i0..self.imports.len()).filter(|&i| !self.imports[i].done && self.import_reportable(i, &mut macro_binds)).collect()
+    }
+
     /// Unresolved imports (from `i0`) become errors.
     fn report_unresolved_imports(&mut self, i0: usize) {
         let mut macro_binds: Option<crate::fxhash::HashSet<Sym>> = None;
@@ -3789,18 +3973,23 @@ impl Program {
             } else {
                 tdef = self.lookup_in_container(parent, last, true);
                 vdef = if self.imports[i].bound & BOUND_SELF_ONLY != 0 { None } else { self.lookup_in_container(parent, last, false) };
-                // rustc ignores a namespace whose binding this module cannot see when the other
+                let mdef = self.imports[i].bound & BOUND_SELF_ONLY == 0 && self.lookup_macro_in_container(parent, last);
+                // rustc ignores a namespace whose binding this module cannot see when another
                 // namespace is accessible (`use validate::validate;` where `validate` also holds
-                // a private glob-imported module of that name); with neither accessible the
+                // a private glob-imported module of that name, or `use zerovec::zerovec;` where
+                // `zerovec` holds a private submodule and a public macro); with none accessible the
                 // privacy error is reported
-                if self.def(parent).kind == DefKind::Mod && tdef.is_some() && vdef.is_some() {
+                if self.def(parent).kind == DefKind::Mod && (tdef.is_some() as u8 + vdef.is_some() as u8 + mdef as u8) >= 2 {
                     let sub = self.def(parent).sub;
                     let seen = |p: &Program, ns: bool| {
                         let mut q = GlobQuery { precise: true, ..Default::default() };
                         p.lookup_in_module_vis(sub, last, ns, &mut q).map_or(true, |(_, v)| p.vis_visible(v, module))
                     };
-                    let (tv, vv) = (seen(self, true), seen(self, false));
-                    if tv && !vv { vdef = None; } else if vv && !tv { tdef = None; }
+                    let (tv, vv) = (tdef.is_some() && seen(self, true), vdef.is_some() && seen(self, false));
+                    if tv || vv || mdef {
+                        if !tv { tdef = None; }
+                        if !vv { vdef = None; }
+                    }
                 }
             }
             if tdef.is_none() && vdef.is_none() {
@@ -4213,13 +4402,34 @@ impl Program {
         }
         // `$crate` from another crate's macro: `::__relax_crate_<name>` is that crate by identity
         if let Some(cn) = self.syms.str(name).strip_prefix("__relax_crate_") {
-            for (i, c) in self.crates.iter().enumerate() {
-                if self.syms.str(c.name) == cn {
-                    return Some(i as u32);
+            return self.dollar_crate(krate, cn);
+        }
+        None
+    }
+
+    /// The crate `$crate` of a macro defined in crate `name` denotes in code of crate `krate`
+    /// (rustc: the macro's defining crate, carried by hygiene). The expansion spells it by name,
+    /// and the program can hold two crates of one name: a domain relaunched after a Cargo graph
+    /// change loads new revisions of changed crates next to the old ones (domain.rs load_graph).
+    /// The defining crate is the one `krate` depends on (a macro reaches code only through the
+    /// dependency graph), nearest first; outside that graph, the newest crate of the name (the
+    /// macro table resolves a name to its newest definition).
+    fn dollar_crate(&self, krate: u32, name: &str) -> Option<u32> {
+        let named = |k: u32| self.syms.str(self.crates[k as usize].name) == name;
+        let mut seen = vec![false; self.crates.len()];
+        let mut queue = std::collections::VecDeque::from([krate]);
+        seen[krate as usize] = true;
+        while let Some(k) = queue.pop_front() {
+            if named(k) {
+                return Some(k);
+            }
+            for &(_, d) in &self.crates[k as usize].deps {
+                if !std::mem::replace(&mut seen[d as usize], true) {
+                    queue.push_back(d);
                 }
             }
         }
-        None
+        (0..self.crates.len() as u32).rev().find(|&k| named(k))
     }
 
     /// Resolves a path to a container (module, enum, trait, type). `from_root`: 2015-style
@@ -4400,11 +4610,13 @@ impl Program {
         for pass in 0.. {
             q.memo.clear();
             q.hits.clear();
+            q.tainted.clear();
             let r = self.lookup_in_module_pass(m, name, ns_type, q);
             let stale = q.hits.iter().any(|(x, given)| q.memo.get(x).map_or(false, |fin| fin != given));
             if !stale || pass > q.prev.len() + 1 {
                 if cacheable {
-                    self.glob_cache.insert((m, name, ns_type), r);
+                    // (a final answer of the pass is there already)
+                    self.glob_cache.insert_first((m, name, ns_type), r);
                 }
                 return r;
             }
@@ -4429,18 +4641,29 @@ impl Program {
             return given;
         }
         if let Some(r) = q.memo.get(&m) {
+            if q.tainted.contains(&m) { q.taints += 1; }
             return *r;
         }
         // through globs: converged answers of earlier queries (glob graphs are wide and deep)
-        if self.imports_done && !q.precise {
+        let cacheable = self.imports_done && !q.precise;
+        if cacheable {
             if let Some(r) = self.glob_cache.get(&(m, name, ns_type)) {
                 return r;
             }
         }
+        let (hits, taints) = (q.hits.len(), q.taints);
         q.open.push(m);
         let r = self.lookup_in_module_globs(m, name, ns_type, q);
         q.open.pop();
         q.memo.insert(m, r);
+        // an answer that read no module still being looked through (directly or through an
+        // answer that did) is final: later lookups of the name through this module take it
+        // instead of walking its globs again (a miss walks every module the globs reach)
+        if q.hits.len() != hits || q.taints != taints {
+            q.tainted.insert(m);
+        } else if cacheable {
+            self.glob_cache.insert_first((m, name, ns_type), r);
+        }
         r
     }
 
@@ -5190,20 +5413,6 @@ pub fn set_record_import_uses(on: bool) { RECORD_IMPORT_USES.store(on, std::sync
 
 static SHARED_STD: relax_session::sync::Mutex<Option<HashMap<String, std::sync::Arc<SharedParse>>>> = relax_session::sync::Mutex::new(None);
 
-pub(crate) struct ZoneTaken(Option<HashMap<String, std::sync::Arc<SharedParse>>>);
-
-pub(crate) fn zone_take() -> ZoneTaken {
-    let mut shared = SHARED_STD.lock().unwrap_or_else(|e| e.into_inner());
-    let taken = ZoneTaken(std::mem::take(&mut *shared));
-    #[cfg(test)]
-    assert!(shared.is_none());
-    taken
-}
-
-pub(crate) fn zone_put_back(taken: ZoneTaken) {
-    let mut shared = SHARED_STD.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *shared, taken.0));
-}
 static SHARED_CV: relax_session::sync::Condvar = relax_session::sync::Condvar::new();
 /// the program's std load is running: the world waits for its files
 static SHARING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -5239,6 +5448,17 @@ impl Drop for WorldWait {
 
 /// The program's std crates are loaded: a world still waiting for a file the program did not
 /// load parses it itself.
+/// Drops the std parses shared during the load (a settle rebuild; a later proc-macro world parses
+/// what it needs again). Nothing while a load shares them.
+pub fn drop_shared_std() {
+    let m = {
+        let mut g = SHARED_STD.lock().unwrap_or_else(|e| e.into_inner());
+        if SHARING.load(std::sync::atomic::Ordering::Acquire) { return; }
+        g.take()
+    };
+    drop(m);
+}
+
 pub fn share_std_end() {
     let _g = SHARED_STD.lock().unwrap_or_else(|e| e.into_inner());
     SHARING.store(false, std::sync::atomic::Ordering::Release);
@@ -5322,6 +5542,20 @@ impl ParseSnapshot {
             assert_eq!(v.blocks, full.blocks);
         }
         Ok(v)
+    }
+
+    /// A file whose items are `stream` (tokens built by the caller, a proc-macro-like
+    /// expansion), with `src` as the file's own text (the tokens' file-0 spans point into it:
+    /// diagnostics name it).
+    pub fn parse_tokens(&self, src: Vec<u8>, stream: crate::pm_tokens::TokenStream) -> Result<FileVersion, String> {
+        let Self { old, path, edition, kname, mod_path, cfg, macros, .. } = self;
+        let bctx = std::rc::Rc::new(crate::builtins::FileCtx::new(kname, path, mod_path, cfg));
+        let context = self.context.edited(path, src.into());
+        let (mut pf, used) = crate::parser::parse_token_stream(stream, path, *edition, Some(crate::macros::MacroScope::new(macros.clone())), bctx, context.sources().clone(), false)
+            .map_err(|(span, m)| format!("{}:{}: {}", path, span.lo, m))?;
+        let prep = prepare_file(&mut pf, cfg);
+        let local = used.map(|u| u.local).unwrap_or_default();
+        Ok(FileVersion { old: *old, path: path.clone(), pf, blocks: prep.blocks, idents: prep.idents, macros: local, reuse: Default::default(), context })
     }
 
     pub fn parse_full(&self, src: Vec<u8>) -> Result<FileVersion, String> {
@@ -5613,6 +5847,10 @@ struct GlobQuery {
     open: Vec<u32>,
     /// (module still being looked through, the answer it gave)
     hits: Vec<(u32, Option<(DefId, BindVis)>)>,
+    /// modules of this pass whose answer read a module still being looked through (not final),
+    /// and how often such an answer was read
+    tainted: std::collections::HashSet<u32>,
+    taints: usize,
 }
 
 /// One walk of trait bindings through glob imports (see GlobQuery).
@@ -5624,7 +5862,7 @@ struct TraitQuery {
     hits: Vec<(u32, std::sync::Arc<Vec<(DefId, BindVis)>>)>,
 }
 
-crate::gen_local! {
+crate::memo_local! {
     /// (skipped module, name) pairs a lookup on this thread missed since the last take_missing.
     static MISSING: std::cell::RefCell<Vec<(u32, String)>>;
 }
@@ -5634,7 +5872,7 @@ thread_local! {
     /// noted before the mark (an earlier lookup of the same name).
     static MISSING_FROM: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
-crate::gen_local! {
+crate::memo_local! {
     /// The notes of MISSING[from..] as a set (push_missing's dedup), valid for (generation,
     /// from, len); a body's bound-variable walk notes thousands of misses in one window, and
     /// a scan of the window per note made that quadratic.

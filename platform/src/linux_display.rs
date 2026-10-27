@@ -11,7 +11,7 @@
 //! Outside the direct Vulkan backend (Wayland/X11 builds, hosted children)
 //! the snapshot is empty with `direct == false`.
 
-pub use makepad_hal::direct::{DisplayArrangement, DisplayPacing, LinuxDisplayFrameTiming, LinuxDisplayOutput, LinuxDisplaySnapshot, LINUX_VULKAN_DEVICE_ENV};
+pub use makepad_hal::direct::{DisplayArrangement, DisplayPacing, LinuxDisplayFrameTiming, LinuxDisplayOutput, LinuxDisplaySnapshot, VirtualDisplay, VirtualPanels, LINUX_VULKAN_DEVICE_ENV, VIRTUAL_OUTPUT};
 
 pub use makepad_hal::direct::DisplayCommand as LinuxDisplayCommand;
 
@@ -65,6 +65,13 @@ impl crate::cx::Cx {
     /// `paced_by` follow.
     pub fn linux_set_display_pacing(&mut self, pacing: &DisplayPacing) -> Result<(), String> {
         self.hal_queue_display(LinuxDisplayCommand::Pacing(pacing.clone()))
+    }
+    /// The virtual display becomes the desktop, changes, or (`None`) gives way to the panels'
+    /// own modes. No modeset when only its size or refresh changes: the desktop is laid out
+    /// again. Host acceptance arrives as `Event::LinuxDisplayResult`; the snapshot's
+    /// `virtual_display` follows.
+    pub fn linux_set_virtual_display(&mut self, display: Option<VirtualDisplay>) -> Result<(), String> {
+        self.hal_queue_display(LinuxDisplayCommand::Virtual(display))
     }
     /// The id assigned by the last successful display setter, for correlating replies.
     pub fn linux_display_request_id(&self) -> u64 {

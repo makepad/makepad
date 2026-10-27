@@ -1,0 +1,63 @@
+// Analog poly: a pulse with slow PWM plus a brightness-shaped saw, a
+// filter envelope with an attack stage, keytracked, velocity to cutoff.
+// Plucks, leads and brass come from the envelope settings.
+let cutoff = param(900, 40, 16000)
+let res = param(1.2, 0.5, 8)
+let env_amt = param(4000, 0, 12000)
+let f_attack = param(0.005, 0.001, 2)
+let f_decay = param(0.25, 0.01, 4)
+let keytrack = param(0.5, 0, 1)
+let vel_amt = param(0.6, 0, 1)
+let pwm_rate = param(0.7, 0, 8)
+let pwm_depth = param(0.3, 0, 0.45)
+let mix_saw = param(0.5, 0, 1)
+let attack = param(0.003, 0.001, 4)
+let decay = param(0.4, 0.01, 8)
+let sustain = param(0.6, 0, 1)
+let release = param(0.25, 0.01, 8)
+let gain = param(0.4, 0, 1)
+
+var p1 = 0.0
+var p2 = 0.0
+var lfo = 0.0
+var fenv = 0.0
+var fstage = int(0)
+var f = Svf{}
+var amp = Adsr{}
+
+fn block() {
+    let track = pow(freq / 261.63, keytrack)
+    let vel = 1.0 - vel_amt + vel_amt * velocity
+    svf_set(f, (cutoff + env_amt * fenv * vel) * track, res)
+}
+
+fn voice() {
+    if trigger {
+        fenv = 0.0
+        fstage = 1
+        p2 = 0.25
+    }
+    // Filter envelope: attack up, then exponential decay.
+    if fstage == 1 {
+        fenv = fenv + 1.0 / (f_attack * sample_rate)
+        if fenv >= 1.0 {
+            fenv = 1.0
+            fstage = 2
+        }
+    } else {
+        fenv = fenv * exp(-5.0 / (f_decay * sample_rate))
+    }
+    lfo = advance(lfo, pwm_rate / sample_rate)
+    let dt = freq / sample_rate
+    p1 = advance(p1, dt)
+    p2 = advance(p2, dt * 1.003)
+    let w = 0.5 + pwm_depth * sin(TAU * lfo)
+    let pulse = pulse_blep(p1, dt, w)
+    let saw = saw_blep(p2, dt * 1.003)
+    let x = mix(pulse, saw, mix_saw)
+    let e = adsr(amp, attack, decay, sustain, release)
+    if gate == 0.0 && e == 0.0 {
+        stop()
+    }
+    svf_lp(f, x) * e * gain * (0.5 + 0.5 * velocity)
+}

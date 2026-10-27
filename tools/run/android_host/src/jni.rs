@@ -41,7 +41,10 @@ pub unsafe extern "system" fn JNI_OnLoad(vm: *mut sys::JavaVM, _: *mut c_void) -
     let result = makepad_hal::backend::android::register_natives(env, class);
     ((**env).DeleteLocalRef.unwrap())(env, class);
     match result {
-        Ok(pending) => logcat::log(&format!("HAL shell registered; pending services: {}", pending.join(", "))),
+        Ok(pending) => {
+            crate::android_fleet::register();
+            logcat::log(&format!("HAL shell registered; pending services: {}", pending.join(", ")))
+        }
         Err(error) => {
             logcat::log(&format!("HAL registration failed: {error}"));
             return sys::JNI_ERR;
@@ -125,12 +128,18 @@ struct Conf {
     env: Vec<(String, String)>,
     /// `privileged=1`: the app that boots is the window manager (domain control)
     privileged: bool,
+    /// the embedded devhub node (`devhub_name=`, `rev=<repo> <sha>`, `prefix=<repo> <path>`)
+    store: crate::devhub::StoreConf,
+    /// the embedded Desk Link endpoint (`desk_link=on|off`, `desk_link_fps=`)
+    desk: crate::deskhost::DeskConf,
 }
 
 fn parse_conf(text: &str) -> Result<Conf, String> {
     let mut apps: Vec<App> = Vec::new();
     let mut env = Vec::new();
     let mut privileged = false;
+    let mut store = crate::devhub::StoreConf::default();
+    let mut desk = crate::deskhost::DeskConf::default();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let (k, v) = line.split_once('=').ok_or_else(|| format!("{CONF_ASSET}: bad line {line:?}"))?;
         match k {
@@ -141,13 +150,21 @@ fn parse_conf(text: &str) -> Result<Conf, String> {
                 env.push((k.to_string(), val.to_string()));
             }
             "privileged" => privileged = v == "1",
+            "devhub_name" => store.name = v.to_string(),
+            "desk_link" => desk.on = v == "on",
+            "desk_link_fps" => desk.fps = Some(v.parse().map_err(|_| format!("{CONF_ASSET}: desk_link_fps wants a number, got {v:?}"))?),
+            "rev" | "prefix" => {
+                let (repo, val) = v.split_once(' ').ok_or_else(|| format!("{CONF_ASSET}: {k} wants `<repo> <value>`, got {v:?}"))?;
+                let list = if k == "rev" { &mut store.revs } else { &mut store.prefixes };
+                list.push((repo.to_string(), val.to_string()));
+            }
             _ => return Err(format!("{CONF_ASSET}: unknown key {k:?}")),
         }
     }
     if apps.is_empty() {
         return Err(format!("{CONF_ASSET}: no app"));
     }
-    Ok(Conf { apps, env, privileged })
+    Ok(Conf { apps, env, privileged, store, desk })
 }
 
 /// Starts the process app on its own thread; Activity callbacks never wait for compilation.
@@ -213,18 +230,20 @@ pub unsafe extern "system" fn Java_dev_makepad_run_RunActivity_boot(
     }
 }
 
-/// The compile cache persists: a fresh process boots warm from it. It belongs to exactly one
-/// build (the host library and the source pack it carries): a different build starts from an
-/// empty cache, so a stale startup image never meets code it was not made for. The window
-/// manager's settings ("Clear JIT cache") leave a `clear-cache` file in the home folder: the
-/// next process starts cold. The old cache is renamed away at once and deleted on a thread of
-/// its own, so the boot does not wait for the delete.
-fn freshen_cache(home: &std::path::Path, apk: &std::path::Path, offset: u64, len: u64) {
+/// The compile cache persists: a fresh process boots warm from it, and an APK update keeps it
+/// (Relax keys its stored builds by its codegen identity, relax_compiler::codegen_id, and
+/// recompiles only sources that changed). It is deleted only for a host library with another code
+/// generator (another codegen identity: none of its code could be used) or when the window manager's settings ("Clear JIT cache") leave a
+/// `clear-cache` file in the home folder. The old cache is renamed away at once and deleted on a
+/// thread of its own, so the boot does not wait for the delete.
+/// Answers whether the packed sources changed (another archive than the last process's).
+fn freshen_cache(home: &std::path::Path, offset: u64, len: u64) -> bool {
     let stamp_file = home.join("build.stamp");
-    let meta = std::fs::metadata(apk).ok();
-    let size = meta.as_ref().map_or(0, |m| m.len());
-    let mtime = meta.and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
-    let stamp = format!("{offset} {len} {size} {mtime}");
+    let stamp = format!("{:032x}", relax_compiler::codegen_id::id());
+    let pack_file = home.join("pack.stamp");
+    let pack = format!("{offset} {len}");
+    let other_pack = std::fs::read_to_string(&pack_file).map_or(true, |s| s != pack);
+    if other_pack { let _ = std::fs::write(&pack_file, &pack); }
     let other_build = std::fs::read_to_string(&stamp_file).map_or(true, |s| s != stamp);
     let cleared = home.join("clear-cache");
     let asked = cleared.exists();
@@ -234,7 +253,7 @@ fn freshen_cache(home: &std::path::Path, apk: &std::path::Path, offset: u64, len
         if std::fs::rename(&target, &trash).is_err() {
             let _ = std::fs::remove_dir_all(&target);
         }
-        logcat::log(&format!("compile cache cleared at process start ({})", if asked { "cleared in settings" } else { "another build" }));
+        logcat::log(&format!("compile cache cleared at process start ({})", if asked { "cleared in settings" } else { "another code generator" }));
         boot::set_note("cold start \u{b7} cache cleared");
     }
     let _ = std::fs::remove_file(&cleared);
@@ -242,6 +261,7 @@ fn freshen_cache(home: &std::path::Path, apk: &std::path::Path, offset: u64, len
     if std::fs::write(&tmp, &stamp).is_ok() { let _ = std::fs::rename(&tmp, &stamp_file); }
     // this and earlier processes' renamed caches (a delete cut short by a kill stays until here)
     let home = home.to_path_buf();
+    let other = other_pack;
     let _ = std::thread::Builder::new().name("cache-delete".into()).spawn(move || {
         let Ok(entries) = std::fs::read_dir(&home) else { return };
         for entry in entries.flatten() {
@@ -250,6 +270,7 @@ fn freshen_cache(home: &std::path::Path, apk: &std::path::Path, offset: u64, len
             }
         }
     });
+    other
 }
 
 fn boot_thread(
@@ -276,14 +297,24 @@ fn boot_thread(
     let remote_file = files.join("remote.spec");
     let spec = if remote.is_empty() { std::fs::read_to_string(&remote_file).unwrap_or_default() } else { let _ = std::fs::write(&remote_file, remote); remote.to_string() };
     if !spec.trim().is_empty() {
-        match makepad_run::remote::dial_in_background(spec.trim(), files) {
+        match relax_runner::remote::dial_in_background(spec.trim(), files) {
             Ok(()) => logcat::log("makepad-remote: dialling the hub (from the intent / remote.spec)"),
             Err(e) => logcat::log(&format!("makepad-remote: not dialling: {e}")),
         }
     }
     let conf = parse_conf(&unsafe { asset_text(manager, CONF_ASSET)? })?;
     let (offset, len) = unsafe { asset_range(manager, ARCHIVE_ASSET)? };
-    freshen_cache(&relax_home, apk, offset, len);
+    let other_pack = freshen_cache(&relax_home, offset, len);
+    // devhub pushes live in the run's edits folder over the APK's source store; other packed
+    // sources start from their own revs (the conf's)
+    if other_pack {
+        let _ = std::fs::remove_dir_all(files.join("devhub"));
+    }
+    let edits = crate::devhub::edits_dir(files);
+    std::fs::create_dir_all(&edits).map_err(|e| format!("{}: {e}", edits.display()))?;
+    std::env::set_var("MAKEPAD_RUN_EDITS", &edits);
+    std::env::set_var("MAKEPAD_RUN_STORE_LIVE", "1");
+    relax_compiler::vfs::set_edits(Some(edits));
     for (k, v) in &conf.env {
         std::env::set_var(k, v);
     }
@@ -300,9 +331,18 @@ fn boot_thread(
         exe: lib_dir.join("libmakepad_exe.so"),
         // the window manager is the app the APK boots first; a launch-intent app is an ordinary one
         privileged: conf.privileged && app.is_empty(),
+        on_mounted: {
+            let (files, store, desk) = (files.to_path_buf(), conf.store.clone(), conf.desk.clone());
+            Some(Box::new(move |workspace: &str| {
+                let name = if store.name.is_empty() { makepad_devhub::proto::default_machine_name() } else { store.name.clone() };
+                // after devhub's start: it sets the fleet dir the endpoint's credential is in
+                crate::devhub::start(&files, workspace, store);
+                crate::deskhost::start(&files, name, desk);
+            }))
+        },
     };
     logcat::log(&format!("booting {} from {} at {offset}+{len}", b.package, apk.display()));
-    boot::boot(&b)
+    boot::boot(b)
 }
 
 /// `RunActivity.status()`: "state|phase|loaded|total|error" (error last: it may hold anything).

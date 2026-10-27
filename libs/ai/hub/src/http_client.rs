@@ -258,7 +258,7 @@ fn connect(url: &ParsedUrl) -> Result<Transport, AssetAiError> {
         let mut last = None;
         let mut stream = None;
         for addr in addrs {
-            match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+            match makepad_network::lan::connect_timeout("ai-hub http", &addr, CONNECT_TIMEOUT) {
                 Ok(s) => {
                     stream = Some(s);
                     break;
@@ -675,8 +675,8 @@ fn same_origin(a: &ParsedUrl, b: &ParsedUrl) -> bool {
     a.https == b.https && a.port == b.port && a.host.eq_ignore_ascii_case(&b.host)
 }
 
-/// A fleet node: TLS checked against the known-nodes record, then the
-/// request with this process's credential proof for the certificate seen.
+/// A fleet node: its TLS certificate checked against the fleet root, then
+/// the request with this machine's proof for that certificate.
 #[cfg(not(target_arch = "wasm32"))]
 fn fetch_fleet(
     url: &ParsedUrl,
@@ -685,15 +685,15 @@ fn fetch_fleet(
     body: Option<(&str, &[u8])>,
     send_extra_headers: bool,
 ) -> Result<HttpClientResponse, AssetAiError> {
-    let (stream, authorization) = makepad_network::tls::connect_fleet(&url.host, &url.port.to_string())
+    let (stream, _server, authorization) = makepad_network::fleet::id::connect(&url.host, &url.port.to_string())
         .map_err(|e| AssetAiError::Http(format!("fleet tls {}:{}: {e}", url.host, url.port)))?;
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
     let mut transport = Transport::Tls(stream);
     let has_auth = req.extra_headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("authorization"));
     let mut headers: Vec<(String, String)> = req.extra_headers.to_vec();
-    if let (Some(value), false) = (authorization, has_auth) {
-        headers.push(("Authorization".into(), value));
+    if !has_auth {
+        headers.push(("Authorization".into(), authorization));
     }
     // Names this app on the node's control panel.
     if !headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(crate::control::HEADER_APP)) {

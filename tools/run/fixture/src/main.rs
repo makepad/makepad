@@ -94,5 +94,26 @@ fn main() {
         }
         println!("round trips {} growth under 96 MiB: {}", total, peak_rss() - before < 96 * 1024 * 1024);
     }
+    {
+        // a handle of owned values built here crosses as it is (rustc's layout on both sides)
+        let n = Note { title: String::from("built here"), tags: vec![String::from("a"), String::from("bb")], items: vec![Item { a: 1, b: 2, c: false }], alias: Some(String::from("al")), limit: Some(9), kind: Kind::B, weight: 7 };
+        println!("note digest {}", note_digest(&n));
+        let g = note_grow(n);
+        println!("note grown {:?} {} {:?} {:?} {:?} {:?} {} {}", g.title, g.tags.len(), g.tags.last(), g.alias, g.limit, g.kind, g.weight, g.items.len());
+        let mut u = Note { title: format!("{} (updated)", "struct"), weight: 2, ..Default::default() };
+        u.tags.push(String::from("pushed here"));
+        println!("note update {} | {}", note_digest(&u), note_take(u));
+        let mut r = note_new("by rustc");
+        r.title.push_str(" and grown here");
+        r.alias = Some(String::from("set here"));
+        println!("note rustc-built {} {:?}", note_digest(&r), r);
+        let before = peak_rss();
+        let mut total = 0usize;
+        for i in 0..20_000usize {
+            let n = Note { title: "x".repeat(1000 + i % 7), tags: vec![String::from("t"); 4], alias: (i % 2 == 0).then(|| String::from("y")), ..Default::default() };
+            total += note_take(note_grow(n));
+        }
+        println!("note round trips {} growth under 96 MiB: {}", total, peak_rss() - before < 96 * 1024 * 1024);
+    }
     println!("asm {}", asm_twice(40));
 }

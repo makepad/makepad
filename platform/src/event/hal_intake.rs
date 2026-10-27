@@ -591,7 +591,8 @@ impl Cx {
                     hosted.window_closed(window_id);
                 }
                 self.hal.frames.window_closed(hal_window_id(window_id));
-                if !self.hal.windows.values().any(|w| w.confirmed) {
+                // a tray app lives on in its tray without windows
+                if !self.hal.windows.values().any(|w| w.confirmed) && !self.has_tray() {
                     if user_closed {
                         crate::remote::note_user_closed_last_window();
                     }
@@ -675,6 +676,13 @@ impl Cx {
             }
             HalEvent::ResizeLoop { .. } => {} // the main thread tracks the resize, the sessions run on
             HalEvent::MenuCmd { cmd } => self.call_event_handler(&Event::MacosMenuCommand(LiveId(cmd))),
+            HalEvent::TrayMenu { tray, item } => self.call_event_handler(&Event::TrayMenu(crate::tray::TrayMenuEvent { tray: LiveId(tray), item: LiveId(item) })),
+            HalEvent::TrayClick { tray, x, y, w, h, screen } => {
+                use crate::makepad_math::{dvec2, Rect};
+                let anchor = Rect { pos: dvec2(x, y), size: dvec2(w, h) };
+                let screen = Rect { pos: dvec2(screen[0] as f64, screen[1] as f64), size: dvec2(screen[2] as f64, screen[3] as f64) };
+                self.call_event_handler(&Event::TrayClick(crate::tray::TrayClickEvent { tray: LiveId(tray), anchor, screen }))
+            }
 
             // ---- app
             // (every backend paints its windows once after the app started)
@@ -725,9 +733,10 @@ impl Cx {
                         _ => AppOpenItem::Url(value),
                     })
                     .collect();
-                if !items.is_empty() {
-                    crate::app_open::post(items, AppOpenSource::System);
-                }
+                // none: the user opened the running app again with no window on screen (macOS
+                // reopen, its Dock icon): like a later launch of a single-instance app
+                let source = if items.is_empty() { AppOpenSource::SecondInstance } else { AppOpenSource::System };
+                crate::app_open::post(items, source);
             }
 
             // ---- child windows and domains (this app is a parent)
@@ -804,6 +813,10 @@ impl Cx {
                     self.hal_repaint_all();
                 }
             }
+            HalEvent::XrFrame { window: _, display_ns, frame } => {
+                let time = self.hal.secs(display_ns);
+                self.hal_xr_frame(time, frame);
+            }
             HalEvent::FrameReady { window, next_ns: _ } => {
                 let window_id = window_id(window);
                 if self.windows.is_valid(window_id) {
@@ -814,6 +827,12 @@ impl Cx {
                     }
                     makepad_hal::profile::credit();
                 }
+            }
+            HalEvent::Redraw { window: _, owners } => {
+                if owners {
+                    self.arm_draw_owners();
+                }
+                self.redraw_all();
             }
             HalEvent::FramePartial { window: _, frame } => {
                 // its pipeline's PipelineReady repaints; an offscreen render asks `frames_partial`
@@ -830,7 +849,7 @@ impl Cx {
                     }
                     if closes { crate::gpu_frame_timer::finish_frame(group); }
                 }
-                self.hal.frames.frame_done(window, frame);
+                let window_frame = self.hal.frames.frame_done(window, frame);
                 // a draw item's backing is reusable once the frame that last read it is done
                 self.textures.1.serials.complete(frame);
                 let pool = self.task_pool();
@@ -840,15 +859,23 @@ impl Cx {
                 self.poll_texture_lifetimes();
                 self.hal.frames_done += 1;
                 match self.hal.hosted.as_mut().map(|h| h.completed(window, frame)) {
-                    Some(crate::os::hal::HostedDone::Publish(draw)) => Self::send_studio_message(crate::studio::AppToStudio::DrawCompleteAndFlip(draw)),
+                    Some(crate::os::hal::HostedDone::Publish(draw)) => {
+                        if window_frame { crate::frame_trace::note_presented(); }
+                        Self::send_studio_message(crate::studio::AppToStudio::DrawCompleteAndFlip(draw))
+                    }
                     // a hosted frame the GPU dropped: nothing to publish, paint it again
                     #[cfg(target_os = "linux")]
                     Some(crate::os::hal::HostedDone::Dropped) => self.hal_repaint_all(),
-                    Some(crate::os::hal::HostedDone::Unknown) | None => {}
+                    // the HAL presented the window's frame itself (other targets' frames are passes)
+                    Some(crate::os::hal::HostedDone::Unknown) | None => if window_frame { crate::frame_trace::note_presented() },
                 }
                 // (the first frame the HAL finished is the first one on the glass; once per app)
                 crate::startup_trace_first_present();
-                crate::cx::relax_frame_done();
+                // the JIT's fps (devhub, `jit`): under XR the frames on the glass are the stereo
+                // window's; the panel's and offscreen frames do not count
+                if self.hal.xr.as_ref().map_or(true, |xr| hal_window_id(xr.window) == window) {
+                    crate::cx::relax_frame_done();
+                }
             }
             HalEvent::PipelineReady { pipeline } => {
                 // a draw built before the pipeline was ready was skipped by the HAL: paint again
@@ -1106,8 +1133,8 @@ impl Cx {
         self.fingers.process_touch_update_end(&e.touches);
     }
 
-    /// Signals, actions and script tasks the loop services on a wake and on every beat (the
-    /// work macOS did on its timer-0 beat).
+    /// Signals, actions, script tasks and network events the loop services on a wake and on
+    /// every beat (the work macOS did on its timer-0 beat).
     pub(crate) fn hal_service_signals(&mut self) -> bool {
         let internal_signal = SignalToUI::check_and_clear_internal_signal();
         let ui_signal = SignalToUI::check_and_clear_ui_signal();
@@ -1125,6 +1152,10 @@ impl Cx {
             self.handle_action_receiver();
             did = true;
         }
+        // A network answer wakes the loop (the runtime's wake fn) with no frame to draw: read
+        // here it reaches the app now. Read only on a beat, an idle app (a login page waiting
+        // for its answer) left it unread until something else asked for a frame.
+        self.handle_networking_events();
         self.poll_control_channel();
         self.poll_texture_readbacks();
         self.handle_actions();

@@ -418,7 +418,7 @@ pub fn check_literals(prog: &Program, tcx: &crate::tcx::Tcx, body: &crate::typec
         let neg = negated.contains(&e.0);
         match (kind, tcx.tys.kind(t)) {
             (LitKind::Int, TyKind::Int(p)) => {
-                let (bytes, signed) = crate::types::Types::int_info(*p);
+                let (bytes, signed) = tcx.tys.int_info(*p);
                 let Some(v) = crate::const_fold::parse_int_lit(text) else { continue };
                 let bits = bytes * 8;
                 let (max, min_abs) = if signed { ((1u128 << (bits - 1)) - 1, 1u128 << (bits - 1)) } else { (if bits == 128 { u128::MAX } else { (1u128 << bits) - 1 }, 0) };
@@ -593,7 +593,7 @@ pub fn is_automatically_derived(prog: &Program, d: DefId) -> bool {
     let ast = &prog.files[def.file as usize].ast;
     let item = ast.item(def.item);
     has_attr(prog, def.file, ast.list(item.attrs), "automatically_derived")
-        || prog.files[def.file as usize].expansion_kind(item.lo) == crate::parser::ExpnKind::Builtin
+        || derived(prog, d)
 }
 
 /// The attributes of the parameters, statements and arms around the binding written at `pos` in
@@ -724,6 +724,14 @@ mod tests {
 /// Whether `d` (or an item around it) was written by a derive, attribute or built-in macro:
 /// rustc reports no lints inside their output (the spans are `in_external_macro`). A
 /// `macro_rules!` expansion is the user's code and is judged.
+/// An item a built-in derive output (`#[derive(..)]` of a compiler derive).
+pub fn derived(prog: &Program, d: DefId) -> bool {
+    let def = prog.def(d);
+    let pf = &prog.files[def.file as usize];
+    let it = pf.ast.item(def.item);
+    it.lo >= pf.src_len && matches!(pf.expansion_region_kind(it.lo), crate::parser::ExpnKind::Builtin)
+}
+
 pub fn generated(prog: &Program, d: DefId) -> bool {
     let mut cur = d;
     let mut guard = 0;

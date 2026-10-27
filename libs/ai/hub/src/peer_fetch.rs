@@ -456,7 +456,7 @@ fn source_node_key(base: &str) -> Option<String> {
             .to_socket_addrs()
             .ok()?
             .next()?;
-        std::net::TcpStream::connect_timeout(&addr, PREFLIGHT_TIMEOUT).ok()?;
+        makepad_network::lan::connect_timeout("ai-hub peer preflight", &addr, PREFLIGHT_TIMEOUT).ok()?;
     }
     let health_url = format!("{base}/health");
     let response = http_fetch_no_redirect(&HttpClientRequest::get(&health_url)).ok()?;

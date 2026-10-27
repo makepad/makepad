@@ -16,7 +16,7 @@ impl EvalCtxt<'_, '_> {
             PredicateKind::Subtype(p) => self.compute_subtype_goal(env, p.a, p.b),
             PredicateKind::Coerce(p) => self.compute_subtype_goal(env, p.a, p.b),
             PredicateKind::Clause(ClauseKind::RegionOutlives(a, b)) => {
-                self.delegate.inner.borrow_mut().unwrap_region_constraints().make_subregion(&self.delegate.tcx.tys, b, a, true);
+                self.delegate.inner.borrow_mut().unwrap_region_constraints().make_subregion(&self.delegate.tcx.tys, crate::infer::region_constraints::SubregionOrigin::RelateRegionParamBound(self.delegate.origin_span.get()), b, a, true);
                 self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
             }
             PredicateKind::Clause(ClauseKind::TypeOutlives(ty, region)) => {
@@ -117,11 +117,46 @@ impl EvalCtxt<'_, '_> {
         }
         if ct.has_non_region_infer(&tcx.tys) { return Ok(None); }
         let ConstKind::Alias(_, alias) = tcx.tys.const_kind(ct) else { unreachable!() };
-        let typing_env = crate::tcx::TypingEnv { limit: self.delegate.recursion_limit, param_env: *env, mode: self.delegate.typing_mode.get() };
-        match tcx.const_eval_resolve(self.solver.prog, typing_env, alias.kind.def_id(), &alias.args) {
+        let prog = self.solver.prog;
+        let def = alias.kind.def_id();
+        // traits/mod.rs try_evaluate_const: an array repeat count may mention its parent's generics but
+        // must not depend on them -- it is evaluated with its identity arguments in its own
+        // post-analysis environment (a value that needs them is too generic); any other constant
+        // with generic parameters or placeholders among its arguments is too generic to evaluate.
+        let (args, typing_env) = if matches!(alias.kind, crate::consts::AliasConstKind::Anon { .. }) && prog.repeat_expr_counts.contains(&def) {
+            // (Relax evaluates by running monomorphic code: a count whose body mentions none of its
+            // parameters has the same value under any arguments, so they are instantiated with `()`;
+            // one that mentions them is too generic -- rustc's evaluation fails exactly when the value
+            // needs them)
+            if repeat_count_mentions_params(tcx, prog, def) { return Ok(None); }
+            let args: Arc<[GenericArg]> = tcx.generic_indices_of(prog, def).identity_args(&tcx.tys).into_iter().map(|a| match a {
+                GenericArg::Type(t) if tcx.tys.flags(t).intersects(crate::types::TypeFlags::HAS_TY_PARAM) => GenericArg::Type(tcx.tys.unit),
+                a => a,
+            }).collect();
+            (args, crate::tcx::TypingEnv { limit: self.delegate.recursion_limit, param_env: tcx.param_env_id(prog, def), mode: crate::tcx::TypingMode::PostAnalysis })
+        } else {
+            let generic = alias.args.iter().any(|a| match *a {
+                GenericArg::Type(t) => tcx.tys.flags(t).intersects(crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_PLACEHOLDER),
+                GenericArg::Const(c) => tcx.tys.flags(tcx.tys.intern(TyKind::Const(c))).intersects(crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_PLACEHOLDER),
+                GenericArg::Lifetime(_) => false,
+            });
+            if generic { return Ok(None); }
+            (alias.args.clone(), crate::tcx::TypingEnv { limit: self.delegate.recursion_limit, param_env: *env, mode: self.delegate.typing_mode.get() })
+        };
+        match tcx.const_eval_resolve(prog, typing_env, def, &args) {
             Ok(value) => Ok(Some(crate::consts::Const::new_value(&tcx.tys, value, self.const_type(&alias)?))),
             Err(crate::const_eval::ErrorHandled::TooGeneric) => Ok(None),
             Err(crate::const_eval::ErrorHandled::Reported(_)) => Ok(Some(tcx.tys.intern_const(ConstKind::Error))),
         }
     }
+}
+
+/// Whether the body of the repeat count `def` mentions a generic parameter of its parent: in an expression's or
+/// a pattern's type, or in the arguments of a path or a method it resolves to.
+fn repeat_count_mentions_params(tcx: &crate::tcx::Tcx, prog: &crate::program::Program, def: crate::program::DefId) -> bool {
+    let body = tcx.typeck(prog, def);
+    let param = |t: TyId| tcx.tys.flags(t).intersects(crate::types::TypeFlags::HAS_PARAM);
+    let list = |l: crate::types::TyList| tcx.tys.list(l).iter().any(|&t| param(t));
+    body.expr_ty.iter().any(|&t| param(t)) || body.pat_ty.iter().any(|&t| param(t))
+        || body.res_args.values().any(|&l| list(l)) || body.methods.values().any(|m| list(m.args)) || body.binops.values().any(|m| list(m.args))
 }

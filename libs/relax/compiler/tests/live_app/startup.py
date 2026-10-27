@@ -40,7 +40,7 @@ fn main() {
     log_path = root / "run.log"
     with log_path.open("w") as log:
         p = subprocess.Popen([binary, "run", "makepad-platform"], cwd=root,
-                             env=dict(os.environ, MAKEPAD_RUN_CACHE="off", MAKEPAD_RUN_STARTUP_PHASE="0"),
+                             env=dict(os.environ, MAKEPAD_RUN_LIVE_READY=str(root / "live-ready"), MAKEPAD_RUN_CACHE="off", MAKEPAD_RUN_STARTUP_PHASE="0"),
                              stdout=log, stderr=subprocess.STDOUT)
         def text():
             return log_path.read_text(errors="replace")
@@ -51,7 +51,7 @@ fn main() {
                 assert time.monotonic() < deadline, text()
                 time.sleep(.05)
         try:
-            wait_for(lambda: "value 1" in text() and "watching" in text())
+            wait_for(lambda: "value 1" in text() and (root / "live-ready").exists())
             helper.write_text('#[inline(never)] pub fn value() -> u32 { 2 }\n')
             time.sleep(3)
             assert "patched" not in text() and "value 2" not in text(), text()

@@ -20,7 +20,9 @@ use crate::sys;
 
 mod local;
 
-pub use self::local::{AccessError, LocalKey};
+pub use self::local::{AccessError, LazyKey, LocalKey};
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+pub use self::local::EagerStorage;
 
 pub type Result<T> = core::result::Result<T, Box<dyn Any + Send + 'static>>;
 
@@ -97,10 +99,8 @@ impl fmt::Debug for Thread {
 }
 
 /// The current thread's Thread handle (set by thread_start, created lazily otherwise).
-static CURRENT: LocalKey<UnsafeCell<Option<Thread>>> = LocalKey::new(current_cell_init);
-
-fn current_cell_init() -> UnsafeCell<Option<Thread>> {
-    UnsafeCell::new(None)
+thread_local! {
+    static CURRENT: UnsafeCell<Option<Thread>> = const { UnsafeCell::new(None) };
 }
 
 fn set_current(thread: Thread) {
@@ -133,7 +133,7 @@ pub fn current() -> Thread {
 // ---- free functions
 
 pub fn sleep(dur: Duration) {
-    sys::time::sleep(dur)
+    crate::sync::raw::sleep(dur)
 }
 
 pub fn sleep_ms(ms: u32) {
@@ -163,7 +163,7 @@ pub fn panicking() -> bool {
 pub fn available_parallelism() -> io::Result<NonZeroUsize> {
     match NonZeroUsize::new(sys::available_parallelism()) {
         Some(n) => Ok(n),
-        None => Err(io::const_error!(io::ErrorKind::NotFound, "The number of hardware threads is not known for the target platform")),
+        None => Err(io::const_error!(io::ErrorKind::NotFound, "the number of hardware threads is not known for the target platform")),
     }
 }
 
@@ -294,6 +294,11 @@ fn spawn_native(stack_size: usize, start: Box<ThreadStart>) -> io::Result<sys::N
         Ok(native) => Ok(native),
         Err(r) => {
             drop(unsafe { Box::from_raw(arg as *mut ThreadStart) });
+            #[cfg(target_family = "wasm")]
+            let _ = r;
+            #[cfg(target_family = "wasm")]
+            return Err(io::Error::UNSUPPORTED_PLATFORM);
+            #[cfg(not(target_family = "wasm"))]
             Err(io::Error::from_raw_os_error(r))
         }
     }
@@ -310,8 +315,11 @@ fn thread_start(arg: *mut u8) {
     let mut start = unsafe { Box::from_raw(arg as *mut ThreadStart) };
     if let Some(name) = &start.thread.inner.name {
         sys::os::set_thread_name(name.as_ptr());
-        extern "C" { fn __relax_domain_name(name: *const u8); }
-        unsafe { __relax_domain_name(name.as_ptr() as *const u8); }
+        #[cfg(not(relax_web))]
+        {
+            extern "C" { fn __relax_domain_name(name: *const u8); }
+            unsafe { __relax_domain_name(name.as_ptr() as *const u8); }
+        }
     }
     set_current(start.thread.clone());
     let mut main = start.main.take();
@@ -380,6 +388,14 @@ impl<T> JoinHandle<T> {
     }
     pub fn is_finished(&self) -> bool {
         self.0.is_finished()
+    }
+    #[cfg(unix)]
+    pub(crate) fn as_raw(&self) -> usize {
+        self.0.native.raw()
+    }
+    #[cfg(unix)]
+    pub(crate) fn into_raw(self) -> usize {
+        self.0.native.into_raw()
     }
 }
 
@@ -474,6 +490,14 @@ impl<'scope, T> ScopedJoinHandle<'scope, T> {
     }
     pub fn is_finished(&self) -> bool {
         self.0.is_finished()
+    }
+    #[cfg(unix)]
+    pub(crate) fn as_raw(&self) -> usize {
+        self.0.native.raw()
+    }
+    #[cfg(unix)]
+    pub(crate) fn into_raw(self) -> usize {
+        self.0.native.into_raw()
     }
 }
 

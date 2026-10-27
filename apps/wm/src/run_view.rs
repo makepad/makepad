@@ -166,6 +166,10 @@ pub struct MpRunView {
     /// files keeps the keyboard so its arrows go on dialing.
     #[rust(true)]
     takes_key_focus: bool,
+    #[rust(true)]
+    host_focused: bool,
+    #[rust]
+    sent_focus: Option<bool>,
     /// Newest stdout/stderr line from the child, shown while it starts.
     #[rust]
     status_line: String,
@@ -312,6 +316,7 @@ impl MpRunView {
     /// What a changed target resets in the tile (the protocol state reset
     /// itself in `HostedApp::set_target`).
     fn target_changed(&mut self, cx: &mut Cx, had_target: bool) {
+        self.sent_focus = None;
         self.remote_cursor = MouseCursor::Default;
         self.is_hovered = false;
         self.ime_pos = None;
@@ -402,6 +407,7 @@ impl MpRunView {
     /// CreateWindow arrived: the child's stdin loop is live, share the
     /// swapchain from now on.
     pub fn app_ready(&mut self, cx: &mut Cx, client: ClientId, window_id: usize) {
+        self.sent_focus = None;
         let had_target = self.hosted.client().is_some();
         if self.hosted.app_ready(cx, client, window_id) {
             self.target_changed(cx, had_target);
@@ -439,6 +445,17 @@ impl MpRunView {
         }
         cx.set_key_focus(self.area);
         true
+    }
+
+    fn sync_focus(&mut self, cx: &Cx) {
+        let Some(target) = self.hosted.target() else { return; };
+        let focused = self.host_focused && self.takes_key_focus && self.area.is_valid(cx) && cx.has_key_focus(self.area);
+        if self.sent_focus != Some(focused) {
+            self.sent_focus = Some(focused);
+            self.hosted.send(vec![makepad_studio_protocol::StudioToApp::WindowFocus {
+                window_id: target.window_id, focused,
+            }]);
+        }
     }
 
     /// Give the keyboard back if this tile holds it -- the AI pane hiding
@@ -507,18 +524,6 @@ impl MpRunView {
         }
     }
 
-    /// Keep the tail -- that is where the crate name is.
-    fn trimmed_status(&self, width: f64) -> String {
-        // The code font at 9pt is about 7 logical px per character.
-        let max = ((width - 24.0) / 7.0).floor().max(8.0) as usize;
-        let chars: Vec<char> = self.status_line.chars().collect();
-        if chars.len() <= max {
-            return self.status_line.clone();
-        }
-        let tail: String = chars[chars.len() - (max - 1)..].iter().collect();
-        format!("\u{2026}{}", tail)
-    }
-
     pub fn has_frame(&self) -> bool {
         self.hosted.has_frame()
     }
@@ -546,7 +551,12 @@ impl MpRunView {
 impl Widget for MpRunView {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let dpi_factor = Self::host_dpi_factor(cx);
-        let rect = cx.walk_turtle(walk).dpi_snap(1.0 / dpi_factor);
+        let rect = cx.walk_turtle(walk).device_round(dpi_factor);
+        // MAKEPAD_TRACE=tile: where each hosted frame is drawn, in device pixels, and the size it has
+        if makepad_error_log::trace_enabled("tile") {
+            log!("tile c{} px {:.3},{:.3} {:.3}x{:.3} dpi {dpi_factor} frame {:?}", self.hosted.client().unwrap_or(0),
+                rect.pos.x * dpi_factor, rect.pos.y * dpi_factor, rect.size.x * dpi_factor, rect.size.y * dpi_factor, self.hosted.presented_px());
+        }
         // Only the "starting..." state gets a backdrop; a presented frame is
         // composited straight over the wallpaper so translucent children
         // (Omarchy's 0.985/0.96 window opacity) show it through.
@@ -584,7 +594,8 @@ impl Widget for MpRunView {
             .draw_vars
             .set_dyn_instance(cx, id!(host_dpi_factor), &[dpi_factor as f32]);
         let told = self.hosted.trace_config().0 * dpi_factor;
-        let told = [told.x.ceil() as u32, told.y.ceil() as u32];
+        // the pixels the app draws for the size it was told: rounded, as the hosted shell sizes its frames
+        let told = [told.x.round() as u32, told.y.round() as u32];
         if self.anchor_frames && !self.live_resize && self.hosted.presented_px() == Some(told) {
             self.anchor_frames = false;
         }
@@ -625,20 +636,18 @@ impl Widget for MpRunView {
                 self.startup_initialized = true;
                 self.no_fb_view.set_text(cx, include_str!("../resources/startup.splash"));
             }
-            let t = self.status_line.trim_start();
-            let lower = t.to_ascii_lowercase();
-            let headline = if lower.starts_with("compiling") {
-                "Compiling…"
-            } else if lower.starts_with("waiting for another build") {
-                "Waiting to compile…"
-            } else if lower.starts_with("build failed") {
-                "Could not build application"
-            } else { "Starting…" };
+            let (headline, progress) = startup_headline(&self.status_line);
             self.no_fb_view.label(cx, ids!(placeholder)).set_text(cx, headline);
-            let status = self.trimmed_status(rect.size.x);
+            let status = startup_detail(&self.status_line, rect.size.x);
             self.no_fb_view
                 .label(cx, ids!(status_line))
                 .set_text(cx, &status);
+            let bar = self.no_fb_view.widget(cx, ids!(startup_progress));
+            bar.set_visible(cx, progress.is_some());
+            if let (Some(progress), Some(mut bar)) = (progress, bar.borrow_mut::<View>()) {
+                // The Splash isolate's view: set its draw instance directly.
+                bar.draw_bg.draw_vars.set_dyn_instance(cx, id!(progress), &[progress]);
+            }
             if let Some(mut icon) = self.no_fb_view.widget(cx, ids!(startup_icon)).borrow_mut::<app_icon::AppIcon>() {
                 icon.set_name(cx, if self.startup_app.is_empty() {"app"} else {&self.startup_app});
             }
@@ -659,6 +668,7 @@ impl Widget for MpRunView {
         }
         self.draw_app.draw_abs(cx, rect);
         self.area = self.draw_app.area();
+        self.sync_focus(cx);
         // On a phone ShowTextIME raises the soft keyboard: only while the
         // child has a focused text field, never for the tile's focus alone.
         let wants_ime = !crate::host::device_phone() || self.child_ime.is_some();
@@ -680,11 +690,18 @@ impl Widget for MpRunView {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        match event {
+            Event::WindowGotFocus(_) => self.host_focused = true,
+            Event::WindowLostFocus(_) => self.host_focused = false,
+            _ => {}
+        }
         self.hosted.handle_event(cx, event);
         self.flush(cx);
         // Input handed to the host wakes the beat if it was asleep (the
         // input path ends in `flush`).
         self.handle_input(cx, event, scope);
+        self.sync_focus(cx);
+        self.flush(cx);
     }
 }
 
@@ -848,5 +865,77 @@ impl crate::tile::TileHost for MpRunView {
 
     fn set_visible(&mut self, cx: &mut Cx, visible: bool) -> bool {
         MpRunView::send_visible(self, cx, visible)
+    }
+}
+
+/// The card's status line: the build stage without the "building <app>… "
+/// prefix (the icon and headline say that), cut at the end with an ellipsis
+/// so the crate count stays and the card stays compact.
+fn startup_detail(status: &str, width: f64) -> String {
+    let status = status.trim();
+    let stage = match status.strip_prefix("building ").and_then(|rest| rest.split_once("\u{2026} ")) {
+        Some((_, stage)) if !stage.trim().is_empty() => stage.trim(),
+        _ => status,
+    };
+    // The card is at most ~520 logical px wide; the regular font at 11pt
+    // is about 6.5 logical px per character.
+    let max = ((width.min(520.0) - 96.0) / 6.5).floor().max(12.0) as usize;
+    if stage.chars().count() <= max {
+        return stage.to_string();
+    }
+    let head: String = stage.chars().take(max - 1).collect();
+    format!("{}\u{2026}", head.trim_end_matches(|c: char| c == ',' || c == ' ' || c == '\u{b7}' || c == '\u{2026}'))
+}
+
+/// The startup card's headline for the launcher's status line, and the
+/// build progress (0..1) from its "N/M crates" when it has one.
+/// "building Synth… compiling 149/162 crates · makepad-flow, …"
+fn startup_headline(status: &str) -> (&'static str, Option<f32>) {
+    let lower = status.trim().to_ascii_lowercase();
+    let headline = if lower.contains("failed") {
+        "Could not build application"
+    } else if lower.contains("waiting for another build") {
+        "Waiting to compile…"
+    } else if lower.starts_with("compiling") || lower.contains("… compiling") {
+        "Compiling…"
+    } else {
+        "Starting…"
+    };
+    let progress = lower.split_once(" crates").and_then(|(head, _)| {
+        let (done, total) = head.rsplit(' ').next()?.split_once('/')?;
+        let (done, total) = (done.parse::<f32>().ok()?, total.parse::<f32>().ok()?);
+        (total > 0.0).then(|| (done / total).clamp(0.0, 1.0))
+    });
+    (headline, progress)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{startup_detail, startup_headline};
+
+    #[test]
+    fn startup_headline_reads_the_launcher_status() {
+        let (h, p) = startup_headline("building Synth… compiling 149/162 crates · makepad-flow, makepad-script…");
+        assert_eq!(h, "Compiling…");
+        assert!((p.unwrap() - 149.0 / 162.0).abs() < 1e-6);
+        assert_eq!(startup_headline("compiling 0/88 crates…"), ("Compiling…", Some(0.0)));
+        assert_eq!(startup_headline("compiling makepad-app-clock…"), ("Compiling…", None));
+        assert_eq!(startup_headline("waiting for another build…"), ("Waiting to compile…", None));
+        assert_eq!(startup_headline("building Synth failed (1)").0, "Could not build application");
+        assert_eq!(startup_headline("build failed — see the app log").0, "Could not build application");
+        assert_eq!(startup_headline("starting Clock…"), ("Starting…", None));
+        assert_eq!(startup_headline(""), ("Starting…", None));
+    }
+
+    #[test]
+    fn startup_detail_keeps_the_count_and_cuts_the_crate_list() {
+        let line = "building Synth… compiling 149/162 crates · makepad-flow, makepad-script, makepad-widgets…";
+        assert_eq!(startup_detail("building Synth… compiling 149/162 crates · makepad-flow…", 2000.0), "compiling 149/162 crates · makepad-flow…");
+        assert!(startup_detail(line, 2000.0).chars().count() <= 65);
+        let short = startup_detail(line, 300.0);
+        assert!(short.starts_with("compiling 149/162 crates"), "{short}");
+        assert!(short.ends_with('\u{2026}') && short.chars().count() <= 31, "{short}");
+        assert_eq!(startup_detail("starting Clock…", 600.0), "starting Clock…");
+        assert_eq!(startup_detail("building Synth…", 600.0), "building Synth…");
     }
 }

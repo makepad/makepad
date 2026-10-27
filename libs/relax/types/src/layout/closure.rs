@@ -4,7 +4,7 @@ use crate::typeck::Body;
 use crate::types::{TyId, TyKind};
 
 // EXCEPTION(N4): root-slot closure storage until per-place capture codegen
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct ClosureStorage {
     pub fields: Vec<TyId>,
     pub roots: Vec<u32>,
@@ -41,9 +41,9 @@ impl ClosureStorage {
         for &root in &roots {
             let cs: Vec<_> = captures.iter().filter(|c| c.place.root == root).collect();
             let ty = ty(body.locals[root as usize].ty);
-            // A captured *shared_ref is already a pointer to its referent. The old
-            // ABI accesses the root, so store that reference value, not &shared_ref.
-            let deref_shared = matches!(tcx.tys.kind(ty), TyKind::Ref(false, _, _))
+            // A captured *ref is already a pointer to its referent. The old
+            // ABI accesses the root, so store that reference value, not &ref.
+            let deref_shared = matches!(tcx.tys.kind(ty), TyKind::Ref(..))
                 && cs.iter().all(|c| {
                     c.place
                         .projections

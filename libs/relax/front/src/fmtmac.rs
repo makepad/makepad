@@ -37,6 +37,7 @@ pub(super) fn is_builtin(name: &[u8]) -> bool {
             | b"assert_eq"
             | b"assert_ne"
             | b"vec"
+            | b"smallvec"
             | b"dbg"
     )
 }
@@ -113,6 +114,9 @@ struct FmtCall {
     pos: Vec<ExprId>,
     named: Vec<(String, ExprId)>,
     named_pos: Vec<u32>,
+    /// the format string is a literal written in the call (rustc format.rs `is_direct_literal`):
+    /// only then may it capture variables implicitly
+    direct: bool,
 }
 
 /// Generated tokens plus the expressions spliced into them.
@@ -181,11 +185,16 @@ impl<'a> Parser<'a> {
                 tg!(&mut g; #close());
             }
             "print" | "println" | "eprint" | "eprintln" => {
+                // std's macros: `{ $crate::io::_print($crate::format_args!(..)); }` -- the statement
+                // ends the format temporaries' lives inside the macro's block
                 let c = self.fmt_call(hi, false)?;
                 let f = if name.starts_with('e') { "_eprint" } else { "_print" };
+                g.open_brace();
                 tg!(&mut g; #std() :: io :: #word(f) #open());
                 self.gen_args(&mut g, c, Vec::new(), Vec::new(), if name.ends_with("ln") { "\n" } else { "" })?;
                 tg!(&mut g; #close());
+                g.punct(T::Semi);
+                g.close_brace();
             }
             "write" | "writeln" => {
                 if self.pos >= hi {
@@ -201,13 +210,28 @@ impl<'a> Parser<'a> {
                 tg!(&mut g; #close());
             }
             "panic" | "unreachable" | "todo" | "unimplemented" => {
-                let c = self.fmt_call(hi, true)?;
+                let mut c = self.fmt_call(hi, true)?;
+                // core unreachable_2015 `($fmt:expr, $($arg:tt)*)`: the format string is
+                // `concat!("internal error: entered unreachable code: ", $fmt)`, not a direct literal
+                if name == "unreachable" && self.edition < 2021 && (!c.pos.is_empty() || !c.named.is_empty()) { c.direct = false; }
                 let prefix = match name {
                     "unreachable" => "internal error: entered unreachable code",
                     "todo" => "not yet implemented",
                     "unimplemented" => "not implemented",
                     _ => "",
                 };
+                // core's panic_2015/panic_2021 arms are blocks `({ ..; })`: the semicolon ends the
+                // format temporaries' lives inside the macro
+                g.open_brace();
+                // panic_2015/panic_2021 `("{}", $arg:expr $(,)?) => ({ $crate::panicking::panic_display(&$arg); })`,
+                // the single-argument case of const panics
+                if name == "panic" && c.direct && c.first.is_none() && c.named.is_empty() && c.pos.len() == 1 && c.fmt.as_ref().is_some_and(|(f, _)| f == "{}") {
+                    let arg = c.pos[0];
+                    tg!(&mut g; #core() :: panicking :: panic_display (& #expr(arg)));
+                    g.punct(T::Semi);
+                    g.close_brace();
+                    return Ok(g);
+                }
                 tg!(&mut g; #core() :: panicking :: panic_at #open());
                 let empty = c.fmt.is_none() && c.first.is_none();
                 if empty {
@@ -223,6 +247,8 @@ impl<'a> Parser<'a> {
                     self.gen_pieces(&mut g, pieces, vec![Src::Nested(inner)], lo)?;
                 }
                 tg!(&mut g; , #caller_location() #close());
+                g.punct(T::Semi);
+                g.close_brace();
             }
             "assert" => {
                 let cond_lo = self.pos;
@@ -308,6 +334,30 @@ impl<'a> Parser<'a> {
                             tg!(&mut g; #expr(e) ,);
                         }
                         tg!(&mut g; #close_bracket() #close() #close());
+                    }
+                }
+            }
+            "smallvec" => {
+                if self.pos >= hi {
+                    tg!(&mut g; smallvec :: SmallVec :: new ());
+                } else {
+                    let first = self.expr()?;
+                    if self.eat(T::Semi) {
+                        let n = self.expr()?;
+                        tg!(&mut g; smallvec :: SmallVec :: from_elem (#expr(first), #expr(n)));
+                    } else {
+                        let mut v = vec![first];
+                        while self.eat(T::Comma) {
+                            if self.pos >= hi {
+                                break;
+                            }
+                            v.push(self.expr()?);
+                        }
+                        tg!(&mut g; smallvec :: SmallVec :: from_vec #open() < [_] > :: into_vec #open() #core() :: boxed :: Box :: new #open() #open_bracket());
+                        for e in v {
+                            tg!(&mut g; #expr(e) ,);
+                        }
+                        tg!(&mut g; #close_bracket() #close() #close() #close());
                     }
                 }
             }
@@ -462,7 +512,7 @@ impl<'a> Parser<'a> {
     /// `"fmt", args.., name = arg..` up to token `hi`. `loose`: the first argument may be any
     /// expression (`panic!(x)`, formatted with Display).
     fn fmt_call(&mut self, hi: usize, loose: bool) -> PResult<FmtCall> {
-        let mut c = FmtCall { fmt: None, first: None, pos: Vec::new(), named: Vec::new(), named_pos: Vec::new() };
+        let mut c = FmtCall { fmt: None, first: None, pos: Vec::new(), named: Vec::new(), named_pos: Vec::new(), direct: true };
         if self.pos >= hi {
             return Ok(c);
         }
@@ -476,6 +526,7 @@ impl<'a> Parser<'a> {
             // a macro that expands to a string literal (`format!(concat!("a", "{}"), x)`):
             // rustc expands it eagerly as the format string (format_args's expr_to_spanned_string)
             c.fmt = Some((text, t.lo));
+            c.direct = false;
             self.pos = end;
         } else if loose {
             c.first = Some(self.expr()?);
@@ -540,6 +591,7 @@ impl<'a> Parser<'a> {
             srcs.push(Src::Expr(*e));
         }
         // rebase indices and names onto slots; captures become new slots
+        let direct = c.direct;
         let mut next = 0usize;
         let mut captures: Vec<String> = Vec::new();
         // named arguments reached by position (named_arguments_used_positionally)
@@ -566,6 +618,9 @@ impl<'a> Parser<'a> {
                     Some(k) => base + npos + k,
                     None => match captures.iter().position(|x| x == n) {
                         Some(k) => base + npos + names.len() + k,
+                        // (rustc format.rs FormatNoArgNamed: capturing variables from format
+                        // strings expanded from macros is disabled, RFC 2795)
+                        None if !direct => return Err(format!("there is no argument named `{}`", n)),
                         None => {
                             captures.push(n.clone());
                             srcs.push(Src::Capture(n.clone(), flo));

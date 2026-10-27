@@ -112,13 +112,14 @@ fn rehome(u: &Unit, addr: u64, seen: &mut std::collections::HashMap<u64, u64>, f
     // block took it off the shared data for nothing (and the disk cache named the copy as a
     // fresh, zeroed block: the warm run read a length of 0). An object whose kind cannot tell
     // is scanned word by word, as before.
-    let words: Vec<usize> = match crate::syms::pointer_offsets(u, start) {
-        Some(offs) => offs.into_iter().map(|o| o as usize).filter(|&o| o + 8 <= bytes.len()).collect(),
-        None => (0..bytes.len() / 8).map(|i| i * 8).collect(),
+    let pw = u.ptr_bytes() as usize;
+    let words: Vec<usize> = match crate::syms::pointer_offsets(u, start, &bytes) {
+        Some(offs) => offs.into_iter().map(|o| o as usize).filter(|&o| o + pw <= bytes.len()).collect(),
+        None => (0..bytes.len() / pw).map(|i| i * pw).collect(),
     };
     let mut reaches = false;
     for &k in &words {
-        let w = u64::from_le_bytes(bytes[k..k + 8].try_into().unwrap());
+        let w = crate::syms::word_in(u, &bytes, k);
         if (lo..hi).contains(&w) {
             // a static (materialized when laid out) or an anonymous mutable block: one constant
             // evaluation made (a promoted temporary) has no initial image yet -- every domain needs it
@@ -134,7 +135,7 @@ fn rehome(u: &Unit, addr: u64, seen: &mut std::collections::HashMap<u64, u64>, f
         }
         let moved = rehome(u, cs, seen, false);
         if moved != cs {
-            bytes[k..k + 8].copy_from_slice(&(moved + (w - cs)).to_le_bytes());
+            bytes[k..k + pw].copy_from_slice(&u.ptr_word(moved + (w - cs)));
             reaches = true;
         }
     }
@@ -148,9 +149,9 @@ fn rehome(u: &Unit, addr: u64, seen: &mut std::collections::HashMap<u64, u64>, f
     unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), new as *mut u8, bytes.len()) };
     // a word pointing into the object itself (a self-referential constant) points at the copy
     for &k in &words {
-        let w = u64::from_le_bytes(bytes[k..k + 8].try_into().unwrap());
+        let w = crate::syms::word_in(u, &bytes, k);
         if (start..start + len).contains(&w) {
-            unsafe { *((new + k as u64) as *mut u64) = new + (w - start) };
+            unsafe { crate::syms::write_ptr(u, new + k as u64, new + (w - start)) };
         }
     }
     seen.insert(addr, new);
@@ -205,12 +206,14 @@ pub extern "C" fn relax_domain_id() -> u32 {
 
 /// For Relax std (`__relax_domain_enter`): the first thing a started thread does.
 pub extern "C" fn relax_domain_enter(base: u64, token: u64) {
-    let _kept = crate::zone_alloc::kept();
-    unsafe {
-        let t = crate::domain_threads::data(crate::jit::tls_block());
-        if token != 0 { t.registrations.push((base, token)); }
-    }
-    enter(base);
+    crate::jit::host_boundary("relax_domain_enter", move || {
+        let _kept = crate::zone_alloc::kept();
+        unsafe {
+            let t = crate::domain_threads::data(crate::jit::tls_block());
+            if token != 0 { t.registrations.push((base, token)); }
+        }
+        enter(base);
+    })
 }
 
 fn register_current(base: u64) {
@@ -226,12 +229,14 @@ static NEXT_THREAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 
 /// Reserve before OS thread creation: main may return before a child reaches its entry.
 pub extern "C" fn relax_domain_reserve(base: u64) -> u64 {
-    let token = NEXT_THREAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if let Some(d) = domains().iter_mut().find(|d| d.info.base == base && base != 0) {
-        d.threads.push((token, format!("thread-{token}")));
-        return token;
-    }
-    0
+    crate::jit::host_boundary("relax_domain_reserve", move || {
+        let token = NEXT_THREAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(d) = domains().iter_mut().find(|d| d.info.base == base && base != 0) {
+            d.threads.push((token, format!("thread-{token}")));
+            return token;
+        }
+        0
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -279,27 +284,31 @@ impl Callback {
 }
 
 pub extern "C" fn relax_domain_name(name: *const u8) {
-    let base = current();
-    let t = unsafe { crate::domain_threads::data(crate::jit::tls_block()) };
-    let Some((_, token)) = t.registrations.iter().find(|r| r.0 == base) else { return };
-    let name = unsafe { std::ffi::CStr::from_ptr(name.cast()) }.to_string_lossy().into_owned();
-    if let Some(d) = domains().iter_mut().find(|d| d.info.base == base) {
-        if let Some(entry) = d.threads.iter_mut().find(|e| e.0 == *token) { entry.1 = name; }
-    }
+    crate::jit::host_boundary("relax_domain_name", move || {
+        let base = current();
+        let t = unsafe { crate::domain_threads::data(crate::jit::tls_block()) };
+        let Some((_, token)) = t.registrations.iter().find(|r| r.0 == base) else { return };
+        let name = unsafe { std::ffi::CStr::from_ptr(name.cast()) }.to_string_lossy().into_owned();
+        if let Some(d) = domains().iter_mut().find(|d| d.info.base == base) {
+            if let Some(entry) = d.threads.iter_mut().find(|e| e.0 == *token) { entry.1 = name; }
+        }
+    })
 }
 
 /// Called after the TLS block and every Relax std TLS destructor are finished (also on a
 /// failed OS spawn, while the parent still holds its own registration).
 pub extern "C" fn thread_finished(base: u64, token: u64) {
-    if token == 0 { return; }
-    let id = {
-        let mut ds = domains();
-        let Some(d) = ds.iter_mut().find(|d| d.info.base == base) else { return };
-        d.threads.retain(|e| e.0 != token);
-        d.info.id
-    };
-    teardown(id);
-    CHANGED.notify_all();
+    crate::jit::host_boundary("thread_finished", move || {
+        if token == 0 { return; }
+        let id = {
+            let mut ds = domains();
+            let Some(d) = ds.iter_mut().find(|d| d.info.base == base) else { return };
+            d.threads.retain(|e| e.0 != token);
+            d.info.id
+        };
+        teardown(id);
+        CHANGED.notify_all();
+    })
 }
 
 /// The offset in a domain block of what `s` names, when its storage is per domain: a static, a
@@ -328,7 +337,7 @@ fn materialize_in(u: &Unit, base: u64, sym: u32, seen: &mut HashSet<u32>) {
     unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), at as *mut u8, bytes.len()) };
     for (o, t) in provenance_words(u, &bytes) {
         if let Some(to) = offset_of(u, t) {
-            unsafe { *((at + o as u64) as *mut u64) = base + to };
+            unsafe { crate::syms::write_ptr(u, at + o as u64, base + to) };
             if !matches!(u.syms.kind(t.id), Some(SymKind::Static(_) | SymKind::Rw(_))) {
                 materialize_in(u, base, t.id, seen);
             }
@@ -339,7 +348,8 @@ fn materialize_in(u: &Unit, base: u64, sym: u32, seen: &mut HashSet<u32>) {
 /// Makes a new domain's block: reserved once (it never moves), holding the initial image of
 /// every static laid out so far. Returns its base.
 pub fn create(u: &Unit) -> u64 {
-    let base = crate::os::mem::alloc_rw(BLOCK_SIZE);
+    // a wasm32 program's statics are in its window (web32.rs)
+    let base = if crate::web32::on() { crate::web32::alloc(BLOCK_SIZE) } else { crate::os::mem::alloc_rw(BLOCK_SIZE) };
     let ids: Vec<u32> = u.syms.initial_data.lock().unwrap_or_else(|e| e.into_inner()).keys().copied().collect();
     let mut seen = HashSet::new();
     for id in ids {
@@ -356,7 +366,7 @@ pub fn create(u: &Unit) -> u64 {
 pub fn destroy(base: u64) {
     forget_tls_keys(base);
     BLOCKS.lock().unwrap_or_else(|e| e.into_inner()).retain(|b| *b != base);
-    crate::os::mem::free(base, BLOCK_SIZE);
+    if crate::web32::on() { crate::web32::free(base, BLOCK_SIZE) } else { crate::os::mem::free(base, BLOCK_SIZE) }
 }
 
 /// A static was just laid out (jit.rs `static_addr`, after its initial image was captured): copy
@@ -477,10 +487,9 @@ static CHANGED: relax_session::sync::Condvar = relax_session::sync::Condvar::new
 type Observer = std::sync::Arc<dyn Fn(DomainId, &DomainState) + Send + Sync>;
 static OBSERVER: Mutex<Option<Observer>> = Mutex::new(None);
 
-/// The registry lock, held in the kept phase: the registry is process state that outlives the
-/// settle swap (zone_swap destroys the compiler arena generation), so whatever a mutator
-/// allocates while holding it (records, names, strings) lands in the kept heap, whichever
-/// phase the calling thread is in. Values built before the lock is taken are copied in with
+/// The registry lock, held in the kept phase: the registry is process state, so whatever a
+/// mutator allocates while holding it (records, names, strings) lands in the kept heap (the
+/// program's), whichever phase the calling thread is in. Values built before the lock is taken are copied in with
 /// `kept_clone`.
 struct Registry {
     guard: relax_session::sync::MutexGuard<'static, Vec<Domain>>,
@@ -565,9 +574,21 @@ fn with_block_memory(mut i: DomainInfo) -> DomainInfo {
     i.static_committed = if i.base == 0 { 0 } else { block_committed(i.base) };
     i
 }
+/// Each domain heap's chunk states with resident bytes (`memory`; walks every chunk header).
+pub fn heap_states() -> Vec<(DomainId, [usize; 28])> {
+    domains().iter().filter_map(|d| Some((d.info.id, d.heap.as_ref()?.states()))).collect()
+}
+
 pub fn list() -> Vec<DomainInfo> {
     let snapshots: Vec<_> = domains().iter().map(snapshot).collect();
     snapshots.into_iter().map(with_block_memory).collect()
+}
+
+/// The app domain's heap: (requested live bytes, committed bytes), without the block walk of
+/// `info` (the flight recorder's 1-s counter).
+pub fn app_heap_stats() -> Option<(usize, usize)> {
+    let id = crate::run::app_domain()?;
+    domains().iter().find(|d| d.info.id == id).and_then(|d| d.heap.as_ref().map(|h| h.stats()))
 }
 
 pub fn state(id: DomainId) -> Option<DomainState> {
@@ -1004,20 +1025,19 @@ impl Drop for Loading {
 }
 
 fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId, Vec<String>> {
-    // New loaders wait outside the compiler phase while a swap has the gate shut. Every
-    // entry path registers active loaders so the swap waits for their compile state.
+    // a loader is a compile job: it waits outside the compiler phase while an allocator swap or
+    // a fork holds the job gate
     let _job = crate::jit::compile_job();
     let _z = crate::zone_alloc::compiler_thread();
     if crate::preload::trace() { eprintln!("boot-trace: domain {id} start_prepared at t={:.1} ms", crate::clock::ms_since_start()); }
     let _loading = Loading(id);
     let t0 = std::time::Instant::now();
     // The app's first start takes the boot's resolved package (same process, same instant). Taken
-    // before anything can end this start: the slot never outlives it (its memory is the compiler
-    // generation's, which the settle swap destroys), so a relaunch always resolves its own.
+    // before anything can end this start, so a relaunch always resolves its own.
     let boot_resolved = if crate::run::app_domain() == Some(id) { crate::run::take_boot_resolved() } else { None };
     if cancelled(id) { return Ok(id); }
     set_state(id, DomainState::Compiling("package graph".into()));
-    let sess = unsafe { (*std::ptr::addr_of!((*up).prog.session)).clone() };
+    let sess = unsafe { crate::jit::unit_session(up) };
     let workspace = crate::run::workspace_dir();
     let target_dir = crate::dirs::relax_dir().display().to_string();
     let std_dir = crate::std_dir();
@@ -1037,7 +1057,7 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
     let t1 = std::time::Instant::now();
     let upn = up as usize;
     // the owner thread: the program's tables change there
-    let loaded = crate::owner::call(crate::owner::Class::App, || unsafe { load_graph(upn as *mut Unit, &g, &order, &cfgs, &idents, id, !from_boot) });
+    let loaded = crate::owner::call(crate::owner::Class::Program, || unsafe { load_graph(upn as *mut Unit, &g, &order, &cfgs, &idents, id, !from_boot) });
     let (root, n_reused, new_names, first_file) = match loaded {
         Ok(x) => x,
         Err(e) => return fail(id, e),
@@ -1048,7 +1068,7 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
     if compile_phase(id, "link").is_err() { return Ok(id); }
     let t2 = std::time::Instant::now();
     // the libraries the new crates link
-    let (_, missing) = crate::run::link_libraries(unsafe { &(*up).prog }, &g.link_libs, first_file);
+    let (_, missing) = crate::run::link_libraries(unsafe { &(*up).prog }, &g.link_libs, g.native.as_ref(), first_file);
     if !missing.is_empty() && crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
         eprintln!("makepad-run domain: libraries not found: {:?}", missing);
     }
@@ -1057,7 +1077,7 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
         std::thread::spawn(crate::memstat::trim);
     }
     if compile_phase(id, "main").is_err() { return Ok(id); }
-    let prepared = crate::owner::call(crate::owner::Class::App, || unsafe {
+    let prepared = crate::owner::call(crate::owner::Class::Program, || unsafe {
         if cancelled(id) { return Err("domain compilation cancelled".into()); }
         let u = &mut *(upn as *mut Unit);
         if crate::run::app_domain() == Some(id) { crate::layout::set_root_crate(root); }
@@ -1072,8 +1092,7 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
         Ok(x) => x,
         Err(e) => return fail(id, vec![e]),
     };
-    // the domain's arena is program memory: the kept heap (the compiler arena's generation is
-    // destroyed by the settle swap; a domain heap is never touched by it)
+    // the domain's arena is program memory: the kept heap
     let heap = match crate::zone_alloc::kept_with(crate::zone_alloc::domain::DomainHeap::new) {
         Some(h) => h,
         None => { destroy(base); return fail(id, vec!["reserving domain heap".into()]); }
@@ -1096,7 +1115,7 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
     if crate::run::app_domain() == Some(id) {
         crate::reload::domain_loaded(live_inputs);
     }
-    // the domain's main thread (its name, its handle) outlives any compiler generation
+    // the domain's main thread (its name, its handle) is process state
     if crate::preload::trace() { eprintln!("boot-trace: domain {id} launching at t={:.1} ms", crate::clock::ms_since_start()); }
     let launched = crate::zone_alloc::kept_with(|| launch_main(upn, id, base, target, arg, &spec.package, spec.around.clone()));
     if let Err(e) = launched {
@@ -1115,6 +1134,12 @@ fn launch_main(upn: usize, id: DomainId, base: u64, target: u64, arg: u64, packa
         crate::jit::ensure_altstack();
         if crate::run::app_domain() == Some(id) {
             crate::jit::MAIN_TID.store(crate::jit::current_thread_id(), std::sync::atomic::Ordering::Relaxed);
+            // the app's main thread at the QoS a native app's main thread has (macOS: user-
+            // interactive; AppKit gives it to the process main thread, which under makepad run
+            // is the HAL's). At the default QoS the scheduler moved the race's UI thread to the
+            // efficiency cores 20-25% of the time whenever the performance cores were busy
+            // (ARMIPC, mini); a native app's never goes there.
+            crate::os::thread::interactive();
         }
         let up = upn as *mut Unit;
         relax_domain_enter(base, token);
@@ -1134,10 +1159,11 @@ fn launch_main(upn: usize, id: DomainId, base: u64, target: u64, arg: u64, packa
                 Err(p) => end(id, DomainState::Crashed(format!("{}: {}", p.kind, p.message))),
             }
         };
-        match &around {
+        // the program's main runs on a program stack (large, lazily committed, guarded)
+        crate::stack::on_program_stack(crate::jit::program_stack_changed, || match &around {
             Some(a) => a(&mut run),
             None => run(),
-        }
+        });
         if let Some(x) = domains().iter_mut().find(|x| x.info.id == id) {
             x.thread_done = true;
         }
@@ -1157,6 +1183,14 @@ fn end(id: DomainId, st: DomainState) {
     if matches!(state(id), Some(DomainState::Compiling(_) | DomainState::Running)) {
         set_state(id, st);
     }
+}
+
+/// The app domain whose block is `base` (None: the compile domain, or none).
+pub(crate) fn id_of_base(base: u64) -> Option<DomainId> {
+    if base == 0 {
+        return None;
+    }
+    domains().iter().find(|d| d.info.base == base && d.info.id != 0).map(|d| d.info.id)
 }
 
 /// The id of the app domain whose block is the calling thread's (None: the compile domain, or a
@@ -1336,8 +1370,8 @@ unsafe fn load_graph(up: *mut Unit, g: &crate::unitgraph::Graph, order: &[usize]
 /// later, and what its static block holds.
 pub(crate) fn run_vehicle(up: *mut Unit, packages: Vec<String>) {
     let upn = up as usize;
-    // The vehicle outlives the settle swap: its package names, its thread (name) and what it
-    // prints are kept state, not the compiler generation the caller is in.
+    // The vehicle's package names, its thread (name) and what it prints are process state (kept
+    // heap), whatever phase the caller is in.
     let _k = crate::zone_alloc::kept();
     let packages = packages.clone();
     let _ = std::thread::Builder::new().name("run-domains".to_string()).spawn(move || {

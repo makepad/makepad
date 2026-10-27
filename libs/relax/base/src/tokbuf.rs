@@ -243,6 +243,14 @@ impl TokBuf {
         self.origins.push((t.lo, origin, text.len() as u32));
     }
 
+    /// A token copied from the source token at `origin`: it stands for that token (its position
+    /// and hygiene are the source's).
+    pub fn put_at(&mut self, kind: T, text: &str, origin: u32) {
+        self.put(kind, text);
+        let t = self.toks[self.toks.len() - 1];
+        self.origins.push((t.lo, origin, text.len() as u32));
+    }
+
     /// Appends another buffer's tokens (and spliced expressions).
     pub fn append(&mut self, other: &TokBuf) {
         self.s.push(' ');

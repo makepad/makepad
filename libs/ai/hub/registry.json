@@ -1372,261 +1372,290 @@
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "kokoro-v1_0.pth",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/kokoro-v1_0.pth",
      "size": 327212226,
-     "sha256": null,
+     "sha256": "496dba118d1a58f5f3db2efc88dbdc216e0483fc89fe6e47ee1f2c53f18ad1e4",
      "local": false,
      "converts_to": "tts/kokoro-v1_0.mktts"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/af_alloy.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/af_alloy.pt",
      "size": 523425,
-     "sha256": null,
+     "sha256": "6d877149dd8b348fbad12e5845b7e43d975390e9f3b68a811d1d86168bef5aa3",
      "local": false,
      "converts_to": "tts/af_alloy.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/af_aoede.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/af_aoede.pt",
      "size": 523425,
-     "sha256": null,
+     "sha256": "c03bd1a4c3716c2d8eaa3d50022f62d5c31cfbd6e15933a00b17fefe13841cc4",
      "local": false,
      "converts_to": "tts/af_aoede.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/af_bella.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/af_bella.pt",
      "size": 523425,
-     "sha256": null,
+     "sha256": "8cb64e02fcc8de0327a8e13817e49c76c945ecf0052ceac97d3081480e8e48d6",
      "local": false,
      "converts_to": "tts/af_bella.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/af_heart.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/af_heart.pt",
      "size": 523425,
-     "sha256": null,
+     "sha256": "0ab5709b8ffab19bfd849cd11d98f75b60af7733253ad0d67b12382a102cb4ff",
      "local": false,
      "converts_to": "tts/af_heart.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/af_jessica.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/af_jessica.pt",
      "size": 523435,
-     "sha256": null,
+     "sha256": "cdfdccb8cc975aa34ee6b89642963b0064237675de0e41a30ae64cc958dd4e87",
      "local": false,
      "converts_to": "tts/af_jessica.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/af_kore.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/af_kore.pt",
      "size": 523420,
-     "sha256": null,
+     "sha256": "8bfbc512321c3db49dff984ac675fa5ac7eaed5a96cc31104d3a9080e179d69d",
      "local": false,
      "converts_to": "tts/af_kore.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/af_nicole.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/af_nicole.pt",
      "size": 523430,
-     "sha256": null,
+     "sha256": "c5561808bcf5250fe8c5f5de32caf2d94f27e57e95befdb098c5c85991d4c5da",
      "local": false,
      "converts_to": "tts/af_nicole.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/af_nova.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/af_nova.pt",
      "size": 523420,
-     "sha256": null,
+     "sha256": "e0233676ddc21908c37a1f102f6b88a59e4e5c1bd764983616eb9eda629dbcd2",
      "local": false,
      "converts_to": "tts/af_nova.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/af_river.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/af_river.pt",
      "size": 523425,
-     "sha256": null,
+     "sha256": "e149459bd9c084416b74756b9bd3418256a8b839088abb07d463730c369dab8f",
      "local": false,
      "converts_to": "tts/af_river.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/af_sarah.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/af_sarah.pt",
      "size": 523425,
-     "sha256": null,
+     "sha256": "49bd364ea3be9eb3e9685e8f9a15448c4883112a7c0ff7ab139fa4088b08cef9",
      "local": false,
      "converts_to": "tts/af_sarah.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/af_sky.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/af_sky.pt",
      "size": 523351,
-     "sha256": null,
+     "sha256": "c799548aed06e0cb0d655a85a01b48e7f10484d71663f9a3045a5b9362e8512c",
      "local": false,
      "converts_to": "tts/af_sky.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/am_adam.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/am_adam.pt",
      "size": 523420,
-     "sha256": null,
+     "sha256": "ced7e284aba12472891be1da3ab34db84cc05cc02b5889535796dbf2d8b0cb34",
      "local": false,
      "converts_to": "tts/am_adam.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/am_echo.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/am_echo.pt",
      "size": 523420,
-     "sha256": null,
+     "sha256": "8bcfdc852bc985fb45c396c561e571ffb9183930071f962f1b50df5c97b161e8",
      "local": false,
      "converts_to": "tts/am_echo.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/am_eric.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/am_eric.pt",
      "size": 523420,
-     "sha256": null,
+     "sha256": "ada66f0eefff34ec921b1d7474d7ac8bec00cd863c170f1c534916e9b8212aae",
      "local": false,
      "converts_to": "tts/am_eric.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/am_fenrir.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/am_fenrir.pt",
      "size": 523430,
-     "sha256": null,
+     "sha256": "98e507eca1db08230ae3b6232d59c10aec9630022d19accac4f5d12fcec3c37a",
      "local": false,
      "converts_to": "tts/am_fenrir.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/am_liam.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/am_liam.pt",
      "size": 523420,
-     "sha256": null,
+     "sha256": "c82550757ddb31308b97f30040dda8c2d609a9e2de6135848d0a948368138518",
      "local": false,
      "converts_to": "tts/am_liam.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/am_michael.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/am_michael.pt",
      "size": 523435,
-     "sha256": null,
+     "sha256": "9a443b79a4b22489a5b0ab7c651a0bcd1a30bef675c28333f06971abbd47bd37",
      "local": false,
      "converts_to": "tts/am_michael.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/am_onyx.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/am_onyx.pt",
      "size": 523420,
-     "sha256": null,
+     "sha256": "e8452be16cd0f6da7b4579eaf7b1e4506e92524882053d86d72b96b9a7fed584",
      "local": false,
      "converts_to": "tts/am_onyx.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/am_puck.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/am_puck.pt",
      "size": 523420,
-     "sha256": null,
+     "sha256": "dd1d8973f4ce4b7d8ae407c77a435f485dabc052081b80ea75c4f30b84f36223",
      "local": false,
      "converts_to": "tts/am_puck.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/am_santa.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/am_santa.pt",
      "size": 523425,
-     "sha256": null,
+     "sha256": "7f2f7582fa2b1f160e90aafe6d0b442a685e773608b6667e545d743b073e97a7",
      "local": false,
      "converts_to": "tts/am_santa.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/bf_alice.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/bf_alice.pt",
      "size": 523425,
-     "sha256": null,
+     "sha256": "d292651b6af6c0d81705c2580dcb4463fccc0ff7b8d618a471dbb4e45655b3f3",
      "local": false,
      "converts_to": "tts/bf_alice.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/bf_emma.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/bf_emma.pt",
      "size": 523420,
-     "sha256": null,
+     "sha256": "d0a423deabf4a52b4f49318c51742c54e21bb89bbbe9a12141e7758ddb5da701",
      "local": false,
      "converts_to": "tts/bf_emma.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/bf_isabella.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/bf_isabella.pt",
      "size": 523440,
-     "sha256": null,
+     "sha256": "cdd4c37003805104d1d08fb1e05855c8fb2c68de24ca6e71f264a30aaa59eefd",
      "local": false,
      "converts_to": "tts/bf_isabella.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/bf_lily.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/bf_lily.pt",
      "size": 523420,
-     "sha256": null,
+     "sha256": "6e09c2e481e2d53004d7e5ae7d3a325369e130a6f45c35a6002de75084be9285",
      "local": false,
      "converts_to": "tts/bf_lily.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/bm_daniel.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/bm_daniel.pt",
      "size": 523430,
-     "sha256": null,
+     "sha256": "fc3fce4e9c12ed4dbc8fa9680cfe51ee190a96444ce7c3ad647549a30823fc5d",
      "local": false,
      "converts_to": "tts/bm_daniel.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/bm_fable.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/bm_fable.pt",
      "size": 523425,
-     "sha256": null,
+     "sha256": "d44935f3135257a9064df99f007fc1342ff1aa767552b4a4fa4c3b2e6e59079c",
      "local": false,
      "converts_to": "tts/bm_fable.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/bm_george.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/bm_george.pt",
      "size": 523430,
-     "sha256": null,
+     "sha256": "f1bc812213dc59774769e5c80004b13eeb79bd78130b11b2d7f934542dab811b",
      "local": false,
      "converts_to": "tts/bm_george.mkvoice"
     },
     {
      "repo": "hexgrad/Kokoro-82M",
      "path": "voices/bm_lewis.pt",
+     "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
      "cache_as": "tts/upstream/bm_lewis.pt",
      "size": 523425,
-     "sha256": null,
+     "sha256": "b5204750dcba01029d2ac9cec17aec3b20a6d64073c579d694a23cb40effbd0e",
      "local": false,
      "converts_to": "tts/bm_lewis.mkvoice"
     },
@@ -1677,81 +1706,91 @@
     {
      "repo": "IndexTeam/IndexTTS-2.5",
      "path": "gpt.pth",
+     "revision": "c39ce5ba981572cb187443877ff559dfb246ce63",
      "cache_as": "indextts/gpt.pth",
      "size": 3259599833,
-     "sha256": null,
+     "sha256": "43a8f4c30eccdf201958d3b9713511482c19d56dc20b0b1c4ee1e6b080b19d85",
      "local": false
     },
     {
      "repo": "IndexTeam/IndexTTS-2.5",
      "path": "s2mel.pth",
+     "revision": "c39ce5ba981572cb187443877ff559dfb246ce63",
      "cache_as": "indextts/s2mel.pth",
      "size": 414908601,
-     "sha256": null,
+     "sha256": "9b1b0003fc189c94cc349758d7ebc25f903b7eb2de4602879959cc64ce816456",
      "local": false
     },
     {
      "repo": "IndexTeam/IndexTTS-2.5",
      "path": "codec.pth",
+     "revision": "c39ce5ba981572cb187443877ff559dfb246ce63",
      "cache_as": "indextts/codec.pth",
      "size": 607290935,
-     "sha256": null,
+     "sha256": "d15cbed16a40f478438c961fb043f68dfa6353bf56c966761315db3433e9722c",
      "local": false
     },
     {
      "repo": "IndexTeam/IndexTTS-2.5",
      "path": "feat1.pt",
+     "revision": "c39ce5ba981572cb187443877ff559dfb246ce63",
      "cache_as": "indextts/feat1.pt",
      "size": 57170,
-     "sha256": null,
+     "sha256": "f219cb447d80216ba615666da2ff8d63ac544eee26657f3a7b278692bf7a67c4",
      "local": false
     },
     {
      "repo": "IndexTeam/IndexTTS-2.5",
      "path": "feat2.pt",
+     "revision": "c39ce5ba981572cb187443877ff559dfb246ce63",
      "cache_as": "indextts/feat2.pt",
      "size": 374866,
-     "sha256": null,
+     "sha256": "9c4292e96dee535aea9a6206e9a0c856dd578dde9212acdb16dd3ada4d12bf80",
      "local": false
     },
     {
      "repo": "IndexTeam/IndexTTS-2.5",
      "path": "wav2vec2bert_stats.pt",
+     "revision": "c39ce5ba981572cb187443877ff559dfb246ce63",
      "cache_as": "indextts/wav2vec2bert_stats.pt",
      "size": 9343,
-     "sha256": null,
+     "sha256": "c9c176c2b8850ab2e3ba828bbfa969deaf4566ce55db5f2687b8430b87526ad2",
      "local": false
     },
     {
      "repo": "IndexTeam/IndexTTS-2.5",
      "path": "multilingual_zh_ja_yue_char_del.tiktoken",
+     "revision": "c39ce5ba981572cb187443877ff559dfb246ce63",
      "cache_as": "indextts/multilingual_zh_ja_yue_char_del.tiktoken",
      "size": 907395,
-     "sha256": null,
+     "sha256": "747979631e813193436aabcff7c1c235d37de8097b71c563ec8b63b7a515c718",
      "local": false
     },
     {
      "repo": "facebook/w2v-bert-2.0",
      "path": "model.safetensors",
+     "revision": "da985ba0987f70aaeb84a80f2851cfac8c697a7b",
      "cache_as": "indextts/w2v-bert-2.0/model.safetensors",
      "size": 2322063736,
-     "sha256": null,
+     "sha256": "eb890c9660ed6e3414b6812e27257b8ce5454365d5490d3ad581ea60b93be043",
      "local": false
     },
     {
      "repo": "funasr/campplus",
      "path": "campplus_cn_common.bin",
+     "revision": "e4b6ede7ce16997aff4ae69fbca1f0175e2afede",
      "cache_as": "indextts/campplus_cn_common.bin",
      "size": 28036335,
-     "sha256": null,
+     "sha256": "3388cf5fd3493c9ac9c69851d8e7a8badcfb4f3dc631020c4961371646d5ada8",
      "local": false
     },
     {
      "repo": "nvidia/bigvgan_v2_22khz_80band_256x",
      "path": "bigvgan_generator.pt",
+     "revision": "633ff708ed5b74903e86ff1298cf4a98e921c513",
      "cache_as": "indextts/bigvgan_generator.pt",
      "size": 449228171,
-     "sha256": null,
+     "sha256": "e95ba25972d3de0628d99cd156e9315a9c018899bf739988959ebe3544080ced",
      "local": false
     }
    ]
@@ -1774,429 +1813,490 @@
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "audio_scheduler/scheduler_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/audio_scheduler/scheduler_config.json",
      "size": 96,
-     "sha256": null
+     "sha256": "804780f7133477067bd6bbfbc02dc8b3cf9feeb400f97c08f5b1d5f6cbab3840"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "audio_vae/config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/audio_vae/config.json",
      "size": 2271,
-     "sha256": null
+     "sha256": "9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "audio_vae/diffusion_pytorch_model.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/audio_vae/diffusion_pytorch_model.safetensors",
      "size": 605429340,
-     "sha256": null
+     "sha256": "52c59e67ba8de5477c81bfbced0327aabf500f1bfdeefd5ee754529241cb26cb"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "model_index.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/model_index.json",
      "size": 2936,
-     "sha256": null
+     "sha256": "5a587fe13b2371427415ac892463142683aefcd8d322e274a3a095eac37ac7d2"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "modular_model_index.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/modular_model_index.json",
      "size": 2935,
-     "sha256": null
+     "sha256": "a2b6a210e482ffb78e613b553f570c44e101afce6741bd4ed91429d0559af031"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/chat_template.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/chat_template.json",
      "size": 5499,
-     "sha256": null
+     "sha256": "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/merges.txt",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/merges.txt",
      "size": 1671839,
-     "sha256": null
+     "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/preprocessor_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/preprocessor_config.json",
      "size": 390,
-     "sha256": null
+     "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/tokenizer.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/tokenizer.json",
      "size": 7032403,
-     "sha256": null
+     "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/tokenizer_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/tokenizer_config.json",
      "size": 11003,
-     "sha256": null
+     "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/video_preprocessor_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/video_preprocessor_config.json",
      "size": 385,
-     "sha256": null
+     "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/vocab.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/vocab.json",
      "size": 2776833,
-     "sha256": null
+     "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "scheduler/scheduler_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/scheduler/scheduler_config.json",
      "size": 97,
-     "sha256": null
+     "sha256": "8fa6c3aa70dc9e691e1a6df899fd1b6f75f70481a27cee6e18a303817075c304"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/chat_template.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/chat_template.json",
      "size": 5499,
-     "sha256": null
+     "sha256": "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/config.json",
      "size": 1474,
-     "sha256": null
+     "sha256": "d2dd0c60d01b9e195d9447c52da61c7302d28828524914c044d9c6e1b81d0427"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/merges.txt",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/merges.txt",
      "size": 1671839,
-     "sha256": null
+     "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00001-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00001-of-00014.safetensors",
      "size": 4932328944,
-     "sha256": null
+     "sha256": "6b9dfbc930e505402ae9d7e5091a9d7d656cda5f34614f01cfe70bfb0cca27cb"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00002-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00002-of-00014.safetensors",
      "size": 4875990528,
-     "sha256": null
+     "sha256": "d8bb44b4ff303fe76fe9e894022fb3dc71b15a2e716592790fe0e3c3e60478fa"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00003-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00003-of-00014.safetensors",
      "size": 4875990552,
-     "sha256": null
+     "sha256": "54f22e8b3168f8dc962fac0d313607ebf52a12b433d4cf3098a0d82d9f042940"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00004-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00004-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "ad09c74d3c13ee29b5d0d84548fd8a3424a651564eaccd519946c296e59c557f"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00005-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00005-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "fc993c8a0e2a5b0570f383e1a95dc3a1281d1b224b6f3ee908f4827941e1dfc2"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00006-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00006-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "82f05620d1f718a90c362b221d6a184ff1a0f53301d706882d3df49695fa1974"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00007-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00007-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "fb91da8cb01ff4de3eef0eab1c3e769a734b3a1aafc61734068638a0d6c86934"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00008-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00008-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "431ca56535c8781944ce3801f5eb61c45531e853ecc5846d936ebaf4761b764f"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00009-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00009-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "3825e3f4302f4d2f7d76aa7430d2ce0864fde6b9e540a5806bf0d8e38e4d9f47"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00010-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00010-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "aded5a4d1d5e22dbd8b6f79266b6eb88c840411b09527c53917a1419ace22e2f"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00011-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00011-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "3820ffe8d8d6477f6fe8d614ef3c87abb264ee39accebf43a1507b970d80946f"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00012-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00012-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "05ad2d08ce71963121c9b03f1d9ec5d7641052f4b23c6c12b80d71065eb8e98e"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00013-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00013-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "b64f2289871261fdd1abbd3b78bcd66011b341de3dc8eeb2ed1a473ee7c8d95c"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00014-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00014-of-00014.safetensors",
      "size": 3270697008,
-     "sha256": null
+     "sha256": "e45b6c9998c77ee5a6577f9f47bc76416c1d4d387169e50c4c9d3134ea51b13b"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model.safetensors.index.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model.safetensors.index.json",
      "size": 97831,
-     "sha256": null
+     "sha256": "06c952c569285870b811989b794b9766493e280fb77fbcb957fc4e5fcf25403a"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/preprocessor_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/preprocessor_config.json",
      "size": 390,
-     "sha256": null
+     "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/tokenizer.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/tokenizer.json",
      "size": 7032403,
-     "sha256": null
+     "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/tokenizer_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/tokenizer_config.json",
      "size": 11003,
-     "sha256": null
+     "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/video_preprocessor_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/video_preprocessor_config.json",
      "size": 385,
-     "sha256": null
+     "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/vocab.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/vocab.json",
      "size": 2776833,
-     "sha256": null
+     "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "tokenizer/merges.txt",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/tokenizer/merges.txt",
      "size": 1671839,
-     "sha256": null
+     "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "tokenizer/tokenizer.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/tokenizer/tokenizer.json",
      "size": 7032403,
-     "sha256": null
+     "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "tokenizer/tokenizer_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/tokenizer/tokenizer_config.json",
      "size": 11003,
-     "sha256": null
+     "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "tokenizer/vocab.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/tokenizer/vocab.json",
      "size": 2776833,
-     "sha256": null
+     "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/config.json",
      "size": 546,
-     "sha256": null
+     "sha256": "74c11bff524336576096993cbfcdcdc2ef4fa2fa4409df693bdcbc6c666282ae"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00001-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00001-of-00014.safetensors",
      "size": 4825958704,
-     "sha256": null
+     "sha256": "2d847200c45c09dd7f973c1b096663068408ef851ee0b3711d059b6dc5dcd028"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00002-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00002-of-00014.safetensors",
      "size": 4702158032,
-     "sha256": null
+     "sha256": "2c4d362eddd2802180ac9c744849eb9ba8d9c8b984bdf9822cb02ed004b29184"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00003-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00003-of-00014.safetensors",
      "size": 4933368192,
-     "sha256": null
+     "sha256": "949c5aafbbfa5654da730a6a7fafd75adb164d0857b095a30e8bb6d390887d69"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00004-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00004-of-00014.safetensors",
      "size": 4567069608,
-     "sha256": null
+     "sha256": "eef7616790105ee839766bb2027203bf2c0d87c6aa038dca84145a8675f5ce28"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00005-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00005-of-00014.safetensors",
      "size": 4702158080,
-     "sha256": null
+     "sha256": "43fdf42d638e8bc6745f713fae80c93bb301807a1a5ae7249344ce28e202a494"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00006-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00006-of-00014.safetensors",
      "size": 4933368232,
-     "sha256": null
+     "sha256": "6442510b34d173653f0cce5c964b935395a8f7accf0b9cc0aa31aec59805239d"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00007-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00007-of-00014.safetensors",
      "size": 4567069608,
-     "sha256": null
+     "sha256": "29f48f535c91dac76496ca821eeb16ca24bc4caf3f0cae8b920a89b1f966da6d"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00008-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00008-of-00014.safetensors",
      "size": 4702158080,
-     "sha256": null
+     "sha256": "c711b096c764bd60f0b8b6ad49518bfab6d614fb788c725add8741c0674a4cd8"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00009-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00009-of-00014.safetensors",
      "size": 4933368232,
-     "sha256": null
+     "sha256": "44428defe3976cbb87635ad200b958199e739986697cd29fdf27aeb7294b5944"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00010-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00010-of-00014.safetensors",
      "size": 4567069608,
-     "sha256": null
+     "sha256": "3d44939c374c9da382e9c6877e1946adf7b84e08c7a881c068f228d6849411c9"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00011-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00011-of-00014.safetensors",
      "size": 4702158080,
-     "sha256": null
+     "sha256": "224d24430b58127a5577721084e0e704a0e74ec96dd7c35bc6fc0994ebd87c33"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00012-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00012-of-00014.safetensors",
      "size": 4933368232,
-     "sha256": null
+     "sha256": "48fa2bd8fe134eef565ab2464f1c2589a6657cba0d14283dfc06b532f8961f3c"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00013-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00013-of-00014.safetensors",
      "size": 4567069608,
-     "sha256": null
+     "sha256": "be5b4b1809f9d546ffd4b3fcf41e5c1e02b819125caa6bc105c109b04c051bd3"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00014-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00014-of-00014.safetensors",
      "size": 4644161920,
-     "sha256": null
+     "sha256": "8fbd5e6c1fb1df7ce988ca90f3d59e7610e465c7517e4b344eda4a214ba4b97d"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model.safetensors.index.json",
      "size": 64488,
-     "sha256": null
+     "sha256": "ac30a3b58963f2e735d493475fbb81853a5735ec947619648b3e045acda6783e"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "vae/config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/vae/config.json",
      "size": 2011,
-     "sha256": null
+     "sha256": "78f67deec3d63aae807f2bfe7154bc1e26f6372cb20b63265fcbae1b62bb5745"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "vae/diffusion_pytorch_model-00001-of-00003.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00001-of-00003.safetensors",
      "size": 5061033024,
-     "sha256": null
+     "sha256": "72f4c6be84ac0674f27398cde991dd9d719762f3952c4921aa66b2ce542f6374"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "vae/diffusion_pytorch_model-00002-of-00003.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00002-of-00003.safetensors",
      "size": 4955986528,
-     "sha256": null
+     "sha256": "2e05e8bc23fa4071043e17fd242be8acd0685e781a43987432b2eae925be4198"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "vae/diffusion_pytorch_model-00003-of-00003.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00003-of-00003.safetensors",
      "size": 398539336,
-     "sha256": null
+     "sha256": "c05d6ac4b1a33de372799d708531da6320f6a3ce6d1ce6d895e770988e004a39"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "vae/diffusion_pytorch_model.safetensors.index.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model.safetensors.index.json",
      "size": 74228,
-     "sha256": null
+     "sha256": "15f6d44553c3c616b0dc999920aa784f92ecee7e4201f1f99ac405cfbf3061ca"
     },
     {
      "role": "interpolate",
@@ -2227,37 +2327,42 @@
     {
      "repo": "cocktailpeanut/stable-audio-3-small-sfx",
      "path": "model_config.json",
+     "revision": "84c4bc8e3281c5bc6d6f09525fec1c5c5fd411ab",
      "cache_as": "audio/sa3/model_config.json",
      "size": 10457,
-     "sha256": null
+     "sha256": "cd00a32f42ba8a8d98f31d7fa6687cc1fc627f24c72116eb54f6df142df00b6a"
     },
     {
      "repo": "cocktailpeanut/stable-audio-3-small-sfx",
      "path": "model.safetensors",
+     "revision": "84c4bc8e3281c5bc6d6f09525fec1c5c5fd411ab",
      "cache_as": "audio/sa3/model.safetensors",
      "size": 2270384940,
-     "sha256": null
+     "sha256": "ed9cf1b6172f1a8c2921a9560c21109ff3239524563ced9dce6dcdef41e2f515"
     },
     {
      "repo": "cocktailpeanut/stable-audio-3-small-sfx",
      "path": "t5gemma-b-b-ul2/config.json",
+     "revision": "84c4bc8e3281c5bc6d6f09525fec1c5c5fd411ab",
      "cache_as": "audio/sa3/t5gemma-b-b-ul2/config.json",
      "size": 2540,
-     "sha256": null
+     "sha256": "575334409716886ac2952f5a275ed92868deef8a0ea560258d9970a431c6fb3a"
     },
     {
      "repo": "cocktailpeanut/stable-audio-3-small-sfx",
      "path": "t5gemma-b-b-ul2/tokenizer.model",
+     "revision": "84c4bc8e3281c5bc6d6f09525fec1c5c5fd411ab",
      "cache_as": "audio/sa3/t5gemma-b-b-ul2/tokenizer.model",
      "size": 4241003,
-     "sha256": null
+     "sha256": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2"
     },
     {
      "repo": "cocktailpeanut/stable-audio-3-small-sfx",
      "path": "t5gemma-b-b-ul2/model.safetensors",
+     "revision": "84c4bc8e3281c5bc6d6f09525fec1c5c5fd411ab",
      "cache_as": "audio/sa3/t5gemma-b-b-ul2/model.safetensors",
      "size": 1183022944,
-     "sha256": null
+     "sha256": "9b05ea5a4f211d023832f706fb2c0e83e4fc721b6da35ab69ceb0b55eb7800d3"
     }
    ]
   },
@@ -2279,44 +2384,50 @@
     {
      "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
      "path": "text_encoder/model-00001-of-00002.safetensors",
+     "revision": "e35df4d82fbe87fcd5d14e5d100e349c0c3c076d",
      "cache_as": "audio/moss/text_encoder/model-00001-of-00002.safetensors",
      "size": 3441185608,
-     "sha256": null
+     "sha256": "169ad53ec313c3a34b06c0809216e4fc072cce444a5d4ff2b59690d064130ed5"
     },
     {
      "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
      "path": "text_encoder/model-00002-of-00002.safetensors",
+     "revision": "e35df4d82fbe87fcd5d14e5d100e349c0c3c076d",
      "cache_as": "audio/moss/text_encoder/model-00002-of-00002.safetensors",
      "size": 622329984,
-     "sha256": null
+     "sha256": "912becff8d60672aa8628ef08c05898d9adf17c2ad4ae3caf99b065622fdeff9"
     },
     {
      "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
      "path": "transformer/diffusion_pytorch_model.safetensors",
+     "revision": "e35df4d82fbe87fcd5d14e5d100e349c0c3c076d",
      "cache_as": "audio/moss/transformer/diffusion_pytorch_model.safetensors",
      "size": 5664274560,
-     "sha256": null
+     "sha256": "bda86e4d6730ff47cea47851d219880191e9d21d4d264b21a6ffe7cb2db9dfb0"
     },
     {
      "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
      "path": "vae/vae_128d_48k.pth",
+     "revision": "e35df4d82fbe87fcd5d14e5d100e349c0c3c076d",
      "cache_as": "audio/moss/vae/vae_128d_48k.pth",
      "size": 1486465965,
-     "sha256": null
+     "sha256": "07e6139ff33bd21ba8a7a7f40ed24aab13ac0d100cd686f8a9f3e03dc5251cb1"
     },
     {
      "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
      "path": "tokenizer/tokenizer.json",
+     "revision": "e35df4d82fbe87fcd5d14e5d100e349c0c3c076d",
      "cache_as": "audio/moss/tokenizer/tokenizer.json",
      "size": 11422654,
-     "sha256": null
+     "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
     },
     {
      "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
      "path": "tokenizer/tokenizer_config.json",
+     "revision": "e35df4d82fbe87fcd5d14e5d100e349c0c3c076d",
      "cache_as": "audio/moss/tokenizer/tokenizer_config.json",
      "size": 9732,
-     "sha256": null
+     "sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
     }
    ]
   },
@@ -3337,7 +3448,7 @@
    "vram_gb": 14.0,
    "min_vram_gb": 14.0,
    "min_compute_cap": 8.0,
-   "note": "YuE2-3B full-song generation with an editable score (lyrics + style -> 48 kHz stereo, up to 6 min): one 28-layer AR-NAR mixture-of-transformers backbone (Qwen3-shaped, 2048 hidden, GQA 16/8) writes a chord-annotated ABC score, then 25 Hz codec tokens, then 64-d acoustic latents by 32-step midpoint flow matching; the Oobleck YuE2-Vae decodes them. Native port on the in-repo CUDA store (makepad-ai-music yue2*.rs), no Python. Request: prompt = style tags, lyrics with [Verse]/[Chorus]/... sections, seed; score_mode full|melody|off (default full); score = an ABC score to render instead of planning one (the edit-and-re-render loop); score_only = return the planned score without audio; guidance = text CFG (default 1.0, 1.01 for score_mode off). The song length follows the lyrics/score; seconds is only an upper bound. Artifacts: audio/wav + the ABC score (text, .abc). Measured peak 13.1 GiB (RTX PRO 6000, 204 s song). File set pinned at m-a-p/YuE2-3B 8f24312f and m-a-p/YuE2-Vae 152733a1 (~7.8 GB). Weights CC BY-NC 4.0 (non-commercial).",
+   "note": "YuE2-3B full-song generation with an editable score (lyrics + style -> 48 kHz stereo, up to 6 min): one 28-layer AR-NAR mixture-of-transformers backbone (Qwen3-shaped, 2048 hidden, GQA 16/8) writes a chord-annotated ABC score, then 25 Hz codec tokens, then 64-d acoustic latents by 32-step midpoint flow matching; the Oobleck YuE2-Vae decodes them. Native port on the in-repo CUDA store (makepad-ai-music yue2*.rs), no Python. Request: prompt = style tags, lyrics with [Verse]/[Chorus]/... sections, seed; score_mode full|melody|off (default full); score = an ABC score to render instead of planning one (the edit-and-re-render loop); score_only = return the planned score without audio; guidance = text CFG (default 1.0, 1.01 for score_mode off). The song length follows the lyrics/score; seconds is only an upper bound. Artifacts: audio/wav + the ABC score (text, .abc) + the song's timeline from the score (application/json song-timing: sections with start/end and the sung notes, for timed lyrics). Measured peak 13.1 GiB (RTX PRO 6000, 204 s song). File set pinned at m-a-p/YuE2-3B 8f24312f and m-a-p/YuE2-Vae 152733a1 (~7.8 GB). Weights CC BY-NC 4.0 (non-commercial).",
    "files": [
     {
      "role": "weights",
@@ -3588,429 +3699,490 @@
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "audio_scheduler/scheduler_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/audio_scheduler/scheduler_config.json",
      "size": 96,
-     "sha256": null
+     "sha256": "804780f7133477067bd6bbfbc02dc8b3cf9feeb400f97c08f5b1d5f6cbab3840"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "audio_vae/config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/audio_vae/config.json",
      "size": 2271,
-     "sha256": null
+     "sha256": "9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "audio_vae/diffusion_pytorch_model.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/audio_vae/diffusion_pytorch_model.safetensors",
      "size": 605429340,
-     "sha256": null
+     "sha256": "52c59e67ba8de5477c81bfbced0327aabf500f1bfdeefd5ee754529241cb26cb"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "model_index.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/model_index.json",
      "size": 2936,
-     "sha256": null
+     "sha256": "5a587fe13b2371427415ac892463142683aefcd8d322e274a3a095eac37ac7d2"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "modular_model_index.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/modular_model_index.json",
      "size": 2935,
-     "sha256": null
+     "sha256": "a2b6a210e482ffb78e613b553f570c44e101afce6741bd4ed91429d0559af031"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/chat_template.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/chat_template.json",
      "size": 5499,
-     "sha256": null
+     "sha256": "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/merges.txt",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/merges.txt",
      "size": 1671839,
-     "sha256": null
+     "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/preprocessor_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/preprocessor_config.json",
      "size": 390,
-     "sha256": null
+     "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/tokenizer.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/tokenizer.json",
      "size": 7032403,
-     "sha256": null
+     "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/tokenizer_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/tokenizer_config.json",
      "size": 11003,
-     "sha256": null
+     "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/video_preprocessor_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/video_preprocessor_config.json",
      "size": 385,
-     "sha256": null
+     "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/vocab.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/vocab.json",
      "size": 2776833,
-     "sha256": null
+     "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "scheduler/scheduler_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/scheduler/scheduler_config.json",
      "size": 97,
-     "sha256": null
+     "sha256": "8fa6c3aa70dc9e691e1a6df899fd1b6f75f70481a27cee6e18a303817075c304"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/chat_template.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/chat_template.json",
      "size": 5499,
-     "sha256": null
+     "sha256": "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/config.json",
      "size": 1474,
-     "sha256": null
+     "sha256": "d2dd0c60d01b9e195d9447c52da61c7302d28828524914c044d9c6e1b81d0427"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/merges.txt",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/merges.txt",
      "size": 1671839,
-     "sha256": null
+     "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00001-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00001-of-00014.safetensors",
      "size": 4932328944,
-     "sha256": null
+     "sha256": "6b9dfbc930e505402ae9d7e5091a9d7d656cda5f34614f01cfe70bfb0cca27cb"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00002-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00002-of-00014.safetensors",
      "size": 4875990528,
-     "sha256": null
+     "sha256": "d8bb44b4ff303fe76fe9e894022fb3dc71b15a2e716592790fe0e3c3e60478fa"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00003-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00003-of-00014.safetensors",
      "size": 4875990552,
-     "sha256": null
+     "sha256": "54f22e8b3168f8dc962fac0d313607ebf52a12b433d4cf3098a0d82d9f042940"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00004-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00004-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "ad09c74d3c13ee29b5d0d84548fd8a3424a651564eaccd519946c296e59c557f"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00005-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00005-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "fc993c8a0e2a5b0570f383e1a95dc3a1281d1b224b6f3ee908f4827941e1dfc2"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00006-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00006-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "82f05620d1f718a90c362b221d6a184ff1a0f53301d706882d3df49695fa1974"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00007-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00007-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "fb91da8cb01ff4de3eef0eab1c3e769a734b3a1aafc61734068638a0d6c86934"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00008-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00008-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "431ca56535c8781944ce3801f5eb61c45531e853ecc5846d936ebaf4761b764f"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00009-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00009-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "3825e3f4302f4d2f7d76aa7430d2ce0864fde6b9e540a5806bf0d8e38e4d9f47"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00010-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00010-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "aded5a4d1d5e22dbd8b6f79266b6eb88c840411b09527c53917a1419ace22e2f"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00011-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00011-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "3820ffe8d8d6477f6fe8d614ef3c87abb264ee39accebf43a1507b970d80946f"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00012-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00012-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "05ad2d08ce71963121c9b03f1d9ec5d7641052f4b23c6c12b80d71065eb8e98e"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00013-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00013-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "b64f2289871261fdd1abbd3b78bcd66011b341de3dc8eeb2ed1a473ee7c8d95c"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00014-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00014-of-00014.safetensors",
      "size": 3270697008,
-     "sha256": null
+     "sha256": "e45b6c9998c77ee5a6577f9f47bc76416c1d4d387169e50c4c9d3134ea51b13b"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model.safetensors.index.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model.safetensors.index.json",
      "size": 97831,
-     "sha256": null
+     "sha256": "06c952c569285870b811989b794b9766493e280fb77fbcb957fc4e5fcf25403a"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/preprocessor_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/preprocessor_config.json",
      "size": 390,
-     "sha256": null
+     "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/tokenizer.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/tokenizer.json",
      "size": 7032403,
-     "sha256": null
+     "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/tokenizer_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/tokenizer_config.json",
      "size": 11003,
-     "sha256": null
+     "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/video_preprocessor_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/video_preprocessor_config.json",
      "size": 385,
-     "sha256": null
+     "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/vocab.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/vocab.json",
      "size": 2776833,
-     "sha256": null
+     "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "tokenizer/merges.txt",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/tokenizer/merges.txt",
      "size": 1671839,
-     "sha256": null
+     "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "tokenizer/tokenizer.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/tokenizer/tokenizer.json",
      "size": 7032403,
-     "sha256": null
+     "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "tokenizer/tokenizer_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/tokenizer/tokenizer_config.json",
      "size": 11003,
-     "sha256": null
+     "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "tokenizer/vocab.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/tokenizer/vocab.json",
      "size": 2776833,
-     "sha256": null
+     "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/config.json",
      "size": 546,
-     "sha256": null
+     "sha256": "74c11bff524336576096993cbfcdcdc2ef4fa2fa4409df693bdcbc6c666282ae"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00001-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00001-of-00014.safetensors",
      "size": 4825958704,
-     "sha256": null
+     "sha256": "2d847200c45c09dd7f973c1b096663068408ef851ee0b3711d059b6dc5dcd028"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00002-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00002-of-00014.safetensors",
      "size": 4702158032,
-     "sha256": null
+     "sha256": "2c4d362eddd2802180ac9c744849eb9ba8d9c8b984bdf9822cb02ed004b29184"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00003-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00003-of-00014.safetensors",
      "size": 4933368192,
-     "sha256": null
+     "sha256": "949c5aafbbfa5654da730a6a7fafd75adb164d0857b095a30e8bb6d390887d69"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00004-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00004-of-00014.safetensors",
      "size": 4567069608,
-     "sha256": null
+     "sha256": "eef7616790105ee839766bb2027203bf2c0d87c6aa038dca84145a8675f5ce28"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00005-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00005-of-00014.safetensors",
      "size": 4702158080,
-     "sha256": null
+     "sha256": "43fdf42d638e8bc6745f713fae80c93bb301807a1a5ae7249344ce28e202a494"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00006-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00006-of-00014.safetensors",
      "size": 4933368232,
-     "sha256": null
+     "sha256": "6442510b34d173653f0cce5c964b935395a8f7accf0b9cc0aa31aec59805239d"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00007-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00007-of-00014.safetensors",
      "size": 4567069608,
-     "sha256": null
+     "sha256": "29f48f535c91dac76496ca821eeb16ca24bc4caf3f0cae8b920a89b1f966da6d"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00008-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00008-of-00014.safetensors",
      "size": 4702158080,
-     "sha256": null
+     "sha256": "c711b096c764bd60f0b8b6ad49518bfab6d614fb788c725add8741c0674a4cd8"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00009-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00009-of-00014.safetensors",
      "size": 4933368232,
-     "sha256": null
+     "sha256": "44428defe3976cbb87635ad200b958199e739986697cd29fdf27aeb7294b5944"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00010-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00010-of-00014.safetensors",
      "size": 4567069608,
-     "sha256": null
+     "sha256": "3d44939c374c9da382e9c6877e1946adf7b84e08c7a881c068f228d6849411c9"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00011-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00011-of-00014.safetensors",
      "size": 4702158080,
-     "sha256": null
+     "sha256": "224d24430b58127a5577721084e0e704a0e74ec96dd7c35bc6fc0994ebd87c33"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00012-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00012-of-00014.safetensors",
      "size": 4933368232,
-     "sha256": null
+     "sha256": "48fa2bd8fe134eef565ab2464f1c2589a6657cba0d14283dfc06b532f8961f3c"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00013-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00013-of-00014.safetensors",
      "size": 4567069608,
-     "sha256": null
+     "sha256": "be5b4b1809f9d546ffd4b3fcf41e5c1e02b819125caa6bc105c109b04c051bd3"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model-00014-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model-00014-of-00014.safetensors",
      "size": 4644161920,
-     "sha256": null
+     "sha256": "8fbd5e6c1fb1df7ce988ca90f3d59e7610e465c7517e4b344eda4a214ba4b97d"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "transformer/diffusion_pytorch_model.safetensors.index.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/transformer/diffusion_pytorch_model.safetensors.index.json",
      "size": 64488,
-     "sha256": null
+     "sha256": "ac30a3b58963f2e735d493475fbb81853a5735ec947619648b3e045acda6783e"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "vae/config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/vae/config.json",
      "size": 2011,
-     "sha256": null
+     "sha256": "78f67deec3d63aae807f2bfe7154bc1e26f6372cb20b63265fcbae1b62bb5745"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "vae/diffusion_pytorch_model-00001-of-00003.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00001-of-00003.safetensors",
      "size": 5061033024,
-     "sha256": null
+     "sha256": "72f4c6be84ac0674f27398cde991dd9d719762f3952c4921aa66b2ce542f6374"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "vae/diffusion_pytorch_model-00002-of-00003.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00002-of-00003.safetensors",
      "size": 4955986528,
-     "sha256": null
+     "sha256": "2e05e8bc23fa4071043e17fd242be8acd0685e781a43987432b2eae925be4198"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "vae/diffusion_pytorch_model-00003-of-00003.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00003-of-00003.safetensors",
      "size": 398539336,
-     "sha256": null
+     "sha256": "c05d6ac4b1a33de372799d708531da6320f6a3ce6d1ce6d895e770988e004a39"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "vae/diffusion_pytorch_model.safetensors.index.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model.safetensors.index.json",
      "size": 74228,
-     "sha256": null
+     "sha256": "15f6d44553c3c616b0dc999920aa784f92ecee7e4201f1f99ac405cfbf3061ca"
     },
     {
      "role": "interpolate",
@@ -4200,317 +4372,362 @@
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "audio_scheduler/scheduler_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/audio_scheduler/scheduler_config.json",
      "size": 96,
-     "sha256": null
+     "sha256": "804780f7133477067bd6bbfbc02dc8b3cf9feeb400f97c08f5b1d5f6cbab3840"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "audio_vae/config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/audio_vae/config.json",
      "size": 2271,
-     "sha256": null
+     "sha256": "9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "audio_vae/diffusion_pytorch_model.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/audio_vae/diffusion_pytorch_model.safetensors",
      "size": 605429340,
-     "sha256": null
+     "sha256": "52c59e67ba8de5477c81bfbced0327aabf500f1bfdeefd5ee754529241cb26cb"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "model_index.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/model_index.json",
      "size": 2936,
-     "sha256": null
+     "sha256": "5a587fe13b2371427415ac892463142683aefcd8d322e274a3a095eac37ac7d2"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "modular_model_index.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/modular_model_index.json",
      "size": 2935,
-     "sha256": null
+     "sha256": "a2b6a210e482ffb78e613b553f570c44e101afce6741bd4ed91429d0559af031"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/chat_template.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/chat_template.json",
      "size": 5499,
-     "sha256": null
+     "sha256": "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/merges.txt",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/merges.txt",
      "size": 1671839,
-     "sha256": null
+     "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/preprocessor_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/preprocessor_config.json",
      "size": 390,
-     "sha256": null
+     "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/tokenizer.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/tokenizer.json",
      "size": 7032403,
-     "sha256": null
+     "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/tokenizer_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/tokenizer_config.json",
      "size": 11003,
-     "sha256": null
+     "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/video_preprocessor_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/video_preprocessor_config.json",
      "size": 385,
-     "sha256": null
+     "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "processor/vocab.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/processor/vocab.json",
      "size": 2776833,
-     "sha256": null
+     "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "scheduler/scheduler_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/scheduler/scheduler_config.json",
      "size": 97,
-     "sha256": null
+     "sha256": "8fa6c3aa70dc9e691e1a6df899fd1b6f75f70481a27cee6e18a303817075c304"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/chat_template.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/chat_template.json",
      "size": 5499,
-     "sha256": null
+     "sha256": "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/config.json",
      "size": 1474,
-     "sha256": null
+     "sha256": "d2dd0c60d01b9e195d9447c52da61c7302d28828524914c044d9c6e1b81d0427"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/merges.txt",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/merges.txt",
      "size": 1671839,
-     "sha256": null
+     "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00001-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00001-of-00014.safetensors",
      "size": 4932328944,
-     "sha256": null
+     "sha256": "6b9dfbc930e505402ae9d7e5091a9d7d656cda5f34614f01cfe70bfb0cca27cb"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00002-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00002-of-00014.safetensors",
      "size": 4875990528,
-     "sha256": null
+     "sha256": "d8bb44b4ff303fe76fe9e894022fb3dc71b15a2e716592790fe0e3c3e60478fa"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00003-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00003-of-00014.safetensors",
      "size": 4875990552,
-     "sha256": null
+     "sha256": "54f22e8b3168f8dc962fac0d313607ebf52a12b433d4cf3098a0d82d9f042940"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00004-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00004-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "ad09c74d3c13ee29b5d0d84548fd8a3424a651564eaccd519946c296e59c557f"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00005-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00005-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "fc993c8a0e2a5b0570f383e1a95dc3a1281d1b224b6f3ee908f4827941e1dfc2"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00006-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00006-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "82f05620d1f718a90c362b221d6a184ff1a0f53301d706882d3df49695fa1974"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00007-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00007-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "fb91da8cb01ff4de3eef0eab1c3e769a734b3a1aafc61734068638a0d6c86934"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00008-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00008-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "431ca56535c8781944ce3801f5eb61c45531e853ecc5846d936ebaf4761b764f"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00009-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00009-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "3825e3f4302f4d2f7d76aa7430d2ce0864fde6b9e540a5806bf0d8e38e4d9f47"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00010-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00010-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "aded5a4d1d5e22dbd8b6f79266b6eb88c840411b09527c53917a1419ace22e2f"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00011-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00011-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "3820ffe8d8d6477f6fe8d614ef3c87abb264ee39accebf43a1507b970d80946f"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00012-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00012-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "05ad2d08ce71963121c9b03f1d9ec5d7641052f4b23c6c12b80d71065eb8e98e"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00013-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00013-of-00014.safetensors",
      "size": 4875990584,
-     "sha256": null
+     "sha256": "b64f2289871261fdd1abbd3b78bcd66011b341de3dc8eeb2ed1a473ee7c8d95c"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model-00014-of-00014.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model-00014-of-00014.safetensors",
      "size": 3270697008,
-     "sha256": null
+     "sha256": "e45b6c9998c77ee5a6577f9f47bc76416c1d4d387169e50c4c9d3134ea51b13b"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/model.safetensors.index.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/model.safetensors.index.json",
      "size": 97831,
-     "sha256": null
+     "sha256": "06c952c569285870b811989b794b9766493e280fb77fbcb957fc4e5fcf25403a"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/preprocessor_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/preprocessor_config.json",
      "size": 390,
-     "sha256": null
+     "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/tokenizer.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/tokenizer.json",
      "size": 7032403,
-     "sha256": null
+     "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/tokenizer_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/tokenizer_config.json",
      "size": 11003,
-     "sha256": null
+     "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/video_preprocessor_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/video_preprocessor_config.json",
      "size": 385,
-     "sha256": null
+     "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "text_encoder/vocab.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/text_encoder/vocab.json",
      "size": 2776833,
-     "sha256": null
+     "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "tokenizer/merges.txt",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/tokenizer/merges.txt",
      "size": 1671839,
-     "sha256": null
+     "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "tokenizer/tokenizer.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/tokenizer/tokenizer.json",
      "size": 7032403,
-     "sha256": null
+     "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "tokenizer/tokenizer_config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/tokenizer/tokenizer_config.json",
      "size": 11003,
-     "sha256": null
+     "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "tokenizer/vocab.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/tokenizer/vocab.json",
      "size": 2776833,
-     "sha256": null
+     "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "vae/config.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/vae/config.json",
      "size": 2011,
-     "sha256": null
+     "sha256": "78f67deec3d63aae807f2bfe7154bc1e26f6372cb20b63265fcbae1b62bb5745"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "vae/diffusion_pytorch_model-00001-of-00003.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00001-of-00003.safetensors",
      "size": 5061033024,
-     "sha256": null
+     "sha256": "72f4c6be84ac0674f27398cde991dd9d719762f3952c4921aa66b2ce542f6374"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "vae/diffusion_pytorch_model-00002-of-00003.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00002-of-00003.safetensors",
      "size": 4955986528,
-     "sha256": null
+     "sha256": "2e05e8bc23fa4071043e17fd242be8acd0685e781a43987432b2eae925be4198"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "vae/diffusion_pytorch_model-00003-of-00003.safetensors",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model-00003-of-00003.safetensors",
      "size": 398539336,
-     "sha256": null
+     "sha256": "c05d6ac4b1a33de372799d708531da6320f6a3ce6d1ce6d895e770988e004a39"
     },
     {
      "repo": "MiniMaxAI/MiniMax-H3",
      "path": "vae/diffusion_pytorch_model.safetensors.index.json",
+     "revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
      "cache_as": "video/MiniMax-H3/vae/diffusion_pytorch_model.safetensors.index.json",
      "size": 74228,
-     "sha256": null
+     "sha256": "15f6d44553c3c616b0dc999920aa784f92ecee7e4201f1f99ac405cfbf3061ca"
     },
     {
      "role": "interpolate",

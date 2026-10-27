@@ -19,8 +19,14 @@ pub enum Metric {
     CpuDraw,
     /// App CPU: building the frame packet (passes into commands, shader compiles).
     CpuBuild,
-    /// The app's submit of a window frame until the HAL saw its GPU work done.
+    /// The app's submit of a window frame until the HAL saw its GPU work done (Vulkan: every
+    /// batch, from its hand-off to the submit worker until its completion was seen).
     SubmitToRendered,
+    /// Vulkan: a batch waiting on the submit worker until its vkQueueSubmit began (the worker
+    /// is behind: a submit that blocks in the driver queues every batch after it).
+    SubmitQueue,
+    /// Vulkan: the vkQueueSubmit call of one batch.
+    QueueSubmit,
     /// A rendered frame waiting for the display worker to take it.
     DisplayQueue,
     /// Cross-GPU transfer, source side: copy into the shared buffer until it is done.
@@ -41,8 +47,8 @@ pub enum Metric {
     ChildFrame,
 }
 
-const METRICS: [Metric; 14] = [
-    Metric::Beat, Metric::CpuInput, Metric::CpuDraw, Metric::CpuBuild, Metric::SubmitToRendered,
+const METRICS: [Metric; 16] = [
+    Metric::Beat, Metric::CpuInput, Metric::CpuDraw, Metric::CpuBuild, Metric::SubmitToRendered, Metric::SubmitQueue, Metric::QueueSubmit,
     Metric::DisplayQueue, Metric::XgpuSource, Metric::XgpuDestination, Metric::ToPresent,
     Metric::PresentWait, Metric::PresentInterval, Metric::PeerPresentInterval, Metric::CreditToGlass, Metric::ChildFrame,
 ];
@@ -54,6 +60,8 @@ fn name(metric: Metric) -> &'static str {
         Metric::CpuDraw => "cpu draw",
         Metric::CpuBuild => "cpu build",
         Metric::SubmitToRendered => "submit->rendered",
+        Metric::SubmitQueue => "vk submit queue",
+        Metric::QueueSubmit => "vkQueueSubmit",
         Metric::DisplayQueue => "display queue",
         Metric::XgpuSource => "xgpu source copy",
         Metric::XgpuDestination => "xgpu dest copy",
@@ -120,6 +128,7 @@ pub fn set(enable: bool) {
     if enable == on() {
         return;
     }
+    crate::threadcpu::snapshot();
     if enable {
         let now = crate::clock_ns();
         *lock() = Some(Samples { started: now, printed: now, data: vec![vec![Vec::new(); METRICS.len()]; ACTIVITIES.len()], children: Default::default(), counts: Default::default(), windows: Default::default() });

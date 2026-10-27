@@ -1,0 +1,76 @@
+use mod.flow.*
+use mod.components.*
+
+let first = Input{
+    value: "sky"
+    at: vec2(40, 60)
+}
+
+let second = Input{
+    value: "sea"
+    at: vec2(40, 220)
+}
+
+/** Pictures, in order; none unless given. */
+let pics = Input{
+    type: @image
+    many: 4
+    value: []
+    at: vec2(40, 380)
+}
+
+let stack = Stack{
+    in: {layers: [conn(1, first.text()), conn(2, second.text()), conn(3, first.text())]}
+    at: vec2(340, 60)
+}
+
+let empty = Stack{
+    in: {layers: []}
+    at: vec2(340, 320)
+}
+
+let count_pics = Fn{
+    in: {pics: ordered(@image, 4, [conn(1, pics.image())])}
+    out: [@text]
+    run: |i| { {text: "" + i.pics.len()} }
+    at: vec2(340, 580)
+}
+
+let result = Output{
+    value: stack.out(@joined)
+    at: vec2(680, 60)
+}
+
+let total = Output{
+    value: stack.out(@total)
+    at: vec2(680, 200)
+}
+
+let stacked = Output{
+    many: 8
+    value: [conn(1, stack.out(@ordered))]
+    at: vec2(680, 340)
+}
+
+let empty_total = Output{
+    value: empty.out(@total)
+    at: vec2(680, 480)
+}
+
+let pic_count = Output{
+    value: count_pics.text()
+    at: vec2(680, 620)
+}
+
+let pics_out = Output{
+    type: @image
+    many: 4
+    value: [conn(1, pics.image())]
+    at: vec2(680, 760)
+}
+
+Flow{
+    label: "Layer stack"
+    brief: "Three ordered text layers through a reusable stack, an empty stack, and an ordered picture pass-through."
+    first, second, pics, stack, empty, count_pics, result, total, stacked, empty_total, pic_count, pics_out
+}

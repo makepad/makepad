@@ -550,6 +550,8 @@ pub enum StudioToApp {
     /// Files dropped on the window by the host (APPENDED LAST): delivered as `Event::Drag`
     /// (so a widget can light its drop target) then `Event::Drop`, `Event::DragEnd`.
     DropFiles(RemoteDrop),
+    /// Activation of one hosted window. Appended to preserve existing wire tags.
+    WindowFocus { window_id: usize, focused: bool },
 }
 
 /// A batch of host messages. On the wire every message is framed with its
@@ -668,6 +670,25 @@ impl HostedAppearance {
     }
 }
 
+/// The stock caption of a window under the WM's style sheet, host to app: what widgets
+/// resolves for it (`desktop_style::caption_look`), for what draws a caption without widgets
+/// (`makepad run`'s load screen, through the WM-hosted HAL shell: `makepad_hal::host_caption`),
+/// so its caption is the app's. Colours 0xRRGGBBAA: the bar (the window's ground where the bar
+/// is clear) and the title, each with focus and without; `size`: the title's font size (points);
+/// `button`: the window buttons' glyph colour.
+/// Sent with the style sheet (on connect and on every change), as `StudioToApp::Custom`.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct HostedCaption { pub bar: u32, pub bar_unfocused: u32, pub ink: u32, pub ink_unfocused: u32, pub size: f32, pub button: u32 }
+#[derive(SerJson, DeJson)]
+struct CaptionEnvelope { makepad_caption: HostedCaption }
+impl HostedCaption {
+    pub fn to_json(&self) -> String { CaptionEnvelope { makepad_caption: self.clone() }.serialize_json() }
+    pub fn parse(json: &str) -> Option<Self> {
+        if !json.contains("\"makepad_caption\"") { return None; }
+        CaptionEnvelope::deserialize_json(json).ok().map(|e| e.makepad_caption)
+    }
+}
+
 // Own chrome (the contract is described in the platform's `ime.rs`): the WM asks a makepad
 // window's drag query on a press and the app answers; the app's window buttons ask the WM for
 // the window op. Both travel as `Custom` JSON. They live here, not in the platform, because the
@@ -726,6 +747,37 @@ pub mod window_op {
     pub const MAXIMIZE: u8 = 2;
     /// Leave the maximised state; nothing when not maximised.
     pub const RESTORE: u8 = 3;
+    /// Bring the window back and give it focus (`WindowHandle::set_visible(true)`: a tray
+    /// app opening its window again after a close hid it).
+    pub const SHOW: u8 = 4;
+}
+
+/// `HostedDropdown::op` values.
+pub mod dropdown_op {
+    /// App to host: show the dropdown window under the host's item of tray `tray`, `w` by `h`
+    /// points (`WindowHandle::show_at_tray`; again while it shows = a new size).
+    pub const SHOW: u8 = 0;
+    /// App to host: the dropdown window is hidden.
+    pub const HIDE: u8 = 1;
+    /// Host to app: the person turned away from the dropdown (a click elsewhere, Escape, the
+    /// tray item again): the app hides the window (it hears `Event::PopupDismissed`).
+    pub const DISMISS: u8 = 2;
+}
+
+/// A tray dropdown window (`window_kind::DROPDOWN`, `CreateWindow::kind_id`) of a hosted app:
+/// the host shows it as a borderless flyout under the tray's bar item, never as a tile.
+/// Both ways, as JSON in `Custom`.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct HostedDropdown { pub window_id: usize, pub op: u8, pub tray: u64, pub w: f64, pub h: f64 }
+#[derive(SerJson, DeJson)]
+struct DropdownEnvelope { makepad_dropdown: HostedDropdown }
+impl HostedDropdown {
+    pub fn new(window_id: usize, op: u8) -> Self { Self { window_id, op, ..Default::default() } }
+    pub fn to_json(&self) -> String { DropdownEnvelope { makepad_dropdown: self.clone() }.serialize_json() }
+    pub fn parse(json: &str) -> Option<Self> {
+        if !json.contains("\"makepad_dropdown\"") { return None; }
+        DropdownEnvelope::deserialize_json(json).ok().map(|e| e.makepad_dropdown)
+    }
 }
 
 /// App to host: the app's window was asked to close, minimise or

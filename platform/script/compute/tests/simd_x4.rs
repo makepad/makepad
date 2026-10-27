@@ -1,10 +1,9 @@
-//! Four-wide (x4) differential fuzz: random kernel-shaped AIR programs (divergent
-//! and uniform branches, loops with breaks and continues at every depth,
-//! per-lane frames, hostile loads, integer division, shifts, selects,
-//! variables written under masks) run on the interpreter, scalar native
-//! code and x4 vector code (the shared back end: NEON on AArch64, SSE4.1/AVX2 on
-//! x86-64), with guard words around every buffer: every word must agree, and
-//! nothing outside a buffer may change.
+//! Vector kernel differential fuzz at both widths (4 and 8 lanes): random kernel-shaped AIR
+//! programs (divergent and uniform branches, loops with breaks and continues at every depth,
+//! per-lane frames, hostile loads, integer division, shifts, selects, variables written under
+//! masks) run on the interpreter, scalar native code and vector code of 4 and of 8 lanes (the
+//! shared back end: NEON on AArch64, SSE4.1/AVX2 on x86-64), with guard words around every
+//! buffer: every word must agree, and nothing outside a buffer may change.
 #![cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 
 use makepad_script_compute_sched::kernel::KernelExt;
@@ -16,10 +15,16 @@ use makepad_script_compute::{native, native_vec, Backend};
 mod kernel_gen;
 use kernel_gen::*;
 
-/// Runs p on the interpreter, scalar and x4 code: (interpreter,
-/// scalar, x4) buffers and ctx, and whether the guards held.
-fn run3(p: &Program, n: usize, ctx0: &[u32], seed: u64) -> Option<[(Vec<Vec<u32>>, Vec<u32>); 3]> {
-    let vcode = native_vec::compile(p)?;
+/// Vector code of `lanes` lanes for p (None: declined).
+fn vcompile(p: &Program, lanes: u32) -> Option<native::Code> {
+    let (code, l) = native_vec::with_lanes(lanes, || native_vec::compile(p))?;
+    (l == lanes).then_some(code)
+}
+
+/// Runs p on the interpreter, scalar and vector code of `lanes` lanes: (interpreter,
+/// scalar, vector) buffers and ctx, and whether the guards held.
+fn run3(p: &Program, n: usize, ctx0: &[u32], seed: u64, lanes: u32) -> Option<[(Vec<Vec<u32>>, Vec<u32>); 3]> {
+    let vcode = vcompile(p, lanes)?;
     let scode = native::compile(p)?;
     let mut ib = Bufs::new(&mut Rng(seed), n);
     let mut ictx = ctx0.to_vec();
@@ -51,25 +56,33 @@ fn run3(p: &Program, n: usize, ctx0: &[u32], seed: u64) -> Option<[(Vec<Vec<u32>
     let mut vb = Bufs::new(&mut Rng(seed), n);
     let mut vctx = ctx0.to_vec();
     let t = vb.table();
-    let n4 = n & !3;
-    if n4 > 0 {
-        unsafe { vcode.run_kernel(vctx.as_mut_ptr(), state.as_mut_ptr(), shared.as_ptr() as *mut u32, t.as_ptr(), n4 as u32) };
-    }
-    if n4 < n {
-        vctx[K_BASE as usize] += n4 as u32;
-        unsafe { scode.run_kernel(vctx.as_mut_ptr(), state.as_mut_ptr(), shared.as_ptr() as *mut u32, t.as_ptr(), (n - n4) as u32) };
-        vctx[K_BASE as usize] -= n4 as u32;
-    }
+    run_vector(&vcode, lanes, &scode, &mut vctx, &t, n);
     assert!(sb.guards_intact() && vb.guards_intact(), "a guard word changed");
     Some([(ib.words, ictx), (sb.words, sctx), (vb.words, vctx)])
 }
 
-/// Deletes statements while x4 code still disagrees with scalar code.
-fn minimize(p: Program, n: usize, ctx0: &[u32], seed: u64, regions: &Regions) -> Program {
-    minimize_by(p, n, ctx0, seed, regions, |[_, s, v]| s != v)
+/// The vector code of `lanes` lanes over `n & !(lanes - 1)` elements, the rest on scalar code
+/// (as the runtime does).
+fn run_vector(vcode: &native::Code, lanes: u32, scode: &native::Code, vctx: &mut [u32], t: &[u64], n: usize) {
+    let mut state = [0u32; 1];
+    let shared = SHARED;
+    let nv = n & !(lanes as usize - 1);
+    if nv > 0 {
+        unsafe { vcode.run_kernel(vctx.as_mut_ptr(), state.as_mut_ptr(), shared.as_ptr() as *mut u32, t.as_ptr(), nv as u32) };
+    }
+    if nv < n {
+        vctx[K_BASE as usize] += nv as u32;
+        unsafe { scode.run_kernel(vctx.as_mut_ptr(), state.as_mut_ptr(), shared.as_ptr() as *mut u32, t.as_ptr(), (n - nv) as u32) };
+        vctx[K_BASE as usize] -= nv as u32;
+    }
 }
 
-fn minimize_by(mut p: Program, n: usize, ctx0: &[u32], seed: u64, regions: &Regions, bad: impl Fn(&[(Vec<Vec<u32>>, Vec<u32>); 3]) -> bool) -> Program {
+/// Deletes statements while vector code of `lanes` lanes still disagrees with scalar code.
+fn minimize(p: Program, n: usize, ctx0: &[u32], seed: u64, regions: &Regions, lanes: u32) -> Program {
+    minimize_by(p, n, ctx0, seed, regions, lanes, |[_, s, v]| s != v)
+}
+
+fn minimize_by(mut p: Program, n: usize, ctx0: &[u32], seed: u64, regions: &Regions, lanes: u32, bad: impl Fn(&[(Vec<Vec<u32>>, Vec<u32>); 3]) -> bool) -> Program {
     fn count(b: &Block) -> usize {
         b.iter().map(|s| 1 + match s {
             Stmt::If(_, t, e) => count(t) + count(e),
@@ -103,7 +116,7 @@ fn minimize_by(mut p: Program, n: usize, ctx0: &[u32], seed: u64, regions: &Regi
         }
         false
     }
-    let fails = |p: &Program| match run3(p, n, ctx0, seed) {
+    let fails = |p: &Program| match run3(p, n, ctx0, seed, lanes) {
         Some(r) => bad(&r),
         None => false,
     };
@@ -114,7 +127,7 @@ fn minimize_by(mut p: Program, n: usize, ctx0: &[u32], seed: u64, regions: &Regi
         while k < total {
             let mut q = p.clone();
             let mut kk = k;
-            if remove(&mut q.body, &mut kk, 0) && ir::validate(&q, regions).is_ok() && native_vec::compile(&q).is_some() && fails(&q) {
+            if remove(&mut q.body, &mut kk, 0) && ir::validate(&q, regions).is_ok() && vcompile(&q, lanes).is_some() && fails(&q) {
                 p = q;
                 shrunk = true;
             } else {
@@ -131,7 +144,7 @@ fn minimize_by(mut p: Program, n: usize, ctx0: &[u32], seed: u64, regions: &Regi
 }
 
 #[test]
-fn x4_equals_scalar_and_interpreter_on_random_kernels() {
+fn vector_code_of_both_widths_equals_scalar_and_interpreter_on_random_kernels() {
     // X4_FUZZ_SEED / X4_FUZZ_ROUNDS for longer runs.
     let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     let mut r = Rng(env("X4_FUZZ_SEED", 0xC0FF_EE12_3456_789B));
@@ -150,14 +163,15 @@ fn x4_equals_scalar_and_interpreter_on_random_kernels() {
             continue;
         }
         tried += 1;
-        let Some(vcode) = native_vec::compile(&p) else { continue };
+        let Some(vcode) = vcompile(&p, 4) else { continue };
+        let v8 = vcompile(&p, 8).expect("a kernel vectorized at four lanes vectorizes at eight");
         // X4_FUZZ_TRACE: the program about to run (a crash leaves it).
         if let Ok(path) = std::env::var("X4_FUZZ_TRACE") {
             std::fs::write(path, format!("round {}\n{:?}", round, p.body)).ok();
         }
         let scode = native::compile(&p).expect("scalar code");
         vectorized += 1;
-        let n = [1usize, 3, 4, 5, 8, 13, 16, 31][r.below(8) as usize];
+        let n = [1usize, 3, 4, 5, 8, 13, 16, 31, 9, 24, 40][r.below(11) as usize];
         let ctx0 = params(&mut r);
         let seed = r.next();
         // Interpreter.
@@ -189,33 +203,27 @@ fn x4_equals_scalar_and_interpreter_on_random_kernels() {
         let mut state = [0u32; 1];
         let shared = SHARED;
         unsafe { scode.run_kernel(sctx.as_mut_ptr(), state.as_mut_ptr(), shared.as_ptr() as *mut u32, t.as_ptr(), n as u32) };
-        // x4 for n & !3, the rest scalar (as the runtime does).
-        let mut vb = Bufs::new(&mut Rng(seed), n);
-        let mut vctx = ctx0.clone();
-        let t = vb.table();
-        let n4 = n & !3;
-        if n4 > 0 {
-            unsafe { vcode.run_kernel(vctx.as_mut_ptr(), state.as_mut_ptr(), shared.as_ptr() as *mut u32, t.as_ptr(), n4 as u32) };
-        }
-        if n4 < n {
-            vctx[K_BASE as usize] += n4 as u32;
-            unsafe { scode.run_kernel(vctx.as_mut_ptr(), state.as_mut_ptr(), shared.as_ptr() as *mut u32, t.as_ptr(), (n - n4) as u32) };
-            vctx[K_BASE as usize] -= n4 as u32;
-        }
-        assert!(sb.guards_intact() && vb.guards_intact(), "round {}: a guard word changed", round);
         if ib.words != sb.words || ictx != sctx {
-            let min = minimize_by(p.clone(), n, &ctx0, seed, &regions, |[i, s, _]| i != s);
-            let [i, s, _] = run3(&min, n, &ctx0, seed).unwrap();
+            let min = minimize_by(p.clone(), n, &ctx0, seed, &regions, 4, |[i, s, _]| i != s);
+            let [i, s, _] = run3(&min, n, &ctx0, seed, 4).unwrap();
             panic!("round {}: scalar != interpreter, minimized: {:?}\ninterp {:x?}\nscalar {:x?}\n", round, min.body, i, s);
         }
-        if vb.words != sb.words || vctx != sctx {
-            let min = minimize(p.clone(), n, &ctx0, seed, &regions);
-            // X4_FUZZ_DUMP=<dir>: the minimized program's RIR and code (kernel<k>.rir/.bin)
-            if let Ok(dir) = std::env::var("X4_FUZZ_DUMP") {
-                std::env::set_var("COMPUTE_NATIVE_DUMP", dir);
+        // vector code of 4 and of 8 lanes for n & !(lanes - 1), the rest scalar (as the runtime does)
+        for (lanes, vcode) in [(4u32, &vcode), (8, &v8)] {
+            let mut vb = Bufs::new(&mut Rng(seed), n);
+            let mut vctx = ctx0.clone();
+            let t = vb.table();
+            run_vector(vcode, lanes, &scode, &mut vctx, &t, n);
+            assert!(sb.guards_intact() && vb.guards_intact(), "round {}: a guard word changed (x{})", round, lanes);
+            if vb.words != sb.words || vctx != sctx {
+                let min = minimize(p.clone(), n, &ctx0, seed, &regions, lanes);
+                // X4_FUZZ_DUMP=<dir>: the minimized program's RIR and code (kernel<k>.rir/.bin)
+                if let Ok(dir) = std::env::var("X4_FUZZ_DUMP") {
+                    std::env::set_var("COMPUTE_NATIVE_DUMP", dir);
+                }
+                let [_, s, v] = run3(&min, n, &ctx0, seed, lanes).unwrap();
+                panic!("round {}: x{} differs, minimized: {:?}\nx{} {:x?}\nscalar {:x?}\n", round, lanes, min.body, lanes, v, s);
             }
-            let [_, s, v] = run3(&min, n, &ctx0, seed).unwrap();
-            panic!("minimized: {:?}\nx4 {:x?}\nscalar {:x?}\n", min.body, v, s);
         }
     }
     eprintln!("{} random kernels, {} vectorized, all bit-equal", tried, vectorized);
@@ -228,13 +236,26 @@ fn bits(v: &[f32]) -> Vec<u32> {
     v.iter().map(|x| x.to_bits()).collect()
 }
 
-/// Runs a one-output kernel natively with and without x4 code and on the
-/// interpreter, at sizes around multiples of 4, single and multi-thread.
+/// The kernel of `src` with vector code of `lanes` lanes.
+fn compile_at(src: &str, lanes: u32) -> makepad_script_compute::kernel::KernelRef {
+    let k = native_vec::with_lanes(lanes, || compile(src)).unwrap_or_else(|e| panic!("{:?}\n{}", e, src));
+    assert!(k.simd(), "expected vector code for:\n{}", src);
+    assert_eq!(k.vector_lanes(), lanes, "lanes of:\n{}", src);
+    k
+}
+
+/// Runs a one-output kernel natively with and without vector code (4 and 8 lanes) and on the
+/// interpreter, at sizes around multiples of 4 and 8, single and multi-thread.
 fn same_everywhere(src: &str, out: &str, words: usize) {
-    let k = compile(src).unwrap_or_else(|e| panic!("{:?}\n{}", e, src));
-    assert!(k.simd(), "expected x4 code for:\n{}", src);
+    for lanes in [4, 8] {
+        same_everywhere_at(src, out, words, lanes);
+    }
+}
+
+fn same_everywhere_at(src: &str, out: &str, words: usize, lanes: u32) {
+    let k = compile_at(src, lanes);
     let ki = compile_with(src, &[], Backend::Interp).unwrap();
-    for n in [1usize, 4, 7, 4096 + 5, 20_003] {
+    for n in [1usize, 4, 7, 12, 4096 + 5, 20_003] {
         let run = |k: &makepad_script_compute::kernel::Kernel, simd: bool, threads: usize| {
             let mut o = vec![0.0f32; n * words];
             let mut c = k.call();
@@ -245,9 +266,60 @@ fn same_everywhere(src: &str, out: &str, words: usize) {
             bits(&o)
         };
         let v = run(&k, true, 1);
-        assert_eq!(v, run(&k, false, 1), "x4 != scalar, n {}:\n{}", n, src);
-        assert_eq!(v, run(&ki, false, 1), "x4 != interpreter, n {}:\n{}", n, src);
-        assert_eq!(v, run(&k, true, 4), "x4 on 4 threads != one thread, n {}:\n{}", n, src);
+        assert_eq!(v, run(&k, false, 1), "x{} != scalar, n {}:\n{}", lanes, n, src);
+        assert_eq!(v, run(&ki, false, 1), "x{} != interpreter, n {}:\n{}", lanes, n, src);
+        assert_eq!(v, run(&k, true, 4), "x{} on 4 threads != one thread, n {}:\n{}", lanes, n, src);
+    }
+}
+
+/// NaN operands of every float fused multiply-add form (`a * b + c`, `c - a * b`, `a * b - c`;
+/// a factor uniform across lanes too): x4, scalar and the interpreter give the same bits for
+/// NaNs of both signs, quiet and signaling, one or several per element, inf * 0 and inf - inf --
+/// a negated NaN operand's sign flipped, the rest by the host's rule (ir::fma_nan; Rust leaves
+/// mul_add's NaN unspecified, and rustc with the fma feature drops the flip).
+#[test]
+fn fused_multiply_add_nans_agree_with_x4() {
+    let vals: [u32; 12] = [0x3f80_0000, 0xbfc0_0000, 0, 0x7f80_0000, 0xff80_0000, 0x7fc0_0000, 0xffc0_0000, 0x7fc3_872e, 0xffc1_2345, 0x7f80_0567, 0xff80_0089, 0x7149_f2ca];
+    let mut abc = Vec::new();
+    for &x in &vals {
+        for &y in &vals {
+            for &z in &vals {
+                abc.extend_from_slice(&[f32::from_bits(x), f32::from_bits(y), f32::from_bits(z)]);
+            }
+        }
+    }
+    let n = abc.len() / 3;
+    let srcs = [
+        "let abc = input(vec3)\nlet u = input(f32)\nlet o = output(f32)\nfn element(i) { let v = abc[i]\n o[i] = v.x * v.y + v.z }",
+        "let abc = input(vec3)\nlet u = input(f32)\nlet o = output(f32)\nfn element(i) { let v = abc[i]\n o[i] = v.z - v.x * v.y }",
+        "let abc = input(vec3)\nlet u = input(f32)\nlet o = output(f32)\nfn element(i) { let v = abc[i]\n o[i] = v.x * v.y - v.z }",
+        "let abc = input(vec3)\nlet u = input(f32)\nlet o = output(f32)\nfn element(i) { let v = abc[i]\n o[i] = v.z - u[0] * v.y }",
+        "let abc = input(vec3)\nlet u = input(f32)\nlet o = output(f32)\nfn element(i) { let v = abc[i]\n o[i] = v.x * u[0] + v.z }",
+        "let abc = input(vec3)\nlet u = input(f32)\nlet o = output(f32)\nfn element(i) { let v = abc[i]\n o[i] = u[0] * v.y - v.z }",
+    ];
+    for (src, lanes) in srcs.iter().flat_map(|s| [(*s, 4), (*s, 8)]) {
+        let k = compile_at(src, lanes);
+        assert!(format!("{:?}", k.program().body).contains("Fma("), "no fused multiply-add in:\n{}", src);
+        let ki = compile_with(src, &[], Backend::Interp).unwrap();
+        for &u in &vals {
+            let u = [f32::from_bits(u)];
+            let run = |k: &makepad_script_compute::kernel::Kernel, simd: bool| {
+                let mut o = vec![0.0f32; n];
+                let mut c = k.call();
+                c.set_simd(simd);
+                c.input("abc", &abc).unwrap();
+                c.input("u", &u).unwrap();
+                c.output("o", &mut o).unwrap();
+                c.run(n).unwrap();
+                bits(&o)
+            };
+            let (v, s, i) = (run(&k, true), run(&k, false), run(&ki, false));
+            for e in 0..n {
+                let t = (abc[3 * e].to_bits(), abc[3 * e + 1].to_bits(), abc[3 * e + 2].to_bits(), u[0].to_bits());
+                assert_eq!(s[e], i[e], "scalar != interpreter, (x, y, z, u) {:x?}:\n{}", t, src);
+                assert_eq!(v[e], i[e], "x{} != interpreter, (x, y, z, u) {:x?}:\n{}", lanes, t, src);
+            }
+        }
     }
 }
 
@@ -297,9 +369,8 @@ fn kernels_from_source_agree_with_x4() {
 #[test]
 fn emit_kernels_agree_with_x4() {
     let src = "let seg = emit_buffer(3, 4)\nfn primitive(i) { for k in 0..(i % 5) { if hash01(i, k) > 0.3 { emit(seg, float(i), float(k), hash01(i, k)) } } }";
-    let k = compile(src).unwrap();
-    assert!(k.simd());
-    for n in [6usize, 4099] {
+    for (n, lanes) in [(6usize, 4), (4099, 4), (13, 8), (4099, 8)] {
+        let k = compile_at(src, lanes);
         let mut outs = Vec::new();
         for simd in [true, false] {
             let mut data = vec![0.0f32; n * 4 * 3];
@@ -345,12 +416,13 @@ fn optimized_random_kernels_give_the_same_bits() {
         let n = [1usize, 3, 4, 5, 8, 13, 16, 31][r.below(8) as usize];
         let ctx0 = params(&mut r);
         let seed = r.next();
-        let (Some(a), Some(b)) = (run3(&p, n, &ctx0, seed), run3(&q, n, &ctx0, seed)) else { continue };
+        let lanes = if round % 2 == 0 { 4 } else { 8 };
+        let (Some(a), Some(b)) = (run3(&p, n, &ctx0, seed, lanes), run3(&q, n, &ctx0, seed, lanes)) else { continue };
         ran += 1;
         let [ia, _, _] = &a;
         let [ib, sb, vb] = &b;
         if ia != ib || ia != sb || ia != vb {
-            panic!("round {}: optimized differs\noriginal {:?}\noptimized {:?}", round, p.body, q.body);
+            panic!("round {}: optimized differs (x{})\noriginal {:?}\noptimized {:?}", round, lanes, p.body, q.body);
         }
         // Fused multiply-adds (math: fast): every backend gives the
         // interpreter's fused bits.
@@ -359,9 +431,9 @@ fn optimized_random_kernels_give_the_same_bits() {
         if let Err(e) = ir::validate(&f, &regions) {
             panic!("round {}: the fused program is invalid: {}\n{:?}", round, e, f.body);
         }
-        if let Some([fi, fs, fv]) = run3(&f, n, &ctx0, seed) {
+        if let Some([fi, fs, fv]) = run3(&f, n, &ctx0, seed, lanes) {
             if fi != fs || fi != fv {
-                panic!("round {}: fused backends differ\n{:?}\ninterp {:x?}\nscalar {:x?}\nx4 {:x?}", round, f.body, fi, fs, fv);
+                panic!("round {}: fused backends differ\n{:?}\ninterp {:x?}\nscalar {:x?}\nx{} {:x?}", round, f.body, fi, fs, lanes, fv);
             }
         }
     }
@@ -373,7 +445,7 @@ fn optimized_random_kernels_give_the_same_bits() {
 /// The x4 RIR of a kernel source (before the back end's passes).
 fn x4_rir(src: &str) -> String {
     let k = compile(src).unwrap_or_else(|e| panic!("{:?}\n{}", e, src));
-    native_vec::rir_of(k.program()).expect("x4 code").dump()
+    native_vec::rir_of(k.program(), 4).expect("x4 code").dump()
 }
 
 #[test]
@@ -397,10 +469,15 @@ fn x4_store_groups_check_once_and_store_lane_records() {
 /// of 4, inputs as long as the run and shorter: a short input clamps) and one output natively
 /// with and without x4 code and on the interpreter: the output words must agree.
 fn same_with_input(src: &str, inp: &str, inp_words: usize, out: &str, words: usize) {
-    let k = compile(src).unwrap_or_else(|e| panic!("{:?}\n{}", e, src));
-    assert!(k.simd(), "expected x4 code for:\n{}", src);
+    for lanes in [4, 8] {
+        same_with_input_at(src, inp, inp_words, out, words, lanes);
+    }
+}
+
+fn same_with_input_at(src: &str, inp: &str, inp_words: usize, out: &str, words: usize, lanes: u32) {
+    let k = compile_at(src, lanes);
     let ki = compile_with(src, &[], Backend::Interp).unwrap();
-    for n in [1usize, 4, 7, 64, 4096 + 5] {
+    for n in [1usize, 4, 7, 12, 64, 4096 + 5] {
         for short in [0usize, 1, 3, 5, 13] {
             let len = (n * inp_words).saturating_sub(short).max(1);
             let data: Vec<f32> = (0..len).map(|j| ((j * 7919) % 1000) as f32 * 0.01 - 3.0).collect();
@@ -415,9 +492,9 @@ fn same_with_input(src: &str, inp: &str, inp_words: usize, out: &str, words: usi
                 bits(&o)
             };
             let v = run(&k, true, 1);
-            assert_eq!(v, run(&k, false, 1), "x4 != scalar, n {} short {}:\n{}", n, short, src);
-            assert_eq!(v, run(&ki, false, 1), "x4 != interpreter, n {} short {}:\n{}", n, short, src);
-            assert_eq!(v, run(&k, true, 4), "x4 on 4 threads != one thread, n {} short {}:\n{}", n, short, src);
+            assert_eq!(v, run(&k, false, 1), "x{} != scalar, n {} short {}:\n{}", lanes, n, short, src);
+            assert_eq!(v, run(&ki, false, 1), "x{} != interpreter, n {} short {}:\n{}", lanes, n, short, src);
+            assert_eq!(v, run(&k, true, 4), "x{} on 4 threads != one thread, n {} short {}:\n{}", lanes, n, short, src);
         }
     }
 }
@@ -461,7 +538,7 @@ fn x4_store_groups_of_four_words_are_a_transpose_and_lane_stores() {
 #[cfg(target_arch = "aarch64")]
 fn x4_small_tables_are_one_tbl() {
     // tables of up to 16 words (noise gradients, small lookup rows) read at varying indices: on
-    // NEON one ld1 of the table and one TBL by byte indices (neon.rs small_table), not a gather
+    // NEON one ld1 of the table and one TBL by byte indices not a gather
     let src = "let A8 = [0.5, -1.0, 2.0, 3.5, -4.25, 5.0, 6.125, -7.0]\nlet C12 = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5]\nlet o = output(vec4)\nfn element(i) {\n let h = hash(i)\n o[i] = vec4(A8[h & 7], C12[h % 12], gradient_noise2(vec2(float(i) * 0.37, float(h & 255) * 0.11)), A8[i]) }";
     let rir = x4_rir(src);
     assert!(rir.contains("VTbl"), "no table lookup in the x4 code of:\n{}", src);

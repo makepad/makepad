@@ -551,6 +551,11 @@ impl ScriptTokenizer {
     }
 
     #[inline]
+    /// Where token `tok_index` starts, as a char index into the tokenized text.
+    pub fn token_char_pos(&self, tok_index: u32) -> Option<usize> {
+        self.tokens.get(tok_index as usize).map(|t| t.pos).filter(|&p| p < self.pos)
+    }
+
     pub fn token_index_to_row_col(&self, tok_index: u32) -> Option<(u32, u32)> {
         // the index must name a token (a plain index panics past the end)
         let v = self.view(tok_index);

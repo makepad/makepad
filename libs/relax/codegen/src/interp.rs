@@ -732,6 +732,7 @@ const OP_DIV: u8 = 8;
 const OP_REM: u8 = 9;
 const OP_MULHI: u8 = 10;
 const OP_ROTL: u8 = 11;
+const OP_BZHI: u8 = 12;
 
 fn iop_code(op: IOp) -> u8 {
     match op {
@@ -747,6 +748,7 @@ fn iop_code(op: IOp) -> u8 {
         IOp::Rem => OP_REM,
         IOp::MulHi => OP_MULHI,
         IOp::Rotl => OP_ROTL,
+        IOp::Bzhi => OP_BZHI,
     }
 }
 
@@ -754,8 +756,14 @@ fn iop_code(op: IOp) -> u8 {
 /// u32: shift amounts mod 32), division by zero gives 0, remainder by zero the dividend.
 #[inline(always)]
 fn ibin(op: u8, bits: u8, s: bool, a: u64, b: u64) -> u64 {
+    if op == OP_BZHI {
+        let n = (b & 63) as u32;
+        return if n == 0 { 0 } else { a & (u64::MAX >> (64 - n)) };
+    }
     if op == OP_ROTL {
-        return if bits == 32 { (a as u32).rotate_left(b as u32 & 31) as u64 } else { a.rotate_left(b as u32 & 63) };
+        // within the type's width, re-extended (passes::rotl: the one definition)
+        let r = relax_backend::passes::rotl(bits, a, b);
+        return if bits < 64 { ext(r, bits, s) } else { r };
     }
     if bits == 32 && !s && op != OP_DIV && op != OP_REM && op != OP_MULHI {
         let (x, y) = (a as u32, b as u32);
@@ -852,6 +860,7 @@ fn pick_ibin<const B: u8, const S: bool>(op: u8, imm: bool) -> H {
         OP_DIV => p!(OP_DIV),
         OP_REM => p!(OP_REM),
         OP_MULHI => p!(OP_MULHI),
+        OP_BZHI => p!(OP_BZHI),
         _ => p!(OP_ROTL),
     }
 }
@@ -2545,6 +2554,8 @@ fn coalesce(f: &Func) -> (Vec<u32>, std::collections::HashSet<(u32, u32)>) {
 }
 
 fn lower(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64) -> Result<(IFunc, Persist), &'static str> {
+    let covered = relax_backend::passes::lower_coverage(f);
+    let f = covered.as_ref().unwrap_or(f);
     let (alias, skip) = coalesce(f);
     // frame: one cell per vreg (two for V128), then the stack slots, then C ABI buffers; an
     // aliased vreg shares its representative's cell
@@ -3061,6 +3072,8 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
             l.emit(h_tls_addr, &[w, sym_val(*sym)]);
             l.mark_last(Prov::Sym(*sym));
         }
+        // static TLS is placed only for native code (compiler jit.rs static_tls_ok)
+        Inst::TlsStatic(..) => unreachable!("interp: TlsStatic in code without codegen"),
         Inst::FnAddr(d, id) => {
             let w = l.r(*d);
             l.emit(h_const, &[w, slots.callable(*id)]);
@@ -3076,6 +3089,8 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
         }
         Inst::Call(callee, args, rets) => {
             let target = match callee {
+                // an asm! block runs only as machine code: its function stays native
+                Callee::Asm(_) => return Err("inline assembly"),
                 Callee::Fn(id) | Callee::CFn(id, _) => Target::Table(slots.table(*id)),
                 Callee::Indirect(v) | Callee::CIndirect(v, _) => Target::Cell(l.cell[v.0 as usize]),
                 Callee::Host(s) | Callee::CHost(s, _) => Target::Addr(sym_val(*s)),
@@ -3163,6 +3178,7 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
             let w = l.w4(*d, *a, *e, *n);
             l.emit(h_atomic_cas, &[w, mem_code(*m)]);
         }
+        Inst::Coverage { .. } => unreachable!("coverage lowered before interpreter emission"),
         Inst::Fence(_, compiler_only) => l.emit(h_fence, &[*compiler_only as u64]),
         Inst::FpEnv(write, v) => {
             let w = l.r(*v);
@@ -3243,7 +3259,7 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
 /// The vregs an instruction defines (its results).
 fn defs_of(i: &Inst, out: &mut Vec<VReg>) {
     match i {
-        Inst::Store(..) | Inst::StoreX(..) | Inst::Copy(..) | Inst::VStore(..) | Inst::VStoreX(..) | Inst::AtomicStore(..) | Inst::Fence(..) => {}
+        Inst::Store(..) | Inst::StoreX(..) | Inst::Copy(..) | Inst::VStore(..) | Inst::VStoreX(..) | Inst::AtomicStore(..) | Inst::Fence(..) | Inst::Coverage { .. } => {}
         Inst::FpEnv(w, v) => {
             if !*w {
                 out.push(*v)
@@ -3251,7 +3267,7 @@ fn defs_of(i: &Inst, out: &mut Vec<VReg>) {
         }
         Inst::Call(_, _, rets) => out.extend_from_slice(rets),
         Inst::Cpuid(ds, _, _) => out.extend_from_slice(ds),
-        Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::VConst(d, _) => out.push(*d),
+        Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::TlsStatic(d, _) | Inst::VConst(d, _) => out.push(*d),
         Inst::Mov(d, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::FUnary(_, _, d, _) | Inst::Conv(_, d, _) | Inst::IBinI(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::Load(_, d, _, _) | Inst::VSplat(d, _) | Inst::VExtract(d, _, _) | Inst::VLoad(d, _, _) | Inst::VAny(d, _) | Inst::AtomicLoad(_, _, d, _) | Inst::Xgetbv(d, _) => out.push(*d),
         Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VGather(d, _, _) | Inst::VTbl(d, _, _, _) | Inst::VShuffle(d, _, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) | Inst::VLoadX(d, _, _, _, _) => out.push(*d),
         Inst::VInsert(d, _, _, _) | Inst::Sel(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => out.push(*d),

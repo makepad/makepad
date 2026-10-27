@@ -1,5 +1,11 @@
 //! Machine activity safety gate. The monitor alone probes the OS. Readers use
 //! atomics, including cancellation checks made by independent backend lanes.
+//!
+//! The window manager that hosts the hub is the second source: it sees games
+//! (a fullscreen client, an active gamepad) where an OS probe cannot, and it
+//! owns the node's compute mode (`POST /control/local-use`, [`ComputeMode`]).
+//! Both feed the same published code, so closing admission, unloading and
+//! rerouting run through the one path below.
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::time::{Duration, Instant};
 use crate::protocol::ActivityJson;
@@ -55,6 +61,30 @@ impl Config {
     }
 }
 
+/// The node's compute availability, set by the hosting WM (its `ai-hub.conf`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ComputeMode {
+    /// Local use (a game, or the OS probe where there is one) closes admission
+    /// and releases the GPU; it reopens once local use has ended.
+    #[default]
+    Automatic,
+    /// Always admits; the UI's GPU memory still comes first (`/control/yield`).
+    UiFirst,
+    /// Always admits and never yields GPU memory: the UI may degrade or fail.
+    AiFirst,
+    /// Admits nothing; models are unloaded.
+    Unavailable,
+}
+impl ComputeMode {
+    pub const ALL: [ComputeMode; 4] = [ComputeMode::Automatic, ComputeMode::UiFirst, ComputeMode::AiFirst, ComputeMode::Unavailable];
+    pub fn name(self) -> &'static str {
+        match self { ComputeMode::Automatic=>"auto", ComputeMode::UiFirst=>"ui-first", ComputeMode::AiFirst=>"ai-first", ComputeMode::Unavailable=>"unavailable" }
+    }
+    pub fn parse(name: &str) -> Option<Self> { Self::ALL.into_iter().find(|m| m.name()==name) }
+    fn from_u64(v: u64) -> Self { Self::ALL.get(v as usize).copied().unwrap_or_default() }
+    fn to_u64(self) -> u64 { Self::ALL.iter().position(|m| *m==self).unwrap_or(0) as u64 }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct Observation {
     pub idle_seconds: Option<u64>,
@@ -70,6 +100,7 @@ const START: u64=0; const IDLE:u64=1; const INPUT:u64=2; const FULLSCREEN:u64=3;
 const CONTROLLER:u64=4; const GPU:u64=5; const QUIET:u64=6; const SESSION_ERROR:u64=7;
 const FULLSCREEN_ERROR:u64=8; const CONTROLLER_ERROR:u64=9; const GPU_ERROR:u64=10;
 const CONFIG_ERROR:u64=11; const DISABLED:u64=12; const UNSUPPORTED:u64=13; const STALE:u64=14; const RETIRING:u64=15;
+const GAMING:u64=16; const UNAVAILABLE:u64=17; const UI_FIRST:u64=18; const AI_FIRST:u64=19; const RESTARTING:u64=20;
 fn reason(code:u64)->(&'static str,&'static str) { match code {
     IDLE=>("idle","quiet"), INPUT=>("busy","recent-input"), FULLSCREEN=>("busy","fullscreen"),
     CONTROLLER=>("busy","controller-active"), GPU=>("busy","foreign-gpu-load"), QUIET=>("busy","quiet-hysteresis"),
@@ -77,10 +108,20 @@ fn reason(code:u64)->(&'static str,&'static str) { match code {
     CONTROLLER_ERROR=>("unknown","controller-probe-unavailable"), GPU_ERROR=>("unknown","gpu-counter-unavailable"),
     CONFIG_ERROR=>("unknown","invalid-operator-configuration"), DISABLED=>("disabled","operator-disabled"),
     UNSUPPORTED=>("unsupported","platform-unsupported"), STALE=>("unknown","monitor-stale"),
-    RETIRING=>("busy","releasing-models"),
+    RETIRING=>("busy","releasing-models"), GAMING=>("busy","gaming"),
+    UNAVAILABLE=>("busy","operator-unavailable"), UI_FIRST=>("disabled","ui-first"), AI_FIRST=>("disabled","ai-first"),
+    RESTARTING=>("busy","restarting"),
     _=>("unknown","monitor-starting"),
 }}
-fn permits(code:u64, config:&Config)->bool { code==IDLE || code==DISABLED || (code==UNSUPPORTED && !config.enabled) }
+fn permits(code:u64, config:&Config)->bool { code==IDLE || code==DISABLED || code==UI_FIRST || code==AI_FIRST || (code==UNSUPPORTED && !config.enabled) }
+/// What the WM's mode and local-use report make of the OS probe's code.
+fn combine(os:u64, mode:ComputeMode, gaming:bool, stopping:bool)->u64 {
+    if stopping { return RESTARTING; }
+    match mode {
+        ComputeMode::Unavailable=>UNAVAILABLE, ComputeMode::AiFirst=>AI_FIRST, ComputeMode::UiFirst=>UI_FIRST,
+        ComputeMode::Automatic=>if gaming {GAMING} else {os},
+    }
+}
 
 const GPU_BUSY_MS: u64 = 3_000;
 /// A failed GPU counter read reuses the last good reading for this long. One
@@ -142,12 +183,20 @@ pub struct ActivityGate {
     config: Config, clock: Instant, sequence:AtomicU64, code:AtomicU64,
     sampled_ms:AtomicU64, idle:AtomicU64, gpu:AtomicU64, epoch:AtomicU64, retiring:AtomicBool,
     probe_error:Mutex<Option<&'static str>>,
+    /// The WM's report: [`ComputeMode`] and whether a game runs.
+    mode:AtomicU64, gaming:AtomicBool,
+    /// The process is stopping (SIGTERM): admission stays closed until it exits.
+    stopping:AtomicBool,
+    /// The OS probe's last sample (code, idle, gpu), republished with a new WM report.
+    /// Held for the whole publication: the monitor and a WM report never interleave.
+    os:Mutex<(u64,Option<u64>,Option<f64>)>,
 }
 impl ActivityGate {
     pub fn new(config:Config)->Arc<Self> {
         let code=if config.invalid {CONFIG_ERROR} else if !config.supported {UNSUPPORTED} else if !config.enabled {DISABLED} else {START};
         Arc::new(Self { config,clock:Instant::now(),sequence:AtomicU64::new(0),code:AtomicU64::new(code),
-            sampled_ms:AtomicU64::new(0),idle:AtomicU64::new(u64::MAX),gpu:AtomicU64::new(f64::NAN.to_bits()),epoch:AtomicU64::new(0),retiring:AtomicBool::new(false),probe_error:Mutex::new(None) })
+            sampled_ms:AtomicU64::new(0),idle:AtomicU64::new(u64::MAX),gpu:AtomicU64::new(f64::NAN.to_bits()),epoch:AtomicU64::new(0),retiring:AtomicBool::new(false),probe_error:Mutex::new(None),
+            mode:AtomicU64::new(0),gaming:AtomicBool::new(false),stopping:AtomicBool::new(false),os:Mutex::new((code,None,None)) })
     }
     pub fn epoch(&self)->u64 {self.epoch.load(Ordering::SeqCst)}
     fn now(&self)->u64 {self.clock.elapsed().as_millis() as u64}
@@ -158,7 +207,7 @@ impl ActivityGate {
         let idle=self.idle.load(Ordering::SeqCst);
         let gpu=f64::from_bits(self.gpu.load(Ordering::SeqCst));
         if before%2!=0 || before!=self.sequence.load(Ordering::SeqCst) || (self.config.enabled && age>self.config.stale_ms) {code=STALE;}
-        if code==IDLE && self.retiring.load(Ordering::SeqCst) {code=RETIRING;}
+        if permits(code,&self.config) && self.retiring.load(Ordering::SeqCst) {code=RETIRING;}
         (code,age,(idle!=u64::MAX).then_some(idle),gpu.is_finite().then_some(gpu))
     }
     pub fn allows_work(&self)->bool {
@@ -169,10 +218,34 @@ impl ActivityGate {
             && (!self.config.enabled || self.now().saturating_sub(self.sampled_ms.load(Ordering::SeqCst))<=self.config.stale_ms)
     }
     pub(crate) fn retirement_finished(&self) { self.retiring.store(false,Ordering::SeqCst); }
+    pub fn mode(&self)->ComputeMode { ComputeMode::from_u64(self.mode.load(Ordering::SeqCst)) }
+    pub fn gaming(&self)->bool { self.gaming.load(Ordering::SeqCst) }
+    /// The WM's report (`POST /control/local-use`), effective at once: closing
+    /// cancels running jobs as `local-use: …` and unloads like any local use.
+    pub fn set_local_use(&self, mode:ComputeMode, gaming:bool) {
+        let os=self.os.lock().unwrap();
+        self.mode.store(mode.to_u64(),Ordering::SeqCst);
+        self.gaming.store(gaming,Ordering::SeqCst);
+        self.publish(combine(os.0,mode,gaming,self.stopping.load(Ordering::SeqCst)),os.1,os.2);
+    }
+    /// The process is about to exit (a restart): admission closes for good, running jobs see
+    /// `local-use: restarting` and their clients reroute; the fleet routes elsewhere meanwhile.
+    pub fn begin_stop(&self) {
+        let os=self.os.lock().unwrap();
+        self.stopping.store(true,Ordering::SeqCst);
+        self.publish(RESTARTING,os.1,os.2);
+    }
+    /// The OS probe's sample, under the WM's report.
+    fn publish_os(&self,code:u64,idle:Option<u64>,gpu:Option<f64>) {
+        let mut os=self.os.lock().unwrap();
+        *os=(code,idle,gpu);
+        self.publish(combine(code,self.mode(),self.gaming(),self.stopping.load(Ordering::SeqCst)),idle,gpu);
+    }
     pub fn refusal(&self)->Option<String> {let code=self.read().0; (!permits(code,&self.config)).then(||format!("local-use: {}",reason(code).1))}
     pub fn snapshot(&self)->ActivityJson {
         let (code,age,idle,gpu)=self.read();let (state,why)=reason(code);
         ActivityJson {version:1, enabled:self.config.enabled, state:state.into(), reason:why.into(),idle_seconds:idle,
+            mode:Some(self.mode().name().into()),
             foreign_gpu_percent:gpu,admission_open:permits(code,&self.config),idle_threshold_seconds:self.config.idle_seconds,
             quiet_seconds:self.config.quiet_seconds,gpu_threshold_percent:self.config.gpu_percent,sample_age_ms:age,
             probe_error:if state=="unknown" {self.probe_error.lock().ok().and_then(|e|*e).map(String::from)} else {None}}
@@ -191,7 +264,7 @@ impl ActivityGate {
         self.sampled_ms.store(self.now(),Ordering::SeqCst);self.sequence.fetch_add(1,Ordering::SeqCst);
     }
     #[cfg(test)]
-    pub(crate) fn test_publish(&self,open:bool) {self.publish(if open {IDLE}else{INPUT},Some(if open{600}else{0}),Some(0.0));}
+    pub(crate) fn test_publish(&self,open:bool) {self.publish_os(if open {IDLE}else{INPUT},Some(if open{600}else{0}),Some(0.0));}
 }
 
 pub struct Monitor { stop:Arc<AtomicBool>, thread:Option<std::thread::JoinHandle<()>> }
@@ -225,7 +298,7 @@ impl Sampler {
         let error=match code {SESSION_ERROR=>o.session_error, FULLSCREEN_ERROR=>o.fullscreen.err(),
             CONTROLLER_ERROR=>o.controller_active.err(), GPU_ERROR=>o.foreign_gpu_percent.err(), _=>None};
         if let Ok(mut slot)=gate.probe_error.lock() {*slot=error;}
-        gate.publish(code,idle,o.foreign_gpu_percent.ok());
+        gate.publish_os(code,idle,o.foreign_gpu_percent.ok());
     }
 }
 /// Bounded headless evidence. No singleton, ports, cache paths or GPU models.
@@ -314,6 +387,42 @@ mod tests {
             assert_eq!(p.observe(21000,&o).0,IDLE);
             assert_eq!(p.observe(22000,&observation).0,expected);
         }
+    }
+    #[test] fn wm_report_closes_and_reopens_where_the_os_probe_sees_nothing() {
+        // A Linux node: no OS probe, admission open by default.
+        let g=ActivityGate::new(Config{enabled:false,supported:false,..Config::default()});
+        assert!(g.allows_work());
+        let epoch=g.epoch();
+        g.set_local_use(ComputeMode::Automatic,true);
+        assert!(!g.allows_work());assert_eq!(g.refusal().as_deref(),Some("local-use: gaming"));
+        assert_ne!(g.epoch(),epoch,"running jobs see the close");
+        assert!(!g.snapshot().admission_open);
+        // Ended: open again only once the models were released.
+        g.set_local_use(ComputeMode::Automatic,false);
+        assert!(!g.allows_work());assert_eq!(g.snapshot().reason,"releasing-models");
+        g.retirement_finished();
+        assert!(g.allows_work());assert!(g.snapshot().admission_open);
+        // The forced modes win over a game; Unavailable over everything.
+        g.set_local_use(ComputeMode::UiFirst,true);assert!(g.allows_work());assert_eq!(g.snapshot().reason,"ui-first");
+        g.set_local_use(ComputeMode::AiFirst,true);assert!(g.allows_work());assert_eq!(g.snapshot().mode.as_deref(),Some("ai-first"));
+        g.set_local_use(ComputeMode::Unavailable,false);assert!(!g.allows_work());
+        assert_eq!(g.refusal().as_deref(),Some("local-use: operator-unavailable"));
+    }
+    #[test] fn a_stopping_hub_closes_admission_whatever_the_mode() {
+        let g=ActivityGate::new(Config{enabled:false,supported:false,..Config::default()});
+        g.set_local_use(ComputeMode::AiFirst,false);assert!(g.allows_work());
+        g.begin_stop();
+        assert!(!g.allows_work());assert_eq!(g.refusal().as_deref(),Some("local-use: restarting"));
+        g.set_local_use(ComputeMode::UiFirst,false);g.retirement_finished();
+        assert!(!g.allows_work(),"a later report does not reopen a stopping hub");
+    }
+    #[test] fn wm_report_survives_os_samples() {
+        let g=ActivityGate::new(config());
+        g.test_publish(true);g.set_local_use(ComputeMode::Automatic,true);
+        g.test_publish(true);assert!(!g.allows_work(),"the next OS sample keeps the game's close");
+        g.set_local_use(ComputeMode::UiFirst,false);g.retirement_finished();
+        g.test_publish(false);assert!(g.allows_work(),"UI First admits through local input");
+        for m in ComputeMode::ALL {assert_eq!(ComputeMode::parse(m.name()),Some(m));}
     }
     #[test] fn stale_and_epoch_cancel_are_latched() {
         let g=ActivityGate::new(Config{stale_ms:0,..config()});g.test_publish(true);

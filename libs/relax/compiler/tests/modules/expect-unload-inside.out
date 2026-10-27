@@ -1,0 +1,2 @@
+out calls after unload are refused: true
+out dead windows stay reserved: true

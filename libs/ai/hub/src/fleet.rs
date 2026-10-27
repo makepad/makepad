@@ -1051,7 +1051,9 @@ fn preferred_on_disk(model: &ModelInfoJson, score: u32) -> bool {
 /// `pick_box*` remains the explicit model-pin path and does not apply this
 /// filter.
 fn is_explicit_only(model: &ModelInfoJson) -> bool {
-    model.backend.ends_with("-oracle")
+    // claude-cli runs on someone's own Claude account: only a client that
+    // names it gets it (crate::claude_cli).
+    model.backend.ends_with("-oracle") || model.backend == crate::claude_cli::BACKEND
 }
 
 #[derive(Clone, Copy)]

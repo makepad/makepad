@@ -116,6 +116,8 @@ pub enum Message {
     /// The local file of this play (see `Model::local_generation`) played out.
     LocalEnded { generation: u64 },
     LocalError { generation: u64, error: String },
+    /// From the ai-music worker (`ai_music.rs`).
+    AiMusic(crate::ai_music::AiEvent),
     Error(String),
 }
 
@@ -150,10 +152,14 @@ pub enum Setting {
     /// The equalizer page's picture: spectrum or MilkDrop, and MilkDrop's
     /// own choices (`MilkSettings::serialize`).
     Visualizer,
+    /// Each track list's sort (`Model::serialize_sorts`).
+    Sorts,
+    /// The AI music page: Auto, and its table's columns and sort.
+    AiMusic,
 }
 
 impl Setting {
-    const ALL: [Setting; 5] = [Setting::Columns, Setting::UpNext, Setting::Equalizer, Setting::Queue, Setting::Visualizer];
+    const ALL: [Setting; 7] = [Setting::Columns, Setting::UpNext, Setting::Equalizer, Setting::Queue, Setting::Visualizer, Setting::Sorts, Setting::AiMusic];
 
     fn file(self) -> &'static str {
         match self {
@@ -162,6 +168,8 @@ impl Setting {
             Setting::Equalizer => "eq.txt",
             Setting::Queue => "queue.txt",
             Setting::Visualizer => "visualizer.txt",
+            Setting::Sorts => "sorts.txt",
+            Setting::AiMusic => "ai_music.txt",
         }
     }
 
@@ -191,6 +199,11 @@ pub struct Workers {
     pub knobs: Knobs,
     /// What the decoder worker and the sound card share.
     pub shared: Arc<Shared>,
+    /// The ai-music worker, and the epoch Cancel and Restart bump.
+    ai_music: SyncSender<crate::ai_music::AiCommand>,
+    pub ai_epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// Dropped at quit: the library worker's wait between reads ends.
+    library_stop: Option<SyncSender<()>>,
     messages: Receiver<Message>,
 }
 
@@ -225,8 +238,9 @@ impl Workers {
         let source = library_source.as_ref().map(|source| source.id());
         let player = library_source.as_ref().and_then(|source| source.player_bundle_id());
         let (tx, merge) = (message_tx.clone(), merge_tx.clone());
+        let (library_stop, stop_rx) = mpsc::sync_channel(1);
         if !local_only() {
-            spawn(spawner, "music-library", move || run_library(library_source, tx, merge));
+            spawn(spawner, "music-library", move || run_library(library_source, tx, merge, stop_rx));
         }
 
         let control = control_source.map(|mut source| {
@@ -256,9 +270,14 @@ impl Workers {
         let (decoder_shared, tx) = (shared.clone(), message_tx.clone());
         spawn(spawner, "music-decoder", move || crate::player::run_decoder(decoder_shared, player_rx, tx));
 
+        let (ai_music, ai_rx) = mpsc::sync_channel(8);
+        let ai_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (epoch, tx) = (ai_epoch.clone(), message_tx.clone());
+        spawn(spawner, "ai-music", move || crate::ai_music::run(ai_rx, epoch, tx));
+
         let (disk, disk_rx) = mpsc::sync_channel(16);
         spawn(spawner, "music-disk", move || run_disk(data_dir(), disk_rx, message_tx));
-        Self { source, control, disk, audio, local, player, knobs, shared, messages }
+        Self { source, control, disk, audio, local, player, knobs, shared, ai_music, ai_epoch, library_stop: Some(library_stop), messages }
     }
 
     /// Queue a command for the music system; `false` when there is none or
@@ -291,6 +310,24 @@ impl Workers {
     /// Ask the local worker; `false` when it is too far behind to take it.
     pub fn local(&self, command: LocalCommand) -> bool {
         self.local.try_send(command).is_ok()
+    }
+
+    /// At quit: end the workers that would outlive the app (the UI thread
+    /// may not join; the app's end waits for its threads): the library
+    /// reader (its wait ends), the merge (its senders go with the library
+    /// and local workers), the AI music worker (its command channel closes,
+    /// a running job is cancelled on its node) and the hub discovery
+    /// listener (stopped and waited for by the hub crate).
+    pub fn shutdown(mut self) {
+        self.ai_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        drop(self.library_stop.take());
+        drop(self);
+        makepad_ai_hub::discovery::stop_listener();
+    }
+
+    /// Ask the ai-music worker; `false` when it is too far behind to take it.
+    pub fn ai_music(&self, command: crate::ai_music::AiCommand) -> bool {
+        self.ai_music.try_send(command).is_ok()
     }
 
     /// Ask the decoder worker; `false` when it is too far behind to take it.
@@ -402,7 +439,7 @@ fn run_merge(rx: Receiver<Merge>, tx: SyncSender<Message>) {
 /// Load the system's saved index, then keep reading the library while the
 /// system is there. Without a system (not installed) the saved index is all
 /// there is.
-fn run_library(source: Option<Box<dyn MusicSource>>, tx: SyncSender<Message>, merge: SyncSender<Merge>) {
+fn run_library(source: Option<Box<dyn MusicSource>>, tx: SyncSender<Message>, merge: SyncSender<Merge>, stop: Receiver<()>) {
     let id = source.as_ref().map_or(SourceId::Spotify, |source| source.id());
     let path = index_path(id);
     let started = Instant::now();
@@ -437,7 +474,10 @@ fn run_library(source: Option<Box<dyn MusicSource>>, tx: SyncSender<Message>, me
                 log!("amp: cannot save the index at {}: {error}", path.display());
             }
         }
-        std::thread::sleep(wait);
+        // The wait ends early when the app quits (the sender is dropped).
+        if !matches!(stop.recv_timeout(wait), Err(RecvTimeoutError::Timeout)) {
+            return;
+        }
     }
 }
 

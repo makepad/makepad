@@ -193,12 +193,12 @@ fn owner_front_write_serves_waiting_readers() {
         crate::owner::call(crate::owner::Class::Job, || {});
     });
     ready_rx.recv().unwrap();
-    let start = std::time::Instant::now();
-    crate::owner::call(crate::owner::Class::App, || {
+    // without the pump the two wait for each other forever (the test hangs, which the harness
+    // reports); how long the serving takes is the machine's (a JIT-run test compiles on first use)
+    crate::owner::call(crate::owner::Class::Program, || {
         let _writer = front_write();
     });
     reader.join().unwrap();
-    assert!(start.elapsed().as_secs() < 5, "the owner's front write waited for a reader waiting for the owner");
 }
 
 #[test]
@@ -207,17 +207,15 @@ fn allocator_swap_serves_background_finish() {
     // A background build's job (O2, speculation, O3) that reaches its finish while an allocator
     // swap pauses the jobs: the finish keeps the job running (Class::keeps_job), so the owner
     // serves it for the job's thread and the swap's wait ends. Held back, the swap waited forever.
-    crate::owner::call(crate::owner::Class::App, || {});
+    crate::owner::call(crate::owner::Class::Program, || {});
     let (began_tx, began_rx) = std::sync::mpsc::channel();
     let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
     let job = std::thread::spawn(move || {
         let _job = compile_job();
         began_tx.send(()).unwrap();
         go_rx.recv().unwrap();
-        crate::owner::call(crate::owner::Class::FinishBackground, || {});
-        for class in [crate::owner::Class::Finish, crate::owner::Class::Job] {
-            crate::owner::call(class, || {});
-        }
+        crate::owner::publish(|| {});
+        crate::owner::call(crate::owner::Class::Job, || {});
     });
     began_rx.recv().unwrap();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -282,7 +280,7 @@ fn main() {}
     let mut entry = None;
     let mut first_slot = None;
     let mut initial_slot = None;
-    let id = crate::owner::call(crate::owner::Class::App, || {
+    let id = crate::owner::call(crate::owner::Class::Program, || {
         let id = u.fn_id(FnKey::Inst(def, Vec::new()));
         assert!(relax_level(&u, id) < 3, "the fixture must be unmarked");
         let mut cache = crate::cache::Cache::open(&u, crate::cache::Mode::ReadOnly).unwrap();
@@ -304,7 +302,6 @@ fn main() {}
             assert_eq!(u.stats.tier1_installed, 0, "warm linking must not rebuild O3");
             assert!(u.fns[id as usize].rir.is_none());
             assert_eq!(unsafe { (*tier_rec(&u.slots, id).add(3)).load(Ordering::Acquire) }, T_QUEUED);
-            assert!(u.frequency_profiles.contains_key(&id), "cached O3 keeps its training opportunity");
             assert!(TIER_QUEUE.lock().unwrap().is_empty());
             assert!(O2_QUEUE.lock().unwrap().is_empty());
         }
@@ -317,14 +314,16 @@ fn main() {}
             .unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
         assert_eq!(result, 19900);
         assert!(unsafe { compile_tier1(up, id) });
-        let recorded = crate::owner::call(crate::owner::Class::App, || {
+        let recorded = crate::owner::call(crate::owner::Class::Program, || {
+            // (an O3 install's record is encoded in the record batches)
+            u.flush_cache_records();
             let recorded = u.cache.as_ref().unwrap().stats.recorded;
-            // A frequency retier replaces the first O3 entry too.
-            u.frequency_profiles.get_mut(&id).unwrap().samples = FREQUENCY_SAMPLES;
+            // A retier replaces the first O3 entry too.
             recorded
         });
         assert!(unsafe { compile_tier1(up, id) });
-        let spill = crate::owner::call(crate::owner::Class::App, || {
+        let spill = crate::owner::call(crate::owner::Class::Program, || {
+            u.flush_cache_records();
             assert_eq!(u.cache.as_ref().unwrap().stats.recorded, recorded + 1);
             let mut cache = u.cache.take().unwrap();
             let recorded = cache.stats.recorded;
@@ -392,7 +391,7 @@ fn unrelated(x: u32) -> u32 { x + 1 }
     assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
     let mut u = Unit::new(prog, tcx, core);
     let up = &mut *u as *mut Unit;
-    let (id, file, first, spill) = crate::owner::call(crate::owner::Class::App, || {
+    let (id, file, first, spill) = crate::owner::call(crate::owner::Class::Program, || {
         let id = u.fn_id(FnKey::Inst(def, Vec::new()));
         let file = u.prog.def(def).file;
         let first = unsafe { compile_fn(up, id) }.unwrap();
@@ -439,7 +438,7 @@ fn unrelated(x: u32) -> u32 { x + 1 }
         (id, file, first, spill)
     });
     assert!(spill.write().unwrap() > 0);
-    let (mut verify, rir, calls, closure, closure_rir, mut dropped, retired) = crate::owner::call(crate::owner::Class::App, || {
+    let (mut verify, rir, calls, closure, closure_rir, mut dropped, retired) = crate::owner::call(crate::owner::Class::Program, || {
         let mut verify = crate::cache::Cache::open(&u, crate::cache::Mode::Verify).unwrap();
         assert!(matches!(verify.lookup(&mut u, id), Some(_)), "verification must have a real disk entry");
         let rir = u.fns[id as usize].rir.as_ref().unwrap().dump();
@@ -508,7 +507,7 @@ fn unrelated(x: u32) -> u32 { x + 1 }
         (verify, rir, calls, closure, closure_rir, dropped, retired)
     });
     dropped.release_rir();
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         assert!(retired.upgrade().is_none(), "retired RIR must actually be released off the unit lock");
         assert_eq!(u.fns[id as usize].calls, calls);
         assert!(!u.has_body(id, file));
@@ -522,7 +521,7 @@ fn unrelated(x: u32) -> u32 { x + 1 }
         unsafe { settle_drop(up) };
     });
     assert!(unsafe { compile_tier1(up, id) }, "O3 must rebuild settled RIR");
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         unsafe { settle_drop(up) };
         assert!(!u.has_body(id, file));
     });
@@ -531,7 +530,7 @@ fn unrelated(x: u32) -> u32 { x + 1 }
         file, path: path.to_str().unwrap().to_string(), src: source.replace("*v + 7", "*v + 9").into_bytes(),
     }]) };
     assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         assert!(u.has_body(id, file), "reload must preserve the old closure owner");
         u.fns[closure as usize].rir = None;
         unsafe { build_rir(up, closure) }.unwrap();
@@ -602,12 +601,12 @@ fn round42_const_and_build_cancellation_are_retryable() {
             assert!(u.errors.is_empty());
         };
         // depth 0: no unit call; depth 2: two nested ones
-        if depth == 0 { body() } else { crate::owner::call(crate::owner::Class::App, || crate::owner::call(crate::owner::Class::App, body)) }
+        if depth == 0 { body() } else { crate::owner::call(crate::owner::Class::Program, || crate::owner::call(crate::owner::Class::Program, body)) }
     }
     u.tcx.const_eval_provider = Some(original);
     let value = u.tcx.const_eval_resolve(&u.prog, env, value, &[]).unwrap();
     assert_eq!(value.try_to_leaf().unwrap().to_bits(4), 3);
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         let id = u.fn_id(FnKey::Inst(target, vec![]));
         let writer = crate::preempt::WriterWaiting::new();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -699,7 +698,7 @@ fn round50_initializer_reload_policy() {
         // no storage, not literal, no scalar fold: the round-51 CTFE-relevant path (full publication)
         assert!(!std::sync::Arc::ptr_eq(&other_before, &u.tcx.typeck(&u.prog, unrelated)), "an unfoldable static without storage took the per-file path");
     }
-    if let Some(undo) = outcome.undo { unsafe { crate::reload::rollback(up, undo); } }
+    if let Some(undo) = outcome.undo { unsafe { crate::reload::rollback(up, undo, "test"); } }
     unsafe { call_jit(up, entry, &mut result as *mut u32 as u64).unwrap_or_else(|p| panic!("{}", p.message)); }
     assert_eq!(result, 3);
     assert_eq!(u.const_addr(value, vec![]), Some(old_addr));
@@ -740,7 +739,7 @@ fn round50_opaque_body_invalidates_solver_answer() {
     let outcome = unsafe { crate::reload::apply(up, vec![crate::reload::Edit { file: u.prog.def(owner).file, path: path.to_string_lossy().into_owned(), src: source.replace("1u8", "2u32").into_bytes() }]) };
     assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
     assert_eq!(hidden(&u), u.tcx.tys.u32_);
-    unsafe { crate::reload::rollback(up, outcome.undo.unwrap()); }
+    unsafe { crate::reload::rollback(up, outcome.undo.unwrap(), "test"); }
     assert_eq!(hidden(&u), u.tcx.tys.u8_);
     std::fs::remove_file(path).unwrap();
 }
@@ -834,7 +833,7 @@ fn deferred_cache_record_is_dropped_when_a_source_changed() {
     tcx.collect(&prog);
     let mut u = Unit::new(prog, tcx, core);
     let up = &mut *u as *mut Unit;
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         let id = u.fn_id(FnKey::Inst(def, Vec::new()));
         let mut cache = crate::cache::Cache::open(&u, crate::cache::Mode::ReadOnly).unwrap();
         cache.mode = crate::cache::Mode::On;
@@ -853,4 +852,57 @@ fn deferred_cache_record_is_dropped_when_a_source_changed() {
         u.cache = Some(cache);
     });
     std::mem::forget(u);
+}
+
+// INVALID2 (invalid.rs group_of): code built AFTER a patch that inlined patched code (here a lazy
+// first compile of an unpatched caller that inlines an `#[inline(always)]` helper the patch
+// changed, a helper that never had code of its own) is that patch generation's code: a rollback
+// of the generation invalidates it (PROT_NONE, stale range) and the caller is built again from
+// the restored source.
+#[test]
+fn invalid_inliner_built_after_patch_is_in_its_group() {
+    isolated_test!(invalid_inliner_built_after_patch_is_in_its_group);
+    const CHILD: &str = "MAKEPAD_RUN_INVALID_INLINER_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "jit::settle_tests::invalid_inliner_built_after_patch_is_in_its_group", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0").output().unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    crate::borrowck::lazy::disable_gandalf();
+    let source = "#![no_std] #[inline(always)] fn inl() -> u32 { 1 } #[inline(never)] fn late(out: *mut u32) { unsafe { *out = inl() * 100; } } fn early(out: *mut u32) { unsafe { *out = 7; } }";
+    let path = std::env::temp_dir().join(format!("relax-invalid-inliner-{}.rs", std::process::id()));
+    std::fs::write(&path, source).unwrap();
+    let session = std::sync::Arc::new(crate::Session::default());
+    let mut prog = Program::new(&session);
+    prog.load_crate("invalid_inliner", path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+    let named = |name| prog.defs.iter().enumerate().find_map(|(i, _)| (prog.name(DefId(i as u32)) == name).then_some(DefId(i as u32))).unwrap();
+    let (late, early, inl) = (named("late"), named("early"), named("inl"));
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    let mut u = Unit::new(prog, tcx, 0);
+    let up = &mut *u as *mut Unit;
+    let mut result = 0u32;
+    let early_entry = u.entry(u.fn_id(FnKey::Inst(early, vec![])));
+    unsafe { call_jit(up, early_entry, &mut result as *mut u32 as u64).unwrap_or_else(|p| panic!("{}", p.message)) };
+    assert_eq!(result, 7);
+    let outcome = unsafe { crate::reload::apply(up, vec![crate::reload::Edit { file: u.prog.def(late).file, path: path.to_string_lossy().into_owned(), src: source.replace("{ 1 }", "{ 2 }").into_bytes() }]) };
+    assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
+    // late's first code: built now, from the patched helper
+    let late_id = u.fn_id(FnKey::Inst(late, vec![]));
+    let late_entry = u.entry(late_id);
+    unsafe { call_jit(up, late_entry, &mut result as *mut u32 as u64).unwrap_or_else(|p| panic!("{}", p.message)) };
+    assert_eq!(result, 200);
+    let inl_id = u.fn_id(FnKey::Inst(inl, vec![]));
+    assert!(u.body_deps.get(&late_id).is_some_and(|d| d.contains(&inl_id)), "late inlined inl: {:?}", u.body_deps.get(&late_id));
+    let code = u.fns[late_id as usize].code;
+    assert!(u.fns[late_id as usize].compiled && u.fns[late_id as usize].patch_gen == 0);
+    assert!(crate::stale::lookup(code).is_none());
+    unsafe { crate::reload::rollback(up, outcome.undo.unwrap(), "test") };
+    assert!(crate::stale::lookup(code).is_some(), "late's code (built after the patch, it inlined the patched helper) is invalidated by the rollback");
+    assert!(!u.fns[late_id as usize].compiled, "late is back at its lazy stub");
+    unsafe { call_jit(up, late_entry, &mut result as *mut u32 as u64).unwrap_or_else(|p| panic!("{}", p.message)) };
+    assert_eq!(result, 100, "late is built again from the restored helper");
+    std::fs::remove_file(path).unwrap();
 }

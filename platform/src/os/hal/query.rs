@@ -11,7 +11,8 @@ impl Cx {
         let request = String::from_utf8_lossy(request);
         let reply = match request.trim() {
             "widgets" => self.hal_widget_rows(),
-            other => format!("error: unknown request `{other}` (the app answers: widgets)"),
+            "draw_owners" => self.draw_owners_answer(),
+            other => format!("error: unknown request `{other}` (the app answers: widgets, draw_owners)"),
         };
         self.hal.frames.w.query_reply(req, reply.as_bytes());
     }

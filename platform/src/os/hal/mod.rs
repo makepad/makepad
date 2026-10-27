@@ -23,6 +23,7 @@ mod query;
 mod readback;
 mod shader;
 mod software_video;
+mod xr;
 
 pub use fonts::*;
 
@@ -127,6 +128,8 @@ pub struct HalClient {
     pub(crate) direct_display: display::DisplayClient,
     /// External compositor state for `--stdin-loop`; ordinary windows have none.
     pub(crate) hosted: Option<hosted::HostedClient>,
+    /// the head-mounted display's stereo window (`xr_start_presenting`)
+    pub(crate) xr: Option<xr::HalXr>,
     /// a window drag started by the app (`CxOsOp::StartDragging`): the in-window drag protocol
     /// synthesises Drag / Drop events from mouse move and up
     pub(crate) internal_drag_items: Option<Arc<Vec<DragItem>>>,
@@ -142,6 +145,9 @@ pub struct HalClient {
     /// The frame profile (`makepad_hal::profile`): the last beat, input intake since it.
     pub(crate) profile_beat: u64,
     pub(crate) profile_input_ns: u64,
+    /// this beat's CPU phases (`FrameMeta::phases`): start, end of dispatch, next-frame
+    /// callbacks, draw, then build / submit / spare (unused)
+    pub(crate) beat_phases: [[u64; 2]; 6],
     /// the HAL said the GPU device is lost and has not reset it yet: no frames are built
     pub(crate) device_lost: bool,
     /// another thread woke the loop (`Wake`)
@@ -164,7 +170,10 @@ pub struct HalClient {
     pub(crate) audio_ctx: [Vec<Option<media::AudioCtx>>; 2],
     /// entries the HAL has replaced: freed once the batch that replaced them is submitted
     pub(crate) retired_ctx: Vec<media::AudioCtx>,
-    #[cfg(any(target_vendor = "apple", target_os = "windows"))]
+    /// entries whose real-time code Relax still compiles: they go to the HAL once it is ready
+    #[cfg(relax)]
+    pub(crate) audio_waiting: Vec<media::AudioWaiting>,
+    #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
     pub(crate) game: media::GameClient,
     pub(crate) camera: camera::CameraClient,
     /// videos the app's own decoder plays, and the ones the HAL's native player plays
@@ -201,6 +210,7 @@ impl Default for HalClient {
             #[cfg(target_os = "linux")]
             direct_display: Default::default(),
             hosted: None,
+            xr: None,
             internal_drag_items: None,
             input_ns: 0,
             composing: false,
@@ -209,6 +219,7 @@ impl Default for HalClient {
             beat: false,
             profile_beat: 0,
             profile_input_ns: 0,
+            beat_phases: [[0; 2]; 6],
             device_lost: false,
             wake: false,
             focused: None,
@@ -221,7 +232,9 @@ impl Default for HalClient {
             midi_senders: Vec::new(),
             audio_ctx: [Vec::new(), Vec::new()],
             retired_ctx: Vec::new(),
-            #[cfg(any(target_vendor = "apple", target_os = "windows"))]
+            #[cfg(relax)]
+            audio_waiting: Vec::new(),
+            #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
             game: Default::default(),
             camera: Default::default(),
             software_videos: HashMap::new(),
@@ -250,6 +263,8 @@ impl HalClient {
     /// and presented at both displays' vsyncs together, more often than its display shows
     /// frames, and the presents queued up and blocked.
     pub(crate) fn window_may_paint(&self, id: WindowId) -> bool {
+        // the XR window paints once per XrFrame (its FrameReady)
+        if self.xr.as_ref().is_some_and(|xr| xr.window == id) { return self.windows.get(&id.0).is_some_and(|w| w.credit); }
         let display_clock = self.info.as_ref().is_some_and(|info| info.flags & makepad_hal::info_flags::DISPLAY_CLOCK != 0);
         !display_clock || self.hosted.is_some() || self.externally_driven || self.windows.get(&id.0).is_none_or(|w| !w.paced || w.credit)
     }
@@ -420,8 +435,15 @@ impl CxMediaApi for Cx {
 
 #[cfg(target_os = "android")]
 mod android_socket;
+#[cfg(target_os = "android")]
+pub(crate) mod android_fleet;
 
 impl crate::cx_api::CxOsApi for Cx {
+    fn xr_eye_matrices(&self) -> Option<[(crate::makepad_math::Mat4f, crate::makepad_math::Mat4f); 2]> {
+        let frame = self.hal.xr.as_ref()?.frame?;
+        Some([xr::eye_matrices(&frame, 0), xr::eye_matrices(&frame, 1)])
+    }
+
     fn init_cx_os(&mut self) {
         self.hal.start_ns = makepad_hal::clock_ns();
         // an Android APK and an iOS / tvOS device have no build tree: the resources are in the
@@ -430,6 +452,7 @@ impl crate::cx_api::CxOsApi for Cx {
         #[cfg(target_os = "android")]
         {
             android_socket::register();
+            android_fleet::register();
             self.package_root = Some("makepad".to_string());
             self.native_load_dependencies();
         }

@@ -138,6 +138,7 @@ impl GlBackend {
         let mut backend = Self::with_source(wake, Box::new(super::linux::EglSurfaceSource(shell)), Some(shell))?;
         backend.info.flags |= info_flags::DISPLAY_CLOCK;
         if shell.client_chrome() { backend.info.flags |= info_flags::CLIENT_CHROME; }
+        if shell.window_manager() { backend.info.flags |= info_flags::WM_HOSTED; }
         backend.info.dpi = shell.dpi();
         Ok(backend)
     }
@@ -145,8 +146,10 @@ impl GlBackend {
     fn with_source(wake: Arc<dyn Fn() + Send + Sync>, source: Box<dyn surface::EglSurfaceSource>, shell: Option<&'static super::linux::Shared>) -> Result<Self, String> {
         let mailbox = Mailbox::new(wake);
         let (queue, caps, thread) = render::start(source, mailbox.clone())?;
-        let info = HalInfo { backend: backend_id::GL, dialect: dialect::GLSL, formats: caps.formats, msaa: 1, dpi: 1.0, flags: 0,
-            max_texture: caps.max_texture, max_window: [caps.max_texture; 2], ..Default::default() };
+        let mut info = HalInfo { backend: backend_id::GL, dialect: dialect::GLSL, formats: caps.formats, msaa: 1, dpi: 1.0, flags: 0,
+            max_texture: caps.max_texture, max_window: [caps.max_texture; 2],
+            device_kind: if caps.software { device_kind::SOFTWARE } else { device_kind::UNKNOWN }, ..Default::default() };
+        info.set_device_name(&caps.renderer);
         if super::log_enabled() { eprintln!("[hal-gl] {} offscreen={} software={}", caps.renderer, shell.is_none(), caps.software); }
         Ok(Self { shell, info, caps, queue, thread: Some(thread), next_key: 1, allocated: Arc::new(AtomicU64::new(0)),
             tex: HashMap::new(), buf: HashMap::new(), pipe: HashMap::new(), programs: HashMap::new(), win: HashMap::new(),
@@ -360,13 +363,22 @@ impl Backend for GlBackend {
     fn window_pixels(&mut self, world: &mut World, sid: u32, window: Option<Id>) -> Option<Pixels> {
         self.host_window_pixels(world, sid, window)
     }
+    /// The process ends next: the render thread (the one GL context) runs what was queued,
+    /// finishes the GPU's work (`Renderer::drop`) and is joined.
+    fn before_exit(&mut self) { self.stop(); }
+}
+
+impl GlBackend {
+    fn stop(&mut self) {
+        self.queue.push(|r| r.exit());
+        if let Some(thread) = self.thread.take() {
+            if thread.join().is_err() { eprintln!("[hal-gl] the render thread panicked"); }
+        }
+    }
 }
 
 impl Drop for GlBackend {
-    fn drop(&mut self) {
-        self.queue.push(|r| r.exit());
-        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
-    }
+    fn drop(&mut self) { self.stop(); }
 }
 
 impl Gpu for GlBackend {
@@ -375,10 +387,6 @@ impl Gpu for GlBackend {
         let handled = media.command(self, s, c);
         self.media = media;
         handled
-    }
-    /// The host's run-state overlay is drawn by the macOS backend only so far; counted here.
-    fn window_overlay(&mut self, s: &mut Session, _id: Id, rect: Option<[f32; 4]>, _layer: Id, _now: u64) {
-        if rect.is_some() { s.stats.overlay_unsupported += 1; }
     }
     fn os(&mut self, sid: u32, command: exec::OsCmd) -> bool {
         if matches!(&command, exec::OsCmd::FileDialog { .. }) { return self.media.dialog(sid, command); }

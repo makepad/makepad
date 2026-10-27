@@ -17,7 +17,8 @@ use crate::buffers::{pack_strs, unpack_forward, DomainInfo, EventQueue};
 use crate::codec::ArenaSink;
 use crate::ledger::{Kind, Ledger, LedgerEntry};
 use crate::types::*;
-use std::collections::{BTreeMap, HashMap};
+use crate::FastMap;
+use std::collections::BTreeMap;
 
 /// Session 0: the host.
 pub const HOST: u32 = 0;
@@ -36,14 +37,14 @@ pub struct Entry<T> {
 /// Objects of one kind, keyed by (session, index).
 #[derive(Debug)]
 pub struct Table<T> {
-    map: HashMap<(u32, u32), Entry<T>>,
+    map: FastMap<(u32, u32), Entry<T>>,
     /// last destroyed generation per slot: a create or use with an older one is stale
-    retired: HashMap<(u32, u32), u32>,
+    retired: FastMap<(u32, u32), u32>,
 }
 
 impl<T> Default for Table<T> {
     fn default() -> Self {
-        Table { map: HashMap::new(), retired: HashMap::new() }
+        Table { map: FastMap::default(), retired: FastMap::default() }
     }
 }
 
@@ -139,6 +140,14 @@ pub struct TextureObj {
     pub lent: Option<LentRef>,
 }
 
+impl TextureObj {
+    /// Six square colour layers are a cube, unless the texture was created as an array
+    /// ([`usage::ARRAY`]); every other layered texture is a 2D array.
+    pub fn is_cube(&self) -> bool {
+        self.depth == 6 && self.w == self.h && !format::is_depth(self.format) && self.usage & usage::ARRAY == 0
+    }
+}
+
 /// What an alias texture of the parent stands for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LentRef {
@@ -178,7 +187,9 @@ pub struct BufferObj {
 pub struct PipelineObj {
     pub dialect: u32,
     pub desc: PipelineDesc,
-    pub code_len: usize,
+    /// The `PipelineCreate` blob as received (header, code, bindings, vertex layout): frame
+    /// capture replays exactly this code.
+    pub blob: std::sync::Arc<[u8]>,
 }
 
 /// An opaque host panel. Its pixels and the application's pixels have separate
@@ -189,6 +200,10 @@ pub struct WindowOverlay {
     pub frame: Option<u64>,
     /// the window layer's texture (NONE: an opaque panel)
     pub layer: Id,
+    /// The executor composes this opaque panel as the window's layer (`Gpu::overlays` false: the
+    /// backend draws no panels itself): while it is up the borrower's frames render into the
+    /// window's retained image and never reach the window; only the panel's frames present.
+    pub composed: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -220,6 +235,110 @@ pub struct WindowObj {
     /// Last submitted base layer (session, window alias, frame), independent of
     /// presentation counters and the overlay's own frame serial.
     pub base_frame: Option<(u32, Id, u64)>,
+    /// Session 0's window: the caption the app drawing it reports (`WindowCaption`).
+    pub app_caption: Option<AppCaption>,
+    /// Session 0's window: the title the app drawing it gave its window (`WindowTitle` on the
+    /// lent window), which `makepad run`'s load screen titles its caption with.
+    pub app_title: Option<String>,
+    /// Session 0's window: its badge that sees the pointer hover (`window_style::BADGE_HOVER`)
+    /// and the badge's rect (window points), and whether the pointer is over it.
+    pub badge_hover: Option<(Id, [f32; 4])>,
+    pub badge_hovered: bool,
+    /// Session 0's window: its badge layer (`target::BADGES`), drawn over every frame it presents.
+    pub badges: Option<std::sync::Arc<KeptFrame>>,
+    /// Session 0's window: the backend has its layer on (`Gpu::badge_layer`) for its badges or a
+    /// composed panel (`exec::sync_layer` keeps the two in step).
+    pub layer_on: bool,
+}
+
+/// A frame kept past its batch (session 0's badge layer): its packet with its own passes and
+/// draws (ranges from 0), the batch's arena, and a copy of every byte run its passes and draws
+/// borrowed from the client (uniforms, inline instances), which their slices point into now.
+#[derive(Debug, Default)]
+pub struct KeptFrame {
+    frame: FramePacket,
+    passes: Vec<Pass>,
+    draws: Vec<Draw>,
+    arena: Vec<u8>,
+    /// 8-aligned (the slices are read as words), never changed after `keep`
+    bytes: Vec<Box<[u64]>>,
+}
+
+// SAFETY: the only pointers are the slices into `bytes`, owned and immutable for the frame's life.
+unsafe impl Send for KeptFrame {}
+unsafe impl Sync for KeptFrame {}
+
+impl KeptFrame {
+    /// A copy of packet `packet` of `view`; `None` when its ranges are out of bounds.
+    ///
+    /// Call only inside the `hal_submit` that received `view` (its slices are still alive).
+    pub fn keep(view: &crate::buffers::CmdView, packet: u32) -> Option<Self> {
+        let p = *view.frames.get(packet as usize)?;
+        let within = |r: Range, len: usize| {
+            let a = r.off as usize;
+            a.checked_add(r.len as usize).filter(|e| *e <= len).map(|e| a..e)
+        };
+        let passes = view.passes.get(within(p.passes, view.passes.len())?)?;
+        let draws_at = within(p.draws, view.draws.len())?;
+        let mut kept = KeptFrame { arena: view.arena.to_vec(), ..Default::default() };
+        let own = |s: Slice, bytes: &mut Vec<Box<[u64]>>| -> Slice {
+            // SAFETY: inside the call that received the slice (see above)
+            let src = unsafe { s.as_bytes() };
+            if src.is_empty() { return Slice::EMPTY; }
+            let mut words = vec![0u64; src.len().div_ceil(8)].into_boxed_slice();
+            // SAFETY: `words` has at least `src.len()` bytes
+            unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), words.as_mut_ptr() as *mut u8, src.len()) };
+            let out = Slice { ptr: words.as_ptr() as *const u8, len: src.len() };
+            bytes.push(words);
+            out
+        };
+        for pass in passes {
+            let r = within(pass.draws, view.draws.len())?;
+            if r.start < draws_at.start || r.end > draws_at.end { return None; }
+            let mut pass = *pass;
+            pass.uniforms = own(pass.uniforms, &mut kept.bytes);
+            pass.draws = Range { off: (r.start - draws_at.start) as u32, len: r.len() as u32 };
+            kept.passes.push(pass);
+        }
+        for d in &view.draws[draws_at] {
+            let mut d = *d;
+            for u in &mut d.uniforms { *u = own(*u, &mut kept.bytes); }
+            d.inst.data = own(d.inst.data, &mut kept.bytes);
+            kept.draws.push(d);
+        }
+        kept.frame = FramePacket {
+            passes: Range { off: 0, len: kept.passes.len() as u32 },
+            draws: Range { off: 0, len: kept.draws.len() as u32 },
+            ..p
+        };
+        Some(kept)
+    }
+
+    /// The frame as a batch of one packet (packet 0).
+    pub fn view(&self) -> crate::buffers::CmdView<'_> {
+        crate::buffers::CmdView { session: HOST, cmds: &[], arena: &self.arena, frames: std::slice::from_ref(&self.frame), passes: &self.passes, draws: &self.draws }
+    }
+
+    /// Whether the frame draws anything (none: the layer ends).
+    pub fn draws(&self) -> bool {
+        !self.draws.is_empty()
+    }
+}
+
+/// The room at the right of an app's caption that the host's caption badge (`makepad run`'s
+/// JIT ring) takes: just left of window buttons at the caption's right, else at the window's
+/// right edge (window points). An app's caption controls keep out of it (`Cx::caption_badge_room`).
+pub const CAPTION_BADGE_ROOM: f32 = 32.0;
+
+/// The caption an app draws in its window (`WindowCaption`), in window points.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AppCaption {
+    /// the strip that drags the window: its top and height (zero: none)
+    pub top: f32,
+    pub height: f32,
+    /// the window buttons in it (zero: none)
+    pub buttons: [f32; 4],
+    pub dark: bool,
 }
 
 impl WindowObj {
@@ -288,12 +407,12 @@ pub struct Session {
     pub app_key: u64,
     /// the dpi factor the backend reported for this session's windows
     pub dpi: f32,
-    pub strings: HashMap<StrId, String>,
+    pub strings: FastMap<StrId, String>,
     pub textures: Table<TextureObj>,
     pub buffers: Table<BufferObj>,
     pub pipelines: Table<PipelineObj>,
     pub windows: Table<WindowObj>,
-    pub timers: HashMap<u32, TimerObj>,
+    pub timers: FastMap<u32, TimerObj>,
     pub ledger: Ledger,
     pub events: EventQueue,
     pub stats: Stats,
@@ -341,12 +460,12 @@ impl Session {
             dpi: 1.0,
             attached: true,
             closing: false,
-            strings: HashMap::new(),
+            strings: FastMap::default(),
             textures: Table::default(),
             buffers: Table::default(),
             pipelines: Table::default(),
             windows: Table::default(),
-            timers: HashMap::new(),
+            timers: FastMap::default(),
             ledger: Ledger::default(),
             events: EventQueue::new(),
             stats: Stats::default(),
@@ -394,7 +513,7 @@ impl Clock {
 
 /// All sessions.
 pub struct World {
-    sessions: HashMap<u32, Session>,
+    sessions: FastMap<u32, Session>,
     next_session: u32,
     next_host_window: u32,
     pub clock: Clock,
@@ -413,7 +532,7 @@ pub struct World {
     /// who hears of a session's window frames besides itself (its parent for an embedded window,
     /// the host for a window lent by the host): a completion thread wakes them with the owner,
     /// so the news is drained at once and not at the owner's next pump
-    pub listeners: std::sync::Arc<std::sync::Mutex<HashMap<u32, Vec<u32>>>>,
+    pub listeners: std::sync::Arc<std::sync::Mutex<FastMap<u32, Vec<u32>>>>,
     /// sessions to close, children before their parent
     close_queue: Vec<(u32, CloseAs)>,
     /// calls to the registered `DomainHost`, made after the command batch (no lock held)
@@ -482,6 +601,10 @@ pub struct ExecRecord {
     pub deps: Vec<(u32, Id, u64)>,
     /// Window composition in back-to-front order. Empty for texture/pick frames.
     pub layers: Vec<(u32, Id, u64)>,
+    /// What reached the window with this frame, back to front: the frame itself, or the panel or
+    /// badge layer it is composed with. Empty: nothing reached it (a texture or pick frame, or a
+    /// borrower's frame under a composed panel, which only renders into the retained image).
+    pub shown: Vec<(u32, Id, u64)>,
 }
 
 impl Default for World {
@@ -492,7 +615,7 @@ impl Default for World {
 
 impl World {
     pub fn new() -> World {
-        let mut sessions = HashMap::new();
+        let mut sessions = FastMap::default();
         sessions.insert(HOST, Session::new(HOST, 0));
         World {
             sessions,
@@ -1136,6 +1259,13 @@ impl World {
     }
 
     /// Creates a window owned by the host that an app may adopt (the spinner window).
+    /// A fresh id for a window of session 0 the session makes itself (a badge: `window_kind::BADGE`).
+    pub fn host_window_id(&mut self) -> Id {
+        let id = Id::new(self.next_host_window, 1);
+        self.next_host_window += 1;
+        id
+    }
+
     pub fn host_window(&mut self, geom: [f32; 4]) -> Id {
         let id = Id::new(self.next_host_window, 1);
         self.next_host_window += 1;
@@ -1198,11 +1328,19 @@ impl World {
         if let Some(crate::HalEvent::Geom { window, x, y, w, h, dpi, state }) = event.decode(payload) {
             self.window_geom(sid, window, [x as f32, y as f32, w as f32, h as f32], dpi, state);
         }
+        // the window buttons' rect goes to the host too, like the geometry: the host draws its
+        // run-state view (a caption strip that leaves the native buttons room) in the lent window
+        if let (Some(crate::HalEvent::Chrome { x, y, w, h, topmost, .. }), Some(hid)) = (event.decode(payload), alias) {
+            self.to_session(HOST, |q| q.chrome(hid, x, y, w, h, topmost));
+        }
         if let Some(crate::HalEvent::Display { window, dpi, .. }) = event.decode(payload) {
             if let Some(w) = self.session(sid).and_then(|s| s.windows.get(sid, window).ok()) {
                 let (geom, state) = (w.val.geom, w.val.state);
                 self.window_geom(sid, window, geom, dpi, state);
             }
+        }
+        if let Some(hid) = alias {
+            self.badge_hover(hid, &event, payload);
         }
         use crate::events::event_tag as tag;
         let input = matches!(event.tag, tag::MouseDown | tag::MouseMove | tag::MouseUp | tag::MouseLeave
@@ -1219,6 +1357,37 @@ impl World {
         });
     }
 
+    /// The pointer over lent window `hid`'s hover badge (`window_style::BADGE_HOVER`): session 0
+    /// gets a copy of each move over it (as an event of the badge) and a `MouseLeave` of it when
+    /// the pointer leaves it or the window. The badge never takes input: every event still goes
+    /// on to the window's owner (a press, a scroll and the caption question there are the app's).
+    fn badge_hover(&mut self, hid: Id, event: &RawEvent, payload: &[u8]) {
+        use crate::events::event_tag as tag;
+        if !matches!(event.tag, tag::MouseMove | tag::MouseLeave) {
+            return;
+        }
+        let Some(w) = self.sessions.get_mut(&HOST).and_then(|s| s.windows.get_mut(HOST, hid).ok()) else { return };
+        let Some((badge, [bx, by, bw, bh])) = w.val.badge_hover else { return };
+        let (x, y) = match event.decode(payload) {
+            Some(crate::HalEvent::MouseMove { x, y, .. } | crate::HalEvent::MouseLeave { x, y, .. }) => (x, y),
+            _ => return,
+        };
+        let (fx, fy) = (x as f32, y as f32);
+        let inside = event.tag == tag::MouseMove && fx >= bx && fy >= by && fx < bx + bw && fy < by + bh;
+        let left = w.val.badge_hovered && !inside;
+        w.val.badge_hovered = inside;
+        if inside {
+            let mut copy = *event;
+            copy.window = badge;
+            self.to_session(HOST, |q| {
+                copy.data = q.put_bytes(payload);
+                q.push(copy);
+            });
+        } else if left {
+            self.to_session(HOST, |q| q.mouse_leave(badge, x, y));
+        }
+    }
+
     /// Objects alive of one kind, summed over all sessions.
     pub fn count(&self, kind: Kind) -> usize {
         self.sessions
@@ -1230,5 +1399,23 @@ impl World {
                 Kind::Window => s.windows.len(),
             })
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod texture_kind_tests {
+    use super::*;
+
+    fn tex(w: u32, h: u32, layers: u32, fmt: u32, usage: u16) -> TextureObj {
+        TextureObj { format: fmt, w, h, depth: layers, mips: 1, usage, bytes: 0, imported: false, uploaded: 0, lent: None }
+    }
+
+    #[test]
+    fn six_square_colour_layers_are_a_cube_unless_made_as_an_array() {
+        assert!(tex(64, 64, 6, format::BGRA8, usage::SAMPLED).is_cube());
+        assert!(!tex(64, 64, 6, format::BGRA8, usage::SAMPLED | usage::ARRAY).is_cube());
+        assert!(!tex(64, 32, 6, format::BGRA8, usage::SAMPLED).is_cube());
+        assert!(!tex(64, 64, 4, format::BGRA8, usage::SAMPLED).is_cube());
+        assert!(!tex(64, 64, 6, format::DEPTH32F, usage::SAMPLED).is_cube());
     }
 }

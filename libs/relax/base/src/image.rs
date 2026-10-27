@@ -75,7 +75,7 @@ unsafe impl Pod for crate::ast::ForeignModItem {}
 unsafe impl Pod for crate::ast::Path {}
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"RFI1");
-/// bump when a section's meaning changes (layouts are covered by the build id)
+/// bump when a section's meaning changes (layouts are covered by the codegen identity: relax-base is in it)
 pub const VERSION: u32 = 11;
 
 const HEAD: usize = 16;
@@ -153,6 +153,13 @@ impl<'a> Writer<'a> {
     pub fn add_image(&mut self, id: u32, image: std::sync::Arc<Writer<'a>>) {
         let n = image.len() as u64;
         self.secs.push((id, 1, vec![Chunk::Image(image)], n));
+    }
+
+    /// `add_image` at section position `at`: a section built after the ones that follow it
+    /// (relax-types Tcx::collected_writer_with encodes the type interner last).
+    pub fn insert_image(&mut self, at: usize, id: u32, image: std::sync::Arc<Writer<'a>>) {
+        let n = image.len() as u64;
+        self.secs.insert(at, (id, 1, vec![Chunk::Image(image)], n));
     }
 
     /// Freeze borrowed arrays while keeping generated sections and nested images intact.

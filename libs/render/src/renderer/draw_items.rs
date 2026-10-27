@@ -376,6 +376,8 @@ pub(super) enum ModelDraw<'a> {
     Grass(&'a mut crate::shaders::DrawSceneGrass),
     /// Swaying trees and bushes (shaders/foliage.rs).
     Foliage(&'a mut crate::shaders::DrawSceneFoliageLit),
+    /// Generated terrain tiles, their paint blended per pixel (shaders/splat.rs).
+    Splat(&'a mut crate::shaders::DrawSceneSplat),
 }
 
 impl ModelDraw<'_> {
@@ -387,13 +389,14 @@ impl ModelDraw<'_> {
             ModelDraw::City(d) => &mut d.pbr.skinned,
             ModelDraw::Grass(d) => &mut d.pbr.skinned,
             ModelDraw::Foliage(d) => &mut d.pbr.skinned,
+            ModelDraw::Splat(d) => &mut d.pbr.skinned,
         }
     }
 
     /// The PBR shader and its game.material variant: both bind the eye and
     /// each layer's metallic-roughness.
     pub(super) fn is_pbr(&self) -> bool {
-        matches!(self, ModelDraw::Pbr(_) | ModelDraw::Custom(..) | ModelDraw::City(_) | ModelDraw::Grass(_) | ModelDraw::Foliage(_))
+        matches!(self, ModelDraw::Pbr(_) | ModelDraw::Custom(..) | ModelDraw::City(_) | ModelDraw::Grass(_) | ModelDraw::Foliage(_) | ModelDraw::Splat(_))
     }
 
     fn pbr(&mut self) -> Option<&mut DrawScenePbr> {
@@ -404,6 +407,7 @@ impl ModelDraw<'_> {
             ModelDraw::City(d) => Some(&mut d.pbr),
             ModelDraw::Grass(d) => Some(&mut d.pbr),
             ModelDraw::Foliage(d) => Some(&mut d.pbr),
+            ModelDraw::Splat(d) => Some(&mut d.pbr),
         }
     }
 
@@ -414,6 +418,19 @@ impl ModelDraw<'_> {
         if let Some(d) = self.pbr() {
             let was = d.skinned.uniform_value(cx, live_id!(emissive));
             d.skinned.draw_vars.set_uniform(cx, live_id!(emissive), &[was[0] + e.x, was[1] + e.y, was[2] + e.z]);
+        }
+    }
+
+    /// Light a signal lamp layer (a material with a lamp role) from the
+    /// copy's vehicle signals: `set_material` bound the lamp fully lit, and
+    /// this scales it to what the lamp shows now. Other layers keep theirs.
+    pub(super) fn light_lamp(&mut self, cx: &Cx, m: &LayerMaterial, lamps: makepad_scene::light::LampSignals, lamp_level: f32) {
+        let Some(surface) = m.surface.as_ref() else { return };
+        let Some(role) = surface.definition.lamp else { return };
+        if let Some(d) = self.pbr() {
+            let gain = crate::material_surface::lamp_gain(role, lamps, lamp_level);
+            let e = surface.definition.emissive;
+            d.skinned.draw_vars.set_uniform(cx, live_id!(emissive), &[e[0] * gain, e[1] * gain, e[2] * gain]);
         }
     }
 
@@ -486,6 +503,25 @@ impl ModelDraw<'_> {
         // One recipe per layer: only the shell FRACTION differs between the
         // instances a layer emits, and that stays on the instance stream.
         self.base().draw_vars.set_uniform(cx, live_id!(fur), &[fur.x, fur.y, fur.z, fur.w]);
+        // A terrain tile's paint: the layer arrays, the weight map (on the
+        // occlusion slot: the lane reads no occlusion) and the per-layer
+        // terms. Slot 0 (the albedo array) is bound per draw by the lane.
+        if let (ModelDraw::Splat(d), Some(p)) = (&mut *self, m.surface.as_ref().and_then(|s| s.splat.as_ref())) {
+            let vars = &mut d.pbr.skinned.draw_vars;
+            vars.set_uniform(cx, live_id!(occlusion_strength), &[0.0]);
+            vars.set_uniform(cx, live_id!(splat_map), &p.map);
+            vars.set_uniform(cx, live_id!(splat_size), &p.size);
+            for (i, id) in [live_id!(splat_l0), live_id!(splat_l1), live_id!(splat_l2), live_id!(splat_l3), live_id!(splat_l4), live_id!(splat_l5), live_id!(splat_l6), live_id!(splat_l7)].into_iter().enumerate() {
+                vars.set_uniform(cx, id, &p.params[i]);
+            }
+            if let Some(id) = vars.draw_shader_id {
+                for (name, texture) in [(live_id!(normal_map), &p.normal), (live_id!(occlusion_map), &p.weights)] {
+                    if let Some(slot) = cx.draw_shaders[id.index].mapping.textures.iter().position(|t| t.id == name).filter(|slot| *slot < vars.texture_slots.len()) {
+                        vars.set_texture(slot, texture);
+                    }
+                }
+            }
+        }
     }
 
     pub(super) fn submit(&mut self, cx: &mut Cx3d, distance: f32, fur_budget: &mut usize) -> usize {

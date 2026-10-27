@@ -1,0 +1,15 @@
+[package]
+name = "makepad-stack"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad secondary stack: frame-scoped bump allocation with alloca-style returns"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+
+# `cfg(relax)`: under makepad run the secondary stack is the JIT thread's (the runtime owns it)
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(relax)'] }

@@ -17,6 +17,79 @@ const STACK_SEGMENT: usize = 64 << 20;
 thread_local! {
     /// lowest usable address of the stack this thread runs on now (0: not known yet)
     static STACK_LO: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// the program stack this thread runs on (`on_program_stack`): usable [lo, hi), or (0, 0)
+    static PROGRAM_STACK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// The program stack the calling thread runs on now (`on_program_stack`): usable (lo, hi).
+/// Stack walkers and the fault reports bound their reads by it instead of the OS thread's stack.
+pub fn program_stack_bounds() -> Option<(usize, usize)> {
+    PROGRAM_STACK.try_with(|c| c.get()).ok().filter(|b| b.1 != 0)
+}
+
+/// Size of a program thread's stack reservation: a quarter of physical memory, 1..64 GiB
+/// (MAKEPAD_RUN_STACK_GB overrides). Pages are committed as the stack grows into them, so the size
+/// costs address space only; the bound keeps a runaway recursion from paging the machine to death
+/// before it reaches the guard.
+pub fn program_stack_size() -> usize {
+    static SIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *SIZE.get_or_init(|| {
+        const GB: usize = 1 << 30;
+        if let Some(g) = std::env::var("MAKEPAD_RUN_STACK_GB").ok().and_then(|v| v.parse::<usize>().ok()) {
+            return g.clamp(1, 1024) * GB;
+        }
+        if cfg!(not(target_pointer_width = "64")) {
+            return 64 << 20;
+        }
+        (imp::physical_memory() / 4).clamp(GB, 64 * GB)
+    })
+}
+
+/// Runs `f` on a program stack: one large reservation (`program_stack_size`, halved until the
+/// system grants one), committed as it is touched, with a no-access guard below it. A recursion
+/// that overruns it faults on the guard (reported as a stack overflow), never writes past it.
+/// `bounds_changed` runs on the new stack before `f` and again back on the thread's own stack
+/// after it (callers refresh their cached stack bounds there).
+/// Without a reservation (none granted) `f` runs on the thread's own stack.
+pub fn on_program_stack<F: FnOnce()>(bounds_changed: fn(), f: F) {
+    let mut len = program_stack_size();
+    let seg = loop {
+        if let Some(s) = imp::reserve_stack(len) {
+            break Some(s);
+        }
+        if len <= (64 << 20) {
+            break None;
+        }
+        len /= 2;
+    };
+    let Some(seg) = seg else {
+        f();
+        return;
+    };
+    struct Job<F> {
+        f: Option<F>,
+        bounds_changed: fn(),
+        r: Option<std::thread::Result<()>>,
+    }
+    extern "C" fn run<F: FnOnce()>(p: *mut u8) {
+        let job = unsafe { &mut *(p as *mut Job<F>) };
+        (job.bounds_changed)();
+        let f = job.f.take().unwrap();
+        // a Rust panic must not unwind through the stack switch (no unwind info for it)
+        job.r = Some(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)));
+    }
+    let mut job: Job<F> = Job { f: Some(f), bounds_changed, r: None };
+    let (old_lo, old_ps) = (STACK_LO.with(|c| c.get()), PROGRAM_STACK.with(|c| c.get()));
+    STACK_LO.with(|c| c.set(seg.floor));
+    PROGRAM_STACK.with(|c| c.set((seg.floor, seg.top)));
+    unsafe { imp::call_on_segment(&seg, run::<F>, &mut job as *mut Job<F> as *mut u8) };
+    STACK_LO.with(|c| c.set(old_lo));
+    PROGRAM_STACK.with(|c| c.set(old_ps));
+    bounds_changed();
+    imp::free_segment(seg);
+    if let Some(Err(e)) = job.r.take() {
+        std::panic::resume_unwind(e);
+    }
 }
 
 /// Runs `f` on a fresh stack segment when this thread's stack is nearly used up.
@@ -35,7 +108,7 @@ fn grow<R, F: FnOnce() -> R>(f: F) -> R {
     let here = &f as *const _ as usize;
     let mut lo = STACK_LO.with(|c| c.get());
     if lo == 0 {
-        lo = stack_lo();
+        lo = program_stack_bounds().map_or_else(stack_lo, |b| b.0);
         STACK_LO.with(|c| c.set(lo));
     }
     if lo == 0 || here.saturating_sub(lo) >= STACK_RED_ZONE {
@@ -66,11 +139,13 @@ fn grow<R, F: FnOnce() -> R>(f: F) -> R {
     }
 }
 
-/// A stack segment: usable [lo, top), mapped [base, base + len).
+/// A stack segment: usable [lo, top), mapped [base, base + len); `floor`: the lowest address the
+/// stack may grow to (above the guard; = lo unless the OS commits the segment as it grows).
 struct Segment {
     base: usize,
     len: usize,
     lo: usize,
+    floor: usize,
     top: usize,
 }
 
@@ -152,11 +227,47 @@ mod imp {
         // a guard page at the low end: an overflow faults instead of writing below the segment
         unsafe { mprotect(seg, GUARD, 0) };
         crate::memstat::name_mapping(seg as usize, len, c"makepad-run-stack");
-        Some(Segment { base: seg as usize, len, lo: seg as usize + GUARD, top: (seg as usize + len) & !15 })
+        Some(Segment { base: seg as usize, len, lo: seg as usize + GUARD, floor: seg as usize + GUARD, top: (seg as usize + len) & !15 })
     }
 
     pub(super) fn free_segment(s: Segment) {
         unsafe { munmap(s.base as *mut c_void, s.len) };
+    }
+
+    /// Guard bytes below a program stack (big frames probe every page, so any access below the
+    /// stack's end lands here first).
+    const PROGRAM_GUARD: usize = 1 << 20;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const MAP_NORESERVE: i32 = 0x4000;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    const MAP_NORESERVE: i32 = 0;
+
+    /// A program stack: a lazily committed reservation (Linux: no commit charge until touched),
+    /// its lowest PROGRAM_GUARD bytes no-access.
+    pub(super) fn reserve_stack(len: usize) -> Option<Segment> {
+        let seg = unsafe { mmap(std::ptr::null_mut(), len, PROT_RW, MAP_PRIVATE_ANON | MAP_NORESERVE, -1, 0) };
+        if seg as isize == -1 || seg.is_null() {
+            return None;
+        }
+        if unsafe { mprotect(seg, PROGRAM_GUARD, 0) } != 0 {
+            unsafe { munmap(seg, len) };
+            return None;
+        }
+        crate::memstat::name_mapping(seg as usize, len, c"makepad-run-program-stack");
+        let lo = seg as usize + PROGRAM_GUARD;
+        Some(Segment { base: seg as usize, len, lo, floor: lo, top: (seg as usize + len) & !15 })
+    }
+
+    pub(super) fn physical_memory() -> usize {
+        extern "C" {
+            fn sysconf(name: i32) -> i64;
+        }
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        const PAGES: (i32, i32) = (85, 30); // _SC_PHYS_PAGES, _SC_PAGESIZE
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        const PAGES: (i32, i32) = (200, 29);
+        let (n, p) = unsafe { (sysconf(PAGES.0), sysconf(PAGES.1)) };
+        if n > 0 && p > 0 { (n as usize).saturating_mul(p as usize) } else { 16 << 30 }
     }
 
     /// Calls `f(data)` with the stack pointer at the segment's top, back on this stack after.
@@ -205,12 +316,61 @@ mod imp {
         }
         let mut old = 0u32;
         unsafe { VirtualProtect(seg, GUARD, PAGE_NOACCESS, &mut old) };
-        Some(Segment { base: seg as usize, len, lo: seg as usize + GUARD, top: (seg as usize + len) & !15 })
+        Some(Segment { base: seg as usize, len, lo: seg as usize + GUARD, floor: seg as usize + GUARD, top: (seg as usize + len) & !15 })
     }
 
     pub(super) fn free_segment(s: Segment) {
         let _ = s.len;
         unsafe { VirtualFree(s.base as *mut u8, 0, MEM_RELEASE) };
+    }
+
+    const PAGE_GUARD: u32 = 0x100;
+    /// committed at first: the top of a program stack, then its guard page
+    const INITIAL: usize = 1 << 20;
+    /// kept reserved (never committed) above the reservation's base: the stack overflows here
+    const PROGRAM_GUARD: usize = 1 << 20;
+
+    /// A program stack as a fiber's: reserved, its top committed with a guard page below that
+    /// the system moves down as the stack grows (TEB StackLimit; call_on_segment sets the
+    /// bounds). The commit charge follows use.
+    pub(super) fn reserve_stack(len: usize) -> Option<Segment> {
+        let base = unsafe { VirtualAlloc(std::ptr::null_mut(), len, MEM_RESERVE, PAGE_NOACCESS) };
+        if base.is_null() {
+            return None;
+        }
+        let top = (base as usize + len) & !15;
+        let lo = base as usize + len - INITIAL;
+        let ok = unsafe {
+            !VirtualAlloc(lo as *mut u8, INITIAL, MEM_COMMIT, PAGE_READWRITE).is_null()
+                && !VirtualAlloc((lo - 4096) as *mut u8, 4096, MEM_COMMIT, PAGE_READWRITE | PAGE_GUARD).is_null()
+        };
+        if !ok {
+            unsafe { VirtualFree(base, 0, MEM_RELEASE) };
+            return None;
+        }
+        Some(Segment { base: base as usize, len, lo, floor: base as usize + PROGRAM_GUARD, top })
+    }
+
+    #[repr(C)]
+    struct MemoryStatusEx {
+        length: u32,
+        load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page_file: u64,
+        avail_page_file: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended_virtual: u64,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalMemoryStatusEx(s: *mut MemoryStatusEx) -> i32;
+    }
+
+    pub(super) fn physical_memory() -> usize {
+        let mut m = MemoryStatusEx { length: std::mem::size_of::<MemoryStatusEx>() as u32, load: 0, total_phys: 0, avail_phys: 0, total_page_file: 0, avail_page_file: 0, total_virtual: 0, avail_virtual: 0, avail_extended_virtual: 0 };
+        if unsafe { GlobalMemoryStatusEx(&mut m) } != 0 { m.total_phys as usize } else { 16 << 30 }
     }
 
     /// Calls `f(data)` (Win64: data in rcx, 32 bytes of shadow space) on the segment. The TEB's
@@ -252,6 +412,12 @@ mod imp {
         None
     }
     pub(super) fn free_segment(_s: Segment) {}
+    pub(super) fn reserve_stack(_len: usize) -> Option<Segment> {
+        None
+    }
+    pub(super) fn physical_memory() -> usize {
+        1 << 30
+    }
     pub(super) unsafe fn call_on_segment(_s: &Segment, _f: extern "C" fn(*mut u8), _data: *mut u8) {}
 }
 

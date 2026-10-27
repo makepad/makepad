@@ -280,6 +280,8 @@ pub struct Renderer {
     /// vertices never change, so its per-frame cost is one instance. See
     /// model.rs.
     static_models: Vec<(String, LoadedModel)>,
+    /// The model lanes' draw names for the GPU profiler, made once each.
+    draw_names: draw_models::DrawNames,
     preview_originals: std::collections::HashMap<String, (LoadedModel, Option<String>)>,
     preview_new: std::collections::HashSet<String>,
     /// The map-sky shader, built lazily from its script type default (the
@@ -426,6 +428,19 @@ pub struct Renderer {
     /// frame (else foliage stays on the PBR lane).
     foliage_draw: Option<Box<crate::shaders::DrawSceneFoliageLit>>,
     foliage_ready: bool,
+    /// The terrain paint lane's shader, and whether it can draw this frame
+    /// (else painted tiles draw their main layer on the PBR lane).
+    splat_draw: Option<Box<crate::shaders::DrawSceneSplat>>,
+    splat_ready: bool,
+    /// Multiplier on every model's stand-in distance (`makepadShading.impostor`):
+    /// the quality tier's say in where trees turn into impostors.
+    impostor_scale: f32,
+    /// The tier's grass radius multiplier and kept blade fraction.
+    grass_radius_scale: f32,
+    grass_density: f32,
+    /// The tier's reach of terrain paint blending (quality_tier.rs).
+    terrain_blend_reach: f32,
+    graphics_tier: crate::quality_tier::GraphicsTier,
     grass_rings: [Vec<(f32, f32)>; 3],
     /// The PBR pipeline can draw this frame (`draw_models_inner`).
     pbr_ready: bool,
@@ -518,6 +533,9 @@ pub struct Renderer {
     model_headlight_owners: Vec<u64>,
     /// The vehicle-lamp radius, eased between frames (`entity_lights`).
     vehicle_lamp_radius: f32,
+    /// This frame's headlight level (`light::lamp_level`: 0 in daylight, 1
+    /// at night or in fog), which the tail lamp lenses' running glow follows.
+    lamp_level: f32,
     /// Lights `stream_lights` queued this frame, and how many of them the
     /// frame budget kept.
     stream_light_count: usize,
@@ -690,6 +708,7 @@ impl Default for Renderer {
             skin_palette_texels: 0,
             skin_joint_bases: Vec::new(),
             static_models: Vec::new(),
+            draw_names: Default::default(),
             preview_originals: std::collections::HashMap::new(),
             preview_new: std::collections::HashSet::new(),
             sky_draw: None,
@@ -742,6 +761,13 @@ impl Default for Renderer {
             grass_draw: None,
             foliage_draw: None,
             foliage_ready: false,
+            splat_draw: None,
+            splat_ready: false,
+            impostor_scale: crate::quality_tier::GraphicsTier::High.budget().impostor_scale,
+            grass_radius_scale: 1.0,
+            grass_density: 1.0,
+            terrain_blend_reach: f32::MAX,
+            graphics_tier: crate::quality_tier::GraphicsTier::High,
             grass_rings: Default::default(),
             pbr_ready: false,
             lane_variants: Default::default(),
@@ -789,6 +815,7 @@ impl Default for Renderer {
             host_asset_lights:Vec::new(),asset_light_error:None,light_eye:Vec3f::default(),light_daylight:SunLight::default().dir,camera_relative:false,
             model_headlight_owners: Vec::new(),
             vehicle_lamp_radius: 0.0,
+            lamp_level: 0.0,
             stream_light_count: 0,
             frame_stream_lights: 0,
             frame_vehicle_lamps: 0,

@@ -182,6 +182,78 @@ mod tests {
         })
     }
 
+    /// Glyph animators at both vector widths (4 and 8 lanes) and on the interpreter: the same
+    /// draw records and the same counted work, at glyph counts around multiples of 4 and 8. The
+    /// kits: three written here, plus every `*.splash` kit in the directory `KINETIC_KITS`
+    /// names (the stock kits: apps/commercial/engine/resources/kits/kinetic).
+    #[test]
+    fn kit_animators_are_the_same_at_both_widths() {
+        use makepad_script_compute::native_vec::with_lanes;
+        let mut kits: Vec<(String, String)> = vec![
+            ("wave".into(), "Kinetic{\n  dials: {swing: 0.25}\n  glyph: fn(g, o) {\n    let w = wave(g.rest.x, width, size, time, 1.0 + swing, 1.0, pulse)\n    o.pos.y = o.pos.y + w.x + g.t * 2.0\n    o.rot = qz(w.y)\n  }\n}\n".into()),
+            ("branchy".into(), "Kinetic{\n  glyph: fn(g, o) {\n    let s = max(time - text_at, 0.0) * bpm / 60.0\n    let l = clamp((s - g.t * 0.5) / 0.75, 0.0, 1.0)\n    if l < 1.0 { o.pos.y = o.pos.y + (1.0 - l) * size * 8.0 } else { o.scale = o.scale * (1.0 + 0.1 * bass) }\n    for k in 0..4 { if band(float(k) / 4.0) > 0.6 { o.color.x = o.color.x + 0.1 } }\n  }\n}\n".into()),
+            ("still".into(), "Kinetic{ dials: {a: 0.1} }".into()),
+        ];
+        if let Ok(dir) = std::env::var("KINETIC_KITS") {
+            let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("KINETIC_KITS {dir}: {e}")).filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "splash")).collect();
+            files.sort();
+            for f in files {
+                kits.push((f.file_name().unwrap().to_string_lossy().into_owned(), std::fs::read_to_string(&f).unwrap()));
+            }
+        }
+        let (mut checked, mut vector, mut skipped) = (0, 0, Vec::new());
+        for (name, src) in &kits {
+            let ks = with_kit(src, |vm, kit| {
+                let kit = kit.map_err(|e| e.to_string())?;
+                let k4 = with_lanes(4, || compile(vm, &kit, Which::Glyph, &out_layout()))?;
+                let k8 = with_lanes(8, || compile(vm, &kit, Which::Glyph, &out_layout()))?;
+                Ok::<_, String>((k4, k8))
+            });
+            let (k4, k8) = match ks {
+                Ok(k) => k,
+                // a kit this tree cannot load (a newer kit than the engine) is named, not compared
+                Err(e) => {
+                    skipped.push(format!("{name}: {}", e.lines().next().unwrap_or("")));
+                    continue;
+                }
+            };
+            assert_eq!(k4.simd(), k8.simd(), "{name}: vector code at one width only");
+            if k4.simd() {
+                assert_eq!((k4.vector_lanes(), k8.vector_lanes()), (4, 8), "{name}: lanes");
+            }
+            vector += k4.simd() as usize;
+            for n in [1usize, 4, 7, 8, 9, 13, 16, 33, 200] {
+                let stride = 40;
+                let recs: Vec<f32> = (0..n * stride).map(|j| ((j * 7919 + 13) % 1000) as f32 * 0.002 - 0.5).collect();
+                let spec: Vec<f32> = (0..32).map(|j| (j as f32 * 0.37).sin() * 0.5 + 0.5).collect();
+                let run = |k: &KernelRef, mode: u8| {
+                    let mut out = vec![0.0f32; n * 24];
+                    let mut call = k.call();
+                    call.set_simd(mode == 2);
+                    call.set_time(2.75);
+                    for (p, v) in [("beat", 5.5), ("phase", 0.25), ("pulse", 0.6), ("bpm", 128.0), ("bass", 0.7), ("mid", 0.4), ("high", 0.2), ("width", 6.0), ("text_at", 1.0)] {
+                        call.set_param(p, v);
+                    }
+                    call.input("spectrum", &spec).unwrap();
+                    call.input("glyphs", &recs).unwrap();
+                    call.output("out", &mut out).unwrap();
+                    let st = if mode == 0 { call.run_interp(n) } else { call.run(n) }.unwrap();
+                    drop(call);
+                    (out.iter().map(|x| x.to_bits()).collect::<Vec<u32>>(), st.work)
+                };
+                let want = run(&k4, 0);
+                for (lanes, k) in [(4, &k4), (8, &k8)] {
+                    for mode in [1u8, 2] {
+                        assert!(run(k, mode) == want, "{name}: x{lanes} mode {mode} differs from the interpreter at {n} glyphs");
+                    }
+                }
+            }
+            checked += 1;
+        }
+        eprintln!("{checked} kit animators ({vector} with vector code) the same bits at 4 and 8 lanes; {} not loadable here: {:?}", skipped.len(), skipped);
+        assert!(checked >= 3 && vector >= 2, "checked {checked}, vector {vector}");
+    }
+
     #[test]
     fn a_kit_animator_compiles_runs_and_names_its_lines() {
         let src = "fn lift(g) { g.t * 2.0 }\nKinetic{\n  dials: {swing: 0.25}\n  glyph: fn(g, o) {\n    let w = wave(g.rest.x, width, size, time, 1.0 + swing, 1.0, pulse)\n    o.pos.y = o.pos.y + w.x + lift(g)\n    o.rot = qz(w.y)\n  }\n}\n";

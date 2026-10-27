@@ -1,8 +1,7 @@
 //! The compiled-kernel store: a kernel loaded from stored code computes what a fresh compile
 //! computes, also when the host trampoline it calls sits at another address (the next run).
-//! The store holds the shared back end's code: the host's kernel path on x86-64, and on AArch64
-//! with `shared-backend` (until it is the default there).
-#![cfg(any(target_arch = "x86_64", all(target_arch = "aarch64", feature = "shared-backend")))]
+//! The store holds the shared back end's code (both targets).
+#![cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 
 use makepad_script_compute::host::{self, ErrorSink, HostCallFrame, HostCallbacks, HostFn, Tier};
 use makepad_script_compute::ir::Ty;

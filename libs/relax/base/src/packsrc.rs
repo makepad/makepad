@@ -283,9 +283,40 @@ pub fn run(opts: Options) -> Result<(), String> {
     // an Android app reads its resources (fonts, images, ..) from the APK's assets, which the
     // APK builder packages per crate (cargo makepad android): the archive holds the sources
     let assets_in_apk = opts.target.as_deref().is_some_and(|t| t.contains("android"));
-    for p in graph.iter().filter(|_| !assets_in_apk) {
+    // ... except the packed apps' own `resources/`: an app reads its data there by path
+    // (CARGO_MANIFEST_DIR/resources: Sandbox's bundled games), which APK assets cannot serve (no
+    // folder listing)
+    let apps: BTreeSet<&str> = opts.packages.iter().map(|(name, _)| name.as_str()).collect();
+    let is_app = |dir: &str| {
+        let manifest = if dir.is_empty() { "Cargo.toml".to_string() } else { format!("{dir}/Cargo.toml") };
+        std::fs::read_to_string(root.join(manifest)).is_ok_and(|t| {
+            t.lines().skip_while(|l| l.trim() != "[package]").skip(1).take_while(|l| !l.trim_start().starts_with('[')).any(|l| {
+                l.split_once('=').is_some_and(|(k, v)| k.trim() == "name" && apps.contains(v.trim().trim_matches('"')))
+            })
+        })
+    };
+    for p in graph.iter().filter(|p| !assets_in_apk || is_app(p)) {
         let res = if p.is_empty() { "resources".to_string() } else { format!("{p}/resources") };
         walk(&root, &res, &mut files)?;
+    }
+    // data a crate reads by a path outside its own folder, declared in its manifest:
+    // `[package.metadata.makepad] data = ["../../../engine/resources/kits"]` (Sandbox's game
+    // script reads the engine's kits so; without them a store run's games fail to load)
+    for p in graph.iter() {
+        let manifest = if p.is_empty() { "Cargo.toml".to_string() } else { format!("{p}/Cargo.toml") };
+        let Ok(text) = std::fs::read_to_string(root.join(&manifest)) else { continue };
+        let section = text.lines().skip_while(|l| l.trim() != "[package.metadata.makepad]").skip(1).take_while(|l| !l.trim_start().starts_with('['));
+        for line in section {
+            let Some((k, v)) = line.split_once('=') else { continue };
+            if k.trim() != "data" { continue; }
+            for rel in v.trim().trim_start_matches('[').trim_end_matches(']').split(',').map(|d| d.trim().trim_matches('"')).filter(|d| !d.is_empty()) {
+                let mut parts: Vec<&str> = if p.is_empty() { Vec::new() } else { p.split('/').collect() };
+                for c in rel.split('/') {
+                    match c { "" | "." => {}, ".." => { parts.pop(); } c => parts.push(c) }
+                }
+                walk(&root, &parts.join("/"), &mut files)?;
+            }
+        }
     }
     let mut std_files = BTreeSet::new();
     walk(&root, STD_DIR, &mut std_files)?;

@@ -41,7 +41,7 @@ enum Folded { Value(EvalToValTreeResult), Execute(ConstEvalKey) }
 /// code; where it succeeds, eval_to_valtree folds to the same value.
 /// A cycle (which the query engine would report) is not folded here.
 pub fn fold_without_execution(tcx: &Tcx, prog: &Program, typing_env: TypingEnv, def: DefId) -> Option<EvalToValTreeResult> {
-    crate::gen_local! { static ACTIVE: std::cell::RefCell<Vec<DefId>>; }
+    crate::memo_local! { static ACTIVE: std::cell::RefCell<Vec<DefId>>; }
     if ACTIVE.with(|a| a.borrow().contains(&def)) { return None; }
     ACTIVE.with(|a| a.borrow_mut().push(def));
     let folded = fold_to_valtree(tcx, prog, &ConstEvalKey { typing_env, def, args: Arc::from([]) }, true);
@@ -97,7 +97,7 @@ fn fold_to_valtree(tcx: &Tcx, prog: &Program, key: &ConstEvalKey, fold_only: boo
         None => return Folded::Execute(key.clone()),
     };
     let size = match tcx.tys.kind(ty) {
-        TyKind::Int(p) => crate::types::Types::int_info(*p).0 as u8,
+        TyKind::Int(p) => tcx.tys.int_info(*p).0 as u8,
         TyKind::Bool => 1,
         TyKind::Char => 4,
         _ => return Folded::Value(Err(ErrorHandled::Reported(ValTreeCreationError::NonSupportedType(ty)))),
@@ -133,3 +133,4 @@ pub fn evaluation_error() -> ErrorHandled {
 
 #[cfg(test)]
 mod tests;
+pub mod interp;

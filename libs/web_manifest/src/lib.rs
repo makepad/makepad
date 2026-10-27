@@ -18,6 +18,8 @@ use std::io::Write;
 use std::path::Path;
 
 /// The files of a manifest directory.
+pub mod embed;
+
 pub mod files {
     /// Per font file: `<font hash> <glyph id> <glyph id> ...`, one font per
     /// line: every glyph a layout returned.

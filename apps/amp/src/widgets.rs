@@ -87,6 +87,28 @@ script_mod! {
             default_row_height: 36.0
             cols: 6
             allow_col_reorder: true
+            // A press that travels carries the picked rows out of the
+            // window (drag_out.rs); Shift picks a run of rows.
+            row_drag: true
+        }
+    }
+
+    // The AI music page's songs (ai_table.rs): the track table's grid and
+    // type, its own columns.
+    mod.widgets.AiTableBase = #(crate::ai_table::AiTable::register_widget(vm))
+    mod.widgets.AiTable = set_type_default() do mod.widgets.AiTableBase{
+        width: Fill
+        height: Fill
+        flow: Down
+        draw_title +: {text_style: theme.font_regular{font_size: 11.5}}
+        draw_small +: {text_style: theme.font_regular{font_size: 10.0}}
+        draw_icon +: {text_style: theme.font_icons{font_size: 10.0}}
+        draw_round: mod.widgets.DrawMusicRound{}
+        grid := MusicGrid{
+            default_row_height: 36.0
+            cols: 6
+            // A press that travels carries the song out of the window.
+            row_drag: true
         }
     }
 
@@ -152,7 +174,7 @@ pub const ICON_RADIO: &str = "\u{f519}";
 pub const ICON_QUEUE: &str = "\u{f0cb}";
 const ICON_FOLDER: &str = "\u{f07b}";
 const ICON_LIST: &str = "\u{f03a}";
-const ICON_SPEAKER: &str = "\u{f027}";
+pub(crate) const ICON_SPEAKER: &str = "\u{f027}";
 /// A track there is a local file of: a drive.
 const ICON_LOCAL: &str = "\u{f0a0}";
 const ICON_CACHED: &str = "\u{f058}";
@@ -160,7 +182,7 @@ const CACHED_INK: Vec4f = Vec4f { x: 0.24, y: 0.80, z: 0.43, w: 1.0 };
 
 /// The row under the pointer in a list's grid (for its hover tint);
 /// `true` when it changed (the grid is redrawn).
-fn track_hover(cx: &mut Cx, grid: &DataGridRef, event: &Event, row: &mut Option<usize>) -> bool {
+pub(crate) fn track_hover(cx: &mut Cx, grid: &DataGridRef, event: &Event, row: &mut Option<usize>) -> bool {
     let abs = match event {
         Event::MouseMove(e) => Some(e.abs),
         Event::MouseLeave(_) => None,
@@ -181,7 +203,7 @@ fn track_hover_at(cx: &mut Cx, grid: &DataGridRef, abs: Option<DVec2>, row: &mut
 }
 
 /// A row's hover tint: faint, under the selection's stronger one.
-fn hover_tint(theme: &Theme) -> Vec4f {
+pub(crate) fn hover_tint(theme: &Theme) -> Vec4f {
     with_alpha(theme.accent, crate::hw::row_tint_alphas(theme.background, theme.foreground, theme.accent).1)
 }
 
@@ -236,13 +258,13 @@ pub(crate) fn text_fit(draw: &mut DrawText, cx: &mut Cx2d, x: f64, mid: f64, max
 }
 
 /// Text ending at `right`, centred vertically on `mid`.
-fn text_right(draw: &mut DrawText, cx: &mut Cx2d, right: f64, mid: f64, text: &str) {
+pub(crate) fn text_right(draw: &mut DrawText, cx: &mut Cx2d, right: f64, mid: f64, text: &str) {
     let width = text_width(draw, cx, text);
     let y = mid - text_height(draw, cx, text) * 0.5;
     draw.draw_abs(cx, dvec2(right - width, y), text);
 }
 
-fn round(draw: &mut DrawMusicRound, cx: &mut Cx2d, rect: Rect, color: Vec4f, radius: f32) {
+pub(crate) fn round(draw: &mut DrawMusicRound, cx: &mut Cx2d, rect: Rect, color: Vec4f, radius: f32) {
     draw.color = color;
     draw.radius = radius;
     draw.draw_abs(cx, rect);
@@ -805,6 +827,9 @@ pub struct TrackTable {
     /// The row the keyboard or a press picked.
     #[rust]
     picked: Option<usize>,
+    /// The picked run of rows (Shift extends it): what a drag out carries.
+    #[rust]
+    picked_rows: Option<std::ops::Range<usize>>,
     /// The page and query drawn: a new one starts at the top.
     #[rust]
     shown: Option<(Page, String)>,
@@ -840,6 +865,8 @@ pub enum TrackTableAction {
     Menu(usize, DVec2),
     /// A row's radio button was pressed.
     Radio(usize),
+    /// A press on a row travelled out: drag these rows out of the window.
+    DragOut(Vec<usize>, WindowId),
 }
 
 impl TrackTable {
@@ -888,24 +915,32 @@ impl TrackTable {
 
 impl TrackTableRef {
     pub fn activated(&self, actions: &Actions) -> Option<usize> {
-        match actions.find_widget_action(self.widget_uid())?.cast() {
+        actions.filter_widget_actions_cast::<TrackTableAction>(self.widget_uid()).find_map(|action| match action {
             TrackTableAction::Activated(row) => Some(row),
             _ => None,
-        }
+        })
     }
 
     pub fn menu(&self, actions: &Actions) -> Option<(usize, DVec2)> {
-        match actions.find_widget_action(self.widget_uid())?.cast() {
+        actions.filter_widget_actions_cast::<TrackTableAction>(self.widget_uid()).find_map(|action| match action {
             TrackTableAction::Menu(row, abs) => Some((row, abs)),
             _ => None,
-        }
+        })
     }
 
     pub fn radio(&self, actions: &Actions) -> Option<usize> {
-        match actions.find_widget_action(self.widget_uid())?.cast() {
+        actions.filter_widget_actions_cast::<TrackTableAction>(self.widget_uid()).find_map(|action| match action {
             TrackTableAction::Radio(row) => Some(row),
             _ => None,
-        }
+        })
+    }
+
+    /// Rows to drag out of the window, and the window.
+    pub fn drag_out(&self, actions: &Actions) -> Option<(Vec<usize>, WindowId)> {
+        actions.filter_widget_actions_cast::<TrackTableAction>(self.widget_uid()).find_map(|action| match action {
+            TrackTableAction::DragOut(rows, window) => Some((rows, window)),
+            _ => None,
+        })
     }
 
     pub fn picked(&self) -> Option<usize> {
@@ -1256,11 +1291,26 @@ impl Widget for TrackTable {
             match action {
                 DataGridAction::SelectionChanged { selection } => {
                     self.picked = selection.map(|selection| selection.head.0);
+                    self.picked_rows = selection.map(|selection| {
+                        let (first, last) = selection.row_range();
+                        first..last + 1
+                    });
                 }
                 // Return and a double-click both ask to "edit" a cell; in a
                 // read-only list that is the row being chosen.
                 DataGridAction::EditCell { row, replace: None, .. } => {
                     cx.widget_action(uid, TrackTableAction::Activated(row));
+                }
+                // A press that travelled: the picked rows when it began on
+                // one of them, else the row itself, go out of the window.
+                DataGridAction::RowDragStarted { row, .. } => {
+                    let rows: Vec<usize> = match &self.picked_rows {
+                        Some(range) if range.contains(&row) => range.clone().collect(),
+                        _ => vec![row],
+                    };
+                    if let Some(window) = cx.get_window_id_of(&grid.area()) {
+                        cx.widget_action(uid, TrackTableAction::DragOut(rows, window));
+                    }
                 }
                 DataGridAction::CellReleased { row, .. } => {
                     if self.radio_button.is_some_and(|(at, button)| at == row && button.contains(self.pointer)) {
@@ -1356,6 +1406,8 @@ pub enum UpNextAction {
     Remove(usize),
     /// Move the upcoming track `from` into the gap `to`.
     Move { from: usize, to: usize },
+    /// The carried upcoming track left the list: drag it out of the window.
+    DragOut(usize, WindowId),
 }
 
 impl UpNext {
@@ -1547,6 +1599,17 @@ impl Widget for UpNext {
                     self.gap = None;
                 }
                 DataGridAction::RowDragMoved { abs } => {
+                    // Carried off the list, the track leaves the window as a
+                    // file (drag_out.rs) instead of moving in the queue.
+                    if let Some(at) = self.carrying.filter(|_| !grid.area().rect(cx).contains(abs)) {
+                        if let Some(window) = cx.get_window_id_of(&grid.area()) {
+                            self.carrying = None;
+                            self.gap = None;
+                            grid.redraw(cx);
+                            cx.widget_action(uid, UpNextAction::DragOut(at, window));
+                            continue;
+                        }
+                    }
                     if self.carrying.is_some() {
                         let gap = grid.borrow().and_then(|grid| grid.row_gap_at(abs));
                         if gap != self.gap {

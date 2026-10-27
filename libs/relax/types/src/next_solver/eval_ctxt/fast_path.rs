@@ -82,7 +82,7 @@ pub fn compute_goal_fast_path(infcx: &InferCtxt<'_>, prog: &crate::program::Prog
             } else { return None; }
         }
         PredicateKind::DynCompatible(d) if infcx.tcx.dyn_compatibility_violations(prog, *d).is_empty() => {},
-        PredicateKind::Clause(ClauseKind::RegionOutlives(a,b)) if !bound => { infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(tys, *b, *a, false); }
+        PredicateKind::Clause(ClauseKind::RegionOutlives(a,b)) if !bound => { infcx.inner.borrow_mut().unwrap_region_constraints().make_subregion(tys, crate::infer::region_constraints::SubregionOrigin::RelateRegionParamBound(infcx.origin_span.get()), *b, *a, false); }
         PredicateKind::Clause(ClauseKind::TypeOutlives(ty,r)) if !bound => {
             let ty = infcx.deeply_resolve_ignoring_regions(*ty);
             if normalize::has_non_rigid_aliases(tys, ty) { return None; }

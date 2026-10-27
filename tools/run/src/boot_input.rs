@@ -43,6 +43,9 @@ impl Input {
     }
 
     fn moved(&mut self, host: &mut Boot, finger: Option<u32>, point: [f32; 2]) {
+        if finger.is_none() {
+            host.hover(Some(point));
+        }
         let Some(press) = &mut self.press else { return };
         if press.finger != finger {
             return;
@@ -92,6 +95,7 @@ impl Input {
                 x, y, button: 1, ..
             } => return self.up(host, None, [x as f32, y as f32]),
             HalEvent::MouseLeave { .. } | HalEvent::Focus { focused: false, .. } => {
+                host.hover(None);
                 self.cancel(host)
             }
             HalEvent::Scroll { x, y, dy, .. } => {

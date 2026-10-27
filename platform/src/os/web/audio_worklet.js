@@ -141,11 +141,15 @@ class AudioWorklet extends AudioWorkletProcessor {
             let frames = outputs[0][0].length;
             let channels = outputs[0].length;
 
+            // The block's first frame (the context's frame counter); when it is heard is
+            // unknown here (NaN: no time): a worklet has no clock of the page's.
             let output_ptr = context.exports.wasm_audio_output_entrypoint(
                 context.context_ptr,
                 frames,
                 channels,
                 sampleRate,
+                currentFrame,
+                NaN,
             );
 
             if (!this._callback_started) {

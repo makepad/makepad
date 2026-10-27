@@ -30,8 +30,10 @@ fn const_to_valtree_inner(u: &Unit, place: Place, nodes: &mut usize, visited: &m
         }
         TyKind::FnDef(..) => { *nodes += 1; Ok(ValTree::from_branches(tys, &[])) }
         TyKind::Ref(_, inner, _) => {
-            let ptr = scalar(addr, 8).to_bits(8) as u64;
-            let meta = match tys.kind(inner) { TyKind::Str | TyKind::Slice(_) => Some(scalar(addr + 8, 8).to_bits(8) as u64), _ => None };
+            // pointer-sized words (a wasm32 word holds the window offset: syms::read_ptr)
+            let pb = u.ptr_bytes() as u64;
+            let ptr = crate::syms::read_ptr(u, addr);
+            let meta = match tys.kind(inner) { TyKind::Str | TyKind::Slice(_) => Some(scalar(addr + pb, pb as u8).to_bits(pb as u8) as u64), _ => None };
             const_to_valtree_inner(u, (ptr, inner, meta), nodes, visited, settled)
         }
         TyKind::Array(..) | TyKind::Slice(_) | TyKind::Str => {

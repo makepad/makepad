@@ -606,7 +606,7 @@ impl ShellGallery {
                 _ => {}
             }
             match wa.cast::<ShellPanelAction>() {
-                ShellPanelAction::Hub(_) => {}
+                ShellPanelAction::TrayMenu { .. } | ShellPanelAction::DeskLinkDisconnect(_) => {}
                 ShellPanelAction::SetVolume(v) => {
                     self.bar_panel.data.volume = Some(v);
                     self.panel.data.volume = Some(v);

@@ -551,8 +551,20 @@ impl<'c, 'a> Unit<'c, 'a> {
     }
 
     /// A call that never returns (its result is `!`, or a type without values) ends the flow.
+    /// In a closure (rustc_mir_transform/src/liveness.rs `visit_terminator`): at a call that does
+    /// not return the unwind may be caught, so the by-reference captures are live there; an `FnMut`
+    /// closure is also called again after any call unwinds (its `UnwindResume` becomes a jump to
+    /// the start). Both are the path to the body's exit. A returning call in an `Fn`/`FnOnce`
+    /// closure keeps no capture live.
     fn after_call(&mut self, e: ExprId) {
-        if self.is_never(e) || self.uninhabited(e) { self.cur = None; }
+        let diverges = self.is_never(e) || self.uninhabited(e);
+        if let (Some(info), Some(c)) = (&self.closure, self.cur) {
+            if diverges || info.fn_mut {
+                let ex = self.exit;
+                self.link(c, ex);
+            }
+        }
+        if diverges { self.cur = None; }
     }
 
     fn uninhabited(&mut self, e: ExprId) -> bool {
@@ -720,14 +732,16 @@ impl<'c, 'a> Unit<'c, 'a> {
             },
             ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => {
                 let (r, _, ind) = self.place(x);
-                let deref = matches!(self.ty_kind_of(x), Some(TyKind::Ref(..) | TyKind::Ptr(..))) || self.is_box(x);
+                let deref = self.cx.body.field_idx.get(&e.0).is_some_and(|&(d, _)| d > 0)
+                    || matches!(self.ty_kind_of(x), Some(TyKind::Ref(..) | TyKind::Ptr(..)))
+                    || self.is_box(x);
                 (r, false, ind || deref)
             }
             ExprKind::Index(a, i) => {
                 let (r, _, ind) = self.place(a);
                 self.expr(i);
-                let overloaded = self.cx.body.ov_index.get(&e.0).is_some();
-                let deref = matches!(self.ty_kind_of(a), Some(TyKind::Ref(..) | TyKind::Ptr(..) | TyKind::Slice(_))) || overloaded;
+                let overloaded = self.cx.body.ov_index.get(&e.0).is_some() || self.cx.body.index_derefs(e.0) > 0;
+                let deref = matches!(self.ty_kind_of(a), Some(TyKind::Ref(..) | TyKind::Ptr(..) | TyKind::Slice(_))) || self.is_box(a) || overloaded;
                 (r, false, ind || deref)
             }
             ExprKind::Unary(UnOp::Deref, x) => {
@@ -919,6 +933,11 @@ impl<'c, 'a> Unit<'c, 'a> {
                     let s = s as usize;
                     if !reach[s] { continue; }
                     for k in 0..w { out[k] |= live_in[s * w + k]; }
+                }
+                if n == exit as usize {
+                    for (v, var) in self.vars.iter().enumerate() {
+                        if var.own { out[v / 64] &= !(1u64 << (v % 64)); }
+                    }
                 }
                 let d = self.nodes[n].def;
                 if d != NONE { out[(d / 64) as usize] &= !(1u64 << (d % 64)); }

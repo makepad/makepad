@@ -8,12 +8,12 @@ use crate::session::Session;
 use crate::types::*;
 use makepad_apple_sys::*;
 use std::any::Any;
-use std::collections::HashMap;
+use crate::FastMap;
 
 /// The texture storage of the Metal backend, as the media module sees it.
 pub struct MetalSink<'a> {
     pub dev: &'a Device,
-    pub tex: &'a mut HashMap<(u32, u32), Tex>,
+    pub tex: &'a mut FastMap<(u32, u32), Tex>,
     pub now: u64,
 }
 

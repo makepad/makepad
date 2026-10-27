@@ -62,9 +62,72 @@ const fn min_non_zero_cap(elem_size: usize) -> usize {
     }
 }
 
+#[inline(never)]
 #[cold]
 const fn capacity_overflow() -> ! {
     crate::panicking::panic_str("capacity overflow")
+}
+
+// Real alloc's RawVecInner: the element-independent half of a Vec's buffer (its growth, the
+// layout arithmetic and the allocator calls) is one body for every element type, the element's
+// layout passed as a value, so the `Vec<T>` instances keep only a capacity compare and a call
+// (P(DOOM)'s wasm had 694 `try_grow_to`, 88 `try_reserve`, 875 `do_reserve_and_handle` copies).
+
+/// `n` elements of `elem` (Layout::array).
+fn raw_array(elem: Layout, n: usize) -> Result<Layout, crate::collections::TryReserveError> {
+    match elem.size().checked_mul(n) {
+        Some(size) => Layout::from_size_align(size, elem.align()).map_err(|_| crate::collections::TryReserveError::capacity_overflow()),
+        None => Err(crate::collections::TryReserveError::capacity_overflow()),
+    }
+}
+
+/// Reallocates the buffer to exactly `new_cap` elements of `elem` (not a ZST).
+#[inline(never)]
+fn raw_grow_to(ptr: &mut crate::ptr::NonNull<u8>, cap: &mut Cap, new_cap: usize, elem: Layout) -> Result<(), crate::collections::TryReserveError> {
+    let new_layout = raw_array(elem, new_cap)?;
+    let p = if cap.get() == 0 {
+        heap::alloc_or_abort(new_layout)
+    } else {
+        // the current allocation's layout was valid when it was made
+        let old = unsafe { Layout::from_size_align_unchecked(elem.size() * cap.get(), elem.align()) };
+        heap::realloc_or_abort(ptr.as_ptr(), old, new_layout.size())
+    };
+    *ptr = unsafe { crate::ptr::NonNull::new_unchecked(p) };
+    // raw_array checked that the allocation fits in isize::MAX bytes (a non-ZST: u8 stands in)
+    *cap = unsafe { Cap::new::<u8>(new_cap) };
+    Ok(())
+}
+
+/// Room for `additional` more after `len`, growing amortized (doubling, at least the minimum
+/// non-zero capacity), as RawVecInner::grow_amortized.
+#[inline(never)]
+fn raw_reserve(ptr: &mut crate::ptr::NonNull<u8>, cap: &mut Cap, len: usize, additional: usize, elem: Layout) -> Result<(), crate::collections::TryReserveError> {
+    if elem.size() == 0 {
+        // a ZST's capacity is usize::MAX already
+        return Err(crate::collections::TryReserveError::capacity_overflow());
+    }
+    let required = match len.checked_add(additional) {
+        Some(r) => r,
+        None => return Err(crate::collections::TryReserveError::capacity_overflow()),
+    };
+    let mut new_cap = cap.get() * 2;
+    if new_cap < required {
+        new_cap = required;
+    }
+    let min = min_non_zero_cap(elem.size());
+    if new_cap < min {
+        new_cap = min;
+    }
+    raw_grow_to(ptr, cap, new_cap, elem)
+}
+
+/// raw_reserve that aborts on overflow (RawVecInner's do_reserve_and_handle).
+#[cold]
+#[inline(never)]
+fn raw_reserve_or_abort(ptr: &mut crate::ptr::NonNull<u8>, cap: &mut Cap, len: usize, additional: usize, elem: Layout) {
+    if raw_reserve(ptr, cap, len, additional, elem).is_err() {
+        capacity_overflow();
+    }
 }
 
 impl<T> Vec<T> {
@@ -107,6 +170,12 @@ impl<T> Vec<T> {
         }
     }
 
+    /// The layout of an existing buffer of `cap` elements (real alloc's RawVecInner::current_memory:
+    /// the buffer was allocated with it, so its size cannot overflow -- no check, no panic path)
+    pub(crate) fn current_layout(cap: usize) -> Layout {
+        unsafe { Layout::from_size_align_unchecked(cap.wrapping_mul(crate::mem::size_of::<T>()), crate::mem::align_of::<T>()) }
+    }
+
     /// Reallocates to exactly `new_cap` (>= len). Not for ZSTs.
     fn grow_to(&mut self, new_cap: usize) {
         if self.try_grow_to(new_cap).is_err() {
@@ -115,25 +184,31 @@ impl<T> Vec<T> {
     }
 
     fn try_grow_to(&mut self, new_cap: usize) -> Result<(), crate::collections::TryReserveError> {
-        let new_layout = match Layout::array::<T>(new_cap) {
-            Ok(l) => l,
-            Err(_) => return Err(crate::collections::TryReserveError::capacity_overflow()),
-        };
-        let p = if self.cap.get() == 0 {
-            heap::alloc_or_abort(new_layout)
-        } else {
-            heap::realloc_or_abort(self.ptr.as_ptr() as *mut u8, Vec::<T>::layout_for(self.cap.get()), new_layout.size())
-        };
-        self.ptr = unsafe { crate::ptr::NonNull::new_unchecked(p as *mut T) };
-        // Layout::array checked that the non-ZST allocation fits in isize::MAX bytes.
-        self.cap = unsafe { Cap::new::<T>(new_cap) };
-        Ok(())
+        let (ptr, cap) = self.raw_parts_mut();
+        raw_grow_to(ptr, cap, new_cap, Layout::new::<T>())
     }
 
+    /// The buffer's pointer (as bytes) and capacity, for the element-independent growth.
+    fn raw_parts_mut(&mut self) -> (&mut crate::ptr::NonNull<u8>, &mut Cap) {
+        // NonNull<T> and NonNull<u8> are one pointer
+        (unsafe { &mut *(&mut self.ptr as *mut crate::ptr::NonNull<T>).cast::<crate::ptr::NonNull<u8>>() }, &mut self.cap)
+    }
+
+    /// Real alloc's RawVecInner::reserve: only the capacity check inline, the growth and its
+    /// error handling behind a cold call (do_reserve_and_handle), so a caller that grows rarely
+    /// (`DrawVars::fit_dyn_uniforms` on every `set_uniform`) inlines a compare and a call.
+    #[inline]
     pub fn reserve(&mut self, additional: usize) {
-        if self.try_reserve(additional).is_err() {
-            capacity_overflow();
+        if additional > self.capacity().wrapping_sub(self.len) {
+            self.do_reserve_and_handle(additional);
         }
+    }
+
+    #[cold]
+    fn do_reserve_and_handle(&mut self, additional: usize) {
+        let len = self.len;
+        let (ptr, cap) = self.raw_parts_mut();
+        raw_reserve_or_abort(ptr, cap, len, additional, Layout::new::<T>());
     }
 
     pub fn reserve_exact(&mut self, additional: usize) {
@@ -146,19 +221,9 @@ impl<T> Vec<T> {
         if self.capacity() - self.len >= additional {
             return Ok(());
         }
-        let required = match self.len.checked_add(additional) {
-            Some(r) => r,
-            None => return Err(crate::collections::TryReserveError::capacity_overflow()),
-        };
-        let mut cap = self.cap.get() * 2;
-        if cap < required {
-            cap = required;
-        }
-        let min = min_non_zero_cap(crate::mem::size_of::<T>());
-        if cap < min {
-            cap = min;
-        }
-        self.try_grow_to(cap)
+        let len = self.len;
+        let (ptr, cap) = self.raw_parts_mut();
+        raw_reserve(ptr, cap, len, additional, Layout::new::<T>())
     }
 
     pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), crate::collections::TryReserveError> {
@@ -185,7 +250,7 @@ impl<T> Vec<T> {
             return;
         }
         if target == 0 {
-            heap::free(self.ptr.as_ptr() as *mut u8, Vec::<T>::layout_for(self.cap.get()));
+            heap::free(self.ptr.as_ptr() as *mut u8, Vec::<T>::current_layout(self.cap.get()));
             self.ptr = crate::ptr::NonNull::dangling();
             self.cap = Cap::ZERO;
         } else {
@@ -297,26 +362,62 @@ impl<T> Vec<T> {
         self.retain_mut(|x| f(x));
     }
 
+    /// Port of real alloc's `Vec::retain_mut` (library/alloc/src/vec/mod.rs): a first loop that only
+    /// reads until the first removed element, then the compacting loop; a panic guard that, if the
+    /// predicate or a drop panics, shifts the unchecked tail over the holes and sets the length
+    /// (the elements not yet visited stay in the Vec, as in real std).
     pub fn retain_mut<F: FnMut(&mut T) -> bool>(&mut self, f: F) {
         let mut f = f;
-        let len = self.len;
-        // elements are dropped in order, survivors moved down (same observable order as core)
-        self.len = 0;
-        let mut deleted = 0;
-        let mut i = 0;
-        while i < len {
-            unsafe {
-                let cur = im::ptr_add_mut(self.ptr.as_ptr(), i);
-                if !f(&mut *cur) {
-                    deleted += 1;
-                    im::drop_in_place(cur);
-                } else if deleted > 0 {
-                    im::copy_nonoverlapping(cur as *const T, im::ptr_add_mut(self.ptr.as_ptr(), i - deleted), 1);
+        let original_len = self.len;
+        if original_len == 0 {
+            return;
+        }
+        struct PanicGuard<'a, T> {
+            v: &'a mut Vec<T>,
+            read: usize,
+            write: usize,
+            original_len: usize,
+        }
+        impl<T> Drop for PanicGuard<'_, T> {
+            #[cold]
+            fn drop(&mut self) {
+                let remaining = self.original_len - self.read;
+                unsafe {
+                    im::copy(im::ptr_add(self.v.ptr.as_ptr() as *const T, self.read), im::ptr_add_mut(self.v.ptr.as_ptr(), self.write), remaining);
+                    self.v.set_len(self.write + remaining);
                 }
             }
-            i += 1;
         }
-        self.len = len - deleted;
+        let mut read = 0;
+        loop {
+            // read < original_len
+            let cur = unsafe { &mut *im::ptr_add_mut(self.ptr.as_ptr(), read) };
+            if !f(cur) {
+                break;
+            }
+            read += 1;
+            if read == original_len {
+                // every element kept
+                return;
+            }
+        }
+        // at least one element goes; `read` advances before the drop (a panicking drop is not
+        // dropped twice)
+        let mut g = PanicGuard { v: self, read: read + 1, write: read, original_len };
+        unsafe { im::drop_in_place(im::ptr_add_mut(g.v.ptr.as_ptr(), read)) };
+        while g.read < g.original_len {
+            let cur = unsafe { im::ptr_add_mut(g.v.ptr.as_ptr(), g.read) };
+            if !f(unsafe { &mut *cur }) {
+                g.read += 1;
+                unsafe { im::drop_in_place(cur) };
+            } else {
+                unsafe { im::copy_nonoverlapping(cur as *const T, im::ptr_add_mut(g.v.ptr.as_ptr(), g.write), 1) };
+                g.write += 1;
+                g.read += 1;
+            }
+        }
+        unsafe { g.v.set_len(g.write) };
+        crate::mem::forget(g);
     }
 
     pub fn dedup_by_key<K: PartialEq, F: FnMut(&mut T) -> K>(&mut self, key: F) {
@@ -388,6 +489,12 @@ impl<T> Vec<T> {
         }
         self.push(value);
         Ok(())
+    }
+
+    pub fn push_mut(&mut self, value: T) -> &mut T {
+        self.push(value);
+        let idx = self.len - 1;
+        unsafe { &mut *im::ptr_add_mut(self.ptr.as_ptr(), idx) }
     }
 
     pub fn pop(&mut self) -> Option<T> {
@@ -513,7 +620,7 @@ impl<T: Clone> Vec<T> {
         unsafe {
             let start = im::ptr_add_mut(self.ptr.as_ptr(), self.len);
             if im::is_copy::<T>() {
-                if crate::mem::size_of::<T>() == 1 {
+                if im::is_primitive_scalar::<T>() && crate::mem::size_of::<T>() == 1 {
                     let byte: u8 = im::ptr_read(&value as *const T as *const u8);
                     im::write_bytes(start as *mut u8, byte, n);
                 } else {
@@ -577,9 +684,9 @@ impl<T: PartialEq> Vec<T> {
 
 /// `vec![elem; n]`
 pub fn from_elem<T: Clone>(elem: T, n: usize) -> Vec<T> {
-    // real alloc's SpecFromElem + IsZero: a Copy value whose bytes are all zero becomes one
-    // zeroed allocation (calloc: untouched pages stay unmapped until written)
-    if n > 0 && !is_zst::<T>() && unsafe { im::is_copy::<T>() } && all_zero_bytes(&elem) {
+    // Like real alloc's scalar IsZero implementations. Copy alone does not make a byte
+    // scan valid: aggregates can have uninitialized padding or inactive enum storage.
+    if n > 0 && primitive_is_zero(&elem) {
         let layout = Vec::<T>::layout_for(n);
         if layout.size() > isize::MAX as usize {
             capacity_overflow();
@@ -592,20 +699,31 @@ pub fn from_elem<T: Clone>(elem: T, n: usize) -> Vec<T> {
     }
     let mut v = Vec::with_capacity(n);
     v.extend_with(n, elem);
+    // extend_with wrote all n elements (a panicking clone never gets here): the caller sees the
+    // length n, not a load after the call, so its bounds checks against `n` fold (LLVM inlines
+    // extend_with and knows the same)
+    v.len = n;
     v
 }
 
-fn all_zero_bytes<T>(v: &T) -> bool {
+fn primitive_is_zero<T>(v: &T) -> bool {
+    if !unsafe { im::is_primitive_scalar::<T>() } {
+        return false;
+    }
     let n = crate::mem::size_of::<T>();
     let p = v as *const T as *const u8;
-    let mut i = 0;
-    while i < n {
-        if unsafe { im::ptr_read(im::ptr_add(p, i)) } != 0 {
-            return false;
+    // one compare of the value's bits for scalar sizes, as real alloc's IsZero impls do
+    // (`self.to_bits() == 0`, `*self == 0`): a constant element folds the whole test
+    unsafe {
+        match n {
+            1 => return im::ptr_read(p) == 0,
+            2 => return crate::ptr::read_unaligned(p as *const u16) == 0,
+            4 => return crate::ptr::read_unaligned(p as *const u32) == 0,
+            8 => return crate::ptr::read_unaligned(p as *const u64) == 0,
+            16 => return crate::ptr::read_unaligned(p as *const u128) == 0,
+            _ => return false,
         }
-        i += 1;
     }
-    true
 }
 
 /// extend_with's length guard (real alloc's SetLenOnDrop): the elements written so far count
@@ -632,7 +750,7 @@ unsafe impl<#[may_dangle] T> Drop for Vec<T> {
             }
         }
         if !is_zst::<T>() && self.cap.get() != 0 {
-            heap::free(self.ptr.as_ptr() as *mut u8, Vec::<T>::layout_for(self.cap.get()));
+            heap::free(self.ptr.as_ptr() as *mut u8, Vec::<T>::current_layout(self.cap.get()));
         }
     }
 }
@@ -915,10 +1033,9 @@ impl<T> FromIterator<T> for Vec<T> {
 }
 
 impl<T> Vec<T> {
-    /// Real alloc's extend_trusted, for an iterator that reported exactly `n` items: one reserve,
-    /// then writes through a raw pointer with the length in a local (no capacity check per item).
-    /// Unlike TrustedLen nothing is trusted: a short iterator just ends early, and items beyond
-    /// `n` go through the caller's checked loop.
+    /// Real alloc's extend_trusted, for a TrustedLen iterator of exactly `n` items (its upper size
+    /// hint): one reserve, then writes through a raw pointer with the length in a local (no
+    /// capacity check per item). A short iterator just ends early.
     fn extend_counted<I: Iterator<Item = T>>(&mut self, iter: &mut I, n: usize) {
         self.reserve(n);
         let dst = unsafe { im::ptr_add_mut(self.ptr.as_ptr(), self.len) };
@@ -952,12 +1069,18 @@ fn is_slice_iter<I, T>() -> bool {
 impl<T> Extend<T> for Vec<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         let mut iter = iter.into_iter();
-        let (lower, upper) = iter.size_hint();
-        if upper == Some(lower) {
-            self.extend_counted(&mut iter, lower);
-        } else {
-            self.reserve(lower);
+        // real alloc's SpecExtend: a TrustedLen iterator takes extend_trusted (its size hint is
+        // exact by contract: one reserve, no capacity test per item), any other the desugared
+        // loop -- one loop per instance, never both
+        if unsafe { im::is_trusted_len::<I::IntoIter>() } {
+            match iter.size_hint() {
+                (_, Some(n)) => self.extend_counted(&mut iter, n),
+                (_, None) => capacity_overflow(),
+            }
+            return;
         }
+        let (lower, _) = iter.size_hint();
+        self.reserve(lower);
         while let Some(x) = iter.next() {
             if self.len == self.capacity() {
                 let (lower, _) = iter.size_hint();
@@ -987,13 +1110,18 @@ impl<'a, T: Copy + 'a> Extend<&'a T> for Vec<T> {
             self.extend_from_slice(it.as_slice());
             return;
         }
-        let (lower, upper) = iter.size_hint();
-        if upper == Some(lower) {
-            let mut copied = CopiedRefs { it: &mut iter };
-            self.extend_counted(&mut copied, lower);
-        } else {
-            self.reserve(lower);
+        if unsafe { im::is_trusted_len::<I::IntoIter>() } {
+            match iter.size_hint() {
+                (_, Some(n)) => {
+                    let mut copied = CopiedRefs { it: &mut iter };
+                    self.extend_counted(&mut copied, n);
+                }
+                (_, None) => capacity_overflow(),
+            }
+            return;
         }
+        let (lower, _) = iter.size_hint();
+        self.reserve(lower);
         while let Some(x) = iter.next() {
             self.push(*x);
         }
@@ -1037,7 +1165,7 @@ impl<T, const N: usize> TryFrom<Vec<T>> for [T; N] {
         let me = crate::mem::ManuallyDrop::new(vec);
         let arr = unsafe { im::ptr_read(me.ptr.as_ptr() as *const [T; N]) };
         if !is_zst::<T>() && me.cap.get() != 0 {
-            heap::free(me.ptr.as_ptr() as *mut u8, Vec::<T>::layout_for(me.cap.get()));
+            heap::free(me.ptr.as_ptr() as *mut u8, Vec::<T>::current_layout(me.cap.get()));
         }
         Ok(arr)
     }

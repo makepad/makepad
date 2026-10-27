@@ -162,7 +162,7 @@ impl DrawText3d {
         for glyph in &run.glyphs {
             let glyph_origin = crate::text::geom::Point::new(
                 baseline.x + glyph.pen_x_in_lpxs + glyph.offset_x_in_lpxs,
-                baseline.y,
+                baseline.y + glyph.offset_y_in_lpxs,
             );
             self.draw_super.draw_glyph_at(
                 cx,

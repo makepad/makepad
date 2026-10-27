@@ -23,8 +23,8 @@ impl TranslatorView {
     pub(super) fn start_models(&mut self, cx: &mut Cx) {
         let lan = crate::engine::hub_base(&self.saved.hub).filter(|_| !self.saved.credential.is_empty());
         if let Some(base) = &lan {
-            // The LAN front is TLS with the device credential: tell the fleet client.
-            makepad_ai_hub::fleet_auth::mark_fleet_endpoint(base.trim_start_matches("https://").trim_start_matches("http://"));
+            // The LAN front is TLS with this device's fleet credential: tell the fleet client.
+            makepad_network::fleet::id::mark_fleet_endpoint(base.trim_start_matches("https://").trim_start_matches("http://"));
         }
         if self.models.opened_for == Some(lan.clone()) && self.models.store.is_some() {
             return;

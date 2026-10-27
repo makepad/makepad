@@ -1,0 +1,70 @@
+;; claude-cli.sb : the macOS sandbox every claude-cli turn of the AI hub runs in.
+;;
+;; Applied by the hub as
+;;   /usr/bin/sandbox-exec -p <this text> -D TURN_DIR=<turn dir> -D CLAUDE_BIN=<claude binary> <claude binary> ...
+;; (libs/ai/hub/src/claude_cli.rs, `turn_command`). Both parameters are canonical
+;; paths (no symlinks): the sandbox matches real paths.
+;;
+;; What it allows, and nothing else:
+;; - exec: only CLAUDE_BIN itself (a single-file arm64 Mach-O, the Bun-compiled Claude
+;;   Code; no node, no shell). A shell, git, curl, osascript or any other program is
+;;   denied, whatever the CLI or a prompt asks for.
+;; - file reads: the OS runtime (dyld cache, system libraries, /private/etc for hosts,
+;;   resolv.conf and certificates, zoneinfo), CLAUDE_BIN, and TURN_DIR. Nothing under
+;;   /Users (no home dir, no keychain files, no repos, no ~/.claude) except CLAUDE_BIN.
+;;   Metadata (stat) is allowed everywhere: dyld and path walking need it; it reveals
+;;   names and sizes, never contents.
+;; - file writes: TURN_DIR only (the turn's HOME, CLAUDE_CONFIG_DIR, TMPDIR and cwd,
+;;   all inside it, deleted after the turn) and /dev/null.
+;; - network: outbound TCP to port 443 only, plus the system DNS resolver socket.
+;;   A sandbox profile cannot filter by host name, so this is "any host on 443", not
+;;   "api.anthropic.com only". No inbound, no listening, no UDP, no other port.
+;; - IPC: a short list of system lookups (DNS configuration, notifications, user
+;;   records); no Apple events, no pasteboard, no window server, no keychain daemon.
+;; - login: none needed here. The hub (outside this sandbox) reads the person's Claude
+;;   Code login from the keychain and passes only the short-lived access token in the
+;;   environment, so no keychain file, no securityd lookup and no /usr/bin/security exec
+;;   is allowed: the child can neither read other keychain items nor refresh the login.
+(version 1)
+(deny default)
+
+;; processes
+(allow process-exec (literal (param "CLAUDE_BIN")))
+(allow process-fork)
+(allow process-info* (target self))
+(allow signal (target self))
+(allow sysctl-read)
+
+;; files
+(allow file-read-metadata)
+(allow file-read*
+    (literal "/")
+    (literal (param "CLAUDE_BIN"))
+    (subpath (param "TURN_DIR"))
+    (subpath "/System")
+    (subpath "/usr/lib")
+    (subpath "/usr/share")
+    (subpath "/private/etc")
+    (subpath "/private/var/db/dyld")
+    (subpath "/private/var/db/timezone")
+    (literal "/dev/null")
+    (literal "/dev/zero")
+    (literal "/dev/random")
+    (literal "/dev/urandom"))
+(allow file-write*
+    (subpath (param "TURN_DIR"))
+    (literal "/dev/null"))
+(allow file-ioctl (literal "/dev/null"))
+
+;; network
+(allow system-socket)
+(allow network-outbound (remote tcp "*:443"))
+(allow network-outbound (literal "/private/var/run/mDNSResponder"))
+
+;; IPC
+(allow mach-lookup
+    (global-name "com.apple.SystemConfiguration.DNSConfiguration")
+    (global-name "com.apple.dnssd.service")
+    (global-name "com.apple.system.notification_center")
+    (global-name "com.apple.system.opendirectoryd.libinfo"))
+(allow ipc-posix-shm-read* (ipc-posix-name "apple.shm.notification_center"))

@@ -95,14 +95,16 @@ unsafe fn probe_hardware_encoder(
 }
 
 /// Poll an AVAssetWriterInput until it accepts more media data. Offline
-/// writes drain quickly; the timeout only guards against a wedged writer.
+/// writes drain quickly (the input is usually ready again within tens of microseconds, so the
+/// poll is fine-grained: a 1 ms sleep per frame capped a long movie at a few hundred frames a
+/// second); the timeout (20 s) only guards against a wedged writer.
 unsafe fn wait_for_input_ready(input: ObjcId, context: &str) -> Result<(), VideoFileError> {
-    for _ in 0..20_000u32 {
+    for _ in 0..400_000u32 {
         let ready: BOOL = msg_send![input, isReadyForMoreMediaData];
         if ready == YES {
             return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        std::thread::sleep(std::time::Duration::from_micros(50));
     }
     Err(VideoFileError::new(format!(
         "{}: AVAssetWriterInput never became ready",

@@ -11,6 +11,16 @@ use std::cell::RefCell;
 
 struct RelaxProbe;
 
+/// Pushes onto a thread's probe stack; the stack grows in the kept heap: it outlives the build
+/// whose job arena it would otherwise be grown in (a job survivor for the thread's life).
+fn push_kept<T>(v: &mut Vec<T>, x: T) {
+    if v.len() == v.capacity() {
+        let _k = relax_session::phase::kept();
+        v.reserve(8);
+    }
+    v.push(x);
+}
+
 thread_local! {
     static PHASES: RefCell<Vec<crate::fncost::Phase>> = const { RefCell::new(Vec::new()) };
     static SCOPES: RefCell<Vec<crate::warm::Scope>> = const { RefCell::new(Vec::new()) };
@@ -24,7 +34,7 @@ impl relax_backend::probe::Probe for RelaxProbe {
     // destructor) finds the stacks gone: its guards are then not kept (profiling only).
     fn phase_enter(&self, phase: usize) {
         let mut p = Some(crate::fncost::phase(phase));
-        let _ = PHASES.try_with(|s| s.borrow_mut().push(p.take().unwrap()));
+        let _ = PHASES.try_with(|s| push_kept(&mut s.borrow_mut(), p.take().unwrap()));
         std::mem::forget(p);
     }
     fn phase_leave(&self) {
@@ -33,7 +43,7 @@ impl relax_backend::probe::Probe for RelaxProbe {
     }
     fn backend_enter(&self, name: &str) {
         let mut s = Some(crate::warm::Scope::backend(name));
-        let _ = SCOPES.try_with(|v| v.borrow_mut().push(s.take().unwrap()));
+        let _ = SCOPES.try_with(|v| push_kept(&mut v.borrow_mut(), s.take().unwrap()));
         std::mem::forget(s);
     }
     fn backend_leave(&self) {
@@ -62,7 +72,33 @@ pub fn compile(options: &relax_session::Options, f: &Func, env: &target::Env) ->
 /// `compile` with measured block frequencies of `f` (0..=1 of its hottest block, per block), which
 /// the register allocator weighs uses by instead of loop depth.
 pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &target::Env, freq: Option<&[f32]>) -> Result<target::Compiled, String> {
+    let mut c = compile_freq_inner(options, f, env, freq)?;
+    // the inline stack goes with the code, in its pc map (rir::inline_pc_entries)
+    if !f.inl.is_empty() && !c.pc_map.is_empty() {
+        c.pc_map.extend(relax_backend::rir::inline_pc_entries(f));
+    }
+    Ok(c)
+}
+
+fn compile_freq_inner(options: &relax_session::Options, f: &Func, env: &target::Env, freq: Option<&[f32]>) -> Result<target::Compiled, String> {
     install_probe();
+    // Keep the actual backend input alongside MAKEPAD_RUN_DUMP's source RIR,
+    // including baseline/O1 bodies transformed for W32 execution.
+    static DUMP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *DUMP.get_or_init(|| std::env::var_os("MAKEPAD_RUN_DUMP").is_some()) {
+        target::set_rir_map(true);
+    }
+    // the wasm32 web target's program (web32.rs): pointers are offsets into its window
+    if let Some(c) = crate::web32::applies(env.syms) {
+        let mut g = f.clone();
+        crate::web32::transform(&mut g, &c, env.sym_class)?;
+        g.verify_after("web32::transform")?;
+        return compile_native(options, &g, env, freq);
+    }
+    compile_native(options, f, env, freq)
+}
+
+fn compile_native(options: &relax_session::Options, f: &Func, env: &target::Env, freq: Option<&[f32]>) -> Result<target::Compiled, String> {
     #[cfg(target_arch = "aarch64")]
     {
         // the function runs in the threaded interpreter (interp.rs, MAKEPAD_RUN_INTERP /

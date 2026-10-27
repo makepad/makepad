@@ -2,8 +2,11 @@
 use crate::{id, LiveId, ScriptMod, ScriptValue, ScriptVm};
 
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+    // This hand-written registration needs the same dependency boundary as
+    // script_mod!: spreads read their source before touch slots are mapped.
+    vm.census_begin(module_path!());
     vm.new_module(id!(glyph_coverage));
-    vm.eval(ScriptMod::new(
+    let value = vm.eval(ScriptMod::new(
         env!("CARGO_MANIFEST_DIR"),
         "makepad_script::glyph_coverage",
         concat!(
@@ -14,5 +17,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         0,
         include_str!("../resources/glyph_coverage.splash"),
         &[],
-    ))
+    ));
+    vm.census_end();
+    value
 }

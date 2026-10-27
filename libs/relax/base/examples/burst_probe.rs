@@ -28,7 +28,8 @@ fn main() {
         for batch in (0..count).step_by(128) {
             // Persistent allocations on the ordinary heap, interleaved with compile bursts.
             anchors.push(vec![0x1a_u8; size]);
-            let _scope = zone_alloc::scratch(&runtime);
+            let _phase = zone_alloc::compiler();
+            let _scope = zone_alloc::job("probe", runtime.burst_arena);
             for _ in batch..(batch + 128).min(count) {
                 transient.push(vec![0x6b_u8; size]);
             }

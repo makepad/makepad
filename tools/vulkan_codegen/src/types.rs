@@ -8,6 +8,13 @@ pub fn emit(r: &Registry, selected: &BTreeSet<String>, constants: &BTreeSet<Stri
     for name in selected {
         for f in &r.types[name].fields {
             if f.array.starts_with("VK_") { constants.insert(f.array.clone()); }
+            // every dimension of a codec Std array (StdVideoH264ScalingLists is two-dimensional)
+            let mut rest = f.ty.as_str();
+            while let Some(at) = rest.find("STD_VIDEO_") {
+                let name: String = rest[at..].chars().take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_').collect();
+                rest = &rest[at + name.len()..];
+                constants.insert(name);
+            }
             if !f.value.is_empty() {
                 wanted.entry(f.base.clone()).or_default().insert(member_name(&f.base, &f.value));
             }
@@ -20,7 +27,7 @@ pub fn emit(r: &Registry, selected: &BTreeSet<String>, constants: &BTreeSet<Stri
             continue;
         }
         let value = r.value(&name);
-        let short = name.strip_prefix("VK_").unwrap();
+        let short = name.strip_prefix("VK_").unwrap_or(&name);
         let short = short.strip_suffix("_EXTENSION_NAME").map(|s| format!("{s}_NAME")).unwrap_or_else(|| short.to_string());
         if value.starts_with('"') {
             let text = value.trim_matches('"');
@@ -71,6 +78,14 @@ fn handle(out: &mut String, t: &Type) {
     out.push_str(&format!("impl core::fmt::Debug for {n} {{ fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {{ f.write_str(\"0x\")?; core::fmt::LowerHex::fmt(&self.0, f) }} }}\n"));
 }
 fn value_name(group: &str, raw: &str) -> String {
+    // video.xml's codec enums: STD_VIDEO_H264_PROFILE_IDC_HIGH in StdVideoH264ProfileIdc.
+    if group.starts_with("StdVideo") {
+        let prefix = format!("{}_", snake(group).to_ascii_uppercase());
+        let Some(short) = raw.strip_prefix(&prefix) else { return String::new(); };
+        let mut name = short.to_string();
+        if name.as_bytes().first().is_some_and(u8::is_ascii_digit) { name.insert_str(0, "TYPE_"); }
+        return name;
+    }
     let mut group = snake(group.strip_prefix("Vk").unwrap()).to_ascii_uppercase();
     for suffix in ["_KHR", "_EXT", "_ANDROID", "_NV", "_AMD"] {
         if group.ends_with(suffix) { group.truncate(group.len()-suffix.len()); break; }
@@ -157,9 +172,13 @@ fn record(out: &mut String, t: &Type, selected: &BTreeSet<String>, r: &Registry)
     let derives = if t.name == "VkExtent2D" { "Clone, Copy, Debug, PartialEq, Eq" }
         else if t.category == "union" { "Clone, Copy" } else { "Clone, Copy, Debug" };
     out.push_str(&format!("#[repr(C)]\n#[derive({derives})]\npub {} {n} {{\n",t.category));
-    for f in &t.fields {
-        assert!(!f.ty.contains("UNSUPPORTED_BITFIELD"), "unsupported bitfield {}.{}",t.name,f.name);
-        out.push_str(&format!("    pub {}: {},\n", f.name, f.ty));
+    let units = bitfield_units(t);
+    let mut declared = BTreeSet::new();
+    for (f, unit) in t.fields.iter().zip(&units) {
+        match unit {
+            Some((word, _)) => if declared.insert(*word) { out.push_str(&format!("    pub bitfield{word}: u32,\n")); },
+            None => out.push_str(&format!("    pub {}: {},\n", f.name, f.ty)),
+        }
     }
     out.push_str("}\n");
     out.push_str(&format!("impl Default for {n} {{ fn default() -> Self {{\n"));
@@ -174,7 +193,14 @@ fn record(out: &mut String, t: &Type, selected: &BTreeSet<String>, r: &Registry)
         return;
     }
     out.push_str(&format!("impl {n} {{\n"));
-    for f in &t.fields {
+    for (f, unit) in t.fields.iter().zip(&units) {
+        if let Some((word, shift)) = unit {
+            // A C bitfield (LSB first within its 32-bit storage unit, as the SysV and AAPCS64 ABIs
+            // lay them out): a builder setter like any field, and a getter.
+            let mask = if f.bits == 32 { u32::MAX } else { (1u32 << f.bits) - 1 };
+            out.push_str(&format!("    #[inline]\n    pub fn {name}(mut self, value: u32) -> Self {{ self.bitfield{word} = (self.bitfield{word} & !({mask:#x} << {shift})) | ((value & {mask:#x}) << {shift}); self }}\n    #[inline]\n    pub fn get_{name}(&self) -> u32 {{ (self.bitfield{word} >> {shift}) & {mask:#x} }}\n", name = f.name));
+            continue;
+        }
         setter(out, t, f);
         if f.base == "char" && !f.array.is_empty() {
             out.push_str(&format!("    pub fn {field}_as_c_str(&self) -> std::result::Result<&CStr, core::ffi::FromBytesUntilNulError> {{\n        let bytes = unsafe {{ core::slice::from_raw_parts(self.{field}.as_ptr().cast::<u8>(), self.{field}.len()) }};\n        CStr::from_bytes_until_nul(bytes)\n    }}\n",field=f.name));
@@ -188,6 +214,30 @@ fn record(out: &mut String, t: &Type, selected: &BTreeSet<String>, r: &Registry)
         }
     }
     out.push_str("}\n");
+}
+/// For each field: its bitfield storage word and bit shift, `None` for an ordinary member.
+/// Consecutive bitfields share a 32-bit unit until the next one does not fit; any other member
+/// ends the run. Only `uint32_t` bitfields exist in the registries.
+fn bitfield_units(t: &Type) -> Vec<Option<(usize, u32)>> {
+    let mut out = Vec::new();
+    let mut word = 0usize;
+    let mut used: Option<u32> = None;
+    for f in &t.fields {
+        if f.bits == 0 {
+            if used.take().is_some() { word += 1; }
+            out.push(None);
+            continue;
+        }
+        assert!(f.base == "uint32_t", "bitfield {}.{} of {}", t.name, f.name, f.base);
+        let shift = match used {
+            Some(u) if u + f.bits <= 32 => u,
+            Some(_) => { word += 1; 0 }
+            None => 0,
+        };
+        used = Some(shift + f.bits);
+        out.push(Some((word, shift)));
+    }
+    out
 }
 fn setter(out: &mut String, parent: &Type, f: &Field) {
     if f.name == "s_type" || f.name == "p_next" { return; }

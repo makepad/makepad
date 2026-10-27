@@ -32,6 +32,8 @@ pub struct Fault {
     pub sp: u64,
     pub fp: u64,
     pub addr: u64,
+    /// the link register (arm64 x30: the return address of a leaf); 0 on x86_64
+    pub lr: u64,
 }
 
 impl Fault {
@@ -143,7 +145,7 @@ mod imp {
                 eprintln!("makepad-run watch: stuck thread {:#x} at pc {:#x} ({}) fp {:#x}", crate::os::thread::current(), pc, crate::jit::fn_name_at(pc), fp);
                 return;
             }
-            let f = Fault { kind: kind(sig), sig, pc: *gregs.add(16), sp: *gregs.add(15), fp: *gregs.add(10), addr: *(info.add(16) as *const u64) };
+            let f = Fault { kind: kind(sig), sig, pc: *gregs.add(16), sp: *gregs.add(15), fp: *gregs.add(10), addr: *(info.add(16) as *const u64), lr: 0 };
             let chained = CHAINED[sig as usize][0].load(Ordering::SeqCst) > 1;
             match crate::jit::on_fault(&f, &Hooks { prepare: &|| {}, chained, debug: &|| {} }) {
                 Action::Ignore => {}
@@ -162,19 +164,38 @@ mod imp {
         }
     }
 
-    /// sigaltstack for the calling thread (64 KB)
-    pub fn this_thread() {
+    /// sigaltstack for the calling thread (64 KB above a guard page); its stack pointer for
+    /// `this_thread_done`.
+    pub fn this_thread() -> u64 {
         unsafe {
-            let stack = crate::os::mem::alloc_rw(1 << 16);
+            let stack = super::guarded_altstack(1 << 16);
             let ss = StackT { sp: stack as *mut u8, flags: 0, pad: 0, size: 1 << 16 };
             sigaltstack(&ss, std::ptr::null_mut());
+            stack
+        }
+    }
+
+    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off and freed,
+    /// unless something else replaced it since.
+    pub fn this_thread_done(sp: u64) {
+        const SS_DISABLE: i32 = 2;
+        unsafe {
+            let mut old = StackT { sp: std::ptr::null_mut(), flags: 0, pad: 0, size: 0 };
+            if sigaltstack(std::ptr::null(), &mut old) != 0 || old.sp as u64 != sp || old.flags & SS_DISABLE != 0 {
+                return;
+            }
+            let off = StackT { sp: std::ptr::null_mut(), flags: SS_DISABLE, pad: 0, size: 0 };
+            if sigaltstack(&off, std::ptr::null_mut()) == 0 {
+                super::free_altstack(sp, old.size);
+            }
         }
     }
 
     const OUR_SIGNALS: [i32; 5] = [SIGILL, SIGBUS, SIGFPE, SIG_WATCHDOG, SIGSEGV];
     const SA_SIGINFO: i32 = 4;
-    /// SA_SIGINFO | SA_ONSTACK | SA_NODEFER
-    const OUR_FLAGS: i32 = SA_SIGINFO | 0x0800_0000 | 0x4000_0000;
+    /// SA_SIGINFO | SA_ONSTACK. No SA_NODEFER: the signal stays blocked while its handler runs,
+    /// so a fault inside the handler is not handled again (the kernel kills the process).
+    const OUR_FLAGS: i32 = SA_SIGINFO | 0x0800_0000;
 
     pub fn install() {
         unsafe {
@@ -303,7 +324,7 @@ mod imp {
                 eprintln!("makepad-run watch: stuck thread {:#x} at pc {:#x} ({}) fp {:#x}", crate::os::thread::current(), pc, crate::jit::fn_name_at(pc), fp);
                 return;
             }
-            let f = Fault { kind: kind(sig), sig, pc: *reg(14), sp: *reg(13), fp: *reg(11), addr: *(info.add(OFFSETS[7]) as *const u64) };
+            let f = Fault { kind: kind(sig), sig, pc: *reg(14), sp: *reg(13), fp: *reg(11), addr: *(info.add(OFFSETS[7]) as *const u64), lr: *reg(12) };
             let chained = CHAINED[sig as usize][0].load(Ordering::SeqCst) > 1;
             match crate::jit::on_fault(&f, &Hooks { prepare: &|| {}, chained, debug: &|| {} }) {
                 Action::Ignore => {}
@@ -322,12 +343,30 @@ mod imp {
         }
     }
 
-    /// sigaltstack for the calling thread (64 KB)
-    pub fn this_thread() {
+    /// sigaltstack for the calling thread (64 KB above a guard page); its stack pointer for
+    /// `this_thread_done`.
+    pub fn this_thread() -> u64 {
         unsafe {
-            let stack = crate::os::mem::alloc_rw(1 << 16);
+            let stack = super::guarded_altstack(1 << 16);
             let ss = StackT { sp: stack as *mut u8, flags: 0, pad: 0, size: 1 << 16 };
             sigaltstack(&ss, std::ptr::null_mut());
+            stack
+        }
+    }
+
+    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off and freed,
+    /// unless something else replaced it since.
+    pub fn this_thread_done(sp: u64) {
+        const SS_DISABLE: i32 = 2;
+        unsafe {
+            let mut old = StackT { sp: std::ptr::null_mut(), flags: 0, pad: 0, size: 0 };
+            if sigaltstack(std::ptr::null(), &mut old) != 0 || old.sp as u64 != sp || old.flags & SS_DISABLE != 0 {
+                return;
+            }
+            let off = StackT { sp: std::ptr::null_mut(), flags: SS_DISABLE, pad: 0, size: 0 };
+            if sigaltstack(&off, std::ptr::null_mut()) == 0 {
+                super::free_altstack(sp, old.size);
+            }
         }
     }
 
@@ -343,8 +382,9 @@ mod imp {
         assert!(std::mem::size_of::<SigAction>() == OFFSETS[15]);
     };
     const SA_SIGINFO: i32 = 4;
-    /// SA_SIGINFO | SA_ONSTACK | SA_NODEFER
-    const OUR_FLAGS: i32 = SA_SIGINFO | 0x0800_0000 | 0x4000_0000;
+    /// SA_SIGINFO | SA_ONSTACK. No SA_NODEFER: the signal stays blocked while its handler runs,
+    /// so a fault inside the handler is not handled again (the kernel kills the process).
+    const OUR_FLAGS: i32 = SA_SIGINFO | 0x0800_0000;
 
     pub fn install() {
         // sigaction is deliberately the public libc entry: ART's libsigchain intercepts it
@@ -449,7 +489,6 @@ mod imp {
     }
 
     const SA_ONSTACK: i32 = 0x1;
-    const SA_NODEFER: i32 = 0x10;
     const SA_SIGINFO: i32 = 0x40;
 
     // Darwin arm64 signal frame offsets (checked against the SDK headers):
@@ -515,17 +554,23 @@ mod imp {
 
     /// MAKEPAD_RUN_FAULT_REGS: registers and the call sequence around a fault (arm64 encodings).
     unsafe fn fault_regs(uc: *mut u8) {
-        if std::env::var_os("MAKEPAD_RUN_FAULT_REGS").is_none() {
+        // (read once at install: no environment lock in a signal handler)
+        if !FAULT_REGS.load(Ordering::Relaxed) {
             return;
         }
         let mc = *(uc.add(UC_MCONTEXT) as *const *mut u8);
         let reg = |off: usize| -> *mut u64 { mc.add(off) as *mut u64 };
+        if UNIT.is_null() {
+            return;
+        }
         let u = &*UNIT;
         let (pc, fp) = (*reg(SS_PC), *reg(SS_FP));
         let lr = *reg(SS + 240);
         let x16 = *reg(SS + 16 * 8);
         let x17 = *reg(SS + 17 * 8);
-        let nm = |a: u64| u.find_fn(a).map(|id| format!("{}#{}", u.fns[id as usize].name, id)).unwrap_or("-".to_string());
+        // the code tables without waiting (the faulting thread may hold them)
+        let find = |a: u64| u.code.try_read().ok().and_then(|t| t.slot_at(a));
+        let nm = |a: u64| find(a).map(|id| format!("{}#{}", u.fns[id as usize].name, id)).unwrap_or("-".to_string());
         let mut slots = Vec::new();
         for id in 0..u.fns.len() {
             let t = *(u.slots.table(id as u32) as *const u64);
@@ -535,7 +580,7 @@ mod imp {
         }
         let ins = |a: u64| if a >= 8 { *((a) as *const u32) } else { 0 };
         eprintln!("makepad-run fault-regs: pc {:#x} ({}) lr {:#x} ({}) fp {:#x} x16 {:#x} ({}) x17 {:#x}; table slots holding x16/pc: {:?}; insts at lr-12..lr: {:08x} {:08x} {:08x}", pc, nm(pc), lr, nm(lr), fp, x16, nm(x16), x17, slots, ins(lr - 12), ins(lr - 8), ins(lr - 4));
-        if let Some(id) = u.find_fn(lr) {
+        if let Some(id) = find(lr) {
             let f = &u.fns[id as usize];
             eprintln!("makepad-run fault-regs: caller {} code {:#x} len {} lr off {:#x}", f.name, f.code, f.code_len, lr.wrapping_sub(f.code));
         }
@@ -579,7 +624,7 @@ mod imp {
             }
             let mc = *(uc.add(UC_MCONTEXT) as *const *mut u8);
             let reg = |off: usize| -> *mut u64 { mc.add(off) as *mut u64 };
-            let f = Fault { kind: kind(sig), sig, pc: *reg(SS_PC), sp: *reg(SS_SP), fp: *reg(SS_FP), addr: *(info.add(SI_ADDR) as *const u64) };
+            let f = Fault { kind: kind(sig), sig, pc: *reg(SS_PC), sp: *reg(SS_SP), fp: *reg(SS_FP), addr: *(info.add(SI_ADDR) as *const u64), lr: *reg(SS + 240) };
             // the program may fault while it has its own MAP_JIT pages in write mode
             // (pthread_jit_write_protect_np(0)); recovery continues in execute mode
             let prepare = || pthread_jit_write_protect_np(1);
@@ -602,22 +647,43 @@ mod imp {
         }
     }
 
-    /// sigaltstack for the calling thread (64 KB)
-    pub fn this_thread() {
+    /// sigaltstack for the calling thread (64 KB above a guard page); its stack pointer for
+    /// `this_thread_done`.
+    pub fn this_thread() -> u64 {
         unsafe {
             let size = 1 << 16;
-            let stack = crate::os::mem::alloc_rw(size);
+            let stack = super::guarded_altstack(size);
             let ss = StackT { sp: stack as *mut u8, size, flags: 0 };
             sigaltstack(&ss, std::ptr::null_mut());
+            stack
+        }
+    }
+
+    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off and freed,
+    /// unless something else replaced it since.
+    pub fn this_thread_done(sp: u64) {
+        const SS_DISABLE: i32 = 4;
+        unsafe {
+            let mut old = StackT { sp: std::ptr::null_mut(), size: 0, flags: 0 };
+            if sigaltstack(std::ptr::null(), &mut old) != 0 || old.sp as u64 != sp || old.flags & SS_DISABLE != 0 {
+                return;
+            }
+            let off = StackT { sp: std::ptr::null_mut(), size: 0, flags: SS_DISABLE };
+            if sigaltstack(&off, std::ptr::null_mut()) == 0 {
+                super::free_altstack(sp, old.size);
+            }
         }
     }
 
     const OUR_SIGNALS: [i32; 7] = [SIGILL, SIGTRAP, SIGFPE, SIGBUS, SIGSEGV, SIGABRT, SIG_WATCHDOG];
 
+    static FAULT_REGS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
     pub fn install() {
+        FAULT_REGS.store(std::env::var_os("MAKEPAD_RUN_FAULT_REGS").is_some(), Ordering::Relaxed);
         unsafe {
             for sig in OUR_SIGNALS {
-                let act = SigAction { handler: on_signal as *const () as usize, mask: 0, flags: SA_SIGINFO | SA_ONSTACK | SA_NODEFER };
+                let act = SigAction { handler: on_signal as *const () as usize, mask: 0, flags: SA_SIGINFO | SA_ONSTACK };
                 sigaction(sig, &act, std::ptr::null_mut());
             }
         }
@@ -638,7 +704,7 @@ mod imp {
                 if old.handler != on_signal as *const () as usize {
                     CHAINED[sig as usize][0].store(old.handler, Ordering::SeqCst);
                     CHAINED[sig as usize][1].store(old.flags as usize, Ordering::SeqCst);
-                    let act = SigAction { handler: on_signal as *const () as usize, mask: 0, flags: SA_SIGINFO | SA_ONSTACK | SA_NODEFER };
+                    let act = SigAction { handler: on_signal as *const () as usize, mask: 0, flags: SA_SIGINFO | SA_ONSTACK };
                     sigaction(sig, &act, std::ptr::null_mut());
                 }
             }
@@ -724,7 +790,7 @@ mod imp {
             EXCEPTION_STACK_OVERFLOW => ctx.get(CTX_RSP).wrapping_sub(8),
             _ => pc,
         };
-        let f = Fault { kind: k, sig: rec.code as i32, pc, sp: ctx.get(CTX_RSP), fp: ctx.get(CTX_RBP), addr };
+        let f = Fault { kind: k, sig: rec.code as i32, pc, sp: ctx.get(CTX_RSP), fp: ctx.get(CTX_RBP), addr, lr: 0 };
         match crate::jit::on_fault(&f, &Hooks { prepare: &|| {}, chained: false, debug: &|| {} }) {
             Action::Ignore | Action::PassOn | Action::Die => EXCEPTION_CONTINUE_SEARCH,
             Action::Resume { pc, a0, a1 } => {
@@ -773,12 +839,16 @@ mod imp {
     }
 
     /// The stack-overflow handler runs in the thread's guaranteed stack area (64 KB).
-    pub fn this_thread() {
+    pub fn this_thread() -> u64 {
         let mut size: u32 = 1 << 16;
         unsafe {
             SetThreadStackGuarantee(&mut size);
         }
+        0
     }
+
+    /// The guarantee goes with the thread.
+    pub fn this_thread_done(_sp: u64) {}
 
     pub fn install() {
         unsafe {
@@ -825,3 +895,97 @@ mod imp {
 
 #[cfg(not(target_os = "android"))]
 pub fn watchdog_signal() -> i32 { SIG_WATCHDOG }
+
+/// Fault stack memory: `size` bytes above one PROT_NONE guard page, so a handler that overflows
+/// its alternate stack faults on the guard (the process dies) instead of writing into whatever
+/// mapping lies below it.
+#[cfg(unix)]
+fn guarded_altstack(size: usize) -> u64 {
+    let base = crate::os::mem::alloc_rw(size + ALTSTACK_GUARD);
+    crate::os::mem::guard_page(base, ALTSTACK_GUARD);
+    base + ALTSTACK_GUARD as u64
+}
+
+#[cfg(unix)]
+const ALTSTACK_GUARD: usize = 16 << 10;
+
+/// Gives back what `guarded_altstack` made (`sp` above its guard, `size` bytes).
+#[cfg(unix)]
+fn free_altstack(sp: u64, size: usize) {
+    crate::os::mem::free(sp - ALTSTACK_GUARD as u64, size + ALTSTACK_GUARD);
+}
+
+/// The highest address of the calling thread's stack (0: unknown). Called in normal context
+/// (jit::ensure_altstack); fault handlers read the recorded value to bound frame walks.
+pub fn stack_hi_of_self() -> u64 {
+    // a program stack (relax_base::stack::on_program_stack) replaces the OS thread's while it runs
+    if let Some((_, hi)) = crate::stack::program_stack_bounds() {
+        return hi as u64;
+    }
+    #[cfg(target_os = "macos")]
+    unsafe {
+        extern "C" {
+            fn pthread_self() -> usize;
+            fn pthread_get_stackaddr_np(t: usize) -> *mut u8;
+        }
+        pthread_get_stackaddr_np(pthread_self()) as u64
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe {
+        extern "C" {
+            fn pthread_self() -> usize;
+            fn pthread_getattr_np(t: usize, attr: *mut u64) -> i32;
+            fn pthread_attr_getstack(attr: *const u64, addr: *mut usize, size: *mut usize) -> i32;
+            fn pthread_attr_destroy(attr: *mut u64) -> i32;
+        }
+        let mut attr = [0u64; 16];
+        if pthread_getattr_np(pthread_self(), attr.as_mut_ptr()) != 0 {
+            return 0;
+        }
+        let (mut addr, mut size) = (0usize, 0usize);
+        let ok = pthread_attr_getstack(attr.as_ptr(), &mut addr, &mut size) == 0;
+        pthread_attr_destroy(attr.as_mut_ptr());
+        if ok { (addr + size) as u64 } else { 0 }
+    }
+    #[cfg(windows)]
+    unsafe {
+        extern "system" {
+            fn GetCurrentThreadStackLimits(low: *mut usize, high: *mut usize);
+        }
+        let (mut lo, mut hi) = (0usize, 0usize);
+        GetCurrentThreadStackLimits(&mut lo, &mut hi);
+        hi as u64
+    }
+}
+
+/// Writes `b` to stderr with one system call: no allocation, no lock (a fault handler's report).
+pub fn raw_stderr(b: &[u8]) {
+    #[cfg(unix)]
+    unsafe {
+        extern "C" {
+            fn write(fd: i32, buf: *const u8, n: usize) -> isize;
+        }
+        let _ = write(2, b.as_ptr(), b.len());
+    }
+    #[cfg(windows)]
+    {
+        use std::io::Write;
+        let _ = std::io::stderr().write_all(b);
+    }
+}
+
+/// Ends the process by signal `sig` with its default action (exit status 128 + sig, as a
+/// rustc build's fault would), from normal context: a contained fault the policy found fatal.
+pub fn die_by(sig: i32) -> ! {
+    #[cfg(unix)]
+    unsafe {
+        extern "C" {
+            fn signal(sig: i32, handler: usize) -> usize;
+            fn raise(sig: i32) -> i32;
+        }
+        signal(sig, 0);
+        raise(sig);
+    }
+    let _ = sig;
+    std::process::abort()
+}

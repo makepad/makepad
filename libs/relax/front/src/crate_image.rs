@@ -369,9 +369,10 @@ impl Codec for CrateMods {
         self.uses.put(w);
         self.externs.put(w);
         self.renames.put(w);
+        self.recursion_limit.put(w);
     }
     fn get(r: &mut Decode<'_>) -> Option<Self> {
-        Some(Self { root: Codec::get(r)?, src: Codec::get(r)?, mods: Codec::get(r)?, items: Codec::get(r)?, uses: Codec::get(r)?, externs: Codec::get(r)?, renames: Codec::get(r)?, ..Default::default() })
+        Some(Self { root: Codec::get(r)?, src: Codec::get(r)?, mods: Codec::get(r)?, items: Codec::get(r)?, uses: Codec::get(r)?, externs: Codec::get(r)?, renames: Codec::get(r)?, recursion_limit: Codec::get(r)?, ..Default::default() })
     }
 }
 impl Codec for MacroUse {

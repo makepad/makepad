@@ -114,10 +114,77 @@ pub fn unit_sizes(u: &crate::jit::Unit) -> Vec<(String, u64)> {
             spec += std::mem::size_of::<crate::jit::SpecCode>() as u64 + vbytes(&s.code) + vbytes(&s.map) + vbytes(&s.relocs);
         }
     }
+    // where the per-slot blocks live (compiler arena old / new chunks, burst, other heaps): a
+    // settle rebuild keeps the slots, so their cold-start blocks pin the cold chunks
+    {
+        let mut pl = [[0u64; 4]; 9];
+        let mut put = |k: usize, p: *const u8, n: usize| {
+            if n != 0 {
+                pl[k][crate::zone_alloc::placement(p)] += n as u64;
+            }
+        };
+        for f in u.fns.iter() {
+            put(0, f.name.as_ptr(), f.name.len());
+            if let Some(p) = f.pc_map.own_ptr() {
+                put(1, p, f.pc_map.bytes());
+            }
+            if let Some(h) = &f.history {
+                put(2, (&**h as *const crate::jit::SlotHistory).cast(), std::mem::size_of::<crate::jit::SlotHistory>());
+                for x in h.prev.iter() {
+                    if let Some(p) = x.2.own_ptr() { put(1, p, x.2.bytes()); }
+                }
+                for x in h.retired.iter() {
+                    if let Some(p) = x.2.own_ptr() { put(1, p, x.2.bytes()); }
+                }
+            }
+            if let Some(r) = &f.rir {
+                put(3, std::sync::Arc::as_ptr(r).cast(), rir_bytes(r) as usize);
+            }
+            if let Some(sc) = &f.spec {
+                put(4, sc.code.as_ptr(), sc.code.capacity());
+            }
+            if let crate::jit::FnKey::Inst(_, v) = &f.key {
+                put(5, v.as_ptr().cast(), v.capacity() * std::mem::size_of::<relax_types::types::TyId>());
+            }
+            put(6, f.calls.as_ptr().cast(), f.calls.len() * 4);
+            put(7, f.rir_refs().as_ptr().cast(), f.rir_refs().len() * 4);
+            if let Some(e) = &f.build_err {
+                put(8, e.as_ptr(), e.len());
+            }
+        }
+        for (k, name) in ["names", "pc maps", "histories", "RIR kept", "spec code", "keys (type args)", "calls", "RIR refs", "build errors"].iter().enumerate() {
+            let mb = |b: u64| b as f64 / 1048576.0;
+            out.push((format!("placement of slot {name}: compiler old {:.1} / compiler new {:.1} / burst {:.1} / other {:.1} MB", mb(pl[k][0]), mb(pl[k][1]), mb(pl[k][2]), mb(pl[k][3])), pl[k][0] + pl[k][1]));
+        }
+    }
     out.push((format!("slots ({}; FnEntry)", n_fns), n_fns * std::mem::size_of::<crate::jit::FnEntry>() as u64));
     out.push(("slot names".to_string(), names));
     out.push(("slot histories".to_string(), history));
     out.push(("slot pc maps".to_string(), pcm));
+    // the variable tables in the installed bodies' pc maps (makepad inspect `locals`) and the
+    // debug tables the retained RIR carries
+    let (mut n_vars, mut var_bytes, mut dbg_bytes) = (0u64, 0u64, 0u64);
+    for f in u.fns.iter() {
+        let e = f.pc_map.entries();
+        let k = e.iter().position(|x| x.0 == relax_backend::dbgloc::PC_VARS);
+        if let Some(k) = k {
+            // its length entry, then its bytes as they are (PcMap::encode_to)
+            n_vars += 1;
+            var_bytes += relax_backend::dbgloc::varint_bytes(if k > 0 { e[k - 1] } else { (0, 0) }, &e[k..k + 1]) + e[k].1 as u32 as u64;
+        }
+        if let Some(r) = &f.rir {
+            dbg_bytes += vbytes(&r.dbg) + r.dbg.iter().map(|d| vbytes(&d.k) + match &d.loc { relax_backend::rir::DbgLoc::Regs(v) => vbytes(v), _ => 0 }).sum::<u64>();
+        }
+    }
+    out.push((format!("slot pc maps: of which variable tables ({} bodies)", n_vars), var_bytes));
+    out.push(("RIR debug tables (Func::dbg)".to_string(), dbg_bytes));
+    if relax_backend::dbgloc::stats_on() {
+        let st = &relax_backend::dbgloc::STATS;
+        let g = |k: usize| st[k].load(std::sync::atomic::Ordering::Relaxed);
+        out.push((format!("compiled: {} of {} bodies with a table; table bytes", g(0), g(1)), g(2)));
+        out.push(("compiled: the tables' pc-map bytes".to_string(), g(3)));
+        out.push(("compiled: the code entries' pc-map bytes".to_string(), g(4)));
+    }
     out.push((format!("slot RIR kept ({} fns; inst {} B, block {} B, func {} B)", n_rir, std::mem::size_of::<relax_backend::rir::Inst>(), std::mem::size_of::<relax_backend::rir::Block>(), std::mem::size_of::<relax_backend::rir::Func>()), rir));
     out.push((format!("  RIR insts used (of {:.1} MB capacity)", parts[1] as f64 / 1048576.0), parts[0]));
     out.push((format!("  RIR positions used (of {:.1} MB capacity)", parts[3] as f64 / 1048576.0), parts[2]));

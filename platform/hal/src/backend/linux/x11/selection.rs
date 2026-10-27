@@ -440,6 +440,8 @@ impl Selections {
             let bytes = if e.selection == xdnd {
                 self.outgoing.as_ref().and_then(|d| {
                     if e.target == uri {
+                        // promised files are handed over once they are written
+                        crate::drag_promise::wait_promised(&d.items);
                         Some(Arc::new(input::encode_uris(&d.items)))
                     } else if text {
                         Some(Arc::new(

@@ -86,6 +86,23 @@ impl Drop for Lists {
 }
 
 impl Lists {
+    /// A heap copy of `live` (positions, words and bucket heads as they are), with nothing
+    /// mapped: the settle rebuild's restored interner (Types::top_up_from). Every list is complete,
+    /// since nothing interns while it copies.
+    pub(super) fn copy_of(live: &Lists) -> Self {
+        let l = Lists::new();
+        let words = live.tail_words(0);
+        for (p, &w) in words.iter().enumerate() {
+            if w != 0 {
+                let c = l.chunk(p >> LIST_CHUNK_BITS);
+                unsafe { *c.add(p & (LIST_CHUNK - 1)) = w };
+            }
+        }
+        l.end.store(words.len() as u32, Ordering::Release);
+        for (b, h) in l.buckets.iter().zip(live.buckets.iter()) { b.store(h.load(Ordering::Acquire), Ordering::Release); }
+        l
+    }
+
     pub(super) fn new() -> Self {
         Lists {
             mapped: &[],
@@ -256,6 +273,7 @@ impl Lists {
             (head != 0).then_some([i as u32, head])
         }).flatten().collect()
     }
+
 
     /// A collected image's words and bucket heads; new lists follow the mapped words.
     pub(super) fn restored(mapped: &'static [u32], buckets: &[u32]) -> Option<Self> {

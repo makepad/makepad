@@ -80,6 +80,9 @@ fn fresh(req: &Req) -> Report {
 
 /// True when this is a GPU or HAL command. The endpoint thread reads the native ledger directly.
 pub fn dispatch(req: &Req, out: &mut Out) -> bool {
+    if crate::framecap::dispatch(req, out) {
+        return true;
+    }
     if req.cmd == "hal" {
         match req.pos.first().map(String::as_str) {
             Some("pump") => pump(out),
@@ -89,6 +92,9 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
     }
     if req.cmd != "gpu" {
         return false;
+    }
+    if crate::gpu_prof::dispatch(req, out) {
+        return true;
     }
     let sub = req.pos.first().map(String::as_str).unwrap_or("");
     if sub == "diff" {
@@ -174,7 +180,7 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
             ));
             snaps.push((name.clone(), Arc::new(snap)));
         }
-        _ => out.err("gpu | gpu top | gpu idle | gpu snap | gpu diff | gpu path"),
+        _ => out.err("gpu | gpu top | gpu idle | gpu snap | gpu diff | gpu path | gpu prof start|stop|status|frames|frame|lanes|top|util|diff"),
     }
     true
 }

@@ -280,7 +280,8 @@ impl PreparedStaticPreview {
         for (_,lod) in &self.lods { lod.collect_texture_charges(out); }
         for l in std::iter::once(&self.main).chain(&self.extra).chain(self.anim_parts.iter().flat_map(|p|&p.draws)).chain(self.driven_parts.iter().flat_map(|p|&p.draws)) {
             let surface=l.surface.iter().flat_map(|s|[&s.normal,&s.occlusion,&s.emissive]);
-            for t in [&*l.texture,&*l.detail,&*l.orm].into_iter().chain(surface) {
+            let splat=l.surface.iter().filter_map(|s|s.splat.as_ref()).flat_map(|p|p.albedo.iter().chain(&p.normal).map(|t|&**t).chain(std::iter::once(&p.weights)));
+            for t in [&*l.texture,&*l.detail,&*l.orm].into_iter().chain(surface).chain(splat) {
                 if !out.iter().any(|(h,_)|*h==t.hash) { out.push((t.hash,t.bytes())); }
             }
         }

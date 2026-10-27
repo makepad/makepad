@@ -718,13 +718,20 @@ impl IrFnCompiler {
                 let e = self.expr(ExprKind::Sample(Box::new(s)), vec4);
                 self.push(ShaderType::Pod(pods.pod_vec4f), e);
             }
-            id!(sample_grad) => {
-                if exprs.len() != 3 || !matches!(tex_type, TextureType::Texture2d) {
-                    script_err_invalid_args!(self.trap, "texture.sample_grad(coord, dx, dy) takes 3 args, on a 2D texture");
+            // `sample_grad_repeat`: the same with a repeating sampler (a
+            // tiled texture read where implicit derivatives are not
+            // defined: inside a branch that differs between pixels).
+            id!(sample_grad) | id!(sample_grad_repeat) => {
+                if exprs.len() != 3 || !matches!(tex_type, TextureType::Texture2d | TextureType::Texture2dArray) {
+                    script_err_invalid_args!(self.trap, "texture.{:?}(coord, dx, dy) takes 3 args, on a 2D texture or 2D array (coord.z = layer)", method_id);
                     return self.push(ShaderType::Pod(pods.pod_vec4f), NO_EXPR);
                 }
-                let sampler = output.get_or_create_sampler(ShaderSampler::default());
-                let coord = self.settle_float(output, exprs[0], 2);
+                let sampler = output.get_or_create_sampler(if method_id == id!(sample_grad_repeat) {
+                    ShaderSampler { address: SamplerAddress::Repeat, ..ShaderSampler::default() }
+                } else {
+                    ShaderSampler::default()
+                });
+                let coord = self.settle_float(output, exprs[0], coord_lanes(tex_type));
                 let dx = self.settle_float(output, exprs[1], 2);
                 let dy = self.settle_float(output, exprs[2], 2);
                 let s = IrSample {
@@ -771,7 +778,7 @@ impl IrFnCompiler {
                     method_id,
                     suggest_from_live_ids(
                         method_id,
-                        &[id!(sample), id!(sample_nearest), id!(sample_repeat), id!(sample_lod), id!(sample_grad), id!(sample_video), id!(size)]
+                        &[id!(sample), id!(sample_nearest), id!(sample_repeat), id!(sample_lod), id!(sample_grad), id!(sample_grad_repeat), id!(sample_video), id!(size)]
                     )
                 );
             }

@@ -51,7 +51,7 @@ fn want(x: u32) -> u64 {
 #[test]
 fn u32_immediates_above_i32_max() {
     for opt in [false, true] {
-        let env = x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: opt, syms: 0, sym_class: 0 };
+        let env = x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: opt, syms: 0, sym_class: 0, near: false };
         let f = build();
         let c = x64::compile(&relax_session::Options::default(), &f, &env).unwrap();
         let code = Code::new(&c.code).unwrap();

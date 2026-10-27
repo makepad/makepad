@@ -83,11 +83,8 @@ impl Bytes {
     }
 
     /// The file read into the kept heap: where it is not mapped (Windows), the bytes stand for a
-    /// mapping, which outlives every compiler generation -- what is read in place from them (a
-    /// startup image's pc maps, unwind trailers) is identity state of installed code. Read in
-    /// the caller's phase (a warm start loads in the compiler phase) they were destroyed by the
-    /// settle swap, and the O3 sampler's next pc lookup faulted on run-owner ("use after
-    /// compiler-zone destroy (generation 0)", 0xC0000005, DESKTOP-5).
+    /// mapping, which is process state -- what is read in place from them (a startup image's pc
+    /// maps, unwind trailers) is identity state of installed code: the kept heap.
     fn read_kept(path: &Path) -> Option<Bytes> {
         crate::zone_alloc::kept_with(|| std::fs::read(path).ok().map(Bytes::from_vec))
     }
@@ -232,8 +229,7 @@ pub fn map_pinned(file: &std::fs::File, off: u64, len: usize) -> Option<&'static
 #[cfg(not(unix))]
 pub fn map_pinned(file: &std::fs::File, off: u64, len: usize) -> Option<&'static [u8]> {
     use std::os::windows::fs::FileExt;
-    // the copy stands for a mapping kept for the rest of the process: the kept heap, never the
-    // compiler generation the settle swap destroys (Bytes::read_kept)
+    // the copy stands for a mapping kept for the rest of the process: the kept heap (Bytes::read_kept)
     let _k = crate::zone_alloc::kept();
     // 8-byte aligned, as a store payload is
     let mut words = vec![0u64; len.div_ceil(8)];
@@ -290,9 +286,9 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     /// A cache file read in place of a mapping, from the compiler phase (a warm start's load):
-    /// its bytes are in the kept heap, not in the compiler generation the settle swap destroys.
+    /// its bytes are in the kept heap (the program's), not in the compiler arena.
     #[test]
-    fn unmapped_cache_bytes_outlive_the_compiler_generation() {
+    fn unmapped_cache_bytes_live_in_the_kept_heap() {
         let path = std::env::temp_dir().join(format!("relax-pack-kept-{}", std::process::id()));
         std::fs::write(&path, vec![7u8; 4096]).unwrap();
         let _c = crate::zone_alloc::compiler();

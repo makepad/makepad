@@ -934,7 +934,14 @@ impl CalculatorView {
         // Each display fits on its own allocation: in landscape the portrait
         // `result` is hidden and has none, which must not skip `short_result`.
         self.fit_short_result(cx, metrics, &text);
-        let width = self.widget(cx, ids!(result)).area().rect(cx).size.x;
+        let area = self.widget(cx, ids!(result)).area();
+        // Web fonts load asynchronously: until glyphs have been drawn the
+        // label can have an instance area with no instances. Fit on a later
+        // redraw, once the resource loader has supplied the font.
+        if !area.is_valid(cx) {
+            return;
+        }
+        let width = area.rect(cx).size.x;
         if width < 8.0 {
             return;
         }

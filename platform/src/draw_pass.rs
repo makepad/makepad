@@ -312,6 +312,8 @@ impl DrawPass {
         pass.parent = CxDrawPassParent::None;
         pass.attached_by = None;
         pass.paint_dirty = false;
+        // nothing is drawn from it until it records again
+        pass.incomplete = false;
     }
 
     /// Render without a depth attachment.
@@ -701,6 +703,16 @@ pub struct CxDrawPass {
     /// lands its cells only once its sheet was painted) compares this with
     /// the value it saw when it attached the pass.
     pub painted_serial: u64,
+    /// Its picture is not yet the whole of what it last recorded: a draw of
+    /// it was left out while its pipeline compiled, it kept an older picture
+    /// for one, or it was drawn from such a picture. A pass that samples it
+    /// is not painted whole either; its next whole paint clears it.
+    pub(crate) incomplete: bool,
+    /// Kept attached although its attaching list was recorded again without
+    /// it: a drawing recorded it, the frame was drawn again before it painted
+    /// whole, and the later drawing did not record it again (`Cx::frame_drawn_again`).
+    /// Cleared once it has painted whole.
+    pub(crate) kept_recording: bool,
     pub pass_rect: Option<CxDrawPassRect>,
     pub view_shift: Vec2d,
     pub view_scale: Vec2d,
@@ -717,6 +729,27 @@ pub struct CxDrawPass {
 }
 
 impl CxDrawPass {
+    /// A paint of it is done: whole (every draw it recorded drew, from whole
+    /// pictures) moves `painted_serial` to `repaint`; one that left a draw
+    /// out or sampled an unfinished picture leaves it, and the passes that
+    /// sample this one are not whole either until it paints whole.
+    #[allow(dead_code)]
+    pub(crate) fn painted(&mut self, whole: bool, repaint: u64) {
+        self.incomplete = !whole;
+        if whole {
+            self.painted_serial = repaint;
+        }
+    }
+
+    /// It keeps its older picture while a pipeline its draws use compiles
+    /// (the pipeline's answer repaints it): nothing to paint until then, but
+    /// what it shows is not what it recorded.
+    #[allow(dead_code)]
+    pub(crate) fn hold_picture(&mut self) {
+        self.paint_dirty = false;
+        self.incomplete = true;
+    }
+
     /// Opt in when a widget borrows its containing pass. No OS/GPU wait.
     pub fn set_gpu_timing_enabled(&mut self, enabled: bool) {
         if enabled {
@@ -780,6 +813,8 @@ impl Default for CxDrawPass {
             repaint_next: false,
             time_owed: false,
             painted_serial: 0,
+            incomplete: false,
+            kept_recording: false,
             pass_rect: None,
             #[cfg(target_arch = "wasm32")]
             os: CxOsPass::default(),

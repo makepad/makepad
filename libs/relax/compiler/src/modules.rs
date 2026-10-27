@@ -24,8 +24,30 @@ struct Module {
 
 static MODULES: relax_session::sync::Mutex<Vec<Module>> = relax_session::sync::Mutex::new(Vec::new());
 
-crate::gen_local! {
-    static LAST_ERROR: std::cell::RefCell<String>;
+/// The crates of run-time modules (from their front end on, before their code compiles): their code
+/// goes into the module's own code group (invalid.rs), made inaccessible when it is unloaded.
+static MODULE_CRATES: relax_session::sync::Mutex<Vec<u32>> = relax_session::sync::Mutex::new(Vec::new());
+static ANY_MODULE_CRATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn note_module_crate(krate: u32) {
+    let mut v = MODULE_CRATES.lock().unwrap_or_else(|e| e.into_inner());
+    if !v.contains(&krate) {
+        crate::zone_alloc::kept_with(|| v.push(krate));
+    }
+    ANY_MODULE_CRATE.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Whether any module crate exists (one atomic load: this sits on every install's path).
+pub(crate) fn any_module_crate() -> bool {
+    ANY_MODULE_CRATE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+pub(crate) fn is_module_crate(krate: u32) -> bool {
+    MODULE_CRATES.lock().unwrap_or_else(|e| e.into_inner()).contains(&krate)
+}
+
+thread_local! {
+    static LAST_ERROR: std::cell::RefCell<String> = Default::default();
 }
 
 fn set_error(e: String) {
@@ -237,7 +259,6 @@ pub(crate) unsafe fn add_crates(up: *mut Unit, new: &[NewCrate], tolerant: bool,
             let loaded = u.prog.load_crate_deferred(&nc.name, &nc.path, nc.edition, nc.cfg.clone(), dep_list);
             for k in first..u.prog.crates.len() {
                 u.prog.crates[k].proc_macro = nc.proc_macro;
-                if up == crate::run::running_unit() { jit::zone_swap::remember_runtime(&u.prog, k as u32); }
             }
             match loaded {
                 Ok(k) => {
@@ -267,11 +288,17 @@ pub(crate) unsafe fn add_crates(up: *mut Unit, new: &[NewCrate], tolerant: bool,
     // host) are not the module's errors. Only diagnostics in the module's files refuse it.
     let mine: Vec<String> = (f0..u.prog.files.len()).map(|f| u.prog.file_paths[f].clone()).collect();
     let mut errs: Vec<String> = u.prog.errors[e0..].iter().filter(|e| mine.iter().any(|p| e.starts_with(p.as_str()))).cloned().collect();
-    u.prog.errors.truncate(e0);
-    u.prog.errors.extend(errs.iter().cloned());
-    // imports of the module that did not resolve
-    for im in u.prog.imports.iter().skip(i0) {
-        if !im.done {
+    {
+        // (Program.errors is read off the owner under a front read: a mid-run encode)
+        let _fw = jit::front_write();
+        u.prog.errors.truncate(e0);
+        u.prog.errors.extend(errs.iter().cloned());
+    }
+    // imports of the module that did not resolve (a macro import stays open by design: macros
+    // resolve by name at the call)
+    for i in u.prog.open_reportable_imports(i0) {
+        let im = &u.prog.imports[i];
+        {
             let (l, c) = u.prog.files[im.file as usize].line_col(im.pos);
             errs.push(format!("{}:{}:{}: unresolved import -- name a crate the module depends on", u.prog.file_paths[im.file as usize], l, c));
         }
@@ -302,7 +329,7 @@ pub(crate) unsafe fn add_crates(up: *mut Unit, new: &[NewCrate], tolerant: bool,
 /// Parses, resolves, collects and type-checks a crate loaded at run time (on the owner thread);
 /// `sandbox`: the compile-time refusal applies. On an error nothing of it stays reachable.
 unsafe fn front(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox: bool) -> Result<(u32, u32, Vec<DefId>), Vec<String>> {
-    let session = unsafe { (*std::ptr::addr_of!((*up).prog.session)).clone() };
+    let session = unsafe { crate::jit::unit_session(up) };
     let sess = &session;
     let u = &mut *up;
     let mut dep_list = Vec::new();
@@ -315,11 +342,7 @@ unsafe fn front(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox:
             None => return Err(vec![format!("{}: dependency `{}` is not a crate of the running program", path, c)]),
         }
     }
-    let cfg = {
-        let mut c = crate::cfg::CfgSet::host(sess, &[]);
-        c.set.push("relax".to_string());
-        c
-    };
+    let cfg = crate::program_cfg(sess, &[]);
     let tr = std::env::var_os("MAKEPAD_RUN_MODULE_TRACE").is_some();
     let mut marks: Vec<(&str, std::time::Instant)> = vec![("", std::time::Instant::now())];
     let added = add_crates(up, &[NewCrate { name: name.to_string(), path: path.to_string(), edition: 2021, cfg, deps: dep_list, proc_macro: false }], false, None)?;
@@ -368,6 +391,7 @@ unsafe fn front(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox:
     if !errs.is_empty() {
         drop_defs(up, &defs);
         let u = &mut *up;
+        let _fw = jit::front_write();
         u.prog.errors.truncate(e0);
         return Err(errs);
     }
@@ -408,6 +432,7 @@ fn root_fns(u: &Unit, defs: &[DefId]) -> Vec<DefId> {
 /// Loads a trusted module (MAKEPAD_RUN_MODULES_TRUSTED=1; on the owner thread): it runs as host code.
 unsafe fn load(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox: bool) -> Result<(u32, u32, Vec<DefId>), Vec<String>> {
     let (krate, root_file, defs) = front(up, name, path, deps, sandbox)?;
+    note_module_crate(krate);
     let u = &mut *up;
     let roots: Vec<u32> = root_fns(u, &defs).into_iter().map(|d| u.fn_id(FnKey::Inst(d, Vec::new()))).collect();
     let mine = |u: &Unit, id: u32| match &u.fns[id as usize].key {
@@ -422,10 +447,110 @@ unsafe fn load(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox: 
     Ok((krate, root_file, defs))
 }
 
-/// makepad inspect's probes: loads the module at `path` as a trusted crate depending on `deps`
-/// (owner thread): (crate, root file, its definitions).
-pub(crate) unsafe fn load_trusted(up: *mut Unit, name: &str, path: &str, deps: &[String]) -> Result<(u32, u32, Vec<DefId>), Vec<String>> {
-    load(up, name, path, deps, false)
+/// makepad inspect's probes and `eval`: compiles `v` as a new private child module `name` of
+/// module `parent` (Program::add_child_module: the parent's private items, imports and `crate::`
+/// paths are in scope), type-checks it and compiles its non-generic fns and what they reach
+/// (owner thread): (the child module, its definitions). On an error nothing of it stays reachable.
+pub(crate) unsafe fn load_in_module(up: *mut Unit, parent: u32, name: &str, v: crate::program::FileVersion) -> Result<(u32, Vec<DefId>), Vec<String>> {
+    let u = &mut *up;
+    let d0 = u.prog.defs.len();
+    let i0 = u.prog.imports.len();
+    let e0 = u.prog.errors.len();
+    let f0 = u.prog.files.len();
+    let path = v.path.clone();
+    let child = {
+        let _fw = jit::front_write();
+        crate::run::preserve_collected_boot(u);
+        u.tcx.collect_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let r = u.prog.add_child_module(parent, name, v);
+        if r.is_ok() {
+            u.prog.resolve_imports_added(i0, d0);
+        }
+        u.prog.reclaim_caches();
+        r
+    };
+    let defs: Vec<DefId> = (d0 as u32..u.prog.defs.len() as u32).map(DefId).collect();
+    let fail = |up: *mut Unit, errs: Vec<String>| -> Result<(u32, Vec<DefId>), Vec<String>> {
+        drop_defs(up, &defs);
+        let _fw = jit::front_write();
+        (&mut *up).prog.errors.truncate(e0);
+        Err(errs)
+    };
+    let (child, _file) = match child {
+        Ok(c) => c,
+        Err(e) => return fail(up, vec![e]),
+    };
+    let u = &mut *up;
+    let mine_file = |p: &str| p == path;
+    let mut errs: Vec<String> = u.prog.errors[e0..].iter().filter(|e| e.starts_with(path.as_str())).cloned().collect();
+    for im in u.prog.imports.iter().skip(i0) {
+        if !im.done {
+            let (l, c) = u.prog.files[im.file as usize].line_col(im.pos);
+            errs.push(format!("{}:{}:{}: unresolved import", u.prog.file_paths[im.file as usize], l, c));
+        }
+    }
+    if errs.is_empty() {
+        let _fw = jit::front_write();
+        let visible = u.prog.crates_seeing_files(f0 as u32..u.prog.files.len() as u32);
+        errs.extend(u.tcx.collect_added_in(&u.prog, &defs, false, Some(&visible)).into_iter().filter(|e| e.starts_with(path.as_str())));
+    }
+    if errs.is_empty() {
+        for &d in &defs {
+            if !matches!(u.prog.def(d).kind, DefKind::Fn | DefKind::AssocFn | DefKind::Const | DefKind::Static | DefKind::AssocConst) {
+                continue;
+            }
+            if let Some(a) = crate::borrowck::identity_args(&u.tcx, &u.prog, d) {
+                let b = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::typeck::instantiate_body(&crate::tcx::EvalCx::new(&u.prog, &u.tcx, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), &crate::tcx::EvalState::new()), &u.prog, &u.tcx, d, &a)));
+                match b {
+                    Ok(b) => {
+                        for e in &b.errors {
+                            if !errs.contains(e) {
+                                errs.push(e.clone());
+                            }
+                        }
+                    }
+                    Err(_) => errs.push(format!("internal compiler error type-checking {} -- makepad run bug, report it", u.prog.def_path(d))),
+                }
+            }
+        }
+    }
+    if !errs.is_empty() {
+        return fail(up, errs);
+    }
+    let roots: Vec<u32> = root_fns(u, &defs).into_iter().map(|d| u.fn_id(FnKey::Inst(d, Vec::new()))).collect();
+    let mine = |u: &Unit, id: u32| match &u.fns[id as usize].key {
+        FnKey::Inst(d, _) => mine_file(&u.prog.file_paths[u.prog.def(*d).file as usize]),
+        FnKey::Closure(file, _, _) => u.prog.file_paths.get(*file as usize).is_some_and(|p| mine_file(p)),
+        _ => false,
+    };
+    if let Err(e) = compile_all(up, roots, &mine, &mine) {
+        return fail(up, e);
+    }
+    Ok((child, defs))
+}
+
+/// The module a `crate::a::b` / `krate::a::b` path names (a crate's root for `krate`): inspect's
+/// `--in` and the scope of a hooked fn.
+pub(crate) fn module_named(u: &Unit, path: &str) -> Option<u32> {
+    let path = path.trim().trim_start_matches("::");
+    let mut segs = path.split("::").filter(|s| !s.is_empty());
+    let first = segs.next()?.replace('-', "_");
+    let krate = (0..u.prog.crates.len()).rev().find(|&k| u.prog.syms.str(u.prog.crates[k].name) == first)?;
+    let mut m = u.prog.crates[krate].root_mod;
+    for s in segs {
+        let sym = u.prog.syms.get(s)?;
+        let d = *u.prog.mods[m as usize].types.get(&sym)?;
+        if u.prog.def(d).kind != DefKind::Mod {
+            return None;
+        }
+        m = u.prog.def(d).sub;
+    }
+    Some(m)
+}
+
+/// The module whose scope resolves the names in fn `d`'s body (its block module's named module).
+pub(crate) fn scope_of(u: &Unit, d: DefId) -> u32 {
+    u.prog.mods[u.prog.def(d).scope as usize].normal
 }
 
 /// How an export's parameter or result crosses into the sandbox (wrapper generation).
@@ -675,7 +800,7 @@ fn wrapper_source(u: &Unit, krate: u32, modname: &str, idx: u32, defs: &[DefId])
 /// defs and the wrapper's, wrapper crate, arena, unsupported exports).
 #[allow(clippy::type_complexity)]
 unsafe fn load_sandboxed(up: *mut Unit, idx: u32, name: &str, path: &str, deps: &[String]) -> Result<(u32, u32, Vec<DefId>, u32, std::sync::Arc<crate::sandbox::Arena>, Vec<String>), Vec<String>> {
-    let session = unsafe { (*std::ptr::addr_of!((*up).prog.session)).clone() };
+    let session = unsafe { crate::jit::unit_session(up) };
     let sess = &session;
     let runtime = &sess.runtime;
     let options = &sess.options;
@@ -683,6 +808,7 @@ unsafe fn load_sandboxed(up: *mut Unit, idx: u32, name: &str, path: &str, deps: 
     let check = !options.sandbox_nocheck;
     let t0 = std::time::Instant::now();
     let (krate, root_file, mut defs) = front(up, name, path, deps, check)?;
+    note_module_crate(krate);
     let t_front = t0.elapsed();
     let fail = |up: *mut Unit, defs: &[DefId], e: Vec<String>| -> Vec<String> {
         drop_defs(up, defs);
@@ -693,7 +819,7 @@ unsafe fn load_sandboxed(up: *mut Unit, idx: u32, name: &str, path: &str, deps: 
     }
     let mem: u64 = runtime.module_mem_mb << 20;
     let fuel: i64 = runtime.module_fuel;
-    let arena = match crate::sandbox::new_arena(idx, mem, fuel) {
+    let arena = match crate::sandbox::new_arena(idx, name, mem, fuel) {
         Ok(a) => a,
         Err(e) => return Err(fail(up, &defs, vec![e])),
     };
@@ -814,7 +940,7 @@ pub(crate) fn stream_applied(h: u64, file: u32) {
 pub extern "C" fn __relax_module_load_stream(name: *const u8, nlen: usize, path: *const u8, plen: usize, src: *const u8, slen: usize, deps: *const u8, dlen: usize) -> u64 {
     let up = jit::current_unit();
     if up.is_null() { set_error("no running unit".to_string()); return 0; }
-    let session = unsafe { (*std::ptr::addr_of!((*up).prog.session)).clone() };
+    let session = unsafe { crate::jit::unit_session(up) };
     let sess = &session;
     let path_text = unsafe { String::from_utf8_lossy(bytes(path, plen)) };
     let text = crate::reload::complete_prefix(sess, &path_text, unsafe { bytes(src, slen) }, 2021);
@@ -835,7 +961,7 @@ pub extern "C" fn __relax_module_stream(h: u64, src: *const u8, slen: usize, kep
         crate::reload::Rung::Restart => 2,
         crate::reload::Rung::Refuse => 1,
         crate::reload::Rung::Patch if o.group == 0 => 1,
-        crate::reload::Rung::Patch => { crate::sandbox::maybe_recycle(up); 0 }
+        crate::reload::Rung::Patch => 0,
     }
 }
 
@@ -891,7 +1017,7 @@ fn load_src_inner(name: *const u8, nlen: usize, path: *const u8, plen: usize, sr
         set_error("no running unit".to_string());
         return 0;
     }
-    let session = unsafe { (*std::ptr::addr_of!((*up).prog.session)).clone() };
+    let session = unsafe { crate::jit::unit_session(up) };
     let options = &session.options;
     // MAKEPAD_RUN_MODULES_TRUSTED=1: a trusted module (host code, no sandbox; diagnosis only)
     let trusted = options.modules_trusted;
@@ -907,7 +1033,7 @@ fn load_src_inner(name: *const u8, nlen: usize, path: *const u8, plen: usize, sr
         ms.push(Module { name: name.clone(), krate: u32::MAX, file: 0, path: shown.clone(), defs: Vec::new(), gen: 0, alive: false, arena: None, wrapper: None, extra_exports: Vec::new(), skipped: Vec::new() });
         ms.len() - 1
     };
-    let r = crate::owner::call(crate::owner::program_class(), || {
+    let r = crate::owner::call(crate::owner::Class::Program, || {
         let r = if trusted {
             unsafe { load(up, &name, &path, &deps, false) }.map(|(k, f, d)| (k, f, d, None, None, Vec::new()))
         } else {
@@ -947,7 +1073,7 @@ pub extern "C" fn __relax_module_get(h: u64, name: *const u8, nlen: usize, ty: *
         }
     };
     let up = jit::current_unit();
-    let r = crate::owner::call(crate::owner::program_class(), || {
+    let r = crate::owner::call(crate::owner::Class::Program, || {
         let ready = unsafe { ensure_export(up, idx, m, &name) };
         let u = unsafe { &mut *up };
         ready.and_then(|_| export(u, m, &name)).and_then(|(d, t)| {
@@ -979,10 +1105,7 @@ pub extern "C" fn __relax_module_replace(h: u64, src: *const u8, slen: usize) ->
     };
     let error = || o.lines.join("\n");
     match o.rung {
-        crate::reload::Rung::Patch => {
-            crate::sandbox::maybe_recycle(up);
-            0
-        }
+        crate::reload::Rung::Patch => 0,
         crate::reload::Rung::Refuse => {
             set_error(error());
             1
@@ -998,18 +1121,18 @@ pub extern "C" fn __relax_module_replace(h: u64, src: *const u8, slen: usize) ->
 /// fn pointers still in it). Later uses of the handle fail.
 pub extern "C" fn __relax_module_unload(h: u64) {
     crate::reload::forget_module_stream(jit::current_unit(), h);
-    let mut krate: Option<u32> = None;
     let module_crate;
+    let module_name;
     let mut defs = {
         let mut ms = MODULES.lock().unwrap_or_else(|e| e.into_inner());
         match unhandle(h).and_then(|(i, g)| ms.get_mut(i).filter(|m| m.gen == g && m.alive)) {
             Some(m) => {
                 module_crate = m.krate;
+                module_name = m.name.clone();
                 m.alive = false;
                 m.gen += 1;
                 if let Some(a) = m.arena.take() {
                     crate::sandbox::free_arena(&a);
-                    krate = Some(m.krate);
                 }
                 std::mem::take(&mut m.defs)
             }
@@ -1017,8 +1140,18 @@ pub extern "C" fn __relax_module_unload(h: u64) {
         }
     };
     let up = jit::current_unit();
-    crate::owner::call(crate::owner::program_class(), || {
+    crate::owner::call(crate::owner::Class::Program, || {
         let u = unsafe { &mut *up };
+        // its code never runs again (invalid.rs): a stored fn pointer, a return into it, a frame
+        // still in it is a stale access
+        crate::invalid::invalidate(
+            u,
+            |g| matches!(g, crate::invalid::Group::Module { krate, .. } if krate == module_crate),
+            0,
+            "unloaded module",
+            Some(&module_name),
+            &format!("Module::unload of `{}`: an unloaded module's code never runs again", module_name),
+        );
         defs.extend((0..u.prog.defs.len()).filter(|&i| u.prog.defs[i].krate == module_crate).map(|i| DefId(i as u32)));
         defs.sort_unstable_by_key(|d| d.0);
         defs.dedup();
@@ -1031,11 +1164,7 @@ pub extern "C" fn __relax_module_unload(h: u64) {
                 u.prog.reclaim_caches();
             }
         }
-        if let Some(k) = krate {
-            unsafe { crate::sandbox::retire_crate(up, k) };
-        }
     });
-    crate::sandbox::maybe_recycle(up);
 }
 
 /// Copies this thread's last module error into `buf` (up to `cap` bytes); returns its length.
@@ -1050,21 +1179,19 @@ pub extern "C" fn __relax_module_error(buf: *mut u8, cap: usize) -> usize {
     })
 }
 
-/// A wrapper enters module `idx`'s arena (0; the state before goes to `out`), or finds it
-/// unloaded (1).
-pub extern "C" fn __relax_sb_enter(idx: u32, out: *mut [i64; 4]) -> u32 {
+/// A wrapper enters module `idx`'s arena: 0, or 1 (the module was unloaded), or 2 (every
+/// per-thread segment of the module is in use).
+pub extern "C" fn __relax_sb_enter(idx: u32) -> u32 {
     match crate::sandbox::enter_module(idx) {
-        Some(prev) => {
-            unsafe { *out = prev.0 };
-            0
-        }
-        None => 1,
+        Ok(()) => 0,
+        Err(crate::sandbox::EnterError::Unloaded) => 1,
+        Err(crate::sandbox::EnterError::Busy) => 2,
     }
 }
 
 /// A wrapper leaves: the state before its entry comes back.
-pub extern "C" fn __relax_sb_leave(prev: *const [i64; 4]) {
-    crate::sandbox::leave(crate::sandbox::Saved(unsafe { *prev }));
+pub extern "C" fn __relax_sb_leave() {
+    crate::sandbox::leave();
 }
 
 pub extern "C" fn __relax_sb_alloca(size: usize, align: usize) -> usize {
@@ -1112,8 +1239,8 @@ struct HostEntry {
     busy: bool,
 }
 
-crate::gen_local! {
-    static HOSTS: std::cell::RefCell<Vec<HostEntry>>;
+thread_local! {
+    static HOSTS: std::cell::RefCell<Vec<HostEntry>> = Default::default();
 }
 static NEXT_HOST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -1183,25 +1310,12 @@ pub fn guard_reset(m: GuardMark) {
     });
 }
 
-/// Sandbox statistics for tests and memory reports: [recycles, code bytes in the active space,
-/// dead code bytes pending, image ro bytes, image rw bytes, arenas live]. `recycle` != 0 runs a
-/// recycle now (blocking).
-pub extern "C" fn __relax_sb_stats(out: *mut [u64; 6], recycle: u32) -> u32 {
-    let mut ok = 1;
-    if recycle != 0 {
-        let up = jit::current_unit();
-        ok = match unsafe { crate::sandbox::recycle(up) } {
-            Ok(_) => 1,
-            Err(e) => {
-                set_error(e);
-                0
-            }
-        };
-    }
-    let (r, used, dead) = crate::sandbox::code_stats();
+/// Sandbox statistics for tests and memory reports: [twin code bytes installed (append-only:
+/// every version stays), image ro bytes, image rw bytes, arenas live, unloaded modules' windows
+/// (reserved, inaccessible, never reused)].
+pub extern "C" fn __relax_sb_stats(out: *mut [u64; 5]) {
     let (ro, rw, n) = crate::sandbox::stats();
-    unsafe { *out = [r as u64, used, dead, ro as u64, rw as u64, n as u64] };
-    ok
+    unsafe { *out = [crate::sandbox::twin_code_bytes(), ro as u64, rw as u64, n as u64, crate::sandbox::dead_arenas() as u64] };
 }
 
 /// The `__relax_module_*` entries by name (jit::loader_symbol).

@@ -202,8 +202,14 @@ impl RecordedFont {
 /// glyphs of which font files a program draws ([`record_all_glyphs`]).
 static RECORD_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-fn recorded_all() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, std::collections::BTreeSet<GlyphId>>> {
-    static ALL: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeMap<u64, std::collections::BTreeSet<GlyphId>>>> = std::sync::OnceLock::new();
+#[derive(Default)]
+struct GlyphRecord {
+    drawn: std::collections::BTreeMap<u64, std::collections::BTreeSet<GlyphId>>,
+    chars: std::collections::BTreeMap<u64, std::collections::BTreeSet<char>>,
+}
+
+fn recorded_all() -> &'static std::sync::Mutex<GlyphRecord> {
+    static ALL: std::sync::OnceLock<std::sync::Mutex<GlyphRecord>> = std::sync::OnceLock::new();
     ALL.get_or_init(Default::default)
 }
 
@@ -221,7 +227,7 @@ pub fn record_all_glyphs(on: bool) {
 /// The glyphs recorded since [`record_all_glyphs`] or the last call: per
 /// font file hash, the glyph ids laid out.
 pub fn take_all_recorded_glyphs() -> Vec<(u64, std::collections::BTreeSet<GlyphId>)> {
-    std::mem::take(&mut *recorded_all().lock().unwrap_or_else(std::sync::PoisonError::into_inner)).into_iter().collect()
+    std::mem::take(&mut recorded_all().lock().unwrap_or_else(std::sync::PoisonError::into_inner).drawn).into_iter().collect()
 }
 
 /// The trace host's switch (`makepad-web-trace`): record every layout's
@@ -238,11 +244,25 @@ pub extern "C" fn wasm_record_glyphs(on: u32) {
 #[no_mangle]
 pub extern "C" fn wasm_take_recorded_glyphs() -> u32 {
     let fonts = take_all_recorded_glyphs();
+    glyph_record_words(fonts.into_iter().map(|(hash, glyphs)| (hash, glyphs.into_iter().map(|g| g as u64).collect())).collect())
+}
+
+/// Source characters, separate from drawn glyphs: the subsetter needs the cmap inputs of
+/// substitutions and normalization, but they are not evidence that a glyph was drawn.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn wasm_take_recorded_glyph_chars() -> u32 {
+    let fonts = std::mem::take(&mut recorded_all().lock().unwrap_or_else(std::sync::PoisonError::into_inner).chars);
+    glyph_record_words(fonts.into_iter().map(|(hash, chars)| (hash, chars.into_iter().map(|c| c as u64).collect())).collect())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn glyph_record_words(fonts: Vec<(u64, Vec<u64>)>) -> u32 {
     let mut words = vec![0u64, fonts.len() as u64];
     for (hash, glyphs) in fonts {
         words.push(hash);
         words.push(glyphs.len() as u64);
-        words.extend(glyphs.iter().map(|&id| id as u64));
+        words.extend(glyphs);
     }
     words[0] = words.len() as u64;
     Box::leak(words.into_boxed_slice()).as_ptr() as usize as u32
@@ -295,10 +315,24 @@ impl Layouter {
 
     fn note_glyphs(&mut self, text: &LaidoutText) {
         if RECORD_ALL.load(std::sync::atomic::Ordering::Relaxed) {
+            // Hashing font files and collecting text never holds the cross-thread lock.
+            let mut record = GlyphRecord::default();
+            for row in &text.rows {
+                let mut fonts = std::collections::HashSet::new();
+                for glyph in &row.glyphs {
+                    let hash = *self.font_hashes.entry(glyph.font.id()).or_insert_with(|| fnv64(glyph.font.data().as_slice()));
+                    record.drawn.entry(hash).or_default().insert(glyph.id);
+                    if fonts.insert(hash) {
+                        record.chars.entry(hash).or_default().extend(row.text.chars());
+                    }
+                }
+            }
             let mut all = recorded_all().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            for glyph in text.rows.iter().flat_map(|row| row.glyphs.iter()) {
-                let hash = *self.font_hashes.entry(glyph.font.id()).or_insert_with(|| fnv64(glyph.font.data().as_slice()));
-                all.entry(hash).or_default().insert(glyph.id);
+            for (hash, glyphs) in record.drawn {
+                all.drawn.entry(hash).or_default().extend(glyphs);
+            }
+            for (hash, chars) in record.chars {
+                all.chars.entry(hash).or_default().extend(chars);
             }
         }
         let Some(map) = &mut self.recorded_glyphs else { return };
@@ -339,6 +373,10 @@ impl Layouter {
                     continue;
                 }
                 self.missing_count += 1;
+                // The OS font lookup says it, once it failed too.
+                if super::system_fallback::reports_miss(c) {
+                    continue;
+                }
                 if self.missing_reported.insert((glyph.font.id(), c)) {
                     let face = glyph.font.with_ttf_parser_face(|f| {
                         f.names().into_iter().filter(|n| n.name_id == 4 && n.is_unicode()).find_map(|n| n.to_string())
@@ -398,13 +436,27 @@ impl Layouter {
         self.loader.define_font(id, definition);
     }
 
+    /// Appends an OS face to every family (see
+    /// [`Loader::add_system_fallback`]): the laid-out texts are dropped, so
+    /// the boxes they drew lay out again with real glyphs.
+    pub fn add_system_fallback(&mut self, id: FontId, definition: FontDefinition, bold: bool) {
+        if !self.loader.is_font_known(id) {
+            self.loader.define_font(id, definition);
+        }
+        self.loader.add_system_fallback(id, bold);
+        self.family_generation += 1;
+        self.cached_results.clear();
+        self.cache_lru_order.clear();
+        self.cache_bytes = 0;
+    }
+
     pub fn get_or_load_font_family(&mut self, id: FontFamilyId) -> Rc<FontFamily> {
         self.loader.get_or_load_font_family_rc(id)
     }
 
     pub fn get_or_layout(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
         let result = self.get_or_layout_uncounted(params);
-        if self.recorded_glyphs.is_some() {
+        if self.recorded_glyphs.is_some() || RECORD_ALL.load(std::sync::atomic::Ordering::Relaxed) {
             self.note_glyphs(&result);
         }
         result
@@ -602,6 +654,12 @@ impl LayoutContext {
         let mut line_break_len = 0;
         for (line_index, (len, next_line_break_len)) in lines_and_breaks(&text).enumerate() {
             if line_index != 0 {
+                // `max_rows` cut the previous line off mid-line: the row end is
+                // where layout stopped, not at the line break, so stepping over
+                // the "break" would land inside the next character.
+                if self.is_past_max_rows() {
+                    break;
+                }
                 self.finish_current_row(true);
                 // finish_current_row steps over one byte; a `\r\n` has two.
                 self.current_row_start += line_break_len - 1;
@@ -720,18 +778,21 @@ impl LayoutContext {
     }
 
     fn append_text(&mut self, text: &ShapedText) {
-        for glyph in &text.glyphs {
+        for shaped in &text.glyphs {
             let mut glyph = LaidoutGlyph {
                 origin_in_lpxs: Point::ZERO,
-                font: glyph.font.clone(),
+                font: shaped.font.clone(),
                 font_size_in_lpxs: self.style.font_size_in_lpxs(),
                 color: self.style.color,
-                id: glyph.id,
-                cluster: self.current_row_len() + glyph.cluster,
-                advance_in_ems: glyph.advance_in_ems,
-                offset_in_ems: glyph.offset_in_ems,
+                id: shaped.id,
+                cluster: self.current_row_len() + shaped.cluster,
+                advance_in_ems: shaped.advance_in_ems,
+                offset_in_ems: shaped.offset_in_ems,
             };
             glyph.origin_in_lpxs.x = self.current_point_in_lpxs.x;
+            // The font's vertical mark positioning (GPOS: Devanagari, Arabic
+            // and Thai marks stacked above or below their base), y down.
+            glyph.origin_in_lpxs.y = -shaped.y_offset_in_ems * glyph.font_size_in_lpxs;
             self.current_point_in_lpxs.x += glyph.advance_in_lpxs();
             self.glyphs.push(glyph);
         }
@@ -2270,6 +2331,37 @@ mod tests {
             assert_eq!(crlf.rows.len(), lf.rows.len(), "max_rows {max_rows}");
             assert_eq!(crlf.is_truncated, lf.is_truncated, "max_rows {max_rows}");
         }
+    }
+
+    /// A multi-line text whose first line `max_rows` cuts off mid-line: the row end is
+    /// where layout stopped, not a line break, so the next line must not step one byte
+    /// past it (Sandbox panicked on a status "… 'hud_panel' — game.api() …\n…" when the
+    /// cut fell right before the 3-byte em dash).
+    #[test]
+    fn max_rows_cut_mid_line_before_a_multibyte_char() {
+        let mut layouter = real_font_layouter();
+        let text = "game failed: game.splash:314:14: unknown game verb 'hud_panel' — game.api() lists every verb\n\
+                    game.splash:315:14: unknown game verb 'hud_panel' — game.api() lists every verb";
+        let mut cut_before_dash = false;
+        for max_rows in 1..=3 {
+            for ellipsis in [true, false] {
+                for width in (40..=900).step_by(3) {
+                    let laidout =
+                        wrapped_layout(&mut layouter, LATIN_FAMILY, text, width as f32, Some(max_rows), ellipsis);
+                    assert!(laidout.rows.len() <= max_rows, "width {width} max_rows {max_rows}");
+                    for row in &laidout.rows {
+                        let start = row.text.start_in_parent();
+                        assert!(text.is_char_boundary(start), "row start {start} at width {width}");
+                        assert!(text.is_char_boundary(start + row.text.len()), "row end at width {width}");
+                    }
+                    let first = &laidout.rows[0];
+                    if max_rows == 1 && first.text.start_in_parent() + first.text.len() == text.find('—').unwrap() {
+                        cut_before_dash = true;
+                    }
+                }
+            }
+        }
+        assert!(cut_before_dash, "some width must cut the first line right before the em dash");
     }
 
     /// The recency list pops oldest first, a touch moves an entry to the back,

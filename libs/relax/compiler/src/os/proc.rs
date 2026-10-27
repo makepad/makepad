@@ -26,7 +26,7 @@ static ARGS: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
 /// host library started from a loader (Android: bionic hands a cdylib's std no argv, the APK's
 /// executable passes its own).
 pub fn set_args(args: Vec<Vec<u8>>) {
-    // process state: rebuilt in the kept heap (the settle swap destroys the compiler arena's generation)
+    // process state: rebuilt in the kept heap
     let args = crate::zone_alloc::kept_with(|| args.clone());
     let _ = ARGS.set(args);
 }
@@ -61,6 +61,39 @@ impl Drop for KeepLastError {
 /// what dladdr reports for a shared object (exported names only).
 pub fn symbol_at(pc: u64) -> Option<(String, u64, String)> {
     symbol_at_imp(pc)
+}
+
+/// From a fault handler (no allocation): the image holding `a` (its file name's last part and
+/// load base) and the nearest symbol dladdr knows (empty when none, with its address). Unix:
+/// dladdr, which the handler calls only on the way to the end of the process. Windows: None.
+pub fn image_at_raw(a: u64) -> Option<(&'static [u8], u64, &'static [u8], u64)> {
+    #[cfg(unix)]
+    {
+        #[repr(C)]
+        struct DlInfo {
+            fname: *const std::ffi::c_char,
+            fbase: *mut u8,
+            sname: *const std::ffi::c_char,
+            saddr: *mut u8,
+        }
+        extern "C" {
+            fn dladdr(addr: *const u8, info: *mut DlInfo) -> i32;
+        }
+        let mut info = DlInfo { fname: std::ptr::null(), fbase: std::ptr::null_mut(), sname: std::ptr::null(), saddr: std::ptr::null_mut() };
+        if unsafe { dladdr(a as *const u8, &mut info) } == 0 || info.fname.is_null() {
+            return None;
+        }
+        // SAFETY: dladdr's strings belong to the loaded image (they live as long as it stays loaded)
+        let file: &'static [u8] = unsafe { std::ffi::CStr::from_ptr(info.fname) }.to_bytes();
+        let base = file.iter().rposition(|&c| c == b'/').map_or(file, |k| &file[k + 1..]);
+        let sym: &'static [u8] = if info.sname.is_null() { b"" } else { unsafe { std::ffi::CStr::from_ptr(info.sname) }.to_bytes() };
+        Some((base, info.fbase as u64, sym, info.saddr as u64))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = a;
+        None
+    }
 }
 
 #[cfg(unix)]
@@ -224,7 +257,28 @@ mod imp {
     pub use super::unix::{os_args_bytes, create_private, ensure_private_dir, exit, last_error, lookup, set_last_error};
     use super::unix::{dlopen, dlsym};
 
+    #[cfg(target_env = "gnu")]
+    extern "C" {
+        fn dlvsym(handle: *mut u8, name: *const u8, version: *const u8) -> *mut u8;
+    }
+
     pub unsafe fn find(name: *const u8) -> *mut u8 {
+        // `name@VERSION` (a `#[link_name]` the way an assembler or linker spells a versioned reference):
+        // the symbol of that version
+        #[cfg(target_env = "gnu")]
+        {
+            let s = std::ffi::CStr::from_ptr(name as *const _).to_bytes();
+            if let Some(at) = s.iter().position(|&b| b == b'@') {
+                if s.get(at + 1) != Some(&b'@') {
+                    let (base, ver) = (&s[..at], &s[at + 1..]);
+                    let mut b = base.to_vec();
+                    b.push(0);
+                    let mut v = ver.to_vec();
+                    v.push(0);
+                    return dlvsym(std::ptr::null_mut(), b.as_ptr(), v.as_ptr());
+                }
+            }
+        }
         dlsym(std::ptr::null_mut(), name)
     }
 
@@ -240,6 +294,12 @@ mod imp {
             }
         }
         std::ptr::null_mut()
+    }
+
+    /// A shared library by absolute path (--allow-c's native library), its symbols global.
+    pub fn load_path(path: &str) -> bool {
+        // RTLD_NOW | RTLD_GLOBAL
+        unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 0x100).is_null() }
     }
 
     pub fn load_library(name: &str, framework: bool) -> bool {
@@ -326,7 +386,7 @@ mod imp {
     static POOL: relax_session::sync::Mutex<Option<Pool>> = relax_session::sync::Mutex::new(None);
 
     pub fn set_trampolines(base: u64, table: *mut u64, count: usize) {
-        // process state: kept heap (the settle swap destroys the compiler zone)
+        // process state: kept heap
         let _k = crate::zone_alloc::kept();
         *POOL.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pool { base, table, count, used: std::collections::HashMap::new() });
     }
@@ -341,14 +401,15 @@ mod imp {
             return a;
         }
         // called while compiling (c_callable_hook): the map is process state, so its growth goes
-        // to the kept heap -- in the compiler zone it was gone after the settle swap and the
-        // first new C callback (a touch handler on the phone) faulted
+        // to the kept heap
         let _k = crate::zone_alloc::kept();
         let i = pool.used.len();
         assert!(i < pool.count, "the host library's {} C-callable stubs are all in use", pool.count);
         unsafe { *pool.table.add(i) = target };
         let a = pool.base + 16 * i as u64;
         pool.used.insert(target, a);
+        // one stub per target, never reused: say how fast they go (Sandbox's race used up 4096)
+        if (i + 1).is_power_of_two() && i >= 1023 { eprintln!("makepad-run: {} of {} C-callable stubs in use", i + 1, pool.count); }
         a
     }
 
@@ -397,6 +458,12 @@ mod imp {
             }
         }
         std::ptr::null_mut()
+    }
+
+    /// A shared library by absolute path (--allow-c's native library), its symbols global.
+    pub fn load_path(path: &str) -> bool {
+        // RTLD_NOW | RTLD_GLOBAL
+        unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 0x100).is_null() }
     }
 
     pub fn load_library(name: &str, framework: bool) -> bool {
@@ -457,6 +524,12 @@ mod imp {
 
     pub unsafe fn find_system(_name: *const u8) -> *mut u8 {
         std::ptr::null_mut()
+    }
+
+    /// A shared library by absolute path (--allow-c's native library), its symbols global.
+    pub fn load_path(path: &str) -> bool {
+        // RTLD_NOW | RTLD_GLOBAL
+        unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 8).is_null() }
     }
 
     pub fn load_library(name: &str, framework: bool) -> bool {
@@ -529,6 +602,11 @@ mod imp {
             }
         }
         std::ptr::null_mut()
+    }
+
+    /// --allow-c's native library is not supported on Windows.
+    pub fn load_path(_path: &str) -> bool {
+        false
     }
 
     /// `#[link(name = "user32")]` / raw-dylib `name = "DINPUT8"`: the DLL of that name.
@@ -696,6 +774,25 @@ mod imp {
             unsafe { ensure_acl(&target, dir) }
         }
 
+        /// `DOMAIN\name` of a SID, else its `S-1-...` form.
+        unsafe fn account(sid: *const u8) -> String {
+            let (mut name, mut domain) = ([0u16; 256], [0u16; 256]);
+            let (mut n, mut d, mut kind) = (256u32, 256u32, 0u32);
+            if LookupAccountSidW(null_mut(), sid, name.as_mut_ptr(), &mut n, domain.as_mut_ptr(), &mut d, &mut kind) != 0 {
+                let name = String::from_utf16_lossy(&name[..n as usize]);
+                let domain = String::from_utf16_lossy(&domain[..d as usize]);
+                return if domain.is_empty() { name } else { format!("{}\\{}", domain, name) };
+            }
+            // revision, subauthority count, six-byte big-endian authority, little-endian subauthorities
+            let count = *sid.add(1) as usize;
+            let authority = (0..6).fold(0u64, |a, i| a << 8 | *sid.add(2 + i) as u64);
+            let mut text = format!("S-{}-{}", *sid, authority);
+            for i in 0..count {
+                text += &format!("-{}", read_unaligned(sid.add(8 + 4 * i).cast::<u32>()));
+            }
+            text
+        }
+
         unsafe fn ensure_acl(target: &Path, display: &Path) -> Result<(), String> {
             let error = || format!("{}: {}", display.display(), std::io::Error::last_os_error());
             let writable = || format!("{} is writable by group or others", display.display());
@@ -788,7 +885,11 @@ mod imp {
                 let mask = read_unaligned(ace.add(4).cast::<u32>());
                 let sid = ace.add(offset);
                 if size < offset + 8 + 4 * (*sid.add(1) as usize) || IsValidSid(sid) == 0 { return Err(writable()); }
-                if mask & WRITE_RIGHTS != 0 && !trusted(sid) { return Err(writable()); }
+                if mask & WRITE_RIGHTS != 0 && !trusted(sid) {
+                    // name the principal: the fix is that account's grant, not this check
+                    return Err(format!("{} is writable by {} (a JIT cache may be writable only by you, SYSTEM and Administrators)",
+                        display.display(), account(sid)));
+                }
             }
             Ok(())
         }

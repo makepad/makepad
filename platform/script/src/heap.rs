@@ -220,6 +220,8 @@ pub struct ScriptHeap {
     /// The module registrations, while a collect run records them
     /// (makepad-script-census; `census`).
     pub census: Option<Box<dyn crate::census::ScriptCensus>>,
+    /// The definitions a run reads, while a trace records them (touch.rs).
+    pub(crate) touch: Option<Box<crate::touch::ScriptTouch>>,
 }
 
 #[relax_api]
@@ -713,6 +715,7 @@ impl ScriptHeap {
             strings,
             regexes,
             heap_tag,
+            touch: crate::touch::ScriptTouch::new_if_recording(),
             ..Default::default()
         };
         // Initialize slot 0 (reserved null slot) - use get_at_mut for internal init
@@ -1087,6 +1090,9 @@ impl ScriptHeap {
     /// a use of the module that registered it (`census`).
     #[inline]
     fn census_default_used(&self, obj: Option<ScriptObject>) {
+        if let Some(obj) = obj {
+            self.touch_obj(obj);
+        }
         if let (Some(census), Some(obj)) = (&self.census, obj) {
             census.default_used(obj);
         }

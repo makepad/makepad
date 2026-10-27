@@ -7,12 +7,41 @@ mod leak_check;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ConstraintKind { VarSubVar, RegSubVar, VarSubReg, RegSubReg, VarEqVar, VarEqReg, RegEqReg }
 
+/// mod.rs SubregionOrigin: why a region constraint was added -- what its error reports
+/// (rustc report_concrete_failure). Spans are byte positions of the item's file (0: none).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SubregionOrigin {
+    /// a type relation outside the solver (lattice LUB/GLB: coercions, `match` arms ..)
+    Subtype(u32),
+    /// a component of `ty: 'r` (register_type_outlives_constraint)
+    RelateParamBound(u32, crate::types::TyId),
+    /// a region outlives or equality the solver proved (`'a: 'b`, region relations it returned)
+    RelateRegionParamBound(u32),
+    /// internal: tests and checks that report nothing from their constraints
+    Misc,
+}
+impl SubregionOrigin {
+    pub fn span(self) -> u32 {
+        match self { Self::Subtype(s) | Self::RelateParamBound(s, _) | Self::RelateRegionParamBound(s) => s, Self::Misc => 0 }
+    }
+}
+
+/// A constraint is identified by its kind and regions; `origin` is the first origin recorded for it
+/// (lexical resolution deduplicates by the constraint alone, keeping the first, as rustc's does).
+#[derive(Clone, Copy, Debug)]
 pub struct Constraint {
     pub kind: ConstraintKind,
     pub sub: RegionId,
     pub sup: RegionId,
     pub visible_for_leak_check: bool,
+    pub origin: SubregionOrigin,
+}
+impl PartialEq for Constraint {
+    fn eq(&self, o: &Self) -> bool { self.kind == o.kind && self.sub == o.sub && self.sup == o.sup && self.visible_for_leak_check == o.visible_for_leak_check }
+}
+impl Eq for Constraint {}
+impl std::hash::Hash for Constraint {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) { self.kind.hash(h); self.sub.hash(h); self.sup.hash(h); self.visible_for_leak_check.hash(h); }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -46,7 +75,7 @@ impl RegionVariableValue {
 pub enum RegionVariableOrigin { Misc, Nll(crate::borrowck::region_infer::NllRegionVariableOrigin) }
 
 #[derive(Clone, Copy)]
-pub(crate) struct RegionVariableInfo { pub universe: UniverseIndex, pub origin: RegionVariableOrigin, parent: u32, rank: u32, value: RegionVariableValue }
+pub(crate) struct RegionVariableInfo { pub universe: UniverseIndex, pub origin: RegionVariableOrigin, /** where the variable was created (the root obligation's span; rustc RegionVariableOrigin::span) */ pub span: u32, parent: u32, rank: u32, value: RegionVariableValue }
 
 #[derive(Clone, Default)]
 pub struct RegionConstraintStorage {
@@ -87,36 +116,36 @@ impl RegionConstraintStorage {
 impl RegionConstraintCollector<'_> {
     /// mod.rs:635-736: cache each ordered pair and undo cache insertions with
     /// their fresh region. The result can name both input universes.
-    pub fn lub_regions(&mut self, tys: &Types, a: RegionId, b: RegionId) -> RegionId {
+    pub fn lub_regions(&mut self, tys: &Types, origin: SubregionOrigin, a: RegionId, b: RegionId) -> RegionId {
         if tys.region_kind(a) == RegionKind::ReStatic || tys.region_kind(b) == RegionKind::ReStatic || a == b { a }
-        else { self.combine_vars(tys, true, a, b) }
+        else { self.combine_vars(tys, origin, true, a, b) }
     }
-    pub fn glb_regions(&mut self, tys: &Types, a: RegionId, b: RegionId) -> RegionId {
+    pub fn glb_regions(&mut self, tys: &Types, origin: SubregionOrigin, a: RegionId, b: RegionId) -> RegionId {
         if tys.region_kind(a) == RegionKind::ReStatic { b }
         else if tys.region_kind(b) == RegionKind::ReStatic || a == b { a }
-        else { self.combine_vars(tys, false, a, b) }
+        else { self.combine_vars(tys, origin, false, a, b) }
     }
-    fn combine_vars(&mut self, tys: &Types, lub: bool, a: RegionId, b: RegionId) -> RegionId {
+    fn combine_vars(&mut self, tys: &Types, origin: SubregionOrigin, lub: bool, a: RegionId, b: RegionId) -> RegionId {
         if let Some(&region) = self.storage.combinations.get(&(lub, a, b)) { return region; }
         let universe = self.universe(tys, a).max(self.universe(tys, b));
-        let region = self.new_region_var(tys, universe);
+        let region = self.new_region_var(tys, universe, origin.span());
         self.storage.combinations.insert((lub, a, b), region);
         self.log(UndoLog::AddCombination(lub, a, b));
         for old in [a, b] {
-            if lub { self.make_subregion(tys, old, region, true); }
-            else { self.make_subregion(tys, region, old, true); }
+            if lub { self.make_subregion(tys, origin, old, region, true); }
+            else { self.make_subregion(tys, origin, region, old, true); }
         }
         region
     }
     pub fn num_region_vars(&self) -> usize { self.storage.var_infos.len() }
 
-    pub fn new_region_var(&mut self, tys: &Types, universe: UniverseIndex) -> RegionId {
-        self.new_region_var_with_origin(tys, universe, RegionVariableOrigin::Misc)
+    pub fn new_region_var(&mut self, tys: &Types, universe: UniverseIndex, span: u32) -> RegionId {
+        self.new_region_var_with_origin(tys, universe, RegionVariableOrigin::Misc, span)
     }
 
-    pub fn new_region_var_with_origin(&mut self, tys: &Types, universe: UniverseIndex, origin: RegionVariableOrigin) -> RegionId {
+    pub fn new_region_var_with_origin(&mut self, tys: &Types, universe: UniverseIndex, origin: RegionVariableOrigin, span: u32) -> RegionId {
         let vid = self.storage.var_infos.len() as u32;
-        self.storage.var_infos.push(RegionVariableInfo { universe, origin, parent: vid, rank: 0, value: RegionVariableValue::Unknown { universe } });
+        self.storage.var_infos.push(RegionVariableInfo { universe, origin, span, parent: vid, rank: 0, value: RegionVariableValue::Unknown { universe } });
         self.log(UndoLog::AddVar(vid as usize));
         tys.intern_region(RegionKind::ReVar(vid))
     }
@@ -155,7 +184,7 @@ impl RegionConstraintCollector<'_> {
         }
     }
 
-    pub fn make_subregion(&mut self, tys: &Types, sub: RegionId, sup: RegionId, visible: bool) {
+    pub fn make_subregion(&mut self, tys: &Types, origin: SubregionOrigin, sub: RegionId, sup: RegionId, visible: bool) {
         use RegionKind::*;
         let kind = match (tys.region_kind(sub), tys.region_kind(sup)) {
             (ReBound(..), _) | (_, ReBound(..)) => panic!("cannot relate bound region"),
@@ -166,10 +195,10 @@ impl RegionConstraintCollector<'_> {
             _ => { if sub == sup { return; } ConstraintKind::RegSubReg }
         };
         self.log(UndoLog::AddConstraint(self.storage.constraints.len()));
-        self.storage.constraints.push(Constraint { kind, sub, sup, visible_for_leak_check: visible });
+        self.storage.constraints.push(Constraint { kind, sub, sup, visible_for_leak_check: visible, origin });
     }
 
-    pub fn make_eqregion(&mut self, tys: &Types, a: RegionId, b: RegionId, visible: bool) {
+    pub fn make_eqregion(&mut self, tys: &Types, origin: SubregionOrigin, a: RegionId, b: RegionId, visible: bool) {
         use RegionKind::*;
         if a == b { return; }
         let (kind, sub, sup) = match (tys.region_kind(a), tys.region_kind(b)) {
@@ -193,7 +222,7 @@ impl RegionConstraintCollector<'_> {
             _ => (ConstraintKind::RegEqReg, a, b),
         };
         self.log(UndoLog::AddConstraint(self.storage.constraints.len()));
-        self.storage.constraints.push(Constraint { kind, sub, sup, visible_for_leak_check: visible });
+        self.storage.constraints.push(Constraint { kind, sub, sup, visible_for_leak_check: visible, origin });
     }
 
     fn unify_var_value(&mut self, tys: &Types, vid: u32, value: RegionId) {

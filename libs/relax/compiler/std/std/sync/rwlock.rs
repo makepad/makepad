@@ -171,6 +171,16 @@ impl<'a, T: ?Sized> Drop for RwLockReadGuard<'a, T> {
     }
 }
 
+impl<'rwlock, T: ?Sized> RwLockWriteGuard<'rwlock, T> {
+    pub fn downgrade(s: Self) -> RwLockReadGuard<'rwlock, T> {
+        let lock = s.lock;
+        lock.poison.done(&s.poison);
+        core::mem::forget(s);
+        unsafe { lock.inner.downgrade() };
+        RwLockReadGuard { lock }
+    }
+}
+
 impl<'a, T> Deref for RwLockWriteGuard<'a, T> {
     type Target = T;
     fn deref(&self) -> &T {

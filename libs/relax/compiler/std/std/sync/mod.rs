@@ -6,6 +6,10 @@ mod mpmc;
 mod mutex;
 mod once;
 mod poison;
+#[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
+pub(crate) mod raw;
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+#[path = "no_threads.rs"]
 pub(crate) mod raw;
 mod reentrant_lock;
 mod rwlock;
@@ -15,7 +19,7 @@ pub use core::sync::atomic;
 
 pub use self::barrier::{Barrier, BarrierWaitResult};
 pub use self::mutex::{Condvar, Mutex, MutexGuard, WaitTimeoutResult};
-pub use self::once::{LazyLock, Once, OnceLock, OnceState};
+pub use self::once::{LazyLock, Once, OnceLock, OnceState, ONCE_INIT};
 pub use self::poison::{LockResult, PoisonError, TryLockError, TryLockResult};
 pub use self::reentrant_lock::{ReentrantLock, ReentrantLockGuard};
 pub use self::rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};

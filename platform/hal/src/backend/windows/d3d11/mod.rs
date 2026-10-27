@@ -57,6 +57,11 @@ pub struct D3d11 {
     programs: HashMap<u64, Vec<Weak<PipeState>>>,
     /// windows' retained images, by (owner, index)
     win: HashMap<(u32, u32), Tex>,
+    /// session 0's windows with a badge layer (by index), and the image each last presented: its
+    /// retained image with the layer drawn over (what a snapshot of the window reads)
+    badged: HashMap<u32, Option<Tex>>,
+    /// the composed image the badge frame being encoded draws into
+    compose: Option<Arc<Texture>>,
     aliases: HashMap<(u32, Id), Id>,
     /// the id target of each window's newest pick frame, and the targets missing a draw
     pick_ids: HashMap<(u32, Id), Id>,
@@ -107,7 +112,8 @@ impl D3d11 {
             formats: dev.formats,
             msaa: 1,
             dpi: shell.map_or_else(win32::system_dpi, |s| s.dpi()),
-            flags: info_flags::GPU_TIMESTAMPS,
+            // offscreen too: a badge layer is composed into the retained image's copy either way
+            flags: info_flags::GPU_TIMESTAMPS | info_flags::WINDOW_BADGES,
             max_texture: 16384,
             max_window: [16384, 16384],
             max_buffer: (u32::MAX as u64) & !15,
@@ -137,6 +143,8 @@ impl D3d11 {
             pipe: HashMap::new(),
             programs: HashMap::new(),
             win: HashMap::new(),
+            badged: HashMap::new(),
+            compose: None,
             aliases: HashMap::new(),
             pick_ids: HashMap::new(),
             pick_pending: Default::default(),
@@ -296,6 +304,14 @@ impl Backend for D3d11 {
     fn info(&self) -> HalInfo {
         self.info
     }
+    /// The process ends next: the open batch is handed on, the HLSL compilers and the
+    /// completion thread (GPU event waits, readback maps) run out and are joined.
+    fn before_exit(&mut self) {
+        let batch = std::mem::take(&mut self.batch);
+        self.complete.submit(batch);
+        for compiler in &mut self.compilers { compiler.stop(); }
+        self.complete.stop();
+    }
     fn submit(&mut self, world: &mut World, sid: u32, view: &CmdView) {
         self.recover(world);
         self.drain(world);
@@ -337,6 +353,7 @@ impl Backend for D3d11 {
         self.buf.retain(|k, _| k.0 != sid);
         self.pipe.retain(|k, _| k.0 != sid);
         self.win.retain(|k, _| k.0 != sid);
+        if sid == HOST { self.badged.clear(); }
         self.aliases.retain(|k, _| k.0 != sid);
         self.pick_ids.retain(|k, _| k.0 != sid);
         self.pick_pending.retain(|k| k.0 != sid);
@@ -376,6 +393,7 @@ impl exec::DeviceReset for D3d11 {
         self.tex.clear();
         self.buf.clear();
         self.win.clear();
+        for composed in self.badged.values_mut() { *composed = None; }
         self.pick_ids.clear();
         self.pick_pending.clear();
         self.captures.clear();
@@ -427,10 +445,9 @@ impl Gpu for D3d11 {
         self.dev.budget()
     }
 
-    fn window_overlay(&mut self, s: &mut Session, _id: Id, rect: Option<[f32; 4]>, _layer: Id, _now: u64) {
-        if rect.is_some() {
-            s.stats.overlay_unsupported += 1;
-        }
+    fn badges(&self) -> bool { true }
+    fn badge_layer(&mut self, window: Id, on: bool) {
+        if on { self.badged.entry(window.index).or_insert(None); } else { self.badged.remove(&window.index); }
     }
 
     fn os(&mut self, sid: u32, command: exec::OsCmd) -> bool {
@@ -560,6 +577,7 @@ impl Gpu for D3d11 {
     }
     fn window_closed(&mut self, sid: u32, id: Id) {
         self.win.remove(&(sid, id.index));
+        if sid == HOST { self.badged.remove(&id.index); }
         self.pick_ids.remove(&(sid, id));
         if let Some(shell) = self.shell {
             self.chains.remove(shell, (sid, id));

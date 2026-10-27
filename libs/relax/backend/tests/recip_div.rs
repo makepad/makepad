@@ -27,7 +27,7 @@ fn build(w: bool, c: u64) -> (Func, bool) {
 }
 
 fn run(f: &Func) -> Code {
-    let env = x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+    let env = x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
     let c = x64::compile(&relax_session::Options::default(), f, &env).unwrap();
     assert!(c.relocs.is_empty());
     Code::new(&c.code).unwrap()

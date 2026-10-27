@@ -148,9 +148,17 @@ fn estimate_complexity(commands: &[Command]) -> OutlineComplexity {
     }
 }
 
+/// Collects an outline's commands and the exact bounds of its points (control points included).
+///
+/// The bounds are the points' own: the box a font reports is integer font units, and for a
+/// variable instance (fractional points) `ttf_parser` truncates it toward zero, so points at a
+/// fractional negative x fell left of the raster, where the coverage rasteriser drops the bottom
+/// row's edge contribution and fills that row as a line under the glyph.
 #[derive(Debug)]
 pub struct Builder {
     commands: Vec<Command>,
+    min: Point<f32>,
+    max: Point<f32>,
 }
 
 impl Default for Builder {
@@ -163,35 +171,53 @@ impl Builder {
     pub fn new() -> Self {
         Self {
             commands: Vec::new(),
+            min: Point::new(f32::INFINITY, f32::INFINITY),
+            max: Point::new(f32::NEG_INFINITY, f32::NEG_INFINITY),
         }
     }
 
-    pub fn finish(self, bounds: Rect<f32>, units_per_em: f32) -> GlyphOutline {
+    fn include(&mut self, x: f32, y: f32) {
+        self.min = Point::new(self.min.x.min(x), self.min.y.min(y));
+        self.max = Point::new(self.max.x.max(x), self.max.y.max(y));
+    }
+
+    /// The outline, or `None` when it has no points.
+    pub fn finish(self, units_per_em: f32) -> Option<GlyphOutline> {
+        if !(self.min.x <= self.max.x && self.min.y <= self.max.y) {
+            return None;
+        }
         let complexity = estimate_complexity(&self.commands);
-        GlyphOutline {
-            bounds,
+        Some(GlyphOutline {
+            bounds: Rect::new(self.min, self.max - self.min),
             units_per_em,
             commands: self.commands,
             complexity,
-        }
+        })
     }
 }
 
 impl ttf_parser::OutlineBuilder for Builder {
     fn move_to(&mut self, x: f32, y: f32) {
+        self.include(x, y);
         self.commands.push(Command::MoveTo(Point::new(x, y)));
     }
 
     fn line_to(&mut self, x: f32, y: f32) {
+        self.include(x, y);
         self.commands.push(Command::LineTo(Point::new(x, y)));
     }
 
     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        self.include(x1, y1);
+        self.include(x, y);
         self.commands
             .push(Command::QuadTo(Point::new(x1, y1), Point::new(x, y)));
     }
 
     fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        self.include(x1, y1);
+        self.include(x2, y2);
+        self.include(x, y);
         self.commands.push(Command::CurveTo(
             Point::new(x1, y1),
             Point::new(x2, y2),

@@ -78,9 +78,26 @@ impl Cx {
         self.gpu_info.float16_blend_targets = supports(makepad_hal::format::RGBA16F);
         self.gpu_info.texture_bc7 = supports(makepad_hal::format::BC7);
         self.gpu_info.texture_astc4x4 = supports(makepad_hal::format::ASTC4X4);
+        // Who the GPU is, for apps that size their work to it (a graphics
+        // quality tier): the vendor from its PCI id, the driver's device name.
+        let name = info.device_name();
+        if !name.is_empty() {
+            self.gpu_info.vendor = match info.vendor_id {
+                0x10de => "nvidia", 0x1002 | 0x1022 => "amd", 0x8086 => "intel", 0x106b => "apple",
+                0x5143 => "qualcomm", 0x13b5 => "arm", 0x1010 => "imagination", 0x14e4 => "broadcom",
+                _ => "unknown",
+            }.to_string();
+            self.gpu_info.renderer = name;
+        }
+        self.gpu_info.discrete = match info.device_kind {
+            makepad_hal::device_kind::DISCRETE => Some(true),
+            makepad_hal::device_kind::INTEGRATED | makepad_hal::device_kind::SOFTWARE | makepad_hal::device_kind::VIRTUAL => Some(false),
+            _ => None,
+        };
         crate::gpu_info::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_info::set_gpu_working_set_bytes(info.working_set);
         if info.working_set != 0 { self.gpu_admission.set_device_bytes(info.working_set); }
+        crate::app_main::set_hal_window_manager(info.flags & info_flags::WM_HOSTED != 0);
         self.hal.info = Some(info);
         // `MAKEPAD_PICK_VARIANTS=1`: every shader also compiles its pick variant from the start
         // (backend coverage of the pick emitters without an editor driving picks)
@@ -231,8 +248,8 @@ impl Cx {
             return;
         }
         self.hal_init_session(info);
-        // controllers connect and report values from here on (they ring the pump, no polling)
-        #[cfg(any(target_vendor = "apple", target_os = "windows"))]
+        // Controllers wake the pump. Linux hosted apps own an evdev reader too.
+        #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
         self.hal.frames.w.game_out(0, makepad_hal::media::game_op::ENABLE, 0, 0, 0, 0, &[]);
         let display_clock = info.flags & info_flags::DISPLAY_CLOCK != 0;
         // a batch renderer beats as the GPU completes frames, not 60 times a second
@@ -442,6 +459,8 @@ impl Cx {
 
     /// One batch to the HAL, then the memory its slices pointed at is ours again.
     pub(super) fn hal_submit_batch(&mut self) {
+        #[cfg(relax)]
+        self.hal_audio_waiting_ready();
         #[cfg(target_os = "linux")]
         {
             self.hal.direct_display.flush(&mut self.hal.frames.w);
@@ -471,6 +490,8 @@ impl Cx {
     /// The frame beat (what macOS ran on its paint clock): services, next-frame callbacks, the
     /// draw event, shader compiles, then the passes into commands.
     pub(super) fn hal_beat(&mut self) -> bool {
+        self.hal.beat_phases = [[0; 2]; 6];
+        self.hal.beat_phases[0][0] = makepad_hal::clock_ns();
         frame_log::beat();
         crate::frame_sources::beat();
         if makepad_hal::profile::on() {
@@ -502,7 +523,6 @@ impl Cx {
         if !self.hosted_frames_held() {
             self.hal_poll_software_videos();
         }
-        self.handle_networking_events();
         self.run_live_edit_if_needed("hal");
         if !self.hosted_frames_held() {
             if !self.hal_draw_frame() {
@@ -544,9 +564,16 @@ impl Cx {
         }
         let time_now = self.hal_now();
         let draw_start = makepad_hal::profile::on().then(makepad_hal::clock_ns);
+        let next_start = makepad_hal::clock_ns();
+        self.hal.beat_phases[0][1] = next_start;
         if !self.new_next_frames.is_empty() {
             self.call_next_frame_event(time_now);
+            // the frame saw this beat's game input taps (held for it); later frames see them released
+            #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
+            self.hal.game.frame_end();
+            self.hal.beat_phases[1] = [next_start, makepad_hal::clock_ns()];
         }
+        let walk_start = makepad_hal::clock_ns();
         let mut deadline = None;
         loop {
             // A control-channel visibility message may arrive during the glyph wait.
@@ -556,6 +583,8 @@ impl Cx {
             self.hal.glyph_wait.pending.clear();
             self.hal.glyph_wait.drawn_blank = 0;
             if self.need_redrawing() {
+                // (a frame drawn again below still paints what an earlier drawing of it recorded
+                // and this one did not: `call_draw_event` keeps it)
                 self.call_draw_event(time_now);
             }
             if !self.draw_shaders.compile_set.is_empty() {
@@ -575,6 +604,7 @@ impl Cx {
                     eprintln!("[hal-client] first window FramePacket deferred: pending_glyphs={} pending_pipelines={}; waiting for resources before submission",
                         self.hal.glyph_wait.pending.len(), self.hal.frames.pipelines_pending());
                 }
+                self.frame_drawn_again();
                 self.redraw_all();
                 return true;
             }
@@ -607,8 +637,10 @@ impl Cx {
                 }
             }
             // Rebuild even on timeout, so every glyph that arrived within the budget is used.
+            self.frame_drawn_again();
             self.redraw_all();
         }
+        self.hal.beat_phases[2] = [walk_start, makepad_hal::clock_ns()];
         let build_start = draw_start.map(|start| {
             let now = makepad_hal::clock_ns();
             makepad_hal::profile::record(makepad_hal::profile::Metric::CpuDraw, now - start);
@@ -630,6 +662,7 @@ impl Cx {
         self.fb_build(&mut fb, &passes, pass_time, input_ns);
         self.fb_picks(&mut fb);
         self.hal.frames = fb;
+        self.release_painted_recordings();
         if let Some(start) = build_start {
             makepad_hal::profile::since(makepad_hal::profile::Metric::CpuBuild, start);
             if passes.is_empty() { makepad_hal::profile::count("beat: no pass painted"); }

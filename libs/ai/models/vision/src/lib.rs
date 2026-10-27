@@ -17,6 +17,7 @@ pub mod birefnet;
 mod birefnet_model;
 pub mod da3;
 pub mod depth_anything;
+mod depth_anything_temporal;
 pub mod realesrgan;
 mod realesrgan_model;
 pub mod sam3;

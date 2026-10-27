@@ -179,3 +179,22 @@ fn load_stays_when_a_call_before_the_loop_is_handed_the_param() {
 fn p_of(f: &Func) -> VReg {
     f.params[0]
 }
+
+/// The same call when the callee provably keeps no pointer it is handed there (O3's
+/// param_nocapture oracle, LLVM's `nocapture`): nothing can reach the param's memory through `q`,
+/// so the load is hoisted; a callee that may keep it (oracle false, or another argument
+/// position) still blocks it.
+#[test]
+fn load_is_hoisted_past_a_call_before_the_loop_that_keeps_nothing() {
+    for (kept_by_callee, hoisted) in [(false, true), (true, false)] {
+        let (mut f, _) = build(Body::OtherStore, false);
+        let at = f.blocks[0].insts.len();
+        let p = p_of(&f);
+        f.blocks[0].insts.insert(at, Inst::Call(Callee::Fn(7), vec![p], vec![]));
+        f.blocks[0].pos.insert(at, 0);
+        passes::set_sroa_nocapture(Some(Box::new(move |c: &Callee, k: usize| matches!(c, Callee::Fn(7)) && k == 0 && !kept_by_callee)));
+        let b = run(&mut f, &relax_session::Options::default());
+        passes::set_sroa_nocapture(None);
+        assert_eq!(b == 0, hoisted, "kept_by_callee {kept_by_callee}: load in b{b}");
+    }
+}

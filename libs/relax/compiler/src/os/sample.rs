@@ -6,6 +6,8 @@
 //! - `read(h, pcs, selfs, lo, hi)`: appends the samples taken since the last read whose pcs lie
 //!   in [lo, hi) (pcs: the pc and callers; selfs: the pc only), without allocating.
 //! - `close(h)`.
+//! - `set_period(h, ms)`: the source's own sampling period (Linux: the kernel's task-clock period;
+//!   the suspending samplers sample when the sampler thread wakes, so it is theirs: no-op).
 //!
 //! Android: no sampler (the app sandbox gives no perf_event_open).
 //! macOS suspends the thread for a Mach thread_get_state; Linux reads a perf_event task-clock
@@ -45,6 +47,7 @@ mod imp {
         }
     }
     pub fn close(_h: Handle) {}
+    pub fn set_period(_h: &Handle, _ms: u64) {}
     /// A thread on a CPU now: suspend, read the pc and the return addresses of the next CALLERS
     /// frames (the frame record chain, within the thread's stack), resume. No allocation while
     /// the thread is stopped (it may hold the allocator's lock): pcs go to a fixed array first.
@@ -126,6 +129,7 @@ mod imp {
         fn munmap(a: *mut u8, len: usize) -> i32;
         #[link_name = "close"]
         fn close_fd(fd: i32) -> i32;
+        fn ioctl(fd: i32, req: u64, ...) -> i32;
     }
     /// task-clock sampling of the calling thread every SAMPLE_MS of its CPU time, user ips only
     pub fn open_this_thread(_me: u64) -> Option<Handle> {
@@ -137,6 +141,8 @@ mod imp {
             attr[8..16].copy_from_slice(&1u64.to_ne_bytes()); // PERF_COUNT_SW_TASK_CLOCK
             let periods = sample_periods();
             let period = if periods.len() == 1 { periods[0] } else { periods.iter().copied().min().unwrap().min(SAMPLE_MS) };
+            // a thread that starts running JIT code while the sampler is settled samples at its cadence
+            let period = if periods.len() == 1 { period.max(crate::jit::sampler_period_floor()) } else { period };
             attr[16..24].copy_from_slice(&(period * 1_000_000).to_ne_bytes()); // sample_period (ns)
             attr[24..32].copy_from_slice(&(1u64 | 32 | 256).to_ne_bytes()); // PERF_SAMPLE_IP | PERF_SAMPLE_CALLCHAIN | PERF_SAMPLE_PERIOD
             attr[108..110].copy_from_slice(&(SAMPLE_CALLERS as u16 + 2).to_ne_bytes()); // sample_max_stack
@@ -158,6 +164,18 @@ mod imp {
         unsafe {
             munmap(h.1 as *mut u8, (1 + RING_PAGES) * PAGE);
             close_fd(h.0);
+        }
+    }
+    /// PERF_EVENT_IOC_PERIOD (_IOW('$', 4, u64)): the kernel samples every `ms` of the thread's
+    /// CPU from its next overflow on (each record carries its period: weights stay right).
+    /// Only for the single default cadence (the irregular diagnostic one is `exposure`'s).
+    pub fn set_period(h: &Handle, ms: u64) {
+        if sample_periods().len() != 1 {
+            return;
+        }
+        let ns: u64 = ms * 1_000_000;
+        unsafe {
+            ioctl(h.0, 0x4008_2404, &ns as *const u64);
         }
     }
     /// Diagnostic irregular sampling selects observations from a fixed-period
@@ -272,6 +290,7 @@ mod imp {
             CloseHandle(h.0);
         }
     }
+    pub fn set_period(_h: &Handle, _ms: u64) {}
 
     /// Returns true (the thread is sampled whatever its state: no back-off on Windows).
     pub fn read(h: &Handle, out: &mut Vec<super::Sample>, selfs: &mut Vec<super::Sample>, lo: u64, hi: u64, weight: u32) -> bool {
@@ -379,6 +398,7 @@ mod imp {
     /// Perf sampling is unsupported in the Android app sandbox.
     pub fn open_this_thread(_me: u64) -> Option<Handle> { None }
     pub fn close(_h: Handle) {}
+    pub fn set_period(_h: &Handle, _ms: u64) {}
     pub fn read(_h: &Handle, _out: &mut Vec<super::Sample>, _selfs: &mut Vec<super::Sample>, _lo: u64, _hi: u64, _weight: u32) -> bool {
         false
     }

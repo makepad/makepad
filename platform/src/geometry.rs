@@ -362,9 +362,11 @@ impl Geometry {
         handle.into()
     }
 
+    #[track_caller]
     pub fn new(cx: &mut Cx) -> Self {
         let geometry = cx.geometries.alloc();
         let cxgeom = &mut cx.geometries[geometry.geometry_id()];
+        cxgeom.origin = crate::gpu_ledger::GpuOrigin::here();
         cxgeom.indices.clear();
         cxgeom.vertices.clear();
         cxgeom.index_count = 0;
@@ -688,6 +690,9 @@ pub struct CxGeometry {
     pub dirty_indices: bool,
     pub logged_stride_mismatch: bool,
     pub logged_unsupported_typed: bool,
+    /// Who made it (`Geometry::new`'s caller and the open `gpu_owner` scopes): the ledger and
+    /// the GPU profiler name its vertex and index buffers by it.
+    pub origin: crate::gpu_ledger::GpuOrigin,
     #[allow(unused)]
     #[cfg(target_arch = "wasm32")]
     pub os: CxOsGeometry,
@@ -708,6 +713,7 @@ impl Default for CxGeometry {
             dirty_indices: false,
             logged_stride_mismatch: false,
             logged_unsupported_typed: false,
+            origin: Default::default(),
             #[cfg(target_arch = "wasm32")]
             os: CxOsGeometry::default(),
         }

@@ -70,6 +70,8 @@ pub enum RoundTo {
     Trunc,
     /// half away from zero
     Away,
+    /// to nearest, ties to even (roundps/roundpd imm 0, frintn)
+    Even,
 }
 
 /// Lane-typed 128-bit vector ops (`Inst::VX(op, d, a, b)`): the core::arch intrinsics'
@@ -171,6 +173,11 @@ pub enum VX {
     ArmSha256H,
     ArmSha256H2,
     ArmSha256Su1,
+    /// shift by the signed amount in each lane (NEON USHL / SSHL): left by n >= 0, right by -n
+    /// (logical / arithmetic) for n < 0, |n| below the lane bits. Made by the arm64 back end only
+    /// (a right shift by `y + c` is `ushl` by `-c - y`: one `sub`, no `neg`).
+    ArmUShl(VW),
+    ArmSShl(VW),
     // ---- unary, V128 -> V128
     FNeg(VW),
     FAbs(VW),
@@ -258,7 +265,7 @@ pub struct VReg(pub u32);
 
 /// Integer type of an operation: width in bits and signedness. Narrow values are
 /// kept extended to 64 bits in registers (sign- or zero-extended by type).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct IntTy {
     pub bits: u8,
     pub signed: bool,
@@ -269,7 +276,7 @@ pub const U64: IntTy = IntTy { bits: 64, signed: false };
 pub const I32: IntTy = IntTy { bits: 32, signed: true };
 pub const U32: IntTy = IntTy { bits: 32, signed: false };
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum IOp {
     Add,
     Sub,
@@ -287,6 +294,10 @@ pub enum IOp {
     /// rotate left by the second operand (mod the width); made by the optimiser from
     /// `x << k | x >> (w - k)` for unsigned 32-bit and 64-bit values only
     Rotl,
+    /// `a & ((1 << (b mod 64)) - 1)`: the low `b mod 64` bits of a (IntTy is U64); made by the
+    /// optimiser from that mask idiom (bit readers' `bitbuf & bitmask(n)`): x64 BMI2 `bzhi`,
+    /// arm64 `lsl` of all ones + `bic`
+    Bzhi,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -299,7 +310,7 @@ pub enum Cond {
     Ge,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum FOp {
     Add,
     Sub,
@@ -314,7 +325,7 @@ pub enum FOp {
     MaxGt,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum FUn {
     Neg,
     Abs,
@@ -327,7 +338,7 @@ pub enum FUn {
     RoundAway,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Conv {
     /// re-extend an integer to a (narrower or wider) integer type
     IntToInt(IntTy),
@@ -418,6 +429,26 @@ pub enum RelocKind {
     Imm32,
     /// arm64 movz at `at` and movk (lsl 16) at `at + 4`: the low 32 bits of value (must fit)
     A64MovzMovk,
+    /// An arm64 coverage probe's leading NOP. `target` is the bitmap word;
+    /// after bit `bit` is set, the embedder may atomically replace the NOP
+    /// with a branch over `words` instructions. Not a cached fixup.
+    A64CoverageBit { bit: u8, words: u32 },
+    /// x64: the disp32 of a `call`/`jmp` at `at` (ends the instruction): value - (base + at + 4);
+    /// a target out of reach is branched to through a veneer (`link_with`)
+    X64Branch32,
+    /// arm64 `b`/`bl` at `at`: (value - pc) / 4 in imm26 (+-128 MB); out of reach: a veneer
+    A64Branch26,
+}
+
+/// Reach of a pc-relative branch field from the branch's own pc (`RelocKind::X64Branch32`: from
+/// the end of the disp32, `A64Branch26`: from the instruction).
+pub fn branch_reaches(kind: RelocKind, pc: u64, target: u64) -> bool {
+    let d = target.wrapping_sub(pc) as i64;
+    match kind {
+        RelocKind::X64Branch32 => d >= i32::MIN as i64 && d <= i32::MAX as i64,
+        RelocKind::A64Branch26 => d & 3 == 0 && (-(1i64 << 27)..1i64 << 27).contains(&d),
+        _ => false,
+    }
 }
 
 /// One relocated field: where, how, and what value goes there.
@@ -512,6 +543,10 @@ impl SlotTable {
         self.callable_ctx.store(ctx, std::sync::atomic::Ordering::Relaxed);
         self.callable_hook.store(hook as usize, std::sync::atomic::Ordering::Release);
     }
+    /// The embedder answers slot addresses as values (set_callable_hook).
+    pub fn has_callable_hook(&self) -> bool {
+        self.callable_hook.load(std::sync::atomic::Ordering::Acquire) != 0
+    }
     /// The address of the slot as a value: its thunk, unless the embedder's hook says otherwise.
     pub fn callable(&self, id: u32) -> u64 {
         let thunk = self.thunk(id);
@@ -569,19 +604,50 @@ impl SlotsPtr {
 
 /// Writes every relocated field of `code`, to run at address `base`. Backends emit the fields
 /// zeroed, so emitted code is independent of where and in which run it runs; the embedder
-/// links it here (fresh and cached code alike). Err: a value does not fit its field at `base`.
+/// links it here (fresh and cached code alike). Err: a value does not fit its field at `base`
+/// (a branch field out of reach included: `link_with` takes veneers for those).
 pub fn link(code: &mut [u8], base: u64, relocs: &[RelocAt], value: &dyn Fn(Reloc) -> u64) -> Result<(), String> {
+    link_with(code, base, relocs, value, &|_, _, _| None)
+}
+
+/// `link`, where a branch field (`X64Branch32`, `A64Branch26`) whose target is out of reach
+/// branches to `veneer(kind, target, pc)` instead: code in reach of `pc` that jumps to `target`
+/// (None: no veneer, the link fails).
+pub fn link_with(code: &mut [u8], base: u64, relocs: &[RelocAt], value: &dyn Fn(Reloc) -> u64, veneer: &dyn Fn(RelocKind, u64, u64) -> Option<u64>) -> Result<(), String> {
     for r in relocs {
         let at = r.at as usize;
-        let v = value(r.target);
+        let mut v = value(r.target);
+        if matches!(r.kind, RelocKind::X64Branch32 | RelocKind::A64Branch26) {
+            let pc = base + at as u64 + if r.kind == RelocKind::X64Branch32 { 4 } else { 0 };
+            if !branch_reaches(r.kind, pc, v) {
+                v = match veneer(r.kind, v, pc) {
+                    Some(t) if branch_reaches(r.kind, pc, t) => t,
+                    _ => return Err(format!("branch out of reach ({:#x} from {:#x}) and no veneer", v, pc)),
+                };
+            }
+        }
         let rd32 = |c: &[u8], o: usize| -> Result<u32, String> {
             c.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).ok_or_else(|| format!("relocation at {} past the code", o))
         };
         let wr32 = |c: &mut [u8], o: usize, w: u32| c[o..o + 4].copy_from_slice(&w.to_le_bytes());
         match r.kind {
+            RelocKind::A64CoverageBit { bit, words } => {
+                if bit >= 64 || words == 0 || words >= 1 << 25 || at % 4 != 0 || at + words as usize * 4 > code.len() || rd32(code, at)? != 0xD503_201F {
+                    return Err(format!("invalid coverage probe at {}", at));
+                }
+            }
             RelocKind::Pool64 => {
                 let w = code.get_mut(at..at + 8).ok_or_else(|| format!("relocation at {} past the code", at))?;
                 w.copy_from_slice(&v.to_le_bytes());
+            }
+            RelocKind::X64Branch32 => {
+                rd32(code, at)?;
+                wr32(code, at, v.wrapping_sub(base + at as u64 + 4) as i64 as i32 as u32);
+            }
+            RelocKind::A64Branch26 => {
+                let d = (v.wrapping_sub(base + at as u64) as i64 >> 2) as u32;
+                let w = rd32(code, at)? & !0x03FF_FFFF;
+                wr32(code, at, w | (d & 0x03FF_FFFF));
             }
             RelocKind::X64Rel32 => {
                 let d = v.wrapping_sub(base + at as u64 + 4) as i64;
@@ -640,9 +706,13 @@ pub enum Reloc {
     Sym(Sym),
     /// the function table word of a slot (`SlotTable::table`)
     Slot(u32),
-    /// a slot's permanent callable address (`SlotTable::thunk`)
+    /// a slot's permanent callable address (`SlotTable::callable`): a value (fn pointers, vtables)
     Thunk(u32),
-    /// the thread-local block key / cell offset (`Env::tls_key`, pre-scaled as the backend loads it)
+    /// a slot as a call target: its thunk (`SlotTable::thunk`), which jumps to the slot's current
+    /// code (a direct branch the runtime keeps in step with the table word)
+    Call(u32),
+    /// the thread-local block key / cell offset (`Env::tls_key`, pre-scaled as the backend loads it;
+    /// x64 Windows: `x64::win_tls_key`)
     TlsKey,
     /// `Env::tls_slow`
     TlsSlow,
@@ -652,7 +722,7 @@ pub enum Reloc {
     Value(u64),
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub enum Callee {
     /// through the function table slot (live mode) / direct (AOT)
     Fn(u32),
@@ -665,10 +735,43 @@ pub enum Callee {
     CIndirect(VReg, Box<CSig>),
     /// direct call of a Relax `extern "C" fn` (function table slot)
     CFn(u32, Box<CSig>),
+    /// an inline assembly block (`asm!`; `--no-asm` blocks it): the call's arguments are its
+    /// inputs and its results its outputs, each in the block's register. Every pass sees it as a
+    /// call (side effects, memory, no motion); the register allocator keeps all other values out
+    /// of its registers over it (`AsmBlock::regs`); the backend emits the bytes in place.
+    Asm(Box<AsmBlock>),
+}
+
+/// The options of an inline assembly block (Reference [asm.options]) that the backend reads.
+pub const ASM_NORETURN: u32 = 1;
+pub const ASM_NOSTACK: u32 = 2;
+pub const ASM_NOMEM: u32 = 4;
+pub const ASM_READONLY: u32 = 8;
+pub const ASM_PURE: u32 = 16;
+pub const ASM_PRESERVES_FLAGS: u32 = 32;
+
+/// An `asm!` block assembled at lowering (`asm` module): its machine code, with its operands
+/// in fixed registers.
+#[derive(Clone, PartialEq, Hash, Debug)]
+pub struct AsmBlock {
+    pub code: Vec<u8>,
+    /// fields that hold a symbol's value: (offset in `code`, encoding, symbol)
+    pub fixups: Vec<(u32, crate::asm::FixKind, Sym)>,
+    /// the register of each input (the call's argument vregs, in order)
+    pub ins: Vec<crate::asm::PReg>,
+    /// the register of each output (the call's result vregs, in order)
+    pub outs: Vec<crate::asm::PReg>,
+    /// every register the block reads or may write (`PReg::bit`): inputs, outputs, discarded
+    /// outputs, clobbers. No other value is held in them over the block.
+    pub regs: u64,
+    /// the registers it may write: callee-saved ones among them are saved by the prologue
+    pub writes: u64,
+    /// ASM_* bits
+    pub opts: u32,
 }
 
 /// An aggregate passed or returned by value under the C ABI.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub struct CAgg {
     pub size: u32,
     pub align: u32,
@@ -677,7 +780,7 @@ pub struct CAgg {
     pub fields: Vec<(u32, Mem)>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub enum CArg {
     /// the vreg holds the value (integers extended to 64 bits as everywhere in RIR)
     Scalar(Mem),
@@ -686,7 +789,7 @@ pub enum CArg {
 }
 
 /// C-family calling convention, separate from ABI identity and unwinding.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[repr(u8)]
 pub enum CConv { Host, SysV64, Win64 }
 
@@ -704,7 +807,7 @@ impl CConv {
 /// ABI argument vregs: [result address if `ret` is Some] then one per `args` entry.
 /// With an aggregate return the result is written through that address and the call
 /// has no result vregs; scalar results come back in the call's result vregs as usual.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub struct CSig {
     pub conv: CConv,
     pub args: Vec<CArg>,
@@ -720,7 +823,7 @@ pub struct CSig {
     pub unwinds: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum AtomOrd {
     Relaxed,
     Acquire,
@@ -733,7 +836,7 @@ pub enum AtomOrd {
     Volatile,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum RmwOp {
     Xchg,
     Add,
@@ -748,8 +851,15 @@ pub enum RmwOp {
     UMin,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub enum Inst {
+    /// Set bits in an embedder-owned coverage bitmap. The aligned atomic word
+    /// must outlive the code and must not alias program memory. This is an
+    /// observable trace effect, but does not invalidate program loads. Native
+    /// backends lower it after optimisation; it is never persisted in a cache.
+    /// `disabled` names a thread-local u64: zero during runtime execution,
+    /// all ones while the compiler evaluates an initializer on this thread.
+    Coverage { word: u64, mask: u64, disabled: Sym },
     Iconst(VReg, i64),
     Fconst(VReg, u64, bool),
     Mov(VReg, VReg),
@@ -784,7 +894,9 @@ pub enum Inst {
     /// d = c != 0 ? a : b (c an integer vreg; a, b, d of one class)
     Sel(VReg, VReg, VReg, VReg), // d, c, a, b
     /// fused multiply-add, one rounding: d = (neg_prod ? -a : a) * b + (neg_add ? -c : c), the
-    /// negations those of the operands (a NaN's sign flips: `(-a).mul_add(b, c)`).
+    /// negations those of the operands (a NaN's sign flips: `(-a).mul_add(b, c)`). A NaN result
+    /// is [`fma_nan_f32`] / [`fma_nan_f64`] of the negated operands on every tier and register
+    /// assignment (each back end keeps one operand placement).
     /// The only fusion RIR has (the optimiser never fuses).
     FMulAdd(bool, bool, bool, VReg, VReg, VReg, VReg), // neg_prod, neg_add, f64?, d, a, b, c
     /// atomic load (Mem::Int only; the value is extended by signedness)
@@ -806,11 +918,15 @@ pub enum Inst {
     Xgetbv(VReg, VReg),
     /// d = address of this thread's copy of the thread-local block at the offset a symbol holds
     TlsAddr(VReg, Sym),
+    /// d = the thread pointer + the symbol's value: a variable in the executable's static TLS
+    /// (x86-64 Linux: fs:0 + offset, rustc's local-exec model). Pure within a thread, like TlsAddr
+    /// never moved (a coroutine may resume on another thread).
+    TlsStatic(VReg, Sym),
     // ---- 128-bit vectors (Cls::V128; four 32-bit lanes)
     /// d = bitwise m ? a : b (m: lane masks)
     VSel(VReg, VReg, VReg, VReg), // d, m, a, b
-    /// f32 lanes, one rounding: (neg_prod ? -a : a) * b + (neg_add ? -c : c) (operand negations,
-    /// as `FMulAdd`)
+    /// f32 lanes, one rounding: (neg_prod ? -a : a) * b + (neg_add ? -c : c) (operand negations
+    /// and NaN lanes as `FMulAdd`)
     VFma(bool, bool, VReg, VReg, VReg, VReg), // neg_prod, neg_add, d, a, b, c
     /// every lane = the low 32 bits of s (an I or F32 vreg)
     VSplat(VReg, VReg),
@@ -823,7 +939,7 @@ pub enum Inst {
     /// 16 bytes at [base + off] (no alignment needed)
     VLoad(VReg, VReg, i32),
     VStore(VReg, i32, VReg), // base, off, src
-    /// 16 bytes at [base + (idx << sh) + off] (sh <= 3; made by `passes::addr_modes` on x86-64)
+    /// 16 bytes at [base + (idx << sh) + off] (made by `passes::addr_modes`; sh <= 3, arm64 <= 4)
     VLoadX(VReg, VReg, VReg, u8, i32), // d, base, idx, sh, off
     VStoreX(VReg, VReg, u8, i32, VReg), // base, idx, sh, off, src
     /// d (I) = 1 if any lane of v is nonzero, else 0
@@ -843,7 +959,7 @@ pub enum Inst {
     VX3(VX, VReg, VReg, VReg, VReg),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Hash, Debug)]
 pub enum Term {
     Jump(u32),
     Branch(VReg, u32, u32),
@@ -865,7 +981,7 @@ pub enum Term {
 }
 
 /// The table of a `Term::Switch`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub struct SwitchTable {
     pub min: i64,
     pub targets: Vec<u32>,
@@ -925,7 +1041,7 @@ impl Inst {
     /// counts as written.
     pub fn defs(&self, mut f: impl FnMut(VReg)) {
         match self {
-            Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::VConst(d, _) => f(*d),
+            Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::TlsStatic(d, _) | Inst::VConst(d, _) => f(*d),
             Inst::Mov(d, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::FUnary(_, _, d, _) | Inst::Conv(_, d, _) | Inst::IBinI(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::Load(_, d, _, _) | Inst::VSplat(d, _) | Inst::VExtract(d, _, _) | Inst::VLoad(d, _, _) | Inst::VAny(d, _) | Inst::AtomicLoad(_, _, d, _) => f(*d),
             Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VGather(d, _, _) | Inst::VTbl(d, _, _, _) | Inst::VShuffle(d, _, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) | Inst::VLoadX(d, _, _, _, _) => f(*d),
             Inst::Sel(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => f(*d),
@@ -934,14 +1050,14 @@ impl Inst {
             Inst::FpEnv(_, v) => f(*v),
             Inst::Cpuid(ds, a, b) => { ds.iter().for_each(|d| f(*d)); f(*a); f(*b); }
             Inst::Xgetbv(d, a) => { f(*d); f(*a); }
-            Inst::Store(..) | Inst::Copy(..) | Inst::VStore(..) | Inst::VStoreX(..) | Inst::AtomicStore(..) | Inst::StoreX(..) | Inst::Fence(..) => {}
+            Inst::Store(..) | Inst::Copy(..) | Inst::VStore(..) | Inst::VStoreX(..) | Inst::AtomicStore(..) | Inst::StoreX(..) | Inst::Fence(..) | Inst::Coverage { .. } => {}
         }
     }
 
     /// Every vreg operand and result, in place (renaming without rebuilding the instruction).
     pub fn vregs_mut(&mut self, mut f: impl FnMut(&mut VReg)) {
         match self {
-            Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::VConst(d, _) => f(d),
+            Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::TlsStatic(d, _) | Inst::VConst(d, _) => f(d),
             Inst::Mov(d, a) | Inst::INeg(_, d, a) | Inst::INot(_, d, a) | Inst::IBit(_, d, a) | Inst::FUnary(_, _, d, a) | Inst::Conv(_, d, a) | Inst::IBinI(_, _, d, a, _) | Inst::ICmpI(_, _, d, a, _) | Inst::Load(_, d, a, _) | Inst::VSplat(d, a) | Inst::VExtract(d, a, _) | Inst::VLoad(d, a, _) | Inst::VAny(d, a) | Inst::AtomicLoad(_, _, d, a) => {
                 f(d);
                 f(a);
@@ -973,7 +1089,7 @@ impl Inst {
                 args.iter_mut().for_each(&mut f);
                 rets.iter_mut().for_each(&mut f);
             }
-            Inst::Fence(..) => {}
+            Inst::Fence(..) | Inst::Coverage { .. } => {}
             Inst::FpEnv(_, v) => f(v),
             Inst::Cpuid(ds, a, b) => {
                 ds.iter_mut().for_each(&mut f);
@@ -1026,6 +1142,10 @@ pub struct Block {
     pub pos: Vec<u64>,
     pub term: Term,
     pub term_pos: u64,
+    /// how often the block ran in the slot's counted build (PGO: the counted tier's exact
+    /// count of the O3 input block this one came from; copies keep it), negative = unknown.
+    /// A frequency for layout and register allocation only: never a correctness fact.
+    pub count: f32,
 }
 
 #[derive(Clone)]
@@ -1047,6 +1167,21 @@ pub struct Slot {
     /// one call only)
     pub ret: bool,
 }
+
+/// The bytes a callee may read and the bytes it may write through a pointer argument, relative
+/// to that pointer: `[lo, hi)` each (`lo == hi`: none). LLVM gets the same from FunctionAttrs'
+/// memory effects (`readonly` / `writeonly` params) and `dereferenceable`: `Arc::drop_slow` only
+/// reads `[0, 8)` of the `&mut Arc` it gets, so the caller's bytes of a value around that field,
+/// and that field itself, stay as they were (coalesce_slot_copies).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Access {
+    pub read: (i32, i32),
+    pub write: (i32, i32),
+}
+
+/// A callee's `Access` through a pointer argument; None when not known (anywhere it can reach,
+/// read and written).
+pub type Extent = Option<Access>;
 
 #[derive(Clone)]
 pub struct Func {
@@ -1083,6 +1218,12 @@ pub struct Func {
     /// slot passed there is written by the call, not read (forward_slot_dests_x builds such a
     /// result straight where it is copied to)
     pub sret_callees: Vec<u32>,
+    /// (callee, argument index, may return it) of calls whose callee keeps no copy of that
+    /// pointer argument (codegen opt::param_escape over its body): a frame address passed there
+    /// does not escape for sibling calls (tail.rs), the call's result is one when it may be
+    /// returned. Filled by the front end for bodies with tail-shaped calls. The fourth field is
+    /// the callee's access extent through that pointer (`Extent`).
+    pub nocapture: Vec<(Callee, u32, bool, Extent)>,
     /// Nounwind query answers consulted by this body's optimization, including false.
     /// They travel with the immutable O1 body, not with a mutable function slot.
     pub nounwind_inputs: Vec<(u32, bool)>,
@@ -1093,30 +1234,391 @@ pub struct Func {
     /// register allocation): code marked `// relax: hot`, whose first code is its only code
     /// until O3 replaces it
     pub full: bool,
+    /// by-pointer aggregate params (each also in `noalias`): the private copy of a by-value
+    /// argument that the callee owns (Relax ABI). Nobody reads it after the call returns or unwinds
+    /// out of it (the caller moved it; a cleanup that drops it runs in this function, behind an
+    /// Invoke), so a value promoted to a register needs no store before a plain call
+    pub owned: Vec<VReg>,
     /// values loaded from a field whose type cannot be null (references, Box, NonNull: the
     /// layout's niche excludes 0) -- the Load that defines each is non-null; other definitions
     /// of the same vreg prove nothing (fold_nonnull checks every definition)
     pub nonnull: Vec<VReg>,
+    /// parameters of a declared integer or pointer type: (vreg, bytes, signed) -- the value is
+    /// that type's, extended to the register (a wasm32 usize or pointer is 4 zero-extended bytes),
+    /// whatever any caller computed it from (the wasm backend's signature narrowing)
+    pub param_ints: Vec<(VReg, u8, bool)>,
     /// values loaded from a scalar whose type restricts its valid values (`char`, `bool`, enum
     /// tags: the layout's niche, rustc's `!range` load metadata): (vreg, load bytes, lo, hi) --
     /// the zero-extending Load of that width defining the vreg yields a value in lo..=hi; other
     /// definitions of the same vreg prove nothing (value ranges check the defining instruction)
     pub ranged: Vec<(VReg, u8, u64, u64)>,
-    /// the trait-object types this body calls methods through (virtual calls, by type id): code
-    /// that must run without lazy compiles (real-time threads) compiles their vtables' methods
-    pub dyn_calls: Vec<u32>,
+    /// a `#[unsafe(naked)]` fn: its one block is its `naked_asm!` (a noreturn Callee::Asm) and
+    /// the backend emits no prologue, no epilogue, nothing but the block
+    pub naked: bool,
+    /// The inline stack (`pos_ctx`): context k (1-based) is entry k-1, (the call's position -- its
+    /// own context is the parent's --, a position inside the inlined fn naming it). Machine code
+    /// carries it in its pc map (`inline_pc_entries`).
+    pub inl: Vec<(u64, u64)>,
+    /// Exact function instance copied at each inline context, parallel to `inl`.
+    /// Source positions alone cannot distinguish generic instances. This is body
+    /// provenance, not a call edge or an observation that the body executed.
+    pub inl_slots: Vec<u32>,
+    /// Where the source's named locals live (makepad inspect `locals`): side metadata only --
+    /// no pass reads it to decide anything, passes that rename vregs or slots map it, and the
+    /// back end turns it into per-call-site locations in the pc map (`vars_pc_entries`).
+    pub dbg: Vec<DbgVar>,
+    /// (low, high) V128 vregs that are the two halves of one 256-bit value, as a front end that
+    /// computes values in halves made them (compute's eight-lane kernels): `pair256` seeds.
+    /// A hint only (pair256 checks every pairing itself); `compact_vregs` renames it.
+    pub halves: Vec<(VReg, VReg)>,
+}
+
+/// A named local of the source and its storage (`Func::dbg`).
+#[derive(Clone, Debug, PartialEq, Hash)]
+pub struct DbgVar {
+    /// its fn's inline context (`pos_ctx`): 0 the function itself, k an inlined copy
+    pub ctx: u16,
+    /// the local's index in its fn's checked body (`Body::locals`)
+    pub local: u32,
+    pub loc: DbgLoc,
+    /// (leaf, value) of `Regs` leaves the optimiser found constant (their vreg folded away)
+    pub k: Vec<(u32, i64)>,
+}
+
+/// Storage of a `DbgVar`.
+#[derive(Clone, Debug, PartialEq, Hash)]
+pub enum DbgLoc {
+    /// one vreg per layout leaf (in leaf order); `DBG_NONE` = that leaf is no longer held
+    Regs(Vec<VReg>),
+    /// the bytes of stack slot `slot` from offset `off`
+    Slot(u32, i32),
+    /// the bytes at the address a vreg holds, plus `off` (a by-pointer argument copy)
+    Mem(VReg, i32),
+}
+
+/// A `DbgLoc::Regs` leaf whose value no vreg holds any more.
+pub const DBG_NONE: VReg = VReg(u32::MAX);
+
+/// A function slot an `Inst` names (`Callee::Fn` / `Callee::CFn` / `FnAddr`), in place.
+pub fn inst_fn_slot_mut(i: &mut Inst) -> Option<&mut u32> {
+    match i {
+        Inst::Call(Callee::Fn(c) | Callee::CFn(c, _), _, _) | Inst::FnAddr(_, c) => Some(c),
+        _ => None,
+    }
+}
+
+impl Func {
+    /// Every function-slot id the body names, in place: calls and fn addresses, `sret_callees`,
+    /// the `nocapture` facts' callees and the `nounwind_inputs`. Symbols (`Sym`) are not slots,
+    /// even those whose value is a slot's thunk. Relax's back-end memo renames slots through this
+    /// (a body equal to another one up to a renaming of its slots compiles to the same code with
+    /// the same renaming of its relocations).
+    pub fn fn_slots_mut(&mut self, f: &mut dyn FnMut(&mut u32)) {
+        for b in &mut self.blocks {
+            for i in &mut b.insts {
+                if let Some(c) = inst_fn_slot_mut(i) {
+                    f(c);
+                }
+            }
+        }
+        for c in &mut self.sret_callees {
+            f(c);
+        }
+        for (c, _, _, _) in &mut self.nocapture {
+            if let Callee::Fn(c) | Callee::CFn(c, _) = c {
+                f(c);
+            }
+        }
+        for (c, _) in &mut self.nounwind_inputs {
+            f(c);
+        }
+        for c in &mut self.inl_slots {
+            f(c);
+        }
+    }
+
+    /// Structural equality of everything but `name`, with the function slots each side names
+    /// compared through its own map (`ma` for self, `mb` for `o`; block counts by bits). With
+    /// injective maps: the bodies are equal up to a renaming of their slots.
+    pub fn same_body_mapped(&self, ma: &mut dyn FnMut(u32) -> u32, o: &Func, mb: &mut dyn FnMut(u32) -> u32) -> bool {
+        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves } = self;
+        let callee_eq = |a: &Callee, ma: &mut dyn FnMut(u32) -> u32, b: &Callee, mb: &mut dyn FnMut(u32) -> u32| match (a, b) {
+            (Callee::Fn(x), Callee::Fn(y)) => ma(*x) == mb(*y),
+            (Callee::CFn(x, xs), Callee::CFn(y, ys)) => ma(*x) == mb(*y) && xs == ys,
+            (Callee::Fn(_) | Callee::CFn(..), _) | (_, Callee::Fn(_) | Callee::CFn(..)) => false,
+            _ => a == b,
+        };
+        let inst_eq = |a: &Inst, ma: &mut dyn FnMut(u32) -> u32, b: &Inst, mb: &mut dyn FnMut(u32) -> u32| match (a, b) {
+            (Inst::Call(x, xa, xr), Inst::Call(y, ya, yr)) => xa == ya && xr == yr && callee_eq(x, ma, y, mb),
+            (Inst::FnAddr(v, x), Inst::FnAddr(w, y)) => v == w && ma(*x) == mb(*y),
+            (Inst::FnAddr(..), _) | (_, Inst::FnAddr(..)) => false,
+            _ => a == b,
+        };
+        blocks.len() == o.blocks.len()
+            && blocks.iter().zip(&o.blocks).all(|(a, b)| {
+                let Block { insts, pos, term, term_pos, count } = a;
+                insts.len() == b.insts.len()
+                    && insts.iter().zip(&b.insts).all(|(x, y)| inst_eq(x, ma, y, mb))
+                    && *pos == b.pos && *term == b.term && *term_pos == b.term_pos && count.to_bits() == b.count.to_bits()
+            })
+            && *vregs == o.vregs
+            && slots.len() == o.slots.len()
+            && slots.iter().zip(&o.slots).all(|(a, b)| {
+                let Slot { size, align, arg, born, ret } = a;
+                (*size, *align, *arg, *born, *ret) == (b.size, b.align, b.arg, b.born, b.ret)
+            })
+            && *params == o.params
+            && *rets == o.rets
+            && *file == o.file
+            && *noalias == o.noalias
+            && *withheld_noalias == o.withheld_noalias
+            && *plain_calls == o.plain_calls
+            && *deref == o.deref
+            && *cabi == o.cabi
+            && *sret == o.sret
+            && sret_callees.len() == o.sret_callees.len()
+            && sret_callees.iter().zip(&o.sret_callees).all(|(x, y)| ma(*x) == mb(*y))
+            && nocapture.len() == o.nocapture.len()
+            && nocapture.iter().zip(&o.nocapture).all(|(x, y)| x.1 == y.1 && x.2 == y.2 && x.3 == y.3 && callee_eq(&x.0, ma, &y.0, mb))
+            && nounwind_inputs.len() == o.nounwind_inputs.len()
+            && nounwind_inputs.iter().zip(&o.nounwind_inputs).all(|(x, y)| x.1 == y.1 && ma(x.0) == mb(y.0))
+            && *baseline == o.baseline
+            && *full == o.full
+            && *owned == o.owned
+            && *nonnull == o.nonnull
+            && *param_ints == o.param_ints
+            && *ranged == o.ranged
+            && *naked == o.naked
+            && *inl == o.inl
+            && inl_slots.len() == o.inl_slots.len()
+            && inl_slots.iter().zip(&o.inl_slots).all(|(x, y)| ma(*x) == mb(*y))
+            && *dbg == o.dbg
+            && *halves == o.halves
+    }
+
+    /// A hash of what `same_body_mapped` compares, the function slots replaced by `m(slot)`.
+    pub fn hash_body_mapped<H: std::hash::Hasher>(&self, h: &mut H, m: &mut dyn FnMut(u32) -> u32) {
+        use std::hash::Hash;
+        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves } = self;
+        fn callee<H: std::hash::Hasher>(c: &Callee, h: &mut H, m: &mut dyn FnMut(u32) -> u32) {
+            match c {
+                Callee::Fn(x) => {
+                    0xf1u8.hash(h);
+                    m(*x).hash(h);
+                }
+                Callee::CFn(x, s) => {
+                    0xf2u8.hash(h);
+                    m(*x).hash(h);
+                    s.hash(h);
+                }
+                _ => c.hash(h),
+            }
+        }
+        blocks.len().hash(h);
+        for Block { insts, pos, term, term_pos, count } in blocks {
+            insts.len().hash(h);
+            for i in insts {
+                match i {
+                    Inst::Call(c, a, r) => {
+                        0xf0u8.hash(h);
+                        callee(c, h, m);
+                        a.hash(h);
+                        r.hash(h);
+                    }
+                    Inst::FnAddr(v, x) => {
+                        0xf3u8.hash(h);
+                        v.hash(h);
+                        m(*x).hash(h);
+                    }
+                    _ => i.hash(h),
+                }
+            }
+            pos.hash(h);
+            term.hash(h);
+            term_pos.hash(h);
+            count.to_bits().hash(h);
+        }
+        vregs.hash(h);
+        slots.len().hash(h);
+        for Slot { size, align, arg, born, ret } in slots {
+            (size, align, arg, born, ret).hash(h);
+        }
+        (params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret).hash(h);
+        sret_callees.len().hash(h);
+        for x in sret_callees {
+            m(*x).hash(h);
+        }
+        nocapture.len().hash(h);
+        for (c, i, r, e) in nocapture {
+            callee(c, h, m);
+            (i, r, e).hash(h);
+        }
+        nounwind_inputs.len().hash(h);
+        for (x, v) in nounwind_inputs {
+            m(*x).hash(h);
+            v.hash(h);
+        }
+        (baseline, full, owned, nonnull, ranged, naked, inl, dbg).hash(h);
+        inl_slots.len().hash(h);
+        for x in inl_slots {
+            m(*x).hash(h);
+        }
+        // (only when present, as `halves` below)
+        if !param_ints.is_empty() {
+            param_ints.hash(h);
+        }
+        // (only when present: bodies without the hint keep the hash they had before it existed)
+        if !halves.is_empty() {
+            halves.hash(h);
+        }
+    }
+
+    /// Maps the debug table through a vreg renaming (`map(v)` None: v is gone).
+    pub fn dbg_map_vregs(&mut self, map: &dyn Fn(VReg) -> Option<VReg>) {
+        for d in self.dbg.iter_mut() {
+            match &mut d.loc {
+                DbgLoc::Regs(r) => {
+                    for v in r.iter_mut() {
+                        if *v != DBG_NONE {
+                            *v = map(*v).unwrap_or(DBG_NONE);
+                        }
+                    }
+                }
+                DbgLoc::Mem(v, _) => *v = map(*v).unwrap_or(DBG_NONE),
+                DbgLoc::Slot(..) => {}
+            }
+        }
+    }
+    /// Live-range splits (register allocation): each (piece, original) pair is a vreg made to
+    /// hold the original's value over part of the function. Every debug entry naming the
+    /// original gets a twin naming the piece; where a local is looked up, the leaf's vreg live
+    /// there (original or piece) holds it.
+    pub fn dbg_add_pieces(&mut self, pairs: &[(VReg, VReg)]) {
+        if self.dbg.is_empty() || pairs.is_empty() {
+            return;
+        }
+        let mut of: std::collections::HashMap<u32, Vec<VReg>> = std::collections::HashMap::new();
+        for &(p, o) in pairs {
+            of.entry(o.0).or_default().push(p);
+        }
+        let mut more = Vec::new();
+        for d in &self.dbg {
+            if let DbgLoc::Regs(r) = &d.loc {
+                for (k, v) in r.iter().enumerate() {
+                    for p in of.get(&v.0).map(|x| x.as_slice()).unwrap_or(&[]) {
+                        let mut leaves = vec![DBG_NONE; r.len()];
+                        leaves[k] = *p;
+                        more.push(DbgVar { ctx: d.ctx, local: d.local, loc: DbgLoc::Regs(leaves), k: Vec::new() });
+                    }
+                }
+            }
+        }
+        self.dbg.extend(more);
+    }
+    /// A pass proved, for vregs the debug table may name, `d == s` everywhere (`copies`: both
+    /// single-definition, d a copy of s) or `d == k` (`consts`: single-definition constants)
+    /// before d goes away: its leaves name s, or hold the constant.
+    pub fn dbg_salvage(&mut self, copies: &[(VReg, VReg)], consts: &[(VReg, i64)]) {
+        if self.dbg.is_empty() || copies.is_empty() && consts.is_empty() {
+            return;
+        }
+        let copies: std::collections::HashMap<u32, VReg> = copies.iter().map(|c| (c.0 .0, c.1)).collect();
+        let consts: std::collections::HashMap<u32, i64> = consts.iter().map(|c| (c.0 .0, c.1)).collect();
+        for d in self.dbg.iter_mut() {
+            match &mut d.loc {
+                DbgLoc::Regs(r) => {
+                    for (leaf, v) in r.iter_mut().enumerate() {
+                        if *v == DBG_NONE {
+                            continue;
+                        }
+                        // (a chain of removed copies: to its end)
+                        for _ in 0..64 {
+                            match copies.get(&v.0) {
+                                Some(&s) if s != *v => *v = s,
+                                _ => break,
+                            }
+                        }
+                        if let Some(&k) = consts.get(&v.0) {
+                            *v = DBG_NONE;
+                            d.k.push((leaf as u32, k));
+                        }
+                    }
+                }
+                DbgLoc::Mem(v, _) => {
+                    if let Some(&s) = copies.get(&v.0) {
+                        *v = s;
+                    }
+                }
+                DbgLoc::Slot(..) => {}
+            }
+        }
+    }
+
+    /// The vregs the debug table names (sorted, deduplicated): passes check removals against it.
+    pub fn dbg_vregs(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self.dbg.iter().flat_map(|d| match &d.loc {
+            DbgLoc::Regs(r) => r.clone(),
+            DbgLoc::Mem(a, _) => vec![*a],
+            DbgLoc::Slot(..) => Vec::new(),
+        }).filter(|v| *v != DBG_NONE).map(|v| v.0).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// Maps the debug table through a slot renumbering (`map(s)` None: s is gone).
+    pub fn dbg_map_slots(&mut self, map: &dyn Fn(u32) -> Option<u32>) {
+        for d in self.dbg.iter_mut() {
+            if let DbgLoc::Slot(s, _) = &mut d.loc {
+                *s = map(*s).unwrap_or(u32::MAX);
+            }
+        }
+    }
+}
+
+/// Source positions are `(file << 32) | byte`, with the inline context in bits 48..63 (0: the
+/// function's own body; k: inlined through `Func::inl[k - 1]`). File indices stay below 1 << 16.
+pub const POS_CTX_SHIFT: u32 = 48;
+/// An inline chain deeper / wider than 16 bits: the context is lost (positions still name lines).
+pub const POS_CTX_LOST: u64 = 0xffff;
+
+/// The inline context of a position.
+pub fn pos_ctx(p: u64) -> u64 {
+    p >> POS_CTX_SHIFT
+}
+
+/// A position without its inline context: what names a source place (keys, lookups).
+pub fn pos_plain(p: u64) -> u64 {
+    p & ((1u64 << POS_CTX_SHIFT) - 1)
+}
+
+/// The file index of a position.
+pub fn pos_file(p: u64) -> u32 {
+    ((p >> 32) & 0xffff) as u32
+}
+
+/// `p` with inline context `ctx`.
+pub fn pos_with_ctx(p: u64, ctx: u64) -> u64 {
+    pos_plain(p) | (ctx.min(POS_CTX_LOST) << POS_CTX_SHIFT)
+}
+
+/// The pc-map entries carrying `f`'s inline stack: two per context, at code offset u32::MAX
+/// (after every instruction's entry; a lookup never reaches them): the call position, then the
+/// position naming the inlined fn. Positions both, so caches translate their files as any other.
+pub fn inline_pc_entries(f: &Func) -> impl Iterator<Item = (u32, u64)> + '_ {
+    f.inl.iter().flat_map(|&(call, callee)| [(u32::MAX, call), (u32::MAX, callee)])
 }
 
 impl Func {
     pub fn new(name: String, file: u32) -> Func {
-        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, full: false, nonnull: Vec::new(), ranged: Vec::new(), dyn_calls: Vec::new() }
+        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nocapture: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, full: false, owned: Vec::new(), nonnull: Vec::new(), param_ints: Vec::new(), ranged: Vec::new(), naked: false, inl: Vec::new(), inl_slots: Vec::new(), dbg: Vec::new(), halves: Vec::new() }
     }
     pub fn vreg(&mut self, c: Cls) -> VReg {
         self.vregs.push(c);
         VReg(self.vregs.len() as u32 - 1)
     }
     pub fn block(&mut self) -> u32 {
-        self.blocks.push(Block { insts: Vec::new(), pos: Vec::new(), term: Term::Unreachable, term_pos: 0 });
+        self.blocks.push(Block { insts: Vec::new(), pos: Vec::new(), term: Term::Unreachable, term_pos: 0, count: -1.0 });
         self.blocks.len() as u32 - 1
     }
     pub fn slot(&mut self, size: u32, align: u32) -> u32 {
@@ -1127,6 +1629,10 @@ impl Func {
     /// Text dump for debugging and the crash report.
     pub fn dump(&self) -> String {
         let mut s = format!("fn {} params {:?} rets {:?}\n", self.name, self.params, self.rets);
+        if !self.param_ints.is_empty() {
+            let d: Vec<String> = self.param_ints.iter().map(|(v, n, sg)| format!("{:?}:{}{}", v, if *sg { "i" } else { "u" }, *n as u32 * 8)).collect();
+            s.push_str(&format!("; declared params: {}\n", d.join(" ")));
+        }
         if self.slots.iter().any(|x| x.size >= 1024) {
             let big: Vec<String> = self.slots.iter().enumerate().filter(|(_, x)| x.size >= 1024).map(|(i, x)| format!("{}:{}", i, x.size)).collect();
             s.push_str(&format!("; slots >= 1 KB: {}\n", big.join(" ")));
@@ -1165,8 +1671,19 @@ impl Func {
     }
 
     /// Structural verifier: every use has a class-correct vreg, every target exists.
+    /// Hard verification after a rewrite that runs past the last `verify` (JITSAFE 19): always in
+    /// debug builds; in release with MAKEPAD_RUN_VERIFY_PASSES (the gates' diff_fast legs set it).
+    /// A broken function is an error naming the pass -- never compiled.
+    pub fn verify_after(&self, pass: &str) -> Result<(), String> {
+        if !verify_passes_on() {
+            return Ok(());
+        }
+        self.verify().map_err(|e| format!("RIR broken by {} in {}: {}", pass, self.name, e))
+    }
+
     pub fn verify(&self) -> Result<(), String> {
-        if let Some(sig) = &self.cabi {
+        // a naked fn's body is its asm: it has no parameter vregs
+        if let Some(sig) = self.cabi.as_ref().filter(|_| !self.naked) {
             for p in &self.params {
                 if p.0 as usize >= self.vregs.len() {
                     return Err(format!("{}: param vreg out of range", self.name));
@@ -1228,11 +1745,11 @@ impl Func {
                         regs.push(*a);
                         regs.push(*b);
                     }
-                    Inst::Fence(..) => {}
+                    Inst::Fence(..) | Inst::Coverage { .. } => {}
                     Inst::FpEnv(_, v) => regs.push(*v),
                     Inst::Cpuid(ds, a, b) => { regs.extend_from_slice(ds); regs.push(*a); regs.push(*b); }
                     Inst::Xgetbv(d, a) => { regs.push(*d); regs.push(*a); }
-                    Inst::TlsAddr(d, _) => regs.push(*d),
+                    Inst::TlsAddr(d, _) | Inst::TlsStatic(d, _) => regs.push(*d),
                     Inst::VSplat(d, a) | Inst::VExtract(d, a, _) | Inst::VLoad(d, a, _) | Inst::VStore(d, _, a) | Inst::VAny(d, a) => {
                         regs.push(*d);
                         regs.push(*a);
@@ -1357,11 +1874,144 @@ impl Func {
                 }
             }
         }
+        // Copy is memcpy: its source and destination never overlap unless they are the same
+        // bytes (a slot copied onto its own storage, which moves nothing). A pass that forwards
+        // one slot into another must not leave a copy between two offsets of one slot whose
+        // ranges meet: the backends copy forward in chunks (DFREE: a moved key shifted a word).
+        if let Some((bi, x)) = self.overlapping_copy() {
+            return Err(format!("{}: b{} copy between overlapping bytes of one slot: {:?}", self.name, bi, x));
+        }
         Ok(())
+    }
+
+    /// The first `Copy` whose destination and source are addresses of one slot (single-definition
+    /// SlotAddr / Mov / constant-Add chains) at different offsets with overlapping ranges.
+    pub fn overlapping_copy(&self) -> Option<(usize, Inst)> {
+        if !self.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::Copy(..)))) {
+            return None;
+        }
+        let at = slot_offsets(self);
+        for (bi, b) in self.blocks.iter().enumerate() {
+            for x in &b.insts {
+                if let Inst::Copy(d, s, n) = x {
+                    if let (Some((ds, doff)), Some((ss, soff))) = (at[d.0 as usize], at[s.0 as usize]) {
+                        if ds == ss && doff != soff && doff < soff + *n as i64 && soff < doff + *n as i64 {
+                            return Some((bi, x.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
+/// Per vreg: (slot, constant byte offset) when its one definition is a SlotAddr, or a
+/// single-definition Mov / 64-bit constant Add of such a value.
+pub fn slot_offsets(f: &Func) -> Vec<Option<(u32, i64)>> {
+    let nv = f.vregs.len();
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        if (p.0 as usize) < nv {
+            ndef[p.0 as usize] += 1;
+        }
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            crate::regalloc::for_defs(i, |d| {
+                if (d.0 as usize) < nv {
+                    ndef[d.0 as usize] += 1
+                }
+            });
+        }
+    }
+    let mut at: Vec<Option<(u32, i64)>> = vec![None; nv];
+    for b in &f.blocks {
+        for i in &b.insts {
+            if let Inst::SlotAddr(d, s) = i {
+                if (d.0 as usize) < nv && ndef[d.0 as usize] == 1 {
+                    at[d.0 as usize] = Some((*s, 0));
+                }
+            }
+        }
+    }
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for b in &f.blocks {
+            for i in &b.insts {
+                let (d, s, k) = match i {
+                    Inst::Mov(d, s) => (*d, *s, 0),
+                    Inst::IBinI(IOp::Add, IntTy { bits: 64, .. }, d, s, k) => (*d, *s, *k),
+                    _ => continue,
+                };
+                if (d.0 as usize) < nv && (s.0 as usize) < nv && ndef[d.0 as usize] == 1 && at[d.0 as usize].is_none() {
+                    if let Some((sl, o)) = at[s.0 as usize] {
+                        at[d.0 as usize] = Some((sl, o + k));
+                        grew = true;
+                    }
+                }
+            }
+        }
+    }
+    at
+}
+
 /// `v` re-extended to integer type `it` (how RIR keeps narrow integers in registers).
+/// The NaN result of `FMulAdd` / `VFma` lanes: `fma(a, b, c)` with the operands already negated
+/// (`neg_prod` / `neg_add`), on this host (Rust leaves it unspecified; the back ends fix it so
+/// that every tier and register assignment gives the same bits, and compute kernels match their
+/// interpreter, makepad_script_compute::ir::fma_nan):
+/// - x86-64: the first NaN of b, a, c, quieted (vfmadd213 with a in the destination, b in vvvv,
+///   c in r/m -- glibc's fma/fmaf, what rustc calls without the fma feature; the vf*231/132 forms
+///   keep b first too); no NaN operand (inf * 0, inf - inf): the negative default NaN.
+/// - AArch64 (fmadd/fmla: Rn = a, Rm = b, addend c; Arm's FPMulAdd): the first signaling NaN of
+///   c, a, b, else the first quiet NaN of c, a, b, quieted -- except that a quiet NaN c with
+///   inf * 0 gives the default NaN; none: the positive default NaN.
+/// - wasm: as the engine's f64 multiply then add pass NaNs on (`b * a + c`, the x86-64 order on
+///   x86-64 engines); wasm itself leaves NaN signs nondeterministic.
+/// `None` when the result is not a NaN.
+pub fn fma_nan_f32(a: f32, b: f32, c: f32) -> Option<u32> {
+    let r = a.mul_add(b, c);
+    fma_nan(a.to_bits() as u64, b.to_bits() as u64, c.to_bits() as u64, 23, 8, r.is_nan()).map(|x| x as u32)
+}
+
+/// [`fma_nan_f32`] for f64.
+pub fn fma_nan_f64(a: f64, b: f64, c: f64) -> Option<u64> {
+    let r = a.mul_add(b, c);
+    fma_nan(a.to_bits(), b.to_bits(), c.to_bits(), 52, 11, r.is_nan())
+}
+
+/// m mantissa and e exponent bits; `is_nan`: the result's value is a NaN
+fn fma_nan(a: u64, b: u64, c: u64, m: u32, e: u32, is_nan: bool) -> Option<u64> {
+    if !is_nan {
+        return None;
+    }
+    let exp = ((1u64 << e) - 1) << m;
+    let abs = |x: u64| x & (exp | ((1 << m) - 1));
+    let nan = |x: u64| abs(x) > exp;
+    let quiet = 1u64 << (m - 1);
+    let default = exp | quiet;
+    #[cfg(target_arch = "aarch64")]
+    {
+        let snan = |x: u64| nan(x) && x & quiet == 0;
+        if let Some(&x) = [c, a, b].iter().find(|&&x| snan(x)) {
+            return Some(x | quiet);
+        }
+        let (inf, zero) = (|x: u64| abs(x) == exp, |x: u64| abs(x) == 0);
+        if nan(c) && ((inf(a) && zero(b)) || (zero(a) && inf(b))) {
+            return Some(default);
+        }
+        Some([c, a, b].iter().find(|&&x| nan(x)).map_or(default, |&x| x | quiet))
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let sign = 1u64 << (m + e);
+        let default = if cfg!(target_arch = "x86_64") { sign | default } else { default };
+        Some([b, a, c].iter().find(|&&x| nan(x)).map_or(default, |&x| x | quiet))
+    }
+}
+
 pub fn extend_const(v: i64, it: IntTy) -> i64 {
     match (it.bits, it.signed) {
         (8, true) => v as i8 as i64,
@@ -1519,4 +2169,19 @@ mod slot_table_tests {
         assert_eq!(t.find(0, a + 5 * 32 + 4), Some((5, 4)));
         assert_eq!(t.find(0, 0x2000_0000), None);
     }
+}
+
+/// MAKEPAD_RUN_VERIFY_PASSES (any value), `force_verify_passes`, or a debug build:
+/// `Func::verify_after` checks.
+pub fn verify_passes_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    cfg!(debug_assertions) || FORCE_VERIFY.load(std::sync::atomic::Ordering::Relaxed) || *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_VERIFY_PASSES").is_some())
+}
+
+static FORCE_VERIFY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turns `verify_after` on for the rest of the process (tests: the environment switch is read once
+/// per process, and test targets may share one).
+pub fn force_verify_passes() {
+    FORCE_VERIFY.store(true, std::sync::atomic::Ordering::Relaxed);
 }

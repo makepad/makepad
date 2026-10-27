@@ -67,6 +67,42 @@ pub struct GlbShading {
     /// 1 = a number plate laid out by `stencil::stencil_plate`: its digit
     /// cells show each copy's own number (the instance's plate number).
     pub plate: f64,
+    /// A vehicle's signal lamp: the layer's emission follows the copy's
+    /// brake and reverse state instead of shining all the time.
+    pub lamp: Option<GlbLamp>,
+}
+
+/// The role of a vehicle lamp lens (`makepadShading.lamp`). The material's
+/// emission is the lamp fully lit; each copy lights it from its own
+/// vehicle's signals, so one model serves a braking car and a cruising one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlbLamp {
+    /// Tail lamp: dim with the lights on after dark, full while braking
+    /// (a combined tail and brake lamp, as most cars have).
+    Tail,
+    /// Brake lamp only: dark until the brake is applied (a centre high
+    /// mount or a rain light).
+    Brake,
+    /// Reversing lamp: lit while the vehicle is in reverse.
+    Reverse,
+}
+
+impl GlbLamp {
+    pub fn name(self) -> &'static str {
+        match self {
+            GlbLamp::Tail => "tail",
+            GlbLamp::Brake => "brake",
+            GlbLamp::Reverse => "reverse",
+        }
+    }
+    pub fn from_name(name: &str) -> Option<GlbLamp> {
+        match name {
+            "tail" => Some(GlbLamp::Tail),
+            "brake" => Some(GlbLamp::Brake),
+            "reverse" => Some(GlbLamp::Reverse),
+            _ => None,
+        }
+    }
 }
 
 impl GlbShading {
@@ -262,6 +298,9 @@ pub fn augment_glb_pbr(
             }
             if let (JsonValue::Object(o), true) = (&mut shading, s.plate > 0.0) {
                 o.insert("plate".into(), JsonValue::F64(s.plate));
+            }
+            if let (JsonValue::Object(o), Some(lamp)) = (&mut shading, s.lamp) {
+                o.insert("lamp".into(), string(lamp.name()));
             }
             extras.insert("makepadShading".into(), shading);
         }

@@ -27,6 +27,7 @@ impl<T> DoubleEndedIterator for Empty<T> {
     }
 }
 impl<T> ExactSizeIterator for Empty<T> {}
+unsafe impl<T> super::TrustedLen for Empty<T> {}
 impl<T> FusedIterator for Empty<T> {}
 impl<T> Clone for Empty<T> {
     fn clone(&self) -> Empty<T> {
@@ -64,6 +65,7 @@ impl<T> DoubleEndedIterator for Once<T> {
     }
 }
 impl<T> ExactSizeIterator for Once<T> {}
+unsafe impl<T> super::TrustedLen for Once<T> {}
 impl<T> FusedIterator for Once<T> {}
 
 pub struct OnceWith<F> {
@@ -216,6 +218,14 @@ impl<T, F: FnMut(&T) -> Option<T>> FusedIterator for Successors<T, F> {}
 
 pub fn zip<A: IntoIterator, B: IntoIterator>(a: A, b: B) -> Zip<A::IntoIter, B::IntoIter> {
     Zip::new(a.into_iter(), b.into_iter())
+}
+
+pub fn chain<A, B>(a: A, b: B) -> super::Chain<A::IntoIter, B::IntoIter>
+where
+    A: IntoIterator,
+    B: IntoIterator<Item = A::Item>,
+{
+    super::Chain::new(a.into_iter(), b.into_iter())
 }
 
 // ---------------------------------------------------------------- Debug (as real core)

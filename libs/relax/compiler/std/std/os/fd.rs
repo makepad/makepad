@@ -136,7 +136,17 @@ impl AsRawFd for crate::io::Stdin {
         0
     }
 }
+impl AsRawFd for crate::io::StdinLock<'_> {
+    fn as_raw_fd(&self) -> RawFd {
+        0
+    }
+}
 impl AsRawFd for crate::io::Stdout {
+    fn as_raw_fd(&self) -> RawFd {
+        1
+    }
+}
+impl AsRawFd for crate::io::StdoutLock<'_> {
     fn as_raw_fd(&self) -> RawFd {
         1
     }
@@ -146,7 +156,17 @@ impl AsRawFd for crate::io::Stderr {
         2
     }
 }
+impl AsRawFd for crate::io::StderrLock<'_> {
+    fn as_raw_fd(&self) -> RawFd {
+        2
+    }
+}
 impl AsFd for crate::io::Stdin {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        unsafe { BorrowedFd::borrow_raw(0) }
+    }
+}
+impl AsFd for crate::io::StdinLock<'_> {
     fn as_fd(&self) -> BorrowedFd<'_> {
         unsafe { BorrowedFd::borrow_raw(0) }
     }
@@ -156,9 +176,29 @@ impl AsFd for crate::io::Stdout {
         unsafe { BorrowedFd::borrow_raw(1) }
     }
 }
+impl AsFd for crate::io::StdoutLock<'_> {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        unsafe { BorrowedFd::borrow_raw(1) }
+    }
+}
 impl AsFd for crate::io::Stderr {
     fn as_fd(&self) -> BorrowedFd<'_> {
         unsafe { BorrowedFd::borrow_raw(2) }
+    }
+}
+impl AsFd for crate::io::StderrLock<'_> {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        unsafe { BorrowedFd::borrow_raw(2) }
+    }
+}
+impl crate::io::IsTerminal for BorrowedFd<'_> {
+    fn is_terminal(&self) -> bool {
+        crate::sys::stdio_is_terminal(self.fd)
+    }
+}
+impl crate::io::IsTerminal for OwnedFd {
+    fn is_terminal(&self) -> bool {
+        crate::sys::stdio_is_terminal(self.fd)
     }
 }
 

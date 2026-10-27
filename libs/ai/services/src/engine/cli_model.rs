@@ -194,12 +194,13 @@ fn safe_end(raw: &str, from: usize) -> usize {
     if let Some(at) = next_block(tail) {
         return from + at;
     }
-    // Hold back a suffix that is a prefix of a marker.
+    // Hold back a suffix that is a prefix of a marker. A cut inside a
+    // multi-byte character starts no (ASCII) marker and is skipped.
     for keep in (1.."<function_calls>".len()).rev() {
         if tail.len() >= keep {
             let cut = tail.len() - keep;
-            let end = &tail[cut..];
-            if tail.is_char_boundary(cut) && [OPEN, "<function_calls>", "<invoke name="].iter().any(|m| m.starts_with(end)) {
+            let Some(end) = tail.get(cut..) else { continue };
+            if [OPEN, "<function_calls>", "<invoke name="].iter().any(|m| m.starts_with(end)) {
                 return from + cut;
             }
         }
@@ -496,5 +497,31 @@ impl Model for CliModel {
             self.images.drain(..cut);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_end_never_cuts_inside_a_character() {
+        // A streamed reply arrives in pieces that may end anywhere, and
+        // the part already shown may end anywhere before that.
+        for text in ["sun at 12°", "exposure −", "storm 🌩", "°", "−", "🌩", "a °<tool_c", "−<invoke name=", "🌩<function_calls"] {
+            for len in (0..=text.len()).filter(|&i| text.is_char_boundary(i)) {
+                let raw = &text[..len];
+                for from in (0..=len).filter(|&i| raw.is_char_boundary(i)) {
+                    let end = safe_end(raw, from);
+                    assert!(from <= end && end <= len, "{raw:?} from {from}: {end}");
+                    assert!(raw.is_char_boundary(end), "{raw:?} from {from}: {end} is inside a character");
+                }
+            }
+        }
+        // A marker's start after a multi-byte character is still held back.
+        assert_eq!(safe_end("12°<tool_c", 0), "12°".len());
+        assert_eq!(safe_end("−<inv", 0), "−".len());
+        assert_eq!(safe_end("🌩<", 0), "🌩".len());
+        assert_eq!(safe_end("12°", 0), "12°".len());
     }
 }

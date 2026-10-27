@@ -5,7 +5,7 @@
 //! Reports are plain data (no references into the tables), so any thread can analyse one.
 
 use crate::types::{Attr, StrId};
-use std::collections::HashMap;
+use crate::FastMap;
 
 /// The object kinds that have tables.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -52,9 +52,9 @@ pub struct LedgerEntry {
 
 #[derive(Default, Debug)]
 pub struct Ledger {
-    entries: HashMap<(Kind, u32), LedgerEntry>,
+    entries: FastMap<(Kind, u32), LedgerEntry>,
     /// every create / destroy ever seen, per site (churn)
-    sites: HashMap<StrId, SiteCounts>,
+    sites: FastMap<StrId, SiteCounts>,
     /// What the device says this process holds (set by backends that can ask): the ledger's
     /// total reconciles against it.
     pub device_allocated: Option<u64>,
@@ -114,7 +114,7 @@ impl Ledger {
 
     /// The report of this session. `strings` resolves the attrs; `frame` is the current frame;
     /// a texture-like handle unused for `idle_frames` frames (or never) is idle.
-    pub fn report(&self, session: u32, strings: &HashMap<StrId, String>, frame: u64, idle_frames: u64) -> Report {
+    pub fn report(&self, session: u32, strings: &FastMap<StrId, String>, frame: u64, idle_frames: u64) -> Report {
         let name = |id: StrId| strings.get(&id).cloned().filter(|_| id != 0);
         let mut items: Vec<ReportItem> = self
             .entries
@@ -161,7 +161,7 @@ impl Ledger {
 }
 
 fn group(items: &[ReportItem], key: impl Fn(&ReportItem) -> String) -> Vec<Group> {
-    let mut m: HashMap<String, (u64, usize)> = HashMap::new();
+    let mut m: FastMap<String, (u64, usize)> = FastMap::default();
     for i in items {
         let e = m.entry(key(i)).or_default();
         e.0 += i.bytes;

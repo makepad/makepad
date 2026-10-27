@@ -145,21 +145,6 @@ pub const LATE_ENV: u8 = 2;
 
 static LATE: crate::sync::Mutex<Option<std::collections::HashMap<(String, u8, String), u128>>> = crate::sync::Mutex::new(None);
 
-pub(crate) struct ZoneTaken(Option<std::collections::HashMap<(String, u8, String), u128>>);
-
-pub(crate) fn zone_take() -> ZoneTaken {
-    let mut late = LATE.lock().unwrap_or_else(|e| e.into_inner());
-    let taken = ZoneTaken(std::mem::take(&mut *late));
-    #[cfg(test)]
-    assert!(late.is_none());
-    taken
-}
-
-pub(crate) fn zone_put_back(taken: ZoneTaken) {
-    let mut late = LATE.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *late, taken.0));
-}
-
 /// The content hash a late input is recorded with.
 pub fn late_hash(content: Option<&[u8]>) -> u128 {
     let mut h = Sip128::new();
@@ -176,8 +161,9 @@ pub fn late_hash(content: Option<&[u8]>) -> u128 {
 
 pub fn note_late_input(krate: &str, kind: u8, name: &str, content: Option<&[u8]>) {
     let v = late_hash(content);
+    let key = (krate.to_string(), kind, name.to_string());
     let mut g = LATE.lock().unwrap_or_else(|e| e.into_inner());
-    g.get_or_insert_with(Default::default).insert((krate.to_string(), kind, name.to_string()), v);
+    g.get_or_insert_with(Default::default).insert(key, v);
 }
 
 /// The late inputs seen so far, sorted: (crate, kind, name, content hash).

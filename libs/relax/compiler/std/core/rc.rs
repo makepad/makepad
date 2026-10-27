@@ -24,43 +24,17 @@ use crate::ptr;
 
 // ---------------------------------------------------------------- raw blocks (shared with Arc)
 
-#[repr(C, align(16))]
-struct Chunk16 {
-    _b: [u8; 16],
-}
-
-#[repr(C, align(64))]
-struct Chunk64 {
-    _b: [u8; 64],
-}
-
-/// Allocates `size` bytes aligned to `align` (<= 64), never zero-sized.
+/// Allocates `size` bytes aligned to `align`, never zero-sized.
 pub(crate) fn block_alloc(size: usize, align: usize) -> *mut u8 {
-    if align <= 16 {
-        let n = (size + 15) / 16;
-        let mut v: Vec<Chunk16> = Vec::with_capacity(n);
-        let p = v.as_mut_ptr() as *mut u8;
-        crate::mem::forget(v);
-        p
-    } else if align <= 64 {
-        let n = (size + 63) / 64;
-        let mut v: Vec<Chunk64> = Vec::with_capacity(n);
-        let p = v.as_mut_ptr() as *mut u8;
-        crate::mem::forget(v);
-        p
-    } else {
-        crate::panicking::panic_str("Rc/Arc: alignment above 64 is not supported")
-    }
+    let layout = match crate::heap::Layout::from_size_align(size, align) {
+        Ok(l) => l,
+        Err(_) => crate::panicking::panic_str("Rc/Arc: capacity overflow"),
+    };
+    crate::heap::alloc_or_abort(layout)
 }
 
 pub(crate) unsafe fn block_free(p: *mut u8, size: usize, align: usize) {
-    if align <= 16 {
-        let n = (size + 15) / 16;
-        drop(Vec::from_raw_parts(p as *mut Chunk16, 0, n));
-    } else {
-        let n = (size + 63) / 64;
-        drop(Vec::from_raw_parts(p as *mut Chunk64, 0, n));
-    }
+    crate::heap::dealloc(p, crate::heap::Layout::from_size_align_unchecked(size, align));
 }
 
 /// Block header; `weak` counts the Weaks plus one for all strong pointers together.
@@ -302,16 +276,28 @@ impl<T: ?Sized> Clone for Rc<T> {
     }
 }
 
+impl<T: ?Sized> Rc<T> {
+    // Non-inlined part of `drop` (real std's Rc::drop_slow): the value's drop glue stays out of
+    // every dropping caller, so the count decrement inlines there.
+    #[inline(never)]
+    unsafe fn drop_slow(&mut self) {
+        unsafe {
+            ptr::drop_in_place(self.ptr.as_ptr());
+            (*header_of(self.ptr.as_ptr())).weak -= 1;
+            if (*header_of(self.ptr.as_ptr())).weak == 0 {
+                free_block(header_of(self.ptr.as_ptr()));
+            }
+        }
+    }
+}
+
 unsafe impl<#[may_dangle] T: ?Sized> Drop for Rc<T> {
+    #[inline]
     fn drop(&mut self) {
         unsafe {
             (*header_of(self.ptr.as_ptr())).strong -= 1;
             if (*header_of(self.ptr.as_ptr())).strong == 0 {
-                ptr::drop_in_place(self.ptr.as_ptr());
-                (*header_of(self.ptr.as_ptr())).weak -= 1;
-                if (*header_of(self.ptr.as_ptr())).weak == 0 {
-                    free_block(header_of(self.ptr.as_ptr()));
-                }
+                self.drop_slow();
             }
         }
     }

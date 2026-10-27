@@ -168,6 +168,8 @@ pub struct CrateMods {
     pub externs: HashMap<String, String>,
     /// names `use .. as name` binds under another name
     pub renames: crate::fxhash::HashSet<String>,
+    /// crate-level `#![recursion_limit = ".."]` from the root file
+    pub recursion_limit: Option<u32>,
     /// the crate's resolved scopes, computed once on first use (CrateScope::compute)
     pub scope: std::sync::OnceLock<CrateScope>,
 }
@@ -289,7 +291,9 @@ pub(crate) const TY_FRAG: u32 = 1 << 31;
 pub(crate) const EXPR_FRAG: u32 = 1 << 30;
 pub(crate) const LIT_FRAG: u32 = 1 << 29;
 pub(crate) const META_ONLY: u32 = 1 << 28;
-pub(crate) const FRAG_FLAGS: u32 = TY_FRAG | EXPR_FRAG | LIT_FRAG | META_ONLY;
+/// A `$b:block` fragment (rustc's `MetaVarKind::Block`): no labeled / unsafe block or closure body.
+pub(crate) const BLOCK_FRAG: u32 = 1 << 27;
+pub(crate) const FRAG_FLAGS: u32 = TY_FRAG | EXPR_FRAG | LIT_FRAG | META_ONLY | BLOCK_FRAG;
 
 const GLOB_ID: Name = Name(0);
 const GLOB_SEP_ID: Name = Name(1);
@@ -669,6 +673,7 @@ impl MacroTable {
         let mut uses = old.uses.clone();
         let mut renames = old.renames.clone();
         let mut mods = old.mods.clone();
+        let mut externs = old.externs.clone();
         let mut added = false;
         let mut binds: Vec<(&(String, String), &Vec<String>)> = eu.iter().collect();
         binds.sort();
@@ -692,6 +697,14 @@ impl MacroTable {
                 }
                 continue;
             }
+            if m == &old.root {
+                if path.len() == 1 && path[0] == "crate" {
+                    externs.insert(b.clone(), k.to_string());
+                } else if path.len() == 2 && path[0].is_empty() {
+                    let target = externs.get(&path[1]).cloned().unwrap_or_else(|| path[1].clone());
+                    externs.insert(b.clone(), target);
+                }
+            }
             if v.iter().any(|u| u.bind.as_deref() == Some(b.as_str()) && &u.path == path) {
                 continue;
             }
@@ -704,14 +717,14 @@ impl MacroTable {
         if !added {
             return;
         }
-        let cm = CrateMods { root: old.root.clone(), src: old.src.clone(), mods, items: old.items.clone(), uses, externs: old.externs.clone(), renames, scope: Default::default() };
+        let cm = CrateMods { root: old.root.clone(), src: old.src.clone(), mods, items: old.items.clone(), uses, externs, renames, recursion_limit: old.recursion_limit, scope: Default::default() };
         self.add_crate(k.to_string(), std::sync::Arc::new(cm));
         // a crate not loaded yet whose scope a parse ahead of its load computed (preloaded files'
         // lookups) copied this crate's names as they were: computed afresh on next use
         let stale: Vec<String> = self.crates.iter().filter(|(n, c)| !self.sealed.contains(n.as_str()) && c.scope.get().is_some()).map(|(n, _)| n.clone()).collect();
         for n in stale {
             let c = self.crates[&n].clone();
-            let fresh = CrateMods { root: c.root.clone(), src: c.src.clone(), mods: c.mods.clone(), items: c.items.clone(), uses: c.uses.clone(), externs: c.externs.clone(), renames: c.renames.clone(), scope: Default::default() };
+            let fresh = CrateMods { root: c.root.clone(), src: c.src.clone(), mods: c.mods.clone(), items: c.items.clone(), uses: c.uses.clone(), externs: c.externs.clone(), renames: c.renames.clone(), recursion_limit: c.recursion_limit, scope: Default::default() };
             self.crates.insert(n, std::sync::Arc::new(fresh));
         }
     }
@@ -793,7 +806,8 @@ fn lookup_in_t<S: AsRef<str>>(table: &MacroTable, local: &[MacroRef], name: &str
     }
     if let Some(us) = table.macro_use.get(cur) {
         for u in us.iter().rev() {
-            if let Some(d) = r.exported(u, name) {
+            let u_key = cm.and_then(|c| c.externs.get(u.as_str())).map(|s| s.as_str()).unwrap_or(u.as_str());
+            if let Some(d) = r.exported(u_key, name) {
                 return Some(d);
             }
         }
@@ -869,6 +883,9 @@ impl<'a> Res<'a> {
     where
         'a: 'b,
     {
+        if let Some(c) = n.strip_prefix("__relax_crate_") {
+            return Some(self.crate_root(c));
+        }
         if let Some(c) = self.table.crates.get(k).and_then(|c| c.externs.get(n)) {
             // a bin naming its own package's lib (same crate name): the lib, not itself
             if c == k {
@@ -1104,8 +1121,10 @@ impl CrateScope {
                             if may_macro && !sc.mnon.get(m).map_or(false, |t| t.contains_key(b)) {
                                 let d = match u.path.split_last() {
                                     Some((last, prefix)) if prefix.is_empty() || (prefix.len() == 1 && prefix[0].is_empty()) => {
-                                        // `use name;` of a macro in scope (2018 `pub use mac;`)
-                                        table.defs.get(last).and_then(|ds| ds.iter().rev().find(|d| d.krate == krate_name(k)).cloned())
+                                        // `use name;` of a macro in scope (2018 `pub use mac;`): the latest
+                                        // macro_rules of the name in this module's textual scope (one of
+                                        // the same name in another module is another macro)
+                                        table.defs.get(last).and_then(|ds| ds.iter().rev().find(|d| d.krate == krate_name(k) && cm.in_textual_scope(d, m, None)).cloned())
                                     }
                                     Some((last, prefix)) => {
                                         let t = resolve_path(&r, k, m, prefix, &|kk, mm, n| sc.lookup_type(&r, k, kk, mm, n));
@@ -1944,9 +1963,44 @@ pub mod uses {
         SYNTH.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| s.contains(&(file.to_string(), pos)))
     }
 
+    /// rustc_resolve ident.rs `resolve_ident_in_module_non_globs_unadjusted` (Shadowing::Unrestricted):
+    /// a call through a module path (`crate::m!`) of a `#[macro_export]` macro_rules! of the calling
+    /// crate: (calling file, call position, defining file, definition position). Whether the
+    /// definition is macro-expanded is answered with the program's files (lint_early).
+    static ABS_PATH_MACRO_CALLS: Mutex<Vec<(String, u32, String, u32)>> = Mutex::new(Vec::new());
+    pub fn abs_path_macro_call(file: &str, pos: u32, d: &MacroDef) {
+        if !recording() { return; }
+        ABS_PATH_MACRO_CALLS.lock().unwrap_or_else(|e| e.into_inner()).push((file.to_string(), pos, d.def_file.clone(), d.def_pos));
+    }
+    pub fn take_abs_path_macro_calls() -> Vec<(String, u32, String, u32)> { std::mem::take(&mut *ABS_PATH_MACRO_CALLS.lock().unwrap_or_else(|e| e.into_inner())) }
+    /// The single-name bang macro calls written in the checked crates (calling file, position, name):
+    /// rustc resolves them in the lexical scopes (`early_resolve_ident_in_lexical_scope`), where a glob
+    /// import's macro that an outer scope also provides is ambiguous (Program::macro_call_ambiguities).
+    static PLAIN_MACRO_CALLS: Mutex<Vec<(String, u32, String)>> = Mutex::new(Vec::new());
+    pub fn plain_macro_call(file: &str, pos: u32, name: &str) {
+        if !recording() { return; }
+        PLAIN_MACRO_CALLS.lock().unwrap_or_else(|e| e.into_inner()).push((file.to_string(), pos, name.to_string()));
+    }
+    pub fn take_plain_macro_calls() -> Vec<(String, u32, String)> { std::mem::take(&mut *PLAIN_MACRO_CALLS.lock().unwrap_or_else(|e| e.into_inner())) }
     static NAMED_POSITIONAL: Mutex<Vec<(String, u32, String)>> = Mutex::new(Vec::new());
     pub fn named_arg_positional(file: &str, pos: u32, name: &str) { NAMED_POSITIONAL.lock().unwrap_or_else(|e| e.into_inner()).push((file.to_string(), pos, name.to_string())); }
     pub fn take_named_arg_positional() -> Vec<(String, u32, String)> { std::mem::take(&mut *NAMED_POSITIONAL.lock().unwrap_or_else(|e| e.into_inner())) }
+    /// rustc_builtin_macros source_util `ExpandInclude::make_expr`: tokens after the one
+    /// expression of an `include!` in expression position (lint incomplete_include): the
+    /// calling file and the call's position.
+    static INCOMPLETE_INCLUDE: Mutex<Vec<(String, u32)>> = Mutex::new(Vec::new());
+    pub fn incomplete_include(file: &str, call: u32) { INCOMPLETE_INCLUDE.lock().unwrap_or_else(|e| e.into_inner()).push((file.to_string(), call)); }
+    pub fn take_incomplete_include() -> Vec<(String, u32)> { std::mem::take(&mut *INCOMPLETE_INCLUDE.lock().unwrap_or_else(|e| e.into_inner())) }
+    /// rustc_parse parse_param_general: a C-variadic `...` without a pattern where the parameter needs
+    /// one (lint varargs_without_pattern, buffered for the crate root): the file and the `...`.
+    static VARARGS_WITHOUT_PATTERN: Mutex<Vec<(String, u32)>> = Mutex::new(Vec::new());
+    pub fn varargs_without_pattern(file: &str, pos: u32) { VARARGS_WITHOUT_PATTERN.lock().unwrap_or_else(|e| e.into_inner()).push((file.to_string(), pos)); }
+    pub fn take_varargs_without_pattern() -> Vec<(String, u32)> { std::mem::take(&mut *VARARGS_WITHOUT_PATTERN.lock().unwrap_or_else(|e| e.into_inner())) }
+    /// rustc_expand InvocationCollector::check_attributes: the attributes written on a macro call (the
+    /// file, the attribute's position, its name), whose feature gates are judged as an item's are.
+    static MAC_CALL_ATTRS: Mutex<Vec<(String, u32, String)>> = Mutex::new(Vec::new());
+    pub fn mac_call_attr(file: &str, pos: u32, name: &str) { MAC_CALL_ATTRS.lock().unwrap_or_else(|e| e.into_inner()).push((file.to_string(), pos, name.to_string())); }
+    pub fn mac_call_attrs() -> Vec<(String, u32, String)> { MAC_CALL_ATTRS.lock().unwrap_or_else(|e| e.into_inner()).clone() }
     static CFG_ATTR_EMPTY: Mutex<Vec<(String, u32)>> = Mutex::new(Vec::new());
     pub fn cfg_attr_empty(file: &str, pos: u32) { CFG_ATTR_EMPTY.lock().unwrap_or_else(|e| e.into_inner()).push((file.to_string(), pos)); }
     pub fn take_cfg_attr_empty() -> Vec<(String, u32)> { std::mem::take(&mut *CFG_ATTR_EMPTY.lock().unwrap_or_else(|e| e.into_inner())) }
@@ -2287,7 +2341,7 @@ fn check_seq(nodes: &[MNode], after: &[Follow], edition: u16) -> Result<(), Stri
                 let mut inner_after: Vec<Follow> = match sep {
                     _ if *op == b'?' => Vec::new(),
                     Some(t) => vec![Follow::Tok(t.text.clone())],
-                    None => first_of(inner).0,
+                    None => Vec::new(),
                 };
                 inner_after.extend(followers);
                 check_seq(inner, &inner_after, edition)?;
@@ -2615,7 +2669,7 @@ impl<'a> Parser<'a> {
                         // (a `$t:ty` is a type nonterminal even when it is one token: where a bound is
                         // expected, it is not a trait -- rustc `parse_trait_bound`; the end carries TY_FRAG)
                         let ty_frag = *f == Frag::Ty && !wrap;
-                        let kind_flag = match f { Frag::Expr if !wrap => EXPR_FRAG, Frag::Literal => LIT_FRAG, _ => 0 };
+                        let kind_flag = match f { Frag::Expr if !wrap => EXPR_FRAG, Frag::Literal => LIT_FRAG, Frag::Block if !wrap => BLOCK_FRAG, _ => 0 };
                         let group = opaque && out.s.len() > group_start && (hi - lo + usize::from(taken.is_some()) > 1 || ty_frag);
                         if group || (kind_flag != 0 && out.s.len() > group_start) {
                             out.groups.push((group_start as u32, out.s.len() as u32 | if ty_frag { TY_FRAG } else { 0 } | kind_flag | if group { 0 } else { META_ONLY }));
@@ -2730,9 +2784,13 @@ impl<'a> Parser<'a> {
             let mut i = lo;
             if self.match_seq(matcher, &mut i, hi, &mut binds) && i == hi {
                 uses::used(def, arm as u32);
-                // `$crate` names the defining crate itself, even where the caller reaches the macro
-                // only through a re-export (no dependency of that name)
-                let krate_path = if def.krate == self.krate { "crate".to_string() } else { format!("::__relax_crate_{}", def.krate) };
+                // `$crate` names the defining crate by identity (rustc: the `$crate` token keeps the
+                // definition's hygiene), wherever the transcribed tokens end up: a caller that reaches
+                // the macro only through a re-export, and also this crate's own expansions, whose
+                // tokens can become the body of a macro another crate expands (a nested
+                // `macro_rules!`, or tokens passed on to a macro that defines one). `crate` would
+                // name the crate expanding that macro.
+                let krate_path = format!("::__relax_crate_{}", def.krate);
                 let mut out = Transcript { edition: self.edition, ..Default::default() };
                 self.transcribe(body, &binds, &mut Vec::new(), &krate_path, &mut out)?;
                 out.s.push(' ');

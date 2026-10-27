@@ -8,8 +8,11 @@
 //!   side;
 //! - `#[relax_api(plain)]` on a struct/enum: plain data JIT code reads, builds and drops itself
 //!   (Relax checks rustc's size, align and field offsets against its own);
-//! - `#[relax_api(handle[, clone][, eq][, hash][, debug][, display])]` on a struct/enum: an opaque
-//!   handle -- rustc's size/align/drop (and the listed trait ops) cross, its fields never do.
+//! - `#[relax_api(handle[, clone][, eq][, hash][, debug][, display])]` on a struct/enum: a handle --
+//!   rustc's size/align/drop (and the listed trait ops) cross. A struct's field offsets cross too:
+//!   when Relax lays it out the same and every field is the same bytes on both sides (plain data,
+//!   `String`/`Vec`/`Option<String>` while the two stds agree, other such handles), JIT code builds it
+//!   and reads its fields itself; otherwise its fields never cross.
 //!
 //! In a normal build the attribute leaves the item as it is. With the crate's `host-shims`
 //! feature (only the `makepad` loader build enables it) it also emits, next to the item, an extern "C"
@@ -48,7 +51,7 @@ pub struct Entry {
     /// HANDLE/PLAIN: the type's size and align
     pub size: u64,
     pub align: u64,
-    /// PLAIN struct: its fields' offsets in declaration order
+    /// PLAIN / HANDLE struct: its fields' offsets in declaration order
     pub offsets: &'static [u64],
     /// HANDLE: rustc's drop_in_place, when the type needs drop
     pub drop: Option<DropFn>,

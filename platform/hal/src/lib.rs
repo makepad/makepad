@@ -9,6 +9,11 @@
 //! [`types`], the command and event tables in [`cmds`] and [`events`], the GPU ledger in
 //! [`ledger`]. This crate ships the headless backend; the platform backends come with their phases.
 
+/// The HAL's maps of objects, keyed by small ids ((session, index) pairs, string ids): hashed
+/// with the in-tree FxHash. The per-draw path looks textures, buffers and pipelines up in them
+/// many times a frame, where std's SipHash was ~4% of the main thread's encode samples.
+pub type FastMap<K, V> = std::collections::HashMap<K, V, fxhash::FxBuildHasher>;
+
 pub mod backend;
 #[cfg(target_os = "linux")]
 pub mod dmabuf;
@@ -26,6 +31,7 @@ pub mod buffers;
 pub mod clock;
 pub mod fake_camera;
 pub mod clipboard;
+pub mod drag_promise;
 pub mod direct;
 #[cfg(target_os = "linux")]
 pub mod wide_desktop;
@@ -43,13 +49,26 @@ pub mod events;
 pub mod font;
 pub mod ledger;
 pub mod gpu_limits;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod gpu_prof;
 pub mod gpu_pressure;
+pub mod h264_bits;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub mod stream_encode;
+pub mod stream_pack;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub mod frame_tap;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod framecap;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod inspect;
 pub mod media;
 pub mod profile;
+pub mod threadcpu;
 pub mod session;
 pub mod types;
+pub mod window_controls;
+pub use window_controls::{host_caption, host_window_controls, HostCaption, WindowControls};
 
 #[cfg(target_vendor = "apple")]
 pub use backend::apple::media::{can_play_type, video_h264_probe};
@@ -72,7 +91,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
 
-pub use session::{CloseAs, DomainLaunch, ExecRecord};
+pub use session::{AppCaption, CAPTION_BADGE_ROOM, CloseAs, DomainLaunch, ExecRecord};
 
 /// What the relax host provides so a privileged session can start, stop and relaunch apps
 /// (`DomainStart` / `DomainStop` / `DomainRelaunch`): host-native code, registered with
@@ -104,6 +123,8 @@ struct State {
     backend: Option<(u32, Box<dyn Backend>)>,
     /// how many times a backend instance was created (stays 1 across relaunches)
     backend_inits: u32,
+    /// `before_exit` ran: the process is ending, no backend is made again
+    exited: bool,
 }
 
 /// Who has something to pick up: one blocking queue per session, plus the all-sessions wake.
@@ -323,7 +344,7 @@ impl Hal {
         raise_open_file_limit();
         Arc::new_cyclic(|me| Hal {
             me: me.clone(),
-            state: Mutex::new(State { world: World::new(), backend: None, backend_inits: 0 }),
+            state: Mutex::new(State { world: World::new(), backend: None, backend_inits: 0, exited: false }),
             sig: Arc::new(Sig { signal: Mutex::new(Signal::default()), cv: Condvar::new() }),
             next_req: AtomicU32::new(1),
             runners: Mutex::new(Default::default()),
@@ -429,6 +450,7 @@ impl Hal {
             // AUTO takes the backend the first open selected
             Some((id, _)) if *id != req.backend && req.backend != backend_id::AUTO => return refused,
             Some(_) => {}
+            None if st.exited => return refused,
             None => match make(req.backend) {
                 Some(b) => {
                     st.backend = Some((b.info().backend, b));
@@ -594,6 +616,11 @@ impl Hal {
     /// How many backend instances this Hal has created (1 once opened, however many relaunches).
     pub fn backend_inits(&self) -> u32 {
         lock(&self.state).backend_inits
+    }
+
+    /// The backend this Hal runs (`backend_id`) and its shader dialect, once one is open.
+    pub fn backend_info(&self) -> Option<HalInfo> {
+        lock(&self.state).backend.as_ref().map(|(_, b)| b.info())
     }
 
     /// Executes a batch. The slices in `buf` are read during this call only.
@@ -782,13 +809,23 @@ impl Hal {
         self.wake();
     }
 
-    /// The host is about to end the process (its sessions are done, its app domains stopped):
-    /// the backend's driver threads run out first, so exit() does not unload the driver under
-    /// them. A host API, called once at the end of the run.
+    /// The host ends the process next (its sessions are done, its app domains stopped): the
+    /// backend leaves the Hal -- no call reaches it any more, no backend is made again -- and its
+    /// driver threads stop and are joined (work in flight completes or is abandoned), so exit()
+    /// never runs the driver's exit handlers under a thread inside the driver. Returns once
+    /// they are gone. A host API, the last HAL call of every way the host ends; once is enough.
     pub fn before_exit(&self) {
-        let mut guard = lock(&self.state);
-        if let Some((_, b)) = guard.backend.as_mut() {
+        let backend = {
+            let mut guard = lock(&self.state);
+            guard.exited = true;
+            guard.backend.take()
+        };
+        // outside the state lock: a worker's last jobs may still deliver to the sessions
+        if let Some((_, mut b)) = backend {
             b.before_exit();
+            // the process ends: its GPU objects go with it (destroying them now would only be
+            // more driver calls on the way out)
+            std::mem::forget(b);
         }
     }
 
@@ -991,6 +1028,14 @@ pub fn run_main_loop() {
     main_loop::run()
 }
 
+/// The app lives in the menu bar (macOS): it starts as an accessory app (no Dock icon, no menu
+/// bar) like a bundle whose Info.plist says `LSUIElement`, for a binary that is not such a bundle
+/// (a host a launcher bundle starts). Set before the window system starts. A host API.
+#[cfg(target_os = "macos")]
+pub fn set_menu_bar_app(on: bool) {
+    backend::apple::appkit::MENU_BAR_APP.store(on, std::sync::atomic::Ordering::Release);
+}
+
 /// A display: its extent and what is left of it after the menu bar and Dock, as x, y, w, h in the
 /// window system's global points (macOS: bottom-left origin, the space window frames are in).
 #[relax_api(plain)]
@@ -1000,6 +1045,22 @@ pub struct ScreenInfo {
     pub bounds: [f64; 4],
     pub work_area: [f64; 4],
     pub is_primary: bool,
+}
+
+/// The identity a launcher gave this process (MAKEPAD_APP_ID, set by `makepad app <id>` for the
+/// OS entry of an app: its .desktop file names the same id): `nl.makepad.<id>`, which a Linux
+/// window takes as its Wayland app_id and X11 WM_CLASS so the desktop groups it with its entry.
+/// None without one (the window is named after the executable).
+pub fn app_identity() -> Option<String> {
+    app_id().map(|id| format!("nl.makepad.{id}"))
+}
+
+/// The launcher's app id itself (MAKEPAD_APP_ID when it is a valid one): Windows names the
+/// process and its windows `Makepad.<id>`, the AppUserModelID of the app's Start menu entry.
+pub fn app_id() -> Option<String> {
+    let id = std::env::var("MAKEPAD_APP_ID").ok()?;
+    let ok = !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    ok.then_some(id)
 }
 
 /// The displays attached right now, as the window system last saw them (readable from any
@@ -1351,14 +1412,19 @@ pub fn hal_socket_timeout(id: i64, read: u32, ms: i32) {
     backend::android::socket::set_timeout(id, read != 0, ms)
 }
 
-/// Writes the SHA-256 of the server certificate (once handshaken) into `out` (32 bytes). Returns 32,
-/// or -1 when there is none.
+/// Copies the server's leaf certificate DER into `out` when it fits. Returns the required
+/// byte length (call with an empty buffer to query it), or -1 when there is no certificate.
 #[cfg(target_os = "android")]
 #[relax_api]
-pub fn hal_socket_fingerprint(id: i64, out: &mut [u8]) -> i64 {
-    match backend::android::socket::peer_fingerprint(id) {
-        Some(fp) if fp.len() == 32 && out.len() >= 32 => { out[..32].copy_from_slice(&fp); 32 }
-        _ => -1,
+pub fn hal_socket_certificate(id: i64, out: &mut [u8]) -> i64 {
+    match backend::android::socket::peer_certificate(id) {
+        Some(der) => {
+            if out.len() >= der.len() {
+                out[..der.len()].copy_from_slice(&der);
+            }
+            der.len() as i64
+        }
+        None => -1,
     }
 }
 
@@ -1576,4 +1642,104 @@ pub fn open_url(url: &str) -> bool {
             let () = msg_send![app, openURL: value options: options completionHandler: nil];
         }
     })
+}
+
+/// Fleet identity crypto on Android (native code has no libcrypto/libssl; the platform's Java
+/// security providers do the work: backend/android/fleet.rs). Keys are X9.63 (97 bytes), points
+/// 65 bytes. Byte results go into `out`; the return is the byte count, or -1 on failure.
+#[cfg(target_os = "android")]
+fn fleet_out(r: Result<Vec<u8>, String>, out: &mut [u8]) -> i64 {
+    match r {
+        Ok(v) if v.len() <= out.len() => {
+            out[..v.len()].copy_from_slice(&v);
+            v.len() as i64
+        }
+        _ => -1,
+    }
+}
+
+/// A fresh P-256 key into `out` (97 bytes).
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_generate(out: &mut [u8]) -> i64 {
+    fleet_out(backend::android::fleet::generate_p256(), out)
+}
+
+/// DER ECDSA-SHA256 of `msg` by `key` into `out` (at most 72 bytes).
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_sign(key: &[u8], msg: &[u8], out: &mut [u8]) -> i64 {
+    fleet_out(backend::android::fleet::sign(key, msg), out)
+}
+
+/// 1 when `sig` (DER) is `point`'s ECDSA-SHA256 of `msg`.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_verify(point: &[u8], msg: &[u8], sig: &[u8]) -> u32 {
+    backend::android::fleet::verify(point, msg, sig) as u32
+}
+
+/// The raw P-256 ECDH secret of `key` and `point` into `out` (32 bytes).
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_ecdh(key: &[u8], point: &[u8], out: &mut [u8]) -> i64 {
+    fleet_out(backend::android::fleet::ecdh(key, point), out)
+}
+
+/// A TLS server context (certificate DER + key): a handle, or -1.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_tls_server(cert: &[u8], key: &[u8]) -> i64 {
+    backend::android::fleet::server(cert, key).unwrap_or(-1)
+}
+
+/// A new server session of a context: a handle, or -1.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_tls_session(server: i64) -> i64 {
+    backend::android::fleet::session(server).unwrap_or(-1)
+}
+
+/// Feeds a session ciphertext from the peer (empty: advance the handshake). Returns bit 0 =
+/// handshaking, bit 1 = closed, or -1 on failure. Output waits for `hal_fleet_tls_take`.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_tls_feed(session: i64, data: &[u8]) -> i64 {
+    match backend::android::fleet::feed(session, data) {
+        Ok((hs, closed)) => hs as i64 | (closed as i64) << 1,
+        Err(_) => -1,
+    }
+}
+
+/// Encrypts plaintext (`close` != 0: stages the close_notify instead). 0, or -1 on failure.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_tls_wrap(session: i64, data: &[u8], close: u32) -> i64 {
+    if close != 0 {
+        backend::android::fleet::close(session);
+        return 0;
+    }
+    backend::android::fleet::wrap(session, data).map_or(-1, |_| 0)
+}
+
+/// Moves waiting bytes (`app` != 0: plaintext, else ciphertext to send) into `out`: the count
+/// (0: none), -1 for an unknown handle.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_tls_take(session: i64, app: u32, out: &mut [u8]) -> i64 {
+    backend::android::fleet::take(session, app != 0, out)
+}
+
+/// Frees a server or session handle.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_fleet_tls_free(handle: i64) {
+    backend::android::fleet::free(handle)
+}
+
+/// The battery: level 0..=100 in bits 0..8, bit 8 = charging; -1 when unknown.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_battery() -> i64 {
+    backend::android::fleet::battery().map_or(-1, |(level, charging)| level as i64 | (charging as i64) << 8)
 }

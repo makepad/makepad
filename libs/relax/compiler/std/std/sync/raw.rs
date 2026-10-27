@@ -9,17 +9,21 @@ use core::time::Duration;
 
 // makepad inspect's wait registry (loader entries): a blocking wait names what it waits on and,
 // for a mutex, its holder. Called only around a wait that blocks anyway.
+// Web programs have no Relax session: wait directly through the wasm atomic futex instead.
+#[cfg(not(relax_web))]
 extern "C" {
     fn __relax_wait_enter(kind: u32, addr: usize, holder: usize);
     fn __relax_wait_leave();
     // makepad inspect's timeline: a wake is an edge that ends someone's wait (recorded only while
-    // a client records; the flag is the loader's)
+    // a client records; the flag is the loader's). Web programs are never recorded by the
+    // host timeline, so neither the hook nor its flag belongs to the web ABI.
     fn __relax_wake(addr: usize);
     static __relax_recording: core::sync::atomic::AtomicBool;
 }
 
 /// futex_wake, noted on makepad inspect's timeline while it records.
 pub(crate) fn futex_wake(futex: &AtomicU32) -> bool {
+    #[cfg(not(relax_web))]
     if unsafe { __relax_recording.load(Relaxed) } {
         unsafe { __relax_wake(futex.as_ptr() as usize) };
     }
@@ -28,6 +32,7 @@ pub(crate) fn futex_wake(futex: &AtomicU32) -> bool {
 
 /// futex_wake_all, noted like futex_wake.
 pub(crate) fn futex_wake_all(futex: &AtomicU32) {
+    #[cfg(not(relax_web))]
     if unsafe { __relax_recording.load(Relaxed) } {
         unsafe { __relax_wake(futex.as_ptr() as usize) };
     }
@@ -40,11 +45,24 @@ pub(crate) const WAIT_READ: u32 = 3;
 pub(crate) const WAIT_WRITE: u32 = 4;
 pub(crate) const WAIT_PARK: u32 = 5;
 pub(crate) const WAIT_ONCE: u32 = 6;
+pub(crate) const WAIT_SLEEP: u32 = 8;
+
+/// thread::sleep, recorded in the wait registry while it sleeps (a sleeping thread is a quiet
+/// one: makepad run settles its heap chunks there, as at a futex wait).
+pub(crate) fn sleep(dur: Duration) {
+    #[cfg(not(relax_web))]
+    unsafe { __relax_wait_enter(WAIT_SLEEP, 0, 0) };
+    crate::sys::time::sleep(dur);
+    #[cfg(not(relax_web))]
+    unsafe { __relax_wait_leave() };
+}
 
 /// futex_wait, recorded in the wait registry while it blocks.
-pub(crate) fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<Duration>, kind: u32, holder: usize) -> bool {
-    unsafe { __relax_wait_enter(kind, futex.as_ptr() as usize, holder) };
+pub(crate) fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<Duration>, _kind: u32, _holder: usize) -> bool {
+    #[cfg(not(relax_web))]
+    unsafe { __relax_wait_enter(_kind, futex.as_ptr() as usize, _holder) };
     let r = crate::sys::os::futex_wait(futex, expected, timeout);
+    #[cfg(not(relax_web))]
     unsafe { __relax_wait_leave() };
     r
 }

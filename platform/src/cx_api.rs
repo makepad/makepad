@@ -229,6 +229,12 @@ pub trait CxOsApi {
         None
     }
 
+    /// The view and projection of each eye the next XR frame draws with, in tracking space:
+    /// what a renderer culls and picks levels of detail by under XR.
+    fn xr_eye_matrices(&self) -> Option<[(crate::makepad_math::Mat4f, crate::makepad_math::Mat4f); 2]> {
+        None
+    }
+
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
@@ -319,12 +325,24 @@ pub enum CxOsOp {
     NormalizeWindow(WindowId),
     RestoreWindow(WindowId),
     HideWindow(WindowId),
+    /// Shows a hidden window again and brings it (and the app) to the front.
+    ShowWindow(WindowId),
+    /// The window's own close button (an app-drawn caption's): the app gets
+    /// `WindowCloseRequested`, as for a native close, and the window closes if it accepts.
+    RequestCloseWindow(WindowId),
+    /// A dropdown window (`WindowHandle::show_at_tray`): sized to the points given, shown at
+    /// the tray's icon.
+    ShowWindowAtTray(WindowId, LiveId, Vec2d),
     HideWindowButtons(WindowId),
     ShowWindowButtons(WindowId),
     /// Centre the native window buttons (macOS traffic lights) on this
     /// distance below the window's top edge, in points: a caption row of
     /// another height than the system's keeps them in line. No-op elsewhere.
     CenterWindowButtons(WindowId, f64),
+    /// The caption this window draws (the strip that drags it) and the window buttons in it
+    /// (layout points, zero: none) and whether it is dark: the HAL's `WindowCaption`, by which
+    /// `makepad run` places its JIT ring in the caption. Pushed when it changes.
+    SetWindowCaption(WindowId, Rect, Rect, bool),
     SetTopmost(WindowId, bool),
     /// `true`: drop the native maximized-state border/titlebar strip a
     /// backend would otherwise keep (Windows only; other backends ignore
@@ -398,9 +416,12 @@ pub enum CxOsOp {
     /// immediate, synthetic in-window drag protocol.
     StartExternalDragging {
         window_id: WindowId,
-        items: Vec<DragItem>,
+        items: Vec<crate::event::DragOutFile>,
+        image: Option<crate::event::DragImage>,
     },
     UpdateMacosMenu(MacosMenu),
+    SetTray(crate::tray::TrayIcon),
+    RemoveTray(LiveId),
     ShowClipboardActions {
         has_selection: bool,
         rect: Rect,
@@ -571,9 +592,13 @@ impl CxOsOp {
             Self::NormalizeWindow(..) => "NormalizeWindow",
             Self::RestoreWindow(..) => "RestoreWindow",
             Self::HideWindow(..) => "HideWindow",
+            Self::ShowWindow(..) => "ShowWindow",
+            Self::RequestCloseWindow(..) => "RequestCloseWindow",
+            Self::ShowWindowAtTray(..) => "ShowWindowAtTray",
             Self::HideWindowButtons(..) => "HideWindowButtons",
             Self::ShowWindowButtons(..) => "ShowWindowButtons",
             Self::CenterWindowButtons(..) => "CenterWindowButtons",
+            Self::SetWindowCaption(..) => "SetWindowCaption",
             Self::SetTopmost(..) => "SetTopmost",
             Self::SetChromelessWhenMaximized(..) => "SetChromelessWhenMaximized",
             Self::SetWindowTitle(..) => "SetWindowTitle",
@@ -600,6 +625,8 @@ impl CxOsOp {
             Self::StartDragging(..) => "StartDragging",
             Self::StartExternalDragging { .. } => "StartExternalDragging",
             Self::UpdateMacosMenu(..) => "UpdateMacosMenu",
+            Self::SetTray(..) => "SetTray",
+            Self::RemoveTray(..) => "RemoveTray",
             Self::ShowClipboardActions { .. } => "ShowClipboardActions",
             Self::HideClipboardActions => "HideClipboardActions",
             Self::CopyToClipboard(..) => "CopyToClipboard",
@@ -891,6 +918,11 @@ impl Cx {
 
     pub fn xr_effective_frame_rate_hz(&self) -> Option<f64> {
         <Self as CxOsApi>::xr_effective_frame_rate_hz(self)
+    }
+
+    /// The eyes of the next XR frame (`CxOsApi::xr_eye_matrices`): `[(view, projection); 2]`.
+    pub fn xr_eye_matrices(&self) -> Option<[(crate::makepad_math::Mat4f, crate::makepad_math::Mat4f); 2]> {
+        <Self as CxOsApi>::xr_eye_matrices(self)
     }
 
     pub fn geometry_pool_slot_count(&self) -> usize {
@@ -1197,6 +1229,24 @@ impl Cx {
         self.redraw_id
     }
 
+    /// The drawing being recorded: one per draw event, however many draw
+    /// contexts it makes (a second window's, an offscreen bake's), and one per
+    /// draw context made outside a draw event. A recorder that keeps state
+    /// between frames counts frames by it, not by `redraw_id`.
+    pub fn drawing_id(&self) -> u64 {
+        self.drawing_id
+    }
+
+    /// A draw context begins (`CxDraw::new`): a new `redraw_id` for the lists
+    /// it records, and, outside a draw event, a drawing of its own.
+    pub fn begin_draw_context(&mut self) {
+        if !self.in_draw_event {
+            self.drawing_id += 1;
+            self.drawing_start = self.redraw_id;
+        }
+        self.redraw_id += 1;
+    }
+
     pub fn os_type(&self) -> &OsType {
         &self.os_type
     }
@@ -1255,6 +1305,23 @@ impl Cx {
     pub fn update_macos_menu(&mut self, menu: MacosMenu) {
         if self.script_data.std.host_io_only() { return; }
         self.platform_ops.push_back(CxOsOp::UpdateMacosMenu(menu));
+    }
+
+    /// A head-mounted display shows this app (`xr_start_presenting` gives it a stereo view).
+    pub fn xr_display(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::XR != 0) }
+        #[cfg(target_arch = "wasm32")]
+        { false }
+    }
+
+    /// The headset's view is see-through: the room shows wherever the XR passes leave alpha 0
+    /// (mixed reality, a passthrough under the projection on headsets that have one).
+    pub fn xr_set_see_through(&mut self, on: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hal_xr_see_through(on);
+        #[cfg(target_arch = "wasm32")]
+        let _ = on;
     }
 
     pub fn xr_start_presenting(&mut self) {
@@ -1740,24 +1807,30 @@ impl Cx {
         }
     }
 
-    /// Starts a native drag-and-drop session that can leave the Makepad app.
-    ///
-    /// `FilePath` items must contain absolute paths to existing regular files
-    /// and must not carry an `internal_id`. The source window is explicit so
-    /// a multi-window application never starts the session from a stale Cocoa
-    /// event or the wrong native surface. Unsupported item/platform
-    /// combinations are rejected by the platform adapter. Every accepted or
-    /// rejected request completes with `Event::DragEnd`, allowing callers to
-    /// release gesture state without platform-specific timeouts.
-    pub fn start_external_dragging(&mut self, window_id: WindowId, items: Vec<DragItem>) {
+    /// Starts a native drag-and-drop session that can leave the Makepad app, from the press
+    /// in progress in `window_id`: files another app can take (a chat, a mail, the file
+    /// manager), each an existing file by absolute path or a [`crate::event::FilePromise`] whose
+    /// producer starts now, on its own thread. The source window is explicit so a multi-window
+    /// application never starts the session from a stale event or the wrong native surface.
+    /// Every accepted or rejected request completes with `Event::DragEnd`, so callers release
+    /// their gesture state without platform-specific timeouts.
+    pub fn start_external_dragging(&mut self, window_id: WindowId, drag: crate::event::DragOut) {
         if self.script_data.std.host_io_only() { return; }
         self.platform_ops.iter().for_each(|op| {
             if matches!(op, CxOsOp::StartExternalDragging { .. }) {
                 panic!("start external drag twice");
             }
         });
+        let items = drag
+            .items
+            .into_iter()
+            .map(|item| match item {
+                crate::event::DragOutItem::File(path) => crate::event::DragOutFile::File(path),
+                crate::event::DragOutItem::Promise(promise) => promise.start(),
+            })
+            .collect();
         self.platform_ops
-            .push_back(CxOsOp::StartExternalDragging { window_id, items });
+            .push_back(CxOsOp::StartExternalDragging { window_id, items, image: drag.image });
     }
 
     pub fn set_cursor(&mut self, cursor: MouseCursor) {
@@ -2014,13 +2087,7 @@ impl Cx {
     pub fn get_pass_rect(&self, draw_pass_id: DrawPassId, dpi: f64) -> Option<Rect> {
         let size = |size: Vec2d| Self::pass_logical_size(size, dpi);
         match self.passes[draw_pass_id].pass_rect {
-            Some(CxDrawPassRect::Area(area)) => {
-                let rect = area.rect(self);
-                Some(Rect {
-                    pos: ((rect.pos * dpi) + 0.01).floor() / dpi,
-                    size: size(rect.size),
-                })
-            }
+            Some(CxDrawPassRect::Area(area)) => Some(Self::pass_device_rect(area.rect(self), dpi)),
             Some(CxDrawPassRect::AreaOrigin(area, origin)) => {
                 let rect = area.rect(self);
                 Some(Rect {
@@ -2044,6 +2111,16 @@ impl Cx {
     }
 
     /// A pass's logical size snapped to its whole pixels (`pass_pixel_size` / dpi).
+    /// Where a texture pass for `rect` lies in whole device pixels: its origin floored to a pixel
+    /// (a hundredth of a pixel is rounding) and its size [`Self::pass_pixel_size`]. A cached view
+    /// or capture renders its content relative to this rect, so it must also be drawn back at
+    /// exactly this rect: drawn at the raw rect (26 pt below the top at 1.75x is 45.5 px) the
+    /// texture was resampled half a pixel off and up to a pixel squeezed -- every window and every
+    /// glyph of the WM blurred at fractional scales.
+    pub fn pass_device_rect(rect: Rect, dpi: f64) -> Rect {
+        Rect { pos: ((rect.pos * dpi) + 0.01).floor() / dpi, size: Self::pass_logical_size(rect.size, dpi) }
+    }
+
     pub fn pass_logical_size(size: Vec2d, dpi: f64) -> Vec2d {
         let (w, h) = Self::pass_pixel_size(size, dpi);
         dvec2(w as f64 / dpi, h as f64 / dpi)
@@ -2850,6 +2927,28 @@ macro_rules! register_component_factory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cached view (the WM's whole desk, `WmScene`) is drawn back at the rect its pass renders:
+    /// whole device pixels at every scale, and a draw-back at that rect snaps to itself. At 1.75 the
+    /// desk sits 26 pt (45.5 px) below the top; drawn there its texture was resampled half a pixel
+    /// off and squeezed a pixel, and every window and glyph of the WM blurred (WMSYNC).
+    #[test]
+    fn a_cached_pass_is_drawn_back_on_whole_pixels_at_its_own_rect() {
+        for step in 100..=300 {
+            let dpi = step as f64 / 100.0;
+            for (x, y, w, h) in [(0.0, 26.0, 2194.2857142857, 1208.2857142857), (976.15, 458.46, 1000.77, 699.23), (0.3, 0.7, 333.3, 77.7)] {
+                let rect = Rect { pos: dvec2(x, y), size: dvec2(w, h) };
+                let snapped = Cx::pass_device_rect(rect, dpi);
+                for v in [snapped.pos.x, snapped.pos.y, snapped.size.x, snapped.size.y] {
+                    let px = v * dpi;
+                    assert!((px - px.round()).abs() < 1e-6, "{rect:?} at {dpi}: {snapped:?} is not on whole pixels");
+                }
+                assert_eq!(Cx::pass_device_rect(snapped, dpi), snapped, "{rect:?} at {dpi}: snapping is not idempotent");
+                let (tw, th) = Cx::pass_pixel_size(rect.size, dpi);
+                assert_eq!(((snapped.size.x * dpi).round() as usize, (snapped.size.y * dpi).round() as usize), (tw, th));
+            }
+        }
+    }
 
     /// A texture pass and its render target come out the same pixel size for every scale and
     /// window size: the target sized with `pass_pixel_size` of the logical size the pass is set

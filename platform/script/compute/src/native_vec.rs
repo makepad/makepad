@@ -1,31 +1,48 @@
-//! Four elements per iteration through the shared back end: a kernel's element loop
-//! lowered to RIR's 128-bit vectors (masked SPMD, [`crate::spmd`]'s analysis -- the same
-//! as NEON x4 and wasm SIMD128) and emitted by the shared x64 (SSE4.1/AVX2) or arm64 (NEON)
-//! code generator. Bit-identical to the scalar code and the interpreter.
+//! A kernel's element loop as vector code through the shared back end: `lanes` elements per
+//! iteration (4 or 8), lowered to RIR's 128-bit vectors (masked SPMD, [`crate::spmd`]'s
+//! analysis -- the same as wasm SIMD128) and emitted by the shared x64 (SSE4.1/AVX2) or arm64
+//! (NEON) code generator. Bit-identical to the scalar code and the interpreter at every width.
 //!
-//! Every AIR value is a V128 vreg, one element per lane, holding exactly the bits the
-//! scalar code holds for that element (bools are 0/1 words). Uniform control flow is real
-//! branches on lane 0; divergent ifs run both sides under the execution mask `vm` (a
-//! vreg), masked loops keep break/continue masks, variables set while lanes are off are
-//! blended, stores write the running lanes in lane order. Integer division, non-power-
-//! of-two wraps and varying-address memory run per lane with the scalar sequences.
+//! Every AIR value is `parts` V128 vregs (lanes / 4), element `4 p + l` in lane l of part p,
+//! holding exactly the bits the scalar code holds for that element (bools are 0/1 words).
+//! Eight lanes are two independent four-lane halves in flight: on AArch64 two NEON registers
+//! per value (the halves' chains interleave and hide latency), on x86-64 with AVX2 the
+//! back end's `pair256` fuses each pair of halves into one ymm instruction. Uniform control
+//! flow is real branches on lane 0; divergent ifs run both sides under the execution mask `vm`,
+//! masked loops keep break/continue masks, variables set while lanes are off are blended,
+//! stores write the running lanes in lane order (element order, whatever the width). Integer
+//! division, non-power-of-two wraps and varying-address memory run per lane with the scalar
+//! sequences.
+//!
+//! Nothing a result depends on varies with the width: every op is lane-wise (an element's bits
+//! depend on that element only), stores land in element order, and the one cross-lane sum (a
+//! run's counted work, `crate::work`) is a wrapping integer sum, exact in any order.
 //!
 //! The element loop is the shape `lower_kernel` emits ([`crate::spmd::shape`]): its counter
-//! holds `[i, i+1, i+2, i+3]`, steps by 4, and its `i >= n` exit is taken on lane 0 (the
-//! caller runs `n` a multiple of 4; the tail runs on scalar code). [`compile`] declines
-//! (None) whatever [`crate::spmd::supported`] rejects.
+//! holds `[i, i+1, .., i+lanes-1]`, steps by `lanes`, and its `i >= n` exit is taken on lane 0
+//! (the caller runs `n` a multiple of `lanes`; the tail runs on scalar code). [`compile`]
+//! declines (None) whatever [`crate::spmd::supported`] rejects.
+//!
+//! The width is a per-host parameter chosen by rule ([`host_lanes`]), no tuning: 8 on x86-64
+//! with AVX2 + FMA (ymm through `pair256`), 4 elsewhere (see host_lanes for the AArch64
+//! measurement). Eight-lane hosts install four-lane code and upgrade hot kernels in the
+//! background ([`install_lanes`]).
 
 use crate::ir::{Bin, Block, Cmp, Fma, Op, Program, Region, Stmt, Un, Val, Var};
 use crate::native::Code;
 use crate::spmd::{analyse, id, shape, steps, supported, Info};
 use relax_backend::rir::{self, Cls, Cond, Conv, Func, IOp, Inst, IntTy, Mem, NanBits, RoundTo, Term, VReg, VW, VX};
-
+use std::cell::Cell;
 
 const I32: IntTy = IntTy { bits: 32, signed: true };
 const U32: IntTy = IntTy { bits: 32, signed: false };
 const I64: IntTy = rir::I64;
 const W32: Mem = Mem::Int(4, true);
 const PTR: Mem = Mem::Int(8, false);
+
+/// Largest frame of an eight-lane kernel in words per lane: 8 lanes x 2048 words = 64 KiB, the
+/// four-lane limit's bytes ([`crate::spmd::MAX_FRAME_WORDS`]); a larger frame runs four lanes.
+pub(crate) const MAX_FRAME_WORDS_X8: u32 = 2048;
 
 /// What the vector code needs from the CPU (x64: SSE4.1, AVX2 per-lane shifts, FMA3).
 fn cpu_ok() -> bool {
@@ -37,35 +54,115 @@ fn cpu_ok() -> bool {
     true
 }
 
-/// Compiles a kernel's element loop to four-wide vector code, or declines.
-pub fn compile(p: &Program) -> Option<Code> {
+/// The lanes of this host's vector kernels, by rule per CPU class (no tuning): x86-64 with
+/// AVX2 + FMA (the CPUs `cpu_ok` admits) runs eight (the back end's `pair256` makes each pair of
+/// 128-bit halves one ymm instruction); AArch64 runs four. `MAKEPAD_KERNEL_LANES=4|8` overrides
+/// it for the process (A/B measurement); [`with_lanes`] for one thread's compiles (tests).
+pub fn host_lanes() -> u32 {
+    host().0
+}
+
+/// (this host's lanes, whether MAKEPAD_KERNEL_LANES set them)
+fn host() -> (u32, bool) {
+    static L: std::sync::OnceLock<(u32, bool)> = std::sync::OnceLock::new();
+    *L.get_or_init(|| match std::env::var("MAKEPAD_KERNEL_LANES").ok().as_deref() {
+        Some("4") => (4, true),
+        Some("8") => (8, true),
+        _ => (if cfg!(target_arch = "x86_64") { 8 } else { 4 }, false),
+    })
+}
+
+/// What a kernel install compiles now, and whether it moves to eight lanes once hot. Under the
+/// host rule an eight-lane host installs four-lane code (it compiles in about 2/3 of the time:
+/// Stage cold on 165 measured +8% CPU at present and +10% instructions with eight-lane installs)
+/// and upgrades a kernel in the background after [`HOT_ELEMENTS`] vector elements, so cold
+/// start pays nothing for the width. A thread override ([`with_lanes`]) or MAKEPAD_KERNEL_LANES
+/// compiles that width at once, with no upgrade (tests, A/Bs). The results are the same bits
+/// at either width, so the switch is invisible to them.
+pub fn install_lanes() -> (u32, bool) {
+    match LANES.with(|c| c.get()) {
+        0 => match host() {
+            (l, true) => (l, false),
+            (8, false) => (4, true),
+            (l, false) => (l, false),
+        },
+        l => (l, false),
+    }
+}
+
+/// Vector elements a kernel runs at four lanes before its eight-lane code is compiled (in the
+/// background, once): a fixed rule, no tuning.
+pub const HOT_ELEMENTS: u64 = 1 << 16;
+
+thread_local! {
+    static LANES: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Runs `f` with this thread's kernel compiles at `lanes` (4 or 8) instead of [`host_lanes`]:
+/// the cross-width differential tests and benchmarks compile one kernel at both widths.
+pub fn with_lanes<R>(lanes: u32, f: impl FnOnce() -> R) -> R {
+    assert!(lanes == 4 || lanes == 8, "kernel lanes are 4 or 8");
+    let old = LANES.with(|c| c.replace(lanes));
+    let r = f();
+    LANES.with(|c| c.set(old));
+    r
+}
+
+/// The lanes a compile on this thread makes now.
+pub fn lanes() -> u32 {
+    match LANES.with(|c| c.get()) {
+        0 => host_lanes(),
+        l => l,
+    }
+}
+
+/// Compiles a kernel's element loop to vector code of [`lanes`] lanes, or declines: (code,
+/// lanes). An eight-lane compile whose frame is too large makes four-lane code.
+pub fn compile(p: &Program) -> Option<(Code, u32)> {
+    compile_at(p, lanes())
+}
+
+/// [`compile`] at `lanes` (4 or 8).
+pub fn compile_at(p: &Program, lanes: u32) -> Option<(Code, u32)> {
     if !cpu_ok() {
         return None;
     }
+    let mut lanes = lanes;
+    if lanes == 8 && p.frame_words > MAX_FRAME_WORDS_X8 {
+        lanes = 4;
+    }
     let flat = crate::ir::flat(p);
-    let key = crate::kcache::key("x4", &flat, 0);
+    let tag = if lanes == 8 { "x8" } else { "x4" };
+    let key = crate::kcache::key(tag, &flat, 0);
     if let Some(code) = key.and_then(crate::native::load) {
         if crate::kcache::verify() {
-            let fresh = compile_fresh(p, None).expect("a stored kernel compiles");
-            crate::kcache::same("x4", code.bytes(), fresh.bytes());
+            let fresh = compile_fresh(p, lanes, None).expect("a stored kernel compiles");
+            crate::kcache::same(tag, code.bytes(), fresh.bytes());
         }
-        return Some(code);
+        return Some((code, lanes));
     }
-    compile_fresh(p, key)
+    compile_fresh(p, lanes, key).map(|c| (c, lanes))
 }
 
-fn compile_fresh(p: &Program, key: Option<u128>) -> Option<Code> {
-    let mut f = rir_of(p)?;
+fn compile_fresh(p: &Program, lanes: u32, key: Option<u128>) -> Option<Code> {
+    let mut f = rir_of(p, lanes)?;
     crate::native::optimise_for_codegen(&mut f);
     if f.verify().is_err() {
         return None;
     }
-    // one quick allocation round (see emit_keyed)
-    crate::native::emit_keyed(&f, key, std::env::var("VEC6_THOROUGH").is_ok())
+    crate::native::pair_halves(&mut f);
+    // one quick allocation round, with copy coalescing (see emit_keyed, native::options)
+    crate::native::emit_keyed(&f, key, false)
 }
 
-/// The vector RIR of a kernel (None when declined), before optimisation.
-pub fn rir_of(p: &Program) -> Option<Func> {
+/// A value's vector: `parts` V128 vregs (the second unused at four lanes).
+type V = [VReg; 2];
+
+/// The vector RIR of a kernel at `lanes` (4 or 8) lanes (None when declined), before
+/// optimisation; at eight lanes `halves` names every value's (low, high) parts.
+pub fn rir_of(p: &Program, lanes: u32) -> Option<Func> {
+    assert!(lanes == 4 || lanes == 8, "kernel lanes are 4 or 8");
+    let np = (lanes / 4) as usize;
     let flat = crate::ir::flat(p);
     let p = &*flat;
     let sh = shape(p)?;
@@ -75,7 +172,7 @@ pub fn rir_of(p: &Program) -> Option<Func> {
     }
     let info = analyse(p, &sh)?;
     let (step, _consts) = steps(p, &info, sh.i);
-    let mut f = Func::new("splash_kernel_x4".to_string(), 0);
+    let mut f = Func::new(format!("splash_kernel_x{}", lanes), 0);
     let entry = f.block();
     let mut regions = [VReg(0); 4];
     for r in regions.iter_mut() {
@@ -84,13 +181,22 @@ pub fn rir_of(p: &Program) -> Option<Func> {
     }
     let n_raw = f.vreg(Cls::I);
     f.params.push(n_raw);
-    let vals: Vec<VReg> = p.vals.iter().map(|_| f.vreg(Cls::V128)).collect();
-    let vars: Vec<VReg> = p.vars.iter().map(|_| f.vreg(Cls::V128)).collect();
-    let frame = if p.frame_words > 0 { Some(f.slot(p.frame_words * 16, 16)) } else { None };
-    let vm = f.vreg(Cls::V128);
+    let vnew = |f: &mut Func| -> V {
+        let mut v = [VReg(0); 2];
+        for x in v.iter_mut().take(np) {
+            *x = f.vreg(Cls::V128);
+        }
+        v
+    };
+    let vals: Vec<V> = p.vals.iter().map(|_| vnew(&mut f)).collect();
+    let vars: Vec<V> = p.vars.iter().map(|_| vnew(&mut f)).collect();
+    let frame = if p.frame_words > 0 { Some(f.slot(p.frame_words * 16 * np as u32, 16)) } else { None };
+    let vm = vnew(&mut f);
+    let halves: Vec<(VReg, VReg)> = if np > 1 { vals.iter().chain(&vars).chain([&vm]).map(|v| (v[0], v[1])).collect() } else { Vec::new() };
     let mut lx = Vx {
         p,
         f,
+        np,
         cur: entry,
         vals,
         vars,
@@ -109,6 +215,7 @@ pub fn rir_of(p: &Program) -> Option<Func> {
         bufs: Vec::new(),
         defs: vec![None; p.vals.len()],
         grouped: Default::default(),
+        halves,
     };
     fn walk(b: &Block, defs: &mut Vec<Option<Op>>) {
         for s in b {
@@ -127,7 +234,9 @@ pub fn rir_of(p: &Program) -> Option<Func> {
     let nu = lx.conv(Conv::IntToInt(U32), n_raw);
     lx.n_i32 = lx.conv(Conv::IntToInt(I32), nu);
     let ones = lx.iconst(-1);
-    lx.emit(Inst::VSplat(vm, ones));
+    for q in 0..np {
+        lx.emit(Inst::VSplat(vm[q], ones));
+    }
     for k in 0..=crate::native::max_buf(&p.body) {
         let ptr = lx.f.vreg(Cls::I);
         lx.emit(Inst::Load(PTR, ptr, lx.regions[3], k * 16));
@@ -139,13 +248,17 @@ pub fn rir_of(p: &Program) -> Option<Func> {
     for s in sh.prelude {
         if let Stmt::Set(var, _) = s {
             if *var == sh.i {
-                // the lanes' element offsets [0, 1, 2, 3]
+                // the lanes' element offsets [0, 1, .., lanes - 1]
                 let d = lx.vars[var.0 as usize];
-                let z = lx.iconst(0);
-                lx.emit(Inst::VSplat(d, z));
-                for l in 1..4u8 {
-                    let k = lx.iconst(l as i64);
-                    lx.emit(Inst::VInsert(d, d, l, k));
+                if np == 1 {
+                    lx.lane_ids_into(d[0], 0);
+                } else {
+                    // built apart, then moved into the counter's halves together (pair256)
+                    let t = lx.vnew();
+                    for q in 0..np {
+                        lx.lane_ids_into(t[q], q);
+                    }
+                    lx.mov_into(d, t);
                 }
                 continue;
             }
@@ -154,16 +267,18 @@ pub fn rir_of(p: &Program) -> Option<Func> {
     }
     lx.stmt(sh.element);
     if let Some((var, word)) = sh.post {
-        // the run's counted work: the lanes' counts summed into its ctx word
+        // the run's counted work: the lanes' counts summed into its ctx word (a wrapping sum:
+        // the same in any order, so at any width)
         let v = lx.vars[var.0 as usize];
         let mut sum = lx.extract_i(v, 0);
-        for l in 1..4u8 {
+        for l in 1..lanes as u8 {
             let x = lx.extract_i(v, l);
             sum = lx.ibin(IOp::Add, I32, sum, x);
         }
         lx.emit(Inst::Store(W32, lx.regions[0], 4 * word as i32, sum));
     }
     lx.term(Term::Ret(Vec::new()));
+    lx.f.halves = lx.halves;
     Some(lx.f)
 }
 
@@ -172,16 +287,18 @@ struct Loop {
     top: u32,
     exit: u32,
     iter_end: u32,
-    brk: VReg,
-    cont: VReg,
+    brk: V,
+    cont: V,
 }
 
 struct Vx<'a> {
     p: &'a Program,
     f: Func,
+    /// V128 parts per value (lanes / 4)
+    np: usize,
     cur: u32,
-    vals: Vec<VReg>,
-    vars: Vec<VReg>,
+    vals: Vec<V>,
+    vars: Vec<V>,
     regions: [VReg; 4],
     n_i32: VReg,
     frame: Option<u32>,
@@ -191,23 +308,29 @@ struct Vx<'a> {
     /// per value: lanes are `lane0 + l * step`
     step: Vec<Option<i64>>,
     /// the execution mask (lane masks)
-    vm: VReg,
+    vm: V,
     /// statically every lane runs
     full: bool,
     i: Var,
     /// constant values (materialised at each use)
     consts: Vec<Option<u32>>,
     /// per compare / logic value: its lane mask (all-ones / zero lanes) beside its 0/1 word
-    masks: Vec<Option<VReg>>,
+    masks: Vec<Option<V>>,
     /// per host buffer: (base pointer, last word index), loaded once at entry
     bufs: Vec<(VReg, VReg)>,
     /// per value: its defining op
     defs: Vec<Option<Op>>,
     /// loads a load group already made (statement ids)
     grouped: std::collections::HashSet<usize>,
+    /// every value's (low, high) halves at eight lanes (`pair256` seeds)
+    halves: Vec<(VReg, VReg)>,
 }
 
 impl<'a> Vx<'a> {
+    fn lanes(&self) -> u8 {
+        4 * self.np as u8
+    }
+
     fn emit(&mut self, i: Inst) {
         let b = &mut self.f.blocks[self.cur as usize];
         b.insts.push(i);
@@ -220,6 +343,17 @@ impl<'a> Vx<'a> {
 
     fn block_new(&mut self) -> u32 {
         self.f.block()
+    }
+
+    fn vnew(&mut self) -> V {
+        let mut v = [VReg(0); 2];
+        for q in 0..self.np {
+            v[q] = self.f.vreg(Cls::V128);
+        }
+        if self.np > 1 {
+            self.halves.push((v[0], v[1]));
+        }
+        v
     }
 
     fn iconst(&mut self, k: i64) -> VReg {
@@ -257,42 +391,70 @@ impl<'a> Vx<'a> {
         d
     }
 
-    fn splat_const(&mut self, bits: u32) -> VReg {
-        let d = self.f.vreg(Cls::V128);
-        self.emit(Inst::VConst(d, bits));
+    fn splat_const(&mut self, bits: u32) -> V {
+        let d = self.vnew();
+        for q in 0..self.np {
+            self.emit(Inst::VConst(d[q], bits));
+        }
         d
     }
 
-    fn vbin(&mut self, op: VX, a: VReg, b: VReg) -> VReg {
-        let d = self.f.vreg(Cls::V128);
-        self.emit(Inst::VX(op, d, a, b));
-        d
-    }
-
-    /// `a` shifted by the immediate `k` (op: one of `VX::ShlI`, `ShrSI`, `ShrUI` of 32-bit lanes)
-    fn vshift(&mut self, op: fn(VW, u8) -> VX, a: VReg, k: u8) -> VReg {
-        self.vbin(op(VW::S, k), a, a)
-    }
-
-    /// Lane `l` of `d` = scalar `s`, building `d` lane by lane from lane 0: lane 0 splats (a
-    /// whole-register write: the build does not depend on d's last value, e.g. the previous
-    /// element's), the others insert.
-    fn put_lane(&mut self, d: VReg, l: u8, s: VReg) {
-        if l == 0 {
-            self.emit(Inst::VSplat(d, s));
-        } else {
-            self.emit(Inst::VInsert(d, d, l, s));
+    /// `d = op(a, b)` part by part (the halves' instructions next to each other: `pair256`).
+    fn vbin_into(&mut self, op: VX, d: V, a: V, b: V) {
+        for q in 0..self.np {
+            self.emit(Inst::VX(op, d[q], a[q], b[q]));
         }
     }
 
-    fn extract_i(&mut self, v: VReg, lane: u8) -> VReg {
+    fn vbin(&mut self, op: VX, a: V, b: V) -> V {
+        let d = self.vnew();
+        self.vbin_into(op, d, a, b);
+        d
+    }
+
+    fn vsel_into(&mut self, d: V, m: V, a: V, b: V) {
+        for q in 0..self.np {
+            self.emit(Inst::VSel(d[q], m[q], a[q], b[q]));
+        }
+    }
+
+    fn mov_into(&mut self, d: V, s: V) {
+        for q in 0..self.np {
+            self.emit(Inst::Mov(d[q], s[q]));
+        }
+    }
+
+    fn splat_into(&mut self, d: V, s: VReg) {
+        for q in 0..self.np {
+            self.emit(Inst::VSplat(d[q], s));
+        }
+    }
+
+    /// `a` shifted by the immediate `k` (op: one of `VX::ShlI`, `ShrSI`, `ShrUI` of 32-bit lanes)
+    fn vshift(&mut self, op: fn(VW, u8) -> VX, a: V, k: u8) -> V {
+        self.vbin(op(VW::S, k), a, a)
+    }
+
+    /// Lane `l` of `d` = scalar `s`, building `d` lane by lane from lane 0 of each part: lane 0
+    /// splats (a whole-register write: the build does not depend on d's last value, e.g. the
+    /// previous element's), the others insert.
+    fn put_lane(&mut self, d: V, l: u8, s: VReg) {
+        let (q, k) = ((l / 4) as usize, l % 4);
+        if k == 0 {
+            self.emit(Inst::VSplat(d[q], s));
+        } else {
+            self.emit(Inst::VInsert(d[q], d[q], k, s));
+        }
+    }
+
+    fn extract_i(&mut self, v: V, lane: u8) -> VReg {
         let d = self.f.vreg(Cls::I);
-        self.emit(Inst::VExtract(d, v, lane));
+        self.emit(Inst::VExtract(d, v[(lane / 4) as usize], lane % 4));
         d
     }
 
     /// The vector of value `x` (constants splatted at each use).
-    fn v(&mut self, x: Val) -> VReg {
+    fn v(&mut self, x: Val) -> V {
         match self.consts[x.0 as usize] {
             Some(bits) => self.splat_const(bits),
             None => self.vals[x.0 as usize],
@@ -311,7 +473,7 @@ impl<'a> Vx<'a> {
             Some(bits) => self.emit(Inst::Iconst(d, bits as i32 as i64)),
             None => {
                 let v = self.vals[x.0 as usize];
-                self.emit(Inst::VExtract(d, v, l));
+                self.emit(Inst::VExtract(d, v[(l / 4) as usize], l % 4));
             }
         }
         d
@@ -322,13 +484,13 @@ impl<'a> Vx<'a> {
     }
 
     /// A lane mask -> the scalar code's 0/1 word.
-    fn mask_to_word(&mut self, m: VReg) -> VReg {
+    fn mask_to_word(&mut self, m: V) -> V {
         let one = self.splat_const(1);
         self.vbin(VX::And, m, one)
     }
 
     /// The lane mask of `x != 0` (the compare's own mask when `x` is one).
-    fn mask(&mut self, x: Val) -> VReg {
+    fn mask(&mut self, x: Val) -> V {
         if let Some(m) = self.masks[x.0 as usize] {
             return m;
         }
@@ -337,9 +499,22 @@ impl<'a> Vx<'a> {
     }
 
     /// A word (any bits) -> lane mask of `word != 0`.
-    fn word_to_mask(&mut self, w: VReg) -> VReg {
+    fn word_to_mask(&mut self, w: V) -> V {
         let z = self.splat_const(0);
         self.vbin(VX::ICmp(Cond::Ne, VW::S), w, z)
+    }
+
+    /// The largest unsigned lane of `v` as a scalar (zero-extended).
+    fn max_across(&mut self, v: V) -> VReg {
+        let mx = self.f.vreg(Cls::I);
+        let mut m = v[0];
+        for q in 1..self.np {
+            let t = self.f.vreg(Cls::V128);
+            self.emit(Inst::VX(VX::MaxU(VW::S), t, m, v[q]));
+            m = t;
+        }
+        self.emit(Inst::VX(VX::MaxAcrossU(VW::S), mx, m, m));
+        mx
     }
 
     // -- memory --------------------------------------------------------------
@@ -373,18 +548,24 @@ impl<'a> Vx<'a> {
         self.sel(c, so, top)
     }
 
+    /// Bytes per frame word (all lanes): 16 per part.
+    fn frame_row(&self) -> u32 {
+        16 * self.np as u32
+    }
+
     /// Address of word `base + clamp(o)` of the per-lane frame, lane `lane`: word w of lane l
-    /// lives at frame + 16 w + 4 l.
+    /// lives at frame + row w + 4 l (row = 16 bytes per part).
     fn frame_addr(&mut self, base: u32, extent: u32, o: Option<(Val, VReg)>, lane: u8) -> (VReg, i32) {
         let fr = self.f.vreg(Cls::I);
         self.emit(Inst::SlotAddr(fr, self.frame.unwrap_or(0)));
+        let row = self.frame_row();
         match o {
-            None => (fr, (base * 16 + 4 * lane as u32) as i32),
+            None => (fr, (base * row + 4 * lane as u32) as i32),
             Some((ov, so)) => {
                 let idx = self.clamp(ov, so, extent);
-                let sc = self.ibini(IOp::Shl, I64, idx, 4);
+                let sc = self.ibini(IOp::Shl, I64, idx, row.trailing_zeros() as i64);
                 let a = self.ibin(IOp::Add, I64, fr, sc);
-                (a, (base * 16 + 4 * lane as u32) as i32)
+                (a, (base * row + 4 * lane as u32) as i32)
             }
         }
     }
@@ -421,14 +602,16 @@ impl<'a> Vx<'a> {
         Some((o, so))
     }
 
-    fn load(&mut self, d: VReg, region: Region, base: u32, extent: u32, off: Option<Val>, fp: bool) {
+    fn load(&mut self, d: V, region: Region, base: u32, extent: u32, off: Option<Val>, fp: bool) {
         let m = if fp { Mem::F32 } else { W32 };
         let scls = if fp { Cls::F32 } else { Cls::I };
         let uniform = off.is_none_or(|o| self.uniform(o));
         if region == Region::Frame && uniform {
             let o = self.lane_off(off, 0);
             let (a, k) = self.frame_addr(base, extent, o, 0);
-            self.emit(Inst::VLoad(d, a, k));
+            for q in 0..self.np {
+                self.emit(Inst::VLoad(d[q], a, k + 16 * q as i32));
+            }
             return;
         }
         if uniform {
@@ -445,17 +628,17 @@ impl<'a> Vx<'a> {
                     self.emit(Inst::Load(m, s, a, k));
                 }
             }
-            self.emit(Inst::VSplat(d, s));
+            self.splat_into(d, s);
             return;
         }
         let o = off.unwrap();
         if let (Region::Buf(k), Some(1)) = (region, self.step[o.0 as usize]) {
-            // four consecutive words: one vector load when all lie inside the buffer
+            // `lanes` consecutive words: a vector load per part when all lie inside the buffer
             let (ptr, last) = self.buf_regs(k);
             let ov = self.v(o);
             let s0 = self.extract_i(ov, 0);
             let z = self.conv(Conv::IntToInt(U32), s0);
-            let span = base as i64 + 3;
+            let span = base as i64 + self.lanes() as i64 - 1;
             let end = self.ibini(IOp::Add, I64, z, span);
             let inside = self.icmp(Cond::Le, false, end, last);
             let (fast, slow, join) = (self.block_new(), self.block_new(), self.block_new());
@@ -464,35 +647,47 @@ impl<'a> Vx<'a> {
             let idx = self.ibini(IOp::Add, I64, z, base as i64);
             let sc = self.ibini(IOp::Shl, I64, idx, 2);
             let a = self.ibin(IOp::Add, I64, ptr, sc);
-            self.emit(Inst::VLoad(d, a, 0));
+            for q in 0..self.np {
+                self.emit(Inst::VLoad(d[q], a, 16 * q as i32));
+            }
             self.term(Term::Jump(join));
             self.cur = slow;
-            for l in 0..4u8 {
+            // built in temporaries, then moved into d's parts together (every definition of d's
+            // parts a pair of like instructions: `pair256` can keep d one register)
+            let t = if self.np > 1 { self.vnew() } else { d };
+            for l in 0..self.lanes() {
                 let so = self.extract_i(ov, l);
                 let a = self.buf_addr(ptr, last, base, Some(so));
                 let s = self.f.vreg(scls);
                 self.emit(Inst::Load(m, s, a, 0));
-                self.put_lane(d, l, s);
+                self.put_lane(t, l, s);
+            }
+            if self.np > 1 {
+                self.mov_into(d, t);
             }
             self.term(Term::Jump(join));
             self.cur = join;
             return;
         }
         // a gather of clamped word indices (one instruction on x64 AVX2)
-        let o = off.unwrap();
         let ov = self.v(o);
         match region {
             Region::Buf(k) => self.buf_gather(d, k, base, ov, m, scls),
             Region::Frame => {
-                // word w of lane l: frame + 16 w + 4 l -> gather index 4 clamp(o) + l
+                // word w of lane l: frame + row w + 4 l -> gather index (row / 4) clamp(o) + l
                 let idx = self.vclamp(o, ov, extent);
-                let i4 = self.vshift(VX::ShlI, idx, 2);
-                let ids = self.lane_ids();
-                let il = self.vbin(VX::Add(VW::S), i4, ids);
+                let row = self.frame_row();
+                let i4 = self.vshift(VX::ShlI, idx, (row / 4).trailing_zeros() as u8);
+                let mut il = [VReg(0); 2];
+                for q in 0..self.np {
+                    let ids = self.lane_ids(q);
+                    il[q] = self.f.vreg(Cls::V128);
+                    self.emit(Inst::VX(VX::Add(VW::S), il[q], i4[q], ids));
+                }
                 let fr = self.f.vreg(Cls::I);
                 self.emit(Inst::SlotAddr(fr, self.frame.unwrap_or(0)));
-                let b0 = self.ibini(IOp::Add, I64, fr, 16 * base as i64);
-                self.emit(Inst::VGather(d, b0, il));
+                let b0 = self.ibini(IOp::Add, I64, fr, (row * base) as i64);
+                self.gather(d, b0, il);
             }
             _ => {
                 let rb = match region {
@@ -500,36 +695,65 @@ impl<'a> Vx<'a> {
                     Region::State => self.regions[1],
                     _ => self.regions[2],
                 };
-                let idx = self.vclamp(o, ov, extent);
                 if region == Region::Shared {
-                    self.table_gather(d, base, extent, idx);
+                    let (idx, k) = self.table_index(o, ov, extent);
+                    self.table_gather(d, base, extent, idx, k);
                 } else {
+                    let idx = self.vclamp(o, ov, extent);
                     let b0 = self.ibini(IOp::Add, I64, rb, 4 * base as i64);
-                    self.emit(Inst::VGather(d, b0, idx));
+                    self.gather(d, b0, idx);
                 }
             }
         }
-        let _ = (m, scls);
     }
 
-    /// d = per lane word `base + idx_l` of the shared tables (idx below extent): a small table
+    /// d = per lane word `idx_l` at `b0` (one gather per part, built in temporaries and moved
+    /// into d's parts together: see `load`'s slow path).
+    fn gather(&mut self, d: V, b0: VReg, idx: V) {
+        let t = if self.np > 1 { self.vnew() } else { d };
+        for q in 0..self.np {
+            self.emit(Inst::VGather(t[q], b0, idx[q]));
+        }
+        if self.np > 1 {
+            self.mov_into(d, t);
+        }
+    }
+
+    /// The in-range word index of shared-table load `o` (vector `ov`) as (x, k): word = x << k. An
+    /// index `x << k` known in range (a vec2 row's first word, `2 * h`) gives x itself, so the TBL
+    /// byte index multiplies x by `0x04040404 << k` (wrapping products agree) instead of shifting.
+    fn table_index(&mut self, o: Val, ov: V, extent: u32) -> (V, u8) {
+        if self.bounds[o.0 as usize].is_some_and(|b| b < extent) {
+            if let Some(Op::Bin(Bin::ShlI, x, y)) = self.defs[o.0 as usize] {
+                if let Some(k) = self.consts[y.0 as usize].filter(|k| *k < 8) {
+                    return (self.v(x), k as u8);
+                }
+            }
+        }
+        (self.vclamp(o, ov, extent), 0)
+    }
+
+    /// d = per lane word `base + (idx_l << k)` of the shared tables (in range): a small table
     /// (noise gradients, lookup rows: up to 16 words) on NEON is one TBL by byte indices (word i =
-    /// bytes 4i .. 4i + 3; neon.rs small_table), else a gather.
-    fn table_gather(&mut self, d: VReg, base: u32, extent: u32, idx: VReg) {
+    /// bytes 4i .. 4i + 3), else a gather.
+    fn table_gather(&mut self, d: V, base: u32, extent: u32, idx: V, k: u8) {
         let b0 = self.ibini(IOp::Add, I64, self.regions[2], 4 * base as i64);
         if cfg!(target_arch = "aarch64") && extent <= 16 {
-            let k1 = self.splat_const(0x0404_0404);
+            let k1 = self.splat_const(0x0404_0404u32 << k);
             let b4 = self.vbin(VX::MulLo(VW::S), idx, k1);
             let k2 = self.splat_const(0x0302_0100);
             let bi = self.vbin(VX::Add(VW::S), b4, k2);
-            self.emit(Inst::VTbl(d, b0, bi, extent as u8));
+            for q in 0..self.np {
+                self.emit(Inst::VTbl(d[q], b0, bi[q], extent as u8));
+            }
         } else {
-            self.emit(Inst::VGather(d, b0, idx));
+            let idx = if k == 0 { idx } else { self.vshift(VX::ShlI, idx, k) };
+            self.gather(d, b0, idx);
         }
     }
 
     /// d = per lane word `min(base + zext(ov_l), last)` of host buffer k: a gather of clamped indices.
-    fn buf_gather(&mut self, d: VReg, k: u8, base: u32, ov: VReg, m: Mem, scls: Cls) {
+    fn buf_gather(&mut self, d: V, k: u8, base: u32, ov: V, m: Mem, scls: Cls) {
         // index = min(base + o, last) = base + umin(o, last - base) when last >= base
         let (ptr, last) = self.buf_regs(k);
         let bk = self.iconst(base as i64);
@@ -538,24 +762,32 @@ impl<'a> Vx<'a> {
         self.term(Term::Branch(ok, gath, low));
         self.cur = gath;
         let lim = self.ibini(IOp::Sub, I64, last, base as i64);
-        let limv = self.f.vreg(Cls::V128);
-        self.emit(Inst::VSplat(limv, lim));
+        let limv = self.vnew();
+        self.splat_into(limv, lim);
         let idx = self.vbin(VX::MinU(VW::S), ov, limv);
         let b0 = self.ibini(IOp::Add, I64, ptr, 4 * base as i64);
-        self.emit(Inst::VGather(d, b0, idx));
+        self.gather(d, b0, idx);
         self.term(Term::Jump(join));
         self.cur = low;
-        // every lane clamps to the last word
+        // every lane clamps to the last word (a splat apart, moved into d's parts together: two
+        // splats of one scalar into d's parts would be one value to value numbering, and d's
+        // parts no longer a pair of like definitions)
         let a = self.buf_addr(ptr, last, base, None);
         let s = self.f.vreg(scls);
         self.emit(Inst::Load(m, s, a, 0));
-        self.emit(Inst::VSplat(d, s));
+        if self.np > 1 {
+            let t = self.vnew();
+            self.splat_into(t, s);
+            self.mov_into(d, t);
+        } else {
+            self.splat_into(d, s);
+        }
         self.term(Term::Jump(join));
         self.cur = join;
     }
 
     /// Lanes `min(o as u32, extent - 1)` unless the offset is proven in range.
-    fn vclamp(&mut self, o: Val, ov: VReg, extent: u32) -> VReg {
+    fn vclamp(&mut self, o: Val, ov: V, extent: u32) -> V {
         if self.bounds[o.0 as usize].is_some_and(|b| b < extent) {
             return ov;
         }
@@ -563,53 +795,38 @@ impl<'a> Vx<'a> {
         self.vbin(VX::MinU(VW::S), ov, top)
     }
 
-    /// The vector [0, 1, 2, 3].
-    fn lane_ids(&mut self) -> VReg {
+    /// Part q's lane numbers [4q, 4q + 1, 4q + 2, 4q + 3].
+    fn lane_ids(&mut self, q: usize) -> VReg {
         let d = self.f.vreg(Cls::V128);
-        let z = self.iconst(0);
-        self.emit(Inst::VSplat(d, z));
-        for l in 1..4u8 {
-            let k = self.iconst(l as i64);
-            self.emit(Inst::VInsert(d, d, l, k));
-        }
+        self.lane_ids_into(d, q);
         d
     }
 
-    #[allow(dead_code)]
-    fn load_per_lane(&mut self, d: VReg, region: Region, base: u32, extent: u32, off: Option<Val>, m: Mem, scls: Cls) {
-        let buf = if let Region::Buf(k) = region { Some(self.buf_regs(k)) } else { None };
-        for l in 0..4u8 {
-            let lo = self.lane_off(off, l);
-            let s = self.f.vreg(scls);
-            match region {
-                Region::Buf(_) => {
-                    let (ptr, last) = buf.unwrap();
-                    let a = self.buf_addr(ptr, last, base, lo.map(|x| x.1));
-                    self.emit(Inst::Load(m, s, a, 0));
-                }
-                Region::Frame => {
-                    let (a, k) = self.frame_addr(base, extent, lo, l);
-                    self.emit(Inst::Load(m, s, a, k));
-                }
-                _ => {
-                    let (a, k) = self.region_addr(region, base, extent, lo);
-                    self.emit(Inst::Load(m, s, a, k));
-                }
-            }
-            self.put_lane(d, l, s);
+    fn lane_ids_into(&mut self, d: VReg, q: usize) {
+        let z = self.iconst(4 * q as i64);
+        self.emit(Inst::VSplat(d, z));
+        for l in 1..4u8 {
+            let k = self.iconst(4 * q as i64 + l as i64);
+            self.emit(Inst::VInsert(d, d, l, k));
         }
     }
 
-    /// Stores the running lanes of vector `v` to the 16 bytes at [a + k].
-    fn store_q(&mut self, a: VReg, k: i32, v: VReg) {
+    /// Stores the running lanes of vector `v` to the 16 bytes per part at [a + k + 16 part].
+    fn store_q(&mut self, a: VReg, k: i32, v: V) {
         if self.full {
-            self.emit(Inst::VStore(a, k, v));
+            for q in 0..self.np {
+                self.emit(Inst::VStore(a, k + 16 * q as i32, v[q]));
+            }
         } else {
-            let old = self.f.vreg(Cls::V128);
-            self.emit(Inst::VLoad(old, a, k));
-            let new = self.f.vreg(Cls::V128);
-            self.emit(Inst::VSel(new, self.vm, v, old));
-            self.emit(Inst::VStore(a, k, new));
+            let old = self.vnew();
+            for q in 0..self.np {
+                self.emit(Inst::VLoad(old[q], a, k + 16 * q as i32));
+            }
+            let new = self.vnew();
+            self.vsel_into(new, self.vm, v, old);
+            for q in 0..self.np {
+                self.emit(Inst::VStore(a, k + 16 * q as i32, new[q]));
+            }
         }
     }
 
@@ -619,6 +836,7 @@ impl<'a> Vx<'a> {
         let scls = if fp { Cls::F32 } else { Cls::I };
         let rv = self.v(val);
         let uniform = off.is_none_or(|o| self.uniform(o));
+        let lanes = self.lanes();
         if region == Region::Frame && uniform {
             let o = self.lane_off(off, 0);
             let (a, k) = self.frame_addr(base, extent, o, 0);
@@ -635,7 +853,7 @@ impl<'a> Vx<'a> {
                     let ov = self.v(o);
                     let s0 = self.extract_i(ov, 0);
                     let z = self.conv(Conv::IntToInt(U32), s0);
-                    let end = self.ibini(IOp::Add, I64, z, base as i64 + 3);
+                    let end = self.ibini(IOp::Add, I64, z, base as i64 + lanes as i64 - 1);
                     let inside = self.icmp(Cond::Le, false, end, last);
                     let (fast, slow) = (self.block_new(), self.block_new());
                     self.term(Term::Branch(inside, fast, slow));
@@ -647,13 +865,13 @@ impl<'a> Vx<'a> {
                     self.term(Term::Jump(join));
                     self.cur = slow;
                 } else if let (true, Some(st)) = (self.full, self.step[o.0 as usize].filter(|s| *s > 1 && *s <= 1 << 16)) {
-                    // records `st` words apart, all four inside, every lane running: a store
-                    // per lane in lane order, no clamps (the last lane decides: lanes increase)
+                    // records `st` words apart, all inside, every lane running: a store per
+                    // lane in lane order, no clamps (the last lane decides: lanes increase)
                     let (ptr, last) = buf.unwrap();
                     let ov = self.v(o);
                     let s0 = self.extract_i(ov, 0);
                     let z = self.conv(Conv::IntToInt(U32), s0);
-                    let end = self.ibini(IOp::Add, I64, z, base as i64 + 3 * st);
+                    let end = self.ibini(IOp::Add, I64, z, base as i64 + (lanes as i64 - 1) * st);
                     let inside = self.icmp(Cond::Le, false, end, last);
                     let (fast, slow) = (self.block_new(), self.block_new());
                     self.term(Term::Branch(inside, fast, slow));
@@ -661,7 +879,7 @@ impl<'a> Vx<'a> {
                     let idx = self.ibini(IOp::Add, I64, z, base as i64);
                     let sc = self.ibini(IOp::Shl, I64, idx, 2);
                     let a = self.ibin(IOp::Add, I64, ptr, sc);
-                    for l in 0..4u8 {
+                    for l in 0..lanes {
                         let sv = self.lane(val, l, scls);
                         self.emit(Inst::Store(m, a, (4 * st * l as i64) as i32, sv));
                     }
@@ -671,7 +889,7 @@ impl<'a> Vx<'a> {
             }
         }
         // per lane, in lane order: a word two lanes store ends as the later element's
-        for l in 0..4u8 {
+        for l in 0..lanes {
             let next = self.block_new();
             if !self.full {
                 let ml = self.extract_i(self.vm, l);
@@ -743,10 +961,10 @@ impl<'a> Vx<'a> {
     /// (a record's fields read per lane: `src[i * 8]`, `src[i * 8 + 1]`, ...; a table's rows:
     /// `T4[i].x`, `T4[i].y`, ...) among the definitions that follow `b[0]` (up to the first
     /// statement that is not a definition): every four consecutive words holding at least two
-    /// of them are one 16-byte load per lane and a 4x4 transpose, when every lane's words lie
-    /// inside (checked once, on the largest lane root): a buffer's length; for tables, no load
-    /// clamps and each 16-byte load stays inside its table (neon.rs gather_group, which took
-    /// only consecutive rows). Else the loads one by one, as clamped gathers. Made at b[0]; the
+    /// of them are one 16-byte load per lane and a 4x4 transpose per four lanes, when every
+    /// lane's words lie inside (checked once, on the largest lane root): a buffer's length; for
+    /// tables, no load clamps and each 16-byte load stays inside its table (any rows, not only
+    /// consecutive ones). Else the loads one by one, as clamped gathers. Made at b[0]; the
     /// loads it made are in `grouped`.
     fn load_group(&mut self, b: &[Stmt]) {
         let Some(Stmt::Def(_, Op::Load { region, off: Some(o0), .. })) = b.first() else { return };
@@ -794,7 +1012,6 @@ impl<'a> Vx<'a> {
         }
         let mine: Vec<(u32, Val, usize, u32)> = ls.iter().filter_map(|&(w, v, sid, _)| chunks.iter().find(|&&c| w >= c && w < c + 4).map(|&c| (w, v, sid, c))).collect();
         let rv = self.v(r);
-        let mx = self.f.vreg(Cls::I);
         let inside = match region {
             Region::Buf(kb) => {
                 if chunks.is_empty() {
@@ -803,7 +1020,7 @@ impl<'a> Vx<'a> {
                 let lim = chunks.iter().map(|c| c + 3).max().unwrap();
                 let (_, last) = self.buf_regs(kb);
                 // every lane inside: max(zext root) + lim <= min(last, 2^31 - 1) (no root + c wraps)
-                self.emit(Inst::VX(VX::MaxAcrossU(VW::S), mx, rv, rv));
+                let mx = self.max_across(rv);
                 let end = self.ibini(IOp::Add, I64, mx, lim as i64);
                 let top = self.iconst(i32::MAX as i64);
                 let small = self.icmp(Cond::Le, false, last, top);
@@ -815,17 +1032,16 @@ impl<'a> Vx<'a> {
                 // stays inside a table of its chunk: max(zext root) <= lim
                 let mut lim = i64::MAX;
                 for &(w, v, _, c) in &mine {
-                    let (base, end) = match self.defs[v.0 as usize] {
-                        Some(Op::Load { base, extent, .. }) => (base, (base + extent) as i64 - 1),
+                    let end = match self.defs[v.0 as usize] {
+                        Some(Op::Load { base, extent, .. }) => (base + extent) as i64 - 1,
                         _ => unreachable!("a load"),
                     };
                     lim = lim.min(end - w as i64).min(end - c as i64 - 3);
-                    let _ = base;
                 }
                 if chunks.is_empty() || lim < 0 {
                     return;
                 }
-                self.emit(Inst::VX(VX::MaxAcrossU(VW::S), mx, rv, rv));
+                let mx = self.max_across(rv);
                 let k = self.iconst(lim);
                 self.icmp(Cond::Le, false, mx, k)
             }
@@ -837,24 +1053,30 @@ impl<'a> Vx<'a> {
             Region::Buf(kb) => self.buf_regs(kb).0,
             _ => self.regions[2],
         };
-        let mut addr = [VReg(0); 4];
-        for l in 0..4u8 {
-            let so = self.extract_i(rv, l);
+        let lanes = self.lanes() as usize;
+        let mut addr = [VReg(0); 8];
+        for l in 0..lanes {
+            let so = self.extract_i(rv, l as u8);
             let z = self.conv(Conv::IntToInt(U32), so);
             let sc = self.ibini(IOp::Shl, I64, z, 2);
-            addr[l as usize] = self.ibin(IOp::Add, I64, rb, sc);
+            addr[l] = self.ibin(IOp::Add, I64, rb, sc);
         }
         for &c in &chunks {
-            let mut rows = [VReg(0); 4];
-            for l in 0..4 {
+            let mut rows = [VReg(0); 8];
+            for l in 0..lanes {
                 rows[l] = self.f.vreg(Cls::V128);
                 self.emit(Inst::VLoad(rows[l], addr[l], 4 * c as i32));
             }
-            let cols = self.transpose4_regs(rows);
+            let mut cols = [[VReg(0); 4]; 2];
+            for q in 0..self.np {
+                cols[q] = self.transpose4_regs([rows[4 * q], rows[4 * q + 1], rows[4 * q + 2], rows[4 * q + 3]]);
+            }
             for &(w, v, _, cc) in &mine {
                 if cc == c {
                     let d = self.vals[v.0 as usize];
-                    self.emit(Inst::Mov(d, cols[(w - c) as usize]));
+                    for q in 0..self.np {
+                        self.emit(Inst::Mov(d[q], cols[q][(w - c) as usize]));
+                    }
                 }
             }
         }
@@ -881,7 +1103,7 @@ impl<'a> Vx<'a> {
                 _ => {
                     let top = self.splat_const(extent.saturating_sub(1));
                     let idx = self.vbin(VX::MinU(VW::S), ov, top);
-                    self.table_gather(d, base, extent, idx);
+                    self.table_gather(d, base, extent, idx, 0);
                 }
             }
         }
@@ -895,11 +1117,12 @@ impl<'a> Vx<'a> {
     /// Consecutive stores of words `base .. base + n` (n >= 2) of a host buffer at one varying
     /// offset (a record's fields, an emitted record): when every lane's words lie inside the
     /// buffer (checked once, on the largest lane offset), each running lane writes its n words
-    /// without clamps; else the stores one by one. Four consecutive words are a 4x4 transpose
-    /// (eight zips) and one 16-byte store per lane, the rest of the words one per lane. Words go
-    /// in lane order (a word two lanes store ends as the later lane's) unless the lanes' records
-    /// are disjoint (offsets `st >= n` words apart): then four words of all lanes at a time, which
-    /// keeps four rows live instead of all of them. Returns the stores handled (0: none).
+    /// without clamps; else the stores one by one. Four consecutive words are a 4x4 transpose per
+    /// four lanes (eight zips) and one 16-byte store per lane, the rest of the words one per
+    /// lane. Words go in lane order (a word two lanes store ends as the later lane's) unless the
+    /// lanes' records are disjoint (offsets `st >= n` words apart): then four words of all lanes
+    /// at a time, which keeps four rows live instead of all of them. Returns the stores handled
+    /// (0: none).
     fn store_group(&mut self, b: &[Stmt]) -> usize {
         let Some(Stmt::Store { region: Region::Buf(kb), base, off: Some(o), .. }) = b.first() else { return 0 };
         let (kb, base, o) = (*kb, *base, *o);
@@ -920,8 +1143,7 @@ impl<'a> Vx<'a> {
         let (ptr, last_w) = self.buf_regs(kb);
         let ov = self.v(o);
         // every lane inside: max(zext offset) + last <= the buffer's last word (64 bits)
-        let mx = self.f.vreg(Cls::I);
-        self.emit(Inst::VX(VX::MaxAcrossU(VW::S), mx, ov, ov));
+        let mx = self.max_across(ov);
         let end = self.ibini(IOp::Add, I64, mx, last as i64);
         let inside = self.icmp(Cond::Le, false, end, last_w);
         let (fast, slow, join) = (self.block_new(), self.block_new(), self.block_new());
@@ -929,36 +1151,47 @@ impl<'a> Vx<'a> {
         self.cur = fast;
         let vals: Vec<Val> = b[..n].iter().map(|st| if let Stmt::Store { val, .. } = st { *val } else { unreachable!() }).collect();
         // each lane's record address, and (not every lane running) whether it runs
-        let mut addr = [VReg(0); 4];
-        let mut runs = [None; 4];
-        for l in 0..4u8 {
-            let so = self.extract_i(ov, l);
+        let lanes = self.lanes() as usize;
+        let mut addr = [VReg(0); 8];
+        let mut runs = [None; 8];
+        for l in 0..lanes {
+            let so = self.extract_i(ov, l as u8);
             let z = self.conv(Conv::IntToInt(U32), so);
             let idx = if base > 0 { self.ibini(IOp::Add, I64, z, base as i64) } else { z };
             let sc = self.ibini(IOp::Shl, I64, idx, 2);
-            addr[l as usize] = self.ibin(IOp::Add, I64, ptr, sc);
+            addr[l] = self.ibin(IOp::Add, I64, ptr, sc);
             if !self.full {
-                runs[l as usize] = Some(self.extract_i(self.vm, l));
+                runs[l] = Some(self.extract_i(self.vm, l as u8));
             }
         }
         let nq = n / 4;
         let disjoint = self.step[o.0 as usize].is_some_and(|st| st >= n as i64);
         if disjoint {
             for c in 0..nq {
-                let rows = self.transpose4(&vals[4 * c..4 * c + 4]);
-                for l in 0..4 {
-                    self.lane_run(runs[l], |x| x.emit(Inst::VStore(addr[l], 16 * c as i32, rows[l])));
+                for q in 0..self.np {
+                    let rows = self.transpose4(&vals[4 * c..4 * c + 4], q);
+                    for k in 0..4 {
+                        let l = 4 * q + k;
+                        self.lane_run(runs[l], |x| x.emit(Inst::VStore(addr[l], 16 * c as i32, rows[k])));
+                    }
                 }
             }
-            for l in 0..4 {
+            for l in 0..lanes {
                 self.lane_run(runs[l], |x| x.lane_words(&vals, 4 * nq, addr[l], l as u8));
             }
         } else {
-            let rows: Vec<[VReg; 4]> = (0..nq).map(|c| self.transpose4(&vals[4 * c..4 * c + 4])).collect();
-            for l in 0..4 {
+            let mut rows: Vec<[[VReg; 4]; 2]> = Vec::new();
+            for c in 0..nq {
+                let mut r = [[VReg(0); 4]; 2];
+                for q in 0..self.np {
+                    r[q] = self.transpose4(&vals[4 * c..4 * c + 4], q);
+                }
+                rows.push(r);
+            }
+            for l in 0..lanes {
                 self.lane_run(runs[l], |x| {
                     for (c, r) in rows.iter().enumerate() {
-                        x.emit(Inst::VStore(addr[l], 16 * c as i32, r[l]));
+                        x.emit(Inst::VStore(addr[l], 16 * c as i32, r[l / 4][l % 4]));
                     }
                     x.lane_words(&vals, 4 * nq, addr[l], l as u8);
                 });
@@ -996,25 +1229,37 @@ impl<'a> Vx<'a> {
         }
     }
 
-    /// The 4x4 transpose of four values' vectors (row l = lane l of each): eight zips.
-    fn transpose4(&mut self, vals: &[Val]) -> [VReg; 4] {
-        let w: Vec<VReg> = vals.iter().map(|v| self.v(*v)).collect();
+    /// The 4x4 transpose of part q of four values' vectors (row k = lane 4q + k of each): eight
+    /// zips.
+    fn transpose4(&mut self, vals: &[Val], q: usize) -> [VReg; 4] {
+        let w: Vec<VReg> = vals.iter().map(|v| self.v(*v)[q]).collect();
         self.transpose4_regs([w[0], w[1], w[2], w[3]])
     }
 
     fn transpose4_regs(&mut self, w: [VReg; 4]) -> [VReg; 4] {
+        let z = |s: &mut Self, op: VX, a: VReg, b: VReg| {
+            let d = s.f.vreg(Cls::V128);
+            s.emit(Inst::VX(op, d, a, b));
+            d
+        };
         // t0 = a0 b0 a1 b1, t1 = a2 b2 a3 b3, t2 = c0 d0 c1 d1, t3 = c2 d2 c3 d3
-        let t0 = self.vbin(VX::ZipLo(VW::S), w[0], w[1]);
-        let t1 = self.vbin(VX::ZipHi(VW::S), w[0], w[1]);
-        let t2 = self.vbin(VX::ZipLo(VW::S), w[2], w[3]);
-        let t3 = self.vbin(VX::ZipHi(VW::S), w[2], w[3]);
-        [self.vbin(VX::ZipLo(VW::D), t0, t2), self.vbin(VX::ZipHi(VW::D), t0, t2), self.vbin(VX::ZipLo(VW::D), t1, t3), self.vbin(VX::ZipHi(VW::D), t1, t3)]
+        let t0 = z(self, VX::ZipLo(VW::S), w[0], w[1]);
+        let t1 = z(self, VX::ZipHi(VW::S), w[0], w[1]);
+        let t2 = z(self, VX::ZipLo(VW::S), w[2], w[3]);
+        let t3 = z(self, VX::ZipHi(VW::S), w[2], w[3]);
+        [z(self, VX::ZipLo(VW::D), t0, t2), z(self, VX::ZipHi(VW::D), t0, t2), z(self, VX::ZipLo(VW::D), t1, t3), z(self, VX::ZipHi(VW::D), t1, t3)]
     }
 
     /// Branches to `skip` when no lane of the mask `m` is set, else to a new block.
-    fn skip_if_none(&mut self, m: VReg, skip: u32) {
+    fn skip_if_none(&mut self, m: V, skip: u32) {
+        let mut u = m[0];
+        for q in 1..self.np {
+            let t = self.f.vreg(Cls::V128);
+            self.emit(Inst::VX(VX::Or, t, u, m[q]));
+            u = t;
+        }
         let any = self.f.vreg(Cls::I);
-        self.emit(Inst::VAny(any, m));
+        self.emit(Inst::VAny(any, u));
         let go = self.block_new();
         self.term(Term::Branch(any, go, skip));
         self.cur = go;
@@ -1026,17 +1271,16 @@ impl<'a> Vx<'a> {
             Stmt::Set(var, x) => {
                 let d = self.vars[var.0 as usize];
                 if *var == self.i {
-                    let four = self.splat_const(4);
-                    let iv = self.vars[var.0 as usize];
-                    self.emit(Inst::VX(VX::Add(VW::S), d, iv, four));
+                    let w = self.splat_const(self.lanes() as u32);
+                    self.vbin_into(VX::Add(VW::S), d, d, w);
                     return;
                 }
                 let r = self.v(*x);
                 if self.full {
-                    self.emit(Inst::Mov(d, r));
+                    self.mov_into(d, r);
                 } else {
                     // only the running lanes take the new value
-                    self.emit(Inst::VSel(d, self.vm, r, d));
+                    self.vsel_into(d, self.vm, r, d);
                 }
             }
             Stmt::Store { region, base, extent, off, val } => self.store(*region, *base, *extent, *off, *val),
@@ -1064,7 +1308,7 @@ impl<'a> Vx<'a> {
                 // divergent: both sides under masks, then the union
                 let cm = self.mask(*c);
                 let else_m = self.vbin(VX::AndNot, self.vm, cm);
-                self.emit(Inst::VX(VX::And, self.vm, self.vm, cm));
+                self.vbin_into(VX::And, self.vm, self.vm, cm);
                 let full = self.full;
                 self.full = false;
                 let skip_t = self.block_new();
@@ -1072,26 +1316,26 @@ impl<'a> Vx<'a> {
                 self.block(t);
                 self.term(Term::Jump(skip_t));
                 self.cur = skip_t;
-                let then_m = self.f.vreg(Cls::V128);
-                self.emit(Inst::Mov(then_m, self.vm));
-                self.emit(Inst::Mov(self.vm, else_m));
+                let then_m = self.vnew();
+                self.mov_into(then_m, self.vm);
+                self.mov_into(self.vm, else_m);
                 let skip_e = self.block_new();
                 self.skip_if_none(self.vm, skip_e);
                 self.full = false;
                 self.block(e);
                 self.term(Term::Jump(skip_e));
                 self.cur = skip_e;
-                self.emit(Inst::VX(VX::Or, self.vm, self.vm, then_m));
+                self.vbin_into(VX::Or, self.vm, self.vm, then_m);
                 self.full = full;
             }
             Stmt::Loop { cap, body } => {
                 let masked = self.info.masked.contains(&id(s));
                 let (top, exit, iter_end) = (self.block_new(), self.block_new(), self.block_new());
-                let brk = self.f.vreg(Cls::V128);
-                let cont = self.f.vreg(Cls::V128);
+                let brk = self.vnew();
+                let cont = self.vnew();
                 if masked {
                     let z = self.splat_const(0);
-                    self.emit(Inst::Mov(brk, z));
+                    self.mov_into(brk, z);
                 }
                 let full = self.full;
                 let has_masked_exit = self.info.escapes.contains(&id(s));
@@ -1110,7 +1354,7 @@ impl<'a> Vx<'a> {
                 self.emit(Inst::IBinI(IOp::Add, I64, cnt, cnt, 1));
                 if masked {
                     let z = self.splat_const(0);
-                    self.emit(Inst::Mov(cont, z));
+                    self.mov_into(cont, z);
                 }
                 self.loops.push(Loop { masked, top, exit, iter_end, brk, cont });
                 self.block(body);
@@ -1118,14 +1362,14 @@ impl<'a> Vx<'a> {
                 self.term(Term::Jump(iter_end));
                 self.cur = iter_end;
                 if masked {
-                    self.emit(Inst::VX(VX::Or, self.vm, self.vm, cont));
+                    self.vbin_into(VX::Or, self.vm, self.vm, cont);
                     // a continued lane may be the only one left running
                     self.full = false;
                 }
                 self.term(Term::Jump(top));
                 self.cur = exit;
                 if masked {
-                    self.emit(Inst::VX(VX::Or, self.vm, self.vm, brk));
+                    self.vbin_into(VX::Or, self.vm, self.vm, brk);
                 }
                 self.full = full;
             }
@@ -1138,7 +1382,7 @@ impl<'a> Vx<'a> {
                 };
                 if masked {
                     let slot = if is_break { brk } else { cont };
-                    self.emit(Inst::VX(VX::Or, slot, slot, self.vm));
+                    self.vbin_into(VX::Or, slot, slot, self.vm);
                 }
                 if self.info.jump.contains(&id(s)) {
                     // every running lane leaves together
@@ -1146,7 +1390,7 @@ impl<'a> Vx<'a> {
                         (_, true) => {
                             if is_break {
                                 let z = self.splat_const(0);
-                                self.emit(Inst::Mov(self.vm, z));
+                                self.mov_into(self.vm, z);
                             }
                             iter_end
                         }
@@ -1158,7 +1402,7 @@ impl<'a> Vx<'a> {
                 } else {
                     // these lanes stop until their loop's exit or next iteration
                     let z = self.splat_const(0);
-                    self.emit(Inst::Mov(self.vm, z));
+                    self.mov_into(self.vm, z);
                     self.full = false;
                 }
             }
@@ -1181,10 +1425,11 @@ impl<'a> Vx<'a> {
             return;
         }
         let d = self.vals[v.0 as usize];
+        let lanes = self.lanes();
         match *op {
             Op::Get(var) => {
                 let s = self.vars[var.0 as usize];
-                self.emit(Inst::Mov(d, s));
+                self.mov_into(d, s);
             }
             Op::Un(u, a) => {
                 let a = self.v(a);
@@ -1202,14 +1447,14 @@ impl<'a> Vx<'a> {
                     _ => None,
                 };
                 match (vu, u) {
-                    (Some(o), _) => self.emit(Inst::VX(o, d, a, a)),
-                    (None, Un::BitsFI | Un::BitsIF) => self.emit(Inst::Mov(d, a)),
+                    (Some(o), _) => self.vbin_into(o, d, a, a),
+                    (None, Un::BitsFI | Un::BitsIF) => self.mov_into(d, a),
                     (None, Un::NotB) => {
                         let z = self.splat_const(0);
                         let m = self.vbin(VX::ICmp(Cond::Eq, VW::S), a, z);
                         self.masks[v.0 as usize] = Some(m);
                         let one = self.splat_const(1);
-                        self.emit(Inst::VX(VX::And, d, m, one));
+                        self.vbin_into(VX::And, d, m, one);
                     }
                     _ => unreachable!("f64 is declined"),
                 }
@@ -1232,7 +1477,7 @@ impl<'a> Vx<'a> {
                     _ => None,
                 };
                 if let Some(o) = vop {
-                    self.emit(Inst::VX(o, d, xv, yv));
+                    self.vbin_into(o, d, xv, yv);
                     if matches!(b, Bin::AndB | Bin::OrB) {
                         if let (Some(mx), Some(my)) = (self.masks[x.0 as usize], self.masks[y.0 as usize]) {
                             self.masks[v.0 as usize] = Some(self.vbin(o, mx, my));
@@ -1248,7 +1493,7 @@ impl<'a> Vx<'a> {
                             Bin::ShrI => VX::ShrSI(VW::S, k),
                             _ => VX::ShrUI(VW::S, k),
                         };
-                        self.emit(Inst::VX(o, d, xv, xv));
+                        self.vbin_into(o, d, xv, xv);
                     }
                     Bin::ShlI | Bin::ShrI | Bin::ShrUI => {
                         // the amount masked to 31 (as AIR), unless proven below 32 already
@@ -1263,7 +1508,7 @@ impl<'a> Vx<'a> {
                             Bin::ShrI => VX::ShrSV(VW::S),
                             _ => VX::ShrUV(VW::S),
                         };
-                        self.emit(Inst::VX(o, d, xv, k));
+                        self.vbin_into(o, d, xv, k);
                     }
                     Bin::DivI | Bin::RemI if self.consts[y.0 as usize].is_some_and(|c| c > 1 && c < 1 << 31 && c.is_power_of_two()) => {
                         // by 2^k, lane-wise: q = (x + ((x >> 31) >>> (32 - k))) >> k, r = x - (q << k)
@@ -1273,25 +1518,30 @@ impl<'a> Vx<'a> {
                         let bias = self.vshift(VX::ShrUI, sg, (32 - k) as u8);
                         let t = self.vbin(VX::Add(VW::S), xv, bias);
                         if b == Bin::DivI {
-                            self.emit(Inst::VX(VX::ShrSI(VW::S, k as u8), d, t, t));
+                            self.vbin_into(VX::ShrSI(VW::S, k as u8), d, t, t);
                         } else {
                             let q = self.vshift(VX::ShrSI, t, k as u8);
                             let qk = self.vshift(VX::ShlI, q, k as u8);
-                            self.emit(Inst::VX(VX::Sub(VW::S), d, xv, qk));
+                            self.vbin_into(VX::Sub(VW::S), d, xv, qk);
                         }
                     }
                     Bin::DivI | Bin::RemI if self.consts[y.0 as usize].is_some() => {
                         let c = self.consts[y.0 as usize].unwrap() as i32;
-                        for l in 0..4u8 {
+                        let t = if self.np > 1 { self.vnew() } else { d };
+                        for l in 0..lanes {
                             let a = self.extract_i(xv, l);
                             let cur = self.cur;
                             let r = crate::native::Emitter { f: &mut self.f, cur }.div_const(a, c, b == Bin::RemI);
-                            self.put_lane(d, l, r);
+                            self.put_lane(t, l, r);
+                        }
+                        if self.np > 1 {
+                            self.mov_into(d, t);
                         }
                     }
                     Bin::DivI | Bin::RemI => {
                         // per lane: x / 0 = 0, x % 0 = x (scalar code's sequence)
-                        for l in 0..4u8 {
+                        let t = if self.np > 1 { self.vnew() } else { d };
+                        for l in 0..lanes {
                             let a = self.extract_i(xv, l);
                             let c = self.extract_i(yv, l);
                             let z = self.icmpi_eq0(c);
@@ -1300,7 +1550,10 @@ impl<'a> Vx<'a> {
                             let q = self.ibin(if b == Bin::DivI { IOp::Div } else { IOp::Rem }, I32, a, safe);
                             let zc = if b == Bin::DivI { self.iconst(0) } else { a };
                             let r = self.sel(z, zc, q);
-                            self.put_lane(d, l, r);
+                            self.put_lane(t, l, r);
+                        }
+                        if self.np > 1 {
+                            self.mov_into(d, t);
                         }
                     }
                     _ => unreachable!("f64 is declined"),
@@ -1320,17 +1573,17 @@ impl<'a> Vx<'a> {
                 let m = self.vbin(o, xv, yv);
                 self.masks[v.0 as usize] = Some(m);
                 let w = self.mask_to_word(m);
-                self.emit(Inst::Mov(d, w));
+                self.mov_into(d, w);
             }
             Op::Sel(c, x, y) => {
                 let m = self.mask(c);
                 let (xv, yv) = (self.v(x), self.v(y));
-                self.emit(Inst::VSel(d, m, xv, yv));
+                self.vsel_into(d, m, xv, yv);
             }
             Op::Fma(Fma::MulAddI, a, b, c) => {
                 let (av, bv, cv) = (self.v(a), self.v(b), self.v(c));
                 let m = self.vbin(VX::MulLo(VW::S), av, bv);
-                self.emit(Inst::VX(VX::Add(VW::S), d, m, cv));
+                self.vbin_into(VX::Add(VW::S), d, m, cv);
             }
             Op::Fma(k, a, b, c) => {
                 let (np, na) = match k {
@@ -1339,23 +1592,29 @@ impl<'a> Vx<'a> {
                     _ => (false, true),
                 };
                 let (av, bv, cv) = (self.v(a), self.v(b), self.v(c));
-                self.emit(Inst::VFma(np, na, d, av, bv, cv));
+                for q in 0..self.np {
+                    self.emit(Inst::VFma(np, na, d[q], av[q], bv[q], cv[q]));
+                }
             }
             Op::Wrap(x, len) => {
                 let xv = self.v(x);
                 if len.is_power_of_two() {
                     let mk = self.splat_const(len - 1);
-                    self.emit(Inst::VX(VX::And, d, xv, mk));
+                    self.vbin_into(VX::And, d, xv, mk);
                 } else {
                     let lk = len as i32 as i64;
-                    for l in 0..4u8 {
+                    let t = if self.np > 1 { self.vnew() } else { d };
+                    for l in 0..lanes {
                         let a = self.extract_i(xv, l);
                         let cur = self.cur;
                         let r = crate::native::Emitter { f: &mut self.f, cur }.div_const(a, len as i32, true);
                         let neg = self.icmpi_lt0(r);
                         let up = self.ibini(IOp::Add, I32, r, lk);
                         let w = self.sel(neg, up, r);
-                        self.put_lane(d, l, w);
+                        self.put_lane(t, l, w);
+                    }
+                    if self.np > 1 {
+                        self.mov_into(d, t);
                     }
                 }
             }
@@ -1363,11 +1622,11 @@ impl<'a> Vx<'a> {
                 let fp = self.p.vals[v.0 as usize] == crate::ir::Ty::F32;
                 self.load(d, region, base, extent, off, fp);
             }
-            Op::FrameCount => self.emit(Inst::VSplat(d, self.n_i32)),
+            Op::FrameCount => self.splat_into(d, self.n_i32),
             Op::BufLen(k) => {
                 let s = self.f.vreg(Cls::I);
                 self.emit(Inst::Load(W32, s, self.regions[3], k as i32 * 16 + 8));
-                self.emit(Inst::VSplat(d, s));
+                self.splat_into(d, s);
             }
             Op::ConstF(_) | Op::ConstI(_) | Op::ConstB(_) => {}
             Op::ConstD(_) | Op::CmpD(..) | Op::In { .. } => unreachable!("declined"),

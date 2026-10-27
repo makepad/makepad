@@ -144,6 +144,11 @@ hal_commands! {
 
     /// Whether the window draws its own caption, for an embedding parent.
     WindowChrome = 26, window_chrome { id: obj, own: bool };
+    /// The caption the app draws in the window: the strip's top and height (window points; height
+    /// zero: none), the window buttons in it (the app's own or the system's; zero: none), and
+    /// whether the caption is dark. Sent when they change. Session 0 places what it draws in a
+    /// lent window's caption (the JIT ring) by it; window systems ignore it.
+    WindowCaption = 27, window_caption { id: obj, top: f32, height: f32, buttons: rect, dark: bool };
 
     // ---- text input
     ImeShow = 30, ime_show { id: obj, area: rect, config: u32 };
@@ -155,8 +160,9 @@ hal_commands! {
     ClipSet = 40, clip_set { text: rng };
     /// The Linux primary selection.
     SelectionSet = 41, selection_set { text: rng };
-    /// `items`: `count` flat `DragItem`s.
-    DragStart = 42, drag_start { id: obj, count: u32, items: rng };
+    /// A drag out of the app from window `id`: `items` holds `count` flat `DragItem`s, then the
+    /// drag image, `image_w` x `image_h` RGBA8 rows (none when either is zero).
+    DragStart = 42, drag_start { id: obj, count: u32, image_w: u32, image_h: u32, items: rng };
     /// `items`: `count` flat `MenuItem`s.
     MenuSet = 43, menu_set { count: u32, items: rng };
     /// `filters`: `count` flat strings (u32 length + bytes), a description and the comma-separated
@@ -358,4 +364,24 @@ hal_commands! {
     /// atlas is full the HAL takes back the least recently DRAWN slots first (a slot's own use
     /// time is otherwise only its delivery).
     GlyphTouch = 150, glyph_touch { count: u32, slots: rng };
+
+    // ---- system tray (status items)
+    /// Creates or updates (in place) the app's tray `tray` (the app's own id): a `w` x `h`
+    /// monochrome glyph, the `tooltip`, and its menu. `data` is `count` flat `MenuItem`s (all
+    /// `parent` 0, `cmd` the item's id, `menu_kind::CHECKABLE`/`CHECKED` for check marks) followed
+    /// by `w * h` alpha bytes (one per pixel, rows top-down). Chosen items answer as `TrayMenu`.
+    /// `flags` (`tray_flags`): `DROPDOWN` = a primary click answers `TrayClick` (the app opens its
+    /// dropdown window) and the menu opens on a secondary click.
+    TraySet = 151, tray_set { tray: u64, w: u32, h: u32, tooltip: sid, count: u32, flags: u32, data: rng };
+    /// Removes the app's tray `tray`.
+    TrayRemove = 152, tray_remove { tray: u64 };
+    /// The virtual display (`direct::VirtualDisplay`), packed strings: `WxH@Hz`
+    /// (`VirtualDisplay::mode_string`) and `mirror` or `off` (what the panels show); no strings = the panels' own
+    /// modes again. Answered by `DirectDisplayResult`.
+    DirectDisplayVirtual = 153, direct_display_virtual { req: u64, count: u32, args: rng };
+    /// Sizes window `id` (a `window_kind::DROPDOWN`) to `w` x `h` points, fitted into the visible
+    /// area of the screen with tray `tray`'s icon, places it there (under the macOS status item,
+    /// next to the Windows notification icon), shows it in front and gives it the focus. Its focus
+    /// loss (a click anywhere else) answers `PopupDismissed`.
+    WindowAtTray = 154, window_at_tray { id: obj, tray: u64, w: f32, h: f32 };
 }

@@ -178,6 +178,15 @@ pub const ERR_DRAIN: u32 = 7;
 pub const ERR_FORMAT_ENUM_VARIANT: u32 = 8;
 /// `value`: an object, written to `out` briefly (its proto chain and key properties).
 pub const ERR_FORMAT_OBJECT: u32 = 9;
+/// `text`: a WARNING diagnostic at the current script ip (a value the host coerced with a defined
+/// meaning, e.g. `lit: true` read as 1): logged once per site, counted and kept per site in the
+/// inspect registry (`makepad inspect <app> script errors`). Never enters the error capture, so a
+/// host that refuses an evaluation on captured errors runs on.
+pub const ERR_PUSH_DIAGNOSTIC: u32 = 10;
+/// `text`: an ERROR diagnostic at the current script ip (a value the host cannot read at all, e.g.
+/// `size: [1, 2, 3]` for a vec3): into the active capture (once), where a host refuses the
+/// evaluation on it; logged once per site when nothing captures; counted like ERR_PUSH_DIAGNOSTIC.
+pub const ERR_PUSH_DIAGNOSTIC_ERROR: u32 = 11;
 
 pub type ScriptErrorPush = unsafe extern "C-unwind" fn(*mut u8, *const ScriptErrorRecord);
 
@@ -464,6 +473,7 @@ impl ScriptVmBase {
                 report.allocated_bytes as u64
             }
             CTL_CENSUS_BEGIN => {
+                self.heap.touch_pause();
                 let Some(mut census) = self.heap.census.take() else {
                     if let Some(note) = crate::census::CENSUS_OTHER_VM.get() {
                         note(req.name);
@@ -475,6 +485,7 @@ impl ScriptVmBase {
                 0
             }
             CTL_CENSUS_END => {
+                self.heap.touch_resume(&self.code);
                 let Some(mut census) = self.heap.census.take() else { return 0 };
                 census.end(&self.heap, &self.code);
                 self.heap.census = Some(census);
@@ -576,6 +587,37 @@ impl ScriptVmBase {
                 }
             }
             ERR_DRAIN => self.drain_errors(),
+            ERR_PUSH_DIAGNOSTIC | ERR_PUSH_DIAGNOSTIC_ERROR => {
+                let fatal = req.op == ERR_PUSH_DIAGNOSTIC_ERROR;
+                let ip = self.threads.cur_ref().trap.ip;
+                let loc = self.code.ip_to_loc(ip);
+                let mut captured = false;
+                if fatal {
+                    if let Some(sink) = &mut self.captured_errors {
+                        let full = match &loc {
+                            Some(l) => format!("{}: {}", l, req.text),
+                            None => req.text.to_string(),
+                        };
+                        if !sink.iter().any(|error| error.text == full) {
+                            sink.push(ScriptErrorRecord::plain_str(&full));
+                        }
+                        captured = true;
+                    }
+                }
+                let first = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    (ip.body, ip.index, req.text).hash(&mut h);
+                    self.logged_errors.len() >= 4096 || self.logged_errors.insert(h.finish())
+                };
+                crate::inspect_registry::diagnostic(self, loc.as_ref().map(|l| (l.file.as_str(), l.line)), req.text, first);
+                if first && !self.silence_errors && !captured {
+                    match &loc {
+                        Some(l) => crate::makepad_error_log::log_with_level(&l.file, l.line, l.col, l.line, l.col, req.text.to_string(), crate::makepad_error_log::LogLevel::Warning),
+                        None => crate::makepad_error_log::log_with_level("script", 0, 0, 0, 0, req.text.to_string(), crate::makepad_error_log::LogLevel::Warning),
+                    }
+                }
+            }
             ERR_FORMAT_ENUM_VARIANT => req.out.push(&crate::suggest::format_enum_variant_error(&self.heap, req.value)),
             ERR_FORMAT_OBJECT => {
                 let mut text = String::new();

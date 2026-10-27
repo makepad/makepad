@@ -78,9 +78,28 @@ fn storable(result: &Result<Option<super::Verdict>, String>) -> Option<StoredVer
 /// Counts the verdicts recorded: a consumer waiting on verdicts (SPEC-V: the JIT's unverified slots)
 /// looks again only when it moved.
 pub static RECORDED: AtomicU64 = AtomicU64::new(0);
+/// The owners recorded since the last `take_recorded_owners`, once a consumer asked for them
+/// (SPEC-V's sweep looks again only at the slots of these owners; None: nobody asked yet).
+static RECORDED_OWNERS: Mutex<Option<Vec<DefId>>> = Mutex::new(None);
 fn record(key: ItemKey, value: FnVerdict) {
     VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).entry(key.1).or_default().insert(key, value);
+    if let Some(owners) = RECORDED_OWNERS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        crate::zone_alloc::kept_with(|| owners.push(key.1));
+    }
     RECORDED.fetch_add(1, Ordering::Release);
+}
+
+/// The owners whose verdicts were recorded since the last call (None on the first call: from then on
+/// they are logged). Taken before `RECORDED` is read, an owner recorded meanwhile is in the next take.
+pub fn take_recorded_owners() -> Option<Vec<DefId>> {
+    let mut owners = RECORDED_OWNERS.lock().unwrap_or_else(|e| e.into_inner());
+    match owners.as_mut() {
+        Some(v) => Some(std::mem::take(v)),
+        None => {
+            *owners = Some(Vec::new());
+            None
+        }
+    }
 }
 
 pub fn report_checked(prog: &Program, src: usize, epoch: u64, def: DefId, args: &[TyId], errors: Vec<BorrowError>, origin: Origin) -> Vec<GandalfEvent> {
@@ -150,6 +169,18 @@ pub fn carry_epoch(src: usize, from: u64, to: u64, keep: &dyn Fn(DefId) -> bool)
     }
     q.pending_ranks.retain(|k, _| k.0 != src || keep(k.1));
     q.pending_order.retain(|k| k.0 != src || keep(k.1));
+}
+
+/// The program behind `src` was rebuilt unchanged (the settle rebuild: a restored program and
+/// type context, identical to the running ones) and moved from collect epoch `from` to `to`:
+/// every verdict, queued check and the discovery pass stay as they are. Front-end write lock
+/// held (no check is running).
+pub fn carry_whole(src: usize, from: u64, to: u64) {
+    let mut guard = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(q) = guard.as_mut() else { return };
+    let base = q.canon(src, from);
+    if from == to || q.epoch.get(&src) != Some(&base) { return; }
+    q.alias.insert((src, to), base);
 }
 
 /// A source of the program / type context for the worker (the unit's shared front end).
@@ -249,8 +280,15 @@ pub fn set_ranks(src: usize, epoch: u64, ranks: &[(DefId, Vec<TyId>, u32)]) {
     let q = guard.get_or_insert_with(Queue::default);
     let epoch = q.canon(src, epoch);
     if !q.advance(src, epoch) { return; }
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let trace = *TRACE.get_or_init(|| std::env::var_os("MAKEPAD_RUN_SPECV_TRACE").is_some());
     for (def, _, rank) in ranks {
         let key = (src, *def, epoch);
+        if trace {
+            let state = if q.rank_of.contains_key(&key) { "queued" } else if q.seen.contains_key(&key) { "seen" } else { "not queued" };
+            let v = VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).get(def).map(|m| m.len()).unwrap_or(0);
+            eprintln!("gandalf: rank {} for {:?} epoch {}: {} ({} verdict entries, {} items queued)", rank, def, epoch, state, v, q.order.len());
+        }
         if let Some(at) = q.rank_of.remove(&key) {
             q.order.remove(&at);
             let item = q.items.remove(&at).unwrap();
@@ -285,80 +323,46 @@ pub fn take_verdict_keys() -> Vec<(u128, StoredVerdict)> {
 
 static QUEUE: Mutex<Option<Queue>> = Mutex::new(None);
 
-pub(crate) struct ZoneTaken {
-    verdicts: HashMap<DefId, HashMap<ItemKey, FnVerdict>>,
-    keys: Vec<(u128, StoredVerdict)>,
-    queue: Option<Queue>,
-}
+/// The front source that now stands for an identity whose earlier source died (`rehome`).
+static REHOMED: Mutex<Vec<(usize, Arc<dyn FrontSource>)>> = Mutex::new(Vec::new());
 
-pub(crate) fn zone_take() -> ZoneTaken {
-    // VERDICTS' LazyLock stays initialised; its mutex payload can be reset normally.
-    let mut verdicts = VERDICTS.lock().unwrap_or_else(|e| e.into_inner());
-    let mut keys = VERDICT_KEYS.lock().unwrap_or_else(|e| e.into_inner());
-    let mut queue = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-    let taken = ZoneTaken {
-        verdicts: std::mem::take(&mut *verdicts),
-        keys: std::mem::take(&mut *keys),
-        queue: std::mem::take(&mut *queue),
-    };
-    // the taken queue's payload bytes stay in the static (only the discriminant changes): zeroed, so
-    // a raw scan of the statics (MAKEPAD_RUN_ZONE_CHECK=2) finds no dead pointer there
-    unsafe {
-        let slot: *mut Option<Queue> = &mut *queue;
-        std::ptr::write_bytes(slot as *mut u8, 0, std::mem::size_of::<Option<Queue>>());
-        std::ptr::write(slot, None);
+/// The front end behind identity `src.identity()` was replaced by `src` (a settle rebuild: the
+/// same program, the same definitions and verdict keys, a new program value). Every queued
+/// check of that identity reads it from now on, and so does a check the worker holds already
+/// (it finds its old source dead): the old front state is no longer kept alive by the queue,
+/// and is never read after the replace. Call with the front end's write lock held. Returns the
+/// queued checks moved.
+pub fn rehome(src: &Arc<dyn FrontSource>) -> usize {
+    let id = src.identity();
+    {
+        let mut r = REHOMED.lock().unwrap_or_else(|e| e.into_inner());
+        r.retain(|x| x.0 != id);
+        r.push((id, src.clone()));
     }
-    #[cfg(test)]
-    { assert!(verdicts.is_empty()); assert!(keys.is_empty()); assert!(queue.is_none()); }
-    taken
+    let mut guard = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut n = 0;
+    if let Some(q) = guard.as_mut() {
+        for item in q.items.values_mut() {
+            if item.key.0 == id {
+                item.src = src.clone();
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
-pub(crate) fn zone_put_back(taken: ZoneTaken) {
-    let mut verdicts = VERDICTS.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *verdicts, taken.verdicts));
-    let mut keys = VERDICT_KEYS.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *keys, taken.keys));
-    let mut queue = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *queue, taken.queue));
+/// The live source standing for a dead one's identity, if it was rehomed.
+fn rehomed(dead: &Arc<dyn FrontSource>) -> Option<Arc<dyn FrontSource>> {
+    let id = dead.identity();
+    REHOMED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|x| x.0 == id && x.1.alive()).map(|x| x.1.clone())
 }
 
 static WAKE: Condvar = Condvar::new();
 static STARTED: AtomicBool = AtomicBool::new(false);
 static STOP: AtomicBool = AtomicBool::new(false);
-/// The settle swap asks the worker to end (it holds the old front for its whole life), and
-/// whether it runs.
-static SWAP_STOP: AtomicBool = AtomicBool::new(false);
-static RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Ends the worker for the settle swap and waits up to `ms` for it (the check in flight
-/// finishes first). It starts again at the next enqueue, from the new front. false: it did not
-/// end in time (it keeps running).
-pub fn swap_stop(ms: u64) -> bool {
-    if !STARTED.load(Ordering::SeqCst) { return true; }
-    SWAP_STOP.store(true, Ordering::SeqCst);
-    let t = std::time::Instant::now();
-    loop {
-        {
-            let _q = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-            WAKE.notify_all();
-        }
-        if !RUNNING.load(Ordering::SeqCst) {
-            // nothing queues between here and the swap's end: enqueue spawns a new worker
-            STARTED.store(false, Ordering::SeqCst);
-            SWAP_STOP.store(false, Ordering::SeqCst);
-            return true;
-        }
-        if t.elapsed().as_millis() as u64 > ms {
-            SWAP_STOP.store(false, Ordering::SeqCst);
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_micros(500));
-    }
-}
-
-fn stopping() -> bool { STOP.load(Ordering::SeqCst) || SWAP_STOP.load(Ordering::SeqCst) || crate::preempt::is_stopped() }
-struct RunningGuard;
-impl Drop for RunningGuard { fn drop(&mut self) { RUNNING.store(false, Ordering::SeqCst); } }
+fn stopping() -> bool { STOP.load(Ordering::SeqCst) || crate::preempt::is_stopped() }
 pub static CHECKED: AtomicU64 = AtomicU64::new(0);
 /// checks that failed inside the checker (a panic): those fns are NOT checked
 pub static PANICS: AtomicU64 = AtomicU64::new(0);
@@ -402,6 +406,19 @@ fn enqueue(options: &crate::options::Options, src: &Arc<dyn FrontSource>, def: D
         if !q.advance(src.identity(), epoch) { return; }
         let key = (src.identity(), def, epoch);
         if q.seen.contains_key(&key) {
+            // a verdict an earlier run stored for this body settles a check that is only queued
+            // (discovery queues every owner at the start): the queued check goes, and the body is
+            // verified now instead of being lowered as unverified code until the checker reaches it
+            if let Some(v) = cached.clone() {
+                if matches!(VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).get(&def).and_then(|i| i.get(&key)), Some(FnVerdict::Pending) | None) {
+                    if let Some(at) = q.rank_of.remove(&key) {
+                        q.order.remove(&at);
+                        q.items.remove(&at);
+                    }
+                    v.reuse(key);
+                    return;
+                }
+            }
             // Discovery may have queued this owner first. A compiled instance
             // promotes that same check instead of adding an instance check.
             if args.is_some() {
@@ -428,7 +445,6 @@ fn enqueue(options: &crate::options::Options, src: &Arc<dyn FrontSource>, def: D
         q.insert(Item { key, args, cache_key, src: src.clone(), discovery: 0 }, rank);
     }
     if !STARTED.swap(true, Ordering::SeqCst) {
-        RUNNING.store(true, Ordering::SeqCst);
         let s = src.clone(); let verbose = options.verbose;
         { let _k = crate::zone_alloc::kept();
         let _ = std::thread::Builder::new().name("gandalf".to_string()).spawn(move || { let _z = crate::zone_alloc::compiler_thread(); worker(s, verbose) });
@@ -436,6 +452,16 @@ fn enqueue(options: &crate::options::Options, src: &Arc<dyn FrontSource>, def: D
     }
     WAKE.notify_one();
 }
+/// Checks queued (0 also before the worker started); the aot levels' completion line reads it.
+pub fn queued() -> usize {
+    QUEUE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |q| q.order.len())
+}
+
+/// Bodies checked so far this run.
+pub fn checked() -> u64 {
+    CHECKED.load(Ordering::Relaxed)
+}
+
 pub fn note_program(options: &crate::options::Options, src: &Arc<dyn FrontSource>, epoch: u64) {
     enqueue(options, src, crate::program::NO_DEF, None, None, epoch, None, None);
 }
@@ -527,14 +553,19 @@ fn finish_verdict(prog: &Program, src: usize, epoch: u64, def: DefId, args: &[Ty
         Err(message) => { record(key, FnVerdict::Unchecked(format!("checker failure: {}", message))); Vec::new() }
     }
 }
-fn worker(src: Arc<dyn FrontSource>, verbose: bool) {
-    let _running = RunningGuard;
+fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
     let _mem = crate::memstat::tag(crate::memstat::Tag::Borrowck);
     src.lower_priority(); src.wait_start();
     loop {
         if stopping() { return; }
+        // (the source the worker started with must not keep a replaced front state alive)
+        if !src.alive() {
+            if let Some(n) = rehomed(&src) { src = n; }
+        }
         let quiet = src.quiet_ns();
-        if quiet < QUIET_NS {
+        // rank 0 (hot code waiting for its verdict, set_ranks) runs while compiles go on
+        let urgent = || QUEUE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|q| q.order.first()).is_some_and(|a| a.0 == 0);
+        if quiet < QUIET_NS && !urgent() {
             std::thread::sleep(std::time::Duration::from_millis(((QUIET_NS - quiet) / 1_000_000).clamp(20, 500)));
             continue;
         }
@@ -553,6 +584,10 @@ fn worker(src: Arc<dyn FrontSource>, verbose: bool) {
                 IDLE_REPORTED.store(false, Ordering::Relaxed);
             }
         };
+        let mut item = item;
+        if !item.src.alive() {
+            if let Some(n) = rehomed(&item.src) { item.src = n; }
+        }
         if !item.src.alive() {
             STALE.fetch_add(1, Ordering::Relaxed);
             record(item.key, FnVerdict::Unchecked("stale".into()));
@@ -607,6 +642,16 @@ fn worker(src: Arc<dyn FrontSource>, verbose: bool) {
                 if d < prog.defs.len() { discovery_next = Some(d); }
                 return;
             }
+            // Every instance checks the same generic body and can persist its owner verdict. The
+            // stored one is looked up first: it needs only the definition, not the owner's identity
+            // arguments (a warm aot run's discovery reuses ~21k stored verdicts)
+            let (owner_key, stored) = item.src.owner_verdict(prog, *def, *epoch);
+            phase.set("stored");
+            if let Some(v) = stored {
+                reused_owner = true;
+                v.reuse(item.key);
+                return;
+            }
             let identity_args;
             let args = match &item.args {
                 Some(args) => args,
@@ -616,14 +661,6 @@ fn worker(src: Arc<dyn FrontSource>, verbose: bool) {
                     &identity_args
                 }
             };
-            // Every instance checks the same generic body and can persist its owner verdict.
-            let (owner_key, stored) = item.src.owner_verdict(prog, *def, *epoch);
-            phase.set("stored");
-            if let Some(v) = stored {
-                reused_owner = true;
-                v.reuse(item.key);
-                return;
-            }
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _p = crate::preempt::Preemptible::on();
                 crate::preempt::point();

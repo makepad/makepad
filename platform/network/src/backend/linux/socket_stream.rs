@@ -385,7 +385,8 @@ impl SocketStream {
         use_tls: bool,
         ignore_ssl_cert: bool,
     ) -> io::Result<Self> {
-        let tcp_stream = TcpStream::connect(format!("{host}:{port}"))?;
+        let port_number: u16 = port.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad port"))?;
+        let tcp_stream = crate::lan::connect_host("socket stream", host, port_number, None)?;
         let _ = tcp_stream.set_nodelay(true);
 
         if use_tls {
@@ -400,9 +401,9 @@ impl SocketStream {
     }
 
     /// TLS 1.2+ without CA validation (self-signed servers); returns the
-    /// server certificate's SHA-256 for the caller's known-hosts record.
-    pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, [u8; 32])> {
-        let tcp_stream = TcpStream::connect(format!("{host}:{port}"))?;
+    /// server leaf certificate DER for the caller's known-hosts record.
+    pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, Vec<u8>)> {
+        let tcp_stream = connect_lan(host, port)?;
         let _ = tcp_stream.set_nodelay(true);
         let _ = tcp_stream.set_read_timeout(Some(Duration::from_secs(5)));
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -412,10 +413,10 @@ impl SocketStream {
             if unsafe { SSL_version(stream.ssl) } < 0x0303 {
                 return Err(io_other("server negotiated a TLS version below 1.2"));
             }
-            Ok(crate::digest::sha256_hash(&stream.peer_leaf_der()?))
+            stream.peer_leaf_der()
         })();
         match result {
-            Ok(fp) => Ok((SocketStream::Tls(stream), fp)),
+            Ok(der) => Ok((SocketStream::Tls(stream), der)),
             Err(err) => {
                 stream.shutdown();
                 Err(err)
@@ -481,4 +482,11 @@ impl Write for SocketStream {
             SocketStream::Tls(stream) => stream.flush(),
         }
     }
+}
+
+/// The TCP connection of a fleet TLS stream: each address of `host` tried for at most 5 s, so an
+/// offline LAN machine fails fast instead of after the OS's minute-long connect timeout.
+fn connect_lan(host: &str, port: &str) -> io::Result<TcpStream> {
+    let port: u16 = port.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad port"))?;
+    crate::lan::connect_host("fleet tls", host, port, Some(Duration::from_secs(5)))
 }

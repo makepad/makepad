@@ -1,0 +1,13 @@
+# Live frames: main-thread texture bindings every live frame provider shares,
+# the frame view and the frame stage a host draws on the main thread.
+
+[package]
+name = "makepad-live-frame"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Live frame bindings, the frame view and the frame stage for flow frame providers"
+
+[dependencies]
+makepad-flow = { path = "../flow", default-features = false, features = ["live"] }
+makepad-widgets = { path = "../../widgets", default-features = false }

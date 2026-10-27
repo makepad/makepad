@@ -21,10 +21,9 @@ use crate::types::{TyId, TyKind};
 const STEP_BUDGET: u32 = 4_000_000;
 const CALL_DEPTH: u32 = 32;
 
-crate::gen_local! {
+thread_local! {
     /// the constants whose data this thread's nested evaluations are reading (const_data)
-    /// (compiler TLS: the settle swap forgets the buffer with its generation)
-    static CONSTS_READING: std::cell::RefCell<Vec<(crate::program::DefId, Vec<TyId>)>>;
+    static CONSTS_READING: std::cell::RefCell<Vec<(crate::program::DefId, Vec<TyId>)>> = Default::default();
 }
 
 struct Ctx<'a> {
@@ -40,7 +39,7 @@ struct Ctx<'a> {
 pub fn eval_into(u: &mut Unit, d: crate::program::DefId, args: &[TyId], buf: u64) -> bool {
     let options = &u.prog.session.clone().options;
     let _mem = crate::memstat::tag(crate::memstat::Tag::Ctfe);
-    if off(options) {
+    if off(options) || u.ptr_bytes() != 8 {
         return false;
     }
     let init = match relax_types::const_eval::const_body(&u.prog, d) { Some(e) => e, None => return false };
@@ -80,7 +79,7 @@ pub fn eval_into(u: &mut Unit, d: crate::program::DefId, args: &[TyId], buf: u64
 /// Evaluates the inline const block `bl` of the (instantiated) body `body` to the bytes of its
 /// value of type `t`; None outside the subset (lowering then runs the block).
 pub fn eval_const_block(u: &mut Unit, body: &Body, bl: crate::ast::BlockId, t: TyId) -> Option<Vec<u8>> {
-    if off(&u.prog.session.clone().options) {
+    if off(&u.prog.session.clone().options) || u.ptr_bytes() != 8 {
         return None;
     }
     let mut cx = Ctx { u, steps: 0, depth: 0, trace: false, reason: None };
@@ -337,6 +336,8 @@ pub fn zero_undefined(u: &mut Unit, t: TyId, a: u64) {
 }
 
 /// MAKEPAD_RUN_CTFE=0: every initializer is compiled and run (the reference behaviour).
+/// (The evaluator models 8-byte pointer and usize words: a wasm32 program's initializers run as
+/// code, web32.rs, whatever the option says.)
 fn off(options: &crate::options::Options) -> bool {
     options.ctfe == crate::options::Ctfe::Off
 }
@@ -365,7 +366,7 @@ impl<'a> Ctx<'a> {
     fn int_of(&self, t: TyId) -> Option<(usize, bool)> {
         match self.u.tcx.tys.kind(t) {
             TyKind::Int(p) => {
-                let (b, s) = crate::types::Types::int_info(*p);
+                let (b, s) = self.u.tcx.tys.int_info(*p);
                 Some((b as usize, s))
             }
             TyKind::Bool => Some((1, false)),
@@ -1019,14 +1020,22 @@ impl<'a> Ctx<'a> {
         let ExprKind::Unsafe(fb) = ast.expr(*fi).kind else { return None };
         let [Stmt::Expr(addr, false)] = ast.stmts(fb) else { return None };
         let ExprKind::AddrOf(true, false, place) = ast.expr(*addr).kind else { return None };
-        let ExprKind::Binary(BinOp::Sub, lhs, rhs) = ast.expr(*tail).kind else { return None };
-        // Both operands are exactly `local as *const u8 as usize`.
-        for (e, local) in [(lhs, field), (rhs, base)] {
-            if b.ty(e) != self.u.tcx.tys.usize_ { return None; }
-            let ExprKind::Cast(ptr, _) = ast.expr(e).kind else { return None };
-            if !matches!(self.kind(b.ty(ptr)), TyKind::Ptr(false, p) if matches!(self.kind(p), TyKind::Int(crate::program::Prim::U8))) { return None; }
-            let ExprKind::Cast(value, _) = ast.expr(ptr).kind else { return None };
-            if b.res.get(&value.0) != Some(&Res::Local(local)) { return None; }
+        // The tail is exactly `unsafe { <*const _>::cast::<u8>(field).offset_from_unsigned(base as *const u8) }`.
+        let ExprKind::Unsafe(tb) = ast.expr(*tail).kind else { return None };
+        let [Stmt::Expr(dist, false)] = ast.stmts(tb) else { return None };
+        let ExprKind::MethodCall(recv, mrow) = ast.expr(*dist).kind else { return None };
+        let m = b.methods.get(&dist.0)?;
+        if self.u.prog.def(m.def).krate != self.u.core_crate || self.u.prog.name(m.def) != "offset_from_unsigned" { return None; }
+        let [origin] = ast.list(ast.row(mrow).args) else { return None };
+        let ExprKind::Call(cast, cargs) = ast.expr(recv).kind else { return None };
+        let TyKind::FnDef(cd, _, _) = self.kind(b.ty(cast)) else { return None };
+        if self.u.prog.def(cd).krate != self.u.core_crate || self.u.prog.name(cd) != "cast" { return None; }
+        let [fv] = ast.list(cargs) else { return None };
+        if b.res.get(&fv.0) != Some(&Res::Local(field)) { return None; }
+        let ExprKind::Cast(value, _) = ast.expr(*origin).kind else { return None };
+        if b.res.get(&value.0) != Some(&Res::Local(base)) { return None; }
+        for e in [recv, *origin] {
+            if !matches!(self.kind(b.ty(e)), TyKind::Ptr(false, p) if matches!(self.kind(p), TyKind::Int(crate::program::Prim::U8))) { return None; }
         }
         let offset = self.place_offset(b, place, base)?;
         Some((offset as u64).to_le_bytes().to_vec())

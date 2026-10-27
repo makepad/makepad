@@ -29,6 +29,9 @@ pub enum SurfaceState {
 /// events before a surface/swapchain or a compositor frame callback exists.
 pub trait VkSurfaceSource: Send {
     fn instance_extensions(&self) -> Vec<&'static CStr>;
+    /// A runtime that creates the process's Vulkan instance and device itself (an XR runtime
+    /// adds the extensions it needs and names the GPU); `None`: the core creates them.
+    fn creator(&self) -> Option<Arc<dyn VkCreator>> { None }
     /// Called during device discovery, before any logical device is created.
     fn order_devices(&mut self, _instance: &makepad_vulkan::Instance, _devices: &mut Vec<vk::PhysicalDevice>) -> Result<(), String> { Ok(()) }
     fn device_ready(&mut self, _device: Arc<Device>) -> Result<(), String> { Ok(()) }
@@ -53,11 +56,32 @@ pub trait VkSurfaceSource: Send {
     }
 }
 
+/// Creates the Vulkan objects for a runtime that must make them (OpenXR's
+/// XR_KHR_vulkan_enable2). The core's create infos are passed unchanged; the runtime may chain
+/// and extend them. The returned handles are adopted by the core and destroyed by it.
+pub trait VkCreator: Send + Sync {
+    /// # Safety
+    /// `info` and everything it points to is valid for the call.
+    unsafe fn create_instance(&self, get_instance_proc_addr: makepad_vulkan::commands::PfnGetInstanceProcAddr, info: &vk::InstanceCreateInfo) -> Result<vk::Instance, String>;
+    /// The one GPU the runtime drives. # Safety: `instance` came from `create_instance`.
+    unsafe fn physical_device(&self, instance: vk::Instance) -> Result<vk::PhysicalDevice, String>;
+    /// # Safety
+    /// `physical` came from `physical_device`; `info` is valid for the call. A failure the
+    /// runtime itself reports is `ERROR_INITIALIZATION_FAILED` (and logged).
+    unsafe fn create_device(&self, get_instance_proc_addr: makepad_vulkan::commands::PfnGetInstanceProcAddr, physical: vk::PhysicalDevice, info: &vk::DeviceCreateInfo) -> Result<vk::Device, vk::Result>;
+}
+
 /// A native scanout provider receives an immutable whole-target image after its rendering
 /// fence signals. It owns presentation pacing and reports actual presentation separately
 /// from GPU completion. The image lease must survive all display reads, including peers.
 pub trait FramePresenter: Send + Sync {
     fn submit(&self, session: u32, window: Id, image: Arc<super::Image>, presented: Box<dyn FnOnce(u64) + Send>);
+    /// A frame of this window was encoded for this presenter: its [`Self::submit`] (GPU done)
+    /// or [`Self::dropped`] (its batch failed) follows exactly once. A shell that grants its
+    /// windows frames itself bounds the frames in flight with this.
+    fn scheduled(&self, _session: u32, _window: Id) {}
+    /// A [`Self::scheduled`] frame whose batch did not run: it reaches no `submit`.
+    fn dropped(&self, _session: u32, _window: Id) {}
 }
 
 pub struct NativeSurface {

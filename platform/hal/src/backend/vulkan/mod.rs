@@ -11,11 +11,15 @@ mod capture_gpu;
 mod device;
 mod frame;
 mod pipeline;
+mod prof;
 mod readback;
 mod resources;
 pub(crate) mod share;
 mod submit;
 pub mod surface;
+pub(crate) mod tap;
+#[cfg(target_os = "linux")]
+pub(crate) mod video_encode;
 
 pub use device::Device;
 pub use resources::Image;
@@ -30,15 +34,19 @@ use crate::session::*;
 use crate::types::*;
 use device::Worker;
 use pipeline::{PassKey, RenderPass, State};
-use resources::{buffer_usage, Buffer};
+pub(crate) use resources::{buffer_usage, Buffer};
 use submit::{Batch, Event, Mailbox, Token};
-use std::collections::{HashMap, HashSet};
+use crate::FastMap;
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 
 struct Texture { gen: u32, image: Arc<Image> }
 struct Retained { gen: u32, buffer: Arc<Buffer>, evictable: bool }
-struct Pipe { gen: u32, state: Arc<State>, epoch: u64, announced: bool }
+/// A session's pipeline. `desc` is its own create's: the program may be shared with an identical
+/// shader of another session, whose names (string ids) are that session's; the GPU profiler names
+/// the pipeline by this one.
+struct Pipe { gen: u32, state: Arc<State>, epoch: u64, announced: bool, desc: PipelineDesc }
 
 /// Native window-system work stays outside the GPU core.
 pub trait Shell: Send {
@@ -53,7 +61,7 @@ pub struct Vulkan {
     #[cfg(target_os = "android")]
     media: super::android::media::AndroidMedia,
     #[cfg(target_os = "linux")]
-    capture_pool: HashMap<(u32, Id), Vec<Arc<Buffer>>>,
+    capture_pool: FastMap<(u32, Id), Vec<Arc<Buffer>>>,
     #[cfg(target_os = "linux")]
     shell: Option<&'static super::linux::Shared>,
     /// the Android shell (Activity surface, lifecycle, input)
@@ -61,23 +69,38 @@ pub struct Vulkan {
     shell: Option<Box<dyn Shell>>,
     dev: Arc<Device>,
     info: HalInfo,
-    tex: HashMap<(u32, u32), Texture>,
-    buf: HashMap<(u32, u32), Retained>,
-    pipe: HashMap<(u32, u32), Pipe>,
-    programs: HashMap<Vec<u8>, Weak<State>>,
+    tex: FastMap<(u32, u32), Texture>,
+    buf: FastMap<(u32, u32), Retained>,
+    pipe: FastMap<(u32, u32), Pipe>,
+    programs: FastMap<Vec<u8>, Weak<State>>,
     /// Scratch of `prepare`: one draw's buffer and image descriptors, cleared per draw.
     draw_bins: Vec<(u32, makepad_vulkan::vk::DescriptorType, makepad_vulkan::vk::DescriptorBufferInfo)>,
     draw_images: Vec<(u32, makepad_vulkan::vk::DescriptorType, makepad_vulkan::vk::DescriptorImageInfo)>,
-    passes: HashMap<PassKey, Arc<RenderPass>>,
-    win: HashMap<(u32, u32), Texture>,
+    passes: FastMap<PassKey, Arc<RenderPass>>,
+    win: FastMap<(u32, u32), Texture>,
     /// A hosted window's newest frame size: its host's shared image is allocated larger than
     /// the window (resizes reuse it), and a snapshot or copy reads only what the frame drew.
-    hosted_sizes: HashMap<(u32, u32), [u32; 2]>,
-    scanout_images: HashMap<(u32, Id), Vec<Arc<Image>>>,
-    aliases: HashMap<(u32, Id), Id>,
-    pick_ids: HashMap<(u32, Id), Id>,
+    hosted_sizes: FastMap<(u32, u32), [u32; 2]>,
+    scanout_images: FastMap<(u32, Id), Vec<Arc<Image>>>,
+    /// MAKEPAD_FRAME_STAMP: the red and blue 8x8 blocks stamped into each frame handed to a host
+    /// (`frame::stamp_frame`), and the size the last window pass drew.
+    #[cfg(target_os = "linux")]
+    stamp: Option<[Arc<Image>; 2]>,
+    #[cfg(target_os = "linux")]
+    window_px: [u32; 2],
+    /// session 0's windows with a badge layer (by index): the images their layer was composed
+    /// into (`frame::Badged`)
+    badged: FastMap<u32, frame::Badged>,
+    /// session 0's windows (by index) whose newest frame went straight to the shell's target, so
+    /// their retained image holds an older one: a badge layer is never composed over it (the
+    /// stale picture showed in the WM for a frame each time a badge came up)
+    retained_stale: std::collections::HashSet<u32>,
+    /// the composed image the badge frame being encoded draws into
+    compose: Option<Arc<Image>>,
+    aliases: FastMap<(u32, Id), Id>,
+    pick_ids: FastMap<(u32, Id), Id>,
     pick_pending: HashSet<(u32, Id)>,
-    fallback: HashMap<u32, Arc<Image>>,
+    fallback: FastMap<u32, Arc<Image>>,
     windows: surface::Windows,
     sharing: Box<dyn VkExternalImages>,
     #[cfg(target_os = "linux")]
@@ -128,8 +151,9 @@ impl Vulkan {
     #[cfg(target_os = "linux")]
     pub fn on_shell(flags: u32, sessions: super::SessionNotify, shell: &'static super::linux::Shared) -> Result<Self, String> {
         let mut backend = Self::with_sources(flags, sessions, super::linux::surface_source(shell), Box::new(NativeImages::default()))?;
-        backend.info.flags |= info_flags::DISPLAY_CLOCK;
+        backend.info.flags |= info_flags::DISPLAY_CLOCK | info_flags::WINDOW_BADGES;
         if shell.client_chrome() { backend.info.flags |= info_flags::CLIENT_CHROME; }
+        if shell.window_manager() { backend.info.flags |= info_flags::WM_HOSTED; }
         if shell.direct_display() { backend.info.flags |= info_flags::DIRECT_DISPLAY; }
         backend.info.dpi = shell.dpi();
         backend.shell = Some(shell);
@@ -155,15 +179,25 @@ impl Vulkan {
                 ty.heap_index as usize == *heap && ty.property_flags.contains(makepad_vulkan::vk::MemoryPropertyFlags::DEVICE_LOCAL)))
             .map(|(_, h)| h.size).sum();
         let info = HalInfo { backend: backend_id::VULKAN, dialect: dialect::SPIRV, formats, msaa: 1, dpi: 1.0,
-            flags: if dev.timestamp_bits > 0 { info_flags::GPU_TIMESTAMPS } else { 0 },
+            flags: if dev.timestamp_bits > 0 { info_flags::GPU_TIMESTAMPS } else { 0 } | if dev.multiview { info_flags::MULTIVIEW } else { 0 },
             max_texture: dev.properties.limits.max_image_dimension2_d,
             max_window: [dev.properties.limits.max_framebuffer_width, dev.properties.limits.max_framebuffer_height],
-            max_buffer: dev.properties.limits.max_storage_buffer_range as u64, working_set, ..Default::default() };
+            max_buffer: dev.properties.limits.max_storage_buffer_range as u64, working_set,
+            vendor_id: dev.properties.vendor_id,
+            device_kind: match dev.properties.device_type {
+                makepad_vulkan::vk::PhysicalDeviceType::INTEGRATED_GPU => device_kind::INTEGRATED,
+                makepad_vulkan::vk::PhysicalDeviceType::DISCRETE_GPU => device_kind::DISCRETE,
+                makepad_vulkan::vk::PhysicalDeviceType::CPU => device_kind::SOFTWARE,
+                _ => device_kind::UNKNOWN,
+            },
+            ..Default::default() };
+        let mut info = info;
+        info.set_device_name(&unsafe { std::ffi::CStr::from_ptr(dev.properties.device_name.as_ptr()) }.to_string_lossy());
         crate::gpu_limits::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
-        Ok(Self { #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: HashMap::new(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: HashMap::new(), buf: HashMap::new(), pipe: HashMap::new(), programs: HashMap::new(), draw_bins: Vec::new(), draw_images: Vec::new(),
-            passes: HashMap::new(), win: HashMap::new(), hosted_sizes: HashMap::new(), scanout_images: HashMap::new(), aliases: HashMap::new(), pick_ids: HashMap::new(), pick_pending: HashSet::new(),
-            fallback: HashMap::new(), windows: surface::Windows::new(source), sharing,
+        Ok(Self { #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: FastMap::default(), buf: FastMap::default(), pipe: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
+            passes: FastMap::default(), win: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), retained_stale: Default::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
+            fallback: FastMap::default(), windows: surface::Windows::new(source), sharing,
             #[cfg(target_os = "linux")] foreign_support,
             batch: None, spares: Default::default(), mailbox: Mailbox::new(sessions),
             queue: Some(Worker::new("makepad-vulkan-submit")?), complete: Arc::new(Worker::new("makepad-vulkan-complete")?),
@@ -180,7 +214,7 @@ impl Vulkan {
 
     fn ensure_batch(&mut self) -> Result<&mut Batch, String> {
         if self.dev.lost.load(Ordering::Acquire) { return Err("Vulkan device lost".into()); }
-        if self.batch.is_none() { self.batch = Some(Batch::new(self.dev.clone(), &self.spares, false, 0)?); }
+        if self.batch.is_none() { self.batch = Some(Batch::new(self.dev.clone(), &self.spares, 0, 0)?); }
         Ok(self.batch.as_mut().unwrap())
     }
 
@@ -365,7 +399,7 @@ impl Backend for Vulkan {
     fn work_ahead(&mut self, world: &World, sid: u32, view: &CmdView) -> Option<Box<dyn FnOnce() + Send>> {
         use crate::cmds::HalCmd;
         let s = world.session(sid)?;
-        let mut created = HashMap::new();
+        let mut created = FastMap::default();
         for cmd in view.cmds {
             if let Some(HalCmd::TextureCreate { id, format, .. }) = cmd.decode(view.arena) { created.insert(id, format); }
         }
@@ -377,7 +411,7 @@ impl Backend for Vulkan {
             let Some(passes) = frame::slice(packet.passes, view.passes.len()) else { continue };
             let is_window = kind & !target::FLAGS == target::WINDOW;
             'pass: for pass in &view.passes[passes] {
-                let mut key = PassKey { colors: [pipeline::ABSENT; 4], depth: pipeline::ABSENT, load: pass.load };
+                let mut key = PassKey { colors: [pipeline::ABSENT; 4], depth: pipeline::ABSENT, load: pass.load, views: frame::pass_views(pass) };
                 for (i, id) in pass.color.iter().enumerate().filter(|(_, id)| !id.is_none()) {
                     let Some(format) = format_of(*id) else { continue 'pass };
                     key.colors[i] = format;
@@ -396,7 +430,7 @@ impl Backend for Vulkan {
                 let Some(draws) = frame::slice(pass.draws, view.draws.len()) else { continue };
                 for d in &view.draws[draws] {
                     let Some(p) = self.pipe.get(&(sid, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen) else { continue };
-                    if p.state.lacks(key, d.flags) && !needed.iter().any(|(state, k, f)| Arc::ptr_eq(state, &p.state) && k.colors == key.colors && k.depth == key.depth && *f == d.flags) {
+                    if p.state.lacks(key, d.flags) && !needed.iter().any(|(state, k, f)| Arc::ptr_eq(state, &p.state) && k.colors == key.colors && k.depth == key.depth && k.views == key.views && *f == d.flags) {
                         needed.push((p.state.clone(), key, d.flags));
                     }
                 }
@@ -469,6 +503,7 @@ impl Backend for Vulkan {
         self.capture_pool.retain(|key, _| key.0 != sid);
         self.windows.close_session(sid, self.queue.as_ref().unwrap());
         self.tex.retain(|k, _| k.0 != sid); self.buf.retain(|k, _| k.0 != sid); self.pipe.retain(|k, _| k.0 != sid);
+        if sid == HOST { self.badged.clear(); self.retained_stale.clear(); }
         self.win.retain(|k, _| k.0 != sid); self.hosted_sizes.retain(|k, _| k.0 != sid); self.aliases.retain(|k, _| k.0 != sid);
         self.scanout_images.retain(|k, _| k.0 != sid);
         self.pick_ids.retain(|k, _| k.0 != sid); self.pick_pending.retain(|k| k.0 != sid);
@@ -476,34 +511,23 @@ impl Backend for Vulkan {
         self.sharing.session_closed(sid);
         self.pressure.forget_session(sid);
         exec::free_session(world, sid);
-        // The last app session closed: its process is about to exit. The frames still in flight
-        // free their buffers and descriptor pools on the queue workers when their fences signal;
-        // exit() unloads the driver under them (a SIGSEGV in the ICD at every quit). Those
-        // workers run out first.
-        if world.session_ids().iter().all(|id| *id == sid || *id == HOST) {
-            self.settle_workers("the last session closed");
-        }
         #[cfg(target_os = "linux")]
         if let Some(shell) = self.shell { shell.session_closed(sid); }
     }
     fn window_pixels(&mut self, world: &mut World, sid: u32, window: Option<Id>) -> Option<Pixels> { self.host_window_pixels(world, sid, window) }
     fn simulate_device_loss(&mut self) { self.simulate = true; }
-    // the host's own session (the boot window of `makepad run`) never closes: its pipeline
-    // compiles were still in the driver when exit() unloaded it (a SIGSEGV on
-    // makepad-vulkan-compile at a quit during boot)
+    /// The process ends next: exit() runs the driver's exit handlers (NVIDIA's EGL teardown
+    /// unloads its core), and a worker still in a driver call faulted inside it (a SIGSEGV in
+    /// `submit_until_room` at a SIGTERM mid-frame; on makepad-vulkan-compile at a quit during
+    /// boot). What was recorded is submitted, every swapchain retires, and the three workers
+    /// stop in dependency order -- compiles; the queue (its submits, presents and retirements,
+    /// which hand completions on); the completions (fence waits, frees) -- each joined.
     fn before_exit(&mut self) {
         self.flush();
-        self.settle_workers("the host is exiting");
-    }
-}
-
-impl Vulkan {
-    /// The driver work on this backend's threads (pipeline compiles, frames in flight whose
-    /// fences free their buffers and descriptor pools) runs out.
-    fn settle_workers(&self, why: &str) {
-        let limit = std::time::Duration::from_secs(2);
-        let settled = self.compiler.settle(limit) && self.queue.as_ref().is_some_and(|q| q.settle(limit)) && self.complete.settle(limit);
-        if !settled { eprintln!("[hal-vulkan] {why} with GPU work still running after {limit:?}; exiting may race the driver"); }
+        if let Some(queue) = self.queue.as_ref() { self.windows.clear(queue); }
+        self.compiler.stop();
+        if let Some(queue) = self.queue.as_ref() { queue.stop(); }
+        self.complete.stop();
     }
 }
 
@@ -600,6 +624,7 @@ impl exec::DeviceReset for Vulkan {
         self.buf.clear();
         self.win.clear();
         self.hosted_sizes.clear();
+        for b in self.badged.values_mut() { *b = Default::default(); }
         self.scanout_images.clear();
         self.fallback.clear();
         self.passes.clear();
@@ -618,7 +643,7 @@ impl exec::DeviceReset for Vulkan {
 
     fn rebuild_pipelines(&mut self, world: &mut World) {
         self.programs.clear();
-        let mut rebuilt: HashMap<*const State, Arc<State>> = HashMap::new();
+        let mut rebuilt: FastMap<*const State, Arc<State>> = FastMap::default();
         let keys: Vec<(u32, u32)> = self.pipe.keys().copied().collect();
         for key in keys {
             let old = self.pipe[&key].state.clone();
@@ -662,12 +687,10 @@ impl Gpu for Vulkan {
         self.media = media;
         handled
     }
-    /// The host's run-state overlay is drawn by the macOS backend only so far (the bootloader
-    /// host runs on macOS); here it is counted as unsupported, never silently dropped.
-    fn window_overlay(&mut self, s: &mut Session, _id: Id, rect: Option<[f32; 4]>, _layer: Id, _now: u64) {
-        if rect.is_some() {
-            s.stats.overlay_unsupported += 1;
-        }
+    #[cfg(target_os = "linux")]
+    fn badges(&self) -> bool { self.shell.is_some() }
+    fn badge_layer(&mut self, window: Id, on: bool) {
+        if on { self.badged.entry(window.index).or_default(); } else { self.badged.remove(&window.index); }
     }
 
     #[cfg(target_os = "android")]
@@ -729,6 +752,13 @@ impl Gpu for Vulkan {
         self.pick_pending.remove(&(sid, id));
         if self.pressure.is_starved(sid, id) { self.pressure.forget(sid, id); }
     }
+    fn capture_texture(&mut self, s: &mut Session, id: Id, done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>) {
+        self.capture_storage(s, id, done);
+    }
+    fn capture_buffer(&mut self, sid: u32, id: Id) -> Option<Vec<u8>> {
+        let r = self.buf.get(&(sid, id.index)).filter(|r| r.gen == id.gen)?;
+        r.buffer.read(r.buffer.size as usize).ok()
+    }
     fn texture_readback(&mut self, s: &mut Session, id: Id, req: u32, rect: [u32; 4]) {
         if self.pick_pending.contains(&(s.id, id)) { s.events.readback(req, crate::types::readback::INCOMPLETE, rect, &[]); return; }
         let image = self.resolve(s, id); self.read(s, image, req, rect, None);
@@ -788,7 +818,7 @@ impl Gpu for Vulkan {
             }
         };
         state.wait(s.id);
-        self.pipe.insert((s.id, id.index), Pipe { gen: id.gen, state, epoch: 0, announced: false }); PipeStatus::Pending
+        self.pipe.insert((s.id, id.index), Pipe { gen: id.gen, state, epoch: 0, announced: false, desc: blob.desc }); PipeStatus::Pending
     }
     fn pipeline_destroy(&mut self, sid: u32, id: Id) -> bool {
         if self.pipe.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) { return self.pipe.remove(&(sid, id.index)).is_some_and(|p| !p.announced); } false
@@ -804,6 +834,7 @@ impl Gpu for Vulkan {
         self.capture_pool.remove(&(sid, id));
         self.win.remove(&(sid, id.index)); self.hosted_sizes.remove(&(sid, id.index)); self.pick_ids.remove(&(sid, id));
         self.scanout_images.remove(&(sid, id));
+        if sid == HOST { self.badged.remove(&id.index); self.retained_stale.remove(&id.index); }
         self.windows.remove((sid, id), self.queue.as_ref().unwrap());
     }
     fn window_lent(&mut self, sid: u32, id: Id, host: Id, attach: bool) {

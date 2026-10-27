@@ -71,23 +71,24 @@ pub(crate) fn kill_tree(child: &mut Child) -> io::Result<()> {
 fn configure(command: &mut Command) -> io::Result<()> {
     use std::os::unix::process::CommandExt;
 
-    #[cfg(target_os = "linux")]
-    let parent_pid = std::process::id() as i32;
+    // The own process group goes through the spawn attributes (posix_spawn's
+    // POSIX_SPAWN_SETPGROUP where std can use posix_spawn): no code of ours runs in
+    // the child between fork and exec. That matters most under the JIT, where a
+    // forked child running a not-yet-compiled closure waits forever on a lock
+    // another parent thread held at fork (HUBAPPTEST, 2026-10-25).
+    command.process_group(0);
 
-    // SAFETY: this closure runs after fork and invokes only small libc
-    // syscalls plus errno inspection. Failures are intentionally ignored so
-    // the existing polling/direct-kill behavior remains the fallback.
-    unsafe {
-        command.pre_exec(move || {
-            #[cfg(target_os = "linux")]
-            {
-                let pdeath = unix::prctl(
-                    unix::PR_SET_PDEATHSIG,
-                    unix::SIGKILL as usize,
-                    0,
-                    0,
-                    0,
-                );
+    // Linux only: ask for SIGKILL when the service dies. This needs code in the
+    // child (prctl has no spawn attribute), so Linux keeps the fork path.
+    #[cfg(target_os = "linux")]
+    {
+        let parent_pid = std::process::id() as i32;
+        // SAFETY: this closure runs after fork and invokes only small libc
+        // syscalls plus errno inspection. Failures are intentionally ignored so
+        // the existing polling/direct-kill behavior remains the fallback.
+        unsafe {
+            command.pre_exec(move || {
+                let pdeath = unix::prctl(unix::PR_SET_PDEATHSIG, unix::SIGKILL as usize, 0, 0, 0);
                 if pdeath != 0 {
                     let _ = io::Error::last_os_error().raw_os_error();
                 } else if unix::getppid() != parent_pid {
@@ -95,13 +96,9 @@ fn configure(command: &mut Command) -> io::Result<()> {
                     // those two operations.
                     let _ = unix::kill(unix::getpid(), unix::SIGKILL);
                 }
-            }
-
-            if unix::setpgid(0, 0) != 0 {
-                let _ = io::Error::last_os_error().raw_os_error();
-            }
-            Ok(())
-        });
+                Ok(())
+            });
+        }
     }
     Ok(())
 }
@@ -123,7 +120,6 @@ mod unix {
 
     extern "C" {
         pub(super) fn kill(pid: i32, signal: i32) -> i32;
-        pub(super) fn setpgid(pid: i32, pgid: i32) -> i32;
     }
 
     #[cfg(target_os = "linux")]

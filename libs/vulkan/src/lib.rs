@@ -11,7 +11,8 @@
 //!
 //! From the repository root, after building the generator in release mode:
 //! `tools/vulkan_codegen/target/release/makepad-vulkan-codegen
-//! /usr/share/vulkan/registry/vk.xml tools/vulkan_codegen/apis.txt libs/vulkan/src`.
+//! /usr/share/vulkan/registry/vk.xml tools/vulkan_codegen/apis.txt libs/vulkan/src
+//! /usr/share/vulkan/registry/video.xml` (video.xml: the codec Std types of Vulkan Video).
 //! The checked-in output uses registry 1.4.357. API roots include the Linux,
 //! direct-display and Android/OpenXR backends, not the entire Vulkan registry.
 pub mod vk;

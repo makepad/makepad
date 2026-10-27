@@ -477,7 +477,8 @@ pub fn connect_with_credentials(addr: &str, creds: &ClientCredentials) -> io::Re
     let tls_host = host.trim_start_matches('[').trim_end_matches(']');
     let mut last = None;
     for key in &creds.keys {
-        let (mut stream, seen) = SocketStream::connect_capture(tls_host, port)?;
+        let (mut stream, der) = SocketStream::connect_capture(tls_host, port)?;
+        let seen = crate::tls::fingerprint(&der);
         if let Some(expect) = creds.expect {
             if !constant_time_eq(&expect, &seen) {
                 stream.shutdown();

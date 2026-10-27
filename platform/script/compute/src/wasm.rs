@@ -1329,14 +1329,17 @@ impl<'a> Sc<'a> {
                 self.f.b(0);
             }
             Op::Fma(k, a, b, c) => {
+                // p = b * a' (exact in f64), then p + c': a NaN operand comes out as the
+                // engine's f64 ops pass it on -- the first NaN of b, a', c' on x86-64 hosts, as
+                // the native fused op (ir::fma_nan); a negated NaN keeps its flipped sign
                 let neg_a = k == Fma::SubFrom;
                 let neg_c = k == Fma::Sub;
+                self.v(b);
+                self.f.b(op::F64_PROMOTE_F32);
                 self.v(a);
                 if neg_a {
                     self.f.b(op::F32_NEG);
                 }
-                self.f.b(op::F64_PROMOTE_F32);
-                self.v(b);
                 self.f.b(op::F64_PROMOTE_F32);
                 self.f.b(op::F64_MUL);
                 self.f.set(self.tf64[0]);

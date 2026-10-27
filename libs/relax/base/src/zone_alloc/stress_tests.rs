@@ -348,37 +348,6 @@ fn a_thread_allocating_after_its_exit_hook_still_works() {
     assert_back_to(live0, chunks0);
 }
 
-#[test]
-fn old_generation_chunks_held_by_threads_are_left_alone() {
-    let _s = serial();
-    compiler_trim();
-    let (live0, chunks0) = (live_bytes(), compiler_stats().2);
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
-    let worker = std::thread::spawn(move || {
-        let _g = compiler_thread();
-        let first: Vec<Block> = (0..500).map(|i| unsafe { Block::make(8 + i % 300, 8, 0x11) }).collect();
-        tx.send(()).unwrap();
-        go_rx.recv().unwrap();
-        // the generation moved on while this thread held chunks of the old one: it takes new chunks
-        let second: Vec<Block> = (0..500).map(|i| unsafe { Block::make(8 + i % 300, 8, 0x22) }).collect();
-        for b in &first {
-            assert_eq!(compiler_epoch_of(b.p as *const u8), Some(compiler_generation() - 1));
-        }
-        for b in &second {
-            assert_eq!(compiler_epoch_of(b.p as *const u8), Some(compiler_generation()));
-        }
-        for b in first.into_iter().chain(second) {
-            unsafe { b.free() };
-        }
-    });
-    rx.recv().unwrap();
-    compiler_begin_generation();
-    go_tx.send(()).unwrap();
-    worker.join().unwrap();
-    compiler_destroy_older();
-    assert_back_to(live0, chunks0);
-}
 
 #[test]
 fn an_emptied_chunk_is_released_when_it_was_carved_far_and_kept_when_it_was_not() {

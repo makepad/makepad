@@ -15,6 +15,13 @@
 //! * Extended / Mirror and "Optimise for" switch at once (no output is
 //!   reinitialised) and are saved when the renderer takes them; a refusal
 //!   is noted under the switch.
+//! * The Desktop row chooses where the desktop's resolution comes from:
+//!   "Panel" (the screens' own modes, as above) or "Virtual" (one fixed
+//!   virtual desktop the panels show scaled to fit, or not at all). Virtual
+//!   adds its Size (follow the Desk Link viewer, a preset, or a custom
+//!   size) and Panels (Mirror (scaled) / Off) rows; the scale slider is
+//!   then the virtual desktop's. Extended / Mirror and Pace by do not
+//!   apply while Virtual.
 //! * Every resolution or refresh change is tried first: "Keep this mode?
 //!   Reverting in 15 s" with Keep and Revert under the controls. A change
 //!   that fails shows the renderer's error there and the previous one is
@@ -30,11 +37,11 @@ use super::super::ui::HAlign;
 use crate::linux_controls::ControlAction;
 use crate::shell::display_layout::{screen_rows, screens_span_gpus, swap_neighbour};
 use crate::shell::display_menu::{
-    mode_for, native_resolution, rate_after_resolution, rate_label, rates_for, resolution_label, resolutions, screen_title,
+    is_virtual, mode_for, step_custom, virtual_mode_label, virtual_size_choices, virtual_size_label, CustomField, native_resolution, rate_after_resolution, rate_label, rates_for, resolution_label, resolutions, screen_title,
     shown_mode, pacing_choices, pacing_label, Change, Phase, ARRANGEMENT_SLOT,
 };
 use crate::shell::system_linux::{Availability, BatteryStatus, GpuInfo, SystemCommand, DISPLAY_SCALE_MAX, DISPLAY_SCALE_MIN};
-use makepad_widgets::makepad_platform::linux_display::{DisplayArrangement, DisplayPacing, LinuxDisplayOutput};
+use makepad_widgets::makepad_platform::linux_display::{DisplayArrangement, DisplayPacing, LinuxDisplayOutput, VirtualPanels};
 use makepad_widgets::makepad_platform::linux_input::{
     pointer_speed, POINTER_SPEED_MAX, POINTER_SPEED_MIN,
 };
@@ -61,6 +68,8 @@ const CHIP_H: f64 = 26.0;
 const RESOLUTION_CHIPS: usize = 3;
 const RATE_CHIPS: usize = 4;
 const PACE_CHIPS: usize = 3;
+/// The Size picker's chips per row.
+const SIZE_CHIPS: usize = 3;
 /// The scale row's caption.
 const CAPTION_H: f64 = 16.0;
 /// The footer row and the Render on list's rows.
@@ -155,6 +164,8 @@ impl ShellPanel {
         self.chooser_changes.clear();
         self.pace_open = false;
         self.pace_targets.clear();
+        self.virtual_size_open = false;
+        self.virtual_size_targets.clear();
     }
 
     /// One list at a time: fold every Display list and drop a restart
@@ -262,6 +273,36 @@ impl ShellPanel {
                     self.system_action(cx, ControlAction::DisplayPacing(pacing));
                 }
             }
+            Hit::Desktop(virtual_) => {
+                let now = self.virtual_desktop();
+                self.close_display_lists();
+                if virtual_ != now {
+                    self.system_action(cx, if virtual_ { ControlAction::DesktopVirtual } else { ControlAction::DesktopPanel });
+                }
+            }
+            Hit::VirtualSizePicker => {
+                let open = !self.virtual_size_open;
+                self.close_display_lists();
+                self.virtual_size_open = open;
+            }
+            Hit::VirtualSizeItem(index) => {
+                let size = self.virtual_size_targets.get(index).copied();
+                self.close_display_lists();
+                if let Some(size) = size {
+                    self.system_action(cx, ControlAction::VirtualSize(size));
+                }
+            }
+            Hit::VirtualCustom(field, dir) => {
+                let size = self.virtual_saved.map(|saved| step_custom(&saved.mode, field, dir));
+                self.close_display_lists();
+                if let Some(size) = size {
+                    self.system_action(cx, ControlAction::VirtualSize(size));
+                }
+            }
+            Hit::VirtualPanels(off) => {
+                self.close_display_lists();
+                self.system_action(cx, ControlAction::VirtualPanels(if off { VirtualPanels::Off } else { VirtualPanels::Mirror }));
+            }
             Hit::TrialKeep => self.system_action(cx, ControlAction::DisplayKeep),
             Hit::TrialRevert => self.system_action(cx, ControlAction::DisplayRevert),
             Hit::RestartDesktop => {
@@ -287,6 +328,9 @@ impl ShellPanel {
                 self.pointer_settings = !self.pointer_settings;
                 self.dragging = None;
                 self.close_display_lists();
+            }
+            Hit::InvertScroll => {
+                self.system_action(cx, ControlAction::InvertScroll(!self.invert_scroll));
             }
             Hit::Gpu(row) => {
                 let choice = self.gpu_targets.get(row).cloned();
@@ -505,8 +549,36 @@ impl ShellPanel {
         self.display_trials.selected_arrangement(&self.display_snapshot.arrangement).clone()
     }
 
+    /// The arrangement switch's Mirror: never while the desktop is virtual,
+    /// where Extended / Mirror do not apply.
     fn mirror_shown(&self) -> bool {
-        matches!(self.arrangement_shown(), DisplayArrangement::Mirror { .. })
+        !self.virtual_desktop() && matches!(self.arrangement_shown(), DisplayArrangement::Mirror { .. })
+    }
+
+    /// The desktop is the virtual display (chosen, or the renderer shows it).
+    fn virtual_desktop(&self) -> bool {
+        self.virtual_saved.is_some() || self.display_snapshot.virtual_display.is_some()
+    }
+
+    /// The Desktop block: the switch, and while virtual the Size row (its
+    /// unfolded chips), the Custom steppers and the Panels row; then a
+    /// separator.
+    fn desktop_height(&self) -> f64 {
+        if !self.display_snapshot.direct {
+            return 0.0;
+        }
+        let mut h = CONTROL_H;
+        if let Some(saved) = &self.virtual_saved {
+            h += CONTROL_H;
+            if self.virtual_size_open {
+                h += virtual_size_choices(saved).len().div_ceil(SIZE_CHIPS) as f64 * CHIP_H;
+            }
+            if !saved.follow {
+                h += CONTROL_H;
+            }
+            h += CONTROL_H;
+        }
+        h + SEP_H
     }
 
     /// The mode the controls of `output` show (`None` is automatic).
@@ -543,12 +615,17 @@ impl ShellPanel {
     }
 
     fn screen_block_height(&self, output: &LinuxDisplayOutput) -> f64 {
+        if is_virtual(output) {
+            return SCREEN_LINE_H;
+        }
         SCREEN_LINE_H + CONTROL_H + self.chooser_rows(output) as f64 * CHIP_H + self.slot_extra_height(&output.name)
     }
 
     /// Pace by is offered while more than one screen shows.
     fn pace_shown(&self) -> bool {
-        self.display_snapshot.direct && self.display_snapshot.outputs.iter().filter(|o| o.active).count() > 1
+        self.display_snapshot.direct
+            && !self.virtual_desktop()
+            && self.display_snapshot.outputs.iter().filter(|o| o.active).count() > 1
     }
 
     fn pace_height(&self) -> f64 {
@@ -579,6 +656,7 @@ impl ShellPanel {
             h += CONTROL_H;
         }
         h += self.slot_extra_height(ARRANGEMENT_SLOT) + SEP_H;
+        h += self.desktop_height();
         if snapshot.outputs.is_empty() {
             h += SCREEN_LINE_H;
         }
@@ -603,6 +681,7 @@ impl ShellPanel {
     fn pointer_settings_height(&self) -> f64 {
         let notice = if self.system_notice.is_empty() { 0.0 } else { NOTICE_H };
         HERO_H + POINTER_SEP_H + PICKER_ROW_H
+            + PICKER_ROW_H
             + POINTER_SEP_H + HEADER_H + SLIDER_H + ENDS_H
             + POINTER_SEP_H + HEADER_H + SLIDER_H + ENDS_H
             + POINTER_CAPTION_H
@@ -647,6 +726,17 @@ impl ShellPanel {
         let (sep, next) = cut_top(rest, SEP_H);
         rest = next;
         self.d.separator(cx, sep, fg, 0.12);
+        if snapshot.direct {
+            let (area, next) = cut_top(rest, self.desktop_height() - SEP_H);
+            rest = next;
+            self.draw_desktop(cx, area);
+            let (sep, next) = cut_top(rest, SEP_H);
+            rest = next;
+            self.d.separator(cx, sep, fg, 0.12);
+        } else {
+            self.virtual_size_open = false;
+            self.virtual_size_targets.clear();
+        }
 
         if order.is_empty() {
             let (row, next) = cut_top(rest, SCREEN_LINE_H);
@@ -690,7 +780,7 @@ impl ShellPanel {
         let fg = tok.popups.text;
         let dim = darker(fg, 1.4);
         let direct = self.display_snapshot.direct;
-        let switch_w = if direct { 168.0 } else { 0.0 };
+        let switch_w = if direct && !self.virtual_desktop() { 168.0 } else { 0.0 };
         self.d.icon_centered(cx, Ico::Monitor, rect(row.pos.x, row.pos.y, 22.0, row.size.y), 16.0, fg);
         let title_x = row.pos.x + 28.0;
         let title_w = self.d.measure(cx, true, tok.font.body, "Display");
@@ -699,7 +789,7 @@ impl ShellPanel {
         let status_x = title_x + title_w + 8.0;
         let status_w = (row.pos.x + row.size.x - switch_w - 8.0 - status_x).max(0.0);
         self.d.label_elided(cx, rect(status_x, row.pos.y, status_w, row.size.y), false, tok.font.caption, dim, HAlign::Left, &status);
-        if !direct {
+        if switch_w == 0.0 {
             return;
         }
         let mirror = self.mirror_shown();
@@ -798,7 +888,8 @@ impl ShellPanel {
         let icon_w = 22.0;
         self.d.icon_centered(cx, Ico::Monitor, rect(line.pos.x, line.pos.y, icon_w, line.size.y), 14.0, text);
         let mut right = line.pos.x + line.size.x;
-        if direct && !mirror {
+        let virtual_row = is_virtual(output);
+        if direct && !mirror && !virtual_row && !self.virtual_desktop() {
             let main_w = 80.0;
             let main = rect(right - main_w, line.pos.y + 1.0, main_w, line.size.y - 2.0);
             if output.primary {
@@ -824,7 +915,13 @@ impl ShellPanel {
         let name_w = self.d.measure(cx, true, tok.font.body_small, &title).min((right - name_x).max(0.0));
         self.d.label_elided(cx, rect(name_x, line.pos.y, name_w, line.size.y), true, tok.font.body_small, text, HAlign::Left, &title);
         let (status, problem) = self.screen_status(output);
-        let detail = if !status.is_empty() {
+        let detail = if virtual_row {
+            match self.display_snapshot.virtual_display {
+                Some(mode) => format!("{} \u{b7} panels {}", virtual_mode_label(&mode),
+                    if mode.panels == VirtualPanels::Off { "off" } else { "mirror the desktop" }),
+                None => status,
+            }
+        } else if !status.is_empty() {
             status
         } else if mirror {
             let target = matches!(self.arrangement_shown(), DisplayArrangement::Mirror { optimise_for } if optimise_for == output.name);
@@ -836,6 +933,9 @@ impl ShellPanel {
         self.d.label_elided(cx, rect(detail_x, line.pos.y, (right - detail_x).max(0.0), line.size.y),
             false, tok.font.caption, if problem { tok.bar.active } else { dim }, HAlign::Left, &detail);
 
+        if virtual_row {
+            return;
+        }
         // Line two: the pickers, or in Mirror what the screen shows.
         let (controls, mut rest) = cut_top(rest, CONTROL_H);
         let inner = rect(controls.pos.x + icon_w + 6.0, controls.pos.y + 2.0,
@@ -928,6 +1028,88 @@ impl ShellPanel {
             }
         }
         rest
+    }
+
+    /// `Desktop  [Panel | Virtual]`, and while Virtual `Size  [Follow Desk
+    /// Link viewer · 3840×2160 ▾]` (unfolded: Follow and the presets as
+    /// chips), the Custom steppers when the size is fixed, and `Panels
+    /// [Mirror (scaled) | Off]`.
+    fn draw_desktop(&mut self, cx: &mut Cx2d, area: Rect) {
+        let tok = self.tokens;
+        let dim = darker(tok.popups.text, 1.4);
+        let caption_w = 84.0;
+        let virtual_ = self.virtual_desktop();
+        let (row, mut rest) = cut_top(area, CONTROL_H);
+        self.d.label(cx, rect(row.pos.x, row.pos.y, caption_w, row.size.y), false, tok.font.body_small, dim, HAlign::Left, "Desktop");
+        let inner = rect(row.pos.x + caption_w, row.pos.y + 2.0, row.size.x - caption_w, row.size.y - 4.0);
+        let half = (inner.size.x / 2.0).floor();
+        let panel = rect(inner.pos.x, inner.pos.y, half, inner.size.y);
+        let virt = rect(inner.pos.x + half, inner.pos.y, inner.size.x - half, inner.size.y);
+        self.small_button(cx, panel, virtual_.then_some(Hit::Desktop(false)), !virtual_, None, "Panel");
+        self.small_button(cx, virt, (!virtual_).then_some(Hit::Desktop(true)), virtual_, None, "Virtual");
+        self.virtual_size_targets.clear();
+        let Some(saved) = self.virtual_saved else {
+            self.virtual_size_open = false;
+            return;
+        };
+
+        // Size.
+        let (row, next) = cut_top(rest, CONTROL_H);
+        rest = next;
+        self.d.label(cx, rect(row.pos.x, row.pos.y, caption_w, row.size.y), false, tok.font.body_small, dim, HAlign::Left, "Size");
+        let picker = rect(row.pos.x + caption_w, row.pos.y + 2.0, row.size.x - caption_w, row.size.y - 4.0);
+        let label = virtual_size_label(&saved, self.display_snapshot.virtual_display.as_ref());
+        let open = self.virtual_size_open;
+        self.picker_face(cx, picker, Some(Hit::VirtualSizePicker), open, &label);
+        if open {
+            let choices = virtual_size_choices(&saved);
+            let (chips, next) = cut_top(rest, choices.len().div_ceil(SIZE_CHIPS) as f64 * CHIP_H);
+            rest = next;
+            let gap = 4.0;
+            let x0 = chips.pos.x + caption_w;
+            let w = ((chips.pos.x + chips.size.x - x0) - gap * (SIZE_CHIPS - 1) as f64) / SIZE_CHIPS as f64;
+            for (i, (label, size, current)) in choices.into_iter().enumerate() {
+                let r = rect(x0 + (i % SIZE_CHIPS) as f64 * (w + gap), chips.pos.y + (i / SIZE_CHIPS) as f64 * CHIP_H + 2.0, w, CHIP_H - 4.0);
+                self.virtual_size_targets.push(size);
+                self.small_button(cx, r, (!current).then_some(Hit::VirtualSizeItem(i)), current, None, &label);
+            }
+        }
+
+        // Custom: width, height and refresh steppers, while the size is fixed.
+        if !saved.follow {
+            let (row, next) = cut_top(rest, CONTROL_H);
+            rest = next;
+            self.d.label(cx, rect(row.pos.x, row.pos.y, caption_w, row.size.y), false, tok.font.body_small, dim, HAlign::Left, "Custom");
+            let inner = rect(row.pos.x + caption_w, row.pos.y + 2.0, row.size.x - caption_w, row.size.y - 4.0);
+            let gap = 6.0;
+            let group_w = (inner.size.x - gap * 2.0) / 3.0;
+            let fields = [
+                (CustomField::Width, format!("W {}", saved.mode.width)),
+                (CustomField::Height, format!("H {}", saved.mode.height)),
+                (CustomField::Refresh, rate_label(saved.mode.refresh_hz())),
+            ];
+            let button_w = 22.0;
+            for (i, (field, text)) in fields.into_iter().enumerate() {
+                let x = inner.pos.x + i as f64 * (group_w + gap);
+                let minus = rect(x, inner.pos.y, button_w, inner.size.y);
+                let plus = rect(x + group_w - button_w, inner.pos.y, button_w, inner.size.y);
+                self.small_button(cx, minus, Some(Hit::VirtualCustom(field, -1)), false, Some(Ico::ChevronLeft), "");
+                self.small_button(cx, plus, Some(Hit::VirtualCustom(field, 1)), false, Some(Ico::ChevronRight), "");
+                let text_r = rect(x + button_w, inner.pos.y, group_w - 2.0 * button_w, inner.size.y);
+                self.d.label_elided(cx, text_r, false, tok.font.body_small, tok.popups.text, HAlign::Center, &text);
+            }
+        }
+
+        // Panels.
+        let (row, _) = cut_top(rest, CONTROL_H);
+        self.d.label(cx, rect(row.pos.x, row.pos.y, caption_w, row.size.y), false, tok.font.body_small, dim, HAlign::Left, "Panels");
+        let inner = rect(row.pos.x + caption_w, row.pos.y + 2.0, row.size.x - caption_w, row.size.y - 4.0);
+        let half = (inner.size.x / 2.0).floor();
+        let off = saved.mode.panels == VirtualPanels::Off;
+        let mirror = rect(inner.pos.x, inner.pos.y, half, inner.size.y);
+        let off_r = rect(inner.pos.x + half, inner.pos.y, inner.size.x - half, inner.size.y);
+        self.small_button(cx, mirror, off.then_some(Hit::VirtualPanels(false)), !off, None, "Mirror (scaled)");
+        self.small_button(cx, off_r, (!off).then_some(Hit::VirtualPanels(true)), off, None, "Off");
     }
 
     /// `Pace by  [Auto (each screen at its own rate) ▾]`, then, unfolded,
@@ -1148,6 +1330,10 @@ impl ShellPanel {
                 self.d.label(cx, ends, false, tok.font.caption, dim, HAlign::Right, "Fast");
             }
         }
+        let (row, rest) = cut_top(rest, PICKER_ROW_H);
+        self.d.label(cx, row, false, tok.font.body, fg, HAlign::Left, "Invert scroll");
+        self.d.toggle_switch(cx, dvec2(row.pos.x + row.size.x - 48.0, row.pos.y + 4.0), &tok, self.invert_scroll, fg);
+        self.hits.push((Hit::InvertScroll, row));
         let (caption, rest) = cut_top(rest, POINTER_CAPTION_H);
         self.d.label_elided(cx, caption, false, tok.font.caption, dim, HAlign::Left,
             "Lift and reposition to keep moving");
@@ -1217,7 +1403,7 @@ impl ShellPanel {
 
     /// A small control face: `hit` `None` draws it disabled (no hit),
     /// `selected` in the chosen state; an icon, a label, or both.
-    fn small_button(&mut self, cx: &mut Cx2d, r: Rect, hit: Option<Hit>, selected: bool, icon: Option<Ico>, text: &str) {
+    pub(super) fn small_button(&mut self, cx: &mut Cx2d, r: Rect, hit: Option<Hit>, selected: bool, icon: Option<Ico>, text: &str) {
         let tok = self.tokens;
         let fg = tok.popups.text;
         let dim = darker(fg, 1.4);

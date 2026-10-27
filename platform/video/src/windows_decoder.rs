@@ -98,6 +98,12 @@ impl MfColorCodes {
     }
 }
 
+/// The colour a media type declares (each property it leaves out: [`VideoColor::from_h273`]'s
+/// fallback for the size).
+pub(crate) unsafe fn media_type_color(mt: &windows::Win32::Media::MediaFoundation::IMFMediaType, width: u32, height: u32) -> VideoColor {
+    MfColorCodes::read(mt).color(width, height)
+}
+
 /// MFVideoPrimaries_* to the H.273 ColourPrimaries code point (2 = unspecified).
 fn mf_primaries_h273(v: Option<u32>) -> u32 {
     match v {
@@ -772,7 +778,7 @@ impl WindowsVideoFileDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{VideoMatrix, VideoPrimaries, VideoTransfer};
+    use crate::{VideoMatrix, VideoPrimaries, VideoRange, VideoTransfer};
 
     #[test]
     fn mf_codes_map_to_video_color() {

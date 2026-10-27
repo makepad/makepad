@@ -293,32 +293,6 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
         v
     }
 
-    /// The kept-state scan (MAKEPAD_RUN_ZONE_CHECK): `own` sees each allocation the map owns (tables,
-    /// bucket arrays, nodes), `entry` each live entry's key and value. Quiescent callers only.
-    pub fn scan(&self, mut own: impl FnMut(*const u8), mut entry: impl FnMut(&K, &V)) {
-        let tables: Vec<*mut MemoTable<K, V>> = {
-            let g = self.graveyard.lock().unwrap_or_else(|e| e.into_inner());
-            std::iter::once(self.table.load(std::sync::atomic::Ordering::Acquire)).chain(g.iter().copied()).collect()
-        };
-        own(self as *const Self as *const u8);
-        for (ti, t) in tables.into_iter().enumerate() {
-            own(t as *const u8);
-            let t = unsafe { &*t };
-            own(t.buckets.as_ptr() as *const u8);
-            for bucket in t.buckets.iter() {
-                let mut p = bucket.load(std::sync::atomic::Ordering::Acquire);
-                while !p.is_null() {
-                    own(p as *const u8);
-                    let n = unsafe { &*p };
-                    if ti == 0 {
-                        entry(&n.key, &n.val);
-                    }
-                    p = n.next;
-                }
-            }
-        }
-    }
-
     /// Memory report: (entries, bytes) of the current table, `deep` adding each entry's own heap
     /// (nodes and buckets counted here). Reads like `get`: nodes are freed only under exclusion.
     pub fn mem_stats(&self, deep: impl Fn(&K, &V) -> usize) -> (usize, usize) {
@@ -490,17 +464,6 @@ impl<T> AppendVec<T> {
         (0..n).map(move |i| unsafe { &*self.ptr(i) })
     }
 
-    /// Every allocation the vector itself owns (the chunk table, each chunk): the kept-state
-    /// scan (MAKEPAD_RUN_ZONE_CHECK) asks the compiler arena whether any of them lies in it.
-    pub fn alloc_ptrs(&self, mut f: impl FnMut(*const u8)) {
-        f(self.chunks.as_ptr() as *const u8);
-        for c in self.chunks.iter() {
-            let p = c.load(std::sync::atomic::Ordering::Acquire);
-            if !p.is_null() {
-                f(p as *const u8);
-            }
-        }
-    }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> + '_ {
         let n = self.len();

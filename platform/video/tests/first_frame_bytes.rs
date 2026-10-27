@@ -62,7 +62,7 @@ fn assert_decodes(codec: VideoFileCodec) {
         VideoFileCodec::H264 => {
             assert!(matches!(au.codec, makepad_video::StreamVideoCodec::H264))
         }
-        VideoFileCodec::H265 => {
+        VideoFileCodec::H265 | VideoFileCodec::H265Alpha => {
             assert!(matches!(au.codec, makepad_video::StreamVideoCodec::Hevc))
         }
     }

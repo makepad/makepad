@@ -15,7 +15,7 @@ use std::sync::Arc;
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
-#[cfg(any(all(not(target_os = "windows"), not(target_arch = "wasm32")), test))]
+#[cfg(any(all(not(target_os = "windows"), not(target_arch = "wasm32")), all(test, not(target_os = "windows"))))]
 use std::time::Instant;
 
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
@@ -864,7 +864,7 @@ fn try_connect_addrs(
     for addr in addrs {
         saw_any = true;
         let slice = remaining(deadline)?.min(Duration::from_secs(5));
-        match TcpStream::connect_timeout(&addr, slice) {
+        match crate::lan::connect_timeout("blocking http", &addr, slice) {
             Ok(stream) => return Ok(stream),
             Err(_) => continue,
         }
@@ -1850,7 +1850,7 @@ impl ChunkSrc<'_> {
 
 // ----------------------------------------------------------- watch / i/o
 
-#[cfg(any(all(not(target_os = "windows"), not(target_arch = "wasm32")), test))]
+#[cfg(any(all(not(target_os = "windows"), not(target_arch = "wasm32")), all(test, not(target_os = "windows"))))]
 fn check_watch(cancel: &CancelToken, deadline: Instant) -> Result<(), Error> {
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
@@ -1870,7 +1870,7 @@ fn capped_read_len(max_body: usize, received: usize, buffer_len: usize) -> usize
         .max(1)
 }
 
-#[cfg(any(all(not(target_os = "windows"), not(target_arch = "wasm32")), test))]
+#[cfg(any(all(not(target_os = "windows"), not(target_arch = "wasm32")), all(test, not(target_os = "windows"))))]
 fn remaining(deadline: Instant) -> Result<Duration, Error> {
     deadline.checked_duration_since(Instant::now()).ok_or(Error::Timeout)
 }

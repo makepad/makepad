@@ -456,7 +456,7 @@ impl<'a> RustPrinter<'a> {
                     _ => {
                         let method = if smp.method == id!(sample_nearest) {
                             "sample_nearest"
-                        } else if smp.method == id!(sample_repeat) {
+                        } else if smp.method == id!(sample_repeat) || smp.method == id!(sample_grad_repeat) {
                             "sample_repeat"
                         } else {
                             "sample"

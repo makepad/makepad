@@ -142,12 +142,25 @@ mod EvKeyCodes {
     pub const BTN_TOOL_QUADTAP: u16 = 0x14f;
 }
 
+/// A wheel event as makepad's scroll (points; +y = the view moves down the content, +x = right):
+/// a notch is 40 points (a high-resolution step 1/120 of that). evdev counts +1 for the wheel
+/// turned away from the user (tilted right). Traditional: that scrolls the view up (left).
+/// Natural (the WM's setting, as on a Mac): the content follows the wheel, so the view moves
+/// down (right).
+fn wheel_scroll(value: i32, hires: bool, horizontal: bool, natural: bool) -> (f64, f64) {
+    let points = value as f64 * if hires { 40.0 / 120.0 } else { 40.0 };
+    let along = if natural { points } else { -points };
+    if horizontal { (-along, 0.0) } else { (0.0, along) }
+}
+
 #[allow(non_snake_case)]
 mod EvRelCodes {
     pub const REL_X: u16 = 0x00;
     pub const REL_Y: u16 = 0x01;
     pub const REL_HWHEEL: u16 = 0x06;
     pub const REL_WHEEL: u16 = 0x08;
+    pub const REL_WHEEL_HI_RES: u16 = 0x0b;
+    pub const REL_HWHEEL_HI_RES: u16 = 0x0c;
 }
 
 #[allow(non_snake_case)]
@@ -206,6 +219,16 @@ fn abs_info(file: &File, axis: u16) -> Option<AbsInfo> {
 
 fn has_bit(bytes: &[u8], bit: u16) -> bool {
     bytes.get(bit as usize / 8).is_some_and(|byte| byte & (1 << (bit % 8)) != 0)
+}
+
+/// A gamepad or joystick node (BTN_GAMEPAD / BTN_JOYSTICK) that is neither a
+/// keyboard nor a pointer: its buttons would arrive as unknown key presses
+/// and every stick report would wake the UI loop. A pad's own touchpad or a
+/// keyboard-in-a-controller is a separate node with keys or BTN_LEFT.
+fn is_game_controller(keys: &[u8]) -> bool {
+    (has_bit(keys, 0x130) || has_bit(keys, 0x120))
+        && !has_bit(keys, EvKeyCodes::KEY_A)
+        && !has_bit(keys, EvKeyCodes::BTN_LEFT)
 }
 
 #[derive(Default, Clone)]
@@ -460,6 +483,9 @@ pub struct RawInput {
     next_device_id: u64,
     modifier_keys: HashSet<(u64, u16)>,
     denied: HashSet<PathBuf>,
+    /// Gamepads and joysticks: their buttons are not keys (each app reads
+    /// them through its own gamepad reader), so they are never opened here.
+    pads: HashSet<PathBuf>,
     next_scan: f64,
     width: f64,
     height: f64,
@@ -469,6 +495,9 @@ pub struct RawInput {
     /// coordinates: relative pointer motion stays on them, so screens of
     /// different heights leave no reachable dead corners.
     screen_rects: Vec<[f64; 4]>,
+    /// Devices that sent a high-resolution wheel (1/120 notch): their whole-notch events
+    /// (the kernel sends both) are left out.
+    hires_wheels: HashSet<u64>,
 }
 
 impl RawInput {
@@ -482,12 +511,14 @@ impl RawInput {
             next_device_id: 0,
             modifier_keys: HashSet::new(),
             denied: HashSet::new(),
+            pads: HashSet::new(),
             next_scan: 1.0,
             width,
             height,
             dpi_factor,
             abs: dvec2(0.0, 0.0),
             screen_rects: Vec::new(),
+            hires_wheels: HashSet::new(),
             modifiers: Default::default(),
         };
         input.scan_devices();
@@ -540,8 +571,9 @@ impl RawInput {
         }).collect();
         paths.sort();
         self.denied.retain(|path| paths.contains(path));
+        self.pads.retain(|path| paths.contains(path));
         for path in paths {
-            if self.devices.iter().any(|device| device.path == path) {
+            if self.pads.contains(&path) || self.devices.iter().any(|device| device.path == path) {
                 continue;
             }
             match OpenOptions::new().read(true).custom_flags(libc_sys::O_NONBLOCK).open(&path) {
@@ -551,6 +583,10 @@ impl RawInput {
                     let mut keys = [0u8; 96];
                     evdev_read(&file, 0x09, &mut props); // EVIOCGPROP
                     evdev_read(&file, 0x21, &mut keys); // EVIOCGBIT(EV_KEY)
+                    if is_game_controller(&keys) {
+                        self.pads.insert(path);
+                        continue;
+                    }
                     let touchpad = Touchpad::open(&file, &props, &keys);
                     let mut absolute_mt = false;
                     let absolute_axes = if touchpad.is_none() && (has_bit(&props, 1)
@@ -722,7 +758,7 @@ impl RawInput {
             match evt.ty {
                 InputEventType::EV_REL => {
                     // relative input
-                    self.process_rel_event(evt, dir_evts, time, window_id)
+                    self.process_rel_event(device_id, evt, dir_evts, time, window_id)
                 }
                 InputEventType::EV_ABS => {
                     // absolute input
@@ -739,6 +775,7 @@ impl RawInput {
 
     fn process_rel_event(
         &mut self,
+        device_id: u64,
         evt: InputEvent,
         dir_evts: &mut EventQueue,
         _time: f64,
@@ -766,12 +803,16 @@ impl RawInput {
                 }
                 self.clamp_to_screens();
             }
-            EvRelCodes::REL_WHEEL | EvRelCodes::REL_HWHEEL => {
-                let delta = evt.value as f64 * 40.0;
-                dir_evts.scroll(window_id, self.abs.x, self.abs.y,
-                    if code == EvRelCodes::REL_HWHEEL { delta } else { 0.0 },
-                    if code == EvRelCodes::REL_WHEEL { -delta } else { 0.0 },
-                    self.modifiers.bits(), false, input::scroll::NONE);
+            EvRelCodes::REL_WHEEL | EvRelCodes::REL_HWHEEL | EvRelCodes::REL_WHEEL_HI_RES | EvRelCodes::REL_HWHEEL_HI_RES => {
+                let hires = matches!(code, EvRelCodes::REL_WHEEL_HI_RES | EvRelCodes::REL_HWHEEL_HI_RES);
+                if hires {
+                    self.hires_wheels.insert(device_id);
+                } else if self.hires_wheels.contains(&device_id) {
+                    return;
+                }
+                let horizontal = matches!(code, EvRelCodes::REL_HWHEEL | EvRelCodes::REL_HWHEEL_HI_RES);
+                let (x, y) = wheel_scroll(evt.value, hires, horizontal, super::preferences::natural_scroll());
+                dir_evts.scroll(window_id, self.abs.x, self.abs.y, x, y, self.modifiers.bits(), false, input::scroll::NONE);
                 return;
             }
             _ => return (),
@@ -1000,6 +1041,21 @@ impl RawInput {
 mod tests {
     use super::*;
 
+    #[test]
+    fn gamepads_are_not_keyboards() {
+        let with = |codes: &[u16]| {
+            let mut keys = [0u8; 96];
+            for c in codes { keys[*c as usize / 8] |= 1 << (c % 8); }
+            is_game_controller(&keys)
+        };
+        // An Xbox Series pad: face buttons, Start/View/Guide and Share (KEY_RECORD).
+        assert!(with(&[0x130, 0x131, 0x13a, 0x13b, 0x13c, 167]));
+        assert!(with(&[0x120]), "a joystick");
+        assert!(!with(&[EvKeyCodes::KEY_A, 0x130]), "a keyboard with gamepad keys stays a keyboard");
+        assert!(!with(&[EvKeyCodes::BTN_LEFT, 0x130]), "a pointer stays a pointer");
+        assert!(!with(&[EvKeyCodes::KEY_A]));
+    }
+
     fn axis(maximum: i32) -> AbsInfo {
         AbsInfo { maximum, resolution: 32, ..Default::default() }
     }
@@ -1221,5 +1277,23 @@ mod tests {
         let mut pad = clickpad();
         feed(&mut pad, &events);
         assert_eq!(pad.gesture.finger_count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::wheel_scroll;
+
+    #[test]
+    fn wheel_direction_follows_the_natural_setting() {
+        // the wheel turned away from the user (evdev +1)
+        assert_eq!(wheel_scroll(1, false, false, false), (0.0, -40.0), "traditional: the view moves up");
+        assert_eq!(wheel_scroll(1, false, false, true), (0.0, 40.0), "natural (Mac): the content follows, the view moves down");
+        // tilted right
+        assert_eq!(wheel_scroll(1, false, true, false), (40.0, 0.0));
+        assert_eq!(wheel_scroll(1, false, true, true), (-40.0, 0.0));
+        // a high-resolution step is 1/120 of a notch
+        assert_eq!(wheel_scroll(120, true, false, true), (0.0, 40.0));
+        assert_eq!(wheel_scroll(-30, true, false, false), (0.0, 10.0));
     }
 }

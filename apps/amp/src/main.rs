@@ -29,6 +29,10 @@ use std::sync::Arc;
 
 mod audio;
 mod cache;
+mod drag_out;
+mod drop_video;
+mod faststart;
+mod lyric_video;
 mod columns;
 mod connection;
 mod eq;
@@ -52,6 +56,12 @@ mod widgets;
 mod worker;
 // The AI stylist and the style manager.
 mod ai;
+mod ai_music;
+mod ai_page;
+mod ai_table;
+mod lyrics;
+mod lyrics_view;
+use crate::ai_music::AiMode;
 mod ai_schema;
 mod theme_manager;
 
@@ -579,7 +589,65 @@ script_mod! {
                                         flow: Down
                                         spacing: 6
                                         padding: Inset{left: 6 right: 8 top: 14 bottom: 8}
+                                        // While an AI song plays (or the AI page is open), the
+                                        // panel's pages (ai_page.rs): the queue, the song's lyrics
+                                        // in time with the music, what made it, the writer chat.
+                                        side_tabs := View{
+                                            visible: false
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 5
+                                            align: Align{y: 0.5}
+                                            padding: Inset{left: 6}
+                                            side_queue_cap := mod.widgets.HwKey{width: Fit height: 28 inset: 3 padding: Inset{left: 15 right: 8} draw_bg +: {has_led: 1.0 role: 46.0}
+                                                side_queue := mod.widgets.HwKeyText{text: "Queue" width: Fit}
+                                            }
+                                            ai_show_lyrics_cap := mod.widgets.HwKey{width: Fit height: 28 inset: 3 padding: Inset{left: 15 right: 8} draw_bg +: {has_led: 1.0 role: 46.0}
+                                                ai_show_lyrics := mod.widgets.HwKeyText{text: "Lyrics" width: Fit}
+                                            }
+                                            ai_show_song_cap := mod.widgets.HwKey{width: Fit height: 28 inset: 3 padding: Inset{left: 15 right: 8} draw_bg +: {has_led: 1.0 role: 46.0}
+                                                ai_show_song := mod.widgets.HwKeyText{text: "Song" width: Fit}
+                                            }
+                                            ai_show_chat_cap := mod.widgets.HwKey{width: Fit height: 28 inset: 3 padding: Inset{left: 15 right: 8} draw_bg +: {has_led: 1.0 role: 46.0}
+                                                ai_show_chat := mod.widgets.HwKeyText{text: "Writer chat" width: Fit}
+                                            }
+                                        }
                                         up_next := UpNext{}
+                                        ai_lyrics_pane := View{
+                                            visible: false
+                                            width: Fill
+                                            height: Fill
+                                            flow: Down
+                                            spacing: 6
+                                            padding: Inset{left: 8 top: 4}
+                                            ai_lyrics_title := mod.widgets.HwPanelTitle{width: Fill text: ""}
+                                            ai_lyrics_info := mod.widgets.HwPanelText{width: Fill text: ""}
+                                            View{
+                                                width: Fill
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 8
+                                                align: Align{y: 0.5}
+                                                mod.widgets.HwPanelText{width: Fill text: "Translate new songs to"}
+                                                ai_language := mod.widgets.HwDropDown{width: 128 height: 28 labels: ["English", "Dutch", "German", "French", "Spanish", "Italian", "Portuguese", "Japanese", "Chinese", "Korean", "No translation"]}
+                                            }
+                                            ai_lyrics := mod.widgets.HwLyrics{}
+                                        }
+                                        ai_detail := ScrollYView{
+                                            visible: false
+                                            width: Fill
+                                            height: Fill
+                                            flow: Down
+                                            spacing: 6
+                                            padding: Inset{left: 8 top: 4}
+                                            ai_detail_title := mod.widgets.HwPanelTitle{width: Fill text: ""}
+                                            ai_detail_meta := mod.widgets.HwPanelText{width: Fill text: ""}
+                                            ai_detail_body := mod.widgets.HwPanelText{width: Fill text: "" draw_text +: {text_style: theme.font_regular{font_size: 10.0}}}
+                                        }
+                                        ai_new_cap := mod.widgets.HwKey{visible: false width: Fit height: 28 inset: 3 padding: Inset{left: 10 right: 10} margin: Inset{left: 8}
+                                            ai_new := mod.widgets.HwKeyText{text: "New conversation" width: Fit}
+                                        }
                                     }}
                                 // The graphic EQ (`eq.rs`): in a layout's `eq` slot, or a
                                 // drawer over the main list the EQ key opens.
@@ -731,6 +799,70 @@ script_mod! {
                                         tab_eq_icon := mod.widgets.HwKeyButton{text: "\u{f1de}" width: Fit draw_text +: {text_style: theme.font_icons{font_size: 10.5}}}
                                         tab_eq := mod.widgets.HwKeyText{text: "Equalizer" width: Fit draw_text +: {text_style: theme.font_bold{font_size: 11.5}}}
                                     }
+                                    tab_ai_cap := mod.widgets.HwKey{width: Fit height: 32 inset: 3 flow: Right spacing: 7 align: Align{x: 0.5 y: 0.5} padding: Inset{left: 14 right: 14} draw_bg +: {has_led: 1.0 role: 46.0}
+                                        tab_ai_icon := mod.widgets.HwKeyButton{text: "\u{f0d0}" width: Fit draw_text +: {text_style: theme.font_icons{font_size: 10.5}}}
+                                        tab_ai := mod.widgets.HwKeyText{text: "AI music" width: Fit draw_text +: {text_style: theme.font_bold{font_size: 11.5}}}
+                                    }
+                                }
+                                // The AI music page (ai_page.rs): the prompt across the top with
+                                // the length, the model, Generate now, Auto and Skip beside it; the
+                                // AI songs below in the playlist's table. The playing song's lyrics
+                                // are in the side panel.
+                                c_ai := View{
+                                    width: Fill
+                                    height: Fill
+                                    ai_page := mod.widgets.HwPanel{
+                                        draw_bg +: {plate_id: 5.0}
+                                        width: Fill
+                                        height: Fill
+                                        flow: Down
+                                        spacing: 6
+                                        padding: Inset{left: 3 right: 3 top: 10 bottom: 3}
+                                        // The prompt (two lines; a longer one scrolls in
+                                        // the field) and its controls in one row.
+                                        View{
+                                            width: Fill
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 10
+                                            align: Align{y: 0.5}
+                                            padding: Inset{left: 9 right: 9}
+                                            ai_prompt := mod.widgets.HwTextInput{width: Fill height: 44 is_multiline: true padding: Inset{left: 8 right: 8 top: 4 bottom: 4} text: "EDM christmas music" empty_text: "What do you want to hear?"}
+                                            View{
+                                                width: Fit
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 6
+                                                align: Align{y: 0.5}
+                                                ai_length := mod.widgets.HwDropDown{width: 76 height: 28 labels: ["1 min", "2 min", "3 min", "5 min"]}
+                                                ai_model := mod.widgets.HwDropDown{width: 186 height: 28 labels: ["yue2-3b · non-commercial"]}
+                                                View{
+                                                    width: Fit
+                                                    height: Fit
+                                                    flow: Right
+                                                    spacing: 6
+                                                    align: Align{y: 0.5}
+                                                    ai_now_cap := mod.widgets.HwKey{width: Fit height: 30 inset: 3 flow: Right spacing: 6 align: Align{x: 0.5 y: 0.5} padding: Inset{left: 10 right: 10} draw_bg +: {role: 43.0}
+                                                        ai_now_icon := mod.widgets.HwKeyButton{text: "\u{f0d0}" width: Fit draw_text +: {text_style: theme.font_icons{font_size: 10.0}}}
+                                                        ai_now := mod.widgets.HwKeyText{text: "Generate now" width: Fit draw_text +: {text_style: theme.font_bold{font_size: 10.5}}}
+                                                    }
+                                                    ai_auto := mod.widgets.HwPanelCheck{text: "Auto"}
+                                                    ai_skip_cap := mod.widgets.HwKey{width: Fit height: 30 inset: 3 flow: Right spacing: 6 align: Align{x: 0.5 y: 0.5} padding: Inset{left: 10 right: 10}
+                                                        ai_skip_icon := mod.widgets.HwKeyButton{text: "\u{f051}" width: Fit draw_text +: {text_style: theme.font_icons{font_size: 10.0}}}
+                                                        ai_skip := mod.widgets.HwKeyText{text: "Skip" width: Fit draw_text +: {text_style: theme.font_bold{font_size: 10.5}}}
+                                                    }
+                                                    ai_cancel_cap := mod.widgets.HwKey{visible: false width: Fit height: 30 inset: 3 align: Align{x: 0.5 y: 0.5} padding: Inset{left: 10 right: 10}
+                                                        ai_cancel := mod.widgets.HwKeyText{text: "Cancel" width: Fit draw_text +: {text_style: theme.font_bold{font_size: 10.5}}}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // Only when something went wrong.
+                                        ai_status := mod.widgets.HwPanelText{visible: false width: Fill padding: Inset{left: 12 right: 9} max_lines: 1 text_overflow: TextOverflow.Ellipsis text: ""}
+                                        ai_empty := mod.widgets.HwPanelText{width: Fill padding: Inset{left: 12 top: 8} text: "No songs yet. Type what you want to hear and press Generate now: a song takes about a minute."}
+                                        // Every AI song in play order, then the ones being made (ai_table.rs).
+                                        ai_table := mod.widgets.AiTable{}
+                                    }
                                 }
                                 // The AI stylist's chat (theme_manager.rs).
                                 c_chat := View{
@@ -781,6 +913,7 @@ script_mod! {
                     // The Spotify audio connection's explainer (connection.rs).
                     connection_sheet := mod.widgets.HwConnectionSheet{}
                     conn_tip := CalloutTooltip{}
+                    ai_tip := CalloutTooltip{}
                     // The torch (torch.rs): carried over the device, it lights it.
                     torch := mod.widgets.HwTorch{visible: false}
                     // Send feedback: the message, the screenshot and the system
@@ -998,6 +1131,20 @@ pub struct App {
     model: Model,
     #[rust]
     workers: Option<Workers>,
+    /// AI music (`ai_music.rs`, `ai_page.rs`).
+    #[rust]
+    ai: AiMode,
+    /// The model picker shows `ai.models`.
+    #[rust]
+    ai_models_shown: bool,
+    /// The AI page's frames while a song is made (its bar, the elapsed time).
+    #[rust]
+    ai_frame: NextFrame,
+    #[rust]
+    ai_frame_at: f64,
+    /// The AI page's tooltip shown, if any.
+    #[rust]
+    ai_tip_shown: Option<String>,
     #[rust]
     art: Art,
     /// Waits for typing to settle before the catalog is searched.
@@ -1135,6 +1282,15 @@ pub struct App {
 }
 
 impl App {
+    /// Songs dragged out of a list (drag_out.rs); a refusal or a partial
+    /// drag says why in the status line.
+    fn drag_out(&mut self, cx: &mut Cx, window: WindowId, paths: Vec<Option<String>>) {
+        if let Some(message) = drag_out::start(cx, window, paths, &self.model.theme) {
+            self.model.error = Some(message);
+            self.model.changed();
+        }
+    }
+
     /// 1 when the output list leads with "Choose a device" (devices known,
     /// none active, nothing picked), else 0: the list row minus this is the
     /// device's index.
@@ -1713,6 +1869,7 @@ impl App {
     /// Everything outside the two lists, from the model. Cheap: labels are
     /// only set when their text changed.
     fn update_chrome(&mut self, cx: &mut Cx) {
+        self.update_ai_page(cx);
         let (title, _) = self.model.heading();
         self.set_label(cx, live_id!(title), ids!(title), &title);
         // The list's name rides on its tab key, cut short.
@@ -1970,6 +2127,7 @@ impl App {
 
     /// Act on what the widgets asked for.
     fn after_event(&mut self, cx: &mut Cx) {
+        self.ai_tick(cx);
         let requests = std::mem::take(&mut self.model.requests);
         let mut redraw = requests.redraw;
         for command in requests.transport {
@@ -2027,6 +2185,9 @@ impl App {
         }
         if requests.columns {
             self.save(Setting::Columns, self.model.columns.serialize());
+        }
+        if requests.sorts {
+            self.save(Setting::Sorts, self.model.serialize_sorts());
         }
         if requests.catalog && self.model.system_ready() {
             if !self.catalog_timer.is_empty() {
@@ -2280,6 +2441,8 @@ impl App {
                     }
                 }
                 Message::Saved { setting: Setting::UpNext, text } => self.restore_up_next(cx, &text),
+                Message::Saved { setting: Setting::Sorts, text } => self.model.parse_sorts(&text),
+                Message::Saved { setting: Setting::AiMusic, text } => self.ai_restore(cx, &text),
                 Message::Saved { setting: Setting::Visualizer, text } => self.restore_milk(cx, &text),
                 // The last run's queue, parked: shown, steering nothing,
                 // unless something was played before it was read.
@@ -2300,6 +2463,7 @@ impl App {
                 }
                 Message::Folders(folders) => self.model.set_folders(folders),
                 Message::LocalEnded { generation } => self.model.local_ended(generation),
+                Message::AiMusic(event) => self.ai_message(cx, event),
                 Message::LocalError { generation, error } => {
                     log!("amp: {error}");
                     self.model.error = Some(error);
@@ -2758,6 +2922,7 @@ impl MatchEvent for App {
         self.popout_actions(cx, actions);
         self.torch_actions(cx, actions);
         self.connection_actions(cx, actions);
+        self.ai_actions(cx, actions);
         let search = self.ui.text_input(cx, ids!(search));
         if let Some(query) = search.changed(actions) {
             self.model.set_query(&query);
@@ -2817,6 +2982,12 @@ impl MatchEvent for App {
         if let Some(row) = tracks.radio(actions) {
             self.radio(Some(row));
         }
+        for table in [&tracks, &plist] {
+            if let Some((rows, window)) = table.drag_out(actions) {
+                let paths = rows.iter().filter_map(|row| self.model.row_uri(*row)).map(|uri| drag_out::draggable_path(&self.model.index, &uri)).collect();
+                self.drag_out(cx, window, paths);
+            }
+        }
         if let Some((at, abs)) = self.ui.library_list(cx, ids!(library)).menu(actions) {
             let commands = self.model.playlist_commands(at);
             self.open_menu(cx, commands, abs);
@@ -2834,6 +3005,11 @@ impl MatchEvent for App {
             Some(UpNextAction::Jump(at)) => self.model.jump(at),
             Some(UpNextAction::Remove(at)) => self.model.edit_queue(|queue| drop(queue.remove(at))),
             Some(UpNextAction::Move { from, to }) => self.model.edit_queue(|queue| queue.move_to(from, to)),
+            Some(UpNextAction::DragOut(at, window)) => {
+                let uri = self.model.queue.upcoming().nth(at).map(|(_, item)| item.uri.clone());
+                let path = uri.and_then(|uri| drag_out::draggable_path(&self.model.index, &uri));
+                self.drag_out(cx, window, vec![path]);
+            }
             Some(UpNextAction::Menu(at, abs)) => {
                 self.up_next_menu = Some(at);
                 let rows = up_next_commands().iter().map(|(label, id)| MenuRow::new(*id, label)).collect();
@@ -3019,6 +3195,7 @@ impl AppMain for App {
         crate::layout::script_mod(vm);
         crate::eq::script_mod(vm);
         crate::micro::script_mod(vm);
+        crate::lyrics_view::script_mod(vm);
         crate::connection::script_mod(vm);
         makepad_app_aichat::script_mod(vm);
         makepad_widgets_feedback::script_mod(vm);
@@ -3034,6 +3211,12 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        // Quit: the workers that would outlive the app end, and are waited for.
+        if let Event::Shutdown = event {
+            if let Some(workers) = self.workers.take() {
+                workers.shutdown();
+            }
+        }
         // A window manager parks the window small (or returns it to full
         // size): the compact-forms contract, platform/src/ime.rs.
         if let Event::Custom(json) = event {
@@ -3300,6 +3483,7 @@ impl AppMain for App {
         // After the device: the pop-out shows what it drew this frame.
         self.popout_event(cx, event);
         self.connection_event(cx, event);
+        self.ai_page_event(cx, event);
         self.after_event(cx);
     }
 }

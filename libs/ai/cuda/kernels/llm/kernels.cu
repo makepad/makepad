@@ -3040,22 +3040,28 @@ extern "C" cudaError_t mkllm_quantize_mmq_d4(
     return cudaGetLastError();
 }
 
+// gridDim.y is capped at 65535; the column (M) loops below stride by the
+// launched y-grid so GEMMs with more columns than that (e.g. a long im2col
+// slab) still cast every column.
+#define MKLLM_CAST_MAX_GRID_Y 65535
+
 // Strided f32 -> contiguous bf16 (activation cast for GEMM), 2D [K, M].
 static __global__ void mkllm_cast_f32_bf16_kernel(
         const uint8_t * __restrict__ src, __nv_bfloat16 * __restrict__ dst,
         int K, int M, size_t src_nb0, size_t src_nb1) {
     const int k = blockIdx.x * blockDim.x + threadIdx.x;
-    const int m = blockIdx.y;
-    if (k >= K || m >= M) return;
-    const float v = *(const float *) (src + (size_t) m * src_nb1 + (size_t) k * src_nb0);
-    dst[(size_t) m * K + k] = __float2bfloat16(v);
+    if (k >= K) return;
+    for (int m = blockIdx.y; m < M; m += gridDim.y) {
+        const float v = *(const float *) (src + (size_t) m * src_nb1 + (size_t) k * src_nb0);
+        dst[(size_t) m * K + k] = __float2bfloat16(v);
+    }
 }
 
 extern "C" cudaError_t mkllm_cast_f32_bf16(
         const void * src, void * dst, int K, int M,
         size_t src_nb0, size_t src_nb1, cudaStream_t stream) {
     dim3 block(256);
-    dim3 grid((K + 255) / 256, M);
+    dim3 grid((K + 255) / 256, M < MKLLM_CAST_MAX_GRID_Y ? M : MKLLM_CAST_MAX_GRID_Y);
     mkllm_cast_f32_bf16_kernel<<<grid, block, 0, stream>>>(
         (const uint8_t *) src, (__nv_bfloat16 *) dst, K, M, src_nb0, src_nb1);
     return cudaGetLastError();
@@ -3084,22 +3090,23 @@ static __global__ void mkllm_cast_f32_f16_split_kernel(
         const uint8_t * __restrict__ src, __half * __restrict__ hi, __half * __restrict__ lo,
         int K, int M, size_t src_nb0, size_t src_nb1) {
     const int k = blockIdx.x * blockDim.x + threadIdx.x;
-    const int m = blockIdx.y;
-    if (k >= K || m >= M) return;
-    const float v = *(const float *) (src + (size_t) m * src_nb1 + (size_t) k * src_nb0);
-    const float clamped = fminf(fmaxf(v, -65504.0f), 65504.0f);
-    const __half h = __float2half_rn(clamped);
-    const float r = fminf(fmaxf(v - __half2float(h), -65504.0f), 65504.0f);
-    const size_t o = (size_t) m * K + k;
-    hi[o] = h;
-    lo[o] = __float2half_rn(r);
+    if (k >= K) return;
+    for (int m = blockIdx.y; m < M; m += gridDim.y) {
+        const float v = *(const float *) (src + (size_t) m * src_nb1 + (size_t) k * src_nb0);
+        const float clamped = fminf(fmaxf(v, -65504.0f), 65504.0f);
+        const __half h = __float2half_rn(clamped);
+        const float r = fminf(fmaxf(v - __half2float(h), -65504.0f), 65504.0f);
+        const size_t o = (size_t) m * K + k;
+        hi[o] = h;
+        lo[o] = __float2half_rn(r);
+    }
 }
 
 extern "C" cudaError_t mkllm_cast_f32_f16_split(
         const void * src, void * hi, void * lo, int K, int M,
         size_t src_nb0, size_t src_nb1, cudaStream_t stream) {
     dim3 block(256);
-    dim3 grid((K + 255) / 256, M);
+    dim3 grid((K + 255) / 256, M < MKLLM_CAST_MAX_GRID_Y ? M : MKLLM_CAST_MAX_GRID_Y);
     mkllm_cast_f32_f16_split_kernel<<<grid, block, 0, stream>>>(
         (const uint8_t *) src, (__half *) hi, (__half *) lo, K, M, src_nb0, src_nb1);
     return cudaGetLastError();
@@ -3991,6 +3998,12 @@ extern "C" cudaError_t mkllm_upscale_bilinear(
 #define MKLLM_UNARY_EXPM1 14
 #define MKLLM_UNARY_SOFTPLUS 15
 #define MKLLM_UNARY_GELU_ERF 16
+// The standalone ggml ops GGML_OP_SIN / GGML_OP_COS / GGML_OP_SQR (not
+// GGML_OP_UNARY members). The executor routes them through this kernel
+// under codes above the ggml unary range so they share its launch.
+#define MKLLM_UNARY_SIN 64
+#define MKLLM_UNARY_COS 65
+#define MKLLM_UNARY_SQR 66
 
 static __device__ __forceinline__ float mkllm_unary_apply(int op, float x) {
     switch (op) {
@@ -4012,6 +4025,9 @@ static __device__ __forceinline__ float mkllm_unary_apply(int op, float x) {
         case MKLLM_UNARY_EXPM1: return expm1f(x);
         case MKLLM_UNARY_SOFTPLUS: return x > 20.0f ? x : log1pf(expf(x));
         case MKLLM_UNARY_GELU_ERF: return 0.5f * x * (1.0f + erff(x * 0.70710678118654752440f));
+        case MKLLM_UNARY_SIN: return sinf(x);
+        case MKLLM_UNARY_COS: return cosf(x);
+        case MKLLM_UNARY_SQR: return x * x;
         default: return x;
     }
 }
@@ -4028,6 +4044,38 @@ extern "C" cudaError_t mkllm_unary(
     const int block = 256;
     const int grid = (int) ((n + block - 1) / block);
     mkllm_unary_kernel<<<grid, block, 0, stream>>>((const float *) x, (float *) dst, n, op);
+    return cudaGetLastError();
+}
+
+// ggml GGML_OP_IM2COL, 1D (is_2D = 0), f32 -> f32. Contiguous src
+// [IW, IC, N] (time fastest); contiguous dst [IC*KW, OW, N] with
+// dst[n][ow][ic*KW + kw] = src[n][ic][ow*s0 + kw*d0 - p0], zero outside.
+// One thread per destination element: writes coalesce, reads gather.
+static __global__ void mkllm_im2col_1d_f32_kernel(
+        const float * __restrict__ src, float * __restrict__ dst,
+        int iw, int ic, int kw, int ow, int s0, int p0, int d0, size_t total) {
+    const size_t i = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+    const size_t cols = (size_t) ic * kw;
+    const int col = (int) (i % cols);
+    const size_t rest = i / cols;
+    const int o = (int) (rest % (size_t) ow);
+    const size_t n = rest / (size_t) ow;
+    const int c = col / kw;
+    const int k = col - c * kw;
+    const int x = o * s0 + k * d0 - p0;
+    dst[i] = (x >= 0 && x < iw) ? src[(n * ic + c) * (size_t) iw + x] : 0.0f;
+}
+
+extern "C" cudaError_t mkllm_im2col_1d_f32(
+        const void * src, void * dst, int iw, int ic, int n, int kw, int ow,
+        int s0, int p0, int d0, cudaStream_t stream) {
+    const size_t total = (size_t) ic * kw * ow * n;
+    if (total == 0) return cudaSuccess;
+    const int block = 256;
+    const size_t grid = (total + block - 1) / block;
+    mkllm_im2col_1d_f32_kernel<<<(unsigned) grid, block, 0, stream>>>(
+        (const float *) src, (float *) dst, iw, ic, kw, ow, s0, p0, d0, total);
     return cudaGetLastError();
 }
 

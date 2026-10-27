@@ -345,6 +345,9 @@ pub struct DrawShaderInputs {
     /// Packed byte stride. Equals `total_slots * 4` whenever every input is F32xN.
     pub stride_bytes: usize,
     max_byte_align: usize,
+    /// Each input's index by id, built as the inputs are placed: a uniform write by id is one
+    /// probe, not a scan of every input (`find`).
+    by_id: LiveIdMap<LiveId, u32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -627,7 +630,20 @@ impl DrawShaderInputs {
             total_slots: 0,
             stride_bytes: 0,
             max_byte_align: 1,
+            by_id: LiveIdMap::default(),
         }
+    }
+
+    /// The input of this id (the first, if a layout repeats one).
+    #[inline]
+    pub fn find(&self, id: LiveId) -> Option<&DrawShaderInput> {
+        self.by_id.get(&id).and_then(|index| self.inputs.get(*index as usize))
+    }
+
+    /// Place an input whose offsets the caller computed.
+    pub fn push_placed(&mut self, input: DrawShaderInput) {
+        self.by_id.entry(input.id).or_insert(self.inputs.len() as u32);
+        self.inputs.push(input);
     }
 
     pub fn has_compact(&self) -> bool {
@@ -670,7 +686,7 @@ impl DrawShaderInputs {
         byte_offset: usize,
         byte_size: usize,
     ) {
-        self.inputs.push(DrawShaderInput {
+        self.push_placed(DrawShaderInput {
             id,
             offset,
             slots,
@@ -1099,7 +1115,9 @@ impl CxDrawShaderMapping {
             vm.object_method(object, name).as_object().and_then(|f| vm.heap().fn_script_ip(f))
         }
         if cfg!(not(target_arch = "wasm32")) {
-            [id!(fragment), id!(pixel), id!(vertex)]
+            // `pixel` first: every DrawQuad derivative inherits DrawQuad's `fragment`, so its
+            // location named them all draw_quad.rs:62; the pixel fn is the shader's own code
+            [id!(pixel), id!(fragment), id!(vertex)]
                 .iter()
                 .find_map(|m| vm.ip_to_loc(fn_ip(vm, object, *m)?).map(|loc| loc.to_string()))
         } else {
@@ -1644,7 +1662,7 @@ impl CxDrawShaderMapping {
                     }
                     instances.push(field.ident.0, ty, None);
                     if let LiveFieldKind::Live = live_field_kind {
-                        live_instances.inputs.push(instances.inputs.last().unwrap().clone());
+                        live_instances.push_placed(instances.inputs.last().unwrap().clone());
                     }
                 }
                 DrawShaderFieldKind::Uniform {block_ident, ..} => {

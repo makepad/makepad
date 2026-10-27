@@ -4,10 +4,13 @@ use crate::wide_desktop;
 use super::{dma_buf, drm_sys as drm, gpu_bridge::GpuBridge, kms::*,
     Command, Frame, Key, Snapshot, State};
 use super::super::{io, lock};
-use crate::{backend::vulkan::{Device, Image}, direct::*, session::TextureObj, types::{format, usage}};
+use crate::{backend::vulkan::{buffer_usage, Buffer, Device, Image}, direct::*, session::TextureObj, types::{format, usage}};
 use makepad_vulkan::vk;
 use std::{collections::{HashMap, HashSet, VecDeque}, fs::{File, OpenOptions},
     os::fd::{AsRawFd, IntoRawFd}, path::{Path, PathBuf}, sync::{Arc, atomic::Ordering}, time::{Duration, Instant}};
+
+/// A flip outstanding this long (many refresh periods at any mode) is a stalled head.
+const FLIP_STALL: Duration = Duration::from_millis(500);
 
 fn error(e: vk::Result) -> String { format!("Vulkan display: {e:?}") }
 fn uuid(instance: &makepad_vulkan::Instance, physical: vk::PhysicalDevice) -> String {
@@ -154,8 +157,24 @@ impl Drop for Card {
     fn drop(&mut self) {
         self.release();
         let fd = self.file.as_raw_fd();
-        for saved in &mut self.saved {
+        // NVIDIA's display release gives the heads back to the console itself; a legacy
+        // SetCrtc of the saved state on top fails (EINVAL) and leaves the head mid-commit for
+        // the next master (the driver's flip event timeout, then nv_flip == NULL)
+        let restore = if self.mesa { std::mem::take(&mut self.saved) } else { Vec::new() };
+        for mut saved in restore {
             let c = &mut saved.crtc;
+            // the state saved at start shows the previous master's framebuffer when that was
+            // another desktop (a WM restart): it is gone with its process, and setting it fails
+            // (EINVAL) and leaves the head mid-flip for the next master (the driver's flip event
+            // timeout). Nothing to give back then: the next master sets its own state.
+            if c.buffer_id != 0 {
+                let fb = unsafe { drm::drmModeGetFB(fd,c.buffer_id) };
+                if fb.is_null() {
+                    eprintln!("[hal-direct] CRTC {}: the saved framebuffer {} is gone (the previous desktop's); not restored",c.crtc_id,c.buffer_id);
+                    continue;
+                }
+                unsafe { drm::drmModeFreeFB(fb); }
+            }
             let mode = if c.mode_valid != 0 { &mut c.mode as *mut _ } else { std::ptr::null_mut() };
             if unsafe { drm::drmModeSetCrtc(fd,c.crtc_id,c.buffer_id,c.x,c.y,saved.connectors.as_mut_ptr(),saved.connectors.len() as i32,mode) } < 0 {
                 eprintln!("[hal-direct] restore CRTC {}: {}",c.crtc_id,std::io::Error::last_os_error());
@@ -186,11 +205,11 @@ impl CopyJob {
         self.dev.raw.reset_command_buffer(self.cb,vk::CommandBufferResetFlags::empty()).map_err(error)?;
         self.dev.raw.begin_command_buffer(self.cb,&vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(error)
     } }
-    fn submit(&mut self,signal:vk::Semaphore,image:Arc<Image>) -> Result<(),String> {
+    fn submit(&mut self,signal:Option<vk::Semaphore>,image:Arc<Image>) -> Result<(),String> {
         unsafe {
             self.dev.raw.end_command_buffer(self.cb).map_err(error)?;
             self.dev.raw.reset_fences(&[self.fence]).map_err(error)?;
-            let commands = [self.cb]; let signals = [signal];
+            let commands = [self.cb]; let signals:Vec<_> = signal.into_iter().collect();
             let submit = vk::SubmitInfo::default().command_buffers(&commands).signal_semaphores(&signals);
             let _queue = lock(&self.dev.queue_lock);
             self.dev.raw.queue_submit(self.dev.queue,&[submit],self.fence).map_err(error)?;
@@ -220,7 +239,7 @@ fn transition(dev:&Device,cb:vk::CommandBuffer,image:vk::Image,old:vk::ImageLayo
 /// copied, not blitted: a copy is the cheaper GPU path, and across GPUs half the bytes of
 /// a clear plus a blit. `same_format`: both images have the same Vulkan format.
 fn blit_full(dev:&Device,cb:vk::CommandBuffer,source:vk::Image,source_layout:vk::ImageLayout,source_size:[u32;2],
-    destination:vk::Image,destination_layout:vk::ImageLayout,size:[u32;2],placement:Option<wide_desktop::SliceRect>,same_format:bool) {
+    destination:vk::Image,destination_layout:vk::ImageLayout,size:[u32;2],placement:Option<wide_desktop::SliceRect>,same_format:bool) -> ScanoutOp {
     let sub = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1);
     let (src,dst) = if let Some(r) = placement.filter(|r| r.x + r.width <= source_size[0] && r.y + r.height <= source_size[1]) {
         ([r.x,r.y,r.width,r.height],[0,0,size[0],size[1]])
@@ -242,14 +261,66 @@ fn blit_full(dev:&Device,cb:vk::CommandBuffer,source:vk::Image,source_layout:vk:
             dev.raw.cmd_copy_image(cb,source,source_layout,destination,destination_layout,&[copy]);
         } else {
             let blit = vk::ImageBlit::default().src_subresource(sub).dst_subresource(sub).src_offsets(offsets(src)).dst_offsets(offsets(dst));
-            dev.raw.cmd_blit_image(cb,source,source_layout,destination,destination_layout,&[blit],vk::Filter::NEAREST);
+            // A desktop shown smaller than it is (a virtual or mirrored desktop on a smaller
+            // panel) is filtered: nearest would drop whole pixel columns (text strokes).
+            let filter = if dst[2] < src[2] || dst[3] < src[3] { vk::Filter::LINEAR } else { vk::Filter::NEAREST };
+            dev.raw.cmd_blit_image(cb,source,source_layout,destination,destination_layout,&[blit],filter);
         }
     }
+    ScanoutOp { source: src, destination: dst, copied: same_format && src[2] == dst[2] && src[3] == dst[3] }
+}
+
+/// What one `blit_full` did: the source rectangle, where it landed in the destination, and
+/// whether it was a 1:1 copy (else a blit, which scales when the two rectangles differ).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ScanoutOp { pub source: [u32;4], pub destination: [u32;4], pub copied: bool }
+
+/// `cap scanout` (framecap): one output's next presented image, read back from the swapchain
+/// image after the presenter's copy into it, i.e. the pixels the display plane scans out.
+pub(crate) struct Scanout {
+    pub output: String, pub mode: [u32;2], pub format: vk::Format,
+    /// the desktop frame the copy read (its size), and the copy itself
+    pub frame: [u32;2], pub op: ScanoutOp,
+    /// across GPUs: the frame first crossed the bridge into a local image of the mode's size
+    pub bridged: bool,
+    /// RGBA8 rows of `mode` (10-bit formats are reduced to 8 bits)
+    pub rgba: Vec<u8>,
+    /// the desktop frame itself, RGBA8 rows of `frame`, read in the same submission (same GPU only)
+    pub frame_rgba: Option<Vec<u8>>,
+}
+type ScanoutReply = std::sync::mpsc::Sender<Result<Scanout,String>>;
+static SCANOUT: std::sync::Mutex<Vec<ScanoutReply>> = std::sync::Mutex::new(Vec::new());
+
+/// Ask for the next presented image of any output (the first that presents answers).
+pub(crate) fn request_scanout() -> std::sync::mpsc::Receiver<Result<Scanout,String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    lock(&SCANOUT).push(tx);
+    rx
+}
+
+/// Swapchain pixels as RGBA8.
+fn scanout_rgba(format: vk::Format, bytes: &[u8]) -> Result<Vec<u8>,String> {
+    let mut out = Vec::with_capacity(bytes.len());
+    for p in bytes.chunks_exact(4) {
+        match format {
+            vk::Format::B8G8R8A8_UNORM | vk::Format::B8G8R8A8_SRGB => out.extend_from_slice(&[p[2],p[1],p[0],255]),
+            vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB | vk::Format::A8B8G8R8_UNORM_PACK32 => out.extend_from_slice(&[p[0],p[1],p[2],255]),
+            vk::Format::A2B10G10R10_UNORM_PACK32 => {
+                let v = u32::from_le_bytes([p[0],p[1],p[2],p[3]]);
+                let c = |shift: u32| (((v >> shift) & 0x3ff) >> 2) as u8;
+                out.extend_from_slice(&[c(0),c(10),c(20),255]);
+            }
+            other => return Err(format!("scanout readback: no decoder for {other:?}")),
+        }
+    }
+    Ok(out)
 }
 
 struct Peer {
     source: Arc<Device>, destination: Arc<Device>, bridge: Option<GpuBridge>, local: Arc<Image>,
     sent: u64, received: u64, keep: Option<Arc<Image>>, valid: bool,
+    /// the last frame's copy into the bridge (`cap scanout` reports it)
+    sent_op: Option<ScanoutOp>,
     /// profile: when the last send / receive was submitted
     sent_at: u64, received_at: u64,
 }
@@ -262,7 +333,7 @@ impl Peer {
         let local = Image::new(destination.clone(),TextureObj { format:format::BGRA8,w:size[0],h:size[1],depth:1,mips:1,
             usage:usage::RENDER_TARGET | usage::SAMPLED,bytes:0,imported:false,uploaded:0,lent:None })?;
         let bridge = GpuBridge::new(&source,&destination,vk::Extent2D { width:size[0],height:size[1] })?;
-        Ok(Self { source,destination,bridge:Some(bridge),local,sent:0,received:0,keep:None,valid:false,sent_at:0,received_at:0 })
+        Ok(Self { source,destination,bridge:Some(bridge),local,sent:0,received:0,keep:None,valid:false,sent_op:None,sent_at:0,received_at:0 })
     }
     fn service(&mut self,frame:&Frame,placement:Option<wide_desktop::SliceRect>) -> Result<bool,String> {
         let bridge = self.bridge.as_mut().unwrap();
@@ -288,9 +359,11 @@ impl Peer {
             if self.sent != frame.generation && bridge.writable(&self.source,&self.destination)? {
                 let image = &frame.image;
                 let size = bridge.extent();
+                let mut op = None;
                 bridge.send_commands(&self.source,|cb,shared| {
-                    blit_full(&self.source,cb,image.image,vk::ImageLayout::TRANSFER_SRC_OPTIMAL,[image.desc.w,image.desc.h],shared,vk::ImageLayout::GENERAL,[size.width,size.height],placement,true); Ok(())
+                    op = Some(blit_full(&self.source,cb,image.image,vk::ImageLayout::TRANSFER_SRC_OPTIMAL,[image.desc.w,image.desc.h],shared,vk::ImageLayout::GENERAL,[size.width,size.height],placement,true)); Ok(())
                 })?;
+                self.sent_op = op;
                 self.keep = Some(image.clone()); self.sent = frame.generation; self.sent_at = crate::clock_ns();
             }
         }
@@ -314,6 +387,8 @@ struct Output {
     acquire:vk::Fence, acquired:Option<u32>, acquire_ready:bool, job:CopyJob, peer:Option<Peer>,
     placement:Option<wide_desktop::SliceRect>, generation:u64, serial:u64, pending:Option<u64>,
     complete:u64, last_present:u64, rebuild:bool,
+    /// The swapchain images can be copied from (`cap scanout`).
+    readable:bool,
     progress:(u64,u64,Option<u32>,bool), progress_at:Instant,
     /// profile: the present's submit, the cross-GPU receive's submit
     present_at:u64, peer_at:u64,
@@ -322,7 +397,7 @@ impl Output {
     fn new(dev:Arc<Device>,compositor:Arc<Device>,connector:DrmConnector,display:vk::DisplayKHR,requested:Option<String>,mode:DisplayMode,plane:PlaneCandidate) -> Result<Self,String> {
         let job = CopyJob::new(dev.clone())?;
         let mut out = Self { dev,connector,display,requested,error:None,plane:plane.plane_index,mode,format:vk::Format::UNDEFINED,surface:vk::SurfaceKHR::null(),chain:vk::SwapchainKHR::null(),images:Vec::new(),signals:Vec::new(),
-            acquire:vk::Fence::null(),acquired:None,acquire_ready:false,job,peer:None,placement:None,generation:0,serial:0,pending:None,complete:0,last_present:0,rebuild:false,
+            acquire:vk::Fence::null(),acquired:None,acquire_ready:false,job,peer:None,placement:None,generation:0,serial:0,pending:None,complete:0,last_present:0,rebuild:false,readable:false,
             progress:(0,0,None,false),progress_at:Instant::now(),present_at:0,peer_at:0 };
         out.surface = create_plane_surface(&out.dev.instance,&out.mode,&plane)?;
         if !unsafe { out.dev.instance.get_physical_device_surface_support(out.dev.physical,out.dev.family,out.surface) }.map_err(|e| format!("surface support: {}",error(e)))? { return Err("graphics queue cannot present to the display plane".into()); }
@@ -336,12 +411,14 @@ impl Output {
         });
         let format = choose_output_format(&formats)?;
         out.format = format.format;
+        out.readable = caps.supported_usage_flags.contains(vk::ImageUsageFlags::TRANSFER_SRC);
+        let usage = if out.readable { vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC } else { vk::ImageUsageFlags::TRANSFER_DST };
         let count = if caps.max_image_count == 0 { caps.min_image_count + 1 } else { (caps.min_image_count+1).min(caps.max_image_count) };
         let alpha = [vk::CompositeAlphaFlagsKHR::OPAQUE,vk::CompositeAlphaFlagsKHR::INHERIT].into_iter().find(|a| caps.supported_composite_alpha.contains(*a)).ok_or("display has no opaque composite alpha")?;
         unsafe {
             out.chain = out.dev.raw.create_swapchain(&vk::SwapchainCreateInfoKHR::default().surface(out.surface).min_image_count(count)
                 .image_format(format.format).image_color_space(format.color_space).image_extent(out.mode.extent).image_array_layers(1)
-                .image_usage(vk::ImageUsageFlags::TRANSFER_DST).image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .image_usage(usage).image_sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .pre_transform(caps.current_transform).composite_alpha(alpha).present_mode(vk::PresentModeKHR::FIFO).clipped(true),None).map_err(|e| format!("create swapchain {}x{} @ {:.3} Hz: {}",out.mode.extent.width,out.mode.extent.height,out.mode.refresh_mhz as f64 / 1000.0,error(e)))?;
             out.images = out.dev.raw.get_swapchain_images(out.chain).map_err(error)?;
             for _ in &out.images { out.signals.push(out.dev.raw.create_semaphore(&vk::SemaphoreCreateInfo::default(),None).map_err(error)?); }
@@ -411,10 +488,13 @@ impl Output {
         self.job.begin()?;
         let destination = self.images[index as usize];
         transition(&self.dev,self.job.cb,destination,vk::ImageLayout::UNDEFINED,vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-        blit_full(&self.dev,self.job.cb,image.image,vk::ImageLayout::TRANSFER_SRC_OPTIMAL,[image.desc.w,image.desc.h],destination,vk::ImageLayout::TRANSFER_DST_OPTIMAL,self.size(),placement,self.format == vk::Format::B8G8R8A8_UNORM);
-        transition(&self.dev,self.job.cb,destination,vk::ImageLayout::TRANSFER_DST_OPTIMAL,vk::ImageLayout::PRESENT_SRC_KHR);
+        let op = blit_full(&self.dev,self.job.cb,image.image,vk::ImageLayout::TRANSFER_SRC_OPTIMAL,[image.desc.w,image.desc.h],destination,vk::ImageLayout::TRANSFER_DST_OPTIMAL,self.size(),placement,self.format == vk::Format::B8G8R8A8_UNORM);
+        let shot = self.record_scanout(destination,frame,op)?;
+        transition(&self.dev,self.job.cb,destination,if shot.is_some() { vk::ImageLayout::TRANSFER_SRC_OPTIMAL } else { vk::ImageLayout::TRANSFER_DST_OPTIMAL },vk::ImageLayout::PRESENT_SRC_KHR);
         let ready = self.signals[index as usize];
-        self.job.submit(ready,image)?;
+        let frame_format = image.desc.format;
+        self.job.submit(Some(ready),image)?;
+        if let Some((reply,staging,scanout)) = shot { self.finish_scanout(reply,staging,scanout,frame_format); }
         self.serial += 1;
         let ids = [self.serial]; let mut present_id = vk::PresentIdKHR::default().present_ids(&ids);
         let waits = [ready]; let chains = [self.chain]; let indices = [index];
@@ -431,6 +511,54 @@ impl Output {
         }
         self.generation = frame.generation; self.pending = Some(frame.generation); Ok(())
     }
+    /// A pending `cap scanout`: after the copy into the swapchain image, that image is copied
+    /// on into a host buffer in the same submission (read once its fence signals).
+    fn record_scanout(&self,destination:vk::Image,frame:&Frame,op:ScanoutOp) -> Result<Option<(ScanoutReply,[Option<Arc<Buffer>>;2],Scanout)>,String> {
+        let Some(reply) = lock(&SCANOUT).pop() else { return Ok(None); };
+        if !self.readable {
+            let _ = reply.send(Err(format!("{}: the display surface does not offer TRANSFER_SRC swapchain images",self.connector.name)));
+            return Ok(None);
+        }
+        let [w,h] = self.size();
+        let staging = Buffer::scratch(self.dev.clone(),w as u64 * h as u64 * 4,buffer_usage())?;
+        transition(&self.dev,self.job.cb,destination,vk::ImageLayout::TRANSFER_DST_OPTIMAL,vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+        let region = vk::BufferImageCopy::default()
+            .image_subresource(vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1))
+            .image_extent(vk::Extent3D { width:w,height:h,depth:1 });
+        // the frame the copy read, on the same GPU: for the pixel-identity check
+        let source = if self.peer.is_none() && matches!(frame.image.desc.format,format::BGRA8 | format::RGBA8) {
+            let [fw,fh] = [frame.image.desc.w,frame.image.desc.h];
+            let staging = Buffer::scratch(self.dev.clone(),fw as u64 * fh as u64 * 4,buffer_usage())?;
+            let region = region.image_extent(vk::Extent3D { width:fw,height:fh,depth:1 });
+            unsafe { self.dev.raw.cmd_copy_image_to_buffer(self.job.cb,frame.image.image,vk::ImageLayout::TRANSFER_SRC_OPTIMAL,staging.buffer,&[region]); }
+            Some(staging)
+        } else { None };
+        unsafe {
+            self.dev.raw.cmd_copy_image_to_buffer(self.job.cb,destination,vk::ImageLayout::TRANSFER_SRC_OPTIMAL,staging.buffer,&[region]);
+            self.dev.raw.cmd_pipeline_barrier(self.job.cb,vk::PipelineStageFlags::TRANSFER,vk::PipelineStageFlags::HOST,vk::DependencyFlags::empty(),
+                &[vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::TRANSFER_WRITE).dst_access_mask(vk::AccessFlags::HOST_READ)],&[],&[]);
+        }
+        let (frame_size,op,bridged) = match &self.peer {
+            Some(peer) => ([frame.image.desc.w,frame.image.desc.h],peer.sent_op.unwrap_or(op),true),
+            None => ([frame.image.desc.w,frame.image.desc.h],op,false),
+        };
+        Ok(Some((reply,[Some(staging),source],Scanout { output:self.connector.name.clone(),mode:[w,h],format:self.format,frame:frame_size,op,bridged,rgba:Vec::new(),frame_rgba:None })))
+    }
+    /// Debug tooling only: the presenter waits for this one submission (a few ms).
+    fn finish_scanout(&self,reply:ScanoutReply,staging:[Option<Arc<Buffer>>;2],mut scanout:Scanout,frame_format:u32) {
+        let result = (|| {
+            unsafe { self.dev.raw.wait_for_fences(&[self.job.fence],true,2_000_000_000) }.map_err(error)?;
+            let [out,source] = staging;
+            scanout.rgba = scanout_rgba(self.format,&out.unwrap().read(scanout.mode[0] as usize * scanout.mode[1] as usize * 4)?)?;
+            if let Some(source) = source {
+                let bytes = source.read(scanout.frame[0] as usize * scanout.frame[1] as usize * 4)?;
+                let vk_format = if frame_format == format::BGRA8 { vk::Format::B8G8R8A8_UNORM } else { vk::Format::R8G8B8A8_UNORM };
+                scanout.frame_rgba = Some(scanout_rgba(vk_format,&bytes)?);
+            }
+            Ok(scanout)
+        })();
+        let _ = reply.send(result);
+    }
     fn busy(&self,frame:Option<&Frame>) -> bool {
         self.job.pending || self.pending.is_some() || (self.acquired.is_some() && !self.acquire_ready)
             || frame.is_some_and(|f| f.generation != self.generation)
@@ -439,6 +567,12 @@ impl Output {
 impl Drop for Output {
     fn drop(&mut self) {
         // Executed on the display worker, never under the HAL or shell state locks.
+        // The last flip completes before its swapchain (and the display) goes: a flip still in
+        // flight when the display is released completes into freed driver state (nvidia-drm:
+        // "nv_flip == NULL", then a flip event timeout on the head's next commit).
+        if self.dev.present_wait && self.serial > 0 {
+            let _ = unsafe { self.dev.raw.wait_for_present(self.chain,self.serial,200_000_000) };
+        }
         let _queue = lock(&self.dev.queue_lock);
         let _ = unsafe { self.dev.raw.queue_wait_idle(self.dev.queue) };
         if self.acquired.is_some() && !self.acquire_ready
@@ -526,6 +660,71 @@ fn connector_requests(connectors:&[DrmConnector],modes:&HashMap<String,String>,g
     }).collect()
 }
 
+/// The virtual display's head (see `VirtualDisplay`): no connector, no swapchain. A frame
+/// presents on the first tick of the display's own clock after the GPU finished rendering it
+/// (an empty submission's fence on the render queue), one frame in flight: the desktop is paced
+/// like a FIFO panel at the virtual refresh, and the client never runs ahead of the GPU.
+struct VirtualHead {
+    display:VirtualDisplay, job:CopyJob,
+    generation:u64, pending:Option<u64>, complete:u64, last_present:u64,
+    /// The tick the pending frame shows at (once its fence has signalled).
+    due:u64,
+    /// The clock's phase: the ticks are `phase + k * period`.
+    phase:u64,
+}
+impl VirtualHead {
+    fn new(dev:Arc<Device>,display:VirtualDisplay) -> Result<Self,String> {
+        eprintln!("[hal-direct] virtual display {}x{} {:.3} Hz, panels {}",display.width,display.height,display.refresh_hz(),display.panels.as_str());
+        Ok(Self { display,job:CopyJob::new(dev)?,generation:0,pending:None,complete:0,last_present:0,due:0,phase:crate::clock_ns() })
+    }
+    fn period(&self) -> u64 { 1_000_000_000_000 / u64::from(self.display.refresh_mhz.max(1)) }
+    /// The first tick after `t`.
+    fn tick_after(&self,t:u64) -> u64 { let p = self.period(); self.phase + (t.saturating_sub(self.phase) / p + 1) * p }
+    /// A size or panels change keeps the clock; a refresh change starts it again from now.
+    fn change(&mut self,display:VirtualDisplay) {
+        if display.refresh_mhz != self.display.refresh_mhz { self.phase = crate::clock_ns(); }
+        if display != self.display {
+            eprintln!("[hal-direct] virtual display {}x{} {:.3} Hz, panels {}",display.width,display.height,display.refresh_hz(),display.panels.as_str());
+        }
+        self.display = display;
+    }
+    fn service(&mut self,frame:Option<&Frame>) -> Result<(),String> {
+        let now = crate::clock_ns();
+        if let Some(generation) = self.pending {
+            if now < self.due { return Ok(()); }
+            // Not rendered by its tick: it shows on the first tick after the GPU is done.
+            if !self.job.done()? { self.due = self.tick_after(now); return Ok(()); }
+            self.pending = None; self.complete = generation;
+            if crate::profile::on() && self.last_present != 0 {
+                crate::profile::record(crate::profile::Metric::PresentInterval,self.due - self.last_present);
+            }
+            self.last_present = self.due;
+        }
+        let Some(frame) = frame.filter(|f| f.generation != self.generation) else { return Ok(()); };
+        self.job.begin()?;
+        self.job.submit(None,frame.image.clone())?;
+        self.due = self.tick_after(now.max(self.last_present));
+        self.generation = frame.generation; self.pending = Some(frame.generation);
+        Ok(())
+    }
+}
+
+/// What paces the desktop: the pacing output's present state, or the virtual head's.
+#[derive(Clone,Copy)]
+struct Pace { generation:u64, complete:u64, last_present:u64, refresh_mhz:u32 }
+
+/// `MAKEPAD_VIRTUAL_DISPLAY`: `WxH@Hz [mirror|off]` (default mirror), set by the session from
+/// the saved display layout; empty or absent = the panels' own modes.
+fn virtual_from_env() -> Option<VirtualDisplay> {
+    let value = std::env::var("MAKEPAD_VIRTUAL_DISPLAY").ok()?;
+    let mut words = value.split_whitespace();
+    let mode = words.next()?;
+    match VirtualDisplay::parse(mode,words.next().unwrap_or("mirror")) {
+        Ok(display) => Some(display),
+        Err(e) => { eprintln!("[hal-direct] MAKEPAD_VIRTUAL_DISPLAY={value:?}: {e}; the panels' own modes stand"); None }
+    }
+}
+
 struct Context {
     compositor:Arc<Device>, devices:HashMap<vk::PhysicalDevice,Arc<Device>>, physical:Vec<vk::PhysicalDevice>,
     cards:HashMap<PathBuf,Card>, outputs:Vec<Output>, failed:Vec<Failed>,
@@ -538,7 +737,9 @@ struct Context {
     /// Frames handed to the outputs whose present has not completed on the pacing output yet,
     /// with the callback that reports it (oldest first).
     presenting:VecDeque<(u64,super::Presented)>,
-    sequence:u64, demand:bool, awaiting:bool,
+    sequence:u64, demand:bool, awaiting:bool, credit_due:u64,
+    /// The virtual display while it is the desktop (see `VirtualDisplay`).
+    virtual_head:Option<VirtualHead>,
 }
 impl Context {
     fn new(compositor:Arc<Device>) -> Result<Self,String> {
@@ -547,9 +748,11 @@ impl Context {
         for arg in std::env::args() { if let Some(value) = arg.strip_prefix("-mode=").or_else(|| arg.strip_prefix("--mode=")) { mode = (value != "auto").then(|| value.to_owned()); } }
         let modes = wide_desktop::parse_mode_overrides(&std::env::var("MAKEPAD_DRM_MODES").unwrap_or_default()).into_iter().collect();
         let order = wide_desktop::parse_display_order(&std::env::var("MAKEPAD_DISPLAY_ORDER").unwrap_or_default());
+        let virtual_head = virtual_from_env().map(|d| VirtualHead::new(compositor.clone(),d)).transpose()?;
         Ok(Self { devices:HashMap::from([(compositor.physical,compositor.clone())]),compositor,physical,
             cards:HashMap::new(),outputs:Vec::new(),failed:Vec::new(),working:HashMap::new(),mirror:None,pacing:Default::default(),connectors:Vec::new(),filter:DrmFilter::from_env(),
-            modes,mode,order,primary:None,size:[0,0],active:true,window:None,current:None,frames:VecDeque::new(),presenting:VecDeque::new(),sequence:0,demand:false,awaiting:false })
+            modes,mode,order,primary:None,size:[0,0],active:true,window:None,current:None,frames:VecDeque::new(),presenting:VecDeque::new(),sequence:0,demand:false,awaiting:false,credit_due:0,
+            virtual_head })
     }
     /// The HAL replaced its lost GPU device. The outputs' swapchains, surfaces, copy jobs and
     /// peers lived on the old device and are dropped; the cards keep DRM master and their
@@ -568,6 +771,12 @@ impl Context {
             for (dev,_) in &mut card.displays { if dev.physical == old { *dev = device.clone(); } }
         }
         self.devices.insert(device.physical,device.clone());
+        if let Some(head) = self.virtual_head.take() {
+            match VirtualHead::new(device.clone(),head.display) {
+                Ok(head) => self.virtual_head = Some(head),
+                Err(e) => eprintln!("[hal-direct] virtual display on the new device: {e}"),
+            }
+        }
         self.compositor = device;
         self.connectors.clear(); self.failed.clear();
         state.ready.store(0,Ordering::Release);
@@ -616,6 +825,16 @@ impl Context {
     /// retried when it is replugged (or another monitor appears on it) or its mode
     /// request changes. Returns without touching anything when nothing changed.
     fn reconcile(&mut self,connectors:Vec<DrmConnector>,state:&State) {
+        if self.panels_off() {
+            // The virtual display is the desktop and the panels show nothing: no display is
+            // held (each goes back to the console), no swapchain, no scanout.
+            let changed = !self.outputs.is_empty() || !self.cards.is_empty() || connectors != self.connectors || !self.failed.is_empty();
+            if !self.outputs.is_empty() { eprintln!("[hal-direct] the virtual display is the desktop: the panels are not driven"); }
+            self.drain_outputs(); self.cards.clear(); self.failed.clear();
+            self.connectors = connectors;
+            if changed { self.layout(); self.publish(state); }
+            return;
+        }
         let requests = connector_requests(&connectors,&self.modes,self.mode.as_deref());
         let requested = |name:&str| requests.get(name).cloned().flatten();
         let mut kept = Vec::new(); let mut retired = Vec::new();
@@ -790,6 +1009,13 @@ impl Context {
         self.mirror.as_deref().filter(|name| self.outputs.iter().any(|o| o.connector.name == *name))
     }
     fn layout(&mut self) {
+        if let Some(head) = &self.virtual_head {
+            // The virtual desktop at its own size; every panel shows it scaled to fit (a
+            // panel whose mode is the same size copies it 1:1).
+            self.size = [head.display.width,head.display.height];
+            for output in &mut self.outputs { output.placement = None; }
+            return;
+        }
         if let Some(target) = self.mirror_target().map(str::to_owned) {
             // Mirror: one desktop at the optimised screen's mode. That screen shows it
             // 1:1; every other output has no rectangle of its own, so its copy (or its
@@ -826,6 +1052,7 @@ impl Context {
     /// `paced_by` for the inventory: the pacing output, or `None` while every screen runs at
     /// its own refresh (Auto, extended).
     fn paced_by(&self) -> Option<String> {
+        if self.virtual_head.is_some() { return Some(VIRTUAL_OUTPUT.into()); }
         let main = self.primary_index();
         let mirror = self.mirror_target().is_some();
         let candidates:Vec<_> = self.outputs.iter().enumerate().filter(|(_,o)| mirror || o.placement.is_some()).map(|(i,o)| PacingCandidate {
@@ -835,7 +1062,7 @@ impl Context {
         pacing_choice(&self.pacing,mirror,&candidates).filter(|(_,pick)| *pick).map(|(i,_)| self.outputs[i].connector.name.clone())
     }
     fn publish(&self,state:&State) {
-        let main = self.primary_index();
+        let main = if self.virtual_head.is_some() { None } else { self.primary_index() };
         let mut outputs:Vec<_> = self.outputs.iter().enumerate().map(|(i,o)| LinuxDisplayOutput {
             name:o.connector.name.clone(),width:o.mode.extent.width,height:o.mode.extent.height,refresh_hz:o.mode.refresh_mhz as f64 / 1000.0,
             primary:Some(i) == main,card:card_name(&o.connector.card),desktop_position:o.placement.map(|r| (r.x,r.y)),active:o.last_present != 0,
@@ -848,16 +1075,36 @@ impl Context {
             error:o.error.clone(),requested:o.requested.clone(),
             native:self.cards.get(&o.connector.card).and_then(|c| drm_connector_modes(c.file.as_raw_fd(),o.connector.id).1),
         }).collect();
-        outputs.extend(self.failed.iter().map(|f| f.row.clone())); outputs.sort_by_key(|o| connector_rank(&o.name));
+        outputs.extend(self.failed.iter().map(|f| f.row.clone()));
+        if self.panels_off() {
+            // The connected panels, listed (with their modes) but not driven.
+            outputs.extend(self.connectors.iter().map(|c| {
+                let (modes,native) = OpenOptions::new().read(true).write(true).open(&c.card).map(|f| drm_connector_modes(f.as_raw_fd(),c.id)).unwrap_or_default();
+                LinuxDisplayOutput { name:c.name.clone(),card:card_name(&c.card),status:"not driven: the virtual display is the desktop".into(),
+                    modes,native,pci:pci(&c.card),mode_override:self.modes.get(&c.name).cloned(),..Default::default() }
+            }));
+        }
+        outputs.sort_by_key(|o| connector_rank(&o.name));
+        if let Some(head) = &self.virtual_head {
+            let d = head.display;
+            outputs.insert(0,LinuxDisplayOutput { name:VIRTUAL_OUTPUT.into(),width:d.width,height:d.height,refresh_hz:d.refresh_hz(),primary:true,
+                desktop_position:Some((0,0)),active:head.last_present != 0,
+                status:if head.last_present != 0 { "active (virtual)".into() } else { "virtual; waiting for first frame".into() },
+                modes:vec![(d.width,d.height,d.refresh_hz())],..Default::default() });
+        }
         {
             let mut snapshot = lock(&state.snapshot);
             let arrangement = self.mirror_target().map_or(crate::direct::DisplayArrangement::Extended,|name| crate::direct::DisplayArrangement::Mirror { optimise_for:name.to_owned() });
             let paced_by = self.paced_by();
-            snapshot.displays = LinuxDisplaySnapshot { direct:true,outputs,arrangement,pacing:self.pacing.clone(),paced_by }; snapshot.size = self.size;
-            if !self.outputs.is_empty() { state.acquired.store(true,Ordering::Release); }
+            let virtual_display = self.virtual_head.as_ref().map(|h| h.display);
+            snapshot.displays = LinuxDisplaySnapshot { direct:true,outputs,arrangement,pacing:self.pacing.clone(),paced_by,virtual_display }; snapshot.size = self.size;
+            if !self.outputs.is_empty() || self.virtual_head.is_some() { state.acquired.store(true,Ordering::Release); }
             // A reacquired output has no phase until its new swapchain presents.
             snapshot.timings = self.outputs.iter().filter(|o| o.last_present != 0 && o.mode.refresh_mhz != 0)
                 .map(|o| (o.connector.name.clone(), (o.last_present, 1000.0 / o.mode.refresh_mhz as f64))).collect();
+            if let Some(h) = self.virtual_head.as_ref().filter(|h| h.last_present != 0) {
+                snapshot.timings.insert(VIRTUAL_OUTPUT.into(),(h.last_present,1000.0 / h.display.refresh_mhz.max(1) as f64));
+            }
             state.changed(&mut snapshot);
         }
     }
@@ -867,12 +1114,42 @@ impl Context {
     /// of frame N instead of adding to it. Each output still holds one flip in flight (FIFO):
     /// a present waits for the previous one, so credit comes at most once per refresh.
     fn queued(&self) -> bool {
-        self.current.as_ref().is_none_or(|f| self.pacing_index().is_some_and(|i| self.outputs[i].generation >= f.generation))
+        self.current.as_ref().is_none_or(|f| self.pace().is_some_and(|p| p.generation >= f.generation))
+    }
+    /// The panels are not driven (the virtual display is the desktop, its panels `Off`).
+    fn panels_off(&self) -> bool { self.virtual_head.as_ref().is_some_and(|h| h.display.panels == VirtualPanels::Off) }
+    /// The present state that paces the desktop: the virtual head, else the pacing output.
+    fn pace(&self) -> Option<Pace> {
+        if let Some(h) = &self.virtual_head {
+            return Some(Pace { generation:h.generation,complete:h.complete,last_present:h.last_present,refresh_mhz:h.display.refresh_mhz });
+        }
+        self.pacing_index().map(|i| { let o = &self.outputs[i]; Pace { generation:o.generation,complete:o.complete,last_present:o.last_present,refresh_mhz:o.mode.refresh_mhz } })
+    }
+    /// The virtual display becomes the desktop, changes, or gives way to the panels. Only
+    /// a change of whether the panels are driven touches an output; a size or refresh change
+    /// lays the desktop out again (a fresh credit, a whole frame at the new size).
+    fn set_virtual(&mut self,display:Option<VirtualDisplay>,state:&State) -> bool {
+        let was_off = self.panels_off();
+        let was_virtual = self.virtual_head.is_some();
+        match (display,&mut self.virtual_head) {
+            (None,head) => { if head.take().is_some() { eprintln!("[hal-direct] virtual display off: the panels' own modes"); } }
+            (Some(display),Some(head)) => head.change(display),
+            (Some(display),head) => match VirtualHead::new(self.compositor.clone(),display) {
+                Ok(new) => *head = Some(new),
+                Err(e) => { eprintln!("[hal-direct] virtual display: {e}"); }
+            },
+        }
+        self.awaiting = false; self.demand |= self.window.is_some();
+        state.ready.store(0,Ordering::Release);
+        self.layout(); self.publish(state);
+        // Driving the panels again (or no longer) is a reconcile; leaving the virtual display
+        // gives each panel its own rectangle again.
+        was_off != self.panels_off() || was_virtual != self.virtual_head.is_some()
     }
     /// Report every frame whose present completed on the pacing output.
     fn notify_presented(&mut self) {
-        let Some(index) = self.pacing_index() else { return };
-        let (complete,presented_at) = (self.outputs[index].complete,self.outputs[index].last_present);
+        let Some(pace) = self.pace() else { return };
+        let (complete,presented_at) = (pace.complete,pace.last_present);
         while self.presenting.front().is_some_and(|(generation,_)| *generation <= complete) {
             let (_,presented) = self.presenting.pop_front().unwrap();
             presented(presented_at);
@@ -899,15 +1176,17 @@ impl Context {
                 // One output's presentation failure (cable pulled, VT, driver) rebuilds that
                 // output alone; the others keep presenting the retained whole frame.
                 eprintln!("[hal-direct] {}: presentation: {e}; rebuilding this output",output.connector.name);
+                if e.contains("ERROR_DEVICE_LOST") && !output.dev.lost.swap(true,Ordering::AcqRel) { state.shared.signal(); }
                 output.rebuild = true; continue;
             }
             let progress = (output.generation,output.complete,output.acquired,output.acquire_ready);
             if progress != output.progress || !output.busy(self.current.as_ref()) {
                 output.progress = progress; output.progress_at = Instant::now();
-            } else if output.progress_at.elapsed() >= Duration::from_secs(2) && !output.rebuild {
-                // Native acquire watchdog: retry the retained complete frame, with no retry
-                // limit and no discarded input/image when WSI stops returning credit.
-                eprintln!("[hal-direct] {}: presentation made no progress for 2 s; reacquiring",output.connector.name);
+            } else if output.progress_at.elapsed() >= FLIP_STALL && !output.rebuild {
+                // Flip watchdog: a flip (or the WSI credit after it) outstanding this long is a
+                // stalled head; the output is rebuilt (modeset again) and retries the retained
+                // complete frame, with no retry limit and no discarded input/image.
+                eprintln!("[hal-direct] {}: flip {} made no progress for {} ms; rebuilding this output",output.connector.name,output.serial,output.progress_at.elapsed().as_millis());
                 output.rebuild = true;
             }
             if output.last_present != old {
@@ -921,23 +1200,40 @@ impl Context {
                 }
             }
         }
+        if let Some(head) = &mut self.virtual_head {
+            let old = head.last_present;
+            head.service(self.current.as_ref())?;
+            if head.last_present != old {
+                first |= old == 0;
+                timing_changed = true;
+                let value = (head.last_present,1000.0 / head.display.refresh_mhz.max(1) as f64);
+                lock(&state.snapshot).timings.insert(VIRTUAL_OUTPUT.into(),value);
+            }
+        }
         if first { self.publish(state); }
         if timing_changed { state.timings_changed.store(true, Ordering::Release); state.shared.signal(); }
         self.notify_presented();
         if self.queued() {
             if self.demand && !self.awaiting && self.frames.is_empty() {
-                if let Some(index) = self.pacing_index() {
-                    let output = &self.outputs[index];
-                    let period = 1_000_000_000_000u64 / u64::from(output.mode.refresh_mhz.max(1));
-                    let now = crate::clock_ns(); let phase = output.last_present;
+                if let Some(pace) = self.pace() {
+                    let period = 1_000_000_000_000u64 / u64::from(pace.refresh_mhz.max(1));
+                    let now = crate::clock_ns(); let phase = pace.last_present;
                     let next = if phase == 0 { now + period } else { phase + ((now.saturating_sub(phase) / period) + 1) * period };
-                    state.ready.store(next,Ordering::Release); state.shared.signal();
-                    self.demand = false; self.awaiting = true;
+                    // Empty animation beats and pointer reports can request again before
+                    // a rendered frame reaches this worker. Keep those requests on the
+                    // display clock instead of granting credit at the input report rate.
+                    if now >= self.credit_due {
+                        self.credit_due = if self.credit_due == 0 { next } else {
+                            self.credit_due + ((now - self.credit_due) / period + 1) * period
+                        };
+                        state.ready.store(next,Ordering::Release); state.shared.signal();
+                        self.demand = false; self.awaiting = true;
+                    }
                 }
             }
         }
         Ok(self.outputs.iter().any(|o| o.busy(self.current.as_ref()))
-            || (!self.frames.is_empty() && self.pacing_index().is_some()))
+            || (!self.frames.is_empty() && self.pace().is_some()))
     }
 }
 
@@ -990,6 +1286,7 @@ pub(super) fn run(state:Arc<State>,device:Arc<Device>) {
                 // No modeset: the next credit follows the newly resolved output.
                 Command::Pacing(pacing) => { context.pacing = pacing; context.publish(&state); }
                 Command::Device(device) => { context.replace_device(device,&state); rescan = true; }
+                Command::Virtual(display) => { rescan |= context.set_virtual(display,&state); }
             }
         }
         if stop { break; }
@@ -1011,12 +1308,25 @@ pub(super) fn run(state:Arc<State>,device:Arc<Device>) {
             Ok(busy) => busy,
             Err(e) => {
                 eprintln!("[hal-direct] presentation: {e}; retaining the whole frame for reacquisition");
+                // A lost device seen here first (no render submit to see it: the client waits
+                // for this worker's credit) is the HAL's to replace: say so and wake it.
+                if e.contains("ERROR_DEVICE_LOST") && !context.compositor.lost.swap(true,Ordering::AcqRel) {
+                    eprintln!("[hal-direct] the render GPU device is lost; asking the HAL to replace it");
+                    state.shared.signal();
+                }
                 // Recreate display resources on the next turn; retain the source image and
                 // outstanding demand. A cable/VT failure is not a lost render device.
                 rescan = true; false
             }
         };
-        let deadline = if busy { now + Duration::from_micros(500) } else if rescan && context.active { now + Duration::from_millis(1) } else { next_scan };
+        let mut deadline = if busy { now + Duration::from_micros(500) } else if rescan && context.active { now + Duration::from_millis(1) } else { next_scan };
+        // the virtual head's pending tick (it is not `busy`: no polling between ticks)
+        if let Some(due) = context.virtual_head.as_ref().filter(|_| context.active).and_then(|h| h.pending.map(|_| h.due)) {
+            deadline = deadline.min(Instant::now() + Duration::from_nanos(due.saturating_sub(crate::clock_ns())));
+        }
+        if context.active && context.demand && !context.awaiting && context.frames.is_empty() && context.queued() && context.pace().is_some() {
+            deadline = deadline.min(Instant::now() + Duration::from_nanos(context.credit_due.saturating_sub(crate::clock_ns())));
+        }
         let mut fds:Vec<_> = watch.iter().map(|w| io::PollFd { fd:w.fd(),events:io::READ,revents:0 }).collect();
         if let Err(e) = io::wait(state.reader.as_raw_fd(),&mut fds,Some(deadline)) { eprintln!("[hal-direct] wait: {e}"); }
     }

@@ -12,7 +12,7 @@ type Entry = extern "C" fn(*const u8, *const u8, *mut u8);
 
 #[cfg(target_arch = "x86_64")]
 fn compile(options: &relax_session::Options, f: &Func) -> (Code, u32) {
-    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+    let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
     let c = relax_backend::x64::compile(options, f, &env).unwrap();
     assert!(c.relocs.is_empty());
     (Code::new(&c.code).unwrap(), c.text_len)
@@ -25,7 +25,7 @@ fn native(options: &relax_session::Options, op: VX) -> bool {
 
 #[cfg(target_arch = "aarch64")]
 fn compile(options: &relax_session::Options, f: &Func) -> (Code, u32) {
-    let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+    let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
     let c = relax_backend::arm64::compile(options, f, &env).unwrap();
     assert!(c.relocs.is_empty());
     (Code::new(&c.code).unwrap(), c.text_len)
@@ -246,11 +246,40 @@ fn lane_ref(op: VX, w: VW, x: u64, y: u64) -> (u64, Cmp) {
         VX::ShlV(_) => (x << y) & m,
         VX::ShrUV(_) => x >> y,
         VX::ShrSV(_) => (sx >> y) as u64 & m,
+        VX::ArmUShl(_) | VX::ArmSShl(_) => {
+            let n = sext(w, y);
+            match op {
+                _ if n >= 0 => (x << n) & m,
+                VX::ArmUShl(_) => x >> -n,
+                _ => (sx >> -n) as u64 & m,
+            }
+        }
         VX::ShlI(_, k) => if k as i64 >= b { 0 } else { (x << k) & m },
         VX::ShrUI(_, k) => if k as i64 >= b { 0 } else { x >> k },
         VX::ShrSI(_, k) => (sx >> (k as i64).min(b - 1)) as u64 & m,
         VX::Neg(_) => x.wrapping_neg() & m,
         VX::Abs(_) => sx.unsigned_abs() & m,
+        // SSE NaN results, exactly: the first NaN operand quieted, else the negative default NaN
+        VX::FAdd(_, NanBits::Intel) | VX::FSub(_, NanBits::Intel) | VX::FMul(_, NanBits::Intel) | VX::FDiv(_, NanBits::Intel) | VX::FSqrt(_, NanBits::Intel) => {
+            let (r, y) = match op {
+                VX::FAdd(..) => (f2(|a, b| a + b, |a, b| a + b), y),
+                VX::FSub(..) => (f2(|a, b| a - b, |a, b| a - b), y),
+                VX::FMul(..) => (f2(|a, b| a * b, |a, b| a * b), y),
+                VX::FDiv(..) => (f2(|a, b| a / b, |a, b| a / b), y),
+                _ => (f1(f32::sqrt, f64::sqrt), x),
+            };
+            let quiet = 1u64 << (if w == VW::D { 51 } else { 22 });
+            let r = if is_nan(w, x) {
+                x | quiet
+            } else if is_nan(w, y) {
+                y | quiet
+            } else if is_nan(w, r) {
+                if w == VW::D { 0xfff8_0000_0000_0000 } else { 0xffc0_0000 }
+            } else {
+                r
+            };
+            return (r, Cmp::Exact);
+        }
         VX::FAdd(..) => return (f2(|a, b| a + b, |a, b| a + b), Cmp::NanAny),
         VX::FSub(..) => return (f2(|a, b| a - b, |a, b| a - b), Cmp::NanAny),
         VX::FMul(..) => return (f2(|a, b| a * b, |a, b| a * b), Cmp::NanAny),
@@ -290,6 +319,7 @@ fn lane_ref(op: VX, w: VW, x: u64, y: u64) -> (u64, Cmp) {
                 RoundTo::Ceil => f1(f32::ceil, f64::ceil),
                 RoundTo::Trunc => f1(f32::trunc, f64::trunc),
                 RoundTo::Away => f1(f32::round, f64::round),
+                RoundTo::Even => f1(f32::round_ties_even, f64::round_ties_even),
             };
             return (r, Cmp::NanAny);
         }
@@ -341,6 +371,12 @@ fn reference(op: VX, a: &[u8; 16], b: &[u8; 16]) -> ([u8; 16], VW, Vec<Cmp>) {
             }
             (d, VW::S, vec![Cmp::NanAny; 4])
         }
+        VX::ShufS(k) => {
+            for j in 0..4 {
+                put(&mut d, VW::S, j, get(a, VW::S, (k as usize >> (2 * j)) & 3));
+            }
+            (d, VW::S, vec![Cmp::Exact; 4])
+        }
         VX::MoveMask(w) => {
             let mut r = 0u64;
             for j in 0..lanes(w) {
@@ -370,11 +406,13 @@ fn width(op: VX) -> VW {
         VX::AddSatU(w) | VX::SubSatU(w) | VX::AddSatS(w) | VX::SubSatS(w) | VX::AvgU(w) => w,
         VX::ICmp(_, w) | VX::UCmp(_, w) | VX::CmpEq(w) | VX::CmpGtS(w) => w,
         VX::ShlV(w) | VX::ShrSV(w) | VX::ShrUV(w) | VX::ShlI(w, _) | VX::ShrUI(w, _) | VX::ShrSI(w, _) => w,
+        VX::ArmUShl(w) | VX::ArmSShl(w) => w,
         VX::Neg(w) | VX::Abs(w) => w,
         VX::FAdd(w, _) | VX::FSub(w, _) | VX::FMul(w, _) | VX::FDiv(w, _) => w,
         VX::FMinLt(w) | VX::FMaxGt(w) | VX::FMinNum(w) | VX::FMaxNum(w) | VX::FCmp(_, w) => w,
         VX::FNeg(w) | VX::FAbs(w) | VX::FSqrt(w, _) | VX::FRound(w, _) | VX::FToI(w) | VX::IToF(w) => w,
         VX::Narrow(w) | VX::MoveMask(w) => w,
+        VX::ShufS(_) => VW::S,
         VX::FCvtLo => VW::S,
         VX::FCvtNarrow => VW::D,
         _ => unreachable!("{op:?}"),
@@ -403,6 +441,16 @@ fn check(op: VX, n: usize, fails: &mut Vec<String>) {
             for k in 0..lanes(w) {
                 let c = get(b, w, k) % bits(w) as u64;
                 put(b, w, k, c);
+            }
+        }
+    }
+    // signed amounts: -(lane bits - 1) ..= lane bits - 1
+    if let VX::ArmUShl(w) | VX::ArmSShl(w) = op {
+        for (_, b) in ins.iter_mut() {
+            for k in 0..lanes(w) {
+                let span = 2 * bits(w) as u64 - 1;
+                let c = (get(b, w, k) % span) as i64 - (bits(w) as i64 - 1);
+                put(b, w, k, c as u64 & mask(w));
             }
         }
     }
@@ -449,6 +497,11 @@ fn int_ops() -> Vec<VX> {
         v.push(VX::MoveMask(w));
     }
     v.extend([VX::AvgU(VW::B), VX::AvgU(VW::H)]);
+    #[cfg(target_arch = "aarch64")]
+    for w in W {
+        v.extend([VX::ArmUShl(w), VX::ArmSShl(w)]);
+    }
+    v.extend([0x00, 0x1b, 0x55, 0xc9, 0xd2, 0xe4].map(VX::ShufS));
     v.extend([VX::Narrow(VW::H), VX::Narrow(VW::S), VX::Narrow(VW::D)]);
     v
 }
@@ -458,9 +511,11 @@ fn float_ops() -> Vec<VX> {
     for w in F {
         let h = NanBits::Host;
         v.extend([VX::FAdd(w, h), VX::FSub(w, h), VX::FMul(w, h), VX::FDiv(w, h), VX::FSqrt(w, h)]);
+        let i = NanBits::Intel;
+        v.extend([VX::FAdd(w, i), VX::FSub(w, i), VX::FMul(w, i), VX::FDiv(w, i), VX::FSqrt(w, i)]);
         v.extend([VX::FMinLt(w), VX::FMaxGt(w), VX::FMinNum(w), VX::FMaxNum(w), VX::FNeg(w), VX::FAbs(w)]);
         v.extend([VX::FToI(w), VX::IToF(w)]);
-        for t in [RoundTo::Floor, RoundTo::Ceil, RoundTo::Trunc, RoundTo::Away] {
+        for t in [RoundTo::Floor, RoundTo::Ceil, RoundTo::Trunc, RoundTo::Away, RoundTo::Even] {
             v.push(VX::FRound(w, t));
         }
         for c in C {
@@ -524,6 +579,56 @@ fn shuffles_match_the_reference() {
                 if got != want {
                     fails.push(format!("VShuffle {idx:?} [{mode}]: got {} want {}", hex(&got), hex(&want)));
                     break;
+                }
+            }
+        }
+    }
+    report(fails);
+}
+
+/// `a >> (b + c)` and `a >> (b - c)` (32-bit lanes, `c` a constant splat): arm64 turns the amount
+/// into `-c - b` / `c - b` and the shift into ushl / sshl by it (fold_shift_amounts); x86-64 runs
+/// the plain ops. Amounts stay in 0..32.
+#[test]
+fn shifts_by_a_sum_with_a_constant_match_the_reference() {
+    let mut rng = Rng(0x6a09_e667_f3bc_c908);
+    let mut fails = Vec::new();
+    for (shr, signed) in [(VX::ShrUV(VW::S), false), (VX::ShrSV(VW::S), true)] {
+        for (sub, c) in [(false, 4u32), (false, 0), (false, 31), (true, 5), (true, 31)] {
+            let mut f = Func::new("shift_sum".into(), 0);
+            let (pa, pb, pd) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+            f.params = vec![pa, pb, pd];
+            f.rets = vec![];
+            f.block();
+            let (va, vb, k, t, d) = (f.vreg(Cls::V128), f.vreg(Cls::V128), f.vreg(Cls::V128), f.vreg(Cls::V128), f.vreg(Cls::V128));
+            let amount = if sub { Inst::VX(VX::Sub(VW::S), t, vb, k) } else { Inst::VX(VX::Add(VW::S), t, vb, k) };
+            for i in [Inst::VLoad(va, pa, 0), Inst::VLoad(vb, pb, 0), Inst::VConst(k, c), amount, Inst::VX(shr, d, va, t), Inst::VStore(pd, 0, d)] {
+                f.blocks[0].insts.push(i);
+                f.blocks[0].pos.push(0);
+            }
+            f.blocks[0].term = Term::Ret(vec![]);
+            f.verify().unwrap();
+            let mut ins = inputs(VW::S, &mut rng, 200);
+            // b in range: b + c (or b - c) in 0..32
+            for (_, b) in ins.iter_mut() {
+                for l in 0..4 {
+                    let x = get(b, VW::S, l) % (32 - if sub { 0 } else { c }) as u64;
+                    let x = if sub { (x % (32 - c as u64)) + c as u64 } else { x };
+                    put(b, VW::S, l, x);
+                }
+            }
+            for (mode, options) in modes() {
+                let (code, _) = compile(&options, &f);
+                for (a, b) in &ins {
+                    let got = run(&code, a, b);
+                    for l in 0..4 {
+                        let (x, y) = (get(a, VW::S, l), get(b, VW::S, l));
+                        let n = if sub { y - c as u64 } else { y + c as u64 };
+                        let want = if signed { ((x as u32 as i32) >> n) as u32 as u64 } else { x >> n };
+                        if get(&got, VW::S, l) != want && fails.len() < 8 {
+                            fails.push(format!("{shr:?} sub {sub} c {c} [{mode}]: x {x:#x} y {y}: got {:#x} want {want:#x}", get(&got, VW::S, l)));
+                        }
+                    }
                 }
             }
         }

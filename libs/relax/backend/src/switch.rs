@@ -117,7 +117,9 @@ fn subtract(a: &Ranges, b: &Ranges) -> Ranges {
 
 struct Chain<'a> {
     tests: &'a [Option<Test>],
-    f: &'a Func,
+    /// per block: it holds only its test (the compare, and the constant it compares with when
+    /// that does not fit an immediate: a 64-bit `LiveId` hash)
+    lone: &'a [bool],
     x: VReg,
     signed: bool,
     /// the order of the compares was fixed by a signed or unsigned relation
@@ -140,7 +142,7 @@ impl Chain<'_> {
         }
         self.budget -= 1;
         let link = match self.tests[b as usize] {
-            Some(t) if t.x == self.x && (head || self.f.blocks[b as usize].insts.len() == 1) => Some(t),
+            Some(t) if t.x == self.x && (head || self.lone[b as usize]) => Some(t),
             _ => None,
         };
         let Some(t) = link else {
@@ -199,13 +201,20 @@ enum Node {
     Table { lo: u64, targets: Vec<u32>, default: u32 },
 }
 
-const MIN_TABLE_CLUSTERS: usize = 4;
+/// fewest clusters for a jump table on x86-64 / wasm (LLVM's default); `lower_switches` takes the
+/// target's
+pub const MIN_TABLE_CLUSTERS: usize = 4;
+/// arm64: LLVM's AArch64 minimum (aarch64-min-jump-table-entries, 13): an indirect branch through
+/// a table costs more than a short compare tree there; rustc's arm64 code of box3d's
+/// `match simplex.count` (four cases) has no tables, Relax's had six per shape_distance call
+pub const MIN_TABLE_CLUSTERS_ARM64: usize = 13;
 /// jump table density: at most this many table entries per cluster
 const MAX_SPAN_PER_CLUSTER: u128 = 4;
 const MAX_TABLE: u128 = 4096;
 
 struct Planner {
     default: u32,
+    min_table: usize,
 }
 
 impl Planner {
@@ -238,7 +247,7 @@ impl Planner {
         }
         // a table pays when its entries are mostly distinct clusters: few clusters over a wide span
         // (identifier characters, say) are cheaper as range compares or bit tests
-        if n >= MIN_TABLE_CLUSTERS && span <= MAX_TABLE && span <= MAX_SPAN_PER_CLUSTER * n as u128 {
+        if n >= self.min_table && span <= MAX_TABLE && span <= MAX_SPAN_PER_CLUSTER * n as u128 {
             let mut targets = vec![self.default; span as usize];
             for c in cl {
                 for v in c.lo..=c.hi {
@@ -381,7 +390,14 @@ impl Emit<'_> {
 /// Switch lowering of every chain of `f` (see the module comment). None when nothing changed; else
 /// the new function and, per its block, the block of `f` whose execution frequency it shares (the
 /// blocks are renumbered, and block frequencies are by number).
-pub fn lower_switches(options: &relax_session::Options, f: &Func) -> Option<(Func, Vec<u32>)> {
+pub fn lower_switches(options: &relax_session::Options, f: &Func, min_table: usize) -> Option<(Func, Vec<u32>)> {
+    lower_switches_sized(options, f, min_table, false)
+}
+
+/// lower_switches; `size_first`: only chains that become a jump table or bit tests (smaller than
+/// the compares), never a binary search (more compares than the chain: code that ships and runs
+/// rarely, a wasm export's O1 bodies, keeps its chains).
+pub fn lower_switches_sized(options: &relax_session::Options, f: &Func, min_table: usize, size_first: bool) -> Option<(Func, Vec<u32>)> {
     if options.no_jump_tables || f.baseline {
         return None;
     }
@@ -455,13 +471,19 @@ pub fn lower_switches(options: &relax_session::Options, f: &Func) -> Option<(Fun
             _ => None,
         };
     }
-    // a block holding only its compare, entered from a test of the same value, continues that chain
+    // a block holding only its compare (and that compare's own constant), entered from a test of
+    // the same value, continues that chain
+    let lone: Vec<bool> = f.blocks.iter().enumerate().map(|(bi, b)| match (tests[bi], b.insts.as_slice()) {
+        (Some(_), [_]) => true,
+        (Some(t), [Inst::Iconst(k, kv), Inst::ICmp(_, _, _, x, y)]) => *kv == t.k && uses[k.0 as usize] == 1 && (y == k && *x == t.x || x == k && *y == t.x),
+        _ => false,
+    }).collect();
     let mut is_link = vec![false; nb];
     for bi in 0..nb {
         if let Some(t) = tests[bi] {
             for s in [t.t, t.e] {
                 let s = s as usize;
-                if s != bi && f.blocks[s].insts.len() == 1 && matches!(tests[s], Some(u) if u.x == t.x) {
+                if s != bi && lone[s] && matches!(tests[s], Some(u) if u.x == t.x) {
                     is_link[s] = true;
                 }
             }
@@ -475,7 +497,7 @@ pub fn lower_switches(options: &relax_session::Options, f: &Func) -> Option<(Fun
         if is_link[head] {
             continue;
         }
-        let mut chain = Chain { tests: &tests, f, x: h.x, signed: false, fixed: false, budget: 600, leaves: Vec::new() };
+        let mut chain = Chain { tests: &tests, lone: &lone, x: h.x, signed: false, fixed: false, budget: 600, leaves: Vec::new() };
         let mut tries = 0;
         let ok = loop {
             chain.leaves.clear();
@@ -523,8 +545,11 @@ pub fn lower_switches(options: &relax_session::Options, f: &Func) -> Option<(Fun
         if cl.len() < 3 {
             continue;
         }
-        let planner = Planner { default };
+        let planner = Planner { default, min_table };
         let node = planner.plan(&cl);
+        if size_first && !matches!(node, Node::Table { .. } | Node::Bits { .. }) {
+            continue;
+        }
         let g = out.get_or_insert_with(|| f.clone());
         let pos = g.blocks[head].term_pos;
         // the head's compare is replaced by the switch
@@ -553,4 +578,77 @@ fn swap(c: Cond) -> Cond {
         Cond::Gt => Cond::Lt,
         Cond::Ge => Cond::Le,
     }
+}
+
+/// Per block: its `Term::Switch` (min 0) needs no range test -- every predecessor reaches it on
+/// the edge of an unsigned `x < k` / `x <= k` test of the switch value that fits the table (an
+/// enum match whose arms past the table were split off first: rustc's `otherwise: unreachable`).
+/// The emitters then index the table straight away.
+pub fn switch_in_range(f: &Func) -> Vec<bool> {
+    let n = f.blocks.len();
+    let mut out = vec![false; n];
+    if !f.blocks.iter().any(|b| matches!(b.term, Term::Switch(..))) {
+        return out;
+    }
+    let reach = crate::regalloc::reachable(f);
+    let mut preds: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        if reach[bi] {
+            for t in b.term.succs() {
+                preds[t as usize].push(bi as u32);
+            }
+        }
+    }
+    for (bi, b) in f.blocks.iter().enumerate() {
+        let Term::Switch(x, tab) = &b.term else { continue };
+        if !reach[bi] || tab.min != 0 || preds[bi].is_empty() {
+            continue;
+        }
+        let mut redefined = false;
+        for i in &b.insts {
+            for_defs(i, |d| redefined |= d == *x);
+        }
+        if redefined {
+            continue;
+        }
+        let len = tab.targets.len() as i64;
+        let ok = preds[bi].iter().all(|&p| {
+            let pb = &f.blocks[p as usize];
+            let Term::Branch(c, t, e) = pb.term else { return false };
+            if t == e {
+                return false;
+            }
+            // the compare that last defines c, and x not redefined after it
+            let mut fact = None;
+            for i in pb.insts.iter().rev() {
+                let mut dc = false;
+                let mut dx = false;
+                for_defs(i, |d| {
+                    dc |= d == c;
+                    dx |= d == *x;
+                });
+                if dc {
+                    if let Inst::ICmpI(cond, false, _, a, k) = *i {
+                        if a == *x {
+                            fact = Some((cond, k));
+                        }
+                    }
+                    break;
+                }
+                if dx {
+                    break;
+                }
+            }
+            let Some((cond, k)) = fact else { return false };
+            // the largest x on the edge into the switch block
+            let hi = match (cond, t as usize == bi) {
+                (Cond::Lt, true) | (Cond::Ge, false) => k.checked_sub(1),
+                (Cond::Le, true) | (Cond::Gt, false) => Some(k),
+                _ => None,
+            };
+            matches!(hi, Some(h) if h >= 0 && h < len)
+        });
+        out[bi] = ok;
+    }
+    out
 }

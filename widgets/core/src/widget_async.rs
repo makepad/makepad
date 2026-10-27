@@ -95,8 +95,9 @@ pub fn register_splash_isolate_mod(f: fn(&mut ScriptVm)) {
 }
 
 /// Queue a Splash isolate for reclamation on the next isolate alloc. Called from
-/// `Splash::drop`, which has no `Cx`. Ignores the main VM (id 0), never an isolate.
-pub(crate) fn mark_splash_isolate_dead(vm_id: SplashVmId) {
+/// the `Drop` of an isolate's owner, which has no `Cx` (`Splash`, a game's script
+/// host). Ignores the main VM (id 0), never an isolate.
+pub fn mark_splash_isolate_dead(vm_id: SplashVmId) {
     if vm_id == MAIN_SPLASH_VM_ID {
         return;
     }
@@ -2715,8 +2716,9 @@ mod isolate_shader_tests {
         // Answered at registration, in the isolate: the frame needs no VM to ask.
         if cfg!(target_os = "macos") {
             let loc = mapping.source_loc.clone().expect("the HAL's trace location");
-            // the first of fragment, pixel, vertex: the quad's own fragment fn
-            assert!(loc.contains("draw_quad.rs"), "the quad's fragment fn, not {loc}");
+            // the first of pixel, fragment, vertex (draw_shader.rs read_source): this quad's own
+            // pixel fn, written above
+            assert!(loc.contains("widget_async.rs"), "the quad's pixel fn, not {loc}");
         }
         cx.free_splash_vm(vm_id);
     }

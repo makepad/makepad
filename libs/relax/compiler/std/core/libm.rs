@@ -1,6 +1,7 @@
-//! The platform math library (what Rust's std calls for these functions, so results match
-//! rustc builds on the same platform bit for bit).
+//! Target math library: native platform C libm, or the Rust compiler-builtins
+//! libm implementation for web targets (see libm/ORIGIN.txt).
 
+#[cfg(not(relax_web))]
 extern "C" {
     pub fn sin(x: f64) -> f64;
     pub fn cos(x: f64) -> f64;
@@ -58,3 +59,10 @@ extern "C" {
     pub fn fmaf(x: f32, y: f32, z: f32) -> f32;
     pub fn fmodf(x: f32, y: f32) -> f32;
 }
+
+#[cfg(relax_web)]
+mod math;
+#[cfg(relax_web)]
+pub use self::math::{
+    sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, exp, exp2, expm1, log, log2, log10, log1p, pow, cbrt, hypot, round, fma, fmod, sinf, cosf, tanf, asinf, acosf, atanf, atan2f, sinhf, coshf, tanhf, expf, exp2f, expm1f, logf, log2f, log10f, log1pf, powf, cbrtf, hypotf, roundf, fmaf, fmodf
+};

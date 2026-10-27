@@ -244,8 +244,18 @@ impl<'a, 'b, A: crate::marker::PointeeSized + PartialOrd<B>, B: crate::marker::P
         (**self).partial_cmp(*other)
     }
 }
+impl<'a, 'b, A: crate::marker::PointeeSized + PartialOrd<B>, B: crate::marker::PointeeSized> PartialOrd<&'b mut B> for &'a mut A {
+    fn partial_cmp(&self, other: &&'b mut B) -> Option<Ordering> {
+        (**self).partial_cmp(*other)
+    }
+}
 impl<'a, A: crate::marker::PointeeSized + Ord> Ord for &'a A {
     fn cmp(&self, other: &&'a A) -> Ordering {
+        (**self).cmp(*other)
+    }
+}
+impl<'a, A: crate::marker::PointeeSized + Ord> Ord for &'a mut A {
+    fn cmp(&self, other: &&'a mut A) -> Ordering {
         (**self).cmp(*other)
     }
 }

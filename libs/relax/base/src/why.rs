@@ -47,7 +47,7 @@ impl Trace {
     }
 }
 pub fn enabled() -> bool { trace().is_some() }
-crate::gen_local! { static CAUSE: RefCell<Option<Cause>>; }
+crate::memo_local! { static CAUSE: RefCell<Option<Cause>>; }
 pub struct Scope { previous: Option<Option<Cause>> }
 pub fn enter(cause: Cause) -> Scope {
     Scope { previous: enabled().then(|| CAUSE.with(|c| c.replace(Some(cause)))) }

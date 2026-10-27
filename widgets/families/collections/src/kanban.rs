@@ -245,9 +245,9 @@ pub struct DrawKanbanColumn {
 
 /// A column as it is written in the DSL.
 ///
-/// It is a declaration, not the column itself: the board copies it once and
-/// then owns what it holds, because the cards move and the declaration does
-/// not.
+/// It is a declaration, not the column itself: the board copies its cards once
+/// and then owns them, because the cards move and the declaration does not.
+/// A reapply or a rebake only takes its heading and cap again.
 #[derive(Script, ScriptHook, Default)]
 pub struct KanbanColumnSpec {
     #[source]
@@ -651,8 +651,8 @@ pub struct KanbanBoard {
     /// The card template, collected from the instance by name.
     #[rust]
     card_template: Option<ScriptObjectRef>,
-    /// The columns as they were written down. Copied into `board` once; the
-    /// declaration is not the board, because the cards move and it does not.
+    /// The columns as they were written down. Their cards are copied into `board`
+    /// once, because the cards move and the declaration does not.
     #[rust]
     declared: Vec<KanbanColumn>,
     #[rust]
@@ -724,22 +724,35 @@ impl ScriptHook for KanbanBoard {
                 // be applied more than once, and a board that appended would
                 // end up with each of its columns twice.
                 if !declared.is_empty() || template.is_some() {
+                    // A theme switch or a rotation re-walks the same DSL, so the board keeps
+                    // its cards and only takes its columns' headings and caps again.
+                    if apply.preserves_runtime_state()
+                        && self.built
+                        && self.board.columns.len() == declared.len()
+                    {
+                        for (column, spec) in self.board.columns.iter_mut().zip(&declared) {
+                            column.heading = spec.heading.clone();
+                            column.cap = spec.cap;
+                        }
+                    } else {
+                        self.built = false;
+                    }
                     self.declared = declared;
                     if template.is_some() {
                         self.card_template = template;
                     }
-                    self.built = false;
                 }
             }
         }
         if apply.is_reload() {
             // The cards come from a template that may have just changed, so
-            // they are rebuilt rather than patched — and with them goes
-            // whatever the board had been dragged into, because on a reload
-            // what is written down IS the board.
+            // they are rebuilt rather than patched. On a real reload, what is
+            // written down IS the board again.
             self.pool.clear();
             self.warned = false;
-            self.built = false;
+            if !apply.preserves_runtime_state() {
+                self.built = false;
+            }
         }
     }
 }
@@ -1084,6 +1097,21 @@ impl Widget for KanbanBoard {
                 });
             }
             let content = cx.turtle().used_height() + inset;
+            // The cards can come out shorter than last draw (a card left, or a new theme shrank
+            // them), so a column scrolled past its new end moves its cards back down to it.
+            let max_scroll = (content - body.size.y).max(0.0);
+            if offset > max_scroll {
+                let shift = dvec2(0.0, offset - max_scroll);
+                let range = cx.get_turtle_align_range();
+                // Everything after the body's own clip entry, so the clip itself stays put.
+                cx.shift_align_range(&TurtleAlignRange { start: range.start + 1, end: range.end }, shift);
+                for rect in &mut rects {
+                    rect.pos += shift;
+                }
+                if let Some(scroll) = self.scroll.get_mut(index) {
+                    *scroll = max_scroll;
+                }
+            }
             cx.end_turtle();
 
             geom.push(ColumnGeom {
@@ -1541,5 +1569,42 @@ mod tests {
         let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
         assert!(near(centred_baseline(0.0, 26.0, 10.0), 8.0 - 10.0 * INK_TOP));
         assert!(near(centred_baseline(100.0, 10.0, 10.0), 100.0 - 10.0 * INK_TOP));
+    }
+
+    #[test]
+    fn a_reapply_or_rebake_keeps_the_cards_and_a_reload_starts_over() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut board = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = crate::script_eval!(vm, {use mod.widgets.* KanbanBoard{
+                todo := KanbanColumn{heading: "To do" cards: ["a"]}
+                done := KanbanColumn{heading: "Done" cards: ["b"]}
+            }});
+            KanbanBoard::script_from_value(vm, value)
+        });
+        assert!(board.add_card(&mut cx, 1, "c"));
+        // A theme switch or a rotation re-walks the board, here with a new heading for `done`.
+        for apply in [Apply::ScriptReapply, Apply::Rebake] {
+            cx.with_vm(|vm| {
+                let value = crate::script_eval!(vm, {use mod.widgets.* KanbanBoard{
+                    todo := KanbanColumn{heading: "To do" cards: ["a"]}
+                    done := KanbanColumn{heading: "Finished" cards: ["b"]}
+                }});
+                board.script_apply(vm, &apply, &mut Scope::empty(), value);
+            });
+            board.ensure_built();
+            assert_eq!(board.columns()[1].cards, ["b", "c"]);
+            assert_eq!(board.columns()[1].heading, "Finished");
+        }
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {use mod.widgets.* KanbanBoard{
+                todo := KanbanColumn{heading: "To do" cards: ["a"]}
+                done := KanbanColumn{heading: "Done" cards: ["b"]}
+            }});
+            board.script_apply(vm, &Apply::Reload, &mut Scope::empty(), value);
+        });
+        board.ensure_built();
+        assert_eq!(board.columns()[1].cards, ["b"]);
+        assert_eq!(board.columns()[1].heading, "Done");
     }
 }

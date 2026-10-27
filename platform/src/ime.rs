@@ -333,6 +333,20 @@ impl crate::cx::Cx {
     pub fn hosted_fullscreen(&self, window: crate::window::WindowId) -> bool {
         self.windows.is_valid(window) && self.windows[window].hosted_fullscreen
     }
+
+    /// The room at the right of a window's caption that `makepad run`'s JIT ring takes
+    /// (zero in a rustc build, which has no ring): app caption controls keep out of it.
+    pub fn caption_badge_room(&self) -> f64 {
+        // the web build has no HAL and no ring
+        #[cfg(all(relax, not(target_arch = "wasm32")))]
+        {
+            makepad_hal::CAPTION_BADGE_ROOM as f64
+        }
+        #[cfg(not(all(relax, not(target_arch = "wasm32"))))]
+        {
+            0.0
+        }
+    }
 }
 
 /// What a hosted child announces right after `AfterStartup`: its pointer

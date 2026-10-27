@@ -1,6 +1,6 @@
 //! Kernel benchmarks: a 1M-vertex heightfield (fbm noise + normals) and a
 //! 100k-instance transform (position, quaternion, scale -> mat4 + colour),
-//! on the NEON ×4 code, the scalar code and the reference interpreter, on
+//! on the vector code (4 or 8 lanes: MAKEPAD_KERNEL_LANES), the scalar code and the reference interpreter, on
 //! one thread and on N workers of a persistent pool. Every multi-thread and
 //! vector result is checked bit-identical to the one-thread scalar run.
 //!
@@ -112,7 +112,9 @@ fn main() {
     let n = W * W;
     let base: Arc<[f32]> = (0..n).map(|i| ((i % 97) as f32) * 0.01).collect::<Vec<_>>().into();
     let interp = std::env::var("BENCH_INTERP").is_ok();
-    let runs = [Run { label: "scalar", simd: false, threads: 1 }, Run { label: "neon", simd: true, threads: 1 }, Run { label: "neon", simd: true, threads }];
+    // the vector code's lanes: this host's rule, or MAKEPAD_KERNEL_LANES=4|8
+    let vl: &'static str = if makepad_script_compute::native_vec::host_lanes() == 8 { "x8" } else { "x4" };
+    let runs = [Run { label: "scalar", simd: false, threads: 1 }, Run { label: vl, simd: true, threads: 1 }, Run { label: vl, simd: true, threads }];
     let run = |job: &mut Job, r: &Run| {
         job.set_simd(r.simd);
         let e: &dyn Executor = if r.threads > 1 { &exec } else { &InlineExecutor };
@@ -122,7 +124,7 @@ fn main() {
 
     // -- one pass: three height evaluations per vertex --------------------------
     let k = native(ONE_PASS);
-    println!("heightfield, 1M vertices (NEON code: {})", k.simd());
+    println!("heightfield, 1M vertices (vector code: {})", k.simd());
     let mut job = Job::new(k.clone(), n);
     job.input("base", base.clone()).unwrap();
     job.output("pos", vec![0.0; n * 3]).unwrap();
@@ -211,7 +213,7 @@ fn main() {
     let m = 100_000;
     let src: Arc<[f32]> = (0..m * 8).map(|i| ((i * 7919) % 1000) as f32 * 0.001 + 0.1).collect::<Vec<_>>().into();
     let k: KernelRef = native(INSTANCES);
-    println!("instances, 100k (NEON code: {})", k.simd());
+    println!("instances, 100k (vector code: {})", k.simd());
     let mut job = Job::new(k, m);
     job.set_param("t", 1.5);
     job.input("src", src).unwrap();

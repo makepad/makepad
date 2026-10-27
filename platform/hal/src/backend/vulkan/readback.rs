@@ -93,6 +93,41 @@ impl Vulkan {
         }
     }
 
+    /// Frame capture: every level and layer of a texture's storage into one staging buffer on the
+    /// batch, after the work before it (`Gpu::capture_texture`). Depth formats: `None`.
+    pub(super) fn capture_storage(&mut self, s: &mut Session, id: Id, done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>) {
+        let Some(image) = self.resolve(s, id) else { return done(None) };
+        if format::is_depth(image.desc.format) || !image.supports_transfer() {
+            return done(None);
+        }
+        let mut regions = Vec::new();
+        let mut len = 0u64;
+        for mip in 0..image.desc.mips.max(1) {
+            let (w, h) = ((image.desc.w >> mip).max(1), (image.desc.h >> mip).max(1));
+            for layer in 0..image.desc.depth.max(1) {
+                regions.push(region(mip, layer, [0, 0, w, h], image.aspect).buffer_offset(len));
+                len += format::level_bytes(image.desc.format, w, h);
+            }
+        }
+        let batch = match self.ensure_batch() {
+            Ok(b) => b,
+            Err(_) => return done(None),
+        };
+        if batch.may_read(&image).is_err() {
+            return done(None);
+        }
+        let Ok(staging) = Buffer::scratch(batch.dev.clone(), len, buffer_usage()) else { return done(None) };
+        image.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+        unsafe {
+            batch.dev.raw.cmd_copy_image_to_buffer(batch.cb, image.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, staging.buffer, &regions);
+            batch.dev.raw.cmd_pipeline_barrier(batch.cb, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::HOST, vk::DependencyFlags::empty(),
+                &[vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::TRANSFER_WRITE).dst_access_mask(vk::AccessFlags::HOST_READ)], &[], &[]);
+        }
+        image.transition(batch.cb, image.sampled_layout());
+        batch.images.push(image);
+        batch.tickets.push(Ticket::FrameCap { staging, len: len as usize, done });
+    }
+
     pub(super) fn read_pick(&mut self, s: &mut Session, window: Id, req: u32, pos: [f32; 2]) {
         let Some(id) = self.pick_ids.get(&(s.id, window)).copied() else { s.events.pick_result(req, &[]); return };
         if self.pick_pending.contains(&(s.id, id)) { s.events.pick_result(req, &[]); return; }

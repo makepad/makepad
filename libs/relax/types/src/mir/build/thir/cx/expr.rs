@@ -963,7 +963,7 @@ impl Cx<'_> {
             };
             match discr {
                 Some(discr) => {
-                    let (bytes, _) = crate::types::Types::int_info(discr.ty);
+                    let (bytes, _) = tcx.tys.int_info(discr.ty);
                     let (lit, _) = ScalarInt::truncate_from_uint(discr.val, bytes as u8);
                     let discr_ty = tcx.tys.prim(discr.ty);
                     let literal = self.push(self.mk(e, ExprKind::NonHirLiteral { lit, user_ty: None }, discr_ty));

@@ -13,7 +13,7 @@
 //! crate (and what it reaches) only.
 
 macro_rules! eprintln {
-    ($($arg:tt)*) => { if !crate::diag::enabled() { std::eprintln!($($arg)*); } };
+    ($($arg:tt)*) => { if !crate::diag::enabled() { stderr_line!($($arg)*); } };
 }
 
 use relax_types::next_solver::{Goal, ParamEnvId};
@@ -111,22 +111,34 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         u.prog.crates[k as usize].validate = true;
     }
     u.prog.own_crates = own.clone();
+    let t_rsim0 = std::time::Instant::now();
     errors.extend(u.prog.strict_import_errors(&own));
     errors.extend(relax_types::lint::import_resolution_diags(&mut u.prog, &own));
+    let d_rsim = t_rsim0.elapsed();
+    let t_sigs0 = std::time::Instant::now();
     // every checked definition's signature, on MAKEPAD_RUN_JOBS threads (queries over the shared
     // context); errors in definition order
     {
+        let check_times = std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some();
         let defs: Vec<crate::program::DefId> = (0..u.prog.defs.len()).filter(|&i| own[u.prog.defs[i].krate as usize]).map(|i| crate::program::DefId(i as u32)).collect();
         let (prog, tcx) = (&u.prog, &u.tcx);
         for e in par_map(&defs, |&d| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let t0 = std::time::Instant::now();
                 let mut e = tcx.check_def_signature(prog, d);
+                let dt_sig = t0.elapsed();
                 if prog.def(d).kind == DefKind::Impl { e.extend(relax_types::unsafety::check_impl(prog, tcx, d)); }
+                let dt = t0.elapsed();
+                if check_times && dt.as_millis() >= 500 {
+                    stderr_line!("makepad check: slow sig {:.2} s (check_def_sig {:.2} s): {:?} {}", dt.as_secs_f64(), dt_sig.as_secs_f64(), prog.def(d).kind, prog.def_path(d));
+                }
                 e
             }))
             .unwrap_or_else(|_| vec![format!("internal compiler error while checking the signature of {} -- makepad run bug, report it", prog.def_path(d))])) {
             errors.extend(e);
         }
     }
+    let d_sigs = t_sigs0.elapsed();
+    let t_items0 = std::time::Instant::now();
     errors.extend(relax_types::item_checks::duplicate_items(&u.prog, &own));
     errors.extend(relax_types::item_checks::duplicate_exported_macros(&u.prog, &own));
     errors.extend(relax_types::item_checks::super_paths(&u.prog, &own));
@@ -138,6 +150,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     errors.extend(relax_types::item_checks::foreign_blocks(&u.prog, &own));
     errors.extend(relax_types::item_checks::duplicate_symbols(&u.prog, &own));
     errors.extend(relax_types::item_checks::global_allocators_and_lang_items(&u.prog, &own));
+    errors.extend(relax_types::proc_macro_harness::check(&u.prog, &u.tcx, &own));
     if u.prog.crates[root as usize].is_bin { errors.extend(relax_types::item_checks::entry_point(&u.prog, root)); }
     if u.prog.crates[root as usize].is_bin { errors.extend(relax_types::item_checks::entry_symbol_conflict(&u.prog, &own, root)); }
     errors.extend(relax_types::lint_levels::check(&u.prog, &own));
@@ -146,9 +159,12 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     errors.extend(u.prog.import_privacy_errors(&own));
     errors.extend(u.prog.attribute_errors(&own));
     errors.extend(u.prog.ast_validation_errors(&own));
+    let d_items = t_items0.elapsed();
+    let t_wf0 = std::time::Instant::now();
     // item well-formedness (rustc wfcheck): after the signatures, and only when they are sound -- an
     // item with an unresolved or ill-counted type has no well-formedness to speak of
     if errors.is_empty() {
+        let check_times = std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some();
         let defs: Vec<crate::program::DefId> = (0..u.prog.defs.len()).filter(|&i| own[u.prog.defs[i].krate as usize]).map(|i| crate::program::DefId(i as u32)).collect();
         let (prog, tcx) = (&u.prog, &u.tcx);
         // (a constant a well-formedness check evaluates may find the compiler's owner busy: preempted
@@ -156,7 +172,18 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         for e in par_map(&defs, |&d| {
             let mut tries = 0;
             loop {
-                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| relax_types::wfcheck::obligations::check_def(prog, tcx, d)));
+                let t0 = std::time::Instant::now();
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut v = relax_types::wfcheck::obligations::check_def(prog, tcx, d);
+                    let dt_wf = t0.elapsed();
+                    // rustc_privacy check_mod_privacy: the types of the item's signature
+                    v.extend(relax_types::privacy_types::check_item(prog, tcx, d));
+                    let dt = t0.elapsed();
+                    if check_times && dt.as_millis() >= 500 {
+                        stderr_line!("makepad check: slow wf {:.2} s (check_def {:.2} s, tries {}): {:?} {}", dt.as_secs_f64(), dt_wf.as_secs_f64(), tries, prog.def(d).kind, prog.def_path(d));
+                    }
+                    v
+                }));
                 match r {
                     Ok(v) => break v,
                     Err(p) if (crate::preempt::is_preempted(&*p) || p.is::<crate::preempt::NeedsLoad>() || p.is::<crate::preempt::OwnerBusy>()) && tries < 100 => { tries += 1; std::thread::yield_now(); }
@@ -173,6 +200,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             }
         }
     }
+    let d_wf = t_wf0.elapsed();
     let options = &u.prog.session.clone().options;
     crate::borrowck::lazy::disable_gandalf();
     if options.borrowck_all != crate::options::BorrowckAll::Default {
@@ -223,11 +251,15 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     }
     let n_own = fns.len();
     let t_owners = t_check.elapsed();
+    if std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some() {
+        stderr_line!("makepad check: owners breakdown: rsim {:.2} s, sigs {:.2} s, item_checks {:.2} s, wfcheck {:.2} s", d_rsim.as_secs_f64(), d_sigs.as_secs_f64(), d_items.as_secs_f64(), d_wf.as_secs_f64());
+    }
     // typeck-audit 1.27: anonymous constants outside bodies are body owners of their own
     for anon in crates.iter().flat_map(|&k| crate::borrowck::body::signature_anon_consts(&u.prog, &u.tcx, k)).collect::<Vec<_>>() {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let body = u.tcx.typeck(&u.prog, anon);
-            let mut errs = body.errors.to_vec();
+            let errs = body.errors.to_vec();
+            let mut diags = Vec::new();
             if errs.is_empty() {
                 relax_types::lint::check_literals(&u.prog, &u.tcx, &body);
                 relax_types::lint_pass::check_body(&u.prog, &u.tcx, &body);
@@ -237,18 +269,21 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
                 if let Some((_, relax_front::def_collector::NodeId::AnonConst(expr))) = u.prog.def_id_to_node_id.get(&anon) {
                     let state = crate::tcx::EvalState::new();
                     let cx = crate::tcx::EvalCx::new(&u.prog, &u.tcx, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), &state);
-                    for e in crate::borrowck::check_anon_const(&cx, &u.prog, &u.tcx, &body, *expr) {
-                        errs.push(e.render());
+                    let errs = crate::borrowck::check_anon_const(&cx, &u.prog, &u.tcx, &body, *expr);
+                    if !errs.is_empty() {
+                        diags.extend(crate::borrowck::lazy::report_checked(&u.prog, 0, u.tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst), anon, &body.args, errs, crate::borrowck::event::Origin::Check).iter().map(|e| e.error.to_diagnostic()));
                     }
                 }
             }
-            errs
+            (errs, diags)
         }));
         match r {
-            Ok(e) => {
+            Ok((e, diags)) => {
+                let e_ok = e.is_empty() && diags.is_empty();
+                borrow_diagnostics.extend(diags);
                 // rustc evaluates every array length / const argument written in a signature (used
                 // or not): one that fails is reported there (E0080)
-                if e.is_empty() && u.tcx.generic_indices_of(&u.prog, anon).types_consts.is_empty() && !matches!(u.prog.def(u.prog.def(anon).parent).kind, DefKind::Trait | DefKind::TypeAlias) {
+                if e_ok && u.tcx.generic_indices_of(&u.prog, anon).types_consts.is_empty() && !matches!(u.prog.def(u.prog.def(anon).parent).kind, DefKind::Trait | DefKind::TypeAlias) {
                     let env = crate::tcx::TypingEnv::fully_monomorphized(&u.prog);
                     let before = u.tcx.dcx.err_count();
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| u.tcx.const_eval_resolve(&u.prog, env, anon, &[])));
@@ -262,7 +297,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     // every body owner type- and borrow-checked on MAKEPAD_RUN_JOBS threads: typeck and the borrow
     // checker are queries over the shared program and type context (as the run's typeck-ahead
     // workers use them); results are merged in owner order
-    struct Outcome { errors: Vec<String>, diags: Vec<crate::diag::Diagnostic>, seed: Option<crate::program::DefId>, retry: bool }
+    struct Outcome { errors: Vec<String>, diags: Vec<crate::diag::Diagnostic>, seed: Option<crate::program::DefId>, needs_load: bool, preempted: bool }
     let jobs = std::env::var("MAKEPAD_RUN_JOBS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0)
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()).min(16));
     let upn = up as usize;
@@ -270,8 +305,8 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         let uu = unsafe { &*(upn as *const Unit) };
         let (prog, tcx) = (&uu.prog, &uu.tcx);
         let d = owner.owner;
-        if std::env::var_os("MAKEPAD_RUN_CHECK_TRACE").is_some() { std::eprintln!("makepad check: body {}", prog.def_path(d)); }
-        let mut out = Outcome { errors: Vec::new(), diags: Vec::new(), seed: None, retry: false };
+        if std::env::var_os("MAKEPAD_RUN_CHECK_TRACE").is_some() { stderr_line!("makepad check: body {}", prog.def_path(d)); }
+        let mut out = Outcome { errors: Vec::new(), diags: Vec::new(), seed: None, needs_load: false, preempted: false };
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // the syntax-level lints do not wait for the types (rustc runs them before analysis)
             relax_types::lint_early::check_def(prog, tcx, d);
@@ -288,19 +323,26 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             if !unsafety.is_empty() {
                 return (unsafety, Vec::new());
             }
+            // rustc_privacy check_mod_privacy: the types of the body's expressions and patterns
+            let privacy = relax_types::privacy_types::check_body(prog, tcx, &body);
+            if !privacy.is_empty() {
+                return (privacy, Vec::new());
+            }
             // E0004 / E0005 and the pattern lints (rustc check_match: its errors stop the body
             // before borrowck); an internal failure of the analysis reports nothing
             let pats = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| relax_types::pattern_analysis::check_body(prog, tcx, &body)));
+            // (binding conflicts of `x @ pat` do not end the checks: borrowck runs after them)
+            let mut at_patterns = Vec::new();
             match pats {
-                Ok(e) if !e.is_empty() => return (e, Vec::new()),
-                Ok(_) => {}
+                Ok(r) if !r.errors.is_empty() => { let mut e = r.errors; e.extend(r.at_patterns); return (e, Vec::new()) }
+                Ok(r) => at_patterns = r.at_patterns,
                 Err(p) if p.is::<crate::preempt::NeedsLoad>() || crate::preempt::is_preempted(&*p) => std::panic::resume_unwind(p),
                 Err(_) => {
-                    if std::env::var_os("MAKEPAD_RUN_CHECK_TRACE").is_some() { std::eprintln!("makepad check: pattern analysis failed in {}", prog.def_path(d)); }
+                    if std::env::var_os("MAKEPAD_RUN_CHECK_TRACE").is_some() { stderr_line!("makepad check: pattern analysis failed in {}", prog.def_path(d)); }
                 }
             }
             if !crate::borrowck::enabled(options) {
-                return (Vec::new(), Vec::new());
+                return (at_patterns, Vec::new());
             }
             let v = crate::borrowck::check_body(&crate::tcx::EvalCx::new(prog, tcx, crate::tcx::TypingEnv::fully_monomorphized(prog), &crate::tcx::EvalState::new()), prog, tcx, &body);
             crate::borrowck::note_verdict(&v);
@@ -309,7 +351,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             }
             let args: Vec<_> = if owner.kind == crate::borrowck::body::BodyKind::Function && !generic { Vec::new() } else { body.args.to_vec() };
             let diags = crate::borrowck::lazy::report_checked(prog, 0, tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst), d, &args, v.errors, crate::borrowck::event::Origin::Check).iter().map(|e| e.error.to_diagnostic()).collect();
-            (Vec::new(), diags)
+            (at_patterns, diags)
             };
             let (mut errs, diags) = inner();
             errs.extend(gates);
@@ -325,10 +367,10 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             }
             // a module the check did not load (another crate's skipped file): checked again
             // once every file is loaded
-            Err(p) if p.is::<crate::preempt::NeedsLoad>() => out.retry = true,
+            Err(p) if p.is::<crate::preempt::NeedsLoad>() => out.needs_load = true,
             // a constant it needed was asked of the compiler's owner thread while an earlier
             // request held it up (owner.rs): checked again
-            Err(p) if crate::preempt::is_preempted(&*p) => out.retry = true,
+            Err(p) if crate::preempt::is_preempted(&*p) => out.preempted = true,
             Err(_) => {
                 let def = prog.def(d);
                 let pos = prog.files[def.file as usize].ast.item(def.item).lo;
@@ -336,7 +378,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             }
         }
         // an error may be a name in a file the app check left unloaded: settled with all loaded
-        if !out.errors.is_empty() { out.retry = true; }
+        if !out.errors.is_empty() { out.needs_load = true; }
         out
     };
     let t_par = t_check.elapsed();
@@ -362,28 +404,47 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         });
         outcomes.extend(results.lock().unwrap().drain(..));
     }
-    if std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some() { std::eprintln!("makepad check: owners {:.2} s, anon consts {:.2} s, bodies {:.2} s ({} jobs)", t_owners.as_secs_f64(), (t_par - t_owners).as_secs_f64(), (t_check.elapsed() - t_par).as_secs_f64(), jobs); }
+    if std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some() { stderr_line!("makepad check: owners {:.2} s, anon consts {:.2} s, bodies {:.2} s ({} jobs)", t_owners.as_secs_f64(), (t_par - t_owners).as_secs_f64(), (t_check.elapsed() - t_par).as_secs_f64(), jobs); }
     outcomes.sort_by_key(|(i, _)| *i);
     // owners that failed or met an unloaded module: every skipped file loaded, checked again
-    // (only when some other crate's file is still skipped: else the first answer stands)
+    // (only when some other crate's file is still skipped: else the first answer stands);
+    // owners preempted by OwnerBusy are always retried in parallel.
     let skipped_left = unsafe { !(&*up).prog.skipped_files.is_empty() };
-    if skipped_left && outcomes.iter().any(|(_, o)| o.retry) {
+    if skipped_left && outcomes.iter().any(|(_, o)| o.needs_load) {
+        let t_skip = std::time::Instant::now();
         unsafe { jit::load_all_skipped(up) };
-        for (i, o) in outcomes.iter_mut() {
-            if o.retry {
-                let (owner, generic) = &fns[*i];
-                *o = check_one(owner, *generic);
-            }
+        if std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some() {
+            stderr_line!("makepad check: load_all_skipped {:.2} s", t_skip.elapsed().as_secs_f64());
+        }
+    }
+    let retry_idxs: Vec<usize> = outcomes.iter().enumerate()
+        .filter(|(_, (_, o))| (skipped_left && o.needs_load) || o.preempted)
+        .map(|(idx, _)| idx)
+        .collect();
+    if !retry_idxs.is_empty() {
+        let t_retry = std::time::Instant::now();
+        let retried = par_map(&retry_idxs, |&idx| {
+            let fi = outcomes[idx].0;
+            let (owner, generic) = &fns[fi];
+            check_one(owner, *generic)
+        });
+        for (idx, new_o) in retry_idxs.iter().copied().zip(retried) {
+            outcomes[idx].1 = new_o;
+        }
+        if std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some() {
+            stderr_line!("makepad check: retried {} bodies in {:.2} s", retry_idxs.len(), t_retry.elapsed().as_secs_f64());
         }
     }
     let mut seeds = Vec::new();
-    for (_, o) in outcomes {
+    // rustc: an item whose body failed its checks (borrowck included) is tainted: it is never evaluated
+    let mut tainted: std::collections::HashSet<crate::program::DefId> = std::collections::HashSet::new();
+    for (i, o) in outcomes {
+        if !o.errors.is_empty() || !o.diags.is_empty() { tainted.insert(fns[i].0.owner); }
         errors.extend(o.errors);
         borrow_diagnostics.extend(o.diags);
         if let Some(d) = o.seed { seeds.push(d); }
     }
     let checked = seeds.len();
-    relax_types::lint_dead::finish(&u.prog, &u.tcx, &own, root);
     relax_types::lint_early::finish(&u.prog, &own);
     errors.extend(static_self_access(up, &own));
     // the feature gates (E0658 and friends): items and signatures, then the loaded bodies
@@ -395,7 +456,14 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     // rustc_hir_analysis check_crate: every static and every non-generic, non-associated const
     // item of the checked crates is evaluated, used or not; one that cannot be evaluated is an
     // E0080 (the unit notes it, reported below with the builds' other notes)
-    eval_items(up, &own);
+    eval_items(up, &own, &tainted);
+    // rustc_interface passes.rs analysis: an error (lint errors excluded) of the required analyses
+    // -- resolution, feature gates, type and borrow checks, constant evaluation of items -- ends the
+    // compilation before misc_checking_3, so check_mod_deathness (dead_code, unnameable_types)
+    // never runs: a body that failed its check reported nothing it uses as dead. Nor does
+    // check_expectations (unfulfilled_lint_expectations).
+    let analyses_ok = errors.is_empty() && borrow_diagnostics.is_empty() && unsafe { (&*up).errors.iter().all(|e| e.starts_with("compile error in ")) };
+    if analyses_ok { relax_types::lint_dead::finish(&u.prog, &u.tcx, &own, root); }
     // rustc_monomorphize: a program's `main` and what it reaches, instantiated -- the constants
     // generic code evaluates there (post-monomorphization E0080) -- in a check of a program
     if options.const_fuel && !compile && errors.is_empty() && borrow_diagnostics.is_empty() && unsafe { (&*up).errors.is_empty() } { mono_check(up, &own, root); }
@@ -404,7 +472,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     // of malloc free pages held after it)
     if compile { unsafe {
         let _job = jit::compile_job();
-        let mut d = crate::owner::call(crate::owner::Class::App, || jit::settle_drop(up));
+        let mut d = crate::owner::call(crate::owner::Class::Program, || jit::settle_drop(up));
         d.release_rir();
     } crate::memstat::trim(); }
     if crate::memstat::enabled() {
@@ -471,13 +539,13 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     } else {
         eprintln!("makepad check: {} crates type- and borrow-checked in {:.1} s", crates.len(), t_front.as_secs_f64());
     }
-    relax_types::lint_levels::finish(&u.prog);
+    if analyses_ok { relax_types::lint_levels::finish(&u.prog); }
     let (lint_errors, mut lint_warnings) = relax_types::lint::take();
     errors.extend(lint_errors);
     lint_warnings.sort_by_cached_key(|e| error_position(e));
     lint_warnings.dedup();
     if emit && !crate::diag::enabled() {
-        for w in &lint_warnings { std::eprintln!("{}", w); }
+        for w in &lint_warnings { stderr_line!("{}", w); }
     }
     // rustc's order: by file, then position (a plain string sort put line 10 before line 3)
     errors.sort_by_cached_key(|e| error_position(e));
@@ -535,7 +603,7 @@ unsafe fn compile_all(up: *mut Unit, seeds: &[crate::program::DefId]) -> Vec<(u3
     // (and the run's speculative callee builds)
     jit::enable_pipelining(&(*up).prog.session.clone().options);
     // (slots made before the seeds -- the root's main, constants' readers -- are compiled too)
-    crate::owner::call(crate::owner::Class::App, || {
+    crate::owner::call(crate::owner::Class::Program, || {
         for &d in seeds {
             (&mut *up).fn_id(FnKey::Inst(d, Vec::new()));
         }
@@ -567,7 +635,7 @@ unsafe fn compile_all(up: *mut Unit, seeds: &[crate::program::DefId]) -> Vec<(u3
                     active.fetch_add(1, Ordering::SeqCst);
                     let pick = {
                         let _job = jit::compile_job();
-                        crate::owner::call(crate::owner::Class::App, || {
+                        crate::owner::call(crate::owner::Class::Program, || {
                             let n = (&(*up).fns).len();
                             let mut pick = None;
                             loop {
@@ -586,7 +654,7 @@ unsafe fn compile_all(up: *mut Unit, seeds: &[crate::program::DefId]) -> Vec<(u3
                     };
                     let Some(id) = pick else {
                         active.fetch_sub(1, Ordering::SeqCst);
-                        if active.load(Ordering::SeqCst) == 0 && next.load(Ordering::SeqCst) >= crate::owner::call(crate::owner::Class::App, || (&(*up).fns).len()) {
+                        if active.load(Ordering::SeqCst) == 0 && next.load(Ordering::SeqCst) >= crate::owner::call(crate::owner::Class::Program, || (&(*up).fns).len()) {
                             break;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -603,7 +671,7 @@ unsafe fn compile_all(up: *mut Unit, seeds: &[crate::program::DefId]) -> Vec<(u3
                     if n >= at + 2_000 && settled_at.compare_exchange(at, n, Ordering::AcqRel, Ordering::Relaxed).is_ok()
                         && crate::memstat::resident() as u64 > settled_rss.load(Ordering::Relaxed) + SETTLE_GROWTH {
                         let _job = jit::compile_job();
-                        let mut d = crate::owner::call(crate::owner::Class::App, || jit::settle_drop(up));
+                        let mut d = crate::owner::call(crate::owner::Class::Program, || jit::settle_drop(up));
                         d.release_rir();
                         crate::memstat::trim();
                         settled_rss.store(crate::memstat::resident() as u64, Ordering::Relaxed);
@@ -736,7 +804,7 @@ fn is_follow_on(e: &str) -> bool {
 
 /// Evaluates the checked crates' statics and non-generic const items (rustc evaluates them in
 /// `cargo check`, used or not). A body with type errors is skipped: those errors are reported.
-fn eval_items(up: *mut Unit, own: &[bool]) {
+fn eval_items(up: *mut Unit, own: &[bool], tainted: &std::collections::HashSet<crate::program::DefId>) {
     let u = unsafe { &mut *up };
     let items: Vec<(crate::program::DefId, bool)> = (0..u.prog.defs.len())
         .filter(|&i| own[u.prog.defs[i].krate as usize])
@@ -750,9 +818,9 @@ fn eval_items(up: *mut Unit, own: &[bool]) {
         .collect();
     let _job = jit::compile_job();
     for (d, is_static) in items {
-        if !u.tcx.typeck(&u.prog, d).errors.is_empty() { continue; }
+        if tainted.contains(&d) || !u.tcx.typeck(&u.prog, d).errors.is_empty() { continue; }
         let before = unsafe { (&*up).errors.len() };
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::owner::call(crate::owner::Class::App, || unsafe {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::owner::call(crate::owner::Class::Program, || unsafe {
             let u = &mut *up;
             if is_static { u.static_addr(d); } else { u.const_addr(d, Vec::new()); }
         })));
@@ -779,12 +847,18 @@ fn mono_check(up: *mut Unit, own: &[bool], root: u32) {
         def.kind == DefKind::Fn && def.krate == root && u.prog.name(d) == "main"
             && def.parent == u.prog.mods[u.prog.crates[root as usize].root_mod as usize].def
     });
-    let Some(main) = main else { return };
     let limit = u.prog.crates[root as usize].recursion_limit as usize;
     let _job = jit::compile_job();
     // (instance, the instance it was reached from): the chain of a reached instance is its DFS stack
-    let mut work: Vec<(u32, Option<u32>)> = vec![(crate::owner::call(crate::owner::Class::App, || unsafe { (&mut *up).fn_id(FnKey::Inst(main, Vec::new())) }), None)];
+    // (collector.rs: a program starts at `main`; a library's roots are all its non-generic fns)
+    let roots: Vec<crate::program::DefId> = match main { Some(m) => vec![m], None => (0..u.prog.defs.len()).map(|i| crate::program::DefId(i as u32)).filter(|&d| {
+        let def = u.prog.def(d);
+        def.kind == DefKind::Fn && def.krate == root && u.prog.def(def.parent).kind != DefKind::Trait
+            && u.tcx.fn_sig(&u.prog, d).is_some_and(|s| s.n_generics == 0)
+    }).collect() };
+    let mut work: Vec<(u32, Option<u32>)> = roots.into_iter().rev().map(|d| (crate::owner::call(crate::owner::Class::Program, || unsafe { (&mut *up).fn_id(FnKey::Inst(d, Vec::new())) }), None)).collect();
     let mut parents: std::collections::HashMap<u32, Option<u32>> = std::collections::HashMap::new();
+    let mut deep_seen: std::collections::HashMap<crate::program::DefId, usize> = std::collections::HashMap::new();
     while let Some((id, parent)) = work.pop() {
         if parents.contains_key(&id) { continue; }
         parents.insert(id, parent);
@@ -811,14 +885,27 @@ fn mono_check(up: *mut Unit, own: &[bool], root: u32) {
                 continue;
             }
         }
-        let callees = crate::owner::call(crate::owner::Class::App, || unsafe {
-            if !mine { return Vec::new(); }
+        let callees = crate::owner::call(crate::owner::Class::Program, || unsafe {
+            // collector.rs: a library instance is lowered by rustc too; Relax lowers it only when a type argument
+            // is too big to lay out (its body's layout query is then rustc's SizeOverflow, reported where it is
+            // evaluated), and follows none of its callees
+            let library_overflow = !mine && matches!(&(&*up).fns[id as usize].key, FnKey::Inst(_, args) if args.iter().any(|t| {
+                let uu = &*up;
+                uu.tcx.tys.depth(*t) <= 6 && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| uu.size_overflows(*t))).unwrap_or(false)
+            }));
+            if !mine && !library_overflow { return Vec::new(); }
             // (a fn taking or returning a value of hundreds of MB is not lowered: its frame would
             // be allocated for real)
             // (instances over deeply nested types -- closures wrapped in closures -- cost more to
             // lower than a constants check is worth; one that recurses into itself is followed to the limit)
             if let FnKey::Inst(_, args) = &(&*up).fns[id as usize].key {
-                if same_def < 2 && args.iter().any(|t| (&*up).tcx.tys.depth(*t) > 6) { return Vec::new(); }
+                // (deep instances of one definition are followed up to the recursion limit's worth, so a recursion that
+                // nests its type argument deeper at every step (issue-22638) still reaches the limit)
+                if args.iter().any(|t| (&*up).tcx.tys.depth(*t) > 6) {
+                    let n = deep_seen.entry(def_of.unwrap()).or_insert(0usize);
+                    *n += 1;
+                    if *n > limit + 2 { return Vec::new(); }
+                }
             }
             if let FnKey::Inst(d, _) = &(&*up).fns[id as usize].key {
                 let uu = &*up;
@@ -854,7 +941,14 @@ fn mono_check(up: *mut Unit, own: &[bool], root: u32) {
                     }
                 }
             }
-            if !matches!(built, Ok(Ok(()))) { return Vec::new(); }
+            // (rustc's SizeOverflow of a type the instance lays out: lowering's error, at its use)
+            if let Ok(Err(msg)) = &built {
+                if msg.ends_with("are too big for the target architecture") {
+                    // (a library instance's error is reported once by its lowering, with no location in the library's source)
+                    if !library_overflow { (&mut *up).errors.push(msg.clone()); }
+                }
+            }
+                if !matches!(built, Ok(Ok(()))) || library_overflow { return Vec::new(); }
             let mut out = Vec::new();
             if let Some(f) = &(&*up).fns[id as usize].rir {
                 for b in &f.blocks {

@@ -559,13 +559,15 @@ fn a_nested_closure_returning_a_captured_reference_keeps_the_borrow_alive() {
 
 #[test]
 fn a_higher_ranked_mismatch_is_e0308_one_type_is_more_general() {
-    let (errors, unchecked) = borrowck_source("
+    // (typeck's: a function-pointer coercion forces the leak check, coercion.rs coerce_from_fn_pointer;
+    // tests/ui/regions/higher-ranked-implied.rs)
+    let (prog, tcx, user) = load_source("
         pub struct Inv<T>(*mut T);
         pub type A = for<'a, 'b> fn(Inv<&'a &'b ()>, Inv<&'b &'a ()>, Inv<&'a ()>);
         pub type B = for<'a, 'b> fn(Inv<&'a &'b ()>, Inv<&'b &'a ()>, Inv<&'b ()>);
-        pub fn f(x: A) { let _y: B = x; }");
-    assert!(unchecked.is_empty(), "{unchecked:?}");
-    assert!(!errors.is_empty() && errors.iter().all(|e| e.starts_with("E0308 mismatched types")), "{errors:?}");
+        pub fn f(x: A) { let _y: B = x; }", 2021, "repro");
+    let errors: Vec<String> = crate::borrowck::body::owners(&prog).filter(|o| prog.def(o.owner).krate == user).flat_map(|o| tcx.typeck(&prog, o.owner).errors.to_vec()).collect();
+    assert!(errors.len() == 1 && errors[0].contains("E0308: mismatched types"), "{errors:?}");
 }
 
 #[test]

@@ -14,6 +14,9 @@ pub enum Option<T> {
 
 pub use Option::{None, Some};
 
+// library/core/src/option.rs:2290-2295 (const effects are outside this port)
+unsafe impl<T: crate::clone::TrivialClone> crate::clone::TrivialClone for Option<T> {}
+
 impl<T> Option<T> {
     pub const fn is_some(&self) -> bool {
         matches!(*self, Some(_))
@@ -61,14 +64,14 @@ impl<T> Option<T> {
     pub const fn expect(self, msg: &str) -> T {
         match self {
             Some(x) => x,
-            None => crate::panicking::panic_display(&msg),
+            None => expect_failed(msg),
         }
     }
     #[track_caller]
     pub const fn unwrap(self) -> T {
         match self {
             Some(x) => x,
-            None => crate::panicking::panic_str("called `Option::unwrap()` on a `None` value"),
+            None => unwrap_failed(),
         }
     }
     pub const fn unwrap_or(self, default: T) -> T {
@@ -344,6 +347,7 @@ impl<'a, T> From<&'a Option<T>> for Option<&'a T> {
 
 // ---------------------------------------------------------------- iterators
 
+#[derive(Debug)]
 pub struct Iter<'a, T> {
     inner: Option<&'a T>,
 }
@@ -380,6 +384,7 @@ impl<'a, T> Clone for Iter<'a, T> {
 impl<'a, T> ExactSizeIterator for Iter<'a, T> {}
 impl<'a, T> crate::iter::FusedIterator for Iter<'a, T> {}
 
+#[derive(Debug)]
 pub struct IterMut<'a, T> {
     pub(crate) inner: Option<&'a mut T>,
 }
@@ -404,6 +409,7 @@ impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
 impl<'a, T> ExactSizeIterator for IterMut<'a, T> {}
 impl<'a, T> crate::iter::FusedIterator for IterMut<'a, T> {}
 
+#[derive(Clone, Debug)]
 pub struct IntoIter<T> {
     inner: Option<T>,
 }
@@ -426,6 +432,7 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
 }
 
 impl<T> ExactSizeIterator for IntoIter<T> {}
+unsafe impl<T> crate::iter::TrustedLen for IntoIter<T> {}
 impl<T> crate::iter::FusedIterator for IntoIter<T> {}
 
 impl<T> IntoIterator for Option<T> {
@@ -485,4 +492,20 @@ impl<'a, A, I: Iterator<Item = Option<A>>> Iterator for OptionShunt<'a, I> {
             None => None,
         }
     }
+}
+
+// real core's out-of-line failure paths (option.rs `unwrap_failed` / `expect_failed`): a call per
+// site instead of the panic's message and formatting built at each one
+#[inline(never)]
+#[cold]
+#[track_caller]
+const fn unwrap_failed() -> ! {
+    crate::panicking::panic_str("called `Option::unwrap()` on a `None` value")
+}
+
+#[inline(never)]
+#[cold]
+#[track_caller]
+const fn expect_failed(msg: &str) -> ! {
+    crate::panicking::panic_display(&msg)
 }

@@ -138,14 +138,71 @@ impl<T> NonNull<T> {
     pub const fn dangling() -> NonNull<T> {
         NonNull { pointer: dangling::<T>() }
     }
+    pub const fn without_provenance(addr: crate::num::NonZeroUsize) -> NonNull<T> {
+        NonNull { pointer: without_provenance(addr.get()) }
+    }
+    pub const fn with_exposed_provenance(addr: crate::num::NonZeroUsize) -> NonNull<T> {
+        NonNull { pointer: with_exposed_provenance(addr.get()) }
+    }
     pub const unsafe fn add(self, count: usize) -> NonNull<T> {
         NonNull { pointer: im::ptr_add(self.pointer, count) }
+    }
+    pub const unsafe fn sub(self, count: usize) -> NonNull<T> {
+        NonNull { pointer: im::ptr_sub(self.pointer, count) }
+    }
+    pub const unsafe fn offset(self, count: isize) -> NonNull<T> {
+        NonNull { pointer: im::ptr_add(self.pointer, count as usize) }
     }
     pub const unsafe fn read(self) -> T {
         im::ptr_read(self.pointer)
     }
+    pub const unsafe fn read_unaligned(self) -> T {
+        read_unaligned(self.pointer)
+    }
     pub const unsafe fn write(self, val: T) {
         im::ptr_write(self.pointer as *mut T, val)
+    }
+    pub const unsafe fn write_unaligned(self, val: T) {
+        write_unaligned(self.pointer as *mut T, val)
+    }
+    pub const unsafe fn write_bytes(self, val: u8, count: usize) {
+        im::write_bytes(self.pointer as *mut T, val, count)
+    }
+    pub const unsafe fn copy_to(self, dest: NonNull<T>, count: usize) {
+        im::copy(self.pointer, dest.pointer as *mut T, count)
+    }
+    pub const unsafe fn copy_to_nonoverlapping(self, dest: NonNull<T>, count: usize) {
+        im::copy_nonoverlapping(self.pointer, dest.pointer as *mut T, count)
+    }
+    pub const unsafe fn copy_from(self, src: NonNull<T>, count: usize) {
+        im::copy(src.pointer, self.pointer as *mut T, count)
+    }
+    pub const unsafe fn copy_from_nonoverlapping(self, src: NonNull<T>, count: usize) {
+        im::copy_nonoverlapping(src.pointer, self.pointer as *mut T, count)
+    }
+    pub const unsafe fn replace(self, src: T) -> T {
+        replace(self.pointer as *mut T, src)
+    }
+    pub const unsafe fn swap(self, with: NonNull<T>) {
+        swap(self.pointer as *mut T, with.pointer as *mut T)
+    }
+}
+
+impl<T> NonNull<[T]> {
+    pub const fn slice_from_raw_parts(data: NonNull<T>, len: usize) -> Self {
+        unsafe { Self::new_unchecked(slice_from_raw_parts_mut(data.as_ptr(), len)) }
+    }
+    pub const fn len(self) -> usize {
+        unsafe { im::slice_len(&*self.pointer) }
+    }
+    pub const fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+    pub const fn as_non_null_ptr(self) -> NonNull<T> {
+        self.cast()
+    }
+    pub const fn as_mut_ptr(self) -> *mut T {
+        self.pointer as *mut T
     }
 }
 
@@ -153,8 +210,32 @@ impl<T: crate::marker::PointeeSized> NonNull<T> {
     pub const fn cast<U>(self) -> NonNull<U> {
         NonNull { pointer: self.pointer as *const U }
     }
+    pub const unsafe fn byte_add(self, count: usize) -> Self {
+        NonNull { pointer: self.pointer.wrapping_byte_add(count) }
+    }
+    pub const unsafe fn byte_sub(self, count: usize) -> Self {
+        NonNull { pointer: self.pointer.wrapping_byte_sub(count) }
+    }
+    pub const unsafe fn byte_offset(self, count: isize) -> Self {
+        NonNull { pointer: self.pointer.wrapping_byte_add(count as usize) }
+    }
+    pub const unsafe fn drop_in_place(self) {
+        im::drop_in_place(self.pointer as *mut T)
+    }
     pub fn addr(self) -> crate::num::NonZeroUsize {
         unsafe { crate::num::NonZeroUsize::new_unchecked(self.pointer as *const u8 as usize) }
+    }
+    pub fn expose_provenance(self) -> crate::num::NonZeroUsize {
+        self.addr()
+    }
+    pub fn with_addr(self, addr: crate::num::NonZeroUsize) -> Self {
+        // real core: `self.as_ptr().with_addr(addr.get())`, i.e. a wrapping byte offset (keeps provenance)
+        let p = self.pointer as *const u8;
+        let delta = (addr.get() as isize).wrapping_sub(p as usize as isize);
+        NonNull { pointer: p.wrapping_offset(delta) as *const T }
+    }
+    pub fn map_addr(self, f: impl FnOnce(crate::num::NonZeroUsize) -> crate::num::NonZeroUsize) -> Self {
+        self.with_addr(f(self.addr()))
     }
     pub const unsafe fn new_unchecked(ptr: *mut T) -> NonNull<T> {
         NonNull { pointer: ptr as *const T }
@@ -190,6 +271,8 @@ impl<T: crate::marker::PointeeSized> Clone for NonNull<T> {
     }
 }
 impl<T: crate::marker::PointeeSized> Copy for NonNull<T> {}
+// library/core/src/ptr/non_null.rs:1684
+unsafe impl<T: crate::marker::PointeeSized> crate::clone::TrivialClone for NonNull<T> {}
 impl<T: crate::marker::PointeeSized> PartialEq for NonNull<T> {
     fn eq(&self, other: &NonNull<T>) -> bool {
         crate::ptr_methods::ptr_words(self.pointer) == crate::ptr_methods::ptr_words(other.pointer)

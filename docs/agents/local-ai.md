@@ -25,6 +25,9 @@ is the one it loads. It never picks a model you did not install.
   Without it the build succeeds but prints
   `makepad-ai-cuda: building WITHOUT CUDA — GPU inference is unavailable`.
   Add `MAKEPAD_GGML_REQUIRE_CUDA=1` to make that an error instead.
+  Only the hub builds the kernels: they are makepad-ai-cuda's `cuda` feature, on in
+  `makepad-app-ai-hub` (default) and the AI Hub app's `node`. Every other app is CPU-only;
+  a model crate's own bin or test gets CUDA with `--features makepad-ai-cuda/cuda`.
 - macOS: nothing extra (Metal).
 
 ## 1. Build

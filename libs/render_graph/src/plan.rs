@@ -380,6 +380,12 @@ fn scaled(size: (u32, u32), scale: f32) -> (u32, u32) {
 }
 
 impl FramePlan {
+    /// The targets the history passes of `graph` write: each carries its
+    /// picture to the next frame.
+    pub fn history_targets(&self, graph: &PostGraph) -> Vec<usize> {
+        self.passes.iter().filter(|p| graph.nodes[p.node].history).map(|p| p.output.0 as usize).collect()
+    }
+
     /// Compile `graph` for a frame of `size` pixels. `locked` is the mode
     /// kind (part of the structure); `budget` caps the target bytes.
     pub fn compile(graph: &PostGraph, size: (u32, u32), attachments: Attachments, host_named: &[LiveId], locked: bool, budget: u64) -> Result<FramePlan, PlanError> {
@@ -614,6 +620,18 @@ mod tests {
         let plan = FramePlan::compile(&g, (64, 64), Attachments::default(), &[], false, BIG).unwrap();
         assert_eq!(plan.passes[0].inputs, vec![Source::Host(Resource::Color), Source::History]);
         assert_eq!(plan.bytes(), 2 * 64 * 64 * 4);
+    }
+
+    #[test]
+    fn a_history_pass_s_target_is_the_one_kept_between_frames() {
+        let mut keep = pass(Some("keep"), Stage::Display, &["color", "history"], 1.0);
+        keep.history = true;
+        let g = PostGraph { color: ColorPipeline::Display8, nodes: vec![pass(None, Stage::Display, &["color"], 1.0), keep, pass(None, Stage::Display, &["color", "keep"], 1.0)] };
+        let plan = FramePlan::compile(&g, (64, 64), Attachments::default(), &[], false, BIG).unwrap();
+        let kept = plan.history_targets(&g);
+        assert_eq!(kept, vec![plan.passes[1].output.0 as usize]);
+        assert!(!kept.contains(&(plan.passes[0].output.0 as usize)));
+        assert!(!kept.contains(&(plan.passes[2].output.0 as usize)));
     }
 
     #[test]

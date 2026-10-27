@@ -180,9 +180,9 @@ pub fn slot_colors_used(f: &Func, min: u32, addressed: &[bool]) -> Option<Vec<u3
         slot_live_intervals(f, &cand, &der, &acc, &ent, &ext)
     };
     // MAKEPAD_RUN_COLOR_TRACE=<name substring>: each slot of the matching fns, escaping or not
-    static TRACE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    if let Some(w) = TRACE.get_or_init(|| std::env::var("MAKEPAD_RUN_COLOR_TRACE").ok()) {
-        if f.name.contains(w.as_str()) {
+    static TRACE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(w) = relax_session::phase::env_once(&TRACE, "MAKEPAD_RUN_COLOR_TRACE") {
+        if f.name.contains(w) {
             for s in 0..ns {
                 if f.slots[s].size >= min && addressed[s] {
                     let k = ci[s];
@@ -452,6 +452,59 @@ pub fn slot_addr_positions(f: &Func, at: &[i64]) -> Vec<i64> {
     pos
 }
 
+/// `Copy(dst, src, n)` with both addresses at known frame positions (`slot_addr_positions`) whose
+/// byte ranges overlap but are not the same bytes: `dst - src` in bytes, else 0. Copy is memcpy
+/// (no pass may make such a copy: rir `overlapping_copy`), but the frame layout shares storage
+/// too, so the backends check the final layout: under MAKEPAD_RUN_VERIFY_PASSES such a copy fails
+/// the build, elsewhere it is emitted in memmove order -- a correct copy, never a wrong one.
+pub fn copy_overlap(pos: &[i64], dst: VReg, src: VReg, n: u32) -> i64 {
+    let (Some(&pd), Some(&ps)) = (pos.get(dst.0 as usize), pos.get(src.0 as usize)) else { return 0 };
+    if pd == i64::MIN || ps == i64::MIN {
+        return 0;
+    }
+    // positions grow downwards: an address is the frame base minus its position
+    let delta = ps - pd;
+    if delta != 0 && delta.unsigned_abs() < n as u64 { delta } else { 0 }
+}
+
+/// The first copy of `f` that `copy_overlap` finds in the final layout, described (the backends'
+/// verify-mode build error).
+pub fn overlapping_copy_at(f: &Func, pos: &[i64]) -> Option<String> {
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for i in &b.insts {
+            if let Inst::Copy(d, s, n) = i {
+                let delta = copy_overlap(pos, *d, *s, *n);
+                if delta != 0 {
+                    return Some(format!("{}: b{} copy between overlapping frame bytes (dst - src = {} of {} bytes): {:?}", f.name, bi, delta, n, i));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The pieces (offset, width) a backend copies `n` bytes in: 16-byte pieces, then 8/4/2/1 --
+/// in this order when the destination is below the source (or apart from it), reversed when it
+/// is above: each piece is loaded whole before it is stored, so no piece reads a byte an
+/// earlier piece wrote (memmove order).
+pub fn copy_pieces(n: u32, wide: u32, dst_above: bool) -> Vec<(i32, u8)> {
+    let mut v = Vec::new();
+    let mut o = 0u32;
+    for w in [wide, 8, 4, 2, 1] {
+        if w == 0 {
+            continue;
+        }
+        while o + w <= n {
+            v.push((o as i32, w as u8));
+            o += w;
+        }
+    }
+    if dst_above {
+        v.reverse();
+    }
+    v
+}
+
 /// Every block once: reverse postorder of those reachable from the entry, then the others in
 /// index order (dataflow sweeps in this order settle in about loop depth + 2 passes; lowering's
 /// block numbers are not in flow order -- a join is made before the blocks that reach it).
@@ -659,7 +712,14 @@ pub fn born_liveness(f: &Func, cand: &[usize], der: &[Vec<u32>], live: &mut [Vec
 /// (offset of its lowest byte below the base, its alignment respected), slots sharing storage
 /// (`slot_colors`) the same; unaddressed slots take no space. Returns the offsets and the new
 /// end of the area. `share` false (MAKEPAD_RUN_OPT=-slotcolor): every slot keeps its own storage.
-pub fn slot_layout(f: &Func, mut off: i64, share: bool) -> (Vec<i64>, i64) {
+pub fn slot_layout(f: &Func, off: i64, share: bool) -> (Vec<i64>, i64) {
+    slot_layout_aligned(f, off, share, |_| 1)
+}
+
+/// `slot_layout` with each storage aligned to at least `min_align(size)` (arm64: 8-byte and
+/// 16-byte aggregates on 8 / 16, so their 8-byte fields and q pairs take scaled immediate
+/// offsets instead of an offset register)
+pub fn slot_layout_aligned(f: &Func, mut off: i64, share: bool, min_align: fn(u32) -> u32) -> (Vec<i64>, i64) {
     let ns = f.slots.len();
     if ns == 0 {
         return (Vec::new(), off);
@@ -673,7 +733,7 @@ pub fn slot_layout(f: &Func, mut off: i64, share: bool) -> (Vec<i64>, i64) {
     let Some(to) = to else {
         for (s, slot) in f.slots.iter().enumerate() {
             if used[s] {
-                let al = slot.align.max(1) as i64;
+                let al = slot.align.max(min_align(slot.size)).max(1) as i64;
                 off += slot.size as i64;
                 off = (off + al - 1) / al * al;
                 at[s] = off;
@@ -695,7 +755,7 @@ pub fn slot_layout(f: &Func, mut off: i64, share: bool) -> (Vec<i64>, i64) {
         if !used[s] || to[s] as usize != s {
             continue;
         }
-        let al = align[s] as i64;
+        let al = align[s].max(min_align(size[s])) as i64;
         off += size[s] as i64;
         off = (off + al - 1) / al * al;
         at[s] = off;
@@ -736,7 +796,7 @@ pub fn slot_sets(f: &Func) -> Option<(Vec<Vec<u32>>, Vec<bool>, Vec<bool>)> {
                 src.clear();
                 match i {
                     Inst::SlotAddr(_, s) => src.push(*s),
-                    Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::VLoadX(..) | Inst::AtomicLoad(..) | Inst::Iconst(..) | Inst::Fconst(..) | Inst::Addr(..) | Inst::FnAddr(..) | Inst::TlsAddr(..) | Inst::VConst(..) => continue,
+                    Inst::Load(..) | Inst::LoadX(..) | Inst::VLoad(..) | Inst::VLoadX(..) | Inst::AtomicLoad(..) | Inst::Iconst(..) | Inst::Fconst(..) | Inst::Addr(..) | Inst::FnAddr(..) | Inst::TlsAddr(..) | Inst::TlsStatic(..) | Inst::VConst(..) => continue,
                     // a call's results do not point into its own memory (a result buffer, an
                     // argument copy: see below; a copy that turns out not to be one escapes)
                     Inst::Call(c, args, rets) => {

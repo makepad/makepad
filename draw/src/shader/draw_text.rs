@@ -476,6 +476,8 @@ fn prepare_glyph(cx: &mut Cx2d, glyph: &LaidoutGlyph, dpxs_per_em: f32) -> (Opti
 pub struct PreparedTextGlyph<G = PreparedGlyph> {
     pub pen_x_in_lpxs: f32,
     pub offset_x_in_lpxs: f32,
+    /// The glyph's vertical mark offset, y down (0 for most glyphs).
+    pub offset_y_in_lpxs: f32,
     pub advance_in_lpxs: f32,
     pub font_size_in_lpxs: f32,
     pub glyph: G,
@@ -703,6 +705,7 @@ impl DrawText {
             glyphs.push(PreparedTextGlyph {
                 pen_x_in_lpxs: glyph.origin_in_lpxs.x * self.font_scale,
                 offset_x_in_lpxs: glyph.offset_in_lpxs() * self.font_scale,
+                offset_y_in_lpxs: glyph.origin_in_lpxs.y * self.font_scale,
                 advance_in_lpxs: glyph.advance_in_lpxs() * self.font_scale,
                 font_size_in_lpxs: glyph.font_size_in_lpxs * self.font_scale,
                 glyph: prepared,
@@ -1396,12 +1399,13 @@ impl DrawText {
             return laidout;
         }
         let started = Cx::time_now();
+        let mut laidout = laidout;
         if self.text_style.font_family.request_lazy_fonts_for_glyph_miss(
             cx,
             text,
             has_missing_glyph,
         ) {
-            let laidout = self.layout_loaded(
+            laidout = self.layout_loaded(
                 cx,
                 first_row_indent_in_lpxs,
                 first_row_min_line_spacing_below_in_lpxs,
@@ -1414,7 +1418,27 @@ impl DrawText {
                 "lazy font face loaded and text laid out again in {:.2} ms",
                 (Cx::time_now() - started) * 1000.0
             );
-            return laidout;
+            if !laidout.rows.iter().flat_map(|row| &row.glyphs).any(|glyph| glyph.id == 0) {
+                return laidout;
+            }
+        }
+        // What no face of the family draws (Devanagari, Arabic, Thai, ... in
+        // a Latin theme) comes from the OS's own font for that script.
+        let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+        let found = fonts
+            .borrow_mut()
+            .request_system_fallback(self.text_style.font_family.to_font_family_id(), text);
+        if found {
+            laidout = self.layout_loaded(
+                cx,
+                first_row_indent_in_lpxs,
+                first_row_min_line_spacing_below_in_lpxs,
+                max_width_in_lpxs,
+                wrap,
+                align,
+                text,
+            );
+            cx.redraw_all();
         }
         laidout
     }
@@ -1887,7 +1911,9 @@ pub struct FontFamily {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FontMemberDef {
-    handle: ScriptHandle,
+    // The family can outlive the script object it was read from. Keep its
+    // resource rooted until deferred loading and every later draw are done.
+    handle: Option<ScriptHandleRef>,
     resource_path: String,
     id: String,
     asc: f32,
@@ -2017,11 +2043,6 @@ impl FontFamily {
                             variations: member.variations.clone(),
                         },
                     );
-                // Two different absences, and only one is a mistake. A build that
-                // leaves a font out on purpose says so through the resource table:
-                // the family renders without it, and that is a log. A font nobody
-                // declared at all shows as boxes on screen, so it is an error that
-                // says how to fix it.
                 } else if cx.script_resource_unavailable(&member.resource_path) {
                     // Not packaged with this app: the family renders without
                     // it (dropped, not asked for again every frame), and it
@@ -2035,14 +2056,10 @@ impl FontFamily {
                         );
                     }
                     continue;
-                } else if fonts.note_missing_font(&member.resource_path) {
-                    error!(
-                        "font {:?} (member {}) is not packaged with this app, so its text will show as boxes. \
-                        Declare it in `app_main!`, e.g. `font_assets: [MATH_VIEW_FONT_ASSET]`, \
-                        `INTER_FONT_ASSET` or `ROBOTO_FLEX_FONT_ASSET`, or a literal resource path.",
-                        member.resource_path, member.id
-                    );
                 }
+                // Otherwise the registered resource is still pending. Keep it
+                // in the expected count so the family is retried on redraw when
+                // the web resource loader supplies its bytes or reports failure.
             }
             expected_member_count += 1;
 
@@ -2204,7 +2221,7 @@ fn append_lazy_fallbacks(vm: &mut ScriptVm, members: &mut Vec<FontMemberDef>) {
             continue;
         };
         members.push(FontMemberDef {
-            handle: ScriptHandle::ZERO,
+            handle: None,
             resource_path,
             id: fallback.asset.id.to_string(),
             asc: fallback.asset.ascender,
@@ -2314,7 +2331,7 @@ impl ScriptHook for FontFamily {
                     continue;
                 };
                 self.members.push(FontMemberDef {
-                    handle: handle_ref.as_handle(),
+                    handle: Some(handle_ref.clone()),
                     resource_path,
                     id: kv
                         .key

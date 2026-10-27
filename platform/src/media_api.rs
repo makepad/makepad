@@ -35,9 +35,6 @@ pub trait CxMediaApi {
     where
         F: FnMut(AudioInfo, &AudioBuffer) + Send + 'static,
     {
-        // runs on the device's real-time thread: under Relax compiled now, not on its first call
-        #[cfg(relax)]
-        std::relax::realtime(&f);
         self.audio_input_box(index, Box::new(f))
     }
 
@@ -52,21 +49,14 @@ pub trait CxMediaApi {
     /// recording keeps its place through a fault rather than ending at it.
     #[relax(O3, always)]
     fn audio_output_box(&mut self, index: usize, f: AudioOutputFn) {
-        // The app's closure and this seam run on the device's real-time thread: under Relax
-        // everything they reach is compiled now, never on a first call there (a stall the
-        // device plays as a glitch).
-        #[cfg(relax)]
-        std::relax::realtime(&*f);
         let mut fenced = crate::audio_output_fence::FencedOutput::new(index, f);
         let mut meter = crate::audio_deadline::DeadlineMeter::new("output");
         let seam = move |info: AudioInfo, buffer: &mut AudioBuffer| {
-            let t0 = std::time::Instant::now();
+            let t0 = crate::monotonic_seconds();
             fenced.call(info, buffer);
             crate::audio_output_tap::feed_audio_output_tap(index, info, buffer);
-            meter.block(buffer.frame_count(), info.sample_rate, t0.elapsed());
+            meter.block(buffer.frame_count(), info.sample_rate, t0, crate::monotonic_seconds() - t0);
         };
-        #[cfg(relax)]
-        std::relax::realtime(&seam);
         self.audio_output_box_os(index, Box::new(seam))
     }
 

@@ -921,7 +921,8 @@ impl<'a> TextCx<'a> {
         let smp = format!("_s{}", s.sampler);
         let c = self.expr(f, s.coord);
         let arrayed = matches!(s.tex_type, TextureType::Texture2dArray | TextureType::TextureDepthArray | TextureType::Texture1dArray);
-        let coord = if arrayed { format!("({}).xy, i32(({}).z)", c, c) } else { c };
+        // the layer rounds to nearest, as GLSL, HLSL, Metal and SPIR-V take it
+        let coord = if arrayed { format!("({}).xy, i32(round(({}).z))", c, c) } else { c };
         let depth = matches!(s.tex_type, TextureType::TextureDepth | TextureType::TextureDepthArray);
         let r = match s.kind {
             SampleKind::Implicit => format!("textureSample({}, {}, {})", t, smp, coord),

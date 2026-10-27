@@ -167,6 +167,9 @@ fn targets_from_doc(
     if has_main && bins.is_empty() {
         bins.insert(package.into());
     }
+    // a skip entry also names one binary of a package (`flow-server`: Flow's server binary, not
+    // an app to launch)
+    bins.retain(|b| !skip.iter().any(|s| s == b || Some(s.as_str()) == b.strip_prefix("makepad-")));
     let multiple = bins.len() > 1;
     Ok(bins
         .into_iter()
@@ -304,6 +307,9 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        let d = parse_toml("[package]\nname='makepad-app-flow'\n[[bin]]\nname='makepad-app-flow'\npath='a.rs'\n[[bin]]\nname='makepad-flow-server'\npath='b.rs'").unwrap();
+        let t = targets_from_doc(&d, Path::new("apps/flow"), false, &["flow-server".into()]).unwrap();
+        assert_eq!(t.iter().map(|t| t.binary.as_str()).collect::<Vec<_>>(), ["makepad-app-flow"]);
         let d = parse_toml("[package]\nname='plain'").unwrap();
         assert!(targets_from_doc(&d, Path::new("apps/plain"), false, &[])
             .unwrap()
@@ -328,6 +334,8 @@ mod tests {
             checkout: root.clone(), skip_apps: vec!["private".into()], model: "test".into(),
             targets: Vec::new(), allowed_errors: Vec::new(), no_vision: true, parallel: 1, deep_tests: false,
             machines: Default::default(),
+            yield_to: None,
+            deny_warnings: true,
         };
         let (targets, scripts) = discover(&root, &config).unwrap();
         assert_eq!(targets.iter().map(|t| t.package.as_str()).collect::<Vec<_>>(), vec!["kept"]);
@@ -358,6 +366,8 @@ mod tests {
             checkout: root.clone(), skip_apps: crate::watch::DEFAULT_SKIPS.iter().map(|s| s.to_string()).collect(), model: "test".into(),
             targets: Vec::new(), allowed_errors: Vec::new(), no_vision: true, parallel: 1, deep_tests: false,
             machines: Default::default(),
+            yield_to: None,
+            deny_warnings: true,
         };
         let (targets, scripts) = discover(&root, &config).unwrap();
         assert!(targets.is_empty(), "the members package is no app");

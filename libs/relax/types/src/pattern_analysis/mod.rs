@@ -52,6 +52,9 @@ pub struct Cx<'a> {
     const_errors: Vec<String>,
 }
 
+/// rustc_mir_build errors.rs PointerPattern.
+const POINTER_PATTERN: &str = "function pointers and raw pointers not derived from integers in patterns behave unpredictably and should not be relied upon";
+
 impl<'a> Cx<'a> {
     pub fn pat(&self, p: PIx) -> &DPat {
         &self.pats[p]
@@ -221,7 +224,7 @@ impl<'a> Cx<'a> {
             TyKind::Bool => ConstructorSet::Bool,
             TyKind::Char => ConstructorSet::Integers { range_1: uint_range(0, 0xD7FF), range_2: Some(uint_range(0xE000, 0x10FFFF)) },
             TyKind::Int(p) => {
-                let (bytes, signed) = crate::types::Types::int_info(p);
+                let (bytes, signed) = self.tcx.tys.int_info(p);
                 let range = if matches!(p, Prim::Isize) {
                     IntRange { lo: MaybeInfiniteInt::NegInfinity, hi: MaybeInfiniteInt::PosInfinity }
                 } else if matches!(p, Prim::Usize) {
@@ -557,6 +560,34 @@ impl<'a> Cx<'a> {
                 }
                 // (no value tree to walk: the type is judged -- structural ADTs, no function pointers)
                 None => {
+                    // const_to_pat.rs: valtree construction (here over the interpreter's value of a
+                    // non-generic constant) fails on a union, a function pointer or a raw pointer
+                    // that is not an integer
+                    if self.prog.def(d).kind == DefKind::Const && self.tcx.generic_indices_of(self.prog, d).types_consts.is_empty() {
+                        match crate::const_eval::interp::valtree_of_const(self.prog, self.tcx, d) {
+                            crate::const_eval::interp::ValtreeWalk::NoValtree(bad) => {
+                                let msg = match self.kind(bad) {
+                                    TyKind::FnPtr(..) | TyKind::Ptr(..) => Some(POINTER_PATTERN),
+                                    TyKind::Adt(a, ..) if self.tcx.adts.get(&a).is_some_and(|a| a.is_union) => Some("cannot use unions in constant patterns"),
+                                    _ => None,
+                                };
+                                if let (Some(msg), Some(lo)) = (msg, pos) {
+                                    let e = self.prog.record_uncoded_error(self.body.file, lo, "typeck", msg.to_string());
+                                    self.const_errors.push(e);
+                                    return Some(self.opaque(t, pos));
+                                }
+                            }
+                            // valtree_to_pat: every ADT of the value must be structural (issue-89088:
+                            // a `Cow` inside a derived enum)
+                            crate::const_eval::interp::ValtreeWalk::Adts(adts) => {
+                                if let Some(&bad) = adts.iter().find(|&&a| !self.type_marked_structural(a)) {
+                                    self.not_structural(bad, pos);
+                                    return Some(self.opaque(t, pos));
+                                }
+                            }
+                            crate::const_eval::interp::ValtreeWalk::Unknown => {}
+                        }
+                    }
                     let mut seen = Vec::new();
                     self.const_pattern_type_walk(t, pos, 0, &mut seen);
                     self.const_pattern_partial_eq(t, pos);
@@ -604,7 +635,7 @@ impl<'a> Cx<'a> {
         match self.kind(t) {
             TyKind::FnPtr(..) => {
                 if let Some(lo) = pos {
-                    let e = self.prog.record_uncoded_error(self.body.file, lo, "typeck", "function pointers and raw pointers not derived from integers in patterns behave unpredictably and should not be relied upon. See https://github.com/rust-lang/rust/issues/70861 for details.".to_string());
+                    let e = self.prog.record_uncoded_error(self.body.file, lo, "typeck", POINTER_PATTERN.to_string());
                     self.const_errors.push(e);
                 }
             }
@@ -813,7 +844,7 @@ impl<'a> Cx<'a> {
     fn int_value(&self, t: TyId, bits: u128) -> Option<MaybeInfiniteInt> {
         match self.kind(t) {
             TyKind::Int(p) => {
-                let (bytes, signed) = crate::types::Types::int_info(p);
+                let (bytes, signed) = self.tcx.tys.int_info(p);
                 let size = bytes * 8;
                 let bits = if size == 128 { bits } else { bits & ((1u128 << size) - 1) };
                 Some(if signed { MaybeInfiniteInt::new_finite_int(bits, size) } else { MaybeInfiniteInt::new_finite_uint(bits) })
@@ -1017,7 +1048,7 @@ impl<'a> Cx<'a> {
     fn int_size(&self, t: TyId) -> (u32, bool, bool) {
         match self.kind(t) {
             TyKind::Int(p) => {
-                let (b, s) = crate::types::Types::int_info(p);
+                let (b, s) = self.tcx.tys.int_info(p);
                 (b * 8, s, matches!(p, Prim::Isize | Prim::Usize))
             }
             _ => (32, false, false),
@@ -1223,18 +1254,28 @@ impl Cx<'_> {
 struct Checker<'a> {
     cx: Cx<'a>,
     errors: Vec<String>,
+    at_patterns: Vec<String>,
 }
 
-/// Checks the matches, lets and parameters of a type-checked body: the errors (E0004 /
-/// E0005, located); lints go to the lint sink.
-pub fn check_body(prog: &Program, tcx: &Tcx, body: &Body) -> Vec<String> {
+/// What check_match found in a body.
+pub struct BodyErrors {
+    /// check_match's own failure (E0004, E0005, a constant that is no pattern): the body's checks end
+    pub errors: Vec<String>,
+    /// binding conflicts in `x @ pat` patterns: emitted without failing check_match, so borrowck
+    /// still runs (check_borrow_conflicts_in_at_patterns only emits)
+    pub at_patterns: Vec<String>,
+}
+
+/// Checks the matches, lets and parameters of a type-checked body (located errors); lints go to
+/// the lint sink.
+pub fn check_body(prog: &Program, tcx: &Tcx, body: &Body) -> BodyErrors {
     let cx = body_cx(prog, tcx, body);
-    let mut ck = Checker { cx, errors: Vec::new() };
+    let mut ck = Checker { cx, errors: Vec::new(), at_patterns: Vec::new() };
     ck.run();
     let mut const_errors = std::mem::take(&mut ck.cx.const_errors);
     const_errors.dedup();
     ck.errors.extend(const_errors);
-    ck.errors
+    BodyErrors { errors: ck.errors, at_patterns: ck.at_patterns }
 }
 
 impl<'a> Checker<'a> {
@@ -1360,6 +1401,9 @@ impl<'a> Checker<'a> {
     /// Whether `pos` lies in the expansion of a macro defined in another file (lints from
     /// external macros are not reported).
     fn in_external_macro(&self, pos: u32) -> bool {
+        if crate::lint::generated(self.cx.prog, self.cx.body.def) || crate::lint::external(self.cx.prog, self.cx.body.file, pos) {
+            return true;
+        }
         let pf = &self.cx.prog.files[self.cx.body.file as usize];
         if pos < pf.src_len {
             return false;
@@ -1423,6 +1467,7 @@ impl<'a> Checker<'a> {
         let Some(scrut_ty) = self.scrut_ty(scrut) else { return };
         let mut tarms = Vec::new();
         for (p, g, _, _) in arms {
+            self.check_at_patterns(*p);
             let Some(pat) = self.cx.lower(*p) else { return };
             tarms.push(MatchArm { pat, has_guard: *g });
         }
@@ -1545,6 +1590,7 @@ impl<'a> Checker<'a> {
     }
 
     fn analyze_binding(&mut self, p: PatId, scrut: Option<ExprId>, fallback: u32) -> Option<(PIx, usefulness::UsefulnessReport)> {
+        self.check_at_patterns(p);
         let pat = self.cx.lower(p)?;
         let ty = self.cx.pat(pat).ty;
         let validity = match scrut {
@@ -1575,6 +1621,86 @@ impl<'a> Checker<'a> {
         let (pat, report) = self.analyze_binding(p, scrut, fallback)?;
         self.report_arm_reachability(pat, &report, fallback);
         Some(report.non_exhaustiveness_witnesses.is_empty())
+    }
+
+    /// The subpatterns of `p` in order (Pat::walk_always's children).
+    fn pat_children(&self, p: PatId) -> Vec<PatId> {
+        let ast = self.ast();
+        match ast.pat(p) {
+            Pat::Ident { sub: Some(s), .. } | Pat::Ref(_, s) | Pat::Paren(s) | Pat::Box(s) => vec![*s],
+            Pat::TupleStruct(_, l) | Pat::Tuple(l) | Pat::Slice(l) | Pat::Or(l) => ast.list(*l).to_vec(),
+            Pat::Struct(_, fields, _) => ast.list(*fields).iter().map(|f| f.pat).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// A binding's resolved mode (match ergonomics included): None by value, Some(mutable) by reference.
+    fn binding_mode(&self, p: PatId) -> Option<Option<bool>> {
+        let Pat::Ident { by_ref, mutbl, .. } = self.ast().pat(p) else { return None };
+        self.cx.body.pat_local.get(&p.0)?;
+        if *by_ref { return Some(Some(*mutbl)); }
+        Some(match self.cx.body.pat_bind_ref.get(&p.0).copied() { Some(m) if m != 0 => Some(m == 2), _ => None })
+    }
+
+    /// Pat::each_binding: (pattern, mode, the binding's type) of every binding in `p`.
+    fn each_binding(&self, p: PatId, out: &mut Vec<(PatId, Option<bool>, TyId)>) {
+        if let Some(mode) = self.binding_mode(p) {
+            let li = *self.cx.body.pat_local.get(&p.0).unwrap();
+            out.push((p, mode, self.cx.body.locals[li as usize].ty));
+        }
+        for c in self.pat_children(p) { self.each_binding(c, out); }
+    }
+
+    /// check_match.rs lower_pattern's walk: check_borrow_conflicts_in_at_patterns at every
+    /// subpattern of `p`.
+    fn check_at_patterns(&mut self, p: PatId) {
+        if let Pat::Ident { sub: Some(sub), .. } = *self.ast().pat(p) { self.check_borrow_conflicts_in_at_pattern(p, sub); }
+        for c in self.pat_children(p) { self.check_at_patterns(c); }
+    }
+
+    /// check_match.rs check_borrow_conflicts_in_at_patterns for `binding @ sub`: a by-move binding
+    /// with by-reference bindings below it, or a by-reference one with conflicting bindings below.
+    fn check_borrow_conflicts_in_at_pattern(&mut self, p: PatId, sub: PatId) {
+        let Some(mode) = self.binding_mode(p) else { return };
+        let li = *self.cx.body.pat_local.get(&p.0).unwrap();
+        let ty = self.cx.body.locals[li as usize].ty;
+        let state = crate::tcx::EvalState::new();
+        let ecx = crate::tcx::EvalCx::new(self.cx.prog, self.cx.tcx, self.cx.env, &state);
+        let by_move = |t: TyId| {
+            let t = self.cx.tcx.tys.erase_all_regions(t);
+            let f = self.cx.tcx.tys.flags(t);
+            // (a type with errors or unresolved variables was reported or is not known: no conflict)
+            !f.intersects(TypeFlags::HAS_ERROR) && !f.intersects(TypeFlags::HAS_NON_REGION_INFER) && !self.cx.tcx.type_is_copy_modulo_regions(self.cx.prog, &ecx, self.cx.body.def, t)
+        };
+        let Some(pos) = self.cx.pat_pos(p) else { return };
+        let mut subs = Vec::new();
+        self.each_binding(sub, &mut subs);
+        let msg = match mode {
+            None if by_move(ty) => {
+                if !subs.iter().any(|(_, m, _)| m.is_some()) { return; }
+                "borrow of moved value"
+            }
+            None => return,
+            Some(outer_mut) => {
+                let (mut mut_mut, mut mut_ref, mut moved) = (false, false, false);
+                for &(_, m, t) in &subs {
+                    match m {
+                        Some(inner_mut) => match (outer_mut, inner_mut) {
+                            (false, false) => {}
+                            (true, true) => mut_mut = true,
+                            _ => mut_ref = true,
+                        },
+                        None if by_move(t) => moved = true,
+                        None => {}
+                    }
+                }
+                if mut_mut { "cannot borrow value as mutable more than once at a time" }
+                else if mut_ref { if outer_mut { "cannot borrow value as immutable because it is also borrowed as mutable" } else { "cannot borrow value as mutable because it is also borrowed as immutable" } }
+                else if moved { "cannot move out of value because it is borrowed" }
+                else { return }
+            }
+        };
+        self.at_patterns.push(self.cx.prog.record_uncoded_error(self.cx.body.file, pos, "typeck", msg.to_string()));
     }
 
     fn check_binding_is_irrefutable(&mut self, p: PatId, origin: &str, scrut: Option<ExprId>, fallback: Option<u32>) {

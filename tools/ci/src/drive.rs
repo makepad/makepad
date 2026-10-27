@@ -1330,6 +1330,8 @@ mod tests {
             parallel: 2,
             deep_tests: false,
             machines: Default::default(),
+            yield_to: None,
+            deny_warnings: true,
         };
         let judge = crate::uihub::JudgeWorker::start(&config.model, true).unwrap();
         // The three contract scripts with their pinned step counts, then every
@@ -1348,9 +1350,10 @@ mod tests {
             .collect();
         apps.sort();
         assert!(apps.len() >= 20, "the app scripts are missing: {apps:?}");
-        // The terminal also builds the pty helper it starts its shell through.
+        // The terminal also builds the pty helper it starts its shell through; Desk Host is a
+        // windowless service (no launch step).
         scripts.extend(apps.into_iter().map(|app| {
-            let steps = if app == "terminal" { 3 } else { 2 };
+            let steps = match app.as_str() { "terminal" => 3, "deskhost" => 1, _ => 2 };
             (format!("apps/{app}/ci.splash"), steps)
         }));
         for (path, count) in scripts.iter().map(|(path, count)| (path.as_str(), *count)) {

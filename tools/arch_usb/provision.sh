@@ -161,7 +161,7 @@ install -d /etc/makepad
 install -m 0755 "$seed/wm-session.sh" /usr/local/bin/makepad-wm-session
 install -m 0644 "$seed/wm.env" /etc/makepad/wm.env
 install -m 0644 "$seed/makepad-wm.service" /etc/systemd/system/makepad-wm.service
-# The AI hub is the WM's own child (apps/wm/src/hub_child.rs): its settings, no unit.
+# The AI hub is the AI Hub app the WM starts and keeps running (apps/wm/src/hub_app.rs): its settings, no unit.
 install -d -o arch -g arch /home/arch/.makepad /home/arch/.makepad/wm
 test -f /home/arch/.makepad/wm/ai-hub.conf || install -o arch -g arch -m 0644 "$seed/ai-hub.conf" /home/arch/.makepad/wm/ai-hub.conf
 systemctl daemon-reload
@@ -184,9 +184,15 @@ if test -f "$seed/clone.json"; then
     install -o arch -g arch -m 0755 "$seed/makepad-app-wm" /home/arch/makepad/target/release/makepad-app-wm
     install -o arch -g arch -m 0644 "$seed/clone.json" /home/arch/makepad/CLONE-REVISION.json
 else
-    stage 'Building the release WM offline (it builds the CUDA AI hub when it starts)'
+    stage 'Building the release WM offline'
     runuser -u arch -- env HOME=/home/arch CARGO_NET_OFFLINE=true MAKEPAD_CUDA_ROOT=/opt/cuda NVCC_CCBIN=/usr/bin/g++-15 CUDAHOSTCXX=/usr/bin/g++-15 PATH="$PATH" bash -c 'cd /home/arch/makepad && cargo build --offline --release -p makepad-app-wm'
 fi
+# The WM starts the AI Hub app with `cargo run --release -p makepad-app-aihub --features <features>`
+# (apps/wm/src/hub_app.rs: features and the CUDA toolkit from ~/.makepad/wm/ai-hub.conf and its
+# defaults). `makepad-wm-build -- hub` is that very command with `build`, made by the same code, in the
+# WM session's environment (/etc/environment, written above): the WM's start compiles nothing.
+stage 'Building the AI Hub app (CUDA kernels) the way the WM runs it'
+runuser -u arch -- env HOME=/home/arch CARGO_NET_OFFLINE=true MAKEPAD_WM_ROOT=/home/arch/makepad PATH="$PATH" bash -c 'cd /home/arch/makepad && cargo run --offline --release -p makepad-app-wm --bin makepad-wm-build -- -- hub'
 sshd -t
 systemctl reload sshd
 touch "$state/complete"

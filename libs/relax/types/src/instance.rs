@@ -212,9 +212,27 @@ impl Instance {
                     tcx.dcx.fatal(crate::next_solver::fulfill::ObligationCause { body_id: def, span: 0 },
                         format!("reached the type-length limit while instantiating `{}` (type length {length}, limit {limit})", prog.def_path(def)));
                 }
-                panic!("failed to resolve instance for {}", prog.def_path(def));
+                let args: Vec<String> = args.iter().map(|t| crate::typeck::ty_to_string(false, prog, tcx, *t)).collect();
+                // the trait's impls whose self type is no nominal type (a parameter, an error, a
+                // projection): the usual cause of an ambiguity no concrete type should have
+                let tr = prog.def(def).parent;
+                let mut blanket = Vec::new();
+                if let Some(impls) = tcx.trait_impls_of.get(&tr) {
+                    for imp in impls.iter() {
+                        let Some(st) = tcx.impl_self.get(imp) else { continue };
+                        if matches!(tcx.tys.kind(*st), crate::types::TyKind::Param(..) | crate::types::TyKind::Infer(..) | crate::types::TyKind::Alias(..) | crate::types::TyKind::Error) {
+                            let d = prog.def(*imp);
+                            blanket.push(format!("{} for {}", prog.file_paths.get(d.file as usize).map_or("?", |p| p.as_str()), crate::typeck::ty_to_string(false, prog, tcx, *st)));
+                        }
+                    }
+                }
+                blanket.truncate(6);
+                panic!("failed to resolve instance for {} with [{}] (ambiguous; impls on non-nominal self types: {})", prog.def_path(def), args.join(", "), blanket.join("; "));
             }
-            Err(error) => panic!("failed to resolve instance for {}: {error:?}", prog.def_path(def)),
+            Err(error) => {
+                let args: Vec<String> = args.iter().map(|t| crate::typeck::ty_to_string(false, prog, tcx, *t)).collect();
+                panic!("failed to resolve instance for {} with [{}]: {error:?}", prog.def_path(def), args.join(", "))
+            }
         }
     }
 }

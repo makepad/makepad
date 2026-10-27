@@ -368,6 +368,15 @@ impl ScreenSet {
     /// `Fullscreen` (a `Maximized` window is not one). With two or more
     /// live screens false: a fullscreen there is a span, see
     /// `main_fullscreen`.
+    /// A live screen shows a fullscreen space (SUPER+F): local use for the AI hub
+    /// (`local_use`). A maximised window (a span) is not.
+    pub fn any_fullscreen(&self) -> bool {
+        self.screens[..self.live_count()].iter().any(|s| {
+            let w = &s.layout.workspaces[s.layout.focus_ws()];
+            w.fullscreen.is_some() && w.fullscreen_mode == FullscreenMode::Fullscreen
+        })
+    }
+
     pub fn one_screen_fullscreen(&self) -> bool {
         if self.live_count() >= 2 {
             return false;

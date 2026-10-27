@@ -31,8 +31,9 @@ pub(crate) struct PendingLiveChange {
 pub struct CxLiveReloadState {
     pub(crate) pending_files: Vec<PendingLiveChange>,
     pub script_mod_overrides: crate::makepad_script::ScriptModOverrides,
-    /// Set when overrides were dropped outside the file path (a revert), so
-    /// the next live edit re-runs the modules as a DSL change.
+    /// Set when overrides were dropped outside the file path (a revert, or a
+    /// compiler patch of a design's code under `makepad run`), so the next
+    /// live edit re-runs the modules as a DSL change.
     pub(crate) overrides_changed: bool,
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub(crate) file_observer: Option<DesktopHotReloadWatcher>,
@@ -639,6 +640,26 @@ fn resolve_script_mod_file_candidates(script_mod: &ScriptMod) -> Vec<String> {
     }
 
     candidates
+}
+
+/// Under `makepad run` a source edit is a compiler patch: the `script_mod!` fns of the edited
+/// file run the new code, but the VM keeps the design it evaluated from them. A patched file
+/// with compiled `script_mod!` blocks drops its hot-reload overrides (the patched code is the
+/// file's text now) and the next live edit re-runs the modules, which evaluates the patched
+/// fns, and re-applies them to the live widgets: the design edit shows up live. No file is
+/// read, so this works wherever the program runs (a device's packed sources included).
+#[cfg(relax)]
+impl Cx {
+    pub(crate) fn live_code_patched(&mut self, file_name: &str) {
+        let Some(script_vm) = self.script_vm.as_ref() else { return };
+        let file_name = normalize_path_string(Path::new(file_name));
+        if collect_compiled_sites_for_file(script_vm, &file_name).is_empty() {
+            return;
+        }
+        crate::log!("live design: {} was patched: its script_mod! design runs again", file_name);
+        self.revert_live_edit_file(&file_name);
+        self.script_data.live_reload.overrides_changed = true;
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]

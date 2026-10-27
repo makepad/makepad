@@ -31,7 +31,6 @@ use crate::wayland_view::MpWaylandView;
 use crate::run_view::{MpRunView, MpRunViewAction};
 use crate::domain_view::MpDomainView;
 use crate::tile::TileHost;
-use crate::theme;
 use crate::desktop::{DrawDesktopChrome, StyleTween};
 use crate::shell::ui::ShellDraw;
 use crate::skins::{DrawSkin, Light, Skin};
@@ -166,11 +165,8 @@ fn lerp_color(a: Vec4f, b: Vec4f, t: f64) -> Vec4f {
 /// window must never change its framebuffer dimensions.
 fn snap_to_device(r: Rect, dpi: f64) -> Rect {
     let dpi = dpi.max(1.0);
-    let snap = |v: f64| (v * dpi).round() / dpi;
-    Rect {
-        pos: dvec2(snap(r.pos.x), snap(r.pos.y)),
-        size: dvec2(snap(r.size.x).max(1.0 / dpi), snap(r.size.y).max(1.0 / dpi)),
-    }
+    let r = r.device_round(dpi);
+    Rect { pos: r.pos, size: dvec2(r.size.x.max(1.0 / dpi), r.size.y.max(1.0 / dpi)) }
 }
 
 /// The chrome and app use the same physical-pixel grid.
@@ -370,7 +366,7 @@ pub struct BorderTheme {
 }
 
 impl BorderTheme {
-    fn stop(s: theme::Stop) -> Vec4f {
+    fn stop(s: makepad_shell_kit::theme::Stop) -> Vec4f {
         Vec4f {
             x: s.rgb.r as f32 / 255.0,
             y: s.rgb.g as f32 / 255.0,
@@ -381,7 +377,7 @@ impl BorderTheme {
 
     /// Read the border keys out of a theme.splash source.
     pub fn from_theme_source(source: &str) -> Self {
-        let (active, inactive) = theme::scan_borders(source);
+        let (active, inactive) = makepad_shell_kit::theme::scan_borders(source);
         Self {
             active: Self::stop(active.start),
             active_end: Self::stop(active.end),
@@ -484,6 +480,9 @@ pub struct WmState {
     /// frame, and every tile snaps to the layout like a dragged one — a
     /// tween on top of the slide would lag it (see `dragging`).
     pub pane_sliding: bool,
+    /// The service client whose tray dropdown is open (`dropdown.rs`): a float drawn bare, above
+    /// the windows, and in no dock.
+    pub dropdown_client: Option<ClientId>,
     /// What the shell surfaces may offer to launch (apps.rs): the linked
     /// modules, and the checkout's apps where this build hosts processes.
     pub launchable: crate::apps::Launchable,
@@ -669,7 +668,7 @@ impl WmState {
             let l = self.layout();
             return l.clients_on(l.active);
         }
-        self.screens.shown_clients()
+        self.screens.shown_clients().into_iter().filter(|c| Some(*c) != self.dropdown_client).collect()
     }
 
     /// The active screen's layout: where new windows, workspace keys and
@@ -2595,7 +2594,12 @@ impl WmDesk {
         // The title fills that surface without an independently inset edge.
         self.chrome.radius=0.0;
         self.chrome.bevel=0.0;
-        self.chrome.color=lerp_color(alpha(if t.dark && t.target.supports_dark() {rgb(48,48,51)}else{rgb(237,237,240)},opacity),alpha(if focus>0.5 {rgb(10,36,106)}else{rgb(128,128,128)},opacity),classic as f64);
+        let mac_focus = focus.clamp(0.0, 1.0);
+        let modern_title = if t.target == DesktopStyle::Macos {
+            if t.dark {lerp_color(rgb(40,40,42),rgb(48,48,51),mac_focus)}
+            else {lerp_color(rgb(246,246,246),rgb(237,237,240),mac_focus)}
+        } else if t.dark && t.target.supports_dark() {rgb(48,48,51)}else{rgb(237,237,240)};
+        self.chrome.color=lerp_color(alpha(modern_title,opacity),alpha(if focus>0.5 {rgb(10,36,106)}else{rgb(128,128,128)},opacity),classic as f64);
         self.chrome.color=lerp_color(self.chrome.color,alpha(if focus>0.5 {rgb(0,0,0)}else{rgb(85,85,85)},opacity),next as f64);
         let title_fill=rect(title.pos.x,title.pos.y,title.size.x,(h-2.0*classic as f64).max(1.0));
         self.chrome.draw_abs(cx,title_fill);
@@ -2621,7 +2625,7 @@ impl WmDesk {
             }
         }
         self.title_hits.push((client,title,ChromeHit::Title));
-        let ink=alpha(if retro>0.5 || (t.dark && t.target.supports_dark()) {rgb(255,255,255)}else{rgb(30,30,34)},opacity);
+        let ink=alpha(if t.target == DesktopStyle::Macos {lerp_color(rgb(152,152,158),if t.dark {rgb(229,229,231)}else{rgb(36,36,38)},mac_focus)}else if retro>0.5 || (t.dark && t.target.supports_dark()) {rgb(255,255,255)}else{rgb(30,30,34)},opacity);
         let text=self.titles.get(&client).cloned().unwrap_or_default();
         let inset=if t.target==DesktopStyle::Macos {86.0}else if t.target==DesktopStyle::Windows {38.0}else{28.0};
         if t.target != DesktopStyle::Macos && t.target != DesktopStyle::NextStep {
@@ -2652,6 +2656,8 @@ impl WmDesk {
             self.chrome.radius=(mac*14.0) as f32;
             self.chrome.bevel=retro;
             self.chrome.pressed=if pressed {retro}else{0.0};
+            let group_hover = self.chrome_hover.is_some_and(|(c,h)| c==client && matches!(h,ChromeHit::Close|ChromeHit::Minimize|ChromeHit::Maximize));
+            let color = lerp_color(if t.dark {rgb(85,85,88)}else{rgb(181,181,181)}, color, if group_hover {1.0}else{mac_focus});
             self.chrome.color=lerp_color(alpha(rgb(212,208,200),opacity*classic),alpha(color,opacity),mac);
             if next>0.01 {self.chrome.color=alpha(if pressed {rgb(128,128,128)}else{rgb(170,170,170)},opacity);}
             if modern && hovered {
@@ -2663,7 +2669,6 @@ impl WmDesk {
             }
             let face=if mac>0.99 {rect(button.pos.x+2.0,button.pos.y+(button.size.y-14.0)*0.5,14.0,14.0)}else{button};
             use crate::desktop::MacCaption;
-            let group_hover = self.chrome_hover.is_some_and(|(c,h)| c==client && matches!(h,ChromeHit::Close|ChromeHit::Minimize|ChromeHit::Maximize));
             self.chrome.caption = if mac>0.99 && group_hover {match hit {
                 ChromeHit::Close => MacCaption::Close,
                 ChromeHit::Minimize => MacCaption::Minimize,
@@ -2823,6 +2828,8 @@ impl Widget for WmDesk {
             }
         }
         self.spanned_tiles = spans.iter().map(|(c, _)| *c).collect();
+        // A tray dropdown is drawn bare: the app's card is its whole look.
+        self.spanned_tiles.extend(state.dropdown_client);
         // A fullscreen space's window is drawn bare, whichever space is shown.
         for s in &state.screens.screens {
             self.spanned_tiles.extend(s.layout.spaces.items().iter().filter_map(|sp| sp.fullscreen_client()));
@@ -3709,7 +3716,7 @@ mod tests {
     fn border_theme_reads_the_theme_source() {
         // Tokyo night names no gradient of its own, so it wears
         // hyprland's default: cyan → green at 45°.
-        let t = BorderTheme::from_theme_source(theme::BUNDLED_TOKYO_NIGHT_SPLASH);
+        let t = BorderTheme::from_theme_source(makepad_shell_kit::theme::BUNDLED_TOKYO_NIGHT_SPLASH);
         assert!((t.active.x - 0x33 as f32 / 255.0).abs() < 0.01);
         assert!((t.active_end.y - 1.0).abs() < 0.01);
         assert_ne!(t.active, t.active_end);

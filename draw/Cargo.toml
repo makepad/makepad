@@ -31,5 +31,9 @@ makepad-zune-qoi = { version = "0.5.2", path = "../libs/zune/zune-qoi" }
 makepad-webp = { version = "0.2.4", path = "../libs/webp" }
 makepad-gif = { version = "0.1.0", path = "../libs/gif" }
 
+[dev-dependencies]
+# The script render test rasterises glyph outlines at fractional pen positions.
+ab_glyph_rasterizer = { version = "0.1.8", path = "../libs/ab_glyph_rasterizer" }
+
 [features]
 default = []

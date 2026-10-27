@@ -513,11 +513,12 @@ script_mod! {
             return self.tex.sample_repeat(suv)
         }
 
-        pixel: fn() {
-            // Streamed-LOD crossfade (stream.rs `Dither`): a screen-space
-            // noise window. 0 = no dither; else 1 + lo8 * 256 + hi8 and a
-            // pixel shows only while lo <= noise < hi, so the two LODs of a
-            // transition cover complementary pixels.
+        // Crossfade windows (stream.rs `Dither`, the model chains' and the
+        // stand-ins' dissolves): a screen-space noise window. 0 = no
+        // dither; else 1 + lo8 * 256 + hi8 and a pixel shows only while
+        // lo <= noise < hi, so the two levels of a transition cover
+        // complementary pixels.
+        door_window: fn() {
             if self.color_adjust_ctl.w > 0.5 {
                 let dsp = self.v_spos.xy / max(self.v_spos.w, 0.000001)
                 // A cell grid commensurate with no real target: two draws
@@ -532,6 +533,10 @@ script_mod! {
                 let dhi = dv - dlo * 256.0
                 if dn < dlo / 255.0 || dn >= dhi / 255.0 { self.clip() }
             }
+        }
+
+        pixel: fn() {
+            self.door_window()
             if self.occ_focus.w > 0.0 {
                 let oe = self.occ_eye.xyz
                 let of = self.occ_focus.xyz - oe

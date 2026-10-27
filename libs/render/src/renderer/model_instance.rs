@@ -1,6 +1,7 @@
 //! Placed model instances, model-state targets and animation state.
 
 use super::*;
+use makepad_scene::light::LampSignals;
 
 /// Which placed geometry a model-state command addresses.
 ///
@@ -266,6 +267,10 @@ pub struct ModelInstance {
     /// keyed by their source-neutral connection name. Missing entries sit in
     /// the authored rest pose, so generic viewers need no special handling.
     pub part_poses: Vec<ModelPartPose>,
+    /// The vehicle signals this copy shows: its lamp-role layers (brake,
+    /// tail, reverse lenses) light from them. Default for anything that is
+    /// not a vehicle body, so its lamps show only their running glow.
+    pub lamps: LampSignals,
 }
 
 #[derive(Debug, PartialEq)]
@@ -275,7 +280,9 @@ pub struct CustomMaterialInstance {
 }
 
 pub struct ModelPartPose {
-    pub connection: String,
+    /// shared with the model's driven part ([`DrivenPartInfo::connection_shared`]): posing a part
+    /// every frame copies a reference, not the name
+    pub connection: std::sync::Arc<str>,
     pub transform: Mat4f,
 }
 
@@ -284,7 +291,7 @@ pub struct ModelPartPose {
 // allocating and freeing thousands of them per frame.
 impl Clone for ModelInstance {
     fn clone(&self) -> Self {
-        let ModelInstance { model, custom_material, transform, tint, color_adjust, dynamic, depth_order, part_poses } = self;
+        let ModelInstance { model, custom_material, transform, tint, color_adjust, dynamic, depth_order, part_poses, lamps } = self;
         ModelInstance {
             model: model.clone(),
             custom_material: custom_material.clone(),
@@ -294,10 +301,12 @@ impl Clone for ModelInstance {
             dynamic: *dynamic,
             depth_order: *depth_order,
             part_poses: part_poses.clone(),
+            lamps: *lamps,
         }
     }
     fn clone_from(&mut self, source: &Self) {
-        let ModelInstance { model, custom_material, transform, tint, color_adjust, dynamic, depth_order, part_poses } = source;
+        let ModelInstance { model, custom_material, transform, tint, color_adjust, dynamic, depth_order, part_poses, lamps } = source;
+        self.lamps = *lamps;
         self.model.clone_from(model);
         self.custom_material.clone_from(custom_material);
         self.transform = *transform;
@@ -335,6 +344,8 @@ impl Clone for ModelPartPose {
 #[derive(Clone, Debug)]
 pub struct DrivenPartInfo<'a> {
     pub connection: &'a str,
+    /// the same name, shared: what a [`ModelPartPose`] for this part holds
+    pub connection_shared: &'a std::sync::Arc<str>,
     pub pivot: Vec3f,
     pub anchor: Vec3f,
     pub radius: f32,
@@ -496,6 +507,7 @@ impl ModelInstance {
             model, transform: Mat4f::mul(frame, &local),
             tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
             dynamic: true, depth_order: 0.0, part_poses: Vec::new(), custom_material: None,
+            lamps: LampSignals::default(),
         }
     }
     /// Hang a model off a moving body, anchored by the MODEL's own measured
@@ -562,6 +574,7 @@ impl ModelInstance {
             depth_order: 0.0,
             custom_material: None,
             part_poses: Vec::new(),
+            lamps: LampSignals::default(),
         }
     }
 
@@ -577,6 +590,11 @@ impl ModelInstance {
 
     pub fn with_color_adjust(mut self, color_adjust: Vec4f) -> Self {
         self.color_adjust = color_adjust;
+        self
+    }
+
+    pub fn with_lamps(mut self, lamps: LampSignals) -> Self {
+        self.lamps = lamps;
         self
     }
 }

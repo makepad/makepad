@@ -44,7 +44,7 @@ fn forwarding_body(body: CConv, callee: CConv, regs: bool) -> Code {
     f.blocks[b as usize].pos = vec![0, 0];
     f.blocks[b as usize].term = Term::Ret(Vec::new());
     f.verify().unwrap();
-    let env = x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: regs, syms: 0, sym_class: 0 };
+    let env = x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: regs, syms: 0, sym_class: 0, near: false };
     let c = x64::compile(&relax_session::Options::default(), &f, &env).unwrap();
     assert!(c.relocs.is_empty());
     Code::new(&c.code).unwrap()

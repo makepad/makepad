@@ -17,6 +17,11 @@ mod regions;
 pub mod arg_count;
 pub(crate) mod lifetime_resolve;
 pub(crate) mod resolve_bound_vars;
+
+/// Process-wide memos of the type layer, dropped by value (a settle rebuild: made again on demand).
+pub fn drop_process_memos() {
+    resolve_bound_vars::drop_trivial();
+}
 mod discriminant;
 pub use discriminant::{Discr, VariantDiscr};
 pub mod outlives;
@@ -39,6 +44,9 @@ pub enum TyKey {
     FnPtr,
     /// trait objects by principal trait (`impl Debug for dyn ActionTrait`)
     Dyn(DefId),
+    /// a self type that failed to resolve (rustc fast_reject's SimplifiedType::Error): its
+    /// impls are no blanket impls, so they never answer another type's goals
+    Error,
     Other,
 }
 
@@ -256,6 +264,10 @@ pub struct Tcx {
     /// `TypeckResults::coroutine_stalled_predicates`, per typeck root: the goals that were stalled on a
     /// coroutine of that body (regions erased), proven once the coroutines' witnesses are known.
     pub coroutine_stalled_predicates: relax_session::sync::Mutex<crate::fxhash::HashMap<DefId, Vec<(crate::next_solver::Goal, u32)>>>,
+    /// `TypeckResults::potentially_region_dependent_goals`, per typeck root of a checked crate: the goals HIR
+    /// typeck proved that may depend on the identity of their regions (regions erased, deduplicated), with
+    /// their spans; re-proven when a type op of the root's borrow check fails.
+    pub potentially_region_dependent_goals: relax_session::sync::Mutex<crate::fxhash::HashMap<DefId, Vec<(crate::next_solver::Goal, u32)>>>,
     /// a coroutine type's saved locals after its upvars: (end offset, alignment), made when its
     /// poll function is lowered (coroutine_transform)
     pub coro_frames: crate::conc::MemoMap<TyId, (u32, u32)>,
@@ -274,6 +286,8 @@ pub struct Tcx {
     /// rustc `inferred_outlives_of` (a query there): the outlives requirements an ADT's fields put on its own
     /// parameters, computed once per ADT; cleared whenever declarations change.
     pub inferred_outlives: crate::conc::ShardMap<DefId, std::sync::Arc<Vec<outlives::OutlivesPredicate>>>,
+    /// the ADTs whose `inferred_outlives` still grew at the recursion limit (rustc: a fatal overflow error)
+    pub inferred_outlives_overflow: crate::conc::ShardMap<DefId, ()>,
     /// each trait with its supertraits, transitively (a trait object implements all of them)
     pub trait_closure: ImageMap<DefId, Vec<DefId>>,
     pub queries: crate::type_queries::QueryCx,
@@ -377,6 +391,7 @@ pub fn ty_key(tys: &Types, t: TyId) -> TyKey {
         TyKind::Tuple(_) => TyKey::Tuple,
         TyKind::FnPtr(..) => TyKey::FnPtr,
         TyKind::Dyn(d, ..) => TyKey::Dyn(*d),
+        TyKind::Error => TyKey::Error,
         _ => TyKey::Other,
     }
 }
@@ -428,6 +443,7 @@ impl Tcx {
             coroutine_witness_needs_drop: crate::conc::MemoMap::with_bits(10),
             coroutine_hidden_types: crate::conc::MemoMap::new_kept(10),
             coroutine_stalled_predicates: Default::default(),
+            potentially_region_dependent_goals: Default::default(),
             coro_frames: Default::default(),
             coro_shapes: Default::default(),
             coro_slot_ty: Default::default(),
@@ -435,6 +451,7 @@ impl Tcx {
             future_defs: Default::default(),
             opaques: Default::default(),
             inferred_outlives: Default::default(),
+            inferred_outlives_overflow: Default::default(),
             trait_closure: Default::default(),
             queries: crate::type_queries::QueryCx::new(),
             collect_epoch: Default::default(),
@@ -785,6 +802,7 @@ impl Tcx {
     /// Collects impls and ADTs; registers functions and constants for their declaration
     /// queries. Coherence is not checked (check_coherence / report_coherence).
     pub fn collect_declarations(&mut self, prog: &Program) {
+        self.tys.ptr_bytes = prog.ptr_bytes;
         self.declarations = Default::default();
         self.queries.register_files(prog.files.len());
         self.queries.register_crates(prog.crates.len());
@@ -1087,10 +1105,19 @@ impl Tcx {
         Box::new(std::mem::take(&mut self.queries.solver))
     }
 
+    /// A commit added defs (a body edit's closures, anonymous constants, opaque types: created by
+    /// def_collector at the commit, never "added items"): the per-def declaration table covers
+    /// them. Without it the borrow checker of the edited fn read past the table's end ("index
+    /// out of bounds: the len is N but the index is N+1": a closure added by a live patch).
+    pub fn grow_to(&mut self, prog: &Program) {
+        self.declarations.grow(prog.defs.len());
+    }
+
     pub fn invalidate_check(&mut self, gone: &[DefId]) {
         self.declarations.invalidate(gone);
         self.alias_tys.clear();
         self.inferred_outlives.clear();
+        self.inferred_outlives_overflow.clear();
         if gone.is_empty() { self.publish_collected(); return; }
         let gone: crate::fxhash::HashSet<_> = gone.iter().copied().collect();
         self.sigs.retain(|d, _| !gone.contains(d));
@@ -1557,7 +1584,9 @@ impl Tcx {
 
     #[cold]
     fn init_signature<'a>(&'a self, prog: &Program, d: DefId, cell: &'a std::sync::OnceLock<Box<SigParts>>) -> &'a SigParts {
-        cell.get_or_init(|| {
+        // (computed outside the cell's Once: relax_base::query::init_once)
+        let diagnostics = std::cell::Cell::new(None);
+        let value: &Box<_> = crate::query::init_once(cell, || {
             if crate::why::enabled() && prog.files.get(prog.def(d).file as usize)
                 .and_then(|f| f.ast.items.get(prog.def(d).item.0 as usize)).is_some() {
                 let cause = prog.why_def(d, "signature-demand");
@@ -1569,16 +1598,19 @@ impl Tcx {
             typing_env.limit = RecursionLimit::for_item(prog, d);
             let cx = EvalCx::new(prog, self, typing_env, &state);
             let checkpoint = self.dcx.checkpoint();
-            let mut parts = self.sig_parts_captured(&cx, prog, d);
+            let parts = self.sig_parts_captured(&cx, prog, d);
             if !parts.errors.is_empty() { cx.errors().note_reported_error(); }
-            let (errors, warnings) = cx.errors().take_since(checkpoint);
+            diagnostics.set(Some(cx.errors().take_since(checkpoint)));
+            Box::new(parts)
+        }, |parts| {
+            let (errors, warnings) = diagnostics.take().unwrap_or_default();
             for error in errors {
                 let owner = if error.cause.body_id == NO_DEF { d } else { error.cause.body_id };
                 parts.errors.push(prog.record_error(prog.def(owner).file, error.cause.span, "signature", error.message));
             }
             for warning in warnings { eprintln!("warning: {}", warning.message); }
-            Box::new(parts)
-        })
+        });
+        value
     }
 
     /// fn_sig(d).header.abi without lowering the signature: lower_fn_header reads it from
@@ -1643,6 +1675,9 @@ impl Tcx {
             errors.extend(self.check_item_type_defaults(prog, did));
         }
         errors.extend_from_slice(self.signature_errors(prog, did));
+        if def.kind == DefKind::OpaqueTy && self.validates(prog, def.file) {
+            for e in self.opaque_bound_errors(prog, did) { if !errors.contains(e) { errors.push(e.clone()); } }
+        }
         if prog.item_defs.get(&(def.file, def.item.0)) == Some(&did) {
             errors.extend(crate::item_checks::duplicate_generic_params(prog, did));
             if self.validates(prog, def.file) { errors.extend(crate::item_checks::generic_param_rules(prog, did)); }
@@ -1732,12 +1767,16 @@ impl Tcx {
         let state = EvalState::new();
         state.errors.replace(Some(Vec::new()));
         let cx = EvalCx::new(prog, self, TypingEnv::fully_monomorphized(prog), &state);
+        let mut param_wf = Vec::new();
         for param in ast.list(generics.params) {
             match param.kind {
                 GenericParamKind::Type(_, Some(ty)) => { self.lower_ty(&cx, prog, def.file, def.scope, &env, ty); }
                 GenericParamKind::Const(ty, default) => {
                     let ty = self.lower_ty(&cx, prog, def.file, def.scope, &env, ty);
                     if let Some(value) = default { self.lower_const_arg(prog, def.file, &env, value, ty); }
+                    if self.validates(prog, def.file) {
+                        param_wf.extend(self.const_param_ty_wf(prog, d, param.name.lo, ty));
+                    }
                 }
                 _ => {}
             }
@@ -1766,11 +1805,37 @@ impl Tcx {
             }
         }
         found.extend(state.errors.take().unwrap_or_default());
+        found.extend(param_wf);
         found
     }
 
+    /// rustc_hir_analysis wfcheck.rs check_param_wf without `adt_const_params` /
+    /// `min_adt_const_params` / `const_param_ty_unchecked`: a const parameter's type is an
+    /// integer, `bool` or `char`. (Types carry no span: the error is at the parameter.)
+    fn const_param_ty_wf(&self, prog: &Program, d: DefId, pos: u32, ty: TyId) -> Option<String> {
+        let def = prog.def(d);
+        let features = prog.crates[def.krate as usize].features(prog);
+        if features.has("adt_const_params") || features.has("min_adt_const_params") || features.has("const_param_ty_unchecked") {
+            return None;
+        }
+        let msg = match self.tys.kind(ty) {
+            // (a parameter type that names another parameter is E0770, reported by resolution)
+            TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Error | TyKind::Param(_) => return None,
+            TyKind::FnPtr(..) => "using function pointers as const generic parameters is forbidden".to_string(),
+            TyKind::Ptr(..) => "using raw pointers as const generic parameters is forbidden".to_string(),
+            _ => {
+                if self.tys.has_error(ty) { return None; }
+                format!("`{}` is forbidden as the type of a const generic parameter", crate::typeck::ty_to_string(false, prog, self, ty))
+            }
+        };
+        Some(prog.record_uncoded_error(def.file, pos, "signature", msg))
+    }
+
+    /// Signatures computed and resident: a mapped image's entries count once decoded (reading
+    /// all of them here decoded the whole map into the heap: `memory compiler=1` grew the compiler
+    /// arena by 15 MB per call in a Sandbox race).
     pub fn signature_count(&self) -> usize {
-        self.sigs.values().filter(|cell| cell.get().is_some()).count()
+        self.sigs.decoded_values().filter(|cell| cell.get().is_some()).count()
     }
 
     pub fn signature_bytes(&self) -> usize {
@@ -1926,17 +1991,25 @@ impl Tcx {
         let mut tyb = Vec::new();
         let f = &prog.files[file as usize];
         // (and the enclosing impl's: `impl<A: Array> SmallVec<A> where A::Item: Clone`)
-        let impl_where: &[ast::WherePred] = if prog.def(def.parent).kind == DefKind::Impl {
+        let (impl_where, impl_where_lo): (&[ast::WherePred], u32) = if prog.def(def.parent).kind == DefKind::Impl {
             let im = &prog.impls[prog.def(def.parent).sub as usize];
             match prog.files[im.file as usize].ast.as_impl(&prog.files[im.file as usize].ast.item(im.item).kind) {
-                Some(ImplItem { generics, .. }) if im.file == file => f.ast.list(generics.where_),
-                _ => &[],
+                Some(ImplItem { generics, .. }) if im.file == file => (f.ast.list(generics.where_), generics.where_.lo),
+                _ => (&[], 0),
             }
         } else {
-            &[]
+            (&[], 0)
         };
-        for w in f.ast.list(sig.generics.where_).iter().chain(impl_where.iter()) {
+        let sig_where = f.ast.list(sig.generics.where_);
+        for (wi, w) in sig_where.iter().chain(impl_where.iter()).enumerate() {
             if let ast::WherePred::Bound { ty, bounds, .. } = w {
+                let (base_env, where_id) = match &parent_env {
+                    Some(penv) if wi >= sig_where.len() => (penv, impl_where_lo + (wi - sig_where.len()) as u32),
+                    _ => (&env, sig.generics.where_.lo + wi as u32),
+                };
+                let mut wenv = base_env.clone();
+                wenv.regions = base_env.regions.with_binder(Some(resolve_bound_vars::BinderId::Where(where_id)));
+                let env = &wenv;
                 let simple = match f.ast.ty(*ty) {
                     ast::Ty::Path(p) => p.no_qself() && p.segs.len() == 1 && f.ast.segs(p.segs)[0].args().is_none(),
                     _ => false,
@@ -1960,7 +2033,7 @@ impl Tcx {
                 // a self type Relax cannot lower here (`M::Item` through a where-clause
                 // supertrait) only loses this inference aid: its errors are not the program's
                 let nerr = self.captured_len(cx).unwrap_or(0);
-                let st = self.lower_ty(cx, prog, file, module, &env, *ty);
+                let st = self.lower_ty(cx, prog, file, module, env, *ty);
                 if st == self.tys.error || self.captured_len(cx).unwrap_or(0) != nerr {
                     {
                         if let Some(v) = cx.state.errors.borrow_mut().as_mut() {
@@ -1970,7 +2043,7 @@ impl Tcx {
                     continue;
                 }
                 for (td, path) in tds {
-                    let targs = self.lower_generic_args(cx, prog, file, module, &env, path);
+                    let targs = self.lower_generic_args(cx, prog, file, module, env, path);
                     tyb.push((st, td, targs));
                 }
             }
@@ -2202,7 +2275,9 @@ impl Tcx {
 
     #[cold]
     fn init_const_decl<'a>(&'a self, prog: &Program, d: DefId, cell: &'a std::sync::OnceLock<Box<ConstDecl>>) -> &'a ConstDecl {
-        cell.get_or_init(|| {
+        // (computed outside the cell's Once: relax_base::query::init_once)
+        let diagnostics = std::cell::Cell::new(None);
+        let value: &Box<_> = crate::query::init_once(cell, || {
             let _mem = crate::memstat::tag(crate::memstat::Tag::Sigs);
             let state = EvalState::new();
             let cx = EvalCx::new(prog, self, TypingEnv::fully_monomorphized(prog), &state);
@@ -2214,14 +2289,17 @@ impl Tcx {
             crate::program::missing_restore(enclosing);
             decl.errors = cx.state.errors.replace(outer).unwrap_or_default();
             if !decl.errors.is_empty() { cx.errors().note_reported_error(); }
-            let (errors, warnings) = cx.errors().take_since(checkpoint);
+            diagnostics.set(Some(cx.errors().take_since(checkpoint)));
+            Box::new(decl)
+        }, |decl| {
+            let (errors, warnings) = diagnostics.take().unwrap_or_default();
             for error in errors {
                 let owner = if error.cause.body_id == NO_DEF { d } else { error.cause.body_id };
                 decl.errors.push(prog.record_error(prog.def(owner).file, error.cause.span, "signature", error.message));
             }
             for warning in warnings { eprintln!("warning: {}", warning.message); }
-            Box::new(decl)
-        })
+        });
+        value
     }
 
     fn const_decl_uncached(&self, cx: &crate::tcx::EvalCx<'_>, prog: &Program, d: DefId) -> ConstDecl {
@@ -2389,11 +2467,11 @@ impl Tcx {
         if let (Some(literal), TyKind::Int(prim)) = (literal, self.tys.kind(expected_ty)) {
             let le = pf.ast.expr(literal);
             let text = std::str::from_utf8(pf.bytes(le.lo, le.hi)).unwrap_or("");
-            let (bytes, signed) = crate::types::Types::int_info(*prim);
+            let (bytes, signed) = self.tys.int_info(*prim);
             let matches = match crate::const_fold::int_suffix(text) {
                 None => signed || !neg,
                 Some(suffix) => crate::program::PRIMS.iter().find(|(n, _)| *n == suffix)
-                    .is_some_and(|(_, p)| crate::types::Types::int_info(*p) == (bytes, signed) && (signed || !neg)),
+                    .is_some_and(|(_, p)| self.tys.int_info(*p) == (bytes, signed) && (signed || !neg)),
             };
             if let (true, Some(value)) = (matches, crate::const_fold::parse_int_lit(text)) {
                 let value = if neg { value.wrapping_neg() } else { value };
@@ -2682,7 +2760,23 @@ impl Tcx {
                 args.push(if declaration.consts.iter().any(|c| c.0 as usize == i) { self.tys.intern(TyKind::Const(self.tys.intern_const(crate::consts::ConstKind::Error))) } else { self.tys.error });
             }
             let bound = u16::try_from(bound).expect("dyn principal bound-region count");
-            return self.tys.intern(TyKind::Dyn(td, self.tys.mk_list(&args), self.tys.mk_list(&binds), regions, region, bound, self.tys.mk_list(&autos)));
+            let object = self.tys.intern(TyKind::Dyn(td, self.tys.mk_list(&args), self.tys.mk_list(&binds), regions, region, bound, self.tys.mk_list(&autos)));
+            // dyn_trait.rs check_elaborated_projection_mentions_input_lifetimes: a projection a
+            // supertrait fixes may not mention a late-bound region of the principal that its
+            // trait's input types do not (E0582: `dyn for<'a> A<&'a _>` with `trait A<T>: B<T = T>`)
+            if bound > 0 && self.validates(prog, file) {
+                let principal = self.object_predicates(prog, object).swap_remove(0);
+                for p in self.supertraits(prog, principal) {
+                    use crate::next_solver::{PredicateKind, ClauseKind, AliasTerm, Term};
+                    let PredicateKind::Clause(ClauseKind::Projection(proj)) = &p.kind else { continue };
+                    let (AliasTerm::Ty(alias), Term::Ty(term)) = (&proj.projection_term, &proj.term) else { continue };
+                    let TyKind::Alias(_, a) = self.tys.kind(*alias).clone() else { continue };
+                    let mut input: Vec<crate::consts::GenericArg> = self.tys.list(a.args).iter().map(|&t| crate::consts::GenericArg::Type(t)).collect();
+                    input.extend(self.tys.region_args(a.regions).iter().map(|&r| crate::consts::GenericArg::Lifetime(r)));
+                    self.validate_late_bound_regions(cx, prog, file, path.lo, &input, &[], *term);
+                }
+            }
+            return object;
         }
         // only auto traits (`dyn Send`, `dyn Send + Sync`): a trait object without a principal
         // (rustc: its vtable is drop, size and align alone); the first auto trait stands for it

@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 makepad-draw = { path = "../../draw", version = "2.0.0" }
+makepad-stack = { path = "../stack", version = "1.0.0" }
 makepad-scene = { path = "../scene" }
 # Materials: the Splash hook set, derived variants, diagnostics, IBL.
 makepad-render-material = { path = "../render_material" }

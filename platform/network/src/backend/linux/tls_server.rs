@@ -31,6 +31,17 @@ extern "C" {
     fn EC_KEY_get0_private_key(key: *const c_void) -> *const c_void;
     fn EC_KEY_get0_public_key(key: *const c_void) -> *const c_void;
     fn EC_KEY_get0_group(key: *const c_void) -> *const c_void;
+    fn EC_POINT_new(group: *const c_void) -> *mut c_void;
+    fn EC_POINT_free(point: *mut c_void);
+    fn EC_POINT_oct2point(group: *const c_void, point: *mut c_void, buf: *const u8, len: usize, ctx: *mut c_void) -> c_int;
+    fn EC_POINT_is_on_curve(group: *const c_void, point: *const c_void, ctx: *mut c_void) -> c_int;
+    fn ECDH_compute_key(
+        out: *mut u8,
+        out_len: usize,
+        peer: *const c_void,
+        key: *const c_void,
+        kdf: Option<unsafe extern "C" fn(*const c_void, usize, *mut c_void, *mut usize) -> *mut c_void>,
+    ) -> c_int;
     fn EC_POINT_point2oct(
         group: *const c_void,
         point: *const c_void,
@@ -108,6 +119,37 @@ pub fn generate_p256() -> io::Result<[u8; 97]> {
 
 fn sec1(key: &[u8; 97]) -> Vec<u8> {
     x509::sec1_private_key(&key[65..], &key[..65])
+}
+
+pub fn ecdh_p256(key: &[u8; 97], peer_point: &[u8]) -> io::Result<[u8; 32]> {
+    let der = sec1(key);
+    unsafe {
+        let mut p = der.as_ptr();
+        let key = d2i_ECPrivateKey(ptr::null_mut(), &mut p, der.len() as c_long);
+        if key.is_null() {
+            return Err(ssl_error("d2i_ECPrivateKey"));
+        }
+        let group = EC_KEY_get0_group(key);
+        let peer = EC_POINT_new(group);
+        let result = (|| {
+            if peer.is_null() {
+                return Err(ssl_error("EC_POINT_new"));
+            }
+            if EC_POINT_oct2point(group, peer, peer_point.as_ptr(), peer_point.len(), ptr::null_mut()) != 1
+                || EC_POINT_is_on_curve(group, peer, ptr::null_mut()) != 1
+            {
+                return Err(ssl_error("invalid P-256 peer point"));
+            }
+            let mut secret = [0u8; 32];
+            if ECDH_compute_key(secret.as_mut_ptr(), secret.len(), peer, key, None) != 32 {
+                return Err(ssl_error("ECDH_compute_key"));
+            }
+            Ok(secret)
+        })();
+        EC_POINT_free(peer);
+        EC_KEY_free(key);
+        result
+    }
 }
 
 pub fn sign_p256_sha256(key: &[u8; 97], msg: &[u8]) -> io::Result<Vec<u8>> {

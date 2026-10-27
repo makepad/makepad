@@ -30,13 +30,17 @@
 //! frees its own blocks with plain loads and stores. A free from another thread pushes the block
 //! onto the chunk's lock-free remote list, which the owner drains when its free list runs dry; the
 //! chunk lock is only taken to attach a chunk, hand it back (the thread ends, the chunk is full or
-//! empty, the generation moved on) or to free into a chunk nobody owns. Accounting is per chunk.
+//! empty) or to free into a chunk nobody owns. Accounting is per chunk.
 //!
 //! Routing is by a per-thread phase: `compiler()` opts a thread (or a stretch of one) in; the
 //! default, `kept`, is the system heap. A free is decided by the block's address, never by the
 //! phase, so a block can be freed from any thread in any phase. A realloc moves a compiler block
 //! to the system heap when it grows in the kept phase; a system block never moves into the
-//! compiler arena (a program block must not end up where a later destroy would take it).
+//! compiler arena (the program's memory stays the program's).
+//!
+//! Safety rule (MEMSAFE.DESIGN.md M1): a block is released only by its owner's Drop. No arena
+//! frees, decommits or protects live blocks in bulk; which arena a block lives in is a matter of
+//! memory footprint, never of lifetime.
 //! `MAKEPAD_RUN_COMPILER_ARENA=0` turns compiler routing off (read once, without allocating).
 //!
 //! The JIT allocator ABI selects a domain heap through thread-local ownership (domain.rs).
@@ -61,15 +65,6 @@ mod compiler {
     const WEB_AT: usize = 0;
     include!("zone_alloc/arena.rs");
 }
-/// The web target's linear memory (web.rs): the compiler arena's allocator over one fixed range.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-#[allow(dead_code)]
-mod web_arena {
-    pub const COMPILER: bool = true;
-    pub const LABEL: &std::ffi::CStr = c"makepad-run-web-memory";
-    const WEB_AT: usize = super::web::BASE + super::web::ARENA_OFFSET;
-    include!("zone_alloc/arena.rs");
-}
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod web;
 
@@ -79,9 +74,24 @@ pub mod web;
 mod disabled {
     use std::alloc::Layout;
     pub struct ScratchGuard;
+    pub struct FreshGuard;
+    impl Drop for FreshGuard {
+        fn drop(&mut self) {}
+    }
+    pub fn fresh_chunks() -> FreshGuard {
+        FreshGuard
+    }
     #[inline]
-    pub fn scratch(_: &crate::options::RuntimeOptions) -> ScratchGuard {
+    pub fn enter_scratch() -> ScratchGuard {
         ScratchGuard
+    }
+    #[inline]
+    pub fn no_scratch() -> ScratchGuard {
+        ScratchGuard
+    }
+    #[inline]
+    pub fn copy_out<R>(f: impl FnOnce() -> R) -> R {
+        f()
     }
     #[inline]
     pub fn active() -> bool {
@@ -98,40 +108,18 @@ mod disabled {
     pub fn stats() -> (usize, usize, usize) {
         (0, 0, 0)
     }
-    pub fn trim() {}
-    pub fn detach_thread() {}
-    pub fn generation() -> u64 {
-        0
+    pub fn census() -> [usize; 11] {
+        [0; 11]
     }
-    pub fn begin_generation() -> u64 {
-        0
+    pub fn states() -> [usize; 28] {
+        [0; 28]
     }
-    pub fn destroy_generation(_: u64) -> (usize, usize) {
-        (0, 0)
-    }
-    pub fn destroy_older() -> (usize, usize) {
-        (0, 0)
-    }
-    pub fn epoch_of(_: *const u8) -> Option<u64> {
-        None
-    }
-    pub fn tombstone_of(_: usize) -> Option<u64> {
-        None
-    }
-    pub fn tombstone_frees() -> usize {
-        0
-    }
-    pub fn tombstones() -> usize {
-        0
-    }
-    pub fn tombstone_hit(_: *mut u8, _: &str) {}
-    pub fn tombstone_expected() {}
-    pub fn points_into(_: usize, _: u64) -> bool {
+    pub fn mark_old() {}
+    pub fn is_old(_: *const u8) -> bool {
         false
     }
-    pub fn internal_ranges() -> [(usize, usize); 2] {
-        [(0, 0); 2]
-    }
+    pub fn trim() {}
+    pub fn detach_thread() {}
     pub unsafe fn alloc(_: Layout) -> *mut u8 {
         std::ptr::null_mut()
     }
@@ -150,12 +138,135 @@ use disabled as burst;
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android", windows)))]
 use disabled as compiler;
 
-pub use burst::{scratch, stats as burst_stats, trim as burst_trim, ScratchGuard};
+pub use burst::{copy_out, stats as burst_stats, trim as burst_trim, ScratchGuard};
+
+// ------------------------------------------------------------------ job arena
+//
+// Every compile job (the outermost `compile_job` guard of a thread) allocates in its job arena,
+// the burst arena: what the job builds and drops dies there; what it hands on is copied out at its
+// install (`copy_out`). Memory is freed only by its owner's Drop, in any arena, from any thread:
+// a result that was not copied out is never freed under a reference, it only stays in the job
+// arena (a survivor, counted below). The arena decides where a block lives, never when it dies.
+
+thread_local! {
+    /// Net bytes this thread allocated in the burst arena minus what it freed there.
+    static JOB_LIVE: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+
+static JOBS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static SURVIVOR_JOBS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static SURVIVOR_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[inline(always)]
+fn job_count(bytes: isize) {
+    let _ = JOB_LIVE.try_with(|c| c.set(c.get() + bytes));
+}
+
+/// One env flag read without allocating (the allocator may be on the stack): 1 = set to "1".
+#[cold]
+fn env_flag(name: &std::ffi::CStr, cell: &std::sync::atomic::AtomicU8, default: bool) -> bool {
+    #[cfg(unix)]
+    let v = unsafe {
+        extern "C" {
+            fn getenv(name: *const u8) -> *const u8;
+        }
+        let p = getenv(name.as_ptr().cast());
+        if p.is_null() || *p.add(1) != 0 {
+            default
+        } else {
+            match *p {
+                b'0' => false,
+                b'1' => true,
+                _ => default,
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let v = {
+        let _ = name;
+        default
+    };
+    cell.store(if v { 1 } else { 2 }, Ordering::Relaxed);
+    v
+}
+
+#[inline(always)]
+fn flag(cell: &std::sync::atomic::AtomicU8, name: &std::ffi::CStr, default: bool) -> bool {
+    match cell.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => env_flag(name, cell, default),
+    }
+}
+
+static JOB_CHECK: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static ZAP: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// MAKEPAD_RUN_ZAP=1: a block freed in the compiler or job arena is filled with 0xcd first, so a
+/// read of freed memory (unsafe code, a raw pointer kept past its owner) sees poison at once.
+#[inline(always)]
+fn zap(p: *mut u8, l: Layout) {
+    if flag(&ZAP, c"MAKEPAD_RUN_ZAP", false) {
+        unsafe { std::ptr::write_bytes(p, 0xcd, l.size()) };
+    }
+}
+
+/// MAKEPAD_RUN_JOB_CHECK=1: every job that ends with survivors in its job arena is reported.
+pub fn job_check_on() -> bool {
+    flag(&JOB_CHECK, c"MAKEPAD_RUN_JOB_CHECK", false)
+}
+
+/// A compile job's arena scope: the optimiser and back end of one function build (O1 codegen,
+/// O2, counted, O3, split back-end jobs). Its working set dies with it; its result (code bytes,
+/// relocations, pc map, optimised RIR) is copied out (`copy_out`) where it is handed on. Front
+/// ends, type checks and lowering run in the compiler arena: their results are memoized by queries
+/// and interners, which a per-job arena would only pin. Nested scopes add nothing.
+/// `enabled` = RuntimeOptions::burst_arena (MAKEPAD_RUN_BURST_ARENA=0 turns it off; with
+/// MAKEPAD_RUN_COMPILER_ARENA=0 too every block is in the system heap, for ASan/valgrind runs).
+pub struct JobScope {
+    open: Option<(ScratchGuard, isize, &'static str)>,
+}
+
+thread_local! {
+    static JOB_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub fn job(label: &'static str, enabled: bool) -> JobScope {
+    if JOB_OPEN.try_with(|o| o.replace(true)).unwrap_or(true) {
+        return JobScope { open: None };
+    }
+    let scratch = if enabled { burst::enter_scratch() } else { burst::no_scratch() };
+    JobScope { open: Some((scratch, JOB_LIVE.try_with(|c| c.get()).unwrap_or(0), label)) }
+}
+
+impl Drop for JobScope {
+    fn drop(&mut self) {
+        let Some((scratch, start, label)) = self.open.take() else { return };
+        drop(scratch);
+        let _ = JOB_OPEN.try_with(|o| o.set(false));
+        let left = JOB_LIVE.try_with(|c| c.get()).unwrap_or(0) - start;
+        JOBS.fetch_add(1, Ordering::Relaxed);
+        if left > 0 {
+            SURVIVOR_JOBS.fetch_add(1, Ordering::Relaxed);
+            SURVIVOR_BYTES.fetch_add(left as usize, Ordering::Relaxed);
+            if job_check_on() {
+                let _k = kept();
+                let t = std::thread::current();
+                eprintln!("makepad-run job: {label} on {} left {left} bytes in its job arena (not copied out)", t.name().unwrap_or("?"));
+            }
+        }
+    }
+}
+
+/// (jobs ended, jobs that left survivors in their job arena, survivor bytes).
+pub fn job_stats() -> (usize, usize, usize) {
+    (JOBS.load(Ordering::Relaxed), SURVIVOR_JOBS.load(Ordering::Relaxed), SURVIVOR_BYTES.load(Ordering::Relaxed))
+}
 pub use relax_session::phase::{in_compiler, PhaseGuard};
 
 use relax_session::phase::ROUTING as MODE;
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(target_os = "macos")]
 use std::sync::atomic::AtomicBool;
 
@@ -165,6 +276,41 @@ pub fn compiler_stats() -> (usize, usize, usize) {
 }
 
 /// (touched bytes of small chunks, bytes in their live slots, bytes of large blocks, chunks listed for reuse).
+/// The compiler and burst arenas' census (arena.rs `census`): where their committed bytes are.
+pub fn arena_census() -> ([usize; 11], [usize; 11]) {
+    (compiler::census(), burst::census())
+}
+
+/// The compiler and burst arenas' chunk states with resident bytes (arena.rs `states`).
+pub fn arena_states() -> ([usize; 28], [usize; 28]) {
+    (compiler::states(), burst::states())
+}
+
+/// The compiler arena's committed chunks are old from now on (`arena_states`' old row).
+pub fn compiler_mark_old() {
+    compiler::mark_old();
+    OLD_MARKS.fetch_add(1, Ordering::Release);
+}
+
+/// `compiler_mark_old` calls so far (heap samples taken before the last one are the cold state's).
+static OLD_MARKS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn compiler_old_marks() -> usize {
+    OLD_MARKS.load(Ordering::Acquire)
+}
+
+/// Where block `p` lives: 0 a compiler-arena chunk marked old, 1 another compiler-arena chunk,
+/// 2 the burst arena, 3 any other heap (diagnostics: `memory compiler=1` placement rows).
+pub fn placement(p: *const u8) -> usize {
+    if compiler::owns(p as *mut u8) {
+        if compiler::is_old(p) { 0 } else { 1 }
+    } else if burst::owns(p as *mut u8) {
+        2
+    } else {
+        3
+    }
+}
+
 pub fn compiler_detail() -> (usize, usize, usize, usize) {
     compiler::detail()
 }
@@ -182,65 +328,26 @@ pub fn compiler_hand_back() {
     compiler::detach_thread()
 }
 
+/// Compiler-arena blocks of the calling thread come from fresh chunks only until the guard drops
+/// (arena.rs `fresh_chunks`: a settle rebuild's new state, kept compact).
+pub fn compiler_fresh() -> impl Drop {
+    compiler::fresh_chunks()
+}
+
+/// `compiler_hand_back` for a thread about to wait (a worker with no work, a program thread
+/// after its lazy compile). A thread's current chunks are its own: frees from other threads only
+/// queue on them (the remote lists) until it allocates in them again, so a thread that goes quiet
+/// would keep every block freed into them -- a settle rebuild's dropped state among them --
+/// resident. Handed back, the chunks take those frees under their lock and an emptied one is
+/// released. A thread with no current chunk (it allocated nothing since) pays one pass over its
+/// class table.
+pub fn compiler_hand_back_idle() {
+    compiler::detach_thread();
+}
+
 /// Decommits the compiler arena's warm chunks (settle's heap trim).
 pub fn compiler_trim() {
     compiler::trim()
-}
-
-/// The compiler arena's current generation (starts at 0).
-pub fn compiler_generation() -> u64 {
-    compiler::generation()
-}
-
-/// Starts a new compiler generation and returns it: compiler-phase allocations from now on take
-/// only chunks and runs carved for it; frees of older blocks keep working by address.
-pub fn compiler_begin_generation() -> u64 {
-    compiler::begin_generation()
-}
-
-/// Destroys generation `g` (older than the current one): its chunks and large runs are
-/// decommitted with the zeroing path and left PROT_NONE as tombstones, never reused. Returns
-/// (chunks, touched bytes). The caller has stopped every user of `g` (the settle swap).
-pub fn compiler_destroy_generation(g: u64) -> (usize, usize) {
-    compiler::destroy_generation(g)
-}
-
-/// Destroys every generation older than the current one, including aborted swaps' arenas.
-/// Returns (chunks, touched bytes); every user of those generations must be quiesced.
-pub fn compiler_destroy_older() -> (usize, usize) {
-    compiler::destroy_older()
-}
-
-/// The generation of the live compiler block at `p` (None: not a live arena address).
-pub fn compiler_epoch_of(p: *const u8) -> Option<u64> {
-    compiler::epoch_of(p)
-}
-
-/// The destroyed generation whose address range holds `addr` (async-signal-safe: the fault
-/// handler reports "use after compiler-zone destroy").
-pub fn compiler_tombstone_of(addr: usize) -> Option<u64> {
-    compiler::tombstone_of(addr)
-}
-
-/// Frees and reallocs that hit a destroyed generation (counted no-ops).
-pub fn compiler_tombstone_frees() -> usize {
-    compiler::tombstone_frees()
-}
-
-/// Does `p` point into the carved part of a live block area of generation `g`? (exact; the
-/// static scan's test.)
-pub fn compiler_points_into(p: usize, g: u64) -> bool {
-    compiler::points_into(p, g)
-}
-
-/// The arena's own statics (address ranges): its free lists and base address are not roots.
-pub fn compiler_internal_ranges() -> [(usize, usize); 2] {
-    compiler::internal_ranges()
-}
-
-/// Number of tombstoned chunks and runs.
-pub fn compiler_tombstones() -> usize {
-    compiler::tombstones()
 }
 
 /// Whether compiler-phase routing is on in this process (`MAKEPAD_RUN_COMPILER_ARENA=0` turns it off).
@@ -285,100 +392,17 @@ pub fn compiler() -> PhaseGuard {
 
 /// `compiler()` for the first statement of a thread that compiles: when the thread ends its
 /// chunks are handed back for reuse.
-pub struct ThreadGuard(#[allow(dead_code)] PhaseGuard, usize);
+pub struct ThreadGuard(#[allow(dead_code)] PhaseGuard);
 
 impl Drop for ThreadGuard {
     fn drop(&mut self) {
-        live::leave(self.1);
         compiler::detach_thread();
     }
 }
 
 #[inline]
 pub fn compiler_thread() -> ThreadGuard {
-    let phase = compiler();
-    ThreadGuard(phase, live::enter())
-}
-
-/// Every thread that took `compiler_thread()` and has not ended: the settle swap (jit zone_swap)
-/// may destroy the compiler generation only when the threads that are alive are all known to
-/// hold none of its blocks across the swap. Fixed table and a spin lock: no allocation, so it
-/// is safe to touch from a thread's first statement.
-mod live {
-    use std::cell::UnsafeCell;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    const N: usize = 512;
-    /// Threads that found the table full: counted, and listed as "<untracked>" so the swap sees
-    /// them as unexpected threads (it waits) instead of missing them.
-    static OVERFLOW: AtomicUsize = AtomicUsize::new(0);
-    const NAME: usize = 24;
-    struct Table {
-        lock: AtomicBool,
-        slots: UnsafeCell<[(bool, [u8; NAME]); N]>,
-    }
-    unsafe impl Sync for Table {}
-    static TABLE: Table = Table { lock: AtomicBool::new(false), slots: UnsafeCell::new([(false, [0; NAME]); N]) };
-
-    fn with<R>(f: impl FnOnce(&mut [(bool, [u8; NAME]); N]) -> R) -> R {
-        while TABLE.lock.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-            std::hint::spin_loop();
-        }
-        let r = f(unsafe { &mut *TABLE.slots.get() });
-        TABLE.lock.store(false, Ordering::Release);
-        r
-    }
-
-    pub fn enter() -> usize {
-        let mut name = [0u8; NAME];
-        // (a spawned thread's name is already set: no allocation)
-        if let Some(n) = std::thread::current().name() {
-            let b = n.as_bytes();
-            let k = b.len().min(NAME);
-            name[..k].copy_from_slice(&b[..k]);
-        }
-        with(|t| match t.iter().position(|s| !s.0) {
-            Some(i) => {
-                t[i] = (true, name);
-                i
-            }
-            None => {
-                OVERFLOW.fetch_add(1, Ordering::Relaxed);
-                usize::MAX
-            }
-        })
-    }
-
-    pub fn leave(i: usize) {
-        if i != usize::MAX {
-            with(|t| t[i].0 = false);
-        } else {
-            OVERFLOW.fetch_sub(1, Ordering::Relaxed);
-        }
-    }
-
-    pub fn list() -> Vec<String> {
-        let names: Vec<[u8; NAME]> = with(|t| t.iter().filter(|s| s.0).map(|s| s.1).collect());
-        let mut v: Vec<String> = names.into_iter().map(|n| {
-            let k = n.iter().position(|b| *b == 0).unwrap_or(NAME);
-            String::from_utf8_lossy(&n[..k]).into_owned()
-        }).collect();
-        v.extend((0..OVERFLOW.load(Ordering::Relaxed)).map(|_| "<untracked>".to_string()));
-        v
-    }
-}
-
-/// The names of the threads alive that took `compiler_thread()` (an unnamed thread: "").
-/// Allocates: call in the phase the result should live in.
-pub fn live_compiler_threads() -> Vec<String> {
-    live::list()
-}
-
-/// Frees of destroyed-generation blocks are expected from now on (the boot frame of the main
-/// thread drops its compiler-phase locals when the program's `main` returns): still counted,
-/// no longer fatal under MAKEPAD_RUN_ZONE_CHECK.
-pub fn tombstone_frees_expected() {
-    compiler::tombstone_expected();
+    ThreadGuard(compiler())
 }
 
 /// Allocations go to the system heap (the program's) until the guard drops. JIT code and
@@ -403,11 +427,17 @@ pub fn kept_clone<T: Clone>(v: &T) -> T {
     v.clone()
 }
 
-/// Does `p` lie in the compiler arena (a block there is destroyed by step 1b)? The check
-/// `MAKEPAD_RUN_ZONE_CHECK=1` runs over the kept state.
+/// Does `p` lie in the compiler arena? (Placement only: which heap holds a block decides the
+/// footprint, never its lifetime.)
 #[inline]
 pub fn compiler_owns(p: *const u8) -> bool {
     compiler::owns(p as *mut u8)
+}
+
+/// Does `p` lie in the burst (scratch) arena?
+#[inline]
+pub fn burst_owns(p: *const u8) -> bool {
+    burst::owns(p as *mut u8)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", windows))]
@@ -522,9 +552,12 @@ mod zone {
 unsafe impl GlobalAlloc for RelaxAlloc {
     #[inline]
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        if burst::active() {
+        // the job arena takes only compiler-phase blocks: kept state and JIT code's allocations
+        // (kept phase) never land in it, whatever scope the thread is in
+        if burst::active() && in_compiler() {
             let p = burst::alloc(l);
             if !p.is_null() {
+                job_count(l.size() as isize);
                 return p;
             }
         }
@@ -542,9 +575,12 @@ unsafe impl GlobalAlloc for RelaxAlloc {
     }
     #[inline]
     unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
-        if burst::active() {
+        // the job arena takes only compiler-phase blocks: kept state and JIT code's allocations
+        // (kept phase) never land in it, whatever scope the thread is in
+        if burst::active() && in_compiler() {
             let p = burst::alloc(l);
             if !p.is_null() {
+                job_count(l.size() as isize);
                 std::ptr::write_bytes(p, 0, l.size());
                 return p;
             }
@@ -566,11 +602,14 @@ unsafe impl GlobalAlloc for RelaxAlloc {
         // The compiler arena first: one address-range test decides the common free. The arenas
         // reserve disjoint ranges, so the order among them does not change who owns a block.
         if compiler::owns(p) {
+            zap(p, l);
             return compiler::dealloc(p, l);
         }
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", windows))]
         if domain::dealloc_layout(p, l) { return; }
         if burst::owns(p) {
+            zap(p, l);
+            job_count(-(l.size() as isize));
             return burst::dealloc(p, l);
         }
         #[cfg(target_os = "macos")]
@@ -584,8 +623,10 @@ unsafe impl GlobalAlloc for RelaxAlloc {
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", windows))]
         if let Some(q) = domain::realloc_layout(p, l, size) { return q; }
         let in_burst = burst::owns(p);
-        if in_burst || burst::active() {
-            // The destination follows the current scope. On failure the old block stays valid.
+        // A job-arena block moves to wherever the scope and phase send it now. A block of another
+        // heap never moves into the job arena: a container that outlives the job and grows in it
+        // stays where it lives. On failure the old block stays valid.
+        if in_burst {
             let n = self.alloc(Layout::from_size_align_unchecked(size, l.align()));
             if !n.is_null() {
                 std::ptr::copy_nonoverlapping(p, n, l.size().min(size));
@@ -594,19 +635,14 @@ unsafe impl GlobalAlloc for RelaxAlloc {
             return n;
         }
         if compiler::owns(p) {
-            if compiler::tombstone_of(p as usize).is_some() {
-                // a destroyed block: counted (an abort under MAKEPAD_RUN_ZONE_CHECK); its bytes are
-                // gone, so the new block is not a copy
-                compiler::tombstone_hit(p, "realloc");
-                return self.alloc(Layout::from_size_align_unchecked(size, l.align()));
-            }
             if in_compiler() && compiler::resize_in_place(p, l, size) {
                 return p;
             }
             // grows (or shrinks) into the heap of the current phase; the old block stays valid on failure
-            let n = self.alloc(Layout::from_size_align_unchecked(size, l.align()));
+            let n = copy_out(|| self.alloc(Layout::from_size_align_unchecked(size, l.align())));
             if !n.is_null() {
                 std::ptr::copy_nonoverlapping(p, n, l.size().min(size));
+                zap(p, l);
                 compiler::dealloc(p, l);
             }
             return n;
@@ -619,14 +655,21 @@ unsafe impl GlobalAlloc for RelaxAlloc {
     }
 }
 
+/// Tests that read the arenas' process-wide counters (committed bytes, chunks) run one at a time,
+/// and so do the tests whose threads allocate in the compiler arena meanwhile (pool.rs: its
+/// workers are compiler threads and hand their chunks back after every task).
+#[cfg(test)]
+pub(crate) fn test_serial() -> relax_session::sync::MutexGuard<'static, ()> {
+    static SERIAL: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(all(test, any(target_os = "macos", target_os = "linux", target_os = "android", windows)))]
 mod routing_tests {
     use super::*;
 
-    static SERIAL: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
-
     fn serial() -> relax_session::sync::MutexGuard<'static, ()> {
-        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+        test_serial()
     }
 
     unsafe fn put(size: usize, align: usize, byte: u8) -> (*mut u8, Layout) {
@@ -674,7 +717,6 @@ mod routing_tests {
         kept()
     }
 
-    include!("zone_alloc/generation_tests.rs");
     include!("zone_alloc/stress_tests.rs");
 
     #[test]

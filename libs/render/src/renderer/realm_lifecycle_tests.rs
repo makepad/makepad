@@ -40,6 +40,7 @@ fn model(id: &str, x: f32, dynamic: bool, depth_order: f32) -> ModelInstance {
         depth_order,
         custom_material: None,
         part_poses: Vec::new(),
+        lamps: Default::default(),
     }
 }
 

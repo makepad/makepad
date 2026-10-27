@@ -42,7 +42,7 @@ static RECORDED: relax_session::sync::Mutex<Option<(std::collections::HashSet<(u
 
 /// Starts the read log from MAKEPAD_RUN_READ_LOG (the loader calls this at start, next to MAKEPAD_RUN_VFS).
 pub fn record_from_env() -> Result<(), String> {
-    // process state: built in the kept heap (the settle swap destroys the compiler zone)
+    // process state: built in the kept heap
     let _k = crate::zone_alloc::kept();
     let Some(p) = std::env::var_os("MAKEPAD_RUN_READ_LOG").filter(|p| !p.is_empty()) else { return Ok(()) };
     let f = std::fs::OpenOptions::new().create(true).append(true).open(&p).map_err(|e| format!("MAKEPAD_RUN_READ_LOG {}: {e}", p.to_string_lossy()))?;
@@ -75,7 +75,7 @@ static FROZEN: RwLock<Vec<String>> = RwLock::new(Vec::new());
 /// Verify a complete subtree directly from the store (no disk/edits reads), then protect it
 /// from the app's edit overlay. Paths and bytes use the same digest as the compiler build.
 pub fn verify_std(path: &str, expected: &str) -> Result<(), String> {
-    // process state: built in the kept heap (the settle swap destroys the compiler zone)
+    // process state: built in the kept heap
     let _k = crate::zone_alloc::kept();
     let (m, rel) = find(path).ok_or("no makepad run std mount")?;
     let prefix = if rel.is_empty() { String::new() } else { format!("{rel}/") };
@@ -108,7 +108,7 @@ pub fn verify_std(path: &str, expected: &str) -> Result<(), String> {
 
 /// Serves `root` (a folder that does not exist on disk) from `store` at `commit`.
 pub fn mount(root: &str, store: Arc<Store>, commit: &Oid) -> Result<(), String> {
-    // process state: built in the kept heap (the settle swap destroys the compiler zone)
+    // process state: built in the kept heap
     let _k = crate::zone_alloc::kept();
     let files: Arc<[Entry]> = store.index.table(commit).ok_or_else(|| format!("{}: commit {} is not kept", store.path.display(), store::hex(commit)))?.to_vec().into();
     let root = normalize_path(root);
@@ -253,9 +253,14 @@ fn edited_file(path: &str) -> Option<std::path::PathBuf> {
     p.is_file().then_some(p)
 }
 
+/// Whether virtual files are writable (an edits folder is set).
+pub fn edits_enabled() -> bool {
+    EDITS.read().unwrap().is_some()
+}
+
 /// The edits folder from MAKEPAD_RUN_EDITS (the runner sets it per licensed app).
 pub fn set_edits(dir: Option<std::path::PathBuf>) {
-    // process state: built in the kept heap (the settle swap destroys the compiler zone)
+    // process state: built in the kept heap
     let _k = crate::zone_alloc::kept();
     *EDITS.write().unwrap() = dir;
 }
@@ -280,12 +285,10 @@ fn not_found(path: &str) -> io::Error {
 // Read bindings: a load binds its read snapshot to the thread it runs on for the extent of a
 // `ReadScope` on that thread's stack. The binding lives in the thread's own table and owns its
 // snapshot (a strong reference, dropped with the scope): there is no process registry, no weak
-// pointer and no entry another thread or a later compiler generation can reach. A scope is
-// !Send, so no shared state (a preload pool, a Program the settle swap forgets) can keep a
-// thread's binding alive past its load.
-crate::gen_local! {
-    // compiler TLS: the table's buffer is a generation's block, the settle swap forgets it
-    static BOUND: std::cell::RefCell<Vec<(u64, Arc<ReadSnapshot>)>>;
+// pointer and no entry another thread can reach. A scope is !Send, so no shared state (a preload
+// pool, a Program) can keep a thread's binding alive past its load.
+thread_local! {
+    static BOUND: std::cell::RefCell<Vec<(u64, Arc<ReadSnapshot>)>> = Default::default();
 }
 static BIND_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -770,7 +773,7 @@ pub fn mounts_text() -> String {
 
 /// Mounts what `mounts_text` wrote (MAKEPAD_RUN_VFS).
 pub fn mount_text(text: &str) -> Result<(), String> {
-    // process state: built in the kept heap (the settle swap destroys the compiler zone)
+    // process state: built in the kept heap
     let _k = crate::zone_alloc::kept();
     for line in text.lines().filter(|l| !l.is_empty()) {
         let mut it = line.split('\t');
@@ -796,7 +799,7 @@ pub fn parse_range(s: &str) -> Option<(u64, u64)> {
 
 /// MAKEPAD_RUN_VFS from the environment, mounted once (the loader calls this at start).
 pub fn mount_from_env() -> Result<(), String> {
-    // process state: built in the kept heap (the settle swap destroys the compiler zone)
+    // process state: built in the kept heap
     let _k = crate::zone_alloc::kept();
     record_from_env()?;
     if let Some(d) = std::env::var_os("MAKEPAD_RUN_EDITS").filter(|d| !d.is_empty()) {

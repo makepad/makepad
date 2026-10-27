@@ -91,10 +91,21 @@ fn in_body(prog: &Program, owner: DefId, file: u32, lo: u32) -> bool {
     }
 }
 
-/// Anonymous const children for which typeck retained expression facts.
-/// Inline consts remain constant operands in their parent until their region-bearing
-/// signatures are available (DESIGN-regions A3). Keep their builder entry point, but
-/// do not schedule a child with an independently reconstructed output lifetime.
+/// The inline constants of a typeck root (closures' included): nested bodies that are borrow-checked with
+/// the root (rustc nested_bodies_within).
+pub fn inline_const_children(prog: &Program, tcx: &Tcx, body: &Body) -> Vec<u32> {
+    let ast = &prog.files[body.file as usize].ast;
+    let mut out = Vec::new();
+    for i in 0..body.expr_ty.len() {
+        if body.expr_ty[i] == tcx.tys.error { continue; }
+        let e = ExprId(if i < body.expr_n1 as usize { body.expr_lo + i as u32 } else { body.expr_lo2 + i as u32 - body.expr_n1 });
+        if matches!(ast.expr(e).kind, ExprKind::ConstBlock(_)) && body.inline_const_types.get(&e.0).is_some() { out.push(e.0); }
+    }
+    out
+}
+
+/// Anonymous const children for which typeck retained expression facts (inline consts are
+/// nested bodies of the root instead: `inline_const_children`).
 pub fn const_children(prog: &Program, tcx: &Tcx, body: &Body) -> Vec<CheckedBody> {
     let ast = &prog.files[body.file as usize].ast;
     let mut out = Vec::new();

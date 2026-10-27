@@ -1,0 +1,83 @@
+//! The Score tools' text and shape: `score_guide`, `score_check` and
+//! `score_listen`, defined once and listed byte for byte the same by every
+//! app's AI registry (Stage's studio API, Sandbox's game chat).
+//! Dependency-free, so a light registry such as an MCP bridge can list
+//! them; running them (and the guide's text) is `makepad-score-live`'s
+//! `tools` module.
+
+/// One tool as every registry declares it. `input` and `output` are JSON
+/// Schema (strict JSON); `args_doc` is a call sketch for registries that
+/// show one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScoreToolDef {
+    /// The dotted canonical name (`score.check`).
+    pub name: &'static str,
+    /// The underscore spelling (`score_check`): what the model sees in
+    /// every app, and what the guide calls the tools.
+    pub api_name: &'static str,
+    pub description: &'static str,
+    pub input: &'static str,
+    pub output: &'static str,
+    pub args_doc: &'static str,
+}
+
+pub const GUIDE: ScoreToolDef = ScoreToolDef {
+    name: "score.guide",
+    api_name: "score_guide",
+    description: "How to write a score: the document (Clock, instruments, Loops with code, FX, Sections, Score{…}), the functions loop code calls, instrument presets and drum kits, genre templates, drum patterns and progressions, arrangement and mixing rules, how to fit a video or a game, and synth panels. Read it once before composing.",
+    input: r#"{"type": "object", "properties": {}}"#,
+    output: r#"{"type": "object", "additionalProperties": true, "properties": {"guide": {"type": "string", "description": "the composer guide"}}, "required": ["guide"]}"#,
+    args_doc: r#"{}"#,
+};
+
+pub const CHECK: ScoreToolDef = ScoreToolDef {
+    name: "score.check",
+    api_name: "score_check",
+    description: "Check a score's Splash source without playing it (default: the score open in the app): every problem with its line and column; once it loads, what it declares (label, bpm, params, sections, arrangement, stingers, loops) and the problems its loops raise over their first 8 bars (a code error shows only when the loop runs).",
+    input: r#"{"type": "object", "properties": {"source": {"type": "string", "description": "the score's Splash source (default: the open score)"}}}"#,
+    output: r#"{"type": "object", "additionalProperties": true, "properties": {"ok": {"type": "boolean", "description": "no problems"}, "problems": {"type": "array", "items": {"type": "object", "description": "{line, col, message, text}"}, "description": "the document's or its loops' problems"}}, "required": ["ok", "problems"]}"#,
+    args_doc: r#"{"source": "use mod.score.*\n..."}"#,
+};
+
+pub const LISTEN: ScoreToolDef = ScoreToolDef {
+    name: "score.listen",
+    api_name: "score_listen",
+    description: "Hear a score as data (you cannot hear audio): renders `bars` bars from `from_bar` offline (default: the score open in the app, or `source`), exactly as it plays, with `params` set and `held` fields moved from a bar on (what an editor panel's control does live: Synth fields, Shader params, Loop amp/pan, FX settings), and measures it: peak and RMS dBFS per loop and FX and the master; the master's spectrum in ten octave bands with a verdict on balance (muddy, harsh, thin, no low end); onsets per bar on the sixteenth grid; per loop the notes it played (beat, note name, velocity); per bar the master's RMS and brightness (bright_hz: the spectrum's centroid), so a held control's effect shows bar by bar; and silence or clipping warnings. Use it after every change to check what you made, and to check an editor panel's ranges: hold a field at its control's ends and hear the difference.",
+    input: r#"{"type": "object", "properties": {"source": {"type": "string", "description": "the score's Splash source (default: the open score)"}, "from_bar": {"type": "integer", "minimum": 0, "maximum": 10000, "description": "first bar (default 0)"}, "bars": {"type": "integer", "minimum": 1, "maximum": 64, "description": "how many bars (default 4)"}, "params": {"type": "object", "additionalProperties": {"type": "number"}, "description": "Clock params to set, e.g. {intensity: 0.8}"}, "held": {"type": "array", "items": {"type": "object", "properties": {"path": {"type": "string", "description": "node.field, e.g. mono.cutoff"}, "value": {"type": "number", "description": "the value held"}, "at_bar": {"type": "number", "description": "from this bar of the render (default 0)"}}, "required": ["path", "value"]}, "description": "fields held live during the render, as an editor panel's controls"}}}"#,
+    output: r#"{"type": "object", "additionalProperties": true, "properties": {"ok": {"type": "boolean", "description": "it loaded and rendered"}}, "required": ["ok"]}"#,
+    args_doc: r#"{"source": "...", "from_bar": 0, "bars": 4, "params": {"intensity": 0.8}, "held": [{"path": "mono.cutoff", "value": 3000, "at_bar": 2}]}"#,
+};
+
+pub const INSTRUMENT_SEARCH: ScoreToolDef = ScoreToolDef {
+    name: "instrument.search",
+    api_name: "instrument_search",
+    description: "Find the instruments and drum kits that fit a description (\"thin bright 80s drum machine\", \"warm upright jazz bass\", \"lush 70s string pad\"): the General MIDI SoundFont's programs and its drum kits (standard, room, power, electronic, analog drum machine, jazz, brush, orchestra), each tagged by family, role, era, genre and character, and measured offline (brightness, attack, decay, low/mid/high energy, loudness; kits by their kick, snare and hats). Each answer has the Score code that plays it (`Instrument{kind: @soundfont ...}`), its words and its measured level against its family (a gain to match). Use it before choosing a sound; prefer what it finds over a generic preset.",
+    input: r#"{"type": "object", "properties": {"query": {"type": "string", "description": "what it should sound like: era, genre, instrument, character"}, "kind": {"type": "string", "enum": ["any", "drums", "melodic"], "description": "drum kits only, melodic instruments only, or both (default)"}, "role": {"type": "string", "enum": ["bass", "chords", "lead", "pad", "arp", "texture", "hits", "fx", "drums"], "description": "the part it plays"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "how many (default 6)"}}, "required": ["query"]}"#,
+    output: r#"{"type": "object", "additionalProperties": true, "properties": {"results": {"type": "array", "items": {"type": "object", "description": "{id, name, code, family, roles, words, measured: {centroid_hz, attack_ms, decay_ms, low, mid, high, lufs}, gain}"}, "description": "best first"}}, "required": ["results"]}"#,
+    args_doc: r#"{"query": "thin bright 80s drum machine", "kind": "drums", "limit": 4}"#,
+};
+
+/// Every Score tool, in the order registries list them.
+pub const TOOLS: [ScoreToolDef; 4] = [GUIDE, CHECK, LISTEN, INSTRUMENT_SEARCH];
+
+/// The Score tool named `name`, dotted or underscored.
+pub fn find(name: &str) -> Option<&'static ScoreToolDef> {
+    TOOLS.iter().find(|tool| tool.name == name || tool.api_name == name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_are_legal_and_schemas_parse() {
+        for tool in TOOLS {
+            assert_eq!(tool.api_name, tool.name.replace('.', "_"));
+            assert!(tool.api_name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'), "{}", tool.api_name);
+            for schema in [tool.input, tool.output, tool.args_doc] {
+                makepad_strict_json::parse(schema.as_bytes()).unwrap_or_else(|e| panic!("{}: {e}: {schema}", tool.name));
+            }
+            assert_eq!(find(tool.name), find(tool.api_name));
+        }
+    }
+}

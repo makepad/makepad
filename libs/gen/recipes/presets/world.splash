@@ -1,0 +1,19 @@
+use mod.flow.*
+
+/** The place. */
+let prompt = Input{ type: @text default: "a mossy forest clearing at dawn" }
+let image = Gen{
+    domain: "image"
+    label: "image"
+    ports: { in: { prompt: @text } out: { image: @image } }
+    prompt: prompt.text()
+}
+let world = World{ prompt: prompt.text() image: image.out(@image) }
+let published_image = Publish{ value: image.out(@image) tags: ["world"] }
+let published = Publish{ value: world.out(@mesh) tags: ["world"] }
+
+Flow{
+    label: "World"
+    brief: "A walkable gaussian-splat scene from a prompt."
+    prompt, image, world, published_image, published
+}

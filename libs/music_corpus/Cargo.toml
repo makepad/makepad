@@ -1,0 +1,23 @@
+[package]
+name = "makepad-music-corpus"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Train it yourself: music training data built on the person's machine from the song libraries they chose to download (the Lakh MIDI clean subset) and their own MIDI, tracker and chip files, through the same importers Stage uses. Songs become the roll text and Scores; filtered, deduplicated, split by song, written as chat-style task shards with exact Qwen token counts; an eval tool scores a model's rolls and Scores against held-out songs. Nothing it builds ships or is committed."
+
+[lib]
+name = "makepad_music_corpus"
+
+[[bin]]
+name = "music_corpus"
+path = "src/bin/music_corpus.rs"
+
+[dependencies]
+makepad-midi-library = { path = "../midi_library" }
+makepad-midi-file = { path = "../midi_file" }
+makepad-strict-json = { path = "../strict_json" }
+makepad-score-live = { path = "../score_live" }
+makepad-score-player = { path = "../score_player" }
+# The Qwen tokenizer read from a GGUF's vocabulary: token counts are the
+# model's own.
+makepad-ai-llm = { path = "../ai/llm" }

@@ -30,6 +30,14 @@
 //!   and the model belong to the host, which applies the move and redraws.
 //!   The carry is ink, not layout — it is applied once the list's draw pass
 //!   is done, and the next pass starts from an untouched list.
+//! - a drag from OUTSIDE the list — a tile carried in from another panel —
+//!   is the host's gesture, not the list's: the host asks
+//!   [`ReorderList::row_at`] which slot the pointer is over, the same slot
+//!   a row of the list's own would take there, and hands it to
+//!   [`ReorderList::set_external_gap`]. The list opens that gap and draws
+//!   its line in it as it does for its own carry, until the host closes it
+//!   with `None`; the drop itself is the host's too. The list's own drag,
+//!   while one is live, wins.
 //!
 //! The host names the gripper in its item template and points at it:
 //!
@@ -118,6 +126,28 @@ pub fn press_carries(point: DVec2, list: Rect, rows: &[RowBand], taken: &[Rect])
     rows.iter()
         .find(|(_, top, height)| point.y >= *top && point.y < top + height)
         .map(|(id, _, _)| *id)
+}
+
+/// The slot a drop at `point` from outside the list lands in, of the rows
+/// the list has drawn: what [`slot_for`] gives the list's own drag for the
+/// same height. `None` for a point outside the list, or with no row drawn.
+fn drop_slot(point: DVec2, list: Rect, rows: &[RowBand]) -> Option<usize> {
+    if !list.contains(point) {
+        return None;
+    }
+    slot_for(rows, point.y)
+}
+
+/// The gap a drop from outside holds open at `slot`, as a carry of a row
+/// from past the end of the list: every row from the slot down makes way
+/// and nothing is lifted, since no row is that one. As tall as the row the
+/// gap opens before, the last row's after the end. `None` with no row drawn.
+fn outside_gap(slot: usize, rows: &[RowBand]) -> Option<ReorderDrag> {
+    let (_, _, height) = rows.iter().find(|(id, _, _)| *id == slot).or(rows.last()).copied()?;
+    let mut gap = ReorderDrag::press(usize::MAX, 0.0).on_row(0.0, height);
+    gap.slot = slot;
+    gap.active = true;
+    Some(gap)
 }
 
 /// How far out of the paint order a carried row is lifted, so it draws over
@@ -270,6 +300,10 @@ pub struct ReorderList {
     bands: Vec<RowBand>,
     #[rust]
     scroll_pump: NextFrame,
+    /// The slot a drop from outside the list would land in, while the host
+    /// carries one over it ([`ReorderList::set_external_gap`]).
+    #[rust]
+    external_gap: Option<usize>,
 }
 
 impl ReorderList {
@@ -315,6 +349,35 @@ impl ReorderList {
             }
         }
         None
+    }
+
+    /// The slot a drop at `abs` from outside the list lands in: before the
+    /// row whose upper half holds the point, after it in its lower half,
+    /// after the last row under it — the slot the list's own drag takes for
+    /// the same point. Read from the rows the last draw laid out, before
+    /// any gap moved them, so an open gap does not chase the pointer.
+    /// `None` outside the list, or with no row drawn.
+    pub fn row_at(&self, cx: &Cx, abs: DVec2) -> Option<usize> {
+        drop_slot(abs, self.list.area().rect(cx), &self.bands)
+    }
+
+    /// Open the gap a drop from outside the list would land in, at `row` (a
+    /// slot as [`Self::row_at`] gives it), and draw the drop line in it: what
+    /// the list shows for a row of its own carried there. `None` closes it.
+    pub fn set_external_gap(&mut self, cx: &mut Cx, row: Option<usize>) {
+        if self.external_gap != row {
+            self.external_gap = row;
+            self.list.redraw(cx);
+        }
+    }
+
+    /// The gap the rows stand open for this pass: the list's own live
+    /// carry's, else the one a drop from outside would land in.
+    fn open_gap(&self) -> Option<ReorderDrag> {
+        if let Some(drag) = self.drag.filter(|d| d.active) {
+            return Some(drag);
+        }
+        outside_gap(self.external_gap?, &self.bands)
     }
 
     /// Take down where the list just put every visible row, in entry order.
@@ -627,17 +690,18 @@ impl ReorderList {
     /// the rows the list painted after it, and every row the carry reaches
     /// over shifted by the lifted row's height, so the gap it would land in
     /// stands open. Ink only — run once the list's draw pass is done, and
-    /// gone again on the pass after the drag ends.
+    /// gone again on the pass after the drag ends. A drop from outside opens
+    /// its gap the same way and lifts nothing: no row is the one it carries.
     fn draw_carry(&mut self, cx: &mut Cx2d) {
-        let Some(drag) = self.drag.filter(|d| d.active) else { return };
-        let Some(y) = self.drag_pointer_y else { return };
+        let Some(drag) = self.open_gap() else { return };
         let view = self.list.area().rect(cx);
         let bands = std::mem::take(&mut self.bands);
         for (id, top, _) in bands.iter() {
-            let (offset, lift) = if *id == drag.from {
-                (drag.carry_top(y, view.pos.y, view.pos.y + view.size.y) - top, CARRY_LIFT)
-            } else {
-                (drag.gap_offset(*id), 0.0)
+            let (offset, lift) = match self.drag_pointer_y {
+                Some(y) if *id == drag.from => {
+                    (drag.carry_top(y, view.pos.y, view.pos.y + view.size.y) - top, CARRY_LIFT)
+                }
+                _ => (drag.gap_offset(*id), 0.0),
             };
             if offset != 0.0 || lift != 0.0 {
                 self.list.offset_drawn_item(cx, *id, dvec2(0.0, offset), lift);
@@ -650,10 +714,7 @@ impl ReorderList {
     /// carry holds open, so the line reads as the floor the row lands on.
     /// Drawn after the list's own pass, so it rides on top of the rows.
     fn draw_drop_indicator(&mut self, cx: &mut Cx2d) {
-        let Some(drag) = self.drag else { return };
-        if !drag.active {
-            return;
-        }
+        let Some(drag) = self.open_gap() else { return };
         let Some((last, last_top, last_height)) = self.bands.last().copied() else { return };
         let y = if let Some((id, top, _)) = self.bands.iter().find(|(id, _, _)| *id == drag.slot) {
             top + drag.gap_offset(*id) - 4.0
@@ -716,7 +777,7 @@ impl Widget for ReorderList {
 
 #[cfg(test)]
 mod tests {
-    use super::{press_carries, slot_for, ReorderDrag, RowBand};
+    use super::{drop_slot, outside_gap, press_carries, slot_for, ReorderDrag, RowBand};
     use crate::makepad_draw::{dvec2, Rect};
 
     /// Four rows of height 60 starting at y=100: ids 0..3 at 100/160/220/280.
@@ -893,6 +954,47 @@ mod tests {
             Some(0),
             "the very top of the first row is still that row"
         );
+    }
+
+    #[test]
+    fn a_drop_from_outside_lands_in_the_slot_a_row_of_the_list_would() {
+        let rows = rows();
+        // The rows fill y 100..340 of a list that reaches to 400.
+        let list = Rect { pos: dvec2(10.0, 100.0), size: dvec2(400.0, 300.0) };
+        assert_eq!(drop_slot(dvec2(200.0, 110.0), list, &rows), Some(0), "the first row's upper half: before it");
+        assert_eq!(drop_slot(dvec2(200.0, 150.0), list, &rows), Some(1), "its lower half: after it");
+        assert_eq!(drop_slot(dvec2(200.0, 250.0), list, &rows), Some(3), "row 2's midpoint is already past it");
+        assert_eq!(drop_slot(dvec2(200.0, 360.0), list, &rows), Some(4), "under the last row, in the list: after the end");
+        assert_eq!(drop_slot(dvec2(500.0, 150.0), list, &rows), None, "beside the list");
+        assert_eq!(drop_slot(dvec2(200.0, 50.0), list, &rows), None, "above it");
+        assert_eq!(drop_slot(dvec2(200.0, 150.0), list, &[]), None, "nothing drawn");
+        // Whatever the slot, it is the one the list's own drag takes there.
+        for y in [100.0, 129.0, 131.0, 200.0, 311.0, 399.0] {
+            assert_eq!(drop_slot(dvec2(200.0, y), list, &rows), slot_for(&rows, y), "y {y}");
+        }
+    }
+
+    #[test]
+    fn a_gap_from_outside_moves_every_row_from_its_slot_down() {
+        let rows = rows();
+        let gap = outside_gap(2, &rows).expect("rows are drawn");
+        assert_eq!(gap.slot, 2);
+        assert_eq!(gap.gap_offset(0), 0.0, "rows above the gap stay");
+        assert_eq!(gap.gap_offset(1), 0.0);
+        assert_eq!(gap.gap_offset(2), 60.0, "the slot's own row makes way by a row's height");
+        assert_eq!(gap.gap_offset(3), 60.0);
+        // At the top, everything moves; after the end, nothing does.
+        let top = outside_gap(0, &rows).unwrap();
+        assert!((0..4).all(|id| top.gap_offset(id) == 60.0));
+        let end = outside_gap(4, &rows).unwrap();
+        assert!((0..4).all(|id| end.gap_offset(id) == 0.0));
+        // Its height is the row it opens before, the last one's after the end.
+        let mixed: Vec<RowBand> = vec![(0, 100.0, 40.0), (1, 140.0, 22.0), (2, 162.0, 54.0)];
+        assert_eq!(outside_gap(0, &mixed).unwrap().height, 40.0);
+        assert_eq!(outside_gap(1, &mixed).unwrap().height, 22.0);
+        assert_eq!(outside_gap(3, &mixed).unwrap().height, 54.0, "after the end");
+        assert_eq!(outside_gap(0, &mixed).unwrap().gap_offset(2), 40.0, "every row moves by the gap's height");
+        assert!(outside_gap(0, &[]).is_none(), "no row drawn, no gap");
     }
 
     #[test]

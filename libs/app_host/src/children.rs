@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use makepad_app_registry::{AppEntry, AppLaunch, BuildPolicy, LaunchEvent, LaunchKind, ProcessOutput};
+use makepad_app_registry::{AppEntry, AppLaunch, BuildPolicy, LaunchEvent, LaunchKind, ProcessOutput, Runner};
 use makepad_error_log::log;
 use makepad_platform::thread::{SignalToUI, TaskHandle, TaskPool, ThreadOptions, ThreadSpawner};
 use makepad_platform::*;
@@ -373,7 +373,7 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
         let pool = self.pool.clone();
         let output = self.output_tx.clone();
         let (spec, folder, client) = (&slot.spec, &slot.folder, slot.client);
-        let (pending, child) = AppLaunch::start(entry, makepad_app_registry::repo_root(), spec.args.clone(), policy, slot.hold_build, |cmd, kind| {
+        let (pending, child) = AppLaunch::start(entry, Runner::Native, makepad_app_registry::repo_root(), spec.args.clone(), policy, slot.hold_build, |cmd, kind| {
             spawn_process(&spawner, &pool, spec, folder, client, port, entry.bin, cmd, kind, output.clone())
         })?;
         slot.life = if pending.is_building() { Life::Building } else { Life::Starting };

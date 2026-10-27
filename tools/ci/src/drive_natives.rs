@@ -82,6 +82,9 @@ fn record(vm: &mut ScriptVm, result: &CargoResult, opts: &Options) -> Result<boo
         let own = result.warnings.iter()
             .filter(|(name, _)| owner.as_deref().is_none_or(|p| p == name.as_str()))
             .map(|(name, n)| format!("{name}: {n} warnings")).collect::<Vec<_>>().join("\n");
+        if rt(vm).config.deny_warnings {
+            return Err(format!("compiler warnings (deny_warnings in ci.toml)\n{own}\n{warnings}"));
+        }
         warning(vm, &own);
     }
     if result.output.code != 0 && !opts.allow_fail {
@@ -303,8 +306,12 @@ fn finish_batch(vm: &mut ScriptVm, i: usize, outcomes: Result<Vec<(String, crate
             if !libraries.is_empty() {
                 let text = libraries.iter().map(|(name, n)| format!("{name}: {n} warnings")).collect::<Vec<_>>().join("\n");
                 rt(vm).run.annotate(i, &text);
-                warning(vm, &text);
-                orange = true;
+                if rt(vm).config.deny_warnings {
+                    failures.push(format!("compiler warnings in libraries (deny_warnings in ci.toml)\n{text}"));
+                } else {
+                    warning(vm, &text);
+                    orange = true;
+                }
             }
         }
         Ok(outcomes) => for (package, outcome) in outcomes {

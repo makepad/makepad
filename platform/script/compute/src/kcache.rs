@@ -3,8 +3,9 @@
 //!
 //! The key names everything the emitted bytes depend on: the program (its whole AIR, the host
 //! buffer write mask), the back end (scalar or four-wide), the optimiser switches and the CPU
-//! features the emitter reads. The embedder adds the loader's build id (the store it hands out
-//! is that build's), so another build, another program or another CPU never meets old code.
+//! features the emitter reads. The embedder adds Relax's codegen identity and this crate's source
+//! identity (the store it hands out is theirs), so another kernel compiler, another program or
+//! another CPU never meets old code.
 //! The code is position independent except for the host-call address (the trampoline into the
 //! interpreter): the back end's pool words for it, recorded as `host_refs` and written at load.
 

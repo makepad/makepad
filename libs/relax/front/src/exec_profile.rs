@@ -30,7 +30,9 @@ pub struct File {
     before: OnceLock<(u32, [u64; 2])>,
 }
 
+/// The census is process state (the exit report reads it): its map and records are kept-heap state.
 pub fn file(path: &str) -> Arc<File> {
+    let _k = crate::zone_alloc::kept();
     FILES.lock().unwrap().entry(path.into()).or_default().clone()
 }
 

@@ -79,7 +79,7 @@ fn negated_compare_branches_on_the_flags() {
                         assert!(b0.insts.iter().all(|i| !matches!(i, Inst::ICmpI(..) | Inst::IBinI(..))));
                     }
                     for regs in [false, true] {
-                        let env = x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: regs, syms: 0, sym_class: 0 };
+                        let env = x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: regs, syms: 0, sym_class: 0, near: false };
                         let c = x64::compile(&options, &f, &env).unwrap();
                         let code = Code::new(&c.code).unwrap();
                         for a in vals {

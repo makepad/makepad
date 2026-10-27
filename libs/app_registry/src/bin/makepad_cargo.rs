@@ -3,9 +3,11 @@
 //! what they compile is what the WM, Code, DECK and a terminal's `cargo run --release -p <pkg>`
 //! find fresh.
 //!
-//! - `build <app>...`: `cargo build --release -p <pkg> --bin <bin>`, one cargo per app (one
-//!   `-p a -p b` invocation would unify their features and build artifacts no launcher uses);
-//! - `run <app> [-- args]`: `cargo run` of one app with its arguments;
+//! - `build [--features a,b] <app>...`: `cargo build --release -p <pkg> --bin <bin>`, one cargo per
+//!   app (one `-p a -p b` invocation would unify their features and build artifacts no launcher
+//!   uses). A service the WM starts with features (the AI Hub: `--features node`) is built with
+//!   the same list, so the WM's `cargo run` of it compiles nothing;
+//! - `run [--features a,b] <app> [-- args]`: `cargo run` of one app with its arguments;
 //! - `print build|run <app>...`: the commands, one per line, as a shell would run them.
 //!
 //! `<app>` is a registry id (`stage`), a package (`makepad-app-stage`) or `makepad-run` (the
@@ -44,8 +46,8 @@ fn shell_line(command: &Command) -> String {
     line.join(" ")
 }
 
-fn command(verb: &str, app: &AppTarget, root: &Path, app_args: &[String]) -> Command {
-    let (program, args) = if verb == "run" { registry::run_argv(app, root, app_args) } else { registry::build_argv(app, root) };
+fn command(verb: &str, app: &AppTarget, root: &Path, features: &str, app_args: &[String]) -> Command {
+    let (program, args) = if verb == "run" { registry::run_argv_features(app, root, features, app_args) } else { registry::build_argv_features(app, root, features) };
     registry::cargo_command(&program, &args, root)
 }
 
@@ -56,7 +58,7 @@ fn main() -> ExitCode {
         _ => (false, &args[..]),
     };
     let Some((verb, rest)) = rest.split_first().filter(|(v, _)| matches!(v.as_str(), "build" | "run")) else {
-        eprintln!("usage: makepad-cargo [print] build <app>... | [print] run <app> [-- args]");
+        eprintln!("usage: makepad-cargo [print] build [--features a,b] <app>... | [print] run [--features a,b] <app> [-- args]");
         return ExitCode::from(2);
     };
     let Some(root) = std::env::current_dir().ok().and_then(|cwd| registry::checkout_at_or_above(&cwd)) else {
@@ -67,6 +69,16 @@ fn main() -> ExitCode {
         Some(i) => (&rest[..i], rest[i + 1..].to_vec()),
         None => (rest, Vec::new()),
     };
+    let (features, names) = match names.split_first() {
+        Some((flag, tail)) if flag == "--features" => match tail.split_first() {
+            Some((list, tail)) => (list.as_str(), tail),
+            None => {
+                eprintln!("makepad-cargo: --features takes a list");
+                return ExitCode::from(2);
+            }
+        },
+        _ => ("", names),
+    };
     if names.is_empty() || verb == "run" && names.len() != 1 {
         eprintln!("makepad-cargo: {verb} takes {}", if verb == "run" { "one app" } else { "one or more apps" });
         return ExitCode::from(2);
@@ -76,7 +88,7 @@ fn main() -> ExitCode {
             eprintln!("makepad-cargo: no app or package {name}");
             return ExitCode::from(2);
         };
-        let mut cmd = command(verb, &app, &root, &app_args);
+        let mut cmd = command(verb, &app, &root, features, &app_args);
         if print {
             println!("{}", shell_line(&cmd));
             continue;

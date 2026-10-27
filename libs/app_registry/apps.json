@@ -25,6 +25,16 @@
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": true
   },
   {
+    "id": "flow", "label": "Flow", "package": "makepad-app-flow",
+    "dir": "apps/flow", "bin": "makepad-app-flow", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
+  },
+  {
+    "id": "synth", "label": "Synth", "package": "makepad-app-synth",
+    "dir": "apps/synth", "bin": "makepad-app-synth", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
+  },
+  {
     "id": "code", "label": "Code", "package": "makepad-app-code",
     "dir": "apps/code", "bin": "makepad-app-code", "manifest": null, "args": [],
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
@@ -130,9 +140,24 @@
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
   },
   {
+    "id": "story", "label": "Makepad Story", "package": "makepad-story",
+    "dir": "apps/commercial/story/app", "bin": "makepad-story", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
+  },
+  {
     "id": "sandbox", "label": "Sandbox", "package": "makepad-sandbox",
     "dir": "apps/commercial/sandbox", "bin": "makepad-sandbox", "manifest": null, "args": [],
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
+  },
+  {
+    "id": "aihub", "label": "AI Hub", "package": "makepad-app-aihub",
+    "dir": "apps/aihub", "bin": "makepad-app-aihub", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["localai"], "mobile": false
+  },
+  {
+    "id": "devhub", "label": "devhub", "package": "makepad-app-devhub",
+    "dir": "apps/devhub", "bin": "makepad-app-devhub", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": false, "wm_launchable": true, "features": [], "mobile": false
   },
   {
     "id": "image", "label": "Image Viewer", "package": "makepad-app-image",
@@ -170,7 +195,7 @@
     "policy": "always_new", "menu_visible": false, "wm_launchable": true, "features": ["engine", "gen"], "mobile": false
   },
   {
-    "id": "ai-hub", "label": "AI Hub", "package": "makepad-app-ai-hub",
+    "id": "ai-hub", "label": "AI Hub (headless)", "package": "makepad-app-ai-hub",
     "dir": "apps/ai-hub", "bin": "makepad-app-ai-hub", "manifest": null, "args": [],
     "policy": "or_focus", "menu_visible": false, "wm_launchable": false,
     "features": ["localai", "flux", "paint", "paint-cuda", "llm", "tts", "indextts", "speech", "stt", "video", "interpolate", "audio", "mesh", "matte-native", "depth-native", "segment-native", "body-native", "upscale-native", "motion-native", "rig-native", "splat-native", "stems-native", "beats-native", "notes-native"], "mobile": false

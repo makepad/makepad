@@ -6,25 +6,40 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::ops::Deref;
+#[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
 use core::sync::atomic::AtomicU32;
+#[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
+#[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
 use crate::sync::raw::{futex_wait, futex_wake_all, WAIT_ONCE};
 
-const INCOMPLETE: u32 = 3;
-const POISONED: u32 = 2;
-const RUNNING: u32 = 1;
-const COMPLETE: u32 = 0;
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+type State = u8;
+#[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
+type State = u32;
+const INCOMPLETE: State = 3;
+const POISONED: State = 2;
+const RUNNING: State = 1;
+const COMPLETE: State = 0;
 const QUEUED: u32 = 4;
 const STATE_MASK: u32 = 0b11;
 
 pub struct Once {
+    #[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
     state_and_queued: AtomicU32,
+    #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+    state_and_queued: Cell<State>,
 }
+
+pub const ONCE_INIT: Once = Once::new();
+
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+unsafe impl Sync for Once {}
 
 pub struct OnceState {
     poisoned: bool,
-    set_state_to: Cell<u32>,
+    set_state_to: Cell<State>,
 }
 
 impl OnceState {
@@ -41,12 +56,18 @@ impl fmt::Debug for OnceState {
 
 /// Publishes the final state and wakes waiters (also when the closure panics under rustc).
 struct CompletionGuard<'a> {
+    #[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
     state_and_queued: &'a AtomicU32,
-    set_state_on_drop_to: u32,
+    #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+    state_and_queued: &'a Cell<State>,
+    set_state_on_drop_to: State,
 }
 
 impl<'a> Drop for CompletionGuard<'a> {
     fn drop(&mut self) {
+        #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+        self.state_and_queued.set(self.set_state_on_drop_to);
+        #[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
         if self.state_and_queued.swap(self.set_state_on_drop_to, Release) & QUEUED != 0 {
             futex_wake_all(self.state_and_queued);
         }
@@ -55,10 +76,16 @@ impl<'a> Drop for CompletionGuard<'a> {
 
 impl Once {
     pub const fn new() -> Once {
+        #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+        return Once { state_and_queued: Cell::new(INCOMPLETE) };
+        #[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
         Once { state_and_queued: AtomicU32::new(INCOMPLETE) }
     }
 
     pub fn is_completed(&self) -> bool {
+        #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+        return self.state_and_queued.get() == COMPLETE;
+        #[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
         self.state_and_queued.load(Acquire) == COMPLETE
     }
 
@@ -101,6 +128,7 @@ impl Once {
     }
 
     #[cold]
+    #[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
     fn wait_inner(&self, ignore_poisoning: bool) {
         let mut state_and_queued = self.state_and_queued.load(Acquire);
         loop {
@@ -125,6 +153,7 @@ impl Once {
     }
 
     #[cold]
+    #[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
     fn call(&self, ignore_poisoning: bool, f: &mut dyn FnMut(&OnceState)) {
         let mut state_and_queued = self.state_and_queued.load(Acquire);
         loop {
@@ -158,6 +187,26 @@ impl Once {
             }
             futex_wait(&self.state_and_queued, state_and_queued, None, WAIT_ONCE, 0);
             state_and_queued = self.state_and_queued.load(Acquire);
+        }
+    }
+}
+
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+impl Once {
+    fn wait_inner(&self, _ignore_poisoning: bool) { panic!("not implementable on this target"); }
+    fn call(&self, ignore_poisoning: bool, f: &mut dyn FnMut(&OnceState)) {
+        let state = self.state_and_queued.get();
+        match state {
+            COMPLETE => {},
+            RUNNING => panic!("one-time initialization may not be performed recursively"),
+            POISONED if !ignore_poisoning => panic!("Once instance has previously been poisoned"),
+            _ => {
+                self.state_and_queued.set(RUNNING);
+                let mut guard = CompletionGuard { state_and_queued: &self.state_and_queued, set_state_on_drop_to: POISONED };
+                let f_state = OnceState { poisoned: state == POISONED, set_state_to: Cell::new(COMPLETE) };
+                f(&f_state);
+                guard.set_state_on_drop_to = f_state.set_state_to.get();
+            }
         }
     }
 }

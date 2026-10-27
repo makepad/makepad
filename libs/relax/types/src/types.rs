@@ -368,8 +368,9 @@ const CHUNK_BITS: u32 = 14;
 const CHUNK: usize = 1 << CHUNK_BITS;
 /// Chunk table size: 2^26 types at most (a run uses ~10^5).
 const MAX_CHUNKS: usize = 1 << 12;
-/// Hash buckets of the intern table (fixed; sized to the ~6*10^5 types of a settled app, chains of ~1-2 entries).
-const BUCKET_BITS: u32 = 19;
+/// Hash buckets of the intern table (fixed): a cold Stage interns ~1.1*10^6 types, which 2^19
+/// buckets held in chains of ~2 (every lookup walked them: a third of the interner's time).
+const BUCKET_BITS: u32 = 21;
 /// Insert locks, by bucket.
 const LOCKS: usize = 64;
 
@@ -406,6 +407,9 @@ pub struct Types {
     pub f32_: TyId,
     pub f64_: TyId,
     pub str_ref: TyId,
+    /// The target's pointer width in bytes (size_of::<usize>()): 8, or 4 for the wasm32 web
+    /// target (Program::ptr_bytes, set when declarations are collected).
+    pub ptr_bytes: u32,
 }
 
 // The arena's raw chunk pointers are owned by Types; entries are written once before their id
@@ -453,6 +457,7 @@ impl Types {
             f32_: TyId(0),
             f64_: TyId(0),
             str_ref: TyId(0),
+            ptr_bytes: 8,
         };
         let mut t = t;
         t.unit = t.intern(TyKind::Tuple(TyList::EMPTY));
@@ -524,10 +529,16 @@ impl Types {
         self.len.load(std::sync::atomic::Ordering::Acquire) as usize
     }
 
-    /// (interned regions, interned region lists): the settle swap compares them before and
+    /// (interned regions, interned region lists): the settle rebuild compares them before and
     /// after the restore (type ids and region ids must come back identical).
     pub fn region_counts(&self) -> (usize, usize) {
         (self.regions.kinds.len(), self.regions.args.len())
+    }
+
+    /// (list arena words, interned constants): with `len` and `region_counts`, what the settle
+    /// rebuild compares (only the interners may grow between its encode and its replace).
+    pub fn list_const_counts(&self) -> (usize, usize) {
+        (self.lists.end(), self.const_count())
     }
 
     /// Memory report lines: the arena, the list arena, and the part that holds inference
@@ -799,17 +810,25 @@ impl Types {
     }
 
     /// Integer width in bytes and signedness.
-    pub fn int_info(p: Prim) -> (u32, bool) {
+    /// (bytes, signed) of an integer type on this world's target.
+    pub fn int_info(&self, p: Prim) -> (u32, bool) {
+        Self::int_info_of(p, self.ptr_bytes)
+    }
+
+    /// (bytes, signed) of an integer type on a target with `ptr_bytes`-byte pointers.
+    pub fn int_info_of(p: Prim, ptr_bytes: u32) -> (u32, bool) {
         match p {
+            Prim::Isize => (ptr_bytes, true),
+            Prim::Usize => (ptr_bytes, false),
             Prim::I8 => (1, true),
             Prim::I16 => (2, true),
             Prim::I32 => (4, true),
-            Prim::I64 | Prim::Isize => (8, true),
+            Prim::I64 => (8, true),
             Prim::I128 => (16, true),
             Prim::U8 => (1, false),
             Prim::U16 => (2, false),
             Prim::U32 => (4, false),
-            Prim::U64 | Prim::Usize => (8, false),
+            Prim::U64 => (8, false),
             Prim::U128 => (16, false),
             _ => (0, false),
         }

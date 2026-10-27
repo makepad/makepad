@@ -473,6 +473,9 @@ impl Pool {
             };
             inputs.push((path.clone(), crate::crate_image::file_hash(&path, &s.src[..s.src_len])));
             probes.extend(s.probes);
+            if path == c.root && s.recursion_limit.is_some() {
+                cmods.recursion_limit = s.recursion_limit;
+            }
             for d in s.defs {
                 defs.push(Arc::new(d));
             }
@@ -489,9 +492,14 @@ impl Pool {
                     if u.path.last() != Some(b) {
                         cmods.renames.insert(b.clone());
                     }
-                    // `extern crate self as b;` at the root: b names this crate everywhere
-                    if u.path.len() == 1 && u.path[0] == "crate" && u.module == c.name {
-                        cmods.externs.insert(b.clone(), c.name.clone());
+                    // `extern crate self as b;` or `extern crate x as b;` at the root: b is in the extern prelude
+                    if u.module == c.name {
+                        if u.path.len() == 1 && u.path[0] == "crate" {
+                            cmods.externs.insert(b.clone(), c.name.clone());
+                        } else if u.path.len() == 2 && u.path[0].is_empty() {
+                            let target = cmods.externs.get(&u.path[1]).cloned().unwrap_or_else(|| u.path[1].clone());
+                            cmods.externs.insert(b.clone(), target);
+                        }
                     }
                 }
                 cmods.uses.entry(u.module.clone()).or_default().push(u);
@@ -611,9 +619,17 @@ fn parse_job(_sess: &std::sync::Arc<crate::Session>, job: Job, in_scope: bool) -
     crate::why::event("parse", &path, 0, "", None);
     let src_len = src.len();
     let t = std::time::Instant::now();
+    if trace() && crate::memstat::enabled() { eprintln!("boot-trace-job-start: {} {} src={}KB", ctx.name, path, src_len >> 10); }
+    // MAKEPAD_RUN_BOOT_TRACE with MAKEPAD_RUN_MEM_REPORT: the bytes this job retains on its thread and its peak
+    let (live0, peak) = (crate::memstat::thread_live(), crate::memstat::peak_start());
     let bctx = std::rc::Rc::new(crate::builtins::FileCtx::new(&ctx.name, &path, &mod_path, &ctx.cfg));
     let r = ctx.context.parse_input(src, Some(toks), ctx.edition, Some(crate::macros::MacroScope::new(ctx.table.clone())), bctx, crate::parser::lazy_auto());
     PARSE_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    if trace() && crate::memstat::enabled() {
+        let pk = crate::memstat::peak_end(peak);
+        eprintln!("boot-trace-job: {} {} src={}KB retained={}KB peak={}KB rss={}MB live={}MB {:.1}ms", ctx.name, path, src_len >> 10,
+            (crate::memstat::thread_live() - live0) >> 10, pk >> 10, crate::memstat::resident() >> 20, crate::memstat::live_total() >> 20, t.elapsed().as_secs_f64() * 1e3);
+    }
     let mut error = None;
     let mut parsed = match r {
         Ok((pf, used)) => Some((pf, used.unwrap())),
@@ -637,8 +653,8 @@ pub fn trace() -> bool {
 /// MAKEPAD_RUN_TRACE, read once (parse workers ask per expansion; std::env::var takes the env lock and
 /// allocates).
 pub fn relax_trace() -> Option<&'static str> {
-    static T: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    T.get_or_init(|| std::env::var("MAKEPAD_RUN_TRACE").ok()).as_deref()
+    static T: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    relax_session::phase::env_once(&T, "MAKEPAD_RUN_TRACE")
 }
 
 /// MAKEPAD_RUN_DERIVES=0 (derives are not expanded; measurement baseline), read once.
@@ -764,6 +780,8 @@ struct Scanned {
     mods: Vec<String>,
     /// the `mod` item of each module declared in the file
     mod_items: Vec<(String, crate::macros::ModItem)>,
+    /// `#![recursion_limit = ".."]` in the file's leading inner attributes
+    pub(crate) recursion_limit: Option<u32>,
 }
 
 /// The bindings of a `use` tree in tokens `lo..hi` (after `use`, before `;`) under `prefix`.
@@ -952,7 +970,29 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
     let mut mod_items: Vec<(String, crate::macros::ModItem)> = Vec::new();
     if !file_cfg_active(&src, &toks, cfg) {
         // `#![cfg(false)]` file: removed with its module; nothing in it counts
-        return Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods: Vec::new(), mod_items: Vec::new() });
+        return Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods: Vec::new(), mod_items: Vec::new(), recursion_limit: None });
+    }
+    let mut recursion_limit = None;
+    {
+        let mut i = 0;
+        while i + 5 < toks.len() && toks[i].kind == T::Pound && toks[i + 1].kind == T::Not && toks[i + 2].kind == T::OpenBracket {
+            let mut d = 0i32;
+            let mut j = i + 2;
+            while j < toks.len() {
+                match toks[j].kind {
+                    T::OpenBracket => d += 1,
+                    T::CloseBracket => { d -= 1; if d == 0 { break; } }
+                    _ => {}
+                }
+                j += 1;
+            }
+            if j == i + 6 && &src[toks[i + 3].lo as usize..toks[i + 3].hi as usize] == b"recursion_limit" && toks[i + 4].kind == T::Eq {
+                if let Ok(s) = std::str::from_utf8(&src[toks[i + 5].lo as usize..toks[i + 5].hi as usize]) {
+                    recursion_limit = s.trim_matches('"').parse::<u32>().ok().or(recursion_limit);
+                }
+            }
+            i = j + 1;
+        }
     }
     {
         let text = |i: usize| -> &[u8] { &src[toks[i].lo as usize..toks[i].hi as usize] };
@@ -1174,7 +1214,7 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
             i += 1;
         }
     }
-    Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods, mod_items })
+    Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods, mod_items, recursion_limit })
 }
 
 /// Starts the pipeline for `crates` (load order): scans (all crates at once, earliest crate
@@ -1349,6 +1389,9 @@ pub fn check_macros(prog: &mut crate::program::Program, krate: u32, files: &[(u3
     let mut reached = Vec::new();
     for (k, reachable, mut mods, scans) in contexts {
         for scan in scans {
+            if scan.recursion_limit.is_some() && mods.recursion_limit.is_none() {
+                mods.recursion_limit = scan.recursion_limit;
+            }
             for d in scan.defs { table.define(d); }
             for (alias, qual, target) in scan.aliases { table.add_alias(name.clone(), alias, (qual, target)); }
             table.macro_use.entry(name.clone()).or_default().extend(scan.macro_use);
@@ -1357,7 +1400,14 @@ pub fn check_macros(prog: &mut crate::program::Program, krate: u32, files: &[(u3
             for u in scan.uses {
                 if let Some(b) = &u.bind {
                     if u.path.last() != Some(b) { mods.renames.insert(b.clone()); }
-                    if u.path.len() == 1 && u.path[0] == "crate" && u.module == name { mods.externs.insert(b.clone(), name.clone()); }
+                    if u.module == name {
+                        if u.path.len() == 1 && u.path[0] == "crate" {
+                            mods.externs.insert(b.clone(), name.clone());
+                        } else if u.path.len() == 2 && u.path[0].is_empty() {
+                            let target = mods.externs.get(&u.path[1]).cloned().unwrap_or_else(|| u.path[1].clone());
+                            mods.externs.insert(b.clone(), target);
+                        }
+                    }
                 }
                 mods.uses.entry(u.module.clone()).or_default().push(u);
             }

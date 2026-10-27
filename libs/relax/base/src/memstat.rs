@@ -300,6 +300,9 @@ unsafe impl GlobalAlloc for Counting {
         sites::on_alloc(b.add(h), l.size());
         add(t, l.size() as i64);
         add_block(t, l.size(), 1);
+        if TRACK.load(Relaxed) {
+            track_alloc(b.add(h), l.size());
+        }
         b.add(h)
     }
 
@@ -322,6 +325,9 @@ unsafe impl GlobalAlloc for Counting {
         sites::on_alloc(b.add(h), l.size());
         add(t, l.size() as i64);
         add_block(t, l.size(), 1);
+        if TRACK.load(Relaxed) {
+            track_alloc(b.add(h), l.size());
+        }
         b.add(h)
     }
 
@@ -336,6 +342,9 @@ unsafe impl GlobalAlloc for Counting {
                 track_free(p);
             }
             return System.dealloc(p, l);
+        }
+        if TRACK.load(Relaxed) {
+            track_free(p);
         }
         let h = hdr(l.align());
         let b = p.sub(h);
@@ -360,6 +369,20 @@ unsafe impl GlobalAlloc for Counting {
             }
             return System.realloc(p, l, new);
         }
+        if TRACK.load(Relaxed) {
+            track_free(p);
+            let q = self.realloc_counted(p, l, new);
+            track_alloc(q, new);
+            return q;
+        }
+        self.realloc_counted(p, l, new)
+    }
+}
+
+impl Counting {
+    /// `realloc` with accounting on (MAKEPAD_RUN_MEM_REPORT).
+    #[inline(always)]
+    unsafe fn realloc_counted(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
         let h = hdr(l.align());
         let b = p.sub(h);
         let t = *b.add(h - 1);
@@ -403,6 +426,41 @@ pub fn live_of_index(i: usize) -> i64 {
 /// Live bytes of the whole counted heap.
 pub fn live_total() -> i64 {
     TOTAL.live.load(Relaxed)
+}
+
+/// This thread's allocated-minus-freed bytes (0 unless MAKEPAD_RUN_MEM_REPORT).
+pub fn thread_live() -> i64 {
+    TL_LIVE.with(|x| x.get())
+}
+
+/// MAKEPAD_RUN_MEM_SAMPLE_MS=<ms> (with MAKEPAD_RUN_MEM_REPORT): a thread that prints
+/// one `mem-sample:` line per interval (ms since start, rss, live total, every tag over 8 MB) and
+/// appends the JSON snapshot to MAKEPAD_RUN_MEM_JSON, so a run that is killed still leaves a timeline.
+pub fn start_sampler() {
+    let Some(ms) = std::env::var("MAKEPAD_RUN_MEM_SAMPLE_MS").ok().and_then(|v| v.parse::<u64>().ok()).filter(|&n| n > 0) else { return };
+    if !enabled() {
+        return;
+    }
+    let _ = crate::zone_alloc::kept_with(|| std::thread::Builder::new().name("mem-sampler".into()).spawn(move || {
+        let t0 = std::time::Instant::now();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            let mut s = format!("mem-sample: t={}ms rss={}MB live={}MB", t0.elapsed().as_millis(), resident() >> 20, live_total() >> 20);
+            for (i, n) in TAG_NAMES.iter().enumerate() {
+                let l = live_of_index(i);
+                if l > (8 << 20) {
+                    s.push_str(&format!(" {}={}", n, l >> 20));
+                }
+            }
+            eprintln!("{s}");
+            if let Ok(path) = std::env::var("MAKEPAD_RUN_MEM_JSON") {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                    let _ = f.write_all(json("sample", &[]).as_bytes());
+                }
+            }
+        }
+    }));
 }
 
 /// The process's physical footprint in bytes where the OS reports one (macOS `phys_footprint`,
@@ -766,9 +824,17 @@ pub fn tune_malloc() {
 
 /// Returns the malloc allocator's free pages to the system (glibc malloc_trim; macOS zone
 /// pressure relief).
+/// Trims so far and the clock (ms since start) of the last one (`memory` shows them).
+pub static TRIMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static LAST_TRIM_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn trim() {
+    TRIMS.fetch_add(1, Relaxed);
+    LAST_TRIM_MS.store(crate::clock::ms_since_start() as u64, Relaxed);
     crate::zone_alloc::burst_trim();
     crate::zone_alloc::compiler_trim();
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", windows))]
+    crate::zone_alloc::domain::trim_all();
     #[cfg(target_os = "linux")]
     {
         extern "C" {

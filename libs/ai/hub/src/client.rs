@@ -110,7 +110,7 @@ pub struct LocalService {
 pub fn mark_if_fleet(base_url: &str) {
     if let Ok(url) = crate::http_client::parse_url(base_url) {
         if url.https {
-            crate::fleet_auth::mark_fleet_endpoint(&format!("{}:{}", url.host, url.port));
+            makepad_network::fleet::id::mark_fleet_endpoint(&format!("{}:{}", url.host, url.port));
         }
     }
 }
@@ -123,8 +123,8 @@ impl LocalService {
     pub fn new(base_url: &str) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
         // An https service is a fleet node (discovered, or configured by
-        // URL): reached over self-signed TLS recorded in known_nodes, with
-        // this process's credential proof added by the HTTP client.
+        // URL): its TLS certificate is checked against the fleet root, and
+        // the HTTP client adds this machine's proof for that certificate.
         mark_if_fleet(&base_url);
         Self {
             base_url,

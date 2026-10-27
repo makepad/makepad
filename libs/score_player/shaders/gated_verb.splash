@@ -1,0 +1,78 @@
+// Gated reverb, the big 80s snare: a dense, bright room (four combs per
+// side with damping, then two allpasses) whose tail a gate cuts. A hit on
+// the input opens the gate; it holds `hold` seconds, then closes in
+// `release` seconds, so each hit gets a huge, short burst of room and then
+// silence. Feed it the snare and toms (a send at mix 1, or an insert with
+// `wet` below 1).
+let room = param(0.82, 0.1, 0.98)
+let damp = param(9000, 1000, 16000)
+let hold = param(0.22, 0.02, 1)
+let release = param(0.04, 0.005, 0.5)
+let threshold = param(-30, -60, 0)
+let low_cut = param(250, 20, 1000)
+let wet = param(1, 0, 1)
+
+var c0 = [0.0; 1500]
+var c1 = [0.0; 1500]
+var c2 = [0.0; 1500]
+var c3 = [0.0; 1500]
+var d0 = [0.0; 1500]
+var d1 = [0.0; 1500]
+var d2 = [0.0; 1500]
+var d3 = [0.0; 1500]
+var a0 = [0.0; 600]
+var a1 = [0.0; 600]
+var b0 = [0.0; 600]
+var b1 = [0.0; 600]
+var w = int(0)
+var lp = [0.0; 8]
+var hp_l = OnePole{}
+var hp_r = OnePole{}
+var follow = 0.0
+var open = 0.0
+var since = 10.0
+var damp_k = 0.5
+
+fn block() {
+    onepole_set(hp_l, low_cut)
+    onepole_set(hp_r, low_cut)
+    damp_k = exp(-TAU * damp / sample_rate)
+}
+
+// One comb: read `len` behind, damp the feedback (state lp[k]), write.
+fn comb(buf, len, k, x) {
+    let y = buf[w - len]
+    lp[k] = y * (1.0 - damp_k) + lp[k] * damp_k
+    buf[w] = x + lp[k] * room
+    y
+}
+
+fn allpass(buf, len, x) {
+    let b = buf[w - len]
+    buf[w] = x + b * 0.5
+    b - x * 0.5
+}
+
+fn effect(l, r) {
+    // The gate: an envelope follower; a rise over the threshold restarts
+    // the hold, then the gate falls over `release`.
+    let level = max(abs(l), abs(r))
+    let prev = follow
+    follow = max(level, follow * 0.9995)
+    if follow > db_to_gain(threshold) && level > prev * 1.5 {
+        since = 0.0
+    }
+    since = since + 1.0 / sample_rate
+    let target = if since < hold { 1.0 } else { 0.0 }
+    let rate = if target > open { 0.05 } else { min(4.0 / (release * sample_rate), 1.0) }
+    open = open + (target - open) * rate
+    let inl = onepole_hp(hp_l, l) * 0.3
+    let inr = onepole_hp(hp_r, r) * 0.3
+    // Four combs a side (the right 23 samples longer), then two allpasses.
+    var sl = comb(c0, 1116, 0, inl) + comb(c1, 1188, 1, inl) + comb(c2, 1277, 2, inl) + comb(c3, 1356, 3, inl)
+    var sr = comb(d0, 1139, 4, inr) + comb(d1, 1211, 5, inr) + comb(d2, 1300, 6, inr) + comb(d3, 1379, 7, inr)
+    sl = allpass(a1, 441, allpass(a0, 556, sl))
+    sr = allpass(b1, 464, allpass(b0, 579, sr))
+    w = w + 1
+    vec2(l, r) * (1.0 - wet) + vec2(sl, sr) * (open * wet)
+}

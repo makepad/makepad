@@ -1,0 +1,24 @@
+[package]
+name = "makepad-music-iter"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The song iteration loop's core: render a Score offline to a mix and stems, score it with a repeatable scorecard, keep versions with their verdicts and feedback, and distil feedback into MUSIC-AGENTS.md; the SCORE page and the music_iter tool share it"
+
+[lib]
+name = "makepad_music_iter"
+
+[[bin]]
+name = "music_iter"
+path = "src/bin/music_iter.rs"
+
+[dependencies]
+# The one loudness meter.
+makepad-audio-dsp = { path = "../audio_dsp" }
+makepad-score-live = { path = "../score_live" }
+makepad-score-player = { path = "../score_player" }
+makepad-score-voice = { path = "../score_voice" }
+# The model that writes and learns: Stage's chat provider (the claude CLI).
+makepad-ai-hub = { path = "../ai/hub", default-features = false }
+# The beat grid, from Stage's one beat detector.
+makepad-beat = { path = "../beat" }

@@ -156,13 +156,13 @@ std::arch::global_asm!(
     "  mov sp, x16",
     "  mov x0, x1",
     "  b Lmakepad_run_sg_enter_tail",
-    // ---- panic trampolines: the caller's register block [fp, lr, x19..x28, d8..d15] on the
-    // stack, its address in x6, x7 = 0, then the host entry (never returns)
+    // ---- panic trampolines: the caller's register block [fp, lr, x19..x28, d8..d15, x0..x15]
+    // on the stack, its address in x6, x7 = 0, then the host entry (never returns)
     ".macro makepad_run_sg_tramp name, target",
     ".p2align 2",
     ".globl \\name",
     "\\name:",
-    "  sub sp, sp, #160",
+    "  sub sp, sp, #288",
     "  stp x29, x30, [sp, #0]",
     "  stp x19, x20, [sp, #16]",
     "  stp x21, x22, [sp, #32]",
@@ -173,6 +173,14 @@ std::arch::global_asm!(
     "  stp d10, d11, [sp, #112]",
     "  stp d12, d13, [sp, #128]",
     "  stp d14, d15, [sp, #144]",
+    "  stp x0, x1, [sp, #160]",
+    "  stp x2, x3, [sp, #176]",
+    "  stp x4, x5, [sp, #192]",
+    "  stp x6, x7, [sp, #208]",
+    "  stp x8, x9, [sp, #224]",
+    "  stp x10, x11, [sp, #240]",
+    "  stp x12, x13, [sp, #256]",
+    "  stp x14, x15, [sp, #272]",
     "  mov x6, sp",
     "  mov x7, #0",
     "  adrp x16, \\target@PAGE",

@@ -50,6 +50,19 @@ fn get<'a>(kv: &'a [(String, String)], keys: &[&str]) -> Option<&'a str> {
 
 /// Like [`run`] for a request typed as one line (words split on spaces).
 pub fn run_line(client: &Client, line: &str, each: &mut dyn FnMut(&str) -> bool) -> Result<bool, Error> {
+    // a JSON request goes as it is (its values keep their spaces and `=`)
+    if line.trim_start().starts_with('{') {
+        let mut err = false;
+        let mut lines = client.cmd(line.trim())?;
+        while let Some(l) = lines.next() {
+            let l = l?;
+            err |= l.starts_with("{\"err\":");
+            if !each(&l) {
+                break;
+            }
+        }
+        return Ok(err);
+    }
     let argv: Vec<String> = line.split_whitespace().map(str::to_string).collect();
     run(client, &argv, each)
 }
@@ -74,7 +87,8 @@ fn run_inner(client: &Client, argv: &[String], each: &mut dyn FnMut(&str) -> boo
     let reply = match (first, second) {
         ("grab", _) | ("tweak", Some("grab")) => grab(client, &kv),
         ("gseq", _) => gseq(client, &kv),
-        ("rec", _) => rec(client, &kv),
+        // `rec save|status|mark|on|off` is the flight recorder (an app command); bare `rec` records frames
+        ("rec", s) if !matches!(s, Some("save" | "status" | "mark" | "on" | "off")) => rec(client, &kv),
         ("gq", _) => gq(client, &kv),
         ("tweak", Some("final")) => return tweak_final(client, &words, &kv, each),
         ("tools", _) => return app_request(client, "list", each),

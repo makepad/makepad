@@ -23,6 +23,9 @@ static IMAGES: Mutex<Vec<Image>> = Mutex::new(Vec::new());
 
 /// The function containing `pc`: (demangled name, image file name, pc's offset from the symbol).
 pub fn host_symbol(pc: u64) -> Option<(String, String, u64)> {
+    // IMAGES is process state, filled by whichever thread asks first (a hitch report, a panic):
+    // it lives in the kept heap
+    let _kept = crate::zone_alloc::kept();
     let mut images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
     if !images.iter().any(|i| pc >= i.lo && pc < i.hi) {
         *images = enumerate();
@@ -146,16 +149,16 @@ fn enumerate() -> Vec<Image> {
 
 // ------------------------------------------------------------------ symbol tables
 
-fn u16_at(b: &[u8], o: usize) -> Option<u16> {
+pub(crate) fn u16_at(b: &[u8], o: usize) -> Option<u16> {
     Some(u16::from_le_bytes(b.get(o..o + 2)?.try_into().ok()?))
 }
-fn u32_at(b: &[u8], o: usize) -> Option<u32> {
+pub(crate) fn u32_at(b: &[u8], o: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?))
 }
-fn u64_at(b: &[u8], o: usize) -> Option<u64> {
+pub(crate) fn u64_at(b: &[u8], o: usize) -> Option<u64> {
     Some(u64::from_le_bytes(b.get(o..o + 8)?.try_into().ok()?))
 }
-fn cstr(b: &[u8], o: usize) -> Option<&str> {
+pub(crate) fn cstr(b: &[u8], o: usize) -> Option<&str> {
     let s = b.get(o..)?;
     let n = s.iter().position(|&c| c == 0)?;
     std::str::from_utf8(&s[..n]).ok()

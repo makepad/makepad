@@ -2,7 +2,7 @@
 # Makepad for macOS and Linux: gets Rust, compiles Makepad's loader (makepad run) from its source on
 # this computer and starts it. Read it before you run it; it is this one file.
 #
-#   curl -fsSL https://makepad.nl/builder/unix | sh
+#   curl -fsSL https://makepad.nl/runner/unix | sh
 #
 # 1. Rust 1.98.0 (rustc, cargo, rust-std) from static.rust-lang.org, fetched as 25 MB pieces
 #    over parallel connections, checked against the sizes and SHA-256 sums below.
@@ -10,13 +10,18 @@
 #    a ZIP whose size and SHA-256 the service names (checked before unpacking); and, with no
 #    arguments, the packs of the runner's git repositories (the service's latest `runner`
 #    release), which makepad run takes instead of downloading them itself.
-# 3. The loader is compiled (`cargo build --release --offline`: the ZIP holds every crate) the
-#    moment Rust and the source are in place, and started: `makepad run` the runner, which
-#    downloads the rest. With arguments, the loader runs with them instead.
+# 3. The loader is compiled for this computer's processor (`cargo build --profile host --offline`:
+#    the ZIP holds every crate) the moment Rust and the source are in place, and started with no
+#    arguments: it runs the runner, which downloads the rest. With arguments, the loader runs with
+#    them instead. A new loader release replaces only the files that changed, so only their crates
+#    compile again.
 #
-# Beside this file it creates only two folders: rust/ (the toolchain) and cache/
-# (everything else: downloads, the loader, its caches and logs). Piped into sh, the folder is
-# ~/makepad-builder; $MAKEPAD_LOADER_ROOT overrides either. Run it again at any time: nothing is
+# In its folder it creates rust/ (the toolchain), cache/ (downloads, the loader, its caches and
+# logs), apps/ (what `makepad` and `makepad app <id>` run: the runner's and each app's launch
+# record), runner/ (the runner's own state: licence, catalog, launch logs) and target/ (what makepad
+# run builds for the apps: build scripts, unit graphs, code cache). The folder is this
+# file's own when it holds nothing else (or is an installation already), else ~/makepad-runner
+# (piped into sh, or saved among other downloads); $MAKEPAD_LOADER_ROOT overrides. Run it again at any time: nothing is
 # downloaded or compiled twice. The system needs a C linker (Apple's command line tools; on
 # Linux cc) and, on Linux, OpenSSL 3's development files; it names the packages when missing.
 set -u
@@ -149,7 +154,15 @@ case "$0" in
     sh | -sh | */sh | bash | -bash | */bash | dash | */dash | zsh | */zsh) script_dir= ;;
     *) script_dir=; [ -f "$0" ] && script_dir=$(cd -P -- "$(dirname -- "$0")" && pwd -P) ;;
 esac
-root=${MAKEPAD_LOADER_ROOT:-${script_dir:-$HOME/makepad-builder}}
+# The folder: this file's own when it is an installation already, or holds nothing else (a folder
+# made for it); else ~/makepad-runner (piped into sh, or a download among other files), where the
+# file copies itself.
+if [ -n "$script_dir" ] && [ -z "${MAKEPAD_LOADER_ROOT:-}" ] && [ ! -d "$script_dir/cache" ] \
+    && [ -n "$(ls -A "$script_dir" | grep -v -x -e "$(basename -- "$0")" -e .DS_Store)" ]; then
+    script_dir_other=1
+fi
+if [ -n "$script_dir" ] && [ -z "${script_dir_other:-}" ]; then default_root=$script_dir; else default_root=$HOME/makepad-runner; fi
+root=${MAKEPAD_LOADER_ROOT:-$default_root}
 mkdir -p "$root" 2>/dev/null && root=$(cd -P -- "$root" && pwd -P) || fail "Cannot create the folder $root"
 rust=$root/rust
 cache=$root/cache
@@ -231,7 +244,7 @@ repos=
 # unreachable, the folder's stores and loader start at once (makepad run runs the stored commits).
 # The two questions to the service go out together.
 meta="--retry 2 -m 60"
-if [ -f "$cache/loader/current" ] && [ -f "$cache/runner/release" ]; then meta="--connect-timeout 3 -m 6"; fi
+if [ -f "$cache/loader/src/.built" ] && [ -f "$cache/runner/release" ]; then meta="--connect-timeout 3 -m 6"; fi
 mkdir -p "$cache"
 : > "$cache/loader-latest.json"
 ( curl -fsS --proto "$proto" $meta "$service/public/app/relax/latest" > "$cache/loader-latest.json.part" 2>>"$logs/download.log" \
@@ -276,16 +289,20 @@ latest=$(cat "$cache/loader-latest.json" 2>/dev/null) || latest=
 loader_version=$(printf '%s' "$latest" | sed -n 's/.*"release":"\([A-Za-z0-9_-]*\)".*/\1/p')
 archive=$(printf '%s' "$latest" | sed -n 's/.*"archive":{"name":"\([A-Za-z0-9_.-]*\)","bytes":\([0-9]*\),"sha256":"\([0-9a-f]*\)"}.*/\1 \2 \3/p')
 [ -n "$archive" ] || loader_version=
-[ -n "$loader_version" ] || loader_version=$(cat "$cache/loader/current" 2>/dev/null)
-[ -n "$loader_version" ] || fail "Could not reach the release service ${D}($service)$N and no loader is here yet."
-src=$cache/loader/$loader_version
-makepad=$src/target/release/makepad
+# One source folder for every version: an update replaces only the files that changed, so cargo
+# recompiles only the crates they belong to (target/ stays inside it: makepad finds its std two
+# levels above itself).
+src=$cache/loader/src
+[ -n "$loader_version" ] || loader_version=$(cat "$src/.version" 2>/dev/null)
+[ -n "$loader_version" ] || fail "Could not reach the release service ${D}($service)$N and no loader is here yet. ${D}Check the connection, then run this again.$N"
+makepad=$src/target/host/makepad
+built="$loader_version $rust_version $triple"
 need_build=
-[ -x "$makepad" ] && [ -f "$src/.built" ] || need_build=1
+[ -x "$makepad" ] && [ "$(cat "$src/.built" 2>/dev/null)" = "$built" ] || need_build=1
 need_zip=
-[ -n "$need_build" ] && [ ! -f "$src/Cargo.toml" ] && need_zip=1
+[ -n "$need_build" ] && [ "$(cat "$src/.version" 2>/dev/null)" != "$loader_version" ] && need_zip=1
 if [ -n "$need_zip" ]; then
-    [ -n "$archive" ] || fail "The release service did not answer; the loader's source is not here yet."
+    [ -n "$archive" ] || fail "The release service did not answer; the loader's source is not here yet. ${D}Check the connection, then run this again.$N"
     loader_name=$(printf '%s' "$archive" | cut -d' ' -f1)
     loader_bytes=$(printf '%s' "$archive" | cut -d' ' -f2)
     loader_sha256=$(printf '%s' "$archive" | cut -d' ' -f3)
@@ -448,9 +465,41 @@ if [ -n "$need_zip" ]; then
     elif command -v bsdtar >/dev/null 2>&1; then bsdtar -xf "$zip.part" -C "$unpack"
     elif command -v python3 >/dev/null 2>&1; then python3 -m zipfile -e "$zip.part" "$unpack"
     else fail "Makepad needs unzip ${D}· install it, then run this again$N"
-    fi >>"$logs/download.log" 2>&1 || fail "Unpacking the loader's source failed. ${D}· log: $logs/download.log$N"
-    rm -rf "$src"
-    mv "$unpack/$loader_version" "$src" || fail "Unpacking the loader's source failed. ${D}· log: $logs/download.log$N"
+    fi >>"$logs/download.log" 2>&1 || fail "Unpacking the loader's source failed. ${D}Run this again · log: $logs/download.log$N"
+    new=$unpack/$loader_version
+    [ -f "$new/Cargo.toml" ] || fail "The loader's source has no $loader_version/Cargo.toml. ${D}Run this again later; the release service is being updated.$N"
+    if [ ! -f "$src/Cargo.toml" ]; then
+        rm -rf "$src"
+        mv "$new" "$src" || fail "Cannot move the loader's source into $src"
+    else
+        # an update: files that changed are replaced (with the time of now, so cargo sees them
+        # as changed), files the new version no longer has are removed, the rest stay as they are
+        row 7 "Makepad's loader" "$C●$N updating its source $D· $loader_version$N" "updating"
+        # one `diff -rq` names what differs (one process, not one per file)
+        LC_ALL=C diff -rq -x target -x .version -x .built "$new" "$src" > "$unpack/changes" 2>&1
+        [ $? -le 1 ] || fail "Cannot compare the loader's source with $src ${D}· $(head -1 "$unpack/changes")$N"
+        while IFS= read -r line; do
+            case "$line" in
+                "Files $new/"*" differ")
+                    rel=${line#"Files $new/"}
+                    rel=${rel%%" and $src/"*}
+                    mv -f "$new/$rel" "$src/$rel" && touch "$src/$rel" || exit 1 ;;
+                "Only in $new"*)
+                    dir=${line#"Only in $new"}
+                    dir=${dir%%": "*}
+                    rel=${dir#/}${dir:+/}${line#*": "}
+                    rel=${rel#/}
+                    mkdir -p "$(dirname "$src/$rel")" && mv -f "$new/$rel" "$src/$rel" || exit 1
+                    find "$src/$rel" -exec touch {} + ;;
+                "Only in $src"*)
+                    dir=${line#"Only in $src"}
+                    dir=${dir%%": "*}
+                    rel=${dir#/}${dir:+/}${line#*": "}
+                    rm -rf "$src/${rel#/}" ;;
+            esac
+        done < "$unpack/changes" || fail "Cannot update the loader's source in $src"
+    fi
+    printf '%s\n' "$loader_version" > "$src/.version"
     rm -rf "$unpack"
     rm -f "$zip.part"
     stamp source
@@ -464,30 +513,33 @@ export PATH="$rust/bin:$PATH" CARGO_HOME="$cache/cargo-home" RUSTC="$rust/bin/ru
 if [ -n "$need_build" ]; then
     build_log=$logs/build.log
     rm -f "$build_log"
-    # the crates to compile: one Cargo.toml each, besides the workspace's own
-    crates=$(($(find "$src" -name target -prune -o -name Cargo.toml -print | wc -l) - 1))
-    [ $crates -gt 0 ] || crates=1
+    # the crates to compile: the lock file's packages (the archive holds only the loader's crates)
+    crates=$(grep -c '^name = ' "$src/Cargo.lock" 2>/dev/null)
+    [ "${crates:-0}" -gt 0 ] || crates=1
     # the archive's lock file (path crates only): nothing is resolved or fetched on this computer
     locked=
     [ ! -f "$src/Cargo.lock" ] || locked=--locked
+    # room for the build (about 2 GB of target/), said before it starts rather than as a cargo error
+    free_kb=$(df -Pk "$cache" | awk 'NR == 2 { print $4 }')
+    [ "${free_kb:-0}" -ge 3000000 ] || fail "Compiling Makepad's loader needs about 3 GB free on this disk. ${D}Free some space, then run this again.$N"
     status "Compiling Makepad's loader; once per version."
     build_t0=$(now)
-    job build sh -c 'cd "$1" && exec "$2" build --release --offline $3 -p makepad-run --bin makepad' \
+    # for this computer's processor ([profile.host]: thin LTO, 16 codegen units, target-cpu=native)
+    job build env RUSTFLAGS=-Ctarget-cpu=native sh -c 'cd "$1" && exec "$2" build --profile host --offline $3 -p makepad-run --bin makepad' \
         build "$src" "$rust/bin/cargo" "$locked" >"$build_log" 2>&1
     while [ ! -f "$jobs/build.done" ]; do
         compiled=$(grep -c '^ *Compiling ' "$build_log" 2>/dev/null)
         compiled=${compiled:-0}
         [ "$compiled" -le $crates ] || compiled=$crates
         bar "$compiled" $crates
-        row 7 "Makepad's loader" "$C●$N $BAR $D· $compiled of $crates crates started · $(($(now) - build_t0)) s$N" "compiling"
+        row 7 "Makepad's loader" "$C●$N $BAR $D· $compiled of $crates crates · $(($(now) - build_t0)) s$N" "compiling"
         nap
     done
-    [ "$(cat "$jobs/build.done")" = 0 ] || fail "Makepad's loader did not compile. ${D}· log: $build_log$N"
-    : > "$src/.built"
-    # the loader compiled before this one is no longer needed
-    old=$(cat "$cache/loader/current" 2>/dev/null)
-    [ -z "$old" ] || [ "$old" = "$loader_version" ] || [ ! -d "$cache/loader/$old" ] || rm -rf "$cache/loader/$old"
-    printf '%s\n' "$loader_version" > "$cache/loader/current.next" && mv -f "$cache/loader/current.next" "$cache/loader/current"
+    if [ "$(cat "$jobs/build.done")" != 0 ]; then
+        why=$(grep -m1 '^error' "$build_log" | cut -c1-90)
+        fail "Makepad's loader did not compile${why:+: $why}. ${D}Run this again; if it stops the same way, the log says why: $build_log$N"
+    fi
+    printf '%s\n' "$built" > "$src/.built"
     row 7 "Makepad's loader" "$G✓$N compiled $D· $(($(now) - build_t0)) s$N"
     stamp built
 fi
@@ -499,12 +551,12 @@ fi
 
 # --- 4. Start it --------------------------------------------------------------------------------
 # makepad run runs cargo/rustc for build scripts and unit graphs (until it does that itself), so the
-# toolchain stays on PATH for it and every app it starts. makepad run knows only git URLs: with no
-# arguments this script names the runner's: the release service's latest licence-free `runner`
-# release, whose repositories the service serves read-only over git
+# toolchain stays on PATH for it and every app it starts. With no arguments `makepad` runs the
+# runner: its launch record names the runner's repositories, the release service's latest
+# licence-free `runner` release, which the service serves read-only over git
 # ($service/public/git/runner/<repository>.git, one branch per release). The repository at
 # `makepad` is the workspace, the others mount at their folders inside it. makepad run keeps its
-# snapshots in $MAKEPAD_RUN_HOME/cache and, with --cached, starts the last one at once while it
+# stores in $MAKEPAD_RUN_HOME/cache and, with --cached, starts the last one at once while it
 # fetches the new release for the next start. Offline, the release recorded last.
 export MAKEPAD_LOADER_ROOT="$root" MAKEPAD_LOADER_SERVICE="$service"
 if [ $# -gt 0 ]; then
@@ -530,7 +582,13 @@ else
     repos=$(sed -n '2,$p' "$cache/runner/release")
 fi
 git_base=$service/public/git/runner
-set -- run --quiet --cached
+# The runner's launch record ($MAKEPAD_RUN_HOME/apps/runner.launch, one `key<TAB>value` line each):
+# what `makepad` with no arguments runs, from here and from anywhere else (makepad launch.rs).
+launch_dir=$root/apps
+mkdir -p "$launch_dir" || fail "Cannot create $launch_dir"
+record=$launch_dir/runner.launch
+printf 'title\tMakepad\narg\trun\narg\t--quiet\narg\t--cached\n' > "$record.part" || fail "Cannot write $record"
+rm -f "$record.mounts"
 root_repo=
 for entry in $(printf '%s\n' "$repos" | tr ' ' ':'); do
     name=${entry%%:*}
@@ -543,18 +601,22 @@ for entry in $(printf '%s\n' "$repos" | tr ' ' ':'); do
     [ ${#commit} -ne 40 ] || pin=@$commit
     case "$path" in
         makepad) root_repo="$git_base/$name.git#$runner_release$pin" ;;
-        makepad/*) set -- "$@" --mount "${path#makepad/}=$git_base/$name.git#$runner_release$pin" ;;
-        *) fail "The runner release has a repository outside its workspace: $path" ;;
+        makepad/*) printf 'arg\t--mount\narg\t%s\n' "${path#makepad/}=$git_base/$name.git#$runner_release$pin" >> "$record.mounts" ;;
+        *) rm -f "$record.mounts"; fail "The runner release has a repository outside its workspace: $path" ;;
     esac
 done
 [ -n "$root_repo" ] || fail "The runner release has no repository at makepad."
+printf 'arg\t%s\n' "$root_repo" >> "$record.part"
+[ ! -f "$record.mounts" ] || { cat "$record.mounts" >> "$record.part"; rm -f "$record.mounts"; }
+printf 'arg\tmakepad-runner\n' >> "$record.part"
+mv -f "$record.part" "$record" || fail "Cannot write $record"
 stamp start-loader
 # The loader runs as a job; the runner reports its first frame (MAKEPAD_RUN_REPORT_TO), and the row
 # turns to running then. Its own output goes to the log.
 report=$logs/runner.report
 : > "$report"
 export MAKEPAD_RUN_REPORT_TO="$report"
-job run "$makepad" "$@" "$root_repo" makepad-runner >"$logs/makepad.log" 2>&1
+job run "$makepad" >"$logs/makepad.log" 2>&1
 while [ ! -f "$jobs/run.done" ]; do
     if [ -z "$shown" ] && grep -q '^present' "$report" 2>/dev/null; then
         shown=1
@@ -567,6 +629,6 @@ while [ ! -f "$jobs/run.done" ]; do
 done
 code=$(cat "$jobs/run.done")
 stamp "loader-exit-$code"
-[ "$code" = 0 ] || fail "Makepad stopped with an error. ${D}· log: $logs/makepad.log$N"
+[ "$code" = 0 ] || fail "Makepad stopped with an error (exit $code). ${D}Run this again to start it; the log says why: $logs/makepad.log$N"
 leave
 exit 0

@@ -1,7 +1,6 @@
-//! Finding running endpoints by their discovery files (`makepad-remote-<pid>.json` in the temp
-//! dir). Files of processes that ended are removed when listed.
+//! Finding running endpoints by their discovery files (`makepad-remote-<pid>.json` in the user's
+//! registry dir, [`registry_dir`]). Files of processes that ended are removed when listed.
 
-use crate::carrier::unix::paths;
 
 #[derive(Debug, Clone)]
 pub struct App {
@@ -185,21 +184,38 @@ pub(crate) fn rewrite_caps(file: &std::path::Path, caps: &[String]) {
     }
 }
 
+/// Where every process of this user registers its endpoint: one directory whatever the
+/// process's TMPDIR. The socket itself stays in the process's temp dir (its path is in the file).
+/// A makepad WM gives its JIT apps an on-disk TMPDIR (`~/.makepad/wm/jit.env`), and `makepad
+/// inspect` from a shell has another: with the files in the temp dir it found none of them
+/// (166, 2026-10-25). Linux (and other Unix with a session): `$XDG_RUNTIME_DIR`, the user's 0700
+/// runtime dir; elsewhere the temp dir (macOS's is per user already).
+pub fn registry_dir() -> std::path::PathBuf {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).filter(|d| d.is_absolute() && d.is_dir()) {
+        return dir;
+    }
+    std::env::temp_dir()
+}
+
 /// The running endpoints, oldest first by pid (stale discovery files of ended processes are
-/// removed).
+/// removed, with the socket each names).
 pub fn apps() -> Vec<App> {
     let mut out = Vec::new();
-    let Ok(dir) = std::fs::read_dir(std::env::temp_dir()) else { return out };
+    let Ok(dir) = std::fs::read_dir(registry_dir()) else { return out };
     for e in dir.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let Some(pid) = name.strip_prefix("makepad-remote-").and_then(|r| r.strip_suffix(".json")).and_then(|p| p.parse::<u32>().ok()) else { continue };
+        let Ok(text) = std::fs::read_to_string(e.path()) else { continue };
+        let app = parse(&text);
         if !alive(pid) {
             let _ = std::fs::remove_file(e.path());
-            let _ = std::fs::remove_file(paths(pid).0);
+            if let Some(socket) = app.as_ref().map(|a| &a.socket).filter(|s| s.ends_with(&format!("makepad-remote-{pid}.sock"))) {
+                let _ = std::fs::remove_file(socket);
+            }
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(e.path()) else { continue };
-        if let Some(app) = parse(&text) {
+        if let Some(app) = app {
             out.push(app);
         }
     }
@@ -207,9 +223,14 @@ pub fn apps() -> Vec<App> {
     out
 }
 
-/// `spec` is a pid or an app name; of several with that name the most recent (highest pid).
+/// `spec` is a pid, an app name (of several with that name the most recent: highest pid) or a
+/// `tcp:` socket a discovery file names.
 pub fn find(spec: &str) -> Option<App> {
     let list = apps();
+    // a loopback endpoint as its discovery file names it (Windows): the file carries its token
+    if spec.starts_with("tcp:") {
+        return list.into_iter().rfind(|a| a.socket == spec);
+    }
     match spec.parse::<u32>() {
         Ok(pid) => list.into_iter().find(|a| a.pid == pid),
         Err(_) => list.into_iter().rfind(|a| a.app == spec),
@@ -227,5 +248,21 @@ mod rewrite_tests {
         assert!(app.serves("app") && app.serves("cmd"));
         assert_eq!(app.text("app").as_deref(), Some("x"));
         std::fs::remove_file(&file).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    /// The discovery file is in the registry dir, not the temp dir: a process with another TMPDIR
+    /// (a WM's JIT apps, `~/.makepad/wm/jit.env`) still lists in `makepad inspect` from a shell.
+    #[test]
+    fn discovery_files_go_to_the_registry_dir() {
+        let (sock, disc) = crate::carrier::unix::paths(7);
+        assert_eq!(disc.parent(), Some(super::registry_dir().as_path()));
+        assert_eq!(sock.parent(), Some(std::env::temp_dir().as_path()));
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).filter(|d| d.is_absolute() && d.is_dir()) {
+            assert_eq!(super::registry_dir(), xdg);
+        }
     }
 }

@@ -15,6 +15,19 @@ pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 pub(super) fn error(e: vk::Result) -> String { format!("Vulkan: {e:?}") }
 
+pub struct VideoQueue {
+    pub family: u32,
+    pub queue: vk::Queue,
+    /// Its queue family's timestamp bits (0: no timestamps on it).
+    pub timestamp_bits: u32,
+    /// The family's further queues: one per further encode engine (a 4090 has two engines and
+    /// exposes two queues), so tiles of a picture encode at once.
+    pub more: Vec<(vk::Queue, Mutex<()>)>,
+    pub lock: Mutex<()>,
+    /// The encoder also takes H.265 (VK_KHR_video_encode_h265 enabled).
+    pub h265: bool,
+}
+
 pub struct Device {
     pub instance: makepad_vulkan::Instance,
     pub raw: makepad_vulkan::Device,
@@ -29,8 +42,18 @@ pub struct Device {
     pub features: vk::PhysicalDeviceFeatures,
     pub formats: [vk::FormatProperties; crate::types::format::COUNT as usize],
     pub timestamp_bits: u32,
+    /// The device's timestamps can be sampled together with the host clock
+    /// (VK_KHR/EXT_calibrated_timestamps with the device and CLOCK_MONOTONIC domains): the GPU
+    /// profiler places its pass times on the HAL clock with them ([`Device::calibrate`]).
+    pub calibrated: bool,
     pub extensions: HashSet<String>,
     pub present_wait: bool,
+    /// Multiview render passes (Vulkan 1.1 `multiview`, enabled when the device has it).
+    pub multiview: bool,
+    /// The queue of the GPU's hardware video encoder (VK_KHR_video_encode_queue + H.264), when
+    /// it has one: `video_encode::Stream` submits there. Its own lock: video submits never wait
+    /// for the graphics queue's.
+    pub video_encode: Option<VideoQueue>,
     /// The instance, destroyed after the last device made on it (display peers and a device
     /// that replaced a lost one share it).
     life: Arc<InstanceLife>,
@@ -79,6 +102,22 @@ fn device_local_free(instance: &makepad_vulkan::Instance, physical: vk::Physical
     (size > 0).then_some((free, size))
 }
 
+/// Tells the GPU profiler what this device can time: whole render passes and copies with
+/// timestamp queries (no stage lanes), placed on the host clock by calibration where offered.
+fn report_profiling(name: &CStr, properties: &vk::PhysicalDeviceProperties, bits: u32, calibrated: bool) {
+    let period = properties.limits.timestamp_period;
+    let mut notes = vec!["render passes and copies are timed whole with timestamp queries (no vertex / fragment lanes)".to_string(),
+        "no shader cost hints: pipelines arrive as SPIR-V".to_string()];
+    if bits == 0 { notes.push("the graphics queue has no timestamps: nothing is timed".into()); }
+    if !calibrated { notes.push("no calibrated timestamps: GPU times are placed on the host clock where each frame's fence was seen (late by the completion worker's wake-up)".into()); }
+    crate::gpu_prof::set_device(crate::gpu_prof::DeviceInfo {
+        name: name.to_string_lossy().into_owned(),
+        counter_sets: vec![format!("timestamp ({bits} valid bits, {period} ns per tick)")],
+        sampling: vec!["pass boundary".into(), if calibrated { "calibrated device/host clock".into() } else { "fence-time clock anchor".into() }],
+        notes,
+    });
+}
+
 /// How long a device creation out of memory waits before it tries again.
 const DEVICE_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
 
@@ -87,8 +126,10 @@ const BUDGET_REUSE: std::time::Duration = std::time::Duration::from_millis(250);
 
 static SHARED: Mutex<Option<(Vec<String>, Arc<Device>)>> = Mutex::new(None);
 
-/// Owns a VkInstance: destroyed when the last device on it is gone.
-struct InstanceLife(makepad_vulkan::Instance);
+/// Owns a VkInstance: destroyed when the last device on it is gone. `creator` is the runtime
+/// that made it (and makes its devices, a replacement after a loss too), with the loader's
+/// `vkGetInstanceProcAddr` it was given.
+struct InstanceLife(makepad_vulkan::Instance, Option<(Arc<dyn super::surface::VkCreator>, makepad_vulkan::commands::PfnGetInstanceProcAddr)>);
 impl Drop for InstanceLife {
     fn drop(&mut self) { unsafe { self.0.destroy_instance(None) } }
 }
@@ -136,18 +177,33 @@ impl Device {
         }
         let names: Vec<_> = instance_extensions.iter().map(|n| n.as_ptr()).collect();
         let app = vk::ApplicationInfo::default().application_name(c"Makepad HAL").api_version(vk::API_VERSION_1_1);
-        let instance = unsafe { entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app).enabled_extension_names(&names), None) }
-            .map_err(|e| format!("vkCreateInstance: {e:?}"))?;
+        let info = vk::InstanceCreateInfo::default().application_info(&app).enabled_extension_names(&names);
+        let creator = source.creator();
+        let (instance, creator) = match creator {
+            Some(creator) => {
+                let gipa = entry.table.get_instance_proc_addr.ok_or("Vulkan loader lacks vkGetInstanceProcAddr")?;
+                let handle = unsafe { creator.create_instance(gipa, &info) }?;
+                (unsafe { makepad_vulkan::Instance::from_handle(&entry, handle) }, Some((creator, gipa)))
+            }
+            None => (unsafe { entry.create_instance(&info, None) }.map_err(|e| format!("vkCreateInstance: {e:?}"))?, None),
+        };
         if log_enabled() { eprintln!("[hal-vulkan] vkCreateInstance succeeded"); }
-        let life = Arc::new(InstanceLife(instance.clone()));
-        let mut devices = unsafe { instance.enumerate_physical_devices() }
-            .map_err(|e| format!("vkEnumeratePhysicalDevices: {e:?}"))?;
-        devices.sort_by_key(|p| match unsafe { instance.get_physical_device_properties(*p) }.device_type {
-            vk::PhysicalDeviceType::DISCRETE_GPU => 0,
-            vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
-            _ => 2,
-        });
-        source.order_devices(&instance, &mut devices)?;
+        let life = Arc::new(InstanceLife(instance.clone(), creator));
+        // a runtime that makes the device names its GPU
+        let devices = match &life.1 {
+            Some((creator, _)) => vec![unsafe { creator.physical_device(instance.handle()) }?],
+            None => {
+                let mut devices = unsafe { instance.enumerate_physical_devices() }
+                    .map_err(|e| format!("vkEnumeratePhysicalDevices: {e:?}"))?;
+                devices.sort_by_key(|p| match unsafe { instance.get_physical_device_properties(*p) }.device_type {
+                    vk::PhysicalDeviceType::DISCRETE_GPU => 0,
+                    vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
+                    _ => 2,
+                });
+                source.order_devices(&instance, &mut devices)?;
+                devices
+            }
+        };
         let wanted = Wanted { instance_extensions, optional };
         for physical in devices {
             if let Some(device) = Self::open(&life, physical, &wanted)? { return Ok(device); }
@@ -222,24 +278,69 @@ impl Device {
         if pacing { wanted.extend([vk::KHR_PRESENT_ID_NAME, vk::KHR_PRESENT_WAIT_NAME]); }
         // the device's real budget (other processes included), for the UI's memory reserve
         if supported(vk::EXT_MEMORY_BUDGET_NAME) { wanted.push(vk::EXT_MEMORY_BUDGET_NAME); }
+        // the GPU profiler's clock: device timestamps sampled with the host's CLOCK_MONOTONIC (the
+        // HAL clock on Linux and Android); the KHR name first, the EXT one is the same functions
+        let calibration = [vk::KHR_CALIBRATED_TIMESTAMPS_NAME, vk::EXT_CALIBRATED_TIMESTAMPS_NAME].into_iter().find(|n| supported(n))
+            .filter(|_| instance.table.get_physical_device_calibrateable_time_domains_khr.is_some())
+            .filter(|_| unsafe { instance.get_physical_device_calibrateable_time_domains(physical) }
+                .is_ok_and(|d| d.contains(&vk::TimeDomainKHR::DEVICE) && d.contains(&vk::TimeDomainKHR::CLOCK_MONOTONIC)));
+        if let Some(name) = calibration { wanted.push(name); }
+        // The hardware video encoder: its queue family and the four extensions it takes, when the
+        // GPU has all of them (nothing else changes on a GPU without them).
+        let video_names = [vk::KHR_SYNCHRONIZATION_2_NAME, vk::KHR_VIDEO_QUEUE_NAME, vk::KHR_VIDEO_ENCODE_QUEUE_NAME, vk::KHR_VIDEO_ENCODE_H264_NAME];
+        let video_family = if video_names.iter().all(|n| supported(n)) {
+            queues.iter().position(|q| q.queue_count > 0 && q.queue_flags.contains(vk::QueueFlags::VIDEO_ENCODE_KHR))
+                .filter(|f| *f != family)
+        } else { None };
+        if video_family.is_some() { wanted.extend(video_names); }
+        let h265 = video_family.is_some() && supported(vk::KHR_VIDEO_ENCODE_H265_NAME);
+        if h265 { wanted.push(vk::KHR_VIDEO_ENCODE_H265_NAME); }
+        // 4:4:4 encode source images (G8_B8R8_2PLANE_444): an extension below Vulkan 1.3, and a
+        // feature
+        let mut plane444 = vk::PhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT::default();
+        if video_family.is_some() && supported(vk::EXT_YCBCR_2PLANE_444_FORMATS_NAME) {
+            let mut query = vk::PhysicalDeviceFeatures2::default().next_physical_device_ycbcr2_plane444_formats_features_ext(&mut plane444);
+            unsafe { instance.get_physical_device_features2(physical, &mut query); }
+            plane444.p_next = std::ptr::null_mut();
+            if plane444.ycbcr2plane444_formats != 0 { wanted.push(vk::EXT_YCBCR_2PLANE_444_FORMATS_NAME); }
+        }
         wanted.sort_by(|a, b| a.to_bytes().cmp(b.to_bytes()));
         wanted.dedup();
         if log_enabled() { eprintln!("[hal-vulkan] vkCreateDevice device={name:?} queue_family={family} extensions={wanted:?}"); }
         let extensions = wanted.iter().map(|n| n.to_string_lossy().into_owned()).collect();
         let wanted: Vec<_> = wanted.iter().map(|n| n.as_ptr()).collect();
+        // multiview (core in 1.1): a stereo view renders both eyes in one pass
+        let mut multiview = vk::PhysicalDeviceMultiviewFeatures::default();
+        {
+            let mut query = vk::PhysicalDeviceFeatures2::default().next_physical_device_multiview_features(&mut multiview);
+            unsafe { instance.get_physical_device_features2(physical, &mut query); }
+        }
+        multiview.p_next = std::ptr::null_mut();
+        let has_multiview = multiview.multiview != 0;
+        let mut multiview = vk::PhysicalDeviceMultiviewFeatures::default().multiview(has_multiview);
         let supported_features = unsafe { instance.get_physical_device_features(physical) };
         let features = vk::PhysicalDeviceFeatures::default()
             .independent_blend(supported_features.independent_blend == vk::TRUE)
             .texture_compression_bc(supported_features.texture_compression_bc == vk::TRUE)
-            .texture_compression_astc_ldr(supported_features.texture_compression_astc_ldr == vk::TRUE);
+            .texture_compression_astc_ldr(supported_features.texture_compression_astc_ldr == vk::TRUE)
+            // line fill: frame capture's wireframe view (`Draw::WIREFRAME`)
+            .fill_mode_non_solid(supported_features.fill_mode_non_solid == vk::TRUE);
         let priorities = [1.0];
-        let queues = [vk::DeviceQueueCreateInfo::default().queue_family_index(family as u32).queue_priorities(&priorities)];
+        // every encode engine's queue (up to 4)
+        let video_count = video_family.map_or(0, |f| queues[f].queue_count.min(4));
+        let video_priorities = [1.0; 4];
+        let mut queue_infos = vec![vk::DeviceQueueCreateInfo::default().queue_family_index(family as u32).queue_priorities(&priorities)];
+        if let Some(video) = video_family { queue_infos.push(vk::DeviceQueueCreateInfo::default().queue_family_index(video as u32).queue_priorities(&video_priorities[..video_count as usize])); }
+        let video_timestamp_bits = video_family.map_or(0, |f| queues[f].timestamp_valid_bits);
+        let queues = queue_infos;
         let mut create = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues).enabled_extension_names(&wanted).enabled_features(&features);
         #[cfg(target_os = "linux")]
         if timeline.timeline_semaphore != 0 { create = create.next_physical_device_timeline_semaphore_features(&mut timeline); }
         if pacing { create = create.next_physical_device_present_id_features_khr(&mut present_id)
             .next_physical_device_present_wait_features_khr(&mut present_wait); }
+        if plane444.ycbcr2plane444_formats != 0 { create = create.next_physical_device_ycbcr2_plane444_formats_features_ext(&mut plane444); }
+        if has_multiview { create = create.next_physical_device_multiview_features(&mut multiview); }
         // A GPU full of other work (an AI model) has no room for a device yet: the app waits
         // for room -- the desktop's owner asks the hub to yield on the sustained shortage --
         // instead of falling back to another renderer. It never fails for want of memory.
@@ -254,7 +355,12 @@ impl Device {
         };
         let mut waited = 0u64;
         let raw = loop {
-            match unsafe { instance.create_device(physical, &create, None) } {
+            let made = match &life.1 {
+                Some((creator, gipa)) => unsafe { creator.create_device(*gipa, physical, &create) }
+                    .map(|handle| unsafe { makepad_vulkan::Device::from_handle(instance, handle) }),
+                None => unsafe { instance.create_device(physical, &create, None) },
+            };
+            match made {
                 Ok(raw) => break raw,
                 Err(e) if short_of_memory(e) => {
                     if waited == 0 { eprintln!("[hal-vulkan] vkCreateDevice device={name:?}: {e:?}; waiting for GPU memory"); }
@@ -270,10 +376,16 @@ impl Device {
         let formats = std::array::from_fn(|f| unsafe {
             instance.get_physical_device_format_properties(physical, super::resources::vk_format(f as u32).unwrap())
         });
+        let calibrated = calibration.is_some() && raw.table.get_calibrated_timestamps_khr.is_some();
+        report_profiling(name, &properties, queue.timestamp_valid_bits, calibrated);
+        let video_encode = video_family.map(|f| VideoQueue { family: f as u32, queue: unsafe { raw.get_device_queue(f as u32, 0) }, timestamp_bits: video_timestamp_bits,
+            more: (1..video_count).map(|i| (unsafe { raw.get_device_queue(f as u32, i) }, Mutex::new(()))).collect(), lock: Mutex::new(()), h265 });
+        if let Some(v) = &video_encode { if log_enabled() { eprintln!("[hal-vulkan] hardware video encode queue family={}", v.family); } }
         Ok(Some(Arc::new(Self {
             queue: unsafe { raw.get_device_queue(family as u32, 0) }, queue_lock: Mutex::new(()), raw, instance: instance.clone(),
             physical, family: family as u32, properties, memory, features, formats,
-            timestamp_bits: queue.timestamp_valid_bits, extensions, present_wait: pacing, life: life.clone(),
+            timestamp_bits: queue.timestamp_valid_bits, calibrated, extensions, present_wait: pacing, multiview: has_multiview, life: life.clone(),
+            video_encode,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
         })))
     }
@@ -284,6 +396,17 @@ impl Device {
     }
 
     pub fn supports(&self, extension: &CStr) -> bool { self.extensions.contains(extension.to_string_lossy().as_ref()) }
+
+    /// A device timestamp and the HAL clock's ns sampled together (`None` without calibrated
+    /// timestamps): the GPU profiler's anchor for a batch's query results.
+    pub fn calibrate(&self) -> Option<(u64, u64)> {
+        if !self.calibrated { return None; }
+        let infos = [vk::CalibratedTimestampInfoKHR::default().time_domain(vk::TimeDomainKHR::DEVICE),
+            vk::CalibratedTimestampInfoKHR::default().time_domain(vk::TimeDomainKHR::CLOCK_MONOTONIC)];
+        let mut t = [0u64; 2];
+        unsafe { self.raw.get_calibrated_timestamps(&infos, &mut t) }.ok()?;
+        Some((t[0], t[1]))
+    }
 
     /// The device-local budget; `fresh` reads the driver now (after a failed allocation),
     /// otherwise a read younger than `BUDGET_REUSE` is reused. `None` without the extension.
@@ -377,7 +500,8 @@ impl Device {
         let formats = std::array::from_fn(|f| unsafe { instance.get_physical_device_format_properties(physical, super::resources::vk_format(f as u32).unwrap()) });
         Ok(Arc::new(Self { instance: instance.clone(), queue: unsafe { raw.get_device_queue(family as u32, 0) },
             raw, physical, queue_lock: Mutex::new(()), family: family as u32, properties, memory, features, formats,
-            timestamp_bits: queue.timestamp_valid_bits, extensions, present_wait: pacing, life: owner.life.clone(),
+            // a display peer only scans out: the GPU profiler times the rendering device
+            timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, multiview: false, life: owner.life.clone(), video_encode: None,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None) }))
     }
 }
@@ -403,7 +527,10 @@ pub(super) type Later = Arc<Mutex<Vec<(std::time::Instant, LaterJob)>>>;
 pub(super) struct Worker {
     jobs: Arc<Mutex<VecDeque<Job>>>,
     later: Later,
-    tx: Option<SyncSender<()>>,
+    /// the wakeup sender: `None` once the worker was let go (`Drop`) or stopped (`stop`)
+    tx: Mutex<Option<SyncSender<()>>>,
+    /// joined by `stop` (the end of the process); a dropped worker runs out on its own
+    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl Worker {
@@ -413,7 +540,7 @@ impl Worker {
         let later: Later = Arc::new(Mutex::new(Vec::new()));
         let timed = later.clone();
         let (tx, rx) = sync_channel(1);
-        std::thread::Builder::new().name(name.into()).spawn(move || {
+        let thread = std::thread::Builder::new().name(name.into()).spawn(move || {
             loop {
                 let next = lock(&timed).iter().map(|(at, _)| *at).min();
                 let alive = match next {
@@ -436,38 +563,100 @@ impl Worker {
                 if !alive { break; }
             }
         }).map_err(|e| e.to_string())?;
-        Ok(Self { jobs, later, tx: Some(tx) })
+        Ok(Self { jobs, later, tx: Mutex::new(Some(tx)), thread: Mutex::new(Some(thread)) })
     }
 
     /// The timed-job list, for jobs of this worker that continue later on it.
     pub fn later(&self) -> Later { self.later.clone() }
 
+    /// Queues `job`. On a stopped worker (the process is ending, `stop`) the job is abandoned:
+    /// dropped here, never run.
     pub fn push(&self, job: impl FnOnce() + Send + 'static) {
+        let tx = lock(&self.tx);
+        let Some(wake) = tx.as_ref() else {
+            drop(tx);
+            drop(job);
+            return;
+        };
         lock(&self.jobs).push_back(Box::new(job));
-        match self.tx.as_ref().expect("live worker").try_send(()) {
+        match wake.try_send(()) {
             Ok(()) | Err(TrySendError::Full(())) => {} // an existing wake drains the FIFO
             Err(TrySendError::Disconnected(())) => panic!("Vulkan driver worker stopped"),
         }
     }
-}
 
-impl Worker {
     /// Waits (up to `limit`) until the worker ran every job pushed before this call.
     pub fn settle(&self, limit: std::time::Duration) -> bool {
         let (done, wait) = std::sync::mpsc::sync_channel(1);
         self.push(move || { let _ = done.send(()); });
         wait.recv_timeout(limit).is_ok()
     }
+
+    /// The end of the process (`Vulkan::before_exit`): the worker runs every job queued so far,
+    /// its timed jobs early (closing), and its thread ends; this returns once it has. Jobs pushed
+    /// afterwards are abandoned (`push`). Never on the worker's own thread.
+    pub fn stop(&self) {
+        lock(&self.tx).take();
+        let thread = lock(&self.thread).take();
+        if let Some(thread) = thread {
+            debug_assert!(thread.thread().id() != std::thread::current().id(), "a Vulkan worker cannot stop itself");
+            if thread.join().is_err() { eprintln!("[hal-vulkan] a driver worker panicked"); }
+        }
+    }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        self.tx.take();
+        lock(&self.tx).take();
         // The worker drains the FIFO and exits. Jobs retain their device/resources; dropping
-        // the HAL on a UI thread must not join a thread that can be waiting for a GPU fence.
+        // the HAL on a UI thread must not join a thread that can be waiting for a GPU fence
+        // (only the end of the process joins it: `stop`).
     }
 }
 
 /// The Vulkan loader. makepad-vulkan opens it once per process and never closes it (ICDs register
 /// process-exit and thread-exit handlers that must not outlive their library).
 fn loader() -> Result<Entry, String> { unsafe { Entry::load() } }
+
+#[cfg(test)]
+mod tests {
+    use super::Worker;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// The end of the process stops a driver worker: every job queued before `stop` ran, its
+    /// timed jobs ran early (closing), its thread is gone when `stop` returns, and a job pushed
+    /// afterwards is abandoned (dropped, never run, no panic).
+    #[test]
+    fn stop_runs_the_queued_jobs_and_joins_the_thread() {
+        let worker = Worker::new("makepad-vulkan-test").expect("worker");
+        let ran = Arc::new(AtomicUsize::new(0));
+        let closing = Arc::new(AtomicUsize::new(0));
+        let thread_name = Arc::new(std::sync::Mutex::new(None));
+        {
+            let (later, closing, name) = (worker.later(), closing.clone(), thread_name.clone());
+            worker.push(move || {
+                *name.lock().unwrap() = std::thread::current().name().map(str::to_owned);
+                // a retry far in the future: only the stop runs it, as closing
+                later.lock().unwrap().push((std::time::Instant::now() + std::time::Duration::from_secs(3600), Box::new(move |c: bool| {
+                    if c { closing.fetch_add(1, Ordering::SeqCst); }
+                })));
+            });
+        }
+        for _ in 0..100 {
+            let ran = ran.clone();
+            worker.push(move || { ran.fetch_add(1, Ordering::SeqCst); });
+        }
+        worker.stop();
+        assert_eq!(ran.load(Ordering::SeqCst), 100, "every queued job ran before stop returned");
+        assert_eq!(closing.load(Ordering::SeqCst), 1, "the timed job ran early, closing");
+        assert_eq!(thread_name.lock().unwrap().as_deref(), Some("makepad-vulkan-test"));
+        assert!(super::lock(&worker.thread).is_none(), "the thread was joined");
+        let late = ran.clone();
+        worker.push(move || { late.fetch_add(1, Ordering::SeqCst); });
+        assert_eq!(ran.load(Ordering::SeqCst), 100, "a job after stop never runs");
+        assert_eq!(Arc::strong_count(&ran), 1, "the abandoned job was dropped");
+        // stopping again (a second before_exit) is a no-op
+        worker.stop();
+    }
+}

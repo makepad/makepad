@@ -884,10 +884,9 @@ impl TranslatorView {
         }
     }
 
+    /// The pairing itself is this device's fleet identity (installed by
+    /// [`Self::connect_invite`]); the paired hub is pinned here.
     fn apply_credential(&self) {
-        if !self.saved.credential.is_empty() {
-            std::env::set_var("MAKEPAD_AI_HUB_CREDENTIAL", &self.saved.credential);
-        }
         // The paired hub serves speech too, before chat has found it.
         if let Some(base) = crate::engine::hub_base(&self.saved.hub).filter(|b| b.starts_with("https://")) {
             crate::engine::pin_speech_hub(base.trim_start_matches("https://"));
@@ -940,16 +939,27 @@ impl TranslatorView {
         let text = self.view.text_input(cx, ids!(settings.invite)).text();
         match Invite::parse(&text) {
             Ok(invite) => {
-                log!("translator: paired with {}", invite.addr);
+                let in_use = match invite.install_here() {
+                    Ok(in_use) => in_use,
+                    Err(why) => {
+                        self.set_pair_status(cx, &why);
+                        return;
+                    }
+                };
+                log!("translator: paired with {} as {}", invite.addr, invite.name());
                 self.saved.hub = invite.addr.clone();
-                self.saved.credential = invite.credential;
+                self.saved.credential = invite.credential.clone();
                 self.apply_credential();
                 self.view.text_input(cx, ids!(settings.hub)).set_text(cx, &invite.addr);
                 self.view.text_input(cx, ids!(settings.invite)).set_text(cx, "");
                 self.persist(cx);
                 // The model store fetches from the paired hub first: reopen it for this one.
                 self.start_models(cx);
-                self.set_pair_status(cx, &format!("Paired with {}. Checking the hub…", invite.addr));
+                if in_use {
+                    self.set_pair_status(cx, &format!("Paired with {}. Checking the hub…", invite.addr));
+                } else {
+                    self.set_pair_status(cx, &format!("Paired with {}. Restart the translator to use it.", invite.addr));
+                }
                 self.hub_ok = None;
                 self.probe_id = 0;
                 self.probe(cx);

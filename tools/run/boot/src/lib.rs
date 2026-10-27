@@ -1,4 +1,31 @@
 //! Session 0's text/pass renderer. No platform client, draw tree, widgets or Cx.
+// Diagnostics never panic: std's print macros panic when a write fails (ENOSPC on the session
+// log in a full tmpfs /tmp aborted a fleet Sandbox inside a lazy compile, 2026-10-23), so in this
+// crate every print is a write whose error is dropped. Test builds keep std's captured macros.
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! eprintln {
+    () => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_all(b"\n"); }};
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_fmt(format_args!("{}\n", format_args!($($t)+))); }};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! eprint {
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_fmt(format_args!($($t)+)); }};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! println {
+    () => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_all(b"\n"); }};
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_fmt(format_args!("{}\n", format_args!($($t)+))); }};
+}
+#[cfg(not(test))]
+#[allow(unused_macros)]
+macro_rules! print {
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_fmt(format_args!($($t)+)); }};
+}
+
+mod caption;
 mod document;
 mod dump;
 mod field;
@@ -7,15 +34,17 @@ mod groups;
 mod icon;
 mod layer;
 mod layout;
+mod ring;
 mod text;
 
 use document::{Program, ERROR_BAND, FIELD, GLYPH, ICON, PIPE_BANK_SIZE};
 pub use groups::order as order_diagnostics;
 pub use icon::Icon;
+pub use ring::{summary as ring_summary, Alert as RingAlert, Want as RingWant};
 pub use layer::Want as LayerWant;
 use makepad_hal::{
     backend_id, buffer_kind, clock_ns, dialect, event_tag, format, info_flags, input, lifecycle,
-    pass_load, session::HOST, target, usage, window_kind, Attr, CmdWriter, EventBuf, EventQueue,
+    pass_load, session::HOST, target, usage, window_kind, window_state, window_style, Attr, CmdWriter, EventBuf, EventQueue,
     FrameMeta, Hal, HalEvent, HalInfo, Id, Pass, RawEvent,
 };
 use makepad_script::{id, LiveId};
@@ -23,7 +52,11 @@ pub use relax_base::{
     diag::Diagnostic,
     run_state::{Mode, State},
 };
-use std::{path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 pub const DEFAULT_DOCUMENT: &str = include_str!("../resources/boot.splash");
 
@@ -61,6 +94,10 @@ pub enum Action {
     Select(usize),
     /// The window's close button: the run ends, as when the window is asked to close.
     Close,
+    /// The caption's minimise button (`Boot::window_control`).
+    Minimize,
+    /// The caption's maximise / restore button (`Boot::window_control`).
+    Maximize,
 }
 
 #[derive(Clone)]
@@ -126,7 +163,7 @@ struct Card {
     rect: [f32; 4],
     action: Action,
     /// the card's look (document `error_band.accent`): 0 follow-on, 1 root cause or panic,
-    /// 2 a member row of a folded group, 3 a button, 4 the close button
+    /// 2 a member row of a folded group, 3 a button, 4 a window button of the caption
     accent: f32,
     /// the list entries the card shows: it is drawn selected while one of them is
     members: std::ops::Range<usize>,
@@ -168,6 +205,8 @@ struct Renderer {
     clear_errors_on_install: bool,
     icon_aspect: Option<f32>,
     pressed: Option<Action>,
+    /// the caption's window button under the pointer
+    hovered: Option<Action>,
     layout_revision: u64,
     presented_revision: u64,
     presented_scroll: f32,
@@ -198,14 +237,29 @@ pub struct Boot {
     gpu: bool,
     /// the backend composes a window layer over a lent window (`info_flags::WINDOW_LAYERS`)
     layers: bool,
+    /// the window system composites badges over the window (`info_flags::WINDOW_BADGES`)
+    badges: bool,
+    /// the JIT ring in the running app's caption
+    ring: ring::Ring,
+    /// the window's chrome as the platform reports it: the caption strip follows it
+    chrome: caption::Chrome,
+    /// the window has focus (the caption's traffic lights grey without it)
+    focused: bool,
+    /// under a makepad WM: its sheet's caption, as the app's caption draws it
+    caption_look: Option<makepad_hal::HostCaption>,
+    /// the title the app gave its window (the lent window's), once it did
+    app_title: Option<String>,
 }
 
 impl Boot {
+    /// `exact`: `geometry` is a launch size (`MAKEPAD_WINDOW`) the window system keeps as it
+    /// is, not fitted to the displays.
     pub fn new(
         info: HalInfo,
         document: Document,
         state: State,
         geometry: [f32; 4],
+        exact: bool,
     ) -> Result<Self, String> {
         let mut boot = Self {
             window: None,
@@ -228,7 +282,23 @@ impl Boot {
             offscreen: false,
             gpu: std::env::var_os("MAKEPAD_RUN_BOOT_STATS").is_some(),
             layers: info.flags & info_flags::WINDOW_LAYERS != 0,
+            badges: info.flags & info_flags::WINDOW_BADGES != 0,
+            ring: ring::Ring::new(),
+            chrome: caption::Chrome {
+                client: info.flags & info_flags::CLIENT_CHROME != 0,
+                // under a makepad WM the window's controls are its family's, as the app's caption
+                // draws them (`turn` follows the WM's style changes)
+                hosted: (info.flags & info_flags::WM_HOSTED != 0)
+                    .then(|| makepad_hal::host_window_controls().unwrap_or(makepad_hal::WindowControls::None)),
+                ..Default::default()
+            },
+            focused: true,
+            caption_look: None,
+            app_title: None,
         };
+        if let Some(chrome) = boot.dump.as_ref().and_then(|d| d.chrome) {
+            boot.chrome = chrome;
+        }
         // A backend without a shader dialect has no native HAL window to draw into.
         // In particular Linux/Windows do not manufacture a clear-only fake window.
         if info.backend == backend_id::HEADLESS || info.dialect == dialect::NONE {
@@ -257,7 +327,8 @@ impl Boot {
         let hal = Hal::global();
         let window = hal.with_world(|world| world.host_window(geometry));
         let mut writer = CmdWriter::new(HOST);
-        writer.window_create(window, window_kind::NORMAL, Id::NONE, geometry, false);
+        let style = if exact { window_style::EXACT_SIZE } else { 0 };
+        writer.window_create(window, window_kind::NORMAL | style, Id::NONE, geometry, false);
         writer.str_def(1, boot.state.app.as_bytes());
         writer.window_title(window, 1);
         let vertices: Vec<u8> = [0.0_f32, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]
@@ -304,6 +375,7 @@ impl Boot {
             clear_errors_on_install,
             icon_aspect: None,
             pressed: None,
+            hovered: None,
             layout_revision: 0,
             presented_revision: 0,
             presented_scroll: 0.0,
@@ -420,6 +492,53 @@ impl Boot {
                 renderer.redraw = true;
             }
         }
+    }
+
+    /// The pointer is at `point` (`None`: it left the window): the caption's window button under
+    /// it shows its hover.
+    pub fn hover(&mut self, point: Option<[f32; 2]>) {
+        let caption = self.caption();
+        if let Some(renderer) = &mut self.renderer {
+            let hovered = point.and_then(|p| caption.button_at(p));
+            if renderer.hovered != hovered {
+                renderer.hovered = hovered;
+                renderer.redraw = true;
+            }
+        }
+    }
+
+    /// The caption's minimise and maximise / restore buttons: the window's state changes.
+    pub fn window_control(&mut self, action: Action) {
+        let Some(window) = self.window else { return };
+        let state = match action {
+            Action::Minimize => window_state::MINIMIZE,
+            Action::Maximize if self.chrome.state == window_state::MAXIMIZE => window_state::RESTORE,
+            Action::Maximize => window_state::MAXIMIZE,
+            _ => return,
+        };
+        let mut writer = CmdWriter::new(HOST);
+        writer.window_state(window, state);
+        Hal::global().submit(&writer.buf());
+    }
+
+    /// The caption strip the window has now.
+    fn caption(&self) -> caption::Caption {
+        let mut caption = self.chrome.caption(self.geometry[2], self.environment.touch);
+        caption.title = self.app_title.clone();
+        caption.ink = caption::TITLE;
+        caption.size = 10.0;
+        // under a makepad WM: the app's own caption, from the WM's sheet
+        if let (Some(_), Some(look)) = (self.chrome.hosted, self.caption_look) {
+            let (bar, ink) = if self.focused { (look.bar, look.ink) } else { (look.bar_unfocused, look.ink_unfocused) };
+            caption.ground = Some(rgba(bar));
+            caption.ink = rgba(ink);
+            caption.button_ink = rgba(look.button);
+            // widgets' points as the document's pixels (96 / 72)
+            if look.size > 0.0 {
+                caption.size = look.size * 96.0 / 72.0;
+            }
+        }
+        caption
     }
 
     pub fn reload(&mut self, document: Document) {
@@ -576,6 +695,27 @@ impl Boot {
             environment.dark = Some(dark);
             self.environment(environment);
         }
+        if self.chrome.hosted.is_some() && !self.dump.as_ref().is_some_and(|d| d.chrome.is_some()) {
+            let controls = Some(makepad_hal::host_window_controls().unwrap_or(makepad_hal::WindowControls::None));
+            let look = makepad_hal::host_caption();
+            if self.chrome.hosted != controls || self.caption_look != look {
+                self.chrome.hosted = controls;
+                self.caption_look = look;
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.dirty = true;
+                }
+            }
+        }
+        // the app's title for the caption, as soon as the app names its window
+        let title = self.window.and_then(|window| {
+            Hal::global().with_world(|w| w.session(HOST).and_then(|s| s.windows.get(HOST, window).ok()).and_then(|w| w.val.app_title.clone()))
+        }).filter(|t| !t.is_empty());
+        if title != self.app_title {
+            self.app_title = title;
+            if let Some(renderer) = &mut self.renderer {
+                renderer.dirty = true;
+            }
+        }
         let hal = Hal::global();
         // Pump backend completions, then take session 0's owned queue. A zero-cap
         // pump leaves the events queued. Taking the arena avoids truncating large
@@ -642,7 +782,22 @@ impl Boot {
                 | HalEvent::Focus { window, .. }
                     if Some(window) == self.window =>
                 {
+                    if let HalEvent::Focus { focused, .. } = &event {
+                        let focused = *focused;
+                        if self.focused != focused {
+                            self.focused = focused;
+                            // the caption's title ink and ground follow focus
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.dirty = true;
+                            }
+                        }
+                    }
                     self.events.push(Event::Input(raw, payload.to_vec()));
+                }
+                HalEvent::MouseMove { window, .. } | HalEvent::MouseLeave { window, .. }
+                    if Some(window) == self.ring.window =>
+                {
+                    self.ring_pointer(&event)
                 }
                 HalEvent::KeyDown { window, .. } if Some(window) == self.window => {
                     self.events.push(Event::KeyDown(raw))
@@ -668,14 +823,29 @@ impl Boot {
                     w,
                     h,
                     dpi,
-                    ..
+                    state,
                 } if Some(window) == self.window => {
                     self.geometry = [x as f32, y as f32, w as f32, h as f32];
+                    self.chrome.state = state;
                     if dpi.is_finite() && dpi > 0.0 {
                         self.dpi = dpi;
                     }
                     if let Some(renderer) = &mut self.renderer {
                         renderer.dirty = true;
+                    }
+                }
+                HalEvent::Chrome { window, x, y, w, h, .. } if Some(window) == self.window => {
+                    let native = [x as f32, y as f32, w as f32, h as f32];
+                    let native = if native.iter().all(|v| v.is_finite()) { native } else { [0.0; 4] };
+                    let fixed = self.dump.as_ref().is_some_and(|d| d.chrome.is_some());
+                    if self.chrome.native != native && !fixed {
+                        if self.dump.is_some() {
+                            eprintln!("makepad-run: boot window chrome: native window buttons at {native:?}");
+                        }
+                        self.chrome.native = native;
+                        if let Some(renderer) = &mut self.renderer {
+                            renderer.dirty = true;
+                        }
                     }
                 }
                 HalEvent::Display { window, dpi, .. } if Some(window) == self.window => {
@@ -807,6 +977,7 @@ impl Boot {
         if self.offscreen && !self.field_mode() {
             return;
         }
+        let halted_caption = self.caption();
         let Some(renderer) = &mut self.renderer else {
             return;
         };
@@ -828,11 +999,14 @@ impl Boot {
         if !renderer.redraw && !renderer.dirty {
             return;
         }
+        let caption = halted_caption;
+        let focus = self.focused as u8 as f32;
         if renderer.dirty {
             renderer.layout(
                 &self.state,
                 [self.geometry[2], self.geometry[3]],
                 self.environment,
+                &caption,
             );
             renderer.dirty = false;
         }
@@ -853,7 +1027,6 @@ impl Boot {
             renderer.layout.galaxy,
             self.environment.reduce_motion,
             true,
-            false,
             -1.0,
             false,
         );
@@ -873,19 +1046,35 @@ impl Boot {
                 &mut data[ICON],
             );
         }
+        if let Some(ground) = caption.ground.filter(|_| caption.height > 0.0) {
+            program.pipes[ERROR_BAND].instances.write(
+                &[
+                    (id!(rect), &[0.0, 0.0, self.geometry[2], caption.height]),
+                    (id!(clip_rect), &frame),
+                    (id!(accent), &[CAPTION_GROUND]),
+                    (id!(tint), &ground),
+                ],
+                &mut data[ERROR_BAND],
+            );
+        }
         for card in renderer.layout.visible_cards(scroll) {
             let mut rect = card.rect;
             let bounds = if card.fixed { frame } else { clip };
             if !card.fixed {
                 rect[1] -= scroll;
             }
-            let selected = !card.fixed && card.members.contains(&renderer.selected);
+            let selected = (!card.fixed && card.members.contains(&renderer.selected))
+                || (card.accent == CAPTION_BUTTON && renderer.hovered == Some(card.action));
             program.pipes[ERROR_BAND].instances.write(
                 &[
                     (id!(rect), &rect),
                     (id!(clip_rect), &bounds),
                     (id!(selected), &[selected as u8 as f32]),
                     (id!(accent), &[card.accent]),
+                    (id!(action), &[button_glyph(card.action, caption.lights)]),
+                    (id!(block), &[if card.accent == CAPTION_BUTTON { focus } else { 0.0 }]),
+                    (id!(beat), &[(card.accent == CAPTION_BUTTON && caption.ground.is_some()) as u8 as f32]),
+                    (id!(tint), &caption.button_ink),
                     (
                         id!(pressed),
                         &[(renderer.pressed == Some(card.action)) as u8 as f32],
@@ -923,7 +1112,7 @@ impl Boot {
         }
         let sdf = makepad_font_core::raster::Settings::default().sdfer;
         let field_frame = frame;
-        let fault = [1.0, 0.0, 0.0, 0.0];
+        let fault = [1.0, 0.0, caption.height, 0.0];
         let mut uniforms = vec![Vec::new(); program.pipes.len()];
         for (i, pipe) in program.pipes.iter().enumerate() {
             pipe.uniforms.write(
@@ -1093,7 +1282,218 @@ impl Boot {
         Hal::global().submit(&writer.buf());
     }
 
-    /// The layer has faded out (the ready lift, the JIT loader): the run may take it away.
+    /// Whether frames are dumped (`MAKEPAD_RUN_BOOT_DUMP`): the run looks in at the dump's pace.
+    pub fn dumping(&self) -> bool {
+        self.dump.is_some()
+    }
+
+    /// A dump keeps the running app's frames while no ring and no layer is over them (the HAL's
+    /// snapshot of the window), at the dump's pace.
+    pub fn dump_app(&mut self) {
+        let (Some(window), None, false) = (self.window, self.ring.window, self.layer_on()) else { return };
+        if let Some(req) = self.dump.as_mut().and_then(|d| d.due()) {
+            let mut writer = CmdWriter::new(HOST);
+            writer.snapshot(window, req);
+            Hal::global().submit(&writer.buf());
+        }
+    }
+
+    /// ms on the dump's clock (its frames' file names), when frames are dumped.
+    pub fn dump_ms(&self) -> Option<u128> {
+        self.dump.as_ref().map(|d| d.ms())
+    }
+
+    /// Whether this window can show the JIT ring (the window system composites badges).
+    pub fn badges(&self) -> bool {
+        self.badges && self.window.is_some() && self.renderer.as_ref().is_some_and(|r| r.active.is_some())
+    }
+
+    /// The caption the app draws in this window (`WindowCaption`), when it said.
+    fn app_caption(&self) -> Option<makepad_hal::AppCaption> {
+        let window = self.window?;
+        Hal::global().with_world(|w| w.session(HOST).and_then(|s| s.windows.get(HOST, window).ok()).and_then(|w| w.val.app_caption))
+    }
+
+    /// The run's wish for the JIT ring this turn: the JIT's work (`None`: settled; a shown ring
+    /// fades out, then goes) and what the program is stopped on. Draws the ring's frame (and the
+    /// tooltip's while the pointer rests on it) when one is due; returns how long until the next
+    /// (`None`: no ring).
+    pub fn ring(&mut self, want: Option<RingWant>, alert: Option<RingAlert>) -> Option<Duration> {
+        let shows = self.badges();
+        let window = self.window?;
+        // a dump may show the dot and the tooltip (a hidden run has no stop or pointer to show)
+        let alert = alert.or(self.dump.as_ref().and_then(|d| d.ring_alert));
+        if self.dump.as_ref().is_some_and(|d| d.ring_hover) && self.ring.window.is_some() {
+            self.ring.hovered.get_or_insert_with(|| Instant::now() - Duration::from_secs(1));
+        }
+        self.ring.set(want.filter(|_| shows), alert.filter(|_| shows));
+        let size = [self.geometry[2], self.geometry[3]];
+        let caption = self.app_caption();
+        let place = ring::Ring::place(size, caption);
+        let mut writer = CmdWriter::new(HOST);
+        match self.ring.window {
+            Some(badge) if self.ring.done() || !shows => {
+                writer.window_close(badge);
+                // the badge layer ends: the window shows without it
+                if self.badges {
+                    let size = [self.geometry[2], self.geometry[3]];
+                    badge_frame(&mut writer, &mut self.frame, self.dump.as_mut(), window, self.dpi, size, |_| {});
+                }
+                Hal::global().submit(&writer.buf());
+                if self.ring.tip {
+                    self.ring.tip = false;
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.text.unpin();
+                    }
+                }
+                self.ring.window = None;
+                self.ring.hovered = None;
+                return None;
+            }
+            Some(badge) => {
+                if self.ring.placed != place {
+                    writer.window_geom(badge, place);
+                    self.ring.placed = place;
+                }
+            }
+            None if self.ring.wanted() => {
+                // the ring's place for the pointer's hover; its pixels are the window's badge layer
+                let badge = next_badge(&mut self.ring.slot);
+                writer.window_create(badge, window_kind::BADGE | window_style::BADGE_HOVER, window, place, false);
+                self.ring.window = Some(badge);
+                self.ring.placed = place;
+            }
+            None => return None,
+        }
+        // the tooltip while the pointer rests on the ring
+        let tip = match (self.ring.tip_shown(), self.renderer.as_mut()) {
+            (true, Some(renderer)) => {
+                let run = renderer.text.shape(&self.ring.tip_text(), ring::TIP_FONT, 1.0e4, ring::TIP_H);
+                self.ring.tip_placed = ring::Ring::place_tip(place, run.width, size);
+                self.ring.tip = true;
+                Some(run)
+            }
+            _ => {
+                if self.ring.tip {
+                    self.ring.tip = false;
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.text.unpin();
+                    }
+                }
+                None
+            }
+        };
+        Hal::global().submit(&writer.buf());
+        let now = Instant::now();
+        if now >= self.ring.next_frame {
+            let dark = caption.map_or(self.environment.dark.unwrap_or(true), |c| c.dark);
+            self.present_ring(window, tip, dark);
+            self.ring.next_frame = now + ring::FRAME;
+        }
+        let wait = self.ring.next_frame.saturating_duration_since(Instant::now());
+        Some(self.ring.tip_due().map_or(wait, |due| wait.min(due)))
+    }
+
+    /// The pointer hovering the ring's badge (session 0 sees its moves over it and its leave;
+    /// a press, a scroll or a drag there is the app's): the tooltip's hover.
+    fn ring_pointer(&mut self, event: &HalEvent) {
+        let rect = [0.0, 0.0, ring::SIDE, ring::SIDE];
+        let placed = self.ring.placed;
+        let over = match *event {
+            HalEvent::MouseMove { x, y, .. } => contains(rect, [x as f32 - placed[0], y as f32 - placed[1]]),
+            _ => false,
+        };
+        if !over {
+            self.ring.hovered = None;
+        } else if self.ring.hovered.is_none() {
+            self.ring.hovered = Some(Instant::now());
+        }
+        self.ring.next_frame = Instant::now();
+    }
+
+    /// One frame of the ring (one quad), and of its tooltip (a plate and its line) when it
+    /// shows, in `window`'s badge layer. `dark`: the caption under them is dark.
+    fn present_ring(&mut self, window: Id, tip: Option<Arc<text::Shaped>>, dark: bool) {
+        let reduce_motion = self.environment.reduce_motion;
+        let dpi = self.dpi;
+        let look = self.ring.look(reduce_motion);
+        let tip_rect = self.ring.tip_placed;
+        let ring_rect = self.ring.placed;
+        let viewport = [self.geometry[2], self.geometry[3]];
+        let Some(renderer) = self.renderer.as_mut() else { return };
+        let Some(program) = renderer.active.as_ref() else { return };
+        let ink = dark as u8 as f32;
+        let band = &program.pipes[ERROR_BAND];
+        let quad = |rect: [f32; 4], accent: f32| {
+            let mut uniforms = Vec::new();
+            band.uniforms.write(
+                &[(id!(viewport), &viewport), (id!(dpi), &[dpi]), (id!(reduce_motion), &[reduce_motion as u8 as f32])],
+                &mut uniforms,
+            );
+            let mut data = Vec::new();
+            band.instances.write(
+                &[
+                    (id!(rect), &rect),
+                    (id!(accent), &[accent]),
+                    (id!(selected), &[look.fill]),
+                    (id!(block), &[look.mode]),
+                    (id!(pressed), &[look.opacity]),
+                    (id!(action), &[look.spin]),
+                    (id!(beat), &[look.hover]),
+                    (id!(ink), &[ink]),
+                ],
+                &mut data,
+            );
+            (uniforms, data)
+        };
+        let px = |r: [f32; 4]| [(r[0] * dpi).floor(), (r[1] * dpi).floor(), (r[2] * dpi).ceil() + 1.0, (r[3] * dpi).ceil() + 1.0];
+        // the tooltip's line, its glyphs pinned (the HAL draws the layer again over app frames)
+        let mut glyphs = Vec::new();
+        let mut tip_ready = false;
+        if let Some(run) = &tip {
+            renderer.text.begin_pinned();
+            let mut requests = Vec::new();
+            let color = if dark { [0.925, 0.902, 1.0, look.opacity] } else { [0.165, 0.149, 0.22, look.opacity] };
+            let style = document::Line { role: document::Role::Hints, size: ring::TIP_FONT, height: ring::TIP_H, gap: 0.0, color, align: 0.0 };
+            let baseline = (ring::TIP_H * 0.5 + ring::TIP_FONT * 0.36).round();
+            let position = [tip_rect[0] + ring::TIP_PAD, tip_rect[1] + baseline - renderer.text.ascender(ring::TIP_FONT)];
+            let line = TextLine { run: run.clone(), position, style, fixed: true };
+            renderer.text.glyph_instances(program, &line, line.position[1], tip_rect, dpi, &mut requests, &mut glyphs);
+            let mut writer = CmdWriter::new(HOST);
+            tip_ready = renderer.text.finish_pinned(&mut writer, &requests);
+            Hal::global().submit(&writer.buf());
+        }
+        let (ring_uniforms, ring_data) = quad(ring_rect, RING);
+        let tip_draws = tip_ready.then(|| {
+            let (uniforms, data) = quad(tip_rect, TIP);
+            let mut glyph_uniforms = Vec::new();
+            let sdf = makepad_font_core::raster::Settings::default().sdfer;
+            program.pipes[GLYPH].uniforms.write(
+                &[
+                    (id!(viewport), &viewport),
+                    (id!(dpi), &[dpi]),
+                    (id!(dark), &[ink]),
+                    (id!(radius), &[sdf.radius]),
+                    (id!(cutoff), &[sdf.cutoff]),
+                ],
+                &mut glyph_uniforms,
+            );
+            (uniforms, data, glyph_uniforms)
+        });
+        let atlas = renderer.text.atlas();
+        let glyph = &program.pipes[GLYPH];
+        let mut writer = CmdWriter::new(HOST);
+        badge_frame(&mut writer, &mut self.frame, self.dump.as_mut(), window, dpi, viewport, |writer| {
+            band.draw(writer, &ring_data, &ring_uniforms, atlas, px(ring_rect));
+            if let Some((uniforms, data, glyph_uniforms)) = &tip_draws {
+                band.draw(writer, data, uniforms, atlas, px(tip_rect));
+                glyph.draw(writer, &glyphs, glyph_uniforms, atlas, px(tip_rect));
+            }
+        });
+        Hal::global().submit(&writer.buf());
+    }
+
+    /// The layer has faded out (the ready lift): the run may take it away.
     pub fn layer_done(&mut self) -> bool {
         self.renderer
             .as_mut()
@@ -1105,8 +1505,9 @@ impl Boot {
         let Some(window) = self.window else { return };
         let viewport = [self.geometry[2], self.geometry[3]];
         let dpi = self.dpi;
-        let touch = self.environment.touch;
         let reduce_motion = self.environment.reduce_motion;
+        let caption = self.caption();
+        let focus = self.focused as u8 as f32;
         let build_start_ns = makepad_hal::clock_ns();
         let renderer = self.renderer.as_mut().unwrap();
         let program = renderer.active.as_ref().unwrap();
@@ -1114,16 +1515,7 @@ impl Boot {
         let time = renderer.began.elapsed().as_secs_f32();
         let layered = renderer.layer.on && program.layer.is_some();
         let look = layered.then(|| renderer.layer.look(reduce_motion));
-        let hud = look.is_none_or(|l| l.hud);
-        let corner = look.is_some_and(|l| l.corner);
-        // the JIT loader: the whole galaxy in a square at the bottom-right corner
-        let region = if corner {
-            let side = layer::LOADER_SIDE.min(viewport[0].min(viewport[1]) * 0.4);
-            let margin = layer::LOADER_MARGIN;
-            [viewport[0] - side - margin, viewport[1] - side - margin, side, side]
-        } else {
-            [0.0, 0.0, viewport[0], viewport[1]]
-        };
+        let region = [0.0, 0.0, viewport[0], viewport[1]];
         renderer.text.begin_layout();
         let frame = renderer.field.frame(
             &mut writer,
@@ -1133,34 +1525,28 @@ impl Boot {
             region,
             reduce_motion,
             false,
-            corner,
             look.map_or(-1.0, |l| l.resolve),
             renderer.layer.on && !matches!(renderer.layer.want(), None | Some(LayerWant::Boot)),
         );
-        if !hud {
-            renderer.layout.fixed_text.clear();
-            renderer.layout.cards.clear();
-        } else {
-            let mut hint = program.label(layout::phase_key(self.state.phase));
-            let mut status = None;
-            if let Some(look) = look.filter(|l| l.progress >= 0.0) {
-                hint = format!("warming up · {} functions", field::group(renderer.layer.ahead));
-                status = Some(if look.resolve >= 0.0 { "ready" } else { "warming up" });
-            }
-            renderer.field.hud(
-                &mut renderer.text,
-                &self.state,
-                &hint,
-                status,
-                viewport,
-                frame.view,
-                frame.params[0],
-                time,
-                !touch && look.is_none(),
-                self.offscreen,
-                &mut renderer.layout,
-            );
+        let mut hint = program.label(layout::phase_key(self.state.phase));
+        let mut status = None;
+        if let Some(look) = look.filter(|l| l.progress >= 0.0) {
+            hint = format!("warming up · {} functions", field::group(renderer.layer.ahead));
+            status = Some(if look.resolve >= 0.0 { "ready" } else { "warming up" });
         }
+        renderer.field.hud(
+            &mut renderer.text,
+            &self.state,
+            &hint,
+            status,
+            viewport,
+            frame.view,
+            frame.params[0],
+            time,
+            &caption,
+            self.offscreen,
+            &mut renderer.layout,
+        );
         renderer.text.end_layout();
         renderer.text.begin_frame();
         let mut requests = Vec::new();
@@ -1193,7 +1579,8 @@ impl Boot {
             return;
         }
         let sdf = makepad_font_core::raster::Settings::default().sdfer;
-        let field_layer = look.map_or([0.0; 4], |l| [if l.hud { 1.0 } else { 2.0 }, l.galaxy, l.backdrop, l.progress]);
+        let field_layer = look.map_or([0.0; 4], |l| [1.0, l.galaxy, l.backdrop, l.progress]);
+        let field_fault = [0.0, 0.0, caption.height, 0.0];
         let common = |pipe: &gpu::Pipeline, out: &mut Vec<f32>| {
             pipe.uniforms.write(
                 &[
@@ -1206,6 +1593,7 @@ impl Boot {
                     (id!(field_params), &frame.params),
                     (id!(field_fall), &frame.fall),
                     (id!(field_layer), &field_layer),
+                    (id!(field_fault), &field_fault),
                     (id!(radius), &[sdf.radius]),
                     (id!(cutoff), &[sdf.cutoff]),
                 ],
@@ -1216,6 +1604,31 @@ impl Boot {
         common(&program.pipes[FIELD], &mut field_uniforms);
         let mut glyph_uniforms = Vec::new();
         common(&program.pipes[GLYPH], &mut glyph_uniforms);
+        // the caption's window buttons (the field's only cards)
+        let mut buttons = Vec::new();
+        if let Some(ground) = caption.ground.filter(|_| caption.height > 0.0) {
+            program.pipes[ERROR_BAND].instances.write(
+                &[(id!(rect), &[0.0, 0.0, viewport[0], caption.height]), (id!(accent), &[CAPTION_GROUND]), (id!(tint), &ground)],
+                &mut buttons,
+            );
+        }
+        for card in renderer.layout.cards.iter().filter(|c| c.accent == CAPTION_BUTTON) {
+            program.pipes[ERROR_BAND].instances.write(
+                &[
+                    (id!(rect), &card.rect),
+                    (id!(selected), &[(renderer.hovered == Some(card.action)) as u8 as f32]),
+                    (id!(accent), &[card.accent]),
+                    (id!(action), &[button_glyph(card.action, caption.lights)]),
+                    (id!(block), &[focus]),
+                    (id!(beat), &[caption.ground.is_some() as u8 as f32]),
+                    (id!(tint), &caption.button_ink),
+                    (id!(pressed), &[(renderer.pressed == Some(card.action)) as u8 as f32]),
+                ],
+                &mut buttons,
+            );
+        }
+        let mut band_uniforms = Vec::new();
+        common(&program.pipes[ERROR_BAND], &mut band_uniforms);
         self.frame += 1;
         let offscreen = if self.offscreen && !layered {
             let size = [(viewport[0] * dpi) as u32, (viewport[1] * dpi) as u32];
@@ -1309,27 +1722,25 @@ impl Boot {
                 kept.push(uniforms);
             }
         };
-        if let Some(look) = look {
-            if look.corner {
-                app(&mut writer, layer::APP, look.sharp, 0.0);
-            }
-            if look.blur {
-                app(&mut writer, layer::QUARTER, 1.0, layer::BLUR_DIM);
-            }
+        if look.is_some_and(|l| l.blur) {
+            app(&mut writer, layer::QUARTER, 1.0, layer::BLUR_DIM);
         }
         if fade > 0.0 || look.is_some_and(|l| l.backdrop > 0.0) {
-            // the JIT loader's galaxy stays inside its square
-            let field_scissor = if corner {
-                region.map(|v| v * dpi)
-            } else {
-                scissor
-            };
             program.pipes[FIELD].draw_buffer(
                 &mut writer,
                 field::INSTANCES,
                 frame.count,
                 &field_uniforms,
-                field_scissor,
+                scissor,
+            );
+        }
+        if !buttons.is_empty() {
+            program.pipes[ERROR_BAND].draw(
+                &mut writer,
+                &buttons,
+                &band_uniforms,
+                renderer.text.atlas(),
+                scissor,
             );
         }
         program.pipes[GLYPH].draw(
@@ -1339,7 +1750,7 @@ impl Boot {
             renderer.text.atlas(),
             scissor,
         );
-        if let Some(look) = look.filter(|l| !l.corner) {
+        if let Some(look) = look {
             app(&mut writer, layer::APP, look.sharp, 0.0);
         }
         writer.frame_set_build_end(makepad_hal::clock_ns());
@@ -1419,6 +1830,56 @@ impl Layout {
         self.cards
             .iter()
             .filter(move |c| c.fixed || (c.rect[1] + c.rect[3] >= top && c.rect[1] <= bottom))
+    }
+}
+
+/// `Card::accent` of a window button of the caption.
+const CAPTION_BUTTON: f32 = 4.0;
+/// `error_band.accent` of the caption's ground (the app's caption bar colour).
+const CAPTION_GROUND: f32 = 7.0;
+
+/// 0xRRGGBBAA as the document's colours.
+fn rgba(c: u32) -> [f32; 4] {
+    [(c >> 24) as f32 / 255.0, ((c >> 16) & 0xff) as f32 / 255.0, ((c >> 8) & 0xff) as f32 / 255.0, (c & 0xff) as f32 / 255.0]
+}
+/// `error_band.accent` of the JIT ring (ring.rs) and of its tooltip's plate.
+const RING: f32 = 5.0;
+const TIP: f32 = 6.0;
+
+/// A frame of `window`'s badge layer (`target::BADGES`): one pass over the whole window (`size`
+/// points) in window pixels, loading what is under it, with the draws `draw` writes (none: the
+/// layer ends). The HAL draws it over every frame the window presents. A dump reads the window
+/// back with it, as presented.
+fn badge_frame(writer: &mut CmdWriter, frame: &mut u64, dump: Option<&mut dump::Dump>, window: Id, dpi: f32, size: [f32; 2], draw: impl FnOnce(&mut CmdWriter)) {
+    *frame += 1;
+    writer.frame_begin(*frame, FrameMeta { build_start_ns: makepad_hal::clock_ns(), ..Default::default() });
+    writer.pass(Pass { color: [Id::NONE; 4], load: [pass_load::LOAD; 5], viewport: [0.0, 0.0, size[0] * dpi, size[1] * dpi], dpi, ..Default::default() });
+    draw(writer);
+    writer.frame_set_build_end(makepad_hal::clock_ns());
+    let snapshot = dump.and_then(|d| d.due());
+    writer.frame_end(window, target::WINDOW | target::BADGES | if snapshot.is_some() { target::SNAPSHOT } else { 0 });
+    if let Some(req) = snapshot {
+        writer.snapshot(window, req);
+    }
+}
+
+/// A badge id of `slot` (one slot per badge, made on first use), a new generation each time.
+fn next_badge(slot: &mut Option<Id>) -> Id {
+    let s = *slot.get_or_insert_with(|| Hal::global().with_world(|w| w.host_window_id()));
+    *slot = Some(Id::new(s.index, s.gen.wrapping_add(1).max(1)));
+    Id::new(s.index, s.gen)
+}
+
+/// The glyph a window button of the caption shows (document `error_band.action`): 0 minimise,
+/// 1 maximise / restore, 2 close; as traffic lights (`lights`) 3 close, 4 minimise, 5 maximise.
+fn button_glyph(action: Action, lights: bool) -> f32 {
+    match (action, lights) {
+        (Action::Minimize, false) => 0.0,
+        (Action::Maximize, false) => 1.0,
+        (_, false) => 2.0,
+        (Action::Minimize, true) => 4.0,
+        (Action::Maximize, true) => 5.0,
+        (_, true) => 3.0,
     }
 }
 

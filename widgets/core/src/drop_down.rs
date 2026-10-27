@@ -500,6 +500,10 @@ pub struct DropDown {
     #[walk]
     walk: Walk,
 
+    // Read by the hand-written `visible`/`set_visible` below.
+    #[live(true)]
+    visible: bool,
+
     #[live]
     bind: String,
     #[live]
@@ -533,6 +537,12 @@ pub struct DropDown {
 
     #[live]
     popup_menu_position: PopupMenuPosition,
+
+    /// The tallest the open list may be, in points: past it the items
+    /// scroll inside the list, the chosen one brought into view as it opens.
+    /// 0 is no cap, every item drawn as it always was.
+    #[live]
+    popup_max_height: f64,
 
     #[rust]
     is_active: bool,
@@ -882,6 +892,7 @@ impl DropDown {
             // so claim its items for this dropdown while they draw.
             popup_menu.tree_parent = self.uid;
             popup_menu.icon_column = !self.icons.is_empty();
+            popup_menu.max_height = self.popup_max_height;
             popup_menu.begin(cx);
             popup_menu.fit_width_to_items(
                 cx,
@@ -913,11 +924,11 @@ impl DropDown {
                         .popup_anchor_transform
                         .map(|transform| transform.rect(area))
                         .unwrap_or(area);
-                    popup_menu.end(
-                        cx,
-                        self.draw_bg.area(),
-                        anchor.pos - area.pos - item_pos.unwrap_or(dvec2(0.0, 0.0)),
-                    );
+                    let shift = anchor.pos - area.pos;
+                    match item_pos {
+                        Some(item_pos) => popup_menu.end_at_item(cx, self.draw_bg.area(), shift, item_pos),
+                        None => popup_menu.end(cx, self.draw_bg.area(), shift),
+                    }
                 }
                 PopupMenuPosition::BelowInput => {
                     for (i, item) in self.labels.iter().enumerate() {
@@ -969,6 +980,21 @@ impl WidgetNode for DropDown {
 
     fn redraw(&mut self, cx: &mut Cx) {
         self.draw_bg.redraw(cx);
+    }
+
+    fn visible(&self) -> bool {
+        self.visible
+    }
+
+    fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
+        if self.visible != visible {
+            self.visible = visible;
+            // The open menu would stay up with nothing under it.
+            if !visible && self.is_active {
+                self.set_closed(cx);
+            }
+            self.redraw(cx);
+        }
     }
 
     fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
@@ -1023,6 +1049,9 @@ impl Widget for DropDown {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         self.animator_handle_event(cx, event);
+        if !self.visible && event.requires_visibility() {
+            return;
+        }
         let uid = self.widget_uid();
 
         // ONE menu instance serves every dropdown on the same template, and
@@ -1171,6 +1200,9 @@ impl Widget for DropDown {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         self.draw_walk(cx, walk);
         DrawStep::done()
     }
@@ -1610,5 +1642,344 @@ mod anchor_tests {
         let map = global.map.borrow();
         assert!(!map.keys().any(|key| key.heap == 11));
         assert!(map.keys().any(|key| key.heap == 22));
+    }
+}
+
+#[cfg(test)]
+mod popup_scroll_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use crate::makepad_platform::event::{ScrollEvent, ScrollPhase};
+    use crate::scroll_bars::ScrollExtent;
+    use std::cell::Cell;
+
+    const SIZE: DVec2 = DVec2 { x: 800.0, y: 600.0 };
+    const WINDOW: WindowId = WindowId(1, 1);
+
+    /// A window-less pass with the overlay a window keeps, which is where
+    /// the list draws.
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        overlay: Overlay,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), overlay }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            self.overlay.begin(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.overlay.end(&mut cx2d);
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    /// A page holding one dropdown of a hundred items, its list capped at
+    /// 200 points or left as every dropdown was.
+    fn page(cx: &mut Cx, capped: bool) -> (WidgetRef, WidgetRef, Target) {
+        let root = cx.with_vm(|vm| {
+            let value = if capped {
+                crate::script_eval!(vm, {
+                    use mod.prelude.widgets.*
+                    use mod.widgets.*
+                    View{
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        pick := DropDown{width: 150. popup_max_height: 200.}
+                    }
+                })
+            } else {
+                crate::script_eval!(vm, {
+                    use mod.prelude.widgets.*
+                    use mod.widgets.*
+                    View{
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        pick := DropDown{width: 150.}
+                    }
+                })
+            };
+            WidgetRef::script_from_value(vm, value)
+        });
+        let labels = (0..100).map(|i| format!("Item {i}")).collect();
+        root.drop_down(cx, ids!(pick)).set_labels(cx, labels);
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        let pick = root.widget(cx, ids!(pick));
+        (root, pick, target)
+    }
+
+    fn open(cx: &mut Cx, root: &WidgetRef, pick: &WidgetRef, target: &mut Target) {
+        pick.borrow_mut::<DropDown>().unwrap().set_active(cx);
+        target.draw(cx, root);
+    }
+
+    fn is_open(pick: &WidgetRef) -> bool {
+        pick.borrow::<DropDown>().unwrap().is_active
+    }
+
+    /// The open list, read through the store every dropdown on the template
+    /// shares.
+    fn menu<R>(cx: &mut Cx, pick: &WidgetRef, f: impl FnOnce(&mut Cx, &PopupMenu) -> R) -> R {
+        let key = pick.borrow::<DropDown>().unwrap().popup_menu_key();
+        let global = cx.global::<PopupMenuGlobal>().clone();
+        let map = global.map.borrow();
+        f(cx, map.get(&key).expect("the dropdown has no list"))
+    }
+
+    fn menu_rect(cx: &mut Cx, pick: &WidgetRef) -> Rect {
+        menu(cx, pick, |cx, menu| menu.area().rect(cx))
+    }
+
+    fn extent(cx: &mut Cx, pick: &WidgetRef) -> ScrollExtent {
+        menu(cx, pick, |_, menu| menu.scroll_bars().extent())
+    }
+
+    fn row(cx: &mut Cx, pick: &WidgetRef, index: u64) -> Rect {
+        menu(cx, pick, |cx, menu| {
+            menu.item_refs()
+                .find(|(id, _)| *id == LiveId(index))
+                .map(|(_, item)| item.area().rect(cx))
+                .expect("the row was not drawn")
+        })
+    }
+
+    fn inside(inner: Rect, outer: Rect) -> bool {
+        inner.pos.y >= outer.pos.y - 0.01
+            && inner.pos.y + inner.size.y <= outer.pos.y + outer.size.y + 0.01
+            && inner.pos.x >= outer.pos.x - 0.01
+            && inner.pos.x + inner.size.x <= outer.pos.x + outer.size.x + 0.01
+    }
+
+    fn wheel(at: DVec2, dy: f64) -> Event {
+        Event::Scroll(ScrollEvent {
+            window_id: WINDOW,
+            scroll: dvec2(0.0, dy),
+            abs: at,
+            modifiers: KeyModifiers::default(),
+            handled_x: Cell::new(false),
+            handled_y: Cell::new(false),
+            is_mouse: true,
+            time: 0.0,
+            phase: ScrollPhase::None,
+        })
+    }
+
+    fn press(abs: DVec2) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 1.0,
+        })
+    }
+
+    fn drag(abs: DVec2) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: DVec2::default(),
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 1.1,
+            handled: Cell::new(Area::Empty),
+        })
+    }
+
+    fn release(abs: DVec2) -> Event {
+        Event::MouseUp(MouseUpEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 1.2,
+        })
+    }
+
+    fn key(key_code: KeyCode) -> Event {
+        Event::KeyDown(KeyEvent { key_code, ..Default::default() })
+    }
+
+    /// Every choice the dropdown reported out of these events.
+    fn send(cx: &mut Cx, root: &WidgetRef, pick: &WidgetRef, events: &[Event]) -> Vec<usize> {
+        let mut chosen = Vec::new();
+        for event in events {
+            let actions = cx.capture_actions(|cx| root.handle_event(cx, event, &mut Scope::empty()));
+            chosen.extend(
+                actions
+                    .iter()
+                    .filter_map(|action| action.as_widget_action())
+                    .filter(|action| action.widget_uid == pick.widget_uid())
+                    .filter_map(|action| match action.cast::<DropDownAction>() {
+                        DropDownAction::Select(index) => Some(index),
+                        DropDownAction::None => None,
+                    }),
+            );
+        }
+        chosen
+    }
+
+    /// A hundred items capped at 200 points show in a scroll area: the list
+    /// is no taller than its cap and holds more than it shows, the wheel
+    /// moves the rows by the wheel's delta, and the last row can be reached.
+    #[test]
+    fn a_capped_list_scrolls_its_items_by_the_wheel() {
+        crate::on_test_cx(|| {
+            let mut cx = crate::checkout_test_cx();
+            let (root, pick, mut target) = page(&mut cx, true);
+            open(&mut cx, &root, &pick, &mut target);
+
+            let list = menu_rect(&mut cx, &pick);
+            assert!(
+                list.size.y > 0.0 && list.size.y <= 200.0 + 0.01,
+                "the list is {} points tall, past its cap of 200",
+                list.size.y
+            );
+            let shown = extent(&mut cx, &pick);
+            assert!(
+                shown.visible.y > 0.0 && shown.total.y > shown.visible.y,
+                "the list holds no more than it shows: {shown:?}"
+            );
+            assert_eq!(shown.pos.y, 0.0, "the first row is chosen, so the list starts at the top");
+            let first = row(&mut cx, &pick, 0);
+
+            let over_list = list.pos + list.size * 0.5;
+            let chosen = send(&mut cx, &root, &pick, &[wheel(over_list, 50.0)]);
+            assert!(chosen.is_empty(), "the wheel chose {chosen:?}");
+            assert_eq!(extent(&mut cx, &pick).pos.y, 50.0, "the wheel moved the list by its delta");
+            target.draw(&mut cx, &root);
+            assert_eq!(menu_rect(&mut cx, &pick), list, "the list moved instead of its rows");
+            let moved = row(&mut cx, &pick, 0);
+            assert!(
+                (moved.pos.y - (first.pos.y - 50.0)).abs() < 0.01,
+                "the rows did not move with the list: the first row went from {} to {}",
+                first.pos.y,
+                moved.pos.y
+            );
+
+            // All the way down: the last row comes into the list.
+            send(&mut cx, &root, &pick, &[wheel(over_list, 100_000.0)]);
+            let shown = extent(&mut cx, &pick);
+            assert_eq!(shown.pos.y, shown.total.y - shown.visible.y, "the wheel stops at the end");
+            target.draw(&mut cx, &root);
+            let list = menu_rect(&mut cx, &pick);
+            let last = row(&mut cx, &pick, 99);
+            assert!(inside(last, list), "the last row {last:?} is not inside the list {list:?}");
+            assert!(is_open(&pick), "scrolling closed the list");
+        });
+    }
+
+    /// A dropdown left uncapped draws every row as it always did: the list
+    /// is as tall as its rows and no scroll area is drawn.
+    #[test]
+    fn an_uncapped_list_draws_every_row_as_before() {
+        crate::on_test_cx(|| {
+            let mut cx = crate::checkout_test_cx();
+            let (root, pick, mut target) = page(&mut cx, false);
+            open(&mut cx, &root, &pick, &mut target);
+
+            let list = menu_rect(&mut cx, &pick);
+            let first = row(&mut cx, &pick, 0);
+            let last = row(&mut cx, &pick, 99);
+            assert!(
+                list.size.y >= last.pos.y + last.size.y - first.pos.y,
+                "the list ({} tall) does not hold all its rows",
+                list.size.y
+            );
+            assert_eq!(extent(&mut cx, &pick), ScrollExtent::default(), "a scroll area was drawn");
+        });
+    }
+
+    /// Opening brings the chosen row into view, however far down it is. The
+    /// arrow keys choose the next row up or down and shut the list, as they
+    /// always have, so the row they choose is the one the next opening
+    /// brings into view, from wherever the list was left.
+    #[test]
+    fn opening_a_capped_list_brings_the_chosen_row_into_view() {
+        crate::on_test_cx(|| {
+            let mut cx = crate::checkout_test_cx();
+            let (root, pick, mut target) = page(&mut cx, true);
+            pick.as_drop_down().set_selected_item(&mut cx, 80);
+            target.draw(&mut cx, &root);
+            open(&mut cx, &root, &pick, &mut target);
+
+            let list = menu_rect(&mut cx, &pick);
+            let chosen = row(&mut cx, &pick, 80);
+            assert!(inside(chosen, list), "the chosen row {chosen:?} is not in the list {list:?}");
+            assert!(
+                inside(list, Rect { pos: DVec2::default(), size: SIZE }),
+                "the list {list:?} left the window"
+            );
+
+            // Wheel the list to the top, away from the chosen row, then move
+            // the choice with the keyboard.
+            let over_list = list.pos + list.size * 0.5;
+            send(&mut cx, &root, &pick, &[wheel(over_list, -100_000.0)]);
+            target.draw(&mut cx, &root);
+            assert!(!inside(row(&mut cx, &pick, 80), menu_rect(&mut cx, &pick)), "the wheel left the chosen row in view");
+            cx.set_key_focus(pick.area());
+            cx.action(());
+            cx.handle_actions();
+            let chosen = send(&mut cx, &root, &pick, &[key(KeyCode::ArrowDown)]);
+            assert_eq!(chosen, vec![81], "the arrow key chose the next row down");
+            assert!(!is_open(&pick), "the arrow key shut the list, as it always has");
+            target.draw(&mut cx, &root);
+
+            open(&mut cx, &root, &pick, &mut target);
+            let list = menu_rect(&mut cx, &pick);
+            let chosen = row(&mut cx, &pick, 81);
+            assert!(inside(chosen, list), "reopened, the chosen row {chosen:?} is not in the list {list:?}");
+
+            // And back up: a row above the view is brought down into it.
+            pick.borrow_mut::<DropDown>().unwrap().set_closed(&mut cx);
+            pick.as_drop_down().set_selected_item(&mut cx, 3);
+            target.draw(&mut cx, &root);
+            open(&mut cx, &root, &pick, &mut target);
+            let list = menu_rect(&mut cx, &pick);
+            let chosen = row(&mut cx, &pick, 3);
+            assert!(inside(chosen, list), "the chosen row {chosen:?} above the view is not in the list {list:?}");
+        });
+    }
+
+    /// A drag on the scroll bar scrolls the list, though the dropdown holds
+    /// the pointer while its list is open. The press is the bar's: no row
+    /// under it is chosen, and the list stays open.
+    #[test]
+    fn a_drag_on_the_bar_scrolls_a_capped_list() {
+        crate::on_test_cx(|| {
+            let mut cx = crate::checkout_test_cx();
+            let (root, pick, mut target) = page(&mut cx, true);
+            open(&mut cx, &root, &pick, &mut target);
+            assert!(cx.sweep_lock_area().is_some(), "the open list holds the pointer");
+
+            let bar = menu(&mut cx, &pick, |cx, menu| menu.scroll_bars().bar_areas()[1].rect(cx));
+            assert!(bar.size.x > 0.0 && bar.size.y > 0.0, "no scroll bar was drawn");
+            let from = dvec2(bar.pos.x + bar.size.x * 0.5, bar.pos.y + 5.0);
+            let to = from + dvec2(0.0, 60.0);
+            cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+            let chosen = send(&mut cx, &root, &pick, &[press(from), drag(to), release(to)]);
+            cx.fingers.first_mouse_button = None;
+
+            assert!(chosen.is_empty(), "the drag chose {chosen:?}");
+            assert!(extent(&mut cx, &pick).pos.y > 0.0, "the drag on the bar did not scroll the list");
+            assert!(is_open(&pick), "the drag shut the list");
+            assert!(cx.sweep_lock_area().is_some(), "the list let go of the pointer");
+        });
     }
 }

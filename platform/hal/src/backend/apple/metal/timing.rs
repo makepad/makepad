@@ -46,6 +46,26 @@ impl PassClock {
             }
             let sets: ObjcId = msg_send![device, counterSets];
             let count: u64 = if sets == nil { 0 } else { msg_send![sets, count] };
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let name: ObjcId = msg_send![device, name];
+                let counter_sets = (0..count)
+                    .map(|i| -> String {
+                        let set: ObjcId = msg_send![sets, objectAtIndex: i];
+                        let n: ObjcId = msg_send![set, name];
+                        let counters: ObjcId = msg_send![set, counters];
+                        let k: u64 = if counters == nil { 0 } else { msg_send![counters, count] };
+                        format!("{} ({k} counters)", nsstring_to_string(n))
+                    })
+                    .collect();
+                let points = ["stage boundary", "draw boundary", "dispatch boundary", "tile dispatch boundary", "blit boundary"];
+                let sampling = points.iter().enumerate().filter(|(i, _)| { let ok: bool = msg_send![device, supportsCounterSampling: *i as u64]; ok }).map(|(_, p)| p.to_string()).collect();
+                let mut notes = Vec::new();
+                if !stage {
+                    notes.push("no stage-boundary sampling: render passes are timed as whole encoders (no vertex / fragment lanes)".to_string());
+                }
+                crate::gpu_prof::set_device(crate::gpu_prof::DeviceInfo { name: nsstring_to_string(name), counter_sets, sampling, notes });
+            }
             let set = (0..count)
                 .map(|i| -> ObjcId { msg_send![sets, objectAtIndex: i] })
                 .find(|set| {
@@ -91,13 +111,14 @@ pub struct PassSamples {
     pub buffer: Option<RcObjcId>,
     /// Samples reserved (backend thread only; atomic to share with handlers).
     used: AtomicUsize,
-    spans: OnceLock<Vec<Option<(f64, f64)>>>,
+    /// per sample group: its four times in host seconds (`None`: not sampled)
+    raw: OnceLock<Vec<[Option<f64>; 4]>>,
 }
 
 impl PassSamples {
     pub fn new(clock: Arc<PassClock>) -> Option<Arc<PassSamples>> {
         let buffer = clock.take()?;
-        Some(Arc::new(PassSamples { clock, buffer: Some(buffer), used: AtomicUsize::new(0), spans: OnceLock::new() }))
+        Some(Arc::new(PassSamples { clock, buffer: Some(buffer), used: AtomicUsize::new(0), raw: OnceLock::new() }))
     }
 
     pub fn reserve(&self) -> Option<usize> {
@@ -117,13 +138,35 @@ impl PassSamples {
         self.used.load(Ordering::Relaxed) + PASS_CLOCK_STRIDE > PASS_CLOCK_SAMPLES
     }
 
-    pub fn span(&self, command_buffer: ObjcId, index: usize) -> Option<(f64, f64)> {
-        self.spans.get_or_init(|| self.resolve(command_buffer)).get(index / PASS_CLOCK_STRIDE).copied().flatten()
+    /// The four sampled times of the group at `index`: vertex start / end and fragment start /
+    /// end of a render pass on stage-boundary devices; encoder start and end (first and last)
+    /// otherwise, and for blit and compute encoders (first two).
+    pub fn raw(&self, command_buffer: ObjcId, index: usize) -> [Option<f64>; 4] {
+        self.raw.get_or_init(|| self.resolve(command_buffer)).get(index / PASS_CLOCK_STRIDE).copied().unwrap_or([None; 4])
     }
 
-    /// Every pass's (start, end) in host seconds, the clock of the buffer's own `GPUStartTime`;
-    /// `None` for a pass whose fragment stage left no time inside the buffer's span.
-    fn resolve(&self, command_buffer: ObjcId) -> Vec<Option<(f64, f64)>> {
+    /// A render pass's own (start, end) in host seconds, the clock of the buffer's own
+    /// `GPUStartTime`; `None` for a pass whose fragment stage left no time inside the buffer's span.
+    pub fn span(&self, command_buffer: ObjcId, index: usize) -> Option<(f64, f64)> {
+        let [v0, v1, f0, f1] = self.raw(command_buffer, index);
+        if !self.clock.stage {
+            // encoder samples: first and last
+            return v0.zip(f1).filter(|(a, b)| b >= a);
+        }
+        // Apple GPUs run a pass's vertex stage early, alongside the fragment work of
+        // passes before it (its tiles wait for them): start..end would count that wait.
+        // The pass's own time is its vertex stage plus its fragment stage, ending where
+        // its fragment stage ends. A pass that shades no pixel has its vertex stage alone.
+        let vertex = v0.zip(v1).filter(|(a, b)| b >= a);
+        match f0.zip(f1).filter(|(a, b)| b >= a) {
+            Some((f0, f1)) => Some((f0 - vertex.map_or(0.0, |(a, b)| b - a), f1)),
+            None => vertex,
+        }
+    }
+
+    /// Every sample group's times in host seconds; a time outside the buffer's own span is a
+    /// stage that never ran.
+    fn resolve(&self, command_buffer: ObjcId) -> Vec<[Option<f64>; 4]> {
         let used = self.used.load(Ordering::Acquire);
         let Some(buffer) = &self.buffer else { return Vec::new() };
         let (host0, gpu0) = self.clock.anchor;
@@ -149,22 +192,7 @@ impl PassSamples {
             (tick != 0 && tick != u64::MAX && t >= lo && t <= hi).then_some(t)
         };
         (0..count / PASS_CLOCK_STRIDE)
-            .map(|pass| {
-                let [v0, v1, f0, f1]: [Option<f64>; 4] = std::array::from_fn(|i| host(unsafe { *ptr.add(pass * PASS_CLOCK_STRIDE + i) }));
-                if !self.clock.stage {
-                    // encoder samples: first and last
-                    return v0.zip(f1).filter(|(a, b)| b >= a);
-                }
-                // Apple GPUs run a pass's vertex stage early, alongside the fragment work of
-                // passes before it (its tiles wait for them): start..end would count that wait.
-                // The pass's own time is its vertex stage plus its fragment stage, ending where
-                // its fragment stage ends. A pass that shades no pixel has its vertex stage alone.
-                let vertex = v0.zip(v1).filter(|(a, b)| b >= a);
-                match f0.zip(f1).filter(|(a, b)| b >= a) {
-                    Some((f0, f1)) => Some((f0 - vertex.map_or(0.0, |(a, b)| b - a), f1)),
-                    None => vertex,
-                }
-            })
+            .map(|group| std::array::from_fn(|i| host(unsafe { *ptr.add(group * PASS_CLOCK_STRIDE + i) })))
             .collect()
     }
 }

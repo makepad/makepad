@@ -1,0 +1,30 @@
+use mod.flow.*
+
+/** The layers, in order. */
+let layers = Input{ type: @text  many: 8  at: vec2(40, 80) }
+
+/** Every layer joined with " / ", in order. */
+let join = Fn{
+    in: { layers: ordered(@text, 8, [conn(1, layers.text())]) }
+    out: [@text]
+    run: |i| { let s = ""; for l in i.layers { if s != "" { s = s + " / " }; s = s + l }; {text: s} }
+    at: vec2(320, 40)
+}
+
+/** How many layers arrived. */
+let count = Fn{
+    in: { layers: ordered(@text, 8, [conn(1, layers.text())]) }
+    out: [@text]
+    run: |i| { {text: "" + i.layers.len()} }
+    at: vec2(320, 300)
+}
+
+let joined = Output{ value: join.text()  at: vec2(600, 40) }
+let total = Output{ value: count.text()  at: vec2(600, 300) }
+/** The layers again, as an ordered result of the stack. */
+let ordered = Output{ type: @text  many: 8  value: [conn(1, layers.text())]  at: vec2(600, 560) }
+
+Component{
+    label: "Stack"
+    layers, join, count, joined, total, ordered
+}

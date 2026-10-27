@@ -1,0 +1,32 @@
+//! The codegen identity: the key under which every stored build, code store, front store and
+//! kernel store lives (cache.rs, store.rs, kernel_store.rs; the Android host's cache wipe).
+//!
+//! It is a hash of exactly what decides the code Relax generates: the source stamp of every crate
+//! of relax-compiler's library closure (the compiler, RIR, codegen, regalloc and backends, the
+//! runtime ABI and its rt_* functions, the std image and its shims, the native macros), each with
+//! the rustc version, target, CPU features, profile and flags it was compiled with
+//! (libs/relax/self_stamp.rs; build.rs codegen_parts for the closure's non-Relax packages).
+//! Each stamp is compiled into the rlib of the crate it describes, so a crate cargo did not
+//! rebuild keeps its old stamp with its old code: the identity cannot be newer than the code.
+//!
+//! Anything else linked into the binary (devhub, platform glue, Desk Link, the loader's UI) is
+//! not in it: changing it keeps every stored build. Provided crates (provided.rs) are keyed by
+//! their own source identity (cache/items.rs apply_bound) and checked at bind time. Stored
+//! entries stay keyed per function by their own inputs (body, inline tree, verdicts).
+use crate::sip::Sip128;
+
+include!(concat!(env!("OUT_DIR"), "/codegen_parts.rs"));
+
+/// This build's codegen identity.
+pub fn id() -> u128 {
+    static ID: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+    *ID.get_or_init(|| {
+        let mut h = Sip128::new();
+        h.str("relax-codegen-id");
+        for (name, stamp) in CODEGEN_PARTS {
+            h.str(name);
+            h.u128(*stamp);
+        }
+        h.finish128()
+    })
+}

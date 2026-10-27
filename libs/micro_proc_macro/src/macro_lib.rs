@@ -879,42 +879,6 @@ impl TokenParser {
         None
     }
 
-    /// Named Rust fields for opt-in derives. Unlike the legacy field parser,
-    /// preserve qualified/generic/function types as opaque tokens for rustc.
-    /// Groups shield commas in tuple/array types; angle depth shields generics.
-    #[cfg(feature = "relax-tokens")]
-    pub fn eat_all_rust_struct_fields(&mut self) -> Option<Vec<StructField>> {
-        if !self.open_brace() { return None; }
-        let mut fields = Vec::new();
-        while !self.eat_eot() {
-            let attrs = self.eat_attributes();
-            if self.eat_ident("pub") && self.open_paren() { self.eat_level(); }
-            let name = self.eat_any_ident()?;
-            if !self.eat_punct_alone(':') { return None; }
-            let mut ty = Vec::new();
-            let mut depth = 0usize;
-            let mut arrow = false;
-            while let Some(token) = self.current.clone() {
-                if let TokenTree::Punct(punct) = &token {
-                    match punct.as_char() {
-                        ',' if depth == 0 => break,
-                        '<' => depth += 1,
-                        '>' if !arrow => depth = depth.checked_sub(1)?,
-                        _ => {}
-                    }
-                    arrow = punct.as_char() == '-';
-                } else { arrow = false; }
-                ty.push(token);
-                self.advance();
-            }
-            if ty.is_empty() || depth != 0 { return None; }
-            fields.push(StructField { name, attrs, ty: ty.into_iter().collect() });
-            // Generated text can print `f32,#[cfg(..)]`, where the comma is Joint.
-            self.eat_punct_any(',');
-        }
-        Some(fields)
-    }
-
     pub fn eat_generic(&mut self) -> Option<TokenStream> {
         let mut tb = TokenBuilder::new();
         // if we have a <, keep running and keep a < stack
@@ -977,7 +941,8 @@ impl TokenParser {
                 }
             }
         }
-        #[cfg(feature = "relax-tokens")]
+        // a leading `::` (`::std::time::Instant`); the JIT's token model and rustc's must
+        // accept the same field types (a path type once built only under the JIT)
         if self.eat_double_colon_destruct() {
             tb.add("::");
         }
@@ -1009,7 +974,7 @@ impl TokenParser {
                 }
             }
             tb.stream(self.eat_generic());
-            #[cfg(feature = "relax-tokens")]
+            // path segments: `crate::module::Type<T>`
             while self.eat_double_colon_destruct() {
                 tb.add("::");
                 let (segment, span) = self.eat_any_ident_with_span()?;
@@ -1021,3 +986,4 @@ impl TokenParser {
         None
     }
 }
+

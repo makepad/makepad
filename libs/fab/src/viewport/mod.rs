@@ -862,6 +862,7 @@ impl FabViewport {
                 depth_order: 0.0,
                 part_poses: Vec::new(),
                 custom_material: None,
+                lamps: Default::default(),
             }]
         };
         self.renderer.set_models(instances);

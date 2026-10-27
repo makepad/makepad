@@ -909,7 +909,7 @@ impl<'a> L2<'a> {
         let Some(v) = crate::const_fold::parse_int_lit(text) else { return true };
         let Some(et) = self.expr_ty(expr) else { return true };
         let TyKind::Int(p) = self.kind(et) else { return true };
-        let (bytes, signed) = crate::types::Types::int_info(p);
+        let (bytes, signed) = self.tcx.tys.int_info(p);
         if bytes == 0 { return true; }
         let is_valid = |v: i128, min: i128, max: i128| match norm {
             BinOp::Lt => v > min && v <= max,
@@ -1370,8 +1370,8 @@ impl<'a> L2<'a> {
         let (sk, dk) = (self.kind(src), self.kind(dst));
         let is_int = |k: &TyKind| matches!(k, TyKind::Int(_));
         let prim = |k: &TyKind| matches!(k, TyKind::Int(_) | TyKind::Float(_));
-        let unsigned = |k: &TyKind| matches!(k, TyKind::Int(p) if !crate::types::Types::int_info(*p).1);
-        let signed = |k: &TyKind| matches!(k, TyKind::Int(p) if crate::types::Types::int_info(*p).1);
+        let unsigned = |k: &TyKind| matches!(k, TyKind::Int(p) if !self.tcx.tys.int_info(*p).1);
+        let signed = |k: &TyKind| matches!(k, TyKind::Int(p) if self.tcx.tys.int_info(*p).1);
         let is_u32 = |k: &TyKind| matches!(k, TyKind::Int(crate::program::Prim::U32));
         let is_i32 = |k: &TyKind| matches!(k, TyKind::Int(crate::program::Prim::I32));
         let size = |k: &TyKind| matches!(k, TyKind::Int(crate::program::Prim::Usize | crate::program::Prim::Isize));

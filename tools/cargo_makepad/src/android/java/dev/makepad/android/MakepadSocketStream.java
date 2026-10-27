@@ -44,8 +44,8 @@ public class MakepadSocketStream {
         }
     }
 
-    /** SHA-256 of the server's leaf certificate (DER) after a TLS handshake, or null. */
-    public synchronized byte[] peerFingerprint() {
+    /** DER of the server's leaf certificate after a TLS handshake, or null. */
+    public synchronized byte[] peerCertificate() {
         try {
             if (!(mSocket instanceof SSLSocket)) {
                 return null;
@@ -54,7 +54,7 @@ public class MakepadSocketStream {
             if (chain == null || chain.length == 0) {
                 return null;
             }
-            return java.security.MessageDigest.getInstance("SHA-256").digest(chain[0].getEncoded());
+            return chain[0].getEncoded();
         } catch (Exception e) {
             return null;
         }

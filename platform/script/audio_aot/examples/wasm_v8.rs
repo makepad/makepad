@@ -26,7 +26,7 @@ fn sources() -> Vec<(String, String)> {
         .iter()
         .map(|n| (n.to_string(), std::fs::read_to_string(format!("{}/shaders/{}.splash", root, n)).unwrap()))
         .collect();
-    if let Ok(dir) = std::fs::read_dir(format!("{}/../../../apps/commercial/engine/score_player/shaders", root)) {
+    if let Ok(dir) = std::fs::read_dir(format!("{}/../../../libs/score_player/shaders", root)) {
         let mut names: Vec<_> = dir.filter_map(|e| e.ok()).map(|e| e.path()).collect();
         names.sort();
         for p in names {

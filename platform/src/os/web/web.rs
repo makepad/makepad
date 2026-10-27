@@ -1,3 +1,4 @@
+use makepad_relax::relax;
 use {
     self::super::{from_wasm::*, to_wasm::*, web_media::CxWebMedia},
     crate::{
@@ -279,7 +280,9 @@ impl Cx {
                         tw.gpu_info.vendor,
                         tw.gpu_info.renderer,
                     );
-                    self.os_type = tw.browser_info.into();
+                    let mut browser_info = tw.browser_info;
+                    browser_info.search = super::web_embed::page_query(browser_info.search);
+                    self.os_type = browser_info.into();
                     self.xr_capabilities = tw.xr_capabilities.into();
                     let mut new_geom: WindowGeom = tw.window_info.into();
                     self.os.native_window_geom = new_geom.clone();
@@ -312,6 +315,8 @@ impl Cx {
                 live_id!(ToWasmAnimationFrame) => {
                     let tw = ToWasmAnimationFrame::read_to_wasm(&mut to_wasm);
                     is_animation_frame = Some(tw.time);
+                    // A page without threads: this frame may run one deferred job.
+                    crate::thread::frame_jobs_new_frame();
                     if self.new_next_frames.len() != 0 {
                         self.call_next_frame_event(tw.time);
                     }
@@ -1521,6 +1526,8 @@ impl Cx {
                     self.action(FileDialogAction::FileCancelled { id: dialog.id });
                     self.handle_actions();
                 }
+                // a page has no window chrome: the app-drawn caption's hit regions name nothing
+                CxOsOp::SetWindowCaption(..) => {}
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 } /*
@@ -1665,6 +1672,7 @@ impl CxOsApi for Cx {
             FromWasmAllocTextureImage2D_Ru8::to_js_code(),
             FromWasmAllocTextureImage2D_RGBAf32::to_js_code(),
             FromWasmAllocTextureCube_BGRAu8_32::to_js_code(),
+            FromWasmAllocTextureArray_BGRAu8_32::to_js_code(),
             FromWasmBeginRenderTexture::to_js_code(),
             FromWasmRequestRenderTextureCapture::to_js_code(),
             FromWasmBeginRenderCanvas::to_js_code(),
@@ -1678,6 +1686,7 @@ impl CxOsApi for Cx {
             FromWasmQueryAudioDevices::to_js_code(),
             FromWasmStartAudioOutput::to_js_code(),
             FromWasmStopAudioOutput::to_js_code(),
+            FromWasmTestClock::to_js_code(),
             FromWasmQueryMidiPorts::to_js_code(),
             FromWasmPrepareVideoPlayback::to_js_code(),
             FromWasmBeginVideoPlayback::to_js_code(),
@@ -1756,6 +1765,16 @@ impl Cx {
 
     pub fn monotonic_now() -> f64 {
         unsafe { js_monotonic_now() }
+    }
+
+    /// A page opened with `?test=1` hands a test harness the app's media clock
+    /// (`FromWasmTestClock`: `globalThis.makepad_test_clock`); otherwise nothing.
+    pub fn web_test_clock(&mut self, film: f64, rendered: f64, speed: f64) {
+        let OsType::Web(params) = &self.os_type else { return };
+        if !params.search.trim_start_matches('?').split('&').any(|p| p == "test=1") {
+            return;
+        }
+        self.os.from_wasm(FromWasmTestClock { film, rendered, speed });
     }
 }
 
@@ -1893,6 +1912,7 @@ pub unsafe extern "C" fn wasm_check_signal() -> u32 {
 }
 
 #[export_name = "wasm_init_panic_hook"]
+#[relax(keep_reachable)]
 pub unsafe extern "C" fn init_panic_hook() {
     pub fn panic_hook(info: &panic::PanicHookInfo) {
         #[cfg(target_arch = "wasm32")]

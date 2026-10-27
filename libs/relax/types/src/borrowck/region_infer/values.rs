@@ -1,9 +1,11 @@
 // ported from N:rustc_borrowck/src/region_infer/values.rs @8d1a764
-use crate::mir::dataflow::bitset::{BitMatrix, BitSet};
+use crate::mir::dataflow::bitset::BitMatrix;
+use crate::mir::dataflow::IntervalSet;
 use crate::types::RegionId;
 
 #[derive(Clone, Debug)]
-pub struct LivenessValues { num_points: usize, rows: Vec<Option<BitSet>>, live_loans: Option<crate::borrowck::polonius::LiveLoans>, deferred: Vec<bool> }
+/// rustc region_infer/values.rs: rows are `SparseIntervalMatrix` rows (IntervalSet), as are RegionValues' points.
+pub struct LivenessValues { num_points: usize, rows: Vec<Option<IntervalSet>>, live_loans: Option<crate::borrowck::polonius::LiveLoans>, deferred: Vec<bool> }
 impl LivenessValues {
     pub fn new(regions: usize, num_points: usize) -> Self { Self { num_points, rows: vec![None; regions], live_loans: None, deferred: Vec::new() } }
     pub fn record_live_loans(&mut self, loans: crate::borrowck::polonius::LiveLoans) { self.live_loans = Some(loans); }
@@ -12,15 +14,15 @@ impl LivenessValues {
     /// placeholder and existential regions after the initial renumbering.
     pub fn add_point(&mut self, region: usize, point: usize) {
         if region >= self.rows.len() { self.rows.resize(region + 1, None); }
-        self.rows[region].get_or_insert_with(|| BitSet::new_empty(self.num_points)).insert(point);
+        self.rows[region].get_or_insert_with(|| IntervalSet::new(self.num_points)).insert(point);
     }
     pub fn add_all_points(&mut self, region: usize) {
         if region >= self.rows.len() { self.rows.resize(region + 1, None); }
-        self.rows[region] = Some(BitSet::new_filled(self.num_points));
+        self.rows[region] = Some(IntervalSet::new_filled(self.num_points));
     }
     /// Regions live at one or more points (N:region_infer/values.rs live_regions_unordered).
     pub fn live_regions(&self) -> impl Iterator<Item = usize> + '_ {
-        self.rows.iter().enumerate().filter(|(_, r)| r.as_ref().is_some_and(|r| r.iter().next().is_some())).map(|(i, _)| i)
+        self.rows.iter().enumerate().filter(|(_, r)| r.as_ref().is_some_and(|r| !r.is_empty())).map(|(i, _)| i)
     }
     /// The liveness of `region` was computed on demand, for loan propagation (a local whose regions
     /// outlive a universal region is boring: rustc's NLL computes no liveness for it at all).
@@ -33,7 +35,7 @@ impl LivenessValues {
     pub fn is_live_at_point_eagerly(&self, region: usize, point: usize) -> bool {
         !self.deferred.get(region).copied().unwrap_or(false) && self.is_live_at_point(region, point)
     }
-    pub fn point_liveness(&self, region: usize) -> Option<&BitSet> { self.rows.get(region)?.as_ref() }
+    pub fn point_liveness(&self, region: usize) -> Option<&IntervalSet> { self.rows.get(region)?.as_ref() }
     pub fn is_live_at_point(&self, region: usize, point: usize) -> bool {
         self.point_liveness(region).is_some_and(|r| r.contains(point))
     }
@@ -53,7 +55,7 @@ impl PlaceholderIndices {
 pub enum RegionElement { Location(usize), RootUniversalRegion(usize), PlaceholderRegion(RegionId) }
 #[derive(Clone, Debug)]
 pub struct RegionValues {
-    points: Vec<Option<BitSet>>,
+    points: Vec<Option<IntervalSet>>,
     free_regions: BitMatrix,
     free_region_indices: Vec<usize>,
     placeholders: BitMatrix,
@@ -69,8 +71,8 @@ impl RegionValues {
     pub fn add_placeholder(&mut self, row: usize, p: RegionId) {
         self.placeholders.insert(row, self.placeholder_indices.lookup_index(p));
     }
-    pub fn merge_liveness(&mut self, row: usize, points: &BitSet) {
-        self.points[row].get_or_insert_with(|| BitSet::new_empty(self.num_points)).union(points);
+    pub fn merge_liveness(&mut self, row: usize, points: &IntervalSet) {
+        self.points[row].get_or_insert_with(|| IntervalSet::new(self.num_points)).union(points);
     }
     pub fn add_region(&mut self, row: usize, from: usize) {
         if row == from { return; }
@@ -85,7 +87,7 @@ impl RegionValues {
     }
     pub fn contains_point(&self, row: usize, point: usize) -> bool { self.points[row].as_ref().is_some_and(|p| p.contains(point)) }
     pub fn contains_points(&self, sup: usize, sub: usize) -> bool {
-        self.points[sub].as_ref().is_none_or(|p| p.iter().all(|p| self.contains_point(sup, p)))
+        self.points[sub].as_ref().is_none_or(|p| p.is_empty() || self.points[sup].as_ref().is_some_and(|q| q.superset(p)))
     }
     pub fn contains_free_region(&self, row: usize, r: usize) -> bool { self.free_region_indices.binary_search(&r).is_ok_and(|i| self.free_regions.contains(row, i)) }
     pub fn universal_regions_outlived_by(&self, row: usize) -> impl Iterator<Item=usize> + '_ { self.free_regions.iter(row).map(|i| self.free_region_indices[i]) }

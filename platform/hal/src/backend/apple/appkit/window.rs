@@ -28,6 +28,8 @@ pub struct Win {
     pub id: Cell<Id>,
     pub owner_id: Id,
     pub popup: bool,
+    /// a tray app's dropdown (`window_kind::DROPDOWN`): placed by `WindowAtTray`
+    pub dropdown: bool,
     /// `window_style` bits the window was made with
     pub style: u32,
     pub window: ObjcId,
@@ -53,6 +55,8 @@ pub struct Win {
     /// the display link of the window and whether the app asked for a frame
     pub link: Cell<ObjcId>,
     pub want_frame: Cell<bool>,
+    /// Display link callbacks in a row that found no frame asked for (it pauses at `LINK_IDLE`).
+    pub link_idle: Cell<u8>,
     pub fallback: Cell<ObjcId>,
     last_geom: Cell<Option<[f64; 12]>>,
     dpi_override: Cell<Option<f64>>,
@@ -65,6 +69,8 @@ pub struct Win {
     last_press: Cell<ObjcId>,
     /// the press whose caption answer is pending, and its click count
     caption_event: Cell<ObjcId>,
+    /// that press: its event timestamp (s) and its y (points below the window's top edge)
+    caption_press: Cell<[f64; 2]>,
     /// what the app said about the drag over the window the last time (`drag_response`)
     pub drag_answer: Cell<u32>,
     /// a drop was announced (the app accepts it iff it answered with an operation)
@@ -90,10 +96,13 @@ impl Win {
         let style = kind & !0xff;
         let kind = kind & 0xff;
         let popup = kind == window_kind::POPUP;
+        let dropdown = kind == window_kind::DROPDOWN;
         let size = NSSize { width: geom[2].max(1.0) as f64, height: geom[3].max(1.0) as f64 };
         let win = unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
-            let window_class = if style & window_style::PANEL != 0 { classes.panel } else { classes.window };
+            // a dropdown is a non-activating panel: it takes the keyboard without activating the app
+            // (a status item click never does), so a click anywhere else is its resignKey
+            let window_class = if style & window_style::PANEL != 0 || kind == window_kind::DROPDOWN { classes.panel } else { classes.window };
             let window: ObjcId = msg_send![window_class, alloc];
             let delegate: ObjcId = msg_send![classes.window_delegate, new];
             let view: ObjcId = msg_send![classes.view, alloc];
@@ -104,6 +113,7 @@ impl Win {
                 owner_sid: sid,
                 owner_id: id,
                 popup,
+                dropdown,
                 style,
                 window,
                 view,
@@ -122,6 +132,7 @@ impl Win {
                 effect_view: Cell::new(nil),
                 link: Cell::new(nil),
                 want_frame: Cell::new(false),
+                link_idle: Cell::new(0),
                 fallback: Cell::new(nil),
                 last_geom: Cell::new(None),
                 dpi_override: Cell::new(None),
@@ -130,6 +141,7 @@ impl Win {
                 buttons_center_y: Cell::new(None),
                 last_press: Cell::new(nil),
                 caption_event: Cell::new(nil),
+                caption_press: Cell::new([0.0; 2]),
                 drag_answer: Cell::new(input::drag_response::NONE),
                 transparent: Cell::new(false),
             }));
@@ -142,6 +154,8 @@ impl Win {
 
             if popup {
                 win.init_popup(size, geom, parent);
+            } else if dropdown {
+                win.init_dropdown(size);
             } else {
                 win.init_window(kind, size, geom);
             }
@@ -311,9 +325,36 @@ impl Win {
         let () = msg_send![input_context, invalidateCharacterCoordinates];
     }
 
+    /// A tray app's dropdown: a borderless non-activating panel at the pop-up menu level on every
+    /// space, made hidden;
+    /// `WindowAtTray` (`tray::window_at`) places and shows it under the status item. It is not
+    /// a document window: no Dock window-list entry, not in the Window menu.
+    unsafe fn init_dropdown(&self, size: NSSize) {
+        let frame = NSRect { origin: NSPoint { x: 0.0, y: 0.0 }, size };
+        let style = NSWindowStyleMask::NSBorderlessWindowMask as u64
+            | NSWindowStyleMask::NSFullSizeContentViewWindowMask as u64
+            | NSWindowStyleMask::NSNonactivatingPanelWindowMask as u64;
+        let () = msg_send![self.window, initWithContentRect: frame styleMask: style backing: NSBackingStoreType::NSBackingStoreBuffered as u64 defer: NO];
+        let () = msg_send![self.window, setDelegate: self.delegate];
+        let () = msg_send![self.window, setReleasedWhenClosed: NO];
+        let () = msg_send![self.window, setLevel: NSPopUpMenuWindowLevel];
+        let () = msg_send![self.window, setHasShadow: YES];
+        let () = msg_send![self.window, setExcludedFromWindowsMenu: YES];
+        let () = msg_send![self.window, setHidesOnDeactivate: NO];
+        let () = msg_send![self.window, setBecomesKeyOnlyIfNeeded: NO];
+        let () = msg_send![self.window, setCollectionBehavior: NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary];
+        let () = msg_send![self.window, setAcceptsMouseMovedEvents: YES];
+        let () = msg_send![self.view, setLayerContentsRedrawPolicy: 2i64];
+        let () = msg_send![self.window, setContentView: self.view];
+        let () = msg_send![self.window, makeFirstResponder: self.view];
+        self.add_tracking(size);
+        let input_context: ObjcId = msg_send![self.view, inputContext];
+        let () = msg_send![input_context, invalidateCharacterCoordinates];
+    }
+
     /// A panel that does not activate the app.
     pub fn nonactivating_panel(&self) -> bool {
-        self.style & window_style::PANEL != 0 && self.style & window_style::NON_ACTIVATING != 0
+        self.dropdown || self.style & window_style::PANEL != 0 && self.style & window_style::NON_ACTIVATING != 0
     }
 
     /// A panel that becomes key only when a click needs a text field.
@@ -437,7 +478,7 @@ impl Win {
     }
 
     pub fn lost_focus(&self) {
-        if self.popup {
+        if self.popup || self.dropdown {
             self.push(|q| q.popup_dismissed(self.id.get()));
         } else {
             self.push(|q| q.focus(self.id.get(), false));
@@ -500,7 +541,7 @@ impl Win {
             self.remember_press(event);
             // the caption question goes to the app; its answer (`caption_answer`) starts the
             // window drag, or the zoom on a double click
-            self.remember_caption(event);
+            self.remember_caption(event, y);
             self.push(|q| q.drag_query(self.id.get(), x, y));
         }
         self.push(|q| q.mouse_down(self.id.get(), x, y, button, mods));
@@ -549,6 +590,7 @@ impl Win {
         }
         if event_is_press_motion(event) {
             self.remember_press(event);
+            self.caption_drag_unanswered(event);
         }
         self.push(|q| q.mouse_move(self.id.get(), pos[0], pos[1], delta[0], delta[1], mods));
     }
@@ -622,16 +664,46 @@ impl Win {
         }
     }
 
-    fn remember_caption(&self, event: ObjcId) {
+    fn remember_caption(&self, event: ObjcId, y: f64) {
         if event == nil {
             return;
         }
         unsafe {
+            let at: f64 = msg_send![event, timestamp];
+            self.caption_press.set([at, y]);
             let () = msg_send![event, retain];
             let old = self.caption_event.replace(event);
             if old != nil {
                 let () = msg_send![old, release];
             }
+        }
+    }
+
+    /// A press in the caption strip that the app has not answered for CAPTION_HUNG_S while the
+    /// pointer is dragged: the app is not running its event loop (a long lazy compile, a level
+    /// load): the strip moves the window as a hung app's title bar does. A later answer finds
+    /// the press taken. The strip is the app's caption (twice the traffic lights' center it
+    /// asked for), else the native caption height; windows without native buttons have none.
+    fn caption_drag_unanswered(&self, event: ObjcId) {
+        const CAPTION_HUNG_S: f64 = 0.25;
+        let pending = self.caption_event.get();
+        if pending == nil || self.popup || self.fullscreen.get() {
+            return;
+        }
+        let [at, y] = self.caption_press.get();
+        let now: f64 = unsafe { msg_send![event, timestamp] };
+        if now - at < CAPTION_HUNG_S {
+            return;
+        }
+        let strip = match self.buttons_center_y.get() {
+            Some(center) => 2.0 * center,
+            None => match self.capture_default_window_buttons() {
+                Some(d) => d.caption_height,
+                None => return,
+            },
+        };
+        if y >= 0.0 && y < strip {
+            self.caption_answer(input::drag_query::CAPTION);
         }
     }
 
@@ -678,67 +750,122 @@ impl Win {
         }
     }
 
-    /// Starts a Finder-compatible file drag from this window (`start_external_dragging`).
-    pub fn start_external_drag(&self, items: &[(u32, String)]) -> bool {
-        if self.retired.get() || items.is_empty() {
+    /// Starts a drag out of this window (`start_external_dragging`): existing files as file URLs,
+    /// files the app is still making as promises (`super::drag_out`), under `image` when given
+    /// (pixels at the window's backing scale), else the file type's icon.
+    pub fn start_external_drag(&self, items: &[(u32, String)], image: Option<&crate::backend::exec::DragImage>) -> bool {
+        if self.retired.get() {
+            eprintln!("[hal] external drag: the window is retired");
             return false;
         }
-        let paths: Option<Vec<&str>> = items.iter().map(|(kind, s)| (*kind == input::drag_item::FILE).then_some(s.as_str())).collect();
-        let Some(paths) = paths else {
-            eprintln!("[hal] an external drag accepts only public file paths");
-            return false;
-        };
-        if paths.iter().any(|p| {
-            let path = std::path::Path::new(p);
-            !path.is_absolute() || !path.is_file()
-        }) {
-            eprintln!("[hal] an external drag requires absolute paths to existing files");
+        if items.is_empty() {
+            eprintln!("[hal] external drag: no items");
             return false;
         }
-        unsafe {
-            let event = self.last_press.get();
-            if event == nil {
+        for (kind, s) in items {
+            let ok = match *kind {
+                input::drag_item::FILE => {
+                    let path = std::path::Path::new(s);
+                    path.is_absolute() && path.is_file()
+                }
+                input::drag_item::PROMISE => std::path::Path::new(crate::drag_promise::decode(s).0).is_absolute(),
+                _ => false,
+            };
+            if !ok {
+                eprintln!("[hal] an external drag takes absolute paths of existing or promised files only");
                 return false;
             }
-            let pressed: u64 = msg_send![class!(NSEvent), pressedMouseButtons];
-            if pressed == 0 {
+        }
+        unsafe {
+            // AppKit starts a session from the press's own event: the last left/right press or
+            // press motion this window saw, else the event AppKit is handling right now. The
+            // command can arrive after the button went up (an app behind a pipe, a lazy compile):
+            // AppKit then runs a session that drops at once, which is fine; only the event matters.
+            let mut event = self.last_press.get();
+            if event == nil {
+                let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+                let current: ObjcId = msg_send![ns_app, currentEvent];
+                if current != nil && event_is_press_motion(current) {
+                    event = current;
+                }
+            }
+            if event == nil {
+                eprintln!("[hal] external drag: this window has seen no mouse press to start a drag from");
                 return false;
             }
             let window_point: NSPoint = msg_send![event, locationInWindow];
             let view_point: NSPoint = msg_send![self.view, convertPoint: window_point fromView: nil];
             let workspace: ObjcId = msg_send![class!(NSWorkspace), sharedWorkspace];
-            let mut dragging_items = Vec::with_capacity(paths.len());
-            for (index, path) in paths.iter().enumerate() {
-                let ns_path = str_to_nsstring(path);
-                let file_url: ObjcId = msg_send![class!(NSURL), fileURLWithPath: ns_path isDirectory: NO];
-                if file_url == nil {
+            let scale: f64 = msg_send![self.window, backingScaleFactor];
+            let picture = image.map(|i| {
+                let size = NSSize { width: i.w as f64 / scale.max(1.0), height: i.h as f64 / scale.max(1.0) };
+                (app::nsimage_from_rgba(i.w, i.h, &i.rgba, size), size)
+            });
+            let mut dragging_items = Vec::with_capacity(items.len());
+            for (index, (kind, s)) in items.iter().enumerate() {
+                let (writer, icon_path) = if *kind == input::drag_item::PROMISE {
+                    (super::drag_out::promise_writer(s), crate::drag_promise::decode(s).0)
+                } else {
+                    let url: ObjcId = msg_send![class!(NSURL), fileURLWithPath: str_to_nsstring(s) isDirectory: NO];
+                    if url != nil {
+                        let () = msg_send![url, retain];
+                    }
+                    (url, s.as_str())
+                };
+                if writer == nil {
+                    eprintln!("[hal] external drag: no pasteboard writer for {s:?}");
                     continue;
                 }
                 let item: ObjcId = msg_send![class!(NSDraggingItem), alloc];
-                let item: ObjcId = msg_send![item, initWithPasteboardWriter: file_url];
+                let item: ObjcId = msg_send![item, initWithPasteboardWriter: writer];
+                let () = msg_send![writer, release];
                 if item == nil {
+                    eprintln!("[hal] external drag: no dragging item for {s:?}");
                     continue;
                 }
-                let icon: ObjcId = msg_send![workspace, iconForFile: ns_path];
-                let icon: ObjcId = if icon == nil { nil } else { msg_send![icon, copy] };
                 let offset = index as f64 * 3.0;
-                let frame = NSRect {
-                    origin: NSPoint { x: view_point.x - 24.0 + offset, y: view_point.y - 24.0 - offset },
-                    size: NSSize { width: 48.0, height: 48.0 },
+                let (contents, size) = match picture {
+                    Some((Some(img), size)) => {
+                        let () = msg_send![img, retain];
+                        (img, size)
+                    }
+                    _ => {
+                        // a promised file does not exist yet: its type's icon, by extension
+                        let icon: ObjcId = if *kind == input::drag_item::PROMISE {
+                            let ext = std::path::Path::new(icon_path).extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+                            msg_send![workspace, iconForFileType: str_to_nsstring(&ext)]
+                        } else {
+                            msg_send![workspace, iconForFile: str_to_nsstring(icon_path)]
+                        };
+                        let icon: ObjcId = if icon == nil { nil } else { msg_send![icon, copy] };
+                        (icon, NSSize { width: 48.0, height: 48.0 })
+                    }
                 };
-                let _: () = msg_send![item, setDraggingFrame: frame contents: icon];
-                if icon != nil {
-                    let _: () = msg_send![icon, release];
+                let frame = NSRect {
+                    origin: NSPoint { x: view_point.x - size.width * 0.5 + offset, y: view_point.y - size.height * 0.5 - offset },
+                    size,
+                };
+                let _: () = msg_send![item, setDraggingFrame: frame contents: contents];
+                if contents != nil {
+                    let _: () = msg_send![contents, release];
                 }
                 dragging_items.push(item);
             }
+            if let Some((Some(img), _)) = picture {
+                let () = msg_send![img, release];
+            }
             if dragging_items.is_empty() {
+                eprintln!("[hal] external drag: none of the {} items could go on the pasteboard", items.len());
                 return false;
             }
             let array: ObjcId = msg_send![class!(NSArray), arrayWithObjects: dragging_items.as_ptr() count: dragging_items.len()];
             let session: ObjcId = msg_send![self.view, beginDraggingSessionWithItems: array event: event source: self.view];
             if session != nil {
                 let _: () = msg_send![session, setAnimatesToStartingPositionsOnCancelOrFail: NO];
+            } else {
+                let kind: NSEventType = msg_send![event, type];
+                let pressed: u64 = msg_send![class!(NSEvent), pressedMouseButtons];
+                eprintln!("[hal] external drag: AppKit refused the session (event type {}, buttons down {pressed:#x})", kind as u64);
             }
             for item in dragging_items {
                 let _: () = msg_send![item, release];
@@ -840,8 +967,19 @@ impl Win {
                 window_state::HIDE => {
                     let () = msg_send![self.window, orderOut: nil];
                 }
+                // the app-drawn caption's close: asked as the traffic light's close is
+                window_state::CLOSE => {
+                    self.close_requested();
+                    return;
+                }
                 window_state::SHOW => {
-                    let () = msg_send![self.window, orderFront: nil];
+                    // shown again (a tray app's panel): in front and, when this process may
+                    // take the focus, the key window
+                    if focus_allowed() {
+                        let () = msg_send![self.window, makeKeyAndOrderFront: nil];
+                    } else {
+                        let () = msg_send![self.window, orderFront: nil];
+                    }
                 }
                 _ => {
                     // restore: out of fullscreen, out of the Dock

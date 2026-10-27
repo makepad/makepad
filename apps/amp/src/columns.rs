@@ -2,9 +2,9 @@
 //! ([`makepad_widgets::GridColumns`]) arranges them: which there are, how
 //! wide, and how a column orders the tracks when its heading is pressed.
 //!
-//! A heading press sorts by that column rising, a second press falling, a
-//! third puts the list back in its own order (the playlist's, or the
-//! search ranking). A track without the figure (no release date known)
+//! A heading press sorts the open list by that column rising, the next
+//! press falling, and so on; # is the list's own order (the playlist's, or
+//! the search ranking). Each list keeps its own sort. A track without the figure (no release date known)
 //! sorts after every track that has one, whichever way.
 
 use makepad_widgets::{ColumnWidth, GridColumn, GridColumns, SortCycle};
@@ -27,7 +27,7 @@ pub const ALL: [Column; 6] = [Column::Number, Column::Title, Column::Artist, Col
 /// The arrangement a first start shows: every column, in the list's own
 /// order until a heading is pressed.
 pub fn layout() -> GridColumns<Column> {
-    GridColumns::new(&ALL, &[], ALL.to_vec(), None, SortCycle::FlipThenNone)
+    GridColumns::new(&ALL, &[], ALL.to_vec(), None, SortCycle::Flip)
 }
 
 impl GridColumn for Column {

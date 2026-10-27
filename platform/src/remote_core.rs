@@ -323,6 +323,8 @@ pub struct QueuedCmd {
 
 pub enum Cmd {
     Activity(Sender<Reply>),
+    Gamepads(Sender<Reply>),
+    Focus(Sender<Reply>),
     Input {
         window: Option<usize>,
         inputs: Vec<Input>,
@@ -368,6 +370,8 @@ pub enum Cmd {
     /// Is anything still moving: a pending NextFrame, redraw, repaint or
     /// virtual timer due within the next frame?
     Settled(Sender<Reply>),
+    /// The UI thread's own counters (`uicounts`): read on the thread that runs the event loop.
+    UiCounts(Sender<Reply>),
     CapStop(Sender<Reply>),
     /// `/cap/pause` (true) and `/cap/resume` (false).
     CapPause(bool, Sender<Reply>),
@@ -376,6 +380,9 @@ pub enum Cmd {
     Platform(Box<dyn std::any::Any + Send>),
     Close {
         window: Option<usize>,
+        /// `ask=1`: the user's close (title-bar button, Cmd+W): the app is asked first
+        /// (`WindowCloseRequested`) and may keep the window, e.g. hide it instead
+        ask: bool,
         tx: Sender<Reply>,
     },
     /// Give a window a new inner size, in layout points, the way a
@@ -710,6 +717,8 @@ pub fn err(msg: &str) -> Answer {
 /// `grab`, `gseq`, `gq` and `tweak grab` are client side: they open the `frames` service.
 pub const COMMANDS: &[Command] = &[
     Command { words: "status", args: "[w=ID]", answers: "{\"app\",\"pid\",\"w\":[{\"i\":id,\"t\":title,\"sz\":[w,h],\"px\":[w,h],\"dpi\",\"pos\":[x,y]}],\"activity\"}", service: "ui", risk: CmdRisk::Read, params: "\"w\":{\"type\":\"integer\",\"description\":\"window id (status lists them)\"}", required: &[], positional: &[] },
+    Command { words: "gamepads", args: "", answers: "connected controllers and their current input states", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
+    Command { words: "focus", args: "", answers: "{\"key\":{\"r\":[x,y,w,h],\"w\",\"p\":widget path}|null,\"window\":focused window|null}: who has the key focus (rect as snap gives it) and which window is focused", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "activity", args: "", answers: "native user activity: user_active, user_seq, idle_ms, quiet_ms, held, last_input, window (also in status)", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "grab", args: "[w=ID] [scale=1] [out=FILE]", answers: "client side (frames service): the window as a PNG file; prints {\"png\":path,\"w\",\"sz\",\"capture_ms\",\"encode_ms\",\"capture_kind\"}", service: "ui", risk: CmdRisk::Read, params: "\"w\":{\"type\":\"integer\"},\"scale\":{\"type\":\"number\"},\"out\":{\"type\":\"string\"}", required: &[], positional: &[] },
     Command { words: "gseq", args: "[n=8] [every_ms=50] [scale=1] [w=ID] [out=DIR]", answers: "client side (frames service): n frames, a separate present per deadline; n=1..64, every_ms>=8, span<=60s", service: "ui", risk: CmdRisk::Read, params: "\"n\":{\"type\":\"integer\"},\"every_ms\":{\"type\":\"integer\"},\"scale\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"out\":{\"type\":\"string\"}", required: &[], positional: &[] },
@@ -722,18 +731,24 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "drop", args: "path=ABS x= y= [w=ID] [wait=1]", answers: "drop one absolute file path through Drag/Drop/DragEnd", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["path"], positional: &[] },
     Command { words: "window", args: "k=maximize | k=resize width= height= | k=dragquery x= y= [w=ID] [wait=1]", answers: "window operations (the maximise/occlusion proof, the caption hit test)", service: "ui", risk: CmdRisk::Act, params: "\"k\":{\"type\":\"string\",\"enum\":[\"maximize\",\"resize\",\"dragquery\"]},\"width\":{\"type\":\"number\"},\"height\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["k"], positional: &[] },
     Command { words: "log", args: "[n=50] [since=N]", answers: "{\"n\":lastseq,\"pool\",\"l\":[lines]}", service: "logs", risk: CmdRisk::Read, params: "\"n\":{\"type\":\"integer\"},\"since\":{\"type\":\"integer\"}", required: &[], positional: &[] },
+    Command { words: "net", args: "", answers: "the app's HTTP requests and network event queue, answered off the UI thread: a verdict per runtime first (STUCK: an answer waits unread in the app's queue, with when the app last read it / WAITING: in flight with nothing from the backend / OK), then per request: id, method and URL, the backend's answer and when, whether the app read it", service: "logs", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "midi", args: "a= b= c= [p=PORT] | k=ports n=NAME[,NAME] | k=out | k=reset", answers: "inject a MIDI message as if a device sent it; declare ports; read back what the app sent", service: "ui", risk: CmdRisk::Act, params: "\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"integer\"},\"c\":{\"type\":\"integer\"},\"p\":{\"type\":\"string\"},\"k\":{\"type\":\"string\",\"enum\":[\"ports\",\"out\",\"reset\"]},\"n\":{\"type\":\"string\"}", required: &[], positional: &[] },
     Command { words: "trace", args: "[topics=a,b] [off=1]", answers: "get / set the trace topics", service: "logs", risk: CmdRisk::Act, params: "\"topics\":{\"type\":\"string\"},\"off\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "snap", args: "[q=TEXT|path:a.b] [w=ID] [all=1]", answers: "widget rects ready to click: {\"s\":[{\"i\",\"ty\",\"r\":[x,y,w,h],\"w\",\"t\",\"p\"}]}", service: "ui", risk: CmdRisk::Read, params: "\"q\":{\"type\":\"string\",\"description\":\"text to find, or path:a.b\"},\"w\":{\"type\":\"integer\"},\"all\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "dump", args: "[paths=1]", answers: "the widget tree as indented text (id, type, x y w h); paths=1 one line per widget", service: "ui", risk: CmdRisk::Read, params: "\"paths\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "step", args: "[frames=1] [fps=60] [wait_loads=1] [w=ID]", answers: "--virtual-clock only: run frames of 1/fps; answers {\"frame\",\"time\"} after the last", service: "ui", risk: CmdRisk::Act, params: "\"frames\":{\"type\":\"integer\"},\"fps\":{\"type\":\"number\"},\"wait_loads\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "settled", args: "", answers: "{\"settled\":bool,\"reasons\":[next_frame|redraw|repaint|timer|step|shaders|loads],\"loads\":{kind:n}}", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
+    Command { words: "uicounts", args: "", answers: "{\"ins\":n,\"cyc\":n,\"cpu_ns\":n} of the UI thread so far (ins/cyc: thread_counters, user mode: macOS thread_selfcounts, Linux perf_event; else 0)", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "cap start", args: "path=ABS.mp4 [fps=60] [audio=1] [overwrite=1] [w=ID]", answers: "record the window in process (native pixels, H.264)", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"},\"fps\":{\"type\":\"number\"},\"audio\":{\"type\":\"boolean\"},\"overwrite\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"}", required: &["path"], positional: &[] },
     Command { words: "cap stop", args: "[hashes=1]", answers: "finalize the recording: {\"frames\",\"sz\",\"missing\",\"hash\"}", service: "ui", risk: CmdRisk::Act, params: "\"hashes\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
+    Command { words: "input record", args: "path=<file>", answers: "record the person's native pointer, wheel, key and text input as the commands that inject it (one line each: ms, presented frame, command)", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"}", required: &["path"], positional: &[] },
+    Command { words: "input replay", args: "path=<file> [speed=1] [sync=time|frame]", answers: "play a recording back through the injecting commands, paced by time or by presented frames (same input on the same frame)", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"},\"speed\":{\"type\":\"number\"},\"sync\":{\"type\":\"string\",\"enum\":[\"time\",\"frame\"]}", required: &["path"], positional: &[] },
+    Command { words: "input stop", args: "", answers: "end the recording (its event count) and any replay", service: "ui", risk: CmdRisk::Act, params: "", required: &[], positional: &[] },
+    Command { words: "input status", args: "", answers: "recording on/off, events recorded, replay events left", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "cap pause", args: "", answers: "stop writing without stopping the clock", service: "ui", risk: CmdRisk::Act, params: "", required: &[], positional: &[] },
     Command { words: "cap resume", args: "", answers: "restart writing", service: "ui", risk: CmdRisk::Act, params: "", required: &[], positional: &[] },
     Command { words: "cursor", args: "[show=1|0] [style=arrow|hand|text|crosshair|app] [x= y=] [w=ID]", answers: "a pointer drawn into the frame, moved by injected mouse input", service: "ui", risk: CmdRisk::Act, params: "\"show\":{\"type\":\"boolean\"},\"style\":{\"type\":\"string\",\"enum\":[\"arrow\",\"hand\",\"text\",\"crosshair\",\"app\"]},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"}", required: &[], positional: &[] },
-    Command { words: "close", args: "[w=ID]", answers: "close one window the normal way", service: "ui", risk: CmdRisk::Destructive, params: "\"w\":{\"type\":\"integer\"}", required: &[], positional: &[] },
+    Command { words: "close", args: "[w=ID] [ask=1]", answers: "close one window the normal way; ask=1 asks the app first like the window's close button (it may keep or hide the window)", service: "ui", risk: CmdRisk::Destructive, params: "\"w\":{\"type\":\"integer\"},\"ask\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "resize", args: "w= h= [window=ID]", answers: "give the window a new inner size in layout points; answers after the frame that shows it", service: "ui", risk: CmdRisk::Act, params: "\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"window\":{\"type\":\"integer\"}", required: &["w", "h"], positional: &[] },
     Command { words: "handsoff", args: "[on=1|0]", answers: "the red hands-off frame round the window", service: "ui", risk: CmdRisk::Act, params: "\"on\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "ai", args: "[on=1|0] | say=TEXT", answers: "the AI chat overlay: toggle or type a line", service: "ui", risk: CmdRisk::Act, params: "\"on\":{\"type\":\"boolean\"},\"say\":{\"type\":\"string\"}", required: &[], positional: &[] },
@@ -1036,32 +1051,69 @@ pub fn route_key(p: &Params) -> Answer {
         return err(&format!("bad key code {name}"));
     };
     let kind = p.get(&["k", "kind"]).unwrap_or("press");
+    // A real keyboard delivers a printable key's character as text input after its key down
+    // (that is what a TextInput inserts); an injected one must too, or `key c=Space` types
+    // nothing. Not with ctrl/alt/logo held: those are shortcuts.
+    let text = (!mods.control && !mods.alt && !mods.logo)
+        .then(|| key_text(code, mods.shift))
+        .flatten()
+        .map(|c| Input::Text(c.to_string()));
     let inputs = match kind {
-        "down" => vec![Input::Key {
+        "down" => [Input::Key {
             down: true,
             code,
             mods,
-        }],
+        }]
+        .into_iter()
+        .chain(text)
+        .collect(),
         "up" => vec![Input::Key {
             down: false,
             code,
             mods,
         }],
-        "press" | "tap" => vec![
-            Input::Key {
-                down: true,
-                code,
-                mods,
-            },
-            Input::Key {
-                down: false,
-                code,
-                mods,
-            },
-        ],
+        "press" | "tap" => [Input::Key {
+            down: true,
+            code,
+            mods,
+        }]
+        .into_iter()
+        .chain(text)
+        .chain([Input::Key {
+            down: false,
+            code,
+            mods,
+        }])
+        .collect(),
         other => return err(&format!("bad kind {other}")),
     };
     send_input(window, inputs, p.flag(&["wait"]))
+}
+
+/// The character a key types on a US layout (letters, digits, space), as the OS sends it
+/// with the key down. Shifted digits and punctuation depend on the layout: none.
+fn key_text(code: KeyCode, shift: bool) -> Option<char> {
+    const LETTERS: [(KeyCode, char); 26] = [
+        (KeyCode::KeyA, 'a'), (KeyCode::KeyB, 'b'), (KeyCode::KeyC, 'c'), (KeyCode::KeyD, 'd'),
+        (KeyCode::KeyE, 'e'), (KeyCode::KeyF, 'f'), (KeyCode::KeyG, 'g'), (KeyCode::KeyH, 'h'),
+        (KeyCode::KeyI, 'i'), (KeyCode::KeyJ, 'j'), (KeyCode::KeyK, 'k'), (KeyCode::KeyL, 'l'),
+        (KeyCode::KeyM, 'm'), (KeyCode::KeyN, 'n'), (KeyCode::KeyO, 'o'), (KeyCode::KeyP, 'p'),
+        (KeyCode::KeyQ, 'q'), (KeyCode::KeyR, 'r'), (KeyCode::KeyS, 's'), (KeyCode::KeyT, 't'),
+        (KeyCode::KeyU, 'u'), (KeyCode::KeyV, 'v'), (KeyCode::KeyW, 'w'), (KeyCode::KeyX, 'x'),
+        (KeyCode::KeyY, 'y'), (KeyCode::KeyZ, 'z'),
+    ];
+    const DIGITS: [KeyCode; 10] = [
+        KeyCode::Key0, KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4,
+        KeyCode::Key5, KeyCode::Key6, KeyCode::Key7, KeyCode::Key8, KeyCode::Key9,
+    ];
+    if code == KeyCode::Space {
+        return Some(' ');
+    }
+    if let Some(&(_, c)) = LETTERS.iter().find(|(k, _)| *k == code) {
+        return Some(if shift { c.to_ascii_uppercase() } else { c });
+    }
+    let digit = DIGITS.iter().position(|k| *k == code)?;
+    (!shift).then(|| char::from(b'0' + digit as u8))
 }
 
 pub fn route_text(p: &Params) -> Answer {
@@ -1828,6 +1880,7 @@ mod tests {
     fn every_former_route_resolves_to_a_command() {
         let routes = [
             ("status", 1),
+            ("gamepads", 1),
             ("activity", 1),
             ("mouse", 1),
             ("click", 1),
@@ -1839,10 +1892,15 @@ mod tests {
             ("snap", 1),
             ("step", 1),
             ("settled", 1),
+            ("uicounts", 1),
             ("cap pause", 2),
             ("cap resume", 2),
             ("cap start", 2),
             ("cap stop", 2),
+            ("input record", 2),
+            ("input replay", 2),
+            ("input stop", 2),
+            ("input status", 2),
             ("close", 1),
             ("resize", 1),
             ("window", 1),
@@ -1860,8 +1918,10 @@ mod tests {
             ("shader const", 2),
             ("quit", 1),
             ("log", 1),
+            ("net", 1),
             ("midi", 1),
             ("cursor", 1),
+            ("focus", 1),
         ];
         for (line, used) in routes {
             let r = resolve(&words(line)).unwrap_or_else(|e| panic!("{line}: {e}"));

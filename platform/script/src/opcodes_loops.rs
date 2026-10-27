@@ -4,6 +4,7 @@
 //! including begin_for_loop, end_for_loop, break_for_loop, and related helpers.
 
 use crate::makepad_live_id::*;
+use crate::opcode::*;
 use crate::thread::*;
 use crate::value::*;
 use crate::vm::ScriptVm;
@@ -34,7 +35,7 @@ impl<'a> ScriptVm<'a> {
         };
         // no_vec: loop scopes are only ever read through their map
         // (scope_value / def_scope_value), the proto vec copy is dead weight
-        let scope = self.bx.heap.new_with_proto_no_vec(parent.into());
+        let scope = self.bx.heap.new_loop_scope(parent);
         self.bx.heap.clear_object_deep(scope);
         self.bx.threads.cur().scopes.push(scope);
         true
@@ -72,7 +73,7 @@ impl<'a> ScriptVm<'a> {
             self.bail("scopes empty in begin_for_loop_inner");
             return;
         };
-        let new_scope = self.bx.heap.new_with_proto_no_vec(scope.into());
+        let new_scope = self.bx.heap.new_loop_scope(scope);
         self.bx.heap.clear_object_deep(new_scope);
 
         self.bx.threads.cur().scopes.push(new_scope);
@@ -112,9 +113,24 @@ impl<'a> ScriptVm<'a> {
             self.bail("scopes empty in begin_loop");
             return;
         };
-        let new_scope = self.bx.heap.new_with_proto_no_vec(scope.into());
+        let new_scope = self.bx.heap.new_loop_scope(scope);
         self.bx.heap.clear_object_deep(new_scope);
         self.bx.threads.cur().scopes.push(new_scope);
+    }
+
+    /// Whether the `for` at the current ip takes its source straight from a
+    /// RANGE the parser marked RANGE_FOR_SOURCE (`for i in a..b`).
+    fn for_source_is_range_literal(&self) -> bool {
+        let ip = self.bx.threads.cur_ref().trap.ip;
+        if ip.index == 0 {
+            return false;
+        }
+        let bodies = self.bx.code.bodies.borrow();
+        let Some(body) = bodies.get(ip.body as usize) else { return false };
+        matches!(
+            body.parser.opcodes.get(ip.index as usize - 1).and_then(|code| code.as_opcode()),
+            Some((Opcode::RANGE, args)) if args == OpcodeArgs::RANGE_FOR_SOURCE
+        )
     }
 
     pub fn begin_for_loop(
@@ -158,7 +174,8 @@ impl<'a> ScriptVm<'a> {
                     .unwrap_or(0.0);
                 // A range literal nothing else references (un-REFFED) cannot
                 // be mutated mid-loop: capture end/step once.
-                let range_cache = if !self.bx.heap.is_object_reffed(obj) {
+                let literal = self.for_source_is_range_literal();
+                let range_cache = if literal || !self.bx.heap.is_object_reffed(obj) {
                     let step = self
                         .bx
                         .heap
@@ -168,6 +185,15 @@ impl<'a> ScriptVm<'a> {
                     Some((end, step))
                 } else {
                     None
+                };
+                // `for i in a..b`: the loop holds the only reference to the
+                // range (RANGE_FOR_SOURCE), and its bounds are cached: free it
+                // now instead of leaving one dead object per loop run to GC.
+                let source = if literal {
+                    self.bx.heap.free_object_if_unreffed(obj);
+                    NIL
+                } else {
+                    source
                 };
                 let v = start.into();
                 if (start - end).abs() >= 1.0 {
@@ -271,8 +297,9 @@ impl<'a> ScriptVm<'a> {
                     self.bx.heap.set_loop_binding(scope, index_id.into(), index.into());
                 }
                 return;
-            } else if let Some(obj) = values.source.as_object() {
+            } else if values.range_cache.is_some() || values.source.as_object().is_some() {
                 let cached = values.range_cache;
+                let obj = values.source.as_object().unwrap_or(ScriptObject::ZERO);
                 if cached.is_some()
                     || self
                         .bx

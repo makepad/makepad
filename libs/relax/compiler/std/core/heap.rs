@@ -3,8 +3,10 @@
 //! domain zero on the process heap and selects an arena only for hosted program allocations.
 
 use crate::fmt;
+#[cfg(relax_web)]
+use crate::web_allocator as sys;
 
-#[cfg(not(relax_check))]
+#[cfg(all(not(relax_check), not(relax_web)))]
 mod sys {
     extern "C" {
         pub fn relax_alloc(size: usize, align: usize) -> *mut u8;
@@ -85,6 +87,12 @@ impl Layout {
     pub const fn for_value<T: ?Sized>(t: &T) -> Layout {
         unsafe { Layout::from_size_align_unchecked(crate::mem::size_of_val(t), crate::mem::align_of_val(t)) }
     }
+    /// # Safety
+    /// The pointer metadata must describe a valid layout fitting in `isize` (an initialized
+    /// slice length or a valid vtable). The pointee need not contain an initialized value.
+    pub const unsafe fn for_value_raw<T: ?Sized>(t: *const T) -> Layout {
+        Layout::from_size_align_unchecked(crate::intrinsics_mem::size_of_val(t), crate::intrinsics_mem::align_of_val(t))
+    }
     pub const fn array<T>(n: usize) -> Result<Layout, LayoutError> {
         let size = match crate::mem::size_of::<T>().checked_mul(n) {
             Some(s) => s,
@@ -118,36 +126,68 @@ impl Layout {
         let layout = Layout::from_size_align(new_size, new_align)?;
         Ok((layout, offset))
     }
+    pub const fn extend_packed(&self, next: Layout) -> Result<Layout, LayoutError> {
+        let new_size = match self.size.checked_add(next.size) {
+            Some(s) => s,
+            None => return Err(LayoutError),
+        };
+        Layout::from_size_align(new_size, self.align())
+    }
+    // library/core/src/alloc/layout.rs repeat: n-1 padded elements, then the last one unpadded
+    pub const fn repeat(&self, n: usize) -> Result<(Layout, usize), LayoutError> {
+        let padded = self.pad_to_align();
+        let result = if let Some(k) = n.checked_sub(1) {
+            let repeated = match padded.repeat_packed(k) {
+                Ok(r) => r,
+                Err(e) => return Err(e),
+            };
+            repeated.extend_packed(*self)
+        } else {
+            self.repeat_packed(0)
+        };
+        match result {
+            Ok(l) => Ok((l, padded.size)),
+            Err(e) => Err(e),
+        }
+    }
+    pub const fn repeat_packed(&self, n: usize) -> Result<Layout, LayoutError> {
+        let size = match self.size.checked_mul(n) {
+            Some(s) => s,
+            None => return Err(LayoutError),
+        };
+        Layout::from_size_align(size, self.align())
+    }
     pub fn dangling(&self) -> crate::ptr::NonNull<u8> {
         unsafe { crate::ptr::NonNull::new_unchecked(self.align() as *mut u8) }
     }
 }
 
-/// Allocates `layout` (size must be non-zero). Returns null on failure, as real alloc.
+/// Allocates `layout` (size must be non-zero) with the program's global allocator. Returns null
+/// on failure, as real alloc.
 pub unsafe fn alloc(layout: Layout) -> *mut u8 {
     #[cfg(not(relax_check))]
-    { sys::relax_alloc(layout.size, layout.align()) }
+    { crate::intrinsics_rt::rust_alloc(layout.size, layout.align()) }
     #[cfg(relax_check)]
     { std::alloc::alloc(std::alloc::Layout::from_size_align_unchecked(layout.size, layout.align())) }
 }
 
 pub unsafe fn alloc_zeroed(layout: Layout) -> *mut u8 {
     #[cfg(not(relax_check))]
-    { sys::relax_alloc_zeroed(layout.size, layout.align()) }
+    { crate::intrinsics_rt::rust_alloc_zeroed(layout.size, layout.align()) }
     #[cfg(relax_check)]
     { std::alloc::alloc_zeroed(std::alloc::Layout::from_size_align_unchecked(layout.size, layout.align())) }
 }
 
 pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
     #[cfg(not(relax_check))]
-    { sys::relax_dealloc(ptr, layout.size, layout.align()) }
+    { crate::intrinsics_rt::rust_dealloc(ptr, layout.size, layout.align()) }
     #[cfg(relax_check)]
     { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align_unchecked(layout.size, layout.align())) }
 }
 
 pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
     #[cfg(not(relax_check))]
-    { sys::relax_realloc(ptr, layout.size, layout.align(), new_size) }
+    { crate::intrinsics_rt::rust_realloc(ptr, layout.size, layout.align(), new_size) }
     #[cfg(relax_check)]
     { std::alloc::realloc(ptr, std::alloc::Layout::from_size_align_unchecked(layout.size, layout.align()), new_size) }
 }
@@ -189,8 +229,47 @@ pub(crate) fn free(ptr: *mut u8, layout: Layout) {
     }
 }
 
-/// The global allocator interface (kept for source compatibility; Relax always uses the
-/// program allocator).
+/// rustc_builtin_macros global_allocator.rs: the `__rg_*` fns its expansion defines for a
+/// `#[global_allocator]` static, here generic over the static's type; the allocator shim
+/// (intrinsics_rt::rust_alloc & co) calls them with the static.
+#[cfg(not(relax_check))]
+pub(crate) unsafe fn __rg_alloc<A: GlobalAlloc>(a: &A, size: usize, align: usize) -> *mut u8 {
+    a.alloc(Layout::from_size_align_unchecked(size, align))
+}
+#[cfg(not(relax_check))]
+pub(crate) unsafe fn __rg_alloc_zeroed<A: GlobalAlloc>(a: &A, size: usize, align: usize) -> *mut u8 {
+    a.alloc_zeroed(Layout::from_size_align_unchecked(size, align))
+}
+#[cfg(not(relax_check))]
+pub(crate) unsafe fn __rg_dealloc<A: GlobalAlloc>(a: &A, ptr: *mut u8, size: usize, align: usize) {
+    a.dealloc(ptr, Layout::from_size_align_unchecked(size, align))
+}
+#[cfg(not(relax_check))]
+pub(crate) unsafe fn __rg_realloc<A: GlobalAlloc>(a: &A, ptr: *mut u8, old_size: usize, align: usize, new_size: usize) -> *mut u8 {
+    a.realloc(ptr, Layout::from_size_align_unchecked(old_size, align), new_size)
+}
+
+/// library/std/src/alloc.rs `__rdl_*`: the default allocator (System) of a program without a
+/// `#[global_allocator]`.
+#[cfg(not(relax_check))]
+pub(crate) unsafe fn __rdl_alloc(size: usize, align: usize) -> *mut u8 {
+    sys::relax_alloc(size, align)
+}
+#[cfg(not(relax_check))]
+pub(crate) unsafe fn __rdl_alloc_zeroed(size: usize, align: usize) -> *mut u8 {
+    sys::relax_alloc_zeroed(size, align)
+}
+#[cfg(not(relax_check))]
+pub(crate) unsafe fn __rdl_dealloc(ptr: *mut u8, size: usize, align: usize) {
+    sys::relax_dealloc(ptr, size, align)
+}
+#[cfg(not(relax_check))]
+pub(crate) unsafe fn __rdl_realloc(ptr: *mut u8, old_size: usize, align: usize, new_size: usize) -> *mut u8 {
+    sys::relax_realloc(ptr, old_size, align, new_size)
+}
+
+/// The global allocator interface: a `#[global_allocator]` static's type implements it and the
+/// program's allocations (alloc, Box, Vec ..) go to it; System is the default.
 pub unsafe trait GlobalAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8;
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout);
@@ -215,11 +294,30 @@ pub unsafe trait GlobalAlloc {
 
 pub struct System;
 
+/// The system allocator (Relax's program heap), whatever the program's global allocator is.
 unsafe impl GlobalAlloc for System {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        alloc(layout)
+        #[cfg(not(relax_check))]
+        { __rdl_alloc(layout.size, layout.align()) }
+        #[cfg(relax_check)]
+        { <std::alloc::System as std::alloc::GlobalAlloc>::alloc(&std::alloc::System, std::alloc::Layout::from_size_align_unchecked(layout.size, layout.align())) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        #[cfg(not(relax_check))]
+        { __rdl_alloc_zeroed(layout.size, layout.align()) }
+        #[cfg(relax_check)]
+        { <std::alloc::System as std::alloc::GlobalAlloc>::alloc_zeroed(&std::alloc::System, std::alloc::Layout::from_size_align_unchecked(layout.size, layout.align())) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        dealloc(ptr, layout)
+        #[cfg(not(relax_check))]
+        { __rdl_dealloc(ptr, layout.size, layout.align()) }
+        #[cfg(relax_check)]
+        { <std::alloc::System as std::alloc::GlobalAlloc>::dealloc(&std::alloc::System, ptr, std::alloc::Layout::from_size_align_unchecked(layout.size, layout.align())) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        #[cfg(not(relax_check))]
+        { __rdl_realloc(ptr, layout.size, layout.align(), new_size) }
+        #[cfg(relax_check)]
+        { <std::alloc::System as std::alloc::GlobalAlloc>::realloc(&std::alloc::System, ptr, std::alloc::Layout::from_size_align_unchecked(layout.size, layout.align()), new_size) }
     }
 }

@@ -48,7 +48,12 @@ pub fn check_items(prog: &Program, tcx: &Tcx, own: &[bool]) {
     for i in 0..prog.defs.len() {
         let def = prog.defs[i];
         if !own.get(def.krate as usize).copied().unwrap_or(false) { continue; }
-        if lint::generated(prog, DefId(i as u32)) { continue; }
+        if lint::generated(prog, DefId(i as u32)) {
+            // (rustc's wfcheck lints a derive's impl too: its lifetime parameters carry the spans of the
+            // type's own, outside the expansion)
+            if def.kind == DefKind::Impl && lint::derived(prog, DefId(i as u32)) { redundant_lifetimes(prog, tcx, DefId(i as u32)); }
+            continue;
+        }
         attr_lints(prog, DefId(i as u32));
         check_def_item(prog, tcx, DefId(i as u32));
         if matches!(def.kind, DefKind::Fn | DefKind::ForeignFn | DefKind::Impl | DefKind::Trait | DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::TypeAlias | DefKind::Const | DefKind::Static) { lifetime_lints(prog, DefId(i as u32)); }
@@ -103,7 +108,8 @@ fn lifetime_lints(prog: &Program, d: DefId) {
     // a lifetime is written with a quote; the code a derive writes is not the user's
     if !pf.bytes(item.lo, item.hi).contains(&b'\'') || lint::external(prog, def.file, item.lo) { return; }
     let mut w = W::new(prog, def.file, d);
-    w.lt = Some(LtCx { ribs: vec![LRib::Item], scopes: Vec::new(), next: 0 });
+    let anon_in_impl_trait = prog.crates[def.krate as usize].features(prog).has("anonymous_lifetime_in_impl_trait");
+    w.lt = Some(LtCx { ribs: vec![LRib::Item], scopes: Vec::new(), next: 0, anon_in_impl_trait });
     match def.kind {
         DefKind::Fn | DefKind::ForeignFn => w.lt_fn(def.item),
         DefKind::Impl => w.lt_impl(d, def.item),
@@ -224,6 +230,15 @@ fn attr_lints(prog: &Program, d: DefId) {
                 && matches!(item.kind, ItemKind::Fn(sig, None, _) if ast.fn_sig(sig).lazy_body.is_none());
             if bodiless_trait_method { emit("`#[inline]` attribute cannot be used on required trait methods"); }
             else if def.kind == DefKind::ForeignFn { emit("`#[inline]` attribute cannot be used on foreign functions"); }
+        }
+        // codegen_attrs.rs ColdParser: AllowListWarnRest (fns, methods with a body, foreign fns, closures)
+        if name == b"cold" {
+            if item.is_none() { continue; }
+            if let Some((what, fn_like, trait_fn_no_body, _)) = crate::item_checks::attribute_target(prog, d) {
+                if trait_fn_no_body || !fn_like {
+                    emit(&format!("`#[cold]` attribute cannot be used on {}", if trait_fn_no_body { "required trait methods" } else { what }));
+                }
+            }
         }
     }
     attr_checks(prog, &AttrNode { d, inner: &[], attrs: &all, is_crate: is_root, macro_use_target: is_root || named_mod });
@@ -451,6 +466,8 @@ struct LtCx {
     ribs: Vec<LRib>,
     scopes: Vec<LtScope>,
     next: u32,
+    /// `#![feature(anonymous_lifetime_in_impl_trait)]`: an `impl Trait` rib lets the search go on outward
+    anon_in_impl_trait: bool,
 }
 
 pub(crate) struct W<'a> {
@@ -1150,6 +1167,15 @@ impl<'a> W<'a> {
                 // the lint attributes of an expression statement survive cfg stripping
                 let attrs = ast.stmt_attrs(e);
                 self.enter(attrs);
+                // codegen_attrs.rs ColdParser (AllowListWarnRest): an expression is no target of `#[cold]`
+                if self.lt.is_none() && !matches!(self.kind(e), ExprKind::Closure(..)) {
+                    for a in ast.list(attrs) {
+                        if a.toks.hi > a.toks.lo && lint::attr_path(self.prog, self.file, a) == b"cold" {
+                            let pos = attr_pos(self.pf, a);
+                            if !lint::external(self.prog, self.file, pos) { emit(self.prog, self.def, &UNUSED_ATTRIBUTES, self.file, pos, "`#[cold]` attribute cannot be used on expressions"); }
+                        }
+                    }
+                }
                 // (`#[cfg(..)]` stays on the node in rustc: a value with attributes is not linted)
                 if !semi && attrs.len() == 0 { self.both(e, Ctx::BlockRetValue, false); }
                 self.expr(e);
@@ -1649,6 +1675,7 @@ impl<'a> W<'a> {
         for r in c.ribs.iter().rev() {
             match r {
                 LRib::Generics => continue,
+                LRib::ImplTrait if c.anon_in_impl_trait => continue,
                 LRib::Anon(b) => { state = if *b == binder { 1 } else { 2 }; break; }
                 LRib::Item | LRib::Fail | LRib::ImplTrait => { state = 2; break; }
             }
@@ -2694,6 +2721,12 @@ fn redundant_lifetimes(prog: &Program, tcx: &Tcx, d: DefId) {
         if let (Some(a), Some(b)) = (idx(a), idx(b)) { reach[a][b] = true; }
     }
     for k in 0..n { for i in 0..n { if reach[i][k] { for j in 0..n { if reach[k][j] { reach[i][j] = true; } } } } }
+    // a built-in derive's impl copies the type's generics with their spans (rustc deriving/generic):
+    // its parameter is reported where the type declares it
+    let derived_from = if def.kind == DefKind::Impl && lint::derived(prog, d) {
+        tcx.impl_self.get(&d).and_then(|t| match tcx.tys.kind(*t) { crate::types::TyKind::Adt(a, ..) => Some(*a), _ => None })
+            .map(|a| (prog.def(a).file, names(prog, tcx, a).named_in_scope()))
+    } else { None };
     let mut shadowed = vec![false; n];
     for c in 0..n {
         if shadowed[c] { continue; }
@@ -2702,8 +2735,12 @@ fn redundant_lifetimes(prog: &Program, tcx: &Tcx, d: DefId) {
             let _ = id;
             if !own || !(reach[c][v] && reach[v][c]) { continue; }
             shadowed[v] = true;
-            if lint::external(prog, def.file, span) { continue; }
-            emit(prog, d, &REDUNDANT_LIFETIMES, def.file, span, &format!("unnecessary lifetime parameter `{}`", name));
+            let (file, span) = match &derived_from {
+                Some((f, params)) => match params.iter().find(|p| p.3 && p.1 == *name) { Some(p) => (*f, p.2), None => continue },
+                None => (def.file, span),
+            };
+            if lint::external(prog, file, span) { continue; }
+            emit(prog, d, &REDUNDANT_LIFETIMES, file, span, &format!("unnecessary lifetime parameter `{}`", name));
         }
     }
 }
@@ -2867,6 +2904,80 @@ pub(crate) struct AttrNode<'a> {
     pub macro_use_target: bool,
 }
 
+pub const ILL_FORMED_ATTRIBUTE_INPUT: Lint = lint::lint("ill_formed_attribute_input");
+pub const MALFORMED_DIAGNOSTIC_FORMAT_LITERALS: Lint = lint::lint("malformed_diagnostic_format_literals");
+
+/// rustc_parse_format (ParseMode::Diagnostic) over the string literal at `pos` (its source bytes
+/// `tok`), with rustc_attr_parsing's warnings on its arguments and check_attr's unknown
+/// parameter of a trait (`trait_params`: the trait's name and its type/const parameters).
+/// Positions are those of the source (escapes and `\` line continuations mapped back). A literal
+/// that does not parse gets rustc's parse error only, which is not reported here.
+fn diagnostic_format_lints(pos: u32, tok: &[u8], trait_params: Option<&(String, Vec<String>)>, emit: &mut dyn FnMut(u32, &str)) {
+    let Ok(src) = std::str::from_utf8(tok) else { return };
+    // the literal's characters with their source offsets
+    let mut chars: Vec<(char, u32)> = Vec::new();
+    if let Some(rest) = src.strip_prefix('r') {
+        let hashes = rest.bytes().take_while(|&b| b == b'#').count();
+        let start = 1 + hashes + 1;
+        let end = src.len().saturating_sub(1 + hashes);
+        if start > end { return; }
+        for (i, c) in src[start..end].char_indices() { chars.push((c, (start + i) as u32)); }
+    } else if src.starts_with('"') && src.len() >= 2 {
+        let body = &src[1..src.len() - 1];
+        let mut it = body.char_indices().peekable();
+        while let Some((i, c)) = it.next() {
+            let at = (1 + i) as u32;
+            if c != '\\' { chars.push((c, at)); continue; }
+            match it.next() {
+                Some((_, '\n')) => { while matches!(it.peek(), Some((_, ' ' | '\t' | '\n' | '\r'))) { it.next(); } }
+                Some((_, 'x')) => { it.next(); it.next(); chars.push(('?', at)); }
+                Some((_, 'u')) => { while let Some((_, c)) = it.next() { if c == '}' { break; } } chars.push(('?', at)); }
+                Some((_, c)) => chars.push((if c == '{' || c == '}' { c } else { '?' }, at)),
+                None => return,
+            }
+        }
+    } else { return; }
+    let ch = |i: usize| chars.get(i).map(|c| c.0);
+    let mut warnings: Vec<(u32, String)> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i].0 {
+            '{' if ch(i + 1) == Some('{') => i += 2,
+            '}' if ch(i + 1) == Some('}') => i += 2,
+            '}' => return,
+            '{' => {
+                i += 1;
+                while ch(i).is_some_and(|c| c.is_whitespace()) { i += 1; }
+                let at = chars.get(i).map_or(pos, |c| pos + c.1);
+                if ch(i).is_some_and(|c| c.is_ascii_digit()) {
+                    while ch(i).is_some_and(|c| c.is_ascii_digit()) { i += 1; }
+                    warnings.push((at, "indexed format arguments are not permitted in diagnostic attributes".into()));
+                } else if ch(i).is_some_and(|c| c == '_' || c.is_alphabetic()) && !(ch(i) == Some('_') && !ch(i + 1).is_some_and(|c| c == '_' || c.is_alphanumeric())) {
+                    let mut name = String::new();
+                    while let Some(c) = ch(i).filter(|&c| c == '_' || c.is_alphanumeric()) { name.push(c); i += 1; }
+                    if let Some((tr, params)) = trait_params {
+                        if name != "Self" && !params.contains(&name) { warnings.push((at, format!("there is no parameter `{}` on trait `{}`", name, tr))); }
+                    }
+                } else {
+                    warnings.push((at, "positional arguments are not permitted in diagnostic attributes".into()));
+                }
+                while ch(i).is_some_and(|c| c.is_whitespace()) { i += 1; }
+                if ch(i) == Some(':') {
+                    i += 1;
+                    let ty_at = chars.get(i).map_or(pos, |c| pos + c.1);
+                    let start = i;
+                    while ch(i).is_some_and(|c| c != '{' && c != '}') { i += 1; }
+                    if i > start { warnings.push((ty_at, "format specifiers are not permitted in diagnostic attributes".into())); }
+                }
+                if ch(i) != Some('}') { return; }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    for (at, msg) in warnings { emit(at, &msg); }
+}
+
 const DIAGNOSTIC_ATTRIBUTES: &[(&str, Option<&str>)] = &[
     ("on_unimplemented", None), ("do_not_recommend", None), ("on_move", Some("diagnostic_on_move")),
     ("on_const", Some("diagnostic_on_const")), ("on_unknown", Some("diagnostic_on_unknown")),
@@ -2925,6 +3036,32 @@ pub(crate) fn attr_checks(prog: &Program, n: &AttrNode) {
                 while i < hi && pf.bytes(pf.tok(i as u32).lo, pf.tok(i as u32).hi) != b"::" { i += 1; }
                 emit(&UNKNOWN_DIAGNOSTIC_ATTRIBUTES, pf.tok((i + 1).min(hi - 1) as u32).lo, "unknown diagnostic attribute");
             }
+        }
+        // ---- the format literals of `message`, `label` and `note` (rustc_attr_parsing
+        // diagnostic/mod.rs parse_format_string; check_attr.rs check_diagnostic_on_unimplemented)
+        if path.len() == 2 && path[0] == b"diagnostic" && matches!(&path[1][..], b"on_unimplemented" | b"on_const" | b"on_move")
+            && DIAGNOSTIC_ATTRIBUTES.iter().any(|(k, f)| k.as_bytes() == &path[1][..] && f.is_none_or(|f| feature_enabled(prog, krate, f))) {
+            if let Args::List { items } = args {
+                // a trait's own `#[diagnostic::on_unimplemented]`: its type and const parameters
+                let trait_params = (path[1] == b"on_unimplemented" && prog.def(d).kind == DefKind::Trait).then(|| {
+                    let def = prog.def(d);
+                    let tf = &prog.files[def.file as usize];
+                    let names: Vec<String> = tf.ast.kind_generics(&tf.ast.item(def.item).kind).map(|g| tf.ast.list(g.params).iter()
+                        .filter(|p| !matches!(p.kind, GenericParamKind::Lifetime(_))).map(|p| tf.text(p.name).to_string()).collect()).unwrap_or_default();
+                    (prog.name(d).to_string(), names)
+                });
+                for m in items {
+                    let Meta::Item { path: key, args: Args::Value { pos, tok }, .. } = m else { continue };
+                    if !(key.len() == 1 && matches!(&key[0][..], b"message" | b"label" | b"note")) { continue; }
+                    diagnostic_format_lints(*pos, tok, trait_params.as_ref(), &mut |at, msg| emit(&MALFORMED_DIAGNOSTIC_FORMAT_LITERALS, at, msg));
+                }
+            }
+        }
+        // ---- test_attrs.rs IgnoreParser: `#[ignore]` or `#[ignore = "reason"]`; a list, or a value
+        // that is no string, is ill-formed input (a future-incompatibility lint, deny by default)
+        if word.as_deref() == Some("ignore") {
+            let bad = match args { Args::None => false, Args::Value { tok, .. } => !(tok.first() == Some(&b'"') || tok.starts_with(b"r\"") || tok.starts_with(b"r#")), Args::List { .. } => true };
+            if bad { emit(&ILL_FORMED_ATTRIBUTE_INPUT, apos, "valid forms for the attribute are `#[ignore = \"reason\"]` and `#[ignore]`"); }
         }
         // ---- lint attributes: empty lists, `reason` only, crate-level-only lints
         if matches!(word.as_deref(), Some("allow" | "warn" | "deny" | "forbid" | "expect")) {
@@ -3378,6 +3515,20 @@ fn cfg_attr_empties(prog: &Program, own: &[bool]) {
     }
 }
 
+pub const VARARGS_WITHOUT_PATTERN: Lint = lint::lint("varargs_without_pattern");
+
+/// rustc_parse parse_param_general: `...` without a pattern in a fn that needs parameter names (the
+/// parser records it under `makepad check`, cfg'd-out code included: a pre-expansion lint of the crate root).
+fn varargs_without_patterns(prog: &Program, own: &[bool]) {
+    let mut seen = std::collections::HashSet::new();
+    for (path, pos) in crate::macros::uses::take_varargs_without_pattern() {
+        let Some(file) = prog.file_paths.iter().position(|p| *p == path) else { continue };
+        let krate = prog.file_crate.get(file).copied().unwrap_or(u32::MAX);
+        if !own.get(krate as usize).copied().unwrap_or(false) || !seen.insert((file, pos)) { continue; }
+        emit(prog, crate_root(prog, krate), &VARARGS_WITHOUT_PATTERN, file as u32, pos, "missing pattern for `...` argument");
+    }
+}
+
 pub const NAMED_ARGUMENTS_USED_POSITIONALLY: Lint = lint::lint("named_arguments_used_positionally");
 
 fn named_args_positional(prog: &Program, own: &[bool]) {
@@ -3388,6 +3539,64 @@ fn named_args_positional(prog: &Program, own: &[bool]) {
         if lint::external(prog, file as u32, pos) { continue; }
         let def = enclosing_def(prog, file as u32, prog.files[file].lint_pos(pos), krate);
         emit(prog, def, &NAMED_ARGUMENTS_USED_POSITIONALLY, file as u32, pos, &format!("named argument `{}` is not used by name", name));
+    }
+}
+
+pub const AMBIGUOUS_PANIC_IMPORTS: Lint = lint::lint("ambiguous_panic_imports");
+
+/// The single-name macro calls of the checked crates resolved in the lexical scopes over the import
+/// replay's macro namespace (front program/rsim.rs `macro_call_ambiguities`): E0659, or the lints
+/// `ambiguous_panic_imports` / `ambiguous_glob_imports`.
+fn macro_call_ambiguities(prog: &Program, own: &[bool]) {
+    let calls = crate::macros::uses::take_plain_macro_calls();
+    for (file, pos, lint_name, msg) in prog.macro_call_ambiguities(calls, own) {
+        match lint_name {
+            None => lint::hard_error(prog, file, pos, &msg),
+            Some(name) => {
+                let l = if name == "ambiguous_panic_imports" { AMBIGUOUS_PANIC_IMPORTS } else { lint::AMBIGUOUS_GLOB_IMPORTS };
+                let krate = prog.file_crate.get(file as usize).copied().unwrap_or(u32::MAX);
+                let def = enclosing_def(prog, file, pos, krate);
+                emit(prog, def, &l, file, pos, &msg);
+            }
+        }
+    }
+}
+
+pub const MACRO_EXPANDED_MACRO_EXPORTS_ACCESSED_BY_ABSOLUTE_PATHS: Lint = lint::lint("macro_expanded_macro_exports_accessed_by_absolute_paths");
+
+/// rustc_resolve ident.rs (resolve_ident_in_module_non_globs_unadjusted, Shadowing::Unrestricted) and
+/// diagnostics.rs `report_errors`: a module-relative path (an import `use crate::m;`, a call `crate::m!()`)
+/// that finds a `#[macro_export]` macro_rules! of the current crate whose definition a macro expansion
+/// wrote. (A path resolved in the lexical scopes -- `m!()`, 2015's `use m;` -- is restricted shadowing:
+/// no lint.)
+fn macro_expanded_macro_exports(prog: &Program, own: &[bool]) {
+    const MSG: &str = "macro-expanded `macro_export` macros from the current crate cannot be referred to by absolute paths";
+    let expanded_def = |file: u32, pos: u32| prog.files.get(file as usize).is_some_and(|f| f.expansion_region_id(pos) != 0);
+    let mut seen = std::collections::HashSet::new();
+    // imports with a module part whose last name is such a macro of the importing crate's root
+    for im in &prog.imports {
+        if im.glob || im.ext || im.segs.len() < 2 || !own.get(prog.mods[im.module as usize].krate as usize).copied().unwrap_or(false) { continue; }
+        let krate = prog.mods[im.module as usize].krate;
+        let root = prog.crates[krate as usize].root_mod;
+        let Some(&(SegKind::Ident, last)) = im.segs.last() else { continue };
+        let Some(&mac) = prog.mods[root as usize].macros.get(&last) else { continue };
+        let edition = prog.crates[krate as usize].edition;
+        let Some(parent) = prog.resolve_mod_path(im.module, im.global, &im.segs[..im.segs.len() - 1], edition < 2018, true) else { continue };
+        if parent != prog.mods[root as usize].def { continue; }
+        let md = prog.def(mac);
+        let lo = prog.files[md.file as usize].ast.item(md.item).lo;
+        if !expanded_def(md.file, lo) || !seen.insert((im.file, im.pos)) { continue; }
+        let def = enclosing_def(prog, im.file, im.pos, krate);
+        emit(prog, def, &MACRO_EXPANDED_MACRO_EXPORTS_ACCESSED_BY_ABSOLUTE_PATHS, im.file, im.pos, MSG);
+    }
+    // macro calls through a module path (the parser records them under `makepad check`)
+    for (path, pos, def_path, def_pos) in crate::macros::uses::take_abs_path_macro_calls() {
+        let Some(file) = prog.file_paths.iter().position(|p| *p == path) else { continue };
+        let Some(def_file) = prog.file_paths.iter().position(|p| *p == def_path) else { continue };
+        let krate = prog.file_crate.get(file).copied().unwrap_or(u32::MAX);
+        if !own.get(krate as usize).copied().unwrap_or(false) || !expanded_def(def_file as u32, def_pos) || !seen.insert((file as u32, pos)) { continue; }
+        let def = enclosing_def(prog, file as u32, prog.files[file].lint_pos(pos), krate);
+        emit(prog, def, &MACRO_EXPANDED_MACRO_EXPORTS_ACCESSED_BY_ABSOLUTE_PATHS, file as u32, pos, MSG);
     }
 }
 
@@ -3445,6 +3654,26 @@ fn trailing_semis(prog: &Program, own: &[bool]) {
     }
 }
 
+// ---------------------------------------------------------------- incomplete_include
+
+pub const INCOMPLETE_INCLUDE: Lint = lint::lint("incomplete_include");
+
+/// rustc_builtin_macros source_util `ExpandInclude::make_expr`: an `include!` in expression
+/// position whose file holds more than one expression (the parser records the call).
+fn incomplete_includes(prog: &Program, own: &[bool]) {
+    let mut seen = std::collections::HashSet::new();
+    for (path, call) in crate::macros::uses::take_incomplete_include() {
+        let Some(file) = prog.file_paths.iter().position(|p| *p == path) else { continue };
+        let krate = prog.file_crate.get(file).copied().unwrap_or(u32::MAX);
+        if !own.get(krate as usize).copied().unwrap_or(false) || !seen.insert((file, call)) { continue; }
+        let pf = &prog.files[file];
+        let pos = pf.lint_pos(call);
+        let def = enclosing_def(prog, file as u32, pos, krate);
+        let attrs = lint::attrs_at_call(prog, def, file as u32, call);
+        emit_in(prog, def, &attrs, &INCOMPLETE_INCLUDE, file as u32, pos, "include macro expected single expression in source");
+    }
+}
+
 // ---------------------------------------------------------------- meta_variable_misuse
 
 pub const META_VARIABLE_MISUSE: Lint = lint::lint("meta_variable_misuse");
@@ -3479,9 +3708,13 @@ pub const UNUSED_MACRO_RULES: Lint = lint::lint("unused_macro_rules");
 pub fn finish(prog: &Program, own: &[bool]) {
     if !lint::enabled() { return; }
     trailing_semis(prog, own);
+    incomplete_includes(prog, own);
     meta_variable_misuse(prog, own);
     cfg_attr_empties(prog, own);
+    varargs_without_patterns(prog, own);
     named_args_positional(prog, own);
+    macro_expanded_macro_exports(prog, own);
+    macro_call_ambiguities(prog, own);
     crate_attr_lints(prog, own);
     let (defs, used) = crate::macros::uses::take();
     if defs.is_empty() { return; }

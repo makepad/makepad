@@ -153,6 +153,12 @@ fn enter(phase: u64) -> UiPhaseGuard {
         (h.begin)(name.as_ptr(), name.len());
         guard.traced = phase;
     }
+    // a native build's profiler stream (a viewer is attached)
+    #[cfg(all(not(relax), any(target_os = "macos", target_os = "linux")))]
+    if guard.traced == 0 && crate::prof_native::on() {
+        crate::prof_native::begin(phase_name(phase as u32));
+        guard.traced = phase;
+    }
     if !state.is_null() {
         // Registration and guards are confined to this thread. The sampler
         // owns another Arc, so State also outlives TLS teardown.
@@ -181,6 +187,9 @@ impl Drop for UiPhaseGuard {
             if let Some(h) = relax_timeline::hooks() {
                 let name = phase_name(self.traced as u32);
                 (h.end)(name.as_ptr(), name.len());
+            } else {
+                #[cfg(not(relax))]
+                crate::prof_native::end(phase_name(self.traced as u32));
             }
         }
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]

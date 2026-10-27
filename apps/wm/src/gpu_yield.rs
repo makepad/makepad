@@ -1,6 +1,6 @@
 //! The desktop's GPU memory comes first. When the HAL says the device is short of memory
 //! for the UI (`Event::GpuPressure`), the WM, as the session owner, asks the local AI hub
-//! for room through its existing hub link (`hub_control`), in steps:
+//! for room through its existing hub link (`hub_link`), in steps:
 //!
 //! 1. a yield without unloading: the hub shrinks its chat model's context (KV cache) and
 //!    drops idle models;

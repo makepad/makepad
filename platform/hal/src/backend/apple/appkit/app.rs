@@ -38,6 +38,9 @@ unsafe impl Encode for CAFrameRateRange {
 /// How long a requested frame may wait for the display link before it is delivered anyway (a
 /// window that is occluded or in the Dock gets no vsync).
 const FALLBACK_SECS: f64 = 0.1;
+/// Display link callbacks without a frame asked for before the link pauses (an idle app costs
+/// nothing; an animating one keeps every vsync).
+const LINK_IDLE: u8 = 4;
 
 /// The system appearance as the main thread last read it: 0 unknown, 1 light, 2 dark.
 static APPEARANCE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -101,6 +104,8 @@ pub struct App {
     menu_sid: Cell<u32>,
     pulse: Cell<ObjcId>,
     menu_delegate: Cell<ObjcId>,
+    /// The Dock icon's menu (`menu_kind::DOCK` items; the system adds the windows), nil: none.
+    dock_menu: Cell<ObjcId>,
     pasteboard: Cell<ObjcId>,
     nap: Cell<ObjcId>,
     marked_attributes: Cell<ObjcId>,
@@ -139,6 +144,7 @@ pub fn app() -> &'static App {
             menu_sid: Cell::new(0),
             pulse: Cell::new(nil),
             menu_delegate: Cell::new(nil),
+            dock_menu: Cell::new(nil),
             pasteboard: Cell::new(nil),
             nap: Cell::new(nil),
             marked_attributes: Cell::new(nil),
@@ -345,15 +351,19 @@ unsafe fn init() {
     let no_open: ObjcId = msg_send![class!(NSDictionary), dictionaryWithObject: str_to_nsstring("NO") forKey: str_to_nsstring("NSTreatUnknownArgumentsAsOpen")];
     let () = msg_send![defaults, registerDefaults: no_open];
     let () = msg_send![ns_app, setDelegate: delegate];
-    let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular as i64];
+    // a bundle whose Info.plist says LSUIElement is an agent app (a menu-bar app), as is an app that
+    // says so itself (`AppMain::menu_bar_app`, for a host a launcher bundle starts): no Dock icon and
+    // no menu bar from the first moment; `ShowInDock` turns the Dock icon on while it has a window
+    let policy = if bundle_flag("LSUIElement") || super::MENU_BAR_APP.load(Ordering::Acquire) { NSApplicationActivationPolicy::NSApplicationActivationPolicyAccessory } else { NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular };
+    let () = msg_send![ns_app, setActivationPolicy: policy as i64];
     a.pulse.set(msg_send![classes.pulse, new]);
     a.menu_delegate.set(msg_send![classes.menu_delegate, new]);
     a.pasteboard.set(msg_send![class!(NSPasteboard), generalPasteboard]);
     let _ = a.classes.set(classes);
     let () = msg_send![ns_app, finishLaunching];
-    // a minimal app menu (Quit, Cmd+Q) for unbundled `cargo run` apps; an app's own menu
+    // a minimal app menu (About, Quit with Cmd+Q) named after the bundle; an app's own menu
     // (`MenuSet`) replaces it
-    install_quit_menu();
+    install_app_menu();
     begin_test_instance_activity();
     // the system appearance, now and whenever it changes
     read_appearance();
@@ -637,10 +647,12 @@ impl App {
         self.windows.borrow().iter().copied().find(|w| !w.retired.get())
     }
 
-    /// `applicationShouldTerminate:`: each session with a window is asked to quit; true when
+    /// `applicationShouldTerminate:`: each session with a window or a tray is asked to quit; true when
     /// there is anyone to ask (the termination is cancelled, the app's `Quit` ends it).
     pub fn ask_sessions_to_quit(&self) -> bool {
         let mut sids: Vec<u32> = self.windows.borrow().iter().filter(|w| !w.retired.get()).map(|w| w.sid.get()).collect();
+        // a tray app without a window is asked too
+        sids.extend(super::tray::sessions());
         sids.sort();
         sids.dedup();
         for sid in &sids {
@@ -1049,6 +1061,7 @@ fn apply(op: Op) {
             if app().menu_sid.get() == sid {
                 app().menu_sid.set(0);
             }
+            super::tray::session_closed(sid);
         }
         Op::Cmd(sid, cmd, _) => command(sid, cmd),
     }
@@ -1176,9 +1189,9 @@ fn command(sid: u32, cmd: OsCmd) {
             let () = msg_send![pasteboard, declareTypes: array owner: nil];
             let () = msg_send![pasteboard, setString: str_to_nsstring(&text) forType: NSStringPboardType];
         },
-        OsCmd::DragStart { id, items } => {
+        OsCmd::DragStart { id, items, image } => {
             if let Some(win) = window_of(id) {
-                if !win.start_external_drag(&items) {
+                if !win.start_external_drag(&items, image.as_ref()) {
                     eprintln!("[hal] could not start external file drag");
                     // a native session ends with its source callback; a rejected start needs the
                     // same completion signal so application gesture guards recover at once
@@ -1190,6 +1203,13 @@ fn command(sid: u32, cmd: OsCmd) {
             a.menu_sid.set(sid);
             update_menu(&items);
         }
+        OsCmd::TraySet { tray, w, h, flags, alpha, tooltip, items } => super::tray::set(sid, tray, w, h, flags, &alpha, &tooltip, &items),
+        OsCmd::WindowAtTray { id, tray, w, h } => {
+            if let Some(win) = window_of(id) {
+                super::tray::window_at(sid, win, tray, w, h);
+            }
+        }
+        OsCmd::TrayRemove { tray } => super::tray::remove(sid, tray),
         OsCmd::FileDialog { req, kind, title, location, filename, filters } => file_dialog(sid, req, kind, &title, &location, &filename, &filters),
         OsCmd::DragReply { id, to, answer } => {
             if let Some(win) = window_of(id) {
@@ -1207,13 +1227,34 @@ fn command(sid: u32, cmd: OsCmd) {
     }
 }
 
-/// The Dock icon of an unbundled app (RGBA8 rows).
+/// The Dock icon of an unbundled app (RGBA8 rows). A bundle that names its own icon
+/// (CFBundleIconFile / CFBundleIconName) keeps it: the runtime icon is ignored there.
 fn set_application_icon(w: u32, h: u32, rgba: &[u8]) {
     let (width, height) = (w as usize, h as usize);
     if width == 0 || height == 0 || rgba.len() < width * height * 4 {
         return;
     }
+    if bundle_has_icon() {
+        eprintln!("makepad-hal: the bundle's own icon stays (runtime app icon ignored)");
+        return;
+    }
     unsafe {
+        let Some(ns_image) = nsimage_from_rgba(w, h, rgba, NSSize { width: width as f64, height: height as f64 }) else {
+            return;
+        };
+        let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        let () = msg_send![ns_app, setApplicationIconImage: ns_image];
+        let () = msg_send![ns_image, release];
+    }
+}
+
+/// An NSImage (+1 retained) of `w` x `h` RGBA8 rows, shown at `size` points.
+pub(super) unsafe fn nsimage_from_rgba(w: u32, h: u32, rgba: &[u8], size: NSSize) -> Option<ObjcId> {
+    let (width, height) = (w as usize, h as usize);
+    if width == 0 || height == 0 || rgba.len() < width * height * 4 {
+        return None;
+    }
+    {
         let bitmap_rep: ObjcId = msg_send![class!(NSBitmapImageRep), alloc];
         let bitmap_rep: ObjcId = msg_send![bitmap_rep,
             initWithBitmapDataPlanes: std::ptr::null_mut::<*mut u8>()
@@ -1228,24 +1269,25 @@ fn set_application_icon(w: u32, h: u32, rgba: &[u8]) {
             bitsPerPixel: 32i64
         ];
         if bitmap_rep == nil {
-            return;
+            return None;
         }
         let bitmap_data: *mut u8 = msg_send![bitmap_rep, bitmapData];
         if !bitmap_data.is_null() {
             std::ptr::copy_nonoverlapping(rgba.as_ptr(), bitmap_data, width * height * 4);
         }
         let ns_image: ObjcId = msg_send![class!(NSImage), alloc];
-        let ns_image: ObjcId = msg_send![ns_image, initWithSize: NSSize { width: width as f64, height: height as f64 }];
+        let ns_image: ObjcId = msg_send![ns_image, initWithSize: size];
         let () = msg_send![ns_image, addRepresentation: bitmap_rep];
-        let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
-        let () = msg_send![ns_app, setApplicationIconImage: ns_image];
+        let () = msg_send![bitmap_rep, release];
+        Some(ns_image)
     }
 }
 
 // ------------------------------------------------------------------ frame pacing
 
 /// The app has work for the window: a frame is announced at the next vsync. The display link is
-/// unpaused for it and paused again once the frame was announced, so an idle app costs nothing.
+/// unpaused for it and runs on while frames are asked for; it pauses after `LINK_IDLE` vsyncs
+/// with nothing asked, so an idle app costs nothing.
 fn request_frame(win: &'static Win) {
     unsafe {
         win.want_frame.set(true);
@@ -1304,11 +1346,11 @@ fn deliver_frame(win: &Win, next_ns: u64) {
         if timer != nil {
             let () = msg_send![timer, invalidate];
         }
-        let link = win.link.get();
-        if link != nil {
-            let () = msg_send![link, setPaused: YES];
-        }
     }
+    // the link keeps running while frames follow each other: pausing it after every frame and
+    // unpausing it at the next request lost vsyncs (a viewer showing ~115 pictures a second
+    // drew ~70 frames); it pauses once it found nothing to do `LINK_IDLE` times in a row
+    win.link_idle.set(0);
     if !win.retired.get() {
         Shared::global().push(win.sid.get(), |q| q.frame_ready(win.id.get(), next_ns));
     }
@@ -1317,6 +1359,16 @@ fn deliver_frame(win: &Win, next_ns: u64) {
 pub fn display_link_fired(link: ObjcId) {
     let win = app().windows.borrow().iter().copied().find(|w| w.link.get() == link);
     let Some(win) = win else { return };
+    if !win.want_frame.get() {
+        let idle = win.link_idle.get().saturating_add(1);
+        win.link_idle.set(idle);
+        if idle >= LINK_IDLE {
+            unsafe {
+                let () = msg_send![link, setPaused: YES];
+            }
+        }
+        return;
+    }
     let (target, media): (f64, f64) = unsafe { (msg_send![link, targetTimestamp], CACurrentMediaTime()) };
     let next_ns = crate::clock_ns() + ((target - media).clamp(0.0, 0.1) * 1e9) as u64;
     deliver_frame(win, next_ns);
@@ -1350,7 +1402,51 @@ pub fn resize_loop(win: &Win, start: bool) {
 
 // ------------------------------------------------------------------ menu
 
-fn install_quit_menu() {
+/// A boolean key of the running bundle's Info.plist (false when unbundled or absent).
+fn bundle_flag(key: &str) -> bool {
+    unsafe {
+        let bundle: ObjcId = msg_send![class!(NSBundle), mainBundle];
+        if bundle == nil {
+            return false;
+        }
+        let value: ObjcId = msg_send![bundle, objectForInfoDictionaryKey: str_to_nsstring(key)];
+        if value == nil {
+            return false;
+        }
+        let on: BOOL = msg_send![value, boolValue];
+        on != NO
+    }
+}
+
+/// Whether the running bundle's Info.plist names an icon of its own (an unbundled binary's
+/// embedded plist names none).
+fn bundle_has_icon() -> bool {
+    unsafe {
+        let bundle: ObjcId = msg_send![class!(NSBundle), mainBundle];
+        if bundle == nil {
+            return false;
+        }
+        ["CFBundleIconFile", "CFBundleIconName"].iter().any(|key| {
+            let value: ObjcId = msg_send![bundle, objectForInfoDictionaryKey: str_to_nsstring(key)];
+            value != nil
+        })
+    }
+}
+
+/// The activation policy now: "regular" (Dock icon, menu bar), "accessory" (neither), "prohibited".
+pub(super) fn activation_policy_name() -> &'static str {
+    unsafe {
+        let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        let policy: i64 = msg_send![ns_app, activationPolicy];
+        match policy {
+            0 => "regular",
+            1 => "accessory",
+            _ => "prohibited",
+        }
+    }
+}
+
+fn install_app_menu() {
     // the running app's CFBundleName is what macOS shows as the application menu title; none
     // for a binary that is not bundled at all
     let name = unsafe {
@@ -1364,13 +1460,16 @@ fn install_quit_menu() {
         }
     };
     let sub = MenuItem { parent: 0, kind: menu_kind::SUB, ..Default::default() };
+    let about = MenuItem { parent: 1, kind: menu_kind::ITEM | menu_kind::ABOUT, cmd: 0, key: makepad_key_code::KeyCode::Escape.to_index(), str: 0 };
+    let line = MenuItem { parent: 1, kind: menu_kind::LINE, ..Default::default() };
     let quit = MenuItem { parent: 1, kind: menu_kind::ITEM | menu_kind::QUIT, cmd: 0, key: makepad_key_code::KeyCode::KeyQ.to_index(), str: 0 };
-    update_menu(&[(sub, name.clone()), (quit, format!("Quit {name}"))]);
+    update_menu(&[(sub, name.clone()), (about, format!("About {name}")), (line, String::new()), (quit, format!("Quit {name}"))]);
 }
 
 /// Builds the main menu from the flat list: node `i` (1-based) is `items[i - 1]`, `parent` 0 is
 /// the root. A `QUIT` item goes to `terminate:` (which routes through `applicationShouldTerminate:`
-/// outside any in-flight handler); the others to the menu target that re-emits their command.
+/// outside any in-flight handler), an `ABOUT` item to the application's standard About panel; the
+/// others to the menu target that re-emits their command.
 fn update_menu(items: &[(MenuItem, String)]) {
     unsafe {
         let a = app();
@@ -1380,6 +1479,9 @@ fn update_menu(items: &[(MenuItem, String)]) {
         let () = msg_send![main_menu, setDelegate: a.menu_delegate.get()];
         // menus[0] is the root, menus[i] the submenu of node i
         let mut menus: Vec<ObjcId> = vec![main_menu];
+        let dock_menu: ObjcId = msg_send![class!(NSMenu), new];
+        let () = msg_send![dock_menu, setAutoenablesItems: NO];
+        let mut docked = 0;
         for (item, name) in items {
             let parent = menus.get(item.parent as usize).copied().unwrap_or(main_menu);
             match item.kind & 0xff {
@@ -1395,7 +1497,14 @@ fn update_menu(items: &[(MenuItem, String)]) {
                 menu_kind::ITEM => {
                     menus.push(nil);
                     let quit = item.kind & menu_kind::QUIT != 0;
-                    let action = if quit { sel!(terminate:) } else { sel!(menuAction:) };
+                    let about = item.kind & menu_kind::ABOUT != 0;
+                    let action = if quit {
+                        sel!(terminate:)
+                    } else if about {
+                        sel!(orderFrontStandardAboutPanel:)
+                    } else {
+                        sel!(menuAction:)
+                    };
                     let shift = item.kind & menu_kind::SHIFT != 0;
                     let key = makepad_key_code::KeyCode::from_index(item.key);
                     let sub_item: ObjcId = msg_send![
@@ -1406,10 +1515,17 @@ fn update_menu(items: &[(MenuItem, String)]) {
                     ];
                     let enabled = item.kind & menu_kind::DISABLED == 0;
                     let () = msg_send![sub_item, setEnabled: if enabled { YES } else { NO }];
-                    if !quit {
+                    if !quit && !about {
                         let target: ObjcId = msg_send![a.classes().menu_target, new];
                         let () = msg_send![sub_item, setTarget: target];
                         (*target).set_ivar("command_u64", item.cmd as usize);
+                        if item.kind & menu_kind::DOCK != 0 {
+                            // the same command from the Dock icon's menu (no key equivalent there)
+                            let dock_item: ObjcId = msg_send![dock_menu, addItemWithTitle: str_to_nsstring(name) action: sel!(menuAction:) keyEquivalent: str_to_nsstring("")];
+                            let () = msg_send![dock_item, setTarget: target];
+                            let () = msg_send![dock_item, setEnabled: if enabled { YES } else { NO }];
+                            docked += 1;
+                        }
                     }
                 }
                 _ => {
@@ -1419,9 +1535,15 @@ fn update_menu(items: &[(MenuItem, String)]) {
                 }
             }
         }
+        a.dock_menu.set(if docked > 0 { dock_menu } else { nil });
         let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
         let () = msg_send![ns_app, setMainMenu: main_menu];
     }
+}
+
+/// The Dock icon's menu (`applicationDockMenu:`): the app's `menu_kind::DOCK` items, nil for none.
+pub fn dock_menu() -> ObjcId {
+    app().dock_menu.get()
 }
 
 // ------------------------------------------------------------------ dialogs

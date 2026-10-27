@@ -1,0 +1,263 @@
+mod.theme = mod.themes.dark
+
+// Automotive. A racing dash: a deck of dark brushed steel between bands of
+// carbon-fibre twill, dark graphite caps with a bright top edge, chrome
+// bezels round every instrument, wells of dark brushed steel behind a
+// silver rim, plates of lighter steel. State is said by light: a blue glow
+// round the chosen cap, neon blue tubes under the slider caps, a rainbow
+// bar of cells for feedback, red needles and a red line on the gauges,
+// amber lit legends on the tabs. The faces are drawn in widgets.splash;
+// this file holds the tokens every face and every stock widget reads.
+mod.theme.color_bg_app = #2c2e32
+mod.theme.color_fg_app = #1a1b1e
+mod.theme.color_bg_container = #16171a
+// Rows of a list or a tree stand clear on the deck.
+mod.theme.color_bg_even = #00000000
+mod.theme.color_bg_odd = #00000000
+
+// The surfaces a stock view fills: graphite, darker than the deck.
+mod.theme.color_surface = #0e0f11
+mod.theme.color_surface_container = #1a1b1e
+mod.theme.color_surface_container_low = #141517
+mod.theme.color_surface_container_high = #222327
+mod.theme.color_surface_container_highest = #2a2c30
+mod.theme.color_surface_container_lowest = #08090a
+mod.theme.color_surface_dim = #0b0c0d
+mod.theme.color_surface_bright = #2e3034
+mod.theme.color_on_surface = #eceef0
+mod.theme.color_on_surface_variant = #d8dbdf
+mod.theme.color_outline = #5d6066
+mod.theme.color_outline_variant = #34363a
+
+// Raised caps: the middle of the graphite face, for any stock face this
+// sheet does not replace.
+mod.theme.color_outset = #2e2f33
+mod.theme.color_outset_1 = #3a3c40
+mod.theme.color_outset_2 = #1e1f22
+mod.theme.color_outset_hover = #35373b
+mod.theme.color_outset_1_hover = #434549
+mod.theme.color_outset_2_hover = #232427
+mod.theme.color_outset_focus = #2e2f33
+mod.theme.color_outset_1_focus = #3a3c40
+mod.theme.color_outset_2_focus = #1e1f22
+mod.theme.color_outset_active = #1f2c3c
+mod.theme.color_outset_1_active = #1f2c3c
+mod.theme.color_outset_2_active = #1f2c3c
+mod.theme.color_outset_down = #1a1b1d
+mod.theme.color_outset_1_down = #1a1b1d
+mod.theme.color_outset_2_down = #1a1b1d
+mod.theme.color_outset_drag = #1a1b1d
+mod.theme.color_outset_1_drag = #1a1b1d
+mod.theme.color_outset_2_drag = #1a1b1d
+mod.theme.color_outset_disabled = #1d1e20
+mod.theme.color_outset_1_disabled = #1d1e20
+mod.theme.color_outset_2_disabled = #1d1e20
+
+// Wells cut into the ground: fields, tracks, trays.
+mod.theme.color_inset = #0b0c0d
+mod.theme.color_inset_1 = #0b0c0d
+mod.theme.color_inset_2 = #111214
+mod.theme.color_inset_hover = #0e0f10
+mod.theme.color_inset_1_hover = #0e0f10
+mod.theme.color_inset_2_hover = #111214
+mod.theme.color_inset_focus = #0b0c0d
+mod.theme.color_inset_1_focus = #0b0c0d
+mod.theme.color_inset_2_focus = #111214
+mod.theme.color_inset_active = #0b0c0d
+mod.theme.color_inset_1_active = #0b0c0d
+mod.theme.color_inset_2_active = #111214
+mod.theme.color_inset_down = #0b0c0d
+mod.theme.color_inset_1_down = #0b0c0d
+mod.theme.color_inset_2_down = #111214
+mod.theme.color_inset_drag = #0b0c0d
+mod.theme.color_inset_1_drag = #0b0c0d
+mod.theme.color_inset_2_drag = #111214
+mod.theme.color_inset_empty = #0b0c0d
+mod.theme.color_inset_1_empty = #0b0c0d
+mod.theme.color_inset_2_empty = #111214
+mod.theme.color_inset_disabled = #141517
+mod.theme.color_inset_1_disabled = #141517
+mod.theme.color_inset_2_disabled = #141517
+
+// Every edge a stock face strokes is the black outline; the light comes from
+// the bright top edge the faces draw, not from a bevel.
+mod.theme.beveling = 0.34
+mod.theme.color_bevel = #050506
+mod.theme.color_bevel_hover = #050506
+mod.theme.color_bevel_focus = #3a9cff
+mod.theme.color_bevel_active = #050506
+mod.theme.color_bevel_empty = #050506
+mod.theme.color_bevel_down = #050506
+mod.theme.color_bevel_drag = #050506
+mod.theme.color_bevel_disabled = #121315
+mod.theme.color_bevel_inset_1 = #050506
+mod.theme.color_bevel_inset_2 = #050506
+mod.theme.color_bevel_outset_1 = #050506
+mod.theme.color_bevel_outset_2 = #020203
+mod.theme.color_bevel_inset_1_hover = #050506
+mod.theme.color_bevel_inset_2_hover = #050506
+mod.theme.color_bevel_outset_1_hover = #050506
+mod.theme.color_bevel_outset_2_hover = #020203
+mod.theme.color_bevel_inset_1_focus = #3a9cff
+mod.theme.color_bevel_inset_2_focus = #3a9cff
+mod.theme.color_bevel_outset_1_focus = #3a9cff
+mod.theme.color_bevel_outset_2_focus = #3a9cff
+mod.theme.color_bevel_inset_1_down = #050506
+mod.theme.color_bevel_inset_2_down = #050506
+mod.theme.color_bevel_outset_1_down = #050506
+mod.theme.color_bevel_outset_2_down = #050506
+mod.theme.color_bevel_inset_1_disabled = #121315
+mod.theme.color_bevel_inset_2_disabled = #121315
+mod.theme.color_bevel_outset_1_disabled = #121315
+mod.theme.color_bevel_outset_2_disabled = #121315
+
+// Ink. Caps carry #dcdde0; words on the deck a touch lighter, never past
+// #e8e9eb at rest. Dim and disabled ink is #63666b.
+mod.theme.color_text = #dcdde0
+mod.theme.color_text_hover = #e8e9eb
+mod.theme.color_text_focus = #e8e9eb
+mod.theme.color_text_active = #e8e9eb
+mod.theme.color_text_down = #dcdde0
+mod.theme.color_text_val = #b9bcc1
+mod.theme.color_text_disabled = #63666b
+mod.theme.color_text_placeholder = #868a90
+mod.theme.color_text_placeholder_hover = #92969c
+mod.theme.color_text_meta = #8f9399
+mod.theme.color_text_cursor = #f4fbff
+mod.theme.color_cursor = #f4fbff
+mod.theme.color_label = #e2e3e6
+mod.theme.color_label_hover = #eeeff1
+mod.theme.color_label_focus = #eeeff1
+mod.theme.color_label_active = #eeeff1
+mod.theme.color_label_down = #e2e3e6
+mod.theme.color_label_disabled = #63666b
+mod.theme.color_label_inner = #dcdde0
+mod.theme.color_label_inner_hover = #e8e9eb
+mod.theme.color_label_inner_focus = #dcdde0
+mod.theme.color_label_inner_active = #f6f7f8
+mod.theme.color_label_inner_down = #c9cbcf
+mod.theme.color_label_inner_drag = #c9cbcf
+mod.theme.color_label_inner_inactive = #8f9399
+mod.theme.color_label_inner_disabled = #63666b
+mod.theme.color_label_outer = #e2e3e6
+mod.theme.color_label_outer_off = #a3a6ab
+mod.theme.color_label_outer_hover = #eeeff1
+mod.theme.color_label_outer_focus = #e2e3e6
+mod.theme.color_label_outer_active = #eeeff1
+mod.theme.color_label_outer_active_focus = #eeeff1
+mod.theme.color_label_outer_down = #e2e3e6
+mod.theme.color_label_outer_drag = #e2e3e6
+mod.theme.color_label_outer_disabled = #63666b
+mod.theme.color_icon = #c9cbcf
+mod.theme.color_icon_hover = #e8e9eb
+mod.theme.color_icon_focus = #c9cbcf
+mod.theme.color_icon_active = #f6f7f8
+mod.theme.color_icon_down = #c9cbcf
+mod.theme.color_icon_disabled = #63666b
+
+// The light. The focus glow and the chosen cap's rim are #3a9cff; lit
+// marks #4fb4ff; value fills the neon blue #3cc4ff.
+mod.theme.color_focus = #3a9cff
+mod.theme.color_ctrl_active = #4fb4ff
+mod.theme.color_val = #3cc4ff
+mod.theme.color_val_hover = #3cc4ff
+mod.theme.color_val_focus = #3cc4ff
+mod.theme.color_val_drag = #3cc4ff
+mod.theme.color_val_disabled = #2c3a48
+mod.theme.color_mark_active = #4fb4ff
+mod.theme.color_mark_active_hover = #4fb4ff
+mod.theme.color_mark_focus = #4fb4ff
+mod.theme.color_mark_disabled = #45484d
+// The accent seed: the primary, secondary and tertiary families are
+// grown from it, and nothing else in this file reaches them. It is the
+// selected row of a menu, the one place this family fills with colour.
+mod.theme.color_ctrl_selected = #2f7fd0
+mod.theme.color_bg_highlight = #26282c
+mod.theme.color_bg_highlight_inline = #1f4570
+mod.theme.color_text_on_accent = #ffffff
+// Selected text: the accent at a third over the well while focused.
+mod.theme.color_selection = #00000000
+mod.theme.color_selection_hover = #00000000
+mod.theme.color_selection_down = #1f4570
+mod.theme.color_selection_focus = #1f4570
+
+// The dash displays: black glass, white segments, a faint ghost.
+mod.theme.color_screen = #050607
+mod.theme.color_screen_ink = #eef2f6
+mod.theme.screen_ghost = 0.07
+
+// SPACING. Rows of 26 points, gaps of 8, panels padded 12. The base theme
+// froze everything it derives from space_factor when it was built, so every
+// rung this sheet depends on is stated again here.
+mod.theme.space_factor = 8.0
+mod.theme.space_1 = 4.0
+mod.theme.space_2 = 8.0
+mod.theme.space_3 = 12.0
+mod.theme.space_4 = 16.0
+mod.theme.space_5 = 24.0
+mod.theme.space_6 = 32.0
+mod.theme.mspace_1 = mod.turtle.Inset{top: 4.0 right: 4.0 bottom: 4.0 left: 4.0}
+mod.theme.mspace_h_1 = mod.turtle.Inset{top: 0.0 right: 4.0 bottom: 0.0 left: 4.0}
+mod.theme.mspace_v_1 = mod.turtle.Inset{top: 4.0 right: 0.0 bottom: 4.0 left: 0.0}
+mod.theme.mspace_2 = mod.turtle.Inset{top: 8.0 right: 8.0 bottom: 8.0 left: 8.0}
+mod.theme.mspace_h_2 = mod.turtle.Inset{top: 0.0 right: 8.0 bottom: 0.0 left: 8.0}
+mod.theme.mspace_v_2 = mod.turtle.Inset{top: 8.0 right: 0.0 bottom: 8.0 left: 0.0}
+mod.theme.mspace_3 = mod.turtle.Inset{top: 12.0 right: 12.0 bottom: 12.0 left: 12.0}
+mod.theme.mspace_h_3 = mod.turtle.Inset{top: 0.0 right: 12.0 bottom: 0.0 left: 12.0}
+mod.theme.mspace_v_3 = mod.turtle.Inset{top: 12.0 right: 0.0 bottom: 12.0 left: 0.0}
+mod.theme.size_control_s = 20.0
+mod.theme.size_control_m = 26.0
+mod.theme.size_control_l = 30.0
+mod.theme.tab_height = 28.0
+mod.theme.tab_flat_height = 26.0
+// Stock shaders draw a corner twice the number written: 1.5 is the 3 point
+// corner of a cap, 3 the 6 point corner of a panel.
+mod.theme.corner_radius = 1.5
+mod.theme.container_corner_radius = 3.0
+mod.theme.textselection_corner_radius = 1.0
+// The radius rungs written in true points: caps 3, panels and cards 6.
+mod.theme.radius_s = 3.0
+mod.theme.radius_m = 3.0
+mod.theme.radius_l = 6.0
+
+// TYPE. The library's own grotesque, as a dash sets its legends: cap and
+// field labels at 8.5 points, captions and lit legends in its semibold.
+mod.theme.font_size_p = 8.5
+mod.theme.font_size_base = 8.5
+// The whole ladder, restated: the base theme froze its rungs from its own
+// 10 point base, so "small" came out larger than a cap label and panel text
+// larger than both. Small 8, body 8.5, titles 9.5 to 11.5.
+mod.theme.type_label_l_size = 8.5
+mod.theme.type_label_m_size = 8.0
+mod.theme.type_label_s_size = 7.5
+mod.theme.type_body_l_size = 9.0
+mod.theme.type_body_m_size = 8.5
+mod.theme.type_body_s_size = 8.0
+mod.theme.type_title_s_size = 9.5
+mod.theme.type_title_m_size = 10.5
+mod.theme.type_title_l_size = 11.5
+// The heading rung a card title takes (H4), on the same ladder.
+mod.theme.font_size_4 = 10.5
+// The styles built from those rungs, and the two plain faces a label takes
+// when it names no size (the base draws them at 10). Only the size changes;
+// each keeps the base theme's family with all its members.
+mod.theme.font_regular = mod.theme.font_regular{font_size: 8.5}
+mod.theme.font_bold = mod.theme.font_bold{font_size: 9.0}
+mod.theme.font_title_l = mod.theme.font_bold{font_size: 11.5 line_spacing: 1.2}
+mod.theme.font_title_m = mod.theme.font_bold{font_size: 10.5 line_spacing: 1.2}
+mod.theme.font_title_s = mod.theme.font_bold{font_size: 9.5 line_spacing: 1.2}
+mod.theme.font_body_l = mod.theme.font_regular{font_size: 9.0 line_spacing: 1.35}
+mod.theme.font_body_m = mod.theme.font_regular{font_size: 8.5 line_spacing: 1.35}
+mod.theme.font_body_s = mod.theme.font_regular{font_size: 8.0 line_spacing: 1.35}
+mod.theme.font_label_l = mod.theme.font_bold{font_size: 8.5 line_spacing: 1.2}
+mod.theme.font_label_m = mod.theme.font_bold{font_size: 8.0 line_spacing: 1.2}
+mod.theme.font_label_s = mod.theme.font_bold{font_size: 7.5 line_spacing: 1.2}
+
+// No surface material: every face that matters is drawn by the sheet, and
+// the rest stay flat rather than take a relief that is not this family's.
+mod.theme.material_level = 0.0
+mod.theme.material_margin = 0.0
+mod.theme.material_glow = 0.0
+mod.theme.material_ink_glow = 0.0
+mod.theme.color_material_glow = #3a9cff
+true

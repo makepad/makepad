@@ -148,6 +148,49 @@ fn meta() -> &'static Mutex<Meta> {
     META.get_or_init(|| Mutex::new(Meta::default()))
 }
 
+/// One fleet client as the hub has heard it: its credential id, the address it called
+/// from, the app it named, how many requests and when the last one was.
+#[derive(Clone, Debug)]
+pub struct ClientSeen {
+    pub client: String,
+    pub addr: String,
+    pub app: Option<String>,
+    pub requests: u64,
+    pub last_ms: u64,
+}
+
+fn clients() -> &'static Mutex<HashMap<String, ClientSeen>> {
+    static CLIENTS: OnceLock<Mutex<HashMap<String, ClientSeen>>> = OnceLock::new();
+    CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// An authenticated request from `client` at `addr` (the TLS front names both). Local
+/// callers of a loopback node are not fleet clients and are not noted.
+pub fn note_caller(client: &str, addr: std::net::IpAddr, app: Option<&str>) {
+    let mut map = clients().lock().unwrap_or_else(|e| e.into_inner());
+    let key = format!("{client}@{addr}");
+    let seen = map.entry(key).or_insert_with(|| ClientSeen { client: client.to_string(), addr: addr.to_string(), app: None, requests: 0, last_ms: 0 });
+    seen.requests += 1;
+    seen.last_ms = crate::jobs::now_ms();
+    if let Some(app) = app {
+        seen.app = Some(app.to_string());
+    }
+    // A bounded table: the oldest go first.
+    if map.len() > 64 {
+        if let Some(oldest) = map.iter().min_by_key(|(_, c)| c.last_ms).map(|(k, _)| k.clone()) {
+            map.remove(&oldest);
+        }
+    }
+}
+
+/// The clients heard within `within_ms`, newest first.
+pub fn clients_seen(within_ms: u64) -> Vec<ClientSeen> {
+    let now = crate::jobs::now_ms();
+    let mut list: Vec<ClientSeen> = clients().lock().unwrap_or_else(|e| e.into_inner()).values().filter(|c| now.saturating_sub(c.last_ms) <= within_ms).cloned().collect();
+    list.sort_by(|a, b| b.last_ms.cmp(&a.last_ms));
+    list
+}
+
 pub fn note_job(job_id: &str, client: &str, app: Option<&str>, kind: &str) {
     let mut meta = meta().lock().unwrap();
     meta.jobs.insert(

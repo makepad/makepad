@@ -1,0 +1,38 @@
+# x64 scoreboard plan (bench box 203). One stage (= one tq ticket) per line: <workload> [sbstage args]
+# real apps first (they matter most), then rwbench
+game:race
+game:strike
+game:leap
+game:flight
+start:stage --settle 90
+start:story --settle 90
+start:scope --settle 90
+start:code --settle 90
+start:amp --settle 90
+start:calculator --settle 90
+start:box3d --settle 90
+rw:text_shape_raster
+rw:sdf_glyphs
+rw:inflate_real
+rw:zip_read
+rw:png_decode
+rw:brotli_decode
+rw:maps_tile_decode
+rw:layout_widgets
+rw:llm_host
+rw:rust_tokenize
+rw:markdown_parse
+rw:html_parse
+rw:piano_render
+rw:ogg_decode
+rw:audio_mix
+rw:splash_eval
+rw:csg_boolean
+rw:box3d_physics
+rw:sandbox_sim
+rw:level_walk
+rw:model_build
+# UI interaction and media
+ui:calculator
+ui:code
+stage:pdoom

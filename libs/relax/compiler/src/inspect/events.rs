@@ -59,7 +59,7 @@ pub fn parked_events(domain: u32) -> Option<Vec<std::sync::Arc<str>>> {
         .map(|p| p.event.clone()).collect())
 }
 
-pub const KINDS: &[&str] = &["panic", "hang", "deadlock", "mem", "spike", "hitch", "rtstall", "scripterr", "patchrefused", "patchverified", "patchreverted"];
+pub const KINDS: &[&str] = &["panic", "hang", "deadlock", "mem", "spike", "hitch", "rtstall", "scripterr", "patchrefused", "patchverified", "patchreverted", "engine_request", "engine_reply", "engine_code_update"];
 
 /// Records an event (`fields`: the kind-specific JSON members, without braces). Returns its seq,
 /// or 0 when it repeated one sent in the last 30 s.
@@ -69,6 +69,9 @@ pub fn emit(kind: &'static str, key: &str, fields: &str) -> u64 {
 
 fn emit_record(kind: &'static str, key: &str, fields: &str) -> (u64, std::sync::Arc<str>) {
     let _k = crate::zone_alloc::kept();
+    if kind != "panic" {
+        super::flightrec::inspect_event(kind, key);
+    }
     let mut q = EVENTS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(e) = q.iter().rev().find(|e| e.kind == kind && e.key == key) {
         if e.at.elapsed().as_secs() < 30 {
@@ -237,6 +240,36 @@ struct Parked {
     event: std::sync::Arc<str>,
     /// (thread name, message, location): why-hung's verdict names the parked panic
     what: (String, String, String),
+    /// its frames, innermost first (lookup pcs): `eval`'s default scope, `locals`
+    frames: Vec<u64>,
+    /// the panic trampoline's register block at the innermost frame's call (frame pointer,
+    /// return address, callee-saved registers; jit.rs REG_WORDS): `locals` reads the frames'
+    /// variables from it; empty for a stop without one (a fault)
+    regs: Vec<u64>,
+    /// a stale access (stale.rs): parked in its fault handler for good; only `restart` / `stop`
+    stale: bool,
+}
+
+/// Parked panic `id`'s (the newest with None) register block at its innermost frame's call
+/// (empty: none): (id, block).
+pub fn parked_regs(id: Option<u64>) -> Option<(u64, Vec<u64>)> {
+    let list = PARKED.lock().unwrap_or_else(|e| e.into_inner());
+    let p = match id {
+        Some(k) => list.iter().find(|p| p.id == k)?,
+        None => list.iter().max_by_key(|p| p.id)?,
+    };
+    Some((p.id, p.regs.clone()))
+}
+
+/// Parked panic `id` (the newest with None): (id, its domain, its frames as lookup pcs, its
+/// thread's os id).
+pub fn parked_frames(id: Option<u64>) -> Option<(u64, Option<crate::domain::DomainId>, Vec<u64>, u64)> {
+    let list = PARKED.lock().unwrap_or_else(|e| e.into_inner());
+    let p = match id {
+        Some(k) => list.iter().find(|p| p.id == k)?,
+        None => list.iter().max_by_key(|p| p.id)?,
+    };
+    Some((p.id, p.domain, p.frames.clone(), p.os_id))
 }
 
 // ---- retry boundaries (DESIGN.md §10b): makepad's event dispatch runs inside one while an agent
@@ -285,6 +318,14 @@ fn park_secs_unwatched() -> u64 {
 
 /// A panic is about to unwind on this (program) thread: park it if someone may want to look
 /// (jit.rs raise_with; not on the owner, not without a recovery point).
+/// The program frames of thread `os_id` when it is parked at a stale access (pc first, then
+/// return addresses, as a capture gives them).
+pub fn stale_frames_of(os_id: u64) -> Option<Vec<u64>> {
+    let list = PARKED.lock().unwrap_or_else(|e| e.into_inner());
+    let p = list.iter().find(|p| p.stale && p.os_id == os_id)?;
+    Some(p.frames.iter().enumerate().map(|(i, &f)| if i == 0 { f } else { f + 1 }).collect())
+}
+
 /// True when `os_id` is a thread parked at a panic.
 pub fn panic_parked(os_id: u64) -> bool {
     PARKED.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|p| p.os_id == os_id)
@@ -298,15 +339,17 @@ pub fn release_domain(domain: crate::domain::DomainId) {
     RESUME.notify_all();
 }
 
-pub fn on_panic(info: &crate::jit::PanicInfo, unwinds: bool) {
+pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
+    let unwinds = !regs.is_null();
     let _k = crate::zone_alloc::kept();
-    if !super::STARTED.load(Relaxed) || crate::owner::is_owner() || super::probes::in_probe() {
+    if !super::STARTED.load(Relaxed) || crate::owner::is_owner() || super::probes::in_probe() || super::eval::in_eval() {
         return;
     }
     let domain = crate::domain::current_app_domain();
     let watched = WATCHERS.load(SeqCst) > 0 || super::AGENT.load(Relaxed)
         || (RUN_STATE_AVAILABLE.load(SeqCst) && domain.is_some() && domain == crate::run::app_domain());
     let key = format!("{}|{}|{}", info.site, info.location, info.message);
+    super::flightrec::panic(&super::short(&info.message, 120), if info.location.is_empty() { "?" } else { &info.location });
     if !watched {
         let mut seen = SITES_SEEN.lock().unwrap_or_else(|e| e.into_inner());
         if park_secs_unwatched() == 0 || seen.iter().any(|s| s.1 == key) {
@@ -366,7 +409,7 @@ pub fn on_panic(info: &crate::jit::PanicInfo, unwinds: bool) {
     // Do not park a new cleanup panic after that release.
     if domain.is_some_and(crate::domain::cancelled) { return; }
     let (seq, event) = emit_record("panic", &format!("P{}", id), &fields);
-    let p = std::sync::Arc::new(Parked { id, seq, os_id: super::threads::self_os_id(), domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event, what: (thread.clone(), info.message.clone(), location.clone()) });
+    let p = std::sync::Arc::new(Parked { id, seq, os_id: super::threads::self_os_id(), domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event, what: (thread.clone(), info.message.clone(), location.clone()), frames: info.frames.iter().copied().take(64).collect(), regs: if unwinds { unsafe { std::slice::from_raw_parts(regs, crate::jit::REG_WORDS) }.to_vec() } else { Vec::new() }, stale: false });
     list.push(p.clone());
     parked_changed();
     if !watched {
@@ -388,6 +431,7 @@ pub fn on_panic(info: &crate::jit::PanicInfo, unwinds: bool) {
     drop(list);
     parked_changed();
     let decision = p.decision.load(SeqCst);
+    super::flightrec::panic_decided(id, ["timed out: unwinds", "panic", "retry", "restart", "return"].get(decision as usize).copied().unwrap_or("?"));
     if decision == 2 && boundary.is_some() {
         let _ = RETRY.try_with(|r| r.set(true));
     }
@@ -400,6 +444,70 @@ pub fn on_panic(info: &crate::jit::PanicInfo, unwinds: bool) {
             super::instrument::set_pending(super::instrument::Pending { slot: *slot, mode: if decision == 3 { 1 } else { 2 }, words });
         }
     }
+}
+
+/// Somebody could answer a parked stop now: the Run panel, an inspect watcher, an agent.
+pub fn can_decide() -> bool {
+    super::STARTED.load(Relaxed) && (WATCHERS.load(SeqCst) > 0 || super::AGENT.load(Relaxed) || RUN_STATE_AVAILABLE.load(SeqCst))
+}
+
+/// A stale access (stale.rs), parked on behalf of thread `os_id` (it waits in its fault handler
+/// for good): listed and announced as a parked panic -- `panics`, `watch`, the Run panel -- with the
+/// choices `restart` (the app domain relaunches; only for the app's own domain) and `stop`. Waits
+/// for the decision without a timeout. True: stop; false: the domain was relaunched.
+/// What the user decided for a parked stale access.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StaleDecision {
+    /// the process ends by the fault's signal
+    Stop,
+    /// the app domain was relaunched (window kept): the program runs on, the thread stays parked
+    RestartDomain,
+    /// no app domain: the process starts again with its command line
+    RestartProcess,
+}
+
+pub fn park_stale(os_id: u64, domain: Option<crate::domain::DomainId>, message: &str, frames: &[u64]) -> StaleDecision {
+    let _k = crate::zone_alloc::kept();
+    let id = PANIC_IDS.fetch_add(1, SeqCst) + 1;
+    let top: Vec<u64> = frames.iter().copied().take(12).collect();
+    let as_raw: Vec<u64> = top.iter().enumerate().map(|(i, &p)| if i == 0 { p } else { p + 1 }).collect();
+    let mut partial = Vec::new();
+    let sym = super::symbolise_within(&[as_raw], &mut partial, 500).pop().unwrap_or_default();
+    let location = sym.first().map(|f| f.at.clone()).unwrap_or_default();
+    let fr: Vec<String> = sym.iter().map(super::frame_json).collect();
+    let thread = super::threads::list().into_iter().find(|t| t.os_id == os_id).map(|t| t.name.clone()).unwrap_or_else(|| os_id.to_string());
+    let primary = domain.is_some() && domain == crate::run::app_domain();
+    let fields = format!(
+        "\"id\":\"P{}\",\"kind\":\"stale access\",\"message\":{},\"location\":{},\"thread\":{},\"frames\":[{}],\"parked_s\":null{},\"more\":[\"stacks\",\"why-hung\",{}\"resume P{} stop\"]",
+        id,
+        json_str(&super::short(message, 400)),
+        json_str(&location),
+        json_str(&thread),
+        fr.join(","),
+        if primary { format!(",\"restart\":{{\"domain\":{},\"window_kept\":true}}", domain.unwrap()) } else { ",\"restart\":{\"process\":true,\"state_kept\":false}".to_string() },
+        format!("\"resume P{} restart\",", id),
+        id
+    );
+    let mut list = PARKED.lock().unwrap_or_else(|e| e.into_inner());
+    let (seq, event) = emit_record("panic", &format!("P{}", id), &fields);
+    let p = std::sync::Arc::new(Parked { id, seq, os_id, domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event, what: (thread, message.to_string(), location), frames: frames.iter().copied().take(64).collect(), regs: Vec::new(), stale: true });
+    list.push(p.clone());
+    parked_changed();
+    eprintln!("makepad: stale access parked as P{} -- makepad inspect {} panics; resume P{} restart | stop", id, std::process::id(), id);
+    while p.decision.load(SeqCst) == 0 {
+        list = RESUME.wait_timeout(list, std::time::Duration::from_millis(500)).unwrap_or_else(|e| e.into_inner()).0;
+    }
+    list.retain(|x| x.id != id);
+    drop(list);
+    parked_changed();
+    let decision = p.decision.load(SeqCst);
+    let d = match decision {
+        5 => StaleDecision::Stop,
+        3 => StaleDecision::RestartProcess,
+        _ => StaleDecision::RestartDomain,
+    };
+    super::flightrec::panic_decided(id, match d { StaleDecision::Stop => "stale: stop", StaleDecision::RestartDomain => "stale: restart (domain)", StaleDecision::RestartProcess => "stale: restart (process)" });
+    d
 }
 
 /// "file:line:col" of a compiler-known panic site.
@@ -441,8 +549,9 @@ pub fn cmd_resume(req: &Req, out: &mut Out) {
         "retry" => 2,
         "restart" => 3,
         "return" => 4,
+        "stop" => 5,
         _ => {
-            out.err("resume <P<n>> panic | retry | restart | return <value>[,<value>..]");
+            out.err("resume <P<n>> panic | retry | restart | return <value>[,<value>..] | stop (a stale access)");
             return;
         }
     };
@@ -468,6 +577,14 @@ pub fn cmd_resume(req: &Req, out: &mut Out) {
     }
     let list = PARKED.lock().unwrap_or_else(|e| e.into_inner());
     match list.iter().find(|p| p.id == id) {
+        Some(p) if p.stale && decision != 3 && decision != 5 => out.err(&format!("P{} is a stale access: its thread cannot go on (resume P{} restart | stop)", id, id)),
+        Some(p) if !p.stale && decision == 5 => out.err(&format!("P{} is a panic: stop is for stale accesses", id)),
+        Some(p) if p.stale && decision == 3 && !(p.domain.is_some() && p.domain == crate::run::app_domain()) => {
+            // no app domain: the process starts again (stale.rs restart_process)
+            p.decision.store(3, SeqCst);
+            RESUME.notify_all();
+            out.line(&format!("{{\"resumed\":\"P{}\",\"as\":\"process restart\",\"state_kept\":false}}", id));
+        }
         Some(p) => {
             if decision == 3 && p.domain.is_some() && p.domain == crate::run::app_domain() {
                 match crate::run::relaunch() {
@@ -504,9 +621,12 @@ pub fn start() {
         let mut base_rss = 0u64;
         let mut tick = 0u64;
         let (mut marked_main, mut marked_present) = (false, false);
+        // the main thread outside any registry wait, no wait cycle, the resident size unchanged:
+        // one look a second (the tick counts quarter seconds: it moves to the next whole second)
+        let (mut idle, mut last_rss) = (false, 0u64);
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            tick += 1;
+            std::thread::sleep(std::time::Duration::from_millis(if idle { 1000 } else { 250 }));
+            tick = if idle { (tick / 4 + 1) * 4 } else { tick + 1 };
             let waits = crate::waits::snapshot();
             let main = crate::jit::MAIN_TID.load(Relaxed);
             let now = crate::clock::wall_ns();
@@ -542,6 +662,8 @@ pub fn start() {
             super::heap::expire();
             // the memory timeline and its phase markers
             let rss = crate::memstat::resident();
+            idle = last_cycle.is_empty() && rss == last_rss && crate::jit::FIRST_PRESENT.load(Relaxed) && !waits.iter().any(|w| w.thread == main);
+            last_rss = rss;
             super::mem::tick(tick, rss);
             if !marked_main && main != 0 {
                 marked_main = true;

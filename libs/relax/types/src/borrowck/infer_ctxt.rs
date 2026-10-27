@@ -23,6 +23,9 @@ pub struct BorrowckInferCtxt<'tcx> {
     pub param_env: ParamEnv,
     param_env_id: std::cell::OnceCell<crate::tcx::ParamEnvId>,
     pub tainted_by_errors: std::cell::Cell<bool>,
+    /// A type op of the body failed (custom.rs scrape_region_constraints): the root's potentially
+    /// region-dependent goals are re-proven (`check_potentially_region_dependent_goals`).
+    pub type_op_failed: std::cell::Cell<bool>,
     encountered_re_error: std::cell::Cell<bool>,
     pub universal_regions: Option<super::universal_regions::UniversalRegions>,
     pub region_bound_pairs: Vec<(TyId, RegionId)>,
@@ -52,7 +55,7 @@ impl<'tcx> BorrowckInferCtxt<'tcx> {
         for p in &*result.clauses { clauses.push(tcx.instantiate_predicate(prog, def_id, &full, p)); }
         let param_env = ParamEnv { clauses: clauses.into() };
         let param_env_id = std::cell::OnceCell::new();
-        BorrowckInferCtxt { infcx, prog, root_def_id, param_env, param_env_id, tainted_by_errors: std::cell::Cell::new(false), encountered_re_error: std::cell::Cell::new(false), universal_regions: None, region_bound_pairs: Vec::new(), mir_view: None, mir_views_outer: Vec::new(), reg_var_to_origin: RefCell::new(HashMap::default()) }
+        BorrowckInferCtxt { infcx, prog, root_def_id, param_env, param_env_id, tainted_by_errors: std::cell::Cell::new(false), type_op_failed: std::cell::Cell::new(false), encountered_re_error: std::cell::Cell::new(false), universal_regions: None, region_bound_pairs: Vec::new(), mir_view: None, mir_views_outer: Vec::new(), reg_var_to_origin: RefCell::new(HashMap::default()) }
     }
 
     pub(crate) fn param_env_id(&self) -> crate::tcx::ParamEnvId {
@@ -145,6 +148,7 @@ impl<'tcx> BorrowckInferCtxt<'tcx> {
         self.infcx.inner.borrow_mut().opaque_types().set_span_since(opaques_before, (span.lo, span.hi));
         if result.is_err() {
             self.tainted_by_errors.set(true);
+            self.type_op_failed.set(true);
             if std::env::var_os("MAKEPAD_RUN_NOSOLUTION_TRACE").is_some() {
                 let show = |t| crate::typeck::ty_to_string(false, self.prog, &self.tcx, t);
                 let what = match &input_dbg {

@@ -995,6 +995,8 @@ pub(crate) mod tests {
             flow_map: false,
             target_domain: "image".to_string(),
             chat_session: String::new(),
+            chat_system: String::new(),
+            chat_messages: Vec::new(),
             chat_images: Vec::new(),
             identity_anchor: String::new(),
             style: String::new(),

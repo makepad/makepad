@@ -21,3 +21,27 @@ pub fn memory_size<const MEM: u32>() -> usize {
 pub fn memory_grow<const MEM: u32>(delta: usize) -> usize {
     unsafe { relax_web_memory_grow(MEM, delta) }
 }
+
+extern "C" {
+    fn relax_web_atomic_wait32(addr: *mut i32, expected: i32, timeout_ns: i64) -> i32;
+    fn relax_web_atomic_notify(addr: *mut i32, count: u32) -> u32;
+}
+
+/// `memory.atomic.wait32`: blocks while `*ptr == expression` (a negative `timeout_ns` waits
+/// forever). 0 = woken by a notify, 1 = the value was not `expression`, 2 = timed out.
+#[inline]
+pub unsafe fn memory_atomic_wait32(ptr: *mut i32, expression: i32, timeout_ns: i64) -> i32 {
+    relax_web_atomic_wait32(ptr, expression, timeout_ns)
+}
+
+/// `memory.atomic.notify`: wakes up to `waiters` threads blocked on `ptr`; how many woke.
+#[inline]
+pub unsafe fn memory_atomic_notify(ptr: *mut i32, waiters: u32) -> u32 {
+    relax_web_atomic_notify(ptr, waiters)
+}
+
+/// The 128-bit vector type (simd128): same size and alignment as wasm's `v128`.
+#[derive(Copy, Clone)]
+#[repr(C, align(16))]
+#[allow(non_camel_case_types)]
+pub struct v128(pub [i32; 4]);

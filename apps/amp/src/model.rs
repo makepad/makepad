@@ -13,7 +13,8 @@ use crate::source::{CatalogResults, Device, NowPlaying, Repeat, TrackDetail, Tra
 use crate::worker::Availability;
 use crate::Theme;
 use makepad_audio_route::AnalyzerHandle;
-use makepad_widgets::{GridColumns, GridSort};
+use makepad_widgets::{log, GridColumn, GridColumns, GridSort};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Tracks a search lists at most; the count says how many matched.
@@ -271,8 +272,10 @@ pub struct Requests {
     pub transport: Vec<Transport>,
     /// The query changed: search the catalog after a pause.
     pub catalog: bool,
-    /// The table's columns changed (chosen, moved, resized, sorted): save them.
+    /// The table's columns changed (chosen, moved, resized): save them.
     pub columns: bool,
+    /// A list's sort changed: save every list's sort.
+    pub sorts: bool,
     /// The play queue changed: hand its next tracks to the system.
     pub queue: bool,
     /// Fetch a radio: (seed uri, title).
@@ -319,8 +322,11 @@ pub struct Model {
     pub error: Option<String>,
     /// How long the last local search took, in ms.
     pub search_ms: f64,
-    /// The track table's columns and the sort a heading press chose.
+    /// The track table's columns, and the open list's sort.
     pub columns: GridColumns<Column>,
+    /// Each list's sort, by [`Model::list_key`]: a heading press sorts the
+    /// open list only, and it is sorted that way when it opens again.
+    pub sorts: HashMap<String, GridSort<Column>>,
     /// The equalizer as set, and where its route stands.
     pub eq: EqSettings,
     pub audio: AudioState,
@@ -344,6 +350,13 @@ pub struct Model {
     /// The local file played out with nothing of ours after it: Play
     /// starts it again.
     pub local_done: bool,
+    /// An AI song plays while one is being made (`ai_page.rs`): when it
+    /// plays out with nothing after it, its last
+    /// [`crate::ai_music::LOOP_TAIL_MS`] play again until the new song is
+    /// ready, rather than silence.
+    pub ai_hold: bool,
+    /// Set when that happened; the next AI song then starts at once.
+    pub ai_waiting: bool,
     pub filter: Filter,
     /// The folders of music files, as added.
     pub folders: Vec<String>,
@@ -379,6 +392,7 @@ impl Model {
             error: None,
             search_ms: 0.0,
             columns: columns::layout(),
+            sorts: HashMap::new(),
             eq: EqSettings::default(),
             audio: AudioState::Off,
             route_sound: None,
@@ -390,6 +404,8 @@ impl Model {
             local_path: None,
             local_generation: 0,
             local_done: false,
+            ai_hold: false,
+            ai_waiting: false,
             filter: Filter::All,
             folders: Vec::new(),
             local_progress: String::new(),
@@ -549,13 +565,55 @@ impl Model {
         }
     }
 
-    /// A press on a column's heading: rising, falling, then back to the
-    /// list's own order.
+    /// A press on a column's heading: the open list sorts by it rising, the
+    /// next press falling, and so on (# is the list's own order).
     pub fn press_heading(&mut self, column: Column) {
+        let Some(key) = self.list_key() else { return };
+        self.columns.set_sort(self.sorts.get(&key).copied());
         if self.columns.press_heading(column) {
-            self.requests.columns = true;
+            match self.columns.sort() {
+                Some(sort) => self.sorts.insert(key, sort),
+                None => self.sorts.remove(&key),
+            };
+            self.requests.sorts = true;
             self.rebuild();
         }
+    }
+
+    /// What the open list's sort is kept under: a playlist by its uri, an
+    /// artist or album by its name, the search page as one list.
+    pub fn list_key(&self) -> Option<String> {
+        match &self.page {
+            Page::Playlist(at) => self.index.entries.get(*at).map(|entry| format!("playlist {}", entry.uri)),
+            Page::Search => Some("search".into()),
+            Page::Artist(name) => Some(format!("artist {name}")),
+            Page::Album(name, artists, _) => Some(format!("album {name} · {artists}")),
+            Page::Equalizer | Page::Folders => None,
+        }
+    }
+
+    /// Every list's sort, one `up|down <column> <list key>` line each.
+    pub fn serialize_sorts(&self) -> String {
+        let mut lines: Vec<String> = self.sorts.iter().map(|(key, sort)| format!("{} {} {key}\n", if sort.descending { "down" } else { "up" }, sort.column.code())).collect();
+        lines.sort();
+        lines.concat()
+    }
+
+    /// Read back what [`Self::serialize_sorts`] wrote; unknown lines are skipped.
+    pub fn parse_sorts(&mut self, text: &str) {
+        for line in text.lines() {
+            let mut parts = line.splitn(3, ' ');
+            let (Some(way), Some(code), Some(key)) = (parts.next(), parts.next(), parts.next()) else { continue };
+            let descending = match way {
+                "down" => true,
+                "up" => false,
+                _ => continue,
+            };
+            if let Some(column) = columns::ALL.iter().copied().find(|c| c.code() == code) {
+                self.sorts.insert(key.to_string(), GridSort { column, descending });
+            }
+        }
+        self.rebuild();
     }
 
     /// The columns were chosen, moved or read back: rebuild in case the
@@ -885,10 +943,56 @@ impl Model {
         } else if self.queue.driving && self.queue.upcoming_len() > 0 {
             let next = self.queue.advance();
             self.start(next);
+        } else if self.ai_hold && !failed {
+            // The next AI song is still being made: the end of this one
+            // again, never silence (`ai_music.rs`).
+            let tail = self.playback.duration_ms.saturating_sub(crate::ai_music::LOOP_TAIL_MS);
+            log!("amp: ai-music: the next song is not ready; playing the last {} s again", crate::ai_music::LOOP_TAIL_MS / 1000);
+            self.ai_waiting = true;
+            self.requests.player.push(PlayerRequest::Seek(tail));
+            self.changed();
         } else {
             // Played out: the output closes until something plays again.
             self.local_done = true;
             self.requests.player.push(PlayerRequest::Stop);
+            self.changed();
+        }
+    }
+
+    /// Play the AI list (`items`, oldest first) from `start` on: songs
+    /// made later for its end join this list (`ai_append`).
+    pub fn ai_play(&mut self, items: Vec<QueueItem>, start: usize) {
+        self.ai_waiting = false;
+        let first = self.queue.play_list(items, start, crate::ai_music::FOLDER_NAME);
+        self.start(first);
+    }
+
+    /// A song made by "Generate now": it plays next (at once when the
+    /// playing AI song was replaying its end while it waited).
+    pub fn ai_play_next(&mut self, item: QueueItem) {
+        if self.ai_waiting {
+            self.ai_waiting = false;
+            self.queue.user.insert(0, item);
+            let next = self.queue.advance();
+            self.start(next);
+        } else {
+            self.run(Activate::PlayNext(item));
+        }
+    }
+
+    /// A song Auto made for the end of the AI list: it joins the list
+    /// playing, when that is the AI list.
+    pub fn ai_append(&mut self, item: QueueItem) {
+        if !self.queue.driving || self.queue.source != crate::ai_music::FOLDER_NAME {
+            return;
+        }
+        self.queue.list.push(item);
+        if self.ai_waiting {
+            self.ai_waiting = false;
+            let next = self.queue.advance();
+            self.start(next);
+        } else {
+            self.requests.queue = true;
             self.changed();
         }
     }
@@ -1060,6 +1164,11 @@ impl Model {
         if (self.queue.driving || self.queue.parked) && self.queue.upcoming_len() > 0 {
             let next = self.queue.advance();
             self.start(next);
+        } else if self.ai_hold {
+            // An AI song with none made after it yet: the next one starts
+            // the moment it is (ai_page.rs), the playing one goes on.
+            self.ai_waiting = true;
+            self.changed();
         } else {
             self.transport(Transport::Next);
         }
@@ -1187,6 +1296,15 @@ impl Model {
     }
 
     /// What a row's menu offers, and what each does.
+    /// The track URI a row stands for: a library track or a catalog track.
+    pub fn row_uri(&self, row: usize) -> Option<String> {
+        match self.rows.get(row)? {
+            Row::Track { id, .. } => self.index.tracks.get(*id as usize).map(|track| track.uri.clone()),
+            Row::Catalog { kind: "Track", uri, .. } => Some(uri.clone()),
+            _ => None,
+        }
+    }
+
     pub fn row_commands(&self, row: usize) -> Vec<(RowCommand, Activate)> {
         let mut out = Vec::new();
         match self.rows.get(row) {
@@ -1290,6 +1408,8 @@ impl Model {
         if self.filter == Filter::Local && self.page != Page::Folders {
             self.rows.retain(|row| !matches!(row, Row::Track { id, .. } if !index.has_local(*id)));
         }
+        let sort = self.list_key().and_then(|key| self.sorts.get(&key).copied());
+        self.columns.set_sort(sort);
         if let Some(sort) = self.columns.sort() {
             sort_tracks(&index, &mut self.rows, sort);
         }
@@ -1444,7 +1564,7 @@ pub fn long_duration(ms: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn playing(uri: &str, on: bool) -> Option<NowPlaying> {
@@ -1531,8 +1651,9 @@ mod tests {
         }).collect()
     }
 
-    /// A heading sorts rising, falling, then back to the playlist's order;
-    /// text sorts folded (Ämber with the a's).
+    /// Each press on a heading turns the sort around (rising, falling,
+    /// rising...); text sorts folded (Ämber with the a's); # rising is the
+    /// playlist's own order.
     #[test]
     fn headings_sort_every_way() {
         let mut model = playlist_model();
@@ -1542,12 +1663,34 @@ mod tests {
         model.press_heading(Column::Title);
         assert_eq!(names(&model), ["Gamma", "Beta", "Ämber", "alpha"]);
         model.press_heading(Column::Title);
+        assert_eq!(names(&model), ["alpha", "Ämber", "Beta", "Gamma"]);
+        model.press_heading(Column::Number);
         assert_eq!(names(&model), ["Beta", "alpha", "Gamma", "Ämber"]);
         // # falling: the playlist backwards, newest additions first.
         model.press_heading(Column::Number);
-        model.press_heading(Column::Number);
         assert_eq!(names(&model), ["Ämber", "Gamma", "alpha", "Beta"]);
-        assert!(model.requests.columns, "a sort is saved with the layout");
+        assert!(model.requests.sorts, "a sort is saved");
+    }
+
+    /// A sort belongs to the list it was chosen on: another list opens in
+    /// its own order, and the first is sorted again when it reopens, also
+    /// after the sorts were saved and read back.
+    #[test]
+    fn each_list_keeps_its_own_sort() {
+        let mut model = playlist_model();
+        let page = model.page.clone();
+        model.press_heading(Column::Title);
+        model.press_heading(Column::Title);
+        assert_eq!(names(&model), ["Gamma", "Beta", "Ämber", "alpha"]);
+        model.open(Page::Search);
+        assert_eq!(model.columns.sort(), None);
+        model.open(page.clone());
+        assert_eq!(names(&model), ["Gamma", "Beta", "Ämber", "alpha"]);
+        let saved = model.serialize_sorts();
+        let mut fresh = playlist_model();
+        fresh.parse_sorts(&saved);
+        fresh.open(page);
+        assert_eq!(names(&fresh), ["Gamma", "Beta", "Ämber", "alpha"]);
     }
 
     /// Playing a row of a list sorted by # falling plays on in that order,
@@ -1686,7 +1829,7 @@ mod tests {
 
     /// A library of two system tracks, one with a local copy, and a local
     /// file of its own, laid side by side.
-    fn mixed_model() -> Model {
+    pub(crate) fn mixed_model() -> Model {
         use crate::source::{LibraryEntry, Playlist, PlaylistTrack, SourceId};
         let mut system = Index::new(SourceId::Spotify);
         system.set_library(vec![LibraryEntry { uri: "p:1".into(), name: "Mix".into(), is_folder: false, depth: 1 }]);
@@ -1704,11 +1847,11 @@ mod tests {
         model
     }
 
-    fn item(uri: &str, name: &str) -> QueueItem {
+    pub(crate) fn item(uri: &str, name: &str) -> QueueItem {
         QueueItem { uri: uri.into(), name: name.into(), artist: "A".into() }
     }
 
-    fn player_plays(model: &mut Model) -> Vec<String> {
+    pub(crate) fn player_plays(model: &mut Model) -> Vec<String> {
         std::mem::take(&mut model.requests.player).into_iter().map(|request| match request {
             PlayerRequest::Play { path, .. } => path,
             other => format!("{other:?}"),
@@ -1919,6 +2062,40 @@ mod tests {
         model.transport(Transport::Resume);
         assert_eq!(player_plays(&mut model), ["/m/mine.ogg"]);
         assert!(!model.local_done);
+    }
+
+    /// AI music: the AI list plays from the song picked; a song Auto made
+    /// joins its end, one made by Generate now plays next; a song made
+    /// while the last one replayed its end (waiting) starts at once; a list
+    /// that is not the AI list is left alone.
+    #[test]
+    fn ai_songs_go_where_they_were_made_for() {
+        let mut model = mixed_model();
+        let (mine, kept) = (item("file:///m/mine.ogg", "Mine"), item("file:///m/kept.ogg", "Kept"));
+        model.ai_play(vec![mine.clone()], 0);
+        assert_eq!(player_plays(&mut model), ["/m/mine.ogg"]);
+        model.ai_append(kept.clone());
+        assert_eq!(upcoming(&model), ["Kept"], "Auto's song joins the end");
+        model.ai_play_next(item("file:///m/mine.ogg", "Mine again"));
+        assert_eq!(upcoming(&model), ["Mine again", "Kept"], "Generate now's song plays next");
+        assert!(player_plays(&mut model).is_empty(), "nothing is interrupted");
+
+        model.edit_queue(|queue| queue.clear());
+        model.ai_play(vec![kept.clone()], 0);
+        player_plays(&mut model);
+        model.ai_hold = true;
+        model.local_ended(model.local_generation);
+        assert!(model.ai_waiting, "the last song replays its end while one is made");
+        player_plays(&mut model);
+        model.ai_append(mine.clone());
+        assert_eq!(player_plays(&mut model), ["/m/mine.ogg"], "the made song starts at once");
+        assert!(!model.ai_waiting);
+
+        model.ai_hold = false;
+        model.run(Activate::PlayOne(kept));
+        player_plays(&mut model);
+        model.ai_append(mine);
+        assert!(upcoming(&model).is_empty(), "not the AI list: nothing joins it");
     }
 
     /// A file that cannot be read or decoded moves on even under repeat

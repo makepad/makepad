@@ -512,18 +512,63 @@ pub fn eval_bin(op: Bin, a: u64, b: u64) -> u64 {
     }
 }
 
+/// A float fused multiply-add: `fma(a', b, c')` with one rounding, where `a' = -a` for
+/// [`Fma::SubFrom`] and `c' = -c` for [`Fma::Sub`] (exact sign flips: a NaN operand's sign flips
+/// too). A NaN result is spelled out ([`fma_nan`]): Rust leaves the sign and payload of
+/// `mul_add`'s NaN unspecified, and rustc really does vary -- with the `fma` target feature
+/// LLVM folds `(-a).mul_add(b, c)` into vfnmadd, which keeps a NaN `a`'s sign, without it the
+/// C library's fmaf sees `-a` -- so the interpreter must not leave it to the compiler.
 #[inline(always)]
 pub fn eval_fma(k: Fma, a: u64, b: u64, c: u64) -> u64 {
     if k == Fma::MulAddI {
         return iw(i(a).wrapping_mul(i(b)).wrapping_add(i(c)));
     }
     let (a, b, c) = (f(a), f(b), f(c));
-    fw(match k {
-        Fma::Add => a.mul_add(b, c),
-        Fma::SubFrom => (-a).mul_add(b, c),
-        Fma::Sub => a.mul_add(b, -c),
+    let (a, c) = match k {
+        Fma::Add => (a, c),
+        Fma::SubFrom => (-a, c),
+        Fma::Sub => (a, -c),
         Fma::MulAddI => unreachable!(),
-    })
+    };
+    let r = a.mul_add(b, c);
+    if r.is_nan() {
+        return fma_nan(a.to_bits(), b.to_bits(), c.to_bits()) as u64;
+    }
+    fw(r)
+}
+
+/// The NaN of `fma(a, b, c)` (operands already negated) as the native back ends' fused
+/// multiply-add gives it on this host; every native kernel (scalar and x4) keeps this operand
+/// placement (relax_backend::rir::fma_nan_f32 is the same rule).
+/// - x86-64 (vfmadd213 with a in the destination, b in vvvv, c in r/m -- the C library's
+///   fmaf): the first NaN of b, a, c, quieted (no signaling-first rule); none (an invalid
+///   inf * 0 or inf - inf): the negative default NaN.
+/// - AArch64 (fmadd/fmla, Rn = a, Rm = b, addend c; Arm's FPMulAdd): the first signaling NaN of
+///   c, a, b, else the first quiet NaN of c, a, b, quieted -- except a quiet NaN c with
+///   inf * 0 gives the default NaN; none: the positive default NaN.
+/// - other hosts (wasm32: the interpreter itself in a browser): the first NaN of b, a, c,
+///   quieted; none: the positive default NaN.
+pub fn fma_nan(a: u32, b: u32, c: u32) -> u32 {
+    const QUIET: u32 = 0x0040_0000;
+    let nan = |x: u32| x & 0x7FFF_FFFF > 0x7F80_0000;
+    #[cfg(target_arch = "aarch64")]
+    {
+        let snan = |x: u32| nan(x) && x & QUIET == 0;
+        if let Some(&x) = [c, a, b].iter().find(|&&x| snan(x)) {
+            return x | QUIET;
+        }
+        let inf = |x: u32| x & 0x7FFF_FFFF == 0x7F80_0000;
+        let zero = |x: u32| x & 0x7FFF_FFFF == 0;
+        if nan(c) && ((inf(a) && zero(b)) || (zero(a) && inf(b))) {
+            return 0x7FC0_0000;
+        }
+        [c, a, b].iter().find(|&&x| nan(x)).map_or(0x7FC0_0000, |&x| x | QUIET)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let default = if cfg!(target_arch = "x86_64") { 0xFFC0_0000 } else { 0x7FC0_0000 };
+        [b, a, c].iter().find(|&&x| nan(x)).map_or(default, |&x| x | QUIET)
+    }
 }
 
 #[inline(always)]

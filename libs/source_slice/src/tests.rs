@@ -478,3 +478,80 @@ fn a_roots_optional_dependencies_follow_the_slice_features() {
     assert_eq!(internal.placeholders.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["scope-extra", "scope-via", "scope-weak"]);
     assert!(f.show(&format!("{}:Cargo.toml", internal.commit)).contains("\"scope-internal\" = { path = \"scope/deps/internal\" }"));
 }
+
+/// A repository with a root workspace (Makepad's shape): the archive of a root reaching a
+/// library through `{ workspace = true }` and a vendored crate through `[patch.crates-io]`.
+#[test]
+fn a_workspace_archive_holds_the_closure_and_a_workspace_that_builds_it() {
+    let f = Fixture::new("workspace-archive");
+    f.write(
+        "Cargo.toml",
+        "workspace.members = [\n    \"tools/run\",\n    \"libs/a\",\n    \"libs/other\",\n    \"libs/models/*\",\n]\nworkspace.exclude = [\"libs/vendored\"]\nworkspace.resolver = \"2\"\n\n[patch.crates-io]\nvendored = { path = \"libs/vendored\" }\nunused = { path = \"libs/other\" }\n\n[workspace.dependencies]\n# the workspace's crates\nlib-a = { path = \"libs/a\", version = \"0.1.0\" }\nlib-other = { path = \"libs/other\", version = \"0.1.0\" }\n\n[profile.release]\nincremental = false\n[profile.release.package.tool-run]\nopt-level = 3\n[profile.release.package.lib-other]\nopt-level = 3\n",
+    );
+    f.write("Cargo.lock", "# lock\n");
+    f.write(
+        "tools/run/Cargo.toml",
+        &package("tool-run", "\n[package.metadata.commercial]\ninclude = [\"../../resources/font.ttf\"]\n\n[dependencies]\nlib-a = { workspace = true }\nvendored = \"1\"\nmodel = { path = \"../../libs/models/m\" }\n\n[dev-dependencies]\nlib-other = { workspace = true }\n\n[[test]]\nname = \"t\"\npath = \"tests/t.rs\"\n\n[target.'cfg(unix)'.dev-dependencies]\nlib-other = { workspace = true }\n"),
+    );
+    f.write("tools/run/src/main.rs", "fn main() {}\n");
+    f.write("tools/run/tests/t.rs", "#[test] fn t() {}\n");
+    f.write("tools/run/nested/Cargo.toml", &package("nested", ""));
+    f.write("tools/run/nested/src/lib.rs", "");
+    f.write("resources/font.ttf", "font");
+    f.write("resources/other.ttf", "other");
+    for (dir, name) in [("libs/a", "lib-a"), ("libs/other", "lib-other"), ("libs/vendored", "vendored"), ("libs/models/m", "model")] {
+        f.write(&format!("{dir}/Cargo.toml"), &package(name, ""));
+        f.write(&format!("{dir}/src/lib.rs"), "");
+    }
+    let commit = f.commit();
+    let archive = workspace_archive(&f.dir, &commit, &roots(&["tool-run"]), "tool", "tool-1").unwrap();
+    let dirs: Vec<&str> = archive.slice.crates.iter().map(|(_, d)| d.as_str()).collect();
+    assert_eq!(dirs, ["libs/a", "libs/models/m", "libs/vendored", "tools/run"]);
+
+    let mut cursor = std::io::Cursor::new(archive.zip.clone());
+    let directory = makepad_zip_file::zip_read_central_directory(&mut cursor).unwrap();
+    let mut files = std::collections::BTreeMap::new();
+    for header in &directory.file_headers {
+        let data = header.extract(&mut cursor).unwrap();
+        files.insert(header.file_name.clone(), String::from_utf8(data).unwrap());
+    }
+    let names: Vec<&str> = files.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        [
+            "tool-1/Cargo.lock",
+            "tool-1/Cargo.toml",
+            "tool-1/SOURCE_COMMITS",
+            "tool-1/libs/a/Cargo.toml",
+            "tool-1/libs/a/src/lib.rs",
+            "tool-1/libs/models/m/Cargo.toml",
+            "tool-1/libs/models/m/src/lib.rs",
+            "tool-1/libs/other/Cargo.toml",
+            "tool-1/libs/other/src/lib.rs",
+            "tool-1/libs/vendored/Cargo.toml",
+            "tool-1/libs/vendored/src/lib.rs",
+            "tool-1/resources/font.ttf",
+            "tool-1/tools/run/Cargo.toml",
+            "tool-1/tools/run/src/main.rs",
+            "tool-1/tools/run/tests/t.rs",
+        ]
+    );
+    assert_eq!(files["tool-1/SOURCE_COMMITS"], format!("{commit}\n"));
+    let manifest = &files["tool-1/Cargo.toml"];
+    // members: listed or not excluded; the excluded vendored crate stays out of the workspace
+    assert!(manifest.contains("members = [\n    \"libs/a\",\n    \"libs/models/m\",\n    \"tools/run\",\n]\nexclude = [\n    \"libs/vendored\",\n]\n"), "{manifest}");
+    assert!(manifest.contains("resolver = \"2\""), "{manifest}");
+    assert!(manifest.contains("lib-a = { path = \"libs/a\"") && !manifest.contains("lib-other"), "{manifest}");
+    assert!(manifest.contains("vendored = { path = \"libs/vendored\" }") && !manifest.contains("unused ="), "{manifest}");
+    assert!(manifest.contains("[profile.release]\nincremental = false\n") && manifest.contains("[profile.release.package.tool-run]\nopt-level = 3\n"), "{manifest}");
+    assert!(!manifest.contains("workspace.members") && !manifest.contains("# the workspace's crates"), "{manifest}");
+    // the member's manifest is as written; its dev-dependency outside the slice is a placeholder
+    assert_eq!(files["tool-1/tools/run/Cargo.toml"], f.show(&format!("{commit}:tools/run/Cargo.toml")));
+    assert!(files["tool-1/libs/other/Cargo.toml"].contains("not part of this slice") && files["tool-1/libs/other/src/lib.rs"].is_empty());
+    // the same commit and roots give the same bytes
+    assert_eq!(workspace_archive(&f.dir, &commit, &roots(&["tool-run"]), "tool", "tool-1").unwrap().zip, archive.zip);
+    // a repository without a root workspace has no archive of this kind
+    let c = commercial("archive-no-workspace");
+    let head = c.commit();
+    assert!(workspace_archive(&c.dir, &head, &roots(&["makepad-amp"]), "amp", "amp").is_err());
+}

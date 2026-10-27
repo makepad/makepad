@@ -24,7 +24,9 @@ pkg = os.path.join(tmp, "pkg")
 shutil.copytree(os.path.join(HERE, "pkg"), pkg)
 main = os.path.join(pkg, "src", "main.rs")
 base = open(main).read()
-env = dict(os.environ, MAKEPAD_RUN_CACHE="0")
+# the live driver writes this file once it watches the sources (MAKEPAD_RUN_LIVE_READY)
+ready = os.path.join(tmp, "live-ready")
+env = dict(os.environ, MAKEPAD_RUN_LIVE_READY=ready, MAKEPAD_RUN_CACHE="0")
 p = subprocess.Popen([relax, "run", "--quiet", "relax-live-selfvariant"], cwd=pkg, env=env, stdout=subprocess.PIPE,
                      stderr=subprocess.PIPE, text=True, start_new_session=True)
 out, err = [], []
@@ -65,7 +67,7 @@ def no_e0412(since):
     return not any("E0412" in l for l in err[since:])
 
 try:
-    step("starts", wait(lambda: last_value() == 4 and any("watching" in l for l in err), 120))
+    step("starts", wait(lambda: last_value() == 4 and os.path.exists(ready), 120))
     n = len(err)
     body = base.replace("p.a + ease(", "p.a + 1 + ease(")
     save(body)

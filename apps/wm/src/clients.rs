@@ -32,7 +32,7 @@ use crate::host;
 use makepad_widgets::makepad_platform::thread::{SignalToUI, TaskPool, ThreadSpawner, ThreadOptions};
 
 use makepad_app_host::ClientId;
-use makepad_app_registry::{AppLaunch, BuildPolicy, LaunchEvent, LaunchKind, ProcessOutput};
+use makepad_app_registry::{AppLaunch, BuildPolicy, LaunchEvent, LaunchKind, ProcessOutput, Runner};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchPolicy {
@@ -163,6 +163,13 @@ fn registry_app(entry: &makepad_app_registry::AppEntry) -> AppDef {
     }
     app
 }
+
+/// The registry id of the supervised service the WM keeps (the node's AI Hub, `hub_app.rs`): the
+/// launcher offers it (starting it again after its Quit), the dock never shows it.
+pub const HUB_SERVICE_APP: &str = "aihub";
+/// The registry id of the node's devhub, the other supervised service (`devhub_link.rs`): tray
+/// only (no launcher row, no dock item); its off slot in the tray area starts it after its Quit.
+pub const DEVHUB_SERVICE_APP: &str = "devhub";
 
 /// The curated applications, in menu order: the menu rows of the shared
 /// registry (`libs/app_registry/apps.json`). Every one of these is a real
@@ -661,12 +668,18 @@ pub struct ClientSlot {
     pub closing: Option<f64>,
     /// The aichat child seated in the AI pane: not in the layout, no tile.
     pub pane: bool,
-    /// Came to the WM by itself through its socket (adopt.rs): its launcher owns the
-    /// process, and the tile ends when its hub socket closes.
-    pub external: bool,
+    /// Came to the WM by itself through its socket (adopt.rs): the pid that asked. Its
+    /// launcher owns the process; the tile ends when its hub socket closes, when that pid
+    /// asks again (its earlier admission is void) or when the pid is gone (`reap_exited`:
+    /// an app that never connected its hub, or died before, has no socket to close).
+    pub external: Option<u32>,
     /// One of an app's later windows (`client_windows.rs`): the app's client. No process
     /// of its own; its sender is the app's.
     pub parent: Option<ClientId>,
+    /// A service the WM supervises (the node's AI Hub app, hub_app.rs): it came to the socket
+    /// like any app but has no tile and is in no layout, no dock and no alt-tab. Its one window
+    /// is a tray dropdown (`dropdown.rs`) that shows as a flyout under its tray item.
+    pub service: bool,
 }
 
 impl ClientSlot {
@@ -698,8 +711,9 @@ impl ClientSlot {
             linked_at: None,
             closing: None,
             pane: false,
-            external: false,
+            external: None,
             parent: None,
+            service: false,
         }
     }
 
@@ -718,11 +732,21 @@ impl ClientSlot {
 impl ClientSlot {
     /// The slot of an app the WM socket admitted: a window like a launched one, without a
     /// process handle (adopt.rs).
-    pub fn adopted(id: ClientId, app: &str) -> ClientSlot {
+    pub fn adopted(id: ClientId, app: &str, pid: u32) -> ClientSlot {
         let mut slot = ClientSlot::module(id, app, "");
         slot.ready = false;
-        slot.external = true;
+        slot.external = Some(pid);
         slot.status = "starting…".into();
+        slot
+    }
+
+    /// The slot of a supervised service the WM socket admitted (`service`): the same client as
+    /// an adopted app, without a tile.
+    pub fn adopted_service(id: ClientId, app: &str, pid: u32) -> ClientSlot {
+        let mut slot = ClientSlot::adopted(id, app, pid);
+        slot.service = true;
+        // Never the keyboard's target: its dropdown takes pointer input only.
+        slot.takes_focus = false;
         slot
     }
 
@@ -776,6 +800,10 @@ pub fn client_log(id: ClientId, build: bool) -> PathBuf {
     host::homeless_root().join(format!("wm-client-{}{}.log", id, if build { "-build" } else { "" }))
 }
 
+/// The nice level of every client process and build the WM starts.
+#[cfg(unix)]
+const CHILD_NICE: i32 = 10;
+
 /// Start `program` as client `id`'s process: hidden, stdin closed, both
 /// output streams into `log` and onto its tile.
 fn spawn_process(
@@ -793,6 +821,9 @@ fn spawn_process(
     // (`configure` did that for an app; a build gets it here.)
     #[cfg(unix)]
     makepad_app_host::launch::own_process_group(&mut cmd);
+    // apps and their builds below the WM: its compositing and Desk Link stream keep the CPU
+    #[cfg(unix)]
+    makepad_app_host::launch::lower_priority(&mut cmd, CHILD_NICE);
     host::no_console_window(&mut cmd);
     // Both streams are piped so a reader thread can put the newest line on
     // the tile — cargo talks on stderr.
@@ -850,8 +881,9 @@ fn client_slot(pool: &TaskPool, id: ClientId, app: &AppDef, child: Child, warm: 
         linked_at: None,
         closing: None,
         pane: false,
-        external: false,
+        external: None,
         parent: None,
+        service: false,
     }
 }
 
@@ -873,13 +905,15 @@ pub fn spawn_client(
     // come up and then idle until it is adopted.
     warm: bool,
     policy: BuildPolicy,
+    // Its release binary, or the JIT (`AppRegistry::runner`: `id: Jit` in apps.splash).
+    runner: Runner,
     // Every output line the child writes is forwarded here.
     lines: Sender<ClientLine>,
 ) -> Result<ClientSlot, String> {
     let entry = makepad_app_registry::find(&app.id).ok_or_else(|| format!("unknown app: {}", app.id))?;
     let extra = app.args.iter().chain(extra_args).cloned().collect();
-    let (launch, child) = AppLaunch::start(entry, repo_root(), extra, policy, false, |cmd, kind| {
-        spawn_for_client(pool, spawner, id, &app.bin, cwd, term_colors, warm, hub_port, cmd, kind, lines.clone())
+    let (launch, child) = AppLaunch::start(entry, runner, repo_root(), extra, policy, false, |cmd, kind| {
+        spawn_for_client(pool, spawner, id, &app.bin, cwd, term_colors, warm, hub_port, runner, cmd, kind, lines.clone())
     })?;
     let mut slot = client_slot(pool, id, app, child, warm);
     slot.status = launch.status().to_string();
@@ -898,12 +932,16 @@ fn spawn_for_client(
     term_colors: Option<&str>,
     warm: bool,
     hub_port: u16,
+    runner: Runner,
     mut cmd: Command,
     kind: LaunchKind,
     lines: Sender<ClientLine>,
 ) -> Result<Child, String> {
     if kind == LaunchKind::Build {
         return spawn_process(pool, spawner, id, client_log(id, true), cmd, bin, lines);
+    }
+    if runner == Runner::Jit {
+        return spawn_jit(pool, spawner, id, bin, cwd, cmd, kind, lines);
     }
     // The app, or `cargo run` of it (cargo's progress on the tile, then the app): the
     // app's environment either way.
@@ -918,9 +956,13 @@ fn spawn_for_client(
     #[cfg(target_os = "linux")]
     cmd.env(makepad_widgets::makepad_platform::hosted_relay::HOST_FILE_DIALOGS_ENV, "1");
     if let Some(cwd) = cwd {
-        // The terminal's Omarchy behavior: open where the focused one is.
+        // The terminal's Omarchy behavior: open where the focused one is. A `cargo run` stays in
+        // the checkout: cargo reads the workspace's .cargo/config.toml (its rustflags) from its
+        // working directory, and from elsewhere it builds the whole app again with other flags.
         cmd.arg("--cwd").arg(cwd);
-        cmd.current_dir(cwd);
+        if kind == LaunchKind::App {
+            cmd.current_dir(cwd);
+        }
     }
     if let Some(colors) = term_colors {
         cmd.env("MAKEPAD_TERMINAL_COLORS", colors);
@@ -938,6 +980,56 @@ fn spawn_for_client(
         cmd.env(WARM_ENV.0, WARM_ENV.1);
     }
     spawn_process(pool, spawner, id, client_log(id, false), cmd, bin, lines)
+}
+
+/// `~/.makepad/wm/jit.env`: `KEY=VALUE` lines (`#` comments) every JIT-run app gets on top of
+/// the WM's environment (a node's `MAKEPAD_RUN_VERBOSE=1`, an on-disk `TMPDIR` for the session
+/// transcript, `MAKEPAD_REMOTE=1`), so how a machine debugs its JIT apps is a file, not a
+/// rebuilt WM.
+pub fn jit_env(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .filter(|(k, _)| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .collect()
+}
+
+/// A JIT run (`makepad run <package>`, or `cargo run` of the tool first). It is not a
+/// `--stdin-loop` child and gets no hub identity: on Linux its HAL asks the WM's socket for its
+/// window (`MAKEPAD_WM_SOCKET`, which passes), and the socket admits it as THIS client because
+/// its pid is the one recorded here (`adopt::expect`). `cargo run` execs the tool, so the pid
+/// cargo starts with is the tool's.
+fn spawn_jit(
+    pool: &TaskPool,
+    spawner: &ThreadSpawner,
+    id: ClientId,
+    bin: &str,
+    cwd: Option<&PathBuf>,
+    mut cmd: Command,
+    kind: LaunchKind,
+    lines: Sender<ClientLine>,
+) -> Result<Child, String> {
+    cmd.env("MAKEPAD_WM_CAPTION_CONTENT", "1");
+    // A `cargo run` of the tool stays in the checkout (cargo's config is read from its working
+    // directory); the built tool may start elsewhere.
+    if let (Some(cwd), LaunchKind::App) = (cwd, kind) {
+        cmd.current_dir(cwd);
+    }
+    let settings = crate::theme::makepad_home().join("wm/jit.env");
+    if let Ok(text) = std::fs::read_to_string(&settings) {
+        for (key, value) in jit_env(&text) {
+            if key == "TMPDIR" {
+                let _ = std::fs::create_dir_all(&value);
+            }
+            cmd.env(key, value);
+        }
+    }
+    let child = spawn_process(pool, spawner, id, client_log(id, false), cmd, bin, lines)?;
+    #[cfg(target_os = "linux")]
+    crate::adopt::expect(child.id(), id);
+    Ok(child)
 }
 
 impl ClientSlot {
@@ -958,9 +1050,10 @@ impl ClientSlot {
         let cwd = self.launch_cwd.as_ref();
         let warm = self.warm;
         let pool = self.task_pool.as_ref().ok_or("no task pool for the client")?;
+        let runner = launch.runner();
         launch.poll(&mut self.child, |cmd, kind| {
             let entry = makepad_app_registry::find(app).ok_or_else(|| format!("unknown app: {app}"))?;
-            spawn_for_client(pool, spawner, id, entry.bin, cwd, term_colors, warm, hub_port, cmd, kind, lines.clone())
+            spawn_for_client(pool, spawner, id, entry.bin, cwd, term_colors, warm, hub_port, runner, cmd, kind, lines.clone())
         })
     }
 }
@@ -1100,6 +1193,8 @@ mod tests {
                 "Terminal",
                 "Mixer",
                 "Amp",
+                "Flow",
+                "Synth",
                 "Code",
                 "Task Manager",
                 "Sheets",
@@ -1121,7 +1216,9 @@ mod tests {
                 "Fab",
                 "Scope",
                 "Stage",
+                "Makepad Story",
                 "Sandbox",
+                "AI Hub",
             ]
             .map(str::to_string)
         );

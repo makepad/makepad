@@ -2780,6 +2780,10 @@ pub struct Slider {
     #[walk]
     walk: Walk,
 
+    #[live(true)]
+    #[visible]
+    visible: bool,
+
     #[live(DragAxis::Horizontal)]
     pub axis: DragAxis,
 
@@ -3327,6 +3331,10 @@ impl Widget for Slider {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
+        // Hidden: no hits, and the value field inside takes no keys.
+        if !self.visible {
+            return;
+        }
         self.cap_motion_tick(cx, event);
         match event {
             Event::MouseMove(e) => self.cap_field_pointer(cx, e.abs),
@@ -3576,6 +3584,9 @@ impl Widget for Slider {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         self.draw_walk_slider(cx, walk);
         DrawStep::done()
     }

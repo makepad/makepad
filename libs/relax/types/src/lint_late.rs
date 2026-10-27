@@ -1048,7 +1048,7 @@ impl<'a> Kp<'a> {
     }
     /// (bytes, signed) of an integer-typed expression.
     fn int_of(&self, e: ExprId) -> Option<(u32, bool)> {
-        match self.ty_of(e)? { TyKind::Int(p) => Some(crate::types::Types::int_info(p)), _ => None }
+        match self.ty_of(e)? { TyKind::Int(p) => Some(self.tcx.tys.int_info(p)), _ => None }
     }
     fn is_never(&self, e: ExprId) -> bool { matches!(self.ty_of(e), Some(TyKind::Never)) }
 
@@ -1128,7 +1128,7 @@ impl<'a> Kp<'a> {
             ExprKind::Lit(LitKind::Bool(b)) => V::Bool(b),
             ExprKind::Lit(LitKind::Int) => {
                 let Some(TyKind::Int(p)) = self.ty_of(e) else { return V::Unknown };
-                let (bytes, signed) = crate::types::Types::int_info(p);
+                let (bytes, signed) = self.tcx.tys.int_info(p);
                 let text = std::str::from_utf8(self.prog.files[self.body.file as usize].bytes(ex.lo, ex.hi)).unwrap_or("");
                 match crate::const_fold::parse_int_lit(text) {
                     Some(v) => { let v = v & mask(bytes); V::Int(if signed { signed_of(v, bytes) as u128 } else { v }) }
@@ -1545,7 +1545,7 @@ impl<'a> Kp<'a> {
         let src = self.ty_of(x);
         match (dest, v) {
             (TyKind::Int(p), V::Int(b)) => {
-                let (db, ds) = crate::types::Types::int_info(p);
+                let (db, ds) = self.tcx.tys.int_info(p);
                 // an integer or a (sign-extended) enum discriminant: the value is already extended
                 match src {
                     Some(TyKind::Int(_)) | Some(TyKind::Adt(..)) => { let t = b & mask(db); V::Int(if ds { signed_of(t, db) as u128 } else { t }) }
@@ -1554,7 +1554,7 @@ impl<'a> Kp<'a> {
             }
             (TyKind::Int(p), V::Bool(b)) => { let _ = p; V::Int(b as u128) }
             (TyKind::Int(p), V::Float(f)) => {
-                let (db, ds) = crate::types::Types::int_info(p);
+                let (db, ds) = self.tcx.tys.int_info(p);
                 if f.is_nan() { return V::Int(0); }
                 let r = if ds {
                     let min = if db == 16 { i128::MIN } else { -(1i128 << (db * 8 - 1)) };
@@ -1567,7 +1567,7 @@ impl<'a> Kp<'a> {
                 V::Int(r)
             }
             (TyKind::Float(_), V::Int(b)) => match src {
-                Some(TyKind::Int(p)) => { let (sb, ss) = crate::types::Types::int_info(p); V::Float(if ss { signed_of(b, sb) as f64 } else { (b & mask(sb)) as f64 }) }
+                Some(TyKind::Int(p)) => { let (sb, ss) = self.tcx.tys.int_info(p); V::Float(if ss { signed_of(b, sb) as f64 } else { (b & mask(sb)) as f64 }) }
                 _ => V::Unknown,
             },
             (TyKind::Float(_), V::Float(f)) => V::Float(f),
@@ -2043,7 +2043,7 @@ impl<'a> Ffic<'a> {
                 }
                 self.visit_struct_or_union(state, ty, d, args)
             }
-            TyKind::Int(p) if crate::types::Types::int_info(p).0 != 0 => Ffi::Safe,
+            TyKind::Int(p) if self.tcx.tys.int_info(p).0 != 0 => Ffi::Safe,
             TyKind::Float(_) | TyKind::Bool => Ffi::Safe,
             TyKind::Char => Ffi::Unsafe { ty, reason: "the `char` type has no C equivalent" },
             TyKind::Slice(_) => Ffi::Unsafe { ty, reason: "slices have no C equivalent" },
@@ -2445,13 +2445,19 @@ pub fn variant_size_differences(prog: &Program, tcx: &Tcx, own: &[bool]) {
         let def = prog.def(d);
         if def.kind != DefKind::Enum || !own.get(def.krate as usize).copied().unwrap_or(false) || lint::generated(prog, d) { continue; }
         let Some(adt) = tcx.adts.get(&d) else { continue };
-        if adt.n_generics != 0 || adt.variants.len() < 2 { continue; }
-        let bad = crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_ALIAS | crate::types::TypeFlags::HAS_ERROR | crate::types::TypeFlags::HAS_INFER;
+        if adt.n_generics != 0 { continue; }
+        // (rustc computes the layout of every non-generic enum here, projections in its fields normalized:
+        // a layout that needs itself is the cycle E0391; the size comparison is for tagged enums)
+        let bad = crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_ERROR | crate::types::TypeFlags::HAS_INFER;
         if adt.variants.iter().any(|v| v.fields.iter().any(|f| tcx.tys.flags(f.ty).intersects(bad))) { continue; }
+        // (a field whose projection does not normalize has no layout: rustc's layout_of is an error, the pass returns)
+        let env = crate::tcx::TypingEnv::fully_monomorphized(prog);
+        if adt.variants.iter().any(|v| v.fields.iter().any(|f| tcx.tys.flags(f.ty).intersects(crate::types::TypeFlags::HAS_ALIAS) && tcx.try_normalize_erasing_regions(prog, env, f.ty).is_err())) { continue; }
         let ty = tcx.tys.intern(TyKind::Adt(d, tcx.tys.mk_list(&[]), adt.region_params));
         let lcx = crate::layout::LayoutCx::new(prog);
         let lay = crate::layout::Layouts::new();
         let l = lay.of(&lcx, tcx, ty);
+        if adt.variants.len() < 2 { continue; }
         let (Some((_, mem)), crate::layout::TagEnc::Direct) = (l.tag, l.enc) else { continue };
         let tag_size = match mem { relax_backend::rir::Mem::Int(b, _) => b as u32, relax_backend::rir::Mem::F32 => 4, relax_backend::rir::Mem::F64 => 8 };
         if l.variant_fields.len() != adt.variants.len() { continue; }

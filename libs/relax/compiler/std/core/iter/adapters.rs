@@ -40,6 +40,7 @@ impl<B, I: DoubleEndedIterator, F: FnMut(I::Item) -> B> DoubleEndedIterator for 
 }
 
 impl<B, I: ExactSizeIterator, F: FnMut(I::Item) -> B> ExactSizeIterator for Map<I, F> {}
+unsafe impl<B, I: super::TrustedLen, F: FnMut(I::Item) -> B> super::TrustedLen for Map<I, F> {}
 impl<B, I: FusedIterator, F: FnMut(I::Item) -> B> FusedIterator for Map<I, F> {}
 
 // ---------------------------------------------------------------- Filter
@@ -168,6 +169,7 @@ impl<I: ExactSizeIterator + DoubleEndedIterator> DoubleEndedIterator for Enumera
 }
 
 impl<I: ExactSizeIterator> ExactSizeIterator for Enumerate<I> {}
+unsafe impl<I: super::TrustedLen> super::TrustedLen for Enumerate<I> {}
 impl<I: FusedIterator> FusedIterator for Enumerate<I> {}
 
 // ---------------------------------------------------------------- Zip
@@ -229,6 +231,7 @@ where
 }
 
 impl<A: ExactSizeIterator, B: ExactSizeIterator> ExactSizeIterator for Zip<A, B> {}
+unsafe impl<A: super::TrustedLen, B: super::TrustedLen> super::TrustedLen for Zip<A, B> {}
 impl<A: FusedIterator, B: FusedIterator> FusedIterator for Zip<A, B> {}
 
 // ---------------------------------------------------------------- Rev
@@ -267,6 +270,7 @@ impl<I: DoubleEndedIterator> DoubleEndedIterator for Rev<I> {
 }
 
 impl<I: DoubleEndedIterator + ExactSizeIterator> ExactSizeIterator for Rev<I> {}
+unsafe impl<I: super::TrustedLen + DoubleEndedIterator> super::TrustedLen for Rev<I> {}
 impl<I: DoubleEndedIterator + FusedIterator> FusedIterator for Rev<I> {}
 
 // ---------------------------------------------------------------- Take / Skip
@@ -332,6 +336,7 @@ impl<I: DoubleEndedIterator + ExactSizeIterator> DoubleEndedIterator for Take<I>
 }
 
 impl<I: ExactSizeIterator> ExactSizeIterator for Take<I> {}
+unsafe impl<I: super::TrustedLen> super::TrustedLen for Take<I> {}
 impl<I: FusedIterator> FusedIterator for Take<I> {}
 
 #[derive(Clone, Debug)]
@@ -483,6 +488,7 @@ impl<A: DoubleEndedIterator, B: DoubleEndedIterator<Item = A::Item>> DoubleEnded
 }
 
 impl<A: FusedIterator, B: FusedIterator<Item = A::Item>> FusedIterator for Chain<A, B> {}
+unsafe impl<A: super::TrustedLen, B: super::TrustedLen<Item = A::Item>> super::TrustedLen for Chain<A, B> {}
 
 // ---------------------------------------------------------------- Cloned / Copied
 
@@ -514,6 +520,7 @@ impl<'a, T: 'a + Clone, I: DoubleEndedIterator<Item = &'a T>> DoubleEndedIterato
 }
 
 impl<'a, T: 'a + Clone, I: ExactSizeIterator<Item = &'a T>> ExactSizeIterator for Cloned<I> {}
+unsafe impl<'a, T: 'a + Clone, I: super::TrustedLen<Item = &'a T>> super::TrustedLen for Cloned<I> {}
 
 #[derive(Clone, Debug)]
 pub struct Copied<I> {
@@ -546,6 +553,7 @@ impl<'a, T: 'a + Copy, I: DoubleEndedIterator<Item = &'a T>> DoubleEndedIterator
 }
 
 impl<'a, T: 'a + Copy, I: ExactSizeIterator<Item = &'a T>> ExactSizeIterator for Copied<I> {}
+unsafe impl<'a, T: 'a + Copy, I: super::TrustedLen<Item = &'a T>> super::TrustedLen for Copied<I> {}
 
 // ---------------------------------------------------------------- Peekable
 

@@ -512,6 +512,50 @@ pub mod game {
         pub dpad_right: f32,
         pub left_stick: [f32; 2],
         pub right_stick: [f32; 2],
+        /// Presses per button since the device connected (wrapping), in [`gamepad_button`]
+        /// order. The state above is the latest sample; these count every press the backend
+        /// saw, so a tap shorter than the app's frame or tick survives any coalescing.
+        pub presses: [u16; gamepad_button::COUNT],
+    }
+
+    /// The digital buttons of a [`GamepadState`], as indexes into `presses`.
+    pub mod gamepad_button {
+        pub const A: usize = 0;
+        pub const B: usize = 1;
+        pub const X: usize = 2;
+        pub const Y: usize = 3;
+        pub const LEFT_SHOULDER: usize = 4;
+        pub const RIGHT_SHOULDER: usize = 5;
+        pub const LEFT_TRIGGER: usize = 6;
+        pub const RIGHT_TRIGGER: usize = 7;
+        pub const SELECT: usize = 8;
+        pub const START: usize = 9;
+        pub const HOME: usize = 10;
+        pub const LEFT_THUMB: usize = 11;
+        pub const RIGHT_THUMB: usize = 12;
+        pub const DPAD_UP: usize = 13;
+        pub const DPAD_DOWN: usize = 14;
+        pub const DPAD_LEFT: usize = 15;
+        pub const DPAD_RIGHT: usize = 16;
+        pub const COUNT: usize = 17;
+    }
+
+    impl GamepadState {
+        /// The buttons' values in [`gamepad_button`] order.
+        pub fn buttons(&self) -> [f32; gamepad_button::COUNT] {
+            [self.a, self.b, self.x, self.y, self.left_shoulder, self.right_shoulder, self.left_trigger, self.right_trigger,
+             self.select, self.start, self.home, self.left_thumb, self.right_thumb, self.dpad_up, self.dpad_down, self.dpad_left, self.dpad_right]
+        }
+
+        /// A backend saw this state follow `prev`: carry `prev`'s press counts and count each
+        /// button that went down (past half travel) between the two. Every backend calls this on
+        /// every state it observes (each evdev report, each GameController change, each poll).
+        pub fn count_presses_since(&mut self, prev: &GamepadState) {
+            let (was, now) = (prev.buttons(), self.buttons());
+            for b in 0..gamepad_button::COUNT {
+                self.presses[b] = prev.presses[b].wrapping_add((now[b] >= 0.5 && was[b] < 0.5) as u16);
+            }
+        }
     }
 
     #[derive(Clone, Debug, Default, PartialEq)]
@@ -612,6 +656,9 @@ pub mod game {
                         p.dpad_left, p.dpad_right, p.left_stick[0], p.left_stick[1], p.right_stick[0], p.right_stick[1],
                     ],
                 );
+                for n in p.presses {
+                    w.u32(n as u32);
+                }
             }
             GameState::Wheel(v) => {
                 w.u8(1);
@@ -657,6 +704,7 @@ pub mod game {
                     dpad_right: v[16],
                     left_stick: [v[17], v[18]],
                     right_stick: [v[19], v[20]],
+                    presses: std::array::from_fn(|_| r.u32() as u16),
                 })
             }
             1 => {

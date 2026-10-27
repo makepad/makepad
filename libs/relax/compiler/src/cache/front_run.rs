@@ -19,35 +19,14 @@ const RUN_PREFIX: &str = "front_run";
 static RUNS: Mutex<Vec<Arc<RunStore>>> = Mutex::new(Vec::new());
 static SINKS: Mutex<Option<HashMap<PathBuf, Arc<FrontSink>>>> = Mutex::new(None);
 /// Run stores opened to resolve references, and keys found missing in them.
-static OPEN: Mutex<Option<(HashMap<PathBuf, Arc<Store>>, HashSet<(PathBuf, u128)>)>> = Mutex::new(None);
+static OPEN: Mutex<Option<Open>> = Mutex::new(None);
+type Open = (HashMap<PathBuf, Arc<Store>>, HashSet<(PathBuf, u128)>);
 
-pub(super) struct ZoneTaken {
-    runs: Vec<Arc<RunStore>>,
-    sinks: Option<HashMap<PathBuf, Arc<FrontSink>>>,
-    open: Option<(HashMap<PathBuf, Arc<Store>>, HashSet<(PathBuf, u128)>)>,
-}
-
-pub(super) fn zone_take() -> ZoneTaken {
-    let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
-    let mut sinks = SINKS.lock().unwrap_or_else(|e| e.into_inner());
-    let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
-    let taken = ZoneTaken {
-        runs: std::mem::take(&mut *runs),
-        sinks: std::mem::take(&mut *sinks),
-        open: std::mem::take(&mut *open),
-    };
-    #[cfg(test)]
-    { assert!(runs.is_empty()); assert!(sinks.is_none()); assert!(open.is_none()); }
-    taken
-}
-
-pub(super) fn zone_put_back(taken: ZoneTaken) {
-    let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *runs, taken.runs));
-    let mut sinks = SINKS.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *sinks, taken.sinks));
-    let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *open, taken.open));
+/// `f` over OPEN.
+fn with_open<R>(f: impl FnOnce(&mut HashMap<PathBuf, Arc<Store>>, &mut HashSet<(PathBuf, u128)>) -> R) -> R {
+    let mut guard = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    let (open, missing) = guard.get_or_insert_with(Default::default);
+    f(open, missing)
 }
 
 /// The images written so far, per run store of this process: what references made now can
@@ -197,13 +176,11 @@ pub(super) fn resolve(dir: &Path, b: &[u8], check: bool) -> Option<(ImageLoc, &'
     }
     let path = dir.join(name);
     let find = |st: &Store| st.index.binary_search_by(|e| { let k = e.key; k.cmp(&key) }).ok();
-    let (st, i) = {
-        let mut guard = OPEN.lock().unwrap_or_else(|e| e.into_inner());
-        let (open, missing) = guard.get_or_insert_with(Default::default);
+    let (st, i) = with_open(|open, missing| {
         if missing.contains(&(path.clone(), key)) { return None; }
         let opened = open.get(&path).cloned();
         match opened.as_ref().and_then(|st| Some((st.clone(), find(st)?))) {
-            Some(x) => x,
+            Some(x) => Some(x),
             None => {
                 // A first open, or a key the opened index lacks: the store is mapped again
                 // only when its committed header changed since (a newer index); a key it still
@@ -212,7 +189,7 @@ pub(super) fn resolve(dir: &Path, b: &[u8], check: bool) -> Option<(ImageLoc, &'
                 let found = if changed {
                     Store::open(&path).map(Arc::new).and_then(|st| {
                         // FRONT_STORES keeps every opened mapping for the rest of the process
-                        FRONT_STORES.lock().unwrap_or_else(|x| x.into_inner()).push(st.clone());
+                        pin_front(&st, None);
                         open.insert(path.clone(), st.clone());
                         Some((st.clone(), find(&st)?))
                     })
@@ -220,15 +197,15 @@ pub(super) fn resolve(dir: &Path, b: &[u8], check: bool) -> Option<(ImageLoc, &'
                     None
                 };
                 match found {
-                    Some(x) => x,
-                    None => { missing.insert((path, key)); return None; }
+                    Some(x) => Some(x),
+                    None => { missing.insert((path, key)); None }
                 }
             }
         }
-    };
+    })?;
     let (kind, img) = st.get_at(i, key)?;
     if kind != KIND_FRONT || (check && !st.verify_at(i)) { return None; }
-    if !check { FRONT_USED.lock().unwrap_or_else(|x| x.into_inner()).push((st.clone(), i)); }
+    if !check { pin_front(&st, Some(i)); }
     // SAFETY: FRONT_STORES keeps the store (and its mapping) for the rest of the process, and a
     // committed payload never changes (store.rs)
     let img: &'static [u8] = unsafe { std::slice::from_raw_parts(img.as_ptr(), img.len()) };

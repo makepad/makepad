@@ -297,7 +297,7 @@ pub struct Command {
     stderr: Option<Stdio>,
     pgroup: Option<sys::pid_t>,
     /// CommandExt::pre_exec closures, run in the child between fork and exec
-    closures: Vec<alloc::boxed::Box<dyn FnMut() -> io::Result<()> + Send + Sync>>,
+    closures: Vec<PreExec>,
 }
 
 impl Command {
@@ -383,8 +383,8 @@ impl Command {
     pub(crate) fn set_pgroup(&mut self, pgroup: sys::pid_t) {
         self.pgroup = Some(pgroup);
     }
-    pub(crate) fn add_pre_exec(&mut self, f: alloc::boxed::Box<dyn FnMut() -> io::Result<()> + Send + Sync>) {
-        self.closures.push(f);
+    pub(crate) fn add_pre_exec(&mut self, f: alloc::boxed::Box<dyn FnMut() -> io::Result<()> + Send + Sync>, run: unsafe fn(*mut u8) -> io::Result<()>) {
+        self.closures.push(PreExec { f, run });
     }
 
     pub fn spawn(&mut self) -> io::Result<Child> {
@@ -439,11 +439,12 @@ impl Command {
 
     /// Under `makepad run` the program's executable is Relax itself: spawning it runs this
     /// program again (Relax's command line up to `--`, then the new arguments). A spawn of the
-    /// loader whose first argument is `run` is a launcher starting another program through it
-    /// (`$MAKEPAD_RUN_LOADER run [flags] <package> ...`): that one runs as written.
+    /// loader whose first argument is `run` or `app` is a launcher starting another program
+    /// through it (`$MAKEPAD_RUN_LOADER run [flags] <package> ...`, `... app <id>`: a launch
+    /// record): that one runs as written.
     fn self_exec_args(&self) -> Option<Vec<OsString>> {
         let pre = crate::env::var("MAKEPAD_RUN_SELF_EXEC").ok()?;
-        if self.args.get(1).is_some_and(|a| a.as_encoded_bytes() == b"run") {
+        if self.args.get(1).is_some_and(|a| matches!(a.as_encoded_bytes(), b"run" | b"app")) {
             return None;
         }
         // inside a build script (MAKEPAD_RUN_AS_RUSTC): its spawns of this executable are RUSTC
@@ -572,8 +573,8 @@ impl Command {
         if !self.closures.is_empty() {
             if exec {
                 // CommandExt::exec: real std runs the closures in this process before the exec
-                for f in self.closures.iter_mut() {
-                    f()?;
+                for p in self.closures.iter_mut() {
+                    unsafe { p.call()? };
                 }
             } else {
                 // real std: no posix_spawn when there are pre_exec closures -- fork, set the child
@@ -705,41 +706,82 @@ impl Command {
     /// child reported through the CLOEXEC pipe (the child is reaped then).
     #[cfg(not(target_os = "android"))]
     unsafe fn fork_exec(&mut self, prog: &CString, argv: &Vec<*const c_char>, envp: *const *const c_char, cwd: &Option<CString>, stdin_child: &Option<OwnedFd>, stdout_child: &Option<OwnedFd>, stderr_child: &Option<OwnedFd>) -> io::Result<sys::pid_t> {
-        let (err_r, err_w) = anon_pipe()?;
-        let pid = fork();
-        if pid < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if pid == 0 {
-            // child
-            let w = err_w.as_raw_fd();
-            for (fd, to) in [(stdin_child, 0), (stdout_child, 1), (stderr_child, 2)] {
-                if let Some(fd) = fd {
-                    if sys::dup2(fd.as_raw_fd(), to) < 0 {
-                        child_fail(w, io::Error::last_os_error());
-                    }
-                }
+        // Under the JIT the child must find its code built: it has only this thread, and a
+        // compile there would wait for locks other threads of this process held at the fork
+        // (POSIX: only async-signal-safe work between fork and exec). The loader builds the
+        // child's half and the closures, with what they call, now; its fork marks the child
+        // (a stub reached there anyway ends it with the function's name, never a hang).
+        // Under rustc (std/check_os) there is no loader: plain fork.
+        // A child that reached code built only now (a vtable's fn) ended before its exec, with
+        // none of its effects left: the loader built that code, and the fork goes again.
+        let loader = ForkLoader::get();
+        if let Some(pre) = loader.precompile {
+            pre(Self::fork_child_half as usize);
+            for p in &self.closures {
+                pre(p.run as usize);
             }
-            if let Some(c) = cwd {
-                if sys::chdir(c.as_ptr()) != 0 {
+        }
+        let mut again = 0;
+        loop {
+            let (err_r, err_w) = anon_pipe()?;
+            let pid = match loader.fork_exec {
+                Some(f) => f(),
+                None => fork(),
+            };
+            if pid < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if pid == 0 {
+                self.fork_child_half(err_w.as_raw_fd(), prog, argv, envp, cwd, stdin_child, stdout_child, stderr_child);
+            }
+            drop(err_w);
+            let r = self.fork_exec_wait(pid, err_r);
+            match loader.fork_exec_done {
+                Some(done) if done(pid) != 0 && again < 64 => {
+                    let mut status: c_int = 0;
+                    while sys::waitpid(pid, &mut status as *mut c_int, 0) < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {}
+                    again += 1;
+                }
+                _ => return r,
+            }
+        }
+    }
+
+    /// The child's half of fork_exec: stdio, cwd, process group, SIGPIPE default, the
+    /// closures, exec; a failure's errno goes back through the CLOEXEC pipe `w`.
+    #[cfg(not(target_os = "android"))]
+    unsafe fn fork_child_half(&mut self, w: c_int, prog: &CString, argv: &Vec<*const c_char>, envp: *const *const c_char, cwd: &Option<CString>, stdin_child: &Option<OwnedFd>, stdout_child: &Option<OwnedFd>, stderr_child: &Option<OwnedFd>) -> ! {
+        for (fd, to) in [(stdin_child, 0), (stdout_child, 1), (stderr_child, 2)] {
+            if let Some(fd) = fd {
+                if sys::dup2(fd.as_raw_fd(), to) < 0 {
                     child_fail(w, io::Error::last_os_error());
                 }
             }
-            if let Some(pgroup) = self.pgroup {
-                if fork_setpgid(0, pgroup) != 0 {
-                    child_fail(w, io::Error::last_os_error());
-                }
-            }
-            fork_signal(SIGPIPE, 0);
-            for f in self.closures.iter_mut() {
-                if let Err(e) = f() {
-                    child_fail(w, e);
-                }
-            }
-            exec_path_env(prog.as_ptr(), argv.as_ptr(), envp);
-            child_fail(w, io::Error::last_os_error());
         }
-        drop(err_w);
+        if let Some(c) = cwd {
+            if sys::chdir(c.as_ptr()) != 0 {
+                child_fail(w, io::Error::last_os_error());
+            }
+        }
+        if let Some(pgroup) = self.pgroup {
+            if fork_setpgid(0, pgroup) != 0 {
+                child_fail(w, io::Error::last_os_error());
+            }
+        }
+        fork_signal(SIGPIPE, 0);
+        for p in self.closures.iter_mut() {
+            if let Err(e) = p.call() {
+                child_fail(w, e);
+            }
+        }
+        exec_path_env(prog.as_ptr(), argv.as_ptr(), envp);
+        child_fail(w, io::Error::last_os_error())
+    }
+
+    /// The parent's half of fork_exec: the child's pid once it exec'd (the CLOEXEC pipe
+    /// closed), or the errno it reported (the child is reaped then).
+    #[cfg(not(target_os = "android"))]
+    unsafe fn fork_exec_wait(&mut self, pid: sys::pid_t, err_r: OwnedFd) -> io::Result<sys::pid_t> {
         let mut buf = [0u8; 4];
         let mut got = 0usize;
         loop {
@@ -772,6 +814,55 @@ impl Command {
             Err(io::Error::from_raw_os_error(i32::from_be_bytes(buf)))
         } else {
             Err(io::const_error!(io::ErrorKind::Other, "short read on the CLOEXEC pipe"))
+        }
+    }
+}
+
+/// A CommandExt::pre_exec closure, with the code that calls it: the child calls it through
+/// `run` (built before the fork, with the closure: `__relax_precompile`), not through the box's
+/// vtable, whose entries may still be unbuilt.
+pub(crate) struct PreExec {
+    f: alloc::boxed::Box<dyn FnMut() -> io::Result<()> + Send + Sync>,
+    run: unsafe fn(*mut u8) -> io::Result<()>,
+}
+
+impl PreExec {
+    unsafe fn call(&mut self) -> io::Result<()> {
+        (self.run)(&mut *self.f as *mut (dyn FnMut() -> io::Result<()> + Send + Sync) as *mut u8)
+    }
+}
+
+/// PreExec::run for closures of type F.
+pub(crate) unsafe fn run_pre_exec<F: FnMut() -> io::Result<()>>(f: *mut u8) -> io::Result<()> {
+    (*(f as *mut F))()
+}
+
+/// The loader's fork-for-exec entry points (jit.rs / forkexec.rs, found through dlsym: none
+/// when std runs without Relax, e.g. under rustc in std/check_os).
+#[cfg(not(target_os = "android"))]
+struct ForkLoader {
+    precompile: Option<extern "C" fn(usize) -> u64>,
+    fork_exec: Option<extern "C" fn() -> sys::pid_t>,
+    fork_exec_done: Option<extern "C" fn(sys::pid_t) -> u32>,
+}
+
+#[cfg(not(target_os = "android"))]
+impl ForkLoader {
+    fn get() -> ForkLoader {
+        unsafe fn sym(name: &core::ffi::CStr) -> usize {
+            #[cfg(target_os = "macos")]
+            const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+            #[cfg(not(target_os = "macos"))]
+            const RTLD_DEFAULT: *mut c_void = core::ptr::null_mut();
+            dlsym(RTLD_DEFAULT, name.as_ptr()) as usize
+        }
+        unsafe {
+            let (p, f, d) = (sym(c"__relax_precompile"), sym(c"__relax_fork_exec"), sym(c"__relax_fork_exec_done"));
+            ForkLoader {
+                precompile: (p != 0).then(|| core::mem::transmute::<usize, extern "C" fn(usize) -> u64>(p)),
+                fork_exec: (f != 0).then(|| core::mem::transmute::<usize, extern "C" fn() -> sys::pid_t>(f)),
+                fork_exec_done: (d != 0).then(|| core::mem::transmute::<usize, extern "C" fn(sys::pid_t) -> u32>(d)),
+            }
         }
     }
 }
@@ -985,6 +1076,8 @@ extern "C" {
     fn sigaddset(set: *mut SigSet, sig: c_int) -> c_int;
     #[cfg(not(target_os = "android"))]
     fn fork() -> sys::pid_t;
+    #[cfg(not(target_os = "android"))]
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     #[cfg(not(target_os = "android"))]
     #[link_name = "setpgid"]
     fn fork_setpgid(pid: sys::pid_t, pgid: sys::pid_t) -> c_int;

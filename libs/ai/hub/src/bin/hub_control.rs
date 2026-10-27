@@ -5,6 +5,7 @@
 //! ```text
 //! hub-control <base> get | watch | load <model> | unload <model>
 //! hub-control <base> yield <mb> [unload] [reserve_mb]   (what the WM asks under GPU pressure)
+//! hub-control <base> local-use gaming|none              (what the WM reports; its own hub only)
 //! hub-control <base> context <tokens> | kv f16|q8        (applied at once)
 //! hub-control <base> ask <model> <prompt> [--image <png|jpg>] [--max N]
 //!             [--session S] [--thinking true|false] [--system <text>] [--temp T]
@@ -43,6 +44,15 @@ fn run() -> Result<(), String> {
                 since = v.get("seq").and_then(Value::as_u64).unwrap_or(since);
                 println!("{}", v.to_json());
             }
+        }
+        "local-use" => {
+            let use_ = match rest.first().map(String::as_str) {
+                Some("gaming") => "gaming",
+                Some("none") => "",
+                _ => return Err("local-use gaming|none".into()),
+            };
+            let v = t.post_json(&format!("{base}/control/local-use"), &json::obj(vec![("use", json::s(use_))]))?;
+            println!("{}", v.to_json());
         }
         "yield" => {
             // what the WM sends under GPU pressure: yield <mb> [unload] [reserve_mb]

@@ -128,7 +128,12 @@ impl SurfaceOperation {
                 value.shading = match v.get("shading") {
                     None | Some(Value::Null) => None,
                     Some(s) => {
-                        fields(s, &["wind", "clearcoat", "flake", "impostor", "rim", "plate"])?;
+                        fields(s, &["wind", "clearcoat", "flake", "impostor", "rim", "plate", "lamp"])?;
+                        let lamp = match s.get("lamp") {
+                            None | Some(Value::Null) => None,
+                            Some(l) => Some(l.as_str().and_then(makepad_gltf::GlbLamp::from_name)
+                                .ok_or(Error::Invalid("shading lamp: tail, brake or reverse"))?),
+                        };
                         Some(makepad_gltf::GlbShading {
                             wind: number(s, "wind", 0.0)?,
                             clearcoat: number(s, "clearcoat", 0.0)?,
@@ -136,6 +141,7 @@ impl SurfaceOperation {
                             impostor: number(s, "impostor", 0.0)?,
                             rim: number(s, "rim", 0.0)?,
                             plate: number(s, "plate", 0.0)?,
+                            lamp,
                         })
                     }
                 };

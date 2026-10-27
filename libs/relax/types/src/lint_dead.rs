@@ -1308,7 +1308,7 @@ impl<'a, 'b> Reporter<'a, 'b> {
         };
         let _ = (parent, tuple_fields);
         let def = prog.def(first.scope);
-        if lint::external(prog, def.file, first.pos) { return; }
+        if lint::external(prog, def.file, first.pos) || lint::generated(prog, first.scope) { return; }
         lint::emit_in(prog, first.scope, &first.inner, lint, def.file, first.pos, &msg);
     }
 

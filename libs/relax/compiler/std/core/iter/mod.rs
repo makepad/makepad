@@ -12,8 +12,8 @@ pub use adapters::{
 };
 pub use range::Step;
 pub use sources::{
-    empty, from_fn, once, once_with, repeat, repeat_n, repeat_with, successors, zip, Empty, FromFn, Once, OnceWith,
-    Repeat, RepeatN, RepeatWith, Successors,
+    chain, empty, from_fn, once, once_with, repeat, repeat_n, repeat_with, successors, zip, Empty, FromFn, Once,
+    OnceWith, Repeat, RepeatN, RepeatWith, Successors,
 };
 
 use crate::cmp::Ordering;
@@ -674,6 +674,7 @@ impl<'a, I: DoubleEndedIterator + ?Sized> DoubleEndedIterator for &'a mut I {
 }
 
 impl<'a, I: ExactSizeIterator + ?Sized> ExactSizeIterator for &'a mut I {}
+unsafe impl<'a, I: TrustedLen + ?Sized> TrustedLen for &'a mut I {}
 
 pub trait DoubleEndedIterator: Iterator {
     fn next_back(&mut self) -> Option<Self::Item>;
@@ -787,6 +788,18 @@ impl<A, B, EA: Extend<A>, EB: Extend<B>> Extend<(A, B)> for (EA, EB) {
             Extend::<A>::extend_one(&mut self.0, a);
             Extend::<B>::extend_one(&mut self.1, b);
         }
+    }
+}
+
+impl<A, B, FromA, FromB> FromIterator<(A, B)> for (FromA, FromB)
+where
+    FromA: Default + Extend<A>,
+    FromB: Default + Extend<B>,
+{
+    fn from_iter<T: IntoIterator<Item = (A, B)>>(iter: T) -> (FromA, FromB) {
+        let mut res = (FromA::default(), FromB::default());
+        res.extend(iter);
+        res
     }
 }
 

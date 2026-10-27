@@ -35,6 +35,9 @@ pub(super) struct State {
     pub physical_keyboard: Option<bool>,
     pub ime: Option<(i32, bool)>,
     pub wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// An immersive (OpenXR) build: the host window is the XR panel, this many pixels at this
+    /// density, whatever the Activity's own surface is.
+    pub xr: Option<([u32; 2], f32)>,
 }
 pub(super) struct Shared {
     pub registry: Mutex<Registry>,
@@ -44,10 +47,10 @@ impl Shared {
     pub fn global() -> &'static Self {
         static VALUE: OnceLock<Shared> = OnceLock::new();
         VALUE.get_or_init(|| Self { registry: Mutex::new(Registry::default()), state: Mutex::new(State {
-            recipient: None, ime_session: None, events: Vec::new(), params: AndroidParams::default(), refresh: 60., insets: [0.; 4], pending: HashSet::new(), active: false, focused: false, physical_keyboard: None, ime: None, wake: None,
+            recipient: None, ime_session: None, events: Vec::new(), params: AndroidParams::default(), refresh: 60., insets: [0.; 4], pending: HashSet::new(), active: false, focused: false, physical_keyboard: None, ime: None, wake: None, xr: None,
         }) })
     }
-    pub fn dpi(&self) -> f32 { lock(&self.state).params.density }
+    pub fn dpi(&self) -> f32 { let s = lock(&self.state); s.xr.map_or(s.params.density, |(_, dpi)| dpi) }
     pub fn emit(&self, time: u64, f: impl FnOnce(&mut EventQueue, Id)) {
         let mut q = EventQueue::new();
         q.set_time(time);
@@ -63,7 +66,10 @@ impl Shared {
     }
     pub fn display(&self) {
         let size = lock(&self.registry).state.size;
-        let (dpi, refresh, insets) = { let s = lock(&self.state); (s.params.density, s.refresh, s.insets) };
+        let (size, dpi, refresh, insets) = { let s = lock(&self.state); match s.xr {
+            Some((size, dpi)) => (size, dpi, s.refresh, [0.; 4]),
+            None => (size, s.params.density, s.refresh, s.insets),
+        } };
         self.emit(clock_ns(), |q, id| {
             q.display(id, dpi, refresh);
             q.geom(id, 0., 0., size[0] as f64 / dpi as f64, size[1] as f64 / dpi as f64, dpi, window_state::RESTORE);
@@ -71,11 +77,24 @@ impl Shared {
             q.safe_area(id, insets[0] as f64, insets[1] as f64, insets[2] as f64, insets[3] as f64);
         });
     }
+    /// Sends `f`'s events to window `id` of session `sid`.
+    pub fn emit_to(&self, sid: u32, id: Id, time: u64, f: impl FnOnce(&mut EventQueue, Id)) {
+        let mut q = EventQueue::new();
+        q.set_time(time);
+        f(&mut q, id);
+        let wake = { let mut s = lock(&self.state); s.events.push((Some(sid), q)); s.wake.clone() };
+        if let Some(wake) = wake { wake(); }
+    }
+    /// FrameReady for the windows that asked; an XR window stays pending for the XR thread.
     pub fn frame(&self, time: u64) {
+        let xr_window = lock(&self.registry).xr_window;
         let (pending, wake, period) = {
             let mut s = lock(&self.state);
             if !s.active { return; }
-            (std::mem::take(&mut s.pending), s.wake.clone(), (1_000_000_000. / s.refresh as f64) as u64)
+            let pending = std::mem::take(&mut s.pending);
+            let (xr, pending): (HashSet<_>, HashSet<_>) = pending.into_iter().partition(|w| Some(*w) == xr_window);
+            s.pending.extend(xr);
+            (pending, s.wake.clone(), (1_000_000_000. / s.refresh as f64) as u64)
         };
         let mut events = Vec::with_capacity(pending.len());
         for (sid, id) in pending {
@@ -111,6 +130,14 @@ impl Shell for AndroidShell {
                 // change the canonical host window independently of the Android surface.
                 Shared::global().display(); true
             }
+            OsCmd::WindowCreate { id, kind, .. } if kind & 0xff == window_kind::XR => super::xr::create_window(sid, id),
+            OsCmd::WindowClose { id } if lock(&Shared::global().registry).xr_window == Some((sid, id)) => {
+                let mut r = lock(&Shared::global().registry);
+                r.xr_window = None; r.xr_see_through = false; true
+            }
+            OsCmd::WindowVisuals { id, visuals, .. } if lock(&Shared::global().registry).xr_window == Some((sid, id)) => {
+                lock(&Shared::global().registry).xr_see_through = visuals & 0xff != 0; true
+            }
             OsCmd::FrameRequest { id } => { lock(&Shared::global().state).pending.insert((sid, id)); jni::request_frame(); true }
             cmd @ (OsCmd::ImeShow { .. } | OsCmd::ImeHide { .. } | OsCmd::ImeSync { .. }) => {
                 if lock(&Shared::global().state).ime_session != Some(sid) { return false; }
@@ -127,8 +154,13 @@ impl AndroidBackend {
     /// `notify` makes every pump look (the Activity's events and frame callbacks); `sessions` the
     /// session a GPU result is for.
     pub fn new(flags: u32, sessions: crate::backend::SessionNotify, notify: Arc<dyn Fn() + Send + Sync>) -> Result<Self, String> {
-        let mut core = Vulkan::with_sources(flags, sessions, Box::new(AndroidSurfaces), Box::new(NativeImages::default()))?;
         let offscreen = flags & open_flags::OFFSCREEN_WINDOWS != 0;
+        // A Quest build carries the OpenXR loader: the host window is shown in an XR session.
+        let source: Box<dyn crate::backend::vulkan::VkSurfaceSource> = match (!offscreen).then(super::xr::XrSurfaces::try_new).flatten() {
+            Some(xr) => Box::new(xr?),
+            None => Box::new(AndroidSurfaces),
+        };
+        let mut core = Vulkan::with_sources(flags, sessions, source, Box::new(NativeImages::default()))?;
         if !offscreen { core.set_shell(Box::new(AndroidShell)); }
         lock(&Shared::global().state).wake = Some(notify);
         Ok(Self { core, host: None, offscreen })
@@ -162,7 +194,10 @@ impl AndroidBackend {
     }
 }
 impl Backend for AndroidBackend {
-    fn info(&self) -> HalInfo { HalInfo { dpi: Shared::global().dpi(), ..self.core.info() } }
+    fn info(&self) -> HalInfo {
+        let info = self.core.info();
+        HalInfo { dpi: Shared::global().dpi(), flags: info.flags | if super::xr::active() { info_flags::XR } else { 0 }, ..info }
+    }
     fn submit(&mut self, world: &mut World, sid: u32, view: &CmdView) {
         self.ensure_host(world);
         self.drain(world);
@@ -184,5 +219,9 @@ impl Backend for AndroidBackend {
         state.events.retain(|(s, _)| *s != Some(sid));
         state.pending.retain(|(s, _)| *s != sid);
         if state.recipient.is_some_and(|(s, _)| s == sid) { state.recipient = self.host.map(|id| (HOST, id)); }
+        drop(state);
+        let mut registry = lock(&shared.registry);
+        if registry.xr_window.is_some_and(|(s, _)| s == sid) { registry.xr_window = None; }
     }
+    fn before_exit(&mut self) { self.core.before_exit(); }
 }

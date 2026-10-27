@@ -281,7 +281,7 @@ impl App {
                 protocols.as_mut_ptr(),
                 protocols.len() as c_int,
             );
-            let name = std::env::var("RESOURCE_NAME").ok().unwrap_or_else(|| {
+            let name = std::env::var("RESOURCE_NAME").ok().or_else(crate::app_identity).unwrap_or_else(|| {
                 std::env::current_exe()
                     .ok()
                     .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
@@ -570,6 +570,12 @@ impl App {
                     }
                 }
                 self.publish(native);
+            }
+            // the app-drawn caption's close: asked as the window manager's close is
+            window_state::CLOSE => {
+                if let Some(w) = self.windows.get(&native) {
+                    self.shared.push(w.recipient, |q, id| q.close_requested(id));
+                }
             }
             _ => {}
         }
@@ -1474,8 +1480,9 @@ impl Shell for App {
                 OsCmd::ClipRead { req, primary } => self
                     .selection
                     .read(selection::Purpose::Reply(sid, req), primary),
-                OsCmd::DragStart { id, items } => {
+                OsCmd::DragStart { id, items, .. } => {
                     if let Some(n) = self.find((sid, id)) {
+                        let items = crate::drag_promise::to_files(items);
                         self.selection.start_drag(n, (sid, id), items, self.shared);
                     }
                 }
@@ -1556,6 +1563,9 @@ impl Shell for App {
                 | OsCmd::WindowButtonsCenter { .. }
                 | OsCmd::WindowDpiOverride { .. }
                 | OsCmd::MenuSet { .. }
+                | OsCmd::TraySet { .. }
+                | OsCmd::TrayRemove { .. }
+                | OsCmd::WindowAtTray { .. }
                 | OsCmd::ClipboardActions { .. }
                 | OsCmd::ShareText { .. }
                 | OsCmd::MobileUi { .. }

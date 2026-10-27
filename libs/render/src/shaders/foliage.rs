@@ -23,6 +23,8 @@ script_mod! {
         ..mod.draw.DrawScenePbr
 
         pixel: fn() {
+            // Chain levels and the mesh <-> stand-in switch dissolve.
+            self.door_window()
             let tex = self.base_texel()
             if tex.w < 0.5 { self.clip() }
             let wp = self.v_csm.xyz
@@ -32,11 +34,9 @@ script_mod! {
             if dot(n, v) < 0.0 { n = n * (0.0 - 1.0) }
             let l = normalize(self.light_dir)
             let ndl = dot(n, l)
-            // A far stand-in (tex_mag.y < 0) is lit without a shadow lookup:
-            // at impostor range a tree's own shading is its silhouette.
-            var vis = 1.0
-            if self.tex_mag.y > -0.5 { vis = self.csm_vis_fast(wp, n, max(ndl, 0.0)) }
-            let albedo = self.to_scene(tex.xyz) * self.to_lin(self.v_tint.xyz)
+            let vis = self.csm_vis_fast(wp, n, max(ndl, 0.0))
+            // The copy's own tint and adjust (a scatter varies its crowns).
+            let albedo = self.color_adjust(self.to_scene(tex.xyz) * self.to_lin(self.v_tint.xyz), self.tint, self.color_adjust_ctl)
             let ao = clamp(mix(self.v_tint.w, 1.0, self.surface_on), 0.0, 1.0)
             var sao = 1.0
             if self.ssao_ctl.x > 0.001 {

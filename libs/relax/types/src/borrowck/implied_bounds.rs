@@ -15,6 +15,10 @@ pub struct ImpliedBounds {
     pub obligations: Vec<OutlivesPredicate>,
     /// `inferred_outlives_of` per ADT, in terms of its identity parameters (computed on demand).
     inferred: crate::fxhash::HashMap<crate::program::DefId, Vec<OutlivesPredicate>>,
+    /// `inferred_outlives_of` of the ADTs being computed: the previous round's set
+    provisional: crate::fxhash::HashMap<crate::program::DefId, Vec<OutlivesPredicate>>,
+    /// the ADTs being computed that their own fields reached in the current round
+    cycle_heads: crate::fxhash::HashSet<crate::program::DefId>,
 }
 
 impl ImpliedBounds {
@@ -231,25 +235,45 @@ impl ImpliedBounds {
         }
     }
     /// rustc_hir_analysis/src/outlives/implicit_infer.rs: the outlives predicates the field types of `def`
-    /// require, with those of the ADTs they name (`insert_required_predicates_to_be_wf`). A cycle through
-    /// `visiting` contributes nothing on its way back (rustc iterates to a fixpoint).
+    /// require, with those of the ADTs they name (`insert_required_predicates_to_be_wf`). rustc iterates every
+    /// item of the crate until no item's set grows (`infer_predicates`); here an ADT that its own fields reach
+    /// (`visiting`) gives its set of the previous round, and an ADT that was reached so is recomputed until its
+    /// set stops growing. A set that still grows after the recursion limit's count of rounds is rustc's
+    /// "overflow computing implied lifetime bounds" (recorded in `tcx.inferred_outlives_overflow`).
     fn inferred_outlives_of(&mut self, tcx: &Tcx, prog: &Program, def: crate::program::DefId, visiting: &mut Vec<crate::program::DefId>) -> Vec<OutlivesPredicate> {
         if let Some(done) = self.inferred.get(&def) { return done.clone(); }
         if let Some(done) = tcx.inferred_outlives.get(&def) { return (*done).clone(); }
-        if visiting.contains(&def) { return vec![]; }
-        let Some(adt) = tcx.adts.get(&def) else { return vec![] };
-        visiting.push(def);
-        let mut required: Vec<OutlivesPredicate> = vec![];
-        for variant in &adt.variants {
-            for field in &variant.fields { self.required_to_be_wf(tcx, prog, field.ty, visiting, &mut required); }
+        if visiting.contains(&def) {
+            self.cycle_heads.insert(def);
+            return self.provisional.get(&def).cloned().unwrap_or_default();
         }
-        visiting.pop();
-        // Only the ADT's own early-bound parameters can be required of it.
-        required.retain(|p| match *p {
-            OutlivesPredicate::Region(a, b) => [a, b].iter().all(|&r| matches!(tcx.tys.region_kind(r), RegionKind::ReEarlyParam(_))),
-            OutlivesPredicate::Type(t, r) => matches!(tcx.tys.kind(t), TyKind::Param(_) | TyKind::Alias(..)) && matches!(tcx.tys.region_kind(r), RegionKind::ReEarlyParam(_)),
-        });
-        if visiting.is_empty() { self.inferred.insert(def, required.clone()); tcx.inferred_outlives.insert(def, std::sync::Arc::new(required.clone())); }
+        let Some(adt) = tcx.adts.get(&def) else { return vec![] };
+        let limit = crate::tcx::RecursionLimit::for_item(prog, def).0;
+        let mut round = 0usize;
+        let required = loop {
+            visiting.push(def);
+            let mut required: Vec<OutlivesPredicate> = vec![];
+            for variant in &adt.variants {
+                for field in &variant.fields { self.required_to_be_wf(tcx, prog, field.ty, visiting, &mut required); }
+            }
+            visiting.pop();
+            // Only the ADT's own early-bound parameters can be required of it.
+            required.retain(|p| match *p {
+                OutlivesPredicate::Region(a, b) => [a, b].iter().all(|&r| matches!(tcx.tys.region_kind(r), RegionKind::ReEarlyParam(_))),
+                OutlivesPredicate::Type(t, r) => matches!(tcx.tys.kind(t), TyKind::Param(_) | TyKind::Alias(..)) && matches!(tcx.tys.region_kind(r), RegionKind::ReEarlyParam(_)),
+            });
+            // (rustc: a round adds predicates when the item's set is longer than the previous round's)
+            let reached = self.cycle_heads.remove(&def);
+            if !reached || required.len() <= self.provisional.get(&def).map_or(0, |p| p.len()) { break required; }
+            if round >= limit {
+                tcx.inferred_outlives_overflow.insert(def, ());
+                break required;
+            }
+            round += 1;
+            self.provisional.insert(def, required);
+        };
+        self.provisional.remove(&def);
+        if self.cycle_heads.is_empty() { self.inferred.insert(def, required.clone()); tcx.inferred_outlives.insert(def, std::sync::Arc::new(required.clone())); }
         required
     }
     fn required_to_be_wf(&mut self, tcx: &Tcx, prog: &Program, ty: TyId, visiting: &mut Vec<crate::program::DefId>, out: &mut Vec<OutlivesPredicate>) {
@@ -334,13 +358,13 @@ impl ImpliedBounds {
 }
 /// `ContainsBevyParamSet`: `ParamSet<T>` of crate `bevy_ecs`, or a reference to one (references only; the
 /// arguments of other types are not searched).
-fn contains_bevy_param_set(tcx: &Tcx, prog: &crate::program::Program, mut ty: TyId) -> bool {
+pub(crate) fn contains_bevy_param_set(tcx: &Tcx, prog: &crate::program::Program, mut ty: TyId) -> bool {
     loop {
         match tcx.tys.kind(ty) {
             TyKind::Ref(_,inner,_) => ty = *inner,
             TyKind::Adt(d,_,_) => {
                 let def = prog.def(*d);
-                return prog.name(*d) == "ParamSet" && prog.syms.str(prog.crates[def.krate as usize].name) == "bevy_ecs";
+                return prog.name(*d) == "ParamSet" && prog.crates[def.krate as usize].crate_name(prog) == "bevy_ecs";
             }
             _ => return false,
         }

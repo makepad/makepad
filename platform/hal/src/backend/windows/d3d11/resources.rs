@@ -99,7 +99,7 @@ impl Texture {
         let layers = desc.depth.max(1);
         // a six-layer sampled colour texture is a cube when the app samples it so; D3D11 needs
         // the flag at creation, and a cube-capable texture can still be viewed as an array
-        let cube = layers == 6 && desc.w == desc.h && !depth;
+        let cube = desc.is_cube();
         let mut bind = D3D11_BIND_SHADER_RESOURCE.0 as u32;
         if target {
             bind |= if depth { D3D11_BIND_DEPTH_STENCIL.0 as u32 } else { D3D11_BIND_RENDER_TARGET.0 as u32 };

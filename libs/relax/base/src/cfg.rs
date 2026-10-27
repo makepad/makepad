@@ -24,7 +24,7 @@ impl CfgSet {
             crate::options::CheckTarget::MacosArm64 => CfgSet::macos_arm64(sess, features),
             crate::options::CheckTarget::LinuxX64 => CfgSet::linux_x64(sess, features),
             crate::options::CheckTarget::AndroidArm64 => CfgSet::android_arm64(sess, features),
-            crate::options::CheckTarget::Web => CfgSet::web(sess, features),
+            crate::options::CheckTarget::Web(w) => CfgSet::web(sess, w, features),
             // machine() adds the extra cfgs itself
             crate::options::CheckTarget::Host => return CfgSet::machine(sess, features),
         };
@@ -193,20 +193,27 @@ impl CfgSet {
         }
         CfgSet { session: sess.clone(), set }
     }
-    /// The web target as the trace host runs it: `rustc --print cfg --target
-    /// wasm32-unknown-unknown` (1.98), plus `atomics` of makepad's threaded web build (cargo
-    /// makepad wasm's default: `+atomics,+bulk-memory,+mutable-globals`). Two differences, both because this machine's JIT runs the code:
-    /// `target_pointer_width` is 64 (usize is the machine's word), and std/core/alloc are read
-    /// with the machine's cfg (`std_cfg`): only the program's own crates take this set.
-    pub fn web(sess: &std::sync::Arc<crate::Session>, features: &[String]) -> CfgSet {
+    /// A web target as the trace host runs it: `rustc --print cfg --target wasm32-unknown-unknown`
+    /// (1.98; wasm64-unknown-unknown for `PtrWidth::W64`). The explicit threaded profile adds
+    /// `atomics` (cargo makepad wasm's default). std/core/alloc
+    /// are read with this set too (lib.rs `std_cfg`, plus `relax_web`): Relax std's web layer is
+    /// rustc's wasm32-unknown-unknown std.
+    pub fn web(sess: &std::sync::Arc<crate::Session>, w: crate::options::PtrWidth, features: &[String]) -> CfgSet {
+        let (arch, width) = match w {
+            crate::options::PtrWidth::W32 => ("target_arch=wasm32", "target_pointer_width=32"),
+            crate::options::PtrWidth::W64 => ("target_arch=wasm64", "target_pointer_width=64"),
+        };
         let mut set: Vec<String> = [
-            "target_arch=wasm32", "target_os=unknown", "target_family=wasm", "target_env=", "target_abi=",
-            "target_vendor=unknown", "target_pointer_width=64", "target_endian=little", "panic=abort",
+            arch, "target_os=unknown", "target_family=wasm", "target_env=", "target_abi=",
+            "target_vendor=unknown", width, "target_endian=little", "panic=abort",
             "target_feature=bulk-memory", "target_feature=multivalue", "target_feature=mutable-globals",
             "target_feature=nontrapping-fptoint", "target_feature=reference-types", "target_feature=sign-ext",
             "target_has_atomic=8", "target_has_atomic=16", "target_has_atomic=32", "target_has_atomic=64",
-            "target_has_atomic=ptr", "target_feature=atomics",
+            "target_has_atomic=ptr",
         ].iter().map(|s| s.to_string()).collect();
+        if sess.options.web_threads == crate::options::WebThreads::On {
+            set.push("target_feature=atomics".into());
+        }
         for f in features {
             set.push(format!("feature={}", f));
         }
@@ -216,7 +223,9 @@ impl CfgSet {
     /// The target triple of this cfg set (build scripts' TARGET / HOST).
     pub fn triple(&self) -> &'static str {
         if self.has("target_arch=wasm32") {
-            crate::options::CheckTarget::WEB_TRIPLE
+            crate::options::CheckTarget::web_triple(crate::options::PtrWidth::W32)
+        } else if self.has("target_arch=wasm64") {
+            crate::options::CheckTarget::web_triple(crate::options::PtrWidth::W64)
         } else if self.has("target_os=windows") {
             "x86_64-pc-windows-gnu"
         } else if self.has("target_os=android") {
@@ -228,33 +237,25 @@ impl CfgSet {
         }
     }
 
-    /// The CARGO_CFG_* variables cargo gives a build script for the target's basic cfgs (OS, arch,
-    /// env, vendor, family, endianness, pointer width, and the family flag `unix` / `windows`).
+    /// The CARGO_CFG_* variables cargo gives a build script for the target's cfgs (OS, arch,
+    /// env, vendor, family, endianness, pointer width, target_has_atomic, target_feature, panic,
+    /// and the family flag `unix` / `windows`), plus any `--cfg` from RUSTFLAGS.
     pub fn build_script_env(&self) -> Vec<(String, String)> {
-        let mut v = Vec::new();
-        for key in ["target_endian", "target_pointer_width", "target_family", "target_os", "target_arch", "target_env", "target_vendor"] {
-            let prefix = format!("{}=", key);
-            if let Some(e) = self.set.iter().find(|e| e.starts_with(&prefix)) {
-                v.push((format!("CARGO_CFG_{}", key.to_uppercase()), e[prefix.len()..].to_string()));
+        let mut v: Vec<(String, String)> = Vec::new();
+        for e in self.set.iter().chain(self.session.options.cfgs.iter()) {
+            if e.starts_with("feature=") {
+                continue;
             }
-        }
-        for flag in ["unix", "windows"] {
-            if self.has(flag) {
-                v.push((format!("CARGO_CFG_{}", flag.to_uppercase()), String::new()));
-            }
-        }
-        // cargo gives a build script every `--cfg` of RUSTFLAGS the same way: `CARGO_CFG_CUSTOM`
-        // (empty) for `--cfg custom`, `CARGO_CFG_KEY=value` for `--cfg key="value"` (several
-        // values of one key are joined by commas)
-        for e in &self.session.options.cfgs {
             let (k, val) = e.split_once('=').unwrap_or((e.as_str(), ""));
             let name = format!("CARGO_CFG_{}", k.to_uppercase());
             match v.iter_mut().find(|(n, _)| *n == name) {
                 Some((_, old)) if !val.is_empty() => {
-                    if !old.is_empty() {
-                        old.push(',');
+                    if !old.split(',').any(|x| x == val) {
+                        if !old.is_empty() {
+                            old.push(',');
+                        }
+                        old.push_str(val);
                     }
-                    old.push_str(val);
                 }
                 Some(_) => {}
                 None => v.push((name, val.to_string())),

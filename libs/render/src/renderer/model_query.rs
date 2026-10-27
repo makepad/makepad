@@ -48,26 +48,24 @@ impl Renderer {
 
     /// Generic externally-driven connection points declared by this model.
     /// Empty is a valid ordinary model; no source-pack naming is consulted.
-    pub fn model_driven_parts(&self, id: &str) -> Vec<DrivenPartInfo<'_>> {
-        self.static_models
-            .iter()
-            .find(|(key, _)| key == id)
-            .map(|(_, model)| {
-                model
-                    .driven_parts
-                    .iter()
-                    .map(|part| DrivenPartInfo {
-                        connection: &part.def.connection,
-                        pivot: part.def.pivot,
-                        anchor: part.def.anchor,
-                        radius: part.def.radius,
-                        width: part.def.width,
-                        visual: part.def.visual,
-                        rest_transform: part.def.rest_transform(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+    ///
+    /// The list is built in the caller's frame on the secondary stack (makepad_stack): asked per
+    /// car per frame, it costs no heap allocation.
+    pub fn model_driven_parts<'f>(&self, f: &makepad_stack::Frame<'f>, id: &str) -> makepad_stack::StackSlice<'f, DrivenPartInfo<'_>> {
+        let mut out = f.vec();
+        if let Some((_, model)) = self.static_models.iter().find(|(key, _)| key == id) {
+            out.extend(model.driven_parts.iter().map(|part| DrivenPartInfo {
+                connection: &part.def.connection,
+                connection_shared: &part.def.connection,
+                pivot: part.def.pivot,
+                anchor: part.def.anchor,
+                radius: part.def.radius,
+                width: part.def.width,
+                visual: part.def.visual,
+                rest_transform: part.def.rest_transform(),
+            }));
+        }
+        out.into_slice()
     }
 
     /// Advance the sky clock — what the scrolling layers of a Quake sky

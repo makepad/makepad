@@ -37,12 +37,21 @@ makepad-milkdrop = { path = "../../libs/milkdrop" }
 makepad-app-aichat = { path = "../aichat", default-features = false, features = ["engine"] }
 makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-strict-json = { path = "../../libs/strict_json" }
+# AI music (src/ai_music.rs): the hub's job API for the song writer and the
+# music models, and the encoder that files each song as tagged Ogg Vorbis.
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
+# The AI list's Created column on the local wall clock.
+makepad-civil-time = { path = "../../libs/civil_time" }
+makepad-audio-encode = { path = "../../libs/audio_encode" }
+# Songs dragged out as video (drop_video.rs, lyric_video.rs): the OS H.264 + AAC encoders, and the
+# lyric video's text drawn on the CPU with the UI's own text stack (font tables, shaping, outlines)
+# and the coverage rasteriser the draw crate uses.
+makepad-video = { package = "makepad-platform-video", path = "../../platform/video" }
+makepad-font-core = { path = "../../libs/font_core" }
+ab_glyph_rasterizer = { path = "../../libs/ab_glyph_rasterizer" }
 
 [dev-dependencies]
 makepad-script-test = { path = "../../platform/script/test" }
-
-# Writes the small tagged Ogg files the local-files tests scan.
-makepad-audio-encode = { path = "../../libs/audio_encode" }
 
 [package.metadata.makepad.desktop]
 name = "Makepad Amp"

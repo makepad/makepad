@@ -36,7 +36,27 @@ pub use core::marker;
 pub use core::mem;
 pub use core::ops;
 pub use core::option;
-pub use core::prelude;
+/// std's preludes (library/std/src/prelude): std's own modules over core's (the resolver injects core's
+/// into every crate; these are what `std::prelude::..` paths name). They differ from core's in the macro
+/// namespace only: their `panic` is `std::panic!`, core's is `core::panic!` (rust#147319; the import
+/// replay models the macro bindings, front program/rsim.rs).
+pub mod prelude {
+    pub mod v1 {
+        pub use core::prelude::v1::*;
+    }
+    pub mod rust_2015 {
+        pub use super::v1::*;
+    }
+    pub mod rust_2018 {
+        pub use super::v1::*;
+    }
+    pub mod rust_2021 {
+        pub use core::prelude::rust_2021::*;
+    }
+    pub mod rust_2024 {
+        pub use core::prelude::rust_2024::*;
+    }
+}
 pub use core::primitive;
 pub use core::ptr;
 pub use core::result;
@@ -109,6 +129,7 @@ pub mod num {
     pub use core::num::NonZeroUsize;
     pub use core::num::ParseFloatError;
     pub use core::num::ParseIntError;
+    pub use core::num::Saturating;
     pub use core::num::TryFromIntError;
     pub use core::num::Wrapping;
 }
@@ -131,4 +152,5 @@ pub mod thread;
 pub mod time;
 // ---- end std-os modules ----
 /// Relax-only: run-time modules (hot-reload lane)
+#[cfg(not(relax_web))]
 pub mod relax;

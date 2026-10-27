@@ -15,6 +15,8 @@
 //      RW_ITERS (positive count: warm up for RW_MS, then run exactly this many iterations),
 //      RW_PERF_CTL=<control fifo>,<ack fifo> (fixed mode only; perf stat --control fifo:...
 //      -D -1 --no-inherit counts the main thread only, excluding setup and warm-up).
+//      RW_THREAD_COUNTS=1 (fixed mode, macOS): the benchmark thread's own instructions and cycles over the
+//      counted iterations (thread_selfcounts; exact, unprivileged), appended as `ins=<n> cyc=<n>`.
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -29,6 +31,23 @@ pub fn main_with(all: &[(&str, Setup)]) {
             run(name, *setup, t0, proc_ms_at_start);
         }
     }
+}
+
+/// (instructions, cycles) retired by the calling thread so far (macOS: thread_selfcounts THSC_CPI)
+#[cfg(target_os = "macos")]
+fn thread_counts() -> (u64, u64) {
+    extern "C" {
+        fn thread_selfcounts(kind: i32, buf: *mut u64, nbytes: usize) -> i32;
+    }
+    let mut b = [0u64; 2];
+    let r = unsafe { thread_selfcounts(1, b.as_mut_ptr(), 16) };
+    assert_eq!(r, 0, "thread_selfcounts failed");
+    (b[0], b[1])
+}
+
+#[cfg(not(target_os = "macos"))]
+fn thread_counts() -> (u64, u64) {
+    panic!("RW_THREAD_COUNTS is macOS only (use RW_PERF_CTL with perf on Linux)")
 }
 
 /// ms since this process started (Linux: /proc/self/stat start time vs /proc/uptime), else None
@@ -101,12 +120,19 @@ fn run(name: &str, setup: Setup, t0: Instant, proc_ms_at_start: Option<f64>) {
                 assert_eq!(&reply, b"ack\n\0");
             }
         };
+        let counts = std::env::var("RW_THREAD_COUNTS").is_ok();
         perf("enable\n");
+        let c0 = if counts { thread_counts() } else { (0, 0) };
         for _ in 0..count {
             assert_eq!(black_box(iter()), expected, "{}: checksum differs between iterations", name);
         }
+        let c1 = if counts { thread_counts() } else { (0, 0) };
         perf("disable\n");
-        println!("| {} fixed_iters={} {}", name, count, expected);
+        if counts {
+            println!("| {} fixed_iters={} {} ins={} cyc={}", name, count, expected, c1.0 - c0.0, c1.1 - c0.1);
+        } else {
+            println!("| {} fixed_iters={} {}", name, count, expected);
+        }
         return;
     }
     let mut starts: Vec<f64> = Vec::new(); // ms since main start, at each iteration's start

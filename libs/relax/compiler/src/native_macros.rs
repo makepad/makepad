@@ -10,21 +10,6 @@ pub fn report(profile: bool) {
 static UPDATE: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
 static GRAPH: std::sync::RwLock<Option<std::sync::Arc<Graph>>> = std::sync::RwLock::new(None);
 
-pub(crate) struct ZoneTaken(Option<std::sync::Arc<Graph>>);
-
-pub(crate) fn zone_take() -> ZoneTaken {
-    // prepare (called when the front registry is installed) rebuilds this graph.
-    let mut graph = GRAPH.write().unwrap_or_else(|e| e.into_inner());
-    let taken = ZoneTaken(std::mem::take(&mut *graph));
-    #[cfg(test)]
-    assert!(graph.is_none());
-    taken
-}
-
-pub(crate) fn zone_put_back(taken: ZoneTaken) {
-    let mut graph = GRAPH.write().unwrap_or_else(|e| e.into_inner());
-    std::mem::forget(std::mem::replace(&mut *graph, taken.0));
-}
 
 #[derive(Clone, Debug)]
 pub struct Mismatch {
@@ -303,7 +288,7 @@ mod tests {
             }
             let unit = reg.units.len();
             reg.units.push(UnitInfo { name: name.into(), src_path: root.join(name).join("src/lib.rs").to_string_lossy().into_owned(), edition: 2021,
-                features: Vec::new(), deps: if unit == 0 { Vec::new() } else { vec![(unit - 1, reg.units[unit - 1].name.clone())] }, proc_macro: unit == 2 });
+                features: Vec::new(), deps: if unit == 0 { Vec::new() } else { vec![(unit - 1, reg.units[unit - 1].name.clone())] }, proc_macro: unit == 2, registry: false, cfgs: Vec::new(), env: Vec::new() });
         }
         reg.units[2].deps.push((0, "makepad_micro_proc_macro".into()));
         assert!(checked(&reg).is_ok());

@@ -22,7 +22,9 @@ pkg = os.path.join(tmp, "pkg")
 shutil.copytree(os.path.join(HERE, "pkg"), pkg)
 helper = os.path.join(pkg, "src", "helper.rs")
 base = open(helper).read()
-env = dict(os.environ, MAKEPAD_RUN_LIVE="1", MAKEPAD_RUN_CACHE_DIR=os.path.join(tmp, "cache"))
+# the live driver writes this file once it watches the sources (MAKEPAD_RUN_LIVE_READY)
+ready = os.path.join(tmp, "live-ready")
+env = dict(os.environ, MAKEPAD_RUN_LIVE="1", MAKEPAD_RUN_LIVE_READY=ready, MAKEPAD_RUN_CACHE_DIR=os.path.join(tmp, "cache"))
 for k in ("MAKEPAD_RUN_CACHE", "MAKEPAD_RUN_PRELINK", "MAKEPAD_RUN_HINTS_RECORD"):
     env.pop(k, None)
 cmd = [relax, "run", "--verbose", "cache-prelink-reload"]
@@ -45,6 +47,8 @@ p2 = once("warm")
 step("warm run prelinks its start", p2.returncode == 0 and "out tick 0 11" in p2.stdout and "prelinked" in p2.stderr)
 
 trace = os.path.join(tmp, "live.trace")
+if os.path.exists(ready):
+    os.remove(ready)  # written by the runs before this one
 p = subprocess.Popen(cmd, cwd=pkg, env=dict(env, MAKEPAD_RUN_CACHE_TRACE=trace), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 out, err = [], []
 def pump(f, acc):
@@ -74,7 +78,8 @@ def save(text):
     st = os.stat(helper)
     os.utime(helper, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
 
-step("live run starts prelinked", wait(lambda: last_value() == 11 and any("watching" in l for l in err), 120) and any("prelinked" in l for l in err))
+# (the readiness file and the prelink report come from different threads: wait for both)
+step("live run starts prelinked", wait(lambda: last_value() == 11 and os.path.exists(ready), 120) and wait(lambda: any("prelinked" in l for l in err)))
 save(base.replace("    1\n", "    2\n"))
 ok = wait(lambda: last_value() == 21)
 step("edit of the prelinked value(): the prelinked caller calls the new code", ok and any("patched" in l for l in err))

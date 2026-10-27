@@ -4,8 +4,8 @@
 //! binary compiles, from `cargo metadata` of the package (its library-dependency closure), split into
 //! Relax's own (under libs/relax and tools/run) and the makepad crates it uses. Only file contents count:
 //! never git state, mtimes or the checkout's location. A commit, checkout or `git add` neither
-//! reruns the script nor changes the stamp; the stamp is in the binary, whose bytes are the
-//! build id in every Relax cache key.
+//! reruns the script nor changes the stamp. (Relax's cache keys use the codegen identity instead:
+//! self_stamp.rs, relax-compiler's codegen_id.rs.)
 //! Reruns: every file the hashes read (a deleted one too) and the workspace manifest (it places
 //! the workspace dependencies). Nothing else of the workspace or the repository.
 use crate::json;

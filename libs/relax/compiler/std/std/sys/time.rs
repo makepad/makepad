@@ -3,20 +3,52 @@
 use core::time::Duration;
 
 /// A normalized fractional second, matching the niche used by Duration.
+#[cfg(not(target_family = "wasm"))]
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 #[cfg_attr(not(relax_check), rustc_layout_scalar_valid_range_end(999_999_999))]
 struct Nanoseconds(u32);
 
+#[cfg(not(target_family = "wasm"))]
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timespec {
     pub secs: i64,
     nanos: Nanoseconds,
 }
 
+#[cfg(not(target_family = "wasm"))]
 const NSEC_PER_SEC: u32 = 1_000_000_000;
 
-#[cfg(windows)]
+/// The web targets: rustc's sys/time/unsupported.rs `Instant` / `SystemTime`, a Duration since
+/// the epoch (nothing can read a clock, so a value comes from `UNIX_EPOCH` and arithmetic; a
+/// time before the epoch does not exist).
+#[cfg(target_family = "wasm")]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Timespec(Duration);
+
+#[cfg(target_family = "wasm")]
+impl Timespec {
+    pub const ZERO: Timespec = Timespec(Duration::from_secs(0));
+
+    pub fn duration(&self) -> Duration {
+        self.0
+    }
+
+    pub fn checked_add(&self, d: Duration) -> Option<Timespec> {
+        Some(Timespec(self.0.checked_add(d)?))
+    }
+
+    pub fn checked_sub(&self, d: Duration) -> Option<Timespec> {
+        Some(Timespec(self.0.checked_sub(d)?))
+    }
+
+    /// `self - other` as a Duration: Ok if self >= other, else Err(other - self).
+    pub fn sub_timespec(&self, other: &Timespec) -> Result<Duration, Duration> {
+        self.0.checked_sub(other.0).ok_or_else(|| other.0 - self.0)
+    }
+}
+
+#[cfg(any(windows, target_family = "wasm"))]
 pub use super::os::{now, sleep};
 
 #[cfg(unix)]
@@ -29,6 +61,7 @@ pub fn now(clock: super::os::clockid_t) -> Timespec {
     Timespec::new(t.tv_sec, t.tv_nsec as i64)
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl Timespec {
     pub const ZERO: Timespec = Timespec::new(0, 0);
 

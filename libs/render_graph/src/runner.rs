@@ -14,6 +14,17 @@
 //! slot reads the pass's first input and `history_ready()` is 0, so a pass
 //! never samples a texture it has not written in this run (a texture from
 //! the pool may still hold another document's frame).
+//!
+//! A history steps once per recording that painted whole. The platform does
+//! not owe a paint for every recording (a frame drawn again for its glyphs,
+//! a first frame waiting for its pipelines, a window that did not ask for a
+//! frame yet), and a paint can leave a draw out while its pipeline compiles;
+//! a pass recorded again before its last recording painted whole
+//! (`painted_serial`) takes that same step again: the same texture written,
+//! the same history read, cold while it was cold. Every history is settled
+//! that way once per drawing, before any pass reads it: a pass that reads
+//! `name.prev` ahead of the history pass `name` reads its last whole output,
+//! never the texture that pass is about to write again.
 
 use crate::pass::PassDecl;
 use crate::program::{DrawGraphPass, Programs};
@@ -90,10 +101,78 @@ struct HistorySlot {
     /// The plan node it belongs to.
     node: usize,
     twin: Texture,
-    /// True: the latest output is in `twin` (the next run writes the plan's
-    /// target and reads `twin` as its history).
+    state: HistoryState,
+    /// The pass that recorded its last step (a plan rebuild can give the
+    /// node another pass).
+    stepped_by: Option<DrawPassId>,
+}
+
+/// Which of a history pass's two textures holds its latest output, stepped
+/// once per recording that painted whole.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct HistoryState {
+    /// True: the latest output is in the twin (the next step writes the
+    /// plan's target and reads the twin as its history).
     in_twin: bool,
     cold: bool,
+    /// The last step not yet settled: the state before it, the repaint
+    /// (`Cx::repaint_id`) and the drawing (`Cx::drawing_id`) that recorded it.
+    last: Option<HistoryStep>,
+}
+
+/// A history step: the state before it, and where it was recorded.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct HistoryStep {
+    in_twin: bool,
+    cold: bool,
+    repaint: u64,
+    drawing: u64,
+}
+
+impl Default for HistoryState {
+    fn default() -> Self {
+        HistoryState { in_twin: false, cold: true, last: None }
+    }
+}
+
+impl HistoryState {
+    /// Settle the step a drawing before `drawing` took, its pass last
+    /// painted whole in repaint `painted`: kept when that recording painted
+    /// whole, undone when it did not (it is taken again). Idempotent within
+    /// a drawing.
+    fn settle(&mut self, painted: u64, drawing: u64) {
+        if let Some(last) = self.last {
+            if last.drawing != drawing {
+                if painted <= last.repaint {
+                    self.in_twin = last.in_twin;
+                    self.cold = last.cold;
+                }
+                self.last = None;
+            }
+        }
+    }
+
+    /// Where the latest whole output is (true: the twin), `None` while cold.
+    fn latest(&self) -> Option<bool> {
+        (!self.cold).then_some(self.in_twin)
+    }
+
+    /// Take the step of a recording in repaint `repaint` of drawing
+    /// `drawing`; returns where the history it reads is (true: the twin),
+    /// `None` while cold. Recorded again in the same drawing, it replaces
+    /// the step that drawing took.
+    fn step(&mut self, painted: u64, repaint: u64, drawing: u64) -> Option<bool> {
+        self.settle(painted, drawing);
+        if let Some(last) = self.last {
+            self.in_twin = last.in_twin;
+            self.cold = last.cold;
+        }
+        self.last = Some(HistoryStep { in_twin: self.in_twin, cold: self.cold, repaint, drawing });
+        let read = self.latest();
+        self.in_twin = !self.in_twin;
+        self.cold = false;
+        read
+    }
 }
 
 /// The graph's GPU side for one host view.
@@ -267,14 +346,23 @@ impl GraphRunner {
                 Some((f, _)) if *f == t.format => {}
                 _ => {
                     let tex = Texture::new_with_format(cx, t.format.texture_format());
-                    // every frame renders a graph target before it is read
-                    tex.set_transient(cx, true);
                     if i < self.targets.len() {
                         self.targets[i] = (t.format, tex);
                     } else {
                         self.targets.push((t.format, tex));
                     }
                 }
+            }
+        }
+        // Every frame renders a graph target before it is read, so the
+        // platform may give an idle one's storage back (transient), except a
+        // history pass's: it carries the picture to the next frame, and one
+        // given back would come back empty under the history.
+        let kept = plan.history_targets(&self.graph);
+        for (i, (_, tex)) in self.targets.iter().enumerate() {
+            let transient = !kept.contains(&i);
+            if tex.is_transient(cx) != transient {
+                tex.set_transient(cx, transient);
             }
         }
         while self.slots.len() < plan.passes.len() {
@@ -302,7 +390,7 @@ impl GraphRunner {
         for (node, format) in wanted {
             if !self.history.iter().any(|h| h.node == node) {
                 let twin = Texture::new_with_format(cx, format.texture_format());
-                self.history.push(HistorySlot { node, twin, in_twin: false, cold: true });
+                self.history.push(HistorySlot { node, twin, state: HistoryState::default(), stepped_by: None });
             }
         }
         ok
@@ -315,7 +403,7 @@ impl GraphRunner {
         let writer = plan.targets[v.0 as usize].writer;
         let node = plan.passes[writer.0 as usize].node;
         match self.history.iter().find(|h| h.node == node) {
-            Some(h) if h.in_twin => h.twin.clone(),
+            Some(h) if h.state.in_twin => h.twin.clone(),
             _ => self.targets[v.0 as usize].1.clone(),
         }
     }
@@ -323,12 +411,10 @@ impl GraphRunner {
     /// A history pass's latest output (None while it is cold).
     fn latest_of(&self, node: usize) -> Option<Texture> {
         let h = self.history.iter().find(|h| h.node == node)?;
-        if h.cold {
-            return None;
-        }
+        let in_twin = h.state.latest()?;
         let plan = self.plan.as_ref()?;
         let v = plan.passes.iter().find(|p| p.node == node)?.output;
-        Some(if h.in_twin { h.twin.clone() } else { self.targets[v.0 as usize].1.clone() })
+        Some(if in_twin { h.twin.clone() } else { self.targets[v.0 as usize].1.clone() })
     }
 
     /// Start every history cold again (a live unit suspended, a document
@@ -336,8 +422,8 @@ impl GraphRunner {
     /// producers they sampled. Targets stay allocated.
     pub fn reset_history(&mut self, cx: &mut Cx) {
         for h in &mut self.history {
-            h.in_twin = false;
-            h.cold = true;
+            h.state = HistoryState::default();
+            h.stepped_by = None;
         }
         for slot in &self.slots {
             slot.pass.withdraw(cx);
@@ -431,17 +517,26 @@ impl GraphRunner {
         crate::accum::attach(cx, &self.slots[last].pass, parent);
         let aspect = plan.size.0 as f32 / plan.size.1.max(1) as f32;
         let plan_w = plan.size.0 as f32;
+        // Settle every history before any pass reads one: a step a drawing
+        // before took is kept if its recording painted whole and undone if
+        // not, so `name.prev` and `@history` read the last whole output.
+        let (repaint, drawing) = (cx.cx.repaint_id(), cx.cx.drawing_id());
+        for h in &mut self.history {
+            let painted = h.stepped_by.map_or(0, |id| cx.cx.passes[id].painted_serial);
+            h.state.settle(painted, drawing);
+        }
         for p in &passes {
             let program = self.decls[p.node].program_id();
             // A history pass reads its latest output and writes the other
-            // of its two textures, which then holds the latest.
+            // of its two textures, which then holds the latest (or, its last
+            // recording not painted whole yet, records that step again).
             let mut prev = None;
             if let Some(h) = self.history.iter_mut().find(|h| h.node == p.node) {
-                if !h.cold {
-                    prev = Some(if h.in_twin { h.twin.clone() } else { self.targets[p.output.0 as usize].1.clone() });
+                let painted = h.stepped_by.map_or(0, |id| cx.cx.passes[id].painted_serial);
+                if let Some(in_twin) = h.state.step(painted, repaint, drawing) {
+                    prev = Some(if in_twin { h.twin.clone() } else { self.targets[p.output.0 as usize].1.clone() });
                 }
-                h.in_twin = !h.in_twin;
-                h.cold = false;
+                h.stepped_by = Some(self.slots[p.id.0 as usize].pass.draw_pass_id());
             }
             let target = self.version_texture(p.output);
             let mut textures: Vec<Option<Texture>> = p
@@ -591,6 +686,96 @@ mod tests {
             label: "Pass".into(),
             map: false,
             live_literals: false,
+        }
+    }
+
+    #[test]
+    fn a_history_steps_once_per_recording_that_painted_whole() {
+        // `step(painted, repaint, drawing)`: recorded in repaint `repaint` by
+        // drawing `drawing`, the pass last painted whole in `painted`.
+        let mut h = HistoryState::default();
+        // The first recording is cold: it writes the twin and reads nothing.
+        assert_eq!(h.step(0, 3, 1), None);
+        // Drawn again before it painted (a frame drawn again for its glyphs:
+        // another drawing, the same repaint) and painted with its draw left
+        // out (its pipeline compiling): still that cold step, never a read of
+        // the twin nothing painted.
+        assert_eq!(h.step(0, 3, 2), None);
+        assert_eq!(h.step(0, 4, 3), None);
+        // Painted whole: the next recording reads it, then they alternate.
+        assert_eq!(h.step(5, 5, 4), Some(true));
+        assert_eq!(h.step(6, 6, 5), Some(false));
+        assert_eq!(h.step(7, 7, 6), Some(true));
+        // A recording that did not paint is recorded again as it was: the
+        // same history read, the same texture written.
+        let before = h;
+        assert_eq!(h.step(7, 8, 7), Some(true));
+        assert!(!h.in_twin);
+        assert_eq!(h.step(7, 9, 8), Some(true));
+        assert_eq!((h.in_twin, h.cold), (before.in_twin, before.cold));
+        // Recorded twice in one drawing (a host running the stage again):
+        // the second replaces the first.
+        assert_eq!(h.step(10, 10, 9), Some(false));
+        assert_eq!(h.step(10, 10, 9), Some(false));
+        assert_eq!(h.step(11, 11, 10), Some(true));
+        // Reset: cold again.
+        h = HistoryState::default();
+        assert_eq!(h.step(11, 12, 11), None);
+    }
+
+    #[test]
+    fn a_prev_reader_ahead_of_its_history_pass_reads_the_last_whole_output() {
+        // A simulation's loop: `advect` reads `flow.prev`, and the history
+        // pass `flow` runs after it. Each drawing settles the history first,
+        // then advect reads `latest`, then flow takes its step.
+        let mut flow = HistoryState::default();
+        flow.settle(0, 1);
+        assert_eq!(flow.latest(), None, "cold: advect reads zeros");
+        assert_eq!(flow.step(0, 1, 1), None);
+        // Drawing 2: drawing 1's recording painted whole (repaint 2).
+        flow.settle(2, 2);
+        assert_eq!(flow.latest(), Some(true));
+        assert_eq!(flow.step(2, 2, 2), Some(true));
+        // Drawing 3: drawing 2's recording did not paint whole. Advect reads
+        // the output drawing 1 painted, not the target flow is about to
+        // write again, and flow redoes drawing 2's step.
+        flow.settle(2, 3);
+        assert_eq!(flow.latest(), Some(true));
+        assert_eq!(flow.step(2, 3, 3), Some(true));
+        // Settling twice in a drawing (a stage run after another) changes nothing.
+        flow.settle(2, 3);
+        assert_eq!(flow.latest(), Some(false), "the step this drawing took stands");
+        // Drawing 4: painted whole (repaint 4); advect reads it.
+        flow.settle(4, 4);
+        assert_eq!(flow.latest(), Some(false));
+    }
+
+    fn history_pass(name: Option<&str>, reads: &[&str]) -> PassDecl {
+        PassDecl {
+            name: name.map(Into::into),
+            stage: Stage::Display,
+            reads: reads.iter().map(|r| r.to_string()).collect(),
+            history: reads.contains(&"history"),
+            scale: 1.0,
+            ..pass(1.0)
+        }
+    }
+
+    #[test]
+    fn a_history_pass_s_targets_are_never_given_back() {
+        // A transient target may be given back while idle (Metal, Vulkan)
+        // and comes back empty; a history pass's output must not be one.
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut runner = GraphRunner::default();
+        runner.set_passes(&[history_pass(None, &["color"]), history_pass(Some("keep"), &["color", "history"]), history_pass(None, &["color", "keep"])]);
+        runner.prepare(&mut cx, (64, 64), Attachments::default(), &[], false, 1 << 30);
+        let plan = runner.plan.as_ref().unwrap_or_else(|| panic!("no plan: {:?}", runner.errors));
+        for p in &plan.passes {
+            let transient = runner.targets[p.output.0 as usize].1.is_transient(&cx);
+            assert_eq!(transient, !runner.decls[p.node].history, "{}", runner.decls[p.node].label);
+        }
+        for h in &runner.history {
+            assert!(!h.twin.is_transient(&cx));
         }
     }
 

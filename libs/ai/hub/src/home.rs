@@ -1,19 +1,10 @@
 use std::fs;
 use std::path::PathBuf;
 
-/// The shared per-user home for Makepad AI state.
+/// The shared per-user home for Makepad AI state (one rule with the fleet's
+/// credential directory).
 pub fn makepad_home() -> PathBuf {
-    // An empty MAKEPAD_HOME counts as unset: PathBuf::from("") would make
-    // every path below it relative to the current folder.
-    if let Some(home) = std::env::var_os("MAKEPAD_HOME").filter(|home| !home.is_empty()) {
-        return PathBuf::from(home);
-    }
-    // USERPROFILE on Windows, HOME elsewhere; temp dir as a last resort.
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".makepad")
+    makepad_network::fleet::makepad_home()
 }
 
 fn create_home_subdir(name: &str) -> PathBuf {

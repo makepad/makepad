@@ -1,0 +1,18 @@
+[package]
+name = "makepad-app-devhub"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "devhub: the development hub. Master on the user's Mac (tray: inbox + explorer), node as a WM-supervised tray service on each Linux WM"
+
+[[bin]]
+name = "makepad-app-devhub"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-shell-kit = { path = "../../libs/shell_kit" }
+makepad-devhub = { path = "../../libs/devhub" }
+makepad-remote = { workspace = true }
+makepad-strict-json = { workspace = true }

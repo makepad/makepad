@@ -151,7 +151,6 @@ hal_events! {
     /// The window's chrome: the rect of the window buttons (x, y, w, h in window points) and
     /// whether the window floats above others. Sent ahead of a `Geom`.
     Chrome = 31, chrome { window: obj, x: f64, y: f64, w: f64, h: f64, topmost: bool };
-
     /// Safe-area insets in window points, accompanying Display and Geom notifications.
     SafeArea = 32, safe_area { window: obj, top: f64, right: f64, bottom: f64, left: f64 };
 
@@ -175,6 +174,10 @@ hal_events! {
     /// The packet left draws out: a pipeline they use was still being built for its target's
     /// layout (they come with a later packet, after `PipelineReady`). Posted before its `FrameDone`.
     FramePartial = 68, frame_partial { window: obj, frame: u64 };
+    /// The HAL wants a complete frame of every window (`window` NONE) or of one: an inspector
+    /// is about to record it (frame capture). The app redraws everything, cached or not; with
+    /// `owners` it also records which widget draws each instance range (the `draw_owners` query).
+    Redraw = 70, redraw { window: obj, owners: bool };
     PipelineFailed = 53, pipeline_failed { pipeline: id, log: rng };
     BufferEvicted = 54, buffer_evicted { buffer: id };
     TextureShared = 55, texture_shared { texture: id, handle: u64 };
@@ -319,4 +322,17 @@ hal_events! {
     /// The system back press or completed back gesture. Unless the app takes it, it answers
     /// `BackUnhandled`.
     BackPressed = 147, back_pressed { window: obj };
+
+    // ---- system tray (status items), appended
+    /// Menu item `item` (its `MenuItem::cmd`) of the app's tray `tray` (`TraySet::tray`) was chosen.
+    TrayMenu = 148, tray_menu { tray: u64, item: u64 };
+    /// A primary click on tray `tray` (Windows; macOS for a `tray_flags::DROPDOWN` tray, which
+    /// otherwise opens the menu). `x`, `y`, `w`, `h` is the icon's rect and `screen` the visible area
+    /// of its screen (x, y, w, h), in points from the primary screen's top left corner, y down
+    /// (zero where the system does not say).
+    /// An XR window's frame (`window_kind::XR`): the predicted display time (HAL clock) and the
+    /// head, eyes and hands then, one `XrFrame` (`buffers::Wire`) in the payload. The window's
+    /// FrameReady follows; that frame is drawn with these eyes.
+    XrFrame = 150, xr_frame { window: obj, display_ns: u64, frame: rng };
+    TrayClick = 149, tray_click { tray: u64, x: f64, y: f64, w: f64, h: f64, screen: rect };
 }

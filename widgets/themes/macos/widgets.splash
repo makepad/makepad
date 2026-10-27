@@ -71,4 +71,8 @@ field_frame(mod.widgets.DateRangePicker)
 mod.widgets.WellInput.min_height = 0.0
 
 mod.widgets.Window.pass.clear_color = #ececec
+mod.widgets.Window.caption_bar.draw_bg.color = #ededf0
+mod.widgets.Window.caption_bar.draw_bg.color_unfocused = #f6f6f6
+mod.widgets.Window.caption_bar.caption_label.label.draw_text.color = #242426
+mod.widgets.Window.caption_bar.caption_label.label.draw_text.color_unfocused = #98989e
 true

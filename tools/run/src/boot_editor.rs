@@ -46,6 +46,11 @@ impl Editor {
         Ok(())
     }
 
+    /// A Studio connection is open (or opening): `poll` has something to look at.
+    pub fn has_network(&self) -> bool {
+        self.network.is_some()
+    }
+
     pub fn poll(&mut self) -> Vec<String> {
         let mut errors = Vec::new();
         let Some(network) = &self.network else {

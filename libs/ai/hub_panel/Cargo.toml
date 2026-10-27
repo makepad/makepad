@@ -1,0 +1,13 @@
+[package]
+name = "makepad-ai-hub-panel"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "The AI hub control panel: hub snapshot, commands, control clients and the panel drawn with the shell kit"
+
+[dependencies]
+makepad-widgets = { path = "../../../widgets", default-features = false }
+makepad-shell-kit = { path = "../../shell_kit" }
+makepad-ai-hub = { path = "../hub", default-features = false }
+makepad-strict-json = { path = "../../strict_json" }
+makepad-network = { path = "../../../platform/network" }

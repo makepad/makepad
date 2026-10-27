@@ -353,6 +353,8 @@ impl Names {
                 else if let Some((_, root)) = self.crates[ci].deps.iter()
                     .chain(self.crates[ci].image_dep_names.iter().filter(|_| self.crates[ci].cfg.session.options.rs_lazy))
                     .find(|(alias, _)| alias == name) { root.clone() }
+                else if let Some((_, _, root, _)) = self.externs.iter()
+                    .find(|(m, alias, _, _)| m == &self.crates[ci].name && alias == name) { root.clone() }
                 else if self.crates[ci].name == name { name.into() }
                 else { format!("{module}::{name}") }
             }

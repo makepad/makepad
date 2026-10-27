@@ -1,0 +1,43 @@
+# Credits
+
+Makepad Synth's code is MIT OR Apache-2.0. It commits and ships no third-party data: everything below that is not
+Makepad's own is fetched on the person's request (Resources, the Song library), after its notice and licence are
+shown, into the weights folder (`~/.makepad/weights/`, or `MAKEPAD_ASSET_AI_CACHE`), outside every repository.
+Each install is pinned by size and SHA-256 and writes a provenance record beside the file (`makepad-model-install`).
+See also `libs/midi_library/CREDITS.md` (the song library's data and code) and `libs/score_live/CREDITS.md` (the
+score engine's example scores and sound palette).
+
+## Downloaded on request (Resources)
+
+- **FluidR3 GM**, Frank Wen's General MIDI SoundFont (release 3, 2008), MIT licence (the full text is shown in
+  Resources). What a score's `@soundfont` instruments and imported songs play. Fetched from Debian's
+  `fluid-soundfont` source package; never shipped.
+- **Lakh MIDI Dataset v0.1**, clean subset and match scores, Colin Raffel, CC BY 4.0. The song library's MIDI files.
+  The songs the files transcribe are their owners' copyrighted works: study them, play them, make covers for
+  yourself; publishing or selling a recording of a cover needs a licence for the song from its rights holder. Every
+  score imported from one keeps its credit.
+- **Million Song Dataset** track names and release years (Bertin-Mahieux, Ellis, Whitman and Lamere, ISMIR 2011),
+  freely available for research. Part of the song library's default download.
+- **Research extras, a separate opt-in** (never part of the song library's default download; the library works
+  without them): the **tagtraum MSD genre annotations CD2** (Hendrik Schreiber, ISMIR 2015), research only and
+  strictly non-commercial, and the **Last.fm tags of the Million Song Dataset**, for research.
+- **High Voltage SID Collection** (release #85, hvsc.c64.org): the tunes are copyrighted by their composers;
+  private enjoyment only (the collection's disclaimer is shown before install). Each tune keeps its composer,
+  title and release.
+
+## Downloaded on the person's own pick (Song library, chat tools)
+
+- **Zophar's Domain** (zophar.net): game music rips (NSF, SPC, GBS, VGM), one game at a time; the music is its
+  publisher's copyright, kept with its credits for listening and learning, never published.
+- **The Mod Archive** (modarchive.org): MOD, S3M, XM and IT modules, one at a time; the composers keep their
+  copyright unless a module carries a public-domain or Creative Commons licence.
+
+## In the repository
+
+- The classical example scores (`libs/score_live/examples/classical`) are transcriptions of Bernd Krueger's piano
+  performances from piano-midi.de, licensed CC BY-SA 3.0 DE; the adaptations carry the same licence (see
+  `libs/score_live/examples/classical/LICENSE`).
+- `resources/icon.svg`, `resources/icon_1024.png`, `resources/synth-icon.png`: the Synth app icon (a saw wave over
+  four level bars), original, made for this project: hand-written SVG, no traced or third-party artwork. The PNGs
+  are `rsvg-convert -w 1024 -h 1024 resources/icon.svg`, copied to both names.
+- `resources/icons/*.svg` (play, pause, stop, save, more, note, text, timeline): original, hand-written for Synth.

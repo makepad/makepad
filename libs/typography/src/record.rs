@@ -15,6 +15,7 @@ struct Record {
     /// program's life: one hash per file).
     hashes: HashMap<(usize, usize), u64>,
     glyphs: BTreeMap<u64, BTreeSet<u16>>,
+    chars: BTreeMap<u64, BTreeSet<char>>,
 }
 
 fn record() -> &'static Mutex<Record> {
@@ -37,11 +38,12 @@ pub(crate) fn recording() -> bool {
 }
 
 /// `glyphs` of the font file `data` were laid out.
-pub(crate) fn note(data: &[u8], glyphs: impl Iterator<Item = u16>) {
+pub(crate) fn note(data: &[u8], glyphs: impl Iterator<Item = u16>, text: &str) {
     let mut record = record().lock().unwrap_or_else(PoisonError::into_inner);
     let at = (data.as_ptr() as usize, data.len());
     let hash = *record.hashes.entry(at).or_insert_with(|| fnv64(data));
     record.glyphs.entry(hash).or_default().extend(glyphs);
+    record.chars.entry(hash).or_default().extend(text.chars());
 }
 
 /// The glyphs recorded since the last call: per font file hash, the ids.
@@ -67,6 +69,21 @@ pub extern "C" fn wasm_take_outline_glyphs() -> u32 {
         words.push(hash);
         words.push(glyphs.len() as u64);
         words.extend(glyphs.iter().map(|&id| id as u64));
+    }
+    words[0] = words.len() as u64;
+    Box::leak(words.into_boxed_slice()).as_ptr() as usize as u32
+}
+
+/// Source characters are cmap inputs, distinct from the glyphs actually drawn.
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn wasm_take_outline_glyph_chars() -> u32 {
+    let fonts = std::mem::take(&mut record().lock().unwrap_or_else(PoisonError::into_inner).chars);
+    let mut words = vec![0u64, fonts.len() as u64];
+    for (hash, chars) in fonts {
+        words.push(hash);
+        words.push(chars.len() as u64);
+        words.extend(chars.into_iter().map(|c| c as u64));
     }
     words[0] = words.len() as u64;
     Box::leak(words.into_boxed_slice()).as_ptr() as usize as u32

@@ -18,12 +18,12 @@ fn compile(f: &Func) -> Code {
     #[cfg(target_arch = "x86_64")]
     let c = {
         o.cpu = relax_backend::x64::detect_cpu(&o);
-        let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+        let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
         relax_backend::x64::compile(&o, f, &env).unwrap()
     };
     #[cfg(target_arch = "aarch64")]
     let c = {
-        let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0 };
+        let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
         relax_backend::arm64::compile(&o, f, &env).unwrap()
     };
     assert!(c.relocs.is_empty());

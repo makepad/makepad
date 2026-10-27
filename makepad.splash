@@ -69,6 +69,7 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-example-map"}
     RunStudioRelease{name: "makepad-app-route"}
     RunStudioRelease{name: "makepad-app-clock"}
+    RunStudioRelease{name: "makepad-app-desklink"}
     RunStudioRelease{name: "makepad-app-weather"}
     RunStudioRelease{name: "makepad-app-translator"}
     RunStudioRelease{name: "makepad-app-camera"}

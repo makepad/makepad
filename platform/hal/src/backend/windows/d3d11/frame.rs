@@ -13,7 +13,7 @@ use super::{D3d11, Tex};
 use crate::backend::exec::{self, LentState};
 use crate::buffers::{id_at, read_ids, read_pairs, CmdView};
 use crate::ledger::Kind;
-use crate::session::{LentRef, Session, TextureObj};
+use crate::session::{LentRef, Session, TextureObj, HOST};
 use crate::types::*;
 use makepad_windows_sys::Win32::Foundation::RECT;
 use makepad_windows_sys::Win32::Graphics::Direct3D::D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
@@ -221,12 +221,35 @@ impl D3d11 {
         Ok(tex)
     }
 
+    /// A window with a badge layer reads as it was last presented: with the layer.
     pub(super) fn window_image(&mut self, s: &mut Session, id: Id) -> Option<Arc<Texture>> {
         if let Some(em) = s.windows.get(s.id, id).ok().and_then(|w| w.val.embedded) {
             return self.resolve(s, em.tex);
         }
         let (sid, id) = self.window_key(s.id, id);
+        if let Some(Some(composed)) = self.badged.get(&id.index).filter(|_| sid == HOST) {
+            if composed.gen == id.gen { return Some(composed.tex.clone()); }
+        }
         self.win.get(&(sid, id.index)).filter(|t| t.gen == id.gen).map(|t| t.tex.clone())
+    }
+
+    /// The image a badge layer frame of host window `key` draws into: the window's retained image
+    /// copied into the window's composed image (made at its size). `None`: nothing rendered yet.
+    fn begin_compose(&mut self, key: (u32, Id)) -> Option<Arc<Texture>> {
+        let base = self.win.get(&(key.0, key.1.index)).filter(|t| t.gen == key.1.gen)?.tex.clone();
+        let fits = |c: &Tex| c.gen == key.1.gen && [c.tex.desc.w, c.tex.desc.h] == [base.desc.w, base.desc.h];
+        let composed = match self.badged.get(&key.1.index)?.as_ref().filter(|c| fits(c)) {
+            Some(c) => c.tex.clone(),
+            None => {
+                let tex = Texture::new(self.dev.clone(), TextureObj { format: format::BGRA8, w: base.desc.w, h: base.desc.h, depth: 1, mips: 1,
+                    usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })
+                    .map_err(|e| eprintln!("[hal-d3d11] badge layer image: {e}")).ok()?;
+                self.badged.insert(key.1.index, Some(Tex { gen: key.1.gen, tex: tex.clone() }));
+                tex
+            }
+        };
+        unsafe { self.dev.ctx.CopyResource(composed.res.as_ID3D11Resource(), base.res.as_ID3D11Resource()) };
+        Some(composed)
     }
 
     /// A 1x1 texture of a shape, sampled where a draw names no texture.
@@ -278,11 +301,40 @@ impl D3d11 {
         s.stats.max_frame_ns = s.stats.max_frame_ns.max(packet.meta.build_end_ns.saturating_sub(packet.meta.build_start_ns));
         let is_window = kind & !target::FLAGS == target::WINDOW;
         let pick = kind & target::PICK != 0;
+        let replay = kind & target::REPLAY != 0;
+        let key = self.window_key(sid, target);
+        // a window with a badge layer: its frames stay in the retained image, the layer's frame
+        // (`target::BADGES`, from the executor right after) composes and presents it
+        let layered = is_window && !pick && key.0 == HOST && self.badged.contains_key(&key.1.index);
+        let badges = layered && kind & target::BADGES != 0;
+        if badges {
+            self.compose = self.begin_compose(key);
+            // an opaque panel (`target::OVERLAY`) needs nothing under it: with no frame of the
+            // window kept yet (an app parked before it drew under the layer) the window's
+            // retained image is made at the panel's size and composed over as it is
+            if self.compose.is_none() && kind & target::OVERLAY != 0 {
+                if let Some(v) = view.passes[pr.clone()].first().map(|p| p.viewport) {
+                    let size = [(v[0] + v[2]).ceil().max(1.0) as u32, (v[1] + v[3]).ceil().max(1.0) as u32];
+                    if self.window_storage(s, target, size, now).is_ok() {
+                        self.compose = self.begin_compose(key);
+                    }
+                }
+            }
+            if self.compose.is_none() {
+                // nothing rendered yet to draw the layer over
+                if !replay {
+                    let mut batch = std::mem::take(&mut self.batch);
+                    batch.tickets.push(Ticket::Frame { token: Self::token(s), target, kind, frame: packet.frame, window: false, timer: None });
+                    self.complete.submit(batch);
+                }
+                return Some(exec::SubmittedFrame { deps: Vec::new(), window: false });
+            }
+        }
         let mut deps = Vec::new();
         let mut window_image = None;
         let mut batch = std::mem::take(&mut self.batch);
         // the frame's GPU span: a disjoint query around two timestamps
-        let timer = self.complete.timers.take(&self.dev);
+        let timer = if replay { None } else { self.complete.timers.take(&self.dev) };
         if let Some(t) = &timer {
             unsafe {
                 self.dev.ctx.Begin(t.disjoint.as_ID3D11Asynchronous());
@@ -331,10 +383,9 @@ impl D3d11 {
             if let Some(image) = window_image {
                 let embedded = s.windows.get(sid, target).is_ok_and(|w| w.val.embedded.is_some());
                 let hosted = s.windows.get(sid, target).is_ok_and(|w| w.val.is_hosted());
-                if embedded {
+                if embedded || (layered && !badges) {
                     presented = true;
                 } else if !hosted {
-                    let key = self.window_key(sid, target);
                     presented = self.present(key, &image);
                 }
                 if kind & target::CAPTURE != 0 {
@@ -348,7 +399,10 @@ impl D3d11 {
                 self.dev.ctx.End(t.disjoint.as_ID3D11Asynchronous());
             }
         }
-        batch.tickets.push(Ticket::Frame { token: Self::token(s), target, kind, frame: packet.frame, window: presented, timer });
+        self.compose = None;
+        if !replay {
+            batch.tickets.push(Ticket::Frame { token: Self::token(s), target, kind, frame: packet.frame, window: presented, timer });
+        }
         self.complete.submit(batch);
         Some(exec::SubmittedFrame { deps, window: presented })
     }
@@ -360,7 +414,11 @@ impl D3d11 {
         if v.iter().any(|v| !v.is_finite() || *v < 0.0) || v[2] <= 0.0 || v[3] <= 0.0 {
             return Err("invalid pass viewport".into());
         }
-        let size = [(v[0] + v[2]).ceil() as u32, (v[1] + v[3]).ceil() as u32];
+        let mut size = [(v[0] + v[2]).ceil() as u32, (v[1] + v[3]).ceil() as u32];
+        // a badge layer is drawn over what the window has (a resize may be landing)
+        if let Some(c) = self.compose.as_ref().filter(|_| is_window) {
+            size = [size[0].min(c.desc.w), size[1].min(c.desc.h)];
+        }
         let mut colors: Vec<(usize, Arc<Texture>)> = Vec::new();
         let mut window = None;
         for (i, id) in pass.color.iter().enumerate().filter(|(_, id)| !id.is_none()) {
@@ -379,7 +437,10 @@ impl D3d11 {
             let embedded = s.windows.get(s.id, target).ok().and_then(|w| w.val.embedded);
             let tex = match embedded {
                 Some(em) => self.resolve(s, em.tex).ok_or("missing embedded window storage")?,
-                None => self.window_storage(s, target, size, now)?,
+                None => match self.compose.clone() {
+                    Some(composed) => composed,
+                    None => self.window_storage(s, target, size, now)?,
+                },
             };
             window = Some(tex.clone());
             colors.push((0, tex));

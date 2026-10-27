@@ -101,12 +101,42 @@ impl<P: Deref> Deref for Pin<P> {
     }
 }
 
-impl<P: DerefMut> DerefMut for Pin<P>
+/// library/core/src/pin.rs `mod helper` (rust-lang/rust#85099): `DerefMut for Pin` delegates to a
+/// trait of a type that is not `#[fundamental]`, so the orphan rules keep downstream crates from
+/// writing `impl DerefMut for Pin<&LocalType>` (it could overlap an impl core may add later).
+mod helper {
+    #[repr(transparent)]
+    pub struct PinHelper<Ptr> {
+        pub(super) pointer: Ptr,
+    }
+
+    pub trait PinDerefMutHelper {
+        type Target: ?Sized;
+        fn deref_mut(&mut self) -> &mut Self::Target;
+    }
+
+    impl<Ptr: super::DerefMut> PinDerefMutHelper for PinHelper<Ptr>
+    where
+        Ptr::Target: crate::marker::Unpin,
+    {
+        type Target = Ptr::Target;
+
+        #[inline(always)]
+        fn deref_mut(&mut self) -> &mut Ptr::Target {
+            &mut self.pointer
+        }
+    }
+}
+
+impl<P> DerefMut for Pin<P>
 where
-    P::Target: Unpin,
+    P: Deref,
+    helper::PinHelper<P>: helper::PinDerefMutHelper<Target = Self::Target>,
 {
+    #[inline]
     fn deref_mut(&mut self) -> &mut P::Target {
-        &mut *self.pointer
+        // SAFETY: Pin and PinHelper have the same layout (both `repr(transparent)` over the pointer)
+        helper::PinDerefMutHelper::deref_mut(unsafe { &mut *(self as *mut Pin<P> as *mut helper::PinHelper<P>) })
     }
 }
 

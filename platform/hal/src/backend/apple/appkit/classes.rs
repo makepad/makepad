@@ -20,6 +20,7 @@ pub struct Classes {
     pub window_delegate: *const Class,
     pub view: *const Class,
     pub menu_target: *const Class,
+    pub tray_target: *const Class,
     pub menu_delegate: *const Class,
     pub app_delegate: *const Class,
     pub pulse: *const Class,
@@ -34,6 +35,7 @@ impl Classes {
             window_delegate: define_window_delegate(),
             view: define_view_class(),
             menu_target: define_menu_target_class(),
+            tray_target: define_tray_target_class(),
             menu_delegate: define_menu_delegate(),
             app_delegate: define_app_delegate(),
             pulse: define_pulse_class(),
@@ -95,6 +97,10 @@ fn define_app_delegate() -> *const Class {
             CANCEL
         } else {
             app::windows_gone_before_exit();
+            // NOW: AppKit calls exit() itself, past the hosts' own end of run. The HAL's driver
+            // threads (Metal submit, allocator) stop and are joined first, as at every other
+            // end (Hal::before_exit; it waits on no main-thread work, so this thread may call it)
+            crate::Hal::global().before_exit();
             NOW
         }
     }
@@ -108,6 +114,16 @@ fn define_app_delegate() -> *const Class {
         if !items.is_empty() {
             app().send_app_open(&items);
         }
+    }
+
+    // The user opened the running app again (its Dock icon, Finder, `open`): with no window on
+    // screen the app is asked to show itself, as an `AppOpen` without items (a later launch of a
+    // single-instance app). AppKit itself still unminiaturizes a minimized window.
+    extern "C" fn application_should_handle_reopen(_: &Object, _: Sel, _: ObjcId, has_visible_windows: BOOL) -> BOOL {
+        if has_visible_windows == NO {
+            app().send_app_open(&[]);
+        }
+        YES
     }
 
     /// A file URL as its path, anything else as the URL string.
@@ -126,10 +142,17 @@ fn define_app_delegate() -> *const Class {
         (string != nil).then(|| (input::drag_item::STRING, nsstring_to_string(string)))
     }
 
+    // the Dock icon's menu: the items the app marked for it (the system adds the windows)
+    extern "C" fn application_dock_menu(_: &Object, _: Sel, _: ObjcId) -> ObjcId {
+        super::app::dock_menu()
+    }
+
     let mut decl = ClassDecl::new("HalAppDelegate", class!(NSObject)).unwrap();
     unsafe {
+        decl.add_method(sel!(applicationDockMenu:), application_dock_menu as extern "C" fn(&Object, Sel, ObjcId) -> ObjcId);
         decl.add_method(sel!(applicationShouldTerminate:), application_should_terminate as extern "C" fn(&Object, Sel, ObjcId) -> isize);
         decl.add_method(sel!(application:openURLs:), application_open_urls as extern "C" fn(&Object, Sel, ObjcId, ObjcId));
+        decl.add_method(sel!(applicationShouldHandleReopen:hasVisibleWindows:), application_should_handle_reopen as extern "C" fn(&Object, Sel, ObjcId, BOOL) -> BOOL);
     }
     decl.register()
 }
@@ -146,6 +169,32 @@ fn define_menu_target_class() -> *const Class {
         decl.add_method(sel!(menuAction:), menu_action as extern "C" fn(&Object, Sel, ObjcId));
     }
     decl.add_ivar::<usize>("command_u64");
+    decl.register()
+}
+
+/// The target of a tray menu item: which session's tray and item it is.
+fn define_tray_target_class() -> *const Class {
+    extern "C" fn tray_action(this: &Object, _sel: Sel, _item: ObjcId) {
+        shielded("tray menu", std::panic::AssertUnwindSafe(|| {
+            let (sid, tray, item): (usize, usize, usize) = unsafe { (*this.get_ivar("sid"), *this.get_ivar("tray_u64"), *this.get_ivar("item_u64")) };
+            super::tray::action(sid as u32, tray as u64, item as u64);
+        }));
+    }
+    // a dropdown tray's button (`tray_flags::DROPDOWN`)
+    extern "C" fn tray_click(this: &Object, _sel: Sel, _button: ObjcId) {
+        shielded("tray click", std::panic::AssertUnwindSafe(|| {
+            let (sid, tray): (usize, usize) = unsafe { (*this.get_ivar("sid"), *this.get_ivar("tray_u64")) };
+            super::tray::click(sid as u32, tray as u64);
+        }));
+    }
+    let mut decl = ClassDecl::new("HalTrayTarget", class!(NSObject)).unwrap();
+    unsafe {
+        decl.add_method(sel!(trayAction:), tray_action as extern "C" fn(&Object, Sel, ObjcId));
+        decl.add_method(sel!(trayClick:), tray_click as extern "C" fn(&Object, Sel, ObjcId));
+    }
+    decl.add_ivar::<usize>("sid");
+    decl.add_ivar::<usize>("tray_u64");
+    decl.add_ivar::<usize>("item_u64");
     decl.register()
 }
 

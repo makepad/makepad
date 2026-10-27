@@ -282,4 +282,42 @@ mod tests {
         assert!(kept.ensure_kept(&mut cx, (16, 8), RenderTargetFormat::Bgra8));
         assert!(!kept.texture.is_transient(&cx));
     }
+
+    /// A window's content drawn into a pass nested under a pixel-addressed target keeps the
+    /// window's density. Desk Link draws the desktop (C) inside its dpi-1 picture target; C took
+    /// the picture's dpi, so at display scale 2.0 it was half the screen's pixels and the window
+    /// showed it magnified: every pixel of the panel and of the stream blurred (WMSHARP, 166).
+    #[test]
+    fn a_pass_under_a_pixel_target_draws_at_its_windows_dpi() {
+        use crate::cx_draw::CxDraw;
+        for dpi in [1.0, 1.3, 2.0, 2.07, 3.0] {
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            let window = WindowHandle::new(&mut cx);
+            let window_id = window.window_id();
+            cx.windows[window_id].is_created = true;
+            cx.windows[window_id].window_geom.inner_size = dvec2(1920.0, 1080.0);
+            cx.windows[window_id].window_geom.dpi_factor = dpi;
+            let root_pass = DrawPass::new(&mut cx);
+            window.set_pass(&mut cx, &root_pass);
+            let mut picture = RenderTarget::new(&mut cx, "picture");
+            picture.ensure(&mut cx, (960, 6480), RenderTargetFormat::SharedBgra8);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            draw.begin_pass(&root_pass, Some(dpi));
+            {
+                let mut cx = Cx2d::new(&mut draw);
+                cx.begin_root_turtle(dvec2(1920.0, 1080.0), Layout::default());
+                assert_eq!(cx.owning_window_dpi_factor(), dpi);
+                picture.begin(&mut cx, vec4(0.0, 0.0, 0.0, 0.0));
+                assert_eq!(cx.current_dpi_factor(), 1.0, "the picture is pixel-addressed");
+                assert_eq!(cx.owning_window_dpi_factor(), dpi, "content of the window under the picture: the window's dpi");
+                assert_eq!(cx.owning_window_or_root_pass_size(), dvec2(1920.0, 1080.0));
+                picture.end(&mut cx);
+                while !cx.turtles.is_empty() {
+                    cx.end_turtle();
+                }
+            }
+            draw.end_pass(&root_pass);
+        }
+    }
 }

@@ -10,7 +10,10 @@ license = "MIT OR Apache-2.0"
 # speech-to-text. Apps depend on the hub with defaults off and name what
 # they use; the standalone service (apps/ai-hub) lists every backend in its
 # own default feature set.
-default = ["localai", "stt"]
+default = ["localai", "stt", "kernel"]
+# The `kernel` job domain: Splash compute kernels from fleet clients run on
+# this node's CPUs (src/kernel_compute.rs). CPU only, no model weights.
+kernel = ["dep:makepad-script-compute", "dep:makepad-script-compute-sched"]
 # The local model runtime an app's chat runs on (the local chat session,
 # prompt expansion, vision, OCR): `llm`, under the name every AI crate
 # and app uses for it (makepad-ai-services / makepad-app-aichat `localai`).
@@ -19,6 +22,9 @@ localai = ["llm"]
 # Depth-Anything-3, and the rig/motion oracles). Not in default: a native
 # service must not advertise or instantiate a Python runtime.
 python-backends = []
+# TEST BUILDS ONLY: claude_cli::enable_stub serves a fake claude executable unsandboxed
+# (fleet round-trip tests on any OS without anyone's login). Never in a shipped build.
+claude-stub = []
 # Real Flux image generation via makepad-ai-flux.
 flux = ["dep:makepad-ai-flux", "dep:makepad-ai-common"]
 # The generative-PBR paint domain: mesh GLB + reference image -> PBR-textured
@@ -32,6 +38,10 @@ paint = ["dep:makepad-ai-paint", "dep:makepad-gltf", "dep:makepad-remesh", "dep:
 paint-cuda = ["paint", "makepad-ai-paint/cuda-taps"]
 # Real LLM prompt expansion via makepad-ai-llm (Qwen3.5/3.6 GGUF).
 llm = ["dep:makepad-ai-llm"]
+# The CUDA kernels for every local model backend (makepad-ai-cuda `cuda`; Linux/Windows,
+# the toolkit named by MAKEPAD_CUDA_ROOT). Only a hub app enables it (apps/aihub `node`,
+# apps/ai-hub): apps that run models in-process stay CPU-only.
+cuda = ["dep:makepad-ai-cuda", "makepad-ai-cuda/cuda"]
 # Speech sessions (AiHub::start_stt / start_tts): the OS engines as the
 # stt.system / tts.system pipes plus the in-process / machine / LAN ladder.
 speech = ["dep:makepad-system-speech"]
@@ -102,6 +112,10 @@ makepad-zune-png = { path = "../../zune/zune-png" }
 # Vision-domain request images arrive as PNG or JPEG.
 makepad-zune-jpeg = { path = "../../zune/zune-jpeg" }
 makepad-zip-file = { path = "../../zip_file" }
+# Kernel tiles travel delta-deflated (src/kernel_wire.rs).
+makepad-fast-inflate = { path = "../../fast_inflate" }
+makepad-script-compute = { path = "../../../platform/script/compute", optional = true }
+makepad-script-compute-sched = { path = "../../../platform/script/compute_sched", optional = true }
 # Music reference clips arrive as any audio file the in-repo decoders read
 # (MP3 / FLAC / Ogg Vorbis here, WAV in crate::wav). No deps, no unsafe.
 makepad-audio-decode = { path = "../../audio_decode" }
@@ -210,9 +224,20 @@ name = "hub-install"
 path = "src/bin/hub_install.rs"
 required-features = ["local"]
 
+# The kernel domain's render gate and perf table: one fractal frame on this
+# machine's threads, on each kernel node alone and on all of them together,
+# every tile bit-compared with the local render.
 [[bin]]
-name = "ai-fleet"
-path = "src/bin/ai_fleet.rs"
+name = "kernel-bench"
+path = "src/bin/kernel_bench.rs"
+required-features = ["kernel"]
+
+[[test]]
+name = "kernel_compute"
+required-features = ["kernel"]
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+makepad-ai-cuda = { path = "../cuda", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 makepad-windows-sys = {path = "../../windows/sys", version = "0.1.0"}

@@ -14,7 +14,7 @@ pub mod query;
 pub const DEFAULT_KEEP_FRAMES: usize = 60 * 60;
 
 const MAGIC: &[u8; 4] = b"MKGP";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Header {
@@ -34,6 +34,9 @@ pub struct Header {
     pub refresh_hz: f32,
     /// what could not be measured and why
     pub notes: Vec<String>,
+    /// per shader (string id): its compiled cost hints (ALU / texture ops, registers), as the
+    /// shader compiler reported them
+    pub shader_info: Vec<(u32, String)>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -43,8 +46,17 @@ pub struct CpuSpan {
     pub end: u64,
 }
 
-/// One render pass of a frame. `start`/`end` are the pass's own GPU span (0/0: the timestamps
-/// did not resolve); `vs` and `fs` are its vertex and fragment stage spans where sampled.
+/// Pass kinds.
+pub mod kind {
+    pub const RENDER: u8 = 0;
+    pub const COMPUTE: u8 = 1;
+    /// copies, uploads, mip generation
+    pub const BLIT: u8 = 2;
+}
+
+/// One encoder of a frame: a render pass, a compute dispatch or a blit. `start`/`end` are its
+/// own GPU span (0/0: the timestamps did not resolve); `vs` and `fs` are a render pass's vertex
+/// and fragment stage spans where sampled (raw, so their overlap with other passes shows).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Pass {
     pub name: u32,
@@ -58,6 +70,10 @@ pub struct Pass {
     pub fs: (u64, u64),
     /// split frames: the cost of an encoder with these attachments and no draws
     pub baseline: u64,
+    /// its attachments: format, load and store per target (string id; 0: none recorded)
+    pub attach: u32,
+    /// attachment memory traffic estimate: bytes loaded plus bytes stored
+    pub bytes: u64,
 }
 
 impl Pass {
@@ -70,9 +86,32 @@ impl Pass {
 pub struct Draw {
     pub pass: u16,
     pub shader: u32,
+    /// the draw list's owner (widget / module)
     pub owner: u32,
     pub instances: u32,
+    /// indices per instance
     pub indices: u32,
+    /// the draw list (its debug name: a model, a layer)
+    pub list: u32,
+    /// bytes of the geometry, index and instance data it reads
+    pub geo_bytes: u64,
+    /// bytes of the textures it binds, and how many
+    pub tex_bytes: u64,
+    pub textures: u32,
+    /// pixels its instances' bounds cover in the target, clipped to it (0: unknown): the sum over
+    /// a pass divided by the pass's pixels is its overdraw upper bound
+    pub area: u64,
+    /// [`draw_flags`]
+    pub flags: u8,
+}
+
+/// `Draw::flags` bits.
+pub mod draw_flags {
+    pub const BLEND: u8 = 1;
+    pub const DEPTH_WRITE: u8 = 2;
+    pub const CULL: u8 = 4;
+    /// the pass has a depth attachment (the draw is depth-tested)
+    pub const DEPTH_TEST: u8 = 8;
 }
 
 /// Split frames: GPU time of the consecutive draws of one shader (each in its own encoder).
@@ -81,6 +120,9 @@ pub struct Group {
     pub pass: u16,
     pub shader: u32,
     pub ns: u64,
+    /// the run's draws: `frame.draws[first..first + count]`
+    pub first: u32,
+    pub count: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -88,7 +130,11 @@ pub struct Frame {
     pub id: u64,
     /// the CPU's present call (0: the frame never presented)
     pub present: u64,
+    /// when the frame reached the display (0: unknown)
+    pub shown: u64,
     pub split: bool,
+    /// an ablation frame: the draws of this shader (string id) were left out (0: none)
+    pub ablated: u32,
     pub cpu: Vec<CpuSpan>,
     pub passes: Vec<Pass>,
     pub draws: Vec<Draw>,
@@ -96,8 +142,13 @@ pub struct Frame {
 }
 
 impl Frame {
+    /// A split or ablation frame: an experiment, left out of every time statistic.
+    pub fn special(&self) -> bool {
+        self.split || self.ablated != 0
+    }
+
     pub fn approx_bytes(&self) -> usize {
-        64 + self.cpu.len() * 12 + self.passes.len() * 40 + self.draws.len() * 8 + self.groups.len() * 8
+        72 + self.cpu.len() * 12 + self.passes.len() * 56 + self.draws.len() * 24 + self.groups.len() * 8
     }
 }
 
@@ -243,6 +294,11 @@ impl Recording {
         }
         put(&mut p, h.split_every as u64);
         put(&mut p, h.refresh_hz.to_bits() as u64);
+        put(&mut p, h.shader_info.len() as u64);
+        for (id, info) in &h.shader_info {
+            put(&mut p, *id as u64);
+            put_s(&mut p, info);
+        }
         let mut o = Vec::new();
         chunk(&mut o, TAG_HEADER, &p);
         o
@@ -280,7 +336,13 @@ impl Recording {
             };
             put_delta(&mut p, r, prev_ref);
             prev_ref = r;
-            put(&mut p, (f.present != 0) as u64 | (f.split as u64) << 1);
+            put(&mut p, (f.present != 0) as u64 | (f.split as u64) << 1 | ((f.shown != 0) as u64) << 2 | ((f.ablated != 0) as u64) << 3);
+            if f.shown != 0 {
+                put_delta(&mut p, f.shown, r);
+            }
+            if f.ablated != 0 {
+                put(&mut p, f.ablated as u64);
+            }
             put(&mut p, f.cpu.len() as u64);
             for c in &f.cpu {
                 put(&mut p, c.name as u64);
@@ -294,6 +356,8 @@ impl Recording {
                 put(&mut p, q.w as u64);
                 put(&mut p, q.h as u64);
                 put(&mut p, q.baseline);
+                put(&mut p, q.attach as u64);
+                put(&mut p, q.bytes);
                 for (a, b) in [(q.start, q.end), q.vs, q.fs] {
                     if a == 0 || b < a {
                         put(&mut p, 0);
@@ -311,12 +375,20 @@ impl Recording {
                 put(&mut p, d.owner as u64);
                 put(&mut p, d.instances as u64);
                 put(&mut p, d.indices as u64);
+                put(&mut p, d.list as u64);
+                put(&mut p, d.geo_bytes);
+                put(&mut p, d.tex_bytes);
+                put(&mut p, d.textures as u64);
+                put(&mut p, d.area);
+                put(&mut p, d.flags as u64);
             }
             put(&mut p, f.groups.len() as u64);
             for g in &f.groups {
                 put(&mut p, g.pass as u64);
                 put(&mut p, g.shader as u64);
                 put(&mut p, g.ns);
+                put(&mut p, g.first as u64);
+                put(&mut p, g.count as u64);
             }
         }
         let mut o = Vec::new();
@@ -396,6 +468,10 @@ impl Recording {
         }
         self.header.split_every = r.u()? as u32;
         self.header.refresh_hz = f32::from_bits(r.u()? as u32);
+        for _ in 0..r.n()? {
+            let id = r.u()? as u32;
+            self.header.shader_info.push((id, r.s()?));
+        }
         Ok(())
     }
 
@@ -422,6 +498,12 @@ impl Recording {
             if flags & 1 != 0 {
                 f.present = rf;
             }
+            if flags & 4 != 0 {
+                f.shown = r.d(rf)?;
+            }
+            if flags & 8 != 0 {
+                f.ablated = r.u()? as u32;
+            }
             for _ in 0..r.n()? {
                 let name = r.u()? as u32;
                 let start = r.d(rf)?;
@@ -429,7 +511,7 @@ impl Recording {
                 f.cpu.push(CpuSpan { name, start, end });
             }
             for _ in 0..r.n()? {
-                let mut p = Pass { name: r.u()? as u32, kind: r.u()? as u8, w: r.u()? as u32, h: r.u()? as u32, baseline: r.u()?, ..Default::default() };
+                let mut p = Pass { name: r.u()? as u32, kind: r.u()? as u8, w: r.u()? as u32, h: r.u()? as u32, baseline: r.u()?, attach: r.u()? as u32, bytes: r.u()?, ..Default::default() };
                 let mut spans = [(0u64, 0u64); 3];
                 for s in spans.iter_mut() {
                     if r.u()? == 1 {
@@ -443,14 +525,59 @@ impl Recording {
                 f.passes.push(p);
             }
             for _ in 0..r.n()? {
-                f.draws.push(Draw { pass: r.u()? as u16, shader: r.u()? as u32, owner: r.u()? as u32, instances: r.u()? as u32, indices: r.u()? as u32 });
+                f.draws.push(Draw {
+                    pass: r.u()? as u16,
+                    shader: r.u()? as u32,
+                    owner: r.u()? as u32,
+                    instances: r.u()? as u32,
+                    indices: r.u()? as u32,
+                    list: r.u()? as u32,
+                    geo_bytes: r.u()?,
+                    tex_bytes: r.u()?,
+                    textures: r.u()? as u32,
+                    area: r.u()?,
+                    flags: r.u()? as u8,
+                });
             }
             for _ in 0..r.n()? {
-                f.groups.push(Group { pass: r.u()? as u16, shader: r.u()? as u32, ns: r.u()? });
+                f.groups.push(Group { pass: r.u()? as u16, shader: r.u()? as u32, ns: r.u()?, first: r.u()? as u32, count: r.u()? as u32 });
             }
             self.frames.push(f);
         }
         Ok(())
+    }
+}
+
+// ------------------------------------------------------------------ embedding
+
+/// What the profiler stream (makepad-prof-stream, profproto.md) carries of a recording: its
+/// GPU_HEADER, GPU_STRINGS and GPU_FRAMES records hold these chunks' payloads unchanged.
+pub mod chunk_tag {
+    pub const HEADER: u8 = super::TAG_HEADER;
+    pub const STRINGS: u8 = super::TAG_STRINGS;
+    pub const FRAMES: u8 = super::TAG_FRAMES;
+}
+
+impl Recording {
+    /// Applies one chunk's payload (tag from [`chunk_tag`]) to the recording: how a stream viewer
+    /// builds the GPU side as records arrive.
+    pub fn ingest(&mut self, tag: u8, payload: &[u8]) -> Result<(), String> {
+        let mut r = Rd { b: payload, i: 0 };
+        match tag {
+            TAG_HEADER => self.read_header(&mut r),
+            TAG_STRINGS => self.read_strings(&mut r),
+            TAG_FRAMES => self.read_frames(&mut r),
+            _ => Ok(()),
+        }
+    }
+
+    /// A chunk's payload without its tag and length (the stream's GPU record payload).
+    pub fn chunk_payload(chunk: &[u8]) -> &[u8] {
+        let mut r = Rd { b: chunk, i: 1 };
+        match r.u() {
+            Ok(len) => chunk.get(r.i..r.i + len as usize).unwrap_or(&[]),
+            Err(_) => &[],
+        }
     }
 }
 

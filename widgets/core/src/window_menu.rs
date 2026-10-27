@@ -22,12 +22,14 @@ pub enum MenuItem {
     #[live { name: String::new(), items: Vec::new() }]
     Sub { name: String, items: Vec<LiveId> },
 
-    #[live { name: String::new(), shift: false, key: KeyCode::Unknown, enabled: true }]
+    #[live { name: String::new(), shift: false, key: KeyCode::Unknown, enabled: true, dock: false }]
     Item {
         name: String,
         shift: bool,
         key: KeyCode,
         enabled: bool,
+        /// Also in the Dock icon's menu (macOS).
+        dock: bool,
     },
 
     #[pick]
@@ -114,6 +116,7 @@ impl WindowMenu {
                             shift,
                             key,
                             enabled,
+                            dock,
                         } => {
                             return MacosMenu::Item {
                                 command,
@@ -121,6 +124,7 @@ impl WindowMenu {
                                 shift,
                                 key,
                                 enabled,
+                                dock,
                             }
                         }
                         MenuItem::Sub { name, items } => {

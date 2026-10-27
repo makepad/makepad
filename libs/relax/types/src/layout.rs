@@ -384,15 +384,42 @@ impl Layouts {
         tcx.try_normalize_erasing_regions(lcx.prog, env, ty).unwrap_or(ty)
     }
 
+    /// A closure's environment. Its type names the file version whose body made it: the
+    /// storages of every lowered body are recorded (`note_closure_storages`), so a closure of a
+    /// version a live edit replaced keeps the environment that version gave it. Only the
+    /// current version is derived from the owner's type check here (a replaced version's
+    /// expression ids name other expressions, or none, in the current body).
     pub fn closure_storage(&self, prog: &crate::program::Program, tcx: &Tcx, ty: TyId) -> ClosureStorage {
         let ty = tcx.tys.erase_regions(ty);
         if let Some(storage) = self.closure_storage.get(&ty) { return storage; }
-        let TyKind::Closure(_, ce, crate::types::ClosureArgs { parent_args: owner, .. }) = tcx.tys.kind(ty) else { panic!("closure storage for non-closure") };
+        let TyKind::Closure(file, ce, crate::types::ClosureArgs { parent_args: owner, .. }) = tcx.tys.kind(ty) else { panic!("closure storage for non-closure") };
         let TyKind::FnDef(def, args, _) = tcx.tys.kind(*owner) else { panic!("closure owner") };
         let body = crate::typeck::codegen_body(prog, tcx, *def, tcx.tys.list(*args));
+        if body.file != *file {
+            panic!("the environment of a closure of a replaced version of {} (expression {}) is unknown: no body of that version was lowered in this process",
+                prog.file_paths.get(*file as usize).map_or("?", |p| p.as_str()), ce & !crate::tcx::ASYNC_FN_BODY);
+        }
         let storage = ClosureStorage::for_codegen(prog, tcx, &body, *ce);
         self.closure_storage.insert(ty, storage.clone());
         storage
+    }
+
+    /// Records the environments `storages` (closure expression, storage) that codegen body `body`
+    /// gives its closures, under their closure types. The body being lowered is the truth for its
+    /// version: a recorded storage that differs (the owner was checked again) is replaced.
+    pub fn note_closure_storages<'a>(&self, prog: &crate::program::Program, tcx: &Tcx, body: &crate::typeck::Body, storages: impl Iterator<Item = (u32, &'a ClosureStorage)>) {
+        for (ce, storage) in storages {
+            if ce & crate::tcx::ASYNC_FN_BODY != 0 || !body.has_expr(crate::ast::ExprId(ce)) {
+                continue;
+            }
+            let ty = tcx.tys.erase_regions(tcx.normalize_erasing_regions(prog, crate::tcx::TypingEnv::fully_monomorphized(prog), body.ty(crate::ast::ExprId(ce))));
+            if !matches!(tcx.tys.kind(ty), TyKind::Closure(f, e, _) if *f == body.file && *e == ce) {
+                continue;
+            }
+            if self.closure_storage.get(&ty).as_ref() != Some(storage) {
+                self.closure_storage.insert(ty, storage.clone());
+            }
+        }
     }
 
     pub fn closure_storage_layout(&self, lcx: &LayoutCx<'_>, tcx: &Tcx, ty: TyId) -> Layout {
@@ -598,6 +625,70 @@ impl Layouts {
         w & SLOT_IDX != 0 && self.entry(w).too_big
     }
 
+    /// rustc_abi's `LayoutError::SizeOverflow`: is `t`'s size at least the target's `obj_size_bound`
+    /// (2^61 bytes with 64-bit pointers, 2^31 with 32-bit ones)? Only a type whose u32 layout
+    /// saturated can be (`is_too_big`); its exact size is `wide_size`.
+    pub fn size_overflows(&self, lcx: &LayoutCx<'_>, tcx: &Tcx, t: TyId) -> bool {
+        let t = tcx.tys.erase_regions(t);
+        let _ = self.of(lcx, tcx, t);
+        if !self.is_too_big(t) { return false; }
+        let bound: u128 = if tcx.tys.ptr_bytes == 4 { 1 << 31 } else { 1 << 61 };
+        self.wide_size(lcx, tcx, t, &mut Default::default()) >= bound
+    }
+
+    /// The exact size of `t` where its u32 layout saturated, with the same choices the layout made
+    /// (variant encoding, field reordering): a reordered struct packs its fields by decreasing
+    /// alignment (each size a multiple of its alignment, so without padding), a `repr(C)` one lays
+    /// them out in order; a tagged enum puts each variant after its tag.
+    fn wide_size(&self, lcx: &LayoutCx<'_>, tcx: &Tcx, t: TyId, memo: &mut crate::fxhash::HashMap<TyId, u128>) -> u128 {
+        let t = tcx.tys.erase_regions(t);
+        let l = self.of(lcx, tcx, t);
+        let up = |x: u128, a: u32| { let a = a.max(1) as u128; x.div_ceil(a) * a };
+        if !self.is_too_big(t) { return up(l.size as u128, l.align); }
+        if let Some(&w) = memo.get(&t) { return w; }
+        let fields = |this: &Self, fts: &[TyId], reorder: bool, memo: &mut crate::fxhash::HashMap<TyId, u128>| -> u128 {
+            let mut off = 0u128;
+            for &f in fts {
+                let fl = this.of(lcx, tcx, f);
+                let w = this.wide_size(lcx, tcx, f, memo);
+                off = if reorder { off + up(w, fl.align) } else { up(off, fl.align) + w };
+            }
+            off
+        };
+        let w = match tcx.tys.kind(t).clone() {
+            TyKind::Array(e, n) => match n.try_to_target_usize(&tcx.tys) {
+                Some(n) => { let el = self.of(lcx, tcx, e); up(self.wide_size(lcx, tcx, e, memo), el.align) * n as u128 }
+                None => l.size as u128,
+            },
+            TyKind::Tuple(v) => fields(self, &tcx.tys.list(v).to_vec(), true, memo),
+            TyKind::Adt(d, args, _) => match tcx.adts.get(&d) {
+                Some(adt) => {
+                    let args = tcx.tys.list(args).to_vec();
+                    let reorder = !adt.repr_c && adt.repr_int.is_none();
+                    let tag = match (&l.enc, l.tag) { (TagEnc::Direct, Some((_, Mem::Int(b, _)))) => b as u128, _ => 0 };
+                    let mut max = 0u128;
+                    for (vi, v) in adt.variants.iter().enumerate() {
+                        let fts: Vec<TyId> = (0..v.fields.len()).map(|fi| self.field_ty(lcx, tcx, d, vi as u32, fi as u32, &args)).collect();
+                        let size = if adt.is_union {
+                            fts.iter().map(|&f| self.wide_size(lcx, tcx, f, memo)).max().unwrap_or(0)
+                        } else {
+                            let valign = fts.iter().map(|&f| self.of(lcx, tcx, f).align).max().unwrap_or(1);
+                            (if tag > 0 { up(tag, valign) } else { 0 }) + fields(self, &fts, reorder, memo)
+                        };
+                        max = max.max(size);
+                        if !adt.is_enum { break; }
+                    }
+                    max
+                }
+                None => l.size as u128,
+            },
+            _ => l.size as u128,
+        };
+        let w = up(w, l.align);
+        memo.insert(t, w);
+        w
+    }
+
     fn rup(&self, lcx: &LayoutCx<'_>, x: u32, a: u32) -> u32 {
         if a > 1 && x as u64 + a as u64 - 1 > u32::MAX as u64 {
             lcx.overflowed.set(true);
@@ -617,8 +708,10 @@ impl Layouts {
 
     fn compute(&self, lcx: &LayoutCx<'_>, tcx: &Tcx, t: TyId) -> Layout {
         let k = tcx.tys.kind(t).clone();
-        let ptr = Mem::Int(8, false);
-        let nonnull = |off: u32| Some(Niche { off, bytes: 8, start: 1, end: u64::MAX as u128 });
+        // a thin pointer (and usize) is `pb` bytes: 8, or 4 on the wasm32 web target
+        let pb = tcx.tys.ptr_bytes;
+        let ptr = Mem::Int(pb as u8, false);
+        let nonnull = |off: u32| Some(Niche { off, bytes: pb, start: 1, end: if pb == 8 { u64::MAX as u128 } else { u32::MAX as u128 } });
         match k {
             TyKind::Bool => {
                 let mut l = scalar(1, Mem::Int(1, false), Cls::I);
@@ -631,7 +724,7 @@ impl Layouts {
                 l
             }
             TyKind::Int(p) => {
-                let (b, s) = crate::types::Types::int_info(p);
+                let (b, s) = tcx.tys.int_info(p);
                 if b == 16 {
                     // i128/u128: two words (low, high), lowered as word pairs
                     return plain(16, 16, Some(vec![Leaf { off: 0, mem: Mem::Int(8, false), cls: Cls::I }, Leaf { off: 8, mem: Mem::Int(8, s), cls: Cls::I }]));
@@ -643,16 +736,16 @@ impl Layouts {
             TyKind::Ref(_, inner, _) | TyKind::Ptr(_, inner) => {
                 let is_ref = matches!(k, TyKind::Ref(..));
                 let mut l = if self.is_unsized(lcx, tcx, inner) && !matches!(tcx.tys.kind(self.struct_tail_for_codegen(lcx, tcx, inner)), TyKind::Foreign(_)) {
-                    let mut l = plain(16, 8, Some(vec![Leaf { off: 0, mem: ptr, cls: Cls::I }, Leaf { off: 8, mem: ptr, cls: Cls::I }]));
-                    l.fields = vec![0, 8];
+                    let mut l = plain(2 * pb, pb, Some(vec![Leaf { off: 0, mem: ptr, cls: Cls::I }, Leaf { off: pb, mem: ptr, cls: Cls::I }]));
+                    l.fields = vec![0, pb];
                     // A dyn pointer's vtable is non-null even when its data pointer is raw.
                     // Slice metadata is a length and has no invalid values.
                     if matches!(tcx.tys.kind(self.struct_tail_for_codegen(lcx, tcx, inner)), TyKind::Dyn(..)) {
-                        l.niche = nonnull(8);
+                        l.niche = nonnull(pb);
                     }
                     l
                 } else {
-                    scalar(8, ptr, Cls::I)
+                    scalar(pb, ptr, Cls::I)
                 };
                 // references are never null (rustc: the data pointer's valid range starts at 1;
                 // of a fat reference's two scalars the first wins a tie)
@@ -662,7 +755,7 @@ impl Layouts {
                 l
             }
             TyKind::FnPtr(..) => {
-                let mut l = scalar(8, ptr, Cls::I);
+                let mut l = scalar(pb, ptr, Cls::I);
                 l.niche = nonnull(0);
                 l
             }
@@ -709,9 +802,10 @@ impl Layouts {
                 let el = self.of(lcx, tcx, e);
                 let stride = self.rup(lcx, el.size, el.align);
                 let full = (stride as u64).saturating_mul(n);
-                // rustc_abi obj_size_bound: 2^61 bytes on a 64-bit target; a larger value type has no
+                // rustc_abi obj_size_bound: 2^61 bytes on a 64-bit target (2^31 on a 32-bit one); a larger value type has no
                 // layout (E0080 "values of the type `..` are too big for the target architecture")
-                if (stride as u128) * (n as u128) >= 1u128 << 61 {
+                let bound = if tcx.tys.ptr_bytes == 4 { 1u128 << 31 } else { 1u128 << 61 };
+                if (stride as u128) * (n as u128) >= bound {
                     tcx.dcx.report(crate::next_solver::fulfill::ObligationCause { body_id: crate::program::NO_DEF, span: 0 },
                         format!("E0080: values of the type `{}` are too big for the target architecture", crate::typeck::ty_to_string(false, lcx.prog, tcx, t)));
                 }
@@ -748,9 +842,9 @@ impl Layouts {
                     if !adt.is_union && self.live_editable(lcx, tcx, d, &adt, t) {
                         let n_base = (adt.ext_from as usize).min(fts.len());
                         let mut l = self.struct_layout(lcx, tcx, &fts[..n_base], repr, Kind::AlwaysSized);
-                        let ext = self.rup(lcx, l.size, 8);
-                        l.align = l.align.max(8);
-                        l.size = self.rup(lcx, ext + 8, l.align);
+                        let ext = self.rup(lcx, l.size, pb);
+                        l.align = l.align.max(pb);
+                        l.size = self.rup(lcx, ext + pb, l.align);
                         l.ext = Some(ext);
                         l.leaves = None;
                         l.fields.resize(fts.len(), u32::MAX);
@@ -1091,12 +1185,12 @@ impl Layouts {
         ds.sort();
         ds.dedup();
         let discr_signed = match adt.repr_int {
-            Some(p) => crate::types::Types::int_info(p).1,
+            Some(p) => tcx.tys.int_info(p).1,
             None => true,
         };
         let discr_bytes = match adt.repr_int {
-            Some(p) => crate::types::Types::int_info(p).0,
-            None => 8,
+            Some(p) => tcx.tys.int_info(p).0,
+            None => tcx.tys.ptr_bytes,
         };
         let dmax = if discr_bytes >= 16 { u128::MAX } else { (1u128 << (discr_bytes * 8)) - 1 };
         let smax: u128 = if discr_bytes >= 16 { i128::MAX as u128 } else { (1u128 << (discr_bytes * 8 - 1)) - 1 };
@@ -1118,7 +1212,7 @@ impl Layouts {
         // rustc_middle discr_range_of_repr
         let (min_bytes, signed) = match adt.repr_int {
             Some(p) => {
-                let (b, s) = crate::types::Types::int_info(p);
+                let (b, s) = tcx.tys.int_info(p);
                 (b, s)
             }
             None => {

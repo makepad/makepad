@@ -518,6 +518,14 @@ pub fn validate_file(src: &[u8], toks: &[Tok], edition: u16) -> Result<(), LexEr
     crate::validate::validate(src, toks, edition).map_err(|(pos, msg)| LexError { pos, msg })
 }
 
+/// A number literal cooked by the parser outside the file validation (an expansion's): `makepad check` only.
+pub fn validate_number(text: &[u8], float: bool) -> Result<(), String> {
+    if !crate::validate::enabled() {
+        return Ok(());
+    }
+    crate::validate::cooked_number(text, float)
+}
+
 pub fn validation_enabled() -> bool {
     crate::validate::enabled()
 }

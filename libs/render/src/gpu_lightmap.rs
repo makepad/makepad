@@ -574,6 +574,8 @@ struct LmDraws {
     zero: DrawLmZero,
     sun_depth: DrawLmSunDepth,
     sun_depth_cutout: DrawLmSunDepthCutout,
+    /// Far stand-ins' quads, turned to the sun (shaders/lm_depth.rs).
+    sun_depth_impostor: DrawLmSunDepthImpostor,
     sun_depth_inside: DrawLmSunDepthInside,
     sun_depth_skinned: DrawLmSunDepthSkinned,
     /// Splash materials' derived casters: one draw struct, the variant's
@@ -1773,6 +1775,7 @@ impl GpuLightmapBaker {
                 zero: DrawLmZero::script_new_with_default(vm),
                 sun_depth: DrawLmSunDepth::script_new_with_default(vm),
                 sun_depth_cutout: DrawLmSunDepthCutout::script_new_with_default(vm),
+                sun_depth_impostor: DrawLmSunDepthImpostor::script_new_with_default(vm),
                 sun_depth_inside: DrawLmSunDepthInside::script_new_with_default(vm),
                 sun_depth_skinned: DrawLmSunDepthSkinned::script_new_with_default(vm),
                 material_shadow: None,
@@ -2823,7 +2826,13 @@ impl GpuLightmapBaker {
                 crate::custom_material::DrawMaterialShadow::script_new_with_default(vm)
             });
         }
+        // The GPU profiler names each cascade's draws (fixed names: no formatting per frame).
+        const CASCADE_NAMES: [&str; 8] = ["shadow csm cascade 0", "shadow csm cascade 1", "shadow csm cascade 2", "shadow csm cascade 3",
+            "shadow csm cascade 4", "shadow csm cascade 5", "shadow csm cascade 6", "shadow csm cascade 7"];
+        let outer_owner = cx.enter_draw_name(CASCADE_NAMES[0]);
         for (ci, casc) in frame.cascades.iter().enumerate() {
+            cx.exit_draw_label(outer_owner);
+            cx.enter_draw_name(CASCADE_NAMES[ci.min(CASCADE_NAMES.len() - 1)]);
             self.csm_tiles.cascades[ci] = *casc;
             let tile = csm_tile_clip(ci);
             // The tile in target pixels: every draw into this cascade is
@@ -2922,25 +2931,32 @@ impl GpuLightmapBaker {
             // discards, the opaque one above never does. A tree's leaf cards
             // in the first cascade, its stand-in's cards in the next (CasterBand);
             // a masked model without a stand-in in every one.
+            // A stand-in (band Far) draws through the sun-facing impostor
+            // caster: its quad is not the shape it casts.
             let cutouts = static_casters;
             let dc = &mut draws.sun_depth_cutout;
+            let dimp = &mut draws.sun_depth_impostor.cutout;
             let cut_slot = cutout_slot(cx.cx, &dc.depth.draw_vars);
-            dc.depth.flip_a = gen;
-            dc.depth.tile_a = tile;
-            dc.depth.draw_vars.options.scissor = scissor;
-            dc.depth.sun_rx = casc.rx;
-            dc.depth.sun_ry = casc.ry;
-            dc.depth.sun_rz = casc.rz;
+            let imp_slot = cutout_slot(cx.cx, &dimp.depth.draw_vars);
+            for d in [&mut *dc, &mut *dimp] {
+                d.depth.flip_a = gen;
+                d.depth.tile_a = tile;
+                d.depth.draw_vars.options.scissor = scissor;
+                d.depth.sun_rx = casc.rx;
+                d.depth.sun_ry = casc.ry;
+                d.depth.sun_rz = casc.rz;
+            }
             for m in casters_reaching(cutouts, casc).filter(|m| m.cutout.is_some() && mode != 2 && draws_in(m.band) && !(mode == 1 && m.band == CasterBand::Near)) {
                 if !cascade_overlaps(casc, m.min, m.max) || !crate::shadow_csm::cascade_sees(casc, m.min, m.max) || held(m.band, m.min, m.max) {
                     continue;
                 }
                 draws_n += 1;
-                dc.depth.transform = m.transform;
-                dc.depth.draw_vars.geometry_id = Some(m.geometry);
-                if let (Some(t), Some(slot)) = (&m.cutout, cut_slot) { dc.depth.draw_vars.set_texture(slot, t); }
-                if dc.depth.draw_vars.can_instance() {
-                    cx.add_instance(&dc.depth.draw_vars);
+                let (d, slot) = if m.band == CasterBand::Far { (&mut *dimp, imp_slot) } else { (&mut *dc, cut_slot) };
+                d.depth.transform = m.transform;
+                d.depth.draw_vars.geometry_id = Some(m.geometry);
+                if let (Some(t), Some(slot)) = (&m.cutout, slot) { d.depth.draw_vars.set_texture(slot, t); }
+                if d.depth.draw_vars.can_instance() {
+                    cx.add_instance(&d.depth.draw_vars);
                 }
             }
             let d = &mut draws.sun_depth;
@@ -3029,10 +3045,12 @@ impl GpuLightmapBaker {
                 }
             }
         }
+        cx.exit_draw_label(outer_owner);
         seq.close(cx, idx);
         // The depth drawers are shared with the atlas passes (whole target).
         draws.sun_depth.draw_vars.options.scissor = None;
         draws.sun_depth_cutout.depth.draw_vars.options.scissor = None;
+        draws.sun_depth_impostor.cutout.depth.draw_vars.options.scissor = None;
         draws.sun_depth_inside.depth.draw_vars.options.scissor = None;
         draws.sun_depth_skinned.draw_vars.options.scissor = None;
         self.csm_draws = draws_n;

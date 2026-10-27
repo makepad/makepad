@@ -263,7 +263,8 @@ impl AlsaAudioAccess {
             let stopped = stop.clone();
             let failed = failed.clone();
             let change = self.change.clone();
-            let thread = std::thread::spawn(move || {
+            // named: the device's real-time thread as tools see it (MAKEPAD_RUN_RT_THREADS)
+            let thread = std::thread::Builder::new().name("hal-alsa-audio".into()).spawn(move || {
                 let result = (|| {
                     let mut pcm = Pcm::new(
                         &name,
@@ -325,11 +326,18 @@ impl AlsaAudioAccess {
                     change.set();
                 }
             });
+            let thread = match thread {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    eprintln!("[hal-alsa] the audio thread did not start: {e}");
+                    None
+                }
+            };
             self.streams[dir].push(Stream {
                 id,
                 slot: index,
                 stop,
-                thread: Some(thread),
+                thread,
             });
         }
     }

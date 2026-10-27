@@ -17,7 +17,20 @@ fn coroutine_hidden_types(ecx: &EvalCtxt<'_, '_>, file: u32, expr: u32, owner: T
     }
     let Some(hidden) = hidden else { return Vec::new() };
     let full = tcx.complete_args(prog, def, tcx.tys.list(args), regions);
-    hidden.iter().map(|&t| tcx.instantiate_ty(prog, def, &full, t)).collect()
+    // rustc_traits coroutine_witnesses.rs: each erased region of a witness type is a bound region of the witness
+    // binder, which the auto-trait candidate enters (enter_forall_with_assumptions): a placeholder of a new universe
+    let tys = &tcx.tys;
+    let erased = |t: TyId| { let seen = std::cell::Cell::new(false); tys.map_regions(t, &|r, _| { if tys.region_kind(r) == crate::types::RegionKind::ReErased { seen.set(true); } r }, 0); seen.get() };
+    let universe = if hidden.iter().any(|&t| erased(t)) { Some(ecx.delegate.create_next_universe()) } else { None };
+    let next = std::cell::Cell::new(0u32);
+    hidden.iter().map(|&t| {
+        let t = tcx.instantiate_ty(prog, def, &full, t);
+        let Some(universe) = universe else { return t };
+        tys.map_regions(t, &|r, _| if tys.region_kind(r) == crate::types::RegionKind::ReErased {
+            let var = crate::types::BoundVar(next.get()); next.set(next.get() + 1);
+            tys.intern_region(crate::types::RegionKind::RePlaceholder { universe, var })
+        } else { r }, 0)
+    }).collect()
 }
 
 pub fn instantiate_constituent_tys_for_auto_trait(ecx: &EvalCtxt<'_, '_>, ty: TyId) -> Result<Vec<TyId>, NoSolution> {

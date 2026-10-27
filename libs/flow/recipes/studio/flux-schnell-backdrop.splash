@@ -1,0 +1,25 @@
+use mod.flow.*
+
+// Restored from the ComfyUI workflow examples/comfyui/flux_schnell.json
+// (removed from Makepad in 1d5770fd5): FLUX.1 schnell at 1920x1080 and eight
+// steps, the size the old example sent to the stage displays. Image sizes
+// step by 16, so the height is 1088 (1080 would be snapped to it anyway).
+
+/** The backdrop to paint. */
+let prompt = Input{ type: @text  default: "an endless hall of soft volumetric light beams, haze, deep blue and amber"  at: vec2(40, 120) }
+
+let image = Image{
+    prompt: prompt.text()
+    width: 1920  height: 1088  steps: 8
+    model: "flux1-schnell-q4"
+    at: vec2(360, 120)
+}
+
+/** The backdrop, into the VJ grid's IMAGE lane. */
+let published = Publish{ value: image.image()  namespace: "flows"  tags: ["flow", "image", "backdrop"]  at: vec2(680, 120) }
+
+Flow{
+    label: "Flux schnell · 16:9 backdrop"
+    brief: "A full-HD FLUX.1 schnell still for the VJ grid, eight steps."
+    prompt, image, published
+}
