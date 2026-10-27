@@ -416,8 +416,6 @@ pub struct WmState {
     pub screen_source: ScreenSource,
     /// Spacewarp: the user toggle (the desk keeps the per-display zones).
     pub warp: Warp,
-    /// Shake to periphery: the drag track and the arrangement to restore.
-    pub shake: crate::shake::Shake,
     /// Drag from behind: the deferred raise of a pressed background window.
     pub behind: crate::behind::Behind,
     /// Layout time-scrub: the ring of past arrangements and a scrub in progress.
