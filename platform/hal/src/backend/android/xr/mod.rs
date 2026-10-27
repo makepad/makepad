@@ -1944,6 +1944,8 @@ fn track(rt: Arc<Runtime>, inputs: Arc<Mutex<SharedInputs>>, session: XrSession,
     // the controllers' angular lead as a share of the stream's lead (percent; debug
     // `debug.xrremote.ctrlang`, read with `handlead`; 255: located at the target as before)
     let mut ctrl_angular = CONTROLLER_ANGULAR_PERCENT;
+    // each controller's grip and aim angular velocity of the sample before (rad/s)
+    let mut ctrl_last_ang = [[[0f32; 3]; 2]; 2];
     while !stop.load(Ordering::Acquire) {
         // the next display frame (its predicted display time)
         let display = {
@@ -2027,8 +2029,16 @@ fn track(rt: Arc<Runtime>, inputs: Arc<Mutex<SharedInputs>>, session: XrSession,
                         let moving = inputs.0.locate_controllers(xr, session, local_space, XrTime::from_nanos(display as i64));
                         let lead_s = (target.as_nanos() - display as i64).max(0) as f32 / 1e9;
                         for c in 0..2 {
-                            controllers[c].grip_pose = carried(moving[c][0], lead_s, ctrl_angular as f32 / 100.0).unwrap_or(controllers[c].grip_pose);
-                            controllers[c].aim_pose = carried(moving[c][1], lead_s, ctrl_angular as f32 / 100.0).unwrap_or(controllers[c].aim_pose);
+                            let share = ctrl_angular as f32 / 100.0;
+                            // (untracked there: the pose as located at the display time, never the
+                            // target's: switching between the two jumped by the runtime's overshoot)
+                            let [grip, aim] = [0, 1].map(|k| {
+                                let m = moving[c][k];
+                                let ang = crate::xr_carry::steadier(m.2, std::mem::replace(&mut ctrl_last_ang[c][k], m.2));
+                                crate::xr_carry::carried((m.0, m.1, ang, m.3), lead_s, share).unwrap_or(m.0)
+                            });
+                            controllers[c].grip_pose = grip;
+                            controllers[c].aim_pose = aim;
                         }
                     }
                     (controllers, hands)
@@ -2090,34 +2100,6 @@ fn track(rt: Arc<Runtime>, inputs: Arc<Mutex<SharedInputs>>, session: XrSession,
 /// carried by its angular velocity (percent; the position takes the whole lead): half damps the
 /// overshoot on a sudden stop while still leading a steady turn.
 const CONTROLLER_ANGULAR_PERCENT: u32 = 50;
-
-/// A pose located with its velocity (`(pose, m/s, rad/s, flags)`: location flags, velocity
-/// flags << 8) carried `lead_s` ahead: the position by the linear velocity, the orientation by
-/// the angular velocity over `angular_share` of it. `None` when it is not tracked.
-fn carried(located: (XrPose, [f32; 3], [f32; 3], u32), lead_s: f32, angular_share: f32) -> Option<XrPose> {
-    let (p, lin, ang, flags) = located;
-    if flags & 0b11 != 0b11 { return None; }
-    let (lin_ok, ang_ok) = ((flags >> 8) & 1 == 1, (flags >> 8) & 2 == 2);
-    let mut out = p;
-    if lin_ok { for i in 0..3 { out.position[i] += lin[i] * lead_s; } }
-    if ang_ok {
-        let t = lead_s * angular_share;
-        let w = (ang[0] * ang[0] + ang[1] * ang[1] + ang[2] * ang[2]).sqrt();
-        if w * t > 1e-6 {
-            let (s, c) = (w * t * 0.5).sin_cos();
-            let k = s / w;
-            let d = [ang[0] * k, ang[1] * k, ang[2] * k, c];
-            let q = p.orientation;
-            // (the angular velocity is in the reference space: the turn applies on the left)
-            out.orientation = [
-                d[3] * q[0] + d[0] * q[3] + d[1] * q[2] - d[2] * q[1],
-                d[3] * q[1] - d[0] * q[2] + d[1] * q[3] + d[2] * q[0],
-                d[3] * q[2] + d[0] * q[1] - d[1] * q[0] + d[2] * q[3],
-                d[3] * q[3] - d[0] * q[0] - d[1] * q[1] - d[2] * q[2]];
-        }
-    }
-    Some(out)
-}
 
 /// The longest the uplink's hands are carried past the runtime's display time (`HandKey`): the
 /// rest of the stream's lead shows as lag, not jumps.

@@ -29,6 +29,8 @@ pub mod gl_interop;
 pub mod automation;
 pub mod buffers;
 pub mod clock;
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+mod xr_carry;
 pub mod fake_camera;
 pub mod clipboard;
 pub mod drag_promise;
