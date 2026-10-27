@@ -62,7 +62,7 @@ impl SpirvPipeline {
             return Err("invalid HAL SPIR-V payload lengths".into());
         }
         let textures = words[HEADER..HEADER + nt].to_vec();
-        if textures.iter().any(|t| *t > 5) { return Err("invalid SPIR-V texture shape".into()); }
+        if textures.iter().any(|t| *t > 6) { return Err("invalid SPIR-V texture shape".into()); }
         let mut samplers = Vec::with_capacity(ns);
         for s in words[HEADER + nt..HEADER + nt + ns * 4].chunks_exact(4) {
             if s[0] > 1 || s[1] > 3 || s[2] > 1 || s[3] > 1 { return Err("invalid SPIR-V sampler".into()); }

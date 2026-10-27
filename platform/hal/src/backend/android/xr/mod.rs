@@ -287,8 +287,13 @@ struct Frames { panel: Mutex<Option<Pending>>, stereo: Mutex<Option<Pending>>, a
 /// acquires one per frame (acquire + wait) and renders the frame straight into it; the XR
 /// thread releases them in acquire order when it takes a frame ([`Targets::release_through`]),
 /// so the projection layer shows the newest frame with no copy. Every acquire, wait and release
-/// of the chain goes through this lock.
-struct Targets { handle: XrSwapchain, images: Vec<Arc<Image>>, acquired: std::collections::VecDeque<usize> }
+/// of the chain goes through this lock. OpenXR lets one image be waited at a time: a frame's
+/// image is acquired only when none is held (a second wait failed with CALL_ORDER_INVALID, the
+/// chain's waited image fell one behind the rendered one, and the compositor showed images
+/// still being drawn: torn, a frame late, with the newer frame's eyes).
+/// `submitted`: the held image's frame is finished and was handed to the XR thread (a newer
+/// frame may have replaced it before the XR thread took it).
+struct Targets { handle: XrSwapchain, images: Vec<Arc<Image>>, acquired: std::collections::VecDeque<usize>, submitted: bool }
 
 impl Targets {
     /// The chain's images wrapped as `layers`-layer render targets of `size` in the frames'
@@ -297,7 +302,7 @@ impl Targets {
         let desc = crate::session::TextureObj { format: if rgba { crate::format::RGBA8 } else { crate::format::BGRA8 }, w: chain.size[0], h: chain.size[1],
             depth: chain.layers, mips: 1, usage: crate::usage::RENDER_TARGET | crate::usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None };
         let images = chain.images.iter().map(|image| unsafe { Image::borrowed(dev.clone(), desc.clone(), *image, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL) }).collect::<Result<_, _>>()?;
-        Ok(Targets { handle: chain.handle, images, acquired: Default::default() })
+        Ok(Targets { handle: chain.handle, images, acquired: Default::default(), submitted: false })
     }
 
     /// The next image for a frame of at least `size`, acquired and waited for; `None` when every
@@ -305,16 +310,20 @@ impl Targets {
     fn acquire(&mut self, xr: &LibOpenXr, size: [u32; 2]) -> Option<Arc<Image>> {
         let first = self.images.first()?;
         if first.desc.w < size[0] || first.desc.h < size[1] { return None; }
-        if self.acquired.len() + 1 >= self.images.len() { crate::profile::count("xr target: every image held (frame copied)"); return None; }
+        if !self.acquired.is_empty() { crate::profile::count("xr target: an image held (frame copied)"); return None; }
         let mut index = 0;
         unsafe { (xr.xrAcquireSwapchainImage)(self.handle, &XrSwapchainImageAcquireInfo::default(), &mut index) }.to_result("xrAcquireSwapchainImage")
             .map_err(|e| xr_log!("{e}")).ok()?;
         let wait_info = XrSwapchainImageWaitInfo { timeout: XrDuration(1000000000), ..Default::default() };
         loop {
-            if unsafe { (xr.xrWaitSwapchainImage)(self.handle, &wait_info) } != XrResult::TIMEOUT_EXPIRED { break; }
-            xr_log!("retry xrWaitSwapchainImage");
+            let r = unsafe { (xr.xrWaitSwapchainImage)(self.handle, &wait_info) };
+            if r == XrResult::TIMEOUT_EXPIRED { xr_log!("retry xrWaitSwapchainImage"); continue; }
+            // (acquired and not waited: released all the same, so the chain stays in step)
+            if let Err(e) = r.to_result("xrWaitSwapchainImage") { xr_log!("{e}"); }
+            break;
         }
         self.acquired.push_back(index as usize);
+        self.submitted = false;
         let image = self.images.get(index as usize)?.clone();
         image.set_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
         Some(image)
@@ -324,6 +333,7 @@ impl Targets {
     /// releases the oldest), so the chain shows `image`; `None` when `image` is none of them.
     fn release_through(&mut self, xr: &LibOpenXr, image: &Arc<Image>) -> Option<Result<(), String>> {
         let at = self.acquired.iter().position(|i| Arc::ptr_eq(&self.images[*i], image))?;
+        self.submitted = false;
         for _ in 0..=at {
             self.acquired.pop_front();
             if let Err(e) = unsafe { (xr.xrReleaseSwapchainImage)(self.handle, &XrSwapchainImageReleaseInfo::default()) }.to_result("xrReleaseSwapchainImage") {
@@ -338,6 +348,11 @@ struct Presenter { frames: Arc<Frames>, stereo: bool }
 impl FramePresenter for Presenter {
     fn submit(&self, _: u32, _: Id, image: Arc<Image>, presented: Box<dyn FnOnce(u64) + Send>) {
         let slot = if self.stereo { &self.frames.stereo } else { &self.frames.panel };
+        if self.stereo {
+            if let Some(t) = lock(&self.frames.stereo_targets).as_mut() {
+                if t.acquired.back().is_some_and(|i| Arc::ptr_eq(&t.images[*i], &image)) { t.submitted = true; }
+            }
+        }
         let replaced = lock(slot).replace((image, presented));
         self.frames.arrived.notify_all();
         // a frame the XR thread never copied: it is over all the same (the app's frames in
@@ -388,6 +403,8 @@ impl VkSurfaceSource for XrSurfaces {
     }
     fn target(&mut self, session: u32, window: Id, size: [u32; 2]) -> Option<Arc<Image>> {
         if lock(&Shared::global().registry).xr_window != Some((session, window)) { return None; }
+        // with the previous frame's image still held (the XR thread releases it when it takes
+        // that frame) this frame renders aside and is copied; it never waits
         lock(&self.frames.stereo_targets).as_mut()?.acquire(&self.rt.xr, size)
     }
     fn is_target(&self, image: &Arc<Image>) -> bool {
@@ -653,8 +670,10 @@ struct CxOpenXrSession {
     hands: [XrHand; 2],
     /// a panel frame was released into its chain (its layer may be shown), and its size
     panel_shown: Option<[u32; 2]>,
-    /// the panel shows (always without an XR window; with one, the left thumbstick click toggles it)
+    /// the panel shows (always without an XR window; with one, `panel_over_stereo`)
     panel_visible: bool,
+    /// the panel shows over the stereo view (toggled by the left thumbstick click; off at start)
+    panel_over_stereo: bool,
     cursor_ready: bool,
     /// the eyes the stereo frame in flight was asked for, and the eyes of the frame the
     /// projection layer shows
@@ -795,7 +814,7 @@ impl CxOpenXrSession {
         let mut session = Self { depth, rt: rt.clone(), dev, frames, handle, head_space, local_space, panel_space, passthrough, passthrough_layer, depth_provider, depth_swap_chain,
             inputs, active: false, focused: false, active_display_refresh_rate_hz: None, panel, cursor, stereo: Some(stereo),
             pointer: Pointer { hand: 1, ..Default::default() }, controllers: Default::default(), hands: Default::default(),
-            panel_shown: None, panel_visible: true, cursor_ready: false, stereo_asked: None, stereo_shown: None, stereo_asked_at: Instant::now(),
+            panel_shown: None, panel_visible: true, panel_over_stereo: false, cursor_ready: false, stereo_asked: None, stereo_shown: None, stereo_asked_at: Instant::now(),
             stats: [0; 4], phases: [0; 7], stats_at: Instant::now() };
         let _ = session.update_active_display_refresh_rate();
         Ok(session)
@@ -928,10 +947,12 @@ impl CxOpenXrSession {
         }
         let xr_window = lock(&shared.registry).xr_window;
         if xr_window.is_some() {
-            // a click of the left thumbstick shows and hides the panel over the stereo view (the
-            // face and menu buttons stay the app's)
-            let click = |c: &XrController| c.buttons & xr_controller::CLICK_THUMBSTICK != 0;
-            if click(&self.controllers[0]) && !click(&previous[0]) { self.panel_visible = !self.panel_visible; }
+            // over the stereo view the panel is hidden (it would cover the scene: layers are not
+            // depth tested) until a click of a held left controller's thumbstick shows it (and
+            // the next hides it); hands never toggle it, the face and menu buttons stay the app's
+            let click = |c: &XrController| c.buttons & xr_controller::ACTIVE != 0 && c.buttons & xr_controller::CLICK_THUMBSTICK != 0;
+            if click(&self.controllers[0]) && !click(&previous[0]) { self.panel_over_stereo = !self.panel_over_stereo; }
+            self.panel_visible = self.panel_over_stereo;
         } else {
             self.panel_visible = true;
         }
@@ -999,6 +1020,17 @@ impl CxOpenXrSession {
             let hands = self.hands.map(|h| if h.flags & xr_hand::IN_VIEW != 0 { "tracked" } else { "-" });
             let ms = self.phases.map(|v| v as f64 / 1e6 / frames.max(1) as f64);
             let depth = self.depth.as_mut().map(|d| { let n = (d.acquired, d.delivered); d.acquired = 0; d.delivered = 0; n });
+            // the projection layer's views against the views located for this display time
+            if let (Some(views), Some((_, now))) = (proj_views.as_ref(), self.locate(time)) {
+                for eye in 0..2 {
+                    let (v, n) = (&views[eye], &now[eye]);
+                    let q = |p: &XrPosef| [p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w];
+                    let t = |p: &XrPosef| [p.position.x, p.position.y, p.position.z];
+                    xr_log!("layer eye {eye}: pose {:?} {:?} fov {:?} layer {} {}x{} | located {:?} {:?} fov {:?}", q(&v.pose), t(&v.pose),
+                        [v.fov.angle_left, v.fov.angle_right, v.fov.angle_up, v.fov.angle_down], v.sub_image.image_array_index, v.sub_image.image_rect.extent.width, v.sub_image.image_rect.extent.height,
+                        q(&n.pose), t(&n.pose), [n.fov.angle_left, n.fov.angle_right, n.fov.angle_up, n.fov.angle_down]);
+                }
+            }
             if let Some(chain) = self.stereo.as_mut() {
                 let t = chain.take_times(shown);
                 xr_log!("stereo copy per frame ms: acquire {:.2} wait-image {:.2} slot-fence {:.2} record+submit {:.2} (queue lock {:.2} vkQueueSubmit {:.2}) release {:.2}", t[0], t[1], t[2], t[3], t[4], t[5], t[6]);
@@ -1079,13 +1111,18 @@ impl CxOpenXrSession {
         // a frame rendered into the chain: released (with the older ones), no copy
         let size = match targets.as_mut().and_then(|t| t.release_through(&self.rt.xr, &image)) {
             Some(released) => { released?; chain.size }
-            // a frame in the window target (every chain image was held): copied in, when no
-            // image is held now (a copy's acquire and release would take a held one's turn)
-            None if targets.as_ref().is_some_and(|t| !t.acquired.is_empty()) => {
+            // a frame rendered aside (the chain's image was held): copied in. A held image of an
+            // older frame (one this frame replaced) is released first; one still being drawn
+            // (a newer frame) keeps its turn and this frame is dropped
+            None if targets.as_ref().is_some_and(|t| !t.acquired.is_empty() && !t.submitted) => {
                 crate::profile::count("xr stereo frame dropped (chain images held)");
                 return Ok(Some(done));
             }
             None => {
+                if let Some(t) = targets.as_mut().filter(|t| !t.acquired.is_empty()) {
+                    let held = t.images[*t.acquired.back().unwrap()].clone();
+                    t.release_through(&self.rt.xr, &held).unwrap_or(Ok(()))?;
+                }
                 // a multiview frame: an eye per layer; else both side by side
                 let eye_w = if image.desc.depth >= 2 { image.desc.w } else { image.desc.w / 2 };
                 let size = [eye_w.min(chain.size[0]), image.desc.h.min(chain.size[1])];
@@ -1267,4 +1304,3 @@ fn panel_hit(pose: XrPose, panel: XrPosef) -> Option<[f32; 4]> {
     let (x, y) = (o[0] + s * d[0], o[1] + s * d[1]);
     Some([(x - c.x + PANEL_M[0] / 2.) / PANEL_M[0], (c.y + PANEL_M[1] / 2. - y) / PANEL_M[1], x, y])
 }
-

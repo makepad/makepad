@@ -103,6 +103,9 @@ impl DrawVars {
                         && a.info.pick_binding() == b.info.pick_binding() && a.info.pick_texture_base() == b.info.pick_texture_base()
                 };
                 let (xr_vertex, xr_fragment) = if multiview && !xr.vertex.is_empty() && same(stage, xr) { (xr.vertex.to_vec(), xr.fragment.to_vec()) } else { (Vec::new(), Vec::new()) };
+                if multiview && xr_vertex.is_empty() {
+                    crate::log!("Vulkan shader: no multiview stages ({}): its draws are left out of XR passes", if xr.vertex.is_empty() { "none compiled" } else { "bindings differ" });
+                }
                 Ok(makepad_hal::spirv::SpirvPipeline { xr_vertex, xr_fragment, vertex: stage.vertex.to_vec(), fragment: stage.fragment.to_vec(),
                     texture_base: stage.info.texture_binding_base(), sampler_base: stage.info.sampler_binding_base(),
                     depth_binding: stage.info.xr_depth_binding(), instance_binding: stage.info.instance_binding().unwrap_or(u32::MAX),

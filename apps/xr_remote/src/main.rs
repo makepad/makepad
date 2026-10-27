@@ -2,8 +2,9 @@
 //! to a desktop app's XR server (`XR_REMOTE_TARGET` at build time, default 166's Sandbox) and shows
 //! its stereo stream in the XR view: each eye its half of the picture, drawn with the eyes the
 //! desktop rendered it with. Its poses, controllers and hands go upstream every display frame.
-//! The panel (the window, a quad in the headset) shows the link and its stats. No app state of
-//! the remote app lives here.
+//! The panel (the window, a quad in the headset) shows the link and its stats; over the stereo
+//! view it is hidden until the left thumbstick is clicked. No app state of the remote app lives
+//! here.
 
 pub use makepad_widgets;
 use makepad_widgets::*;
@@ -73,6 +74,11 @@ pub struct XrRemoteView {
     presenting: bool,
     #[rust]
     client: Option<XrStreamClient>,
+    /// When the debug switches were last read.
+    #[rust]
+    switches_at: Option<std::time::Instant>,
+    #[rust]
+    clear_tint: bool,
 }
 
 impl XrRemoteView {
@@ -131,6 +137,35 @@ impl Widget for XrRemoteView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Some(client) = self.client.as_mut() {
             client.handle_event(cx, event);
+        }
+        if self.presenting {
+            // the debug switches (`adb shell setprop debug.xrremote.<name> 0|1`), read once a
+            // second: `occlusion` (default 1) the room's depth hides the picture, `opaque`
+            // (default 0) 1 the picture covers the room whatever its coverage, 2 a flat magenta
+            // instead (the draw reaches the view), `clear` (default 0) 1 a green tint under it
+            // (the XR pass reaches the view), `owneyes` (default 0) 1 the frame shows with the
+            // headset's own eyes instead of the picture's
+            if self.switches_at.map_or(true, |t| t.elapsed().as_secs() >= 1) {
+                self.switches_at = Some(std::time::Instant::now());
+                let switch = |name: &str, default: u8| device_property(name).and_then(|v| v.trim().parse::<u8>().ok()).unwrap_or(default);
+                let (occlusion, opaque, clear) = (switch("debug.xrremote.occlusion", 1) != 0, switch("debug.xrremote.opaque", 0), switch("debug.xrremote.clear", 0) != 0);
+                let was = self.client.as_ref().map_or((true, 0), |c| (c.occlusion, c.opaque));
+                if (occlusion, opaque, clear) != (was.0, was.1, self.clear_tint) {
+                    log!("xr remote: occlusion {occlusion}, opaque {opaque}, clear tint {clear}");
+                    if clear != self.clear_tint {
+                        self.clear_tint = clear;
+                        let c = if clear { vec4(0.0, 0.25, 0.0, 0.5) } else { vec4(0.0, 0.0, 0.0, 0.0) };
+                        self.pass.set_window_clear_color(cx, c);
+                    }
+                }
+                if let Some(client) = self.client.as_mut() {
+                    client.occlusion = occlusion;
+                    client.opaque = opaque;
+                    let own = switch("debug.xrremote.owneyes", 0) != 0;
+                    if own != client.own_eyes { log!("xr remote: own eyes {own}"); }
+                    client.own_eyes = own;
+                }
+            }
         }
         // every XR frame is answered (with or without a link)
         if self.presenting && matches!(event, Event::XrUpdate(_) | Event::Signal) {

@@ -48,7 +48,7 @@ script_mod! {
     // the backend's clip conventions). The frame is shown with the eyes the picture was rendered
     // with (`Cx::xr_present_eyes`): the headset's compositor reprojects it to the display's
     // pose. One draw per eye; the other eye's view gets a degenerate quad (the eye is told by
-    // where the head is from the pass's camera: right of the left eye).
+    // its view's frustum: a left eye sees further left than right).
     mod.draw.DrawXrStream = mod.std.set_type_default() do #(DrawXrStream::script_shader(vm)){
         ..mod.draw.DrawNv12
         // a decoder's picture where it is (`video_mode` 1): sampled it gives its raw codes
@@ -56,6 +56,29 @@ script_mod! {
         video: texture_video()
         // the headset's newest environment depth image (0..1; `env_pos.w` its near plane)
         env_depth: texture_2d(float)
+        // Per draw (each eye is a draw call of its own), uniforms, not instance data: as
+        // instance fields they were the fragment's inputs, and past the varyings that fit, the
+        // fragment read other values (the picture showed whatever the vertex stage drew, its
+        // debug switches did nothing). `eye`: 0 left, 1 right; `video_mode` 1: the picture is the
+        // decoder's own (`video`), 0 NV12 bytes or planes; `occlude` 1: real things in front
+        // hide the picture; `depth_near`: the band's inverse depth scale; `opaque` (a debug
+        // switch) 1: the picture covers the room whatever its coverage, 2: a flat colour per
+        // eye (red left, blue right); `render_*`: the eye the picture was
+        // rendered with (orientation, position, fov tangents left right up down); `env_*`: the
+        // environment depth camera (orientation, position with its near plane in w, fov
+        // tangents), `env_far` its far plane (0 infinite)
+        eye: uniform(0.0)
+        video_mode: uniform(0.0)
+        occlude: uniform(0.0)
+        depth_near: uniform(0.0)
+        opaque: uniform(0.0)
+        render_rot: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        render_pos: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        render_tan: uniform(vec4(-1.0, 1.0, 1.0, -1.0))
+        env_rot: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        env_pos: uniform(vec4(0.0, 0.0, 0.0, 0.1))
+        env_tan: uniform(vec4(-1.0, 1.0, 1.0, -1.0))
+        env_far: uniform(0.0)
         qrot: fn(q: vec4, v: vec3) -> vec3 {
             let t = cross(q.xyz, v) * 2.0
             return v + t * q.w + cross(q.xyz, t)
@@ -77,7 +100,9 @@ script_mod! {
                 return 0.0
             }
             let et = self.env_tan
-            let uv = vec2((pe.x / ze - et.x) / (et.y - et.x), (et.z - pe.y / ze) / (et.z - et.w))
+            // (the depth image's first row is the bottom of its view: y up, as the room field
+            // reads it)
+            let uv = vec2((pe.x / ze - et.x) / (et.y - et.x), (pe.y / ze - et.w) / (et.z - et.w))
             if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
                 return 0.0
             }
@@ -92,9 +117,6 @@ script_mod! {
             return clamp((ze - zr - 0.02) / 0.04, 0.0, 1.0)
         }
         vertex: fn() {
-            let head = self.draw_pass.camera_view * vec4(self.xr_head.xyz, 1.0)
-            let left_view = step(0.0, head.x)
-            let mine = 1.0 - abs(left_view - (1.0 - self.eye))
             let proj = self.draw_pass.camera_projection
             let k = proj * vec4(0.0, 0.0, -1.0, 1.0)
             let a = (proj * vec4(1.0, 0.0, 0.0, 0.0)).x
@@ -103,6 +125,11 @@ script_mod! {
             let x1 = (k.w - k.x) / a
             let y0 = (0.0 - k.w - k.y) / c
             let y1 = (k.w - k.y) / c
+            // the eye is told by its view's frustum: a left eye sees further left than right
+            // (canted displays; the head's position was a frame and a space away from the
+            // view's camera and picked one eye for both views)
+            let left_view = step(x0 + x1, 0.0)
+            let mine = 1.0 - abs(left_view - (1.0 - self.eye))
             let g = self.geom.pos
             let ex = mix(min(x0, x1), max(x0, x1), g.x)
             let ey = mix(max(y0, y1), min(y0, y1), g.y)
@@ -117,6 +144,9 @@ script_mod! {
         // is its coverage at half resolution in the luma: the output is premultiplied colour
         // with that coverage, so the passthrough shows where the desktop drew nothing.
         pixel: fn() {
+            if self.opaque > 1.5 {
+                return vec4(0.6 * (1.0 - self.eye), 0.0, 0.6 * self.eye, 1.0)
+            }
             let ch = floor(self.src.w * 2.0 / 3.0 + 0.5)
             if self.video_mode > 0.5 {
                 let vs = self.nv12_size
@@ -127,7 +157,8 @@ script_mod! {
                 let vd = self.video.sample_video((floor(vap + vec2(self.src.z * 0.5, 0.0)) + vec2(0.5, 0.5)) / vs).y
                 let vz = self.depth_near / max(vd, 0.0001)
                 let keep = 1.0 - self.occlusion(mix(0.0, vz, step(0.004, vd)))
-                return vec4(rgb * keep, clamp(va, 0.0, 1.0) * keep)
+                let ca = max(clamp(va, 0.0, 1.0), self.opaque)
+                return vec4(rgb * keep, ca * keep)
             }
             let s = self.src.xy + self.pos * vec2(self.src.z, ch) - vec2(0.5, 0.5)
             let f = s - floor(s)
@@ -135,7 +166,7 @@ script_mod! {
             let top = mix(self.nv12_rgb(p), self.nv12_rgb(p + vec2(1.0, 0.0)), f.x)
             let bottom = mix(self.nv12_rgb(p + vec2(0.0, 1.0)), self.nv12_rgb(p + vec2(1.0, 1.0)), f.x)
             let ap = vec2(self.src.x, ch) + self.pos * vec2(self.src.z * 0.5, ch * 0.5)
-            let a = clamp(self.nv12_bytes(floor(ap)).x / 255.0, 0.0, 1.0)
+            let a = max(clamp(self.nv12_bytes(floor(ap)).x / 255.0, 0.0, 1.0), self.opaque)
             let dvb = self.nv12_bytes(floor(ap + vec2(self.src.z * 0.5, 0.0))).x / 255.0
             let keep = 1.0 - self.occlusion(mix(0.0, self.depth_near / max(dvb, 0.0001), step(0.004, dvb)))
             return vec4(mix(top, bottom, f.y) * keep, a * keep)
@@ -149,39 +180,6 @@ script_mod! {
 pub struct DrawXrStream {
     #[deref]
     pub draw_super: DrawNv12,
-    /// The head's position (tracking space): tells the eyes apart.
-    #[live]
-    pub xr_head: Vec4f,
-    /// Which eye this draw is (0 left, 1 right).
-    #[live]
-    pub eye: f32,
-    /// 1: the picture is the decoder's own (the `video` texture), 0: NV12 bytes or planes.
-    #[live]
-    pub video_mode: f32,
-    /// 1: real things in front hide the picture (the environment depth test).
-    #[live]
-    pub occlude: f32,
-    /// The band's inverse depth scale (`DEPTH_NEAR_M`).
-    #[live]
-    pub depth_near: f32,
-    /// The eye the picture was rendered with: orientation, position, fov tangents (left,
-    /// right, up, down).
-    #[live]
-    pub render_rot: Vec4f,
-    #[live]
-    pub render_pos: Vec4f,
-    #[live]
-    pub render_tan: Vec4f,
-    /// The environment depth image's camera: orientation, position (w: its near plane), fov tangents.
-    #[live]
-    pub env_rot: Vec4f,
-    #[live]
-    pub env_pos: Vec4f,
-    #[live]
-    pub env_tan: Vec4f,
-    /// Its far plane (0: infinite).
-    #[live]
-    pub env_far: f32,
 }
 
 /// One tile of a picture, decoded, waiting for the UI thread.
@@ -289,7 +287,6 @@ pub struct XrStreamClient {
     world_link: Option<Arc<XrLink>>,
     world_cursor: u64,
     world_tick: u64,
-    head: Vec3f,
     /// The picture made current by the last upload, until a display frame shows it: (seq,
     /// sample_ns, decoded_at, the display time its pose was predicted for).
     pending_show: Option<(u64, u64, Instant, u64)>,
@@ -300,6 +297,13 @@ pub struct XrStreamClient {
     window_at: Instant,
     counts_at: (u32, u32),
     line: String,
+    /// Real things in front hide the picture (the environment depth test); the app may turn it
+    /// off (a debug switch).
+    pub occlusion: bool,
+    /// The whole picture covers the room, its coverage ignored; 2: flat magenta (debug switches).
+    pub opaque: u8,
+    /// The frame shows with the headset's own eyes, not the picture's (a debug switch).
+    pub own_eyes: bool,
 }
 
 impl Drop for XrStreamClient {
@@ -336,13 +340,15 @@ impl XrStreamClient {
             world_link: None,
             world_cursor: 0,
             world_tick: 0,
-            head: Vec3f::default(),
             pending_show: None,
             lead_ns: 0.0,
             window: Window::default(),
             window_at: Instant::now(),
             counts_at: (0, 0),
             line: String::new(),
+            occlusion: true,
+            opaque: 0,
+            own_eyes: false,
         }
     }
 
@@ -364,8 +370,7 @@ impl XrStreamClient {
     /// uploaded (true: redraw the XR pass).
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> bool {
         match event {
-            Event::XrUpdate(e) => {
-                self.head = e.state.head_pose.position;
+            Event::XrUpdate(_) => {
                 self.window.display_frames += 1;
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -598,7 +603,9 @@ impl XrStreamClient {
                 pose: makepad_widgets::makepad_platform::makepad_hal::XrPose { orientation: e.orientation, position: e.position },
                 fov: e.fov,
             };
-            cx.cx.xr_present_eyes([eye(&first.head.eyes[0]), eye(&first.head.eyes[1])]);
+            if !self.own_eyes {
+                cx.cx.xr_present_eyes([eye(&first.head.eyes[0]), eye(&first.head.eyes[1])]);
+            }
             // the tile's picture (the texture may be the decoder's larger buffer)
             let tile_size = self.shared.lock().unwrap().tile_size;
             for e in 0..2 {
@@ -606,10 +613,11 @@ impl XrStreamClient {
                 let tiled = self.shown[1].is_some();
                 let ew = if tiled { tile_size[0] } else { tile_size[0] / 2 };
                 let color = makepad_widgets::makepad_platform::video_file::VideoColor::BT709;
+                let video_mode;
                 match &shown.tex {
                     ShownTex::Cpu(texture) => {
                         draw.set_nv12(texture, shown.size[0], shown.size[1], color, None);
-                        draw.video_mode = 0.0;
+                        video_mode = 0.0;
                     }
                     ShownTex::Gpu { texture, .. } => {
                         // the colour (the byte slots get a stand-in: the picture is a video
@@ -618,37 +626,52 @@ impl XrStreamClient {
                         draw.set_nv12(blank, shown.size[0], shown.size[1], color, None);
                         draw.nv12_size = vec2(shown.size[0] as f32, shown.size[1] as f32);
                         draw.draw_vars.set_texture(2, texture);
-                        draw.video_mode = 1.0;
+                        video_mode = 1.0;
                     }
                 }
                 draw.src = vec4(if tiled { 0.0 } else { (e as u32 * ew) as f32 }, 0.0, ew as f32, tile_size[1] as f32);
                 // real things in front of the picture (hands): the headset's depth against the
                 // picture's, per pixel
                 let r = &shown.head.eyes[e];
-                let tan = |f: [f32; 4]| vec4(f[0].tan(), f[1].tan(), f[2].tan(), f[3].tan());
-                draw.render_rot = vec4(r.orientation[0], r.orientation[1], r.orientation[2], r.orientation[3]);
-                draw.render_pos = vec4(r.position[0], r.position[1], r.position[2], 1.0);
-                draw.render_tan = tan(r.fov);
-                draw.depth_near = makepad_desk_link::xr::DEPTH_NEAR_M;
-                match cx.cx.xr_environment_depth() {
+                let tan = |f: [f32; 4]| f.map(f32::tan);
+                let mut uniforms: Vec<(LiveId, Vec<f32>)> = vec![
+                    (live_id!(eye), vec![e as f32]),
+                    (live_id!(video_mode), vec![video_mode]),
+                    (live_id!(render_rot), r.orientation.to_vec()),
+                    (live_id!(render_pos), vec![r.position[0], r.position[1], r.position[2], 1.0]),
+                    (live_id!(render_tan), tan(r.fov).to_vec()),
+                    (live_id!(depth_near), vec![makepad_desk_link::xr::DEPTH_NEAR_M]),
+                    (live_id!(opaque), vec![self.opaque as f32]),
+                ];
+                match cx.cx.xr_environment_depth().filter(|_| self.occlusion) {
                     Some((depth, header)) => {
                         let v = &header.views[(header.eye as usize).min(1)];
-                        draw.env_rot = vec4(v.pose.orientation[0], v.pose.orientation[1], v.pose.orientation[2], v.pose.orientation[3]);
-                        draw.env_pos = vec4(v.pose.position[0], v.pose.position[1], v.pose.position[2], header.near);
-                        draw.env_tan = tan(v.fov);
-                        draw.env_far = if header.far.is_finite() { header.far.max(0.0) } else { 0.0 };
+                        let p = v.pose.position;
+                        uniforms.extend([
+                            (live_id!(env_rot), v.pose.orientation.to_vec()),
+                            (live_id!(env_pos), vec![p[0], p[1], p[2], header.near]),
+                            (live_id!(env_tan), tan(v.fov).to_vec()),
+                            (live_id!(env_far), vec![if header.far.is_finite() { header.far.max(0.0) } else { 0.0 }]),
+                            (live_id!(occlude), vec![1.0]),
+                        ]);
                         draw.draw_vars.set_texture(3, &depth);
-                        draw.occlude = 1.0;
                     }
                     None => {
                         // (a stand-in: every texture slot is bound)
                         let none = self.no_depth.get_or_insert_with(|| Texture::new_with_format(cx.cx, TextureFormat::VecRf32 { width: 1, height: 1, data: Some(vec![1.0]), updated: TextureUpdated::Full }));
                         draw.draw_vars.set_texture(3, none);
-                        draw.occlude = 0.0;
+                        uniforms.push((live_id!(occlude), vec![0.0]));
                     }
                 }
-                draw.xr_head = vec4(self.head.x, self.head.y, self.head.z, 1.0);
-                draw.eye = e as f32;
+                for (name, value) in &uniforms {
+                    draw.draw_vars.set_uniform(cx.cx, *name, value);
+                }
+                // never the XR pass's own depth clip: it tests the quad's stand-in world point (the
+                // tracking origin, on the floor) against the room's depth and discarded the whole
+                // picture wherever the room was nearer along that ray (most head poses; the
+                // picture showed only at odd head angles). Real things in front are this shader's
+                // own per-pixel test (`occlusion`)
+                draw.depth_clip = 0.0;
                 draw.new_draw_call(cx);
                 draw.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2(1.0, 1.0) });
             }
