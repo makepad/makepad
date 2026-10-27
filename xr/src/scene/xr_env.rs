@@ -226,6 +226,8 @@ const XR_HAND_PLATE_HALF_DEPTH: f32 = 0.028;
 const XR_HAND_PLATE_FORWARD_OFFSET: f32 = 0.004;
 const XR_HAND_TIP_RADIUS_SCALE: f32 = 0.72;
 const XR_HAND_GRAB_MAX_DISTANCE: f32 = 0.24;
+/// How near a hand must be to a body the other hand holds to join the hold (metres): on it.
+const XR_HAND_SHARED_GRAB_MAX_DISTANCE: f32 = 0.08;
 const XR_HAND_DUAL_GRAB_MIN_SPAN: f32 = 0.035;
 const XR_HAND_GRAB_RELEASE_LINEAR_VELOCITY_SCALE: f32 = 1.0;
 const XR_BODY_LINEAR_DAMPING: f32 = 1.5;

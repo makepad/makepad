@@ -2449,6 +2449,23 @@ pub struct XrSpaceLocation {
     pub pose: XrPosef,
 }
 
+/// XrSpaceVelocity (chained to an XrSpaceLocation): linear (m/s) and angular (rad/s) velocity.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSpaceVelocity {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub velocity_flags: u64,
+    pub linear_velocity: XrVector3f,
+    pub angular_velocity: XrVector3f,
+}
+
+impl Default for XrSpaceVelocity {
+    fn default() -> Self {
+        XrSpaceVelocity { ty: XrStructureType::SPACE_VELOCITY, next: 0 as *mut _, velocity_flags: 0, linear_velocity: XrVector3f::default(), angular_velocity: XrVector3f::default() }
+    }
+}
+
 impl XrSpaceLocation {
     pub fn locate(xr: &LibOpenXr, local_space: XrSpace, time: XrTime, space: XrSpace) -> Self {
         let mut location = XrSpaceLocation::default();

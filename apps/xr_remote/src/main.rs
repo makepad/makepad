@@ -94,12 +94,46 @@ pub struct XrRemoteView {
     /// The trace length last asked for (`debug.xrremote.trace`).
     #[rust]
     trace_asked: u8,
+    #[rust]
+    replay_asked: String,
     /// The refresh rate asked for (Hz; 0 before the first ask).
     #[rust]
     refresh_hz: u8,
+    /// An XR frame was asked and not drawn yet; the window's dpi factor (the XR pass draws
+    /// with it).
+    #[rust]
+    xr_due: bool,
+    #[rust(1.0)]
+    dpi: f64,
 }
 
 impl XrRemoteView {
+    /// The XR pass, drawn on its own (every XR frame is answered, cleared until the first
+    /// picture: the headset keeps asking at its display rate and the poses flow at that rate).
+    fn draw_xr(&mut self, cx: &mut Cx, event: &DrawEvent) {
+        // one XR frame per XR frame asked (any other draw event draws none: an extra frame
+        // waits in the HAL's slot and is taken for the next ask)
+        if !self.presenting || !std::mem::take(&mut self.xr_due) {
+            return;
+        }
+        let mut draw = CxDraw::new(cx, event);
+        let cx = &mut Cx2d::new(&mut draw);
+        cx.begin_pass(&self.pass, Some(self.dpi));
+        // (the warp's band-depth pass, a child of this one: before its draw list)
+        if let Some(client) = self.client.as_mut().filter(|c| c.opaque != 3) {
+            client.draw_band(cx, &mut self.draw_band_depth);
+        }
+        self.draw_list.begin_always(cx);
+        cx.begin_unclipped_root_turtle(dvec2(4096.0, 4096.0), Layout::flow_down());
+        // (debug `opaque` 3: nothing drawn, the pass only clears: its fixed cost)
+        if let Some(client) = self.client.as_mut().filter(|c| c.opaque != 3) {
+            client.draw(cx, &mut self.draw_stream);
+        }
+        cx.end_pass_sized_turtle_no_clip();
+        self.draw_list.end(cx);
+        cx.end_pass(&self.pass);
+    }
+
     /// Once: the XR pass and the link.
     fn start(&mut self, cx: &mut Cx) {
         if self.presenting || !cx.xr_display() {
@@ -211,6 +245,15 @@ impl Widget for XrRemoteView {
                         client.start_trace(trace as f64, path);
                     }
                 }
+                // `replay` NAME: the tracking log NAME (a trace's `track-<n>`) plays instead of
+                // the headset's own poses (the whole stream runs that motion with the headset on
+                // the desk); 0 stops
+                let replay = device_property("debug.xrremote.replay").map(|v| v.trim().to_string()).unwrap_or_default();
+                if replay != self.replay_asked {
+                    self.replay_asked = replay.clone();
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let _ = makepad_xr_stream::replay_track_log("/sdcard/Android/data/dev.makepad.xrremote/files", &replay);
+                }
                 if let Some(client) = self.client.as_mut() {
                     client.occlusion = occlusion;
                     client.opaque = opaque;
@@ -244,9 +287,18 @@ impl Widget for XrRemoteView {
         if matches!(event, Event::XrUpdate(_)) && self.update_at.is_none() {
             self.update_at = Some(std::time::Instant::now());
         }
-        // every XR frame is answered (with or without a link)
-        if self.presenting && matches!(event, Event::XrUpdate(_) | Event::Signal) {
-            self.draw_bg.redraw(cx);
+        // every XR frame is answered (with or without a link): the XR pass alone is drawn
+        // (`draw_xr`); the panel (hidden over the stereo view) is redrawn once a second for its
+        // status (redrawn per XR frame it cost a 1920x1200 pass and its scanout copy, 1.8 ms
+        // of GPU every frame)
+        // (only an XR frame draws the XR pass: drawn on a decoded picture's signal too, the
+        // extra frame waited in the HAL's slot and was taken for the NEXT ask, shown with that
+        // ask's eyes: a frame of head rotation off, and twice the GPU work)
+        // (the panel is not redrawn while the stereo view shows: drawn once a second, its
+        // draw event drew an XR frame too, outside the asks: a far one-frame jump each second)
+        if self.presenting && matches!(event, Event::XrUpdate(_)) {
+            self.xr_due = true;
+            self.draw_list.redraw(cx);
         }
     }
 
@@ -254,25 +306,7 @@ impl Widget for XrRemoteView {
         let draw_started = std::time::Instant::now();
         self.start(cx.cx);
         let rect = cx.walk_turtle(walk);
-        // every XR frame is answered (cleared until the first picture): the headset keeps asking
-        // at its display rate and the poses flow at that rate
-        if self.presenting {
-            let dpi = cx.current_dpi_factor();
-            cx.begin_pass(&self.pass, Some(dpi));
-            // (the warp's band-depth pass, a child of this one: before its draw list)
-            if let Some(client) = self.client.as_mut().filter(|c| c.opaque != 3) {
-                client.draw_band(cx, &mut self.draw_band_depth);
-            }
-            self.draw_list.begin_always(cx);
-            cx.begin_unclipped_root_turtle(dvec2(4096.0, 4096.0), Layout::flow_down());
-            // (debug `opaque` 3: nothing drawn, the pass only clears: its fixed cost)
-            if let Some(client) = self.client.as_mut().filter(|c| c.opaque != 3) {
-                client.draw(cx, &mut self.draw_stream);
-            }
-            cx.end_pass_sized_turtle_no_clip();
-            self.draw_list.end(cx);
-            cx.end_pass(&self.pass);
-        }
+        self.dpi = cx.current_dpi_factor();
         self.draw_bg.draw_abs(cx, rect);
         let status = match &self.client {
             Some(c) => c.status(),
@@ -366,5 +400,11 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        // the XR pass, apart from the window's draw
+        if let Event::Draw(e) = event {
+            if let Some(mut view) = self.ui.widget(cx, ids!(remote)).borrow_mut::<XrRemoteView>() {
+                view.draw_xr(cx, e);
+            }
+        }
     }
 }

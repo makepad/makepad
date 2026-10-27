@@ -1499,6 +1499,8 @@ mod tests {
             gripping: true,
             held_body: None,
             grab_offset: Pose::default(),
+            hold_bend: 0.0,
+            grip_began: false,
         };
 
         scene.step();
@@ -1565,6 +1567,8 @@ mod tests {
             gripping: true,
             held_body: None,
             grab_offset: Pose::default(),
+            hold_bend: 0.0,
+            grip_began: false,
         };
 
         scene.step();
@@ -1691,6 +1695,8 @@ mod tests {
             gripping: true,
             held_body: None,
             grab_offset: Pose::default(),
+            hold_bend: 0.0,
+            grip_began: false,
         };
         scene.step();
         assert_eq!(scene.left_hand_grab.held_body, Some(cube.body));
@@ -1714,6 +1720,8 @@ mod tests {
             gripping: true,
             held_body: None,
             grab_offset: Pose::default(),
+            hold_bend: 0.0,
+            grip_began: true,
         };
         scene.step();
 
@@ -1763,6 +1771,8 @@ mod tests {
             gripping: true,
             held_body: Some(cube.body),
             grab_offset: Pose::default(),
+            hold_bend: 0.0,
+            grip_began: false,
         };
 
         let mut hand = XrHand::default();
@@ -1820,6 +1830,8 @@ mod tests {
             gripping: true,
             held_body: Some(cube.body),
             grab_offset: Pose::default(),
+            hold_bend: 0.0,
+            grip_began: false,
         };
 
         let mut hand = XrHand::default();

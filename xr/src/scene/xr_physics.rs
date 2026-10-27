@@ -126,6 +126,12 @@ struct HandGrabState {
     gripping: bool,
     held_body: Option<RigidBodyHandle>,
     grab_offset: Pose,
+    /// The hand's most curled mean finger bend (degrees) in this hold: the hold lets go when
+    /// the hand opens from it (`updated_hand_grab_state`).
+    hold_bend: f32,
+    /// The grip began at this step (it was not gripping the step before): only such a grab
+    /// takes a body the other hand holds.
+    grip_began: bool,
 }
 
 impl HandGrabState {
@@ -139,6 +145,8 @@ impl HandGrabState {
             gripping: false,
             held_body: None,
             grab_offset: Pose::default(),
+            hold_bend: 0.0,
+            grip_began: false,
         }
     }
 }
@@ -1867,14 +1875,25 @@ impl PhysicsScene {
             // a hand grips with a grasp (the fist) or an index pinch; the grip point is the
             // pinch point either way (hand_grab_pose)
             // A grab begins with the grasp (the runtime's, its straight-index check: that is a
-            // point) or an index pinch; a hold lasts until the hand opens (all four fingers
-            // straight, from the joints) or the pinch and grasp both end. (Holding a cube the
-            // index often lies straight along it and the runtime's grasp value sags on a loose
-            // hold: either let go of the cube mid-wave.)
+            // point) or an index pinch; a hold lasts until the hand opens: all four fingers
+            // straight (from the joints), or, with the grasp and the pinch both over, the
+            // fingers opened by RELEASE_OPENING_DEGREES from the hold's most curled. (Holding a
+            // cube the index often lies straight along it and the runtime's grasp value sags on
+            // a loose hold: either alone let go of the cube mid-wave; waiting for a fully open
+            // hand kept a cube on a relaxed hand for a second.)
             .or_else(|| hand_grab_pose(hand).map(|pose| {
-                let held = state.held_body.is_some() && hand.in_view() && !hand.is_open();
+                const RELEASE_OPENING_DEGREES: f32 = 20.0;
+                let bend = hand.average_open_finger_bend_degrees();
+                let held_ = state.held_body.is_some();
+                let opened = bend.is_some_and(|b| b <= state.hold_bend - RELEASE_OPENING_DEGREES) && !hand.grabbing() && !hand.pinch_index();
+                let held = held_ && hand.in_view() && !hand.is_open() && !opened;
                 (pose, held || hand.grab_intent() || hand.pinch_index(), hand_shared)
             }));
+        state.hold_bend = match (state.held_body.is_some(), hand.average_open_finger_bend_degrees()) {
+            (true, Some(b)) => state.hold_bend.max(b),
+            (true, None) => state.hold_bend,
+            (false, b) => b.unwrap_or(0.0),
+        };
         let Some((pose, gripping, shared_hand)) = next_source else {
             if state.held_body.is_some() {
                 eprintln!("[xr physics] hold ends: the hand is not tracked (flags {:#x}, controller buttons {:#x})", hand.flags, controller.buttons);
@@ -1907,6 +1926,7 @@ impl PhysicsScene {
             vec3f(0.0, 0.0, 0.0)
         };
         state.tracked = true;
+        state.grip_began = gripping && !state.gripping;
         state.gripping = gripping;
         state.shared_hand = shared_hand;
         state
@@ -2363,6 +2383,14 @@ impl PhysicsScene {
             if distance > XR_HAND_GRAB_MAX_DISTANCE {
                 continue;
             }
+            // a body the other hand holds is taken (a two-handed hold) only by a grab that
+            // begins now within reach of it: an idle hand's grasp value, noisy, took it whenever
+            // it flickered on near the cube (the cube jumped to the middle of both hands and
+            // back). (A held body is kinematic: no contacts with the hand's colliders, so the
+            // reach is its distance.)
+            if shared_candidate && (!hand.grip_began || distance > XR_HAND_SHARED_GRAB_MAX_DISTANCE) {
+                continue;
+            }
             if !shared_candidate && !self.cube_has_hand_contact(cube, slots) {
                 continue;
             }
@@ -2379,6 +2407,7 @@ impl PhysicsScene {
         };
         hand.grab_offset = grab_offset_from_body_anchor(hand.pose, body_pose, body_anchor_local);
         hand.held_body = Some(body_handle);
+        eprintln!("[xr physics] hold begins: {:?} takes body {:?}{}", hand.shared_hand, body_handle, if other_held_body == Some(body_handle) { " (the other hand holds it too: a two-handed hold)" } else { "" });
         self.release_settle_state(body_handle);
         let target_pose = Pose::multiply(&hand.pose, &hand.grab_offset);
         if !target_pose.is_finite() {

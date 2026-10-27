@@ -1477,6 +1477,56 @@ pub fn hal_xr_uplink_next(timeout_ms: u32, out: &mut [u8]) -> u64 {
     }
 }
 
+/// The XR tracking log (Android XR, while the uplink runs): what went upstream (kind 0: the
+/// sample time, the display time it was located for, its `XrFrame`) and the poses as tracked
+/// (kind 1: a display time already past, located after it, the time it was located, the
+/// `XrFrame` without controllers). Entries from absolute index `cursor` on (the oldest kept when
+/// older) are written into `out` after an 8-byte count of them (u64 LE), each kind, time, aux
+/// (u64 LE) then the `XrFrame` ([`hal_xr_track_entry_size`] bytes each), as many whole ones as
+/// fit; returns the index after the last written. Elsewhere nothing (count 0).
+#[relax_api]
+pub fn hal_xr_track_log(cursor: u64, out: &mut [u8]) -> u64 {
+    if out.len() < 8 {
+        return cursor;
+    }
+    #[cfg(target_os = "android")]
+    {
+        let (next, bytes) = backend::android::xr::track_log(cursor, &mut out[8..]);
+        let n = (bytes / backend::android::xr::track_entry_size().max(1)) as u64;
+        out[..8].copy_from_slice(&n.to_le_bytes());
+        return next;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        out[..8].copy_from_slice(&0u64.to_le_bytes());
+        cursor
+    }
+}
+
+/// The size of one [`hal_xr_track_log`] entry in bytes.
+#[relax_api]
+pub fn hal_xr_track_entry_size() -> usize {
+    #[cfg(target_os = "android")]
+    return backend::android::xr::track_entry_size();
+    #[cfg(not(target_os = "android"))]
+    0
+}
+
+/// Plays a recorded tracking log (entries as [`hal_xr_track_log`] writes them) instead of the
+/// runtime's poses, looping: the uplink gets the recorded predictions (moved to the replay's
+/// display times along the tracked path), the XR window's frames the tracked path. Empty: the
+/// runtime's poses again. Whether a replay runs (Android XR; elsewhere false).
+#[relax_api]
+pub fn hal_xr_replay(data: &[u8]) -> bool {
+    #[cfg(target_os = "android")]
+    return backend::android::xr::replay(data);
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = data;
+        false
+    }
+}
+
 /// The device's network in its low-latency mode while `on` (Android: a low-latency Wi-Fi lock,
 /// no power save or background scans); elsewhere nothing. Whether it was applied.
 #[relax_api]

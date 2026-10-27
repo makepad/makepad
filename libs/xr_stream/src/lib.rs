@@ -20,9 +20,8 @@ use makepad_widgets::*;
 pub const DEFAULT_PORT: u16 = 8794;
 /// The room field goes up in messages of about this size (bytes).
 const WORLD_MESSAGE_BYTES: usize = 16 << 10;
-/// The decoded pictures the client keeps queued on average before it skips one (the reference
-/// client's default).
-const BUFFERED: f64 = 2.0;
+/// The display period the client expects (ns; the stream runs at 90 Hz).
+const PERIOD_NS: u64 = 11_111_111;
 /// The furthest ahead poses are predicted (a slow link does not extrapolate the head for ever).
 const MAX_POSE_LEAD_NS: u64 = 100_000_000;
 
@@ -54,8 +53,8 @@ script_mod! {
     // pose. One draw per eye; the other eye's view gets a degenerate quad (the eye is told by
     // its view's frustum: a left eye sees further left than right).
     // The band's depth of one eye (its right half: the inverse depth, one byte) copied into the
-    // band-depth target (`XrStreamClient::draw`): the stream's vertices read it there (a
-    // decoder's Y'CbCr picture is sampled in fragment stages only).
+    // band target (`XrStreamClient::draw_band`) with its coverage: the stream's pixels read
+    // both there with one plain fetch (and the warp's depth steps).
     mod.draw.DrawXrBandDepth = mod.std.set_type_default() do #(DrawXrBandDepth::script_shader(vm)){
         ..mod.draw.DrawQuad
         video: texture_video()
@@ -66,7 +65,9 @@ script_mod! {
             let ch = floor(self.src.w * 2.0 / 3.0 + 0.5)
             let vap = vec2(self.src.x, ch) + self.pos * vec2(self.src.z * 0.5, ch * 0.5)
             let vd = self.video.sample_video((floor(vap + vec2(self.src.z * 0.5, 0.0)) + vec2(0.5, 0.5)) / self.nv12_size).y
-            return vec4(vd, vd, vd, 1.0)
+            let va = self.video.sample_video((floor(vap) + vec2(0.5, 0.5)) / self.nv12_size).y
+            // .x the inverse depth, .y the coverage
+            return vec4(vd, va, 0.0, 1.0)
         }
     }
 
@@ -106,21 +107,36 @@ script_mod! {
         env_tan: uniform(vec4(-1.0, 1.0, 1.0, -1.0))
         env_far: uniform(0.0)
         env_map: uniform(0.0)
-        // 1: the picture is reprojected to the view's eye in this pass (see `vertex`); the
-        // frame then goes to the compositor with the view's own eyes
+        // 1: the picture is reprojected per pixel to the view's eye in this pass (see `warped`);
+        // the frame then goes to the compositor with the view's own eyes (`view_*`: that eye:
+        // orientation, position, fov tangents)
         warp: uniform(0.0)
-        grid_cells: uniform(64.0)
-        // 1 on a vertex at a depth edge (see `vertex`)
-        edge: varying(float)
-        // The picture's depth at grid point `g` (m along the render eye's axis; far where
+        view_rot: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        view_pos: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        view_tan: uniform(vec4(-1.0, 1.0, 1.0, -1.0))
+        // The picture's depth at its point `g` (m along the render eye's axis; far where
         // nothing was drawn), from the band-depth target, nearest texel
         band_z: fn(g: vec2) -> float {
+            let vd = self.band_at(g).x
+            return mix(50.0, self.depth_near / max(vd, 0.0001), step(0.004, vd))
+        }
+        // The band target at the picture's point `g` (nearest texel): .x inverse depth, .y coverage
+        band_at: fn(g: vec2) -> vec4 {
             let bs = self.band_size
             let half = vec2(bs.x * 0.5, bs.y)
             let gc = clamp(g, vec2(0.0, 0.0), vec2(1.0, 1.0))
             let t = (min(floor(gc * half), half - vec2(1.0, 1.0)) + vec2(0.5, 0.5) + vec2(self.eye * half.x, 0.0)) / bs
-            let vd = self.band_depth.sample_lod(t, 0.0).x
-            return mix(50.0, self.depth_near / max(vd, 0.0001), step(0.004, vd))
+            return self.band_depth.sample_lod(t, 0.0)
+        }
+        // The coverage at the picture's point `g`, filtered between the band's texels (the
+        // colour is full resolution and premultiplied on black: the nearest half-resolution
+        // coverage put a dark line along every edge where it said 1 and the colour was already
+        // fading to black)
+        band_coverage: fn(g: vec2) -> float {
+            let bs = self.band_size
+            let half = vec2(bs.x * 0.5, bs.y)
+            let p = clamp(g * half, vec2(0.5, 0.5), half - vec2(0.5, 0.5))
+            return self.band_depth.sample_lod((p + vec2(self.eye * half.x, 0.0)) / bs, 0.0).y
         }
         env_size: uniform(vec2(1.0, 1.0))
         qrot: fn(q: vec4, v: vec3) -> vec3 {
@@ -130,9 +146,9 @@ script_mod! {
         // The picture's point at this pixel at depth `z` (m, along the render eye's axis) seen by
         // the depth camera: (its distance there, what the camera measured along that ray); y < 0
         // where the depth image has nothing
-        room_depth: fn(z: float) -> vec2 {
+        room_depth: fn(uv: vec2, z: float) -> vec2 {
             let rt = self.render_tan
-            let d = vec3(mix(rt.x, rt.y, self.pos.x), mix(rt.z, rt.w, self.pos.y), -1.0)
+            let d = vec3(mix(rt.x, rt.y, uv.x), mix(rt.z, rt.w, uv.y), -1.0)
             let pw = self.render_pos.xyz + self.qrot(self.render_rot, d * z)
             let ec = vec4(0.0 - self.env_rot.x, 0.0 - self.env_rot.y, 0.0 - self.env_rot.z, self.env_rot.w)
             let pe = self.qrot(ec, pw - self.env_pos.xyz)
@@ -174,15 +190,55 @@ script_mod! {
         // How much of the picture a real thing in front hides at this pixel (0..1): the
         // picture's point at its depth (the band's inverse depth), seen by the depth camera, is
         // behind what that camera measured there.
-        occlusion: fn(z: float) -> float {
+        occlusion: fn(uv: vec2, z: float) -> float {
             if self.occlude < 0.5 || z <= 0.0 {
                 return 0.0
             }
-            let r = self.room_depth(z)
+            let r = self.room_depth(uv, z)
             if r.y < 0.0 {
                 return 0.0
             }
             return clamp((r.x - r.y - 0.02) / 0.04, 0.0, 1.0)
+        }
+        // The display pixel's ray in the render eye's frame (`warp`: from the vertices, exact:
+        // the ray is linear across the view) and the view eye's offset from the render eye there
+        ray: varying(vec3)
+        ray_o: varying(vec3)
+        // The picture's point where the display pixel's ray (`o`, `dr`: in the render eye's
+        // frame) is at render depth `z`
+        ray_at: fn(o: vec3, dr: vec3, z: float) -> vec2 {
+            let t = (0.0 - z - o.z) / min(dr.z, -0.0001)
+            let p = o + dr * t
+            let rt = self.render_tan
+            let w = max(0.0 - p.z, 0.0001)
+            return vec2((p.x / w - rt.x) / (rt.y - rt.x), (p.y / w - rt.z) / (rt.w - rt.z))
+        }
+        // The picture's point this display pixel shows (`warp`): the pixel's ray from the view
+        // eye, found in the picture where the picture's own depth puts a point on that ray: a
+        // fixed point from the rotation alone (the far point), each step the depth at the last
+        // guess. The view eye and the render eye are millimetres apart (a frame of prediction),
+        // so the parallax is a few pixels and two steps settle it; edges stay as sharp as the
+        // picture's own pixels (no grid)
+        warped: fn() -> vec2 {
+            let o = self.ray_o
+            let dr = self.ray
+            let rt = self.render_tan
+            let w = max(0.0 - dr.z, 0.0001)
+            let uv0 = vec2((dr.x / w - rt.x) / (rt.y - rt.x), (dr.y / w - rt.z) / (rt.w - rt.z))
+            let z0 = self.band_z(uv0)
+            let a = self.ray_at(o, dr, z0)
+            let z1 = self.band_z(a)
+            let b = self.ray_at(o, dr, z1)
+            // b is the answer when its own depth puts it back on this ray (within a band
+            // texel); else the ray passes an edge where the picture has two answers, a
+            // foreground point it misses and the background the head now sees beside it: the
+            // farther one (never the foreground smeared past its outline)
+            let texel = vec2(2.0, 1.0) / self.band_size
+            let c = self.ray_at(o, dr, self.band_z(b))
+            if (abs(c.x - b.x) > texel.x || abs(c.y - b.y) > texel.y) && z0 > z1 {
+                return a
+            }
+            return b
         }
         vertex: fn() {
             let proj = self.draw_pass.camera_projection
@@ -204,30 +260,13 @@ script_mod! {
             self.pos = g
             // (the 2D clip in the fragment reads `world`: a point inside every clip)
             self.world = vec4(0.0, 0.0, 0.0, 1.0)
-            var at = proj * vec4(ex, ey, -1.0, 1.0)
-            self.edge = 0.0
-            if self.warp > 0.5 && self.video_mode > 0.5 {
-                // `warp`: the picture reprojected here, to this view's own eye: each grid vertex
-                // is the picture's point there (its render eye's ray at the band's depth, far
-                // where nothing was drawn) seen by this view's camera: rotation AND translation
-                // since the render pose, per vertex
-                let z = self.band_z(g)
-                // a vertex where the depth jumps (an object's edge) is on a triangle stretched
-                // across the gap from the reprojection: such triangles are not drawn (the room
-                // shows there) instead of smearing the edge into slices
-                let n = 1.0 / self.grid_cells
-                let z1 = self.band_z(g + vec2(n, 0.0))
-                let z2 = self.band_z(g - vec2(n, 0.0))
-                let z3 = self.band_z(g + vec2(0.0, n))
-                let z4 = self.band_z(g - vec2(0.0, n))
-                let zmin = min(min(min(z1, z2), min(z3, z4)), z)
-                let zmax = max(max(max(z1, z2), max(z3, z4)), z)
-                self.edge = step(1.15, zmax / max(zmin, 0.01))
-                let rt = self.render_tan
-                let d = vec3(mix(rt.x, rt.y, g.x), mix(rt.z, rt.w, g.y), -1.0)
-                let pw = self.render_pos.xyz + self.qrot(self.render_rot, d * z)
-                at = proj * (self.draw_pass.camera_view * vec4(pw, 1.0))
-            }
+            let at = proj * vec4(ex, ey, -1.0, 1.0)
+            // (the warp's ray at this corner)
+            let rc = vec4(0.0 - self.render_rot.x, 0.0 - self.render_rot.y, 0.0 - self.render_rot.z, self.render_rot.w)
+            let vt = self.view_tan
+            let dv = vec3(mix(vt.x, vt.y, g.x), mix(vt.z, vt.w, g.y), -1.0)
+            self.ray = self.qrot(rc, self.qrot(self.view_rot, dv))
+            self.ray_o = self.qrot(rc, self.view_pos.xyz - self.render_pos.xyz)
             // not this draw's eye: nothing (every vertex at one point outside the view)
             self.vertex_pos = mix(vec4(2.0, 2.0, 2.0, 1.0), at, mine)
         }
@@ -247,7 +286,7 @@ script_mod! {
                 // (debug: the room's depth along each pixel's ray as contour bands every 10 cm,
                 // half see-through over the room so its edges can be matched; red where the
                 // depth image has nothing)
-                let r = self.room_depth(1.0)
+                let r = self.room_depth(self.pos, 1.0)
                 if r.y < 0.0 {
                     return vec4(0.3, 0.0, 0.0, 0.5)
                 }
@@ -258,21 +297,39 @@ script_mod! {
                 return vec4(0.6 * (1.0 - self.eye), 0.0, 0.6 * self.eye, 1.0)
             }
             let ch = floor(self.src.w * 2.0 / 3.0 + 0.5)
+            // the picture's point here: this pixel's own (the frame shows with the picture's
+            // eyes), or the warp's (with the view's eyes); outside the picture: the room
+            var uv = self.pos
+            if self.warp > 0.5 && self.video_mode > 0.5 {
+                uv = self.warped()
+                if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+                    return vec4(0.0, 0.0, 0.0, 0.0)
+                }
+            }
             if self.opaque > 3.5 && self.video_mode > 0.5 {
                 // (debug `opaque` 4: the colour alone, no coverage or depth samples: their cost)
-                let c4 = self.video.sample_video((self.src.xy + self.pos * vec2(self.src.z, ch)) / self.nv12_size)
+                let c4 = self.video.sample_video((self.src.xy + uv * vec2(self.src.z, ch)) / self.nv12_size)
                 return vec4(self.nv12_color(vec3(c4.y, c4.z, c4.x) * 255.0), 1.0)
             }
             if self.video_mode > 0.5 {
-                let vs = self.nv12_size
-                let c = self.video.sample_video((self.src.xy + self.pos * vec2(self.src.z, ch)) / vs)
-                let rgb = self.nv12_color(vec3(c.y, c.z, c.x) * 255.0)
-                let vap = vec2(self.src.x, ch) + self.pos * vec2(self.src.z * 0.5, ch * 0.5)
-                let va = self.video.sample_video((floor(vap) + vec2(0.5, 0.5)) / vs).y
-                let vd = self.video.sample_video((floor(vap + vec2(self.src.z * 0.5, 0.0)) + vec2(0.5, 0.5)) / vs).y
-                let vz = self.depth_near / max(vd, 0.0001)
-                let keep = 1.0 - self.occlusion(mix(0.0, vz, step(0.004, vd)))
+                // the coverage and depth from the band target (one plain fetch: two Y'CbCr
+                // taps of the decoder's picture less per pixel); nothing drawn there: the room,
+                // before any other work
+                let band = self.band_at(uv)
+                let vd = band.x
+                let va = self.band_coverage(uv)
                 let ca = max(clamp(va, 0.0, 1.0), self.opaque)
+                if ca <= 0.002 {
+                    return vec4(0.0, 0.0, 0.0, 0.0)
+                }
+                let vs = self.nv12_size
+                // (inside this eye's colour: the filter never reaches the other eye's column or
+                // the band below)
+                let cp = clamp(uv * vec2(self.src.z, ch), vec2(1.0, 1.0), vec2(self.src.z, ch) - vec2(1.0, 1.0))
+                let c = self.video.sample_video((self.src.xy + cp) / vs)
+                let rgb = self.nv12_color(vec3(c.y, c.z, c.x) * 255.0)
+                let vz = self.depth_near / max(vd, 0.0001)
+                let keep = 1.0 - self.occlusion(uv, mix(0.0, vz, step(0.004, vd)))
                 return vec4(rgb * keep, ca * keep)
             }
             let s = self.src.xy + self.pos * vec2(self.src.z, ch) - vec2(0.5, 0.5)
@@ -283,26 +340,10 @@ script_mod! {
             let ap = vec2(self.src.x, ch) + self.pos * vec2(self.src.z * 0.5, ch * 0.5)
             let a = max(clamp(self.nv12_bytes(floor(ap)).x / 255.0, 0.0, 1.0), self.opaque)
             let dvb = self.nv12_bytes(floor(ap + vec2(self.src.z * 0.5, 0.0))).x / 255.0
-            let keep = 1.0 - self.occlusion(mix(0.0, self.depth_near / max(dvb, 0.0001), step(0.004, dvb)))
+            let keep = 1.0 - self.occlusion(self.pos, mix(0.0, self.depth_near / max(dvb, 0.0001), step(0.004, dvb)))
             return vec4(mix(top, bottom, f.y) * keep, a * keep)
         }
     }
-}
-
-/// The stream's grid: GRID x GRID cells over the unit square, each a quad of the quad's own
-/// vertex layout (its corners carry the picture's depth when it is reprojected). Set on the
-/// draw at draw time: declared as the shader's vertex buffer it moved the draw's instance
-/// fields (the picture's source rect read garbage: nothing showed).
-const GRID: usize = 128;
-fn xr_grid_geometry(cx: &mut Cx) -> Geometry {
-    let mut g = makepad_widgets::makepad_draw::geometry::geometry_gen::GeometryGen::default();
-    let s = 1.0 / GRID as f32;
-    for y in 0..GRID {
-        for x in 0..GRID {
-            g.add_quad_2d(x as f32 * s, y as f32 * s, (x + 1) as f32 * s, (y + 1) as f32 * s);
-        }
-    }
-    g.into_geometry(cx)
 }
 
 /// The band-depth copy of one eye's picture (see the shader).
@@ -425,6 +466,8 @@ struct Trace {
     until: Instant,
     path: String,
     rows: String,
+    /// The clock when it began (the tracking log from then on goes with it).
+    started_ns: u64,
 }
 
 /// A pose sent and not answered yet.
@@ -437,6 +480,8 @@ struct Sent {
     display_ns: u64,
     /// The eyes' orientations sent (the picture must come back with exactly these).
     eyes: [[f32; 4]; 2],
+    /// The whole pose sent (its `XrFrame`): the trace's hands.
+    frame: Vec<u8>,
 }
 
 /// The headset end (see the module). Owned by the app's XR view.
@@ -460,20 +505,34 @@ pub struct XrStreamClient {
     /// The picture made current by the last upload, until a display frame shows it: (seq,
     /// sample_ns, decoded_at, the display time its pose was predicted for).
     pending_show: Option<(u64, u64, Instant, u64)>,
-    /// The running average of decoded pictures waiting at a take (see BUFFERED).
-    queue_avg: f64,
+    /// Per picture (the last 256): its pose's sample to the display time of the first frame
+    /// that could show it (complete at that frame's take), and the newest picture counted.
+    ready: VecDeque<f64>,
+    ready_seq: u64,
     /// Stats windows (seconds) so far.
     windows: u64,
-    /// The smoothed lead (ns) from a pose's display time to its picture's: how far ahead poses
-    /// are predicted (`Cx::xr_set_pose_lead`).
+    /// How far ahead of their sample poses are predicted (ns; `Cx::xr_set_pose_lead`): see
+    /// `ready`.
     lead_ns: f64,
-    /// The last motion-to-photon samples the lead averages.
-    leads: VecDeque<f64>,
     /// The previous XR frame's display time (a gap of more than 1.5 periods: a display frame
     /// the app missed).
     last_display_ns: u64,
     /// A per-display-frame trace being recorded (`start_trace`).
     trace: Option<Trace>,
+    /// The pose the shown picture was rendered for, as sent (its `XrFrame`; the trace's hands).
+    shown_sent: Option<Vec<u8>>,
+    /// The shown picture's pose sample time and how long it waited decoded (the trace).
+    shown_meta: (u64, u64),
+    /// The odd-frame watch (`watch_frame`): XR pass draws since the last XR frame, the last
+    /// frames as compact records, the frames still to log after an odd one, the odd frames so
+    /// far, the shown picture's last seq and how many frames it has shown.
+    draws: u32,
+    watch: VecDeque<String>,
+    watch_after: u32,
+    odd_frames: u32,
+    watch_seq: (u64, u32),
+    watch_last_view: Option<[f32; 4]>,
+    watch_turn: f32,
     window: Window,
     window_at: Instant,
     counts_at: (u32, u32),
@@ -499,8 +558,6 @@ pub struct XrStreamClient {
     pub warp: bool,
     /// The band-depth target the warp's vertices read (made at the first warped draw).
     band_rt: Option<RenderTarget>,
-    /// The warp's grid geometry (made at the first warped draw).
-    grid: Option<Geometry>,
     /// The warp probe's read back in flight.
     #[cfg(not(target_arch = "wasm32"))]
     probe_ticket: Option<ReadbackTicket>,
@@ -552,12 +609,21 @@ impl XrStreamClient {
             world_cursor: 0,
             world_tick: 0,
             pending_show: None,
-            queue_avg: 0.0,
+            ready: VecDeque::new(),
+            ready_seq: 0,
             windows: 0,
             lead_ns: 0.0,
-            leads: VecDeque::new(),
             last_display_ns: 0,
             trace: None,
+            shown_sent: None,
+            shown_meta: (0, 0),
+            draws: 0,
+            watch: VecDeque::new(),
+            watch_after: 0,
+            odd_frames: 0,
+            watch_seq: (0, 0),
+            watch_last_view: None,
+            watch_turn: 0.0,
             window: Window::default(),
             window_at: Instant::now(),
             counts_at: (0, 0),
@@ -571,7 +637,6 @@ impl XrStreamClient {
             freeze: false,
             warp: false,
             band_rt: None,
-            grid: None,
             #[cfg(not(target_arch = "wasm32"))]
             probe_ticket: None,
             focus_override_m: 0.0,
@@ -608,27 +673,6 @@ impl XrStreamClient {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    // the picture made current last time is on the glass at this frame's display
-                    if let (Some((_, sample_ns, decoded_at, _)), Some((display_ns, _))) = (self.pending_show.take(), cx.xr_frame_wire()) {
-                        self.window.shown += 1;
-                        self.window.wait_us.push(decoded_at.elapsed().as_micros() as u32);
-                        if display_ns > sample_ns {
-                            self.window.m2p_us.push(((display_ns - sample_ns) / 1000) as u32);
-                        }
-                        // the poses sent upstream are predicted for when their picture will show:
-                        // the measured motion to photon (the pose's sample to the display of its
-                        // picture, smoothed), as far ahead of the sample as the headset locates them
-                        let lead = display_ns.saturating_sub(sample_ns) as f64;
-                        // (the mean of the last 256, as the reference client averages its total
-                        // latency: a faster average moved every picture's pose with each
-                        // re-measured latency)
-                        self.leads.push_back(lead);
-                        if self.leads.len() > 256 {
-                            self.leads.pop_front();
-                        }
-                        self.lead_ns = self.leads.iter().sum::<f64>() / self.leads.len() as f64;
-                        cx.xr_set_pose_lead((self.lead_ns as u64).min(MAX_POSE_LEAD_NS));
-                    }
                     if let (Some((display_ns, _)), env_ns) = (cx.xr_frame_wire(), cx.xr_environment_depth_display_ns()) {
                         if env_ns != 0 && display_ns >= env_ns {
                             self.window.env_age_us.push(((display_ns - env_ns) / 1000) as u32);
@@ -640,12 +684,36 @@ impl XrStreamClient {
                     }
 
                     // this display frame's picture: the oldest decoded one
-                    let fresh = self.take_picture(cx);
+                    let display_ns = cx.xr_frame_wire().map_or(0, |(t, _)| t);
+                    let fresh = self.take_picture(cx, display_ns);
                     if !fresh {
                         self.window.repeats += 1;
                         self.window.events.push((self.window_at.elapsed().as_millis() as u32, 'r'));
                     }
+                    // the picture taken for this frame is on the glass at this frame's display time
+                    if let (Some((_, sample_ns, decoded_at, _)), Some((display_ns, _))) = (self.pending_show.take(), cx.xr_frame_wire()) {
+                        self.shown_meta = (sample_ns, decoded_at.elapsed().as_micros() as u64);
+                        self.window.shown += 1;
+                        self.window.wait_us.push(decoded_at.elapsed().as_micros() as u32);
+                        if display_ns > sample_ns {
+                            self.window.m2p_us.push(((display_ns - sample_ns) / 1000) as u32);
+                        }
+                    }
+                    // The poses go up predicted for the display frame their picture will show at:
+                    // far enough ahead that 9 of 10 pictures are complete by that frame's take
+                    // (the tracking thread takes the first frame of the headset's grid at least
+                    // that far ahead). Pictures show at their own frame (`take_picture`), so the
+                    // lead is the latency itself, not a queue's; a late one shows a frame late,
+                    // warped to that frame's eyes.
+                    if self.ready.len() >= 16 {
+                        let mut v: Vec<f64> = self.ready.iter().copied().collect();
+                        v.sort_by(|a, b| a.total_cmp(b));
+                        self.lead_ns = v[v.len() * 9 / 10];
+                        cx.xr_set_pose_lead((self.lead_ns as u64).min(MAX_POSE_LEAD_NS));
+                    }
                     self.trace_frame(cx, fresh);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.watch_frame(cx, fresh);
                     if self.window_at.elapsed().as_secs_f64() >= 5.0 {
                         self.log_eyes(cx);
                     }
@@ -698,7 +766,7 @@ impl XrStreamClient {
     }
 
     /// Uploads the newest complete picture (every tile of one pose), if a new one came.
-    fn take_picture(&mut self, cx: &mut Cx) -> bool {
+    fn take_picture(&mut self, cx: &mut Cx, display_ns: u64) -> bool {
         // (debug `freeze`: the last picture keeps showing with its own eyes: the headset's
         // reprojection alone keeps it in place)
         if self.freeze && self.shown[0].is_some() {
@@ -709,22 +777,49 @@ impl XrStreamClient {
             let tiles = {
                 let mut s = self.shared.lock().unwrap();
                 let tiles = s.tiles.clamp(1, 2) as usize;
-                // As the reference client does: one picture per display frame, the OLDEST both
-                // eyes are decoded for, so pictures that arrive unevenly (two in one display
-                // frame, none in the next: the server's clock is not the display's) still show
-                // one per frame; when the queue stays above BUFFERED pictures on average, one is
-                // skipped to catch up.
-                let complete: Vec<u64> = s.latest[0].iter().map(|d| d.head.seq).filter(|seq| tiles == 1 || s.latest[1].iter().any(|d| d.head.seq == *seq)).collect();
-                let Some(&oldest) = complete.first() else { return false };
-                self.queue_avg = self.queue_avg * 0.9 + complete.len() as f64 * 0.1;
-                let seq = if self.queue_avg > BUFFERED && complete.len() > 1 {
-                    self.window.skipped += 1;
-                    self.window.events.push((self.window_at.elapsed().as_millis() as u32, 's'));
-                    self.queue_avg -= 1.0;
-                    complete[1]
-                } else {
-                    oldest
+                // Each picture shows at the display frame it was rendered for (its pose's display
+                // time): the newest complete one (both eyes decoded) whose time has come. A
+                // picture early waits for its frame; one late shows at the next frame (the one
+                // due then is skipped over). Shown off its time (the reference's oldest-first
+                // queue of about two) every picture moved: the poses are predicted for their own
+                // display time, and what moves in the picture (a held cube, the hands' effect)
+                // jumped by the frames it was shown early or late.
+                let complete: Vec<(u64, u64, Instant)> = s.latest[0].iter().map(|d| {
+                    let other = s.latest[1].iter().find(|o| o.head.seq == d.head.seq).map_or(d.decoded_at, |o| o.decoded_at);
+                    (d.head.seq, d.head.display_ns, d.decoded_at.max(other))
+                }).filter(|(seq, _, _)| tiles == 1 || s.latest[1].iter().any(|d| d.head.seq == *seq)).collect();
+                if complete.is_empty() {
+                    return false;
+                }
+                // (each picture once: the earliest display frame it could show at, for the lead:
+                // the frame of the first take after both its eyes were decoded, a display period
+                // per take earlier than this one. Measured at the take that first sees it, a
+                // picture held up behind the queue (the decoder waiting for a free image) counted
+                // as late and raised the lead, which held more pictures: the lead only grew)
+                let counted = self.ready_seq;
+                for (seq, _, decoded_at) in complete.iter().filter(|(seq, _, _)| *seq > counted) {
+                    if let Some(sent) = self.sent.lock().unwrap().iter().find(|p| p.seq == *seq) {
+                        let takes_ago = (decoded_at.elapsed().as_nanos() as u64 / PERIOD_NS).min(8);
+                        let first = display_ns.saturating_sub(takes_ago * PERIOD_NS);
+                        self.ready.push_back(first.saturating_sub(sent.sample_ns) as f64);
+                        if self.ready.len() > 256 {
+                            self.ready.pop_front();
+                        }
+                    }
+                    self.ready_seq = *seq;
+                }
+                let due = display_ns + PERIOD_NS / 2;
+                let seq = match complete.iter().rev().find(|(_, t, _)| *t <= due) {
+                    Some((seq, _, _)) => *seq,
+                    // none due yet: the shown one stays (the first picture shows at once)
+                    None if self.shown[0].is_some() => return false,
+                    None => complete[0].0,
                 };
+                let skipped = complete.iter().filter(|(q, _, _)| *q < seq).count() as u32;
+                if skipped > 0 {
+                    self.window.skipped += skipped;
+                    self.window.events.push((self.window_at.elapsed().as_millis() as u32, 's'));
+                }
                 let mut out: Vec<Decoded> = Vec::with_capacity(tiles);
                 for t in 0..tiles {
                     // older pictures go (their buffers back to the decoder); newer ones wait
@@ -740,6 +835,7 @@ impl XrStreamClient {
             let mut sent_q = self.sent.lock().unwrap();
             let sent = sent_q.iter().position(|p| p.seq == seq).map(|i| {
                 let (at, sample_ns, display_ns) = (sent_q[i].at, sent_q[i].sample_ns, sent_q[i].display_ns);
+                self.shown_sent = Some(std::mem::take(&mut sent_q[i].frame));
                 // the eyes the picture says it was rendered with against the ones sent for it
                 let echo = &tiles[0].head.eyes;
                 for e in 0..2 {
@@ -889,17 +985,34 @@ impl XrStreamClient {
         }
     }
 
-    /// Starts a per-display-frame trace of `secs` seconds, written to `path` as CSV when done.
+    /// Starts a per-display-frame trace of `secs` seconds, written to `path` as CSV when done
+    /// (with the tracking log of the same seconds next to it: `track-*.csv` to read, `track-*.bin`
+    /// to replay).
     pub fn start_trace(&mut self, secs: f64, path: String) {
-        self.trace = Some(Trace { until: Instant::now() + Duration::from_secs_f64(secs), path, rows: String::from(
-            "display_ns,head_qx,head_qy,head_qz,head_qw,head_x,head_y,head_z,new,seq,pic_display_ns,render_qx,render_qy,render_qz,render_qw,render_x,render_y,render_z,sample_ns,lead_ns,decoded_age_us,queue\n") });
+        let mut rows = String::from("display_ns,head_qx,head_qy,head_qz,head_qw,head_x,head_y,head_z,new,seq,pic_display_ns,render_qx,render_qy,render_qz,render_qw,render_x,render_y,render_z,sample_ns,lead_ns,decoded_age_us,queue,warp");
+        for p in ["view", "render1"] {
+            for c in ["qx", "qy", "qz", "qw", "x", "y", "z"] {
+                rows.push_str(&format!(",{p}_{c}"));
+            }
+        }
+        for p in ["sent_lgrip", "sent_rgrip"] {
+            for c in ["ok", "grab", "qx", "qy", "qz", "qw", "x", "y", "z"] {
+                rows.push_str(&format!(",{p}_{c}"));
+            }
+        }
+        rows.push('\n');
+        self.trace = Some(Trace { until: Instant::now() + Duration::from_secs_f64(secs), path, rows, started_ns: makepad_widgets::makepad_platform::makepad_hal::clock_ns() });
     }
 
-    /// One trace row: this display frame, its head (located at its display time), the picture
-    /// it shows (new or repeated), that picture's render eye 0 and target time, the sample time
-    /// of its pose, the lead, how long it waited decoded, the decoded pictures queued.
+    /// One trace row: this display frame, its head and eye 0 (the view: located at its display
+    /// time when the frame was asked), the picture it shows (new or repeated), that picture's
+    /// render eyes and target time, the sample time of its pose, the lead, how long it waited
+    /// decoded, the decoded pictures queued, whether it is warped, and the grips (each hand's
+    /// grab pose: the palm's orientation at the thumb and index tips' middle) of the pose the
+    /// picture was rendered for.
     #[cfg(not(target_arch = "wasm32"))]
     fn trace_frame(&mut self, cx: &Cx, fresh: bool) {
+        use makepad_widgets::makepad_platform::makepad_hal::{buffers::read_items, XrFrame};
         let Some(t) = self.trace.as_mut() else { return };
         if Instant::now() >= t.until {
             let t = self.trace.take().unwrap();
@@ -907,20 +1020,70 @@ impl XrStreamClient {
                 Ok(()) => log!("xr stream: trace written to {}", t.path),
                 Err(e) => log!("xr stream: trace not written to {}: {e}", t.path),
             }
+            write_track_log(&t.path, t.started_ns);
             return;
         }
         let Some((display_ns, wire)) = cx.xr_frame_wire() else { return };
-        let Some(frame) = makepad_widgets::makepad_platform::makepad_hal::buffers::read_items::<makepad_widgets::makepad_platform::makepad_hal::XrFrame>(&wire, 1).next() else { return };
+        let Some(frame) = read_items::<XrFrame>(&wire, 1).next() else { return };
         let Some(shown) = self.shown[0].as_ref() else { return };
-        let (h, r) = (&frame.head, &shown.head.eyes[0]);
-        let sample_ns = self.pending_show.map_or(0, |p| p.1);
-        let age = self.pending_show.map_or(0, |p| p.2.elapsed().as_micros() as u64);
+        let (h, r, r1, v) = (&frame.head, &shown.head.eyes[0], &shown.head.eyes[1], &frame.eyes[0].pose);
+        let (sample_ns, age) = self.shown_meta;
         let queue = self.shared.lock().unwrap().latest[0].len();
         use std::fmt::Write;
-        let _ = writeln!(t.rows, "{display_ns},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{sample_ns},{:.0},{age},{queue}",
+        let _ = write!(t.rows, "{display_ns},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{sample_ns},{:.0},{age},{queue},{}",
             h.orientation[0], h.orientation[1], h.orientation[2], h.orientation[3], h.position[0], h.position[1], h.position[2],
             fresh as u8, shown.head.seq, shown.head.display_ns,
-            r.orientation[0], r.orientation[1], r.orientation[2], r.orientation[3], r.position[0], r.position[1], r.position[2], self.lead_ns);
+            r.orientation[0], r.orientation[1], r.orientation[2], r.orientation[3], r.position[0], r.position[1], r.position[2], self.lead_ns, self.warp as u8);
+        for (q, p) in [(v.orientation, v.position), (r1.orientation, r1.position)] {
+            let _ = write!(t.rows, ",{},{},{},{},{},{},{}", q[0], q[1], q[2], q[3], p[0], p[1], p[2]);
+        }
+        let sent = self.shown_sent.as_ref().and_then(|b| read_items::<XrFrame>(b, 1).next());
+        for hand in 0..2 {
+            push_grip(&mut t.rows, sent.as_ref().map(|f| &f.hands[hand]));
+        }
+        t.rows.push('\n');
+    }
+
+    /// Always on: each display frame as a compact record (display time ms, picture seq, its
+    /// target against this frame in frames, new or repeated and for how many frames, decoded
+    /// pictures queued, how long it waited decoded, XR pass draws since the last frame, the
+    /// angle from its render eye to this frame's view eye, and the view eye's turn since the
+    /// last frame). An odd frame (a picture off its frame, shown a third time, a draw count not
+    /// 1, render and view eyes far apart, a turn step unlike its neighbours') logs the five
+    /// frames before it and the five after: the intermittent one-frame jump, caught when it
+    /// happens.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn watch_frame(&mut self, cx: &Cx, fresh: bool) {
+        use makepad_widgets::makepad_platform::makepad_hal::{buffers::read_items, XrFrame};
+        let draws = std::mem::take(&mut self.draws);
+        let Some((display_ns, wire)) = cx.xr_frame_wire() else { return };
+        let Some(frame) = read_items::<XrFrame>(&wire, 1).next() else { return };
+        let Some(shown) = self.shown[0].as_ref() else { return };
+        let angle = |a: [f32; 4], b: [f32; 4]| (2.0 * (0..4).map(|k| a[k] * b[k]).sum::<f32>().abs().min(1.0).acos()).to_degrees();
+        let seq = shown.head.seq;
+        self.watch_seq = if self.watch_seq.0 == seq { (seq, self.watch_seq.1 + 1) } else { (seq, 1) };
+        let off = (display_ns as i64 - shown.head.display_ns as i64) as f64 / PERIOD_NS as f64;
+        let render_view = angle(shown.head.eyes[0].orientation, frame.eyes[0].pose.orientation);
+        let turn = self.watch_last_view.map_or(0.0, |q| angle(q, frame.eyes[0].pose.orientation));
+        let turn_before = std::mem::replace(&mut self.watch_turn, turn);
+        self.watch_last_view = Some(frame.eyes[0].pose.orientation);
+        let queue = self.shared.lock().unwrap().latest[0].len();
+        let rec = format!("{}:{} off{:+.1} {}{} q{} age{} d{} rv{:.2} turn{:.2}", (display_ns / 1_000_000) % 100_000, seq % 100_000, off, if fresh { 'n' } else { 'r' }, self.watch_seq.1, queue, self.shown_meta.1 / 1000, draws, render_view, turn);
+        self.watch.push_back(rec);
+        while self.watch.len() > 6 {
+            self.watch.pop_front();
+        }
+        let odd = off.abs() > 0.5 || self.watch_seq.1 >= 3 || draws != 1 || render_view > 6.0 || (turn > 0.3 && turn > 2.5 * turn_before.max(0.05)) || (turn_before > 0.3 && turn < turn_before / 2.5);
+        if odd && self.watch_after == 0 {
+            self.odd_frames += 1;
+            self.watch_after = 6;
+            log!("xr stream: odd frame #{}: {} (before: {})", self.odd_frames, self.watch.back().unwrap(), self.watch.iter().rev().skip(1).rev().cloned().collect::<Vec<_>>().join(" | "));
+        } else if self.watch_after > 0 {
+            self.watch_after -= 1;
+            if self.watch_after == 0 {
+                log!("xr stream: odd frame #{} after: {}", self.odd_frames, self.watch.iter().cloned().collect::<Vec<_>>().join(" | "));
+            }
+        }
     }
 
     /// Every second: the window's numbers to the server (its stats panel); logged every 5th.
@@ -945,7 +1108,8 @@ impl XrStreamClient {
             v.get(v.len() * 9 / 10).map_or(0.0, |x| *x as f64 / 1000.0)
         };
         let line = format!(
-            "display {:.0}/s · recv {:.0}/s dec {:.0}/s shown {:.0}/s · m2p {:.0} ms = render {:.1} gpu {:.1} enc {:.1} send {:.1} net {:.1} dec {:.1} wait {:.1} (trip {:.0}) · {} unmatched · env depth age {:.0}/{:.0} ms · pose echo max diff {:e} · repeats {} skipped {} dropped {}",
+            "odd frames {} · display {:.0}/s · recv {:.0}/s dec {:.0}/s shown {:.0}/s · m2p {:.0} ms = render {:.1} gpu {:.1} enc {:.1} send {:.1} net {:.1} dec {:.1} wait {:.1} (trip {:.0}) · {} unmatched · env depth age {:.0}/{:.0} ms · pose echo max diff {:e} · repeats {} skipped {} dropped {}",
+            self.odd_frames,
             rate(w.display_frames),
             rate(received.wrapping_sub(r0)),
             rate(decoded.wrapping_sub(d0)),
@@ -1015,14 +1179,17 @@ impl XrStreamClient {
     pub fn draw_band(&mut self, cx: &mut Cx2d, band: &mut DrawXrBandDepth) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if !self.warp || self.shown[0].is_none() {
+            if self.shown[0].is_none() {
                 return;
             }
             let tile_size = self.shared.lock().unwrap().tile_size;
             let tiled = self.shown[1].is_some();
             let ew = if tiled { tile_size[0] } else { tile_size[0] / 2 };
             let ch = (tile_size[1] as f32 * 2.0 / 3.0).round() as u32;
-            let band_size = ((ew / 2) * 2, (tile_size[1].saturating_sub(ch)).max(2) / 2);
+            // (one texel per band texel: the band is the colour's half resolution both ways, its
+            // coverage left and its depth right; at half the band's rows the coverage was a
+            // quarter of the colour's: a dark rim along horizontal edges)
+            let band_size = ((ew / 2) * 2, (tile_size[1].saturating_sub(ch)).max(1));
             let rt = self.band_rt.get_or_insert_with(|| RenderTarget::new(cx.cx, "xr_stream_band_depth"));
             rt.ensure(cx.cx, band_size, RenderTargetFormat::Bgra8);
             rt.begin(cx, vec4(0.0, 0.0, 0.0, 1.0));
@@ -1044,10 +1211,19 @@ impl XrStreamClient {
     }
 
     pub fn draw(&mut self, cx: &mut Cx2d, draw: &mut DrawXrStream) {
+        self.draws += 1;
         #[cfg(not(target_arch = "wasm32"))]
         {
             let Some(first) = self.shown[0].as_ref() else { return };
             let tile_size = self.shared.lock().unwrap().tile_size;
+            // this frame's eyes (the warp's target)
+            let wire = cx.cx.xr_frame_wire();
+            let view = wire.as_ref().and_then(|(_, w)| makepad_widgets::makepad_platform::makepad_hal::buffers::read_items::<makepad_widgets::makepad_platform::makepad_hal::XrFrame>(w, 1).next());
+            // a picture more than three frames old is not warped (the warp is for the few
+            // millimetres of one frame's prediction; stretched over a stall it smeared every
+            // edge): it shows with its own eyes, the compositor turning it
+            let stale = wire.as_ref().is_some_and(|(t, _)| *t > first.head.display_ns + 3 * PERIOD_NS);
+            let warp = self.warp && !stale;
             let band_size = self.band_rt.as_ref().map_or((1, 1), |rt| rt.size());
             let eye = |e: &XrRenderEye| makepad_widgets::makepad_platform::makepad_hal::XrEye {
                 pose: makepad_widgets::makepad_platform::makepad_hal::XrPose { orientation: e.orientation, position: e.position },
@@ -1056,8 +1232,16 @@ impl XrStreamClient {
             // (warped here, the frame shows with the view's own eyes: the compositor corrects
             // only the last few ms; else it shows with the picture's and the compositor
             // corrects the rotation since then)
-            if !self.own_eyes && !self.warp {
+            if !self.own_eyes && !warp {
                 cx.cx.xr_present_eyes([eye(&first.head.eyes[0]), eye(&first.head.eyes[1])], if !self.depth_layer { 0.0 } else if self.focus_override_m > 0.0 { self.focus_override_m } else { first.head.focus_m });
+            }
+            // warped, the frame goes with the eyes it was warped to (the ones its uniforms
+            // hold), never with whatever the HAL asked last: a frame drawn for one ask and taken
+            // for the next showed a display frame of head rotation off
+            if warp && !self.own_eyes {
+                if let Some(v) = view.as_ref() {
+                    cx.cx.xr_present_eyes(v.eyes, 0.0);
+                }
             }
             // the tile's picture (the texture may be the decoder's larger buffer)
             for e in 0..2 {
@@ -1095,10 +1279,17 @@ impl XrStreamClient {
                     (live_id!(depth_near), vec![makepad_desk_link::xr::DEPTH_NEAR_M]),
                     (live_id!(opaque), vec![self.opaque as f32]),
                     (live_id!(env_map), vec![self.env_map as f32]),
-                    (live_id!(warp), vec![self.warp as u8 as f32]),
+                    (live_id!(warp), vec![warp as u8 as f32]),
                     (live_id!(band_size), vec![band_size.0 as f32, band_size.1 as f32]),
-                    (live_id!(grid_cells), vec![GRID as f32]),
                 ];
+                // the view's own eye (this frame's: what the pass draws with)
+                if let Some(v) = view.as_ref().map(|f| &f.eyes[e]) {
+                    uniforms.extend([
+                        (live_id!(view_rot), v.pose.orientation.to_vec()),
+                        (live_id!(view_pos), vec![v.pose.position[0], v.pose.position[1], v.pose.position[2], 1.0]),
+                        (live_id!(view_tan), tan(v.fov).to_vec()),
+                    ]);
+                }
                 match cx.cx.xr_environment_depth().filter(|_| self.occlusion) {
                     Some((depth, header)) => {
                         // this eye's own depth camera and image layer
@@ -1123,7 +1314,7 @@ impl XrStreamClient {
                     }
                 }
                 // the band depth the warp reads (a stand-in while there is none)
-                match self.band_rt.as_ref().filter(|_| self.warp) {
+                match self.band_rt.as_ref() {
                     Some(rt) => draw.draw_vars.set_texture(4, &rt.texture),
                     None => {
                         let blank = self.blank.get_or_insert_with(|| Texture::new_nv12(cx.cx, 2, 2, vec![16, 16, 16, 16, 128, 128]));
@@ -1139,10 +1330,6 @@ impl XrStreamClient {
                 // picture showed only at odd head angles). Real things in front are this shader's
                 // own per-pixel test (`occlusion`)
                 draw.depth_clip = 0.0;
-                if self.warp {
-                    let grid = self.grid.get_or_insert_with(|| xr_grid_geometry(cx.cx));
-                    draw.draw_vars.geometry_id = Some(grid.geometry_id());
-                }
                 draw.new_draw_call(cx);
                 draw.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2(1.0, 1.0) });
             }
@@ -1199,7 +1386,7 @@ fn uplink(shared: Arc<Mutex<Shared>>, sent: Arc<Mutex<VecDeque<Sent>>>) {
         let eyes = read_items::<XrFrame>(&buf, 1).next().map_or([[0.0; 4]; 2], |f| [f.eyes[0].pose.orientation, f.eyes[1].pose.orientation]);
         {
             let mut q = sent.lock().unwrap();
-            q.push_back(Sent { seq, at: now, sample_ns, display_ns, eyes });
+            q.push_back(Sent { seq, at: now, sample_ns, display_ns, eyes, frame: buf.clone() });
             while q.len() > 512 {
                 q.pop_front();
             }
@@ -1350,7 +1537,12 @@ fn decode_tile(tile: usize, codec: StreamVideoCodec, size: [u32; 2], rx: std::sy
                     let mut s = shared.lock().unwrap();
                     s.decoded += 1;
                     let held = &mut s.latest[tile & 1];
-                    // a few at most: the oldest goes (its buffer back to the decoder)
+                    // four at most (pictures wait up to the lead's spread for their frame; at
+                    // two or three the one due next was dropped: a repeat and a skip): the oldest
+                    // goes. With the shown one and the two before it that is seven of the
+                    // reader's eight images: the decoder never waits for one (with all of them
+                    // held it did, each picture then decoded late, and the lead measured from
+                    // that grew without end)
                     while held.len() >= 4 {
                         held.pop_front();
                     }
@@ -1364,6 +1556,141 @@ fn decode_tile(tile: usize, codec: StreamVideoCodec, size: [u32; 2], rx: std::sy
                 link.send(&XrClientMsg::Stats { seq, decode_us: 0, m2p_us: 0 });
                 link.send(&XrClientMsg::Keyframe);
             }
+        }
+    }
+}
+
+/// A hand's grab pose (the physics' grip: the palm's orientation at the middle of the thumb and
+/// index tips, else the index tip) and whether it grabs.
+#[cfg(not(target_arch = "wasm32"))]
+fn grip_of(h: &makepad_widgets::makepad_platform::makepad_hal::XrHand) -> Option<(bool, Quat, Vec3f)> {
+    use makepad_widgets::makepad_platform::event::xr::XrHand;
+    let mut c = XrHand { flags: h.flags as u8, tips: h.tips, tips_active: h.tips_active as u8, pinch: h.pinch, ..Default::default() };
+    for (o, j) in c.joints.iter_mut().zip(h.joints.iter()) {
+        *o = Pose::new(Quat { x: j.orientation[0], y: j.orientation[1], z: j.orientation[2], w: j.orientation[3] }, vec3f(j.position[0], j.position[1], j.position[2]));
+    }
+    let palm = c.tracking_pose()?;
+    let position = match (c.tip_pos_checked(XrHand::THUMB_TIP), c.tip_pos_checked(XrHand::INDEX_TIP)) {
+        (Some(t), Some(i)) => (t + i) * 0.5,
+        (_, Some(i)) => i,
+        _ => return None,
+    };
+    Some((c.grabbing(), palm.orientation, position))
+}
+
+/// A grip's trace columns: ok, grab, orientation, position (empty when the hand is not tracked).
+#[cfg(not(target_arch = "wasm32"))]
+fn push_grip(rows: &mut String, h: Option<&makepad_widgets::makepad_platform::makepad_hal::XrHand>) {
+    use std::fmt::Write;
+    match h.and_then(grip_of) {
+        Some((grab, q, p)) => { let _ = write!(rows, ",1,{},{},{},{},{},{},{},{}", grab as u8, q.x, q.y, q.z, q.w, p.x, p.y, p.z); }
+        None => rows.push_str(",0,0,0,0,0,1,0,0,0"),
+    }
+}
+
+/// The tracking log since `since_ns` next to the trace at `trace_path`: `track-*.csv` (kind 0
+/// sent: sample time, the display time located for; kind 1 tracked: a display time, when it was
+/// located; then the head, eye 0, eye 1 and both grips) and `track-*.bin` (the entries
+/// themselves: `debug.xrremote.replay` plays them).
+#[cfg(not(target_arch = "wasm32"))]
+fn write_track_log(trace_path: &str, since_ns: u64) {
+    use makepad_widgets::makepad_platform::makepad_hal::{self as hal, buffers::read_items, XrFrame};
+    use std::fmt::Write;
+    let size = hal::hal_xr_track_entry_size();
+    if size == 0 {
+        return;
+    }
+    let mut buf = vec![0u8; 8 + size * 512];
+    let (mut cursor, mut bin, mut csv) = (0u64, Vec::new(), String::from("kind,t_ns,aux_ns"));
+    for p in ["head", "eye0", "eye1"] {
+        for c in ["qx", "qy", "qz", "qw", "x", "y", "z"] {
+            csv.push_str(&format!(",{p}_{c}"));
+        }
+    }
+    for p in ["lgrip", "rgrip"] {
+        for c in ["ok", "grab", "qx", "qy", "qz", "qw", "x", "y", "z"] {
+            csv.push_str(&format!(",{p}_{c}"));
+        }
+    }
+    csv.push('\n');
+    loop {
+        let next = hal::hal_xr_track_log(cursor, &mut buf);
+        let n = u64::from_le_bytes(buf[..8].try_into().unwrap()) as usize;
+        if n == 0 {
+            break;
+        }
+        cursor = next;
+        for e in buf[8..8 + n * size].chunks_exact(size) {
+            let u = |k: usize| u64::from_le_bytes(e[k..k + 8].try_into().unwrap());
+            // (the sent poses from the trace's start, the tracked path from a little before it)
+            let (kind, t, aux) = (u(0), u(8), u(16));
+            let at = if kind == 0 { t } else { t + 200_000_000 };
+            if at < since_ns {
+                continue;
+            }
+            bin.extend_from_slice(e);
+            let Some(f) = read_items::<XrFrame>(&e[24..], 1).next() else { continue };
+            let _ = write!(csv, "{kind},{t},{aux}");
+            if kind == 2 {
+                // (the hands' grip action space: head = the right grip's angular velocity (x, y,
+                // z, 0) and linear velocity at the sample time; eye 0 / eye 1 = the right / left
+                // grip at the sample time; the grips = at the target, ok = position valid)
+                let (av, lv) = (f.hands[1].joints[1].position, f.hands[1].joints[0].position);
+                let _ = write!(csv, ",{},{},{},0,{},{},{}", av[0], av[1], av[2], lv[0], lv[1], lv[2]);
+                for p in [&f.controllers[1].aim_pose, &f.controllers[0].aim_pose] {
+                    let _ = write!(csv, ",{},{},{},{},{},{},{}", p.orientation[0], p.orientation[1], p.orientation[2], p.orientation[3], p.position[0], p.position[1], p.position[2]);
+                }
+                for h in 0..2 {
+                    let p = &f.controllers[h].grip_pose;
+                    let _ = write!(csv, ",{},{},{},{},{},{},{},{},{}", (f.hands[h].tips_active & 2 != 0) as u8, f.hands[h].flags, p.orientation[0], p.orientation[1], p.orientation[2], p.orientation[3], p.position[0], p.position[1], p.position[2]);
+                }
+                // (then the right palm joint at the sample time, at the target + 40 ms and at the
+                // newest display frame's time)
+                for j in 2..5 {
+                    let a = f.hands[1].joints[j].position;
+                    let _ = write!(csv, ",{},{},{}", a[0], a[1], a[2]);
+                }
+                csv.push('\n');
+                continue;
+            }
+            for p in [&f.head, &f.eyes[0].pose, &f.eyes[1].pose] {
+                let _ = write!(csv, ",{},{},{},{},{},{},{}", p.orientation[0], p.orientation[1], p.orientation[2], p.orientation[3], p.position[0], p.position[1], p.position[2]);
+            }
+            for hand in 0..2 {
+                push_grip(&mut csv, Some(&f.hands[hand]));
+            }
+            csv.push('\n');
+        }
+    }
+    let base = trace_path.replace("trace-", "track-");
+    let base = base.strip_suffix(".csv").unwrap_or(&base).to_string();
+    let entries = bin.len() / size;
+    match std::fs::write(format!("{base}.csv"), csv.as_bytes()).and_then(|_| std::fs::write(format!("{base}.bin"), &bin)) {
+        Ok(()) => log!("xr stream: tracking log ({entries} entries) written to {base}.csv and .bin"),
+        Err(e) => log!("xr stream: tracking log not written to {base}: {e}"),
+    }
+}
+
+/// Plays the tracking log `name` (`track-<n>` in the app's files: a trace's) instead of the
+/// headset's own poses; "" or "0" stops. Whether a replay runs.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn replay_track_log(dir: &str, name: &str) -> bool {
+    use makepad_widgets::makepad_platform::makepad_hal as hal;
+    if name.is_empty() || name == "0" {
+        hal::hal_xr_replay(&[]);
+        log!("xr stream: replay off: the headset's own poses");
+        return false;
+    }
+    let path = format!("{dir}/{name}.bin");
+    match std::fs::read(&path) {
+        Ok(data) => {
+            let on = hal::hal_xr_replay(&data);
+            log!("xr stream: replay of {path} ({} entries): {}", data.len() / hal::hal_xr_track_entry_size().max(1), if on { "playing" } else { "too short, not played" });
+            on
+        }
+        Err(e) => {
+            log!("xr stream: replay: {path}: {e}");
+            false
         }
     }
 }

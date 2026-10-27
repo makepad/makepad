@@ -165,6 +165,14 @@ pub(super) fn log(text: &str) {
 }
 macro_rules! xr_log { ($($t:tt)*) => { log(&format!($($t)*)) } }
 mod depth;
+mod track_log;
+
+/// The tracking log from absolute index `cursor` (`hal_xr_track_log`).
+pub fn track_log(cursor: u64, out: &mut [u8]) -> (u64, usize) { track_log::read(cursor, out) }
+/// Plays a recorded tracking log instead of the runtime's poses (`hal_xr_replay`; empty: off).
+pub fn replay(data: &[u8]) -> bool { track_log::set_replay(data, clock_ns()) }
+/// One tracking log entry's size in bytes.
+pub fn track_entry_size() -> usize { track_log::entry_size() }
 
 /// `window_kind::XR` window `id` of session `sid` is made: it is the stereo view, sized by the
 /// eyes (one pixel per point). `false` without an XR session.
@@ -1431,6 +1439,13 @@ impl CxOpenXrSession {
         if self.stereo_shown.is_none() { xr_log!("first stereo frame ({}x{} px per eye)", size[0], size[1]); }
         // the eyes it was drawn for: its own (a streamed picture's render eyes), else its XrFrame's
         let asked = self.stereo_asked.take();
+        // (a frame that carries its own eyes far from the ones asked: drawn for another ask, a
+        // picture's render eyes long ago, the one-frame jump's suspects; logged)
+        if let (Some((own, _)), Some(a)) = (eyes.as_ref(), asked.as_ref()) {
+            let (p, q) = (own[0].pose.orientation, a[0].pose.orientation);
+            let d = (2.0 * (p.x * q.x + p.y * q.y + p.z * q.z + p.w * q.w).abs().min(1.0).acos()).to_degrees();
+            if d > 1.0 { xr_log!("stereo frame shown with eyes {d:.2} deg from the ones asked for its display time"); }
+        }
         self.stereo_focus = eyes.map_or(0.0, |(_, f)| f);
         if eyes.is_some() { self.eyes_own += 1 } else { self.eyes_asked += 1 }
         self.stereo_shown = eyes.map(|(e, _)| e).or(asked);
@@ -1463,6 +1478,11 @@ impl CxOpenXrSession {
     /// The frame for display time `time`: the head and eyes located then, this display frame's
     /// controllers and hands; `None` while the head is not tracked.
     fn frame_at(&self, time: XrTime) -> Option<XrFrame> {
+        // (a replay: its tracked path)
+        if let Some(r) = track_log::replay() {
+            let f = r.tracked_at(time.as_nanos() as u64);
+            return Some(XrFrame { controllers: self.controllers, hands: self.hands, ..f });
+        }
         let located = self.locate(time);
         let (head, eyes) = located?;
         let fov = |f: &XrFovf| [f.angle_left, f.angle_right, f.angle_up, f.angle_down];
@@ -1606,6 +1626,12 @@ fn track(rt: Arc<Runtime>, inputs: Arc<Mutex<SharedInputs>>, session: XrSession,
     let xr = &rt.xr;
     let (mut samples, mut palm_changes, mut window, mut last_palm) = (0u32, 0u32, Instant::now(), None);
     let mut seen = 0u64;
+    // the newest display time logged as tracked (the tracking log); how many display frames
+    // past the newest one the poses are located for
+    let mut tracked_to = 0i64;
+    let mut ahead_frames = 0i64;
+    // per hand: its newest sample's palm position and when it was first seen
+    let mut hand_seen = [([0f32; 3], 0u64); 2];
     while !stop.load(Ordering::Acquire) {
         // the next display frame (its predicted display time)
         let display = {
@@ -1620,10 +1646,59 @@ fn track(rt: Arc<Runtime>, inputs: Arc<Mutex<SharedInputs>>, session: XrSession,
         if !uplink_wanted() { continue; }
         let period = PERIOD_NS.load(Ordering::Acquire).max(1_000_000);
         // the display time on the headset's grid nearest now + the lead
-        let want = clock_ns() as i64 + POSE_LEAD_NS.load(Ordering::Acquire);
-        let k = ((want - display as i64) as f64 / period as f64).round().max(0.0) as i64;
-        let target = XrTime::from_nanos(display as i64 + k * period);
-        let polled = lock(&inputs).0.poll(xr, session, local_space, target);
+        let now = clock_ns();
+        let want = now as i64 + POSE_LEAD_NS.load(Ordering::Acquire);
+        // the display frame this many frames past the newest one: at least now + the lead, and
+        // kept while it still is (rounding now + the lead to the nearest frame flipped with the
+        // thread's wake jitter when it sat near half a period: the same frame twice, then one
+        // skipped, about 2 of 15 pictures a repeat)
+        let desired = (want - display as i64) as f64 / period as f64;
+        if ahead_frames < desired.ceil() as i64 || (ahead_frames as f64) > desired + 1.25 {
+            ahead_frames = desired.ceil().max(0.0) as i64;
+        }
+        let target = XrTime::from_nanos(display as i64 + ahead_frames * period);
+        // the display times on the grid now 15 ms past, each once: the tracked path (the
+        // tracking log's truth for what each display frame should have shown)
+        let past = display as i64 + ((now as i64 - 15_000_000 - display as i64) as f64 / period as f64).floor() as i64 * period;
+        // (on this display grid: a grid of before, another rate or phase, is left behind)
+        for k in (0..8).rev() {
+            let t = past - k * period;
+            if t <= tracked_to + period / 2 { continue; }
+            tracked_to = t;
+            let at = XrTime::from_nanos(tracked_to);
+            let frame = match track_log::replay() {
+                Some(r) => Some(r.tracked_at(tracked_to as u64)),
+                None => locate_views(xr, session, local_space, head_space, at).map(|(head, eyes)| {
+                    let hands = lock(&inputs).0.locate_hands(xr, session, local_space, at);
+                    let fov = |f: &XrFovf| [f.angle_left, f.angle_right, f.angle_up, f.angle_down];
+                    XrFrame { head: pose(head), eyes: eyes.map(|e| XrEye { pose: pose(e.pose), fov: fov(&e.fov) }), controllers: Default::default(), hands }
+                }),
+            };
+            if let Some(f) = frame { track_log::push(track_log::TRACKED, tracked_to as u64, now, f); }
+        }
+        // (a replay: the recorded poses instead of the runtime's)
+        let replay = track_log::replay();
+        let replayed = replay.as_ref().map(|r| r.sent_at(now, target.as_nanos() as u64));
+        let polled = match &replayed {
+            Some(f) => Some((f.controllers, f.hands)),
+            None => {
+                let mut inputs = lock(&inputs);
+                inputs.0.poll(xr, session, local_space, target).map(|(controllers, mut hands)| {
+                    // The hands as the reference carries them: located NOW (their newest tracked
+                    // sample) and moved to the target by the grip's velocity at now. Located at
+                    // the target itself (~80 ms ahead) the runtime's joints moved only every 3rd
+                    // or 4th sample (25 Hz, in 4-12 mm steps: a held cube at a third of the frame
+                    // rate); at now every 2nd (its tracker's rate), and the velocity carries them
+                    // between.
+                    let now_t = XrTime::from_nanos(now as i64);
+                    let (at_now, grips) = (inputs.0.locate_hands(xr, session, local_space, now_t), inputs.0.locate_hand_grips(xr, local_space, now_t));
+                    for h in 0..2 {
+                        hands[h] = hand_moved_to(&hands[h], &at_now[h], grips[h], &mut hand_seen[h], now, target.as_nanos() as u64);
+                    }
+                    (controllers, hands)
+                })
+            }
+        };
         let (controllers, hands) = polled.unwrap_or_default();
         // (how often the tracked hands change between samples: logged every 5 s)
         let palm = hands[1].joints[0].position;
@@ -1634,9 +1709,38 @@ fn track(rt: Arc<Runtime>, inputs: Arc<Mutex<SharedInputs>>, session: XrSession,
             (samples, palm_changes, window) = (0, 0, Instant::now());
         }
         *lock(&TRACKED_INPUT) = Some((controllers, hands));
-        let Some((head, eyes)) = locate_views(xr, session, local_space, head_space, target) else { continue };
-        let fov = |f: &XrFovf| [f.angle_left, f.angle_right, f.angle_up, f.angle_down];
-        let frame = XrFrame { head: pose(head), eyes: eyes.map(|e| XrEye { pose: pose(e.pose), fov: fov(&e.fov) }), controllers, hands };
+        let frame = match replayed {
+            Some(f) => f,
+            None => {
+                let Some((head, eyes)) = locate_views(xr, session, local_space, head_space, target) else { continue };
+                let fov = |f: &XrFovf| [f.angle_left, f.angle_right, f.angle_up, f.angle_down];
+                XrFrame { head: pose(head), eyes: eyes.map(|e| XrEye { pose: pose(e.pose), fov: fov(&e.fov) }), controllers, hands }
+            }
+        };
+        track_log::push(track_log::SENT, now, target.as_nanos() as u64, frame);
+        // the hands' grip action space at the target and at now (with velocity): the tracking
+        // log's GRIP entries (the held objects' candidate path)
+        if replayed.is_none() {
+            let mut inputs = lock(&inputs);
+            let (at_target, at_now) = (inputs.0.locate_hand_grips(xr, local_space, target), inputs.0.locate_hand_grips(xr, local_space, XrTime::from_nanos(now as i64)));
+            // (the joints asked for other times: whether the runtime extrapolates them)
+            let (joints_now, joints_later) = (inputs.0.locate_hands(xr, session, local_space, XrTime::from_nanos(now as i64)), inputs.0.locate_hands(xr, session, local_space, XrTime::from_nanos(target.as_nanos() + 40_000_000)));
+            let joints_display = inputs.0.locate_hands(xr, session, local_space, XrTime::from_nanos(display as i64));
+            drop(inputs);
+            let mut g = XrFrame::default();
+            for h in 0..2 {
+                g.controllers[h].grip_pose = at_target[h].0;
+                g.controllers[h].aim_pose = at_now[h].0;
+                g.hands[h].joints[0].position = at_now[h].1;
+                g.hands[h].joints[1].position = at_now[h].2;
+                g.hands[h].flags = at_now[h].3;
+                g.hands[h].tips_active = at_target[h].3;
+                g.hands[h].joints[2].position = joints_now[h].joints[0].position;
+                g.hands[h].joints[3].position = joints_later[h].joints[0].position;
+                g.hands[h].joints[4].position = joints_display[h].joints[0].position;
+            }
+            track_log::push(track_log::GRIP, now, target.as_nanos() as u64, g);
+        }
         let mut u = lock(&UPLINK);
         u.1.clear();
         crate::buffers::Wire::write(&frame, &mut u.1);
@@ -1644,6 +1748,57 @@ fn track(rt: Arc<Runtime>, inputs: Arc<Mutex<SharedInputs>>, session: XrSession,
         drop(u);
         UPLINK_NEW.notify_all();
     }
+}
+
+/// A hand for the uplink: `polled` (located at `target`: its flags, pinches and grab) with the
+/// joints, tips and aim of `now_hand` (located now) moved rigidly by the hand's grip motion from
+/// its sample time to `target`: the grip's linear and angular velocity at now (`grip`: pose,
+/// m/s, rad/s, flags as `locate_hand_grips`). A sample is as old as when it was first seen
+/// (`seen`: its palm, that time; the tracker runs below the display rate, a repeated sample is
+/// carried from its own time). Without a valid grip or velocity, or untracked now: `polled`.
+fn hand_moved_to(polled: &XrHand, now_hand: &XrHand, grip: (XrPose, [f32; 3], [f32; 3], u32), seen: &mut ([f32; 3], u64), now: u64, target: u64) -> XrHand {
+    let (gp, lin, ang, flags) = grip;
+    // (location: orientation and position valid; velocity: linear and angular valid)
+    let valid = flags & 0b11 == 0b11 && (flags >> 8) & 0b11 == 0b11;
+    if now_hand.flags & xr_hand::IN_VIEW == 0 || !valid {
+        return *polled;
+    }
+    let palm = now_hand.joints[xr_hand::CENTER].position;
+    if seen.0 != palm || seen.1 == 0 {
+        *seen = (palm, now);
+    }
+    let dt = (target.saturating_sub(seen.1) as f32 / 1e9).min(0.1);
+    // the grip's motion over dt: a rotation about its own position, then the translation
+    let theta = (ang[0] * ang[0] + ang[1] * ang[1] + ang[2] * ang[2]).sqrt() * dt;
+    let dq = if theta > 1e-6 {
+        let (s, c) = (theta * 0.5).sin_cos();
+        let k = s / (theta / dt);
+        [ang[0] * k, ang[1] * k, ang[2] * k, c]
+    } else { [0., 0., 0., 1.] };
+    let qmul = |a: [f32; 4], b: [f32; 4]| [
+        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]];
+    let rot = |q: [f32; 4], v: [f32; 3]| {
+        let t = [2. * (q[1] * v[2] - q[2] * v[1]), 2. * (q[2] * v[0] - q[0] * v[2]), 2. * (q[0] * v[1] - q[1] * v[0])];
+        [v[0] + q[3] * t[0] + (q[1] * t[2] - q[2] * t[1]), v[1] + q[3] * t[1] + (q[2] * t[0] - q[0] * t[2]), v[2] + q[3] * t[2] + (q[0] * t[1] - q[1] * t[0])]
+    };
+    let move_pose = |p: &XrPose| {
+        let r = [p.position[0] - gp.position[0], p.position[1] - gp.position[1], p.position[2] - gp.position[2]];
+        let r = rot(dq, r);
+        XrPose {
+            orientation: qmul(dq, p.orientation),
+            position: [gp.position[0] + lin[0] * dt + r[0], gp.position[1] + lin[1] * dt + r[1], gp.position[2] + lin[2] * dt + r[2]],
+        }
+    };
+    let mut out = *polled;
+    for (o, j) in out.joints.iter_mut().zip(now_hand.joints.iter()) { *o = move_pose(j); }
+    out.aim_pose = move_pose(&now_hand.aim_pose);
+    out.tips = now_hand.tips;
+    out.tips_active = (now_hand.tips_active & !xr_hand::GRAB_ACTIVE) | (polled.tips_active & xr_hand::GRAB_ACTIVE);
+    out.flags = polled.flags | (now_hand.flags & xr_hand::IN_VIEW);
+    out
 }
 
 fn pose(p: XrPosef) -> XrPose {
