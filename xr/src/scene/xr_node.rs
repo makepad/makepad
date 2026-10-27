@@ -137,6 +137,9 @@ pub struct XrRuntimeBodyState {
     pub held_by: Option<XrSharedHand>,
     /// the player whose hand holds it (0: the local one)
     pub held_by_player: Option<u32>,
+    /// while held: the body is the holding hand's grip pose ([`crate::scene::xr_grip_pose`])
+    /// times this
+    pub grab_offset: Option<Pose>,
     pub linked_support_local_poses: [Option<Pose>; XR_RUNTIME_LINKED_SUPPORT_BODY_COUNT],
     pub linked_support_spin_angles: [Option<f32>; XR_RUNTIME_LINKED_SUPPORT_BODY_COUNT],
     pub linked_support_steer_angles: [Option<f32>; XR_RUNTIME_LINKED_SUPPORT_BODY_COUNT],

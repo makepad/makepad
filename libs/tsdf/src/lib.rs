@@ -621,6 +621,10 @@ pub use bricks::{Brick, BrickGrid, BrickMirror, BrickProducer};
 pub mod depth_writer;
 #[cfg(not(target_arch = "wasm32"))]
 pub use depth_writer::{DepthFrame, DepthFrameView, DepthWriter};
+pub mod mesh;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mesh_worker;
+pub mod synthetic;
 
 #[cfg(test)]
 #[path = "synthetic_bench.rs"]

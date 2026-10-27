@@ -516,6 +516,12 @@ fn grab_offset_from_body_anchor(
     grab_offset
 }
 
+/// The grip pose a hold follows (a held body is this times its grab offset): the controller's
+/// while it is tracked, else the hand's pinch point with the palm's orientation.
+pub fn xr_grip_pose(hand: &XrHand, controller: &XrController) -> Option<Pose> {
+    controller_grab_pose(controller).or_else(|| hand_grab_pose(hand))
+}
+
 fn hand_grab_pose(hand: &XrHand) -> Option<Pose> {
     let palm_pose = hand.tracking_pose()?;
     let thumb_tip = hand.tip_pos_checked(XrHand::THUMB_TIP);
@@ -1860,8 +1866,19 @@ impl PhysicsScene {
             .map(|pose| (pose, controller.grip >= 0.55, controller_shared))
             // a hand grips with a grasp (the fist) or an index pinch; the grip point is the
             // pinch point either way (hand_grab_pose)
-            .or_else(|| hand_grab_pose(hand).map(|pose| (pose, hand.grab_intent() || hand.pinch_index(), hand_shared)));
+            // A grab begins with the grasp (the runtime's, its straight-index check: that is a
+            // point) or an index pinch; a hold lasts until the hand opens (all four fingers
+            // straight, from the joints) or the pinch and grasp both end. (Holding a cube the
+            // index often lies straight along it and the runtime's grasp value sags on a loose
+            // hold: either let go of the cube mid-wave.)
+            .or_else(|| hand_grab_pose(hand).map(|pose| {
+                let held = state.held_body.is_some() && hand.in_view() && !hand.is_open();
+                (pose, held || hand.grab_intent() || hand.pinch_index(), hand_shared)
+            }));
         let Some((pose, gripping, shared_hand)) = next_source else {
+            if state.held_body.is_some() {
+                eprintln!("[xr physics] hold ends: the hand is not tracked (flags {:#x}, controller buttons {:#x})", hand.flags, controller.buttons);
+            }
             state.previous_pose = state.pose;
             state.linvel = vec3f(0.0, 0.0, 0.0);
             state.tracked = false;
@@ -1869,6 +1886,12 @@ impl PhysicsScene {
             state.shared_hand = hand_shared;
             return state;
         };
+        if state.held_body.is_some() && !gripping {
+            // why the hold ends: the grasp (the headset's grab, with its own thresholds), the
+            // index check that a grasp with a straight index is no grab, the pinch
+            eprintln!("[xr physics] hold ends: open {} (mean bend {:?}) grasp {} pinch {} tracked {} controller grip {:.2}",
+                hand.is_open(), hand.average_open_finger_bend_degrees(), hand.grabbing(), hand.pinch_index(), hand.in_view(), controller.grip);
+        }
         let was_tracked = state.tracked;
         let previous_pose = if was_tracked && state.shared_hand == shared_hand {
             state.pose
@@ -2048,6 +2071,13 @@ impl PhysicsScene {
         let mut out = vec![self.active_player];
         out.extend(self.other_rigs.iter().map(|r| r.player));
         out
+    }
+
+    /// The hold's offset (the body is the grip pose times it) of whoever holds `body_handle`.
+    pub(crate) fn grab_offset_for_body(&self, body_handle: RigidBodyHandle) -> Option<Pose> {
+        let here = [&self.left_hand_grab, &self.right_hand_grab];
+        let others = self.other_rigs.iter().flat_map(|r| [&r.left_hand_grab, &r.right_hand_grab]);
+        here.into_iter().chain(others).find(|g| g.held_body == Some(body_handle)).map(|g| g.grab_offset)
     }
 
     fn body_held_by_any(&self, body: RigidBodyHandle) -> Option<(u32, XrSharedHand)> {

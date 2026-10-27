@@ -570,6 +570,12 @@ impl XrHand {
         Some((max_bend_angle_degrees, straightness, extension_ratio))
     }
 
+    /// The index finger's (max bend in degrees, straightness, extension ratio) that
+    /// [`Self::grab_intent`] judges a grasp by (`None`: its joints are not valid).
+    pub fn index_release_metrics(&self) -> Option<(f32, f32, f32)> {
+        self.index_grab_release_metrics()
+    }
+
     pub fn grab_intent(&self) -> bool {
         if !self.grabbing() {
             return false;

@@ -6,7 +6,7 @@ mod shell;
 #[cfg(target_os = "android")]
 mod surface;
 #[cfg(target_os = "android")]
-mod xr;
+pub(crate) mod xr;
 #[cfg(target_os = "android")]
 pub mod jni;
 #[cfg(target_os = "android")]

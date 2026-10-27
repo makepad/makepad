@@ -13,12 +13,16 @@
 //! convert and encode, the round trip to decoded, the decode, and the render pose's age at the
 //! display time of the frame that shows it.
 
+use makepad_widgets::makepad_draw::render_target::{RenderTarget, RenderTargetFormat};
 use makepad_widgets::makepad_draw::shader::draw_nv12::DrawNv12;
 use makepad_widgets::*;
 /// The XR server's port when the target names none.
 pub const DEFAULT_PORT: u16 = 8794;
 /// The room field goes up in messages of about this size (bytes).
 const WORLD_MESSAGE_BYTES: usize = 16 << 10;
+/// The decoded pictures the client keeps queued on average before it skips one (the reference
+/// client's default).
+const BUFFERED: f64 = 2.0;
 /// The furthest ahead poses are predicted (a slow link does not extrapolate the head for ever).
 const MAX_POSE_LEAD_NS: u64 = 100_000_000;
 
@@ -49,6 +53,23 @@ script_mod! {
     // with (`Cx::xr_present_eyes`): the headset's compositor reprojects it to the display's
     // pose. One draw per eye; the other eye's view gets a degenerate quad (the eye is told by
     // its view's frustum: a left eye sees further left than right).
+    // The band's depth of one eye (its right half: the inverse depth, one byte) copied into the
+    // band-depth target (`XrStreamClient::draw`): the stream's vertices read it there (a
+    // decoder's Y'CbCr picture is sampled in fragment stages only).
+    mod.draw.DrawXrBandDepth = mod.std.set_type_default() do #(DrawXrBandDepth::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        video: texture_video()
+        // this eye's column of the picture (origin, size) and the picture's buffer size
+        src: uniform(vec4(0.0, 0.0, 1.0, 1.0))
+        nv12_size: uniform(vec2(1.0, 1.0))
+        pixel: fn() {
+            let ch = floor(self.src.w * 2.0 / 3.0 + 0.5)
+            let vap = vec2(self.src.x, ch) + self.pos * vec2(self.src.z * 0.5, ch * 0.5)
+            let vd = self.video.sample_video((floor(vap + vec2(self.src.z * 0.5, 0.0)) + vec2(0.5, 0.5)) / self.nv12_size).y
+            return vec4(vd, vd, vd, 1.0)
+        }
+    }
+
     mod.draw.DrawXrStream = mod.std.set_type_default() do #(DrawXrStream::script_shader(vm)){
         ..mod.draw.DrawNv12
         // a decoder's picture where it is (`video_mode` 1): sampled it gives its raw codes
@@ -57,6 +78,10 @@ script_mod! {
         // the headset's newest environment depth image itself, a layer per eye (its depth
         // 0..1 in .r; `env_pos.w` its near plane)
         env_depth: texture_2d_array(float)
+        // the picture's band depth per eye (left half eye 0), copied out by DrawXrBandDepth:
+        // what the warp's vertices read
+        band_depth: texture_2d(float)
+        band_size: uniform(vec2(1.0, 1.0))
         // Per draw (each eye is a draw call of its own), uniforms, not instance data: as
         // instance fields they were the fragment's inputs, and past the varyings that fit, the
         // fragment read other values (the picture showed whatever the vertex stage drew, its
@@ -81,6 +106,9 @@ script_mod! {
         env_tan: uniform(vec4(-1.0, 1.0, 1.0, -1.0))
         env_far: uniform(0.0)
         env_map: uniform(0.0)
+        // 1: the picture is reprojected to the view's eye in this pass (see `vertex`); the
+        // frame then goes to the compositor with the view's own eyes
+        warp: uniform(0.0)
         env_size: uniform(vec2(1.0, 1.0))
         qrot: fn(q: vec4, v: vec3) -> vec3 {
             let t = cross(q.xyz, v) * 2.0
@@ -163,8 +191,24 @@ script_mod! {
             self.pos = g
             // (the 2D clip in the fragment reads `world`: a point inside every clip)
             self.world = vec4(0.0, 0.0, 0.0, 1.0)
+            var at = proj * vec4(ex, ey, -1.0, 1.0)
+            if self.warp > 0.5 && self.video_mode > 0.5 {
+                // `warp`: the picture reprojected here, to this view's own eye: each grid vertex
+                // is the picture's point there (its render eye's ray at the band's depth, far
+                // where nothing was drawn) seen by this view's camera: rotation AND translation
+                // since the render pose, per vertex
+                let bs = self.band_size
+                let half = vec2(bs.x * 0.5, bs.y)
+                let t = (min(floor(g * half), half - vec2(1.0, 1.0)) + vec2(0.5, 0.5) + vec2(self.eye * half.x, 0.0)) / bs
+                let vd = self.band_depth.sample_lod(t, 0.0).x
+                let z = mix(50.0, self.depth_near / max(vd, 0.0001), step(0.004, vd))
+                let rt = self.render_tan
+                let d = vec3(mix(rt.x, rt.y, g.x), mix(rt.z, rt.w, g.y), -1.0)
+                let pw = self.render_pos.xyz + self.qrot(self.render_rot, d * z)
+                at = proj * (self.draw_pass.camera_view * vec4(pw, 1.0))
+            }
             // not this draw's eye: nothing (every vertex at one point outside the view)
-            self.vertex_pos = mix(vec4(2.0, 2.0, 2.0, 1.0), proj * vec4(ex, ey, -1.0, 1.0), mine)
+            self.vertex_pos = mix(vec4(2.0, 2.0, 2.0, 1.0), at, mine)
         }
         // The eye's column (`src`: its origin and size in the tile) holds its colour
         // (premultiplied on black) over two thirds of its height; below, a band whose left half
@@ -224,6 +268,30 @@ script_mod! {
     }
 }
 
+/// The stream's grid: GRID x GRID cells over the unit square, each a quad of the quad's own
+/// vertex layout (its corners carry the picture's depth when it is reprojected). Set on the
+/// draw at draw time: declared as the shader's vertex buffer it moved the draw's instance
+/// fields (the picture's source rect read garbage: nothing showed).
+const GRID: usize = 64;
+fn xr_grid_geometry(cx: &mut Cx) -> Geometry {
+    let mut g = makepad_widgets::makepad_draw::geometry::geometry_gen::GeometryGen::default();
+    let s = 1.0 / GRID as f32;
+    for y in 0..GRID {
+        for x in 0..GRID {
+            g.add_quad_2d(x as f32 * s, y as f32 * s, (x + 1) as f32 * s, (y + 1) as f32 * s);
+        }
+    }
+    g.into_geometry(cx)
+}
+
+/// The band-depth copy of one eye's picture (see the shader).
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawXrBandDepth {
+    #[deref]
+    pub draw_super: DrawQuad,
+}
+
 /// One eye of [`XrStreamClient`]'s picture in an XR pass (see the shader).
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
@@ -263,6 +331,14 @@ struct Shared {
     decoded: u32,
     status: String,
     stop: bool,
+    /// The uplink's last 5 s (rate, interval spread).
+    uplink_line: String,
+    /// The same as numbers: poses/s, the intervals' spread (ms).
+    uplink: (f32, f32),
+    /// The poses' datagram path (`XrServerMsg::Uplink`): the socket, connected to the server,
+    /// and the key that seals them.
+    #[cfg(not(target_arch = "wasm32"))]
+    udp: Option<Arc<(std::net::UdpSocket, Vec<u8>)>>,
 }
 
 /// The stats of one window (5 s).
@@ -284,8 +360,17 @@ struct Window {
     /// The environment depth image's age at use: the display time of the frame drawn with it
     /// less that of the frame that acquired it.
     env_age_us: Vec<u32>,
-    /// The largest angle between a picture's render eyes and the eyes sent for its pose.
+    /// The largest difference between a picture's render eyes and the eyes sent for its pose
+    /// (quaternion components).
     echo_err_deg: f32,
+    /// Display frames without a new picture; pictures skipped to catch up (the queue above
+    /// BUFFERED); pictures dropped unshown (one eye decoded without the other's pair).
+    repeats: u32,
+    skipped: u32,
+    dropped: u32,
+    /// When (ms into the window) a frame repeated ('r'), a picture was skipped ('s'), the
+    /// display skipped a frame ('l'): to line up with what the wearer saw.
+    events: Vec<(u32, char)>,
 }
 
 fn median(v: &mut [u32]) -> f64 {
@@ -314,6 +399,13 @@ enum ShownTex {
     Gpu { texture: Texture, picture: makepad_widgets::makepad_platform::video_file::DecodedPicture, _previous: Vec<makepad_widgets::makepad_platform::video_file::DecodedPicture> },
 }
 
+/// A trace being recorded: until when, where it goes, its CSV rows.
+struct Trace {
+    until: Instant,
+    path: String,
+    rows: String,
+}
+
 /// A pose sent and not answered yet.
 struct Sent {
     seq: u64,
@@ -330,8 +422,8 @@ struct Sent {
 pub struct XrStreamClient {
     shared: Arc<Mutex<Shared>>,
     signal: SignalToUI,
-    seq: u64,
-    sent: VecDeque<Sent>,
+    /// The poses sent (by the uplink thread), not answered yet.
+    sent: Arc<Mutex<VecDeque<Sent>>>,
     #[cfg(not(target_arch = "wasm32"))]
     shown: [Option<Shown>; 2],
     /// A 2x2 NV12 stand-in for the byte slots while the picture is a video texture.
@@ -347,9 +439,20 @@ pub struct XrStreamClient {
     /// The picture made current by the last upload, until a display frame shows it: (seq,
     /// sample_ns, decoded_at, the display time its pose was predicted for).
     pending_show: Option<(u64, u64, Instant, u64)>,
+    /// The running average of decoded pictures waiting at a take (see BUFFERED).
+    queue_avg: f64,
+    /// Stats windows (seconds) so far.
+    windows: u64,
     /// The smoothed lead (ns) from a pose's display time to its picture's: how far ahead poses
     /// are predicted (`Cx::xr_set_pose_lead`).
     lead_ns: f64,
+    /// The last motion-to-photon samples the lead averages.
+    leads: VecDeque<f64>,
+    /// The previous XR frame's display time (a gap of more than 1.5 periods: a display frame
+    /// the app missed).
+    last_display_ns: u64,
+    /// A per-display-frame trace being recorded (`start_trace`).
+    trace: Option<Trace>,
     window: Window,
     window_at: Instant,
     counts_at: (u32, u32),
@@ -368,6 +471,21 @@ pub struct XrStreamClient {
     /// The frame goes to the compositor with the picture's depth (positional correction; a
     /// debug switch).
     pub depth_layer: bool,
+    /// No new pictures: the last one stays (a debug switch: the reprojection check).
+    pub freeze: bool,
+    /// The picture is reprojected to the display eyes by depth in the stream pass (default; a
+    /// debug switch).
+    pub warp: bool,
+    /// The band-depth target the warp's vertices read (made at the first warped draw).
+    band_rt: Option<RenderTarget>,
+    /// The warp's grid geometry (made at the first warped draw).
+    grid: Option<Geometry>,
+    /// The warp probe's read back in flight.
+    #[cfg(not(target_arch = "wasm32"))]
+    probe_ticket: Option<ReadbackTicket>,
+    /// The depth the layer carries instead of the picture's (m; 0: the picture's; a debug
+    /// switch: whether the compositor uses it).
+    pub focus_override_m: f32,
 }
 
 impl Drop for XrStreamClient {
@@ -381,6 +499,15 @@ impl XrStreamClient {
     pub fn connect(host: String, port: u16, eye: [u32; 2], refresh_hz: f64) -> XrStreamClient {
         let shared = Arc::new(Mutex::new(Shared { status: format!("connecting to {host}:{port}"), tiles: 1, ..Default::default() }));
         let signal = SignalToUI::new();
+        let sent = Arc::new(Mutex::new(VecDeque::new()));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // the poses go up from a thread of their own, one per display frame as the headset
+            // publishes it (not when the app finishes a frame: the server renders at the
+            // display's rate and spacing whatever the app's frames do)
+            let (shared, sent) = (shared.clone(), sent.clone());
+            let _ = std::thread::Builder::new().name("xr-uplink".into()).spawn(move || uplink(shared, sent));
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let (shared, signal) = (shared.clone(), signal.clone());
@@ -394,8 +521,7 @@ impl XrStreamClient {
         XrStreamClient {
             shared,
             signal,
-            seq: 0,
-            sent: VecDeque::new(),
+            sent,
             #[cfg(not(target_arch = "wasm32"))]
             shown: [None, None],
             blank: None,
@@ -405,7 +531,12 @@ impl XrStreamClient {
             world_cursor: 0,
             world_tick: 0,
             pending_show: None,
+            queue_avg: 0.0,
+            windows: 0,
             lead_ns: 0.0,
+            leads: VecDeque::new(),
+            last_display_ns: 0,
+            trace: None,
             window: Window::default(),
             window_at: Instant::now(),
             counts_at: (0, 0),
@@ -416,6 +547,13 @@ impl XrStreamClient {
             room_view: false,
             env_map: 0,
             depth_layer: true,
+            freeze: false,
+            warp: false,
+            band_rt: None,
+            grid: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            probe_ticket: None,
+            focus_override_m: 0.0,
         }
     }
 
@@ -440,18 +578,34 @@ impl XrStreamClient {
             Event::XrUpdate(_) => {
                 self.window.display_frames += 1;
                 #[cfg(not(target_arch = "wasm32"))]
+                if let Some((display_ns, _)) = cx.xr_frame_wire() {
+                    let last = std::mem::replace(&mut self.last_display_ns, display_ns);
+                    let period = 1.0e9 / 90.0;
+                    if last != 0 && display_ns > last && (display_ns - last) as f64 > period * 1.5 {
+                        self.window.events.push((self.window_at.elapsed().as_millis() as u32, 'l'));
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
                 {
                     // the picture made current last time is on the glass at this frame's display
-                    if let (Some((_, sample_ns, decoded_at, pose_display_ns)), Some((display_ns, _))) = (self.pending_show.take(), cx.xr_frame_wire()) {
+                    if let (Some((_, sample_ns, decoded_at, _)), Some((display_ns, _))) = (self.pending_show.take(), cx.xr_frame_wire()) {
                         self.window.shown += 1;
                         self.window.wait_us.push(decoded_at.elapsed().as_micros() as u32);
                         if display_ns > sample_ns {
                             self.window.m2p_us.push(((display_ns - sample_ns) / 1000) as u32);
                         }
                         // the poses sent upstream are predicted for when their picture will show:
-                        // the measured lead from a pose's display time to its picture's (smoothed)
-                        let lead = display_ns.saturating_sub(pose_display_ns) as f64;
-                        self.lead_ns = if self.lead_ns == 0.0 { lead } else { self.lead_ns * 0.9 + lead * 0.1 };
+                        // the measured motion to photon (the pose's sample to the display of its
+                        // picture, smoothed), as far ahead of the sample as the headset locates them
+                        let lead = display_ns.saturating_sub(sample_ns) as f64;
+                        // (the mean of the last 256, as the reference client averages its total
+                        // latency: a faster average moved every picture's pose with each
+                        // re-measured latency)
+                        self.leads.push_back(lead);
+                        if self.leads.len() > 256 {
+                            self.leads.pop_front();
+                        }
+                        self.lead_ns = self.leads.iter().sum::<f64>() / self.leads.len() as f64;
                         cx.xr_set_pose_lead((self.lead_ns as u64).min(MAX_POSE_LEAD_NS));
                     }
                     if let (Some((display_ns, _)), env_ns) = (cx.xr_frame_wire(), cx.xr_environment_depth_display_ns()) {
@@ -463,17 +617,14 @@ impl XrStreamClient {
                     if let Some(link) = &link {
                         self.send_world(cx, link);
                     }
-                    if let (Some(link), Some((display_ns, frame))) = (link, cx.xr_frame_wire()) {
-                        self.seq += 1;
-                        let sample_ns = makepad_widgets::makepad_platform::makepad_hal::clock_ns();
-                        let eyes = makepad_widgets::makepad_platform::makepad_hal::buffers::read_items::<makepad_widgets::makepad_platform::makepad_hal::XrFrame>(&frame, 1)
-                            .next().map_or([[0.0; 4]; 2], |f| [f.eyes[0].pose.orientation, f.eyes[1].pose.orientation]);
-                        link.send(&XrClientMsg::Pose { seq: self.seq, sample_ns, display_ns, frame });
-                        self.sent.push_back(Sent { seq: self.seq, at: Instant::now(), sample_ns, display_ns, eyes });
-                        while self.sent.len() > 512 {
-                            self.sent.pop_front();
-                        }
+
+                    // this display frame's picture: the oldest decoded one
+                    let fresh = self.take_picture(cx);
+                    if !fresh {
+                        self.window.repeats += 1;
+                        self.window.events.push((self.window_at.elapsed().as_millis() as u32, 'r'));
                     }
+                    self.trace_frame(cx, fresh);
                     if self.window_at.elapsed().as_secs_f64() >= 5.0 {
                         self.log_eyes(cx);
                     }
@@ -481,7 +632,12 @@ impl XrStreamClient {
                 }
                 false
             }
-            Event::Signal => self.take_picture(cx),
+            // (a decoded picture: the next XR frame takes it)
+            Event::Signal => {
+                #[cfg(not(target_arch = "wasm32"))]
+                self.warp_probe_result(cx);
+                self.signal.check_and_clear()
+            }
             _ => false,
         }
     }
@@ -522,7 +678,9 @@ impl XrStreamClient {
 
     /// Uploads the newest complete picture (every tile of one pose), if a new one came.
     fn take_picture(&mut self, cx: &mut Cx) -> bool {
-        if !self.signal.check_and_clear() {
+        // (debug `freeze`: the last picture keeps showing with its own eyes: the headset's
+        // reprojection alone keeps it in place)
+        if self.freeze && self.shown[0].is_some() {
             return false;
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -530,34 +688,50 @@ impl XrStreamClient {
             let tiles = {
                 let mut s = self.shared.lock().unwrap();
                 let tiles = s.tiles.clamp(1, 2) as usize;
-                // the newest pose both eyes are decoded for (one eye's next picture may be in
-                // before the other's current one)
-                let newest = s.latest[0].iter().rev().map(|d| d.head.seq).find(|seq| tiles == 1 || s.latest[1].iter().any(|d| d.head.seq == *seq));
-                let Some(seq) = newest else { return false };
+                // As the reference client does: one picture per display frame, the OLDEST both
+                // eyes are decoded for, so pictures that arrive unevenly (two in one display
+                // frame, none in the next: the server's clock is not the display's) still show
+                // one per frame; when the queue stays above BUFFERED pictures on average, one is
+                // skipped to catch up.
+                let complete: Vec<u64> = s.latest[0].iter().map(|d| d.head.seq).filter(|seq| tiles == 1 || s.latest[1].iter().any(|d| d.head.seq == *seq)).collect();
+                let Some(&oldest) = complete.first() else { return false };
+                self.queue_avg = self.queue_avg * 0.9 + complete.len() as f64 * 0.1;
+                let seq = if self.queue_avg > BUFFERED && complete.len() > 1 {
+                    self.window.skipped += 1;
+                    self.window.events.push((self.window_at.elapsed().as_millis() as u32, 's'));
+                    self.queue_avg -= 1.0;
+                    complete[1]
+                } else {
+                    oldest
+                };
                 let mut out: Vec<Decoded> = Vec::with_capacity(tiles);
                 for t in 0..tiles {
                     // older pictures go (their buffers back to the decoder); newer ones wait
                     while s.latest[t].front().is_some_and(|d| d.head.seq < seq) {
                         s.latest[t].pop_front();
+                        if t == 0 { self.window.dropped += 1; }
                     }
                     out.push(s.latest[t].pop_front().unwrap());
                 }
                 out
             };
             let seq = tiles[0].head.seq;
-            let sent = self.sent.iter().position(|p| p.seq == seq).map(|i| {
-                let (at, sample_ns, display_ns) = (self.sent[i].at, self.sent[i].sample_ns, self.sent[i].display_ns);
+            let mut sent_q = self.sent.lock().unwrap();
+            let sent = sent_q.iter().position(|p| p.seq == seq).map(|i| {
+                let (at, sample_ns, display_ns) = (sent_q[i].at, sent_q[i].sample_ns, sent_q[i].display_ns);
                 // the eyes the picture says it was rendered with against the ones sent for it
                 let echo = &tiles[0].head.eyes;
                 for e in 0..2 {
-                    let (a, b) = (self.sent[i].eyes[e], echo[e].orientation);
-                    let dot = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).abs().min(1.0);
-                    let deg = 2.0 * dot.acos().to_degrees();
-                    if deg > self.window.echo_err_deg { self.window.echo_err_deg = deg; }
+                    // (the largest component difference: exactly 0 when they are the same; an
+                    // angle from the quaternions' dot product shows f32 rounding as ~0.1 degrees)
+                    let (a, b) = (sent_q[i].eyes[e], echo[e].orientation);
+                    let d = (0..4).map(|k| (a[k] - b[k]).abs()).fold(0.0f32, f32::max);
+                    if d > self.window.echo_err_deg { self.window.echo_err_deg = d; }
                 }
-                self.sent.drain(..=i);
+                sent_q.drain(..=i);
                 (at, sample_ns, display_ns)
             });
+            drop(sent_q);
             let w = &mut self.window;
             let mut decoded_at = tiles[0].decoded_at;
             for d in &tiles {
@@ -641,11 +815,100 @@ impl XrStreamClient {
         }
     }
 
-    fn stats_window(&mut self) {
-        let secs = self.window_at.elapsed().as_secs_f64();
-        if secs < 5.0 {
+    /// The warp's desk check: reads the band-depth target back once and, at a few grid points of
+    /// eye 0, logs the band value, the depth it gives, and where the warped vertex lands in the
+    /// display eye (normalized device coordinates; in view: within ±1).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn warp_probe(&mut self, cx: &mut Cx) {
+        let Some(rt) = self.band_rt.as_ref() else {
+            log!("xr stream: warp probe: no band-depth target yet (warp off or no picture)");
+            return;
+        };
+        match rt.texture.read_back(cx, ReadbackRequest { next_render: false }) {
+            Ok(ticket) => self.probe_ticket = Some(ticket),
+            Err(e) => log!("xr stream: warp probe: read back refused: {e:?}"),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn warp_probe_result(&mut self, cx: &mut Cx) {
+        let Some(ticket) = self.probe_ticket else { return };
+        let Some(r) = cx.try_take_texture_readbacks_for(&[ticket]).into_iter().next() else { return };
+        self.probe_ticket = None;
+        let Ok(data) = r.data else {
+            log!("xr stream: warp probe: read back failed");
+            return;
+        };
+        let (w, h) = (r.width, r.height);
+        let px = |x: usize, y: usize| data.get((y * w + x) * 4 + 2).copied().unwrap_or(0) as f32 / 255.0;
+        let (mut lo, mut hi, mut nonzero) = (1.0f32, 0.0f32, 0usize);
+        for y in 0..h {
+            for x in 0..w / 2 {
+                let v = px(x, y);
+                lo = lo.min(v);
+                hi = hi.max(v);
+                nonzero += (v >= 0.004) as usize;
+            }
+        }
+        log!("xr stream: warp probe: band {w}x{h}, eye 0 values {lo:.3}..{hi:.3}, {nonzero} of {} with depth", (w / 2) * h);
+        let (Some(shown), Some(m)) = (self.shown[0].as_ref(), cx.xr_eye_matrices()) else { return };
+        let r = &shown.head.eyes[0];
+        let [l, rr, u, d] = r.fov.map(f32::tan);
+        let q = Quat { x: r.orientation[0], y: r.orientation[1], z: r.orientation[2], w: r.orientation[3] };
+        let (view, proj) = m[0];
+        for (gx, gy) in [(0.5f32, 0.5f32), (0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9), (0.5, 0.7)] {
+            let x = ((gx * (w / 2) as f32) as usize).min(w / 2 - 1);
+            let y = ((gy * h as f32) as usize).min(h - 1);
+            let vd = px(x, y);
+            let z = if vd >= 0.004 { makepad_desk_link::xr::DEPTH_NEAR_M / vd.max(0.0001) } else { 50.0 };
+            let dir = Vec3f { x: l + (rr - l) * gx, y: u + (d - u) * gy, z: -1.0 };
+            let p = Vec3f { x: r.position[0], y: r.position[1], z: r.position[2] } + q.rotate_vec3(&(dir * z));
+            let c = proj.transform_vec4(view.transform_vec4(Vec4f { x: p.x, y: p.y, z: p.z, w: 1.0 }));
+            log!("xr stream: warp probe: grid ({gx:.1},{gy:.1}) band {vd:.3} depth {z:.2} m -> display ndc ({:.2}, {:.2}, z {:.3}, w {:.3})", c.x / c.w, c.y / c.w, c.z / c.w, c.w);
+        }
+    }
+
+    /// Starts a per-display-frame trace of `secs` seconds, written to `path` as CSV when done.
+    pub fn start_trace(&mut self, secs: f64, path: String) {
+        self.trace = Some(Trace { until: Instant::now() + Duration::from_secs_f64(secs), path, rows: String::from(
+            "display_ns,head_qx,head_qy,head_qz,head_qw,head_x,head_y,head_z,new,seq,pic_display_ns,render_qx,render_qy,render_qz,render_qw,render_x,render_y,render_z,sample_ns,lead_ns,decoded_age_us,queue\n") });
+    }
+
+    /// One trace row: this display frame, its head (located at its display time), the picture
+    /// it shows (new or repeated), that picture's render eye 0 and target time, the sample time
+    /// of its pose, the lead, how long it waited decoded, the decoded pictures queued.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn trace_frame(&mut self, cx: &Cx, fresh: bool) {
+        let Some(t) = self.trace.as_mut() else { return };
+        if Instant::now() >= t.until {
+            let t = self.trace.take().unwrap();
+            match std::fs::write(&t.path, t.rows.as_bytes()) {
+                Ok(()) => log!("xr stream: trace written to {}", t.path),
+                Err(e) => log!("xr stream: trace not written to {}: {e}", t.path),
+            }
             return;
         }
+        let Some((display_ns, wire)) = cx.xr_frame_wire() else { return };
+        let Some(frame) = makepad_widgets::makepad_platform::makepad_hal::buffers::read_items::<makepad_widgets::makepad_platform::makepad_hal::XrFrame>(&wire, 1).next() else { return };
+        let Some(shown) = self.shown[0].as_ref() else { return };
+        let (h, r) = (&frame.head, &shown.head.eyes[0]);
+        let sample_ns = self.pending_show.map_or(0, |p| p.1);
+        let age = self.pending_show.map_or(0, |p| p.2.elapsed().as_micros() as u64);
+        let queue = self.shared.lock().unwrap().latest[0].len();
+        use std::fmt::Write;
+        let _ = writeln!(t.rows, "{display_ns},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{sample_ns},{:.0},{age},{queue}",
+            h.orientation[0], h.orientation[1], h.orientation[2], h.orientation[3], h.position[0], h.position[1], h.position[2],
+            fresh as u8, shown.head.seq, shown.head.display_ns,
+            r.orientation[0], r.orientation[1], r.orientation[2], r.orientation[3], r.position[0], r.position[1], r.position[2], self.lead_ns);
+    }
+
+    /// Every second: the window's numbers to the server (its stats panel); logged every 5th.
+    fn stats_window(&mut self) {
+        let secs = self.window_at.elapsed().as_secs_f64();
+        if secs < 1.0 {
+            return;
+        }
+        self.windows += 1;
         let (received, decoded) = {
             let s = self.shared.lock().unwrap();
             (s.received, s.decoded)
@@ -661,7 +924,7 @@ impl XrStreamClient {
             v.get(v.len() * 9 / 10).map_or(0.0, |x| *x as f64 / 1000.0)
         };
         let line = format!(
-            "display {:.0}/s · recv {:.0}/s dec {:.0}/s shown {:.0}/s · m2p {:.0} ms = render {:.1} gpu {:.1} enc {:.1} send {:.1} net {:.1} dec {:.1} wait {:.1} (trip {:.0}) · {} unmatched · env depth age {:.0}/{:.0} ms · pose echo err max {:.4} deg",
+            "display {:.0}/s · recv {:.0}/s dec {:.0}/s shown {:.0}/s · m2p {:.0} ms = render {:.1} gpu {:.1} enc {:.1} send {:.1} net {:.1} dec {:.1} wait {:.1} (trip {:.0}) · {} unmatched · env depth age {:.0}/{:.0} ms · pose echo max diff {:e} · repeats {} skipped {} dropped {}",
             rate(w.display_frames),
             rate(received.wrapping_sub(r0)),
             rate(decoded.wrapping_sub(d0)),
@@ -678,9 +941,46 @@ impl XrStreamClient {
             w.unmatched,
             median(&mut w.env_age_us),
             env_p90,
-            w.echo_err_deg
+            w.echo_err_deg,
+            w.repeats,
+            w.skipped,
+            w.dropped
         );
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use makepad_desk_link::xr::report;
+            let (link, uplink) = {
+                let s = self.shared.lock().unwrap();
+                (s.link.clone(), s.uplink)
+            };
+            let mut v = vec![0.0f32; report::COUNT];
+            v[report::DISPLAY] = rate(w.display_frames) as f32;
+            v[report::SHOWN] = rate(w.shown) as f32;
+            v[report::REPEATS] = rate(w.repeats) as f32;
+            v[report::RECEIVED] = (rate(received.wrapping_sub(r0)) / self.shared.lock().unwrap().tiles.max(1) as f64) as f32;
+            v[report::M2P_MS] = median(&mut w.m2p_us) as f32;
+            v[report::NET_MS] = median(&mut w.net_us) as f32;
+            v[report::DECODE_MS] = median(&mut w.decode_us) as f32;
+            v[report::WAIT_MS] = median(&mut w.wait_us) as f32;
+            v[report::ENV_AGE_MS] = median(&mut w.env_age_us) as f32;
+            v[report::UPLINK] = uplink.0;
+            v[report::UPLINK_SD_MS] = uplink.1;
+            v[report::LEAD_MS] = (self.lead_ns / 1e6) as f32;
+            v[report::SKIPPED] = rate(w.skipped) as f32;
+            if let Some(link) = link {
+                link.send(&XrClientMsg::Report { values: v });
+            }
+        }
+        if self.windows % 5 != 0 {
+            self.window = Window::default();
+            self.window_at = Instant::now();
+            return;
+        }
         log!("xr stream: {line}");
+        if !w.events.is_empty() {
+            let ev: Vec<String> = w.events.iter().map(|(t, k)| format!("{k}{t}")).collect();
+            log!("xr stream: events (ms into the window; r repeat, s skip, l display frame missed): {} · lead {:.1} ms", ev.join(" "), self.lead_ns / 1e6);
+        }
         self.line = line;
         self.window = Window::default();
         self.window_at = Instant::now();
@@ -689,19 +989,56 @@ impl XrStreamClient {
     /// Draws the newest picture into the current (XR) pass, each eye its column over the whole
     /// view, and shows the frame with the eyes the picture was rendered with (the compositor
     /// reprojects them to the display's pose).
+    /// Before the XR pass's own drawing (a pass of its own, painted before the XR pass that
+    /// reads it): the band's depth of both eyes into the band-depth target the warp reads.
+    pub fn draw_band(&mut self, cx: &mut Cx2d, band: &mut DrawXrBandDepth) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if !self.warp || self.shown[0].is_none() {
+                return;
+            }
+            let tile_size = self.shared.lock().unwrap().tile_size;
+            let tiled = self.shown[1].is_some();
+            let ew = if tiled { tile_size[0] } else { tile_size[0] / 2 };
+            let ch = (tile_size[1] as f32 * 2.0 / 3.0).round() as u32;
+            let band_size = ((ew / 2) * 2, (tile_size[1].saturating_sub(ch)).max(2) / 2);
+            let rt = self.band_rt.get_or_insert_with(|| RenderTarget::new(cx.cx, "xr_stream_band_depth"));
+            rt.ensure(cx.cx, band_size, RenderTargetFormat::Bgra8);
+            rt.begin(cx, vec4(0.0, 0.0, 0.0, 1.0));
+            for e in 0..2 {
+                let Some(shown) = self.shown[e].as_ref().or(self.shown[0].as_ref()) else { break };
+                let ShownTex::Gpu { texture, .. } = &shown.tex else { continue };
+                band.draw_vars.set_texture(0, texture);
+                let src = [if tiled { 0.0 } else { (e as u32 * ew) as f32 }, 0.0, ew as f32, tile_size[1] as f32];
+                band.draw_vars.set_uniform(cx.cx, live_id!(src), &src);
+                band.draw_vars.set_uniform(cx.cx, live_id!(nv12_size), &[shown.size[0] as f32, shown.size[1] as f32]);
+                band.new_draw_call(cx);
+                let half = band_size.0 as f64 / 2.0;
+                band.draw_abs(cx, Rect { pos: dvec2(e as f64 * half, 0.0), size: dvec2(half, band_size.1 as f64) });
+            }
+            rt.end(cx);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (cx, band);
+    }
+
     pub fn draw(&mut self, cx: &mut Cx2d, draw: &mut DrawXrStream) {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let Some(first) = self.shown[0].as_ref() else { return };
+            let tile_size = self.shared.lock().unwrap().tile_size;
+            let band_size = self.band_rt.as_ref().map_or((1, 1), |rt| rt.size());
             let eye = |e: &XrRenderEye| makepad_widgets::makepad_platform::makepad_hal::XrEye {
                 pose: makepad_widgets::makepad_platform::makepad_hal::XrPose { orientation: e.orientation, position: e.position },
                 fov: e.fov,
             };
-            if !self.own_eyes {
-                cx.cx.xr_present_eyes([eye(&first.head.eyes[0]), eye(&first.head.eyes[1])], if self.depth_layer { first.head.focus_m } else { 0.0 });
+            // (warped here, the frame shows with the view's own eyes: the compositor corrects
+            // only the last few ms; else it shows with the picture's and the compositor
+            // corrects the rotation since then)
+            if !self.own_eyes && !self.warp {
+                cx.cx.xr_present_eyes([eye(&first.head.eyes[0]), eye(&first.head.eyes[1])], if !self.depth_layer { 0.0 } else if self.focus_override_m > 0.0 { self.focus_override_m } else { first.head.focus_m });
             }
             // the tile's picture (the texture may be the decoder's larger buffer)
-            let tile_size = self.shared.lock().unwrap().tile_size;
             for e in 0..2 {
                 let Some(shown) = self.shown[e].as_ref().or(self.shown[0].as_ref()) else { return };
                 let tiled = self.shown[1].is_some();
@@ -737,6 +1074,8 @@ impl XrStreamClient {
                     (live_id!(depth_near), vec![makepad_desk_link::xr::DEPTH_NEAR_M]),
                     (live_id!(opaque), vec![self.opaque as f32]),
                     (live_id!(env_map), vec![self.env_map as f32]),
+                    (live_id!(warp), vec![self.warp as u8 as f32]),
+                    (live_id!(band_size), vec![band_size.0 as f32, band_size.1 as f32]),
                 ];
                 match cx.cx.xr_environment_depth().filter(|_| self.occlusion) {
                     Some((depth, header)) => {
@@ -761,6 +1100,14 @@ impl XrStreamClient {
                         uniforms.push((live_id!(occlude), vec![0.0]));
                     }
                 }
+                // the band depth the warp reads (a stand-in while there is none)
+                match self.band_rt.as_ref().filter(|_| self.warp) {
+                    Some(rt) => draw.draw_vars.set_texture(4, &rt.texture),
+                    None => {
+                        let blank = self.blank.get_or_insert_with(|| Texture::new_nv12(cx.cx, 2, 2, vec![16, 16, 16, 16, 128, 128]));
+                        draw.draw_vars.set_texture(4, blank);
+                    }
+                }
                 for (name, value) in &uniforms {
                     draw.draw_vars.set_uniform(cx.cx, *name, value);
                 }
@@ -770,6 +1117,10 @@ impl XrStreamClient {
                 // picture showed only at odd head angles). Real things in front are this shader's
                 // own per-pixel test (`occlusion`)
                 draw.depth_clip = 0.0;
+                if self.warp {
+                    let grid = self.grid.get_or_insert_with(|| xr_grid_geometry(cx.cx));
+                    draw.draw_vars.geometry_id = Some(grid.geometry_id());
+                }
                 draw.new_draw_call(cx);
                 draw.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2(1.0, 1.0) });
             }
@@ -792,6 +1143,68 @@ fn frustum_corners(eye: &XrRenderEye, depth: f32) -> [Vec4f; 4] {
         vec4(w.x, w.y, w.z, 1.0)
     };
     [at(l, u), at(r, u), at(l, d), at(r, d)]
+}
+
+/// The uplink thread: each display frame's pose (`hal_xr_uplink_next`) up the link as it is
+/// published; logs the send intervals' spread every 5 s.
+#[cfg(not(target_arch = "wasm32"))]
+fn uplink(shared: Arc<Mutex<Shared>>, sent: Arc<Mutex<VecDeque<Sent>>>) {
+    use makepad_widgets::makepad_platform::makepad_hal::{self as hal, buffers::{read_items, Wire}, XrFrame};
+    let mut buf = vec![0u8; <XrFrame as Wire>::SIZE];
+    let mut seq = 0u64;
+    let mut last: Option<Instant> = None;
+    let (mut intervals, mut window) = (Vec::<u32>::new(), Instant::now());
+    loop {
+        let display_ns = hal::hal_xr_uplink_next(100, &mut buf);
+        let (link, stop) = {
+            let s = shared.lock().unwrap();
+            (s.link.clone(), s.stop)
+        };
+        if stop {
+            return;
+        }
+        if display_ns == 0 {
+            continue;
+        }
+        let Some(link) = link else { continue };
+        let now = Instant::now();
+        if let Some(l) = last {
+            intervals.push(now.duration_since(l).as_micros() as u32);
+        }
+        last = Some(now);
+        seq += 1;
+        let sample_ns = hal::clock_ns();
+        let eyes = read_items::<XrFrame>(&buf, 1).next().map_or([[0.0; 4]; 2], |f| [f.eyes[0].pose.orientation, f.eyes[1].pose.orientation]);
+        {
+            let mut q = sent.lock().unwrap();
+            q.push_back(Sent { seq, at: now, sample_ns, display_ns, eyes });
+            while q.len() > 512 {
+                q.pop_front();
+            }
+        }
+        let udp = shared.lock().unwrap().udp.clone();
+        match udp {
+            Some(u) => {
+                let _ = u.0.send(&makepad_desk_link::xr::pose_datagram::seal(&u.1, seq, sample_ns, display_ns, &buf));
+            }
+            None => link.send(&XrClientMsg::Pose { seq, sample_ns, display_ns, frame: buf.clone() }),
+        }
+        if window.elapsed() >= Duration::from_secs(5) {
+            let n = intervals.len().max(1) as f64;
+            let mean = intervals.iter().map(|v| *v as f64).sum::<f64>() / n;
+            let dev = (intervals.iter().map(|v| (*v as f64 - mean).powi(2)).sum::<f64>() / n).sqrt();
+            let max = intervals.iter().copied().max().unwrap_or(0);
+            let line = format!("{:.0}/s, interval {:.2} ms ±{:.2} (max {:.1})", intervals.len() as f64 / window.elapsed().as_secs_f64(), mean / 1000.0, dev / 1000.0, max as f64 / 1000.0);
+            log!("xr stream: uplink poses {line}");
+            {
+                let mut s = shared.lock().unwrap();
+                s.uplink_line = line;
+                s.uplink = ((intervals.len() as f64 / window.elapsed().as_secs_f64()) as f32, (dev / 1000.0) as f32);
+            }
+            intervals.clear();
+            window = Instant::now();
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -857,11 +1270,25 @@ fn worker(host: String, port: u16, info: HeadsetInfo, shared: Arc<Mutex<Shared>>
                     let _ = tx.send((head, data, Instant::now()));
                 }
                 XrServerMsg::Note { text } => log!("xr stream: server: {text}"),
+                XrServerMsg::Uplink { port, key } => {
+                    let socket = std::net::UdpSocket::bind("0.0.0.0:0").and_then(|s| s.connect((host.as_str(), port)).map(|_| s));
+                    match socket {
+                        Ok(socket) => {
+                            log!("xr stream: poses go as datagrams to port {port}");
+                            shared.lock().unwrap().udp = Some(Arc::new((socket, key)));
+                        }
+                        Err(e) => log!("xr stream: no pose datagrams ({e}): poses go on the link"),
+                    }
+                }
                 XrServerMsg::Refused { reason } | XrServerMsg::Bye { reason } => break reason,
                 XrServerMsg::Pong { .. } => {}
             }
         };
-        shared.lock().unwrap().link = None;
+        {
+            let mut s = shared.lock().unwrap();
+            s.link = None;
+            s.udp = None;
+        }
         set_status(format!("link ended: {why}; reconnecting"));
         std::thread::sleep(Duration::from_secs(1));
     }
@@ -902,7 +1329,7 @@ fn decode_tile(tile: usize, codec: StreamVideoCodec, size: [u32; 2], rx: std::sy
                     s.decoded += 1;
                     let held = &mut s.latest[tile & 1];
                     // a few at most: the oldest goes (its buffer back to the decoder)
-                    while held.len() >= 3 {
+                    while held.len() >= 4 {
                         held.pop_front();
                     }
                     held.push_back(Decoded { nv12: f.nv12, gpu: f.gpu, size: [f.width, f.height], head, decode_us, arrived_at, decoded_at: Instant::now() });

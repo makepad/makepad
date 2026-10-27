@@ -1460,6 +1460,23 @@ fn media_keep(id: i64, result: Result<Vec<u8>, String>) -> i64 {
     len
 }
 
+/// The headset's pose for a renderer elsewhere, once per display frame (Android XR: published by
+/// the XR thread right after xrBeginFrame, located `XrPoseLead` past the display time, whether
+/// or not the app draws that frame): waits at most `timeout_ms` for one newer than the last
+/// taken, writes its `XrFrame` (`buffers::Wire`) into `out` and returns its display time (ns);
+/// 0 when none came (or elsewhere). A thread of the app's own sends it on, so the uplink keeps
+/// the display's rate and spacing whatever the app's frames do.
+#[relax_api]
+pub fn hal_xr_uplink_next(timeout_ms: u32, out: &mut [u8]) -> u64 {
+    #[cfg(target_os = "android")]
+    return backend::android::xr::uplink_next(timeout_ms, out);
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (timeout_ms, out);
+        0
+    }
+}
+
 /// The device's network in its low-latency mode while `on` (Android: a low-latency Wi-Fi lock,
 /// no power save or background scans); elsewhere nothing. Whether it was applied.
 #[relax_api]

@@ -10,9 +10,12 @@
 //!
 //! The producer runs on the depth writer's thread after each published snapshot: chunks whose
 //! storage changed are marked dirty, and a dirty chunk is re-sent only when its quantized
-//! content moved by at least [`BRICK_RESEND_MIN_DELTA`] somewhere (or its voxel set changed),
-//! and not more often than every [`BRICK_DEBOUNCE`] (the integrator touches the same chunks
-//! every frame; flicker must not be re-sent). The newest version of every brick sits in the
+//! content moved as a whole (the RMS change of its voxels' distances at least
+//! [`BRICK_RESEND_MIN_DELTA`] with [`BRICK_RESEND_MIN_VOXELS`] of them beyond it, or its voxel
+//! set changed by [`BRICK_RESEND_MIN_SET_CHANGE`]), and not more often than every
+//! [`BRICK_DEBOUNCE`] (the integrator touches the same chunks every frame; depth noise moves
+//! single voxels of nearly every surface brick, and resending on any one voxel sent the whole
+//! room again every debounce: 300-550 KB/s at rest). The newest version of every brick sits in the
 //! store's brick log; a sender asks for what changed since its cursor
 //! ([`XrTsdfStore::brick_changes_since`]), so a late joiner gets everything with cursor 0.
 //!
@@ -28,11 +31,13 @@ pub const BRICK_MIN_CONFIDENCE: u8 = 8;
 pub const BRICK_KEEP_CONFIDENCE: u8 = 3;
 /// A brick whose voxel set changed by fewer voxels than this (and whose distances did not
 /// move) is not sent again: growth goes out in steps, not one voxel at a time.
-pub const BRICK_RESEND_MIN_VOXELS: u32 = 3;
-/// Least change of a voxel's quantized distance (of 127) that makes a brick go out again.
-pub const BRICK_RESEND_MIN_DELTA: i16 = 6;
-/// A brick is sent at most this often.
-pub const BRICK_DEBOUNCE: Duration = Duration::from_millis(500);
+pub const BRICK_RESEND_MIN_SET_CHANGE: u32 = 8;
+/// Least RMS change of a brick's quantized distances (of 127) that makes it go out again...
+pub const BRICK_RESEND_MIN_DELTA: f32 = 6.0;
+/// ... with at least this many of its voxels moved by more than that.
+pub const BRICK_RESEND_MIN_VOXELS: u32 = 4;
+/// A brick sent before is sent again at most this often (a new one goes out at once).
+pub const BRICK_DEBOUNCE: Duration = Duration::from_secs(2);
 
 /// One brick as it travels: `payload` empty = the brick is gone.
 #[derive(Clone, Debug, PartialEq)]
@@ -93,9 +98,9 @@ impl BrickLog {
 
 /// The quantized content of one brick: the valid voxels and their distances (127 = +1).
 #[derive(Clone, PartialEq)]
-struct Quantized {
-    valid: u64,
-    distance: [i8; 64],
+pub(crate) struct Quantized {
+    pub(crate) valid: u64,
+    pub(crate) distance: [i8; 64],
 }
 
 /// `sent`: the brick as it last went out (its voxels are kept down to BRICK_KEEP_CONFIDENCE).
@@ -118,11 +123,22 @@ fn quantize(chunk: &SparseTsdReadChunk, volume: usize, sent: Option<&Quantized>)
 }
 
 fn moved(a: &Quantized, b: &Quantized) -> bool {
-    (a.valid ^ b.valid).count_ones() >= BRICK_RESEND_MIN_VOXELS || (0..64).any(|i| (a.valid >> i) & 1 != 0 && (a.distance[i] as i16 - b.distance[i] as i16).abs() >= BRICK_RESEND_MIN_DELTA)
+    if (a.valid ^ b.valid).count_ones() >= BRICK_RESEND_MIN_SET_CHANGE {
+        return true;
+    }
+    let shared = a.valid & b.valid;
+    let (mut sum, mut n, mut far) = (0.0f32, 0u32, 0u32);
+    for i in (0..64).filter(|i| (shared >> i) & 1 != 0) {
+        let d = (a.distance[i] as f32 - b.distance[i] as f32).abs();
+        sum += d * d;
+        n += 1;
+        far += (d > BRICK_RESEND_MIN_DELTA) as u32;
+    }
+    n > 0 && (sum / n as f32).sqrt() >= BRICK_RESEND_MIN_DELTA && far >= BRICK_RESEND_MIN_VOXELS
 }
 
 /// payload: valid bits (u64 LE), then one i8 per valid voxel in index order.
-fn encode(q: &Quantized) -> Vec<u8> {
+pub(crate) fn encode(q: &Quantized) -> Vec<u8> {
     let mut out = Vec::with_capacity(8 + q.valid.count_ones() as usize);
     out.extend_from_slice(&q.valid.to_le_bytes());
     for i in 0..64 {

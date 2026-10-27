@@ -192,9 +192,14 @@ impl Session {
         hal::hal_xr_remote_attach(eye[0], eye[1], refresh_mhz);
         let welcome = XrServerMsg::Welcome { version: XR_VERSION, server: self.server.clone(), size: core.size, codec: core.codec, tiles: core.tiles as u8, encoder: core.description.clone() };
         write_all(stream, &welcome.encode()).map_err(|e| format!("write: {e}"))?;
+        // the poses come as datagrams: a socket of the session's own, a key for it
+        let uplink = Uplink::open(self.peer.ip(), &core, self.log.clone())?;
+        write_all(stream, &XrServerMsg::Uplink { port: uplink.port, key: uplink.key.to_vec() }.encode()).map_err(|e| format!("write: {e}"))?;
         stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
         stream.set_write_timeout(Some(Duration::from_millis(5))).map_err(|e| e.to_string())?;
         let why = self.pump(stream, &mut inbox, &mut buf, &core);
+        REPORTS.lock().unwrap().clear();
+        uplink.stop();
         core.stop();
         let _ = write_all(stream, &XrServerMsg::Bye { reason: why.clone() }.encode());
         stream.shutdown();
@@ -281,6 +286,13 @@ impl Session {
                             world(voxel_size, chunk_edge, bricks);
                         }
                     }
+                    XrClientMsg::Report { values } => {
+                        let mut r = REPORTS.lock().unwrap();
+                        r.push_back(values);
+                        while r.len() > 60 {
+                            r.pop_front();
+                        }
+                    }
                     XrClientMsg::Hello { .. } => return "a second hello".into(),
                 }
             }
@@ -355,6 +367,8 @@ impl PumpStats {
         let built = core.flow.built.swap(0, Ordering::AcqRel);
         let skipped = core.flow.skipped.swap(0, Ordering::AcqRel);
         let kbps = core.rate.kbps.load(Ordering::Acquire);
+        *SERVER_LINE.lock().unwrap() = format!("server built {:.0}/s · sent {:.1} Mbit/s · render {:.1} gpu {:.1} encode {:.1} ms",
+            built as f64 / secs, self.bytes as f64 * 8.0 / secs / 1e6, median_ms(&mut self.stages_us[0].clone()), median_ms(&mut self.stages_us[1].clone()), median_ms(&mut self.stages_us[2].clone()));
         let [ref mut render, ref mut gpu, ref mut encode, ref mut send] = self.stages_us;
         log(&format!(
             "xr host: poses {:.0}/s ({} no XR window) · built {:.0}/s ({} without a slot) · sent {:.0}/s {:.1} Mbit/s (rate {:.0}) · render {:.1} gpu {:.1} encode {:.1} send {:.1} (write {:.1}) ms · headset decode {:.1} ms · in flight {}",
@@ -500,9 +514,10 @@ const QUEUED_MS: f64 = 10.0;
 /// The lowest the rate controller goes (kbit/s, all tiles).
 const MIN_KBPS: u32 = 15_000;
 /// Pictures built and not yet decoded by the headset before the app waits (`room`):
-/// `MAKEPAD_XR_REMOTE_IN_FLIGHT`, default 2.
+/// `MAKEPAD_XR_REMOTE_IN_FLIGHT`, default 3 (a picture's build to its decode takes ~2 display
+/// periods at 90 Hz: with 2 in flight the app waited for most frames and built 64 of 90/s).
 fn in_flight_limit() -> u64 {
-    std::env::var("MAKEPAD_XR_REMOTE_IN_FLIGHT").ok().and_then(|v| v.parse().ok()).unwrap_or(2u64).clamp(1, 8)
+    std::env::var("MAKEPAD_XR_REMOTE_IN_FLIGHT").ok().and_then(|v| v.parse().ok()).unwrap_or(3u64).clamp(1, 8)
 }
 
 /// One eye's encode: what its thread is given.
@@ -513,6 +528,89 @@ struct Work {
     head: VideoHead,
     built_at: Instant,
     kbps: u32,
+}
+
+/// The session's pose datagrams: a thread reads them (newest wins: an older or repeated one is
+/// dropped, a gap counted as lost) and hands each to the app as a pose over the link would. The
+/// headset sends one per display frame, for a display time on its own grid: the app renders each
+/// as it comes, so its pictures keep the display's spacing and phase (no clock of its own).
+struct Uplink {
+    port: u16,
+    key: [u8; 32],
+    stop: Arc<AtomicBool>,
+}
+
+impl Uplink {
+    fn open(peer: std::net::IpAddr, core: &Core, log: Log) -> Result<Uplink, String> {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("uplink socket: {e}"))?;
+        socket.set_read_timeout(Some(Duration::from_millis(100))).map_err(|e| e.to_string())?;
+        let port = socket.local_addr().map_err(|e| e.to_string())?.port();
+        let mut key = [0u8; 32];
+        makepad_network::tls::os_random(&mut key).map_err(|e| format!("uplink key: {e}"))?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let (poses, ending, stop2) = (core.poses.clone(), core.ending.clone(), stop.clone());
+        std::thread::Builder::new()
+            .name("xr-host-uplink".into())
+            .spawn(move || {
+                let mut buf = vec![0u8; 4096];
+                let (mut last_seq, mut got, mut lost, mut stale, mut bad) = (0u64, 0u64, 0u64, 0u64, 0u64);
+                let (mut last_at, mut gaps, mut window) = (None::<Instant>, Vec::<u32>::new(), Instant::now());
+                while !stop2.load(Ordering::Acquire) && !ending.load(Ordering::Acquire) {
+                    if window.elapsed() >= Duration::from_secs(5) {
+                        let n = gaps.len().max(1) as f64;
+                        let mean = gaps.iter().map(|v| *v as f64).sum::<f64>() / n;
+                        let dev = (gaps.iter().map(|v| (*v as f64 - mean).powi(2)).sum::<f64>() / n).sqrt();
+                        log(&format!("xr host: uplink {:.0} poses/s, interval {:.2} ms ±{:.2} (max {:.1}), {lost} lost, {stale} out of order, {bad} refused",
+                            got as f64 / window.elapsed().as_secs_f64(), mean / 1000.0, dev / 1000.0, gaps.iter().copied().max().unwrap_or(0) as f64 / 1000.0));
+                        (got, lost, stale, bad) = (0, 0, 0, 0);
+                        gaps.clear();
+                        window = Instant::now();
+                    }
+                    let (n, from) = match socket.recv_from(&mut buf) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+                    let Some((seq, _sample_ns, display_ns, frame)) = (from.ip() == peer).then(|| pose_datagram::open(&key, &buf[..n])).flatten() else {
+                        bad += 1;
+                        continue;
+                    };
+                    if seq <= last_seq {
+                        stale += 1;
+                        continue;
+                    }
+                    if last_seq != 0 {
+                        lost += seq - last_seq - 1;
+                    }
+                    last_seq = seq;
+                    got += 1;
+                    let now = Instant::now();
+                    if let Some(l) = last_at {
+                        gaps.push(now.duration_since(l).as_micros() as u32);
+                    }
+                    last_at = Some(now);
+                    take_pose(&poses, seq, display_ns, frame);
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(Uplink { port, key, stop })
+    }
+
+    fn stop(&self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+/// A pose from the headset: to the app's XR window, and kept to match its picture.
+fn take_pose(poses: &Mutex<VecDeque<(u64, Arrived)>>, seq: u64, display_ns: u64, frame: &[u8]) -> bool {
+    {
+        let mut poses = poses.lock().unwrap();
+        poses.push_back((display_ns, Arrived { at: Instant::now(), seq, eyes: render_eyes(frame) }));
+        // poses never drawn (the newest one wins in the HAL): the oldest go
+        while poses.len() > 1024 {
+            poses.pop_front();
+        }
+    }
+    hal::hal_xr_remote_pose(seq, display_ns, frame)
 }
 
 /// A pose that came: when, the eyes it gives, its sequence number.
@@ -532,6 +630,7 @@ struct Core {
     rate: Arc<Rate>,
     out: Receiver<Out>,
     keyframe: Arc<[AtomicBool; 2]>,
+    /// The poses asked for, to match their pictures.
     poses: Arc<Mutex<VecDeque<(u64, Arrived)>>>,
     ending: Arc<AtomicBool>,
 }
@@ -546,6 +645,21 @@ struct Live {
 }
 
 static LIVE: Mutex<Option<Live>> = Mutex::new(None);
+/// The headset's per-second reports (`XrClientMsg::Report`), the last minute, oldest first.
+static REPORTS: Mutex<VecDeque<Vec<f32>>> = Mutex::new(VecDeque::new());
+
+/// The server's own numbers of its last stats window, one line (for a stats panel).
+static SERVER_LINE: Mutex<String> = Mutex::new(String::new());
+
+pub fn server_line() -> String {
+    SERVER_LINE.lock().unwrap().clone()
+}
+
+/// The headset's last minute of per-second reports (`crate::xr::report` names the values),
+/// oldest first: for a stats panel.
+pub fn headset_reports() -> Vec<Vec<f32>> {
+    REPORTS.lock().unwrap().iter().cloned().collect()
+}
 type Wake = Arc<dyn Fn() + Send + Sync>;
 static WAKE: Mutex<Option<Wake>> = Mutex::new(None);
 
@@ -615,6 +729,7 @@ impl Core {
         let keyframe: Arc<[AtomicBool; 2]> = Arc::new([AtomicBool::new(true), AtomicBool::new(true)]);
         let ending = Arc::new(AtomicBool::new(false));
         let poses: Arc<Mutex<VecDeque<(u64, Arrived)>>> = Arc::default();
+
         let (out_tx, out) = channel::<Out>();
         let codec_byte = if codec == StreamVideoCodec::Hevc { CODEC_HEVC } else { CODEC_H264 };
         let mut workers = Vec::new();
@@ -745,15 +860,7 @@ impl Core {
 
     /// A pose from the headset: to the app's XR window, and kept to match its picture.
     fn pose(&self, seq: u64, display_ns: u64, frame: &[u8]) -> bool {
-        {
-            let mut poses = self.poses.lock().unwrap();
-            poses.push_back((display_ns, Arrived { at: Instant::now(), seq, eyes: render_eyes(frame) }));
-            // poses never drawn (the newest one wins in the HAL): the oldest go
-            while poses.len() > 256 {
-                poses.pop_front();
-            }
-        }
-        hal::hal_xr_remote_pose(seq, display_ns, frame)
+        take_pose(&self.poses, seq, display_ns, frame)
     }
 
     fn keyframe(&self) {

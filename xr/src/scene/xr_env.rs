@@ -4,9 +4,9 @@ use super::xr_node::{
     XR_HAND_INFLUENCE_POINTS_PER_HAND, XR_HAND_INFLUENCE_POINT_COUNT,
 };
 use crate::prelude::*;
-use crate::util::{
-    depth_debug_mesh::DebugDepthMeshChunk,
-    depth_debug_mesh_worker::{XrDepthDebugMeshSelection, XrDepthDebugMeshWorker},
+use makepad_widgets::makepad_platform::xr_tsdf::{
+    mesh::DebugDepthMeshChunk,
+    mesh_worker::{XrDepthDebugMeshSelection, XrDepthDebugMeshWorker},
 };
 use makepad_widgets::makepad_platform::{
     event::{CameraPreviewMode, VideoSource, VideoYuvMetadata},
@@ -41,6 +41,7 @@ mod xr_hands;
 mod xr_passthrough;
 #[path = "xr_physics.rs"]
 mod xr_physics;
+pub use xr_physics::xr_grip_pose;
 #[path = "xr_physics_worker.rs"]
 mod xr_physics_worker;
 

@@ -168,6 +168,9 @@ script_mod! {
         draw_chroma +: {}
         draw_band +: {}
         draw_mirror +: {}
+        draw_stats_bg +: {}
+        draw_stats_bar +: {}
+        draw_stats_text +: {}
     }
 }
 
@@ -257,6 +260,13 @@ pub struct XrServe {
     draw_band: DrawXrBand,
     #[live]
     draw_mirror: DrawXrMirror,
+    /// The stats panel over the mirror: its ground, its graphs' bars, its text.
+    #[live]
+    draw_stats_bg: DrawColor,
+    #[live]
+    draw_stats_bar: DrawColor,
+    #[live]
+    draw_stats_text: DrawText,
     #[rust]
     slots: Vec<Slot>,
     #[rust]
@@ -462,6 +472,42 @@ impl XrServe {
         let pos = rect.pos + (rect.size - dvec2(w, h)) * 0.5;
         self.draw_mirror.draw_vars.set_texture(0, color);
         self.draw_mirror.draw_abs(cx, Rect { pos, size: dvec2(w, h) });
+        #[cfg(not(target_arch = "wasm32"))]
+        self.draw_stats(cx, Rect { pos, size: dvec2(w, h) });
+    }
+
+    /// The stats panel (while a headset streams): the headset's last-second numbers and the
+    /// server's, and the last minute of pictures shown per second and motion to photon as bars.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn draw_stats(&mut self, cx: &mut Cx2d, mirror: Rect) {
+        use makepad_desk_link::xr::report as r;
+        let reports = xr_host::headset_reports();
+        let Some(last) = reports.last() else { return };
+        let v = |i: usize| last.get(i).copied().unwrap_or(0.0);
+        let panel = Rect { pos: mirror.pos + dvec2(12.0, 12.0), size: dvec2(470.0, 150.0) };
+        self.draw_stats_bg.color = vec4(0.0, 0.0, 0.0, 0.62);
+        self.draw_stats_bg.draw_abs(cx, panel);
+        let lines = [
+            format!("headset {:.0} Hz · shown {:.0}/s · repeats {:.1}/s · skipped {:.1}/s · received {:.0}/s", v(r::DISPLAY), v(r::SHOWN), v(r::REPEATS), v(r::SKIPPED), v(r::RECEIVED)),
+            format!("motion to photon {:.0} ms (net {:.1} decode {:.1} queue {:.1}) · lead {:.0} ms", v(r::M2P_MS), v(r::NET_MS), v(r::DECODE_MS), v(r::WAIT_MS), v(r::LEAD_MS)),
+            format!("uplink {:.0} poses/s ±{:.2} ms · env depth age {:.0} ms", v(r::UPLINK), v(r::UPLINK_SD_MS), v(r::ENV_AGE_MS)),
+            xr_host::server_line(),
+        ];
+        for (k, l) in lines.iter().enumerate() {
+            self.draw_stats_text.draw_abs(cx, panel.pos + dvec2(8.0, 6.0 + k as f64 * 16.0), l);
+        }
+        // the last minute: shown/s (green, 0..90) and motion to photon (orange, 0..150 ms)
+        let base = panel.pos + dvec2(8.0, 140.0);
+        let bw = 454.0 / 60.0;
+        for (k, rep) in reports.iter().enumerate() {
+            let x = base.x + k as f64 * bw;
+            let shown = (rep.get(r::SHOWN).copied().unwrap_or(0.0) as f64 / 90.0).clamp(0.0, 1.0) * 34.0;
+            let m2p = (rep.get(r::M2P_MS).copied().unwrap_or(0.0) as f64 / 150.0).clamp(0.0, 1.0) * 34.0;
+            self.draw_stats_bar.color = vec4(0.3, 0.85, 0.4, 0.9);
+            self.draw_stats_bar.draw_abs(cx, Rect { pos: dvec2(x, base.y - shown), size: dvec2(bw * 0.45, shown.max(1.0)) });
+            self.draw_stats_bar.color = vec4(1.0, 0.6, 0.2, 0.9);
+            self.draw_stats_bar.draw_abs(cx, Rect { pos: dvec2(x + bw * 0.5, base.y - m2p), size: dvec2(bw * 0.45, m2p.max(1.0)) });
+        }
     }
 
     /// The mirror's area (the app's hit area for its view).

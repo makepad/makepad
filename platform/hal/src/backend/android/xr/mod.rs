@@ -122,6 +122,37 @@ pub(super) fn refresh_rate(millihertz: u32) {
     REFRESH_MHZ.store(millihertz, Ordering::Release);
 }
 
+/// The newest uplink pose (`hal_xr_uplink_next`): its time and `XrFrame`, and the time last
+/// taken; the tracking thread's newest input; when the uplink was last asked for (ns); the
+/// display period (ns).
+static UPLINK: Mutex<(u64, Vec<u8>, u64)> = Mutex::new((0, Vec::new(), 0));
+static UPLINK_NEW: std::sync::Condvar = std::sync::Condvar::new();
+static TRACKED_INPUT: Mutex<Option<([XrController; 2], [XrHand; 2])>> = Mutex::new(None);
+static UPLINK_ASKED_NS: AtomicU64 = AtomicU64::new(0);
+static PERIOD_NS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(11_111_111);
+/// The predicted display time of the XR thread's newest display frame (it wakes the tracking
+/// thread).
+static DISPLAY_FRAME: Mutex<u64> = Mutex::new(0);
+static DISPLAY_FRAME_NEW: std::sync::Condvar = std::sync::Condvar::new();
+
+fn uplink_wanted() -> bool { clock_ns().saturating_sub(UPLINK_ASKED_NS.load(Ordering::Acquire)) < 1_000_000_000 }
+
+pub fn uplink_next(timeout_ms: u32, out: &mut [u8]) -> u64 {
+    UPLINK_ASKED_NS.store(clock_ns(), Ordering::Release);
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+    let mut u = lock(&UPLINK);
+    loop {
+        if u.0 != 0 && u.0 != u.2 && out.len() >= u.1.len() {
+            out[..u.1.len()].copy_from_slice(&u.1);
+            u.2 = u.0;
+            return u.0;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() { return 0; }
+        u = UPLINK_NEW.wait_timeout(u, left).unwrap_or_else(|e| e.into_inner()).0;
+    }
+}
+
 pub(super) fn active() -> bool { ACTIVE.load(Ordering::Acquire) }
 
 /// One eye's pixels while an XR session runs (the XR window is two of them side by side).
@@ -824,7 +855,9 @@ struct CxOpenXrSession {
     depth_swap_chain: XrEnvironmentDepthSwapchainMETA,
     /// the environment depth readback (None without a depth provider)
     depth: Option<depth::DepthSource>,
-    inputs: CxOpenXrInputs,
+    inputs: Arc<Mutex<SharedInputs>>,
+    /// the tracking thread (`track`) and its stop flag
+    tracker: Option<(std::thread::JoinHandle<()>, Arc<AtomicBool>)>,
     active: bool,
     focused: bool,
     active_display_refresh_rate_hz: Option<f32>,
@@ -861,6 +894,10 @@ struct CxOpenXrSession {
     stereo_asked_ns: u64,
     /// the refresh rate last requested (mHz; 0 none)
     requested_refresh_mhz: u32,
+    /// stereo frames taken this window with eyes of their own (`HalCmd::XrFrameEyes`), and
+    /// without (shown with their XrFrame's)
+    eyes_own: u64,
+    eyes_asked: u64,
     /// stereo frames taken per path this window: rendered into the chain, copied in, dropped
     paths: [u64; 3],
     /// summed time (ns) per part of the frame loop: xrWaitFrame, xrBeginFrame, input, panel,
@@ -984,7 +1021,7 @@ impl CxOpenXrSession {
         let blit = matches!(format, vk::Format::R8G8B8A8_SRGB | vk::Format::R8G8B8A8_UNORM);
         frames.rgba.store(blit, Ordering::Release);
         let (passthrough, passthrough_layer, depth_provider, depth_swap_chain) = Self::create_passthrough_and_depth(xr, handle, options)?;
-        let inputs = CxOpenXrInputs::new_inputs(xr, handle, rt.instance)?;
+        let inputs = Arc::new(Mutex::new(SharedInputs(CxOpenXrInputs::new_inputs(xr, handle, rt.instance)?)));
         xr_log!("session {handle:?}: local space {local_space_type:?}, swapchain {format:?}{}; passthrough running",
             if blit { " (swizzled through staging)" } else { "" });
         let panel = Chain::new(xr, &dev, handle, format, PANEL_PX, 1, XrSwapchainCreateFlags(0), blit)?;
@@ -1000,11 +1037,18 @@ impl CxOpenXrSession {
             None
         });
         let mut session = Self { depth, rt: rt.clone(), dev, frames, handle, head_space, local_space, panel_space, passthrough, passthrough_layer, depth_provider, depth_swap_chain,
-            inputs, active: false, focused: false, active_display_refresh_rate_hz: None, panel, cursor, stereo: Some(stereo),
+            inputs: inputs.clone(), tracker: None, active: false, focused: false, active_display_refresh_rate_hz: None, panel, cursor, stereo: Some(stereo),
             pointer: Pointer { hand: 1, ..Default::default() }, controllers: Default::default(), hands: Default::default(),
             panel_shown: None, panel_visible: true, panel_over_stereo: false, cursor_ready: false, stereo_asked: None, stereo_shown: None, stereo_focus: 0.0, depth_layer, stereo_asked_at: Instant::now(),
-            stats: [0; 4], frame_us: Vec::new(), stereo_asked_ns: 0, requested_refresh_mhz: 0, paths: [0; 3], phases: [0; 7], stats_at: Instant::now(), stereo_b: Some(stereo_b), stereo_shown_chain: None };
+            stats: [0; 4], frame_us: Vec::new(), stereo_asked_ns: 0, requested_refresh_mhz: 0, eyes_own: 0, eyes_asked: 0, paths: [0; 3], phases: [0; 7], stats_at: Instant::now(), stereo_b: Some(stereo_b), stereo_shown_chain: None };
         let _ = session.update_active_display_refresh_rate();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let (rt, inputs, stop) = (rt.clone(), inputs, stop.clone());
+            std::thread::Builder::new().name("hal-xr-track".into())
+                .spawn(move || track(rt, inputs, handle, local_space, head_space, stop)).map_err(|e| format!("XR tracking thread: {e}"))?
+        };
+        session.tracker = Some((thread, stop));
         Ok(session)
     }
 
@@ -1152,13 +1196,18 @@ impl CxOpenXrSession {
         }
         phase(1, &mut self.phases);
         let previous = self.controllers;
-        // (hands and controllers predicted as far ahead as the head: `HalCmd::XrPoseLead`)
-        let lead = POSE_LEAD_NS.load(Ordering::Acquire);
-        let input_time = if lead > 0 { XrTime::from_nanos(time.as_nanos() + lead) } else { time };
-        match self.inputs.poll(xr, self.handle, self.local_space, input_time) {
-            Some((controllers, hands)) => { self.controllers = controllers; self.hands = hands; }
-            // not focused: nothing is held
-            None => { self.controllers = Default::default(); self.hands = Default::default(); }
+        PERIOD_NS.store(period, Ordering::Release);
+        *lock(&DISPLAY_FRAME) = time.as_nanos() as u64;
+        DISPLAY_FRAME_NEW.notify_all();
+        if uplink_wanted() {
+            // the tracking thread polls the input (its newest)
+            (self.controllers, self.hands) = lock(&TRACKED_INPUT).unwrap_or_default();
+        } else {
+            match lock(&self.inputs).0.poll(xr, self.handle, self.local_space, time) {
+                Some((controllers, hands)) => { self.controllers = controllers; self.hands = hands; }
+                // not focused: nothing is held
+                None => { self.controllers = Default::default(); self.hands = Default::default(); }
+            }
         }
         let xr_window = lock(&shared.registry).xr_window;
         if xr_window.is_some() {
@@ -1271,7 +1320,8 @@ impl CxOpenXrSession {
             xr_log!("{frames} display frames in {secs:.1} s ({:.1} Hz): {shown} stereo frames shown, {late} late, {:.2} ms average wait; per frame ms: wait-frame {:.2} begin {:.2} input {:.2} panel {:.2} stereo {:.2} (copy {:.2}) end {:.2}; panel {}; hands {hands:?}; focused {}; depth {}",
                 frames as f64 / secs, wait as f64 / 1e6 / shown.max(1) as f64, ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], ms[6], if !self.panel_visible { "hidden" } else if self.panel_shown.is_some() { "up" } else { "no frame yet" }, self.focused,
                 depth.map(|(a, d)| format!("{a} read, {d} sent")).unwrap_or_else(|| "none".into()));
-            xr_log!("stereo frames: {} rendered into the chain, {} copied in, {} dropped", self.paths[0], self.paths[1], self.paths[2]);
+            xr_log!("stereo frames: {} rendered into the chain, {} copied in, {} dropped; shown with their own eyes {}, with the asked eyes {}", self.paths[0], self.paths[1], self.paths[2], self.eyes_own, self.eyes_asked);
+            (self.eyes_own, self.eyes_asked) = (0, 0);
             {
                 let mut cols: [Vec<u32>; 4] = Default::default();
                 for f in self.frame_us.drain(..) { for i in 0..4 { cols[i].push(f[i]); } }
@@ -1303,18 +1353,7 @@ impl CxOpenXrSession {
     /// The head and both eyes at `time` in the local space (the old `begin_frame`: the views
     /// located in the head space, then put in the local space through the head's pose).
     fn locate(&self, time: XrTime) -> Option<(XrPosef, [Eye; 2])> {
-        let xr = &self.rt.xr;
-        let local_from_head = XrSpaceLocation::locate(xr, self.local_space, time, self.head_space);
-        let valid = XrSpaceLocationFlags::ORIENTATION_VALID | XrSpaceLocationFlags::POSITION_VALID;
-        if !local_from_head.location_flags.contains(valid) { return None; }
-        let projection_info = XrViewLocateInfo { view_configuration_type: XrViewConfigurationType::PRIMARY_STEREO, display_time: time, space: self.head_space, ..Default::default() };
-        let mut view_state = XrViewState::default();
-        let mut projections = [XrView::default(); 2];
-        let mut num_views = 0;
-        unsafe { (xr.xrLocateViews)(self.handle, &projection_info, &mut view_state, 2, &mut num_views, &mut projections as *mut _) }.to_result("xrLocateViews").ok()?;
-        if num_views != 2 { return None; }
-        let eyes = [0, 1].map(|eye| Eye { pose: XrPosef::multiply(&local_from_head.pose, &projections[eye].pose), fov: projections[eye].fov });
-        Some((local_from_head.pose, eyes))
+        locate_views(&self.rt.xr, self.handle, self.local_space, self.head_space, time)
     }
 
     /// The stereo window: asks for its frame of this display frame (when none is in flight),
@@ -1393,6 +1432,7 @@ impl CxOpenXrSession {
         // the eyes it was drawn for: its own (a streamed picture's render eyes), else its XrFrame's
         let asked = self.stereo_asked.take();
         self.stereo_focus = eyes.map_or(0.0, |(_, f)| f);
+        if eyes.is_some() { self.eyes_own += 1 } else { self.eyes_asked += 1 }
         self.stereo_shown = eyes.map(|(e, _)| e).or(asked);
         Ok(Some(done))
     }
@@ -1402,44 +1442,31 @@ impl CxOpenXrSession {
     /// tracked.
     fn ask_stereo(&mut self, sid: u32, id: Id, time: XrTime, period: i64) -> bool {
         let shared = Shared::global();
-        // located the asked lead past the display time (a remote picture of it shows that late)
-        let lead = POSE_LEAD_NS.load(Ordering::Acquire);
-        // With the frames' depth on the layer the whole pose is predicted the lead ahead (the
-        // compositor corrects the rest at that depth). Without it only the orientation is: the
-        // runtime corrects a rotation exactly at display time, but not a position, so a position
-        // predicted far ahead showed its prediction noise as judder; the head's position then
-        // stays the display time's, the eyes move with it.
-        let positional = self.stereo_focus > 0.0 && self.depth_layer.is_some();
-        let located = match (lead > 0).then(|| self.locate(XrTime::from_nanos(time.as_nanos() + lead))).flatten() {
-            Some(ahead) if positional => Some(ahead),
-            Some((ahead, eyes)) => self.locate(time).map(|(now, _)| {
-                let shift = |p: &mut XrPosef| {
-                    p.position.x += now.position.x - ahead.position.x;
-                    p.position.y += now.position.y - ahead.position.y;
-                    p.position.z += now.position.z - ahead.position.z;
-                };
-                let mut head = ahead;
-                shift(&mut head);
-                let eyes = eyes.map(|mut e| { shift(&mut e.pose); e });
-                (head, eyes)
-            }),
-            None => self.locate(time),
-        };
-        let Some((head, eyes)) = located else {
+        let Some(frame) = self.frame_at(time) else {
             if self.stats[0] % 360 == 0 { xr_log!("the head is not tracked: no stereo frame asked"); }
             return false;
         };
         lock(&shared.state).pending.remove(&(sid, id));
-        let fov = |f: &XrFovf| [f.angle_left, f.angle_right, f.angle_up, f.angle_down];
-        let frame = XrFrame { head: pose(head), eyes: eyes.map(|e| XrEye { pose: pose(e.pose), fov: fov(&e.fov) }), controllers: self.controllers, hands: self.hands };
         let mut bytes = Vec::with_capacity(<XrFrame as crate::buffers::Wire>::SIZE);
         crate::buffers::Wire::write(&frame, &mut bytes);
         let t = time.as_nanos();
         shared.emit_to(sid, id, clock_ns(), |q, id| { q.xr_frame(id, t as u64, &bytes); q.frame_ready(id, (t + period) as u64); });
-        self.stereo_asked = Some(eyes);
+        let eye = |e: &XrEye| Eye { pose: XrPosef { orientation: makepad_math::Quat { x: e.pose.orientation[0], y: e.pose.orientation[1], z: e.pose.orientation[2], w: e.pose.orientation[3] },
+            position: makepad_math::Vec3f { x: e.pose.position[0], y: e.pose.position[1], z: e.pose.position[2] } },
+            fov: XrFovf { angle_left: e.fov[0], angle_right: e.fov[1], angle_up: e.fov[2], angle_down: e.fov[3] } };
+        self.stereo_asked = Some([eye(&frame.eyes[0]), eye(&frame.eyes[1])]);
         self.stereo_asked_at = Instant::now();
         self.stereo_asked_ns = clock_ns();
         true
+    }
+
+    /// The frame for display time `time`: the head and eyes located then, this display frame's
+    /// controllers and hands; `None` while the head is not tracked.
+    fn frame_at(&self, time: XrTime) -> Option<XrFrame> {
+        let located = self.locate(time);
+        let (head, eyes) = located?;
+        let fov = |f: &XrFovf| [f.angle_left, f.angle_right, f.angle_up, f.angle_down];
+        Some(XrFrame { head: pose(head), eyes: eyes.map(|e| XrEye { pose: pose(e.pose), fov: fov(&e.fov) }), controllers: self.controllers, hands: self.hands })
     }
 
     /// The pointer ray of hand `h`: the controller's aim while it is tracked, else the tracked
@@ -1536,8 +1563,86 @@ impl Drop for CxOpenXrSession {
         unsafe { (xr.xrDestroySpace)(self.local_space) }.log_error("xrDestroySpace");
         unsafe { (xr.xrDestroySpace)(self.panel_space) }.log_error("xrDestroySpace");
         // the action spaces and hand trackers belong to the session: they go first
-        self.inputs.destroy_input(xr);
+        if let Some((thread, stop)) = self.tracker.take() {
+            stop.store(true, Ordering::Release);
+            let _ = thread.join();
+        }
+        lock(&self.inputs).0.destroy_input(xr);
         unsafe { (xr.xrDestroySession)(self.handle) }.log_error("xrDestroySession");
+    }
+}
+
+/// The head and both eyes at `time` in `local_space` (the views located in the head space, then
+/// put in the local space through the head's pose).
+fn locate_views(xr: &LibOpenXr, session: XrSession, local_space: XrSpace, head_space: XrSpace, time: XrTime) -> Option<(XrPosef, [Eye; 2])> {
+    let local_from_head = XrSpaceLocation::locate(xr, local_space, time, head_space);
+    let valid = XrSpaceLocationFlags::ORIENTATION_VALID | XrSpaceLocationFlags::POSITION_VALID;
+    if !local_from_head.location_flags.contains(valid) { return None; }
+    let projection_info = XrViewLocateInfo { view_configuration_type: XrViewConfigurationType::PRIMARY_STEREO, display_time: time, space: head_space, ..Default::default() };
+    let mut view_state = XrViewState::default();
+    let mut projections = [XrView::default(); 2];
+    let mut num_views = 0;
+    unsafe { (xr.xrLocateViews)(session, &projection_info, &mut view_state, 2, &mut num_views, &mut projections as *mut _) }.to_result("xrLocateViews").ok()?;
+    if num_views != 2 { return None; }
+    let eyes = [0, 1].map(|eye| Eye { pose: XrPosef::multiply(&local_from_head.pose, &projections[eye].pose), fov: projections[eye].fov });
+    Some((local_from_head.pose, eyes))
+}
+
+/// The session's input (actions, hand trackers), polled by the XR thread for its frames, or by
+/// the tracking thread while a renderer elsewhere takes the uplink.
+struct SharedInputs(CxOpenXrInputs);
+unsafe impl Send for SharedInputs {}
+
+/// The tracking thread (while `hal_xr_uplink_next` is called, i.e. a renderer elsewhere takes
+/// the poses): once per display frame (woken by the XR thread's xrWaitFrame, `DISPLAY_FRAME`) it
+/// polls the input and locates the head, eyes, hands and controllers at a display time of the
+/// headset's own grid, the one nearest now + the pose lead (`HalCmd::XrPoseLead`: the measured
+/// latency to the display), and publishes them as the uplink pose, tagged with that time. The
+/// renderer draws each as it comes: its pictures are on the display's grid and spaced by its
+/// period (a renderer pacing itself on its own clock drifted against the display: a picture
+/// missing about once a second). Off the XR frame loop's own work; its frames take this
+/// thread's newest input meanwhile.
+fn track(rt: Arc<Runtime>, inputs: Arc<Mutex<SharedInputs>>, session: XrSession, local_space: XrSpace, head_space: XrSpace, stop: Arc<AtomicBool>) {
+    let xr = &rt.xr;
+    let (mut samples, mut palm_changes, mut window, mut last_palm) = (0u32, 0u32, Instant::now(), None);
+    let mut seen = 0u64;
+    while !stop.load(Ordering::Acquire) {
+        // the next display frame (its predicted display time)
+        let display = {
+            let mut d = lock(&DISPLAY_FRAME);
+            while *d == seen && !stop.load(Ordering::Acquire) {
+                d = DISPLAY_FRAME_NEW.wait_timeout(d, Duration::from_millis(100)).unwrap_or_else(|e| e.into_inner()).0;
+            }
+            *d
+        };
+        if display == seen { continue; }
+        seen = display;
+        if !uplink_wanted() { continue; }
+        let period = PERIOD_NS.load(Ordering::Acquire).max(1_000_000);
+        // the display time on the headset's grid nearest now + the lead
+        let want = clock_ns() as i64 + POSE_LEAD_NS.load(Ordering::Acquire);
+        let k = ((want - display as i64) as f64 / period as f64).round().max(0.0) as i64;
+        let target = XrTime::from_nanos(display as i64 + k * period);
+        let polled = lock(&inputs).0.poll(xr, session, local_space, target);
+        let (controllers, hands) = polled.unwrap_or_default();
+        // (how often the tracked hands change between samples: logged every 5 s)
+        let palm = hands[1].joints[0].position;
+        if last_palm != Some(palm) { palm_changes += 1; last_palm = Some(palm); }
+        samples += 1;
+        if window.elapsed() >= Duration::from_secs(5) {
+            xr_log!("tracking: {:.0} samples/s, right hand changed in {:.0}/s", samples as f64 / window.elapsed().as_secs_f64(), palm_changes as f64 / window.elapsed().as_secs_f64());
+            (samples, palm_changes, window) = (0, 0, Instant::now());
+        }
+        *lock(&TRACKED_INPUT) = Some((controllers, hands));
+        let Some((head, eyes)) = locate_views(xr, session, local_space, head_space, target) else { continue };
+        let fov = |f: &XrFovf| [f.angle_left, f.angle_right, f.angle_up, f.angle_down];
+        let frame = XrFrame { head: pose(head), eyes: eyes.map(|e| XrEye { pose: pose(e.pose), fov: fov(&e.fov) }), controllers, hands };
+        let mut u = lock(&UPLINK);
+        u.1.clear();
+        crate::buffers::Wire::write(&frame, &mut u.1);
+        u.0 = target.as_nanos() as u64;
+        drop(u);
+        UPLINK_NEW.notify_all();
     }
 }
 

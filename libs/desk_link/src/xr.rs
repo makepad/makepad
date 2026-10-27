@@ -23,7 +23,7 @@
 use crate::{In, Out};
 use std::io;
 
-pub const XR_VERSION: u16 = 2;
+pub const XR_VERSION: u16 = 4;
 /// The band's depth: luma `v` (1..255) is `z = DEPTH_NEAR_M * 255 / v` metres (inverse depth,
 /// finest near the eye); 0 = no depth (nothing drawn there).
 pub const DEPTH_NEAR_M: f32 = 0.25;
@@ -62,6 +62,27 @@ pub enum XrClientMsg {
     /// bricks (an empty payload: the brick is gone). Sent in the link's gaps, never ahead of a
     /// pose ([`link::XrLink::send_bulk`]).
     World { voxel_size: f32, chunk_edge: i32, bricks: Vec<WorldBrick> },
+    /// The headset's numbers of its last second ([`report`] names them), for the server's
+    /// stats panel.
+    Report { values: Vec<f32> },
+}
+
+/// `XrClientMsg::Report`: what each value is (index) and its label.
+pub mod report {
+    pub const DISPLAY: usize = 0;
+    pub const SHOWN: usize = 1;
+    pub const REPEATS: usize = 2;
+    pub const RECEIVED: usize = 3;
+    pub const M2P_MS: usize = 4;
+    pub const NET_MS: usize = 5;
+    pub const DECODE_MS: usize = 6;
+    pub const WAIT_MS: usize = 7;
+    pub const ENV_AGE_MS: usize = 8;
+    pub const UPLINK: usize = 9;
+    pub const UPLINK_SD_MS: usize = 10;
+    pub const LEAD_MS: usize = 11;
+    pub const SKIPPED: usize = 12;
+    pub const COUNT: usize = 13;
 }
 
 /// One brick of a room field as it travels (see `XrClientMsg::World`).
@@ -84,6 +105,9 @@ pub enum XrServerMsg {
     Pong { client_ns: u64, server_ns: u64 },
     Bye { reason: String },
     Note { text: String },
+    /// Send the poses as datagrams ([`pose_datagram`]) to `port` of the server's address, each
+    /// sealed with `key` (32 bytes): no head-of-line blocking, a lost one is replaced by the next.
+    Uplink { port: u16, key: Vec<u8> },
 }
 
 /// `Video::stages`: the desktop's durations of a picture (µs).
@@ -106,12 +130,14 @@ mod tag {
     pub const PING: u8 = 5;
     pub const KEYFRAME: u8 = 6;
     pub const WORLD: u8 = 7;
+    pub const REPORT: u8 = 8;
     pub const WELCOME: u8 = 100;
     pub const REFUSED: u8 = 101;
     pub const VIDEO: u8 = 102;
     pub const PONG: u8 = 103;
     pub const BYE: u8 = 104;
     pub const NOTE: u8 = 105;
+    pub const UPLINK: u8 = 106;
 }
 
 fn bad(ty: u8, side: &str) -> io::Error {
@@ -148,6 +174,14 @@ impl XrClientMsg {
                 o.done()
             }
             XrClientMsg::Keyframe => Out::new(KEYFRAME).done(),
+            XrClientMsg::Report { values } => {
+                let mut o = Out::new(REPORT);
+                o.u32(values.len() as u32);
+                for v in values {
+                    o.f32(*v);
+                }
+                o.done()
+            }
             XrClientMsg::World { voxel_size, chunk_edge, bricks } => {
                 let mut o = Out::new(WORLD);
                 o.f32(*voxel_size).i32(*chunk_edge).u32(bricks.len() as u32);
@@ -169,6 +203,14 @@ impl XrClientMsg {
             STATS => XrClientMsg::Stats { seq: r.u64()?, decode_us: r.u32()?, m2p_us: r.u32()? },
             PING => XrClientMsg::Ping { client_ns: r.u64()? },
             KEYFRAME => XrClientMsg::Keyframe,
+            REPORT => {
+                let n = r.u32()? as usize;
+                let mut values = Vec::with_capacity(n.min(64));
+                for _ in 0..n {
+                    values.push(r.f32()?);
+                }
+                XrClientMsg::Report { values }
+            }
             WORLD => {
                 let (voxel_size, chunk_edge, n) = (r.f32()?, r.i32()?, r.u32()? as usize);
                 let mut bricks = Vec::with_capacity(n.min(1 << 16));
@@ -214,6 +256,11 @@ impl XrServerMsg {
                 o.str(text);
                 o.done()
             }
+            XrServerMsg::Uplink { port, key } => {
+                let mut o = Out::new(UPLINK);
+                o.u16(*port).bytes(key);
+                o.done()
+            }
         }
     }
 
@@ -238,6 +285,7 @@ impl XrServerMsg {
             PONG => XrServerMsg::Pong { client_ns: r.u64()?, server_ns: r.u64()? },
             BYE => XrServerMsg::Bye { reason: r.str()? },
             NOTE => XrServerMsg::Note { text: r.str()? },
+            UPLINK => XrServerMsg::Uplink { port: r.u16()?, key: r.bytes()?.to_vec() },
             _ => return Err(bad(ty, "server")),
         })
     }
@@ -273,6 +321,41 @@ pub fn encode_xr_video(h: &VideoHead, data: &[u8]) -> Vec<u8> {
     }
     o.u32(h.size[0]).u32(h.size[1]).u8(h.codec).bytes(data);
     o.done()
+}
+
+/// The poses as datagrams (`XrServerMsg::Uplink`): `MXP1`, seq, sample_ns, display_ns (u64 LE),
+/// the `XrFrame`, then the first 16 bytes of HMAC-SHA256(key, all before).
+#[cfg(feature = "server")]
+pub mod pose_datagram {
+    const MAGIC: &[u8; 4] = b"MXP1";
+    const TAG: usize = 16;
+
+    pub fn seal(key: &[u8], seq: u64, sample_ns: u64, display_ns: u64, frame: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + 24 + frame.len() + TAG);
+        out.extend_from_slice(MAGIC);
+        for v in [seq, sample_ns, display_ns] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(frame);
+        let tag = makepad_network::tunnel::hmac_sha256(key, &out);
+        out.extend_from_slice(&tag[..TAG]);
+        out
+    }
+
+    /// (seq, sample_ns, display_ns, frame) of a datagram sealed with `key`; `None` otherwise.
+    pub fn open<'a>(key: &[u8], d: &'a [u8]) -> Option<(u64, u64, u64, &'a [u8])> {
+        if d.len() < 4 + 24 + TAG || &d[..4] != MAGIC {
+            return None;
+        }
+        let (body, tag) = d.split_at(d.len() - TAG);
+        let want = makepad_network::tunnel::hmac_sha256(key, body);
+        // (constant time: no early out on the first differing byte)
+        if want[..TAG].iter().zip(tag).fold(0u8, |a, (x, y)| a | (x ^ y)) != 0 {
+            return None;
+        }
+        let u = |at: usize| u64::from_le_bytes(body[at..at + 8].try_into().unwrap());
+        Some((u(4), u(12), u(20), &body[28..]))
+    }
 }
 
 #[cfg(feature = "server")]

@@ -7,10 +7,11 @@
 //! the window with them. Reprojection is the headset's (it shows each picture with the eyes it
 //! was rendered with).
 //!
-//! One frame is asked at a time: a pose that arrives while the app builds a frame waits (the
-//! newest one wins) and is asked for once the app says it built the frame
-//! (`hal_xr_remote_drawn`): the app says so when it has a picture slot for the next one, so
-//! the frames in flight to the encoder stay bounded by the app's slots.
+//! One frame is asked at a time: the poses come paced (one per display period, from the remote
+//! render server's pacer), a pose that arrives while the app builds a frame waits (the newest one
+//! wins) and is asked for once the app says it built the frame (`hal_xr_remote_drawn`: when it
+//! has a picture slot for the next one, so the frames in flight to the encoder stay bounded by
+//! the app's slots).
 
 use super::{lock, Key};
 use crate::buffers::EventQueue;
@@ -46,6 +47,9 @@ struct State {
     /// The XR window's events, by session, until the backend's next step delivers them.
     inbox: HashMap<u32, EventQueue>,
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Poses that came, and those that replaced one still waiting (a frame not drawn).
+    poses: u64,
+    replaced: u64,
 }
 
 struct Remote {
@@ -160,8 +164,15 @@ pub(crate) fn attach(eye_px: [u32; 2], refresh: f32) {
 pub(crate) fn pose(seq: u64, display_ns: u64, frame: &[u8]) -> bool {
     let mut s = lock(&remote().state);
     let Some(key) = s.window else { return false };
+    s.poses += 1;
+    if s.poses % 450 == 0 {
+        eprintln!("[hal-xr-remote] of the last 450 poses {} replaced one still waiting (the app's frame took longer than the poses' spacing)", s.replaced);
+        s.replaced = 0;
+    }
     if s.asked.is_some_and(|(_, at)| at.elapsed() < REASK) {
-        s.waiting = Some((seq, display_ns, frame.to_vec()));
+        if s.waiting.replace((seq, display_ns, frame.to_vec())).is_some() {
+            s.replaced += 1;
+        }
         return true;
     }
     ask(&mut s, key, seq, display_ns, frame);

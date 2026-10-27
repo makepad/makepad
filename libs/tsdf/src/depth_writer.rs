@@ -164,7 +164,7 @@ fn enqueue_pending_depth_candidate(pending_depth_candidate: &mut Option<PendingD
 
 /// The worker yields to the frame threads: it runs as long as it is given (a whole core while
 /// the room changes), and at the app's own priority it held the headset's frame loop late.
-fn background_priority() {
+pub(crate) fn background_priority() {
     #[cfg(any(target_os = "android", target_os = "linux"))]
     {
         extern "C" {

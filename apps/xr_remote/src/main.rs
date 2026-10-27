@@ -8,7 +8,7 @@
 
 pub use makepad_widgets;
 use makepad_widgets::*;
-use makepad_xr_stream::{DrawXrStream, XrStreamClient};
+use makepad_xr_stream::{DrawXrBandDepth, DrawXrStream, XrStreamClient};
 
 app_main!(App);
 
@@ -61,6 +61,8 @@ pub struct XrRemoteView {
     draw_text: DrawText,
     #[live]
     draw_stream: DrawXrStream,
+    #[live]
+    draw_band_depth: DrawXrBandDepth,
     #[new]
     pass: DrawPass,
     /// The XR pass's own draw list (draws inside a pass need one).
@@ -86,6 +88,12 @@ pub struct XrRemoteView {
     /// A GPU profile runs since then (`debug.xrremote.gpuprof`).
     #[rust]
     gpu_prof_at: Option<std::time::Instant>,
+    /// The warp probe last asked for (`debug.xrremote.warpprobe`).
+    #[rust]
+    probe_asked: u8,
+    /// The trace length last asked for (`debug.xrremote.trace`).
+    #[rust]
+    trace_asked: u8,
     /// The refresh rate asked for (Hz; 0 before the first ask).
     #[rust]
     refresh_hz: u8,
@@ -192,6 +200,17 @@ impl Widget for XrRemoteView {
                 if !prof {
                     self.gpu_prof_at = None;
                 }
+                // `trace` N: a per-display-frame trace of the next N seconds into the app's
+                // external files folder (adb pull; set it back to 0 for the next one)
+                let trace = switch("debug.xrremote.trace", 0);
+                if trace != self.trace_asked {
+                    self.trace_asked = trace;
+                    if let (true, Some(client)) = (trace > 0, self.client.as_mut()) {
+                        let path = format!("/sdcard/Android/data/dev.makepad.xrremote/files/trace-{}.csv", makepad_widgets::makepad_platform::makepad_hal::clock_ns() / 1_000_000_000);
+                        log!("xr remote: tracing {trace} s into {path}");
+                        client.start_trace(trace as f64, path);
+                    }
+                }
                 if let Some(client) = self.client.as_mut() {
                     client.occlusion = occlusion;
                     client.opaque = opaque;
@@ -203,6 +222,22 @@ impl Widget for XrRemoteView {
                     // `depthlayer` (default 1): the frame carries the picture's depth to the
                     // compositor (positional correction)
                     client.depth_layer = switch("debug.xrremote.depthlayer", 1) != 0;
+                    // `freeze` 1: the last picture stays, shown with its own eyes
+                    client.freeze = switch("debug.xrremote.freeze", 0) != 0;
+                    // `warp` (default 0 until it is verified on the headset): the picture
+                    // reprojected by its depth to the display eyes
+                    client.warp = switch("debug.xrremote.warp", 0) != 0;
+                    // `warpprobe` N: a new N runs the warp's desk check once
+                    let probe = switch("debug.xrremote.warpprobe", 0);
+                    if probe != self.probe_asked {
+                        self.probe_asked = probe;
+                        if probe > 0 {
+                            #[cfg(target_os = "android")]
+                            client.warp_probe(cx);
+                        }
+                    }
+                    // `focuscm` N: the depth layer at N cm instead of the picture's depth
+                    client.focus_override_m = switch("debug.xrremote.focuscm", 0) as f32 / 100.0;
                 }
             }
         }
@@ -224,6 +259,10 @@ impl Widget for XrRemoteView {
         if self.presenting {
             let dpi = cx.current_dpi_factor();
             cx.begin_pass(&self.pass, Some(dpi));
+            // (the warp's band-depth pass, a child of this one: before its draw list)
+            if let Some(client) = self.client.as_mut().filter(|c| c.opaque != 3) {
+                client.draw_band(cx, &mut self.draw_band_depth);
+            }
             self.draw_list.begin_always(cx);
             cx.begin_unclipped_root_turtle(dvec2(4096.0, 4096.0), Layout::flow_down());
             // (debug `opaque` 3: nothing drawn, the pass only clears: its fixed cost)
