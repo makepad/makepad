@@ -329,8 +329,10 @@ pub(crate) fn crate_ifaces(prog: &crate::program::Program, fps: &[u128], digests
 }
 
 /// The interface fingerprints `plain` (bound-set free: what a collected image stores) with the
-/// loader's bound crates folded in. `bound` = (crate index, source identity) of the provided
-/// crates this program binds instead of compiling.
+/// loader's bound crates folded in. `bound` = (crate index, binding identity: provided.rs
+/// binding_identity) of the provided crates this program binds instead of compiling. The binding
+/// identity, not the crate's source identity: its source text is in the fingerprints and body
+/// keys like any crate's, so an edit of a bound crate's fn bodies (a HAL fix) keeps the code above it.
 ///
 /// Whether a crate is bound changes the code of whatever can reach it (bridge calls instead of
 /// compiled callees), and so does which types cross the boundary: that set is global to the
@@ -339,7 +341,7 @@ pub(crate) fn crate_ifaces(prog: &crate::program::Program, fps: &[u128], digests
 /// the types of crates it depends on, so the types of P are affected by P and by the bound crates
 /// that depend on P. The view of a crate c is therefore: the bound crates reachable from c
 /// (through its dependencies, itself included) plus the bound crates depending on any of those,
-/// each by (name, source identity). A crate with an empty view (std, anything that cannot reach a
+/// each by (name, binding identity). A crate with an empty view (std, anything that cannot reach a
 /// bound crate) keeps its plain fingerprint and shares with every program.
 pub(crate) fn apply_bound(prog: &crate::program::Program, plain: &[u128], bound: &[(u32, u64)]) -> Vec<u128> {
     let n = plain.len();

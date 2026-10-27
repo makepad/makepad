@@ -589,6 +589,18 @@ pub fn forbid_in_publish(what: &'static str, slot: u32) {
     }
 }
 
+/// Called on entry to owner work that runs what `forbid_in_publish` guards for some inputs only (a
+/// warm-cache link: a static's initializer when the cache has no value for it). Inside `publish`
+/// it is a bug whatever the input, so it panics on the first call, not on the rare input that
+/// reaches the guarded operation; inside `publish_or_bail` that operation bails when it is reached.
+#[inline]
+#[track_caller]
+pub fn forbid_in_strict_publish(what: &'static str, slot: u32) {
+    if PUBLISHING.try_with(|p| p.get()).unwrap_or(0) == PUB_STRICT {
+        forbid_in_publish(what, slot)
+    }
+}
+
 /// Inside the take of a background build (`publish_or_bail`): a front bails it.
 #[inline]
 pub fn bailing() -> bool {

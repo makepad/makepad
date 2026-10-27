@@ -11,11 +11,26 @@
 //!
 //! Anything else linked into the binary (devhub, platform glue, Desk Link, the loader's UI) is
 //! not in it: changing it keeps every stored build. Provided crates (provided.rs) are keyed by
-//! their own source identity (cache/items.rs apply_bound) and checked at bind time. Stored
+//! their binding identity (provided.rs binding_identity; cache/items.rs apply_bound), their source
+//! is checked against the loader's at bind time. Stored
 //! entries stay keyed per function by their own inputs (body, inline tree, verdicts).
 use crate::sip::Sip128;
 
 include!(concat!(env!("OUT_DIR"), "/codegen_parts.rs"));
+
+// Every part names a stamp of its own: a crate whose SRC_STAMP resolves to another crate's (a glob
+// re-export standing in for a missing include of its own stamp) would leave its source out.
+const _: () = {
+    let mut i = 0;
+    while i < CODEGEN_PARTS.len() {
+        let mut j = i + 1;
+        while j < CODEGEN_PARTS.len() {
+            assert!(CODEGEN_PARTS[i].1 != CODEGEN_PARTS[j].1, "two codegen identity parts share one stamp");
+            j += 1;
+        }
+        i += 1;
+    }
+};
 
 /// This build's codegen identity.
 pub fn id() -> u128 {

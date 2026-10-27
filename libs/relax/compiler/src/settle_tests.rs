@@ -349,6 +349,98 @@ fn main() {}
 }
 
 #[test]
+fn prebuild_link_needing_initializer_bails() {
+    isolated_test!(prebuild_link_needing_initializer_bails);
+    // Rule I-PUB (remote-XR Sandbox on 166: "O3 build of slot N panicked: initializer inside a
+    // publish"): an O3 replacement's prebuild_callees linked a callee's stored entry inside a
+    // publish; the entry names a static whose value the cache does not hold, so the link ran its
+    // initializer there. The link is a take now: it bails, and the program's own link (or a
+    // later build) runs the initializer. A link inside a publish panics on every call.
+    const CHILD: &str = "MAKEPAD_RUN_PREBUILD_INIT_TEST";
+    const DIR: &str = "MAKEPAD_RUN_PREBUILD_INIT_TEST_DIR";
+    let Ok(phase) = std::env::var(CHILD) else {
+        let dir = std::env::temp_dir().join(format!("relax-prebuild-init-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("input.rs"), r#"
+use std::sync::atomic::{AtomicU32, Ordering};
+static COUNT: AtomicU32 = AtomicU32::new(5);
+pub fn leaf(out: &mut u32) {
+    *out = COUNT.fetch_add(1, Ordering::Relaxed);
+}
+fn main() {}
+"#).unwrap();
+        for phase in ["cold", "warm"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "jit::settle_tests::prebuild_link_needing_initializer_bails", "--nocapture", "--test-threads=1"])
+                .env(CHILD, phase).env(DIR, &dir).env("MAKEPAD_RUN_SPEC", "0")
+                .output().unwrap();
+            assert!(output.status.success(), "{phase}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    };
+    crate::borrowck::lazy::disable_gandalf();
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::path::PathBuf::from(std::env::var_os(DIR).unwrap());
+    std::env::set_var("MAKEPAD_RUN_CACHE_DIR", dir.join("cache"));
+    let session = std::sync::Arc::new(crate::Session::default());
+    let (prog, core, krate) = crate::load_with_std(&session, dir.join("input.rs").to_str().unwrap(), "prebuild_init", false).unwrap();
+    let def = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && prog.name(id) == "leaf").then_some(id)
+    }).unwrap();
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    if phase == "cold" {
+        let spill = crate::owner::call(crate::owner::Class::Program, || {
+            let id = u.fn_id(FnKey::Inst(def, Vec::new()));
+            // built under a read-only cache: COUNT's value is not recorded (record_static), only
+            // the entry that names it, so the warm link has to run its initializer
+            let cache = crate::cache::Cache::open(&u, crate::cache::Mode::ReadOnly).unwrap();
+            u.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
+            let built = unsafe { compile_fn(up, id) }.unwrap();
+            let mut cache = u.cache.take().unwrap();
+            cache.mode = crate::cache::Mode::On;
+            cache.record_o2(&u, id, &built.0, &built.2, &built.1);
+            let spill = cache.spill_take().unwrap();
+            u.cache = Some(cache);
+            spill
+        });
+        assert!(spill.write().unwrap() > 0);
+        std::mem::forget(u);
+        return;
+    }
+    let id = crate::owner::call(crate::owner::Class::Program, || {
+        let mut cache = crate::cache::Cache::open(&u, crate::cache::Mode::ReadOnly).unwrap();
+        cache.mode = crate::cache::Mode::On;
+        u.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
+        u.fn_id(FnKey::Inst(def, Vec::new()))
+    });
+    // an O3 replacement about to be installed calls `leaf`, an inline candidate whose code the
+    // disk cache holds (`absent`): its entry is linked ahead, from this background thread
+    FIRST_PRESENT.store(true, Ordering::Release);
+    let bails = crate::owner::BAILS[1].load(Ordering::Relaxed);
+    {
+        let _job = compile_job();
+        let relocs = [relax_backend::rir::RelocAt { at: 0, kind: relax_backend::rir::RelocKind::Pool64, target: relax_backend::rir::Reloc::Call(id) }];
+        unsafe { prebuild_callees(up, &relocs, &[id]) };
+    }
+    assert!(crate::owner::BAILS[1].load(Ordering::Relaxed) > bails, "the link ahead must reach COUNT's initializer and bail there");
+    // the program's own link runs the initializer the take bailed on, into the static's storage
+    let entry = crate::owner::call(crate::owner::Class::Program, || unsafe { ready_code_locked(up, id) }).expect("the stored entry links on the program's call");
+    let mut result = 0u32;
+    unsafe { call_jit(up, entry, &mut result as *mut u32 as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+    assert_eq!(result, 5, "COUNT must hold its initial value after the bailed link");
+    // a link inside a publish is a bug whatever the slot (here: one with code already)
+    let strict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::owner::publish(|| unsafe { ready_code_locked(up, id) })));
+    assert!(strict.is_err(), "a warm-cache link inside a publish must panic (rule I-PUB)");
+    std::mem::forget(u);
+}
+
+#[test]
 fn settle_rebuild_pins_tier1_and_closure_history() {
     isolated_test!(settle_rebuild_pins_tier1_and_closure_history);
     // Unit installs process-global runtime state. Cache fixtures in the same harness can
