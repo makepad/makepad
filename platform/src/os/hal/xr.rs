@@ -23,6 +23,8 @@ pub(crate) struct HalXr {
     pub(crate) window: WindowId,
     /// the newest `XrFrame`: the eyes of the next frame
     pub(crate) frame: Option<XrFrame>,
+    /// its predicted display time (HAL clock, ns)
+    pub(crate) display_ns: u64,
     pub(crate) last: Rc<XrState>,
     /// the pass uniforms of the frame being built, one per eye (alive until the batch is sent);
     /// a multiview pass uses the first, with both eyes in it
@@ -30,6 +32,9 @@ pub(crate) struct HalXr {
     /// the TSDF depth writer the headset's environment depth goes to (`cx.xr_tsdf()`), made
     /// at the first depth frame
     pub(crate) depth_writer: Option<makepad_tsdf::DepthWriter>,
+    /// The newest environment depth image as a texture (its depth values 0..1) and its header
+    /// (`Cx::xr_environment_depth`).
+    pub(crate) env_depth: Option<(crate::texture::Texture, XrDepth)>,
 }
 
 // asked before the XR window exists: applied when it is made
@@ -64,7 +69,7 @@ impl Cx {
         self.hal.windows.insert(window.0, super::HalWindow::default());
         // the HAL sizes it (its first Geom confirms it)
         self.hal.frames.w.window_create(hal_window_id(window), window_kind::XR, Id::NONE, [0.0; 4], false);
-        self.hal.xr = Some(HalXr { window, frame: None, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None });
+        self.hal.xr = Some(HalXr { window, frame: None, display_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None });
         if SEE_THROUGH.with(|s| s.get()) { self.hal_xr_see_through(true); }
         // the XR passes paint into it from now on
         self.redraw_all();
@@ -76,6 +81,20 @@ impl Cx {
         self.hal.frames.w.window_visuals(hal_window_id(xr.window), on as u32, [0.0; 4]);
     }
 
+    /// `Cx::xr_present_eyes`: the eyes of the XR window's next frame.
+    pub(crate) fn hal_xr_present_eyes(&mut self, eyes: [makepad_hal::XrEye; 2]) {
+        let Some(xr) = self.hal.xr.as_ref() else { return };
+        let mut bytes = Vec::with_capacity(2 * <makepad_hal::XrEye as makepad_hal::buffers::Wire>::SIZE);
+        for e in &eyes { makepad_hal::buffers::Wire::write(e, &mut bytes); }
+        self.hal.frames.w.xr_frame_eyes(hal_window_id(xr.window), &bytes);
+    }
+
+    /// `Cx::xr_set_pose_lead`.
+    pub(crate) fn hal_xr_pose_lead(&mut self, lead_ns: u64) {
+        let Some(xr) = self.hal.xr.as_ref() else { return };
+        self.hal.frames.w.xr_pose_lead(hal_window_id(xr.window), lead_ns);
+    }
+
     pub(crate) fn hal_xr_stop(&mut self) {
         let Some(xr) = self.hal.xr.take() else { return };
         self.hal.frames.w.window_close(hal_window_id(xr.window));
@@ -83,10 +102,11 @@ impl Cx {
     }
 
     /// An `XrFrame`: the eyes of the XR window's next frame, and `Event::XrUpdate` for the app.
-    pub(crate) fn hal_xr_frame(&mut self, time: f64, bytes: &[u8]) {
+    pub(crate) fn hal_xr_frame(&mut self, time: f64, display_ns: u64, bytes: &[u8]) {
         let Some(frame) = read_items::<XrFrame>(bytes, 1).next() else { return };
         let Some(xr) = self.hal.xr.as_mut() else { return };
         xr.frame = Some(frame);
+        xr.display_ns = display_ns;
         // the HAL's controllers and hands are the old backend's, field for field
         let controller = |c: &makepad_hal::XrController| XrController { grip_pose: pose(&c.grip_pose), aim_pose: pose(&c.aim_pose), trigger: c.trigger,
             grip: c.grip, buttons: c.buttons as u16, stick: normalize_xr_controller_stick(Vec2f { x: c.stick[0], y: c.stick[1] }) };
@@ -120,7 +140,21 @@ impl Cx {
         let Some(header) = read_items::<XrDepth>(bytes, 1).next() else { return };
         let texels = (header.width * header.height) as usize;
         let Some(raw) = bytes.get(XrDepth::SIZE..XrDepth::SIZE + texels * 2) else { return };
-        let depth = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        let depth: Vec<u16> = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        // the newest image as a texture for the app's own per-pixel tests (occlusion)
+        let values: Vec<f32> = depth.iter().map(|d| *d as f32 / 65535.0).collect();
+        let (w, h) = (header.width as usize, header.height as usize);
+        let reuse = xr.env_depth.as_ref().filter(|(_, old)| old.width == header.width && old.height == header.height).map(|(t, _)| t.clone());
+        let texture = match reuse {
+            Some(t) => {
+                let _ = t.take_vec_f32(self);
+                t.put_back_vec_f32(self, values, None);
+                t
+            }
+            None => crate::texture::Texture::new_with_format(self, crate::texture::TextureFormat::VecRf32 { width: w, height: h, data: Some(values), updated: crate::texture::TextureUpdated::Full }),
+        };
+        let Some(xr) = self.hal.xr.as_mut() else { return };
+        xr.env_depth = Some((texture, header));
         if xr.depth_writer.is_none() {
             match makepad_tsdf::DepthWriter::new() {
                 Ok(writer) => xr.depth_writer = Some(writer),

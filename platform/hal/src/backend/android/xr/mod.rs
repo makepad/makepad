@@ -76,6 +76,27 @@ static EYE_PX: OnceLock<[u32; 2]> = OnceLock::new();
 
 /// An XR session shows the windows (the Choreographer and the Activity's surface and window
 /// focus are not used).
+/// The eyes the XR window's frame in flight was drawn for when they are not its XrFrame's
+/// (`HalCmd::XrFrameEyes`: a streamed picture's render eyes), taken with the frame.
+static FRAME_EYES: Mutex<Option<[Eye; 2]>> = Mutex::new(None);
+
+/// The XR window's next frame shows with `eyes` (the projection views' poses and fields).
+pub(super) fn frame_eyes(eyes: [XrEye; 2]) {
+    let eye = |e: &XrEye| Eye {
+        pose: XrPosef { orientation: makepad_math::Quat { x: e.pose.orientation[0], y: e.pose.orientation[1], z: e.pose.orientation[2], w: e.pose.orientation[3] },
+            position: makepad_math::Vec3f { x: e.pose.position[0], y: e.pose.position[1], z: e.pose.position[2] } },
+        fov: XrFovf { angle_left: e.fov[0], angle_right: e.fov[1], angle_up: e.fov[2], angle_down: e.fov[3] },
+    };
+    *lock(&FRAME_EYES) = Some([eye(&eyes[0]), eye(&eyes[1])]);
+}
+
+/// How far past its display time the XR window's XrFrames are located (`HalCmd::XrPoseLead`).
+static POSE_LEAD_NS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+pub(super) fn pose_lead(lead_ns: u64) {
+    POSE_LEAD_NS.store(lead_ns.min(500_000_000) as i64, Ordering::Release);
+}
+
 pub(super) fn active() -> bool { ACTIVE.load(Ordering::Acquire) }
 
 /// One eye's pixels while an XR session runs (the XR window is two of them side by side).
@@ -256,7 +277,62 @@ type Pending = (Arc<Image>, Box<dyn FnOnce(u64) + Send>);
 /// The newest panel frame and the stereo window's frame in flight; `arrived` wakes the XR
 /// thread waiting for a stereo frame.
 #[derive(Default)]
-struct Frames { panel: Mutex<Option<Pending>>, stereo: Mutex<Option<Pending>>, arrived: Condvar }
+/// `rgba`: the swapchains are RGBA ordered, so the panel's and the stereo window's targets are
+/// made RGBA8 and copy into them as they are (a swizzling blit cost ~16 ms of CPU per frame on
+/// Quest 3 to record).
+/// `stereo_targets`: the projection chain's images the app renders into ([`Targets`]).
+struct Frames { panel: Mutex<Option<Pending>>, stereo: Mutex<Option<Pending>>, arrived: Condvar, rgba: AtomicBool, stereo_targets: Mutex<Option<Targets>> }
+
+/// A chain's images as the app's render targets (`XrSurfaces::target`): the render thread
+/// acquires one per frame (acquire + wait) and renders the frame straight into it; the XR
+/// thread releases them in acquire order when it takes a frame ([`Targets::release_through`]),
+/// so the projection layer shows the newest frame with no copy. Every acquire, wait and release
+/// of the chain goes through this lock.
+struct Targets { handle: XrSwapchain, images: Vec<Arc<Image>>, acquired: std::collections::VecDeque<usize> }
+
+impl Targets {
+    /// The chain's images wrapped as `layers`-layer render targets of `size` in the frames'
+    /// format (`rgba`: RGBA8, else BGRA8; UNORM views of the sRGB images: mutable format).
+    fn new(dev: &Arc<Device>, chain: &Chain, rgba: bool) -> Result<Targets, String> {
+        let desc = crate::session::TextureObj { format: if rgba { crate::format::RGBA8 } else { crate::format::BGRA8 }, w: chain.size[0], h: chain.size[1],
+            depth: chain.layers, mips: 1, usage: crate::usage::RENDER_TARGET | crate::usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None };
+        let images = chain.images.iter().map(|image| unsafe { Image::borrowed(dev.clone(), desc.clone(), *image, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL) }).collect::<Result<_, _>>()?;
+        Ok(Targets { handle: chain.handle, images, acquired: Default::default() })
+    }
+
+    /// The next image for a frame of at least `size`, acquired and waited for; `None` when every
+    /// image but one is held (the frame renders into the window target and is copied instead).
+    fn acquire(&mut self, xr: &LibOpenXr, size: [u32; 2]) -> Option<Arc<Image>> {
+        let first = self.images.first()?;
+        if first.desc.w < size[0] || first.desc.h < size[1] { return None; }
+        if self.acquired.len() + 1 >= self.images.len() { crate::profile::count("xr target: every image held (frame copied)"); return None; }
+        let mut index = 0;
+        unsafe { (xr.xrAcquireSwapchainImage)(self.handle, &XrSwapchainImageAcquireInfo::default(), &mut index) }.to_result("xrAcquireSwapchainImage")
+            .map_err(|e| xr_log!("{e}")).ok()?;
+        let wait_info = XrSwapchainImageWaitInfo { timeout: XrDuration(1000000000), ..Default::default() };
+        loop {
+            if unsafe { (xr.xrWaitSwapchainImage)(self.handle, &wait_info) } != XrResult::TIMEOUT_EXPIRED { break; }
+            xr_log!("retry xrWaitSwapchainImage");
+        }
+        self.acquired.push_back(index as usize);
+        let image = self.images.get(index as usize)?.clone();
+        image.set_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        Some(image)
+    }
+
+    /// Releases every acquired image up to and including `image` (oldest first: a release
+    /// releases the oldest), so the chain shows `image`; `None` when `image` is none of them.
+    fn release_through(&mut self, xr: &LibOpenXr, image: &Arc<Image>) -> Option<Result<(), String>> {
+        let at = self.acquired.iter().position(|i| Arc::ptr_eq(&self.images[*i], image))?;
+        for _ in 0..=at {
+            self.acquired.pop_front();
+            if let Err(e) = unsafe { (xr.xrReleaseSwapchainImage)(self.handle, &XrSwapchainImageReleaseInfo::default()) }.to_result("xrReleaseSwapchainImage") {
+                return Some(Err(e));
+            }
+        }
+        Some(Ok(()))
+    }
+}
 
 struct Presenter { frames: Arc<Frames>, stereo: bool }
 impl FramePresenter for Presenter {
@@ -310,6 +386,18 @@ impl VkSurfaceSource for XrSurfaces {
         else if session == HOST && r.host == Some(window) { Some(self.panel.clone()) }
         else { None }
     }
+    fn target(&mut self, session: u32, window: Id, size: [u32; 2]) -> Option<Arc<Image>> {
+        if lock(&Shared::global().registry).xr_window != Some((session, window)) { return None; }
+        lock(&self.frames.stereo_targets).as_mut()?.acquire(&self.rt.xr, size)
+    }
+    fn is_target(&self, image: &Arc<Image>) -> bool {
+        lock(&self.frames.stereo_targets).as_ref().is_some_and(|t| t.images.iter().any(|i| Arc::ptr_eq(i, image)))
+    }
+    fn window_format(&self, session: u32, window: Id) -> u32 {
+        let r = lock(&Shared::global().registry);
+        let ours = r.xr_window == Some((session, window)) || (session == HOST && r.host == Some(window));
+        if ours && self.frames.rgba.load(Ordering::Acquire) { crate::format::RGBA8 } else { crate::format::BGRA8 }
+    }
     fn state(&mut self, session: u32, window: Id, _: [u32; 2]) -> SurfaceState {
         let r = lock(&Shared::global().registry);
         if r.xr_window == Some((session, window)) || (session == HOST && r.host == Some(window)) { SurfaceState::Managed } else { SurfaceState::Lost }
@@ -318,10 +406,12 @@ impl VkSurfaceSource for XrSurfaces {
 
 /// The copy of a frame into one image of a chain: its command buffer and fence, and the frame
 /// image read until that fence.
-struct Slot { pool: vk::CommandPool, cb: vk::CommandBuffer, fence: vk::Fence, keep: Option<Arc<Image>> }
+/// `lock_ns`, `submit_ns`: summed waits for the queue lock and vkQueueSubmit times.
+struct Slot { pool: vk::CommandPool, cb: vk::CommandBuffer, fence: vk::Fence, keep: Option<Arc<Image>>, lock_ns: u64, submit_ns: u64, steps: [u64; 4] }
 
 /// An XR swapchain, its Vulkan images, a copy slot per image, its size and layers.
-struct Chain { handle: XrSwapchain, images: Vec<vk::Image>, slots: Vec<Slot>, size: [u32; 2], layers: u32, staging: Option<Arc<Image>> }
+/// `times`: summed ns in `write` for acquire, wait for the image, the slot's fence, record + submit.
+struct Chain { handle: XrSwapchain, images: Vec<vk::Image>, slots: Vec<Slot>, size: [u32; 2], layers: u32, staging: Option<Arc<Image>>, times: [u64; 5] }
 
 impl Chain {
     /// `swizzle`: the format is RGBA ordered, the frames BGRA: copies go through a staging image
@@ -330,7 +420,7 @@ impl Chain {
         let (handle, images) = vulkan::create_swapchain(xr, session, format, size[0], size[1], layers, flags)?;
         let slots = images.iter().map(|_| Slot::new(dev)).collect::<Result<_, _>>()?;
         let staging = if swizzle { Some(Self::staging(dev, size, layers, false)?) } else { None };
-        Ok(Chain { handle, images, slots, size, layers, staging })
+        Ok(Chain { handle, images, slots, size, layers, staging, times: [0; 5] })
     }
 
     /// The swizzle staging image for frames of this chain: `layers` side by side, or (a
@@ -342,6 +432,8 @@ impl Chain {
 
     /// The staging image (when the chain swizzles) for a frame laid out as `frame`.
     fn staging_for(&mut self, dev: &Arc<Device>, frame: &Image) -> Result<Option<Arc<Image>>, String> {
+        // a frame already in the chain's order copies as it is
+        if frame.desc.format != crate::format::BGRA8 { return Ok(None); }
         let Some(staging) = &self.staging else { return Ok(None) };
         let layered = frame.desc.depth >= self.layers && self.layers > 1;
         if (staging.desc.depth > 1) != layered {
@@ -358,25 +450,48 @@ impl Chain {
     /// it. `keep` is read by the commands until their fence.
     fn write(&mut self, xr: &LibOpenXr, dev: &Device, keep: Option<Arc<Image>>, body: impl FnOnce(&Device, vk::CommandBuffer, vk::Image)) -> Result<(), String> {
         let mut index = 0;
+        let mut mark = Instant::now();
         {
             let _queue = lock(&dev.queue_lock);
             unsafe { (xr.xrAcquireSwapchainImage)(self.handle, &XrSwapchainImageAcquireInfo::default(), &mut index) }.to_result("xrAcquireSwapchainImage")?;
         }
+        self.times[0] += mark.elapsed().as_nanos() as u64;
+        mark = Instant::now();
         let wait_info = XrSwapchainImageWaitInfo { timeout: XrDuration(1000000000), ..Default::default() };
         loop {
             if unsafe { (xr.xrWaitSwapchainImage)(self.handle, &wait_info) } != XrResult::TIMEOUT_EXPIRED { break; }
             xr_log!("retry xrWaitSwapchainImage");
         }
+        self.times[1] += mark.elapsed().as_nanos() as u64;
         let dst = self.images[index as usize];
         let layers = self.layers;
-        let recorded = self.slots[index as usize].record(dev, dst, layers, |dev, cb| body(dev, cb, dst));
-        if recorded.is_ok() { self.slots[index as usize].keep = keep; }
+        let slot = &mut self.slots[index as usize];
+        let fence_ns = slot.wait(dev);
+        if fence_ns != u64::MAX { self.times[2] += fence_ns; }
+        mark = Instant::now();
+        let recorded = fence_ns_ok(fence_ns).and_then(|_| slot.record(dev, dst, layers, |dev, cb| body(dev, cb, dst)));
+        if recorded.is_ok() { slot.keep = keep; }
+        self.times[3] += mark.elapsed().as_nanos() as u64;
+        mark = Instant::now();
         let released = {
             let _queue = lock(&dev.queue_lock);
             unsafe { (xr.xrReleaseSwapchainImage)(self.handle, &XrSwapchainImageReleaseInfo::default()) }
         };
+        self.times[4] += mark.elapsed().as_nanos() as u64;
         recorded?;
         released.to_result("xrReleaseSwapchainImage")
+    }
+
+    /// The summed write times (ms per write over `n` writes), reset.
+    fn take_times(&mut self, n: u64) -> [f64; 7] {
+        let t = self.times.map(|v| v as f64 / 1e6 / n.max(1) as f64);
+        self.times = [0; 5];
+        let (mut lock, mut submit) = (0, 0);
+        let mut steps = [0u64; 4];
+        for s in &mut self.slots { lock += s.lock_ns; submit += s.submit_ns; s.lock_ns = 0; s.submit_ns = 0; for i in 0..4 { steps[i] += s.steps[i]; } s.steps = [0; 4]; }
+        let st = steps.map(|v| v as f64 / 1e6 / n.max(1) as f64);
+        xr_log!("copy record ms: reset+begin {:.2} barrier {:.2} body {:.2} barrier+end {:.2}", st[0], st[1], st[2], st[3]);
+        [t[0], t[1], t[2], t[3], lock as f64 / 1e6 / n.max(1) as f64, submit as f64 / 1e6 / n.max(1) as f64, t[4]]
     }
 
     fn destroy(&mut self, xr: &LibOpenXr, dev: &Device) {
@@ -405,8 +520,17 @@ impl Slot {
             let cb = dev.raw.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(pool)
                 .level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1)).map_err(|e| format!("XR command buffer: {e:?}"))?[0];
             let fence = dev.raw.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None).map_err(|e| format!("XR fence: {e:?}"))?;
-            Ok(Slot { pool, cb, fence, keep: None })
+            Ok(Slot { pool, cb, fence, keep: None, lock_ns: 0, submit_ns: 0, steps: [0; 4] })
         }
+    }
+
+    /// Waits for the slot's last copy (its fence), then drops what it kept; the wait in ns
+    /// (`u64::MAX`: the wait failed).
+    fn wait(&mut self, dev: &Device) -> u64 {
+        let at = Instant::now();
+        if unsafe { dev.raw.wait_for_fences(&[self.fence], true, u64::MAX) }.is_err() { return u64::MAX; }
+        self.keep = None;
+        at.elapsed().as_nanos() as u64
     }
 
     /// Records `body` between the barriers that take `dst` (an acquired XR image of `layers`
@@ -418,25 +542,37 @@ impl Slot {
         let barrier = |old, new, src, dest| vk::ImageMemoryBarrier::default().image(dst).old_layout(old).new_layout(new)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(src).dst_access_mask(dest).subresource_range(range);
+        let mut at = Instant::now();
+        let mut step = |i: usize, steps: &mut [u64; 4]| { steps[i] += at.elapsed().as_nanos() as u64; at = Instant::now(); };
         unsafe {
-            dev.raw.wait_for_fences(&[self.fence], true, u64::MAX).map_err(|e| format!("XR copy fence: {e:?}"))?;
-            self.keep = None;
             dev.raw.reset_fences(&[self.fence]).map_err(|e| format!("XR copy fence reset: {e:?}"))?;
             dev.raw.reset_command_buffer(self.cb, vk::CommandBufferResetFlags::empty()).map_err(|e| format!("XR copy reset: {e:?}"))?;
             dev.raw.begin_command_buffer(self.cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).map_err(|e| format!("XR copy begin: {e:?}"))?;
+            step(0, &mut self.steps);
             dev.raw.cmd_pipeline_barrier(self.cb, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(),
                 &[vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::MEMORY_WRITE).dst_access_mask(vk::AccessFlags::TRANSFER_READ)], &[],
                 &[barrier(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::AccessFlags::COLOR_ATTACHMENT_WRITE, vk::AccessFlags::TRANSFER_WRITE)]);
+            step(1, &mut self.steps);
             body(dev, self.cb);
+            step(2, &mut self.steps);
             dev.raw.cmd_pipeline_barrier(self.cb, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, vk::DependencyFlags::empty(), &[], &[],
                 &[barrier(vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE)]);
             dev.raw.end_command_buffer(self.cb).map_err(|e| format!("XR copy end: {e:?}"))?;
+            step(3, &mut self.steps);
             let cbs = [self.cb];
+            let at = Instant::now();
             let _queue = lock(&dev.queue_lock);
+            self.lock_ns += at.elapsed().as_nanos() as u64;
+            let at = Instant::now();
             dev.raw.queue_submit(dev.queue, &[vk::SubmitInfo::default().command_buffers(&cbs)], self.fence).map_err(|e| format!("XR copy submit: {e:?}"))?;
+            self.submit_ns += at.elapsed().as_nanos() as u64;
         }
         Ok(())
     }
+}
+
+fn fence_ns_ok(ns: u64) -> Result<(), String> {
+    if ns == u64::MAX { Err("XR copy fence wait failed".into()) } else { Ok(()) }
 }
 
 /// Copies a frame image (BGRA8 UNORM in TRANSFER_SRC_OPTIMAL, as the core hands it over) into
@@ -510,11 +646,8 @@ struct CxOpenXrSession {
     active_display_refresh_rate_hz: Option<f32>,
     panel: Chain,
     cursor: Chain,
-    /// the projection layer: a layer per eye (made with the XR window)
+    /// the projection layer: a layer per eye (the app's XR window renders into its images)
     stereo: Option<Chain>,
-    format: vk::Format,
-    /// the swapchain format is RGBA ordered (the frames are BGRA): copies swizzle through staging
-    blit: bool,
     pointer: Pointer,
     controllers: [XrController; 2],
     hands: [XrHand; 2],
@@ -531,6 +664,9 @@ struct CxOpenXrSession {
     /// counters for the periodic timing line: display frames, stereo frames shown, frames
     /// whose stereo frame came too late, and the summed wait for stereo frames (ns)
     stats: [u64; 4],
+    /// summed time (ns) per part of the frame loop: xrWaitFrame, xrBeginFrame, input, panel,
+    /// stereo (ask + wait), stereo copy, xrEndFrame
+    phases: [u64; 7],
     stats_at: Instant,
 }
 
@@ -641,21 +777,26 @@ impl CxOpenXrSession {
         let format = vulkan::pick_vulkan_color_format(&formats, vk::Format::B8G8R8A8_SRGB)
             .ok_or_else(|| format!("OpenXR Vulkan found no supported 32-bit RGBA swapchain format; runtime={formats:?}"))?;
         let blit = matches!(format, vk::Format::R8G8B8A8_SRGB | vk::Format::R8G8B8A8_UNORM);
+        frames.rgba.store(blit, Ordering::Release);
         let (passthrough, passthrough_layer, depth_provider, depth_swap_chain) = Self::create_passthrough_and_depth(xr, handle, options)?;
         let inputs = CxOpenXrInputs::new_inputs(xr, handle, rt.instance)?;
         xr_log!("session {handle:?}: local space {local_space_type:?}, swapchain {format:?}{}; passthrough running",
             if blit { " (swizzled through staging)" } else { "" });
         let panel = Chain::new(xr, &dev, handle, format, PANEL_PX, 1, XrSwapchainCreateFlags(0), blit)?;
+        // the projection chain: the app's XR window renders straight into its images
+        let eye = EYE_PX.get().copied().unwrap_or([1, 1]);
+        let stereo = Chain::new(xr, &dev, handle, format, eye, 2, XrSwapchainCreateFlags(0), blit)?;
+        *lock(&frames.stereo_targets) = Some(Targets::new(&dev, &stereo, blit)?);
         let cursor = Chain::new(xr, &dev, handle, format, [CURSOR_PX; 2], 1, XrSwapchainCreateFlags::STATIC_IMAGE, false)?;
         let depth = depth::DepthSource::new(xr, &dev, depth_provider, depth_swap_chain).unwrap_or_else(|e| {
             xr_log!("environment depth readback unavailable: {e}");
             None
         });
         let mut session = Self { depth, rt: rt.clone(), dev, frames, handle, head_space, local_space, panel_space, passthrough, passthrough_layer, depth_provider, depth_swap_chain,
-            inputs, active: false, focused: false, active_display_refresh_rate_hz: None, panel, cursor, stereo: None, format, blit,
+            inputs, active: false, focused: false, active_display_refresh_rate_hz: None, panel, cursor, stereo: Some(stereo),
             pointer: Pointer { hand: 1, ..Default::default() }, controllers: Default::default(), hands: Default::default(),
             panel_shown: None, panel_visible: true, cursor_ready: false, stereo_asked: None, stereo_shown: None, stereo_asked_at: Instant::now(),
-            stats: [0; 4], stats_at: Instant::now() };
+            stats: [0; 4], phases: [0; 7], stats_at: Instant::now() };
         let _ = session.update_active_display_refresh_rate();
         Ok(session)
     }
@@ -752,7 +893,10 @@ impl CxOpenXrSession {
         let xr = &rt.xr;
         let mut fi = XrFrameWaitInfo::default();
         let mut frame_state = XrFrameState::default();
+        let mut mark = Instant::now();
+        let mut phase = |i: usize, phases: &mut [u64; 7]| { phases[i] += mark.elapsed().as_nanos() as u64; mark = Instant::now(); };
         unsafe { (xr.xrWaitFrame)(self.handle, &mut fi, &mut frame_state) }.to_result("xrWaitFrame")?;
+        phase(0, &mut self.phases);
         let time = frame_state.predicted_display_time;
         // the old backend drew and submitted every frame whatever `should_render` said (the
         // runtime clears it while the session is only VISIBLE, which kept the panel and the
@@ -768,10 +912,16 @@ impl CxOpenXrSession {
         shared.frame(time.as_nanos() as u64);
         {
             let _queue = lock(&self.dev.queue_lock);
-            unsafe { (xr.xrBeginFrame)(self.handle, &XrFrameBeginInfo::default()) }.to_result("xrBeginFrame")?;
+            // FRAME_DISCARDED is a success: the frame before was not ended (it is dropped)
+            let begun = unsafe { (xr.xrBeginFrame)(self.handle, &XrFrameBeginInfo::default()) };
+            if begun == XrResult::FRAME_DISCARDED { crate::profile::count("xr frame discarded"); } else { begun.to_result("xrBeginFrame")?; }
         }
+        phase(1, &mut self.phases);
         let previous = self.controllers;
-        match self.inputs.poll(xr, self.handle, self.local_space, time) {
+        // (hands and controllers predicted as far ahead as the head: `HalCmd::XrPoseLead`)
+        let lead = POSE_LEAD_NS.load(Ordering::Acquire);
+        let input_time = if lead > 0 { XrTime::from_nanos(time.as_nanos() + lead) } else { time };
+        match self.inputs.poll(xr, self.handle, self.local_space, input_time) {
             Some((controllers, hands)) => { self.controllers = controllers; self.hands = hands; }
             // not focused: nothing is held
             None => { self.controllers = Default::default(); self.hands = Default::default(); }
@@ -794,8 +944,12 @@ impl CxOpenXrSession {
             loc
         };
         let hit = if self.panel_visible { self.point(panel_pose) } else { self.leave_panel(); None };
-        let panel_done = if render { self.update_panel()? } else { None };
-        let stereo_done = match xr_window { Some((sid, id)) if render => self.update_stereo(sid, id, time, period)?, _ => None };
+        phase(2, &mut self.phases);
+        // from here on every frame ends (a frame begun and not ended discards the next one)
+        let panel_done = if render { self.update_panel().unwrap_or_else(|e| { xr_log!("panel: {e}"); None }) } else { None };
+        phase(3, &mut self.phases);
+        let stereo_done = match xr_window { Some((sid, id)) if render => self.update_stereo(sid, id, time, period).unwrap_or_else(|e| { xr_log!("stereo: {e}"); None }), _ => None };
+        phase(4, &mut self.phases);
         // environment depth: a finished readback to the XR window, the next one started (never waits)
         if let (Some(depth), Some((sid, id))) = (self.depth.as_mut(), xr_window) {
             if let Some(payload) = depth.poll(&self.dev) {
@@ -804,7 +958,7 @@ impl CxOpenXrSession {
             }
             depth.acquire(xr, &self.dev, self.depth_provider, self.local_space, time);
         }
-        if !self.cursor_ready && render { self.fill_cursor()?; }
+        if !self.cursor_ready && render { if let Err(e) = self.fill_cursor() { xr_log!("cursor: {e}"); } }
 
         let quad = |chain: &Chain, size: [u32; 2], pose, metres: [f32; 2]| {
             let mut sub_image = chain.sub_image(0);
@@ -834,6 +988,7 @@ impl CxOpenXrSession {
         }
         let fei = XrFrameEndInfo { display_time: time, environment_blend_mode: XrEnvironmentBlendMode::OPAQUE, layer_count: layers.len() as _, layers: layers.as_ptr(), ..Default::default() };
         let r = { let _queue = lock(&self.dev.queue_lock); unsafe { (xr.xrEndFrame)(self.handle, &fei) } };
+        phase(6, &mut self.phases);
         let shown_at = time.as_nanos() as u64;
         if let Some(done) = panel_done { done(shown_at); }
         if let Some(done) = stereo_done { done(shown_at); }
@@ -842,11 +997,17 @@ impl CxOpenXrSession {
             let [frames, shown, late, wait] = self.stats;
             let secs = self.stats_at.elapsed().as_secs_f64();
             let hands = self.hands.map(|h| if h.flags & xr_hand::IN_VIEW != 0 { "tracked" } else { "-" });
+            let ms = self.phases.map(|v| v as f64 / 1e6 / frames.max(1) as f64);
             let depth = self.depth.as_mut().map(|d| { let n = (d.acquired, d.delivered); d.acquired = 0; d.delivered = 0; n });
-            xr_log!("{frames} display frames in {secs:.1} s ({:.1} Hz): {shown} stereo frames shown, {late} late, {:.2} ms average wait; panel {}; hands {hands:?}; focused {}; depth {}",
-                frames as f64 / secs, wait as f64 / 1e6 / shown.max(1) as f64, if self.panel_shown.is_some() { "up" } else { "no frame yet" }, self.focused,
+            if let Some(chain) = self.stereo.as_mut() {
+                let t = chain.take_times(shown);
+                xr_log!("stereo copy per frame ms: acquire {:.2} wait-image {:.2} slot-fence {:.2} record+submit {:.2} (queue lock {:.2} vkQueueSubmit {:.2}) release {:.2}", t[0], t[1], t[2], t[3], t[4], t[5], t[6]);
+            }
+            xr_log!("{frames} display frames in {secs:.1} s ({:.1} Hz): {shown} stereo frames shown, {late} late, {:.2} ms average wait; per frame ms: wait-frame {:.2} begin {:.2} input {:.2} panel {:.2} stereo {:.2} (copy {:.2}) end {:.2}; panel {}; hands {hands:?}; focused {}; depth {}",
+                frames as f64 / secs, wait as f64 / 1e6 / shown.max(1) as f64, ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], ms[6], if self.panel_shown.is_some() { "up" } else { "no frame yet" }, self.focused,
                 depth.map(|(a, d)| format!("{a} read, {d} sent")).unwrap_or_else(|| "none".into()));
             self.stats = [0; 4];
+            self.phases = [0; 7];
             self.stats_at = Instant::now();
         }
         r.to_result("xrEndFrame")
@@ -857,7 +1018,7 @@ impl CxOpenXrSession {
         let Some((image, done)) = lock(&self.frames.panel).take() else { return Ok(None) };
         let size = [image.desc.w.min(PANEL_PX[0]), image.desc.h.min(PANEL_PX[1])];
         let src = image.clone();
-        let staging = self.panel.staging.clone();
+        let staging = self.panel.staging_for(&self.dev, &image)?;
         self.panel.write(&self.rt.xr, &self.dev, Some(image), |dev, cb, dst| copy_frame(dev, cb, &src, dst, size, 1, staging.as_deref()))?;
         if self.panel_shown.is_none() { xr_log!("first frame on the panel ({}x{} px)", size[0], size[1]); }
         self.panel_shown = Some(size);
@@ -885,29 +1046,15 @@ impl CxOpenXrSession {
     /// waits for it until shortly before the display time, and copies a frame that came into
     /// the projection chain (an eye per layer) with the eyes it was drawn with.
     fn update_stereo(&mut self, sid: u32, id: Id, time: XrTime, period: i64) -> Result<Option<Box<dyn FnOnce(u64) + Send>>, String> {
-        let shared = Shared::global();
-        let eye = EYE_PX.get().copied().unwrap_or([1, 1]);
-        if self.stereo.is_none() {
-            self.stereo = Some(Chain::new(&self.rt.xr, &self.dev, self.handle, self.format, eye, 2, XrSwapchainCreateFlags(0), self.blit)?);
-        }
-        // Every display frame asks the XR window for a frame (the app's XR pass repaints with
-        // each new XrFrame), one at a time; a frame that never came (its batch dropped) is
-        // asked again after STEREO_REASK.
+        // The XR window draws one frame per XrFrame it is sent, one in flight at a time. A frame
+        // is asked as soon as the previous one was taken (below), for the display frame after
+        // this one: the app gets a whole period plus the wait to draw it, as the old backend's
+        // frame loop had (it drew right after xrWaitFrame returned). Without an ask in flight
+        // (the first frame, the head untracked) this display frame's is asked here; a frame
+        // that never came (its batch dropped) is asked again after STEREO_REASK.
         if self.stereo_asked.is_some() && self.stereo_asked_at.elapsed() > STEREO_REASK { self.stereo_asked = None; }
-        if self.stereo_asked.is_none() {
-            let Some((head, eyes)) = self.locate(time) else {
-                if self.stats[0] % 360 == 0 { xr_log!("the head is not tracked: no stereo frame asked"); }
-                return Ok(None)
-            };
-            lock(&shared.state).pending.remove(&(sid, id));
-            let fov = |f: &XrFovf| [f.angle_left, f.angle_right, f.angle_up, f.angle_down];
-            let frame = XrFrame { head: pose(head), eyes: eyes.map(|e| XrEye { pose: pose(e.pose), fov: fov(&e.fov) }), controllers: self.controllers, hands: self.hands };
-            let mut bytes = Vec::with_capacity(<XrFrame as crate::buffers::Wire>::SIZE);
-            crate::buffers::Wire::write(&frame, &mut bytes);
-            let t = time.as_nanos();
-            shared.emit_to(sid, id, clock_ns(), |q, id| { q.xr_frame(id, t as u64, &bytes); q.frame_ready(id, (t + period) as u64); });
-            self.stereo_asked = Some(eyes);
-            self.stereo_asked_at = Instant::now();
+        if self.stereo_asked.is_none() && !self.ask_stereo(sid, id, time, period) {
+            return Ok(None);
         }
         // wait for the frame asked for (it is drawn with the eyes of this display frame)
         let started = Instant::now();
@@ -927,15 +1074,77 @@ impl CxOpenXrSession {
         self.stats[1] += 1;
         self.stats[3] += started.elapsed().as_nanos() as u64;
         let chain = self.stereo.as_mut().expect("stereo chain");
-        // a multiview frame: an eye per layer; else both side by side
-        let eye_w = if image.desc.depth >= 2 { image.desc.w } else { image.desc.w / 2 };
-        let size = [eye_w.min(chain.size[0]), image.desc.h.min(chain.size[1])];
-        let src = image.clone();
-        let staging = chain.staging_for(&self.dev, &image)?;
-        chain.write(&self.rt.xr, &self.dev, Some(image), |dev, cb, dst| copy_frame(dev, cb, &src, dst, size, 2, staging.as_deref()))?;
+        let copy_at = Instant::now();
+        let mut targets = lock(&self.frames.stereo_targets);
+        // a frame rendered into the chain: released (with the older ones), no copy
+        let size = match targets.as_mut().and_then(|t| t.release_through(&self.rt.xr, &image)) {
+            Some(released) => { released?; chain.size }
+            // a frame in the window target (every chain image was held): copied in, when no
+            // image is held now (a copy's acquire and release would take a held one's turn)
+            None if targets.as_ref().is_some_and(|t| !t.acquired.is_empty()) => {
+                crate::profile::count("xr stereo frame dropped (chain images held)");
+                return Ok(Some(done));
+            }
+            None => {
+                // a multiview frame: an eye per layer; else both side by side
+                let eye_w = if image.desc.depth >= 2 { image.desc.w } else { image.desc.w / 2 };
+                let size = [eye_w.min(chain.size[0]), image.desc.h.min(chain.size[1])];
+                let src = image.clone();
+                let staging = chain.staging_for(&self.dev, &image)?;
+                chain.write(&self.rt.xr, &self.dev, Some(image), |dev, cb, dst| copy_frame(dev, cb, &src, dst, size, 2, staging.as_deref()))?;
+                size
+            }
+        };
+        drop(targets);
+        self.phases[5] += copy_at.elapsed().as_nanos() as u64;
         if self.stereo_shown.is_none() { xr_log!("first stereo frame ({}x{} px per eye)", size[0], size[1]); }
-        self.stereo_shown = self.stereo_asked.take();
+        // the eyes it was drawn for: its own (a streamed picture's render eyes), else its XrFrame's
+        let asked = self.stereo_asked.take();
+        self.stereo_shown = lock(&FRAME_EYES).take().or(asked);
+        // the next frame, for the next display frame, asked now
+        self.ask_stereo(sid, id, XrTime::from_nanos(time.as_nanos() + period), period);
         Ok(Some(done))
+    }
+
+    /// Sends the XR window its XrFrame for display time `time` (the head and eyes located at
+    /// that time, this display frame's controllers and hands); false when the head is not
+    /// tracked.
+    fn ask_stereo(&mut self, sid: u32, id: Id, time: XrTime, period: i64) -> bool {
+        let shared = Shared::global();
+        // located the asked lead past the display time (a remote picture of it shows that late)
+        let lead = POSE_LEAD_NS.load(Ordering::Acquire);
+        // Only the orientation is predicted the lead ahead: the runtime corrects a rotation
+        // exactly at display time, but not a position (without depth), so a position predicted
+        // far ahead showed its prediction noise as judder. The head's position stays the display
+        // time's, the eyes move with it.
+        let located = match (lead > 0).then(|| self.locate(XrTime::from_nanos(time.as_nanos() + lead))).flatten() {
+            Some((ahead, eyes)) => self.locate(time).map(|(now, _)| {
+                let shift = |p: &mut XrPosef| {
+                    p.position.x += now.position.x - ahead.position.x;
+                    p.position.y += now.position.y - ahead.position.y;
+                    p.position.z += now.position.z - ahead.position.z;
+                };
+                let mut head = ahead;
+                shift(&mut head);
+                let eyes = eyes.map(|mut e| { shift(&mut e.pose); e });
+                (head, eyes)
+            }),
+            None => self.locate(time),
+        };
+        let Some((head, eyes)) = located else {
+            if self.stats[0] % 360 == 0 { xr_log!("the head is not tracked: no stereo frame asked"); }
+            return false;
+        };
+        lock(&shared.state).pending.remove(&(sid, id));
+        let fov = |f: &XrFovf| [f.angle_left, f.angle_right, f.angle_up, f.angle_down];
+        let frame = XrFrame { head: pose(head), eyes: eyes.map(|e| XrEye { pose: pose(e.pose), fov: fov(&e.fov) }), controllers: self.controllers, hands: self.hands };
+        let mut bytes = Vec::with_capacity(<XrFrame as crate::buffers::Wire>::SIZE);
+        crate::buffers::Wire::write(&frame, &mut bytes);
+        let t = time.as_nanos();
+        shared.emit_to(sid, id, clock_ns(), |q, id| { q.xr_frame(id, t as u64, &bytes); q.frame_ready(id, (t + period) as u64); });
+        self.stereo_asked = Some(eyes);
+        self.stereo_asked_at = Instant::now();
+        true
     }
 
     /// The pointer ray of hand `h`: the controller's aim while it is tracked, else the tracked
@@ -1058,3 +1267,4 @@ fn panel_hit(pose: XrPose, panel: XrPosef) -> Option<[f32; 4]> {
     let (x, y) = (o[0] + s * d[0], o[1] + s * d[1]);
     Some([(x - c.x + PANEL_M[0] / 2.) / PANEL_M[0], (c.y + PANEL_M[1] / 2. - y) / PANEL_M[1], x, y])
 }
+

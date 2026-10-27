@@ -58,12 +58,13 @@ pub fn try_enable_fixed_foveation(xr: &LibOpenXr, session: XrSession, swapchain:
 }
 
 /// A swapchain of `array_size` layers (2: the projection layer, one per eye, as the old
-/// backend made it; 1: a quad layer) and its Vulkan images. The HAL copies frames into it, so
-/// it is also a transfer destination.
+/// backend made it; 1: a quad layer) and its Vulkan images. The app renders into its images
+/// (viewed in the UNORM format of the frames: mutable format) or the HAL copies frames into it
+/// (a transfer destination).
 pub fn create_swapchain(xr: &LibOpenXr, session: XrSession, format: vk::Format, width: u32, height: u32, array_size: u32, create_flags: XrSwapchainCreateFlags) -> Result<(XrSwapchain, Vec<vk::Image>), String> {
     let swap_chain_create_info = XrSwapchainCreateInfo {
         create_flags,
-        usage_flags: XrSwapchainUsageFlags::SAMPLED | XrSwapchainUsageFlags::COLOR_ATTACHMENT | XrSwapchainUsageFlags::TRANSFER_DST,
+        usage_flags: XrSwapchainUsageFlags::SAMPLED | XrSwapchainUsageFlags::COLOR_ATTACHMENT | XrSwapchainUsageFlags::TRANSFER_DST | XrSwapchainUsageFlags::MUTABLE_FORMAT,
         format: i64::from(format.as_raw()),
         width,
         height,

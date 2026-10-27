@@ -26,6 +26,9 @@ pub struct VideoQueue {
     pub lock: Mutex<()>,
     /// The encoder also takes H.265 (VK_KHR_video_encode_h265 enabled).
     pub h265: bool,
+    /// The encoder takes a QP delta per region of a picture (VK_KHR_video_encode_quantization_map
+    /// and its feature enabled): foveated encode.
+    pub qp_map: bool,
 }
 
 pub struct Device {
@@ -70,6 +73,21 @@ pub struct Device {
     files_reported: AtomicBool,
     /// The last device budget read (`memory_budget`) and when.
     budget: Mutex<Option<(std::time::Instant, MemoryBudget)>>,
+    /// Sampler Y'CbCr conversion (core 1.1 `samplerYcbcrConversion`, enabled when the device has
+    /// it): a decoder's external-format pictures can be sampled.
+    pub ycbcr: bool,
+    /// The samplers of video textures (`Device::video_sampler`), by external format (0: an
+    /// ordinary image's), destroyed with the device.
+    video_samplers: Mutex<std::collections::HashMap<u64, VideoSampler>>,
+}
+
+/// The immutable sampler of a video texture slot: a linear clamp-to-edge one for an ordinary
+/// image, or one through the Y'CbCr conversion of a decoder's external format (sampling then
+/// gives the raw codes: .g = Y', .b = Cb, .r = Cr).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct VideoSampler {
+    pub conversion: vk::SamplerYcbcrConversion,
+    pub sampler: vk::Sampler,
 }
 
 /// The device-local heaps as the driver accounts them (VK_EXT_memory_budget): `budget` is what
@@ -304,6 +322,15 @@ impl Device {
             plane444.p_next = std::ptr::null_mut();
             if plane444.ycbcr2plane444_formats != 0 { wanted.push(vk::EXT_YCBCR_2PLANE_444_FORMATS_NAME); }
         }
+        // QP delta maps for the encoder (a QP per region of the picture)
+        let mut qp_map = vk::PhysicalDeviceVideoEncodeQuantizationMapFeaturesKHR::default();
+        if video_family.is_some() && supported(vk::KHR_VIDEO_ENCODE_QUANTIZATION_MAP_NAME) {
+            let mut query = vk::PhysicalDeviceFeatures2::default().next_physical_device_video_encode_quantization_map_features_khr(&mut qp_map);
+            unsafe { instance.get_physical_device_features2(physical, &mut query); }
+            qp_map.p_next = std::ptr::null_mut();
+            if qp_map.video_encode_quantization_map != 0 { wanted.push(vk::KHR_VIDEO_ENCODE_QUANTIZATION_MAP_NAME); }
+        }
+        let has_qp_map = qp_map.video_encode_quantization_map != 0;
         wanted.sort_by(|a, b| a.to_bytes().cmp(b.to_bytes()));
         wanted.dedup();
         if log_enabled() { eprintln!("[hal-vulkan] vkCreateDevice device={name:?} queue_family={family} extensions={wanted:?}"); }
@@ -318,6 +345,15 @@ impl Device {
         multiview.p_next = std::ptr::null_mut();
         let has_multiview = multiview.multiview != 0;
         let mut multiview = vk::PhysicalDeviceMultiviewFeatures::default().multiview(has_multiview);
+        // sampler Y'CbCr conversion (core in 1.1): a decoder's pictures sampled where they are
+        let mut ycbcr = vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default();
+        {
+            let mut query = vk::PhysicalDeviceFeatures2::default().next_physical_device_sampler_ycbcr_conversion_features(&mut ycbcr);
+            unsafe { instance.get_physical_device_features2(physical, &mut query); }
+        }
+        ycbcr.p_next = std::ptr::null_mut();
+        let has_ycbcr = ycbcr.sampler_ycbcr_conversion != 0 && instance.table.get_physical_device_features2.is_some();
+        let mut ycbcr = vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default().sampler_ycbcr_conversion(has_ycbcr);
         let supported_features = unsafe { instance.get_physical_device_features(physical) };
         let features = vk::PhysicalDeviceFeatures::default()
             .independent_blend(supported_features.independent_blend == vk::TRUE)
@@ -341,6 +377,8 @@ impl Device {
             .next_physical_device_present_wait_features_khr(&mut present_wait); }
         if plane444.ycbcr2plane444_formats != 0 { create = create.next_physical_device_ycbcr2_plane444_formats_features_ext(&mut plane444); }
         if has_multiview { create = create.next_physical_device_multiview_features(&mut multiview); }
+        if has_ycbcr { create = create.next_physical_device_sampler_ycbcr_conversion_features(&mut ycbcr); }
+        if has_qp_map { create = create.next_physical_device_video_encode_quantization_map_features_khr(&mut qp_map); }
         // A GPU full of other work (an AI model) has no room for a device yet: the app waits
         // for room -- the desktop's owner asks the hub to yield on the sustained shortage --
         // instead of falling back to another renderer. It never fails for want of memory.
@@ -379,7 +417,7 @@ impl Device {
         let calibrated = calibration.is_some() && raw.table.get_calibrated_timestamps_khr.is_some();
         report_profiling(name, &properties, queue.timestamp_valid_bits, calibrated);
         let video_encode = video_family.map(|f| VideoQueue { family: f as u32, queue: unsafe { raw.get_device_queue(f as u32, 0) }, timestamp_bits: video_timestamp_bits,
-            more: (1..video_count).map(|i| (unsafe { raw.get_device_queue(f as u32, i) }, Mutex::new(()))).collect(), lock: Mutex::new(()), h265 });
+            more: (1..video_count).map(|i| (unsafe { raw.get_device_queue(f as u32, i) }, Mutex::new(()))).collect(), lock: Mutex::new(()), h265, qp_map: has_qp_map });
         if let Some(v) = &video_encode { if log_enabled() { eprintln!("[hal-vulkan] hardware video encode queue family={}", v.family); } }
         Ok(Some(Arc::new(Self {
             queue: unsafe { raw.get_device_queue(family as u32, 0) }, queue_lock: Mutex::new(()), raw, instance: instance.clone(),
@@ -387,12 +425,53 @@ impl Device {
             timestamp_bits: queue.timestamp_valid_bits, calibrated, extensions, present_wait: pacing, multiview: has_multiview, life: life.clone(),
             video_encode,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
+            ycbcr: has_ycbcr, video_samplers: Mutex::new(Default::default()),
         })))
     }
 
     pub fn memory_type(&self, bits: u32, required: vk::MemoryPropertyFlags) -> Result<u32, String> {
         (0..self.memory.memory_type_count).find(|i| bits & (1 << i) != 0 && self.memory.memory_types[*i as usize].property_flags.contains(required))
             .ok_or_else(|| format!("no memory type for {required:?} ({bits:#x})"))
+    }
+
+    /// The sampler of a video texture slot: an ordinary image's (`external_format` 0) or one
+    /// through the Y'CbCr conversion of a decoder's external format (`props`: its format's
+    /// properties), made once per format. Model RGB identity, full range: sampling gives the raw
+    /// codes (.g = Y', .b = Cb, .r = Cr); the shader converts with the picture's own colour.
+    pub fn video_sampler(&self, external_format: u64, props: Option<&vk::AndroidHardwareBufferFormatPropertiesANDROID>) -> Result<VideoSampler, String> {
+        let mut samplers = lock(&self.video_samplers);
+        if let Some(v) = samplers.get(&external_format) { return Ok(*v); }
+        let mut info = vk::SamplerCreateInfo::default().mag_filter(vk::Filter::LINEAR).min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::NEAREST).address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE).address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .min_lod(0.0).max_lod(0.0);
+        let mut conversion = vk::SamplerYcbcrConversion::null();
+        let mut conversion_info = vk::SamplerYcbcrConversionInfo::default();
+        if external_format != 0 {
+            if !self.ycbcr { return Err("the device has no sampler Y'CbCr conversion".into()); }
+            let props = props.ok_or("an external format's properties are needed")?;
+            // VK_FORMAT_FEATURE_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT
+            let linear = props.format_features.contains(vk::FormatFeatureFlags::from_raw(1 << 18));
+            let mut external = vk::ExternalFormatANDROID { external_format, ..Default::default() };
+            let create = vk::SamplerYcbcrConversionCreateInfo::default().next_external_format_android(&mut external).format(vk::Format::UNDEFINED)
+                .ycbcr_model(vk::SamplerYcbcrModelConversion::from_raw(0 /* RGB_IDENTITY */)).ycbcr_range(vk::SamplerYcbcrRange::from_raw(0 /* ITU_FULL */))
+                .components(vk::ComponentMapping::default()).x_chroma_offset(props.suggested_x_chroma_offset).y_chroma_offset(props.suggested_y_chroma_offset)
+                .chroma_filter(if linear { vk::Filter::LINEAR } else { vk::Filter::NEAREST }).force_explicit_reconstruction(false);
+            conversion = unsafe { self.raw.create_sampler_ycbcr_conversion(&create, None) }.map_err(error)?;
+            conversion_info = conversion_info.conversion(conversion);
+            info = info.next_sampler_ycbcr_conversion_info(&mut conversion_info);
+            if !linear { info = info.mag_filter(vk::Filter::NEAREST).min_filter(vk::Filter::NEAREST); }
+        }
+        let sampler = match unsafe { self.raw.create_sampler(&info, None) } {
+            Ok(s) => s,
+            Err(e) => {
+                if conversion != vk::SamplerYcbcrConversion::null() { unsafe { self.raw.destroy_sampler_ycbcr_conversion(conversion, None); } }
+                return Err(error(e));
+            }
+        };
+        let v = VideoSampler { conversion, sampler };
+        samplers.insert(external_format, v);
+        Ok(v)
     }
 
     pub fn supports(&self, extension: &CStr) -> bool { self.extensions.contains(extension.to_string_lossy().as_ref()) }
@@ -502,7 +581,8 @@ impl Device {
             raw, physical, queue_lock: Mutex::new(()), family: family as u32, properties, memory, features, formats,
             // a display peer only scans out: the GPU profiler times the rendering device
             timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, multiview: false, life: owner.life.clone(), video_encode: None,
-            allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None) }))
+            allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
+            ycbcr: false, video_samplers: Mutex::new(Default::default()) }))
     }
 }
 
@@ -510,7 +590,13 @@ impl Drop for Device {
     fn drop(&mut self) {
         // Every in-flight submission and resource owns an Arc<Device>. The last one is gone; the
         // instance goes with the last device made on it (`life`).
-        unsafe { self.raw.destroy_device(None); }
+        unsafe {
+            for (_, v) in lock(&self.video_samplers).drain() {
+                self.raw.destroy_sampler(v.sampler, None);
+                if v.conversion != vk::SamplerYcbcrConversion::null() { self.raw.destroy_sampler_ycbcr_conversion(v.conversion, None); }
+            }
+            self.raw.destroy_device(None);
+        }
     }
 }
 

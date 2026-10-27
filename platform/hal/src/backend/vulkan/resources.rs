@@ -51,6 +51,11 @@ pub struct Image {
     pub aspect: vk::ImageAspectFlags,
     layout: Mutex<vk::ImageLayout>,
     pub(super) external_owner: AtomicBool,
+    /// Made and kept by another owner (an XR runtime's swapchain image): never destroyed here.
+    borrowed: bool,
+    /// A decoder's external-format picture: the video sampler its views were made with (the
+    /// sampler a video texture slot needs for it); the default (null) for an ordinary image.
+    pub video: super::device::VideoSampler,
     /// The external allocation/handle owner, if any (released after image and memory).
     pub external: Option<Arc<dyn std::any::Any + Send + Sync>>,
     #[cfg(target_os = "linux")]
@@ -104,11 +109,43 @@ impl Image {
     /// no pending commands may use them except through the returned lease.
     pub unsafe fn from_bound(dev: Arc<Device>, desc: TextureObj, image: vk::Image, memory: vk::DeviceMemory,
         bytes: u64, layout: vk::ImageLayout, external: Option<Arc<dyn std::any::Any + Send + Sync>>) -> Result<Arc<Self>, String> {
+        Self::adopt(dev, desc, image, memory, bytes, layout, external, false)
+    }
+
+    /// An image another owner made and keeps (an XR runtime's swapchain image), in `layout`
+    /// now: views of it in `desc`'s format (the image must allow that format), never destroyed
+    /// here.
+    pub unsafe fn borrowed(dev: Arc<Device>, desc: TextureObj, image: vk::Image, layout: vk::ImageLayout) -> Result<Arc<Self>, String> {
+        Self::adopt(dev, desc, image, vk::DeviceMemory::null(), 0, layout, None, true)
+    }
+
+    /// A bound external-format image (a decoder's picture) sampled through `video`'s Y'CbCr
+    /// conversion: its views carry the conversion.
+    pub unsafe fn external_video(dev: Arc<Device>, desc: TextureObj, image: vk::Image, memory: vk::DeviceMemory, video: super::device::VideoSampler,
+        external: Option<Arc<dyn std::any::Any + Send + Sync>>) -> Result<Arc<Self>, String> {
+        let mut conversion = vk::SamplerYcbcrConversionInfo::default().conversion(video.conversion);
+        let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).level_count(1).layer_count(1);
+        let info = vk::ImageViewCreateInfo::default().next_sampler_ycbcr_conversion_info(&mut conversion).image(image).format(vk::Format::UNDEFINED)
+            .view_type(vk::ImageViewType::TYPE_2D).subresource_range(range);
+        let view = dev.raw.create_image_view(&info, None).map_err(error)?;
+        Ok(Arc::new(Self { dev, image, memory, view, array_view: vk::ImageView::null(), cube_view: vk::ImageView::null(), layers: Vec::new(), desc, bytes: 0,
+            aspect: vk::ImageAspectFlags::COLOR, layout: Mutex::new(vk::ImageLayout::UNDEFINED), external_owner: AtomicBool::new(false), borrowed: false, video, external,
+            #[cfg(target_os = "linux")] timeline: None }))
+    }
+
+    /// The layout the image is in now, as its owner says (an acquired swapchain image).
+    pub fn set_layout(&self, layout: vk::ImageLayout) {
+        *lock(&self.layout) = layout;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn adopt(dev: Arc<Device>, desc: TextureObj, image: vk::Image, memory: vk::DeviceMemory,
+        bytes: u64, layout: vk::ImageLayout, external: Option<Arc<dyn std::any::Any + Send + Sync>>, borrowed: bool) -> Result<Arc<Self>, String> {
         let aspect = if desc.format == format::DEPTH24_STENCIL8 { vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL }
             else if format::is_depth(desc.format) { vk::ImageAspectFlags::DEPTH } else { vk::ImageAspectFlags::COLOR };
         dev.charge(bytes);
         let mut out = Self { dev, image, memory, view: vk::ImageView::null(), array_view: vk::ImageView::null(), cube_view: vk::ImageView::null(),
-            layers: Vec::new(), desc, bytes, aspect, layout: Mutex::new(layout), external_owner: AtomicBool::new(false), external,
+            layers: Vec::new(), desc, bytes, aspect, layout: Mutex::new(layout), external_owner: AtomicBool::new(false), borrowed, video: Default::default(), external,
             #[cfg(target_os = "linux")] timeline: None };
         let sampled_aspect = if format::is_depth(out.desc.format) { vk::ImageAspectFlags::DEPTH } else { aspect };
         let info = vk::ImageViewCreateInfo::default().image(image).format(vk_format(out.desc.format).ok_or("unknown image format")?)
@@ -174,11 +211,12 @@ impl Image {
         // and soft particles do with the scene depth, as on Metal, D3D11 and GL); only a depth
         // shape (a comparison) needs a depth image.
         let depth = format::is_depth(self.desc.format);
-        if (matches!(shape, 3 | 4) && !depth) || (matches!(shape, 1 | 5) && depth) || (shape == 5) != (self.desc.format == format::R32UINT) {
+        if (matches!(shape, 3 | 4) && !depth) || (matches!(shape, 1 | 5 | 6) && depth) || (shape == 5) != (self.desc.format == format::R32UINT)
+            || (self.video.conversion != vk::SamplerYcbcrConversion::null() && shape != 6) {
             return Err("sampled image format differs from shader texture type".into());
         }
         match shape {
-            0 | 3 | 5 => Ok(self.view),
+            0 | 3 | 5 | 6 => Ok(self.view),
             2 | 4 => Ok(self.array_view),
             1 if self.cube_view != vk::ImageView::null() => Ok(self.cube_view),
             _ => Err("sampled image has no matching cube/array view".into()),
@@ -214,10 +252,12 @@ impl Drop for Image {
         unsafe {
             for view in self.layers.drain(..) { self.dev.raw.destroy_image_view(view, None); }
             if self.view != vk::ImageView::null() { self.dev.raw.destroy_image_view(self.view, None); }
-            self.dev.raw.destroy_image_view(self.array_view, None);
-            self.dev.raw.destroy_image_view(self.cube_view, None);
-            self.dev.raw.destroy_image(self.image, None);
-            self.dev.raw.free_memory(self.memory, None);
+            if self.array_view != vk::ImageView::null() { self.dev.raw.destroy_image_view(self.array_view, None); }
+            if self.cube_view != vk::ImageView::null() { self.dev.raw.destroy_image_view(self.cube_view, None); }
+            if !self.borrowed {
+                self.dev.raw.destroy_image(self.image, None);
+                self.dev.raw.free_memory(self.memory, None);
+            }
         }
         self.dev.uncharge(self.bytes);
     }
@@ -251,8 +291,16 @@ impl Buffer {
             .sharing_mode(vk::SharingMode::EXCLUSIVE), None) }.map_err(error)?;
         let req = unsafe { dev.raw.get_buffer_memory_requirements(buffer) };
         let result = (|| {
-            let ty = dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
-                .or_else(|_| dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE))?;
+            // a buffer the GPU writes for the CPU to read (a readback) is CPU-cached where the
+            // device has such memory: reading uncached (write-combined) memory runs at a few
+            // hundred MB/s, a frame's readback took ~90 ms of the copy-out alone
+            let readback = usage.contains(vk::BufferUsageFlags::TRANSFER_DST) && !usage.contains(vk::BufferUsageFlags::TRANSFER_SRC);
+            let cached = if readback { dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_CACHED).ok() } else { None };
+            let ty = match cached {
+                Some(ty) => ty,
+                None => dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
+                    .or_else(|_| dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE))?,
+            };
             let memory = unsafe { dev.raw.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(ty), None) }.map_err(error)?;
             Ok::<_, String>((memory, ty))
         })();

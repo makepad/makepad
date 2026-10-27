@@ -385,4 +385,12 @@ hal_commands! {
     /// next to the Windows notification icon), shows it in front and gives it the focus. Its focus
     /// loss (a click anywhere else) answers `PopupDismissed`.
     WindowAtTray = 154, window_at_tray { id: obj, tray: u64, w: f32, h: f32 };
+    /// The eyes XR window `id`'s next frame shows with, when they are not its `XrFrame`'s (a
+    /// picture rendered elsewhere, for other eyes): `eyes` is two `XrEye` (`buffers::Wire`). The
+    /// shell gives them to the display (the runtime reprojects from them to the display's pose).
+    XrFrameEyes = 155, xr_frame_eyes { id: obj, eyes: rng };
+    /// XR window `id`'s `XrFrame`s are located `lead_ns` past their display time (head, eyes,
+    /// hands, controllers): a picture rendered elsewhere from them shows that much later (a
+    /// stream's measured latency). 0: at the display time.
+    XrPoseLead = 156, xr_pose_lead { id: obj, lead_ns: u64 };
 }

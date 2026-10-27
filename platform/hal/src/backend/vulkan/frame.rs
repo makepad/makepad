@@ -125,7 +125,7 @@ impl Vulkan {
             if sid == s.id { s.ledger.touch(Kind::Window, id.index, id.gen, s.frame, now); }
             return Ok(t.image.clone());
         }
-        let image = Image::new(self.dev.clone(), TextureObj { format: format::BGRA8, w: size[0], h: size[1], depth: layers, mips: 1,
+        let image = Image::new(self.dev.clone(), TextureObj { format: self.windows.source.window_format(sid, id), w: size[0], h: size[1], depth: layers, mips: 1,
             usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })?;
         // The host row is reconciled in step; a borrower never owns this allocation.
         if sid == s.id { s.ledger.add(window_row(id, &image, now, s.frame)); }
@@ -513,8 +513,11 @@ impl Vulkan {
                         Some(composed) => composed,
                         // the retained image a badge layer is composed over
                         None if layered => { self.retained_stale.remove(&key.1.index); self.offscreen(s, target, size, now)? }
-                        // a multiview window: its own image, a layer per view
-                        None if views > 1 => self.offscreen_layers(s, target, size, views as u32, now)?,
+                        // a multiview window: the shell's own target (a layer per view), or its own image
+                        None if views > 1 => match self.windows.source.target(key.0, key.1, size) {
+                            Some(image) => { if key.0 == HOST { self.retained_stale.insert(key.1.index); } image }
+                            None => self.offscreen_layers(s, target, size, views as u32, now)?,
+                        },
                         None => match self.windows.source.target(key.0, key.1, size) {
                             // the retained image no longer holds the newest frame
                             Some(image) => { if key.0 == HOST { self.retained_stale.insert(key.1.index); } image }
@@ -752,7 +755,16 @@ impl Vulkan {
             }
         }
         let Some(state) = self.pipe.get(&(s.id, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen).map(|p| p.state.clone()) else { s.stale(); return Ok(None) };
-        let Some(pipeline) = state.select(&render_pass, d.flags) else { return Ok(None) };
+        // video slots: the samplers their bound images need (a decoder's external-format
+        // picture its conversion's) pick the program
+        let mut video: Vec<super::device::VideoSampler> = Vec::new();
+        for (i, shape) in state.src.code.textures.iter().enumerate() {
+            if *shape != super::pipeline::VIDEO_SHAPE { continue; }
+            let picture = self.resolve(s, id_at(arena, d.tex, i)).filter(|image| image.video.conversion != vk::SamplerYcbcrConversion::null());
+            video.push(match picture { Some(image) => image.video, None => self.dev.video_sampler(0, None)? });
+        }
+        let selected = if video.is_empty() { state.select(&render_pass, d.flags) } else { state.select_video(&render_pass, d.flags, &video) };
+        let Some(pipeline) = selected else { return Ok(None) };
         let p = &pipeline.program;
         let buffer = |id: Id| self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).map(|b| b.buffer.clone());
         let vertex = buffer(d.vb).ok_or("missing vertex buffer")?;
@@ -805,6 +817,7 @@ impl Vulkan {
             batch.buffers.push(b.buffer.clone());
         }
         let mut pick_mask = 0u32;
+        let mut video_slot = 0usize;
         for (i, shape) in p.code.textures.iter().enumerate() {
             let id = id_at(arena, d.tex, i);
             // An imported texture without storage yet (a video/camera target before its first
@@ -819,14 +832,21 @@ impl Vulkan {
                 None if self.pressure.is_starved(s.id, id) => self.fallback_image(*shape, batch)?,
                 None => return Err("missing sampled texture".into()),
             };
-            self.bind_image(s, id, image, *shape, p.code.texture_base + i as u32, attachments, batch, now, images)?;
+            // a video slot: a combined image sampler with the program's (immutable) sampler
+            let sampler = if *shape == super::pipeline::VIDEO_SHAPE {
+                video_slot += 1;
+                let v = p.video.get(video_slot - 1).ok_or("a video slot without its sampler")?;
+                if image.video != *v && image.video.conversion != vk::SamplerYcbcrConversion::null() { return Err("a video picture bound with another conversion's program".into()); }
+                Some(v.sampler)
+            } else { None };
+            self.bind_image(s, id, image, *shape, p.code.texture_base + i as u32, attachments, batch, now, images, sampler)?;
             if pick && p.code.pick_texture_base != ABSENT {
                 let twin_id = id_at(arena, d.pick_tex, i);
                 let twin = self.resolve(s, twin_id);
                 if twin.is_some() { pick_mask |= 1 << i; }
                 let twin = match twin { Some(t) => t, None => self.fallback_image(0, batch)? };
                 if !matches!(twin.desc.format, format::RGBA8 | format::BGRA8) { return Err("pick twins require RGBA8/BGRA8".into()); }
-                self.bind_image(s, twin_id, twin, 0, p.code.pick_texture_base + i as u32, attachments, batch, now, images)?;
+                self.bind_image(s, twin_id, twin, 0, p.code.pick_texture_base + i as u32, attachments, batch, now, images, None)?;
             }
         }
         if p.code.depth_binding != ABSENT {
@@ -871,12 +891,18 @@ impl Vulkan {
         if n > 0 { unsafe { self.dev.raw.update_descriptor_sets(&chunk[..n], &[]); } }
     }
 
+    /// `sampler`: a video slot's (a combined image sampler), else a plain sampled image.
+    #[allow(clippy::too_many_arguments)]
     fn bind_image(&self, s: &mut Session, id: Id, image: Arc<Image>, shape: u32, slot: u32, attachments: &[Arc<Image>], batch: &mut Batch, now: u64,
-        images: &mut Vec<(u32, vk::DescriptorType, vk::DescriptorImageInfo)>) -> Result<(), String> {
+        images: &mut Vec<(u32, vk::DescriptorType, vk::DescriptorImageInfo)>, sampler: Option<vk::Sampler>) -> Result<(), String> {
         if attachments.iter().any(|a| Arc::ptr_eq(a, &image)) { return Err("attachment feedback requires a separate pass".into()); }
         let view = image.sample_view(shape)?;
         image.to_sampled(batch.cb);
-        images.push((slot, vk::DescriptorType::SAMPLED_IMAGE, vk::DescriptorImageInfo::default().image_view(view).image_layout(image.sampled_layout())));
+        let info = vk::DescriptorImageInfo::default().image_view(view).image_layout(image.sampled_layout());
+        match sampler {
+            Some(sampler) => images.push((slot, vk::DescriptorType::COMBINED_IMAGE_SAMPLER, info.sampler(sampler))),
+            None => images.push((slot, vk::DescriptorType::SAMPLED_IMAGE, info)),
+        }
         batch.images.push(image);
         if !id.is_none() { s.ledger.touch(Kind::Texture, id.index, id.gen, s.frame, now); }
         Ok(())

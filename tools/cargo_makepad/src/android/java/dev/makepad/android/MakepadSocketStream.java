@@ -22,12 +22,16 @@ public class MakepadSocketStream {
     private Socket mSocket;
     private InputStream mInputStream;
     private OutputStream mOutputStream;
+    private byte[] mReadBuffer;
 
     public synchronized boolean connect(String host, int port, boolean useTls, boolean ignoreSslCert) {
         try {
             Socket socket = new Socket();
             socket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
             socket.setKeepAlive(true);
+            // small messages (a headset's poses, input) go out at once, never held back for an
+            // acknowledgement (Nagle with the peer's delayed ACK held them up to ~40 ms)
+            socket.setTcpNoDelay(true);
 
             if (useTls) {
                 socket = createTlsSocket(socket, host, port, ignoreSslCert);
@@ -69,17 +73,16 @@ public class MakepadSocketStream {
         }
 
         try {
-            byte[] buffer = new byte[maxBytes];
-            int readBytes = mInputStream.read(buffer);
+            // one read buffer, reused: a read every millisecond of a 1 MB buffer allocated
+            // ~1 GB/s of garbage
+            if (mReadBuffer == null || mReadBuffer.length < maxBytes) {
+                mReadBuffer = new byte[maxBytes];
+            }
+            int readBytes = mInputStream.read(mReadBuffer, 0, maxBytes);
             if (readBytes < 0) {
                 return null;
             }
-            if (readBytes == buffer.length) {
-                return buffer;
-            }
-            byte[] result = new byte[readBytes];
-            System.arraycopy(buffer, 0, result, 0, readBytes);
-            return result;
+            return java.util.Arrays.copyOf(mReadBuffer, readBytes);
         } catch (java.net.SocketTimeoutException e) {
             // the read timeout passed with nothing to read: an empty answer (not end of stream)
             return new byte[0];

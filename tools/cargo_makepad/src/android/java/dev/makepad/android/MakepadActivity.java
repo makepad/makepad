@@ -1262,6 +1262,10 @@ public class MakepadActivity
             finish();
             return;
         }
+        // the app's external files folder exists from the first start (the system makes it with
+        // the app's ownership): what a developer drops in with adb (a fleet credential, a config)
+        // is then readable by the app
+        getExternalFilesDir(null);
         if (mWebSocketsThread == null || !mWebSocketsThread.isAlive()) {
             mWebSocketsThread = new HandlerThread("WebSocketsThread");
             mWebSocketsThread.start();
@@ -3321,6 +3325,29 @@ public class MakepadActivity
     /// The largest frame the HEVC encoder that MediaCodec.createEncoderByType("video/hevc") picks
     /// (the first one in the regular list) takes: its width (which == 0) or height (which == 1),
     /// 0 when there is none. The image tile libraries size their pages to fit it.
+    private android.net.wifi.WifiManager.WifiLock lowLatencyWifi;
+
+    /// The low-latency Wi-Fi mode while `on` (WIFI_MODE_FULL_LOW_LATENCY where the system has
+    /// it, else full high-performance): no power save and no background scans.
+    public void networkLowLatency(boolean on) {
+        try {
+            if (on && lowLatencyWifi == null) {
+                android.net.wifi.WifiManager wifi = (android.net.wifi.WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                if (wifi == null) return;
+                int mode = Build.VERSION.SDK_INT >= 29 ? 4 : 3;
+                lowLatencyWifi = wifi.createWifiLock(mode, "makepad low latency");
+                lowLatencyWifi.setReferenceCounted(false);
+                lowLatencyWifi.acquire();
+                Log.i("Makepad", "low-latency Wi-Fi " + (lowLatencyWifi.isHeld() ? "held" : "not held"));
+            } else if (!on && lowLatencyWifi != null) {
+                lowLatencyWifi.release();
+                lowLatencyWifi = null;
+            }
+        } catch (Exception e) {
+            Log.e("Makepad", "low-latency Wi-Fi: " + e);
+        }
+    }
+
     public int hevcEncoderMaxSize(int which) {
         try {
             MediaCodecList list = new MediaCodecList(MediaCodecList.REGULAR_CODECS);

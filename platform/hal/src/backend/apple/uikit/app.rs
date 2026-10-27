@@ -486,6 +486,8 @@ fn command(sid: u32, cmd: OsCmd, taken: u64) {
         | OsCmd::TraySet { .. }
         | OsCmd::TrayRemove { .. }
         | OsCmd::WindowAtTray { .. }
+        | OsCmd::XrFrameEyes { .. }
+        | OsCmd::XrPoseLead { .. }
         | OsCmd::SelectionSet { .. }
         | OsCmd::ShareText { .. }
         | OsCmd::DragReply { .. }

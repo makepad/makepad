@@ -329,6 +329,16 @@ impl Cx {
                 }
             }
             let announced = std::mem::take(&mut self.hal.beat);
+            // a hosted app beats at its host's Ticks, and at once for its XR window's frames
+            let xr_beat = std::mem::take(&mut self.hal.xr_beat);
+            if hosted && xr_beat && !quitting && !self.hal.device_lost {
+                if !self.hal_guarded(true, |cx| cx.hal_beat()) {
+                    self.call_event_handler(&Event::Shutdown);
+                    self.hal_submit_batch();
+                    break 'turns;
+                }
+                self.hal_submit_batch();
+            }
             let gpu_ready = batch.is_none() || in_flight.len() < BATCH_FRAMES_IN_FLIGHT || self.frame_completed_serial() >= in_flight[0]
                 || last_beat.elapsed() >= BATCH_STALL;
             let due = std::time::Instant::now() >= next_beat && gpu_ready;

@@ -60,6 +60,8 @@ pub const KHR_SYNCHRONIZATION_2_NAME: &CStr = c"VK_KHR_synchronization2";
 pub const KHR_TIMELINE_SEMAPHORE_NAME: &CStr = c"VK_KHR_timeline_semaphore";
 pub const KHR_VIDEO_ENCODE_H264_NAME: &CStr = c"VK_KHR_video_encode_h264";
 pub const KHR_VIDEO_ENCODE_H265_NAME: &CStr = c"VK_KHR_video_encode_h265";
+pub const KHR_VIDEO_ENCODE_INTRA_REFRESH_NAME: &CStr = c"VK_KHR_video_encode_intra_refresh";
+pub const KHR_VIDEO_ENCODE_QUANTIZATION_MAP_NAME: &CStr = c"VK_KHR_video_encode_quantization_map";
 pub const KHR_VIDEO_ENCODE_QUEUE_NAME: &CStr = c"VK_KHR_video_encode_queue";
 pub const KHR_VIDEO_QUEUE_NAME: &CStr = c"VK_KHR_video_queue";
 pub const KHR_WAYLAND_SURFACE_NAME: &CStr = c"VK_KHR_wayland_surface";
@@ -5069,6 +5071,10 @@ impl DeviceCreateInfo {
     #[inline]
     pub fn next_physical_device_timeline_semaphore_features(mut self, next: &mut PhysicalDeviceTimelineSemaphoreFeatures) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceTimelineSemaphoreFeatures).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceTimelineSemaphoreFeatures as *const core::ffi::c_void; self }
     #[inline]
+    pub fn next_physical_device_video_encode_intra_refresh_features_khr(mut self, next: &mut PhysicalDeviceVideoEncodeIntraRefreshFeaturesKHR) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceVideoEncodeIntraRefreshFeaturesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceVideoEncodeIntraRefreshFeaturesKHR as *const core::ffi::c_void; self }
+    #[inline]
+    pub fn next_physical_device_video_encode_quantization_map_features_khr(mut self, next: &mut PhysicalDeviceVideoEncodeQuantizationMapFeaturesKHR) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceVideoEncodeQuantizationMapFeaturesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceVideoEncodeQuantizationMapFeaturesKHR as *const core::ffi::c_void; self }
+    #[inline]
     pub fn next_physical_device_vulkan11_features(mut self, next: &mut PhysicalDeviceVulkan11Features) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceVulkan11Features).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceVulkan11Features as *const core::ffi::c_void; self }
     #[inline]
     pub fn next_physical_device_vulkan12_features(mut self, next: &mut PhysicalDeviceVulkan12Features) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceVulkan12Features).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceVulkan12Features as *const core::ffi::c_void; self }
@@ -7004,6 +7010,7 @@ impl ImageLayout {
     pub const TRANSFER_SRC_OPTIMAL: Self = Self(6 as i32);
     pub const UNDEFINED: Self = Self(0 as i32);
     pub const VIDEO_ENCODE_DPB_KHR: Self = Self(1000299002 as i32);
+    pub const VIDEO_ENCODE_QUANTIZATION_MAP_KHR: Self = Self(1000553000 as i32);
     pub const VIDEO_ENCODE_SRC_KHR: Self = Self(1000299001 as i32);
 }
 impl core::fmt::Debug for ImageLayout { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -7196,6 +7203,7 @@ impl ImageUsageFlags {
     pub const TRANSFER_DST: Self = Self(2 as u32);
     pub const TRANSFER_SRC: Self = Self(1 as u32);
     pub const VIDEO_ENCODE_DPB_KHR: Self = Self(32768 as u32);
+    pub const VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_KHR: Self = Self(33554432 as u32);
     pub const VIDEO_ENCODE_SRC_KHR: Self = Self(16384 as u32);
     #[inline]
     pub const fn from_bits_retain(value: u32) -> Self { Self(value) }
@@ -8396,6 +8404,10 @@ impl PhysicalDeviceFeatures2 {
     #[inline]
     pub fn next_physical_device_timeline_semaphore_features(mut self, next: &mut PhysicalDeviceTimelineSemaphoreFeatures) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceTimelineSemaphoreFeatures).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceTimelineSemaphoreFeatures as *mut core::ffi::c_void; self }
     #[inline]
+    pub fn next_physical_device_video_encode_intra_refresh_features_khr(mut self, next: &mut PhysicalDeviceVideoEncodeIntraRefreshFeaturesKHR) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceVideoEncodeIntraRefreshFeaturesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceVideoEncodeIntraRefreshFeaturesKHR as *mut core::ffi::c_void; self }
+    #[inline]
+    pub fn next_physical_device_video_encode_quantization_map_features_khr(mut self, next: &mut PhysicalDeviceVideoEncodeQuantizationMapFeaturesKHR) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceVideoEncodeQuantizationMapFeaturesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceVideoEncodeQuantizationMapFeaturesKHR as *mut core::ffi::c_void; self }
+    #[inline]
     pub fn next_physical_device_vulkan11_features(mut self, next: &mut PhysicalDeviceVulkan11Features) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceVulkan11Features).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceVulkan11Features as *mut core::ffi::c_void; self }
     #[inline]
     pub fn next_physical_device_vulkan12_features(mut self, next: &mut PhysicalDeviceVulkan12Features) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceVulkan12Features).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceVulkan12Features as *mut core::ffi::c_void; self }
@@ -9182,6 +9194,24 @@ match self.0 {
 } }
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct PhysicalDeviceVideoEncodeIntraRefreshFeaturesKHR {
+    pub s_type: StructureType,
+    pub p_next: *mut core::ffi::c_void,
+    pub video_encode_intra_refresh: Bool32,
+}
+impl Default for PhysicalDeviceVideoEncodeIntraRefreshFeaturesKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000552004);
+    value
+} }
+unsafe impl Send for PhysicalDeviceVideoEncodeIntraRefreshFeaturesKHR {}
+unsafe impl Sync for PhysicalDeviceVideoEncodeIntraRefreshFeaturesKHR {}
+impl PhysicalDeviceVideoEncodeIntraRefreshFeaturesKHR {
+    #[inline]
+    pub fn video_encode_intra_refresh(mut self, value: bool) -> Self { self.video_encode_intra_refresh = value as u32; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct PhysicalDeviceVideoEncodeQualityLevelInfoKHR {
     pub s_type: StructureType,
     pub p_next: *const core::ffi::c_void,
@@ -9200,6 +9230,24 @@ impl PhysicalDeviceVideoEncodeQualityLevelInfoKHR {
     pub fn video_profile(mut self, value: &VideoProfileInfoKHR) -> Self { self.p_video_profile = value; self }
     #[inline]
     pub fn quality_level(mut self, value: u32) -> Self { self.quality_level = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct PhysicalDeviceVideoEncodeQuantizationMapFeaturesKHR {
+    pub s_type: StructureType,
+    pub p_next: *mut core::ffi::c_void,
+    pub video_encode_quantization_map: Bool32,
+}
+impl Default for PhysicalDeviceVideoEncodeQuantizationMapFeaturesKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000553009);
+    value
+} }
+unsafe impl Send for PhysicalDeviceVideoEncodeQuantizationMapFeaturesKHR {}
+unsafe impl Sync for PhysicalDeviceVideoEncodeQuantizationMapFeaturesKHR {}
+impl PhysicalDeviceVideoEncodeQuantizationMapFeaturesKHR {
+    #[inline]
+    pub fn video_encode_quantization_map(mut self, value: bool) -> Self { self.video_encode_quantization_map = value as u32; self }
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -12660,7 +12708,9 @@ impl StructureType {
     pub const PHYSICAL_DEVICE_PROPERTIES_2: Self = Self(1000059001 as i32);
     pub const PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES: Self = Self(1000156004 as i32);
     pub const PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES: Self = Self(1000207000 as i32);
+    pub const PHYSICAL_DEVICE_VIDEO_ENCODE_INTRA_REFRESH_FEATURES_KHR: Self = Self(1000552004 as i32);
     pub const PHYSICAL_DEVICE_VIDEO_ENCODE_QUALITY_LEVEL_INFO_KHR: Self = Self(1000299006 as i32);
+    pub const PHYSICAL_DEVICE_VIDEO_ENCODE_QUANTIZATION_MAP_FEATURES_KHR: Self = Self(1000553009 as i32);
     pub const PHYSICAL_DEVICE_VIDEO_FORMAT_INFO_KHR: Self = Self(1000023014 as i32);
     pub const PHYSICAL_DEVICE_VULKAN_1_1_FEATURES: Self = Self(49 as i32);
     pub const PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES: Self = Self(50 as i32);
@@ -12713,6 +12763,7 @@ impl StructureType {
     pub const VIDEO_ENCODE_H264_PICTURE_INFO_KHR: Self = Self(1000038003 as i32);
     pub const VIDEO_ENCODE_H264_PROFILE_INFO_KHR: Self = Self(1000038007 as i32);
     pub const VIDEO_ENCODE_H264_QUALITY_LEVEL_PROPERTIES_KHR: Self = Self(1000038011 as i32);
+    pub const VIDEO_ENCODE_H264_QUANTIZATION_MAP_CAPABILITIES_KHR: Self = Self(1000553003 as i32);
     pub const VIDEO_ENCODE_H264_RATE_CONTROL_INFO_KHR: Self = Self(1000038008 as i32);
     pub const VIDEO_ENCODE_H264_RATE_CONTROL_LAYER_INFO_KHR: Self = Self(1000038009 as i32);
     pub const VIDEO_ENCODE_H264_SESSION_PARAMETERS_ADD_INFO_KHR: Self = Self(1000038002 as i32);
@@ -12725,6 +12776,7 @@ impl StructureType {
     pub const VIDEO_ENCODE_H265_PICTURE_INFO_KHR: Self = Self(1000039003 as i32);
     pub const VIDEO_ENCODE_H265_PROFILE_INFO_KHR: Self = Self(1000039007 as i32);
     pub const VIDEO_ENCODE_H265_QUALITY_LEVEL_PROPERTIES_KHR: Self = Self(1000039012 as i32);
+    pub const VIDEO_ENCODE_H265_QUANTIZATION_MAP_CAPABILITIES_KHR: Self = Self(1000553004 as i32);
     pub const VIDEO_ENCODE_H265_RATE_CONTROL_INFO_KHR: Self = Self(1000039009 as i32);
     pub const VIDEO_ENCODE_H265_RATE_CONTROL_LAYER_INFO_KHR: Self = Self(1000039010 as i32);
     pub const VIDEO_ENCODE_H265_SESSION_CREATE_INFO_KHR: Self = Self(1000039011 as i32);
@@ -12733,18 +12785,27 @@ impl StructureType {
     pub const VIDEO_ENCODE_H265_SESSION_PARAMETERS_FEEDBACK_INFO_KHR: Self = Self(1000039014 as i32);
     pub const VIDEO_ENCODE_H265_SESSION_PARAMETERS_GET_INFO_KHR: Self = Self(1000039013 as i32);
     pub const VIDEO_ENCODE_INFO_KHR: Self = Self(1000299000 as i32);
+    pub const VIDEO_ENCODE_INTRA_REFRESH_CAPABILITIES_KHR: Self = Self(1000552000 as i32);
+    pub const VIDEO_ENCODE_INTRA_REFRESH_INFO_KHR: Self = Self(1000552002 as i32);
     pub const VIDEO_ENCODE_QUALITY_LEVEL_INFO_KHR: Self = Self(1000299008 as i32);
     pub const VIDEO_ENCODE_QUALITY_LEVEL_PROPERTIES_KHR: Self = Self(1000299007 as i32);
+    pub const VIDEO_ENCODE_QUANTIZATION_MAP_CAPABILITIES_KHR: Self = Self(1000553000 as i32);
+    pub const VIDEO_ENCODE_QUANTIZATION_MAP_INFO_KHR: Self = Self(1000553002 as i32);
+    pub const VIDEO_ENCODE_QUANTIZATION_MAP_SESSION_PARAMETERS_CREATE_INFO_KHR: Self = Self(1000553005 as i32);
     pub const VIDEO_ENCODE_RATE_CONTROL_INFO_KHR: Self = Self(1000299001 as i32);
     pub const VIDEO_ENCODE_RATE_CONTROL_LAYER_INFO_KHR: Self = Self(1000299002 as i32);
+    pub const VIDEO_ENCODE_SESSION_INTRA_REFRESH_CREATE_INFO_KHR: Self = Self(1000552001 as i32);
     pub const VIDEO_ENCODE_SESSION_PARAMETERS_FEEDBACK_INFO_KHR: Self = Self(1000299010 as i32);
     pub const VIDEO_ENCODE_SESSION_PARAMETERS_GET_INFO_KHR: Self = Self(1000299009 as i32);
     pub const VIDEO_ENCODE_USAGE_INFO_KHR: Self = Self(1000299004 as i32);
     pub const VIDEO_END_CODING_INFO_KHR: Self = Self(1000023009 as i32);
+    pub const VIDEO_FORMAT_H265_QUANTIZATION_MAP_PROPERTIES_KHR: Self = Self(1000553006 as i32);
     pub const VIDEO_FORMAT_PROPERTIES_KHR: Self = Self(1000023015 as i32);
+    pub const VIDEO_FORMAT_QUANTIZATION_MAP_PROPERTIES_KHR: Self = Self(1000553001 as i32);
     pub const VIDEO_PICTURE_RESOURCE_INFO_KHR: Self = Self(1000023002 as i32);
     pub const VIDEO_PROFILE_INFO_KHR: Self = Self(1000023000 as i32);
     pub const VIDEO_PROFILE_LIST_INFO_KHR: Self = Self(1000023013 as i32);
+    pub const VIDEO_REFERENCE_INTRA_REFRESH_INFO_KHR: Self = Self(1000552003 as i32);
     pub const VIDEO_REFERENCE_SLOT_INFO_KHR: Self = Self(1000023011 as i32);
     pub const VIDEO_SESSION_CREATE_INFO_KHR: Self = Self(1000023005 as i32);
     pub const VIDEO_SESSION_MEMORY_REQUIREMENTS_KHR: Self = Self(1000023003 as i32);
@@ -12874,6 +12935,19 @@ match self.0 {
     1000506000 => f.write_str("PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR"),
     1000506001 => f.write_str("COOPERATIVE_MATRIX_PROPERTIES_KHR"),
     1000506002 => f.write_str("PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_KHR"),
+    1000552000 => f.write_str("VIDEO_ENCODE_INTRA_REFRESH_CAPABILITIES_KHR"),
+    1000552001 => f.write_str("VIDEO_ENCODE_SESSION_INTRA_REFRESH_CREATE_INFO_KHR"),
+    1000552002 => f.write_str("VIDEO_ENCODE_INTRA_REFRESH_INFO_KHR"),
+    1000552003 => f.write_str("VIDEO_REFERENCE_INTRA_REFRESH_INFO_KHR"),
+    1000552004 => f.write_str("PHYSICAL_DEVICE_VIDEO_ENCODE_INTRA_REFRESH_FEATURES_KHR"),
+    1000553000 => f.write_str("VIDEO_ENCODE_QUANTIZATION_MAP_CAPABILITIES_KHR"),
+    1000553001 => f.write_str("VIDEO_FORMAT_QUANTIZATION_MAP_PROPERTIES_KHR"),
+    1000553002 => f.write_str("VIDEO_ENCODE_QUANTIZATION_MAP_INFO_KHR"),
+    1000553003 => f.write_str("VIDEO_ENCODE_H264_QUANTIZATION_MAP_CAPABILITIES_KHR"),
+    1000553004 => f.write_str("VIDEO_ENCODE_H265_QUANTIZATION_MAP_CAPABILITIES_KHR"),
+    1000553005 => f.write_str("VIDEO_ENCODE_QUANTIZATION_MAP_SESSION_PARAMETERS_CREATE_INFO_KHR"),
+    1000553006 => f.write_str("VIDEO_FORMAT_H265_QUANTIZATION_MAP_PROPERTIES_KHR"),
+    1000553009 => f.write_str("PHYSICAL_DEVICE_VIDEO_ENCODE_QUANTIZATION_MAP_FEATURES_KHR"),
     11 => f.write_str("QUERY_POOL_CREATE_INFO"),
     12 => f.write_str("BUFFER_CREATE_INFO"),
     14 => f.write_str("IMAGE_CREATE_INFO"),
@@ -13629,7 +13703,15 @@ impl VideoCapabilitiesKHR {
     #[inline]
     pub fn next_video_encode_h264_capabilities_khr(mut self, next: &mut VideoEncodeH264CapabilitiesKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264CapabilitiesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264CapabilitiesKHR as *mut core::ffi::c_void; self }
     #[inline]
+    pub fn next_video_encode_h264_quantization_map_capabilities_khr(mut self, next: &mut VideoEncodeH264QuantizationMapCapabilitiesKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264QuantizationMapCapabilitiesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264QuantizationMapCapabilitiesKHR as *mut core::ffi::c_void; self }
+    #[inline]
     pub fn next_video_encode_h265_capabilities_khr(mut self, next: &mut VideoEncodeH265CapabilitiesKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265CapabilitiesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265CapabilitiesKHR as *mut core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_encode_h265_quantization_map_capabilities_khr(mut self, next: &mut VideoEncodeH265QuantizationMapCapabilitiesKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265QuantizationMapCapabilitiesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265QuantizationMapCapabilitiesKHR as *mut core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_encode_intra_refresh_capabilities_khr(mut self, next: &mut VideoEncodeIntraRefreshCapabilitiesKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeIntraRefreshCapabilitiesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeIntraRefreshCapabilitiesKHR as *mut core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_encode_quantization_map_capabilities_khr(mut self, next: &mut VideoEncodeQuantizationMapCapabilitiesKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeQuantizationMapCapabilitiesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeQuantizationMapCapabilitiesKHR as *mut core::ffi::c_void; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -14019,6 +14101,8 @@ pub struct VideoEncodeFlagsKHR(pub u32);
 impl VideoEncodeFlagsKHR {
     pub const fn from_raw(value: u32) -> Self { Self(value) }
     pub const fn as_raw(self) -> u32 { self.0 }
+    pub const INTRA_REFRESH: Self = Self(4 as u32);
+    pub const WITH_QUANTIZATION_DELTA_MAP: Self = Self(1 as u32);
     #[inline]
     pub const fn from_bits_retain(value: u32) -> Self { Self(value) }
     #[inline]
@@ -14314,6 +14398,27 @@ impl VideoEncodeH264QualityLevelPropertiesKHR {
     pub fn preferred_max_l1_reference_count(mut self, value: u32) -> Self { self.preferred_max_l1_reference_count = value; self }
     #[inline]
     pub fn preferred_std_entropy_coding_mode_flag(mut self, value: bool) -> Self { self.preferred_std_entropy_coding_mode_flag = value as u32; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH264QuantizationMapCapabilitiesKHR {
+    pub s_type: StructureType,
+    pub p_next: *mut core::ffi::c_void,
+    pub min_qp_delta: i32,
+    pub max_qp_delta: i32,
+}
+impl Default for VideoEncodeH264QuantizationMapCapabilitiesKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000553003);
+    value
+} }
+unsafe impl Send for VideoEncodeH264QuantizationMapCapabilitiesKHR {}
+unsafe impl Sync for VideoEncodeH264QuantizationMapCapabilitiesKHR {}
+impl VideoEncodeH264QuantizationMapCapabilitiesKHR {
+    #[inline]
+    pub fn min_qp_delta(mut self, value: i32) -> Self { self.min_qp_delta = value; self }
+    #[inline]
+    pub fn max_qp_delta(mut self, value: i32) -> Self { self.max_qp_delta = value; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -14882,6 +14987,27 @@ impl VideoEncodeH265QualityLevelPropertiesKHR {
     #[inline]
     pub fn preferred_max_l1_reference_count(mut self, value: u32) -> Self { self.preferred_max_l1_reference_count = value; self }
 }
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeH265QuantizationMapCapabilitiesKHR {
+    pub s_type: StructureType,
+    pub p_next: *mut core::ffi::c_void,
+    pub min_qp_delta: i32,
+    pub max_qp_delta: i32,
+}
+impl Default for VideoEncodeH265QuantizationMapCapabilitiesKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000553004);
+    value
+} }
+unsafe impl Send for VideoEncodeH265QuantizationMapCapabilitiesKHR {}
+unsafe impl Sync for VideoEncodeH265QuantizationMapCapabilitiesKHR {}
+impl VideoEncodeH265QuantizationMapCapabilitiesKHR {
+    #[inline]
+    pub fn min_qp_delta(mut self, value: i32) -> Self { self.min_qp_delta = value; self }
+    #[inline]
+    pub fn max_qp_delta(mut self, value: i32) -> Self { self.max_qp_delta = value; self }
+}
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VideoEncodeH265RateControlFlagsKHR(pub u32);
@@ -15262,7 +15388,104 @@ impl VideoEncodeInfoKHR {
     pub fn next_video_encode_h264_picture_info_khr(mut self, next: &mut VideoEncodeH264PictureInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264PictureInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264PictureInfoKHR as *const core::ffi::c_void; self }
     #[inline]
     pub fn next_video_encode_h265_picture_info_khr(mut self, next: &mut VideoEncodeH265PictureInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265PictureInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265PictureInfoKHR as *const core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_encode_intra_refresh_info_khr(mut self, next: &mut VideoEncodeIntraRefreshInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeIntraRefreshInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeIntraRefreshInfoKHR as *const core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_encode_quantization_map_info_khr(mut self, next: &mut VideoEncodeQuantizationMapInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeQuantizationMapInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeQuantizationMapInfoKHR as *const core::ffi::c_void; self }
 }
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeIntraRefreshCapabilitiesKHR {
+    pub s_type: StructureType,
+    pub p_next: *mut core::ffi::c_void,
+    pub intra_refresh_modes: VideoEncodeIntraRefreshModeFlagsKHR,
+    pub max_intra_refresh_cycle_duration: u32,
+    pub max_intra_refresh_active_reference_pictures: u32,
+    pub partition_independent_intra_refresh_regions: Bool32,
+    pub non_rectangular_intra_refresh_regions: Bool32,
+}
+impl Default for VideoEncodeIntraRefreshCapabilitiesKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000552000);
+    value
+} }
+unsafe impl Send for VideoEncodeIntraRefreshCapabilitiesKHR {}
+unsafe impl Sync for VideoEncodeIntraRefreshCapabilitiesKHR {}
+impl VideoEncodeIntraRefreshCapabilitiesKHR {
+    #[inline]
+    pub fn intra_refresh_modes(mut self, value: VideoEncodeIntraRefreshModeFlagsKHR) -> Self { self.intra_refresh_modes = value; self }
+    #[inline]
+    pub fn max_intra_refresh_cycle_duration(mut self, value: u32) -> Self { self.max_intra_refresh_cycle_duration = value; self }
+    #[inline]
+    pub fn max_intra_refresh_active_reference_pictures(mut self, value: u32) -> Self { self.max_intra_refresh_active_reference_pictures = value; self }
+    #[inline]
+    pub fn partition_independent_intra_refresh_regions(mut self, value: bool) -> Self { self.partition_independent_intra_refresh_regions = value as u32; self }
+    #[inline]
+    pub fn non_rectangular_intra_refresh_regions(mut self, value: bool) -> Self { self.non_rectangular_intra_refresh_regions = value as u32; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeIntraRefreshInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub intra_refresh_cycle_duration: u32,
+    pub intra_refresh_index: u32,
+}
+impl Default for VideoEncodeIntraRefreshInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000552002);
+    value
+} }
+unsafe impl Send for VideoEncodeIntraRefreshInfoKHR {}
+unsafe impl Sync for VideoEncodeIntraRefreshInfoKHR {}
+impl VideoEncodeIntraRefreshInfoKHR {
+    #[inline]
+    pub fn intra_refresh_cycle_duration(mut self, value: u32) -> Self { self.intra_refresh_cycle_duration = value; self }
+    #[inline]
+    pub fn intra_refresh_index(mut self, value: u32) -> Self { self.intra_refresh_index = value; self }
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VideoEncodeIntraRefreshModeFlagsKHR(pub u32);
+impl VideoEncodeIntraRefreshModeFlagsKHR {
+    pub const fn from_raw(value: u32) -> Self { Self(value) }
+    pub const fn as_raw(self) -> u32 { self.0 }
+    pub const BLOCK_BASED: Self = Self(2 as u32);
+    pub const BLOCK_COLUMN_BASED: Self = Self(8 as u32);
+    pub const BLOCK_ROW_BASED: Self = Self(4 as u32);
+    pub const PER_PICTURE_PARTITION: Self = Self(1 as u32);
+    #[inline]
+    pub const fn from_bits_retain(value: u32) -> Self { Self(value) }
+    #[inline]
+    pub const fn bits(self) -> u32 { self.0 }
+    #[inline]
+    pub const fn empty() -> Self { Self(0) }
+    #[inline]
+    pub const fn all() -> Self { Self(!0) }
+    #[inline]
+    pub const fn is_empty(self) -> bool { self.0 == 0 }
+    #[inline]
+    pub const fn is_all(self) -> bool { self.0 == !0 }
+    #[inline]
+    pub const fn contains(self, other: Self) -> bool { self.0 & other.0 == other.0 }
+    #[inline]
+    pub const fn intersects(self, other: Self) -> bool { self.0 & other.0 != 0 }
+}
+impl core::ops::BitOr for VideoEncodeIntraRefreshModeFlagsKHR { type Output = Self; #[inline] fn bitor(self, other: Self) -> Self { Self(self.0 | other.0) } }
+impl core::ops::BitOrAssign for VideoEncodeIntraRefreshModeFlagsKHR { #[inline] fn bitor_assign(&mut self, other: Self) { self.0 |= other.0 } }
+impl core::ops::BitAnd for VideoEncodeIntraRefreshModeFlagsKHR { type Output = Self; #[inline] fn bitand(self, other: Self) -> Self { Self(self.0 & other.0) } }
+impl core::ops::BitAndAssign for VideoEncodeIntraRefreshModeFlagsKHR { #[inline] fn bitand_assign(&mut self, other: Self) { self.0 &= other.0 } }
+impl core::ops::BitXor for VideoEncodeIntraRefreshModeFlagsKHR { type Output = Self; #[inline] fn bitxor(self, other: Self) -> Self { Self(self.0 ^ other.0) } }
+impl core::ops::BitXorAssign for VideoEncodeIntraRefreshModeFlagsKHR { #[inline] fn bitxor_assign(&mut self, other: Self) { self.0 ^= other.0 } }
+impl core::ops::Not for VideoEncodeIntraRefreshModeFlagsKHR { type Output = Self; #[inline] fn not(self) -> Self { Self(!self.0) } }
+impl core::fmt::Debug for VideoEncodeIntraRefreshModeFlagsKHR { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+debug_flags(f, self.0 as u64, &[
+(1, "PER_PICTURE_PARTITION"),
+(2, "BLOCK_BASED"),
+(4, "BLOCK_ROW_BASED"),
+(8, "BLOCK_COLUMN_BASED"),
+])
+} }
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct VideoEncodeQualityLevelInfoKHR {
@@ -15305,6 +15528,63 @@ impl VideoEncodeQualityLevelPropertiesKHR {
     pub fn next_video_encode_h264_quality_level_properties_khr(mut self, next: &mut VideoEncodeH264QualityLevelPropertiesKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264QualityLevelPropertiesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264QualityLevelPropertiesKHR as *mut core::ffi::c_void; self }
     #[inline]
     pub fn next_video_encode_h265_quality_level_properties_khr(mut self, next: &mut VideoEncodeH265QualityLevelPropertiesKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265QualityLevelPropertiesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265QualityLevelPropertiesKHR as *mut core::ffi::c_void; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeQuantizationMapCapabilitiesKHR {
+    pub s_type: StructureType,
+    pub p_next: *mut core::ffi::c_void,
+    pub max_quantization_map_extent: Extent2D,
+}
+impl Default for VideoEncodeQuantizationMapCapabilitiesKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000553000);
+    value
+} }
+unsafe impl Send for VideoEncodeQuantizationMapCapabilitiesKHR {}
+unsafe impl Sync for VideoEncodeQuantizationMapCapabilitiesKHR {}
+impl VideoEncodeQuantizationMapCapabilitiesKHR {
+    #[inline]
+    pub fn max_quantization_map_extent(mut self, value: Extent2D) -> Self { self.max_quantization_map_extent = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeQuantizationMapInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub quantization_map: ImageView,
+    pub quantization_map_extent: Extent2D,
+}
+impl Default for VideoEncodeQuantizationMapInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000553002);
+    value
+} }
+unsafe impl Send for VideoEncodeQuantizationMapInfoKHR {}
+unsafe impl Sync for VideoEncodeQuantizationMapInfoKHR {}
+impl VideoEncodeQuantizationMapInfoKHR {
+    #[inline]
+    pub fn quantization_map(mut self, value: ImageView) -> Self { self.quantization_map = value; self }
+    #[inline]
+    pub fn quantization_map_extent(mut self, value: Extent2D) -> Self { self.quantization_map_extent = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeQuantizationMapSessionParametersCreateInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub quantization_map_texel_size: Extent2D,
+}
+impl Default for VideoEncodeQuantizationMapSessionParametersCreateInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000553005);
+    value
+} }
+unsafe impl Send for VideoEncodeQuantizationMapSessionParametersCreateInfoKHR {}
+unsafe impl Sync for VideoEncodeQuantizationMapSessionParametersCreateInfoKHR {}
+impl VideoEncodeQuantizationMapSessionParametersCreateInfoKHR {
+    #[inline]
+    pub fn quantization_map_texel_size(mut self, value: Extent2D) -> Self { self.quantization_map_texel_size = value; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -15445,6 +15725,24 @@ debug_flags(f, self.0 as u64, &[
 (4, "VBR"),
 ])
 } }
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoEncodeSessionIntraRefreshCreateInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub intra_refresh_mode: VideoEncodeIntraRefreshModeFlagsKHR,
+}
+impl Default for VideoEncodeSessionIntraRefreshCreateInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000552001);
+    value
+} }
+unsafe impl Send for VideoEncodeSessionIntraRefreshCreateInfoKHR {}
+unsafe impl Sync for VideoEncodeSessionIntraRefreshCreateInfoKHR {}
+impl VideoEncodeSessionIntraRefreshCreateInfoKHR {
+    #[inline]
+    pub fn intra_refresh_mode(mut self, value: VideoEncodeIntraRefreshModeFlagsKHR) -> Self { self.intra_refresh_mode = value; self }
+}
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct VideoEncodeSessionParametersFeedbackInfoKHR {
@@ -15625,6 +15923,24 @@ impl VideoEndCodingInfoKHR {
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct VideoFormatH265QuantizationMapPropertiesKHR {
+    pub s_type: StructureType,
+    pub p_next: *mut core::ffi::c_void,
+    pub compatible_ctb_sizes: VideoEncodeH265CtbSizeFlagsKHR,
+}
+impl Default for VideoFormatH265QuantizationMapPropertiesKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000553006);
+    value
+} }
+unsafe impl Send for VideoFormatH265QuantizationMapPropertiesKHR {}
+unsafe impl Sync for VideoFormatH265QuantizationMapPropertiesKHR {}
+impl VideoFormatH265QuantizationMapPropertiesKHR {
+    #[inline]
+    pub fn compatible_ctb_sizes(mut self, value: VideoEncodeH265CtbSizeFlagsKHR) -> Self { self.compatible_ctb_sizes = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct VideoFormatPropertiesKHR {
     pub s_type: StructureType,
     pub p_next: *mut core::ffi::c_void,
@@ -15655,6 +15971,28 @@ impl VideoFormatPropertiesKHR {
     pub fn image_tiling(mut self, value: ImageTiling) -> Self { self.image_tiling = value; self }
     #[inline]
     pub fn image_usage_flags(mut self, value: ImageUsageFlags) -> Self { self.image_usage_flags = value; self }
+    #[inline]
+    pub fn next_video_format_h265_quantization_map_properties_khr(mut self, next: &mut VideoFormatH265QuantizationMapPropertiesKHR) -> Self { unsafe { append_extension((next as *mut VideoFormatH265QuantizationMapPropertiesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoFormatH265QuantizationMapPropertiesKHR as *mut core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_format_quantization_map_properties_khr(mut self, next: &mut VideoFormatQuantizationMapPropertiesKHR) -> Self { unsafe { append_extension((next as *mut VideoFormatQuantizationMapPropertiesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoFormatQuantizationMapPropertiesKHR as *mut core::ffi::c_void; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VideoFormatQuantizationMapPropertiesKHR {
+    pub s_type: StructureType,
+    pub p_next: *mut core::ffi::c_void,
+    pub quantization_map_texel_size: Extent2D,
+}
+impl Default for VideoFormatQuantizationMapPropertiesKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000553001);
+    value
+} }
+unsafe impl Send for VideoFormatQuantizationMapPropertiesKHR {}
+unsafe impl Sync for VideoFormatQuantizationMapPropertiesKHR {}
+impl VideoFormatQuantizationMapPropertiesKHR {
+    #[inline]
+    pub fn quantization_map_texel_size(mut self, value: Extent2D) -> Self { self.quantization_map_texel_size = value; self }
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -15739,6 +16077,24 @@ impl VideoProfileListInfoKHR {
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct VideoReferenceIntraRefreshInfoKHR {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub dirty_intra_refresh_regions: u32,
+}
+impl Default for VideoReferenceIntraRefreshInfoKHR { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000552003);
+    value
+} }
+unsafe impl Send for VideoReferenceIntraRefreshInfoKHR {}
+unsafe impl Sync for VideoReferenceIntraRefreshInfoKHR {}
+impl VideoReferenceIntraRefreshInfoKHR {
+    #[inline]
+    pub fn dirty_intra_refresh_regions(mut self, value: u32) -> Self { self.dirty_intra_refresh_regions = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct VideoReferenceSlotInfoKHR {
     pub s_type: StructureType,
     pub p_next: *const core::ffi::c_void,
@@ -15761,6 +16117,8 @@ impl VideoReferenceSlotInfoKHR {
     pub fn next_video_encode_h264_dpb_slot_info_khr(mut self, next: &mut VideoEncodeH264DpbSlotInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH264DpbSlotInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH264DpbSlotInfoKHR as *const core::ffi::c_void; self }
     #[inline]
     pub fn next_video_encode_h265_dpb_slot_info_khr(mut self, next: &mut VideoEncodeH265DpbSlotInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265DpbSlotInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265DpbSlotInfoKHR as *const core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_reference_intra_refresh_info_khr(mut self, next: &mut VideoReferenceIntraRefreshInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoReferenceIntraRefreshInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoReferenceIntraRefreshInfoKHR as *const core::ffi::c_void; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -15769,6 +16127,7 @@ impl VideoSessionCreateFlagsKHR {
     pub const fn from_raw(value: u32) -> Self { Self(value) }
     pub const fn as_raw(self) -> u32 { self.0 }
     pub const ALLOW_ENCODE_PARAMETER_OPTIMIZATIONS: Self = Self(2 as u32);
+    pub const ALLOW_ENCODE_QUANTIZATION_DELTA_MAP: Self = Self(8 as u32);
     #[inline]
     pub const fn from_bits_retain(value: u32) -> Self { Self(value) }
     #[inline]
@@ -15846,6 +16205,8 @@ impl VideoSessionCreateInfoKHR {
     pub fn std_header_version(mut self, value: &ExtensionProperties) -> Self { self.p_std_header_version = value; self }
     #[inline]
     pub fn next_video_encode_h265_session_create_info_khr(mut self, next: &mut VideoEncodeH265SessionCreateInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265SessionCreateInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265SessionCreateInfoKHR as *const core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_encode_session_intra_refresh_create_info_khr(mut self, next: &mut VideoEncodeSessionIntraRefreshCreateInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeSessionIntraRefreshCreateInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeSessionIntraRefreshCreateInfoKHR as *const core::ffi::c_void; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -15883,6 +16244,7 @@ pub struct VideoSessionParametersCreateFlagsKHR(pub u32);
 impl VideoSessionParametersCreateFlagsKHR {
     pub const fn from_raw(value: u32) -> Self { Self(value) }
     pub const fn as_raw(self) -> u32 { self.0 }
+    pub const QUANTIZATION_MAP_COMPATIBLE: Self = Self(1 as u32);
     #[inline]
     pub const fn from_bits_retain(value: u32) -> Self { Self(value) }
     #[inline]
@@ -15941,6 +16303,8 @@ impl VideoSessionParametersCreateInfoKHR {
     pub fn next_video_encode_h265_session_parameters_create_info_khr(mut self, next: &mut VideoEncodeH265SessionParametersCreateInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeH265SessionParametersCreateInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeH265SessionParametersCreateInfoKHR as *const core::ffi::c_void; self }
     #[inline]
     pub fn next_video_encode_quality_level_info_khr(mut self, next: &mut VideoEncodeQualityLevelInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeQualityLevelInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeQualityLevelInfoKHR as *const core::ffi::c_void; self }
+    #[inline]
+    pub fn next_video_encode_quantization_map_session_parameters_create_info_khr(mut self, next: &mut VideoEncodeQuantizationMapSessionParametersCreateInfoKHR) -> Self { unsafe { append_extension((next as *mut VideoEncodeQuantizationMapSessionParametersCreateInfoKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut VideoEncodeQuantizationMapSessionParametersCreateInfoKHR as *const core::ffi::c_void; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]

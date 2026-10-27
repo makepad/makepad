@@ -454,7 +454,12 @@ impl Batch {
             // driver round trips) every few frames as a view's draw count wandered.
             let draws = self.draw_counts.get(&state).ok_or("pipeline missing from frame descriptor counts")?.next_power_of_two();
             let mut counts: FastMap<vk::DescriptorType, u32> = FastMap::default();
-            for (_, ty) in &p.descriptor_types { let count = counts.entry(*ty).or_default(); *count = count.saturating_add(draws); }
+            // (a combined image sampler through a Y'CbCr conversion may take up to three
+            // descriptors: combinedImageSamplerDescriptorCount)
+            for (_, ty) in &p.descriptor_types {
+                let per = if *ty == vk::DescriptorType::COMBINED_IMAGE_SAMPLER { 3 } else { 1 };
+                let count = counts.entry(*ty).or_default(); *count = count.saturating_add(draws.saturating_mul(per));
+            }
             let sizes: Vec<_> = counts.into_iter().map(|(ty, count)| vk::DescriptorPoolSize::default().ty(ty).descriptor_count(count)).collect();
             let pool = unsafe { self.dev.raw.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(draws).pool_sizes(&sizes), None) }.map_err(error)?;
             self.descriptors.insert(p.descriptors, (pool, draws, true)); pool

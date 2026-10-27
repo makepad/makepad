@@ -83,9 +83,11 @@ impl DrawVars {
                 if let Some(error) = view.error { return Err(error.to_owned()); }
                 let stage = &view.stages[0];
                 let textures = mapping.textures.iter().map(|t| match t.tex_type {
-                    TextureType::Texture2d | TextureType::TextureVideo => Ok(0), TextureType::TextureCube => Ok(1),
+                    TextureType::Texture2d => Ok(0), TextureType::TextureCube => Ok(1),
                     TextureType::Texture2dArray => Ok(2), TextureType::TextureDepth => Ok(3), TextureType::TextureDepthArray => Ok(4),
-                    _ => Err("HAL Vulkan texture shape is not a 2D/cube/depth image".to_owned()),
+                    // a combined image sampler (its sampler in the descriptor layout)
+                    TextureType::TextureVideo => Ok(6),
+                    _ => Err("HAL Vulkan texture shape is not a 2D/cube/depth/video image".to_owned()),
                 }).collect::<Result<Vec<_>, _>>()?;
                 let samplers: Vec<_> = mapping.samplers.iter().map(|s| makepad_hal::spirv::SpirvSampler {
                     filter: if s.filter == SamplerFilter::Nearest { 0 } else { 1 },

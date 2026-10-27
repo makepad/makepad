@@ -2,11 +2,10 @@
 //! its render pose and per-eye projections; the display pose can change
 //! without rendering the scene again. No device-specific tracking here.
 
-use makepad_widgets::{live_id, LiveId};
-use super::tracking::quat_columns;
+use crate::pose::quat_columns;
 
 /// Metadata that must travel with an eye image, including images supplied
-/// by a future 3D client. Axes are columns of each eye-to-head rotation;
+/// by a remote renderer (the stream's render eyes). Axes are columns of each eye-to-head rotation;
 /// projections are (x scale, x offset, y scale, y offset).
 #[derive(Clone, Copy, Debug)]
 pub struct EyeFrame {
@@ -27,7 +26,9 @@ impl EyeFrame {
     /// Inverse mapping: source_eye^-1 * source_head^-1 * display_head *
     /// display_eye. A destination ray is rotated into the old image and
     /// projected there, as in Monado's render_calc_time_warp_matrix.
-    pub fn uniforms(&self, display: &Self) -> [(LiveId, [f32; 4]); 10] {
+    /// In order: the left eye's x, y, z columns, the right eye's x, y, z columns, then the source
+    /// projections (left, right) and the display projections (left, right).
+    pub fn warp(&self, display: &Self) -> [[f32; 4]; 10] {
         let source_head = quat_columns(self.orientation);
         let display_head = quat_columns(display.orientation);
         let column = |eye: usize, axis: usize| {
@@ -37,16 +38,16 @@ impl EyeFrame {
             [v[0], v[1], v[2], 0.0]
         };
         [
-            (live_id!(tw_lx), column(0, 0)),
-            (live_id!(tw_ly), column(0, 1)),
-            (live_id!(tw_lz), column(0, 2)),
-            (live_id!(tw_rx), column(1, 0)),
-            (live_id!(tw_ry), column(1, 1)),
-            (live_id!(tw_rz), column(1, 2)),
-            (live_id!(tw_src_l), self.projection[0]),
-            (live_id!(tw_src_r), self.projection[1]),
-            (live_id!(tw_dst_l), display.projection[0]),
-            (live_id!(tw_dst_r), display.projection[1]),
+            column(0, 0),
+            column(0, 1),
+            column(0, 2),
+            column(1, 0),
+            column(1, 1),
+            column(1, 2),
+            self.projection[0],
+            self.projection[1],
+            display.projection[0],
+            display.projection[1],
         ]
     }
 

@@ -69,6 +69,18 @@ impl Wire for TouchPoint {
     }
 }
 
+/// `XrEye`: orientation, position, fov, 4 bytes each (floats as their bits).
+impl Wire for XrEye {
+    const SIZE: usize = 11 * 4;
+    fn write(&self, out: &mut Vec<u8>) {
+        for x in self.pose.orientation.iter().chain(self.pose.position.iter()).chain(self.fov.iter()) { w32(out, x.to_bits()); }
+    }
+    fn read(b: &[u8]) -> Self {
+        let f = |i: usize| f32::from_bits(r32(b, i * 4));
+        XrEye { pose: XrPose { orientation: [f(0), f(1), f(2), f(3)], position: [f(4), f(5), f(6)] }, fov: [f(7), f(8), f(9), f(10)] }
+    }
+}
+
 /// `XrFrame`: its fields in declaration order, 4 bytes each (floats as their bits, integers as
 /// u32; a hand's pinch strengths one u32 each).
 impl Wire for XrFrame {

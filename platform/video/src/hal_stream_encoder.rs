@@ -127,6 +127,19 @@ impl HalStreamEncoder {
     pub fn set_bitrate_kbps(&mut self, kbps: u32) {
         hal::hal_stream_encoder_bitrate(self.id, kbps);
     }
+
+    /// (columns, rows, texel px, delta range) of the QP delta map, when the encoder takes one.
+    #[cfg(target_os = "linux")]
+    pub fn qp_grid(&self) -> Option<crate::stream_encoder::QpGrid> {
+        let mut v = [0i32; 6];
+        hal::hal_stream_encoder_qp_grid(self.id, &mut v).then(|| crate::stream_encoder::QpGrid { cols: v[0] as u32, rows: v[1] as u32, texel: [v[2] as u32, v[3] as u32], min: v[4], max: v[5] })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn set_qp_map(&mut self, deltas: &[i8]) -> bool {
+        let bytes: &[u8] = unsafe { std::slice::from_raw_parts(deltas.as_ptr().cast(), deltas.len()) };
+        hal::hal_stream_encoder_qp_map(self.id, bytes)
+    }
 }
 
 impl Drop for HalStreamEncoder {

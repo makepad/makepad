@@ -13,6 +13,9 @@ use std::io::{self, Write};
 pub mod server;
 #[cfg(feature = "host")]
 pub mod host;
+pub mod xr;
+#[cfg(feature = "host")]
+pub mod xr_host;
 
 pub const VERSION: u16 = 7;
 pub const DEFAULT_PORT: u16 = 8790;
@@ -257,6 +260,10 @@ impl Out {
         self.0.extend_from_slice(&v.to_le_bytes());
         self
     }
+    fn f32(&mut self, v: f32) -> &mut Self {
+        self.0.extend_from_slice(&v.to_le_bytes());
+        self
+    }
     fn bytes(&mut self, v: &[u8]) -> &mut Self {
         self.u32(v.len() as u32);
         self.0.extend_from_slice(v);
@@ -309,6 +316,9 @@ impl<'a> In<'a> {
     }
     fn u64(&mut self) -> io::Result<u64> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    fn f32(&mut self) -> io::Result<f32> {
+        Ok(f32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
     fn bytes(&mut self) -> io::Result<&'a [u8]> {
         let n = self.u32()? as usize;

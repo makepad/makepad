@@ -240,10 +240,15 @@ pub mod info_flags {
     /// The backend renders multiview passes (`Pass::views` 2): an app draws a stereo view in one
     /// pass instead of one per eye.
     pub const MULTIVIEW: u32 = 1024;
+    /// With `XR`: the XR window has no display of its own (a remote headset: its frames go to an
+    /// encoder the app drives). XR passes render into the pass's own colour and depth textures,
+    /// both eyes side by side, and the app hands the result on; the XR window only paces them
+    /// (its `XrFrame`s and `FrameReady`s), it is never presented.
+    pub const XR_OFFSCREEN: u32 = 2048;
 
     #[test]
     fn the_flags_are_distinct_bits() {
-        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW];
+        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW, XR_OFFSCREEN];
         for (i, a) in all.iter().enumerate() {
             assert!(a.is_power_of_two());
             assert!(all[i + 1..].iter().all(|b| a & b == 0), "flag {a} shares a bit");
@@ -722,6 +727,10 @@ pub mod texture_handle {
     pub const LUMA: u32 = 1;
     /// Its interleaved chroma plane (Metal: plane 1), as an RG8 texture of half the size.
     pub const CHROMA: u32 = 2;
+    /// A decoder's whole picture (Vulkan on Android: a stream decoder's picture ticket, a Y'CbCr
+    /// hardware buffer) as one video texture: sampled from a `texture_video` slot it gives the
+    /// picture's raw codes (.g = Y', .b = Cb, .r = Cr, 0..1 of the 8-bit range).
+    pub const VIDEO: u32 = 3;
 }
 
 /// The bits above the kind byte of `WindowCreate::kind`: how a macOS window is made (Cx's

@@ -103,6 +103,9 @@ impl Cx {
         // nothing else asks for a frame of it, so its pass would be presented without a draw list
         // (solid black). One full redraw after the create draws it.
         self.redraw_all();
+        // the XR window was made by `hal_xr_start` (the headset's view): no window of the window
+        // system or the host stands for it
+        if self.hal.xr.as_ref().is_some_and(|xr| xr.window == window_id) { return; }
         if self.hal.hosted.is_some() {
             self.hal_hosted_create_window(window_id);
             return;

@@ -12,7 +12,10 @@ pub struct SpirvPipeline {
     /// Optional pick uniforms and the base of pick twins; NONE for an ordinary pipeline.
     pub pick_binding: u32,
     pub pick_texture_base: u32,
-    /// Texture shapes: 0 = 2D, 1 = cube, 2 = array, 3 = depth, 4 = depth array, 5 = uint.
+    /// Texture shapes: 0 = 2D, 1 = cube, 2 = array, 3 = depth, 4 = depth array, 5 = uint, 6 = video
+    /// (2D, a combined image sampler whose sampler is immutable in the descriptor layout: an
+    /// ordinary image gets a linear clamp-to-edge sampler, a decoder's external-format picture its
+    /// format's Y'CbCr conversion).
     pub textures: Vec<u32>,
     pub samplers: Vec<SpirvSampler>,
     /// The multiview stages (`view_index` picks each view's pass matrices; the bindings are the

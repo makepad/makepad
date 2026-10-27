@@ -1261,6 +1261,8 @@ fn compile_java(
         makepad_java_classes_dir.join("VideoPlayerRunnable.java"),
         makepad_java_classes_dir.join("OesDecodeSurface.java"),
         makepad_java_classes_dir.join("H264Encoder.java"),
+        // makepad-network's P-256 and TLS server (fleet identity) over Java security, for every app
+        makepad_java_classes_dir.join("FleetTls.java"),
         build_paths.java_file.clone(),
         build_paths.xr_file.clone(),
     ];
@@ -3181,8 +3183,7 @@ pub fn build_host(
     );
     build_r_class(sdk_dir, &build_paths, urls)?;
     let run_java = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/android/java/dev/makepad/run/RunActivity.java");
-    let fleet_java = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/android/java/dev/makepad/android/FleetTls.java");
-    compile_java(sdk_dir, &build_paths, urls, &[run_java, fleet_java])?;
+    compile_java(sdk_dir, &build_paths, urls, &[run_java])?;
     build_dex(sdk_dir, &build_paths, urls)?;
     build_unaligned_apk(sdk_dir, &build_paths, urls)?;
     let build_args = vec!["--release".to_string()];

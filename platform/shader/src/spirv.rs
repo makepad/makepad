@@ -67,6 +67,7 @@ pub const OP_COPY_OBJECT: u32 = 83;
 pub const OP_TRANSPOSE: u32 = 84;
 pub const OP_SAMPLED_IMAGE: u32 = 86;
 pub const OP_IMAGE_SAMPLE_IMPLICIT_LOD: u32 = 87;
+pub const OP_IMAGE: u32 = 100;
 pub const OP_IMAGE_SAMPLE_EXPLICIT_LOD: u32 = 88;
 pub const OP_IMAGE_SAMPLE_DREF_IMPLICIT_LOD: u32 = 89;
 pub const OP_IMAGE_SAMPLE_DREF_EXPLICIT_LOD: u32 = 90;

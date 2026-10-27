@@ -67,6 +67,10 @@ pub enum OsCmd {
     TrayRemove { tray: u64 },
     /// Size dropdown `id` to `w` x `h` points and show it at tray `tray`'s icon.
     WindowAtTray { id: Id, tray: u64, w: f32, h: f32 },
+    /// The eyes the XR window's next frame shows with (`HalCmd::XrFrameEyes`).
+    XrFrameEyes { id: Id, eyes: [crate::XrEye; 2] },
+    /// `HalCmd::XrPoseLead`.
+    XrPoseLead { id: Id, lead_ns: u64 },
     FileDialog { req: u32, kind: u32, title: String, location: String, filename: String, filters: Vec<String> },
     ShareText { text: String },
     ClipboardActions { id: Id, show: bool, area: [f32; 4], selection: bool },
@@ -1062,6 +1066,11 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         },
         // window chrome and OS interaction: the id must be live, then the window system acts
         HalCmd::WindowVisuals { id, visuals, params } => os_window(gpu, s, id, OsCmd::WindowVisuals { id, visuals, params }),
+        HalCmd::XrPoseLead { id, lead_ns } => os_window(gpu, s, id, OsCmd::XrPoseLead { id, lead_ns }),
+        HalCmd::XrFrameEyes { id, eyes } => {
+            let mut it = crate::buffers::read_items::<crate::XrEye>(eyes, 2);
+            if let (Some(l), Some(r)) = (it.next(), it.next()) { os_window(gpu, s, id, OsCmd::XrFrameEyes { id, eyes: [l, r] }); }
+        }
         HalCmd::WindowTopmost { id, on } => os_window(gpu, s, id, OsCmd::WindowTopmost { id, on }),
         HalCmd::WindowButtons { id, show } => os_window(gpu, s, id, OsCmd::WindowButtons { id, show }),
         HalCmd::WindowButtonsCenter { id, y_center } => {

@@ -55,7 +55,11 @@ pub mod gpu_pressure;
 pub mod h264_bits;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod stream_encode;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod stream_decode;
 pub mod stream_pack;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod xr_remote;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod frame_tap;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1454,6 +1458,19 @@ fn media_keep(id: i64, result: Result<Vec<u8>, String>) -> i64 {
     };
     media_results().lock().unwrap_or_else(|e| e.into_inner()).insert(id, result);
     len
+}
+
+/// The device's network in its low-latency mode while `on` (Android: a low-latency Wi-Fi lock,
+/// no power save or background scans); elsewhere nothing. Whether it was applied.
+#[relax_api]
+pub fn hal_network_low_latency(on: bool) -> bool {
+    #[cfg(target_os = "android")]
+    return backend::android::media::network_low_latency(on).map_err(|e| eprintln!("[hal-android] low-latency network: {e}")).is_ok();
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = on;
+        false
+    }
 }
 
 /// Writes the largest frame the HEVC encoder takes into `out` (width, height: little-endian

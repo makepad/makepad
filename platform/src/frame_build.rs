@@ -1125,11 +1125,14 @@ impl Cx {
         // an XR pass paints into the XR window, once per eye, when the eyes of its next frame came
         // (on a multiview backend once for both eyes)
         let stereo = matches!(self.passes[pass_id].parent, CxDrawPassParent::Xr);
-        let multiview = stereo && !picking && self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::MULTIVIEW != 0);
+        // an XR display without a display of its own (`info_flags::XR_OFFSCREEN`): the XR pass
+        // renders into its own textures, eyes side by side; the XR window only paces it
+        let offscreen_xr = stereo && self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::XR_OFFSCREEN != 0);
+        let multiview = stereo && !offscreen_xr && !picking && self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::MULTIVIEW != 0);
         let (window, is_window) = match self.passes[pass_id].parent {
             CxDrawPassParent::Window(w) => (Some(w), true),
             CxDrawPassParent::Xr => match self.hal.xr.as_ref() {
-                Some(xr) if xr.frame.is_some() => (Some(xr.window), true),
+                Some(xr) if xr.frame.is_some() => (Some(xr.window), !offscreen_xr),
                 _ => return None,
             },
             _ => (None, false),
@@ -1225,8 +1228,9 @@ impl Cx {
             crate::log!("passpx {:?} window {:?} rect {:?} dpi {dpi} target {tw}x{th} inner*dpi {:?}", self.passes[pass_id].debug_name, window.map(|w| w.0),
                 pass_rect, window.map(|w| self.windows[w].window_geom.inner_size * dpi));
         }
+        // the XR window is the headset's (its own swapchain or a remote sink), never a hosted one
         let hosted_target = match (window, self.hal.hosted.as_ref()) {
-            (Some(window), Some(hosted)) => Some(hosted.target(window, tw, th)?),
+            (Some(window), Some(hosted)) if !stereo && is_window => Some(hosted.target(window, tw, th)?),
             _ => None,
         };
         self.passes[pass_id].paint_dirty = false;
@@ -1331,7 +1335,7 @@ impl Cx {
             self.fb_list(fb, pass_id, list_id, sploded, &mut zbias, step, serial);
         }
         let end = makepad_hal::clock_ns();
-        let (target, kind) = match (window, self.passes[pass_id].color_textures.first()) {
+        let (target, kind) = match (window.filter(|_| is_window), self.passes[pass_id].color_textures.first()) {
             (Some(w), _) => (Id::new(w.0 as u32, w.1 as u32), makepad_hal::target::WINDOW | capture_flag(w.0) | if self.window_snapshot_wanted(w.0) || self.hal_capture_due(w) || self.screenshot_requests.iter().any(|request| crate::remote::grab_waits_on_window(request.request_id, w.id())) { makepad_hal::target::SNAPSHOT } else { 0 }),
             (None, Some(_)) => (pass.color[0], makepad_hal::target::TEXTURE),
             (None, None) => (Id::NONE, makepad_hal::target::TEXTURE),
@@ -1345,8 +1349,15 @@ impl Cx {
         if !picking {
             self.readback_pass_submitted(pass_id, serial);
             self.hal_texture_readbacks(fb, Some(pass_id));
-            if let Some(window) = window {
+            if let Some(window) = window.filter(|_| is_window) {
                 self.hal_window_readbacks(fb, window, tw, th);
+            }
+        }
+        // an offscreen XR frame was built: the XR window's credit is used (its next XrFrame paces
+        // the next one)
+        if offscreen_xr && !picking {
+            if let Some(window) = window {
+                self.hal.window_painted(window);
             }
         }
         if is_window {

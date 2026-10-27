@@ -73,6 +73,8 @@ makepad-civil-time = { path = "../../libs/civil_time" }
 # The headset IMU reader (src/headset_imu.rs) inflates the tracker board's
 # zlib config JSON.
 makepad-fast-inflate = { path = "../../libs/fast_inflate" }
+# Head poses, display optics and reprojection, shared with the HAL's XR backends.
+makepad-xr-core = { path = "../../libs/xr_core" }
 
 # Foreign Wayland windows (src/wayland_host): the WM serves the protocol itself.
 [target.'cfg(target_os = "linux")'.dependencies]

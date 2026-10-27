@@ -27,6 +27,26 @@ pub use dma_buf::{DmaBufSupport, OpaqueMemory};
 #[cfg(target_os = "android")]
 pub use hardware_buffer::HardwareBuffer as NativeHandle;
 
+/// The process's registry on Android (the shell's sharing, the decoders' pictures).
+#[cfg(target_os = "android")]
+pub fn shared_images() -> NativeImages {
+    static IMAGES: std::sync::OnceLock<NativeImages> = std::sync::OnceLock::new();
+    IMAGES.get_or_init(NativeImages::default).clone()
+}
+
+/// A decoder's picture (`buffer`: an AHardwareBuffer it holds) registered for texture import: its
+/// ticket (`texture_handle::VIDEO` imports it as a video texture).
+#[cfg(target_os = "android")]
+pub fn picture_ticket(buffer: *mut std::ffi::c_void) -> Result<u64, String> {
+    let native = unsafe { NativeHandle::retain(buffer as *mut makepad_vulkan::vk::AHardwareBuffer) }?;
+    Ok(unsafe { shared_images().register(crate::session::HOST, native) })
+}
+
+#[cfg(target_os = "android")]
+pub fn release_picture_ticket(ticket: u64) {
+    shared_images().release(ticket);
+}
+
 /// A shell may supply its own handle transport. The image lease owns the native allocation;
 /// any external producer must have completed and released ownership before import is used.
 /// External providers enable EXT_queue_family_foreign. Batches release their images to that
@@ -79,6 +99,12 @@ impl VkExternalImages for NativeImages {
         lock(&self.entries).insert(id, Entry { session, handle: native, image: Arc::downgrade(&image) }); Ok(id)
     }
     fn import(&mut self, dev: Arc<Device>, handle: u64, kind: u32) -> Result<Arc<Image>, String> {
+        // a decoder's picture (its hardware buffer), sampled as a video texture
+        #[cfg(target_os = "android")]
+        if kind == texture_handle::VIDEO {
+            let native = lock(&self.entries).get(&handle).map(|e| e.handle.clone()).ok_or("unknown picture ticket")?;
+            return NativeHandle::import_video(dev, native);
+        }
         if kind != texture_handle::NATIVE { return Err("unsupported Vulkan handle kind".into()); }
         let (native, image) = {
             let entries = lock(&self.entries); let entry = entries.get(&handle).ok_or("unknown native image ticket")?;

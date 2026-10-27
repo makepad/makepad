@@ -83,7 +83,7 @@ pub trait ImuBackend: Send {
     fn pump(&mut self, timeout_ms: i32, out: &mut dyn FnMut(ImuSample)) -> Result<Pumped, String>;
     /// The headset display's optics, when this device's config carries
     /// them (read once at open).
-    fn display_calibration(&self) -> Option<crate::stereo::calibration::DisplayCalibration> {
+    fn display_calibration(&self) -> Option<makepad_xr_core::optics::DisplayCalibration> {
         None
     }
 }
@@ -250,7 +250,7 @@ impl HeadsetImu {
 
     /// The open device's display optics, if its config has them. Takes a
     /// lock the worker holds only while opening or closing a device.
-    pub fn display_calibration(&self) -> Option<Arc<crate::stereo::calibration::DisplayCalibration>> {
+    pub fn display_calibration(&self) -> Option<Arc<makepad_xr_core::optics::DisplayCalibration>> {
         match self.shared.display.lock() {
             Ok(slot) => slot.as_ref().filter(|(g, _)| *g == self.shared.source_generation.load(Ordering::Acquire)).map(|(_, c)| c.clone()),
             Err(poisoned) => poisoned.into_inner().as_ref().filter(|(g, _)| *g == self.shared.source_generation.load(Ordering::Acquire)).map(|(_, c)| c.clone()),
@@ -319,7 +319,7 @@ struct Shared {
     stop: AtomicBool,
     /// The open device's display optics; replaced on open and close only,
     /// with `display_generation` bumped so the UI locks only on a change.
-    display: Mutex<Option<(u32, Arc<crate::stereo::calibration::DisplayCalibration>)>>,
+    display: Mutex<Option<(u32, Arc<makepad_xr_core::optics::DisplayCalibration>)>>,
     display_generation: AtomicU32,
 }
 
@@ -378,7 +378,7 @@ impl Shared {
         self.state.store(state as u8, Ordering::Release);
     }
 
-    fn set_display(&self, display: Option<crate::stereo::calibration::DisplayCalibration>, generation: u32) {
+    fn set_display(&self, display: Option<makepad_xr_core::optics::DisplayCalibration>, generation: u32) {
         let mut slot = match self.display.lock() {
             Ok(slot) => slot,
             Err(poisoned) => poisoned.into_inner(),
