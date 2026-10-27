@@ -470,7 +470,6 @@ pub enum SystemCommand {
     /// Persist a pointer speed (integer hundredths, 25..=300). The speed is
     /// already applied in-process by then; this only decides the next start.
     SavePointerSpeed { touchpad: bool, value: u32 },
-    SaveInvertScroll(bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -486,7 +485,6 @@ pub enum CommandKind {
     DpiScale,
     DisplayLayout,
     PointerSpeed,
-    InvertScroll,
 }
 
 /// Which streams a [`StreamFollow`] counted.
@@ -531,7 +529,6 @@ pub struct CommandOutcome {
 /// Everything the worker observed, published as one immutable value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SystemSnapshot {
-    pub invert_scroll: bool,
     pub game_controllers: super::game_controllers::Inventory,
     /// The BlackShark V3 Pro receiver and headset, as last observed.
     pub headset: HeadsetSnapshot,
@@ -600,7 +597,6 @@ impl Default for SystemSnapshot {
         Self {
             game_controllers: Default::default(),
             headset: HeadsetSnapshot::default(),
-            invert_scroll: false,
             serial: 0,
             applied_seq: 0,
             sampled_at: 0.0,
@@ -1719,8 +1715,6 @@ impl Worker {
         self.snapshot.order_env = order_env();
         self.snapshot.modes_env = modes_env();
         self.snapshot.pointer_speeds = [read_pointer_speed(false), read_pointer_speed(true)];
-        self.snapshot.invert_scroll = display_settings_path("invert-scroll").ok()
-            .and_then(|path| read_trim(&path)).is_some_and(|text| text == "on");
         self.snapshot.display_settings_loaded = true;
         self.snapshot.input_settings_loaded = true;
         self.publish(start);
@@ -2016,13 +2010,6 @@ impl Worker {
                 let result = super::game_controllers::pair(&id).map_or_else(CommandResult::Failed, |_| CommandResult::Applied);
                 self.sample_sysfs(now);
                 (CommandKind::PairXbox, result, false)
-            }
-            SystemCommand::SaveInvertScroll(on) => {
-                let result = match write_display_setting("invert-scroll", if on { "on" } else { "off" }) {
-                    Ok(_) => { self.snapshot.invert_scroll = on; CommandResult::Applied }
-                    Err(message) => CommandResult::Failed(format!("Invert scroll not saved: {message}")),
-                };
-                (CommandKind::InvertScroll, result, false)
             }
             SystemCommand::SetOutputMuted(muted) => (
                 CommandKind::OutputMute,

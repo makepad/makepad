@@ -425,7 +425,6 @@ impl App {
                 menu.model.shelf_autohide = shelves;
                 menu.model.dock_autohide = autohide;
                 menu.model.dark_choice = dark;
-                menu.model.natural_scroll = host::load_natural_scroll();
                 menu.model.tap_to_click = host::load_tap_to_click();
             }
         }

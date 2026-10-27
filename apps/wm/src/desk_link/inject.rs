@@ -5,7 +5,9 @@
 //! for a keyboard, mouse or pad on the machine.
 //!
 //! - pointer: an absolute device (`INPUT_PROP_DIRECT`, ABS_X/Y 0..65535 over the whole wide
-//!   desktop, which raw input maps to the desktop), five buttons and both wheels;
+//!   desktop, which raw input maps to the desktop), five buttons and both wheels. Its id
+//!   (`DESK_LINK_INPUT_VENDOR`, `DESK_LINK_POINTER_PRODUCT`) tells raw input that the wheel is
+//!   in the viewer's content direction already, so the WM's natural scrolling never turns it;
 //! - keyboard: every key the WM's key map knows;
 //! - one gamepad per viewer pad (made on its first state, removed with `GamepadGone`).
 //!
@@ -13,6 +15,7 @@
 //! access to `/dev/uinput` (a udev rule gives the `input` group it), the session is view-only.
 
 use makepad_desk_link::{button, pad, GamepadState};
+use makepad_widgets::makepad_platform::linux_input::{DESK_LINK_INPUT_VENDOR, DESK_LINK_POINTER_PRODUCT};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::fd::AsRawFd;
@@ -41,9 +44,6 @@ const REL_WHEEL: u16 = 8;
 const REL_WHEEL_HI_RES: u16 = 0x0b;
 const REL_HWHEEL_HI_RES: u16 = 0x0c;
 
-/// The WM's natural scrolling setting (`host::apply_natural_scroll`): this session's input
-/// stack turns a wheel's direction by it, so the injected wheel is turned back first.
-pub static NATURAL_SCROLL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 const ABS_X: u16 = 0;
 const ABS_Y: u16 = 1;
 const INPUT_PROP_DIRECT: i32 = 1;
@@ -100,7 +100,7 @@ impl Device {
         let file = OpenOptions::new().write(true).custom_flags(O_NONBLOCK).open("/dev/uinput")?;
         let dev = Device { file };
         setup(&dev)?;
-        let mut s = UinputSetup { id: InputId { bustype: BUS_VIRTUAL, vendor: 0x4d50, product, version: 1 }, name: [0; 80], ff_effects_max: 0 };
+        let mut s = UinputSetup { id: InputId { bustype: BUS_VIRTUAL, vendor: DESK_LINK_INPUT_VENDOR, product, version: 1 }, name: [0; 80], ff_effects_max: 0 };
         let bytes = name.as_bytes();
         s.name[..bytes.len().min(79)].copy_from_slice(&bytes[..bytes.len().min(79)]);
         dev.ioctl_ptr(UI_DEV_SETUP, &s as *const UinputSetup as usize)?;
@@ -168,6 +168,34 @@ const PAD_BUTTONS: [(u32, u16); 15] = [
     (pad::DPAD_RIGHT, 0x223),
 ];
 
+/// The viewer's scroll (1/120 notches, the content direction its user saw: +dy the view moves
+/// up, +dx right) as one wheel report: a high-resolution wheel (smooth, trackpad pixels and
+/// momentum included) plus the whole notches a wheel also reports, `rest` carrying parts of a
+/// notch. The values go out unturned, in evdev's own sense (+1 = the view moves up, tilted
+/// right): raw input recognises this pointer and never applies the WM's natural scrolling to it.
+fn wheel_report(rest: &mut [i32; 2], dx: i32, dy: i32) -> Vec<(u16, u16, i32)> {
+    rest[0] += dx;
+    rest[1] += dy;
+    let notches = [rest[0] / makepad_desk_link::SCROLL_UNITS_PER_NOTCH, rest[1] / makepad_desk_link::SCROLL_UNITS_PER_NOTCH];
+    rest[0] -= notches[0] * makepad_desk_link::SCROLL_UNITS_PER_NOTCH;
+    rest[1] -= notches[1] * makepad_desk_link::SCROLL_UNITS_PER_NOTCH;
+    let mut events = Vec::new();
+    // high resolution first: the WM's raw input then leaves this device's whole notches out
+    if dx != 0 {
+        events.push((EV_REL, REL_HWHEEL_HI_RES, dx));
+    }
+    if dy != 0 {
+        events.push((EV_REL, REL_WHEEL_HI_RES, dy));
+    }
+    if notches[0] != 0 {
+        events.push((EV_REL, REL_HWHEEL, notches[0]));
+    }
+    if notches[1] != 0 {
+        events.push((EV_REL, REL_WHEEL, notches[1]));
+    }
+    events
+}
+
 pub struct Injector {
     pointer: Device,
     keyboard: Device,
@@ -178,7 +206,7 @@ pub struct Injector {
 
 impl Injector {
     pub fn new() -> std::io::Result<Injector> {
-        let pointer = Device::new("Desk Link pointer", 1, |d| {
+        let pointer = Device::new("Desk Link pointer", DESK_LINK_POINTER_PRODUCT, |d| {
             d.ioctl_int(UI_SET_PROPBIT, INPUT_PROP_DIRECT)?;
             d.ioctl_int(UI_SET_EVBIT, EV_KEY as i32)?;
             d.ioctl_int(UI_SET_EVBIT, EV_REL as i32)?;
@@ -221,34 +249,9 @@ impl Injector {
         self.pointer.emit(&[(EV_KEY, code, down as i32)]);
     }
 
-    /// The viewer's scroll (1/120 notches, the content direction its user saw: +dy the view
-    /// moves up, +dx right) as a high-resolution wheel (smooth, trackpad pixels and momentum
-    /// included) plus the whole notches a wheel also reports. evdev's +1 is the wheel turned
-    /// away (tilted right): with traditional scrolling the view moves up (right); this
-    /// session's natural setting turns that, so the wheel is turned back first and the
-    /// content moves as it did for the viewer's user.
+    /// The viewer's scroll as this pointer's wheel (`wheel_report`).
     pub fn scroll(&mut self, dx: i32, dy: i32) {
-        let turn = if NATURAL_SCROLL.load(std::sync::atomic::Ordering::Relaxed) { -1 } else { 1 };
-        let (dx, dy) = (dx * turn, dy * turn);
-        self.wheel[0] += dx;
-        self.wheel[1] += dy;
-        let notches = [self.wheel[0] / makepad_desk_link::SCROLL_UNITS_PER_NOTCH, self.wheel[1] / makepad_desk_link::SCROLL_UNITS_PER_NOTCH];
-        self.wheel[0] -= notches[0] * makepad_desk_link::SCROLL_UNITS_PER_NOTCH;
-        self.wheel[1] -= notches[1] * makepad_desk_link::SCROLL_UNITS_PER_NOTCH;
-        let mut events = Vec::new();
-        // high resolution first: the WM's raw input then leaves this device's whole notches out
-        if dx != 0 {
-            events.push((EV_REL, REL_HWHEEL_HI_RES, dx));
-        }
-        if dy != 0 {
-            events.push((EV_REL, REL_WHEEL_HI_RES, dy));
-        }
-        if notches[0] != 0 {
-            events.push((EV_REL, REL_HWHEEL, notches[0]));
-        }
-        if notches[1] != 0 {
-            events.push((EV_REL, REL_WHEEL, notches[1]));
-        }
+        let events = wheel_report(&mut self.wheel, dx, dy);
         if !events.is_empty() {
             self.pointer.emit(&events);
         }
@@ -330,5 +333,23 @@ impl makepad_desk_link::server::Input for Injector {
     }
     fn gamepad_gone(&mut self, slot: u8) {
         Injector::gamepad_gone(self, slot)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_viewers_scroll_goes_out_unturned() {
+        let mut rest = [0; 2];
+        // one notch "view moves up" (a Mac user's two fingers down, natural): evdev +1 (away)
+        assert_eq!(wheel_report(&mut rest, 0, 120), vec![(EV_REL, REL_WHEEL_HI_RES, 120), (EV_REL, REL_WHEEL, 1)]);
+        // "view moves down", in parts of a notch: the whole notch once they add up
+        assert_eq!(wheel_report(&mut rest, 0, -60), vec![(EV_REL, REL_WHEEL_HI_RES, -60)]);
+        assert_eq!(wheel_report(&mut rest, 0, -60), vec![(EV_REL, REL_WHEEL_HI_RES, -60), (EV_REL, REL_WHEEL, -1)]);
+        // "view moves right": tilted right
+        assert_eq!(wheel_report(&mut rest, 120, 0), vec![(EV_REL, REL_HWHEEL_HI_RES, 120), (EV_REL, REL_HWHEEL, 1)]);
+        assert_eq!(rest, [0, 0]);
     }
 }

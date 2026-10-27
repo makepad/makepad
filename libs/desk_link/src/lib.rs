@@ -113,6 +113,18 @@ pub mod button {
 /// Wheel units per notch (`Scroll`): the hi-res wheel convention.
 pub const SCROLL_UNITS_PER_NOTCH: i32 = 120;
 
+/// A viewer's makepad scroll (points, 40 per notch; `scroll.y > 0` = the view moves down the
+/// content, with the viewer OS's own direction setting applied) as the wire's `Scroll`
+/// (1/120 notches, +dy = the view moves up, +dx = right): the content direction the viewer's
+/// user saw. `rest` carries parts of a unit to the next scroll. PROTOCOL.md "Scroll direction".
+pub fn scroll_to_wire(rest: &mut (f64, f64), scroll_x: f64, scroll_y: f64) -> (i32, i32) {
+    let x = rest.0 + scroll_x * 3.0;
+    let y = rest.1 - scroll_y * 3.0;
+    let (dx, dy) = (x.trunc() as i32, y.trunc() as i32);
+    *rest = (x - dx as f64, y - dy as f64);
+    (dx, dy)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct GamepadState {
     pub buttons: u32,
@@ -159,7 +171,8 @@ pub enum ClientMsg {
     /// The pointer in the stream picture, 0..=65535 on both axes.
     Pointer { x: u16, y: u16 },
     Button { down: bool, button: u8 },
-    /// Wheel motion in 1/120 notch units (+y = content moves up / wheel away from the user).
+    /// Wheel motion in 1/120 notch units, the content direction the viewer's user saw: +dy the
+    /// view moves up (the content down), +dx the view moves right ([`scroll_to_wire`]).
     Scroll { dx: i32, dy: i32 },
     Gamepad { slot: u8, state: GamepadState },
     GamepadGone { slot: u8 },
@@ -674,6 +687,20 @@ mod tests {
         round_client(ClientMsg::Ping { client_ns: u64::MAX - 3 });
         round_client(ClientMsg::Stats { frame: 9, decode_us: 1200, present_us: 8000 });
         round_client(ClientMsg::Clipboard { text: "héllo".into() });
+    }
+
+    #[test]
+    fn scroll_goes_on_the_wire_in_the_viewers_content_direction() {
+        let mut rest = (0.0, 0.0);
+        // a Mac user's two fingers up with natural scrolling (AppKit scrollingDeltaY < 0, makepad
+        // scroll.y = +40: the view moves down, the content up): the view moves down on the wire
+        assert_eq!(scroll_to_wire(&mut rest, 0.0, 40.0), (0, -120));
+        // fingers down: the view moves up; fingers left (scroll.x > 0): the view moves right
+        assert_eq!(scroll_to_wire(&mut rest, 0.0, -40.0), (0, 120));
+        assert_eq!(scroll_to_wire(&mut rest, 40.0, 0.0), (120, 0));
+        // a trackpad's fractions carry over
+        assert_eq!(scroll_to_wire(&mut rest, 0.0, 0.2), (0, 0));
+        assert_eq!(scroll_to_wire(&mut rest, 0.0, 0.2), (0, -1));
     }
 
     #[test]

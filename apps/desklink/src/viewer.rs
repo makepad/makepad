@@ -665,13 +665,9 @@ impl App {
             }
             Event::Scroll(e) if Some(e.window_id) == wid && live => {
                 if placement.to_stream(e.abs).is_some() {
-                    // makepad points (40 per wheel notch) -> 1/120 notches, in the content
-                    // direction this machine's user saw (its OS setting applied, e.g. a Mac's
-                    // natural scrolling): +dy the view moves up, +dx right (PROTOCOL.md)
-                    let x = v.scroll_rest.0 + e.scroll.x * 3.0;
-                    let y = v.scroll_rest.1 - e.scroll.y * 3.0;
-                    let (dx, dy) = (x.trunc() as i32, y.trunc() as i32);
-                    v.scroll_rest = (x - dx as f64, y - dy as f64);
+                    // in the content direction this machine's user saw (its OS setting
+                    // applied, e.g. a Mac's natural scrolling)
+                    let (dx, dy) = makepad_desk_link::scroll_to_wire(&mut v.scroll_rest, e.scroll.x, e.scroll.y);
                     if dx != 0 || dy != 0 {
                         conn.send(ClientMsg::Scroll { dx, dy });
                     }

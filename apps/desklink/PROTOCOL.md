@@ -230,16 +230,20 @@ Defined once, end to end, so nobody flips it again:
   OS's direction setting already applied (macOS: the user's natural-scrolling setting; Windows
   and stock Linux desktops: theirs, unchanged).
 - **Our Linux WM** (the HAL direct backend) is the one place makepad decides the direction
-  itself: its *Natural scrolling* setting (desktop menu, default on = the Mac direction) turns
-  both touchpad and mouse wheel (`direct/raw_input.rs` `wheel_scroll`). Every app under the WM
-  gets the result; no app flips anything.
+  itself, per device class: *Natural scrolling* for mouse wheels and for touchpads (Display >
+  Mouse & touchpad, both default on = the Mac direction; `direct/preferences.rs`, applied in
+  `direct/raw_input.rs`). Every app under the WM, hosted or Wayland, gets the result; no app and
+  no WM layer flips anything.
 - **The wire** (`Scroll`) carries what the viewer's user saw: `dy = -scroll.y * 3`, `dx =
-  scroll.x * 3` (1/120 notches). The remote content moves the way local content would on the
-  viewer's machine, whatever the desktop's own setting.
-- **Desktops inject** so that holds: the WM as a high-resolution uinput wheel, turned back by its
-  own natural setting first (its input stack turns it again); Windows `SendInput` wheel (+ =
-  view up; Windows' setting only touches precision touchpads, not injected wheels); macOS a
-  pixel `CGEvent` scroll (+ = view up; posted events are not turned by the user's setting).
+  scroll.x * 3` (1/120 notches, `makepad_desk_link::scroll_to_wire`). The remote content moves
+  the way local content would on the viewer's machine, whatever the desktop's own setting.
+- **Desktops inject** so that holds: the WM as a high-resolution wheel on its uinput *Desk Link
+  pointer*, the values unturned in evdev's own sense (+1 = view up, tilted right = view right).
+  Raw input knows that device by its id (`BUS_VIRTUAL`, `DESK_LINK_INPUT_VENDOR`,
+  `DESK_LINK_POINTER_PRODUCT`) and never applies the natural setting to its wheel. Windows
+  `SendInput` wheel (+ = view up; Windows' setting only touches precision touchpads, not
+  injected wheels); macOS a pixel `CGEvent` scroll (+ = view up; posted events are not turned by
+  the user's setting).
 
 ## Latency
 

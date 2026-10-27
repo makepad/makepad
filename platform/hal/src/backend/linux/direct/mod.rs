@@ -231,7 +231,8 @@ impl App {
     fn publish_input(&self) {
         if let Some(key) = self.recipient {
             self.state.shared.push(key, |q, id| q.direct_input(id, preferences::pointer_speed(false),
-                preferences::pointer_speed(true), preferences::natural_scroll(), preferences::tap_to_click()));
+                preferences::pointer_speed(true), preferences::natural_scroll(false), preferences::natural_scroll(true),
+                preferences::tap_to_click()));
         }
     }
     fn owns_display(&self, sid: u32) -> bool {
@@ -393,8 +394,8 @@ impl Shell for App {
                     if self.owns_display(sid) { preferences::set_pointer_speed(touchpad, hundredths); self.publish_input(); }
                     else { eprintln!("[hal-direct] session={sid} cannot set pointer speed: it does not own the desktop"); }
                 }
-                OsCmd::DirectNaturalScroll { on } => {
-                    if self.owns_display(sid) { preferences::set_natural_scroll(on); self.publish_input(); }
+                OsCmd::DirectNaturalScroll { touchpad, on } => {
+                    if self.owns_display(sid) { preferences::set_natural_scroll(touchpad, on); self.publish_input(); }
                     else { eprintln!("[hal-direct] session={sid} cannot set natural scrolling: it does not own the desktop"); }
                 }
                 OsCmd::DirectTapToClick { on } => {

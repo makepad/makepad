@@ -379,9 +379,9 @@ impl Cx {
             #[cfg(target_os = "linux")]
             HalEvent::DirectDisplayResult { req, command, ok, message } => self.hal_display_result(req, command, ok, message),
             #[cfg(target_os = "linux")]
-            HalEvent::DirectInput { window, mouse_speed, touchpad_speed, natural_scroll, tap_to_click } => {
+            HalEvent::DirectInput { window, mouse_speed, touchpad_speed, natural_scroll_mouse, natural_scroll_touchpad, tap_to_click } => {
                 if self.hal.direct_display.window == Some(window) {
-                    crate::linux_input::report(mouse_speed, touchpad_speed, natural_scroll, tap_to_click);
+                    crate::linux_input::report([mouse_speed, touchpad_speed], [natural_scroll_mouse, natural_scroll_touchpad], tap_to_click);
                 }
             }
             #[cfg(not(target_os = "linux"))]

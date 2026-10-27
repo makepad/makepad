@@ -4128,12 +4128,6 @@ impl App {
                 let on = !self.state_mut().shelf_autohide.enabled(side);
                 self.set_shelf_autohide(cx, side, on);
             }
-            "desktop.natural-scroll" => {
-                self.close_shell_menu(cx);
-                let on = !host::load_natural_scroll();
-                host::persist_natural_scroll(on);
-                host::apply_natural_scroll(on);
-            }
             "desktop.tap-to-click" => {
                 self.close_shell_menu(cx);
                 let on = !host::load_tap_to_click();
@@ -6140,7 +6134,9 @@ impl MatchEvent for App {
             self.adoptions = adopt::Adoptions::start(cx, hub_port);
         }
 
-        host::apply_natural_scroll(host::load_natural_scroll());
+        for touchpad in [false, true] {
+            host::apply_natural_scroll(touchpad, host::load_natural_scroll(touchpad));
+        }
         host::apply_tap_to_click(host::load_tap_to_click());
         self.state = Some(WmState {
             snap: Default::default(),
@@ -6655,26 +6651,6 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        #[cfg(target_os = "linux")]
-        if let Event::Scroll(scroll) = event {
-            if self.linux_controls.invert_scroll && scroll.is_mouse {
-                let mut reversed = scroll.clone();
-                reversed.scroll = -reversed.scroll;
-                let reversed = Event::Scroll(reversed);
-                self.handle_wm_event(cx, &reversed);
-                if let Event::Scroll(reversed) = reversed {
-                    scroll.handled_x.set(reversed.handled_x.get());
-                    scroll.handled_y.set(reversed.handled_y.get());
-                }
-                return;
-            }
-        }
-        self.handle_wm_event(cx, event);
-    }
-}
-
-impl App {
-    fn handle_wm_event(&mut self, cx: &mut Cx, event: &Event) {
         self.desk_link.handle_event(cx, event);
         // a virtual desktop that follows its viewer takes the window size of the viewer that connected last
         #[cfg(target_os = "linux")]

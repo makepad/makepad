@@ -81,7 +81,7 @@ pub enum OsCmd {
     #[cfg(target_os = "linux")]
     DirectPointerSpeed { touchpad: bool, hundredths: u32 },
     #[cfg(target_os = "linux")]
-    DirectNaturalScroll { on: bool },
+    DirectNaturalScroll { touchpad: bool, on: bool },
     #[cfg(target_os = "linux")]
     DirectTapToClick { on: bool },
 }
@@ -1211,10 +1211,10 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             let _ = (touchpad, hundredths);
             s.bad();
         }
-        HalCmd::DirectNaturalScroll { on } => {
+        HalCmd::DirectNaturalScroll { touchpad, on } => {
             #[cfg(target_os = "linux")]
-            if gpu.os(sid, OsCmd::DirectNaturalScroll { on }) { return; }
-            let _ = on;
+            if gpu.os(sid, OsCmd::DirectNaturalScroll { touchpad, on }) { return; }
+            let _ = (touchpad, on);
             s.bad();
         }
         HalCmd::DirectTapToClick { on } => {

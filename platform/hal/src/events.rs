@@ -302,7 +302,7 @@ hal_events! {
     /// Later device failures are inventory statuses. `message` is UTF-8 on failure.
     DirectDisplayResult = 135, direct_display_result { req: u64, command: u32, ok: bool, message: rng };
     /// Initial host preferences and changes applied by this owner.
-    DirectInput = 136, direct_input { window: obj, mouse_speed: u32, touchpad_speed: u32, natural_scroll: bool, tap_to_click: bool };
+    DirectInput = 136, direct_input { window: obj, mouse_speed: u32, touchpad_speed: u32, natural_scroll_mouse: bool, natural_scroll_touchpad: bool, tap_to_click: bool };
 
     /// The soft keyboard starts to move: it will cover `height` window points of the window's
     /// bottom (`open`), or go away, over `duration` seconds along `curve` (`ime_curve::*`). The

@@ -319,7 +319,8 @@ hal_commands! {
     DirectDisplayMode = 135, direct_display_mode { req: u64, args: rng };
     /// Mouse or touchpad speed in hundredths; the host clamps it to the native preference range.
     DirectPointerSpeed = 136, direct_pointer_speed { touchpad: bool, hundredths: u32 };
-    DirectNaturalScroll = 137, direct_natural_scroll { on: bool };
+    /// Natural scrolling for touchpads or mouse wheels (direct backend).
+    DirectNaturalScroll = 137, direct_natural_scroll { touchpad: bool, on: bool };
     /// Touchpad tap to click (direct backend).
     DirectTapToClick = 149, direct_tap_to_click { on: bool };
 
