@@ -514,10 +514,12 @@ const QUEUED_MS: f64 = 10.0;
 /// The lowest the rate controller goes (kbit/s, all tiles).
 const MIN_KBPS: u32 = 15_000;
 /// Pictures built and not yet decoded by the headset before the app waits (`room`):
-/// `MAKEPAD_XR_REMOTE_IN_FLIGHT`, default 3 (a picture's build to its decode takes ~2 display
-/// periods at 90 Hz: with 2 in flight the app waited for most frames and built 64 of 90/s).
+/// `MAKEPAD_XR_REMOTE_IN_FLIGHT`, default 4 (a picture's build to its decode takes ~2 display
+/// periods at 90 Hz: with 2 in flight the app waited for most frames and built 64 of 90/s; at
+/// the 120% eye picture, 3 still held the app back 40-60 times a second and it built 81-86/s:
+/// each missing picture a repeat on the headset).
 fn in_flight_limit() -> u64 {
-    std::env::var("MAKEPAD_XR_REMOTE_IN_FLIGHT").ok().and_then(|v| v.parse().ok()).unwrap_or(3u64).clamp(1, 8)
+    std::env::var("MAKEPAD_XR_REMOTE_IN_FLIGHT").ok().and_then(|v| v.parse().ok()).unwrap_or(4u64).clamp(1, 8)
 }
 
 /// One eye's encode: what its thread is given.
@@ -755,6 +757,8 @@ impl Core {
                     let mut applied = kbps / tiles;
                     let mut pts = 0i64;
                     let mut foveated = false;
+                    // the live tuning file (`tune`), read once a second
+                    let (mut tuned, mut tune_at) = (Tune::default(), Instant::now() - Duration::from_secs(2));
                     while let Ok(w) = rx.recv() {
                         // the eye's foveation, once its field of view is known (its first picture)
                         if !foveated && w.head.eyes[t as usize].fov != [0.0; 4] {
@@ -766,7 +770,19 @@ impl Core {
                                 }
                             }
                         }
-                        let tile_kbps = (w.kbps / tiles).max(1);
+                        if tune_at.elapsed() >= Duration::from_secs(1) {
+                            tune_at = Instant::now();
+                            let now = tune();
+                            if now != tuned {
+                                if t == 0 {
+                                    log(&format!("xr host: tuning: {} kbps, max QP {}", now.kbps.map_or("rate control's".to_string(), |k| k.to_string()), now.max_qp));
+                                    #[cfg(any(target_os = "linux", target_os = "android"))]
+                                    makepad_hal::stream_encode::hal_stream_encoder_max_qp(now.max_qp);
+                                }
+                                tuned = now;
+                            }
+                        }
+                        let tile_kbps = (tuned.kbps.unwrap_or(w.kbps) / tiles).max(1);
                         if tile_kbps != applied {
                             encoder.set_bitrate_kbps(tile_kbps);
                             applied = tile_kbps;
@@ -1039,4 +1055,26 @@ fn render_eyes(frame: &[u8]) -> [XrRenderEye; 2] {
 /// band half its height (coverage and inverse depth at half resolution; `crate::xr`).
 pub fn picture_size(eye: [u32; 2]) -> [u32; 2] {
     [eye[0] * 2, eye[1] * 3 / 2]
+}
+
+/// The stream's live tuning (`$TMPDIR/xr-remote-tune`, lines `kbps=N` and `maxqp=N`; read once a
+/// second by the encoders): the rate instead of the rate controller's, and a QP ceiling (every
+/// encoder of the process). For sweeps on a running server; absent: neither.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct Tune {
+    kbps: Option<u32>,
+    max_qp: u32,
+}
+
+fn tune() -> Tune {
+    let Ok(text) = std::fs::read_to_string(std::env::temp_dir().join("xr-remote-tune")) else { return Tune::default() };
+    let mut t = Tune::default();
+    for line in text.lines() {
+        match line.trim().split_once('=') {
+            Some(("kbps", v)) => t.kbps = v.trim().parse().ok().filter(|k: &u32| *k > 0),
+            Some(("maxqp", v)) => t.max_qp = v.trim().parse().unwrap_or(0),
+            _ => {}
+        }
+    }
+    t
 }

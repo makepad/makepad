@@ -219,6 +219,8 @@ struct Picture {
     bitrate: Option<u32>,
     /// The rate control in effect when this picture's coding scope begins.
     current_kbps: Option<u32>,
+    /// The QP ceiling for this picture's rate control (0: none; `stream_encode::MAX_QP`).
+    max_qp: u32,
     /// A refinement: the same picture again at `REFINE_QP` (rate control off), near lossless.
     refine: bool,
     /// Rate control is off when this picture's coding scope begins (after a refinement).
@@ -898,6 +900,7 @@ impl Encoder {
         // buffer without it, although the spec leaves it optional)
         let mut layer_h264_now = vk::VideoEncodeH264RateControlLayerInfoKHR::default();
         let mut layer_h265_now = vk::VideoEncodeH265RateControlLayerInfoKHR::default();
+        qp_ceiling(&mut layer_h264_now, &mut layer_h265_now, pic.max_qp);
         let layer_now = pic.current_kbps.map(|k| {
             let layer = self.rate_control_layer(k);
             [match self.codec { Codec::H264 => layer.next_video_encode_h264_rate_control_layer_info_khr(&mut layer_h264_now), Codec::H265 => layer.next_video_encode_h265_rate_control_layer_info_khr(&mut layer_h265_now) }]
@@ -959,6 +962,7 @@ impl Encoder {
             let kbps = pic.bitrate.or(pic.current_kbps).unwrap_or(0);
             let mut layer_h264 = vk::VideoEncodeH264RateControlLayerInfoKHR::default();
             let mut layer_h265 = vk::VideoEncodeH265RateControlLayerInfoKHR::default();
+            qp_ceiling(&mut layer_h264, &mut layer_h265, pic.max_qp);
             let layer = self.rate_control_layer(kbps);
             let layer = [match self.codec { Codec::H264 => layer.next_video_encode_h264_rate_control_layer_info_khr(&mut layer_h264), Codec::H265 => layer.next_video_encode_h265_rate_control_layer_info_khr(&mut layer_h265) }];
             let mut h264_rc = vk::VideoEncodeH264RateControlInfoKHR::default().gop_frame_count(u32::MAX).idr_period(u32::MAX).temporal_layer_count(1);
@@ -1250,6 +1254,7 @@ pub(crate) struct StreamEncoder {
     kbps: u32,
     /// The rate control the session has (None before the first picture reset it).
     applied_kbps: Option<u32>,
+    applied_max_qp: u32,
     /// What the encoder is, for logs and status lines.
     pub info: String,
     /// GPU timestamps around the copy (graphics queue): where a picture's time goes.
@@ -1375,6 +1380,7 @@ impl StreamEncoder {
                 last: None,
                 kbps,
                 applied_kbps: None,
+                applied_max_qp: 0,
                 info,
                 stamps,
                 rc_off: false,
@@ -1445,6 +1451,7 @@ impl StreamEncoder {
         // pictures)
         let poc = match self.enc.codec { Codec::H264 => (self.frame_num * 2) as i32, Codec::H265 => self.poc_count };
         self.poc_count += 1;
+        let max_qp = crate::stream_encode::MAX_QP.load(std::sync::atomic::Ordering::Acquire);
         let pic = Picture {
             slot: 0,
             idr,
@@ -1454,14 +1461,16 @@ impl StreamEncoder {
             setup,
             reference: if idr { None } else { self.last },
             reset: self.applied_kbps.is_none(),
-            // after a refinement the stream's rate control is set again
-            bitrate: (self.applied_kbps != Some(self.kbps) || self.rc_off).then_some(self.kbps),
+            // after a refinement the stream's rate control is set again (and with a new QP ceiling)
+            bitrate: (self.applied_kbps != Some(self.kbps) || self.rc_off || max_qp != self.applied_max_qp).then_some(self.kbps),
+            max_qp,
             current_kbps: self.applied_kbps,
             // a refinement needs a stream (not the first picture, not a key frame)
             refine: refine && !idr && self.applied_kbps.is_some(),
             rc_off_now: self.rc_off,
         };
         self.applied_kbps = Some(self.kbps);
+        self.applied_max_qp = max_qp;
         self.rc_off = pic.refine;
         self.last = Some((setup, self.frame_num, poc));
         // frame_num wraps at MaxFrameNum; POC type 2 follows it (2 x FrameNumOffset + frame_num)
@@ -1737,4 +1746,16 @@ impl Drop for StreamEncoder {
             d.destroy_command_pool(self.copy_pool, None);
         }
     }
+}
+
+/// A QP ceiling on a rate control layer (0: none), every picture type.
+fn qp_ceiling(h264: &mut vk::VideoEncodeH264RateControlLayerInfoKHR, h265: &mut vk::VideoEncodeH265RateControlLayerInfoKHR, max_qp: u32) {
+    if max_qp == 0 {
+        return;
+    }
+    let q = max_qp as i32;
+    h264.use_max_qp = 1;
+    h264.max_qp = vk::VideoEncodeH264QpKHR { qp_i: q, qp_p: q, qp_b: q };
+    h265.use_max_qp = 1;
+    h265.max_qp = vk::VideoEncodeH265QpKHR { qp_i: q, qp_p: q, qp_b: q };
 }

@@ -103,6 +103,9 @@ pub struct XrRemoteView {
     /// with it).
     #[rust]
     xr_due: bool,
+    /// The foveation level last asked for (`debug.xrremote.fov`).
+    #[rust]
+    fov_asked: u8,
     #[rust(1.0)]
     dpi: f64,
 }
@@ -182,7 +185,14 @@ impl XrRemoteView {
         // encodes for it (its pictures are paced by the poses, one per display frame)
         let refresh = device_property("debug.xrremote.hz").and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(90.0);
         log!("xr remote: linking to {host}:{port} at {refresh} Hz");
-        self.client = Some(XrStreamClient::connect(host, port, [1680, 1760], refresh));
+        // `streamscale` N (percent, read at the link; default 120, the user's pick: 100 looked
+        // half-res blurry, 140 is past what 166 encodes at 90/s): the eye picture the desktop
+        // renders and encodes, N% of the headset's 1680x1760
+        let percent = device_property("debug.xrremote.streamscale").and_then(|v| v.trim().parse::<u32>().ok()).filter(|p| (50..=160).contains(p)).unwrap_or(120);
+        // (even sizes, 16-aligned widths: the encoder's blocks)
+        let eye = [((1680 * percent / 100 + 15) / 16) * 16, ((1760 * percent / 100 + 7) / 8) * 8];
+        log!("xr remote: stream eye {}x{} ({percent}%)", eye[0], eye[1]);
+        self.client = Some(XrStreamClient::connect(host, port, eye, refresh));
     }
 }
 
@@ -253,6 +263,13 @@ impl Widget for XrRemoteView {
                     self.replay_asked = replay.clone();
                     #[cfg(not(target_arch = "wasm32"))]
                     let _ = makepad_xr_stream::replay_track_log("/sdcard/Android/data/dev.makepad.xrremote/files", &replay);
+                }
+                // `fov` N (0 none .. 3 high, live): the headset's fixed foveation of the view
+                let fov = switch("debug.xrremote.fov", 0);
+                if fov != self.fov_asked {
+                    self.fov_asked = fov;
+                    log!("xr remote: foveation level {fov}");
+                    makepad_widgets::makepad_platform::makepad_hal::hal_xr_foveation(fov as u32);
                 }
                 if let Some(client) = self.client.as_mut() {
                     client.occlusion = occlusion;

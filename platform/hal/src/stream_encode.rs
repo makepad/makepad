@@ -105,6 +105,17 @@ pub const CBR: u32 = 4;
 /// tuning) instead of its fastest encode (low-latency tuning).
 pub const SHARP: u32 = 8;
 
+/// The highest QP every stream encoder of this process may use from its next picture on (0:
+/// the encoder's own range): a quality floor under constant rate (a plain picture then takes
+/// more of the rate instead of undershooting it). Vulkan Video only.
+pub static MAX_QP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Sets [`MAX_QP`].
+#[makepad_relax_api::relax_api]
+pub fn hal_stream_encoder_max_qp(qp: u32) {
+    MAX_QP.store(qp.min(51), std::sync::atomic::Ordering::Release);
+}
+
 fn codec_of(flags: u32) -> Codec {
     if flags & HEVC != 0 { Codec::H265 } else { Codec::H264 }
 }

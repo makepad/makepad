@@ -53,6 +53,9 @@ pub struct Device {
     pub present_wait: bool,
     /// Multiview render passes (Vulkan 1.1 `multiview`, enabled when the device has it).
     pub multiview: bool,
+    /// Fragment density maps (VK_EXT_fragment_density_map: a target's coarser shading where
+    /// its map says, an XR runtime's foveation), enabled when the device has them.
+    pub fdm: bool,
     /// The queue of the GPU's hardware video encoder (VK_KHR_video_encode_queue + H.264), when
     /// it has one: `video_encode::Stream` submits there. Its own lock: video submits never wait
     /// for the graphics queue's.
@@ -331,6 +334,16 @@ impl Device {
             if qp_map.video_encode_quantization_map != 0 { wanted.push(vk::KHR_VIDEO_ENCODE_QUANTIZATION_MAP_NAME); }
         }
         let has_qp_map = qp_map.video_encode_quantization_map != 0;
+        // fragment density maps (an XR runtime's foveation of its swapchains)
+        let mut fdm = vk::PhysicalDeviceFragmentDensityMapFeaturesEXT::default();
+        if supported(vk::EXT_FRAGMENT_DENSITY_MAP_NAME) && instance.table.get_physical_device_features2.is_some() {
+            let mut query = vk::PhysicalDeviceFeatures2::default().next_physical_device_fragment_density_map_features_ext(&mut fdm);
+            unsafe { instance.get_physical_device_features2(physical, &mut query); }
+            fdm.p_next = std::ptr::null_mut();
+            if fdm.fragment_density_map != 0 { wanted.push(vk::EXT_FRAGMENT_DENSITY_MAP_NAME); }
+        }
+        let has_fdm = fdm.fragment_density_map != 0;
+        let mut fdm = vk::PhysicalDeviceFragmentDensityMapFeaturesEXT::default().fragment_density_map(has_fdm);
         wanted.sort_by(|a, b| a.to_bytes().cmp(b.to_bytes()));
         wanted.dedup();
         if log_enabled() { eprintln!("[hal-vulkan] vkCreateDevice device={name:?} queue_family={family} extensions={wanted:?}"); }
@@ -378,6 +391,7 @@ impl Device {
         if plane444.ycbcr2plane444_formats != 0 { create = create.next_physical_device_ycbcr2_plane444_formats_features_ext(&mut plane444); }
         if has_multiview { create = create.next_physical_device_multiview_features(&mut multiview); }
         if has_ycbcr { create = create.next_physical_device_sampler_ycbcr_conversion_features(&mut ycbcr); }
+        if has_fdm { create = create.next_physical_device_fragment_density_map_features_ext(&mut fdm); }
         if has_qp_map { create = create.next_physical_device_video_encode_quantization_map_features_khr(&mut qp_map); }
         // A GPU full of other work (an AI model) has no room for a device yet: the app waits
         // for room -- the desktop's owner asks the hub to yield on the sustained shortage --
@@ -422,7 +436,7 @@ impl Device {
         Ok(Some(Arc::new(Self {
             queue: unsafe { raw.get_device_queue(family as u32, 0) }, queue_lock: Mutex::new(()), raw, instance: instance.clone(),
             physical, family: family as u32, properties, memory, features, formats,
-            timestamp_bits: queue.timestamp_valid_bits, calibrated, extensions, present_wait: pacing, multiview: has_multiview, life: life.clone(),
+            timestamp_bits: queue.timestamp_valid_bits, calibrated, extensions, present_wait: pacing, multiview: has_multiview, fdm: has_fdm, life: life.clone(),
             video_encode,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: has_ycbcr, video_samplers: Mutex::new(Default::default()),
@@ -580,7 +594,7 @@ impl Device {
         Ok(Arc::new(Self { instance: instance.clone(), queue: unsafe { raw.get_device_queue(family as u32, 0) },
             raw, physical, queue_lock: Mutex::new(()), family: family as u32, properties, memory, features, formats,
             // a display peer only scans out: the GPU profiler times the rendering device
-            timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, multiview: false, life: owner.life.clone(), video_encode: None,
+            timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, multiview: false, fdm: false, life: owner.life.clone(), video_encode: None,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: false, video_samplers: Mutex::new(Default::default()) }))
     }

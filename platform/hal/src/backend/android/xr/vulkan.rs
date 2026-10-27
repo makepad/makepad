@@ -36,11 +36,9 @@ pub fn desired_fixed_foveation_level(level: u8) -> Option<XrFoveationLevelFB> {
     }
 }
 
-/// Fixed foveation on `swapchain` (XR_FB_foveation + configuration + swapchain_update_state).
-/// It takes effect where the app renders into the swapchain with the runtime's fragment density
-/// map; the HAL copies finished frames into it, so the session does not ask for it yet (it comes
-/// with rendering straight into the swapchain images).
-#[allow(dead_code)]
+/// Fixed foveation on `swapchain` (XR_FB_foveation + configuration + swapchain_update_state):
+/// the runtime writes the profile into the chain's fragment density maps, which the passes
+/// rendering into its images attach (a chain made `foveated`).
 pub fn try_enable_fixed_foveation(xr: &LibOpenXr, session: XrSession, swapchain: XrSwapchain, level: XrFoveationLevelFB) -> Result<(), String> {
     let create_profile = xr.xrCreateFoveationProfileFB.ok_or_else(|| "xrCreateFoveationProfileFB unavailable even though fixed foveation was requested".to_string())?;
     let update_swapchain = xr.xrUpdateSwapchainFB.ok_or_else(|| "xrUpdateSwapchainFB unavailable even though fixed foveation was requested".to_string())?;
@@ -57,20 +55,22 @@ pub fn try_enable_fixed_foveation(xr: &LibOpenXr, session: XrSession, swapchain:
     update_result
 }
 
-/// A swapchain of `array_size` layers (2: the projection layer, one per eye, as the old
-/// backend made it; 1: a quad layer) and its Vulkan images. The app renders into its images
-/// (viewed in the UNORM format of the frames: mutable format) or the HAL copies frames into it
-/// (a transfer destination).
-pub fn create_swapchain(xr: &LibOpenXr, session: XrSession, format: vk::Format, width: u32, height: u32, array_size: u32, create_flags: XrSwapchainCreateFlags) -> Result<(XrSwapchain, Vec<vk::Image>), String> {
-    let usage = XrSwapchainUsageFlags::SAMPLED | XrSwapchainUsageFlags::COLOR_ATTACHMENT | XrSwapchainUsageFlags::TRANSFER_DST | XrSwapchainUsageFlags::MUTABLE_FORMAT;
-    create_swapchain_for(xr, session, format, width, height, array_size, create_flags, usage)
-}
-
 /// A swapchain of `array_size` layers with the given usage (a depth swapchain: the layer's depth).
 #[allow(clippy::too_many_arguments)]
 pub fn create_swapchain_for(xr: &LibOpenXr, session: XrSession, format: vk::Format, width: u32, height: u32, array_size: u32, create_flags: XrSwapchainCreateFlags,
     usage_flags: XrSwapchainUsageFlags) -> Result<(XrSwapchain, Vec<vk::Image>), String> {
+    create_swapchain_foveated(xr, session, format, width, height, array_size, create_flags, usage_flags, false).map(|(h, i, _)| (h, i))
+}
+
+/// `create_swapchain_for`, `foveated`: with a fragment density map per image
+/// (XR_FB_foveation_vulkan: the runtime's foveation profile writes them, `try_enable_fixed_foveation`):
+/// each image's density map image and its size.
+#[allow(clippy::too_many_arguments)]
+pub fn create_swapchain_foveated(xr: &LibOpenXr, session: XrSession, format: vk::Format, width: u32, height: u32, array_size: u32, create_flags: XrSwapchainCreateFlags,
+    usage_flags: XrSwapchainUsageFlags, foveated: bool) -> Result<(XrSwapchain, Vec<vk::Image>, Vec<(vk::Image, u32, u32)>), String> {
+    let foveation = XrSwapchainCreateInfoFoveationFB { flags: XrSwapchainCreateFoveationFlagsFB::FRAGMENT_DENSITY_MAP_BIT_FB, ..Default::default() };
     let swap_chain_create_info = XrSwapchainCreateInfo {
+        next: if foveated { &foveation as *const _ as *const std::ffi::c_void } else { std::ptr::null() },
         create_flags,
         usage_flags,
         format: i64::from(format.as_raw()),
@@ -84,11 +84,20 @@ pub fn create_swapchain_for(xr: &LibOpenXr, session: XrSession, format: vk::Form
     };
     let mut swap_chain = XrSwapchain(0);
     unsafe { (xr.xrCreateSwapchain)(session, &swap_chain_create_info, &mut swap_chain) }.to_result("xrCreateSwapchain")?;
-    let images = xr_array_fetch(XrSwapchainImageVulkanKHR::default(), |cap, len, buf| {
-        unsafe { (xr.xrEnumerateSwapchainImages)(swap_chain, cap, len, buf as *mut std::ffi::c_void) }.to_result("xrEnumerateSwapchainImages")
-    });
+    let images = (|| {
+        let mut len = 0u32;
+        unsafe { (xr.xrEnumerateSwapchainImages)(swap_chain, 0, &mut len, std::ptr::null_mut()) }.to_result("xrEnumerateSwapchainImages")?;
+        let mut maps = vec![XrSwapchainImageFoveationVulkanFB::default(); len as usize];
+        let mut images = vec![XrSwapchainImageVulkanKHR::default(); len as usize];
+        if foveated {
+            for (i, m) in images.iter_mut().zip(maps.iter_mut()) { i.next = m as *mut _ as *mut std::ffi::c_void; }
+        }
+        unsafe { (xr.xrEnumerateSwapchainImages)(swap_chain, len, &mut len, images.as_mut_ptr() as *mut std::ffi::c_void) }.to_result("xrEnumerateSwapchainImages")?;
+        let maps: Vec<(vk::Image, u32, u32)> = if foveated { maps.iter().map(|m| (vk::Image::from_raw(m.image), m.width, m.height)).collect() } else { Vec::new() };
+        Ok::<_, String>((images.iter().map(|image| vk::Image::from_raw(image.image)).collect::<Vec<_>>(), maps))
+    })();
     match images {
-        Ok(images) => Ok((swap_chain, images.iter().map(|image| vk::Image::from_raw(image.image)).collect())),
+        Ok((images, maps)) => Ok((swap_chain, images, maps)),
         Err(e) => {
             unsafe { (xr.xrDestroySwapchain)(swap_chain) }.log_error("xrDestroySwapchain");
             Err(e)

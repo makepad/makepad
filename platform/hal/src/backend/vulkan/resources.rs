@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub fn vk_format(f: u32) -> Option<vk::Format> {
     Some(match f {
         format::RGBA8 => vk::Format::R8G8B8A8_UNORM,
+        format::RGBA8_SRGB => vk::Format::R8G8B8A8_SRGB,
         format::BGRA8 => vk::Format::B8G8R8A8_UNORM,
         format::R8 => vk::Format::R8_UNORM,
         format::RG8 => vk::Format::R8G8_UNORM,
@@ -26,6 +27,26 @@ pub fn vk_format(f: u32) -> Option<vk::Format> {
         format::ASTC4X4 => vk::Format::ASTC_4X4_UNORM_BLOCK,
         _ => return None,
     })
+}
+
+/// The fragment density maps of render targets another owner made (an XR runtime's foveated
+/// swapchain images: their density map image's view, by the target's raw image): a pass into
+/// such a target shades coarser where its map says ([`set_density_map`]).
+static DENSITY_MAPS: Mutex<Vec<(u64, vk::ImageView)>> = Mutex::new(Vec::new());
+
+/// Target `image` renders with the fragment density map `view` (a 2D array view, a layer per
+/// view of a multiview pass); `None`: without one again. The view's owner keeps it alive while
+/// registered.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn set_density_map(image: vk::Image, view: Option<vk::ImageView>) {
+    let mut maps = DENSITY_MAPS.lock().unwrap_or_else(|e| e.into_inner());
+    maps.retain(|(i, _)| *i != image.as_raw());
+    if let Some(v) = view { maps.push((image.as_raw(), v)); }
+}
+
+/// The density map registered for `image`, if any.
+pub(super) fn density_map(image: vk::Image) -> Option<vk::ImageView> {
+    DENSITY_MAPS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(i, _)| *i == image.as_raw()).map(|(_, v)| *v)
 }
 
 pub fn image_usage(t: &TextureObj) -> vk::ImageUsageFlags {

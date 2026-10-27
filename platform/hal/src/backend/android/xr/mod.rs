@@ -110,6 +110,36 @@ static TARGET_WAIT_NS: AtomicU64 = AtomicU64::new(0);
 static TARGET_WAITS: AtomicU64 = AtomicU64::new(0);
 static POSE_LEAD_NS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
+/// The app's frames write linear colour (`hal_xr_linear_frames`), and whether the projection
+/// chains are made for it now.
+static LINEAR_WANTED: AtomicBool = AtomicBool::new(false);
+static LINEAR_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub fn linear_frames(on: bool) { LINEAR_WANTED.store(on, Ordering::Release); }
+/// The projection chains' fixed foveation level (0 none .. 3 high; `hal_xr_foveation`), applied
+/// by the XR thread when it changes.
+static FOVEATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub fn foveation(level: u32) { FOVEATION.store(level.min(3), Ordering::Release); }
+pub fn linear_frames_active() -> bool { LINEAR_ACTIVE.load(Ordering::Acquire) }
+
+/// The two projection chains (a layer per eye) and their render targets: `linear` sRGB images
+/// without the mutable format (rendered through their own format: the shaders write linear
+/// colour, the GPU keeps their framebuffer compression), else `format` with UNORM views.
+#[allow(clippy::too_many_arguments)]
+fn stereo_chains(xr: &LibOpenXr, dev: &Arc<Device>, session: XrSession, format: vk::Format, eye: [u32; 2], blit: bool, linear: bool) -> Result<(Chain, Chain, Targets), String> {
+    let (format, usage, swizzle, target) = if linear {
+        (vk::Format::R8G8B8A8_SRGB, Some(XrSwapchainUsageFlags::COLOR_ATTACHMENT | XrSwapchainUsageFlags::TRANSFER_DST), true, crate::format::RGBA8_SRGB)
+    } else {
+        (format, None, blit, if blit { crate::format::RGBA8 } else { crate::format::BGRA8 })
+    };
+    // foveated where the GPU takes density maps and the runtime offers foveation profiles
+    let foveated = dev.fdm && xr.xrUpdateSwapchainFB.is_some() && xr.xrCreateFoveationProfileFB.is_some();
+    let a = Chain::new_with(xr, dev, session, format, eye, 2, XrSwapchainCreateFlags(0), swizzle, usage, foveated)?;
+    let b = Chain::new_with(xr, dev, session, format, eye, 2, XrSwapchainCreateFlags(0), false, usage, foveated)?;
+    let targets = Targets::new(dev, &[&a, &b], target)?;
+    log(&format!("projection chains: {format:?}{}", if linear { ", not mutable: linear frames" } else { ", mutable (UNORM views)" }));
+    Ok((a, b, targets))
+}
+
 pub(super) fn pose_lead(lead_ns: u64) {
     POSE_LEAD_NS.store(lead_ns.min(500_000_000) as i64, Ordering::Release);
 }
@@ -297,7 +327,10 @@ impl Runtime {
                 unsafe { (xr.xrEnumerateViewConfigurationViews)(instance, sys_id, XrViewConfigurationType::PRIMARY_STEREO, cap, len, buf) }.to_result("xrEnumerateViewConfigurationViews")
             })?;
             let view = config_views.first().ok_or("no PRIMARY_STEREO views")?;
-            let scale = |v: u32| ((v as f32) * XR_OPTIONS.buffer_scale).max(1.0) as u32;
+            // (debug `debug.xrremote.eyescale` N at start: the eye buffers at N percent of the
+            // recommended size, the GPU's shading against sharpness)
+            let percent = system_property("debug.xrremote.eyescale").and_then(|v| v.trim().parse::<u32>().ok()).filter(|p| (40..=150).contains(p)).unwrap_or(100);
+            let scale = |v: u32| ((v as f32) * XR_OPTIONS.buffer_scale * percent as f32 / 100.0).max(1.0) as u32;
             let eye = [scale(view.recommended_image_rect_width), scale(view.recommended_image_rect_height)];
             let _ = EYE_PX.set(eye);
             xr_log!("instance {instance:?} system {sys_id:?} runtime {} {:?}; extensions {:?}; eye {}x{} px", xr_string_zero_terminated(&instance_props.runtime_name).trim_end_matches(char::from(0)),
@@ -366,12 +399,13 @@ struct Frames { panel: Mutex<Option<Pending>>, stereo: Mutex<Option<Pending>>, a
 struct Targets { handles: Vec<XrSwapchain>, images: Vec<Arc<Image>>, owner: Vec<usize>, base: Vec<usize>, next: usize, acquired: std::collections::VecDeque<usize>, submitted: bool }
 
 impl Targets {
-    /// The chain's images wrapped as `layers`-layer render targets of `size` in the frames'
-    /// format (`rgba`: RGBA8, else BGRA8; UNORM views of the sRGB images: mutable format).
-    fn new(dev: &Arc<Device>, chains: &[&Chain], rgba: bool) -> Result<Targets, String> {
+    /// The chain's images wrapped as `layers`-layer render targets of `size` in `format` (RGBA8 or
+    /// BGRA8: UNORM views of the sRGB images, mutable format; RGBA8_SRGB: the images' own format,
+    /// linear frames).
+    fn new(dev: &Arc<Device>, chains: &[&Chain], format: u32) -> Result<Targets, String> {
         let (mut images, mut owner, mut base, mut handles) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (c, chain) in chains.iter().enumerate() {
-            let desc = crate::session::TextureObj { format: if rgba { crate::format::RGBA8 } else { crate::format::BGRA8 }, w: chain.size[0], h: chain.size[1],
+            let desc = crate::session::TextureObj { format, w: chain.size[0], h: chain.size[1],
                 depth: chain.layers, mips: 1, usage: crate::usage::RENDER_TARGET | crate::usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None };
             base.push(images.len());
             handles.push(chain.handle);
@@ -634,16 +668,35 @@ impl DepthChain {
 
 /// An XR swapchain, its Vulkan images, a copy slot per image, its size and layers.
 /// `times`: summed ns in `write` for acquire, wait for the image, the slot's fence, record + submit.
-struct Chain { handle: XrSwapchain, images: Vec<vk::Image>, slots: Vec<Slot>, size: [u32; 2], layers: u32, staging: Option<Arc<Image>>, times: [u64; 5] }
+/// `densities`: each image's fragment density map view (a foveated chain; registered with the
+/// GPU backend for its image: passes into it shade coarser where the runtime's profile says).
+struct Chain { handle: XrSwapchain, images: Vec<vk::Image>, slots: Vec<Slot>, size: [u32; 2], layers: u32, staging: Option<Arc<Image>>, times: [u64; 5], densities: Vec<vk::ImageView> }
 
 impl Chain {
     /// `swizzle`: the format is RGBA ordered, the frames BGRA: copies go through a staging image
     /// (the size of the frames copied in: `layers` side by side).
     fn new(xr: &LibOpenXr, dev: &Arc<Device>, session: XrSession, format: vk::Format, size: [u32; 2], layers: u32, flags: XrSwapchainCreateFlags, swizzle: bool) -> Result<Chain, String> {
-        let (handle, images) = vulkan::create_swapchain(xr, session, format, size[0], size[1], layers, flags)?;
+        Self::new_with(xr, dev, session, format, size, layers, flags, swizzle, None, false)
+    }
+
+    /// `new` with the swapchain's usage (`None`: the default, mutable format).
+    #[allow(clippy::too_many_arguments)]
+    fn new_with(xr: &LibOpenXr, dev: &Arc<Device>, session: XrSession, format: vk::Format, size: [u32; 2], layers: u32, flags: XrSwapchainCreateFlags, swizzle: bool, usage: Option<XrSwapchainUsageFlags>, foveated: bool) -> Result<Chain, String> {
+        let usage = usage.unwrap_or(XrSwapchainUsageFlags::SAMPLED | XrSwapchainUsageFlags::COLOR_ATTACHMENT | XrSwapchainUsageFlags::TRANSFER_DST | XrSwapchainUsageFlags::MUTABLE_FORMAT);
+        let (handle, images, maps) = vulkan::create_swapchain_foveated(xr, session, format, size[0], size[1], layers, flags, usage, foveated)?;
+        // the density maps' views (a 2D array: a layer per eye of the multiview pass)
+        let mut densities = Vec::new();
+        for (image, (map, _, _)) in images.iter().zip(maps.iter()) {
+            let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).level_count(1).layer_count(layers);
+            let info = vk::ImageViewCreateInfo::default().image(*map).format(vk::Format::R8G8_UNORM).view_type(vk::ImageViewType::TYPE_2D_ARRAY).subresource_range(range);
+            match unsafe { dev.raw.create_image_view(&info, None) } {
+                Ok(view) => { crate::backend::vulkan::resources::set_density_map(*image, Some(view)); densities.push(view); }
+                Err(e) => { xr_log!("density map view: {e:?}"); break; }
+            }
+        }
         let slots = images.iter().map(|_| Slot::new(dev)).collect::<Result<_, _>>()?;
         let staging = if swizzle { Some(Self::staging(dev, size, layers, false)?) } else { None };
-        Ok(Chain { handle, images, slots, size, layers, staging, times: [0; 5] })
+        Ok(Chain { handle, images, slots, size, layers, staging, times: [0; 5], densities })
     }
 
     /// The swizzle staging image for frames of this chain: `layers` side by side, or (a
@@ -718,6 +771,8 @@ impl Chain {
     }
 
     fn destroy(&mut self, xr: &LibOpenXr, dev: &Device) {
+        for image in &self.images { crate::backend::vulkan::resources::set_density_map(*image, None); }
+        for view in self.densities.drain(..) { unsafe { dev.raw.destroy_image_view(view, None) }; }
         for slot in self.slots.drain(..) {
             unsafe {
                 let _ = dev.raw.wait_for_fences(&[slot.fence], true, u64::MAX);
@@ -916,6 +971,13 @@ struct CxOpenXrSession {
     stereo_b: Option<Chain>,
     /// the projection chain of the stereo frame shown
     stereo_shown_chain: Option<XrSwapchain>,
+    /// what the projection chains are made from (their format, swizzled copies) and whether
+    /// the runtime offers an sRGB format for linear frames (`hal_xr_linear_frames`)
+    stereo_base_format: vk::Format,
+    stereo_blit: bool,
+    linear_ok: bool,
+    /// the foveation level the projection chains have (`apply_foveation`; MAX: not yet)
+    foveation_applied: u32,
 }
 
 unsafe impl Send for CxOpenXrSession {}
@@ -1035,10 +1097,12 @@ impl CxOpenXrSession {
         let panel = Chain::new(xr, &dev, handle, format, PANEL_PX, 1, XrSwapchainCreateFlags(0), blit)?;
         // the projection chain: the app's XR window renders straight into its images
         let eye = EYE_PX.get().copied().unwrap_or([1, 1]);
-        let stereo = Chain::new(xr, &dev, handle, format, eye, 2, XrSwapchainCreateFlags(0), blit)?;
+        let linear_ok = formats.contains(&i64::from(vk::Format::R8G8B8A8_SRGB.as_raw()));
+        let linear = linear_ok && LINEAR_WANTED.load(Ordering::Acquire);
+        let (stereo, stereo_b, targets) = stereo_chains(xr, &dev, handle, format, eye, blit, linear)?;
+        LINEAR_ACTIVE.store(linear, Ordering::Release);
+        *lock(&frames.stereo_targets) = Some(targets);
         let depth_layer = DepthChain::new(xr, &dev, handle, eye).map_err(|e| xr_log!("no projection depth layer: {e}")).ok();
-        let stereo_b = Chain::new(xr, &dev, handle, format, eye, 2, XrSwapchainCreateFlags(0), false)?;
-        *lock(&frames.stereo_targets) = Some(Targets::new(&dev, &[&stereo, &stereo_b], blit)?);
         let cursor = Chain::new(xr, &dev, handle, format, [CURSOR_PX; 2], 1, XrSwapchainCreateFlags::STATIC_IMAGE, false)?;
         let depth = depth::DepthSource::new(xr, &dev, depth_provider, depth_swap_chain).unwrap_or_else(|e| {
             xr_log!("environment depth readback unavailable: {e}");
@@ -1048,7 +1112,8 @@ impl CxOpenXrSession {
             inputs: inputs.clone(), tracker: None, active: false, focused: false, active_display_refresh_rate_hz: None, panel, cursor, stereo: Some(stereo),
             pointer: Pointer { hand: 1, ..Default::default() }, controllers: Default::default(), hands: Default::default(),
             panel_shown: None, panel_visible: true, panel_over_stereo: false, cursor_ready: false, stereo_asked: None, stereo_shown: None, stereo_focus: 0.0, depth_layer, stereo_asked_at: Instant::now(),
-            stats: [0; 4], frame_us: Vec::new(), stereo_asked_ns: 0, requested_refresh_mhz: 0, eyes_own: 0, eyes_asked: 0, paths: [0; 3], phases: [0; 7], stats_at: Instant::now(), stereo_b: Some(stereo_b), stereo_shown_chain: None };
+            stats: [0; 4], frame_us: Vec::new(), stereo_asked_ns: 0, requested_refresh_mhz: 0, eyes_own: 0, eyes_asked: 0, paths: [0; 3], phases: [0; 7], stats_at: Instant::now(), stereo_b: Some(stereo_b), stereo_shown_chain: None,
+            stereo_base_format: format, stereo_blit: blit, linear_ok, foveation_applied: u32::MAX };
         let _ = session.update_active_display_refresh_rate();
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -1243,6 +1308,8 @@ impl CxOpenXrSession {
         let panel_done = if render && self.panel_visible { self.update_panel().unwrap_or_else(|e| { xr_log!("panel: {e}"); None }) }
             else { lock(&self.frames.panel).take().map(|(_, done, _)| done) };
         phase(3, &mut self.phases);
+        self.switch_stereo_chains();
+        self.apply_foveation();
         let stereo_done = match xr_window { Some((sid, id)) if render => self.update_stereo(sid, id, time, period).unwrap_or_else(|e| { xr_log!("stereo: {e}"); None }), _ => None };
         phase(4, &mut self.phases);
         // environment depth: a finished readback to the XR window, the next one started (never waits)
@@ -1344,6 +1411,46 @@ impl CxOpenXrSession {
             self.stats_at = Instant::now();
         }
         r.to_result("xrEndFrame")
+    }
+
+    /// The projection chains made anew when the app's frames changed between linear and
+    /// sRGB-encoded colour (`hal_xr_linear_frames`), at a frame boundary: no frame asked, no
+    /// image held. The frame's layer is left out once (its chain is gone).
+    fn switch_stereo_chains(&mut self) {
+        let wanted = self.linear_ok && LINEAR_WANTED.load(Ordering::Acquire);
+        if wanted == LINEAR_ACTIVE.load(Ordering::Acquire) || self.stereo_asked.is_some() { return; }
+        let mut targets = lock(&self.frames.stereo_targets);
+        if targets.as_ref().is_some_and(|t| !t.acquired.is_empty()) { return; }
+        let eye = EYE_PX.get().copied().unwrap_or([1, 1]);
+        match stereo_chains(&self.rt.xr, &self.dev, self.handle, self.stereo_base_format, eye, self.stereo_blit, wanted) {
+            Ok((a, b, t)) => {
+                *targets = Some(t);
+                drop(targets);
+                if let Some(mut old) = self.stereo.replace(a) { old.destroy(&self.rt.xr, &self.dev); }
+                if let Some(mut old) = self.stereo_b.replace(b) { old.destroy(&self.rt.xr, &self.dev); }
+                self.stereo_shown = None;
+                self.stereo_shown_chain = None;
+                self.foveation_applied = u32::MAX;
+                LINEAR_ACTIVE.store(wanted, Ordering::Release);
+            }
+            Err(e) => { xr_log!("projection chains for linear frames: {e}"); self.linear_ok = false; }
+        }
+    }
+
+    /// The fixed foveation level asked (`hal_xr_foveation`) on both projection chains, when it
+    /// changed (or the chains were made anew). A chain made without density maps takes none.
+    fn apply_foveation(&mut self) {
+        let level = FOVEATION.load(Ordering::Acquire);
+        if level == self.foveation_applied { return; }
+        self.foveation_applied = level;
+        let fb = match level { 0 => XrFoveationLevelFB::NONE, 1 => XrFoveationLevelFB::LOW, 2 => XrFoveationLevelFB::MEDIUM, _ => XrFoveationLevelFB::HIGH };
+        for chain in [self.stereo.as_ref(), self.stereo_b.as_ref()].into_iter().flatten() {
+            if chain.densities.is_empty() { continue; }
+            match vulkan::try_enable_fixed_foveation(&self.rt.xr, self.handle, chain.handle, fb) {
+                Ok(()) => xr_log!("projection chain foveation level {level}"),
+                Err(e) => xr_log!("projection chain foveation: {e}"),
+            }
+        }
     }
 
     /// Copies the newest panel frame into the panel's next image; the frame's `presented`.
@@ -1799,6 +1906,15 @@ fn hand_moved_to(polled: &XrHand, now_hand: &XrHand, grip: (XrPose, [f32; 3], [f
     out.tips_active = (now_hand.tips_active & !xr_hand::GRAB_ACTIVE) | (polled.tips_active & xr_hand::GRAB_ACTIVE);
     out.flags = polled.flags | (now_hand.flags & xr_hand::IN_VIEW);
     out
+}
+
+/// An Android system property (`adb shell setprop`), if set.
+fn system_property(name: &str) -> Option<String> {
+    extern "C" { fn __system_property_get(name: *const std::ffi::c_char, value: *mut std::ffi::c_char) -> i32; }
+    let name = std::ffi::CString::new(name).ok()?;
+    let mut value = [0 as std::ffi::c_char; 92];
+    let n = unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr()) };
+    (n > 0).then(|| value[..n as usize].iter().map(|c| *c as u8 as char).collect())
 }
 
 fn pose(p: XrPosef) -> XrPose {

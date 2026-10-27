@@ -15,7 +15,7 @@ pub(super) const ABSENT: u32 = u32::MAX;
 pub(super) const VIDEO_SHAPE: u32 = 6;
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
-pub(super) struct PassKey { pub colors: [u32; 4], pub depth: u32, pub load: [u8; 5], /** 1, or 2: a multiview pass */ pub views: u8 }
+pub(super) struct PassKey { pub colors: [u32; 4], pub depth: u32, pub load: [u8; 5], /** 1, or 2: a multiview pass */ pub views: u8, /** a fragment density map attachment after the others */ pub fdm: bool }
 
 pub(super) struct RenderPass { pub dev: Arc<Device>, pub raw: vk::RenderPass, pub key: PassKey }
 
@@ -51,7 +51,17 @@ impl RenderPass {
         let mut subpass = vk::SubpassDescription::default().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&colors);
         if key.depth != ABSENT { subpass = subpass.depth_stencil_attachment(&depth); }
         let subpasses = [subpass];
+        // the fragment density map (an XR runtime's foveation): read only, in its own layout
+        let mut density = vk::RenderPassFragmentDensityMapCreateInfoEXT::default()
+            .fragment_density_map_attachment(vk::AttachmentReference::default().attachment(attachments.len() as u32).layout(vk::ImageLayout::FRAGMENT_DENSITY_MAP_OPTIMAL_EXT));
+        if key.fdm {
+            attachments.push(vk::AttachmentDescription::default().format(vk::Format::R8G8_UNORM).samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::DONT_CARE).store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE).stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::FRAGMENT_DENSITY_MAP_OPTIMAL_EXT).final_layout(vk::ImageLayout::FRAGMENT_DENSITY_MAP_OPTIMAL_EXT));
+        }
         let mut info = vk::RenderPassCreateInfo::default().attachments(&attachments).subpasses(&subpasses);
+        if key.fdm { info = info.next_render_pass_fragment_density_map_create_info_ext(&mut density); }
         // a multiview pass renders every view's layer (view mask: the low `views` bits); the
         // views are correlated (the eyes see nearly the same scene)
         let mask = [(1u32 << key.views.max(1)) - 1];
@@ -275,7 +285,7 @@ impl State {
         if program.desc.blend & pipeline_blend::RAW != 0 { return; }
         let mut colors = [ABSENT; 4];
         for i in 0..4 { if program.desc.outputs & (1 << i) != 0 { colors[i] = program.desc.color_formats[i]; } }
-        let key = PassKey { colors, depth: format::DEPTH32F, load: [pass_load::DONT_CARE; 5], views: 1 };
+        let key = PassKey { colors, depth: format::DEPTH32F, load: [pass_load::DONT_CARE; 5], views: 1, fdm: false };
         // a data target (R32F depth/shadow values, ids) is drawn without blending
         let blends = matches!(colors[0], format::BGRA8 | format::RGBA8 | format::RGBA16F);
         let flags = Draw::DEPTH_WRITE | if blends { Draw::BLEND } else { 0 };

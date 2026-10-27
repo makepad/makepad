@@ -13,7 +13,7 @@ mod frame;
 mod pipeline;
 mod prof;
 mod readback;
-mod resources;
+pub(crate) mod resources;
 pub(crate) mod share;
 mod submit;
 pub mod surface;
@@ -417,7 +417,7 @@ impl Backend for Vulkan {
             let Some(passes) = frame::slice(packet.passes, view.passes.len()) else { continue };
             let is_window = kind & !target::FLAGS == target::WINDOW;
             'pass: for pass in &view.passes[passes] {
-                let mut key = PassKey { colors: [pipeline::ABSENT; 4], depth: pipeline::ABSENT, load: pass.load, views: frame::pass_views(pass) };
+                let mut key = PassKey { colors: [pipeline::ABSENT; 4], depth: pipeline::ABSENT, load: pass.load, views: frame::pass_views(pass), fdm: false };
                 for (i, id) in pass.color.iter().enumerate().filter(|(_, id)| !id.is_none()) {
                     let Some(format) = format_of(*id) else { continue 'pass };
                     key.colors[i] = format;

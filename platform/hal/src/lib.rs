@@ -1527,6 +1527,40 @@ pub fn hal_xr_replay(data: &[u8]) -> bool {
     }
 }
 
+/// The XR window's frames write linear colour (`on`): its projection chains become sRGB images
+/// without the mutable format (the GPU keeps their framebuffer compression: the stream pass's
+/// fixed cost 1.7 -> 0.1 ms on Quest 3) and the hardware encodes on write; the app's shaders then
+/// output linear colour into it ([`hal_xr_linear_frames_active`] says from which frame on).
+/// Off: sRGB-encoded colour written through UNORM views, as every app's frames. Android XR;
+/// elsewhere nothing.
+#[relax_api]
+pub fn hal_xr_linear_frames(on: bool) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::linear_frames(on);
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
+}
+
+/// The XR window's fixed foveation (Android XR: the runtime's foveation profile in the
+/// projection chains' fragment density maps; 0 none, 1 low, 2 medium, 3 high), applied from the
+/// next display frame. Elsewhere nothing.
+#[relax_api]
+pub fn hal_xr_foveation(level: u32) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::foveation(level);
+    #[cfg(not(target_os = "android"))]
+    let _ = level;
+}
+
+/// Whether the XR window's frames render into linear-output (sRGB-encoding) targets now.
+#[relax_api]
+pub fn hal_xr_linear_frames_active() -> bool {
+    #[cfg(target_os = "android")]
+    return backend::android::xr::linear_frames_active();
+    #[cfg(not(target_os = "android"))]
+    false
+}
+
 /// The device's network in its low-latency mode while `on` (Android: a low-latency Wi-Fi lock,
 /// no power save or background scans); elsewhere nothing. Whether it was applied.
 #[relax_api]

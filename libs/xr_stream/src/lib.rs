@@ -111,6 +111,8 @@ script_mod! {
         // the frame then goes to the compositor with the view's own eyes (`view_*`: that eye:
         // orientation, position, fov tangents)
         warp: uniform(0.0)
+        // 1: the frame's targets encode on write (`hal_xr_linear_frames`): output linear colour
+        linear_out: uniform(0.0)
         view_rot: uniform(vec4(0.0, 0.0, 0.0, 1.0))
         view_pos: uniform(vec4(0.0, 0.0, 0.0, 1.0))
         view_tan: uniform(vec4(-1.0, 1.0, 1.0, -1.0))
@@ -219,7 +221,7 @@ script_mod! {
         // guess. The view eye and the render eye are millimetres apart (a frame of prediction),
         // so the parallax is a few pixels and two steps settle it; edges stay as sharp as the
         // picture's own pixels (no grid)
-        warped: fn() -> vec2 {
+        warped: fn() -> vec3 {
             let o = self.ray_o
             let dr = self.ray
             let rt = self.render_tan
@@ -233,12 +235,14 @@ script_mod! {
             // texel); else the ray passes an edge where the picture has two answers, a
             // foreground point it misses and the background the head now sees beside it: the
             // farther one (never the foreground smeared past its outline)
+            // (with the picture's depth there: .z, m, 50 where nothing was drawn)
             let texel = vec2(2.0, 1.0) / self.band_size
-            let c = self.ray_at(o, dr, self.band_z(b))
+            let z2 = self.band_z(b)
+            let c = self.ray_at(o, dr, z2)
             if (abs(c.x - b.x) > texel.x || abs(c.y - b.y) > texel.y) && z0 > z1 {
-                return a
+                return vec3(a.x, a.y, z1)
             }
-            return b
+            return vec3(b.x, b.y, z2)
         }
         vertex: fn() {
             let proj = self.draw_pass.camera_projection
@@ -300,8 +304,12 @@ script_mod! {
             // the picture's point here: this pixel's own (the frame shows with the picture's
             // eyes), or the warp's (with the view's eyes); outside the picture: the room
             var uv = self.pos
+            // (the picture's depth there, m, once the warp found it; 0: not yet)
+            var wz = 0.0
             if self.warp > 0.5 && self.video_mode > 0.5 {
-                uv = self.warped()
+                let w3 = self.warped()
+                uv = w3.xy
+                wz = w3.z
                 if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
                     return vec4(0.0, 0.0, 0.0, 0.0)
                 }
@@ -315,12 +323,15 @@ script_mod! {
                 // the coverage and depth from the band target (one plain fetch: two Y'CbCr
                 // taps of the decoder's picture less per pixel); nothing drawn there: the room,
                 // before any other work
-                let band = self.band_at(uv)
-                let vd = band.x
                 let va = self.band_coverage(uv)
                 let ca = max(clamp(va, 0.0, 1.0), self.opaque)
                 if ca <= 0.002 {
                     return vec4(0.0, 0.0, 0.0, 0.0)
+                }
+                // the depth there (the warp's, else one fetch)
+                var z = wz
+                if z <= 0.0 {
+                    z = self.band_z(uv)
                 }
                 let vs = self.nv12_size
                 // (inside this eye's colour: the filter never reaches the other eye's column or
@@ -328,8 +339,15 @@ script_mod! {
                 let cp = clamp(uv * vec2(self.src.z, ch), vec2(1.0, 1.0), vec2(self.src.z, ch) - vec2(1.0, 1.0))
                 let c = self.video.sample_video((self.src.xy + cp) / vs)
                 let rgb = self.nv12_color(vec3(c.y, c.z, c.x) * 255.0)
-                let vz = self.depth_near / max(vd, 0.0001)
-                let keep = 1.0 - self.occlusion(uv, mix(0.0, vz, step(0.004, vd)))
+                let keep = 1.0 - self.occlusion(uv, mix(0.0, z, step(z, 49.0)))
+                // (into the linear-frame targets: the colour as linear light, the hardware
+                // encodes it; the picture is premultiplied on black, so straight first)
+                if self.linear_out > 0.5 {
+                    let straight = clamp(rgb / max(ca, 0.004), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+                    // (the sRGB curve exactly: the hardware encodes with it)
+                    let lin = mix(straight / 12.92, pow((straight + vec3(0.055, 0.055, 0.055)) / 1.055, vec3(2.4, 2.4, 2.4)), step(vec3(0.04045, 0.04045, 0.04045), straight))
+                    return vec4(lin * ca * keep, ca * keep)
+                }
                 return vec4(rgb * keep, ca * keep)
             }
             let s = self.src.xy + self.pos * vec2(self.src.z, ch) - vec2(0.5, 0.5)
@@ -422,6 +440,8 @@ struct Window {
     /// The environment depth image's age at use: the display time of the frame drawn with it
     /// less that of the frame that acquired it.
     env_age_us: Vec<u32>,
+    /// Per picture: sample to decoded, decoded to the first take, that take to its display (us).
+    ready_parts: Vec<[u32; 3]>,
     /// The largest difference between a picture's render eyes and the eyes sent for its pose
     /// (quaternion components).
     echo_err_deg: f32,
@@ -591,6 +611,9 @@ impl XrStreamClient {
             let (shared, signal) = (shared.clone(), signal.clone());
             // the radio never naps while a stream runs (power save adds tens of ms per picture)
             makepad_widgets::makepad_platform::makepad_hal::hal_network_low_latency(true);
+            // the stream's frames write linear colour: the projection chains become sRGB images
+            // without the mutable format (framebuffer compression kept: 1.6 ms less per frame)
+            makepad_widgets::makepad_platform::makepad_hal::hal_xr_linear_frames(true);
             let info = HeadsetInfo { name: "headset".into(), eye, refresh_mhz: (refresh_hz * 1000.0) as u32, codecs: codecs::HEVC | codecs::H264 };
             let _ = std::thread::Builder::new().name("xr-stream".into()).spawn(move || worker(host, port, info, shared, signal));
         }
@@ -802,6 +825,12 @@ impl XrStreamClient {
                         let takes_ago = (decoded_at.elapsed().as_nanos() as u64 / PERIOD_NS).min(8);
                         let first = display_ns.saturating_sub(takes_ago * PERIOD_NS);
                         self.ready.push_back(first.saturating_sub(sent.sample_ns) as f64);
+                        // (its parts, for the 5 s line: sample to decoded, decoded to the first take
+                        // after it, that take to its frame's display)
+                        let now_ns = makepad_widgets::makepad_platform::makepad_hal::clock_ns();
+                        let decoded_ns = now_ns.saturating_sub(decoded_at.elapsed().as_nanos() as u64);
+                        let take_ns = now_ns.saturating_sub(takes_ago * PERIOD_NS);
+                        self.window.ready_parts.push([decoded_ns.saturating_sub(sent.sample_ns) as u32 / 1000, take_ns.saturating_sub(decoded_ns) as u32 / 1000, first.saturating_sub(take_ns) as u32 / 1000]);
                         if self.ready.len() > 256 {
                             self.ready.pop_front();
                         }
@@ -1162,6 +1191,14 @@ impl XrStreamClient {
             return;
         }
         log!("xr stream: {line}");
+        if !w.ready_parts.is_empty() {
+            let q = |k: usize| {
+                let mut v: Vec<u32> = w.ready_parts.iter().map(|p| p[k]).collect();
+                v.sort_unstable();
+                format!("{:.1}/{:.1}/{:.1}", v[v.len() / 10] as f64 / 1000.0, v[v.len() / 2] as f64 / 1000.0, v[v.len() * 9 / 10] as f64 / 1000.0)
+            };
+            log!("xr stream: ready p10/p50/p90 ms: sample to decoded {} · decoded to take {} · take to display {} · lead {:.1}", q(0), q(1), q(2), self.lead_ns / 1e6);
+        }
         if !w.events.is_empty() {
             let ev: Vec<String> = w.events.iter().map(|(t, k)| format!("{k}{t}")).collect();
             log!("xr stream: events (ms into the window; r repeat, s skip, l display frame missed): {} · lead {:.1} ms", ev.join(" "), self.lead_ns / 1e6);
@@ -1280,6 +1317,7 @@ impl XrStreamClient {
                     (live_id!(opaque), vec![self.opaque as f32]),
                     (live_id!(env_map), vec![self.env_map as f32]),
                     (live_id!(warp), vec![warp as u8 as f32]),
+                    (live_id!(linear_out), vec![makepad_widgets::makepad_platform::makepad_hal::hal_xr_linear_frames_active() as u8 as f32]),
                     (live_id!(band_size), vec![band_size.0 as f32, band_size.1 as f32]),
                 ];
                 // the view's own eye (this frame's: what the pass draws with)

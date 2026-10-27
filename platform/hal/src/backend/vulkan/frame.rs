@@ -541,7 +541,9 @@ impl Vulkan {
             let d = depth.as_ref().unwrap();
             return Err(format!("invalid depth attachment: format {} usage {:#x} size {}x{} for a {}x{} pass", d.desc.format, d.desc.usage, d.desc.w, d.desc.h, size[0], size[1]));
         }
-        let mut key = PassKey { colors: [ABSENT; 4], depth: depth.as_ref().map_or(ABSENT, |d| d.desc.format), load: pass.load, views };
+        // (a target with a registered density map renders with it: an XR runtime's foveation)
+        let density = if self.dev.fdm { colors.first().and_then(|(_, c)| super::resources::density_map(c.image)) } else { None };
+        let mut key = PassKey { colors: [ABSENT; 4], depth: depth.as_ref().map_or(ABSENT, |d| d.desc.format), load: pass.load, views, fdm: density.is_some() };
         for (i, c) in &colors { key.colors[*i] = c.desc.format; }
         let render_pass = if let Some(pass) = self.passes.get(&key) { pass.clone() } else {
             let pass = RenderPass::new(self.dev.clone(), key)?; self.passes.insert(key, pass.clone()); pass
@@ -588,6 +590,7 @@ impl Vulkan {
             clear.push(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: pass.clear_depth, stencil: 0 } });
             s.ledger.touch(Kind::Texture, pass.depth.index, pass.depth.gen, s.frame, now);
         }
+        if let Some(view) = density { attachment_views.push(view); }
         let framebuffer = unsafe { self.dev.raw.create_framebuffer(&vk::FramebufferCreateInfo::default().render_pass(render_pass.raw)
             .attachments(&attachment_views).width(target_size[0]).height(target_size[1]).layers(1), None) }.map_err(error)?;
         batch.framebuffers.push(framebuffer); batch.passes.push(render_pass.clone());

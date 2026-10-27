@@ -472,11 +472,15 @@ pub mod format {
     pub const BC5: u32 = 12;
     pub const ASTC4X4: u32 = 13;
     pub const COUNT: u32 = 14;
+    /// RGBA8 with sRGB encoding on write (the shader outputs linear colour): a render target
+    /// of the Android XR projection chains only (`hal_xr_linear_frames`), outside the texture
+    /// formats every backend lists (`COUNT`); Vulkan alone maps it.
+    pub const RGBA8_SRGB: u32 = 32;
 
     /// Bytes per texel; 0 for an unknown format.
     pub const fn texel_bytes(f: u32) -> u64 {
         match f {
-            RGBA8 | BGRA8 | DEPTH32F | DEPTH24_STENCIL8 | R32F | RG16F | R32UINT => 4,
+            RGBA8 | BGRA8 | DEPTH32F | DEPTH24_STENCIL8 | R32F | RG16F | R32UINT | RGBA8_SRGB => 4,
             // 16 bytes per 4x4 texels
             R8 | BC7 | BC5 | ASTC4X4 => 1,
             RG8 => 2,
@@ -489,6 +493,7 @@ pub mod format {
     pub const fn name(f: u32) -> &'static str {
         match f {
             RGBA8 => "Rgba8",
+            RGBA8_SRGB => "Rgba8Srgb",
             BGRA8 => "Bgra8",
             R8 => "R8",
             RG8 => "Rg8",
