@@ -172,7 +172,8 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("hal", "pump", "HAL pump loop per session: turns and wake causes, totals and per second since the last call (an idle app shows none)"),
     ("writes", "<Type::field> | (none: the watches) | W<n> [n=20] | rm <W<n>|all>", "who writes a struct field: the compiled fns that assign `x.field` (`=`, `op=`) are rebuilt to record every write: its site (fn, file:line), the value written and the field's address; `writes W<n>` reads the sites and the latest writes"),
     ("vms", "", "every live Splash VM: label, thread, heap objects / strings / arrays and bytes, GC runs and time, errors, evaluations"),
-    ("jit", "[ms=250]", "live compile activity in one line (what the JIT ring shows): busy or idle, the jobs running now, the queues per tier (ahead, O2, O3), builds finished and their rate over ms, the UI thread's JIT duty"),
+    ("live", "[after=<next>]", "an instant look for live graphs (no window, no sleep), one JSON line: now_ms, frames presented, finished builds so far per kind (lazy, ahead, o2, o3, linked; diff two looks for a rate), queues [ahead,o2,o3], UI ms waited on the JIT; with after=<the last answer's next>: the UI frames since then (the last minute at most) as ft [[ms before now_ms the frame ended, ms it worked], ...]"),
+    ("jit", "[ms=250]","live compile activity in one line (what the JIT ring shows): busy or idle, the jobs running now, the queues per tier (ahead, O2, O3), builds finished and their rate over ms, the UI thread's JIT duty"),
     ("threads", "", "every thread: name, role, state, CPU time, what it waits on; JIT threads: alive/restarting/dead, panics, heartbeat"),
     ("stacks", "[thread=<name|tid|main|owner|all>] [depth=12]", "symbolised stacks (identical stacks folded)"),
     ("waits", "", "the wait registry: who waits for what, held by whom"),
@@ -231,6 +232,7 @@ fn dispatch_command(req: &Req, out: &mut Out) {
         "ping" => out.line(&format!("{{\"pid\":{},\"app\":{},\"ms\":{}}}", std::process::id(), json_str(&APP.lock().unwrap()), now_ms())),
         "threads" => cmd_threads(out),
         "jit" => cmd_jit(req, out),
+        "live" => cmd_live(req, out),
         "stacks" => cmd_stacks(req, out),
         "waits" => cmd_waits(out),
         "owner" => cmd_owner(out),
@@ -1016,6 +1018,41 @@ fn cmd_jit(req: &Req, out: &mut Out) {
     if f1 > 0 {
         out.line(&format!("frames: {:.0} fps in the window ({} presented in all)", (f1 - f0) as f64 * 1000.0 / ms as f64, f1));
     }
+}
+
+/// `live [after=<next>]`: one instant look for a live view polled many times a second (devhub's
+/// graphs): the monotonic counters a rate is diffed from and the UI frames since the last look.
+fn cmd_live(req: &Req, out: &mut Out) {
+    use std::fmt::Write;
+    let a = crate::postframe::activity();
+    let now = crate::clock::wall_ns();
+    let frames = crate::postframe::FRAMES.load(Relaxed);
+    out.measured("live counters", "postframe::activity + the flight recorder's frame ring, one look", &[]);
+    let mut ft = String::new();
+    let next = match req.get("after").and_then(|v| v.parse::<u64>().ok()) {
+        // the last minute at most (what a live graph shows; an old cursor gets no backlog)
+        Some(from) => flightrec::frames_since(from, &mut |_, f| {
+            if now.saturating_sub(f.t1) > 60_000_000_000 {
+                return;
+            }
+            let busy = f.t1.saturating_sub(f.t0).saturating_sub(f.idle);
+            let _ = write!(ft, "{}[{:.1},{:.1}]", if ft.is_empty() { "" } else { "," }, now.saturating_sub(f.t1) as f64 / 1e6, busy as f64 / 1e6);
+        }),
+        None => flightrec::frames_head(),
+    };
+    out.line(&format!(
+        "{{\"now_ms\":{:.1},\"frames\":{frames},\"lazy\":{},\"ahead\":{},\"o2\":{},\"o3\":{},\"linked\":{},\"q\":[{},{},{}],\"ui_wait_ms\":{},\"next\":{next},\"ft\":[{ft}]}}",
+        now as f64 / 1e6,
+        a.demand(),
+        a.ahead_done,
+        a.o2_done,
+        a.o3_done,
+        a.linked,
+        a.ahead,
+        a.o2,
+        a.o3 + a.o3_running,
+        a.ui_wait_ns / 1_000_000
+    ));
 }
 
 /// The `jit` answer from two looks `ms` apart.

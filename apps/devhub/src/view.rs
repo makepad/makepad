@@ -12,6 +12,9 @@ use makepad_devhub::lease::sched::NodeView;
 use makepad_shell_kit::ui::{contains, cut_top, rect, DrawShellFill, HAlign, Ico, ShellDraw};
 use makepad_shell_kit::{alpha, darker, CtrlState, ShellTokens};
 use makepad_widgets::*;
+use crate::graph::{DrawDevhubTrace, Palette};
+use crate::live::Board;
+use std::sync::{Arc, Mutex};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -23,6 +26,7 @@ script_mod! {
         height: Fill
         draw_bg +: {}
         d +: {}
+        g +: {}
     }
 }
 
@@ -208,6 +212,11 @@ pub struct DevhubView {
     tokens: ShellTokens,
     #[live]
     card: bool,
+    #[live]
+    g: DrawDevhubTrace,
+    /// the live sampler's rings (the selected JIT's card)
+    #[rust]
+    pub live: Option<Arc<Mutex<Board>>>,
     #[rust]
     pub state: ViewState,
     #[rust]
@@ -485,6 +494,17 @@ impl DevhubView {
         let r = rect(x0 + wd - 22.0, row.pos.y + 3.0, 22.0, 22.0);
         self.d.button(cx, r, &tok, self.ctrl(&Hit::CloseDetail, false), Some(Ico::Close), "", tok.font.caption, fg, false);
         self.hits.push((Hit::CloseDetail, r));
+        // its live graphs (the node's task view card): compiles by tier, frame times, CPU
+        if let (Some(src), Some((machine, pid))) = (self.live.clone(), st.selected.clone()) {
+            let b = src.lock().unwrap();
+            if let Some(j) = b.jits.iter().find(|j| j.pid == pid) {
+                let p = Palette::new(&tok);
+                let cpu = st.machines.iter().find(|m| m.name == machine).and_then(|m| m.jits.iter().find(|j| j.pid == pid)).and_then(|j| j.cpu_pct).map(|c| format!("{c:.0}%"));
+                let now = crate::taskview::view_now(&b);
+                let h = crate::taskview::jit_card(&mut self.d, &mut self.g, cx, &tok, &p, rect(x0, rest.pos.y + 6.0, wd, 0.0), j, now, cpu.as_deref());
+                rest = cut_top(rest, h + 14.0).1;
+            }
+        }
         let box_h = 16.0 * st.detail.len().min(40) as f64 + 8.0;
         let (area, r2) = cut_top(rest, box_h);
         rest = r2;

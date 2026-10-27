@@ -140,6 +140,32 @@ fn unreachable_dial_host_says_so() {
 }
 
 #[test]
+fn requests_to_an_unreachable_fleet_host_leave_no_route_threads() {
+    // the request line arrives while the dial is still failing: the route ends without an
+    // upstream, and its client -> upstream thread must end with it
+    let hub = Hub::new(&Hosts::default());
+    hub.set_fleet(std::sync::Arc::new(|_addr: &str| {
+        std::thread::sleep(Duration::from_millis(50));
+        Err(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "down"))
+    }));
+    hub.sync(&Hosts { hosts: vec![Host { name: "gone".into(), via: Via::Fleet { addr: "10.0.0.1:1".into() } }] });
+    let c = client(&hub);
+    for _ in 0..10 {
+        let ch = c.open("route", "gone peers").unwrap();
+        ch.send(b"peers".to_vec()).unwrap();
+        match ch.recv_timeout(WAIT) {
+            Ok(Event::Closed(_, why)) => assert!(why.contains("down"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+    let end = std::time::Instant::now() + WAIT;
+    while hub.routes() > 0 && std::time::Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(hub.routes(), 0, "route threads left behind");
+}
+
+#[test]
 fn hosts_report_shows_state_and_rtt() {
     let hub = Hub::new(&hosts());
     let c = client(&hub);

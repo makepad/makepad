@@ -1175,6 +1175,11 @@ pub fn writes_allowed() -> bool {
     EXEC.get().is_some_and(|x| x.dev.load(Ordering::Acquire))
 }
 
+/// The leases live on this node now: (id, lane, kind), for its own status view.
+pub fn held() -> Vec<(String, String, &'static str)> {
+    EXEC.get().map_or_else(Vec::new, |x| x.leases.lock().unwrap().values().map(|l| (l.id.clone(), l.lane.clone(), l.kind.as_str())).collect())
+}
+
 /// Puts a process started for lease `id` (a sync launch) under that lease: its end stops it.
 pub fn adopt(id: &str, pid: u32, log: PathBuf) -> Result<(), String> {
     let x = EXEC.get().ok_or("this process runs no lease executor")?;

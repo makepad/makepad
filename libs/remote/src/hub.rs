@@ -20,7 +20,7 @@ use crate::link::{Client, Error, Target};
 use crate::stream::{write_varint, TAG_DROP};
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -122,6 +122,8 @@ struct Inner {
     source: Mutex<Option<Source>>,
     /// how `via = "fleet"` hosts are dialled (the owner's transport and authentication)
     fleet: Mutex<Option<FleetDialer>>,
+    /// live client -> upstream threads of routes (one per open route)
+    routes_in: Arc<AtomicUsize>,
 }
 
 pub type Source = Arc<dyn Fn() -> Hosts + Send + Sync>;
@@ -142,7 +144,7 @@ pub fn parse_target(t: &str) -> (&str, Option<String>) {
 
 impl Hub {
     pub fn new(hosts: &Hosts) -> Hub {
-        let hub = Hub(Arc::new(Inner { links: Mutex::new(Vec::new()), clients: Mutex::new(Vec::new()), source: Mutex::new(None), fleet: Mutex::new(None) }));
+        let hub = Hub(Arc::new(Inner { links: Mutex::new(Vec::new()), clients: Mutex::new(Vec::new()), source: Mutex::new(None), fleet: Mutex::new(None), routes_in: Arc::new(AtomicUsize::new(0)) }));
         hub.sync(hosts);
         hub
     }
@@ -194,6 +196,11 @@ impl Hub {
             }
             kept
         });
+    }
+
+    /// Routes whose client -> upstream thread still runs.
+    pub fn routes(&self) -> usize {
+        self.0.routes_in.load(Relaxed)
     }
 
     /// Clients currently connected to the hub's socket.
@@ -328,9 +335,10 @@ fn route_factory(hub: Hub) -> Factory {
         };
         let service = service.to_string();
         let channel = open.channel;
+        let live = hub.0.routes_in.clone();
         std::thread::Builder::new()
             .name("makepad-remote-route".into())
-            .spawn(move || route(link, channel, spec, service, args))
+            .spawn(move || route(link, channel, spec, service, args, live))
             .map(|_| ())
             .map_err(|e| (CLOSE_REFUSED, format!("cannot start the route thread: {e}")))
     })
@@ -369,20 +377,33 @@ impl Slot {
         self.tx.lock().unwrap().take()
     }
 
-    /// The sender, waiting while there is none and the route is still alive.
+    /// The sender, waiting while there is none and the route is still alive (`done` is set
+    /// before the `set` that wakes this, under the same lock: no wake-up is lost, no polling).
     fn wait(&self, done: &AtomicBool) -> Option<ChannelTx> {
         let mut g = self.tx.lock().unwrap();
         while g.is_none() {
             if done.load(Relaxed) {
                 return None;
             }
-            g = self.set.wait_timeout(g, Duration::from_millis(200)).unwrap().0;
+            g = self.set.wait(g).unwrap();
         }
         g.clone()
     }
 }
 
-fn route(link: Arc<HostLink>, client: Channel, spec: Option<String>, service: String, args: String) {
+/// Ends a route however its upstream loop returns: the client -> upstream thread stops waiting
+/// for an upstream that will never come. (Without it every request to a host that could not be
+/// reached left that thread polling forever: 20 threads a minute with two hosts down.)
+struct RouteEnd(Arc<Slot>, Arc<AtomicBool>);
+
+impl Drop for RouteEnd {
+    fn drop(&mut self) {
+        self.1.store(true, Relaxed);
+        self.0.set(None);
+    }
+}
+
+fn route(link: Arc<HostLink>, client: Channel, spec: Option<String>, service: String, args: String, live: Arc<AtomicUsize>) {
     let feed = service == "watch" || service == "stream";
     let ctx = client.tx();
     let up_slot: Arc<Slot> = Arc::new(Slot::default());
@@ -390,13 +411,19 @@ fn route(link: Arc<HostLink>, client: Channel, spec: Option<String>, service: St
     {
         // client -> upstream, for as long as the client channel lives
         let (slot, done) = (up_slot.clone(), done.clone());
-        let _ = std::thread::Builder::new().name("makepad-remote-route-in".into()).spawn(move || {
+        live.fetch_add(1, Relaxed);
+        let gone = live.clone();
+        let started = std::thread::Builder::new().name("makepad-remote-route-in".into()).spawn(move || {
             loop {
                 match client.recv() {
                     Some(Event::Data(d)) => {
                         // the upstream channel may still be opening (or reopening)
-                        if let Some(tx) = slot.wait(&done) {
-                            let _ = tx.send(d);
+                        match slot.wait(&done) {
+                            Some(tx) => {
+                                let _ = tx.send(d);
+                            }
+                            // the route ended: nothing forwards any more
+                            None => break,
                         }
                     }
                     Some(Event::Opened(_)) => {}
@@ -407,8 +434,13 @@ fn route(link: Arc<HostLink>, client: Channel, spec: Option<String>, service: St
             if let Some(tx) = slot.take() {
                 tx.close(CLOSE_NORMAL, "");
             }
+            live.fetch_sub(1, Relaxed);
         });
+        if started.is_err() {
+            gone.fetch_sub(1, Relaxed);
+        }
     }
+    let _end = RouteEnd(up_slot.clone(), done.clone());
     let (mut last, mut have_seq, mut attempt, mut ever) = (0u64, false, 0u32, false);
     'link: loop {
         if done.load(Relaxed) {

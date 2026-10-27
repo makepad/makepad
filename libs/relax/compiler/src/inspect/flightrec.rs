@@ -329,6 +329,20 @@ pub fn frame(f: Fr) {
     frames().push(f);
 }
 
+/// The UI frames recorded from cursor `from` on (`(n, frame)`); returns the cursor to read from
+/// next time (`live`'s frame times). Nothing when the recorder is off.
+pub fn frames_since(from: u64, f: &mut dyn FnMut(u64, Fr)) -> u64 {
+    if !on() {
+        return from;
+    }
+    frames().read(from, f).0
+}
+
+/// The cursor after the last UI frame recorded.
+pub fn frames_head() -> u64 {
+    if on() { frames().fill().0 } else { 0 }
+}
+
 /// wall ns the UI thread entered its current root phase (0: between phases: idle in the event
 /// loop, or between a frame's phases)
 static UI_BUSY_SINCE: AtomicU64 = AtomicU64::new(0);
