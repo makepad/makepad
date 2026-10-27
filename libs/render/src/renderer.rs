@@ -414,6 +414,8 @@ pub struct Renderer {
     custom_draws: std::collections::BTreeMap<String, Box<CustomMaterial>>,
     /// Image-based lighting for Splash materials (renderer/ibl.rs).
     ibl: ibl::IblState,
+    /// Shiny stock models under that environment (renderer/stock_ibl.rs).
+    stock_ibl: stock_ibl::StockIblState,
     /// The world's generic items on the model lanes (renderer/items.rs).
     items: items::ItemState,
     /// The streamed world's surface shader, created on first streamed draw.
@@ -538,9 +540,14 @@ pub struct Renderer {
     /// frame budget kept.
     stream_light_count: usize,
     frame_stream_lights: usize,
+    /// The vehicle lamps `frame_lamps` lit this frame (`RenderStats::vehicle_lamps`).
+    frame_vehicle_lamps: usize,
     asset_light_error:Option<String>,
     /// This frame's eye, for ranking lights past the authored budget.
     light_eye: Vec3f,
+    /// This frame's daylight direction (renderer/env_sun.rs `daylight_dir`):
+    /// what the lamps' photocell reads, here and in the bake's lamp key.
+    light_daylight: Vec3f,
     /// See [`Renderer::set_camera_relative`].
     camera_relative: bool,
     /// Cached [`Self::harvest_lamps`] output — the harvest walks strings, so
@@ -660,11 +667,17 @@ mod gi;
 mod stream_draw;
 mod grass_draw;
 mod vfx_draw;
-mod ibl;
+pub(crate) mod ibl;
+mod env_sun;
+mod stock_ibl;
 mod items;
 mod water;
 pub use water::{eye_under_water, pack_wave_uniforms};
 pub use items::{splash_material_name, GeometryData, TransformTint, LAYOUT_TRANSFORM_TINT};
+// The names `IblSource::Procedural` indexes, for hosts that name an
+// environment as the engine does (Scene3D's `@hdri_golden_hour`).
+pub use ibl::{HDRI_PREFIX, PROCEDURAL_ENVIRONMENTS, PROCEDURAL_HDRI_WIDTH};
+pub use stock_ibl::STOCK_IBL_MATERIAL;
 
 pub use draw_items::*;
 pub use prepared::*;
@@ -741,6 +754,7 @@ impl Default for Renderer {
             pbr_draw: None,
             custom_draws: Default::default(),
             ibl: Default::default(),
+            stock_ibl: Default::default(),
             items: Default::default(),
             city_draw: None,
             grass: None,
@@ -798,12 +812,13 @@ impl Default for Renderer {
             frame_lights: Vec::new(),
             frame_baked_count: 0,
             host_lights: Vec::new(),
-            host_asset_lights:Vec::new(),asset_light_error:None,light_eye:Vec3f::default(),camera_relative:false,
+            host_asset_lights:Vec::new(),asset_light_error:None,light_eye:Vec3f::default(),light_daylight:SunLight::default().dir,camera_relative:false,
             model_headlight_owners: Vec::new(),
             vehicle_lamp_radius: 0.0,
             lamp_level: 0.0,
             stream_light_count: 0,
             frame_stream_lights: 0,
+            frame_vehicle_lamps: 0,
             lamp_cache: Vec::new(),
             lamp_cache_rev: None,
             light_grid: LightGrid::default(),
@@ -846,6 +861,8 @@ mod shell_bucket_tests;
 mod realm_lifecycle_tests;
 #[cfg(test)]
 mod sun_tests;
+#[cfg(test)]
+mod env_prepare_tests;
 #[cfg(test)]
 mod cull_tests;
 #[cfg(test)]

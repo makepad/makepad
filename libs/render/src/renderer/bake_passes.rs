@@ -386,8 +386,13 @@ impl Renderer {
             }
         }
         let mut sun = crate::sun::resolve_sun(&world.sun);
-        // A world's own Sun steers the cascades and the bake too.
-        if let Some(dir) = crate::world_lights::world_sun_dir(world) { sun.dir = dir; }
+        // A world's own Sun steers the cascades and the bake too; else the
+        // environment's sun (renderer/env_sun.rs). Only the direction: this
+        // site never took the rig's colours, and the bake reads `sun.dir`.
+        if let Some(dir) = crate::world_lights::world_sun_dir(world).or_else(|| self.env_sun_dir(world)) { sun.dir = dir; }
+        if self.clustered_frames % 240 == 0 && std::env::var_os("MAKEPAD_HDR_STATS").is_some() {
+            log!("bake: sun dir {:?}", sun.dir);
+        }
         // The re-bake idempotence probe (macOS readback): with
         // MAKEPAD_GPU_LM_REBAKE set, every settled bake reports its atlas
         // signature, and each bake after the first reports its DIFF against

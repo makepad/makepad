@@ -38,6 +38,10 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     foliage::script_mod(vm);
     splat::script_mod(vm);
     impostor::script_mod(vm);
+    // The skin lane assigns render-material's IBL lookups by name
+    // (skinned_gpu.rs), so they exist before it is declared. Idempotent:
+    // custom_material.rs registers them again for the material programs.
+    makepad_render_material::builtin::register(vm);
     skinned_gpu::script_mod(vm);
     world::script_mod(vm);
     water::script_mod(vm);
@@ -1208,6 +1212,72 @@ pub struct DrawLmTopDilate {
 /// the window would darken at all must carry a blocker height.
 pub const LM_SUN_SOFT: (f32, f32) = (0.2, 0.8);
 
+/// The body of the function `name` in a lowered shader source a compile
+/// test emitted (GLSL and HLSL both define it as `io_<name>(`): the lines
+/// between its opening line and its closing brace.
+#[cfg(test)]
+pub(crate) fn lowered_fn_body(source: &str, name: &str) -> Option<String> {
+    let def = format!("io_{name}(");
+    // `<type> <name>(..){` at the start of a line: the definition, not a call.
+    let mut lines = source.lines().skip_while(|l| {
+        !(l.trim_end().ends_with('{') && l.split_whitespace().nth(1).is_some_and(|w| w.starts_with(&def)))
+    });
+    lines.next()?;
+    let (mut depth, mut body) = (1i32, String::new());
+    for line in lines {
+        depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+        if depth <= 0 {
+            return Some(body);
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    None
+}
+
+/// A lowered shader source as the source-text tests read it: each line
+/// trimmed, and each user local named `l_<name>`. The shader IR writes a
+/// local `l<index>_<name>` (platform/shader, `local_name`), its index in
+/// its function, which moves whenever the function gains or loses a local;
+/// the tests pin statements, not that numbering or the indentation.
+#[cfg(test)]
+pub(crate) fn test_source(source: &str) -> String {
+    let mut out = Vec::with_capacity(source.len());
+    for line in source.lines() {
+        let b = line.trim().as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            let in_word = i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+            if b[i] == b'l' && !in_word {
+                let digits = b[i + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+                if digits > 0 && b.get(i + 1 + digits) == Some(&b'_') {
+                    out.extend_from_slice(b"l_");
+                    i += digits + 2;
+                    continue;
+                }
+            }
+            out.push(b[i]);
+            i += 1;
+        }
+        out.push(b'\n');
+    }
+    // Only ASCII runs were replaced, so the bytes are still UTF-8.
+    String::from_utf8(out).expect("UTF-8 source")
+}
+
+#[cfg(test)]
+mod lowered_source_tests {
+    use super::test_source;
+
+    #[test]
+    fn a_local_reads_by_its_name_and_a_line_without_its_indent() {
+        let lowered = "    float l14_dither = (((l13_hash - 0.5) * 0.008) * (1.0 - l6_hdr));\n        if ((uni_ibl_ctl.x > 0.5)) {\n    return p_a;";
+        assert_eq!(test_source(lowered), "float l_dither = (((l_hash - 0.5) * 0.008) * (1.0 - l_hdr));\nif ((uni_ibl_ctl.x > 0.5)) {\nreturn p_a;\n");
+        // Not a local: a name with `l<digits>_` inside it, or no `_` after the digits.
+        assert_eq!(test_source("cell2_x + bl3_y + l7 + l_x"), "cell2_x + bl3_y + l7 + l_x\n");
+    }
+}
+
 #[cfg(test)]
 mod shader_registration_tests {
     use super::*;
@@ -1310,6 +1380,56 @@ mod shader_registration_tests {
         });
     }
 
+    /// The environment background reads both float textures on every
+    /// backend: the atlas through render-material's lookups and the
+    /// full-resolution dome through its own. Shared by the standalone
+    /// test below and the cube family's.
+    fn assert_env_background_sources(vm: &mut ScriptVm) {
+        for (name, result) in [
+            ("env background GLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawEnvBackground, "glsl", false)})),
+            ("env background HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawEnvBackground, "hlsl", false)})),
+        ] {
+            let source = test_source(&vm.heap().string_with(result, |_heap, value| value.to_string()).unwrap());
+            assert!(!source.starts_with("ERRORS:"), "{name}: {source}");
+            assert!(source.contains("env_tex") && source.contains("detail_map"), "{name}: both textures are sampled");
+            // The dome's texel addressing works in its logical size
+            // (bg2.zw), the instance field the lookup reads.
+            assert!(source.contains("bg2"), "{name}: the dome lookup reads its logical size");
+            // K2: the hash dither is the legacy lane's (its 8-bit output
+            // bands); the HDR lane writes linear radiance, which the
+            // composite dithers after its tone map, and a fixed +-0.004
+            // there would swamp a dim map. One factor: (1 - hdr).
+            let dither = source.lines().find(|l| l.contains("0.008")).unwrap_or_else(|| panic!("{name}: the dither"));
+            assert!(dither.contains("(1.0 - l_hdr)"), "{name}: the HDR lane adds no dither: {dither}");
+        }
+    }
+
+    /// The environment background compiles and emits on its own. The cube
+    /// family's test registers every lane (the GI relight among them) and
+    /// stops at the first one that fails, so this one holds the
+    /// background's own contract whatever state the others are in.
+    #[test]
+    fn the_environment_background_shader_compiles_and_samples_both_textures() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            vm.capture_errors();
+            makepad_draw::script_mod(vm);
+            vm.heap_mut().new_module(id!(prelude));
+            script_eval!(vm, {
+                mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw: mod.draw, }
+            });
+            vm.heap_mut().new_module(id!(widgets));
+            makepad_render_material::builtin::register(vm);
+            crate::renderer::ibl::script_mod(vm);
+            let errors = script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawEnvBackground)});
+            let errors = vm.heap().string_with(errors, |_heap, value| value.to_string()).expect("compile result should be a string");
+            let setup_errors = vm.take_errors();
+            assert!(setup_errors.is_empty(), "script setup errors: {setup_errors:#?}");
+            assert!(errors.is_empty(), "env background: {errors}");
+            assert_env_background_sources(vm);
+        });
+    }
+
     /// The water surface compiles on every backend, and its texture
     /// bindings fit the WebGL2 fragment budget with room to spare.
     #[test]
@@ -1392,6 +1512,10 @@ mod shader_registration_tests {
             super::script_mod(vm);
             crate::local_shadows::script_mod(vm);
             crate::custom_material::register(vm);
+            // The environment background registers itself on first draw;
+            // here it is registered explicitly (builtin's mat_ibl_* are in
+            // by custom_material::register).
+            crate::renderer::ibl::script_mod(vm);
 
             // These shaders write numeric payloads (including negatives and
             // triangle ids), not display colors. A successful shader compile
@@ -1434,6 +1558,7 @@ mod shader_registration_tests {
                 ("pbr", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawScenePbr)})),
                 ("skin", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneSkinnedGpu)})),
                 ("custom", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCustom)})),
+                ("env background", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawEnvBackground)})),
                 ("city", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCity)})),
                 ("grass", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneGrass)})),
                 ("foliage", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneFoliageLit)})),
@@ -1489,6 +1614,7 @@ mod shader_registration_tests {
                 assert!(!source.starts_with("ERRORS:"),"{name}: {source}");
                 assert!(source.contains("morph_map"),"{name}: missing morph deformation");
             }
+            assert_env_background_sources(vm);
             let pbr = DrawScenePbr::script_new_with_default(vm);
             let id = pbr.skinned.draw_vars.draw_shader_id.expect("registered PBR shader");
             let cx = vm.cx();
@@ -1544,6 +1670,122 @@ mod shader_registration_tests {
                 let n = m.geometries.total_slots.div_ceil(4);
                 let limit = makepad_draw::makepad_platform::draw_shader_layout::MAX_VERTEX_ATTRIBUTES;
                 assert!(n <= limit, "{name}: {n} geometry vertex attributes (the limit is {limit})");
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod skin_ibl_tests {
+    use super::*;
+    use makepad_draw::makepad_platform::makepad_script::script_eval;
+
+    /// The scene shaders as the crate registers them (`crate::script_mod`,
+    /// what `custom_material::register` and a running renderer run), then
+    /// `f`. The compile list's hand-made registration also has the shared
+    /// Splash stdlib now (`mod.shared`, `makepad_render_graph::pass_stdlib`,
+    /// whose `srgb_to_linear` the skin lane's surface path calls), but the
+    /// crate's own list is the one whose order D2 changes (render-material's
+    /// built-ins before the skin block), so that is the one under test.
+    fn with_vm(f: impl FnOnce(&mut ScriptVm)) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            vm.capture_errors();
+            makepad_draw::script_mod(vm);
+            vm.heap_mut().new_module(id!(prelude));
+            script_eval!(vm, { mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw:mod.draw } });
+            vm.heap_mut().new_module(id!(widgets));
+            crate::script_mod(vm);
+            f(vm);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "script errors: {errors:#?}");
+        });
+    }
+
+    /// The skin lane declares the IBL atlas on a named slot past every
+    /// numbered binding, inside the budgets the PBR lane is held to, with
+    /// the flag off until the renderer binds an environment.
+    #[test]
+    fn the_skin_lane_carries_the_ibl_slot_inside_its_budgets_and_off_by_default() {
+        with_vm(|vm| {
+            let skin = DrawSceneSkinnedGpu::script_new_with_default(vm);
+            let id = skin.draw_vars.draw_shader_id.expect("registered skin shader");
+            let cx = vm.cx();
+            let mapping = &cx.draw_shaders[id.index].mapping;
+            let textures = &mapping.textures;
+            assert!(textures.len() <= skin.draw_vars.texture_slots.len(), "skin exceeds the combined texture bindings");
+            assert!(textures.iter().filter(|t| t.id != live_id!(morph_map)).count() <= 16, "skin exceeds the WebGL2 fragment texture budget");
+            // The numbered bindings draw_skinned_inner writes keep their slots.
+            assert_eq!(textures[0].id, live_id!(tex));
+            assert_eq!(textures[1].id, live_id!(joint_tex));
+            assert_eq!(textures[2].id, live_id!(ao_map));
+            assert_eq!(textures[3].id, live_id!(light_map));
+            assert_eq!(textures[4].id, live_id!(top_map));
+            assert_eq!(textures[5].id, live_id!(csm_map));
+            let detail = textures.iter().position(|t| t.id == live_id!(detail_map)).expect("the IBL atlas slot");
+            assert!(detail > 5, "the atlas binds by name, past the numbered slots");
+            assert_eq!(textures.last().map(|t| t.id), Some(live_id!(morph_map)), "morph_map stays the last texture");
+            let flag = mapping.dyn_uniforms.inputs.iter().find(|i| i.id == live_id!(ibl_ctl)).expect("the ibl_ctl uniform");
+            assert!(skin.draw_vars.dyn_uniforms[flag.offset..flag.offset + flag.slots].iter().all(|v| *v == 0.0), "IBL is off until the renderer binds an environment");
+            // The flag's four floats lie inside the draw's uniform block,
+            // which is as big as the shader's uniforms (DrawVars::dyn_uniforms
+            // is sized to mapping.dyn_uniforms.total_slots when the shader
+            // binds), and the block stays under the most a GL / WebGL 2
+            // uniform block is guaranteed (DRAW_CALL_MAX_UNIFORM_FLOATS).
+            assert!(flag.offset + flag.slots <= skin.draw_vars.dyn_uniforms.len(), "ibl_ctl lies outside the draw call's uniform block");
+            assert!(mapping.dyn_uniforms.total_slots <= DRAW_CALL_MAX_UNIFORM_FLOATS, "skin exceeds the draw call's uniform budget: {} of {}", mapping.dyn_uniforms.total_slots, DRAW_CALL_MAX_UNIFORM_FLOATS);
+        });
+    }
+
+    /// The surface path lowers with the IBL lookups on the backends the
+    /// compile list emits source for, and takes them only under the lane's
+    /// switch: along its reflection and along its normal, the coat along
+    /// its own reflection.
+    #[test]
+    fn the_skin_lane_lowers_with_the_ibl_lookups() {
+        with_vm(|vm| {
+            for (name, result) in [
+                ("skin GLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneSkinnedGpu, "glsl", false)})),
+                ("skin HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneSkinnedGpu, "hlsl", false)})),
+            ] {
+                let source = test_source(&vm.heap().string_with(result, |_heap, value| value.to_string()).unwrap());
+                assert!(!source.starts_with("ERRORS:"), "{name}: {source}");
+                assert!(source.contains("mat_ibl_sky_env") && source.contains("mat_ibl_ambient"), "{name}: the IBL lookups are in the surface path");
+                assert!(source.contains("detail_map"), "{name}: the atlas is sampled");
+                assert!(source.contains("cluster_lights"), "{name}: the clustered lights stay");
+                // The lane takes both lookups through render-material's
+                // lane functions, which carry its control (ibl_ctl): the
+                // lane's scale on the reflection and on the fill (y), and
+                // the fill from the map only while the switch is set (z),
+                // else the fill the lane had (an authored ambient, the
+                // gathered GI).
+                let reflection = lowered_fn_body(&source, "mat_ibl_lane_sky_env").unwrap_or_else(|| panic!("{name}: no lane reflection lookup"));
+                assert!(reflection.contains("mat_ibl_sky_env(p_r, p_rough) * ") && reflection.contains("ibl_ctl.y"), "{name}: the reflection lookup carries the lane's scale: {reflection}");
+                let fill = lowered_fn_body(&source, "mat_ibl_lane_ambient").unwrap_or_else(|| panic!("{name}: no lane fill lookup"));
+                assert!(fill.contains("mat_ibl_ambient(p_n, p_a) * ") && fill.contains("ibl_ctl.y"), "{name}: the fill lookup carries the lane's scale: {fill}");
+                assert!(fill.contains("ibl_ctl.z > 0.5") && fill.contains("return p_a;"), "{name}: the fill is the map's only while the switch is set, else the lane's own: {fill}");
+                // The surface path and the toy coat take them under the
+                // lane's switch, pinned as text: no test draws a skinned
+                // batch. The lookups are on while ibl_ctl.x is set, in the
+                // surface path and in the coat and nowhere else (the lane
+                // functions test z). Under it the surface path reflects the
+                // map along its reflection at its roughness, then fills
+                // along its normal over the fill it had, and the block
+                // ends; the coat reflects the map along its own reflection
+                // as a lacquer (0.03), and nothing else.
+                let pixel = lowered_fn_body(&source, "pixel").unwrap_or_else(|| panic!("{name}: no pixel function"));
+                let coat = lowered_fn_body(&source, "toy_coat").unwrap_or_else(|| panic!("{name}: no toy coat"));
+                // GLSL and HLSL name a uniform and a function alike
+                // (`uni_<name>`, `io_<name>`).
+                let (switch, f) = ("if ((uni_ibl_ctl.x > 0.5)) {", "io_");
+                assert_eq!(source.matches("ibl_ctl.x > 0.5").count(), 2, "{name}: the switch set turns the lookups on, once in the surface path and once in the coat");
+                assert!(pixel.contains(&format!("{switch}\nl_environment = {f}mat_ibl_lane_sky_env(normalize(l_reflection), l_rough);\n")), "{name}: under the switch the surface reflects the map along its reflection, at its roughness: {pixel}");
+                assert!(pixel.contains(&format!("\nl_fill = {f}mat_ibl_lane_ambient(l_n, l_fill);\n}}\n")), "{name}: under the switch the surface fills from the map along its normal, over the fill it had, and the block ends: {pixel}");
+                assert!(coat.contains(&format!("{switch}\nl_env = {f}mat_ibl_lane_sky_env(normalize(l_r), 0.03);\n}}\n")), "{name}: under the switch the coat reflects the map along its own reflection, as a lacquer: {coat}");
+                // Nothing in the lane's pixel stage takes a raw lookup.
+                for (stage, body) in [("pixel", &pixel), ("toy_coat", &coat)] {
+                    assert!(!body.contains("io_mat_ibl_sky_env(") && !body.contains("io_mat_ibl_ambient("), "{name}: {stage} takes a lookup at the map's raw scale");
+                }
             }
         });
     }

@@ -10,7 +10,11 @@
 //! normal, the sun direction, the view direction, the sun's radiance, its
 //! Fresnel term and its specular lobe; `mat_light`, `mat_lighting` and
 //! `mat_ambient` exist with stock bodies; `params` is the material's vec4;
-//! `v_csm` is the true world position; `detail_map` is free on the lane.
+//! `v_csm` is the true world position; `detail_map` is free on the lane;
+//! `ibl_ctl` is the lane's control of the IBL lookups (y: its scale on the
+//! map, z: 1 while the fill comes from the map), written per draw;
+//! `coat_treeline(env, r)` is what the lane's clear coat paints over the
+//! horizon of its reflection `env` along `r`.
 use makepad_draw::*;
 use makepad_draw::makepad_platform::makepad_script::script_eval;
 
@@ -108,6 +112,32 @@ script_mod! {
         e = e + self.mat_ibl_meta(8.0).xyz * (0.546274 * (n.x * n.x - n.y * n.y))
         return max(e, vec3(0.0, 0.0, 0.0)) * (self.mat_ibl_meta(9.0).z / 3.14159265)
     }
+
+    // ---- the two lookups as a lane takes them -------------------------
+    // The functions above return the map at its own scale x Ibl.intensity,
+    // the same in every lane (the dome and a preview read them as they
+    // are). A lane that lights with them puts its own scale on both
+    // (ibl_ctl.y: 1 where a composite exposes the frame; the map's own
+    // exposure in a display-referred lane, where the rig's fill carries
+    // that exposure in its values), so a surface that takes the lookups and
+    // the one beside it that takes the rig's hemisphere are exposed alike.
+    // The fill comes from the map only while ibl_ctl.z is set: cleared, the
+    // lane keeps the fill it passes in (an authored ambient, gathered GI)
+    // and takes the reflection alone from the map.
+    mod.draw.mat_ibl_lane_sky_env = fn(r: vec3, rough: float) -> vec3 {
+        return self.mat_ibl_sky_env(r, rough) * self.ibl_ctl.y
+    }
+    mod.draw.mat_ibl_lane_ambient = fn(n: vec3, a: vec3) -> vec3 {
+        if self.ibl_ctl.z > 0.5 { return self.mat_ibl_ambient(n, a) * self.ibl_ctl.y }
+        return a
+    }
+    // Car paint's clear coat on the lane paints a treeline over the horizon
+    // of its reflection (`coat_treeline`: the analytic sky has none). The
+    // map supplies its own horizon, so under it the reflection stays as the
+    // coat took it.
+    mod.draw.mat_ibl_coat_treeline = fn(env: vec3, r: vec3) -> vec3 {
+        return env
+    }
 }
 
 /// The engine overrides a program can carry.
@@ -123,7 +153,9 @@ pub enum Builtin {
     Flat,
     /// The error material (surface and composition).
     Error,
-    /// Image-based lighting from the atlas in `detail_map`.
+    /// Image-based lighting from the atlas in `detail_map`, under the lane's
+    /// control (`ibl_ctl`); the clear coat reflects the map with no analytic
+    /// treeline over it.
     Ibl,
 }
 
@@ -156,8 +188,13 @@ pub fn overrides(vm: &mut ScriptVm, builtin: Builtin) -> Vec<(LiveId, ScriptObje
             (id!(mat_ibl_meta), f(script_eval!(vm, { mod.draw.mat_ibl_meta }))),
             (id!(mat_ibl_dir), f(script_eval!(vm, { mod.draw.mat_ibl_dir }))),
             (id!(mat_ibl_level), f(script_eval!(vm, { mod.draw.mat_ibl_level }))),
-            (id!(sky_env), f(script_eval!(vm, { mod.draw.mat_ibl_sky_env }))),
-            (id!(mat_ambient), f(script_eval!(vm, { mod.draw.mat_ibl_ambient }))),
+            (id!(mat_ibl_sky_env), f(script_eval!(vm, { mod.draw.mat_ibl_sky_env }))),
+            (id!(mat_ibl_ambient), f(script_eval!(vm, { mod.draw.mat_ibl_ambient }))),
+            // The lane's reflection and fill: the two lookups under ibl_ctl.
+            (id!(sky_env), f(script_eval!(vm, { mod.draw.mat_ibl_lane_sky_env }))),
+            (id!(mat_ambient), f(script_eval!(vm, { mod.draw.mat_ibl_lane_ambient }))),
+            // No analytic treeline over the map's reflection in the clear coat.
+            (id!(coat_treeline), f(script_eval!(vm, { mod.draw.mat_ibl_coat_treeline }))),
         ],
     };
     pairs.into_iter().filter_map(|(id, o)| o.filter(|o| vm.is_fn(*o)).map(|o| (id, o))).collect()

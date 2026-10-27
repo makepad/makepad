@@ -11,6 +11,11 @@ use makepad_draw::*;
 use makepad_scene::SunConfig;
 use makepad_render::sky::{luminance, noaa_solar_position, SkyDate};
 use makepad_render::sun::{resolve_sun, solar_dir};
+use makepad_render::hdri::{self, HdriParams};
+use makepad_render::hdri::envmap::{bake_env_map, remove_sun};
+use makepad_render::makepad_render_material::ibl;
+use makepad_render::sun::{env_exposure, env_sun_dir, env_sun_rig, EnvLighting};
+use makepad_scene::{Ibl, IblSource, TextureRef, World};
 
 /// Fab's default site (libs/fab api::SkyState::default): Amsterdam-ish,
 /// midsummer, CEST.
@@ -188,5 +193,152 @@ fn the_conventions_agree_on_the_same_sky() {
             angle_deg(to_render, noaa_render_dir(hour)) < 1.0e-3,
             "{hour}h"
         );
+    }
+}
+
+/// A clear sky with its sun placed by hand at (azimuth, elevation), no clouds.
+fn manual_sky(azimuth_deg: f32, elevation_deg: f32) -> HdriParams {
+    let mut p = HdriParams::default();
+    p.sky.sun.mode = "manual".to_string();
+    p.sky.sun.azimuth_deg = azimuth_deg;
+    p.sky.sun.elevation_deg = elevation_deg;
+    p.sky.clouds.coverage = 0.0;
+    p.clamp();
+    p
+}
+
+/// `bake_env_map`'s row runner on the test thread.
+fn serial(n: usize, f: &(dyn Fn(usize) + Sync)) {
+    for i in 0..n {
+        f(i);
+    }
+}
+
+/// The lighting the renderer lends a map at `Ibl.intensity` 1: the gain is
+/// the intensity (the environment's own scale, never HDR_SKY_GAIN).
+fn lighting_of(map: &ibl::EnvMap) -> EnvLighting {
+    EnvLighting { sh: ibl::sh9(map), mean_luminance: hdri::image::mean_luminance(map), gain: 1.0 }
+}
+
+fn env_world(sun: Option<makepad_scene::EnvSun>, rotation_deg: f32) -> World {
+    let mut world = World::new();
+    world.environment.ibl = Some(Ibl { source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg });
+    world.environment.sun = sun;
+    world
+}
+
+/// Phase 2's pinned contract: the sun the environment map carries is the
+/// direction the light shades with — at every azimuth, elevation and map
+/// rotation — and a sky lights from above.
+#[test]
+fn the_environments_sun_equals_the_resolved_light_direction() {
+    for (az, el) in [(135.0f32, 40.0f32), (20.0, 10.0), (300.0, 65.0)] {
+        let (map, sun) = bake_env_map(&manual_sky(az, el), 64, serial);
+        let sun = sun.expect("a sky with the sun up reports its sun");
+        // 0.05 degrees: this file's f32 acos cannot resolve less than 0.02.
+        assert!(angle_deg(sun.dir, hdri::dir_from_az_el(az, el)) < 0.05, "the bake reports where it drew the sun");
+        // The renderer lights with the map's lighting copy: the sun's cone
+        // filled with the sky around it, because the directional light
+        // carries the sun (renderer/ibl.rs).
+        let mut lit = map.clone();
+        remove_sun(&mut lit, &sun);
+        let lighting = lighting_of(&lit);
+        for rotation in [0.0f32, 90.0, -45.0] {
+            let world = env_world(Some(sun), rotation);
+            let want = hdri::rotate_y(hdri::dir_from_az_el(az, el), rotation);
+            let dir = env_sun_dir(&world).expect("the environment places the sun");
+            assert!(angle_deg(dir, want) < 0.05, "az {az} el {el} rot {rotation}: {dir:?} vs {want:?}");
+            let rig = env_sun_rig(&world, Some(&lighting), resolve_sun(&world.sun).to_hdr(), true);
+            assert!(angle_deg(rig.dir, want) < 0.2, "the rig follows the map's sun: {:?} vs {want:?}", rig.dir);
+            assert!(luminance(rig.color) > 0.0, "the sun lights");
+            // The fill comes from the right hemispheres: the up term is the blue sky's,
+            // the down term the warm ground's (not "the sky is brighter": a sunlit
+            // ground out-shines a clear sky at 40 degrees).
+            assert!(rig.sky.z > rig.sky.x, "the up term is the sky's: {:?}", rig.sky);
+            assert!(rig.ground.x > rig.ground.z, "the down term is the ground's: {:?}", rig.ground);
+            assert!(rig.color.is_finite() && rig.sky.is_finite() && rig.ground.is_finite());
+        }
+    }
+}
+
+/// An authored direction (Fab's NOAA sun for the hour) is not the map's to
+/// override; the map still supplies the colour and the fill.
+#[test]
+fn an_authored_sun_direction_beats_the_environment() {
+    let (map, sun) = bake_env_map(&manual_sky(135.0, 40.0), 64, serial);
+    let mut world = env_world(sun, 0.0);
+    world.sun = fab_sun_config(14.0);
+    assert!(env_sun_dir(&world).is_none());
+    let input = resolve_sun(&world.sun).to_hdr();
+    let rig = env_sun_rig(&world, Some(&lighting_of(&map)), input, true);
+    assert_eq!(rig.dir, input.dir, "the authored direction passes through bit for bit: never quantised");
+    assert!(angle_deg(rig.dir, world.sun.dir.unwrap()) < 0.05);
+    assert!(luminance(rig.color) > 0.0);
+}
+
+/// The exposure is metered from the map's mean at the environment's own
+/// scale × `Ibl.intensity` (the gain): a brighter map (a higher IBL
+/// intensity) meters darker, within the rig's adaptation band.
+#[test]
+fn the_environment_meters_the_exposure_from_its_mean() {
+    let (map, _) = bake_env_map(&manual_sky(180.0, 45.0), 64, serial);
+    let lighting = lighting_of(&map);
+    assert!(lighting.mean_luminance > 0.0 && lighting.mean_luminance.is_finite());
+    let one = env_exposure(&lighting);
+    assert!((0.25..=3.2).contains(&one), "{one}");
+    // An intensity that puts the key (mean × intensity) at 1 meters the key
+    // 0.75 / 1; twice that intensity meters exactly one stop darker (both
+    // inside the band, whatever the bake's absolute level).
+    let unit = env_exposure(&EnvLighting { gain: 1.0 / lighting.mean_luminance, ..lighting });
+    let twice = env_exposure(&EnvLighting { gain: 2.0 / lighting.mean_luminance, ..lighting });
+    assert!((unit - 0.75).abs() < 1.0e-3, "{unit}");
+    assert!((twice * 2.0 - unit).abs() < 1.0e-3, "one stop: {unit} vs {twice}");
+}
+
+/// What a surface facing `dir` receives from `map`, by quadrature over the
+/// texels' exact solid angles: Σ L(d) max(d·dir, 0) dΩ, in luminance.
+fn irradiance_toward(map: &ibl::EnvMap, dir: Vec3f) -> f32 {
+    use std::f64::consts::{PI, TAU};
+    let (w, h) = (map.width, map.height);
+    let mut sum = 0.0f64;
+    for y in 0..h {
+        let (top, bottom) = (PI * y as f64 / h as f64, PI * (y + 1) as f64 / h as f64);
+        let cell = TAU / w as f64 * (top.cos() - bottom.cos());
+        for x in 0..w {
+            let t = map.data[y * w + x];
+            let d = hdri::vec(ibl::equirect_uv_to_dir([(x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32]));
+            sum += luminance(vec3f(t[0], t[1], t[2])) as f64 * d.dot(dir).max(0.0) as f64 * cell;
+        }
+    }
+    sum as f32
+}
+
+/// Phase 2 amendment: the one directional light delivers what a surface
+/// facing a wide studio key receives from the map. The map here is the key
+/// alone (the backdrop black, no other light), so what a surface facing it
+/// receives, by quadrature, is the key's whole delivery; the lane's light is
+/// `colour · N·L` in irradiance / π, so π × the rig's colour must be that
+/// number, `facing` included. Without the facing share the light would be
+/// 1 / facing times too bright.
+#[test]
+fn a_wide_studio_key_lights_a_facing_surface_with_what_the_map_delivers() {
+    for name in ["Overcast dome", "Top softbox"] {
+        let mut params = hdri::presets::preset(name).unwrap();
+        params.studio.top = [0.0; 3];
+        params.studio.horizon = [0.0; 3];
+        params.studio.floor = [0.0; 3];
+        params.lights.retain(|l| l.enabled && l.key);
+        assert_eq!(params.lights.len(), 1, "{name}: the key alone");
+        let (map, key) = bake_env_map(&params, 128, serial);
+        let key = key.unwrap_or_else(|| panic!("{name} has a key"));
+        assert!(key.facing < 0.95, "{name}: a wide key, facing {}", key.facing);
+        let delivered = irradiance_toward(&map, key.dir);
+        let world = env_world(Some(key), 0.0);
+        let rig = env_sun_rig(&world, Some(&lighting_of(&map)), resolve_sun(&world.sun).to_hdr(), true);
+        assert!(angle_deg(rig.dir, key.dir) < 0.2);
+        let lane = std::f32::consts::PI * luminance(rig.color);
+        assert!((lane - delivered).abs() < 0.03 * delivered, "{name}: the light carries {lane}, the map delivers {delivered} (facing {})", key.facing);
+        // The whole emission (radiance x the cone) is more than a facing surface gets.
+        assert!(luminance(key.irradiance()) > lane * 1.02, "{name}");
     }
 }

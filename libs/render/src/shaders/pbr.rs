@@ -135,12 +135,25 @@ script_mod! {
             return mix(env, avg, rough)
         }
 
+        // The treeline car paint's lacquer reflects: `env`, the coat's
+        // reflection along `r`, with a silhouette painted along the horizon
+        // (dark, broken by azimuth), which the analytic sky does not have.
+        // A function of its own so that a program lit from an environment
+        // map drops it: render-material's Builtin::Ibl installs the
+        // identity, the map supplies its own horizon.
+        coat_treeline: fn(env: vec3, r: vec3) -> vec3 {
+            let az = atan2(r.z, r.x)
+            let ridge = 0.035 + 0.05 * self.tn_noise(vec2(az * 9.0, 0.5)) + 0.03 * self.tn_noise(vec2(az * 37.0, 1.5))
+            let tree = (1.0 - smoothstep(ridge - 0.01, ridge + 0.01, r.y)) * smoothstep(-0.02, 0.0, r.y)
+            return mix(env, self.sun_ground * 0.28 + self.fog_color * 0.12, tree * 0.85)
+        }
+
         // Race paint and toy gloss (tex_mag.y packs rim * 255 * 65536 +
         // clearcoat * 255 * 256 + flake * 255): a mirror-smooth lacquer over
         // the base lobe. Its own Fresnel takes
         // light from the base, and it reflects the sky environment sharply
-        // with a treeline silhouette along the horizon (dark, broken by
-        // azimuth), so the reflection reads as a place and slides over the
+        // with a treeline silhouette along the horizon (coat_treeline), so
+        // the reflection reads as a place and slides over the
         // body as the car turns. Flakes are hashed facets ~1 mm across that
         // catch the sun a little off the mirror direction.
         clear_coat: fn(base: vec3, n: vec3, v: vec3, l: vec3, albedo: vec3, sun: vec3, amb_occ: float) -> vec3 {
@@ -155,12 +168,7 @@ script_mod! {
             var env = self.sky_env(normalize(r), 0.03)
             // The treeline is car paint's; a toy (rim set) reflects a plain
             // studio sky, and skips the two noise taps.
-            if rim < 0.5 {
-                let az = atan2(r.z, r.x)
-                let ridge = 0.035 + 0.05 * self.tn_noise(vec2(az * 9.0, 0.5)) + 0.03 * self.tn_noise(vec2(az * 37.0, 1.5))
-                let tree = (1.0 - smoothstep(ridge - 0.01, ridge + 0.01, r.y)) * smoothstep(-0.02, 0.0, r.y)
-                env = mix(env, self.sun_ground * 0.28 + self.fog_color * 0.12, tree * 0.85)
-            }
+            if rim < 0.5 { env = self.coat_treeline(env, r) }
             let h = normalize(l + v)
             let ndh = max(dot(n, h), 0.0)
             let a2 = 0.0016

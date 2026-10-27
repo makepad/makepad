@@ -108,8 +108,9 @@ impl Renderer {
             // Preserve authored day/night dimming, but there is no 8-bit
             // lamp atlas whose saturation should cap a realtime light. The
             // HDR lane has no headroom to protect at all: a lamp is simply
-            // switched by daylight, like a photocell.
-            let day = if self.hdr_output { Self::lamp_photocell(sun) } else { Self::lamp_daylight_scale(sun) };
+            // switched by daylight, like a photocell, by the frame's own
+            // sun (`light_daylight`), not by whatever key lights the rig.
+            let day = if self.hdr_output { Self::lamp_photocell(self.light_daylight) } else { Self::lamp_daylight_scale(sun) };
             for light in &mut lights { light.color = light.color * day; }
         } else {
             Self::rail_lamp_pools(&mut lights, sun);
@@ -176,7 +177,7 @@ impl Renderer {
     /// 0.009 of light, under a byte on the brightest albedo there is.
     pub(super) fn lamp_daylight_key(&self, sun: &SunLight) -> u32 {
         if self.hdr_output && self.clustered_enabled {
-            return 1000 + (Self::lamp_photocell(sun) * 32.0).round() as u32;
+            return 1000 + (Self::lamp_photocell(self.light_daylight) * 32.0).round() as u32;
         }
         Self::legacy_daylight_key(sun)
     }
@@ -187,9 +188,11 @@ impl Renderer {
 
     /// The HDR lane's street-lamp switch: fully on once the sun is 2 degrees
     /// below the horizon, off by 8 degrees above it, a smooth dusk ramp
-    /// between — the photocell behaviour of a real lamp.
-    pub(super) fn lamp_photocell(sun: &SunLight) -> f32 {
-        let elev = sun.dir.y.clamp(-1.0, 1.0).asin().to_degrees();
+    /// between — the photocell behaviour of a real lamp. `daylight` points
+    /// at the SUN (renderer/env_sun.rs `daylight_dir`), never at a moon that
+    /// lights the frame: under a moonlit sky the lamps are on.
+    pub(super) fn lamp_photocell(daylight: Vec3f) -> f32 {
+        let elev = daylight.y.clamp(-1.0, 1.0).asin().to_degrees();
         let x = ((8.0 - elev) / 10.0).clamp(0.0, 1.0);
         x * x * (3.0 - 2.0 * x)
     }

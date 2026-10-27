@@ -306,11 +306,21 @@ impl Renderer {
             let stock = self.pbr_draw.as_ref().and_then(|d| d.skinned.draw_vars.draw_shader_id);
             let shader = if stock.is_some() { self.lane_shaders(cx.cx, variants::ModelLane::Pbr, stock).0 } else { None };
             self.pbr_ready = shader.is_some_and(|id| cx.cx.draw_shader_ready(id, hdr));
+            // Likewise shiny stock models leave the PBR lane for the
+            // engine's IBL program only once its variant for this frame's
+            // features can draw (renderer/stock_ibl.rs).
+            self.confirm_stock_ibl(cx.cx);
         }
         let custom_name = match &draw {
             ModelDraw::Custom(name, _) => Some((*name).to_string()),
             _ => None,
         };
+        // Shiny stock models under an environment leave the PBR lane for
+        // the engine's IBL program (renderer/stock_ibl.rs): decided in the
+        // diffuse pass above, read here by every lane so exactly one of
+        // them draws them.
+        let stock_ibl_on = self.stock_ibl_active();
+        let stock_ibl_lane = custom_name.as_deref() == Some(stock_ibl::STOCK_IBL_MATERIAL);
         self.bind_model_lane(cx, &mut draw, eye, fog, sun);
         // The lane draws through the shader variant for this frame's
         // features, and draws that cut no pixel through the one without
@@ -479,12 +489,31 @@ impl Renderer {
                     custom_name.as_deref() == Some(m.name.as_str())
                         || self.custom_draws.get(&m.name).is_some_and(|d| d.draw.draw_vars.draw_shader_id.is_some_and(|id| cx.cx.draw_shader_ready(id, self.hdr_output)))
                 });
+                // A shiny stock model with no material of its own, while an
+                // environment is registered: the stock IBL lane takes it and
+                // the PBR lane leaves it (renderer/stock_ibl.rs). A material
+                // it names is its own only while that one is installed: a
+                // name that is not draws through the stock lanes anyway.
+                let own_material = self.has_own_material(inst, custom_name.as_deref());
+                // A painted terrain tile stays with the splat lane (its layers).
+                let takes_stock_ibl = !paints && stock_ibl::takes_stock_ibl(stock_ibl_on, uses_pbr_lane, own_material, sways);
                 if let Some(name) = custom_name.as_deref() {
-                    if wanted_custom.map(|m| m.name.as_str()) != Some(name) { continue; }
-                    if let (ModelDraw::Custom(_, d), Some(material)) = (&mut draw, wanted_custom) {
-                        d.draw.set_params(cx.cx, material.params);
+                    if stock_ibl_lane {
+                        // Its own instances, plus any that name the program
+                        // outright (an engine name, but never a vanished model).
+                        if !(takes_stock_ibl || wanted_custom.map(|m| m.name.as_str()) == Some(name)) { continue; }
+                    } else {
+                        if wanted_custom.map(|m| m.name.as_str()) != Some(name) { continue; }
+                        if let (ModelDraw::Custom(_, d), Some(material)) = (&mut draw, wanted_custom) {
+                            d.draw.set_params(cx.cx, material.params);
+                        }
                     }
-                } else if wanted_custom.is_some() || sways != foliage_lane || paints != splat_lane || (!foliage_lane && !splat_lane && uses_pbr_lane != pbr_lane) {
+                } else if paints != splat_lane || if splat_lane {
+                    // A painted terrain tile draws in the splat lane only.
+                    wanted_custom.is_some() || takes_stock_ibl || sways
+                } else {
+                    stock_ibl::stock_lane_skips(wanted_custom.is_some(), takes_stock_ibl, sways, foliage_lane, uses_pbr_lane, pbr_lane)
+                } {
                     continue;
                 }
                 // Hoisted: `loaded` borrows self, and the per-instance light
@@ -854,6 +883,15 @@ impl Renderer {
         let pbr_lane = draw.is_pbr();
         self.clustered.bind(cx.cx, &mut draw.base().draw_vars, self.clustered_enabled);
         self.gi.bind(cx.cx, &mut draw.base().draw_vars);
+        // An IBL program's control of its two lookups: the lane's scale,
+        // and for the stock IBL program whether the fill comes from the
+        // map (renderer/stock_ibl.rs). After the GI: it reads the gi_on
+        // just bound.
+        if let ModelDraw::Custom(name, m) = draw {
+            if m.ibl {
+                self.bind_ibl_lane(cx.cx, name, &mut m.draw.draw_vars);
+            }
+        }
         // Sun, fog and the debug switches, once for the whole lane. They are
         // uniforms rather than instance lanes -- the vertex stage ran out of
         // D3D11 input registers -- which is also what they describe: one

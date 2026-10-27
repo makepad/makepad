@@ -261,18 +261,27 @@ impl Renderer {
     }
 
     /// Whether every custom material the last frame's items used, and the
-    /// PBR lane, has its pipeline: until then those items draw through the
-    /// stock (matte) lane, so a locked-time host waits for this before it
-    /// takes the frame. A lane's shader is the variant for last frame's
-    /// features (variants.rs), the one it draws through.
+    /// PBR lane, has its pipeline, and the world's environment is prepared:
+    /// until then those items draw through the stock (matte) lane, and
+    /// without the environment's lane texture (the analytic sky), so a
+    /// locked-time host waits for this before it takes the frame. A lane's
+    /// shader is the variant for last frame's features (variants.rs), the
+    /// one it draws through. The environment prepares off the UI thread
+    /// (`environment_pending`); the host's next draw adopts it. Under an
+    /// environment the stock IBL program's pipeline is waited for too
+    /// (`stock_ibl_ready`): until it exists shiny stock models draw on the
+    /// analytic PBR lane.
     pub fn items_ready(&self, cx: &Cx) -> bool {
+        if self.environment_pending() {
+            return false;
+        }
         // A material that is not installed (it did not build) draws through
         // the stock lane for good: nothing to wait for.
         let custom = self.items.used_custom.iter().all(|name| self.custom_draws.get(name).and_then(|m| m.draw.draw_vars.draw_shader_id).is_none_or(|id| cx.draw_shader_ready(id, self.hdr_output)));
         // Shiny models draw matte (no emission, no maps) until the PBR
         // pipeline exists; it is made once a frame has any.
         let pbr = self.pbr_draw.as_ref().is_none_or(|d| d.skinned.draw_vars.draw_shader_id.is_some_and(|id| cx.draw_shader_ready(id, self.hdr_output)));
-        custom && pbr
+        custom && pbr && self.stock_ibl_ready(cx)
     }
 
     /// Items the model lanes skipped last frame (lines, points, cards,
@@ -413,6 +422,9 @@ impl Renderer {
             kind: if b.unlit { BaseKind::Unlit } else { BaseKind::Pbr },
             blend: if b.blend == 2 { Blend::Over } else { Blend::Opaque },
             lighting: if b.unlit { LightingModel::Unlit } else { LightingModel::Lit },
+            // The environment's reflection and fill, at the lane's scale
+            // (`ibl_ctl`, written when the lane binds the program:
+            // renderer/stock_ibl.rs); an item always fills from the map.
             ibl: b.ibl,
         };
         let built = cx.try_with_vm(|vm| DrawSceneCustom::build(vm, &desc, &HookSet::new(), HookMask::ALL, Vec4f::default()));

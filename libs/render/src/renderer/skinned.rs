@@ -260,6 +260,35 @@ impl Renderer {
         palette_tex.put_back_vec_f32(cx, texels, None);
     }
 
+    /// The environment's IBL atlas on the skin lane's detail slot (found by
+    /// name: the slot follows the mixins), and the control the surface path
+    /// branches on (`ibl_lane_ctl`, a stock lane's: x the switch, y the
+    /// lane's scale, z the fill from the map unless the world authors one
+    /// or GI gathers one; it reads the `gi_on` on `vars`, so the GI is
+    /// bound first). No environment: the call binds nothing and writes the
+    /// control all zero, so the lane shades exactly as before. It does not
+    /// clear the slot: after an environment is dropped the atlas bound last
+    /// stays on it, unread (the switch is off) and alive, until the next
+    /// environment's atlas replaces it.
+    pub(super) fn bind_skin_ibl(&self, cx: &Cx, vars: &mut DrawVars) {
+        let bound = match (self.ibl_texture(), vars.draw_shader_id) {
+            (Some(texture), Some(shader)) => {
+                let slot = cx.draw_shaders[shader.index].mapping.textures.iter().position(|t| t.id == live_id!(detail_map))
+                    .filter(|slot| *slot < vars.texture_slots.len());
+                match slot {
+                    Some(slot) => {
+                        vars.set_texture(slot, texture);
+                        true
+                    }
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+        let ctl = if bound { self.ibl_lane_ctl(cx, vars, true) } else { [0.0; 4] };
+        vars.set_uniform(cx, live_id!(ibl_ctl), &ctl);
+    }
+
     /// Draw the skinned batch inside the already-open scene pass.
     ///
     /// GPU skinning: each rig's rest mesh is resident; every character's
@@ -292,6 +321,7 @@ impl Renderer {
         batch.skinned.draw_vars.set_uniform(cx.cx, live_id!(eye), &[eye.x, eye.y, eye.z]);
         self.clustered.bind(cx.cx, &mut batch.skinned.draw_vars, self.clustered_enabled);
         self.gi.bind(cx.cx, &mut batch.skinned.draw_vars);
+        self.bind_skin_ibl(cx.cx, &mut batch.skinned.draw_vars);
         sun.write_uniforms(cx.cx, &mut batch.skinned.draw_vars);
         batch.skinned.draw_vars.set_uniform(cx.cx, live_id!(light_dir), &[sun.dir.x, sun.dir.y, sun.dir.z]);
         batch.skinned.draw_vars.set_uniform(cx.cx, live_id!(depth_clip), &[1.0]);
@@ -551,5 +581,71 @@ impl Renderer {
         sun: &SunLight,
     ) -> Option<ShadowAnchor> {
         character_shadow_anchor(feet, receiver, sun, &self.frame_lights)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use makepad_draw::makepad_platform::makepad_script::script_eval;
+    use makepad_draw::makepad_platform::thread::ShutdownMode;
+    use makepad_render_material::ibl::EnvMap;
+    use makepad_scene::{Environment, Ibl, IblSource, TextureRef};
+
+    /// What `draw_skinned_inner` binds for the environment
+    /// (`bind_skin_ibl`): under a bound one the skin draw carries the
+    /// frame's IBL lane texture on its `detail_map` slot and `ibl_ctl.x` is
+    /// 1, with the lane's control beside it (y the scale, z the fill
+    /// switch: neutral here, no draw has resolved a lane; their values are
+    /// renderer/stock_ibl.rs's tests); with none, never bound or dropped
+    /// again, the whole control is zero and the surface path keeps its
+    /// hemisphere. The rig is the crate's own registration
+    /// (`crate::script_mod`), as in `shaders::skin_ibl_tests`.
+    #[test]
+    fn the_skin_draw_carries_the_atlas_and_the_flag_only_under_an_environment() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut skin = cx.with_vm(|vm| {
+            vm.capture_errors();
+            makepad_draw::script_mod(vm);
+            vm.heap_mut().new_module(id!(prelude));
+            script_eval!(vm, { mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw:mod.draw } });
+            vm.heap_mut().new_module(id!(widgets));
+            crate::script_mod(vm);
+            let skin = DrawSceneSkinnedGpu::script_new_with_default(vm);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "script errors: {errors:#?}");
+            skin
+        });
+        let shader = skin.draw_vars.draw_shader_id.expect("registered skin shader");
+        let slot = cx.draw_shaders[shader.index].mapping.textures.iter().position(|t| t.id == live_id!(detail_map)).expect("the IBL atlas slot");
+        let flag = |cx: &Cx, skin: &DrawSceneSkinnedGpu| {
+            let (offset, slots) = skin.draw_vars.uniform_range(cx, live_id!(ibl_ctl)).expect("the ibl_ctl uniform");
+            skin.draw_vars.dyn_uniforms[offset..offset + slots].to_vec()
+        };
+
+        let mut renderer = Renderer::default();
+        renderer.bind_skin_ibl(&cx, &mut skin.draw_vars);
+        assert!(skin.draw_vars.texture_slots[slot].is_none(), "no environment: nothing bound");
+        assert_eq!(flag(&cx, &skin), [0.0; 4], "no environment: the flag off");
+
+        // A closed pool prepares on the spot: the call binds the texture.
+        cx.task_pool().close(ShutdownMode::CancelPending);
+        renderer.register_environment(TextureRef(1), std::sync::Arc::new(EnvMap::constant(16, [0.25; 3])));
+        let env = Environment { ibl: Some(Ibl { source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
+        renderer.resolve_ibl(&mut cx, &env);
+        let lane = renderer.ibl_texture().expect("premise: the environment is bound").texture_id();
+        renderer.bind_skin_ibl(&cx, &mut skin.draw_vars);
+        assert_eq!(skin.draw_vars.texture_slots[slot].as_ref().map(|t| t.texture_id()), Some(lane), "an environment: its lane texture on the detail slot");
+        assert_eq!(flag(&cx, &skin), [1.0, 1.0, 1.0, 0.0], "an environment: the flag on, the map's own scale and its fill until a draw resolves the lane");
+        for numbered in 0..=5 {
+            assert!(skin.draw_vars.texture_slots[numbered].is_none(), "slot {numbered} is not the atlas's");
+        }
+
+        // The world names no environment any more: the next call turns the
+        // surface path back to the hemisphere.
+        renderer.resolve_ibl(&mut cx, &Environment::default());
+        assert!(renderer.ibl_texture().is_none(), "premise: the environment is dropped");
+        renderer.bind_skin_ibl(&cx, &mut skin.draw_vars);
+        assert_eq!(flag(&cx, &skin), [0.0; 4], "the environment dropped: the flag off again");
     }
 }

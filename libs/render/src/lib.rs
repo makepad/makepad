@@ -53,6 +53,9 @@ pub mod shadow;
 pub mod shadow_mesh;
 pub mod shadow_csm;
 pub mod shadow_sdf;
+// Procedural HDRI environments (outdoor sky, studio lights) as the engine's
+// linear equirect `EnvMap`s.
+pub mod hdri;
 pub mod sky;
 pub mod smoke;
 pub mod vfx;

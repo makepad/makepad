@@ -527,7 +527,9 @@ impl Renderer {
     /// light, near the eye) join this frame's AUTHORED lights, so they go
     /// through the same budget: the ones that matter at the eye win, the
     /// tail fades (`budget_authored_lights`). Also sets the night factor the
-    /// window glow reads. Call before `build_frame_lights`.
+    /// window glow reads. `sun_dir_y` is the daylight sun's height
+    /// (renderer/env_sun.rs `daylight_dir`: the real sun, not a moon key).
+    /// Call before `build_frame_lights`.
     pub(super) fn stream_lights(&mut self, eye: Vec3f, sun_dir_y: f32) {
         let before = self.host_asset_lights.len();
         self.stream_lights_inner(eye, sun_dir_y);

@@ -55,6 +55,17 @@ script_mod! {
         // the instance stream they took the lane one output register past
         // what D3D11's `vs_5_0` allows, and they are one per material draw.
         params: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // The control of an IBL program's two lookups (render-material's
+        // lane functions read it; the renderer writes it per draw,
+        // renderer/stock_ibl.rs): y = the lane's scale on the map (1 under
+        // HDR output, the map's own exposure in the legacy lane, as the
+        // rig's fill carries it), z = 1 while the fill comes from the map
+        // (0: the stock IBL program keeps an authored or a gathered fill).
+        // x is the skin lane's switch (shaders/skinned_gpu.rs has the same
+        // uniform); a program here is IBL by construction. The default is
+        // the lookups as they are without a lane: the map's own scale, its
+        // fill. Only a program with Builtin::Ibl reads it.
+        ibl_ctl: uniform(vec4(1.0, 1.0, 1.0, 0.0))
         surface: fn(base: vec4) -> vec4 { return base }
         // What a hook may read besides its arguments: the clock, the true
         // world position, the mesh uv and the geometric normal.
@@ -499,6 +510,120 @@ mod tests {
             for backend in [ShaderBackend::Metal, ShaderBackend::Hlsl, ShaderBackend::Glsl, ShaderBackend::Wgsl] {
                 let errors = frontend_errors_for(vm, prog, backend);
                 assert!(errors.is_empty(), "{backend:?}: {errors:?}");
+            }
+            assert!(vm.take_errors().is_empty());
+        });
+    }
+
+    /// The lowered source of a program object, for GLSL or HLSL.
+    fn lowered(vm: &mut ScriptVm, program: ScriptObject, glsl: bool) -> String {
+        let draw = vm.value(vm.modules(), id!(draw)).as_object().unwrap();
+        vm.set_value(draw, id!(program_under_test), program);
+        let source = if glsl {
+            script_eval!(vm, { mod.shader.test_compile_draw_source(mod.draw.program_under_test, "glsl", false) })
+        } else {
+            script_eval!(vm, { mod.shader.test_compile_draw_source(mod.draw.program_under_test, "hlsl", false) })
+        };
+        crate::shaders::test_source(&vm.heap().string_with(source, |_, s| s.to_string()).unwrap_or_default())
+    }
+
+    /// An IBL program (the stock IBL program and the built-in item IBL
+    /// material are this one: the PBR lane, IBL, no hooks) takes the
+    /// reflection and the fill through the lane's control: both lookups x
+    /// `ibl_ctl.y` (the lane's scale, so the lookups carry the exposure the
+    /// rig's fill carries), and the fill from the map only while
+    /// `ibl_ctl.z` is set, else the fill the lane passes in (an authored
+    /// ambient, the gathered GI). Never written, the control is neutral:
+    /// the raw lookups. The stock PBR lane's own program has no control.
+    #[test]
+    fn an_ibl_program_takes_its_lookups_through_the_lanes_control() {
+        use crate::shaders::lowered_fn_body;
+        with_vm(|vm| {
+            let m = DrawSceneCustom::build(vm, &MaterialDesc { ibl: true, ..Default::default() }, &HookSet::new(), HookMask::ALL, Vec4f::default()).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(m.plan.builtins, vec![Builtin::Ibl]);
+            assert_eq!(m.draw.pbr.skinned.uniform_value(vm.cx(), live_id!(ibl_ctl)), [1.0, 1.0, 1.0, 0.0], "never written: the map's own scale, the fill from the map");
+            let program = m.program.as_ref().unwrap().as_object();
+            for glsl in [true, false] {
+                let source = lowered(vm, program, glsl);
+                assert!(!source.is_empty() && !source.starts_with("ERRORS:"), "glsl {glsl}: {source}");
+                // `sky_env` (the reflection of the surface and of the clear
+                // coat) and `mat_ambient` (the fill) are the lane functions.
+                let reflection = lowered_fn_body(&source, "sky_env").unwrap_or_else(|| panic!("glsl {glsl}: no sky_env"));
+                assert!(reflection.contains("mat_ibl_sky_env(p_r, p_rough) * ") && reflection.contains("ibl_ctl.y"), "glsl {glsl}: the reflection carries the lane's scale: {reflection}");
+                let fill = lowered_fn_body(&source, "mat_ambient").unwrap_or_else(|| panic!("glsl {glsl}: no mat_ambient"));
+                assert!(fill.contains("mat_ibl_ambient(p_n, p_a) * ") && fill.contains("ibl_ctl.y"), "glsl {glsl}: the fill carries the lane's scale: {fill}");
+                assert!(fill.contains("ibl_ctl.z > 0.5") && fill.contains("return p_a;"), "glsl {glsl}: the fill is the map's only while the switch is set, else the lane's own: {fill}");
+                // Nothing in the lit surface or the coat reads the map past them.
+                for stage in ["shade", "clear_coat"] {
+                    let body = lowered_fn_body(&source, stage).unwrap_or_else(|| panic!("glsl {glsl}: no {stage}"));
+                    assert!(!body.contains("mat_ibl_"), "glsl {glsl}: {stage} takes a lookup at the map's raw scale");
+                }
+            }
+            // No environment, no change: the stock PBR lane's program has
+            // neither the control nor a lookup.
+            let stock = script_eval!(vm, { mod.shader.test_compile_draw_source(mod.draw.DrawScenePbr, "glsl", false) });
+            let stock = vm.heap().string_with(stock, |_, s| s.to_string()).unwrap_or_default();
+            assert!(!stock.is_empty() && !stock.starts_with("ERRORS:"));
+            assert!(!stock.contains("ibl_ctl") && !stock.contains("mat_ibl_"), "the stock PBR lane's program is as it was");
+            assert!(vm.take_errors().is_empty());
+        });
+    }
+
+    /// Car paint's clear coat mirrors `sky_env` and, on the stock PBR lane,
+    /// paints a treeline band along its horizon (`coat_treeline`: the
+    /// analytic sky has none). An IBL program mirrors the map, which has a
+    /// horizon of its own: there `coat_treeline` is the identity, so no
+    /// analytic ridge covers the map's reflection, and the rest of the
+    /// coat is the stock coat line for line. The stock lane's band is the
+    /// one it was, statement for statement (no environment, no change).
+    #[test]
+    fn an_ibl_programs_coat_mirrors_the_maps_horizon_and_the_stock_coat_keeps_its_treeline() {
+        use crate::shaders::lowered_fn_body;
+        with_vm(|vm| {
+            let m = DrawSceneCustom::build(vm, &MaterialDesc { ibl: true, ..Default::default() }, &HookSet::new(), HookMask::ALL, Vec4f::default()).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(m.plan.builtins, vec![Builtin::Ibl]);
+            let ibl_program = m.program.as_ref().unwrap().as_object();
+            let stock_program = script_eval!(vm, { mod.draw.DrawScenePbr }).as_object().unwrap();
+            // Both programs lower for every backend.
+            for backend in [ShaderBackend::Metal, ShaderBackend::Hlsl, ShaderBackend::Glsl, ShaderBackend::Wgsl] {
+                for (name, program) in [("the IBL program", ibl_program), ("the stock PBR program", stock_program)] {
+                    let errors = frontend_errors_for(vm, program, backend);
+                    assert!(errors.is_empty(), "{name}, {backend:?}: {errors:?}");
+                }
+            }
+            for glsl in [true, false] {
+                let (ibl, stock) = (lowered(vm, ibl_program, glsl), lowered(vm, stock_program, glsl));
+                for (name, source) in [("the IBL program", &ibl), ("the stock PBR program", &stock)] {
+                    assert!(!source.is_empty() && !source.starts_with("ERRORS:"), "glsl {glsl}, {name}: {source}");
+                }
+                let body = |source: &str, name: &str, function: &str| lowered_fn_body(source, function).unwrap_or_else(|| panic!("glsl {glsl}: {name} has no {function}"));
+                // Under a map: no noise ridge and no analytic horizon
+                // colour in the coat, and the function it calls for car
+                // paint returns the reflection as it took it.
+                let coat = body(&ibl, "the IBL program", "clear_coat");
+                assert!(!coat.contains("tn_noise(") && !coat.contains("sun_ground"), "glsl {glsl}: an IBL program's coat paints the analytic treeline over the map's reflection: {coat}");
+                assert_eq!(body(&ibl, "the IBL program", "coat_treeline").trim(), "return p_env;", "glsl {glsl}: under a map the treeline is the identity");
+                // The stock lane: the band it had, every constant of it,
+                // over the reflection it is handed.
+                let band = body(&stock, "the stock PBR program", "coat_treeline");
+                // The tree's share, splat to the colour's three channels.
+                let splat = if glsl { "fog_color * 0.12)), vec3((l_tree * 0.85)));" } else { "fog_color * 0.12)), ((float3)((l_tree * 0.85))));" };
+                for part in [
+                    "(p_r.z, p_r.x);",
+                    "((0.035 + (0.05 * ", "((l_az * 9", "), 0.5)))) + (0.03 * ", "((l_az * 37", "), 1.5))));",
+                    "((1.0 - smoothstep((l_ridge - 0.01), (l_ridge + 0.01), p_r.y)) * smoothstep(-0.02, 0.0, p_r.y));",
+                    "(p_env, ((", "sun_ground * 0.28) + (", splat,
+                ] {
+                    assert!(band.contains(part), "glsl {glsl}: the stock lane's treeline is the band it was, `{part}`: {band}");
+                }
+                assert_eq!((band.matches("tn_noise(").count(), band.trim().lines().count()), (2, 4), "glsl {glsl}: two noise taps, four statements: {band}");
+                // Car paint only (a toy's rim skips it), and the IBL
+                // program's coat is this coat: only the function differs.
+                let stock_coat = body(&stock, "the stock PBR program", "clear_coat");
+                // GLSL and HLSL name a shader function alike (`io_<name>`).
+                let call = "if ((l_rim < 0.5)) {\nl_env = io_coat_treeline(l_env, l_r);\n}\n";
+                assert!(stock_coat.contains(call) && !stock_coat.contains("tn_noise("), "glsl {glsl}: the coat paints the band through the function, on car paint: {stock_coat}");
+                assert_eq!(coat, stock_coat, "glsl {glsl}: an IBL program's coat is the stock coat");
             }
             assert!(vm.take_errors().is_empty());
         });

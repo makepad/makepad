@@ -69,6 +69,24 @@ pub fn dir_to_equirect_uv(dir: [f32; 3]) -> [f32; 2] {
     [u.rem_euclid(1.0), v]
 }
 
+/// Equirect uv of the direction at `azimuth_deg`, the angle `atan2(x, -z)`
+/// in degrees (0 looks down -z, 90 at +x), and `elevation_deg` above the
+/// horizon (held to -90..=90): the module's mapping in angles, where it is
+/// linear, `u = 0.5 + azimuth / 360` (folded into 0..1) and `v = 0.5 -
+/// elevation / 180`. Unlike a direction, an angle pair keeps its azimuth at
+/// the poles, so a point an editor holds at the top row stays where it is.
+pub fn az_el_to_equirect_uv(azimuth_deg: f32, elevation_deg: f32) -> [f32; 2] {
+    let u = 0.5 + azimuth_deg / 360.0;
+    [u - u.floor(), 0.5 - elevation_deg.clamp(-90.0, 90.0) / 180.0]
+}
+
+/// The angles at equirect `uv`, `[azimuth, elevation]` in degrees, as
+/// [`az_el_to_equirect_uv`] takes them: the azimuth is -180..180 for u in
+/// 0..1 (any u maps, so a point dragged past the seam keeps going).
+pub fn equirect_uv_to_az_el(uv: [f32; 2]) -> [f32; 2] {
+    [(uv[0] - 0.5) * 360.0, (0.5 - uv[1]) * 180.0]
+}
+
 /// Equirect uv to a unit direction (the inverse of [`dir_to_equirect_uv`]).
 pub fn equirect_uv_to_dir(uv: [f32; 2]) -> [f32; 3] {
     let phi = (uv[0] - 0.5) * TAU;
@@ -725,6 +743,14 @@ fn ggx_samples(r: f32, count: u32, texel_solid_angle: f32) -> Vec<([f32; 3], f32
 /// set over a box-filtered pyramid of the source (at most 512 wide), so the
 /// result is noise-free enough at 64 samples and deterministic.
 pub fn prefilter(env: &EnvMap, base_width: usize, levels: usize) -> EnvAtlas {
+    prefilter_until(env, base_width, levels, &|| false).expect("a prefilter nobody stops runs to its end")
+}
+
+/// [`prefilter`] that asks `stop` before each level and gives up (`None`)
+/// once it says so: a background preparation whose environment was replaced
+/// stops within a level instead of finishing an atlas nobody will use. The
+/// same atlas as [`prefilter`] while `stop` says no.
+pub fn prefilter_until(env: &EnvMap, base_width: usize, levels: usize, stop: &dyn Fn() -> bool) -> Option<EnvAtlas> {
     let width = base_width.max(8);
     let level_height = width / 2;
     let levels = levels.clamp(1, 10);
@@ -745,6 +771,9 @@ pub fn prefilter(env: &EnvMap, base_width: usize, levels: usize) -> EnvAtlas {
         }
     }
     for k in 0..levels {
+        if stop() {
+            return None;
+        }
         let r = if levels == 1 { 0.0 } else { k as f32 / (levels - 1) as f32 };
         if k == 0 || r <= 0.0 {
             for (uv, ..) in &frames {
@@ -772,7 +801,7 @@ pub fn prefilter(env: &EnvMap, base_width: usize, levels: usize) -> EnvAtlas {
             data.push([acc[0] * inv, acc[1] * inv, acc[2] * inv, 1.0]);
         }
     }
-    EnvAtlas { width, height: level_height * levels, levels, level_height, data }
+    Some(EnvAtlas { width, height: level_height * levels, levels, level_height, data })
 }
 
 // ---------------------------------------------------------------------------
@@ -1048,6 +1077,27 @@ mod tests {
         }
     }
 
+    /// The mapping in angles is the mapping of the direction the angles
+    /// name, and keeps the azimuth where the direction loses it (the poles).
+    #[test]
+    fn the_angles_map_as_their_direction_does() {
+        for i in 0..200 {
+            let (az, el) = (((i * 37) % 360) as f32 - 180.0 + 0.25, ((i * 13) % 179) as f32 - 89.0);
+            let (a, e) = (az.to_radians(), el.to_radians());
+            let dir = [a.sin() * e.cos(), e.sin(), -a.cos() * e.cos()];
+            let (uv, want) = (az_el_to_equirect_uv(az, el), dir_to_equirect_uv(dir));
+            let du = (uv[0] - want[0]).abs();
+            assert!(du.min(1.0 - du) < 1e-5 && (uv[1] - want[1]).abs() < 1e-5, "{az}, {el}: {uv:?} vs {want:?}");
+            let back = equirect_uv_to_az_el(uv);
+            let da = (back[0] - az).rem_euclid(360.0);
+            assert!(da.min(360.0 - da) < 1e-3 && (back[1] - el).abs() < 1e-3, "{az}, {el}: back at {back:?}");
+        }
+        assert_eq!(az_el_to_equirect_uv(0.0, 0.0), [0.5, 0.5]);
+        assert_eq!(az_el_to_equirect_uv(90.0, 90.0), [0.75, 0.0], "the zenith keeps its azimuth");
+        assert_eq!(az_el_to_equirect_uv(-90.0, -95.0), [0.25, 1.0]);
+        assert_eq!(equirect_uv_to_az_el([0.75, 0.0]), [90.0, 90.0]);
+    }
+
     fn lum_stats(env: &EnvMap) -> (f32, f32) {
         let m = env.mean();
         let mean = 0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2];
@@ -1085,6 +1135,31 @@ mod tests {
         }
         assert!(prev_var < v0 * 0.5);
         assert_eq!(atlas, prefilter(&env, 128, 6));
+    }
+
+    /// `prefilter_until` asks before every level: told to stop before
+    /// level k it gives up there (k + 1 questions, no atlas), and while it
+    /// is never told to stop it returns exactly `prefilter`'s atlas after
+    /// one question per level.
+    #[test]
+    fn prefilter_until_asks_before_every_level() {
+        let env = EnvMap::procedural(&EnvPreset::Sunset, 32, 1.0, 0.0);
+        let asked = std::cell::Cell::new(0usize);
+        let never = || {
+            asked.set(asked.get() + 1);
+            false
+        };
+        assert_eq!(prefilter_until(&env, 16, 6, &never), Some(prefilter(&env, 16, 6)));
+        assert_eq!(asked.get(), 6, "one question per level");
+        for k in 0..6 {
+            asked.set(0);
+            let before_k = || {
+                asked.set(asked.get() + 1);
+                asked.get() > k
+            };
+            assert_eq!(prefilter_until(&env, 16, 6, &before_k), None, "stopped before level {k}");
+            assert_eq!(asked.get(), k + 1, "nothing asked after the stop");
+        }
     }
 
     #[test]
