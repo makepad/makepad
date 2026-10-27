@@ -25,6 +25,8 @@ const PERIOD_NS: u64 = 11_111_111;
 
 mod serve;
 pub use serve::{serve, DrawXrBand, DrawXrMirror, XrServe};
+#[cfg(not(target_arch = "wasm32"))]
+pub use serve::{tap_audio, XrAudioTap};
 /// The serving side's shaders and `mod.draw.XrServe` (an app that serves registers them).
 pub fn serve_script_mod(vm: &mut ScriptVm) -> ScriptValue {
     serve::script_mod(vm)
@@ -412,6 +414,9 @@ struct Shared {
     uplink_line: String,
     /// The same as numbers: poses/s, the intervals' spread (ms).
     uplink: (f32, f32),
+    /// The server's app uses this headset's room field (`XrServerMsg::RoomField`; off until
+    /// it says so): only then is the depth integrated into the field and are bricks sent.
+    room_field: bool,
     /// The poses' datagram path (`XrServerMsg::Uplink`): the socket, connected to the server,
     /// and the key that seals them.
     #[cfg(not(target_arch = "wasm32"))]
@@ -506,6 +511,10 @@ struct Sent {
 /// The headset end (see the module). Owned by the app's XR view.
 pub struct XrStreamClient {
     shared: Arc<Mutex<Shared>>,
+    /// The game audio's receive side (its player goes into the app's audio callback,
+    /// [`XrStreamClient::audio_player`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    audio: Arc<makepad_desk_link::xr_audio::XrAudioRx>,
     signal: SignalToUI,
     /// The poses sent (by the uplink thread), not answered yet.
     sent: Arc<Mutex<VecDeque<Sent>>>,
@@ -558,6 +567,9 @@ pub struct XrStreamClient {
     odd_frames: u32,
     /// This display frame's code so far (`report::FRAME_*`; the worst event wins).
     frame_code: u8,
+    /// The room field on or off whatever the server says (debug: its CPU A/B; None: as the
+    /// server says).
+    pub room_field_override: Option<bool>,
     watch_seq: (u64, u32),
     watch_last_view: Option<[f32; 4]>,
     watch_turn: f32,
@@ -597,6 +609,8 @@ pub struct XrStreamClient {
 impl Drop for XrStreamClient {
     fn drop(&mut self) {
         self.shared.lock().unwrap().stop = true;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.audio.stop();
     }
 }
 
@@ -607,6 +621,8 @@ impl XrStreamClient {
         let signal = SignalToUI::new();
         let sent = Arc::new(Mutex::new(VecDeque::new()));
         #[cfg(not(target_arch = "wasm32"))]
+        let audio = makepad_desk_link::xr_audio::XrAudioRx::new();
+        #[cfg(not(target_arch = "wasm32"))]
         {
             // the poses go up from a thread of their own, one per display frame as the headset
             // publishes it (not when the app finishes a frame: the server renders at the
@@ -616,19 +632,21 @@ impl XrStreamClient {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let (shared, signal) = (shared.clone(), signal.clone());
+            let (shared, signal, audio) = (shared.clone(), signal.clone(), audio.clone());
             // the radio never naps while a stream runs (power save adds tens of ms per picture)
             makepad_widgets::makepad_platform::makepad_hal::hal_network_low_latency(true);
             // the stream's frames write linear colour: the projection chains become sRGB images
             // without the mutable format (framebuffer compression kept: 1.6 ms less per frame)
             makepad_widgets::makepad_platform::makepad_hal::hal_xr_linear_frames(true);
             let info = HeadsetInfo { name: "headset".into(), eye, refresh_mhz: (refresh_hz * 1000.0) as u32, codecs: codecs::HEVC | codecs::H264 };
-            let _ = std::thread::Builder::new().name("xr-stream".into()).spawn(move || worker(host, port, info, shared, signal));
+            let _ = std::thread::Builder::new().name("xr-stream".into()).spawn(move || worker(host, port, info, shared, signal, audio));
         }
         #[cfg(target_arch = "wasm32")]
         let _ = (host, port, eye, refresh_hz);
         XrStreamClient {
             shared,
+            #[cfg(not(target_arch = "wasm32"))]
+            audio,
             signal,
             sent,
             #[cfg(not(target_arch = "wasm32"))]
@@ -657,6 +675,7 @@ impl XrStreamClient {
             watch_after: 0,
             odd_frames: 0,
             frame_code: 0,
+            room_field_override: None,
             watch_seq: (0, 0),
             watch_last_view: None,
             watch_turn: 0.0,
@@ -677,6 +696,13 @@ impl XrStreamClient {
             probe_ticket: None,
             focus_override_m: 0.0,
         }
+    }
+
+    /// The game audio's player: move it into the app's audio output callback and call its
+    /// `render_planar` there (it plays the stream, lined up with the pictures).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn audio_player(&self) -> makepad_desk_link::xr_audio::XrAudioPlayer {
+        makepad_desk_link::xr_audio::XrAudioPlayer::new(self.audio.clone())
     }
 
     /// The link's state and the last stats line, for the app's own UI and logs.
@@ -716,8 +742,16 @@ impl XrStreamClient {
                             self.window.env_age_us.push(((display_ns - env_ns) / 1000) as u32);
                         }
                     }
-                    let link = self.shared.lock().unwrap().link.clone();
-                    if let Some(link) = &link {
+                    // the room field only while the server's app uses it (the depth readback and
+                    // its integration are a core of the headset's CPU)
+                    let (link, room_field) = { let s = self.shared.lock().unwrap(); (s.link.clone(), s.room_field) };
+                    let room_field = self.room_field_override.unwrap_or(room_field);
+                    if room_field != cx.xr_room_field_wanted() {
+                        cx.xr_set_room_field(room_field);
+                        // (on again: every brick anew, the server's mirror may have dropped them)
+                        self.world_cursor = 0;
+                    }
+                    if let (Some(link), true) = (&link, room_field) {
                         self.send_world(cx, link);
                     }
 
@@ -1249,6 +1283,11 @@ impl XrStreamClient {
             v[report::UPLINK_SD_MS] = uplink.1;
             v[report::LEAD_MS] = (self.lead_ns / 1e6) as f32;
             v[report::SKIPPED] = rate(w.skipped) as f32;
+            // the sound waits as long as a picture's content takes to show (motion to photon
+            // less the pose's way up)
+            let m2p_ms = v[report::M2P_MS];
+            self.audio.set_video_latency(if m2p_ms > 0.0 { ((m2p_ms - self.audio.uplink_ms()).max(0.0) * 1000.0) as u32 } else { 0 });
+            self.audio.report(&mut v);
             report::pack_frames(&mut v, &w.codes);
             if let Some(link) = link {
                 link.send(&XrClientMsg::Report { values: v });
@@ -1565,7 +1604,7 @@ fn uplink(shared: Arc<Mutex<Shared>>, sent: Arc<Mutex<VecDeque<Sent>>>) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn worker(host: String, port: u16, info: HeadsetInfo, shared: Arc<Mutex<Shared>>, signal: SignalToUI) {
+fn worker(host: String, port: u16, info: HeadsetInfo, shared: Arc<Mutex<Shared>>, signal: SignalToUI, audio: Arc<makepad_desk_link::xr_audio::XrAudioRx>) {
     let set_status = |text: String| {
         log!("xr stream: {text}");
         shared.lock().unwrap().status = text;
@@ -1591,7 +1630,8 @@ fn worker(host: String, port: u16, info: HeadsetInfo, shared: Arc<Mutex<Shared>>
                 return;
             }
             if pinged.elapsed() > Duration::from_secs(1) {
-                link.send(&XrClientMsg::Ping { client_ns: 0 });
+                // (the audio's clock offset is taken from the answers)
+                link.send(&XrClientMsg::Ping { client_ns: makepad_widgets::makepad_platform::makepad_hal::clock_ns() });
                 pinged = Instant::now();
             }
             if let Some(why) = link.closed() {
@@ -1627,18 +1667,25 @@ fn worker(host: String, port: u16, info: HeadsetInfo, shared: Arc<Mutex<Shared>>
                     let _ = tx.send((head, data, Instant::now()));
                 }
                 XrServerMsg::Note { text } => log!("xr stream: server: {text}"),
+                XrServerMsg::RoomField { wanted } => {
+                    log!("xr stream: the server {} the room field", if wanted { "wants" } else { "does not want" });
+                    shared.lock().unwrap().room_field = wanted;
+                }
                 XrServerMsg::Uplink { port, key } => {
                     let socket = std::net::UdpSocket::bind("0.0.0.0:0").and_then(|s| s.connect((host.as_str(), port)).map(|_| s));
                     match socket {
                         Ok(socket) => {
-                            log!("xr stream: poses go as datagrams to port {port}");
+                            log!("xr stream: poses go as datagrams to port {port}, the game audio comes back on it");
+                            if let Err(e) = audio.start(&socket, key.clone()) {
+                                log!("xr stream: no game audio: {e}");
+                            }
                             shared.lock().unwrap().udp = Some(Arc::new((socket, key)));
                         }
                         Err(e) => log!("xr stream: no pose datagrams ({e}): poses go on the link"),
                     }
                 }
                 XrServerMsg::Refused { reason } | XrServerMsg::Bye { reason } => break reason,
-                XrServerMsg::Pong { .. } => {}
+                XrServerMsg::Pong { client_ns, server_ns } => audio.pong(client_ns, server_ns),
             }
         };
         {

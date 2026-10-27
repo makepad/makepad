@@ -194,11 +194,14 @@ impl Session {
         write_all(stream, &welcome.encode()).map_err(|e| format!("write: {e}"))?;
         // the poses come as datagrams: a socket of the session's own, a key for it
         let uplink = Uplink::open(self.peer.ip(), &core, self.log.clone())?;
+        // the app's game audio goes down from the same socket to where the poses come from
+        let audio = crate::xr_audio::AudioOut::start(uplink.socket.try_clone().map_err(|e| format!("audio socket: {e}"))?, uplink.key, uplink.from.clone(), self.log.clone())?;
         write_all(stream, &XrServerMsg::Uplink { port: uplink.port, key: uplink.key.to_vec() }.encode()).map_err(|e| format!("write: {e}"))?;
         stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
         stream.set_write_timeout(Some(Duration::from_millis(5))).map_err(|e| e.to_string())?;
         let why = self.pump(stream, &mut inbox, &mut buf, &core);
         REPORTS.lock().unwrap().clear();
+        audio.stop();
         uplink.stop();
         core.stop();
         let _ = write_all(stream, &XrServerMsg::Bye { reason: why.clone() }.encode());
@@ -210,7 +213,17 @@ impl Session {
         let mut last_heard = Instant::now();
         let mut visible = true;
         let mut stats = PumpStats::new();
+        // the room field the headset was told (None: not yet: told at once)
+        let mut room_field_told: Option<bool> = None;
         loop {
+            let wanted = ROOM_FIELD_WANTED.load(Ordering::Acquire);
+            if room_field_told != Some(wanted) {
+                if let Err(e) = write_all(stream, &XrServerMsg::RoomField { wanted }.encode()) {
+                    return format!("write: {e}");
+                }
+                (self.log)(&format!("xr host: room field {}", if wanted { "wanted" } else { "not wanted" }));
+                room_field_told = Some(wanted);
+            }
             if self.stop.load(Ordering::Acquire) {
                 return "the server stopped".into();
             }
@@ -540,6 +553,9 @@ struct Uplink {
     port: u16,
     key: [u8; 32],
     stop: Arc<AtomicBool>,
+    socket: std::net::UdpSocket,
+    /// Where the poses come from (the headset's socket): where its audio goes.
+    from: Arc<Mutex<Option<SocketAddr>>>,
 }
 
 impl Uplink {
@@ -551,6 +567,8 @@ impl Uplink {
         makepad_network::tls::os_random(&mut key).map_err(|e| format!("uplink key: {e}"))?;
         let stop = Arc::new(AtomicBool::new(false));
         let (poses, ending, stop2) = (core.poses.clone(), core.ending.clone(), stop.clone());
+        let from_at: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
+        let (from2, own) = (from_at.clone(), socket.try_clone().map_err(|e| format!("uplink socket: {e}"))?);
         std::thread::Builder::new()
             .name("xr-host-uplink".into())
             .spawn(move || {
@@ -580,6 +598,13 @@ impl Uplink {
                         stale += 1;
                         continue;
                     }
+                    {
+                        let mut f = from2.lock().unwrap();
+                        if *f != Some(from) {
+                            log(&format!("xr host: the headset's poses come from {from}: its audio goes there"));
+                            *f = Some(from);
+                        }
+                    }
                     if last_seq != 0 {
                         lost += seq - last_seq - 1;
                     }
@@ -594,7 +619,7 @@ impl Uplink {
                 }
             })
             .map_err(|e| e.to_string())?;
-        Ok(Uplink { port, key, stop })
+        Ok(Uplink { port, key, stop, socket: own, from: from_at })
     }
 
     fn stop(&self) {
@@ -648,6 +673,15 @@ struct Live {
 
 static LIVE: Mutex<Option<Live>> = Mutex::new(None);
 /// The headset's per-second reports (`XrClientMsg::Report`), the last minute, oldest first.
+/// The app uses the headset's room field (`set_room_field_wanted`): the headset is told, and
+/// integrates and sends its field only then.
+static ROOM_FIELD_WANTED: AtomicBool = AtomicBool::new(false);
+/// Whether the app uses the headset's room field (its physics, particles, field view); a
+/// streaming headset is told at once. Off at start.
+pub fn set_room_field_wanted(wanted: bool) {
+    ROOM_FIELD_WANTED.store(wanted, Ordering::Release);
+}
+
 static REPORTS: Mutex<VecDeque<Vec<f32>>> = Mutex::new(VecDeque::new());
 
 /// The server's own numbers of its last stats window, one line (for a stats panel).

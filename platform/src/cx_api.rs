@@ -1359,6 +1359,25 @@ impl Cx {
         { None }
     }
 
+    /// Whether this app uses the headset's room field (`xr_tsdf`: its physics, particles or
+    /// field view). Off at start: the headset's environment depth is then only the GPU image
+    /// (`xr_environment_depth`, occlusion); on, it is read back and integrated into the field
+    /// (a core of a headset's CPU), and a remote headset is asked for its field (the serving
+    /// side forwards `xr_room_field_wanted`). Call it whenever the need changes (every frame is
+    /// fine).
+    pub fn xr_set_room_field(&mut self, on: bool) {
+        if crate::os::hal::xr::ROOM_FIELD.swap(on, std::sync::atomic::Ordering::AcqRel) != on {
+            makepad_hal::hal_xr_depth_readback(on);
+            #[cfg(not(target_arch = "wasm32"))]
+            if !on { if let Some(xr) = self.hal.xr.as_mut() { xr.depth_writer = None; } }
+        }
+    }
+
+    /// Whether this app uses the room field (`xr_set_room_field`).
+    pub fn xr_room_field_wanted(&self) -> bool {
+        crate::os::hal::xr::ROOM_FIELD.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// The XR window's next frame shows with these eyes instead of its `XrFrame`'s: a picture
     /// rendered elsewhere for other eyes (a streamed one) is drawn over the whole view and the
     /// headset's compositor reprojects it from the eyes it was rendered with to the display's

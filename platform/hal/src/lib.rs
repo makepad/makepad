@@ -1565,6 +1565,17 @@ pub fn hal_xr_environment_depth(on: bool) {
     let _ = on;
 }
 
+/// The environment depth images are read back to the app for its room field (`on`; off at
+/// start: the app gets only the GPU image, no copy and no CPU work). Android XR; elsewhere
+/// nothing.
+#[relax_api]
+pub fn hal_xr_depth_readback(on: bool) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::depth_readback(on);
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
+}
+
 /// Hands and controllers tracked at once (`on`, the default) or only whichever is in use: with
 /// both, the Quest's cameras are shared with the controllers and its hand tracker runs at about
 /// 25 Hz instead of its high-frequency mode. Android XR; elsewhere nothing.

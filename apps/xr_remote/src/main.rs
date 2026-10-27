@@ -203,7 +203,18 @@ impl XrRemoteView {
         // (even sizes, 16-aligned widths: the encoder's blocks)
         let eye = [((1680 * percent / 100 + 15) / 16) * 16, ((1760 * percent / 100 + 7) / 8) * 8];
         log!("xr remote: stream eye {}x{} ({percent}%)", eye[0], eye[1]);
-        self.client = Some(XrStreamClient::connect(host, port, eye, refresh));
+        let client = XrStreamClient::connect(host, port, eye, refresh);
+        // the desktop app's game audio, played here (AAudio, low latency) in step with the
+        // pictures: the player's buffer, concealment and drift correction run in the callback
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut player = client.audio_player();
+            cx.audio_output(0, move |info, out| {
+                let (frames, channels) = (out.frame_count(), out.channel_count());
+                player.render_planar(info.sample_rate, frames, channels, &mut out.data);
+            });
+        }
+        self.client = Some(client);
     }
 }
 
@@ -311,6 +322,9 @@ impl Widget for XrRemoteView {
                 }
                 if let Some(client) = self.client.as_mut() {
                     client.occlusion = occlusion;
+                    // `roomfield` 0 / 1: the room field off or on whatever the server says (its
+                    // CPU A/B); unset or 2: as the server's app asks
+                    client.room_field_override = match switch("debug.xrremote.roomfield", 2) { 0 => Some(false), 1 => Some(true), _ => None };
                     // `ahead` N (default 4): the poses at least N display frames past the
                     // headset's newest (more when the measured sample to decoded needs it; 0:
                     // that alone)
@@ -458,6 +472,10 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
+        // the stream's game audio plays on the headset's default output
+        if let Event::AudioDevices(devices) = event {
+            cx.use_audio_outputs(&devices.default_output());
+        }
         self.ui.handle_event(cx, event, &mut Scope::empty());
         // the XR pass, apart from the window's draw
         if let Event::Draw(e) = event {

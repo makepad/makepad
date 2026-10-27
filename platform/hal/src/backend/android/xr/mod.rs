@@ -128,6 +128,9 @@ pub fn hands_and_controllers(on: bool) { HANDS_AND_CONTROLLERS.store(on, Orderin
 /// The environment depth provider runs (`hal_xr_environment_depth`; on at start).
 static ENVIRONMENT_DEPTH: AtomicBool = AtomicBool::new(true);
 pub fn environment_depth(on: bool) { ENVIRONMENT_DEPTH.store(on, Ordering::Release); }
+/// The depth images are copied back to the app (`hal_xr_depth_readback`; off at start).
+pub(super) static DEPTH_READBACK: AtomicBool = AtomicBool::new(false);
+pub fn depth_readback(on: bool) { DEPTH_READBACK.store(on, Ordering::Release); }
 /// The eye buffers' size in percent of `EYE_PX` (the start size): now, and the range the
 /// dynamic scale moves in (`hal_xr_eye_scale`; min = max: fixed). The XR thread steps it on the
 /// runtime's measured app GPU frame time ([`EyeScale`]).

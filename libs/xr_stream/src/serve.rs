@@ -315,6 +315,13 @@ impl Counts {
         }
         let r = |n: u32| n as f64 / secs;
         log!("xr serve: draws {:.0}/s · new XR frames {:.0}/s · packed {:.0}/s · handed {:.0}/s · poses asked {:.0}/s · waited for room {}", r(self.draws), r(self.frames), r(self.packed), r(self.handed), r(self.asked), self.waited);
+        // the app's audio (what the headset hears) stops for good when its callback panics
+        {
+            use makepad_widgets::makepad_platform::audio_output_fence as fence;
+            if let Some(said) = fence::take_audio_output_panic_note(0) {
+                log!("xr serve: the app's audio output callback panicked ({} times): {said}", fence::audio_output_panics(0));
+            }
+        }
         *self = Counts { at: Some(Instant::now()), ..Default::default() };
     }
 }
@@ -358,6 +365,30 @@ pub fn serve() {
     let _ = Mutex::<()>::new(());
 }
 
+/// The app's tap of its own audio for a remote headset: make it on the app's thread, move it
+/// into the audio output callback and pass it to [`tap_audio`] there after the mix.
+#[cfg(not(target_arch = "wasm32"))]
+pub use makepad_desk_link::xr_audio::XrAudioTap;
+
+/// After the app's mix in its audio output callback: the block goes to the headset (while one
+/// streams) and, when the headset hears it, the desktop's own output is silenced (a setting:
+/// `MAKEPAD_XR_REMOTE_MUTE_LOCAL=0` keeps it). Realtime-safe.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn tap_audio(tap: &XrAudioTap, sample_rate: f64, output: &mut makepad_widgets::makepad_platform::audio::AudioBuffer) {
+    let (frames, channels) = (output.frame_count(), output.channel_count());
+    if channels == 0 {
+        return;
+    }
+    let mute = {
+        let left = output.channel(0);
+        let right = output.channel(if channels >= 2 { 1 } else { 0 });
+        tap.tap(sample_rate, frames, left, right)
+    };
+    if mute {
+        output.zero();
+    }
+}
+
 impl XrServe {
     /// A line of the app's own numbers in the desktop's stats panel, under the stream's (empty:
     /// none). Kept until replaced.
@@ -389,6 +420,8 @@ impl XrServe {
             }
             self.counts.draws += 1;
             self.counts.window();
+            // the headset integrates and sends its room field only while the app uses it
+            xr_host::set_room_field_wanted(cx.cx.xr_room_field_wanted());
             let Some((display_ns, _)) = cx.cx.xr_frame_wire() else { return };
             let Some(eye) = xr_host::session_eye() else { return };
             self.eye = Some(eye);
@@ -496,7 +529,7 @@ impl XrServe {
         let reports = xr_host::headset_reports();
         let Some(last) = reports.last() else { return };
         let v = |i: usize| last.get(i).copied().unwrap_or(0.0);
-        let panel = Rect { pos: mirror.pos + dvec2(12.0, 12.0), size: dvec2(470.0, 204.0) };
+        let panel = Rect { pos: mirror.pos + dvec2(12.0, 12.0), size: dvec2(470.0, 238.0) };
         self.draw_stats_bg.color = vec4(0.0, 0.0, 0.0, 0.62);
         self.draw_stats_bg.draw_abs(cx, panel);
         let lines = [
@@ -504,6 +537,14 @@ impl XrServe {
             format!("motion to photon {:.0} ms (net {:.1} decode {:.1} queue {:.1}) · lead {:.0} ms", v(r::M2P_MS), v(r::NET_MS), v(r::DECODE_MS), v(r::WAIT_MS), v(r::LEAD_MS)),
             format!("uplink {:.0} poses/s ±{:.2} ms · env depth age {:.0} ms", v(r::UPLINK), v(r::UPLINK_SD_MS), v(r::ENV_AGE_MS)),
             xr_host::server_line(),
+            if v(r::AUDIO_RECEIVED) > 0.0 {
+                format!("audio {:.0} ms (net {:.1} buffer {:.0}/{:.0} device {:.0}; pictures {:.0}) · {:.0}/s lost {:.0} · underruns {:.0} concealed {:.0} · drift {:+.0} ppm{}",
+                    v(r::AUDIO_MS), v(r::AUDIO_NET_MS), v(r::AUDIO_BUFFER_MS), v(r::AUDIO_TARGET_MS), v(r::AUDIO_DEVICE_MS), v(r::AUDIO_VIDEO_MS), v(r::AUDIO_RECEIVED), v(r::AUDIO_LOST) + v(r::AUDIO_LATE), v(r::AUDIO_UNDERRUNS), v(r::AUDIO_CONCEALED), v(r::AUDIO_DRIFT_PPM),
+                    if v(r::AUDIO_CLICK_MS) > 0.0 { format!(" · click {:.1} ms", v(r::AUDIO_CLICK_MS)) } else { String::new() })
+            } else {
+                "audio: the headset hears none".to_string()
+            },
+            makepad_desk_link::xr_audio::server_line(),
         ];
         for (k, l) in lines.iter().enumerate() {
             self.draw_stats_text.draw_abs(cx, panel.pos + dvec2(8.0, 6.0 + k as f64 * 16.0), l);
@@ -513,7 +554,7 @@ impl XrServe {
             self.draw_stats_text.draw_abs(cx, at, &self.app_line);
         }
         // the last minute: shown/s (green, 0..90) and motion to photon (orange, 0..150 ms)
-        let base = panel.pos + dvec2(8.0, 140.0);
+        let base = panel.pos + dvec2(8.0, 174.0);
         let bw = 454.0 / 60.0;
         for (k, rep) in reports.iter().enumerate() {
             let x = base.x + k as f64 * bw;
@@ -533,7 +574,7 @@ impl XrServe {
             let n = all.len().saturating_sub(454);
             all.split_off(n)
         };
-        let (strip_y, strip_h) = (panel.pos.y + 150.0, 18.0);
+        let (strip_y, strip_h) = (panel.pos.y + 184.0, 18.0);
         let x0 = panel.pos.x + 8.0 + 454.0 - frames.len() as f64;
         let mut counts = [0u32; 6];
         for (k, c) in frames.iter().enumerate() {

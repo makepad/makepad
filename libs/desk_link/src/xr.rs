@@ -5,6 +5,11 @@
 //! messages and port: an XR session is not a desktop session (no screens, no desktop input; the
 //! headset's controllers and hands reach the XR app only as pose data).
 //!
+//! The app's game audio goes down as datagrams of its own ([`audio_datagram`]) from the
+//! session's pose socket to the address the poses come from: raw 16-bit stereo PCM at 48 kHz,
+//! 5 ms per datagram, each with the time it is due on the desktop's clock (the headset lines it
+//! up with the pictures through the link's ping clock).
+//!
 //! Headset → desktop: `Hello` (eye size, refresh, the decoder's codecs), then one `Pose` per
 //! display frame (the `XrFrame` the app draws with: head, both eyes, controllers, hands; a
 //! sequence number and the headset's sample and display times), `State` (visible / focused),
@@ -23,7 +28,7 @@
 use crate::{In, Out};
 use std::io;
 
-pub const XR_VERSION: u16 = 4;
+pub const XR_VERSION: u16 = 5;
 /// The band's depth: luma `v` (1..255) is `z = DEPTH_NEAR_M * 255 / v` metres (inverse depth,
 /// finest near the eye); 0 = no depth (nothing drawn there).
 pub const DEPTH_NEAR_M: f32 = 0.25;
@@ -82,7 +87,26 @@ pub mod report {
     pub const UPLINK_SD_MS: usize = 10;
     pub const LEAD_MS: usize = 11;
     pub const SKIPPED: usize = 12;
-    pub const COUNT: usize = 13;
+    /// The game audio (`audio_datagram`): due on the desktop to heard (ms: the link, the
+    /// jitter buffer, the device's buffer), its parts, the picture's own latency it aims at.
+    pub const AUDIO_MS: usize = 13;
+    pub const AUDIO_NET_MS: usize = 14;
+    pub const AUDIO_BUFFER_MS: usize = 15;
+    pub const AUDIO_TARGET_MS: usize = 16;
+    pub const AUDIO_DEVICE_MS: usize = 17;
+    pub const AUDIO_VIDEO_MS: usize = 18;
+    /// Datagrams per second, lost and late ones (this second), dry buffer (underruns) and
+    /// concealed frames (this second), the drift nudge (ppm, + faster).
+    pub const AUDIO_RECEIVED: usize = 19;
+    pub const AUDIO_LOST: usize = 20;
+    pub const AUDIO_LATE: usize = 21;
+    pub const AUDIO_UNDERRUNS: usize = 22;
+    pub const AUDIO_CONCEALED: usize = 23;
+    pub const AUDIO_DRIFT_PPM: usize = 24;
+    /// The test signal's clicks (`MAKEPAD_XR_REMOTE_AUDIO_TEST`): due to the output buffer
+    /// (ms, the device's buffer not included; 0: no click this second).
+    pub const AUDIO_CLICK_MS: usize = 25;
+    pub const COUNT: usize = 26;
     /// After the numbers: how many display frames the window had, then their codes, 8 to a
     /// value (3 bits each, the first frame lowest: exact in an f32).
     pub const FRAMES: usize = COUNT;
@@ -134,6 +158,10 @@ pub enum XrServerMsg {
     /// Send the poses as datagrams ([`pose_datagram`]) to `port` of the server's address, each
     /// sealed with `key` (32 bytes): no head-of-line blocking, a lost one is replaced by the next.
     Uplink { port: u16, key: Vec<u8> },
+    /// Whether the server's app uses the headset's room field (its physics, particles or field
+    /// view): only then does the headset integrate its depth into the field and send bricks
+    /// (a whole core of its CPU). Sent after the welcome and on every change; off until then.
+    RoomField { wanted: bool },
 }
 
 /// `Video::stages`: the desktop's durations of a picture (µs).
@@ -164,6 +192,7 @@ mod tag {
     pub const BYE: u8 = 104;
     pub const NOTE: u8 = 105;
     pub const UPLINK: u8 = 106;
+    pub const ROOM_FIELD: u8 = 107;
 }
 
 fn bad(ty: u8, side: &str) -> io::Error {
@@ -287,6 +316,11 @@ impl XrServerMsg {
                 o.u16(*port).bytes(key);
                 o.done()
             }
+            XrServerMsg::RoomField { wanted } => {
+                let mut o = Out::new(ROOM_FIELD);
+                o.u8(*wanted as u8);
+                o.done()
+            }
         }
     }
 
@@ -312,6 +346,7 @@ impl XrServerMsg {
             BYE => XrServerMsg::Bye { reason: r.str()? },
             NOTE => XrServerMsg::Note { text: r.str()? },
             UPLINK => XrServerMsg::Uplink { port: r.u16()?, key: r.bytes()?.to_vec() },
+            ROOM_FIELD => XrServerMsg::RoomField { wanted: r.u8()? != 0 },
             _ => return Err(bad(ty, "server")),
         })
     }
@@ -347,6 +382,66 @@ pub fn encode_xr_video(h: &VideoHead, data: &[u8]) -> Vec<u8> {
     }
     o.u32(h.size[0]).u32(h.size[1]).u8(h.codec).bytes(data);
     o.done()
+}
+
+/// The game audio as datagrams: `MXA1`, seq u32, frames u16, channels u8, flags u8
+/// ([`audio_datagram::TEST`]: the test signal), due_ns u64 (when its first frame is due on the
+/// desktop's clock: when the app's mixer made it), then frames x channels i16 LE interleaved,
+/// then the first 16 bytes of HMAC-SHA256(key, all before), the pose datagrams' key.
+#[cfg(feature = "server")]
+pub mod audio_datagram {
+    const MAGIC: &[u8; 4] = b"MXA1";
+    const TAG: usize = 16;
+    const HEAD: usize = 4 + 4 + 2 + 1 + 1 + 8;
+    /// The wire's rate and channels.
+    pub const RATE: u32 = 48_000;
+    pub const CHANNELS: usize = 2;
+    /// Frames per datagram (5 ms: 960 bytes, one datagram, never a fragment).
+    pub const FRAMES: usize = 240;
+    pub const TEST: u8 = 1;
+
+    pub struct Audio<'a> {
+        pub seq: u32,
+        pub frames: usize,
+        pub channels: usize,
+        pub flags: u8,
+        pub due_ns: u64,
+        /// i16 LE, interleaved.
+        pub pcm: &'a [u8],
+    }
+
+    pub fn seal(key: &[u8], seq: u32, channels: usize, flags: u8, due_ns: u64, samples: &[i16], out: &mut Vec<u8>) {
+        out.clear();
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&seq.to_le_bytes());
+        out.extend_from_slice(&((samples.len() / channels.max(1)) as u16).to_le_bytes());
+        out.push(channels as u8);
+        out.push(flags);
+        out.extend_from_slice(&due_ns.to_le_bytes());
+        for s in samples {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
+        let tag = makepad_network::tunnel::hmac_sha256(key, out);
+        out.extend_from_slice(&tag[..TAG]);
+    }
+
+    pub fn open<'a>(key: &[u8], d: &'a [u8]) -> Option<Audio<'a>> {
+        if d.len() < HEAD + TAG || &d[..4] != MAGIC {
+            return None;
+        }
+        let (body, tag) = d.split_at(d.len() - TAG);
+        let want = makepad_network::tunnel::hmac_sha256(key, body);
+        if want[..TAG].iter().zip(tag).fold(0u8, |a, (x, y)| a | (x ^ y)) != 0 {
+            return None;
+        }
+        let frames = u16::from_le_bytes([body[8], body[9]]) as usize;
+        let channels = body[10] as usize;
+        let pcm = &body[HEAD..];
+        if channels == 0 || pcm.len() != frames * channels * 2 {
+            return None;
+        }
+        Some(Audio { seq: u32::from_le_bytes(body[4..8].try_into().unwrap()), frames, channels, flags: body[11], due_ns: u64::from_le_bytes(body[12..20].try_into().unwrap()), pcm })
+    }
 }
 
 /// The poses as datagrams (`XrServerMsg::Uplink`): `MXP1`, seq, sample_ns, display_ns (u64 LE),
@@ -583,6 +678,7 @@ mod tests {
             XrServerMsg::Pong { client_ns: 1, server_ns: 2 },
             XrServerMsg::Bye { reason: "done".into() },
             XrServerMsg::Note { text: "hi".into() },
+            XrServerMsg::RoomField { wanted: true },
         ];
         for m in server {
             let mut inbox = Inbox::default();

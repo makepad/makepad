@@ -23,7 +23,7 @@ mod query;
 mod readback;
 mod shader;
 mod software_video;
-mod xr;
+pub(crate) mod xr;
 
 pub use fonts::*;
 

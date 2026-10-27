@@ -15,6 +15,8 @@ pub mod server;
 pub mod host;
 pub mod xr;
 #[cfg(feature = "host")]
+pub mod xr_audio;
+#[cfg(feature = "host")]
 pub mod xr_host;
 
 pub const VERSION: u16 = 7;

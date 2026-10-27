@@ -134,7 +134,9 @@ impl DepthSource {
         let view = |v: &XrEnvironmentDepthImageViewMETA| XrEye { pose: pose(v.pose), fov: [v.fov.angle_left, v.fov.angle_right, v.fov.angle_up, v.fov.angle_down] };
         let header = XrDepth { width: self.size[0], height: self.size[1], layers: LAYERS, near: image.near_z, far: if image.far_z.is_finite() { image.far_z } else { 0.0 },
             views: [view(&image.views[0]), view(&image.views[1])], image: self.lent.0.get(image.swapchain_index as usize).copied().unwrap_or(0) };
-        // the texels for the room field: copied when a slot is free (a busy one skips this image)
+        // the texels for the room field: copied when the app wants it (`hal_xr_depth_readback`)
+        // and a slot is free (a busy one skips this image)
+        if !super::DEPTH_READBACK.load(std::sync::atomic::Ordering::Acquire) { return Some(header); }
         // (a delivered slot's fence has signalled (poll checked it); a slot never used is created signalled)
         let Some(slot) = self.slots.iter_mut().find(|s| s.pending.is_none()) else { return Some(header) };
         let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::DEPTH).level_count(1).base_array_layer(0).layer_count(LAYERS);

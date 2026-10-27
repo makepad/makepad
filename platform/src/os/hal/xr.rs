@@ -18,6 +18,9 @@ use std::rc::Rc;
 const EYE_NEAR: f32 = 0.05;
 const EYE_FAR: f32 = 2000.0;
 
+/// The app uses the room field (`Cx::xr_set_room_field`): the depth readback is integrated.
+pub(crate) static ROOM_FIELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub(crate) struct HalXr {
     /// the Cx window standing for the HAL's XR window
     pub(crate) window: WindowId,
@@ -223,6 +226,8 @@ impl Cx {
             xr.env_depth_ns = display_ns;
             return;
         };
+        // (a readback still in flight when the app stopped wanting the field: dropped)
+        if !ROOM_FIELD.load(std::sync::atomic::Ordering::Acquire) { return; }
         let all: Vec<u16> = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
         let Some(xr) = self.hal.xr.as_mut() else { return };
         if xr.depth_writer.is_none() {
