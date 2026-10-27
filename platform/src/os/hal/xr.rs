@@ -11,7 +11,7 @@ use super::super::super::{
     makepad_math::{CameraFov, Mat4f, Pose, Quat, Vec2f, Vec3f},
     window::{WindowHandle, WindowId},
 };
-use makepad_hal::{buffers::read_items, window_kind, Id, XrFrame, XrPose};
+use makepad_hal::{buffers::{read_items, Wire}, window_kind, Id, XrDepth, XrFrame, XrPose};
 use std::rc::Rc;
 
 /// Near and far planes of the eye projections (metres in the room).
@@ -27,6 +27,9 @@ pub(crate) struct HalXr {
     /// the pass uniforms of the frame being built, one per eye (alive until the batch is sent);
     /// a multiview pass uses the first, with both eyes in it
     pub(crate) eye_uniforms: [DrawPassUniforms; 2],
+    /// the TSDF depth writer the headset's environment depth goes to (`cx.xr_tsdf()`), made
+    /// at the first depth frame
+    pub(crate) depth_writer: Option<makepad_tsdf::DepthWriter>,
 }
 
 // asked before the XR window exists: applied when it is made
@@ -61,7 +64,7 @@ impl Cx {
         self.hal.windows.insert(window.0, super::HalWindow::default());
         // the HAL sizes it (its first Geom confirms it)
         self.hal.frames.w.window_create(hal_window_id(window), window_kind::XR, Id::NONE, [0.0; 4], false);
-        self.hal.xr = Some(HalXr { window, frame: None, last: Rc::new(XrState::default()), eye_uniforms: Default::default() });
+        self.hal.xr = Some(HalXr { window, frame: None, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None });
         if SEE_THROUGH.with(|s| s.get()) { self.hal_xr_see_through(true); }
         // the XR passes paint into it from now on
         self.redraw_all();
@@ -108,6 +111,38 @@ impl Cx {
         let passes: Vec<_> = self.passes.id_iter().filter(|p| matches!(self.passes[*p].parent, CxDrawPassParent::Xr)).collect();
         for pass in passes { self.redraw_pass_and_child_passes(pass); }
         self.call_event_handler(&Event::XrUpdate(XrUpdateEvent { state, last }));
+    }
+
+    /// An `XrDepth`: the headset's environment depth, handed to the TSDF depth writer (its
+    /// own thread integrates it into `cx.xr_tsdf()`; this never waits).
+    pub(crate) fn hal_xr_depth(&mut self, bytes: &[u8]) {
+        let Some(xr) = self.hal.xr.as_mut() else { return };
+        let Some(header) = read_items::<XrDepth>(bytes, 1).next() else { return };
+        let texels = (header.width * header.height) as usize;
+        let Some(raw) = bytes.get(XrDepth::SIZE..XrDepth::SIZE + texels * 2) else { return };
+        let depth = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        if xr.depth_writer.is_none() {
+            match makepad_tsdf::DepthWriter::new() {
+                Ok(writer) => xr.depth_writer = Some(writer),
+                Err(e) => {
+                    crate::error!("XR depth: {e}");
+                    return;
+                }
+            }
+        }
+        let view = |e: &makepad_hal::XrEye| makepad_tsdf::DepthFrameView { orientation: e.pose.orientation, position: e.pose.position, fov: e.fov };
+        let frame = makepad_tsdf::DepthFrame {
+            width: header.width,
+            height: header.height,
+            eye: header.eye as usize,
+            near: header.near,
+            far: header.far,
+            views: [view(&header.views[0]), view(&header.views[1])],
+            depth,
+        };
+        if let Some(writer) = xr.depth_writer.as_mut() {
+            let _ = writer.submit(frame);
+        }
     }
 
     /// The uniforms of eye `i` for an XR pass: its own uniforms with that eye's camera (left

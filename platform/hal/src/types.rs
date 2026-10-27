@@ -1009,6 +1009,22 @@ pub struct XrFrame {
     pub hands: [XrHand; 2],
 }
 
+/// The header of an `XrDepth` event (`buffers::Wire`): the environment depth image of eye
+/// `eye` (XR_META_environment_depth), `width` x `height` D16 texels (row-major, little-endian
+/// u16, nonlinear: the depth of the eye's projection with `near`/`far`, `far` 0 = infinite)
+/// follow it in the payload. `views` are the depth camera of each eye in the local space (y
+/// up, the floor at y = 0), at the time the depth was captured.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct XrDepth {
+    pub width: u32,
+    pub height: u32,
+    pub eye: u32,
+    pub near: f32,
+    pub far: f32,
+    pub views: [XrEye; 2],
+}
+
 // ------------------------------------------------------------------ frames
 
 /// One render pass of a frame. `draws` is an element range into the packet's draw array.

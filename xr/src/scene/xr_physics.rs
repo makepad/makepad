@@ -101,6 +101,15 @@ pub(super) struct HandColliderBody {
     pub(super) collider: ColliderHandle,
 }
 
+/// A player's hand collider slots and grab states, while it is not the one in the scene's fields.
+pub(super) struct HandRig {
+    player: u32,
+    left_hand: Vec<HandColliderBody>,
+    right_hand: Vec<HandColliderBody>,
+    left_hand_grab: HandGrabState,
+    right_hand_grab: HandGrabState,
+}
+
 #[derive(Clone, Copy)]
 struct FloorSlabCollider {
     body: RigidBodyHandle,
@@ -302,6 +311,11 @@ pub(crate) struct PhysicsScene {
     pub(super) right_hand: Vec<HandColliderBody>,
     left_hand_grab: HandGrabState,
     right_hand_grab: HandGrabState,
+    /// the player whose hands are in the fields above (0: the local one)
+    active_player: u32,
+    /// every other player's hands (a host simulating for remote players): swapped into the
+    /// fields above while their hands sync, hold and grab, so one player's code serves all
+    other_rigs: Vec<HandRig>,
     shadow_body_motion: HashMap<BodyKey, ShadowBodyMotion>,
     body_drive_motion: HashMap<BodyKey, BodyDriveMotion>,
     settle_frame_counts: HashMap<BodyKey, u8>,
@@ -1346,6 +1360,8 @@ impl PhysicsScene {
             right_hand: Vec::new(),
             left_hand_grab: HandGrabState::new(XrSharedHand::LeftHand),
             right_hand_grab: HandGrabState::new(XrSharedHand::RightHand),
+            active_player: 0,
+            other_rigs: Vec::new(),
             shadow_body_motion: HashMap::new(),
             body_drive_motion: HashMap::new(),
             settle_frame_counts: HashMap::new(),
@@ -1842,7 +1858,9 @@ impl PhysicsScene {
     ) -> HandGrabState {
         let next_source = controller_grab_pose(controller)
             .map(|pose| (pose, controller.grip >= 0.55, controller_shared))
-            .or_else(|| hand_grab_pose(hand).map(|pose| (pose, hand.grab_intent(), hand_shared)));
+            // a hand grips with a grasp (the fist) or an index pinch; the grip point is the
+            // pinch point either way (hand_grab_pose)
+            .or_else(|| hand_grab_pose(hand).map(|pose| (pose, hand.grab_intent() || hand.pinch_index(), hand_shared)));
         let Some((pose, gripping, shared_hand)) = next_source else {
             state.previous_pose = state.pose;
             state.linvel = vec3f(0.0, 0.0, 0.0);
@@ -1978,15 +1996,81 @@ impl PhysicsScene {
         }
     }
 
+    /// Swaps `rig` with the hands in the scene's fields (twice: back again).
+    fn swap_rig(&mut self, rig: &mut HandRig) {
+        std::mem::swap(&mut self.left_hand, &mut rig.left_hand);
+        std::mem::swap(&mut self.right_hand, &mut rig.right_hand);
+        std::mem::swap(&mut self.left_hand_grab, &mut rig.left_hand_grab);
+        std::mem::swap(&mut self.right_hand_grab, &mut rig.right_hand_grab);
+        std::mem::swap(&mut self.active_player, &mut rig.player);
+    }
+
+    /// Runs `f` with each player's hands in the scene's fields in turn (the local player's first).
+    pub(super) fn for_each_rig(&mut self, mut f: impl FnMut(&mut Self)) {
+        f(self);
+        let mut rigs = std::mem::take(&mut self.other_rigs);
+        for rig in rigs.iter_mut() {
+            self.swap_rig(rig);
+            f(self);
+            self.swap_rig(rig);
+        }
+        self.other_rigs = rigs;
+    }
+
+    /// Runs `f` with `player`'s hands in the scene's fields, making that player's collider slots
+    /// the first time.
+    pub(super) fn with_rig(&mut self, player: u32, f: impl FnOnce(&mut Self)) {
+        if player == self.active_player {
+            return f(self);
+        }
+        let at = match self.other_rigs.iter().position(|r| r.player == player) {
+            Some(at) => at,
+            None => {
+                let (left_hand, right_hand) = if XR_ENABLE_HAND_PHYSICS {
+                    (self.spawn_hand_colliders(XR_HAND_COLLIDER_SLOTS_PER_HAND), self.spawn_hand_colliders(XR_HAND_COLLIDER_SLOTS_PER_HAND))
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+                self.other_rigs.push(HandRig { player, left_hand, right_hand,
+                    left_hand_grab: HandGrabState::new(XrSharedHand::LeftHand), right_hand_grab: HandGrabState::new(XrSharedHand::RightHand) });
+                self.other_rigs.len() - 1
+            }
+        };
+        let mut rig = self.other_rigs.swap_remove(at);
+        self.swap_rig(&mut rig);
+        f(self);
+        self.swap_rig(&mut rig);
+        self.other_rigs.push(rig);
+    }
+
+    /// The players whose hands the scene has slots for.
+    pub(super) fn rig_players(&self) -> Vec<u32> {
+        let mut out = vec![self.active_player];
+        out.extend(self.other_rigs.iter().map(|r| r.player));
+        out
+    }
+
+    fn body_held_by_any(&self, body: RigidBodyHandle) -> Option<(u32, XrSharedHand)> {
+        let here = [(self.active_player, &self.left_hand_grab), (self.active_player, &self.right_hand_grab)];
+        let others = self.other_rigs.iter().flat_map(|r| [(r.player, &r.left_hand_grab), (r.player, &r.right_hand_grab)]);
+        here.into_iter().chain(others).find(|(_, g)| g.held_body == Some(body)).map(|(p, g)| (p, g.shared_hand))
+    }
+
+    fn cube_has_any_hand_contact(&self, cube: &PhysicsCube) -> bool {
+        self.cube_has_hand_contact(cube, &self.left_hand)
+            || self.cube_has_hand_contact(cube, &self.right_hand)
+            || self.other_rigs.iter().any(|r| self.cube_has_hand_contact(cube, &r.left_hand) || self.cube_has_hand_contact(cube, &r.right_hand))
+    }
+
     pub(crate) fn step(&mut self) {
-        self.apply_held_body_targets();
+        self.for_each_rig(|s| s.apply_held_body_targets());
         self.apply_shadow_body_targets();
         self.sync_linked_support_bodies();
         self.sync_vehicle_query_sources_pre_step();
         self.update_four_wheel_vehicles();
         b3world::world_step(&mut self.world, self.simulation_dt, XR_PHYSICS_SUB_STEPS);
         self.sync_vehicle_support_bodies_post_step();
-        self.acquire_hand_grabs();
+        self.for_each_rig(|s| s.acquire_hand_grabs());
         self.settle_resting_bodies();
         self.actively_driven_bodies.clear();
     }
@@ -2622,22 +2706,23 @@ impl PhysicsScene {
     fn clear_held_body(&mut self, body_handle: RigidBodyHandle) {
         self.release_drive_state(body_handle);
         self.release_settle_state(body_handle);
-        if self.left_hand_grab.held_body == Some(body_handle) {
-            self.left_hand_grab = self.release_hand_hold(self.left_hand_grab);
-        }
-        if self.right_hand_grab.held_body == Some(body_handle) {
-            self.right_hand_grab = self.release_hand_hold(self.right_hand_grab);
-        }
+        self.for_each_rig(|s| {
+            if s.left_hand_grab.held_body == Some(body_handle) {
+                s.left_hand_grab = s.release_hand_hold(s.left_hand_grab);
+            }
+            if s.right_hand_grab.held_body == Some(body_handle) {
+                s.right_hand_grab = s.release_hand_hold(s.right_hand_grab);
+            }
+        });
     }
 
     pub(crate) fn held_by_for_body(&self, body_handle: RigidBodyHandle) -> Option<XrSharedHand> {
-        if self.left_hand_grab.held_body == Some(body_handle) {
-            Some(self.left_hand_grab.shared_hand)
-        } else if self.right_hand_grab.held_body == Some(body_handle) {
-            Some(self.right_hand_grab.shared_hand)
-        } else {
-            None
-        }
+        self.body_held_by_any(body_handle).map(|(_, hand)| hand)
+    }
+
+    /// The player holding `body_handle`, if any.
+    pub(crate) fn held_by_player_for_body(&self, body_handle: RigidBodyHandle) -> Option<u32> {
+        self.body_held_by_any(body_handle).map(|(player, _)| player)
     }
 
     pub(crate) fn shadow_body_motion_for_body(
@@ -2668,9 +2753,7 @@ impl PhysicsScene {
             if !matches!(cube.body_kind, XrBodyKind::Dynamic) {
                 continue;
             }
-            if self.left_hand_grab.held_body == Some(cube.body)
-                || self.right_hand_grab.held_body == Some(cube.body)
-            {
+            if self.body_held_by_any(cube.body).is_some() {
                 to_reset.push(cube.body);
                 continue;
             }
@@ -2683,8 +2766,7 @@ impl PhysicsScene {
                 to_reset.push(cube.body);
                 continue;
             }
-            let has_hand_contact = self.cube_has_hand_contact(&cube, &self.left_hand)
-                || self.cube_has_hand_contact(&cube, &self.right_hand);
+            let has_hand_contact = self.cube_has_any_hand_contact(&cube);
 
             if !self.body_is_valid(cube.body) {
                 to_reset.push(cube.body);

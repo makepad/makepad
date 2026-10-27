@@ -115,6 +115,28 @@ impl Wire for XrFrame {
     }
 }
 
+impl Wire for XrDepth {
+    const SIZE: usize = (5 + 2 * 11) * 4;
+    fn write(&self, out: &mut Vec<u8>) {
+        let f = |out: &mut Vec<u8>, v: &[f32]| for x in v { w32(out, x.to_bits()); };
+        w32(out, self.width);
+        w32(out, self.height);
+        w32(out, self.eye);
+        f(out, &[self.near, self.far]);
+        for e in &self.views { f(out, &e.pose.orientation); f(out, &e.pose.position); f(out, &e.fov); }
+    }
+    fn read(b: &[u8]) -> Self {
+        let mut at = 0;
+        let mut u = || { let v = r32(b, at); at += 4; v };
+        let (width, height, eye) = (u(), u(), u());
+        let mut f = || f32::from_bits(u());
+        let (near, far) = (f(), f());
+        let mut eye_view = || XrEye { pose: XrPose { orientation: [f(), f(), f(), f()], position: [f(), f(), f()] }, fov: [f(), f(), f(), f()] };
+        let views = [eye_view(), eye_view()];
+        XrDepth { width, height, eye, near, far, views }
+    }
+}
+
 impl Wire for [u32; 2] {
     const SIZE: usize = 8;
     fn write(&self, out: &mut Vec<u8>) {

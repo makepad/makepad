@@ -87,6 +87,7 @@ pub(super) fn log(text: &str) {
     if let Ok(t) = std::ffi::CString::new(text.replace('\0', " ")) { unsafe { __android_log_write(4, c"hal-xr".as_ptr(), t.as_ptr()) }; }
 }
 macro_rules! xr_log { ($($t:tt)*) => { log(&format!($($t)*)) } }
+mod depth;
 
 /// `window_kind::XR` window `id` of session `sid` is made: it is the stereo view, sized by the
 /// eyes (one pixel per point). `false` without an XR session.
@@ -501,6 +502,8 @@ struct CxOpenXrSession {
     passthrough_layer: XrPassthroughLayerFB,
     depth_provider: XrEnvironmentDepthProviderMETA,
     depth_swap_chain: XrEnvironmentDepthSwapchainMETA,
+    /// the environment depth readback (None without a depth provider)
+    depth: Option<depth::DepthSource>,
     inputs: CxOpenXrInputs,
     active: bool,
     focused: bool,
@@ -644,7 +647,11 @@ impl CxOpenXrSession {
             if blit { " (swizzled through staging)" } else { "" });
         let panel = Chain::new(xr, &dev, handle, format, PANEL_PX, 1, XrSwapchainCreateFlags(0), blit)?;
         let cursor = Chain::new(xr, &dev, handle, format, [CURSOR_PX; 2], 1, XrSwapchainCreateFlags::STATIC_IMAGE, false)?;
-        let mut session = Self { rt: rt.clone(), dev, frames, handle, head_space, local_space, panel_space, passthrough, passthrough_layer, depth_provider, depth_swap_chain,
+        let depth = depth::DepthSource::new(xr, &dev, depth_provider, depth_swap_chain).unwrap_or_else(|e| {
+            xr_log!("environment depth readback unavailable: {e}");
+            None
+        });
+        let mut session = Self { depth, rt: rt.clone(), dev, frames, handle, head_space, local_space, panel_space, passthrough, passthrough_layer, depth_provider, depth_swap_chain,
             inputs, active: false, focused: false, active_display_refresh_rate_hz: None, panel, cursor, stereo: None, format, blit,
             pointer: Pointer { hand: 1, ..Default::default() }, controllers: Default::default(), hands: Default::default(),
             panel_shown: None, panel_visible: true, cursor_ready: false, stereo_asked: None, stereo_shown: None, stereo_asked_at: Instant::now(),
@@ -789,6 +796,14 @@ impl CxOpenXrSession {
         let hit = if self.panel_visible { self.point(panel_pose) } else { self.leave_panel(); None };
         let panel_done = if render { self.update_panel()? } else { None };
         let stereo_done = match xr_window { Some((sid, id)) if render => self.update_stereo(sid, id, time, period)?, _ => None };
+        // environment depth: a finished readback to the XR window, the next one started (never waits)
+        if let (Some(depth), Some((sid, id))) = (self.depth.as_mut(), xr_window) {
+            if let Some(payload) = depth.poll(&self.dev) {
+                let t = time.as_nanos() as u64;
+                shared.emit_to(sid, id, clock_ns(), |q, id| q.xr_depth(id, t, &payload));
+            }
+            depth.acquire(xr, &self.dev, self.depth_provider, self.local_space, time);
+        }
         if !self.cursor_ready && render { self.fill_cursor()?; }
 
         let quad = |chain: &Chain, size: [u32; 2], pose, metres: [f32; 2]| {
@@ -827,8 +842,10 @@ impl CxOpenXrSession {
             let [frames, shown, late, wait] = self.stats;
             let secs = self.stats_at.elapsed().as_secs_f64();
             let hands = self.hands.map(|h| if h.flags & xr_hand::IN_VIEW != 0 { "tracked" } else { "-" });
-            xr_log!("{frames} display frames in {secs:.1} s ({:.1} Hz): {shown} stereo frames shown, {late} late, {:.2} ms average wait; panel {}; hands {hands:?}; focused {}",
-                frames as f64 / secs, wait as f64 / 1e6 / shown.max(1) as f64, if self.panel_shown.is_some() { "up" } else { "no frame yet" }, self.focused);
+            let depth = self.depth.as_mut().map(|d| { let n = (d.acquired, d.delivered); d.acquired = 0; d.delivered = 0; n });
+            xr_log!("{frames} display frames in {secs:.1} s ({:.1} Hz): {shown} stereo frames shown, {late} late, {:.2} ms average wait; panel {}; hands {hands:?}; focused {}; depth {}",
+                frames as f64 / secs, wait as f64 / 1e6 / shown.max(1) as f64, if self.panel_shown.is_some() { "up" } else { "no frame yet" }, self.focused,
+                depth.map(|(a, d)| format!("{a} read, {d} sent")).unwrap_or_else(|| "none".into()));
             self.stats = [0; 4];
             self.stats_at = Instant::now();
         }
@@ -898,8 +915,12 @@ impl CxOpenXrSession {
         // and the loop keeps the display rate (waiting to the display time halved it and worse)
         let deadline = Duration::from_nanos((time.as_nanos() - STEREO_MARGIN_NS - clock_ns() as i64).clamp(0, period / 2) as u64);
         let mut slot = lock(&self.frames.stereo);
-        while slot.is_none() && started.elapsed() < deadline {
-            slot = self.frames.arrived.wait_timeout(slot, deadline - started.elapsed()).unwrap_or_else(|e| e.into_inner()).0;
+        // (elapsed is read once per turn: read twice it can pass the deadline in between, and
+        // the subtraction panicked the XR thread)
+        loop {
+            let left = deadline.saturating_sub(started.elapsed());
+            if slot.is_some() || left.is_zero() { break; }
+            slot = self.frames.arrived.wait_timeout(slot, left).unwrap_or_else(|e| e.into_inner()).0;
         }
         let Some((image, done)) = slot.take() else { self.stats[2] += 1; return Ok(None) };
         drop(slot);
@@ -997,6 +1018,7 @@ impl Drop for CxOpenXrSession {
         self.panel.destroy(xr, &dev);
         self.cursor.destroy(xr, &dev);
         if let Some(stereo) = &mut self.stereo { stereo.destroy(xr, &dev); }
+        if let Some(depth) = &mut self.depth { depth.destroy(&dev); }
         if self.depth_provider.0 != 0 {
             unsafe { (xr.xrStopEnvironmentDepthProviderMETA)(self.depth_provider) }.log_error("xrStopEnvironmentDepthProviderMETA");
             unsafe { (xr.xrDestroyEnvironmentDepthProviderMETA)(self.depth_provider) }.log_error("xrDestroyEnvironmentDepthProviderMETA");

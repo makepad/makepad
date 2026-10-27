@@ -334,5 +334,9 @@ hal_events! {
     /// head, eyes and hands then, one `XrFrame` (`buffers::Wire`) in the payload. The window's
     /// FrameReady follows; that frame is drawn with these eyes.
     XrFrame = 150, xr_frame { window: obj, display_ns: u64, frame: rng };
+    /// An XR window's environment depth (XR_META_environment_depth, where the headset has it):
+    /// one `XrDepth` header (`buffers::Wire`) then its D16 texels in the payload. Sent as the
+    /// HAL reads them back (it never waits for one), at most one per display frame.
+    XrDepth = 151, xr_depth { window: obj, display_ns: u64, depth: rng };
     TrayClick = 149, tray_click { tray: u64, x: f64, y: f64, w: f64, h: f64, screen: rect };
 }
