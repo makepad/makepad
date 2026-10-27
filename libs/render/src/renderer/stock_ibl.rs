@@ -579,7 +579,7 @@ mod tests {
         renderer.load_model_parsed(cx, "test/chrome", triangle(chrome), None, None).expect("the chrome model uploads");
         renderer.load_model_parsed(cx, "test/matte", triangle(PbrMaterial::default()), None, None).expect("the matte model uploads");
         assert!(wants_pbr(&renderer, "test/chrome") && !wants_pbr(&renderer, "test/matte"), "a narrowed roughness is the PBR lane, the default the diffuse lane");
-        let instance = |model: &str| ModelInstance { model: model.into(), custom_material: None, transform: Mat4f::identity(), tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0), dynamic: true, depth_order: 0.0, part_poses: Vec::new() };
+        let instance = |model: &str| ModelInstance { model: model.into(), custom_material: None, transform: Mat4f::identity(), tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0), dynamic: true, depth_order: 0.0, part_poses: Vec::new(), lamps: Default::default(), lamps: Default::default() };
         renderer.set_models(vec![instance("test/chrome"), instance("test/matte")]);
         renderer
     }
@@ -958,7 +958,7 @@ mod tests {
         let instance = |model: &str, material: Option<&str>| ModelInstance {
             model: model.into(),
             custom_material: material.map(|name| CustomMaterialInstance { name: name.into(), params: Vec4f::default() }),
-            transform: Mat4f::identity(), tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0), dynamic: true, depth_order: 0.0, part_poses: Vec::new(),
+            transform: Mat4f::identity(), tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0), dynamic: true, depth_order: 0.0, part_poses: Vec::new(), lamps: Default::default(),
         };
         let (stock, missing, own) = (instance("test/chrome", None), instance("test/chrome", Some("replica/paint")), instance("test/chrome", Some("paint")));
         let program = renderer.custom_material_shader(STOCK_IBL_MATERIAL).expect("premise: the program is built");

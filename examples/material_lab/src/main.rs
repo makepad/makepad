@@ -452,6 +452,7 @@ impl MaterialLab {
                 dynamic: true,
                 depth_order: 0.0,
                 part_poses: Vec::new(),
+                lamps: Default::default(),
             }
         }).collect()
     }
