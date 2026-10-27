@@ -319,7 +319,8 @@ hal_commands! {
     DirectDisplayMode = 135, direct_display_mode { req: u64, args: rng };
     /// Mouse or touchpad speed in hundredths; the host clamps it to the native preference range.
     DirectPointerSpeed = 136, direct_pointer_speed { touchpad: bool, hundredths: u32 };
-    DirectNaturalScroll = 137, direct_natural_scroll { on: bool };
+    /// Natural scrolling for touchpads or mouse wheels (direct backend).
+    DirectNaturalScroll = 137, direct_natural_scroll { touchpad: bool, on: bool };
     /// Touchpad tap to click (direct backend).
     DirectTapToClick = 149, direct_tap_to_click { on: bool };
 
@@ -384,4 +385,17 @@ hal_commands! {
     /// next to the Windows notification icon), shows it in front and gives it the focus. Its focus
     /// loss (a click anywhere else) answers `PopupDismissed`.
     WindowAtTray = 154, window_at_tray { id: obj, tray: u64, w: f32, h: f32 };
+    /// The eyes XR window `id`'s next frame shows with, when they are not its `XrFrame`'s (a
+    /// picture rendered elsewhere, for other eyes): `eyes` is two `XrEye` (`buffers::Wire`) and
+    /// the depth (metres along the view, f32 little-endian; 0 none) of what the frame shows
+    /// there. The shell gives them to the display (the runtime reprojects from them to the
+    /// display's pose, positionally at that depth).
+    XrFrameEyes = 155, xr_frame_eyes { id: obj, eyes: rng };
+    /// XR window `id`'s `XrFrame`s are located `lead_ns` past their display time (head, eyes,
+    /// hands, controllers): a picture rendered elsewhere from them shows that much later (a
+    /// stream's measured latency). 0: at the display time.
+    XrPoseLead = 156, xr_pose_lead { id: obj, lead_ns: u64 };
+    /// XR window `id`'s headset runs its display at the supported refresh rate nearest to
+    /// `millihertz` (0: the runtime's default).
+    XrRefreshRate = 157, xr_refresh_rate { id: obj, millihertz: u32 };
 }

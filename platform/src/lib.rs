@@ -114,7 +114,8 @@ mod screen;
 mod texture;
 mod uniform_buffer;
 mod window;
-mod xr_tsdf;
+/// The XR room field (surfaces as a signed distance field): `makepad_tsdf`, its process-wide store.
+pub mod xr_tsdf;
 
 pub mod web_socket;
 

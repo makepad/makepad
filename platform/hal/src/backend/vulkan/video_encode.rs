@@ -144,6 +144,26 @@ struct Slot {
     fence: vk::Fence,
 }
 
+/// A QP delta per region of the picture (VK_KHR_video_encode_quantization_map): the caller's
+/// deltas (`StreamEncoder::set_qp_map`) staged, uploaded before the next picture's encode.
+struct QpMap {
+    image: VideoImage,
+    /// Its texels (columns, rows) and the pixels each one covers.
+    extent: vk::Extent2D,
+    texel: vk::Extent2D,
+    /// The QP deltas the encoder takes (min, max).
+    range: [i32; 2],
+    /// Bytes per texel of its format (R8_SINT 1, R16_SINT 2, R32_SINT 4).
+    bytes: u32,
+    staging: vk::Buffer,
+    staging_memory: vk::DeviceMemory,
+    mapped: usize,
+    coherent: bool,
+    /// Deltas staged and not uploaded yet; uploaded once (the image is in its layout).
+    pending: std::cell::Cell<bool>,
+    uploaded: std::cell::Cell<bool>,
+}
+
 /// The Vulkan objects of a stream; the worker uses them, `encode_frame` records into `slots`.
 struct Encoder {
     dev: Arc<Device>,
@@ -175,6 +195,8 @@ struct Encoder {
     full_chroma: bool,
     codec: Codec,
     tuning: Tuning,
+    /// QP deltas per region, when the encoder takes them.
+    qp_map: Option<QpMap>,
 }
 
 unsafe impl Send for Encoder {}
@@ -197,6 +219,8 @@ struct Picture {
     bitrate: Option<u32>,
     /// The rate control in effect when this picture's coding scope begins.
     current_kbps: Option<u32>,
+    /// The QP ceiling for this picture's rate control (0: none; `stream_encode::MAX_QP`).
+    max_qp: u32,
     /// A refinement: the same picture again at `REFINE_QP` (rate control off), near lossless.
     refine: bool,
     /// Rate control is off when this picture's coding scope begins (after a refinement).
@@ -302,6 +326,52 @@ unsafe fn video_image(dev: &Device, profile: &Profile, pf: PictureFormat, extent
     Ok(VideoImage { image, memory, view })
 }
 
+/// The format of the profile's QP delta maps, the pixels one texel covers (the smallest the
+/// encoder offers) and its bytes per texel; None when it offers none this code writes.
+unsafe fn qp_map_format(dev: &Device, list: &mut vk::VideoProfileListInfoKHR) -> Option<(PictureFormat, vk::Extent2D, u32)> {
+    let call = dev.instance.table.get_physical_device_video_format_properties_khr?;
+    let info = vk::PhysicalDeviceVideoFormatInfoKHR::default().image_usage(vk::ImageUsageFlags::VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_KHR).next_video_profile_list_info_khr(list);
+    let mut count = 0u32;
+    if call(dev.physical, &info, &mut count, std::ptr::null_mut()) != vk::Result::SUCCESS || count == 0 {
+        return None;
+    }
+    // each answer with its texel size chained (the arrays stay put while the driver writes)
+    let mut texels = vec![vk::VideoFormatQuantizationMapPropertiesKHR::default(); count as usize];
+    let mut props = vec![vk::VideoFormatPropertiesKHR::default(); count as usize];
+    for (p, t) in props.iter_mut().zip(texels.iter_mut()) {
+        p.p_next = (t as *mut vk::VideoFormatQuantizationMapPropertiesKHR).cast();
+    }
+    if call(dev.physical, &info, &mut count, props.as_mut_ptr()) != vk::Result::SUCCESS {
+        return None;
+    }
+    props
+        .iter()
+        .zip(texels.iter())
+        .take(count as usize)
+        .filter_map(|(p, t)| {
+            // VK_FORMAT_R8_SINT, R16_SINT, R32_SINT
+            let bytes = match p.format.as_raw() {
+                14 => 1,
+                75 => 2,
+                99 => 4,
+                _ => return None,
+            };
+            (t.quantization_map_texel_size.width > 0).then_some((PictureFormat { format: p.format, flags: p.image_create_flags, tiling: p.image_tiling }, t.quantization_map_texel_size, bytes))
+        })
+        .min_by_key(|(_, t, _)| t.width * t.height)
+}
+
+/// A QP delta map image of `extent` texels and its staging buffer (all deltas 0 until set).
+#[allow(clippy::too_many_arguments)]
+unsafe fn qp_map(dev: &Device, profile: &Profile, pf: PictureFormat, extent: vk::Extent2D, texel: vk::Extent2D, range: [i32; 2], bytes: u32, family: u32) -> Result<QpMap, String> {
+    let image = video_image(dev, profile, pf, [extent.width, extent.height], vk::ImageUsageFlags::VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_KHR | vk::ImageUsageFlags::TRANSFER_DST, &[family])?;
+    let size = extent.width as u64 * extent.height as u64 * bytes as u64;
+    let (staging, staging_memory, coherent) = buffer(dev, size, vk::BufferUsageFlags::TRANSFER_SRC, None, true)?;
+    let mapped = dev.raw.map_memory(staging_memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).map_err(error)? as usize;
+    std::ptr::write_bytes(mapped as *mut u8, 0, size as usize);
+    Ok(QpMap { image, extent, texel, range, bytes, staging, staging_memory, mapped, coherent, pending: std::cell::Cell::new(false), uploaded: std::cell::Cell::new(false) })
+}
+
 unsafe fn buffer(dev: &Device, size: u64, usage: vk::BufferUsageFlags, profile: Option<&Profile>, host: bool) -> Result<(vk::Buffer, vk::DeviceMemory, bool), String> {
     let mut list = profile.map(|p| {
         let mut l = p.list;
@@ -351,12 +421,26 @@ impl Encoder {
             let mut h264_caps = vk::VideoEncodeH264CapabilitiesKHR::default();
             let mut h265_caps = vk::VideoEncodeH265CapabilitiesKHR::default();
             let mut encode_caps = vk::VideoEncodeCapabilitiesKHR::default();
+            let mut qp_caps = vk::VideoEncodeQuantizationMapCapabilitiesKHR::default();
+            let mut h264_qp_caps = vk::VideoEncodeH264QuantizationMapCapabilitiesKHR::default();
+            let mut h265_qp_caps = vk::VideoEncodeH265QuantizationMapCapabilitiesKHR::default();
             let mut caps = vk::VideoCapabilitiesKHR::default().next_video_encode_capabilities_khr(&mut encode_caps);
             caps = match codec {
                 Codec::H264 => caps.next_video_encode_h264_capabilities_khr(&mut h264_caps),
                 Codec::H265 => caps.next_video_encode_h265_capabilities_khr(&mut h265_caps),
             };
+            if video.qp_map {
+                caps = caps.next_video_encode_quantization_map_capabilities_khr(&mut qp_caps);
+                caps = match codec {
+                    Codec::H264 => caps.next_video_encode_h264_quantization_map_capabilities_khr(&mut h264_qp_caps),
+                    Codec::H265 => caps.next_video_encode_h265_quantization_map_capabilities_khr(&mut h265_qp_caps),
+                };
+            }
             dev.instance.get_physical_device_video_capabilities(dev.physical, &profile.info, &mut caps).map_err(|e| format!("{codec:?} encode capabilities: {e:?}"))?;
+            let qp_range = match codec {
+                Codec::H264 => [h264_qp_caps.min_qp_delta, h264_qp_caps.max_qp_delta],
+                Codec::H265 => [h265_qp_caps.min_qp_delta, h265_qp_caps.max_qp_delta],
+            };
             let gran = caps.picture_access_granularity;
             // macroblocks (H.264) or 8x8 coding blocks (H.265), then the encoder's picture access
             // granularity
@@ -395,8 +479,18 @@ impl Encoder {
             let mut list = profile.list;
             list.p_next = std::ptr::null_mut();
             let dpb_format = format_of(vk::ImageUsageFlags::VIDEO_ENCODE_DPB_KHR, &mut list)?;
+            // a QP delta map's format and the pixels a texel covers (the smallest texel offered)
+            let qp_format = if video.qp_map && qp_caps.max_quantization_map_extent.width > 0 && qp_range[1] > qp_range[0] {
+                let mut list = profile.list;
+                list.p_next = std::ptr::null_mut();
+                qp_map_format(&dev, &mut list)
+            } else {
+                None
+            };
             // session
             let header = caps.std_header_version;
+            let session_flags = vk::VideoSessionCreateFlagsKHR::ALLOW_ENCODE_PARAMETER_OPTIMIZATIONS
+                | if qp_format.is_some() { vk::VideoSessionCreateFlagsKHR::ALLOW_ENCODE_QUANTIZATION_DELTA_MAP } else { vk::VideoSessionCreateFlagsKHR::empty() };
             let session = dev
                 .raw
                 .create_video_session(
@@ -404,7 +498,7 @@ impl Encoder {
                         // the driver may change parameters for speed (it reports what it did; its
                         // own parameter sets are sent then): NVIDIA's H.265 encode is 5x faster
                         // with it (4K 4:4:4: 16.6 -> 3.1 ms at low-latency tuning, RTX 5090)
-                        .flags(vk::VideoSessionCreateFlagsKHR::ALLOW_ENCODE_PARAMETER_OPTIMIZATIONS)
+                        .flags(session_flags)
                         .queue_family_index(video.family)
                         .video_profile(&profile.info)
                         .picture_format(src_format.format)
@@ -439,7 +533,18 @@ impl Encoder {
                 full_chroma,
                 codec,
                 tuning,
+                qp_map: None,
             };
+            if let Some((pf, texel, bytes)) = qp_format {
+                let extent = vk::Extent2D {
+                    width: coded[0].div_ceil(texel.width).min(qp_caps.max_quantization_map_extent.width),
+                    height: coded[1].div_ceil(texel.height).min(qp_caps.max_quantization_map_extent.height),
+                };
+                match qp_map(&dev, &enc._profile, pf, extent, texel, qp_range, bytes, video.family) {
+                    Ok(map) => enc.qp_map = Some(map),
+                    Err(e) => eprintln!("[hal-video] QP delta map: {e}; encoding without"),
+                }
+            }
             for req in dev.raw.get_video_session_memory_requirements(session).map_err(error)? {
                 let ty = dev
                     .memory_type(req.memory_requirements.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
@@ -581,16 +686,16 @@ impl Encoder {
         let add = vk::VideoEncodeH264SessionParametersAddInfoKHR::default().std_sp_ss(&sps_list).std_pp_ss(&pps_list);
         let mut h264_params = vk::VideoEncodeH264SessionParametersCreateInfoKHR::default().max_std_sps_count(1).max_std_pps_count(1).parameters_add_info(&add);
         let mut quality = vk::VideoEncodeQualityLevelInfoKHR::default().quality_level(self.quality_level);
-        self.params = self.dev
-            .raw
-            .create_video_session_parameters(
-                &vk::VideoSessionParametersCreateInfoKHR::default()
-                    .video_session(self.session)
-                    .next_video_encode_h264_session_parameters_create_info_khr(&mut h264_params)
-                    .next_video_encode_quality_level_info_khr(&mut quality),
-                None,
-            )
-            .map_err(|e| format!("vkCreateVideoSessionParametersKHR: {e:?}"))?;
+        let mut qp_params = vk::VideoEncodeQuantizationMapSessionParametersCreateInfoKHR::default().quantization_map_texel_size(self.qp_map.as_ref().map_or(vk::Extent2D::default(), |m| m.texel));
+        let mut info = vk::VideoSessionParametersCreateInfoKHR::default()
+            .video_session(self.session)
+            .next_video_encode_h264_session_parameters_create_info_khr(&mut h264_params)
+            .next_video_encode_quality_level_info_khr(&mut quality);
+        if self.qp_map.is_some() {
+            // pictures may carry a QP delta map of this texel size
+            info = info.flags(vk::VideoSessionParametersCreateFlagsKHR::QUANTIZATION_MAP_COMPATIBLE).next_video_encode_quantization_map_session_parameters_create_info_khr(&mut qp_params);
+        }
+        self.params = self.dev.raw.create_video_session_parameters(&info, None).map_err(|e| format!("vkCreateVideoSessionParametersKHR: {e:?}"))?;
         // our parameter sets, checked against the driver's encoding of the same parameters
         // our writer describes macroblock-rounded coding; a coarser granularity is the driver's
         let ours = if coded == [size[0].div_ceil(16) * 16, size[1].div_ceil(16) * 16] { params.parameter_sets() } else { Vec::new() };
@@ -698,17 +803,16 @@ impl Encoder {
         let add = vk::VideoEncodeH265SessionParametersAddInfoKHR::default().std_vp_ss(&vps_list).std_sp_ss(&sps_list).std_pp_ss(&pps_list);
         let mut h265_params = vk::VideoEncodeH265SessionParametersCreateInfoKHR::default().max_std_vps_count(1).max_std_sps_count(1).max_std_pps_count(1).parameters_add_info(&add);
         let mut quality = vk::VideoEncodeQualityLevelInfoKHR::default().quality_level(self.quality_level);
-        self.params = self
-            .dev
-            .raw
-            .create_video_session_parameters(
-                &vk::VideoSessionParametersCreateInfoKHR::default()
-                    .video_session(self.session)
-                    .next_video_encode_h265_session_parameters_create_info_khr(&mut h265_params)
-                    .next_video_encode_quality_level_info_khr(&mut quality),
-                None,
-            )
-            .map_err(|e| format!("vkCreateVideoSessionParametersKHR (H.265): {e:?}"))?;
+        let mut qp_params = vk::VideoEncodeQuantizationMapSessionParametersCreateInfoKHR::default().quantization_map_texel_size(self.qp_map.as_ref().map_or(vk::Extent2D::default(), |m| m.texel));
+        let mut info = vk::VideoSessionParametersCreateInfoKHR::default()
+            .video_session(self.session)
+            .next_video_encode_h265_session_parameters_create_info_khr(&mut h265_params)
+            .next_video_encode_quality_level_info_khr(&mut quality);
+        if self.qp_map.is_some() {
+            // pictures may carry a QP delta map of this texel size
+            info = info.flags(vk::VideoSessionParametersCreateFlagsKHR::QUANTIZATION_MAP_COMPATIBLE).next_video_encode_quantization_map_session_parameters_create_info_khr(&mut qp_params);
+        }
+        self.params = self.dev.raw.create_video_session_parameters(&info, None).map_err(|e| format!("vkCreateVideoSessionParametersKHR (H.265): {e:?}"))?;
         let mut get = vk::VideoEncodeH265SessionParametersGetInfoKHR::default().write_std_vps(true).write_std_sps(true).write_std_pps(true);
         let mut h265_feedback = vk::VideoEncodeH265SessionParametersFeedbackInfoKHR::default();
         let mut feedback_info = vk::VideoEncodeSessionParametersFeedbackInfoKHR::default().next_video_encode_h265_session_parameters_feedback_info_khr(&mut h265_feedback);
@@ -796,6 +900,7 @@ impl Encoder {
         // buffer without it, although the spec leaves it optional)
         let mut layer_h264_now = vk::VideoEncodeH264RateControlLayerInfoKHR::default();
         let mut layer_h265_now = vk::VideoEncodeH265RateControlLayerInfoKHR::default();
+        qp_ceiling(&mut layer_h264_now, &mut layer_h265_now, pic.max_qp);
         let layer_now = pic.current_kbps.map(|k| {
             let layer = self.rate_control_layer(k);
             [match self.codec { Codec::H264 => layer.next_video_encode_h264_rate_control_layer_info_khr(&mut layer_h264_now), Codec::H265 => layer.next_video_encode_h265_rate_control_layer_info_khr(&mut layer_h265_now) }]
@@ -818,6 +923,35 @@ impl Encoder {
                 Codec::H265 => begin.next_video_encode_h265_rate_control_info_khr(&mut h265_rc_now),
             };
         }
+        // a QP delta map set since the last picture: into its image (outside the coding scope)
+        if let Some(map) = self.qp_map.as_ref().filter(|m| m.pending.get()) {
+            let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).level_count(1).layer_count(1);
+            let old = if map.uploaded.get() { vk::ImageLayout::VIDEO_ENCODE_QUANTIZATION_MAP_KHR } else { vk::ImageLayout::UNDEFINED };
+            let to_copy = vk::ImageMemoryBarrier::default()
+                .image(map.image.image)
+                .old_layout(old)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .subresource_range(range);
+            d.cmd_pipeline_barrier(slot.cb, vk::PipelineStageFlags::ALL_COMMANDS, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[to_copy]);
+            let layer = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1);
+            let region = vk::BufferImageCopy::default().image_subresource(layer).image_extent(vk::Extent3D { width: map.extent.width, height: map.extent.height, depth: 1 });
+            d.cmd_copy_buffer_to_image(slot.cb, map.staging, map.image.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[region]);
+            let to_map = vk::ImageMemoryBarrier::default()
+                .image(map.image.image)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::VIDEO_ENCODE_QUANTIZATION_MAP_KHR)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::MEMORY_READ)
+                .subresource_range(range);
+            d.cmd_pipeline_barrier(slot.cb, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::ALL_COMMANDS, vk::DependencyFlags::empty(), &[], &[], &[to_map]);
+            map.pending.set(false);
+            map.uploaded.set(true);
+        }
         d.cmd_begin_video_coding(slot.cb, &begin);
         if pic.refine {
             // rate control off for this picture: its slices carry REFINE_QP
@@ -828,6 +962,7 @@ impl Encoder {
             let kbps = pic.bitrate.or(pic.current_kbps).unwrap_or(0);
             let mut layer_h264 = vk::VideoEncodeH264RateControlLayerInfoKHR::default();
             let mut layer_h265 = vk::VideoEncodeH265RateControlLayerInfoKHR::default();
+            qp_ceiling(&mut layer_h264, &mut layer_h265, pic.max_qp);
             let layer = self.rate_control_layer(kbps);
             let layer = [match self.codec { Codec::H264 => layer.next_video_encode_h264_rate_control_layer_info_khr(&mut layer_h264), Codec::H265 => layer.next_video_encode_h265_rate_control_layer_info_khr(&mut layer_h265) }];
             let mut h264_rc = vk::VideoEncodeH264RateControlInfoKHR::default().gop_frame_count(u32::MAX).idr_period(u32::MAX).temporal_layer_count(1);
@@ -961,6 +1096,15 @@ impl Encoder {
             Codec::H264 => encode.next_video_encode_h264_picture_info_khr(&mut h264_picture),
             Codec::H265 => encode.next_video_encode_h265_picture_info_khr(&mut h265_picture),
         };
+        // the picture's QP deltas per region, once a map was set
+        let mut qp_info = vk::VideoEncodeQuantizationMapInfoKHR::default();
+        let encode = match self.qp_map.as_ref().filter(|m| m.uploaded.get()) {
+            Some(map) => {
+                qp_info = qp_info.quantization_map(map.image.view).quantization_map_extent(map.extent);
+                encode.flags(vk::VideoEncodeFlagsKHR::WITH_QUANTIZATION_DELTA_MAP).next_video_encode_quantization_map_info_khr(&mut qp_info)
+            }
+            None => encode,
+        };
         d.cmd_begin_query(slot.cb, self.queries, pic.slot as u32, vk::QueryControlFlags::empty());
         d.cmd_encode_video(slot.cb, &encode);
         d.cmd_end_query(slot.cb, self.queries, pic.slot as u32);
@@ -1057,6 +1201,14 @@ impl Drop for Encoder {
                 d.destroy_image(i.image, None);
                 d.free_memory(i.memory, None);
             }
+            if let Some(m) = &self.qp_map {
+                d.unmap_memory(m.staging_memory);
+                d.destroy_buffer(m.staging, None);
+                d.free_memory(m.staging_memory, None);
+                d.destroy_image_view(m.image.view, None);
+                d.destroy_image(m.image.image, None);
+                d.free_memory(m.image.memory, None);
+            }
             if self.queries != vk::QueryPool::null() {
                 d.destroy_query_pool(self.queries, None);
                 if let Some(stamps) = self.stamps {
@@ -1102,6 +1254,7 @@ pub(crate) struct StreamEncoder {
     kbps: u32,
     /// The rate control the session has (None before the first picture reset it).
     applied_kbps: Option<u32>,
+    applied_max_qp: u32,
     /// What the encoder is, for logs and status lines.
     pub info: String,
     /// GPU timestamps around the copy (graphics queue): where a picture's time goes.
@@ -1227,6 +1380,7 @@ impl StreamEncoder {
                 last: None,
                 kbps,
                 applied_kbps: None,
+                applied_max_qp: 0,
                 info,
                 stamps,
                 rc_off: false,
@@ -1246,6 +1400,41 @@ impl StreamEncoder {
         }
     }
 
+    /// The QP delta map's grid, when the encoder takes one: its columns and rows, the pixels each
+    /// texel covers, and the deltas it takes (min, max).
+    pub fn qp_grid(&self) -> Option<([u32; 2], [u32; 2], [i32; 2])> {
+        self.enc.qp_map.as_ref().map(|m| ([m.extent.width, m.extent.height], [m.texel.width, m.texel.height], m.range))
+    }
+
+    /// QP deltas for the pictures from the next one on, one per texel of [`Self::qp_grid`] (row
+    /// by row), clamped to its range (negative: more bits there). False when the encoder takes
+    /// none or the grid differs.
+    pub fn set_qp_map(&mut self, deltas: &[i8]) -> bool {
+        let Some(m) = self.enc.qp_map.as_ref() else { return false };
+        let n = (m.extent.width * m.extent.height) as usize;
+        if deltas.len() != n {
+            return false;
+        }
+        unsafe {
+            for (i, d) in deltas.iter().enumerate() {
+                let v = (*d as i32).clamp(m.range[0], m.range[1]);
+                match m.bytes {
+                    1 => *(m.mapped as *mut i8).add(i) = v as i8,
+                    2 => *(m.mapped as *mut i16).add(i) = v as i16,
+                    _ => *(m.mapped as *mut i32).add(i) = v,
+                }
+            }
+        }
+        if !m.coherent {
+            let flushed = unsafe { self.enc.dev.raw.flush_mapped_memory_ranges(&[vk::MappedMemoryRange::default().memory(m.staging_memory).size(vk::WHOLE_SIZE)]) };
+            if flushed.is_err() {
+                return false;
+            }
+        }
+        m.pending.set(true);
+        true
+    }
+
     /// The picture's place in the stream (an IDR when `key` or the first).
     fn next_picture(&mut self, key: bool, refine: bool) -> Picture {
         let idr = key || self.last.is_none();
@@ -1262,6 +1451,7 @@ impl StreamEncoder {
         // pictures)
         let poc = match self.enc.codec { Codec::H264 => (self.frame_num * 2) as i32, Codec::H265 => self.poc_count };
         self.poc_count += 1;
+        let max_qp = crate::stream_encode::MAX_QP.load(std::sync::atomic::Ordering::Acquire);
         let pic = Picture {
             slot: 0,
             idr,
@@ -1271,14 +1461,16 @@ impl StreamEncoder {
             setup,
             reference: if idr { None } else { self.last },
             reset: self.applied_kbps.is_none(),
-            // after a refinement the stream's rate control is set again
-            bitrate: (self.applied_kbps != Some(self.kbps) || self.rc_off).then_some(self.kbps),
+            // after a refinement the stream's rate control is set again (and with a new QP ceiling)
+            bitrate: (self.applied_kbps != Some(self.kbps) || self.rc_off || max_qp != self.applied_max_qp).then_some(self.kbps),
+            max_qp,
             current_kbps: self.applied_kbps,
             // a refinement needs a stream (not the first picture, not a key frame)
             refine: refine && !idr && self.applied_kbps.is_some(),
             rc_off_now: self.rc_off,
         };
         self.applied_kbps = Some(self.kbps);
+        self.applied_max_qp = max_qp;
         self.rc_off = pic.refine;
         self.last = Some((setup, self.frame_num, poc));
         // frame_num wraps at MaxFrameNum; POC type 2 follows it (2 x FrameNumOffset + frame_num)
@@ -1554,4 +1746,16 @@ impl Drop for StreamEncoder {
             d.destroy_command_pool(self.copy_pool, None);
         }
     }
+}
+
+/// A QP ceiling on a rate control layer (0: none), every picture type.
+fn qp_ceiling(h264: &mut vk::VideoEncodeH264RateControlLayerInfoKHR, h265: &mut vk::VideoEncodeH265RateControlLayerInfoKHR, max_qp: u32) {
+    if max_qp == 0 {
+        return;
+    }
+    let q = max_qp as i32;
+    h264.use_max_qp = 1;
+    h264.max_qp = vk::VideoEncodeH264QpKHR { qp_i: q, qp_p: q, qp_b: q };
+    h265.use_max_qp = 1;
+    h265.max_qp = vk::VideoEncodeH265QpKHR { qp_i: q, qp_p: q, qp_b: q };
 }

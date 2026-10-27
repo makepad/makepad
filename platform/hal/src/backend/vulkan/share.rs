@@ -27,6 +27,47 @@ pub use dma_buf::{DmaBufSupport, OpaqueMemory};
 #[cfg(target_os = "android")]
 pub use hardware_buffer::HardwareBuffer as NativeHandle;
 
+/// The process's registry on Android (the shell's sharing, the decoders' pictures).
+#[cfg(target_os = "android")]
+pub fn shared_images() -> NativeImages {
+    static IMAGES: std::sync::OnceLock<NativeImages> = std::sync::OnceLock::new();
+    IMAGES.get_or_init(NativeImages::default).clone()
+}
+
+/// A decoder's picture (`buffer`: an AHardwareBuffer it holds) registered for texture import: its
+/// ticket (`texture_handle::VIDEO` imports it as a video texture).
+#[cfg(target_os = "android")]
+pub fn picture_ticket(buffer: *mut std::ffi::c_void) -> Result<u64, String> {
+    let native = unsafe { NativeHandle::retain(buffer as *mut makepad_vulkan::vk::AHardwareBuffer) }?;
+    Ok(unsafe { shared_images().register(crate::session::HOST, native) })
+}
+
+#[cfg(target_os = "android")]
+pub fn release_picture_ticket(ticket: u64) {
+    shared_images().release(ticket);
+}
+
+/// Images an XR shell owns and lends to its sessions (`texture_handle::XR_DEPTH`), by ticket.
+#[cfg(target_os = "android")]
+fn lent_images() -> &'static Mutex<HashMap<u64, Arc<Image>>> {
+    static LENT: std::sync::OnceLock<Mutex<HashMap<u64, Arc<Image>>>> = std::sync::OnceLock::new();
+    LENT.get_or_init(Default::default)
+}
+
+/// Lends `image` to the sessions for texture import; its ticket.
+#[cfg(target_os = "android")]
+pub fn lend_image(image: Arc<Image>) -> u64 {
+    let id = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    lock(lent_images()).insert(id, image);
+    id
+}
+
+/// Ends a lend (the images' owner goes away; imports made already keep their image).
+#[cfg(target_os = "android")]
+pub fn end_lend(ticket: u64) {
+    lock(lent_images()).remove(&ticket);
+}
+
 /// A shell may supply its own handle transport. The image lease owns the native allocation;
 /// any external producer must have completed and released ownership before import is used.
 /// External providers enable EXT_queue_family_foreign. Batches release their images to that
@@ -79,6 +120,16 @@ impl VkExternalImages for NativeImages {
         lock(&self.entries).insert(id, Entry { session, handle: native, image: Arc::downgrade(&image) }); Ok(id)
     }
     fn import(&mut self, dev: Arc<Device>, handle: u64, kind: u32) -> Result<Arc<Image>, String> {
+        // a decoder's picture (its hardware buffer), sampled as a video texture
+        #[cfg(target_os = "android")]
+        if kind == texture_handle::VIDEO {
+            let native = lock(&self.entries).get(&handle).map(|e| e.handle.clone()).ok_or("unknown picture ticket")?;
+            return NativeHandle::import_video(dev, native);
+        }
+        #[cfg(target_os = "android")]
+        if kind == texture_handle::XR_DEPTH {
+            return lock(lent_images()).get(&handle).cloned().ok_or_else(|| "unknown XR depth ticket".into());
+        }
         if kind != texture_handle::NATIVE { return Err("unsupported Vulkan handle kind".into()); }
         let (native, image) = {
             let entries = lock(&self.entries); let entry = entries.get(&handle).ok_or("unknown native image ticket")?;

@@ -18,18 +18,21 @@ pub fn set_pointer_speed(touchpad: bool, hundredths: u32) {
     );
 }
 
-/// Natural scrolling, as on macOS: the content follows the fingers on a
-/// touchpad and the wheel on a mouse (on by default in the WM's session; the WM's
-/// setting turns it off). Only this direct backend (our WM) applies it: windowed
-/// backends on another desktop keep that desktop's own direction.
-static NATURAL_SCROLL: AtomicBool = AtomicBool::new(true);
+/// Natural scrolling, as on macOS, per device class (`touchpad`, else mouse wheels): the
+/// content follows the fingers on a touchpad and the wheel on a mouse. Both on by default in
+/// the WM's session; the WM's devices settings turn each off. This is the one place makepad
+/// picks a scroll direction itself: only this direct backend (our WM) applies it, windowed
+/// backends on another desktop keep that desktop's own direction. Desk Link's injected wheel
+/// is already in the content direction its viewer saw and is never turned (`raw_input`).
+static NATURAL_SCROLL_MOUSE: AtomicBool = AtomicBool::new(true);
+static NATURAL_SCROLL_TOUCHPAD: AtomicBool = AtomicBool::new(true);
 
-pub fn natural_scroll() -> bool {
-    NATURAL_SCROLL.load(Ordering::Relaxed)
+pub fn natural_scroll(touchpad: bool) -> bool {
+    (if touchpad { &NATURAL_SCROLL_TOUCHPAD } else { &NATURAL_SCROLL_MOUSE }).load(Ordering::Relaxed)
 }
 
-pub fn set_natural_scroll(on: bool) {
-    NATURAL_SCROLL.store(on, Ordering::Relaxed);
+pub fn set_natural_scroll(touchpad: bool, on: bool) {
+    (if touchpad { &NATURAL_SCROLL_TOUCHPAD } else { &NATURAL_SCROLL_MOUSE }).store(on, Ordering::Relaxed);
 }
 
 /// Tap to click on touchpads: a short touch clicks (one finger primary, two

@@ -13,7 +13,7 @@ mod frame;
 mod pipeline;
 mod prof;
 mod readback;
-mod resources;
+pub(crate) mod resources;
 pub(crate) mod share;
 mod submit;
 pub mod surface;
@@ -24,6 +24,8 @@ pub(crate) mod video_encode;
 pub use device::Device;
 pub use resources::Image;
 pub use share::{NativeHandle, NativeImages, VkExternalImages};
+#[cfg(target_os = "android")]
+pub use share::{picture_ticket, release_picture_ticket, shared_images};
 pub use surface::{Offscreen, VkSurfaceSource};
 
 use super::exec::{self, Gpu, PipeStatus};
@@ -192,6 +194,10 @@ impl Vulkan {
             },
             ..Default::default() };
         let mut info = info;
+        // a remote headset slot: the app renders XR as on a headset, into its own textures
+        // (linux/xr_remote.rs)
+        #[cfg(target_os = "linux")]
+        if super::linux::xr_remote::enabled() { info.flags |= info_flags::XR | info_flags::XR_OFFSCREEN; }
         info.set_device_name(&unsafe { std::ffi::CStr::from_ptr(dev.properties.device_name.as_ptr()) }.to_string_lossy());
         crate::gpu_limits::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
@@ -411,7 +417,7 @@ impl Backend for Vulkan {
             let Some(passes) = frame::slice(packet.passes, view.passes.len()) else { continue };
             let is_window = kind & !target::FLAGS == target::WINDOW;
             'pass: for pass in &view.passes[passes] {
-                let mut key = PassKey { colors: [pipeline::ABSENT; 4], depth: pipeline::ABSENT, load: pass.load, views: frame::pass_views(pass) };
+                let mut key = PassKey { colors: [pipeline::ABSENT; 4], depth: pipeline::ABSENT, load: pass.load, views: frame::pass_views(pass), fdm: false };
                 for (i, id) in pass.color.iter().enumerate().filter(|(_, id)| !id.is_none()) {
                     let Some(format) = format_of(*id) else { continue 'pass };
                     key.colors[i] = format;
@@ -420,7 +426,7 @@ impl Backend for Vulkan {
                     // the window's own target: its embedded texture, else a BGRA8 image
                     key.colors[0] = match s.windows.get(sid, target).ok().and_then(|w| w.val.embedded) {
                         Some(em) => match format_of(em.tex) { Some(format) => format, None => continue 'pass },
-                        None => format::BGRA8,
+                        None => { let (wsid, wid) = self.window_key(sid, target); self.windows.source.window_format(wsid, wid) }
                     };
                 }
                 if !pass.depth.is_none() {
@@ -451,6 +457,8 @@ impl Backend for Vulkan {
     fn step(&mut self, world: &mut World, sid: u32) {
         self.flush(); self.drain(world);
         self.recover(world);
+        #[cfg(target_os = "linux")]
+        super::linux::xr_remote::drain_events(sid, world);
         #[cfg(target_os = "linux")]
         if let Some(shell) = self.shell {
             for (owner, id) in shell.drain_events(sid, world) {
@@ -546,7 +554,7 @@ impl Vulkan {
             // again: a program never fails for want of memory
             let mut tries = 0u64;
             let program = loop {
-                match pipeline::Program::new(dev.clone(), src.desc, src.code.clone(), src.bindings.clone(), src.stride) {
+                match pipeline::Program::new(dev.clone(), src.desc, src.code.clone(), src.bindings.clone(), src.stride, None) {
                     Err(e) if pipeline::out_of_memory(&e) && !dev.lost.load(Ordering::Acquire) => {
                         if tries == 0 { eprintln!("[hal-vulkan] pipeline: {e}; waiting for GPU memory"); }
                         tries += 1;
@@ -703,6 +711,7 @@ impl Gpu for Vulkan {
     #[cfg(target_os = "linux")]
     fn os(&mut self, sid: u32, command: exec::OsCmd) -> bool {
         if matches!(&command, exec::OsCmd::FileDialog { .. }) { return self.media.dialog(sid, command); }
+        if super::linux::xr_remote::command(sid, &command) { return true; }
         if let Some(shell) = self.shell { shell.command(sid, command); true } else { false }
     }
     fn gpu_budget(&self) -> Option<(u64, u64)> {

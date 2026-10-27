@@ -435,8 +435,9 @@ enum Hit {
     /// Opens or closes the Display panel's Mouse & touchpad subview.
     #[cfg(target_os = "linux")]
     PointerSettings,
+    /// Natural scrolling toggle: `false` mouse wheels, `true` touchpads.
     #[cfg(target_os = "linux")]
-    InvertScroll,
+    NaturalScroll(bool),
     /// Pointer speed slider: `false` mouse, `true` touchpad.
     #[cfg(target_os = "linux")]
     PointerSpeedSlider(bool),
@@ -642,9 +643,6 @@ pub struct ShellPanel {
     #[cfg(target_os = "linux")]
     #[rust]
     pointer_settings: bool,
-    #[cfg(target_os = "linux")]
-    #[rust]
-    pub invert_scroll: bool,
     /// A source the renderer was asked for and has not yet named as the
     /// primary, with when it was asked. The WM clears it on observation
     /// or reports it after a bounded wait.
@@ -2610,7 +2608,7 @@ impl Widget for ShellPanel {
                         | Hit::Desktop(_) | Hit::VirtualSizePicker | Hit::VirtualSizeItem(_) | Hit::VirtualCustom(..) | Hit::VirtualPanels(_)
                         | Hit::RestartDesktop | Hit::RestartConfirm | Hit::RestartCancel
                         | Hit::GpuPicker
-                        | Hit::Gpu(_) | Hit::PointerSettings | Hit::InvertScroll)) => self.system_press(cx, hit),
+                        | Hit::Gpu(_) | Hit::PointerSettings | Hit::NaturalScroll(_))) => self.system_press(cx, hit),
                     #[cfg(target_os = "linux")]
                     Some(Hit::DpiScaleSlider) => self.dpi_drag_begin(cx, e.abs),
                     #[cfg(target_os = "linux")]

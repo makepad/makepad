@@ -374,6 +374,18 @@ impl Cx {
         texture
     }
 
+    /// A decoder's whole picture the app holds (`DecodedPicture::handle` of a GPU stream
+    /// decoder whose pictures are not biplanar planes: Android's), as one texture over its
+    /// memory for a `texture_video` slot: sampled there it gives the picture's raw Y'CbCr codes
+    /// (.g = Y', .b = Cb, .r = Cr). Nothing is copied. The app keeps the picture alive while
+    /// frames that draw the texture may still run on the GPU.
+    pub fn import_picture(&mut self, handle: u64) -> Texture {
+        let texture = Texture::new_with_format(self, TextureFormat::VideoYuvPlane);
+        let id = self.hal_external_texture(texture.texture_id());
+        self.hal.frames.w.texture_import(id, handle, makepad_hal::texture_handle::VIDEO);
+        texture
+    }
+
     /// Prepares video (or an audio file when `texture` is `None`) playback. The Y / U / V
     /// textures are made here and announced with `VideoYuvTexturesReady`, as every backend does.
     pub(crate) fn hal_prepare_video(&mut self, video_id: LiveId, source: VideoSource, texture: Option<TextureId>, autoplay: bool, looping: bool, camera_preview: CameraPreviewMode) {

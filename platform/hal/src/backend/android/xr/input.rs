@@ -37,6 +37,40 @@ impl CxOpenXrInputs {
         let right_hand = self.right_hand.poll(xr, session, local_space, time, &self.actions);
         Some(([left_controller, right_controller], [left_hand, right_hand]))
     }
+
+    /// Each controller's grip and aim located at `time` with their velocities, as
+    /// `locate_hand_grips` gives them (the spaces `poll` reads: the held or the detached
+    /// controller's). The actions must have been synced (`poll`).
+    pub fn locate_controllers(&self, xr: &LibOpenXr, session: XrSession, local_space: XrSpace, time: XrTime) -> [[(XrPose, [f32; 3], [f32; 3], u32); 2]; 2] {
+        [&self.left_controller, &self.right_controller].map(|c| c.locate_moving(xr, session, local_space, time, &self.actions))
+    }
+
+    /// Each hand's grip pose (hand_interaction_ext's grip action space) located at `time`, with
+    /// its velocity: (pose, linear velocity m/s, angular velocity rad/s, location flags | velocity
+    /// flags << 8). The actions must have been synced (`poll`).
+    pub fn locate_hand_grips(&self, xr: &LibOpenXr, local_space: XrSpace, time: XrTime) -> [(XrPose, [f32; 3], [f32; 3], u32); 2] {
+        [&self.left_hand, &self.right_hand].map(|h| {
+            let mut velocity = XrSpaceVelocity::default();
+            let mut location = XrSpaceLocation { next: &mut velocity as *mut _ as *mut _, ..Default::default() };
+            unsafe { (xr.xrLocateSpace)(h.grip_space, local_space, time, &mut location) }.log_error("xrLocateSpace hand grip");
+            let v = |a: XrVector3f| [a.x, a.y, a.z];
+            (xr_pose(location.pose), v(velocity.linear_velocity), v(velocity.angular_velocity), [XrSpaceLocationFlags::ORIENTATION_VALID, XrSpaceLocationFlags::POSITION_VALID, XrSpaceLocationFlags::ORIENTATION_TRACKED, XrSpaceLocationFlags::POSITION_TRACKED].iter().enumerate().map(|(i, f)| (location.location_flags.contains(*f) as u32) << i).sum::<u32>() | (velocity.velocity_flags as u32) << 8)
+        })
+    }
+
+    /// Both hands located at `time` (the tracking log's tracked path: a time already past)
+    /// without touching the polled state (the last hand kept for untracked joints, the grab's
+    /// hysteresis) and without syncing the actions.
+    pub fn locate_hands(&mut self, xr: &LibOpenXr, session: XrSession, local_space: XrSpace, time: XrTime) -> [XrHand; 2] {
+        let actions = self.actions;
+        [&mut self.left_hand, &mut self.right_hand].map(|h| {
+            let (last, grab) = (h.last_hand, h.grab_active);
+            let hand = h.poll(xr, session, local_space, time, &actions);
+            h.last_hand = last;
+            h.grab_active = grab;
+            hand
+        })
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -78,11 +112,14 @@ pub struct CxOpenXrHand {
     joint_locations: [XrHandJointLocationEXT; HAND_JOINT_COUNT_EXT],
     grab_active: bool,
     last_hand: XrHand,
+    /// The hand's grip pose action space (hand_interaction_ext).
+    grip_space: XrSpace,
 }
 
 impl CxOpenXrHand {
     fn destroy(&self, xr: &LibOpenXr) {
         unsafe { (xr.xrDestroyHandTrackerEXT)(self.tracker) }.log_error("xrDestroyHandTrackerEXT");
+        self.grip_space.destroy(xr);
     }
 
     fn poll(
@@ -270,6 +307,20 @@ pub struct CxOpenXrController {
 }
 
 impl CxOpenXrController {
+    /// The grip and the aim at `time` with their velocities (see `CxOpenXrInputs::locate_controllers`).
+    fn locate_moving(&self, xr: &LibOpenXr, session: XrSession, local_space: XrSpace, time: XrTime, actions: &CxOpenXrInputActions) -> [(XrPose, [f32; 3], [f32; 3], u32); 2] {
+        let grip_active = XrActionStatePose::get(xr, session, actions.grip_pose_action, self.path).is_active.as_bool();
+        let aim_active = XrActionStatePose::get(xr, session, actions.aim_pose_action, self.path).is_active.as_bool();
+        let spaces = [if grip_active { self.grip_space } else { self.detached_grip_space }, if aim_active { self.aim_space } else { self.detached_aim_space }];
+        spaces.map(|space| {
+            let mut velocity = XrSpaceVelocity::default();
+            let mut location = XrSpaceLocation { next: &mut velocity as *mut _ as *mut _, ..Default::default() };
+            unsafe { (xr.xrLocateSpace)(space, local_space, time, &mut location) }.log_error("xrLocateSpace controller");
+            let v = |a: XrVector3f| [a.x, a.y, a.z];
+            (xr_pose(location.pose), v(velocity.linear_velocity), v(velocity.angular_velocity), [XrSpaceLocationFlags::ORIENTATION_VALID, XrSpaceLocationFlags::POSITION_VALID, XrSpaceLocationFlags::ORIENTATION_TRACKED, XrSpaceLocationFlags::POSITION_TRACKED].iter().enumerate().map(|(i, f)| (location.location_flags.contains(*f) as u32) << i).sum::<u32>() | (velocity.velocity_flags as u32) << 8)
+        })
+    }
+
     fn destroy(&self, xr: &LibOpenXr) {
         self.aim_space.destroy(xr);
         self.grip_space.destroy(xr);
@@ -628,6 +679,17 @@ impl CxOpenXrInputs {
             &hand_paths,
         )?;
 
+        // the hands' grip pose (hand_interaction_ext): the runtime's own grip of a tracked hand,
+        // located like a controller (with velocity), apart from the joints
+        let hand_grip_pose_action = XrAction::new(
+            xr,
+            action_set,
+            XrActionType::POSE_INPUT,
+            "hand_grip_pose",
+            "",
+            &hand_paths,
+        )?;
+
         let detached_aim_pose_action = XrAction::new(
             xr,
             action_set,
@@ -849,6 +911,18 @@ impl CxOpenXrInputs {
             XrActionSuggestedBinding::new(
                 xr,
                 instance,
+                hand_grip_pose_action,
+                "/user/hand/left/input/grip/pose",
+            )?,
+            XrActionSuggestedBinding::new(
+                xr,
+                instance,
+                hand_grip_pose_action,
+                "/user/hand/right/input/grip/pose",
+            )?,
+            XrActionSuggestedBinding::new(
+                xr,
+                instance,
                 hand_grab_action,
                 "/user/hand/left/input/grasp_ext/value",
             )?,
@@ -939,6 +1013,7 @@ impl CxOpenXrInputs {
                 joint_locations: Default::default(),
                 grab_active: false,
                 last_hand: XrHand::default(),
+                grip_space: XrSpace::new_action_space(xr, session, hand_grip_pose_action, left_hand_path, pose)?,
             },
             right_hand: CxOpenXrHand {
                 path: right_hand_path,
@@ -946,6 +1021,7 @@ impl CxOpenXrInputs {
                 joint_locations: Default::default(),
                 grab_active: false,
                 last_hand: XrHand::default(),
+                grip_space: XrSpace::new_action_space(xr, session, hand_grip_pose_action, right_hand_path, pose)?,
             },
             left_controller: CxOpenXrController {
                 path: left_hand_path,

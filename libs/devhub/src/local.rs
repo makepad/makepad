@@ -20,6 +20,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const SCAN: Duration = Duration::from_millis(500);
+/// The registry directory is read again at least this often even when its mtime says nothing
+/// changed (an entry written in the same mtime tick as the last read).
+const RESCAN: Duration = Duration::from_secs(10);
 const CMD_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long a `ps` keeps a JIT's state answer.
 const STATE_TTL: Duration = Duration::from_secs(5);
@@ -153,6 +156,9 @@ impl Local {
     fn scan_loop(self: Arc<Self>) {
         let me = std::process::id();
         let mut tick = 0u64;
+        // the registry is the temp dir on macOS: tens of thousands of entries on a busy Mac, so
+        // it is listed only when it changed (a JIT starting or ending adds or removes its file)
+        let (mut seen_mtime, mut last_read) = (None, Instant::now());
         while !self.stop.load(Ordering::Acquire) {
             tick += 1;
             if tick % 4 == 0 {
@@ -168,7 +174,16 @@ impl Local {
                 let gone: Vec<u32> = st.jits.keys().copied().filter(|p| !procinfo::alive(*p) && registry_file(*p).exists()).collect();
                 st.crashed.extend(gone);
             }
-            for app in discovery::apps() {
+            let mtime = std::fs::metadata(discovery::registry_dir()).and_then(|m| m.modified()).ok();
+            let changed = mtime.is_none() || mtime != seen_mtime || last_read.elapsed() >= RESCAN;
+            let apps = if changed {
+                seen_mtime = mtime;
+                last_read = Instant::now();
+                discovery::apps()
+            } else {
+                Vec::new()
+            };
+            for app in apps {
                 if (app.pid == me && !self.include_self) || app.socket.starts_with("tcp:") {
                     continue;
                 }

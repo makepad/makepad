@@ -37,6 +37,10 @@ pub trait VkSurfaceSource: Send {
     fn device_ready(&mut self, _device: Arc<Device>) -> Result<(), String> { Ok(()) }
     fn presenter(&self, _session: u32, _window: Id) -> Option<Arc<dyn FramePresenter>> { None }
     fn state(&mut self, session: u32, window: Id, requested: [u32; 2]) -> SurfaceState;
+    /// The pixel format of the window's render target: BGRA8, unless the shell presents in
+    /// another 32-bit order (an XR runtime whose swapchains are RGBA only), so the frame
+    /// copies into its images as it is.
+    fn window_format(&self, _session: u32, _window: Id) -> u32 { crate::types::format::BGRA8 }
     /// Whether the desktop compositor should blend this window's premultiplied alpha.
     fn transparent(&self, _session: u32, _window: Id) -> bool { false }
     /// A shell that hands out the window's render targets itself (a host compositor's shared
@@ -82,6 +86,11 @@ pub trait FramePresenter: Send + Sync {
     fn scheduled(&self, _session: u32, _window: Id) {}
     /// A [`Self::scheduled`] frame whose batch did not run: it reaches no `submit`.
     fn dropped(&self, _session: u32, _window: Id) {}
+    /// [`Self::submit`] comes as soon as the frame's work is on the queue, not when the GPU is
+    /// done with it: the presenter's consumer waits on that work itself (an XR runtime waits for
+    /// the work submitted before a swapchain image is released; only work on this queue may
+    /// touch the image after it).
+    fn at_queue(&self) -> bool { false }
 }
 
 pub struct NativeSurface {

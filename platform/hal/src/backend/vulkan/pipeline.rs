@@ -1,7 +1,7 @@
 //! SPIR-V modules, descriptor layouts and render-pass-compatible pipeline variants. Vertex
 //! fetch and instance storage match native vulkan.rs, including packed geometry word lanes.
 
-use super::device::{error, lock, Device};
+use super::device::{error, lock, Device, VideoSampler};
 use super::resources::vk_format;
 use crate::spirv::SpirvPipeline;
 use crate::types::*;
@@ -11,9 +11,11 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub(super) const ABSENT: u32 = u32::MAX;
+/// A video texture slot's shape (`SpirvPipeline::textures`): a combined image sampler.
+pub(super) const VIDEO_SHAPE: u32 = 6;
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
-pub(super) struct PassKey { pub colors: [u32; 4], pub depth: u32, pub load: [u8; 5], /** 1, or 2: a multiview pass */ pub views: u8 }
+pub(super) struct PassKey { pub colors: [u32; 4], pub depth: u32, pub load: [u8; 5], /** 1, or 2: a multiview pass */ pub views: u8, /** a fragment density map attachment after the others */ pub fdm: bool }
 
 pub(super) struct RenderPass { pub dev: Arc<Device>, pub raw: vk::RenderPass, pub key: PassKey }
 
@@ -49,7 +51,17 @@ impl RenderPass {
         let mut subpass = vk::SubpassDescription::default().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&colors);
         if key.depth != ABSENT { subpass = subpass.depth_stencil_attachment(&depth); }
         let subpasses = [subpass];
+        // the fragment density map (an XR runtime's foveation): read only, in its own layout
+        let mut density = vk::RenderPassFragmentDensityMapCreateInfoEXT::default()
+            .fragment_density_map_attachment(vk::AttachmentReference::default().attachment(attachments.len() as u32).layout(vk::ImageLayout::FRAGMENT_DENSITY_MAP_OPTIMAL_EXT));
+        if key.fdm {
+            attachments.push(vk::AttachmentDescription::default().format(vk::Format::R8G8_UNORM).samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::DONT_CARE).store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE).stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::FRAGMENT_DENSITY_MAP_OPTIMAL_EXT).final_layout(vk::ImageLayout::FRAGMENT_DENSITY_MAP_OPTIMAL_EXT));
+        }
         let mut info = vk::RenderPassCreateInfo::default().attachments(&attachments).subpasses(&subpasses);
+        if key.fdm { info = info.next_render_pass_fragment_density_map_create_info_ext(&mut density); }
         // a multiview pass renders every view's layer (view mask: the low `views` bits); the
         // views are correlated (the eyes see nearly the same scene)
         let mask = [(1u32 << key.views.max(1)) - 1];
@@ -77,6 +89,10 @@ pub(super) struct Program {
     /// with the same buffers and textures and a draw binds it with its own offsets.
     pub dynamic: Vec<u32>,
     pub samplers: Vec<vk::Sampler>,
+    /// The immutable samplers of its video texture slots (shape 6), in slot order: the layout
+    /// was made with them (`State::select_video` picks the program whose samplers are the
+    /// bound images').
+    pub video: Vec<VideoSampler>,
     vertex: vk::ShaderModule,
     fragment: vk::ShaderModule,
     /// the multiview stages (null without them)
@@ -85,13 +101,21 @@ pub(super) struct Program {
 }
 
 impl Program {
-    pub fn new(dev: Arc<Device>, desc: PipelineDesc, code: SpirvPipeline, bindings: Vec<u32>, vertex_stride: u32) -> Result<Arc<Self>, String> {
+    /// `video`: the samplers of its video slots (`None`: an ordinary image's for each).
+    pub fn new(dev: Arc<Device>, desc: PipelineDesc, code: SpirvPipeline, bindings: Vec<u32>, vertex_stride: u32, video: Option<&[VideoSampler]>) -> Result<Arc<Self>, String> {
         if bindings.len() < pipeline_binding::BUFFERS || bindings.len() > pipeline_binding::BUFFERS + 4
             || bindings[pipeline_binding::TEXTURES] as usize != code.textures.len() || vertex_stride % 4 != 0 {
             return Err("SPIR-V pipeline binding/layout mismatch".into());
         }
+        let slots = code.textures.iter().filter(|t| **t == VIDEO_SHAPE).count();
+        let video = match video {
+            Some(v) if v.len() == slots => v.to_vec(),
+            Some(_) => return Err("video samplers for a different number of video slots".into()),
+            None if slots == 0 => Vec::new(),
+            None => vec![dev.video_sampler(0, None)?; slots],
+        };
         let mut out = Self { dev, desc, code, bindings, vertex_stride, layout: vk::PipelineLayout::null(),
-            descriptors: vk::DescriptorSetLayout::null(), descriptor_types: Vec::new(), dynamic: Vec::new(), samplers: Vec::new(),
+            descriptors: vk::DescriptorSetLayout::null(), descriptor_types: Vec::new(), dynamic: Vec::new(), samplers: Vec::new(), video,
             vertex: vk::ShaderModule::null(), fragment: vk::ShaderModule::null(),
             xr_vertex: vk::ShaderModule::null(), xr_fragment: vk::ShaderModule::null() };
         for (i, slot) in out.bindings.iter().enumerate() {
@@ -102,7 +126,9 @@ impl Program {
             }
         }
         for i in 0..out.code.textures.len() as u32 {
-            out.descriptor_types.push((out.code.texture_base.checked_add(i).ok_or("texture binding overflow")?, vk::DescriptorType::SAMPLED_IMAGE));
+            // a video slot is a combined image sampler (its sampler immutable in the layout)
+            let ty = if out.code.textures[i as usize] == VIDEO_SHAPE { vk::DescriptorType::COMBINED_IMAGE_SAMPLER } else { vk::DescriptorType::SAMPLED_IMAGE };
+            out.descriptor_types.push((out.code.texture_base.checked_add(i).ok_or("texture binding overflow")?, ty));
             if out.code.pick_texture_base != ABSENT {
                 out.descriptor_types.push((out.code.pick_texture_base.checked_add(i).ok_or("pick binding overflow")?, vk::DescriptorType::SAMPLED_IMAGE));
             }
@@ -133,8 +159,16 @@ impl Program {
         }
         let total = out.descriptor_types.len() as u32;
         if total > limits.max_per_stage_resources { return Err(format!("the shader binds {total} resources per stage, the device allows {}", limits.max_per_stage_resources)); }
-        let bindings: Vec<_> = out.descriptor_types.iter().map(|(slot, ty)| vk::DescriptorSetLayoutBinding::default()
-            .binding(*slot).descriptor_type(*ty).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)).collect();
+        // the video slots' samplers, one array each (the layout binding points at it)
+        let video_slots: Vec<u32> = (0..out.code.textures.len() as u32).filter(|i| out.code.textures[*i as usize] == VIDEO_SHAPE).map(|i| out.code.texture_base + i).collect();
+        let immutable: Vec<[vk::Sampler; 1]> = out.video.iter().map(|v| [v.sampler]).collect();
+        let bindings: Vec<_> = out.descriptor_types.iter().map(|(slot, ty)| {
+            let b = vk::DescriptorSetLayoutBinding::default().binding(*slot).descriptor_type(*ty).descriptor_count(1).stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT);
+            match video_slots.iter().position(|v| v == slot) {
+                Some(k) if *ty == vk::DescriptorType::COMBINED_IMAGE_SAMPLER => b.immutable_samplers(&immutable[k]),
+                _ => b,
+            }
+        }).collect();
         unsafe {
             out.descriptors = out.dev.raw.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None).map_err(error)?;
             let layouts = [out.descriptors];
@@ -211,6 +245,10 @@ pub(super) struct State {
     pub src: Arc<Source>,
     pub program: OnceLock<Result<Arc<Program>, String>>,
     variants: Mutex<HashMap<VariantKey, Result<Arc<Pipeline>, String>>>,
+    /// Programs for video slots bound to other samplers than an ordinary image's (a decoder's
+    /// pictures), and their pipelines; made at the first draw that needs them.
+    video: Mutex<HashMap<Vec<VideoSampler>, Result<Arc<Program>, String>>>,
+    video_variants: Mutex<HashMap<(Vec<VideoSampler>, VariantKey), Result<Arc<Pipeline>, String>>>,
     pub epoch: AtomicU64,
     /// the sessions whose pipelines wait for this program while it compiles (programs are shared
     /// by shader content, so every session that created a pipeline with it is told); `None` once
@@ -220,7 +258,8 @@ pub(super) struct State {
 
 impl State {
     pub fn new(src: Arc<Source>) -> Arc<Self> {
-        Arc::new(Self { src, program: OnceLock::new(), variants: Mutex::new(HashMap::new()), epoch: AtomicU64::new(0), waiters: Mutex::new(Some(Vec::new())) })
+        Arc::new(Self { src, program: OnceLock::new(), variants: Mutex::new(HashMap::new()), video: Mutex::new(HashMap::new()), video_variants: Mutex::new(HashMap::new()),
+            epoch: AtomicU64::new(0), waiters: Mutex::new(Some(Vec::new())) })
     }
 
     /// Session `sid` has a pipeline on this program: its pump is woken when the compile answers.
@@ -246,7 +285,7 @@ impl State {
         if program.desc.blend & pipeline_blend::RAW != 0 { return; }
         let mut colors = [ABSENT; 4];
         for i in 0..4 { if program.desc.outputs & (1 << i) != 0 { colors[i] = program.desc.color_formats[i]; } }
-        let key = PassKey { colors, depth: format::DEPTH32F, load: [pass_load::DONT_CARE; 5], views: 1 };
+        let key = PassKey { colors, depth: format::DEPTH32F, load: [pass_load::DONT_CARE; 5], views: 1, fdm: false };
         // a data target (R32F depth/shadow values, ids) is drawn without blending
         let blends = matches!(colors[0], format::BGRA8 | format::RGBA8 | format::RGBA16F);
         let flags = Draw::DEPTH_WRITE | if blends { Draw::BLEND } else { 0 };
@@ -281,6 +320,30 @@ impl State {
         // out of memory is not kept: the next draw tries again (the frame skips it meanwhile)
         if made.as_ref().is_err_and(|e| out_of_memory(e)) { return None; }
         lock(&self.variants).entry(key).or_insert(made).as_ref().ok().cloned()
+    }
+}
+
+impl State {
+    /// [`State::select`] for a draw whose video slots are bound to images needing `video`
+    /// samplers: the program made with those samplers (compiled here, at the first draw that
+    /// needs it, as an unknown pass variant is) and its pipeline for `pass` and `flags`.
+    pub fn select_video(&self, pass: &RenderPass, flags: u32, video: &[VideoSampler]) -> Option<Arc<Pipeline>> {
+        let base = self.program.get()?.as_ref().ok()?.clone();
+        if base.video == video { return self.select(pass, flags); }
+        let program = {
+            let mut programs = lock(&self.video);
+            programs.entry(video.to_vec()).or_insert_with(|| {
+                let made = Program::new(base.dev.clone(), self.src.desc, self.src.code.clone(), self.src.bindings.clone(), self.src.stride, Some(video));
+                if let Err(e) = &made { eprintln!("[hal-vulkan] video pipeline: {e}"); }
+                made
+            }).as_ref().ok()?.clone()
+        };
+        let key = (video.to_vec(), VariantKey::new(pass.key, flags));
+        if let Some(made) = lock(&self.video_variants).get(&key) { return made.as_ref().ok().cloned(); }
+        let made = create_variant(program, pass, flags);
+        if let Err(e) = &made { eprintln!("[hal-vulkan] video pipeline variant: {e}"); }
+        if made.as_ref().is_err_and(|e| out_of_memory(e)) { return None; }
+        lock(&self.video_variants).entry(key).or_insert(made).as_ref().ok().cloned()
     }
 }
 

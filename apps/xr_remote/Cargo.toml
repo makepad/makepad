@@ -1,0 +1,18 @@
+# XR Remote — the Quest's thin client of a desktop app's remote-rendered XR view (Desk Link XR):
+# an OpenXR session, the stream decoded on the headset's hardware decoder and shown with the eyes
+# it was rendered with, poses and input upstream. A native APK of its own beside the JIT host:
+#   cargo makepad android --abi=aarch64 --variant=quest build -p makepad-app-xr-remote --release
+
+[package]
+name = "makepad-app-xr-remote"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[package.metadata.packager]
+identifier = "dev.makepad.xrremote"
+product_name = "XR Remote"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-xr-stream = { path = "../../libs/xr_stream" }

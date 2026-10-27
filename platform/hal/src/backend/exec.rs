@@ -67,6 +67,12 @@ pub enum OsCmd {
     TrayRemove { tray: u64 },
     /// Size dropdown `id` to `w` x `h` points and show it at tray `tray`'s icon.
     WindowAtTray { id: Id, tray: u64, w: f32, h: f32 },
+    /// The eyes the XR window's next frame shows with (`HalCmd::XrFrameEyes`).
+    XrFrameEyes { id: Id, eyes: [crate::XrEye; 2], focus_m: f32 },
+    /// `HalCmd::XrPoseLead`.
+    XrPoseLead { id: Id, lead_ns: u64 },
+    /// `HalCmd::XrRefreshRate`.
+    XrRefreshRate { id: Id, millihertz: u32 },
     FileDialog { req: u32, kind: u32, title: String, location: String, filename: String, filters: Vec<String> },
     ShareText { text: String },
     ClipboardActions { id: Id, show: bool, area: [f32; 4], selection: bool },
@@ -81,7 +87,7 @@ pub enum OsCmd {
     #[cfg(target_os = "linux")]
     DirectPointerSpeed { touchpad: bool, hundredths: u32 },
     #[cfg(target_os = "linux")]
-    DirectNaturalScroll { on: bool },
+    DirectNaturalScroll { touchpad: bool, on: bool },
     #[cfg(target_os = "linux")]
     DirectTapToClick { on: bool },
 }
@@ -1062,6 +1068,14 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         },
         // window chrome and OS interaction: the id must be live, then the window system acts
         HalCmd::WindowVisuals { id, visuals, params } => os_window(gpu, s, id, OsCmd::WindowVisuals { id, visuals, params }),
+        HalCmd::XrPoseLead { id, lead_ns } => os_window(gpu, s, id, OsCmd::XrPoseLead { id, lead_ns }),
+        HalCmd::XrRefreshRate { id, millihertz } => os_window(gpu, s, id, OsCmd::XrRefreshRate { id, millihertz }),
+        HalCmd::XrFrameEyes { id, eyes } => {
+            let mut it = crate::buffers::read_items::<crate::XrEye>(eyes, 2);
+            let at = 2 * <crate::XrEye as crate::buffers::Wire>::SIZE;
+            let focus_m = eyes.get(at..at + 4).map_or(0.0, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+            if let (Some(l), Some(r)) = (it.next(), it.next()) { os_window(gpu, s, id, OsCmd::XrFrameEyes { id, eyes: [l, r], focus_m }); }
+        }
         HalCmd::WindowTopmost { id, on } => os_window(gpu, s, id, OsCmd::WindowTopmost { id, on }),
         HalCmd::WindowButtons { id, show } => os_window(gpu, s, id, OsCmd::WindowButtons { id, show }),
         HalCmd::WindowButtonsCenter { id, y_center } => {
@@ -1211,10 +1225,10 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             let _ = (touchpad, hundredths);
             s.bad();
         }
-        HalCmd::DirectNaturalScroll { on } => {
+        HalCmd::DirectNaturalScroll { touchpad, on } => {
             #[cfg(target_os = "linux")]
-            if gpu.os(sid, OsCmd::DirectNaturalScroll { on }) { return; }
-            let _ = on;
+            if gpu.os(sid, OsCmd::DirectNaturalScroll { touchpad, on }) { return; }
+            let _ = (touchpad, on);
             s.bad();
         }
         HalCmd::DirectTapToClick { on } => {

@@ -392,6 +392,8 @@ pub struct XrTsdfStore {
     voxel_size_meters_bits: Arc<AtomicU32>,
     cooperative_step: Arc<Mutex<XrTsdfCooperativeStepSlot>>,
     cooperative_step_stats_cache: Arc<RwLock<XrTsdfCooperativeStepStats>>,
+    /// the field as versioned bricks for peers (`bricks`)
+    bricks: Arc<Mutex<bricks::BrickLog>>,
 }
 
 impl Default for XrTsdfStore {
@@ -408,6 +410,7 @@ impl Default for XrTsdfStore {
             cooperative_step_stats_cache: Arc::new(RwLock::new(
                 XrTsdfCooperativeStepStats::default(),
             )),
+            bricks: Arc::new(Mutex::new(bricks::BrickLog::default())),
         }
     }
 }
@@ -612,6 +615,16 @@ pub fn empty_bounds() -> (Vec3f, Vec3f) {
 
 pub mod depth_integration;
 pub use depth_integration::*;
+pub mod bricks;
+pub use bricks::{Brick, BrickGrid, BrickMirror, BrickProducer};
+#[cfg(not(target_arch = "wasm32"))]
+pub mod depth_writer;
+#[cfg(not(target_arch = "wasm32"))]
+pub use depth_writer::{DepthFrame, DepthFrameView, DepthWriter};
+pub mod mesh;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mesh_worker;
+pub mod synthetic;
 
 #[cfg(test)]
 #[path = "synthetic_bench.rs"]

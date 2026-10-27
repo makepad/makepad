@@ -142,6 +142,9 @@ pub struct HalClient {
     pub(crate) ime_height: f64,
     /// a window announced a frame (`FrameReady`)
     pub(crate) beat: bool,
+    /// the XR window announced a frame: a hosted app draws it at once, not at its host's next
+    /// Tick (a headset's frames are paced by the headset, not by the host's display)
+    pub(crate) xr_beat: bool,
     /// The frame profile (`makepad_hal::profile`): the last beat, input intake since it.
     pub(crate) profile_beat: u64,
     pub(crate) profile_input_ns: u64,
@@ -217,6 +220,7 @@ impl Default for HalClient {
             ime_visible: false,
             ime_height: 0.0,
             beat: false,
+            xr_beat: false,
             profile_beat: 0,
             profile_input_ns: 0,
             beat_phases: [[0; 2]; 6],
@@ -442,6 +446,14 @@ impl crate::cx_api::CxOsApi for Cx {
     fn xr_eye_matrices(&self) -> Option<[(crate::makepad_math::Mat4f, crate::makepad_math::Mat4f); 2]> {
         let frame = self.hal.xr.as_ref()?.frame?;
         Some([xr::eye_matrices(&frame, 0), xr::eye_matrices(&frame, 1)])
+    }
+
+    fn xr_frame_wire(&self) -> Option<(u64, Vec<u8>)> {
+        let xr = self.hal.xr.as_ref()?;
+        let frame = xr.frame?;
+        let mut bytes = Vec::with_capacity(<makepad_hal::XrFrame as makepad_hal::buffers::Wire>::SIZE);
+        makepad_hal::buffers::Wire::write(&frame, &mut bytes);
+        Some((xr.display_ns, bytes))
     }
 
     fn init_cx_os(&mut self) {

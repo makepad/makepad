@@ -12,7 +12,10 @@ pub struct SpirvPipeline {
     /// Optional pick uniforms and the base of pick twins; NONE for an ordinary pipeline.
     pub pick_binding: u32,
     pub pick_texture_base: u32,
-    /// Texture shapes: 0 = 2D, 1 = cube, 2 = array, 3 = depth, 4 = depth array, 5 = uint.
+    /// Texture shapes: 0 = 2D, 1 = cube, 2 = array, 3 = depth, 4 = depth array, 5 = uint, 6 = video
+    /// (2D, a combined image sampler whose sampler is immutable in the descriptor layout: an
+    /// ordinary image gets a linear clamp-to-edge sampler, a decoder's external-format picture its
+    /// format's Y'CbCr conversion).
     pub textures: Vec<u32>,
     pub samplers: Vec<SpirvSampler>,
     /// The multiview stages (`view_index` picks each view's pass matrices; the bindings are the
@@ -59,7 +62,7 @@ impl SpirvPipeline {
             return Err("invalid HAL SPIR-V payload lengths".into());
         }
         let textures = words[HEADER..HEADER + nt].to_vec();
-        if textures.iter().any(|t| *t > 5) { return Err("invalid SPIR-V texture shape".into()); }
+        if textures.iter().any(|t| *t > 6) { return Err("invalid SPIR-V texture shape".into()); }
         let mut samplers = Vec::with_capacity(ns);
         for s in words[HEADER + nt..HEADER + nt + ns * 4].chunks_exact(4) {
             if s[0] > 1 || s[1] > 3 || s[2] > 1 || s[3] > 1 { return Err("invalid SPIR-V sampler".into()); }

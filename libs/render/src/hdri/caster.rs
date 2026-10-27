@@ -1,7 +1,9 @@
 //! Shadow casters (redesign §5): a layer of the list that adds no light and
 //! multiplies what is drawn before it by its transmission,
 //!
-//!     acc * (1 - s*m + s*m*tint)
+//! ```text
+//! acc * (1 - s*m + s*m*tint)
+//! ```
 //!
 //! where m (0..=1) is its pattern's coverage at that direction (after
 //! softness, here, and after bloom, R5) and s its strength. What is drawn

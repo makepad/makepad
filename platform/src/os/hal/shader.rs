@@ -83,9 +83,11 @@ impl DrawVars {
                 if let Some(error) = view.error { return Err(error.to_owned()); }
                 let stage = &view.stages[0];
                 let textures = mapping.textures.iter().map(|t| match t.tex_type {
-                    TextureType::Texture2d | TextureType::TextureVideo => Ok(0), TextureType::TextureCube => Ok(1),
+                    TextureType::Texture2d => Ok(0), TextureType::TextureCube => Ok(1),
                     TextureType::Texture2dArray => Ok(2), TextureType::TextureDepth => Ok(3), TextureType::TextureDepthArray => Ok(4),
-                    _ => Err("HAL Vulkan texture shape is not a 2D/cube/depth image".to_owned()),
+                    // a combined image sampler (its sampler in the descriptor layout)
+                    TextureType::TextureVideo => Ok(6),
+                    _ => Err("HAL Vulkan texture shape is not a 2D/cube/depth/video image".to_owned()),
                 }).collect::<Result<Vec<_>, _>>()?;
                 let samplers: Vec<_> = mapping.samplers.iter().map(|s| makepad_hal::spirv::SpirvSampler {
                     filter: if s.filter == SamplerFilter::Nearest { 0 } else { 1 },
@@ -101,6 +103,9 @@ impl DrawVars {
                         && a.info.pick_binding() == b.info.pick_binding() && a.info.pick_texture_base() == b.info.pick_texture_base()
                 };
                 let (xr_vertex, xr_fragment) = if multiview && !xr.vertex.is_empty() && same(stage, xr) { (xr.vertex.to_vec(), xr.fragment.to_vec()) } else { (Vec::new(), Vec::new()) };
+                if multiview && xr_vertex.is_empty() {
+                    crate::log!("Vulkan shader: no multiview stages ({}): its draws are left out of XR passes", if xr.vertex.is_empty() { "none compiled" } else { "bindings differ" });
+                }
                 Ok(makepad_hal::spirv::SpirvPipeline { xr_vertex, xr_fragment, vertex: stage.vertex.to_vec(), fragment: stage.fragment.to_vec(),
                     texture_base: stage.info.texture_binding_base(), sampler_base: stage.info.sampler_binding_base(),
                     depth_binding: stage.info.xr_depth_binding(), instance_binding: stage.info.instance_binding().unwrap_or(u32::MAX),

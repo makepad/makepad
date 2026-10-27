@@ -61,15 +61,19 @@ pub struct ProvidedCrate {
     /// unit creation
     pub layouts: HashMap<String, (u64, u64, &'static [u64])>,
     pub last_panic: LastPanicFn,
-    /// the source identity rustc built it from (srchash.rs; the loader's build.rs)
+    /// the source identity rustc built it from (srchash.rs; the loader's build.rs): what
+    /// check_sources compares the program's copy of the crate with
     pub source: u64,
+    /// what JIT code sees of the binding (`binding_identity`): the cache keys of code that can
+    /// reach the crate carry this, not `source` (cache/items.rs apply_bound)
+    pub binding: u64,
     /// Per-file and feature/version identity embedded by the loader build.
     pub manifest: &'static [u8],
 }
 
 impl Clone for ProvidedCrate {
     fn clone(&self) -> Self {
-        ProvidedCrate { name: self.name.clone(), shims: self.shims.clone(), types: self.types.clone(), layouts: self.layouts.clone(), last_panic: self.last_panic, source: self.source, manifest: self.manifest }
+        ProvidedCrate { name: self.name.clone(), shims: self.shims.clone(), types: self.types.clone(), layouts: self.layouts.clone(), last_panic: self.last_panic, source: self.source, binding: self.binding, manifest: self.manifest }
     }
 }
 
@@ -92,7 +96,61 @@ pub fn register(
     manifest: &'static [u8],
 ) {
     let name = name.replace('-', "_");
-    REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).push(ProvidedCrate { name, shims, types, layouts, last_panic, source, manifest });
+    let binding = binding_identity(&name, &shims, &types, &layouts);
+    REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).push(ProvidedCrate { name, shims, types, layouts, last_panic, source, binding, manifest });
+}
+
+/// The identity of what JIT code depends on in a provided crate beyond its source text (which
+/// the interface fingerprints and body keys already cover, as for any crate): which fns are
+/// bound and their rustc signatures and argument layouts (the bridge bodies, lower.rs
+/// bridge_func, call shims by symbol), the opaque handles' rustc size, align, drop and field
+/// offsets, and the plain types' rustc layouts. The program's copy of the crate is the loader's
+/// own source (check_sources), so a change of these follows a source change; a change of the
+/// crate's native fn bodies alone (a HAL fix) keeps them, and with them every stored build of
+/// the code above the crate.
+fn binding_identity(
+    name: &str,
+    shims: &HashMap<String, Shim>,
+    types: &HashMap<String, (u64, u64, Option<DropFn>, &'static [u64])>,
+    layouts: &HashMap<String, (u64, u64, &'static [u64])>,
+) -> u64 {
+    let mut h = crate::sip::Sip128::new();
+    h.str("provided-binding");
+    h.str(name);
+    let mut keys: Vec<&String> = shims.keys().collect();
+    keys.sort_unstable();
+    h.u32(keys.len() as u32);
+    for k in keys {
+        let s = &shims[k];
+        h.str(k);
+        h.str(s.sig);
+        h.u32(s.slots.len() as u32);
+        for slot in s.slots { for x in slot { h.u64(*x); } }
+    }
+    let mut keys: Vec<&String> = types.keys().collect();
+    keys.sort_unstable();
+    h.u32(keys.len() as u32);
+    for k in keys {
+        let (size, align, drop, offsets) = &types[k];
+        h.str(k);
+        h.u64(*size);
+        h.u64(*align);
+        h.u8(drop.is_some() as u8);
+        h.u32(offsets.len() as u32);
+        for x in offsets.iter() { h.u64(*x); }
+    }
+    let mut keys: Vec<&String> = layouts.keys().collect();
+    keys.sort_unstable();
+    h.u32(keys.len() as u32);
+    for k in keys {
+        let (size, align, offsets) = &layouts[k];
+        h.str(k);
+        h.u64(*size);
+        h.u64(*align);
+        h.u32(offsets.len() as u32);
+        for x in offsets.iter() { h.u64(*x); }
+    }
+    h.finish128() as u64
 }
 
 /// The registered crates whose source in the program is what the loader was built from

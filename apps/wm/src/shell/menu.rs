@@ -463,9 +463,6 @@ pub struct MenuModel {
     pub warp_shelves: bool,
     /// Which shelves (left, right) auto-hide.
     pub shelf_autohide: [bool; 2],
-    /// Touchpad scrolling moves the content with the fingers (the Theme
-    /// menu's check row).
-    pub natural_scroll: bool,
     pub tap_to_click: bool,
     /// `Some(dark)` when the current style has a dark variant: the Theme
     /// menu then offers the appearance row.
@@ -488,7 +485,6 @@ impl Default for MenuModel {
             launchable: Default::default(),
             dock_rest: Vec::new(),
             dock_autohide: false,
-            natural_scroll: true,
             tap_to_click: false,
             warp_shelves: true,
             shelf_autohide: [false; 2],
@@ -578,11 +574,9 @@ impl MenuModel {
                 items.push(row);
             }
             // The direct backend reads the touchpad itself; elsewhere the OS owns the choice.
+            // (Natural scrolling lives with the devices: Display > Mouse & touchpad.)
             if cfg!(target_os = "linux") {
-                let mut row = MenuItem::new("desktop.natural-scroll", "Natural scrolling", MenuKind::Action).divided();
-                row.checked = self.natural_scroll;
-                items.push(row);
-                let mut row = MenuItem::new("desktop.tap-to-click", "Tap to click", MenuKind::Action);
+                let mut row = MenuItem::new("desktop.tap-to-click", "Tap to click", MenuKind::Action).divided();
                 row.checked = self.tap_to_click;
                 items.push(row);
             }

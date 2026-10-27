@@ -1566,6 +1566,9 @@ impl Shell for App {
                 | OsCmd::TraySet { .. }
                 | OsCmd::TrayRemove { .. }
                 | OsCmd::WindowAtTray { .. }
+                | OsCmd::XrFrameEyes { .. }
+                | OsCmd::XrPoseLead { .. }
+                | OsCmd::XrRefreshRate { .. }
                 | OsCmd::ClipboardActions { .. }
                 | OsCmd::ShareText { .. }
                 | OsCmd::MobileUi { .. }

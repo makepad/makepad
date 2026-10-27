@@ -99,27 +99,11 @@ fn external_dir(files: &Path) -> Option<PathBuf> {
 
 /// Makes the key on first start; copies a pushed credential, root and revocation list in.
 fn identity(files: &Path) -> Result<(), String> {
-    let dir = id::dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let key_path = dir.join("id.key");
-    if !key_path.exists() {
-        let key = id::generate_key().map_err(|e| format!("cannot make the fleet key: {e}"))?;
-        id::write_key(&key_path, &key).map_err(|e| format!("{}: {e}", key_path.display()))?;
-        logcat::log("devhub: made this device's fleet key");
-    }
-    let key = id::read_key(&key_path).map_err(|e| format!("{}: {e}", key_path.display()))?;
-    logcat::log(&format!("devhub: fleet point {}", makepad_network::tls::to_hex(&id::point_of(&key))));
-    if let Some(ext) = external_dir(files) {
-        for name in ["id.cred", "root.pub", "revoked"] {
-            let from = ext.join("fleet").join(name);
-            if let Ok(bytes) = std::fs::read(&from) {
-                let to = dir.join(name);
-                if std::fs::read(&to).ok().as_deref() != Some(&bytes[..]) {
-                    std::fs::write(&to, &bytes).map_err(|e| format!("{}: {e}", to.display()))?;
-                    logcat::log(&format!("devhub: installed {name} from {}", from.display()));
-                }
-            }
-        }
+    let pushed = external_dir(files).map(|ext| ext.join("fleet"));
+    let (point, installed) = id::enrol_device(pushed.as_deref())?;
+    logcat::log(&format!("devhub: fleet point {}", makepad_network::tls::to_hex(&point)));
+    for name in installed {
+        logcat::log(&format!("devhub: installed {name} from the pushed fleet folder"));
     }
     Ok(())
 }

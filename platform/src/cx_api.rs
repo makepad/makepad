@@ -235,6 +235,13 @@ pub trait CxOsApi {
         None
     }
 
+    /// The newest XR frame as the HAL gave it: its predicted display time (HAL clock, ns) and the
+    /// frame (head, eyes, controllers, hands) in its wire form (`makepad_hal::XrFrame`,
+    /// `buffers::Wire`): what a remote renderer is sent to draw that frame.
+    fn xr_frame_wire(&self) -> Option<(u64, Vec<u8>)> {
+        None
+    }
+
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
@@ -925,6 +932,11 @@ impl Cx {
         <Self as CxOsApi>::xr_eye_matrices(self)
     }
 
+    /// The newest XR frame in its wire form (`CxOsApi::xr_frame_wire`).
+    pub fn xr_frame_wire(&self) -> Option<(u64, Vec<u8>)> {
+        <Self as CxOsApi>::xr_frame_wire(self)
+    }
+
     pub fn geometry_pool_slot_count(&self) -> usize {
         self.geometries.0.slot_count()
     }
@@ -1308,11 +1320,75 @@ impl Cx {
     }
 
     /// A head-mounted display shows this app (`xr_start_presenting` gives it a stereo view).
+    /// The XR display has no display of its own (`info_flags::XR_OFFSCREEN`, a remote headset):
+    /// the XR passes render into their own colour and depth textures, both eyes side by side,
+    /// and the app hands them on (an encoder); they paint before every other pass.
+    pub fn xr_offscreen(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::XR_OFFSCREEN != 0) }
+        #[cfg(target_arch = "wasm32")]
+        { false }
+    }
+
     pub fn xr_display(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         { self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::XR != 0) }
         #[cfg(target_arch = "wasm32")]
         { false }
+    }
+
+    /// The display time (HAL clock, ns) of the frame that acquired the current environment
+    /// depth image (its age at use: a frame's display time less this).
+    pub fn xr_environment_depth_display_ns(&self) -> u64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal.xr.as_ref().map_or(0, |xr| xr.env_depth_ns) }
+        #[cfg(target_arch = "wasm32")]
+        { 0 }
+    }
+
+    /// The headset's newest environment depth image (where the room is, as its depth cameras
+    /// saw it): the runtime's image itself as a `texture_2d_array` texture, one layer per eye
+    /// (`header.layers`), the depth `d` (0..1) in .r (`header.near`/`far` projection; far 0 or
+    /// infinite: `z = near / (1 - d)`; the first row is the bottom of the view), and its header
+    /// (size, each eye's depth camera). For per-pixel tests against the room (real things in
+    /// front of virtual ones).
+    pub fn xr_environment_depth(&self) -> Option<(crate::texture::Texture, makepad_hal::XrDepth)> {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal.xr.as_ref()?.env_depth.clone() }
+        #[cfg(target_arch = "wasm32")]
+        { None }
+    }
+
+    /// The XR window's next frame shows with these eyes instead of its `XrFrame`'s: a picture
+    /// rendered elsewhere for other eyes (a streamed one) is drawn over the whole view and the
+    /// headset's compositor reprojects it from the eyes it was rendered with to the display's
+    /// pose. `focus_m`: the depth (metres along the view) of what the picture shows, for the
+    /// compositor's positional correction (0: rotation only). Set before the frame is drawn; it
+    /// holds for that one frame.
+    pub fn xr_present_eyes(&mut self, eyes: [makepad_hal::XrEye; 2], focus_m: f32) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hal_xr_present_eyes(eyes, focus_m);
+        #[cfg(target_arch = "wasm32")]
+        let _ = (eyes, focus_m);
+    }
+
+    /// The headset's display runs at its supported refresh rate nearest to `hz` (0: the
+    /// runtime's default). The rate in effect: `xr_display_refresh_rate_hz`.
+    pub fn xr_set_refresh_rate(&mut self, hz: f32) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hal_xr_refresh_rate((hz.max(0.0) * 1000.0) as u32);
+        #[cfg(target_arch = "wasm32")]
+        let _ = hz;
+    }
+
+    /// The XR frames' poses (head, eyes, hands, controllers) are predicted `lead_ns` past their
+    /// display time: for a picture rendered elsewhere from them that shows that much later (a
+    /// stream's measured latency). 0 (the default): at the display time.
+    pub fn xr_set_pose_lead(&mut self, lead_ns: u64) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hal_xr_pose_lead(lead_ns);
+        #[cfg(target_arch = "wasm32")]
+        let _ = lead_ns;
     }
 
     /// The headset's view is see-through: the room shows wherever the XR passes leave alpha 0

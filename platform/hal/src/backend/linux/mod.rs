@@ -9,6 +9,7 @@ mod wayland;
 mod x11;
 pub mod direct;
 mod wm;
+pub(crate) mod xr_remote;
 
 use super::exec::OsCmd;
 use super::log_enabled;
@@ -502,8 +503,10 @@ fn prefer(vulkan: Result<super::vulkan::Vulkan, String>, gl: impl FnOnce() -> Re
 pub fn open(flags: u32, wake: Arc<dyn Fn() + Send + Sync>, sessions: super::SessionNotify, notify: Arc<dyn Fn() + Send + Sync>) -> Result<Box<dyn super::Backend>, String> {
     use super::{gl::GlBackend, vulkan::Vulkan};
     if flags & open_flags::OFFSCREEN_WINDOWS != 0 {
+        if xr_remote::enabled() { xr_remote::set_wake(notify.clone()); }
         return prefer(Vulkan::new(flags, sessions, notify.clone()), || GlBackend::new(flags, wake, notify));
     }
+    if xr_remote::enabled() { xr_remote::set_wake(notify.clone()); }
     let shell = Shared::global();
     shell.start(flags, notify)?;
     let opened = prefer(Vulkan::on_shell(flags, sessions, shell), || GlBackend::on_shell(wake, shell));

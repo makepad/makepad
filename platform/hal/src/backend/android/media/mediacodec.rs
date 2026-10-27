@@ -1,7 +1,7 @@
 //! The NDK media plumbing the phone's codecs share (libmediandk): owned MediaCodec, MediaFormat,
 //! MediaExtractor, ImageReader and Image handles that free themselves, and a decoded picture out
 //! of a YUV_420_888 image as tightly packed NV12. Used by `hevc` (single stills), `stream_encode`
-//! (the live stream encoder) and `video_file` (makepad_video's file decoder on Android).
+//! and `stream_decode` (the live stream codecs) and `video_file` (makepad_video's file decoder on Android).
 use std::ffi::{c_char, c_void, CStr};
 use std::time::{Duration, Instant};
 
@@ -230,6 +230,7 @@ pub mod ndk {
         pub fn AMediaFormat_getString(format: *mut c_void, name: *const c_char, out: *mut *const c_char) -> bool;
         pub fn AMediaCodec_createEncoderByType(mime: *const c_char) -> *mut c_void;
         pub fn AMediaCodec_createDecoderByType(mime: *const c_char) -> *mut c_void;
+        pub fn AMediaCodec_createCodecByName(name: *const c_char) -> *mut c_void;
         pub fn AMediaCodec_configure(codec: *mut c_void, format: *const c_void, surface: *mut c_void, crypto: *mut c_void, flags: u32) -> i32;
         pub fn AMediaCodec_start(codec: *mut c_void) -> i32;
         pub fn AMediaCodec_stop(codec: *mut c_void) -> i32;
@@ -264,5 +265,8 @@ pub mod ndk {
         pub fn AImage_getPlaneRowStride(image: *const c_void, plane: i32, stride: *mut i32) -> i32;
         pub fn AImage_getPlanePixelStride(image: *const c_void, plane: i32, stride: *mut i32) -> i32;
         pub fn AImage_delete(image: *mut c_void);
+        pub fn AImageReader_newWithUsage(width: i32, height: i32, format: i32, usage: u64, max_images: i32, reader: *mut *mut c_void) -> i32;
+        pub fn AImage_getHardwareBuffer(image: *const c_void, buffer: *mut *mut c_void) -> i32;
+        pub fn AImage_getTimestamp(image: *const c_void, time: *mut i64) -> i32;
     }
 }

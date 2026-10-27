@@ -74,7 +74,6 @@ use local_use::LocalUse;
 mod motion;
 mod spaces;
 mod spacewarp;
-mod shake;
 mod history;
 mod behind;
 mod host;
@@ -4129,12 +4128,6 @@ impl App {
                 let on = !self.state_mut().shelf_autohide.enabled(side);
                 self.set_shelf_autohide(cx, side, on);
             }
-            "desktop.natural-scroll" => {
-                self.close_shell_menu(cx);
-                let on = !host::load_natural_scroll();
-                host::persist_natural_scroll(on);
-                host::apply_natural_scroll(on);
-            }
             "desktop.tap-to-click" => {
                 self.close_shell_menu(cx);
                 let on = !host::load_tap_to_click();
@@ -5332,7 +5325,6 @@ impl App {
         let shown = self.desk(cx).borrow::<WmDesk>().and_then(|d| d.warp.swollen_pose(client)).map(|p| p.shown);
         self.state_mut().warp.press_pose = shown.map(|r| (client, r));
         self.state_mut().warp.armed_drag = armed.then_some(client);
-        self.state_mut().shake.reset();
         self.focus_client(cx, client);
         self.apply_drag_cursor(cx);
         true
@@ -5450,7 +5442,6 @@ impl App {
                 self.warp_drag_rect(cx, screen, client, start_rect, start, abs, plain)
             };
             self.state_mut().layout_at_mut(screen).set_float_rect(client, rect);
-            if !resize { self.shake_sample(cx, screen, client, abs); }
         } else if resize {
             // Tiled: the divider follows the pointer, one frame at a time,
             // exactly like CDwindleAlgorithm::resizeTarget's Δ.
@@ -6143,7 +6134,9 @@ impl MatchEvent for App {
             self.adoptions = adopt::Adoptions::start(cx, hub_port);
         }
 
-        host::apply_natural_scroll(host::load_natural_scroll());
+        for touchpad in [false, true] {
+            host::apply_natural_scroll(touchpad, host::load_natural_scroll(touchpad));
+        }
         host::apply_tap_to_click(host::load_tap_to_click());
         self.state = Some(WmState {
             snap: Default::default(),
@@ -6157,7 +6150,6 @@ impl MatchEvent for App {
             warp: { let mut w = spacewarp::Warp::default(); w.mode = host::load_desktop_mode().unwrap_or_default(); w.half_heights = host::load_shelf_half(); w },
             dock_autohide: { let mut d = dock_autohide::DockAutohide::default(); d.set_enabled(host::load_dock_autohide(), host::now()); d },
             shelf_autohide: crate::spacewarp::shelf::ShelfHiding::new(host::load_shelf_autohide()),
-            shake: Default::default(),
             behind: Default::default(),
             history: history::History::load(),
             spaces: spaces::Ui::default(),
@@ -6659,26 +6651,6 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        #[cfg(target_os = "linux")]
-        if let Event::Scroll(scroll) = event {
-            if self.linux_controls.invert_scroll && scroll.is_mouse {
-                let mut reversed = scroll.clone();
-                reversed.scroll = -reversed.scroll;
-                let reversed = Event::Scroll(reversed);
-                self.handle_wm_event(cx, &reversed);
-                if let Event::Scroll(reversed) = reversed {
-                    scroll.handled_x.set(reversed.handled_x.get());
-                    scroll.handled_y.set(reversed.handled_y.get());
-                }
-                return;
-            }
-        }
-        self.handle_wm_event(cx, event);
-    }
-}
-
-impl App {
-    fn handle_wm_event(&mut self, cx: &mut Cx, event: &Event) {
         self.desk_link.handle_event(cx, event);
         // a virtual desktop that follows its viewer takes the window size of the viewer that connected last
         #[cfg(target_os = "linux")]

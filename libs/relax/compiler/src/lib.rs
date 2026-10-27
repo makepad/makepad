@@ -108,6 +108,10 @@ pub mod os;
 pub mod lower;
 pub mod cabi;
 pub use relax_types::*;
+// This crate's own source stamp (build.rs, libs/relax/self_stamp.rs), the codegen identity's
+// ("relax-compiler", crate::SRC_STAMP) part. Without it `crate::SRC_STAMP` resolved through the
+// glob above to relax-types' stamp, and the compiler's own source was left out of the identity.
+include!(concat!(env!("OUT_DIR"), "/src_stamp.rs"));
 pub mod run;
 mod harness;
 mod test_pkg;

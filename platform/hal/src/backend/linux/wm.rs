@@ -363,6 +363,8 @@ pub(super) struct App {
     hidden_windows: std::collections::HashSet<Key>,
     /// The WM went away and this process waits for the next one: when it last looked.
     detached_at: Option<std::time::Instant>,
+    /// The last reason a reattach attempt failed (logged once per distinct reason).
+    reattach_error: Option<String>,
     quit_sent: bool,
     stopping: bool,
 }
@@ -386,7 +388,7 @@ impl App {
         Ok(Self { state, hub, aux_path: hosted_ipc::aux_path(admission.port, &admission.client.to_string()), aux: None,
             pending: Vec::new(), windows: HashMap::new(), early: HashMap::new(), next_window: 0, ticking: false, asked_frame: false, hidden: false,
             clip_reads: HashMap::new(), next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(), trays: HashMap::new(),
-            hidden_windows: Default::default(), detached_at: None, quit_sent: false, stopping: false })
+            hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false })
     }
 
     fn key_of(&self, window_id: usize) -> Option<Key> {
@@ -755,9 +757,24 @@ impl App {
     fn reattach(&mut self) {
         if self.detached_at.is_some_and(|at| at.elapsed() < REATTACH_EVERY) { return; }
         self.detached_at = Some(std::time::Instant::now());
-        let Some(path) = wm_socket::discovery_path() else { return };
         let name = wm_socket::client_name();
-        let Ok(admission) = wm_socket::adopt(&path, WIRE, std::process::id(), &name) else { return };
+        let mut found = None;
+        let mut last = String::from("no WM socket to ask");
+        for path in wm_socket::reattach_paths() {
+            match wm_socket::adopt(&path, WIRE, std::process::id(), &name) {
+                Ok(admission) => { found = Some((path, admission)); break; }
+                Err(e) => last = format!("{}: {e:?}", path.display()),
+            }
+        }
+        let Some((path, admission)) = found else {
+            // once per distinct reason, so a long wait is visible without a line a second
+            if self.reattach_error.as_deref() != Some(last.as_str()) {
+                eprintln!("[hal-wm] still waiting for the next WM: {last}");
+                self.reattach_error = Some(last);
+            }
+            return;
+        };
+        self.reattach_error = None;
         self.state.hung_up.store(false, Ordering::Release);
         let hub = match Hub::connect(admission.port, admission.client, &name, self.state.clone()) {
             Ok(hub) => hub,
@@ -1100,7 +1117,7 @@ mod tests {
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
-            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, quit_sent: false, stopping: false };
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let key = (9_001, Id::new(1, 1));
         app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
         // covered: the app's frame request is held, a Tick grants nothing and is answered at once
@@ -1139,7 +1156,7 @@ mod tests {
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
-            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, quit_sent: false, stopping: false };
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let item = |kind, cmd| MenuItem { parent: 0, kind, cmd, key: 0, str: Default::default() };
         let items = vec![
             (item(menu_kind::ITEM | menu_kind::DISABLED, 1), "Serving".to_string()),
@@ -1193,7 +1210,7 @@ mod tests {
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 0, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
-            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, quit_sent: false, stopping: false };
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let id = Id::new(5, 1);
         app.command(Op::Cmd(6, OsCmd::WindowCreate { id, kind: window_kind::DROPDOWN, parent: Id::NONE, geom: [0.0; 4] }));
         assert!(app.windows[&(6, id)].dropdown);
@@ -1236,7 +1253,7 @@ mod tests {
         let mut app = App { state: state.clone(), hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
-            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, quit_sent: false, stopping: false };
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let key = (9_003, Id::new(1, 1));
         app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
         let presenter = Presenter(state.clone());
@@ -1283,7 +1300,7 @@ mod tests {
         let mut app = App { state: state.clone(), hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
-            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, quit_sent: false, stopping: false };
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let key = (9_002, Id::new(1, 1));
         app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
         let presenter = Presenter(state.clone());
@@ -1328,7 +1345,7 @@ mod tests {
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
-            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, quit_sent: false, stopping: false };
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let host = (session::HOST, Id::new(1, 1));
         let lent = (9_002, Id::new(4, 1));
         app.windows.insert(host, Win { window_id: 0, recipient: lent, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
@@ -1387,7 +1404,7 @@ mod tests {
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
-            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, quit_sent: false, stopping: false };
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let host = (session::HOST, Id::new(77, 1));
         app.windows.insert(host, Win { window_id: 0, recipient: host, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
         let old_style = r#"{"makepad_style":{"name":"windows"}}"#;

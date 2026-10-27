@@ -110,6 +110,17 @@ pub struct StreamTile {
     pub source_height: u32,
 }
 
+/// A stream encoder's QP delta map grid ([`VideoStreamEncoder::qp_grid`]): `cols` x `rows`
+/// texels, each covering `texel` pixels of the picture, deltas from `min` to `max`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QpGrid {
+    pub cols: u32,
+    pub rows: u32,
+    pub texel: [u32; 2],
+    pub min: i32,
+    pub max: i32,
+}
+
 /// When a shared texture's picture may be read: its producer's GPU work is complete, or it
 /// completes when the sync_file signals (Linux: the release fence of the frame that rendered it,
 /// `makepad_hal::dmabuf::hal_dmabuf_fence`).
@@ -297,6 +308,28 @@ impl VideoStreamEncoder {
         return self.os.stages();
         #[cfg(not(target_os = "windows"))]
         return [0; 3];
+    }
+
+    /// The QP delta map's grid, when the encoder takes one (Linux, with the GPU's quantization
+    /// maps): foveated or region-weighted encode with [`Self::set_qp_map`].
+    pub fn qp_grid(&self) -> Option<QpGrid> {
+        #[cfg(target_os = "linux")]
+        return self.os.qp_grid();
+        #[cfg(not(target_os = "linux"))]
+        return None;
+    }
+
+    /// A QP delta per texel of [`Self::qp_grid`] (row by row; negative: more bits there,
+    /// positive: fewer) for the pictures from the next one on. False when the encoder takes none
+    /// or `deltas` is not the grid's size.
+    pub fn set_qp_map(&mut self, deltas: &[i8]) -> bool {
+        #[cfg(target_os = "linux")]
+        return self.os.set_qp_map(deltas);
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = deltas;
+            return false;
+        }
     }
 
     /// The last picture's time on the hardware encoder (µs; Linux, from GPU timestamps; 0

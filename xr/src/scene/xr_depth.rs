@@ -7,9 +7,10 @@ use crate::algorithms::tsdf_query::{
     DepthQuery, DepthQueryCollider, DepthQueryColliderGeometry, DepthQueryColliderRole,
     DepthQueryHit, DepthQueryResult, DepthQuerySupportPlane,
 };
-use crate::util::depth_debug_mesh::{push_debug_depth_plane, DebugDepthMeshChunk};
-use crate::util::depth_debug_mesh_worker::{
-    XrDepthDebugMeshVisibleSet, XrDepthDebugMeshWorker, XrDepthDebugMeshWorkerResult,
+use crate::util::depth_debug_mesh::push_debug_depth_plane;
+use makepad_widgets::makepad_platform::xr_tsdf::{
+    mesh::{DebugDepthMeshChunk, XR_DEBUG_TSDF_MESH_CELL_STRIDE_VOXELS, XR_DEBUG_TSDF_MESH_CHUNK_WORLD_SIZE_METERS},
+    mesh_worker::{XrDepthDebugMeshVisibleSet, XrDepthDebugMeshWorker, XrDepthDebugMeshWorkerResult},
 };
 use makepad_widgets::makepad_platform::{TsdfPublishedSnapshot, XrTsdfStore};
 
@@ -426,7 +427,7 @@ impl XrDepthRuntime {
 
     pub(super) fn ensure_surface_mesh_worker(&mut self) -> &mut XrDepthDebugMeshWorker {
         self.surface_mesh_worker
-            .get_or_insert_with(XrDepthDebugMeshWorker::new)
+            .get_or_insert_with(|| XrDepthDebugMeshWorker::new(XR_DEBUG_TSDF_MESH_CHUNK_WORLD_SIZE_METERS, XR_DEBUG_TSDF_MESH_CELL_STRIDE_VOXELS))
     }
 
     fn upsert_query_hit_geometry(
@@ -505,7 +506,9 @@ impl XrDepthRuntime {
         self.snapshot_grid = Some(result.snapshot_grid);
         self.visible_chunks = visible_chunks;
         self.recycle_hidden_surface_mesh_chunks();
-        self.pending_upserts.clear();
+        // queued meshes of chunks that stay visible are kept: the worker counts them as sent
+        let visible = &self.visible_chunks;
+        self.pending_upserts.retain(|(_, chunk)| visible.contains(&chunk.chunk_key));
     }
 
     fn remove_surface_mesh_chunk(&mut self, chunk_key: ChunkKey) {
@@ -524,12 +527,9 @@ impl XrDepthRuntime {
             .len()
             .min(Self::SURFACE_MESH_UPSERTS_PER_FRAME);
         for _ in 0..pending_count {
-            let Some((request_id, chunk)) = self.pending_upserts.pop_front() else {
+            let Some((_, chunk)) = self.pending_upserts.pop_front() else {
                 break;
             };
-            if request_id != self.visible_request_id {
-                continue;
-            }
             self.upsert_surface_mesh_chunk(cx, chunk);
         }
     }
@@ -556,10 +556,7 @@ impl XrDepthRuntime {
                 }
                 for chunk_key in chunk_keys {
                     self.pending_upserts
-                        .retain(|(queued_request_id, queued_chunk)| {
-                            !(*queued_request_id == request_id
-                                && queued_chunk.chunk_key == chunk_key)
-                        });
+                        .retain(|(_, queued_chunk)| queued_chunk.chunk_key != chunk_key);
                     self.remove_surface_mesh_chunk(chunk_key);
                 }
             }

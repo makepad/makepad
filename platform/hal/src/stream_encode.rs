@@ -105,6 +105,17 @@ pub const CBR: u32 = 4;
 /// tuning) instead of its fastest encode (low-latency tuning).
 pub const SHARP: u32 = 8;
 
+/// The highest QP every stream encoder of this process may use from its next picture on (0:
+/// the encoder's own range): a quality floor under constant rate (a plain picture then takes
+/// more of the rate instead of undershooting it). Vulkan Video only.
+pub static MAX_QP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Sets [`MAX_QP`].
+#[makepad_relax_api::relax_api]
+pub fn hal_stream_encoder_max_qp(qp: u32) {
+    MAX_QP.store(qp.min(51), std::sync::atomic::Ordering::Release);
+}
+
 fn codec_of(flags: u32) -> Codec {
     if flags & HEVC != 0 { Codec::H265 } else { Codec::H264 }
 }
@@ -237,4 +248,45 @@ pub fn hal_stream_encoder_bitrate(encoder: u64, kbps: u32) {
 pub fn hal_stream_encoder_close(encoder: u64) {
     let open = crate::lock(&ENCODERS).as_mut().and_then(|e| e.remove(&encoder));
     drop(open);
+}
+
+/// The encoder's QP delta map grid into `out` (columns, rows, texel width, texel height (px),
+/// least and greatest delta): true when it takes one (Linux, VK_KHR_video_encode_quantization_map).
+#[makepad_relax_api::relax_api]
+pub fn hal_stream_encoder_qp_grid(encoder: u64, out: &mut [i32]) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(open) = get(encoder) else { return false };
+        let grid = crate::lock(&open).encoder.qp_grid();
+        let Some(([cols, rows], [tw, th], [min, max])) = grid else { return false };
+        if out.len() < 6 {
+            return false;
+        }
+        out[..6].copy_from_slice(&[cols as i32, rows as i32, tw as i32, th as i32, min, max]);
+        true
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (encoder, out);
+        false
+    }
+}
+
+/// QP deltas (signed bytes, one per texel of `hal_stream_encoder_qp_grid`, row by row) for the
+/// pictures from the next one on: negative spends more bits there, positive fewer.
+#[makepad_relax_api::relax_api]
+pub fn hal_stream_encoder_qp_map(encoder: u64, deltas: &[u8]) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(open) = get(encoder) else { return false };
+        // the bytes are the deltas as they lie (i8)
+        let deltas: &[i8] = unsafe { std::slice::from_raw_parts(deltas.as_ptr().cast(), deltas.len()) };
+        let set = crate::lock(&open).encoder.set_qp_map(deltas);
+        set
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (encoder, deltas);
+        false
+    }
 }

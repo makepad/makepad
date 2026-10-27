@@ -240,10 +240,15 @@ pub mod info_flags {
     /// The backend renders multiview passes (`Pass::views` 2): an app draws a stereo view in one
     /// pass instead of one per eye.
     pub const MULTIVIEW: u32 = 1024;
+    /// With `XR`: the XR window has no display of its own (a remote headset: its frames go to an
+    /// encoder the app drives). XR passes render into the pass's own colour and depth textures,
+    /// both eyes side by side, and the app hands the result on; the XR window only paces them
+    /// (its `XrFrame`s and `FrameReady`s), it is never presented.
+    pub const XR_OFFSCREEN: u32 = 2048;
 
     #[test]
     fn the_flags_are_distinct_bits() {
-        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW];
+        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW, XR_OFFSCREEN];
         for (i, a) in all.iter().enumerate() {
             assert!(a.is_power_of_two());
             assert!(all[i + 1..].iter().all(|b| a & b == 0), "flag {a} shares a bit");
@@ -467,11 +472,15 @@ pub mod format {
     pub const BC5: u32 = 12;
     pub const ASTC4X4: u32 = 13;
     pub const COUNT: u32 = 14;
+    /// RGBA8 with sRGB encoding on write (the shader outputs linear colour): a render target
+    /// of the Android XR projection chains only (`hal_xr_linear_frames`), outside the texture
+    /// formats every backend lists (`COUNT`); Vulkan alone maps it.
+    pub const RGBA8_SRGB: u32 = 32;
 
     /// Bytes per texel; 0 for an unknown format.
     pub const fn texel_bytes(f: u32) -> u64 {
         match f {
-            RGBA8 | BGRA8 | DEPTH32F | DEPTH24_STENCIL8 | R32F | RG16F | R32UINT => 4,
+            RGBA8 | BGRA8 | DEPTH32F | DEPTH24_STENCIL8 | R32F | RG16F | R32UINT | RGBA8_SRGB => 4,
             // 16 bytes per 4x4 texels
             R8 | BC7 | BC5 | ASTC4X4 => 1,
             RG8 => 2,
@@ -484,6 +493,7 @@ pub mod format {
     pub const fn name(f: u32) -> &'static str {
         match f {
             RGBA8 => "Rgba8",
+            RGBA8_SRGB => "Rgba8Srgb",
             BGRA8 => "Bgra8",
             R8 => "R8",
             RG8 => "Rg8",
@@ -722,6 +732,14 @@ pub mod texture_handle {
     pub const LUMA: u32 = 1;
     /// Its interleaved chroma plane (Metal: plane 1), as an RG8 texture of half the size.
     pub const CHROMA: u32 = 2;
+    /// A decoder's whole picture (Vulkan on Android: a stream decoder's picture ticket, a Y'CbCr
+    /// hardware buffer) as one video texture: sampled from a `texture_video` slot it gives the
+    /// picture's raw codes (.g = Y', .b = Cb, .r = Cr, 0..1 of the 8-bit range).
+    pub const VIDEO: u32 = 3;
+    /// An XR runtime's environment depth image (Vulkan on Android: a ticket of the XR shell's,
+    /// `XrDepth::image`): both eyes' layers as a 2D array texture, sampled from a
+    /// `texture_2d_array` slot it gives the depth (0..1, the image's projection) in .r.
+    pub const XR_DEPTH: u32 = 4;
 }
 
 /// The bits above the kind byte of `WindowCreate::kind`: how a macOS window is made (Cx's
@@ -1007,6 +1025,25 @@ pub struct XrFrame {
     pub eyes: [XrEye; 2],
     pub controllers: [XrController; 2],
     pub hands: [XrHand; 2],
+}
+
+/// The header of an `XrDepth` event (`buffers::Wire`): the environment depth images of the
+/// first `layers` eyes (XR_META_environment_depth), each `width` x `height` D16 texels
+/// (row-major, little-endian u16, nonlinear: the depth of that eye's projection with
+/// `near`/`far`, `far` 0 = infinite), eye 0's first, follow it in the payload. `views` are the depth camera of each eye in the local space (y
+/// up, the floor at y = 0), at the time the depth was captured. `image`: the image itself for
+/// the GPU (`texture_handle::XR_DEPTH` ticket; 0 none). A payload without texels announces a
+/// newly acquired image (the GPU reads it from now on); the texels follow in a later event.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct XrDepth {
+    pub width: u32,
+    pub height: u32,
+    pub layers: u32,
+    pub near: f32,
+    pub far: f32,
+    pub views: [XrEye; 2],
+    pub image: u64,
 }
 
 // ------------------------------------------------------------------ frames

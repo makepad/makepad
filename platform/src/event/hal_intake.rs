@@ -379,9 +379,9 @@ impl Cx {
             #[cfg(target_os = "linux")]
             HalEvent::DirectDisplayResult { req, command, ok, message } => self.hal_display_result(req, command, ok, message),
             #[cfg(target_os = "linux")]
-            HalEvent::DirectInput { window, mouse_speed, touchpad_speed, natural_scroll, tap_to_click } => {
+            HalEvent::DirectInput { window, mouse_speed, touchpad_speed, natural_scroll_mouse, natural_scroll_touchpad, tap_to_click } => {
                 if self.hal.direct_display.window == Some(window) {
-                    crate::linux_input::report(mouse_speed, touchpad_speed, natural_scroll, tap_to_click);
+                    crate::linux_input::report([mouse_speed, touchpad_speed], [natural_scroll_mouse, natural_scroll_touchpad], tap_to_click);
                 }
             }
             #[cfg(not(target_os = "linux"))]
@@ -814,13 +814,18 @@ impl Cx {
                 }
             }
             HalEvent::XrFrame { window: _, display_ns, frame } => {
-                let time = self.hal.secs(display_ns);
-                self.hal_xr_frame(time, frame);
+                self.hal_xr_frame(display_ns, frame);
+            }
+            HalEvent::XrDepth { window: _, display_ns, depth } => {
+                self.hal_xr_depth(display_ns, depth);
             }
             HalEvent::FrameReady { window, next_ns: _ } => {
                 let window_id = window_id(window);
                 if self.windows.is_valid(window_id) {
                     self.hal.beat = true;
+                    if self.hal.xr.as_ref().is_some_and(|xr| xr.window == window_id) {
+                        self.hal.xr_beat = true;
+                    }
                     if let Some(w) = self.hal.windows.get_mut(&window_id.0) {
                         w.paced = true;
                         w.credit = true;

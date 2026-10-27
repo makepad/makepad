@@ -103,6 +103,34 @@ pub fn dir() -> PathBuf {
         .unwrap_or_else(|| super::makepad_home().join("fleet"))
 }
 
+/// A device that enrols by file drop (a phone, a headset): makes this machine's key in [`dir`] on
+/// first use and copies a pushed credential, root and revocation list in from `pushed` (an app's
+/// external files folder, `adb push`; none of them holds a secret). Returns the key's public point
+/// (what the admin signs: `fleet-id sign <name> paired <point>`) and the files it installed.
+pub fn enrol_device(pushed: Option<&Path>) -> Result<([u8; 65], Vec<&'static str>), String> {
+    let dir = dir();
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let key_path = dir.join("id.key");
+    if !key_path.exists() {
+        let key = generate_key().map_err(|e| format!("cannot make the fleet key: {e}"))?;
+        write_key(&key_path, &key).map_err(|e| format!("{}: {e}", key_path.display()))?;
+    }
+    let key = read_key(&key_path).map_err(|e| format!("{}: {e}", key_path.display()))?;
+    let mut installed = Vec::new();
+    if let Some(pushed) = pushed {
+        for name in ["id.cred", ROOT_PUB, REVOKED] {
+            if let Ok(bytes) = fs::read(pushed.join(name)) {
+                let to = dir.join(name);
+                if fs::read(&to).ok().as_deref() != Some(&bytes[..]) {
+                    fs::write(&to, &bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+                    installed.push(name);
+                }
+            }
+        }
+    }
+    Ok((point_of(&key), installed))
+}
+
 /// The admin Mac's root key directory, `<fleet dir>/admin`.
 pub fn admin_dir() -> PathBuf {
     dir().join("admin")
@@ -398,6 +426,10 @@ pub enum Need {
     /// This machine's own credential: another process of the machine the
     /// service runs on (its own WM), never another machine, admin or not.
     ThisMachine,
+    /// A headset viewing an XR session (remote rendering): the admin Mac, or a paired device
+    /// the fleet root signed (a Quest). The service admits it to that XR session only: no
+    /// desktop, and its input reaches only the XR app, as headset data.
+    XrViewer,
 }
 
 /// The one policy check: `require(&peer, Need::Admin)?`.
@@ -407,6 +439,7 @@ pub fn require(peer: &Peer, need: Need) -> Result<(), String> {
         Need::Machine => peer.machine(),
         Need::Node => peer.node(),
         Need::ThisMachine => peer.this_machine(),
+        Need::XrViewer => peer.admin() || peer.role == Role::Paired,
     };
     if ok {
         return Ok(());
@@ -417,6 +450,7 @@ pub fn require(peer: &Peer, need: Need) -> Result<(), String> {
         Need::Machine => format!("{} ({}) is not a fleet machine", peer.name, peer.role.as_str()),
         Need::Node => format!("{} ({}) is not a node credential", peer.name, peer.role.as_str()),
         Need::ThisMachine => format!("{} ({}) is not this machine", peer.name, peer.role.as_str()),
+        Need::XrViewer => format!("{} ({}) is neither the admin nor a paired headset", peer.name, peer.role.as_str()),
     })
 }
 

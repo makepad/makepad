@@ -29,60 +29,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use makepad_widgets::makepad_draw::render_target::{RenderTarget, RenderTargetFormat};
 use makepad_widgets::*;
+use makepad_widgets::makepad_draw::shader::draw_nv12_pack::{DrawNv12Chroma, DrawNv12Luma};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.shader.*
-
-    // Four luma samples of row j, columns 4i..4i+3 of the source rect, in memory order B G R A.
-    mod.widgets.DrawNv12Luma = set_type_default() do #(DrawNv12Luma::script_shader(vm)) {
-        ..mod.draw.DrawQuad
-        image: texture_2d(float)
-        source: vec4(0.0, 0.0, 1.0, 1.0)
-        extent: vec2(1.0, 1.0)
-        pixel: fn() {
-            let t = floor(self.pos * self.rect_size)
-            let inv = vec2(1.0 / self.extent.x, 1.0 / self.extent.y)
-            let row = self.source.y + t.y + 0.5
-            let x = self.source.x + t.x * 4.0 + 0.5
-            let w = vec3(0.2126, 0.7152, 0.0722)
-            let y0 = (16.0 + 219.0 * dot(self.image.sample(vec2(x, row) * inv).xyz, w)) / 255.0
-            let y1 = (16.0 + 219.0 * dot(self.image.sample(vec2(x + 1.0, row) * inv).xyz, w)) / 255.0
-            let y2 = (16.0 + 219.0 * dot(self.image.sample(vec2(x + 2.0, row) * inv).xyz, w)) / 255.0
-            let y3 = (16.0 + 219.0 * dot(self.image.sample(vec2(x + 3.0, row) * inv).xyz, w)) / 255.0
-            return vec4(y2, y1, y0, y3)
-        }
-    }
-
-    // Two chroma samples, memory order U0 V0 U1 V1: 4:2:0 each the average of a 2x2 block (one
-    // bilinear tap at its centre); 4:4:4 (`full`) two neighbouring pixels of one row as they
-    // are, a source row over two texture rows (its left half, then its right half).
-    mod.widgets.DrawNv12Chroma = set_type_default() do #(DrawNv12Chroma::script_shader(vm)) {
-        ..mod.draw.DrawQuad
-        image: texture_2d(float)
-        source: vec4(0.0, 0.0, 1.0, 1.0)
-        extent: vec2(1.0, 1.0)
-        full: 0.0
-        pixel: fn() {
-            let t = floor(self.pos * self.rect_size)
-            let inv = vec2(1.0 / self.extent.x, 1.0 / self.extent.y)
-            // which half of its source row this texture row holds (Splash shaders have no `mod`)
-            let half = t.y - floor(t.y * 0.5) * 2.0
-            let full_p = vec2(self.source.x + half * self.rect_size.x * 2.0 + t.x * 2.0 + 0.5, self.source.y + floor(t.y * 0.5) + 0.5)
-            let sub_p = vec2(self.source.x + t.x * 4.0 + 1.0, self.source.y + t.y * 2.0 + 1.0)
-            let p0 = mix(sub_p, full_p, self.full)
-            let step = mix(2.0, 1.0, self.full)
-            let c0 = self.image.sample(p0 * inv).xyz
-            let c1 = self.image.sample((p0 + vec2(step, 0.0)) * inv).xyz
-            let cu = vec3(-0.1146, -0.3854, 0.5)
-            let cv = vec3(0.5, -0.4542, -0.0458)
-            let u0 = (128.0 + 224.0 * dot(c0, cu)) / 255.0
-            let v0 = (128.0 + 224.0 * dot(c0, cv)) / 255.0
-            let u1 = (128.0 + 224.0 * dot(c1, cu)) / 255.0
-            let v1 = (128.0 + 224.0 * dot(c1, cv)) / 255.0
-            return vec4(u1, v0, u0, v1)
-        }
-    }
 
     mod.widgets.DeskCaptureBase = #(DeskCapture::register_widget(vm))
     mod.widgets.DeskCapture = set_type_default() do mod.widgets.DeskCaptureBase {
@@ -94,33 +45,6 @@ script_mod! {
         draw_luma +: {}
         draw_chroma +: {}
     }
-}
-
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawNv12Luma {
-    #[deref]
-    draw_super: DrawQuad,
-    /// The streamed rect of C, in C's pixels.
-    #[live]
-    source: Vec4f,
-    /// C's size in pixels.
-    #[live]
-    extent: Vec2f,
-}
-
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawNv12Chroma {
-    #[deref]
-    draw_super: DrawQuad,
-    #[live]
-    source: Vec4f,
-    #[live]
-    extent: Vec2f,
-    /// 1: 4:4:4 (every pixel's chroma), 0: 4:2:0.
-    #[live]
-    full: f32,
 }
 
 /// How a picture is cut into tiles: `cols` columns by `rows` bands (1 x 1: whole pictures).
@@ -425,14 +349,14 @@ mod tests {
             makepad_widgets::script_mod(vm);
             super::script_mod(vm);
             for (name, backend, value) in [
-                ("luma", "metal", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.DrawNv12Luma, "metal", false)})),
-                ("luma", "hlsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.DrawNv12Luma, "hlsl", false)})),
-                ("luma", "glsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.DrawNv12Luma, "glsl", false)})),
-                ("luma", "wgsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.DrawNv12Luma, "wgsl", false)})),
-                ("chroma", "metal", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.DrawNv12Chroma, "metal", false)})),
-                ("chroma", "hlsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.DrawNv12Chroma, "hlsl", false)})),
-                ("chroma", "glsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.DrawNv12Chroma, "glsl", false)})),
-                ("chroma", "wgsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.widgets.DrawNv12Chroma, "wgsl", false)})),
+                ("luma", "metal", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawNv12Luma, "metal", false)})),
+                ("luma", "hlsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawNv12Luma, "hlsl", false)})),
+                ("luma", "glsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawNv12Luma, "glsl", false)})),
+                ("luma", "wgsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawNv12Luma, "wgsl", false)})),
+                ("chroma", "metal", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawNv12Chroma, "metal", false)})),
+                ("chroma", "hlsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawNv12Chroma, "hlsl", false)})),
+                ("chroma", "glsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawNv12Chroma, "glsl", false)})),
+                ("chroma", "wgsl", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawNv12Chroma, "wgsl", false)})),
             ] {
                 let text = vm.heap().string_with(value, |_heap, text| text.to_string()).expect("the compiler answers with source");
                 assert!(!text.starts_with("ERRORS"), "{name} on {backend} did not compile: {text}");

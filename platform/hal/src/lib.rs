@@ -55,7 +55,11 @@ pub mod gpu_pressure;
 pub mod h264_bits;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod stream_encode;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod stream_decode;
 pub mod stream_pack;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod xr_remote;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod frame_tap;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1454,6 +1458,178 @@ fn media_keep(id: i64, result: Result<Vec<u8>, String>) -> i64 {
     };
     media_results().lock().unwrap_or_else(|e| e.into_inner()).insert(id, result);
     len
+}
+
+/// The headset's pose for a renderer elsewhere, once per display frame (Android XR: published by
+/// the XR thread right after xrBeginFrame, located `XrPoseLead` past the display time, whether
+/// or not the app draws that frame): waits at most `timeout_ms` for one newer than the last
+/// taken, writes its `XrFrame` (`buffers::Wire`) into `out` and returns its display time (ns);
+/// 0 when none came (or elsewhere). A thread of the app's own sends it on, so the uplink keeps
+/// the display's rate and spacing whatever the app's frames do.
+#[relax_api]
+pub fn hal_xr_uplink_next(timeout_ms: u32, out: &mut [u8]) -> u64 {
+    #[cfg(target_os = "android")]
+    return backend::android::xr::uplink_next(timeout_ms, out);
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (timeout_ms, out);
+        0
+    }
+}
+
+/// The XR tracking log (Android XR, while the uplink runs): what went upstream (kind 0: the
+/// sample time, the display time it was located for, its `XrFrame`) and the poses as tracked
+/// (kind 1: a display time already past, located after it, the time it was located, the
+/// `XrFrame` without controllers). Entries from absolute index `cursor` on (the oldest kept when
+/// older) are written into `out` after an 8-byte count of them (u64 LE), each kind, time, aux
+/// (u64 LE) then the `XrFrame` ([`hal_xr_track_entry_size`] bytes each), as many whole ones as
+/// fit; returns the index after the last written. Elsewhere nothing (count 0).
+#[relax_api]
+pub fn hal_xr_track_log(cursor: u64, out: &mut [u8]) -> u64 {
+    if out.len() < 8 {
+        return cursor;
+    }
+    #[cfg(target_os = "android")]
+    {
+        let (next, bytes) = backend::android::xr::track_log(cursor, &mut out[8..]);
+        let n = (bytes / backend::android::xr::track_entry_size().max(1)) as u64;
+        out[..8].copy_from_slice(&n.to_le_bytes());
+        return next;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        out[..8].copy_from_slice(&0u64.to_le_bytes());
+        cursor
+    }
+}
+
+/// The size of one [`hal_xr_track_log`] entry in bytes.
+#[relax_api]
+pub fn hal_xr_track_entry_size() -> usize {
+    #[cfg(target_os = "android")]
+    return backend::android::xr::track_entry_size();
+    #[cfg(not(target_os = "android"))]
+    0
+}
+
+/// Plays a recorded tracking log (entries as [`hal_xr_track_log`] writes them) instead of the
+/// runtime's poses, looping: the uplink gets the recorded predictions (moved to the replay's
+/// display times along the tracked path), the XR window's frames the tracked path. Empty: the
+/// runtime's poses again. Whether a replay runs (Android XR; elsewhere false).
+#[relax_api]
+pub fn hal_xr_replay(data: &[u8]) -> bool {
+    #[cfg(target_os = "android")]
+    return backend::android::xr::replay(data);
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = data;
+        false
+    }
+}
+
+/// The XR window's frames write linear colour (`on`): its projection chains become sRGB images
+/// without the mutable format (the GPU keeps their framebuffer compression: the stream pass's
+/// fixed cost 1.7 -> 0.1 ms on Quest 3) and the hardware encodes on write; the app's shaders then
+/// output linear colour into it ([`hal_xr_linear_frames_active`] says from which frame on).
+/// Off: sRGB-encoded colour written through UNORM views, as every app's frames. Android XR;
+/// elsewhere nothing.
+#[relax_api]
+pub fn hal_xr_linear_frames(on: bool) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::linear_frames(on);
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
+}
+
+/// The XR window's fixed foveation (Android XR: the runtime's foveation profile in the
+/// projection chains' fragment density maps; 0 none, 1 low, 2 medium, 3 high), applied from the
+/// next display frame. Elsewhere nothing.
+#[relax_api]
+pub fn hal_xr_foveation(level: u32) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::foveation(level);
+    #[cfg(not(target_os = "android"))]
+    let _ = level;
+}
+
+/// The headset's environment depth runs (`on`, the default): the occlusion and the room field
+/// read it; off stops the runtime's depth provider (its GPU and camera work). Android XR;
+/// elsewhere nothing.
+#[relax_api]
+pub fn hal_xr_environment_depth(on: bool) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::environment_depth(on);
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
+}
+
+/// Hands and controllers tracked at once (`on`, the default) or only whichever is in use: with
+/// both, the Quest's cameras are shared with the controllers and its hand tracker runs at about
+/// 25 Hz instead of its high-frequency mode. Android XR; elsewhere nothing.
+#[relax_api]
+pub fn hal_xr_hands_and_controllers(on: bool) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::hands_and_controllers(on);
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
+}
+
+/// The XR window's eye buffers move between `min_percent` and `max_percent` of their start size
+/// (40..100; equal: fixed) on the runtime's measured app GPU frame time: a step down (100, 90,
+/// 80, 70) when a frame's GPU time nears the display period, back up with headroom, changing
+/// rarely; the window's geometry follows (the app renders at the new size). Default 100..100.
+/// Android XR (XR_META_performance_metrics); elsewhere nothing.
+#[relax_api]
+pub fn hal_xr_eye_scale(min_percent: u32, max_percent: u32) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::eye_scale(min_percent, max_percent);
+    #[cfg(not(target_os = "android"))]
+    let _ = (min_percent, max_percent);
+}
+
+/// The XR window's eye buffer size now (percent of the start size, the high 32 bits) and the app
+/// GPU frame time the dynamic scale last measured (µs, the low 32 bits; 0 none). Android XR;
+/// elsewhere 100 and 0.
+#[relax_api]
+pub fn hal_xr_eye_scale_now() -> u64 {
+    #[cfg(target_os = "android")]
+    return { let (p, us) = backend::android::xr::eye_scale_now(); ((p as u64) << 32) | us as u64 };
+    #[cfg(not(target_os = "android"))]
+    { 100 << 32 }
+}
+
+/// The uplink's poses are located `frames` display frames past the headset's newest one (the
+/// newest is the runtime's own pipeline ahead of now: a frame located that many past it has
+/// `frames` periods from the pose's sample to its frame's start, whatever that pipeline depth
+/// does); 0: from the pose lead (`XrPoseLead`) instead. Android XR; elsewhere nothing.
+#[relax_api]
+pub fn hal_xr_pose_frames_ahead(frames: u32) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::pose_frames_ahead(frames);
+    #[cfg(not(target_os = "android"))]
+    let _ = frames;
+}
+
+/// Whether the XR window's frames render into linear-output (sRGB-encoding) targets now.
+#[relax_api]
+pub fn hal_xr_linear_frames_active() -> bool {
+    #[cfg(target_os = "android")]
+    return backend::android::xr::linear_frames_active();
+    #[cfg(not(target_os = "android"))]
+    false
+}
+
+/// The device's network in its low-latency mode while `on` (Android: a low-latency Wi-Fi lock,
+/// no power save or background scans); elsewhere nothing. Whether it was applied.
+#[relax_api]
+pub fn hal_network_low_latency(on: bool) -> bool {
+    #[cfg(target_os = "android")]
+    return backend::android::media::network_low_latency(on).map_err(|e| eprintln!("[hal-android] low-latency network: {e}")).is_ok();
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = on;
+        false
+    }
 }
 
 /// Writes the largest frame the HEVC encoder takes into `out` (width, height: little-endian

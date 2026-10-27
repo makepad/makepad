@@ -7563,6 +7563,9 @@ unsafe fn cached_tier1(up: *mut Unit, id: u32, inlined: &[u32]) {
 /// Code that needs no compile (on the owner thread): already compiled, linked ahead from the disk
 /// cache, found in the disk cache, or built ahead by a speculative worker. None: compile it.
 unsafe fn ready_code_locked(up: *mut Unit, id: u32) -> Option<u64> {
+    // a link may run a static's initializer (and, verifying the cache, a front): never in a
+    // publish; a background thread links in a take (publish_or_bail), which bails on them
+    owner::forbid_in_strict_publish("a warm-cache link", id);
     let u = &mut *up;
     if u.fns[id as usize].compiled {
         main_how(0);
@@ -15272,7 +15275,7 @@ unsafe fn prebuild_callees(up: *mut Unit, relocs: &[relax_backend::rir::RelocAt]
     let mut built = 0usize;
     while !todo.is_empty() && built < PREBUILD_MAX {
         let cands = std::mem::take(&mut todo);
-        let need: Vec<u32> = owner::publish(|| {
+        let reached: Vec<u32> = owner::publish(|| {
             let u = &mut *up;
             cands.into_iter().filter(|&c| {
                 (c as usize) < u.fns.len() && !u.fns[c as usize].compiled && u.fns[c as usize].build_err.is_none()
@@ -15281,9 +15284,13 @@ unsafe fn prebuild_callees(up: *mut Unit, relocs: &[relax_backend::rir::RelocAt]
                     // ran inside other code (inlined there, or in twin code), so the replacement's
                     // first calls reach it: its stored entry is linked now, else it is built below
                     && (ran_in_twin_code(u, c) || !u.fns[c as usize].history().inlined_into.is_empty() || absent.contains(&c))
-                    && ready_code_locked(up, c).is_none()
             }).collect()
         });
+        // the stored entry's link, one take per slot (rule I-PUB): a link may need what a publish
+        // never runs -- a static's initializer, its own front under MAKEPAD_RUN_CACHE=verify -- and
+        // then bails; the slot then gets the O2 build below, whose take bails or leaves it to the
+        // program's own lazy compile in the same way (I-PURE)
+        let need: Vec<u32> = reached.into_iter().filter(|&c| !matches!(owner::publish_or_bail(|| ready_code_locked(up, c).is_some()), Ok(true))).collect();
         for c in need {
             if seen.contains(&c) || built >= PREBUILD_MAX {
                 continue;

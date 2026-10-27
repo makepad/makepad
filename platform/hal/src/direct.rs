@@ -218,6 +218,12 @@ pub const LINUX_VULKAN_DEVICE_ENV: &str = "MAKEPAD_VULKAN_DEVICE_UUID";
 pub const POINTER_SPEED_MIN: u32 = 25;
 pub const POINTER_SPEED_MAX: u32 = 300;
 pub const POINTER_SPEED_DEFAULT: u32 = 100;
+/// Desk Link's injected pointer: the uinput device (`BUS_VIRTUAL`, this vendor and product)
+/// the WM makes for a viewer's input. Its wheel already carries the content direction the
+/// viewer's user saw, in evdev's own sense (+1 = the view moves up, tilted right = right), so
+/// the direct backend passes it through and never applies natural scrolling to it.
+pub const DESK_LINK_INPUT_VENDOR: u16 = 0x4d50;
+pub const DESK_LINK_POINTER_PRODUCT: u16 = 1;
 
 /// Owned arguments for a display request, also retained by Cx until its reply.
 #[derive(Clone, Debug)]

@@ -29,7 +29,7 @@
 //! next one, so each feature read is retried a few times.
 use {
     super::{fusion::ImuSample, BackendKind, HeadsetImuSource, ImuBackend, Opened, Pumped},
-    crate::stereo::calibration::{DisplayCalibration, EyeCalibration, LensModel, ValveRadial},
+    makepad_xr_core::optics::{DisplayCalibration, EyeCalibration, LensModel, ValveRadial},
     makepad_widgets::Vec3f,
     std::{
         ffi::{c_int, c_short, c_ulong},

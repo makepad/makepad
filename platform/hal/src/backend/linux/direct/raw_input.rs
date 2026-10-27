@@ -144,13 +144,40 @@ mod EvKeyCodes {
 
 /// A wheel event as makepad's scroll (points; +y = the view moves down the content, +x = right):
 /// a notch is 40 points (a high-resolution step 1/120 of that). evdev counts +1 for the wheel
-/// turned away from the user (tilted right). Traditional: that scrolls the view up (left).
-/// Natural (the WM's setting, as on a Mac): the content follows the wheel, so the view moves
-/// down (right).
+/// turned away from the user and for tilted right. Traditional (evdev's own sense): away scrolls
+/// the view up, tilted right scrolls it right. Natural (the WM's mouse setting, as on a Mac):
+/// the content follows the wheel, so away moves the view down and tilted right moves it left.
 fn wheel_scroll(value: i32, hires: bool, horizontal: bool, natural: bool) -> (f64, f64) {
     let points = value as f64 * if hires { 40.0 / 120.0 } else { 40.0 };
     let along = if natural { points } else { -points };
     if horizontal { (-along, 0.0) } else { (0.0, along) }
+}
+
+/// Whether a device's wheel takes the mouse natural scrolling setting: every wheel except Desk
+/// Link's injected pointer, whose wheel already is in the viewer's content direction.
+fn wheel_follows_setting(id: &InputId) -> bool {
+    !(id.bustype == BUS_VIRTUAL && id.vendor == crate::direct::DESK_LINK_INPUT_VENDOR
+        && id.product == crate::direct::DESK_LINK_POINTER_PRODUCT)
+}
+
+const BUS_VIRTUAL: u16 = 0x06;
+
+/// `struct input_id` (EVIOCGID).
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+struct InputId {
+    bustype: u16,
+    vendor: u16,
+    product: u16,
+    version: u16,
+}
+
+fn input_id(file: &File) -> InputId {
+    let mut bytes = [0u8; std::mem::size_of::<InputId>()];
+    if !evdev_read(file, 0x02, &mut bytes) {
+        return InputId::default();
+    }
+    unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<InputId>()) }
 }
 
 #[allow(non_snake_case)]
@@ -475,6 +502,8 @@ struct InputDevice {
     touchpad: Option<Touchpad>,
     absolute_axes: Option<[AbsInfo; 2]>,
     absolute_mt: bool,
+    /// Its wheel takes the mouse natural scrolling setting (`wheel_follows_setting`).
+    wheel_natural_setting: bool,
 }
 
 pub struct RawInput {
@@ -600,11 +629,14 @@ impl RawInput {
                             .filter(|(x, y)| x.maximum > x.minimum && y.maximum > y.minimum)
                             .map(|(x, y)| [x, y])
                     } else { None };
-                    eprintln!("Direct input: opened {}{}", path.display(),
-                        if touchpad.is_some() { " (relative touchpad, two-finger scroll)" } else { "" });
+                    let wheel_natural_setting = wheel_follows_setting(&input_id(&file));
+                    eprintln!("Direct input: opened {}{}{}", path.display(),
+                        if touchpad.is_some() { " (relative touchpad, two-finger scroll)" } else { "" },
+                        if wheel_natural_setting { "" } else { " (Desk Link: wheel in the viewer's direction)" });
                     self.next_device_id += 1;
                     self.devices.push(InputDevice { id: self.next_device_id, path, file,
-                        pending: Vec::new(), dropped: false, reported_input: false, touchpad, absolute_axes, absolute_mt });
+                        pending: Vec::new(), dropped: false, reported_input: false, touchpad, absolute_axes, absolute_mt,
+                        wheel_natural_setting });
                 }
                 Err(error) => {
                     if self.denied.insert(path.clone()) {
@@ -639,7 +671,7 @@ impl RawInput {
         dir_evts.set_time((time * 1e9) as u64);
         let mut packets = Vec::new();
         let mut pad_out = Vec::new();
-        let natural = super::preferences::natural_scroll();
+        let natural = super::preferences::natural_scroll(true);
         let tap = super::preferences::tap_to_click();
         // Poll nonblocking descriptors directly. Packet state belongs to each
         // device, so a partial report never spins the UI or mixes two devices.
@@ -811,7 +843,9 @@ impl RawInput {
                     return;
                 }
                 let horizontal = matches!(code, EvRelCodes::REL_HWHEEL | EvRelCodes::REL_HWHEEL_HI_RES);
-                let (x, y) = wheel_scroll(evt.value, hires, horizontal, super::preferences::natural_scroll());
+                let natural = self.devices.iter().find(|d| d.id == device_id)
+                    .is_some_and(|d| d.wheel_natural_setting) && super::preferences::natural_scroll(false);
+                let (x, y) = wheel_scroll(evt.value, hires, horizontal, natural);
                 dir_evts.scroll(window_id, self.abs.x, self.abs.y, x, y, self.modifiers.bits(), false, input::scroll::NONE);
                 return;
             }
@@ -1282,7 +1316,24 @@ mod tests {
 
 #[cfg(test)]
 mod wheel_tests {
-    use super::wheel_scroll;
+    use super::{wheel_follows_setting, wheel_scroll, InputId, BUS_VIRTUAL};
+    use crate::direct::{DESK_LINK_INPUT_VENDOR, DESK_LINK_POINTER_PRODUCT};
+
+    #[test]
+    fn desk_link_wheel_passes_through_in_the_viewers_direction() {
+        let desk_link = InputId { bustype: BUS_VIRTUAL, vendor: DESK_LINK_INPUT_VENDOR, product: DESK_LINK_POINTER_PRODUCT, version: 1 };
+        assert!(!wheel_follows_setting(&desk_link), "Desk Link's pointer never takes the local setting");
+        let usb_mouse = InputId { bustype: 0x03, vendor: 0x046d, product: 0xc077, version: 0x111 };
+        assert!(wheel_follows_setting(&usb_mouse));
+        // the Desk Link keyboard and gamepads have no wheel; another virtual device does take it
+        assert!(wheel_follows_setting(&InputId { product: 2, ..desk_link }));
+        assert!(wheel_follows_setting(&InputId { vendor: 0x1234, ..desk_link }));
+        // the viewer's "view moves up" one notch (wire dy = +120, injected as REL_WHEEL_HI_RES
+        // +120) is read in evdev's own sense: the view moves up, whatever the mouse setting
+        assert_eq!(wheel_scroll(120, true, false, false), (0.0, -40.0));
+        // the viewer's "view moves right" (wire dx = +120)
+        assert_eq!(wheel_scroll(120, true, true, false), (40.0, 0.0));
+    }
 
     #[test]
     fn wheel_direction_follows_the_natural_setting() {

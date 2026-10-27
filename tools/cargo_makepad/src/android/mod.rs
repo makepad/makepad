@@ -156,6 +156,7 @@ impl AndroidVariant {
                 <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"  />
                 <uses-permission android:name="android.permission.INTERNET" />
                 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+                <uses-permission android:name="android.permission.WAKE_LOCK" />
                 <uses-permission android:name="android.permission.BLUETOOTH"/>
                 <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
                 <uses-permission android:name="android.permission.CAMERA"/>

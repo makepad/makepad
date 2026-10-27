@@ -31,9 +31,7 @@
 //! tracker the view looks straight ahead and SUPER+SHIFT+CTRL+arrows turn
 //! it; SUPER+ALT+Home recenters.
 
-pub mod calibration;
 pub mod tracking;
-pub mod timewarp;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,9 +41,10 @@ use makepad_widgets::*;
 
 use makepad_app_host::ClientId;
 use crate::layout::LRect;
-use calibration::{DisplayCalibration, EyeCalibration, LensModel, ValveRadial};
-use tracking::{quat_axis_angle, quat_columns, quat_mul, quat_normalize, HeadTracker, TrackedPose, Tracking};
-use timewarp::EyeFrame;
+use makepad_xr_core::optics::{DisplayCalibration, EyeCalibration, LensModel, ValveRadial};
+use makepad_xr_core::pose::{quat_axis_angle, quat_columns, quat_mul, quat_normalize, TrackedPose, Tracking};
+use makepad_xr_core::warp::EyeFrame;
+use tracking::HeadTracker;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -1073,7 +1072,9 @@ impl StereoView {
         for (id, value) in optics.lens_uniforms(params, output.size) {
             draw.draw_vars.set_uniform(cx, id, &value);
         }
-        for (id, value) in frame.uniforms(&frame) {
+        let names = [live_id!(tw_lx), live_id!(tw_ly), live_id!(tw_lz), live_id!(tw_rx), live_id!(tw_ry), live_id!(tw_rz),
+            live_id!(tw_src_l), live_id!(tw_src_r), live_id!(tw_dst_l), live_id!(tw_dst_r)];
+        for (id, value) in names.into_iter().zip(frame.warp(&frame)) {
             draw.draw_vars.set_uniform(cx, id, &value);
         }
         draw.draw_abs(cx, output);

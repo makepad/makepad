@@ -140,6 +140,28 @@ pub fn discovery_path() -> Option<PathBuf> {
     Some(socket_path(&runtime_dir()?, 0))
 }
 
+/// Every socket a detached process may find its next WM at: the one its old WM exported first
+/// (a restarted WM often claims another index, and the exported path then names a stale
+/// file), then each `makepad-wm-<n>` that exists in the runtime directory.
+pub fn reattach_paths() -> Vec<PathBuf> {
+    let exported = std::env::var_os(SOCKET_ENV).filter(|p| !p.is_empty()).map(PathBuf::from);
+    reattach_paths_in(exported, runtime_dir())
+}
+
+fn reattach_paths_in(exported: Option<PathBuf>, dir: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    paths.extend(exported);
+    if let Some(dir) = dir {
+        for index in 0..MAX_INDEX {
+            let path = socket_path(&dir, index);
+            if path.exists() && !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
 fn connect(path: &Path) -> Result<UnixStream, Probe> {
     if !path.exists() {
         return Err(Probe::Absent);
@@ -413,6 +435,28 @@ mod tests {
         assert_eq!(WmSocket::bind(&dir, 1).unwrap().path, socket_path(&dir, 1), "a hidden WM never takes index 0");
         assert_eq!(again.path, path);
         drop(again);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn reattach_finds_the_live_wm_when_the_exported_path_is_stale() {
+        let dir = temp_dir("reattach");
+        let wire = 7;
+        // the old WM sat at index 1 and left its file; the new one took index 0
+        let stale = socket_path(&dir, 1);
+        drop(UnixListener::bind(&stale).unwrap());
+        let live = WmSocket::bind(&dir, 0).unwrap();
+        assert_eq!(live.path, socket_path(&dir, 0));
+        let paths = reattach_paths_in(Some(stale.clone()), Some(dir.clone()));
+        assert_eq!(paths, vec![stale.clone(), socket_path(&dir, 0)]);
+        let server = thread::spawn(move || {
+            let (stream, _) = live.listener.accept().unwrap();
+            WmSocket::serve(stream, wire, |_| Ok(Admission { port: 1, client: 2 })).unwrap();
+        });
+        let found = paths.iter().find_map(|p| adopt(p, wire, 9, "devhub").ok());
+        assert_eq!(found, Some(Admission { port: 1, client: 2 }));
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&stale);
         let _ = std::fs::remove_dir(&dir);
     }
 

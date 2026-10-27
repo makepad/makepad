@@ -454,7 +454,12 @@ impl Batch {
             // driver round trips) every few frames as a view's draw count wandered.
             let draws = self.draw_counts.get(&state).ok_or("pipeline missing from frame descriptor counts")?.next_power_of_two();
             let mut counts: FastMap<vk::DescriptorType, u32> = FastMap::default();
-            for (_, ty) in &p.descriptor_types { let count = counts.entry(*ty).or_default(); *count = count.saturating_add(draws); }
+            // (a combined image sampler through a Y'CbCr conversion may take up to three
+            // descriptors: combinedImageSamplerDescriptorCount)
+            for (_, ty) in &p.descriptor_types {
+                let per = if *ty == vk::DescriptorType::COMBINED_IMAGE_SAMPLER { 3 } else { 1 };
+                let count = counts.entry(*ty).or_default(); *count = count.saturating_add(draws.saturating_mul(per));
+            }
             let sizes: Vec<_> = counts.into_iter().map(|(ty, count)| vk::DescriptorPoolSize::default().ty(ty).descriptor_count(count)).collect();
             let pool = unsafe { self.dev.raw.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(draws).pool_sizes(&sizes), None) }.map_err(error)?;
             self.descriptors.insert(p.descriptors, (pool, draws, true)); pool
@@ -544,6 +549,11 @@ impl Batch {
                         Err(error) => eprintln!("[hal-vulkan] release FD export failed; waiting on completion worker: {error}"),
                     }
                 }
+            }
+            // a presenter that waits on the GPU itself (an XR compositor waits for the work
+            // submitted before an image's release) takes its frame now, not at the fence
+            if outcome == Outcome::Ran && self.scanout.as_ref().is_some_and(|s| s.0.at_queue()) {
+                if let Some(scanout) = self.scanout.take() { hand_over(scanout, self.prof_key, mailbox.clone()); }
             }
             match self.present.take() {
                 Some(present) if outcome == Outcome::Ran => {
@@ -760,21 +770,26 @@ impl Batch {
         drop(self);
         for (token, event) in out { mailbox.push(token, event); }
         if let Some((sid, window, image)) = tap { crate::frame_tap::offer(sid, window, &image); }
-        if let Some((presenter, image, token, target, native, owner, frame)) = scanout {
+        if let Some(scanout) = scanout {
             if failed {
-                presenter.dropped(owner, native);
+                scanout.0.dropped(scanout.5, scanout.4);
             } else {
-                let prof_key = self_prof_key;
-                presenter.submit(owner, native, image, Box::new(move |time| {
-                    // the presenter's time is when the frame reached the display
-                    if let Some(key) = prof_key { crate::gpu_prof::shown(key, time); }
-                    let sid = token.sid;
-                    lock(&mailbox.events).push(Done { token, time, event: Event::Presented { target, frame } });
-                    (mailbox.notify)(sid, true);
-                }));
+                hand_over(scanout, self_prof_key, mailbox);
             }
         }
     }
+}
+
+/// A frame for a presenter: its image, and what reports it shown to its session.
+fn hand_over(scanout: (Arc<dyn super::surface::FramePresenter>, Arc<Image>, Token, Id, Id, u32, u64), prof_key: Option<crate::gpu_prof::FrameKey>, mailbox: Mailbox) {
+    let (presenter, image, token, target, native, owner, frame) = scanout;
+    presenter.submit(owner, native, image, Box::new(move |time| {
+        // the presenter's time is when the frame reached the display
+        if let Some(key) = prof_key { crate::gpu_prof::shown(key, time); }
+        let sid = token.sid;
+        lock(&mailbox.events).push(Done { token, time, event: Event::Presented { target, frame } });
+        (mailbox.notify)(sid, true);
+    }));
 }
 
 impl Drop for Batch {

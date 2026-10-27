@@ -1,5 +1,5 @@
 use super::{jni, surface::{AndroidSurfaces, Registry}};
-use crate::{backend::{exec::{Gpu, OsCmd}, vulkan::{NativeImages, Shell, Vulkan}, Backend, Pixels}, buffers::{CmdView, EventQueue}, session::{World, HOST}, *};
+use crate::{backend::{exec::{Gpu, OsCmd}, vulkan::{Shell, Vulkan}, Backend, Pixels}, buffers::{CmdView, EventQueue}, session::{World, HOST}, *};
 use std::{collections::HashSet, sync::{Arc, Mutex, MutexGuard, OnceLock}};
 
 pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> { m.lock().unwrap_or_else(|e| e.into_inner()) }
@@ -138,6 +138,10 @@ impl Shell for AndroidShell {
             OsCmd::WindowVisuals { id, visuals, .. } if lock(&Shared::global().registry).xr_window == Some((sid, id)) => {
                 lock(&Shared::global().registry).xr_see_through = visuals & 0xff != 0; true
             }
+            OsCmd::XrFrameEyes { id, eyes, focus_m } if lock(&Shared::global().registry).xr_window == Some((sid, id)) => { super::xr::frame_eyes(eyes, focus_m); true }
+            OsCmd::XrPoseLead { id, lead_ns } if lock(&Shared::global().registry).xr_window == Some((sid, id)) => { super::xr::pose_lead(lead_ns); true }
+            // (the display's, whichever window asks: it may come before the XR window is registered)
+            OsCmd::XrRefreshRate { millihertz, .. } => { super::xr::refresh_rate(millihertz); true }
             OsCmd::FrameRequest { id } => { lock(&Shared::global().state).pending.insert((sid, id)); jni::request_frame(); true }
             cmd @ (OsCmd::ImeShow { .. } | OsCmd::ImeHide { .. } | OsCmd::ImeSync { .. }) => {
                 if lock(&Shared::global().state).ime_session != Some(sid) { return false; }
@@ -160,7 +164,7 @@ impl AndroidBackend {
             Some(xr) => Box::new(xr?),
             None => Box::new(AndroidSurfaces),
         };
-        let mut core = Vulkan::with_sources(flags, sessions, source, Box::new(NativeImages::default()))?;
+        let mut core = Vulkan::with_sources(flags, sessions, source, Box::new(crate::backend::vulkan::shared_images()))?;
         if !offscreen { core.set_shell(Box::new(AndroidShell)); }
         lock(&Shared::global().state).wake = Some(notify);
         Ok(Self { core, host: None, offscreen })

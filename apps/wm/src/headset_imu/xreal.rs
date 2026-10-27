@@ -12,7 +12,8 @@
 //! All discovery, TCP I/O, parsing and mode restoration run on the IMU worker.
 
 use super::{fusion::ImuSample, BackendKind, HeadsetImuSource, ImuBackend, Opened, Pumped};
-use crate::stereo::{calibration::{DisplayCalibration, EyeCalibration, LensModel}, XREAL_ONE_PRO_EDID};
+use crate::stereo::XREAL_ONE_PRO_EDID;
+use makepad_xr_core::optics::{DisplayCalibration, EyeCalibration, LensModel};
 use makepad_widgets::{log, Vec3f};
 use std::{
     fs,

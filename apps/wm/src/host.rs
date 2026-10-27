@@ -193,35 +193,41 @@ pub fn persist_shelf_autohide(cx: &mut Cx, sides: [bool; 2]) {
     let _ = cx.storage(STORAGE).set(cx, SHELF_AUTOHIDE_KEY, text.into_bytes());
 }
 
-/// Remember the touchpad's natural scrolling choice beside the theme's state
-/// file (the direct backend reads the touchpad itself; elsewhere the OS owns it).
-pub fn persist_natural_scroll(on: bool) {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = std::fs::write(crate::theme::themes_dir().join("../current-natural-scroll"), if on { "on" } else { "off" });
-    }
-    let _ = on;
+/// The file beside the theme's state that keeps a device class's natural scrolling choice.
+#[cfg(not(target_arch = "wasm32"))]
+fn natural_scroll_file(touchpad: bool) -> std::path::PathBuf {
+    crate::theme::themes_dir().join(if touchpad { "../current-natural-scroll-touchpad" } else { "../current-natural-scroll-mouse" })
 }
 
-/// The saved natural scrolling choice: on (as on a Mac) unless turned off.
-pub fn load_natural_scroll() -> bool {
+/// Remember natural scrolling for mouse wheels or touchpads beside the theme's state file
+/// (the direct backend reads the devices itself; elsewhere the OS owns the choice).
+pub fn persist_natural_scroll(touchpad: bool, on: bool) {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        return std::fs::read_to_string(crate::theme::themes_dir().join("../current-natural-scroll"))
-            .map_or(true, |text| text.trim() != "off");
+        let _ = std::fs::write(natural_scroll_file(touchpad), if on { "on" } else { "off" });
+    }
+    let _ = (touchpad, on);
+}
+
+/// The saved natural scrolling choice of a device class: on (as on a Mac) unless turned off.
+pub fn load_natural_scroll(touchpad: bool) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        return std::fs::read_to_string(natural_scroll_file(touchpad)).map_or(true, |text| text.trim() != "off");
     }
     #[cfg(target_arch = "wasm32")]
-    true
+    {
+        let _ = touchpad;
+        true
+    }
 }
 
-/// Applies the natural scrolling choice to the direct backend's touchpad.
-pub fn apply_natural_scroll(on: bool) {
+/// Applies natural scrolling for mouse wheels or touchpads in the direct backend, the one
+/// place the WM's scroll direction is decided (Desk Link's injected wheel is never turned).
+pub fn apply_natural_scroll(touchpad: bool, on: bool) {
     #[cfg(target_os = "linux")]
-    {
-        makepad_widgets::makepad_platform::linux_input::set_natural_scroll(on);
-        crate::desk_link::inject::NATURAL_SCROLL.store(on, std::sync::atomic::Ordering::Relaxed);
-    }
-    let _ = on;
+    makepad_widgets::makepad_platform::linux_input::set_natural_scroll(touchpad, on);
+    let _ = (touchpad, on);
 }
 
 /// Remember the touchpad's tap to click choice beside natural scrolling's.

@@ -218,6 +218,8 @@ pub struct LibOpenXr {
     pub xrAcquireEnvironmentDepthImageMETA: TxrAcquireEnvironmentDepthImageMETA,
     pub xrReleaseSwapchainImage: TxrReleaseSwapchainImage,
     pub xrUpdateSwapchainFB: Option<TxrUpdateSwapchainFB>,
+    pub xrSetPerformanceMetricsStateMETA: Option<TxrSetPerformanceMetricsStateMETA>,
+    pub xrQueryPerformanceMetricsCounterMETA: Option<TxrQueryPerformanceMetricsCounterMETA>,
     pub xrEndSession: TxrEndSession,
     pub xrStopEnvironmentDepthProviderMETA: TxrStopEnvironmentDepthProviderMETA,
     pub xrDestroyEnvironmentDepthProviderMETA: TxrDestroyEnvironmentDepthProviderMETA,
@@ -393,6 +395,8 @@ impl LibOpenXr {
             )?,
             xrReleaseSwapchainImage: get_proc_addr!(gipa, instance, TxrReleaseSwapchainImage)?,
             xrUpdateSwapchainFB: get_optional_proc_addr!(gipa, instance, TxrUpdateSwapchainFB),
+            xrSetPerformanceMetricsStateMETA: get_optional_proc_addr!(gipa, instance, TxrSetPerformanceMetricsStateMETA),
+            xrQueryPerformanceMetricsCounterMETA: get_optional_proc_addr!(gipa, instance, TxrQueryPerformanceMetricsCounterMETA),
             xrEndSession: get_proc_addr!(gipa, instance, TxrEndSession)?,
             xrStopEnvironmentDepthProviderMETA: get_proc_addr!(
                 gipa,
@@ -783,6 +787,38 @@ pub type TxrUpdateSwapchainFB = unsafe extern "C" fn(
 ) -> XrResult;
 
 pub type TxrEndSession = unsafe extern "C" fn(session: XrSession) -> XrResult;
+
+// XR_META_performance_metrics
+pub type TxrSetPerformanceMetricsStateMETA = unsafe extern "C" fn(
+    session: XrSession,
+    state: *const XrPerformanceMetricsStateMETA,
+) -> XrResult;
+pub type TxrQueryPerformanceMetricsCounterMETA = unsafe extern "C" fn(
+    session: XrSession,
+    counter_path: XrPath,
+    counter: *mut XrPerformanceMetricsCounterMETA,
+) -> XrResult;
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrPerformanceMetricsStateMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub enabled: XrBool32,
+}
+
+/// `counter_flags`: bit 0 any value valid, bit 1 `uint_value` valid, bit 2 `float_value` valid;
+/// `counter_unit`: 0 generic, 1 percentage, 2 milliseconds, 3 bytes, 4 hertz.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrPerformanceMetricsCounterMETA {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub counter_flags: u64,
+    pub counter_unit: i32,
+    pub uint_value: u32,
+    pub float_value: f32,
+}
 
 pub type TxrStopEnvironmentDepthProviderMETA =
     unsafe extern "C" fn(environment_depth_provider: XrEnvironmentDepthProviderMETA) -> XrResult;
@@ -2173,6 +2209,19 @@ pub struct XrSwapchainSubImage {
     pub image_array_index: u32,
 }
 
+/// XR_KHR_composition_layer_depth: a projection view's depth (chained to its `next`).
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrCompositionLayerDepthInfoKHR {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub sub_image: XrSwapchainSubImage,
+    pub min_depth: f32,
+    pub max_depth: f32,
+    pub near_z: f32,
+    pub far_z: f32,
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct XrCompositionLayerProjectionView {
@@ -2434,6 +2483,23 @@ pub struct XrSpaceLocation {
     pub next: *mut c_void,
     pub location_flags: XrSpaceLocationFlags,
     pub pose: XrPosef,
+}
+
+/// XrSpaceVelocity (chained to an XrSpaceLocation): linear (m/s) and angular (rad/s) velocity.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrSpaceVelocity {
+    pub ty: XrStructureType,
+    pub next: *mut c_void,
+    pub velocity_flags: u64,
+    pub linear_velocity: XrVector3f,
+    pub angular_velocity: XrVector3f,
+}
+
+impl Default for XrSpaceVelocity {
+    fn default() -> Self {
+        XrSpaceVelocity { ty: XrStructureType::SPACE_VELOCITY, next: 0 as *mut _, velocity_flags: 0, linear_velocity: XrVector3f::default(), angular_velocity: XrVector3f::default() }
+    }
 }
 
 impl XrSpaceLocation {

@@ -1,0 +1,8 @@
+[package]
+name = "makepad-xr-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "The device-independent XR shell parts: head poses and their sources, display optics, reprojection, shared by the WM's tethered headsets, the HAL XR backends and remote rendering"
+
+[dependencies]

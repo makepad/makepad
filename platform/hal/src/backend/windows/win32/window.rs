@@ -712,6 +712,9 @@ pub(super) fn handles(cmd: &OsCmd) -> bool {
             | OsCmd::TraySet { .. }
             | OsCmd::TrayRemove { .. }
             | OsCmd::WindowAtTray { .. }
+            | OsCmd::XrFrameEyes { .. }
+            | OsCmd::XrPoseLead { .. }
+            | OsCmd::XrRefreshRate { .. }
             | OsCmd::FileDialog { .. }
             | OsCmd::AppIcon { .. }
     )

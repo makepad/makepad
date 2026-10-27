@@ -87,4 +87,61 @@ impl HardwareBuffer {
             if imported { vk::ImageLayout::GENERAL } else { vk::ImageLayout::UNDEFINED }, Some(native)) }?;
         image.external_owner.store(imported, Ordering::Release); Ok(image)
     }
+
+    /// A decoder's picture (`native`, a Y'CbCr hardware buffer, typically of a vendor format
+    /// Vulkan knows only as an external format) as one sampled video texture over its memory,
+    /// through its format's Y'CbCr conversion (`Device::video_sampler`): sampled with that
+    /// sampler it gives the raw codes (.g = Y', .b = Cb, .r = Cr). Nothing is copied.
+    pub(super) fn import_video(dev: Arc<Device>, native: Arc<Self>) -> Result<Arc<Image>, String> {
+        if !Self::extensions().iter().all(|e| dev.supports(e)) { return Err("device lacks AHardwareBuffer/foreign sharing".into()); }
+        let mut description = Description::default();
+        unsafe { AHardwareBuffer_describe(native.as_ptr(), &mut description); }
+        let mut format_properties = vk::AndroidHardwareBufferFormatPropertiesANDROID::default();
+        let mut properties = vk::AndroidHardwareBufferPropertiesANDROID::default().next_android_hardware_buffer_format_properties_android(&mut format_properties);
+        unsafe { dev.raw.get_android_hardware_buffer_properties(native.as_ptr(), &mut properties) }.map_err(error)?;
+        let external_format = format_properties.external_format;
+        if external_format == 0 { return Err(format!("the picture's buffer (format {:#x}) has no external format", description.format)); }
+        format_properties.p_next = std::ptr::null_mut();
+        // (once per external format: what the driver makes of the buffer; a compressed (UBWC)
+        // allocation shows as its own external format and a larger allocation)
+        #[cfg(target_os = "android")]
+        {
+            static SEEN: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+            let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+            if !seen.contains(&external_format) {
+                seen.push(external_format);
+                crate::backend::android::xr::log(&format!("video import: buffer format {:#x} usage {:#x} {}x{} stride {} -> external format {:#x}, allocation {} B, features {:#x}, suggested model {} range {} chroma offsets {}/{}",
+                    description.format, description.usage, description.width, description.height, description.stride, external_format, properties.allocation_size,
+                    format_properties.format_features.as_raw(), format_properties.suggested_ycbcr_model.as_raw(), format_properties.suggested_ycbcr_range.as_raw(),
+                    format_properties.suggested_x_chroma_offset.as_raw(), format_properties.suggested_y_chroma_offset.as_raw()));
+            }
+        }
+        let video = dev.video_sampler(external_format, Some(&format_properties))?;
+        let mut external = vk::ExternalMemoryImageCreateInfo::default().handle_types(vk::ExternalMemoryHandleTypeFlags::ANDROID_HARDWARE_BUFFER_ANDROID);
+        let mut format = vk::ExternalFormatANDROID { external_format, ..Default::default() };
+        let info = vk::ImageCreateInfo::default().next_external_memory_image_create_info(&mut external).next_external_format_android(&mut format)
+            .image_type(vk::ImageType::TYPE_2D).format(vk::Format::UNDEFINED).extent(vk::Extent3D { width: description.width, height: description.height, depth: 1 })
+            .mip_levels(1).array_layers(1).samples(vk::SampleCountFlags::TYPE_1).tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::SAMPLED).sharing_mode(vk::SharingMode::EXCLUSIVE).initial_layout(vk::ImageLayout::UNDEFINED);
+        let image = unsafe { dev.raw.create_image(&info, None) }.map_err(error)?;
+        let mut memory = vk::DeviceMemory::null();
+        let result = (|| {
+            let ty = dev.memory_type(properties.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                .or_else(|_| dev.memory_type(properties.memory_type_bits, vk::MemoryPropertyFlags::empty()))?;
+            let mut import = vk::ImportAndroidHardwareBufferInfoANDROID::default().buffer(native.as_ptr());
+            let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().image(image);
+            memory = unsafe { dev.raw.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(properties.allocation_size).memory_type_index(ty)
+                .next_import_android_hardware_buffer_info_android(&mut import).next_memory_dedicated_allocate_info(&mut dedicated), None) }.map_err(error)?;
+            unsafe { dev.raw.bind_image_memory(image, memory, 0) }.map_err(error)
+        })();
+        if let Err(e) = result { unsafe { dev.raw.destroy_image(image, None); dev.raw.free_memory(memory, None); } return Err(e); }
+        // (an RGBA8 stand-in: the texture's format for the HAL's bookkeeping; its views are the conversion's)
+        let desc = TextureObj { format: format::RGBA8, w: description.width, h: description.height, depth: 1, mips: 1, usage: usage::SAMPLED, bytes: 0, imported: true, uploaded: 0, lent: None };
+        let image = match unsafe { Image::external_video(dev.clone(), desc, image, memory, video, Some(native)) } {
+            Ok(i) => i,
+            Err(e) => { unsafe { dev.raw.destroy_image(image, None); dev.raw.free_memory(memory, None); } return Err(e); }
+        };
+        image.external_owner.store(true, Ordering::Release);
+        Ok(image)
+    }
 }

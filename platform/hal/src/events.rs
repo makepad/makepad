@@ -302,7 +302,7 @@ hal_events! {
     /// Later device failures are inventory statuses. `message` is UTF-8 on failure.
     DirectDisplayResult = 135, direct_display_result { req: u64, command: u32, ok: bool, message: rng };
     /// Initial host preferences and changes applied by this owner.
-    DirectInput = 136, direct_input { window: obj, mouse_speed: u32, touchpad_speed: u32, natural_scroll: bool, tap_to_click: bool };
+    DirectInput = 136, direct_input { window: obj, mouse_speed: u32, touchpad_speed: u32, natural_scroll_mouse: bool, natural_scroll_touchpad: bool, tap_to_click: bool };
 
     /// The soft keyboard starts to move: it will cover `height` window points of the window's
     /// bottom (`open`), or go away, over `duration` seconds along `curve` (`ime_curve::*`). The
@@ -334,5 +334,9 @@ hal_events! {
     /// head, eyes and hands then, one `XrFrame` (`buffers::Wire`) in the payload. The window's
     /// FrameReady follows; that frame is drawn with these eyes.
     XrFrame = 150, xr_frame { window: obj, display_ns: u64, frame: rng };
+    /// An XR window's environment depth (XR_META_environment_depth, where the headset has it):
+    /// one `XrDepth` header (`buffers::Wire`) then its D16 texels in the payload. Sent as the
+    /// HAL reads them back (it never waits for one), at most one per display frame.
+    XrDepth = 151, xr_depth { window: obj, display_ns: u64, depth: rng };
     TrayClick = 149, tray_click { tray: u64, x: f64, y: f64, w: f64, h: f64, screen: rect };
 }

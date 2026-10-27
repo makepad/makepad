@@ -906,7 +906,7 @@ impl Cache {
                 c.iface_plain.truncate(ncr);
             }
         }
-        let provided: Vec<(u32, u64)> = u.provided.iter().map(|(k, pc)| (*k, pc.source)).collect();
+        let provided: Vec<(u32, u64)> = u.provided.iter().map(|(k, pc)| (*k, pc.binding)).collect();
         c.iface = items::apply_bound(prog, &c.iface_plain, &provided);
         c.stats.iface_ns = t_if.elapsed().as_nanos() as u64;
         // MAKEPAD_RUN_CACHE_IFACE=<file>: every file's interface hash and crate's interface

@@ -69,6 +69,18 @@ impl Wire for TouchPoint {
     }
 }
 
+/// `XrEye`: orientation, position, fov, 4 bytes each (floats as their bits).
+impl Wire for XrEye {
+    const SIZE: usize = 11 * 4;
+    fn write(&self, out: &mut Vec<u8>) {
+        for x in self.pose.orientation.iter().chain(self.pose.position.iter()).chain(self.fov.iter()) { w32(out, x.to_bits()); }
+    }
+    fn read(b: &[u8]) -> Self {
+        let f = |i: usize| f32::from_bits(r32(b, i * 4));
+        XrEye { pose: XrPose { orientation: [f(0), f(1), f(2), f(3)], position: [f(4), f(5), f(6)] }, fov: [f(7), f(8), f(9), f(10)] }
+    }
+}
+
 /// `XrFrame`: its fields in declaration order, 4 bytes each (floats as their bits, integers as
 /// u32; a hand's pinch strengths one u32 each).
 impl Wire for XrFrame {
@@ -112,6 +124,31 @@ impl Wire for XrFrame {
         };
         let hands = [hand(&mut u), hand(&mut u)];
         XrFrame { head, eyes, controllers, hands }
+    }
+}
+
+impl Wire for XrDepth {
+    const SIZE: usize = (5 + 2 * 11 + 2) * 4;
+    fn write(&self, out: &mut Vec<u8>) {
+        let f = |out: &mut Vec<u8>, v: &[f32]| for x in v { w32(out, x.to_bits()); };
+        w32(out, self.width);
+        w32(out, self.height);
+        w32(out, self.layers);
+        f(out, &[self.near, self.far]);
+        for e in &self.views { f(out, &e.pose.orientation); f(out, &e.pose.position); f(out, &e.fov); }
+        w32(out, self.image as u32);
+        w32(out, (self.image >> 32) as u32);
+    }
+    fn read(b: &[u8]) -> Self {
+        let mut at = 0;
+        let mut u = || { let v = r32(b, at); at += 4; v };
+        let (width, height, layers) = (u(), u(), u());
+        let mut f = || f32::from_bits(u());
+        let (near, far) = (f(), f());
+        let mut eye_view = || XrEye { pose: XrPose { orientation: [f(), f(), f(), f()], position: [f(), f(), f()] }, fov: [f(), f(), f(), f()] };
+        let views = [eye_view(), eye_view()];
+        let image = u() as u64 | (u() as u64) << 32;
+        XrDepth { width, height, layers, near, far, views, image }
     }
 }
 

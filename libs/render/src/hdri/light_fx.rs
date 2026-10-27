@@ -5,7 +5,9 @@
 //! code draws it first, whatever its shape and content (rect, disc, polygon,
 //! stroke, scrim, image); then `apply` scales what the light did to the map:
 //!
-//!     result = before + (after - before) x k
+//! ```text
+//! result = before + (after - before) x k
+//! ```
 //!
 //! - an emitter (Add): k = what passes the gobo, the doors and the grid,
 //!   times the face's own wear;

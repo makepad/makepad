@@ -7,7 +7,7 @@
 //! - [`Spring`] / [`SpringRect`]: a critically damped spring. It follows a
 //!   target that may change at any moment; a change of target keeps the
 //!   position AND the velocity, so an interrupted move bends into the new one
-//!   instead of restarting. Window rects (park, unpark, cycle, tidy, shake,
+//!   instead of restarting. Window rects (park, unpark, cycle, tidy,
 //!   history scrub, move / resize / tile shortcuts, fullscreen enter and
 //!   exit), the space slide and its jumps all use it.
 //! - [`Ease`]: a fixed-duration move (the space strip sliding in and out).

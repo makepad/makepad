@@ -215,7 +215,10 @@ impl<'a> Gen<'a> {
                 if dim == DIM_CUBE && arrayed {
                     self.b.capability(CAP_SAMPLED_CUBE_ARRAY);
                 }
-                self.b.type_image(f, dim, depth, arrayed)
+                let image = self.b.type_image(f, dim, depth, arrayed);
+                // a video texture is a combined image sampler (its sampler is the binding's own:
+                // a decoder's picture is sampled through its format's Y'CbCr conversion)
+                if matches!(tt, TextureType::TextureVideo) { self.b.type_sampled_image(image) } else { image }
             }
             IrTy::Sampler(_) => self.b.type_sampler(),
         };
@@ -1826,7 +1829,26 @@ impl<'a> Gen<'a> {
 
     // ---- textures ----
 
+    /// Whether texture expression `tex` is a video texture (a combined image sampler).
+    fn is_video(&self, tex: ExprId) -> bool {
+        matches!(self.m.get(self.ety(tex)), IrTy::Texture(TextureType::TextureVideo))
+    }
+
+    /// The image of texture expression `tex` (a video texture's, out of its combined sampler).
+    fn image_of(&mut self, tex: ExprId) -> Result<u32, String> {
+        let v = self.value(tex)?;
+        if !self.is_video(tex) {
+            return Ok(v);
+        }
+        let f = self.b.type_f32();
+        let image = self.b.type_image(f, DIM_2D, false, false);
+        Ok(self.ins_id(OP_IMAGE, image, &[v]))
+    }
+
     fn sampled_image(&mut self, tex: ExprId, sampler: u32) -> Result<u32, String> {
+        if self.is_video(tex) {
+            return self.value(tex);
+        }
         let img = self.value(tex)?;
         let tex_ty = self.ety(tex);
         let it = self.ty(tex_ty);
@@ -1883,7 +1905,7 @@ impl<'a> Gen<'a> {
 
     fn tex_size(&mut self, tex: ExprId, ty: TyId) -> Result<u32, String> {
         self.b.capability(CAP_IMAGE_QUERY);
-        let img = self.value(tex)?;
+        let img = self.image_of(tex)?;
         let tex_ty = self.ety(tex);
         let tt = match self.m.get(tex_ty) {
             IrTy::Texture(t) => *t,
@@ -1908,7 +1930,7 @@ impl<'a> Gen<'a> {
     }
 
     fn tex_load(&mut self, tex: ExprId, coord: ExprId, layer: ExprId, lod: ExprId, ty: TyId) -> Result<u32, String> {
-        let img = self.value(tex)?;
+        let img = self.image_of(tex)?;
         let c = self.value(coord)?;
         let c = if layer != NO_EXPR {
             let l = self.value(layer)?;

@@ -280,6 +280,9 @@ impl Cx {
         // hit exactly this). Parentless passes keep their old "run first"
         // contract via the depth bias.
         const ROOT_NONE_BIAS: u64 = 1 << 32;
+        // An offscreen XR pass (`info_flags::XR_OFFSCREEN`) produces textures the app hands on
+        // (packs, mirrors them): it runs before everything else, its own producers before it.
+        let xr_offscreen = self.xr_offscreen();
         for draw_pass_id in self.passes.id_iter() {
             let requested = std::mem::take(&mut self.passes[draw_pass_id].repaint_requested);
             if self.passes[draw_pass_id].paint_dirty
@@ -303,6 +306,7 @@ impl Cx {
                         }
                     }
                     CxDrawPassParent::None => return depth + ROOT_NONE_BIAS,
+                    CxDrawPassParent::Xr if xr_offscreen => return depth + 2 * ROOT_NONE_BIAS,
                     _ => return depth,
                 }
             }

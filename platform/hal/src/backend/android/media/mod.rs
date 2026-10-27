@@ -26,6 +26,7 @@ mod video;
 mod mediacodec;
 pub mod hevc;
 pub mod stream_encode;
+pub mod stream_decode;
 pub mod video_file;
 
 use crate::{
@@ -599,6 +600,12 @@ pub fn native_methods() -> Vec<(&'static str, &'static str, *mut c_void)> {
     methods.extend(midi::native_methods());
     methods
 }
+/// The low-latency Wi-Fi mode while `on` (no power save, no background scans: a radio that
+/// naps between packets adds tens of ms to a stream's frames).
+pub fn network_low_latency(on: bool) -> Result<(), String> {
+    java(|env, activity| unsafe { void(env, activity, c"networkLowLatency", c"(Z)V", &[jvalue { z: on as u8 }]) })
+}
+
 // Small JNI helpers shared only by this slice. Local references live in a frame;
 // globals retain their JVM so cleanup also works after activityOnDestroy.
 fn java<R>(f: impl FnOnce(*mut JNIEnv, jobject) -> Result<R, String>) -> Result<R, String> {
