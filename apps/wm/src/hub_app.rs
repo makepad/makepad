@@ -352,6 +352,9 @@ pub struct Supervised<C: ServiceConf> {
     started_at: f64,
     /// When the first start began waiting for the WM's socket.
     socket_wait: Option<f64>,
+    /// A kept app must come to this WM's socket by this time or it is stopped and started
+    /// fresh (a tray process that never reattached would stay out of sight for good).
+    adopt_by: Option<f64>,
     /// Hubs an earlier WM generation left on this port, being stopped: pid, SIGKILL time.
     rivals: Vec<(u32, f64)>,
 }
@@ -373,6 +376,7 @@ impl<C: ServiceConf> Supervised<C> {
             kill_at: None,
             started_at: 0.0,
             socket_wait: None,
+            adopt_by: None,
             rivals: Vec::new(),
         }
     }
@@ -439,6 +443,7 @@ impl<C: ServiceConf> Supervised<C> {
             self.running = Some(Running::Adopted(pid));
             self.restart_at = None;
             self.started_at = now;
+            self.adopt_by = Some(now + ADOPT_WAIT_S);
             // An orphan of an older generation may hold the port or the cache it needs: the kept
             // app's start is tried again on its own once they are gone.
             self.stop_rivals(now);
@@ -620,6 +625,19 @@ impl<C: ServiceConf> Supervised<C> {
                 self.kill_at = None;
             }
         }
+        if let (Some(Running::Adopted(pid)), Some(by)) = (&self.running, self.adopt_by) {
+            let pid = *pid;
+            if note_adopted_seen(pid) {
+                self.adopt_by = None;
+            } else if now >= by && self.kill_at.is_none() {
+                makepad_widgets::log!("wm: {label}: kept pid {pid} did not come to this WM within {ADOPT_WAIT_S} s; stopping it to start a fresh one");
+                #[cfg(unix)]
+                makepad_app_host::launch::signal_group(pid, false);
+                self.kill_at = Some(now + STOP_GRACE.as_secs_f64());
+                self.restart_pending = true;
+                self.adopt_by = None;
+            }
+        }
         let exited = match self.running.as_mut() {
             Some(Running::Child(child)) => match child.try_wait() {
                 Ok(Some(status)) => Some(status.to_string()),
@@ -702,6 +720,21 @@ impl<C: ServiceConf> Supervised<C> {
             makepad_app_host::launch::kill_child_group(child, STOP_GRACE, pool);
         }
     }
+}
+
+/// How long a kept app has to come to the new WM's socket.
+const ADOPT_WAIT_S: f64 = 10.0;
+
+/// Service pids that came to this WM's socket.
+static ADOPTED: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+/// The WM admitted service `pid` (adopt.rs).
+pub fn note_adopted(pid: u32) {
+    if let Ok(mut v) = ADOPTED.lock() { v.push(pid); }
+}
+
+fn note_adopted_seen(pid: u32) -> bool {
+    ADOPTED.lock().map_or(true, |v| v.contains(&pid))
 }
 
 /// Whether `pid` is the AI Hub app this node's WMs started (`ai-hub.state` names it): when its
