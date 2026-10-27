@@ -12,7 +12,7 @@
 //! Readers (physics queries, peers) take the published `Arc` snapshot from the store.
 
 use crate::*;
-use makepad_math::{vec3f, vec4f, CameraFov, Mat4f, Pose, Quat};
+use makepad_math::{vec3f, vec4f, CameraFov, Mat4f, Pose, Quat, Vec4f};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -40,6 +40,10 @@ pub struct DepthFrame {
     pub far: f32,
     pub views: [DepthFrameView; 2],
     pub depth: Vec<u16>,
+    /// Spheres (local space x, y, z, radius in metres) whose depth texels stay out of the room
+    /// field: the tracked hands, so the depth image can keep them for occlusion while the field
+    /// holds only the room.
+    pub exclude: Vec<[f32; 4]>,
 }
 
 struct PendingDepthCandidate {
@@ -49,7 +53,7 @@ struct PendingDepthCandidate {
 
 /// The frame side of the depth writer (one per process: the store is the process's).
 pub struct DepthWriter {
-    mailbox: Sender<DepthMeshJob>,
+    mailbox: Sender<(DepthMeshJob, Vec<[f32; 4]>)>,
     store: XrTsdfStore,
     next_generation: u64,
     last_reset_generation: u64,
@@ -64,7 +68,10 @@ impl DepthWriter {
         let worker_store = store.clone();
         std::thread::Builder::new()
             .name("xr-tsdf-depth-writer".into())
-            .spawn(move || depth_preprocess_tsdf_writer_worker(receiver, worker_store))
+            .spawn(move || {
+                background_priority();
+                depth_preprocess_tsdf_writer_worker(receiver, worker_store)
+            })
             .map_err(|e| format!("depth worker unavailable: {e}"))?;
         Ok(Self { mailbox: sender, store, next_generation: 1, last_reset_generation: 0, last_depth_readback_at: None })
     }
@@ -122,7 +129,7 @@ impl DepthWriter {
             world_from_depth_view,
             depth: frame.depth,
         };
-        if self.mailbox.send(job).is_err() {
+        if self.mailbox.send((job, frame.exclude)).is_err() {
             let error = "depth worker is unavailable".to_string();
             self.store.set_error(error.clone());
             return Err(error);
@@ -159,7 +166,66 @@ fn enqueue_pending_depth_candidate(pending_depth_candidate: &mut Option<PendingD
     }
 }
 
-fn depth_preprocess_tsdf_writer_worker(mailbox: Receiver<DepthMeshJob>, store: XrTsdfStore) {
+/// The worker yields to the frame threads: it runs as long as it is given (a whole core while
+/// the room changes), and at the app's own priority it held the headset's frame loop late.
+fn background_priority() {
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    {
+        extern "C" {
+            fn setpriority(which: i32, who: u32, prio: i32) -> i32;
+            fn gettid() -> i32;
+        }
+        // (PRIO_PROCESS with a thread id: that thread alone)
+        unsafe { setpriority(0, gettid() as u32, 10) };
+    }
+}
+
+/// Clears (to 0, no depth) the texels whose point lies inside one of `spheres` (local space
+/// x, y, z, radius): each sphere's centre is projected into the image and only the texels of its
+/// bounding square are unprojected and tested.
+fn mask_depth_spheres(job: &mut DepthMeshJob, spheres: &[[f32; 4]]) {
+    let (w, h) = (job.width as i32, job.height as i32);
+    let pixel = |p: Vec4f| {
+        let clip = job.depth_proj.transform_vec4(p);
+        (clip.w > 1.0e-6).then(|| (((clip.x / clip.w) * 0.5 + 0.5) * w as f32, ((clip.y / clip.w) * 0.5 + 0.5) * h as f32))
+    };
+    for s in spheres {
+        let c = job.depth_view_from_world.transform_vec4(vec4f(s[0], s[1], s[2], 1.0));
+        let c = vec3f(c.x / c.w, c.y / c.w, c.z / c.w);
+        // in front of the camera (it looks down -z) and past its own radius
+        if -c.z <= s[3] {
+            continue;
+        }
+        let (Some((px, py)), Some((ex, _)), Some((_, ey))) =
+            (pixel(vec4f(c.x, c.y, c.z, 1.0)), pixel(vec4f(c.x + s[3], c.y, c.z, 1.0)), pixel(vec4f(c.x, c.y + s[3], c.z, 1.0)))
+        else {
+            continue;
+        };
+        let r = ((ex - px).abs().max((ey - py).abs()) * 1.2).ceil() as i32 + 1;
+        let (x0, x1, y0, y1) = ((px as i32 - r).max(0), (px as i32 + r).min(w - 1), (py as i32 - r).max(0), (py as i32 + r).min(h - 1));
+        let r2 = s[3] * s[3];
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let i = (y * w + x) as usize;
+                let raw = job.depth[i] as f32 / u16::MAX as f32;
+                if raw <= 0.0 || raw >= 1.0 {
+                    continue;
+                }
+                let uv = vec4f(((x as f32 + 0.5) / w as f32) * 2.0 - 1.0, ((y as f32 + 0.5) / h as f32) * 2.0 - 1.0, raw * 2.0 - 1.0, 1.0);
+                let v = job.inv_depth_proj.transform_vec4(uv);
+                if v.w.abs() < 1.0e-6 {
+                    continue;
+                }
+                let d = vec3f(v.x / v.w - c.x, v.y / v.w - c.y, v.z / v.w - c.z);
+                if d.x * d.x + d.y * d.y + d.z * d.z < r2 {
+                    job.depth[i] = 0;
+                }
+            }
+        }
+    }
+}
+
+fn depth_preprocess_tsdf_writer_worker(mailbox: Receiver<(DepthMeshJob, Vec<[f32; 4]>)>, store: XrTsdfStore) {
     let mut preprocess_state = DepthPreprocessWorkerState::default();
     let mut volume = DepthMeshVolume::new(store.voxel_size_meters());
     let mut next_height_map_slice_at = Instant::now();
@@ -194,6 +260,8 @@ fn depth_preprocess_tsdf_writer_worker(mailbox: Receiver<DepthMeshJob>, store: X
                         Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
                     }
                 }
+                let (mut job, exclude) = job;
+                mask_depth_spheres(&mut job, &exclude);
                 if job.reset_generation == store.reset_generation() && (job.voxel_size_meters - store.voxel_size_meters()).abs() <= f32::EPSILON {
                     let candidate = PendingDepthCandidate { novelty: score_depth_job_novelty(&volume, &job), job };
                     enqueue_pending_depth_candidate(&mut pending_depth_candidate, candidate, &store);

@@ -79,6 +79,9 @@ pub struct XrRemoteView {
     switches_at: Option<std::time::Instant>,
     #[rust]
     clear_tint: bool,
+    /// The refresh rate asked for (Hz; 0 before the first ask).
+    #[rust]
+    refresh_hz: u8,
 }
 
 impl XrRemoteView {
@@ -127,7 +130,9 @@ impl XrRemoteView {
                 Err(e) => log!("xr remote: no fleet identity: {e}"),
             }
         }
-        let refresh = cx.xr_display_refresh_rate_hz().unwrap_or(72.0);
+        // the rate the display is asked to run at (`debug.xrremote.hz`, default 90): the server
+        // encodes for it (its pictures are paced by the poses, one per display frame)
+        let refresh = device_property("debug.xrremote.hz").and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(90.0);
         log!("xr remote: linking to {host}:{port} at {refresh} Hz");
         self.client = Some(XrStreamClient::connect(host, port, [1680, 1760], refresh));
     }
@@ -140,7 +145,8 @@ impl Widget for XrRemoteView {
         }
         if self.presenting {
             // the debug switches (`adb shell setprop debug.xrremote.<name> 0|1`), read once a
-            // second: `occlusion` (default 1) the room's depth hides the picture, `opaque`
+            // second: `occlusion` (default 1) the room's depth hides the picture (2: the room's
+            // depth shown instead of the picture as 10 cm contour bands), `opaque`
             // (default 0) 1 the picture covers the room whatever its coverage, 2 a flat magenta
             // instead (the draw reaches the view), `clear` (default 0) 1 a green tint under it
             // (the XR pass reaches the view), `owneyes` (default 0) 1 the frame shows with the
@@ -148,7 +154,8 @@ impl Widget for XrRemoteView {
             if self.switches_at.map_or(true, |t| t.elapsed().as_secs() >= 1) {
                 self.switches_at = Some(std::time::Instant::now());
                 let switch = |name: &str, default: u8| device_property(name).and_then(|v| v.trim().parse::<u8>().ok()).unwrap_or(default);
-                let (occlusion, opaque, clear) = (switch("debug.xrremote.occlusion", 1) != 0, switch("debug.xrremote.opaque", 0), switch("debug.xrremote.clear", 0) != 0);
+                let occlusion_switch = switch("debug.xrremote.occlusion", 1);
+                let (occlusion, opaque, clear) = (occlusion_switch != 0, switch("debug.xrremote.opaque", 0), switch("debug.xrremote.clear", 0) != 0);
                 let was = self.client.as_ref().map_or((true, 0), |c| (c.occlusion, c.opaque));
                 if (occlusion, opaque, clear) != (was.0, was.1, self.clear_tint) {
                     log!("xr remote: occlusion {occlusion}, opaque {opaque}, clear tint {clear}");
@@ -158,12 +165,21 @@ impl Widget for XrRemoteView {
                         self.pass.set_window_clear_color(cx, c);
                     }
                 }
+                // `hz` (default 90): the display's refresh rate (the supported one nearest)
+                let hz = switch("debug.xrremote.hz", 90);
+                if hz != self.refresh_hz {
+                    self.refresh_hz = hz;
+                    log!("xr remote: refresh rate {hz} Hz asked");
+                    cx.xr_set_refresh_rate(hz as f32);
+                }
                 if let Some(client) = self.client.as_mut() {
                     client.occlusion = occlusion;
                     client.opaque = opaque;
                     let own = switch("debug.xrremote.owneyes", 0) != 0;
                     if own != client.own_eyes { log!("xr remote: own eyes {own}"); }
                     client.own_eyes = own;
+                    client.room_view = occlusion_switch == 2;
+                    client.env_map = switch("debug.xrremote.envmap", 0);
                 }
             }
         }

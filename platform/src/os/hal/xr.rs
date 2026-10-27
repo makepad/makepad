@@ -95,6 +95,12 @@ impl Cx {
         self.hal.frames.w.xr_pose_lead(hal_window_id(xr.window), lead_ns);
     }
 
+    /// `Cx::xr_set_refresh_rate`.
+    pub(crate) fn hal_xr_refresh_rate(&mut self, millihertz: u32) {
+        let Some(xr) = self.hal.xr.as_ref() else { return };
+        self.hal.frames.w.xr_refresh_rate(hal_window_id(xr.window), millihertz);
+    }
+
     pub(crate) fn hal_xr_stop(&mut self) {
         let Some(xr) = self.hal.xr.take() else { return };
         self.hal.frames.w.window_close(hal_window_id(xr.window));
@@ -141,17 +147,20 @@ impl Cx {
         let texels = (header.width * header.height) as usize;
         let Some(raw) = bytes.get(XrDepth::SIZE..XrDepth::SIZE + texels * 2) else { return };
         let depth: Vec<u16> = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
-        // the newest image as a texture for the app's own per-pixel tests (occlusion)
-        let values: Vec<f32> = depth.iter().map(|d| *d as f32 / 65535.0).collect();
+        // the newest image as a texture for the app's own per-pixel tests (occlusion): each
+        // D16 texel as two bytes (high in red, low in green) of an 8-bit RGBA texel, read at
+        // texel centres (a linear sampler on a 32-bit float texture is not filterable on every
+        // GPU: on the Quest it sampled garbage, the occlusion looked tiled)
+        let values: Vec<u32> = depth.iter().map(|d| 0xff00_0000 | ((*d as u32 >> 8) << 16) | ((*d as u32 & 0xff) << 8)).collect();
         let (w, h) = (header.width as usize, header.height as usize);
         let reuse = xr.env_depth.as_ref().filter(|(_, old)| old.width == header.width && old.height == header.height).map(|(t, _)| t.clone());
         let texture = match reuse {
             Some(t) => {
-                let _ = t.take_vec_f32(self);
-                t.put_back_vec_f32(self, values, None);
+                let _ = t.take_vec_u32(self);
+                t.put_back_vec_u32(self, values, None);
                 t
             }
-            None => crate::texture::Texture::new_with_format(self, crate::texture::TextureFormat::VecRf32 { width: w, height: h, data: Some(values), updated: crate::texture::TextureUpdated::Full }),
+            None => crate::texture::Texture::new_with_format(self, crate::texture::TextureFormat::VecBGRAu8_32 { width: w, height: h, data: Some(values), updated: crate::texture::TextureUpdated::Full }),
         };
         let Some(xr) = self.hal.xr.as_mut() else { return };
         xr.env_depth = Some((texture, header));
@@ -173,6 +182,13 @@ impl Cx {
             far: header.far,
             views: [view(&header.views[0]), view(&header.views[1])],
             depth,
+            // the hands stay in the depth image (occlusion) but not in the room field: 5 cm
+            // around each tracked joint (the newest hand poses; the image is a few ms older)
+            exclude: [&xr.last.left_hand, &xr.last.right_hand]
+                .into_iter()
+                .filter(|h| h.in_view())
+                .flat_map(|h| h.joints.iter().map(|j| [j.position.x, j.position.y, j.position.z, 0.05]))
+                .collect(),
         };
         if let Some(writer) = xr.depth_writer.as_mut() {
             let _ = writer.submit(frame);

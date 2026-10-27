@@ -263,8 +263,9 @@ impl Session {
                         visible = v;
                         (self.log)(&format!("xr host: headset {} {}", if v { "visible" } else { "not visible" }, if focused { "focused" } else { "not focused" }));
                     }
-                    XrClientMsg::Stats { decode_us, .. } => {
+                    XrClientMsg::Stats { seq, decode_us, .. } => {
                         stats.decode_us.push(decode_us);
+                        stats.reported(seq, decode_us);
                         core.tile_decoded();
                     }
                     XrClientMsg::Ping { client_ns } => {
@@ -298,6 +299,11 @@ struct PumpStats {
     stages_us: [Vec<u32>; 4],
     write_us: Vec<u32>,
     decode_us: Vec<u32>,
+    /// Per tile: from its last byte written to the headset's report that it took it, less the
+    /// headset's own time on it (the link's round trip with whatever queue it holds).
+    trip_us: Vec<u32>,
+    /// The tiles written and not yet reported: (seq, when written).
+    unreported: std::collections::VecDeque<(u64, Instant)>,
     /// Room-field bricks received, and their messages' bytes.
     bricks: u64,
     brick_bytes: u64,
@@ -313,7 +319,7 @@ fn median_ms(v: &mut [u32]) -> f64 {
 
 impl PumpStats {
     fn new() -> Self {
-        PumpStats { at: Instant::now(), poses: 0, refused_poses: 0, pictures: 0, bytes: 0, stages_us: Default::default(), write_us: Vec::new(), decode_us: Vec::new(), bricks: 0, brick_bytes: 0 }
+        PumpStats { at: Instant::now(), poses: 0, refused_poses: 0, pictures: 0, bytes: 0, stages_us: Default::default(), write_us: Vec::new(), decode_us: Vec::new(), trip_us: Vec::new(), unreported: Default::default(), bricks: 0, brick_bytes: 0 }
     }
 
     fn sent(&mut self, head: &VideoHead, bytes: usize, write: Duration) {
@@ -326,6 +332,19 @@ impl PumpStats {
             self.stages_us[i].push(*v);
         }
         self.write_us.push(write.as_micros() as u32);
+        if self.unreported.len() >= 64 {
+            self.unreported.pop_front();
+        }
+        self.unreported.push_back((head.seq, Instant::now()));
+    }
+
+    /// The headset took a tile of picture `seq` (`decode_us` after it arrived).
+    fn reported(&mut self, seq: u64, decode_us: u32) {
+        let Some(at) = self.unreported.iter().position(|(s, _)| *s == seq) else { return };
+        let (_, written) = self.unreported.remove(at).unwrap();
+        // (older ones never reported: lost)
+        self.unreported.drain(..at);
+        self.trip_us.push((written.elapsed().as_micros() as u32).saturating_sub(decode_us));
     }
 
     fn window(&mut self, core: &Core, log: &Log) {
@@ -358,7 +377,10 @@ impl PumpStats {
             log(&format!("xr host: room field {} bricks ({:.1} KB/s) from the headset", self.bricks, self.brick_bytes as f64 / secs / 1000.0));
         }
         let held = core.flow.held.swap(0, Ordering::AcqRel);
-        core.rate.second(held as f64 / secs, self.bytes as f64 * 8.0 / secs / 1000.0, median_ms(&mut self.decode_us), core.fps, log);
+        let trip_ms = median_ms(&mut self.trip_us);
+        let trip_min_ms = self.trip_us.first().map_or(0.0, |v| *v as f64 / 1000.0);
+        log(&format!("xr host: link trip {trip_ms:.1} ms (min {trip_min_ms:.1}, base {:.1}); the app waited for the headset {:.0}/s", core.rate.base_ms(), held as f64 / secs));
+        core.rate.second(trip_ms, trip_min_ms, self.bytes as f64 * 8.0 / secs / 1000.0, log);
         *self = PumpStats::new();
     }
 }
@@ -420,24 +442,41 @@ impl Flow {
     }
 }
 
-/// The stream's rate (all tiles): down when the link holds pictures back, back up while they
-/// flow. kbit/s.
+/// The stream's rate (all tiles): down when the link queues pictures (its round trip grows past
+/// what it is when idle), back up while it does not. kbit/s.
+///
+/// The signal is the link's own delay, not the app waiting for pictures in flight: a picture is
+/// in flight from its build until the headset reports it (encode, the link both ways, the
+/// headset taking it), which is longer than a display period on a healthy link, so the app
+/// waited for a fifth of its frames with the network idle and the rate fell for nothing
+/// (22 -> 15 Mbit/s on 5 ms Wi-Fi).
 struct Rate {
     kbps: AtomicU32,
     start: u32,
     clean: AtomicU32,
+    /// The link's idle round trip (µs): the lowest seen, creeping up 2% a window so a changed
+    /// route is learned. 0 until the first window.
+    base_us: AtomicU32,
 }
 
 impl Rate {
-    /// One stats window: how often per second the app waited for the headset (`held`), the
-    /// rate sent (kbit/s), the headset's median decode (ms).
-    fn second(&self, held: f64, sent_kbps: f64, decode_ms: f64, fps: u32, log: &Log) {
+    fn base_ms(&self) -> f64 {
+        self.base_us.load(Ordering::Acquire) as f64 / 1000.0
+    }
+
+    /// One stats window: the median and lowest round trip of a tile (ms), the rate sent (kbit/s).
+    fn second(&self, trip_ms: f64, trip_min_ms: f64, sent_kbps: f64, log: &Log) {
         let kbps = self.kbps.load(Ordering::Acquire);
+        if trip_ms <= 0.0 {
+            return;
+        }
+        let min_us = (trip_min_ms * 1000.0) as u32;
+        let base = self.base_us.load(Ordering::Acquire);
+        let base = if base == 0 { min_us } else { min_us.min(base + base / 50 + 1) };
+        self.base_us.store(base, Ordering::Release);
         let sent_kbps = sent_kbps as u32;
-        let period_ms = 1000.0 / fps.max(1) as f64;
-        // the app waited for pictures in flight a fifth of its frames while the headset decodes
-        // within its period: the link holds them back
-        let link_bound = held > fps as f64 * 0.2 && decode_ms < period_ms && sent_kbps > 0;
+        // queued: half the tiles wait QUEUED_MS longer than the idle link takes
+        let link_bound = trip_ms > base as f64 / 1000.0 + QUEUED_MS && sent_kbps > 0;
         let next = if link_bound {
             self.clean.store(0, Ordering::Release);
             ((sent_kbps as f64 * 0.85) as u32).max(MIN_KBPS)
@@ -449,11 +488,15 @@ impl Rate {
         .min(self.start);
         if next != kbps {
             self.kbps.store(next, Ordering::Release);
-            log(&format!("xr host: rate {:.0} -> {:.0} Mbit/s ({})", kbps as f64 / 1000.0, next as f64 / 1000.0, if link_bound { "the link holds pictures back" } else { "pictures flow" }));
+            log(&format!("xr host: rate {:.0} -> {:.0} Mbit/s ({})", kbps as f64 / 1000.0, next as f64 / 1000.0,
+                if link_bound { format!("the link queues: trip {trip_ms:.1} ms, idle {:.1}", base as f64 / 1000.0) } else { "the link keeps up".to_string() }));
         }
     }
 }
 
+/// How much longer than the idle link a tile's median round trip may take before the link
+/// counts as queueing (ms).
+const QUEUED_MS: f64 = 10.0;
 /// The lowest the rate controller goes (kbit/s, all tiles).
 const MIN_KBPS: u32 = 15_000;
 /// Pictures built and not yet decoded by the headset before the app waits (`room`):
@@ -569,7 +612,7 @@ impl Core {
         let tiles = if VideoStreamEncoder::engines() >= 2 { 2 } else { 1 };
         let kbps = if kbps == 0 { 80_000 } else { kbps };
         let flow = Arc::new(Flow::default());
-        let rate = Arc::new(Rate { kbps: AtomicU32::new(kbps), start: kbps, clean: AtomicU32::new(0) });
+        let rate = Arc::new(Rate { kbps: AtomicU32::new(kbps), start: kbps, clean: AtomicU32::new(0), base_us: AtomicU32::new(0) });
         let keyframe: Arc<[AtomicBool; 2]> = Arc::new([AtomicBool::new(true), AtomicBool::new(true)]);
         let ending = Arc::new(AtomicBool::new(false));
         let poses: Arc<Mutex<VecDeque<(u64, Arrived)>>> = Arc::default();

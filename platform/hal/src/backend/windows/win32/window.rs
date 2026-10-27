@@ -714,6 +714,7 @@ pub(super) fn handles(cmd: &OsCmd) -> bool {
             | OsCmd::WindowAtTray { .. }
             | OsCmd::XrFrameEyes { .. }
             | OsCmd::XrPoseLead { .. }
+            | OsCmd::XrRefreshRate { .. }
             | OsCmd::FileDialog { .. }
             | OsCmd::AppIcon { .. }
     )

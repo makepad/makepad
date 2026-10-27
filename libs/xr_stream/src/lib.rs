@@ -54,7 +54,8 @@ script_mod! {
         // a decoder's picture where it is (`video_mode` 1): sampled it gives its raw codes
         // (.y = Y', .z = Cb, .x = Cr); `nv12_size` is then its buffer's size
         video: texture_video()
-        // the headset's newest environment depth image (0..1; `env_pos.w` its near plane)
+        // the headset's newest environment depth image (D16 as two bytes per texel, see
+        // `room_depth`; `env_pos.w` its near plane)
         env_depth: texture_2d(float)
         // Per draw (each eye is a draw call of its own), uniforms, not instance data: as
         // instance fields they were the fragment's inputs, and past the varyings that fit, the
@@ -79,9 +80,55 @@ script_mod! {
         env_pos: uniform(vec4(0.0, 0.0, 0.0, 0.1))
         env_tan: uniform(vec4(-1.0, 1.0, 1.0, -1.0))
         env_far: uniform(0.0)
+        env_map: uniform(0.0)
+        env_size: uniform(vec2(1.0, 1.0))
         qrot: fn(q: vec4, v: vec3) -> vec3 {
             let t = cross(q.xyz, v) * 2.0
             return v + t * q.w + cross(q.xyz, t)
+        }
+        // The picture's point at this pixel at depth `z` (m, along the render eye's axis) seen by
+        // the depth camera: (its distance there, what the camera measured along that ray); y < 0
+        // where the depth image has nothing
+        room_depth: fn(z: float) -> vec2 {
+            let rt = self.render_tan
+            let d = vec3(mix(rt.x, rt.y, self.pos.x), mix(rt.z, rt.w, self.pos.y), -1.0)
+            let pw = self.render_pos.xyz + self.qrot(self.render_rot, d * z)
+            let ec = vec4(0.0 - self.env_rot.x, 0.0 - self.env_rot.y, 0.0 - self.env_rot.z, self.env_rot.w)
+            let pe = self.qrot(ec, pw - self.env_pos.xyz)
+            let ze = 0.0 - pe.z
+            if ze <= 0.01 {
+                return vec2(ze, -1.0)
+            }
+            let et = self.env_tan
+            // (the depth image's first row is the bottom of its view: y up, as the room field
+            // reads it)
+            let uv = vec2((pe.x / ze - et.x) / (et.y - et.x), (pe.y / ze - et.w) / (et.z - et.w))
+            if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+                return vec2(ze, -1.0)
+            }
+            // (debug `env_map`: bit 0 mirrors x, bit 1 mirrors y, bit 2 swaps the axes)
+            let m = self.env_map
+            var t = uv
+            if fract(m * 0.5) > 0.25 {
+                t.x = 1.0 - t.x
+            }
+            if fract(floor(m * 0.5) * 0.5) > 0.25 {
+                t.y = 1.0 - t.y
+            }
+            if m > 3.5 {
+                t = t.yx
+            }
+            // (the texel's two bytes: high in red, low in green; read at its centre)
+            let ts = self.env_size
+            let e = self.env_depth.sample((floor(t * ts) + vec2(0.5, 0.5)) / ts)
+            let dv = (floor(e.x * 255.0 + 0.5) * 256.0 + floor(e.y * 255.0 + 0.5)) / 65535.0
+            if dv >= 0.99999 {
+                return vec2(ze, -1.0)
+            }
+            // the depth camera's distance there (an infinite far plane: z = near / (1 - d))
+            let n = self.env_pos.w
+            let f = self.env_far
+            return vec2(ze, mix(n / (1.0 - dv), n * f / max(f - dv * (f - n), 0.0001), step(0.001, f)))
         }
         // How much of the picture a real thing in front hides at this pixel (0..1): the
         // picture's point at its depth (the band's inverse depth), seen by the depth camera, is
@@ -90,31 +137,11 @@ script_mod! {
             if self.occlude < 0.5 || z <= 0.0 {
                 return 0.0
             }
-            let rt = self.render_tan
-            let d = vec3(mix(rt.x, rt.y, self.pos.x), mix(rt.z, rt.w, self.pos.y), -1.0)
-            let pw = self.render_pos.xyz + self.qrot(self.render_rot, d * z)
-            let ec = vec4(0.0 - self.env_rot.x, 0.0 - self.env_rot.y, 0.0 - self.env_rot.z, self.env_rot.w)
-            let pe = self.qrot(ec, pw - self.env_pos.xyz)
-            let ze = 0.0 - pe.z
-            if ze <= 0.01 {
+            let r = self.room_depth(z)
+            if r.y < 0.0 {
                 return 0.0
             }
-            let et = self.env_tan
-            // (the depth image's first row is the bottom of its view: y up, as the room field
-            // reads it)
-            let uv = vec2((pe.x / ze - et.x) / (et.y - et.x), (pe.y / ze - et.w) / (et.z - et.w))
-            if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
-                return 0.0
-            }
-            let dv = self.env_depth.sample(uv).x
-            if dv >= 0.99999 {
-                return 0.0
-            }
-            // the depth camera's distance there (an infinite far plane: z = near / (1 - d))
-            let n = self.env_pos.w
-            let f = self.env_far
-            let zr = mix(n / (1.0 - dv), n * f / max(f - dv * (f - n), 0.0001), step(0.001, f))
-            return clamp((ze - zr - 0.02) / 0.04, 0.0, 1.0)
+            return clamp((r.x - r.y - 0.02) / 0.04, 0.0, 1.0)
         }
         vertex: fn() {
             let proj = self.draw_pass.camera_projection
@@ -144,6 +171,24 @@ script_mod! {
         // is its coverage at half resolution in the luma: the output is premultiplied colour
         // with that coverage, so the passthrough shows where the desktop drew nothing.
         pixel: fn() {
+            // (debug: `env_map` as that many small white squares above the view's centre)
+            if self.env_map > 0.5 && self.pos.y > 0.3 && self.pos.y < 0.32 && self.pos.x > 0.4 {
+                let k = (self.pos.x - 0.4) / 0.03
+                if k < self.env_map && fract(k) < 0.6 {
+                    return vec4(1.0, 1.0, 1.0, 1.0)
+                }
+            }
+            if self.occlude > 1.5 {
+                // (debug: the room's depth along each pixel's ray as contour bands every 10 cm,
+                // half see-through over the room so its edges can be matched; red where the
+                // depth image has nothing)
+                let r = self.room_depth(1.0)
+                if r.y < 0.0 {
+                    return vec4(0.3, 0.0, 0.0, 0.5)
+                }
+                let band = fract(r.y * 10.0)
+                return vec4(band * 0.6, (1.0 - band) * 0.6, 0.0, 0.6)
+            }
             if self.opaque > 1.5 {
                 return vec4(0.6 * (1.0 - self.eye), 0.0, 0.6 * self.eye, 1.0)
             }
@@ -304,6 +349,10 @@ pub struct XrStreamClient {
     pub opaque: u8,
     /// The frame shows with the headset's own eyes, not the picture's (a debug switch).
     pub own_eyes: bool,
+    /// The room's depth instead of the picture (a debug switch: the depth image's placement).
+    pub room_view: bool,
+    /// How the depth image is read (a debug switch: bit 0 mirrors x, 1 mirrors y, 2 swaps).
+    pub env_map: u8,
 }
 
 impl Drop for XrStreamClient {
@@ -349,6 +398,8 @@ impl XrStreamClient {
             occlusion: true,
             opaque: 0,
             own_eyes: false,
+            room_view: false,
+            env_map: 0,
         }
     }
 
@@ -642,6 +693,7 @@ impl XrStreamClient {
                     (live_id!(render_tan), tan(r.fov).to_vec()),
                     (live_id!(depth_near), vec![makepad_desk_link::xr::DEPTH_NEAR_M]),
                     (live_id!(opaque), vec![self.opaque as f32]),
+                    (live_id!(env_map), vec![self.env_map as f32]),
                 ];
                 match cx.cx.xr_environment_depth().filter(|_| self.occlusion) {
                     Some((depth, header)) => {
@@ -651,14 +703,15 @@ impl XrStreamClient {
                             (live_id!(env_rot), v.pose.orientation.to_vec()),
                             (live_id!(env_pos), vec![p[0], p[1], p[2], header.near]),
                             (live_id!(env_tan), tan(v.fov).to_vec()),
+                            (live_id!(env_size), vec![header.width as f32, header.height as f32]),
                             (live_id!(env_far), vec![if header.far.is_finite() { header.far.max(0.0) } else { 0.0 }]),
-                            (live_id!(occlude), vec![1.0]),
+                            (live_id!(occlude), vec![if self.room_view { 2.0 } else { 1.0 }]),
                         ]);
                         draw.draw_vars.set_texture(3, &depth);
                     }
                     None => {
                         // (a stand-in: every texture slot is bound)
-                        let none = self.no_depth.get_or_insert_with(|| Texture::new_with_format(cx.cx, TextureFormat::VecRf32 { width: 1, height: 1, data: Some(vec![1.0]), updated: TextureUpdated::Full }));
+                        let none = self.no_depth.get_or_insert_with(|| Texture::new_with_format(cx.cx, TextureFormat::VecBGRAu8_32 { width: 1, height: 1, data: Some(vec![0xffff_ff00]), updated: TextureUpdated::Full }));
                         draw.draw_vars.set_texture(3, none);
                         uniforms.push((live_id!(occlude), vec![0.0]));
                     }

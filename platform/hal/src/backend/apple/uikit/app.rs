@@ -488,6 +488,7 @@ fn command(sid: u32, cmd: OsCmd, taken: u64) {
         | OsCmd::WindowAtTray { .. }
         | OsCmd::XrFrameEyes { .. }
         | OsCmd::XrPoseLead { .. }
+        | OsCmd::XrRefreshRate { .. }
         | OsCmd::SelectionSet { .. }
         | OsCmd::ShareText { .. }
         | OsCmd::DragReply { .. }

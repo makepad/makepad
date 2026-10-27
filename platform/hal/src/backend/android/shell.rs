@@ -140,6 +140,7 @@ impl Shell for AndroidShell {
             }
             OsCmd::XrFrameEyes { id, eyes } if lock(&Shared::global().registry).xr_window == Some((sid, id)) => { super::xr::frame_eyes(eyes); true }
             OsCmd::XrPoseLead { id, lead_ns } if lock(&Shared::global().registry).xr_window == Some((sid, id)) => { super::xr::pose_lead(lead_ns); true }
+            OsCmd::XrRefreshRate { id, millihertz } if lock(&Shared::global().registry).xr_window == Some((sid, id)) => { super::xr::refresh_rate(millihertz); true }
             OsCmd::FrameRequest { id } => { lock(&Shared::global().state).pending.insert((sid, id)); jni::request_frame(); true }
             cmd @ (OsCmd::ImeShow { .. } | OsCmd::ImeHide { .. } | OsCmd::ImeSync { .. }) => {
                 if lock(&Shared::global().state).ime_session != Some(sid) { return false; }

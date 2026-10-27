@@ -71,6 +71,8 @@ pub enum OsCmd {
     XrFrameEyes { id: Id, eyes: [crate::XrEye; 2] },
     /// `HalCmd::XrPoseLead`.
     XrPoseLead { id: Id, lead_ns: u64 },
+    /// `HalCmd::XrRefreshRate`.
+    XrRefreshRate { id: Id, millihertz: u32 },
     FileDialog { req: u32, kind: u32, title: String, location: String, filename: String, filters: Vec<String> },
     ShareText { text: String },
     ClipboardActions { id: Id, show: bool, area: [f32; 4], selection: bool },
@@ -1067,6 +1069,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         // window chrome and OS interaction: the id must be live, then the window system acts
         HalCmd::WindowVisuals { id, visuals, params } => os_window(gpu, s, id, OsCmd::WindowVisuals { id, visuals, params }),
         HalCmd::XrPoseLead { id, lead_ns } => os_window(gpu, s, id, OsCmd::XrPoseLead { id, lead_ns }),
+        HalCmd::XrRefreshRate { id, millihertz } => os_window(gpu, s, id, OsCmd::XrRefreshRate { id, millihertz }),
         HalCmd::XrFrameEyes { id, eyes } => {
             let mut it = crate::buffers::read_items::<crate::XrEye>(eyes, 2);
             if let (Some(l), Some(r)) = (it.next(), it.next()) { os_window(gpu, s, id, OsCmd::XrFrameEyes { id, eyes: [l, r] }); }

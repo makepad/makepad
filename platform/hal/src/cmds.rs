@@ -393,4 +393,7 @@ hal_commands! {
     /// hands, controllers): a picture rendered elsewhere from them shows that much later (a
     /// stream's measured latency). 0: at the display time.
     XrPoseLead = 156, xr_pose_lead { id: obj, lead_ns: u64 };
+    /// XR window `id`'s headset runs its display at the supported refresh rate nearest to
+    /// `millihertz` (0: the runtime's default).
+    XrRefreshRate = 157, xr_refresh_rate { id: obj, millihertz: u32 };
 }

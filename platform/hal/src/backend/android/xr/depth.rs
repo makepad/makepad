@@ -31,6 +31,10 @@ struct DepthSlot {
 
 pub(super) struct DepthSource {
     images: Vec<vk::Image>,
+    /// The image last read back (its chain index and its view's pose): the runtime hands the
+    /// same image out again until it has a newer one (it makes them at its own rate, below the
+    /// display's), and that one is not read back again.
+    last: Option<(u32, [f32; 7])>,
     size: [u32; 2],
     slots: Vec<DepthSlot>,
     pub(super) delivered: u64,
@@ -66,7 +70,7 @@ impl DepthSource {
         }
         unsafe { (xr.xrStartEnvironmentDepthProviderMETA)(provider) }.to_result("xrStartEnvironmentDepthProviderMETA")?;
         xr_log!("environment depth: {}x{} D16, {} images, read back to the app", size[0], size[1], images.len());
-        Ok(Some(DepthSource { images, size, slots, delivered: 0, acquired: 0 }))
+        Ok(Some(DepthSource { images, last: None, size, slots, delivered: 0, acquired: 0 }))
     }
 
     /// A finished readback: the `XrDepth` payload (header + texels), or None.
@@ -99,6 +103,12 @@ impl DepthSource {
             return;
         }
         let Some(&src) = self.images.get(image.swapchain_index as usize) else { return };
+        let p = image.views[DEPTH_EYE as usize].pose;
+        let id = (image.swapchain_index, [p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w, p.position.x, p.position.y, p.position.z]);
+        if self.last == Some(id) {
+            return;
+        }
+        self.last = Some(id);
         let pose = |p: XrPosef| crate::XrPose { orientation: [p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w], position: [p.position.x, p.position.y, p.position.z] };
         let view = |v: &XrEnvironmentDepthImageViewMETA| XrEye { pose: pose(v.pose), fov: [v.fov.angle_left, v.fov.angle_right, v.fov.angle_up, v.fov.angle_down] };
         let header = XrDepth { width: self.size[0], height: self.size[1], eye: DEPTH_EYE, near: image.near_z, far: if image.far_z.is_finite() { image.far_z } else { 0.0 },

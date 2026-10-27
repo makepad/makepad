@@ -1338,8 +1338,10 @@ impl Cx {
     }
 
     /// The headset's newest environment depth image (where the room is, as its depth camera saw
-    /// it): a texture of its depth values (0..1, `header.near`/`far` projection; far 0 or
-    /// infinite: `z = near / (1 - d)`) and its header (size, the eye views it was taken with).
+    /// it): a texture of its depth values (8-bit RGBA texels: the D16 value's high byte in red,
+    /// low in green, read at texel centres; `d = value / 65535`, `header.near`/`far`
+    /// projection; far 0 or infinite: `z = near / (1 - d)`; the first row is the bottom of the
+    /// view) and its header (size, the eye views it was taken with).
     /// For per-pixel tests against the room (real things in front of virtual ones).
     pub fn xr_environment_depth(&self) -> Option<(crate::texture::Texture, makepad_hal::XrDepth)> {
         #[cfg(not(target_arch = "wasm32"))]
@@ -1357,6 +1359,15 @@ impl Cx {
         self.hal_xr_present_eyes(eyes);
         #[cfg(target_arch = "wasm32")]
         let _ = eyes;
+    }
+
+    /// The headset's display runs at its supported refresh rate nearest to `hz` (0: the
+    /// runtime's default). The rate in effect: `xr_display_refresh_rate_hz`.
+    pub fn xr_set_refresh_rate(&mut self, hz: f32) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hal_xr_refresh_rate((hz.max(0.0) * 1000.0) as u32);
+        #[cfg(target_arch = "wasm32")]
+        let _ = hz;
     }
 
     /// The XR frames' poses (head, eyes, hands, controllers) are predicted `lead_ns` past their

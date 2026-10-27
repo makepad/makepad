@@ -887,6 +887,7 @@ impl State {
             | OsCmd::WindowAtTray { .. }
             | OsCmd::XrFrameEyes { .. }
             | OsCmd::XrPoseLead { .. }
+            | OsCmd::XrRefreshRate { .. }
             | OsCmd::ClipboardActions { .. }
             | OsCmd::ShareText { .. }
             | OsCmd::MobileUi { .. }
