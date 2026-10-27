@@ -251,6 +251,20 @@ impl Atmosphere {
         self.disc_radius * (1.0 + 0.5 * self.disc_softness)
     }
 
+    /// The disc as [`Self::sun_disc`] draws it, for a viewer that draws it
+    /// itself (`Env::sky_discs`): None when it is hidden. Its radiance at a
+    /// direction `theta` off `dir` is `radiance x disc_profile(theta, radius,
+    /// softness)`, 0 below the horizon.
+    pub fn disc_look(&self) -> Option<SunDiscLook> {
+        self.disc_visible.then(|| SunDiscLook {
+            dir: self.sun_dir,
+            radius: self.disc_radius,
+            softness: self.disc_softness,
+            limb_darkening: LIMB_DARKENING,
+            radiance: self.disc_radiance,
+        })
+    }
+
     /// Mean radiance of the upper hemisphere (the disc excluded).
     pub fn ambient(&self) -> Vec3f {
         self.ambient
@@ -586,6 +600,21 @@ fn hemisphere_integrals(lut: &[Vec3f]) -> (Vec3f, Vec3f) {
         }
     }
     (radiance_sum * (1.0 / (2.0 * std::f32::consts::PI)), irradiance)
+}
+
+/// The sun's disc as `Atmosphere::sun_disc` draws it ([`Atmosphere::disc_look`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SunDiscLook {
+    /// The disc's centre, unit length.
+    pub dir: Vec3f,
+    /// Its angular radius in radians: the soft edge is `softness` x radius
+    /// wide, centred on it.
+    pub radius: f32,
+    pub softness: f32,
+    /// Linear limb darkening: 1 - limb_darkening x (1 - sqrt(1 - (theta / outer)^2)).
+    pub limb_darkening: f32,
+    /// The radiance where the profile is 1 (the centre).
+    pub radiance: Vec3f,
 }
 
 /// Relative disc brightness at angle `theta` from its centre: a smoothstep

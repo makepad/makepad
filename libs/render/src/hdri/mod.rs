@@ -1105,7 +1105,12 @@ impl Env {
         // The sun's and the moon's discs are blocked by the unfaded
         // cover, like their keys in `sun`; the rest of the sky by the
         // visible deck, which thins into the haze at the horizon.
-        let mut discs = if without == Some(KeyTerm::Sun) || !points { Vec3f::default() } else { atmo.sun_disc(d) };
+        let mut discs = match without {
+            _ if !points => Vec3f::default(),
+            Some(KeyTerm::Sun | KeyTerm::Discs) => Vec3f::default(),
+            Some(KeyTerm::DiscProbe) => Vec3f::all(1.0),
+            _ => atmo.sun_disc(d),
+        };
         if let Some(night) = &self.night {
             let stars = if points { night.deep_sky(d, at.texel) } else { Vec3f::default() };
             c += stars + night.glow(d) + night.ground(d, ground_color);
@@ -1117,6 +1122,7 @@ impl Env {
             if points {
                 discs += match without {
                     Some(KeyTerm::Moon(share)) => night.moon(d) * (1.0 - share),
+                    Some(KeyTerm::Discs | KeyTerm::DiscProbe) => Vec3f::default(),
                     _ => night.moon(d),
                 };
             }
@@ -1651,6 +1657,135 @@ impl Env {
         self.bake_keyless_marched(map, volumetric::MARCH_MAX_WIDTH, run)
     }
 
+    /// The sun's and the moon's discs as this map draws them, in world space (the map's rotation applied) and times
+    /// 2^intensity_ev, for a viewer that draws them itself over [`Self::split_sky_discs`]' map: the app's preview draws
+    /// them per screen pixel, so a disc stays round at any exposure and any map width. None for a disc the map does not
+    /// draw (hidden, no moon, Studio mode, an image that is the whole base).
+    pub fn sky_discs(&self) -> SkyDiscs {
+        let whole = self.base_image.as_ref().is_some_and(|image| !image.replaces_sky());
+        if whole {
+            return SkyDiscs::default();
+        }
+        let turn = |v: Vec3f| rotate_y(v, self.params.rotation_deg);
+        let sun = self.atmo.as_ref().and_then(|atmo| atmo.disc_look()).map(|look| atmosphere::SunDiscLook {
+            dir: turn(look.dir),
+            radiance: look.radiance * self.scale,
+            ..look
+        });
+        let moon = self.night.as_ref().and_then(|night| night.moon_look()).map(|look| night::MoonDiscLook {
+            dir: turn(look.dir),
+            right: turn(look.right),
+            up: turn(look.up),
+            sun_dir: turn(look.sun_dir),
+            lit: look.lit * self.scale,
+            earthshine: look.earthshine * self.scale,
+            ..look
+        });
+        SkyDiscs { sun, moon }
+    }
+
+    /// Splits this env's bake `width` wide (`texels`, a whole map: [`Self::bake_par`]'s data, or an antialiased mean
+    /// of [`Self::bake_rows_jittered_par`]'s) for a viewer that draws the discs itself ([`Self::sky_discs`]).
+    ///
+    /// - Each texel a disc can touch (its outer edge plus a texel's diagonal, the bake's hot-spot reach) gets the map
+    ///   without the discs: the mean of HOT_SAMPLES x HOT_SAMPLES sub-samples through the lookup without them, as the
+    ///   bake refines a disc's texels.
+    /// - Each texel a viewer's reconstruction of a disc's pixels can read (its outer edge plus three texels) gets in
+    ///   its alpha what of a disc there reaches the eye, the disc's visibility: the mean over the same sub-samples of
+    ///   the light a white unit light behind the sky there leaves, its luminance, without 2^intensity_ev. The clouds,
+    ///   the weather, the skyline and the lights stand in front of it as they stand in front of a disc.
+    /// - Below the horizon a sub-sample reads the visibility just above the horizon: the horizon cuts a disc of its
+    ///   own (the viewer draws that cut), so the visibility runs on unbroken across it.
+    /// - Every other texel is left as it is (alpha 1).
+    ///
+    /// So the map shows as `rgb + alpha x disc`, a disc nowhere twice. The rows the discs touch are spread by `run` as
+    /// for [`Self::bake_par`]; a row it skips keeps the bake's texels and its disc.
+    pub fn split_sky_discs(&self, texels: &mut [[f32; 4]], width: usize, run: impl FnOnce(usize, &(dyn Fn(usize) + Sync))) {
+        let height = (width / 2).max(1);
+        if width < 2 || texels.len() != width * height {
+            return;
+        }
+        let looks = self.sky_discs();
+        let mut spots: Vec<(Vec3f, f32)> = Vec::new();
+        if let Some(sun) = looks.sun.filter(|sun| sun.dir.y > -0.1) {
+            spots.push((sun.dir.normalize(), sun.radius * (1.0 + 0.5 * sun.softness)));
+        }
+        if let Some(moon) = looks.moon.filter(|moon| moon.dir.y > -0.1) {
+            spots.push((moon.dir.normalize(), moon.tan_radius.atan()));
+        }
+        if spots.is_empty() {
+            return;
+        }
+        let step = std::f32::consts::PI / height as f32;
+        // (centre, cos of the drawn reach, cos of the seen reach, the seen reach's rows)
+        let reaches: Vec<(Vec3f, f32, f32, std::ops::Range<usize>)> = spots
+            .iter()
+            .map(|&(centre, outer)| {
+                let drawn = (outer + 1.5 * step).min(std::f32::consts::PI);
+                let seen = (outer + 3.0 * step).min(std::f32::consts::PI);
+                (centre, drawn.cos(), seen.cos(), envmap::rows_near(centre, seen, height))
+            })
+            .collect();
+        let mut rows: Vec<usize> = reaches.iter().flat_map(|r| r.3.clone()).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        let cache = self.cloud_cache(width, volumetric::MARCH_MAX_WIDTH);
+        let at = Sampling::bake(width, cache.as_ref());
+        let without = |d: Vec3f| self.radiance_with(d, Some(KeyTerm::Discs), at);
+        let probe = |d: Vec3f| self.radiance_with(d, Some(KeyTerm::DiscProbe), at);
+        let unscale = if self.scale > 0.0 { 1.0 / self.scale } else { 0.0 };
+        // Just above the horizon: the atmosphere's ground begins below it.
+        let above = |d: Vec3f| if d.y >= 1.0e-4 { d } else { vec3f(d.x, 1.0e-4, d.z).normalize() };
+        let locked: Vec<Mutex<&mut [[f32; 4]]>> = texels.chunks_exact_mut(width).map(Mutex::new).collect();
+        let split_row = |i: usize| {
+            let Some(&y) = rows.get(i) else { return };
+            let Some(Ok(mut row)) = locked.get(y).map(|row| row.lock()) else { return };
+            let v = (y as f32 + 0.5) / height as f32;
+            for (x, out) in row.iter_mut().enumerate() {
+                let d = vec(ibl::equirect_uv_to_dir([(x as f32 + 0.5) / width as f32, v]));
+                let (mut drawn, mut seen) = (false, false);
+                for (centre, cos_drawn, cos_seen, _) in &reaches {
+                    let c = d.dot(*centre);
+                    // (written so a NaN counts as within, as the bake's reach does)
+                    drawn |= !(c < *cos_drawn);
+                    seen |= !(c < *cos_seen);
+                }
+                if !seen {
+                    continue;
+                }
+                let (mut sky, mut lit) = (Vec3f::default(), 0.0f32);
+                for j in 0..HOT_SAMPLES {
+                    let sv = v + ((j as f32 + 0.5) / HOT_SAMPLES as f32 - 0.5) / height as f32;
+                    for i in 0..HOT_SAMPLES {
+                        let su = (x as f32 + 0.5) / width as f32 + ((i as f32 + 0.5) / HOT_SAMPLES as f32 - 0.5) / width as f32;
+                        let s = vec(ibl::equirect_uv_to_dir([su, sv]));
+                        let a = above(s);
+                        let bare = without(a);
+                        if drawn {
+                            let b = if a == s { bare } else { without(s) };
+                            if b.is_finite() {
+                                sky += b;
+                            }
+                        }
+                        let l = crate::sky::luminance(probe(a) - bare);
+                        if l.is_finite() {
+                            lit += l;
+                        }
+                    }
+                }
+                let n = (HOT_SAMPLES * HOT_SAMPLES) as f32;
+                if drawn {
+                    let c = texel(sky * (1.0 / n));
+                    out[0] = c[0];
+                    out[1] = c[1];
+                    out[2] = c[2];
+                }
+                out[3] = (lit / n * unscale).max(0.0);
+            }
+        };
+        run(rows.len(), &split_row);
+    }
+
     /// `bake_keyless_par` with the march's width cap as a parameter: the
     /// texels the key can reach are evaluated again through the lookup without
     /// it, reading a cloud cache built as the map's bake built it (the same
@@ -1732,6 +1867,20 @@ enum KeyTerm {
     /// The sun found in an image that is the whole base (1b, B15): a file's
     /// sun, whose covering cone the renderer fills; no keyless bake.
     Image,
+    /// Not a key ([`Env::split_sky_discs`]): the sun's and the moon's discs
+    /// both left out, for a viewer that draws them itself.
+    Discs,
+    /// Not a key ([`Env::split_sky_discs`]): the discs left out and a white
+    /// light of radiance 1 drawn where they are drawn, at every direction, so
+    /// the map less the map with `Discs` is what of a disc there reaches the eye.
+    DiscProbe,
+}
+
+/// The sun's and the moon's discs as a map draws them ([`Env::sky_discs`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SkyDiscs {
+    pub sun: Option<atmosphere::SunDiscLook>,
+    pub moon: Option<night::MoonDiscLook>,
 }
 
 /// The dome's looks (`Env::dome_light`): DOME_ROWS rows equally spaced in the

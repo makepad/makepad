@@ -458,7 +458,7 @@ mod tests {
             }
             KeyTerm::Sun => p.sky.sun_disc.visible = false,
             KeyTerm::Moon(_) => return None,
-            KeyTerm::Image => return None,
+            KeyTerm::Image | KeyTerm::Discs | KeyTerm::DiscProbe => return None,
         }
         Some(p)
     }

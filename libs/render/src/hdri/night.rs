@@ -585,6 +585,21 @@ impl NightSky {
         Some(EnvSun { dir: m.dir, radiance: EnvSun::cone_radiance(m.emission, m.cos_radius), cos_radius: m.cos_radius, facing: 1.0, cos_cover: m.cos_radius })
     }
 
+    /// The moon's disc as [`Self::moon`] draws it, for a viewer that draws it itself (`Env::sky_discs`): None without a
+    /// moon. In the map's own frame.
+    pub fn moon_look(&self) -> Option<MoonDiscLook> {
+        self.moon.as_ref().map(|m| MoonDiscLook {
+            dir: m.dir,
+            right: m.frame.right,
+            up: m.frame.up,
+            tan_radius: m.tan_radius,
+            limb: MOON_LIMB,
+            lit: m.lit,
+            earthshine: m.earthshine,
+            sun_dir: self.sun_dir,
+        })
+    }
+
     /// The moon's disc for the bake's refinement: its direction in the map's own frame and its angular radius.
     pub fn moon_disc(&self) -> Option<(Vec3f, f32)> {
         self.moon.as_ref().map(|m| (m.dir, m.tan_radius.atan()))
@@ -756,6 +771,22 @@ fn windowed_gaussian(d2: f32, sigma: f32) -> f32 {
         return 0.0;
     }
     ((-x).exp() - GAUSS_FLOOR) / (PI * two_s2 * GAUSS_MASS)
+}
+
+/// The moon's disc as `NightSky::moon` draws it ([`NightSky::moon_look`]): along `d` (above the horizon), with
+/// `q = (d . right, d . up) / (d . dir) / tan_radius`, r = |q| < 1, the radiance is
+/// `(lit x ls + earthshine) x (1 - smoothstep(1 - limb, 1, r))`, where ls is Lommel-Seeliger, 2 cos i / (cos i + cos e)
+/// for cos i > 0 (else 0), cos e = sqrt(1 - r^2), cos i = (right qx + up qy - dir cos e) . sun_dir.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MoonDiscLook {
+    pub dir: Vec3f,
+    pub right: Vec3f,
+    pub up: Vec3f,
+    pub tan_radius: f32,
+    pub limb: f32,
+    pub lit: Vec3f,
+    pub earthshine: Vec3f,
+    pub sun_dir: Vec3f,
 }
 
 /// Radiance of the moon at disc coordinates `q`.
