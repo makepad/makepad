@@ -109,6 +109,19 @@ script_mod! {
         // 1: the picture is reprojected to the view's eye in this pass (see `vertex`); the
         // frame then goes to the compositor with the view's own eyes
         warp: uniform(0.0)
+        grid_cells: uniform(64.0)
+        // 1 on a vertex at a depth edge (see `vertex`)
+        edge: varying(float)
+        // The picture's depth at grid point `g` (m along the render eye's axis; far where
+        // nothing was drawn), from the band-depth target, nearest texel
+        band_z: fn(g: vec2) -> float {
+            let bs = self.band_size
+            let half = vec2(bs.x * 0.5, bs.y)
+            let gc = clamp(g, vec2(0.0, 0.0), vec2(1.0, 1.0))
+            let t = (min(floor(gc * half), half - vec2(1.0, 1.0)) + vec2(0.5, 0.5) + vec2(self.eye * half.x, 0.0)) / bs
+            let vd = self.band_depth.sample_lod(t, 0.0).x
+            return mix(50.0, self.depth_near / max(vd, 0.0001), step(0.004, vd))
+        }
         env_size: uniform(vec2(1.0, 1.0))
         qrot: fn(q: vec4, v: vec3) -> vec3 {
             let t = cross(q.xyz, v) * 2.0
@@ -192,16 +205,24 @@ script_mod! {
             // (the 2D clip in the fragment reads `world`: a point inside every clip)
             self.world = vec4(0.0, 0.0, 0.0, 1.0)
             var at = proj * vec4(ex, ey, -1.0, 1.0)
+            self.edge = 0.0
             if self.warp > 0.5 && self.video_mode > 0.5 {
                 // `warp`: the picture reprojected here, to this view's own eye: each grid vertex
                 // is the picture's point there (its render eye's ray at the band's depth, far
                 // where nothing was drawn) seen by this view's camera: rotation AND translation
                 // since the render pose, per vertex
-                let bs = self.band_size
-                let half = vec2(bs.x * 0.5, bs.y)
-                let t = (min(floor(g * half), half - vec2(1.0, 1.0)) + vec2(0.5, 0.5) + vec2(self.eye * half.x, 0.0)) / bs
-                let vd = self.band_depth.sample_lod(t, 0.0).x
-                let z = mix(50.0, self.depth_near / max(vd, 0.0001), step(0.004, vd))
+                let z = self.band_z(g)
+                // a vertex where the depth jumps (an object's edge) is on a triangle stretched
+                // across the gap from the reprojection: such triangles are not drawn (the room
+                // shows there) instead of smearing the edge into slices
+                let n = 1.0 / self.grid_cells
+                let z1 = self.band_z(g + vec2(n, 0.0))
+                let z2 = self.band_z(g - vec2(n, 0.0))
+                let z3 = self.band_z(g + vec2(0.0, n))
+                let z4 = self.band_z(g - vec2(0.0, n))
+                let zmin = min(min(min(z1, z2), min(z3, z4)), z)
+                let zmax = max(max(max(z1, z2), max(z3, z4)), z)
+                self.edge = step(1.15, zmax / max(zmin, 0.01))
                 let rt = self.render_tan
                 let d = vec3(mix(rt.x, rt.y, g.x), mix(rt.z, rt.w, g.y), -1.0)
                 let pw = self.render_pos.xyz + self.qrot(self.render_rot, d * z)
@@ -272,7 +293,7 @@ script_mod! {
 /// vertex layout (its corners carry the picture's depth when it is reprojected). Set on the
 /// draw at draw time: declared as the shader's vertex buffer it moved the draw's instance
 /// fields (the picture's source rect read garbage: nothing showed).
-const GRID: usize = 64;
+const GRID: usize = 128;
 fn xr_grid_geometry(cx: &mut Cx) -> Geometry {
     let mut g = makepad_widgets::makepad_draw::geometry::geometry_gen::GeometryGen::default();
     let s = 1.0 / GRID as f32;
@@ -1076,6 +1097,7 @@ impl XrStreamClient {
                     (live_id!(env_map), vec![self.env_map as f32]),
                     (live_id!(warp), vec![self.warp as u8 as f32]),
                     (live_id!(band_size), vec![band_size.0 as f32, band_size.1 as f32]),
+                    (live_id!(grid_cells), vec![GRID as f32]),
                 ];
                 match cx.cx.xr_environment_depth().filter(|_| self.occlusion) {
                     Some((depth, header)) => {
