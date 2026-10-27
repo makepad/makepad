@@ -238,7 +238,13 @@ impl Renderer {
         self.apply_model_lod_chains();
         self.placed_blocks.refresh(&self.static_models, &self.placed_models, self.placed_scene_signature);
         let camera_pos = scene_state.camera_pos;
-        let stage_matrix = self.stage.matrix();
+        // The stage the scene draw list carries (identity on an MR box stage, whose stage
+        // rides in the XR eye views instead: shaders then see world coordinates).
+        let stage_matrix = self.draw_stage_matrix();
+        if self.stage.mode != StageMode::Flat {
+            let scene_to_room = if self.stage.mode == StageMode::MrBox { self.stage.matrix() } else { Mat4f::identity() };
+            cx.cx.xr_set_scene_to_room(scene_to_room);
+        }
         let cluster_view = (self.stage.mode == StageMode::Flat).then(|| (
             Mat4f::mul(&scene_state.view, &stage_matrix), scene_state.projection,
         ));
@@ -250,7 +256,10 @@ impl Renderer {
         // eyes the next XR frame draws with (what either eye sees draws).
         // Only per-frame packing points consult this — cached static slabs
         // are never culled, because they outlive the camera that built them.
-        let frustum_val = if self.stage.mode == StageMode::Flat {
+        // An MR box stage: what lies in the box draws (it is small; the eyes see all of it).
+        let frustum_val = if let Some(clip) = self.clip_box_from_world() {
+            Some(Frustum::from_clip_matrix(&clip))
+        } else if self.stage.mode == StageMode::Flat {
             Some(Frustum::from_clip_matrix(&Mat4f::mul(
                 &scene_state.projection,
                 &Mat4f::mul(&scene_state.view, &stage_matrix),
@@ -262,6 +271,19 @@ impl Renderer {
             ))
         };
         let frustum = frustum_val.as_ref();
+        // Where the eye really is in the world: the game camera, except on an MR box stage,
+        // whose eye is the headset's, through the stage (far off at a small scale). Levels of
+        // detail, impostors and grass are picked, and shading views from, there; shadows,
+        // lights and streaming stay centred on the game camera (the followed subject).
+        // (The left eye's view of the world: its view in the room times the stage.)
+        let eye_view = match (self.stage.mode, cx.cx.xr_eye_matrices()) {
+            (StageMode::MrBox, Some([(view, _), _])) => Some(Mat4f::mul(&view, &self.stage.matrix())),
+            _ => None,
+        };
+        let eye_pos = eye_view.map_or(camera_pos, |v| {
+            let w = v.invert().transform_vec4(vec4(0.0, 0.0, 0.0, 1.0));
+            vec3f(w.x, w.y, w.z) * (1.0 / w.w)
+        });
         // Which tier serves the DYNAMIC casters this frame — the ONE
         // decision point (gpu_lightmap::dynamic_shadow_tiers) both the
         // draw gates below and the mover collection consume, so the
@@ -447,6 +469,18 @@ impl Renderer {
         cx.cx.draw_lists[draw_list.id()]
             .draw_list_uniforms
             .view_transform = scene_view_transform;
+        // An MR box stage clips the scene list to its box (the XR shader variant's depth_clip;
+        // every other stage and the window variant never test it).
+        {
+            let uniforms = &mut cx.cx.draw_lists[draw_list.id()].draw_list_uniforms;
+            match self.clip_box_from_world() {
+                Some(clip) => {
+                    uniforms.xr_clip_on = 1.0;
+                    uniforms.xr_clip = clip;
+                }
+                None => uniforms.xr_clip_on = 0.0,
+            }
+        }
         // MR puts the game on your real floor: the room supplies the
         // horizon, so the game's own environment would only paint over the
         // passthrough feed.
@@ -532,6 +566,12 @@ impl Renderer {
         let underwater = world.water.as_deref()
             .filter(|_| shows_environment)
             .and_then(|w| super::water::eye_under_water(w, camera_pos, world.water_time));
+        // An MR box: the world is seen from the room, not through the air of the world (the eye
+        // stands kilometres off at a small scale): no fog.
+        let fog_density = if self.stage.mode == StageMode::MrBox { 0.0 } else { fog_density };
+        if self.stage.mode == StageMode::MrBox {
+            self.clustered.fog_ctl = [0.0; 4];
+        }
         let (fog_color, fog_density) = match &underwater {
             Some(v) => {
                 let c = super::water::in_scatter(&v.look, &sun);
@@ -664,7 +704,7 @@ impl Renderer {
         // authored palette); authored gradients under a fixed hour keep
         // DrawSceneSky.
         let owner = cx.enter_draw_name("sky dome");
-        if let Some(sky) = world.sky.as_ref().filter(|_| shows_environment && !env_dome) {
+        if let Some(sky) = world.sky.as_ref().filter(|_| self.stage.shows_sky() && !env_dome) {
             let mut transform = Mat4f::identity();
             transform.v[12] = camera_pos.x;
             transform.v[13] = camera_pos.y;
@@ -1352,7 +1392,7 @@ impl Renderer {
                 &sun,
                 frustum,
                 &mut stats,
-                camera_pos,
+                eye_pos,
             );
         }
 
@@ -1523,7 +1563,7 @@ impl Renderer {
             self.draw_models_inner(
                 cx,
                 ModelDraw::Diffuse(draw),
-                camera_pos,
+                eye_pos,
                 &instances,
                 WorldModelLane::Placed,
                 (fog_color, fog_density),
@@ -1533,7 +1573,7 @@ impl Renderer {
             );
             self.draw_pbr_models(
                 cx,
-                camera_pos,
+                eye_pos,
                 &instances,
                 WorldModelLane::Placed,
                 (fog_color, fog_density),
@@ -1541,18 +1581,18 @@ impl Renderer {
                 frustum,
                 &mut stats,
             );
-            self.draw_splat_models(cx, camera_pos, &instances, WorldModelLane::Placed,
+            self.draw_splat_models(cx, eye_pos, &instances, WorldModelLane::Placed,
                 (fog_color, fog_density), &sun, frustum, &mut stats);
-            self.draw_foliage_models(cx, camera_pos, &instances, WorldModelLane::Placed,
+            self.draw_foliage_models(cx, eye_pos, &instances, WorldModelLane::Placed,
                 (fog_color, fog_density), &sun, frustum, &mut stats);
-            self.draw_custom_models(cx, camera_pos, &instances, WorldModelLane::Placed,
+            self.draw_custom_models(cx, eye_pos, &instances, WorldModelLane::Placed,
                 (fog_color, fog_density), &sun, frustum, &mut stats);
             self.placed_models = instances;
             let owner = cx.enter_draw_name("stream");
             self.draw_stream(cx, draw, camera_pos, (fog_color, fog_density), &sun);
             cx.exit_draw_label(owner);
             let owner = cx.enter_draw_name("grass");
-            self.draw_grass(cx, camera_pos, (fog_color, fog_density), &sun, frustum, &mut stats);
+            self.draw_grass(cx, eye_pos, (fog_color, fog_density), &sun, frustum, &mut stats);
             cx.exit_draw_label(owner);
 
             // Actor-attached props share the world material/depth pass, but
@@ -1581,7 +1621,7 @@ impl Renderer {
             self.draw_models_inner(
                 cx,
                 ModelDraw::Diffuse(draw),
-                camera_pos,
+                eye_pos,
                 &attachments,
                 WorldModelLane::Attachment,
                 (fog_color, fog_density),
@@ -1591,7 +1631,7 @@ impl Renderer {
             );
             self.draw_pbr_models(
                 cx,
-                camera_pos,
+                eye_pos,
                 &attachments,
                 WorldModelLane::Attachment,
                 (fog_color, fog_density),
@@ -1599,7 +1639,7 @@ impl Renderer {
                 frustum,
                 &mut stats,
             );
-            self.draw_custom_models(cx, camera_pos, &attachments, WorldModelLane::Attachment,
+            self.draw_custom_models(cx, eye_pos, &attachments, WorldModelLane::Attachment,
                 (fog_color, fog_density), &sun, frustum, &mut stats);
             self.world_attachments = attachments;
         }
@@ -1608,11 +1648,11 @@ impl Renderer {
         // depth-rejected behind it rather than shading over it. Drawn even
         // when a host lends no models_draw: the sky lane owns its shader.
         let owner = cx.enter_draw_name("sky faces");
-        self.draw_sky_faces(cx, camera_pos, frustum, &mut stats);
+        self.draw_sky_faces(cx, eye_pos, frustum, &mut stats);
         cx.exit_draw_label(owner);
 
         let owner = cx.enter_draw_name("water");
-        self.draw_water(cx, draws, world, &sun, sky_frame.as_ref(), (fog_color, fog_density), frustum, shows_environment, camera_pos);
+        self.draw_water(cx, draws, world, &sun, sky_frame.as_ref(), (fog_color, fog_density), frustum, shows_environment, eye_pos);
         cx.exit_draw_label(owner);
 
         // 4. Alpha pass, one batch per shape: static sensors from the slab,
@@ -1805,10 +1845,16 @@ impl Renderer {
             }
         }
 
-        let v = &scene_state.view.v;
-        let cam_axes = (vec3f(v[0], v[4], v[8]), vec3f(v[1], v[5], v[9]));
+        // the camera's right and up for camera-facing sprites: the headset eye's on an MR box
+        let cam_axes = match &eye_view {
+            Some(e) => (vec3f(e.v[0], e.v[4], e.v[8]).normalize(), vec3f(e.v[1], e.v[5], e.v[9]).normalize()),
+            None => {
+                let v = &scene_state.view.v;
+                (vec3f(v[0], v[4], v[8]), vec3f(v[1], v[5], v[9]))
+            }
+        };
         let owner = cx.enter_draw_name("late layers");
-        self.draw_late_layers(cx, draws, world, frustum, camera_pos, shows_environment, &mut stats, (sun, (fog_color, fog_density), cam_axes));
+        self.draw_late_layers(cx, draws, world, frustum, eye_pos, shows_environment, &mut stats, (sun, (fog_color, fog_density), cam_axes));
         cx.exit_draw_label(owner);
         // Particles and VFX decals, after every other transparent. Particles
         // are pure decoration and the first thing thermal pressure thins
@@ -1823,7 +1869,7 @@ impl Renderer {
             lin: self.lin_ctl(),
         };
         let owner = cx.enter_draw_name("vfx");
-        self.draw_vfx_layer(cx, &scene_state, stage_matrix, frustum, vfx_light, quality.particle_scale, &mut stats);
+        self.draw_vfx_layer(cx, &SceneState3D { camera_pos: eye_pos, ..scene_state }, stage_matrix, frustum, vfx_light, quality.particle_scale, &mut stats);
         cx.exit_draw_label(owner);
 
         // 7. View-local held meshes, after the complete world. The dedicated

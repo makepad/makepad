@@ -109,6 +109,23 @@ impl Renderer {
         self.stage = stage;
     }
 
+    /// The room box an `MrBox` stage clips the world to (other stages ignore it).
+    pub fn set_clip_box(&mut self, clip_box: Option<crate::stage::ClipBox>) {
+        self.clip_box = clip_box;
+    }
+
+    /// The stage the scene draw list carries as its view transform: the stage itself, or
+    /// identity on an `MrBox` stage (the XR eye views carry it, `Cx::xr_set_scene_to_room`).
+    pub(crate) fn draw_stage_matrix(&self) -> Mat4f {
+        if self.stage.mode == StageMode::MrBox { Mat4f::identity() } else { self.stage.matrix() }
+    }
+
+    /// An `MrBox` stage's box, world -> the unit box.
+    pub(crate) fn clip_box_from_world(&self) -> Option<Mat4f> {
+        let b = self.clip_box.filter(|_| self.stage.mode == StageMode::MrBox)?;
+        Some(Mat4f::mul(&b.unit_from_room(), &self.stage.matrix()))
+    }
+
     /// How many casters may use the projected-silhouette tier. Lower it on
     /// mobile/standalone XR; see apps/commercial/sandbox/BUDGETS.md.
     pub fn shadow_budget(&self) -> usize {

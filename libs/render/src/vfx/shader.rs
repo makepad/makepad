@@ -139,6 +139,9 @@ script_mod! {
             let corner = self.geom.geom_pos.xy * alive
             var world4 = self.draw_list.view_transform * vec4(center.x, center.y, center.z, 1.0)
             var view_pos = self.draw_pass.camera_view * world4
+            // World units to view units: 1 on a window; a stage's scale (an XR box or diorama)
+            // reaches the view-space quad through it.
+            let vs = length((self.draw_pass.camera_view * (self.draw_list.view_transform * vec4(1.0, 0.0, 0.0, 0.0))).xyz)
             // Quad axes in view space (for lighting the sprite's normals).
             var ax = vec2(cs, sn)
             if flat > 0.5 {
@@ -148,7 +151,7 @@ script_mod! {
                 world4 = self.draw_list.view_transform * vec4(wp.x, wp.y, wp.z, 1.0)
                 view_pos = self.draw_pass.camera_view * world4
             } else {
-                var off = vec2(corner.x * cs - corner.y * sn, corner.x * sn + corner.y * cs) * size
+                var off = vec2(corner.x * cs - corner.y * sn, corner.x * sn + corner.y * cs) * (size * vs)
                 let stretch = self.p_look.z
                 if stretch > 0.0 {
                     // Stretched along the screen projection of the velocity,
@@ -159,7 +162,7 @@ script_mod! {
                         let dir = vv / len
                         let perp = vec2(0.0 - dir.y, dir.x)
                         let tail = len * stretch
-                        off = dir * (corner.x * (size + tail) - tail * 0.5) + perp * (corner.y * size)
+                        off = dir * (corner.x * (size * vs + tail) - tail * 0.5) + perp * (corner.y * size * vs)
                         ax = dir
                     }
                 }
@@ -172,7 +175,7 @@ script_mod! {
             self.v_uv = self.geom.geom_uv
             self.v_color = col
             self.v_info = vec4(self.p_kind.x, life_t, variant, self.p_kind.y)
-            self.v_look = vec4(self.p_look.x, self.p_look.y, 0.0 - view_pos.z, max(self.p_extra.y, 0.001))
+            self.v_look = vec4(self.p_look.x, self.p_look.y, 0.0 - view_pos.z, max(self.p_extra.y * vs, 0.001))
             let clip = self.draw_pass.camera_projection * view_pos
             self.v_clip = clip
             self.vertex_pos = clip

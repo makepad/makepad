@@ -1400,6 +1400,19 @@ impl Cx {
         let _ = on;
     }
 
+    /// Where the XR passes' scene space sits in the room: `m` maps a scene point into the
+    /// headset's tracking space, and the eye views the XR passes draw with become `view * m`,
+    /// so shaders see scene (world) coordinates while the headset sees the room. A vehicle the
+    /// view rides with, or a world shown at another scale, is this one matrix instead of a
+    /// transform on every draw. Set per frame; identity (the default) = the scene is the room.
+    /// The eyes `xr_eye_matrices` and `xr_frame_wire` report stay in tracking space.
+    pub fn xr_set_scene_to_room(&mut self, m: crate::makepad_math::Mat4f) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hal_xr_scene_to_room(m);
+        #[cfg(target_arch = "wasm32")]
+        let _ = m;
+    }
+
     pub fn xr_start_presenting(&mut self) {
         self.platform_ops.push_back(CxOsOp::XrStartPresenting);
     }

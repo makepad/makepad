@@ -751,6 +751,41 @@ fn copy_uniforms(b: &mut Bld, dyn_block: Option<GlobalId>, dyn_ios: &[usize], sc
     }
 }
 
+/// The clip volume test at the top of `depth_clip`: discard the fragment when its world
+/// position lies outside the draw list's `xr_clip` box while `xr_clip_on` is set. A shader
+/// without the draw list uniforms (or a list struct without the fields) gets no test.
+fn xr_clip_volume(b: &mut Bld, world: u32, vec4: TyId, vec3: TyId, mat4: TyId) {
+    let mut list = None;
+    for (i, g) in b.m.globals.iter().enumerate() {
+        if g.kind == IrGlobalKind::Io(IrIo::UniformBuffer) && g.name == id!(draw_list) {
+            list = Some(i as GlobalId);
+        }
+    }
+    let Some(list) = list else { return };
+    let IrTy::Struct(si) = b.m.get(b.m.globals[list as usize].ty).clone() else { return };
+    let field = |name: LiveId| b.m.structs[si as usize].fields.iter().position(|f| f.name == name);
+    let (Some(on_k), Some(box_k)) = (field(id!(xr_clip_on)), field(id!(xr_clip))) else { return };
+    let blk = b.glob(list);
+    let on = b.e(ExprKind::Field(blk, on_k as u32), TY_F32);
+    let half = b.f32(0.5);
+    let enabled = b.bin(BinOp::Gt, on, half, TY_BOOL);
+    let blk = b.glob(list);
+    let m = b.e(ExprKind::Field(blk, box_k as u32), mat4);
+    let wv = b.e(ExprKind::Param(world), vec4);
+    let q = b.bin(BinOp::Mul, m, wv, vec4);
+    let xyz = b.e(ExprKind::Swizzle(q, [0, 1, 2, 0], 3), vec3);
+    let a = b.builtin(Builtin::Abs, vec![xyz], vec3);
+    let ax = b.lane(a, 0);
+    let ay = b.lane(a, 1);
+    let az = b.lane(a, 2);
+    let mxy = b.builtin(Builtin::Max, vec![ax, ay], TY_F32);
+    let mx = b.builtin(Builtin::Max, vec![mxy, az], TY_F32);
+    let one = b.f32(1.0);
+    let outside = b.bin(BinOp::Gt, mx, one, TY_BOOL);
+    let c = b.bin(BinOp::LogicAnd, enabled, outside, TY_BOOL);
+    b.f.body.push(Stmt::If(c, vec![Stmt::Discard], Vec::new()));
+}
+
 /// `depth_clip(world, color, clip)` as an IR function (the XR depth clip:
 /// fragments behind the XR depth texture are discarded).
 fn build_depth_clip(ir: &mut IrModule, xr: bool, xr_depth: GlobalId, view_id: GlobalId) {
@@ -782,6 +817,11 @@ fn build_depth_clip(ir: &mut IrModule, xr: bool, xr_depth: GlobalId, view_id: Gl
         let c = b.e(ExprKind::Param(color), vec4);
         vec![Stmt::Return(c)]
     };
+    // The draw list's XR clip volume (`DrawListUniforms::xr_clip`) first, for every draw of the
+    // list whatever its `clip`: if (xr_clip_on > 0.5 && any(abs((xr_clip * world).xyz) > 1))
+    // discard. Both variants: an XR picture drawn side by side is two passes of the window
+    // variant. Off (every list but an XR box stage's) it is one uniform compare.
+    xr_clip_volume(&mut b, world, vec4, vec3, mat4);
     // if (clip < 0.5) return color
     let p = b.e(ExprKind::Param(clip), TY_F32);
     let half = b.f32(0.5);

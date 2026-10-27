@@ -33,18 +33,65 @@ pub enum StageMode {
     /// Mixed reality: the world shrunk onto the real floor. The room is the
     /// environment, so the game's sky and terrain are suppressed.
     MrDiorama,
+    /// Mixed reality: a piece of the world, ground included, inside a box in the room
+    /// ([`ClipBox`]); everything outside the box is clipped away and the room shows where
+    /// the sky would be. The XR passes draw the scene in world coordinates with the stage in
+    /// their eye views (`Cx::xr_set_scene_to_room`), so lighting and shadows stay the
+    /// world's however the stage moves.
+    MrBox,
 }
 
 impl StageMode {
-    /// Whether the game draws its own environment. False in MR — the room
-    /// already has one, and a sky dome would paint over the passthrough.
+    /// Whether the game draws its own ground (terrain, water, lamps). False in the MR
+    /// diorama — the room already has a floor.
     pub fn shows_environment(self) -> bool {
         !matches!(self, StageMode::MrDiorama)
     }
 
+    /// Whether the game draws its sky (the dome, an environment background). False in MR:
+    /// a sky would paint over the passthrough feed.
+    pub fn shows_sky(self) -> bool {
+        !matches!(self, StageMode::MrDiorama | StageMode::MrBox)
+    }
+
     /// Whether this mode wants passthrough enabled on the headset.
     pub fn wants_passthrough(self) -> bool {
-        matches!(self, StageMode::MrDiorama)
+        matches!(self, StageMode::MrDiorama | StageMode::MrBox)
+    }
+}
+
+/// The box an [`StageMode::MrBox`] stage shows the world in, in the room (tracking space):
+/// its centre, its turn about the room's up axis and its half extents (metres).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClipBox {
+    pub center: Vec3f,
+    pub yaw: f32,
+    pub half: Vec3f,
+}
+
+impl ClipBox {
+    /// Room -> the unit box [-1, 1]^3 (column-major, as `Stage::matrix`).
+    pub fn unit_from_room(&self) -> Mat4f {
+        let (s, c) = (self.yaw.sin(), self.yaw.cos());
+        let inv = vec3f(1.0 / self.half.x.max(1.0e-4), 1.0 / self.half.y.max(1.0e-4), 1.0 / self.half.z.max(1.0e-4));
+        // local = R_y(-yaw) (room - center) / half: x' = c x - s z, z' = s x + c z
+        let mut m = Mat4f::identity();
+        m.v[0] = c * inv.x;
+        m.v[2] = s * inv.z;
+        m.v[5] = inv.y;
+        m.v[8] = -s * inv.x;
+        m.v[10] = c * inv.z;
+        let p = self.center;
+        m.v[12] = -(c * p.x - s * p.z) * inv.x;
+        m.v[13] = -p.y * inv.y;
+        m.v[14] = -(s * p.x + c * p.z) * inv.z;
+        m
+    }
+
+    /// A point given in the box's own frame (metres from its centre, unturned) in the room.
+    pub fn room_point(&self, local: Vec3f) -> Vec3f {
+        let (s, c) = (self.yaw.sin(), self.yaw.cos());
+        self.center + vec3f(local.x * c + local.z * s, local.y, -local.x * s + local.z * c)
     }
 }
 
@@ -107,6 +154,10 @@ impl Stage {
 
     pub fn shows_environment(&self) -> bool {
         self.mode.shows_environment()
+    }
+
+    pub fn shows_sky(&self) -> bool {
+        self.mode.shows_sky()
     }
 
     /// The world→room matrix: translate(origin) · rotate_y(yaw) · scale.

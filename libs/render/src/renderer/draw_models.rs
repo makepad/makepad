@@ -1265,7 +1265,7 @@ impl Renderer {
         draw.lin = self.lin_ctl()[0];
         draw.sun_vis = self.view_model_sun;
         draw.fog_color = fog_color;
-        let stage_inv = self.stage.matrix().invert();
+        let stage_inv = self.draw_stage_matrix().invert();
         for inst in &self.view_models {
             let Some((_, loaded)) = self.static_models.iter().find(|(id, _)| *id == inst.model)
             else {

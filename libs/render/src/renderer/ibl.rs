@@ -1033,7 +1033,7 @@ impl Renderer {
     /// never shows an environment (the room supplies the horizon).
     pub(super) fn draw_environment_background(&mut self, cx: &mut Cx3d, env: &Environment, projection: &Mat4f, exposure_ev: f32) -> bool {
         let Background::Environment { blur, intensity } = env.background else { return false };
-        if !self.stage.shows_environment() {
+        if !self.stage.shows_sky() {
             return false;
         }
         let Some(texture) = self.ibl.texture.clone() else { return false };

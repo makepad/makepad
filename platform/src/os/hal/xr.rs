@@ -45,6 +45,9 @@ pub(crate) struct HalXr {
     pub(crate) env_images: Vec<(u64, crate::texture::Texture)>,
     /// the display time of the frame that acquired the current `env_depth` image
     pub(crate) env_depth_ns: u64,
+    /// `Cx::xr_set_scene_to_room`: the XR passes' scene space into the room (tracking space);
+    /// the eye views of the pass uniforms are composed with it (identity: the scene is the room)
+    pub(crate) scene_to_room: Mat4f,
 }
 
 /// A local-space point seen by eye 0's environment depth camera: its depth along that camera's
@@ -109,7 +112,7 @@ impl Cx {
         self.hal.windows.insert(window.0, super::HalWindow::default());
         // the HAL sizes it (its first Geom confirms it)
         self.hal.frames.w.window_create(hal_window_id(window), window_kind::XR, Id::NONE, [0.0; 4], false);
-        self.hal.xr = Some(HalXr { window, frame: None, display_ns: 0, clock_offset_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None, hand_check_at: None, env_images: Vec::new(), env_depth_ns: 0 });
+        self.hal.xr = Some(HalXr { window, frame: None, display_ns: 0, clock_offset_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None, hand_check_at: None, env_images: Vec::new(), env_depth_ns: 0, scene_to_room: Mat4f::identity() });
         if SEE_THROUGH.with(|s| s.get()) { self.hal_xr_see_through(true); }
         let refresh = REFRESH_MHZ.with(|r| r.get());
         if refresh != 0 { self.hal_xr_refresh_rate(refresh); }
@@ -261,12 +264,18 @@ impl Cx {
         }
     }
 
+    /// `Cx::xr_set_scene_to_room`.
+    pub(crate) fn hal_xr_scene_to_room(&mut self, m: Mat4f) {
+        if let Some(xr) = self.hal.xr.as_mut() { xr.scene_to_room = m; }
+    }
+
     /// The uniforms of eye `i` for an XR pass: its own uniforms with that eye's camera (left
     /// and right fields alike: each eye is a pass of its own).
     pub(crate) fn hal_xr_eye_uniforms(&mut self, base: &DrawPassUniforms, i: usize) -> Option<&DrawPassUniforms> {
         let xr = self.hal.xr.as_mut()?;
         let frame = xr.frame?;
         let (view, projection) = eye_matrices(&frame, i);
+        let view = Mat4f::mul(&view, &xr.scene_to_room);
         let inv = view.invert();
         let u = &mut xr.eye_uniforms[i];
         *u = *base;
@@ -285,6 +294,8 @@ impl Cx {
         let frame = xr.frame?;
         let (view, projection) = eye_matrices(&frame, 0);
         let (view_r, projection_r) = eye_matrices(&frame, 1);
+        let view = Mat4f::mul(&view, &xr.scene_to_room);
+        let view_r = Mat4f::mul(&view_r, &xr.scene_to_room);
         let u = &mut xr.eye_uniforms[0];
         *u = *base;
         u.camera_view = view; u.camera_view_r = view_r;

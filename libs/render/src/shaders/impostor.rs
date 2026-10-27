@@ -66,8 +66,9 @@ script_mod! {
             let s2 = max(dot(ax, ax), 0.000001)
             let cw = (m * vec4(center.x, center.y, center.z, 1.0)).xyz
             let eye = (self.draw_pass.camera_inv * vec4(0.0, 0.0, 0.0, 1.0)).xyz
-            let cam_r = (self.draw_pass.camera_inv * vec4(1.0, 0.0, 0.0, 0.0)).xyz
-            let cam_u = (self.draw_pass.camera_inv * vec4(0.0, 1.0, 0.0, 0.0)).xyz
+            // unit axes: a scaled view (an XR box's stage rides in it) must not size the quad
+            let cam_r = normalize((self.draw_pass.camera_inv * vec4(1.0, 0.0, 0.0, 0.0)).xyz)
+            let cam_u = normalize((self.draw_pass.camera_inv * vec4(0.0, 1.0, 0.0, 0.0)).xyz)
             // World directions into the copy's frame (uniform scale).
             let to_eye = eye - cw
             let vd = normalize(vec3(dot(ax, to_eye), dot(ay, to_eye), dot(az, to_eye)))

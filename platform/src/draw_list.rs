@@ -1861,18 +1861,26 @@ pub struct DrawListUniforms {
     pub view_clip: Vec4f,
     #[live]
     pub view_shift: Vec2f,
+    /// 1: `xr_clip` is on for this list (0, the default: off).
     #[live]
-    pub pad1: f32,
+    pub xr_clip_on: f32,
     #[live]
     pub pad2: f32,
+    /// An XR clip volume for this list's 3D draws: the matrix that maps a fragment's world
+    /// position (`view_transform * position`, the room in a headset) into the unit box
+    /// [-1, 1]^3. While `xr_clip_on` is 1 `depth_clip` discards the fragments outside it (one
+    /// uniform compare while it is off).
+    #[live]
+    pub xr_clip: Mat4f,
 }
 
 crate::makepad_math::impl_gpu_pod!(DrawListUniforms,
     view_transform: Mat4f,
     view_clip: Vec4f,
     view_shift: Vec2f,
-    pad1: f32,
+    xr_clip_on: f32,
     pad2: f32,
+    xr_clip: Mat4f,
 );
 
 impl Default for DrawListUniforms {
@@ -1881,8 +1889,9 @@ impl Default for DrawListUniforms {
             view_transform: Mat4f::identity(),
             view_clip: vec4(-100000.0, -100000.0, 100000.0, 100000.0),
             view_shift: vec2(0.0, 0.0),
-            pad1: 0.0,
+            xr_clip_on: 0.0,
             pad2: 0.0,
+            xr_clip: Mat4f::identity(),
         }
     }
 }
