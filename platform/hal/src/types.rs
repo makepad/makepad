@@ -731,6 +731,10 @@ pub mod texture_handle {
     /// hardware buffer) as one video texture: sampled from a `texture_video` slot it gives the
     /// picture's raw codes (.g = Y', .b = Cb, .r = Cr, 0..1 of the 8-bit range).
     pub const VIDEO: u32 = 3;
+    /// An XR runtime's environment depth image (Vulkan on Android: a ticket of the XR shell's,
+    /// `XrDepth::image`): both eyes' layers as a 2D array texture, sampled from a
+    /// `texture_2d_array` slot it gives the depth (0..1, the image's projection) in .r.
+    pub const XR_DEPTH: u32 = 4;
 }
 
 /// The bits above the kind byte of `WindowCreate::kind`: how a macOS window is made (Cx's
@@ -1018,20 +1022,23 @@ pub struct XrFrame {
     pub hands: [XrHand; 2],
 }
 
-/// The header of an `XrDepth` event (`buffers::Wire`): the environment depth image of eye
-/// `eye` (XR_META_environment_depth), `width` x `height` D16 texels (row-major, little-endian
-/// u16, nonlinear: the depth of the eye's projection with `near`/`far`, `far` 0 = infinite)
-/// follow it in the payload. `views` are the depth camera of each eye in the local space (y
-/// up, the floor at y = 0), at the time the depth was captured.
+/// The header of an `XrDepth` event (`buffers::Wire`): the environment depth images of the
+/// first `layers` eyes (XR_META_environment_depth), each `width` x `height` D16 texels
+/// (row-major, little-endian u16, nonlinear: the depth of that eye's projection with
+/// `near`/`far`, `far` 0 = infinite), eye 0's first, follow it in the payload. `views` are the depth camera of each eye in the local space (y
+/// up, the floor at y = 0), at the time the depth was captured. `image`: the image itself for
+/// the GPU (`texture_handle::XR_DEPTH` ticket; 0 none). A payload without texels announces a
+/// newly acquired image (the GPU reads it from now on); the texels follow in a later event.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct XrDepth {
     pub width: u32,
     pub height: u32,
-    pub eye: u32,
+    pub layers: u32,
     pub near: f32,
     pub far: f32,
     pub views: [XrEye; 2],
+    pub image: u64,
 }
 
 // ------------------------------------------------------------------ frames

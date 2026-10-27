@@ -386,8 +386,10 @@ hal_commands! {
     /// loss (a click anywhere else) answers `PopupDismissed`.
     WindowAtTray = 154, window_at_tray { id: obj, tray: u64, w: f32, h: f32 };
     /// The eyes XR window `id`'s next frame shows with, when they are not its `XrFrame`'s (a
-    /// picture rendered elsewhere, for other eyes): `eyes` is two `XrEye` (`buffers::Wire`). The
-    /// shell gives them to the display (the runtime reprojects from them to the display's pose).
+    /// picture rendered elsewhere, for other eyes): `eyes` is two `XrEye` (`buffers::Wire`) and
+    /// the depth (metres along the view, f32 little-endian; 0 none) of what the frame shows
+    /// there. The shell gives them to the display (the runtime reprojects from them to the
+    /// display's pose, positionally at that depth).
     XrFrameEyes = 155, xr_frame_eyes { id: obj, eyes: rng };
     /// XR window `id`'s `XrFrame`s are located `lead_ns` past their display time (head, eyes,
     /// hands, controllers): a picture rendered elsewhere from them shows that much later (a

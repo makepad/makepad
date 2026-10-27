@@ -119,6 +119,23 @@ impl Image {
         Self::adopt(dev, desc, image, vk::DeviceMemory::null(), 0, layout, None, true)
     }
 
+    /// A depth image another owner made and keeps (an XR runtime's environment depth swapchain
+    /// image, in its depth read-only layout), of a format the HAL has no texture format for
+    /// (`format`): `desc` names a depth stand-in (DEPTH32F) for the bookkeeping, its views are
+    /// `format`'s. Sampled as a plain 2D array it reads the depth in .r; never destroyed here.
+    pub unsafe fn borrowed_depth(dev: Arc<Device>, desc: TextureObj, image: vk::Image, format: vk::Format) -> Result<Arc<Self>, String> {
+        let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::DEPTH).level_count(1).layer_count(desc.depth);
+        let info = vk::ImageViewCreateInfo::default().image(image).format(format).view_type(vk::ImageViewType::TYPE_2D_ARRAY).subresource_range(range);
+        let array_view = dev.raw.create_image_view(&info, None).map_err(error)?;
+        let view = match dev.raw.create_image_view(&info.view_type(vk::ImageViewType::TYPE_2D).subresource_range(range.layer_count(1)), None) {
+            Ok(v) => v,
+            Err(e) => { dev.raw.destroy_image_view(array_view, None); return Err(error(e)); }
+        };
+        Ok(Arc::new(Self { dev, image, memory: vk::DeviceMemory::null(), view, array_view, cube_view: vk::ImageView::null(), layers: Vec::new(), desc, bytes: 0,
+            aspect: vk::ImageAspectFlags::DEPTH, layout: Mutex::new(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL), external_owner: AtomicBool::new(false), borrowed: true,
+            video: Default::default(), external: None, #[cfg(target_os = "linux")] timeline: None }))
+    }
+
     /// A bound external-format image (a decoder's picture) sampled through `video`'s Y'CbCr
     /// conversion: its views carry the conversion.
     pub unsafe fn external_video(dev: Arc<Device>, desc: TextureObj, image: vk::Image, memory: vk::DeviceMemory, video: super::device::VideoSampler,

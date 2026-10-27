@@ -1337,12 +1337,21 @@ impl Cx {
         { false }
     }
 
-    /// The headset's newest environment depth image (where the room is, as its depth camera saw
-    /// it): a texture of its depth values (8-bit RGBA texels: the D16 value's high byte in red,
-    /// low in green, read at texel centres; `d = value / 65535`, `header.near`/`far`
-    /// projection; far 0 or infinite: `z = near / (1 - d)`; the first row is the bottom of the
-    /// view) and its header (size, the eye views it was taken with).
-    /// For per-pixel tests against the room (real things in front of virtual ones).
+    /// The display time (HAL clock, ns) of the frame that acquired the current environment
+    /// depth image (its age at use: a frame's display time less this).
+    pub fn xr_environment_depth_display_ns(&self) -> u64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal.xr.as_ref().map_or(0, |xr| xr.env_depth_ns) }
+        #[cfg(target_arch = "wasm32")]
+        { 0 }
+    }
+
+    /// The headset's newest environment depth image (where the room is, as its depth cameras
+    /// saw it): the runtime's image itself as a `texture_2d_array` texture, one layer per eye
+    /// (`header.layers`), the depth `d` (0..1) in .r (`header.near`/`far` projection; far 0 or
+    /// infinite: `z = near / (1 - d)`; the first row is the bottom of the view), and its header
+    /// (size, each eye's depth camera). For per-pixel tests against the room (real things in
+    /// front of virtual ones).
     pub fn xr_environment_depth(&self) -> Option<(crate::texture::Texture, makepad_hal::XrDepth)> {
         #[cfg(not(target_arch = "wasm32"))]
         { self.hal.xr.as_ref()?.env_depth.clone() }
@@ -1353,12 +1362,14 @@ impl Cx {
     /// The XR window's next frame shows with these eyes instead of its `XrFrame`'s: a picture
     /// rendered elsewhere for other eyes (a streamed one) is drawn over the whole view and the
     /// headset's compositor reprojects it from the eyes it was rendered with to the display's
-    /// pose. Set before the frame is drawn; it holds for that one frame.
-    pub fn xr_present_eyes(&mut self, eyes: [makepad_hal::XrEye; 2]) {
+    /// pose. `focus_m`: the depth (metres along the view) of what the picture shows, for the
+    /// compositor's positional correction (0: rotation only). Set before the frame is drawn; it
+    /// holds for that one frame.
+    pub fn xr_present_eyes(&mut self, eyes: [makepad_hal::XrEye; 2], focus_m: f32) {
         #[cfg(not(target_arch = "wasm32"))]
-        self.hal_xr_present_eyes(eyes);
+        self.hal_xr_present_eyes(eyes, focus_m);
         #[cfg(target_arch = "wasm32")]
-        let _ = eyes;
+        let _ = (eyes, focus_m);
     }
 
     /// The headset's display runs at its supported refresh rate nearest to `hz` (0: the

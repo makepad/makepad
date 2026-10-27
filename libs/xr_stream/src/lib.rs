@@ -54,9 +54,9 @@ script_mod! {
         // a decoder's picture where it is (`video_mode` 1): sampled it gives its raw codes
         // (.y = Y', .z = Cb, .x = Cr); `nv12_size` is then its buffer's size
         video: texture_video()
-        // the headset's newest environment depth image (D16 as two bytes per texel, see
-        // `room_depth`; `env_pos.w` its near plane)
-        env_depth: texture_2d(float)
+        // the headset's newest environment depth image itself, a layer per eye (its depth
+        // 0..1 in .r; `env_pos.w` its near plane)
+        env_depth: texture_2d_array(float)
         // Per draw (each eye is a draw call of its own), uniforms, not instance data: as
         // instance fields they were the fragment's inputs, and past the varyings that fit, the
         // fragment read other values (the picture showed whatever the vertex stage drew, its
@@ -118,10 +118,10 @@ script_mod! {
             if m > 3.5 {
                 t = t.yx
             }
-            // (the texel's two bytes: high in red, low in green; read at its centre)
+            // (this eye's layer, read at the texel's centre)
             let ts = self.env_size
-            let e = self.env_depth.sample((floor(t * ts) + vec2(0.5, 0.5)) / ts)
-            let dv = (floor(e.x * 255.0 + 0.5) * 256.0 + floor(e.y * 255.0 + 0.5)) / 65535.0
+            let tc = (floor(t * ts) + vec2(0.5, 0.5)) / ts
+            let dv = self.env_depth.sample(vec3(tc.x, tc.y, self.eye)).x
             if dv >= 0.99999 {
                 return vec2(ze, -1.0)
             }
@@ -189,10 +189,15 @@ script_mod! {
                 let band = fract(r.y * 10.0)
                 return vec4(band * 0.6, (1.0 - band) * 0.6, 0.0, 0.6)
             }
-            if self.opaque > 1.5 {
+            if self.opaque > 1.5 && self.opaque < 3.5 {
                 return vec4(0.6 * (1.0 - self.eye), 0.0, 0.6 * self.eye, 1.0)
             }
             let ch = floor(self.src.w * 2.0 / 3.0 + 0.5)
+            if self.opaque > 3.5 && self.video_mode > 0.5 {
+                // (debug `opaque` 4: the colour alone, no coverage or depth samples: their cost)
+                let c4 = self.video.sample_video((self.src.xy + self.pos * vec2(self.src.z, ch)) / self.nv12_size)
+                return vec4(self.nv12_color(vec3(c4.y, c4.z, c4.x) * 255.0), 1.0)
+            }
             if self.video_mode > 0.5 {
                 let vs = self.nv12_size
                 let c = self.video.sample_video((self.src.xy + self.pos * vec2(self.src.z, ch)) / vs)
@@ -276,6 +281,11 @@ struct Window {
     wait_us: Vec<u32>,
     /// Motion to photon: the pose's sample to the display time of the frame that first shows it.
     m2p_us: Vec<u32>,
+    /// The environment depth image's age at use: the display time of the frame drawn with it
+    /// less that of the frame that acquired it.
+    env_age_us: Vec<u32>,
+    /// The largest angle between a picture's render eyes and the eyes sent for its pose.
+    echo_err_deg: f32,
 }
 
 fn median(v: &mut [u32]) -> f64 {
@@ -298,10 +308,10 @@ struct Shown {
 enum ShownTex {
     /// CPU NV12 uploaded into one byte texture.
     Cpu(Texture),
-    /// The decoder's picture, imported over its memory (a video texture). `_previous` is the
-    /// picture shown before (a frame still on the GPU may draw it), let go when the next one
-    /// comes.
-    Gpu { texture: Texture, picture: makepad_widgets::makepad_platform::video_file::DecodedPicture, _previous: Option<makepad_widgets::makepad_platform::video_file::DecodedPicture> },
+    /// The decoder's picture, imported over its memory (a video texture). `_previous` are the
+    /// two pictures shown before (frames still on the GPU may draw them: a frame is handed to
+    /// the headset when it is queued, not when the GPU is done), let go as newer ones come.
+    Gpu { texture: Texture, picture: makepad_widgets::makepad_platform::video_file::DecodedPicture, _previous: Vec<makepad_widgets::makepad_platform::video_file::DecodedPicture> },
 }
 
 /// A pose sent and not answered yet.
@@ -312,6 +322,8 @@ struct Sent {
     /// The display time of the frame the pose was asked for (its poses are predicted the lead
     /// past it).
     display_ns: u64,
+    /// The eyes' orientations sent (the picture must come back with exactly these).
+    eyes: [[f32; 4]; 2],
 }
 
 /// The headset end (see the module). Owned by the app's XR view.
@@ -353,6 +365,9 @@ pub struct XrStreamClient {
     pub room_view: bool,
     /// How the depth image is read (a debug switch: bit 0 mirrors x, 1 mirrors y, 2 swaps).
     pub env_map: u8,
+    /// The frame goes to the compositor with the picture's depth (positional correction; a
+    /// debug switch).
+    pub depth_layer: bool,
 }
 
 impl Drop for XrStreamClient {
@@ -400,6 +415,7 @@ impl XrStreamClient {
             own_eyes: false,
             room_view: false,
             env_map: 0,
+            depth_layer: true,
         }
     }
 
@@ -438,6 +454,11 @@ impl XrStreamClient {
                         self.lead_ns = if self.lead_ns == 0.0 { lead } else { self.lead_ns * 0.9 + lead * 0.1 };
                         cx.xr_set_pose_lead((self.lead_ns as u64).min(MAX_POSE_LEAD_NS));
                     }
+                    if let (Some((display_ns, _)), env_ns) = (cx.xr_frame_wire(), cx.xr_environment_depth_display_ns()) {
+                        if env_ns != 0 && display_ns >= env_ns {
+                            self.window.env_age_us.push(((display_ns - env_ns) / 1000) as u32);
+                        }
+                    }
                     let link = self.shared.lock().unwrap().link.clone();
                     if let Some(link) = &link {
                         self.send_world(cx, link);
@@ -445,8 +466,10 @@ impl XrStreamClient {
                     if let (Some(link), Some((display_ns, frame))) = (link, cx.xr_frame_wire()) {
                         self.seq += 1;
                         let sample_ns = makepad_widgets::makepad_platform::makepad_hal::clock_ns();
+                        let eyes = makepad_widgets::makepad_platform::makepad_hal::buffers::read_items::<makepad_widgets::makepad_platform::makepad_hal::XrFrame>(&frame, 1)
+                            .next().map_or([[0.0; 4]; 2], |f| [f.eyes[0].pose.orientation, f.eyes[1].pose.orientation]);
                         link.send(&XrClientMsg::Pose { seq: self.seq, sample_ns, display_ns, frame });
-                        self.sent.push_back(Sent { seq: self.seq, at: Instant::now(), sample_ns, display_ns });
+                        self.sent.push_back(Sent { seq: self.seq, at: Instant::now(), sample_ns, display_ns, eyes });
                         while self.sent.len() > 512 {
                             self.sent.pop_front();
                         }
@@ -524,6 +547,14 @@ impl XrStreamClient {
             let seq = tiles[0].head.seq;
             let sent = self.sent.iter().position(|p| p.seq == seq).map(|i| {
                 let (at, sample_ns, display_ns) = (self.sent[i].at, self.sent[i].sample_ns, self.sent[i].display_ns);
+                // the eyes the picture says it was rendered with against the ones sent for it
+                let echo = &tiles[0].head.eyes;
+                for e in 0..2 {
+                    let (a, b) = (self.sent[i].eyes[e], echo[e].orientation);
+                    let dot = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).abs().min(1.0);
+                    let deg = 2.0 * dot.acos().to_degrees();
+                    if deg > self.window.echo_err_deg { self.window.echo_err_deg = deg; }
+                }
                 self.sent.drain(..=i);
                 (at, sample_ns, display_ns)
             });
@@ -554,8 +585,12 @@ impl XrStreamClient {
                     (Some(picture), old) => {
                         let texture = cx.import_picture(picture.handle);
                         let previous = match old.map(|o| o.tex) {
-                            Some(ShownTex::Gpu { picture, .. }) => Some(picture),
-                            _ => None,
+                            Some(ShownTex::Gpu { picture, _previous: mut older, .. }) => {
+                                older.truncate(1);
+                                older.insert(0, picture);
+                                older
+                            }
+                            _ => Vec::new(),
                         };
                         self.shown[t] = Some(Shown { tex: ShownTex::Gpu { texture, picture, _previous: previous }, size, head });
                     }
@@ -620,8 +655,13 @@ impl XrStreamClient {
         let w = &mut self.window;
         let rate = |n: u32| n as f64 / secs;
         let [ref mut render, ref mut gpu, ref mut encode, ref mut send] = w.stages_us;
+        let env_p90 = {
+            let v = &mut w.env_age_us;
+            v.sort_unstable();
+            v.get(v.len() * 9 / 10).map_or(0.0, |x| *x as f64 / 1000.0)
+        };
         let line = format!(
-            "display {:.0}/s · recv {:.0}/s dec {:.0}/s shown {:.0}/s · m2p {:.0} ms = render {:.1} gpu {:.1} enc {:.1} send {:.1} net {:.1} dec {:.1} wait {:.1} (trip {:.0}) · {} unmatched",
+            "display {:.0}/s · recv {:.0}/s dec {:.0}/s shown {:.0}/s · m2p {:.0} ms = render {:.1} gpu {:.1} enc {:.1} send {:.1} net {:.1} dec {:.1} wait {:.1} (trip {:.0}) · {} unmatched · env depth age {:.0}/{:.0} ms · pose echo err max {:.4} deg",
             rate(w.display_frames),
             rate(received.wrapping_sub(r0)),
             rate(decoded.wrapping_sub(d0)),
@@ -635,7 +675,10 @@ impl XrStreamClient {
             median(&mut w.decode_us),
             median(&mut w.wait_us),
             median(&mut w.trip_us),
-            w.unmatched
+            w.unmatched,
+            median(&mut w.env_age_us),
+            env_p90,
+            w.echo_err_deg
         );
         log!("xr stream: {line}");
         self.line = line;
@@ -655,7 +698,7 @@ impl XrStreamClient {
                 fov: e.fov,
             };
             if !self.own_eyes {
-                cx.cx.xr_present_eyes([eye(&first.head.eyes[0]), eye(&first.head.eyes[1])]);
+                cx.cx.xr_present_eyes([eye(&first.head.eyes[0]), eye(&first.head.eyes[1])], if self.depth_layer { first.head.focus_m } else { 0.0 });
             }
             // the tile's picture (the texture may be the decoder's larger buffer)
             let tile_size = self.shared.lock().unwrap().tile_size;
@@ -697,7 +740,8 @@ impl XrStreamClient {
                 ];
                 match cx.cx.xr_environment_depth().filter(|_| self.occlusion) {
                     Some((depth, header)) => {
-                        let v = &header.views[(header.eye as usize).min(1)];
+                        // this eye's own depth camera and image layer
+                        let v = &header.views[e];
                         let p = v.pose.position;
                         uniforms.extend([
                             (live_id!(env_rot), v.pose.orientation.to_vec()),
@@ -711,7 +755,8 @@ impl XrStreamClient {
                     }
                     None => {
                         // (a stand-in: every texture slot is bound)
-                        let none = self.no_depth.get_or_insert_with(|| Texture::new_with_format(cx.cx, TextureFormat::VecBGRAu8_32 { width: 1, height: 1, data: Some(vec![0xffff_ff00]), updated: TextureUpdated::Full }));
+                        let none = self.no_depth.get_or_insert_with(|| Texture::new_with_format(cx.cx, TextureFormat::VecArrayMipBGRAu8_32 { width: 1, height: 1, layers: 2,
+                            data: Some(vec![0xffff_ffff; 2]), max_level: Some(0), wrap: TextureWrap::ClampToEdge, updated: TextureUpdated::Full }));
                         draw.draw_vars.set_texture(3, none);
                         uniforms.push((live_id!(occlude), vec![0.0]));
                     }

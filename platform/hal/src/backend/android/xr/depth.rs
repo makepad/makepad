@@ -1,8 +1,11 @@
 //! Environment depth (XR_META_environment_depth) for the app: each display frame the XR thread
-//! acquires the runtime's newest depth image and copies the left eye's layer into a
-//! host-visible buffer; when that copy's fence has signalled (polled, never waited on) the
-//! texels go to the XR window as an `XrDepth` event, with the depth cameras they were captured
-//! from. The app integrates them into its TSDF on its own thread (makepad-tsdf's depth writer).
+//! acquires the runtime's newest depth image. A new one goes to the XR window at once as an
+//! `XrDepth` header (no texels) naming the image itself (`texture_handle::XR_DEPTH`: the
+//! runtime's swapchain images are lent to the app's GPU work, so its per-pixel tests read the
+//! newest image directly, both eyes' layers, with no CPU on the way), and its copy into a
+//! host-visible buffer starts; when that copy's fence has signalled (polled, never waited on) the
+//! texels follow as a second `XrDepth` with the same header. The app integrates those into its
+//! TSDF on its own thread (makepad-tsdf's depth writer).
 //!
 //! The retired backend read the depth back on its frame thread and waited on the GPU twice a
 //! frame for it (`openxr_depth.rs` / `vulkan.rs` `read_openxr_depth_image`); here the copy rides
@@ -16,9 +19,18 @@ use crate::{XrDepth, XrEye};
 use makepad_vulkan::vk;
 use std::sync::Arc;
 
-/// The eye whose depth layer is read back (the old `DEPTH_VOXEL_EYE_INDEX`).
-const DEPTH_EYE: u32 = 0;
+/// The eyes whose depth layers are read back (both: eye 0's first).
+const LAYERS: u32 = 2;
 const SLOTS: usize = 2;
+
+/// The depth swapchain's images lent to the app's GPU work: their tickets, by chain index.
+struct Lent(Vec<u64>);
+
+impl Drop for Lent {
+    fn drop(&mut self) {
+        for t in &self.0 { crate::backend::vulkan::share::end_lend(*t); }
+    }
+}
 
 struct DepthSlot {
     pool: vk::CommandPool,
@@ -39,6 +51,7 @@ pub(super) struct DepthSource {
     slots: Vec<DepthSlot>,
     pub(super) delivered: u64,
     pub(super) acquired: u64,
+    lent: Lent,
 }
 
 impl DepthSource {
@@ -55,7 +68,12 @@ impl DepthSource {
         })?;
         let images: Vec<vk::Image> = images.iter().map(|i| vk::Image::from_raw(i.image)).collect();
         let size = [state.width, state.height];
-        let bytes = size[0] as u64 * size[1] as u64 * 2;
+        // (each image as a 2-layer depth texture of the runtime's D16 format; a DEPTH32F stand-in names it)
+        let desc = crate::session::TextureObj { format: crate::format::DEPTH32F, w: size[0], h: size[1], depth: LAYERS, mips: 1, usage: crate::usage::SAMPLED,
+            bytes: 0, imported: true, uploaded: 0, lent: None };
+        let lent = Lent(images.iter().map(|i| unsafe { crate::backend::vulkan::Image::borrowed_depth(dev.clone(), desc.clone(), *i, vk::Format::D16_UNORM) }
+            .map(crate::backend::vulkan::share::lend_image)).collect::<Result<_, _>>()?);
+        let bytes = size[0] as u64 * size[1] as u64 * 2 * LAYERS as u64;
         let mut slots = Vec::with_capacity(SLOTS);
         for _ in 0..SLOTS {
             let buffer = Buffer::scratch(dev.clone(), bytes, vk::BufferUsageFlags::TRANSFER_DST)?;
@@ -69,8 +87,12 @@ impl DepthSource {
             }
         }
         unsafe { (xr.xrStartEnvironmentDepthProviderMETA)(provider) }.to_result("xrStartEnvironmentDepthProviderMETA")?;
+        // the hands stay in the image (occlusion needs them): set again on the started provider
+        let keep_hands = XrEnvironmentDepthHandRemovalSetInfoMETA { enabled: XrBool32::from_bool(false), ..Default::default() };
+        let r = unsafe { (xr.xrSetEnvironmentDepthHandRemovalMETA)(provider, &keep_hands) };
+        xr_log!("environment depth provider {:#x} started; hand removal off: {r:?}", provider.0);
         xr_log!("environment depth: {}x{} D16, {} images, read back to the app", size[0], size[1], images.len());
-        Ok(Some(DepthSource { images, last: None, size, slots, delivered: 0, acquired: 0 }))
+        Ok(Some(DepthSource { images, last: None, size, slots, delivered: 0, acquired: 0, lent }))
     }
 
     /// A finished readback: the `XrDepth` payload (header + texels), or None.
@@ -82,7 +104,7 @@ impl DepthSource {
                 continue;
             }
             slot.pending = None;
-            let texels = (header.width * header.height) as usize * 2;
+            let texels = (header.width * header.height * header.layers) as usize * 2;
             let Ok(data) = slot.buffer.read(texels) else { continue };
             let mut payload = Vec::with_capacity(<XrDepth as crate::buffers::Wire>::SIZE + texels);
             crate::buffers::Wire::write(&header, &mut payload);
@@ -93,32 +115,36 @@ impl DepthSource {
         None
     }
 
-    /// Acquires the newest depth image for `time` and starts its copy, when a slot is free.
-    pub(super) fn acquire(&mut self, xr: &LibOpenXr, dev: &Device, provider: XrEnvironmentDepthProviderMETA, space: XrSpace, time: XrTime) {
-        let Some(slot) = self.slots.iter_mut().find(|s| s.pending.is_none()) else { return };
-        // a delivered slot's fence has signalled (poll checked it); a slot never used is created signalled
+    /// Acquires the newest depth image for `time`: a new one's header (the app's GPU reads it
+    /// from now on), and its copy started when a slot is free.
+    pub(super) fn acquire(&mut self, xr: &LibOpenXr, dev: &Device, provider: XrEnvironmentDepthProviderMETA, space: XrSpace, time: XrTime) -> Option<XrDepth> {
         let info = XrEnvironmentDepthImageAcquireInfoMETA { space, display_time: time, ..Default::default() };
         let mut image = XrEnvironmentDepthImageMETA::default();
         if unsafe { (xr.xrAcquireEnvironmentDepthImageMETA)(provider, &info, &mut image) } != XrResult::SUCCESS {
-            return;
+            return None;
         }
-        let Some(&src) = self.images.get(image.swapchain_index as usize) else { return };
-        let p = image.views[DEPTH_EYE as usize].pose;
+        let &src = self.images.get(image.swapchain_index as usize)?;
+        let p = image.views[0].pose;
         let id = (image.swapchain_index, [p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w, p.position.x, p.position.y, p.position.z]);
         if self.last == Some(id) {
-            return;
+            return None;
         }
         self.last = Some(id);
         let pose = |p: XrPosef| crate::XrPose { orientation: [p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w], position: [p.position.x, p.position.y, p.position.z] };
         let view = |v: &XrEnvironmentDepthImageViewMETA| XrEye { pose: pose(v.pose), fov: [v.fov.angle_left, v.fov.angle_right, v.fov.angle_up, v.fov.angle_down] };
-        let header = XrDepth { width: self.size[0], height: self.size[1], eye: DEPTH_EYE, near: image.near_z, far: if image.far_z.is_finite() { image.far_z } else { 0.0 },
-            views: [view(&image.views[0]), view(&image.views[1])] };
-        let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::DEPTH).level_count(1).base_array_layer(DEPTH_EYE).layer_count(1);
+        let header = XrDepth { width: self.size[0], height: self.size[1], layers: LAYERS, near: image.near_z, far: if image.far_z.is_finite() { image.far_z } else { 0.0 },
+            views: [view(&image.views[0]), view(&image.views[1])], image: self.lent.0.get(image.swapchain_index as usize).copied().unwrap_or(0) };
+        // the texels for the room field: copied when a slot is free (a busy one skips this image)
+        // (a delivered slot's fence has signalled (poll checked it); a slot never used is created signalled)
+        let Some(slot) = self.slots.iter_mut().find(|s| s.pending.is_none()) else { return Some(header) };
+        let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::DEPTH).level_count(1).base_array_layer(0).layer_count(LAYERS);
         let barrier = |old, new, from, to| vk::ImageMemoryBarrier::default().image(src).old_layout(old).new_layout(new)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED).src_access_mask(from).dst_access_mask(to).subresource_range(range);
-        let copy = vk::BufferImageCopy::default()
-            .image_subresource(vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::DEPTH).base_array_layer(DEPTH_EYE).layer_count(1))
-            .image_extent(vk::Extent3D { width: self.size[0], height: self.size[1], depth: 1 });
+        // (one region per layer: each eye's texels after the one before)
+        let layer_bytes = self.size[0] as u64 * self.size[1] as u64 * 2;
+        let copies: Vec<vk::BufferImageCopy> = (0..LAYERS).map(|l| vk::BufferImageCopy::default().buffer_offset(l as u64 * layer_bytes)
+            .image_subresource(vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::DEPTH).base_array_layer(l).layer_count(1))
+            .image_extent(vk::Extent3D { width: self.size[0], height: self.size[1], depth: 1 })).collect();
         let ready = vk::BufferMemoryBarrier::default().src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE).dst_access_mask(vk::AccessFlags::HOST_READ).buffer(slot.buffer.buffer).size(vk::WHOLE_SIZE);
         let recorded = unsafe {
@@ -128,7 +154,7 @@ impl DepthSource {
                 dev.raw.begin_command_buffer(slot.cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))?;
                 dev.raw.cmd_pipeline_barrier(slot.cb, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[],
                     &[barrier(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::AccessFlags::SHADER_READ, vk::AccessFlags::TRANSFER_READ)]);
-                dev.raw.cmd_copy_image_to_buffer(slot.cb, src, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, slot.buffer.buffer, &[copy]);
+                dev.raw.cmd_copy_image_to_buffer(slot.cb, src, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, slot.buffer.buffer, &copies);
                 dev.raw.cmd_pipeline_barrier(slot.cb, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::HOST, vk::DependencyFlags::empty(), &[], &[ready],
                     &[barrier(vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL, vk::AccessFlags::TRANSFER_READ, vk::AccessFlags::SHADER_READ)]);
                 dev.raw.end_command_buffer(slot.cb)?;
@@ -149,6 +175,7 @@ impl DepthSource {
                 slot.fence = unsafe { dev.raw.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None) }.unwrap_or(vk::Fence::null());
             }
         }
+        Some(header)
     }
 
     pub(super) fn destroy(&mut self, dev: &Device) {

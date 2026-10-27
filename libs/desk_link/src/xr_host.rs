@@ -526,7 +526,6 @@ struct Arrived {
 struct Core {
     size: [u32; 2],
     tiles: u32,
-    fps: u32,
     codec: u8,
     description: String,
     flow: Arc<Flow>,
@@ -741,7 +740,7 @@ impl Core {
         }
         *LIVE.lock().unwrap() = Some(Live { eye, tx, flow: flow.clone(), tiles, limit: in_flight_limit() });
         wake_app();
-        Ok(Core { size, tiles, fps, codec: codec_byte, description, flow, rate, out, keyframe, poses, ending })
+        Ok(Core { size, tiles, codec: codec_byte, description, flow, rate, out, keyframe, poses, ending })
     }
 
     /// A pose from the headset: to the app's XR window, and kept to match its picture.

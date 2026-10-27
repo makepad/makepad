@@ -62,9 +62,17 @@ pub fn try_enable_fixed_foveation(xr: &LibOpenXr, session: XrSession, swapchain:
 /// (viewed in the UNORM format of the frames: mutable format) or the HAL copies frames into it
 /// (a transfer destination).
 pub fn create_swapchain(xr: &LibOpenXr, session: XrSession, format: vk::Format, width: u32, height: u32, array_size: u32, create_flags: XrSwapchainCreateFlags) -> Result<(XrSwapchain, Vec<vk::Image>), String> {
+    let usage = XrSwapchainUsageFlags::SAMPLED | XrSwapchainUsageFlags::COLOR_ATTACHMENT | XrSwapchainUsageFlags::TRANSFER_DST | XrSwapchainUsageFlags::MUTABLE_FORMAT;
+    create_swapchain_for(xr, session, format, width, height, array_size, create_flags, usage)
+}
+
+/// A swapchain of `array_size` layers with the given usage (a depth swapchain: the layer's depth).
+#[allow(clippy::too_many_arguments)]
+pub fn create_swapchain_for(xr: &LibOpenXr, session: XrSession, format: vk::Format, width: u32, height: u32, array_size: u32, create_flags: XrSwapchainCreateFlags,
+    usage_flags: XrSwapchainUsageFlags) -> Result<(XrSwapchain, Vec<vk::Image>), String> {
     let swap_chain_create_info = XrSwapchainCreateInfo {
         create_flags,
-        usage_flags: XrSwapchainUsageFlags::SAMPLED | XrSwapchainUsageFlags::COLOR_ATTACHMENT | XrSwapchainUsageFlags::TRANSFER_DST | XrSwapchainUsageFlags::MUTABLE_FORMAT,
+        usage_flags,
         format: i64::from(format.as_raw()),
         width,
         height,

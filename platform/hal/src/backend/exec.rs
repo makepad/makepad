@@ -68,7 +68,7 @@ pub enum OsCmd {
     /// Size dropdown `id` to `w` x `h` points and show it at tray `tray`'s icon.
     WindowAtTray { id: Id, tray: u64, w: f32, h: f32 },
     /// The eyes the XR window's next frame shows with (`HalCmd::XrFrameEyes`).
-    XrFrameEyes { id: Id, eyes: [crate::XrEye; 2] },
+    XrFrameEyes { id: Id, eyes: [crate::XrEye; 2], focus_m: f32 },
     /// `HalCmd::XrPoseLead`.
     XrPoseLead { id: Id, lead_ns: u64 },
     /// `HalCmd::XrRefreshRate`.
@@ -1072,7 +1072,9 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         HalCmd::XrRefreshRate { id, millihertz } => os_window(gpu, s, id, OsCmd::XrRefreshRate { id, millihertz }),
         HalCmd::XrFrameEyes { id, eyes } => {
             let mut it = crate::buffers::read_items::<crate::XrEye>(eyes, 2);
-            if let (Some(l), Some(r)) = (it.next(), it.next()) { os_window(gpu, s, id, OsCmd::XrFrameEyes { id, eyes: [l, r] }); }
+            let at = 2 * <crate::XrEye as crate::buffers::Wire>::SIZE;
+            let focus_m = eyes.get(at..at + 4).map_or(0.0, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+            if let (Some(l), Some(r)) = (it.next(), it.next()) { os_window(gpu, s, id, OsCmd::XrFrameEyes { id, eyes: [l, r], focus_m }); }
         }
         HalCmd::WindowTopmost { id, on } => os_window(gpu, s, id, OsCmd::WindowTopmost { id, on }),
         HalCmd::WindowButtons { id, show } => os_window(gpu, s, id, OsCmd::WindowButtons { id, show }),

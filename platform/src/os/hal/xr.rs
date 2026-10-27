@@ -32,13 +32,49 @@ pub(crate) struct HalXr {
     /// the TSDF depth writer the headset's environment depth goes to (`cx.xr_tsdf()`), made
     /// at the first depth frame
     pub(crate) depth_writer: Option<makepad_tsdf::DepthWriter>,
-    /// The newest environment depth image as a texture (its depth values 0..1) and its header
-    /// (`Cx::xr_environment_depth`).
+    /// The newest environment depth image as a texture (the runtime's image itself: both eyes'
+    /// layers, depth 0..1 in .r) and its header (`Cx::xr_environment_depth`).
     pub(crate) env_depth: Option<(crate::texture::Texture, XrDepth)>,
+    /// when the hand depth self-check last logged
+    pub(crate) hand_check_at: Option<std::time::Instant>,
+    /// the runtime's depth images imported as textures (by their `XrDepth::image` ticket)
+    pub(crate) env_images: Vec<(u64, crate::texture::Texture)>,
+    /// the display time of the frame that acquired the current `env_depth` image
+    pub(crate) env_depth_ns: u64,
+}
+
+/// A local-space point seen by eye 0's environment depth camera: its depth along that camera's
+/// axis, and the image's depth at its texel (`None`: no depth there); `None` outside the image.
+fn env_depth_at(header: &XrDepth, texels: &[u16], p: [f32; 3]) -> Option<(f32, Option<f32>)> {
+    let v = &header.views[0];
+    let [x, y, z, w] = v.pose.orientation;
+    let q = Quat { x: -x, y: -y, z: -z, w };
+    let d = Vec3f { x: p[0] - v.pose.position[0], y: p[1] - v.pose.position[1], z: p[2] - v.pose.position[2] };
+    let e = q.rotate_vec3(&d);
+    let ze = -e.z;
+    if ze <= 0.01 { return None; }
+    let [l, r, u, dn] = v.fov.map(f32::tan);
+    let (uu, vv) = ((e.x / ze - l) / (r - l), (e.y / ze - dn) / (u - dn));
+    if !(0.0..1.0).contains(&uu) || !(0.0..1.0).contains(&vv) { return None; }
+    let (tx, ty) = ((uu * header.width as f32) as i32, (vv * header.height as f32) as i32);
+    // the nearest depth within 12 texels (about 3 degrees: a hand that moved since the capture
+    // is still found)
+    let (w, h) = (header.width as i32, header.height as i32);
+    let mut raw = 1.0f32;
+    for y in (ty - 12).max(0)..(ty + 13).min(h) {
+        for x in (tx - 12).max(0)..(tx + 13).min(w) {
+            let d = *texels.get((y * w + x) as usize)? as f32 / 65535.0;
+            if d > 0.0 { raw = raw.min(d); }
+        }
+    }
+    let n = header.near;
+    let image = (raw > 0.0 && raw < 0.99999).then(|| if header.far > 0.0 { n * header.far / (header.far - raw * (header.far - n)) } else { n / (1.0 - raw) });
+    Some((ze, image))
 }
 
 // asked before the XR window exists: applied when it is made
 thread_local! { static SEE_THROUGH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+thread_local! { static REFRESH_MHZ: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
 
 fn pose(p: &XrPose) -> Pose {
     let [x, y, z, w] = p.orientation;
@@ -69,8 +105,10 @@ impl Cx {
         self.hal.windows.insert(window.0, super::HalWindow::default());
         // the HAL sizes it (its first Geom confirms it)
         self.hal.frames.w.window_create(hal_window_id(window), window_kind::XR, Id::NONE, [0.0; 4], false);
-        self.hal.xr = Some(HalXr { window, frame: None, display_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None });
+        self.hal.xr = Some(HalXr { window, frame: None, display_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None, hand_check_at: None, env_images: Vec::new(), env_depth_ns: 0 });
         if SEE_THROUGH.with(|s| s.get()) { self.hal_xr_see_through(true); }
+        let refresh = REFRESH_MHZ.with(|r| r.get());
+        if refresh != 0 { self.hal_xr_refresh_rate(refresh); }
         // the XR passes paint into it from now on
         self.redraw_all();
     }
@@ -82,10 +120,11 @@ impl Cx {
     }
 
     /// `Cx::xr_present_eyes`: the eyes of the XR window's next frame.
-    pub(crate) fn hal_xr_present_eyes(&mut self, eyes: [makepad_hal::XrEye; 2]) {
+    pub(crate) fn hal_xr_present_eyes(&mut self, eyes: [makepad_hal::XrEye; 2], focus_m: f32) {
         let Some(xr) = self.hal.xr.as_ref() else { return };
-        let mut bytes = Vec::with_capacity(2 * <makepad_hal::XrEye as makepad_hal::buffers::Wire>::SIZE);
+        let mut bytes = Vec::with_capacity(2 * <makepad_hal::XrEye as makepad_hal::buffers::Wire>::SIZE + 4);
         for e in &eyes { makepad_hal::buffers::Wire::write(e, &mut bytes); }
+        bytes.extend_from_slice(&focus_m.to_le_bytes());
         self.hal.frames.w.xr_frame_eyes(hal_window_id(xr.window), &bytes);
     }
 
@@ -97,6 +136,7 @@ impl Cx {
 
     /// `Cx::xr_set_refresh_rate`.
     pub(crate) fn hal_xr_refresh_rate(&mut self, millihertz: u32) {
+        REFRESH_MHZ.with(|r| r.set(millihertz));
         let Some(xr) = self.hal.xr.as_ref() else { return };
         self.hal.frames.w.xr_refresh_rate(hal_window_id(xr.window), millihertz);
     }
@@ -139,31 +179,36 @@ impl Cx {
         self.call_event_handler(&Event::XrUpdate(XrUpdateEvent { state, last }));
     }
 
-    /// An `XrDepth`: the headset's environment depth, handed to the TSDF depth writer (its
-    /// own thread integrates it into `cx.xr_tsdf()`; this never waits).
-    pub(crate) fn hal_xr_depth(&mut self, bytes: &[u8]) {
-        let Some(xr) = self.hal.xr.as_mut() else { return };
+    /// An `XrDepth`: the headset's environment depth. A header alone announces a newly
+    /// acquired image: the app's per-pixel tests (occlusion) read that image directly from now
+    /// on (`Cx::xr_environment_depth`, its texture imported once per runtime image). Texels
+    /// following go to the TSDF depth writer (its own thread integrates them into
+    /// `cx.xr_tsdf()`; this never waits).
+    pub(crate) fn hal_xr_depth(&mut self, display_ns: u64, bytes: &[u8]) {
         let Some(header) = read_items::<XrDepth>(bytes, 1).next() else { return };
         let texels = (header.width * header.height) as usize;
-        let Some(raw) = bytes.get(XrDepth::SIZE..XrDepth::SIZE + texels * 2) else { return };
-        let depth: Vec<u16> = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
-        // the newest image as a texture for the app's own per-pixel tests (occlusion): each
-        // D16 texel as two bytes (high in red, low in green) of an 8-bit RGBA texel, read at
-        // texel centres (a linear sampler on a 32-bit float texture is not filterable on every
-        // GPU: on the Quest it sampled garbage, the occlusion looked tiled)
-        let values: Vec<u32> = depth.iter().map(|d| 0xff00_0000 | ((*d as u32 >> 8) << 16) | ((*d as u32 & 0xff) << 8)).collect();
-        let (w, h) = (header.width as usize, header.height as usize);
-        let reuse = xr.env_depth.as_ref().filter(|(_, old)| old.width == header.width && old.height == header.height).map(|(t, _)| t.clone());
-        let texture = match reuse {
-            Some(t) => {
-                let _ = t.take_vec_u32(self);
-                t.put_back_vec_u32(self, values, None);
-                t
-            }
-            None => crate::texture::Texture::new_with_format(self, crate::texture::TextureFormat::VecBGRAu8_32 { width: w, height: h, data: Some(values), updated: crate::texture::TextureUpdated::Full }),
+        let layers = header.layers.max(1) as usize;
+        let Some(raw) = bytes.get(XrDepth::SIZE..XrDepth::SIZE + texels * layers * 2) else {
+            if header.image == 0 { return; }
+            let known = self.hal.xr.as_ref().and_then(|xr| xr.env_images.iter().find(|(t, _)| *t == header.image).map(|(_, tex)| tex.clone()));
+            let texture = match known {
+                Some(t) => t,
+                None => {
+                    let texture = crate::texture::Texture::new_with_format(self, crate::texture::TextureFormat::VideoYuvPlane);
+                    let id = self.hal.frames.external_texture(texture.texture_id().0, texture.texture_id().generation());
+                    self.hal.frames.w.texture_import(id, header.image, makepad_hal::texture_handle::XR_DEPTH);
+                    let Some(xr) = self.hal.xr.as_mut() else { return };
+                    xr.env_images.push((header.image, texture.clone()));
+                    texture
+                }
+            };
+            let Some(xr) = self.hal.xr.as_mut() else { return };
+            xr.env_depth = Some((texture, header));
+            xr.env_depth_ns = display_ns;
+            return;
         };
+        let all: Vec<u16> = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
         let Some(xr) = self.hal.xr.as_mut() else { return };
-        xr.env_depth = Some((texture, header));
         if xr.depth_writer.is_none() {
             match makepad_tsdf::DepthWriter::new() {
                 Ok(writer) => xr.depth_writer = Some(writer),
@@ -173,22 +218,30 @@ impl Cx {
                 }
             }
         }
+        // the self-check (every 5 s while a hand is tracked): the tracked hands' palm and index
+        // tip projected into eye 0's image, the image's distance there against the joint's own
+        if xr.hand_check_at.map_or(true, |t| t.elapsed().as_secs() >= 5) {
+            let checks: Vec<String> = [&xr.last.left_hand, &xr.last.right_hand].into_iter().filter(|h| h.in_view())
+                .flat_map(|h| [0usize, 10].map(|j| h.joints[j].position))
+                .filter_map(|p| env_depth_at(&header, &all, [p.x, p.y, p.z]).map(|(z, img)| format!("joint {z:.2} m image {}", img.map_or("none".to_string(), |d| format!("{d:.2} m")))))
+                .collect();
+            if !checks.is_empty() {
+                xr.hand_check_at = Some(std::time::Instant::now());
+                crate::log!("xr depth hand check (palm, index tip; eye 0, nearest within 12 texels; near {:.2} far {:.2}): {}", header.near, header.far, checks.join(", "));
+            }
+        }
+        // the room field integrates eye 0's image
         let view = |e: &makepad_hal::XrEye| makepad_tsdf::DepthFrameView { orientation: e.pose.orientation, position: e.pose.position, fov: e.fov };
+        let mut depth = all;
+        depth.truncate(texels);
         let frame = makepad_tsdf::DepthFrame {
             width: header.width,
             height: header.height,
-            eye: header.eye as usize,
+            eye: 0,
             near: header.near,
             far: header.far,
             views: [view(&header.views[0]), view(&header.views[1])],
             depth,
-            // the hands stay in the depth image (occlusion) but not in the room field: 5 cm
-            // around each tracked joint (the newest hand poses; the image is a few ms older)
-            exclude: [&xr.last.left_hand, &xr.last.right_hand]
-                .into_iter()
-                .filter(|h| h.in_view())
-                .flat_map(|h| h.joints.iter().map(|j| [j.position.x, j.position.y, j.position.z, 0.05]))
-                .collect(),
         };
         if let Some(writer) = xr.depth_writer.as_mut() {
             let _ = writer.submit(frame);

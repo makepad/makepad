@@ -69,8 +69,6 @@ pub struct XrRemoteView {
     #[rust]
     color: Option<Texture>,
     #[rust]
-    depth: Option<Texture>,
-    #[rust]
     presenting: bool,
     #[rust]
     client: Option<XrStreamClient>,
@@ -79,6 +77,15 @@ pub struct XrRemoteView {
     switches_at: Option<std::time::Instant>,
     #[rust]
     clear_tint: bool,
+    /// The XrUpdate of the frame being drawn arrived then; the UI thread's summed times (µs:
+    /// update to drawn, draw) and their count.
+    #[rust]
+    update_at: Option<std::time::Instant>,
+    #[rust]
+    ui_times: (u64, u64, u32),
+    /// A GPU profile runs since then (`debug.xrremote.gpuprof`).
+    #[rust]
+    gpu_prof_at: Option<std::time::Instant>,
     /// The refresh rate asked for (Hz; 0 before the first ask).
     #[rust]
     refresh_hz: u8,
@@ -92,17 +99,16 @@ impl XrRemoteView {
         }
         self.presenting = true;
         let color = Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 { size: TextureSize::Auto, initial: true });
-        let depth = Texture::new_with_format(cx, TextureFormat::DepthD32Sampled { size: TextureSize::Auto, initial: true });
         self.pass.set_pass_name(cx, "xr remote");
         self.pass.set_color_texture(cx, &color, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
-        self.pass.set_depth_texture(cx, &depth, DrawPassClearDepth::ClearWith(1.0));
+        // (no depth attachment: the stream's draw tests nothing against it, and clearing and
+        // storing a 32-bit depth per eye was half the pass's memory traffic)
         self.pass.set_keep_camera_matrix(cx, true);
         self.pass.set_as_xr_pass(cx);
         cx.xr_start_presenting();
         // mixed reality: the room shows wherever the desktop drew nothing (the stream's coverage)
         cx.xr_set_see_through(option_env!("XR_REMOTE_OPAQUE").is_none());
         self.color = Some(color);
-        self.depth = Some(depth);
         // the device's `debug.xrremote.target` (adb shell setprop) overrides the built-in target;
         // `none`: no link (the headset's own frame loop alone)
         let target = device_property("debug.xrremote.target").filter(|t| !t.is_empty()).unwrap_or_else(|| TARGET.to_string());
@@ -172,6 +178,20 @@ impl Widget for XrRemoteView {
                     log!("xr remote: refresh rate {hz} Hz asked");
                     cx.xr_set_refresh_rate(hz as f32);
                 }
+                // `gpuprof` 1: the GPU's time per pass over the next 4 s, logged (then set it to 0)
+                let prof = switch("debug.xrremote.gpuprof", 0) != 0;
+                if prof && self.gpu_prof_at.is_none() {
+                    use makepad_widgets::makepad_platform::makepad_hal::gpu_prof;
+                    gpu_prof::start(gpu_prof::StartOptions { split_every: 0, ..Default::default() });
+                    self.gpu_prof_at = Some(std::time::Instant::now());
+                    log!("xr remote: gpu profile started");
+                }
+                if self.gpu_prof_at.is_some_and(|t| t.elapsed().as_secs() >= 4) {
+                    gpu_prof_report();
+                }
+                if !prof {
+                    self.gpu_prof_at = None;
+                }
                 if let Some(client) = self.client.as_mut() {
                     client.occlusion = occlusion;
                     client.opaque = opaque;
@@ -180,8 +200,14 @@ impl Widget for XrRemoteView {
                     client.own_eyes = own;
                     client.room_view = occlusion_switch == 2;
                     client.env_map = switch("debug.xrremote.envmap", 0);
+                    // `depthlayer` (default 1): the frame carries the picture's depth to the
+                    // compositor (positional correction)
+                    client.depth_layer = switch("debug.xrremote.depthlayer", 1) != 0;
                 }
             }
+        }
+        if matches!(event, Event::XrUpdate(_)) && self.update_at.is_none() {
+            self.update_at = Some(std::time::Instant::now());
         }
         // every XR frame is answered (with or without a link)
         if self.presenting && matches!(event, Event::XrUpdate(_) | Event::Signal) {
@@ -190,6 +216,7 @@ impl Widget for XrRemoteView {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let draw_started = std::time::Instant::now();
         self.start(cx.cx);
         let rect = cx.walk_turtle(walk);
         // every XR frame is answered (cleared until the first picture): the headset keeps asking
@@ -199,7 +226,8 @@ impl Widget for XrRemoteView {
             cx.begin_pass(&self.pass, Some(dpi));
             self.draw_list.begin_always(cx);
             cx.begin_unclipped_root_turtle(dvec2(4096.0, 4096.0), Layout::flow_down());
-            if let Some(client) = self.client.as_mut() {
+            // (debug `opaque` 3: nothing drawn, the pass only clears: its fixed cost)
+            if let Some(client) = self.client.as_mut().filter(|c| c.opaque != 3) {
                 client.draw(cx, &mut self.draw_stream);
             }
             cx.end_pass_sized_turtle_no_clip();
@@ -212,7 +240,49 @@ impl Widget for XrRemoteView {
             None => "no headset: XR Remote shows a remote XR view on a headset".to_string(),
         };
         self.draw_text.draw_abs(cx, rect.pos + dvec2(24.0, 24.0), &status);
+        // the UI thread's part of a frame: its XrUpdate to the end of its draw, and the draw
+        if let Some(at) = self.update_at.take() {
+            let t = &mut self.ui_times;
+            t.0 += at.elapsed().as_micros() as u64;
+            t.1 += draw_started.elapsed().as_micros() as u64;
+            t.2 += 1;
+            if t.2 >= 450 {
+                log!("xr remote: ui thread per frame ms: update to drawn {:.2}, draw {:.2}", t.0 as f64 / 1000.0 / t.2 as f64, t.1 as f64 / 1000.0 / t.2 as f64);
+                *t = (0, 0, 0);
+            }
+        }
         DrawStep::done()
+    }
+}
+
+/// Stops the GPU profile and logs each pass's GPU time (mean, max) with its size and
+/// attachments, and the frames' GPU spans.
+fn gpu_prof_report() {
+    use makepad_widgets::makepad_platform::makepad_hal::gpu_prof;
+    if gpu_prof::stop().is_none() {
+        return;
+    }
+    let Some(rec) = gpu_prof::recording_of(None) else { return };
+    let mut by: std::collections::BTreeMap<String, (u64, u64, u32, u32, String, u64, u32)> = Default::default();
+    let mut spans = Vec::new();
+    for f in rec.frames.iter().filter(|f| !f.special()) {
+        let timed: Vec<_> = f.passes.iter().filter(|p| p.gpu_ok()).collect();
+        if let (Some(a), Some(b)) = (timed.iter().map(|p| p.start).min(), timed.iter().map(|p| p.end).max()) {
+            spans.push(b - a);
+        }
+        for p in timed {
+            let e = by.entry(rec.s(p.name).to_string()).or_insert((0, 0, p.w, p.h, rec.s(p.attach).to_string(), p.bytes, 0));
+            let d = p.end - p.start;
+            e.0 += d;
+            e.1 = e.1.max(d);
+            e.6 += 1;
+        }
+    }
+    spans.sort_unstable();
+    let n = spans.len().max(1);
+    log!("xr remote: gpu profile: {} frames, frame GPU span ms p50 {:.2} p90 {:.2}", spans.len(), spans.get(n / 2).copied().unwrap_or(0) as f64 / 1e6, spans.get(n * 9 / 10).copied().unwrap_or(0) as f64 / 1e6);
+    for (name, (sum, max, w, h, attach, bytes, count)) in by {
+        log!("xr remote: gpu pass {name}: {count}x mean {:.3} max {:.3} ms, {w}x{h}, {} KB, {attach}", sum as f64 / count.max(1) as f64 / 1e6, max as f64 / 1e6, bytes / 1024);
     }
 }
 

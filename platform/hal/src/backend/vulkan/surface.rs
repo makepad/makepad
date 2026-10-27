@@ -86,6 +86,11 @@ pub trait FramePresenter: Send + Sync {
     fn scheduled(&self, _session: u32, _window: Id) {}
     /// A [`Self::scheduled`] frame whose batch did not run: it reaches no `submit`.
     fn dropped(&self, _session: u32, _window: Id) {}
+    /// [`Self::submit`] comes as soon as the frame's work is on the queue, not when the GPU is
+    /// done with it: the presenter's consumer waits on that work itself (an XR runtime waits for
+    /// the work submitted before a swapchain image is released; only work on this queue may
+    /// touch the image after it).
+    fn at_queue(&self) -> bool { false }
 }
 
 pub struct NativeSurface {

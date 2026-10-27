@@ -84,18 +84,19 @@ static EYE_PX: OnceLock<[u32; 2]> = OnceLock::new();
 /// presenter's `scheduled` moves them to `SCHEDULED_EYES`, its `submit` hands them on with the
 /// image. (One global taken when a frame was shown gave a frame the eyes of the next one, which
 /// the render thread had already encoded: the picture shown a frame off its pose, a swim.)
-static FRAME_EYES: Mutex<Option<[Eye; 2]>> = Mutex::new(None);
+/// With them the depth of what the frame shows (metres; 0 none: no depth layer).
+static FRAME_EYES: Mutex<Option<([Eye; 2], f32)>> = Mutex::new(None);
 /// The scheduled XR window frames' eyes, oldest first (frames complete in order).
-static SCHEDULED_EYES: Mutex<std::collections::VecDeque<Option<[Eye; 2]>>> = Mutex::new(std::collections::VecDeque::new());
+static SCHEDULED_EYES: Mutex<std::collections::VecDeque<Option<([Eye; 2], f32)>>> = Mutex::new(std::collections::VecDeque::new());
 
 /// The XR window's next frame shows with `eyes` (the projection views' poses and fields).
-pub(super) fn frame_eyes(eyes: [XrEye; 2]) {
+pub(super) fn frame_eyes(eyes: [XrEye; 2], focus_m: f32) {
     let eye = |e: &XrEye| Eye {
         pose: XrPosef { orientation: makepad_math::Quat { x: e.pose.orientation[0], y: e.pose.orientation[1], z: e.pose.orientation[2], w: e.pose.orientation[3] },
             position: makepad_math::Vec3f { x: e.pose.position[0], y: e.pose.position[1], z: e.pose.position[2] } },
         fov: XrFovf { angle_left: e.fov[0], angle_right: e.fov[1], angle_up: e.fov[2], angle_down: e.fov[3] },
     };
-    *lock(&FRAME_EYES) = Some([eye(&eyes[0]), eye(&eyes[1])]);
+    *lock(&FRAME_EYES) = Some(([eye(&eyes[0]), eye(&eyes[1])], if focus_m.is_finite() { focus_m.max(0.0) } else { 0.0 }));
 }
 
 /// How far past its display time the XR window's XrFrames are located (`HalCmd::XrPoseLead`).
@@ -103,6 +104,10 @@ pub(super) fn frame_eyes(eyes: [XrEye; 2]) {
 /// and when it arrived (its GPU work done): the frame loop's per-frame timing.
 static STEREO_SCHEDULED_NS: AtomicU64 = AtomicU64::new(0);
 static STEREO_ARRIVED_NS: AtomicU64 = AtomicU64::new(0);
+/// The render thread's time in acquiring and waiting for the projection chain's images (summed
+/// ns, count): the frame-loop stats.
+static TARGET_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+static TARGET_WAITS: AtomicU64 = AtomicU64::new(0);
 static POSE_LEAD_NS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 pub(super) fn pose_lead(lead_ns: u64) {
@@ -193,6 +198,8 @@ impl Runtime {
         } else {
             xr_log!("OpenXR fixed foveation extensions unavailable on this runtime: {:?}", missing_fixed_foveation_exts.iter().map(|e| e.trim_end_matches(char::from(0))).collect::<Vec<_>>());
         }
+        // the projection layer's depth (positional reprojection)
+        if has_extension("XR_KHR_composition_layer_depth\0") { exts_needed.push("XR_KHR_composition_layer_depth\0"); }
         let display_refresh_rate_ext = "XR_FB_display_refresh_rate\0";
         if has_extension(display_refresh_rate_ext) {
             exts_needed.push(display_refresh_rate_ext);
@@ -293,7 +300,7 @@ impl VkCreator for Runtime {
 }
 
 /// A finished frame waiting for the XR thread, and what to call when it is shown.
-type Pending = (Arc<Image>, Box<dyn FnOnce(u64) + Send>, Option<[Eye; 2]>);
+type Pending = (Arc<Image>, Box<dyn FnOnce(u64) + Send>, Option<([Eye; 2], f32)>);
 /// The newest panel frame and the stereo window's frame in flight; `arrived` wakes the XR
 /// thread waiting for a stereo frame.
 #[derive(Default)]
@@ -313,16 +320,33 @@ struct Frames { panel: Mutex<Option<Pending>>, stereo: Mutex<Option<Pending>>, a
 /// still being drawn: torn, a frame late, with the newer frame's eyes).
 /// `submitted`: the held image's frame is finished and was handed to the XR thread (a newer
 /// frame may have replaced it before the XR thread took it).
-struct Targets { handle: XrSwapchain, images: Vec<Arc<Image>>, acquired: std::collections::VecDeque<usize>, submitted: bool }
+/// Two chains: frames alternate between them. With one chain of three images a frame's image
+/// was free only ~3-8 ms after the frame before was ended (the compositor still held the other
+/// two), and every frame waited for it; the other chain's next image is free at once.
+/// `images` are both chains' (`owner`: the chain of each), `acquired` holds their indices.
+struct Targets { handles: Vec<XrSwapchain>, images: Vec<Arc<Image>>, owner: Vec<usize>, base: Vec<usize>, next: usize, acquired: std::collections::VecDeque<usize>, submitted: bool }
 
 impl Targets {
     /// The chain's images wrapped as `layers`-layer render targets of `size` in the frames'
     /// format (`rgba`: RGBA8, else BGRA8; UNORM views of the sRGB images: mutable format).
-    fn new(dev: &Arc<Device>, chain: &Chain, rgba: bool) -> Result<Targets, String> {
-        let desc = crate::session::TextureObj { format: if rgba { crate::format::RGBA8 } else { crate::format::BGRA8 }, w: chain.size[0], h: chain.size[1],
-            depth: chain.layers, mips: 1, usage: crate::usage::RENDER_TARGET | crate::usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None };
-        let images = chain.images.iter().map(|image| unsafe { Image::borrowed(dev.clone(), desc.clone(), *image, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL) }).collect::<Result<_, _>>()?;
-        Ok(Targets { handle: chain.handle, images, acquired: Default::default(), submitted: false })
+    fn new(dev: &Arc<Device>, chains: &[&Chain], rgba: bool) -> Result<Targets, String> {
+        let (mut images, mut owner, mut base, mut handles) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for (c, chain) in chains.iter().enumerate() {
+            let desc = crate::session::TextureObj { format: if rgba { crate::format::RGBA8 } else { crate::format::BGRA8 }, w: chain.size[0], h: chain.size[1],
+                depth: chain.layers, mips: 1, usage: crate::usage::RENDER_TARGET | crate::usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None };
+            base.push(images.len());
+            handles.push(chain.handle);
+            for image in &chain.images {
+                images.push(unsafe { Image::borrowed(dev.clone(), desc.clone(), *image, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL) }?);
+                owner.push(c);
+            }
+        }
+        Ok(Targets { handles, images, owner, base, next: 0, acquired: Default::default(), submitted: false })
+    }
+
+    /// The chain of an image.
+    fn chain_of(&self, image: &Arc<Image>) -> Option<XrSwapchain> {
+        self.images.iter().position(|i| Arc::ptr_eq(i, image)).map(|i| self.handles[self.owner[i]])
     }
 
     /// The next image for a frame of at least `size`, acquired and waited for; `None` when every
@@ -331,22 +355,34 @@ impl Targets {
         let first = self.images.first()?;
         if first.desc.w < size[0] || first.desc.h < size[1] { return None; }
         if !self.acquired.is_empty() { crate::profile::count("xr target: an image held (frame copied)"); return None; }
+        let index = self.take_image(xr)?;
+        self.acquired.push_back(index);
+        self.submitted = false;
+        let image = self.images.get(index)?.clone();
+        image.set_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        Some(image)
+    }
+
+    /// Acquires the next chain's next image and waits for it: its index in `images`.
+    fn take_image(&mut self, xr: &LibOpenXr) -> Option<usize> {
+        let c = self.next;
+        self.next = (c + 1) % self.handles.len();
+        let handle = self.handles[c];
         let mut index = 0;
-        unsafe { (xr.xrAcquireSwapchainImage)(self.handle, &XrSwapchainImageAcquireInfo::default(), &mut index) }.to_result("xrAcquireSwapchainImage")
+        let started = clock_ns();
+        unsafe { (xr.xrAcquireSwapchainImage)(handle, &XrSwapchainImageAcquireInfo::default(), &mut index) }.to_result("xrAcquireSwapchainImage")
             .map_err(|e| xr_log!("{e}")).ok()?;
         let wait_info = XrSwapchainImageWaitInfo { timeout: XrDuration(1000000000), ..Default::default() };
         loop {
-            let r = unsafe { (xr.xrWaitSwapchainImage)(self.handle, &wait_info) };
+            let r = unsafe { (xr.xrWaitSwapchainImage)(handle, &wait_info) };
             if r == XrResult::TIMEOUT_EXPIRED { xr_log!("retry xrWaitSwapchainImage"); continue; }
             // (acquired and not waited: released all the same, so the chain stays in step)
             if let Err(e) = r.to_result("xrWaitSwapchainImage") { xr_log!("{e}"); }
             break;
         }
-        self.acquired.push_back(index as usize);
-        self.submitted = false;
-        let image = self.images.get(index as usize)?.clone();
-        image.set_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-        Some(image)
+        TARGET_WAIT_NS.fetch_add(clock_ns() - started, Ordering::Relaxed);
+        TARGET_WAITS.fetch_add(1, Ordering::Relaxed);
+        Some(self.base[c] + index as usize)
     }
 
     /// Releases every acquired image up to and including `image` (oldest first: a release
@@ -355,8 +391,8 @@ impl Targets {
         let at = self.acquired.iter().position(|i| Arc::ptr_eq(&self.images[*i], image))?;
         self.submitted = false;
         for _ in 0..=at {
-            self.acquired.pop_front();
-            if let Err(e) = unsafe { (xr.xrReleaseSwapchainImage)(self.handle, &XrSwapchainImageReleaseInfo::default()) }.to_result("xrReleaseSwapchainImage") {
+            let Some(i) = self.acquired.pop_front() else { break };
+            if let Err(e) = unsafe { (xr.xrReleaseSwapchainImage)(self.handles[self.owner[i]], &XrSwapchainImageReleaseInfo::default()) }.to_result("xrReleaseSwapchainImage") {
                 return Some(Err(e));
             }
         }
@@ -387,6 +423,10 @@ impl FramePresenter for Presenter {
             lock(&SCHEDULED_EYES).push_back(lock(&FRAME_EYES).take());
         }
     }
+    /// The runtime waits for the work submitted before an image's release, and the panel's copy
+    /// is queued behind the frame: a frame is taken at its submission (waiting for the GPU to
+    /// finish it put the GPU's time into the frame's deadline: frames late with the GPU idle)
+    fn at_queue(&self) -> bool { true }
     fn dropped(&self, _: u32, _: Id) {
         if self.stereo { lock(&SCHEDULED_EYES).pop_front(); }
     }
@@ -456,6 +496,102 @@ impl VkSurfaceSource for XrSurfaces {
 /// image read until that fence.
 /// `lock_ns`, `submit_ns`: summed waits for the queue lock and vkQueueSubmit times.
 struct Slot { pool: vk::CommandPool, cb: vk::CommandBuffer, fence: vk::Fence, keep: Option<Arc<Image>>, lock_ns: u64, submit_ns: u64, steps: [u64; 4] }
+
+/// The projection layer's depth (XR_KHR_composition_layer_depth): a two-layer D16 swapchain
+/// the size of the colour one, each image cleared to the depth of what the frame shows (its
+/// focus: the compositor corrects the head's movement since the picture's render pose at that
+/// depth). An image is cleared again only when its depth changes.
+struct DepthChain { handle: XrSwapchain, images: Vec<vk::Image>, slots: Vec<(vk::CommandPool, vk::CommandBuffer, vk::Fence)>, cleared: Vec<f32>, size: [u32; 2] }
+
+/// The depth chain's projection: Vulkan's 0..1 depth with these planes (metres).
+const DEPTH_NEAR_M: f32 = 0.1;
+const DEPTH_FAR_M: f32 = 100.0;
+
+impl DepthChain {
+    fn new(xr: &LibOpenXr, dev: &Device, session: XrSession, size: [u32; 2]) -> Result<DepthChain, String> {
+        let usage = XrSwapchainUsageFlags::DEPTH_STENCIL_ATTACHMENT | XrSwapchainUsageFlags::TRANSFER_DST;
+        let (handle, images) = vulkan::create_swapchain_for(xr, session, vk::Format::D16_UNORM, size[0], size[1], 2, XrSwapchainCreateFlags(0), usage)?;
+        let mut slots = Vec::new();
+        for _ in &images {
+            unsafe {
+                let pool = dev.raw.create_command_pool(&vk::CommandPoolCreateInfo::default().queue_family_index(dev.family)
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER), None).map_err(|e| format!("XR depth layer pool: {e:?}"))?;
+                let cb = dev.raw.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(pool)
+                    .level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1)).map_err(|e| format!("XR depth layer command buffer: {e:?}"))?[0];
+                let fence = dev.raw.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None).map_err(|e| format!("XR depth layer fence: {e:?}"))?;
+                slots.push((pool, cb, fence));
+            }
+        }
+        let cleared = vec![f32::NAN; images.len()];
+        xr_log!("projection depth layer: {}x{} D16, {} images", size[0], size[1], images.len());
+        Ok(DepthChain { handle, images, slots, cleared, size })
+    }
+
+    /// The depth value of `metres` along the view.
+    fn depth_of(metres: f32) -> f32 {
+        let z = metres.clamp(DEPTH_NEAR_M * 1.01, DEPTH_FAR_M * 0.99);
+        DEPTH_FAR_M * (z - DEPTH_NEAR_M) / (z * (DEPTH_FAR_M - DEPTH_NEAR_M))
+    }
+
+    /// The next image, holding `metres` (cleared when it held another depth), released.
+    fn write(&mut self, xr: &LibOpenXr, dev: &Device, metres: f32) -> Result<(), String> {
+        let d = Self::depth_of(metres);
+        let mut index = 0;
+        {
+            let _queue = lock(&dev.queue_lock);
+            unsafe { (xr.xrAcquireSwapchainImage)(self.handle, &XrSwapchainImageAcquireInfo::default(), &mut index) }.to_result("xrAcquireSwapchainImage (depth)")?;
+        }
+        let wait_info = XrSwapchainImageWaitInfo { timeout: XrDuration(1000000000), ..Default::default() };
+        while unsafe { (xr.xrWaitSwapchainImage)(self.handle, &wait_info) } == XrResult::TIMEOUT_EXPIRED {}
+        let i = index as usize;
+        let recorded = if self.cleared[i] != d {
+            let (_, cb, fence) = self.slots[i];
+            let image = self.images[i];
+            unsafe {
+                (|| -> Result<(), vk::Result> {
+                    dev.raw.wait_for_fences(&[fence], true, u64::MAX)?;
+                    dev.raw.reset_fences(&[fence])?;
+                    dev.raw.reset_command_buffer(cb, vk::CommandBufferResetFlags::empty())?;
+                    dev.raw.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))?;
+                    let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::DEPTH).level_count(1).layer_count(2);
+                    let barrier = |old, new, from, to| vk::ImageMemoryBarrier::default().image(image).old_layout(old).new_layout(new)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED).dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED).src_access_mask(from).dst_access_mask(to).subresource_range(range);
+                    dev.raw.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[],
+                        &[barrier(vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE)]);
+                    dev.raw.cmd_clear_depth_stencil_image(cb, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &vk::ClearDepthStencilValue { depth: d, stencil: 0 }, &[range]);
+                    dev.raw.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::BOTTOM_OF_PIPE, vk::DependencyFlags::empty(), &[], &[],
+                        &[barrier(vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL, vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::empty())]);
+                    dev.raw.end_command_buffer(cb)?;
+                    let cbs = [cb];
+                    let _queue = lock(&dev.queue_lock);
+                    dev.raw.queue_submit(dev.queue, &[vk::SubmitInfo::default().command_buffers(&cbs)], fence)
+                })()
+            }.map_err(|e| format!("XR depth layer clear: {e:?}"))
+        } else { Ok(()) };
+        if recorded.is_ok() { self.cleared[i] = d; } else { self.cleared[i] = f32::NAN; }
+        let released = { let _queue = lock(&dev.queue_lock); unsafe { (xr.xrReleaseSwapchainImage)(self.handle, &XrSwapchainImageReleaseInfo::default()) } };
+        recorded?;
+        released.to_result("xrReleaseSwapchainImage (depth)")
+    }
+
+    fn info(&self, eye: u32) -> XrCompositionLayerDepthInfoKHR {
+        XrCompositionLayerDepthInfoKHR { ty: XrStructureType::COMPOSITION_LAYER_DEPTH_INFO_KHR, next: ptr::null(),
+            sub_image: XrSwapchainSubImage { swapchain: self.handle, image_rect: XrRect2Di { offset: XrOffset2Di { x: 0, y: 0 },
+                extent: XrExtent2Di { width: self.size[0] as i32, height: self.size[1] as i32 } }, image_array_index: eye },
+            min_depth: 0.0, max_depth: 1.0, near_z: DEPTH_NEAR_M, far_z: DEPTH_FAR_M }
+    }
+
+    fn destroy(&mut self, xr: &LibOpenXr, dev: &Device) {
+        for (pool, _, fence) in self.slots.drain(..) {
+            unsafe {
+                let _ = dev.raw.wait_for_fences(&[fence], true, u64::MAX);
+                dev.raw.destroy_fence(fence, None);
+                dev.raw.destroy_command_pool(pool, None);
+            }
+        }
+        unsafe { (xr.xrDestroySwapchain)(self.handle) }.log_error("xrDestroySwapchain (depth)");
+    }
+}
 
 /// An XR swapchain, its Vulkan images, a copy slot per image, its size and layers.
 /// `times`: summed ns in `write` for acquire, wait for the image, the slot's fence, record + submit.
@@ -710,12 +846,17 @@ struct CxOpenXrSession {
     /// projection layer shows
     stereo_asked: Option<[Eye; 2]>,
     stereo_shown: Option<[Eye; 2]>,
+    /// the depth of what the shown stereo frame shows (metres; 0: no depth layer)
+    stereo_focus: f32,
+    /// the projection layer's depth swapchain
+    depth_layer: Option<DepthChain>,
     stereo_asked_at: Instant,
     /// counters for the periodic timing line: display frames, stereo frames shown, frames
     /// whose stereo frame came too late, and the summed wait for stereo frames (ns)
     stats: [u64; 4],
     /// per stereo frame taken (µs): asked to scheduled (the app's CPU), scheduled to arrived
-    /// (its GPU), asked to arrived, and the time it had (asked to the take's deadline)
+    /// (recorded and on the queue), asked to arrived, and the time it had (asked to the take's
+    /// deadline)
     frame_us: Vec<[u32; 4]>,
     stereo_asked_ns: u64,
     /// the refresh rate last requested (mHz; 0 none)
@@ -726,6 +867,10 @@ struct CxOpenXrSession {
     /// stereo (ask + wait), stereo copy, xrEndFrame
     phases: [u64; 7],
     stats_at: Instant,
+    /// the second projection chain the app renders into (frames alternate between the two)
+    stereo_b: Option<Chain>,
+    /// the projection chain of the stereo frame shown
+    stereo_shown_chain: Option<XrSwapchain>,
 }
 
 unsafe impl Send for CxOpenXrSession {}
@@ -798,7 +943,9 @@ impl CxOpenXrSession {
             unsafe { (xr.xrCreateEnvironmentDepthProviderMETA)(session, &edpci, &mut depth_provider) }.to_result("xrCreateEnvironmentDepthProviderMETA")?;
 
             let edhrsi = XrEnvironmentDepthHandRemovalSetInfoMETA { enabled: XrBool32::from_bool(options.remove_hands_from_depth), ..Default::default() };
-            unsafe { (xr.xrSetEnvironmentDepthHandRemovalMETA)(depth_provider, &edhrsi) }.to_result("xrSetEnvironmentDepthHandRemovalMETA")?;
+            let r = unsafe { (xr.xrSetEnvironmentDepthHandRemovalMETA)(depth_provider, &edhrsi) };
+            xr_log!("environment depth provider {:#x} created; hand removal {}: {r:?}", depth_provider.0, options.remove_hands_from_depth);
+            r.to_result("xrSetEnvironmentDepthHandRemovalMETA")?;
 
             let edsci = XrEnvironmentDepthSwapchainCreateInfoMETA { ty: XrStructureType::ENVIRONMENT_DEPTH_SWAPCHAIN_CREATE_INFO_META, next: ptr::null(), create_flags: XrEnvironmentDepthSwapchainCreateFlagsMETA(0) };
             let mut depth_swap_chain = XrEnvironmentDepthSwapchainMETA(0);
@@ -844,7 +991,9 @@ impl CxOpenXrSession {
         // the projection chain: the app's XR window renders straight into its images
         let eye = EYE_PX.get().copied().unwrap_or([1, 1]);
         let stereo = Chain::new(xr, &dev, handle, format, eye, 2, XrSwapchainCreateFlags(0), blit)?;
-        *lock(&frames.stereo_targets) = Some(Targets::new(&dev, &stereo, blit)?);
+        let depth_layer = DepthChain::new(xr, &dev, handle, eye).map_err(|e| xr_log!("no projection depth layer: {e}")).ok();
+        let stereo_b = Chain::new(xr, &dev, handle, format, eye, 2, XrSwapchainCreateFlags(0), false)?;
+        *lock(&frames.stereo_targets) = Some(Targets::new(&dev, &[&stereo, &stereo_b], blit)?);
         let cursor = Chain::new(xr, &dev, handle, format, [CURSOR_PX; 2], 1, XrSwapchainCreateFlags::STATIC_IMAGE, false)?;
         let depth = depth::DepthSource::new(xr, &dev, depth_provider, depth_swap_chain).unwrap_or_else(|e| {
             xr_log!("environment depth readback unavailable: {e}");
@@ -853,8 +1002,8 @@ impl CxOpenXrSession {
         let mut session = Self { depth, rt: rt.clone(), dev, frames, handle, head_space, local_space, panel_space, passthrough, passthrough_layer, depth_provider, depth_swap_chain,
             inputs, active: false, focused: false, active_display_refresh_rate_hz: None, panel, cursor, stereo: Some(stereo),
             pointer: Pointer { hand: 1, ..Default::default() }, controllers: Default::default(), hands: Default::default(),
-            panel_shown: None, panel_visible: true, panel_over_stereo: false, cursor_ready: false, stereo_asked: None, stereo_shown: None, stereo_asked_at: Instant::now(),
-            stats: [0; 4], frame_us: Vec::new(), stereo_asked_ns: 0, requested_refresh_mhz: 0, paths: [0; 3], phases: [0; 7], stats_at: Instant::now() };
+            panel_shown: None, panel_visible: true, panel_over_stereo: false, cursor_ready: false, stereo_asked: None, stereo_shown: None, stereo_focus: 0.0, depth_layer, stereo_asked_at: Instant::now(),
+            stats: [0; 4], frame_us: Vec::new(), stereo_asked_ns: 0, requested_refresh_mhz: 0, paths: [0; 3], phases: [0; 7], stats_at: Instant::now(), stereo_b: Some(stereo_b), stereo_shown_chain: None };
         let _ = session.update_active_display_refresh_rate();
         Ok(session)
     }
@@ -1045,7 +1194,12 @@ impl CxOpenXrSession {
                 let t = time.as_nanos() as u64;
                 shared.emit_to(sid, id, clock_ns(), |q, id| q.xr_depth(id, t, &payload));
             }
-            depth.acquire(xr, &self.dev, self.depth_provider, self.local_space, time);
+            if let Some(header) = depth.acquire(xr, &self.dev, self.depth_provider, self.local_space, time) {
+                let mut payload = Vec::with_capacity(<crate::XrDepth as crate::buffers::Wire>::SIZE);
+                crate::buffers::Wire::write(&header, &mut payload);
+                let t = time.as_nanos() as u64;
+                shared.emit_to(sid, id, clock_ns(), |q, id| q.xr_depth(id, t, &payload));
+            }
         }
         if !self.cursor_ready && render { if let Err(e) = self.fill_cursor() { xr_log!("cursor: {e}"); } }
 
@@ -1063,8 +1217,18 @@ impl CxOpenXrSession {
         });
         // the old end_frame: passthrough under a projection that blends with its alpha
         let comp_passthrough = XrCompositionLayerPassthroughFB { layer_handle: self.passthrough_layer, flags: XrCompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA, ..Default::default() };
+        // the depth of what the frame shows, for the compositor's positional correction
+        let focus = self.stereo_focus;
+        if focus > 0.0 && render {
+            if let Some(depth) = self.depth_layer.as_mut() {
+                if let Err(e) = depth.write(xr, &self.dev, focus) { xr_log!("{e}"); }
+            }
+        }
+        let depth_infos = self.depth_layer.as_ref().filter(|_| focus > 0.0).map(|d| [d.info(0), d.info(1)]);
         let proj_views = match (&self.stereo, self.stereo_shown) {
-            (Some(chain), Some(eyes)) => Some([0, 1].map(|eye| XrCompositionLayerProjectionView { pose: eyes[eye].pose, fov: eyes[eye].fov, sub_image: chain.sub_image(eye as u32), ..Default::default() })),
+            (Some(chain), Some(eyes)) => Some([0, 1].map(|eye| XrCompositionLayerProjectionView { pose: eyes[eye].pose, fov: eyes[eye].fov,
+                sub_image: XrSwapchainSubImage { swapchain: self.stereo_shown_chain.unwrap_or(chain.handle), ..chain.sub_image(eye as u32) },
+                next: depth_infos.as_ref().map_or(ptr::null(), |d| &d[eye] as *const _ as *const c_void), ..Default::default() })),
             _ => None,
         };
         let comp_proj = proj_views.as_ref().map(|views| XrCompositionLayerProjection { space: self.local_space, view_count: 2, views: views as *const _,
@@ -1078,6 +1242,7 @@ impl CxOpenXrSession {
         let fei = XrFrameEndInfo { display_time: time, environment_blend_mode: XrEnvironmentBlendMode::OPAQUE, layer_count: layers.len() as _, layers: layers.as_ptr(), ..Default::default() };
         let r = { let _queue = lock(&self.dev.queue_lock); unsafe { (xr.xrEndFrame)(self.handle, &fei) } };
         phase(6, &mut self.phases);
+
         let shown_at = time.as_nanos() as u64;
         if let Some(done) = panel_done { done(shown_at); }
         if let Some(done) = stereo_done { done(shown_at); }
@@ -1112,7 +1277,8 @@ impl CxOpenXrSession {
                 for f in self.frame_us.drain(..) { for i in 0..4 { cols[i].push(f[i]); } }
                 let q = |v: &mut Vec<u32>| { v.sort_unstable(); let at = |f: f64| v.get(((v.len() as f64 - 1.0) * f) as usize).map_or(0.0, |x| *x as f64 / 1000.0); format!("{:.1}/{:.1}/{:.1}", at(0.5), at(0.9), at(1.0)) };
                 let [a, b, c, d] = &mut cols;
-                xr_log!("stereo frame ms p50/p90/max: app cpu {} gpu {} asked->arrived {} (had {})", q(a), q(b), q(c), q(d));
+                let (wait, waits) = (TARGET_WAIT_NS.swap(0, Ordering::Relaxed), TARGET_WAITS.swap(0, Ordering::Relaxed));
+                xr_log!("stereo frame ms p50/p90/max: app cpu {} to queue {} asked->arrived {} (had {}); chain image acquire+wait {:.2} ms avg over {waits}", q(a), q(b), q(c), q(d), wait as f64 / 1e6 / waits.max(1) as f64);
             }
             self.paths = [0; 3];
             self.stats = [0; 4];
@@ -1155,21 +1321,23 @@ impl CxOpenXrSession {
     /// waits for it until shortly before the display time, and copies a frame that came into
     /// the projection chain (an eye per layer) with the eyes it was drawn with.
     fn update_stereo(&mut self, sid: u32, id: Id, time: XrTime, period: i64) -> Result<Option<Box<dyn FnOnce(u64) + Send>>, String> {
-        // The XR window draws one frame per XrFrame it is sent, one in flight at a time. A frame
-        // is asked as soon as the previous one was taken (below), for the display frame after
-        // this one: the app gets a whole period plus the wait to draw it, as the old backend's
-        // frame loop had (it drew right after xrWaitFrame returned). Without an ask in flight
-        // (the first frame, the head untracked) this display frame's is asked here; a frame
-        // that never came (its batch dropped) is asked again after STEREO_REASK.
+        // The XR window draws one frame per XrFrame it is sent, one in flight at a time: this
+        // display frame's, asked after xrBeginFrame, taken when it is on the GPU's queue (the
+        // runtime waits for that work itself), so the app needs only its CPU time before the
+        // deadline. Asked a display frame ahead (the frame before), the app rendered into the
+        // chain one image too early: every frame waited ~8 ms for a free image and a third of
+        // them came late. A frame still in flight from the loop before is taken when it comes
+        // (it shows with its own eyes); one that never came (its batch dropped) is asked again
+        // after STEREO_REASK.
         if self.stereo_asked.is_some() && self.stereo_asked_at.elapsed() > STEREO_REASK { self.stereo_asked = None; }
         if self.stereo_asked.is_none() && !self.ask_stereo(sid, id, time, period) {
             return Ok(None);
         }
         // wait for the frame asked for (it is drawn with the eyes of this display frame)
         let started = Instant::now();
-        // at most half a display period: a frame that is not there keeps the last one showing,
+        // at most 0.8 of a display period: a frame that is not there keeps the last one showing,
         // and the loop keeps the display rate (waiting to the display time halved it and worse)
-        let deadline = Duration::from_nanos((time.as_nanos() - STEREO_MARGIN_NS - clock_ns() as i64).clamp(0, period / 2) as u64);
+        let deadline = Duration::from_nanos((time.as_nanos() - STEREO_MARGIN_NS - clock_ns() as i64).clamp(0, period * 4 / 5) as u64);
         let mut slot = lock(&self.frames.stereo);
         // (elapsed is read once per turn: read twice it can pass the deadline in between, and
         // the subtraction panicked the XR thread)
@@ -1192,8 +1360,9 @@ impl CxOpenXrSession {
         let copy_at = Instant::now();
         let mut targets = lock(&self.frames.stereo_targets);
         // a frame rendered into the chain: released (with the older ones), no copy
+        let in_chain = targets.as_ref().and_then(|t| t.chain_of(&image));
         let size = match targets.as_mut().and_then(|t| t.release_through(&self.rt.xr, &image)) {
-            Some(released) => { released?; self.paths[0] += 1; chain.size }
+            Some(released) => { released?; self.paths[0] += 1; self.stereo_shown_chain = in_chain; chain.size }
             // a frame rendered aside (the chain's image was held): copied in. A held image of an
             // older frame (one this frame replaced) is released first; one still being drawn
             // (a newer frame) keeps its turn and this frame is dropped
@@ -1208,6 +1377,7 @@ impl CxOpenXrSession {
                     t.release_through(&self.rt.xr, &held).unwrap_or(Ok(()))?;
                 }
                 self.paths[1] += 1;
+                self.stereo_shown_chain = Some(chain.handle);
                 // a multiview frame: an eye per layer; else both side by side
                 let eye_w = if image.desc.depth >= 2 { image.desc.w } else { image.desc.w / 2 };
                 let size = [eye_w.min(chain.size[0]), image.desc.h.min(chain.size[1])];
@@ -1222,9 +1392,8 @@ impl CxOpenXrSession {
         if self.stereo_shown.is_none() { xr_log!("first stereo frame ({}x{} px per eye)", size[0], size[1]); }
         // the eyes it was drawn for: its own (a streamed picture's render eyes), else its XrFrame's
         let asked = self.stereo_asked.take();
-        self.stereo_shown = eyes.or(asked);
-        // the next frame, for the next display frame, asked now
-        self.ask_stereo(sid, id, XrTime::from_nanos(time.as_nanos() + period), period);
+        self.stereo_focus = eyes.map_or(0.0, |(_, f)| f);
+        self.stereo_shown = eyes.map(|(e, _)| e).or(asked);
         Ok(Some(done))
     }
 
@@ -1235,11 +1404,14 @@ impl CxOpenXrSession {
         let shared = Shared::global();
         // located the asked lead past the display time (a remote picture of it shows that late)
         let lead = POSE_LEAD_NS.load(Ordering::Acquire);
-        // Only the orientation is predicted the lead ahead: the runtime corrects a rotation
-        // exactly at display time, but not a position (without depth), so a position predicted
-        // far ahead showed its prediction noise as judder. The head's position stays the display
-        // time's, the eyes move with it.
+        // With the frames' depth on the layer the whole pose is predicted the lead ahead (the
+        // compositor corrects the rest at that depth). Without it only the orientation is: the
+        // runtime corrects a rotation exactly at display time, but not a position, so a position
+        // predicted far ahead showed its prediction noise as judder; the head's position then
+        // stays the display time's, the eyes move with it.
+        let positional = self.stereo_focus > 0.0 && self.depth_layer.is_some();
         let located = match (lead > 0).then(|| self.locate(XrTime::from_nanos(time.as_nanos() + lead))).flatten() {
+            Some(ahead) if positional => Some(ahead),
             Some((ahead, eyes)) => self.locate(time).map(|(now, _)| {
                 let shift = |p: &mut XrPosef| {
                     p.position.x += now.position.x - ahead.position.x;
@@ -1350,6 +1522,8 @@ impl Drop for CxOpenXrSession {
         self.panel.destroy(xr, &dev);
         self.cursor.destroy(xr, &dev);
         if let Some(stereo) = &mut self.stereo { stereo.destroy(xr, &dev); }
+        if let Some(stereo) = &mut self.stereo_b { stereo.destroy(xr, &dev); }
+        if let Some(depth) = &mut self.depth_layer { depth.destroy(xr, &dev); }
         if let Some(depth) = &mut self.depth { depth.destroy(&dev); }
         if self.depth_provider.0 != 0 {
             unsafe { (xr.xrStopEnvironmentDepthProviderMETA)(self.depth_provider) }.log_error("xrStopEnvironmentDepthProviderMETA");

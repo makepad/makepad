@@ -2173,6 +2173,19 @@ pub struct XrSwapchainSubImage {
     pub image_array_index: u32,
 }
 
+/// XR_KHR_composition_layer_depth: a projection view's depth (chained to its `next`).
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrCompositionLayerDepthInfoKHR {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub sub_image: XrSwapchainSubImage,
+    pub min_depth: f32,
+    pub max_depth: f32,
+    pub near_z: f32,
+    pub far_z: f32,
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct XrCompositionLayerProjectionView {
