@@ -1552,6 +1552,52 @@ pub fn hal_xr_foveation(level: u32) {
     let _ = level;
 }
 
+/// The headset's environment depth runs (`on`, the default): the occlusion and the room field
+/// read it; off stops the runtime's depth provider (its GPU and camera work). Android XR;
+/// elsewhere nothing.
+#[relax_api]
+pub fn hal_xr_environment_depth(on: bool) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::environment_depth(on);
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
+}
+
+/// Hands and controllers tracked at once (`on`, the default) or only whichever is in use: with
+/// both, the Quest's cameras are shared with the controllers and its hand tracker runs at about
+/// 25 Hz instead of its high-frequency mode. Android XR; elsewhere nothing.
+#[relax_api]
+pub fn hal_xr_hands_and_controllers(on: bool) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::hands_and_controllers(on);
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
+}
+
+/// The XR window's eye buffers move between `min_percent` and `max_percent` of their start size
+/// (40..100; equal: fixed) on the runtime's measured app GPU frame time: a step down (100, 90,
+/// 80, 70) when a frame's GPU time nears the display period, back up with headroom, changing
+/// rarely; the window's geometry follows (the app renders at the new size). Default 100..100.
+/// Android XR (XR_META_performance_metrics); elsewhere nothing.
+#[relax_api]
+pub fn hal_xr_eye_scale(min_percent: u32, max_percent: u32) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::eye_scale(min_percent, max_percent);
+    #[cfg(not(target_os = "android"))]
+    let _ = (min_percent, max_percent);
+}
+
+/// The XR window's eye buffer size now (percent of the start size, the high 32 bits) and the app
+/// GPU frame time the dynamic scale last measured (µs, the low 32 bits; 0 none). Android XR;
+/// elsewhere 100 and 0.
+#[relax_api]
+pub fn hal_xr_eye_scale_now() -> u64 {
+    #[cfg(target_os = "android")]
+    return { let (p, us) = backend::android::xr::eye_scale_now(); ((p as u64) << 32) | us as u64 };
+    #[cfg(not(target_os = "android"))]
+    { 100 << 32 }
+}
+
 /// The uplink's poses are located `frames` display frames past the headset's newest one (the
 /// newest is the runtime's own pipeline ahead of now: a frame located that many past it has
 /// `frames` periods from the pose's sample to its frame's start, whatever that pipeline depth

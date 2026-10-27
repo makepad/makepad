@@ -755,7 +755,7 @@ impl Quat {
             x: scale0 * n.x + scale1 * m.x,
             y: scale0 * n.y + scale1 * m.y,
             z: scale0 * n.z + scale1 * m.z,
-            w: scale0 * m.w + scale1 * m.w,
+            w: scale0 * n.w + scale1 * m.w,
         })
         .normalized()
     }

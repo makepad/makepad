@@ -88,10 +88,11 @@ script_mod! {
         // decoder's own (`video`), 0 NV12 bytes or planes; `occlude` 1: real things in front
         // hide the picture; `depth_near`: the band's inverse depth scale; `opaque` (a debug
         // switch) 1: the picture covers the room whatever its coverage, 2: a flat colour per
-        // eye (red left, blue right); `render_*`: the eye the picture was
-        // rendered with (orientation, position, fov tangents left right up down); `env_*`: the
-        // environment depth camera (orientation, position with its near plane in w, fov
-        // tangents), `env_far` its far plane (0 infinite)
+        // eye (red left, blue right), 4: the colour alone, 5: the worst case (covered everywhere,
+        // a depth edge at every band texel); `render_*`: the eye the picture was rendered with
+        // (orientation, position, fov tangents left right up down); `env_pos`: the environment
+        // depth camera's position with its near plane in w, `env_far` its far plane (0
+        // infinite), `env_size` its image's size
         eye: uniform(0.0)
         video_mode: uniform(0.0)
         occlude: uniform(0.0)
@@ -100,11 +101,16 @@ script_mod! {
         render_rot: uniform(vec4(0.0, 0.0, 0.0, 1.0))
         render_pos: uniform(vec4(0.0, 0.0, 0.0, 1.0))
         render_tan: uniform(vec4(-1.0, 1.0, 1.0, -1.0))
-        env_rot: uniform(vec4(0.0, 0.0, 0.0, 1.0))
         env_pos: uniform(vec4(0.0, 0.0, 0.0, 0.1))
-        env_tan: uniform(vec4(-1.0, 1.0, 1.0, -1.0))
         env_far: uniform(0.0)
         env_map: uniform(0.0)
+        // The depth camera's view of the picture's point (u z, v z, z, 1) (`uv` the picture's
+        // point, `z` its depth along the render eye's axis), one row each (made per draw on the
+        // CPU from both eyes' poses and fovs, `env_map` folded in): the depth image's (u, v)
+        // times its distance, and the distance
+        env_ku: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        env_kv: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        env_kz: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // 1: the picture is reprojected per pixel to the view's eye in this pass (see `warped`);
         // the frame then goes to the compositor with the view's own eyes (`view_*`: that eye:
         // orientation, position, fov tangents)
@@ -117,6 +123,12 @@ script_mod! {
         // The picture's depth at its point `g` (m along the render eye's axis; far where
         // nothing was drawn), from the band-depth target, nearest texel
         band_z: fn(g: vec2) -> float {
+            if self.opaque > 4.5 {
+                // (debug `opaque` 5, the worst case: covered everywhere, a depth edge at every
+                // band texel: 1 m and 1.5 m alternating)
+                let k = floor(clamp(g, vec2(0.0, 0.0), vec2(1.0, 1.0)) * self.band_size * vec2(0.5, 1.0))
+                return 1.0 + 0.5 * fract((k.x + k.y) * 0.5) * 2.0
+            }
             let vd = self.band_at(g).x
             return mix(50.0, self.depth_near / max(vd, 0.0001), step(0.004, vd))
         }
@@ -147,33 +159,15 @@ script_mod! {
         // the depth camera: (its distance there, what the camera measured along that ray); y < 0
         // where the depth image has nothing
         room_depth: fn(uv: vec2, z: float) -> vec2 {
-            let rt = self.render_tan
-            let d = vec3(mix(rt.x, rt.y, uv.x), mix(rt.z, rt.w, uv.y), -1.0)
-            let pw = self.render_pos.xyz + self.qrot(self.render_rot, d * z)
-            let ec = vec4(0.0 - self.env_rot.x, 0.0 - self.env_rot.y, 0.0 - self.env_rot.z, self.env_rot.w)
-            let pe = self.qrot(ec, pw - self.env_pos.xyz)
-            let ze = 0.0 - pe.z
+            // (the camera's view of the point: `env_k*`)
+            let h = vec4(uv.x * z, uv.y * z, z, 1.0)
+            let ze = dot(self.env_kz, h)
             if ze <= 0.01 {
                 return vec2(ze, -1.0)
             }
-            let et = self.env_tan
-            // (the depth image's first row is the bottom of its view: y up, as the room field
-            // reads it)
-            let uv = vec2((pe.x / ze - et.x) / (et.y - et.x), (pe.y / ze - et.w) / (et.z - et.w))
-            if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+            let t = vec2(dot(self.env_ku, h), dot(self.env_kv, h)) / ze
+            if t.x < 0.0 || t.x > 1.0 || t.y < 0.0 || t.y > 1.0 {
                 return vec2(ze, -1.0)
-            }
-            // (debug `env_map`: bit 0 mirrors x, bit 1 mirrors y, bit 2 swaps the axes)
-            let m = self.env_map
-            var t = uv
-            if fract(m * 0.5) > 0.25 {
-                t.x = 1.0 - t.x
-            }
-            if fract(floor(m * 0.5) * 0.5) > 0.25 {
-                t.y = 1.0 - t.y
-            }
-            if m > 3.5 {
-                t = t.yx
             }
             // (this eye's layer, read at the texel's centre)
             let ts = self.env_size
@@ -228,6 +222,11 @@ script_mod! {
             let z0 = self.band_z(uv0)
             let a = self.ray_at(o, dr, z0)
             let z1 = self.band_z(a)
+            // (inside a surface: the depth at the far guess and at the first step agree, the
+            // second step would land where the first did: done)
+            if abs(z1 - z0) <= 0.01 * z1 {
+                return vec3(a.x, a.y, z1)
+            }
             let b = self.ray_at(o, dr, z1)
             // b is the answer when its own depth puts it back on this ray (within a band
             // texel); else the ray passes an edge where the picture has two answers, a
@@ -312,7 +311,7 @@ script_mod! {
                     return vec4(0.0, 0.0, 0.0, 0.0)
                 }
             }
-            if self.opaque > 3.5 && self.video_mode > 0.5 {
+            if self.opaque > 3.5 && self.opaque < 4.5 && self.video_mode > 0.5 {
                 // (debug `opaque` 4: the colour alone, no coverage or depth samples: their cost)
                 let c4 = self.video.sample_video((self.src.xy + uv * vec2(self.src.z, ch)) / self.nv12_size)
                 return vec4(self.nv12_color(vec3(c4.y, c4.z, c4.x) * 255.0), 1.0)
@@ -322,7 +321,7 @@ script_mod! {
                 // taps of the decoder's picture less per pixel); nothing drawn there: the room,
                 // before any other work
                 let va = self.band_coverage(uv)
-                let ca = max(clamp(va, 0.0, 1.0), self.opaque)
+                let ca = max(clamp(va, 0.0, 1.0), min(self.opaque, 1.0))
                 if ca <= 0.002 {
                     return vec4(0.0, 0.0, 0.0, 0.0)
                 }
@@ -451,6 +450,8 @@ struct Window {
     /// When (ms into the window) a frame repeated ('r'), a picture was skipped ('s'), the
     /// display skipped a frame ('l'): to line up with what the wearer saw.
     events: Vec<(u32, char)>,
+    /// Each display frame's code (`report::FRAME_*`), for the server's per-frame strip.
+    codes: Vec<u8>,
 }
 
 fn median(v: &mut [u32]) -> f64 {
@@ -555,6 +556,8 @@ pub struct XrStreamClient {
     watch: VecDeque<String>,
     watch_after: u32,
     odd_frames: u32,
+    /// This display frame's code so far (`report::FRAME_*`; the worst event wins).
+    frame_code: u8,
     watch_seq: (u64, u32),
     watch_last_view: Option<[f32; 4]>,
     watch_turn: f32,
@@ -653,6 +656,7 @@ impl XrStreamClient {
             watch: VecDeque::new(),
             watch_after: 0,
             odd_frames: 0,
+            frame_code: 0,
             watch_seq: (0, 0),
             watch_last_view: None,
             watch_turn: 0.0,
@@ -695,12 +699,14 @@ impl XrStreamClient {
         match event {
             Event::XrUpdate(_) => {
                 self.window.display_frames += 1;
+                self.frame_code = 0;
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some((display_ns, _)) = cx.xr_frame_wire() {
                     let last = std::mem::replace(&mut self.last_display_ns, display_ns);
                     let period = 1.0e9 / 90.0;
                     if last != 0 && display_ns > last && (display_ns - last) as f64 > period * 1.5 {
                         self.window.events.push((self.window_at.elapsed().as_millis() as u32, 'l'));
+                        self.mark_frame(makepad_desk_link::xr::report::FRAME_LATE);
                     }
                 }
                 #[cfg(not(target_arch = "wasm32"))]
@@ -721,6 +727,7 @@ impl XrStreamClient {
                     if !fresh {
                         self.window.repeats += 1;
                         self.window.events.push((self.window_at.elapsed().as_millis() as u32, 'r'));
+                        self.mark_frame(makepad_desk_link::xr::report::FRAME_REPEAT);
                     }
                     // the picture taken for this frame is on the glass at this frame's display time
                     if let (Some((_, sample_ns, decoded_at, _)), Some((display_ns, _))) = (self.pending_show.take(), cx.xr_frame_wire()) {
@@ -744,6 +751,8 @@ impl XrStreamClient {
                     self.trace_frame(cx, fresh);
                     #[cfg(not(target_arch = "wasm32"))]
                     self.watch_frame(cx, fresh);
+                    self.mark_frame(makepad_desk_link::xr::report::FRAME_NEW);
+                    self.window.codes.push(self.frame_code);
                     if self.window_at.elapsed().as_secs_f64() >= 5.0 {
                         self.log_eyes(cx);
                     }
@@ -893,6 +902,9 @@ impl XrStreamClient {
                 if skipped > 0 {
                     self.window.skipped += skipped;
                     self.window.events.push((self.window_at.elapsed().as_millis() as u32, 's'));
+                    // (as `mark_frame`: the shared state is borrowed here)
+                    use makepad_desk_link::xr::report as r;
+                    if !matches!(self.frame_code, r::FRAME_ODD | r::FRAME_LATE) { self.frame_code = r::FRAME_SKIP; }
                 }
                 let mut out: Vec<Decoded> = Vec::with_capacity(tiles);
                 for t in 0..tiles {
@@ -1148,6 +1160,9 @@ impl XrStreamClient {
             self.watch.pop_front();
         }
         let odd = off.abs() > 0.5 || self.watch_seq.1 >= 3 || draws != 1 || render_view > 6.0 || (turn > 0.3 && turn > 2.5 * turn_before.max(0.05)) || (turn_before > 0.3 && turn < turn_before / 2.5);
+        if odd {
+            self.mark_frame(makepad_desk_link::xr::report::FRAME_ODD);
+        }
         if odd && self.watch_after == 0 {
             self.odd_frames += 1;
             self.watch_after = 6;
@@ -1158,6 +1173,14 @@ impl XrStreamClient {
                 log!("xr stream: odd frame #{} after: {}", self.odd_frames, self.watch.iter().cloned().collect::<Vec<_>>().join(" | "));
             }
         }
+    }
+
+    /// This display frame's code becomes `code` when that is worse (odd, late, skip, repeat,
+    /// new; none yet: anything).
+    fn mark_frame(&mut self, code: u8) {
+        use makepad_desk_link::xr::report as r;
+        let rank = |c: u8| match c { r::FRAME_ODD => 5, r::FRAME_LATE => 4, r::FRAME_SKIP => 3, r::FRAME_REPEAT => 2, r::FRAME_NEW => 1, _ => 0 };
+        if rank(code) > rank(self.frame_code) { self.frame_code = code; }
     }
 
     /// Every second: the window's numbers to the server (its stats panel); logged every 5th.
@@ -1226,6 +1249,7 @@ impl XrStreamClient {
             v[report::UPLINK_SD_MS] = uplink.1;
             v[report::LEAD_MS] = (self.lead_ns / 1e6) as f32;
             v[report::SKIPPED] = rate(w.skipped) as f32;
+            report::pack_frames(&mut v, &w.codes);
             if let Some(link) = link {
                 link.send(&XrClientMsg::Report { values: v });
             }
@@ -1379,13 +1403,13 @@ impl XrStreamClient {
                         let v = &header.views[e];
                         let p = v.pose.position;
                         uniforms.extend([
-                            (live_id!(env_rot), v.pose.orientation.to_vec()),
                             (live_id!(env_pos), vec![p[0], p[1], p[2], header.near]),
-                            (live_id!(env_tan), tan(v.fov).to_vec()),
                             (live_id!(env_size), vec![header.width as f32, header.height as f32]),
                             (live_id!(env_far), vec![if header.far.is_finite() { header.far.max(0.0) } else { 0.0 }]),
                             (live_id!(occlude), vec![if self.room_view { 2.0 } else { 1.0 }]),
                         ]);
+                        let [ku, kv, kz] = env_rows(r, &v.pose.orientation, &p, &tan(v.fov), self.env_map);
+                        uniforms.extend([(live_id!(env_ku), ku.to_vec()), (live_id!(env_kv), kv.to_vec()), (live_id!(env_kz), kz.to_vec())]);
                         draw.draw_vars.set_texture(3, &depth);
                     }
                     None => {
@@ -1420,6 +1444,47 @@ impl XrStreamClient {
         #[cfg(target_arch = "wasm32")]
         let _ = (cx, draw);
     }
+}
+
+/// The depth camera's view of the render eye's picture as three rows over (u z, v z, z, 1)
+/// (`u`, `v` the picture's point, `z` its depth along the render eye's axis): the depth image's
+/// (u, v) times the distance from that camera, and the distance. The shader's per-pixel
+/// rotate-into-the-room and rotate-into-the-camera folded into one 3x4 map (`env_map`: the debug
+/// mirrors and swap).
+#[cfg(not(target_arch = "wasm32"))]
+fn env_rows(r: &XrRenderEye, env_rot: &[f32; 4], env_pos: &[f32; 3], et: &[f32; 4], env_map: u8) -> [[f32; 4]; 3] {
+    // v rotated by the quaternion q, and by its conjugate
+    fn rot(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+        let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
+        let t = [2.0 * (y * v[2] - z * v[1]), 2.0 * (z * v[0] - x * v[2]), 2.0 * (x * v[1] - y * v[0])];
+        [v[0] + w * t[0] + (y * t[2] - z * t[1]), v[1] + w * t[1] + (z * t[0] - x * t[2]), v[2] + w * t[2] + (x * t[1] - y * t[0])]
+    }
+    let ec = [-env_rot[0], -env_rot[1], -env_rot[2], env_rot[3]];
+    // the camera's view of a direction in the render eye's frame, and of the render eye itself
+    let m = |d: [f32; 3]| rot(ec, rot(r.orientation, d));
+    let t = rot(ec, [r.position[0] - env_pos[0], r.position[1] - env_pos[1], r.position[2] - env_pos[2]]);
+    let [l, rr, up, dn] = r.fov.map(f32::tan);
+    // the render eye's point (u z, v z, z): ((rr - l) u z + l z, (dn - up) v z + up z, -z)
+    let (cu, cv, c0, c1, c2) = (m([rr - l, 0.0, 0.0]), m([0.0, dn - up, 0.0]), m([1.0, 0.0, 0.0]), m([0.0, 1.0, 0.0]), m([0.0, 0.0, 1.0]));
+    // the camera's point as rows over (u z, v z, z, 1)
+    let px = [cu[0], cv[0], c0[0] * l + c1[0] * up - c2[0], t[0]];
+    let py = [cu[1], cv[1], c0[1] * l + c1[1] * up - c2[1], t[1]];
+    let pz = [cu[2], cv[2], c0[2] * l + c1[2] * up - c2[2], t[2]];
+    // distance ze = -pz; u ze = (px + et.l pz) / (et.r - et.l); v ze = (py + et.d pz) / (et.u - et.d)
+    // (the depth image's first row is the bottom of its view)
+    let kz = pz.map(|a| -a);
+    let mut ku: [f32; 4] = std::array::from_fn(|i| (px[i] + et[0] * pz[i]) / (et[1] - et[0]));
+    let mut kv: [f32; 4] = std::array::from_fn(|i| (py[i] + et[3] * pz[i]) / (et[2] - et[3]));
+    if env_map & 1 != 0 {
+        ku = std::array::from_fn(|i| kz[i] - ku[i]);
+    }
+    if env_map & 2 != 0 {
+        kv = std::array::from_fn(|i| kz[i] - kv[i]);
+    }
+    if env_map & 4 != 0 {
+        std::mem::swap(&mut ku, &mut kv);
+    }
+    [ku, kv, kz]
 }
 
 /// The corners (top left, top right, bottom left, bottom right) of `eye`'s frustum rectangle at
@@ -1774,6 +1839,53 @@ pub fn replay_track_log(dir: &str, name: &str) -> bool {
         Err(e) => {
             log!("xr stream: replay: {path}: {e}");
             false
+        }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    fn rot(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+        let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
+        let t = [2.0 * (y * v[2] - z * v[1]), 2.0 * (z * v[0] - x * v[2]), 2.0 * (x * v[1] - y * v[0])];
+        [v[0] + w * t[0] + (y * t[2] - z * t[1]), v[1] + w * t[1] + (z * t[0] - x * t[2]), v[2] + w * t[2] + (x * t[1] - y * t[0])]
+    }
+    fn unit(q: [f32; 4]) -> [f32; 4] {
+        let n = q.iter().map(|a| a * a).sum::<f32>().sqrt();
+        q.map(|a| a / n)
+    }
+
+    /// The folded rows give the shader's old per-pixel path (render eye -> room -> depth camera).
+    #[test]
+    fn env_rows_match_the_two_rotations() {
+        let r = XrRenderEye { orientation: unit([0.1, -0.3, 0.05, 0.94]), position: [0.03, 1.6, -0.2], fov: [-0.9, 0.75, 0.8, -0.85] };
+        let env_rot = unit([-0.05, 0.2, 0.1, 0.97]);
+        let env_pos = [0.0, 1.62, -0.18];
+        let et = [-1.1f32, 1.0, 1.05, -0.95];
+        for map in 0..8u8 {
+            let [ku, kv, kz] = env_rows(&r, &env_rot, &env_pos, &et, map);
+            for &(u, v, z) in &[(0.2f32, 0.3f32, 0.7f32), (0.5, 0.5, 2.0), (0.9, 0.1, 1.3)] {
+                // the old path
+                let rt = r.fov.map(f32::tan);
+                let d = [rt[0] + (rt[1] - rt[0]) * u, rt[2] + (rt[3] - rt[2]) * v, -1.0];
+                let dw = rot(r.orientation, d.map(|a| a * z));
+                let pw = [r.position[0] + dw[0], r.position[1] + dw[1], r.position[2] + dw[2]];
+                let pe = rot([-env_rot[0], -env_rot[1], -env_rot[2], env_rot[3]], [pw[0] - env_pos[0], pw[1] - env_pos[1], pw[2] - env_pos[2]]);
+                let ze = -pe[2];
+                let mut t = [(pe[0] / ze - et[0]) / (et[1] - et[0]), (pe[1] / ze - et[3]) / (et[2] - et[3])];
+                if map & 1 != 0 { t[0] = 1.0 - t[0]; }
+                if map & 2 != 0 { t[1] = 1.0 - t[1]; }
+                if map & 4 != 0 { t.swap(0, 1); }
+                // the rows
+                let h = [u * z, v * z, z, 1.0];
+                let dot = |k: [f32; 4]| k.iter().zip(h).map(|(a, b)| a * b).sum::<f32>();
+                let zk = dot(kz);
+                let tk = [dot(ku) / zk, dot(kv) / zk];
+                assert!((zk - ze).abs() < 1e-4, "map {map}: distance {zk} vs {ze}");
+                assert!((tk[0] - t[0]).abs() < 1e-4 && (tk[1] - t[1]).abs() < 1e-4, "map {map}: uv {tk:?} vs {t:?}");
+            }
         }
     }
 }

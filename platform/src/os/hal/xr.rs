@@ -25,6 +25,10 @@ pub(crate) struct HalXr {
     pub(crate) frame: Option<XrFrame>,
     /// its predicted display time (HAL clock, ns)
     pub(crate) display_ns: u64,
+    /// The frames' clock to this process's (ns, added): 0 while their display times are on its
+    /// clock (a headset of its own); a remote headset's are on the headset's clock, before this
+    /// process started (its `XrState::time` stayed 0): the first such frame maps to now.
+    pub(crate) clock_offset_ns: i64,
     pub(crate) last: Rc<XrState>,
     /// the pass uniforms of the frame being built, one per eye (alive until the batch is sent);
     /// a multiview pass uses the first, with both eyes in it
@@ -105,7 +109,7 @@ impl Cx {
         self.hal.windows.insert(window.0, super::HalWindow::default());
         // the HAL sizes it (its first Geom confirms it)
         self.hal.frames.w.window_create(hal_window_id(window), window_kind::XR, Id::NONE, [0.0; 4], false);
-        self.hal.xr = Some(HalXr { window, frame: None, display_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None, hand_check_at: None, env_images: Vec::new(), env_depth_ns: 0 });
+        self.hal.xr = Some(HalXr { window, frame: None, display_ns: 0, clock_offset_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None, hand_check_at: None, env_images: Vec::new(), env_depth_ns: 0 });
         if SEE_THROUGH.with(|s| s.get()) { self.hal_xr_see_through(true); }
         let refresh = REFRESH_MHZ.with(|r| r.get());
         if refresh != 0 { self.hal_xr_refresh_rate(refresh); }
@@ -148,9 +152,18 @@ impl Cx {
     }
 
     /// An `XrFrame`: the eyes of the XR window's next frame, and `Event::XrUpdate` for the app.
-    pub(crate) fn hal_xr_frame(&mut self, time: f64, display_ns: u64, bytes: &[u8]) {
+    pub(crate) fn hal_xr_frame(&mut self, display_ns: u64, bytes: &[u8]) {
         let Some(frame) = read_items::<XrFrame>(bytes, 1).next() else { return };
+        let now_ns = makepad_hal::clock_ns();
+        let start_ns = self.hal.start_ns;
         let Some(xr) = self.hal.xr.as_mut() else { return };
+        // (a display time more than 10 s off this process's clock is another clock's: from the
+        // first one, on this clock by the offset then)
+        if xr.clock_offset_ns == 0 && (display_ns as i64 - now_ns as i64).abs() > 10_000_000_000 {
+            xr.clock_offset_ns = now_ns as i64 - display_ns as i64;
+        }
+        let local_ns = (display_ns as i64 + xr.clock_offset_ns).max(0) as u64;
+        let time = local_ns.saturating_sub(start_ns) as f64 / 1e9;
         xr.frame = Some(frame);
         xr.display_ns = display_ns;
         // the HAL's controllers and hands are the old backend's, field for field

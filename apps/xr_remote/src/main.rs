@@ -106,6 +106,17 @@ pub struct XrRemoteView {
     /// The foveation level last asked for (`debug.xrremote.fov`; 255 before the first ask).
     #[rust(255)]
     fov_asked: u8,
+    /// The eye buffers' lowest dynamic size last asked for (`debug.xrremote.eyemin`; 0 before
+    /// the first ask).
+    #[rust]
+    eyemin_asked: u8,
+    /// Hands and controllers at once last asked (`debug.xrremote.multimodal`; 255 before the
+    /// first ask).
+    #[rust(255)]
+    multimodal_asked: u8,
+    /// The environment depth last asked (`debug.xrremote.envdepth`; 255 before the first ask).
+    #[rust(255)]
+    envdepth_asked: u8,
     #[rust(1.0)]
     dpi: f64,
 }
@@ -271,6 +282,32 @@ impl Widget for XrRemoteView {
                     self.fov_asked = fov;
                     log!("xr remote: foveation level {fov}");
                     makepad_widgets::makepad_platform::makepad_hal::hal_xr_foveation(fov as u32);
+                }
+                // `eyemin` N (default 70; 100: fixed): the eye buffers step down to N% of their
+                // start size when the view's GPU work nears the display period (any picture
+                // keeps 90/s; back up with headroom)
+                let eyemin = switch("debug.xrremote.eyemin", 70);
+                if eyemin != self.eyemin_asked {
+                    self.eyemin_asked = eyemin;
+                    log!("xr remote: eye buffers {eyemin}..100%");
+                    makepad_widgets::makepad_platform::makepad_hal::hal_xr_eye_scale(eyemin as u32, 100);
+                }
+                // `multimodal` (default 1, the user's pick): hands and controllers tracked at once
+                // (the cameras shared: the hand tracker at 25 Hz instead of its high-frequency
+                // rate; the uplink's hands are interpolated between its samples)
+                let multimodal = switch("debug.xrremote.multimodal", 1);
+                if multimodal != self.multimodal_asked {
+                    self.multimodal_asked = multimodal;
+                    log!("xr remote: hands and controllers at once {}", multimodal != 0);
+                    makepad_widgets::makepad_platform::makepad_hal::hal_xr_hands_and_controllers(multimodal != 0);
+                }
+                // `envdepth` (default 1): the headset's environment depth runs (0 stops it: no
+                // occlusion, no room field; its GPU cost A/B)
+                let envdepth = switch("debug.xrremote.envdepth", 1);
+                if envdepth != self.envdepth_asked {
+                    self.envdepth_asked = envdepth;
+                    log!("xr remote: environment depth {}", envdepth != 0);
+                    makepad_widgets::makepad_platform::makepad_hal::hal_xr_environment_depth(envdepth != 0);
                 }
                 if let Some(client) = self.client.as_mut() {
                     client.occlusion = occlusion;

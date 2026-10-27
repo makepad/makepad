@@ -50,6 +50,9 @@ extern "C" {
 
 /// AImageReader formats and AHardwareBuffer usage.
 const AIMAGE_FORMAT_YUV_420_888: i32 = 0x23;
+const AIMAGE_FORMAT_PRIVATE: i32 = 0x22;
+/// The first vendor usage bit (Qualcomm's gralloc: allocate compressed UBWC).
+const USAGE_VENDOR_0: u64 = 1 << 28;
 const USAGE_GPU_SAMPLED_IMAGE: u64 = 1 << 8;
 /// Images of a GPU-output reader: the shown picture, the two before it (frames on the GPU), up to
 /// six decoded and waiting for their display frame, and two for the decoder itself.
@@ -120,7 +123,12 @@ impl StreamDecoder {
         // GPU output: an image reader of GPU-sampled hardware buffers is the decoder's surface
         let (reader, window) = if gpu {
             let mut reader = std::ptr::null_mut();
-            checked(unsafe { ndk::AImageReader_newWithUsage(width.max(64) as i32, height.max(64) as i32, AIMAGE_FORMAT_YUV_420_888, USAGE_GPU_SAMPLED_IMAGE, READER_IMAGES, &mut reader) }, "make the decoder's image reader")?;
+            // (debug `debug.xrremote.ubwc` 1 at start: the reader asks for Qualcomm's compressed
+            // layout, the private format and its vendor usage bit; the import's log line says what
+            // the driver makes of it. Off: the linear YUV_420_888 pictures)
+            let ubwc = super::super::xr::system_property("debug.xrremote.ubwc").is_some_and(|v| v.trim() == "1");
+            let (fmt, usage) = if ubwc { (AIMAGE_FORMAT_PRIVATE, USAGE_GPU_SAMPLED_IMAGE | USAGE_VENDOR_0) } else { (AIMAGE_FORMAT_YUV_420_888, USAGE_GPU_SAMPLED_IMAGE) };
+            checked(unsafe { ndk::AImageReader_newWithUsage(width.max(64) as i32, height.max(64) as i32, fmt, usage, READER_IMAGES, &mut reader) }, "make the decoder's image reader")?;
             let reader = Reader(reader);
             let mut window = std::ptr::null_mut();
             checked(unsafe { ndk::AImageReader_getWindow(reader.0, &mut window) }, "the image reader's window")?;
@@ -238,7 +246,9 @@ impl StreamDecoder {
                 unsafe { AHardwareBuffer_describe(buffer, &mut desc) };
                 let (w, h) = (desc.width, desc.height);
                 if self.logged.swap(true, std::sync::atomic::Ordering::Relaxed) == false {
-                    eprintln!("[hal-android-stream-decode] {}: GPU pictures {w}x{h} (crop {:?})", self.info, self.crop);
+                    // (the buffer's format and usage: a vendor format with the private UBWC bit,
+                    // 1 << 28, is the compressed layout the GPU reads at a fraction of the bytes)
+                    super::super::xr::log(&format!("stream decode {}: GPU pictures {w}x{h} (crop {:?}), buffer format {:#x} usage {:#x} stride {}", self.info, self.crop, desc.format, desc.usage, desc.stride));
                 }
                 return Ok(Picture { width: w, height: h, nv12: Vec::new(), pts_us, gpu: Some(GpuPicture { _image: image, buffer }) });
             }

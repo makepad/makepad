@@ -326,6 +326,12 @@ impl XrEnv {
     }
 }
 
+/// The colliders the physics gives this hand (or its controller) at this pose: exactly what the
+/// hand pushes bodies with (a debug view draws them).
+pub fn xr_hand_colliders(hand: &XrHand, controller: &XrController) -> Vec<HandCollider> {
+    XrHandSystem.build_hand_colliders(hand, controller)
+}
+
 pub(super) fn build_hand_colliders_for_physics(
     hand: &XrHand,
     controller: &XrController,

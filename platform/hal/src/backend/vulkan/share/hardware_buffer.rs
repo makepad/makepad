@@ -102,6 +102,20 @@ impl HardwareBuffer {
         let external_format = format_properties.external_format;
         if external_format == 0 { return Err(format!("the picture's buffer (format {:#x}) has no external format", description.format)); }
         format_properties.p_next = std::ptr::null_mut();
+        // (once per external format: what the driver makes of the buffer; a compressed (UBWC)
+        // allocation shows as its own external format and a larger allocation)
+        #[cfg(target_os = "android")]
+        {
+            static SEEN: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+            let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+            if !seen.contains(&external_format) {
+                seen.push(external_format);
+                crate::backend::android::xr::log(&format!("video import: buffer format {:#x} usage {:#x} {}x{} stride {} -> external format {:#x}, allocation {} B, features {:#x}, suggested model {} range {} chroma offsets {}/{}",
+                    description.format, description.usage, description.width, description.height, description.stride, external_format, properties.allocation_size,
+                    format_properties.format_features.as_raw(), format_properties.suggested_ycbcr_model.as_raw(), format_properties.suggested_ycbcr_range.as_raw(),
+                    format_properties.suggested_x_chroma_offset.as_raw(), format_properties.suggested_y_chroma_offset.as_raw()));
+            }
+        }
         let video = dev.video_sampler(external_format, Some(&format_properties))?;
         let mut external = vk::ExternalMemoryImageCreateInfo::default().handle_types(vk::ExternalMemoryHandleTypeFlags::ANDROID_HARDWARE_BUFFER_ANDROID);
         let mut format = vk::ExternalFormatANDROID { external_format, ..Default::default() };

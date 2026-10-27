@@ -83,6 +83,32 @@ pub mod report {
     pub const LEAD_MS: usize = 11;
     pub const SKIPPED: usize = 12;
     pub const COUNT: usize = 13;
+    /// After the numbers: how many display frames the window had, then their codes, 8 to a
+    /// value (3 bits each, the first frame lowest: exact in an f32).
+    pub const FRAMES: usize = COUNT;
+    /// A display frame's code: a new picture, the one before again (repeat), a new one with
+    /// pictures skipped to catch up, an odd one (the odd-frame watch: a picture off its frame,
+    /// a jump), the display having missed a frame before it (late).
+    pub const FRAME_NEW: u8 = 1;
+    pub const FRAME_REPEAT: u8 = 2;
+    pub const FRAME_SKIP: u8 = 3;
+    pub const FRAME_ODD: u8 = 4;
+    pub const FRAME_LATE: u8 = 5;
+    /// `codes` packed after the numbers (`FRAMES`).
+    pub fn pack_frames(values: &mut Vec<f32>, codes: &[u8]) {
+        values.truncate(FRAMES);
+        values.resize(FRAMES, 0.0);
+        values.push(codes.len() as f32);
+        for chunk in codes.chunks(8) {
+            values.push(chunk.iter().enumerate().fold(0u32, |v, (i, c)| v | ((*c as u32 & 7) << (3 * i))) as f32);
+        }
+    }
+    /// The frame codes of a report (empty from a headset that sends none).
+    pub fn frames(values: &[f32]) -> Vec<u8> {
+        let Some(&n) = values.get(FRAMES) else { return Vec::new() };
+        let n = (n as usize).min(1024);
+        (0..n).filter_map(|i| values.get(FRAMES + 1 + i / 8).map(|v| ((*v as u32 >> (3 * (i % 8))) & 7) as u8)).collect()
+    }
 }
 
 /// One brick of a room field as it travels (see `XrClientMsg::World`).
@@ -511,6 +537,16 @@ pub mod link {
 mod tests {
     use super::*;
     use crate::Inbox;
+
+    #[test]
+    fn report_frame_codes_round_trip() {
+        let codes: Vec<u8> = (0..91).map(|i| [1, 1, 2, 3, 4, 5, 1][i % 7]).collect();
+        let mut v = vec![7.0; report::COUNT];
+        report::pack_frames(&mut v, &codes);
+        assert_eq!(v[report::DISPLAY], 7.0);
+        assert_eq!(report::frames(&v), codes);
+        assert!(report::frames(&v[..report::COUNT]).is_empty());
+    }
 
     #[test]
     fn xr_messages_round_trip() {

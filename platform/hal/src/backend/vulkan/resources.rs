@@ -167,7 +167,9 @@ impl Image {
             .view_type(vk::ImageViewType::TYPE_2D).subresource_range(range);
         let view = dev.raw.create_image_view(&info, None).map_err(error)?;
         Ok(Arc::new(Self { dev, image, memory, view, array_view: vk::ImageView::null(), cube_view: vk::ImageView::null(), layers: Vec::new(), desc, bytes: 0,
-            aspect: vk::ImageAspectFlags::COLOR, layout: Mutex::new(vk::ImageLayout::UNDEFINED), external_owner: AtomicBool::new(false), borrowed: false, video, external,
+            // (the decoder's contents, acquired from the foreign queue in GENERAL: an acquire from
+            // UNDEFINED lets the driver drop them; a compressed (UBWC) picture read so was noise)
+            aspect: vk::ImageAspectFlags::COLOR, layout: Mutex::new(vk::ImageLayout::GENERAL), external_owner: AtomicBool::new(false), borrowed: false, video, external,
             #[cfg(target_os = "linux")] timeline: None }))
     }
 

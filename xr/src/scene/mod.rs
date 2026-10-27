@@ -27,7 +27,10 @@ pub use crate::net::{XrActivityId, XrSpawnableObjectId};
 pub use crate::sync::xr_peer_sync::{XrPeerSync, XrPeerSyncAction};
 pub use crate::sync::xr_scene_sync_controller::XrSceneSyncController;
 pub use xr_body_spawn::{XrBodyDrive, XrBodyImpulse, XrBodySpawn, XrBodyWrench, XrCarControl};
-pub use xr_env::{xr_grip_pose, DrawDepthMeshBasic, XrEnv, XrPhysics, XrPhysicsBody, XrPhysicsMetrics, XrPlayerHands};
+pub use xr_env::{
+    xr_grip_pose, xr_hand_colliders, xr_hold_frame, xr_two_hand_hold_pose, XrHandCollider, DrawDepthMeshBasic, XrEnv, XrPhysics, XrPhysicsBody, XrPhysicsCounters, XrPhysicsMetrics,
+    XrPhysicsState, XrPlayerHands, XR_WORKER_FIXED_DT,
+};
 pub use xr_node::{
     xr_draw_list_depth, xr_sort_child_draw_order, xr_widget_children, xr_widget_is_transparent,
     xr_widget_local_sort_center, xr_widget_with_scene_node, xr_widget_world_transform, XrBodyKind, XrDepthQuerySupportRig,

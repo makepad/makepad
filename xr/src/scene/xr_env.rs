@@ -41,7 +41,9 @@ mod xr_hands;
 mod xr_passthrough;
 #[path = "xr_physics.rs"]
 mod xr_physics;
-pub use xr_physics::xr_grip_pose;
+pub use xr_hands::xr_hand_colliders;
+pub use xr_physics::{xr_grip_pose, xr_hold_frame, xr_two_hand_hold_pose, HandCollider as XrHandCollider};
+pub use xr_physics_worker::{XrPhysicsCounters, XrPhysicsState, XR_WORKER_FIXED_DT};
 #[path = "xr_physics_worker.rs"]
 mod xr_physics_worker;
 
@@ -226,8 +228,9 @@ const XR_HAND_PLATE_HALF_DEPTH: f32 = 0.028;
 const XR_HAND_PLATE_FORWARD_OFFSET: f32 = 0.004;
 const XR_HAND_TIP_RADIUS_SCALE: f32 = 0.72;
 const XR_HAND_GRAB_MAX_DISTANCE: f32 = 0.24;
-/// How near a hand must be to a body the other hand holds to join the hold (metres): on it.
-const XR_HAND_SHARED_GRAB_MAX_DISTANCE: f32 = 0.08;
+/// How near (metres, grip point to surface) a grab must be to a body the other hand holds to
+/// join the hold: on it.
+const XR_HAND_SHARED_GRAB_MAX_DISTANCE: f32 = 0.04;
 const XR_HAND_DUAL_GRAB_MIN_SPAN: f32 = 0.035;
 const XR_HAND_GRAB_RELEASE_LINEAR_VELOCITY_SCALE: f32 = 1.0;
 const XR_BODY_LINEAR_DAMPING: f32 = 1.5;
@@ -288,6 +291,9 @@ pub struct XrPhysics {
     worker: Option<XrPhysicsWorker>,
     runtime_bodies: Rc<HashMap<WidgetUid, XrRuntimeBodyState>>,
     runtime_contacts: Rc<Vec<(WidgetUid, WidgetUid)>>,
+    /// the newest physics states, oldest first (`pose_at` interpolates between them)
+    history: Vec<XrPhysicsState>,
+    counters: XrPhysicsCounters,
     pub(crate) root_pose: Option<Pose>,
     scene_dirty: bool,
     revision: u64,
@@ -308,6 +314,8 @@ impl Default for XrPhysics {
             worker: None,
             runtime_bodies: Rc::new(HashMap::new()),
             runtime_contacts: Rc::new(Vec::new()),
+            history: Vec::new(),
+            counters: XrPhysicsCounters::default(),
             root_pose: None,
             scene_dirty: true,
             revision: 0,
@@ -334,6 +342,8 @@ impl XrPhysics {
         }
         self.runtime_bodies = Rc::new(result.runtime_bodies);
         self.runtime_contacts = Rc::new(result.runtime_contacts);
+        self.history = result.history;
+        self.counters = result.counters;
         if let Some(retained_hits) = result.depth_query_retained_hits {
             self.retained_hits_update = Some(retained_hits);
         }
@@ -401,12 +411,57 @@ impl XrPhysics {
         self.pending_car_controls.push(control);
     }
 
-    /// One step of the scene with these hands and controllers (tracking space, metres).
-    /// The worker steps once per request with its own adaptive dt and publishes the result.
+    /// These hands and controllers (tracking space, metres) as of `time` (seconds of the
+    /// draw's clock: on a headset the picture's display time). The worker simulates fixed
+    /// `XR_WORKER_FIXED_DT` steps up to a little past `time`, each with the hands interpolated
+    /// between the samples around it, and publishes its newest states.
     #[allow(clippy::too_many_arguments)]
-    pub fn step(&mut self, cx: &mut Cx, hands: Vec<XrPlayerHands>, floor_y: Option<f32>, time_scale: f32, include_retained_hits: bool) {
+    pub fn step(&mut self, cx: &mut Cx, time: f64, hands: Vec<XrPlayerHands>, floor_y: Option<f32>, time_scale: f32, include_retained_hits: bool) {
         let revision = self.revision;
-        self.worker(cx).request_step(revision, hands, floor_y, time_scale, include_retained_hits);
+        self.worker(cx).request_step(revision, time, hands, floor_y, time_scale, include_retained_hits);
+    }
+
+    /// A body's pose at `time` (the draw's clock): between the two physics states around it;
+    /// past the newest state carried on by the body's velocity. `None` when no state has it.
+    /// The flag says whether the pose had to be carried past the states (a late step).
+    pub fn pose_at(&self, uid: WidgetUid, time: f64) -> Option<(Pose, bool)> {
+        let find = |s: &XrPhysicsState| s.bodies.iter().find(|(u, _)| *u == uid).map(|(_, p)| *p);
+        let after = self.history.iter().position(|s| s.time >= time);
+        match after {
+            Some(0) => find(&self.history[0]).map(|p| (p, false)),
+            Some(i) => {
+                let (a, b) = (&self.history[i - 1], &self.history[i]);
+                let (pa, pb) = (find(a)?, find(b)?);
+                let f = ((time - a.time) / (b.time - a.time).max(1.0e-9)) as f32;
+                Some((Pose::from_lerp(pa, pb, f), false))
+            }
+            None => {
+                let newest = self.history.last()?;
+                let pose = find(newest)?;
+                let ahead = ((time - newest.time) as f32).min(0.05);
+                let state = self.runtime_bodies.get(&uid);
+                let pose = match state {
+                    Some(b) if b.dynamic_body && !b.sleeping => {
+                        let p = pose.position + b.linvel * ahead;
+                        let w = b.angvel.length();
+                        let o = if w > 1.0e-4 { Quat::multiply(&Quat::from_axis_angle(b.angvel * (1.0 / w), w * ahead), &pose.orientation) } else { pose.orientation };
+                        Pose::new(o, p)
+                    }
+                    _ => pose,
+                };
+                Some((pose, true))
+            }
+        }
+    }
+
+    /// The time of the newest physics state (`None` before the first step).
+    pub fn newest_state_time(&self) -> Option<f64> {
+        self.history.last().map(|s| s.time)
+    }
+
+    /// The worker's totals (steps, hand samples, new hands, skipped time).
+    pub fn counters(&self) -> &XrPhysicsCounters {
+        &self.counters
     }
 
     pub fn reset(&mut self) {
@@ -418,6 +473,7 @@ impl XrPhysics {
         self.retained_hits_update = None;
         Rc::make_mut(&mut self.runtime_bodies).clear();
         Rc::make_mut(&mut self.runtime_contacts).clear();
+        self.history.clear();
         self.pending_body_spawns.clear();
         self.pending_body_despawns.clear();
         self.pending_body_impulses.clear();
@@ -1238,8 +1294,13 @@ impl XrEnv {
                     None,
                 )
             });
+        // the hands' time: the XR frame's display time, else now (the worker steps a fixed rate
+        // up to it). (Not XrState::time: for a remote headset's frames, whose display times
+        // are on its own clock, that reads 0.)
+        let time = cx.xr_frame_wire().map_or_else(|| cx.seconds_since_app_start(), |(ns, _)| ns as f64 / 1e9);
         self.world.physics.step(
             cx,
+            time,
             vec![XrPlayerHands { player: 0, left_hand, right_hand, left_controller, right_controller }],
             floor_y,
             physics_time_scale,

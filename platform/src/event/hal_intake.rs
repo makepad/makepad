@@ -814,8 +814,7 @@ impl Cx {
                 }
             }
             HalEvent::XrFrame { window: _, display_ns, frame } => {
-                let time = self.hal.secs(display_ns);
-                self.hal_xr_frame(time, display_ns, frame);
+                self.hal_xr_frame(display_ns, frame);
             }
             HalEvent::XrDepth { window: _, display_ns, depth } => {
                 self.hal_xr_depth(display_ns, depth);

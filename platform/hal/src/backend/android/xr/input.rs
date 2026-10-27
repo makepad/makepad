@@ -38,6 +38,13 @@ impl CxOpenXrInputs {
         Some(([left_controller, right_controller], [left_hand, right_hand]))
     }
 
+    /// Each controller's grip and aim located at `time` with their velocities, as
+    /// `locate_hand_grips` gives them (the spaces `poll` reads: the held or the detached
+    /// controller's). The actions must have been synced (`poll`).
+    pub fn locate_controllers(&self, xr: &LibOpenXr, session: XrSession, local_space: XrSpace, time: XrTime) -> [[(XrPose, [f32; 3], [f32; 3], u32); 2]; 2] {
+        [&self.left_controller, &self.right_controller].map(|c| c.locate_moving(xr, session, local_space, time, &self.actions))
+    }
+
     /// Each hand's grip pose (hand_interaction_ext's grip action space) located at `time`, with
     /// its velocity: (pose, linear velocity m/s, angular velocity rad/s, location flags | velocity
     /// flags << 8). The actions must have been synced (`poll`).
@@ -300,6 +307,20 @@ pub struct CxOpenXrController {
 }
 
 impl CxOpenXrController {
+    /// The grip and the aim at `time` with their velocities (see `CxOpenXrInputs::locate_controllers`).
+    fn locate_moving(&self, xr: &LibOpenXr, session: XrSession, local_space: XrSpace, time: XrTime, actions: &CxOpenXrInputActions) -> [(XrPose, [f32; 3], [f32; 3], u32); 2] {
+        let grip_active = XrActionStatePose::get(xr, session, actions.grip_pose_action, self.path).is_active.as_bool();
+        let aim_active = XrActionStatePose::get(xr, session, actions.aim_pose_action, self.path).is_active.as_bool();
+        let spaces = [if grip_active { self.grip_space } else { self.detached_grip_space }, if aim_active { self.aim_space } else { self.detached_aim_space }];
+        spaces.map(|space| {
+            let mut velocity = XrSpaceVelocity::default();
+            let mut location = XrSpaceLocation { next: &mut velocity as *mut _ as *mut _, ..Default::default() };
+            unsafe { (xr.xrLocateSpace)(space, local_space, time, &mut location) }.log_error("xrLocateSpace controller");
+            let v = |a: XrVector3f| [a.x, a.y, a.z];
+            (xr_pose(location.pose), v(velocity.linear_velocity), v(velocity.angular_velocity), [XrSpaceLocationFlags::ORIENTATION_VALID, XrSpaceLocationFlags::POSITION_VALID, XrSpaceLocationFlags::ORIENTATION_TRACKED, XrSpaceLocationFlags::POSITION_TRACKED].iter().enumerate().map(|(i, f)| (location.location_flags.contains(*f) as u32) << i).sum::<u32>() | (velocity.velocity_flags as u32) << 8)
+        })
+    }
+
     fn destroy(&self, xr: &LibOpenXr) {
         self.aim_space.destroy(xr);
         self.grip_space.destroy(xr);

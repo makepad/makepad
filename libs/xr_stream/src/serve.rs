@@ -484,7 +484,7 @@ impl XrServe {
         let reports = xr_host::headset_reports();
         let Some(last) = reports.last() else { return };
         let v = |i: usize| last.get(i).copied().unwrap_or(0.0);
-        let panel = Rect { pos: mirror.pos + dvec2(12.0, 12.0), size: dvec2(470.0, 150.0) };
+        let panel = Rect { pos: mirror.pos + dvec2(12.0, 12.0), size: dvec2(470.0, 204.0) };
         self.draw_stats_bg.color = vec4(0.0, 0.0, 0.0, 0.62);
         self.draw_stats_bg.draw_abs(cx, panel);
         let lines = [
@@ -508,6 +508,37 @@ impl XrServe {
             self.draw_stats_bar.color = vec4(1.0, 0.6, 0.2, 0.9);
             self.draw_stats_bar.draw_abs(cx, Rect { pos: dvec2(x + bw * 0.5, base.y - m2p), size: dvec2(bw * 0.45, m2p.max(1.0)) });
         }
+        // the last ~5 s frame by frame, newest right: one tick per display frame (a single repeat
+        // in 90 barely moves a per-second bar): new dim, repeat yellow, skip red, odd bright red
+        // (tall), late purple (tall)
+        let frames: Vec<u8> = {
+            let mut all: Vec<u8> = Vec::new();
+            for rep in reports.iter().rev().take(5).rev() { all.extend(r::frames(rep)); }
+            let n = all.len().saturating_sub(454);
+            all.split_off(n)
+        };
+        let (strip_y, strip_h) = (panel.pos.y + 150.0, 18.0);
+        let x0 = panel.pos.x + 8.0 + 454.0 - frames.len() as f64;
+        let mut counts = [0u32; 6];
+        for (k, c) in frames.iter().enumerate() {
+            counts[(*c as usize).min(5)] += 1;
+            let (color, h) = match *c {
+                r::FRAME_NEW => (vec4(0.3, 0.45, 0.35, 0.7), 0.4),
+                r::FRAME_REPEAT => (vec4(1.0, 0.9, 0.1, 1.0), 0.75),
+                r::FRAME_SKIP => (vec4(1.0, 0.25, 0.2, 1.0), 0.75),
+                r::FRAME_ODD => (vec4(1.0, 0.05, 0.05, 1.0), 1.0),
+                r::FRAME_LATE => (vec4(0.75, 0.3, 1.0, 1.0), 1.0),
+                _ => (vec4(0.2, 0.2, 0.2, 0.5), 0.2),
+            };
+            self.draw_stats_bar.color = color;
+            self.draw_stats_bar.draw_abs(cx, Rect { pos: dvec2(x0 + k as f64, strip_y + strip_h * (1.0 - h)), size: dvec2(1.0, strip_h * h) });
+        }
+        let secs = (frames.len() as f64 / v(r::DISPLAY).max(1.0) as f64).max(1.0);
+        let per_s = |c: u8| counts[c as usize] as f64 / secs;
+        let line = if frames.is_empty() { "per frame: the headset sends no frame codes (an older client)".to_string() } else {
+            format!("last {:.0} s per s: repeats {:.1} · skips {:.1} · odd {:.1} · late {:.1}", secs, per_s(r::FRAME_REPEAT), per_s(r::FRAME_SKIP), per_s(r::FRAME_ODD), per_s(r::FRAME_LATE))
+        };
+        self.draw_stats_text.draw_abs(cx, dvec2(panel.pos.x + 8.0, strip_y + strip_h + 4.0), &line);
     }
 
     /// The mirror's area (the app's hit area for its view).

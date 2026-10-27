@@ -119,6 +119,35 @@ pub fn linear_frames(on: bool) { LINEAR_WANTED.store(on, Ordering::Release); }
 /// by the XR thread when it changes.
 static FOVEATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 pub fn foveation(level: u32) { FOVEATION.store(level.min(3), Ordering::Release); }
+/// Hands and controllers tracked at once (XR_META_simultaneous_hands_and_controllers; on at
+/// start, `hal_xr_hands_and_controllers`). The runtime then shares the cameras with the
+/// controllers: its hand tracker ran at 25 Hz (`muxMode=handsAndControllers`), against its
+/// high-frequency hands mode without it.
+static HANDS_AND_CONTROLLERS: AtomicBool = AtomicBool::new(true);
+pub fn hands_and_controllers(on: bool) { HANDS_AND_CONTROLLERS.store(on, Ordering::Release); }
+/// The environment depth provider runs (`hal_xr_environment_depth`; on at start).
+static ENVIRONMENT_DEPTH: AtomicBool = AtomicBool::new(true);
+pub fn environment_depth(on: bool) { ENVIRONMENT_DEPTH.store(on, Ordering::Release); }
+/// The eye buffers' size in percent of `EYE_PX` (the start size): now, and the range the
+/// dynamic scale moves in (`hal_xr_eye_scale`; min = max: fixed). The XR thread steps it on the
+/// runtime's measured app GPU frame time ([`EyeScale`]).
+static EYE_PERCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+static EYE_PERCENT_RANGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new((100 << 32) | 100);
+pub fn eye_scale(min_percent: u32, max_percent: u32) {
+    let max = max_percent.clamp(40, 100);
+    let min = min_percent.clamp(40, max);
+    EYE_PERCENT_RANGE.store(((min as u64) << 32) | max as u64, Ordering::Release);
+}
+/// The eye buffers' size now (percent of the start size) and the app GPU frame time the
+/// dynamic scale last measured (µs, 0: none).
+static EYE_GPU_US: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub fn eye_scale_now() -> (u32, u32) { (EYE_PERCENT.load(Ordering::Acquire), EYE_GPU_US.load(Ordering::Acquire)) }
+/// The eye's pixels at `percent` of the start size (16-pixel multiples: the GPU's tiles).
+fn eye_at(percent: u32) -> [u32; 2] {
+    let base = EYE_PX.get().copied().unwrap_or([1, 1]);
+    if percent >= 100 { return base; }
+    base.map(|v| (((v * percent / 100) + 8) / 16 * 16).max(16))
+}
 pub fn linear_frames_active() -> bool { LINEAR_ACTIVE.load(Ordering::Acquire) }
 
 /// The two projection chains (a layer per eye) and their render targets: `linear` sRGB images
@@ -191,10 +220,10 @@ pub fn uplink_next(timeout_ms: u32, out: &mut [u8]) -> u64 {
 pub(super) fn active() -> bool { ACTIVE.load(Ordering::Acquire) }
 
 /// One eye's pixels while an XR session runs (the XR window is two of them side by side).
-pub(super) fn eye_px() -> Option<[u32; 2]> { EYE_PX.get().copied().filter(|_| active()) }
+pub(super) fn eye_px() -> Option<[u32; 2]> { EYE_PX.get().filter(|_| active()).map(|_| eye_at(EYE_PERCENT.load(Ordering::Acquire))) }
 
 /// XR lines go straight to logcat (tag `hal-xr`), live, whatever stderr is redirected to.
-pub(super) fn log(text: &str) {
+pub(crate) fn log(text: &str) {
     extern "C" { fn __android_log_write(prio: i32, tag: *const std::ffi::c_char, text: *const std::ffi::c_char) -> i32; }
     if let Ok(t) = std::ffi::CString::new(text.replace('\0', " ")) { unsafe { __android_log_write(4, c"hal-xr".as_ptr(), t.as_ptr()) }; }
 }
@@ -212,7 +241,7 @@ pub fn track_entry_size() -> usize { track_log::entry_size() }
 /// `window_kind::XR` window `id` of session `sid` is made: it is the stereo view, sized by the
 /// eyes (one pixel per point). `false` without an XR session.
 pub(super) fn create_window(sid: u32, id: Id) -> bool {
-    let Some(eye) = EYE_PX.get().copied().filter(|_| active()) else { return false };
+    let Some(eye) = eye_px() else { return false };
     let shared = Shared::global();
     let previous = lock(&shared.registry).xr_window.replace((sid, id));
     if previous.is_some() { xr_log!("a second XR window replaces {previous:?}"); }
@@ -272,6 +301,8 @@ impl Runtime {
         } else {
             xr_log!("OpenXR fixed foveation extensions unavailable on this runtime: {:?}", missing_fixed_foveation_exts.iter().map(|e| e.trim_end_matches(char::from(0))).collect::<Vec<_>>());
         }
+        // the runtime's app GPU frame time (the dynamic eye scale)
+        if has_extension("XR_META_performance_metrics\0") { exts_needed.push("XR_META_performance_metrics\0"); }
         // the projection layer's depth (positional reprojection)
         if has_extension("XR_KHR_composition_layer_depth\0") { exts_needed.push("XR_KHR_composition_layer_depth\0"); }
         let display_refresh_rate_ext = "XR_FB_display_refresh_rate\0";
@@ -427,11 +458,12 @@ impl Targets {
         self.images.iter().position(|i| Arc::ptr_eq(i, image)).map(|i| self.handles[self.owner[i]])
     }
 
-    /// The next image for a frame of at least `size`, acquired and waited for; `None` when every
-    /// image but one is held (the frame renders into the window target and is copied instead).
+    /// The next image for a frame of `size`, acquired and waited for; `None` when every image
+    /// but one is held, or the chain is another size (the eye scale changed: the frame renders
+    /// into the window target, the XR thread remakes the chains at its size and copies it in).
     fn acquire(&mut self, xr: &LibOpenXr, size: [u32; 2]) -> Option<Arc<Image>> {
         let first = self.images.first()?;
-        if first.desc.w < size[0] || first.desc.h < size[1] { return None; }
+        if first.desc.w != size[0] || first.desc.h != size[1] { return None; }
         if !self.acquired.is_empty() { crate::profile::count("xr target: an image held (frame copied)"); return None; }
         let index = self.take_image(xr)?;
         self.acquired.push_back(index);
@@ -652,10 +684,13 @@ impl DepthChain {
         released.to_result("xrReleaseSwapchainImage (depth)")
     }
 
-    fn info(&self, eye: u32) -> XrCompositionLayerDepthInfoKHR {
+    /// Eye `eye`'s depth for a colour layer of `size` (the chain is the start size; a smaller
+    /// eye scale takes its top left)
+    fn info(&self, eye: u32, size: [u32; 2]) -> XrCompositionLayerDepthInfoKHR {
+        let size = [size[0].min(self.size[0]), size[1].min(self.size[1])];
         XrCompositionLayerDepthInfoKHR { ty: XrStructureType::COMPOSITION_LAYER_DEPTH_INFO_KHR, next: ptr::null(),
             sub_image: XrSwapchainSubImage { swapchain: self.handle, image_rect: XrRect2Di { offset: XrOffset2Di { x: 0, y: 0 },
-                extent: XrExtent2Di { width: self.size[0] as i32, height: self.size[1] as i32 } }, image_array_index: eye },
+                extent: XrExtent2Di { width: size[0] as i32, height: size[1] as i32 } }, image_array_index: eye },
             min_depth: 0.0, max_depth: 1.0, near_z: DEPTH_NEAR_M, far_z: DEPTH_FAR_M }
     }
 
@@ -983,6 +1018,89 @@ struct CxOpenXrSession {
     linear_ok: bool,
     /// the foveation level the projection chains have (`apply_foveation`; MAX: not yet)
     foveation_applied: u32,
+    /// the dynamic eye scale's controller
+    eye_scale: EyeScale,
+    /// simultaneous hands and controllers tracking is resumed (the inputs resume it at start)
+    hands_and_controllers: bool,
+    /// the environment depth provider runs (started with the session)
+    environment_depth: bool,
+}
+
+/// The dynamic eye scale (`hal_xr_eye_scale`): the eye buffers step between 100, 90, 80 and 70%
+/// of the start size on the runtime's app GPU frame time (XR_META_performance_metrics' counter,
+/// the time VrApi logs as App), so a heavier view never drops display frames: down when the
+/// mean over half a second passes 82% of the display period twice running, up when the next
+/// size's predicted time stays under 75% for 3 s. A step at most every 2 s (down) or 5 s (up):
+/// a change remakes the projection chains (one frame copied in, ~20 ms of the XR thread). The
+/// prediction scales only the part above the floor by the pixels: most of the time is not the
+/// app's (the compositor and passthrough share the GPU: ~6.8 ms with nothing drawn), and
+/// scaling all of it kept the eyes at 90% for good. The floor: the least half-second mean of
+/// the last minute. A step down within 4 s of a step up doubles the wait before the next step
+/// up (5 s, 10, 20 .. 80; back to 5 after a minute without one): no see-saw in a view that
+/// needs the size between two steps.
+struct EyeScale { counter: Option<XrPath>, sum_ms: f64, n: u32, window_at: Instant, over: u32, under: u32, changed_at: Instant, log_sum_ms: f64, log_n: u32, recent_ms: std::collections::VecDeque<f64>,
+    up_hold_s: u64, went_up: bool }
+
+impl EyeScale {
+    const STEPS: [u32; 4] = [100, 90, 80, 70];
+    fn new(xr: &LibOpenXr, instance: XrInstance, session: XrSession) -> EyeScale {
+        let counter = (|| {
+            let set = xr.xrSetPerformanceMetricsStateMETA?;
+            xr.xrQueryPerformanceMetricsCounterMETA?;
+            let state = XrPerformanceMetricsStateMETA { ty: XrStructureType::PERFORMANCE_METRICS_STATE_META, next: ptr::null(), enabled: XrBool32::from_bool(true) };
+            unsafe { set(session, &state) }.to_result("xrSetPerformanceMetricsStateMETA").map_err(|e| xr_log!("{e}")).ok()?;
+            XrPath::new(xr, instance, "/perfmetrics_meta/app/gpu_frametime").map_err(|e| xr_log!("{e}")).ok()
+        })();
+        xr_log!("dynamic eye scale: {}", if counter.is_some() { "the runtime's app GPU frame time" } else { "no performance metrics (fixed size)" });
+        EyeScale { counter, sum_ms: 0.0, n: 0, window_at: Instant::now(), over: 0, under: 0, changed_at: Instant::now(), log_sum_ms: 0.0, log_n: 0, recent_ms: Default::default(), up_hold_s: 5, went_up: false }
+    }
+
+    /// One display frame: the counter sampled; the percent to change to, when it is time.
+    fn sample(&mut self, xr: &LibOpenXr, session: XrSession, period_ms: f64) -> Option<u32> {
+        let (counter, query) = (self.counter?, xr.xrQueryPerformanceMetricsCounterMETA?);
+        let mut c = XrPerformanceMetricsCounterMETA { ty: XrStructureType::PERFORMANCE_METRICS_COUNTER_META, next: ptr::null(), counter_flags: 0, counter_unit: 0, uint_value: 0, float_value: 0.0 };
+        if unsafe { query(session, counter, &mut c) }.to_result("xrQueryPerformanceMetricsCounterMETA").is_ok() {
+            // (milliseconds as a float, else an integer in µs)
+            let ms = if c.counter_flags & 4 != 0 { c.float_value as f64 } else if c.counter_flags & 2 != 0 { c.uint_value as f64 / 1000.0 } else { 0.0 };
+            if ms > 0.0 && ms < 1000.0 { self.sum_ms += ms; self.n += 1; self.log_sum_ms += ms; self.log_n += 1; }
+        }
+        if self.window_at.elapsed() < Duration::from_millis(500) { return None; }
+        self.window_at = Instant::now();
+        let mean = if self.n > 0 { self.sum_ms / self.n as f64 } else { return None };
+        (self.sum_ms, self.n) = (0.0, 0);
+        EYE_GPU_US.store((mean * 1000.0) as u32, Ordering::Release);
+        let range = EYE_PERCENT_RANGE.load(Ordering::Acquire);
+        let (min, max) = ((range >> 32) as u32, range as u32);
+        let now = EYE_PERCENT.load(Ordering::Acquire);
+        // (the steps within the range, the range's ends included)
+        let down = Self::STEPS.iter().copied().find(|&p| p < now).map(|p| p.max(min)).filter(|&p| p < now);
+        let up = Self::STEPS.iter().rev().copied().find(|&p| p > now).map(|p| p.min(max)).filter(|&p| p > now);
+        if now > max || now < min { return Some(now.clamp(min, max)); }
+        self.recent_ms.push_back(mean);
+        if self.recent_ms.len() > 120 { self.recent_ms.pop_front(); }
+        let floor = self.recent_ms.iter().copied().fold(mean, f64::min);
+        self.over = if mean > 0.82 * period_ms { self.over + 1 } else { 0 };
+        let next_ms = up.map_or(f64::MAX, |p| floor + (mean - floor) * (p as f64 / now as f64).powi(2));
+        self.under = if next_ms < 0.75 * period_ms { self.under + 1 } else { 0 };
+        let since = self.changed_at.elapsed();
+        if since >= Duration::from_secs(60) { self.up_hold_s = 5; }
+        let to = if self.over >= 2 && since >= Duration::from_secs(2) { down } else if self.under >= 6 && since >= Duration::from_secs(self.up_hold_s) { up } else { None };
+        if let Some(p) = to {
+            let going_up = p > now;
+            if !going_up && self.went_up && since < Duration::from_secs(4) { self.up_hold_s = (self.up_hold_s * 2).min(80); }
+            self.went_up = going_up;
+            (self.over, self.under) = (0, 0);
+            self.changed_at = Instant::now();
+        }
+        to
+    }
+
+    /// The mean app GPU frame time since the last call (ms; the 5 s line).
+    fn take_mean(&mut self) -> f64 {
+        let m = if self.log_n > 0 { self.log_sum_ms / self.log_n as f64 } else { 0.0 };
+        (self.log_sum_ms, self.log_n) = (0.0, 0);
+        m
+    }
 }
 
 unsafe impl Send for CxOpenXrSession {}
@@ -1118,7 +1236,7 @@ impl CxOpenXrSession {
             pointer: Pointer { hand: 1, ..Default::default() }, controllers: Default::default(), hands: Default::default(),
             panel_shown: None, panel_visible: true, panel_over_stereo: false, cursor_ready: false, stereo_asked: None, stereo_shown: None, stereo_focus: 0.0, depth_layer, stereo_asked_at: Instant::now(),
             stats: [0; 4], frame_us: Vec::new(), stereo_asked_ns: 0, requested_refresh_mhz: 0, eyes_own: 0, eyes_asked: 0, paths: [0; 3], phases: [0; 7], stats_at: Instant::now(), stereo_b: Some(stereo_b), stereo_shown_chain: None,
-            stereo_base_format: format, stereo_blit: blit, linear_ok, foveation_applied: u32::MAX };
+            stereo_base_format: format, stereo_blit: blit, linear_ok, foveation_applied: u32::MAX, eye_scale: EyeScale::new(xr, rt.instance, handle), hands_and_controllers: true, environment_depth: true };
         let _ = session.update_active_display_refresh_rate();
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -1315,6 +1433,9 @@ impl CxOpenXrSession {
         phase(3, &mut self.phases);
         self.switch_stereo_chains();
         self.apply_foveation();
+        self.step_eye_scale(xr_window, period);
+        self.apply_hands_and_controllers();
+        self.apply_environment_depth();
         let stereo_done = match xr_window { Some((sid, id)) if render => self.update_stereo(sid, id, time, period).unwrap_or_else(|e| { xr_log!("stereo: {e}"); None }), _ => None };
         phase(4, &mut self.phases);
         // environment depth: a finished readback to the XR window, the next one started (never waits)
@@ -1353,7 +1474,8 @@ impl CxOpenXrSession {
                 if let Err(e) = depth.write(xr, &self.dev, focus) { xr_log!("{e}"); }
             }
         }
-        let depth_infos = self.depth_layer.as_ref().filter(|_| focus > 0.0).map(|d| [d.info(0), d.info(1)]);
+        let colour_size = self.stereo.as_ref().map_or([1, 1], |c| c.size);
+        let depth_infos = self.depth_layer.as_ref().filter(|_| focus > 0.0).map(|d| [d.info(0, colour_size), d.info(1, colour_size)]);
         let proj_views = match (&self.stereo, self.stereo_shown) {
             (Some(chain), Some(eyes)) => Some([0, 1].map(|eye| XrCompositionLayerProjectionView { pose: eyes[eye].pose, fov: eyes[eye].fov,
                 sub_image: XrSwapchainSubImage { swapchain: self.stereo_shown_chain.unwrap_or(chain.handle), ..chain.sub_image(eye as u32) },
@@ -1400,7 +1522,8 @@ impl CxOpenXrSession {
             xr_log!("{frames} display frames in {secs:.1} s ({:.1} Hz): {shown} stereo frames shown, {late} late, {:.2} ms average wait; per frame ms: wait-frame {:.2} begin {:.2} input {:.2} panel {:.2} stereo {:.2} (copy {:.2}) end {:.2}; panel {}; hands {hands:?}; focused {}; depth {}",
                 frames as f64 / secs, wait as f64 / 1e6 / shown.max(1) as f64, ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], ms[6], if !self.panel_visible { "hidden" } else if self.panel_shown.is_some() { "up" } else { "no frame yet" }, self.focused,
                 depth.map(|(a, d)| format!("{a} read, {d} sent")).unwrap_or_else(|| "none".into()));
-            xr_log!("stereo frames: {} rendered into the chain, {} copied in, {} dropped; shown with their own eyes {}, with the asked eyes {}", self.paths[0], self.paths[1], self.paths[2], self.eyes_own, self.eyes_asked);
+            xr_log!("stereo frames: {} rendered into the chain, {} copied in, {} dropped; shown with their own eyes {}, with the asked eyes {}; eye scale {}% ({}x{}), app GPU {:.2} ms", self.paths[0], self.paths[1], self.paths[2], self.eyes_own, self.eyes_asked,
+                EYE_PERCENT.load(Ordering::Acquire), self.stereo.as_ref().map_or(0, |c| c.size[0]), self.stereo.as_ref().map_or(0, |c| c.size[1]), self.eye_scale.take_mean());
             (self.eyes_own, self.eyes_asked) = (0, 0);
             {
                 let mut cols: [Vec<u32>; 4] = Default::default();
@@ -1426,7 +1549,7 @@ impl CxOpenXrSession {
         if wanted == LINEAR_ACTIVE.load(Ordering::Acquire) || self.stereo_asked.is_some() { return; }
         let mut targets = lock(&self.frames.stereo_targets);
         if targets.as_ref().is_some_and(|t| !t.acquired.is_empty()) { return; }
-        let eye = EYE_PX.get().copied().unwrap_or([1, 1]);
+        let eye = self.stereo.as_ref().map_or_else(|| eye_at(EYE_PERCENT.load(Ordering::Acquire)), |c| c.size);
         match stereo_chains(&self.rt.xr, &self.dev, self.handle, self.stereo_base_format, eye, self.stereo_blit, wanted) {
             Ok((a, b, t)) => {
                 *targets = Some(t);
@@ -1439,6 +1562,65 @@ impl CxOpenXrSession {
                 LINEAR_ACTIVE.store(wanted, Ordering::Release);
             }
             Err(e) => { xr_log!("projection chains for linear frames: {e}"); self.linear_ok = false; }
+        }
+    }
+
+    /// The dynamic eye scale (`EyeScale`): a new size goes to the XR window as its geometry
+    /// (the app's next frames render at it; the chains follow the first such frame, `update_stereo`).
+    fn step_eye_scale(&mut self, xr_window: Option<(u32, Id)>, period: i64) {
+        let Some(to) = self.eye_scale.sample(&self.rt.xr, self.handle, period as f64 / 1e6) else { return };
+        let from = EYE_PERCENT.swap(to, Ordering::AcqRel);
+        if from == to { return; }
+        let eye = eye_at(to);
+        xr_log!("eye scale {from}% -> {to}% ({}x{} px per eye; app GPU {:.2} ms of a {:.2} ms period)", eye[0], eye[1], EYE_GPU_US.load(Ordering::Acquire) as f64 / 1000.0, period as f64 / 1e6);
+        if let Some((sid, id)) = xr_window {
+            Shared::global().emit_to(sid, id, clock_ns(), |q, id| q.geom(id, 0., 0., 2. * eye[0] as f64, eye[1] as f64, 1., window_state::RESTORE));
+        }
+    }
+
+    /// The projection chains made anew at `eye` (a frame of that size arrived: the eye scale
+    /// changed), with no image held. The frame's foveation is applied again.
+    fn resize_stereo_chains(&mut self, eye: [u32; 2]) -> Result<(), String> {
+        let linear = LINEAR_ACTIVE.load(Ordering::Acquire);
+        let (a, b, t) = stereo_chains(&self.rt.xr, &self.dev, self.handle, self.stereo_base_format, eye, self.stereo_blit, linear)?;
+        *lock(&self.frames.stereo_targets) = Some(t);
+        if let Some(mut old) = self.stereo.replace(a) { old.destroy(&self.rt.xr, &self.dev); }
+        if let Some(mut old) = self.stereo_b.replace(b) { old.destroy(&self.rt.xr, &self.dev); }
+        self.stereo_shown_chain = None;
+        self.foveation_applied = u32::MAX;
+        self.apply_foveation();
+        Ok(())
+    }
+
+    /// The environment depth provider stopped or started as asked (`hal_xr_environment_depth`),
+    /// when it changed: stopped, no depth images (no occlusion, no room field).
+    fn apply_environment_depth(&mut self) {
+        let on = ENVIRONMENT_DEPTH.load(Ordering::Acquire);
+        if on == self.environment_depth || self.depth_provider.0 == 0 { return; }
+        self.environment_depth = on;
+        let xr = &self.rt.xr;
+        let r = if on { unsafe { (xr.xrStartEnvironmentDepthProviderMETA)(self.depth_provider) } } else { unsafe { (xr.xrStopEnvironmentDepthProviderMETA)(self.depth_provider) } };
+        match r.to_result("environment depth provider") {
+            Ok(()) => xr_log!("environment depth provider {}", if on { "started" } else { "stopped" }),
+            Err(e) => xr_log!("{e}"),
+        }
+    }
+
+    /// Simultaneous hands and controllers tracking paused or resumed as asked
+    /// (`hal_xr_hands_and_controllers`), when it changed.
+    fn apply_hands_and_controllers(&mut self) {
+        let on = HANDS_AND_CONTROLLERS.load(Ordering::Acquire);
+        if on == self.hands_and_controllers { return; }
+        self.hands_and_controllers = on;
+        let xr = &self.rt.xr;
+        let r = if on {
+            unsafe { (xr.xrResumeSimultaneousHandsAndControllersTrackingMETA)(self.handle, &XrSimultaneousHandsAndControllersTrackingResumeInfoMETA::default()) }
+        } else {
+            unsafe { (xr.xrPauseSimultaneousHandsAndControllersTrackingMETA)(self.handle, &XrSimultaneousHandsAndControllersTrackingPauseInfoMETA::default()) }
+        };
+        match r.to_result("simultaneous hands and controllers") {
+            Ok(()) => xr_log!("simultaneous hands and controllers tracking {}", if on { "resumed" } else { "paused (the hand tracker's own rate)" }),
+            Err(e) => xr_log!("{e}"),
         }
     }
 
@@ -1515,6 +1697,19 @@ impl CxOpenXrSession {
         }
         self.stats[1] += 1;
         self.stats[3] += started.elapsed().as_nanos() as u64;
+        // a frame of another size than the chains (the eye scale changed; rendered aside): the
+        // chains are made anew at its size, it is copied in
+        {
+            let eye = [if image.desc.depth >= 2 { image.desc.w } else { image.desc.w / 2 }, image.desc.h];
+            let free = lock(&self.frames.stereo_targets).as_ref().is_none_or(|t| t.acquired.is_empty() && t.chain_of(&image).is_none());
+            if free && self.stereo.as_ref().is_some_and(|c| c.size != eye) {
+                let resized_at = Instant::now();
+                match self.resize_stereo_chains(eye) {
+                    Ok(()) => xr_log!("projection chains remade at {}x{} px per eye in {:.1} ms", eye[0], eye[1], resized_at.elapsed().as_secs_f64() * 1e3),
+                    Err(e) => xr_log!("projection chains at {}x{}: {e}", eye[0], eye[1]),
+                }
+            }
+        }
         let chain = self.stereo.as_mut().expect("stereo chain");
         let copy_at = Instant::now();
         let mut targets = lock(&self.frames.stereo_targets);
@@ -1742,8 +1937,13 @@ fn track(rt: Arc<Runtime>, inputs: Arc<Mutex<SharedInputs>>, session: XrSession,
     // past the newest one the poses are located for
     let mut tracked_to = 0i64;
     let mut ahead_frames = 0i64;
-    // per hand: its newest sample's palm position and when it was first seen
-    let mut hand_seen = [([0f32; 3], 0u64); 2];
+    // how far past the runtime's display time the hands are carried at most (ns; debug
+    // `debug.xrremote.handlead` ms, read once a second), and when it was read
+    let (mut hand_lead_cap, mut hand_lead_at) = (HAND_LEAD_CAP_NS, Instant::now() - Duration::from_secs(2));
+    let mut hand_keys = [HandKey::default(); 2];
+    // the controllers' angular lead as a share of the stream's lead (percent; debug
+    // `debug.xrremote.ctrlang`, read with `handlead`; 255: located at the target as before)
+    let mut ctrl_angular = CONTROLLER_ANGULAR_PERCENT;
     while !stop.load(Ordering::Acquire) {
         // the next display frame (its predicted display time)
         let display = {
@@ -1756,6 +1956,11 @@ fn track(rt: Arc<Runtime>, inputs: Arc<Mutex<SharedInputs>>, session: XrSession,
         if display == seen { continue; }
         seen = display;
         if !uplink_wanted() { continue; }
+        if hand_lead_at.elapsed() >= Duration::from_secs(1) {
+            hand_lead_at = Instant::now();
+            hand_lead_cap = system_property("debug.xrremote.handlead").and_then(|v| v.trim().parse::<i64>().ok()).map_or(HAND_LEAD_CAP_NS, |ms| ms.clamp(0, 100) * 1_000_000);
+            ctrl_angular = system_property("debug.xrremote.ctrlang").and_then(|v| v.trim().parse::<u32>().ok()).map_or(CONTROLLER_ANGULAR_PERCENT, |p| p.min(255));
+        }
         let period = PERIOD_NS.load(Ordering::Acquire).max(1_000_000);
         // the display time on the headset's grid nearest now + the lead
         let now = clock_ns();
@@ -1799,16 +2004,32 @@ fn track(rt: Arc<Runtime>, inputs: Arc<Mutex<SharedInputs>>, session: XrSession,
             None => {
                 let mut inputs = lock(&inputs);
                 inputs.0.poll(xr, session, local_space, target).map(|(controllers, mut hands)| {
-                    // The hands as the reference carries them: located NOW (their newest tracked
-                    // sample) and moved to the target by the grip's velocity at now. Located at
-                    // the target itself (~80 ms ahead) the runtime's joints moved only every 3rd
-                    // or 4th sample (25 Hz, in 4-12 mm steps: a held cube at a third of the frame
-                    // rate); at now every 2nd (its tracker's rate), and the velocity carries them
-                    // between.
-                    let now_t = XrTime::from_nanos(now as i64);
-                    let (at_now, grips) = (inputs.0.locate_hands(xr, session, local_space, now_t), inputs.0.locate_hand_grips(xr, local_space, now_t));
+                    // The hands as the runtime predicts them for its newest display frame (what a
+                    // native app draws), interpolated between the tracker's samples and moved
+                    // ahead by at most `hand_lead_cap` (`HandKey`). Located at the far
+                    // target the joints moved only every 3rd or 4th sample; at the display time
+                    // too (68% of samples a repeat: the tracker's ~30 Hz); located at now and
+                    // carried rigidly by the grip's angular velocity over ~100 ms they came in
+                    // pairs and jumped as each sample landed (2-0-1-0-3 mm with the hand still,
+                    // 13-20 cm steps moving).
+                    let at_display = inputs.0.locate_hands(xr, session, local_space, XrTime::from_nanos(display as i64));
+                    let lead = (target.as_nanos() - display as i64).clamp(0, hand_lead_cap);
                     for h in 0..2 {
-                        hands[h] = hand_moved_to(&hands[h], &at_now[h], grips[h], &mut hand_seen[h], now, target.as_nanos() as u64);
+                        hands[h] = hand_keys[h].carry(&hands[h], &at_display[h], display as i64, lead);
+                    }
+                    // The controllers located at the runtime's display time (its short horizon)
+                    // and carried to the target: position by the linear velocity, rotation by
+                    // the angular velocity over only `ctrl_angular`% of the lead. Located at the
+                    // target itself (~55-90 ms out) the runtime's angular prediction overshot
+                    // on every sudden stop (a held cube's rotation swung past and back).
+                    let mut controllers = controllers;
+                    if ctrl_angular != 255 {
+                        let moving = inputs.0.locate_controllers(xr, session, local_space, XrTime::from_nanos(display as i64));
+                        let lead_s = (target.as_nanos() - display as i64).max(0) as f32 / 1e9;
+                        for c in 0..2 {
+                            controllers[c].grip_pose = carried(moving[c][0], lead_s, ctrl_angular as f32 / 100.0).unwrap_or(controllers[c].grip_pose);
+                            controllers[c].aim_pose = carried(moving[c][1], lead_s, ctrl_angular as f32 / 100.0).unwrap_or(controllers[c].aim_pose);
+                        }
                     }
                     (controllers, hands)
                 })
@@ -1865,59 +2086,151 @@ fn track(rt: Arc<Runtime>, inputs: Arc<Mutex<SharedInputs>>, session: XrSession,
     }
 }
 
-/// A hand for the uplink: `polled` (located at `target`: its flags, pinches and grab) with the
-/// joints, tips and aim of `now_hand` (located now) moved rigidly by the hand's grip motion from
-/// its sample time to `target`: the grip's linear and angular velocity at now (`grip`: pose,
-/// m/s, rad/s, flags as `locate_hand_grips`). A sample is as old as when it was first seen
-/// (`seen`: its palm, that time; the tracker runs below the display rate, a repeated sample is
-/// carried from its own time). Without a valid grip or velocity, or untracked now: `polled`.
-fn hand_moved_to(polled: &XrHand, now_hand: &XrHand, grip: (XrPose, [f32; 3], [f32; 3], u32), seen: &mut ([f32; 3], u64), now: u64, target: u64) -> XrHand {
-    let (gp, lin, ang, flags) = grip;
-    // (location: orientation and position valid; velocity: linear and angular valid)
-    let valid = flags & 0b11 == 0b11 && (flags >> 8) & 0b11 == 0b11;
-    if now_hand.flags & xr_hand::IN_VIEW == 0 || !valid {
-        return *polled;
-    }
-    let palm = now_hand.joints[xr_hand::CENTER].position;
-    if seen.0 != palm || seen.1 == 0 {
-        *seen = (palm, now);
-    }
-    let dt = (target.saturating_sub(seen.1) as f32 / 1e9).min(0.1);
-    // the grip's motion over dt: a rotation about its own position, then the translation
-    let theta = (ang[0] * ang[0] + ang[1] * ang[1] + ang[2] * ang[2]).sqrt() * dt;
-    let dq = if theta > 1e-6 {
-        let (s, c) = (theta * 0.5).sin_cos();
-        let k = s / (theta / dt);
-        [ang[0] * k, ang[1] * k, ang[2] * k, c]
-    } else { [0., 0., 0., 1.] };
-    let qmul = |a: [f32; 4], b: [f32; 4]| [
-        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]];
-    let rot = |q: [f32; 4], v: [f32; 3]| {
-        let t = [2. * (q[1] * v[2] - q[2] * v[1]), 2. * (q[2] * v[0] - q[0] * v[2]), 2. * (q[0] * v[1] - q[1] * v[0])];
-        [v[0] + q[3] * t[0] + (q[1] * t[2] - q[2] * t[1]), v[1] + q[3] * t[1] + (q[2] * t[0] - q[0] * t[2]), v[2] + q[3] * t[2] + (q[0] * t[1] - q[1] * t[0])]
-    };
-    let move_pose = |p: &XrPose| {
-        let r = [p.position[0] - gp.position[0], p.position[1] - gp.position[1], p.position[2] - gp.position[2]];
-        let r = rot(dq, r);
-        XrPose {
-            orientation: qmul(dq, p.orientation),
-            position: [gp.position[0] + lin[0] * dt + r[0], gp.position[1] + lin[1] * dt + r[1], gp.position[2] + lin[2] * dt + r[2]],
+/// The share of the stream's lead past the runtime's display time a controller's rotation is
+/// carried by its angular velocity (percent; the position takes the whole lead): half damps the
+/// overshoot on a sudden stop while still leading a steady turn.
+const CONTROLLER_ANGULAR_PERCENT: u32 = 50;
+
+/// A pose located with its velocity (`(pose, m/s, rad/s, flags)`: location flags, velocity
+/// flags << 8) carried `lead_s` ahead: the position by the linear velocity, the orientation by
+/// the angular velocity over `angular_share` of it. `None` when it is not tracked.
+fn carried(located: (XrPose, [f32; 3], [f32; 3], u32), lead_s: f32, angular_share: f32) -> Option<XrPose> {
+    let (p, lin, ang, flags) = located;
+    if flags & 0b11 != 0b11 { return None; }
+    let (lin_ok, ang_ok) = ((flags >> 8) & 1 == 1, (flags >> 8) & 2 == 2);
+    let mut out = p;
+    if lin_ok { for i in 0..3 { out.position[i] += lin[i] * lead_s; } }
+    if ang_ok {
+        let t = lead_s * angular_share;
+        let w = (ang[0] * ang[0] + ang[1] * ang[1] + ang[2] * ang[2]).sqrt();
+        if w * t > 1e-6 {
+            let (s, c) = (w * t * 0.5).sin_cos();
+            let k = s / w;
+            let d = [ang[0] * k, ang[1] * k, ang[2] * k, c];
+            let q = p.orientation;
+            // (the angular velocity is in the reference space: the turn applies on the left)
+            out.orientation = [
+                d[3] * q[0] + d[0] * q[3] + d[1] * q[2] - d[2] * q[1],
+                d[3] * q[1] - d[0] * q[2] + d[1] * q[3] + d[2] * q[0],
+                d[3] * q[2] + d[0] * q[1] - d[1] * q[0] + d[2] * q[3],
+                d[3] * q[3] - d[0] * q[0] - d[1] * q[1] - d[2] * q[2]];
         }
-    };
-    let mut out = *polled;
-    for (o, j) in out.joints.iter_mut().zip(now_hand.joints.iter()) { *o = move_pose(j); }
-    out.aim_pose = move_pose(&now_hand.aim_pose);
-    out.tips = now_hand.tips;
-    out.tips_active = (now_hand.tips_active & !xr_hand::GRAB_ACTIVE) | (polled.tips_active & xr_hand::GRAB_ACTIVE);
-    out.flags = polled.flags | (now_hand.flags & xr_hand::IN_VIEW);
-    out
+    }
+    Some(out)
+}
+
+/// The longest the uplink's hands are carried past the runtime's display time (`HandKey`): the
+/// rest of the stream's lead shows as lag, not jumps.
+const HAND_LEAD_CAP_NS: i64 = 50_000_000;
+
+/// One hand's uplink smoothing. The runtime's joints change only with its tracker (25 Hz with
+/// hands and controllers tracked at once: located for its display time, 59-68% of display
+/// frames repeat the sample before), so the hand sent is: interpolated from where it was sent
+/// last towards the newest sample over the usual interval between samples (`from`, `key`: an
+/// even step per display frame, no jump when a sample lands early or late), moved ahead by the
+/// palm's velocity smoothed over display frames for the lead (position only), then the palm
+/// low-passed with a speed-adaptive cutoff (`palm`, `palm_speed`: the 1-euro filter, the
+/// whole hand moved by its correction). A sample 25 cm off the one before is taken only when
+/// the next agrees (a one-sample 73 cm glitch was seen). Recorded hand motion, frame-to-frame
+/// change of the palm's step (mean): 7.2 mm as located, 7.0 interpolated from the sample
+/// before (build 24), 3.6 so.
+#[derive(Clone, Copy, Default)]
+struct HandKey {
+    from: Option<XrHand>, key: Option<(XrHand, i64)>, outlier: Option<[f32; 3]>,
+    intervals: [i64; 8], n: usize, key_velocity: [f32; 3], velocity: [f32; 3], sent: Option<XrHand>, last_display: i64,
+    palm: Option<[f32; 3]>, palm_speed: [f32; 3],
+}
+
+impl HandKey {
+    const OUTLIER_M: f32 = 0.25;
+    /// The 1-euro filter's cutoff: `MIN_CUTOFF_HZ` + `BETA` x the palm's speed (m/s).
+    const MIN_CUTOFF_HZ: f32 = 6.0;
+    const BETA: f32 = 30.0;
+
+    /// The uplink's hand moved `lead_ns` ahead: `polled` (located at the target: flags, pinches
+    /// and grab) with the joints, tips and aim smoothed as above; `located` this display frame's
+    /// (`display`). Untracked: `polled`, the history dropped.
+    fn carry(&mut self, polled: &XrHand, located: &XrHand, display: i64, lead_ns: i64) -> XrHand {
+        if located.flags & xr_hand::IN_VIEW == 0 {
+            *self = HandKey::default();
+            return *polled;
+        }
+        let palm_of = |h: &XrHand| h.joints[xr_hand::CENTER].position;
+        let dist = |a: [f32; 3], b: [f32; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+        let p = palm_of(located);
+        let new = match self.key {
+            None => true,
+            Some((k, _)) if palm_of(&k) == p => false,
+            // (far off the sample before: only once the next one agrees)
+            Some((k, _)) if dist(palm_of(&k), p) > Self::OUTLIER_M && self.outlier.is_none_or(|o| dist(o, p) > Self::OUTLIER_M) => { self.outlier = Some(p); false }
+            Some(_) => true,
+        };
+        if new {
+            self.outlier = None;
+            if let Some((k, at)) = self.key {
+                let dt = display - at;
+                if dt >= 150_000_000 {
+                    *self = HandKey::default();
+                } else {
+                    self.intervals[self.n % 8] = dt;
+                    self.n += 1;
+                    let kp = palm_of(&k);
+                    self.key_velocity = std::array::from_fn(|i| (p[i] - kp[i]) / dt.max(1) as f32);
+                }
+            }
+            // (from where the hand was sent last, without its lead and filter: the base)
+            self.from = self.sent.or(Some(*located));
+            self.key = Some((*located, display));
+        }
+        let (Some(from), Some((key, at))) = (self.from, self.key) else { return *polled };
+        let mut iv: Vec<i64> = self.intervals[..self.n.min(8)].to_vec();
+        iv.sort_unstable();
+        let interval = iv.get(iv.len() / 2).copied().unwrap_or(40_000_000).max(1);
+        let f = ((display - at) as f32 / interval as f32).clamp(0.0, 1.0);
+        let lerp = |a: &XrPose, b: &XrPose, d: [f32; 3]| {
+            let dot: f32 = (0..4).map(|i| a.orientation[i] * b.orientation[i]).sum();
+            let s = if dot < 0.0 { -1.0 } else { 1.0 };
+            let q: [f32; 4] = std::array::from_fn(|i| a.orientation[i] + (s * b.orientation[i] - a.orientation[i]) * f);
+            let n = q.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+            XrPose { orientation: q.map(|x| x / n), position: std::array::from_fn(|i| a.position[i] + (b.position[i] - a.position[i]) * f + d[i]) }
+        };
+        let mut base = key;
+        for ((o, a), b) in base.joints.iter_mut().zip(from.joints.iter()).zip(key.joints.iter()) { *o = lerp(a, b, [0.0; 3]); }
+        base.aim_pose = lerp(&from.aim_pose, &key.aim_pose, [0.0; 3]);
+        self.sent = Some(base);
+        // the palm's velocity between the last two samples, smoothed per display frame, and the lead
+        for i in 0..3 { self.velocity[i] += 0.1 * (self.key_velocity[i] - self.velocity[i]); }
+        let lead = self.velocity.map(|v| v * lead_ns as f32);
+        // the 1-euro filter on the led palm
+        let target: [f32; 3] = std::array::from_fn(|i| palm_of(&base)[i] + lead[i]);
+        let dt_s = ((display - self.last_display) as f32 / 1e9).clamp(0.001, 0.05);
+        self.last_display = display;
+        let alpha = |cutoff: f32| { let tau = 1.0 / (2.0 * std::f32::consts::PI * cutoff); 1.0 / (1.0 + tau / dt_s) };
+        let filtered = match self.palm {
+            None => target,
+            Some(prev) => {
+                let a_d = alpha(1.0);
+                for i in 0..3 { self.palm_speed[i] += a_d * ((target[i] - prev[i]) / dt_s - self.palm_speed[i]); }
+                let speed = (self.palm_speed.iter().map(|v| v * v).sum::<f32>()).sqrt();
+                let a = alpha(Self::MIN_CUTOFF_HZ + Self::BETA * speed);
+                std::array::from_fn(|i| prev[i] + a * (target[i] - prev[i]))
+            }
+        };
+        self.palm = Some(filtered);
+        let d: [f32; 3] = std::array::from_fn(|i| filtered[i] - palm_of(&base)[i]);
+        let moved = |p: &XrPose| XrPose { orientation: p.orientation, position: [p.position[0] + d[0], p.position[1] + d[1], p.position[2] + d[2]] };
+        let mut out = *polled;
+        for (o, j) in out.joints.iter_mut().zip(base.joints.iter()) { *o = moved(j); }
+        out.aim_pose = moved(&base.aim_pose);
+        out.tips = key.tips;
+        out.tips_active = (key.tips_active & !xr_hand::GRAB_ACTIVE) | (polled.tips_active & xr_hand::GRAB_ACTIVE);
+        out.flags = polled.flags | (key.flags & xr_hand::IN_VIEW);
+        out
+    }
 }
 
 /// An Android system property (`adb shell setprop`), if set.
-fn system_property(name: &str) -> Option<String> {
+pub(crate) fn system_property(name: &str) -> Option<String> {
     extern "C" { fn __system_property_get(name: *const std::ffi::c_char, value: *mut std::ffi::c_char) -> i32; }
     let name = std::ffi::CString::new(name).ok()?;
     let mut value = [0 as std::ffi::c_char; 92];
