@@ -288,6 +288,9 @@ pub struct XrServe {
     eye: Option<[u32; 2]>,
     #[rust]
     counts: Counts,
+    /// The app's own line in the stats panel (`set_app_line`; empty: none).
+    #[rust]
+    app_line: String,
 }
 
 /// The app side's counts per stats window (5 s): draws, new XR frames, frames packed, pictures
@@ -356,6 +359,15 @@ pub fn serve() {
 }
 
 impl XrServe {
+    /// A line of the app's own numbers in the desktop's stats panel, under the stream's (empty:
+    /// none). Kept until replaced.
+    pub fn set_app_line(&mut self, line: &str) {
+        if self.app_line != line {
+            self.app_line.clear();
+            self.app_line.push_str(line);
+        }
+    }
+
     /// The depth (m) the view centres on, for the headset's reprojection.
     pub fn set_focus_m(&mut self, focus_m: f32) {
         self.focus_m = Some(focus_m);
@@ -495,6 +507,10 @@ impl XrServe {
         ];
         for (k, l) in lines.iter().enumerate() {
             self.draw_stats_text.draw_abs(cx, panel.pos + dvec2(8.0, 6.0 + k as f64 * 16.0), l);
+        }
+        if !self.app_line.is_empty() {
+            let at = panel.pos + dvec2(8.0, 6.0 + lines.len() as f64 * 16.0);
+            self.draw_stats_text.draw_abs(cx, at, &self.app_line);
         }
         // the last minute: shown/s (green, 0..90) and motion to photon (orange, 0..150 ms)
         let base = panel.pos + dvec2(8.0, 140.0);
