@@ -52,8 +52,8 @@ extern "C" {
 const AIMAGE_FORMAT_YUV_420_888: i32 = 0x23;
 const USAGE_GPU_SAMPLED_IMAGE: u64 = 1 << 8;
 /// Images of a GPU-output reader: the shown picture, the two before it (frames on the GPU), up to
-/// three decoded and waiting for their display frame, and two for the decoder itself.
-const READER_IMAGES: i32 = 8;
+/// six decoded and waiting for their display frame, and two for the decoder itself.
+const READER_IMAGES: i32 = 11;
 /// How long a picture the decoder released takes at most to reach its reader.
 const READER_WAIT: Duration = Duration::from_millis(20);
 

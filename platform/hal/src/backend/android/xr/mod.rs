@@ -140,6 +140,11 @@ fn stereo_chains(xr: &LibOpenXr, dev: &Arc<Device>, session: XrSession, format: 
     Ok((a, b, targets))
 }
 
+/// How many display frames past the newest one the uplink's poses are located for
+/// (`hal_xr_pose_frames_ahead`; 0: from the pose lead instead).
+static POSE_FRAMES_AHEAD: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+pub fn pose_frames_ahead(frames: u32) { POSE_FRAMES_AHEAD.store(frames.min(30) as i64, Ordering::Release); }
+
 pub(super) fn pose_lead(lead_ns: u64) {
     POSE_LEAD_NS.store(lead_ns.min(500_000_000) as i64, Ordering::Release);
 }
@@ -1760,7 +1765,10 @@ fn track(rt: Arc<Runtime>, inputs: Arc<Mutex<SharedInputs>>, session: XrSession,
         // thread's wake jitter when it sat near half a period: the same frame twice, then one
         // skipped, about 2 of 15 pictures a repeat)
         let desired = (want - display as i64) as f64 / period as f64;
-        if ahead_frames < desired.ceil() as i64 || (ahead_frames as f64) > desired + 1.25 {
+        let asked = POSE_FRAMES_AHEAD.load(Ordering::Acquire);
+        if asked > 0 {
+            ahead_frames = asked;
+        } else if ahead_frames < desired.ceil() as i64 || (ahead_frames as f64) > desired + 1.25 {
             ahead_frames = desired.ceil().max(0.0) as i64;
         }
         let target = XrTime::from_nanos(display as i64 + ahead_frames * period);

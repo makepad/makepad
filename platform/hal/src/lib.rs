@@ -1552,6 +1552,18 @@ pub fn hal_xr_foveation(level: u32) {
     let _ = level;
 }
 
+/// The uplink's poses are located `frames` display frames past the headset's newest one (the
+/// newest is the runtime's own pipeline ahead of now: a frame located that many past it has
+/// `frames` periods from the pose's sample to its frame's start, whatever that pipeline depth
+/// does); 0: from the pose lead (`XrPoseLead`) instead. Android XR; elsewhere nothing.
+#[relax_api]
+pub fn hal_xr_pose_frames_ahead(frames: u32) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::pose_frames_ahead(frames);
+    #[cfg(not(target_os = "android"))]
+    let _ = frames;
+}
+
 /// Whether the XR window's frames render into linear-output (sRGB-encoding) targets now.
 #[relax_api]
 pub fn hal_xr_linear_frames_active() -> bool {

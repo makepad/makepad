@@ -22,8 +22,6 @@ pub const DEFAULT_PORT: u16 = 8794;
 const WORLD_MESSAGE_BYTES: usize = 16 << 10;
 /// The display period the client expects (ns; the stream runs at 90 Hz).
 const PERIOD_NS: u64 = 11_111_111;
-/// The furthest ahead poses are predicted (a slow link does not extrapolate the head for ever).
-const MAX_POSE_LEAD_NS: u64 = 100_000_000;
 
 mod serve;
 pub use serve::{serve, DrawXrBand, DrawXrMirror, XrServe};
@@ -525,14 +523,21 @@ pub struct XrStreamClient {
     /// The picture made current by the last upload, until a display frame shows it: (seq,
     /// sample_ns, decoded_at, the display time its pose was predicted for).
     pending_show: Option<(u64, u64, Instant, u64)>,
-    /// Per picture (the last 256): its pose's sample to the display time of the first frame
-    /// that could show it (complete at that frame's take), and the newest picture counted.
+    /// Per picture (the last 1024): its pose's sample to both its eyes decoded (ns), and the
+    /// newest picture counted.
     ready: VecDeque<f64>,
     ready_seq: u64,
+    /// The display frames past the newest one the poses are located for (`steer_ahead`), when
+    /// it was last checked, and since when it could have been one less.
+    ahead: u32,
+    ahead_at: Instant,
+    ahead_less_since: Option<Instant>,
+    /// The least `ahead` (a debug switch, default 4: at 3, one or two pictures a second were
+    /// still late, a repeat each; at 4 none and the user called it smooth; 0: steered alone).
+    pub pin_ahead: u32,
     /// Stats windows (seconds) so far.
     windows: u64,
-    /// How far ahead of their sample poses are predicted (ns; `Cx::xr_set_pose_lead`): see
-    /// `ready`.
+    /// The poses' frames ahead as a time (ns: `ahead` periods), for the stats.
     lead_ns: f64,
     /// The previous XR frame's display time (a gap of more than 1.5 periods: a display frame
     /// the app missed).
@@ -634,6 +639,10 @@ impl XrStreamClient {
             pending_show: None,
             ready: VecDeque::new(),
             ready_seq: 0,
+            ahead: 0,
+            ahead_at: Instant::now(),
+            ahead_less_since: None,
+            pin_ahead: 0,
             windows: 0,
             lead_ns: 0.0,
             last_display_ns: 0,
@@ -722,18 +731,16 @@ impl XrStreamClient {
                             self.window.m2p_us.push(((display_ns - sample_ns) / 1000) as u32);
                         }
                     }
-                    // The poses go up predicted for the display frame their picture will show at:
-                    // far enough ahead that 9 of 10 pictures are complete by that frame's take
-                    // (the tracking thread takes the first frame of the headset's grid at least
-                    // that far ahead). Pictures show at their own frame (`take_picture`), so the
-                    // lead is the latency itself, not a queue's; a late one shows a frame late,
-                    // warped to that frame's eyes.
-                    if self.ready.len() >= 16 {
-                        let mut v: Vec<f64> = self.ready.iter().copied().collect();
-                        v.sort_by(|a, b| a.total_cmp(b));
-                        self.lead_ns = v[v.len() * 9 / 10];
-                        cx.xr_set_pose_lead((self.lead_ns as u64).min(MAX_POSE_LEAD_NS));
-                    }
+                    // The poses go up located `ahead` display frames past the headset's newest
+                    // one: that leaves `ahead` periods from a pose's sample to its frame's take
+                    // (the runtime's own pipeline depth is in the newest frame's time already, and
+                    // it flips between ~2 and ~4 frames: a lead in ns from now followed each flip a
+                    // frame or two late, with a burst of repeats or drops each time, the ~10 s
+                    // oscillation on the stats panel). So `ahead` covers the sample to decoded alone
+                    // (a steady ~20 ms): its p98 over the last ~11 s plus 2 ms, a frame more at once
+                    // when that needs it, a frame less only after 10 s of not needing it.
+                    // `pin_ahead` (debug) fixes it.
+                    self.steer_ahead();
                     self.trace_frame(cx, fresh);
                     #[cfg(not(target_arch = "wasm32"))]
                     self.watch_frame(cx, fresh);
@@ -788,6 +795,44 @@ impl XrStreamClient {
         flush(&mut batch);
     }
 
+    /// Once a second: the display frames past the newest one the poses go up for (see the
+    /// caller); every change logged.
+    fn steer_ahead(&mut self) {
+        let first = self.ahead == 0;
+        if !first && self.ahead_at.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.ahead_at = Instant::now();
+        let measured = if self.ready.len() >= 64 {
+            let mut v: Vec<f64> = self.ready.iter().copied().collect();
+            v.sort_by(|a, b| a.total_cmp(b));
+            let p98 = v[v.len() * 98 / 100];
+            (((p98 + 2.0e6) / PERIOD_NS as f64).ceil() as u32).clamp(1, 8)
+        } else {
+            // (until measured: room for a ~30 ms sample to decoded)
+            3
+        };
+        // (`pin_ahead` is the floor: more when the link needs it)
+        let want = measured.max(self.pin_ahead);
+        let next = if want > self.ahead {
+            self.ahead_less_since = None;
+            want
+        } else if want < self.ahead {
+            let since = *self.ahead_less_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= Duration::from_secs(10) { self.ahead_less_since = None; self.ahead - 1 } else { self.ahead }
+        } else {
+            self.ahead_less_since = None;
+            self.ahead
+        };
+        if next != self.ahead {
+            log!("xr stream: poses {} display frames ahead (was {}; measured {measured}, floor {})", next, self.ahead, self.pin_ahead);
+            self.ahead = next;
+            #[cfg(not(target_arch = "wasm32"))]
+            makepad_widgets::makepad_platform::makepad_hal::hal_xr_pose_frames_ahead(next);
+        }
+        self.lead_ns = (self.ahead as u64 * PERIOD_NS) as f64;
+    }
+
     /// Uploads the newest complete picture (every tile of one pose), if a new one came.
     fn take_picture(&mut self, cx: &mut Cx, display_ns: u64) -> bool {
         // (debug `freeze`: the last picture keeps showing with its own eyes: the headset's
@@ -824,14 +869,14 @@ impl XrStreamClient {
                     if let Some(sent) = self.sent.lock().unwrap().iter().find(|p| p.seq == *seq) {
                         let takes_ago = (decoded_at.elapsed().as_nanos() as u64 / PERIOD_NS).min(8);
                         let first = display_ns.saturating_sub(takes_ago * PERIOD_NS);
-                        self.ready.push_back(first.saturating_sub(sent.sample_ns) as f64);
                         // (its parts, for the 5 s line: sample to decoded, decoded to the first take
                         // after it, that take to its frame's display)
                         let now_ns = makepad_widgets::makepad_platform::makepad_hal::clock_ns();
                         let decoded_ns = now_ns.saturating_sub(decoded_at.elapsed().as_nanos() as u64);
                         let take_ns = now_ns.saturating_sub(takes_ago * PERIOD_NS);
                         self.window.ready_parts.push([decoded_ns.saturating_sub(sent.sample_ns) as u32 / 1000, take_ns.saturating_sub(decoded_ns) as u32 / 1000, first.saturating_sub(take_ns) as u32 / 1000]);
-                        if self.ready.len() > 256 {
+                        self.ready.push_back(decoded_ns.saturating_sub(sent.sample_ns) as f64);
+                        if self.ready.len() > 1024 {
                             self.ready.pop_front();
                         }
                     }
@@ -1575,13 +1620,13 @@ fn decode_tile(tile: usize, codec: StreamVideoCodec, size: [u32; 2], rx: std::sy
                     let mut s = shared.lock().unwrap();
                     s.decoded += 1;
                     let held = &mut s.latest[tile & 1];
-                    // four at most (pictures wait up to the lead's spread for their frame; at
-                    // two or three the one due next was dropped: a repeat and a skip): the oldest
-                    // goes. With the shown one and the two before it that is seven of the
-                    // reader's eight images: the decoder never waits for one (with all of them
+                    // six at most (pictures wait up to the lead's slack and spread for their frame;
+                    // at two or three the one due next was dropped: a repeat and a skip): the
+                    // oldest goes. With the shown one and the two before it that is nine of the
+                    // reader's eleven images: the decoder never waits for one (with all of them
                     // held it did, each picture then decoded late, and the lead measured from
                     // that grew without end)
-                    while held.len() >= 4 {
+                    while held.len() >= 6 {
                         held.pop_front();
                     }
                     held.push_back(Decoded { nv12: f.nv12, gpu: f.gpu, size: [f.width, f.height], head, decode_us, arrived_at, decoded_at: Instant::now() });

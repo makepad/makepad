@@ -103,8 +103,8 @@ pub struct XrRemoteView {
     /// with it).
     #[rust]
     xr_due: bool,
-    /// The foveation level last asked for (`debug.xrremote.fov`).
-    #[rust]
+    /// The foveation level last asked for (`debug.xrremote.fov`; 255 before the first ask).
+    #[rust(255)]
     fov_asked: u8,
     #[rust(1.0)]
     dpi: f64,
@@ -264,8 +264,9 @@ impl Widget for XrRemoteView {
                     #[cfg(not(target_arch = "wasm32"))]
                     let _ = makepad_xr_stream::replay_track_log("/sdcard/Android/data/dev.makepad.xrremote/files", &replay);
                 }
-                // `fov` N (0 none .. 3 high, live): the headset's fixed foveation of the view
-                let fov = switch("debug.xrremote.fov", 0);
+                // `fov` N (0 none .. 3 high, live; default 2, the user's pick: the edges look the
+                // same, the pass ~20% cheaper): the headset's fixed foveation of the view
+                let fov = switch("debug.xrremote.fov", 2);
                 if fov != self.fov_asked {
                     self.fov_asked = fov;
                     log!("xr remote: foveation level {fov}");
@@ -273,6 +274,10 @@ impl Widget for XrRemoteView {
                 }
                 if let Some(client) = self.client.as_mut() {
                     client.occlusion = occlusion;
+                    // `ahead` N (default 4): the poses at least N display frames past the
+                    // headset's newest (more when the measured sample to decoded needs it; 0:
+                    // that alone)
+                    client.pin_ahead = switch("debug.xrremote.ahead", 4) as u32;
                     client.opaque = opaque;
                     let own = switch("debug.xrremote.owneyes", 0) != 0;
                     if own != client.own_eyes { log!("xr remote: own eyes {own}"); }
