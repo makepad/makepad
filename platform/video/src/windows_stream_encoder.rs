@@ -717,7 +717,8 @@ impl WindowsStreamEncoder {
 
 impl StreamEncoderOs for WindowsStreamEncoder {
     fn caps() -> EncoderCaps {
-        EncoderCaps { engines: 1, tiles: true, full_chroma: false, hevc: hardware_hevc() }
+        // two sessions encode a picture's columns at once (on two engines where the GPU has them)
+        EncoderCaps { engines: 2, tiles: true, full_chroma: false, hevc: hardware_hevc() }
     }
 
     fn open(options: &VideoStreamEncoderOptions, _tile: StreamTile, _tuning: StreamTuning) -> Result<Self, VideoFileError> {

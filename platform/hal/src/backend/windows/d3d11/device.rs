@@ -143,8 +143,20 @@ impl Device {
             let factory = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0), &IDXGIFactory2::IID)
                 .and_then(|raw| IDXGIFactory2::from_raw(raw))
                 .map_err(|e| hr("CreateDXGIFactory2", e))?;
-            // adapter 0: the one the desktop's primary output is on (the old backend's choice)
-            let adapter = factory.EnumAdapters(0).map_err(|e| hr("IDXGIFactory2::EnumAdapters(0)", e))?;
+            // the GPU with the most memory of its own (with a discrete GPU next to an iGPU the
+            // discrete one renders, the iGPU only scans out; DWM moves the frames across);
+            // adapter 0 (the primary output's) when none says more. The software adapter never.
+            let mut adapter = factory.EnumAdapters(0).map_err(|e| hr("IDXGIFactory2::EnumAdapters(0)", e))?;
+            let mut best = adapter.GetDesc().map(|d| if d.VendorId == 0x1414 { 0 } else { d.DedicatedVideoMemory }).unwrap_or(0);
+            let mut i = 1;
+            while let Ok(a) = factory.EnumAdapters(i) {
+                let memory = a.GetDesc().map(|d| if d.VendorId == 0x1414 { 0 } else { d.DedicatedVideoMemory }).unwrap_or(0);
+                if memory > best {
+                    best = memory;
+                    adapter = a;
+                }
+                i += 1;
+            }
             let adapter_name = adapter
                 .GetDesc()
                 .map(|d| {

@@ -67,12 +67,12 @@ fn slot(dev: &Device, key: u64) -> Result<Arc<Slot>, String> {
 /// Makes this process's device now (a recorder calls it before its first frame, so the capture
 /// does not start with a device creation).
 pub fn prepare() -> bool {
-    process_device().is_ok()
+    hal_shared_prepare()
 }
 
 /// Forgets an opened slot (its ring closed).
 pub fn release(key: u64) {
-    lock(slots()).remove(&key);
+    hal_shared_release(key)
 }
 
 /// The slot's keyed mutex, held for the commands issued while this lives.
@@ -211,12 +211,20 @@ pub fn upload(key: u64, pixels: &[u8], width: u32, height: u32, stride: usize) -
 
 /// The device this module's textures live on (an encoder reading [`picture`]s opens on it).
 pub fn device() -> Result<ID3D11Device, String> {
+    unsafe { ID3D11Device::from_raw(hal_shared_device() as *mut _) }.map_err(|_| last_error())
+}
+
+fn device_impl() -> Result<ID3D11Device, String> {
     Ok(process_device()?.device.clone())
 }
 
 /// `region` (x, y, width, height) of slot `key` copied on the GPU into a new BGRA texture of
 /// the region's size on [`device`]: a picture the slot may be written over at once after.
 pub fn picture(key: u64, region: [u32; 4]) -> Result<ID3D11Texture2D, String> {
+    unsafe { ID3D11Texture2D::from_raw(hal_shared_picture(key, &region) as *mut _) }.map_err(|_| last_error())
+}
+
+fn picture_impl(key: u64, region: [u32; 4]) -> Result<ID3D11Texture2D, String> {
     let dev = process_device()?;
     let s = slot(&dev, key)?;
     let [x, y, w, h] = region;
@@ -292,6 +300,10 @@ fn converter(dev: &Device, input: [u32; 2], output: [u32; 2]) -> Result<std::syn
 /// a new NV12 texture of `width` x `height` (even): what a video encoder takes without a
 /// conversion of its own. One video-processor blit, nothing else.
 pub fn to_nv12(picture: &ID3D11Texture2D, width: u32, height: u32) -> Result<ID3D11Texture2D, String> {
+    unsafe { ID3D11Texture2D::from_raw(hal_shared_to_nv12(picture.as_raw() as u64, width, height) as *mut _) }.map_err(|_| last_error())
+}
+
+fn to_nv12_impl(picture: &ID3D11Texture2D, width: u32, height: u32) -> Result<ID3D11Texture2D, String> {
     use makepad_windows_sys::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
     let dev = process_device()?;
     let mut td = D3D11_TEXTURE2D_DESC::default();
@@ -341,6 +353,17 @@ pub fn to_nv12(picture: &ID3D11Texture2D, width: u32, height: u32) -> Result<ID3
 
 /// `region` (x, y, width, height) of slot `key` as BGRA rows (waits for the GPU).
 pub fn read(key: u64, region: [u32; 4]) -> Result<Vec<u8>, String> {
+    let mut out = vec![0u8; region[2] as usize * region[3] as usize * 4];
+    match hal_shared_read(key, &region, &mut out) {
+        n if n >= 0 => {
+            out.truncate(n as usize);
+            Ok(out)
+        }
+        _ => Err(last_error()),
+    }
+}
+
+fn read_impl(key: u64, region: [u32; 4]) -> Result<Vec<u8>, String> {
     let dev = process_device()?;
     let s = slot(&dev, key)?;
     let [x, y, w, h] = region;
@@ -363,15 +386,108 @@ pub fn read(key: u64, region: [u32; 4]) -> Result<Vec<u8>, String> {
 #[makepad_relax_api::relax_api]
 pub fn hal_shared_read(key: u64, region: &[u32], out: &mut [u8]) -> i64 {
     let Ok(region) = <[u32; 4]>::try_from(region) else { return -1 };
-    match read(key, region) {
+    match read_impl(key, region) {
         Ok(pixels) if pixels.len() <= out.len() => {
             out[..pixels.len()].copy_from_slice(&pixels);
             pixels.len() as i64
         }
-        Ok(_) => -1,
-        Err(error) => {
-            eprintln!("[hal-d3d11] shared read: {error}");
+        Ok(_) => {
+            failed("the read's buffer is short".into());
             -1
+        }
+        Err(error) => {
+            failed(error);
+            -1
+        }
+    }
+}
+
+// The ops JIT-compiled code reaches the process's D3D11 device and slots through (their statics
+// live in the loader): COM objects cross as raw pointers that carry one reference (0: failed,
+// the text in `hal_shared_error`).
+
+thread_local! {
+    static LAST_ERROR: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+fn failed(error: String) {
+    LAST_ERROR.with(|e| *e.borrow_mut() = error);
+}
+
+fn last_error() -> String {
+    let mut text = vec![0u8; 512];
+    let n = (hal_shared_error(&mut text) as usize).min(text.len());
+    text.truncate(n);
+    String::from_utf8_lossy(&text).into_owned()
+}
+
+/// The text of this thread's last failed shared-texture op: its first `out.len()` bytes are
+/// written, its length is returned.
+#[makepad_relax_api::relax_api]
+pub fn hal_shared_error(out: &mut [u8]) -> u64 {
+    LAST_ERROR.with(|e| {
+        let e = e.borrow();
+        let n = e.len().min(out.len());
+        out[..n].copy_from_slice(&e.as_bytes()[..n]);
+        e.len() as u64
+    })
+}
+
+/// [`prepare`].
+#[makepad_relax_api::relax_api]
+pub fn hal_shared_prepare() -> bool {
+    process_device().is_ok()
+}
+
+/// [`release`].
+#[makepad_relax_api::relax_api]
+pub fn hal_shared_release(key: u64) {
+    lock(slots()).remove(&key);
+}
+
+/// [`device`]: the device as an `ID3D11Device*` with a reference for the caller.
+#[makepad_relax_api::relax_api]
+pub fn hal_shared_device() -> u64 {
+    match device_impl() {
+        Ok(d) => d.into_raw() as u64,
+        Err(e) => {
+            failed(e);
+            0
+        }
+    }
+}
+
+/// [`picture`] of `region` (x, y, width, height): an `ID3D11Texture2D*` for the caller.
+#[makepad_relax_api::relax_api]
+pub fn hal_shared_picture(key: u64, region: &[u32]) -> u64 {
+    let Ok(region) = <[u32; 4]>::try_from(region) else {
+        failed("a region is four numbers".into());
+        return 0;
+    };
+    match picture_impl(key, region) {
+        Ok(t) => t.into_raw() as u64,
+        Err(e) => {
+            failed(e);
+            0
+        }
+    }
+}
+
+/// [`to_nv12`] of the texture `picture` (borrowed): an `ID3D11Texture2D*` for the caller.
+#[makepad_relax_api::relax_api]
+pub fn hal_shared_to_nv12(picture: u64, width: u32, height: u32) -> u64 {
+    let Ok(source) = (unsafe { ID3D11Texture2D::from_raw(picture as *mut _) }) else {
+        failed("no picture".into());
+        return 0;
+    };
+    let out = to_nv12_impl(&source, width, height);
+    // borrowed: the caller keeps its reference
+    let _ = source.into_raw();
+    match out {
+        Ok(t) => t.into_raw() as u64,
+        Err(e) => {
+            failed(e);
+            0
         }
     }
 }
