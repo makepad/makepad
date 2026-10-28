@@ -54,6 +54,7 @@ pub mod fabric;
 pub mod fleet;
 // Which hub routes each fleet role reaches (the front itself is
 // makepad_network::fleet).
+#[cfg(not(target_arch = "wasm32"))]
 pub mod fleet_routes;
 pub mod job;
 // Splash compute kernels on fleet CPUs: the wire and the client are

@@ -113,6 +113,7 @@ pub enum DragOutFile {
 impl FilePromise {
     /// Starts the producer on its own thread and returns where the file will appear. The
     /// handshake with the window system is `makepad_hal::drag_promise`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn start(self) -> DragOutFile {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -146,12 +147,20 @@ impl FilePromise {
         }
         promised
     }
+
+    /// The web has no files to hand over: the producer never runs and the platform ends the
+    /// drag (`Event::DragEnd`).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn start(self) -> DragOutFile {
+        DragOutFile::Promise { path: String::new(), mime: self.mime }
+    }
 }
 
 /// Puts a finished producer's file in place: its bytes reach the disk first (a receiver that
 /// opens the final name right away, from any process, reads the whole file), then the rename
 /// makes the complete file appear under its final name in one step. An empty file is a failed
 /// producer, not a file to hand over.
+#[cfg(not(target_arch = "wasm32"))]
 fn complete(part: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
     let file = std::fs::File::open(part).map_err(|e| format!("the producer wrote no file: {e}"))?;
     let len = file.metadata().map_err(|e| e.to_string())?.len();
@@ -165,6 +174,7 @@ fn complete(part: &std::path::Path, path: &std::path::Path) -> Result<(), String
 
 /// Removes the temporary folders of drags out more than a day old (a receiver may read a
 /// dropped file a while after the drop, so recent ones stay).
+#[cfg(not(target_arch = "wasm32"))]
 fn sweep_old_drags(root: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(root) else { return };
     let day = std::time::Duration::from_secs(24 * 3600);

@@ -1397,11 +1397,9 @@ impl Cx {
     /// infinite: `z = near / (1 - d)`; the first row is the bottom of the view), and its header
     /// (size, each eye's depth camera). For per-pixel tests against the room (real things in
     /// front of virtual ones).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn xr_environment_depth(&self) -> Option<(crate::texture::Texture, makepad_hal::XrDepth)> {
-        #[cfg(not(target_arch = "wasm32"))]
-        { self.hal.xr.as_ref()?.env_depth.clone() }
-        #[cfg(target_arch = "wasm32")]
-        { None }
+        self.hal.xr.as_ref()?.env_depth.clone()
     }
 
     /// Whether this app uses the headset's room field (`xr_tsdf`: its physics, particles or
@@ -1411,16 +1409,21 @@ impl Cx {
     /// side forwards `xr_room_field_wanted`). Call it whenever the need changes (every frame is
     /// fine).
     pub fn xr_set_room_field(&mut self, on: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
         if crate::os::hal::xr::ROOM_FIELD.swap(on, std::sync::atomic::Ordering::AcqRel) != on {
             makepad_hal::hal_xr_depth_readback(on);
-            #[cfg(not(target_arch = "wasm32"))]
             if !on { if let Some(xr) = self.hal.xr.as_mut() { xr.depth_writer = None; } }
         }
+        #[cfg(target_arch = "wasm32")]
+        let _ = on; // no headset on the web
     }
 
     /// Whether this app uses the room field (`xr_set_room_field`).
     pub fn xr_room_field_wanted(&self) -> bool {
-        crate::os::hal::xr::ROOM_FIELD.load(std::sync::atomic::Ordering::Acquire)
+        #[cfg(not(target_arch = "wasm32"))]
+        return crate::os::hal::xr::ROOM_FIELD.load(std::sync::atomic::Ordering::Acquire);
+        #[cfg(target_arch = "wasm32")]
+        false
     }
 
     /// The XR window's next frame shows with these eyes instead of its `XrFrame`'s: a picture
@@ -1429,11 +1432,9 @@ impl Cx {
     /// pose. `focus_m`: the depth (metres along the view) of what the picture shows, for the
     /// compositor's positional correction (0: rotation only). Set before the frame is drawn; it
     /// holds for that one frame.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn xr_present_eyes(&mut self, eyes: [makepad_hal::XrEye; 2], focus_m: f32) {
-        #[cfg(not(target_arch = "wasm32"))]
         self.hal_xr_present_eyes(eyes, focus_m);
-        #[cfg(target_arch = "wasm32")]
-        let _ = (eyes, focus_m);
     }
 
     /// The headset's display runs at its supported refresh rate nearest to `hz` (0: the

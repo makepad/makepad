@@ -441,8 +441,23 @@ impl Write for SecureTransportStream {
         }
     }
 
+    /// Sends what SecureTransport still holds: a write that ran into the socket's send timeout
+    /// was taken whole (`processed`) but part of its record stayed queued in the context, and
+    /// only a later SSLWrite sends it. An empty SSLWrite services that queue and writes nothing
+    /// new; WouldBlock means some is still queued (call again). Without it the tail of a stream
+    /// written under a send timeout never left (the stream ended short when it was closed).
     fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+        if self.is_closed {
+            return Ok(());
+        }
+        let mut processed = 0usize;
+        let status = unsafe { SSLWrite(self.ssl_context, [0u8; 1].as_ptr() as *const std::ffi::c_void, 0, &mut processed) };
+        match status {
+            SSL_OK => Ok(()),
+            ERR_SSL_WOULD_BLOCK => Err(io::Error::new(io::ErrorKind::WouldBlock, "SSLWrite flush would block")),
+            ERR_SSL_CLOSED_ABORT => Err(io::Error::new(io::ErrorKind::ConnectionAborted, "SSLWrite connection aborted")),
+            _ => Err(io_other(format!("SSLWrite (flush) failed with status {status}"))),
+        }
     }
 }
 

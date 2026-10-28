@@ -510,13 +510,17 @@ impl XrRemoteView {
         // (ticks are 1/100 s)
         let mut rows: Vec<(f64, u32)> = now.iter().map(|(tid, t)| ((t.saturating_sub(*before.get(tid).unwrap_or(t))) as f64 / secs, *tid)).collect();
         rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         let me = unsafe { libc_gettid() } as u32;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let me = 0u32; // no /proc/self/task here: the read above already returned
         let total: f64 = rows.iter().map(|r| r.0).sum();
         let top: Vec<String> = rows.iter().take(12).filter(|r| r.0 > 0.0).map(|(pct, tid)| format!("{} {tid}{} {pct:.1}", names.get(tid).map_or("?", |n| n.as_str()), if *tid == me { "(ui)" } else { "" })).collect();
         log!("xr remote: threads % of a core: total {total:.0} · {}", top.join(" · "));
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 extern "C" {
     #[link_name = "gettid"]
     fn libc_gettid() -> i32;

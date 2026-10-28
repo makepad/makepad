@@ -27,6 +27,10 @@ edition = "2021"
 license = "MIT"
 default-run = "makepad-app-wm"
 
+# the window manager is a desktop compositor (Linux; macOS hosts it for development): no web or mobile build
+[package.metadata.makepad]
+platforms = ["desktop"]
+
 [lib]
 name = "makepad_app_wm"
 path = "src/lib.rs"

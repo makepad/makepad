@@ -1,0 +1,11 @@
+// CI for makepad-app-aihub. the AI Hub is a tray app (menu-bar icon, its panel a dropdown) and a single-instance service: it opens no window at start,
+// so the default smoke test (launch, wait for a window, grab and judge it) cannot pass here.
+// Its checks are the other platforms' builds.
+
+use mod.std.*
+use mod.ci;
+
+ci.step("check other platforms", fn(){
+    ci.check_targets({packages: ["makepad-app-aihub"] targets: ci.host.targets})
+})
+nil
