@@ -1340,6 +1340,32 @@ impl Cx {
         let _ = scale;
     }
 
+    /// Multisampling of the XR passes (both eyes): `samples` per pixel (2, 4 or 8 where the
+    /// GPU has that count, `xr_msaa_counts`; 1 or anything else: none), resolved into the
+    /// passes' colour and depth textures at the end of each eye.
+    pub fn xr_set_msaa(&mut self, samples: u32) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hal_xr_msaa(samples);
+        #[cfg(target_arch = "wasm32")]
+        let _ = samples;
+    }
+
+    /// The XR passes' samples per pixel now (1: no MSAA).
+    pub fn xr_msaa(&self) -> u32 {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal_xr_msaa_now() }
+        #[cfg(target_arch = "wasm32")]
+        { 1 }
+    }
+
+    /// The MSAA sample counts this GPU has (bit n: 2^n samples per pixel; 1: none).
+    pub fn xr_msaa_counts(&self) -> u32 {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal.info.map_or(1, |i| i.msaa) }
+        #[cfg(target_arch = "wasm32")]
+        { 1 }
+    }
+
     /// The offscreen XR passes' pixels per eye pixel (1 without supersampling).
     pub fn xr_supersample(&self) -> f32 {
         #[cfg(not(target_arch = "wasm32"))]

@@ -79,6 +79,9 @@ pub struct Vulkan {
     draw_bins: Vec<(u32, makepad_vulkan::vk::DescriptorType, makepad_vulkan::vk::DescriptorBufferInfo)>,
     draw_images: Vec<(u32, makepad_vulkan::vk::DescriptorType, makepad_vulkan::vk::DescriptorImageInfo)>,
     passes: FastMap<PassKey, Arc<RenderPass>>,
+    /// The multisampled images of MSAA passes, by the attachment they resolve into (its raw
+    /// image) and sample count; dropped with that attachment (`frame::msaa_image`).
+    msaa: FastMap<(u64, u8), (std::sync::Weak<resources::Image>, Arc<resources::Image>)>,
     win: FastMap<(u32, u32), Texture>,
     /// A hosted window's newest frame size: its host's shared image is allocated larger than
     /// the window (resizes reuse it), and a snapshot or copy reads only what the frame drew.
@@ -180,7 +183,7 @@ impl Vulkan {
             .filter(|(heap, _)| dev.memory.memory_types[..dev.memory.memory_type_count as usize].iter().any(|ty|
                 ty.heap_index as usize == *heap && ty.property_flags.contains(makepad_vulkan::vk::MemoryPropertyFlags::DEVICE_LOCAL)))
             .map(|(_, h)| h.size).sum();
-        let info = HalInfo { backend: backend_id::VULKAN, dialect: dialect::SPIRV, formats, msaa: 1, dpi: 1.0,
+        let info = HalInfo { backend: backend_id::VULKAN, dialect: dialect::SPIRV, formats, msaa: dev.msaa, dpi: 1.0,
             flags: if dev.timestamp_bits > 0 { info_flags::GPU_TIMESTAMPS } else { 0 } | if dev.multiview { info_flags::MULTIVIEW } else { 0 },
             max_texture: dev.properties.limits.max_image_dimension2_d,
             max_window: [dev.properties.limits.max_framebuffer_width, dev.properties.limits.max_framebuffer_height],
@@ -202,7 +205,7 @@ impl Vulkan {
         crate::gpu_limits::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
         Ok(Self { #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: FastMap::default(), buf: FastMap::default(), pipe: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
-            passes: FastMap::default(), win: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), retained_stale: Default::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
+            passes: FastMap::default(), msaa: FastMap::default(), win: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), retained_stale: Default::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
             fallback: FastMap::default(), windows: surface::Windows::new(source), sharing,
             #[cfg(target_os = "linux")] foreign_support,
             batch: None, spares: Default::default(), mailbox: Mailbox::new(sessions),
@@ -417,7 +420,8 @@ impl Backend for Vulkan {
             let Some(passes) = frame::slice(packet.passes, view.passes.len()) else { continue };
             let is_window = kind & !target::FLAGS == target::WINDOW;
             'pass: for pass in &view.passes[passes] {
-                let mut key = PassKey { colors: [pipeline::ABSENT; 4], depth: pipeline::ABSENT, load: pass.load, views: frame::pass_views(pass), fdm: false };
+                let mut key = PassKey { colors: [pipeline::ABSENT; 4], depth: pipeline::ABSENT, load: pass.load, views: frame::pass_views(pass), fdm: false,
+                    samples: frame::pass_samples(pass, self.dev.msaa) };
                 for (i, id) in pass.color.iter().enumerate().filter(|(_, id)| !id.is_none()) {
                     let Some(format) = format_of(*id) else { continue 'pass };
                     key.colors[i] = format;

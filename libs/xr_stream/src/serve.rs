@@ -21,6 +21,7 @@
 //! (`xr_host::room`). Without room the app renders nothing more until the encoder or the headset
 //! catches up (its wake signals): the stream never queues stale pictures.
 
+use makepad_widgets::makepad_draw::shader::draw_fxaa::DrawFxaa;
 use makepad_widgets::makepad_draw::shader::draw_nv12_pack::{DrawNv12Chroma, DrawNv12Luma};
 use makepad_widgets::makepad_draw::render_target::{RenderTarget, RenderTargetFormat};
 use makepad_widgets::*;
@@ -175,6 +176,7 @@ script_mod! {
         draw_test +: {}
         draw_luma +: {}
         draw_chroma +: {}
+        draw_fxaa +: {}
         draw_band +: {}
         draw_mirror +: {}
         draw_stats_bg +: {}
@@ -266,6 +268,11 @@ pub struct XrServe {
     draw_luma: DrawNv12Luma,
     #[live]
     draw_chroma: DrawNv12Chroma,
+    /// FXAA over the eyes (a mode with `fxaa`), into `fxaa` before the pack.
+    #[live]
+    draw_fxaa: DrawFxaa,
+    #[rust]
+    fxaa: Option<RenderTarget>,
     #[live]
     draw_band: DrawXrBand,
     #[live]
@@ -400,52 +407,54 @@ pub use makepad_desk_link::xr_host::REFRESH_RATES as STREAM_REFRESH_RATES;
 #[cfg(not(target_arch = "wasm32"))]
 pub use makepad_desk_link::xr_host::{room_scan as stream_room_scan, set_menu_toggles_streaming, set_room_scan as set_stream_room_scan, set_see_through as set_stream_see_through, set_streaming, streaming, streaming_changes};
 
-/// The stream's anti-aliasing: supersampled eyes, filtered down into the encoded eye size
-/// (the eyes rendered at this many pixels per axis; the app's setting, applied live from the
-/// next frame). The modes the app offers its user: [`STREAM_AA_MODES`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StreamAa {
-    Off,
-    X1_25,
-    X1_5,
-    X2,
+/// The stream's anti-aliasing, one of [`STREAM_AA_MODES`] (the app's setting, applied live from
+/// the next frame): hardware MSAA on the eye pass (`msaa` samples per pixel, resolved before
+/// the encoder's pack), FXAA over the resolved eyes, supersampled eyes filtered down into the
+/// encoded eye size (`supersample` rendered pixels per encoded pixel per axis), or a mix.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StreamAa {
+    /// Samples per pixel of the eye pass (1: no MSAA; a count the GPU lacks: the most it has
+    /// below that, shown on the stats panel).
+    pub msaa: u32,
+    pub fxaa: bool,
+    pub supersample: f32,
+    /// Its id (the settings file) and its name for the user.
+    pub id: &'static str,
+    pub name: &'static str,
 }
 
-/// Every [`StreamAa`] mode, cheapest first.
-pub const STREAM_AA_MODES: [StreamAa; 4] = [StreamAa::Off, StreamAa::X1_25, StreamAa::X1_5, StreamAa::X2];
+const fn aa(msaa: u32, fxaa: bool, supersample: f32, id: &'static str, name: &'static str) -> StreamAa {
+    StreamAa { msaa, fxaa, supersample, id, name }
+}
+
+/// The modes the app offers its user, cheapest first.
+pub const STREAM_AA_MODES: [StreamAa; 9] = [
+    aa(1, false, 1.0, "off", "Off"),
+    aa(1, true, 1.0, "fxaa", "FXAA"),
+    aa(2, false, 1.0, "msaa2", "MSAA 2x"),
+    aa(4, false, 1.0, "msaa4", "MSAA 4x"),
+    aa(8, false, 1.0, "msaa8", "MSAA 8x"),
+    aa(4, true, 1.0, "msaa4+fxaa", "MSAA 4x + FXAA"),
+    aa(1, false, 1.25, "ss1.25", "Supersampled 1.25x"),
+    aa(1, false, 1.5, "ss1.5", "Supersampled 1.5x"),
+    aa(1, false, 2.0, "ss2", "Supersampled 2x"),
+];
+
+/// The default: MSAA 4x.
+pub const STREAM_AA_DEFAULT: StreamAa = STREAM_AA_MODES[3];
 
 impl StreamAa {
-    /// Rendered pixels per encoded pixel, per axis.
-    pub fn scale(self) -> f32 {
-        match self {
-            StreamAa::Off => 1.0,
-            StreamAa::X1_25 => 1.25,
-            StreamAa::X1_5 => 1.5,
-            StreamAa::X2 => 2.0,
-        }
-    }
-
-    /// Its name for the user (and the settings file).
-    pub fn label(self) -> &'static str {
-        match self {
-            StreamAa::Off => "off",
-            StreamAa::X1_25 => "1.25x",
-            StreamAa::X1_5 => "1.5x",
-            StreamAa::X2 => "2x",
-        }
-    }
-
-    pub fn from_label(label: &str) -> Option<StreamAa> {
-        STREAM_AA_MODES.into_iter().find(|m| m.label() == label)
+    pub fn from_id(id: &str) -> Option<StreamAa> {
+        STREAM_AA_MODES.into_iter().find(|m| m.id == id)
     }
 }
 
 /// The stream's AA mode as an index into [`STREAM_AA_MODES`].
-static STREAM_AA: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static STREAM_AA: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(3);
 
-/// Sets the stream's anti-aliasing (live: the next frame renders at its size).
+/// Sets the stream's anti-aliasing (live: the next frame renders with it).
 pub fn set_stream_aa(mode: StreamAa) {
-    let i = STREAM_AA_MODES.iter().position(|m| *m == mode).unwrap_or(0);
+    let i = STREAM_AA_MODES.iter().position(|m| *m == mode).unwrap_or(3);
     STREAM_AA.store(i as u8, Ordering::Release);
 }
 
@@ -509,8 +518,10 @@ impl XrServe {
             }
             self.counts.draws += 1;
             self.counts.window();
-            // the stream's AA: the XR pass renders supersampled (from this frame on)
-            cx.cx.xr_set_supersample(stream_aa().scale());
+            // the stream's AA: the XR pass renders multisampled / supersampled (from this frame on)
+            let aa = stream_aa();
+            cx.cx.xr_set_supersample(aa.supersample);
+            cx.cx.xr_set_msaa(aa.msaa);
             // the headset integrates and sends its room field only while the app uses it
             xr_host::set_room_field_wanted(cx.cx.xr_room_field_wanted());
             let Some((display_ns, _)) = cx.cx.xr_frame_wire() else { return };
@@ -546,6 +557,25 @@ impl XrServe {
             let scale = vec2(sw as f32 / ew as f32, sh as f32 / eh as f32);
             let extent = vec2((2 * sw) as f32, sh as f32);
             self.rendered = [sw, sh];
+            // FXAA (a mode with it): the eyes anti-aliased into a target of their size, each eye
+            // on its own; the pack reads that (it paints after the XR pass, before the pack)
+            let fxaa = if aa.fxaa {
+                let target = self.fxaa.get_or_insert_with(|| RenderTarget::new(cx.cx, "xr_stream_fxaa"));
+                target.ensure(cx.cx, (2 * sw, sh), RenderTargetFormat::Bgra8);
+                target.begin(cx, vec4(0.0, 0.0, 0.0, 0.0));
+                self.draw_fxaa.draw_vars.set_texture(0, color);
+                self.draw_fxaa.extent = extent;
+                self.draw_fxaa.split = 2.0;
+                self.draw_fxaa.subpix = 0.5;
+                self.draw_fxaa.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2((2 * sw) as f64, sh as f64) });
+                target.end(cx);
+                Some(target.texture.clone())
+            } else {
+                if let Some(mut t) = self.fxaa.take() { t.release(cx.cx); }
+                None
+            };
+            let color = fxaa.as_ref().unwrap_or(color);
+            let s = &mut self.slots[slot];
             s.target.begin(cx, vec4(0.0, 0.0, 0.0, 0.0));
             // the colour's luma (rows 0..eh) and chroma (rows h..h + eh/2)
             self.draw_luma.draw_vars.set_texture(0, color);
@@ -593,6 +623,10 @@ impl XrServe {
             s.target.end(cx);
             // no parent: it paints after the XR pass (which paints first) and is held by no window
             s.target.pass.detach(cx.cx);
+            // the FXAA pass paints before the pack that samples it
+            if let (true, Some(t)) = (aa.fxaa, self.fxaa.as_ref()) {
+                t.pass.set_pass_parent(cx.cx, s.target.pass.draw_pass_id());
+            }
             s.busy.store(true, Ordering::Release);
             self.counts.packed += 1;
             self.packed = Some(Packed { slot, display_ns, built_at: Instant::now() });
@@ -666,7 +700,8 @@ impl XrServe {
             format!("repeats {:.1}/s: late {:.1} · server skipped {:.1} · queue cap {:.1} · no pose {:.1}", v(r::REPEATS), v(r::REPEAT_LATE), v(r::REPEAT_SERVER), v(r::REPEAT_DROPPED), v(r::REPEAT_NOPOSE)),
             format!("motion to photon {:.0} ms (net {:.1} decode {:.1} queue {:.1}) · lead {:.0} ms ({:.0} frames)", v(r::M2P_MS), v(r::NET_MS), v(r::DECODE_MS), v(r::WAIT_MS), v(r::LEAD_MS), v(r::AHEAD)),
             format!("uplink {:.0} poses/s ±{:.2} ms · env depth age {:.0} ms", v(r::UPLINK), v(r::UPLINK_SD_MS), v(r::ENV_AGE_MS)),
-            format!("{} · AA {} ({}x{} per eye)", xr_host::server_line(), stream_aa().label(), self.rendered[0], self.rendered[1]),
+            format!("{} · AA {} ({}x{} per eye{})", xr_host::server_line(), stream_aa().name, self.rendered[0], self.rendered[1],
+                match cx.cx.xr_msaa() { 1 => String::new(), n => format!(", {n} samples") }),
             if v(r::AUDIO_RECEIVED) > 0.0 {
                 format!("audio {:.0} ms (net {:.1} buffer {:.0}/{:.0} device {:.0}; pictures {:.0}) · {:.0}/s lost {:.0} · underruns {:.0} concealed {:.0} · drift {:+.0} ppm{}",
                     v(r::AUDIO_MS), v(r::AUDIO_NET_MS), v(r::AUDIO_BUFFER_MS), v(r::AUDIO_TARGET_MS), v(r::AUDIO_DEVICE_MS), v(r::AUDIO_VIDEO_MS), v(r::AUDIO_RECEIVED), v(r::AUDIO_LOST) + v(r::AUDIO_LATE), v(r::AUDIO_UNDERRUNS), v(r::AUDIO_CONCEALED), v(r::AUDIO_DRIFT_PPM),

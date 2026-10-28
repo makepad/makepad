@@ -26,7 +26,8 @@ script_mod! {
             // Chain levels and the mesh <-> stand-in switch dissolve.
             self.door_window()
             let tex = self.base_texel()
-            if tex.w < 0.5 { self.clip() }
+            let cut = self.cut_coverage(tex.w, 0.5)
+            if cut <= 0.0 { self.clip() }
             let wp = self.v_csm.xyz
             let v = normalize(self.eye.xyz - wp)
             var n = normalize(self.v_csm_n)
@@ -49,7 +50,7 @@ script_mod! {
             let ambient = mix(self.sun_ground, self.sun_sky, clamp(n.y * 0.5 + 0.5, 0.0, 1.0)) * (ao * sao)
             let lit = albedo * (ambient + self.sun_color * ((wrap + through) * vis * mix(1.0, ao, 0.5)))
                 + self.to_scene(self.emissive_map.sample_repeat(self.v_uv).xyz) * self.emissive
-            return self.csm_debug_view(vec4(self.scene_fogged(self.to_display(lit), self.v_fog, wp, self.fog_density), 1.0), wp, n)
+            return self.csm_debug_view(vec4(self.scene_fogged(self.to_display(lit), self.v_fog, wp, self.fog_density), self.cut_alpha(cut)), wp, n)
         }
 
         fragment: fn() {

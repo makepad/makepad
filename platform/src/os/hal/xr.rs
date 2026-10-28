@@ -53,6 +53,8 @@ pub(crate) struct HalXr {
     /// `Cx::xr_set_supersample`: an offscreen XR pass (`info_flags::XR_OFFSCREEN`) renders at
     /// this many of its eye pixels per axis (1: the eye size); the app filters it down itself
     pub(crate) supersample: f32,
+    /// `Cx::xr_set_msaa`: the XR passes' samples per pixel (1: none)
+    pub(crate) msaa: u32,
 }
 
 /// A local-space point seen by eye 0's environment depth camera: its depth along that camera's
@@ -87,6 +89,7 @@ fn env_depth_at(header: &XrDepth, texels: &[u16], p: [f32; 3]) -> Option<(f32, O
 // asked before the XR window exists: applied when it is made
 thread_local! { static SEE_THROUGH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 thread_local! { static SUPERSAMPLE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) }; }
+thread_local! { static MSAA: std::cell::Cell<u32> = const { std::cell::Cell::new(1) }; }
 thread_local! { static REFRESH_MHZ: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
 
 fn pose(p: &XrPose) -> Pose {
@@ -118,7 +121,7 @@ impl Cx {
         self.hal.windows.insert(window.0, super::HalWindow::default());
         // the HAL sizes it (its first Geom confirms it)
         self.hal.frames.w.window_create(hal_window_id(window), window_kind::XR, Id::NONE, [0.0; 4], false);
-        self.hal.xr = Some(HalXr { window, frame: None, display_ns: 0, clock_offset_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None, hand_check_at: None, env_images: Vec::new(), env_depth_ns: 0, scene_to_room: Mat4f::identity(), supersample: SUPERSAMPLE.with(|s| s.get()) });
+        self.hal.xr = Some(HalXr { window, frame: None, display_ns: 0, clock_offset_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None, hand_check_at: None, env_images: Vec::new(), env_depth_ns: 0, scene_to_room: Mat4f::identity(), supersample: SUPERSAMPLE.with(|s| s.get()), msaa: MSAA.with(|m| m.get()) });
         if SEE_THROUGH.with(|s| s.get()) { self.hal_xr_see_through(true); }
         let refresh = REFRESH_MHZ.with(|r| r.get());
         if refresh != 0 { self.hal_xr_refresh_rate(refresh); }
@@ -150,6 +153,25 @@ impl Cx {
         xr.supersample = scale;
         let passes: Vec<_> = self.passes.id_iter().filter(|p| matches!(self.passes[*p].parent, CxDrawPassParent::Xr)).collect();
         for pass in passes { self.redraw_pass_and_child_passes(pass); }
+    }
+
+    /// `Cx::xr_set_msaa`: the XR passes repaint with that many samples per pixel (a count
+    /// the HAL has, `HalInfo::msaa`; else 1).
+    pub(crate) fn hal_xr_msaa(&mut self, samples: u32) {
+        let supported = self.hal.info.map_or(1, |i| i.msaa);
+        // the most samples the GPU has up to the count asked for
+        let samples = [8u32, 4, 2].into_iter().find(|n| *n <= samples && supported & n != 0).unwrap_or(1);
+        MSAA.with(|m| m.set(samples));
+        let Some(xr) = self.hal.xr.as_mut() else { return };
+        if xr.msaa == samples { return; }
+        xr.msaa = samples;
+        let passes: Vec<_> = self.passes.id_iter().filter(|p| matches!(self.passes[*p].parent, CxDrawPassParent::Xr)).collect();
+        for pass in passes { self.redraw_pass_and_child_passes(pass); }
+    }
+
+    /// The XR passes' samples per pixel (`Cx::xr_set_msaa`).
+    pub(crate) fn hal_xr_msaa_now(&self) -> u32 {
+        self.hal.xr.as_ref().map_or(1, |xr| xr.msaa)
     }
 
     /// The offscreen XR pass's pixels per eye pixel (`Cx::xr_set_supersample`).
@@ -301,8 +323,10 @@ impl Cx {
         let (view, projection) = eye_matrices(&frame, i);
         let view = Mat4f::mul(&view, &xr.scene_to_room);
         let inv = view.invert();
+        let msaa = xr.msaa as f32;
         let u = &mut xr.eye_uniforms[i];
         *u = *base;
+        u.msaa_samples = msaa;
         u.camera_view = view; u.camera_view_r = view;
         u.camera_projection = projection; u.camera_projection_r = projection;
         u.depth_view = view; u.depth_view_r = view;
@@ -320,8 +344,10 @@ impl Cx {
         let (view_r, projection_r) = eye_matrices(&frame, 1);
         let view = Mat4f::mul(&view, &xr.scene_to_room);
         let view_r = Mat4f::mul(&view_r, &xr.scene_to_room);
+        let msaa = xr.msaa as f32;
         let u = &mut xr.eye_uniforms[0];
         *u = *base;
+        u.msaa_samples = msaa;
         u.camera_view = view; u.camera_view_r = view_r;
         u.camera_projection = projection; u.camera_projection_r = projection_r;
         u.depth_view = view; u.depth_view_r = view_r;

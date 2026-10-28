@@ -15,12 +15,14 @@ pub(super) const ABSENT: u32 = u32::MAX;
 pub(super) const VIDEO_SHAPE: u32 = 6;
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
-pub(super) struct PassKey { pub colors: [u32; 4], pub depth: u32, pub load: [u8; 5], /** 1, or 2: a multiview pass */ pub views: u8, /** a fragment density map attachment after the others */ pub fdm: bool }
+pub(super) struct PassKey { pub colors: [u32; 4], pub depth: u32, pub load: [u8; 5], /** 1, or 2: a multiview pass */ pub views: u8, /** a fragment density map attachment after the others */ pub fdm: bool,
+    /** samples per pixel: 1, or an MSAA pass (`Pass::samples`) rendering into multisampled attachments resolved into the pass's own at its end */ pub samples: u8 }
 
 pub(super) struct RenderPass { pub dev: Arc<Device>, pub raw: vk::RenderPass, pub key: PassKey }
 
 impl RenderPass {
     pub fn new(dev: Arc<Device>, key: PassKey) -> Result<Arc<Self>, String> {
+        if key.samples > 1 { return Self::multisampled(dev, key); }
         let mut attachments = Vec::new();
         let mut colors = Vec::new();
         let count = key.colors.iter().rposition(|f| *f != ABSENT).map_or(0, |i| i + 1);
@@ -69,6 +71,79 @@ impl RenderPass {
             p_correlation_masks: mask.as_ptr(), ..Default::default() };
         if key.views > 1 { info = info.next_render_pass_multiview_create_info(&mut multiview); }
         let raw = unsafe { dev.raw.create_render_pass(&info, None) }.map_err(error)?;
+        Ok(Arc::new(Self { dev, raw, key }))
+    }
+}
+
+impl RenderPass {
+    /// An MSAA pass (`key.samples` > 1, `VK_KHR_create_renderpass2` + `VK_KHR_depth_stencil_resolve`):
+    /// the attachments are the multisampled colours, their resolve targets (the pass's own
+    /// colour textures), the multisampled depth and its resolve target (the pass's depth texture,
+    /// sample 0 of each pixel). The multisampled images load as the pass says and are stored
+    /// (a pass that loads continues them: the second eye of a side-by-side target, a profiler's
+    /// split); the resolve targets are written over in the render area only.
+    fn multisampled(dev: Arc<Device>, key: PassKey) -> Result<Arc<Self>, String> {
+        if key.fdm { return Err("an MSAA pass with a fragment density map".into()); }
+        let samples = vk::SampleCountFlags(key.samples as u32);
+        let load = |i: usize| match key.load[i] {
+            pass_load::LOAD => vk::AttachmentLoadOp::LOAD,
+            pass_load::CLEAR => vk::AttachmentLoadOp::CLEAR,
+            _ => vk::AttachmentLoadOp::DONT_CARE,
+        };
+        let count = key.colors.iter().rposition(|f| *f != ABSENT).map_or(0, |i| i + 1);
+        let used: Vec<usize> = (0..count).filter(|i| key.colors[*i] != ABSENT).collect();
+        let mut attachments = Vec::new();
+        let colour = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
+        for i in &used {
+            let fmt = vk_format(key.colors[*i]).ok_or("unknown color format")?;
+            attachments.push(vk::AttachmentDescription2::default().format(fmt).samples(samples).load_op(load(*i)).store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE).stencil_store_op(vk::AttachmentStoreOp::DONT_CARE).initial_layout(colour).final_layout(colour));
+        }
+        for i in &used {
+            let fmt = vk_format(key.colors[*i]).ok_or("unknown color format")?;
+            attachments.push(vk::AttachmentDescription2::default().format(fmt).samples(vk::SampleCountFlags::TYPE_1).load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .store_op(vk::AttachmentStoreOp::STORE).stencil_load_op(vk::AttachmentLoadOp::DONT_CARE).stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(colour).final_layout(colour));
+        }
+        // the colour references in slot order (an unused slot: VK_ATTACHMENT_UNUSED), and their resolves
+        let unused = vk::AttachmentReference2::default().attachment(u32::MAX).aspect_mask(vk::ImageAspectFlags::COLOR);
+        let mut colors = Vec::new();
+        let mut resolves = Vec::new();
+        for i in 0..count {
+            match used.iter().position(|u| *u == i) {
+                Some(k) => {
+                    colors.push(vk::AttachmentReference2::default().attachment(k as u32).layout(colour).aspect_mask(vk::ImageAspectFlags::COLOR));
+                    resolves.push(vk::AttachmentReference2::default().attachment((used.len() + k) as u32).layout(colour).aspect_mask(vk::ImageAspectFlags::COLOR));
+                }
+                None => { colors.push(unused); resolves.push(unused); }
+            }
+        }
+        let depth_layout = vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        let depth_at = attachments.len() as u32;
+        let depth_aspect = if key.depth == crate::types::format::DEPTH24_STENCIL8 { vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL } else { vk::ImageAspectFlags::DEPTH };
+        if key.depth != ABSENT {
+            let fmt = vk_format(key.depth).ok_or("unknown depth format")?;
+            attachments.push(vk::AttachmentDescription2::default().format(fmt).samples(samples).load_op(load(4)).store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(load(4)).stencil_store_op(vk::AttachmentStoreOp::STORE).initial_layout(depth_layout).final_layout(depth_layout));
+            attachments.push(vk::AttachmentDescription2::default().format(fmt).samples(vk::SampleCountFlags::TYPE_1).load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .store_op(vk::AttachmentStoreOp::STORE).stencil_load_op(vk::AttachmentLoadOp::DONT_CARE).stencil_store_op(vk::AttachmentStoreOp::STORE)
+                .initial_layout(depth_layout).final_layout(depth_layout));
+        }
+        let depth = vk::AttachmentReference2::default().attachment(depth_at).layout(depth_layout).aspect_mask(depth_aspect);
+        let depth_resolve = vk::AttachmentReference2::default().attachment(depth_at + 1).layout(depth_layout).aspect_mask(depth_aspect);
+        // depth: sample 0 of each pixel (every device's mode)
+        let mut resolve = vk::SubpassDescriptionDepthStencilResolve::default().depth_resolve_mode(vk::ResolveModeFlags::SAMPLE_ZERO)
+            .stencil_resolve_mode(if depth_aspect.contains(vk::ImageAspectFlags::STENCIL) { vk::ResolveModeFlags::SAMPLE_ZERO } else { vk::ResolveModeFlags::empty() })
+            .depth_stencil_resolve_attachment(&depth_resolve);
+        let mask = (1u32 << key.views.max(1)) - 1;
+        let mut subpass = vk::SubpassDescription2::default().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS).color_attachments(&colors).resolve_attachments(&resolves)
+            .view_mask(if key.views > 1 { mask } else { 0 });
+        if key.depth != ABSENT { subpass = subpass.depth_stencil_attachment(&depth).next_subpass_description_depth_stencil_resolve(&mut resolve); }
+        let subpasses = [subpass];
+        let masks = [mask];
+        let mut info = vk::RenderPassCreateInfo2::default().attachments(&attachments).subpasses(&subpasses);
+        if key.views > 1 { info = info.correlated_view_masks(&masks); }
+        let raw = unsafe { dev.raw.create_render_pass2(&info, None) }.map_err(error)?;
         Ok(Arc::new(Self { dev, raw, key }))
     }
 }
@@ -285,7 +360,7 @@ impl State {
         if program.desc.blend & pipeline_blend::RAW != 0 { return; }
         let mut colors = [ABSENT; 4];
         for i in 0..4 { if program.desc.outputs & (1 << i) != 0 { colors[i] = program.desc.color_formats[i]; } }
-        let key = PassKey { colors, depth: format::DEPTH32F, load: [pass_load::DONT_CARE; 5], views: 1, fdm: false };
+        let key = PassKey { colors, depth: format::DEPTH32F, load: [pass_load::DONT_CARE; 5], views: 1, fdm: false, samples: 1 };
         // a data target (R32F depth/shadow values, ids) is drawn without blending
         let blends = matches!(colors[0], format::BGRA8 | format::RGBA8 | format::RGBA16F);
         let flags = Draw::DEPTH_WRITE | if blends { Draw::BLEND } else { 0 };
@@ -368,7 +443,13 @@ fn create_variant(program: Arc<Program>, pass: &RenderPass, flags: u32) -> Resul
     let raster = vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(if lines { vk::PolygonMode::LINE } else { vk::PolygonMode::FILL })
         .cull_mode(if flags & Draw::CULL != 0 { vk::CullModeFlags::BACK } else { vk::CullModeFlags::NONE })
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE).line_width(1.0);
-    let samples = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    // an MSAA pass: its sample count, per-sample shading off (one fragment shader run per pixel);
+    // an opaque draw's alpha is its coverage of the pixel (alpha to coverage: a cut-out's edge,
+    // `cut_coverage` in the scene shaders), stored as 1 where the device can (alpha to one)
+    let msaa = pass.key.samples > 1;
+    let a2c = msaa && flags & Draw::BLEND == 0 && program.desc.blend & pipeline_blend::RAW == 0;
+    let samples = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags(pass.key.samples.max(1) as u32))
+        .alpha_to_coverage_enable(a2c).alpha_to_one_enable(a2c && dev.features.alpha_to_one == vk::TRUE);
     let count = pass.key.colors.iter().rposition(|f| *f != ABSENT).map_or(0, |i| i + 1);
     let attachments: Vec<_> = (0..count).map(|i| {
         let writes = program.desc.outputs & (1 << i) != 0 && pass.key.colors[i] != ABSENT;

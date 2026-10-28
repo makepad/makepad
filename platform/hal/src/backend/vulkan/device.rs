@@ -56,6 +56,10 @@ pub struct Device {
     /// Fragment density maps (VK_EXT_fragment_density_map: a target's coarser shading where
     /// its map says, an XR runtime's foveation), enabled when the device has them.
     pub fdm: bool,
+    /// The sample counts an MSAA pass may use (`HalInfo::msaa`: bit n = 2^n samples per pixel;
+    /// 1: none but single sampling): the framebuffer colour and depth counts, up to 8, when the
+    /// device resolves depth (VK_KHR_create_renderpass2 + VK_KHR_depth_stencil_resolve).
+    pub msaa: u32,
     /// The queue of the GPU's hardware video encoder (VK_KHR_video_encode_queue + H.264), when
     /// it has one: `video_encode::Stream` submits there. Its own lock: video submits never wait
     /// for the graphics queue's.
@@ -343,6 +347,14 @@ impl Device {
             if fdm.fragment_density_map != 0 { wanted.push(vk::EXT_FRAGMENT_DENSITY_MAP_NAME); }
         }
         let has_fdm = fdm.fragment_density_map != 0;
+        // MSAA passes: multisampled attachments resolved at the end of the subpass, depth (its
+        // sample 0) too
+        let msaa = if supported(vk::KHR_CREATE_RENDERPASS_2_NAME) && supported(vk::KHR_DEPTH_STENCIL_RESOLVE_NAME) {
+            wanted.push(vk::KHR_CREATE_RENDERPASS_2_NAME);
+            wanted.push(vk::KHR_DEPTH_STENCIL_RESOLVE_NAME);
+            let l = &properties.limits;
+            (l.framebuffer_color_sample_counts & l.framebuffer_depth_sample_counts).0 & 0b1111 | 1
+        } else { 1 };
         let mut fdm = vk::PhysicalDeviceFragmentDensityMapFeaturesEXT::default().fragment_density_map(has_fdm);
         wanted.sort_by(|a, b| a.to_bytes().cmp(b.to_bytes()));
         wanted.dedup();
@@ -373,7 +385,9 @@ impl Device {
             .texture_compression_bc(supported_features.texture_compression_bc == vk::TRUE)
             .texture_compression_astc_ldr(supported_features.texture_compression_astc_ldr == vk::TRUE)
             // line fill: frame capture's wireframe view (`Draw::WIREFRAME`)
-            .fill_mode_non_solid(supported_features.fill_mode_non_solid == vk::TRUE);
+            .fill_mode_non_solid(supported_features.fill_mode_non_solid == vk::TRUE)
+            // an MSAA pass's alpha to coverage stores alpha 1 (the resolve then holds the coverage)
+            .alpha_to_one(supported_features.alpha_to_one == vk::TRUE);
         let priorities = [1.0];
         // every encode engine's queue (up to 4)
         let video_count = video_family.map_or(0, |f| queues[f].queue_count.min(4));
@@ -436,7 +450,7 @@ impl Device {
         Ok(Some(Arc::new(Self {
             queue: unsafe { raw.get_device_queue(family as u32, 0) }, queue_lock: Mutex::new(()), raw, instance: instance.clone(),
             physical, family: family as u32, properties, memory, features, formats,
-            timestamp_bits: queue.timestamp_valid_bits, calibrated, extensions, present_wait: pacing, multiview: has_multiview, fdm: has_fdm, life: life.clone(),
+            timestamp_bits: queue.timestamp_valid_bits, calibrated, extensions, present_wait: pacing, multiview: has_multiview, fdm: has_fdm, msaa, life: life.clone(),
             video_encode,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: has_ycbcr, video_samplers: Mutex::new(Default::default()),
@@ -594,7 +608,7 @@ impl Device {
         Ok(Arc::new(Self { instance: instance.clone(), queue: unsafe { raw.get_device_queue(family as u32, 0) },
             raw, physical, queue_lock: Mutex::new(()), family: family as u32, properties, memory, features, formats,
             // a display peer only scans out: the GPU profiler times the rendering device
-            timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, multiview: false, fdm: false, life: owner.life.clone(), video_encode: None,
+            timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, multiview: false, fdm: false, msaa: 1, life: owner.life.clone(), video_encode: None,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: false, video_samplers: Mutex::new(Default::default()) }))
     }

@@ -37,7 +37,7 @@ fn set_refresh_mhz(mhz: u32) {
 const HOLD: usize = 6;
 
 mod serve;
-pub use serve::{serve, set_stream_aa, stream_aa, DrawXrBand, DrawXrMirror, StreamAa, XrServe, STREAM_AA_MODES};
+pub use serve::{serve, set_stream_aa, stream_aa, DrawXrBand, DrawXrMirror, StreamAa, XrServe, STREAM_AA_DEFAULT, STREAM_AA_MODES};
 #[cfg(not(target_arch = "wasm32"))]
 pub use serve::{set_menu_toggles_streaming, set_stream_bitrate_kbps, set_stream_refresh_hz, set_stream_room_scan, set_stream_see_through, set_streaming, stream_room_scan, streaming, streaming_changes, tap_audio, XrAudioTap, STREAM_REFRESH_RATES};
 /// The serving side's shaders and `mod.draw.XrServe` (an app that serves registers them).

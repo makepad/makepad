@@ -1251,6 +1251,8 @@ impl Cx {
         // attachments, and a viewport rounding up would exceed them
         pass.viewport = [0.0, 0.0, tw as f32, th as f32];
         pass.dpi = dpi as f32;
+        // an XR pass multisampled (`Cx::xr_set_msaa`; never a pick)
+        if stereo && !picking { pass.samples = self.hal_xr_msaa_now(); }
         if is_window {
             if let Some((_, image)) = hosted_target {
                 pass.color[0] = image;

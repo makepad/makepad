@@ -380,6 +380,8 @@ pub struct HalInfo {
     pub flags: u32,
     /// bit per [`format`]
     pub formats: u64,
+    /// The sample counts a pass may ask for ([`Pass::samples`]): bit n set = 2^n samples per
+    /// pixel (1: single sampling only, no MSAA).
     pub msaa: u32,
     pub dpi: f32,
     pub max_texture: u32,
@@ -1071,6 +1073,13 @@ pub struct Pass {
     /// draws run their pipelines' multiview stages once and the GPU renders every layer, the
     /// pass uniforms' `_r` matrices being the second view's.
     pub views: u32,
+    /// Samples per pixel: 0 or 1 single sampling; 2, 4 or 8 (a count in [`HalInfo::msaa`],
+    /// else single sampled) an MSAA pass: it renders into multisampled colour and depth images
+    /// of its attachments' formats and size the backend keeps per attachment, resolved into the
+    /// attachments at its end (colour: the samples' average; depth: sample 0). A pass that loads
+    /// continues the multisampled images (the second eye of a side-by-side target), not what
+    /// another pass wrote into the attachments.
+    pub samples: u32,
     pub uniforms: Slice,
     pub draws: Range,
     pub name: StrId,

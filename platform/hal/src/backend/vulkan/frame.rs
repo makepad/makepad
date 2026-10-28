@@ -58,6 +58,13 @@ fn dynamic_offset(p: &super::pipeline::Program, offsets: &mut [u32; MAX_DYNAMIC]
 /// A pass's view count: 2 for a multiview pass (`Pass::views`), else 1.
 pub(super) fn pass_views(pass: &Pass) -> u8 { if pass.views >= 2 { 2 } else { 1 } }
 
+/// A pass's samples per pixel (`Pass::samples`): 2, 4 or 8 when the device has that count
+/// (`supported`: `Device::msaa`), else 1.
+pub(super) fn pass_samples(pass: &Pass, supported: u32) -> u8 {
+    let n = pass.samples;
+    if matches!(n, 2 | 4 | 8) && supported & n != 0 { n as u8 } else { 1 }
+}
+
 pub(super) fn slice(range: Range, len: usize) -> Option<std::ops::Range<usize>> {
     let start = range.off as usize;
     start.checked_add(range.len as usize).filter(|end| *end <= len).map(|end| start..end)
@@ -481,6 +488,17 @@ impl Vulkan {
         Some(exec::SubmittedFrame { deps, window: scheduled })
     }
 
+    /// The multisampled image `samples` per pixel an MSAA pass renders into for `target` (made
+    /// at its first pass, kept while `target` lives; a resized target is a new image).
+    fn msaa_image(&mut self, target: &Arc<Image>, samples: u8) -> Result<Arc<Image>, String> {
+        self.msaa.retain(|_, (t, _)| t.strong_count() > 0);
+        let key = (target.image.as_raw(), samples);
+        if let Some((_, ms)) = self.msaa.get(&key) { return Ok(ms.clone()); }
+        let ms = Image::multisampled(self.dev.clone(), &target.desc, samples as u32)?;
+        self.msaa.insert(key, (Arc::downgrade(target), ms.clone()));
+        Ok(ms)
+    }
+
     fn encode_pass(&mut self, s: &mut Session, target: Id, is_window: bool, pick: bool, pass: &Pass, frame_size: [u32; 2], draws: &[Draw], view: &CmdView,
         batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>) -> Result<Option<Arc<Image>>, String> {
         let v = pass.viewport;
@@ -543,7 +561,9 @@ impl Vulkan {
         }
         // (a target with a registered density map renders with it: an XR runtime's foveation)
         let density = if self.dev.fdm { colors.first().and_then(|(_, c)| super::resources::density_map(c.image)) } else { None };
-        let mut key = PassKey { colors: [ABSENT; 4], depth: depth.as_ref().map_or(ABSENT, |d| d.desc.format), load: pass.load, views, fdm: density.is_some() };
+        // an MSAA pass (never a pick pass, nor one with a density map)
+        let samples = if pick || density.is_some() { 1 } else { pass_samples(pass, self.dev.msaa) };
+        let mut key = PassKey { colors: [ABSENT; 4], depth: depth.as_ref().map_or(ABSENT, |d| d.desc.format), load: pass.load, views, fdm: density.is_some(), samples };
         for (i, c) in &colors { key.colors[*i] = c.desc.format; }
         let render_pass = if let Some(pass) = self.passes.get(&key) { pass.clone() } else {
             let pass = RenderPass::new(self.dev.clone(), key)?; self.passes.insert(key, pass.clone()); pass
@@ -577,12 +597,35 @@ impl Vulkan {
         let mut attachment_views = Vec::new();
         let mut clear = Vec::new();
         batch.images.extend(attachments);
+        // an MSAA pass: the multisampled images first (the render pass's order: colours, their
+        // resolve targets, depth, its resolve target)
+        let view_of = |image: &Image, layer: u32| if views > 1 { image.array_view() } else { image.layers[layer as usize] };
+        let mut msaa_depth = None;
+        if samples > 1 {
+            for (i, color) in &colors {
+                let ms = self.msaa_image(color, samples)?;
+                ms.transition(batch.cb, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+                attachment_views.push(view_of(&ms, pass.layer[*i]));
+                clear.push(vk::ClearValue { color: vk::ClearColorValue { float32: pass.clear[*i] } });
+                batch.images.push(ms);
+            }
+            if let Some(depth) = &depth {
+                let ms = self.msaa_image(depth, samples)?;
+                ms.transition(batch.cb, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+                msaa_depth = Some(ms);
+            }
+        }
         for (i, color) in &colors {
             color.transition(batch.cb, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
             // a multiview pass renders into every layer: the attachment is the whole array
             attachment_views.push(if views > 1 { color.array_view() } else { color.layers[pass.layer[*i] as usize] });
             clear.push(vk::ClearValue { color: if color.desc.format == format::R32UINT { vk::ClearColorValue { uint32: pass.clear[*i].map(|f| f as u32) } }
                 else { vk::ClearColorValue { float32: pass.clear[*i] } } });
+        }
+        if let Some(ms) = msaa_depth {
+            attachment_views.push(view_of(&ms, 0));
+            clear.push(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: pass.clear_depth, stencil: 0 } });
+            batch.images.push(ms);
         }
         if let Some(depth) = &depth {
             depth.transition(batch.cb, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);

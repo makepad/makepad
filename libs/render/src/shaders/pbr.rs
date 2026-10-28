@@ -267,7 +267,7 @@ script_mod! {
                 alpha = mix(0.0, 1.0, step(0.36, cover) * step(0.02, w)) * self.material_alpha
             }
             if self.surface_on<0.5 && tex.w<0.5 {self.clip()}
-            if self.alpha_mode>0.5 && self.alpha_mode<1.5 && alpha<self.alpha_cutoff {self.clip()}
+            if self.alpha_mode>0.5 && self.alpha_mode<1.5 && self.cut_coverage(alpha, self.alpha_cutoff)<=0.0 {self.clip()}
             if self.triplanar != 0.0 {
                 // The brightness drift over ~60 m (tex.w, which the cuts
                 // above read, is untouched): after the cuts, so a splat
@@ -288,14 +288,34 @@ script_mod! {
             if self.surface_on < 0.5 && surf.w < 0.5 {self.clip()}
             // A Mask material cuts on the alpha its surface hook gives (the
             // stock hook returns the alpha tested above).
-            if self.alpha_mode>0.5 && self.alpha_mode<1.5 && surf.w<self.alpha_cutoff {self.clip()}
+            var cut = 1.0
+            if self.alpha_mode>0.5 && self.alpha_mode<1.5 {
+                cut = self.cut_coverage(surf.w, self.alpha_cutoff)
+                if cut<=0.0 {self.clip()}
+            }
             let albedo = surf.xyz
-            return self.shade(albedo, surf.w)
+            let out = self.shade(albedo, surf.w)
+            return vec4(out.xyz, out.w * self.cut_alpha(cut))
         }
 
         // The lit surface: the layer's metal/roughness and mapped normal,
         // then shade_mr. Its own function so an unlit program's variant can
         // replace it with shade_unlit (renderer/variants.rs).
+        // An alpha-tested cut-out's coverage of the pixel: 0 (cut: `clip`) or 1 at `cutoff`. In an
+        // MSAA pass (`draw_pass.msaa_samples`: its pipelines turn alpha into coverage) a ramp a pixel
+        // wide across the cut instead: the share of the pixel's samples the surface covers, so cut
+        // edges (leaves, fences, decals) are anti-aliased like geometry.
+        cut_coverage: fn(a: float, cutoff: float) -> float {
+            if self.draw_pass.msaa_samples > 1.5 {
+                return clamp((a - cutoff) / max(abs(dFdx(a)) + abs(dFdy(a)), 0.0001) + 0.5, 0.0, 1.0)
+            }
+            return step(cutoff, a)
+        }
+        // The output alpha of a cut-out of coverage `cut`: in an MSAA pass the coverage (colour
+        // not premultiplied: the samples it covers take the colour as it is), else 1 as always.
+        cut_alpha: fn(cut: float) -> float {
+            return mix(1.0, cut, step(1.5, self.draw_pass.msaa_samples))
+        }
         shade: fn(albedo: vec3, surf_w: float) -> vec4 {
             // The material. Factor x map, per the glTF spec; orm_on is 0 for
             // a factors-only material so the sample folds out to 1.

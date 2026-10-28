@@ -259,6 +259,8 @@ impl Replayer {
                     dpi: p.dpi,
                     // a multiview pass replays its first view (the target is one image)
                     views: 1,
+                    // (and single sampled: the replay's target has no multisampled images)
+                    samples: 1,
                     uniforms: Slice::from_bytes(&p.uniforms),
                     draws: Range::default(),
                     name: 0,

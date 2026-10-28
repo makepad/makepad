@@ -608,9 +608,11 @@ pub struct DrawPassUniforms {
     /// shader's static `uses_time` scan repaint the pass at display rate.
     #[live]
     pub shiny_time: f32,
-    // std140: the block ends on a vec4 boundary
+    /// Samples per pixel of the pass (2, 4, 8: an MSAA pass, its opaque draws' alpha is their
+    /// coverage; 0 or 1: single sampled).
     #[live]
-    pub pad0: f32,
+    pub msaa_samples: f32,
+    // std140: the block ends on a vec4 boundary
     #[live]
     pub pad1: f32,
     #[live]
@@ -633,7 +635,7 @@ crate::makepad_math::impl_gpu_pod!(DrawPassUniforms,
     display_dpi_factor: f32,
     time: f32,
     shiny_time: f32,
-    pad0: f32,
+    msaa_samples: f32,
     pad1: f32,
     pad2: f32,
 );
