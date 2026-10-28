@@ -106,18 +106,30 @@ pub mod report {
     /// The test signal's clicks (`MAKEPAD_XR_REMOTE_AUDIO_TEST`): due to the output buffer
     /// (ms, the device's buffer not included; 0: no click this second).
     pub const AUDIO_CLICK_MS: usize = 25;
-    pub const COUNT: usize = 26;
+    /// The repeats per second by cause: the picture due was not there yet (late: in flight or
+    /// decoding), the server never sent it (a newer one came), the headset let it go at its
+    /// queue cap, no pose went up for that frame. Then the blank frames per second (a frame
+    /// drawn without a picture for an eye) and the lead in display frames.
+    pub const REPEAT_LATE: usize = 26;
+    pub const REPEAT_SERVER: usize = 27;
+    pub const REPEAT_DROPPED: usize = 28;
+    pub const REPEAT_NOPOSE: usize = 29;
+    pub const BLANK: usize = 30;
+    pub const AHEAD: usize = 31;
+    pub const COUNT: usize = 32;
     /// After the numbers: how many display frames the window had, then their codes, 8 to a
     /// value (3 bits each, the first frame lowest: exact in an f32).
     pub const FRAMES: usize = COUNT;
     /// A display frame's code: a new picture, the one before again (repeat), a new one with
-    /// pictures skipped to catch up, an odd one (the odd-frame watch: a picture off its frame,
-    /// a jump), the display having missed a frame before it (late).
+    /// pictures skipped to catch up, an odd one (the odd-frame watch: a new picture off its
+    /// frame, a jump, not one XR draw), the display having missed a frame before it (late), a
+    /// frame without stream content (blank).
     pub const FRAME_NEW: u8 = 1;
     pub const FRAME_REPEAT: u8 = 2;
     pub const FRAME_SKIP: u8 = 3;
     pub const FRAME_ODD: u8 = 4;
     pub const FRAME_LATE: u8 = 5;
+    pub const FRAME_BLANK: u8 = 6;
     /// `codes` packed after the numbers (`FRAMES`).
     pub fn pack_frames(values: &mut Vec<f32>, codes: &[u8]) {
         values.truncate(FRAMES);

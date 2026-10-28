@@ -304,6 +304,8 @@ struct Counts {
     handed: u32,
     asked: u32,
     waited: u32,
+    /// Frames the app drew without content (`skip_frame`), by reason.
+    skipped: Vec<(&'static str, u32)>,
 }
 
 impl Counts {
@@ -314,7 +316,8 @@ impl Counts {
             return;
         }
         let r = |n: u32| n as f64 / secs;
-        log!("xr serve: draws {:.0}/s · new XR frames {:.0}/s · packed {:.0}/s · handed {:.0}/s · poses asked {:.0}/s · waited for room {}", r(self.draws), r(self.frames), r(self.packed), r(self.handed), r(self.asked), self.waited);
+        let skipped: Vec<String> = self.skipped.iter().map(|(why, n)| format!("{n} {why}")).collect();
+        log!("xr serve: draws {:.0}/s · new XR frames {:.0}/s · packed {:.0}/s · handed {:.0}/s · poses asked {:.0}/s · waited for room {} · not streamed (empty) {}", r(self.draws), r(self.frames), r(self.packed), r(self.handed), r(self.asked), self.waited, if skipped.is_empty() { "0".to_string() } else { skipped.join(", ") });
         // the app's audio (what the headset hears) stops for good when its callback panics
         {
             use makepad_widgets::makepad_platform::audio_output_fence as fence;
@@ -504,6 +507,33 @@ impl XrServe {
         let _ = (cx, color, depth);
     }
 
+    /// The app drew this XR frame without content (`why`): nothing is streamed for it (the
+    /// headset repeats its picture before, instead of a frame of only the room), counted on
+    /// the stats line, and the next pose is asked for.
+    pub fn skip_frame(&mut self, cx: &mut Cx2d, why: &'static str) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if !cx.cx.xr_offscreen() {
+                return;
+            }
+            let Some((display_ns, _)) = cx.cx.xr_frame_wire() else { return };
+            if display_ns == self.last_display_ns {
+                return;
+            }
+            self.last_display_ns = display_ns;
+            match self.counts.skipped.iter_mut().find(|(w, _)| *w == why) {
+                Some((_, n)) => *n += 1,
+                None => self.counts.skipped.push((why, 1)),
+            }
+            self.owed = true;
+            if let Some(signal) = &self.signal {
+                signal.set();
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (cx, why);
+    }
+
     /// The desktop's mirror: the left eye of `color` (the XR pass's side-by-side colour) fitted
     /// into `rect`.
     pub fn draw_mirror(&mut self, cx: &mut Cx2d, rect: Rect, color: &Texture) {
@@ -529,12 +559,13 @@ impl XrServe {
         let reports = xr_host::headset_reports();
         let Some(last) = reports.last() else { return };
         let v = |i: usize| last.get(i).copied().unwrap_or(0.0);
-        let panel = Rect { pos: mirror.pos + dvec2(12.0, 12.0), size: dvec2(470.0, 238.0) };
+        let panel = Rect { pos: mirror.pos + dvec2(12.0, 12.0), size: dvec2(470.0, 254.0) };
         self.draw_stats_bg.color = vec4(0.0, 0.0, 0.0, 0.62);
         self.draw_stats_bg.draw_abs(cx, panel);
         let lines = [
-            format!("headset {:.0} Hz · shown {:.0}/s · repeats {:.1}/s · skipped {:.1}/s · received {:.0}/s", v(r::DISPLAY), v(r::SHOWN), v(r::REPEATS), v(r::SKIPPED), v(r::RECEIVED)),
-            format!("motion to photon {:.0} ms (net {:.1} decode {:.1} queue {:.1}) · lead {:.0} ms", v(r::M2P_MS), v(r::NET_MS), v(r::DECODE_MS), v(r::WAIT_MS), v(r::LEAD_MS)),
+            format!("headset {:.0} Hz · shown {:.0}/s · BLANK {:.1}/s · skipped {:.1}/s · received {:.0}/s", v(r::DISPLAY), v(r::SHOWN), v(r::BLANK), v(r::SKIPPED), v(r::RECEIVED)),
+            format!("repeats {:.1}/s: late {:.1} · server skipped {:.1} · queue cap {:.1} · no pose {:.1}", v(r::REPEATS), v(r::REPEAT_LATE), v(r::REPEAT_SERVER), v(r::REPEAT_DROPPED), v(r::REPEAT_NOPOSE)),
+            format!("motion to photon {:.0} ms (net {:.1} decode {:.1} queue {:.1}) · lead {:.0} ms ({:.0} frames)", v(r::M2P_MS), v(r::NET_MS), v(r::DECODE_MS), v(r::WAIT_MS), v(r::LEAD_MS), v(r::AHEAD)),
             format!("uplink {:.0} poses/s ±{:.2} ms · env depth age {:.0} ms", v(r::UPLINK), v(r::UPLINK_SD_MS), v(r::ENV_AGE_MS)),
             xr_host::server_line(),
             if v(r::AUDIO_RECEIVED) > 0.0 {
@@ -554,7 +585,7 @@ impl XrServe {
             self.draw_stats_text.draw_abs(cx, at, &self.app_line);
         }
         // the last minute: shown/s (green, 0..90) and motion to photon (orange, 0..150 ms)
-        let base = panel.pos + dvec2(8.0, 174.0);
+        let base = panel.pos + dvec2(8.0, 190.0);
         let bw = 454.0 / 60.0;
         for (k, rep) in reports.iter().enumerate() {
             let x = base.x + k as f64 * bw;
@@ -567,24 +598,25 @@ impl XrServe {
         }
         // the last ~5 s frame by frame, newest right: one tick per display frame (a single repeat
         // in 90 barely moves a per-second bar): new dim, repeat yellow, skip red, odd bright red
-        // (tall), late purple (tall)
+        // (tall), late purple (tall), blank white (tall)
         let frames: Vec<u8> = {
             let mut all: Vec<u8> = Vec::new();
             for rep in reports.iter().rev().take(5).rev() { all.extend(r::frames(rep)); }
             let n = all.len().saturating_sub(454);
             all.split_off(n)
         };
-        let (strip_y, strip_h) = (panel.pos.y + 184.0, 18.0);
+        let (strip_y, strip_h) = (panel.pos.y + 200.0, 18.0);
         let x0 = panel.pos.x + 8.0 + 454.0 - frames.len() as f64;
-        let mut counts = [0u32; 6];
+        let mut counts = [0u32; 7];
         for (k, c) in frames.iter().enumerate() {
-            counts[(*c as usize).min(5)] += 1;
+            counts[(*c as usize).min(6)] += 1;
             let (color, h) = match *c {
                 r::FRAME_NEW => (vec4(0.3, 0.45, 0.35, 0.7), 0.4),
                 r::FRAME_REPEAT => (vec4(1.0, 0.9, 0.1, 1.0), 0.75),
                 r::FRAME_SKIP => (vec4(1.0, 0.25, 0.2, 1.0), 0.75),
                 r::FRAME_ODD => (vec4(1.0, 0.05, 0.05, 1.0), 1.0),
                 r::FRAME_LATE => (vec4(0.75, 0.3, 1.0, 1.0), 1.0),
+                r::FRAME_BLANK => (vec4(1.0, 1.0, 1.0, 1.0), 1.0),
                 _ => (vec4(0.2, 0.2, 0.2, 0.5), 0.2),
             };
             self.draw_stats_bar.color = color;
@@ -593,7 +625,7 @@ impl XrServe {
         let secs = (frames.len() as f64 / v(r::DISPLAY).max(1.0) as f64).max(1.0);
         let per_s = |c: u8| counts[c as usize] as f64 / secs;
         let line = if frames.is_empty() { "per frame: the headset sends no frame codes (an older client)".to_string() } else {
-            format!("last {:.0} s per s: repeats {:.1} · skips {:.1} · odd {:.1} · late {:.1}", secs, per_s(r::FRAME_REPEAT), per_s(r::FRAME_SKIP), per_s(r::FRAME_ODD), per_s(r::FRAME_LATE))
+            format!("last {:.0} s per s: repeats {:.1} · skips {:.1} · odd {:.1} · late {:.1} · blank {:.1}", secs, per_s(r::FRAME_REPEAT), per_s(r::FRAME_SKIP), per_s(r::FRAME_ODD), per_s(r::FRAME_LATE), per_s(r::FRAME_BLANK))
         };
         self.draw_stats_text.draw_abs(cx, dvec2(panel.pos.x + 8.0, strip_y + strip_h + 4.0), &line);
     }

@@ -22,6 +22,11 @@ pub const DEFAULT_PORT: u16 = 8794;
 const WORLD_MESSAGE_BYTES: usize = 16 << 10;
 /// The display period the client expects (ns; the stream runs at 90 Hz).
 const PERIOD_NS: u64 = 11_111_111;
+/// Decoded pictures a tile holds waiting for their display frame (with the shown one and the
+/// two before it nine of the decoder reader's eleven images: the decoder never waits for one).
+/// The lead never asks for more waiting than this holds (`steer_ahead`): a picture let go here
+/// was the one due next, a repeat.
+const HOLD: usize = 6;
 
 mod serve;
 pub use serve::{serve, DrawXrBand, DrawXrMirror, XrServe};
@@ -408,6 +413,10 @@ struct Shared {
     /// Video messages received, tiles decoded (the stats' rates).
     received: u32,
     decoded: u32,
+    /// The seqs of the last pictures that arrived (eye 0's tile), and those the decode threads
+    /// let go unshown at their queue cap (the last few: why a display frame repeated).
+    arrived: VecDeque<u64>,
+    cap_dropped: VecDeque<u64>,
     status: String,
     stop: bool,
     /// The uplink's last 5 s (rate, interval spread).
@@ -452,6 +461,10 @@ struct Window {
     repeats: u32,
     skipped: u32,
     dropped: u32,
+    /// The repeats by cause (`report::REPEAT_*`: late, server, dropped at the cap, no pose)
+    /// and the blank frames (drawn without a picture for an eye).
+    repeat_causes: [u32; 4],
+    blanks: u32,
     /// When (ms into the window) a frame repeated ('r'), a picture was skipped ('s'), the
     /// display skipped a frame ('l'): to line up with what the wearer saw.
     events: Vec<(u32, char)>,
@@ -758,10 +771,21 @@ impl XrStreamClient {
                     // this display frame's picture: the oldest decoded one
                     let display_ns = cx.xr_frame_wire().map_or(0, |(t, _)| t);
                     let fresh = self.take_picture(cx, display_ns);
-                    if !fresh {
+                    if !fresh && self.shown[0].is_some() {
                         self.window.repeats += 1;
-                        self.window.events.push((self.window_at.elapsed().as_millis() as u32, 'r'));
+                        let cause = self.repeat_cause(display_ns);
+                        self.window.repeat_causes[cause] += 1;
+                        self.window.events.push((self.window_at.elapsed().as_millis() as u32, ['r', 'v', 'c', 'p'][cause]));
                         self.mark_frame(makepad_desk_link::xr::report::FRAME_REPEAT);
+                    }
+                    // a frame with no stream content: no picture for an eye (the pass draws
+                    // nothing for it: only the room shows)
+                    let tiles = self.shared.lock().unwrap().tiles;
+                    if self.shown[0].is_none() || (tiles >= 2 && self.shown[1].is_none()) {
+                        if self.windows > 0 || self.window.display_frames > 90 {
+                            self.window.blanks += 1;
+                            self.mark_frame(makepad_desk_link::xr::report::FRAME_BLANK);
+                        }
                     }
                     // the picture taken for this frame is on the glass at this frame's display time
                     if let (Some((_, sample_ns, decoded_at, _)), Some((display_ns, _))) = (self.pending_show.take(), cx.xr_frame_wire()) {
@@ -846,23 +870,31 @@ impl XrStreamClient {
             return;
         }
         self.ahead_at = Instant::now();
+        // The pictures' sample to decoded over the last ~3 s: the lead covers its p90 (+2 ms).
+        // A rarer late picture shows a frame late (a repeat, then a skip); covering the p98 the
+        // lead latched at 8 frames on any burst (a stall, a hitch) and pictures waited 60 ms in
+        // the queue, at its cap, where the one due next was let go: a repeat every few frames.
+        // Never more than the queue holds: the median picture waits at most HOLD - 2 frames.
         let measured = if self.ready.len() >= 64 {
-            let mut v: Vec<f64> = self.ready.iter().copied().collect();
+            let mut v: Vec<f64> = self.ready.iter().rev().take(256).copied().collect();
             v.sort_by(|a, b| a.total_cmp(b));
-            let p98 = v[v.len() * 98 / 100];
-            (((p98 + 2.0e6) / PERIOD_NS as f64).ceil() as u32).clamp(1, 8)
+            let (p50, p90) = (v[v.len() / 2], v[v.len() * 9 / 10]);
+            let want = ((p90 + 2.0e6) / PERIOD_NS as f64).ceil() as u32;
+            let fits = (p50 / PERIOD_NS as f64).floor() as u32 + HOLD as u32 - 2;
+            want.min(fits).clamp(1, 8)
         } else {
             // (until measured: room for a ~30 ms sample to decoded)
             3
         };
         // (`pin_ahead` is the floor: more when the link needs it)
         let want = measured.max(self.pin_ahead);
+        // up at once; down once it has not been needed for 3 s (one burst does not hold it)
         let next = if want > self.ahead {
             self.ahead_less_since = None;
             want
         } else if want < self.ahead {
             let since = *self.ahead_less_since.get_or_insert_with(Instant::now);
-            if since.elapsed() >= Duration::from_secs(10) { self.ahead_less_since = None; self.ahead - 1 } else { self.ahead }
+            if since.elapsed() >= Duration::from_secs(3) { self.ahead_less_since = None; self.ahead - 1 } else { self.ahead }
         } else {
             self.ahead_less_since = None;
             self.ahead
@@ -938,7 +970,7 @@ impl XrStreamClient {
                     self.window.events.push((self.window_at.elapsed().as_millis() as u32, 's'));
                     // (as `mark_frame`: the shared state is borrowed here)
                     use makepad_desk_link::xr::report as r;
-                    if !matches!(self.frame_code, r::FRAME_ODD | r::FRAME_LATE) { self.frame_code = r::FRAME_SKIP; }
+                    if !matches!(self.frame_code, r::FRAME_ODD | r::FRAME_LATE | r::FRAME_BLANK) { self.frame_code = r::FRAME_SKIP; }
                 }
                 let mut out: Vec<Decoded> = Vec::with_capacity(tiles);
                 for t in 0..tiles {
@@ -1193,7 +1225,9 @@ impl XrStreamClient {
         while self.watch.len() > 6 {
             self.watch.pop_front();
         }
-        let odd = off.abs() > 0.5 || self.watch_seq.1 >= 3 || draws != 1 || render_view > 6.0 || (turn > 0.3 && turn > 2.5 * turn_before.max(0.05)) || (turn_before > 0.3 && turn < turn_before / 2.5);
+        // (a repeat is off by its frames by definition: counted as a repeat with its cause, not
+        // here; a new picture off its frame, not one XR draw, a jump are odd)
+        let odd = (fresh && off.abs() > 0.5) || draws != 1 || render_view > 6.0 || (turn > 0.3 && turn > 2.5 * turn_before.max(0.05)) || (turn_before > 0.3 && turn < turn_before / 2.5);
         if odd {
             self.mark_frame(makepad_desk_link::xr::report::FRAME_ODD);
         }
@@ -1209,11 +1243,37 @@ impl XrStreamClient {
         }
     }
 
+    /// Why display frame `display_ns` repeats (`Window::repeat_causes`): 0 its picture is not
+    /// here yet (in flight, decoding, one eye only), 1 the server never sent it (a newer one
+    /// arrived), 2 this headset let it go at its queue cap, 3 no pose went up for this frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn repeat_cause(&self, display_ns: u64) -> usize {
+        let seq = {
+            let sent = self.sent.lock().unwrap();
+            match sent.iter().find(|p| p.display_ns.abs_diff(display_ns) < PERIOD_NS / 2) {
+                Some(p) => p.seq,
+                None => return 3,
+            }
+        };
+        let s = self.shared.lock().unwrap();
+        if s.cap_dropped.contains(&seq) {
+            return 2;
+        }
+        // (never arrived while a newer one did: the server skipped it)
+        let newest = s.arrived.back().copied().unwrap_or(0);
+        if newest > seq && !s.arrived.contains(&seq) { 1 } else { 0 }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn repeat_cause(&self, _display_ns: u64) -> usize {
+        0
+    }
+
     /// This display frame's code becomes `code` when that is worse (odd, late, skip, repeat,
     /// new; none yet: anything).
     fn mark_frame(&mut self, code: u8) {
         use makepad_desk_link::xr::report as r;
-        let rank = |c: u8| match c { r::FRAME_ODD => 5, r::FRAME_LATE => 4, r::FRAME_SKIP => 3, r::FRAME_REPEAT => 2, r::FRAME_NEW => 1, _ => 0 };
+        let rank = |c: u8| match c { r::FRAME_BLANK => 6, r::FRAME_ODD => 5, r::FRAME_LATE => 4, r::FRAME_SKIP => 3, r::FRAME_REPEAT => 2, r::FRAME_NEW => 1, _ => 0 };
         if rank(code) > rank(self.frame_code) { self.frame_code = code; }
     }
 
@@ -1239,7 +1299,7 @@ impl XrStreamClient {
             v.get(v.len() * 9 / 10).map_or(0.0, |x| *x as f64 / 1000.0)
         };
         let line = format!(
-            "odd frames {} · display {:.0}/s · recv {:.0}/s dec {:.0}/s shown {:.0}/s · m2p {:.0} ms = render {:.1} gpu {:.1} enc {:.1} send {:.1} net {:.1} dec {:.1} wait {:.1} (trip {:.0}) · {} unmatched · env depth age {:.0}/{:.0} ms · pose echo max diff {:e} · repeats {} skipped {} dropped {}",
+            "odd frames {} · display {:.0}/s · recv {:.0}/s dec {:.0}/s shown {:.0}/s · m2p {:.0} ms = render {:.1} gpu {:.1} enc {:.1} send {:.1} net {:.1} dec {:.1} wait {:.1} (trip {:.0}) · {} unmatched · env depth age {:.0}/{:.0} ms · pose echo max diff {:e} · repeats {} (late {} server {} cap {} no pose {}) blank {} skipped {} dropped {}",
             self.odd_frames,
             rate(w.display_frames),
             rate(received.wrapping_sub(r0)),
@@ -1259,6 +1319,11 @@ impl XrStreamClient {
             env_p90,
             w.echo_err_deg,
             w.repeats,
+            w.repeat_causes[0],
+            w.repeat_causes[1],
+            w.repeat_causes[2],
+            w.repeat_causes[3],
+            w.blanks,
             w.skipped,
             w.dropped
         );
@@ -1283,6 +1348,11 @@ impl XrStreamClient {
             v[report::UPLINK_SD_MS] = uplink.1;
             v[report::LEAD_MS] = (self.lead_ns / 1e6) as f32;
             v[report::SKIPPED] = rate(w.skipped) as f32;
+            for (i, k) in [report::REPEAT_LATE, report::REPEAT_SERVER, report::REPEAT_DROPPED, report::REPEAT_NOPOSE].into_iter().enumerate() {
+                v[k] = rate(w.repeat_causes[i]) as f32;
+            }
+            v[report::BLANK] = rate(w.blanks) as f32;
+            v[report::AHEAD] = self.ahead as f32;
             // the sound waits as long as a picture's content takes to show (motion to photon
             // less the pose's way up)
             let m2p_ms = v[report::M2P_MS];
@@ -1662,7 +1732,14 @@ fn worker(host: String, port: u16, info: HeadsetInfo, shared: Arc<Mutex<Shared>>
                 }
                 XrServerMsg::Video { seq, tile, key, display_ns, eyes, focus_m, stages, size, codec, data } => {
                     let Some(tx) = tiles.get(tile as usize) else { continue };
-                    shared.lock().unwrap().received += 1;
+                    {
+                        let mut s = shared.lock().unwrap();
+                        s.received += 1;
+                        if tile == 0 {
+                            s.arrived.push_back(seq);
+                            if s.arrived.len() > 64 { s.arrived.pop_front(); }
+                        }
+                    }
                     let head = VideoHead { seq, tile, key, display_ns, eyes, focus_m, stages, size, codec };
                     let _ = tx.send((head, data, Instant::now()));
                 }
@@ -1738,9 +1815,15 @@ fn decode_tile(tile: usize, codec: StreamVideoCodec, size: [u32; 2], rx: std::sy
                     // reader's eleven images: the decoder never waits for one (with all of them
                     // held it did, each picture then decoded late, and the lead measured from
                     // that grew without end)
-                    while held.len() >= 6 {
-                        held.pop_front();
+                    let mut let_go = Vec::new();
+                    while held.len() >= HOLD {
+                        if let Some(d) = held.pop_front() { let_go.push(d.head.seq); }
                     }
+                    for seq in let_go {
+                        s.cap_dropped.push_back(seq);
+                        if s.cap_dropped.len() > 64 { s.cap_dropped.pop_front(); }
+                    }
+                    let held = &mut s.latest[tile & 1];
                     held.push_back(Decoded { nv12: f.nv12, gpu: f.gpu, size: [f.width, f.height], head, decode_us, arrived_at, decoded_at: Instant::now() });
                     drop(s);
                     signal.set();

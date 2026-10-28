@@ -277,6 +277,8 @@ impl Runtime {
             unsafe { (loader.xrEnumerateInstanceExtensionProperties)(ptr::null(), cap, len, buf) }.to_result("xrEnumerateInstanceExtensionProperties")
         })?;
         let has_extension = |name: &'static str| exts.iter().any(|e| xr_string_zero_terminated(&e.extension_name) == name);
+        // (once: everything the runtime offers, for choosing what the compositor could do for us)
+        xr_log!("runtime extensions ({}): {}", exts.len(), exts.iter().map(|e| xr_string_zero_terminated(&e.extension_name).trim_end_matches(char::from(0)).to_string()).collect::<Vec<_>>().join(" "));
 
         let mut exts_needed = vec![
             "XR_EXT_performance_settings\0",
@@ -435,6 +437,22 @@ struct Frames { panel: Mutex<Option<Pending>>, stereo: Mutex<Option<Pending>>, a
 /// was free only ~3-8 ms after the frame before was ended (the compositor still held the other
 /// two), and every frame waited for it; the other chain's next image is free at once.
 /// `images` are both chains' (`owner`: the chain of each), `acquired` holds their indices.
+/// A pair of projection chains of one eye size and their render targets, kept while another
+/// size is in use (`CxOpenXrSession::chain_spare`), and since when it is unused.
+struct ChainSet { size: [u32; 2], a: Chain, b: Chain, targets: Targets, unused_since: Instant }
+unsafe impl Send for ChainSet {}
+
+impl ChainSet {
+    fn destroy(&mut self, xr: &LibOpenXr, dev: &Arc<Device>) {
+        self.a.destroy(xr, dev);
+        self.b.destroy(xr, dev);
+    }
+}
+
+/// A session handle moved to the chain builder (creating swapchains needs no external sync).
+struct SendSession(XrSession);
+unsafe impl Send for SendSession {}
+
 struct Targets { handles: Vec<XrSwapchain>, images: Vec<Arc<Image>>, owner: Vec<usize>, base: Vec<usize>, next: usize, acquired: std::collections::VecDeque<usize>, submitted: bool }
 
 impl Targets {
@@ -1023,6 +1041,10 @@ struct CxOpenXrSession {
     foveation_applied: u32,
     /// the dynamic eye scale's controller
     eye_scale: EyeScale,
+    /// projection chains of other eye sizes, kept (`ChainSet`), and the set being built for a
+    /// size the scale is going to (its percent)
+    chain_spare: Vec<ChainSet>,
+    chain_build: Option<(u32, std::thread::JoinHandle<Result<ChainSet, String>>)>,
     /// simultaneous hands and controllers tracking is resumed (the inputs resume it at start)
     hands_and_controllers: bool,
     /// the environment depth provider runs (started with the session)
@@ -1031,18 +1053,19 @@ struct CxOpenXrSession {
 
 /// The dynamic eye scale (`hal_xr_eye_scale`): the eye buffers step between 100, 90, 80 and 70%
 /// of the start size on the runtime's app GPU frame time (XR_META_performance_metrics' counter,
-/// the time VrApi logs as App), so a heavier view never drops display frames: down when the
-/// mean over half a second passes 82% of the display period twice running, up when the next
-/// size's predicted time stays under 75% for 3 s. A step at most every 2 s (down) or 5 s (up):
-/// a change remakes the projection chains (one frame copied in, ~20 ms of the XR thread). The
-/// prediction scales only the part above the floor by the pixels: most of the time is not the
-/// app's (the compositor and passthrough share the GPU: ~6.8 ms with nothing drawn), and
-/// scaling all of it kept the eyes at 90% for good. The floor: the least half-second mean of
-/// the last minute. A step down within 4 s of a step up doubles the wait before the next step
-/// up (5 s, 10, 20 .. 80; back to 5 after a minute without one): no see-saw in a view that
-/// needs the size between two steps.
-struct EyeScale { counter: Option<XrPath>, sum_ms: f64, n: u32, window_at: Instant, over: u32, under: u32, changed_at: Instant, log_sum_ms: f64, log_n: u32, recent_ms: std::collections::VecDeque<f64>,
-    up_hold_s: u64, went_up: bool }
+/// the time VrApi logs as App), so a heavier view never drops display frames. It decides from
+/// what it MEASURED at each size (the median of its half-second means there, from 1 s after
+/// the change), not from a model: the app's time barely follows the pixels (70%: 7.0-7.6 ms,
+/// 80%: 7.2-10.3, 90%: 6.6-8.4 on one race view), and a model that scaled it with them stepped
+/// up, missed, stepped down again every few seconds (each step a frame or two of the
+/// compositor's). Down: a sustained overload (3 s of means over 85% of the period) and the
+/// smaller size not measured to cost about as much (a step that did not lower the time is not
+/// taken again). Up: at most every 30 s, when the bigger size measured (else predicted from
+/// this one by its pixels) under 70% of the period, or measured no dearer than this one. A
+/// steady view picks its size and stays.
+struct EyeScale { counter: Option<XrPath>, sum_ms: f64, n: u32, window_at: Instant, over: u32, changed_at: Instant, log_sum_ms: f64, log_n: u32,
+    /// per step (`STEPS` index): its recent settled half-second means (ms)
+    cost: [std::collections::VecDeque<f64>; 4] }
 
 impl EyeScale {
     const STEPS: [u32; 4] = [100, 90, 80, 70];
@@ -1055,7 +1078,16 @@ impl EyeScale {
             XrPath::new(xr, instance, "/perfmetrics_meta/app/gpu_frametime").map_err(|e| xr_log!("{e}")).ok()
         })();
         xr_log!("dynamic eye scale: {}", if counter.is_some() { "the runtime's app GPU frame time" } else { "no performance metrics (fixed size)" });
-        EyeScale { counter, sum_ms: 0.0, n: 0, window_at: Instant::now(), over: 0, under: 0, changed_at: Instant::now(), log_sum_ms: 0.0, log_n: 0, recent_ms: Default::default(), up_hold_s: 5, went_up: false }
+        EyeScale { counter, sum_ms: 0.0, n: 0, window_at: Instant::now(), over: 0, changed_at: Instant::now(), log_sum_ms: 0.0, log_n: 0, cost: Default::default() }
+    }
+
+    /// The measured cost of step `i` (the median of its settled means; None: not measured).
+    fn cost_of(&self, i: usize) -> Option<f64> {
+        let c = &self.cost[i];
+        if c.len() < 4 { return None; }
+        let mut v: Vec<f64> = c.iter().copied().collect();
+        v.sort_by(|a, b| a.total_cmp(b));
+        Some(v[v.len() / 2])
     }
 
     /// One display frame: the counter sampled; the percent to change to, when it is time.
@@ -1075,24 +1107,33 @@ impl EyeScale {
         let range = EYE_PERCENT_RANGE.load(Ordering::Acquire);
         let (min, max) = ((range >> 32) as u32, range as u32);
         let now = EYE_PERCENT.load(Ordering::Acquire);
-        // (the steps within the range, the range's ends included)
-        let down = Self::STEPS.iter().copied().find(|&p| p < now).map(|p| p.max(min)).filter(|&p| p < now);
-        let up = Self::STEPS.iter().rev().copied().find(|&p| p > now).map(|p| p.min(max)).filter(|&p| p > now);
         if now > max || now < min { return Some(now.clamp(min, max)); }
-        self.recent_ms.push_back(mean);
-        if self.recent_ms.len() > 120 { self.recent_ms.pop_front(); }
-        let floor = self.recent_ms.iter().copied().fold(mean, f64::min);
-        self.over = if mean > 0.82 * period_ms { self.over + 1 } else { 0 };
-        let next_ms = up.map_or(f64::MAX, |p| floor + (mean - floor) * (p as f64 / now as f64).powi(2));
-        self.under = if next_ms < 0.75 * period_ms { self.under + 1 } else { 0 };
         let since = self.changed_at.elapsed();
-        if since >= Duration::from_secs(60) { self.up_hold_s = 5; }
-        let to = if self.over >= 2 && since >= Duration::from_secs(2) { down } else if self.under >= 6 && since >= Duration::from_secs(self.up_hold_s) { up } else { None };
-        if let Some(p) = to {
-            let going_up = p > now;
-            if !going_up && self.went_up && since < Duration::from_secs(4) { self.up_hold_s = (self.up_hold_s * 2).min(80); }
-            self.went_up = going_up;
-            (self.over, self.under) = (0, 0);
+        let Some(here) = Self::STEPS.iter().position(|&p| p == now) else { return None };
+        // (settled at this size: its cost)
+        if since >= Duration::from_secs(1) {
+            let c = &mut self.cost[here];
+            c.push_back(mean);
+            if c.len() > 20 { c.pop_front(); }
+        }
+        let down = (here + 1 < Self::STEPS.len() && Self::STEPS[here + 1] >= min).then_some(here + 1);
+        let up = (here > 0 && Self::STEPS[here - 1] <= max).then(|| here - 1);
+        self.over = if mean > 0.85 * period_ms { self.over + 1 } else { 0 };
+        let cost_here = self.cost_of(here).unwrap_or(mean);
+        let to = if self.over >= 6 {
+            // a smaller size that measured about as dear does not help
+            down.filter(|&d| self.cost_of(d).is_none_or(|c| c < cost_here - 0.5))
+        } else if since >= Duration::from_secs(30) && self.over == 0 {
+            up.filter(|&u| match self.cost_of(u) {
+                Some(c) => c < 0.70 * period_ms || c <= cost_here + 0.3,
+                None => cost_here * (Self::STEPS[u] as f64 / now as f64).powi(2) < 0.70 * period_ms,
+            })
+        } else {
+            None
+        };
+        let to = to.map(|i| Self::STEPS[i]);
+        if to.is_some() {
+            self.over = 0;
             self.changed_at = Instant::now();
         }
         to
@@ -1239,7 +1280,7 @@ impl CxOpenXrSession {
             pointer: Pointer { hand: 1, ..Default::default() }, controllers: Default::default(), hands: Default::default(),
             panel_shown: None, panel_visible: true, panel_over_stereo: false, cursor_ready: false, stereo_asked: None, stereo_shown: None, stereo_focus: 0.0, depth_layer, stereo_asked_at: Instant::now(),
             stats: [0; 4], frame_us: Vec::new(), stereo_asked_ns: 0, requested_refresh_mhz: 0, eyes_own: 0, eyes_asked: 0, paths: [0; 3], phases: [0; 7], stats_at: Instant::now(), stereo_b: Some(stereo_b), stereo_shown_chain: None,
-            stereo_base_format: format, stereo_blit: blit, linear_ok, foveation_applied: u32::MAX, eye_scale: EyeScale::new(xr, rt.instance, handle), hands_and_controllers: true, environment_depth: true };
+            stereo_base_format: format, stereo_blit: blit, linear_ok, foveation_applied: u32::MAX, eye_scale: EyeScale::new(xr, rt.instance, handle), chain_spare: Vec::new(), chain_build: None, hands_and_controllers: true, environment_depth: true };
         let _ = session.update_active_display_refresh_rate();
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -1569,9 +1610,44 @@ impl CxOpenXrSession {
     }
 
     /// The dynamic eye scale (`EyeScale`): a new size goes to the XR window as its geometry
-    /// (the app's next frames render at it; the chains follow the first such frame, `update_stereo`).
+    /// (the app's next frames render at it; the chains follow the first such frame,
+    /// `update_stereo`) once projection chains of that size exist: they are built on a thread of
+    /// their own first (building them in the XR thread took ~10 ms of a frame). Chains of a size
+    /// left are kept; ones unused for a second beyond the newest spare are let go on a thread
+    /// (no frame, and so no fallback the compositor shows, refers to them any more).
     fn step_eye_scale(&mut self, xr_window: Option<(u32, Id)>, period: i64) {
+        // a set built: kept, and the size it was built for goes to the app
+        if self.chain_build.as_ref().is_some_and(|(_, h)| h.is_finished()) {
+            let (to, build) = self.chain_build.take().unwrap();
+            match build.join() {
+                Ok(Ok(set)) => { self.chain_spare.push(set); self.apply_eye_percent(to, xr_window, period); }
+                Ok(Err(e)) => xr_log!("projection chains for {to}%: {e}"),
+                Err(_) => xr_log!("projection chains for {to}%: the builder panicked"),
+            }
+        }
+        self.retire_spare_chains();
         let Some(to) = self.eye_scale.sample(&self.rt.xr, self.handle, period as f64 / 1e6) else { return };
+        if to == EYE_PERCENT.load(Ordering::Acquire) || self.chain_build.is_some() { return; }
+        let eye = eye_at(to);
+        if self.stereo.as_ref().is_some_and(|c| c.size == eye) || self.chain_spare.iter().any(|c| c.size == eye) {
+            self.apply_eye_percent(to, xr_window, period);
+            return;
+        }
+        let (rt, dev, session, format, blit, linear) = (self.rt.clone(), self.dev.clone(), self.handle, self.stereo_base_format, self.stereo_blit, LINEAR_ACTIVE.load(Ordering::Acquire));
+        let started = Instant::now();
+        let session = SendSession(session);
+        match std::thread::Builder::new().name("hal-xr-chains".into()).spawn(move || {
+            let session = session;
+            let (a, b, targets) = stereo_chains(&rt.xr, &dev, session.0, format, eye, blit, linear)?;
+            log(&format!("projection chains at {}x{} px per eye built aside in {:.1} ms", eye[0], eye[1], started.elapsed().as_secs_f64() * 1e3));
+            Ok(ChainSet { size: eye, a, b, targets, unused_since: Instant::now() })
+        }) {
+            Ok(h) => self.chain_build = Some((to, h)),
+            Err(e) => xr_log!("projection chains thread: {e}"),
+        }
+    }
+
+    fn apply_eye_percent(&mut self, to: u32, xr_window: Option<(u32, Id)>, period: i64) {
         let from = EYE_PERCENT.swap(to, Ordering::AcqRel);
         if from == to { return; }
         let eye = eye_at(to);
@@ -1581,14 +1657,40 @@ impl CxOpenXrSession {
         }
     }
 
-    /// The projection chains made anew at `eye` (a frame of that size arrived: the eye scale
-    /// changed), with no image held. The frame's foveation is applied again.
+    /// Spare chains beyond the newest one, unused for a second, destroyed on a thread.
+    fn retire_spare_chains(&mut self) {
+        if self.chain_spare.len() <= 1 { return; }
+        self.chain_spare.sort_by_key(|c| std::cmp::Reverse(c.unused_since));
+        let old: Vec<ChainSet> = self.chain_spare.drain(1..).collect();
+        let (keep, gone): (Vec<ChainSet>, Vec<ChainSet>) = old.into_iter().partition(|c| c.unused_since.elapsed() < Duration::from_secs(1));
+        self.chain_spare.extend(keep);
+        if gone.is_empty() { return; }
+        let (rt, dev) = (self.rt.clone(), self.dev.clone());
+        let _ = std::thread::Builder::new().name("hal-xr-chains".into()).spawn(move || {
+            for mut set in gone { set.destroy(&rt.xr, &dev); }
+        });
+    }
+
+    /// The projection chains switched to `eye` (a frame of that size arrived: the eye scale
+    /// changed), with no image held: a spare set of that size (built aside, `step_eye_scale`),
+    /// else made here. The chains left become a spare set (never destroyed under the frame
+    /// the compositor may still show). The frame's foveation is applied again.
     fn resize_stereo_chains(&mut self, eye: [u32; 2]) -> Result<(), String> {
-        let linear = LINEAR_ACTIVE.load(Ordering::Acquire);
-        let (a, b, t) = stereo_chains(&self.rt.xr, &self.dev, self.handle, self.stereo_base_format, eye, self.stereo_blit, linear)?;
-        *lock(&self.frames.stereo_targets) = Some(t);
-        if let Some(mut old) = self.stereo.replace(a) { old.destroy(&self.rt.xr, &self.dev); }
-        if let Some(mut old) = self.stereo_b.replace(b) { old.destroy(&self.rt.xr, &self.dev); }
+        let set = match self.chain_spare.iter().position(|c| c.size == eye) {
+            Some(i) => self.chain_spare.swap_remove(i),
+            None => {
+                crate::profile::count("xr projection chains made in the frame");
+                let linear = LINEAR_ACTIVE.load(Ordering::Acquire);
+                let (a, b, targets) = stereo_chains(&self.rt.xr, &self.dev, self.handle, self.stereo_base_format, eye, self.stereo_blit, linear)?;
+                ChainSet { size: eye, a, b, targets, unused_since: Instant::now() }
+            }
+        };
+        let old_targets = lock(&self.frames.stereo_targets).replace(set.targets);
+        let old_a = self.stereo.replace(set.a);
+        let old_b = self.stereo_b.replace(set.b);
+        if let (Some(a), Some(b), Some(targets)) = (old_a, old_b, old_targets) {
+            self.chain_spare.push(ChainSet { size: a.size, a, b, targets, unused_since: Instant::now() });
+        }
         self.stereo_shown_chain = None;
         self.foveation_applied = u32::MAX;
         self.apply_foveation();
@@ -1880,6 +1982,8 @@ impl Drop for CxOpenXrSession {
         self.cursor.destroy(xr, &dev);
         if let Some(stereo) = &mut self.stereo { stereo.destroy(xr, &dev); }
         if let Some(stereo) = &mut self.stereo_b { stereo.destroy(xr, &dev); }
+        if let Some((_, build)) = self.chain_build.take() { if let Ok(Ok(set)) = build.join() { self.chain_spare.push(set); } }
+        for mut set in self.chain_spare.drain(..) { set.destroy(xr, &dev); }
         if let Some(depth) = &mut self.depth_layer { depth.destroy(xr, &dev); }
         if let Some(depth) = &mut self.depth { depth.destroy(&dev); }
         if self.depth_provider.0 != 0 {
