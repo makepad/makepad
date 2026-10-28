@@ -459,6 +459,12 @@ impl App {
         });
     }
 
+    /// The window the WM shows as this process's tile: its first (a tray dropdown is a flyout,
+    /// never the tile).
+    fn tile_window(&self) -> Option<Key> {
+        self.windows.iter().filter(|(_, w)| !w.dropdown).min_by_key(|(_, w)| w.window_id).map(|(k, _)| *k)
+    }
+
     /// The first window: input without a window id lands there.
     fn input_recipient(&self) -> Option<Key> {
         self.windows.values().min_by_key(|w| w.window_id).map(|w| w.recipient)
@@ -528,7 +534,11 @@ impl App {
             }
             // The WM closed the tile: each window is asked to close, as a window manager's
             // close button asks (the app may save first; `makepad run` ends the run).
+            // With no window left to ask (the app closed its own), the process is asked to quit.
             StudioToApp::Kill => {
+                if self.windows.is_empty() {
+                    self.quit();
+                }
                 for key in self.windows.keys() {
                     self.state.shared.push(*key, |q, id| q.close_requested(id));
                 }
@@ -825,11 +835,18 @@ impl Shell for App {
                 }
                 OsCmd::WindowClose { id } => {
                     let Some(key) = self.resolve((sid, id)) else { return };
+                    let tile = self.tile_window() == Some(key);
                     if let Some(w) = self.windows.remove(&key) {
                         lock(&self.state.rings).remove(&key);
                         lock(&self.state.in_flight).remove(&key);
                         self.state.shared.push(w.recipient, |q, id| q.closed(id));
                         self.finish_tick();
+                        // The app closed the window the WM shows as its tile (its caption's close
+                        // said yes): the WM closes the tile, as a native window's close takes the
+                        // window off the screen. It asks the process to end with it (`Kill`).
+                        if tile {
+                            self.window_op(window_op::CLOSE);
+                        }
                     }
                 }
                 // The app's caption buttons: the WM minimises, maximises or closes the tile.
@@ -1326,7 +1343,7 @@ mod tests {
 
     /// `makepad run` under the WM draws its own caption: the WM's drag query reaches the app's
     /// window (lent to the app's domain), the app's answer goes back under the WM's id, and the
-    /// caption buttons of the lent window become the WM's window ops.
+    /// caption buttons of the lent window become the WM's window ops; the app closing that window closes the tile.
     #[test]
     fn the_caption_of_a_lent_window_answers_the_wm_and_the_wm_appearance_reaches_host_dark() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1337,7 +1354,7 @@ mod tests {
             let mut byte = [0u8];
             while !request.ends_with(b"\r\n\r\n") { stream.read_exact(&mut byte).unwrap(); request.push(byte[0]); }
             stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").unwrap();
-            (0..4).map(|_| AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0).collect::<Vec<_>>()
+            (0..5).map(|_| AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0).collect::<Vec<_>>()
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
@@ -1369,6 +1386,13 @@ mod tests {
         assert!(lock(&app.state.shared.inbox).contains_key(&session::HOST), "the load screen is woken");
         app.message(StudioToApp::Custom(HostedAppearance { dark: false }.to_json()));
         assert_eq!(super::super::host_dark(), Some(false));
+        // the app's caption close said yes and the app closed its window: the WM closes the tile,
+        // and its Kill then finds no window to ask, so the process is asked to quit
+        app.command(Op::Cmd(lent.0, OsCmd::WindowClose { id: lent.1 }));
+        assert!(app.windows.is_empty());
+        assert!(!app.quit_sent);
+        app.message(StudioToApp::Kill);
+        assert!(app.quit_sent, "a Kill with no window left quits the process");
         lock(&app.state.shared.inbox).remove(&session::HOST);
         lock(&app.state.shared.inbox).remove(&lent.0);
         let custom = |batch: &Vec<AppToStudio>| match batch.as_slice() {
@@ -1380,6 +1404,7 @@ mod tests {
         assert_eq!(HostedDragAnswer::parse(&sent[1]), Some(HostedDragAnswer { id: 12, response: drag_answer::CLIENT, double_click: drag_double::MAXIMISE }));
         assert_eq!(HostedWindowOp::parse(&sent[2]), Some(HostedWindowOp { op: window_op::MAXIMIZE }));
         assert_eq!(HostedWindowOp::parse(&sent[3]), Some(HostedWindowOp { op: window_op::MINIMIZE }));
+        assert_eq!(HostedWindowOp::parse(&sent[4]), Some(HostedWindowOp { op: window_op::CLOSE }));
     }
 
     /// `makepad run` under the WM: the WM's style sheet and its activation of the tile arrive while
