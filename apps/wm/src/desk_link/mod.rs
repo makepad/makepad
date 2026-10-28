@@ -87,7 +87,8 @@ mod native {
     use makepad_desk_link::server::{self, Control, Feed, Geometry, Input, Out, Server, ServerConfig, ToUi};
     use super::settings::DeskLinkSettings;
     use makepad_desk_link::{self as proto, ScreenInfo, ServerMsg};
-    use super::encode::{EncodeStats, Encoder, Fence, Job, Subscribers, TilePlan};
+    use super::encode::{EncodeStats, Encoder, Job, Subscribers, TilePlan};
+    use makepad_widgets::makepad_platform::video_file::{GpuCompletion, SurfaceFormat, SurfaceHandle};
     use makepad_widgets::makepad_platform::video_file::{StreamVideoCodec, VideoStreamEncoder};
     use super::rate::effort;
     use makepad_widgets::*;
@@ -155,9 +156,9 @@ mod native {
         subscribers: Subscribers,
         /// The encoder thread (started with the first picture).
         encoder: Option<Encoder>,
-        /// The picture textures registered for the encoder (Linux: DMA-BUFs of the copy
-        /// registry) and the textures they are (the capture's two, drawn in turn).
-        pictures: Vec<(u64, Texture)>,
+        /// The picture textures as the encoder's surfaces and the textures they are (the
+        /// capture's two, drawn in turn).
+        pictures: Vec<(SurfaceHandle, Texture)>,
         screen: usize,
         /// The picture texture is not exported yet: the frame clock that tries again.
         export_next: NextFrame,
@@ -682,7 +683,7 @@ mod native {
                     let codec = if c.hevc { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
                     let max = VideoStreamEncoder::max_size(codec, c.full_chroma);
                     let split = self.settings.as_ref().map_or(super::settings::Split::Tiles, |s| s.split);
-                    let auto = TilePlan::new(stream, fps, split, VideoStreamEncoder::engines(), max, c.hevc, c.spread, self.rate.decode_bands(stream).0);
+                    let auto = TilePlan::new(stream, fps, split, VideoStreamEncoder::caps().engines, max, c.hevc, c.spread, self.rate.decode_bands(stream).0);
                     // a `tiles = CxR` setting, never fewer than the encoder's size needs
                     let plan = match self.settings.as_ref().and_then(|s| s.tiles).filter(|_| split == super::settings::Split::Tiles) {
                         Some((cols, r)) => TilePlan { cols: cols.max(TilePlan::new(stream, fps, super::settings::Split::Off, 1, max, c.hevc, false, 1).cols), rows: r },
@@ -727,51 +728,30 @@ mod native {
             cx.redraw_all();
         }
 
-        /// The picture textures' registrations go after the pictures queued before them: the
-        /// encoder thread releases them in order (pictures still queued are encoded first).
+        /// The picture textures' surfaces go (the pictures queued before keep theirs until they
+        /// are encoded).
         fn release_picture(&mut self) {
-            for (_handle, _) in std::mem::take(&mut self.pictures) {
-                match &self.encoder {
-                    Some(e) => e.send(Job::Release(_handle)),
-                    #[cfg(target_os = "linux")]
-                    None => makepad_hal::dmabuf::hal_dmabuf_release(_handle),
-                    #[cfg(not(target_os = "linux"))]
-                    None => {}
-                }
-            }
+            self.pictures.clear();
         }
 
-        /// The picture texture's handle for the encoder: its DMA-BUF in the copy registry
-        /// (Linux), registered once per texture. None until the texture is exported.
-        fn picture_handle(&mut self, cx: &mut Cx, texture: &Texture) -> Option<u64> {
-            if let Some((handle, _)) = self.pictures.iter().find(|(_, t)| t == texture) {
-                return Some(*handle);
+        /// The picture texture as the encoder's surface (a `size` picture), exported once per
+        /// texture. None until the texture is exported.
+        fn picture_handle(&mut self, cx: &mut Cx, texture: &Texture, size: [u32; 2]) -> Option<SurfaceHandle> {
+            if let Some((handle, _)) = self.pictures.iter().find(|(h, t)| t == texture && h.size == size) {
+                return Some(handle.clone());
             }
-            // a texture of the capture made again: the registrations of the old ones go
+            // a texture of the capture made again: the old ones go
             if self.pictures.len() >= 2 {
                 self.release_picture();
             }
-            #[cfg(target_os = "linux")]
-            {
-                use std::os::fd::IntoRawFd;
-                let (fd, layout) = cx.shared_texture_dmabuf(texture).ok()?;
-                let handle = makepad_hal::dmabuf::hal_dmabuf_register(fd.into_raw_fd(), &layout);
-                if handle == 0 {
-                    super::note("desk link stream: the picture's DMA-BUF was refused");
-                    return None;
-                }
-                self.pictures.push((handle, texture.clone()));
-                return Some(handle);
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                let _ = (cx, texture);
-                None
-            }
+            // packed planes in BGRA texels (NV12, or NV24 for a 4:4:4 stream)
+            let handle = cx.encode_surface(texture, size, SurfaceFormat::PackedNv12)?;
+            self.pictures.push((handle.clone(), texture.clone()));
+            Some(handle)
         }
 
         /// A picture was drawn in the frame just submitted: to the encoder with that frame's
-        /// fence (the encoder reads the texture once the frame's GPU work is done).
+        /// completion (the encoder reads the texture once the frame's GPU work is done).
         fn picture_done(&mut self, cx: &mut Cx) {
             // dropped on every way out below: the texture may be drawn again
             let (want, texture, held) = {
@@ -780,21 +760,18 @@ mod native {
                 (st.want, st.picture(), held)
             };
             let (Some(want), Some(texture)) = (want, texture) else { return };
-            let Some(handle) = self.picture_handle(cx, &texture) else {
+            let Some(surface) = self.picture_handle(cx, &texture, want.stream) else {
                 // not exported yet: draw again next frame, the picture follows
                 self.export_next = cx.new_next_frame();
                 return;
             };
-            #[cfg(target_os = "linux")]
-            let fence = match cx.foreign_dmabuf_fence() {
-                Ok(f) => Fence::Linux(f),
+            let ready = match cx.frame_completion() {
+                Ok(ready) => ready,
                 Err(e) => {
-                    super::note(&format!("desk link stream: frame fence: {e}"));
+                    super::note(&format!("desk link stream: frame completion: {e}"));
                     return;
                 }
             };
-            #[cfg(not(target_os = "linux"))]
-            let fence = Fence::None;
             if self.encoder.is_none() {
                 let signal = self.signal.clone();
                 match Encoder::start(self.subscribers.clone(), Arc::new(move || signal.set()), self.encode_stats.clone()) {
@@ -808,7 +785,7 @@ mod native {
             let settings = self.settings.clone().unwrap_or_default();
             let kbps = self.stream_kbps(want.stream, want.full_chroma);
             if let Some(e) = &self.encoder {
-                e.send(Job::Picture { handle, held, size: want.stream, fence, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps, split: settings.split, full_chroma: want.full_chroma, refine: false, plan: want.plan, hevc: want.hevc, sharp: want.sharp });
+                e.send(Job::Picture { surface, held, size: want.stream, ready, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps, split: settings.split, full_chroma: want.full_chroma, refine: false, plan: want.plan, hevc: want.hevc, sharp: want.sharp });
                 self.tl_captured += 1;
             }
             // still for REFINE_AFTER s: the same picture again, near lossless
@@ -823,12 +800,12 @@ mod native {
                 (st.want, st.picture(), st.hold_last())
             };
             let (Some(want), Some(texture)) = (want, texture) else { return };
-            let Some(&(handle, _)) = self.pictures.iter().find(|(_, t)| *t == texture) else { return };
+            let Some(surface) = self.pictures.iter().find(|(_, t)| *t == texture).map(|(h, _)| h.clone()) else { return };
             let settings = self.settings.clone().unwrap_or_default();
             let kbps = self.stream_kbps(want.stream, want.full_chroma);
             if let Some(e) = &self.encoder {
                 // the picture's frame finished long ago: nothing to wait for
-                e.send(Job::Picture { handle, held, size: want.stream, fence: Fence::None, built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps, split: settings.split, full_chroma: want.full_chroma, refine: true, plan: want.plan, hevc: want.hevc, sharp: want.sharp });
+                e.send(Job::Picture { surface, held, size: want.stream, ready: GpuCompletion::done(), built_ns: makepad_hal::clock_ns(), fps: self.fps, kbps, split: settings.split, full_chroma: want.full_chroma, refine: true, plan: want.plan, hevc: want.hevc, sharp: want.sharp });
             }
         }
 

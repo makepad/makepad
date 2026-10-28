@@ -149,10 +149,11 @@ fn output_class() -> *const Class {
                 if surface.is_null() {
                     return;
                 }
+                let (width, height) = (CVPixelBufferGetWidth(pixel_buffer) as u32, CVPixelBufferGetHeight(pixel_buffer) as u32);
                 let frame = Frame {
-                    picture: Picture::Shared(IOSurfaceGetID(surface) as u64),
-                    width: CVPixelBufferGetWidth(pixel_buffer) as u32,
-                    height: CVPixelBufferGetHeight(pixel_buffer) as u32,
+                    picture: Picture::Shared(makepad_video::SurfaceHandle::new(IOSurfaceGetID(surface) as u64, makepad_video::SurfaceKind::IoSurface, [width, height], makepad_video::SurfaceFormat::Nv12)),
+                    width,
+                    height,
                     captured_ns: clock_ns(),
                     _hold: Box::new(Retained(CFRetain(pixel_buffer as *const c_void))),
                 };

@@ -301,6 +301,11 @@ impl D3d11 {
 }
 
 impl Backend for D3d11 {
+    /// Complete once submitted: a shared texture's keyed mutex, released at the end of the pass
+    /// that drew it, orders the reader's GPU use after it.
+    fn frame_completion(&mut self, _session: u32, _notify: std::sync::Arc<dyn Fn() + Send + Sync>) -> Result<crate::completion::Completion, String> {
+        Ok(crate::completion::Completion::done())
+    }
     fn info(&self) -> HalInfo {
         self.info
     }

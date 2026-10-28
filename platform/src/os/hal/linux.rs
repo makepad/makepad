@@ -19,10 +19,6 @@ pub(crate) fn dmabuf_ok(ok: bool) -> Result<(), String> {
     if ok { Ok(()) } else { Err(dmabuf_error()) }
 }
 
-extern "C" fn wake_ui() {
-    crate::thread::SignalToUI::set_ui_signal()
-}
-
 impl Cx {
     /// A shared texture's DMA-BUF (`create_shared_texture`, once `shared_texture_handle` is
     /// known): a new descriptor the caller owns and its layout as
@@ -143,13 +139,5 @@ impl Cx {
         let id = texture.texture_id();
         let id = self.hal.frames.texture_hal_id(id.0, id.generation()).ok_or("missing foreign texture")?;
         dmabuf_ok(dmabuf::hal_dmabuf_acquire(self.hal.frames.w.session(), id))
-    }
-
-    pub fn foreign_dmabuf_fence(&mut self) -> Result<ForeignDmabufFence, String> {
-        self.hal_submit_batch();
-        match dmabuf::hal_dmabuf_fence(self.hal.frames.w.session(), wake_ui) {
-            0 => Err(dmabuf_error()),
-            fence => Ok(ForeignDmabufFence::from_hal(fence)),
-        }
     }
 }

@@ -229,7 +229,7 @@ pub(super) struct Batch {
     #[cfg(target_os = "linux")]
     pub external_signals: Vec<(Arc<super::share::sync::Semaphore>, u64)>,
     #[cfg(target_os = "linux")]
-    pub release_fence: Option<(Arc<super::share::sync::Semaphore>, crate::dmabuf::FenceReply)>,
+    pub release_fence: Option<(Arc<super::share::sync::Semaphore>, crate::completion::CompletionReply)>,
     /// Hosted images (a host's shared swapchain image with this writer's timeline) this batch
     /// rendered a frame into. Only these publish a frame on their timeline (`finish`): a batch
     /// that merely reads a hosted image (a snapshot or grab of the window) must neither wait

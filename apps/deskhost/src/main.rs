@@ -12,7 +12,7 @@
 //!
 //! The screen comes from the OS's capture service as GPU frames, only when it changed (frames
 //! carry their own damage); each goes to the platform's hardware encoder
-//! (`makepad_video::VideoStreamEncoder::push_shared_texture`) while a viewer watches. The cursor
+//! (`makepad_video::VideoStreamEncoder::push_surface`) while a viewer watches. The cursor
 //! goes apart from the video. `--check` prints the settings and the permissions and exits.
 
 // no console window in the user's session (the at-logon task starts it there); output of the
@@ -33,7 +33,7 @@ mod windows;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use makepad_desk_link::host::{self, clock_ns, default_kbps, Desktop, Frame, HostControl, Picture, Timing};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use makepad_video::{GpuReady, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
+use makepad_video::{GpuCompletion, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
 use settings::Settings;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::mpsc::Receiver;
@@ -156,13 +156,13 @@ fn capture_test(desktop: &mut dyn Desktop, secs: u64, busy: bool) {
         let e = enc.as_mut().unwrap();
         let t = clock_ns();
         let pushed = match &frame.picture {
-            Picture::Shared(handle) => e.push_shared_texture(*handle, GpuReady::Done, n),
+            Picture::Shared(surface) => e.push_surface(surface, &GpuCompletion::done(), n),
             Picture::Nv12(nv12) => e.push_frame_nv12(nv12, n),
         };
         if let Err(err) = pushed {
             return say(format!("capture-test: picture {n}: {err:?}"));
         }
-        timing.add(if fresh_frame { t.saturating_sub(frame.captured_ns) } else { 0 }, clock_ns() - t, e.stages());
+        timing.add(if fresh_frame { t.saturating_sub(frame.captured_ns) } else { 0 }, clock_ns() - t, e.timings());
         n += 1;
         if timing.since.elapsed() >= Duration::from_secs(2) {
             say(timing.line());

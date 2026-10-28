@@ -47,7 +47,7 @@ fn main() {
             std::process::exit(1);
         });
         encode_ns += started.elapsed().as_nanos() as u64;
-        gpu_us.push(encoder.last_encode_us());
+        gpu_us.push(encoder.timings().encode_us);
         let bytes: usize = packets.iter().map(|p| p.data.len()).sum();
         for p in &packets {
             out.write_all(&p.data).unwrap();

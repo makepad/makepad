@@ -591,8 +591,11 @@ impl Cx {
                     hosted.window_closed(window_id);
                 }
                 self.hal.frames.window_closed(hal_window_id(window_id));
-                // a tray app lives on in its tray without windows
-                if !self.hal.windows.values().any(|w| w.confirmed) && !self.has_tray() {
+                // a tray app lives on in its tray without windows; an offscreen XR window (a remote
+                // headset's slot, `info_flags::XR_OFFSCREEN`) is on no screen: the app ends with its
+                // last window that is (Sandbox serving a headset closed by its caption)
+                let offscreen_xr = self.hal.xr.as_ref().filter(|_| self.xr_offscreen()).map(|xr| xr.window.0);
+                if !self.hal.windows.iter().any(|(id, w)| w.confirmed && Some(*id) != offscreen_xr) && !self.has_tray() {
                     if user_closed {
                         crate::remote::note_user_closed_last_window();
                     }

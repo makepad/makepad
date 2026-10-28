@@ -14,16 +14,20 @@
 //!   `ProcessInput`/`ProcessOutput` — Annex-B output natively, no
 //!   conversion needed.
 //! - Linux: the GPU's hardware H.264 encoder through Vulkan Video on the HAL's device
-//!   (`makepad_hal::stream_encode`), Annex-B natively. Takes shared textures
-//!   ([`VideoStreamEncoder::push_shared_texture`]) as well as CPU NV12.
+//!   (`makepad_hal::stream_encode`), Annex-B natively. Takes shared surfaces
+//!   ([`VideoStreamEncoder::push_surface`]) as well as CPU NV12.
 //! - Android: the phone's MediaCodec encoder in the HAL host (`makepad_hal::stream_encode`, the
 //!   same ops as Linux's), CPU NV12 pictures; it may keep one picture back (a push then returns
 //!   no packet, the next one the picture before).
-//! - Other platforms: [`VideoFileError`] (`UNSUPPORTED`).
+//! - Other platforms: [`VideoFileError`] (`NoStreamEncoder`).
+//!
+//! Every backend is one [`StreamEncoderOs`]; what it can do is its [`EncoderCaps`], so callers
+//! plan by capability, never by OS.
 //!
 //! `keyint` 0 means no scheduled key frames: one at the start and on
 //! [`VideoStreamEncoder::request_keyframe`] (a live view whose transport loses nothing).
 
+use crate::surface::{GpuCompletion, SurfaceHandle};
 use crate::VideoFileError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,7 +104,7 @@ pub struct EncodedPacket {
 /// A tile of a larger source picture (`source_height` rows): its pixels from column `x0`
 /// (a multiple of 4) and row `y0` on, encoded as a stream of its own on encode engine `engine`:
 /// the tiles of one picture encode at once on a GPU with several engines
-/// ([`VideoStreamEncoder::engines`]), and a picture larger than one stream takes
+/// ([`EncoderCaps::engines`]), and a picture larger than one stream takes
 /// ([`VideoStreamEncoder::max_size`]) is split into columns as well as bands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StreamTile {
@@ -121,13 +125,54 @@ pub struct QpGrid {
     pub max: i32,
 }
 
-/// When a shared texture's picture may be read: its producer's GPU work is complete, or it
-/// completes when the sync_file signals (Linux: the release fence of the frame that rendered it,
-/// `makepad_hal::dmabuf::hal_dmabuf_fence`).
-pub enum GpuReady {
-    Done,
-    #[cfg(target_os = "linux")]
-    SyncFile(std::os::fd::OwnedFd),
+/// What this machine's stream encoder can do ([`VideoStreamEncoder::caps`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EncoderCaps {
+    /// Hardware encode engines: how many tiles a picture is best split into (1 where there is
+    /// one, or where pictures are not split).
+    pub engines: u32,
+    /// Streams of a band of a larger picture ([`StreamTile`] other than the whole picture).
+    pub tiles: bool,
+    /// 4:4:4 streams.
+    pub full_chroma: bool,
+    /// H.265 streams.
+    pub hevc: bool,
+}
+
+/// The last surface picture's stages in µs, where the platform splits them: copy out of the
+/// shared surface, conversion to the encoder's layout, encode (Linux: the GPU's encode time).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EncodeTimings {
+    pub copy_us: u32,
+    pub convert_us: u32,
+    pub encode_us: u32,
+}
+
+/// One OS's stream encoder (`VideoStreamEncoder` checks the arguments, the backend encodes).
+pub(crate) trait StreamEncoderOs: Sized + Send {
+    fn caps() -> EncoderCaps;
+    /// The largest picture one stream encodes (4:4:4 when `full_chroma`), `None` when not known.
+    fn max_size(_codec: StreamVideoCodec, _full_chroma: bool) -> Option<[u32; 2]> {
+        None
+    }
+    fn open(options: &VideoStreamEncoderOptions, tile: StreamTile, tuning: StreamTuning) -> Result<Self, VideoFileError>;
+    /// The `tile` of the picture in `surface`, once `ready` lets it be read.
+    fn encode_surface(&mut self, surface: &SurfaceHandle, tile: StreamTile, ready: &GpuCompletion, pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError>;
+    fn encode_nv12(&mut self, nv12: &[u8], pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError>;
+    fn set_bitrate_kbps(&mut self, kbps: u32);
+    fn request_keyframe(&mut self);
+    fn request_refinement(&mut self) {}
+    fn qp_grid(&self) -> Option<QpGrid> {
+        None
+    }
+    fn set_qp_map(&mut self, _deltas: &[i8]) -> bool {
+        false
+    }
+    fn set_max_qp(&mut self, _qp: u32) {}
+    fn timings(&self) -> EncodeTimings {
+        EncodeTimings::default()
+    }
+    fn description(&self) -> String;
 }
 
 #[cfg(target_vendor = "apple")]
@@ -136,16 +181,43 @@ use crate::apple_stream_encoder::AppleStreamEncoder as OsStreamEncoder;
 use crate::windows_stream_encoder::WindowsStreamEncoder as OsStreamEncoder;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use crate::hal_stream_encoder::HalStreamEncoder as OsStreamEncoder;
+#[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "linux", target_os = "android")))]
+use NoStreamEncoder as OsStreamEncoder;
+
+/// No stream encoder on this platform.
+#[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "linux", target_os = "android")))]
+pub(crate) enum NoStreamEncoder {}
 
 #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "linux", target_os = "android")))]
-const UNSUPPORTED: &str = "hardware video stream encode is not implemented on this platform yet";
+impl StreamEncoderOs for NoStreamEncoder {
+    fn caps() -> EncoderCaps {
+        EncoderCaps { engines: 1, tiles: false, full_chroma: false, hevc: false }
+    }
+    fn open(_: &VideoStreamEncoderOptions, _: StreamTile, _: StreamTuning) -> Result<Self, VideoFileError> {
+        Err(VideoFileError::new("hardware video stream encode is not implemented on this platform yet"))
+    }
+    fn encode_surface(&mut self, _: &SurfaceHandle, _: StreamTile, _: &GpuCompletion, _: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
+        match *self {}
+    }
+    fn encode_nv12(&mut self, _: &[u8], _: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
+        match *self {}
+    }
+    fn set_bitrate_kbps(&mut self, _: u32) {
+        match *self {}
+    }
+    fn request_keyframe(&mut self) {
+        match *self {}
+    }
+    fn description(&self) -> String {
+        match *self {}
+    }
+}
 
 pub struct VideoStreamEncoder {
     options: VideoStreamEncoderOptions,
     /// The band of its pictures this encoder takes (all of them: `y0` 0, `source_height` its
     /// height).
     tile: StreamTile,
-    #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux", target_os = "android"))]
     os: OsStreamEncoder,
 }
 
@@ -154,50 +226,35 @@ impl VideoStreamEncoder {
         Self::new_tile(options, StreamTile { engine: 0, x0: 0, y0: 0, source_height: options.height })
     }
 
-    /// The hardware encode engines of this machine: how many tiles a picture is best split into
-    /// (1 where there is one, or where pictures are not split).
-    pub fn engines() -> u32 {
-        #[cfg(target_os = "linux")]
-        return makepad_hal::stream_encode::hal_stream_encoder_engines().max(1);
-        #[cfg(not(target_os = "linux"))]
-        return 1;
+    /// What this machine's stream encoder can do.
+    pub fn caps() -> EncoderCaps {
+        OsStreamEncoder::caps()
     }
 
     /// The largest picture one stream encodes (4:4:4 when `full_chroma`), `None` when not known
     /// (no hardware encoder, or a platform that does not say).
     pub fn max_size(codec: StreamVideoCodec, full_chroma: bool) -> Option<[u32; 2]> {
-        #[cfg(target_os = "linux")]
-        {
-            use makepad_hal::stream_encode as hal;
-            let v = hal::hal_stream_encoder_max_size(if full_chroma { hal::FULL_CHROMA } else { 0 } | if codec == StreamVideoCodec::Hevc { hal::HEVC } else { 0 });
-            return (v != 0).then(|| [(v >> 32) as u32, v as u32]);
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (codec, full_chroma);
-            return None;
-        }
+        OsStreamEncoder::max_size(codec, full_chroma)
     }
 
-    /// An encoder of the band `tile` of the shared-texture pictures pushed to it
-    /// (`options.height` rows of them). Bands other than the whole picture are Linux's (the
-    /// other platforms have one engine).
+    /// An encoder of the band `tile` of the surface pictures pushed to it (`options.height`
+    /// rows of them). Bands other than the whole picture need [`EncoderCaps::tiles`].
     pub fn new_tile(options: VideoStreamEncoderOptions, tile: StreamTile) -> Result<Self, VideoFileError> {
         Self::new_tuned(options, tile, StreamTuning::default())
     }
 
-    /// [`Self::new_tile`] with the rate control and quality level of `tuning` (Linux).
+    /// [`Self::new_tile`] with the rate control and quality level of `tuning` (where the
+    /// encoder takes them).
     pub fn new_tuned(options: VideoStreamEncoderOptions, tile: StreamTile, tuning: StreamTuning) -> Result<Self, VideoFileError> {
         if tile.x0 % 4 != 0 || tile.y0 % 2 != 0 || tile.y0 + options.height > tile.source_height {
             return Err(VideoFileError::new(format!("tile rows {}..+{} outside a {} tall picture", tile.y0, options.height, tile.source_height)));
         }
-        #[cfg(not(target_os = "linux"))]
-        if tile.x0 != 0 || tile.y0 != 0 || tile.source_height != options.height || tile.engine != 0 {
-            return Err(VideoFileError::new("tiled stream encoding is Linux's"));
+        let caps = Self::caps();
+        if !caps.tiles && (tile.x0 != 0 || tile.y0 != 0 || tile.source_height != options.height || tile.engine != 0) {
+            return Err(VideoFileError::new("this encoder takes whole pictures, not tiles"));
         }
-        #[cfg(not(target_os = "linux"))]
-        if options.full_chroma {
-            return Err(VideoFileError::new("4:4:4 stream encoding is Linux's"));
+        if !caps.full_chroma && options.full_chroma {
+            return Err(VideoFileError::new("this encoder has no 4:4:4 streams"));
         }
         if options.width == 0 || options.height == 0 || options.width % 2 != 0 || options.height % 2 != 0 {
             return Err(VideoFileError::new(format!(
@@ -208,22 +265,8 @@ impl VideoStreamEncoder {
         if options.fps == 0 {
             return Err(VideoFileError::new("invalid stream encoder fps 0"));
         }
-        #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux", target_os = "android"))]
-        {
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            let os = OsStreamEncoder::new(&options, tile.engine, tuning)?;
-            #[cfg(not(any(target_os = "linux", target_os = "android")))]
-            let os = {
-                let _ = tuning;
-                OsStreamEncoder::new(&options)?
-            };
-            return Ok(Self { options, tile, os });
-        }
-        #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "linux", target_os = "android")))]
-        {
-            let _ = (&options, tile, tuning);
-            return Err(VideoFileError::new(UNSUPPORTED));
-        }
+        let os = OsStreamEncoder::open(&options, tile, tuning)?;
+        Ok(Self { options, tile, os })
     }
 
     pub fn options(&self) -> &VideoStreamEncoderOptions {
@@ -253,7 +296,7 @@ impl VideoStreamEncoder {
     }
 
     /// Encodes one tightly packed NV12 frame (NV24, full-size interleaved chroma, for a 4:4:4
-    /// stream on Linux).
+    /// stream).
     pub fn push_frame_nv12(&mut self, nv12: &[u8], pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
         let expected = if self.options.full_chroma { self.options.width as usize * self.options.height as usize * 3 } else { crate::nv12::nv12_frame_size(self.options.width, self.options.height) };
         if nv12.len() != expected {
@@ -262,98 +305,54 @@ impl VideoStreamEncoder {
                 nv12.len()
             )));
         }
-        #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux", target_os = "android"))]
-        return self.os.push_frame_nv12(nv12, pts_100ns);
-        #[cfg(not(any(target_vendor = "apple", target_os = "windows", target_os = "linux", target_os = "android")))]
-        {
-            let _ = pts_100ns;
-            return Err(VideoFileError::new(UNSUPPORTED));
-        }
+        self.os.encode_nv12(nv12, pts_100ns)
     }
 
-    /// Encodes one picture straight from a shared GPU texture holding NV12 packed into BGRA8
-    /// texels (`width/4` texels a row, the `height` luma rows then the `height/2` chroma rows:
-    /// the layout of [`crate::GpuPictureMaker::nv12_picture`]), once `ready`. `handle` is the
-    /// platform's handle of it (Linux: a DMA-BUF registered with
-    /// `makepad_hal::dmabuf::hal_dmabuf_register`; Apple: an IOSurface id, whose surface may
-    /// also hold a plain NV12 or BGRA picture, as a screen capture's frames do; Windows: the
-    /// wire key of a keyed-mutex shared texture holding a BGRA picture,
-    /// `makepad_hal::shared_texture`). No pixel crosses the CPU.
-    pub fn push_shared_texture(&mut self, handle: u64, ready: GpuReady, pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
-        #[cfg(target_os = "linux")]
-        return self.os.push_shared_texture(handle, ready, pts_100ns, self.tile.source_height, self.tile.x0, self.tile.y0);
-        #[cfg(any(target_vendor = "apple", target_os = "windows"))]
-        {
-            let GpuReady::Done = ready;
-            return self.os.push_shared_texture(handle, pts_100ns);
-        }
-        #[cfg(not(any(target_os = "linux", target_vendor = "apple", target_os = "windows")))]
-        {
-            let _ = (handle, ready, pts_100ns);
-            return Err(VideoFileError::new("stream encoding from a shared texture is not implemented on this platform yet"));
-        }
+    /// Encodes this encoder's tile of the picture in GPU surface `surface` once `ready` lets
+    /// it be read. No pixel crosses the CPU.
+    pub fn push_surface(&mut self, surface: &SurfaceHandle, ready: &GpuCompletion, pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
+        self.os.encode_surface(surface, self.tile, ready, pts_100ns)
     }
 
     /// The rate for the pictures from the next one on.
     pub fn set_bitrate_kbps(&mut self, kbps: u32) {
         self.options.bitrate_kbps = kbps;
-        #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple", target_os = "windows"))]
         self.os.set_bitrate_kbps(kbps);
     }
 
-    /// The last shared-texture picture's stages in µs, where the platform splits them (Windows:
-    /// copy out of the shared slot, NV12 conversion, encode); zeros elsewhere.
-    pub fn stages(&self) -> [u32; 3] {
-        #[cfg(target_os = "windows")]
-        return self.os.stages();
-        #[cfg(not(target_os = "windows"))]
-        return [0; 3];
+    /// The last surface picture's stages.
+    pub fn timings(&self) -> EncodeTimings {
+        self.os.timings()
     }
 
-    /// The QP delta map's grid, when the encoder takes one (Linux, with the GPU's quantization
-    /// maps): foveated or region-weighted encode with [`Self::set_qp_map`].
+    /// The QP delta map's grid, when the encoder takes one (the GPU's quantization maps):
+    /// foveated or region-weighted encode with [`Self::set_qp_map`].
     pub fn qp_grid(&self) -> Option<QpGrid> {
-        #[cfg(target_os = "linux")]
-        return self.os.qp_grid();
-        #[cfg(not(target_os = "linux"))]
-        return None;
+        self.os.qp_grid()
     }
 
     /// A QP delta per texel of [`Self::qp_grid`] (row by row; negative: more bits there,
     /// positive: fewer) for the pictures from the next one on. False when the encoder takes none
     /// or `deltas` is not the grid's size.
     pub fn set_qp_map(&mut self, deltas: &[i8]) -> bool {
-        #[cfg(target_os = "linux")]
-        return self.os.set_qp_map(deltas);
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = deltas;
-            return false;
-        }
+        self.os.set_qp_map(deltas)
     }
 
-    /// The last picture's time on the hardware encoder (µs; Linux, from GPU timestamps; 0
-    /// elsewhere).
-    pub fn last_encode_us(&self) -> u32 {
-        #[cfg(target_os = "linux")]
-        return self.os.last_gpu_us();
-        #[cfg(not(target_os = "linux"))]
-        return 0;
+    /// The highest QP from the next picture on (0: the encoder's own range): a quality floor
+    /// under constant rate. Where the encoder takes one.
+    pub fn set_max_qp(&mut self, qp: u32) {
+        self.os.set_max_qp(qp);
     }
 
     /// What encodes (codec, size, rate, device), for logs and status lines.
     pub fn description(&self) -> String {
-        #[cfg(any(target_os = "linux", target_os = "android", target_os = "windows"))]
-        return self.os.description();
-        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "windows")))]
-        return format!("{:?} {}x{} {} fps {} kbit/s", self.options.codec, self.options.width, self.options.height, self.options.fps, self.options.bitrate_kbps);
+        self.os.description()
     }
 
-    /// Makes the NEXT pushed shared-texture picture a refinement: the same picture as the last
-    /// one (a still desktop) again at a near-lossless QP, sharp text and edges at once (Linux; a
-    /// no-op elsewhere).
+    /// Makes the NEXT pushed surface picture a refinement: the same picture as the last one (a
+    /// still desktop) again at a near-lossless QP, sharp text and edges at once (where the
+    /// encoder can; a no-op elsewhere).
     pub fn request_refinement(&mut self) {
-        #[cfg(target_os = "linux")]
         self.os.request_refinement();
     }
 
@@ -362,7 +361,6 @@ impl VideoStreamEncoder {
     /// decoding immediately instead of waiting for the next scheduled
     /// keyframe (up to `keyint` frames away).
     pub fn request_keyframe(&mut self) {
-        #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux", target_os = "android"))]
         self.os.request_keyframe();
     }
 }

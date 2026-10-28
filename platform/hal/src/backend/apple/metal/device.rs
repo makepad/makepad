@@ -109,6 +109,8 @@ pub struct Device {
     pub completed: Arc<AtomicU64>,
     /// the sequence number of the newest command buffer created
     pub seq: u64,
+    /// frame completions waiting for a command buffer number (`when_completed`)
+    waiters: Arc<Mutex<Vec<(u64, crate::completion::CompletionReply)>>>,
     pub mailbox: Mailbox,
     alloc_tx: Option<SyncSender<AllocJob>>,
     alloc_thread: Option<std::thread::JoinHandle<()>>,
@@ -205,6 +207,7 @@ impl Device {
             name,
             unified_memory,
             completed,
+            waiters: Default::default(),
             seq: 0,
             mailbox,
             alloc_tx: Some(alloc_tx),
@@ -270,9 +273,11 @@ impl Device {
         let seq = self.seq;
         let completed = self.completed.clone();
         let in_flight = self.in_flight.clone();
+        let waiters = self.waiters.clone();
         let () = unsafe {
             msg_send![buffer.as_id(), addCompletedHandler: &objc_block!(move |cb: ObjcId| {
                 completed.fetch_max(seq, Ordering::AcqRel);
+                answer_waiters(&waiters, completed.load(Ordering::Acquire));
                 let entry = {
                     let mut queue = lock_in_flight(&in_flight);
                     queue.iter().position(|e| e.seq == seq).and_then(|at| queue.remove(at))
@@ -427,6 +432,31 @@ impl Device {
         if let Some(t) = self.alloc_thread.take() {
             if t.join().is_err() { eprintln!("[hal-metal] the allocator thread panicked"); }
         }
+    }
+}
+
+impl Device {
+    /// Answers `reply` once every command buffer up to the newest one created has completed.
+    pub fn when_completed(&self, reply: crate::completion::CompletionReply) {
+        crate::lock(&self.waiters).push((self.seq, reply));
+        // a buffer that completed meanwhile answered nobody: answer it here
+        answer_waiters(&self.waiters, self.completed.load(Ordering::Acquire));
+    }
+}
+
+/// Answers the waiters whose command buffers completed (`done` and below).
+fn answer_waiters(waiters: &Mutex<Vec<(u64, crate::completion::CompletionReply)>>, done: u64) {
+    let ready: Vec<_> = {
+        let mut w = crate::lock(waiters);
+        if w.is_empty() {
+            return;
+        }
+        let (ready, rest) = std::mem::take(&mut *w).into_iter().partition(|(seq, _)| *seq <= done);
+        *w = rest;
+        ready
+    };
+    for (_, reply) in ready {
+        reply.send(Ok(None));
     }
 }
 

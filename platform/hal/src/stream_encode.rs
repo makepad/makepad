@@ -105,16 +105,6 @@ pub const CBR: u32 = 4;
 /// tuning) instead of its fastest encode (low-latency tuning).
 pub const SHARP: u32 = 8;
 
-/// The highest QP every stream encoder of this process may use from its next picture on (0:
-/// the encoder's own range): a quality floor under constant rate (a plain picture then takes
-/// more of the rate instead of undershooting it). Vulkan Video only.
-pub static MAX_QP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// Sets [`MAX_QP`].
-#[makepad_relax_api::relax_api]
-pub fn hal_stream_encoder_max_qp(qp: u32) {
-    MAX_QP.store(qp.min(51), std::sync::atomic::Ordering::Release);
-}
 
 fn codec_of(flags: u32) -> Codec {
     if flags & HEVC != 0 { Codec::H265 } else { Codec::H264 }
@@ -242,6 +232,19 @@ pub fn hal_stream_encoder_bitrate(encoder: u64, kbps: u32) {
     if let Some(open) = get(encoder) {
         crate::lock(&open).encoder.set_kbps(kbps);
     }
+}
+
+/// The highest QP the encoder may use from its next picture on (0: its own range): a quality
+/// floor under constant rate (a plain picture then takes more of the rate instead of
+/// undershooting it). Vulkan Video only.
+#[makepad_relax_api::relax_api]
+pub fn hal_stream_encoder_max_qp(encoder: u64, qp: u32) {
+    #[cfg(target_os = "linux")]
+    if let Some(open) = get(encoder) {
+        crate::lock(&open).encoder.set_max_qp(qp.min(51));
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (encoder, qp);
 }
 
 #[makepad_relax_api::relax_api]

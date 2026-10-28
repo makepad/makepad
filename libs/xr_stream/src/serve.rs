@@ -28,6 +28,8 @@ use makepad_widgets::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use makepad_widgets::makepad_platform::video_file::{SurfaceFormat, SurfaceHandle};
 
 #[cfg(not(target_arch = "wasm32"))]
 use makepad_desk_link::{xr::DEPTH_NEAR_M, xr_host};
@@ -238,8 +240,10 @@ const DEFAULT_FOCUS_M: f32 = 1.0;
 
 struct Slot {
     target: RenderTarget,
-    /// Its texture's DMA-BUF in the copy registry, once exported.
-    handle: Option<(u64, Texture)>,
+    /// Its texture as the encoder's surface, once exported.
+    handle: Option<(SurfaceHandle, Texture)>,
+    /// The picture it holds (pixels; the texture is its packed NV12 texels).
+    picture: [u32; 2],
     /// An encode reads it.
     busy: Arc<AtomicBool>,
 }
@@ -534,7 +538,7 @@ impl XrServe {
             self.counts.frames += 1;
             while self.slots.len() < SLOTS {
                 let name = ["xr_stream_picture_0", "xr_stream_picture_1", "xr_stream_picture_2"][self.slots.len()];
-                self.slots.push(Slot { target: RenderTarget::new(cx.cx, name), handle: None, busy: Arc::new(AtomicBool::new(false)) });
+                self.slots.push(Slot { target: RenderTarget::new(cx.cx, name), handle: None, picture: [0, 0], busy: Arc::new(AtomicBool::new(false)) });
             }
             // a slot no encode reads (the one after the last, else any)
             let Some(slot) = (0..SLOTS).map(|i| (self.next + i) % SLOTS).find(|i| !self.slots[*i].busy.load(Ordering::Acquire)) else {
@@ -550,6 +554,7 @@ impl XrServe {
             if s.target.ensure(cx.cx, (w / 4, h + h / 2), RenderTargetFormat::SharedBgra8) {
                 s.handle = None;
             }
+            s.picture = [w as u32, h as u32];
             // the colour and depth as the XR pass rendered them: `ss` of their pixels per eye
             // pixel (a supersampled pass; the same rounding as the pass's size)
             let ss = cx.cx.xr_supersample() as f64;
@@ -807,24 +812,18 @@ impl XrServe {
             free();
             return;
         };
-        // the frame's release fence (published once the frame is submitted, which this does):
-        // polled on the encoder's side, the UI never waits for it
-        #[cfg(target_os = "linux")]
-        let ready: xr_host::Ready = match cx.foreign_dmabuf_fence() {
-            Ok(mut fence) => {
-                use makepad_widgets::makepad_platform::video_file::GpuReady;
-                Box::new(move || fence.poll().map(|r| r.map(|fd| fd.map_or(GpuReady::Done, GpuReady::SyncFile))))
-            }
+        // the frame's completion (this submits the frame): waited for on the encoder's side, the
+        // UI never waits for it
+        let ready = match cx.frame_completion() {
+            Ok(ready) => ready,
             Err(e) => {
-                log!("xr serve: frame fence: {e}");
+                log!("xr serve: frame completion: {e}");
                 free();
                 return;
             }
         };
-        #[cfg(not(target_os = "linux"))]
-        let ready: xr_host::Ready = Box::new(|| Some(Ok(makepad_widgets::makepad_platform::video_file::GpuReady::Done)));
         let picture = xr_host::Picture {
-            handle,
+            surface: handle,
             ready,
             held: Box::new(Held(busy.clone())),
             display_ns: p.display_ns,
@@ -837,36 +836,18 @@ impl XrServe {
         }
     }
 
-    /// The slot's texture as the encoder's handle (its DMA-BUF registered once).
+    /// The slot's texture as the encoder's surface (exported once per texture).
     #[cfg(not(target_arch = "wasm32"))]
-    fn handle(&mut self, cx: &mut Cx, slot: usize) -> Option<u64> {
+    fn handle(&mut self, cx: &mut Cx, slot: usize) -> Option<SurfaceHandle> {
         let s = &mut self.slots[slot];
         let texture = s.target.texture.clone();
         if let Some((handle, t)) = &s.handle {
             if *t == texture {
-                return Some(*handle);
+                return Some(handle.clone());
             }
         }
-        #[cfg(target_os = "linux")]
-        {
-            // a texture made again (resized): the old one's registration goes
-            if let Some((old, _)) = s.handle.take() {
-                makepad_widgets::makepad_platform::makepad_hal::dmabuf::hal_dmabuf_release(old);
-            }
-            use std::os::fd::IntoRawFd;
-            let (fd, layout) = cx.shared_texture_dmabuf(&texture).ok()?;
-            let handle = makepad_widgets::makepad_platform::makepad_hal::dmabuf::hal_dmabuf_register(fd.into_raw_fd(), &layout);
-            if handle == 0 {
-                log!("xr serve: the picture's DMA-BUF was refused");
-                return None;
-            }
-            s.handle = Some((handle, texture));
-            Some(handle)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (cx, texture);
-            None
-        }
+        let handle = cx.encode_surface(&texture, s.picture, SurfaceFormat::PackedNv12)?;
+        s.handle = Some((handle.clone(), texture));
+        Some(handle)
     }
 }

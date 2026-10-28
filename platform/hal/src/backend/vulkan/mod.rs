@@ -197,10 +197,6 @@ impl Vulkan {
             },
             ..Default::default() };
         let mut info = info;
-        // a remote headset slot: the app renders XR as on a headset, into its own textures
-        // (linux/xr_remote.rs)
-        #[cfg(target_os = "linux")]
-        if super::linux::xr_remote::enabled() { info.flags |= info_flags::XR | info_flags::XR_OFFSCREEN; }
         info.set_device_name(&unsafe { std::ffi::CStr::from_ptr(dev.properties.device_name.as_ptr()) }.to_string_lossy());
         crate::gpu_limits::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
@@ -396,6 +392,18 @@ impl Vulkan {
 impl Backend for Vulkan {
     #[cfg(target_os = "linux")]
     fn dmabuf(&mut self) -> Option<&mut dyn crate::dmabuf::Api> { Some(self) }
+    /// A sync_file semaphore signalled by the batch that takes the session's submitted work:
+    /// answered once the batch is on the queue (the reader's GPU waits on it).
+    #[cfg(target_os = "linux")]
+    fn frame_completion(&mut self, session: u32, notify: Arc<dyn Fn() + Send + Sync>) -> Result<crate::completion::Completion, String> {
+        let semaphore = share::sync::Semaphore::sync_file(self.dev.clone())?;
+        self.flush();
+        let look = self.mailbox.notify.clone();
+        let (completion, reply) = crate::completion::CompletionReply::new(Arc::new(move || { notify(); look(session, false); }));
+        self.ensure_batch()?.release_fence = Some((semaphore, reply));
+        self.flush();
+        Ok(completion)
+    }
     fn info(&self) -> HalInfo { self.info }
     fn submit(&mut self, world: &mut World, sid: u32, view: &CmdView) { self.recover(world); self.drain(world); exec::submit(self, world, sid, view); self.flush(); }
 
@@ -461,8 +469,6 @@ impl Backend for Vulkan {
     fn step(&mut self, world: &mut World, sid: u32) {
         self.flush(); self.drain(world);
         self.recover(world);
-        #[cfg(target_os = "linux")]
-        super::linux::xr_remote::drain_events(sid, world);
         #[cfg(target_os = "linux")]
         if let Some(shell) = self.shell {
             for (owner, id) in shell.drain_events(sid, world) {
@@ -715,7 +721,6 @@ impl Gpu for Vulkan {
     #[cfg(target_os = "linux")]
     fn os(&mut self, sid: u32, command: exec::OsCmd) -> bool {
         if matches!(&command, exec::OsCmd::FileDialog { .. }) { return self.media.dialog(sid, command); }
-        if super::linux::xr_remote::command(sid, &command) { return true; }
         if let Some(shell) = self.shell { shell.command(sid, command); true } else { false }
     }
     fn gpu_budget(&self) -> Option<(u64, u64)> {

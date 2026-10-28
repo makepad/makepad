@@ -10,6 +10,7 @@ mod display;
 mod domain_test;
 pub(crate) use domain::lent_id;
 pub(crate) use hosted::HostedDone;
+mod encode_surface;
 mod event_loop;
 mod fonts;
 #[cfg(not(target_os = "android"))]

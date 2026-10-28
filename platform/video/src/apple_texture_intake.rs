@@ -255,8 +255,9 @@ impl TextureIntake {
     /// (what a GPU pass writes when it converts a picture to NV12). The
     /// texels are copied on the GPU into the encoder's NV12 buffer (through
     /// GPU memory: a texture's bytes reach a plane of another format only
-    /// via a buffer), and the copy is waited for.
-    pub(crate) unsafe fn nv12_picture(&mut self, handle: u64, width: u32, height: u32, full_range: bool) -> Result<GpuPicture, VideoFileError> {
+    /// via a buffer), and the copy is waited for. `x0` (pixels, a multiple of 4): the picture is
+    /// the column of a wider one from there (a tile).
+    pub(crate) unsafe fn nv12_picture(&mut self, handle: u64, x0: u32, width: u32, height: u32, full_range: bool) -> Result<GpuPicture, VideoFileError> {
         if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
             return Err(VideoFileError::new(format!("texture intake: a {width}x{height} picture cannot be NV12")));
         }
@@ -265,7 +266,8 @@ impl TextureIntake {
         unsafe {
             let (surface, source) = self.source(handle)?;
             let (source_width, source_height) = (IOSurfaceGetWidth(surface as _) as u64, IOSurfaceGetHeight(surface as _) as u64);
-            if texels > source_width || rows > source_height {
+            let first = (x0 / 4) as u64;
+            if first + texels > source_width || rows > source_height {
                 return Err(VideoFileError::new(format!(
                     "texture intake: a {width}x{height} NV12 picture needs {texels}x{rows} texels, the texture has {source_width}x{source_height}"
                 )));
@@ -314,7 +316,7 @@ impl TextureIntake {
                 copyFromTexture: source
                 sourceSlice: 0u64
                 sourceLevel: 0u64
-                sourceOrigin: MTLOrigin { x: 0, y: 0, z: 0 }
+                sourceOrigin: MTLOrigin { x: first, y: 0, z: 0 }
                 sourceSize: MTLSize { width: texels, height: rows, depth: 1 }
                 toBuffer: self.staging
                 destinationOffset: 0u64

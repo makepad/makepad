@@ -176,15 +176,6 @@ impl crate::dmabuf::Api for super::Vulkan {
         // acquires it again, after the compositor has observed the producer's fence.
         Ok(())
     }
-    fn fence(&mut self, session: u32, notify: Arc<dyn Fn() + Send + Sync>) -> Result<crate::dmabuf::Fence, String> {
-        let semaphore = sync::Semaphore::sync_file(self.dev.clone())?;
-        self.flush();
-        let look = self.mailbox.notify.clone();
-        let (fence, reply) = crate::dmabuf::FenceReply::new(Arc::new(move || { notify(); look(session, false); }));
-        self.ensure_batch()?.release_fence = Some((semaphore, reply));
-        self.flush();
-        Ok(fence)
-    }
     fn available(&self, session: u32, id: crate::Id) -> Result<bool, String> {
         let image = self.tex.get(&(session, id.index)).filter(|t| t.gen == id.gen).ok_or("missing hosted texture")?;
         match &image.image.timeline { Some(t) if t.producer => t.available(), _ => Err("hosted image has no writer timeline".into()) }

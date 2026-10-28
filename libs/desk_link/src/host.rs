@@ -11,7 +11,7 @@
 
 use crate::server::{self, Control, Feed, Geometry, InputFactory, Log, Out, Server, ServerConfig, ToUi};
 use crate::{self as proto, ScreenInfo, ServerMsg};
-use makepad_video::{GpuReady, VideoStreamEncoder, VideoStreamEncoderOptions};
+use makepad_video::{VideoStreamEncoder, VideoStreamEncoderOptions};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -37,9 +37,9 @@ pub struct Frame {
 }
 
 pub enum Picture {
-    /// The platform's shared-texture handle (macOS: the IOSurface id; Windows: the wire key of
-    /// a keyed-mutex shared texture): `VideoStreamEncoder::push_shared_texture`.
-    Shared(u64),
+    /// A GPU surface (macOS: a captured NV12 IOSurface; Windows: a keyed-mutex BGRA shared
+    /// texture), complete when captured: `VideoStreamEncoder::push_surface`.
+    Shared(makepad_video::SurfaceHandle),
     /// Tightly packed NV12 (`width` x `height`, BT.709 limited range): a JIT host's GPU
     /// readback, `VideoStreamEncoder::push_frame_nv12`.
     Nv12(Vec<u8>),
@@ -676,7 +676,7 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
         // the encode is synchronous: the frame (its surface) is held until it returns
         let push_ns = clock_ns();
         let pushed = push(enc, &frame, size);
-        timing.add(push_ns.saturating_sub(frame.captured_ns), clock_ns() - push_ns, enc.stages());
+        timing.add(push_ns.saturating_sub(frame.captured_ns), clock_ns() - push_ns, enc.timings());
         if timing.since.elapsed() >= Duration::from_secs(10) {
             log(&timing.line());
             timing = Timing::default();
@@ -739,7 +739,7 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
 fn push(enc: &mut VideoStreamEncoder, frame: &Frame, size: [u32; 2]) -> Result<Vec<makepad_video::EncodedPacket>, makepad_video::VideoFileError> {
     let pts = (frame.captured_ns / 100) as i64;
     match &frame.picture {
-        Picture::Shared(handle) => enc.push_shared_texture(*handle, GpuReady::Done, pts),
+        Picture::Shared(surface) => enc.push_surface(surface, &makepad_video::GpuCompletion::done(), pts),
         Picture::Nv12(nv12) if [frame.width, frame.height] == size => enc.push_frame_nv12(nv12, pts),
         Picture::Nv12(nv12) => enc.push_frame_nv12(&crop_nv12(nv12, frame.width, frame.height, size), pts),
     }
@@ -788,7 +788,7 @@ pub struct Timing {
     pub since: Instant,
     wait_us: Vec<u32>,
     encode_us: Vec<u32>,
-    /// The platform's stages of the encode call (see `VideoStreamEncoder::stages`), summed.
+    /// The platform's stages of the encode call (`VideoStreamEncoder::timings`), summed.
     stages: [u64; 3],
 }
 
@@ -799,8 +799,8 @@ impl Default for Timing {
 }
 
 impl Timing {
-    pub fn add(&mut self, wait_ns: u64, encode_ns: u64, stages: [u32; 3]) {
-        for (sum, s) in self.stages.iter_mut().zip(stages) {
+    pub fn add(&mut self, wait_ns: u64, encode_ns: u64, t: makepad_video::EncodeTimings) {
+        for (sum, s) in self.stages.iter_mut().zip([t.copy_us, t.convert_us, t.encode_us]) {
             *sum += s as u64;
         }
         self.wait_us.push((wait_ns / 1000).min(u32::MAX as u64) as u32);

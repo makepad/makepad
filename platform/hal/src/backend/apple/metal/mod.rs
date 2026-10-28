@@ -391,6 +391,13 @@ impl Metal {
 unsafe impl Send for Metal {}
 
 impl Backend for Metal {
+    /// Answered once the command buffers made so far ran (an IOSurface reader on another queue
+    /// or device reads after it).
+    fn frame_completion(&mut self, _session: u32, notify: std::sync::Arc<dyn Fn() + Send + Sync>) -> Result<crate::completion::Completion, String> {
+        let (completion, reply) = crate::completion::CompletionReply::new(notify);
+        self.dev.when_completed(reply);
+        Ok(completion)
+    }
     fn info(&self) -> HalInfo {
         self.info
     }

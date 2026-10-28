@@ -219,7 +219,7 @@ struct Picture {
     bitrate: Option<u32>,
     /// The rate control in effect when this picture's coding scope begins.
     current_kbps: Option<u32>,
-    /// The QP ceiling for this picture's rate control (0: none; `stream_encode::MAX_QP`).
+    /// The QP ceiling for this picture's rate control (0: none; `StreamEncoder::set_max_qp`).
     max_qp: u32,
     /// A refinement: the same picture again at `REFINE_QP` (rate control off), near lossless.
     refine: bool,
@@ -1255,6 +1255,7 @@ pub(crate) struct StreamEncoder {
     /// The rate control the session has (None before the first picture reset it).
     applied_kbps: Option<u32>,
     applied_max_qp: u32,
+    max_qp: u32,
     /// What the encoder is, for logs and status lines.
     pub info: String,
     /// GPU timestamps around the copy (graphics queue): where a picture's time goes.
@@ -1381,6 +1382,7 @@ impl StreamEncoder {
                 kbps,
                 applied_kbps: None,
                 applied_max_qp: 0,
+                max_qp: 0,
                 info,
                 stamps,
                 rc_off: false,
@@ -1398,6 +1400,11 @@ impl StreamEncoder {
         if kbps > 0 {
             self.kbps = kbps;
         }
+    }
+
+    /// The QP ceiling from the next picture on (0: the encoder's own range).
+    pub fn set_max_qp(&mut self, qp: u32) {
+        self.max_qp = qp;
     }
 
     /// The QP delta map's grid, when the encoder takes one: its columns and rows, the pixels each
@@ -1451,7 +1458,7 @@ impl StreamEncoder {
         // pictures)
         let poc = match self.enc.codec { Codec::H264 => (self.frame_num * 2) as i32, Codec::H265 => self.poc_count };
         self.poc_count += 1;
-        let max_qp = crate::stream_encode::MAX_QP.load(std::sync::atomic::Ordering::Acquire);
+        let max_qp = self.max_qp;
         let pic = Picture {
             slot: 0,
             idr,

@@ -8,7 +8,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::{Child, Command as Process, Stdio};
-use makepad_widgets::makepad_platform::foreign_dmabuf::{ForeignDmabuf, ForeignDmabufPlane, ForeignDmabufFence};
+use makepad_widgets::makepad_platform::foreign_dmabuf::{ForeignDmabuf, ForeignDmabufPlane};
+use makepad_widgets::makepad_platform::video_file::GpuCompletion;
 use wayland_server::compositor::{Board, BufferUpdate, DmabufConfig, DmabufFrame, Frame, OutputInfo, Rect as WRect, UiEvent};
 use wayland_server::host::{Command, Host};
 use wayland_server::compositor::xdg::{STATE_ACTIVATED, STATE_TILED_BOTTOM, STATE_TILED_LEFT, STATE_TILED_RIGHT, STATE_TILED_TOP};
@@ -52,7 +53,7 @@ struct Shared {
     cursors: HashMap<u32, u32>,
     /// Imported client dmabufs, by (client, wl_buffer id).
     imports: HashMap<(u32, u32), Texture>,
-    releases: Vec<(u32, u32, ForeignDmabufFence)>,
+    releases: Vec<(u32, u32, GpuCompletion)>,
     release_retry: Vec<(u32, u32)>,
     /// The last text the makepad apps copied (clipboard) and selected (primary), handed to the
     /// server when it starts: a browser opened after a copy pastes it.
@@ -210,9 +211,9 @@ impl Shared {
 
     /// Tells the client its dmabuf buffer may be reused once what the GPU has been given is done.
     fn release(&mut self, cx: &mut Cx, client: u32, buffer: u32) {
-        match cx.foreign_dmabuf_fence() {
-            Ok(mut release) => match release.poll() {
-                Some(Ok(fence)) => host_send(self, Command::BufferDone { client, buffer, fence }),
+        match cx.frame_completion() {
+            Ok(release) => match release.poll() {
+                Some(Ok(())) => host_send(self, Command::BufferDone { client, buffer, fence: release.sync_file() }),
                 Some(Err(error)) => {
                     log!("wm: dmabuf release deferred: {error}");
                     self.release_retry.push((client, buffer));
@@ -229,9 +230,9 @@ impl Shared {
     fn poll_releases(&mut self, cx: &mut Cx) {
         for (client, buffer) in std::mem::take(&mut self.release_retry) { self.release(cx, client, buffer); }
         let mut pending = Vec::new();
-        for (client, buffer, mut release) in std::mem::take(&mut self.releases) {
+        for (client, buffer, release) in std::mem::take(&mut self.releases) {
             match release.poll() {
-                Some(Ok(fence)) => host_send(self, Command::BufferDone { client, buffer, fence }),
+                Some(Ok(())) => host_send(self, Command::BufferDone { client, buffer, fence: release.sync_file() }),
                 Some(Err(error)) => {
                     log!("wm: dmabuf release deferred: {error}");
                     self.release_retry.push((client, buffer));

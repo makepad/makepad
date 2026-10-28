@@ -64,6 +64,11 @@ pub struct Pixels {
 pub trait Backend: Send {
     #[cfg(target_os = "linux")]
     fn dmabuf(&mut self) -> Option<&mut dyn crate::dmabuf::Api> { None }
+    /// The completion of everything `session` submitted so far, for a reader outside this
+    /// backend (an encoder, another process): [`crate::completion`]. `notify` when it answers.
+    fn frame_completion(&mut self, _session: u32, _notify: std::sync::Arc<dyn Fn() + Send + Sync>) -> Result<crate::completion::Completion, String> {
+        Err("this renderer has no frame completion".into())
+    }
     /// The capabilities `hal_open` answers with (session id filled in by the caller).
     fn info(&self) -> HalInfo;
     /// Executes one batch of commands. Borrowed slices in `view` are valid for this call only.

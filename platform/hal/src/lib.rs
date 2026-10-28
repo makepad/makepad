@@ -29,6 +29,7 @@ pub mod gl_interop;
 pub mod automation;
 pub mod buffers;
 pub mod call_scope;
+pub mod completion;
 pub mod clock;
 #[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
 mod xr_carry;
@@ -61,7 +62,6 @@ pub mod stream_encode;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod stream_decode;
 pub mod stream_pack;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod xr_remote;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod frame_tap;
@@ -342,6 +342,14 @@ mod open_file_limit_tests {
     }
 }
 
+/// The backend's capabilities with what the HAL itself adds: a remote headset slot
+/// (`xr_remote`) under any GPU backend.
+fn backend_info_of(b: &dyn Backend) -> HalInfo {
+    let mut info = b.info();
+    info.flags |= xr_remote::info_flags();
+    info
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -462,6 +470,10 @@ impl Hal {
                 Some(b) => {
                     st.backend = Some((b.info().backend, b));
                     st.backend_inits += 1;
+                    // a remote headset slot's XR window events wake the pumps like the backend's
+                    if xr_remote::enabled() {
+                        xr_remote::set_wake(notify.clone());
+                    }
                 }
                 None => return refused,
             },
@@ -470,7 +482,7 @@ impl Hal {
         if st.world.font_notify.is_none() {
             st.world.font_notify = Some(notify.clone());
         }
-        let mut info = st.backend.as_ref().expect("backend").1.info();
+        let mut info = backend_info_of(&*st.backend.as_ref().expect("backend").1);
         if req.parent != 0 || req.flags & open_flags::OFFSCREEN_WINDOWS != 0 {
             info.flags &= !info_flags::DIRECT_DISPLAY;
         }
@@ -627,7 +639,7 @@ impl Hal {
 
     /// The backend this Hal runs (`backend_id`) and its shader dialect, once one is open.
     pub fn backend_info(&self) -> Option<HalInfo> {
-        lock(&self.state).backend.as_ref().map(|(_, b)| b.info())
+        lock(&self.state).backend.as_ref().map(|(_, b)| backend_info_of(&**b))
     }
 
     /// Executes a batch. The slices in `buf` are read during this call only.
@@ -707,6 +719,7 @@ impl Hal {
                 let st = &mut *guard;
                 if let Some((_, b)) = st.backend.as_mut() {
                     b.step(&mut st.world, sid);
+                    xr_remote::drain_events(sid, &mut st.world);
                     // glyphs the font workers finished go to the atlas and to the sessions
                     if let Some(gpu) = b.host_gpu() {
                         font::service(gpu, &mut st.world);

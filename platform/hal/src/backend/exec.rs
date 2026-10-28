@@ -596,7 +596,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 gpu.window_lent(sid, id, host, true);
                 false
             } else {
-                gpu.os(sid, OsCmd::WindowCreate { id, kind, parent, geom })
+                os_cmd(gpu, sid, OsCmd::WindowCreate { id, kind, parent, geom })
             };
             if !handled {
                 // no window system to place it: a NaN position (the app asked the window system to
@@ -631,7 +631,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                     gpu.window_lent(sid, id, host, false);
                 } else {
                     gpu.window_closed(sid, id);
-                    handled = !hosted && !badge && gpu.os(sid, OsCmd::WindowClose { id });
+                    handled = !hosted && !badge && os_cmd(gpu, sid, OsCmd::WindowClose { id });
                 }
             }
             if let Some(s) = world.session_mut(sid) {
@@ -655,7 +655,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             if badge {
                 badge_moved(world, id, Some(geom));
             }
-            if badge || !gpu.os(sid, OsCmd::WindowGeom { id, geom }) {
+            if badge || !os_cmd(gpu, sid, OsCmd::WindowGeom { id, geom }) {
                 let geom = unplaced_at_origin(geom);
                 world.window_geom(sid, id, geom, dpi, state);
                 world.to_session(sid, |q| q.geom(id, geom[0] as f64, geom[1] as f64, geom[2] as f64, geom[3] as f64, dpi, state));
@@ -742,7 +742,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                     return;
                 }
                 let text = s.string(title).unwrap_or("").to_string();
-                gpu.os(sid, OsCmd::WindowTitle { id, title: text });
+                os_cmd(gpu, sid, OsCmd::WindowTitle { id, title: text });
             }
             return;
         }
@@ -1054,7 +1054,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 if e.val.is_hosted() { return; }
                 e.val.state = state;
                 let g = e.val.geom;
-                if !gpu.os(sid, OsCmd::WindowState { id, state }) {
+                if !os_cmd(gpu, sid, OsCmd::WindowState { id, state }) {
                     // no window system: a close button's close is asked all the same
                     if state == window_state::CLOSE {
                         s.events.close_requested(id);
@@ -1110,25 +1110,25 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             os_window(gpu, s, id, OsCmd::DragStart { id, items, image })
         }
         HalCmd::AppIcon { w, h, rgba } => {
-            gpu.os(sid, OsCmd::AppIcon { w, h, rgba: rgba.to_vec() });
+            os_cmd(gpu, sid, OsCmd::AppIcon { w, h, rgba: rgba.to_vec() });
         }
         HalCmd::ClipboardActions { id, show, area, selection } => os_window(gpu, s, id, OsCmd::ClipboardActions { id, show, area, selection }),
         HalCmd::SelectionHandles { id, op, start, end } => os_window(gpu, s, id, OsCmd::SelectionHandles { id, op, start, end }),
         HalCmd::MobileUi { op, value } => {
-            gpu.os(sid, OsCmd::MobileUi { op, value });
+            os_cmd(gpu, sid, OsCmd::MobileUi { op, value });
         }
         HalCmd::BackUnhandled {} => {
-            gpu.os(sid, OsCmd::BackUnhandled);
+            os_cmd(gpu, sid, OsCmd::BackUnhandled);
         }
         HalCmd::ShowInDock { on } => {
-            gpu.os(sid, OsCmd::ShowInDock { on });
+            os_cmd(gpu, sid, OsCmd::ShowInDock { on });
         }
         HalCmd::ActivateApp {} => {
-            gpu.os(sid, OsCmd::ActivateApp);
+            os_cmd(gpu, sid, OsCmd::ActivateApp);
         }
         HalCmd::MenuSet { count, items } => {
             let items: Vec<(MenuItem, String)> = read_items::<MenuItem>(items, count).map(|i| (i, s.string(i.str).unwrap_or("").to_string())).collect();
-            gpu.os(sid, OsCmd::MenuSet { items });
+            os_cmd(gpu, sid, OsCmd::MenuSet { items });
         }
         HalCmd::TraySet { tray, w, h, tooltip, count, flags, data } => {
             let head = count as usize * <MenuItem as crate::buffers::Wire>::SIZE;
@@ -1139,10 +1139,10 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             }
             let items: Vec<(MenuItem, String)> = read_items::<MenuItem>(&data[..head], count).map(|i| (i, s.string(i.str).unwrap_or("").to_string())).collect();
             let tooltip = s.string(tooltip).unwrap_or("").to_string();
-            gpu.os(sid, OsCmd::TraySet { tray, w, h, flags, alpha: data[head..head + pixels].to_vec(), tooltip, items });
+            os_cmd(gpu, sid, OsCmd::TraySet { tray, w, h, flags, alpha: data[head..head + pixels].to_vec(), tooltip, items });
         }
         HalCmd::TrayRemove { tray } => {
-            gpu.os(sid, OsCmd::TrayRemove { tray });
+            os_cmd(gpu, sid, OsCmd::TrayRemove { tray });
         }
         HalCmd::WindowAtTray { id, tray, w, h } => {
             if w.is_finite() && h.is_finite() && w >= 1.0 && h >= 1.0 {
@@ -1153,18 +1153,18 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         }
         HalCmd::ShareText { text } => {
             let text = String::from_utf8_lossy(text).into_owned();
-            gpu.os(sid, OsCmd::ShareText { text });
+            os_cmd(gpu, sid, OsCmd::ShareText { text });
         }
         HalCmd::SelectionSet { text } => {
             let text = String::from_utf8_lossy(text).into_owned();
-            gpu.os(sid, OsCmd::SelectionSet { text });
+            os_cmd(gpu, sid, OsCmd::SelectionSet { text });
         }
         HalCmd::ClipSet { text } => {
             s.clipboard = String::from_utf8_lossy(text).into_owned();
-            gpu.os(sid, OsCmd::ClipSet { text: s.clipboard.clone() });
+            os_cmd(gpu, sid, OsCmd::ClipSet { text: s.clipboard.clone() });
         }
         HalCmd::ClipRead { req, primary } => {
-            if !gpu.os(sid, OsCmd::ClipRead { req, primary }) {
+            if !os_cmd(gpu, sid, OsCmd::ClipRead { req, primary }) {
                 s.events.clipboard(req, false, &[]);
             }
         }
@@ -1221,19 +1221,19 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         }
         HalCmd::DirectPointerSpeed { touchpad, hundredths } => {
             #[cfg(target_os = "linux")]
-            if gpu.os(sid, OsCmd::DirectPointerSpeed { touchpad, hundredths }) { return; }
+            if os_cmd(gpu, sid, OsCmd::DirectPointerSpeed { touchpad, hundredths }) { return; }
             let _ = (touchpad, hundredths);
             s.bad();
         }
         HalCmd::DirectNaturalScroll { touchpad, on } => {
             #[cfg(target_os = "linux")]
-            if gpu.os(sid, OsCmd::DirectNaturalScroll { touchpad, on }) { return; }
+            if os_cmd(gpu, sid, OsCmd::DirectNaturalScroll { touchpad, on }) { return; }
             let _ = (touchpad, on);
             s.bad();
         }
         HalCmd::DirectTapToClick { on } => {
             #[cfg(target_os = "linux")]
-            if gpu.os(sid, OsCmd::DirectTapToClick { on }) { return; }
+            if os_cmd(gpu, sid, OsCmd::DirectTapToClick { on }) { return; }
             let _ = on;
             s.bad();
         }
@@ -1243,7 +1243,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             let location = s.string(location).unwrap_or("").to_string();
             let filename = s.string(filename).unwrap_or("").to_string();
             // without a window system: answered at once, with no paths
-            if !gpu.os(sid, OsCmd::FileDialog { req, kind, title, location, filename, filters }) {
+            if !os_cmd(gpu, sid, OsCmd::FileDialog { req, kind, title, location, filename, filters }) {
                 s.events.dialog_result(req, 0, &[]);
             }
         }
@@ -1255,7 +1255,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 world.request_embedded_frame(sid, id, now);
             }
             Ok(_) => {
-                if !gpu.os(sid, OsCmd::FrameRequest { id }) {
+                if !os_cmd(gpu, sid, OsCmd::FrameRequest { id }) {
                     s.events.frame_ready(id, 0);
                 }
             }
@@ -1524,7 +1524,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
 fn direct_display(_gpu: &mut dyn Gpu, s: &mut Session, req: u64, command: crate::direct::DisplayCommand) {
     let tag = command.tag() as u32;
     #[cfg(target_os = "linux")]
-    if _gpu.os(s.id, OsCmd::DirectDisplay { req, command }) { return; }
+    if os_cmd(_gpu, s.id, OsCmd::DirectDisplay { req, command }) { return; }
     s.events.direct_display_result(req, tag, false, b"this backend does not own direct displays");
 }
 
@@ -1538,10 +1538,16 @@ fn media_unavailable(s: &mut Session, c: &HalCmd) {
     s.stats.media_unsupported += 1;
 }
 
+/// An OS command of the session: a remote headset's XR window answers its own
+/// (`crate::xr_remote`, under every backend), the backend's window system the rest.
+fn os_cmd(gpu: &mut dyn Gpu, sid: u32, cmd: OsCmd) -> bool {
+    crate::xr_remote::command(sid, &cmd) || gpu.os(sid, cmd)
+}
+
 /// A command for a window of the session: counted as stale when the window is gone.
 fn os_window(gpu: &mut dyn Gpu, s: &mut Session, id: Id, cmd: OsCmd) {
     match s.windows.get(s.id, id) {
-        Ok(e) if !e.val.is_hosted() => { gpu.os(s.id, cmd); }
+        Ok(e) if !e.val.is_hosted() => { os_cmd(gpu, s.id, cmd); }
         Ok(_) => {},
         Err(_) => s.stale(),
     }

@@ -473,6 +473,15 @@ extern "C" {
         nalUnitHeaderLengthOut: *mut i32,
     ) -> OSStatus;
 
+    pub fn CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+        videoDesc: CMFormatDescriptionRef,
+        parameterSetIndex: usize,
+        parameterSetPointerOut: *mut *const u8,
+        parameterSetSizeOut: *mut usize,
+        parameterSetCountOut: *mut usize,
+        nalUnitHeaderLengthOut: *mut i32,
+    ) -> OSStatus;
+
     pub fn CMSampleBufferGetImageBuffer(sbuf: CMSampleBufferRef) -> CVImageBufferRef;
     /// The codec's own sample-description extensions — for HEVC this is where
     /// the ready-made `hvcC` atom lives, which an mp4 needs verbatim.

@@ -22,7 +22,7 @@ use crate::{write_all, Inbox};
 use makepad_hal::xr_remote as hal;
 use makepad_network::fleet::id::{self, now_secs, Need};
 use makepad_network::tls::TlsServer;
-use makepad_video::{GpuReady, QpGrid, StreamTile, StreamTuning, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
+use makepad_video::{GpuCompletion, QpGrid, StreamTile, StreamTuning, StreamVideoCodec, SurfaceHandle, VideoStreamEncoder, VideoStreamEncoderOptions};
 use std::collections::VecDeque;
 use std::io::Read;
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -182,7 +182,8 @@ impl Session {
     #[allow(clippy::too_many_arguments)]
     fn session(&self, stream: &mut makepad_network::tls::TlsStream, mut inbox: Inbox, mut buf: Vec<u8>, name: &str, who: &str, eye: [u32; 2], refresh_mhz: u32, decodes: u32) -> Result<String, String> {
         let eye = [eye[0].clamp(64, 4096) & !3, eye[1].clamp(64, 4096) & !3];
-        let codec = if decodes & codecs::HEVC != 0 { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
+        // H.265 when both ends have it
+        let codec = if decodes & codecs::HEVC != 0 && VideoStreamEncoder::caps().hevc { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
         let fps = (refresh_mhz / 1000).clamp(30, 120);
         let core = Core::start(eye, fps, codec, self.log.clone())?;
         (self.log)(&format!("xr host: {who} ({name}) from {}: eyes {}x{} at {fps} Hz, {codec:?} {}x{} in {} tile(s) on {}", self.peer, eye[0], eye[1], core.size[0], core.size[1], core.tiles, core.description));
@@ -445,34 +446,18 @@ enum Out {
     Video(VideoHead, Vec<u8>, Instant),
 }
 
-/// A picture the app packed (`makepad_xr_stream`) for the encoder: the shared texture (`handle`,
-/// its DMA-BUF in the copy registry; the `nv12_picture` layout of the whole picture, both eye
-/// columns), when the GPU has it (`ready`), the display time of the pose it was drawn with.
-/// `held` is dropped once every eye's encode read the texture: the app may draw into it again.
+/// A picture the app packed (`makepad_xr_stream`) for the encoder: the shared surface (the
+/// packed NV12 layout of the whole picture, both eye columns), when the GPU work that drew it
+/// completes (`ready`), the display time of the pose it was drawn with. `held` is dropped once
+/// every eye's encode read the surface: the app may draw into it again.
 pub struct Picture {
-    pub handle: u64,
-    pub ready: Ready,
+    pub surface: SurfaceHandle,
+    pub ready: GpuCompletion,
     pub held: Box<dyn Send + Sync>,
     pub display_ns: u64,
     pub built_at: Instant,
     /// What the view centres on (m), for reprojection without per-pixel depth.
     pub focus_m: f32,
-}
-
-/// When a picture may be read: polled (on the picture thread, never the app's UI thread) until
-/// the frame that rendered it was submitted and its fence published.
-pub type Ready = Box<dyn FnMut() -> Option<Result<GpuReady, String>> + Send>;
-
-/// Polls `ready` until it answers (the frame is submitted within a frame's time; 2 s is lost).
-fn wait_ready(mut ready: Ready) -> Result<GpuReady, String> {
-    let started = Instant::now();
-    loop {
-        match ready() {
-            Some(r) => return r,
-            None if started.elapsed() > Duration::from_secs(2) => return Err("the frame's fence was never published".into()),
-            None => std::thread::sleep(Duration::from_micros(200)),
-        }
-    }
 }
 
 /// Pictures built and their eyes decoded by the headset (`Stats`, one per tile): the pictures in
@@ -578,8 +563,8 @@ fn in_flight_limit() -> u64 {
 
 /// One eye's encode: what its thread is given.
 struct Work {
-    handle: u64,
-    ready: GpuReady,
+    surface: SurfaceHandle,
+    ready: GpuCompletion,
     _held: Arc<Box<dyn Send + Sync>>,
     head: VideoHead,
     built_at: Instant,
@@ -897,7 +882,7 @@ impl Core {
         let kbps = BITRATE_KBPS.load(Ordering::Acquire);
         let size = picture_size(eye);
         // a stream per eye on its own engine when the GPU has two
-        let tiles = if VideoStreamEncoder::engines() >= 2 { 2 } else { 1 };
+        let tiles = if VideoStreamEncoder::caps().engines >= 2 { 2 } else { 1 };
         let flow = Arc::new(Flow::default());
         let rate = Arc::new(Rate { kbps: AtomicU32::new(kbps), cap: AtomicU32::new(kbps), clean: AtomicU32::new(0), base_us: AtomicU32::new(0) });
         let keyframe: Arc<[AtomicBool; 2]> = Arc::new([AtomicBool::new(true), AtomicBool::new(true)]);
@@ -948,9 +933,8 @@ impl Core {
                             if now != tuned {
                                 if t == 0 {
                                     log(&format!("xr host: tuning: max QP {}", now.max_qp));
-                                    #[cfg(any(target_os = "linux", target_os = "android"))]
-                                    makepad_hal::stream_encode::hal_stream_encoder_max_qp(now.max_qp);
                                 }
+                                encoder.set_max_qp(now.max_qp);
                                 tuned = now;
                             }
                         }
@@ -965,7 +949,7 @@ impl Core {
                         pts += 1;
                         let push_at = Instant::now();
                         let queued = push_at.duration_since(w.built_at);
-                        let packets = match encoder.push_shared_texture(w.handle, w.ready, pts * 138_888) {
+                        let packets = match encoder.push_surface(&w.surface, &w.ready, pts * 138_888) {
                             Ok(p) => p,
                             Err(e) => {
                                 log(&format!("xr host: eye {t}: encode: {e:?}"));
@@ -976,9 +960,9 @@ impl Core {
                         };
                         // the push waited for the frame's GPU work, copied the column, encoded it
                         let push = push_at.elapsed();
-                        let encode = Duration::from_micros(encoder.last_encode_us() as u64).min(push);
+                        let encode = Duration::from_micros(encoder.timings().encode_us as u64).min(push);
                         if t == 0 {
-                            dump_picture(w.handle, size, &log);
+                            dump_picture(&w.surface, size, &log);
                         }
                         let mut head = w.head;
                         head.tile = t as u8;
@@ -1000,7 +984,7 @@ impl Core {
         // the app's pictures: matched to their poses, fanned out to the eyes
         let (tx, rx) = sync_channel::<Picture>(4);
         {
-            let (poses, rate, ending, out_tx, flow, log) = (poses.clone(), rate.clone(), ending.clone(), out_tx.clone(), flow.clone(), log.clone());
+            let (poses, rate, ending, out_tx) = (poses.clone(), rate.clone(), ending.clone(), out_tx.clone());
             std::thread::Builder::new()
                 .name("xr-host-pictures".into())
                 .spawn(move || {
@@ -1023,18 +1007,9 @@ impl Core {
                         let head = VideoHead { seq, tile: 0, key: false, display_ns: p.display_ns, eyes, focus_m: p.focus_m, stages: [render_us, 0, 0, 0], size, codec: codec_byte };
                         let held: Arc<Box<dyn Send + Sync>> = Arc::new(p.held);
                         let kbps = rate.current();
-                        let mut ready = match wait_ready(p.ready) {
-                            Ok(r) => Some(r),
-                            Err(e) => {
-                                log(&format!("xr host: {e}"));
-                                flow.lost.fetch_add(1, Ordering::AcqRel);
-                                continue;
-                            }
-                        };
-                        for (t, worker) in workers.iter().enumerate() {
-                            // each eye waits for the same frame: its own copy of the sync_file
-                            let r = if t + 1 == workers.len() { ready.take().unwrap_or(GpuReady::Done) } else { clone_ready(ready.as_ref().unwrap()) };
-                            let _ = worker.send(Work { handle: p.handle, ready: r, _held: held.clone(), head, built_at: p.built_at, kbps });
+                        // each eye's encode waits for the same frame's completion
+                        for worker in &workers {
+                            let _ = worker.send(Work { surface: p.surface.clone(), ready: p.ready.clone(), _held: held.clone(), head, built_at: p.built_at, kbps });
                         }
                     }
                     drop(out_tx);
@@ -1072,30 +1047,18 @@ impl Core {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn clone_ready(ready: &GpuReady) -> GpuReady {
-    match ready {
-        GpuReady::Done => GpuReady::Done,
-        GpuReady::SyncFile(fd) => fd.try_clone().map(GpuReady::SyncFile).unwrap_or(GpuReady::Done),
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn clone_ready(_ready: &GpuReady) -> GpuReady {
-    GpuReady::Done
-}
-
 /// A headset on a loop (`MAKEPAD_XR_REMOTE_SELFTEST=1`): synthetic poses at 72 Hz (the head turning
 /// slowly, eyes 64 mm apart, ±45° fields) drive the app's XR window exactly as a headset's would, and
 /// every picture is encoded and measured, then dropped (and counted decoded at once). The server
 /// side's numbers without a headset.
 pub fn selftest(eye: [u32; 2], log: Log) {
     use makepad_hal::{buffers::Wire, XrEye, XrFrame, XrPose};
-    let core = match Core::start(eye, 72, StreamVideoCodec::Hevc, log.clone()) {
+    let codec = if VideoStreamEncoder::caps().hevc { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
+    let core = match Core::start(eye, 72, codec, log.clone()) {
         Ok(c) => c,
         Err(e) => return log(&format!("xr selftest: {e}")),
     };
-    log(&format!("xr selftest: {}x{} HEVC in {} tile(s) on {}", core.size[0], core.size[1], core.tiles, core.description));
+    log(&format!("xr selftest: {}x{} {codec:?} in {} tile(s) on {}", core.size[0], core.size[1], core.tiles, core.description));
     hal::hal_xr_remote_attach(eye[0], eye[1], 72_000);
     let _ = std::thread::Builder::new().name("xr-selftest".into()).spawn(move || {
         let start = Instant::now();
@@ -1176,11 +1139,11 @@ fn foveation(grid: QpGrid, size: [u32; 2], fov: [f32; 4], peak: i8) -> Vec<i8> {
 /// both eye columns, each its colour over its band of coverage and inverse depth) once its encode
 /// read it, and a line of the band's numbers. A check of what the GPU packed.
 #[cfg(not(target_os = "linux"))]
-fn dump_picture(_handle: u64, _size: [u32; 2], _log: &Log) {}
+fn dump_picture(_surface: &SurfaceHandle, _size: [u32; 2], _log: &Log) {}
 
 /// (shared pictures are DMA-BUFs: Linux)
 #[cfg(target_os = "linux")]
-fn dump_picture(handle: u64, size: [u32; 2], log: &Log) {
+fn dump_picture(surface: &SurfaceHandle, size: [u32; 2], log: &Log) {
     static N: AtomicU32 = AtomicU32::new(0);
     let Some(dir) = std::env::var_os("MAKEPAD_XR_REMOTE_DUMP") else { return };
     if N.fetch_add(1, Ordering::AcqRel) != 300 {
@@ -1188,7 +1151,7 @@ fn dump_picture(handle: u64, size: [u32; 2], log: &Log) {
     }
     let [w, h] = size;
     let mut px = vec![0u8; (w / 4 * h * 4) as usize];
-    if makepad_hal::dmabuf::hal_dmabuf_read(handle, &[0, 0, w / 4, h], &mut px) < 0 {
+    if makepad_hal::dmabuf::hal_dmabuf_read(surface.id, &[0, 0, w / 4, h], &mut px) < 0 {
         return log("xr host: dump: the picture could not be read");
     }
     // a BGRA texel holds luma samples 0..3 in its bytes as they lie: the row is the plane's row
