@@ -484,10 +484,7 @@ impl AndroidMedia {
         let request = match *c {
             HalCmd::AudioEntry { dir, index, entry, ctx } => {
                 if dir > 1 { s.bad(); return true; }
-                state.entries.slot(dir as usize, index as usize).replace((entry != 0).then(|| audio::Entry {
-                    function: unsafe { std::mem::transmute::<usize, AudioFn>(entry as usize) },
-                    context: ctx as usize,
-                }));
+                state.entries.slot(dir as usize, index as usize).replace(audio::Entry::from_cmd(entry, ctx));
                 ControlRequest::Audio { direction: None, devices: Vec::new(), entries: state.entries.clone() }
             }
             HalCmd::AudioUse { dir, options: _, devices } => {

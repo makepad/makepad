@@ -121,6 +121,31 @@ pub struct AudioBlock {
 /// The realtime entry the app registers. `ctx` is the pointer it registered with.
 pub type AudioFn = extern "C" fn(ctx: *mut std::ffi::c_void, block: *mut AudioBlock);
 
+/// A registered realtime entry: the app's function, its `ctx`, and the scope its calls run in
+/// (`call_scope`: under a host that runs several apps in one process, the app that registered
+/// it, on whatever thread the device calls it).
+#[derive(Clone, Copy)]
+pub struct AudioEntry {
+    f: AudioFn,
+    ctx: usize,
+    scope: crate::call_scope::Scope,
+}
+
+impl AudioEntry {
+    /// The entry of an `AudioEntry` command, on the app's thread that submitted it (None: `entry`
+    /// 0, the slot is cleared).
+    pub fn from_cmd(entry: u64, ctx: u64) -> Option<AudioEntry> {
+        // SAFETY: a non-zero `entry` is the address of the `extern "C" fn` the app registered
+        (entry != 0).then(|| AudioEntry { f: unsafe { std::mem::transmute::<usize, AudioFn>(entry as usize) }, ctx: ctx as usize, scope: crate::call_scope::Scope::here() })
+    }
+
+    /// Calls the entry with `block` (the device's realtime thread).
+    #[inline]
+    pub fn call(&self, block: &mut AudioBlock) {
+        self.scope.call(|| (self.f)(self.ctx as *mut std::ffi::c_void, block))
+    }
+}
+
 /// One audio device as `AudioDevices` lists it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioDeviceInfo {

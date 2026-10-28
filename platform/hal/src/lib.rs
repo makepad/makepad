@@ -28,6 +28,7 @@ pub mod glsl;
 pub mod gl_interop;
 pub mod automation;
 pub mod buffers;
+pub mod call_scope;
 pub mod clock;
 #[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
 mod xr_carry;

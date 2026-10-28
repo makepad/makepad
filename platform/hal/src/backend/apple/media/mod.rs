@@ -232,8 +232,7 @@ impl Media {
                     let access = lock(&access);
                     if dir == audio_dir::INPUT { access.input_cb[index].clone() } else { access.output_cb[index].clone() }
                 };
-                // SAFETY: a non-zero `entry` is the address of the `extern "C" fn` the app registered
-                let entry = (entry != 0).then(|| audio::Entry { f: unsafe { std::mem::transmute::<usize, crate::media::AudioFn>(entry as usize) }, ctx: ctx as usize });
+                let entry = audio::Entry::from_cmd(entry, ctx);
                 // waits for a block of the old entry that is running: when this returns the old
                 // entry is not called any more
                 *lock(&slot) = entry;

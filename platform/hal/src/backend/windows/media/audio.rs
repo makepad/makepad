@@ -12,7 +12,7 @@
 //! longer running; nothing else on that thread blocks on a lock another thread holds long.
 
 use super::Signal;
-use crate::media::{device_kind, name_hash, AudioBlock, AudioDeviceInfo, AudioFn};
+use crate::media::{device_kind, name_hash, AudioBlock, AudioDeviceInfo, AudioEntry};
 use makepad_windows_sys::core::{PCWSTR, PWSTR};
 use makepad_windows_sys::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use makepad_windows_sys::Win32::Foundation::{CloseHandle, HANDLE, PROPERTYKEY, WAIT_OBJECT_0};
@@ -30,11 +30,7 @@ use std::sync::{Arc, Mutex};
 pub const MAX_AUDIO_DEVICE_INDEX: usize = 32;
 
 /// A registered entry.
-#[derive(Clone, Copy)]
-pub struct Entry {
-    pub f: AudioFn,
-    pub ctx: usize,
-}
+pub type Entry = AudioEntry;
 
 /// The entry of one device slot. Locked while the entry runs.
 pub type Slot = Arc<Mutex<Option<Entry>>>;
@@ -472,7 +468,7 @@ impl Planar {
         let guard = lock(slot);
         if let Some(entry) = *guard {
             let mut block = AudioBlock { device, sample_rate, sample_time: 0.0, host_time: 0, rate_scalar: 0.0, has_time: 0, frames: frames as u32, channels: self.channels as u32, planes: planes.as_mut_ptr() };
-            (entry.f)(entry.ctx as *mut std::ffi::c_void, &mut block);
+            entry.call(&mut block);
         }
     }
 }

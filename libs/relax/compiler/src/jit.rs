@@ -2172,6 +2172,17 @@ pub fn tls_block() -> u64 {
     rt_tls_block()
 }
 
+/// This thread's thread-local block, 0 when it has none (it never ran JIT code): nothing is
+/// allocated.
+pub fn tls_block_if_any() -> u64 {
+    let b = TLS_BLOCK_COPY.with(|c| c.get());
+    if b != 0 {
+        return b;
+    }
+    let _keep = os::proc::KeepLastError::new();
+    os::tls::get(tls_key()) as u64
+}
+
 rt_fn! {
 pub(crate) fn rt_fmt_pop() -> StrRet {
     let s = FMT.with(|f| {

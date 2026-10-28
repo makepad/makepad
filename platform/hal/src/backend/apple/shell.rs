@@ -63,6 +63,8 @@ struct RawWork {
     data: usize,
     run: extern "C" fn(usize),
     discard: extern "C" fn(usize),
+    /// what the thunks run in: the code that dispatched them (`call_scope`)
+    scope: crate::call_scope::Scope,
     pending: bool,
 }
 
@@ -72,14 +74,14 @@ unsafe impl Send for RawWork {}
 impl RawWork {
     fn call(mut self) {
         self.pending = false;
-        (self.run)(self.data);
+        self.scope.call(|| (self.run)(self.data));
     }
 }
 
 impl Drop for RawWork {
     fn drop(&mut self) {
         if self.pending {
-            (self.discard)(self.data);
+            self.scope.call(|| (self.discard)(self.data));
         }
     }
 }
@@ -94,6 +96,7 @@ pub fn dispatch_main_raw(data: usize, run: usize, discard: usize) -> bool {
         data,
         run: unsafe { std::mem::transmute::<usize, extern "C" fn(usize)>(run) },
         discard: unsafe { std::mem::transmute::<usize, extern "C" fn(usize)>(discard) },
+        scope: crate::call_scope::Scope::here(),
         pending: true,
     };
     dispatch_main(move || work.call())

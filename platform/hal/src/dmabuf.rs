@@ -325,7 +325,9 @@ static NEXT_FENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// (any thread) once it is published. Its number for `hal_dmabuf_fence_poll`, 0 when failed.
 #[makepad_relax_api::relax_api]
 pub fn hal_dmabuf_fence(session: u32, notify: extern "C" fn()) -> u64 {
-    match Hal::global().dmabuf_fence(session, Arc::new(move || notify())) {
+    // `notify` runs in the code that asked (`call_scope`), on whatever thread the fence signals
+    let scope = crate::call_scope::Scope::here();
+    match Hal::global().dmabuf_fence(session, Arc::new(move || scope.call(|| notify()))) {
         Ok(fence) => {
             let id = NEXT_FENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             crate::lock(&FENCES).get_or_insert_with(Default::default).insert(id, fence);

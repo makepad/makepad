@@ -2571,6 +2571,10 @@ fn tick_at(live: usize) -> bool {
 unsafe extern "C" fn owned_tick_c(index: usize, class: usize, live: usize, a: &Arena) {
     a.owned_tick(index, class, live)
 }
+/// The domain arena the calling thread is inside (`enter_domain`; null: none).
+pub fn current_domain() -> *const Arena {
+    domain_tls().arena.get()
+}
 /// Puts the calling thread inside domain arena `a` (null: none): the chunks it holds in the
 /// arena it leaves go back to that arena (alive: the thread is still registered in its domain);
 /// the next arena starts with an empty cache.

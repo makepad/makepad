@@ -470,3 +470,62 @@ fn jit_tls_past_the_direct_slots() {
     assert_eq!(out, [10 * 100 + 16, 7]);
     let _ = std::fs::remove_dir_all(root);
 }
+
+// A callback the domain's code hands to native code runs on a thread native code owns (the HAL's
+// realtime audio thread): through foreign_enter it sees the domain's statics, not the default
+// domain's copy, and allocates in the domain's heap; foreign_leave puts the thread back.
+const FOREIGN_FIXTURE: &str = r#"
+use std::sync::atomic::{AtomicU64, Ordering};
+static TAPPED: AtomicU64 = AtomicU64::new(0);
+static mut LAST: Option<Box<[u8; 4096]>> = None;
+extern "C" fn tap(n: u64) {
+    unsafe { LAST = Some(Box::new([n as u8; 4096])); }
+    TAPPED.fetch_add(n, Ordering::SeqCst);
+}
+fn foreign(p: *mut u64) {
+    let a = unsafe { &*(p as *const [AtomicU64; 4]) };
+    let f: extern "C" fn(u64) = tap;
+    a[0].store(f as usize as u64, Ordering::SeqCst);
+    while TAPPED.load(Ordering::SeqCst) < 6 { std::thread::yield_now(); }
+    a[1].store(TAPPED.load(Ordering::SeqCst), Ordering::SeqCst);
+    a[2].store(unsafe { LAST.as_ref().map_or(0, |b| b[0] as u64) }, Ordering::SeqCst);
+}
+"#;
+
+#[test]
+fn foreign_thread_callback_sees_domain_statics() {
+    isolated_test!(foreign_thread_callback_sees_domain_statics);
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut u, entry, root) = fixture_of(FOREIGN_FIXTURE, "foreign");
+    let flags = [const { AtomicU64::new(0) }; 4];
+    let (domain, base, main) = launch(&mut u, entry, None, &flags);
+    wait(|| flags[0].load(Ordering::SeqCst) != 0);
+    let tap: extern "C" fn(u64) = unsafe { std::mem::transmute(flags[0].load(Ordering::SeqCst) as usize) };
+    let scope = foreign_scope_of(base);
+    assert_ne!(scope, 0);
+    // a thread the program never started, as a device's callback thread
+    std::thread::spawn(move || {
+        for n in 1..=3 {
+            let saved = foreign_enter(scope);
+            assert_eq!(current(), base);
+            tap(n);
+            foreign_leave(saved);
+            assert_ne!(current(), base, "leave puts the thread back");
+            assert!(crate::zone_alloc::domain::current().is_null(), "and its heap");
+        }
+    })
+    .join()
+    .unwrap();
+    // (a callback that wrote the default domain's copy leaves the program waiting: the deadline fails it)
+    wait(|| flags[1].load(Ordering::SeqCst) != 0);
+    main.join().unwrap();
+    assert_eq!(flags[1].load(Ordering::SeqCst), 6, "the program saw every callback's write");
+    assert_eq!(flags[2].load(Ordering::SeqCst), 3);
+    wait(|| info(domain).is_some_and(|i| i.threads == 0 && i.base == 0));
+    assert!(!blocks().contains(&base));
+    // a stale scope enters nothing
+    assert_eq!(foreign_enter(scope).into_words()[2], 0);
+    domains().retain(|d| d.info.id != domain);
+    drop(u);
+    std::fs::remove_dir_all(root).unwrap();
+}
