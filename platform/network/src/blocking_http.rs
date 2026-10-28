@@ -959,6 +959,10 @@ mod linux_tls {
     const SSL_ERROR_WANT_WRITE: c_int = 3;
     const SSL_ERROR_SYSCALL: c_int = 5;
     const SSL_ERROR_ZERO_RETURN: c_int = 6;
+    /// OpenSSL 3's `SSL_R_UNEXPECTED_EOF_WHILE_READING`: the peer closed
+    /// without close_notify, which OpenSSL 1.1 reported as a plain EOF.
+    /// Google and Microsoft Graph close this way after chunked responses.
+    const SSL_R_UNEXPECTED_EOF_WHILE_READING: c_ulong = 0x0A00_0126;
     const OPENSSL_1_1_0: c_ulong = 0x1010_0000;
 
     #[repr(C)]
@@ -1004,6 +1008,8 @@ mod linux_tls {
         fn X509_VERIFY_PARAM_set1_ip_asc(param: *mut c_void, ipasc: *const c_char) -> c_int;
         fn SSL_get0_param(ssl: *mut SSL) -> *mut c_void;
         fn OpenSSL_version_num() -> c_ulong;
+        fn ERR_peek_error() -> c_ulong;
+        fn ERR_clear_error();
     }
 
     struct CtxGuard(*mut SSL_CTX);
@@ -1175,6 +1181,15 @@ mod linux_tls {
                     "tls truncated",
                 )),
                 SSL_ERROR_SYSCALL => Err(std::io::Error::last_os_error()),
+                _ if unsafe { ERR_peek_error() } == SSL_R_UNEXPECTED_EOF_WHILE_READING => {
+                    // Same kind as OpenSSL 1.1's truncation above, so the
+                    // body framing decides whether the response is complete.
+                    unsafe { ERR_clear_error() };
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "tls truncated",
+                    ))
+                }
                 _ => Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     "ssl read failed",
@@ -1885,6 +1900,9 @@ fn expect_eof(
     match read_watch(transport, &mut tmp, cancel, idle_timeout) {
         Ok(0) => Ok(()),
         Ok(_) => Err(Error::InvalidResponse),
+        // The chunked body already ended by its own framing, so a close
+        // without TLS close_notify cannot have truncated anything.
+        Err(Error::InvalidResponse) => Ok(()),
         Err(Error::Reset) => Err(Error::Reset),
         Err(e) => Err(e),
     }
