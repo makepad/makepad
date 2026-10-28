@@ -156,17 +156,6 @@
     "menu": "other"
   },
   {
-    "id": "fab",
-    "title": "Fab",
-    "package": "makepad-app-fab",
-    "binary": "makepad-app-fab",
-    "workspace": "makepad/apps/fab",
-    "features": [
-      "gltf"
-    ],
-    "menu": "other"
-  },
-  {
     "id": "fabric",
     "title": "Fabric",
     "package": "makepad-app-fabric",
@@ -196,14 +185,6 @@
       "standalone"
     ],
     "menu": "other"
-  },
-  {
-    "id": "gltf",
-    "title": "Gltf",
-    "package": "makepad-fab-loader-gltf",
-    "binary": "makepad-fab-loader-gltf",
-    "workspace": "makepad/apps/fab/loaders/gltf",
-    "features": []
   },
   {
     "id": "image",

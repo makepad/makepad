@@ -40,7 +40,11 @@ if grep -rniI --exclude-dir=local --exclude-dir='target*' --exclude-dir=.git --e
     exit 1
 fi
 
-scope="apps/fab libs/fab libs/fab_tour libs/raytrace examples/raytrace Cargo.toml makepad.splash"
+scope="libs/raytrace examples/raytrace Cargo.toml makepad.splash"
+# Fab (the commercial modeler) when the commercial checkout is present.
+if [ -d apps/commercial/fab ]; then
+    scope="apps/commercial/fab $scope"
+fi
 if grep -rniIE --exclude-dir='target*' "$vendor_one|$vendor_two|$old_renderer|$old_shell|$comparison" $scope > "$matches"; then
     echo "forbidden vendor, comparison, or retired naming found:" >&2
     cat "$matches" >&2
@@ -69,7 +73,7 @@ if grep -rniIEw --exclude-dir='target*' \
     exit 1
 fi
 
-if find apps/fab libs/fab libs/fab_tour libs/raytrace examples/raytrace \
+if find $scope \
     -type f -name '*.rej' -print | grep -q .; then
     echo "patch reject artifacts remain" >&2
     exit 1

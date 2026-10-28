@@ -1,7 +1,7 @@
 //! The "fab" control set — the fab app's control styling
-//! (libs/fab/src/ui: the drag-numeric field, the color picker, the row /
+//! (the Fab shell's ui: the drag-numeric field, the color picker, the row /
 //! panel / search visual language) ported into the widget library as a
-//! named, reusable set. Nothing here depends on libs/fab: the code and the
+//! named, reusable set. Nothing here depends on the Fab shell: the code and the
 //! token table are carried over and adapted; the fab app itself migrates to
 //! these later.
 //!

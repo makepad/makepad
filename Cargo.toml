@@ -110,9 +110,6 @@ workspace.members = [
     "libs/font_subset",
     "libs/kinetic_type",
     "libs/raytrace",
-    "libs/fab",
-    "libs/fab_tour",
-    "apps/fab/loaders/gltf",
     "libs/scene",
     "libs/soft_body",
     "libs/show_control",
@@ -180,7 +177,6 @@ workspace.members = [
     "examples/render_to_texture",
     "examples/gl_interop",
     # === digital-fabrication product ===
-    "apps/fab",
     "apps/fabric",
     "libs/fabric/measure",
     "libs/fabric/draft",
