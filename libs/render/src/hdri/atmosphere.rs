@@ -1,7 +1,8 @@
 //! Clear-sky atmosphere for the HDRI generator.
 //!
-//! Scattering by air (Rayleigh) and haze (Mie, two Cornette-Shanks lobes),
-//! with ozone absorption, on a spherical Earth, in eight spectral bands taken
+//! Scattering by air (Rayleigh) and haze (Mie, two Cornette-Shanks lobes; a
+//! low layer the Haze control sets and the stratosphere's thin one), with
+//! ozone absorption, on a spherical Earth, in eight spectral bands taken
 //! to RGB at the end. The marching scheme follows wwwtyro/glsl-atmosphere
 //! (Unlicense, https://github.com/wwwtyro/glsl-atmosphere): march the view ray
 //! through the shell and, at every sample, take the transmittance toward the
@@ -19,7 +20,8 @@
 //! angle from the sun, its colour, and the sky's light on level ground
 //! against the sun's. A clear noon's sky puts about 0.13 of the sun's light
 //! on level ground (real ones 0.10-0.15), the glow round the sun falls as
-//! real ones do, and a sunset's zenith stays blue.
+//! real ones do, a sunset's zenith stays blue, and the stratosphere's haze
+//! keeps the glow over the sunrise point bright in civil twilight.
 //!
 //! A clear sky mirrors about the sun's vertical plane, so everything that
 //! depends on the view is computed once into a sky-view table indexed by the
@@ -131,6 +133,14 @@ const AEROSOL_ALBEDO: f64 = 0.9;
 /// against real HDRIs while it lit the first 5 deg too dim. Together their
 /// mean cosine is 0.78, a continental haze's.
 const MIE_G_BROAD: f64 = 0.65;
+/// The stratosphere's own thin aerosol (the Junge layer, 15-25 km), there on
+/// any day whatever the haze down low: a vertical optical depth of 0.008 at
+/// 550 nm, a tent peaking at STRAT_PEAK_HEIGHT. Lit by a sun that has set for
+/// the air below it, it scatters forward into the bright glow over the
+/// sunrise or sunset point and the purple light of civil twilight.
+const STRAT_DEPTH: f64 = 0.008;
+const STRAT_PEAK_HEIGHT: f64 = 20_000.0;
+const STRAT_HALF_WIDTH: f64 = 7_000.0;
 const MIE_G_PEAK: f64 = 0.95;
 const MIE_PEAK_SHARE: f64 = 0.25;
 /// Ozone only absorbs, in the Chappuis band (500-700 nm, peaking at 600):
@@ -408,6 +418,8 @@ struct Medium {
     rayleigh: Spectrum,
     mie_scattering: Spectrum,
     mie_extinction: Spectrum,
+    strat_scattering: Spectrum,
+    strat_extinction: Spectrum,
     ozone: Spectrum,
     /// The ground's albedo, for the light it bounces back into the air.
     ground: Spectrum,
@@ -420,6 +432,9 @@ impl Medium {
         let (air, haze, ozone) = (p.air as f64, p.haze as f64, p.ozone as f64);
         let mie_extinction: Spectrum = std::array::from_fn(|k| {
             haze * AEROSOL_DEPTH / MIE_SCALE_HEIGHT * (BAND_NM[k] / 550.0).powf(-AEROSOL_ANGSTROM)
+        });
+        let strat_extinction: Spectrum = std::array::from_fn(|k| {
+            STRAT_DEPTH / STRAT_HALF_WIDTH * (BAND_NM[k] / 550.0).powf(-AEROSOL_ANGSTROM)
         });
         let cross = band_ozone_cross_sections();
         // The ground's colour spread over the bands: blue at 440 nm, green at
@@ -441,21 +456,32 @@ impl Medium {
             rayleigh: BAND_NM.map(|nm| air * 1.24062e-6 / (nm / 1000.0).powi(4)),
             mie_scattering: mie_extinction.map(|e| e * AEROSOL_ALBEDO),
             mie_extinction,
+            strat_scattering: strat_extinction.map(|e| e * AEROSOL_ALBEDO),
+            strat_extinction,
             ozone: cross.map(|c| c * OZONE_PEAK_DENSITY * ozone),
             ground,
             to_rgb: band_to_rgb(),
         }
     }
 
-    /// Per-band extinction for (air, haze, ozone) densities: a coefficient
-    /// per metre for point densities, an optical depth for integrated ones.
-    fn extinction(&self, d: [f64; 3]) -> Spectrum {
-        std::array::from_fn(|k| self.rayleigh[k] * d[0] + self.mie_extinction[k] * d[1] + self.ozone[k] * d[2])
+    /// Per-band extinction for (air, haze, ozone, stratospheric haze)
+    /// densities: a coefficient per metre for point densities, an optical
+    /// depth for integrated ones.
+    fn extinction(&self, d: Densities) -> Spectrum {
+        std::array::from_fn(|k| {
+            self.rayleigh[k] * d[0] + self.mie_extinction[k] * d[1] + self.ozone[k] * d[2] + self.strat_extinction[k] * d[3]
+        })
     }
 
-    /// Per-band scattering coefficient for point densities (air, haze, ozone).
-    fn scattering(&self, d: [f64; 3]) -> Spectrum {
-        std::array::from_fn(|k| self.rayleigh[k] * d[0] + self.mie_scattering[k] * d[1])
+    /// Per-band scattering coefficient for point densities.
+    fn scattering(&self, d: Densities) -> Spectrum {
+        std::array::from_fn(|k| self.rayleigh[k] * d[0] + self.mie_scattering[k] * d[1] + self.strat_scattering[k] * d[3])
+    }
+
+    /// Per-band scattering by the haze (low and stratospheric), which shares
+    /// the haze's phase.
+    fn haze_scattering(&self, d: Densities) -> Spectrum {
+        std::array::from_fn(|k| self.mie_scattering[k] * d[1] + self.strat_scattering[k] * d[3])
     }
 
     /// A spectrum, per unit of the sun's light at the top of the air, as the
@@ -537,13 +563,17 @@ fn band_to_rgb() -> [Spectrum; 3] {
     w
 }
 
-/// Relative densities (air, haze, ozone) at `height` metres above the ground.
-fn densities(height: f64) -> [f64; 3] {
+/// Relative densities: air, haze, ozone and the stratosphere's haze.
+type Densities = [f64; 4];
+
+/// Relative densities at `height` metres above the ground.
+fn densities(height: f64) -> Densities {
     let h = height.max(0.0);
     [
         (-h / RAYLEIGH_SCALE_HEIGHT).exp(),
         (-h / MIE_SCALE_HEIGHT).exp(),
         (1.0 - (h - OZONE_PEAK_HEIGHT).abs() / OZONE_HALF_WIDTH).max(0.0),
+        (1.0 - (h - STRAT_PEAK_HEIGHT).abs() / STRAT_HALF_WIDTH).max(0.0),
     ]
 }
 
@@ -587,9 +617,9 @@ fn segment(i: usize, n: usize, length: f64) -> (f64, f64) {
     (0.5 * (t0 + t1), t1 - t0)
 }
 
-/// Integrated (air, haze, ozone) densities in metres from radius `r` along
-/// `mu` to space, or None when the ground is in the way.
-fn column_depth(r: f64, mu: f64, steps: usize) -> Option<[f64; 3]> {
+/// Integrated densities in metres from radius `r` along `mu` to space, or
+/// None when the ground is in the way.
+fn column_depth(r: f64, mu: f64, steps: usize) -> Option<Densities> {
     if hits_ground(r, mu) {
         return None;
     }
@@ -600,9 +630,9 @@ fn column_depth(r: f64, mu: f64, steps: usize) -> Option<[f64; 3]> {
 /// its grazing column: there `hits_ground` sits exactly on its boundary and
 /// rounding could turn a ray that skims the ground into "blocked", which
 /// would store a depth of 0 (full sunlight) right at the terminator.
-fn integrate_column(r: f64, mu: f64, steps: usize) -> [f64; 3] {
+fn integrate_column(r: f64, mu: f64, steps: usize) -> Densities {
     let length = distance_to_top(r, mu);
-    let mut depth = [0.0f64; 3];
+    let mut depth = [0.0f64; 4];
     for i in 0..steps {
         let (t, ds) = segment(i, steps, length);
         // `densities` clamps the height at 0, so a skimming ray that rounds a
@@ -889,12 +919,13 @@ fn view_steps(medium: &Medium, view_sin: f64) -> [RayStep; VIEW_STEPS] {
         let r = radius_at(r0, view_sin, t);
         let dens = densities(r - PLANET_RADIUS);
         let ext = medium.extinction(dens);
+        let haze_sca = medium.haze_scattering(dens);
         let (mut air, mut haze) = ([0.0f64; BANDS], [0.0f64; BANDS]);
         for k in 0..BANDS {
             let view_t = (-(depth[k] + 0.5 * ext[k] * ds)).exp();
             depth[k] += ext[k] * ds;
             air[k] = view_t * medium.rayleigh[k] * dens[0] * ds;
-            haze[k] = view_t * medium.mie_scattering[k] * dens[1] * ds;
+            haze[k] = view_t * haze_sca[k] * ds;
         }
         // `p` holds (t, 0, 0): the distance along the ray is all `in_scatter` needs.
         let (ms_row, ms_ty) = MultiScatter::height(r);
