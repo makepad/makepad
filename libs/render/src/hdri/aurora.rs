@@ -34,7 +34,7 @@
 use makepad_draw::*;
 use super::noise::{fbm1_d, fbm1_frac_full, hash_u32, octaves_for};
 use super::spectrum::{line_xyz_per_rayleigh, xyz_to_rgb_keep_luminance};
-use super::{dir_from_az_el, AuroraParams};
+use super::{dir_from_az_el, AuroraColor, AuroraParams};
 use crate::sky::luminance;
 use std::f32::consts::{PI, TAU};
 
@@ -51,12 +51,13 @@ const ARC_STEP_KM: f32 = 60.0;
 const FIELD_TILT: f32 = 0.23;
 /// Edge-on over face-on, at most: the face-on body is 0.3 of the brightest lines of sight (refs §5.1: 0.1 to 0.3).
 const EDGE_MAX: f32 = 10.0 / 3.0;
-/// The sheet's soft thickness across the ribbon (km, at an arc SHAPE_KM away; nearer arcs take it smaller with their
-/// shapes). Where the ribbon turns back as seen from the observer (a fold's U-turn, a meander running away), a view
+/// The sheet's soft thickness across the ribbon (km, at an arc SHAPE_KM away; nearer arcs take it smaller by the square
+/// root of their shapes' scale; Task L1 follow-up: 24 km, from 10, so a turn's side reads as a rounded ribbon, not a
+/// cut). Where the ribbon turns back as seen from the observer (a fold's U-turn, a meander running away), a view
 /// passing the turn meets two more passes through the sheet; their columns rise from 0 over this much of the view's
 /// lateral distance into the turn, and a thick sheet's column there is finite, so the turn's side is a soft edge, not
 /// a cut, and a wide turn seen edge-on a soft bright rim.
-const TIP_KM: f32 = 10.0;
+const TIP_KM: f32 = 24.0;
 /// The footprint's shapes are sized for an arc SHAPE_KM away (its border 15 degrees up in the middle); a nearer arc,
 /// higher in the sky, takes them smaller in proportion (down to SHAPE_MIN), so they keep their size in the sky and the
 /// ribbon stays in front of the observer.
@@ -83,7 +84,10 @@ const CURL_CELL_KM: f32 = 520.0;
 /// beyond about 2300 km); and its segments' azimuth bins.
 const STEP_KM: f32 = 6.0;
 const STEP_MAX: f32 = 4.0;
-const TURN_STEP: f32 = 0.3;
+/// Task L1 follow-up: at most 0.1 radians a step (it was 0.3: a U-turn of 10 facets read as a folded-paper crease),
+/// steps down to a sixteenth of the base where it turns tightly, growing again once a step turns under half of it.
+const TURN_STEP: f32 = 0.1;
+const STEP_MIN: f32 = 1.0 / 16.0;
 const REACH_KM: f32 = 2400.0;
 const BINS: usize = 1024;
 /// `Aurora::ground_light`'s quadrature: every LIGHT_BINS-th bin's middle.
@@ -470,8 +474,8 @@ fn footprint(d0: f32, k: u32, folds: f32, half: f32, shared: u32, own: u32, deta
                     Some(h) if length > 0.0 => (h[0] * dy - h[1] * dx).atan2(h[0] * dx + h[1] * dy).abs(),
                     _ => 0.0,
                 };
-                if turn > TURN_STEP && grow > 0.25 {
-                    grow = (grow * 0.5).max(0.25);
+                if turn > TURN_STEP && grow > STEP_MIN {
+                    grow = (grow * 0.5).max(STEP_MIN);
                     continue;
                 }
                 t += s;
@@ -480,7 +484,7 @@ fn footprint(d0: f32, k: u32, folds: f32, half: f32, shared: u32, own: u32, deta
                 }
                 p = q;
                 out.push(q);
-                if turn < TURN_STEP / 3.0 {
+                if turn < 0.5 * TURN_STEP {
                     grow = (grow * 1.5).min(STEP_MAX);
                 }
                 break;
@@ -621,7 +625,7 @@ impl Aurora {
         let e0 = p.height_deg.to_radians();
         let d0 = R_KM * ((R_KM * e0.cos() / (R_KM + BORDER_KM)).acos() - e0);
         let half = (0.5 * p.width_deg).to_radians().min(MAX_HALF);
-        let table = line_table(p.line_mix());
+        let table = line_table(p.line_mix(), p.color() == AuroraColor::Classic);
         let mut aurora = Aurora {
             phi0: p.direction_deg.to_radians(),
             half,
@@ -629,7 +633,9 @@ impl Aurora {
             rays: p.rays,
             knots: 0.5 + 0.5 * p.folds,
             gain,
-            tip: TIP_KM * (d0 / SHAPE_KM).clamp(SHAPE_MIN, 1.0),
+            // Task L1 follow-up: a near arc's soft thickness shrinks by the square root of its shapes' scale, as its
+            // turns do, so a turn's side overhead stays a soft edge, not a cut
+            tip: TIP_KM * (d0 / SHAPE_KM).clamp(SHAPE_MIN, 1.0).sqrt(),
             brightest_face: (table.iter().map(|c| luminance(*c)).fold(0.0, f32::max) * EDGE_MAX).max(f32::MIN_POSITIVE),
             arcs: Vec::new(),
             table,
@@ -957,8 +963,10 @@ impl Aurora {
 
 /// The sheet's face-on radiance by height (TABLE entries from TABLE_LOW_KM to TOP_KM, the border at BORDER_KM) for the
 /// line amounts `mix` (green, red, nitrogen), each x PEAK_RAYLEIGHS on the brightest lines of sight: face-on an
-/// EDGE_MAX-th of it.
-fn line_table(mix: [f32; 3]) -> [Vec3f; TABLE] {
+/// EDGE_MAX-th of it. `cyan_top` (the classic preset, Task L1 follow-up): the N2+ bands' blue ends with the green
+/// (GREEN_TOP_KM), so the curtain fades out cyan instead of running on into an indigo band above it ("usually we mostly
+/// see the cyan part"); the other presets keep their blue tops under the red.
+fn line_table(mix: [f32; 3], cyan_top: bool) -> [Vec3f; TABLE] {
     let face = PEAK_RAYLEIGHS / EDGE_MAX;
     let hold = GREEN_HOLD_KM * smoothstep(0.5, 2.0, mix[2]);
     let (green, red, violet, pink) = (line_xyz_per_rayleigh(557.7), line_xyz_per_rayleigh(630.0), line_xyz_per_rayleigh(427.8), line_xyz_per_rayleigh(N2_PINK_NM));
@@ -969,7 +977,8 @@ fn line_table(mix: [f32; 3]) -> [Vec3f; TABLE] {
         let border = smoothstep(-1.5, 0.5, dh);
         let g = smoothstep(2.0 + hold, 12.0 + hold, dh) * (-(dh - 12.0 - hold).max(0.0) / GREEN_FALL_KM).exp() * (1.0 - smoothstep(GREEN_TOP_KM.0, GREEN_TOP_KM.1, h));
         let high = 1.0 - smoothstep(320.0, 350.0, h);
-        let t = TEAL_SHARE * smoothstep(TEAL_FROM_KM, TEAL_KM, dh) * (-(dh - TEAL_KM).max(0.0) / TEAL_FALL_KM).exp() * high;
+        let top = if cyan_top { 1.0 - smoothstep(GREEN_TOP_KM.0, GREEN_TOP_KM.1, h) } else { high };
+        let t = TEAL_SHARE * smoothstep(TEAL_FROM_KM, TEAL_KM, dh) * (-(dh - TEAL_KM).max(0.0) / TEAL_FALL_KM).exp() * top;
         let q = (h / 220.0).ln() / 0.18;
         let r = (-0.5 * q * q).exp() * smoothstep(140.0, 170.0, h) * high;
         let w = (dh - N2_KM) / N2_SPREAD_KM;
@@ -1070,7 +1079,8 @@ mod tests {
     /// The colour by height comes from the lines, as the owner's photographs show it (2026-10-24): every look's
     /// brightest, lower edge is lime (green over red over blue), its body 40 km over the border cyan-green to teal
     /// (green over blue over red), and blue over red 75 km up: blue in magenta tops and storm, cyan in classic (green and
-    /// blue over red, the blue at least half the green: Task L1, "usually we mostly see the cyan part"; it was blue); no look is ever red or maroon (red over green with little blue)
+    /// blue over red, the blue at least half the green: Task L1, "usually we mostly see the cyan part"; it was blue), and
+    /// classic's top, where its green and blue end together, may be pale only where faint (under 3 % of its peak); no look is ever red or maroon (red over green with little blue)
     /// or grey (its hues cancelling) where it shows at 1 % of its peak. Classic carries at most a trace of violet at the
     /// top; magenta tops run on into a faint magenta-purple; the storm's lower border is pink-violet (red and blue over
     /// green) and green above it.
@@ -1093,6 +1103,11 @@ mod tests {
                     continue;
                 }
                 let (most, least) = (c.x.max(c.y).max(c.z), c.x.min(c.y).min(c.z));
+                // classic fades out cyan where its green ends (Task L1 follow-up): there a faint top (under 3 % of its
+                // peak) may be pale
+                if color == "classic" && height(i) >= GREEN_TOP_KM.0 && luminance(c) < 0.03 * peak {
+                    continue;
+                }
                 assert!(least < 0.55 * most, "{color} at {} km is grey: {c:?}", height(i));
                 assert!(!(c.x > c.y && c.x > 2.0 * c.z), "{color} at {} km is red: {c:?}", height(i));
             }
@@ -1100,9 +1115,12 @@ mod tests {
         let classic = at("classic");
         let high = classic.profile(BORDER_KM + 75.0);
         assert!(high.y > high.x && high.z >= 0.5 * high.y, "classic 75 km over the border is cyan: {high:?}");
+        // where it shows (1 % of its peak or more: Task L1 follow-up, its green and blue now end together, so its red
+        // trace alone is left above them, a hundredth of the peak or less)
+        let classic_peak = classic.table.iter().map(|c| luminance(*c)).fold(0.0, f32::max);
         for i in 0..TABLE {
             let c = classic.table[i];
-            if height(i) > BORDER_KM + 10.0 {
+            if height(i) > BORDER_KM + 10.0 && luminance(c) >= 0.01 * classic_peak {
                 assert!(c.x <= 0.6 * c.y.max(c.z), "classic at {} km carries more than a trace of magenta: {c:?}", height(i));
             }
         }
