@@ -28,7 +28,7 @@
 use crate::{In, Out};
 use std::io;
 
-pub const XR_VERSION: u16 = 6;
+pub const XR_VERSION: u16 = 7;
 /// The band's depth: luma `v` (1..255) is `z = DEPTH_NEAR_M * 255 / v` metres (inverse depth,
 /// finest near the eye); 0 = no depth (nothing drawn there). 10 cm: things held up to the face
 /// keep their depth (at 25 cm everything nearer read as 25 cm, and the room's occlusion hid
@@ -43,7 +43,6 @@ pub struct XrRenderEye {
     pub position: [f32; 3],
     pub fov: [f32; 4],
 }
-pub const XR_PORT: u16 = 8794;
 
 /// `Hello::codecs` bits: what the headset decodes.
 pub mod codecs {
@@ -56,7 +55,9 @@ pub const CODEC_HEVC: u8 = 1;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum XrClientMsg {
-    Hello { version: u16, name: String, authorization: String, eye: [u32; 2], refresh_mhz: u32, codecs: u32 },
+    /// `instance`: the headset's instance id (`crate::xr_pair`): the server keeps it as paired
+    /// when the PIN typed on the desktop matched this headset.
+    Hello { version: u16, name: String, authorization: String, instance: u64, eye: [u32; 2], refresh_mhz: u32, codecs: u32 },
     /// `frame`: one `XrFrame` (makepad_hal `buffers::Wire`) predicted for `display_ns`.
     Pose { seq: u64, sample_ns: u64, display_ns: u64, frame: Vec<u8> },
     State { visible: bool, focused: bool },
@@ -121,7 +122,11 @@ pub mod report {
     pub const REPEAT_NOPOSE: usize = 29;
     pub const BLANK: usize = 30;
     pub const AHEAD: usize = 31;
-    pub const COUNT: usize = 34;
+    /// The headset's own GPU time per frame (the runtime's app GPU time, ms; 0 not measured)
+    /// and its eye buffers' size now (percent of their start size): the server decides on them.
+    pub const CLIENT_GPU_MS: usize = 34;
+    pub const EYE_SCALE_PCT: usize = 35;
+    pub const COUNT: usize = 36;
     /// After the numbers: how many display frames the window had, then their codes, 8 to a
     /// value (3 bits each, the first frame lowest: exact in an f32).
     pub const FRAMES: usize = COUNT;
@@ -163,7 +168,9 @@ pub struct WorldBrick {
 #[derive(Clone, Debug, PartialEq)]
 pub enum XrServerMsg {
     /// `size`: the whole picture (both eye columns); `tiles`: 1 (one stream) or 2 (a stream per eye).
-    Welcome { version: u16, server: String, size: [u32; 2], codec: u8, tiles: u8, encoder: String },
+    /// `instance`: the server's instance id (the headset keeps the pair by it); `session`: this
+    /// link's id.
+    Welcome { version: u16, server: String, instance: u64, session: u64, size: [u32; 2], codec: u8, tiles: u8, encoder: String },
     Refused { reason: String },
     /// Tile `tile` of the picture of pose `seq` (predicted for the headset's `display_ns`),
     /// rendered with `eyes`; `focus_m`: the depth (m) of what the view centres on, for
@@ -190,6 +197,16 @@ pub enum XrServerMsg {
     /// Mixed reality (the room through the picture's empty parts) or VR (the picture opaque,
     /// no passthrough): the server's app's choice. Sent after the welcome and on every change.
     SeeThrough { on: bool },
+    /// The desktop's PIN was changed or cleared: the pair is over (both forget it) and the
+    /// server ends the link.
+    Unpaired,
+    /// The server's settings for the headset's own per-frame mechanisms (the headset executes
+    /// them; the policy is the server's): its fixed foveation (0 none .. 3 high), the range its
+    /// eye buffers may move in on its GPU time (percent of their start size), hands and
+    /// controllers tracked at once, the room's depth hiding the picture (occlusion), the poses
+    /// at least `ahead` display frames past the headset's newest. Sent after the welcome and on
+    /// every change.
+    Headset { foveation: u8, eye_min_pct: u8, eye_max_pct: u8, multimodal: bool, occlusion: bool, ahead: u8 },
 }
 
 /// `Video::stages`: the desktop's durations of a picture (µs).
@@ -224,6 +241,8 @@ mod tag {
     pub const REFRESH: u8 = 108;
     pub const STREAMING: u8 = 109;
     pub const SEE_THROUGH: u8 = 110;
+    pub const UNPAIRED: u8 = 111;
+    pub const HEADSET: u8 = 112;
 }
 
 fn bad(ty: u8, side: &str) -> io::Error {
@@ -234,9 +253,9 @@ impl XrClientMsg {
     pub fn encode(&self) -> Vec<u8> {
         use tag::*;
         match self {
-            XrClientMsg::Hello { version, name, authorization, eye, refresh_mhz, codecs } => {
+            XrClientMsg::Hello { version, name, authorization, instance, eye, refresh_mhz, codecs } => {
                 let mut o = Out::new(HELLO);
-                o.u16(*version).str(name).str(authorization).u32(eye[0]).u32(eye[1]).u32(*refresh_mhz).u32(*codecs);
+                o.u16(*version).str(name).str(authorization).u64(*instance).u32(eye[0]).u32(eye[1]).u32(*refresh_mhz).u32(*codecs);
                 o.done()
             }
             XrClientMsg::Pose { seq, sample_ns, display_ns, frame } => {
@@ -283,7 +302,7 @@ impl XrClientMsg {
         use tag::*;
         let mut r = In { b: payload };
         Ok(match ty {
-            HELLO => XrClientMsg::Hello { version: r.u16()?, name: r.str()?, authorization: r.str()?, eye: [r.u32()?, r.u32()?], refresh_mhz: r.u32()?, codecs: r.u32()? },
+            HELLO => XrClientMsg::Hello { version: r.u16()?, name: r.str()?, authorization: r.str()?, instance: r.u64()?, eye: [r.u32()?, r.u32()?], refresh_mhz: r.u32()?, codecs: r.u32()? },
             POSE => XrClientMsg::Pose { seq: r.u64()?, sample_ns: r.u64()?, display_ns: r.u64()?, frame: r.bytes()?.to_vec() },
             STATE => XrClientMsg::State { visible: r.bool()?, focused: r.bool()? },
             STATS => XrClientMsg::Stats { seq: r.u64()?, decode_us: r.u32()?, m2p_us: r.u32()? },
@@ -314,9 +333,9 @@ impl XrServerMsg {
     pub fn encode(&self) -> Vec<u8> {
         use tag::*;
         match self {
-            XrServerMsg::Welcome { version, server, size, codec, tiles, encoder } => {
+            XrServerMsg::Welcome { version, server, instance, session, size, codec, tiles, encoder } => {
                 let mut o = Out::new(WELCOME);
-                o.u16(*version).str(server).u32(size[0]).u32(size[1]).u8(*codec).u8(*tiles).str(encoder);
+                o.u16(*version).str(server).u64(*instance).u64(*session).u32(size[0]).u32(size[1]).u8(*codec).u8(*tiles).str(encoder);
                 o.done()
             }
             XrServerMsg::Refused { reason } => {
@@ -367,6 +386,12 @@ impl XrServerMsg {
                 o.u8(*on as u8);
                 o.done()
             }
+            XrServerMsg::Unpaired => Out::new(UNPAIRED).done(),
+            XrServerMsg::Headset { foveation, eye_min_pct, eye_max_pct, multimodal, occlusion, ahead } => {
+                let mut o = Out::new(HEADSET);
+                o.u8(*foveation).u8(*eye_min_pct).u8(*eye_max_pct).u8(*multimodal as u8).u8(*occlusion as u8).u8(*ahead);
+                o.done()
+            }
         }
     }
 
@@ -374,7 +399,7 @@ impl XrServerMsg {
         use tag::*;
         let mut r = In { b: payload };
         Ok(match ty {
-            WELCOME => XrServerMsg::Welcome { version: r.u16()?, server: r.str()?, size: [r.u32()?, r.u32()?], codec: r.u8()?, tiles: r.u8()?, encoder: r.str()? },
+            WELCOME => XrServerMsg::Welcome { version: r.u16()?, server: r.str()?, instance: r.u64()?, session: r.u64()?, size: [r.u32()?, r.u32()?], codec: r.u8()?, tiles: r.u8()?, encoder: r.str()? },
             REFUSED => XrServerMsg::Refused { reason: r.str()? },
             VIDEO => {
                 let (seq, tile, key, display_ns) = (r.u64()?, r.u8()?, r.bool()?, r.u64()?);
@@ -396,6 +421,8 @@ impl XrServerMsg {
             REFRESH => XrServerMsg::Refresh { mhz: r.u32()? },
             STREAMING => XrServerMsg::Streaming { on: r.u8()? != 0 },
             SEE_THROUGH => XrServerMsg::SeeThrough { on: r.u8()? != 0 },
+            UNPAIRED => XrServerMsg::Unpaired,
+            HEADSET => XrServerMsg::Headset { foveation: r.u8()?, eye_min_pct: r.u8()?, eye_max_pct: r.u8()?, multimodal: r.u8()? != 0, occlusion: r.u8()? != 0, ahead: r.u8()? },
             _ => return Err(bad(ty, "server")),
         })
     }
@@ -554,6 +581,8 @@ pub mod link {
     #[derive(Clone, Debug)]
     pub struct HeadsetInfo {
         pub name: String,
+        /// The headset's instance id (`crate::xr_pair::HeadsetPairing`).
+        pub instance: u64,
         pub eye: [u32; 2],
         pub refresh_mhz: u32,
         pub codecs: u32,
@@ -565,7 +594,7 @@ pub mod link {
         /// are done; the `Welcome` (or `Refused`) arrives on [`XrLink::try_recv`].
         pub fn connect(host: &str, port: u16, info: HeadsetInfo, wake: Arc<dyn Fn() + Send + Sync>) -> Result<XrLink, String> {
             let (mut stream, _server, authorization) = makepad_network::fleet::id::connect(host, &port.to_string()).map_err(|e| format!("connect {host}:{port}: {e}"))?;
-            let hello = XrClientMsg::Hello { version: XR_VERSION, name: info.name, authorization, eye: info.eye, refresh_mhz: info.refresh_mhz, codecs: info.codecs };
+            let hello = XrClientMsg::Hello { version: XR_VERSION, name: info.name, authorization, instance: info.instance, eye: info.eye, refresh_mhz: info.refresh_mhz, codecs: info.codecs };
             write_all(&mut stream, &hello.encode()).map_err(|e| format!("hello: {e}"))?;
             stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
             stream.set_write_timeout(Some(Duration::from_millis(5))).map_err(|e| e.to_string())?;
@@ -695,7 +724,7 @@ mod tests {
     #[test]
     fn xr_messages_round_trip() {
         let client = [
-            XrClientMsg::Hello { version: XR_VERSION, name: "quest".into(), authorization: "MKID x".into(), eye: [1680, 1760], refresh_mhz: 72_000, codecs: codecs::HEVC },
+            XrClientMsg::Hello { version: XR_VERSION, name: "quest".into(), authorization: "MKID x".into(), instance: 42, eye: [1680, 1760], refresh_mhz: 72_000, codecs: codecs::HEVC },
             XrClientMsg::Pose { seq: 9, sample_ns: 1, display_ns: 2, frame: vec![1, 2, 3] },
             XrClientMsg::State { visible: true, focused: false },
             XrClientMsg::Stats { seq: 9, decode_us: 4000, m2p_us: 50_000 },
@@ -710,7 +739,7 @@ mod tests {
             assert_eq!(XrClientMsg::decode(ty, &p).unwrap(), m);
         }
         let server = [
-            XrServerMsg::Welcome { version: XR_VERSION, server: "166".into(), size: [3360, 2640], codec: CODEC_HEVC, tiles: 2, encoder: "nvidia".into() },
+            XrServerMsg::Welcome { version: XR_VERSION, server: "166".into(), instance: 7, session: 9, size: [3360, 2640], codec: CODEC_HEVC, tiles: 2, encoder: "nvidia".into() },
             XrServerMsg::Refused { reason: "busy".into() },
             XrServerMsg::Video {
                 seq: 9,
@@ -731,6 +760,8 @@ mod tests {
             XrServerMsg::Refresh { mhz: 72_000 },
             XrServerMsg::Streaming { on: false },
             XrServerMsg::SeeThrough { on: true },
+            XrServerMsg::Unpaired,
+            XrServerMsg::Headset { foveation: 2, eye_min_pct: 70, eye_max_pct: 100, multimodal: true, occlusion: true, ahead: 4 },
         ];
         for m in server {
             let mut inbox = Inbox::default();

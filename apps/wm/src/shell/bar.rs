@@ -43,6 +43,8 @@ pub enum BarModule {
     Weather,
     SystemUpdate,
     Tray(usize),
+    /// The thermometer: the temperature graphs (`shell/temps.rs`), shown where sensors report.
+    Temps,
     Bluetooth,
     Gamepad,
     Network,
@@ -174,6 +176,8 @@ pub struct BarData {
     pub system_update: bool,
     /// The apps' tray icons (`ChildRelay::SetTray`, `crate::trays`), in the order they came.
     pub tray: Vec<BarTray>,
+    /// The thermometer's reading; `None` where no sensor reports (no item).
+    pub temps: Option<super::temps::Badge>,
     /// `None` renders the module in its "unavailable" reading: the icon at
     /// α .45, which is what an omarchy indicator does when its service is
     /// not there.
@@ -243,6 +247,7 @@ impl BarData {
             weather: None,
             system_update: false,
             tray: vec![],
+            temps: Some(super::temps::Badge { heat: super::temps::Heat::Normal, level: 0.45, tooltip: "CPU 58\u{b0}C \u{b7} GPU 44\u{b0}C".into() }),
             bluetooth: Some(true),
             network: Some(true),
             volume: Some(62),
@@ -780,6 +785,9 @@ impl ShellBar {
         for i in 0..data.tray.len() {
             v.push((BarModule::Tray(i), Ico::Dot, true));
         }
+        if data.temps.is_some() {
+            v.push((BarModule::Temps, Ico::Thermometer, true));
+        }
         v.push((
             BarModule::Bluetooth,
             match data.bluetooth {
@@ -1095,6 +1103,30 @@ impl ShellBar {
             if *module == BarModule::Audio && data.muted {
                 color = fade(fg, 0.45);
             }
+            // The thermometer: its column shows the hottest sensor's place between 30 °C and
+            // its limit, amber near a limit and red while one is over it.
+            if let (BarModule::Temps, Some(badge)) = (module, data.temps.as_ref()) {
+                use super::temps::Heat;
+                color = match badge.heat {
+                    Heat::Normal => fg,
+                    Heat::Warm => super::rgb(0xed, 0xa1, 0x00),
+                    Heat::Alarm => super::rgb(0xe3, 0x49, 0x48),
+                };
+                let g = rect(
+                    (cell.pos.x + (cell.size.x - canvas) * 0.5).floor(),
+                    (cell.pos.y + (cell.size.y - canvas) * 0.5).floor(),
+                    canvas,
+                    canvas,
+                );
+                self.d.icon(cx, Ico::Thermometer, g, color);
+                // the svg is 16 units: the tube's inside runs from 3.2 to the bulb at 11
+                let u = canvas / 16.0;
+                let level = badge.level.clamp(0.12, 1.0) as f64;
+                let top = 11.0 - level * (11.0 - 3.2);
+                self.d.solid(cx, rect(g.pos.x + 7.35 * u, g.pos.y + top * u, 1.3 * u, (11.2 - top) * u), color);
+                self.hits.push((seg, *module, cell));
+                continue;
+            }
             // An app's tray glyph, tinted like the bar's own icons (a template, as macOS
             // shows it); a tray without a glyph shows a dot.
             if let BarModule::Tray(i) = module {
@@ -1143,6 +1175,7 @@ impl ShellBar {
             BarModule::Weather => "Weather".into(),
             BarModule::SystemUpdate => "Pending updates".into(),
             BarModule::Tray(i) => data.tray.get(i).map(|t| t.tooltip.clone()).unwrap_or_default(),
+            BarModule::Temps => data.temps.as_ref().map(|b| b.tooltip.clone()).unwrap_or_default(),
             BarModule::Bluetooth => match data.bluetooth {
                 Some(true) => "Bluetooth on".into(),
                 Some(false) => "Bluetooth off".into(),

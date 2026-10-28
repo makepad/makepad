@@ -2897,12 +2897,13 @@ public class MakepadActivity
         return true;
     }
 
-    public byte[] socketStreamRead(long id, int maxBytes) {
+    /** Into dst (a direct buffer over native memory): bytes moved, 0 on a timeout, -1 ended. */
+    public int socketStreamReadInto(long id, java.nio.ByteBuffer dst) {
         MakepadSocketStream socket = mActiveSocketStreams.get(id);
         if (socket == null) {
-            return null;
+            return -1;
         }
-        return socket.read(maxBytes);
+        return socket.readInto(dst);
     }
 
     public byte[] socketStreamPeerCertificate(long id) {

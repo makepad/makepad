@@ -18,6 +18,8 @@ pub mod xr;
 pub mod xr_audio;
 #[cfg(feature = "host")]
 pub mod xr_host;
+#[cfg(feature = "server")]
+pub mod xr_pair;
 
 pub const VERSION: u16 = 7;
 pub const DEFAULT_PORT: u16 = 8790;

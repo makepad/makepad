@@ -181,9 +181,6 @@ script_mod! {
         draw_fxaa +: {}
         draw_band +: {}
         draw_mirror +: {}
-        draw_stats_bg +: {}
-        draw_stats_bar +: {}
-        draw_stats_text +: {}
     }
 }
 
@@ -281,13 +278,6 @@ pub struct XrServe {
     draw_band: DrawXrBand,
     #[live]
     draw_mirror: DrawXrMirror,
-    /// The stats panel over the mirror: its ground, its graphs' bars, its text.
-    #[live]
-    draw_stats_bg: DrawColor,
-    #[live]
-    draw_stats_bar: DrawColor,
-    #[live]
-    draw_stats_text: DrawText,
     #[rust]
     slots: Vec<Slot>,
     #[rust]
@@ -309,13 +299,6 @@ pub struct XrServe {
     eye: Option<[u32; 2]>,
     #[rust]
     counts: Counts,
-    /// The eye size the XR pass rendered at for the newest picture (px; supersampled: more
-    /// than `eye`).
-    #[rust]
-    rendered: [u32; 2],
-    /// The app's own line in the stats panel (`set_app_line`; empty: none).
-    #[rust]
-    app_line: String,
 }
 
 /// The app side's counts per stats window (5 s): draws, new XR frames, frames packed, pictures
@@ -354,9 +337,11 @@ impl Counts {
     }
 }
 
-/// Starts this process's XR server (once; a process without the remote headset slot, or without
-/// the LAN allowed, does nothing). The listener runs until the process ends.
-pub fn serve() {
+/// Starts this process's XR server for the app `app` (once; a process without the remote headset
+/// slot, or without the LAN allowed, does nothing): on a port the OS picks, found by headsets with
+/// the pairing probe; the pairing is kept in the app's data folder (`xr-pairing`). The listener
+/// runs until the process ends.
+pub fn serve(app: &str) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         use makepad_desk_link::xr_host::{available, XrHost, XrHostConfig};
@@ -369,7 +354,6 @@ pub fn serve() {
             log!("xr host: local network off for this instance (MAKEPAD_LAN=1 allows it)");
             return;
         }
-        let port = std::env::var("MAKEPAD_XR_REMOTE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(makepad_desk_link::xr::XR_PORT);
         // the headset's room field, mirrored into this process's field store: the app's
         // physics (its hit-surface queries) collides with the real room
         let world: makepad_desk_link::xr_host::WorldSink = Arc::new(|voxel_size, chunk_edge, bricks| {
@@ -379,7 +363,8 @@ pub fn serve() {
             let mut mirror = MIRROR.lock().unwrap_or_else(|e| e.into_inner());
             mirror.get_or_insert_with(BrickMirror::default).apply(&makepad_widgets::makepad_platform::xr_tsdf::xr_tsdf_store(), BrickGrid { voxel_size, chunk_edge }, &bricks);
         });
-        let config = XrHostConfig { addr: std::net::SocketAddr::from(([0, 0, 0, 0], port)), tls_name: "makepad xr host".into(), world: Some(world), log: Arc::new(|line: &str| log!("{line}")) };
+        let pairing = makepad_widgets::makepad_platform::home::app_data_dir(app).map(|d| d.join("xr-pairing"));
+        let config = XrHostConfig { addr: std::net::SocketAddr::from(([0, 0, 0, 0], 0)), app: app.to_string(), pairing, tls_name: "makepad xr host".into(), world: Some(world), log: Arc::new(|line: &str| log!("{line}")) };
         match XrHost::start(config) {
             Ok(h) => *host = Some(h),
             Err(e) => log!("{e}"),
@@ -389,12 +374,12 @@ pub fn serve() {
         }
     }
     #[cfg(target_arch = "wasm32")]
-    let _ = Mutex::<()>::new(());
+    let _ = (Mutex::<()>::new(()), app);
 }
 
-/// The stream's settings the app offers its user (the Sandbox gear): the bitrate (kbit/s, all
+/// The stream's settings the user sets (the caption's XR dropdown, `crate::panel`): the bitrate (kbit/s, all
 /// tiles; the rate controller stays below it) and the headset's display rate (Hz, one of
-/// [`STREAM_REFRESH_RATES`]; a change re-links the headset at it).
+/// `xr_host::REFRESH_RATES`; a change re-links the headset at it).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn set_stream_bitrate_kbps(kbps: u32) {
     makepad_desk_link::xr_host::set_bitrate_kbps(kbps);
@@ -403,13 +388,11 @@ pub fn set_stream_bitrate_kbps(kbps: u32) {
 pub fn set_stream_refresh_hz(hz: u32) {
     makepad_desk_link::xr_host::set_refresh_hz(hz);
 }
-#[cfg(not(target_arch = "wasm32"))]
-pub use makepad_desk_link::xr_host::REFRESH_RATES as STREAM_REFRESH_RATES;
 /// The user's power switches for a streaming headset (see `makepad_desk_link::xr_host`): the
 /// stream on/off (off: no XR frames drawn, nothing encoded or sent, the headset idles), the room
 /// scan allowed, the left menu button as the stream's switch (default), mixed reality or VR.
 #[cfg(not(target_arch = "wasm32"))]
-pub use makepad_desk_link::xr_host::{room_scan as stream_room_scan, set_menu_toggles_streaming, set_room_scan as set_stream_room_scan, set_see_through as set_stream_see_through, set_streaming, streaming, streaming_changes};
+pub use makepad_desk_link::xr_host::{set_menu_toggles_streaming, set_room_scan as set_stream_room_scan, set_streaming, streaming, streaming_changes};
 
 /// The stream's anti-aliasing, one of [`STREAM_AA_MODES`] (the app's setting, applied live from
 /// the next frame): hardware MSAA on the eye pass (`msaa` samples per pixel, resolved before
@@ -456,6 +439,25 @@ impl StreamAa {
 /// The stream's AA mode as an index into [`STREAM_AA_MODES`].
 static STREAM_AA: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(3);
 
+/// The server's eye render scale (percent of the encoded eye size, per axis; 100: as encoded):
+/// below 100 the eyes render smaller and the pack scales them up into the same encoded size,
+/// so the headset's picture keeps its size and nothing re-links. Under the AA's supersampling
+/// (the XR pass renders at `aa.supersample * render scale`).
+static RENDER_SCALE_PCT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+
+/// The lowest eye render scale (percent).
+pub const MIN_RENDER_SCALE_PCT: u32 = 70;
+
+/// Sets the eye render scale (percent, [`MIN_RENDER_SCALE_PCT`]..100; live from the next frame).
+pub fn set_stream_render_scale(pct: u32) {
+    RENDER_SCALE_PCT.store(pct.clamp(MIN_RENDER_SCALE_PCT, 100), Ordering::Release);
+}
+
+/// The eye render scale now (percent).
+pub fn stream_render_scale() -> u32 {
+    RENDER_SCALE_PCT.load(Ordering::Acquire)
+}
+
 /// Sets the stream's anti-aliasing (live: the next frame renders with it).
 pub fn set_stream_aa(mode: StreamAa) {
     let i = STREAM_AA_MODES.iter().position(|m| *m == mode).unwrap_or(3);
@@ -465,6 +467,68 @@ pub fn set_stream_aa(mode: StreamAa) {
 /// The stream's anti-aliasing now.
 pub fn stream_aa() -> StreamAa {
     STREAM_AA_MODES[(STREAM_AA.load(Ordering::Acquire) as usize).min(STREAM_AA_MODES.len() - 1)]
+}
+
+/// The app's own stats line (`XrServe::set_app_line`).
+static APP_LINE: Mutex<String> = Mutex::new(String::new());
+
+/// The app's own line in the stream's stats (empty: none).
+pub fn app_line() -> String {
+    APP_LINE.lock().unwrap().clone()
+}
+
+/// What the headset shows around the picture: what the app asks for ([`set_stream_see_through`]),
+/// or the user's choice of mixed reality (the room shows through the picture's empty parts) or
+/// VR (the picture opaque, no passthrough).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamView {
+    App,
+    Mixed,
+    Vr,
+}
+
+impl StreamView {
+    /// Its name in the settings file.
+    pub fn label(self) -> &'static str {
+        match self {
+            StreamView::App => "app",
+            StreamView::Mixed => "mr",
+            StreamView::Vr => "vr",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<StreamView> {
+        [StreamView::App, StreamView::Mixed, StreamView::Vr].into_iter().find(|v| v.label() == label)
+    }
+}
+
+/// The app's ask (see-through) and the user's view, as [`StreamView`] indices.
+static APP_SEE_THROUGH: AtomicBool = AtomicBool::new(true);
+static VIEW: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn apply_view() {
+    let see_through = match VIEW.load(Ordering::Acquire) {
+        1 => true,
+        2 => false,
+        _ => APP_SEE_THROUGH.load(Ordering::Acquire),
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    makepad_desk_link::xr_host::set_see_through(see_through);
+    #[cfg(target_arch = "wasm32")]
+    let _ = see_through;
+}
+
+/// The app's view for its content: mixed reality (true) or VR; the user's choice
+/// ([`set_stream_view`]) goes over it.
+pub fn set_stream_see_through(on: bool) {
+    APP_SEE_THROUGH.store(on, Ordering::Release);
+    apply_view();
+}
+
+/// The user's view (the caption's XR dropdown).
+pub fn set_stream_view(view: StreamView) {
+    VIEW.store(match view { StreamView::App => 0, StreamView::Mixed => 1, StreamView::Vr => 2 }, Ordering::Release);
+    apply_view();
 }
 
 /// The app's tap of its own audio for a remote headset: make it on the app's thread, move it
@@ -492,12 +556,13 @@ pub fn tap_audio(tap: &XrAudioTap, sample_rate: f64, output: &mut makepad_widget
 }
 
 impl XrServe {
-    /// A line of the app's own numbers in the desktop's stats panel, under the stream's (empty:
-    /// none). Kept until replaced.
+    /// A line of the app's own numbers in the stream's stats (the caption's XR dropdown), under
+    /// the stream's (empty: none). Kept until replaced.
     pub fn set_app_line(&mut self, line: &str) {
-        if self.app_line != line {
-            self.app_line.clear();
-            self.app_line.push_str(line);
+        let mut app = APP_LINE.lock().unwrap();
+        if *app != line {
+            app.clear();
+            app.push_str(line);
         }
     }
 
@@ -522,9 +587,10 @@ impl XrServe {
             }
             self.counts.draws += 1;
             self.counts.window();
-            // the stream's AA: the XR pass renders multisampled / supersampled (from this frame on)
+            // the stream's AA and render scale: the XR pass renders multisampled, at the supersample
+            // times the render scale of the encoded eye size (from this frame on)
             let aa = stream_aa();
-            cx.cx.xr_set_supersample(aa.supersample);
+            cx.cx.xr_set_supersample(aa.supersample * stream_render_scale() as f32 / 100.0);
             cx.cx.xr_set_msaa(aa.msaa);
             // the headset integrates and sends its room field only while the app uses it
             xr_host::set_room_field_wanted(cx.cx.xr_room_field_wanted());
@@ -561,7 +627,6 @@ impl XrServe {
             let (sw, sh) = ((ew as f64 * ss).round() as u32, (eh as f64 * ss).round() as u32);
             let scale = vec2(sw as f32 / ew as f32, sh as f32 / eh as f32);
             let extent = vec2((2 * sw) as f32, sh as f32);
-            self.rendered = [sw, sh];
             // FXAA (a mode with it): the eyes anti-aliased into a target of their size, each eye
             // on its own; the pack reads that (it paints after the XR pass, before the pack)
             let fxaa = if aa.fxaa {
@@ -683,90 +748,6 @@ impl XrServe {
         let pos = rect.pos + (rect.size - dvec2(w, h)) * 0.5;
         self.draw_mirror.draw_vars.set_texture(0, color);
         self.draw_mirror.draw_abs(cx, Rect { pos, size: dvec2(w, h) });
-        #[cfg(not(target_arch = "wasm32"))]
-        self.draw_stats(cx, Rect { pos, size: dvec2(w, h) });
-    }
-
-    /// The stats panel (while a headset streams): the headset's last-second numbers and the
-    /// server's, and the last minute of pictures shown per second and motion to photon as bars.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn draw_stats(&mut self, cx: &mut Cx2d, mirror: Rect) {
-        use makepad_desk_link::xr::report as r;
-        let reports = xr_host::headset_reports();
-        let Some(last) = reports.last() else { return };
-        let v = |i: usize| last.get(i).copied().unwrap_or(0.0);
-        let panel = Rect { pos: mirror.pos + dvec2(12.0, 12.0), size: dvec2(560.0, 254.0) };
-        self.draw_stats_bg.color = vec4(0.0, 0.0, 0.0, 0.62);
-        self.draw_stats_bg.draw_abs(cx, panel);
-        let lines = [
-            format!("headset {:.0} Hz · shown {:.0}/s · BLANK {:.1}/s · skipped {:.1}/s · received {:.0}/s · battery {}{} · stream {} · room scan {}", v(r::DISPLAY), v(r::SHOWN), v(r::BLANK), v(r::SKIPPED), v(r::RECEIVED),
-                if v(r::BATTERY_PCT) < 0.0 { "?".to_string() } else { format!("{:.0}%", v(r::BATTERY_PCT)) }, if v(r::BATTERY_CHARGING) > 0.5 { " charging" } else { "" },
-                if makepad_desk_link::xr_host::streaming() { "on" } else { "OFF" }, if makepad_desk_link::xr_host::room_scan() { "allowed" } else { "off" }),
-            format!("repeats {:.1}/s: late {:.1} · server skipped {:.1} · queue cap {:.1} · no pose {:.1}", v(r::REPEATS), v(r::REPEAT_LATE), v(r::REPEAT_SERVER), v(r::REPEAT_DROPPED), v(r::REPEAT_NOPOSE)),
-            format!("motion to photon {:.0} ms (net {:.1} decode {:.1} queue {:.1}) · lead {:.0} ms ({:.0} frames)", v(r::M2P_MS), v(r::NET_MS), v(r::DECODE_MS), v(r::WAIT_MS), v(r::LEAD_MS), v(r::AHEAD)),
-            format!("uplink {:.0} poses/s ±{:.2} ms · env depth age {:.0} ms", v(r::UPLINK), v(r::UPLINK_SD_MS), v(r::ENV_AGE_MS)),
-            format!("{} · AA {} ({}x{} per eye{})", xr_host::server_line(), stream_aa().name, self.rendered[0], self.rendered[1],
-                match cx.cx.xr_msaa() { 1 => String::new(), n => format!(", {n} samples") }),
-            if v(r::AUDIO_RECEIVED) > 0.0 {
-                format!("audio {:.0} ms (net {:.1} buffer {:.0}/{:.0} device {:.0}; pictures {:.0}) · {:.0}/s lost {:.0} · underruns {:.0} concealed {:.0} · drift {:+.0} ppm{}",
-                    v(r::AUDIO_MS), v(r::AUDIO_NET_MS), v(r::AUDIO_BUFFER_MS), v(r::AUDIO_TARGET_MS), v(r::AUDIO_DEVICE_MS), v(r::AUDIO_VIDEO_MS), v(r::AUDIO_RECEIVED), v(r::AUDIO_LOST) + v(r::AUDIO_LATE), v(r::AUDIO_UNDERRUNS), v(r::AUDIO_CONCEALED), v(r::AUDIO_DRIFT_PPM),
-                    if v(r::AUDIO_CLICK_MS) > 0.0 { format!(" · click {:.1} ms", v(r::AUDIO_CLICK_MS)) } else { String::new() })
-            } else {
-                "audio: the headset hears none".to_string()
-            },
-            makepad_desk_link::xr_audio::server_line(),
-        ];
-        for (k, l) in lines.iter().enumerate() {
-            self.draw_stats_text.draw_abs(cx, panel.pos + dvec2(8.0, 6.0 + k as f64 * 16.0), l);
-        }
-        if !self.app_line.is_empty() {
-            let at = panel.pos + dvec2(8.0, 6.0 + lines.len() as f64 * 16.0);
-            self.draw_stats_text.draw_abs(cx, at, &self.app_line);
-        }
-        // the last minute: shown/s (green, 0..90) and motion to photon (orange, 0..150 ms)
-        let base = panel.pos + dvec2(8.0, 190.0);
-        let bw = 454.0 / 60.0;
-        for (k, rep) in reports.iter().enumerate() {
-            let x = base.x + k as f64 * bw;
-            let shown = (rep.get(r::SHOWN).copied().unwrap_or(0.0) as f64 / 90.0).clamp(0.0, 1.0) * 34.0;
-            let m2p = (rep.get(r::M2P_MS).copied().unwrap_or(0.0) as f64 / 150.0).clamp(0.0, 1.0) * 34.0;
-            self.draw_stats_bar.color = vec4(0.3, 0.85, 0.4, 0.9);
-            self.draw_stats_bar.draw_abs(cx, Rect { pos: dvec2(x, base.y - shown), size: dvec2(bw * 0.45, shown.max(1.0)) });
-            self.draw_stats_bar.color = vec4(1.0, 0.6, 0.2, 0.9);
-            self.draw_stats_bar.draw_abs(cx, Rect { pos: dvec2(x + bw * 0.5, base.y - m2p), size: dvec2(bw * 0.45, m2p.max(1.0)) });
-        }
-        // the last ~5 s frame by frame, newest right: one tick per display frame (a single repeat
-        // in 90 barely moves a per-second bar): new dim, repeat yellow, skip red, odd bright red
-        // (tall), late purple (tall), blank white (tall)
-        let frames: Vec<u8> = {
-            let mut all: Vec<u8> = Vec::new();
-            for rep in reports.iter().rev().take(5).rev() { all.extend(r::frames(rep)); }
-            let n = all.len().saturating_sub(454);
-            all.split_off(n)
-        };
-        let (strip_y, strip_h) = (panel.pos.y + 200.0, 18.0);
-        let x0 = panel.pos.x + 8.0 + 454.0 - frames.len() as f64;
-        let mut counts = [0u32; 7];
-        for (k, c) in frames.iter().enumerate() {
-            counts[(*c as usize).min(6)] += 1;
-            let (color, h) = match *c {
-                r::FRAME_NEW => (vec4(0.3, 0.45, 0.35, 0.7), 0.4),
-                r::FRAME_REPEAT => (vec4(1.0, 0.9, 0.1, 1.0), 0.75),
-                r::FRAME_SKIP => (vec4(1.0, 0.25, 0.2, 1.0), 0.75),
-                r::FRAME_ODD => (vec4(1.0, 0.05, 0.05, 1.0), 1.0),
-                r::FRAME_LATE => (vec4(0.75, 0.3, 1.0, 1.0), 1.0),
-                r::FRAME_BLANK => (vec4(1.0, 1.0, 1.0, 1.0), 1.0),
-                _ => (vec4(0.2, 0.2, 0.2, 0.5), 0.2),
-            };
-            self.draw_stats_bar.color = color;
-            self.draw_stats_bar.draw_abs(cx, Rect { pos: dvec2(x0 + k as f64, strip_y + strip_h * (1.0 - h)), size: dvec2(1.0, strip_h * h) });
-        }
-        let secs = (frames.len() as f64 / v(r::DISPLAY).max(1.0) as f64).max(1.0);
-        let per_s = |c: u8| counts[c as usize] as f64 / secs;
-        let line = if frames.is_empty() { "per frame: the headset sends no frame codes (an older client)".to_string() } else {
-            format!("last {:.0} s per s: repeats {:.1} · skips {:.1} · odd {:.1} · late {:.1} · blank {:.1}", secs, per_s(r::FRAME_REPEAT), per_s(r::FRAME_SKIP), per_s(r::FRAME_ODD), per_s(r::FRAME_LATE), per_s(r::FRAME_BLANK))
-        };
-        self.draw_stats_text.draw_abs(cx, dvec2(panel.pos.x + 8.0, strip_y + strip_h + 4.0), &line);
     }
 
     /// The mirror's area (the app's hit area for its view).

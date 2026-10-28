@@ -4,7 +4,8 @@
 //! the display's budget and its CPU). The node's tray dropdown is this view; the master's panel
 //! draws the same card for the selected JIT ([`jit_card`]).
 
-use crate::graph::{self, DrawDevhubTrace, Palette};
+use crate::graph::{self, Palette};
+use makepad_shell_kit::graph::DrawShellTrace;
 use crate::live::{Board, JitLive, MachineLive, WINDOW_S};
 use crate::view::dur;
 use makepad_shell_kit::ui::{contains, rect, DrawShellFill, HAlign, Ico, ShellDraw};
@@ -86,7 +87,7 @@ pub fn view_now(board: &Board) -> f64 {
 /// One JIT's card in `r` (its width; the height it takes is returned). `cpu_text` stands in for
 /// the CPU graph where the OS numbers are another machine's (the master's routed view).
 #[allow(clippy::too_many_arguments)]
-pub fn jit_card(d: &mut ShellDraw, g: &mut DrawDevhubTrace, cx: &mut Cx2d, tok: &ShellTokens, p: &Palette, r: Rect, j: &JitLive, now: f64, cpu_text: Option<&str>) -> f64 {
+pub fn jit_card(d: &mut ShellDraw, g: &mut DrawShellTrace, cx: &mut Cx2d, tok: &ShellTokens, p: &Palette, r: Rect, j: &JitLive, now: f64, cpu_text: Option<&str>) -> f64 {
     let x = r.pos.x;
     let w = r.size.x;
     let mut y = r.pos.y;
@@ -204,7 +205,7 @@ pub struct DevhubTasks {
     #[live]
     d: ShellDraw,
     #[live]
-    g: DrawDevhubTrace,
+    g: DrawShellTrace,
     #[live]
     tokens: ShellTokens,
     /// the sampler's rings, read under its lock while drawing (the sampler holds it briefly)

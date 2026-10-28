@@ -34,6 +34,8 @@ pub mod menu;
 pub mod notifications;
 pub mod osd;
 pub mod panels;
+/// The temperature tray's sensors, history and warning (read on Linux).
+pub mod temps;
 /// The Wi-Fi dropdown's iwd backend: Linux desktop only;
 /// no other platform compiles or references it.
 #[cfg(target_os = "linux")]

@@ -1,6 +1,7 @@
-//! desk-link-xr-probe <host[:port]> [--secs N] [--hz N] [--eye WxH] [--block FRAMES] [--video MS] [--dump FILE]: a headless
+//! desk-link-xr-probe <host:port | pair> [--pairing FILE] [--secs N] [--hz N] [--eye WxH] [--block FRAMES] [--video MS] [--dump FILE]: a headless
 //! headset for Desk Link XR checks. It links like the Quest client (this machine's fleet
-//! credential), sends a synthetic pose per display frame as datagrams (the head turning
+//! credential; `pair`: it finds the server by the pairing probe like the Quest, its instance id,
+//! PIN and pairs kept in `--pairing FILE`, default `xr-probe-pairing`, its PIN printed), sends a synthetic pose per display frame as datagrams (the head turning
 //! slowly), answers every picture tile at once (no decode: the server's flow control keeps
 //! going) and plays the game audio through the headset's own receive path and playout
 //! (`makepad_desk_link::xr_audio`) into a stand-in device: a thread that takes `--block` frames
@@ -20,7 +21,7 @@ use std::time::{Duration, Instant};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let Some(target) = args.get(1).filter(|a| !a.starts_with("--")) else {
-        eprintln!("usage: desk-link-xr-probe <host[:port]> [--secs N] [--hz N] [--eye WxH] [--block FRAMES] [--video MS] [--dump FILE]");
+        eprintln!("usage: desk-link-xr-probe <host:port | pair> [--pairing FILE] [--secs N] [--hz N] [--eye WxH] [--block FRAMES] [--video MS] [--dump FILE]");
         std::process::exit(2);
     };
     let arg = |name: &str| args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone());
@@ -28,11 +29,40 @@ fn main() {
     let hz: f64 = arg("--hz").and_then(|v| v.parse().ok()).unwrap_or(90.0);
     let block: usize = arg("--block").and_then(|v| v.parse().ok()).unwrap_or(192).clamp(16, 4096);
     let eye: [u32; 2] = arg("--eye").and_then(|v| v.split_once('x').and_then(|(w, h)| Some([w.parse().ok()?, h.parse().ok()?]))).unwrap_or([960, 1008]);
-    let (host, port) = match target.rsplit_once(':') {
-        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(makepad_desk_link::xr::XR_PORT)),
-        None => (target.clone(), makepad_desk_link::xr::XR_PORT),
+    let mut pairing = (target == "pair").then(|| makepad_desk_link::xr_pair::HeadsetPairing::load(arg("--pairing").unwrap_or_else(|| "xr-probe-pairing".into()).into()));
+    let mut server = 0u64;
+    let (host, port) = match pairing.as_mut() {
+        Some(p) => {
+            let (me, fleet) = makepad_desk_link::xr_pair::identity("the pairing probe").unwrap_or_else(|e| {
+                eprintln!("xr-probe: {e}");
+                std::process::exit(1);
+            });
+            println!("xr-probe: instance {:016x} PIN {}: waiting for a server", p.instance, p.pin);
+            loop {
+                let answers = makepad_desk_link::xr_pair::sweep(me, &fleet, p, "xr-probe", Duration::from_millis(1500)).unwrap_or_default();
+                match p.choose(&answers) {
+                    Ok(Some(a)) => {
+                        println!("xr-probe: {:?} answer from {} ({:016x}) on {}", a.kind, a.app, a.instance, a.tcp);
+                        server = a.instance;
+                        break (a.tcp.ip().to_string(), a.tcp.port());
+                    }
+                    Ok(None) => {}
+                    Err(()) => {
+                        p.reroll();
+                        println!("xr-probe: PIN clash: new PIN {}", p.pin);
+                    }
+                }
+            }
+        }
+        None => match target.rsplit_once(':') {
+            Some((h, p)) if p.parse::<u16>().is_ok() => (h.to_string(), p.parse().unwrap()),
+            _ => {
+                eprintln!("xr-probe: the target is host:port or pair");
+                std::process::exit(2);
+            }
+        },
     };
-    let info = HeadsetInfo { name: "xr-probe".into(), eye, refresh_mhz: (hz * 1000.0) as u32, codecs: codecs::HEVC | codecs::H264 };
+    let info = HeadsetInfo { name: "xr-probe".into(), instance: pairing.as_ref().map_or(0, |p| p.instance), eye, refresh_mhz: (hz * 1000.0) as u32, codecs: codecs::HEVC | codecs::H264 };
     let link = match XrLink::connect(&host, port, info, Arc::new(|| {})) {
         Ok(l) => Arc::new(l),
         Err(e) => {
@@ -185,7 +215,14 @@ fn main() {
             XrServerMsg::Refresh { mhz } => println!("xr-probe: the server asks for {:.0} Hz (this probe keeps its own)", mhz as f64 / 1000.0),
             XrServerMsg::Streaming { on } => println!("xr-probe: stream {}", if on { "on" } else { "off" }),
             XrServerMsg::SeeThrough { on } => println!("xr-probe: {}", if on { "mixed reality" } else { "VR" }),
+            XrServerMsg::Headset { foveation, eye_min_pct, eye_max_pct, multimodal, occlusion, ahead } => println!("xr-probe: headset settings: foveation {foveation}, eyes {eye_min_pct}..{eye_max_pct}%, multimodal {multimodal}, occlusion {occlusion}, ahead {ahead}"),
             XrServerMsg::Refused { reason } | XrServerMsg::Bye { reason } => break reason,
+            XrServerMsg::Unpaired => {
+                if let Some(p) = pairing.as_mut() {
+                    p.forget(server);
+                }
+                break "the server unpaired this probe".to_string();
+            }
         }
     };
     stop.store(true, Ordering::Release);

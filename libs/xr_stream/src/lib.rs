@@ -16,8 +16,14 @@
 use makepad_widgets::makepad_draw::render_target::{RenderTarget, RenderTargetFormat};
 use makepad_widgets::makepad_draw::shader::draw_nv12::DrawNv12;
 use makepad_widgets::*;
-/// The XR server's port when the target names none.
-pub const DEFAULT_PORT: u16 = 8794;
+/// Where a headset's stream comes from: a server at an address (a debug switch), or the server
+/// it pairs with by its PIN (`makepad_desk_link::xr_pair`; `pairing`: the file its instance id,
+/// PIN and pairs are kept in; `name`: what servers are told it is).
+#[derive(Clone, Debug)]
+pub enum XrTarget {
+    Address { host: String, port: u16 },
+    Pair { pairing: std::path::PathBuf, name: String },
+}
 /// The room field goes up in messages of about this size (bytes).
 const WORLD_MESSAGE_BYTES: usize = 16 << 10;
 /// The display period the client expects (ns; the stream runs at 90 Hz).
@@ -36,13 +42,18 @@ fn set_refresh_mhz(mhz: u32) {
 /// was the one due next, a repeat.
 const HOLD: usize = 6;
 
+mod auto;
+mod panel;
 mod serve;
-pub use serve::{serve, set_stream_aa, stream_aa, DrawXrBand, DrawXrMirror, StreamAa, XrServe, STREAM_AA_DEFAULT, STREAM_AA_MODES};
+pub use panel::{XrCaptionButton, XrStreamSettings};
+pub use serve::{serve, set_stream_see_through, stream_aa, DrawXrBand, DrawXrMirror, StreamAa, StreamView, XrServe, STREAM_AA_DEFAULT, STREAM_AA_MODES};
 #[cfg(not(target_arch = "wasm32"))]
-pub use serve::{set_menu_toggles_streaming, set_stream_bitrate_kbps, set_stream_refresh_hz, set_stream_room_scan, set_stream_see_through, set_streaming, stream_room_scan, streaming, streaming_changes, tap_audio, XrAudioTap, STREAM_REFRESH_RATES};
-/// The serving side's shaders and `mod.draw.XrServe` (an app that serves registers them).
+pub use serve::{set_menu_toggles_streaming, streaming, tap_audio, XrAudioTap};
+/// The serving side's shaders, `mod.draw.XrServe` and the caption's `XrCaptionButton` (an app
+/// that serves registers them).
 pub fn serve_script_mod(vm: &mut ScriptVm) -> ScriptValue {
-    serve::script_mod(vm)
+    serve::script_mod(vm);
+    panel::script_mod(vm)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -444,6 +455,24 @@ struct Shared {
     /// and the key that seals them.
     #[cfg(not(target_arch = "wasm32"))]
     udp: Option<Arc<(std::net::UdpSocket, Vec<u8>)>>,
+    /// The PIN to show while no server is linked (pairing by PIN; None: linked, or linking to
+    /// an address).
+    pin: Option<String>,
+    /// The server's settings for this headset's own mechanisms (`XrServerMsg::Headset`; None
+    /// until it sent them).
+    headset: Option<HeadsetSettings>,
+}
+
+/// What the server set for the headset's own per-frame mechanisms (the app executes them; see
+/// `XrServerMsg::Headset`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeadsetSettings {
+    pub foveation: u8,
+    pub eye_min_pct: u8,
+    pub eye_max_pct: u8,
+    pub multimodal: bool,
+    pub occlusion: bool,
+    pub ahead: u8,
 }
 
 /// The stats of one window (5 s).
@@ -594,12 +623,6 @@ pub struct XrStreamClient {
     odd_frames: u32,
     /// This display frame's code so far (`report::FRAME_*`; the worst event wins).
     frame_code: u8,
-    /// The room field on or off whatever the server says (debug: its CPU A/B; None: as the
-    /// server says).
-    pub room_field_override: Option<bool>,
-    /// The environment depth may run (a debug switch; on: it runs while the stream's occlusion
-    /// or the room field needs it).
-    pub env_depth_allowed: bool,
     /// The power state applied: (stream off, VR, environment depth on); None: not yet.
     power: Option<(bool, bool, bool)>,
     /// The headset's battery as last read (`hal_battery`: level | charging << 8; -1 unknown)
@@ -652,9 +675,9 @@ impl Drop for XrStreamClient {
 }
 
 impl XrStreamClient {
-    /// Starts linking to the XR server at `host:port` (on a worker thread: the UI never waits).
-    pub fn connect(host: String, port: u16, eye: [u32; 2], refresh_hz: f64) -> XrStreamClient {
-        let shared = Arc::new(Mutex::new(Shared { status: format!("connecting to {host}:{port}"), tiles: 1, refresh_mhz: (refresh_hz * 1000.0) as u32, ..Default::default() }));
+    /// Starts linking to an XR server (`target`; on a worker thread: the UI never waits).
+    pub fn connect(target: XrTarget, eye: [u32; 2], refresh_hz: f64) -> XrStreamClient {
+        let shared = Arc::new(Mutex::new(Shared { status: "linking".into(), tiles: 1, refresh_mhz: (refresh_hz * 1000.0) as u32, ..Default::default() }));
         set_refresh_mhz((refresh_hz * 1000.0) as u32);
         let signal = SignalToUI::new();
         let sent = Arc::new(Mutex::new(VecDeque::new()));
@@ -676,11 +699,15 @@ impl XrStreamClient {
             // the stream's frames write linear colour: the projection chains become sRGB images
             // without the mutable format (framebuffer compression kept: 1.6 ms less per frame)
             makepad_widgets::makepad_platform::makepad_hal::hal_xr_linear_frames(true);
-            let info = HeadsetInfo { name: "headset".into(), eye, refresh_mhz: (refresh_hz * 1000.0) as u32, codecs: codecs::HEVC | codecs::H264 };
-            let _ = std::thread::Builder::new().name("xr-stream".into()).spawn(move || worker(host, port, info, shared, signal, audio));
+            let name = match &target {
+                XrTarget::Pair { name, .. } => name.clone(),
+                XrTarget::Address { .. } => "headset".to_string(),
+            };
+            let info = HeadsetInfo { name, instance: 0, eye, refresh_mhz: (refresh_hz * 1000.0) as u32, codecs: codecs::HEVC | codecs::H264 };
+            let _ = std::thread::Builder::new().name("xr-stream".into()).spawn(move || worker(target, info, shared, signal, audio));
         }
         #[cfg(target_arch = "wasm32")]
-        let _ = (host, port, eye, refresh_hz);
+        let _ = (target, eye, refresh_hz);
         XrStreamClient {
             shared,
             #[cfg(not(target_arch = "wasm32"))]
@@ -713,8 +740,6 @@ impl XrStreamClient {
             watch_after: 0,
             odd_frames: 0,
             frame_code: 0,
-            room_field_override: None,
-            env_depth_allowed: true,
             power: None,
             battery: (-1, None),
             idle_report_at: Instant::now(),
@@ -747,6 +772,16 @@ impl XrStreamClient {
         makepad_desk_link::xr_audio::XrAudioPlayer::new(self.audio.clone())
     }
 
+    /// The server's settings for this headset's own mechanisms (None until it sent them).
+    pub fn headset_settings(&self) -> Option<HeadsetSettings> {
+        self.shared.lock().unwrap().headset
+    }
+
+    /// The PIN to show while no server is linked (None: linked, or not pairing by PIN).
+    pub fn pin(&self) -> Option<String> {
+        self.shared.lock().unwrap().pin.clone()
+    }
+
     /// The link's state and the last stats line, for the app's own UI and logs.
     pub fn status(&self) -> String {
         let s = self.shared.lock().unwrap();
@@ -756,6 +791,12 @@ impl XrStreamClient {
     /// The server turned the stream off (the app plays no sound then, the view shows the room).
     pub fn stream_off(&self) -> bool {
         self.shared.lock().unwrap().stream_off
+    }
+
+    /// Nothing to show: the stream is off or no server is linked (no XR frames are drawn).
+    pub fn idle(&self) -> bool {
+        let s = self.shared.lock().unwrap();
+        s.stream_off || s.link.is_none()
     }
 
     /// The display rate (Hz) the link runs at: the app asks its display for it.
@@ -903,8 +944,8 @@ impl XrStreamClient {
     #[cfg(not(target_arch = "wasm32"))]
     fn housekeeping(&mut self, cx: &mut Cx) {
         use makepad_widgets::makepad_platform::makepad_hal as hal;
-        let (link, room_field, off, vr) = { let s = self.shared.lock().unwrap(); (s.link.clone(), s.room_field, s.stream_off, s.vr) };
-        let room_field = self.room_field_override.unwrap_or(room_field);
+        // (no server linked: idle like the stream off, the PIN card alone)
+        let (link, room_field, off, vr) = { let s = self.shared.lock().unwrap(); (s.link.clone(), s.room_field, s.stream_off || s.link.is_none(), s.vr) };
         if room_field != cx.xr_room_field_wanted() {
             cx.xr_set_room_field(room_field);
             // (on again: every brick anew, the server's mirror may have dropped them)
@@ -913,7 +954,7 @@ impl XrStreamClient {
         if let (Some(link), true) = (&link, room_field) {
             self.send_world(cx, link);
         }
-        let env = self.env_depth_allowed && ((!off && self.occlusion && !vr) || room_field);
+        let env = (!off && self.occlusion && !vr) || room_field;
         let want = (off, vr, env);
         if self.power != Some(want) {
             let before = self.power.replace(want);
@@ -1453,6 +1494,10 @@ impl XrStreamClient {
             v[report::AHEAD] = self.ahead as f32;
             v[report::BATTERY_PCT] = if battery < 0 { -1.0 } else { (battery & 0xff) as f32 };
             v[report::BATTERY_CHARGING] = if battery >= 0 && battery & 0x100 != 0 { 1.0 } else { 0.0 };
+            // the headset's own GPU time and eye buffer size (the server decides on them)
+            let eye = makepad_widgets::makepad_platform::makepad_hal::hal_xr_eye_scale_now();
+            v[report::CLIENT_GPU_MS] = (eye & 0xffff_ffff) as f32 / 1000.0;
+            v[report::EYE_SCALE_PCT] = (eye >> 32) as f32;
             // the sound waits as long as a picture's content takes to show (motion to photon
             // less the pose's way up)
             let m2p_ms = v[report::M2P_MS];
@@ -1775,16 +1820,73 @@ fn uplink(shared: Arc<Mutex<Shared>>, sent: Arc<Mutex<VecDeque<Sent>>>) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn worker(host: String, port: u16, mut info: HeadsetInfo, shared: Arc<Mutex<Shared>>, signal: SignalToUI, audio: Arc<makepad_desk_link::xr_audio::XrAudioRx>) {
+fn worker(target: XrTarget, mut info: HeadsetInfo, shared: Arc<Mutex<Shared>>, signal: SignalToUI, audio: Arc<makepad_desk_link::xr_audio::XrAudioRx>) {
+    use makepad_desk_link::xr_pair::{self, HeadsetPairing};
     let set_status = |text: String| {
         log!("xr stream: {text}");
         shared.lock().unwrap().status = text;
         SignalToUI::set_ui_signal();
     };
+    let mut pairing = match &target {
+        XrTarget::Pair { pairing, .. } => Some(HeadsetPairing::load(pairing.clone())),
+        XrTarget::Address { .. } => None,
+    };
+    if let Some(p) = &pairing {
+        info.instance = p.instance;
+    }
+    // another server answered this headset's PIN while it was linked: it links there next
+    let switch_to: Arc<Mutex<Option<xr_pair::Answer>>> = Arc::new(Mutex::new(None));
     loop {
         if shared.lock().unwrap().stop {
             return;
         }
+        // the server: the address, or the one the probe pairs with (while none answers the
+        // PIN shows)
+        let (host, port, server) = match (&target, pairing.as_mut()) {
+            (XrTarget::Address { host, port }, _) => (host.clone(), *port, 0),
+            (_, Some(p)) => {
+                shared.lock().unwrap().pin = Some(p.pin.clone());
+                SignalToUI::set_ui_signal();
+                let switched = switch_to.lock().unwrap().take();
+                let answer = if let Some(a) = switched {
+                    p.pair(a.instance, &a.app);
+                    Some(a)
+                } else {
+                    match xr_pair::identity("pairing with a computer") {
+                    Ok((me, fleet)) => match xr_pair::sweep(me, &fleet, p, &info.name, Duration::from_millis(1500)) {
+                        Ok(answers) => match p.choose(&answers) {
+                            Ok(a) => a,
+                            Err(()) => {
+                                p.reroll();
+                                log!("xr stream: another headset showed the same PIN: new PIN {}", p.pin);
+                                None
+                            }
+                        },
+                        Err(e) => {
+                            set_status(format!("PIN {} · {e}", p.pin));
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        set_status(format!("PIN {} · {e}", p.pin));
+                        std::thread::sleep(Duration::from_secs(3));
+                        None
+                    }
+                    }
+                };
+                let Some(a) = answer else {
+                    let status = format!("PIN {} · type it in the XR menu of the app on the computer", p.pin);
+                    if shared.lock().unwrap().status != status {
+                        set_status(status);
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                    continue;
+                };
+                set_status(format!("linking to {} on {}", a.app, a.tcp));
+                (a.tcp.ip().to_string(), a.tcp.port(), a.instance)
+            }
+            _ => return,
+        };
         let link = match XrLink::connect(&host, port, info.clone(), Arc::new(|| {})) {
             Ok(link) => Arc::new(link),
             Err(e) => {
@@ -1793,6 +1895,24 @@ fn worker(host: String, port: u16, mut info: HeadsetInfo, shared: Arc<Mutex<Shar
                 continue;
             }
         };
+        // while linked the probe goes on now and then: the PIN typed on another computer (or in
+        // another app) moves the headset there
+        let linked = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        if let Some(p) = pairing.clone() {
+            let (linked, switch_to, name) = (linked.clone(), switch_to.clone(), info.name.clone());
+            let _ = std::thread::Builder::new().name("xr-pair-watch".into()).spawn(move || {
+                let Ok((me, fleet)) = xr_pair::identity("pairing with a computer") else { return };
+                while linked.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_secs(3));
+                    let answers = xr_pair::sweep(me, &fleet, &p, &name, Duration::from_millis(1000)).unwrap_or_default();
+                    if let Some(a) = answers.into_iter().find(|a| a.kind == xr_pair::AnswerKind::Pin && a.instance != server) {
+                        *switch_to.lock().unwrap() = Some(a);
+                        return;
+                    }
+                }
+            });
+        }
+        let _linked = Defer(move || linked.store(false, std::sync::atomic::Ordering::Release));
         // a decoder per tile, each on its own thread (the eyes decode in parallel)
         let mut tiles: Vec<std::sync::mpsc::Sender<(VideoHead, Vec<u8>, Instant)>> = Vec::new();
         // the welcome's stream (codec, tile size, tiles): the decoders made again when the
@@ -1811,9 +1931,14 @@ fn worker(host: String, port: u16, mut info: HeadsetInfo, shared: Arc<Mutex<Shar
             if let Some(why) = link.closed() {
                 break why;
             }
+            if let Some(a) = switch_to.lock().unwrap().as_ref() {
+                break format!("the PIN was typed in {} on {}: moving there", a.app, a.tcp);
+            }
             let Some(msg) = link.recv_timeout(Duration::from_millis(5)) else { continue };
             match msg {
-                XrServerMsg::Welcome { server, size, codec, tiles: n, encoder, .. } => {
+                XrServerMsg::Welcome { server, instance, session, size, codec, tiles: n, encoder, .. } => {
+                    shared.lock().unwrap().pin = None;
+                    log!("xr stream: linked to server instance {instance:016x}, session {session:016x}");
                     let codec = if codec == CODEC_HEVC { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
                     let n = n.clamp(1, 2);
                     let tile_size = [size[0] / n as u32, size[1]];
@@ -1894,6 +2019,17 @@ fn worker(host: String, port: u16, mut info: HeadsetInfo, shared: Arc<Mutex<Shar
                     shared.lock().unwrap().vr = !on;
                     signal.set();
                 }
+                XrServerMsg::Headset { foveation, eye_min_pct, eye_max_pct, multimodal, occlusion, ahead } => {
+                    shared.lock().unwrap().headset = Some(HeadsetSettings { foveation, eye_min_pct, eye_max_pct, multimodal, occlusion, ahead });
+                    SignalToUI::set_ui_signal();
+                }
+                // the desktop's PIN changed or cleared: the pair is over (forgotten here too)
+                XrServerMsg::Unpaired => {
+                    if let Some(p) = pairing.as_mut() {
+                        p.forget(server);
+                    }
+                    break "the computer unpaired this headset".to_string();
+                }
                 XrServerMsg::Refresh { mhz } => {
                     log!("xr stream: the server asks for {:.0} Hz", mhz as f64 / 1000.0);
                     info.refresh_mhz = mhz;
@@ -1910,6 +2046,16 @@ fn worker(host: String, port: u16, mut info: HeadsetInfo, shared: Arc<Mutex<Shar
         }
         set_status(format!("link ended: {why}; reconnecting"));
         std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// Runs its closure when dropped.
+#[cfg(not(target_arch = "wasm32"))]
+struct Defer<F: FnMut()>(F);
+#[cfg(not(target_arch = "wasm32"))]
+impl<F: FnMut()> Drop for Defer<F> {
+    fn drop(&mut self) {
+        (self.0)()
     }
 }
 

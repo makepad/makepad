@@ -1,5 +1,6 @@
 //! XR Remote: the headset end of remote rendering. It opens the OpenXR session (the HAL's), links
-//! to a desktop app's XR server (`XR_REMOTE_TARGET` at build time, default 166's Sandbox) and shows
+//! to a desktop app's XR server (found by its PIN: `makepad_desk_link::xr_pair`; the PIN shows
+//! while nothing is linked, the user types it in the app's XR menu on the computer) and shows
 //! its stereo stream in the XR view: each eye its half of the picture, drawn with the eyes the
 //! desktop rendered it with. Its poses, controllers and hands go upstream every display frame.
 //! The panel (the window, a quad in the headset) shows the link and its stats; over the stereo
@@ -8,19 +9,32 @@
 
 pub use makepad_widgets;
 use makepad_widgets::*;
-use makepad_xr_stream::{DrawXrBandDepth, DrawXrStream, XrStreamClient};
+use makepad_xr_stream::{DrawXrBandDepth, DrawXrStream, XrStreamClient, XrTarget};
 
 app_main!(App);
-
-/// The XR server linked to (host:port), fixed at build time until discovery picks one.
-const TARGET: &str = match option_env!("XR_REMOTE_TARGET") {
-    Some(t) => t,
-    None => "10.0.0.166:8794",
-};
 
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
+
+    // The PIN card: a rounded box with a soft edge glow and a hairline border; transparent
+    // outside it (the panel's layer blends with its alpha: the room shows around the card).
+    mod.draw.DrawPinCard = mod.std.set_type_default() do #(DrawPinCard::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        pixel: fn() {
+            let p = self.pos * self.rect_size
+            let m = 28.0
+            let sdf = Sdf2d.viewport(p)
+            sdf.box(m - 10.0, m - 6.0, self.rect_size.x - 2.0 * m + 20.0, self.rect_size.y - 2.0 * m + 20.0, 40.0)
+            sdf.fill(vec4(0.0, 0.0, 0.0, 0.25))
+            let glow = sdf.result
+            let card = Sdf2d.viewport(p)
+            card.box(m, m, self.rect_size.x - 2.0 * m, self.rect_size.y - 2.0 * m, 32.0)
+            card.fill_keep(vec4(0.075, 0.085, 0.105, 0.96))
+            card.stroke(vec4(1.0, 1.0, 1.0, 0.16), 2.0)
+            return card.result + glow * (1.0 - card.result.w)
+        }
+    }
 
     mod.widgets.XrRemoteViewBase = #(XrRemoteView::register_widget(vm))
     mod.widgets.XrRemoteView = set_type_default() do mod.widgets.XrRemoteViewBase{
@@ -31,6 +45,18 @@ script_mod! {
             color: #xc8d2dc
             text_style: theme.font_regular{font_size: 14}
         }
+        draw_pin +: {
+            color: #xffffff
+            text_style: theme.font_bold{font_size: 160}
+        }
+        draw_pin_title +: {
+            color: #xe8eef4
+            text_style: theme.font_regular{font_size: 30}
+        }
+        draw_pin_hint +: {
+            color: #x9aa7b4
+            text_style: theme.font_regular{font_size: 18}
+        }
     }
 
     startup() do #(App::script_component(vm)){
@@ -40,9 +66,19 @@ script_mod! {
                 body +: {
                     remote := mod.widgets.XrRemoteView{}
                 }
+                // (transparent where nothing is drawn: the PIN card's layer shows the room
+                // around it)
+                pass +: { clear_color: #x00000000 }
             }
         }
     }
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawPinCard {
+    #[deref]
+    pub draw_super: DrawQuad,
 }
 
 /// The XR view (the stream) and the panel's status line.
@@ -59,6 +95,18 @@ pub struct XrRemoteView {
     draw_bg: DrawColor,
     #[live]
     draw_text: DrawText,
+    /// The PIN while nothing is linked (the only thing the headset shows of its own).
+    #[live]
+    draw_pin: DrawText,
+    #[live]
+    draw_pin_title: DrawText,
+    #[live]
+    draw_pin_hint: DrawText,
+    #[live]
+    draw_pin_card: DrawPinCard,
+    /// The PIN the panel shows (None: linked; the panel is the stream's own).
+    #[rust]
+    pin_shown: Option<String>,
     #[live]
     draw_stream: DrawXrStream,
     #[live]
@@ -115,20 +163,15 @@ pub struct XrRemoteView {
     /// with it).
     #[rust]
     xr_due: bool,
-    /// The foveation level last asked for (`debug.xrremote.fov`; 255 before the first ask).
+    /// The server's foveation level last applied (255 before the first).
     #[rust(255)]
     fov_asked: u8,
-    /// The eye buffers' lowest dynamic size last asked for (`debug.xrremote.eyemin`; 0 before
-    /// the first ask).
+    /// The eye buffers' range last applied (percent; 0 before the first).
     #[rust]
-    eyemin_asked: u8,
-    /// Hands and controllers at once last asked (`debug.xrremote.multimodal`; 255 before the
-    /// first ask).
-    #[rust(255)]
-    multimodal_asked: u8,
-    /// The environment depth last asked (`debug.xrremote.envdepth`; 255 before the first ask).
-    #[rust(255)]
-    envdepth_asked: u8,
+    eyes_asked: (u8, u8),
+    /// Hands and controllers at once last applied.
+    #[rust]
+    multimodal_asked: Option<bool>,
     #[rust(1.0)]
     dpi: f64,
 }
@@ -177,17 +220,13 @@ impl XrRemoteView {
         // mixed reality: the room shows wherever the desktop drew nothing (the stream's coverage)
         cx.xr_set_see_through(option_env!("XR_REMOTE_OPAQUE").is_none());
         self.color = Some(color);
-        // the device's `debug.xrremote.target` (adb shell setprop) overrides the built-in target;
-        // `none`: no link (the headset's own frame loop alone)
-        let target = device_property("debug.xrremote.target").filter(|t| !t.is_empty()).unwrap_or_else(|| TARGET.to_string());
-        if target == "none" {
+        // the device's `debug.xrremote.target` (adb shell setprop) host:port links there instead
+        // of pairing by PIN; `none`: no link (the headset's own frame loop alone)
+        let fixed = device_property("debug.xrremote.target").filter(|t| !t.is_empty());
+        if fixed.as_deref() == Some("none") {
             log!("xr remote: no link (debug.xrremote.target = none)");
             return;
         }
-        let (host, port) = match target.rsplit_once(':') {
-            Some((h, p)) => (h.to_string(), p.parse().unwrap_or(makepad_xr_stream::DEFAULT_PORT)),
-            None => (target.clone(), makepad_xr_stream::DEFAULT_PORT),
-        };
         // this headset's fleet identity: its own key, the credential the admin signed for it
         // (`fleet-id sign <name> paired <point>`, pushed to the app's external files folder)
         #[cfg(target_os = "android")]
@@ -204,10 +243,16 @@ impl XrRemoteView {
                 Err(e) => log!("xr remote: no fleet identity: {e}"),
             }
         }
+        // where the pairing is kept: the app's internal files (kept across reboots and updates)
+        let files = cx.get_data_dir().unwrap_or_else(|| "/data/user/0/dev.makepad.xrremote/files".to_string());
+        let target = match fixed.as_deref().and_then(|t| t.rsplit_once(':')).and_then(|(h, p)| Some((h.to_string(), p.parse::<u16>().ok()?))) {
+            Some((host, port)) => XrTarget::Address { host, port },
+            None => XrTarget::Pair { pairing: std::path::Path::new(&files).join("xr-pairing"), name: "Quest".into() },
+        };
         // the rate the display runs at until the server asks for its own (`XrServerMsg::Refresh`):
         // the server encodes for it (its pictures are paced by the poses, one per display frame)
         let refresh = 90.0;
-        log!("xr remote: linking to {host}:{port} at {refresh} Hz");
+        log!("xr remote: linking ({target:?}) at {refresh} Hz");
         // `streamscale` N (percent, read at the link; default 120, the user's pick: 100 looked
         // half-res blurry, 140 is past what 166 encodes at 90/s): the eye picture the desktop
         // renders and encodes, N% of the headset's 1680x1760
@@ -215,7 +260,7 @@ impl XrRemoteView {
         // (even sizes, 16-aligned widths: the encoder's blocks)
         let eye = [((1680 * percent / 100 + 15) / 16) * 16, ((1760 * percent / 100 + 7) / 8) * 8];
         log!("xr remote: stream eye {}x{} ({percent}%)", eye[0], eye[1]);
-        let client = XrStreamClient::connect(host, port, eye, refresh);
+        let client = XrStreamClient::connect(target, eye, refresh);
         // the desktop app's game audio, played here (AAudio, low latency) in step with the
         // pictures: the player's buffer, concealment and drift correction run in the callback
         #[cfg(not(target_arch = "wasm32"))]
@@ -261,8 +306,26 @@ impl Widget for XrRemoteView {
             if self.switches_at.map_or(true, |t| t.elapsed().as_secs() >= 1) {
                 self.switches_at = Some(std::time::Instant::now());
                 let switch = |name: &str, default: u8| device_property(name).and_then(|v| v.trim().parse::<u8>().ok()).unwrap_or(default);
-                let occlusion_switch = switch("debug.xrremote.occlusion", 1);
-                let (occlusion, opaque, clear) = (occlusion_switch != 0, switch("debug.xrremote.opaque", 0), switch("debug.xrremote.clear", 0) != 0);
+                // not linked: the PIN card is the panel, always shown, in front of the person
+                // (following the head lazily, 1.5 m away, 1 m wide); linked: the panel as before
+                // (hidden over the stream until a thumbstick click)
+                let pin = self.client.as_ref().and_then(|c| c.pin());
+                if pin != self.pin_shown {
+                    use makepad_widgets::makepad_platform::makepad_hal::hal_xr_panel;
+                    match &pin {
+                        Some(_) => hal_xr_panel(1, 1.5, 1.0, true),
+                        None => hal_xr_panel(0, 2.0, 2.0, false),
+                    }
+                    self.pin_shown = pin;
+                    self.draw_bg.redraw(cx);
+                }
+                // the server decides the policy (`XrServerMsg::Headset`: foveation, the eye
+                // buffers' range, hands and controllers at once, occlusion, the poses' frames
+                // ahead); this headset executes it. Until it says: its defaults.
+                let host = self.client.as_ref().and_then(|c| c.headset_settings()).unwrap_or(makepad_xr_stream::HeadsetSettings { foveation: 2, eye_min_pct: 70, eye_max_pct: 100, multimodal: true, occlusion: true, ahead: 4 });
+                // (debug: `roomview` 1 shows the room's depth as 10 cm contour bands)
+                let room_view = switch("debug.xrremote.roomview", 0) != 0;
+                let (occlusion, opaque, clear) = (host.occlusion || room_view, switch("debug.xrremote.opaque", 0), switch("debug.xrremote.clear", 0) != 0);
                 let was = self.client.as_ref().map_or((true, 0), |c| (c.occlusion, c.opaque));
                 if (occlusion, opaque, clear) != (was.0, was.1, self.clear_tint) {
                     log!("xr remote: occlusion {occlusion}, opaque {opaque}, clear tint {clear}");
@@ -314,55 +377,31 @@ impl Widget for XrRemoteView {
                     #[cfg(not(target_arch = "wasm32"))]
                     let _ = makepad_xr_stream::replay_track_log("/sdcard/Android/data/dev.makepad.xrremote/files", &replay);
                 }
-                // `fov` N (0 none .. 3 high, live; default 2, the user's pick: the edges look the
-                // same, the pass ~20% cheaper): the headset's fixed foveation of the view
-                let fov = switch("debug.xrremote.fov", 2);
-                if fov != self.fov_asked {
-                    self.fov_asked = fov;
-                    log!("xr remote: foveation level {fov}");
-                    makepad_widgets::makepad_platform::makepad_hal::hal_xr_foveation(fov as u32);
+                if host.foveation != self.fov_asked {
+                    self.fov_asked = host.foveation;
+                    log!("xr remote: foveation level {} (the server's)", host.foveation);
+                    makepad_widgets::makepad_platform::makepad_hal::hal_xr_foveation(host.foveation as u32);
                 }
-                // `eyemin` N (default 70; 100: fixed): the eye buffers step down to N% of their
-                // start size when the view's GPU work nears the display period (any picture
-                // keeps 90/s; back up with headroom)
-                let eyemin = switch("debug.xrremote.eyemin", 70);
-                if eyemin != self.eyemin_asked {
-                    self.eyemin_asked = eyemin;
-                    log!("xr remote: eye buffers {eyemin}..100%");
-                    makepad_widgets::makepad_platform::makepad_hal::hal_xr_eye_scale(eyemin as u32, 100);
+                if (host.eye_min_pct, host.eye_max_pct) != self.eyes_asked {
+                    self.eyes_asked = (host.eye_min_pct, host.eye_max_pct);
+                    log!("xr remote: eye buffers {}..{}% (the server's)", host.eye_min_pct, host.eye_max_pct);
+                    makepad_widgets::makepad_platform::makepad_hal::hal_xr_eye_scale(host.eye_min_pct as u32, host.eye_max_pct as u32);
                 }
-                // `multimodal` (default 1, the user's pick): hands and controllers tracked at once
-                // (the cameras shared: the hand tracker at 25 Hz instead of its high-frequency
-                // rate; the uplink's hands are interpolated between its samples)
-                let multimodal = switch("debug.xrremote.multimodal", 1);
-                if multimodal != self.multimodal_asked {
-                    self.multimodal_asked = multimodal;
-                    log!("xr remote: hands and controllers at once {}", multimodal != 0);
-                    makepad_widgets::makepad_platform::makepad_hal::hal_xr_hands_and_controllers(multimodal != 0);
-                }
-                // `envdepth` (default 1): the headset's environment depth runs (0 stops it: no
-                // occlusion, no room field; its GPU cost A/B)
-                let envdepth = switch("debug.xrremote.envdepth", 1);
-                if envdepth != self.envdepth_asked {
-                    self.envdepth_asked = envdepth;
-                    log!("xr remote: environment depth allowed {}", envdepth != 0);
+                if Some(host.multimodal) != self.multimodal_asked {
+                    self.multimodal_asked = Some(host.multimodal);
+                    log!("xr remote: hands and controllers at once {} (the server's)", host.multimodal);
+                    makepad_widgets::makepad_platform::makepad_hal::hal_xr_hands_and_controllers(host.multimodal);
                 }
                 if let Some(client) = self.client.as_mut() {
                     client.occlusion = occlusion;
-                    // (the client runs the depth while the occlusion or the room field needs it)
-                    client.env_depth_allowed = envdepth != 0;
-                    // `roomfield` 0 / 1: the room field off or on whatever the server says (its
-                    // CPU A/B); unset or 2: as the server's app asks
-                    client.room_field_override = match switch("debug.xrremote.roomfield", 2) { 0 => Some(false), 1 => Some(true), _ => None };
-                    // `ahead` N (default 4): the poses at least N display frames past the
-                    // headset's newest (more when the measured sample to decoded needs it; 0:
-                    // that alone)
-                    client.pin_ahead = switch("debug.xrremote.ahead", 4) as u32;
+                    // the poses at least `ahead` display frames past the headset's newest (more
+                    // when the measured sample to decoded needs it; 0: that alone)
+                    client.pin_ahead = host.ahead as u32;
                     client.opaque = opaque;
                     let own = switch("debug.xrremote.owneyes", 0) != 0;
                     if own != client.own_eyes { log!("xr remote: own eyes {own}"); }
                     client.own_eyes = own;
-                    client.room_view = occlusion_switch == 2;
+                    client.room_view = room_view;
                     client.env_map = switch("debug.xrremote.envmap", 0);
                     // `depthlayer` (default 1): the frame carries the picture's depth to the
                     // compositor (positional correction)
@@ -398,7 +437,8 @@ impl Widget for XrRemoteView {
         // ask's eyes: a frame of head rotation off, and twice the GPU work)
         // (the panel is not redrawn while the stereo view shows: drawn once a second, its
         // draw event drew an XR frame too, outside the asks: a far one-frame jump each second)
-        if self.presenting && matches!(event, Event::XrUpdate(_)) {
+        // (idle: no server linked or the stream off: no XR frames, the PIN card or the room alone)
+        if self.presenting && matches!(event, Event::XrUpdate(_)) && !self.client.as_ref().is_some_and(|c| c.idle()) {
             self.xr_due = true;
             self.draw_list.redraw(cx);
         }
@@ -409,12 +449,28 @@ impl Widget for XrRemoteView {
         self.start(cx.cx);
         let rect = cx.walk_turtle(walk);
         self.dpi = cx.current_dpi_factor();
-        self.draw_bg.draw_abs(cx, rect);
         let status = match &self.client {
             Some(c) => c.status(),
             None => "no headset: XR Remote shows a remote XR view on a headset".to_string(),
         };
-        self.draw_text.draw_abs(cx, rect.pos + dvec2(24.0, 24.0), &status);
+        // unlinked: the PIN card (big digits; type them in the app on the computer)
+        if let Some(pin) = self.pin_shown.clone() {
+            let card = Rect { pos: rect.pos + (rect.size - dvec2(1040.0, 560.0)) * 0.5, size: dvec2(1040.0, 560.0) };
+            self.draw_pin_card.draw_abs(cx, card);
+            let centred = |text: &mut DrawText, cx: &mut Cx2d, y: f64, s: &str| {
+                let w = text.prepare_single_line_run(cx, s).map(|r| r.width_in_lpxs as f64).unwrap_or(0.0);
+                text.draw_abs(cx, dvec2(card.pos.x + (card.size.x - w) * 0.5, card.pos.y + y), s);
+            };
+            centred(&mut self.draw_pin_title, cx, 70.0, "Type this PIN on your computer");
+            let spaced: String = pin.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
+            centred(&mut self.draw_pin, cx, 150.0, &spaced);
+            centred(&mut self.draw_pin_hint, cx, 420.0, "In the app: the headset icon in the title bar, then Headset PIN");
+            let line: String = status.split(" · ").skip(1).collect::<Vec<_>>().join(" · ");
+            centred(&mut self.draw_pin_hint, cx, 460.0, if line.is_empty() { "looking for computers" } else { &line });
+        } else {
+            self.draw_bg.draw_abs(cx, rect);
+            self.draw_text.draw_abs(cx, rect.pos + dvec2(24.0, 24.0), &status);
+        }
         // the UI thread's part of a frame: its XrUpdate to the end of its draw, and the draw
         if let Some(at) = self.update_at.take() {
             let t = &mut self.ui_times;

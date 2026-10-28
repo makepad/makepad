@@ -1331,8 +1331,9 @@ impl Cx {
     }
 
     /// Supersampling of an offscreen XR display's passes (`xr_offscreen`; a no-op elsewhere):
-    /// they render at `scale` (1..2) of the eye pixels per axis, both eyes side by side, and
-    /// the app filters them down to the eye size itself (a remote headset's encoder input).
+    /// they render at `scale` (0.5..2) of the eye pixels per axis, both eyes side by side, and
+    /// the app filters them down (or scales them up) to the eye size itself (a remote headset's
+    /// encoder input).
     pub fn xr_set_supersample(&mut self, scale: f32) {
         #[cfg(not(target_arch = "wasm32"))]
         self.hal_xr_supersample(scale);

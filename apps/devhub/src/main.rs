@@ -635,7 +635,6 @@ impl AppMain for App {
         crate::makepad_widgets::script_mod(vm);
         makepad_shell_kit::eval_default_theme(vm);
         makepad_shell_kit::script_mod(vm);
-        crate::graph::script_mod(vm);
         crate::view::script_mod(vm);
         crate::taskview::script_mod(vm);
         self::script_mod(vm)

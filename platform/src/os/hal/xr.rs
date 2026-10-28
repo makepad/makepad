@@ -146,7 +146,7 @@ impl Cx {
 
     /// `Cx::xr_set_supersample`: the offscreen XR pass repaints at its new size.
     pub(crate) fn hal_xr_supersample(&mut self, scale: f32) {
-        let scale = if scale.is_finite() { scale.clamp(1.0, 2.0) } else { 1.0 };
+        let scale = if scale.is_finite() { scale.clamp(0.5, 2.0) } else { 1.0 };
         SUPERSAMPLE.with(|s| s.set(scale));
         let Some(xr) = self.hal.xr.as_mut() else { return };
         if xr.supersample == scale { return; }

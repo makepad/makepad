@@ -1568,6 +1568,20 @@ pub fn hal_xr_stereo_paused(on: bool) {
     let _ = on;
 }
 
+/// The XR panel (the host window as a quad layer in the room): `show` 0 the default rule (shown
+/// without an XR window; over one only after a thumbstick click), 1 always, 2 never; it hangs
+/// `distance_m` away and is `width_m` wide; `follow`: it stays in front of the person, following
+/// the head lazily (it recentres smoothly once the view drifts off it), display only (no
+/// pointer). The image is the window's own frames: a window that draws nothing new costs no
+/// GPU work. Android XR; elsewhere nothing.
+#[relax_api]
+pub fn hal_xr_panel(show: u32, distance_m: f32, width_m: f32, follow: bool) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::panel(show, distance_m, width_m, follow);
+    #[cfg(not(target_os = "android"))]
+    let _ = (show, distance_m, width_m, follow);
+}
+
 /// The near and far planes of every XR eye projection (metres in the room): the app's eye
 /// passes, a remote headset's stream (its depth band decoded with them) and its warp. The one
 /// definition.

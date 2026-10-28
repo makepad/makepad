@@ -12,7 +12,8 @@ use makepad_devhub::lease::sched::NodeView;
 use makepad_shell_kit::ui::{contains, cut_top, rect, DrawShellFill, HAlign, Ico, ShellDraw};
 use makepad_shell_kit::{alpha, darker, CtrlState, ShellTokens};
 use makepad_widgets::*;
-use crate::graph::{DrawDevhubTrace, Palette};
+use crate::graph::Palette;
+use makepad_shell_kit::graph::DrawShellTrace;
 use crate::live::Board;
 use std::sync::{Arc, Mutex};
 
@@ -213,7 +214,7 @@ pub struct DevhubView {
     #[live]
     card: bool,
     #[live]
-    g: DrawDevhubTrace,
+    g: DrawShellTrace,
     /// the live sampler's rings (the selected JIT's card)
     #[rust]
     pub live: Option<Arc<Mutex<Board>>>,

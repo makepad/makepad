@@ -22,6 +22,7 @@
 
 use makepad_widgets::*;
 
+pub mod graph;
 pub mod theme;
 pub mod tray_app;
 pub mod ui;
@@ -68,6 +69,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     #[cfg(target_os = "linux")]
     system_slider::script_mod(vm);
     ui::script_mod(vm);
+    graph::script_mod(vm);
 }
 
 // ======================================================================

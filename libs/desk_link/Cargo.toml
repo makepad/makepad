@@ -7,7 +7,7 @@ description = "Desk Link: the remote desktop wire protocol of the window manager
 
 [features]
 # The server (listener, TLS, fleet credentials, sessions): desktops that serve Desk Link.
-server = ["dep:makepad-network", "dep:makepad-teamtalk"]
+server = ["dep:makepad-network", "dep:makepad-teamtalk", "dep:makepad-core-util"]
 # The deskhost engine (`host`): a picture source (a desktop's screens, a JIT host's render)
 # served through the platform's hardware encoder.
 host = ["server", "dep:makepad-platform-video", "dep:makepad-hal"]
@@ -18,6 +18,9 @@ makepad-platform-video = { path = "../../platform/video", optional = true }
 makepad-hal = { path = "../../platform/hal", optional = true }
 # The XR stream's game audio: the jitter buffer, concealment, drift nudge and resampler.
 makepad-teamtalk = { path = "../teamtalk", optional = true }
+# The XR pairing probe: the reuse-group UDP bind (every server instance on a machine hears a
+# headset's broadcast) and the interfaces' broadcast addresses.
+makepad-core-util = { path = "../core_util", optional = true }
 
 [[bin]]
 name = "desk-link-probe"

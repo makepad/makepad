@@ -37,7 +37,13 @@ pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
 pub type WorldSink = Arc<dyn Fn(f32, i32, Vec<WorldBrick>) + Send + Sync>;
 
 pub struct XrHostConfig {
+    /// The address to listen on (port 0: the OS picks one; headsets find it by the pairing
+    /// probe, `crate::xr_pair`).
     pub addr: SocketAddr,
+    /// The app's name (what a headset is told it links to) and where its pairing is kept (its
+    /// data folder; None: not kept).
+    pub app: String,
+    pub pairing: Option<std::path::PathBuf>,
     /// Where a headset's room field goes (the app mirrors it for its physics).
     pub world: Option<WorldSink>,
     /// The TLS certificate's name.
@@ -72,8 +78,10 @@ impl XrHost {
         let busy = Arc::new(AtomicBool::new(false));
         let verifier = Arc::new(verifier);
         let log = config.log.clone();
-        log(&format!("xr host: listens on {} as {name} (the admin or a paired headset)", config.addr));
         let (stop2, addr, world) = (stop.clone(), config.addr, config.world.clone());
+        let pairing = Arc::new(Mutex::new(crate::xr_pair::ServerPairing::load(config.pairing.clone())));
+        *PAIRING.lock().unwrap() = Some(pairing.clone());
+        let (app, pairing2) = (config.app.clone(), pairing.clone());
         std::thread::Builder::new()
             .name("xr-host-listen".into())
             .spawn(move || {
@@ -91,13 +99,30 @@ impl XrHost {
                         }
                     }
                 };
+                let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+                log(&format!("xr host: {app} listens on port {port} as {name} (the admin or a paired headset), instance {:016x}", pairing2.lock().unwrap().instance));
+                // headsets find this server by their probe (answered while paired, or for the
+                // PIN typed here)
+                let _responder = match crate::xr_pair::identity("pairing headsets") {
+                    Ok((me, fleet)) => match crate::xr_pair::Responder::start(me, fleet, pairing2.clone(), app.clone(), port, log.clone()) {
+                        Ok(r) => Some(r),
+                        Err(e) => {
+                            log(&format!("xr host: {e}"));
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        log(&format!("xr host: no pairing: {e}"));
+                        None
+                    }
+                };
                 while !stop2.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((tcp, peer)) => {
                             if !lan_address(peer.ip()) {
                                 continue;
                             }
-                            let ctx = Session { peer, tls: tls.clone(), verifier: verifier.clone(), log: log.clone(), stop: stop2.clone(), busy: busy.clone(), server: name.clone(), world: world.clone() };
+                            let ctx = Session { peer, tls: tls.clone(), verifier: verifier.clone(), log: log.clone(), stop: stop2.clone(), busy: busy.clone(), server: name.clone(), world: world.clone(), pairing: pairing2.clone() };
                             let _ = std::thread::Builder::new().name("xr-host-session".into()).spawn(move || ctx.run(tcp));
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(50)),
@@ -122,6 +147,7 @@ struct Session {
     stop: Arc<AtomicBool>,
     busy: Arc<AtomicBool>,
     server: String,
+    pairing: Arc<Mutex<crate::xr_pair::ServerPairing>>,
 }
 
 impl Session {
@@ -158,7 +184,7 @@ impl Session {
             stream.shutdown();
             Err(format!("refused: {reason}"))
         };
-        let Ok(XrClientMsg::Hello { version, name, authorization, eye, refresh_mhz, codecs: decodes }) = XrClientMsg::decode(ty, &payload) else {
+        let Ok(XrClientMsg::Hello { version, name, authorization, instance, eye, refresh_mhz, codecs: decodes }) = XrClientMsg::decode(ty, &payload) else {
             return refuse(&mut stream, "the first message must be a hello".into());
         };
         if version != XR_VERSION {
@@ -174,13 +200,23 @@ impl Session {
         if self.busy.swap(true, Ordering::AcqRel) {
             return refuse(&mut stream, "another headset is connected".into());
         }
-        let result = self.session(&mut stream, inbox, buf, &name, &peer.name, eye, refresh_mhz, decodes);
+        // the headset the PIN typed here matched: paired from now on (kept)
+        let paired = {
+            let mut p = self.pairing.lock().unwrap();
+            if p.matched.as_ref().is_some_and(|h| h.instance == instance) {
+                p.paired = p.matched.take();
+                p.save();
+                (self.log)(&format!("xr host: paired with {name} ({instance:016x})"));
+            }
+            p.paired.as_ref().is_some_and(|h| h.instance == instance)
+        };
+        let result = self.session(&mut stream, inbox, buf, &name, &peer.name, instance, paired, eye, refresh_mhz, decodes);
         self.busy.store(false, Ordering::Release);
         result
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn session(&self, stream: &mut makepad_network::tls::TlsStream, mut inbox: Inbox, mut buf: Vec<u8>, name: &str, who: &str, eye: [u32; 2], refresh_mhz: u32, decodes: u32) -> Result<String, String> {
+    fn session(&self, stream: &mut makepad_network::tls::TlsStream, mut inbox: Inbox, mut buf: Vec<u8>, name: &str, who: &str, instance: u64, paired: bool, eye: [u32; 2], refresh_mhz: u32, decodes: u32) -> Result<String, String> {
         let eye = [eye[0].clamp(64, 4096) & !3, eye[1].clamp(64, 4096) & !3];
         // H.265 when both ends have it
         let codec = if decodes & codecs::HEVC != 0 && VideoStreamEncoder::caps().hevc { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
@@ -188,7 +224,14 @@ impl Session {
         let core = Core::start(eye, fps, codec, self.log.clone())?;
         (self.log)(&format!("xr host: {who} ({name}) from {}: eyes {}x{} at {fps} Hz, {codec:?} {}x{} in {} tile(s) on {}", self.peer, eye[0], eye[1], core.size[0], core.size[1], core.tiles, core.description));
         hal::hal_xr_remote_attach(eye[0], eye[1], refresh_mhz);
-        let welcome = XrServerMsg::Welcome { version: XR_VERSION, server: self.server.clone(), size: core.size, codec: core.codec, tiles: core.tiles as u8, encoder: core.description.clone() };
+        let session = {
+            let mut b = [0u8; 8];
+            let _ = makepad_network::tls::os_random(&mut b);
+            u64::from_le_bytes(b)
+        };
+        let server_instance = self.pairing.lock().unwrap().instance;
+        *LIVE_HEADSET.lock().unwrap() = Some((instance, name.to_string(), session));
+        let welcome = XrServerMsg::Welcome { version: XR_VERSION, server: self.server.clone(), instance: server_instance, session, size: core.size, codec: core.codec, tiles: core.tiles as u8, encoder: core.description.clone() };
         write_all(stream, &welcome.encode()).map_err(|e| format!("write: {e}"))?;
         // the poses come as datagrams: a socket of the session's own, a key for it
         let uplink = Uplink::open(self.peer.ip(), &core, self.log.clone())?;
@@ -197,7 +240,8 @@ impl Session {
         write_all(stream, &XrServerMsg::Uplink { port: uplink.port, key: uplink.key.to_vec() }.encode()).map_err(|e| format!("write: {e}"))?;
         stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
         stream.set_write_timeout(Some(Duration::from_millis(5))).map_err(|e| e.to_string())?;
-        let why = self.pump(stream, &mut inbox, &mut buf, &core);
+        let why = self.pump(stream, &mut inbox, &mut buf, &core, (paired, instance));
+        *LIVE_HEADSET.lock().unwrap() = None;
         REPORTS.lock().unwrap().clear();
         audio.stop();
         uplink.stop();
@@ -207,7 +251,9 @@ impl Session {
         Ok(why)
     }
 
-    fn pump(&self, stream: &mut makepad_network::tls::TlsStream, inbox: &mut Inbox, buf: &mut [u8], core: &Core) -> String {
+    /// `paired`: whether the headset (its instance id) is the one paired here: when the desktop
+    /// unpairs it, it is told and the link ends.
+    fn pump(&self, stream: &mut makepad_network::tls::TlsStream, inbox: &mut Inbox, buf: &mut [u8], core: &Core, paired: (bool, u64)) -> String {
         let mut last_heard = Instant::now();
         let mut visible = true;
         let mut stats = PumpStats::new();
@@ -216,6 +262,7 @@ impl Session {
         let mut room_field_told: Option<bool> = None;
         let mut streaming_told: Option<bool> = None;
         let mut see_through_told: Option<bool> = None;
+        let mut headset_told: Option<HeadsetSettings> = None;
         loop {
             let wanted = ROOM_FIELD_WANTED.load(Ordering::Acquire) && ROOM_SCAN.load(Ordering::Acquire);
             if room_field_told != Some(wanted) {
@@ -237,6 +284,14 @@ impl Session {
                 }
                 streaming_told = Some(on);
             }
+            let headset = *HEADSET_SETTINGS.lock().unwrap();
+            if headset_told != Some(headset) {
+                if let Err(e) = write_all(stream, &headset.message().encode()) {
+                    return format!("write: {e}");
+                }
+                (self.log)(&format!("xr host: headset settings {headset:?}"));
+                headset_told = Some(headset);
+            }
             let see = SEE_THROUGH.load(Ordering::Acquire);
             if see_through_told != Some(see) {
                 if let Err(e) = write_all(stream, &XrServerMsg::SeeThrough { on: see }.encode()) {
@@ -255,6 +310,10 @@ impl Session {
             }
             if self.stop.load(Ordering::Acquire) {
                 return "the server stopped".into();
+            }
+            if paired.0 && self.pairing.lock().unwrap().paired.as_ref().map(|h| h.instance) != Some(paired.1) {
+                let _ = write_all(stream, &XrServerMsg::Unpaired.encode());
+                return "the desktop unpaired the headset".into();
             }
             if last_heard.elapsed() > Duration::from_secs(6) {
                 return "the headset was silent for 6 s".into();
@@ -436,6 +495,23 @@ impl PumpStats {
         let trip_ms = median_ms(&mut self.trip_us);
         let trip_min_ms = self.trip_us.first().map_or(0.0, |v| *v as f64 / 1000.0);
         log(&format!("xr host: link trip {trip_ms:.1} ms (min {trip_min_ms:.1}, base {:.1}); the app waited for the headset {:.0}/s", core.rate.base_ms(), held as f64 / secs));
+        {
+            let mut stats = SERVER_STATS.lock().unwrap();
+            *stats = ServerStats {
+                window: stats.window + 1,
+                fps: core.fps,
+                built_per_s: built as f64 / secs,
+                sent_mbps: self.bytes as f64 * 8.0 / secs / 1e6,
+                rate_mbps: kbps as f64 / 1000.0,
+                cap_mbps: BITRATE_KBPS.load(Ordering::Acquire) as f64 / 1000.0,
+                render_ms: median_ms(render),
+                gpu_ms: median_ms(gpu),
+                encode_ms: median_ms(encode),
+                trip_ms,
+                trip_base_ms: core.rate.base_ms(),
+                waited_per_s: held as f64 / secs,
+            };
+        }
         core.rate.second(trip_ms, trip_min_ms, self.bytes as f64 * 8.0 / secs / 1000.0, log);
         *self = PumpStats::new();
     }
@@ -807,11 +883,108 @@ pub fn set_room_field_wanted(wanted: bool) {
 
 static REPORTS: Mutex<VecDeque<Vec<f32>>> = Mutex::new(VecDeque::new());
 
+/// The server's settings for the headset's own mechanisms (`XrServerMsg::Headset`): the policy
+/// lives here, the headset executes it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeadsetSettings {
+    /// Fixed foveation, 0 none .. 3 high (2: the user's pick, the edges look the same, the
+    /// headset's pass ~20% cheaper).
+    pub foveation: u8,
+    /// The eye buffers' range on the headset's GPU time (percent of the start size).
+    pub eye_min_pct: u8,
+    pub eye_max_pct: u8,
+    /// Hands and controllers tracked at once.
+    pub multimodal: bool,
+    /// The room's depth hides the picture.
+    pub occlusion: bool,
+    /// The poses at least this many display frames past the headset's newest.
+    pub ahead: u8,
+}
+
+impl HeadsetSettings {
+    pub const DEFAULT: HeadsetSettings = HeadsetSettings { foveation: 2, eye_min_pct: 70, eye_max_pct: 100, multimodal: true, occlusion: true, ahead: 4 };
+
+    fn message(&self) -> XrServerMsg {
+        XrServerMsg::Headset { foveation: self.foveation, eye_min_pct: self.eye_min_pct, eye_max_pct: self.eye_max_pct, multimodal: self.multimodal, occlusion: self.occlusion, ahead: self.ahead }
+    }
+}
+
+static HEADSET_SETTINGS: Mutex<HeadsetSettings> = Mutex::new(HeadsetSettings::DEFAULT);
+
+/// The headset's settings (a streaming headset is told at once).
+pub fn set_headset_settings(settings: HeadsetSettings) {
+    *HEADSET_SETTINGS.lock().unwrap() = settings;
+}
+
+pub fn headset_settings() -> HeadsetSettings {
+    *HEADSET_SETTINGS.lock().unwrap()
+}
+
+/// The server's pairing state (`crate::xr_pair`), once it started.
+static PAIRING: Mutex<Option<Arc<Mutex<crate::xr_pair::ServerPairing>>>> = Mutex::new(None);
+/// The headset linked now: its instance id, name and the link's session id.
+static LIVE_HEADSET: Mutex<Option<(u64, String, u64)>> = Mutex::new(None);
+
+/// The server's pairing (None before it started): its instance id, the PIN typed, the paired
+/// headset, the headset that PIN matched, a clash.
+pub fn pairing() -> Option<crate::xr_pair::ServerPairing> {
+    PAIRING.lock().unwrap().as_ref().map(|p| p.lock().unwrap().clone())
+}
+
+/// The headset linked now (instance id, name, session id).
+pub fn live_headset() -> Option<(u64, String, u64)> {
+    LIVE_HEADSET.lock().unwrap().clone()
+}
+
+/// The PIN as the user types it (a headset's PIN once it has `crate::xr_pair::PIN_DIGITS`
+/// digits; empty: none). Any change unpairs the paired headset (told, its link ends; both
+/// forget); a whole PIN then looks for the headset showing it.
+pub fn set_pin(pin: &str) {
+    let Some(p) = PAIRING.lock().unwrap().clone() else { return };
+    let mut p = p.lock().unwrap();
+    if p.pin == pin {
+        return;
+    }
+    p.pin = pin.to_string();
+    p.paired = None;
+    p.matched = None;
+    p.clash = false;
+    p.save();
+}
+
 /// The server's own numbers of its last stats window, one line (for a stats panel).
 static SERVER_LINE: Mutex<String> = Mutex::new(String::new());
 
 pub fn server_line() -> String {
     SERVER_LINE.lock().unwrap().clone()
+}
+
+/// The server's numbers of its last stats window (5 s; medians per picture): for an app's
+/// automatic stream settings. `window` counts the windows (0: none yet).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ServerStats {
+    pub window: u64,
+    pub fps: u32,
+    pub built_per_s: f64,
+    pub sent_mbps: f64,
+    /// The rate controller's rate and the app's cap (Mbit/s).
+    pub rate_mbps: f64,
+    pub cap_mbps: f64,
+    /// Pose to picture built, the GPU's part (render + pack), the encode (ms).
+    pub render_ms: f64,
+    pub gpu_ms: f64,
+    pub encode_ms: f64,
+    /// A tile's round trip to the headset (ms) and the idle link's.
+    pub trip_ms: f64,
+    pub trip_base_ms: f64,
+    /// The app waited for the headset (too many pictures in flight), per second.
+    pub waited_per_s: f64,
+}
+
+static SERVER_STATS: Mutex<ServerStats> = Mutex::new(ServerStats { window: 0, fps: 0, built_per_s: 0.0, sent_mbps: 0.0, rate_mbps: 0.0, cap_mbps: 0.0, render_ms: 0.0, gpu_ms: 0.0, encode_ms: 0.0, trip_ms: 0.0, trip_base_ms: 0.0, waited_per_s: 0.0 });
+
+pub fn server_stats() -> ServerStats {
+    *SERVER_STATS.lock().unwrap()
 }
 
 /// The headset's last minute of per-second reports (`crate::xr::report` names the values),
@@ -1095,6 +1268,24 @@ pub fn selftest(eye: [u32; 2], log: Log) {
                 std::thread::sleep((next - now).min(Duration::from_millis(1)));
             }
             stats.window(&core, &log);
+            // a headset's report once a second (synthetic: a stats panel shows the selftest)
+            if seq % 72 == 0 {
+                let mut v = vec![0.0f32; report::COUNT];
+                let k = (seq / 72) as f32;
+                v[report::DISPLAY] = 72.0;
+                v[report::SHOWN] = 72.0 - (k % 7.0 == 0.0) as u8 as f32 * 3.0;
+                v[report::REPEATS] = (k % 7.0 == 0.0) as u8 as f32 * 3.0;
+                v[report::BLANK] = (k % 13.0 == 0.0) as u8 as f32;
+                v[report::M2P_MS] = 70.0 + (k * 0.7).sin() * 20.0;
+                v[report::BATTERY_PCT] = 80.0;
+                let codes: Vec<u8> = (0..72u32).map(|i| match (i + seq as u32 / 72) % 37 { 0 => report::FRAME_REPEAT, 9 => report::FRAME_LATE, 21 => report::FRAME_SKIP, _ => report::FRAME_NEW }).collect();
+                report::pack_frames(&mut v, &codes);
+                let mut r = REPORTS.lock().unwrap();
+                r.push_back(v);
+                while r.len() > 60 {
+                    r.pop_front();
+                }
+            }
         }
     });
 }

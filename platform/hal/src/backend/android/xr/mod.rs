@@ -131,6 +131,18 @@ pub fn environment_depth(on: bool) { ENVIRONMENT_DEPTH.store(on, Ordering::Relea
 /// The stereo view paused (`hal_xr_stereo_paused`): no frame asked, none shown.
 static STEREO_PAUSED: AtomicBool = AtomicBool::new(false);
 pub fn stereo_paused(on: bool) { STEREO_PAUSED.store(on, Ordering::Release); }
+
+/// The panel's rule and placement (`hal_xr_panel`): shown (0 default, 1 always, 2 never),
+/// distance, width (m), lazily following the head.
+static PANEL_LAYOUT: Mutex<(u32, f32, f32, bool)> = Mutex::new((0, -PANEL_Z, PANEL_M[0], false));
+pub fn panel(show: u32, distance_m: f32, width_m: f32, follow: bool) {
+    *lock(&PANEL_LAYOUT) = (show, distance_m.clamp(0.3, 5.0), width_m.clamp(0.1, 4.0), follow);
+}
+
+/// A lazily following panel: where it hangs (local space, its yaw) and whether it is moving to
+/// the view's centre.
+#[derive(Clone, Copy, Default)]
+struct PanelFollow { pos: [f32; 3], yaw: f32, moving: bool }
 /// The depth images are copied back to the app (`hal_xr_depth_readback`; off at start).
 pub(super) static DEPTH_READBACK: AtomicBool = AtomicBool::new(false);
 pub fn depth_readback(on: bool) { DEPTH_READBACK.store(on, Ordering::Release); }
@@ -1001,6 +1013,8 @@ struct CxOpenXrSession {
     panel_visible: bool,
     /// the panel shows over the stereo view (toggled by the left thumbstick click; off at start)
     panel_over_stereo: bool,
+    /// a following panel's place (`hal_xr_panel` with follow)
+    panel_follow: Option<PanelFollow>,
     cursor_ready: bool,
     /// the eyes the stereo frame in flight was asked for, and the eyes of the frame the
     /// projection layer shows
@@ -1281,7 +1295,7 @@ impl CxOpenXrSession {
         let mut session = Self { depth, rt: rt.clone(), dev, frames, handle, head_space, local_space, panel_space, passthrough, passthrough_layer, depth_provider, depth_swap_chain,
             inputs: inputs.clone(), tracker: None, active: false, focused: false, active_display_refresh_rate_hz: None, panel, cursor, stereo: Some(stereo),
             pointer: Pointer { hand: 1, ..Default::default() }, controllers: Default::default(), hands: Default::default(),
-            panel_shown: None, panel_visible: true, panel_over_stereo: false, cursor_ready: false, stereo_asked: None, stereo_shown: None, stereo_focus: 0.0, depth_layer, stereo_asked_at: Instant::now(),
+            panel_shown: None, panel_visible: true, panel_over_stereo: false, panel_follow: None, cursor_ready: false, stereo_asked: None, stereo_shown: None, stereo_focus: 0.0, depth_layer, stereo_asked_at: Instant::now(),
             stats: [0; 4], frame_us: Vec::new(), stereo_asked_ns: 0, requested_refresh_mhz: 0, eyes_own: 0, eyes_asked: 0, paths: [0; 3], phases: [0; 7], stats_at: Instant::now(), stereo_b: Some(stereo_b), stereo_shown_chain: None,
             stereo_base_format: format, stereo_blit: blit, linear_ok, foveation_applied: u32::MAX, eye_scale: EyeScale::new(xr, rt.instance, handle), chain_spare: Vec::new(), chain_build: None, hands_and_controllers: true, environment_depth: true };
         let _ = session.update_active_display_refresh_rate();
@@ -1463,15 +1477,26 @@ impl CxOpenXrSession {
         } else {
             self.panel_visible = true;
         }
-        // the panel's plane in the local space: LOCAL_FLOOR is LOCAL lowered to the floor
-        let panel_pose = {
+        let (show, distance, width, follow) = *lock(&PANEL_LAYOUT);
+        match show {
+            1 => self.panel_visible = true,
+            2 => self.panel_visible = false,
+            _ => {}
+        }
+        let panel_m = [width, width * PANEL_PX[1] as f32 / PANEL_PX[0] as f32];
+        let panel_pose = if follow {
+            self.follow_panel(time, period as u64, distance)
+        } else {
+            self.panel_follow = None;
+            // the panel's plane in the local space: LOCAL_FLOOR is LOCAL lowered to the floor
             let mut loc = XrSpaceLocation::locate(xr, self.local_space, time, self.panel_space).pose;
-            loc.position.z += PANEL_Z;
+            loc.position.z -= distance;
             loc.orientation = Default::default();
             loc.orientation.w = 1.;
             loc
         };
-        let hit = if self.panel_visible { self.point(panel_pose) } else { self.leave_panel(); None };
+        // (a following panel is display only: the pointer is for the fixed one)
+        let hit = if self.panel_visible && !follow { self.point(panel_pose) } else { self.leave_panel(); None };
         phase(2, &mut self.phases);
         // from here on every frame ends (a frame begun and not ended discards the next one)
         // a hidden panel's frames are let go uncopied (no GPU work for a layer not shown)
@@ -1513,7 +1538,7 @@ impl CxOpenXrSession {
             XrCompositionLayerQuad { ty: XrStructureType::COMPOSITION_LAYER_QUAD, next: ptr::null(), layer_flags: XrCompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA,
                 space: self.local_space, eye_visibility: XrEyeVisibility::BOTH, sub_image, pose, size: XrExtent2Df { width: metres[0], height: metres[1] } }
         };
-        let panel = self.panel_shown.filter(|_| self.panel_visible).map(|size| quad(&self.panel, size, panel_pose, PANEL_M));
+        let panel = self.panel_shown.filter(|_| self.panel_visible).map(|size| quad(&self.panel, size, panel_pose, panel_m));
         let cursor = hit.filter(|_| self.cursor_ready && panel.is_some()).map(|p| {
             let mut pose = panel_pose;
             pose.position.x = p[0]; pose.position.y = p[1]; pose.position.z += 0.003;
@@ -1923,6 +1948,45 @@ impl CxOpenXrSession {
 
     /// The pointing hand's ray as mouse events on the panel; the hit point on the panel's plane
     /// (local space, metres) while the ray is over the panel.
+    /// A following panel's pose this frame: in front of the head at its height, `distance` away,
+    /// facing it; it stays put while the view's centre is near it and glides back to the centre
+    /// (a few tenths of a second) once the view drifts more than ~15 degrees or 30 cm off.
+    fn follow_panel(&mut self, time: XrTime, period: u64, distance: f32) -> XrPosef {
+        let head = XrSpaceLocation::locate(&self.rt.xr, self.local_space, time, self.head_space).pose;
+        let q = head.orientation;
+        // the head's forward (0, 0, -1) rotated, flattened to a yaw
+        let fx = -2.0 * (q.x * q.z + q.w * q.y);
+        let fz = -(1.0 - 2.0 * (q.x * q.x + q.y * q.y));
+        let yaw = (-fx).atan2(-fz);
+        let target = [head.position.x - yaw.sin() * distance, head.position.y, head.position.z - yaw.cos() * distance];
+        let wrap = |a: f32| { let t = std::f32::consts::TAU; let mut d = a % t; if d > std::f32::consts::PI { d -= t; } if d < -std::f32::consts::PI { d += t; } d };
+        let f = self.panel_follow.get_or_insert(PanelFollow { pos: target, yaw, moving: false });
+        let off = (0..3).map(|i| (target[i] - f.pos[i]).powi(2)).sum::<f32>().sqrt();
+        let turn = wrap(yaw - f.yaw).abs();
+        if turn > 0.26 || off > 0.3 {
+            f.moving = true;
+        }
+        if f.moving {
+            let dt = (period as f32 / 1e9).clamp(0.001, 0.05);
+            let k = 1.0 - (-dt * 4.0).exp();
+            for i in 0..3 {
+                f.pos[i] += (target[i] - f.pos[i]) * k;
+            }
+            f.yaw += wrap(yaw - f.yaw) * k;
+            if turn < 0.02 && off < 0.02 {
+                f.moving = false;
+            }
+        }
+        let mut pose = head;
+        pose.position.x = f.pos[0];
+        pose.position.y = f.pos[1];
+        pose.position.z = f.pos[2];
+        pose.orientation = Default::default();
+        pose.orientation.y = (f.yaw * 0.5).sin();
+        pose.orientation.w = (f.yaw * 0.5).cos();
+        pose
+    }
+
     fn point(&mut self, panel: XrPosef) -> Option<[f32; 2]> {
         let rays = [self.ray(0), self.ray(1)];
         let pressed = rays.map(|r| r.is_some_and(|(_, down)| down));

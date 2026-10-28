@@ -648,6 +648,15 @@ pub struct App {
     status_worker: Option<TaskHandle<()>>,
     #[rust]
     status_sample: SampledStatus,
+    /// The temperature sampler (`shell/temps.rs`): a frame a second into the panel's history.
+    #[rust]
+    temps_rx: Option<std::sync::mpsc::Receiver<shell::temps::Frame>>,
+    #[rust]
+    temps_worker: Option<TaskHandle<()>>,
+    /// A warning episode began while another flyout was up: the temperature panel opens when
+    /// that one closes (unless the episode is over by then).
+    #[rust]
+    temps_alarm_pending: bool,
     #[rust]
     status_tick: u32,
     /// The clock's alternate format (right-click cycles it, `formatAlt`).
@@ -4798,6 +4807,64 @@ impl App {
         }
         #[cfg(target_os = "linux")]
         self.poll_linux_controls(cx);
+        #[cfg(target_os = "linux")]
+        self.update_temps(cx);
+    }
+
+    /// The temperature frames since the last tick go into the panel's history; the bar's
+    /// thermometer follows, the open panel redraws, and a new warning episode opens the panel
+    /// (once) on the active screen.
+    #[cfg(target_os = "linux")]
+    fn update_temps(&mut self, cx: &mut Cx) {
+        if self.temps_rx.is_none() {
+            match shell::temps::start_sampler(&cx.thread_spawner()) {
+                Ok((rx, worker)) => {
+                    self.temps_rx = Some(rx);
+                    self.temps_worker = Some(worker);
+                }
+                Err(error) => {
+                    log!("wm: could not start the temperature sampler: {error}");
+                    return;
+                }
+            }
+        }
+        let Some(rx) = &self.temps_rx else { return };
+        let frames: Vec<shell::temps::Frame> = rx.try_iter().collect();
+        if frames.is_empty() {
+            return;
+        }
+        let panel = self.ui.widget(cx, ids!(shell_panel));
+        let (badge, open, alarm, any_alarm) = {
+            let Some(mut p) = panel.borrow_mut::<shell::panels::ShellPanel>() else { return };
+            let mut alarm = false;
+            for f in frames {
+                alarm |= p.temps.push(f).episode_started;
+            }
+            let badge = (!p.temps.is_empty()).then(|| p.temps.badge.clone());
+            let open = p.open;
+            if open == Some(shell::panels::PanelKind::Temps) {
+                p.redraw(cx);
+            }
+            (badge, open, alarm, p.temps.any_alarm())
+        };
+        self.bar_sample.temps = badge;
+        // never over another open flyout (a password being typed, a scale being tried): the
+        // warning waits for it to close
+        self.temps_alarm_pending = (self.temps_alarm_pending || alarm) && any_alarm;
+        if self.temps_alarm_pending && open.is_none() {
+            self.temps_alarm_pending = false;
+            let seg = self.active_bar_segment();
+            self.toggle_shell_panel(cx, seg, BarModule::Temps);
+            if let Some(mut p) = panel.borrow_mut::<shell::panels::ShellPanel>() {
+                p.temps_show_alarm();
+                p.redraw(cx);
+            }
+        } else if alarm && open == Some(shell::panels::PanelKind::Temps) {
+            self.temps_alarm_pending = false;
+            if let Some(mut p) = panel.borrow_mut::<shell::panels::ShellPanel>() {
+                p.temps_show_alarm();
+            }
+        }
     }
 
     fn redraw_all(&mut self, cx: &mut Cx) {
