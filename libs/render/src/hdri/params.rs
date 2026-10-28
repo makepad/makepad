@@ -351,7 +351,8 @@ pub struct SunParams {
 
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
 pub struct AtmosphereParams {
-    /// 0..=10, aerosol (Mie) density; 1 = a clear day.
+    /// 0..=10, aerosol (Mie) density; 1 = a clear day, an aerosol optical
+    /// depth of 0.07 at 550 nm (atmosphere.rs, AEROSOL_DEPTH); 3 a hazy one.
     pub haze: f32,
     /// 0..=10, air (Rayleigh) density; 1 = Earth.
     pub air: f32,

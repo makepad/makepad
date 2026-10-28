@@ -1505,8 +1505,9 @@ mod tests {
     /// 51 %).
     #[test]
     fn the_ground_ring_is_even_under_a_wet_ground() {
-        // (the storm's mirror still shows its rain shafts and its flash, which do change round the turn: 3.3 %)
-        const RING_STEP: f32 = 0.05;
+        // (the storm's mirror still shows its rain shafts and its flash, which do change round the turn: 3.3 %; a wet
+        // ground alone mirrors the clear sky's glow round the sun, which falls by up to 13 % a step on the sun's side)
+        const RING_STEP: f32 = 0.15;
         let light = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
         let mut clear = HdriParams::default();
         sun_at(&mut clear, 25.0, 180.0);
@@ -1807,8 +1808,11 @@ mod tests {
         let env = Env::new(&p);
         let l = env.skyline_light();
         assert!(env.radiance(dir_at_u(0.5 / RING as f32, 1.0)).max_elem() > 100.0 * vec(l.ring_low[0]).max_elem(), "the premise: the disc is there");
-        let beside = vec(l.ring_low[1]).max_elem().max(vec(l.ring_low[RING - 1]).max_elem());
-        assert!(vec(l.ring_low[0]).max_elem() < 2.0 * beside, "{:?} beside {beside}", l.ring_low[0]);
+        // The ring there is the sky round the disc, the haze's glow at its brightest (a real sun's aureole, so far
+        // brighter than the ring a step away), and no more.
+        let d = dir_at_u(0.5 / RING as f32, 1.0);
+        let sky = env.atmo.as_ref().unwrap().sky(d);
+        assert!(close3(vec(l.ring_low[0]), sky, 1e-3), "{:?}, the sky round the sun {sky:?}", l.ring_low[0]);
     }
 
     #[test]

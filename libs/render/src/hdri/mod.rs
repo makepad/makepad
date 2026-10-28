@@ -122,9 +122,11 @@ pub struct Env {
     clouds: Option<clouds::CloudLayer>,
     /// Stars, moon and glow; Some exactly in Sky mode.
     night: Option<night::NightSky>,
-    /// Light on the clouds, gathered once per map: the direct sun, and the ambient
-    /// of the day sky plus the night (glow and moonlit air).
+    /// Light on the clouds, gathered once per map: the direct sun at the 2D
+    /// layer's height and at the volume's, and the ambient of the day sky plus
+    /// the night (glow and moonlit air).
     cloud_sun: Vec3f,
+    volume_sun: Vec3f,
     cloud_ambient: Vec3f,
     /// The sky a window filled with sky (GoboParams::fill_sky) looks out at
     /// in Studio mode: a Sky-mode Env of the same parameters with no lights,
@@ -291,7 +293,7 @@ impl Env {
         let mut volumetric = None;
         let mut weather = None;
         let mut weather_sun = Vec3f::default();
-        let (atmo, clouds, night, cloud_sun, cloud_ambient) = match params.mode() {
+        let (atmo, clouds, night, cloud_sun, volume_sun, cloud_ambient) = match params.mode() {
             Mode::Sky => {
                 // Weather kinds are presets over the sky's own fields (1b): the
                 // layers are built from the weathered copy, the stored params
@@ -316,7 +318,16 @@ impl Env {
                     clouds::CloudLayer::new(&sky.clouds, params.seed, atmo.sun_dir())
                 };
                 let night = night::NightSky::new_par(&sky.night, params.seed, atmo.sun_dir(), night::star_hours(&sky.sun), sky.sun.latitude, run)?;
-                let cloud_sun = atmo.sun_irradiance();
+                // The clouds are lit by the sun at their own height, above most
+                // of the haze: a low sun is far brighter on the deck than on the
+                // ground, which is what lights a sunset's clouds. The 2D layer
+                // (the deck and the cirrus over either kind) at the deck's
+                // altitude, the volume at its middle.
+                let cloud_sun = atmo.sun_irradiance_at(sky.clouds.altitude_m);
+                let volume_sun = sky
+                    .volumetric
+                    .as_ref()
+                    .map_or(cloud_sun, |vol| atmo.sun_irradiance_at(0.5 * (vol.base_m + vol.top_m)));
                 let cloud_ambient = atmo.ambient() + night.ambient();
                 // The weather itself works its floors out from the user's block.
                 if !whole_base {
@@ -327,10 +338,10 @@ impl Env {
                 // full overcast is hidden, not 80 % through) and the volume.
                 let sun_cover = clouds.as_ref().map_or(1.0, |layer| 1.0 - layer.cover_toward(atmo.sun_dir()))
                     * volumetric.as_ref().map_or(1.0, |volume| volume.transmittance_toward(atmo.sun_dir()));
-                weather_sun = cloud_sun * sun_cover;
-                (Some(atmo), clouds, Some(night), cloud_sun, cloud_ambient)
+                weather_sun = atmo.sun_irradiance() * sun_cover;
+                (Some(atmo), clouds, Some(night), cloud_sun, volume_sun, cloud_ambient)
             }
-            Mode::Studio => (None, None, None, Vec3f::default(), Vec3f::default()),
+            Mode::Studio => (None, None, None, Vec3f::default(), Vec3f::default(), Vec3f::default()),
         };
         // A window filled with sky looks out at this map's own sky settings.
         // In Studio mode that sky is a second, lightless Sky-mode Env, built
@@ -365,6 +376,7 @@ impl Env {
             clouds,
             night,
             cloud_sun,
+            volume_sun,
             cloud_ambient,
             window_sky,
             backdrop_gobo,
@@ -1157,7 +1169,7 @@ impl Env {
                     // The ground under the layer, lit by the same dome (as the
                     // clouds see it, greyed by their cover), lights the bases.
                     let ground = ground_color * volume.sky_light(self.cloud_ambient);
-                    c = c * (1.0 - m.alpha) + volume.shade(&m, self.cloud_sun, self.cloud_ambient, ground) * gain;
+                    c = c * (1.0 - m.alpha) + volume.shade(&m, self.volume_sun, self.cloud_ambient, ground) * gain;
                 }
             }
         }
@@ -2696,10 +2708,12 @@ mod tests {
                     let got = lum(key.radiance);
                     assert!((got - full * want).abs() <= 2.0e-3 * full + 1.0e-3 * reference, "{e} deg: radiance {got} vs {full} x {want}");
                     // A fade, not a switch: no step over 0.01 degrees of elevation
-                    // reaches a tenth of the key on the horizon, and the key only
-                    // falls as the sun sinks.
+                    // reaches a tenth of the key (the key before the step, or the
+                    // key on the horizon where the fade has taken it below that:
+                    // the haze dims a low sun by 3 % per 0.01 degree by itself),
+                    // and the key only falls as the sun sinks.
                     if let Some((prev_e, prev)) = last {
-                        assert!((got - prev).abs() < 0.1 * reference, "{prev_e} -> {e} deg: {prev} -> {got}");
+                        assert!((got - prev).abs() < 0.1 * prev.max(reference), "{prev_e} -> {e} deg: {prev} -> {got}");
                         assert!(got <= prev * 1.0001, "{prev_e} -> {e} deg: the key rose from {prev} to {got}");
                     }
                     last = Some((e, got));

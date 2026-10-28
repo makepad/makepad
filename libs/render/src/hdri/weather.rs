@@ -1811,7 +1811,12 @@ mod env_tests {
             let (mean, _, _) = light(0.0, true);
             for fog in [0.08f32, 0.3, 0.7, 1.0] {
                 let (foggy, level, lost) = light(fog, true);
-                assert!(foggy <= mean, "sun at {elevation}, fog {fog}: the map's mean {foggy} against {mean} on a clear day");
+                // Within 2 %: the fog is lit by the open dome's mean radiance,
+                // which on a calibrated clear day (a bright horizon) is a little
+                // above the light a level layer of fog receives (E / pi), and as
+                // bright as the sunlit ground it veils: 1.5 % over at a 40 degree
+                // sun and fog 1. The glow itself stays tied to the beam below.
+                assert!(foggy <= 1.02 * mean, "sun at {elevation}, fog {fog}: the map's mean {foggy} against {mean} on a clear day");
                 let (_, glowless, _) = light(fog, false);
                 let glow = level - glowless;
                 assert!(glow <= 1.02 * lost, "sun at {elevation}, fog {fog}: the glow puts {glow} on a level surface, the beam lost {lost} there");

@@ -14,7 +14,7 @@
 //! and back lights near 0.
 //!
 //! Levels are in the model's scene units (atmosphere.rs, "Radiance scale"): a clear noon zenith
-//! is a few tenths (0.25-0.45) and a white wall in the noon sun about 5.6. A light at EV e
+//! is about half a unit (0.4-0.6) and a white wall in the noon sun about 5.3. A light at EV e
 //! has radiance 2^e at luminance 1, so a key at EV 4 is 16. The backdrops stay well below that, so
 //! the lights read as lights.
 //!
