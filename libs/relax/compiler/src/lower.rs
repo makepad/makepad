@@ -5837,8 +5837,14 @@ impl<'a> Lcx<'a> {
                 Some((buf, ptrs))
             }
             Val::M(base, off0) => {
-                // addresses derived from the fresh slot: vreg -> offset in it
-                let mut addrs: HashMap<VReg, i64> = HashMap::default();
+                // addresses derived from fresh slots: vreg -> (slot, offset in it). Only the
+                // stores into the value's own slot make its bytes: an element's temporaries
+                // (the inner arrays of `&[&[1, 2], &[3]]`, promoted on their own) are other
+                // slots, written before the value and never read back into it -- a read of one
+                // (a copy or load) is not a plain constant and stops the scan below.
+                let mut addrs: HashMap<VReg, (u32, i64)> = HashMap::default();
+                // (slot, offset of the store, width, value, a data address?) in order
+                let mut stores: Vec<(u32, i64, usize, u64, bool)> = Vec::new();
                 for i in insts {
                     match i {
                         Inst::Iconst(d, k) => {
@@ -5854,35 +5860,39 @@ impl<'a> Lcx<'a> {
                             }
                             None => return None,
                         },
-                        Inst::SlotAddr(d, _) => {
-                            addrs.insert(*d, 0);
+                        Inst::SlotAddr(d, s) => {
+                            addrs.insert(*d, (*s, 0));
                         }
                         Inst::IBin(IOp::Add, _, d, a, k) if addrs.contains_key(a) => {
-                            let o = addrs[a] + *consts.get(k)? as i64;
-                            addrs.insert(*d, o);
+                            let (s, o) = addrs[a];
+                            addrs.insert(*d, (s, o + *consts.get(k)? as i64));
                         }
                         Inst::Store(m, b, o, src) if addrs.contains_key(b) => {
-                            let val = *consts.get(src)?;
-                            let at = addrs[b] + *o as i64 - *off0 as i64;
-                            let n = width(*m);
-                            if at < 0 {
-                                return None;
-                            }
-                            if ptr_regs.contains(src) {
-                                if n != pw || at as usize % pw != 0 {
-                                    return None;
-                                }
-                                ptrs = true;
-                            }
-                            buf.get_mut(at as usize..at as usize + n)?.copy_from_slice(&val.to_le_bytes()[..n]);
+                            let (s, at) = addrs[b];
+                            stores.push((s, at + *o as i64, width(*m), *consts.get(src)?, ptr_regs.contains(src)));
                         }
                         // anything else touching a slot address (calls, copies, moves) or any
                         // other work: not a plain constant
                         _ => return None,
                     }
                 }
-                if !addrs.contains_key(base) {
-                    return None;
+                let (slot, at0) = *addrs.get(base)?;
+                let start = at0 + *off0 as i64;
+                for (s, at, n, val, ptr) in stores {
+                    if s != slot {
+                        continue;
+                    }
+                    let at = at - start;
+                    if at < 0 {
+                        return None;
+                    }
+                    if ptr {
+                        if n != pw || at as usize % pw != 0 {
+                            return None;
+                        }
+                        ptrs = true;
+                    }
+                    buf.get_mut(at as usize..at as usize + n)?.copy_from_slice(&val.to_le_bytes()[..n]);
                 }
                 Some((buf, ptrs))
             }
