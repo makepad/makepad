@@ -124,8 +124,9 @@ pub const AURORA_COLOR_NAMES: &[&str] = &["classic", "magenta tops", "storm", "c
 /// 103.75 km and its red top at 186 to 189 km outshone the green; with the first positive bands' 600 nm group in the
 /// nitrogen, 0.1 outshone it at 103.75 km). Magenta tops' red, 0.25, is 11 kR face-on at the default Strength 3,
 /// about 3.2 G0 over 210 km with the bands' blue (refs: 10 to 15 kR, 2.4 to 3.6 G0): faint beside the green, as the
-/// owner's photographs show it.
-pub const AURORA_PRESET_MIX: [[f32; 3]; 3] = [[1.0, 0.04, 0.05], [1.0, 0.25, 0.2], [2.0, 0.4, 2.0]];
+/// owner's photographs show it. Task L1 (owner: "usually we mostly see the cyan part"): classic's red 0.015, so the
+/// N2+ bands' blue over the green no longer meets its red in a purple strip at the curtain's top.
+pub const AURORA_PRESET_MIX: [[f32; 3]; 3] = [[1.0, 0.015, 0.05], [1.0, 0.25, 0.2], [2.0, 0.4, 2.0]];
 
 /// clamp()'s rule for one number: NaN is `fallback`, anything else
 /// (infinities too) is held into `lo..=hi`.

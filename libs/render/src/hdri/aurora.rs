@@ -67,8 +67,8 @@ const SHAPE_MIN: f32 = 0.15;
 const MEANDER_KM: f32 = 420.0;
 const MEANDER_DEPTH_KM: f32 = 320.0;
 /// Each ribbon's own small bends, both ways, at Folds 1.
-const BEND_KM: f32 = 110.0;
-const BEND_DEPTH_KM: f32 = 12.0;
+const BEND_KM: f32 = 90.0;
+const BEND_DEPTH_KM: f32 = 18.0;
 /// The folds: in each FOLD_CELL_KM of the arc a fold with a chance of 0.5 + 0.45 Folds, a switchback where the ribbon
 /// doubles back on itself: a U-turn of radius 6 to 20 km, a leg back along the arc of 40 to 140 km (x (0.7 + 0.3
 /// Folds)), slightly bowed, and a U-turn the other way, so it goes on 2 (rho1 + rho2) further toward or away. The
@@ -115,18 +115,26 @@ const N2_KM: f32 = 6.0;
 const N2_SPREAD_KM: f32 = 5.0;
 /// How far a storm (nitrogen 0.5 to 2 in the mix) holds the green off its bottom (refs §5.1: 5 to 10 km).
 const GREEN_HOLD_KM: f32 = 7.0;
+/// The green line fades over GREEN_FALL_KM above its brightest (12 km over the border): slowly enough that the curtain
+/// over the lime lower edge reads cyan-green and cyan, as the owner sees it ("usually we mostly see the cyan part",
+/// Task L1), with the blue only at its top.
+const GREEN_FALL_KM: f32 = 40.0;
+/// Where the green line ends (km up): before the red line's tops take over, so the two never mix grey.
+const GREEN_TOP_KM: (f32, f32) = (140.0, 185.0);
 /// The N2+ first negative bands that come with the green (part of its unit): TEAL_SHARE rayleighs per rayleigh of the
 /// green at its brightest, rising from TEAL_FROM_KM to TEAL_KM over the border and falling over TEAL_FALL_KM above it,
 /// slower than the green (a sunlit curtain's tops scatter the bands' sunlight). In their two visible heads, 470.9 and
 /// 427.8 nm, 3 to 1: the bands' own share is about 1 to 3, but with the violet head foremost the high curtain read
 /// violet-purple where the photographs show blue. So the curtain runs from the lime green line at its lower edge
-/// through cyan-green and teal to blue higher up, as the owner's photographs show it (2026-10-24).
+/// through cyan-green and teal to blue higher up, as the owner's photographs show it (2026-10-24). Task L1: the violet
+/// head is left out (with the red line's trace over it, the high curtain read purple), and the green fades slower
+/// (GREEN_FALL_KM), so the curtain over its lime edge is mostly cyan.
 const TEAL_SHARE: f32 = 0.25;
 const TEAL_FROM_KM: f32 = 4.0;
 const TEAL_KM: f32 = 30.0;
-const TEAL_FALL_KM: f32 = 80.0;
-const TEAL_VIOLET_SHARE: f32 = 0.25;
-const TEAL_BLUE_SHARE: f32 = 0.75;
+const TEAL_FALL_KM: f32 = 60.0;
+const TEAL_VIOLET_SHARE: f32 = 0.0;
+const TEAL_BLUE_SHARE: f32 = 1.0;
 const TEAL_BLUE_NM: f32 = 470.9;
 /// The 427.8 nm violet that comes with the red line, per rayleigh of 630 nm (part of its unit): the sunlit tops'
 /// bands over the oxygen's red, so a high curtain reads magenta-purple, never deep red or maroon (owner, 2026-10-24).
@@ -359,6 +367,9 @@ fn shapes(folds: f32, sc: f32, span: f32, shared: u32, own: u32, k: u32) -> Vec<
     if !(folds > 0.0) {
         return shapes;
     }
+    // Task L1: a near arc (high in the sky, overhead) takes its turns' radii smaller by only the square root of its
+    // shapes' scale, so its U-turns and curls stay round (big swirls overhead, not a zigzag)
+    let round = sc.sqrt();
     let cells = |cell: f32| {
         let n = (span / cell).ceil() as i32 + 1;
         -n..=n
@@ -376,7 +387,7 @@ fn shapes(folds: f32, sc: f32, span: f32, shared: u32, own: u32, k: u32) -> Vec<
                 continue;
             }
             let u = |salt: u32| unit(hash_u32(h ^ salt));
-            let rho = [sc * (6.0 + 14.0 * u(1)), sc * (6.0 + 14.0 * u(2))];
+            let rho = [round * (6.0 + 14.0 * u(1)), round * (6.0 + 14.0 * u(2))];
             let mut leg = sc * (40.0 + 100.0 * u(3)) * (0.7 + 0.3 * folds);
             // bowed less than the nearer U-turn's radius, so the leg never meets the ribbon either side of it
             let bow = (2.0 * u(4) - 1.0) * 0.8 * rho[0].min(rho[1]);
@@ -402,7 +413,8 @@ fn shapes(folds: f32, sc: f32, span: f32, shared: u32, own: u32, k: u32) -> Vec<
             continue;
         }
         let u = |salt: u32| unit(hash_u32(h ^ salt));
-        let rho = sc * (12.0 + 18.0 * u(1));
+        // within its cell (2.2 of its half-width, 3 rho, fits in 0.9 of it)
+        let rho = (round * (18.0 + 24.0 * u(1))).min(0.9 * curl_cell / 6.6);
         let w = 3.0 * rho;
         let at = (c as f32 + 0.5) * curl_cell + (u(2) - 0.5) * (curl_cell - 2.2 * w);
         shapes.push(Shape::Curl { at, w, rho, side: if u(3) < 0.5 { -1.0 } else { 1.0 } });
@@ -955,7 +967,7 @@ fn line_table(mix: [f32; 3]) -> [Vec3f; TABLE] {
         let h = TABLE_LOW_KM + (i as f32 + 0.5) * (TOP_KM - TABLE_LOW_KM) / TABLE as f32;
         let dh = h - BORDER_KM;
         let border = smoothstep(-1.5, 0.5, dh);
-        let g = smoothstep(2.0 + hold, 12.0 + hold, dh) * (-(dh - 12.0 - hold).max(0.0) / 25.0).exp() * (1.0 - smoothstep(180.0, 220.0, h));
+        let g = smoothstep(2.0 + hold, 12.0 + hold, dh) * (-(dh - 12.0 - hold).max(0.0) / GREEN_FALL_KM).exp() * (1.0 - smoothstep(GREEN_TOP_KM.0, GREEN_TOP_KM.1, h));
         let high = 1.0 - smoothstep(320.0, 350.0, h);
         let t = TEAL_SHARE * smoothstep(TEAL_FROM_KM, TEAL_KM, dh) * (-(dh - TEAL_KM).max(0.0) / TEAL_FALL_KM).exp() * high;
         let q = (h / 220.0).ln() / 0.18;
@@ -1057,7 +1069,8 @@ mod tests {
 
     /// The colour by height comes from the lines, as the owner's photographs show it (2026-10-24): every look's
     /// brightest, lower edge is lime (green over red over blue), its body 40 km over the border cyan-green to teal
-    /// (green over blue over red), and blue 75 km up; no look is ever red or maroon (red over green with little blue)
+    /// (green over blue over red), and blue over red 75 km up: blue in magenta tops and storm, cyan in classic (green and
+    /// blue over red, the blue at least half the green: Task L1, "usually we mostly see the cyan part"; it was blue); no look is ever red or maroon (red over green with little blue)
     /// or grey (its hues cancelling) where it shows at 1 % of its peak. Classic carries at most a trace of violet at the
     /// top; magenta tops run on into a faint magenta-purple; the storm's lower border is pink-violet (red and blue over
     /// green) and green above it.
@@ -1072,7 +1085,7 @@ mod tests {
             let body = a.profile(BORDER_KM + 40.0);
             assert!(body.y > body.z && body.z > body.x, "{color} 40 km over the border: {body:?}");
             let high = a.profile(BORDER_KM + 75.0);
-            assert!(high.z > high.y && high.z > high.x, "{color} 75 km over the border: {high:?}");
+            assert!(high.z > high.x && (high.z > high.y || color == "classic"), "{color} 75 km over the border: {high:?}");
             let peak = luminance(lime);
             for i in 0..TABLE {
                 let c = a.table[i];
@@ -1085,6 +1098,8 @@ mod tests {
             }
         }
         let classic = at("classic");
+        let high = classic.profile(BORDER_KM + 75.0);
+        assert!(high.y > high.x && high.z >= 0.5 * high.y, "classic 75 km over the border is cyan: {high:?}");
         for i in 0..TABLE {
             let c = classic.table[i];
             if height(i) > BORDER_KM + 10.0 {

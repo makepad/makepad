@@ -1,17 +1,17 @@
 //! Nebulas (plan hdri-7 §3, Task 3b), written from general techniques: a seed's twelve candidate clouds placed along
 //! the Milky Way's plane, densest toward its centre (anywhere when it is off), each a sprite on its own tangent plane
 //! whose structure (domain-warped noise, an outline the warp's low noise moves round the centre, ridged filaments and
-//! wisps, a hot star's off-centre cavity and rim, a bright star's blue glow, cellular knots, dust lanes) is built once
+//! wisps, a bright star's blue glow, cellular knots, dust lanes and silhouettes) is built once
 //! per seed and kept, its look composed per texel: Amount, Size, Brightness and Realism change no sprite, so only a
 //! typed seed builds anything (D2). With the band drawn, many small knots (H II regions, a few blue) are strewn along
 //! it besides, densest toward the core: four offset grids in galactic longitude and sin b, a knot a cell's hash,
 //! filtered by the lookup's texel in closed form, nothing kept.
 //!
-//! The kinds: an emission cloud (hydrogen-alpha, brightest toward one side); a hot star's blister (an off-centre
-//! cavity, a faint pale glow in it (oxygen-III and hydrogen-alpha: pale rose, never a teal centre), its rim thick on
-//! the far side); a complex near the core (red on one side, a bright star's blue glow in the middle, yellow-orange dust
-//! lit by it on the other); a reflection glow round a bright star, just off the band; a dark cloud; and a large red
-//! shell off the band.
+//! The kinds (Task L1, the owner's Horsehead and Flame photos: "no specific purple donuts"): an emission sheet along
+//! the band (broad, soft, patchy hydrogen-alpha, brightest toward one side, dark dust silhouetted in front of its
+//! other side with a brighter rim of gas along the dust's edge); a complex near the core (red on one side, a bright
+//! star's blue glow in the middle, yellow-orange dust lit by it on the other); a reflection glow round a bright star,
+//! near the band; and a dark cloud. No blisters or shells: their rims read as rings and donuts.
 //!
 //! **Realism** blends two looks of one layout (D8): at 0 astrophotography's colours (hydrogen-alpha red-magenta,
 //! oxygen-III's teal only mixed into a cavity's pale glow, reflection blue, yellow-orange lit dust, dark dust; peaks
@@ -54,6 +54,14 @@ const REFLECTION_RGB: Vec3f = vec3f(0.25, 0.45, 1.0);
 /// A red giant's light scattered by dust: yellow-orange.
 const DUST_LIT_RGB: Vec3f = vec3f(1.0, 0.62, 0.22);
 const REAL_RGB: Vec3f = vec3f(0.95, 0.99, 1.05);
+/// A sheet is ACROSS times narrower across the band than along it (Task L1).
+const ACROSS: f32 = 2.4;
+/// The dust silhouetted in front of a sheet: where the lanes' noise passes SILHOUETTE.0, fully dark by SILHOUETTE.1 (a
+/// crisp edge), and how much of a cloud's own light lies behind its dust (the rest in front of it).
+const SILHOUETTE: (f32, f32) = (0.6, 0.64);
+const BEHIND_DUST: f32 = 0.85;
+/// How far (radians) a sheet's long axis turns off the band's direction, at most.
+const TURN_OFF_BAND: f32 = 0.45;
 /// The knots' grids in galactic longitude and sin b: KNOT_GRIDS of them, each a quarter of a cell off the last, cells of
 /// KNOT_CELL (6.3 degrees), each holding a knot with KNOT_OCCUPANCY at the densest (at Amount 0.5), its centre in the
 /// cell's middle half. A knot is an elliptical Gaussian of sigma 0.3 to 1 of KNOT_SIGMA (0.075 to 0.25 degrees; most of
@@ -77,11 +85,9 @@ const KNOT_SALT: u32 = 0x4b4e_4f54;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NebulaKind {
-    /// Hydrogen-alpha, a little oxygen, brightest toward one side.
+    /// A broad, soft hydrogen-alpha sheet along the band, brightest toward one side, with dark dust silhouetted in
+    /// front of it and a brighter rim where the gas meets the dust (Task L1: the owner's Horsehead and Flame photos).
     Emission,
-    /// A hot star's blister: an off-centre cavity with a faint pale glow (oxygen-III and hydrogen-alpha), its
-    /// hydrogen-alpha rim thick on the far side.
-    BiColour,
     /// A star-forming complex near the core: hydrogen-alpha on one side, a bright star's blue glow in the middle,
     /// yellow-orange dust lit by a red giant on the other.
     Complex,
@@ -89,8 +95,6 @@ enum NebulaKind {
     Reflection,
     /// Dust alone.
     Dark,
-    /// A large hydrogen-alpha shell off the band.
-    Shell,
 }
 
 /// A seed's candidate `i`: what it is, its radius at Size 1, its turn and its placement numbers.
@@ -106,36 +110,35 @@ struct Candidate {
 
 fn candidate(seed: u32, i: usize) -> Candidate {
     let h = |k: i32| hash01(i as i32, k, 0, seed);
+    // Task L1: no blisters and no shells (their rims read as rings and donuts), and narrower: 4 to 14 degrees along the
+    // band (a sheet is about half as wide across it), small and subtle at sky scale
     let kind = match h(0) {
-        x if x < 0.36 => NebulaKind::Emission,
-        x if x < 0.54 => NebulaKind::BiColour,
-        x if x < 0.66 => NebulaKind::Complex,
-        x if x < 0.80 => NebulaKind::Reflection,
-        x if x < 0.93 => NebulaKind::Dark,
-        _ => NebulaKind::Shell,
+        x if x < 0.55 => NebulaKind::Emission,
+        x if x < 0.68 => NebulaKind::Complex,
+        x if x < 0.86 => NebulaKind::Reflection,
+        _ => NebulaKind::Dark,
     };
     let size = h(1);
     let scale = match kind {
-        NebulaKind::Complex => 1.3,
-        NebulaKind::Shell => 1.4,
+        NebulaKind::Complex => 1.2,
+        NebulaKind::Reflection => 0.7,
         _ => 1.0,
     };
-    Candidate { kind, radius_deg: scale * (1.5 + 5.5 * size * size), angle: TAU * h(2), u1: h(3), u2: h(4), u3: h(5) }
+    Candidate { kind, radius_deg: scale * (2.0 + 5.0 * size * size), angle: TAU * h(2), u1: h(3), u2: h(4), u3: h(5) }
 }
 
 /// Where candidate `c` sits in star space: with the Milky Way's axes (centre, pole, l 90) along its plane, l weighted
-/// toward the inner galaxy (|l| = 180 u^2.5 degrees for the glowing kinds, 180 u^2 for reflection and dark clouds,
-/// 25 u for a complex, 180 u for a shell) and b Gaussian (5 degrees for the glowing kinds, 10 for a complex, 15 for
-/// reflection and dark clouds, 25 for a shell); without them uniform on the sphere.
+/// toward the inner galaxy (|l| = 180 u^2 degrees for emission sheets, reflection and dark clouds, 25 u
+/// for a complex) and b Gaussian (5 degrees for emission sheets, 10 for a complex, 12 for reflection and dark clouds);
+/// without them uniform on the sphere.
 fn place(c: &Candidate, axes: Option<[Vec3f; 3]>) -> Vec3f {
     match axes {
         Some([centre, pole, l90]) => {
             let side = if c.u1 < 0.5 { -1.0 } else { 1.0 };
             let (reach, power, sigma) = match c.kind {
-                NebulaKind::Emission | NebulaKind::BiColour => (PI, 2.5, 5.0f32),
+                NebulaKind::Emission => (PI, 2.0, 5.0f32),
                 NebulaKind::Complex => (25f32.to_radians(), 1.0, 10.0),
-                NebulaKind::Reflection | NebulaKind::Dark => (PI, 2.0, 15.0),
-                NebulaKind::Shell => (PI, 1.0, 25.0),
+                NebulaKind::Reflection | NebulaKind::Dark => (PI, 2.0, 12.0),
             };
             let l = side * reach * (2.0 * (c.u1 - 0.5)).abs().powf(power);
             let sigma = sigma.to_radians();
@@ -230,8 +233,11 @@ fn sprite_texel(def: &SpriteDef, size: usize, px: f32, py: f32) -> [f32; 5] {
     // an outline a single low octave moves round the centre, from 0.45 of the radius to the whole of it: the same at
     // every level (a clamp of finer noise would grow or shrink the cloud's mean area with the level's octaves)
     let m = (0.5 + 2.5 * (fbm3_frac_full(px * 1.2 + 3.3, py * 1.2, z + 5.5, 1.0, 1.0, s ^ 6) - 0.5)).clamp(0.0, 1.0);
-    let re = r / (0.45 + 0.55 * m);
-    let envelope = 1.0 - smoothstep(0.35, 1.0, re);
+    // Task L1: a sheet along the band (the sprite's x runs along it), ACROSS times narrower across it; a reflection
+    // glow round its star nearly round. The edge falls softly from a third of the way out.
+    let across = if def.kind == NebulaKind::Reflection { 1.2 } else { ACROSS };
+    let re = (px * px + across * across * py * py).sqrt() / (0.7 + 0.3 * m);
+    let envelope = 1.0 - smoothstep(0.3, 1.0, re);
     let (qx, qy) = (px + 0.9 * wx, py + 0.9 * wy);
     let body = fbm3_frac_full(qx * 2.0, qy * 2.0, z + 3.7, oct(0.5, 5.0), 5.0, s ^ 2);
     let ridge = 1.0 - (2.0 * fbm3_frac_full(qx * 3.0, qy * 3.0, z + 7.1, oct(0.33, 6.0), 6.0, s ^ 3) - 1.0).abs();
@@ -239,9 +245,18 @@ fn sprite_texel(def: &SpriteDef, size: usize, px: f32, py: f32) -> [f32; 5] {
     // knots: within w of a cellular point (cells a quarter of the sprite), w at least two texels, the light kept
     let w = (8.0 * texel).max(0.3);
     let knot = (1.0 - smoothstep(0.0, w, worley3(qx * 4.0, qy * 4.0, z, s ^ 4))) * (0.3 / w) * (0.3 / w);
-    let lanes = smoothstep(0.55, 0.75, fbm3_frac_full(qx * 2.5 + 9.1, qy * 2.5, z + 1.9, oct(0.4, 5.0), 5.0, s ^ 5)) * envelope;
+    let dn = fbm3_frac_full(qx * 2.5 + 9.1, qy * 2.5, z + 1.9, oct(0.4, 5.0), 5.0, s ^ 5);
+    let lanes = smoothstep(0.55, 0.75, dn) * envelope;
+    // Task L1: the broad glowing sheet (the warped body's high patches, soft-edged, more of it toward the middle), the dust silhouetted in front of it
+    // (the lanes' noise's highest clumps, crisp-edged: SILHOUETTE wide in the noise) and a brighter rim of gas hugging
+    // the dust's edge, as the Horsehead's ionisation front does
+    let sheet = smoothstep(0.34 - 0.16 * envelope, 0.7 - 0.12 * envelope, body);
     // how far along the lean a point lies, -1 to 1
     let lean = (qx * def.lean.0 + qy * def.lean.1).clamp(-1.0, 1.0);
+    // the dust stands on the side away from the lean (the gas's bright side), reaching a little past the gas: it bites
+    // into the sheet's edge, never a hole in its middle
+    let silhouette = smoothstep(SILHOUETTE.0, SILHOUETTE.1, dn) * smoothstep(-0.1, 0.5, -lean) * (1.0 - smoothstep(0.5, 1.0, 0.85 * re));
+    let rim = smoothstep(SILHOUETTE.0 - 0.1, SILHOUETTE.0, dn) * (1.0 - smoothstep(SILHOUETTE.0, SILHOUETTE.1, dn));
     // a bright star's glow: a Gaussian of `sigma` widened by the level's texel, its light kept
     let glow = |peak: f32, sigma: f32| {
         let wide = sigma * sigma + 0.25 * texel * texel;
@@ -249,43 +264,25 @@ fn sprite_texel(def: &SpriteDef, size: usize, px: f32, py: f32) -> [f32; 5] {
     };
     match def.kind {
         NebulaKind::Emission => {
-            let ha = envelope * (0.9 + 0.35 * lean) * (0.35 * body + 0.65 * wisps + 0.8 * knot);
-            [ha, 0.12 * ha, 0.0, lanes, 0.0]
-        }
-        NebulaKind::BiColour => {
-            // the cavity a third of the radius off the centre, against the lean
-            let (cx, cy) = (-0.3 * def.lean.0, -0.3 * def.lean.1);
-            let rc = ((qx - cx) * (qx - cx) + (qy - cy) * (qy - cy)).sqrt();
-            let rim = smoothstep(0.12, 0.4, rc) * envelope;
-            // a pale glow in the cavity, fainter than the rim: oxygen-III and as much hydrogen-alpha, pale rose as a long
-            // exposure shows a hot star's cavity (Task 3b: no teal centre)
-            let inner = (1.0 - smoothstep(0.0, 0.35, rc)) * envelope * (0.3 + 0.25 * wisps);
-            [rim * (0.4 + 0.6 * wisps + 0.8 * knot) + inner, inner, 0.0, 0.8 * lanes, 0.0]
+            let ha = envelope * (0.85 + 0.3 * lean) * (sheet * (0.65 + 0.4 * wisps + 0.6 * rim) + (0.3 + 0.7 * sheet) * knot);
+            [ha, 0.08 * ha, 0.0, 0.2 * lanes + 2.0 * silhouette, 0.0]
         }
         NebulaKind::Complex => {
             let red = smoothstep(-0.3, 0.5, lean);
             let glow = glow(0.6, 0.1) + glow(0.35, 0.3);
             [
-                envelope * red * (0.3 * body + 0.6 * wisps + 0.6 * knot),
+                envelope * red * sheet * (0.35 + 0.35 * wisps + 0.6 * knot + 0.5 * rim),
                 0.0,
                 envelope * glow * (0.7 + 0.3 * body),
-                1.2 * lanes,
+                0.8 * lanes + 1.5 * silhouette,
                 envelope * (1.0 - red) * smoothstep(0.15, 0.4, r) * (0.2 + 0.6 * body * body),
             ]
         }
         NebulaKind::Reflection => {
-            let glow = glow(0.5, 0.12) + glow(0.3, 0.35);
-            [0.0, 0.0, envelope * (glow + 0.25 * body + 0.3 * wisps), 0.6 * lanes, 0.0]
+            let glow = glow(0.5, 0.1) + glow(0.3, 0.3);
+            [0.0, 0.0, envelope * (glow + 0.2 * body + 0.25 * wisps), 0.6 * lanes + silhouette, 0.0]
         }
-        NebulaKind::Dark => [0.0, 0.0, 0.0, 1.5 * envelope * (0.6 + 0.8 * body), 0.0],
-        NebulaKind::Shell => {
-            // the ring widened by the level's texel, its light kept
-            let width = (0.0144 + 0.25 * texel * texel).sqrt();
-            let e = (re - 0.68) / width;
-            let ring = (0.12 / width) * (-e * e).exp() * (1.0 - smoothstep(0.85, 1.0, re));
-            let ha = ring * (0.35 + 0.75 * wisps + 0.5 * knot) + 0.1 * envelope * body;
-            [ha, 0.05 * ha, 0.0, 0.5 * lanes, 0.0]
-        }
+        NebulaKind::Dark => [0.0, 0.0, 0.0, envelope * (0.6 + 0.6 * body) + 1.5 * silhouette, 0.0],
     }
 }
 
@@ -379,10 +376,21 @@ impl Nebulas {
             let c = candidate(seed, i);
             let centre = place(&c, axes);
             let radius = (c.radius_deg * p.size).to_radians().min(1.2);
-            let reference = if centre.y.abs() < 0.9 { vec3f(0.0, 1.0, 0.0) } else { vec3f(1.0, 0.0, 0.0) };
-            let t1 = Vec3f::cross(reference, centre).normalize();
+            // the sprite's x along the band (Task L1: a sheet lies along it, turned off it by up to TURN_OFF_BAND), or
+            // any way without the band
+            let (t1, angle) = match axes {
+                Some([gc, _, l90]) => {
+                    let l = centre.dot(l90).atan2(centre.dot(gc));
+                    let along = l90 * l.cos() - gc * l.sin();
+                    ((along - centre * along.dot(centre)).normalize(), TURN_OFF_BAND * (c.angle / PI - 1.0))
+                }
+                None => {
+                    let reference = if centre.y.abs() < 0.9 { vec3f(0.0, 1.0, 0.0) } else { vec3f(1.0, 0.0, 0.0) };
+                    (Vec3f::cross(reference, centre).normalize(), c.angle)
+                }
+            };
             let t2 = Vec3f::cross(centre, t1);
-            let (sa, ca) = c.angle.sin_cos();
+            let (sa, ca) = angle.sin_cos();
             let (e1, e2) = (t1 * ca + t2 * sa, t2 * ca - t1 * sa);
             let cos_reach = (1.05 * radius).cos();
             let holds_stars = c.kind != NebulaKind::Dark && star_gain > 0.0 && !star_colors.is_empty();
@@ -533,8 +541,8 @@ impl Nebulas {
                 let lum = (la.powf(1.0 - self.realism) * lr.powf(self.realism) - self.floor).max(0.0);
                 let art = (self.ha_rgb * v[0] + self.o3_rgb * v[1] + self.reflection_rgb * v[2] + self.dust_lit_rgb * v[4]) * (1.0 / raw);
                 let colour = art + (self.real_rgb - art) * self.chroma;
-                // its own dust in front of half of it
-                gas += colour * (lum * (0.5 + 0.5 * tn) * c.weight);
+                // its own dust in front of most of it: a silhouette (Task L1)
+                gas += colour * (lum * (1.0 - BEHIND_DUST + BEHIND_DUST * tn) * c.weight);
             }
             through *= 1.0 - c.weight * (1.0 - tn);
         }
@@ -644,7 +652,7 @@ mod tests {
             }
             seen += 1;
             let peaks: Vec<f32> = [0.0, 0.25, 0.5, 0.75, 1.0].iter().map(|r| p99_in_g0(&first_cloud(seed, *r))).collect();
-            println!("seed {seed}: peaks in G0 at Realism 0..1: {peaks:.2?}");
+            println!("seed {seed} ({:?}): peaks in G0 at Realism 0..1: {peaks:.2?}", candidate(hash_u32(seed ^ NEBULA_SALT), 0).kind);
             assert!((30.0..=60.0).contains(&peaks[0]), "seed {seed}: Realism 0 peaks at {}", peaks[0]);
             assert!((2.0..=5.0).contains(&peaks[4]), "seed {seed}: Realism 1 peaks at {}", peaks[4]);
             assert!(peaks.windows(2).all(|w| w[1] < w[0]), "seed {seed}: not falling steadily: {peaks:?}");
@@ -656,14 +664,13 @@ mod tests {
 
     /// Realism 1 is nearly grey (saturation at most 0.12 wherever it shows); Realism 0 is the astrophotograph's colours
     /// (spec §3): saturation at least 0.5 where hydrogen-alpha leads; blue the largest channel where reflection leads.
-    /// Oxygen-III shows only mixed into a blister's pale cavity (Task 3b: the owner's photographs show no teal centre):
-    /// where it is at least two thirds of the hydrogen-alpha, the look is pale rose, its red at least its green, never
-    /// teal.
+    /// Task L1 took the blisters (and their pale oxygen-III cavities) out: their rims read as rings. The oxygen-III is a
+    /// trace in the sheets, so no look is teal (its green over both its red and its blue).
     /// Seeds 1 to 24, so every kind is among the first clouds.
     #[test]
     fn a_nebulas_colour_follows_its_realism() {
         let texel = TAU / 1024.0;
-        let (mut red, mut pale, mut blue) = (0, 0, 0);
+        let (mut red, mut blue) = (0, 0);
         for seed in 1..=24u32 {
             if candidate(hash_u32(seed ^ NEBULA_SALT), 0).kind == NebulaKind::Dark {
                 continue;
@@ -685,9 +692,8 @@ mod tests {
                     red += 1;
                     assert!(saturation(c) >= 0.5, "seed {seed}: hydrogen-alpha shows {c:?}");
                 }
-                if v[1] > 0.1 && 1.5 * v[1] >= v[0] {
-                    pale += 1;
-                    assert!(c.x >= c.y, "seed {seed}: oxygen-III shows {c:?}, teal");
+                if luminance(c) > 0.0 {
+                    assert!(c.x >= c.y || c.z >= c.y, "seed {seed}: teal {c:?}");
                 }
                 if v[2] > 0.2 && v[2] > 2.0 * (v[0] + v[1] + v[4]) {
                     blue += 1;
@@ -695,7 +701,7 @@ mod tests {
                 }
             }
         }
-        assert!(red > 50 && pale > 20 && blue > 20, "the premise: hydrogen-alpha {red}, oxygen-III {pale}, reflection {blue} looks");
+        assert!(red > 50 && blue > 20, "the premise: hydrogen-alpha {red}, reflection {blue} looks");
     }
 
     /// Plan hdri-7 §3 ("each with bright knots and embedded stars"): a glowing cloud holds 3 to 8 stars at magnitudes 3
@@ -763,8 +769,8 @@ mod tests {
         assert_eq!((total(0.0), total(0.5), total(1.0)), (0.0, 6.0, NEBULA_MAX as f32));
     }
 
-    /// With the Milky Way's axes the glowing clouds hug its plane (|b| about 5 degrees RMS), reflection and dark ones
-    /// spread wider (about 15); without them they are uniform on the sphere.
+    /// With the Milky Way's axes the emission sheets hug its plane (|b| about 5 degrees RMS), reflection and dark ones
+    /// spread wider (about 12, Task L1); without them they are uniform on the sphere.
     #[test]
     fn they_gather_along_the_milky_way() {
         let axes = [vec3f(1.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.0, 1.0)];
@@ -775,7 +781,7 @@ mod tests {
                 let c = candidate(seed, i);
                 let b = place(&c, Some(axes)).y.clamp(-1.0, 1.0).asin().to_degrees();
                 match c.kind {
-                    NebulaKind::Emission | NebulaKind::BiColour => glowing.push(b),
+                    NebulaKind::Emission => glowing.push(b),
                     _ => wide.push(b),
                 }
                 free.push(place(&c, None));
