@@ -6,10 +6,10 @@
 #
 # 1. Rust 1.98.0 (rustc, cargo, rust-std) from static.rust-lang.org, fetched as 25 MB pieces
 #    over parallel connections, checked against the sizes and SHA-256 sums below.
-# 2. At the same time, the loader's source: the release service's licence-free loader release,
-#    a ZIP whose size and SHA-256 the service names (checked before unpacking); and, with no
-#    arguments, the packs of the runner's git repositories (the service's latest `runner`
-#    release), which makepad run takes instead of downloading them itself.
+# 2. At the same time, the loader's source: a ZIP the service's latest licence-free `runner`
+#    release names (size and SHA-256 checked before unpacking), cut from the same Makepad commit as
+#    the runner, so the two always fit; and, with no arguments, the packs of the runner's git
+#    repositories, which makepad run takes instead of downloading them itself.
 # 3. The loader is compiled for this computer's processor (`cargo build --profile host --offline`:
 #    the ZIP holds every crate) the moment Rust and the source are in place, and started with no
 #    arguments: it runs the runner, which downloads the rest. With arguments, the loader runs with
@@ -232,50 +232,47 @@ logs=$logs_dir
 stamp start
 export MAKEPAD_RUN_HOME="$root"
 
-# --- The runner's packs, from the start (no arguments only) --------------------------------
-# The release service's latest licence-free `runner` release names the runner's git
-# repositories on the service's read-only git face; each commit's pack goes into
+# --- The runner release, from the start ---------------------------------------------------------
+# The release service's latest licence-free `runner` release names the runner's git repositories
+# on the service's read-only git face and the loader's source cut from the same Makepad commit.
+# With no arguments the folder moves to it: each commit's pack goes into
 # $MAKEPAD_RUN_HOME/cache/incoming/<commit>.pack (renamed into place when complete), where makepad run
-# takes it instead of downloading. A release fetched before is not downloaded again.
+# takes it instead of downloading, and the loader is compiled for it. With arguments a loader
+# compiled before stays as it is (the runner and the apps it recorded were made for it).
 prefetch_pids=
 runner_release=
 repos=
+release_json=
 # With a loader and a runner here already, the release service gets a few seconds: offline or
 # unreachable, the folder's stores and loader start at once (makepad run runs the stored commits).
-# The two questions to the service go out together.
 meta="--retry 2 -m 60"
 if [ -f "$cache/loader/src/.built" ] && [ -f "$cache/runner/release" ]; then meta="--connect-timeout 3 -m 6"; fi
-mkdir -p "$cache"
-: > "$cache/loader-latest.json"
-( curl -fsS --proto "$proto" $meta "$service/public/app/relax/latest" > "$cache/loader-latest.json.part" 2>>"$logs/download.log" \
-    && mv -f "$cache/loader-latest.json.part" "$cache/loader-latest.json" ) &
-latest_pid=$!
-if [ $# -eq 0 ]; then
-    mkdir -p "$cache/runner" "$cache/incoming"
+mkdir -p "$cache/runner" "$cache/incoming"
+if [ $# -eq 0 ] || [ ! -f "$cache/loader/src/.built" ]; then
     release_json=$(curl -fsS --proto "$proto" $meta "$service/public/app/runner/latest" 2>>"$logs/download.log") || release_json=
-    runner_release=$(printf '%s' "$release_json" | sed -n 's/.*"release":"\([A-Za-z0-9_-]*\)".*/\1/p')
-    if [ -n "$runner_release" ]; then
-        # one "<name> <path> <commit>" line per repository of the release
-        repos=$(printf '%s\n' "$release_json" | tr '{}' '\n\n' | while IFS= read -r line; do
-            name=$(printf '%s' "$line" | sed -n 's/.*"name":"\([A-Za-z0-9_-]*\)".*/\1/p')
-            path=$(printf '%s' "$line" | sed -n 's/.*"path":"\([A-Za-z0-9_/-]*\)".*/\1/p')
-            commit=$(printf '%s' "$line" | sed -n 's/.*"commit":"\([0-9a-f]\{40\}\)".*/\1/p')
-            if [ -n "$name" ] && [ -n "$path" ]; then printf '%s %s %s\n' "$name" "$path" "$commit"; fi
-        done)
-        if [ "$(sed -n 1p "$cache/runner/release" 2>/dev/null)" != "$runner_release" ]; then
-            for entry in $(printf '%s\n' "$repos" | tr ' ' ':'); do
-                name=${entry%%:*}
-                commit=${entry##*:}
-                [ ${#commit} -eq 40 ] || continue
-                pack=$cache/incoming/$commit.pack
-                [ -f "$pack" ] && continue
-                ( printf '0032want %s\n00000009done\n' "$commit" \
-                    | curl -fsS --proto "$proto" --retry 2 -m 1800 -H 'Content-Type: application/x-git-upload-pack-request' \
-                        --data-binary @- -o "$pack.part" "$service/public/git/runner/$name.git/git-upload-pack" \
-                    && mv -f "$pack.part" "$pack" ) >/dev/null 2>>"$logs/download.log" &
-                prefetch_pids="$prefetch_pids $!"
-            done
-        fi
+fi
+runner_release=$(printf '%s' "$release_json" | sed -n 's/.*"release":"\([A-Za-z0-9_-]*\)".*/\1/p')
+if [ $# -eq 0 ] && [ -n "$runner_release" ]; then
+    # one "<name> <path> <commit>" line per repository of the release
+    repos=$(printf '%s\n' "$release_json" | sed 's/"loader":{[^}]*}//' | tr '{}' '\n\n' | while IFS= read -r line; do
+        name=$(printf '%s' "$line" | sed -n 's/.*"name":"\([A-Za-z0-9_-]*\)".*/\1/p')
+        path=$(printf '%s' "$line" | sed -n 's/.*"path":"\([A-Za-z0-9_/-]*\)".*/\1/p')
+        commit=$(printf '%s' "$line" | sed -n 's/.*"commit":"\([0-9a-f]\{40\}\)".*/\1/p')
+        if [ -n "$name" ] && [ -n "$path" ]; then printf '%s %s %s\n' "$name" "$path" "$commit"; fi
+    done)
+    if [ "$(sed -n 1p "$cache/runner/release" 2>/dev/null)" != "$runner_release" ]; then
+        for entry in $(printf '%s\n' "$repos" | tr ' ' ':'); do
+            name=${entry%%:*}
+            commit=${entry##*:}
+            [ ${#commit} -eq 40 ] || continue
+            pack=$cache/incoming/$commit.pack
+            [ -f "$pack" ] && continue
+            ( printf '0032want %s\n00000009done\n' "$commit" \
+                | curl -fsS --proto "$proto" --retry 2 -m 1800 -H 'Content-Type: application/x-git-upload-pack-request' \
+                    --data-binary @- -o "$pack.part" "$service/public/git/runner/$name.git/git-upload-pack" \
+                && mv -f "$pack.part" "$pack" ) >/dev/null 2>>"$logs/download.log" &
+            prefetch_pids="$prefetch_pids $!"
+        done
     fi
 fi
 
@@ -283,12 +280,10 @@ fi
 need_rust=
 [ "$(cat "$rust/.toolchain-version" 2>/dev/null)" = "$rust_version $triple" ] || need_rust=1
 [ -x "$rust/bin/cargo" ] && [ -x "$rust/bin/rustc" ] || need_rust=1
-# The latest loader release; offline, the one compiled before.
-wait "$latest_pid" 2>/dev/null
-latest=$(cat "$cache/loader-latest.json" 2>/dev/null) || latest=
-loader_version=$(printf '%s' "$latest" | sed -n 's/.*"release":"\([A-Za-z0-9_-]*\)".*/\1/p')
-archive=$(printf '%s' "$latest" | sed -n 's/.*"archive":{"name":"\([A-Za-z0-9_.-]*\)","bytes":\([0-9]*\),"sha256":"\([0-9a-f]*\)"}.*/\1 \2 \3/p')
-[ -n "$archive" ] || loader_version=
+# The loader for the runner release taken above: its Makepad commit names the version (the source
+# folder and the build follow it). Offline, or with arguments, the one compiled before.
+archive=$(printf '%s' "$release_json" | sed -n 's/.*"loader":{"name":"\([A-Za-z0-9_.-]*\)","bytes":\([0-9]*\),"sha256":"\([0-9a-f]*\)","commit":"\([0-9a-f]\{40\}\)"}.*/\1 \2 \3 \4/p')
+loader_version=$(printf '%s' "$archive" | cut -s -d' ' -f4)
 # One source folder for every version: an update replaces only the files that changed, so cargo
 # recompiles only the crates they belong to (target/ stays inside it: makepad finds its std two
 # levels above itself).
@@ -299,6 +294,11 @@ makepad=$src/target/host/makepad
 built="$loader_version $rust_version $triple"
 need_build=
 [ -x "$makepad" ] && [ "$(cat "$src/.built" 2>/dev/null)" = "$built" ] || need_build=1
+# a loader compiled for another Makepad commit than the runner's does not run it: say so, once
+stale=
+if [ -n "$need_build" ] && [ -x "$makepad" ] && [ -f "$src/.built" ] && [ "$(cut -d' ' -f1 "$src/.built")" != "$loader_version" ]; then
+    stale=$(cut -d' ' -f1 "$src/.built" | cut -c1-10)
+fi
 need_zip=
 [ -n "$need_build" ] && [ "$(cat "$src/.version" 2>/dev/null)" != "$loader_version" ] && need_zip=1
 if [ -n "$need_zip" ]; then
@@ -349,7 +349,7 @@ if [ -n "$need_zip" ]; then
     rm -f "$zip.part"
     [ ! -f "$cfg" ] || echo next >> "$cfg"
     printf 'url = "%s"\noutput = "%s"\nproto = %s\nfail\nretry = 3\n' \
-        "$service/public/app/relax/$loader_version/$loader_name" "$(cfgq "$zip.part")" "$proto" >> "$cfg"
+        "$service/public/app/runner/$runner_release/$loader_name" "$(cfgq "$zip.part")" "$proto" >> "$cfg"
 fi
 # the summed size of the Rust pieces here
 pieces_sum() { ls -ln "$downloads" | awk '$9 ~ /\.tar\.gz\.[0-9]+$/ { s += $5 } END { print s + 0 }'; }
@@ -466,8 +466,8 @@ if [ -n "$need_zip" ]; then
     elif command -v python3 >/dev/null 2>&1; then python3 -m zipfile -e "$zip.part" "$unpack"
     else fail "Makepad needs unzip ${D}· install it, then run this again$N"
     fi >>"$logs/download.log" 2>&1 || fail "Unpacking the loader's source failed. ${D}Run this again · log: $logs/download.log$N"
-    new=$unpack/$loader_version
-    [ -f "$new/Cargo.toml" ] || fail "The loader's source has no $loader_version/Cargo.toml. ${D}Run this again later; the release service is being updated.$N"
+    new=$unpack/$runner_release
+    [ -f "$new/Cargo.toml" ] || fail "The loader's source has no $runner_release/Cargo.toml. ${D}Run this again later; the release service is being updated.$N"
     if [ ! -f "$src/Cargo.toml" ]; then
         rm -rf "$src"
         mv "$new" "$src" || fail "Cannot move the loader's source into $src"
@@ -522,7 +522,11 @@ if [ -n "$need_build" ]; then
     # room for the build (about 2 GB of target/), said before it starts rather than as a cargo error
     free_kb=$(df -Pk "$cache" | awk 'NR == 2 { print $4 }')
     [ "${free_kb:-0}" -ge 3000000 ] || fail "Compiling Makepad's loader needs about 3 GB free on this disk. ${D}Free some space, then run this again.$N"
-    status "Compiling Makepad's loader; once per version."
+    if [ -n "$stale" ]; then
+        status "Makepad's loader was compiled for Makepad $stale; compiling it for this runner ($(printf '%s' "$loader_version" | cut -c1-10))."
+    else
+        status "Compiling Makepad's loader; once per version."
+    fi
     build_t0=$(now)
     # for this computer's processor ([profile.host]: thin LTO, 16 codegen units, target-cpu=native)
     job build env RUSTFLAGS=-Ctarget-cpu=native sh -c 'cd "$1" && exec "$2" build --profile host --offline $3 -p makepad-run --bin makepad' \
