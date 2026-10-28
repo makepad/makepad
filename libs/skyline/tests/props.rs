@@ -18,10 +18,12 @@ fn build(p: &Params) -> props::kit::PropSet { props::build(&zones::Zones::new(p)
 fn prop_counts_at_seed_7() {
     let mut p = Params::default();
     let set = build(&p);
-    assert_eq!((set.inst.len(), set.parts.len()), (465, 3492), "defaults");
+    // (here and with every prop at 1, the page's counts less a small boat of 7 parts at u 0.98, 10.7 km out, where the land
+    // envelope is 0.62: the page put it on the land past the sea's end, which the coast now keeps it off, `Zones::at_sea`)
+    assert_eq!((set.inst.len(), set.parts.len()), (464, 3485), "defaults");
     for (i, d) in PARAMS.iter().enumerate() { if d.group == "Props" && i != P::PrRefl as usize && i != P::PrRipple as usize { p.v[i] = 1.0; } }
     let set = build(&p);
-    assert_eq!((set.inst.len(), set.parts.len()), (855, 6439), "every prop at 1");
+    assert_eq!((set.inst.len(), set.parts.len()), (854, 6432), "every prop at 1");
 }
 
 #[test]

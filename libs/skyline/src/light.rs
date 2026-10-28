@@ -435,8 +435,8 @@ pub fn add_scaled(designed: &mut [[f32; 4]], host: &[[f32; 4]], scale: [f32; 3])
 }
 
 /// The coast ring: at each ring sample (u = (i + 0.5) / RING) 1 on land and fading to 0 at SHORE_DEG out to sea
-/// (smooth), by the land envelope (`Zones::land`; sea where the water shader's `sea` passes a half). The shaders blend
-/// a host's ground and fade the day's water by it, so the land meets the sea without an edge across azimuth.
+/// (smooth), by the land envelope (`Zones::land`; land from 0.175 up): how far a bearing lies from land. The band no
+/// longer draws by it: its coast is its own (`Zones::sea_span`), curving round the sea's ends.
 pub fn coast_ring(land: impl Fn(f64) -> f64) -> [f32; RING] {
     const N: usize = 1440;
     let on: Vec<bool> = (0..N).map(|i| land((i as f64 + 0.5) / N as f64) >= 0.175).collect();
@@ -461,7 +461,7 @@ pub fn coast_ring(land: impl Fn(f64) -> f64) -> [f32; RING] {
     out
 }
 
-/// How far out to sea a host's ground runs on and the day's water fades in from the coast (`coast_ring`), degrees.
+/// How far out to sea the coast ring falls to 0 (`coast_ring`), degrees.
 pub const SHORE_DEG: f64 = 15.0;
 
 #[cfg(test)]

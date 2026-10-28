@@ -162,7 +162,6 @@ impl SceneCtx<'_> {
         vars.set_uniform(cx, live_id!(lit), &[l.lights_factor()]);
         vars.set_uniform(cx, live_id!(design_gain), &[l.gpu_gain()]);
         vars.set_uniform(cx, live_id!(host_ground), &[if l.host_ground { 1.0 } else { 0.0 }]);
-        vars.set_uniform(cx, live_id!(sea_edge), &[crate::sea_edge_rad(self.p) as f32]);
         vars.set_uniform(cx, live_id!(lake_n), &[self.z.lakes.len() as f32]);
         vars.set_uniform(cx, live_id!(lake_eye), &[(crate::props::kit::EYE * self.p[P::Size]) as f32]);
         vars.set_uniform(cx, live_id!(near_rise), &[crate::NEAR_RISE_M as f32]);
@@ -230,8 +229,7 @@ pub struct Skyline {
     #[rust] pub zones: Option<(u64, Zones)>,
     #[rust] pub cols: Option<ColumnCache>,
     #[rust] blank: Option<Texture>,
-    /// The sky's horizon rings and the host's ground (`SkyLight::ring_texels`) and, with `host_ground`, the coast
-    /// (`coast_ring`), and the hash of the light and the zones they were written for.
+    /// The sky's horizon rings and the host's ground (`SkyLight::ring_texels`), and the hash of the light they were written for.
     #[rust] ring_tex: Option<(u64, Texture)>,
     /// The sky the day's sea mirrors (`SkyLight::sea_texels`), written with `ring_tex`.
     #[rust] sea_tex: Option<Texture>,
@@ -328,13 +326,9 @@ impl Skyline {
         if self.blank.is_none() {
             self.blank = Some(Texture::new_with_format(cx, TextureFormat::VecRGBAf32 { width: 1, height: 1, data: Some(vec![0.0; 4]), updated: TextureUpdated::Full }));
         }
-        let lkey = light.hash() ^ zkey.rotate_left(17);
+        let lkey = light.hash();
         if self.ring_tex.as_ref().map(|r| r.0) != Some(lkey) {
-            let mut texels = light.ring_texels();
-            // row 3: the coast, which only a host's ground reads
-            let coast = if light.host_ground { crate::light::coast_ring(|u| z.land(u)) } else { [0.0; crate::light::RING] };
-            texels.extend(coast.iter().flat_map(|c| [*c, 0.0, 0.0, 1.0]));
-            let format = TextureFormat::VecRGBAf32 { width: crate::light::RING, height: 4, data: Some(texels), updated: TextureUpdated::Full };
+            let format = TextureFormat::VecRGBAf32 { width: crate::light::RING, height: 3, data: Some(light.ring_texels()), updated: TextureUpdated::Full };
             let tex = match self.ring_tex.take() { Some((_, t)) => { *t.get_format(cx) = format; t } None => Texture::new_with_format(cx, format) };
             self.ring_tex = Some((lkey, tex));
             let format = TextureFormat::VecRGBAf32 { width: crate::light::RING, height: 2, data: Some(light.sea_texels()), updated: TextureUpdated::Full };

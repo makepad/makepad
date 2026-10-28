@@ -44,9 +44,10 @@ pub fn content_top_rad(p: &Params, z: &Zones) -> f64 {
     ranges.max(city).max(props).max(glow)
 }
 
-/// How far down (rad) the band's ground must reach: the sea's near edge, the nearest lake's shore, at least MIN_GROUND_DEG.
+/// How far down (rad) the band's ground must reach: the sea's near shore where it comes nearest (`Zones::deepest_shore`),
+/// the nearest lake's shore, at least MIN_GROUND_DEG.
 pub fn ground_depth_rad(p: &Params, z: &Zones) -> f64 {
-    let sea = if p[P::Land] < 0.999 && crate::sea_distance_m(p).is_some() { crate::sea_edge_rad(p) } else { 0.0 };
+    let sea = z.deepest_shore(p);
     let eye = crate::props::kit::EYE * p[P::Size];
     let lake = z.lakes.iter().map(|l| (eye / (l.d - l.half_d)).atan()).fold(0.0, f64::max);
     sea.max(lake).max(MIN_GROUND_DEG.to_radians())
@@ -123,15 +124,16 @@ mod tests {
         let v = ViewSpec::strip(&p, 1024);
         assert_eq!(v.h, (1024.0 * (f.top_deg - f.bottom_deg) / 360.0).round() as usize);
     }
-    /// The band ends SHORE_BELOW_DEG under where the shore meets the sea (or the nearest lake's shore), at least
+    /// The band ends SHORE_BELOW_DEG under where the shore meets the sea where it comes nearest (its bays and headlands
+    /// bring it nearer than the sea distance in places: `Zones::deepest_shore`), or the nearest lake's shore, at least
     /// MIN_GROUND_DEG + SHORE_BELOW_DEG down.
     #[test]
     fn the_band_ends_below_the_shore() {
         let mut p = Params::default();
         assert!((band_fit(&p).bottom_deg + MIN_GROUND_DEG + SHORE_BELOW_DEG).abs() < 1e-9, "no shore, no lakes");
         p.set(P::SeaD as usize, 0.01);
-        let edge = crate::sea_edge_rad(&p).to_degrees();
-        assert!(edge > 10.0 && (band_fit(&p).bottom_deg + edge + SHORE_BELOW_DEG).abs() < 1e-9, "the sea 35 m out: {edge}");
+        let (edge, nominal) = (Zones::new(&p).deepest_shore(&p).to_degrees(), crate::sea_edge_rad(&p).to_degrees());
+        assert!(nominal > 10.0 && edge > nominal && (band_fit(&p).bottom_deg + edge + SHORE_BELOW_DEG).abs() < 1e-9, "the sea 35 m out: {edge} (nominal {nominal})");
         let mut q = Params::default();
         q.set(P::Land as usize, 1.0);
         q.set(P::PrLake as usize, 1.0);

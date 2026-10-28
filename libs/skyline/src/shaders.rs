@@ -56,9 +56,6 @@ script_mod! {
         design_gain: uniform(1.0)
         // 1: the near ground is the host's own (`SkyLight::host_ground`, the ring texture's third row)
         host_ground: uniform(0.0)
-        // the sea's near edge, rad below the horizon (`crate::sea_edge_rad`: the sea distance seen from the eye); nearer than
-        // it the shore, land. 10 (past every view): no shore, the sea reaches the viewer's feet (the example's)
-        sea_edge: uniform(10.0)
         // the lakes (`lakes::texels`: LAKES_MAX x 1, each u, distance m, half-width u, half-depth m), how many, and the eye's
         // height over the ground (m: EYE x Size)
         lake_tex: texture_2d(float)
@@ -75,8 +72,8 @@ script_mod! {
         // a host's beacons as points (`SkyLight::point_core`): a core's sigma (rad) and its peak over the designed one; 0:
         // the example's core (`beacon_core`)
         point_core: uniform(vec2(0.0, 0.0))
-        // the horizon rings, RING x 4 texels: row 0 the sky at +1 degree, row 1 at +15 degrees, row 2 the host's ground,
-        // row 3 the coast (x: 1 on land, 0 from SHORE_DEG out to sea; `SkyLight::ring_texels`, `coast_ring`)
+        // the horizon rings, RING x 3 texels: row 0 the sky at +1 degree, row 1 at +15 degrees, row 2 the host's ground
+        // (`SkyLight::ring_texels`)
         ring_tex: texture_2d(float)
         seed: uniform(7.0)
         ct_c: uniform(0.55)
@@ -110,16 +107,16 @@ script_mod! {
             return vec2(pp.x, self.view_horizon * self.view_in().y + self.up_dy - self.ang_raw(pp.y) / self.px0() + self.view_pad) / self.view_size
         }
         // row r of the column under pass x: rows 0-4 the ranges (ridge, tree foot, canopy top,
-        // density), 5 the front treeline, 6 (land, ground rise, off-centre factor t, city glow)
+        // density), 5 the front treeline, 6 (land, ground rise, off-centre factor t, city glow), 7 the sea (`sea_at`)
         col_row: fn(x: float, r: float) -> vec4 {
             let c = floor(x) + self.col_geom.z
             let q = floor(c / self.col_geom.x)
             let xx = c - q * self.col_geom.x
-            return self.cols.sample_nearest(vec2((xx + 0.5) / self.col_geom.x, (r + 7.0 * q + 0.5) / self.col_geom.y))
+            return self.cols.sample_nearest(vec2((xx + 0.5) / self.col_geom.x, (r + 8.0 * q + 0.5) / self.col_geom.y))
         }
         // coverage of a signed distance d over a pixel of size px
         cover: fn(d: float, px: float) -> float { return clamp(d / px + 0.5, 0.0, 1.0) }
-        // ring row v (1/8 the low ring, 3/8 the high one, 5/8 the host's ground, 7/8 the coast) at azimuth u: linear between its two nearest samples, wrapping
+        // ring row v (1/6 the low ring, 1/2 the high one, 5/6 the host's ground) at azimuth u: linear between its two nearest samples, wrapping
         // round the turn, as a + (b - a) f, so a ring of one colour gives that colour exactly (the example's night)
         ring_at: fn(u: float, v: float) -> vec3 {
             let n = self.ring_tex.size().x; let x = fract(u) * n - 0.5; let i0 = floor(x); let i1 = i0 + 1.0
@@ -128,11 +125,19 @@ script_mod! {
             return a + (b - a) * (x - i0)
         }
         // the haze at azimuth u: the sky just over the horizon there
-        haze_at: fn(u: float) -> vec3 { return self.ring_at(u, 0.125) }
-        // a host's coast at azimuth u (`host_ground`): 1 on land, fading to 0 out to sea
-        coast_at: fn(u: float) -> float { return clamp(self.ring_at(u, 0.875).x, 0.0, 1.0) }
-        // the shore's share of a pixel al rad below the horizon, px rad a side: the land nearer than the sea distance
-        shore_at: fn(al: float, px: float) -> float { if self.sea_edge > 1.5 { return 0.0 } return self.cover(al - self.sea_edge, px) }
+        haze_at: fn(u: float) -> vec3 { return self.ring_at(u, 0.16666667) }
+        // the host's ground at azimuth u (`host_ground`)
+        ground_at: fn(u: float) -> vec3 { return self.ring_at(u, 0.8333333) }
+        // the sea's share of a pixel al rad below the horizon in pass column x, px rad a side: the column's span between the
+        // coast's far and near edge (`Zones::sea_span_at`, row 7), each edge boxed over the pixel and the rows it moves
+        // across the column, the near one (the water's edge on the shore) over two pixels; the open sea's far edge, the
+        // horizon itself, takes no box
+        sea_at: fn(x: float, al: float, px: float) -> float {
+            let s = self.col_row(x, 7.0)
+            var far = 1.0
+            if s.x > 0.0 { far = self.cover(al - s.x, px + s.z) }
+            return max(far - self.cover(al - s.y, 2.0 * px + s.w), 0.0)
+        }
         // the lakes' share of a pixel al rad down at world azimuth u, px rad a side: each lake's depth at the pixel's place
         // across it as depressions (its far and near shore there), boxed over the pixel's al -+ px / 2, times its share
         // across; the lakes never overlap, so their shares add, and one whose sides the pixel is past adds none
@@ -152,10 +157,11 @@ script_mod! {
             }
             return min(m, 1.0)
         }
-        // what is water at a pixel al rad below the horizon (world azimuth u, px rad a side) in column g: x the sea from its
-        // near edge out, y a lake on the land, z standing water on the land and the shore (the host's wetness there)
-        water_at: fn(g: vec4, u: float, al: float, px: float) -> vec3 {
-            let sea = (1.0 - smoothstep(0.0, 0.35, g.x)) * (1.0 - self.shore_at(al, px))
+        // what is water at a pixel al rad below the horizon (world azimuth u, px rad a side) in pass column x, its row 6 g: x
+        // the sea within its coast (`sea_at`), y a lake on the land, z standing water on the land and the shore (the host's
+        // wetness there)
+        water_at: fn(x: float, g: vec4, u: float, al: float, px: float) -> vec3 {
+            let sea = self.sea_at(x, al, px)
             // a lake stands on land columns only
             return vec3(sea, self.lake_at(u, al, px) * smoothstep(0.35, 0.6, g.x), self.wet * (1.0 - sea))
         }
@@ -171,7 +177,7 @@ script_mod! {
             return 0.0
         }
         // the sky at azimuth u, elevation el (rad): the low ring, toward the high one by +15 degrees
-        sky_at: fn(u: float, el: float) -> vec3 { let a = self.ring_at(u, 0.125); return a + (self.ring_at(u, 0.375) - a) * clamp(el / 0.2617994, 0.0, 1.0) }
+        sky_at: fn(u: float, el: float) -> vec3 { let a = self.ring_at(u, 0.16666667); return a + (self.ring_at(u, 0.5) - a) * clamp(el / 0.2617994, 0.0, 1.0) }
         // the sun's direction in the frame of a pixel at azimuth u: x to its right (growing u), y up, z along the view
         sun_dir: fn(u: float) -> vec3 {
             let az = (self.sun_u - u) * 6.2831853
@@ -329,14 +335,13 @@ script_mod! {
             let gm = self.cover(g.y - self.ang_raw(pp.y) * g.z, self.px0() * g.z)
             // by day: lit from above (normal up)
             let day = self.day_lit(vec3(0.10, 0.10, 0.10), 1.0, max(sin(self.sun_el), 0.0))
-            // the land: the column's, and the shore in front of the sea (nearer than the sea distance)
+            // the land: the column's over the horizon, below it everything the coast leaves out of the sea (`sea_at`)
             let al = 0.0 - self.ang_raw(pp.y) * g.z
             var land = g.x
-            if al > 0.0 { land = max(land, self.shore_at(al, self.px0() * g.z)) }
+            if al > 0.0 { land = 1.0 - self.sea_at(pp.x, al, self.px0() * g.z) }
             var c = mix(self.sil * 0.5, self.sil * 1.6, land) + day
-            // a host's own ground over the land and on out to sea from its coast, so the band's ground is the map's
-            // and the land meets the sea without an edge (`SkyLight::host_ground`, `coast_ring`)
-            if self.host_ground > 0.5 { let u = self.view_raw().x; c = mix(c, self.ring_at(u, 0.625), max(land, self.coast_at(u))) }
+            // a host's own ground over the land, so the band's ground is the map's (`SkyLight::host_ground`)
+            if self.host_ground > 0.5 { let u = self.view_raw().x; c = mix(c, self.ground_at(u), land) }
             // the land's own colour (the host's ground on its land; what a host's wet floor takes the place of)
             let cl = c
             // over a host's wet floor (`host_wet`) the near rise's face, which stands, is a bank under the trees, not the
@@ -353,7 +358,7 @@ script_mod! {
             // shows through it, darkened as through a puddle, and by Fresnel the dark water the night sea shows (its 0.5 sil);
             // the water shader adds what it mirrors
             if al > 0.0 && (self.lake_n > 0.5 || self.wet > 0.0) {
-                let v = self.pix_view(self.view_raw()); let ws = self.water_at(g, v.x, al, self.px0() * g.z)
+                let v = self.pix_view(self.view_raw()); let ws = self.water_at(pp.x, g, v.x, al, self.px0() * g.z)
                 let fr = 0.02 + 0.98 * pow(clamp(1.0 - al, 0.0, 1.0), 5.0)
                 c = c + (c * (0.35 * (1.0 - fr)) + self.sil * (0.5 * fr) - c) * max(ws.y, ws.z)
             }
@@ -361,16 +366,16 @@ script_mod! {
             // reflection runs from the sea onto the floor, the owner's D2): no base of its own, the host's ground
             // through it darkened as through a puddle (x 0.35 (1 - Fresnel)), the water shader mirroring at full
             // strength. And below the horizon (`under_floor`) the strip's flat ground gives way to the host's floor:
-            // the share host_wet of the land (its colour `cl`; in the sea's columns the coast's, the host's ground
-            // `gr`) is left clear at every depression, and its open water (the sea, faded from the host's coast by day,
-            // and a lake) is kept whole, so a lake's edge keeps its water and the cover is applied once; the host lays
-            // its puddles there (plan hdri-6 fix wave 1, the owner's D1 applied literally)
+            // the share host_wet of the land (its colour `cl`; in a pixel with sea the host's ground `gr`) is left clear
+            // at every depression, and its open water (the sea, and a lake) is kept whole, so a lake's edge keeps its
+            // water and the cover is applied once; the host lays its puddles there (plan hdri-6 fix wave 1, the owner's
+            // D1 applied literally)
             if al > 0.0 && self.host_wet > 0.0 {
-                let u = self.view_raw().x; let gr = self.ring_at(u, 0.625); let coast = self.coast_at(u)
+                let u = self.view_raw().x; let gr = self.ground_at(u)
                 let fr = 0.02 + 0.98 * pow(clamp(1.0 - al, 0.0, 1.0), 5.0)
-                c = c + (gr * (0.35 * (1.0 - fr)) - c) * ((1.0 - max(land, coast)) * self.host_wet * self.day())
-                let ws = self.water_at(g, self.pix_view(self.view_raw()).x, al, self.px0() * g.z)
-                let gw = self.host_wet * (1.0 - max(ws.x * (1.0 - coast * self.day()), ws.y)) * self.under_floor()
+                c = c + (gr * (0.35 * (1.0 - fr)) - c) * ((1.0 - land) * self.host_wet * self.day())
+                let ws = self.water_at(pp.x, g, self.pix_view(self.view_raw()).x, al, self.px0() * g.z)
+                let gw = self.host_wet * (1.0 - max(ws.x, ws.y)) * self.under_floor()
                 var lc = cl
                 if ws.x > 0.0 { lc = gr }
                 // (the share of a texel across the horizon over it is the rise's face: the bank)

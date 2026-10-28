@@ -70,7 +70,8 @@ pub fn band_geom(p: &Params) -> BandGeom {
 /// 2/3 of plan 6's 50 m and 5 km, so the sea is 1.5x as deep below the horizon at every slider value).
 pub const SEA_NEAR_M: f64 = 100.0 / 3.0;
 pub const SEA_FAR_M: f64 = 10000.0 / 3.0;
-/// `sea_edge_rad` when there is no shore (the sea at the viewer's feet): past every view's depth.
+/// `sea_edge_rad` when there is no shore (the sea at the viewer's feet): past every view's depth. Also the sea's span on
+/// land (`Zones::sea_span`: both edges, no sea between them).
 pub const NO_SHORE: f64 = 10.0;
 
 /// Where the sea starts (m from the eye): SEA_NEAR_M x (SEA_FAR_M / SEA_NEAR_M)^sea_d, times Size; None at sea_d 0.
@@ -79,12 +80,14 @@ pub fn sea_distance_m(p: &Params) -> Option<f64> {
     (x > 0.0).then(|| SEA_NEAR_M * (SEA_FAR_M / SEA_NEAR_M).powf(x) * p[P::Size])
 }
 
-/// The sea's near edge, rad below the horizon: atan(EYE x Size / sea_distance_m) (the same at every Size); NO_SHORE without a shore.
+/// The sea's nominal near edge, rad below the horizon: atan(EYE x Size / sea_distance_m) (the same at every Size); NO_SHORE
+/// without a shore. The shore itself meanders about it and curves round the sea's ends (`Zones::sea_span`).
 pub fn sea_edge_rad(p: &Params) -> f64 {
     sea_distance_m(p).map_or(NO_SHORE, |d| (crate::props::kit::EYE * p[P::Size] / d).atan())
 }
 
-/// Whether a thing d m out stands on the open sea (beyond the sea distance; everywhere without a shore).
+/// Whether a thing d m out lies beyond the nominal sea distance (everywhere without a shore); whether it stands on the
+/// open sea at a bearing is `Zones::at_sea`.
 pub fn at_sea(p: &Params, d: f64) -> bool { sea_distance_m(p).map_or(true, |s| d >= s) }
 
 /// The distance (m) the strip hands for its near ground rise and its front treeline (`Band::dist`; the shaders'

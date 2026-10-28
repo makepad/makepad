@@ -417,7 +417,9 @@ script_mod! {
         fragment: fn(){
             let pp = self.frag(); let c = self.pl_c.sample_nearest(pp / self.view_size); let e = self.pl_e.sample_nearest(pp / self.view_size)
             let g = self.col_row(pp.x, 6.0); let ang = self.ang_raw(pp.y) * g.z; let px = self.px0() * g.z
-            let wp = self.cover(g.y - ang, px) * (1.0 - self.cover(g.y - min(0.03, self.sea_edge) * (1.0 - smoothstep(0.0, 0.35, g.x)) - ang, px))
+            // (down to the sea's near edge in the column, while the coast leaves it any sea)
+            let s = self.col_row(pp.x, 7.0)
+            let wp = self.cover(g.y - ang, px) * (1.0 - self.cover(g.y - min(0.03, s.y) * clamp((s.y - s.x) / px, 0.0, 1.0) - ang, px))
             self.fb0 = c * wp; self.fb1 = vec4(e.xyz * wp, c.w * wp); self.fb2 = self.pl_d.sample_nearest(pp / self.view_size) * wp
         }
     }
