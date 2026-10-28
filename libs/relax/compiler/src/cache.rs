@@ -626,6 +626,9 @@ pub struct Cache {
     /// code key is then taken as recorded instead of hashing the bodies it is made from again
     /// (code_key_bytes). Empty otherwise.
     manifest_keys: HashMap<u128, u128>,
+    /// the loaded manifest's code keys, in `manifest`'s order (0: none): a slot whose key this
+    /// run's manifest changes had its old entry superseded (record_manifest removes it)
+    manifest_old_keys: Vec<u128>,
     /// the manifest's prelinked startup image (the code of its slots before the first present,
     /// stored once relocatable against a table of this run's identities: `prelink`)
     image: Option<ManifestImage>,
@@ -874,6 +877,7 @@ impl Cache {
             manifest_missing: 0,
             manifest_uncached: 0,
             manifest_keys: HashMap::new(),
+            manifest_old_keys: Vec::new(),
             manifest_present_cached: 0,
             image: None,
             image_ids: None,
@@ -3193,6 +3197,7 @@ impl Cache {
                         self.manifest_keys = out.iter().zip(&keys).filter(|(_, k)| **k != 0).map(|(b, k)| (identity_hash(b), *k)).collect();
                     }
                     self.manifest = out;
+                    self.manifest_old_keys = keys;
                     self.manifest_present = present;
                     self.manifest_missing = missing;
                     self.manifest_uncached = uncached;
@@ -3284,6 +3289,25 @@ impl Cache {
                 eprintln!("makepad-run cache: startup manifest kept: at exit the image would cover {} of the {} slots the loaded one has", n_img, self.image_slots);
             }
             return true;
+        }
+        // the code entries this manifest supersedes: a slot of the loaded manifest whose key
+        // changed (an edit reached what its code is made from) left its old entry behind under a
+        // key nothing names any more (code stores are named by the crate's view, which an edit
+        // keeps). Removed with this manifest's write, its bytes are dead space: the store
+        // rewrite drops them once they outgrow a quarter of the live ones (store.rs append).
+        if self.manifest.len() == self.manifest_old_keys.len() {
+            let old_keys: HashMap<&[u8], u128> = self.manifest.iter().zip(&self.manifest_old_keys)
+                .filter(|(_, k)| **k != 0).map(|(b, k)| (b.as_slice(), *k)).collect();
+            let gone: Vec<u128> = list.iter().filter_map(|(b, k)| old_keys.get(b.as_slice())
+                .filter(|o| *k != 0 && **o != *k && !self.pending_keys.contains(o)).copied()).collect();
+            let mut removed = 0;
+            for o in gone {
+                let Some((p, _)) = self.index_at(o) else { continue };
+                let Some(c) = self.code_path.iter().position(|cp| *cp == self.stores[p as usize].path) else { continue };
+                self.push_pending(c as u32, NewEntry { key: o, kind: crate::store::KIND_REMOVED, payload: Vec::new() });
+                removed += 1;
+            }
+            if self.verbose && removed != 0 { eprintln!("makepad-run cache: {} code entries superseded by this manifest: removed", removed); }
         }
         let mut e = E::default();
         e.u32(ENTRY_VERSION);

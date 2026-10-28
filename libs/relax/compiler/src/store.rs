@@ -112,6 +112,11 @@ pub fn sum64(b: &[u8]) -> u64 {
     sum.finish()
 }
 
+/// The kind of an entry that removes its key from the store instead of adding a payload (an
+/// entry superseded under a key nothing names any more): nothing is written for it, and the
+/// payload it removes is dead space for the next rewrite.
+pub const KIND_REMOVED: u32 = u32::MAX;
+
 /// An entry can encode itself directly into a store, borrowing its existing payload arrays.
 pub trait Entry {
     fn key(&self) -> u128;
@@ -600,6 +605,9 @@ fn append_inner<T: Entry>(base: &Path, mut entries: Vec<T>, drop_all: bool) -> s
     // newest first within this batch: a stable sort keeps the first of equal keys
     entries.sort_by_key(|a| a.key());
     entries.dedup_by(|b, a| a.key() == b.key());
+    // removals (KIND_REMOVED): their keys leave the index, nothing is written for them
+    let removed: std::collections::HashSet<u128> = entries.iter().filter(|e| e.kind() == KIND_REMOVED).map(|e| e.key()).collect();
+    entries.retain(|e| e.kind() != KIND_REMOVED);
     let dir = base.parent().unwrap_or(Path::new("."));
     // the current generation, locked; a newer one written meanwhile (another process's
     // rewrite) is taken instead
@@ -635,7 +643,7 @@ fn append_inner<T: Entry>(base: &Path, mut entries: Vec<T>, drop_all: bool) -> s
         let _ = end;
         Ok(Some((decode_index(&ib), h)))
     })()?;
-    let (old, h) = match r {
+    let (mut old, h) = match r {
         Some(x) if !drop_all => x,
         // unreadable or stale: replaced whole
         _ => {
@@ -645,6 +653,7 @@ fn append_inner<T: Entry>(base: &Path, mut entries: Vec<T>, drop_all: bool) -> s
         }
     };
     let (_, end, _) = h.slots[h.active as usize];
+    if !removed.is_empty() { old.retain(|e| !removed.contains(&{ e.key })); }
     // the merged index: new entries replace old ones of the same key
     let new_keys: std::collections::HashSet<u128> = entries.iter().map(|e| e.key()).collect();
     let merged_n = old.iter().filter(|e| !new_keys.contains(&{ e.key })).count() + entries.len();
