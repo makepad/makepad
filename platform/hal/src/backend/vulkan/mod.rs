@@ -448,7 +448,7 @@ impl Backend for Vulkan {
                 let Some(draws) = frame::slice(pass.draws, view.draws.len()) else { continue };
                 for d in &view.draws[draws] {
                     let Some(p) = self.pipe.get(&(sid, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen) else { continue };
-                    if p.state.lacks(key, d.flags) && !needed.iter().any(|(state, k, f)| Arc::ptr_eq(state, &p.state) && k.colors == key.colors && k.depth == key.depth && k.views == key.views && *f == d.flags) {
+                    if p.state.lacks(key, d.flags) && !needed.iter().any(|(state, k, f)| Arc::ptr_eq(state, &p.state) && k.colors == key.colors && k.depth == key.depth && k.views == key.views && k.samples == key.samples && *f == d.flags) {
                         needed.push((p.state.clone(), key, d.flags));
                     }
                 }

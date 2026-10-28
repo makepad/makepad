@@ -287,13 +287,16 @@ pub(super) struct Pipeline { pub program: Arc<Program>, pub raw: vk::Pipeline }
 impl Drop for Pipeline { fn drop(&mut self) { unsafe { self.program.dev.raw.destroy_pipeline(self.raw, None); } } }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
-struct VariantKey { colors: [u32; 4], depth: u32, flags: u32, views: u8 }
+/// A pipeline's render pass compatibility (formats, views, samples per pixel: a pipeline made
+/// for an MSAA pass rasterises at its sample count and must never draw in another) and its
+/// draw state.
+struct VariantKey { colors: [u32; 4], depth: u32, flags: u32, views: u8, samples: u8 }
 
 impl VariantKey {
     fn new(pass: PassKey, flags: u32) -> Self {
         let mut flags = flags & (Draw::BLEND | Draw::CULL | Draw::DEPTH_WRITE | Draw::WIREFRAME);
         if pass.depth == ABSENT { flags &= !Draw::DEPTH_WRITE; } // no depth attachment: the bit changes nothing
-        Self { colors: pass.colors, depth: pass.depth, flags, views: pass.views }
+        Self { colors: pass.colors, depth: pass.depth, flags, views: pass.views, samples: pass.samples.max(1) }
     }
 }
 
