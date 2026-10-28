@@ -294,11 +294,14 @@ impl FrontImages {
         }
         why = "ledger replay";
         for store in stores.iter().take(prefix) { replay_front_ledger(store)?; }
+        phase("ledger replayed");
         prog.front_graph = Some(GraphRecipe::new(pre));
         if prefix != pre.len() {
             why = "retain prefix";
             let first = prog.retain_collected_prefix(prefix)?;
+            phase("Program prefix retained");
             tcx.retain_collected_prefix(first);
+            phase("Tcx prefix retained");
             if session.options.verbose { eprintln!("makepad-run collected: retained {} crates; rebuilding {} changed/dependent crates", prefix, pre.len() - prefix); }
             // the crates loaded after them find these as their dependencies (full_deps)
             *self.retained.lock().unwrap() = graph.crates[..prefix].iter().map(|((name, _), fp)| (name.clone(), *fp)).collect();
@@ -321,8 +324,10 @@ impl FrontImages {
             ifaces: ifaces.iter().map(|k| k.get()).collect(),
             defs: prog.defs.len(), files: prog.files.len(),
         });
+        phase("demand contexts");
         drop(cert);
         self.end_load();
+        phase("restored");
         if session.options.verbose {
             eprintln!("makepad-run collected: restored {} crates, {} definitions, {} types", prog.crates.len(), prog.defs.len(), tcx.tys.len());
         }

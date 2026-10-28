@@ -2165,9 +2165,11 @@ impl Cache {
     }
 
     /// The item graph (cache/deps.rs), on the first need: the stored one when it was built from
-    /// this program's very sources (a warm start maps it), else built -- every boot file of a
-    /// crate in the graph digested first (a restored collected program digests files lazily) --
-    /// and recorded for the next start.
+    /// this program's very sources (a warm start maps it), else built over it -- the rows of the
+    /// crates whose sources and dependencies are as it was built from are taken over, only the
+    /// other crates' boot files are digested and walked (a restored collected program digests
+    /// files lazily) -- and recorded for the next start. MAKEPAD_RUN_DEPS_VERIFY=1: a graph built
+    /// over a stored one is checked against one built from scratch.
     fn deps_graph(&mut self, u: &Unit) -> std::sync::Arc<deps::Deps> {
         if let Some(g) = &self.deps {
             return g.clone();
@@ -2185,10 +2187,10 @@ impl Cache {
             if kind != KIND_DEPS { return None; }
             // SAFETY: `store` (kept by the graph) holds the mapping
             let p: &'static [u8] = unsafe { std::slice::from_raw_parts(p.as_ptr(), p.len()) };
-            deps::Deps::mapped(prog, ncr, p, valid, store)
+            deps::Deps::read(prog, ncr, p, store)
         });
-        if let Some(g) = stored {
-            let g = std::sync::Arc::new(g);
+        if stored.as_ref().is_some_and(|g| g.built_from() == valid && g.crate_count() == prog.crates.len()) {
+            let g = std::sync::Arc::new(stored.unwrap());
             if self.verbose {
                 eprintln!("makepad-run cache: item graph: {} nodes mapped in {:.1} ms", g.nodes_n, t0.elapsed().as_secs_f64() * 1e3);
             }
@@ -2199,33 +2201,58 @@ impl Cache {
             self.digests.resize(prog.files.len(), None);
         }
         let atomic = deps::atomic_crates(prog, ncr);
-        let want: Vec<usize> = (0..prog.boot_files.min(prog.files.len()))
-            .filter(|&f| self.digests[f].is_none() && prog.file_crate.get(f).is_some_and(|&c| !atomic.get(c as usize).copied().unwrap_or(true)))
-            .collect();
-        items::file_digests_of(prog, &want, &mut self.digests);
+        let digest = |clean: &[bool], digests: &mut Vec<Option<std::sync::Arc<items::FileDigest>>>| {
+            let want: Vec<usize> = (0..prog.boot_files.min(prog.files.len()))
+                .filter(|&f| digests[f].is_none() && prog.file_crate.get(f).is_some_and(|&c| !atomic.get(c as usize).copied().unwrap_or(true) && !clean.get(c as usize).copied().unwrap_or(false)))
+                .collect();
+            items::file_digests_of(prog, &want, digests);
+            want.len()
+        };
+        // (a graph whose component ids ran far is not built over: the next one starts them again)
+        let stored = stored.filter(|g| g.ids_left());
+        let clean = deps::Deps::clean_crates(prog, &self.iface_plain, &self.fps, stored.as_ref());
+        let mut digested = digest(&clean, &mut self.digests);
         let t_dg = t0.elapsed();
-        let g = std::sync::Arc::new(deps::Deps::build(prog, &self.digests, &self.iface_plain));
+        let built = deps::Deps::build(prog, &self.digests, &self.iface_plain, &self.fps, valid, stored.as_ref());
+        let over = built.is_some() && clean.iter().any(|&c| c);
+        let g = match built {
+            Some(g) => g,
+            None => {
+                // the alias or macro names changed: every crate is walked
+                digested += digest(&[], &mut self.digests);
+                deps::Deps::build(prog, &self.digests, &self.iface_plain, &self.fps, valid, None).expect("a graph built from scratch")
+            }
+        };
         if self.verbose {
-            eprintln!("makepad-run cache: item graph: {} nodes, {} edges, {} coarse, built in {:.1} ms (digests of {} files {:.1} ms; files to {:.1}, edges to {:.1}, components to {:.1}, hashed to {:.1})",
-                g.nodes_n, g.edges, g.coarse, t0.elapsed().as_secs_f64() * 1e3, want.len(), t_dg.as_secs_f64() * 1e3, g.phases[0], g.phases[1], g.phases[2], g.phases[3]);
+            eprintln!("makepad-run cache: item graph: {} nodes ({} walked, {} of {} crates taken over), {} edges, {} coarse, built in {:.1} ms (digests of {} files {:.1} ms; files to {:.1}, edges to {:.1}, components to {:.1}, hashed to {:.1})",
+                g.nodes_n, g.walked, if over { clean.iter().filter(|&&c| c).count() } else { 0 }, clean.len(), g.edges, g.coarse, t0.elapsed().as_secs_f64() * 1e3,
+                digested, t_dg.as_secs_f64() * 1e3, g.phases[0], g.phases[1], g.phases[2], g.phases[3]);
         }
-        if let Some(k) = key.filter(|_| self.mode != Mode::ReadOnly && (root as usize) < ncr) {
-            if self.pending_keys.insert(k) {
-                let payload = g.encode(valid);
-                self.push_pending(root, NewEntry { key: k, kind: KIND_DEPS, payload });
+        if over && std::env::var("MAKEPAD_RUN_DEPS_VERIFY").is_ok_and(|v| v == "1") {
+            digest(&[], &mut self.digests);
+            let scratch = deps::Deps::build(prog, &self.digests, &self.iface_plain, &self.fps, valid, None).expect("a graph built from scratch");
+            match g.same_closures(&scratch) {
+                Ok(()) => eprintln!("makepad-run cache: item graph verified: built over the stored graph = built from scratch"),
+                Err(e) => eprintln!("makepad-run cache: item graph verify FAILED: {e}"),
             }
         }
+        if let Some(k) = key.filter(|_| self.mode != Mode::ReadOnly && (root as usize) < ncr) {
+            // (one slot per root: the newest graph replaces the one it was built over)
+            self.pending_keys.insert(k);
+            self.push_pending(root, NewEntry { key: k, kind: KIND_DEPS, payload: g.encode() });
+        }
+        let g = std::sync::Arc::new(g);
         self.deps = Some(g.clone());
         g
     }
 
-    /// The key of the stored item graph of the program rooted at crate `root`.
+    /// The key of the stored item graph of the program rooted at crate `root`: one per root and
+    /// Relax build (a newer graph replaces it; Deps::valid says what it was built from).
     fn deps_key(&self, root: u32) -> Option<u128> {
         let mut h = Sip128::new();
-        h.str("deps-graph");
+        h.str("deps-graph-v2");
         h.u128(self.cfg);
         h.u128(*self.crate_ident.get(root as usize)?);
-        h.u128(*self.view.get(root as usize)?);
         Some(h.finish128())
     }
 
@@ -4411,7 +4438,8 @@ struct FrontGraphWrite {
     options: crate::options::Options,
     recipe: crate::crate_image::GraphRecipe,
     fps: Vec<Option<u128>>,
-    demand: Option<std::sync::Arc<crate::preload::DemandImage>>,
+    /// the load's demand plan: its image is taken on the writer (a plan still planning is not waited for here)
+    demand: Option<std::sync::Arc<crate::preload::DemandPlan>>,
     profile: bool,
 }
 static FRONT_GRAPH_WRITES: relax_session::sync::Mutex<Vec<FrontGraphWrite>> = relax_session::sync::Mutex::new(Vec::new());
@@ -4422,7 +4450,7 @@ impl FrontGraphWrite {
         if recipe.crates.len() != prog.crates.len() || recipe.crates.iter().zip(&prog.crates)
             .any(|(key, c)| prog.syms.str(c.name) != key.0 || c.root_path() != key.1) { return None; }
         Some(Self { dir: dir.to_owned(), options: prog.session.options.clone(), recipe: recipe.clone(),
-            fps: fps.to_vec(), demand: prog.demand_plan.as_ref().map(|p| p.image.clone()), profile: prog.session.runtime.profile })
+            fps: fps.to_vec(), demand: prog.demand_plan.clone(), profile: prog.session.runtime.profile })
     }
 }
 
@@ -4508,7 +4536,7 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
     let (dir, recipe, fps) = (&job.dir, &job.recipe, &job.fps);
     let mut graph = crate::crate_image::GraphImage {
         identity: recipe.identity, crates: Vec::new(), inputs: Vec::new(), stamps: Vec::new(), probes: Vec::new(),
-        demand_image: job.demand.clone(),
+        demand_image: job.demand.as_ref().map(|p| p.image.clone()),
     };
     let mut inputs = std::collections::BTreeMap::new();
     let mut probes = std::collections::BTreeMap::new();
@@ -4605,7 +4633,7 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
         let parts: Vec<String> = marks.iter().map(|&(n, t)| { let d = t - prev; prev = t; format!("{}={:.0}", n, d) }).collect();
         eprintln!("makepad-run front: graph recorded ({} crates, {} inputs) in {:.0} ms: {}", graph.crates.len(), graph.inputs.len(), prev, parts.join(" "));
     }
-    if let (Some(source), Some(written)) = (&job.demand, &graph.demand_image) { source.recording_written(written.parts.clone()); }
+    if let (Some(source), Some(written)) = (&job.demand, &graph.demand_image) { source.image.recording_written(written.parts.clone()); }
     Some(())
 }
 
@@ -5053,7 +5081,6 @@ impl crate::crate_image::CrateImages for FrontImages {
             Some(part.key)
         }).collect::<Vec<_>>();
         let valid = keys.iter().map(Option::is_some).collect::<Vec<_>>();
-        let eager_prefix = valid.iter().take(image.eager_prefix).take_while(|v| **v).count();
         // Stale parts are comparison evidence only, never reusable input. Keep
         // their old demand-out/export sets to validate an edited local selection.
         let keys = image.parts.iter().map(|p| Some(p.key)).collect::<Vec<_>>();
@@ -5061,7 +5088,9 @@ impl crate::crate_image::CrateImages for FrontImages {
         let crates_profile = crates.first().is_some_and(|c| c.cfg.session.runtime.profile);
         let crate_names = crates.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
         let image_dir = self.dir.clone();
-        Some(crate::crate_image::DemandParts { eager_prefix, valid, load: std::sync::Arc::new(move || {
+        let last = crates.len().saturating_sub(1);
+        let last_selected = image.files.iter().filter(|f| f.ci == last).all(|f| image.reached.contains(&(last, f.path.clone())));
+        Some(crate::crate_image::DemandParts { valid, last_selected, load: std::sync::Arc::new(move || {
             let _profile = crate::load_profile::span(crates_profile, "rust-demand-parts", "load");
             let store = Store::open(&path);
             let chunk = keys.len().div_ceil(crate::preload::jobs().max(1)).max(1);

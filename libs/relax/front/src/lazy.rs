@@ -80,7 +80,8 @@ impl PendingPlan {
             images.and_then(|i| i.demand_parts(crates, recipe_identity(crates)))
         } else { None };
         let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts };
-        if let Some(parts) = &pending.parts { pending.early.publish(parts.eager_prefix); }
+        // The crates selected in full (Plan::build) are known before planning.
+        pending.early.publish(selected_prefix(crates, pending.parts.as_ref()));
         if image.is_some() || !parallel {
             let plan = Plan::build(&pending.pending_crates, pending.pending_contexts.clone(), image, &pending.early, pending.parts.as_ref());
             let _ = pending.plan.set(plan);
@@ -95,6 +96,8 @@ impl PendingPlan {
     pub fn ready(&self) -> Option<&Plan> { self.plan.get() }
     /// The crates' source contexts (the plan's own, without waiting for it).
     pub fn contexts(&self) -> &[Arc<crate::source_context::Context>] { &self.pending_contexts }
+    /// The crates the plan is for (without waiting for it).
+    pub fn crates(&self) -> &[PreCrate] { &self.pending_crates }
     /// How many load-order crates are selected in full so far (`eagerly_selected`).
     pub fn early_prefix(&self) -> usize { self.early.prefix.load(std::sync::atomic::Ordering::Acquire) }
     /// Waits until the early prefix passes `seen` or the plan is complete (a caller that needs
@@ -233,7 +236,12 @@ impl Plan {
         let mut expansion_failures = BTreeMap::new();
         let mut eager_bodies = BTreeMap::new();
         let mut prepared_items = BTreeMap::new();
-        let mut eager_prefix = 0;
+        // The closure selects among the last crate's files (`lazy_from`); the load takes the
+        // last crate in full too when the plan these parts come from deferred none of its files
+        // (`eager_prefix`).
+        let lazy_from = eager_prefix(crates);
+        let eager_prefix = selected_prefix(crates, stored);
+        early.publish(eager_prefix);
         let mut prepared_files = Vec::new();
         let mut unindexed_files = Vec::new();
         if rust_lazy {
@@ -322,10 +330,6 @@ impl Plan {
                     identities.push(part.surface_id);
                     reused_outline.insert(*ci);
                     restored_surfaces.extend(part.outlined.iter().map(|(p, m)| (*ci, p.clone(), m.clone())));
-                    if *ci == eager_prefix && *ci + 1 < crates.len() {
-                        eager_prefix += 1;
-                        early.publish(eager_prefix);
-                    }
                     if profile { eprintln!("rust-demand-part: {} restored outline", c.name); }
                     continue;
                 }
@@ -540,11 +544,6 @@ impl Plan {
                 if !saved.is_empty() { part.seal_identity(); }
                 identities.push(part.surface_id);
                 if profile { eprintln!("rust-demand-part: {} rebuilt outline", c.name); }
-                if *ci == eager_prefix && *ci + 1 < crates.len()
- {
-                    eager_prefix += 1;
-                    early.publish(eager_prefix);
-                }
             }
             drop(finish);
             });
@@ -701,7 +700,7 @@ impl Plan {
                 });
                 items::FileInput { ci: file.ci, path: &file.path, module: &file.module, index: file, surface, items,
                     
-                    eager_bodies: eager_bodies.get(&(file.ci, file.path.clone(), file.module.clone())), force, root: file.path == crates[file.ci].root || file.ci < eager_prefix }
+                    eager_bodies: eager_bodies.get(&(file.ci, file.path.clone(), file.module.clone())), force, root: file.path == crates[file.ci].root || file.ci < lazy_from }
             }).collect::<Vec<_>>();
             let implicit = names.implicit_demands().into_iter().filter(|name| names.is_trait(name)).collect::<BTreeSet<_>>();
             drop(inputs_profile);
@@ -712,7 +711,7 @@ impl Plan {
             let local_candidate = previous.len() == crates.len() && previous.iter().all(Option::is_some)
                 && !edited.is_empty() && edited.iter().all(|&ci| previous[ci].as_ref().is_some_and(|old| old.surface_id == parts[ci].surface_id && parts[ci].same_transfer(old)))
                 && previous[0].as_ref().and_then(|p| p.roots.as_ref()).is_some_and(|(old_seeds, old_forced, prefix)|
-                    old_seeds == &demands && old_forced == &forced && *prefix == eager_prefix);
+                    old_seeds == &demands && old_forced == &forced && *prefix == lazy_from);
             let local_result = if local_candidate {
                 let _local = crate::load_profile::span(profile, "rust-demand-local-selection", "edited crates");
                 if let Some(delta) = previous[0].as_ref().and_then(|p| p.closure_delta.as_deref()).and_then(demand::ClosureDelta::decoded) {
@@ -751,7 +750,7 @@ impl Plan {
                 }
                 select(&mut names, &mut inputs, &mut parts, None)
             };
-            parts[0].roots = Some((demands.clone(), forced.clone(), eager_prefix));
+            parts[0].roots = Some((demands.clone(), forced.clone(), lazy_from));
             let _publish_profile = crate::load_profile::span(profile, "rust-demand-closure-publish", "load");
             for (f, file) in files.iter().enumerate() {
                 if !result.reached[f] { continue; }
@@ -833,6 +832,7 @@ impl Plan {
     }
 
     pub fn deferred(&self, ci: usize) -> Vec<String> {
+        if ci < self.image.eager_prefix { return Vec::new(); }
         self.indexed.range((ci, String::new())..(ci + 1, String::new()))
             .filter(|k| !self.reached.contains(*k)).map(|k| k.1.clone()).collect()
     }
@@ -840,7 +840,7 @@ impl Plan {
     pub fn skips(&self, root: &str, path: &str) -> bool {
         self.crates.iter().position(|c| c.root == root).is_some_and(|ci| {
             let key = (ci, path.to_owned());
-            self.indexed.contains(&key) && !self.reached.contains(&key)
+            ci >= self.image.eager_prefix && self.indexed.contains(&key) && !self.reached.contains(&key)
         })
     }
 
@@ -927,6 +927,21 @@ impl Plan {
         }
         Ok(())
     }
+}
+
+/// The load-order prefix selected in full: every crate but the last (whose selection is the closure's
+/// result). Only a Rust-lazy plan selects at all.
+fn eager_prefix(crates: &[PreCrate]) -> usize {
+    if crates.first().is_some_and(|c| c.cfg.session.options.rs_lazy) { crates.len().saturating_sub(1) } else { 0 }
+}
+
+/// The load-order prefix the load takes in full: `eager_prefix`, and the last crate too when the plan
+/// the stored parts come from reached all of its files (a full selection is always a sound one, and
+/// nothing then waits for the closure; the closure still runs and records what it would defer, so a
+/// later start whose plan defers part of the last crate selects again).
+fn selected_prefix(crates: &[PreCrate], stored: Option<&crate::crate_image::DemandParts>) -> usize {
+    let prefix = eager_prefix(crates);
+    prefix + usize::from(prefix + 1 == crates.len() && stored.is_some_and(|p| p.last_selected))
 }
 
 /// Crates a dependency-ready crate may start expanding ahead of publication (`Plan::build`).

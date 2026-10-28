@@ -541,7 +541,8 @@ pub struct CrateImage {
 }
 /// The compiler owns store discovery and mappings; the front end owns scheduling and replay.
 pub struct DemandParts {
-    pub eager_prefix: usize,
+    /// The plan that recorded these parts reached every file of the last crate (lazy.rs selected_prefix).
+    pub last_selected: bool,
     pub valid: Vec<bool>,
     pub load: Arc<dyn Fn() -> Vec<Option<Arc<crate::preload::DemandPart>>> + Send + Sync>,
 }

@@ -113,7 +113,6 @@ type ScanPriority = (usize, u64);
 
 struct PoolState {
     stopped: bool,
-    plan_pending: bool,
     planning: bool,
     /// Crates whose loader has published the dependency macro imports and own definitions.
     parse_ready: HashSet<u32>,
@@ -172,7 +171,6 @@ impl Drop for Pool {
 }
 
 enum Work {
-    Plan,
     Scan(ScanKey),
     Parse(Job),
 }
@@ -363,9 +361,9 @@ impl Pool {
 
     fn selection_ready(&self, st: &PoolState, ci: usize) -> bool {
         let pending = self.demand_plan.as_ref().filter(|p| p.ready().is_none());
-        // The eager prefix is retained in full; the last crate also needs the
+        // The eager prefix is retained in full; a crate after it (the last one) needs the
         // whole-graph certificate. Use the same gate for preparation and commit.
-        st.planning == false || pending.is_none_or(|p| ci + 1 != self.crates.len() && p.eagerly_selected(ci + self.plan_offset))
+        st.planning == false || pending.is_none_or(|p| p.eagerly_selected(ci + self.plan_offset))
     }
 
     /// Publish complete prescans in load order. Only queue transfers hold st:
@@ -563,10 +561,6 @@ impl Pool {
                 let mut st = self.st.lock().unwrap();
                 loop {
                     if st.stopped { return; }
-                    if st.plan_pending {
-                        st.plan_pending = false;
-                        break Work::Plan;
-                    }
                     let scan = Self::next_scan(&st, None);
                     // Syntax, derives and file preparation run on workers. The loader
                     // validates recorded macro lookups in its exact textual environment
@@ -589,13 +583,6 @@ impl Pool {
                 }
             };
             match w {
-                Work::Plan => {
-                    if let Some(plan) = &self.demand_plan { let _ = std::ops::Deref::deref(&**plan); }
-                    let mut st = self.st.lock().unwrap();
-                    st.planning = false;
-                    drop(self.publish(st));
-                    self.cv.notify_all();
-                }
                 Work::Scan(k) => self.scan(k),
                 Work::Parse(job) => {
                     let ((krate, path), x) = parse_job(sess, job, false);
@@ -1242,10 +1229,11 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
         for c in &crates { crate::why::edge(&c.root, crate::why::Cause::new(&c.root, 1, "crate-root", &c.name)); }
     }
     let n = crates.len();
-    let plan_offset = plan.as_ref().map_or(0, |p| p.crates.len().checked_sub(n).expect("preload is a suffix of the demand plan"));
+    // (the plan's own crates and contexts: a pending plan is not waited for here)
+    let plan_offset = plan.as_ref().map_or(0, |p| p.crates().len().checked_sub(n).expect("preload is a suffix of the demand plan"));
     let contexts = plan.as_ref().map(|p| {
-        assert!(p.crates[plan_offset..].iter().zip(&crates).all(|(a, b)| a.name == b.name && a.root == b.root));
-        p.contexts[plan_offset..].to_vec()
+        assert!(p.crates()[plan_offset..].iter().zip(&crates).all(|(a, b)| a.name == b.name && a.root == b.root));
+        p.contexts()[plan_offset..].to_vec()
     }).or(contexts).unwrap_or_else(|| crate::source_context::Context::for_crates(&crates, sources, sess));
     let demand_plan = plan.or_else(|| (!sess.options.source_eager && sess.options.rs_lazy).then(|| Arc::new(DemandPlan::new(&crates, contexts.clone(), images, jobs >= 2))))
         .filter(|plan| plan.ready().map_or(true, |p| p.counts().1 != 0));
@@ -1287,7 +1275,6 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
         else { (0..n).map(|_| None).collect() };
     let mut st = PoolState {
         stopped: false,
-        plan_pending: planning,
         planning,
         parse_ready: Default::default(),
         images: restored,
@@ -1338,6 +1325,24 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
     {
         let st = pool.st.lock().unwrap();
         drop(pool.publish(st));
+    }
+    if planning {
+        // The plan completes on its own thread, not a parse worker: the load joins its workers
+        // when its last crate is in, and a load that does not wait for the plan (the crates it
+        // selects in full) must not wait there either. Completion publishes what waited for it.
+        let weak = Arc::downgrade(&pool);
+        let plan = pool.demand_plan.clone().expect("a planning pool has a plan");
+        let in_world = crate::macro_reg::in_world();
+        let _ = std::thread::Builder::new().name("run-demand-select".into()).spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+            crate::macro_reg::set_in_world(in_world);
+            plan.complete();
+            if let Some(pool) = weak.upgrade() {
+                let mut st = pool.st.lock().unwrap();
+                st.planning = false;
+                drop(pool.publish(st));
+                pool.cv.notify_all();
+            }
+        });
     }
     let mut handles = Vec::new();
     if jobs >= 2 {

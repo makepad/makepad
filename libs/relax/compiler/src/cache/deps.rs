@@ -289,14 +289,39 @@ pub(crate) struct NodeRow {
     closure: [u64; 2],
 }
 
-/// What a name finds in one crate (Deps::names, sorted by (name, crate)).
+/// What a name finds in one crate (Deps::names, sorted by (name, crate)), and the strongly connected
+/// component its name node is in (an id unique within the graph: a graph built over a stored one
+/// keeps the ids of the rows it takes over).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(crate) struct NameRow {
     name: u64,
     krate: u32,
-    _pad: u32,
+    comp: u32,
     closure: [u64; 2],
+}
+
+/// One crate as the graph was built from it (Deps::crates, by crate index): what its rows depend on
+/// besides the crates it can see (whose rows say the same of them), and where its own lists are.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CrateRow {
+    /// its name and root file (crate_ident)
+    ident: [u64; 2],
+    /// its fingerprint (its files' sources and its dependencies' fingerprints; 0 past the cache's crates)
+    fp: [u64; 2],
+    /// its graph files: their numbers, paths and item counts (the rows name items by file and item)
+    files: [u64; 2],
+    /// its interface fingerprint (what its coarse nodes are keyed by)
+    iface: [u64; 2],
+    /// the closures of the always nodes of every crate it can see (Deps::always)
+    always: [u64; 2],
+    /// its own always nodes' closures, alias names and macro names: ranges of Deps::lists
+    always_at: [u32; 2],
+    aliases_at: [u32; 2],
+    macros_at: [u32; 2],
+    atomic: u32,
+    _pad: u32,
 }
 
 fn h2(x: u128) -> [u64; 2] { [x as u64, (x >> 64) as u64] }
@@ -316,13 +341,18 @@ impl<T> Rows<T> {
 /// The program's item graph, as what a key asks of it: each item node's closure hash and what
 /// each name finds per crate.
 pub(crate) struct Deps {
+    /// what it was built from (Deps::valid)
+    valid: u128,
     nodes: Rows<NodeRow>,
     names: Rows<NameRow>,
     /// names of non-sysroot macros (macro_rules, proc macros), sorted: a quiet macro of such a
     /// name is not quiet
     macros: Rows<u64>,
-    /// per crate: the closures of the `always` nodes of every crate it can see
-    always: Vec<u128>,
+    crates: Rows<CrateRow>,
+    /// the crates' own lists (CrateRow ranges): always closures as two words each, names as one
+    lists: Rows<u64>,
+    /// the component ids in use are below this
+    comp_end: u32,
     /// per crate: the crates it can see (itself and its dependencies, transitively), as bits
     universe: Vec<Vec<u64>>,
     /// per crate: not in the graph (sysroot), keyed by its interface fingerprint
@@ -330,14 +360,16 @@ pub(crate) struct Deps {
     /// the store a mapped graph's tables are in
     _store: Option<std::sync::Arc<crate::store::Store>>,
     pub(crate) nodes_n: usize,
+    /// the nodes this build walked (the others' rows came from the stored graph it was built over)
+    pub(crate) walked: usize,
     pub(crate) edges: usize,
     pub(crate) coarse: usize,
     /// build phase ends (ms): files walked, edges, components, hashed (a mapped graph: zeros)
     pub(crate) phases: [f64; 4],
 }
 
-const DEPS_MAGIC: &[u8; 4] = b"DEP1";
-const DEPS_VERSION: u32 = 1;
+const DEPS_MAGIC: &[u8; 4] = b"DEP2";
+const DEPS_VERSION: u32 = 2;
 
 fn bit(set: &[u64], c: u32) -> bool { set.get(c as usize / 64).is_some_and(|w| w >> (c % 64) & 1 == 1) }
 
@@ -798,16 +830,67 @@ fn kind_code(k: &ItemKind) -> u32 {
 }
 
 impl Deps {
+    /// Per crate: what its rows are built from, besides the crates it can see (CrateRow without its
+    /// own lists and always hash).
+    fn crate_inputs(prog: &Program, iface: &[u128], fps: &[u128], atomic: &[bool]) -> Vec<CrateRow> {
+        let mut files: Vec<Sip128> = (0..prog.crates.len()).map(|_| { let mut h = Sip128::new(); h.str("deps-crate-files"); h }).collect();
+        for f in 0..prog.boot_files.min(prog.files.len()) {
+            if prog.front_macro_fragments.contains(&f) { continue; }
+            let Some(&c) = prog.file_crate.get(f) else { continue };
+            let Some(h) = files.get_mut(c as usize) else { continue };
+            h.u32(f as u32);
+            h.str(prog.file_paths.get(f).map_or("", |p| p.as_str()));
+            h.u32(prog.files[f].ast.items.len() as u32);
+        }
+        files.into_iter().enumerate().map(|(c, files)| {
+            let ci = &prog.crates[c];
+            let mut ident = Sip128::new();
+            ident.str("crate-ident");
+            ident.str(prog.syms.str(ci.name));
+            ident.str(prog.mods.get(ci.root_mod as usize).and_then(|m| prog.file_paths.get(m.file as usize)).map_or("", |p| p.as_str()));
+            CrateRow { ident: h2(ident.finish128()), fp: h2(fps.get(c).copied().unwrap_or(0)), files: h2(files.finish128()),
+                iface: h2(iface.get(c).copied().unwrap_or(0)), always: [0; 2], always_at: [0; 2], aliases_at: [0; 2], macros_at: [0; 2],
+                atomic: atomic.get(c).copied().unwrap_or(true) as u32, _pad: 0 }
+        }).collect()
+    }
+
+    /// Per crate: whether its rows in `prev` stand for this program's -- its inputs and those of every
+    /// crate it can see are as `prev` was built from (a graph's rows of a crate depend only on them).
+    fn clean_with(prev: Option<&Deps>, inputs: &[CrateRow], universe: &[Vec<u64>]) -> Vec<bool> {
+        let n = inputs.len();
+        let Some(prev) = prev else { return vec![false; n] };
+        let rows = prev.crates.rows();
+        let same = |a: &CrateRow, b: &CrateRow| (a.ident, a.fp, a.files, a.iface, a.atomic) == (b.ident, b.fp, b.files, b.iface, b.atomic);
+        let own: Vec<bool> = (0..n).map(|c| rows.get(c).is_some_and(|r| same(r, &inputs[c]))).collect();
+        (0..n).map(|c| (0..n).all(|d| !bit(&universe[c], d as u32) || own[d])).collect()
+    }
+
+    /// The crates whose rows a build over `prev` takes over (`build`): their files need no digests.
+    pub(crate) fn clean_crates(prog: &Program, iface: &[u128], fps: &[u128], prev: Option<&Deps>) -> Vec<bool> {
+        let atomic = atomic_crates(prog, iface.len());
+        Self::clean_with(prev, &Self::crate_inputs(prog, iface, fps, &atomic), &universes(prog))
+    }
+
     /// Builds the graph of the program's boot files; `iface`: the crates' interface fingerprints
-    /// (what coarse nodes and sysroot crates are keyed by).
-    pub(crate) fn build(prog: &Program, digests: &[Option<std::sync::Arc<super::items::FileDigest>>], iface: &[u128]) -> Deps {
+    /// (what coarse nodes and sysroot crates are keyed by), `fps` their fingerprints, `valid` what
+    /// it is built from (Deps::valid). Over `prev` (the graph a start before this one stored), the
+    /// rows of every crate that is clean (`clean_crates`) are taken over and only the other crates'
+    /// files are walked: their nodes' edges into clean crates end at those crates' name rows, whose
+    /// closures and components are known. The result is the graph a build from scratch makes (the
+    /// component ids aside). None: over `prev`, the names that decide clean crates' nodes (the
+    /// program's alias and macro names) changed -- build without it.
+    pub(crate) fn build(prog: &Program, digests: &[Option<std::sync::Arc<super::items::FileDigest>>], iface: &[u128], fps: &[u128], valid: u128, prev: Option<&Deps>) -> Option<Deps> {
         let t0 = std::time::Instant::now();
+        let n_crates = prog.crates.len();
         let atomic = atomic_crates(prog, iface.len());
         let universe = universes(prog);
-        // the files of the graph: boot files of non-atomic crates
+        let mut crates = Self::crate_inputs(prog, iface, fps, &atomic);
+        let clean = Self::clean_with(prev, &crates, &universe);
+        let prev = prev.filter(|_| clean.iter().any(|&c| c));
+        // the files walked: boot files of the crates in the graph that are not clean
         let files: Vec<usize> = (0..prog.boot_files.min(prog.files.len()))
             .filter(|&f| !prog.front_macro_fragments.contains(&f))
-            .filter(|&f| prog.file_crate.get(f).is_some_and(|&c| !atomic.get(c as usize).copied().unwrap_or(true)))
+            .filter(|&f| prog.file_crate.get(f).is_some_and(|&c| !atomic.get(c as usize).copied().unwrap_or(true) && !clean[c as usize]))
             .filter(|&f| digests.get(f).is_some_and(|d| d.is_some()))
             .collect();
         // a fn body in the interface (an `impl Trait` return, async, const, items inside) that the
@@ -866,27 +949,44 @@ impl Deps {
                 raws.push(r);
             }
         }
-        // the names of aliases and of user macros
-        let mut aliases: std::collections::HashSet<Name> = Default::default();
-        let mut user_macros: std::collections::HashSet<Name> = Default::default();
+        // the names of aliases and of user macros, by crate (a clean crate's from `prev`)
+        let mut own_aliases: Vec<Vec<Name>> = vec![Vec::new(); n_crates];
+        let mut own_macros: Vec<Vec<Name>> = vec![Vec::new(); n_crates];
         for (id, r) in raws.iter().enumerate() {
             let f = node_file[id] as usize;
             if let Some(&i) = r.items.first() {
                 match &prog.files[f].ast.item(crate::ast::ItemId(i)).kind {
-                    ItemKind::TypeAlias(_) => aliases.extend(r.keys.iter().copied()),
-                    ItemKind::MacroRules(_) => user_macros.extend(r.keys.iter().copied()),
+                    ItemKind::TypeAlias(_) => own_aliases[node_crate[id] as usize].extend(r.keys.iter().copied()),
+                    ItemKind::MacroRules(_) => own_macros[node_crate[id] as usize].extend(r.keys.iter().copied()),
                     _ => {}
                 }
             }
         }
         // proc macros: the fns of the proc-macro crates' root files (their names)
         for (f, pf) in prog.files.iter().enumerate().take(prog.boot_files.min(prog.files.len())) {
-            if prog.file_crate.get(f).is_some_and(|&c| prog.crates.get(c as usize).is_some_and(|ci| ci.proc_macro)) {
-                for &i in pf.ast.root_items.iter() {
-                    let it = pf.ast.item(i);
-                    if matches!(it.kind, ItemKind::Fn(..)) { user_macros.insert(name_of(pf.text(it.name).as_bytes())); }
-                }
+            let Some(&c) = prog.file_crate.get(f) else { continue };
+            if clean[c as usize] || !prog.crates.get(c as usize).is_some_and(|ci| ci.proc_macro) { continue; }
+            for &i in pf.ast.root_items.iter() {
+                let it = pf.ast.item(i);
+                if matches!(it.kind, ItemKind::Fn(..)) { own_macros[c as usize].push(name_of(pf.text(it.name).as_bytes())); }
             }
+        }
+        if let Some(prev) = prev {
+            let (rows, lists) = (prev.crates.rows(), prev.lists.rows());
+            let list = |at: [u32; 2]| &lists[at[0] as usize..(at[0] + at[1]) as usize];
+            for c in (0..n_crates).filter(|&c| clean[c]) {
+                own_aliases[c] = list(rows[c].aliases_at).to_vec();
+                own_macros[c] = list(rows[c].macros_at).to_vec();
+            }
+        }
+        for v in own_aliases.iter_mut().chain(own_macros.iter_mut()) { v.sort_unstable(); v.dedup(); }
+        let aliases: std::collections::HashSet<Name> = own_aliases.iter().flatten().copied().collect();
+        let user_macros: std::collections::HashSet<Name> = own_macros.iter().flatten().copied().collect();
+        if let Some(prev) = prev {
+            // a clean crate's nodes were made with the program's alias and macro names of then
+            let (rows, lists) = (prev.crates.rows(), prev.lists.rows());
+            let was: std::collections::HashSet<Name> = rows.iter().flat_map(|r| lists[r.aliases_at[0] as usize..(r.aliases_at[0] + r.aliases_at[1]) as usize].iter().copied()).collect();
+            if was != aliases || prev.macros.rows().len() != user_macros.len() || prev.macros.rows().iter().any(|m| !user_macros.contains(m)) { return None; }
         }
         // a trait impl for a type named nowhere (a parameter, a primitive, a reference, ...) or for
         // an alias (another type) is also found under its trait's name
@@ -908,6 +1008,7 @@ impl Deps {
         let n_items = raws.len();
         let mut name_nodes: HashMap<Name, Vec<(u32, u32)>> = HashMap::with_capacity(index.len());
         let mut nn_targets: Vec<Vec<u32>> = Vec::new();
+        let mut nn_name: Vec<(Name, u32)> = Vec::new();
         for (&name, ids) in index.iter_mut() {
             ids.sort_unstable_by_key(|&t| (node_crate[t as usize], t));
             let mut v: Vec<(u32, u32)> = Vec::new();
@@ -918,19 +1019,23 @@ impl Deps {
                 while e < ids.len() && node_crate[ids[e] as usize] == c { e += 1; }
                 v.push((c, (n_items + nn_targets.len()) as u32));
                 nn_targets.push(ids[k..e].to_vec());
+                nn_name.push((name, c));
                 k = e;
             }
             name_nodes.insert(name, v);
         }
-        let n = n_items + nn_targets.len();
+        let n_named = n_items + nn_targets.len();
         // a node invoking a macro outside the item position: coarse
-        let mut coarse = vec![false; n];
+        let mut coarse = vec![false; n_items];
         let mut ncoarse = 0;
         for (id, r) in raws.iter().enumerate() {
             let c = r.mac || (!r.rules && r.invoked.iter().any(|&m| m & QUIET_BIT == 0 || user_macros.contains(&(m & !QUIET_BIT))));
             if c { coarse[id] = true; ncoarse += 1; }
         }
-        // edges (CSR), the item nodes' on several threads
+        // edges (CSR), the item nodes' on several threads; an edge into a clean crate's name row is
+        // that row's index with LEAF set (the rows' components are the leaves below)
+        const LEAF: u32 = 1 << 31;
+        let prev_names: &[NameRow] = prev.map_or(&[], |p| p.names.rows());
         let header_node = |id: usize| -> Option<u32> {
             let h = raws[id].header?;
             node_of.get(&(node_file[id], h)).copied()
@@ -938,7 +1043,7 @@ impl Deps {
         let chunk = n_items.div_ceil(threads).max(1);
         let parts: Vec<(Vec<u32>, Vec<u32>)> = std::thread::scope(|s| {
             let hs: Vec<_> = (0..threads).map(|t| {
-                let (raws, coarse, universe, node_crate, name_nodes, header_node) = (&raws, &coarse, &universe, &node_crate, &name_nodes, &header_node);
+                let (raws, coarse, universe, node_crate, name_nodes, header_node, clean) = (&raws, &coarse, &universe, &node_crate, &name_nodes, &header_node, &clean);
                 s.spawn(move || {
                     let (lo, hi) = ((t * chunk).min(n_items), ((t + 1) * chunk).min(n_items));
                     let mut lens = Vec::with_capacity(hi - lo);
@@ -950,6 +1055,12 @@ impl Deps {
                             for nm in &raws[id].names {
                                 if let Some(v) = name_nodes.get(nm) {
                                     for &(c, nn) in v { if bit(uni, c) { tgt.push(nn); } }
+                                }
+                                if !prev_names.is_empty() {
+                                    let at = prev_names.partition_point(|r| r.name < *nm);
+                                    for (k, r) in prev_names[at..].iter().enumerate().take_while(|(_, r)| r.name == *nm) {
+                                        if bit(uni, r.krate) && clean[r.krate as usize] { tgt.push(LEAF | (at + k) as u32); }
+                                    }
                                 }
                             }
                             if let Some(h) = header_node(id) { tgt.push(h); }
@@ -967,18 +1078,40 @@ impl Deps {
             }).collect();
             hs.into_iter().map(|h| h.join().unwrap_or_default()).collect()
         });
-        let mut off: Vec<u32> = Vec::with_capacity(n + 1);
+        // the leaves: one node per component of the clean rows named (its closure is the row's)
+        let mut leaf_of: HashMap<u32, u32> = HashMap::new();
+        let mut leaves: Vec<u128> = Vec::new();
+        let mut off: Vec<u32> = Vec::with_capacity(n_named + 1);
         let mut tgt: Vec<u32> = Vec::new();
         off.push(0);
         for (lens, t) in parts {
-            let mut at = *off.last().unwrap();
-            for l in lens { at += l; off.push(at); }
-            tgt.extend_from_slice(&t);
+            let mut at = 0usize;
+            for l in lens {
+                let start = tgt.len();
+                for &x in &t[at..at + l as usize] {
+                    if x & LEAF == 0 { tgt.push(x); continue; }
+                    let r = &prev_names[(x & !LEAF) as usize];
+                    let leaf = *leaf_of.entry(r.comp).or_insert_with(|| { leaves.push(u2(r.closure)); (leaves.len() - 1) as u32 });
+                    tgt.push(n_named as u32 + leaf);
+                }
+                if tgt.len() - start > 1 {
+                    tgt[start..].sort_unstable();
+                    let mut w = start;
+                    for r in start..tgt.len() {
+                        if r == start || tgt[r] != tgt[w - 1] { tgt[w] = tgt[r]; w += 1; }
+                    }
+                    tgt.truncate(w);
+                }
+                off.push(tgt.len() as u32);
+                at += l as usize;
+            }
         }
         for ts in &nn_targets {
             tgt.extend_from_slice(ts);
             off.push(tgt.len() as u32);
         }
+        let n = n_named + leaves.len();
+        off.resize(n + 1, tgt.len() as u32);
         let edges = tgt.len();
         let t_edges = t0.elapsed();
         // strongly connected components (iterative Tarjan); components come out in reverse
@@ -1031,13 +1164,21 @@ impl Deps {
         let mut closure = vec![0u128; n];
         let mut succ_c: Vec<u32> = Vec::new();
         for (k, members) in comps.iter().enumerate() {
+            // a leaf (it has no edges: its own component) is the clean component it stands for
+            if let [m] = members[..] {
+                if m as usize >= n_named {
+                    chash[k] = leaves[m as usize - n_named];
+                    closure[m as usize] = chash[k];
+                    continue;
+                }
+            }
             let mut own: Vec<u128> = Vec::with_capacity(members.len());
             succ_c.clear();
             for &m in members {
                 let mi = m as usize;
                 let mut h = Sip128::new();
                 h.u128(if mi < n_items { raws[mi].piece } else { 0 });
-                if coarse[mi] {
+                if mi < n_items && coarse[mi] {
                     h.str("coarse");
                     h.u128(iface.get(node_crate[mi] as usize).copied().unwrap_or(0));
                 }
@@ -1063,26 +1204,51 @@ impl Deps {
             chash[k] = h.finish128();
             for &m in members { closure[m as usize] = chash[k]; }
         }
-        // per crate: the closures of the always nodes of every crate it can see
-        let mut always_of: Vec<Vec<u128>> = vec![Vec::new(); prog.crates.len()];
+        // per crate: its always nodes' closures (a clean crate's from `prev`), and the closures of
+        // the always nodes of every crate it can see
+        let mut always_of: Vec<Vec<u128>> = vec![Vec::new(); n_crates];
         for (id, r) in raws.iter().enumerate() {
             if r.always { always_of[node_crate[id] as usize].push(closure[id]); }
         }
-        for v in always_of.iter_mut() { v.sort_unstable(); }
-        let always: Vec<u128> = (0..prog.crates.len()).map(|c| {
-            let mut h = Sip128::new();
-            h.str("dep-always");
-            for (k, v) in always_of.iter().enumerate() {
-                if bit(&universe[c], k as u32) && !v.is_empty() {
-                    h.u32(k as u32);
-                    for x in v { h.u128(*x); }
-                }
+        if let Some(prev) = prev {
+            let (rows, lists) = (prev.crates.rows(), prev.lists.rows());
+            for c in (0..n_crates).filter(|&c| clean[c]) {
+                let at = rows[c].always_at;
+                always_of[c] = lists[at[0] as usize..(at[0] + at[1]) as usize].chunks(2).map(|w| u2([w[0], w[1]])).collect();
             }
-            h.finish128()
-        }).collect();
-        closure.truncate(n);
-        // MAKEPAD_RUN_DEPS_DUMP=<file>: every item node (crate, file:offset, piece, closure, coarse
-        // and the macros that made it so): which piece an edit changed, and what reaches it
+        }
+        for v in always_of.iter_mut() { v.sort_unstable(); }
+        for c in 0..n_crates {
+            crates[c].always = match prev {
+                Some(prev) if clean[c] => prev.crates.rows()[c].always,
+                _ => {
+                    let mut h = Sip128::new();
+                    h.str("dep-always");
+                    for (k, v) in always_of.iter().enumerate() {
+                        if bit(&universe[c], k as u32) && !v.is_empty() {
+                            h.u32(k as u32);
+                            for x in v { h.u128(*x); }
+                        }
+                    }
+                    h2(h.finish128())
+                }
+            };
+        }
+        let mut lists: Vec<u64> = Vec::new();
+        for c in 0..n_crates {
+            let at = |lists: &Vec<u64>, start: usize| [start as u32, (lists.len() - start) as u32];
+            let s = lists.len();
+            for x in &always_of[c] { lists.extend_from_slice(&h2(*x)); }
+            crates[c].always_at = at(&lists, s);
+            let s = lists.len();
+            lists.extend_from_slice(&own_aliases[c]);
+            crates[c].aliases_at = at(&lists, s);
+            let s = lists.len();
+            lists.extend_from_slice(&own_macros[c]);
+            crates[c].macros_at = at(&lists, s);
+        }
+        // MAKEPAD_RUN_DEPS_DUMP=<file>: every item node walked (crate, file:offset, piece, closure,
+        // coarse and the macros that made it so): which piece an edit changed, and what reaches it
         if let Ok(path) = std::env::var("MAKEPAD_RUN_DEPS_DUMP") {
             let mut out = String::new();
             for id in 0..n_items {
@@ -1101,28 +1267,44 @@ impl Deps {
             }
             let _ = std::fs::write(format!("{}.{}", path, std::process::id()), out);
         }
-        let mut nodes: Vec<NodeRow> = node_of.iter().map(|(&(file, item), &id)| NodeRow { file, item, closure: h2(closure[id as usize]) }).collect();
+        // the rows: the clean crates' from `prev`, the walked ones' new (their components numbered
+        // after every id `prev` uses)
+        let base = prev.map_or(0, |p| p.comp_end);
+        let clean_file = |f: u32| prog.file_crate.get(f as usize).is_some_and(|&c| clean[c as usize]);
+        let mut nodes: Vec<NodeRow> = prev.map_or(&[][..], |p| p.nodes.rows()).iter().filter(|r| clean_file(r.file)).copied().collect();
+        let taken = nodes.len();
+        nodes.extend(node_of.iter().map(|(&(file, item), &id)| NodeRow { file, item, closure: h2(closure[id as usize]) }));
         nodes.sort_unstable_by_key(|r| (r.file, r.item));
-        let mut names: Vec<NameRow> = name_nodes.iter().flat_map(|(&name, v)| v.iter().map(move |&(krate, nn)| (name, krate, nn)))
-            .map(|(name, krate, nn)| NameRow { name, krate, _pad: 0, closure: h2(closure[nn as usize]) }).collect();
+        let mut names: Vec<NameRow> = prev_names.iter().filter(|r| clean.get(r.krate as usize).copied().unwrap_or(false)).copied().collect();
+        names.extend(nn_name.iter().enumerate().map(|(i, &(name, krate))| {
+            let nn = n_items + i;
+            NameRow { name, krate, comp: base + comp[nn], closure: h2(closure[nn]) }
+        }));
         names.sort_unstable_by_key(|r| (r.name, r.krate));
         let mut macros: Vec<u64> = user_macros.into_iter().collect();
         macros.sort_unstable();
         let phases = [t_files, t_edges, t_scc, t0.elapsed()].map(|d| d.as_secs_f64() * 1e3);
-        Deps { nodes: Rows::Owned(nodes), names: Rows::Owned(names), macros: Rows::Owned(macros), always, universe, atomic, _store: None,
-            nodes_n: n_items, edges, coarse: ncoarse, phases }
+        Some(Deps { valid, nodes_n: nodes.len(), walked: nodes.len() - taken, nodes: Rows::Owned(nodes), names: Rows::Owned(names), macros: Rows::Owned(macros),
+            crates: Rows::Owned(crates), lists: Rows::Owned(lists), comp_end: base + comps.len() as u32, universe, atomic, _store: None,
+            edges, coarse: ncoarse, phases })
     }
 
-    /// The graph as a store entry's payload, with `valid` (what it was built from: Deps::valid).
-    pub(crate) fn encode(&self, valid: u128) -> Vec<u8> {
-        let (nodes, names, macros) = (self.nodes.rows(), self.names.rows(), self.macros.rows());
-        let mut p = Vec::with_capacity(40 + self.always.len() * 16 + macros.len() * 8 + nodes.len() * 24 + names.len() * 32);
+    /// The graph as a store entry's payload.
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let (crates, lists, macros, nodes, names) = (self.crates.rows(), self.lists.rows(), self.macros.rows(), self.nodes.rows(), self.names.rows());
+        let mut p = Vec::with_capacity(48 + crates.len() * std::mem::size_of::<CrateRow>() + (lists.len() + macros.len()) * 8 + nodes.len() * 24 + names.len() * 32);
         p.extend_from_slice(DEPS_MAGIC);
         p.extend_from_slice(&DEPS_VERSION.to_le_bytes());
-        p.extend_from_slice(&valid.to_le_bytes());
-        for n in [self.always.len(), macros.len(), nodes.len(), names.len()] { p.extend_from_slice(&(n as u32).to_le_bytes()); }
-        for a in &self.always { p.extend_from_slice(&a.to_le_bytes()); }
-        for m in macros { p.extend_from_slice(&m.to_le_bytes()); }
+        p.extend_from_slice(&self.valid.to_le_bytes());
+        p.extend_from_slice(&self.comp_end.to_le_bytes());
+        for n in [crates.len(), lists.len(), macros.len(), nodes.len(), names.len()] { p.extend_from_slice(&(n as u32).to_le_bytes()); }
+        for r in crates {
+            for w in [r.ident, r.fp, r.files, r.iface, r.always] { for x in w { p.extend_from_slice(&x.to_le_bytes()); } }
+            for w in [r.always_at, r.aliases_at, r.macros_at] { for x in w { p.extend_from_slice(&x.to_le_bytes()); } }
+            p.extend_from_slice(&r.atomic.to_le_bytes());
+            p.extend_from_slice(&0u32.to_le_bytes());
+        }
+        for x in lists.iter().chain(macros) { p.extend_from_slice(&x.to_le_bytes()); }
         for r in nodes {
             p.extend_from_slice(&r.file.to_le_bytes());
             p.extend_from_slice(&r.item.to_le_bytes());
@@ -1132,32 +1314,66 @@ impl Deps {
         for r in names {
             p.extend_from_slice(&r.name.to_le_bytes());
             p.extend_from_slice(&r.krate.to_le_bytes());
-            p.extend_from_slice(&0u32.to_le_bytes());
+            p.extend_from_slice(&r.comp.to_le_bytes());
             p.extend_from_slice(&r.closure[0].to_le_bytes());
             p.extend_from_slice(&r.closure[1].to_le_bytes());
         }
         p
     }
 
-    /// A graph stored by `encode`, read in place (`store` holds the mapping of `p`). None: another
-    /// format, a size that does not match, another program state (`valid`), or a misaligned payload.
-    pub(crate) fn mapped(prog: &Program, ncr: usize, p: &'static [u8], valid: u128, store: std::sync::Arc<crate::store::Store>) -> Option<Deps> {
-        if cfg!(target_endian = "big") || p.len() < 40 || &p[0..4] != DEPS_MAGIC || u32::from_le_bytes(p[4..8].try_into().ok()?) != DEPS_VERSION { return None; }
-        if u128::from_le_bytes(p[8..24].try_into().ok()?) != valid { return None; }
-        let n = |k: usize| u32::from_le_bytes(p[24 + k * 4..28 + k * 4].try_into().unwrap()) as usize;
-        let (na, nm, nn, nx) = (n(0), n(1), n(2), n(3));
-        let (a0, m0) = (40, 40 + na * 16);
+    /// A graph stored by `encode`, read in place (`store` holds the mapping of `p`), for this
+    /// program (`Deps::valid` says whether it was built from it). None: another format, a size that
+    /// does not match, or a misaligned payload.
+    pub(crate) fn read(prog: &Program, ncr: usize, p: &'static [u8], store: std::sync::Arc<crate::store::Store>) -> Option<Deps> {
+        const HEAD: usize = 48;
+        if cfg!(target_endian = "big") || p.len() < HEAD || &p[0..4] != DEPS_MAGIC || u32::from_le_bytes(p[4..8].try_into().ok()?) != DEPS_VERSION { return None; }
+        let valid = u128::from_le_bytes(p[8..24].try_into().ok()?);
+        let word = |at: usize| u32::from_le_bytes(p[at..at + 4].try_into().unwrap());
+        let comp_end = word(24);
+        let (nc, nl, nm, nn, nx) = (word(28) as usize, word(32) as usize, word(36) as usize, word(40) as usize, word(44) as usize);
+        let c0 = HEAD;
+        let l0 = c0 + nc * std::mem::size_of::<CrateRow>();
+        let m0 = l0 + nl * 8;
         let n0 = m0 + nm * 8;
         let x0 = n0 + nn * 24;
-        if p.len() != x0 + nx * 32 || p.as_ptr() as usize % 8 != 0 || na != prog.crates.len() { return None; }
-        let always: Vec<u128> = (0..na).map(|i| u128::from_le_bytes(p[a0 + i * 16..a0 + i * 16 + 16].try_into().unwrap())).collect();
+        if std::mem::size_of::<CrateRow>() != 112 || p.len() != x0 + nx * 32 || p.as_ptr() as usize % 8 != 0 { return None; }
         // SAFETY: the payload stays mapped while `store` lives (held below); the tables are
         // 8-byte aligned (checked), plain integers, and their lengths match the payload's size
+        let crates: &'static [CrateRow] = unsafe { std::slice::from_raw_parts(p.as_ptr().add(c0) as *const CrateRow, nc) };
+        let lists: &'static [u64] = unsafe { std::slice::from_raw_parts(p.as_ptr().add(l0) as *const u64, nl) };
         let macros: &'static [u64] = unsafe { std::slice::from_raw_parts(p.as_ptr().add(m0) as *const u64, nm) };
         let nodes: &'static [NodeRow] = unsafe { std::slice::from_raw_parts(p.as_ptr().add(n0) as *const NodeRow, nn) };
         let names: &'static [NameRow] = unsafe { std::slice::from_raw_parts(p.as_ptr().add(x0) as *const NameRow, nx) };
-        Some(Deps { nodes: Rows::Mapped(nodes), names: Rows::Mapped(names), macros: Rows::Mapped(macros), always,
-            universe: universes(prog), atomic: atomic_crates(prog, ncr), _store: Some(store), nodes_n: nn, edges: 0, coarse: 0, phases: [0.0; 4] })
+        // every list range in bounds (a build over this graph slices them)
+        if crates.iter().any(|r| [r.always_at, r.aliases_at, r.macros_at].iter().any(|at| at[0] as usize + at[1] as usize > nl) || r.always_at[1] % 2 != 0) { return None; }
+        Some(Deps { valid, nodes: Rows::Mapped(nodes), names: Rows::Mapped(names), macros: Rows::Mapped(macros), crates: Rows::Mapped(crates),
+            lists: Rows::Mapped(lists), comp_end, universe: universes(prog), atomic: atomic_crates(prog, ncr), _store: Some(store),
+            nodes_n: nn, walked: 0, edges: 0, coarse: 0, phases: [0.0; 4] })
+    }
+
+    /// What it was built from (Deps::valid).
+    pub(crate) fn built_from(&self) -> u128 { self.valid }
+    /// The number of crates it was built for.
+    pub(crate) fn crate_count(&self) -> usize { self.crates.rows().len() }
+    /// Whether a graph can be built over it (its component ids leave room for the new ones).
+    pub(crate) fn ids_left(&self) -> bool { self.comp_end < 1 << 30 }
+    /// Whether the graph holds the same closures as `other` (MAKEPAD_RUN_DEPS_VERIFY: a graph built
+    /// over a stored one against one built from scratch; component ids are not compared).
+    pub(crate) fn same_closures(&self, other: &Deps) -> Result<(), String> {
+        let (a, b) = (self.nodes.rows(), other.nodes.rows());
+        if a.len() != b.len() { return Err(format!("{} node rows, {} from scratch", a.len(), b.len())); }
+        if let Some(r) = a.iter().zip(b).position(|(x, y)| (x.file, x.item, x.closure) != (y.file, y.item, y.closure)) {
+            return Err(format!("node row {r} (file {} item {}) differs", a[r].file, a[r].item));
+        }
+        let (a, b) = (self.names.rows(), other.names.rows());
+        if a.len() != b.len() { return Err(format!("{} name rows, {} from scratch", a.len(), b.len())); }
+        if let Some(r) = a.iter().zip(b).position(|(x, y)| (x.name, x.krate, x.closure) != (y.name, y.krate, y.closure)) {
+            return Err(format!("name row {r} (crate {}) differs", a[r].krate));
+        }
+        if self.macros.rows() != other.macros.rows() { return Err("macro names differ".into()); }
+        let (a, b) = (self.crates.rows(), other.crates.rows());
+        if a.len() != b.len() || a.iter().zip(b).any(|(x, y)| x.always != y.always) { return Err("always closures differ".into()); }
+        Ok(())
     }
 
     /// What a stored graph must have been built from to stand for this program's: the cache
@@ -1181,7 +1397,7 @@ impl Deps {
     }
 
     /// The closures of the always nodes crate `c` can see.
-    pub(crate) fn always(&self, c: u32) -> u128 { self.always.get(c as usize).copied().unwrap_or(0) }
+    pub(crate) fn always(&self, c: u32) -> u128 { self.crates.rows().get(c as usize).map_or(0, |r| u2(r.always)) }
 
     /// The closure hash of definition `d`'s item: None for a sysroot crate's definitions (its
     /// interface fingerprint is in every key) and for a definition with no node (an item a fn body
