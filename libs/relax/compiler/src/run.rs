@@ -442,7 +442,18 @@ pub(crate) fn resolve_package(
         *CRATE_DIRS.lock().unwrap() = g.crates.iter().zip(g.pkg.iter()).map(|(c, (dir, _, _))| (c.name.clone(), dir.clone())).collect();
     }
     // every crate's cfg set (its env!() environment is set when it is loaded: `set_crate_env`)
-    let order = crate::crates::topo_order(&g.crates);
+    // the root package's crates, and whatever depends on them, load last: the crates an edit
+    // of the app reaches are a suffix from the first start on (FrontImages::load_order keeps
+    // that for the crates edited later)
+    let order = {
+        let topo = crate::crates::topo_order(&g.crates);
+        let root_dir = &g.pkg[g.root].0;
+        let mut late: Vec<bool> = g.pkg.iter().map(|(dir, _, _)| dir == root_dir).collect();
+        for &ci in &topo { if !late[ci] && g.crates[ci].deps.iter().any(|(d, _)| late.get(*d).copied().unwrap_or(false)) { late[ci] = true; } }
+        let (mut first, last): (Vec<usize>, Vec<usize>) = topo.into_iter().partition(|&ci| !late[ci]);
+        first.extend(last);
+        first
+    };
     let mut cfgs: Vec<crate::cfg::CfgSet> = Vec::with_capacity(g.crates.len());
     for (ci, c) in g.crates.iter().enumerate() {
         let mut cs = crate::program_cfg(sess, &c.features);
@@ -838,6 +849,21 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         pre_index[ci] = pre.len();
         pre.push(crate::preload::PreCrate { name: c.name.clone(), root: c.src_path.clone(), edition: c.edition, cfg: cfgs[ci].clone(), deps,  proc_macro: c.proc_macro, image_deps, image_dep_names });
     }
+    let front_images = crate::cache::FrontImages::open(options);
+    // the load order the stored image was recorded in, with the changed crates and their
+    // dependents last (FrontImages::load_order): the restore keeps every crate before them
+    let order = match front_images.as_ref().filter(|_| !check).and_then(|images| images.load_order(&pre, std_count)) {
+        Some(perm) => match crate::preload::reorder(&pre, &perm) {
+            Some(reordered) => {
+                let order: Vec<usize> = perm[std_count..].iter().map(|&k| order[k - std_count]).collect();
+                for (k, &ci) in order.iter().enumerate() { pre_index[ci] = std_count + k; }
+                pre = reordered;
+                order
+            }
+            None => order,
+        },
+        None => order,
+    };
     let tp = Instant::now();
     let root_dir = crate::unitgraph::manifest_dir_of(&g.crates[g.root].src_path);
     // the one app-crate rule (borrowck::event): check, serve and run share it
@@ -851,7 +877,6 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     // `makepad check` borrow-checks every crate it loads: all keep their user-written types
     if check { crate::borrowck::event::set_check_scope(); }
     jit::settle_rebuild::remember_boot(&pre);
-    let front_images = crate::cache::FrontImages::open(options);
     prog.record_front = front_images.is_some();
     prog.front_sink = front_images.as_ref().and_then(|images| images.sink());
     if front_images.is_none() && (crate::preload::trace() || crate::memstat::enabled()) {
@@ -909,7 +934,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     if collected_restored {
         core = prog.prelude_crate.expect("collected graph prelude");
     } else {
-        let recipe = crate::crate_image::GraphRecipe::new(&pre);
+        // (a reordered load's base graph: the restore's)
+        let recipe = crate::crate_image::GraphRecipe { base: prog.front_graph.as_ref().and_then(|r| r.base), ..crate::crate_image::GraphRecipe::new(&pre) };
         let replay = (restored_crates != 0).then(|| pre.clone());
         let mut remaining: Vec<_> = pre.into_iter().skip(restored_crates).collect();
         for c in &mut remaining {

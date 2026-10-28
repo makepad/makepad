@@ -70,8 +70,22 @@ pub struct PendingPlan {
     plan: std::sync::OnceLock<Plan>,
     early: EarlyCrates,
     parts: Option<crate::crate_image::DemandParts>,
+    /// the stored plan of an earlier load, taken over without planning (`carried`): its inputs
+    /// and probes are that load's, not this one's
+    carried: bool,
 }
 impl PendingPlan {
+    /// The plan an earlier load of these crates recorded (`image`), taken as it is: an edited start
+    /// whose last crate is unchanged and was selected in full loads every crate in full whatever
+    /// the edit (a full selection is always a sound one), so nothing is planned. Its parts stay
+    /// the stored ones (the next plan validates them by their own inputs).
+    pub fn carried(crates: &[PreCrate], contexts: Vec<Arc<crate::source_context::Context>>, image: Arc<DemandImage>) -> Self {
+        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts: None, carried: true };
+        let plan = Plan::build(&pending.pending_crates, pending.pending_contexts.clone(), Some(image), &pending.early, None);
+        let _ = pending.plan.set(plan);
+        pending
+    }
+    pub fn is_carried(&self) -> bool { self.carried }
     pub fn new(crates: &[PreCrate], contexts: Vec<Arc<crate::source_context::Context>>, images: Option<&dyn crate::crate_image::CrateImages>, parallel: bool) -> Self {
         let image = if crates.iter().any(|c| c.cfg.session.runtime.lazy_verify) { None }
             else { images.and_then(|images| images.demand_image(crates, recipe_identity(crates))) };
@@ -79,7 +93,7 @@ impl PendingPlan {
             && !crates.iter().any(|c| c.cfg.session.runtime.lazy_verify) {
             images.and_then(|i| i.demand_parts(crates, recipe_identity(crates)))
         } else { None };
-        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts };
+        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts, carried: false };
         // The crates selected in full (Plan::build) are known before planning.
         pending.early.publish(selected_prefix(crates, pending.parts.as_ref()));
         if image.is_some() || !parallel {

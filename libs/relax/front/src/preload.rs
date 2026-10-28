@@ -13,7 +13,7 @@ use relax_session::sync::{Condvar, Mutex};
 mod lazy;
 pub use lazy::PendingPlan as DemandPlan;
 pub(crate) use lazy::items as rs_items;
-pub use lazy::{DemandPart, DemandImage, FileIndex as FileIndex};
+pub use lazy::{DemandPart, DemandImage, FileIndex as FileIndex, recipe_identity as demand_recipe_identity};
 
 pub(crate) fn configured_tokens(src: &[u8], tokens: &[Tok], cfg: &CfgSet) -> Vec<Tok> {
     lazy::demand::active_tokens(src, tokens, cfg)
@@ -32,6 +32,19 @@ pub struct PreCrate {
     /// Indices in this preload, in Program dependency order (including implicit std).
     pub image_deps: Vec<usize>,
     pub image_dep_names: Vec<(String, String)>,
+}
+
+/// `crates` in the load order `order` (positions in `crates`, each once), the dependency indices
+/// renumbered; None when that order puts a crate before one of its dependencies.
+pub fn reorder(crates: &[PreCrate], order: &[usize]) -> Option<Vec<PreCrate>> {
+    let mut at = vec![usize::MAX; crates.len()];
+    for (j, &i) in order.iter().enumerate() { *at.get_mut(i)? = j; }
+    if order.len() != crates.len() || at.contains(&usize::MAX) { return None; }
+    order.iter().enumerate().map(|(j, &i)| {
+        let mut c = crates[i].clone();
+        c.image_deps = c.image_deps.iter().map(|&d| at.get(d).copied().filter(|&k| k < j)).collect::<Option<_>>()?;
+        Some(c)
+    }).collect()
 }
 
 /// What load_crate takes for one crate.

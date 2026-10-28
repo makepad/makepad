@@ -302,6 +302,12 @@ pub fn type_hash(prog: &Program, tcx: &Tcx, t: TyId) -> u128 {
 /// crate hash then folds in name, edition, cfg, its files' hashes in file order, and its
 /// dependencies' fingerprints, regardless of load order.
 pub fn crate_fingerprints(prog: &Program) -> Vec<u128> {
+    crate_fingerprints_from(prog, &[])
+}
+
+/// `crate_fingerprints` when the first crates' fingerprints are `known` (a partial collected
+/// restore keeps them): only the other crates' files are hashed.
+pub fn crate_fingerprints_from(prog: &Program, known: &[u128]) -> Vec<u128> {
     let n = prog.files.len();
     let mut fh = vec![0u128; n];
     let threads = std::thread::available_parallelism().map_or(4, |x| x.get()).min(8).max(1);
@@ -310,8 +316,10 @@ pub fn crate_fingerprints(prog: &Program) -> Vec<u128> {
     // only the file's own source: the expansion text after src_len grows lazily (bodies expand on
     // demand), so it depends on timing and on the app. Macro inputs from outside the source
     // (include*!, env!) are the late-input ledger below.
+    let skip = |i: usize| prog.file_crate.get(i).is_some_and(|&c| (c as usize) < known.len());
     let inputs: Vec<(&str, &[u8])> = (0..n)
         .map(|i| {
+            if skip(i) { return ("", &[][..]); }
             let f = &prog.files[i];
             let len = (f.src_len as usize).min(f.src.len());
             (prog.file_paths.get(i).map_or("", |p| p.as_str()), &f.src[..len])
@@ -322,7 +330,7 @@ pub fn crate_fingerprints(prog: &Program) -> Vec<u128> {
             for (out, inp) in fh.chunks_mut(chunk).zip(inputs.chunks(chunk)) {
                 s.spawn(move || {
                     for (o, (path, src)) in out.iter_mut().zip(inp) {
-                        *o = crate::crate_image::file_hash(path, src);
+                        if !path.is_empty() { *o = crate::crate_image::file_hash(path, src); }
                     }
                 });
             }
@@ -349,6 +357,7 @@ pub fn crate_fingerprints(prog: &Program) -> Vec<u128> {
     // scopes since relax 8d070a4f), both already in the fingerprint.
     let mut out = vec![0u128; nc];
     let mut done = vec![false; nc];
+    for (c, &k) in known.iter().enumerate().take(nc) { out[c] = k; done[c] = true; }
     fn fp(c: usize, prog: &Program, per: &mut Vec<Sip128>, out: &mut Vec<u128>, done: &mut Vec<bool>, depth: u32) -> u128 {
         if done[c] || depth > 512 {
             return out[c];

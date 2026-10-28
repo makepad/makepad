@@ -38,7 +38,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 mod collected;
-pub use collected::{CollectedCache, CollectedRecord, CollectedWritten};
+pub use collected::{CollectedCache, CollectedDest, CollectedRecord, CollectedWritten};
 mod image;
 use image::{ManifestImage, IMAGE_MAGIC};
 pub(crate) use image::{complete_identities_unit, ids_report_unit, image_broken_unit, image_slot_by_key_unit, name_unnamed_unit, prelink_unit, PrelinkedSlot};
@@ -60,7 +60,7 @@ const KIND_BORROWCK: u32 = 4;
 /// the checker's own version: bump when its rules change (old verdicts are then ignored)
 pub const BORROWCK_VERSION: u32 = 2;
 /// the coherence check's own version: bump when its rules change
-const COHERENCE_VERSION: u32 = 1;
+const COHERENCE_VERSION: u32 = 2;
 
 /// Immutable driver view for Gandalf's generic owner discovery. No Unit/cache
 /// callbacks under the front read lock, and no need to construct an instance key
@@ -152,6 +152,9 @@ const KIND_EXP_NAMES: u32 = 17;
 /// the program's item graph (cache/deps.rs Deps::encode), one per program (its root crate's code
 /// store, under a key of the program's view: replaced when the program changes)
 const KIND_DEPS: u32 = 18;
+/// a program's last load order (cache.rs load_order): its crates (name, root), in order, keyed by
+/// the graph's crate set (GraphRecipe::set)
+const KIND_FRONT_ORDER: u32 = 19;
 const KIND_CONST: u32 = 9;
 const KIND_WARM_OUTCOME: u32 = 10;
 /// stores a front image was mapped from: kept for the rest of the process (the arrays point
@@ -788,7 +791,13 @@ impl Cache {
         let kept = collected.filter(|c| c.kept.is_some_and(|(k, _)| k <= prog.crates.len() && k <= c.fps.len()));
         let collected = collected.filter(|c| c.kept.is_none() && c.fps.len() <= prog.crates.len()
             && c.defs == prog.defs.len() && c.files == prog.files.len());
-        let fps = collected.map_or_else(|| crate::stable::crate_fingerprints(prog), |c| c.fps.clone());
+        // a partial restore's kept crates: the fingerprints and interfaces of the image (their
+        // inputs are the certified ones); only the crates loaded after them are hashed
+        let kept_n = kept.and_then(|c| c.kept).map_or(0, |(k, _)| k);
+        let fps = match collected {
+            Some(c) => c.fps.clone(),
+            None => crate::stable::crate_fingerprints_from(prog, kept.map_or(&[][..], |c| &c.fps[..kept_n])),
+        };
         // A swap preserves the original cache prefix; runtime crates stay outside boot stores.
         let ncr = fps.len();
         let t_fp = t0.elapsed();
@@ -936,13 +945,23 @@ impl Cache {
                 c.digests = vec![None; prog.files.len()];
                 c.iface_plain = cc.ifaces.clone();
             }
-            None => {
-                // (every file, on several threads: an edited start's keys read the kept crates'
-                // bodies too -- digested one by one on the owner they cost more)
-                c.digests = items::file_digests(prog);
-                c.iface_plain = items::crate_ifaces(prog, &c.fps, &c.digests);
-                c.iface_plain.truncate(ncr);
-            }
+            None => match kept.filter(|k| k.ifaces.len() >= kept_n && std::env::var_os("MAKEPAD_RUN_CACHE_IFACE").is_none()) {
+                // the crates loaded after the kept ones: their files, on several threads (a kept
+                // file is digested when a key needs it, def_body)
+                Some(kc) => {
+                    c.digests = vec![None; prog.files.len()];
+                    let want: Vec<usize> = (0..prog.files.len()).filter(|&f| prog.file_crate.get(f).is_some_and(|&k| k as usize >= kept_n)).collect();
+                    items::file_digests_of(prog, &want, &mut c.digests);
+                    c.iface_plain = items::crate_ifaces_from(prog, &c.fps, &c.digests, &kc.ifaces[..kept_n]);
+                    c.iface_plain.truncate(ncr);
+                }
+                None => {
+                    // (every file, on several threads)
+                    c.digests = items::file_digests(prog);
+                    c.iface_plain = items::crate_ifaces(prog, &c.fps, &c.digests);
+                    c.iface_plain.truncate(ncr);
+                }
+            },
         }
         let provided: Vec<(u32, u64)> = u.provided.iter().map(|(k, pc)| (*k, pc.binding)).collect();
         c.iface = items::apply_bound(prog, &c.iface_plain, &provided);
@@ -2463,17 +2482,19 @@ impl Cache {
 
     /// The key of the run's coherence verdict (orphan rules, overlapping impls: Tcx::report_coherence):
     /// the checker version, the cache configuration (Relax build, options), every crate's
-    /// fingerprint (all its files' text, cfg, dependencies) and the files the program's impls come
-    /// from (the selection loads a subset of files). A clean verdict under this key is stored
+    /// interface fingerprint (its items outside fn bodies, cfg, dependencies) and the files the
+    /// program's impls come from (the selection loads a subset of files). A clean verdict under this key is stored
     /// as a borrowck-kind entry with an empty payload. None after a live edit.
     pub fn coherence_key(&self, prog: &crate::program::Program) -> Option<u128> {
-        if !crate::reload::edited_crates().is_empty() || self.fps.len() != prog.crates.len() { return None; }
+        if !crate::reload::edited_crates().is_empty() || self.iface_plain.len() != prog.crates.len() { return None; }
         let mut h = Sip128::new();
         h.str("coherence-verdict");
         h.u32(COHERENCE_VERSION);
         h.u128(self.cfg);
-        h.u32(self.fps.len() as u32);
-        for fp in &self.fps { h.u128(*fp); }
+        // by the crates' interfaces (their impls and every item they can name; a fn body is
+        // interface when it declares an impl), not their whole texts: a body edit checks nothing
+        h.u32(self.iface_plain.len() as u32);
+        for i in &self.iface_plain { h.u128(*i); }
         let mut from = vec![false; prog.files.len()];
         for im in &prog.impls {
             *from.get_mut(prog.def(im.def).file as usize)? = true;
@@ -2885,16 +2906,15 @@ impl Cache {
             return;
         }
         self.pending_keys.insert(key);
-        // a replacement without a stored entry makes the startup image be written again; one that
-        // moves its slot's tier up (O1 -> O2/O3) counts like a stale image slot (record_manifest:
-        // rewritten past 2%); an O3 payload replacing an O3 entry neither (PGO-driven O3 code
-        // differs run to run; every warm run rewrote the whole image)
+        // a replacement of an entry with no recorded tier, and one that moves its slot's tier up
+        // (O1 -> O2/O3), count like a stale image slot (record_manifest: rewritten past 2%; the
+        // next start leaves a slot lazy whose entry outranks its image code, img_live, and the
+        // image code of an entry replaced at the same tier is code for the same key); an O3
+        // payload replacing an O3 entry neither (PGO-driven O3 code differs run to run; every
+        // warm run rewrote the whole image)
         if replace && (existing || self.linked.contains(&id)) {
             match self.entry_tier(key) {
-                None => {
-                    self.image_rewrite = true;
-                    self.stats.rewrite_why[0] += 1;
-                }
+                None => self.stats.rewrite_why[0] += 1,
                 Some(old) if payload_tier(&payload).is_some_and(|new| tier_rank(new) > tier_rank(old)) => self.stats.rewrite_why[1] += 1,
                 Some(_) => {}
             }
@@ -3314,7 +3334,7 @@ impl Cache {
             }
         }
         let _mem = crate::memstat::tag(crate::memstat::Tag::CacheStore);
-        if self.mode == Mode::ReadOnly || order.is_empty() || (self.manifest_done && order.len() <= self.manifest_len && !self.image_rewrite && self.stats.rewrite_why[1] as usize * 50 <= self.image_slots) {
+        if self.mode == Mode::ReadOnly || order.is_empty() || (self.manifest_done && order.len() <= self.manifest_len && !self.image_rewrite && (self.stats.rewrite_why[0] + self.stats.rewrite_why[1]) as usize * 50 <= self.image_slots) {
             return true;
         }
         // at exit the slots' keys can no longer be made: after the mid-run manifest the exit
@@ -3350,7 +3370,7 @@ impl Cache {
         // the same start as before (within 2%), the loaded manifest still valid and its image
         // current (within 2%, and covering all but 2% of its cached slots): no new one
         let image_current = !self.image_rewrite
-            && (self.image_slots == 0 || ((self.image_stale + self.stats.rewrite_why[1] as usize) * 50 <= self.image_slots && self.image_slots * 50 >= self.manifest_present_cached * 49));
+            && (self.image_slots == 0 || ((self.image_stale + (self.stats.rewrite_why[0] + self.stats.rewrite_why[1]) as usize) * 50 <= self.image_slots && self.image_slots * 50 >= self.manifest_present_cached * 49));
         if self.startup_manifest_valid() && new * 50 <= list.len() && image_current {
             self.manifest_done = true; self.manifest_len = order.len();
             return true;
@@ -4472,6 +4492,43 @@ fn front_graph_key(identity: u128) -> u128 {
     h.u128(identity);
     h.finish128()
 }
+fn front_order_key(set: u128) -> u128 {
+    let mut h = Sip128::new();
+    h.str("front-order");
+    h.u128(crate::codegen_id::id());
+    h.str(std::env::consts::ARCH); h.str(std::env::consts::OS);
+    h.u128(set);
+    h.finish128()
+}
+fn front_order_path(dir: &std::path::Path, set: u128) -> PathBuf {
+    dir.join(format!("front_order-{:016x}.rcs", front_order_key(set) as u64))
+}
+/// The load order the last collected image of a program with these crates was recorded in.
+fn read_front_order(dir: &std::path::Path, set: u128) -> Option<Vec<(String, String)>> {
+    let store = Store::open(&front_order_path(dir, set))?;
+    let (kind, bytes) = store.get(front_order_key(set))?;
+    if kind != KIND_FRONT_ORDER { return None; }
+    crate::crate_image::decode(bytes)
+}
+/// Records `recipe`'s order as its crate set's last one (after its collected image is written:
+/// the next start loads in this order and restores that image). Unchanged: nothing written.
+pub(crate) fn write_front_order(dir: &std::path::Path, recipe: &crate::crate_image::GraphRecipe) {
+    if read_front_order(dir, recipe.set).as_ref() == Some(&recipe.crates) { return; }
+    let entry = NewEntry { key: front_order_key(recipe.set), kind: KIND_FRONT_ORDER, payload: crate::crate_image::encode(&recipe.crates) };
+    let _ = crate::store::append(&front_order_path(dir, recipe.set), vec![entry], true);
+}
+
+/// The stored graph a reordered load restores its leading crates from (FrontImages::load_order):
+/// the last recorded order of the same crates, of which this load keeps the first `common`.
+pub(crate) struct BaseOrder {
+    pub(crate) set: u128,
+    pub(crate) identity: u128,
+    pub(crate) pre: Vec<crate::preload::PreCrate>,
+    pub(crate) common: usize,
+}
+/// Each crate's recorded front record as FrontImages::prefix_records reads it.
+pub(crate) type PrefixRecords = Vec<Result<(u128, Vec<String>), &'static str>>;
+
 fn demand_stores_key(identity: u128) -> u128 {
     let mut h = Sip128::new();
     h.str("demand-stores");
@@ -4616,7 +4673,8 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
     // Selection reads even skipped files and negative module candidates. Keep
     // that global proof in the graph, not in any crate's input certificate.
     // Replacing this record also refreshes demand when the final crate is clean.
-    if let Some(demand) = &graph.demand_image {
+    // (a carried plan's proof is the earlier load's: its parts carry their own inputs)
+    if let Some(demand) = graph.demand_image.as_ref().filter(|_| !job.demand.as_ref().is_some_and(|p| p.is_carried())) {
         for (path, hash) in &demand.inputs {
             if inputs.insert(path.clone(), *hash).is_some_and(|old| old != *hash) { return None; }
         }
@@ -4640,7 +4698,8 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
     let path = front_graph_path(dir, recipe.identity);
     let mut entries = Vec::new();
     if let Some(demand) = &graph.demand_image {
-        let previous = Store::open(&path);
+        // retained parts: this graph's store, or a reordered load's base graph's
+        let previous = [Some(path.clone()), recipe.base.map(|b| front_graph_path(dir, b))].into_iter().flatten().filter_map(|p| Store::open(&p)).collect::<Vec<_>>();
         let mut header = (**demand).clone();
         let recorded = { let _r = crate::load_profile::span(job.profile, "front-graph-demand-record", "graph writer"); demand.recorded_parts() };
         mark("demand-record");
@@ -4664,7 +4723,7 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
             let (key, payload) = match body? {
                 Some(body) => body,
                 None => {
-                    let (kind, bytes) = previous.as_ref()?.get(part.key)?;
+                    let (kind, bytes) = previous.iter().find_map(|st| st.get(part.key))?;
                     if kind != KIND_DEMAND_PART { return None; }
                     (part.key, bytes.to_vec())
                 }
@@ -4714,6 +4773,10 @@ pub struct FrontImages {
     /// the crates a partial collected restore kept (name, fingerprint): the crates loaded after
     /// them name them as dependencies (restore_collected, full_deps)
     retained: relax_session::sync::Mutex<Vec<(String, u128)>>,
+    /// a reordered load's stored graph (load_order): the restore keeps its leading crates
+    base: relax_session::sync::Mutex<Option<BaseOrder>>,
+    /// the records load_order read of graph `.0` (the restore reads them once)
+    records: relax_session::sync::Mutex<Option<(u128, PrefixRecords)>>,
     // A failed collected restore must hand its completed plan to ordinary preload.
     pending_plan: relax_session::sync::Mutex<Option<(u128, std::sync::Arc<crate::preload::DemandPlan>)>>,
     /// writes the images of the files this run parses (None: a read-only cache)
@@ -5067,6 +5130,8 @@ impl crate::crate_image::CrateImages for FrontImages {
         }
     }
     fn end_load(&self) {
+        *self.base.lock().unwrap() = None;
+        *self.records.lock().unwrap() = None;
         self.hashes.lock().unwrap().take();
         *self.probes.lock().unwrap() = None;
         self.stores.lock().unwrap().clear();
@@ -5116,13 +5181,24 @@ impl crate::crate_image::CrateImages for FrontImages {
     }
     fn demand_parts(&self, crates: &[crate::preload::PreCrate], graph: u128) -> Option<crate::crate_image::DemandParts> {
         let recipe = crate::crate_image::GraphRecipe::new(crates);
-        let Some(saved) = self.front_graph(recipe.identity) else { return None; };
-        if saved.identity != recipe.identity || saved.crates.iter().map(|(key, _)| key).ne(recipe.crates.iter()) { return None; }
+        // a reordered load (load_order): the base graph's parts of the crates it keeps in place
+        // (a crate's part covers it and the crates before it); the others are planned again
+        let (identity, graph, common) = match self.front_graph(recipe.identity) {
+            Some(_) => (recipe.identity, graph, crates.len()),
+            None => {
+                let base = self.base.lock().unwrap();
+                let base = base.as_ref().filter(|b| b.set == recipe.set)?;
+                (base.identity, crate::preload::demand_recipe_identity(&base.pre), base.common)
+            }
+        };
+        let Some(saved) = self.front_graph(identity) else { return None; };
+        if saved.identity != identity || saved.crates.len() != crates.len()
+            || saved.crates.iter().map(|(key, _)| key).take(common).ne(recipe.crates.iter().take(common)) { return None; }
         let Some(image) = saved.demand_image.clone().filter(|image| image.graph == graph && image.parts.len() == crates.len()) else { return None; };
-        let path = front_graph_path(&self.dir, recipe.identity);
+        let path = front_graph_path(&self.dir, identity);
         let store = Store::open(&path)?;
         let profile = crates.first().is_some_and(|c| c.cfg.session.runtime.profile);
-        let keys = image.parts.iter().zip(crates).map(|(part, c)| {
+        let keys = image.parts.iter().zip(crates).take(common).map(|(part, c)| {
             let (kind, bytes) = store.get(part.key)?;
             if kind != KIND_DEMAND_PART { return None; }
             let part = crate::preload::DemandPart::read_header(part.key, bytes)?;
@@ -5147,16 +5223,18 @@ impl crate::crate_image::CrateImages for FrontImages {
             for (c, kind, name, _, content) in late { crate::sip::note_late_input(c, kind, name, content.as_deref()); }
             Some(part.key)
         }).collect::<Vec<_>>();
-        let valid = keys.iter().map(Option::is_some).collect::<Vec<_>>();
+        let valid = (0..crates.len()).map(|ci| keys.get(ci).is_some_and(Option::is_some)).collect::<Vec<_>>();
         // Stale parts are comparison evidence only, never reusable input. Keep
         // their old demand-out/export sets to validate an edited local selection.
-        let keys = image.parts.iter().map(|p| Some(p.key)).collect::<Vec<_>>();
-        let path = front_graph_path(&self.dir, recipe.identity);
+        let keys = image.parts.iter().enumerate().map(|(ci, p)| (ci < common).then_some(p.key)).collect::<Vec<_>>();
+        let path = front_graph_path(&self.dir, identity);
         let crates_profile = crates.first().is_some_and(|c| c.cfg.session.runtime.profile);
         let crate_names = crates.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
         let image_dir = self.dir.clone();
         let last = crates.len().saturating_sub(1);
-        let last_selected = image.files.iter().filter(|f| f.ci == last).all(|f| image.reached.contains(&(last, f.path.clone())));
+        // (a reordered load takes its new last crate in full: always sound, and nothing waits for
+        // the closure, which records what it would defer for the next start)
+        let last_selected = common < crates.len() || image.files.iter().filter(|f| f.ci == last).all(|f| image.reached.contains(&(last, f.path.clone())));
         Some(crate::crate_image::DemandParts { valid, last_selected, load: std::sync::Arc::new(move || {
             let _profile = crate::load_profile::span(crates_profile, "rust-demand-parts", "load");
             let store = Store::open(&path);
@@ -5971,6 +6049,89 @@ mod cold_tests {
         std::fs::write(&pre[3].root, "pub fn value() -> u64 { 7 }").unwrap();
         let (kept, _, _) = images.restore_collected(sess, &pre).expect("prefix restore");
         assert_eq!(kept.crates.len(), 3, "only the crates below the changed one");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn load_order_moves_changed_crates_last() {
+        isolated_test!(load_order_moves_changed_crates_last);
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let dir = std::env::temp_dir().join(format!("relax-load-order-{}-{}", std::process::id(), crate::clock::wall_ns()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = crate::cfg::CfgSet::host(sess, &[]);
+        // three padding crates stand where std's are; `late` depends on nothing but loads after `top`
+        let names = ["pad0", "pad1", "pad2", "low", "mid", "top", "late"];
+        let mut pre = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            let package = dir.join(name);
+            std::fs::create_dir(&package).unwrap();
+            let root = package.join("lib.rs").to_string_lossy().into_owned();
+            let (text, deps): (String, Vec<usize>) = match *name {
+                "low" => ("pub fn value() -> u32 { 7 }".into(), vec![]),
+                "mid" => ("pub fn mid() -> u32 { low::value() as u32 + 1 }".into(), vec![3]),
+                "top" => ("pub fn top() -> u32 { mid::mid() + 1 }".into(), vec![4]),
+                _ => (format!("pub fn f{i}() -> u32 {{ {i} }}"), vec![]),
+            };
+            std::fs::write(&root, text).unwrap();
+            pre.push(crate::preload::PreCrate {  name: name.to_string(), root, edition: 2021, cfg: cfg.clone(),
+                deps: deps.iter().map(|&d| (names[d].to_string(), names[d].to_string())).collect(), proc_macro: false,
+                image_deps: deps.clone(), image_dep_names: deps.iter().map(|&d| (names[d].to_string(), names[d].to_string())).collect() });
+        }
+        let store = dir.join("cache");
+        let load = |pre: &[crate::preload::PreCrate], images: &FrontImages| {
+            let mut prog = crate::program::Program::new(sess);
+            prog.record_front = true;
+            prog.front_sink = Some(FrontSink::for_dir(&store));
+            prog.preload_images(pre.to_vec(), Some(images));
+            for c in pre {
+                let deps = c.image_deps.iter().map(|&d| (prog.syms.intern(&pre[d].name), d as u32)).collect();
+                prog.load_crate(&c.name, &c.root, c.edition, c.cfg.clone(), deps).unwrap();
+            }
+            prog.resolve_imports();
+            assert!(prog.errors.is_empty(), "{:?}", prog.errors);
+            prog
+        };
+        let images = FrontImages { dir: store.clone(), ..Default::default() };
+        // a run that loads in `pre`'s order and records its collected graph (and with it the order)
+        let record = |pre: &[crate::preload::PreCrate]| {
+            let mut prog = load(pre, &images);
+            ColdFront::default().finish_in(&mut prog, store.clone());
+            let prog = load(pre, &images);
+            let mut tcx = crate::tcx::Tcx::new();
+            tcx.collect(&prog);
+            let unit = Unit::new(prog, tcx, 0);
+            let mut cache = Cache::open_in(&unit, Mode::On, dir.join("collected")).unwrap();
+            cache.dir = store.clone();
+            cache.crate_path = unit.prog.crates.iter().enumerate().map(|(i, c)|
+                store.join(front_store_name(&sess.options, unit.prog.syms.str(c.name), cache.fps[i]))).collect();
+            cache.record_collected(&unit.prog, &unit.tcx).expect("record collected graph");
+        };
+        let ordered = |pre: &[crate::preload::PreCrate]| -> Vec<crate::preload::PreCrate> {
+            match images.load_order(pre, 3) { Some(order) => crate::preload::reorder(pre, &order).unwrap(), None => pre.to_vec() }
+        };
+        let order_names = |pre: &[crate::preload::PreCrate]| pre.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(" ");
+        record(&pre);
+        // unchanged: the recorded order, everything restored
+        let now = ordered(&pre);
+        assert_eq!(order_names(&now), order_names(&pre));
+        assert_eq!(images.restore_collected(sess, &now).unwrap().0.crates.len(), names.len());
+        // an edit of `low`: it and its dependents load last; the restore keeps the crates before it
+        std::fs::write(&pre[3].root, "pub fn value() -> u32 { 8 }").unwrap();
+        let now = ordered(&pre);
+        assert_eq!(order_names(&now), "pad0 pad1 pad2 late low mid top");
+        let (kept, _, _) = images.restore_collected(sess, &now).expect("prefix restore");
+        assert_eq!(kept.crates.len(), 3, "the crates the stored order keeps in place");
+        record(&now);
+        // the next edit of `low`: the order holds, and `late` is kept too
+        std::fs::write(&pre[3].root, "pub fn value() -> u32 { 9 }").unwrap();
+        let again = ordered(&pre);
+        assert_eq!(order_names(&again), "pad0 pad1 pad2 late low mid top");
+        let (kept, _, _) = images.restore_collected(sess, &again).expect("prefix restore");
+        assert_eq!(kept.crates.len(), 4, "every crate the edit cannot reach");
+        // a restore of the reordered graph is the same program as loading it
+        record(&again);
+        let (whole, _, _) = images.restore_collected(sess, &ordered(&pre)).expect("unchanged sources restore");
+        assert_eq!(whole.crates.iter().map(|c| whole.syms.str(c.name).to_string()).collect::<Vec<_>>().join(" "), "pad0 pad1 pad2 late low mid top");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

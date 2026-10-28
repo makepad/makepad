@@ -638,7 +638,13 @@ pub trait CrateImages {
 #[derive(Clone)]
 pub struct GraphRecipe {
     pub identity: u128,
+    /// the same crates in any load order (each crate's recipe with its dependencies by name):
+    /// the key of the graph's last load order (cache.rs load_order)
+    pub set: u128,
     pub crates: Vec<(String, String)>,
+    /// a reordered load's base graph (cache.rs load_order): the graph store its retained demand
+    /// parts are read from when this graph is recorded
+    pub base: Option<u128>,
 }
 impl GraphRecipe {
     pub fn new(crates: &[crate::preload::PreCrate]) -> Self {
@@ -647,20 +653,34 @@ impl GraphRecipe {
         h.u32(VERSION);
         h.u8(crate::parser::lazy_auto() as u8);
         h.u32(crates.len() as u32);
+        let mut set: Vec<u128> = Vec::with_capacity(crates.len());
         for c in crates {
-            h.str(&c.name); h.str(&c.root); h.u32(c.edition as u32);
-            h.u128(parse_options(&c.cfg.session.options)); h.u8(c.proc_macro as u8);
-            let mut cfg = c.cfg.set.clone(); cfg.sort();
-            h.u32(cfg.len() as u32);
-            for value in cfg { h.str(&value); }
-            h.u32(c.deps.len() as u32);
-            for (alias, name) in &c.deps { h.str(alias); h.str(name); }
+            let mut k = crate::sip::Sip128::new();
+            for h in [&mut h, &mut k] {
+                h.str(&c.name); h.str(&c.root); h.u32(c.edition as u32);
+                h.u128(parse_options(&c.cfg.session.options)); h.u8(c.proc_macro as u8);
+                let mut cfg = c.cfg.set.clone(); cfg.sort();
+                h.u32(cfg.len() as u32);
+                for value in cfg { h.str(&value); }
+                h.u32(c.deps.len() as u32);
+                for (alias, name) in &c.deps { h.str(alias); h.str(name); }
+            }
             h.u32(c.image_deps.len() as u32);
             for d in &c.image_deps { h.u32(*d as u32); }
-            h.u32(c.image_dep_names.len() as u32);
-            for (alias, name) in &c.image_dep_names { h.str(alias); h.str(name); }
+            for h in [&mut h, &mut k] {
+                h.u32(c.image_dep_names.len() as u32);
+                for (alias, name) in &c.image_dep_names { h.str(alias); h.str(name); }
+            }
+            set.push(k.finish128());
         }
-        Self { identity: h.finish128(), crates: crates.iter().map(|c| (c.name.clone(), c.root.clone())).collect() }
+        set.sort_unstable();
+        let mut s = crate::sip::Sip128::new();
+        s.str("front-graph-set");
+        s.u32(VERSION);
+        s.u8(crate::parser::lazy_auto() as u8);
+        s.u32(set.len() as u32);
+        for k in set { s.u128(k); }
+        Self { identity: h.finish128(), set: s.finish128(), crates: crates.iter().map(|c| (c.name.clone(), c.root.clone())).collect(), base: None }
     }
 }
 

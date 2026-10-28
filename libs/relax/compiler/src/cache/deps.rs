@@ -1218,17 +1218,19 @@ impl Deps {
             }
         }
         for v in always_of.iter_mut() { v.sort_unstable(); }
+        // (the crates it can see by identity, not by load-order index: a load order that changes
+        // keeps the keys of code that did not)
+        let mut by_ident: Vec<usize> = (0..n_crates).filter(|&k| !always_of[k].is_empty()).collect();
+        by_ident.sort_unstable_by_key(|&k| crates[k].ident);
         for c in 0..n_crates {
             crates[c].always = match prev {
                 Some(prev) if clean[c] => prev.crates.rows()[c].always,
                 _ => {
                     let mut h = Sip128::new();
-                    h.str("dep-always");
-                    for (k, v) in always_of.iter().enumerate() {
-                        if bit(&universe[c], k as u32) && !v.is_empty() {
-                            h.u32(k as u32);
-                            for x in v { h.u128(*x); }
-                        }
+                    h.str("dep-always-v2");
+                    for &k in by_ident.iter().filter(|&&k| bit(&universe[c], k as u32)) {
+                        h.u64(crates[k].ident[0]); h.u64(crates[k].ident[1]);
+                        for x in &always_of[k] { h.u128(*x); }
                     }
                     h2(h.finish128())
                 }

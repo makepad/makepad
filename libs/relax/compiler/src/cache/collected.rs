@@ -100,6 +100,32 @@ impl FrontImages {
         }).collect())
     }
 
+    /// The demand plan `graph` recorded, when this load can take it as it is (DemandPlan::carried):
+    /// for these crates in this order, it selected every file of the last crate (it deferred
+    /// nothing: the load takes every crate in full, which is always sound), and its module probes
+    /// hold. Edits of file contents do not plan again; a module file that comes or goes does (a
+    /// selection can become partial again only after such a change or a load without a plan).
+    fn carried_demand(&self, graph: &crate::crate_image::GraphImage, pre: &[crate::preload::PreCrate]) -> Option<Arc<crate::preload::DemandImage>> {
+        let no = |why: &str| { if crate::preload::trace() { eprintln!("makepad-run collected: demand plan not carried: {why}"); } None };
+        if pre.iter().any(|c| c.cfg.session.runtime.lazy_verify) { return no("verify"); }
+        let Some(image) = graph.demand_image.clone() else { return no("no stored plan") };
+        let last = pre.len().checked_sub(1)?;
+        if image.graph != crate::preload::demand_recipe_identity(pre) || image.parts.len() != pre.len() { return no("another graph"); }
+        if !image.files.iter().filter(|f| f.ci == last).all(|f| image.reached.contains(&(last, f.path.clone()))) { return no("the last crate was selected in part"); }
+        // the module files it chose between are as they were: no module came or went
+        if !image.probes.iter().all(|(p, e)| self.probe_current(p, *e)) { return no("a module probe changed"); }
+        Some(image)
+    }
+
+    /// prefix_records of `graph` for a load whose first `common` crates are `pre`'s (the
+    /// others: "load order"), the ones load_order read when it read this graph.
+    fn records_for(&self, graph: &crate::crate_image::GraphImage, pre: &[crate::preload::PreCrate], common: usize, opened: Option<&[Arc<Store>]>) -> Option<PrefixRecords> {
+        let stashed = self.records.lock().unwrap().take().filter(|(identity, _)| *identity == graph.identity);
+        let mut records = match stashed { Some((_, r)) => r, None => self.prefix_records(graph, pre, opened)? };
+        for r in records.iter_mut().skip(common) { *r = Err("load order"); }
+        Some(records)
+    }
+
     // An edit normally invalidates a leaf or a dependent suffix. Keep the complete
     // certified prefix resident, including its resolved imports and collected types.
     // `selection(ci)`: this load's demand selection of crate ci, None while it is not known yet.
@@ -142,6 +168,65 @@ impl FrontImages {
         (first >= crate::std_pre_crates(&pre[0].cfg.session, false).len()).then_some((first, unknown))
     }
 
+    /// The load order for `pre` (std first, every crate after its dependencies), as positions
+    /// in `pre`: the order the last collected image of these crates was recorded in, with the
+    /// crates whose records no longer hold, the crates of their names and every crate depending
+    /// on them moved to its end (in that order). The restore keeps every crate before them
+    /// (restore_collected, BaseOrder), and the next edit of the same crates finds them last
+    /// already: an edit of a library collects it and its dependents again, not every crate a
+    /// dependency order happened to put after it. None: `pre`'s own order.
+    pub fn load_order(&self, pre: &[crate::preload::PreCrate], std_count: usize) -> Option<Vec<usize>> {
+        let recipe = GraphRecipe::new(pre);
+        let stored = read_front_order(&self.dir, recipe.set)?;
+        let at: HashMap<(&str, &str), usize> = pre.iter().enumerate().map(|(i, c)| ((c.name.as_str(), c.root.as_str()), i)).collect();
+        let order: Vec<usize> = stored.iter().map(|(n, r)| at.get(&(n.as_str(), r.as_str())).copied()).collect::<Option<_>>()?;
+        if !order.iter().copied().take(std_count).eq(0..std_count) { return None; }
+        let base = crate::preload::reorder(pre, &order)?;
+        self.begin_load(&base);
+        if self.certificate.lock().unwrap().is_some() { return Some(order); }
+        let graph = self.graph_read.lock().unwrap().clone()?;
+        let records = self.prefix_records(&graph, &base, None)?;
+        let mut dirty: Vec<bool> = records.iter().map(Result::is_err).collect();
+        // (a lib and its bin share a name: collected_prefix keeps neither when one changes)
+        loop {
+            let names: std::collections::HashSet<&str> = base.iter().zip(&dirty).filter(|(_, d)| **d).map(|(c, _)| c.name.as_str()).collect();
+            let mut changed = false;
+            for j in 0..base.len() {
+                if !dirty[j] && (names.contains(base[j].name.as_str()) || base[j].image_deps.iter().any(|&k| dirty[k])) { dirty[j] = true; changed = true; }
+            }
+            if !changed { break; }
+        }
+        let moved: Vec<usize> = (0..base.len()).filter(|&j| !dirty[j]).chain((0..base.len()).filter(|&j| dirty[j])).collect();
+        let common = moved.iter().enumerate().take_while(|(j, k)| j == *k).count();
+        if common == base.len() {
+            *self.records.lock().unwrap() = Some((graph.identity, records));
+            return Some(order);
+        }
+        let reordered: Vec<usize> = moved.iter().map(|&j| order[j]).collect();
+        let identity = GraphRecipe::new(&crate::preload::reorder(pre, &reordered)?).identity;
+        if crate::preload::trace() {
+            eprintln!("makepad-run collected: load order keeps {} of {} crates in place, {} changed or dependent ones last ({})", common, base.len(), dirty.iter().filter(|d| **d).count(),
+                (0..base.len()).filter(|&j| dirty[j]).map(|j| base[j].name.as_str()).collect::<Vec<_>>().join(" "));
+        }
+        // that order recorded before: its own graph decides (begin_load)
+        if read_front_graph(&self.dir, identity).is_some() { return Some(reordered); }
+        *self.records.lock().unwrap() = Some((graph.identity, records));
+        *self.base.lock().unwrap() = Some(BaseOrder { set: recipe.set, identity: graph.identity, pre: base, common });
+        // the reordered load begins here, with the inputs validated against the stored graph
+        *self.begun.lock().unwrap() = Some(identity);
+        Some(reordered)
+    }
+
+    /// The stored graph a load of `pre` restores from, the crates in its order and how many
+    /// leading ones of `pre` it describes: `pre`'s own, else a reordered load's base (load_order).
+    fn graph_for(&self, pre: &[crate::preload::PreCrate]) -> Option<(Arc<crate::crate_image::GraphImage>, Option<(Vec<crate::preload::PreCrate>, usize)>)> {
+        let recipe = GraphRecipe::new(pre);
+        if let Some(g) = self.front_graph(recipe.identity) { return Some((g, None)); }
+        let base = self.base.lock().unwrap();
+        let base = base.as_ref().filter(|b| b.set == recipe.set)?;
+        Some((self.front_graph(base.identity)?, Some((base.pre.clone(), base.common))))
+    }
+
     pub fn restore_collected(&self, session: &Arc<crate::Session>, pre: &[crate::preload::PreCrate]) -> Option<(Program, Tcx, Option<CollectedCache>)> {
         let _profile = crate::load_profile::span(session.runtime.profile, "front-collected-restore", "main");
         // This handoff is scoped to one immutable load, never a later edit.
@@ -157,39 +242,49 @@ impl FrontImages {
         why = "certificate";
         let cert = self.certificate.lock().ok()?;
         let stale;
+        // a reordered load's base graph: its crates in its order, of which `common` lead `pre` too
+        let mut base = None;
         let mut plan = None;
         // the prefix whose contexts' prescans the plan worker releases once it is done
         let release_after: Arc<relax_session::sync::Mutex<Option<usize>>> = Arc::default();
         let (graph, mut prefix) = match cert.as_ref() {
             Some(graph) => (graph, pre.len()),
             None => {
-                stale = self.front_graph(GraphRecipe::new(pre).identity)?;
+                let (graph, b) = self.graph_for(pre)?;
+                stale = graph;
+                base = b;
                 if !session.options.source_eager && session.options.rs_lazy {
-                    // Restore the immutable Program/Tcx while the demand worker
-                    // computes the new selection. Nothing is retained or exposed
-                    // to collection until that selection has been validated.
                     let contexts = crate::source_context::Context::for_crates(pre, Arc::default(), session);
-                    let pending = Arc::new(crate::preload::DemandPlan::new(pre, contexts, Some(self), true));
-                    *self.pending_plan.lock().unwrap() = Some((GraphRecipe::new(pre).identity, pending.clone()));
-                    let worker = pending.clone();
-                    let in_world = crate::macro_reg::in_world();
-                    let release = release_after.clone();
-                    // (detached: the restore takes its prefix as soon as the plan's early
-                    // selection covers it, and the load goes on while the plan completes)
-                    std::thread::Builder::new().name("run-demand".into()).spawn(move || {
-                        crate::macro_reg::set_in_world(in_world);
-                        worker.complete();
-                        let mut r = release.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(prefix) = r.take() { for context in &worker.contexts()[..prefix] { context.release_prescan(); } }
-                    }).ok()?;
-                    plan = Some(pending);
+                    if let Some(image) = base.is_none().then(|| self.carried_demand(&stale, pre)).flatten() {
+                        plan = Some(Arc::new(crate::preload::DemandPlan::carried(pre, contexts, image)));
+                    } else {
+                        // Restore the immutable Program/Tcx while the demand worker
+                        // computes the new selection. Nothing is retained or exposed
+                        // to collection until that selection has been validated.
+                        let pending = Arc::new(crate::preload::DemandPlan::new(pre, contexts, Some(self), true));
+                        *self.pending_plan.lock().unwrap() = Some((GraphRecipe::new(pre).identity, pending.clone()));
+                        let worker = pending.clone();
+                        let in_world = crate::macro_reg::in_world();
+                        let release = release_after.clone();
+                        // (detached: the restore takes its prefix as soon as the plan's early
+                        // selection covers it, and the load goes on while the plan completes)
+                        std::thread::Builder::new().name("run-demand".into()).spawn(move || {
+                            crate::macro_reg::set_in_world(in_world);
+                            worker.complete();
+                            let mut r = release.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(prefix) = r.take() { for context in &worker.contexts()[..prefix] { context.release_prescan(); } }
+                        }).ok()?;
+                        plan = Some(pending);
+                    }
                 }
                 let prefix = if plan.is_some() { 0 } else {
-                    Self::collected_prefix(pre, &self.prefix_records(&stale, pre, None)?, &|_| Some((0, Vec::new())))?.0
+                    let (rpre, common) = base.as_ref().map_or((pre, pre.len()), |(p, n): &(Vec<_>, usize)| (p.as_slice(), *n));
+                    Self::collected_prefix(rpre, &self.records_for(&stale, rpre, common, None)?, &|_| Some((0, Vec::new())))?.0
                 };
                 (&stale, prefix)
             }
         };
+        let (rpre, common) = base.as_ref().map_or((pre, pre.len()), |(p, n)| (p.as_slice(), *n));
         phase("validated");
         why = "store";
         let st = Arc::new(Store::open(&path(&self.dir, graph.identity))?);
@@ -237,7 +332,7 @@ impl FrontImages {
             file_times[slot] += now - *t;
             *t = now;
         };
-        let mut prog = Program::restore_collected(session, program, pre, |f, k, cfg, meta| {
+        let mut prog = Program::restore_collected(session, program, rpre, |f, k, cfg, meta| {
             let restored = (|| {
             let mut at = timed.then(std::time::Instant::now);
             let store = stores.get(k as usize)?;
@@ -282,7 +377,7 @@ impl FrontImages {
         phase("Tcx");
         if let Some(plan) = plan.as_deref() {
             why = "demand selection";
-            let records = self.prefix_records(graph, pre, Some(&stores))?;
+            let records = self.records_for(graph, rpre, common, Some(&stores))?;
             phase("prefix records");
             // the plan's selection where it is complete, else its early prefix (crates selected
             // in full: identity 0, nothing deferred; preload resolve_images reads it the same way)
@@ -292,7 +387,7 @@ impl FrontImages {
                     Some(r) => Some((r.selection_identity(ci), r.deferred(ci))),
                     None => (ci < seen).then(Vec::new).map(|d| (0, d)),
                 };
-                let (p, unknown) = Self::collected_prefix(pre, &records, &selection)?;
+                let (p, unknown) = Self::collected_prefix(rpre, &records, &selection)?;
                 if !unknown || ready.is_some() { break p; }
                 plan.wait_progress(seen);
             };
@@ -306,7 +401,7 @@ impl FrontImages {
         why = "ledger replay";
         for store in stores.iter().take(prefix) { replay_front_ledger(store)?; }
         phase("ledger replayed");
-        prog.front_graph = Some(GraphRecipe::new(pre));
+        prog.front_graph = Some(GraphRecipe { base: base.is_some().then_some(graph.identity), ..GraphRecipe::new(pre) });
         let image_defs = prog.defs.len();
         let mut kept = None;
         if prefix != pre.len() {
@@ -366,6 +461,8 @@ struct Encoder<'a> {
     crate_ident: &'a [u128],
     boot: Option<&'a CollectedBoot>,
     committed: bool,
+    /// the definition tables the cache restored, with the definition count they were restored for
+    mapped: Option<(&'a MappedDefinitions, usize)>,
 }
 
 
@@ -380,6 +477,7 @@ pub(crate) struct CollectedInputs {
     iface_plain: Vec<u128>,
     crate_path: Vec<PathBuf>,
     crate_ident: Vec<u128>,
+    mapped: Option<(MappedDefinitions, usize)>,
 }
 
 impl CollectedInputs {
@@ -388,7 +486,8 @@ impl CollectedInputs {
     /// added since the first encode (the settle rebuild restores from it, and compares the counts).
     pub(crate) fn encode_now(&self, prog: &Program, tcx: &Tcx, stop: &dyn Fn() -> bool) -> CollectedRecord {
         Encoder { mode: self.mode, dir: &self.dir, fps: &self.fps, iface_plain: &self.iface_plain,
-            crate_path: &self.crate_path, crate_ident: &self.crate_ident, boot: None, committed: false }
+            crate_path: &self.crate_path, crate_ident: &self.crate_ident, boot: None, committed: false,
+            mapped: self.mapped.as_ref().map(|(m, n)| (m, *n)) }
             .encode_as(prog, tcx, stop, true)
     }
 }
@@ -396,13 +495,14 @@ impl CollectedInputs {
 impl Cache {
     pub(crate) fn collected_inputs(&self) -> CollectedInputs {
         CollectedInputs { mode: self.mode, dir: self.dir.clone(), fps: self.fps.clone(), iface_plain: self.iface_plain.clone(),
-            crate_path: self.crate_path.clone(), crate_ident: self.crate_ident.clone() }
+            crate_path: self.crate_path.clone(), crate_ident: self.crate_ident.clone(),
+            mapped: self.mapped_definitions.clone().map(|m| (m, self.crate_defs_n)) }
     }
 
     fn encoder(&self) -> Encoder<'_> {
         Encoder { mode: self.mode, dir: &self.dir, fps: &self.fps, iface_plain: &self.iface_plain,
             crate_path: &self.crate_path, crate_ident: &self.crate_ident, boot: self.collected_boot.as_ref(),
-            committed: self.collected_committed }
+            committed: self.collected_committed, mapped: self.mapped_definitions.as_ref().map(|m| (m, self.crate_defs_n)) }
     }
 
 
@@ -503,23 +603,28 @@ impl Encoder<'_> {
     }
 
     fn definitions(&self, prog: &Program, tcx: &Tcx, stop: &dyn Fn() -> bool) -> Option<crate::image::Writer<'static>> {
+        // The keys the cache restored hold while the program has the definitions they were
+        // restored for (Cache::def_key): taken as they are below `dk` (a partial restore's kept
+        // definitions); only the definitions after them are keyed here.
+        let reuse = self.mapped.filter(|(m, n)| *n == prog.defs.len() && m.keys.len() <= prog.defs.len()).map(|(m, _)| m);
+        let dk = reuse.map_or(0, |m| m.defs());
         let mut memo = HashMap::new();
         let mut files = HashMap::new();
-        let mut maps = vec![std::collections::BTreeMap::new(); prog.crates.len()];
-        let mut duplicates = HashSet::new();
-        for i in 0..prog.defs.len() {
+        let mut keys: Vec<MappedKey> = Vec::with_capacity(prog.defs.len());
+        if let Some(m) = reuse { keys.extend_from_slice(&m.keys[..dk]); }
+        for i in dk..prog.defs.len() {
             if i % 1024 == 1023 && stop() { return None; }
-            let d = DefId(i as u32);
-            let c = prog.def(d).krate as usize;
-            let k = def_key_in(prog, tcx, self.crate_ident, &mut memo, &mut files, d);
-            if maps[c].insert(k, d).is_some() { duplicates.insert((c, k)); }
+            keys.push(MappedKey::new(def_key_in(prog, tcx, self.crate_ident, &mut memo, &mut files, DefId(i as u32))));
         }
-        for (c, k) in duplicates { maps[c].remove(&k); }
+        // per crate: its definitions by key, without the keys two of them have
+        let mut maps: Vec<Vec<(u128, u32)>> = vec![Vec::new(); prog.crates.len()];
+        for (i, k) in keys.iter().enumerate() { maps[prog.def(DefId(i as u32)).krate as usize].push((k.get(), i as u32)); }
         let mut image = crate::image::Writer::default();
-        let keys: Vec<MappedKey> = (0..prog.defs.len()).map(|i| MappedKey::new(memo[&DefId(i as u32)])).collect();
         image.add_owned(0, &keys);
-        for (c, map) in maps.into_iter().enumerate() {
-            let (keys, defs): (Vec<MappedKey>, Vec<u32>) = map.into_iter().map(|(k, d)| (MappedKey::new(k), d.0)).unzip();
+        for (c, mut map) in maps.into_iter().enumerate() {
+            map.sort_unstable();
+            let unique = |i: usize| (i == 0 || map[i - 1].0 != map[i].0) && map.get(i + 1).is_none_or(|n| n.0 != map[i].0);
+            let (keys, defs): (Vec<MappedKey>, Vec<u32>) = (0..map.len()).filter(|&i| unique(i)).map(|i| (MappedKey::new(map[i].0), map[i].1)).unzip();
             image.add_owned(1 + c as u32 * 2, &keys);
             image.add_owned(2 + c as u32 * 2, &defs);
         }
@@ -556,7 +661,7 @@ impl Encoder<'_> {
         check()?;
         let payload = image;
         let dest = path(self.dir, recipe.identity);
-        Some(CollectedRecord::Ready((dest, key(recipe.identity)), payload))
+        Some(CollectedRecord::Ready(CollectedDest { dest, key: key(recipe.identity), recipe: recipe.clone() }, payload))
         })();
         match recorded {
             Some(r) => r,
@@ -573,19 +678,21 @@ impl Encoder<'_> {
 
 impl Cache {
     /// `report`: the crate count to print (verbose). The entry as the store now holds it.
-    pub fn commit_collected(report: Option<usize>, (dest, key): (PathBuf, u128), payload: crate::image::Writer<'static>) -> Option<CollectedWritten> {
+    pub fn commit_collected(report: Option<usize>, CollectedDest { dest, key, recipe }: CollectedDest, payload: crate::image::Writer<'static>) -> Option<CollectedWritten> {
         front_run::commit_marks(&front_run::run_marks()).ok()?;
         // Hash/verify outside the compiler locks, alongside the store write. The
         // immutable snapshot is already complete; a current store needs no replacement.
         let (len, sum) = crate::store::entry_sum(&CollectedEntry { key, payload: &payload })?;
         let written = CollectedWritten { dest: dest.clone(), key, len, sum };
-        if Store::open(&dest).is_some_and(|s| s.matches_sum(key, KIND_COLLECTED, len, sum)) { return Some(written); }
+        // the next start of these crates loads in this order (load_order)
+        let order = |written| { if let Some(dir) = dest.parent() { write_front_order(dir, &recipe); } Some(written) };
+        if Store::open(&dest).is_some_and(|s| s.matches_sum(key, KIND_COLLECTED, len, sum)) { return order(written); }
         if crate::store::append(&dest, vec![CollectedEntry { key, payload: &payload }], true).is_err() {
             if crate::preload::trace() { eprintln!("makepad-run collected: not recorded: write"); }
             return None;
         }
         if let Some(n) = report { eprintln!("makepad-run collected: recorded {} crates", n); }
-        Some(written)
+        order(written)
     }
 
     /// The running program's collected tables become views of the image this run wrote
@@ -622,9 +729,16 @@ pub struct CollectedWritten {
     sum: u64,
 }
 
+/// Where a collected image goes, and the graph recipe whose load order it is recorded in.
+pub struct CollectedDest {
+    dest: PathBuf,
+    key: u128,
+    recipe: GraphRecipe,
+}
+
 pub enum CollectedRecord {
     /// encoded; commit_collected writes it (no lock needed)
-    Ready((PathBuf, u128), crate::image::Writer<'static>),
+    Ready(CollectedDest, crate::image::Writer<'static>),
     /// the store already holds this exact image
     Current,
     /// stopped for the main thread: try again later
@@ -634,6 +748,7 @@ pub enum CollectedRecord {
 
 /// Tables produced by this build and covered by the collected store checksum and input
 /// certificate. Only the small section directory is decoded at boot; keys stay mapped.
+#[derive(Clone)]
 pub(super) struct MappedDefinitions {
     keys: &'static [MappedKey],
     crates: Vec<(&'static [MappedKey], &'static [u32])>,

@@ -312,6 +312,12 @@ pub(crate) fn pos_digest(pf: &ParsedFile, d: &FileDigest, item: ItemId) -> u128 
 /// dependencies' interface fingerprints. A proc-macro crate's whole fingerprint (its fn bodies
 /// make the expansions of every crate that uses it).
 pub(crate) fn crate_ifaces(prog: &crate::program::Program, fps: &[u128], digests: &[Option<std::sync::Arc<FileDigest>>]) -> Vec<u128> {
+    crate_ifaces_from(prog, fps, digests, &[])
+}
+
+/// `crate_ifaces` when the first crates' interfaces are `known` (a partial collected restore keeps
+/// them): only the other crates' files need digests.
+pub(crate) fn crate_ifaces_from(prog: &crate::program::Program, fps: &[u128], digests: &[Option<std::sync::Arc<FileDigest>>], known: &[u128]) -> Vec<u128> {
     let nc = prog.crates.len();
     let mut per: Vec<Sip128> = (0..nc)
         .map(|c| {
@@ -336,6 +342,7 @@ pub(crate) fn crate_ifaces(prog: &crate::program::Program, fps: &[u128], digests
     }
     let mut out = vec![0u128; nc];
     let mut done = vec![false; nc];
+    for (c, &k) in known.iter().enumerate().take(nc) { out[c] = k; done[c] = true; }
     fn go(c: usize, prog: &crate::program::Program, per: &[Sip128], out: &mut Vec<u128>, done: &mut Vec<bool>, depth: u32) -> u128 {
         if done[c] || depth > 512 {
             return out[c];
