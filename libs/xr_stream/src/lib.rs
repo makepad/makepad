@@ -21,7 +21,15 @@ pub const DEFAULT_PORT: u16 = 8794;
 /// The room field goes up in messages of about this size (bytes).
 const WORLD_MESSAGE_BYTES: usize = 16 << 10;
 /// The display period the client expects (ns; the stream runs at 90 Hz).
-const PERIOD_NS: u64 = 11_111_111;
+/// The display period (ns) of the rate the link runs at (`XrServerMsg::Refresh`; 90 Hz until
+/// linked).
+static PERIOD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(11_111_111);
+fn period_ns() -> u64 {
+    PERIOD.load(std::sync::atomic::Ordering::Relaxed)
+}
+fn set_refresh_mhz(mhz: u32) {
+    PERIOD.store(1_000_000_000_000 / mhz.max(1_000) as u64, std::sync::atomic::Ordering::Relaxed);
+}
 /// Decoded pictures a tile holds waiting for their display frame (with the shown one and the
 /// two before it nine of the decoder reader's eleven images: the decoder never waits for one).
 /// The lead never asks for more waiting than this holds (`steer_ahead`): a picture let go here
@@ -29,9 +37,9 @@ const PERIOD_NS: u64 = 11_111_111;
 const HOLD: usize = 6;
 
 mod serve;
-pub use serve::{serve, DrawXrBand, DrawXrMirror, XrServe};
+pub use serve::{serve, set_stream_aa, stream_aa, DrawXrBand, DrawXrMirror, StreamAa, XrServe, STREAM_AA_MODES};
 #[cfg(not(target_arch = "wasm32"))]
-pub use serve::{tap_audio, XrAudioTap};
+pub use serve::{set_menu_toggles_streaming, set_stream_bitrate_kbps, set_stream_refresh_hz, set_stream_room_scan, set_stream_see_through, set_streaming, stream_room_scan, streaming, streaming_changes, tap_audio, XrAudioTap, STREAM_REFRESH_RATES};
 /// The serving side's shaders and `mod.draw.XrServe` (an app that serves registers them).
 pub fn serve_script_mod(vm: &mut ScriptVm) -> ScriptValue {
     serve::script_mod(vm)
@@ -417,6 +425,12 @@ struct Shared {
     /// let go unshown at their queue cap (the last few: why a display frame repeated).
     arrived: VecDeque<u64>,
     cap_dropped: VecDeque<u64>,
+    /// The display rate the link runs at (mHz): the app's display follows it.
+    refresh_mhz: u32,
+    /// The server's switches: the stream off (no decoders, no stream pass: the room alone), VR
+    /// (the picture opaque, no passthrough).
+    stream_off: bool,
+    vr: bool,
     status: String,
     stop: bool,
     /// The uplink's last 5 s (rate, interval spread).
@@ -583,6 +597,16 @@ pub struct XrStreamClient {
     /// The room field on or off whatever the server says (debug: its CPU A/B; None: as the
     /// server says).
     pub room_field_override: Option<bool>,
+    /// The environment depth may run (a debug switch; on: it runs while the stream's occlusion
+    /// or the room field needs it).
+    pub env_depth_allowed: bool,
+    /// The power state applied: (stream off, VR, environment depth on); None: not yet.
+    power: Option<(bool, bool, bool)>,
+    /// The headset's battery as last read (`hal_battery`: level | charging << 8; -1 unknown)
+    /// and when.
+    battery: (i64, Option<Instant>),
+    /// The last report sent while the stream is off (no XR frames then: `housekeeping`).
+    idle_report_at: Instant,
     watch_seq: (u64, u32),
     watch_last_view: Option<[f32; 4]>,
     watch_turn: f32,
@@ -630,7 +654,8 @@ impl Drop for XrStreamClient {
 impl XrStreamClient {
     /// Starts linking to the XR server at `host:port` (on a worker thread: the UI never waits).
     pub fn connect(host: String, port: u16, eye: [u32; 2], refresh_hz: f64) -> XrStreamClient {
-        let shared = Arc::new(Mutex::new(Shared { status: format!("connecting to {host}:{port}"), tiles: 1, ..Default::default() }));
+        let shared = Arc::new(Mutex::new(Shared { status: format!("connecting to {host}:{port}"), tiles: 1, refresh_mhz: (refresh_hz * 1000.0) as u32, ..Default::default() }));
+        set_refresh_mhz((refresh_hz * 1000.0) as u32);
         let signal = SignalToUI::new();
         let sent = Arc::new(Mutex::new(VecDeque::new()));
         #[cfg(not(target_arch = "wasm32"))]
@@ -689,6 +714,10 @@ impl XrStreamClient {
             odd_frames: 0,
             frame_code: 0,
             room_field_override: None,
+            env_depth_allowed: true,
+            power: None,
+            battery: (-1, None),
+            idle_report_at: Instant::now(),
             watch_seq: (0, 0),
             watch_last_view: None,
             watch_turn: 0.0,
@@ -724,6 +753,16 @@ impl XrStreamClient {
         if self.line.is_empty() { s.status.clone() } else { format!("{} · {}", s.status, self.line) }
     }
 
+    /// The server turned the stream off (the app plays no sound then, the view shows the room).
+    pub fn stream_off(&self) -> bool {
+        self.shared.lock().unwrap().stream_off
+    }
+
+    /// The display rate (Hz) the link runs at: the app asks its display for it.
+    pub fn refresh_hz(&self) -> f32 {
+        self.shared.lock().unwrap().refresh_mhz as f32 / 1000.0
+    }
+
     /// Whether a picture can be drawn.
     pub fn has_picture(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
@@ -742,7 +781,7 @@ impl XrStreamClient {
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some((display_ns, _)) = cx.xr_frame_wire() {
                     let last = std::mem::replace(&mut self.last_display_ns, display_ns);
-                    let period = 1.0e9 / 90.0;
+                    let period = period_ns() as f64;
                     if last != 0 && display_ns > last && (display_ns - last) as f64 > period * 1.5 {
                         self.window.events.push((self.window_at.elapsed().as_millis() as u32, 'l'));
                         self.mark_frame(makepad_desk_link::xr::report::FRAME_LATE);
@@ -755,18 +794,7 @@ impl XrStreamClient {
                             self.window.env_age_us.push(((display_ns - env_ns) / 1000) as u32);
                         }
                     }
-                    // the room field only while the server's app uses it (the depth readback and
-                    // its integration are a core of the headset's CPU)
-                    let (link, room_field) = { let s = self.shared.lock().unwrap(); (s.link.clone(), s.room_field) };
-                    let room_field = self.room_field_override.unwrap_or(room_field);
-                    if room_field != cx.xr_room_field_wanted() {
-                        cx.xr_set_room_field(room_field);
-                        // (on again: every brick anew, the server's mirror may have dropped them)
-                        self.world_cursor = 0;
-                    }
-                    if let (Some(link), true) = (&link, room_field) {
-                        self.send_world(cx, link);
-                    }
+                    self.housekeeping(cx);
 
                     // this display frame's picture: the oldest decoded one
                     let display_ns = cx.xr_frame_wire().map_or(0, |(t, _)| t);
@@ -821,7 +849,10 @@ impl XrStreamClient {
             // (a decoded picture: the next XR frame takes it)
             Event::Signal => {
                 #[cfg(not(target_arch = "wasm32"))]
-                self.warp_probe_result(cx);
+                {
+                    self.warp_probe_result(cx);
+                    self.housekeeping(cx);
+                }
                 self.signal.check_and_clear()
             }
             _ => false,
@@ -862,6 +893,71 @@ impl XrStreamClient {
         flush(&mut batch);
     }
 
+    /// The power switches and the room field as the server says, and the room field's bricks
+    /// up: from every XR frame, and while the stream is off (no XR frames then) from the app's
+    /// timer ([`XrStreamClient::idle_tick`]) and the link's signals. Each part runs only while
+    /// its switch needs it: the stream off releases the decoders and the shown pictures and
+    /// pauses the stereo view (the room alone); the environment depth runs while the stream's
+    /// occlusion or the room field needs it; the room field (the depth readback, its integration,
+    /// the bricks) only while the server's app wants it and its user allows the scan.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn housekeeping(&mut self, cx: &mut Cx) {
+        use makepad_widgets::makepad_platform::makepad_hal as hal;
+        let (link, room_field, off, vr) = { let s = self.shared.lock().unwrap(); (s.link.clone(), s.room_field, s.stream_off, s.vr) };
+        let room_field = self.room_field_override.unwrap_or(room_field);
+        if room_field != cx.xr_room_field_wanted() {
+            cx.xr_set_room_field(room_field);
+            // (on again: every brick anew, the server's mirror may have dropped them)
+            self.world_cursor = 0;
+        }
+        if let (Some(link), true) = (&link, room_field) {
+            self.send_world(cx, link);
+        }
+        let env = self.env_depth_allowed && ((!off && self.occlusion && !vr) || room_field);
+        let want = (off, vr, env);
+        if self.power != Some(want) {
+            let before = self.power.replace(want);
+            if before.map(|b| b.0) != Some(off) {
+                log!("xr stream: stream {}", if off { "off: decoders released, the room alone" } else { "on" });
+                hal::hal_xr_stereo_paused(off);
+                if off {
+                    self.shown = [None, None];
+                    self.pending_show = None;
+                }
+            }
+            if before.map(|b| b.1) != Some(vr) {
+                log!("xr stream: {}", if vr { "VR: the picture opaque, no passthrough" } else { "mixed reality" });
+                cx.xr_set_see_through(!vr);
+            }
+            if before.map(|b| b.2) != Some(env) {
+                log!("xr stream: environment depth {}", if env { "on" } else { "off" });
+                hal::hal_xr_environment_depth(env);
+            }
+        }
+    }
+
+    /// The app's timer while the stream may be off (a few times a second): the room field's
+    /// bricks go up and the once-a-second report (the battery) goes on without XR frames.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn idle_tick(&mut self, cx: &mut Cx) {
+        self.housekeeping(cx);
+        if self.shared.lock().unwrap().stream_off && self.idle_report_at.elapsed() >= Duration::from_secs(1) {
+            self.idle_report_at = Instant::now();
+            self.stats_window();
+        }
+    }
+
+    /// The headset's battery (`hal_battery`), read every 5 s.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn battery(&mut self) -> i64 {
+        if self.battery.1.is_none_or(|at| at.elapsed() >= Duration::from_secs(5)) {
+            #[cfg(target_os = "android")]
+            { self.battery.0 = makepad_widgets::makepad_platform::makepad_hal::hal_battery(); }
+            self.battery.1 = Some(Instant::now());
+        }
+        self.battery.0
+    }
+
     /// Once a second: the display frames past the newest one the poses go up for (see the
     /// caller); every change logged.
     fn steer_ahead(&mut self) {
@@ -879,8 +975,8 @@ impl XrStreamClient {
             let mut v: Vec<f64> = self.ready.iter().rev().take(256).copied().collect();
             v.sort_by(|a, b| a.total_cmp(b));
             let (p50, p90) = (v[v.len() / 2], v[v.len() * 9 / 10]);
-            let want = ((p90 + 2.0e6) / PERIOD_NS as f64).ceil() as u32;
-            let fits = (p50 / PERIOD_NS as f64).floor() as u32 + HOLD as u32 - 2;
+            let want = ((p90 + 2.0e6) / period_ns() as f64).ceil() as u32;
+            let fits = (p50 / period_ns() as f64).floor() as u32 + HOLD as u32 - 2;
             want.min(fits).clamp(1, 8)
         } else {
             // (until measured: room for a ~30 ms sample to decoded)
@@ -905,7 +1001,7 @@ impl XrStreamClient {
             #[cfg(not(target_arch = "wasm32"))]
             makepad_widgets::makepad_platform::makepad_hal::hal_xr_pose_frames_ahead(next);
         }
-        self.lead_ns = (self.ahead as u64 * PERIOD_NS) as f64;
+        self.lead_ns = (self.ahead as u64 * period_ns()) as f64;
     }
 
     /// Uploads the newest complete picture (every tile of one pose), if a new one came.
@@ -942,13 +1038,13 @@ impl XrStreamClient {
                 let counted = self.ready_seq;
                 for (seq, _, decoded_at) in complete.iter().filter(|(seq, _, _)| *seq > counted) {
                     if let Some(sent) = self.sent.lock().unwrap().iter().find(|p| p.seq == *seq) {
-                        let takes_ago = (decoded_at.elapsed().as_nanos() as u64 / PERIOD_NS).min(8);
-                        let first = display_ns.saturating_sub(takes_ago * PERIOD_NS);
+                        let takes_ago = (decoded_at.elapsed().as_nanos() as u64 / period_ns()).min(8);
+                        let first = display_ns.saturating_sub(takes_ago * period_ns());
                         // (its parts, for the 5 s line: sample to decoded, decoded to the first take
                         // after it, that take to its frame's display)
                         let now_ns = makepad_widgets::makepad_platform::makepad_hal::clock_ns();
                         let decoded_ns = now_ns.saturating_sub(decoded_at.elapsed().as_nanos() as u64);
-                        let take_ns = now_ns.saturating_sub(takes_ago * PERIOD_NS);
+                        let take_ns = now_ns.saturating_sub(takes_ago * period_ns());
                         self.window.ready_parts.push([decoded_ns.saturating_sub(sent.sample_ns) as u32 / 1000, take_ns.saturating_sub(decoded_ns) as u32 / 1000, first.saturating_sub(take_ns) as u32 / 1000]);
                         self.ready.push_back(decoded_ns.saturating_sub(sent.sample_ns) as f64);
                         if self.ready.len() > 1024 {
@@ -957,7 +1053,7 @@ impl XrStreamClient {
                     }
                     self.ready_seq = *seq;
                 }
-                let due = display_ns + PERIOD_NS / 2;
+                let due = display_ns + period_ns() / 2;
                 let seq = match complete.iter().rev().find(|(_, t, _)| *t <= due) {
                     Some((seq, _, _)) => *seq,
                     // none due yet: the shown one stays (the first picture shows at once)
@@ -1214,7 +1310,7 @@ impl XrStreamClient {
         let angle = |a: [f32; 4], b: [f32; 4]| (2.0 * (0..4).map(|k| a[k] * b[k]).sum::<f32>().abs().min(1.0).acos()).to_degrees();
         let seq = shown.head.seq;
         self.watch_seq = if self.watch_seq.0 == seq { (seq, self.watch_seq.1 + 1) } else { (seq, 1) };
-        let off = (display_ns as i64 - shown.head.display_ns as i64) as f64 / PERIOD_NS as f64;
+        let off = (display_ns as i64 - shown.head.display_ns as i64) as f64 / period_ns() as f64;
         let render_view = angle(shown.head.eyes[0].orientation, frame.eyes[0].pose.orientation);
         let turn = self.watch_last_view.map_or(0.0, |q| angle(q, frame.eyes[0].pose.orientation));
         let turn_before = std::mem::replace(&mut self.watch_turn, turn);
@@ -1250,7 +1346,7 @@ impl XrStreamClient {
     fn repeat_cause(&self, display_ns: u64) -> usize {
         let seq = {
             let sent = self.sent.lock().unwrap();
-            match sent.iter().find(|p| p.display_ns.abs_diff(display_ns) < PERIOD_NS / 2) {
+            match sent.iter().find(|p| p.display_ns.abs_diff(display_ns) < period_ns() / 2) {
                 Some(p) => p.seq,
                 None => return 3,
             }
@@ -1284,6 +1380,8 @@ impl XrStreamClient {
             return;
         }
         self.windows += 1;
+        #[cfg(not(target_arch = "wasm32"))]
+        let battery = self.battery();
         let (received, decoded) = {
             let s = self.shared.lock().unwrap();
             (s.received, s.decoded)
@@ -1353,6 +1451,8 @@ impl XrStreamClient {
             }
             v[report::BLANK] = rate(w.blanks) as f32;
             v[report::AHEAD] = self.ahead as f32;
+            v[report::BATTERY_PCT] = if battery < 0 { -1.0 } else { (battery & 0xff) as f32 };
+            v[report::BATTERY_CHARGING] = if battery >= 0 && battery & 0x100 != 0 { 1.0 } else { 0.0 };
             // the sound waits as long as a picture's content takes to show (motion to photon
             // less the pose's way up)
             let m2p_ms = v[report::M2P_MS];
@@ -1437,7 +1537,7 @@ impl XrStreamClient {
             // a picture more than three frames old is not warped (the warp is for the few
             // millimetres of one frame's prediction; stretched over a stall it smeared every
             // edge): it shows with its own eyes, the compositor turning it
-            let stale = wire.as_ref().is_some_and(|(t, _)| *t > first.head.display_ns + 3 * PERIOD_NS);
+            let stale = wire.as_ref().is_some_and(|(t, _)| *t > first.head.display_ns + 3 * period_ns());
             let warp = self.warp && !stale;
             let band_size = self.band_rt.as_ref().map_or((1, 1), |rt| rt.size());
             let eye = |e: &XrRenderEye| makepad_widgets::makepad_platform::makepad_hal::XrEye {
@@ -1492,7 +1592,8 @@ impl XrStreamClient {
                     (live_id!(render_pos), vec![r.position[0], r.position[1], r.position[2], 1.0]),
                     (live_id!(render_tan), tan(r.fov).to_vec()),
                     (live_id!(depth_near), vec![makepad_desk_link::xr::DEPTH_NEAR_M]),
-                    (live_id!(opaque), vec![self.opaque as f32]),
+                    // (VR: the picture covers the view, whatever its coverage)
+                    (live_id!(opaque), vec![if self.shared.lock().unwrap().vr { (self.opaque as f32).max(1.0) } else { self.opaque as f32 }]),
                     (live_id!(env_map), vec![self.env_map as f32]),
                     (live_id!(warp), vec![warp as u8 as f32]),
                     (live_id!(linear_out), vec![makepad_widgets::makepad_platform::makepad_hal::hal_xr_linear_frames_active() as u8 as f32]),
@@ -1674,7 +1775,7 @@ fn uplink(shared: Arc<Mutex<Shared>>, sent: Arc<Mutex<VecDeque<Sent>>>) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn worker(host: String, port: u16, info: HeadsetInfo, shared: Arc<Mutex<Shared>>, signal: SignalToUI, audio: Arc<makepad_desk_link::xr_audio::XrAudioRx>) {
+fn worker(host: String, port: u16, mut info: HeadsetInfo, shared: Arc<Mutex<Shared>>, signal: SignalToUI, audio: Arc<makepad_desk_link::xr_audio::XrAudioRx>) {
     let set_status = |text: String| {
         log!("xr stream: {text}");
         shared.lock().unwrap().status = text;
@@ -1694,6 +1795,9 @@ fn worker(host: String, port: u16, info: HeadsetInfo, shared: Arc<Mutex<Shared>>
         };
         // a decoder per tile, each on its own thread (the eyes decode in parallel)
         let mut tiles: Vec<std::sync::mpsc::Sender<(VideoHead, Vec<u8>, Instant)>> = Vec::new();
+        // the welcome's stream (codec, tile size, tiles): the decoders made again when the
+        // stream comes back on
+        let mut stream_shape: Option<(StreamVideoCodec, [u32; 2], u8)> = None;
         let mut pinged = Instant::now();
         let why = loop {
             if shared.lock().unwrap().stop {
@@ -1713,6 +1817,7 @@ fn worker(host: String, port: u16, info: HeadsetInfo, shared: Arc<Mutex<Shared>>
                     let codec = if codec == CODEC_HEVC { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
                     let n = n.clamp(1, 2);
                     let tile_size = [size[0] / n as u32, size[1]];
+                    stream_shape = Some((codec, tile_size, n));
                     // the old tiles' threads end with their channels
                     tiles.clear();
                     {
@@ -1763,6 +1868,39 @@ fn worker(host: String, port: u16, info: HeadsetInfo, shared: Arc<Mutex<Shared>>
                 }
                 XrServerMsg::Refused { reason } | XrServerMsg::Bye { reason } => break reason,
                 XrServerMsg::Pong { client_ns, server_ns } => audio.pong(client_ns, server_ns),
+                // another display rate: the display switches (the app, `refresh_hz`), the
+                // server ends the session and the next link is made at it
+                // the stream off: the decoders go (their threads end with their channels: the
+                // codecs released); on again: made anew (the server starts with a key picture)
+                XrServerMsg::Streaming { on } => {
+                    {
+                        let mut s = shared.lock().unwrap();
+                        s.stream_off = !on;
+                        s.latest = [VecDeque::new(), VecDeque::new()];
+                    }
+                    tiles.clear();
+                    if let (true, Some((codec, tile_size, n))) = (on, stream_shape) {
+                        for tile in 0..n as usize {
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            let (link, shared, signal) = (link.clone(), shared.clone(), signal.clone());
+                            let _ = std::thread::Builder::new().name(format!("xr-decode-{tile}")).spawn(move || decode_tile(tile, codec, tile_size, rx, link, shared, signal));
+                            tiles.push(tx);
+                        }
+                    }
+                    log!("xr stream: the server turned the stream {}", if on { "on" } else { "off" });
+                    signal.set();
+                }
+                XrServerMsg::SeeThrough { on } => {
+                    shared.lock().unwrap().vr = !on;
+                    signal.set();
+                }
+                XrServerMsg::Refresh { mhz } => {
+                    log!("xr stream: the server asks for {:.0} Hz", mhz as f64 / 1000.0);
+                    info.refresh_mhz = mhz;
+                    set_refresh_mhz(mhz);
+                    shared.lock().unwrap().refresh_mhz = mhz;
+                    SignalToUI::set_ui_signal();
+                }
             }
         };
         {

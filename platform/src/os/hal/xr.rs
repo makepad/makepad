@@ -51,6 +51,9 @@ pub(crate) struct HalXr {
     /// `Cx::xr_set_scene_to_room`: the XR passes' scene space into the room (tracking space);
     /// the eye views of the pass uniforms are composed with it (identity: the scene is the room)
     pub(crate) scene_to_room: Mat4f,
+    /// `Cx::xr_set_supersample`: an offscreen XR pass (`info_flags::XR_OFFSCREEN`) renders at
+    /// this many of its eye pixels per axis (1: the eye size); the app filters it down itself
+    pub(crate) supersample: f32,
 }
 
 /// A local-space point seen by eye 0's environment depth camera: its depth along that camera's
@@ -84,6 +87,7 @@ fn env_depth_at(header: &XrDepth, texels: &[u16], p: [f32; 3]) -> Option<(f32, O
 
 // asked before the XR window exists: applied when it is made
 thread_local! { static SEE_THROUGH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+thread_local! { static SUPERSAMPLE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) }; }
 thread_local! { static REFRESH_MHZ: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
 
 fn pose(p: &XrPose) -> Pose {
@@ -115,7 +119,7 @@ impl Cx {
         self.hal.windows.insert(window.0, super::HalWindow::default());
         // the HAL sizes it (its first Geom confirms it)
         self.hal.frames.w.window_create(hal_window_id(window), window_kind::XR, Id::NONE, [0.0; 4], false);
-        self.hal.xr = Some(HalXr { window, frame: None, display_ns: 0, clock_offset_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None, hand_check_at: None, env_images: Vec::new(), env_depth_ns: 0, scene_to_room: Mat4f::identity() });
+        self.hal.xr = Some(HalXr { window, frame: None, display_ns: 0, clock_offset_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None, hand_check_at: None, env_images: Vec::new(), env_depth_ns: 0, scene_to_room: Mat4f::identity(), supersample: SUPERSAMPLE.with(|s| s.get()) });
         if SEE_THROUGH.with(|s| s.get()) { self.hal_xr_see_through(true); }
         let refresh = REFRESH_MHZ.with(|r| r.get());
         if refresh != 0 { self.hal_xr_refresh_rate(refresh); }
@@ -136,6 +140,22 @@ impl Cx {
         for e in &eyes { makepad_hal::buffers::Wire::write(e, &mut bytes); }
         bytes.extend_from_slice(&focus_m.to_le_bytes());
         self.hal.frames.w.xr_frame_eyes(hal_window_id(xr.window), &bytes);
+    }
+
+    /// `Cx::xr_set_supersample`: the offscreen XR pass repaints at its new size.
+    pub(crate) fn hal_xr_supersample(&mut self, scale: f32) {
+        let scale = if scale.is_finite() { scale.clamp(1.0, 2.0) } else { 1.0 };
+        SUPERSAMPLE.with(|s| s.set(scale));
+        let Some(xr) = self.hal.xr.as_mut() else { return };
+        if xr.supersample == scale { return; }
+        xr.supersample = scale;
+        let passes: Vec<_> = self.passes.id_iter().filter(|p| matches!(self.passes[*p].parent, CxDrawPassParent::Xr)).collect();
+        for pass in passes { self.redraw_pass_and_child_passes(pass); }
+    }
+
+    /// The offscreen XR pass's pixels per eye pixel (`Cx::xr_set_supersample`).
+    pub(crate) fn hal_xr_supersample_now(&self) -> f32 {
+        self.hal.xr.as_ref().map_or(1.0, |xr| xr.supersample)
     }
 
     /// `Cx::xr_set_pose_lead`.

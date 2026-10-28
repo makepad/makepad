@@ -1544,6 +1544,17 @@ pub fn hal_xr_linear_frames(on: bool) {
     let _ = on;
 }
 
+/// The XR window's stereo view paused (`on`): no frame is asked of the app and none is shown
+/// (only the room: passthrough); the frame loop, the input, the uplink's poses and the depth
+/// provider go on. A streamed view whose stream is off. Android XR; elsewhere nothing.
+#[relax_api]
+pub fn hal_xr_stereo_paused(on: bool) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::stereo_paused(on);
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
+}
+
 /// The XR window's fixed foveation (Android XR: the runtime's foveation profile in the
 /// projection chains' fragment density maps; 0 none, 1 low, 2 medium, 3 high), applied from the
 /// next display frame. Elsewhere nothing.

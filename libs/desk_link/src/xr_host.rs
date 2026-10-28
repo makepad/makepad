@@ -42,8 +42,6 @@ pub struct XrHostConfig {
     pub world: Option<WorldSink>,
     /// The TLS certificate's name.
     pub tls_name: String,
-    /// The stream's rate (kbit/s) until rate control lands here (0: a rate for the size).
-    pub kbps: u32,
     pub log: Log,
 }
 
@@ -75,7 +73,7 @@ impl XrHost {
         let verifier = Arc::new(verifier);
         let log = config.log.clone();
         log(&format!("xr host: listens on {} as {name} (the admin or a paired headset)", config.addr));
-        let (stop2, kbps, addr, world) = (stop.clone(), config.kbps, config.addr, config.world.clone());
+        let (stop2, addr, world) = (stop.clone(), config.addr, config.world.clone());
         std::thread::Builder::new()
             .name("xr-host-listen".into())
             .spawn(move || {
@@ -99,7 +97,7 @@ impl XrHost {
                             if !lan_address(peer.ip()) {
                                 continue;
                             }
-                            let ctx = Session { peer, tls: tls.clone(), verifier: verifier.clone(), log: log.clone(), stop: stop2.clone(), busy: busy.clone(), server: name.clone(), kbps, world: world.clone() };
+                            let ctx = Session { peer, tls: tls.clone(), verifier: verifier.clone(), log: log.clone(), stop: stop2.clone(), busy: busy.clone(), server: name.clone(), world: world.clone() };
                             let _ = std::thread::Builder::new().name("xr-host-session".into()).spawn(move || ctx.run(tcp));
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(50)),
@@ -124,7 +122,6 @@ struct Session {
     stop: Arc<AtomicBool>,
     busy: Arc<AtomicBool>,
     server: String,
-    kbps: u32,
 }
 
 impl Session {
@@ -187,7 +184,7 @@ impl Session {
         let eye = [eye[0].clamp(64, 4096) & !3, eye[1].clamp(64, 4096) & !3];
         let codec = if decodes & codecs::HEVC != 0 { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
         let fps = (refresh_mhz / 1000).clamp(30, 120);
-        let core = Core::start(eye, fps, codec, self.kbps, self.log.clone())?;
+        let core = Core::start(eye, fps, codec, self.log.clone())?;
         (self.log)(&format!("xr host: {who} ({name}) from {}: eyes {}x{} at {fps} Hz, {codec:?} {}x{} in {} tile(s) on {}", self.peer, eye[0], eye[1], core.size[0], core.size[1], core.tiles, core.description));
         hal::hal_xr_remote_attach(eye[0], eye[1], refresh_mhz);
         let welcome = XrServerMsg::Welcome { version: XR_VERSION, server: self.server.clone(), size: core.size, codec: core.codec, tiles: core.tiles as u8, encoder: core.description.clone() };
@@ -213,16 +210,47 @@ impl Session {
         let mut last_heard = Instant::now();
         let mut visible = true;
         let mut stats = PumpStats::new();
-        // the room field the headset was told (None: not yet: told at once)
+        // the room field, the stream's on/off and the see-through the headset was told (None:
+        // not yet: told at once)
         let mut room_field_told: Option<bool> = None;
+        let mut streaming_told: Option<bool> = None;
+        let mut see_through_told: Option<bool> = None;
         loop {
-            let wanted = ROOM_FIELD_WANTED.load(Ordering::Acquire);
+            let wanted = ROOM_FIELD_WANTED.load(Ordering::Acquire) && ROOM_SCAN.load(Ordering::Acquire);
             if room_field_told != Some(wanted) {
                 if let Err(e) = write_all(stream, &XrServerMsg::RoomField { wanted }.encode()) {
                     return format!("write: {e}");
                 }
                 (self.log)(&format!("xr host: room field {}", if wanted { "wanted" } else { "not wanted" }));
                 room_field_told = Some(wanted);
+            }
+            let on = STREAMING.load(Ordering::Acquire);
+            if streaming_told != Some(on) {
+                if let Err(e) = write_all(stream, &XrServerMsg::Streaming { on }.encode()) {
+                    return format!("write: {e}");
+                }
+                (self.log)(&format!("xr host: stream {}", if on { "on" } else { "off" }));
+                // (on again: the decoder starts from a key picture)
+                if on && streaming_told.is_some() {
+                    core.keyframe();
+                }
+                streaming_told = Some(on);
+            }
+            let see = SEE_THROUGH.load(Ordering::Acquire);
+            if see_through_told != Some(see) {
+                if let Err(e) = write_all(stream, &XrServerMsg::SeeThrough { on: see }.encode()) {
+                    return format!("write: {e}");
+                }
+                see_through_told = Some(see);
+            }
+            // another display rate asked (`set_refresh_hz`): the headset is told and the session
+            // ends; it links again at that rate (new encoders)
+            let hz = REFRESH_HZ.load(Ordering::Acquire);
+            if hz != 0 && hz != core.fps {
+                if let Err(e) = write_all(stream, &XrServerMsg::Refresh { mhz: hz * 1000 }.encode()) {
+                    return format!("write: {e}");
+                }
+                return format!("the display rate goes from {} to {hz} Hz", core.fps);
             }
             if self.stop.load(Ordering::Acquire) {
                 return "the server stopped".into();
@@ -380,8 +408,8 @@ impl PumpStats {
         let built = core.flow.built.swap(0, Ordering::AcqRel);
         let skipped = core.flow.skipped.swap(0, Ordering::AcqRel);
         let kbps = core.rate.kbps.load(Ordering::Acquire);
-        *SERVER_LINE.lock().unwrap() = format!("server built {:.0}/s · sent {:.1} Mbit/s · render {:.1} gpu {:.1} encode {:.1} ms",
-            built as f64 / secs, self.bytes as f64 * 8.0 / secs / 1e6, median_ms(&mut self.stages_us[0].clone()), median_ms(&mut self.stages_us[1].clone()), median_ms(&mut self.stages_us[2].clone()));
+        *SERVER_LINE.lock().unwrap() = format!("server {} Hz · built {:.0}/s · sent {:.1} of {:.0} Mbit/s · render {:.1} gpu {:.1} encode {:.1} ms",
+            core.fps, built as f64 / secs, self.bytes as f64 * 8.0 / secs / 1e6, BITRATE_KBPS.load(Ordering::Acquire) as f64 / 1000.0, median_ms(&mut self.stages_us[0].clone()), median_ms(&mut self.stages_us[1].clone()), median_ms(&mut self.stages_us[2].clone()));
         let [ref mut render, ref mut gpu, ref mut encode, ref mut send] = self.stages_us;
         log(&format!(
             "xr host: poses {:.0}/s ({} no XR window) · built {:.0}/s ({} without a slot) · sent {:.0}/s {:.1} Mbit/s (rate {:.0}) · render {:.1} gpu {:.1} encode {:.1} send {:.1} (write {:.1}) ms · headset decode {:.1} ms · in flight {}",
@@ -479,7 +507,8 @@ impl Flow {
 /// (22 -> 15 Mbit/s on 5 ms Wi-Fi).
 struct Rate {
     kbps: AtomicU32,
-    start: u32,
+    /// The app's bitrate (`set_bitrate_kbps`) as last seen: a change applies at once.
+    cap: AtomicU32,
     clean: AtomicU32,
     /// The link's idle round trip (µs): the lowest seen, creeping up 2% a window so a changed
     /// route is learned. 0 until the first window.
@@ -487,13 +516,25 @@ struct Rate {
 }
 
 impl Rate {
+    /// The rate now (kbit/s, all tiles): the app's bitrate the moment it changes, else the
+    /// controller's (never above it).
+    fn current(&self) -> u32 {
+        let cap = BITRATE_KBPS.load(Ordering::Acquire);
+        if self.cap.swap(cap, Ordering::AcqRel) != cap {
+            self.kbps.store(cap, Ordering::Release);
+            self.clean.store(0, Ordering::Release);
+        }
+        self.kbps.load(Ordering::Acquire).min(cap)
+    }
+
     fn base_ms(&self) -> f64 {
         self.base_us.load(Ordering::Acquire) as f64 / 1000.0
     }
 
     /// One stats window: the median and lowest round trip of a tile (ms), the rate sent (kbit/s).
     fn second(&self, trip_ms: f64, trip_min_ms: f64, sent_kbps: f64, log: &Log) {
-        let kbps = self.kbps.load(Ordering::Acquire);
+        let kbps = self.current();
+        let cap = self.cap.load(Ordering::Acquire);
         if trip_ms <= 0.0 {
             return;
         }
@@ -507,12 +548,12 @@ impl Rate {
         let next = if link_bound {
             self.clean.store(0, Ordering::Release);
             ((sent_kbps as f64 * 0.85) as u32).max(MIN_KBPS)
-        } else if self.clean.fetch_add(1, Ordering::AcqRel) >= 2 && kbps < self.start {
+        } else if self.clean.fetch_add(1, Ordering::AcqRel) >= 2 && kbps < cap {
             (kbps as f64 * 1.1) as u32
         } else {
             kbps
         }
-        .min(self.start);
+        .min(cap);
         if next != kbps {
             self.kbps.store(next, Ordering::Release);
             log(&format!("xr host: rate {:.0} -> {:.0} Mbit/s ({})", kbps as f64 / 1000.0, next as f64 / 1000.0,
@@ -629,6 +670,33 @@ impl Uplink {
 
 /// A pose from the headset: to the app's XR window, and kept to match its picture.
 fn take_pose(poses: &Mutex<VecDeque<(u64, Arrived)>>, seq: u64, display_ns: u64, frame: &[u8]) -> bool {
+    // the left controller's menu button turns the stream on and off (unless the app took that
+    // over, `set_menu_toggles_streaming`): never seen by the app then
+    let mut masked = None;
+    if MENU_TOGGLES.load(Ordering::Acquire) {
+        use makepad_hal::{buffers::{read_items, Wire}, xr_controller, XrFrame};
+        if let Some(mut f) = read_items::<XrFrame>(frame, 1).next() {
+            let left = &mut f.controllers[0];
+            let down = left.buttons & xr_controller::ACTIVE != 0 && left.buttons & xr_controller::CLICK_MENU != 0;
+            if down && !MENU_DOWN.swap(true, Ordering::AcqRel) {
+                let on = !STREAMING.load(Ordering::Acquire);
+                set_streaming(on);
+            } else if !down {
+                MENU_DOWN.store(false, Ordering::Release);
+            }
+            if left.buttons & xr_controller::CLICK_MENU != 0 {
+                left.buttons &= !xr_controller::CLICK_MENU;
+                let mut bytes = Vec::with_capacity(frame.len());
+                f.write(&mut bytes);
+                masked = Some(bytes);
+            }
+        }
+    }
+    // streaming off: no frame drawn for it
+    if !STREAMING.load(Ordering::Acquire) {
+        return true;
+    }
+    let frame = masked.as_deref().unwrap_or(frame);
     {
         let mut poses = poses.lock().unwrap();
         poses.push_back((display_ns, Arrived { at: Instant::now(), seq, eyes: render_eyes(frame) }));
@@ -660,6 +728,8 @@ struct Core {
     /// The poses asked for, to match their pictures.
     poses: Arc<Mutex<VecDeque<(u64, Arrived)>>>,
     ending: Arc<AtomicBool>,
+    /// The display rate the session's encoders are made for (Hz).
+    fps: u32,
 }
 
 /// The session the app's pictures go to.
@@ -676,6 +746,74 @@ static LIVE: Mutex<Option<Live>> = Mutex::new(None);
 /// The app uses the headset's room field (`set_room_field_wanted`): the headset is told, and
 /// integrates and sends its field only then.
 static ROOM_FIELD_WANTED: AtomicBool = AtomicBool::new(false);
+
+/// The user's power switches: the stream runs (pictures and sound to the headset), the room
+/// scan is allowed (the headset scans only when this and the app's want are both on); the
+/// left menu button turns the stream on and off (the app may take the button over); the
+/// headset shows the room through the picture (mixed reality) or not (VR).
+static STREAMING: AtomicBool = AtomicBool::new(true);
+static ROOM_SCAN: AtomicBool = AtomicBool::new(true);
+static MENU_TOGGLES: AtomicBool = AtomicBool::new(true);
+static MENU_DOWN: AtomicBool = AtomicBool::new(false);
+static SEE_THROUGH: AtomicBool = AtomicBool::new(true);
+/// How many times the stream was turned on or off (an app's settings panel follows it).
+static STREAMING_CHANGES: AtomicU32 = AtomicU32::new(0);
+
+/// The stream on or off: off, the app draws no XR frames for the headset, nothing is encoded
+/// or sent (sound neither), and the headset stops all of its stream work (it shows the room).
+/// On again: a key picture first.
+pub fn set_streaming(on: bool) {
+    if STREAMING.swap(on, Ordering::AcqRel) != on {
+        STREAMING_CHANGES.fetch_add(1, Ordering::AcqRel);
+        crate::xr_audio::set_streaming(on);
+        wake_app();
+    }
+}
+pub fn streaming() -> bool {
+    STREAMING.load(Ordering::Acquire)
+}
+/// Counts every change of [`streaming`] (the menu button's too).
+pub fn streaming_changes() -> u32 {
+    STREAMING_CHANGES.load(Ordering::Acquire)
+}
+/// Whether the left controller's menu button turns the stream on and off (default on; off: the
+/// app gets the button).
+pub fn set_menu_toggles_streaming(on: bool) {
+    MENU_TOGGLES.store(on, Ordering::Release);
+}
+/// The room scan allowed (the user's switch; the headset scans while the app wants the room
+/// field and this is on).
+pub fn set_room_scan(on: bool) {
+    ROOM_SCAN.store(on, Ordering::Release);
+}
+pub fn room_scan() -> bool {
+    ROOM_SCAN.load(Ordering::Acquire)
+}
+/// Mixed reality (true: the room shows through the picture's empty parts) or VR (the picture
+/// opaque, no passthrough) on the headset.
+pub fn set_see_through(on: bool) {
+    SEE_THROUGH.store(on, Ordering::Release);
+}
+
+/// The display rate the app asks of a streaming headset (Hz; 0: the headset's own), and the
+/// stream's bitrate (kbit/s, all tiles: the rate controller never goes above it).
+static REFRESH_HZ: AtomicU32 = AtomicU32::new(0);
+static BITRATE_KBPS: AtomicU32 = AtomicU32::new(80_000);
+
+/// The display rate a streaming headset runs at (Hz; 0: its own): a change re-links it at that
+/// rate (a second without pictures).
+pub fn set_refresh_hz(hz: u32) {
+    REFRESH_HZ.store(hz, Ordering::Release);
+}
+
+/// The stream's bitrate (kbit/s, all tiles): applied at once to a running stream; the rate
+/// controller goes below it when the link queues and back up to it.
+pub fn set_bitrate_kbps(kbps: u32) {
+    BITRATE_KBPS.store(kbps.max(MIN_KBPS), Ordering::Release);
+}
+
+/// The display rates a headset may run at (Hz).
+pub const REFRESH_RATES: [u32; 4] = [72, 80, 90, 120];
 /// Whether the app uses the headset's room field (its physics, particles, field view); a
 /// streaming headset is told at once. Off at start.
 pub fn set_room_field_wanted(wanted: bool) {
@@ -755,13 +893,13 @@ pub fn note_skipped() {
 }
 
 impl Core {
-    fn start(eye: [u32; 2], fps: u32, codec: StreamVideoCodec, kbps: u32, log: Log) -> Result<Core, String> {
+    fn start(eye: [u32; 2], fps: u32, codec: StreamVideoCodec, log: Log) -> Result<Core, String> {
+        let kbps = BITRATE_KBPS.load(Ordering::Acquire);
         let size = picture_size(eye);
         // a stream per eye on its own engine when the GPU has two
         let tiles = if VideoStreamEncoder::engines() >= 2 { 2 } else { 1 };
-        let kbps = if kbps == 0 { 80_000 } else { kbps };
         let flow = Arc::new(Flow::default());
-        let rate = Arc::new(Rate { kbps: AtomicU32::new(kbps), start: kbps, clean: AtomicU32::new(0), base_us: AtomicU32::new(0) });
+        let rate = Arc::new(Rate { kbps: AtomicU32::new(kbps), cap: AtomicU32::new(kbps), clean: AtomicU32::new(0), base_us: AtomicU32::new(0) });
         let keyframe: Arc<[AtomicBool; 2]> = Arc::new([AtomicBool::new(true), AtomicBool::new(true)]);
         let ending = Arc::new(AtomicBool::new(false));
         let poses: Arc<Mutex<VecDeque<(u64, Arrived)>>> = Arc::default();
@@ -809,14 +947,14 @@ impl Core {
                             let now = tune();
                             if now != tuned {
                                 if t == 0 {
-                                    log(&format!("xr host: tuning: {} kbps, max QP {}", now.kbps.map_or("rate control's".to_string(), |k| k.to_string()), now.max_qp));
+                                    log(&format!("xr host: tuning: max QP {}", now.max_qp));
                                     #[cfg(any(target_os = "linux", target_os = "android"))]
                                     makepad_hal::stream_encode::hal_stream_encoder_max_qp(now.max_qp);
                                 }
                                 tuned = now;
                             }
                         }
-                        let tile_kbps = (tuned.kbps.unwrap_or(w.kbps) / tiles).max(1);
+                        let tile_kbps = (w.kbps / tiles).max(1);
                         if tile_kbps != applied {
                             encoder.set_bitrate_kbps(tile_kbps);
                             applied = tile_kbps;
@@ -884,7 +1022,7 @@ impl Core {
                         };
                         let head = VideoHead { seq, tile: 0, key: false, display_ns: p.display_ns, eyes, focus_m: p.focus_m, stages: [render_us, 0, 0, 0], size, codec: codec_byte };
                         let held: Arc<Box<dyn Send + Sync>> = Arc::new(p.held);
-                        let kbps = rate.kbps.load(Ordering::Acquire);
+                        let kbps = rate.current();
                         let mut ready = match wait_ready(p.ready) {
                             Ok(r) => Some(r),
                             Err(e) => {
@@ -905,7 +1043,7 @@ impl Core {
         }
         *LIVE.lock().unwrap() = Some(Live { eye, tx, flow: flow.clone(), tiles, limit: in_flight_limit() });
         wake_app();
-        Ok(Core { size, tiles, codec: codec_byte, description, flow, rate, out, keyframe, poses, ending })
+        Ok(Core { size, tiles, codec: codec_byte, description, flow, rate, out, keyframe, poses, ending, fps })
     }
 
     /// A pose from the headset: to the app's XR window, and kept to match its picture.
@@ -951,9 +1089,9 @@ fn clone_ready(_ready: &GpuReady) -> GpuReady {
 /// slowly, eyes 64 mm apart, ±45° fields) drive the app's XR window exactly as a headset's would, and
 /// every picture is encoded and measured, then dropped (and counted decoded at once). The server
 /// side's numbers without a headset.
-pub fn selftest(eye: [u32; 2], kbps: u32, log: Log) {
+pub fn selftest(eye: [u32; 2], log: Log) {
     use makepad_hal::{buffers::Wire, XrEye, XrFrame, XrPose};
-    let core = match Core::start(eye, 72, StreamVideoCodec::Hevc, kbps, log.clone()) {
+    let core = match Core::start(eye, 72, StreamVideoCodec::Hevc, log.clone()) {
         Ok(c) => c,
         Err(e) => return log(&format!("xr selftest: {e}")),
     };
@@ -1091,12 +1229,11 @@ pub fn picture_size(eye: [u32; 2]) -> [u32; 2] {
     [eye[0] * 2, eye[1] * 3 / 2]
 }
 
-/// The stream's live tuning (`$TMPDIR/xr-remote-tune`, lines `kbps=N` and `maxqp=N`; read once a
-/// second by the encoders): the rate instead of the rate controller's, and a QP ceiling (every
-/// encoder of the process). For sweeps on a running server; absent: neither.
+/// The stream's live tuning (`$TMPDIR/xr-remote-tune`, line `maxqp=N`; read once a second by the
+/// encoders): a QP ceiling (every encoder of the process). For sweeps on a running server;
+/// absent: none. (The bitrate is the app's setting, `set_bitrate_kbps`.)
 #[derive(Clone, Copy, Default, PartialEq)]
 struct Tune {
-    kbps: Option<u32>,
     max_qp: u32,
 }
 
@@ -1105,7 +1242,6 @@ fn tune() -> Tune {
     let mut t = Tune::default();
     for line in text.lines() {
         match line.trim().split_once('=') {
-            Some(("kbps", v)) => t.kbps = v.trim().parse().ok().filter(|k: &u32| *k > 0),
             Some(("maxqp", v)) => t.max_qp = v.trim().parse().unwrap_or(0),
             _ => {}
         }

@@ -15,45 +15,76 @@ script_mod! {
     use mod.draw
 
     // Four luma samples of row j, columns 4i..4i+3 of the source rect, in memory order B G R A.
+    // `scale` > 1 (source pixels per output pixel, a supersampled image): each sample filters
+    // its footprint, four bilinear taps around its centre (2x: the 2x2 box exactly).
     mod.draw.DrawNv12Luma = mod.std.set_type_default() do #(DrawNv12Luma::script_shader(vm)) {
         ..mod.draw.DrawQuad
         image: texture_2d(float)
         source: vec4(0.0, 0.0, 1.0, 1.0)
         extent: vec2(1.0, 1.0)
+        scale: vec2(1.0, 1.0)
+        luma_at: fn(c: vec2, d: vec2, inv: vec2) -> float {
+            let w = vec3(0.2126, 0.7152, 0.0722)
+            var rgb = self.image.sample(c * inv).xyz
+            if d.x + d.y > 0.0 {
+                rgb = (self.image.sample((c + vec2(-d.x, -d.y)) * inv).xyz + self.image.sample((c + vec2(d.x, -d.y)) * inv).xyz
+                    + self.image.sample((c + vec2(-d.x, d.y)) * inv).xyz + self.image.sample((c + vec2(d.x, d.y)) * inv).xyz) * 0.25
+            }
+            return (16.0 + 219.0 * dot(rgb, w)) / 255.0
+        }
         pixel: fn() {
             let t = floor(self.pos * self.rect_size)
             let inv = vec2(1.0 / self.extent.x, 1.0 / self.extent.y)
-            let row = self.source.y + t.y + 0.5
-            let x = self.source.x + t.x * 4.0 + 0.5
-            let w = vec3(0.2126, 0.7152, 0.0722)
-            let y0 = (16.0 + 219.0 * dot(self.image.sample(vec2(x, row) * inv).xyz, w)) / 255.0
-            let y1 = (16.0 + 219.0 * dot(self.image.sample(vec2(x + 1.0, row) * inv).xyz, w)) / 255.0
-            let y2 = (16.0 + 219.0 * dot(self.image.sample(vec2(x + 2.0, row) * inv).xyz, w)) / 255.0
-            let y3 = (16.0 + 219.0 * dot(self.image.sample(vec2(x + 3.0, row) * inv).xyz, w)) / 255.0
+            let s = self.scale
+            // the taps' offset: (s - 1) / 2 up to 2x, s / 4 above
+            let d = min((s - vec2(1.0, 1.0)) * 0.5, s * 0.25)
+            let row = self.source.y + (t.y + 0.5) * s.y
+            let x = t.x * 4.0 + 0.5
+            let y0 = self.luma_at(vec2(self.source.x + x * s.x, row), d, inv)
+            let y1 = self.luma_at(vec2(self.source.x + (x + 1.0) * s.x, row), d, inv)
+            let y2 = self.luma_at(vec2(self.source.x + (x + 2.0) * s.x, row), d, inv)
+            let y3 = self.luma_at(vec2(self.source.x + (x + 3.0) * s.x, row), d, inv)
             return vec4(y2, y1, y0, y3)
         }
     }
 
     // Two chroma samples, memory order U0 V0 U1 V1: 4:2:0 each the average of a 2x2 block (one
     // bilinear tap at its centre); 4:4:4 (`full`) two neighbouring pixels of one row as they
-    // are, a source row over two texture rows (its left half, then its right half).
+    // are, a source row over two texture rows (its left half, then its right half). `scale` > 1
+    // (a supersampled image): each sample filters its footprint with four bilinear taps.
     mod.draw.DrawNv12Chroma = mod.std.set_type_default() do #(DrawNv12Chroma::script_shader(vm)) {
         ..mod.draw.DrawQuad
         image: texture_2d(float)
         source: vec4(0.0, 0.0, 1.0, 1.0)
         extent: vec2(1.0, 1.0)
         full: 0.0
+        scale: vec2(1.0, 1.0)
+        rgb_at: fn(c: vec2, d: vec2, inv: vec2) -> vec3 {
+            if d.x + d.y > 0.0 {
+                return (self.image.sample((c + vec2(-d.x, -d.y)) * inv).xyz + self.image.sample((c + vec2(d.x, -d.y)) * inv).xyz
+                    + self.image.sample((c + vec2(-d.x, d.y)) * inv).xyz + self.image.sample((c + vec2(d.x, d.y)) * inv).xyz) * 0.25
+            }
+            return self.image.sample(c * inv).xyz
+        }
         pixel: fn() {
             let t = floor(self.pos * self.rect_size)
             let inv = vec2(1.0 / self.extent.x, 1.0 / self.extent.y)
+            let s = self.scale
             // which half of its source row this texture row holds (Splash shaders have no `mod`)
             let half = t.y - floor(t.y * 0.5) * 2.0
-            let full_p = vec2(self.source.x + half * self.rect_size.x * 2.0 + t.x * 2.0 + 0.5, self.source.y + floor(t.y * 0.5) + 0.5)
-            let sub_p = vec2(self.source.x + t.x * 4.0 + 1.0, self.source.y + t.y * 2.0 + 1.0)
-            let p0 = mix(sub_p, full_p, self.full)
-            let step = mix(2.0, 1.0, self.full)
-            let c0 = self.image.sample(p0 * inv).xyz
-            let c1 = self.image.sample((p0 + vec2(step, 0.0)) * inv).xyz
+            let full_p = vec2(half * self.rect_size.x * 2.0 + t.x * 2.0 + 0.5, floor(t.y * 0.5) + 0.5)
+            let sub_p = vec2(t.x * 4.0 + 1.0, t.y * 2.0 + 1.0)
+            let p0 = self.source.xy + mix(sub_p, full_p, self.full) * s
+            let step = mix(2.0, 1.0, self.full) * s.x
+            // the taps' offset: a 2x2 block's footprint (4:2:0) or a pixel's (4:4:4)
+            let sub_d = s * 0.5
+            let full_d = min((s - vec2(1.0, 1.0)) * 0.5, s * 0.25)
+            var d = mix(sub_d, full_d, self.full)
+            if s.x * s.y <= 1.0 {
+                d = vec2(0.0, 0.0)
+            }
+            let c0 = self.rgb_at(p0, d, inv)
+            let c1 = self.rgb_at(p0 + vec2(step, 0.0), d, inv)
             let cu = vec3(-0.1146, -0.3854, 0.5)
             let cv = vec3(0.5, -0.4542, -0.0458)
             let u0 = (128.0 + 224.0 * dot(c0, cu)) / 255.0
@@ -77,6 +108,9 @@ pub struct DrawNv12Luma {
     /// The image's size in pixels.
     #[live]
     pub extent: Vec2f,
+    /// Source pixels per output pixel (1: as they are; a supersampled image: filtered down).
+    #[live]
+    pub scale: Vec2f,
 }
 
 #[derive(Script, ScriptHook)]
@@ -91,5 +125,8 @@ pub struct DrawNv12Chroma {
     /// 1: 4:4:4 (every pixel's chroma), 0: 4:2:0.
     #[live]
     pub full: f32,
+    /// Source pixels per output pixel (as [`DrawNv12Luma::scale`]).
+    #[live]
+    pub scale: Vec2f,
 }
 

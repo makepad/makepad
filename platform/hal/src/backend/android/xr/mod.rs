@@ -128,6 +128,9 @@ pub fn hands_and_controllers(on: bool) { HANDS_AND_CONTROLLERS.store(on, Orderin
 /// The environment depth provider runs (`hal_xr_environment_depth`; on at start).
 static ENVIRONMENT_DEPTH: AtomicBool = AtomicBool::new(true);
 pub fn environment_depth(on: bool) { ENVIRONMENT_DEPTH.store(on, Ordering::Release); }
+/// The stereo view paused (`hal_xr_stereo_paused`): no frame asked, none shown.
+static STEREO_PAUSED: AtomicBool = AtomicBool::new(false);
+pub fn stereo_paused(on: bool) { STEREO_PAUSED.store(on, Ordering::Release); }
 /// The depth images are copied back to the app (`hal_xr_depth_readback`; off at start).
 pub(super) static DEPTH_READBACK: AtomicBool = AtomicBool::new(false);
 pub fn depth_readback(on: bool) { DEPTH_READBACK.store(on, Ordering::Release); }
@@ -1480,7 +1483,14 @@ impl CxOpenXrSession {
         self.step_eye_scale(xr_window, period);
         self.apply_hands_and_controllers();
         self.apply_environment_depth();
-        let stereo_done = match xr_window { Some((sid, id)) if render => self.update_stereo(sid, id, time, period).unwrap_or_else(|e| { xr_log!("stereo: {e}"); None }), _ => None };
+        // (paused: nothing asked and nothing shown, the room alone; a frame still in flight
+        // waits in its slot and is taken, with its chain image, when the view resumes)
+        let paused = STEREO_PAUSED.load(Ordering::Acquire);
+        if paused && self.stereo_shown.is_some() {
+            self.stereo_shown = None;
+            self.stereo_asked = None;
+        }
+        let stereo_done = match xr_window { Some((sid, id)) if render && !paused => self.update_stereo(sid, id, time, period).unwrap_or_else(|e| { xr_log!("stereo: {e}"); None }), _ => None };
         phase(4, &mut self.phases);
         // environment depth: a finished readback to the XR window, the next one started (never waits)
         if let (Some(depth), Some((sid, id))) = (self.depth.as_mut(), xr_window) {

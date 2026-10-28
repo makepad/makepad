@@ -51,15 +51,24 @@ script_mod! {
             let xe = x - e * ew
             let half = ew * 0.5
             let inv = vec2(1.0 / self.extent.x, 1.0 / self.extent.y)
+            // eye pixels to the colour's (a supersampled pass: `scale` of them per eye pixel)
+            let s = self.scale
             if xe < half {
-                // the 2x2 block's centre: one bilinear tap averages it
-                return self.image.sample(vec2(e * ew + xe * 2.0 + 1.0, r * 2.0 + 1.0) * inv).w
+                // the 2x2 block's centre: one bilinear tap averages it (supersampled: four taps
+                // over its footprint)
+                let c = vec2(e * ew + xe * 2.0 + 1.0, r * 2.0 + 1.0) * s
+                if s.x * s.y <= 1.0 {
+                    return self.image.sample(c * inv).w
+                }
+                let d = s * 0.5
+                return (self.image.sample((c + vec2(-d.x, -d.y)) * inv).w + self.image.sample((c + vec2(d.x, -d.y)) * inv).w
+                    + self.image.sample((c + vec2(-d.x, d.y)) * inv).w + self.image.sample((c + vec2(d.x, d.y)) * inv).w) * 0.25
             }
-            let p = vec2(e * ew + (xe - half) * 2.0 + 0.5, r * 2.0 + 0.5)
+            let p = vec2(e * ew + (xe - half) * 2.0 + 0.5, r * 2.0 + 0.5) * s
             let d0 = self.depth_tex.sample(p * inv).x
-            let d1 = self.depth_tex.sample((p + vec2(1.0, 0.0)) * inv).x
-            let d2 = self.depth_tex.sample((p + vec2(0.0, 1.0)) * inv).x
-            let d3 = self.depth_tex.sample((p + vec2(1.0, 1.0)) * inv).x
+            let d1 = self.depth_tex.sample((p + vec2(s.x, 0.0)) * inv).x
+            let d2 = self.depth_tex.sample((p + vec2(0.0, s.y)) * inv).x
+            let d3 = self.depth_tex.sample((p + s) * inv).x
             let d = min(min(d0, d1), min(d2, d3))
             if d >= 0.999999 {
                 return 0.0
@@ -185,6 +194,9 @@ pub struct DrawXrBand {
     /// x: one eye's width (px).
     #[live]
     pub eye: Vec2f,
+    /// The colour/depth pixels per eye pixel (a supersampled XR pass; 1: none).
+    #[live]
+    pub scale: Vec2f,
     /// The eye projection's depth terms: 2fn, f + n, f - n, and the band's near depth (m).
     #[live]
     pub clip: Vec4f,
@@ -288,6 +300,10 @@ pub struct XrServe {
     eye: Option<[u32; 2]>,
     #[rust]
     counts: Counts,
+    /// The eye size the XR pass rendered at for the newest picture (px; supersampled: more
+    /// than `eye`).
+    #[rust]
+    rendered: [u32; 2],
     /// The app's own line in the stats panel (`set_app_line`; empty: none).
     #[rust]
     app_line: String,
@@ -345,7 +361,6 @@ pub fn serve() {
             return;
         }
         let port = std::env::var("MAKEPAD_XR_REMOTE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(makepad_desk_link::xr::XR_PORT);
-        let kbps = std::env::var("MAKEPAD_XR_REMOTE_KBPS").ok().and_then(|p| p.parse().ok()).unwrap_or(80_000);
         // the headset's room field, mirrored into this process's field store: the app's
         // physics (its hit-surface queries) collides with the real room
         let world: makepad_desk_link::xr_host::WorldSink = Arc::new(|voxel_size, chunk_edge, bricks| {
@@ -355,17 +370,90 @@ pub fn serve() {
             let mut mirror = MIRROR.lock().unwrap_or_else(|e| e.into_inner());
             mirror.get_or_insert_with(BrickMirror::default).apply(&makepad_widgets::makepad_platform::xr_tsdf::xr_tsdf_store(), BrickGrid { voxel_size, chunk_edge }, &bricks);
         });
-        let config = XrHostConfig { addr: std::net::SocketAddr::from(([0, 0, 0, 0], port)), tls_name: "makepad xr host".into(), kbps, world: Some(world), log: Arc::new(|line: &str| log!("{line}")) };
+        let config = XrHostConfig { addr: std::net::SocketAddr::from(([0, 0, 0, 0], port)), tls_name: "makepad xr host".into(), world: Some(world), log: Arc::new(|line: &str| log!("{line}")) };
         match XrHost::start(config) {
             Ok(h) => *host = Some(h),
             Err(e) => log!("{e}"),
         }
         if std::env::var("MAKEPAD_XR_REMOTE_SELFTEST").as_deref() == Ok("1") {
-            makepad_desk_link::xr_host::selftest([1680, 1760], kbps, Arc::new(|line: &str| log!("{line}")));
+            makepad_desk_link::xr_host::selftest([1680, 1760], Arc::new(|line: &str| log!("{line}")));
         }
     }
     #[cfg(target_arch = "wasm32")]
     let _ = Mutex::<()>::new(());
+}
+
+/// The stream's settings the app offers its user (the Sandbox gear): the bitrate (kbit/s, all
+/// tiles; the rate controller stays below it) and the headset's display rate (Hz, one of
+/// [`STREAM_REFRESH_RATES`]; a change re-links the headset at it).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_stream_bitrate_kbps(kbps: u32) {
+    makepad_desk_link::xr_host::set_bitrate_kbps(kbps);
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_stream_refresh_hz(hz: u32) {
+    makepad_desk_link::xr_host::set_refresh_hz(hz);
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub use makepad_desk_link::xr_host::REFRESH_RATES as STREAM_REFRESH_RATES;
+/// The user's power switches for a streaming headset (see `makepad_desk_link::xr_host`): the
+/// stream on/off (off: no XR frames drawn, nothing encoded or sent, the headset idles), the room
+/// scan allowed, the left menu button as the stream's switch (default), mixed reality or VR.
+#[cfg(not(target_arch = "wasm32"))]
+pub use makepad_desk_link::xr_host::{room_scan as stream_room_scan, set_menu_toggles_streaming, set_room_scan as set_stream_room_scan, set_see_through as set_stream_see_through, set_streaming, streaming, streaming_changes};
+
+/// The stream's anti-aliasing: supersampled eyes, filtered down into the encoded eye size
+/// (the eyes rendered at this many pixels per axis; the app's setting, applied live from the
+/// next frame). The modes the app offers its user: [`STREAM_AA_MODES`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamAa {
+    Off,
+    X1_25,
+    X1_5,
+    X2,
+}
+
+/// Every [`StreamAa`] mode, cheapest first.
+pub const STREAM_AA_MODES: [StreamAa; 4] = [StreamAa::Off, StreamAa::X1_25, StreamAa::X1_5, StreamAa::X2];
+
+impl StreamAa {
+    /// Rendered pixels per encoded pixel, per axis.
+    pub fn scale(self) -> f32 {
+        match self {
+            StreamAa::Off => 1.0,
+            StreamAa::X1_25 => 1.25,
+            StreamAa::X1_5 => 1.5,
+            StreamAa::X2 => 2.0,
+        }
+    }
+
+    /// Its name for the user (and the settings file).
+    pub fn label(self) -> &'static str {
+        match self {
+            StreamAa::Off => "off",
+            StreamAa::X1_25 => "1.25x",
+            StreamAa::X1_5 => "1.5x",
+            StreamAa::X2 => "2x",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<StreamAa> {
+        STREAM_AA_MODES.into_iter().find(|m| m.label() == label)
+    }
+}
+
+/// The stream's AA mode as an index into [`STREAM_AA_MODES`].
+static STREAM_AA: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Sets the stream's anti-aliasing (live: the next frame renders at its size).
+pub fn set_stream_aa(mode: StreamAa) {
+    let i = STREAM_AA_MODES.iter().position(|m| *m == mode).unwrap_or(0);
+    STREAM_AA.store(i as u8, Ordering::Release);
+}
+
+/// The stream's anti-aliasing now.
+pub fn stream_aa() -> StreamAa {
+    STREAM_AA_MODES[(STREAM_AA.load(Ordering::Acquire) as usize).min(STREAM_AA_MODES.len() - 1)]
 }
 
 /// The app's tap of its own audio for a remote headset: make it on the app's thread, move it
@@ -423,6 +511,8 @@ impl XrServe {
             }
             self.counts.draws += 1;
             self.counts.window();
+            // the stream's AA: the XR pass renders supersampled (from this frame on)
+            cx.cx.xr_set_supersample(stream_aa().scale());
             // the headset integrates and sends its room field only while the app uses it
             xr_host::set_room_field_wanted(cx.cx.xr_room_field_wanted());
             let Some((display_ns, _)) = cx.cx.xr_frame_wire() else { return };
@@ -451,16 +541,24 @@ impl XrServe {
             if s.target.ensure(cx.cx, (w / 4, h + h / 2), RenderTargetFormat::SharedBgra8) {
                 s.handle = None;
             }
-            let extent = vec2(w as f32, eh as f32);
+            // the colour and depth as the XR pass rendered them: `ss` of their pixels per eye
+            // pixel (a supersampled pass; the same rounding as the pass's size)
+            let ss = cx.cx.xr_supersample() as f64;
+            let (sw, sh) = ((ew as f64 * ss).round() as u32, (eh as f64 * ss).round() as u32);
+            let scale = vec2(sw as f32 / ew as f32, sh as f32 / eh as f32);
+            let extent = vec2((2 * sw) as f32, sh as f32);
+            self.rendered = [sw, sh];
             s.target.begin(cx, vec4(0.0, 0.0, 0.0, 0.0));
             // the colour's luma (rows 0..eh) and chroma (rows h..h + eh/2)
             self.draw_luma.draw_vars.set_texture(0, color);
-            self.draw_luma.source = vec4(0.0, 0.0, w as f32, eh as f32);
+            self.draw_luma.source = vec4(0.0, 0.0, extent.x, extent.y);
             self.draw_luma.extent = extent;
+            self.draw_luma.scale = scale;
             self.draw_luma.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2((w / 4) as f64, eh as f64) });
             self.draw_chroma.draw_vars.set_texture(0, color);
-            self.draw_chroma.source = vec4(0.0, 0.0, w as f32, eh as f32);
+            self.draw_chroma.source = vec4(0.0, 0.0, extent.x, extent.y);
             self.draw_chroma.extent = extent;
+            self.draw_chroma.scale = scale;
             self.draw_chroma.full = 0.0;
             self.draw_chroma.draw_abs(cx, Rect { pos: dvec2(0.0, h as f64), size: dvec2((w / 4) as f64, (eh / 2) as f64) });
             // the band's luma (rows eh..h) and its neutral chroma (rows h + eh/2 .. h + h/2)
@@ -468,6 +566,7 @@ impl XrServe {
             self.draw_band.draw_vars.set_texture(1, depth);
             self.draw_band.extent = extent;
             self.draw_band.eye = vec2(ew as f32, eh as f32);
+            self.draw_band.scale = scale;
             let (n, f) = (EYE_NEAR, EYE_FAR);
             self.draw_band.clip = vec4(2.0 * f * n, f + n, f - n, DEPTH_NEAR_M);
             self.draw_band.neutral = 0.0;
@@ -559,15 +658,17 @@ impl XrServe {
         let reports = xr_host::headset_reports();
         let Some(last) = reports.last() else { return };
         let v = |i: usize| last.get(i).copied().unwrap_or(0.0);
-        let panel = Rect { pos: mirror.pos + dvec2(12.0, 12.0), size: dvec2(470.0, 254.0) };
+        let panel = Rect { pos: mirror.pos + dvec2(12.0, 12.0), size: dvec2(560.0, 254.0) };
         self.draw_stats_bg.color = vec4(0.0, 0.0, 0.0, 0.62);
         self.draw_stats_bg.draw_abs(cx, panel);
         let lines = [
-            format!("headset {:.0} Hz · shown {:.0}/s · BLANK {:.1}/s · skipped {:.1}/s · received {:.0}/s", v(r::DISPLAY), v(r::SHOWN), v(r::BLANK), v(r::SKIPPED), v(r::RECEIVED)),
+            format!("headset {:.0} Hz · shown {:.0}/s · BLANK {:.1}/s · skipped {:.1}/s · received {:.0}/s · battery {}{} · stream {} · room scan {}", v(r::DISPLAY), v(r::SHOWN), v(r::BLANK), v(r::SKIPPED), v(r::RECEIVED),
+                if v(r::BATTERY_PCT) < 0.0 { "?".to_string() } else { format!("{:.0}%", v(r::BATTERY_PCT)) }, if v(r::BATTERY_CHARGING) > 0.5 { " charging" } else { "" },
+                if makepad_desk_link::xr_host::streaming() { "on" } else { "OFF" }, if makepad_desk_link::xr_host::room_scan() { "allowed" } else { "off" }),
             format!("repeats {:.1}/s: late {:.1} · server skipped {:.1} · queue cap {:.1} · no pose {:.1}", v(r::REPEATS), v(r::REPEAT_LATE), v(r::REPEAT_SERVER), v(r::REPEAT_DROPPED), v(r::REPEAT_NOPOSE)),
             format!("motion to photon {:.0} ms (net {:.1} decode {:.1} queue {:.1}) · lead {:.0} ms ({:.0} frames)", v(r::M2P_MS), v(r::NET_MS), v(r::DECODE_MS), v(r::WAIT_MS), v(r::LEAD_MS), v(r::AHEAD)),
             format!("uplink {:.0} poses/s ±{:.2} ms · env depth age {:.0} ms", v(r::UPLINK), v(r::UPLINK_SD_MS), v(r::ENV_AGE_MS)),
-            xr_host::server_line(),
+            format!("{} · AA {} ({}x{} per eye)", xr_host::server_line(), stream_aa().label(), self.rendered[0], self.rendered[1]),
             if v(r::AUDIO_RECEIVED) > 0.0 {
                 format!("audio {:.0} ms (net {:.1} buffer {:.0}/{:.0} device {:.0}; pictures {:.0}) · {:.0}/s lost {:.0} · underruns {:.0} concealed {:.0} · drift {:+.0} ppm{}",
                     v(r::AUDIO_MS), v(r::AUDIO_NET_MS), v(r::AUDIO_BUFFER_MS), v(r::AUDIO_TARGET_MS), v(r::AUDIO_DEVICE_MS), v(r::AUDIO_VIDEO_MS), v(r::AUDIO_RECEIVED), v(r::AUDIO_LOST) + v(r::AUDIO_LATE), v(r::AUDIO_UNDERRUNS), v(r::AUDIO_CONCEALED), v(r::AUDIO_DRIFT_PPM),

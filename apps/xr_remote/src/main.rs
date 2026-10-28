@@ -85,6 +85,18 @@ pub struct XrRemoteView {
     update_at: Option<std::time::Instant>,
     #[rust]
     ui_times: (u64, u64, u32),
+    /// The housekeeping timer (5 a second: the room field's bricks and the report go on while
+    /// the stream is off and no XR frame comes), the default audio outputs, and whether the
+    /// stream's sound plays now (off with the stream: the device stops).
+    #[rust]
+    idle_timer: Timer,
+    #[rust]
+    audio_outputs: Vec<AudioDeviceId>,
+    #[rust]
+    audio_on: Option<bool>,
+    /// The threads' CPU time at the last per-thread line (tid -> ticks) and when.
+    #[rust]
+    thread_cpu: (std::collections::HashMap<u32, u64>, Option<std::time::Instant>),
     /// A GPU profile runs since then (`debug.xrremote.gpuprof`).
     #[rust]
     gpu_prof_at: Option<std::time::Instant>,
@@ -192,9 +204,9 @@ impl XrRemoteView {
                 Err(e) => log!("xr remote: no fleet identity: {e}"),
             }
         }
-        // the rate the display is asked to run at (`debug.xrremote.hz`, default 90): the server
-        // encodes for it (its pictures are paced by the poses, one per display frame)
-        let refresh = device_property("debug.xrremote.hz").and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(90.0);
+        // the rate the display runs at until the server asks for its own (`XrServerMsg::Refresh`):
+        // the server encodes for it (its pictures are paced by the poses, one per display frame)
+        let refresh = 90.0;
         log!("xr remote: linking to {host}:{port} at {refresh} Hz");
         // `streamscale` N (percent, read at the link; default 120, the user's pick: 100 looked
         // half-res blurry, 140 is past what 166 encodes at 90/s): the eye picture the desktop
@@ -215,6 +227,7 @@ impl XrRemoteView {
             });
         }
         self.client = Some(client);
+        self.idle_timer = cx.start_interval(0.2);
     }
 }
 
@@ -222,6 +235,20 @@ impl Widget for XrRemoteView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Some(client) = self.client.as_mut() {
             client.handle_event(cx, event);
+            if self.idle_timer.is_event(event).is_some() {
+                client.idle_tick(cx);
+            }
+            // the stream's sound on the headset's default output while the stream is on (off:
+            // the device stops, its callback no longer runs)
+            if let Event::AudioDevices(devices) = event {
+                self.audio_outputs = devices.default_output();
+                self.audio_on = None;
+            }
+            let on = !client.stream_off();
+            if self.audio_on != Some(on) && !self.audio_outputs.is_empty() {
+                self.audio_on = Some(on);
+                cx.use_audio_outputs(if on { &self.audio_outputs } else { &[] });
+            }
         }
         if self.presenting {
             // the debug switches (`adb shell setprop debug.xrremote.<name> 0|1`), read once a
@@ -245,8 +272,9 @@ impl Widget for XrRemoteView {
                         self.pass.set_window_clear_color(cx, c);
                     }
                 }
-                // `hz` (default 90): the display's refresh rate (the supported one nearest)
-                let hz = switch("debug.xrremote.hz", 90);
+                // the display's refresh rate: the link's (the server's app picks it, the
+                // Sandbox gear's stream fps; the supported one nearest)
+                let hz = self.client.as_ref().map_or(90, |c| c.refresh_hz().round() as u8);
                 if hz != self.refresh_hz {
                     self.refresh_hz = hz;
                     log!("xr remote: refresh rate {hz} Hz asked");
@@ -317,11 +345,12 @@ impl Widget for XrRemoteView {
                 let envdepth = switch("debug.xrremote.envdepth", 1);
                 if envdepth != self.envdepth_asked {
                     self.envdepth_asked = envdepth;
-                    log!("xr remote: environment depth {}", envdepth != 0);
-                    makepad_widgets::makepad_platform::makepad_hal::hal_xr_environment_depth(envdepth != 0);
+                    log!("xr remote: environment depth allowed {}", envdepth != 0);
                 }
                 if let Some(client) = self.client.as_mut() {
                     client.occlusion = occlusion;
+                    // (the client runs the depth while the occlusion or the room field needs it)
+                    client.env_depth_allowed = envdepth != 0;
                     // `roomfield` 0 / 1: the room field off or on whatever the server says (its
                     // CPU A/B); unset or 2: as the server's app asks
                     client.room_field_override = match switch("debug.xrremote.roomfield", 2) { 0 => Some(false), 1 => Some(true), _ => None };
@@ -395,10 +424,46 @@ impl Widget for XrRemoteView {
             if t.2 >= 450 {
                 log!("xr remote: ui thread per frame ms: update to drawn {:.2}, draw {:.2}", t.0 as f64 / 1000.0 / t.2 as f64, t.1 as f64 / 1000.0 / t.2 as f64);
                 *t = (0, 0, 0);
+                self.log_thread_cpu();
             }
         }
         DrawStep::done()
     }
+}
+
+impl XrRemoteView {
+    /// The app's threads by CPU since the last call (% of one core; the busiest, with their
+    /// names and ids: this thread's id is marked), for the load hunt.
+    fn log_thread_cpu(&mut self) {
+        let Ok(dir) = std::fs::read_dir("/proc/self/task") else { return };
+        let mut now = std::collections::HashMap::new();
+        let mut names = std::collections::HashMap::new();
+        for e in dir.flatten() {
+            let Some(tid) = e.file_name().to_str().and_then(|t| t.parse::<u32>().ok()) else { continue };
+            let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else { continue };
+            // (pid (comm) state ... utime stime: fields 14 and 15, counted after the comm)
+            let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else { continue };
+            let rest: Vec<&str> = stat[close + 2..].split(' ').collect();
+            let ticks = rest.get(11).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) + rest.get(12).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            now.insert(tid, ticks);
+            names.insert(tid, stat[open + 1..close].to_string());
+        }
+        let (before, at) = std::mem::replace(&mut self.thread_cpu, (now.clone(), Some(std::time::Instant::now())));
+        let Some(at) = at else { return };
+        let secs = at.elapsed().as_secs_f64().max(0.1);
+        // (ticks are 1/100 s)
+        let mut rows: Vec<(f64, u32)> = now.iter().map(|(tid, t)| ((t.saturating_sub(*before.get(tid).unwrap_or(t))) as f64 / secs, *tid)).collect();
+        rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let me = unsafe { libc_gettid() } as u32;
+        let total: f64 = rows.iter().map(|r| r.0).sum();
+        let top: Vec<String> = rows.iter().take(12).filter(|r| r.0 > 0.0).map(|(pct, tid)| format!("{} {tid}{} {pct:.1}", names.get(tid).map_or("?", |n| n.as_str()), if *tid == me { "(ui)" } else { "" })).collect();
+        log!("xr remote: threads % of a core: total {total:.0} · {}", top.join(" · "));
+    }
+}
+
+extern "C" {
+    #[link_name = "gettid"]
+    fn libc_gettid() -> i32;
 }
 
 /// Stops the GPU profile and logs each pass's GPU time (mean, max) with its size and
@@ -472,10 +537,7 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
-        // the stream's game audio plays on the headset's default output
-        if let Event::AudioDevices(devices) = event {
-            cx.use_audio_outputs(&devices.default_output());
-        }
+        // (the stream's game audio: the view picks the output, on while the stream is)
         self.ui.handle_event(cx, event, &mut Scope::empty());
         // the XR pass, apart from the window's draw
         if let Event::Draw(e) = event {

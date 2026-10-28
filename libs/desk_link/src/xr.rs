@@ -28,7 +28,7 @@
 use crate::{In, Out};
 use std::io;
 
-pub const XR_VERSION: u16 = 5;
+pub const XR_VERSION: u16 = 6;
 /// The band's depth: luma `v` (1..255) is `z = DEPTH_NEAR_M * 255 / v` metres (inverse depth,
 /// finest near the eye); 0 = no depth (nothing drawn there).
 pub const DEPTH_NEAR_M: f32 = 0.25;
@@ -110,13 +110,16 @@ pub mod report {
     /// decoding), the server never sent it (a newer one came), the headset let it go at its
     /// queue cap, no pose went up for that frame. Then the blank frames per second (a frame
     /// drawn without a picture for an eye) and the lead in display frames.
+    /// The headset's battery (percent; -1 not known) and whether it charges (1/0).
+    pub const BATTERY_PCT: usize = 32;
+    pub const BATTERY_CHARGING: usize = 33;
     pub const REPEAT_LATE: usize = 26;
     pub const REPEAT_SERVER: usize = 27;
     pub const REPEAT_DROPPED: usize = 28;
     pub const REPEAT_NOPOSE: usize = 29;
     pub const BLANK: usize = 30;
     pub const AHEAD: usize = 31;
-    pub const COUNT: usize = 32;
+    pub const COUNT: usize = 34;
     /// After the numbers: how many display frames the window had, then their codes, 8 to a
     /// value (3 bits each, the first frame lowest: exact in an f32).
     pub const FRAMES: usize = COUNT;
@@ -174,6 +177,17 @@ pub enum XrServerMsg {
     /// view): only then does the headset integrate its depth into the field and send bricks
     /// (a whole core of its CPU). Sent after the welcome and on every change; off until then.
     RoomField { wanted: bool },
+    /// The display rate the server's app asks of the headset (mHz): the headset switches its
+    /// display to it; the server then ends the session and the headset links again at it (the
+    /// encoders are made for one rate).
+    Refresh { mhz: u32 },
+    /// The stream runs (pictures and sound) or is off: off, the headset stops every part of it
+    /// (decoders released, no stream pass) and shows the room alone. Sent after the welcome
+    /// and on every change.
+    Streaming { on: bool },
+    /// Mixed reality (the room through the picture's empty parts) or VR (the picture opaque,
+    /// no passthrough): the server's app's choice. Sent after the welcome and on every change.
+    SeeThrough { on: bool },
 }
 
 /// `Video::stages`: the desktop's durations of a picture (µs).
@@ -205,6 +219,9 @@ mod tag {
     pub const NOTE: u8 = 105;
     pub const UPLINK: u8 = 106;
     pub const ROOM_FIELD: u8 = 107;
+    pub const REFRESH: u8 = 108;
+    pub const STREAMING: u8 = 109;
+    pub const SEE_THROUGH: u8 = 110;
 }
 
 fn bad(ty: u8, side: &str) -> io::Error {
@@ -333,6 +350,21 @@ impl XrServerMsg {
                 o.u8(*wanted as u8);
                 o.done()
             }
+            XrServerMsg::Refresh { mhz } => {
+                let mut o = Out::new(REFRESH);
+                o.u32(*mhz);
+                o.done()
+            }
+            XrServerMsg::Streaming { on } => {
+                let mut o = Out::new(STREAMING);
+                o.u8(*on as u8);
+                o.done()
+            }
+            XrServerMsg::SeeThrough { on } => {
+                let mut o = Out::new(SEE_THROUGH);
+                o.u8(*on as u8);
+                o.done()
+            }
         }
     }
 
@@ -359,6 +391,9 @@ impl XrServerMsg {
             NOTE => XrServerMsg::Note { text: r.str()? },
             UPLINK => XrServerMsg::Uplink { port: r.u16()?, key: r.bytes()?.to_vec() },
             ROOM_FIELD => XrServerMsg::RoomField { wanted: r.u8()? != 0 },
+            REFRESH => XrServerMsg::Refresh { mhz: r.u32()? },
+            STREAMING => XrServerMsg::Streaming { on: r.u8()? != 0 },
+            SEE_THROUGH => XrServerMsg::SeeThrough { on: r.u8()? != 0 },
             _ => return Err(bad(ty, "server")),
         })
     }
@@ -691,6 +726,9 @@ mod tests {
             XrServerMsg::Bye { reason: "done".into() },
             XrServerMsg::Note { text: "hi".into() },
             XrServerMsg::RoomField { wanted: true },
+            XrServerMsg::Refresh { mhz: 72_000 },
+            XrServerMsg::Streaming { on: false },
+            XrServerMsg::SeeThrough { on: true },
         ];
         for m in server {
             let mut inbox = Inbox::default();

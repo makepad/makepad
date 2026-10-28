@@ -36,6 +36,13 @@ pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
 
 // ---- desktop: the tap ----------------------------------------------------------------------
 
+/// The stream on (`xr_host::set_streaming`): off, nothing is sent and the desktop plays its own
+/// sound again.
+static STREAM_ON: AtomicBool = AtomicBool::new(true);
+pub(crate) fn set_streaming(on: bool) {
+    STREAM_ON.store(on, Ordering::Release);
+}
+
 /// Frames the tap's ring holds (341 ms at 48 kHz): the sender drains it every millisecond.
 const RING: usize = 1 << 14;
 /// Per block the tap took: its first frame's index and when it was due (the clock at the tap).
@@ -117,6 +124,9 @@ impl XrAudioTap {
     let t = &*self.0;
     t.tapped.fetch_add(1, Ordering::Relaxed);
     if !t.on.load(Ordering::Acquire) {
+        return false;
+    }
+    if !STREAM_ON.load(Ordering::Acquire) {
         return false;
     }
     let mute = t.peer.load(Ordering::Acquire) && t.mute_local.load(Ordering::Relaxed);
@@ -285,7 +295,7 @@ impl AudioOut {
                             });
                         }
                         if pending.len() >= wire::FRAMES * wire::CHANNELS {
-                            if let Some(to) = to {
+                            if let (Some(to), true) = (to, STREAM_ON.load(Ordering::Acquire)) {
                                 wire::seal(&key, seq, wire::CHANNELS, flags, pending_due, &pending[..wire::FRAMES * wire::CHANNELS], &mut datagram);
                                 let _ = socket.send_to(&datagram, to);
                                 sent += 1;

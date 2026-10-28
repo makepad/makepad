@@ -182,6 +182,9 @@ fn main() {
             XrServerMsg::Pong { client_ns, server_ns } => rx.pong(client_ns, server_ns),
             XrServerMsg::Note { text } => println!("xr-probe: server: {text}"),
             XrServerMsg::RoomField { wanted } => println!("xr-probe: the server {} the room field (this probe has none)", if wanted { "wants" } else { "does not want" }),
+            XrServerMsg::Refresh { mhz } => println!("xr-probe: the server asks for {:.0} Hz (this probe keeps its own)", mhz as f64 / 1000.0),
+            XrServerMsg::Streaming { on } => println!("xr-probe: stream {}", if on { "on" } else { "off" }),
+            XrServerMsg::SeeThrough { on } => println!("xr-probe: {}", if on { "mixed reality" } else { "VR" }),
             XrServerMsg::Refused { reason } | XrServerMsg::Bye { reason } => break reason,
         }
     };
