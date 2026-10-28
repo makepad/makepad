@@ -998,3 +998,45 @@ fn invalid_inliner_built_after_patch_is_in_its_group() {
     assert_eq!(result, 100, "late is built again from the restored helper");
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn preempted_check_under_a_front_read_gives_way() {
+    isolated_test!(preempted_check_under_a_front_read_gives_way);
+    // A type check ahead (typeck_ahead) that a waiting front writer preempts waits for the writer
+    // and checks again -- it did so also when its thread held another front read (prefront_twin
+    // held one around it). The writer waits for every read, so the two waited for each other for
+    // good: the owner froze in its front write (an inspect `static` during a cold start) and the
+    // program's main thread queued behind it. Under a held read the preempted check gives its
+    // work up instead.
+    crate::borrowck::lazy::disable_gandalf();
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax_preempted_read_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("input.rs");
+    std::fs::write(&path, "pub fn checked(x: u32) -> u32 { x + 1 }\nfn main() { let _ = checked(1); }\n").unwrap();
+    let session = std::sync::Arc::new(crate::Session::default());
+    let (prog, core, krate) = crate::load_with_std(&session, path.to_str().unwrap(), "preempted_read", false).unwrap();
+    let def = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && prog.name(id) == "checked").then_some(id)
+    }).unwrap();
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let u = Unit::new(prog, tcx, core);
+    let front = u.front.clone();
+    // a writer waits from the start: the check is preempted at its first point
+    let writer = crate::preempt::WriterWaiting::new();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _outer = front_read("test: an outer read");
+        let _preemptible = crate::preempt::Preemptible::on();
+        typeck_ahead(&front, def, Vec::new(), 0, false, false);
+        done_tx.send(()).unwrap();
+    });
+    let gave_way = done_rx.recv_timeout(std::time::Duration::from_secs(30)).is_ok();
+    drop(writer);
+    assert!(gave_way, "a preempted check holding another front read waited for the writer (the writer waits for that read)");
+    drop(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}

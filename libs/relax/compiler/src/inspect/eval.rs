@@ -194,8 +194,9 @@ fn writes(trees: &[TokenTree]) -> Option<&'static str> {
 }
 
 /// Compiles `expr` in `module` as an eval fn (on the owner): its callable entry. A type that is
-/// not Debug compiles again with the raw view.
-fn compile(up: *mut Unit, module: u32, src: &str, expr: &TokenStream) -> Result<(u64, bool), String> {
+/// not Debug compiles again with the raw view. Ok(Err(FrontBusy)): nothing loaded, ask again
+/// (super::owner_loading).
+fn compile(up: *mut Unit, module: u32, src: &str, expr: &TokenStream) -> Result<Result<(u64, bool), super::FrontBusy>, String> {
     let mut last = String::new();
     for (helper, raw) in [("__eval", false), ("__eval_raw", true)] {
         let id = NEXT.fetch_add(1, SeqCst);
@@ -210,9 +211,10 @@ fn compile(up: *mut Unit, module: u32, src: &str, expr: &TokenStream) -> Result<
                 let sym = u.prog.syms.get("__relax_eval").ok_or("no eval fn")?;
                 let d = *u.prog.mods[child as usize].values.get(&sym).ok_or("no eval fn")?;
                 let slot = u.fn_id(FnKey::Inst(d, Vec::new()));
-                return Ok((u.entry(slot), raw));
+                return Ok(Ok((u.entry(slot), raw)));
             }
-            Err(e) => {
+            Err(crate::modules::InModuleErr::FrontBusy) => return Ok(Err(super::FrontBusy)),
+            Err(crate::modules::InModuleErr::Errors(e)) => {
                 last = e.join("\n");
                 // only a missing Debug impl goes on to the raw view
                 if raw || !last.contains("Debug") {
@@ -262,14 +264,11 @@ fn eval_tokens(req: &Req, src: &str, expr: TokenStream, mutate: bool) -> Result<
         return Err("no running unit".into());
     }
     let req2 = Req { cmd: req.cmd.clone(), pos: Vec::new(), kv: req.kv.clone() };
-    let text = src.to_string();
-    let r = crate::owner::call_within(crate::owner::Class::Program, 30_000, move || -> Result<(u64, bool, Place), String> {
+    let (entry, raw, p) = super::owner_loading(30_000, || -> Result<Result<(u64, bool, Place), super::FrontBusy>, String> {
         let u = unsafe { &*up };
         let p = place(u, &req2)?;
-        let (entry, raw) = compile(up, p.module, &text, &expr)?;
-        Ok((entry, raw, p))
-    });
-    let (entry, raw, p) = r.unwrap_or_else(|| Err(format!("the owner did not take the request in 30 s ({})", crate::owner::serving_note())))?;
+        Ok(compile(up, p.module, src, &expr)?.map(|(entry, raw)| (entry, raw, p)))
+    })?;
     let (t, v) = run(up, entry, p.base)?;
     Ok((t, v, raw, p))
 }

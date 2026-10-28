@@ -12135,7 +12135,7 @@ pub fn start_completion(up: *mut Unit, runtime: &crate::options::RuntimeOptions)
         lower_worker_priority(&runtime);
         set_worker();
         {
-            let _r = FRONT_RW.read().unwrap_or_else(|e| e.into_inner());
+            let _r = front_read("completion indexes");
             unsafe { (*up).prog.warm_skipped_indexes() };
         }
         loop {
@@ -12152,7 +12152,7 @@ pub fn start_completion(up: *mut Unit, runtime: &crate::options::RuntimeOptions)
             }
             // the next skipped file, and its lowering off the unit lock
             let next = {
-                let _r = FRONT_RW.read().unwrap_or_else(|e| e.into_inner());
+                let _r = front_read("completion next file");
                 let u = unsafe { &*up };
                 u.prog.skipped_files.keys().min().copied()
             };
@@ -21818,7 +21818,8 @@ pub fn front_write() -> std::sync::RwLockWriteGuard<'static, ()> {
     loop {
         match front_try_write() {
             Some(g) => return g,
-            None => owner::pump_wait(&|| FRONT_RW.try_write().is_ok()),
+            // (the wait names the longest-held read: makepad inspect `waits`)
+            None => owner::pump_wait_for(front_holders::oldest(), &|| FRONT_RW.try_write().is_ok()),
         }
     }
 }
@@ -21829,12 +21830,85 @@ fn front_trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_FRONT_TRACE").is_some())
 }
+/// The front end's read holders now, for the waits that name them (a front write's pump, makepad
+/// inspect `waits`): one row per held read, claimed lock-free (tid 0: free). A read that finds
+/// every row taken is not listed (the count of those is kept), it still reads.
+pub(crate) mod front_holders {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::{Acquire, Relaxed, Release}};
+    const ROWS: usize = 256;
+    static TID: [AtomicU64; ROWS] = [const { AtomicU64::new(0) }; ROWS];
+    static SITE: [AtomicUsize; ROWS] = [const { AtomicUsize::new(0) }; ROWS];
+    static SITE_LEN: [AtomicUsize; ROWS] = [const { AtomicUsize::new(0) }; ROWS];
+    static SINCE: [AtomicU64; ROWS] = [const { AtomicU64::new(0) }; ROWS];
+    pub(crate) static UNLISTED: AtomicU64 = AtomicU64::new(0);
+
+    /// Claims a row for this thread's read at `site` (None: every row is taken).
+    pub(crate) fn claim(site: &'static str) -> Option<usize> {
+        let me = crate::os::thread::current().max(1);
+        for k in 0..ROWS {
+            if TID[k].load(Relaxed) == 0 && TID[k].compare_exchange(0, me, Acquire, Relaxed).is_ok() {
+                SITE[k].store(site.as_ptr() as usize, Relaxed);
+                SITE_LEN[k].store(site.len(), Relaxed);
+                SINCE[k].store(crate::clock::wall_ns().max(1), Release);
+                return Some(k);
+            }
+        }
+        UNLISTED.fetch_add(1, Relaxed);
+        None
+    }
+
+    pub(crate) fn release(k: usize) {
+        SINCE[k].store(0, Relaxed);
+        TID[k].store(0, Release);
+    }
+
+    /// (thread, site, held since wall ns) of every listed read now
+    pub(crate) fn snapshot() -> Vec<(u64, &'static str, u64)> {
+        let mut v = Vec::new();
+        for k in 0..ROWS {
+            let tid = TID[k].load(Acquire);
+            let since = SINCE[k].load(Acquire);
+            if tid == 0 || since == 0 {
+                continue;
+            }
+            let (p, n) = (SITE[k].load(Relaxed), SITE_LEN[k].load(Relaxed));
+            // SAFETY: sites are &'static str literals; a row reused meanwhile pairs another literal's
+            // pointer and length only if both changed between the loads, which the re-check rules out
+            let site: &'static str = if p == 0 { "?" } else { unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(p as *const u8, n)) } };
+            if TID[k].load(Acquire) == tid && SINCE[k].load(Relaxed) == since && SITE[k].load(Relaxed) == p && SITE_LEN[k].load(Relaxed) == n {
+                v.push((tid, site, since));
+            }
+        }
+        v
+    }
+
+    /// The longest-held read's thread (0: none listed): who a front write waits for.
+    pub(crate) fn oldest() -> u64 {
+        snapshot().into_iter().min_by_key(|r| r.2).map_or(0, |r| r.0)
+    }
+}
+
+thread_local! {
+    /// this thread's front reads held now
+    static FRONT_READS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// The front reads this thread holds now.
+pub(crate) fn front_reads_held() -> u32 {
+    FRONT_READS.try_with(|c| c.get()).unwrap_or(0)
+}
+
 pub struct FrontRead {
     _g: std::sync::RwLockReadGuard<'static, ()>,
     traced: Option<(&'static str, std::time::Instant)>,
+    row: Option<usize>,
 }
 impl Drop for FrontRead {
     fn drop(&mut self) {
+        let _ = FRONT_READS.try_with(|c| c.set(c.get().saturating_sub(1)));
+        if let Some(k) = self.row {
+            front_holders::release(k);
+        }
         if let Some((site, t)) = self.traced {
             let ms = t.elapsed().as_secs_f64() * 1e3;
             if ms > 50.0 {
@@ -21877,7 +21951,8 @@ unsafe fn owner_front<'u>(up: *const Unit) -> (&'u Program, &'u Tcx) {
 
 pub fn front_read(site: &'static str) -> FrontRead {
     let g = FRONT_RW.read().unwrap_or_else(|e| e.into_inner());
-    FrontRead { _g: g, traced: front_trace().then(|| (site, std::time::Instant::now())) }
+    let _ = FRONT_READS.try_with(|c| c.set(c.get() + 1));
+    FrontRead { _g: g, traced: front_trace().then(|| (site, std::time::Instant::now())), row: front_holders::claim(site) }
 }
 /// What type checks ahead need of a unit, reachable without its lock: the program and type
 /// context (shared, Sync), slot keys, and the checked bodies waiting for their builds.
@@ -22569,15 +22644,17 @@ fn prefront_twin(front: &FrontShared, twin: u32, base: u32) -> bool {
         return prefront_fail(AF_NESTED);
     }
     let Some(FnKey::Inst(d, args)) = front.slot_keys.get(&base) else { return prefront_fail(AF_NOT_BODY) };
+    // the base body's check takes its own front reads: none may be held around it (a preempted
+    // check waits for the front writer to finish, and the writer waits for every read)
+    {
+        let _preemptible = crate::preempt::Preemptible::on();
+        typeck_ahead(front, d, args.clone(), 0, false, false);
+    }
     let r = front_read("lower_ahead");
     if !front.alive.load(Ordering::SeqCst) {
         return prefront_fail(AF_OTHER);
     }
     let u = r.unit_of(front);
-    {
-        let _preemptible = crate::preempt::Preemptible::on();
-        typeck_ahead(front, d, args.clone(), 0, false, false);
-    }
     {
         let mut pending = front.lowered.lock().unwrap_or_else(|e| e.into_inner());
         if pending.contains_key(&twin) {
@@ -22905,8 +22982,14 @@ fn typeck_ahead(f: &FrontShared, d: DefId, args: Vec<TyId>, depth: u32, queued: 
         if r.as_ref().is_err_and(|p| crate::preempt::is_preempted(&**p)) {
             inprog_end(f, &key);
             if crate::preempt::is_stopped() { return; }
-            todo.push((key.0, key.1, depth, normal));
             drop(fr);
+            // a writer waits: this check waits for it to finish and is done again -- unless this
+            // thread holds another front read, which the writer waits for: then the check is
+            // given up (its build checks the body itself), never waited for under that read
+            if front_reads_held() > 0 {
+                return;
+            }
+            todo.push((key.0, key.1, depth, normal));
             std::thread::sleep(std::time::Duration::from_millis(5));
             continue;
         }

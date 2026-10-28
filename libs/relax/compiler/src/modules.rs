@@ -400,8 +400,13 @@ unsafe fn front(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox:
 
 /// Takes defs out of the program (a refused load, an unload).
 pub(crate) unsafe fn drop_defs(up: *mut Unit, defs: &[DefId]) {
-    let u = &mut *up;
     let _fw = jit::front_write();
+    drop_defs_held(up, defs);
+}
+
+/// `drop_defs` with the front end's write lock held by the caller.
+unsafe fn drop_defs_held(up: *mut Unit, defs: &[DefId]) {
+    let u = &mut *up;
     let impls: Vec<DefId> = defs.iter().copied().filter(|d| u.prog.def(*d).kind == DefKind::Impl).collect();
     u.prog.unbind_defs(defs);
     u.tcx.uncollect_impls(&impls);
@@ -447,19 +452,32 @@ unsafe fn load(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox: 
     Ok((krate, root_file, defs))
 }
 
+/// Why `load_in_module` loaded nothing.
+pub(crate) enum InModuleErr {
+    /// the front end is read now (type checks, lowering off the owner): nothing was changed, and
+    /// the owner did not wait for it -- the requester asks again (inspect::owner_loading)
+    FrontBusy,
+    /// the module's errors (nothing of it stays reachable)
+    Errors(Vec<String>),
+}
+
 /// makepad inspect's probes and `eval`: compiles `v` as a new private child module `name` of
 /// module `parent` (Program::add_child_module: the parent's private items, imports and `crate::`
 /// paths are in scope), type-checks it and compiles its non-generic fns and what they reach
 /// (owner thread): (the child module, its definitions). On an error nothing of it stays reachable.
-pub(crate) unsafe fn load_in_module(up: *mut Unit, parent: u32, name: &str, v: crate::program::FileVersion) -> Result<(u32, Vec<DefId>), Vec<String>> {
+/// The owner never waits for the front end here (inspect never holds the owner behind a
+/// reader: the program's own requests queue behind it): the program change takes the front
+/// end's write lock only if it is free now, else FrontBusy; a refused module's removal that finds
+/// it busy is queued as owner work.
+pub(crate) unsafe fn load_in_module(up: *mut Unit, parent: u32, name: &str, v: crate::program::FileVersion) -> Result<(u32, Vec<DefId>), InModuleErr> {
     let u = &mut *up;
     let d0 = u.prog.defs.len();
     let i0 = u.prog.imports.len();
     let e0 = u.prog.errors.len();
     let f0 = u.prog.files.len();
     let path = v.path.clone();
+    let Some(fw) = jit::front_try_write() else { return Err(InModuleErr::FrontBusy) };
     let child = {
-        let _fw = jit::front_write();
         crate::run::preserve_collected_boot(u);
         u.tcx.collect_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let r = u.prog.add_child_module(parent, name, v);
@@ -470,15 +488,32 @@ pub(crate) unsafe fn load_in_module(up: *mut Unit, parent: u32, name: &str, v: c
         r
     };
     let defs: Vec<DefId> = (d0 as u32..u.prog.defs.len() as u32).map(DefId).collect();
-    let fail = |up: *mut Unit, errs: Vec<String>| -> Result<(u32, Vec<DefId>), Vec<String>> {
-        drop_defs(up, &defs);
-        let _fw = jit::front_write();
-        (&mut *up).prog.errors.truncate(e0);
-        Err(errs)
+    // (the front write is held across the failure's removal when it fails at once)
+    let mut fw = Some(fw);
+    let fail = |up: *mut Unit, fw: Option<std::sync::RwLockWriteGuard<'static, ()>>, errs: Vec<String>| -> Result<(u32, Vec<DefId>), InModuleErr> {
+        match fw.or_else(jit::front_try_write) {
+            Some(g) => {
+                drop_defs_held(up, &defs);
+                (&mut *up).prog.errors.truncate(e0);
+                drop(g);
+            }
+            None => {
+                // a reader holds the front end now: the removal is the owner's next work of its
+                // own (the module is private and nothing calls into it meanwhile)
+                let (defs, path, upn) = (defs.clone(), path.clone(), up as usize);
+                crate::owner::post_queued(crate::owner::Class::Program, move || {
+                    let up = upn as *mut Unit;
+                    let _g = jit::front_write();
+                    drop_defs_held(up, &defs);
+                    (&mut *up).prog.errors.retain(|e| !e.starts_with(path.as_str()));
+                });
+            }
+        }
+        Err(InModuleErr::Errors(errs))
     };
     let (child, _file) = match child {
         Ok(c) => c,
-        Err(e) => return fail(up, vec![e]),
+        Err(e) => return fail(up, fw.take(), vec![e]),
     };
     let u = &mut *up;
     let mine_file = |p: &str| p == path;
@@ -490,10 +525,19 @@ pub(crate) unsafe fn load_in_module(up: *mut Unit, parent: u32, name: &str, v: c
         }
     }
     if errs.is_empty() {
-        let _fw = jit::front_write();
+        // (still under the add's front write) collected as a load is (Tcx::collect_loaded): the
+        // child module is new and private under a fresh name, so it changes no existing item --
+        // the visible crates' declarations and solver answers stay. (As a collection of added
+        // items it dropped every declaration of every crate that sees the module: an eval or
+        // `static` in a base crate like makepad_platform re-derived the whole program's
+        // signatures, and a cold start under a loop of them did not reach its present.)
         let visible = u.prog.crates_seeing_files(f0 as u32..u.prog.files.len() as u32);
-        errs.extend(u.tcx.collect_added_in(&u.prog, &defs, false, Some(&visible)).into_iter().filter(|e| e.starts_with(path.as_str())));
+        errs.extend(u.tcx.collect_loaded(&u.prog, &defs, &visible).into_iter().filter(|e| e.starts_with(path.as_str())));
     }
+    if !errs.is_empty() {
+        return fail(up, fw.take(), errs);
+    }
+    drop(fw.take());
     if errs.is_empty() {
         for &d in &defs {
             if !matches!(u.prog.def(d).kind, DefKind::Fn | DefKind::AssocFn | DefKind::Const | DefKind::Static | DefKind::AssocConst) {
@@ -515,7 +559,7 @@ pub(crate) unsafe fn load_in_module(up: *mut Unit, parent: u32, name: &str, v: c
         }
     }
     if !errs.is_empty() {
-        return fail(up, errs);
+        return fail(up, None, errs);
     }
     let roots: Vec<u32> = root_fns(u, &defs).into_iter().map(|d| u.fn_id(FnKey::Inst(d, Vec::new()))).collect();
     let mine = |u: &Unit, id: u32| match &u.fns[id as usize].key {
@@ -524,7 +568,7 @@ pub(crate) unsafe fn load_in_module(up: *mut Unit, parent: u32, name: &str, v: c
         _ => false,
     };
     if let Err(e) = compile_all(up, roots, &mine, &mine) {
-        return fail(up, e);
+        return fail(up, None, e);
     }
     Ok((child, defs))
 }

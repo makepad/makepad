@@ -539,7 +539,7 @@ fn add(hook: &str, src: Vec<u8>, mutate: bool, low: bool) -> Result<(Arc<Probe>,
     let _ = std::fs::write(&path, &src);
     let hook = hook.to_string();
     let src_text = String::from_utf8_lossy(&src).into_owned();
-    let r = crate::owner::call_within(crate::owner::Class::Program, 30_000, move || -> Result<(Arc<Probe>, Vec<String>, Vec<String>), String> {
+    super::owner_loading(30_000, || -> Result<Result<(Arc<Probe>, Vec<String>, Vec<String>), super::FrontBusy>, String> {
         let u = unsafe { &mut *up };
         let found = super::instrument::find_all(u, &hook, 8);
         if found.is_empty() {
@@ -552,8 +552,12 @@ fn add(hook: &str, src: Vec<u8>, mutate: bool, low: bool) -> Result<(Arc<Probe>,
             _ => return Err("the hooked slot is not a fn instance".into()),
         };
         let name = format!("__relax_probe_{}", id);
-        let v = u.prog.child_parse_snapshot(scope, &name, &path).parse(src).map_err(|e| format!("{}: {}", path, e))?;
-        let (child, _) = unsafe { crate::modules::load_in_module(up, scope, &name, v) }.map_err(|e| e.join("\n"))?;
+        let v = u.prog.child_parse_snapshot(scope, &name, &path).parse(src.clone()).map_err(|e| format!("{}: {}", path, e))?;
+        let (child, _) = match unsafe { crate::modules::load_in_module(up, scope, &name, v) } {
+            Ok(c) => c,
+            Err(crate::modules::InModuleErr::FrontBusy) => return Ok(Err(super::FrontBusy)),
+            Err(crate::modules::InModuleErr::Errors(e)) => return Err(e.join("\n")),
+        };
         let u = unsafe { &mut *up };
         let sym = u.prog.syms.get("probe").ok_or("the probe module has no `fn probe`")?;
         let pd = *u.prog.mods[child as usize].values.get(&sym).ok_or("the probe module has no `fn probe`")?;
@@ -614,10 +618,9 @@ fn add(hook: &str, src: Vec<u8>, mutate: bool, low: bool) -> Result<(Arc<Probe>,
             rows.extend(unsafe { super::codever::cover_inliners(up, owner, &ok, false) });
         }
         *p.slots.lock().unwrap_or_else(|e| e.into_inner()) = slots;
-        Ok((p, lines, rows))
+        Ok(Ok((p, lines, rows)))
         })
-    });
-    r.unwrap_or_else(|| Err(format!("the owner did not take the request in 30 s ({})", crate::owner::serving_note())))
+    })
 }
 
 

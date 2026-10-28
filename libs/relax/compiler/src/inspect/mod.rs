@@ -292,6 +292,40 @@ fn dispatch_command(req: &Req, out: &mut Out) {
     }
 }
 
+/// The front end was busy for an inspect load (modules::InModuleErr::FrontBusy): nothing changed.
+pub(crate) struct FrontBusy;
+
+/// Inspect's owner work that loads code into the program (eval, static, probes). Inspect holds
+/// nothing the owner needs, and the owner never waits on inspect's behalf: `f` runs on the owner
+/// as one program-class request (FIFO with the program's own), and a load in it that finds the
+/// front end read now answers FrontBusy at once instead of waiting for the readers there (the
+/// program's requests would queue behind that wait: an eval during a cold start froze the app).
+/// This thread then asks again with a writer announced (preemptible checks give way: announced
+/// only once the front was found busy, so background checks run while the load needs nothing of
+/// them), until `ms`; the owner serves the program in between.
+pub(crate) fn owner_loading<T>(ms: u64, mut f: impl FnMut() -> Result<Result<T, FrontBusy>, String>) -> Result<T, String> {
+    let t0 = std::time::Instant::now();
+    let mut writer: Option<crate::preempt::WriterWaiting> = None;
+    let mut busy = 0u32;
+    loop {
+        let left = ms.saturating_sub(t0.elapsed().as_millis() as u64);
+        match crate::owner::call_within(crate::owner::Class::Program, left, &mut f) {
+            None => return Err(format!("the owner did not take the request in {} s ({})", ms / 1000, crate::owner::serving_note())),
+            Some(Err(e)) => return Err(e),
+            Some(Ok(Ok(t))) => return Ok(t),
+            Some(Ok(Err(FrontBusy))) => {
+                busy += 1;
+                writer.get_or_insert_with(crate::preempt::WriterWaiting::new);
+                if t0.elapsed().as_millis() as u64 >= ms {
+                    let holders: Vec<String> = crate::jit::front_holders::snapshot().iter().map(|(t, site, _)| format!("{} at {}", crate::os::thread::name(*t), site)).collect();
+                    return Err(format!("the compiler's front end stayed busy for {} s ({} tries; read by {}): try again", ms / 1000, busy, if holders.is_empty() { "-".to_string() } else { holders.join(", ") }));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    }
+}
+
 /// `req` with `word` put in front of its positional words (an alias for a subcommand).
 fn shifted(req: &Req, word: &str) -> Req {
     let mut pos = vec![word.to_string()];
@@ -979,6 +1013,15 @@ fn cmd_waits(out: &mut Out) {
             continue;
         }
         out.line(&format!("{{\"thread\":{},\"waits\":{}}}", json_str(&thread_label(w.thread, &list)), json_str(&wait_text(w, &list))));
+    }
+    // the front end's read holders (what a front write waits for)
+    let now = crate::clock::wall_ns();
+    for (tid, site, since) in crate::jit::front_holders::snapshot() {
+        out.line(&format!("{{\"thread\":{},\"holds\":{}}}", json_str(&thread_label(tid, &list)), json_str(&format!("front read ({}) for {} ms", site, now.saturating_sub(since) / 1_000_000))));
+    }
+    let unlisted = crate::jit::front_holders::UNLISTED.load(Relaxed);
+    if unlisted != 0 {
+        out.line(&format!("{{\"front_reads_unlisted\":{}}}", unlisted));
     }
 }
 

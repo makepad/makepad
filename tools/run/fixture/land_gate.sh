@@ -5,8 +5,8 @@
 #   full  : build (0 warnings), rustc-check, relax-compiler libtest build, x64 relax tests, tier fuzzer (fixed
 #           seeds block, random batch never), makepad check of the 7 gate packages + Stage, headless Calc+Stage
 #           present, warm_zero (Calculator: the warm launch shows no JIT spinner), warm_after_app_edit (Sandbox: a
-#           new item in an app file stays warm), warm_after_hal (a HAL body
-#           edit keeps the stored builds), diff_fast, zone leg
+#           new item in an app file stays warm), warm_after_hal (a HAL body edit keeps the stored builds), inspect_cold
+#           (inspect during a cold start never stalls the app), diff_fast, zone leg
 #   stage : build, makepad check makepad-stage, headless Stage present (commercial-only branches)
 # Prints "NODEGATE-OK <summary>" or "NODEGATE-FAIL: <steps>"; exit 0 / 1. Every step is a function named step_*;
 # the zone leg is the ONE function step_zone (settle_stress.sh).
@@ -106,13 +106,18 @@ step_warm_zero() { # JITLOOP-B: after one normal session the next Calculator lau
   echo "$wz"; echo "$wz" | grep -q "^warm_zero: OK" || fail="$fail warm_zero"
   sum="$sum warm_zero:$(echo "$wz" | sed -n 's/.*warm: spinner \([0-9]*\), UI blocked max \([0-9]*\) ms.*/spinner\1.max\2ms/p')"
 }
+step_inspect_cold() { # JITDEADLOCK: inspect static/eval/locals in a loop during a cold Calculator start answer or bail,
+  # and the app still presents with no long UI block (an inspect `static` during a cold start froze the app)
+  ic=$(TARGET=$T/release CLIENTS=1 ROUNDS=2 WAIT=150 tools/run/fixture/inspect_cold.sh 2>&1 | tail -3 | cut -c1-400)
+  echo "$ic"; echo "$ic" | tail -1 | grep -q "^inspect_cold: OK" || fail="$fail inspect_cold"
+}
 step_warm_hal() { # JITCOLD: a body-only HAL edit (a provided crate: the loader rebuilds) keeps the stored builds
   wh=$(TARGET=$T/release WAIT=200 BUILD="cargo build --release -p makepad-run -p makepad-remote --bin makepad --bin makepad-remote -j8" tools/run/fixture/warm_after_hal.sh 2>&1 | tail -1 | cut -c1-400)
   echo "$wh"; echo "$wh" | grep -q "^warm_after_hal: OK" || fail="$fail warm_after_hal"
 }
 if step_build; then
   case $mode in
-    full) step_rustc_check; step_libtest_build; step_x64_tests; step_fuzz; step_checks; step_present_calc; step_present_stage; step_warm_zero; step_warm_hal; step_warm_app_edit; step_diff; step_zone;;
+    full) step_rustc_check; step_libtest_build; step_x64_tests; step_fuzz; step_checks; step_present_calc; step_present_stage; step_warm_zero; step_warm_hal; step_warm_app_edit; step_inspect_cold; step_diff; step_zone;;
     stage) step_check_stage; step_present_stage;;
     *) fail="$fail bad-mode";;
   esac

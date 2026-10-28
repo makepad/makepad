@@ -1338,7 +1338,7 @@ pub fn pump_wait(done: &dyn Fn() -> bool) {
 }
 
 /// `pump_wait` for a wait on thread `runner` (0: unknown), as the wait registry records it.
-fn pump_wait_for(runner: u64, done: &dyn Fn() -> bool) {
+pub(crate) fn pump_wait_for(runner: u64, done: &dyn Fn() -> bool) {
     if done() {
         return;
     }
