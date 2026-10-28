@@ -1,7 +1,7 @@
 //! Remote rendering for headsets over Desk Link XR (`makepad_desk_link::xr`).
 //!
-//! - [`serve`] + [`XrServe`]: an app in a process with a remote headset slot
-//!   (`MAKEPAD_XR_REMOTE=1`) serves its XR view: it renders as on a headset (its XR pass, paced
+//! - [`serve`] + [`XrServe`]: an app serves its XR view (a headset linking gives the process a
+//!   remote headset slot): it renders as on a headset (its XR pass, paced
 //!   by the headset's poses) into its own textures; `XrServe` packs each frame on the GPU and
 //!   hands it to the encoder (`makepad_desk_link::xr_host`), and mirrors it on the desktop.
 //! - [`XrStreamClient`]: on the headset, a thin client: it sends each XR frame's pose (head,
@@ -43,16 +43,19 @@ fn set_refresh_mhz(mhz: u32) {
 const HOLD: usize = 6;
 
 mod auto;
+mod mirror;
 mod panel;
 mod serve;
+pub use mirror::XrMirrorView;
 pub use panel::{XrCaptionButton, XrStreamSettings};
-pub use serve::{serve, set_stream_see_through, stream_aa, DrawXrBand, DrawXrMirror, StreamAa, StreamView, XrServe, STREAM_AA_DEFAULT, STREAM_AA_MODES};
+pub use serve::{serve, set_stream_mirror, set_stream_see_through, stream_aa, DrawXrBand, DrawXrMirror, StreamAa, StreamView, XrServe, STREAM_AA_DEFAULT, STREAM_AA_MODES};
 #[cfg(not(target_arch = "wasm32"))]
 pub use serve::{set_menu_toggles_streaming, streaming, tap_audio, XrAudioTap};
 /// The serving side's shaders, `mod.draw.XrServe` and the caption's `XrCaptionButton` (an app
 /// that serves registers them).
 pub fn serve_script_mod(vm: &mut ScriptVm) -> ScriptValue {
     serve::script_mod(vm);
+    mirror::script_mod(vm);
     panel::script_mod(vm)
 }
 

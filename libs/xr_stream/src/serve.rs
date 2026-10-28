@@ -1,5 +1,6 @@
-//! The desktop end of remote rendering: an app in a process with a remote headset slot
-//! (`MAKEPAD_XR_REMOTE=1`) serves its XR view. The slot is an offscreen XR display
+//! The desktop end of remote rendering: an app serves its XR view ([`serve`]; the caption's XR
+//! control starts it). A headset linking gives the process a remote headset slot, an offscreen
+//! XR display
 //! (`Cx::xr_offscreen`): the app's XR pass renders both eyes side by side into its own colour and
 //! depth textures, paced by the headset's poses. [`XrServe`] (the app's, drawn right after its XR
 //! pass) turns each new frame into the stream picture on the GPU and hands it to the encoder
@@ -299,6 +300,9 @@ pub struct XrServe {
     eye: Option<[u32; 2]>,
     #[rust]
     counts: Counts,
+    /// The desktop windows are held for the headset (`Cx::xr_hold_windows`).
+    #[rust]
+    holding: bool,
 }
 
 /// The app side's counts per stats window (5 s): draws, new XR frames, frames packed, pictures
@@ -314,6 +318,10 @@ struct Counts {
     waited: u32,
     /// Frames the app drew without content (`skip_frame`), by reason.
     skipped: Vec<(&'static str, u32)>,
+    /// The desktop windows' repaints painted and held (`Cx::xr_window_counts`): at the window's
+    /// start and now.
+    desktop_at: (u64, u64),
+    desktop_now: (u64, u64),
 }
 
 impl Counts {
@@ -325,7 +333,8 @@ impl Counts {
         }
         let r = |n: u32| n as f64 / secs;
         let skipped: Vec<String> = self.skipped.iter().map(|(why, n)| format!("{n} {why}")).collect();
-        log!("xr serve: draws {:.0}/s · new XR frames {:.0}/s · packed {:.0}/s · handed {:.0}/s · poses asked {:.0}/s · waited for room {} · not streamed (empty) {}", r(self.draws), r(self.frames), r(self.packed), r(self.handed), r(self.asked), self.waited, if skipped.is_empty() { "0".to_string() } else { skipped.join(", ") });
+        let (painted, held) = (self.desktop_now.0 - self.desktop_at.0.min(self.desktop_now.0), self.desktop_now.1 - self.desktop_at.1.min(self.desktop_now.1));
+        log!("xr serve: draws {:.0}/s · new XR frames {:.0}/s · packed {:.0}/s · handed {:.0}/s · poses asked {:.0}/s · waited for room {} · not streamed (empty) {} · desktop painted {:.1}/s, held {:.0}/s", r(self.draws), r(self.frames), r(self.packed), r(self.handed), r(self.asked), self.waited, if skipped.is_empty() { "0".to_string() } else { skipped.join(", ") }, painted as f64 / secs, held as f64 / secs);
         // the app's audio (what the headset hears) stops for good when its callback panics
         {
             use makepad_widgets::makepad_platform::audio_output_fence as fence;
@@ -333,7 +342,7 @@ impl Counts {
                 log!("xr serve: the app's audio output callback panicked ({} times): {said}", fence::audio_output_panics(0));
             }
         }
-        *self = Counts { at: Some(Instant::now()), ..Default::default() };
+        *self = Counts { at: Some(Instant::now()), desktop_at: self.desktop_now, desktop_now: self.desktop_now, ..Default::default() };
     }
 }
 
@@ -344,10 +353,10 @@ impl Counts {
 pub fn serve(app: &str) {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        use makepad_desk_link::xr_host::{available, XrHost, XrHostConfig};
+        use makepad_desk_link::xr_host::{XrHost, XrHostConfig};
         static HOST: Mutex<Option<XrHost>> = Mutex::new(None);
         let mut host = HOST.lock().unwrap();
-        if host.is_some() || !available() {
+        if host.is_some() {
             return;
         }
         if !makepad_widgets::makepad_platform::makepad_network::lan::service("xr host") {
@@ -518,6 +527,15 @@ fn apply_view() {
     let _ = see_through;
 }
 
+/// The desktop's mirror of the headset's view (`XrServe::draw_mirror`, `XrMirrorView`; the
+/// caption's XR dropdown): repainted from the headset's frames at a few frames a second
+/// (`Cx::xr_hold_windows`), else only with the desktop's own UI changes.
+static MIRROR: AtomicBool = AtomicBool::new(true);
+
+pub fn set_stream_mirror(on: bool) {
+    MIRROR.store(on, Ordering::Release);
+}
+
 /// The app's view for its content: mixed reality (true) or VR; the user's choice
 /// ([`set_stream_view`]) goes over it.
 pub fn set_stream_see_through(on: bool) {
@@ -586,6 +604,18 @@ impl XrServe {
                 self.signal = Some(signal);
             }
             self.counts.draws += 1;
+            // while a headset streams the desktop windows paint for their own causes only, and
+            // a window with the mirror from the headset's frames at the mirror's rate
+            let hold = xr_host::session_eye().is_some() && streaming();
+            let source = cx.cx.global::<crate::mirror::XrMirrorSource>();
+            source.color = Some(color.clone());
+            if let Some(eye) = xr_host::session_eye() {
+                source.eye = eye;
+            }
+            let mirror = std::mem::take(&mut source.drawn) && MIRROR.load(Ordering::Acquire);
+            cx.cx.xr_hold_windows(hold, mirror);
+            self.holding = hold;
+            self.counts.desktop_now = cx.cx.xr_window_counts();
             self.counts.window();
             // the stream's AA and render scale: the XR pass renders multisampled, at the supersample
             // times the render scale of the encoded eye size (from this frame on)
@@ -739,15 +769,9 @@ impl XrServe {
     /// into `rect`.
     pub fn draw_mirror(&mut self, cx: &mut Cx2d, rect: Rect, color: &Texture) {
         let eye = self.eye.unwrap_or([1680, 1760]);
-        let aspect = eye[0].max(1) as f64 / eye[1].max(1) as f64;
-        let (mut w, mut h) = (rect.size.x, rect.size.x / aspect);
-        if h > rect.size.y {
-            h = rect.size.y;
-            w = h * aspect;
-        }
-        let pos = rect.pos + (rect.size - dvec2(w, h)) * 0.5;
         self.draw_mirror.draw_vars.set_texture(0, color);
-        self.draw_mirror.draw_abs(cx, Rect { pos, size: dvec2(w, h) });
+        self.draw_mirror.draw_abs(cx, crate::mirror::fit(rect, eye));
+        cx.cx.global::<crate::mirror::XrMirrorSource>().drawn = true;
     }
 
     /// The mirror's area (the app's hit area for its view).
@@ -760,6 +784,11 @@ impl XrServe {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         #[cfg(not(target_arch = "wasm32"))]
         {
+            // the headset gone or its stream off: the desktop paints as always again
+            if self.holding && (xr_host::session_eye().is_none() || !streaming()) {
+                self.holding = false;
+                cx.xr_hold_windows(false, false);
+            }
             if !matches!(event, Event::Signal) || !self.signal.as_ref().is_some_and(|s| s.check_and_clear()) {
                 return;
             }

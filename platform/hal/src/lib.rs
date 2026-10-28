@@ -471,9 +471,7 @@ impl Hal {
                     st.backend = Some((b.info().backend, b));
                     st.backend_inits += 1;
                     // a remote headset slot's XR window events wake the pumps like the backend's
-                    if xr_remote::enabled() {
-                        xr_remote::set_wake(notify.clone());
-                    }
+                    xr_remote::set_wake(notify.clone());
                 }
                 None => return refused,
             },

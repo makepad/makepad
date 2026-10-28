@@ -131,6 +131,9 @@ pub struct HalClient {
     pub(crate) hosted: Option<hosted::HostedClient>,
     /// the head-mounted display's stereo window (`xr_start_presenting`)
     pub(crate) xr: Option<xr::HalXr>,
+    /// a remote headset slot was offered when last looked (a headset linked: the app draws again
+    /// and finds an XR display, `Cx::xr_display`)
+    pub(crate) xr_remote_seen: bool,
     /// a window drag started by the app (`CxOsOp::StartDragging`): the in-window drag protocol
     /// synthesises Drag / Drop events from mouse move and up
     pub(crate) internal_drag_items: Option<Arc<Vec<DragItem>>>,
@@ -215,6 +218,7 @@ impl Default for HalClient {
             direct_display: Default::default(),
             hosted: None,
             xr: None,
+            xr_remote_seen: false,
             internal_drag_items: None,
             input_ns: 0,
             composing: false,

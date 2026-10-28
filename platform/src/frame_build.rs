@@ -1127,7 +1127,7 @@ impl Cx {
         let stereo = matches!(self.passes[pass_id].parent, CxDrawPassParent::Xr);
         // an XR display without a display of its own (`info_flags::XR_OFFSCREEN`): the XR pass
         // renders into its own textures, eyes side by side; the XR window only paces it
-        let offscreen_xr = stereo && self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::XR_OFFSCREEN != 0);
+        let offscreen_xr = stereo && self.hal_info_flags() & makepad_hal::info_flags::XR_OFFSCREEN != 0;
         let multiview = stereo && !offscreen_xr && !picking && self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::MULTIVIEW != 0);
         let (window, is_window) = match self.passes[pass_id].parent {
             CxDrawPassParent::Window(w) => (Some(w), true),

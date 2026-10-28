@@ -1,4 +1,4 @@
-//! The host API of a remote headset (`MAKEPAD_XR_REMOTE=1`): what a remote-render server
+//! The host API of a remote headset: what a remote-render server
 //! (makepad_xr_stream) drives. The app renders its XR view as on a headset, into its own textures
 //! (`info_flags::XR_OFFSCREEN`); these calls feed it the headset's poses and pace it. JIT-compiled
 //! code reaches it only through these functions. The provider below is the HAL's own, under every
@@ -19,10 +19,22 @@
 //! has a picture slot for the next one, so the frames in flight to the encoder stay bounded by
 //! the app's slots).
 
-/// This process offers a remote headset slot (its apps see `info_flags::XR`).
+/// This process offers a remote headset slot (its apps see `info_flags::XR`): since a headset
+/// linked to its XR server (`hal_xr_remote_enable`).
 #[makepad_relax_api::relax_api]
 pub fn hal_xr_remote_enabled() -> bool {
     enabled()
+}
+
+/// A headset linked: the slot is offered from now on (the process's apps see `info_flags::XR`
+/// with `XR_OFFSCREEN` and may present XR on it); the HAL is woken so its apps learn it.
+#[makepad_relax_api::relax_api]
+pub fn hal_xr_remote_enable() {
+    if !ENABLED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        if let Some(wake) = lock(&remote().state).wake.clone() {
+            wake();
+        }
+    }
 }
 
 /// The headset's eye size (pixels) and display refresh (mHz): the XR window takes them.
@@ -65,11 +77,11 @@ const REASK: Duration = Duration::from_millis(250);
 /// The eye size until the headset says its own.
 const DEFAULT_EYE: [u32; 2] = [1680, 1760];
 
-/// `MAKEPAD_XR_REMOTE=1`: this process offers a remote headset slot (read once: the HAL's info
-/// flags carry it from the first open on).
+static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// This process offers a remote headset slot (`hal_xr_remote_enable`).
 pub(crate) fn enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_XR_REMOTE").is_some_and(|v| v == "1"))
+    ENABLED.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// The info flags a remote headset slot adds to the backend's (`Hal::open`).

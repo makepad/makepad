@@ -464,9 +464,8 @@ impl Widget for XrRemoteView {
             centred(&mut self.draw_pin_title, cx, 70.0, "Type this PIN on your computer");
             let spaced: String = pin.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
             centred(&mut self.draw_pin, cx, 150.0, &spaced);
-            centred(&mut self.draw_pin_hint, cx, 420.0, "In the app: the headset icon in the title bar, then Headset PIN");
-            let line: String = status.split(" · ").skip(1).collect::<Vec<_>>().join(" · ");
-            centred(&mut self.draw_pin_hint, cx, 460.0, if line.is_empty() { "looking for computers" } else { &line });
+            // one short status line, nothing else (the stats and the link's details stay in the log)
+            centred(&mut self.draw_pin_hint, cx, 440.0, "Looking for computers…");
         } else {
             self.draw_bg.draw_abs(cx, rect);
             self.draw_text.draw_abs(cx, rect.pos + dvec2(24.0, 24.0), &status);

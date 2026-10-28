@@ -107,10 +107,18 @@ pub(crate) fn eye_matrices(frame: &XrFrame, i: usize) -> (Mat4f, Mat4f) {
 }
 
 impl Cx {
+    /// The HAL's info flags as they are now: a remote headset slot is offered from the moment a
+    /// headset links (`makepad_hal::xr_remote::hal_xr_remote_enable`), after the HAL opened.
+    pub(crate) fn hal_info_flags(&self) -> u32 {
+        let Some(info) = self.hal.info else { return 0 };
+        let remote = if makepad_hal::xr_remote::hal_xr_remote_enabled() { makepad_hal::info_flags::XR | makepad_hal::info_flags::XR_OFFSCREEN } else { 0 };
+        info.flags | remote
+    }
+
     /// `xr_start_presenting`: the XR window, once (a backend without XR: nothing to present on).
     pub(crate) fn hal_xr_start(&mut self) {
         if self.hal.xr.is_some() { return; }
-        if !self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::XR != 0) {
+        if self.hal_info_flags() & makepad_hal::info_flags::XR == 0 {
             self.hal.frames.gap("XR presenting needs a head-mounted display (info_flags::XR)");
             return;
         }
@@ -234,9 +242,12 @@ impl Cx {
         });
         xr.last = state.clone();
         // the XR pass draws with the new eyes
+        // (what is redrawn from here is the headset's: `XrWindowHold`)
+        let in_xr = std::mem::replace(&mut self.xr_window_hold.in_xr, true);
         let passes: Vec<_> = self.passes.id_iter().filter(|p| matches!(self.passes[*p].parent, CxDrawPassParent::Xr)).collect();
         for pass in passes { self.redraw_pass_and_child_passes(pass); }
         self.call_event_handler(&Event::XrUpdate(XrUpdateEvent { state, last }));
+        self.xr_window_hold.in_xr = in_xr;
     }
 
     /// An `XrDepth`: the headset's environment depth. A header alone announces a newly

@@ -161,6 +161,8 @@ pub struct Cx {
     pub(crate) new_next_frames: HashSet<NextFrame>,
     /// Frame requests made so far (`Cx::frame_requests`).
     pub(crate) frame_requests: u64,
+    /// The desktop windows while a remote headset streams (`Cx::xr_hold_windows`).
+    pub(crate) xr_window_hold: crate::draw_pass::XrWindowHold,
     /// A child its host says nothing shows of (`HostedVisible`: a hosted process over its
     /// socket, a HAL domain as an app message from its parent): next-frame callbacks and draws
     /// wait until it is shown again (`hosted_frames_held`).
@@ -1047,6 +1049,7 @@ impl Cx {
             studio_http: "".to_string(),
             new_next_frames: Default::default(),
             frame_requests: 0,
+            xr_window_hold: Default::default(),
             hosted_hidden: false,
 
             post_draw_hook: None,

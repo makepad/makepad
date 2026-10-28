@@ -1156,6 +1156,13 @@ impl Cx {
         if ui_signal {
             self.call_event_handler(&Event::Signal);
         }
+        // a headset linked to the app's XR server: the remote headset slot is there from now on
+        // (an XR display), the app's next drawing finds it
+        if !self.hal.xr_remote_seen && makepad_hal::xr_remote::hal_xr_remote_enabled() {
+            self.hal.xr_remote_seen = true;
+            self.redraw_all();
+            did = true;
+        }
         if SignalToUI::check_and_clear_action_signal() {
             self.handle_action_receiver();
             did = true;

@@ -283,6 +283,26 @@ fn write_file(path: &PathBuf, text: &str) {
     }
 }
 
+/// The pairing file this server instance keeps, claimed for the life of the returned lock:
+/// `base` when no running instance of the app holds it, else `base-2`, `base-3`, ... (two
+/// instances of one app on a machine are two servers: each its own instance id and pair).
+/// Unlockable (an odd file system): `base`, no claim.
+pub fn claim(base: PathBuf) -> (PathBuf, Option<std::fs::File>) {
+    if let Some(dir) = base.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    for n in 1..=16 {
+        let path = if n == 1 { base.clone() } else { PathBuf::from(format!("{}-{n}", base.display())) };
+        let Ok(lock) = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path.with_extension("lock")) else { break };
+        match lock.try_lock() {
+            Ok(()) => return (path, Some(lock)),
+            Err(std::fs::TryLockError::WouldBlock) => continue,
+            Err(_) => break,
+        }
+    }
+    (base, None)
+}
+
 /// A server a headset is paired with.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServerPair {
@@ -582,6 +602,26 @@ mod tests {
 
     fn pairing(pin: &str) -> ServerPairing {
         ServerPairing { path: None, instance: 7, pin: pin.into(), paired: None, matched: None, clash: false }
+    }
+
+    #[test]
+    fn two_instances_of_an_app_claim_two_pairing_files() {
+        let dir = std::env::temp_dir().join(format!("xr-claim-{:016x}", random_u64()));
+        let base = dir.join("xr-pairing");
+        let (a, la) = claim(base.clone());
+        let (b, lb) = claim(base.clone());
+        assert_eq!(a, base);
+        assert_eq!(b, dir.join("xr-pairing-2"));
+        assert!(la.is_some() && lb.is_some());
+        let (ia, ib) = (ServerPairing::load(Some(a.clone())).instance, ServerPairing::load(Some(b)).instance);
+        assert_ne!(ia, ib);
+        drop(la);
+        // the first instance gone: a new one takes its file (and its instance id) again
+        let (c, _lc) = claim(base.clone());
+        assert_eq!(c, a);
+        assert_eq!(ServerPairing::load(Some(c)).instance, ia);
+        drop(lb);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

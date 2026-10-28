@@ -63,8 +63,11 @@ impl Cx {
 
     #[allow(unused)]
     pub(crate) fn any_passes_dirty(&self) -> bool {
+        // held windows (`XrWindowHold`) keep their recordings dirty without asking for a frame:
+        // the headset's next frame (or another cause) paints them
+        let held = !self.xr_window_hold.wants_frame();
         for draw_pass_id in self.passes.id_iter() {
-            if self.passes[draw_pass_id].paint_dirty {
+            if self.passes[draw_pass_id].paint_dirty && !(held && self.pass_root_window(draw_pass_id).is_some()) {
                 return true;
             }
         }
@@ -289,6 +292,18 @@ impl Cx {
                 && (live[draw_pass_id.0] == Some(true) || requested)
             {
                 passes_todo.push(draw_pass_id);
+            }
+        }
+        // a remote headset streams: a drawing of only its frames leaves the windows as they are
+        // (dirty, painted with everything recorded at their next cause), `XrWindowHold`
+        if self.xr_offscreen() && passes_todo.iter().any(|id| self.pass_root_window(*id).is_some()) {
+            let now = self.seconds_since_app_start();
+            if self.xr_window_hold.windows_paint(now) {
+                self.xr_window_hold.painted += 1;
+            } else {
+                self.xr_window_hold.held += 1;
+                let passes = &*self;
+                passes_todo.retain(|id| passes.pass_root_window(*id).is_none());
             }
         }
         let depth_of = |start: DrawPassId| -> u64 {
@@ -1430,11 +1445,15 @@ impl Cx {
 
     fn invoke_event_handler(&mut self, event: &Event) {
         let event_handler = self.event_handler.clone();
+        // what the user does to a window repaints it at once, also while a headset streams
+        // (`XrWindowHold`)
+        let input = std::mem::replace(&mut self.xr_window_hold.in_input, self.xr_window_hold.on && crate::draw_pass::XrWindowHold::is_input(event));
         // The active flag excludes aliasing, while the Rc keeps this stable
         // allocation alive even if the handler mutates `Cx`.
         unsafe {
             (&mut *event_handler.get())(self, event);
         }
+        self.xr_window_hold.in_input = input;
     }
 
     fn event_dispatch_is_reentrant(&self, event: &Event) -> bool {

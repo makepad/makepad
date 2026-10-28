@@ -1325,9 +1325,29 @@ impl Cx {
     /// and the app hands them on (an encoder); they paint before every other pass.
     pub fn xr_offscreen(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
-        { self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::XR_OFFSCREEN != 0) }
+        { self.hal_info_flags() & makepad_hal::info_flags::XR_OFFSCREEN != 0 }
         #[cfg(target_arch = "wasm32")]
         { false }
+    }
+
+    /// While a remote headset streams (`on`), the desktop windows paint for their own causes
+    /// only, not for the headset's frames (`XrWindowHold`): input at once, other UI changes at
+    /// most 15 a second; `mirror`: a window shows the headset's view (it paints from the
+    /// headset's frames at that rate). Off: the windows paint as always (at once, with what
+    /// was held).
+    pub fn xr_hold_windows(&mut self, on: bool, mirror: bool) {
+        let hold = &mut self.xr_window_hold;
+        if hold.on && !on {
+            hold.input = true;
+        }
+        hold.on = on;
+        hold.mirror = mirror;
+    }
+
+    /// The window repaints that painted and that were held (`xr_hold_windows`), counted since
+    /// the start.
+    pub fn xr_window_counts(&self) -> (u64, u64) {
+        (self.xr_window_hold.painted, self.xr_window_hold.held)
     }
 
     /// Supersampling of an offscreen XR display's passes (`xr_offscreen`; a no-op elsewhere):
@@ -1377,7 +1397,7 @@ impl Cx {
 
     pub fn xr_display(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
-        { self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::XR != 0) }
+        { self.hal_info_flags() & makepad_hal::info_flags::XR != 0 }
         #[cfg(target_arch = "wasm32")]
         { false }
     }
@@ -2408,6 +2428,7 @@ impl Cx {
     pub fn redraw_all(&mut self) {
         self.frame_requests += 1;
         crate::frame_sources::note(crate::frame_sources::Kind::Redraw, std::panic::Location::caller());
+        self.xr_window_hold.note_redraw();
         self.new_draw_event.redraw_all = true;
     }
 
@@ -2438,6 +2459,7 @@ impl Cx {
         }
         self.frame_requests += 1;
         crate::frame_sources::note(crate::frame_sources::Kind::Redraw, std::panic::Location::caller());
+        self.xr_window_hold.note_redraw();
         self.redraw_list_in_draw(draw_list_id);
     }
 
@@ -2461,6 +2483,7 @@ impl Cx {
         }
         self.frame_requests += 1;
         crate::frame_sources::note(crate::frame_sources::Kind::Redraw, std::panic::Location::caller());
+        self.xr_window_hold.note_redraw();
         if self
             .new_draw_event
             .draw_lists_and_children

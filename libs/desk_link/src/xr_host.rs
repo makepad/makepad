@@ -1,5 +1,6 @@
-//! The desktop end of Desk Link XR (`crate::xr`): an XR server in an app's own process that has
-//! a remote headset slot (`MAKEPAD_XR_REMOTE=1`, `makepad_hal::xr_remote`). A headset connects
+//! The desktop end of Desk Link XR (`crate::xr`): an XR server in an app's own process. A headset
+//! linking offers the process a remote headset slot (`makepad_hal::xr_remote`: the app sees an XR
+//! display from then on and presents on it). A headset connects
 //! (fleet TLS; `Need::XrViewer`), says its eye size and refresh; its poses go to the app's XR
 //! window as `XrFrame`s. The app renders each into its own textures and packs the picture on the
 //! GPU (NV12 in a shared texture, `makepad_xr_stream`), then hands it here with [`submit`]: the
@@ -54,6 +55,8 @@ pub struct XrHostConfig {
 pub struct XrHost {
     stop: Arc<AtomicBool>,
     pub addr: SocketAddr,
+    /// This instance's claim on its pairing file (`crate::xr_pair::claim`).
+    _claim: Option<std::fs::File>,
 }
 
 impl Drop for XrHost {
@@ -62,16 +65,8 @@ impl Drop for XrHost {
     }
 }
 
-/// Whether this process can serve a remote headset (its HAL has the slot).
-pub fn available() -> bool {
-    hal::hal_xr_remote_enabled()
-}
-
 impl XrHost {
     pub fn start(config: XrHostConfig) -> Result<XrHost, String> {
-        if !available() {
-            return Err("xr host: this process has no remote headset slot (MAKEPAD_XR_REMOTE=1)".into());
-        }
         let (identity, verifier, name) = fleet_identity(&config.tls_name).map_err(|why| format!("xr host: {why}"))?;
         let tls = Arc::new(TlsServer::new(identity).map_err(|e| format!("xr host: TLS server: {e}"))?);
         let stop = Arc::new(AtomicBool::new(false));
@@ -79,7 +74,14 @@ impl XrHost {
         let verifier = Arc::new(verifier);
         let log = config.log.clone();
         let (stop2, addr, world) = (stop.clone(), config.addr, config.world.clone());
-        let pairing = Arc::new(Mutex::new(crate::xr_pair::ServerPairing::load(config.pairing.clone())));
+        let (path, claim) = match config.pairing.clone() {
+            Some(base) => {
+                let (path, claim) = crate::xr_pair::claim(base);
+                (Some(path), claim)
+            }
+            None => (None, None),
+        };
+        let pairing = Arc::new(Mutex::new(crate::xr_pair::ServerPairing::load(path)));
         *PAIRING.lock().unwrap() = Some(pairing.clone());
         let (app, pairing2) = (config.app.clone(), pairing.clone());
         std::thread::Builder::new()
@@ -134,7 +136,7 @@ impl XrHost {
                 }
             })
             .map_err(|e| e.to_string())?;
-        Ok(XrHost { stop, addr: config.addr })
+        Ok(XrHost { stop, addr: config.addr, _claim: claim })
     }
 }
 
@@ -223,6 +225,8 @@ impl Session {
         let fps = (refresh_mhz / 1000).clamp(30, 120);
         let core = Core::start(eye, fps, codec, self.log.clone())?;
         (self.log)(&format!("xr host: {who} ({name}) from {}: eyes {}x{} at {fps} Hz, {codec:?} {}x{} in {} tile(s) on {}", self.peer, eye[0], eye[1], core.size[0], core.size[1], core.tiles, core.description));
+        // the app's XR display from now on (it presents on it at its next drawing)
+        hal::hal_xr_remote_enable();
         hal::hal_xr_remote_attach(eye[0], eye[1], refresh_mhz);
         let session = {
             let mut b = [0u8; 8];
@@ -1232,6 +1236,7 @@ pub fn selftest(eye: [u32; 2], log: Log) {
         Err(e) => return log(&format!("xr selftest: {e}")),
     };
     log(&format!("xr selftest: {}x{} {codec:?} in {} tile(s) on {}", core.size[0], core.size[1], core.tiles, core.description));
+    hal::hal_xr_remote_enable();
     hal::hal_xr_remote_attach(eye[0], eye[1], 72_000);
     let _ = std::thread::Builder::new().name("xr-selftest".into()).spawn(move || {
         let start = Instant::now();

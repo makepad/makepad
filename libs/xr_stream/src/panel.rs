@@ -3,8 +3,8 @@
 //! numbers (the headset's and the server's lines, the last minute as bars and the last seconds
 //! frame by frame) and the user's settings: the stream on/off, the room scan, the bandwidth, the
 //! headset's frame rate, the anti-aliasing and VR or mixed reality. An app adds it with one line
-//! in its caption (`xr := XrCaptionButton{app: "sandbox"}`); it shows only in a process that
-//! serves XR (`MAKEPAD_XR_REMOTE=1`). The settings are kept per app (`app`) in its data folder
+//! in its caption (`xr := XrCaptionButton{app: "sandbox"}`), which also starts the app's XR server
+//! (headsets find it; one linking gives the app its XR display). The settings are kept per app (`app`) in its data folder
 //! (`home::app_data_dir`, file `xr-stream`) and applied at start and on every change.
 
 use crate::auto::{Lever, XrAuto};
@@ -54,6 +54,7 @@ script_mod! {
                 stats := mod.widgets.XrStatsView{}
                 streaming := CheckBox{ text: "Stream to the headset (the left menu button too)" }
                 room_scan := CheckBox{ text: "Room scan (while the app uses the room)" }
+                mirror := CheckBox{ text: "Mirror the headset on the desktop (a few frames a second)" }
                 mod.widgets.XrSettingRow{
                     mod.widgets.XrSettingLabel{ text: "Bandwidth" }
                     bitrate := DropDown{ width: 180 labels: ["Auto", "40 Mbit/s", "60 Mbit/s", "80 Mbit/s", "100 Mbit/s", "120 Mbit/s", "150 Mbit/s"] }
@@ -106,11 +107,14 @@ pub struct XrStreamSettings {
     pub aa: Option<StreamAa>,
     pub render_scale_pct: Option<u32>,
     pub view: StreamView,
+    /// The desktop's mirror of the headset's view repaints from its frames (else only when
+    /// the desktop's own UI changes).
+    pub mirror: bool,
 }
 
 impl Default for XrStreamSettings {
     fn default() -> Self {
-        XrStreamSettings { streaming: true, room_scan: true, kbps: None, hz: 90, aa: None, render_scale_pct: None, view: StreamView::App }
+        XrStreamSettings { streaming: true, room_scan: true, kbps: None, hz: 90, aa: None, render_scale_pct: None, view: StreamView::App, mirror: true }
     }
 }
 
@@ -129,6 +133,7 @@ impl XrStreamSettings {
             match k.trim() {
                 "streaming" => s.streaming = v != "off",
                 "room_scan" => s.room_scan = v != "off",
+                "mirror" => s.mirror = v != "off",
                 "kbps" => s.kbps = v.parse().ok(),
                 "hz" => s.hz = v.parse().unwrap_or(s.hz),
                 "aa" => s.aa = StreamAa::from_id(v),
@@ -147,7 +152,7 @@ impl XrStreamSettings {
         }
         let on = |b: bool| if b { "on" } else { "off" };
         let auto = |v: Option<String>| v.unwrap_or_else(|| "auto".to_string());
-        let text = format!("streaming={}\nroom_scan={}\nkbps={}\nhz={}\naa={}\nrender_scale={}\nview={}\n", on(self.streaming), on(self.room_scan), auto(self.kbps.map(|k| k.to_string())), self.hz, auto(self.aa.map(|a| a.id.to_string())), auto(self.render_scale_pct.map(|p| p.to_string())), self.view.label());
+        let text = format!("streaming={}\nroom_scan={}\nkbps={}\nhz={}\naa={}\nrender_scale={}\nview={}\nmirror={}\n", on(self.streaming), on(self.room_scan), auto(self.kbps.map(|k| k.to_string())), self.hz, auto(self.aa.map(|a| a.id.to_string())), auto(self.render_scale_pct.map(|p| p.to_string())), self.view.label(), on(self.mirror));
         let _ = std::fs::write(path, text);
     }
 
@@ -166,6 +171,7 @@ impl XrStreamSettings {
         serve::set_stream_aa(self.aa.unwrap_or(a.aa));
         serve::set_stream_render_scale(self.render_scale_pct.unwrap_or(a.render_scale_pct));
         serve::set_stream_view(self.view);
+        serve::set_stream_mirror(self.mirror);
         #[cfg(not(target_arch = "wasm32"))]
         {
             serve::set_streaming(self.streaming);
@@ -203,14 +209,10 @@ fn link_state() -> XrLinkState {
     XrLinkState::Off
 }
 
-/// Whether this process may serve XR (a remote headset slot): the caption shows the control.
+/// Whether this process may serve XR: every native app with the control (a headset linking
+/// gives it the remote headset slot, `serve::serve`).
 fn serves() -> bool {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        makepad_desk_link::xr_host::available()
-    }
-    #[cfg(target_arch = "wasm32")]
-    false
+    cfg!(not(target_arch = "wasm32"))
 }
 
 /// The caption's headset icon (the popover's anchor), coloured by the link's state.
@@ -473,6 +475,8 @@ impl XrCaptionButton {
         if !serves() {
             return;
         }
+        // the app's XR server: headsets find it from now on
+        serve::serve(&self.app);
         let s = XrStreamSettings::load(&self.app);
         s.apply(&self.auto);
         #[cfg(not(target_arch = "wasm32"))]
@@ -492,6 +496,7 @@ impl XrCaptionButton {
         let Some(s) = &self.settings else { return };
         self.content(ids!(streaming)).as_check_box().set_active(cx, s.streaming, Animate::No);
         self.content(ids!(room_scan)).as_check_box().set_active(cx, s.room_scan, Animate::No);
+        self.content(ids!(mirror)).as_check_box().set_active(cx, s.mirror, Animate::No);
         // the dropdowns' first entry is Auto
         let pick = |i: Option<usize>| i.map_or(0, |i| i + 1);
         let bitrate = pick(s.kbps.and_then(|kbps| STREAM_BITRATES_KBPS.iter().position(|k| *k == kbps)));
@@ -591,6 +596,9 @@ impl XrCaptionButton {
         }
         if let Some(on) = self.content(ids!(room_scan)).as_check_box().changed(actions) {
             self.change(|s| s.room_scan = on);
+        }
+        if let Some(on) = self.content(ids!(mirror)).as_check_box().changed(actions) {
+            self.change(|s| s.mirror = on);
         }
         if let Some(k) = self.content(ids!(bitrate)).as_drop_down().changed(actions) {
             let kbps = k.checked_sub(1).and_then(|k| STREAM_BITRATES_KBPS.get(k).copied());
