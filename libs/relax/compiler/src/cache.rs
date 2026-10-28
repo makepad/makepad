@@ -4649,7 +4649,10 @@ pub struct FrontImages {
     content_hashes: std::sync::atomic::AtomicU64,
     probes: relax_session::sync::Mutex<Option<HashMap<String, bool>>>,
     stores: relax_session::sync::Mutex<HashMap<(String, String), PathBuf>>,
-    certificate: relax_session::sync::Mutex<Option<crate::crate_image::GraphImage>>,
+    certificate: relax_session::sync::Mutex<Option<std::sync::Arc<crate::crate_image::GraphImage>>>,
+    /// the begun load's graph as read from its store (begin_load), certified or not: the restore and
+    /// the demand plan's lookups read it once
+    graph_read: relax_session::sync::Mutex<Option<std::sync::Arc<crate::crate_image::GraphImage>>>,
     begun: relax_session::sync::Mutex<Option<u128>>,
     /// the crates a partial collected restore kept (name, fingerprint): the crates loaded after
     /// them name them as dependencies (restore_collected, full_deps)
@@ -4660,6 +4663,11 @@ pub struct FrontImages {
     sink: Option<std::sync::Arc<FrontSink>>,
 }
 impl FrontImages {
+    /// Graph `identity` as its store holds it: the begun load's read when it is that graph.
+    pub(crate) fn front_graph(&self, identity: u128) -> Option<std::sync::Arc<crate::crate_image::GraphImage>> {
+        if let Some(g) = self.graph_read.lock().unwrap().as_ref().filter(|g| g.identity == identity) { return Some(g.clone()); }
+        read_front_graph(&self.dir, identity).map(std::sync::Arc::new)
+    }
     pub fn open(options: &crate::options::Options) -> Option<Self> {
         // A build script's run (its own small world: std plus the script's crates) keeps no
         // front images: they are read only when a script runs again, which a cached build
@@ -4946,7 +4954,8 @@ impl crate::crate_image::CrateImages for FrontImages {
         let rejected = |why: &str| if crate::preload::trace() {
             eprintln!("makepad-run front: graph certificate not restored: {}", why);
         };
-        let Some(graph) = read_front_graph(&self.dir, recipe.identity) else { rejected("store"); return; };
+        let Some(graph) = read_front_graph(&self.dir, recipe.identity).map(std::sync::Arc::new) else { rejected("store"); return; };
+        *self.graph_read.lock().unwrap() = Some(graph.clone());
         if graph.identity != recipe.identity || graph.crates.len() != recipe.crates.len()
             || !graph.crates.iter().zip(&recipe.crates).all(|((key, _), expected)| key == expected)
             { rejected("recipe"); return; }
@@ -5005,13 +5014,14 @@ impl crate::crate_image::CrateImages for FrontImages {
         *self.probes.lock().unwrap() = None;
         self.stores.lock().unwrap().clear();
         *self.certificate.lock().unwrap() = None;
+        *self.graph_read.lock().unwrap() = None;
         *self.begun.lock().unwrap() = None;
     }
     fn demand_image(&self, crates: &[crate::preload::PreCrate], graph: u128) -> Option<std::sync::Arc<crate::preload::DemandImage>> {
         let recipe = crate::crate_image::GraphRecipe::new(crates);
-        let saved = read_front_graph(&self.dir, recipe.identity)?;
+        let saved = self.front_graph(recipe.identity)?;
         if saved.identity != recipe.identity || saved.crates.iter().map(|(key, _)| key).ne(recipe.crates.iter()) { return None; }
-        let image = saved.demand_image?;
+        let image = saved.demand_image.clone()?;
         if image.graph != graph || image.eager_prefix > crates.len() { return None; }
         let indexed: std::collections::BTreeSet<_> = image.files.iter().map(|f| (f.ci, f.path.as_str())).collect();
         if indexed.iter().any(|(ci, _)| *ci >= crates.len())
@@ -5049,9 +5059,9 @@ impl crate::crate_image::CrateImages for FrontImages {
     }
     fn demand_parts(&self, crates: &[crate::preload::PreCrate], graph: u128) -> Option<crate::crate_image::DemandParts> {
         let recipe = crate::crate_image::GraphRecipe::new(crates);
-        let Some(saved) = read_front_graph(&self.dir, recipe.identity) else { return None; };
+        let Some(saved) = self.front_graph(recipe.identity) else { return None; };
         if saved.identity != recipe.identity || saved.crates.iter().map(|(key, _)| key).ne(recipe.crates.iter()) { return None; }
-        let Some(image) = saved.demand_image.filter(|image| image.graph == graph && image.parts.len() == crates.len()) else { return None; };
+        let Some(image) = saved.demand_image.clone().filter(|image| image.graph == graph && image.parts.len() == crates.len()) else { return None; };
         let path = front_graph_path(&self.dir, recipe.identity);
         let store = Store::open(&path)?;
         let profile = crates.first().is_some_and(|c| c.cfg.session.runtime.profile);

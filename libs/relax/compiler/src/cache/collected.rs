@@ -72,21 +72,26 @@ impl FrontImages {
     /// Each crate's recorded front record as the collected prefix needs it: None when its
     /// store, record, inputs, probes or late inputs no longer hold; else the demand selection
     /// (identity, deferred files) it was recorded under, to compare with this load's.
-    fn prefix_records(&self, graph: &crate::crate_image::GraphImage, pre: &[crate::preload::PreCrate]) -> Option<Vec<Result<(u128, Vec<String>), &'static str>>> {
+    /// `opened`: the graph's crate stores, already open (in graph order).
+    fn prefix_records(&self, graph: &crate::crate_image::GraphImage, pre: &[crate::preload::PreCrate], opened: Option<&[Arc<Store>]>) -> Option<Vec<Result<(u128, Vec<String>), &'static str>>> {
         let recipe = GraphRecipe::new(pre);
         if graph.identity != recipe.identity || graph.crates.len() != pre.len()
             || graph.crates.iter().zip(&recipe.crates).any(|((key, _), want)| key != want) { return None; }
         let present = pre.iter().map(|c| c.name.clone()).collect();
         let mut late = HashMap::new();
-        Some(pre.iter().zip(&graph.crates).map(|(c, ((_, _), fp))| {
-            let store = Store::open(&self.dir.join(front_store_name(&c.cfg.session.options, &c.name, *fp))).ok_or("store")?;
+        Some(pre.iter().zip(&graph.crates).enumerate().map(|(i, (c, ((_, _), fp)))| {
+            let reopened;
+            let store = match opened.and_then(|o| o.get(i)) {
+                Some(store) => &**store,
+                None => { reopened = Store::open(&self.dir.join(front_store_name(&c.cfg.session.options, &c.name, *fp))).ok_or("store")?; &reopened }
+            };
             let (kind, bytes) = store.get(front_crate_key(&c.name, &c.root)).ok_or("record")?;
             if kind != KIND_FRONT_CRATE { return Err("record"); }
             let rec: crate::crate_image::Record = crate::crate_image::decode(bytes).ok_or("record")?;
             let inputs: Vec<_> = rec.ahead.inputs.iter().map(|(p, h)| (p.as_str(), *h))
                 .chain(rec.files.iter().map(|f| (f.path.as_str(), f.hash))).collect();
             if !(self.inputs_current(&inputs) && rec.ahead.probes.iter().all(|(p, e)| self.probe_current(p, *e))
-                && ledger_current(&store, &present, &mut late)) { return Err("inputs"); }
+                && ledger_current(store, &present, &mut late)) { return Err("inputs"); }
             Ok((rec.ahead.demand_plan, rec.ahead.deferred))
         }).collect())
     }
@@ -154,7 +159,7 @@ impl FrontImages {
         let (graph, mut prefix) = match cert.as_ref() {
             Some(graph) => (graph, pre.len()),
             None => {
-                stale = read_front_graph(&self.dir, GraphRecipe::new(pre).identity)?;
+                stale = self.front_graph(GraphRecipe::new(pre).identity)?;
                 if !session.options.source_eager && session.options.rs_lazy {
                     // Restore the immutable Program/Tcx while the demand worker
                     // computes the new selection. Nothing is retained or exposed
@@ -176,7 +181,7 @@ impl FrontImages {
                     plan = Some(pending);
                 }
                 let prefix = if plan.is_some() { 0 } else {
-                    Self::collected_prefix(pre, &self.prefix_records(&stale, pre)?, &|_| Some((0, Vec::new())))?.0
+                    Self::collected_prefix(pre, &self.prefix_records(&stale, pre, None)?, &|_| Some((0, Vec::new())))?.0
                 };
                 (&stale, prefix)
             }
@@ -273,7 +278,8 @@ impl FrontImages {
         phase("Tcx");
         if let Some(plan) = plan.as_deref() {
             why = "demand selection";
-            let records = self.prefix_records(graph, pre)?;
+            let records = self.prefix_records(graph, pre, Some(&stores))?;
+            phase("prefix records");
             // the plan's selection where it is complete, else its early prefix (crates selected
             // in full: identity 0, nothing deferred; preload resolve_images reads it the same way)
             prefix = loop {
@@ -286,6 +292,7 @@ impl FrontImages {
                 if !unknown || ready.is_some() { break p; }
                 plan.wait_progress(seen);
             };
+            phase("prefix chosen");
             why = "demand selection: ledger";
             for store in stores.iter().take(prefix) {
                 if !ledger_current(store, &present, &mut late) { return None; }

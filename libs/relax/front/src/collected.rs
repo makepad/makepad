@@ -298,7 +298,9 @@ impl KeyRow { fn get(self) -> u128 { self.lo as u128 | ((self.hi as u128) << 64)
 
 /// A declaration table of a restored collected graph, read in place: the image holds keys,
 /// entry offsets, encoded (key, value) entries and a hash index; a lookup decodes only the
-/// entry it finds, once. The first mutation turns it into an owned HashMap (live edits, prefix retain).
+/// entry it finds, once. Inserting, removing or changing one entry moves it to the owned map
+/// (an image row it replaces is gone); an operation over every entry (retain, values_mut)
+/// turns the whole table into the owned HashMap. A key is in one of the two at most.
 pub struct ImageMap<K, V> {
     owned: crate::fxhash::HashMap<K, V>,
     mapped: Option<MappedTable<K, V>>,
@@ -323,12 +325,17 @@ pub enum Adopt {
     Mismatch,
 }
 pub struct MappedTable<K, V> {
+    /// sorted (write_image)
     keys: &'static [KeyRow],
     /// open-addressed index over `keys` (entry = row + 1, 0 = empty; linear probing)
     index: &'static [u32],
     offsets: &'static [u32],
     entries: &'static [u8],
     slots: LazySlots<(K, V)>,
+    /// rows whose entry left the image (removed, or moved to the owned map), as bits; empty: none
+    gone: Vec<u64>,
+    /// the rows not gone
+    live: usize,
 }
 impl<K, V> Default for ImageMap<K, V> {
     fn default() -> Self { Self { owned: Default::default(), mapped: None, snap: Default::default() } }
@@ -341,15 +348,28 @@ impl<K: Codec, V: Codec> MappedTable<K, V> {
         let bytes = self.entries.get(self.offsets[i] as usize..self.offsets[i + 1] as usize);
         bytes.and_then(crate::crate_image::decode).expect("checksummed collected table")
     }
+    /// The live row of `key`.
     fn find(&self, key: u128) -> Option<usize> {
         let mask = self.index.len() - 1;
         let mut at = key_slot(key, self.index.len());
         loop {
             let e = *self.index.get(at)?;
             if e == 0 { return None; }
-            if self.keys.get(e as usize - 1)?.get() == key { return Some(e as usize - 1); }
+            if self.keys.get(e as usize - 1)?.get() == key { return Some(e as usize - 1).filter(|&i| !self.is_gone(i)); }
             at = (at + 1) & mask;
         }
+    }
+    fn is_gone(&self, i: usize) -> bool { self.gone.get(i / 64).is_some_and(|w| w >> (i % 64) & 1 == 1) }
+    /// Row `i`'s entry, out of the image (the row is gone).
+    fn take_row(&mut self, i: usize) -> (K, V) {
+        if self.gone.is_empty() { self.gone = vec![0; self.keys.len().div_ceil(64)]; }
+        self.gone[i / 64] |= 1 << (i % 64);
+        self.live -= 1;
+        match self.slots.take(i) { Some(kv) => kv, None => self.decode(i) }
+    }
+    /// The live rows from the first whose key is at least `lo`.
+    fn live_from(&self, lo: u128) -> impl Iterator<Item = usize> + '_ {
+        (self.keys.partition_point(|k| k.get() < lo)..self.keys.len()).filter(|&i| !self.is_gone(i))
     }
 }
 fn key_slot(key: u128, table: usize) -> usize {
@@ -362,12 +382,13 @@ impl<K: Codec + ImageKey + std::hash::Hash + Eq, V: Codec> ImageMap<K, V> {
         self.snap.store(true, std::sync::atomic::Ordering::Relaxed);
         let mut rows: Vec<(u128, Option<(u32, u32)>, Option<(&K, &V)>)> = match &self.mapped {
             // An entry nobody decoded is unchanged; a decoded one may have filled a lazy cell.
-            Some(m) => (0..m.keys.len()).map(|i| match m.slots.get(i) {
+            Some(m) => (0..m.keys.len()).filter(|&i| !m.is_gone(i)).map(|i| match m.slots.get(i) {
                 Some(kv) => (m.keys[i].get(), None, Some((&kv.0, &kv.1))),
                 None => (m.keys[i].get(), Some((m.offsets[i], m.offsets[i + 1])), None),
             }).collect(),
-            None => self.owned.iter().map(|(k, v)| (k.image_key(), None, Some((k, v)))).collect(),
+            None => Vec::new(),
         };
+        rows.extend(self.owned.iter().map(|(k, v)| (k.image_key(), None, Some((k, v)))));
         rows.sort_unstable_by_key(|r| r.0);
         let mut keys = Vec::with_capacity(rows.len());
         let mut offsets = Vec::with_capacity(rows.len() + 1);
@@ -403,7 +424,7 @@ impl<K: Codec + ImageKey + std::hash::Hash + Eq, V: Codec> ImageMap<K, V> {
         if offsets.len() != keys.len() + 1 || *offsets.last()? as usize != entries.len()
             || !index.len().is_power_of_two() || index.len() <= keys.len() { return None; }
         *k += 4; *id += 4;
-        Some(Self { owned: Default::default(), mapped: Some(MappedTable { keys, index, offsets, entries, slots: LazySlots::new(keys.len()) }), snap: Default::default() })
+        Some(Self { owned: Default::default(), mapped: Some(MappedTable { keys, index, offsets, entries, slots: LazySlots::new(keys.len()), gone: Vec::new(), live: keys.len() }), snap: Default::default() })
     }
 
     /// Replace this heap table by `image` (read_image of the image `write_image` made from
@@ -411,82 +432,110 @@ impl<K: Codec + ImageKey + std::hash::Hash + Eq, V: Codec> ImageMap<K, V> {
     /// first use like a warm restore's. Needs exclusive access, as any mutation does.
     /// The freed heap table goes to `retired`: the caller drops it outside its locks.
     pub fn adopt(&mut self, image: Self, retired: &mut Vec<Box<dyn Send>>) -> Adopt where K: Send + 'static, V: Send + 'static {
-        if self.mapped.is_some() { return Adopt::Mapped; }
-        if self.owned.is_empty() { return Adopt::Empty; }
+        if self.is_mapped() { return Adopt::Mapped; }
+        if self.is_empty() { return Adopt::Empty; }
         if !*self.snap.get_mut() { return Adopt::Dirty; }
         let Some(m) = image.mapped else { return Adopt::Mismatch };
-        if m.keys.len() != self.owned.len() { return Adopt::Mismatch; }
+        if m.keys.len() != self.len() { return Adopt::Mismatch; }
         let n = m.keys.len();
         retired.push(Box::new(std::mem::take(&mut self.owned)));
-        self.mapped = Some(m);
+        if let Some(old) = self.mapped.replace(m) { retired.push(Box::new(old)); }
         Adopt::Adopted(n)
     }
 
     pub fn get(&self, k: &K) -> Option<&V> {
-        match &self.mapped {
-            None => self.owned.get(k),
-            Some(m) => Some(&m.entry(m.find(k.image_key())?).1),
-        }
+        if let Some(v) = self.owned.get(k) { return Some(v); }
+        let m = self.mapped.as_ref()?;
+        Some(&m.entry(m.find(k.image_key())?).1)
     }
     pub fn contains_key(&self, k: &K) -> bool {
-        match &self.mapped { None => self.owned.contains_key(k), Some(m) => m.find(k.image_key()).is_some() }
+        self.owned.contains_key(k) || self.mapped.as_ref().is_some_and(|m| m.find(k.image_key()).is_some())
     }
-    pub fn len(&self) -> usize { self.mapped.as_ref().map_or(self.owned.len(), |m| m.keys.len()) }
+    pub fn len(&self) -> usize { self.owned.len() + self.mapped.as_ref().map_or(0, |m| m.live) }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
-    pub fn capacity(&self) -> usize { self.mapped.as_ref().map_or(self.owned.capacity(), |m| m.keys.len()) }
+    pub fn capacity(&self) -> usize { self.owned.capacity() + self.mapped.as_ref().map_or(0, |m| m.live) }
     pub fn iter(&self) -> ImageMapIter<'_, K, V> {
-        match &self.mapped {
-            None => ImageMapIter::Owned(self.owned.iter()),
-            Some(m) => ImageMapIter::Mapped(m, 0..m.keys.len()),
+        ImageMapIter { owned: self.owned.iter(), mapped: self.mapped.as_ref().map(|m| (m, 0..m.keys.len())) }
+    }
+    /// The keys whose image key is at least `lo`, decoding only those of the image's rows.
+    pub fn keys_from(&self, lo: u128) -> Vec<&K> {
+        let mut out: Vec<&K> = self.owned.keys().filter(|k| k.image_key() >= lo).collect();
+        if let Some(m) = &self.mapped { out.extend(m.live_from(lo).map(|i| &m.entry(i).0)); }
+        out
+    }
+    /// Removes every entry whose image key is at least `lo` (a table keyed by DefId: the definitions
+    /// from `lo` on), without decoding the image's other rows.
+    pub fn remove_from(&mut self, lo: u128) {
+        if self.owned.keys().any(|k| k.image_key() >= lo) { self.owned.retain(|k, _| k.image_key() < lo); *self.snap.get_mut() = false; }
+        if let Some(m) = &mut self.mapped {
+            let rows: Vec<usize> = m.live_from(lo).collect();
+            if !rows.is_empty() { *self.snap.get_mut() = false; }
+            for i in rows { drop(m.take_row(i)); }
+        }
+    }
+    /// Key `k`'s entry in the owned map (moved there from the image).
+    fn own(&mut self, k: &K) {
+        *self.snap.get_mut() = false;
+        if self.owned.contains_key(k) { return; }
+        if let Some(m) = &mut self.mapped {
+            if let Some(i) = m.find(k.image_key()) { let (k, v) = m.take_row(i); self.owned.insert(k, v); }
         }
     }
     pub fn keys(&self) -> impl Iterator<Item = &K> + '_ { self.iter().map(|(k, _)| k) }
     pub fn values(&self) -> impl Iterator<Item = &V> + '_ { self.iter().map(|(_, v)| v) }
 
-    /// Mutation needs the owned map: decode every entry once, keeping the decoded ones.
-    pub fn owned(&mut self) -> &mut crate::fxhash::HashMap<K, V> {
+    /// An operation over every entry needs the owned map: decode every live row once, keeping
+    /// the decoded ones.
+    fn owned(&mut self) -> &mut crate::fxhash::HashMap<K, V> {
         *self.snap.get_mut() = false;
         if let Some(mut m) = self.mapped.take() {
-            self.owned.reserve(m.keys.len());
+            self.owned.reserve(m.live);
             for i in 0..m.keys.len() {
+                if m.is_gone(i) { continue; }
                 let (k, v) = match m.slots.take(i) { Some(kv) => kv, None => m.decode(i) };
                 self.owned.insert(k, v);
             }
         }
         &mut self.owned
     }
-    pub fn insert(&mut self, k: K, v: V) -> Option<V> { self.owned().insert(k, v) }
-    pub fn remove(&mut self, k: &K) -> Option<V> {
-        // (an absent key changes nothing: a mapped table stays mapped)
-        if !self.contains_key(k) { return None; }
-        self.owned().remove(k)
+    pub fn insert(&mut self, k: K, v: V) -> Option<V> {
+        // (an image row of the key is gone: the key is in one of the two at most)
+        self.own(&k);
+        self.owned.insert(k, v)
     }
-    pub fn get_mut(&mut self, k: &K) -> Option<&mut V> { self.owned().get_mut(k) }
-    pub fn entry(&mut self, k: K) -> std::collections::hash_map::Entry<'_, K, V> { self.owned().entry(k) }
+    pub fn remove(&mut self, k: &K) -> Option<V> {
+        // (an absent key changes nothing: the table stays as it is)
+        if !self.contains_key(k) { return None; }
+        self.own(k);
+        self.owned.remove(k)
+    }
+    pub fn get_mut(&mut self, k: &K) -> Option<&mut V> { self.own(k); self.owned.get_mut(k) }
+    pub fn entry(&mut self, k: K) -> std::collections::hash_map::Entry<'_, K, V> { self.own(&k); self.owned.entry(k) }
     pub fn retain(&mut self, f: impl FnMut(&K, &mut V) -> bool) { self.owned().retain(f) }
     pub fn values_mut(&mut self) -> std::collections::hash_map::ValuesMut<'_, K, V> { self.owned().values_mut() }
-    /// Whether entries are still read from the image (no mutation since the restore).
-    pub fn is_mapped(&self) -> bool { self.mapped.is_some() }
+    /// Whether every entry is still read from the image (no mutation since the restore).
+    pub fn is_mapped(&self) -> bool { self.mapped.as_ref().is_some_and(|m| m.live == m.keys.len()) && self.owned.is_empty() }
     /// decoded_values_mut, read only
     pub fn decoded_values(&self) -> Box<dyn Iterator<Item = &V> + '_> {
         match &self.mapped {
             None => Box::new(self.owned.values()),
-            Some(m) => Box::new(m.slots.decoded().map(|kv| &kv.1)),
+            // (a gone row's slot is empty)
+            Some(m) => Box::new(self.owned.values().chain(m.slots.decoded().map(|kv| &kv.1))),
         }
     }
-    /// The values a reader can have changed through a lazy cell: all of an owned map, only
-    /// the decoded entries of a mapped one (the others are as the image holds them).
+    /// The values a reader can have changed through a lazy cell: all of the owned map, only
+    /// the decoded entries of the image's rows (the others are as the image holds them).
     pub fn decoded_values_mut(&mut self) -> Box<dyn Iterator<Item = &mut V> + '_> {
         match &mut self.mapped {
             None => Box::new(self.owned.values_mut()),
-            Some(m) => Box::new(m.slots.decoded_mut().map(|kv| &mut kv.1)),
+            Some(m) => Box::new(self.owned.values_mut().chain(m.slots.decoded_mut().map(|kv| &mut kv.1))),
         }
     }
     pub fn iter_mut(&mut self) -> std::collections::hash_map::IterMut<'_, K, V> { self.owned().iter_mut() }
     pub fn clear(&mut self) { *self.snap.get_mut() = false; self.mapped = None; self.owned.clear() }
 }
 impl<K: Codec + ImageKey + std::hash::Hash + Eq, V: Codec> Extend<(K, V)> for ImageMap<K, V> {
-    fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, it: I) { self.owned().extend(it) }
+    fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, it: I) { for (k, v) in it { self.insert(k, v); } }
 }
 impl<K: Codec + ImageKey + std::hash::Hash + Eq, V: Codec> FromIterator<(K, V)> for ImageMap<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(it: I) -> Self { Self { owned: it.into_iter().collect(), mapped: None, snap: Default::default() } }
@@ -500,21 +549,23 @@ impl<'a, K: Codec + ImageKey + std::hash::Hash + Eq, V: Codec> IntoIterator for 
     type IntoIter = ImageMapIter<'a, K, V>;
     fn into_iter(self) -> Self::IntoIter { self.iter() }
 }
-/// Entries in hash order (owned) or image key order (mapped); neither is semantic.
-pub enum ImageMapIter<'a, K, V> {
-    Owned(std::collections::hash_map::Iter<'a, K, V>),
-    Mapped(&'a MappedTable<K, V>, std::ops::Range<usize>),
+/// Entries: the owned map's in hash order, then the image's live rows in key order; neither is semantic.
+pub struct ImageMapIter<'a, K, V> {
+    owned: std::collections::hash_map::Iter<'a, K, V>,
+    mapped: Option<(&'a MappedTable<K, V>, std::ops::Range<usize>)>,
 }
 impl<'a, K: Codec, V: Codec> Iterator for ImageMapIter<'a, K, V> {
     type Item = (&'a K, &'a V);
     fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Owned(it) => it.next(),
-            Self::Mapped(m, r) => r.next().map(|i| { let kv = m.entry(i); (&kv.0, &kv.1) }),
-        }
+        if let Some(kv) = self.owned.next() { return Some(kv); }
+        let (m, r) = self.mapped.as_mut()?;
+        let m: &'a MappedTable<K, V> = m;
+        r.find(|&i| !m.is_gone(i)).map(|i| { let kv = m.entry(i); (&kv.0, &kv.1) })
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
-        match self { Self::Owned(it) => it.size_hint(), Self::Mapped(_, r) => r.size_hint() }
+        let (lo, hi) = self.owned.size_hint();
+        let rest = self.mapped.as_ref().map_or(0, |(_, r)| r.len());
+        (lo, hi.map(|h| h + rest))
     }
 }
 /// Same encoding as a HashMap (verification compares tables across restore and rebuild).
@@ -700,6 +751,44 @@ mod image_table_tests {
     }
 
     #[test]
+    fn image_map_moves_single_entries_out_of_the_image() {
+        let mut owned: ImageMap<DefId, String> = Default::default();
+        for i in 0..400u32 { owned.insert(DefId(i), format!("v{i}")); }
+        let r = image(|w| owned.write_image(w, &mut 0));
+        let mut m: ImageMap<DefId, String> = ImageMap::read_image(&r, &mut 0, &mut 0).unwrap();
+        // the definitions from 300 on: only their rows decode
+        assert_eq!(m.keys_from(300).len(), 100);
+        assert_eq!(m.decoded_values().count(), 100);
+        m.remove_from(300);
+        assert_eq!((m.len(), m.get(&DefId(300)), m.contains_key(&DefId(299))), (300, None, true));
+        assert_eq!(m.decoded_values().count(), 0, "a removed row's value is dropped, the others stay undecoded");
+        // an insert, a replacement, a removal and a change move one entry each
+        assert_eq!(m.insert(DefId(450), "new".into()), None);
+        assert_eq!(m.insert(DefId(7), "seven".into()), Some("v7".into()));
+        assert_eq!(m.remove(&DefId(8)), Some("v8".into()));
+        assert_eq!(m.remove(&DefId(8)), None);
+        m.get_mut(&DefId(9)).unwrap().push('!');
+        *m.entry(DefId(10)).or_default() += "?";
+        assert!(!m.is_mapped());
+        assert_eq!(m.len(), 300);
+        assert_eq!((m.get(&DefId(7)).unwrap().as_str(), m.get(&DefId(9)).unwrap().as_str(), m.get(&DefId(10)).unwrap().as_str()), ("seven", "v9!", "v10?"));
+        assert_eq!(m.iter().count(), 300);
+        assert!(m.keys_from(300).iter().map(|d| d.0).eq([450]));
+        // the same table as one built in the heap: entries, encoding and its image
+        let mut want: ImageMap<DefId, String> = Default::default();
+        for i in 0..300u32 { if i != 8 { want.insert(DefId(i), format!("v{i}")); } }
+        want.insert(DefId(450), "new".into()); want.insert(DefId(7), "seven".into());
+        want.insert(DefId(9), "v9!".into()); want.insert(DefId(10), "v10?".into());
+        assert_eq!(crate::crate_image::encode(&m), crate::crate_image::encode(&want));
+        let again = image(|w| m.write_image(w, &mut 0));
+        let back: ImageMap<DefId, String> = ImageMap::read_image(&again, &mut 0, &mut 0).unwrap();
+        assert_eq!(crate::crate_image::encode(&back), crate::crate_image::encode(&want));
+        // an operation over every entry makes the rest owned
+        m.retain(|d, _| d.0 % 2 == 0);
+        assert_eq!(m.len(), want.iter().filter(|(d, _)| d.0 % 2 == 0).count());
+    }
+
+    #[test]
     fn heap_tables_adopt_their_own_image_unless_changed() {
         let mut retired: Vec<Box<dyn Send>> = Vec::new();
         // a map: written, read back, adopted: same entries, now in place, the heap table retired
@@ -789,6 +878,8 @@ impl<K: Codec + ImageKey + std::hash::Hash + Eq> ImageSet<K> {
     pub fn remove(&mut self, key: &K) -> bool { self.0.remove(key).is_some() }
     pub fn contains(&self, key: &K) -> bool { self.0.contains_key(key) }
     pub fn retain(&mut self, mut f: impl FnMut(&K) -> bool) { self.0.retain(|k, _| f(k)); }
+    /// ImageMap::remove_from
+    pub fn remove_from(&mut self, lo: u128) { self.0.remove_from(lo); }
     pub fn iter(&self) -> impl Iterator<Item = &K> { self.0.keys() }
     pub fn write_image(&self, image: &mut crate::image::Writer<'_>, id: &mut u32) { self.0.write_image(image, id); }
     pub fn read_image(image: &crate::image::Reader, k: &mut usize, id: &mut u32) -> Option<Self> { Some(Self(ImageMap::read_image(image, k, id)?)) }
