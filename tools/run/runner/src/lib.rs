@@ -311,6 +311,31 @@ fn run(raw_args: Vec<Vec<u8>>) {
                 std::process::exit(2);
             }
         },
+        Some("export") => match fetch::split_args(&args[2..]) {
+            Some(Ok((_, spec, cached, rest))) if rest.len() == 1 => {
+                let home = fetch::home();
+                let snap = if cached { fetch::cached(&home, &spec) } else { fetch::fetch(&home, &spec) };
+                let edits = std::env::var_os("MAKEPAD_RUN_EDITS").filter(|d| !d.is_empty()).map(std::path::PathBuf::from);
+                match snap.and_then(|snap| fetch::export(&snap, edits.as_deref(), std::path::Path::new(&rest[0]))) {
+                    Ok((files, wrote)) => {
+                        println!("{files} files, {wrote} written");
+                        std::process::exit(0)
+                    }
+                    Err(e) => {
+                        eprintln!("makepad: {e}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                eprintln!("makepad: {e}");
+                std::process::exit(2);
+            }
+            _ => {
+                eprintln!("usage: makepad export <git url>[#ref] [--mount <dir>=<git url>[#ref]]... [--cached] <folder>");
+                std::process::exit(2);
+            }
+        },
         Some(w) if !w.starts_with('-') && !help::COMMANDS.contains(&w) => std::process::exit(help::unknown(w)),
         _ => {}
     }

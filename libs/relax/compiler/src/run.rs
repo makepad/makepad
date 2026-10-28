@@ -710,6 +710,13 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             eprintln!("makepad: edit conflict: {c}");
             report("note", &c);
         }
+        // the app's own folders written out for tools outside the run (vfs.rs SEED)
+        if let Some(seed) = std::env::var("MAKEPAD_RUN_EDITS_SEED").ok().filter(|s| !s.is_empty()) {
+            let folders: Vec<String> = seed.split(',').map(str::to_string).collect();
+            if let Err(e) = crate::vfs::seed_edits(&folders) {
+                eprintln!("makepad: writing the app's source into its edits folder: {e}");
+            }
+        }
     }
     let package = args[i].clone();
     // makepad inspect: the program answers questions from now on (compiles included)

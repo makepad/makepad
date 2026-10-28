@@ -1,6 +1,8 @@
 //! `cargo makepad desktop bundle`: a self-contained, signed macOS `.app` for
 //! a desktop app, optionally installed outside the target directory so a
-//! Dock entry survives `cargo clean`.
+//! Dock entry survives `cargo clean`. On Linux and Windows the same build
+//! makes a self-contained folder (see [`assemble_dir`]); installed, on Linux
+//! it gets a launcher entry.
 //!
 //! The app is built with `MAKEPAD_PACKAGE_DIR=resources` (in its own target
 //! subdirectory, so the packaged executable never replaces the plain one),
@@ -87,9 +89,6 @@ const USAGE_KEYS: [(&str, &str); 3] = [
 ];
 
 pub fn handle_desktop_bundle(args: &[String]) -> Result<(), String> {
-    if !cfg!(target_os = "macos") {
-        return Err("desktop bundle builds macOS .app bundles and runs on macOS only".to_string());
-    }
     let (options, mut cargo_args) = parse_options(args)?;
     if get_target_from_args(&cargo_args).is_some() {
         return Err("desktop bundle builds for this Mac; drop --target".to_string());
@@ -123,9 +122,24 @@ pub fn handle_desktop_bundle(args: &[String]) -> Result<(), String> {
     if !status.success() {
         return Err(format!("cargo build failed with status {status}"));
     }
-    let built = target_dir.join(&profile).join(&binary_name);
+    let exe_name = if cfg!(windows) { format!("{binary_name}.exe") } else { binary_name.clone() };
+    let built = target_dir.join(&profile).join(&exe_name);
     if !built.is_file() {
         return Err(format!("built binary not found at {}", built.display()));
+    }
+    if !cfg!(target_os = "macos") {
+        let out_dir = target_dir.join("bundles").join(&profile);
+        let app_dir = out_dir.join(&meta.name);
+        let stage = out_dir.join(format!(".{}.staging", meta.name));
+        remove_dir_if_present(&stage)?;
+        assemble_dir(&stage, &built, &exe_name, &binary_name, &build_crate, &crate_dir, &target_dir, &meta)?;
+        replace_dir(&stage, &app_dir, &meta.identifier)?;
+        println!("[cargo-makepad] app folder: {}", app_dir.display());
+        if let Some(dir) = options.install {
+            let installed = install_dir(&app_dir, &dir, &exe_name, &meta)?;
+            println!("[cargo-makepad] installed: {}", installed.display());
+        }
+        return Ok(());
     }
 
     let out_dir = target_dir.join("bundles").join(&profile);
@@ -271,7 +285,24 @@ fn assemble(stage: &Path, built: &Path, binary_name: &str, build_crate: &str, cr
 
     let exe = macos.join(binary_name);
     fs::copy(built, &exe).map_err(|e| format!("cannot copy {} into the bundle: {e}", built.display()))?;
+    let map = copy_resources(&resources, built, binary_name, build_crate, crate_dir, target_dir)?;
+    let map_name = format!("{binary_name}.makepad-package-paths");
+    fs::write(resources.join(&map_name), map).map_err(|e| format!("cannot write the package map: {e}"))?;
+    symlink(&format!("../Resources/{map_name}"), &macos.join(&map_name))?;
+    symlink("../Resources", &macos.join("resources"))?;
 
+    write_icon(&resources.join("AppIcon.icns"), crate_dir, meta, stage)?;
+    let plist = contents.join("Info.plist");
+    fs::write(&plist, info_plist(binary_name, meta)).map_err(|e| format!("cannot write Info.plist: {e}"))?;
+    shell_env_cap(&[], stage, "plutil", &["-lint", &plist.to_string_lossy()])?;
+    fs::write(contents.join("PkgInfo"), "APPL????").map_err(|e| format!("cannot write PkgInfo: {e}"))?;
+    Ok(())
+}
+
+/// Every crate's resources (and only the fonts the binary declares) into
+/// `resources/<crate>/`; returns the package map's text (crate name →
+/// `resources/<crate>`, relative to the executable's folder).
+fn copy_resources(resources: &Path, built: &Path, binary_name: &str, build_crate: &str, crate_dir: &Path, target_dir: &Path) -> Result<String, String> {
     // Every crate's resources, and only the fonts the binary declares.
     let manifest = FontAssetManifest::from_native_file(built)?;
     let mut fonts = FontPackage::new(&manifest);
@@ -308,17 +339,109 @@ fn assemble(stage: &Path, built: &Path, binary_name: &str, build_crate: &str, cr
     if alias != own && mapped.contains(&own) && !mapped.contains(&alias) {
         map.push_str(&format!("{alias}\tresources/{own}\n"));
     }
-    let map_name = format!("{binary_name}.makepad-package-paths");
-    fs::write(resources.join(&map_name), map).map_err(|e| format!("cannot write the package map: {e}"))?;
-    symlink(&format!("../Resources/{map_name}"), &macos.join(&map_name))?;
-    symlink("../Resources", &macos.join("resources"))?;
+    Ok(map)
+}
 
-    write_icon(&resources.join("AppIcon.icns"), crate_dir, meta, stage)?;
-    let plist = contents.join("Info.plist");
-    fs::write(&plist, info_plist(binary_name, meta)).map_err(|e| format!("cannot write Info.plist: {e}"))?;
-    shell_env_cap(&[], stage, "plutil", &["-lint", &plist.to_string_lossy()])?;
-    fs::write(contents.join("PkgInfo"), "APPL????").map_err(|e| format!("cannot write PkgInfo: {e}"))?;
+/// The Linux / Windows layout: one folder the app runs from wherever it is.
+///
+/// ```text
+/// <Name>/
+///   <bin>[.exe]                         the executable
+///   <bin>[.exe].makepad-package-paths   crate name → resources/<crate>
+///   resources/<crate>/resources/...     every dependency's resources
+///   resources/<crate>/fonts/...         only the fonts the binary uses
+///   icon.png                            the manifest's icon (a launcher entry's)
+///   .makepad-bundle                     the identifier (a reinstall replaces only its own)
+/// ```
+#[allow(clippy::too_many_arguments)]
+fn assemble_dir(stage: &Path, built: &Path, exe_name: &str, binary_name: &str, build_crate: &str, crate_dir: &Path, target_dir: &Path, meta: &BundleMeta) -> Result<(), String> {
+    if meta.name.contains(['/', '\\']) || meta.name.starts_with('.') {
+        return Err(format!("app name {:?} cannot be a folder name", meta.name));
+    }
+    let resources = stage.join("resources");
+    fs::create_dir_all(&resources).map_err(|e| format!("cannot create {}: {e}", resources.display()))?;
+    let exe = stage.join(exe_name);
+    fs::copy(built, &exe).map_err(|e| format!("cannot copy {} into the folder: {e}", built.display()))?;
+    let map = copy_resources(&resources, built, binary_name, build_crate, crate_dir, target_dir)?;
+    fs::write(stage.join(format!("{exe_name}.makepad-package-paths")), map).map_err(|e| format!("cannot write the package map: {e}"))?;
+    let icon = meta.icon.clone().filter(|p| p.is_file()).or_else(|| {
+        ["icon_1024.png", "icon_512.png", "icon_256.png"].iter().map(|n| crate_dir.join("resources").join(n)).find(|p| p.is_file())
+    });
+    if let Some(icon) = icon {
+        fs::copy(&icon, stage.join("icon.png")).map_err(|e| format!("cannot copy {}: {e}", icon.display()))?;
+    }
+    fs::write(stage.join(".makepad-bundle"), &meta.identifier).map_err(|e| format!("cannot write .makepad-bundle: {e}"))?;
     Ok(())
+}
+
+/// [`replace_bundle`] for a folder: refuses to replace a folder that is not
+/// this app's (its `.makepad-bundle` names another identifier, or none).
+fn replace_dir(stage: &Path, dest: &Path, identifier: &str) -> Result<(), String> {
+    if dest.exists() {
+        let existing = fs::read_to_string(dest.join(".makepad-bundle")).ok();
+        if existing.as_deref() != Some(identifier) {
+            return Err(format!("refusing to replace {} (not a folder of {identifier})", dest.display()));
+        }
+    }
+    let Some(parent) = dest.parent() else { return Err(format!("{} has no parent directory", dest.display())) };
+    let Some(file_name) = dest.file_name() else { return Err(format!("{} has no file name", dest.display())) };
+    let previous = parent.join(format!(".{}.previous", file_name.to_string_lossy()));
+    remove_dir_if_present(&previous)?;
+    if dest.exists() {
+        fs::rename(dest, &previous).map_err(|e| format!("cannot move {} aside: {e}", dest.display()))?;
+        if let Err(error) = fs::rename(stage, dest) {
+            let _ = fs::rename(&previous, dest);
+            return Err(format!("cannot put the new folder at {}: {error}; the previous one is back", dest.display()));
+        }
+        remove_dir_if_present(&previous)?;
+    } else {
+        fs::rename(stage, dest).map_err(|e| format!("cannot put the new folder at {}: {e}", dest.display()))?;
+    }
+    Ok(())
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir_all(to).map_err(|e| format!("cannot create {}: {e}", to.display()))?;
+    for entry in fs::read_dir(from).map_err(|e| format!("cannot read {}: {e}", from.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let (src, dst) = (entry.path(), to.join(entry.file_name()));
+        if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+            copy_tree(&src, &dst)?;
+        } else {
+            fs::copy(&src, &dst).map_err(|e| format!("cannot copy {}: {e}", src.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// The folder copied into `dir` (staged, then swapped in); on Linux also its
+/// launcher entry, `~/.local/share/applications/<identifier>.desktop`.
+fn install_dir(app_dir: &Path, dir: &Path, exe_name: &str, meta: &BundleMeta) -> Result<PathBuf, String> {
+    fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let dest = dir.join(&meta.name);
+    let stage = dir.join(format!(".{}.staging", meta.name));
+    remove_dir_if_present(&stage)?;
+    copy_tree(app_dir, &stage)?;
+    replace_dir(&stage, &dest, &meta.identifier)?;
+    if cfg!(target_os = "linux") {
+        let apps = std::env::var_os("XDG_DATA_HOME").filter(|d| !d.is_empty()).map(PathBuf::from).map_or_else(|| home_dir().map(|h| h.join(".local/share")), Ok)?.join("applications");
+        fs::create_dir_all(&apps).map_err(|e| format!("cannot create {}: {e}", apps.display()))?;
+        let entry = apps.join(format!("{}.desktop", meta.identifier));
+        fs::write(&entry, desktop_entry(&dest, exe_name, meta)).map_err(|e| format!("cannot write {}: {e}", entry.display()))?;
+    }
+    Ok(dest)
+}
+
+/// A freedesktop launcher entry for an installed folder.
+fn desktop_entry(dest: &Path, exe_name: &str, meta: &BundleMeta) -> String {
+    // the Exec value's quoting (desktop entry spec): a word in double quotes, with ", `, $ and \ escaped
+    let quote = |p: &Path| format!("\"{}\"", p.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"").replace('`', "\\`").replace('$', "\\$"));
+    let line = |s: &str| s.replace(['\n', '\r'], " ");
+    let mut text = format!("[Desktop Entry]\nType=Application\nName={}\nExec={}\nPath={}\nStartupWMClass={}\nTerminal=false\n", line(&meta.name), quote(&dest.join(exe_name)), line(&dest.to_string_lossy()), line(&meta.identifier));
+    if dest.join("icon.png").is_file() {
+        text.push_str(&format!("Icon={}\n", line(&dest.join("icon.png").to_string_lossy())));
+    }
+    text
 }
 
 fn host_triple() -> Result<String, String> {
@@ -563,6 +686,15 @@ mod tests {
         let meta = BundleMeta { name: "A & B <C>".into(), identifier: "x.y".into(), icon: None, usage: Vec::new() };
         let plist = info_plist("demo", &meta);
         assert!(plist.contains("<string>A &amp; B &lt;C&gt;</string>"));
+    }
+
+    #[test]
+    fn a_folder_install_gets_a_launcher_entry() {
+        let meta = BundleMeta { name: "Demo".into(), identifier: "nl.makepad.demo".into(), icon: None, usage: Vec::new() };
+        let text = desktop_entry(Path::new("/home/x/apps/De$mo"), "demo", &meta);
+        assert!(text.contains("Exec=\"/home/x/apps/De\\$mo/demo\"\n"), "{text}");
+        assert!(text.contains("StartupWMClass=nl.makepad.demo\n"));
+        assert!(!text.contains("Icon="));
     }
 
     #[test]

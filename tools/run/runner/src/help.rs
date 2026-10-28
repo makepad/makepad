@@ -6,7 +6,7 @@ use std::io::IsTerminal;
 
 /// The word a command line starts with, for every command `makepad` knows (help pages or not).
 pub const COMMANDS: &[&str] = &[
-    "run", "app", "fetch", "pack-src", "inspect", "devhub", "observe", "check", "selftest", "test", "live", "fix", "clean", "serve", "schema", "hover", "definition",
+    "run", "app", "fetch", "export", "pack-src", "inspect", "devhub", "observe", "check", "selftest", "test", "live", "fix", "clean", "serve", "schema", "hover", "definition",
     "parse", "resolve", "file", "std-surface", "lex", "hub", "remote-relay", "remote", "help",
 ];
 
@@ -122,6 +122,7 @@ fn main_page(st: &Style) -> String {
     p.row("run --src <store> <package>", "Run an app from a packed source archive (no checkout)");
     p.row("app <id>", "Run an app the runner set up (its launch record; macOS: from its own .app)");
     p.row("fetch <git-url>", "Fetch a repository into the local store");
+    p.row("export <git-url> <folder>", "Write a repository's files (and the app's edits) into a folder");
     p.row("pack-src <out> <package>...", "Pack the sources a run of these packages reads into one store");
     p.row("inspect <app> <question>", "Ask a running app about itself (hangs, stacks, events)");
     p.row("devhub <stream|ls|inspect>", "Every JIT on the LAN, through the local devhub (also `observe`)");
@@ -202,6 +203,19 @@ fn pack_src_page(st: &Style) -> String {
     p.section("Options:");
     p.row("--target <triple>", "Pack the crate graph of that target (MAKEPAD_RUN_CHECK_TARGET)");
     p.row("<package> [flags]", "--features <list>, --no-default-features, as for check");
+    p.out
+}
+
+fn export_page(st: &Style) -> String {
+    let mut p = Page::new(st, 28);
+    title(&mut p, "export a working tree");
+    p.blank();
+    p.usage("makepad export <git-url>[#ref] [--mount <dir>=<git-url>[#ref]]... [--cached] <folder>");
+    p.blank();
+    p.text("Writes the repositories' files into <folder> (each mounted one at its");
+    p.text("folder), then the files of $MAKEPAD_RUN_EDITS over them: the tree a run of");
+    p.text("the same spec reads, for a native build. Unchanged files are not rewritten;");
+    p.text("files an earlier export wrote and this one does not are removed.");
     p.out
 }
 
@@ -374,6 +388,7 @@ fn page(st: &Style, cmd: Option<&str>) -> Option<String> {
         None | Some("help") => main_page(st),
         Some("run") => run_page(st),
         Some("fetch") => fetch_page(st),
+        Some("export") => export_page(st),
         Some("pack-src") => pack_src_page(st),
         Some("inspect") => inspect_page(st),
         Some("devhub" | "observe") => observe_page(st),
