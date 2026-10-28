@@ -11,14 +11,15 @@ use crate::zones::Zones;
 use makepad_widgets::makepad_draw::*;
 
 /// Texels per column: rows 0-4 the ranges (ridge, tree foot, canopy top, density), row 5 the front
-/// treeline (-, foot, canopy top, density), row 6 (land, ground rise, off-centre factor t, city glow).
-pub const ROWS: usize = 7;
-/// The column texture's widest row; more columns wrap into further bands of 7 rows.
+/// treeline (-, foot, canopy top, density), row 6 (land, ground rise, off-centre factor t, city glow), row 7 the sea
+/// (its far and near edge, rad below the horizon, as `Zones::sea_span_at`, and how far each moves across the column).
+pub const ROWS: usize = 8;
+/// The column texture's widest row; more columns wrap into further bands of ROWS rows.
 pub const TEX_W: usize = 8192;
 
 /// The parameters the columns depend on (with the seed and the view).
 pub const COLUMN_KEYS: &[P] =
-    &[P::MtH, P::MtW, P::MtC, P::MtRug, P::Land, P::LandC, P::TrD, P::TrH, P::TrCon, P::TrW, P::TrC, P::Treeline, P::CtW, P::CtC, P::CtR, P::Off, P::OffDir, P::Size];
+    &[P::MtH, P::MtW, P::MtC, P::MtRug, P::Land, P::LandC, P::TrD, P::TrH, P::TrCon, P::TrW, P::TrC, P::Treeline, P::CtW, P::CtC, P::CtR, P::Off, P::OffDir, P::Size, P::SeaD];
 
 /// Columns beyond the view on each side: the feet of trees reaching in (Size times as far at a larger Size).
 pub fn margin(p: &Params, span: f64, w: usize) -> usize {
@@ -34,7 +35,7 @@ pub fn warp(p: &Params, ur: f64) -> (f64, f64) {
     (fract((cy + t * dy).atan2(cx + t * dx) / TAU), t)
 }
 
-/// The column data of one view: `n = w + 2 m` columns from `u0 - m` pixels, 7 texels each
+/// The column data of one view: `n = w + 2 m` columns from `u0 - m` pixels, ROWS texels each
 /// (column i's row r at `i * ROWS + r`).
 pub fn columns(z: &Zones, p: &Params, u0: f64, span: f64, w: usize, m: usize) -> Vec<[f32; 4]> {
     let (rng, nc, px0) = (&z.rng, w + 2 * m, span * TAU / w as f64);
@@ -79,6 +80,20 @@ pub fn columns(z: &Zones, p: &Params, u0: f64, span: f64, w: usize, m: usize) ->
         }
         let c = canopy(uw, px, tree_cells(p, 3), 400.0, tree_hmax(p, 3), gh, freg); o[5] = [0.0, c[0] as f32, c[1] as f32, c[2] as f32];
         o[6] = [lenv as f32, gh as f32, t as f32, ((0.55 + 0.45 * smooth(0.3, 0.7, rng.fbm(ur, 3.0, 50.0))) * cenv) as f32];
+        let (far, near) = z.sea_span_at(p, uw, lenv);
+        o[7] = [far as f32, near as f32, 0.0, 0.0];
+    }
+    // how far each edge moves across a column (half the change to its neighbours, an open neighbour's): a steep stretch
+    // of the coast is softened over the rows it crosses, so it shows no staircase
+    let open = |e: f32| e < crate::NO_SHORE as f32;
+    for i in 0..nc {
+        let r = i * ROWS + 7;
+        let (c, l, n) = (out[r], out[i.saturating_sub(1) * ROWS + 7], out[(i + 1).min(nc - 1) * ROWS + 7]);
+        for e in 0..2 {
+            if !open(c[e]) { continue; }
+            let side = |s: [f32; 4]| if open(s[e]) { (s[e] - c[e]).abs() } else { 0.0 };
+            out[r][2 + e] = 0.5 * side(l).max(side(n));
+        }
     }
     out
 }
@@ -272,7 +287,7 @@ script_mod! {
         blend_op: @Max
         geom: vertex_buffer(mod.sky_geom.TreeVertex, mod.sky_geom.TreeGeom)
         view_size: uniform(vec2(1.0, 1.0)) view_span: uniform(vec2(0.0, 1.0)) view_horizon: uniform(0.8) view_pad: uniform(0.0)
-        col_geom: uniform(vec4(1.0, 7.0, 0.0, 1.0)) off: uniform(0.0) off_dir: uniform(0.55) cols: texture_2d(float)
+        col_geom: uniform(vec4(1.0, 8.0, 0.0, 1.0)) off: uniform(0.0) off_dir: uniform(0.55) cols: texture_2d(float)
         v_v: varying(vec4f) v_c: varying(vec3f)
         // the camera's bearing (u) and distance factor of world azimuth uw
         raw_of: fn(uw: float, c: vec2) -> vec2 {
@@ -281,7 +296,7 @@ script_mod! {
         // the tree foot line in column row r under pass column x
         foot: fn(x: float, r: float) -> float {
             let c = clamp(x + self.col_geom.z, 0.0, self.col_geom.w - 1.0); let q = floor(c / self.col_geom.x)
-            return self.cols.sample_nearest(vec2((c - q * self.col_geom.x + 0.5) / self.col_geom.x, (r + 7.0 * q + 0.5) / self.col_geom.y)).y
+            return self.cols.sample_nearest(vec2((c - q * self.col_geom.x + 0.5) / self.col_geom.x, (r + 8.0 * q + 0.5) / self.col_geom.y)).y
         }
         vertex: fn(){
             let c = self.off * vec2(cos(self.off_dir * 6.2831853), sin(self.off_dir * 6.2831853)); let sp = self.view_span; let sz = self.view_size - 2.0 * self.view_pad

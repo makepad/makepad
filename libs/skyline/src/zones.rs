@@ -20,6 +20,16 @@ pub fn mt_dist(k: f64) -> f64 { 5000.0 * 6f64.powf((4.0 - k) * 0.25) }
 /// The zones' ridge footprint: roughness octaves down to a 16k export's pixel.
 pub const MPX: f64 = TAU / 16384.0;
 
+/// The land envelope (`Zones::land`) at which the coast has closed round the sea (`Zones::sea_span_at`): the real
+/// shorelines (`Zones::shore`, land 0.5) are the tips of the sea's ends, where the lighthouse and the town stand.
+pub const COAST_CLOSE: f64 = 0.5;
+/// The open sea's far edge the coast closes from in `Zones::sea_span_at` (rad below the horizon: the ground at FAR_M seen
+/// from the eye, near enough; only the coast's curve uses it, the open sea runs on to the horizon).
+pub const SEA_FAR_EDGE: f64 = 1e-4;
+
+/// The deepest near edge the coast closes from in `Zones::sea_span_at` (rad below the horizon, about 14 degrees).
+pub const SEA_FOOT: f64 = 0.25;
+
 /// The first of the `n` candidates `f(j)` = (score, candidate) with the highest score above -9.
 fn argmax<T: Default>(n: usize, mut f: impl FnMut(f64) -> (f64, T)) -> T {
     let (mut best, mut out) = (-9.0, T::default());
@@ -150,6 +160,47 @@ impl Zones {
     pub fn land_n(&self, u: f64) -> f64 {
         let (land, h) = (self.p[P::Land], self.p[P::Land] * 0.5);
         smooth(h + 0.035, h - 0.035, wd(u, self.p[P::LandC]).abs()).max(if land >= 0.999 { 1.0 } else { 0.0 }) * smooth(0.0, 0.02, land)
+    }
+    /// The coast round the sea at world azimuth u, as the sea's span below the horizon: (far, near) rad, the sea lying
+    /// between the two depressions, none where far >= near (both `NO_SHORE` on land). `lenv` is the land envelope there
+    /// (`land(u)`, which `terrain::columns` has to hand).
+    ///
+    /// Over open sea (land 0) the far edge is the horizon and the near edge the shore: `sea_distance_m` x a seeded
+    /// meander of a few scales (`coast_meander`: bays and headlands, about 0.45x to 2.2x the distance), or the viewer's
+    /// feet without a shore. Where the land comes in (land 0 to `COAST_CLOSE`) the coast curves round: in the log of the
+    /// depression both edges close on a meeting point halfway between the horizon's `SEA_FAR_EDGE` and the near edge (at
+    /// most `SEA_FOOT`), t of the way in by sqrt(1 - t), so the near shore bends away up toward the horizon and the far
+    /// side's land comes down to meet it in a rounded tip, never a vertical cut; past it, land.
+    pub fn sea_span_at(&self, p: &Params, u: f64, lenv: f64) -> (f64, f64) {
+        let t = smooth(0.0, COAST_CLOSE, lenv);
+        if t >= 1.0 { return (crate::NO_SHORE, crate::NO_SHORE); }
+        let near = crate::sea_distance_m(p).map_or(crate::NO_SHORE, |d| (crate::props::kit::EYE * p[P::Size] / (d * self.coast_meander(u).exp())).atan());
+        if t <= 0.0 { return (0.0, near); }
+        // (a near edge deeper than SEA_FOOT, the sea at the feet, closes from SEA_FOOT, reached within the first quarter or
+        // so of the way: so the shore bends up into the strip's rows over most of the way, as a beach curving away)
+        let (la, lb, f) = (SEA_FAR_EDGE.ln(), near.min(SEA_FOOT).ln(), (1.0 - t).sqrt());
+        let m = 0.5 * (la + lb);
+        let feet = (near.min(1.5).ln() - lb) * (1.0 - t).powi(8);
+        (((m - (m - la) * f).exp() - SEA_FAR_EDGE * f).max(0.0), (m + (lb - m) * f + feet).exp())
+    }
+    /// `sea_span_at` with the land envelope at u.
+    pub fn sea_span(&self, p: &Params, u: f64) -> (f64, f64) { self.sea_span_at(p, u, self.land(u)) }
+    /// The near shore's meander at u: the log of its distance over the sea distance (four octaves, seeded; 0 on average).
+    pub fn coast_meander(&self, u: f64) -> f64 {
+        let u = fract(u);
+        [(7.0, 0.9), (19.0, 0.5), (53.0, 0.22), (131.0, 0.08)].iter().enumerate()
+            .map(|(i, &(f, a))| a * (self.rng.pn(u * f, f, 1501.0 + i as f64) - 0.5)).sum()
+    }
+    /// Whether a thing d m out at world azimuth u stands on the open sea (between the coast's near and far edges there).
+    pub fn at_sea(&self, p: &Params, u: f64, d: f64) -> bool {
+        let (far, near) = self.sea_span(p, u);
+        let e = (crate::props::kit::EYE * p[P::Size] / d).atan();
+        far < near && e > far && e < near
+    }
+    /// The deepest the sea's near shore comes on the circle (rad below the horizon; 0 without a shore or a sea).
+    pub fn deepest_shore(&self, p: &Params) -> f64 {
+        if p[P::Land] >= 0.999 || crate::sea_distance_m(p).is_none() { return 0.0; }
+        (0..2048).map(|i| self.sea_span(p, (i as f64 + 0.5) / 2048.0)).filter(|(a, b)| a < b).map(|(_, b)| b).fold(0.0, f64::max)
     }
     /// Soft membership of u in z; the clear gap between a zone of half-width hw at c and z (negative:
     /// overlap); c pushed clear of z with a margin of 0.01.

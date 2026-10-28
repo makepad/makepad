@@ -1360,10 +1360,11 @@ fn the_sea_starts_at_its_distance() {
         let mut dry = p.clone();
         dry.set(P::PrRefl as usize, 0.0);
         let (water, none) = (render_band_lit(&p, 1024, &light), render_band_lit(&dry, 1024, &light));
-        let (z, edge, px) = (Zones::new(&p), makepad_skyline::sea_edge_rad(&p), std::f64::consts::TAU / 1024.0);
+        let (z, px) = (Zones::new(&p), std::f64::consts::TAU / 1024.0);
         let (mut near, mut far) = (0usize, 0.0f32);
         for x in 0..water.w {
             if z.land((x as f64 + 0.5) / water.w as f64) > 0.05 { continue; }
+            let edge = shore_edge(&p, &z, water.w, x);
             for y in 0..water.h {
                 let (el, i) = (row_el(&p, &water, y), y * water.w + x);
                 let d = lum(&water.texels[i]) - lum(&none.texels[i]);
@@ -1373,7 +1374,7 @@ fn the_sea_starts_at_its_distance() {
                 } else if el < 0.0 { far = far.max(d); }
             }
         }
-        println!("sea_d {x_sea}: edge {:.2} deg, {near} shore texels clear of water, the water's most {far}", edge.to_degrees());
+        println!("sea_d {x_sea}: nominal edge {:.2} deg, {near} shore texels clear of water, the water's most {far}", makepad_skyline::sea_edge_rad(&p).to_degrees());
         assert!(near > 100 && far > 1e-3, "the premise: shore and water both show ({near}, {far})");
     }
 }
@@ -1387,10 +1388,11 @@ fn the_shore_is_the_hosts_land() {
     let mut p = Params::default();
     p.set(P::SeaD as usize, 0.3);
     let b = render_band_lit(&p, 1024, &light);
-    let (z, edge, px) = (Zones::new(&p), makepad_skyline::sea_edge_rad(&p), std::f64::consts::TAU / 1024.0);
+    let (z, px) = (Zones::new(&p), std::f64::consts::TAU / 1024.0);
     let mut n = 0;
     for x in 0..b.w {
         if z.land((x as f64 + 0.5) / b.w as f64) > 0.05 { continue; }
+        let edge = shore_edge(&p, &z, b.w, x);
         for y in 0..b.h - 1 {
             if -row_el(&p, &b, y) <= edge + 1.5 * px { continue; }
             let t = b.texels[y * b.w + x];
@@ -1654,7 +1656,8 @@ fn over_a_hosts_wet_ground_the_band_gives_way_below_the_horizon() {
     for (k, v) in [(P::SeaD, 0.3), (P::PrLake, 1.0)] { app.set(k as usize, v); }
     for (scene, p) in [("app", Some(app)), ("props_heavy", baseline("props_heavy").map(|(p, _)| p))] {
     let Some(p) = p else { eprintln!("no baseline props_heavy, skipped"); continue };
-    let (z, edge, w) = (Zones::new(&p), makepad_skyline::sea_edge_rad(&p), 2048usize);
+    let (z, w) = (Zones::new(&p), 2048usize);
+    let edges: Vec<f64> = (0..w).map(|x| shore_edge(&p, &z, w, x)).collect();
     let (px, eye) = (std::f64::consts::TAU / w as f64, makepad_skyline::props::kit::EYE * p[P::Size]);
     assert!(scene != "app" || !z.lakes.is_empty(), "the premise: lakes at seed 7");
     let rise = rise_tops(&p, w);
@@ -1674,7 +1677,7 @@ fn over_a_hosts_wet_ground_the_band_gives_way_below_the_horizon() {
             let al = -row_el(&p, &dry, y);
             for x in 0..w {
                 let (i, u) = (y * w + x, (x as f64 + 0.5) / w as f64);
-                let (d, t, land) = (dry.texels[i], wet.texels[i], z.land(u));
+                let (d, t, land, edge) = (dry.texels[i], wet.texels[i], z.land(u), edges[x]);
                 let what = format!("x {x}, {:.2} deg: wet {t:?}, dry {d:?}", -al.to_degrees());
                 // (the near rise's face and its top's texels are a bank under the trees: `rise_tops`)
                 if al < -1.5 * px { if -al > rise[x] + 1.5 * px { tally(&mut above, t == d, what); } continue; }
@@ -1701,6 +1704,14 @@ fn over_a_hosts_wet_ground_the_band_gives_way_below_the_horizon() {
         }
     }
     }
+}
+
+/// The sea's near shore over column x of `w` round the turn at `p` (rad below the horizon: `Zones::sea_span`, as the
+/// columns hand it), plus how far it moves to its neighbours (the shader softens a steep stretch over those rows).
+fn shore_edge(p: &Params, z: &Zones, w: usize, x: usize) -> f64 {
+    let near = |x: f64| z.sea_span(p, (x + 0.5) / w as f64).1;
+    let e = near(x as f64);
+    e + (near(x as f64 - 1.0) - e).abs().max((near(x as f64 + 1.0) - e).abs())
 }
 
 /// The top of the near rise over each of `w` columns round the turn at `p` (raw elevation, rad: the column's ground rise

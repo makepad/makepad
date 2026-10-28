@@ -24,7 +24,7 @@ pub fn build(c: &mut Ctx) {
         // Size times as large: as many over Size
         if s1 >= am * 0.6 * (1.0 - z.land(uc)) * (1.0 - Zones::in_z(uc, &z.bridge)) * (1.0 - Zones::in_z(uc, &z.fair)) / c.k { continue; }
         let (d, ty) = (mix(2500.0, 11000.0, s3 * s3), if s4 < 0.45 { 0 } else if s4 < 0.8 { 1 } else { 2 }); // cargo / tanker, ferry / cruise ship, small boat
-        if !crate::at_sea(c.p, d) { continue; } // nearer than the sea distance: that is the shore
+        if !z.at_sea(c.p, uc, d) { continue; } // nearer than the coast there (the shore), or past it (a headland)
         let ln = [mix(120.0, 240.0, s5), mix(140.0, 280.0, s5), mix(14.0, 30.0, s5)][ty] * mix(0.35, 1.0, s6); // foreshortened by its heading
         let (fb, g, o) = ([mix(8.0, 13.0, s2), 10.0, 2.5][ty], if s6 < 0.5 { -1.0 } else { 1.0 }, 0.5); // g: the bow toward +x or -x
         let (hl, hs) = (0.5 * ln, fb + if ty == 0 { mix(12.0, 20.0, s5) } else { mix(18.0, 32.0, s5) });

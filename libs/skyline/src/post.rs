@@ -104,10 +104,8 @@ script_mod! {
             let e = self.scene_light.sample_nearest(self.pos); let pp = self.frag(); let vr = self.view_raw(); let v = self.pix_view(vr)
             let g = self.col_row(pp.x, 6.0); let al = 0.0 - v.y; let rip = self.pr_ripple
             if al <= 0.0 { return e }
-            // the sea from its near edge out, a lake, standing water on the land (`water_at`)
-            let ws = self.water_at(g, v.x, al, v.z); var sea = ws.x
-            // over a host's ground the day's sea fades in from the coast (the lights it mirrors at night stay)
-            if self.host_ground > 0.5 { sea = sea * (1.0 - self.coast_at(vr.x) * self.day()) }
+            // the sea within its coast, a lake, standing water on the land (`water_at`)
+            let ws = self.water_at(pp.x, g, v.x, al, v.z); let sea = ws.x
             // open water (the sea, a lake) mirrors by the Water reflections strength, standing water on the land as a puddle does
             let open = max(sea, ws.y); let water = max(open, ws.z)
             if water < 0.01 { return e }
@@ -191,8 +189,7 @@ script_mod! {
             let pp = self.frag(); let vr = self.view_raw(); let v = self.pix_view(vr)
             let g = self.col_row(pp.x, 6.0); let al = 0.0 - v.y
             if al <= 0.0 { return vec4(0.0, 0.0, 0.0, 0.0) }
-            let ws = self.water_at(g, v.x, al, v.z); var sea = ws.x
-            if self.host_ground > 0.5 { sea = sea * (1.0 - self.coast_at(vr.x) * self.day()) }
+            let ws = self.water_at(pp.x, g, v.x, al, v.z); let sea = ws.x
             let water = max(max(sea, ws.y), ws.z)
             if water < 0.01 { return vec4(0.0, 0.0, 0.0, 0.0) }
             let fr = 0.02 + 0.98 * pow(clamp(1.0 - al, 0.0, 1.0), 5.0)
@@ -227,8 +224,7 @@ script_mod! {
             if wd.x == s.x && wd.w == s.w { return wd }
             let pp = self.frag(); let vr = self.view_raw(); let v = self.pix_view(vr); let g = self.col_row(pp.x, 6.0); let al = 0.0 - v.y
             if al <= 0.0 { return s }
-            let ws = self.water_at(g, v.x, al, v.z); var sea = ws.x
-            if self.host_ground > 0.5 { sea = sea * (1.0 - self.coast_at(vr.x) * self.day()) }
+            let ws = self.water_at(pp.x, g, v.x, al, v.z); let sea = ws.x
             if max(max(sea, ws.y), ws.z) >= 0.5 { return wd }
             let e = self.scene_light.sample_nearest(self.pos); let one = vec3(1.0, 1.0, 1.0)
             if dot(self.water_light.sample_nearest(self.pos).xyz - e.xyz, one) >= dot(self.scene_color.sample_nearest(self.pos).xyz + e.xyz, one) { return wd }
