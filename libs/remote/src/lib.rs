@@ -42,16 +42,15 @@ pub mod discovery;
 pub mod endpoint;
 pub mod frame;
 pub mod frames;
+pub mod group;
 pub mod hello;
 pub mod hosts;
-#[cfg(unix)]
 pub mod hub;
 pub mod lines;
 pub mod pair;
 pub mod program;
 pub mod link;
 pub mod mcp;
-#[cfg(unix)]
 pub mod relay;
 pub mod ring;
 pub mod stream;

@@ -777,6 +777,10 @@ impl Sched {
                 return Err(format!("needs {key}={v}"));
             }
         }
+        // a Windows node runs no shell scripts and no Unix tools: only what asks for it
+        if c.os.eq_ignore_ascii_case("windows") && l.req.node.is_none() && !l.req.needs.iter().any(|(k, v)| k == "os" && v.eq_ignore_ascii_case("windows")) {
+            return Err("windows: only leases that name it (--node or --needs os=windows)".into());
+        }
         if cost.cores > c.cores as f64 {
             return Err(format!("needs {:.0} cores, has {}", cost.cores, c.cores));
         }
@@ -1090,6 +1094,25 @@ mod tests {
         s.release(&ids[0], "released", 1000);
         let a = s.tick(1000);
         assert_eq!(grants(&a), vec![ids[8].clone()]);
+    }
+
+    #[test]
+    fn a_windows_node_takes_only_leases_that_ask_for_it() {
+        let mut w = caps(64, 256.0, Role::Pool);
+        w.os = "windows".into();
+        let mut s = sched(&[("win", w)]);
+        let mut x64 = req("lane", Kind::Build, None);
+        x64.needs = vec![("arch".into(), "x64".into())];
+        let any = s.request(x64, 0);
+        s.tick(0);
+        assert_eq!(state(&s, &any).0, "ended denied", "{:?}", state(&s, &any));
+        assert!(state(&s, &any).1.contains("only leases that name it"));
+        let named = s.request(req("lane", Kind::Build, Some("win")), 1);
+        let mut by_os = req("lane2", Kind::Build, None);
+        by_os.needs = vec![("os".into(), "windows".into())];
+        let by_os = s.request(by_os, 1);
+        let a = s.tick(1);
+        assert!(grants(&a).contains(&named) && grants(&a).contains(&by_os), "{a:?}");
     }
 
     #[test]

@@ -23,3 +23,8 @@ path = "src/main.rs"
 [[bin]]
 name = "mapfleet"
 path = "src/bin/mapfleet.rs"
+
+[target.'cfg(windows)'.dependencies.windows]
+package = "makepad-windows-sys"
+path = "../windows/sys"
+version = "0.1.0"

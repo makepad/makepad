@@ -26,7 +26,7 @@ pub struct LeaseConf {
 }
 
 pub fn home_dir() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    crate::os::home_dir()
 }
 
 pub fn conf_path() -> PathBuf {
@@ -380,7 +380,45 @@ mod os {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+mod os {
+    use super::*;
+
+    pub fn hardware() -> Caps {
+        let (total, avail) = crate::os::memory();
+        // CPU use since the previous measure (the master asks every 10 s)
+        static LAST: std::sync::Mutex<Option<(u64, u64)>> = std::sync::Mutex::new(None);
+        let now = crate::os::cpu_times();
+        let cpu_pct = match (LAST.lock().unwrap().replace(now.unwrap_or((0, 0))), now) {
+            (Some(a), Some(b)) if b.1 > a.1 => Some(crate::top::cpu_pct(a, b)),
+            _ => None,
+        };
+        let gpu = crate::top::gpu_use();
+        Caps {
+            cpu_pct,
+            gpu_busy: gpu.iter().map(|g| (g.util_pct, g.mem_used_gb)).collect(),
+            arch: std::env::consts::ARCH.to_string(),
+            os: "windows".into(),
+            cpu: crate::os::cpu_name(),
+            cores: std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1),
+            // no load average on Windows: the busy share of the cores stands in
+            load1: cpu_pct.map_or(0.0, |p| p / 100.0 * std::thread::available_parallelism().map(|n| n.get() as f64).unwrap_or(1.0)),
+            ram_gb: total as f64 / GB,
+            ram_avail_gb: avail as f64 / GB,
+            gpus: gpu.iter().map(|g| (g.name.clone(), g.mem_total_gb)).collect(),
+            // the user's desktop session (a lease's windows go there only with display=1)
+            display: Some("windows".into()),
+            battery: crate::os::battery(),
+            ..Default::default()
+        }
+    }
+
+    pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
+        crate::os::disk_space(path)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod os {
     use super::*;
 

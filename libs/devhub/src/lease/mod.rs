@@ -11,6 +11,7 @@ pub mod disk;
 pub mod exec;
 pub mod master;
 pub mod sched;
+pub mod ship;
 pub mod wt;
 
 use makepad_remote::json_str;

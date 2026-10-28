@@ -23,6 +23,7 @@ use super::disk::{self, Guard, Live, Roots};
 use super::wt::{dirty, git, unique_commits};
 use super::Kind;
 use crate::local::Publish;
+use crate::os;
 use crate::proto::{hub_record, Sev};
 use makepad_remote::json_str;
 use makepad_remote::{lines, Endpoint};
@@ -33,7 +34,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 /// The services this module adds to the node's master endpoint.
-pub const WORDS: &[&str] = &["lease-start", "lease-run", "lease-log", "lease-end", "lease-beat", "lease-prune", "get-ls", "get-read", "policy", "lease-conf", "caps", "disk", "recover-get", "recover-del"];
+pub const WORDS: &[&str] = &["lease-start", "lease-run", "lease-log", "lease-end", "lease-beat", "lease-prune", "ship-have", "ship-put", "ship-link", "get-ls", "get-read", "policy", "lease-conf", "caps", "disk", "recover-get", "recover-del"];
 
 const LOG_CHUNK: usize = 64 << 10;
 const RECOVER_CHUNK: usize = 256 << 10;
@@ -72,6 +73,8 @@ struct Run {
     exit: Mutex<Option<i32>>,
     /// started by this hub process (a waiter reaps it)
     ours: bool,
+    /// what keeps its processes together (Windows: its job)
+    hold: os::Hold,
 }
 
 struct Ws {
@@ -133,7 +136,7 @@ impl Lease {
         });
         let runs = v.get("runs").and_then(|x| x.as_arr()).map_or_else(Vec::new, |a| {
             a.iter()
-                .filter_map(|r| Some(Arc::new(Run { n: n(r, "n") as u32, pid: n(r, "pid") as u32, start: n(r, "start"), unit: s(r, "unit"), log: s(r, "log")?.into(), exit: Mutex::new(None), ours: false })))
+                .filter_map(|r| Some(Arc::new(Run { n: n(r, "n") as u32, pid: n(r, "pid") as u32, start: n(r, "start"), unit: s(r, "unit"), log: s(r, "log")?.into(), exit: Mutex::new(None), ours: false, hold: os::Hold::none() })))
                 .collect()
         });
         Some(Lease {
@@ -178,13 +181,18 @@ fn err(e: impl AsRef<str>) -> String {
 
 /// This node's login (what `devhub run` / `get` ship with over ssh).
 fn login() -> String {
-    std::env::var("USER").ok().filter(|u| valid_name(u)).or_else(|| caps::home_dir().file_name().map(|f| f.to_string_lossy().into_owned())).unwrap_or_default()
+    os::login().filter(|u| valid_name(u)).or_else(|| caps::home_dir().file_name().map(|f| f.to_string_lossy().into_owned())).unwrap_or_default()
 }
 
 /// A relative path that stays inside its root: no `..`, not absolute, not empty.
 fn inside(rel: &str) -> bool {
     let p = Path::new(rel);
     !rel.is_empty() && !p.is_absolute() && p.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
+}
+
+/// A relative path with `/` between its parts (what the lane's side joins, whatever the node's OS).
+fn slashed(p: &Path) -> String {
+    p.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
 }
 
 /// Files under `p` (itself when it is one), as paths relative to `base`, at most `max`.
@@ -200,7 +208,7 @@ fn files_under(base: &Path, p: &Path, max: usize, out: &mut Vec<(String, u64)>) 
         if out.len() >= max {
             return Err(format!("more than {max} files: get a narrower path"));
         }
-        out.push((p.strip_prefix(base).unwrap_or(p).to_string_lossy().into_owned(), md.len()));
+        out.push((slashed(p.strip_prefix(base).unwrap_or(p)), md.len()));
     }
     Ok(())
 }
@@ -327,6 +335,7 @@ impl Exec {
             "lease-end" => vec![self.end_cmd(rest)],
             "lease-beat" => vec![self.beat(rest)],
             "lease-prune" => vec![self.prune(rest)],
+            "ship-have" | "ship-put" | "ship-link" => vec![self.ship(word, rest)],
             "get-ls" => self.get_ls(rest),
             "get-read" => vec![self.get_read(rest)],
             "policy" => vec![self.policy(rest)],
@@ -487,19 +496,9 @@ impl Exec {
         let n = l.runs.len() as u32 + 1;
         let log = l.tmp.join(format!("run-{n}.log"));
         let unit = self.scopes.then(|| format!("devhub-lease-{id}-{n}"));
-        let mut full: Vec<String> = Vec::new();
-        if let Some(u) = &unit {
-            full.extend(["systemd-run", "--user", "--scope", "--quiet"].map(String::from));
-            full.push(format!("--unit={u}"));
-            full.push("--".into());
-        }
-        full.extend(["nice", "-n", "10"].map(String::from));
         let conf = self.conf();
         let cpus = if l.kind == Kind::Timed { &conf.cpus_timed } else { &conf.cpus_shared };
-        if !cpus.is_empty() {
-            full.extend(["taskset".to_string(), "-c".to_string(), cpus.clone()]);
-        }
-        full.extend(argv);
+        let full = os::lease_argv(argv, unit.as_deref(), cpus);
         let out = match std::fs::File::create(&log) {
             Ok(f) => f,
             Err(e) => return err(format!("{}: {e}", log.display())),
@@ -513,31 +512,17 @@ impl Exec {
         for (k, v) in &l.env {
             cmd.env(k, v);
         }
-        {
-            use std::os::unix::process::CommandExt;
-            extern "C" {
-                fn setsid() -> i32;
-            }
-            // its own session and process group: the group is what end signals
-            unsafe {
-                cmd.pre_exec(|| {
-                    setsid();
-                    Ok(())
-                });
-            }
-        }
-        let mut child = match cmd.spawn() {
+        let (mut child, hold) = match os::lease_spawn(&mut cmd) {
             Ok(c) => c,
             Err(e) => return err(format!("lease-run {id}: {}: {e}", full[0])),
         };
         let pid = child.id();
-        let run = Arc::new(Run { n, pid, start: proc_start(pid).unwrap_or(0), unit, log, exit: Mutex::new(None), ours: true });
+        let run = Arc::new(Run { n, pid, start: os::proc_start(pid).unwrap_or(0), unit, log, exit: Mutex::new(None), ours: true, hold });
         l.runs.push(run.clone());
         self.save(l);
         drop(leases);
         let _ = std::thread::Builder::new().name("devhub-lease-wait".into()).spawn(move || {
-            use std::os::unix::process::ExitStatusExt;
-            let code = child.wait().map(|s| s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0))).unwrap_or(-1);
+            let code = child.wait().map(os::exit_code).unwrap_or(-1);
             *run.exit.lock().unwrap() = Some(code);
         });
         format!("{{\"run\":{pid},\"n\":{n}}}")
@@ -558,7 +543,7 @@ impl Exec {
         };
         // the exit is known before the last bytes are read: say it only once they are
         let exit = *run.exit.lock().unwrap();
-        let exit = exit.or_else(|| (!run.ours && !group_alive(run.pid, run.start)).then_some(-1));
+        let exit = exit.or_else(|| (!run.ours && !os::group_alive(run.pid, run.start, &run.hold)).then_some(-1));
         use std::io::{Read, Seek, SeekFrom};
         let mut buf = Vec::new();
         let mut len = 0;
@@ -582,7 +567,7 @@ impl Exec {
                     l.beat = Instant::now();
                     live.push(json_str(id));
                     // what it runs now (its newest live process) and its disk use, for the panel
-                    let running = l.runs.iter().rev().find(|r| proc_start(r.pid) == Some(r.start)).and_then(|r| crate::top::label(r.pid).map(|c| (r.pid, c)));
+                    let running = l.runs.iter().rev().find(|r| os::proc_start(r.pid) == Some(r.start)).and_then(|r| crate::top::label(r.pid).map(|c| (r.pid, c)));
                     let dirs = vec![l.work.clone(), l.target.clone(), l.tmp.clone()];
                     let mb = self.disk_of(id, dirs);
                     info.push(format!(
@@ -785,6 +770,22 @@ impl Exec {
         format!("{{\"pruned\":{pruned}}}")
     }
 
+    /// `ship-have|ship-put|ship-link <id> ...`: `devhub run` ships its tree into the lease's
+    /// work dir ([`super::ship`]).
+    fn ship(&self, word: &str, rest: &str) -> String {
+        let (id, rest) = rest.split_once(' ').unwrap_or((rest, ""));
+        let work = match self.leases.lock().unwrap().get(id) {
+            Some(l) => l.work.clone(),
+            None => return err(format!("no lease {id} on {}", self.machine)),
+        };
+        let r = match word {
+            "ship-have" => super::ship::have(&work, rest.trim()),
+            "ship-put" => super::ship::put(&work, rest),
+            _ => super::ship::link(&work, rest),
+        };
+        r.unwrap_or_else(err)
+    }
+
     /// The folder `devhub get` reads and the prefix that names it: a live lease's work
     /// (`target/`, `tmp/`: its target and scratch), else the lane's dir (`src/`: the tree `run`
     /// ships and runs in; `target/`: the lane's warm target). Returns (root, prefix, path under root).
@@ -829,7 +830,7 @@ impl Exec {
             .into_iter()
             .map(|(f, n)| {
                 let under_root = base.join(&f);
-                let r = format!("{pre}{}", under_root.strip_prefix(&root).unwrap_or(&under_root).to_string_lossy());
+                let r = format!("{pre}{}", slashed(under_root.strip_prefix(&root).unwrap_or(&under_root)));
                 format!("{{\"p\":{},\"n\":{n},\"r\":{}}}", json_str(&f), json_str(&r))
             })
             .collect()
@@ -917,25 +918,11 @@ fn watchdog(w: Weak<Exec>, tick: Duration) {
 }
 
 fn disk_loop(w: Weak<Exec>) {
-    nice_this_thread();
+    os::nice_this_thread();
     loop {
         std::thread::sleep(Duration::from_secs(60));
         let Some(x) = w.upgrade() else { return };
         x.guard.check(&|| x.live());
-    }
-}
-
-/// The measuring walk runs at nice 10 (Linux: per thread).
-fn nice_this_thread() {
-    #[cfg(target_os = "linux")]
-    {
-        extern "C" {
-            fn setpriority(which: i32, who: u32, prio: i32) -> i32;
-            fn gettid() -> i32;
-        }
-        unsafe {
-            setpriority(0, gettid() as u32, 10);
-        }
     }
 }
 
@@ -974,135 +961,27 @@ pub fn recover_worktree(path: &Path, except: Option<&str>, id: &str, out: &Path,
     Ok(Some(bundle))
 }
 
-/// A process's start time (Linux: clock ticks since boot; macOS: µs since the epoch).
-pub fn proc_start(pid: u32) -> Option<u64> {
-    proc_stat(pid).map(|s| s.start)
-}
-
-struct Stat {
-    start: u64,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pgrp: u32,
-    zombie: bool,
-}
-
-#[cfg(target_os = "linux")]
-fn proc_stat(pid: u32) -> Option<Stat> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let f: Vec<&str> = stat[stat.rfind(')')? + 2..].split_whitespace().collect();
-    // f[0] = field 3 (state), f[2] = 5 (pgrp), f[19] = 22 (starttime)
-    Some(Stat { start: f.get(19)?.parse().ok()?, pgrp: f.get(2)?.parse().ok()?, zombie: f.first() == Some(&"Z") })
-}
-
-#[cfg(target_os = "macos")]
-fn proc_stat(pid: u32) -> Option<Stat> {
-    #[repr(C)]
-    struct BsdInfo {
-        flags: u32,
-        status: u32,
-        xstatus: u32,
-        pid: u32,
-        ppid: u32,
-        uid: u32,
-        gid: u32,
-        ruid: u32,
-        rgid: u32,
-        svuid: u32,
-        svgid: u32,
-        rfu: u32,
-        comm: [u8; 16],
-        name: [u8; 32],
-        nfiles: u32,
-        pgid: u32,
-        pjobc: u32,
-        tdev: u32,
-        tpgid: u32,
-        nice: i32,
-        start_sec: u64,
-        start_usec: u64,
-    }
-    extern "C" {
-        fn proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: *mut core::ffi::c_void, size: i32) -> i32;
-    }
-    let mut b: BsdInfo = unsafe { std::mem::zeroed() };
-    let size = std::mem::size_of::<BsdInfo>() as i32;
-    // PROC_PIDTBSDINFO = 3
-    if unsafe { proc_pidinfo(pid as i32, 3, 0, &mut b as *mut BsdInfo as *mut _, size) } != size {
-        return None;
-    }
-    // SZOMB = 5
-    Some(Stat { start: b.start_sec * 1_000_000 + b.start_usec, pgrp: b.pgid, zombie: b.status == 5 })
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn proc_stat(_pid: u32) -> Option<Stat> {
-    None
-}
-
-/// The recorded leader still is the process we started (not gone, not a reused pid).
-fn same(pid: u32, start: u64) -> bool {
-    proc_stat(pid).is_some_and(|s| !s.zombie && s.start == start)
-}
-
-/// Whether the run's process group still has a live member. Its pgid is the leader's pid,
-/// which the OS does not hand out again while the group exists; a reused leader pid (a
-/// different start time) means the group is gone.
-fn group_alive(pid: u32, start: u64) -> bool {
-    if let Some(s) = proc_stat(pid) {
-        if s.start != start {
-            return false;
-        }
-        if !s.zombie {
-            return true;
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
-            if let Ok(p) = e.file_name().to_string_lossy().parse::<u32>() {
-                if p != pid && proc_stat(p).is_some_and(|s| s.pgrp == pid && !s.zombie) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn signal_group(pid: u32, sig: i32) {
-    extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    if pid > 1 {
-        unsafe {
-            kill(-(pid as i32), sig);
-        }
-    }
-}
-
 /// TERM the runs' groups, `grace`, KILL, stop their scopes: (stopped leaders, survivors).
 fn stop_runs(runs: &[Arc<Run>], grace: Duration) -> (Vec<u32>, Vec<u32>) {
-    const TERM: i32 = 15;
-    const KILL: i32 = 9;
-    let alive: Vec<&Arc<Run>> = runs.iter().filter(|r| r.start != 0 && group_alive(r.pid, r.start)).collect();
+    let alive: Vec<&Arc<Run>> = runs.iter().filter(|r| r.start != 0 && os::group_alive(r.pid, r.start, &r.hold)).collect();
     for r in &alive {
-        signal_group(r.pid, TERM);
+        os::signal_group(r.pid, false, &r.hold);
     }
     let t = Instant::now();
-    while t.elapsed() < grace && alive.iter().any(|r| group_alive(r.pid, r.start)) {
+    while t.elapsed() < grace && alive.iter().any(|r| os::group_alive(r.pid, r.start, &r.hold)) {
         std::thread::sleep(Duration::from_millis(100));
     }
-    for r in alive.iter().filter(|r| group_alive(r.pid, r.start)) {
-        signal_group(r.pid, KILL);
+    for r in alive.iter().filter(|r| os::group_alive(r.pid, r.start, &r.hold)) {
+        os::signal_group(r.pid, true, &r.hold);
     }
     for u in runs.iter().filter_map(|r| r.unit.as_ref()) {
         let _ = std::process::Command::new("systemctl").args(["--user", "stop", &format!("{u}.scope")]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
     }
     let t = Instant::now();
-    while t.elapsed() < Duration::from_secs(2) && alive.iter().any(|r| group_alive(r.pid, r.start)) {
+    while t.elapsed() < Duration::from_secs(2) && alive.iter().any(|r| os::group_alive(r.pid, r.start, &r.hold)) {
         std::thread::sleep(Duration::from_millis(50));
     }
-    let leak = alive.iter().filter(|r| group_alive(r.pid, r.start) || same(r.pid, r.start)).map(|r| r.pid).collect();
+    let leak = alive.iter().filter(|r| os::group_alive(r.pid, r.start, &r.hold) || os::same(r.pid, r.start)).map(|r| r.pid).collect();
     (alive.iter().map(|r| r.pid).collect(), leak)
 }
 
@@ -1189,7 +1068,7 @@ pub fn adopt(id: &str, pid: u32, log: PathBuf) -> Result<(), String> {
         return Err(format!("{id} is an {} lease: launches need a write lease", l.kind.as_str()));
     }
     let n = l.runs.iter().map(|r| r.n).max().unwrap_or(0) + 1;
-    l.runs.push(Arc::new(Run { n, pid, start: proc_start(pid).unwrap_or(0), unit: None, log, exit: Mutex::new(None), ours: false }));
+    l.runs.push(Arc::new(Run { n, pid, start: os::proc_start(pid).unwrap_or(0), unit: None, log, exit: Mutex::new(None), ours: false, hold: os::Hold::none() }));
     x.save(l);
     Ok(())
 }
@@ -1212,6 +1091,28 @@ pub fn register(ep: &Endpoint, ctx: &crate::sync::NodeCtx) -> Arc<Exec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // what the tests run: a line out, the env, a failure, a long sleeper with a child (Windows)
+    #[cfg(unix)]
+    const ECHO_HI: &[&str] = &["/bin/echo", "hi"];
+    #[cfg(unix)]
+    const ENV: &[&str] = &["/usr/bin/env"];
+    #[cfg(unix)]
+    const FAIL: &[&str] = &["false"];
+    #[cfg(unix)]
+    const SLEEP: &[&str] = &["/bin/sleep", "300"];
+    #[cfg(unix)]
+    const SLEEP_LABEL: &str = "sleep 300";
+    #[cfg(windows)]
+    const ECHO_HI: &[&str] = &["cmd", "/c", "echo hi"];
+    #[cfg(windows)]
+    const ENV: &[&str] = &["cmd", "/c", "set"];
+    #[cfg(windows)]
+    const FAIL: &[&str] = &["cmd", "/c", "exit 1"];
+    #[cfg(windows)]
+    const SLEEP: &[&str] = &["cmd", "/c", "ping -n 300 127.0.0.1 >nul"];
+    #[cfg(windows)]
+    const SLEEP_LABEL: &str = "cmd.exe";
 
     fn b64(argv: &[&str]) -> String {
         makepad_network::digest::base64_encode(argv.join("\0").as_bytes())
@@ -1309,29 +1210,29 @@ mod tests {
         // the same start again answers the same
         assert_eq!(x.handle("lease-start", r#"{"id":"L1","lane":"gapx","kind":"test","rev":null}"#), a);
 
-        let r = x.handle("lease-run", &format!("L1 . {}", b64(&["/bin/echo", "hi"])));
+        let r = x.handle("lease-run", &format!("L1 . {}", b64(ECHO_HI)));
         let n = field(&r[0], "n").and_then(|v| super::super::num(&v)).expect(&r[0]) as u32;
         let (text, code) = log_until_exit(&x, "L1", n);
         assert_eq!((text.trim(), code), ("hi", 0));
         // the env reaches the program; a failing one reports its code
-        let r = x.handle("lease-run", &format!("lease-run L1 . {}", b64(&["/usr/bin/env"])));
+        let r = x.handle("lease-run", &format!("lease-run L1 . {}", b64(ENV)));
         let (env, _) = log_until_exit(&x, "L1", field(&r[0], "n").and_then(|v| super::super::num(&v)).unwrap() as u32);
         assert!(env.contains("FOO=bar") && env.contains("SANDBOX_MUTE=1") && env.contains(&format!("TMPDIR={}", tmp.display())));
-        let r = x.handle("lease-run", &format!("L1 . {}", b64(&["false"])));
+        let r = x.handle("lease-run", &format!("L1 . {}", b64(FAIL)));
         assert_eq!(log_until_exit(&x, "L1", field(&r[0], "n").and_then(|v| super::super::num(&v)).unwrap() as u32).1, 1);
         assert!(x.handle("lease-run", &format!("L1 ../x {}", b64(&["true"])))[0].contains("err"));
 
         // a sleeping child (and its own child) is stopped on end
-        let r = x.handle("lease-run", &format!("L1 . {}", b64(&["/bin/sleep", "300"])));
+        let r = x.handle("lease-run", &format!("L1 . {}", b64(SLEEP)));
         let pid = field(&r[0], "run").and_then(|v| super::super::num(&v)).unwrap() as u32;
-        let start = proc_start(pid).unwrap();
+        let start = os::proc_start(pid).unwrap();
         std::thread::sleep(Duration::from_millis(200));
-        assert!(group_alive(pid, start));
+        assert!(os::group_alive(pid, start, &os::Hold::none()));
         let beat = x.handle("lease-beat", "L1 L404");
-        assert!(beat[0].starts_with(r#"{"live":["L1"],"unknown":["L404"],"info":{"L1":{"running":"sleep 300","pid":"#), "{beat:?}");
+        assert!(beat[0].starts_with(&format!(r#"{{"live":["L1"],"unknown":["L404"],"info":{{"L1":{{"running":"{SLEEP_LABEL}","pid":"#)), "{beat:?}");
         let e = x.handle("lease-end", "L1 released");
         assert!(e[0].contains(&format!("\"killed\":[{pid}]")) && e[0].contains("\"leak\":[]"), "{e:?}");
-        assert!(!group_alive(pid, start));
+        assert!(!os::group_alive(pid, start, &os::Hold::none()));
         assert!(!tmp.exists() && !base.join("leases/L1.json").exists());
         assert!(work.exists(), "a lane dir stays warm");
         assert!(x.handle("lease-end", "L1 released")[0].contains("\"unknown\":true"));
@@ -1382,9 +1283,9 @@ mod tests {
         let (x, base, events) = test_exec("wd", Opts { no_beat: Duration::from_millis(600), tick: Duration::from_millis(100), grace: Duration::from_secs(10), scopes: None });
         let a = x.handle("lease-start", r#"{"id":"L7","lane":"lost","kind":"long","rev":null}"#);
         assert!(a[0].contains("\"ok\":1"));
-        let r = x.handle("lease-run", &format!("L7 . {}", b64(&["/bin/sleep", "300"])));
+        let r = x.handle("lease-run", &format!("L7 . {}", b64(SLEEP)));
         let pid = field(&r[0], "run").and_then(|v| super::super::num(&v)).unwrap() as u32;
-        let start = proc_start(pid).unwrap();
+        let start = os::proc_start(pid).unwrap();
         // beaten: it stays
         for _ in 0..8 {
             std::thread::sleep(Duration::from_millis(100));
@@ -1393,7 +1294,7 @@ mod tests {
         assert!(x.leases.lock().unwrap().contains_key("L7"));
         // not beaten: the node ends it and stops its process
         let t = Instant::now();
-        while x.leases.lock().unwrap().contains_key("L7") || group_alive(pid, start) {
+        while x.leases.lock().unwrap().contains_key("L7") || os::group_alive(pid, start, &os::Hold::none()) {
             assert!(t.elapsed() < Duration::from_secs(20), "the watchdog did not end L7");
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -1409,14 +1310,14 @@ mod tests {
     fn a_restarted_hub_takes_its_leases_back() {
         let (x, base, _) = test_exec("ledger", Opts::default());
         x.handle("lease-start", r#"{"id":"L3","lane":"b","kind":"screen","rev":null}"#);
-        let r = x.handle("lease-run", &format!("L3 . {}", b64(&["/bin/sleep", "300"])));
+        let r = x.handle("lease-run", &format!("L3 . {}", b64(SLEEP)));
         let pid = field(&r[0], "run").and_then(|v| super::super::num(&v)).unwrap() as u32;
         let conf = x.conf();
         let y = Exec::new("t", conf, base.join("leases"), Opts::default(), Arc::new(|_| {}));
         assert!(y.handle("lease-beat", "L3")[0].contains("\"live\":[\"L3\"]"));
         let e = y.handle("lease-end", "L3 released");
         assert!(e[0].contains(&format!("\"killed\":[{pid}]")), "{e:?}");
-        assert!(!group_alive(pid, proc_start(pid).unwrap_or(1)));
+        assert!(!os::group_alive(pid, os::proc_start(pid).unwrap_or(1), &os::Hold::none()));
         let _ = std::fs::remove_dir_all(&base);
     }
 }

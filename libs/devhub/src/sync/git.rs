@@ -38,7 +38,7 @@ pub fn valid_repo(s: &str) -> bool {
 
 /// `~/devhub/git` (DESIGN.md §10.12), next to the lease worktrees and targets.
 pub fn stores_dir() -> PathBuf {
-    std::env::var_os("MAKEPAD_DEVHUB_GIT").map(PathBuf::from).unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/")).join("devhub").join("git"))
+    std::env::var_os("MAKEPAD_DEVHUB_GIT").map(PathBuf::from).unwrap_or_else(|| crate::os::home_dir().join("devhub").join("git"))
 }
 
 /// Runs `git <args>` in `dir` (or with the store as GIT_DIR); stdout on success.

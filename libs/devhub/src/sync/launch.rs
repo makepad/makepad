@@ -145,7 +145,6 @@ pub fn find_app(name: &str) -> Option<&'static makepad_app_registry::AppEntry> {
 
 /// Starts `s` from the checkout; returns the pid (the JIT's) and its log.
 pub fn start(conf: &SyncConf, s: &Spec, publish: &crate::local::Publish, machine: &str) -> Result<(u32, PathBuf), String> {
-    use std::os::unix::process::CommandExt;
     let app = find_app(&s.app).ok_or_else(|| format!("no app `{}` in the registry (a registry name like `calculator` or a package like `makepad-app-calculator`)", s.app))?;
     let _ = std::fs::create_dir_all(ledger_dir());
     let log = ledger_dir().join(format!("{}-{}.log", s.app, proto::wall_ms()));
@@ -165,7 +164,8 @@ pub fn start(conf: &SyncConf, s: &Spec, publish: &crate::local::Publish, machine
         }
         cmd.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         let (out, err) = files.take().ok_or("spawned twice")?;
-        cmd.stdin(std::process::Stdio::null()).stdout(out).stderr(err).process_group(0);
+        cmd.stdin(std::process::Stdio::null()).stdout(out).stderr(err);
+        makepad_remote::group::detach(&mut cmd);
         cmd.spawn().map_err(|e| e.to_string())
     })?;
     let pid = child.id();
@@ -195,14 +195,10 @@ pub fn wait_announced(pid: u32, wait: Duration) -> Option<String> {
     None
 }
 
-extern "C" {
-    fn kill(pid: i32, sig: i32) -> i32;
-}
-
 /// Stops a ledger pid's process group; Err when the pid is not one of ours.
 pub fn stop(pid: u32) -> Result<String, String> {
     let (_, start, _) = ledger(pid).ok_or_else(|| format!("pid {pid} is not a running launch of this hub"))?;
-    unsafe { kill(-(pid as i32), 15) };
+    makepad_remote::group::signal(pid, false);
     let end = Instant::now() + Duration::from_secs(10);
     while Instant::now() < end {
         if makepad_remote::relay::proc_start(pid) != Some(start) {
@@ -212,7 +208,7 @@ pub fn stop(pid: u32) -> Result<String, String> {
         std::thread::sleep(Duration::from_millis(100));
     }
     if makepad_remote::relay::proc_start(pid) == Some(start) {
-        unsafe { kill(-(pid as i32), 9) };
+        makepad_remote::group::signal(pid, true);
     }
     let _ = std::fs::remove_file(ledger_file(pid));
     Ok("SIGKILL after 10 s".into())

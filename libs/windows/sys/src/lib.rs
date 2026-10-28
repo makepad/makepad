@@ -18553,6 +18553,35 @@ pub unsafe fn Process32NextW(hSnapshot: crate::Win32::Foundation::HANDLE,lppe: *
 let hr__ = import_Process32NextW::call(hSnapshot,lppe); hr__.ok()?;
 Ok(())
 }
+pub const TH32CS_SNAPPROCESS: crate::Win32::System::Diagnostics::ToolHelp::CREATE_TOOLHELP_SNAPSHOT_FLAGS = crate::Win32::System::Diagnostics::ToolHelp::CREATE_TOOLHELP_SNAPSHOT_FLAGS(2u64 as _);
+pub const TH32CS_SNAPTHREAD: crate::Win32::System::Diagnostics::ToolHelp::CREATE_TOOLHELP_SNAPSHOT_FLAGS = crate::Win32::System::Diagnostics::ToolHelp::CREATE_TOOLHELP_SNAPSHOT_FLAGS(4u64 as _);
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct THREADENTRY32 {
+pub dwSize: u32,
+pub cntUsage: u32,
+pub th32ThreadID: u32,
+pub th32OwnerProcessID: u32,
+pub tpBasePri: i32,
+pub tpDeltaPri: i32,
+pub dwFlags: u32,
+}
+impl THREADENTRY32 { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for THREADENTRY32 { fn default() -> Self {Self::default()} }
+mod import_Thread32First { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "Thread32First"] pub fn call(hSnapshot: crate::Win32::Foundation::HANDLE,lpte: *mut crate::Win32::System::Diagnostics::ToolHelp::THREADENTRY32) -> crate::core::BOOL; } }
+pub use import_Thread32First::call as Thread32First_raw;
+#[inline]
+pub unsafe fn Thread32First(hSnapshot: crate::Win32::Foundation::HANDLE,lpte: *mut crate::Win32::System::Diagnostics::ToolHelp::THREADENTRY32) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_Thread32First::call(hSnapshot,lpte); hr__.ok()?;
+Ok(())
+}
+mod import_Thread32Next { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "Thread32Next"] pub fn call(hSnapshot: crate::Win32::Foundation::HANDLE,lpte: *mut crate::Win32::System::Diagnostics::ToolHelp::THREADENTRY32) -> crate::core::BOOL; } }
+pub use import_Thread32Next::call as Thread32Next_raw;
+#[inline]
+pub unsafe fn Thread32Next(hSnapshot: crate::Win32::Foundation::HANDLE,lpte: *mut crate::Win32::System::Diagnostics::ToolHelp::THREADENTRY32) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_Thread32Next::call(hSnapshot,lpte); hr__.ok()?;
+Ok(())
+}
 }
 }
 pub mod IO {
@@ -18639,6 +18668,20 @@ impl ::core::ops::BitXor for JOBOBJECTINFOCLASS { type Output = Self; fn bitxor(
 impl ::core::ops::Not for JOBOBJECTINFOCLASS { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION {
+pub TotalUserTime: i64,
+pub TotalKernelTime: i64,
+pub ThisPeriodTotalUserTime: i64,
+pub ThisPeriodTotalKernelTime: i64,
+pub TotalPageFaultCount: u32,
+pub TotalProcesses: u32,
+pub ActiveProcesses: u32,
+pub TotalTerminatedProcesses: u32,
+}
+impl JOBOBJECT_BASIC_ACCOUNTING_INFORMATION { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for JOBOBJECT_BASIC_ACCOUNTING_INFORMATION { fn default() -> Self {Self::default()} }
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
 pub PerProcessUserTimeLimit: i64,
 pub PerJobUserTimeLimit: i64,
@@ -18652,6 +18695,15 @@ pub SchedulingClass: u32,
 }
 impl JOBOBJECT_BASIC_LIMIT_INFORMATION { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
 impl ::core::default::Default for JOBOBJECT_BASIC_LIMIT_INFORMATION { fn default() -> Self {Self::default()} }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct JOBOBJECT_BASIC_PROCESS_ID_LIST {
+pub NumberOfAssignedProcesses: u32,
+pub NumberOfProcessIdsInList: u32,
+pub ProcessIdList: [usize; 1],
+}
+impl JOBOBJECT_BASIC_PROCESS_ID_LIST { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for JOBOBJECT_BASIC_PROCESS_ID_LIST { fn default() -> Self {Self::default()} }
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
@@ -18677,12 +18729,28 @@ impl ::core::ops::BitAnd for JOB_OBJECT_LIMIT { type Output = Self; fn bitand(se
 impl ::core::ops::BitXor for JOB_OBJECT_LIMIT { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
 impl ::core::ops::Not for JOB_OBJECT_LIMIT { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
 pub const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: crate::Win32::System::JobObjects::JOB_OBJECT_LIMIT = crate::Win32::System::JobObjects::JOB_OBJECT_LIMIT(8192u64 as _);
+pub const JobObjectBasicAccountingInformation: crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS = crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS(1i64 as _);
+pub const JobObjectBasicProcessIdList: crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS = crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS(3i64 as _);
 pub const JobObjectExtendedLimitInformation: crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS = crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS(9i64 as _);
+mod import_QueryInformationJobObject { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "QueryInformationJobObject"] pub fn call(hJob: crate::Win32::Foundation::HANDLE,JobObjectInformationClass: crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS,lpJobObjectInformation: *mut ::core::ffi::c_void,cbJobObjectInformationLength: u32,lpReturnLength: *mut u32) -> crate::core::BOOL; } }
+pub use import_QueryInformationJobObject::call as QueryInformationJobObject_raw;
+#[inline]
+pub unsafe fn QueryInformationJobObject(hJob: Option<crate::Win32::Foundation::HANDLE>,JobObjectInformationClass: crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS,lpJobObjectInformation: *mut ::core::ffi::c_void,cbJobObjectInformationLength: u32,lpReturnLength: Option<*mut u32>) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_QueryInformationJobObject::call(hJob.unwrap_or(unsafe { ::core::mem::zeroed() }),JobObjectInformationClass,lpJobObjectInformation,cbJobObjectInformationLength,lpReturnLength.unwrap_or(::core::ptr::null_mut())); hr__.ok()?;
+Ok(())
+}
 mod import_SetInformationJobObject { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "SetInformationJobObject"] pub fn call(hJob: crate::Win32::Foundation::HANDLE,JobObjectInformationClass: crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS,lpJobObjectInformation: *const ::core::ffi::c_void,cbJobObjectInformationLength: u32) -> crate::core::BOOL; } }
 pub use import_SetInformationJobObject::call as SetInformationJobObject_raw;
 #[inline]
 pub unsafe fn SetInformationJobObject(hJob: crate::Win32::Foundation::HANDLE,JobObjectInformationClass: crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS,lpJobObjectInformation: *const ::core::ffi::c_void,cbJobObjectInformationLength: u32) -> Result<(), crate::core::HRESULT> {
 let hr__ = import_SetInformationJobObject::call(hJob,JobObjectInformationClass,lpJobObjectInformation,cbJobObjectInformationLength); hr__.ok()?;
+Ok(())
+}
+mod import_TerminateJobObject { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "TerminateJobObject"] pub fn call(hJob: crate::Win32::Foundation::HANDLE,uExitCode: u32) -> crate::core::BOOL; } }
+pub use import_TerminateJobObject::call as TerminateJobObject_raw;
+#[inline]
+pub unsafe fn TerminateJobObject(hJob: crate::Win32::Foundation::HANDLE,uExitCode: u32) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_TerminateJobObject::call(hJob,uExitCode); hr__.ok()?;
 Ok(())
 }
 }
@@ -19356,6 +19424,50 @@ let hr__ = import_CreatePipe::call(hReadPipe,hWritePipe,lpPipeAttributes.unwrap_
 Ok(())
 }
 }
+pub mod Power {
+mod import_GetSystemPowerStatus { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetSystemPowerStatus"] pub fn call(lpSystemPowerStatus: *mut crate::Win32::System::Power::SYSTEM_POWER_STATUS) -> crate::core::BOOL; } }
+pub use import_GetSystemPowerStatus::call as GetSystemPowerStatus_raw;
+#[inline]
+pub unsafe fn GetSystemPowerStatus(lpSystemPowerStatus: *mut crate::Win32::System::Power::SYSTEM_POWER_STATUS) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_GetSystemPowerStatus::call(lpSystemPowerStatus); hr__.ok()?;
+Ok(())
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SYSTEM_POWER_STATUS {
+pub ACLineStatus: u8,
+pub BatteryFlag: u8,
+pub BatteryLifePercent: u8,
+pub SystemStatusFlag: u8,
+pub BatteryLifeTime: u32,
+pub BatteryFullLifeTime: u32,
+}
+impl SYSTEM_POWER_STATUS { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for SYSTEM_POWER_STATUS { fn default() -> Self {Self::default()} }
+}
+pub mod ProcessStatus {
+mod import_K32GetProcessMemoryInfo { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "K32GetProcessMemoryInfo"] pub fn call(Process: crate::Win32::Foundation::HANDLE,ppsmemCounters: *mut crate::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS,cb: u32) -> crate::core::BOOL; } }
+pub use import_K32GetProcessMemoryInfo::call as K32GetProcessMemoryInfo_raw;
+#[inline]
+pub unsafe fn K32GetProcessMemoryInfo(Process: crate::Win32::Foundation::HANDLE,ppsmemCounters: *mut crate::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS,cb: u32) -> crate::core::BOOL {
+import_K32GetProcessMemoryInfo::call(Process,ppsmemCounters,cb)}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PROCESS_MEMORY_COUNTERS {
+pub cb: u32,
+pub PageFaultCount: u32,
+pub PeakWorkingSetSize: usize,
+pub WorkingSetSize: usize,
+pub QuotaPeakPagedPoolUsage: usize,
+pub QuotaPagedPoolUsage: usize,
+pub QuotaPeakNonPagedPoolUsage: usize,
+pub QuotaNonPagedPoolUsage: usize,
+pub PagefileUsage: usize,
+pub PeakPagefileUsage: usize,
+}
+impl PROCESS_MEMORY_COUNTERS { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for PROCESS_MEMORY_COUNTERS { fn default() -> Self {Self::default()} }
+}
 pub mod Registry {
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -19544,6 +19656,11 @@ let hr__ = import_OpenInputDesktop::call(dwFlags,crate::core::BOOL(fInherit as i
 }
 }
 pub mod SystemInformation {
+mod import_GetNativeSystemInfo { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetNativeSystemInfo"] pub fn call(lpSystemInfo: *mut crate::Win32::System::SystemInformation::SYSTEM_INFO) -> (); } }
+pub use import_GetNativeSystemInfo::call as GetNativeSystemInfo_raw;
+#[inline]
+pub unsafe fn GetNativeSystemInfo(lpSystemInfo: *mut crate::Win32::System::SystemInformation::SYSTEM_INFO) -> () {
+import_GetNativeSystemInfo::call(lpSystemInfo)}
 mod import_GetSystemDirectoryW { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetSystemDirectoryW"] pub fn call(lpBuffer: crate::core::PWSTR,uSize: u32) -> u32; } }
 pub use import_GetSystemDirectoryW::call as GetSystemDirectoryW_raw;
 #[inline]
@@ -19554,6 +19671,11 @@ pub use import_GetTickCount::call as GetTickCount_raw;
 #[inline]
 pub unsafe fn GetTickCount() -> u32 {
 import_GetTickCount::call()}
+mod import_GetTickCount64 { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetTickCount64"] pub fn call() -> u64; } }
+pub use import_GetTickCount64::call as GetTickCount64_raw;
+#[inline]
+pub unsafe fn GetTickCount64() -> u64 {
+import_GetTickCount64::call()}
 mod import_GlobalMemoryStatusEx { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GlobalMemoryStatusEx"] pub fn call(lpBuffer: *mut crate::Win32::System::SystemInformation::MEMORYSTATUSEX) -> crate::core::BOOL; } }
 pub use import_GlobalMemoryStatusEx::call as GlobalMemoryStatusEx_raw;
 #[inline]
@@ -19576,6 +19698,50 @@ pub ullAvailExtendedVirtual: u64,
 }
 impl MEMORYSTATUSEX { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
 impl ::core::default::Default for MEMORYSTATUSEX { fn default() -> Self {Self::default()} }
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct PROCESSOR_ARCHITECTURE(pub u16);
+impl PROCESSOR_ARCHITECTURE { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for PROCESSOR_ARCHITECTURE { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for PROCESSOR_ARCHITECTURE { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for PROCESSOR_ARCHITECTURE {}
+impl ::core::fmt::Debug for PROCESSOR_ARCHITECTURE { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for PROCESSOR_ARCHITECTURE { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for PROCESSOR_ARCHITECTURE { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for PROCESSOR_ARCHITECTURE { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for PROCESSOR_ARCHITECTURE { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SYSTEM_INFO {
+pub Anonymous: crate::Win32::System::SystemInformation::SYSTEM_INFO_0,
+pub dwPageSize: u32,
+pub lpMinimumApplicationAddress: *mut ::core::ffi::c_void,
+pub lpMaximumApplicationAddress: *mut ::core::ffi::c_void,
+pub dwActiveProcessorMask: usize,
+pub dwNumberOfProcessors: u32,
+pub dwProcessorType: u32,
+pub dwAllocationGranularity: u32,
+pub wProcessorLevel: u16,
+pub wProcessorRevision: u16,
+}
+impl SYSTEM_INFO { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for SYSTEM_INFO { fn default() -> Self {Self::default()} }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union SYSTEM_INFO_0 {
+pub dwOemId: u32,
+pub Anonymous: crate::Win32::System::SystemInformation::SYSTEM_INFO_0_0,
+}
+impl SYSTEM_INFO_0 { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for SYSTEM_INFO_0 { fn default() -> Self {Self::default()} }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SYSTEM_INFO_0_0 {
+pub wProcessorArchitecture: crate::Win32::System::SystemInformation::PROCESSOR_ARCHITECTURE,
+pub wReserved: u16,
+}
+impl SYSTEM_INFO_0_0 { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for SYSTEM_INFO_0_0 { fn default() -> Self {Self::default()} }
 }
 pub mod SystemServices {
 pub const MK_CONTROL: crate::Win32::System::SystemServices::MODIFIERKEYS_FLAGS = crate::Win32::System::SystemServices::MODIFIERKEYS_FLAGS(8u64 as _);
@@ -19629,6 +19795,10 @@ pub use import_AvSetMmThreadCharacteristicsW::call as AvSetMmThreadCharacteristi
 pub unsafe fn AvSetMmThreadCharacteristicsW(TaskName: crate::core::PCWSTR,TaskIndex: *mut u32) -> Result<crate::Win32::System::Threading::AVRT_TASK_HANDLE, crate::core::HRESULT> {
 let hr__ = import_AvSetMmThreadCharacteristicsW::call(TaskName,TaskIndex); if hr__.is_invalid() {return Err(crate::core::HRESULT::from_thread());} return Ok(hr__);
 }
+pub const BELOW_NORMAL_PRIORITY_CLASS: crate::Win32::System::Threading::PROCESS_CREATION_FLAGS = crate::Win32::System::Threading::PROCESS_CREATION_FLAGS(16384u64 as _);
+pub const CREATE_NEW_PROCESS_GROUP: crate::Win32::System::Threading::PROCESS_CREATION_FLAGS = crate::Win32::System::Threading::PROCESS_CREATION_FLAGS(512u64 as _);
+pub const CREATE_NO_WINDOW: crate::Win32::System::Threading::PROCESS_CREATION_FLAGS = crate::Win32::System::Threading::PROCESS_CREATION_FLAGS(134217728u64 as _);
+pub const CREATE_SUSPENDED: crate::Win32::System::Threading::PROCESS_CREATION_FLAGS = crate::Win32::System::Threading::PROCESS_CREATION_FLAGS(4u64 as _);
 mod import_CreateEventA { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "CreateEventA"] pub fn call(lpEventAttributes: *const crate::Win32::Security::SECURITY_ATTRIBUTES,bManualReset: crate::core::BOOL,bInitialState: crate::core::BOOL,lpName: crate::core::PCSTR) -> crate::Win32::Foundation::HANDLE; } }
 pub use import_CreateEventA::call as CreateEventA_raw;
 #[inline]
@@ -19695,6 +19865,13 @@ pub unsafe fn GetProcessTimes(hProcess: crate::Win32::Foundation::HANDLE,lpCreat
 let hr__ = import_GetProcessTimes::call(hProcess,lpCreationTime,lpExitTime,lpKernelTime,lpUserTime); hr__.ok()?;
 Ok(())
 }
+mod import_GetSystemTimes { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetSystemTimes"] pub fn call(lpIdleTime: *mut crate::Win32::Foundation::FILETIME,lpKernelTime: *mut crate::Win32::Foundation::FILETIME,lpUserTime: *mut crate::Win32::Foundation::FILETIME) -> crate::core::BOOL; } }
+pub use import_GetSystemTimes::call as GetSystemTimes_raw;
+#[inline]
+pub unsafe fn GetSystemTimes(lpIdleTime: Option<*mut crate::Win32::Foundation::FILETIME>,lpKernelTime: Option<*mut crate::Win32::Foundation::FILETIME>,lpUserTime: Option<*mut crate::Win32::Foundation::FILETIME>) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_GetSystemTimes::call(lpIdleTime.unwrap_or(::core::ptr::null_mut()),lpKernelTime.unwrap_or(::core::ptr::null_mut()),lpUserTime.unwrap_or(::core::ptr::null_mut())); hr__.ok()?;
+Ok(())
+}
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct IO_COUNTERS {
@@ -19733,6 +19910,12 @@ pub use import_OpenSemaphoreW::call as OpenSemaphoreW_raw;
 #[inline]
 pub unsafe fn OpenSemaphoreW(dwDesiredAccess: crate::Win32::System::Threading::SYNCHRONIZATION_ACCESS_RIGHTS,bInheritHandle: bool,lpName: crate::core::PCWSTR) -> Result<crate::Win32::Foundation::HANDLE, crate::core::HRESULT> {
 let hr__ = import_OpenSemaphoreW::call(dwDesiredAccess,crate::core::BOOL(bInheritHandle as i32),lpName); if hr__.is_invalid() {return Err(crate::core::HRESULT::from_thread());} return Ok(hr__);
+}
+mod import_OpenThread { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "OpenThread"] pub fn call(dwDesiredAccess: crate::Win32::System::Threading::THREAD_ACCESS_RIGHTS,bInheritHandle: crate::core::BOOL,dwThreadId: u32) -> crate::Win32::Foundation::HANDLE; } }
+pub use import_OpenThread::call as OpenThread_raw;
+#[inline]
+pub unsafe fn OpenThread(dwDesiredAccess: crate::Win32::System::Threading::THREAD_ACCESS_RIGHTS,bInheritHandle: bool,dwThreadId: u32) -> Result<crate::Win32::Foundation::HANDLE, crate::core::HRESULT> {
+let hr__ = import_OpenThread::call(dwDesiredAccess,crate::core::BOOL(bInheritHandle as i32),dwThreadId); if hr__.is_invalid() {return Err(crate::core::HRESULT::from_thread());} return Ok(hr__);
 }
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -19780,7 +19963,11 @@ impl ::core::ops::BitOr for PROCESS_NAME_FORMAT { type Output = Self; fn bitor(s
 impl ::core::ops::BitAnd for PROCESS_NAME_FORMAT { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
 impl ::core::ops::BitXor for PROCESS_NAME_FORMAT { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
 impl ::core::ops::Not for PROCESS_NAME_FORMAT { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const PROCESS_QUERY_INFORMATION: crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS = crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS(1024u64 as _);
 pub const PROCESS_QUERY_LIMITED_INFORMATION: crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS = crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS(4096u64 as _);
+pub const PROCESS_SET_QUOTA: crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS = crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS(256u64 as _);
+pub const PROCESS_TERMINATE: crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS = crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS(1u64 as _);
+pub const PROCESS_VM_READ: crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS = crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS(16u64 as _);
 pub const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: u32 = 131094;
 mod import_QueryFullProcessImageNameW { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "QueryFullProcessImageNameW"] pub fn call(hProcess: crate::Win32::Foundation::HANDLE,dwFlags: crate::Win32::System::Threading::PROCESS_NAME_FORMAT,lpExeName: crate::core::PWSTR,lpdwSize: *mut u32) -> crate::core::BOOL; } }
 pub use import_QueryFullProcessImageNameW::call as QueryFullProcessImageNameW_raw;
@@ -19796,6 +19983,11 @@ pub unsafe fn ReleaseSemaphore(hSemaphore: crate::Win32::Foundation::HANDLE,lRel
 let hr__ = import_ReleaseSemaphore::call(hSemaphore,lReleaseCount,lpPreviousCount.unwrap_or(::core::ptr::null_mut())); hr__.ok()?;
 Ok(())
 }
+mod import_ResumeThread { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "ResumeThread"] pub fn call(hThread: crate::Win32::Foundation::HANDLE) -> u32; } }
+pub use import_ResumeThread::call as ResumeThread_raw;
+#[inline]
+pub unsafe fn ResumeThread(hThread: crate::Win32::Foundation::HANDLE) -> u32 {
+import_ResumeThread::call(hThread)}
 pub const SEMAPHORE_MODIFY_STATE: crate::Win32::System::Threading::SYNCHRONIZATION_ACCESS_RIGHTS = crate::Win32::System::Threading::SYNCHRONIZATION_ACCESS_RIGHTS(2u64 as _);
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -19866,6 +20058,19 @@ pub use import_Sleep::call as Sleep_raw;
 #[inline]
 pub unsafe fn Sleep(dwMilliseconds: u32) -> () {
 import_Sleep::call(dwMilliseconds)}
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct THREAD_ACCESS_RIGHTS(pub u32);
+impl THREAD_ACCESS_RIGHTS { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for THREAD_ACCESS_RIGHTS { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for THREAD_ACCESS_RIGHTS { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for THREAD_ACCESS_RIGHTS {}
+impl ::core::fmt::Debug for THREAD_ACCESS_RIGHTS { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for THREAD_ACCESS_RIGHTS { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for THREAD_ACCESS_RIGHTS { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for THREAD_ACCESS_RIGHTS { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for THREAD_ACCESS_RIGHTS { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const THREAD_SUSPEND_RESUME: crate::Win32::System::Threading::THREAD_ACCESS_RIGHTS = crate::Win32::System::Threading::THREAD_ACCESS_RIGHTS(2u64 as _);
 mod import_TerminateProcess { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "TerminateProcess"] pub fn call(hProcess: crate::Win32::Foundation::HANDLE,uExitCode: u32) -> crate::core::BOOL; } }
 pub use import_TerminateProcess::call as TerminateProcess_raw;
 #[inline]

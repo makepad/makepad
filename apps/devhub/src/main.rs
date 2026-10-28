@@ -7,6 +7,10 @@
 //! - Node (a Linux WM): a tray icon in the WM's bar with a status menu; it serves this machine's
 //!   JITs to the master. Quit writes `enabled = off` into its conf, so the WM leaves it off until
 //!   the person starts it from the launcher.
+//! - Node (Windows): the same tray, in the notification area, started at logon by the per-user
+//!   task `tools/devhub/windows/install-node.ps1` makes (through `cargo run`, under a headless
+//!   console: no window); its conf is `%USERPROFILE%\.makepad\devhub\node.conf` unless the env
+//!   names one.
 //!
 //! Without the fleet identity (`~/.makepad/fleet`, tools/fleet-identity.md) both serve this
 //! machine's JITs only. `makepad devhub serve [--node <conf>]` runs the same core without a
@@ -238,6 +242,8 @@ fn start_node(conf_path: PathBuf) -> Result<Option<NodeCore>, String> {
 fn start_core() -> Result<Option<Core>, String> {
     match std::env::var_os(NODE_CONF_ENV).filter(|p| !p.is_empty()) {
         Some(p) => Ok(start_node(PathBuf::from(p))?.map(Core::Node)),
+        // the master is the Mac's: on Windows devhub is always a node (its logon task's tray)
+        None if cfg!(windows) => Ok(start_node(proto::home().join("node.conf"))?.map(Core::Node)),
         None => Ok(Some(Core::Master(start_master()?))),
     }
 }
@@ -437,6 +443,7 @@ impl App {
             let _ = std::fs::write(&n.conf_path, format!("enabled = off\n{}\n", kept.join("\n")));
         }
         let _ = std::fs::remove_file(proto::control_socket());
+        let _ = std::fs::remove_file(proto::home().join("node.pid"));
         installed::clear_pid();
         cx.remove_tray(TRAY);
         cx.quit();
@@ -583,6 +590,10 @@ impl MatchEvent for App {
             return;
         }
         installed::write_pid();
+        if matches!(self.core, Some(Core::Node(_))) {
+            // what stops this node by pid (a Windows logon task's hub, a test by hand)
+            let _ = std::fs::write(proto::home().join("node.pid"), format!("{}\n", std::process::id()));
+        }
         self.login = installed::login();
         self.state.tab = Tab::Fleet;
         self.state.view = "jit";

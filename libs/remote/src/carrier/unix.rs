@@ -192,8 +192,30 @@ mod imp {
         unsafe { atexit(cleanup) };
         Ok(PathBuf::from(socket))
     }
-    pub fn listen_at(_ep: &Endpoint, _path: &std::path::Path) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::Unsupported, "makepad-remote is not available on Windows yet"))
+    /// Serves `ep` at a fixed address such as the hub's: loopback TCP behind a fresh token, both
+    /// written to the file at `path` (`{"pid","socket":"tcp:127.0.0.1:PORT","token"}`, in the
+    /// user's own temp folder, which only that user can read). [`resolve`] is the dial side.
+    pub fn listen_at(ep: &Endpoint, path: &std::path::Path) -> io::Result<()> {
+        let token = crate::carrier::loopback::new_token()?;
+        let addr = crate::carrier::loopback::serve(ep, &token)?;
+        let info = format!(
+            "{{\"pid\":{},\"app\":{},\"socket\":{},\"token\":{},\"started_ms\":{},\"caps\":[]}}\n",
+            std::process::id(),
+            crate::cmd::json_str(ep.app()),
+            crate::cmd::json_str(&format!("tcp:{addr}")),
+            crate::cmd::json_str(&token),
+            crate::cmd::wall_ms()
+        );
+        let _ = std::fs::remove_file(path);
+        makepad_network::tls::write_private(path, info.as_bytes())
+    }
+
+    /// The loopback address and token a [`listen_at`] file at `path` names.
+    pub fn resolve(path: &std::path::Path) -> io::Result<(String, String)> {
+        let text = std::fs::read_to_string(path)?;
+        let app = crate::discovery::parse(&text).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{}: not an endpoint file", path.display())))?;
+        let addr = app.socket.strip_prefix("tcp:").ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{}: no tcp: socket", path.display())))?;
+        Ok((addr.to_string(), app.text("token").unwrap_or_default()))
     }
 }
 

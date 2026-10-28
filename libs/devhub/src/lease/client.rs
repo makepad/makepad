@@ -105,11 +105,7 @@ fn default_lane() -> String {
 }
 
 fn pid_alive(pid: i32) -> bool {
-    extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    // signal 0 only checks; EPERM still means it lives
-    unsafe { kill(pid, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1) }
+    crate::os::pid_alive(pid as u32)
 }
 
 struct Opts {
@@ -158,9 +154,6 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
 struct Held {
     id: String,
     node: String,
-    addr: String,
-    /// the node's login for the ssh ship
-    user: String,
     work: String,
     env: Vec<(String, String)>,
 }
@@ -192,8 +185,7 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
                     Some(Value::Obj(pairs)) => pairs.iter().map(|(k, x)| (k.clone(), x.as_str().unwrap_or("").to_string())).collect(),
                     _ => Vec::new(),
                 };
-                let user = start.map(|st| s(st, "user")).unwrap_or_default();
-                return Ok(Held { id, node: s(&v, "node"), addr: s(&v, "addr"), user, work: start.map(|st| s(st, "work")).unwrap_or_default(), env });
+                return Ok(Held { id, node: s(&v, "node"), work: start.map(|st| s(st, "work")).unwrap_or_default(), env });
             }
             _ => {
                 let how = s(&v, "how");
@@ -353,11 +345,12 @@ fn shell_quote(v: &str) -> String {
 }
 
 /// Ships the worktree (tracked + untracked-not-ignored files that exist, + apps/commercial, +
-/// DEVHUB_ALSO) to the lease's work dir, content-checksummed, with its file list; the node then
-/// prunes the files the previous ship had and this one has not (deleted on the lane's side).
+/// DEVHUB_ALSO) to the lease's work dir over the devhub link ([`super::ship`]: a file goes when
+/// its size, mtime or executable bit differ there), with its file list; the node then prunes the
+/// files the previous ship had and this one has not (deleted on the lane's side).
 fn ship(c: &Client, root: &Path, held: &Held) -> Result<(), String> {
-    if held.addr.is_empty() || held.work.is_empty() || held.user.is_empty() {
-        return Err(format!("{}: no node address, login or work dir to ship to", held.id));
+    if held.work.is_empty() {
+        return Err(format!("{}: no work dir to ship to", held.id));
     }
     let mut files: Vec<String> = git(root, &["ls-files", "-co", "--exclude-standard"]).ok_or("git ls-files failed")?.lines().map(str::to_string).collect();
     if root.join("apps/commercial/.git").exists() {
@@ -380,25 +373,31 @@ fn ship(c: &Client, root: &Path, held: &Held) -> Result<(), String> {
         // shipped, never in the prune list: two runs with different DEVHUB_ALSO keep each other's files
         all.push(p.to_string());
     }
-    let tmp = std::env::temp_dir();
-    let man = tmp.join(format!("devhub-ship-{}-{}.all", held.id, std::process::id()));
-    let list = tmp.join(format!("devhub-ship-{}-{}.files", held.id, std::process::id()));
-    std::fs::write(&man, format!("{}\n", all.join("\n"))).map_err(|e| e.to_string())?;
-    std::fs::write(&list, format!("{}\n", files.join("\n"))).map_err(|e| e.to_string())?;
-    let dst = format!("{}@{}:{}/", held.user, held.addr, held.work.trim_end_matches('/'));
-    let rsync = |args: &[&std::ffi::OsStr]| Command::new("rsync").args(args).status();
-    let st = rsync(&["-rlp".as_ref(), "--checksum".as_ref(), format!("--files-from={}", man.display()).as_ref(), format!("{}/", root.display()).as_ref(), dst.as_ref()]).and_then(|st| {
-        if !st.success() {
-            return Ok(st);
+    let mut entries = Vec::new();
+    for f in &all {
+        super::ship::entries(root, f, &mut entries)?;
+    }
+    let t = Instant::now();
+    // the lease is beaten while the tree goes (a first ship of a whole tree takes a while)
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (bc, bd, bid) = (c.clone(), done.clone(), held.id.clone());
+    let beater = std::thread::spawn(move || {
+        while !bd.load(std::sync::atomic::Ordering::Relaxed) {
+            let t = Instant::now();
+            while t.elapsed() < BEAT && !bd.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if !bd.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = one(&bc, "beat", &bid);
+            }
         }
-        rsync(&["-p".as_ref(), list.as_os_str(), format!("{dst}.devhub-files.new").as_ref()])
     });
-    let _ = std::fs::remove_file(&man);
-    let _ = std::fs::remove_file(&list);
-    match st {
-        Ok(s) if s.success() => {}
-        Ok(s) => return Err(format!("rsync to {dst} failed ({s})")),
-        Err(e) => return Err(format!("rsync: {e}")),
+    let sent = super::ship::send(c, &held.node, &held.id, root, &entries, &format!("{}\n", files.join("\n")));
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = beater.join();
+    let sent = sent?;
+    if sent.sent > 0 {
+        eprintln!("{} {}: shipped {} of {} files ({} KB) in {:.1} s", held.id, held.node, sent.sent, sent.files, sent.bytes >> 10, t.elapsed().as_secs_f64());
     }
     let v = node_one(c, &held.node, "lease-prune", &format!("lease-prune {}", held.id))?;
     let n = n(&v, "pruned");

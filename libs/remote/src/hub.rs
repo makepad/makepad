@@ -264,6 +264,7 @@ impl Hub {
     /// Test seam: serves a carrier a relay named `name` dialled over and binds it (the TCP path
     /// binds by proved key instead).
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn accept_dialed(&self, car: crate::carrier::Carrier) -> Result<Conn, crate::hello::HandshakeError> {
         let conn = Endpoint::new("makepad-run-hub").serve(car.reader, car.writer, car.shutdown)?;
         self.bind_link(&conn.peer().name.clone(), &conn);
@@ -535,7 +536,6 @@ fn lock_pid() -> io::Result<bool> {
 /// Runs the hub in this process until it has been idle for [`IDLE_EXIT`] (never, with a TCP
 /// listener). Returns `Ok(false)` at once when another hub already runs. `listen`: `host:port`
 /// for paired devices to dial; the hub's TLS identity is created on first use.
-#[cfg(unix)]
 pub fn serve(hosts: Hosts, listen: Option<&str>) -> io::Result<bool> {
     if !lock_pid()? {
         return Ok(false);
@@ -546,7 +546,6 @@ pub fn serve(hosts: Hosts, listen: Option<&str>) -> io::Result<bool> {
     result.map(|_| true)
 }
 
-#[cfg(unix)]
 fn serve_locked(hosts: Hosts, listen: Option<&str>) -> io::Result<()> {
     let hub = Hub::new(&hosts);
     hub.set_source(Arc::new(|| Hosts::load(&crate::hosts::registry_path()).unwrap_or_default()));
@@ -579,9 +578,7 @@ fn serve_locked(hosts: Hosts, listen: Option<&str>) -> io::Result<()> {
 
 /// A client of the hub: dials its socket, starting `<exe> hub` first (detached, logging to
 /// [`log_path`]) when none is running and `start` names the executable.
-#[cfg(unix)]
 pub fn connect(start: Option<&std::path::Path>) -> Result<Client, String> {
-    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let client = Client::new(Target::Unix(socket_path()), "client");
     if client.conn().is_ok() {
@@ -590,7 +587,10 @@ pub fn connect(start: Option<&std::path::Path>) -> Result<Client, String> {
     let exe = start.ok_or_else(|| "no makepad hub is running".to_string())?;
     let log = std::fs::File::create(log_path()).map_err(|e| format!("cannot write {}: {e}", log_path().display()))?;
     let log2 = log.try_clone().map_err(|e| e.to_string())?;
-    Command::new(exe).arg("hub").stdin(Stdio::null()).stdout(log).stderr(log2).process_group(0).spawn().map_err(|e| format!("cannot start `{} hub`: {e}", exe.display()))?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("hub").stdin(Stdio::null()).stdout(log).stderr(log2);
+    crate::group::detach(&mut cmd);
+    cmd.spawn().map_err(|e| format!("cannot start `{} hub`: {e}", exe.display()))?;
     let end = Instant::now() + Duration::from_secs(5);
     while Instant::now() < end {
         std::thread::sleep(Duration::from_millis(50));
