@@ -56,4 +56,27 @@ pub fn data() -> usize { include_str!("../data.txt").len() }
 mod alt;
 pub fn alt_val() -> u32 { alt::val() + 1 }
 
+// What a code key must see of other items through names (cache/deps.rs): a glob import shadowed by a
+// new item, a method a macro's expansion calls (`write!` -> `write_fmt`), a macro's definition, a trait
+// impl's items, a generic fn's body with an `impl Trait` argument.
+mod glob_src { pub fn which() -> u32 { 1 } }
+use glob_src::*;
+// EDIT shadow
+pub fn uses_which() -> u32 { which() }
+
+pub struct Sink(pub u32);
+impl std::fmt::Write for Sink { fn write_str(&mut self, s: &str) -> std::fmt::Result { self.0 += s.len() as u32; Ok(()) } }
+// EDIT inherent
+pub fn sink_len() -> u32 { use std::fmt::Write as _; let mut s = Sink(0); let _ = write!(s, "abc"); s.0 }
+
+macro_rules! seven { () => { 7 } } // EDIT seven
+pub fn uses_seven() -> u32 { seven!() }
+
+pub trait Greet { fn greet(&self) -> u32 { 1 } }
+pub struct Plain;
+impl Greet for Plain {} // EDIT greet
+pub fn greet_plain() -> u32 { Plain.greet() }
+
+pub fn apply(f: impl Fn(u32) -> u32) -> u32 { f(2) } // EDIT apit
+
 pub fn wrap<T: Default + std::fmt::Debug>() -> usize { format!("{:?}", T::default()).len() }

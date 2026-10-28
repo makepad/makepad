@@ -43,6 +43,7 @@ mod image;
 use image::{ManifestImage, IMAGE_MAGIC};
 pub(crate) use image::{complete_identities_unit, ids_report_unit, image_broken_unit, image_slot_by_key_unit, name_unnamed_unit, prelink_unit, PrelinkedSlot};
 mod items;
+mod deps;
 mod demand;
 mod front_run;
 pub use front_run::FrontSink;
@@ -145,6 +146,12 @@ const KIND_FRONT_GRAPH: u32 = 8;
 const KIND_DEMAND_PART: u32 = 13;
 /// a graph store's list of the crate stores its demand parts take images from (prune keeps them)
 const KIND_DEMAND_STORES: u32 = 16;
+/// the names a fn body's macro expansions produced (cache/deps.rs exp_names), keyed by the code
+/// key the fn has without them: a later run keys the fn's code without parsing its body
+const KIND_EXP_NAMES: u32 = 17;
+/// the program's item graph (cache/deps.rs Deps::encode), one per program (its root crate's code
+/// store, under a key of the program's view: replaced when the program changes)
+const KIND_DEPS: u32 = 18;
 const KIND_CONST: u32 = 9;
 const KIND_WARM_OUTCOME: u32 = 10;
 /// stores a front image was mapped from: kept for the rest of the process (the arrays point
@@ -518,6 +525,15 @@ pub struct Cache {
     /// the same without the bound crates: what a collected image stores (run, check and
     /// check --boundary of one program bind different sets, the image is shared by all)
     iface_plain: Vec<u128>,
+    /// per crate: its view (items.rs crate_views, bound crates folded in): what code keys and
+    /// store names take from the crate besides its items
+    view: Vec<u128>,
+    /// the program's item graph (cache/deps.rs), built on the first key that needs it
+    deps: Option<std::sync::Arc<deps::Deps>>,
+    /// (crate, name) -> what the name finds from the crate (deps.rs name_closure)
+    name_memo: HashMap<(u32, deps::Name), u128>,
+    /// per definition: its body's names, as one closure hash (code keys)
+    body_names: HashMap<DefId, u128>,
     /// per file: its interface hash and the fn bodies outside it
     digests: Vec<Option<std::sync::Arc<items::FileDigest>>>,
     /// per definition: its body (when a hole) and position digest, hashed (code keys)
@@ -814,6 +830,10 @@ impl Cache {
             fps,
             iface: Vec::new(),
             iface_plain: Vec::new(),
+            view: Vec::new(),
+            deps: None,
+            name_memo: HashMap::new(),
+            body_names: HashMap::new(),
             digests: Vec::new(),
             def_bodies: HashMap::new(),
             code_path: Vec::new(),
@@ -908,13 +928,17 @@ impl Cache {
         }
         let provided: Vec<(u32, u64)> = u.provided.iter().map(|(k, pc)| (*k, pc.binding)).collect();
         c.iface = items::apply_bound(prog, &c.iface_plain, &provided);
+        // the views (a restored collected program digests no file: its interfaces are restored)
+        let mut view = items::crate_views(prog, &c.iface_plain, &deps::atomic_crates(prog, ncr));
+        view.truncate(ncr);
+        c.view = items::apply_bound(prog, &view, &provided);
         c.stats.iface_ns = t_if.elapsed().as_nanos() as u64;
         // MAKEPAD_RUN_CACHE_IFACE=<file>: every file's interface hash and crate's interface
         // fingerprint (which file made an edit's crate recompile)
         if let Ok(path) = std::env::var("MAKEPAD_RUN_CACHE_IFACE") {
             let mut out = String::new();
             for (ci, v) in c.iface.iter().enumerate() {
-                out.push_str(&format!("crate\t{}\t{:032x}\n", prog.syms.str(prog.crates[ci].name), v));
+                out.push_str(&format!("crate\t{}\t{:032x}\t{:032x}\n", prog.syms.str(prog.crates[ci].name), v, c.view.get(ci).copied().unwrap_or(0)));
             }
             for (i, d) in c.digests.iter().enumerate() {
                 if let Some(d) = d {
@@ -931,8 +955,10 @@ impl Cache {
                 }
             }
         }
+        // named by the view: an edit of the crate's items keeps its store (the entries' keys say
+        // which code still holds)
         for ci in 0..ncr {
-            c.code_path.push(dir.join(code_store_name(options, prog.syms.str(prog.crates[ci].name), c.iface[ci])));
+            c.code_path.push(dir.join(code_store_name(options, prog.syms.str(prog.crates[ci].name), c.view[ci])));
         }
         c.depth = crate_depths(prog);
         c.stale = vec![false; ncr];
@@ -2074,25 +2100,221 @@ impl Cache {
         let k = match recorded {
             Some(k) => k,
             None => {
+                let g = self.deps_graph(u);
                 let mut h = Sip128::new();
-                h.str("code");
+                h.str("code-deps");
                 h.u128(self.cfg);
                 h.write(&e.0);
                 h.write(&shim.0);
+                // what the crates give besides their items (deps.rs): name, cfg, dependencies,
+                // bound crates, the whole fingerprints of the sysroot, and the items every node of
+                // the crate sees (inner attributes, glob imports)
                 for &c in &crates {
-                    h.u128(*self.iface.get(c as usize)?);
+                    h.u128(*self.view.get(c as usize)?);
+                    h.u128(g.always(c));
+                }
+                // the items the identity names (the definition, the types of its arguments): what
+                // they reach of the program's interfaces; one with no node (an item a fn body
+                // defines) by its crate's whole interface fingerprint
+                let mut defs = named.clone();
+                defs.sort_unstable_by_key(|d| d.0);
+                defs.dedup();
+                for d in defs {
+                    match g.def_closure(&u.prog, d) {
+                        Some(x) => h.u128(x),
+                        None if g.in_graph(&u.prog, d) => {
+                            h.str("coarse");
+                            h.u128(*self.iface.get(u.prog.def(d).krate as usize)?);
+                        }
+                        None => {}
+                    }
                 }
                 // the bodies the code is made from: the definition's, a closure's enclosing fns'
-                for d in key_defs(u, key) {
+                // -- their text and position, and what the names in them find
+                let kd = key_defs(u, key);
+                for &d in &kd {
                     h.u128(self.def_body(u, d));
+                    h.u128(self.body_names_of(u, d, &g));
                 }
                 // types defined in a fn body (their text is that body's)
                 self.local_bodies(u, &named, &mut h);
+                let k0 = h.finish128();
+                // and what the names of their macro expansions find (unknown until the body is
+                // parsed or an earlier run recorded them: no key yet, none remembered)
+                let mut h = Sip128::new();
+                h.str("code-exp");
+                h.u128(k0);
+                for &d in &kd {
+                    match self.exp_closure(u, d, k0, dom, &g) {
+                        Some(x) => h.u128(x),
+                        None => {
+                            self.key_waits = true;
+                            return None;
+                        }
+                    }
+                }
                 h.finish128()
             }
         };
         self.key_crate.insert(k, dom);
         Some((k, crates, e.0))
+    }
+
+    /// The item graph (cache/deps.rs), on the first need: the stored one when it was built from
+    /// this program's very sources (a warm start maps it), else built -- every boot file of a
+    /// crate in the graph digested first (a restored collected program digests files lazily) --
+    /// and recorded for the next start.
+    fn deps_graph(&mut self, u: &Unit) -> std::sync::Arc<deps::Deps> {
+        if let Some(g) = &self.deps {
+            return g.clone();
+        }
+        let t0 = std::time::Instant::now();
+        let prog = &u.prog;
+        let ncr = self.iface.len();
+        let valid = deps::Deps::valid(prog, self.cfg, &self.fps);
+        let root = self.manifest_root.unwrap_or(ncr.saturating_sub(1) as u32);
+        let key = self.deps_key(root);
+        let stored = key.and_then(|k| {
+            let (si, _) = self.index_at(k)?;
+            let store = self.stores.get(si as usize)?.clone();
+            let (kind, p) = self.get_checked(k)?;
+            if kind != KIND_DEPS { return None; }
+            // SAFETY: `store` (kept by the graph) holds the mapping
+            let p: &'static [u8] = unsafe { std::slice::from_raw_parts(p.as_ptr(), p.len()) };
+            deps::Deps::mapped(prog, ncr, p, valid, store)
+        });
+        if let Some(g) = stored {
+            let g = std::sync::Arc::new(g);
+            if self.verbose {
+                eprintln!("makepad-run cache: item graph: {} nodes mapped in {:.1} ms", g.nodes_n, t0.elapsed().as_secs_f64() * 1e3);
+            }
+            self.deps = Some(g.clone());
+            return g;
+        }
+        if self.digests.len() < prog.files.len() {
+            self.digests.resize(prog.files.len(), None);
+        }
+        let atomic = deps::atomic_crates(prog, ncr);
+        let want: Vec<usize> = (0..prog.boot_files.min(prog.files.len()))
+            .filter(|&f| self.digests[f].is_none() && prog.file_crate.get(f).is_some_and(|&c| !atomic.get(c as usize).copied().unwrap_or(true)))
+            .collect();
+        items::file_digests_of(prog, &want, &mut self.digests);
+        let t_dg = t0.elapsed();
+        let g = std::sync::Arc::new(deps::Deps::build(prog, &self.digests, &self.iface_plain));
+        if self.verbose {
+            eprintln!("makepad-run cache: item graph: {} nodes, {} edges, {} coarse, built in {:.1} ms (digests of {} files {:.1} ms; files to {:.1}, edges to {:.1}, components to {:.1}, hashed to {:.1})",
+                g.nodes_n, g.edges, g.coarse, t0.elapsed().as_secs_f64() * 1e3, want.len(), t_dg.as_secs_f64() * 1e3, g.phases[0], g.phases[1], g.phases[2], g.phases[3]);
+        }
+        if let Some(k) = key.filter(|_| self.mode != Mode::ReadOnly && (root as usize) < ncr) {
+            if self.pending_keys.insert(k) {
+                let payload = g.encode(valid);
+                self.push_pending(root, NewEntry { key: k, kind: KIND_DEPS, payload });
+            }
+        }
+        self.deps = Some(g.clone());
+        g
+    }
+
+    /// The key of the stored item graph of the program rooted at crate `root`.
+    fn deps_key(&self, root: u32) -> Option<u128> {
+        let mut h = Sip128::new();
+        h.str("deps-graph");
+        h.u128(self.cfg);
+        h.u128(*self.crate_ident.get(root as usize)?);
+        h.u128(*self.view.get(root as usize)?);
+        Some(h.finish128())
+    }
+
+    /// File `f`'s digest (made on the first need).
+    fn digest_of(&mut self, u: &Unit, f: usize) -> Option<std::sync::Arc<items::FileDigest>> {
+        let pf = u.prog.files.get(f)?;
+        if self.digests.len() <= f {
+            self.digests.resize(u.prog.files.len(), None);
+        }
+        Some(self.digests[f].get_or_insert_with(|| std::sync::Arc::new(items::file_digest(pf))).clone())
+    }
+
+    /// What name `n` finds from crate `c` (memo of deps.rs name_closure).
+    fn name_closure(&mut self, g: &deps::Deps, c: u32, n: deps::Name) -> u128 {
+        *self.name_memo.entry((c, n)).or_insert_with(|| g.name_closure(c, n))
+    }
+
+    /// Definition `d`'s body (when a hole: deps.rs): what the names written in it find.
+    fn body_names_of(&mut self, u: &Unit, d: DefId, g: &deps::Deps) -> u128 {
+        if let Some(&k) = self.body_names.get(&d) {
+            return k;
+        }
+        let def = u.prog.def(d);
+        let (f, item, c) = (def.file as usize, def.item, def.krate);
+        let mut h = Sip128::new();
+        h.str("body-names");
+        if let Some(dg) = self.digest_of(u, f) {
+            if let Some((lo, hi)) = dg.body_span(item) {
+                let (mut names, mut invoked) = (Vec::new(), Vec::new());
+                deps::scan(&u.prog.files[f].src, &[(lo, hi)], &[], &mut names, &mut invoked);
+                names.sort_unstable();
+                names.dedup();
+                let mut v: Vec<u128> = names.iter().map(|&n| self.name_closure(g, c, n)).filter(|&x| x != 0).collect();
+                v.sort_unstable();
+                v.dedup();
+                h.u32(v.len() as u32);
+                for x in v { h.u128(x); }
+            }
+        }
+        let k = h.finish128();
+        self.body_names.insert(d, k);
+        k
+    }
+
+    /// What the names of the macro expansions in definition `d`'s body find (0: its body invokes
+    /// no macro that can name anything; deps.rs). The names come from the body's parse in this run
+    /// (then recorded under `k0`, the code key without them, for a later run) or from that record.
+    /// None: the body is not parsed and nothing was recorded (the key is not known yet).
+    fn exp_closure(&mut self, u: &Unit, d: DefId, k0: u128, dom: u32, g: &deps::Deps) -> Option<u128> {
+        let def = u.prog.def(d);
+        let (f, item, c) = (def.file as usize, def.item, def.krate);
+        let Some(dg) = self.digest_of(u, f) else { return Some(0) };
+        let Some((lo, hi)) = dg.body_span(item) else { return Some(0) };
+        let pf = &u.prog.files[f];
+        let (mut names, mut invoked) = (Vec::new(), Vec::new());
+        deps::scan(&pf.src, &[(lo, hi)], &[], &mut names, &mut invoked);
+        if !invoked.iter().any(|&m| g.loud(m)) {
+            return Some(0);
+        }
+        let mut kh = Sip128::new();
+        kh.str("exp-names");
+        kh.u128(k0);
+        kh.u128(self.def_key(u, d));
+        let ekey = kh.finish128();
+        let owner = dg.hole_owner(item);
+        let lazy = matches!(pf.ast.items.get(owner as usize).map(|it| &it.kind), Some(crate::ast::ItemKind::Fn(_, None, _)));
+        let names = match deps::exp_names(pf, lo, hi, lazy) {
+            Some(n) => {
+                if self.mode != Mode::ReadOnly && !self.has_index(&ekey) && self.pending_keys.insert(ekey) {
+                    let mut p = Vec::with_capacity(4 + n.len() * 8);
+                    p.extend_from_slice(&(n.len() as u32).to_le_bytes());
+                    for x in &n { p.extend_from_slice(&x.to_le_bytes()); }
+                    self.push_pending(dom, NewEntry { key: ekey, kind: KIND_EXP_NAMES, payload: p });
+                }
+                n
+            }
+            None => match self.get_checked(ekey) {
+                Some((KIND_EXP_NAMES, p)) => {
+                    let n = u32::from_le_bytes(p.get(0..4)?.try_into().ok()?) as usize;
+                    if p.len() != 4 + n * 8 { return None; }
+                    (0..n).map(|i| u64::from_le_bytes(p[4 + i * 8..12 + i * 8].try_into().unwrap())).collect()
+                }
+                _ => return None,
+            },
+        };
+        let mut v: Vec<u128> = names.iter().map(|&n| self.name_closure(g, c, n)).filter(|&x| x != 0).collect();
+        v.sort_unstable();
+        v.dedup();
+        let mut h = Sip128::new();
+        h.str("exp-closure");
+        h.u32(v.len() as u32);
+        for x in v { h.u128(x); }
+        Some(h.finish128())
     }
 
     /// The bodies that define any of `named` (local items), into a key.
@@ -2881,7 +3103,9 @@ impl Cache {
         let mut h = Sip128::new();
         h.str("startup slots");
         h.u128(self.cfg);
-        h.u128(*self.iface.get(root as usize)?);
+        // the program's view, not its interface: the manifest names each slot's key, which says
+        // whether its entry holds after an edit (load_manifest)
+        h.u128(*self.view.get(root as usize)?);
         Some(h.finish128())
     }
 
@@ -2926,6 +3150,10 @@ impl Cache {
         self.manifest_len = old.manifest_len;
         self.collected_committed = true;
         self.stats = old.stats.clone();
+        // the same program (settle_rebuild compares it): the same item graph and definitions
+        self.deps = old.deps.clone();
+        self.name_memo = old.name_memo.clone();
+        self.body_names = old.body_names.clone();
     }
 
     /// Reads the newest startup manifest of the program rooted at crate `root` (and its
@@ -6087,7 +6315,8 @@ mod data_tests {
             slots.push(id);
         }
         assert_eq!(cache.stats.recorded, fixtures.len() as u64);
-        assert_eq!(cache.flush().unwrap(), fixtures.len());
+        // and the program's item graph (cache/deps.rs), recorded with the first key
+        assert_eq!(cache.flush().unwrap(), fixtures.len() + 1);
         drop(cache);
         let mut warm = open_test_cache(&u, &root.join("cache"));
         for id in slots {
