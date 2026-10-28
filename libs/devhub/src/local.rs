@@ -205,6 +205,10 @@ impl Local {
                 };
                 st.jits.insert(app.pid, jit.clone());
                 drop(st);
+                // the cache it runs on, for a later JIT cache clear (crate::jitcache)
+                if let Some(dir) = app.text("run_dir") {
+                    crate::jitcache::remember(&dir);
+                }
                 let l = self.clone();
                 let _ = std::thread::Builder::new().name("devhub-observe".into()).spawn(move || l.follow(jit));
             }

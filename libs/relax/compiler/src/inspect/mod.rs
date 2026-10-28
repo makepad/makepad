@@ -87,7 +87,9 @@ pub fn start(app: &str) {
     *APP.lock().unwrap() = app.to_string();
     let pid = std::process::id();
     let log = crate::tui::session_log_path().map(|p| p.display().to_string()).unwrap_or_default();
-    let extra = format!(",\"session_log\":{},\"run\":{},\"agent\":{}", json_str(&log), json_str(crate::jit::PROVENANCE), AGENT.load(Relaxed));
+    // run_dir: the cache this run uses (devhub's JIT cache clear names the apps running on it)
+    let run_dir = crate::dirs::relax_dir().display().to_string();
+    let extra = format!(",\"session_log\":{},\"run\":{},\"run_dir\":{},\"agent\":{}", json_str(&log), json_str(crate::jit::PROVENANCE), json_str(&run_dir), AGENT.load(Relaxed));
     let endpoint = makepad_remote::Endpoint::new(app);
     endpoint.set_hooks(makepad_remote::Hooks { enter: server_thread_enter, exit: server_thread_exit });
     endpoint.register_cmd(dispatch);

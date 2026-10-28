@@ -53,6 +53,8 @@ pub enum JitDo {
     Log,
     /// hold an inspect lease on it as the user (AI breakpoints wait for it)
     Lease,
+    /// clear its app's JIT cache on its machine (confirmed first)
+    ClearCache,
 }
 
 /// A user action that is confirmed in the panel first.
@@ -62,6 +64,9 @@ pub enum Confirm {
     Evict(String),
     /// (node, to lane or the user)
     Override(String, Option<String>),
+    /// a machine's JIT cache, sized first: `question` says what goes and who runs on it; `force`
+    /// when JITs run on it (they keep running)
+    ClearJit { machine: String, app: Option<String>, question: String, force: bool },
 }
 
 impl Confirm {
@@ -71,6 +76,7 @@ impl Confirm {
             Confirm::Evict(who) => format!("Evict {who}? Every lease of it ends and it gets no new ones until unblocked."),
             Confirm::Override(n, None) => format!("Take {n}? Its leases end and it takes no new ones (dev off)."),
             Confirm::Override(n, Some(l)) => format!("Give {n} to {l}? The other leases on it end."),
+            Confirm::ClearJit { question, .. } => question.clone(),
         }
     }
 
@@ -79,6 +85,8 @@ impl Confirm {
             Confirm::Release(_) => "Release",
             Confirm::Evict(_) => "Evict",
             Confirm::Override(..) => "Take it",
+            Confirm::ClearJit { force: true, .. } => "Clear anyway",
+            Confirm::ClearJit { .. } => "Clear",
         }
     }
 }
@@ -100,6 +108,8 @@ pub enum DevhubAction {
     /// the node's dev switch: (node, on)
     Dev(String, bool),
     Ask(Confirm),
+    /// size a machine's JIT cache (all, or one app's), then ask
+    ClearJit(String, Option<String>),
     Confirmed(Confirm),
     Cancel,
     Unblock(String),
@@ -183,6 +193,7 @@ enum Hit {
     Release(usize),
     Evict(usize),
     Override(usize),
+    ClearJit(usize),
     Confirm,
     Cancel,
     Unblock(usize),
@@ -352,8 +363,12 @@ impl DevhubView {
             (None, Some(n)) => format!("{} \u{b7} {jits} JITs \u{b7} {} leases{}", n.state_word(), n.leases, if n.waiting > 0 { format!(", {} waiting", n.waiting) } else { String::new() }),
             (None, None) => format!("{jits} JITs"),
         };
-        self.d.label_elided(cx, rect(row.pos.x + 160.0, row.pos.y, row.size.x - 160.0 - 170.0, row.size.y), false, tok.font.caption, dim, HAlign::Left, &tail);
-        self.hits.push((hit, rect(row.pos.x, row.pos.y, row.size.x - 170.0, row.size.y)));
+        self.d.label_elided(cx, rect(row.pos.x + 160.0, row.pos.y, row.size.x - 160.0 - 262.0, row.size.y), false, tok.font.caption, dim, HAlign::Left, &tail);
+        self.hits.push((hit, rect(row.pos.x, row.pos.y, row.size.x - 262.0, row.size.y)));
+        if up {
+            // its JIT cache (every app's): sized, then confirmed in the panel
+            self.small_button(cx, rect(row.pos.x, row.pos.y + 2.0, row.size.x, 24.0), if node.is_some() { 170.0 } else { 0.0 }, 86.0, Hit::ClearJit(mi), "Clear JIT");
+        }
         if let Some(n) = &node {
             let dev_hit = Hit::Dev(mi);
             let r = rect(row.pos.x + row.size.x - 166.0, row.pos.y + 3.0, 84.0, 22.0);
@@ -485,7 +500,7 @@ impl DevhubView {
         let held = st.selected.as_ref().and_then(|s| st.user_leases.iter().find(|u| u.0 == *s));
         let (row, r2) = cut_top(rest, 28.0);
         rest = r2;
-        let acts: [(JitDo, &str); 4] = [(JitDo::Restart, "Restart"), (JitDo::Stop, "Stop"), (JitDo::Log, "Log"), (JitDo::Lease, if held.is_some() { "Let go" } else { "Hold it" })];
+        let acts: [(JitDo, &str); 5] = [(JitDo::Restart, "Restart"), (JitDo::Stop, "Stop"), (JitDo::Log, "Log"), (JitDo::Lease, if held.is_some() { "Let go" } else { "Hold it" }), (JitDo::ClearCache, "Clear cache")];
         for (i, (a, label)) in acts.iter().enumerate() {
             let r = rect(x0 + i as f64 * 82.0, row.pos.y + 3.0, 78.0, 22.0);
             let hit = Hit::JitDo(*a);
@@ -559,10 +574,14 @@ impl DevhubView {
 
         // a pending confirmation sits on top, in the panel
         if let Some(c) = &st.confirm {
-            let (row, r2) = cut_top(rest, 34.0);
+            // the question wraps (a cache clear names every folder it removes)
+            let lines = self.d.wrap(cx, true, tok.font.caption, &c.question(), rest.size.x - 190.0, 8);
+            let (row, r2) = cut_top(rest, (16.0 * lines.len() as f64 + 10.0).max(34.0));
             rest = r2;
             self.d.solid(cx, row, alpha(WARN, 0.14));
-            self.d.label_elided(cx, rect(row.pos.x + 8.0, row.pos.y, row.size.x - 190.0, row.size.y), true, tok.font.caption, fg, HAlign::Left, &c.question());
+            for (i, l) in lines.iter().enumerate() {
+                self.d.label(cx, rect(row.pos.x + 8.0, row.pos.y + 5.0 + 16.0 * i as f64, row.size.x - 190.0, 16.0), true, tok.font.caption, fg, HAlign::Left, l);
+            }
             self.small_button(cx, rect(row.pos.x, row.pos.y + 5.0, row.size.x - 6.0, 24.0), 84.0, 80.0, Hit::Confirm, c.verb());
             self.small_button(cx, rect(row.pos.x, row.pos.y + 5.0, row.size.x - 6.0, 24.0), 0.0, 80.0, Hit::Cancel, "Cancel");
             rest = cut_top(rest, 6.0).1;
@@ -727,6 +746,10 @@ impl Widget for DevhubView {
                     },
                     Some(Hit::Override(mi)) => match st.machines.get(mi) {
                         Some(m) => DevhubAction::Ask(Confirm::Override(m.name.clone(), None)),
+                        None => return,
+                    },
+                    Some(Hit::ClearJit(mi)) => match st.machines.get(mi) {
+                        Some(m) => DevhubAction::ClearJit(m.name.clone(), None),
                         None => return,
                     },
                     Some(Hit::Confirm) => match &st.confirm {

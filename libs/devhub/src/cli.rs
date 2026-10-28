@@ -19,6 +19,10 @@ const HELP: &str = "makepad devhub (or observe): the local devhub (start it with
   show <id>                               an event with its detail (master inbox)
   clear <id|all>                          remove from the inbox (seen <id|all> marks it read)
   hubs [--json]                           the node hubs this one links to (nodes.conf + the nodes they heard)
+  cache [ls|clear] [--node <n>] [--app <package>] [--dir <run dir>] [--force]
+                                          the JIT cache (makepad run's compiled code): what a clear frees, or
+                                          clear it (the next start is cold; --dir: that one cache); refused
+                                          while JITs run on it unless --force (they keep running)
   serve [--node <conf>]                   run a hub here without its app (master, or a node with that conf)";
 
 pub(crate) fn control() -> Result<Client, String> {
@@ -28,7 +32,7 @@ pub(crate) fn control() -> Result<Client, String> {
 }
 
 /// Sends one line to a lines service and collects the answer.
-pub(crate) fn ask(c: &Client, target: Option<&str>, service: &str, line: &str) -> Result<Vec<String>, String> {
+pub fn ask(c: &Client, target: Option<&str>, service: &str, line: &str) -> Result<Vec<String>, String> {
     let mut got = Vec::new();
     match target {
         Some(t) => {
@@ -223,6 +227,9 @@ pub fn main(args: &[String]) -> i32 {
     if let Some(code) = crate::lease::cli(&a) {
         return code;
     }
+    if a.first() == Some(&"cache") {
+        return cache(&a[1..]);
+    }
     let c = match control() {
         Ok(c) => c,
         Err(e) => {
@@ -389,4 +396,86 @@ fn serve(args: &[&str]) -> i32 {
             2
         }
     }
+}
+
+/// `cache [ls|clear] [--node <n>] [--app <package>] [--force]`: a machine's JIT cache, through
+/// its hub's `jitcache` service (this machine's runs in this process when no hub runs here).
+fn cache(args: &[&str]) -> i32 {
+    let (mut verb, mut node, mut app, mut force, mut dir) = ("plan", None, None, false, None);
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "ls" | "plan" => verb = "plan",
+            "clear" => verb = "clear",
+            "--force" => force = true,
+            "--node" if i + 1 < args.len() => {
+                node = Some(args[i + 1]);
+                i += 1;
+            }
+            "--app" if i + 1 < args.len() => {
+                app = Some(args[i + 1]);
+                i += 1;
+            }
+            "--dir" if i + 1 < args.len() => {
+                dir = Some(args[i + 1]);
+                i += 1;
+            }
+            _ => {
+                eprintln!("makepad devhub cache [ls|clear] [--node <n>] [--app <package>] [--dir <run dir>] [--force]");
+                return 2;
+            }
+        }
+        i += 1;
+    }
+    let line = format!("jitcache {verb}{}{}{}", app.map_or(String::new(), |a| format!(" app={a}")), dir.map_or(String::new(), |d| format!(" dir={d}")), if force { " force" } else { "" });
+    let answer = match control() {
+        Ok(c) => {
+            let target = node.filter(|n| *n != local_name(&c));
+            ask(&c, target, "jitcache", &line)
+        }
+        Err(e) if node.is_some() => Err(e),
+        Err(_) => {
+            let mut out = Vec::new();
+            crate::jitcache::service(&proto::default_machine_name(), &line, &mut out, &|_| {});
+            Ok(out)
+        }
+    };
+    let who = node.unwrap_or("this machine");
+    let lines = match answer {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("makepad devhub cache: {who}: {e}");
+            return 2;
+        }
+    };
+    let mut code = 0;
+    for l in &lines {
+        let Ok(v) = makepad_strict_json::parse(l.as_bytes()) else { continue };
+        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        if let Some(e) = v.get("err").and_then(|x| x.as_str()) {
+            eprintln!("makepad devhub cache: {who}: {e}");
+            code = 1;
+        } else if v.get("kept_bytes").is_some() {
+            let users: Vec<String> = v
+                .get("users")
+                .and_then(|u| u.as_arr())
+                .map(|u| u.iter().filter_map(|x| Some(format!("{}#{}", x.get("app")?.as_str()?, x.get("pid")?.as_u64()?))).collect())
+                .unwrap_or_default();
+            let busy = match (users.is_empty(), n("held")) {
+                (false, _) => format!("  in use by {}", users.join(", ")),
+                (true, h) if h > 0 => "  in use (a makepad run/check/test process)".to_string(),
+                _ => String::new(),
+            };
+            println!("{}/{{{}}}  {} in {} files ({} kept){busy}", s("dir"), crate::jitcache::CLEARED.join(","), crate::jitcache::human(n("bytes")), n("files"), crate::jitcache::human(n("kept_bytes")));
+        } else if v.get("total_bytes").is_some() {
+            println!("{who}: a clear removes only those folders (never ~/.cargo, target/ builds, downloaded packages or sources)");
+            println!("{who}: a clear frees {} in {} cache{}; the next start is cold{}", crate::jitcache::human(n("total_bytes")), n("caches"), if n("caches") == 1 { "" } else { "s" }, if v.get("in_use").and_then(|x| x.as_bool()) == Some(true) { " (in use: clear needs --force)" } else { "" });
+        } else if v.get("removed_files").is_some() {
+            println!("{}  removed {} files, {}{}", s("dir"), n("removed_files"), crate::jitcache::human(n("freed")), if n("skipped") > 0 { format!(", {} skipped (in use)", n("skipped")) } else { String::new() });
+        } else if v.get("freed").is_some() {
+            println!("{who}: {}", s("line"));
+        }
+    }
+    code
 }

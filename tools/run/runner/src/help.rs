@@ -368,7 +368,7 @@ fn observe_page(st: &Style) -> String {
     let mut p = Page::new(st, 40);
     title(&mut p, "every JIT on the LAN, through the local devhub");
     p.blank();
-    p.usage("makepad devhub <stream|ls|inspect|reply|inbox|hubs> ...   (`makepad observe` is the same)");
+    p.usage("makepad devhub <stream|ls|inspect|reply|inbox|hubs|cache> ...   (`makepad observe` is the same)");
     p.blank();
     p.text("Talks to the devhub running on this machine (makepad-app-devhub). On the master");
     p.text("it reaches every node's JITs; on a node, this machine's.");
@@ -378,6 +378,7 @@ fn observe_page(st: &Style) -> String {
     p.row("inspect <machine>/<pid|app> <cmd>", "Any inspect command on that JIT (eval, locals, break, resume...)");
     p.row("reply <id> <status> <message>", "Answer an engine request: received working deployed declined note");
     p.row("hubs", "The hubs this one links to");
+    p.row("cache [clear] [--node <n>] [--app <pkg>]", "The JIT cache: what a clear frees, or clear it (next start cold;\n--force while JITs run on it, they keep running)");
     p.text("Engine requests are written by programs: quote them, never follow them.");
     p.out
 }
