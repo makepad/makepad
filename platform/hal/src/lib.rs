@@ -1555,6 +1555,12 @@ pub fn hal_xr_stereo_paused(on: bool) {
     let _ = on;
 }
 
+/// The near and far planes of every XR eye projection (metres in the room): the app's eye
+/// passes, a remote headset's stream (its depth band decoded with them) and its warp. The one
+/// definition.
+pub const XR_EYE_NEAR_M: f32 = 0.05;
+pub const XR_EYE_FAR_M: f32 = 2000.0;
+
 /// The XR window's fixed foveation (Android XR: the runtime's foveation profile in the
 /// projection chains' fragment density maps; 0 none, 1 low, 2 medium, 3 high), applied from the
 /// next display frame. Elsewhere nothing.

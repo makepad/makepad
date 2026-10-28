@@ -30,8 +30,10 @@ use std::io;
 
 pub const XR_VERSION: u16 = 6;
 /// The band's depth: luma `v` (1..255) is `z = DEPTH_NEAR_M * 255 / v` metres (inverse depth,
-/// finest near the eye); 0 = no depth (nothing drawn there).
-pub const DEPTH_NEAR_M: f32 = 0.25;
+/// finest near the eye); 0 = no depth (nothing drawn there). 10 cm: things held up to the face
+/// keep their depth (at 25 cm everything nearer read as 25 cm, and the room's occlusion hid
+/// what was held in front of a hand); a step is ~4 cm at 1 m, ~16 cm at 2 m.
+pub const DEPTH_NEAR_M: f32 = 0.1;
 
 /// One eye a picture was rendered with: orientation (x, y, z, w), position (m) in the headset's
 /// tracking space, fov tangents' angles (left, right, up, down; radians, left and down negative).

@@ -14,9 +14,8 @@ use super::super::super::{
 use makepad_hal::{buffers::{read_items, Wire}, window_kind, Id, XrDepth, XrFrame, XrPose};
 use std::rc::Rc;
 
-/// Near and far planes of the eye projections (metres in the room).
-const EYE_NEAR: f32 = 0.05;
-const EYE_FAR: f32 = 2000.0;
+/// Near and far planes of the eye projections (metres in the room): the HAL's one definition.
+use makepad_hal::{XR_EYE_FAR_M as EYE_FAR, XR_EYE_NEAR_M as EYE_NEAR};
 
 /// The app uses the room field (`Cx::xr_set_room_field`): the depth readback is integrated.
 pub(crate) static ROOM_FIELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

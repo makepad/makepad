@@ -229,10 +229,8 @@ pub struct DrawXrMirror {
 
 /// Picture slots: one being drawn, one being encoded, one spare.
 const SLOTS: usize = 3;
-/// The eye projections' planes (`platform/src/os/hal/xr.rs`): the band's depth is decoded with
-/// them.
-const EYE_NEAR: f32 = 0.05;
-const EYE_FAR: f32 = 2000.0;
+/// The eye projections' planes (the HAL's one definition): the band's depth is decoded with them.
+use makepad_widgets::makepad_platform::makepad_hal::{XR_EYE_FAR_M as EYE_FAR, XR_EYE_NEAR_M as EYE_NEAR};
 /// What the view centres on until the app says (m): a table-top distance.
 const DEFAULT_FOCUS_M: f32 = 1.0;
 
