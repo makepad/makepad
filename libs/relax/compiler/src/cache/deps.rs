@@ -308,11 +308,11 @@ pub(crate) struct NameRow {
 pub(crate) struct CrateRow {
     /// its name and root file (crate_ident)
     ident: [u64; 2],
-    /// its fingerprint (its files' sources and its dependencies' fingerprints; 0 past the cache's crates)
-    fp: [u64; 2],
     /// its graph files: their numbers, paths and item counts (the rows name items by file and item)
     files: [u64; 2],
-    /// its interface fingerprint (what its coarse nodes are keyed by)
+    /// its interface fingerprint: its files' text outside the holes (what its nodes are made of:
+    /// pieces and their names; also what its coarse nodes are keyed by). Not its fingerprint: an
+    /// edit inside fn bodies keeps every row of its crate (a body is in no piece)
     iface: [u64; 2],
     /// the closures of the always nodes of every crate it can see (Deps::always)
     always: [u64; 2],
@@ -369,7 +369,7 @@ pub(crate) struct Deps {
 }
 
 const DEPS_MAGIC: &[u8; 4] = b"DEP2";
-const DEPS_VERSION: u32 = 2;
+const DEPS_VERSION: u32 = 3;
 
 fn bit(set: &[u64], c: u32) -> bool { set.get(c as usize / 64).is_some_and(|w| w >> (c % 64) & 1 == 1) }
 
@@ -832,7 +832,7 @@ fn kind_code(k: &ItemKind) -> u32 {
 impl Deps {
     /// Per crate: what its rows are built from, besides the crates it can see (CrateRow without its
     /// own lists and always hash).
-    fn crate_inputs(prog: &Program, iface: &[u128], fps: &[u128], atomic: &[bool]) -> Vec<CrateRow> {
+    fn crate_inputs(prog: &Program, iface: &[u128], atomic: &[bool]) -> Vec<CrateRow> {
         let mut files: Vec<Sip128> = (0..prog.crates.len()).map(|_| { let mut h = Sip128::new(); h.str("deps-crate-files"); h }).collect();
         for f in 0..prog.boot_files.min(prog.files.len()) {
             if prog.front_macro_fragments.contains(&f) { continue; }
@@ -848,7 +848,7 @@ impl Deps {
             ident.str("crate-ident");
             ident.str(prog.syms.str(ci.name));
             ident.str(prog.mods.get(ci.root_mod as usize).and_then(|m| prog.file_paths.get(m.file as usize)).map_or("", |p| p.as_str()));
-            CrateRow { ident: h2(ident.finish128()), fp: h2(fps.get(c).copied().unwrap_or(0)), files: h2(files.finish128()),
+            CrateRow { ident: h2(ident.finish128()), files: h2(files.finish128()),
                 iface: h2(iface.get(c).copied().unwrap_or(0)), always: [0; 2], always_at: [0; 2], aliases_at: [0; 2], macros_at: [0; 2],
                 atomic: atomic.get(c).copied().unwrap_or(true) as u32, _pad: 0 }
         }).collect()
@@ -860,31 +860,31 @@ impl Deps {
         let n = inputs.len();
         let Some(prev) = prev else { return vec![false; n] };
         let rows = prev.crates.rows();
-        let same = |a: &CrateRow, b: &CrateRow| (a.ident, a.fp, a.files, a.iface, a.atomic) == (b.ident, b.fp, b.files, b.iface, b.atomic);
+        let same = |a: &CrateRow, b: &CrateRow| (a.ident, a.files, a.iface, a.atomic) == (b.ident, b.files, b.iface, b.atomic);
         let own: Vec<bool> = (0..n).map(|c| rows.get(c).is_some_and(|r| same(r, &inputs[c]))).collect();
         (0..n).map(|c| (0..n).all(|d| !bit(&universe[c], d as u32) || own[d])).collect()
     }
 
     /// The crates whose rows a build over `prev` takes over (`build`): their files need no digests.
-    pub(crate) fn clean_crates(prog: &Program, iface: &[u128], fps: &[u128], prev: Option<&Deps>) -> Vec<bool> {
+    pub(crate) fn clean_crates(prog: &Program, iface: &[u128], prev: Option<&Deps>) -> Vec<bool> {
         let atomic = atomic_crates(prog, iface.len());
-        Self::clean_with(prev, &Self::crate_inputs(prog, iface, fps, &atomic), &universes(prog))
+        Self::clean_with(prev, &Self::crate_inputs(prog, iface, &atomic), &universes(prog))
     }
 
     /// Builds the graph of the program's boot files; `iface`: the crates' interface fingerprints
-    /// (what coarse nodes and sysroot crates are keyed by), `fps` their fingerprints, `valid` what
+    /// (what coarse nodes and sysroot crates are keyed by), `valid` what
     /// it is built from (Deps::valid). Over `prev` (the graph a start before this one stored), the
     /// rows of every crate that is clean (`clean_crates`) are taken over and only the other crates'
     /// files are walked: their nodes' edges into clean crates end at those crates' name rows, whose
     /// closures and components are known. The result is the graph a build from scratch makes (the
     /// component ids aside). None: over `prev`, the names that decide clean crates' nodes (the
     /// program's alias and macro names) changed -- build without it.
-    pub(crate) fn build(prog: &Program, digests: &[Option<std::sync::Arc<super::items::FileDigest>>], iface: &[u128], fps: &[u128], valid: u128, prev: Option<&Deps>) -> Option<Deps> {
+    pub(crate) fn build(prog: &Program, digests: &[Option<std::sync::Arc<super::items::FileDigest>>], iface: &[u128], valid: u128, prev: Option<&Deps>) -> Option<Deps> {
         let t0 = std::time::Instant::now();
         let n_crates = prog.crates.len();
         let atomic = atomic_crates(prog, iface.len());
         let universe = universes(prog);
-        let mut crates = Self::crate_inputs(prog, iface, fps, &atomic);
+        let mut crates = Self::crate_inputs(prog, iface, &atomic);
         let clean = Self::clean_with(prev, &crates, &universe);
         let prev = prev.filter(|_| clean.iter().any(|&c| c));
         // the files walked: boot files of the crates in the graph that are not clean
@@ -1299,7 +1299,7 @@ impl Deps {
         p.extend_from_slice(&self.comp_end.to_le_bytes());
         for n in [crates.len(), lists.len(), macros.len(), nodes.len(), names.len()] { p.extend_from_slice(&(n as u32).to_le_bytes()); }
         for r in crates {
-            for w in [r.ident, r.fp, r.files, r.iface, r.always] { for x in w { p.extend_from_slice(&x.to_le_bytes()); } }
+            for w in [r.ident, r.files, r.iface, r.always] { for x in w { p.extend_from_slice(&x.to_le_bytes()); } }
             for w in [r.always_at, r.aliases_at, r.macros_at] { for x in w { p.extend_from_slice(&x.to_le_bytes()); } }
             p.extend_from_slice(&r.atomic.to_le_bytes());
             p.extend_from_slice(&0u32.to_le_bytes());
@@ -1336,7 +1336,7 @@ impl Deps {
         let m0 = l0 + nl * 8;
         let n0 = m0 + nm * 8;
         let x0 = n0 + nn * 24;
-        if std::mem::size_of::<CrateRow>() != 112 || p.len() != x0 + nx * 32 || p.as_ptr() as usize % 8 != 0 { return None; }
+        if std::mem::size_of::<CrateRow>() != 96 || p.len() != x0 + nx * 32 || p.as_ptr() as usize % 8 != 0 { return None; }
         // SAFETY: the payload stays mapped while `store` lives (held below); the tables are
         // 8-byte aligned (checked), plain integers, and their lengths match the payload's size
         let crates: &'static [CrateRow] = unsafe { std::slice::from_raw_parts(p.as_ptr().add(c0) as *const CrateRow, nc) };

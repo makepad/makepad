@@ -362,10 +362,14 @@ impl<K: Codec, V: Codec> MappedTable<K, V> {
     fn is_gone(&self, i: usize) -> bool { self.gone.get(i / 64).is_some_and(|w| w >> (i % 64) & 1 == 1) }
     /// Row `i`'s entry, out of the image (the row is gone).
     fn take_row(&mut self, i: usize) -> (K, V) {
+        match self.drop_row(i) { Some(kv) => kv, None => self.decode(i) }
+    }
+    /// Row `i` leaves the image; its entry if it was decoded (one nobody decoded stays encoded).
+    fn drop_row(&mut self, i: usize) -> Option<(K, V)> {
         if self.gone.is_empty() { self.gone = vec![0; self.keys.len().div_ceil(64)]; }
         self.gone[i / 64] |= 1 << (i % 64);
         self.live -= 1;
-        match self.slots.take(i) { Some(kv) => kv, None => self.decode(i) }
+        self.slots.take(i)
     }
     /// The live rows from the first whose key is at least `lo`.
     fn live_from(&self, lo: u128) -> impl Iterator<Item = usize> + '_ {
@@ -470,7 +474,18 @@ impl<K: Codec + ImageKey + std::hash::Hash + Eq, V: Codec> ImageMap<K, V> {
         if let Some(m) = &mut self.mapped {
             let rows: Vec<usize> = m.live_from(lo).collect();
             if !rows.is_empty() { *self.snap.get_mut() = false; }
-            for i in rows { drop(m.take_row(i)); }
+            for i in rows { drop(m.drop_row(i)); }
+        }
+    }
+    /// Removes the entries with an image key in `lo..hi` for which `f` says so, decoding only the
+    /// image's rows in that range.
+    pub fn remove_in(&mut self, lo: u128, hi: u128, mut f: impl FnMut(&K, &V) -> bool) {
+        let inside = |k: &K| (lo..hi).contains(&k.image_key());
+        if self.owned.iter().any(|(k, v)| inside(k) && f(k, v)) { self.owned.retain(|k, v| !(inside(k) && f(k, v))); *self.snap.get_mut() = false; }
+        if let Some(m) = &mut self.mapped {
+            let rows: Vec<usize> = m.live_from(lo).take_while(|&i| m.keys[i].get() < hi).filter(|&i| { let (k, v) = m.entry(i); f(k, v) }).collect();
+            if !rows.is_empty() { *self.snap.get_mut() = false; }
+            for i in rows { drop(m.drop_row(i)); }
         }
     }
     /// Key `k`'s entry in the owned map (moved there from the image).

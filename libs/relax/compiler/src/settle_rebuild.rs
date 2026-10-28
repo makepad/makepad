@@ -379,7 +379,7 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
     let mut front = FrontShared::new(sess);
     front.census_id = u.front.census_id;
     front.checker_id = u.front.checker_id;
-    front.warm_cache.store(u.front.warm_cache.load(Ordering::Relaxed), Ordering::Relaxed);
+    front.linked_start.store(u.front.linked_start.load(Ordering::Relaxed), Ordering::Relaxed);
     for (i, f) in u.fns.iter().enumerate() {
         front.slot_keys.insert(i as u32, f.key.clone());
     }

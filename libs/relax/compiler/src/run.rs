@@ -1378,7 +1378,12 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
                 let warm = c.startup_manifest_valid() && c.stats.packs_rejected == 0 && c.stats.packs as usize == u.prog.crates.len() && (!u.prog.record_front || u.prog.front_restored.iter().all(|r| *r));
                 relax_codegen::warm::classify(warm);
                 crate::run_state::emit(crate::run_state::Event::Warm { domain: None, warm });
-                u.front.warm_cache.store(warm, Ordering::Relaxed);
+                // the startup links cached code (warm, or an edited start of a program that ran
+                // before: its manifest's entries are all in the cache): no speculative body checks
+                // ahead of the lazy compiles -- an edited start's slots link stored code but for the
+                // few the edit reaches, and a build checks its own body (an edited Sandbox start
+                // checked 80k bodies ahead, 13 s cpu, for 31 its 8 builds took)
+                u.front.linked_start.store(c.startup_manifest_valid() && c.stats.packs_rejected == 0, Ordering::Relaxed);
                 jit::CODE_CACHE_EMPTY.store(c.stats.code_stores == 0, Ordering::Relaxed);
                 if warm {
                     warm_start = Some((c.manifest.len(), c.manifest_present, c.manifest_uncached));
@@ -1501,9 +1506,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         if let Some(c) = unsafe { (*up).cache.as_ref() } {
             let s = &c.stats;
             let ms = |ns: u64| ns as f64 / 1e6;
-            verbose!("makepad-run cache: prelinked {} startup slots and {} data objects in {:.1} ms (image read {:.1}, keys {:.1}, symbols {:.1}, placed+linked+installed {:.1}; {} left lazy: {} stale, {} unresolved, {} had code)", s.prelinked, s.prelink_data, t_pre.elapsed().as_secs_f64() * 1e3,
-                ms(s.prelink_parse_ns), ms(s.prelink_keys_ns), ms(s.prelink_syms_ns), ms(s.prelink_ns.saturating_sub(s.prelink_parse_ns + s.prelink_keys_ns + s.prelink_syms_ns)),
-                s.prelink_changed + s.prelink_failed + s.prelink_had_code, s.prelink_changed, s.prelink_failed, s.prelink_had_code);
+            verbose!("makepad-run cache: prelinked {} startup slots and {} data objects in {:.1} ms (image read {:.1}, keys {:.1}, symbols {:.1}, placed+linked+installed {:.1}; {} naming a changed crate kept, checked in {:.1}; {} left lazy: {} stale, {} unresolved, {} had code)", s.prelinked, s.prelink_data, t_pre.elapsed().as_secs_f64() * 1e3,
+                ms(s.prelink_parse_ns), ms(s.prelink_keys_ns), ms(s.prelink_syms_ns), ms(s.prelink_ns.saturating_sub(s.prelink_parse_ns + s.prelink_keys_ns + s.prelink_syms_ns + s.prelink_check_ns)),
+                s.prelink_rekeyed, ms(s.prelink_check_ns), s.prelink_changed + s.prelink_failed + s.prelink_had_code, s.prelink_changed, s.prelink_failed, s.prelink_had_code);
         }
     }
     unsafe { jit::spec_seed_manifest(up) };

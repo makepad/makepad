@@ -401,7 +401,12 @@ impl Codec for crate::ast::BlockId {
     }
 }
 impl Codec for CrateAhead {
+    // (the fields RecordHead reads first)
     fn put(&self, w: &mut Vec<u8>) {
+        self.inputs.put(w);
+        self.probes.put(w);
+        self.deferred.put(w);
+        self.demand_plan.put(w);
         self.complete.put(w);
         self.name.put(w);
         self.defs.put(w);
@@ -409,13 +414,13 @@ impl Codec for CrateAhead {
         self.macro_use.put(w);
         self.mods.put(w);
         self.files.put(w);
-        self.inputs.put(w);
-        self.probes.put(w);
-        self.deferred.put(w);
-        self.demand_plan.put(w);
     }
     fn get(r: &mut Decode<'_>) -> Option<Self> {
         Some(Self {
+            inputs: Codec::get(r)?,
+            probes: Codec::get(r)?,
+            deferred: Codec::get(r)?,
+            demand_plan: Codec::get(r)?,
             complete: Codec::get(r)?,
             name: Codec::get(r)?,
             defs: Codec::get(r)?,
@@ -423,10 +428,6 @@ impl Codec for CrateAhead {
             macro_use: Codec::get(r)?,
             mods: Codec::get(r)?,
             files: Codec::get(r)?,
-            inputs: Codec::get(r)?,
-            probes: Codec::get(r)?,
-            deferred: Codec::get(r)?,
-            demand_plan: Codec::get(r)?,
             idx: 0,
             prelexed: Vec::new(),
             image: true,
@@ -523,7 +524,45 @@ pub struct Record {
     pub files: Vec<FileMeta>,
     pub selection_hash: u128,
 }
-fields!(Record, name, root, edition, cfg, proc_macro, deps, dep_fps, lazy_auto, parse_options, ahead, files, selection_hash);
+// The fields a restore validates come first (RecordHead): the files' paths and hashes, then the
+// crate's own inputs and demand selection (CrateAhead's leading fields); the macro and module
+// tables and the files' images after them.
+impl Codec for Record {
+    fn put(&self, w: &mut Vec<u8>) {
+        self.name.put(w); self.root.put(w); self.edition.put(w); self.cfg.put(w); self.proc_macro.put(w);
+        self.deps.put(w); self.dep_fps.put(w); self.lazy_auto.put(w); self.parse_options.put(w); self.selection_hash.put(w);
+        self.files.len().put(w);
+        for f in &self.files { f.path.put(w); f.hash.put(w); }
+        self.ahead.put(w); self.files.put(w);
+    }
+    fn get(r: &mut Decode<'_>) -> Option<Self> {
+        let (name, root, edition, cfg, proc_macro) = (Codec::get(r)?, Codec::get(r)?, Codec::get(r)?, Codec::get(r)?, Codec::get(r)?);
+        let (deps, dep_fps, lazy_auto, parse_options, selection_hash) = (Codec::get(r)?, Codec::get(r)?, Codec::get(r)?, Codec::get(r)?, Codec::get(r)?);
+        let _hashes: Vec<(String, u128)> = Codec::get(r)?;
+        Some(Self { name, root, edition, cfg, proc_macro, deps, dep_fps, lazy_auto, parse_options, ahead: Codec::get(r)?, files: Codec::get(r)?, selection_hash })
+    }
+}
+/// What validating a crate's record reads (`decode_record_head`): not its macro and module tables
+/// nor its files' images.
+pub struct RecordHead {
+    pub name: String,
+    pub root: String,
+    /// its files' paths and source hashes
+    pub files: Vec<(String, u128)>,
+    pub inputs: Vec<(String, u128)>,
+    pub probes: Vec<(String, bool)>,
+    pub deferred: Vec<String>,
+    pub demand_plan: u128,
+    pub complete: bool,
+}
+pub fn decode_record_head(b: &[u8]) -> Option<RecordHead> {
+    let mut r = Decode { bytes: b, depth: 0 };
+    let r = &mut r;
+    let (name, root) = (String::get(r)?, String::get(r)?);
+    u16::get(r)?; Vec::<String>::get(r)?; bool::get(r)?; Vec::<(String, String)>::get(r)?; Vec::<u128>::get(r)?; bool::get(r)?; u128::get(r)?; u128::get(r)?;
+    let files = Codec::get(r)?;
+    Some(RecordHead { name, root, files, inputs: Codec::get(r)?, probes: Codec::get(r)?, deferred: Codec::get(r)?, demand_plan: Codec::get(r)?, complete: Codec::get(r)? })
+}
 impl Record {
     pub fn file_hashes(&self) -> Vec<u128> {
         self.files.iter().map(|f| f.hash).collect()

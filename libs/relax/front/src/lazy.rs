@@ -685,6 +685,7 @@ impl Plan {
         // references need neither mapped origins nor a second lowering stream.
         let surfaces = rust.iter().map(|(ci, path, module, scan)| ((*ci, path.as_str(), module.as_str()), (&scan.src, &scan.toks))).collect::<BTreeMap<_, _>>();
         let closure_profile = crate::load_profile::span(profile, if rust_lazy { "rust-demand-selection" } else { "rust-demand-closure" }, "load");
+        let mut kept_delta: Option<Arc<demand::ClosureDelta>> = None;
         if rust_lazy {
             // Item-level closure: a reached file declares its items; only used
             // items (and their impls/members) add references.
@@ -708,6 +709,13 @@ impl Plan {
                 items::closure(names, inputs, demands.clone(), &implicit, jobs(), profile, parts, incoming)
             };
             let edited = (0..crates.len()).filter(|ci| !reused_outline.contains(ci)).collect::<BTreeSet<_>>();
+            if profile {
+                let surface = edited.iter().filter(|&&ci| previous.get(ci).and_then(|p| p.as_ref()).is_none_or(|old| old.surface_id != parts[ci].surface_id)).map(|&ci| crates[ci].name.as_str()).collect::<Vec<_>>();
+                let transfer = edited.iter().filter(|&&ci| previous.get(ci).and_then(|p| p.as_ref()).is_none_or(|old| !parts[ci].same_transfer(old))).map(|&ci| crates[ci].name.as_str()).collect::<Vec<_>>();
+                let roots = previous.first().and_then(|p| p.as_ref()).and_then(|p| p.roots.as_ref()).map(|(s, f, p)| (s == &demands, f == &forced, *p == lazy_from));
+                eprintln!("rust-demand-local: previous {}/{} edited {:?} surface changed {:?} transfer changed {:?} roots (seeds, forced, prefix) {:?}",
+                    previous.iter().filter(|p| p.is_some()).count(), crates.len(), edited.iter().map(|&ci| crates[ci].name.as_str()).collect::<Vec<_>>(), surface, transfer, roots);
+            }
             let local_candidate = previous.len() == crates.len() && previous.iter().all(Option::is_some)
                 && !edited.is_empty() && edited.iter().all(|&ci| previous[ci].as_ref().is_some_and(|old| old.surface_id == parts[ci].surface_id && parts[ci].same_transfer(old)))
                 && previous[0].as_ref().and_then(|p| p.roots.as_ref()).is_some_and(|(old_seeds, old_forced, prefix)|
@@ -735,6 +743,9 @@ impl Plan {
             let local_result = local_result.filter(|_| edited.iter().all(|&ci|
                 parts[ci].boundary.same_outgoing(&previous[ci].as_ref().unwrap().boundary, &crates[ci].name)));
             let result = if let Some((selected, local)) = local_result {
+                // the namespaces are the stored ones plus the stored closure delta: the recording
+                // keeps that delta (Recording::kept_delta) instead of rebuilding every namespace
+                kept_delta = previous[0].as_ref().and_then(|p| p.closure_delta.clone());
                 let mut reached = files.iter().map(|file| !edited.contains(&file.ci) && previous[file.ci].as_ref().unwrap().reached.contains(&file.path)).collect::<Vec<_>>();
                 let mut reasons = vec![("stored-boundary".into(), String::new()); files.len()];
                 for (i, &f) in selected.iter().enumerate() { reached[f] = local.reached[i]; reasons[f] = local.reasons[i].clone(); }
@@ -813,7 +824,7 @@ impl Plan {
         }
         let image_profile = crate::load_profile::span(profile, "rust-demand-certify-image", "load");
         let headers = parts.iter().map(|p| Arc::new(DemandPart { key: p.key, ..DemandPart::default() })).collect();
-        let recording = rust_lazy.then(|| Arc::new(part::Recording::new(crates, names, parts)));
+        let recording = rust_lazy.then(|| Arc::new(part::Recording::new(crates, names, parts, kept_delta)));
         plan.image = Arc::new(DemandImage { graph, fingerprint, inputs: inputs.into_iter().collect(),
             probes: plan.probes.clone(), late_inputs, files, reached: plan.reached.clone(),
             opaque_crates: forced.len(), eager_prefix,

@@ -5305,6 +5305,8 @@ impl Unit {
         // after the first present only the slots the program's own builds make (their callees),
         // not a speculative or tier-up build's, and no cold callee (panics, formatting): what
         // the UI thread's next calls most likely meet
+        // (a start that links cached code checks nothing ahead: ahead_helper's rule)
+        if self.front.linked_start.load(Ordering::Relaxed) && crate::reload::edited_crates().is_empty() { return; }
         if self.front.helpers > 0 && (startup_phase() || ahead_policy().post_present_helpers > 0 && ahead_foreground() && !match key {
             FnKey::Inst(d, _) => is_cold_def(&self.prog, &self.tcx, *d) || is_cold_name(&self.prog.def_path(*d)),
             _ => true,
@@ -22006,7 +22008,9 @@ pub struct FrontShared {
     src_toks: std::sync::atomic::AtomicU32,
     /// set once the unit sits at its final address; cleared when it is dropped
     alive: AtomicBool,
-    pub(crate) warm_cache: AtomicBool,
+    /// the startup links cached code (run.rs, at the cache open): the helpers check no bodies
+    /// ahead, a build checks its own
+    pub(crate) linked_start: AtomicBool,
     owner_verdicts: crate::conc::MemoMap<u64, std::sync::Arc<crate::cache::OwnerVerdicts>>,
     /// SPEC-V: the stored owner verdicts looked up so far, by (epoch, owner) (Unit::stored_owner_verdict)
     stored_owner: crate::conc::MemoMap<(u64, DefId), Option<crate::borrowck::lazy::StoredVerdict>>,
@@ -22100,7 +22104,7 @@ impl FrontShared {
             core_crate: Default::default(),
             src_toks: Default::default(),
             alive: AtomicBool::new(false),
-            warm_cache: AtomicBool::new(false),
+            linked_start: AtomicBool::new(false),
             owner_verdicts: Default::default(),
             stored_owner: Default::default(),
             slot_keys: crate::conc::MemoMap::with_bits(16),
@@ -22309,8 +22313,8 @@ fn ahead_helper(f: std::sync::Arc<FrontShared>, index: u32) {
                 q = f.wake.wait_timeout(q, std::time::Duration::from_millis(50)).map(|x| x.0).unwrap_or_else(|e| e.into_inner().0);
             }
         };
-        // a validated warm start links cached code: no bodies to check (typeck_ahead_slot's rule)
-        if f.warm_cache.load(Ordering::Relaxed) && crate::reload::edited_crates().is_empty() {
+        // a start that links cached code: no bodies to check (typeck_ahead_slot's rule)
+        if f.linked_start.load(Ordering::Relaxed) && crate::reload::edited_crates().is_empty() {
             continue;
         }
         let (d, args, slot, normal) = match id {
@@ -22909,10 +22913,10 @@ pub unsafe fn typeck_ahead_slot(up: *mut Unit, id: u32) {
         return;
     }
     let f: std::sync::Arc<FrontShared> = (*std::ptr::addr_of!((*up).front)).clone();
-    // A few legitimate warm misses must not speculatively type-check their
-    // cached callees. The normal build checks a missing body on demand. After a
-    // live edit the edited code is not cached: speculation helps again.
-    if f.warm_cache.load(Ordering::Relaxed) && crate::reload::edited_crates().is_empty() { return; }
+    // A start that links cached code (warm or edited) has few misses; they must not
+    // speculatively type-check their cached callees. The normal build checks a missing
+    // body on demand. After a live edit the edited code is not cached: speculation helps again.
+    if f.linked_start.load(Ordering::Relaxed) && crate::reload::edited_crates().is_empty() { return; }
     // an unverified-mode twin (SPEC-V) is built from its base slot's body: that body is checked
     let key = match f.slot_keys.get(&id) {
         Some(FnKey::Plain(base)) => f.slot_keys.get(&base),
@@ -23449,7 +23453,7 @@ pub fn start_background_coherence(u: &Unit) {
     // Without errors and warnings this run, the verdict is stored for the next one.
     let key = u.cache.as_ref().and_then(|c| c.coherence_key(&u.prog));
     if let (Some(k), Some(c)) = (key, u.cache.as_ref()) {
-        if u.front.warm_cache.load(Ordering::Relaxed) && matches!(c.borrowck_stored(k), Some(crate::borrowck::lazy::StoredVerdict::Clean)) {
+        if u.front.linked_start.load(Ordering::Relaxed) && matches!(c.borrowck_stored(k), Some(crate::borrowck::lazy::StoredVerdict::Clean)) {
             if u.prog.session.options.verbose { eprintln!("makepad-run coherence: clean verdict from the cache"); }
             return;
         }

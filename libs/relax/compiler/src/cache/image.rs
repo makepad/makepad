@@ -648,7 +648,7 @@ fn image_slot(tab: &mut ImageTables, out: &mut E, blob: &mut Vec<u8>, entry_key:
 /// What an encoded identity names that a later run may not have: a crate (by its identity) or
 /// a file version (enc_file's identity: path, text and owner).
 #[derive(Clone, Copy)]
-pub(super) enum Atom {
+pub(crate) enum Atom {
     Crate(u128),
     File(u128),
 }
@@ -822,7 +822,7 @@ fn skip_ty(d: &mut D, depth: u32, v: &mut dyn FnMut(Atom)) -> Option<()> {
     Some(())
 }
 
-pub(super) fn skip_fnkey(d: &mut D, depth: u32, v: &mut dyn FnMut(Atom)) -> Option<()> {
+pub(crate) fn skip_fnkey(d: &mut D, depth: u32, v: &mut dyn FnMut(Atom)) -> Option<()> {
     if depth > 32 {
         return None;
     }
@@ -942,6 +942,10 @@ struct Img {
     /// slots placed (or found with code) so far
     seen: HashSet<u32>,
     changed: u64,
+    /// slots naming a changed crate whose code entry is still this run's (prelinked)
+    rekeyed: u64,
+    /// their check's ns
+    t_check: u64,
     failed: u64,
     had_code: u64,
     t_syms: u64,
@@ -951,6 +955,15 @@ struct Img {
     /// the symbols part of the prelink time is measured (verbose: a clock read per symbol
     /// otherwise costs thousands of clock reads at every warm start)
     timed: bool,
+}
+
+/// A startup image's crates as it was made from: (identity, fingerprint) each.
+pub(super) fn image_crates(img: &[u8]) -> Option<Vec<(u128, u128)>> {
+    let mut d = D { b: img, p: 0 };
+    let nc = d.u32()? as usize;
+    let mut out = Vec::with_capacity(nc.min(1 << 16));
+    for _ in 0..nc { out.push((d.u128()?, d.u128()?)); }
+    Some(out)
 }
 
 /// Reads a startup image (`build_image`'s layout); `crate_ok(ident, fp)`: whether that crate is
@@ -1097,6 +1110,8 @@ fn parse_image(img: &'static [u8], store: std::sync::Arc<Store>, crate_ok: impl 
         fresh: HashMap::new(),
         seen: HashSet::new(),
         changed: 0,
+        rekeyed: 0,
+        t_check: 0,
         failed: 0,
         had_code: 0,
         t_syms: 0,
@@ -1438,10 +1453,12 @@ impl Linker {
 
     /// Whether image slot `si` can be placed (its crates unchanged, its code entry indexed):
     /// the keys it names are then marked in `need`.
-    fn img_live(&mut self, im: &Img, si: usize, need: &mut [bool], need_sym: &mut [bool]) -> bool {
+    /// `crates`: also that every crate the slot names is unchanged (else its key is checked:
+    /// `prelink`'s candidates).
+    fn img_live(&mut self, im: &Img, si: usize, need: &mut [bool], need_sym: &mut [bool], crates: bool) -> bool {
         let s = &im.slots[si];
         let in_range = s.code.0.checked_add(s.code.1).map_or(false, |e| e <= im.blob.len());
-        if !in_range || !im.flat[s.crates.0..s.crates.1].iter().all(|&c| im.crate_ok.get(c as usize) == Some(&true)) || !self.cache().has_index(&s.entry) {
+        if !in_range || crates && !im.flat[s.crates.0..s.crates.1].iter().all(|&c| im.crate_ok.get(c as usize) == Some(&true)) || !self.cache().has_index(&s.entry) {
             return false;
         }
         // a build of the slot at a higher tier replaced its entry after this image was made (O3 over
@@ -1645,8 +1662,11 @@ impl Linker {
         let nk = im.keys.len();
         let mut need = vec![false; nk];
         let mut need_sym = vec![false; im.syms.len()];
-        let live: Vec<bool> = (0..im.slots.len()).map(|si| self.img_live(&im, si, &mut need, &mut need_sym)).collect();
-        im.changed += live.iter().filter(|&&l| !l).count() as u64;
+        let mut live: Vec<bool> = (0..im.slots.len()).map(|si| self.img_live(&im, si, &mut need, &mut need_sym, true)).collect();
+        // a slot naming a changed crate whose code entry is still this run's (its key and its
+        // certificate as recorded: an edit reaches few of the slots naming its crate), once the
+        // identities are decoded below
+        let candidates: Vec<usize> = (0..im.slots.len()).filter(|&si| !live[si] && self.img_live(&im, si, &mut need, &mut need_sym, false)).collect();
         for &k in &im.thunks {
             need[k as usize] = true;
         }
@@ -1683,6 +1703,17 @@ impl Linker {
         if let Some(ids) = self.cache().image_ids.as_ref() {
             im.slot.copy_from_slice(&ids.slot);
         }
+        let t_check = crate::jit::wall_ns();
+        for &si in &candidates {
+            let (key, entry) = (im.slots[si].key, im.slots[si].entry);
+            let Some(id) = im.slot_of(key) else { continue };
+            if self.cache().slot_key(u, id) == Some(entry) && self.entry_cert_valid(u, entry) == Some(true) {
+                live[si] = true;
+                im.rekeyed += 1;
+            }
+        }
+        im.t_check = crate::jit::wall_ns() - t_check;
+        im.changed += live.iter().filter(|&&l| !l).count() as u64;
         // every slot the image names ran in the session that made it, and so did the callees its
         // code inlined: not never-run code for O3's walk before their first (lazy) install here
         for s in &im.slots {
@@ -1728,10 +1759,12 @@ impl Linker {
         install(u, second);
         let c = self.cache();
         c.stats.prelink_parse_ns += t_parsed - t0;
-        c.stats.prelink_keys_ns += t_keys - t_parsed;
+        c.stats.prelink_keys_ns += (t_keys - t_parsed).saturating_sub(im.t_check);
         c.stats.prelink_syms_ns += im.t_syms;
         c.stats.prelinked += n as u64;
         c.stats.prelink_changed += im.changed;
+        c.stats.prelink_rekeyed += im.rekeyed;
+        c.stats.prelink_check_ns += im.t_check;
         c.stats.prelink_failed += im.failed;
         c.stats.prelink_had_code += im.had_code;
         super::warm_count::add(super::warm_count::IMG_PLACED, n as u64);

@@ -132,16 +132,26 @@ impl Program {
         if let Some(c) = self.crates[crates..].iter().find(|c| names.contains(self.syms.str(c.name))) {
             no(&format!("a name shared with a dropped crate: {}", self.syms.str(c.name))); return None;
         }
-        self.node_id_to_def_id.retain(|(f, _), d| (*f as usize) < s.files && (d.0 as usize) < s.defs);
         // (a table keyed by the definitions or files drops the dropped ones without decoding the
-        // retained rows of its image: ImageMap::remove_from)
+        // retained rows of its image: ImageMap::remove_from; the retained crates' on-demand tail
+        // goes by its definitions' own rows)
+        let tail: Vec<DefId> = (s.defs..self.defs.len()).map(|i| DefId(i as u32)).filter(|&d| (self.def(d).krate as usize) < crates).collect();
+        self.node_id_to_def_id.remove_from((s.files as u128) << 64);
+        for &t in &tail {
+            if let Some(&node) = self.def_id_to_node_id.get(&t) {
+                if self.node_id_to_def_id.get(&node) == Some(&t) { self.node_id_to_def_id.remove(&node); }
+            }
+        }
         self.legacy_const_args.remove_from(s.defs as u128);
         for owner in &relink.owners { self.legacy_const_args.remove(owner); }
         Arc::make_mut(&mut self.legacy_const_attrs).retain(|d, _| (d.0 as usize) < s.defs);
         self.def_id_to_node_id.remove_from(s.defs as u128);
         let kept = |d: &DefId| (d.0 as usize) < s.defs;
         self.impl_trait_in_trait_data.remove_from(s.defs as u128);
-        self.associated_types_for_impl_traits.retain(|d, v| kept(d) && v.iter().all(kept));
+        self.associated_types_for_impl_traits.remove_from(s.defs as u128);
+        for f in &relink.fns {
+            if self.associated_types_for_impl_traits.get(f).is_some_and(|v| !v.iter().all(kept)) { self.associated_types_for_impl_traits.remove(f); }
+        }
         self.opaque_to_rpitit.retain(|d, v| kept(d) && kept(v));
         self.opaque_types_defined_by.retain(|d, v| { v.retain(kept); kept(d) });
         self.trait_item_def_id.retain(|d, v| kept(d) && kept(v));
@@ -157,7 +167,13 @@ impl Program {
             let key = (parent, DefKind::AnonConst, None);
             if first == 0 { self.def_disambiguators.remove(&key); } else { self.def_disambiguators.insert(key, first); }
         }
-        self.child_definitions.retain(|(d, _, _, _), child| (d.0 as usize) < s.defs && (child.0 as usize) < s.defs);
+        // (child keys lead with the parent: ImageKey of (DefId, DefKind, Option<Sym>, u32))
+        self.child_definitions.remove_from((s.defs as u128) << 96);
+        let mut parents: Vec<DefId> = tail.iter().map(|&t| self.def(t).parent).filter(|&p| p != NO_DEF && (p.0 as usize) < s.defs).collect();
+        parents.sort_unstable_by_key(|p| p.0); parents.dedup();
+        for p in parents {
+            self.child_definitions.remove_in((p.0 as u128) << 96, ((p.0 as u128) + 1) << 96, |_, child| (child.0 as usize) >= s.defs);
+        }
         self.crates.truncate(crates);
         self.load_recipe.truncate(crates);
         self.collected_starts.truncate(crates);

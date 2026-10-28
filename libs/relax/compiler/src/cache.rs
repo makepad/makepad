@@ -414,6 +414,10 @@ pub struct CacheStats {
     /// already; wall ns of the whole prelink
     pub prelinked: u64,
     pub prelink_changed: u64,
+    /// image slots naming a changed crate prelinked after all (their key and certificate as
+    /// recorded), and the ns their check took
+    pub prelink_rekeyed: u64,
+    pub prelink_check_ns: u64,
     pub prelink_failed: u64,
     pub prelink_had_code: u64,
     pub prelink_ns: u64,
@@ -621,11 +625,16 @@ pub struct Cache {
     pub manifest_uncached: usize,
     /// of the slots before the first present: how many had a code entry when it was recorded
     manifest_present_cached: usize,
-    /// the loaded manifest's code keys by the hash of their slot's identity bytes, when the
-    /// manifest was recorded from exactly this run's sources (manifest_sources_key): a slot's
-    /// code key is then taken as recorded instead of hashing the bodies it is made from again
-    /// (code_key_bytes). Empty otherwise.
+    /// the loaded manifest's code keys by the hash of their slot's identity bytes: a slot's code
+    /// key is taken as recorded instead of hashing the bodies it is made from again
+    /// (code_key_bytes) when every crate its identity names is as the manifest was recorded
+    /// from (`manifest_key_crates`). Empty without a manifest whose entries are all here.
     manifest_keys: HashMap<u128, u128>,
+    /// per crate: unchanged since the manifest was recorded (its fingerprint, which covers its
+    /// dependencies, is the one in the manifest's startup image); None: every crate (the manifest
+    /// was recorded from exactly this run's sources, manifest_sources_key). A slot whose crates
+    /// are all unchanged has its recorded key -- the startup image's rule for prelinking its code.
+    manifest_key_crates: Option<Vec<bool>>,
     /// the loaded manifest's code keys, in `manifest`'s order (0: none): a slot whose key this
     /// run's manifest changes had its old entry superseded (record_manifest removes it)
     manifest_old_keys: Vec<u128>,
@@ -775,7 +784,9 @@ impl Cache {
         let dir = root.join("cache");
         pack::ensure_private_dir(&dir)?;
         let prog = &u.prog;
-        let collected = collected.filter(|c| c.fps.len() <= prog.crates.len()
+        // a partial restore's (an edited start): the kept crates' definition tables
+        let kept = collected.filter(|c| c.kept.is_some_and(|(k, _)| k <= prog.crates.len() && k <= c.fps.len()));
+        let collected = collected.filter(|c| c.kept.is_none() && c.fps.len() <= prog.crates.len()
             && c.defs == prog.defs.len() && c.files == prog.files.len());
         let fps = collected.map_or_else(|| crate::stable::crate_fingerprints(prog), |c| c.fps.clone());
         // A swap preserves the original cache prefix; runtime crates stay outside boot stores.
@@ -877,6 +888,7 @@ impl Cache {
             manifest_missing: 0,
             manifest_uncached: 0,
             manifest_keys: HashMap::new(),
+            manifest_key_crates: None,
             manifest_old_keys: Vec::new(),
             manifest_present_cached: 0,
             image: None,
@@ -925,6 +937,8 @@ impl Cache {
                 c.iface_plain = cc.ifaces.clone();
             }
             None => {
+                // (every file, on several threads: an edited start's keys read the kept crates'
+                // bodies too -- digested one by one on the owner they cost more)
                 c.digests = items::file_digests(prog);
                 c.iface_plain = items::crate_ifaces(prog, &c.fps, &c.digests);
                 c.iface_plain.truncate(ncr);
@@ -1102,7 +1116,11 @@ impl Cache {
         let t_packs = t0.elapsed();
         // Load-time front writes make a cold cache nonempty, but need no code definition maps.
         if c.has_code_entries() && !collected.is_some_and(|graph| c.restore_collected_definitions(&u.prog, graph.definitions)) {
-            c.build_def_maps(u);
+            match kept.and_then(|cc| cc.kept.map(|(k, d)| (cc, k, d))) {
+                // the kept crates' tables mapped, the others' maps built
+                Some((cc, k, d)) if c.restore_kept_definitions(&u.prog, cc.definitions, cc.defs, cc.fps.len(), k, d) => c.build_def_maps_from(u, k),
+                _ => c.build_def_maps(u),
+            }
         }
         c.stats.open_ns = t0.elapsed().as_nanos() as u64;
         if crate::preload::trace() {
@@ -1302,6 +1320,11 @@ impl Cache {
     /// open, before main: nothing changes the program meanwhile). A warm start decodes
     /// definitions of most crates; building their maps lazily on the main thread cost ~30 ms.
     fn build_def_maps(&mut self, u: &Unit) {
+        self.build_def_maps_from(u, 0);
+    }
+
+    /// build_def_maps of the crates from `first` on (the ones before have mapped tables).
+    fn build_def_maps_from(&mut self, u: &Unit, first: usize) {
         let mut by = vec![Vec::new(); u.prog.crates.len()];
         for i in 0..u.prog.defs.len() {
             let d = DefId(i as u32);
@@ -1310,7 +1333,7 @@ impl Cache {
             }
         }
         self.crate_defs_n = u.prog.defs.len();
-        let mut order: Vec<usize> = (0..by.len()).filter(|c| !by[*c].is_empty()).collect();
+        let mut order: Vec<usize> = (first..by.len()).filter(|c| !by[*c].is_empty()).collect();
         order.sort_by_key(|c| std::cmp::Reverse(by[*c].len()));
         let n = std::thread::available_parallelism().map_or(4, |x| x.get()).clamp(1, 8);
         let next = std::sync::atomic::AtomicUsize::new(0);
@@ -1355,7 +1378,9 @@ impl Cache {
             self.def_maps.insert(c, m);
             self.def_keys.extend(memo);
         }
-        self.crate_defs = vec![Vec::new(); u.prog.crates.len()];
+        // the crates before `first` keep their lists: dec_def builds such a map on its first miss
+        for v in by.iter_mut().skip(first) { *v = Vec::new(); }
+        self.crate_defs = by;
     }
 
     /// A file version in an entry: its path and source hash (see file_ids).
@@ -1460,7 +1485,13 @@ impl Cache {
             self.mapped_definitions = None;
         }
         if let Some(mapped) = &self.mapped_definitions {
-            return mapped.definition(c, k);
+            // (a partial restore's tables hold for its kept crates' definitions before its suffix;
+            // the rest -- the other crates, a kept crate's on-demand tail -- go by the maps)
+            match mapped.definition(c, k) {
+                Some(d) => return Some(d),
+                None if !mapped.partial() => return None,
+                None => {}
+            }
         }
         if !self.def_maps.contains_key(&c) {
             let t0 = relax_backend::cpu_ns();
@@ -2071,6 +2102,21 @@ impl Cache {
         Some((k, bytes))
     }
 
+    /// Whether the slot identity `b` (enc_fnkey bytes) names only crates unchanged since the
+    /// loaded manifest was recorded (`manifest_key_crates`): its code key is then the recorded
+    /// one, as for every slot of those crates (a closure, named by its file: no).
+    pub(super) fn identity_unchanged(&self, b: &[u8]) -> bool {
+        if self.manifest_keys.is_empty() || !crate::reload::edited_crates().is_empty() { return false; }
+        let Some(ok) = &self.manifest_key_crates else { return true };
+        let mut all = true;
+        let mut d = D { b, p: 0 };
+        let read = image::skip_fnkey(&mut d, 0, &mut |a| all &= match a {
+            image::Atom::Crate(ident) => self.crate_by_ident.get(&ident).is_some_and(|&c| ok.get(c as usize) == Some(&true)),
+            image::Atom::File(_) => false,
+        });
+        read.is_some() && d.p == b.len() && all
+    }
+
     fn code_key_bytes(&mut self, u: &Unit, key: &FnKey) -> Option<(u128, Vec<u32>, Vec<u8>)> {
         let mut e = E::default();
         let mut crates = Vec::new();
@@ -2098,9 +2144,11 @@ impl Cache {
         crates.sort_unstable();
         crates.dedup();
         let dom = self.dominant(&crates);
-        // a slot of the startup manifest, recorded from these sources and none edited since:
-        // its key as recorded (the bodies below hash to what they hashed to then)
-        let recorded = if self.manifest_keys.is_empty() || !crate::reload::edited_crates().is_empty() { None } else { self.manifest_keys.get(&identity_hash(&e.0)).copied() };
+        // a slot of the startup manifest whose crates are as it was recorded from and none
+        // edited since: its key as recorded (the bodies below hash to what they hashed to then)
+        let unchanged = |c: &u32| self.manifest_key_crates.as_ref().is_none_or(|ok| ok.get(*c as usize) == Some(&true));
+        let recorded = if self.manifest_keys.is_empty() || !crate::reload::edited_crates().is_empty() || !crates.iter().all(unchanged) { None }
+            else { self.manifest_keys.get(&identity_hash(&e.0)).copied() };
         let k = match recorded {
             Some(k) => k,
             None => {
@@ -2210,17 +2258,17 @@ impl Cache {
         };
         // (a graph whose component ids ran far is not built over: the next one starts them again)
         let stored = stored.filter(|g| g.ids_left());
-        let clean = deps::Deps::clean_crates(prog, &self.iface_plain, &self.fps, stored.as_ref());
+        let clean = deps::Deps::clean_crates(prog, &self.iface_plain, stored.as_ref());
         let mut digested = digest(&clean, &mut self.digests);
         let t_dg = t0.elapsed();
-        let built = deps::Deps::build(prog, &self.digests, &self.iface_plain, &self.fps, valid, stored.as_ref());
+        let built = deps::Deps::build(prog, &self.digests, &self.iface_plain, valid, stored.as_ref());
         let over = built.is_some() && clean.iter().any(|&c| c);
         let g = match built {
             Some(g) => g,
             None => {
                 // the alias or macro names changed: every crate is walked
                 digested += digest(&[], &mut self.digests);
-                deps::Deps::build(prog, &self.digests, &self.iface_plain, &self.fps, valid, None).expect("a graph built from scratch")
+                deps::Deps::build(prog, &self.digests, &self.iface_plain, valid, None).expect("a graph built from scratch")
             }
         };
         if self.verbose {
@@ -2230,7 +2278,7 @@ impl Cache {
         }
         if over && std::env::var("MAKEPAD_RUN_DEPS_VERIFY").is_ok_and(|v| v == "1") {
             digest(&[], &mut self.digests);
-            let scratch = deps::Deps::build(prog, &self.digests, &self.iface_plain, &self.fps, valid, None).expect("a graph built from scratch");
+            let scratch = deps::Deps::build(prog, &self.digests, &self.iface_plain, valid, None).expect("a graph built from scratch");
             match g.same_closures(&scratch) {
                 Ok(()) => eprintln!("makepad-run cache: item graph verified: built over the stored graph = built from scratch"),
                 Err(e) => eprintln!("makepad-run cache: item graph verify FAILED: {e}"),
@@ -3218,10 +3266,24 @@ impl Cache {
                     Some(present.min(n))
                 })();
                 if let Some(present) = ok {
-                    // recorded from these very sources: its keys are this run's keys
+                    // the image section after the slot list (the store keeps the mapping alive)
+                    if d.u32() == Some(IMAGE_MAGIC) {
+                        let rest = &p[d.p..];
+                        self.image = Some(ManifestImage { _store: pk.clone(), at: rest.as_ptr() as usize, len: rest.len() });
+                    }
+                    // recorded from these very sources: its keys are this run's keys; else those
+                    // of the slots whose crates its image records with this run's fingerprints
                     let sources = self.manifest_sources_key(key);
-                    if missing == 0 && self.mode != Mode::Verify && pk.get(sources).is_some_and(|(kind, p)| kind == KIND_MANIFEST && D { b: p, p: 0 }.u128() == Some(self.sources_fp())) {
+                    let same = pk.get(sources).is_some_and(|(kind, p)| kind == KIND_MANIFEST && D { b: p, p: 0 }.u128() == Some(self.sources_fp()));
+                    let crates = if same { Some(None) } else {
+                        self.image.as_ref().and_then(|im| image::image_crates(im.bytes())).map(|recorded| {
+                            let recorded: HashMap<u128, u128> = recorded.into_iter().collect();
+                            Some(self.crate_ident.iter().zip(&self.fps).map(|(id, fp)| recorded.get(id) == Some(fp)).collect())
+                        })
+                    };
+                    if let Some(crates) = crates.filter(|_| missing == 0 && self.mode != Mode::Verify) {
                         self.manifest_keys = out.iter().zip(&keys).filter(|(_, k)| **k != 0).map(|(b, k)| (identity_hash(b), *k)).collect();
+                        self.manifest_key_crates = crates;
                     }
                     self.manifest = out;
                     self.manifest_old_keys = keys;
@@ -3229,11 +3291,6 @@ impl Cache {
                     self.manifest_missing = missing;
                     self.manifest_uncached = uncached;
                     self.manifest_present_cached = present_cached;
-                    // the image section after the slot list (the store keeps the mapping alive)
-                    if d.u32() == Some(IMAGE_MAGIC) {
-                        let rest = &p[d.p..];
-                        self.image = Some(ManifestImage { _store: pk.clone(), at: rest.as_ptr() as usize, len: rest.len() });
-                    }
                     self.image_rewrite = self.image.is_none();
                 }
                 return;
@@ -4546,12 +4603,12 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
         let store = Store::open(&dir.join(front_store_name(&job.options, &key.0, fp)))?;
         let (kind, bytes) = store.get(front_crate_key(&key.0, &key.1))?;
         if kind != KIND_FRONT_CRATE { return None; }
-        let rec: crate::crate_image::Record = crate::crate_image::decode(bytes)?;
-        if !rec.ahead.complete || rec.name != key.0 || rec.root != key.1 { return None; }
-        for (path, hash) in rec.ahead.inputs.into_iter().chain(rec.files.into_iter().map(|f| (f.path, f.hash))) {
+        let rec = crate::crate_image::decode_record_head(bytes)?;
+        if !rec.complete || rec.name != key.0 || rec.root != key.1 { return None; }
+        for (path, hash) in rec.inputs.into_iter().chain(rec.files) {
             if inputs.insert(path, hash).is_some_and(|old| old != hash) { return None; }
         }
-        for (path, exists) in rec.ahead.probes {
+        for (path, exists) in rec.probes {
             if probes.insert(path, exists).is_some_and(|old| old != exists) { return None; }
         }
         graph.crates.push((key.clone(), fp));
@@ -5906,7 +5963,7 @@ mod cold_tests {
         std::fs::write(&pre[5].root, "pub fn top() -> u32 { mid::mid() + 2 }").unwrap();
         let (kept, _, proof) = images.restore_collected(sess, &pre).expect("prefix restore");
         assert_eq!(kept.crates.len(), 5, "crates below the edited one");
-        assert!(proof.is_none(), "a partial restore has no whole-graph proof");
+        assert!(proof.is_some_and(|p| p.kept.is_some_and(|(k, _)| k == 5)), "a partial restore keeps only the kept crates' definition tables");
         // the next run after recording the edited sources restores everything again
         record(&images);
         assert_eq!(images.restore_collected(sess, &pre).unwrap().0.crates.len(), names.len());
@@ -7573,6 +7630,18 @@ impl Linker {
         }
     }
 
+    /// cert_valid of the code entry `key` (None: no such code entry, or it does not decode).
+    pub(super) fn entry_cert_valid(&mut self, u: &mut Unit, key: u128) -> Option<bool> {
+        let (p, i) = self.cache().index_at(key)?;
+        let pack = self.cache().stores[p as usize].clone();
+        let (kind, payload) = pack.get_checked_at(i as usize, key)?;
+        if kind != KIND_CODE || payload.is_empty() { return None; }
+        let t0 = relax_backend::cpu_ns();
+        let r = self.cert_valid_inner(u, payload);
+        self.cache().stats.cert_check_ns += relax_backend::cpu_ns() - t0;
+        r
+    }
+
     /// Whether every slot a code entry's certificate names still has the recorded key. None:
     /// the payload does not decode.
     fn cert_valid(&mut self, u: &mut Unit, payload: &[u8]) -> Option<bool> {
@@ -7601,6 +7670,8 @@ impl Linker {
         for _ in 0..n {
             let b = d.bytes()?;
             let want = d.u128()?;
+            // (a slot of the crates unchanged since the manifest keeps its recorded key)
+            if self.cache().identity_unchanged(b) { continue; }
             let Some(s) = self.slot_of_bytes(u, b) else { return Some(false) };
             if self.cache().slot_key(u, s) != Some(want) {
                 return Some(false);

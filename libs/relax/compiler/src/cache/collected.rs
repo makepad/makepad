@@ -18,6 +18,10 @@ pub struct CollectedCache {
     pub(super) ifaces: Vec<u128>,
     pub(super) defs: usize,
     pub(super) files: usize,
+    /// a partial restore (an edited start): the crates and definitions it kept of the image --
+    /// only their definition tables (`definitions`, of `defs` definitions and `fps.len()`
+    /// crates) hold for this program
+    pub(super) kept: Option<(usize, usize)>,
 }
 
 fn enabled() -> bool { std::env::var("MAKEPAD_RUN_COLLECTED").map_or(true, |v| v != "0") }
@@ -87,12 +91,12 @@ impl FrontImages {
             };
             let (kind, bytes) = store.get(front_crate_key(&c.name, &c.root)).ok_or("record")?;
             if kind != KIND_FRONT_CRATE { return Err("record"); }
-            let rec: crate::crate_image::Record = crate::crate_image::decode(bytes).ok_or("record")?;
-            let inputs: Vec<_> = rec.ahead.inputs.iter().map(|(p, h)| (p.as_str(), *h))
-                .chain(rec.files.iter().map(|f| (f.path.as_str(), f.hash))).collect();
-            if !(self.inputs_current(&inputs) && rec.ahead.probes.iter().all(|(p, e)| self.probe_current(p, *e))
+            // (its head: the inputs and the selection, not its tables and file images)
+            let rec = crate::crate_image::decode_record_head(bytes).ok_or("record")?;
+            let inputs: Vec<_> = rec.inputs.iter().chain(&rec.files).map(|(p, h)| (p.as_str(), *h)).collect();
+            if !(self.inputs_current(&inputs) && rec.probes.iter().all(|(p, e)| self.probe_current(p, *e))
                 && ledger_current(store, &present, &mut late)) { return Err("inputs"); }
-            Ok((rec.ahead.demand_plan, rec.ahead.deferred))
+            Ok((rec.demand_plan, rec.deferred))
         }).collect())
     }
 
@@ -303,9 +307,12 @@ impl FrontImages {
         for store in stores.iter().take(prefix) { replay_front_ledger(store)?; }
         phase("ledger replayed");
         prog.front_graph = Some(GraphRecipe::new(pre));
+        let image_defs = prog.defs.len();
+        let mut kept = None;
         if prefix != pre.len() {
             why = "retain prefix";
             let first = prog.retain_collected_prefix(prefix)?;
+            kept = Some((prefix, first));
             phase("Program prefix retained");
             tcx.retain_collected_prefix(first);
             phase("Tcx prefix retained");
@@ -326,10 +333,10 @@ impl FrontImages {
             prog.sources = plan.contexts().first()?.sources().clone();
             prog.demand_plan = Some(plan);
         }
-        let cache = (prefix == pre.len()).then(|| CollectedCache {
-            indexes, definitions, fps: graph.crates.iter().map(|(_, fp)| *fp).collect(),
+        let cache = Some(CollectedCache {
+            indexes: indexes.filter(|_| kept.is_none()), definitions, fps: graph.crates.iter().map(|(_, fp)| *fp).collect(),
             ifaces: ifaces.iter().map(|k| k.get()).collect(),
-            defs: prog.defs.len(), files: prog.files.len(),
+            defs: if kept.is_some() { image_defs } else { prog.defs.len() }, files: prog.files.len(), kept,
         });
         phase("demand contexts");
         drop(cert);
@@ -422,7 +429,16 @@ impl Cache {
     }
 
     pub(super) fn restore_collected_definitions(&mut self, prog: &Program, bytes: &'static [u8]) -> bool {
-        let Some(mapped) = MappedDefinitions::read(bytes, prog.defs.len(), prog.crates.len()) else { return false; };
+        let Some(mapped) = MappedDefinitions::read(bytes, prog.defs.len(), prog.crates.len(), None) else { return false; };
+        self.mapped_definitions = Some(mapped);
+        self.crate_defs_n = prog.defs.len();
+        true
+    }
+
+    /// A partial restore's definition tables: those of the `crates` crates it kept, for their
+    /// definitions below `defs` (an image of `image_defs` definitions and `image_crates` crates).
+    pub(super) fn restore_kept_definitions(&mut self, prog: &Program, bytes: &'static [u8], image_defs: usize, image_crates: usize, crates: usize, defs: usize) -> bool {
+        let Some(mapped) = MappedDefinitions::read(bytes, image_defs, image_crates, Some((crates, defs))) else { return false; };
         self.mapped_definitions = Some(mapped);
         self.crate_defs_n = prog.defs.len();
         true
@@ -621,9 +637,12 @@ pub enum CollectedRecord {
 pub(super) struct MappedDefinitions {
     keys: &'static [MappedKey],
     crates: Vec<(&'static [MappedKey], &'static [u32])>,
+    /// a partial restore's: the tables hold for the definitions below `.1` of the first `.0`
+    /// crates only (the others go by the maps the cache builds)
+    kept: Option<(usize, usize)>,
 }
 impl MappedDefinitions {
-    fn read(bytes: &'static [u8], defs: usize, crates: usize) -> Option<Self> {
+    fn read(bytes: &'static [u8], defs: usize, crates: usize, kept: Option<(usize, usize)>) -> Option<Self> {
         let image = crate::image::Reader::new(bytes)?;
         if image.len() != 1 + crates * 2 { return None; }
         let keys: &[MappedKey] = image.slice(0, 0)?;
@@ -635,13 +654,20 @@ impl MappedDefinitions {
             if ks.len() != ds.len() { return None; }
             tables.push((ks, ds));
         }
-        Some(Self { keys, crates: tables })
+        Some(Self { keys, crates: tables, kept })
     }
-    pub(super) fn key(&self, d: DefId) -> Option<u128> { self.keys.get(d.0 as usize).map(|k| k.get()) }
+    pub(super) fn partial(&self) -> bool { self.kept.is_some() }
+    /// the definitions below this hold (all of them but in a partial restore)
+    fn defs(&self) -> usize { self.kept.map_or(self.keys.len(), |(_, d)| d) }
+    /// whether crate `c`'s table holds (its definitions below `defs()` are found there)
+    pub(super) fn has_crate(&self, c: u32) -> bool { self.kept.is_none_or(|(n, _)| (c as usize) < n) }
+    pub(super) fn key(&self, d: DefId) -> Option<u128> { if (d.0 as usize) < self.defs() { self.keys.get(d.0 as usize).map(|k| k.get()) } else { None } }
+    /// None also for a definition past `defs()` (a kept crate's on-demand tail: its map has it)
     pub(super) fn definition(&self, c: u32, key: u128) -> Option<DefId> {
+        if !self.has_crate(c) { return None; }
         let (keys, defs) = self.crates.get(c as usize)?;
         let d = *defs.get(find_key(keys, key)?)?;
-        ((d as usize) < self.keys.len()).then_some(DefId(d))
+        ((d as usize) < self.defs()).then_some(DefId(d))
     }
 }
 
