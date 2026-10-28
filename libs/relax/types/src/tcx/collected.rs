@@ -70,7 +70,9 @@ impl Tcx {
         let keep = |d: &DefId| (d.0 as usize) < first;
         let impls: Vec<_> = self.impl_self.keys().filter(|d| !keep(d)).copied().collect();
         self.uncollect_impls(&impls);
+        // (a list only the dropped impls had goes, as a build without them never made it)
         self.inherent.retain(|_, v| !v.is_empty()); self.trait_impls.retain(|_, v| !v.is_empty());
+        self.trait_impls_of.retain(|_, v| !v.is_empty()); self.impls_by_key.retain(|_, v| !v.is_empty());
         let mut gone: Vec<_> = self.sigs.keys().chain(self.adts.keys())
             .chain(self.impl_self.keys()).chain(self.trait_closure.keys()).filter(|d| !keep(d)).copied().collect();
         gone.extend(self.const_tys.keys().filter(|d| !keep(d)));

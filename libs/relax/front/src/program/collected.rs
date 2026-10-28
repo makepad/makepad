@@ -110,13 +110,28 @@ impl Program {
     /// again by its resolve in the same order (Relink), with the ids a fresh build gives them.
     pub fn retain_collected_prefix(&mut self, crates: usize) -> Option<usize> {
         let s = *self.collected_starts.get(crates)?;
-        if s.mods > self.mods.len() || self.mods.iter().skip(s.mods).any(|m| (m.krate as usize) < crates)
-            || self.file_crate.get(s.files..)?.iter().any(|k| (*k as usize) < crates) { return None; }
-        let relink = self.on_demand_tail(crates, s.defs)?;
+        let no = |why: &str| { if crate::preload::trace() { eprintln!("makepad-run collected: prefix of {crates} crates not retained: {why}"); } };
+        if s.mods > self.mods.len() || self.mods.iter().skip(s.mods).any(|m| (m.krate as usize) < crates) { no("a module of a retained crate after the suffix start"); return None; }
+        if self.file_crate.get(s.files..)?.iter().any(|k| (*k as usize) < crates) {
+            if crate::preload::trace() {
+                let late: Vec<_> = self.file_crate[s.files..].iter().enumerate().filter(|(_, k)| (**k as usize) < crates).take(5).map(|(i, _)| self.file_paths[s.files + i].clone()).collect();
+                eprintln!("makepad-run collected: late files of retained crates: {late:?}");
+            }
+            no("a file of a retained crate after the suffix start"); return None;
+        }
+        let Some(relink) = self.on_demand_tail(crates, s.defs) else {
+            if crate::preload::trace() {
+                let bad: Vec<_> = self.defs.get(s.defs..).unwrap_or_default().iter().filter(|d| (d.krate as usize) < crates).take(5).map(|d| format!("{:?} {}", d.kind, self.syms.str(d.name))).collect();
+                eprintln!("makepad-run collected: tail definitions of retained crates: {bad:?}");
+            }
+            no("on-demand tail"); return None;
+        };
         let names: crate::fxhash::HashSet<String> = self.crates[..crates].iter().map(|c| self.syms.str(c.name).to_string()).collect();
         // A library and its binary can share a name; their macro-table shadowing requires
         // the ordinary loader if either changes.
-        if self.crates[crates..].iter().any(|c| names.contains(self.syms.str(c.name))) { return None; }
+        if let Some(c) = self.crates[crates..].iter().find(|c| names.contains(self.syms.str(c.name))) {
+            no(&format!("a name shared with a dropped crate: {}", self.syms.str(c.name))); return None;
+        }
         self.node_id_to_def_id.retain(|(f, _), d| (*f as usize) < s.files && (d.0 as usize) < s.defs);
         self.legacy_const_args.retain(|d, _| (d.0 as usize) < s.defs);
         for owner in &relink.owners { self.legacy_const_args.remove(owner); }

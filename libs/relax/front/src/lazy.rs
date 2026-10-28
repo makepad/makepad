@@ -45,11 +45,18 @@ pub struct DemandImage {
 struct EarlyCrates {
     prefix: std::sync::atomic::AtomicUsize,
     notify: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
+    /// wakes `PendingPlan::wait_progress` (a publication or the plan's completion)
+    wake: (relax_session::sync::Mutex<()>, relax_session::sync::Condvar),
 }
 impl EarlyCrates {
     fn publish(&self, prefix: usize) {
         self.prefix.fetch_max(prefix, std::sync::atomic::Ordering::Release);
         if let Some(notify) = self.notify.get() { notify(); }
+        self.wake_all();
+    }
+    fn wake_all(&self) {
+        let _g = self.wake.0.lock().unwrap_or_else(|e| e.into_inner());
+        self.wake.1.notify_all();
     }
 }
 
@@ -83,8 +90,22 @@ impl PendingPlan {
     pub fn complete(&self) {
         let _reads = self.pending_contexts.first().map(|c| c.bind_source_reads());
         let _ = std::ops::Deref::deref(self);
+        self.early.wake_all();
     }
     pub fn ready(&self) -> Option<&Plan> { self.plan.get() }
+    /// The crates' source contexts (the plan's own, without waiting for it).
+    pub fn contexts(&self) -> &[Arc<crate::source_context::Context>] { &self.pending_contexts }
+    /// How many load-order crates are selected in full so far (`eagerly_selected`).
+    pub fn early_prefix(&self) -> usize { self.early.prefix.load(std::sync::atomic::Ordering::Acquire) }
+    /// Waits until the early prefix passes `seen` or the plan is complete (a caller that needs
+    /// the selection of a crate: its early selection, or the plan's).
+    pub fn wait_progress(&self, seen: usize) {
+        let mut g = self.early.wake.0.lock().unwrap_or_else(|e| e.into_inner());
+        while self.ready().is_none() && self.early_prefix() <= seen {
+            // (re-checked now and then: a plan made by another dereference wakes nobody)
+            g = self.early.wake.1.wait_timeout(g, std::time::Duration::from_millis(20)).unwrap_or_else(|e| e.into_inner()).0;
+        }
+    }
     pub fn eagerly_selected(&self, ci: usize) -> bool {
         ci < self.early.prefix.load(std::sync::atomic::Ordering::Acquire)
     }

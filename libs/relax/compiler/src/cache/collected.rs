@@ -69,34 +69,68 @@ pub(super) struct CollectedBoot {
 impl FrontImages {
     // An edit normally invalidates a leaf or a dependent suffix. Keep the complete
     // certified prefix resident, including its resolved imports and collected types.
-    fn collected_prefix(&self, graph: &crate::crate_image::GraphImage, pre: &[crate::preload::PreCrate], plan: Option<&crate::preload::DemandPlan>) -> Option<usize> {
+    /// Each crate's recorded front record as the collected prefix needs it: None when its
+    /// store, record, inputs, probes or late inputs no longer hold; else the demand selection
+    /// (identity, deferred files) it was recorded under, to compare with this load's.
+    fn prefix_records(&self, graph: &crate::crate_image::GraphImage, pre: &[crate::preload::PreCrate]) -> Option<Vec<Result<(u128, Vec<String>), &'static str>>> {
         let recipe = GraphRecipe::new(pre);
         if graph.identity != recipe.identity || graph.crates.len() != pre.len()
             || graph.crates.iter().zip(&recipe.crates).any(|((key, _), want)| key != want) { return None; }
         let present = pre.iter().map(|c| c.name.clone()).collect();
-        let mut dirty = Vec::new();
         let mut late = HashMap::new();
-        for (ci, (c, ((_, _), fp))) in pre.iter().zip(&graph.crates).enumerate() {
-            let valid = (|| {
-                let store = Store::open(&self.dir.join(front_store_name(&c.cfg.session.options, &c.name, *fp)))?;
-                let (kind, bytes) = store.get(front_crate_key(&c.name, &c.root))?;
-                if kind != KIND_FRONT_CRATE { return None; }
-                let rec: crate::crate_image::Record = crate::crate_image::decode(bytes)?;
-                if rec.ahead.demand_plan != plan.map_or(0, |p| p.selection_identity(ci))
-                    || rec.ahead.deferred != plan.map(|p| p.deferred(ci)).unwrap_or_default() { return None; }
-                let inputs: Vec<_> = rec.ahead.inputs.iter().map(|(p, h)| (p.as_str(), *h))
-                    .chain(rec.files.iter().map(|f| (f.path.as_str(), f.hash))).collect();
-                (self.inputs_current(&inputs) && rec.ahead.probes.iter().all(|(p, e)| self.probe_current(p, *e))
-                    && ledger_current(&store, &present, &mut late)).then_some(())
-            })().is_some();
-            dirty.push(!valid || c.image_deps.iter().any(|d| dirty.get(*d).copied().unwrap_or(true)));
+        Some(pre.iter().zip(&graph.crates).map(|(c, ((_, _), fp))| {
+            let store = Store::open(&self.dir.join(front_store_name(&c.cfg.session.options, &c.name, *fp))).ok_or("store")?;
+            let (kind, bytes) = store.get(front_crate_key(&c.name, &c.root)).ok_or("record")?;
+            if kind != KIND_FRONT_CRATE { return Err("record"); }
+            let rec: crate::crate_image::Record = crate::crate_image::decode(bytes).ok_or("record")?;
+            let inputs: Vec<_> = rec.ahead.inputs.iter().map(|(p, h)| (p.as_str(), *h))
+                .chain(rec.files.iter().map(|f| (f.path.as_str(), f.hash))).collect();
+            if !(self.inputs_current(&inputs) && rec.ahead.probes.iter().all(|(p, e)| self.probe_current(p, *e))
+                && ledger_current(&store, &present, &mut late)) { return Err("inputs"); }
+            Ok((rec.ahead.demand_plan, rec.ahead.deferred))
+        }).collect())
+    }
+
+    // An edit normally invalidates a leaf or a dependent suffix. Keep the complete
+    // certified prefix resident, including its resolved imports and collected types.
+    // `selection(ci)`: this load's demand selection of crate ci, None while it is not known yet.
+    // Ok((prefix, unknown)): `unknown` when the prefix ends at a crate whose selection is not
+    // known yet (a later look may find it longer).
+    fn collected_prefix(pre: &[crate::preload::PreCrate], records: &[Result<(u128, Vec<String>), &'static str>],
+        selection: &dyn Fn(usize) -> Option<(u128, Vec<String>)>) -> Option<(usize, bool)> {
+        let mut dirty = Vec::new();
+        let mut unknown = false;
+        let mut first_why = "";
+        for (ci, c) in pre.iter().enumerate() {
+            let why = match &records[ci] {
+                Err(why) => Some(*why),
+                Ok(recorded) => match selection(ci) {
+                    None => Some("selection not known yet"),
+                    Some(now) => (now != *recorded).then_some("demand selection"),
+                },
+            };
+            let dep_dirty = c.image_deps.iter().any(|d| dirty.get(*d).copied().unwrap_or(true));
+            if (why.is_some() || dep_dirty) && first_why.is_empty() {
+                first_why = why.unwrap_or("a dependency");
+                unknown = why == Some("selection not known yet");
+            }
+            dirty.push(why.is_some() || dep_dirty);
         }
-        let first = dirty.iter().position(|d| *d)?;
+        let mut first = dirty.iter().position(|d| *d)?;
+        // A package's lib and bin share their name (cargo names both after the package), and the
+        // macro table keys its per-crate state by name (the bin's load moves the lib's modules to
+        // `<name>\u{1}lib` and replaces the rest): a retained crate named as a collected-again one
+        // cannot be told apart from it there, so the suffix starts at the first such crate (an app
+        // edit in its bin collects its lib again too, not every crate below it).
+        while let Some(i) = pre[..first].iter().position(|c| pre[first..].iter().any(|d| d.name == c.name)) { first = i; }
+        if crate::preload::trace() {
+            eprintln!("makepad-run collected: prefix {} of {} crates, ends at {} ({}{})", first, pre.len(), pre[dirty.iter().position(|d| *d)?].name, first_why, if unknown { "; waiting" } else { "" });
+        }
         // Every crate from the first changed one on is collected again: changed ones parse,
         // clean ones load from their crate images (proc-macro and build crates load after the
         // app's, so an app edit leaves clean crates behind it). The std crates may depend on
         // one another despite their load order: a change there uses the ordinary path.
-        (first >= crate::std_pre_crates(&pre[0].cfg.session, false).len()).then_some(first)
+        (first >= crate::std_pre_crates(&pre[0].cfg.session, false).len()).then_some((first, unknown))
     }
 
     pub fn restore_collected(&self, session: &Arc<crate::Session>, pre: &[crate::preload::PreCrate]) -> Option<(Program, Tcx, Option<CollectedCache>)> {
@@ -108,14 +142,15 @@ impl FrontImages {
         let phase = |name: &str| if crate::preload::trace() {
             eprintln!("makepad-run collected: {} at {:.1} ms", name, started.elapsed().as_secs_f64() * 1e3);
         };
-        let restored = std::thread::scope(|scope| (|| {
+        let restored = (|| {
         if !enabled() || crate::syms::perturb(&session.options) != 0 { return None; }
         self.begin_load(pre);
         why = "certificate";
         let cert = self.certificate.lock().ok()?;
         let stale;
         let mut plan = None;
-        let mut plan_task = None;
+        // the prefix whose contexts' prescans the plan worker releases once it is done
+        let release_after: Arc<relax_session::sync::Mutex<Option<usize>>> = Arc::default();
         let (graph, mut prefix) = match cert.as_ref() {
             Some(graph) => (graph, pre.len()),
             None => {
@@ -129,13 +164,20 @@ impl FrontImages {
                     *self.pending_plan.lock().unwrap() = Some((GraphRecipe::new(pre).identity, pending.clone()));
                     let worker = pending.clone();
                     let in_world = crate::macro_reg::in_world();
-                    plan_task = Some(std::thread::Builder::new().name("run-demand".into()).spawn_scoped(scope, move || {
+                    let release = release_after.clone();
+                    // (detached: the restore takes its prefix as soon as the plan's early
+                    // selection covers it, and the load goes on while the plan completes)
+                    std::thread::Builder::new().name("run-demand".into()).spawn(move || {
                         crate::macro_reg::set_in_world(in_world);
                         worker.complete();
-                    }).ok()?);
+                        let mut r = release.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(prefix) = r.take() { for context in &worker.contexts()[..prefix] { context.release_prescan(); } }
+                    }).ok()?;
                     plan = Some(pending);
                 }
-                let prefix = if plan.is_some() { 0 } else { self.collected_prefix(&stale, pre, None)? };
+                let prefix = if plan.is_some() { 0 } else {
+                    Self::collected_prefix(pre, &self.prefix_records(&stale, pre)?, &|_| Some((0, Vec::new())))?.0
+                };
                 (&stale, prefix)
             }
         };
@@ -229,18 +271,32 @@ impl FrontImages {
         why = "Tcx";
         let mut tcx = Tcx::restore_collected(types, prog.files.len(), prog.crates.len())?;
         phase("Tcx");
-        if let Some(task) = plan_task {
+        if let Some(plan) = plan.as_deref() {
             why = "demand selection";
-            task.join().ok()?;
-            prefix = self.collected_prefix(graph, pre, plan.as_deref())?;
+            let records = self.prefix_records(graph, pre)?;
+            // the plan's selection where it is complete, else its early prefix (crates selected
+            // in full: identity 0, nothing deferred; preload resolve_images reads it the same way)
+            prefix = loop {
+                let (ready, seen) = (plan.ready(), plan.early_prefix());
+                let selection = |ci: usize| match ready {
+                    Some(r) => Some((r.selection_identity(ci), r.deferred(ci))),
+                    None => (ci < seen).then(Vec::new).map(|d| (0, d)),
+                };
+                let (p, unknown) = Self::collected_prefix(pre, &records, &selection)?;
+                if !unknown || ready.is_some() { break p; }
+                plan.wait_progress(seen);
+            };
+            why = "demand selection: ledger";
             for store in stores.iter().take(prefix) {
                 if !ledger_current(store, &present, &mut late) { return None; }
             }
             phase("selection validated");
         }
+        why = "ledger replay";
         for store in stores.iter().take(prefix) { replay_front_ledger(store)?; }
         prog.front_graph = Some(GraphRecipe::new(pre));
         if prefix != pre.len() {
+            why = "retain prefix";
             let first = prog.retain_collected_prefix(prefix)?;
             tcx.retain_collected_prefix(first);
             if session.options.verbose { eprintln!("makepad-run collected: retained {} crates; rebuilding {} changed/dependent crates", prefix, pre.len() - prefix); }
@@ -251,8 +307,13 @@ impl FrontImages {
             self.pending_plan.lock().unwrap().take();
             // Parsing the remaining crates reuses these exact source snapshots,
             // lowerings and full-graph selection (including retained dependencies).
-            for context in &plan.contexts[..prefix] { context.release_prescan(); }
-            prog.sources = plan.contexts.first()?.sources().clone();
+            why = "demand contexts";
+            {
+                // the retained crates' prescans go once the plan no longer reads them
+                let mut r = release_after.lock().unwrap_or_else(|e| e.into_inner());
+                if plan.ready().is_some() { for context in &plan.contexts()[..prefix] { context.release_prescan(); } } else { *r = Some(prefix); }
+            }
+            prog.sources = plan.contexts().first()?.sources().clone();
             prog.demand_plan = Some(plan);
         }
         let cache = (prefix == pre.len()).then(|| CollectedCache {
@@ -266,7 +327,7 @@ impl FrontImages {
             eprintln!("makepad-run collected: restored {} crates, {} definitions, {} types", prog.crates.len(), prog.defs.len(), tcx.tys.len());
         }
         Some((prog, tcx, cache))
-        })());
+        })();
         if restored.is_none() && (crate::preload::trace() || session.runtime.profile) {
             eprintln!("makepad-run collected: not restored: {}; demand plan retained={}", why, self.pending_plan.lock().unwrap().is_some());
         }

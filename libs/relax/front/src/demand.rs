@@ -1432,12 +1432,20 @@ impl Names {
     /// spellings that `absolute` reads. Everything else it reads is the bindings of
     /// earlier crates, which a part pins by its dependency identities.
     pub fn snapshot(&self, ci: usize) -> (Vec<u8>, u128) {
+        let profile = self.crates[ci].cfg.session.runtime.profile;
+        let t = crate::load_profile::span(profile, "rust-demand-snapshot-tables", &self.crates[ci].name);
         let mut image = self.tables(ci);
+        drop(t);
         let krate = &self.crates[ci].name;
         let mine = |s: &str| within(s, krate);
+        let t = crate::load_profile::span(profile, "rust-demand-snapshot-input", krate);
         let input = self.input_identity(ci, &image);
+        drop(t);
+        let t = crate::load_profile::span(profile, "rust-demand-snapshot-capture", krate);
         image.bindings = BindingImage::capture(self, self.bindings.modules.iter().filter(|(id, _)| mine(self.bindings.spelling(**id)))
             .flat_map(|(_, entries)| entries.values().copied()).collect());
+        drop(t);
+        let _t = crate::load_profile::span(profile, "rust-demand-snapshot-encode", krate);
         (strings::encode(&image), input)
     }
     /// See `snapshot`: `tables` is the crate's namespace image with empty bindings.

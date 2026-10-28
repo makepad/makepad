@@ -96,7 +96,7 @@ step_zone() { # THE memory leg: settle_stress.sh (MEMSAFE: settles + settle rebu
 step_warm_app_edit() { # JITCOLD2: a new item in an app file recompiles what names it, not the app (Sandbox: cold,
   # warm, then a new pub fn appended to one of its files; at most 400 first compiles, no JIT spinner)
   [ -d apps/commercial/sandbox ] || { echo "warm_after_app_edit: skipped (no apps/commercial)"; return 0; }
-  wa=$(TARGET=$T/release WAIT=300 STEPS=item tools/run/fixture/warm_after_app_edit.sh 2>&1 | tail -1 | cut -c1-600)
+  wa=$(TARGET=$T/release WAIT=300 STEPS="item graph" tools/run/fixture/warm_after_app_edit.sh 2>&1 | tail -1 | cut -c1-600)
   echo "$wa"; echo "$wa" | grep -q "^warm_after_app_edit: OK" || fail="$fail warm_after_app_edit"
   sum="$sum warm_app_edit:$(echo "$wa" | sed -n 's/.*\[item\][^]]*compiled \([0-9]*\) first.*/\1/p')"
 }

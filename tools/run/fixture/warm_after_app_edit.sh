@@ -7,6 +7,9 @@
 #     body   : a statement into one fn body of the app crate
 #     item   : a new pub fn at the end of one app source file (an interface edit: a new item)
 #     splash : a number in one script_mod! of the app crate (an item macro's text)
+#     graph  : no edit: the program restored from the collected image the step before recorded (an edited
+#              start keeps the unchanged crates' collected prefix and collects the rest again) is checked
+#              against one rebuilt from the sources (MAKEPAD_RUN_COLLECTED_VERIFY=1)
 #   every edited file is restored at the end (also on failure or interrupt).
 # A step passes when its session compiles at most MAX (default 400) fns first and the JIT spinner
 # never shows. Before the fix every non-body edit renamed the app crate's interface fingerprint, which
@@ -48,6 +51,7 @@ session() { # session <label>: one launch to idle and quit; prints its first-fra
     label=$1
     trace=""; [ -n "${TRACE:-}" ] && trace="MAKEPAD_RUN_CACHE_TRACE=$dir/trace.$label MAKEPAD_RUN_DEPS_DUMP=$dir/deps.$label"
     [ "$label" = verify ] && trace="$trace MAKEPAD_RUN_CACHE=verify"
+    [ "$label" = graph ] && trace="$trace MAKEPAD_RUN_COLLECTED_VERIFY=1"
     env MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 TMPDIR="$dir/t" \
         MAKEPAD_HOME="$dir/home" SANDBOX_HOME="$dir/home" MAKEPAD_RUN_HOME="$dir/run" MAKEPAD_RUN_CACHE_DIR="$dir/run/cache" \
         MAKEPAD_RUN_TARGET_DIR="$dir/run/target" MAKEPAD_RUN_CACHE_IFACE="$dir/iface.$label" $trace \
@@ -69,6 +73,7 @@ session() { # session <label>: one launch to idle and quit; prints its first-fra
     echo "$last" | grep '^session:' || echo "no jit session line: $(echo "$last" | head -3 | tr '\n' ' ')"
     echo "$last" > "$dir/jit.$label"
     [ "$label" = verify ] && grep -m1 'cache: verify:' "$dir/log.$label"
+    [ "$label" = graph ] && { grep -m1 -e 'collected: verified restored graph' -e 'collected: verification requires' -e 'panicked' "$dir/log.$label" || echo "graph: no verification line"; }
     # the crates whose interface fingerprint moved since the session before
     if [ -n "${prev:-}" ] && [ -f "$dir/iface.$prev" ] && [ -f "$dir/iface.$label" ]; then
         grep '^crate' "$dir/iface.$prev" | sort > "$dir/a"; grep '^crate' "$dir/iface.$label" | sort > "$dir/b"
@@ -98,6 +103,10 @@ check() { # check <label> <session output>
     spin=$(echo "$2" | sed -n 's/.*spinner \([0-9]*\).*/\1/p')
     out="$out
 [$1] $(echo "$2" | tr '\n' ' ')"
+    if [ "$1" = graph ]; then
+        echo "$2" | grep -q 'collected: verified restored graph against rebuilt graph' || fail="$fail graph"
+        return
+    fi
     if [ -z "$n" ] || [ "$n" -gt "$MAX" ] || [ "$spin" != 0 ]; then fail="$fail $1"; fi
 }
 prev=""
@@ -106,7 +115,7 @@ out="[cold] $(echo "$cold" | tr '\n' ' ')"
 s=$(session warm); check warm "$s"
 for step in $STEPS; do
     case $step in
-    verify) ;;  # no edit: the session compiles every fn it would link and compares (MAKEPAD_RUN_CACHE=verify)
+    verify|graph) ;;  # no edit: verify compiles every fn it would link and compares (MAKEPAD_RUN_CACHE=verify); graph above
     body) f=${BODY%%|*}; r=${BODY#*|}; edit_after "$f" "${r%%|*}" "${r#*|}" || { restore; exit 1; };;
     item) save "$ITEM" || { restore; exit 1; }; printf '\npub fn warm_after_app_edit_probe() -> u32 { 7 }\n' >> "$ITEM";;
     splash) f=${SPLASH%%|*}; r=${SPLASH#*|}; edit_replace "$f" "${r%%|*}" "${r#*|}" || { restore; exit 1; };;
