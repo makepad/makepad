@@ -81,12 +81,22 @@ pub fn memory_budget_mb() -> Option<u64> {
     Some((total / 4).min(available * 6 / 10).max(256))
 }
 
+/// The activity stopped (home, recents, the screen off): Android kills a process instead of
+/// exiting it, so the loader's quit write runs now, on its own thread -- the startup manifest,
+/// this run's code and front images and the collected program reach the cache, and the next
+/// launch starts warm. The app keeps running; a later start of the activity resumes it.
+fn background_quit_write() {
+    crate::logcat::log("background: the compile cache's quit write starts (the next launch can be warm)");
+    relax_compiler::run::quit_requested();
+}
+
 /// Compiles and runs the package main on this domain thread.
 /// Runs on the boot thread: it holds the compiler's allocation zone while Relax loads the program.
 pub fn boot(mut b: Boot) -> Result<(), String> {
     let _zone = relax_compiler::zone_alloc::compiler();
     relax_compiler::clock::mark_process_start();
     relax_runner::init_embedded(&b.exe, &makepad_run::HOST);
+    makepad_hal::set_background_hook(background_quit_write);
     if b.privileged {
         relax_runner::set_privileged();
     }

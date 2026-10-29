@@ -1979,3 +1979,16 @@ pub fn hal_fleet_tls_free(handle: i64) {
 pub fn hal_battery() -> i64 {
     backend::android::fleet::battery().map_or(-1, |(level, charging)| level as i64 | (charging as i64) << 8)
 }
+
+/// The host's hook for the Android BACKGROUND lifecycle (the activity stopped): an Android process
+/// is killed, never exited, so the makepad run host writes its compile cache from here (the loader's
+/// quit write) instead of at an exit that never comes. Set once, before the first stop.
+static BACKGROUND_HOOK: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+pub fn set_background_hook(f: fn()) {
+    let _ = BACKGROUND_HOOK.set(f);
+}
+pub(crate) fn background_hook() {
+    if let Some(f) = BACKGROUND_HOOK.get() {
+        f();
+    }
+}
