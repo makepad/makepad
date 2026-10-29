@@ -1241,7 +1241,8 @@ const TIER1_CACHE_FRAME_MAX_FLAT: u32 = 256 * 1024;
 /// Installs before this wall time go to the startup manifest (run.rs sets it at main), as do
 /// all installs before the first present.
 pub static ORDER_UNTIL_NS: AtomicU64 = AtomicU64::new(0);
-/// How many of those installs came before the first present.
+/// How many of those installs came while the startup image's window was open (the first present
+/// and the frame after it: postframe::image_window_open): the next start prelinks them.
 pub static ORDER_PRESENT_LEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Queues the previous run's startup manifest (disk cache) for the speculative workers, in the
@@ -1305,7 +1306,7 @@ unsafe fn install_prelinked_slot(up: *mut Unit, s: crate::cache::PrelinkedSlot, 
     // the startup set of the next manifest (install_compiled's rule: before the first present)
     if u.fns[s.id as usize].patch_gen == 0 && (!FIRST_PRESENT.load(Ordering::Acquire) || wall_ns() < ORDER_UNTIL_NS.load(Ordering::Relaxed)) {
         crate::zone_alloc::kept_with(|| u.start_order.push(s.id));
-        if !FIRST_PRESENT.load(Ordering::Acquire) {
+        if crate::postframe::image_window_open() {
             ORDER_PRESENT_LEN.store(u.start_order.len(), Ordering::Relaxed);
         }
     }
@@ -7885,7 +7886,7 @@ unsafe fn install_compiled(up: *mut Unit, id: u32, code: &[u8], map: Vec<(u32, u
                         eprintln!("pre-present-fn: {:?}", u.prog.file_paths[u.prog.def(*d).file as usize]);
                     }
                 }
-                if before_present {
+                if crate::postframe::image_window_open() {
                     ORDER_PRESENT_LEN.store(u.start_order.len(), Ordering::Relaxed);
                 }
             }

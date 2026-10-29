@@ -555,6 +555,9 @@ pub struct Cache {
     verdict_rejected: HashSet<u128>,
     /// per slot: the crates its key names (a certificate's fast path)
     slot_crates: HashMap<u32, Vec<u32>>,
+    /// per crate: the indexes of its opened crate stores (has_front_key_in_crate)
+    front_stores_of: Vec<Vec<u32>>,
+    front_stores_n: usize,
     /// while a key is encoded: the definitions it names (their local bodies join the key)
     enc_defs: Option<Vec<DefId>>,
     /// crate identity hash -> crate index
@@ -864,6 +867,8 @@ impl Cache {
             cert_rejected: HashSet::new(),
             verdict_rejected: HashSet::new(),
             slot_crates: HashMap::new(),
+            front_stores_of: Vec::new(),
+            front_stores_n: 0,
             enc_defs: None,
             crate_by_ident,
             crate_ident,
@@ -1178,12 +1183,21 @@ impl Cache {
 
     /// Image availability is local to the crate's store, even when another world already
     /// mapped the same source (the process-wide key index may point at that other store).
-    fn has_front_key_in_crate(&self, krate: u32, key: u128) -> bool {
-        let stored = self.stores.iter().any(|st| {
-            self.crate_path.get(krate as usize) == Some(&st.path)
-                && st.index.binary_search_by_key(&key, |e| e.key).ok().is_some_and(|i| st.index[i].kind == KIND_FRONT_REF)
-        });
-        stored || self.pending.iter().any(|(c, e)| *c == krate && e.key == key && e.kind == KIND_FRONT_REF)
+    fn has_front_key_in_crate(&mut self, krate: u32, key: u128) -> bool {
+        // (the crate's opened stores, found once: every mid-run write asks for every file)
+        if self.front_stores_of.len() != self.crate_path.len() || self.front_stores_n != self.stores.len() {
+            self.front_stores_n = self.stores.len();
+            let mut of = vec![Vec::new(); self.crate_path.len()];
+            for (si, st) in self.stores.iter().enumerate() {
+                if let Some(k) = self.crate_path.iter().position(|p| *p == st.path) { of[k].push(si as u32); }
+            }
+            self.front_stores_of = of;
+        }
+        let stored = self.front_stores_of.get(krate as usize).is_some_and(|v| v.iter().any(|&si| {
+            let st = &self.stores[si as usize];
+            st.index.binary_search_by_key(&key, |e| e.key).ok().is_some_and(|i| st.index[i].kind == KIND_FRONT_REF)
+        }));
+        stored || self.pending_keys.contains(&key) && self.pending.iter().any(|(c, e)| *c == krate && e.key == key && e.kind == KIND_FRONT_REF)
     }
 
     /// Queues references to file `path`'s images (`main`, `part`: where they are) for crate
@@ -1200,8 +1214,10 @@ impl Cache {
         let mut n = 0;
         for (key, loc) in [(Self::front_key(path, source_hash), main), (Self::front_part_key(path, source_hash), part)] {
             let Some(loc) = loc else { continue };
-            if self.front_reserved.contains(&(krate, key)) || self.has_front_key_in_crate(krate, key) { continue; }
+            if self.front_reserved.contains(&(krate, key)) { continue; }
+            // (found or queued now: the next write's scan takes the memo)
             self.front_reserved.insert((krate, key));
+            if self.has_front_key_in_crate(krate, key) { continue; }
             self.pending_keys.insert(key);
             self.push_pending(krate, NewEntry { key, kind: KIND_FRONT_REF, payload: front_run::encode_ref(loc) });
             n += 1;
@@ -3347,11 +3363,12 @@ impl Cache {
         let Some(key) = self.manifest_key(root) else { self.manifest_done = true; self.manifest_len = order.len(); return true };
         // what earlier spills of this run wrote: the image takes those entries too
         self.index_written();
+        crate::run::yield_section("manifest keys");
         let mut list: Vec<(Vec<u8>, u128)> = Vec::with_capacity(order.len());
         let mut before_present = 0;
         let mut present_ids = Vec::new();
         for (n, &id) in order.iter().enumerate() {
-            if n % 256 == 255 && stop() { return false; }
+            if n % 64 == 63 && stop() { return false; }
             if let Some(b) = self.slot_bytes(u, id) {
                 let entry = match self.slot_key(u, id) {
                     Some(k) if self.has_index(&k) || self.pending_keys.contains(&k) => k,
@@ -3365,6 +3382,8 @@ impl Cache {
             }
         }
         if self.verbose { eprintln!("makepad-run cache: manifest phases: {} slots keyed in {:.1} ms", order.len(), t0.elapsed().as_secs_f64() * 1e3); }
+        if stop() { return false; }
+        crate::run::yield_section("manifest compare");
         let old: HashSet<&[u8]> = self.manifest.iter().map(|b| b.as_slice()).collect();
         let new = list.iter().filter(|b| !old.contains(b.0.as_slice())).count();
         // the same start as before (within 2%), the loaded manifest still valid and its image
@@ -3379,52 +3398,67 @@ impl Cache {
             eprintln!("makepad-run cache: startup manifest rewritten: valid {} (missing {}), {} new of {}, image rewrite {} (replacements without a stored entry {}, tier-ups {}), image slots {} stale {} cached at present {}",
                 self.startup_manifest_valid(), self.manifest_missing, new, list.len(), self.image_rewrite, self.stats.rewrite_why[0], self.stats.rewrite_why[1], self.image_slots, self.image_stale, self.manifest_present_cached);
         }
+        crate::run::yield_section("manifest image");
         let img = if self.mode != Mode::Verify && !self.image_bad {
             match self.build_image(u, &present_ids, stop) { Err(()) => return false, Ok(img) => img }
         } else { None };
-        self.manifest_done = true; self.manifest_len = order.len();
         // at exit no key can be made any more (slot_key): slots no lookup or record keyed this
         // run fall out of the image. A rewrite then (O2/O3 code replaced startup code since the
         // mid-run write) must not replace the loaded image with one covering fewer slots: the
         // next start would prelink a fraction of it (Calculator: 16,000 -> 2 slots)
+        crate::run::yield_section("manifest tail");
+        if stop() { return false; }
         let n_img = img.as_ref().map_or(0, |i| i.1 as usize);
         if crate::preempt::is_stopped() && self.image_slots > 0 && n_img * 50 < self.image_slots * 49 && !self.image_bad {
             if self.verbose {
                 eprintln!("makepad-run cache: startup manifest kept: at exit the image would cover {} of the {} slots the loaded one has", n_img, self.image_slots);
             }
+            self.manifest_done = true; self.manifest_len = order.len();
             return true;
+        }
+        // the entry first (the yield checks: nothing is queued before the last of them)
+        crate::run::yield_section("manifest entry");
+        let mut e = E::default();
+        e.u32(ENTRY_VERSION);
+        e.u32(list.len() as u32);
+        e.u32(before_present as u32);
+        for (i, (b, entry)) in list.iter().enumerate() {
+            if i % 1024 == 1023 && stop() { return false; }
+            e.bytes(b);
+            e.u128(*entry);
+        }
+        if let Some((img, _)) = img {
+            e.u32(IMAGE_MAGIC);
+            for part in img.chunks(1 << 20) {
+                e.0.extend_from_slice(part);
+                if stop() { return false; }
+            }
         }
         // the code entries this manifest supersedes: a slot of the loaded manifest whose key
         // changed (an edit reached what its code is made from) left its old entry behind under a
         // key nothing names any more (code stores are named by the crate's view, which an edit
         // keeps). Removed with this manifest's write, its bytes are dead space: the store
         // rewrite drops them once they outgrow a quarter of the live ones (store.rs append).
+        crate::run::yield_section("manifest superseded");
+        let mut gone: Vec<u128> = Vec::new();
         if self.manifest.len() == self.manifest_old_keys.len() {
             let old_keys: HashMap<&[u8], u128> = self.manifest.iter().zip(&self.manifest_old_keys)
                 .filter(|(_, k)| **k != 0).map(|(b, k)| (b.as_slice(), *k)).collect();
-            let gone: Vec<u128> = list.iter().filter_map(|(b, k)| old_keys.get(b.as_slice())
-                .filter(|o| *k != 0 && **o != *k && !self.pending_keys.contains(o)).copied()).collect();
-            let mut removed = 0;
-            for o in gone {
-                let Some((p, _)) = self.index_at(o) else { continue };
-                let Some(c) = self.code_path.iter().position(|cp| *cp == self.stores[p as usize].path) else { continue };
-                self.push_pending(c as u32, NewEntry { key: o, kind: crate::store::KIND_REMOVED, payload: Vec::new() });
-                removed += 1;
+            for (i, (b, k)) in list.iter().enumerate() {
+                if i % 1024 == 1023 && stop() { return false; }
+                if let Some(o) = old_keys.get(b.as_slice()).filter(|o| *k != 0 && **o != *k && !self.pending_keys.contains(o)) { gone.push(*o); }
             }
-            if self.verbose && removed != 0 { eprintln!("makepad-run cache: {} code entries superseded by this manifest: removed", removed); }
         }
-        let mut e = E::default();
-        e.u32(ENTRY_VERSION);
-        e.u32(list.len() as u32);
-        e.u32(before_present as u32);
-        for (b, entry) in &list {
-            e.bytes(b);
-            e.u128(*entry);
+        // (past the last yield check: this manifest is the run's)
+        self.manifest_done = true; self.manifest_len = order.len();
+        let mut removed = 0;
+        for o in gone {
+            let Some((p, _)) = self.index_at(o) else { continue };
+            let Some(c) = self.code_path.iter().position(|cp| *cp == self.stores[p as usize].path) else { continue };
+            self.push_pending(c as u32, NewEntry { key: o, kind: crate::store::KIND_REMOVED, payload: Vec::new() });
+            removed += 1;
         }
-        if let Some((img, _)) = img {
-            e.u32(IMAGE_MAGIC);
-            e.0.extend_from_slice(&img);
-        }
+        if self.verbose && removed != 0 { eprintln!("makepad-run cache: {} code entries superseded by this manifest: removed", removed); }
         self.push_pending(root, NewEntry { key, kind: KIND_MANIFEST, payload: e.0 });
         // the sources the keys above were made from (none after a live edit: this run's
         // fingerprints describe its start, not the edited files)

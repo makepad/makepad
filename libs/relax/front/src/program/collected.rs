@@ -311,9 +311,13 @@ impl Program {
         self.macros.write_image(&mut image, 2);
         self.syms.write_image(&mut image, 3);
         let mut id = 6;
-        macro_rules! table { ($($f:ident),+) => { $(if stop() { return None; } self.$f.write_image(&mut image, &mut id);)+ }; }
+        let tr = std::env::var_os("MAKEPAD_RUN_COLLECTED_TRACE").is_some();
+        let mut t = std::time::Instant::now();
+        let mut lap = |what: &str| if tr { eprintln!("program-writer: {what} {:.1} ms", t.elapsed().as_secs_f64() * 1e3); t = std::time::Instant::now(); };
+        lap("head, files, macros, syms");
+        macro_rules! table { ($($f:ident),+) => { $(self.$f.write_image_with(&mut image, &mut id, stop)?; lap(stringify!($f));)+ }; }
         tables!(table);
-        macro_rules! list { ($($f:ident),+) => { $(if stop() { return None; } self.$f.write_image(&mut image, &mut id);)+ }; }
+        macro_rules! list { ($($f:ident),+) => { $(self.$f.write_image_with(&mut image, &mut id, stop)?; lap(stringify!($f));)+ }; }
         lists!(list);
         self.repeat_expr_counts.write_image(&mut image, &mut id);
         self.collected_definitions.write_image(&mut image, &mut id);

@@ -581,19 +581,25 @@ impl Encoder<'_> {
             .any(|(key, c)| prog.syms.str(c.name) != key.0 || c.root_path() != key.1) { return None; }
         *why = "Program";
         let mut parts = Parts::new();
+        crate::run::yield_section("collected Program");
         let program = Arc::new(prog.collected_writer_with(stop)?.into_owned());
         parts.lap("Program", program.len());
         if stop() { return None; }
         *why = "Tcx";
-        let types = Arc::new(tcx.collected_writer_with(stop)?.into_owned());
+        crate::run::yield_section("collected Tcx");
+        let w = tcx.collected_writer_with(stop)?;
+        parts.lap("Tcx writer", 0);
+        let types = Arc::new(w.into_owned());
         parts.lap("Tcx", types.len());
         if stop() { return None; }
         *why = "definitions";
+        crate::run::yield_section("collected definitions");
         let definitions = Arc::new(self.definitions(prog, tcx, stop)?);
         parts.lap("definitions", definitions.len());
         if stop() { return None; }
         *why = "interfaces";
         if self.iface_plain.len() != recipe.crates.len() { return None; }
+        crate::run::yield_section("collected files");
         let interfaces = self.iface_plain.iter().map(|&k| MappedKey::new(k)).collect();
         let files = prog.files.iter().enumerate().map(|(f, file)| {
             let path = prog.file_paths.get(f)?;
@@ -613,7 +619,7 @@ impl Encoder<'_> {
         let mut keys: Vec<MappedKey> = Vec::with_capacity(prog.defs.len());
         if let Some(m) = reuse { keys.extend_from_slice(&m.keys[..dk]); }
         for i in dk..prog.defs.len() {
-            if i % 1024 == 1023 && stop() { return None; }
+            if i % 128 == 127 && stop() { return None; }
             keys.push(MappedKey::new(def_key_in(prog, tcx, self.crate_ident, &mut memo, &mut files, DefId(i as u32))));
         }
         // per crate: its definitions by key, without the keys two of them have
@@ -651,6 +657,7 @@ impl Encoder<'_> {
             None => { captured = self.capture_boot(prog, tcx, stop, &mut why)?; &captured }
         };
         check()?;
+        crate::run::yield_section("collected image");
         let mut image = crate::image::Writer::default();
         image.add_bytes(0, certificate(&graph).to_le_bytes().to_vec());
         image.add_image(1, boot.program.clone()); image.add_image(2, boot.types.clone());

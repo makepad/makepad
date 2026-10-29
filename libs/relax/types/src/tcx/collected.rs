@@ -227,14 +227,20 @@ impl Tcx {
         image.add_bytes(0, w);
         if stop() { return None; }
         let mut id = 2;
-        macro_rules! table { ($($f:ident),+) => { $(if stop() { return None; } self.$f.write_image(&mut image, &mut id);)+ }; }
+        let tr = std::env::var_os("MAKEPAD_RUN_COLLECTED_TRACE").is_some();
+        let mut t = std::time::Instant::now();
+        let mut lap = |what: &str| if tr { eprintln!("tcx-writer: {what} {:.1} ms", t.elapsed().as_secs_f64() * 1e3); t = std::time::Instant::now(); };
+        macro_rules! table { ($($f:ident),+) => { $(self.$f.write_image_with(&mut image, &mut id, stop)?; lap(stringify!($f));)+ }; }
         tables!(table);
         self.const_tys.write_image(&mut image, &mut id);
         self.contracts_waiting.write_image(&mut image, &mut id);
+        lap("const_tys+contracts");
         // The interner last (its section stays the second): other threads may intern while this
         // runs (a mid-run encode), and every type, region, list and constant the tables
         // above name was interned before its count is read, so the image is consistent.
-        image.insert_image(1, 1, std::sync::Arc::new(self.tys.collected_writer()?));
+        if stop() { return None; }
+        image.insert_image(1, 1, std::sync::Arc::new(self.tys.collected_writer_with(stop)?));
+        lap("interner");
         Some(image)
     }
 

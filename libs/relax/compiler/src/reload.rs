@@ -4395,6 +4395,10 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         // Once the tree no longer matches this session, later saves must not patch a
         // mixture of revisions into the old process. A fresh run restores live editing.
         if restart_required { gate_note(3); continue; }
+        // the startup's file scan (own_files: an owner request of 10-15 ms on Sandbox) waits until
+        // the UI thread's first frames after the present are done: run right at the present, the
+        // UI thread's first lazy links queued behind it (36 ms of a first post-present episode)
+        if startup_scan && crate::postframe::in_first_frames() { continue; }
         gate_note(0);
         let loads = jit::DEFERRED_LOADS.load(std::sync::atomic::Ordering::Relaxed);
         // a new watch set drops the events the old one had not delivered yet (a save made

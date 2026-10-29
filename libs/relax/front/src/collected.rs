@@ -383,6 +383,10 @@ fn key_slot(key: u128, table: usize) -> usize {
 impl<K: Codec + ImageKey + std::hash::Hash + Eq, V: Codec> ImageMap<K, V> {
     /// Sections of a collected image: keys, offsets, entries, hash index.
     pub fn write_image(&self, image: &mut crate::image::Writer<'_>, id: &mut u32) {
+        self.write_image_with(image, id, &|| false);
+    }
+    /// write_image, asking `stop` every 1024 rows (None: it said yes, nothing was added)
+    pub fn write_image_with(&self, image: &mut crate::image::Writer<'_>, id: &mut u32, stop: &dyn Fn() -> bool) -> Option<()> {
         self.snap.store(true, std::sync::atomic::Ordering::Relaxed);
         let mut rows: Vec<(u128, Option<(u32, u32)>, Option<(&K, &V)>)> = match &self.mapped {
             // An entry nobody decoded is unchanged; a decoded one may have filled a lazy cell.
@@ -393,11 +397,14 @@ impl<K: Codec + ImageKey + std::hash::Hash + Eq, V: Codec> ImageMap<K, V> {
             None => Vec::new(),
         };
         rows.extend(self.owned.iter().map(|(k, v)| (k.image_key(), None, Some((k, v)))));
+        if stop() { return None; }
         rows.sort_unstable_by_key(|r| r.0);
+        if stop() { return None; }
         let mut keys = Vec::with_capacity(rows.len());
         let mut offsets = Vec::with_capacity(rows.len() + 1);
         let mut entries = ImageEntries::default();
-        for (key, raw, kv) in rows {
+        for (i, (key, raw, kv)) in rows.into_iter().enumerate() {
+            if i % 1024 == 1023 && stop() { return None; }
             keys.push(KeyRow { lo: key as u64, hi: (key >> 64) as u64 });
             offsets.push(u32::try_from(entries.len()).expect("collected table size"));
             match (raw, kv) {
@@ -414,9 +421,11 @@ impl<K: Codec + ImageKey + std::hash::Hash + Eq, V: Codec> ImageMap<K, V> {
             while index[at] != 0 { at = (at + 1) & (size - 1); }
             index[at] = i as u32 + 1;
         }
+        if stop() { return None; }
         image.add_owned(*id, &keys); image.add_owned(*id + 1, &offsets); image.add_chunks(*id + 2, entries.finish());
         image.add_owned(*id + 3, &index);
         *id += 4;
+        Some(())
     }
     pub fn read_image(image: &crate::image::Reader, k: &mut usize, id: &mut u32) -> Option<Self> {
         let keys: &'static [KeyRow] = image.slice(*k, *id)?;
@@ -626,10 +635,15 @@ impl<T: Codec> MappedList<T> {
 impl<T: Codec> ImageVec<T> {
     /// Sections of a collected image: offsets, entries.
     pub fn write_image(&self, image: &mut crate::image::Writer<'_>, id: &mut u32) {
+        self.write_image_with(image, id, &|| false);
+    }
+    /// write_image, asking `stop` every 1024 elements (None: it said yes, nothing was added)
+    pub fn write_image_with(&self, image: &mut crate::image::Writer<'_>, id: &mut u32, stop: &dyn Fn() -> bool) -> Option<()> {
         self.snap.store(true, std::sync::atomic::Ordering::Relaxed);
         let mut offsets = Vec::with_capacity(self.len() + 1);
         let mut entries = ImageEntries::default();
         for i in 0..self.len() {
+            if i % 1024 == 1023 && stop() { return None; }
             offsets.push(u32::try_from(entries.len()).expect("collected list size"));
             match &self.mapped {
                 // An element nobody decoded is unchanged; copy its bytes.
@@ -641,6 +655,7 @@ impl<T: Codec> ImageVec<T> {
         offsets.push(u32::try_from(entries.len()).expect("collected list size"));
         image.add_owned(*id, &offsets); image.add_chunks(*id + 1, entries.finish());
         *id += 2;
+        Some(())
     }
     pub fn read_image(image: &crate::image::Reader, k: &mut usize, id: &mut u32) -> Option<Self> {
         let offsets: &'static [u32] = image.slice(*k, *id)?;
