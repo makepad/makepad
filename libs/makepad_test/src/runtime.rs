@@ -1158,6 +1158,7 @@ fn studio_msg_name(msg: &StudioToApp) -> &'static str {
         StudioToApp::KeyDown(_) => "KeyDown",
         StudioToApp::KeyUp(_) => "KeyUp",
         StudioToApp::TextInput(_) => "TextInput",
+        StudioToApp::NativeApp(_) => "NativeApp",
         StudioToApp::TextCopy => "TextCopy",
         StudioToApp::TextCut => "TextCut",
         StudioToApp::DropFiles(_) => "DropFiles",

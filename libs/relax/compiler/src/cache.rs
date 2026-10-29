@@ -763,6 +763,28 @@ fn hash_bytes(b: &[u8]) -> u128 {
     crate::sip::hash_bytes(b)
 }
 
+/// What opening a cache reads of a unit: its program and types, and the settings the cache is
+/// keyed by (OpenFrom::of)
+pub struct OpenFrom<'a> {
+    pub prog: &'a crate::program::Program,
+    pub tcx: &'a crate::tcx::Tcx,
+    pub opt: relax_codegen::opt::OptCfg,
+    pub tier1: bool,
+    pub global_allocator: Option<DefId>,
+    pub provided: Vec<(u32, u64)>,
+}
+impl<'a> OpenFrom<'a> {
+    pub fn of(u: &'a Unit) -> Self {
+        Self::with(u, &u.prog, &u.tcx)
+    }
+    /// `u`'s settings with program `prog` and types `tcx` (the same program: a settle rebuild's
+    /// new state)
+    pub fn with(u: &Unit, prog: &'a crate::program::Program, tcx: &'a crate::tcx::Tcx) -> Self {
+        OpenFrom { prog, tcx, opt: u.opt.clone(), tier1: u.tier1.is_some(), global_allocator: crate::jit::global_allocator_static_of(prog),
+            provided: u.provided.iter().map(|(k, pc)| (*k, pc.binding)).collect() }
+    }
+}
+
 impl Cache {
     /// Opens the cache for this unit: the directory for this Relax build and target, every
     /// pack's index (packs whose recorded late macro inputs changed are skipped).
@@ -782,14 +804,21 @@ impl Cache {
 
     /// The one opener: cache root `root`, optionally with the restored collected graph.
     pub fn open_in_collected(u: &Unit, mode: Mode, root: PathBuf, collected: Option<&CollectedCache>) -> Result<Cache, String> {
-        let runtime = u.prog.session.runtime.clone();
-        let options = &u.prog.session.clone().options;
+        Self::open_from(&OpenFrom::of(u), mode, root, collected)
+    }
+
+    /// The one opener, from what it reads of a unit (`from`): also off the owner thread, for a
+    /// program no other thread reaches (settle_rebuild opens the new state's cache before its
+    /// replace).
+    pub fn open_from(from: &OpenFrom<'_>, mode: Mode, root: PathBuf, collected: Option<&CollectedCache>) -> Result<Cache, String> {
+        let runtime = from.prog.session.runtime.clone();
+        let options = &from.prog.session.clone().options;
         let verbose = options.verbose;
         let t0 = std::time::Instant::now();
         pack::ensure_private_dir(&root)?;
         let dir = root.join("cache");
         pack::ensure_private_dir(&dir)?;
-        let prog = &u.prog;
+        let prog = &from.prog;
         // a partial restore's (an edited start): the kept crates' definition tables
         let kept = collected.filter(|c| c.kept.is_some_and(|(k, _)| k <= prog.crates.len() && k <= c.fps.len()));
         let collected = collected.filter(|c| c.kept.is_none() && c.fps.len() <= prog.crates.len()
@@ -821,19 +850,19 @@ impl Cache {
         cfgh.u32(ENTRY_VERSION);
         cfgh.u32(STORE_FORMAT);
         cfgh.u128(crate::codegen_id::id());
-        let o = &u.opt;
+        let o = &from.opt;
         for b in [o.inline, o.inline_all, o.fold, o.cse, o.sroa, o.licm, o.imm, o.layout] {
             cfgh.u8(b as u8);
         }
-        cfgh.u8(u.tier1.is_some() as u8);
+        cfgh.u8(from.tier1 as u8);
         // which crates are bound to the loader's rustc build (provided.rs) is in the interface
         // fingerprints (items::apply_bound), so only the code that can reach a bound crate is keyed by it
-        cfgh.u128(u.prog.session.options.fingerprint());
+        cfgh.u128(from.prog.session.options.fingerprint());
         // the static a #[global_allocator] program's allocator shim calls: code inlining a shim
         // caller (core::heap::alloc & co) is certified by crate fingerprints, which do not show
         // whether or which allocator the program has (the static's type is in the shim callers'
         // own keys, code_key_bytes)
-        match u.global_allocator_static() {
+        match from.global_allocator {
             Some(s) => {
                 cfgh.u8(1);
                 cfgh.u128(crate_ident.get(prog.def(s).krate as usize).copied().unwrap_or(0));
@@ -968,7 +997,7 @@ impl Cache {
                 }
             },
         }
-        let provided: Vec<(u32, u64)> = u.provided.iter().map(|(k, pc)| (*k, pc.binding)).collect();
+        let provided: Vec<(u32, u64)> = from.provided.clone();
         c.iface = items::apply_bound(prog, &c.iface_plain, &provided);
         // the views (a restored collected program digests no file: its interfaces are restored)
         let mut view = items::crate_views(prog, &c.iface_plain, &deps::atomic_crates(prog, ncr));
@@ -1139,11 +1168,11 @@ impl Cache {
         c.stats.index_entries = (c.index.len() + c.mapped_index.as_ref().map_or(0, |m| m.len())) as u64;
         let t_packs = t0.elapsed();
         // Load-time front writes make a cold cache nonempty, but need no code definition maps.
-        if c.has_code_entries() && !collected.is_some_and(|graph| c.restore_collected_definitions(&u.prog, graph.definitions)) {
+        if c.has_code_entries() && !collected.is_some_and(|graph| c.restore_collected_definitions(&from.prog, graph.definitions)) {
             match kept.and_then(|cc| cc.kept.map(|(k, d)| (cc, k, d))) {
                 // the kept crates' tables mapped, the others' maps built
-                Some((cc, k, d)) if c.restore_kept_definitions(&u.prog, cc.definitions, cc.defs, cc.fps.len(), k, d) => c.build_def_maps_from(u, k),
-                _ => c.build_def_maps(u),
+                Some((cc, k, d)) if c.restore_kept_definitions(&from.prog, cc.definitions, cc.defs, cc.fps.len(), k, d) => c.build_def_maps_from(from.prog, from.tcx, k),
+                _ => c.build_def_maps(from.prog, from.tcx),
             }
         }
         c.stats.open_ns = t0.elapsed().as_nanos() as u64;
@@ -1354,12 +1383,14 @@ impl Cache {
     /// Every crate's map from definition key to definition, built on several threads (cache
     /// open, before main: nothing changes the program meanwhile). A warm start decodes
     /// definitions of most crates; building their maps lazily on the main thread cost ~30 ms.
-    fn build_def_maps(&mut self, u: &Unit) {
-        self.build_def_maps_from(u, 0);
+    fn build_def_maps(&mut self, prog: &crate::program::Program, tcx: &crate::tcx::Tcx) {
+        self.build_def_maps_from(prog, tcx, 0);
     }
 
     /// build_def_maps of the crates from `first` on (the ones before have mapped tables).
-    fn build_def_maps_from(&mut self, u: &Unit, first: usize) {
+    fn build_def_maps_from(&mut self, prog: &crate::program::Program, tcx: &crate::tcx::Tcx, first: usize) {
+        struct ProgTcx<'a> { prog: &'a crate::program::Program, tcx: &'a crate::tcx::Tcx }
+        let u = &ProgTcx { prog, tcx };
         let mut by = vec![Vec::new(); u.prog.crates.len()];
         for i in 0..u.prog.defs.len() {
             let d = DefId(i as u32);
@@ -1372,7 +1403,7 @@ impl Cache {
         order.sort_by_key(|c| std::cmp::Reverse(by[*c].len()));
         let n = std::thread::available_parallelism().map_or(4, |x| x.get()).clamp(1, 8);
         let next = std::sync::atomic::AtomicUsize::new(0);
-        struct Shared<'a>(&'a Unit);
+        struct Shared<'a>(&'a ProgTcx<'a>);
         unsafe impl Sync for Shared<'_> {}
         let sh = Shared(u);
         let ci = &self.crate_ident;

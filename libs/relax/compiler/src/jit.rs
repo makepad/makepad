@@ -4680,14 +4680,7 @@ impl Unit {
 
     /// The `#[global_allocator]` static (global_allocator without its type).
     pub fn global_allocator_static(&self) -> Option<DefId> {
-        let prog = &self.prog;
-        (0..prog.defs.len() as u32).map(DefId).find(|&d| {
-            let def = prog.def(d);
-            def.kind == DefKind::Static && prog.item_defs.get(&(def.file, def.item.0)) == Some(&d) && {
-                let ast = &prog.files[def.file as usize].ast;
-                crate::lang_items::has_attr(prog, def.file, ast.list(ast.item(def.item).attrs), "global_allocator")
-            }
-        })
+        global_allocator_static_of(&self.prog)
     }
 
     /// Whether `d` is one of the fns whose bodies call the allocator shim (core::heap's alloc,
@@ -24782,4 +24775,15 @@ impl Unit {
             let _ = self.provided_shared.set(set);
         }
     }
+}
+
+/// The `#[global_allocator]` static of program `prog`
+pub fn global_allocator_static_of(prog: &crate::program::Program) -> Option<DefId> {
+    (0..prog.defs.len() as u32).map(DefId).find(|&d| {
+        let def = prog.def(d);
+        def.kind == DefKind::Static && prog.item_defs.get(&(def.file, def.item.0)) == Some(&d) && {
+            let ast = &prog.files[def.file as usize].ast;
+            crate::lang_items::has_attr(prog, def.file, ast.list(ast.item(def.item).attrs), "global_allocator")
+        }
+    })
 }

@@ -896,14 +896,27 @@ impl Cx {
             }
             // Linux PRIO_PROCESS, who=0 addresses the current task/thread,
             // not the whole process. Keep SCHED_OTHER; no realtime privilege.
-            // Interactive uses nice 0 (unprivileged), light 1 and utility 5.
-            let nice = match priority {
+            // Interactive uses the process's nice (0 normally), light +1 and
+            // utility +5. The ladder is relative to the nice the process was
+            // started with: an unprivileged thread can raise its nice but not
+            // lower it, so under `nice 10` absolute values below 10 would fail.
+            // A boosted (negative) process keeps the absolute ladder.
+            static BASE: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+            let base = *BASE.get_or_init(|| {
+                unsafe extern "C" {
+                    fn getpid() -> i32;
+                }
+                // the thread group leader's nice: the nice the process was started with
+                unsafe { getpriority(0, getpid() as u32) }.clamp(0, 19)
+            });
+            let step = match priority {
                 CxThreadPriority::Normal | CxThreadPriority::UserInteractive => 0,
                 CxThreadPriority::UserInitiated => 1,
                 CxThreadPriority::Utility => 5,
                 CxThreadPriority::Background => 10,
                 CxThreadPriority::Idle => 15,
             };
+            let nice = (base + step).min(19);
             let applied = unsafe { setpriority(0, 0, nice) == 0 && getpriority(0, 0) == nice };
             if applied {
                 PriorityStatus::Applied
