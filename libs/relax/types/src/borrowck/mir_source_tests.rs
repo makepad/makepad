@@ -959,6 +959,8 @@ fn a_local_live_across_an_await_is_part_of_the_future_for_auto_traits() {
     assert!(unchecked.is_empty(), "{unchecked:?}");
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(errors[0].contains("future cannot be sent between threads safely"), "{errors:?}");
+    assert!(errors[0].contains("Rc<u8") && errors[0].contains("`rc` of type"), "{errors:?}");
+    assert!(errors[0].contains("is used across an await at"), "{errors:?}");
 }
 
 #[test]
@@ -971,6 +973,7 @@ fn the_witness_of_another_fns_future_is_made_on_demand() {
         async fn fine() { let n = 1u8; nothing().await; drop(n); }
         pub fn user() { needs_send(holds()); needs_send(fine()); }", 2021);
     assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("Rc<u8") && errors[0].contains("is used across an await at"), "{errors:?}");
 }
 
 #[test]

@@ -250,6 +250,20 @@ fn round12_unsize_to_object_and_supertrait_upcast() {
 }
 
 #[test]
+fn auto_trait_impls_only_disqualify_matching_simplified_types() {
+    // rustc_middle/src/ty/trait_def.rs::for_each_relevant_impl and
+    // rustc_type_ir/src/fast_reject.rs::simplify_type distinguish reference/pointer mutability.
+    let (p, t) = program("auto trait Auto {} impl<T> !Auto for &T {} impl<T> !Auto for *const T {}", "auto_impl_heads");
+    let infcx = InferCtxt::new(&t, TypingMode::PostAnalysis, Default::default());
+    for mutable in [false, true] {
+        for ty in [t.tys.intern(TyKind::Ref(mutable, t.tys.u8_, crate::types::RegionId::ERASED)), t.tys.intern(TyKind::Ptr(mutable, t.tys.u8_))] {
+            let goal = Goal { param_env: ParamEnvId::EMPTY, predicate: collect::trait_predicate(named(&p, "Auto"), vec![GenericArg::Type(ty)]) };
+            assert_eq!(infcx.evaluate_root_goal(&p, goal, None).is_ok_and(|r| r.certainty.is_yes()), mutable);
+        }
+    }
+}
+
+#[test]
 fn closure_uses_minimum_capture_types() {
     let (p,t) = program("auto trait Auto {} struct NotAuto { value: u64 } impl !Auto for NotAuto {} struct Pair { good: u32, bad: NotAuto } fn owner(pair: Pair) { let c = move || pair.good; }", "capture_storage");
     let state = crate::tcx::EvalState::new();

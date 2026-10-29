@@ -5,7 +5,7 @@
 pub use core::any;
 pub mod arch;
 pub use core::array;
-pub use core::ascii;
+pub mod ascii;
 pub use core::cell;
 pub use core::char;
 pub use core::clone;

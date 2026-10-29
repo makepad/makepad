@@ -133,8 +133,10 @@ unsafe impl<#[may_dangle] T: ?Sized> Drop for Box<T> {
     fn drop(&mut self) {
         unsafe {
             let layout = Layout::for_value(&*self.ptr.as_ptr());
+            // rustc_mir_transform/src/elaborate_drop.rs: open_drop_for_adt calls
+            // Box's deallocator even when dropping its contents unwinds.
+            let _guard = heap::DeallocGuard(self.ptr.as_ptr() as *mut u8, layout);
             im::drop_in_place(self.ptr.as_ptr());
-            heap::free(self.ptr.as_ptr() as *mut u8, layout);
         }
     }
 }
@@ -258,6 +260,14 @@ impl<T: ?Sized> AsMut<T> for Box<T> {
 impl<T> From<T> for Box<T> {
     fn from(t: T) -> Box<T> {
         Box::new(t)
+    }
+}
+
+// alloc/src/boxed.rs: `impl<T: ?Sized, A: Allocator> From<Box<T, A>> for Pin<Box<T, A>>`
+// (futures' join_all: `collect::<Box<[_]>>().into()`)
+impl<T: ?Sized> From<Box<T>> for crate::pin::Pin<Box<T>> {
+    fn from(boxed: Box<T>) -> Self {
+        Box::into_pin(boxed)
     }
 }
 impl<'a, T: Clone> From<&'a [T]> for Box<[T]> {

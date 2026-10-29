@@ -148,19 +148,22 @@ fn resolve_entry(reg: &mut Reg, krate: &str, name: &str, kind: Kind) -> Option<E
 /// whose closure holds no proc-macro crate, such as std's own crates, has no attribute macros
 /// at all: core's inert `#[unstable]` stays an attribute when the graph holds the
 /// `instability` crate, which exports an attribute macro of that name.
-fn attr_entry_for(krate: &str, name: &str) -> Option<Entry> {
+pub(crate) fn attr_entry_for(krate: &str, name: &str) -> Option<Entry> {
+    if in_world() { return None; }
     REG.with(|r| {
         let mut b = r.borrow_mut();
         resolve_entry(b.as_mut()?, krate, name, Kind::Attr)
     })
 }
 
-/// Is `name` an attribute macro crate `krate` can use (attr_entry_for)?
-pub fn has_attr_for(krate: &str, name: &str) -> bool {
-    if in_world() {
-        return false;
-    }
-    attr_entry_for(krate, name).is_some()
+/// An attribute exported by this crate itself, not by one of its dependencies.
+pub(crate) fn exported_attr(krate: &str, name: &str) -> Option<Entry> {
+    if in_world() { return None; }
+    REG.with(|r| {
+        let r = r.borrow();
+        let r = r.as_ref()?;
+        r.macros.iter().find(|(n, e)| n == name && e.kind == Kind::Attr && r.units[e.unit].name == krate).map(|(_, e)| e.clone())
+    })
 }
 
 /// Boot cost of the host (for the measurements in builtins-lane.md).
@@ -251,6 +254,9 @@ thread_local! {
     /// this thread builds the world, or parses its crates (the builder's parse pool): a hosted
     /// macro met there is left alone (it would wait for the world being built)
     static IN_WORLD: Cell<bool> = const { Cell::new(false) };
+    /// this thread works for the macro world's build (the builder, or a parse worker on one of
+    /// the world's crates): a macro the boot world lacks must not wait for that build (pmhost)
+    static WORLD_BUILDER: Cell<bool> = const { Cell::new(false) };
     /// the invoking crate name during a proc-macro expansion (`run_derive_in`, `run_attr`, `run_bang_in`)
     static CALL_KRATE: RefCell<String> = const { RefCell::new(String::new()) };
 }
@@ -342,6 +348,14 @@ pub fn set_in_world(v: bool) {
     IN_WORLD.with(|w| w.set(v));
 }
 
+pub fn world_builder() -> bool {
+    WORLD_BUILDER.with(|w| w.get())
+}
+
+pub fn set_world_builder(v: bool) {
+    WORLD_BUILDER.with(|w| w.set(v));
+}
+
 /// Index of function-like proc macro `name` of the registered graph (builtins' HOSTED ids).
 pub fn bang_index(name: &str) -> Option<usize> {
     if in_world() {
@@ -384,11 +398,10 @@ pub fn reusable_derive(name: &str) -> bool {
     pure || entry.as_ref().is_some_and(|e| RUNNER.get().is_some_and(|r| r.reusable(e)))
 }
 
-/// Is attribute macro `name` (as run_attr finds it) a pure token transform (derive rule)?
-pub fn reusable_attr(name: &str) -> bool {
-    let (entry, pure) = REG.with(|r| r.borrow().as_ref().and_then(|r| r.macros.iter().find(|(n, e)| n == name && e.kind == Kind::Attr)
-        .map(|(_, e)| (Some(e.clone()), PURE_DERIVE_UNITS.contains(&r.units[e.unit].name.as_str())))).unwrap_or((None, false)));
-    pure || entry.as_ref().is_some_and(|e| RUNNER.get().is_some_and(|r| r.reusable(e)))
+/// Is the resolved attribute a pure token transform (derive rule)?
+pub fn reusable_attr(entry: &Entry) -> bool {
+    let pure = REG.with(|r| r.borrow().as_ref().is_some_and(|r| PURE_DERIVE_UNITS.contains(&r.units[entry.unit].name.as_str())));
+    pure || RUNNER.get().is_some_and(|r| r.reusable(entry))
 }
 
 /// Runs function-like proc macro `i` (bang_index) on `input` in crate `krate`.
@@ -432,8 +445,9 @@ fn register(sess: &std::sync::Arc<crate::Session>, units: &[CrateUnit], std_dir:
     let mut map = vec![usize::MAX; units.len()];
     let mut fresh = Vec::new();
     for (i, u) in units.iter().enumerate() {
+        let features = u.host.as_ref().map_or(&u.features, |h| &h.features);
         let same = if additive {
-            reg.units.iter().position(|r| r.name == u.name && r.src_path == u.src_path && r.edition == u.edition && r.features == u.features && r.proc_macro == u.proc_macro && r.registry == u.registry)
+            reg.units.iter().position(|r| r.name == u.name && r.src_path == u.src_path && r.edition == u.edition && &r.features == features && r.proc_macro == u.proc_macro && r.registry == u.registry)
         } else {
             None
         };
@@ -445,7 +459,8 @@ fn register(sess: &std::sync::Arc<crate::Session>, units: &[CrateUnit], std_dir:
     }
     for &i in &fresh {
         let u = &units[i];
-        reg.units[map[i]] = UnitInfo { name: u.name.clone(), src_path: u.src_path.clone(), edition: u.edition, features: u.features.clone(), deps: u.deps.iter().map(|(d, n)| (map[*d], n.clone())).collect(), proc_macro: u.proc_macro, registry: u.registry, cfgs: Vec::new(), env: Vec::new() };
+        let (features, deps) = u.host.as_ref().map_or((&u.features, &u.deps), |h| (&h.features, &h.deps));
+        reg.units[map[i]] = UnitInfo { name: u.name.clone(), src_path: u.src_path.clone(), edition: u.edition, features: features.clone(), deps: deps.iter().map(|(d, n)| (map[*d], n.clone())).collect(), proc_macro: u.proc_macro, registry: u.registry, cfgs: Vec::new(), env: Vec::new() };
     }
     for &i in &fresh {
         let u = reg.units[map[i]].clone();
@@ -471,6 +486,60 @@ fn register(sess: &std::sync::Arc<crate::Session>, units: &[CrateUnit], std_dir:
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn merged_host_units_keep_features_and_dependencies() {
+    use crate::resolve::{GraphUnit, Units};
+    let root = std::env::temp_dir().join(format!("relax-host-units-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("proc_macro")).unwrap();
+    std::fs::write(root.join("proc_macro/empty.rs"), "").unwrap();
+    let dir = root.display().to_string();
+    let unit = |name: &str, kind: &str, host, features: &[&str], deps: &[(usize, &str)]| GraphUnit {
+        pkg_id: format!("path+file://{dir}/{name}#0.1.0"),
+        name: name.to_string(), kind: vec![kind.to_string()],
+        src_path: format!("{dir}/{name}/src/lib.rs"), edition: "2021".to_string(),
+        host, mode: "build".to_string(), features: features.iter().map(|s| s.to_string()).collect(),
+        deps: deps.iter().map(|(d, n)| (*d, n.to_string())).collect(),
+    };
+    let units = Units { units: vec![
+        unit("app", "bin", false, &[], &[(1, "shared"), (2, "macros")]),
+        unit("shared", "lib", false, &["target"], &[(3, "target_helper")]),
+        unit("macros", "proc-macro", true, &[], &[(4, "shared")]),
+        unit("target_helper", "lib", false, &[], &[]),
+        unit("shared", "lib", true, &["full", "visit"], &[(5, "host_helper")]),
+        unit("host_helper", "lib", true, &["walk"], &[]),
+    ], roots: vec![0], bins: Vec::new() };
+    let mut g = crate::unitgraph::load(&units, false).unwrap();
+    let sess = &std::sync::Arc::new(crate::Session::default());
+    let saved = REG.with(|r| r.borrow_mut().take());
+    register_and_strip(sess, &mut g.crates, &dir, false).unwrap();
+    let shared = g.crates.iter().find(|u| u.name == "shared").unwrap();
+    assert_eq!(shared.features, ["target"]);
+    assert_eq!(shared.deps.len(), 1);
+    assert_eq!(g.crates[shared.deps[0].0].name, "target_helper");
+    let helper = g.crates.iter().find(|u| u.name == "host_helper").unwrap();
+    assert_eq!(helper.src_path, format!("{dir}/proc_macro/empty.rs"));
+    // Re-registering the original graph matches the host feature set, not the app's.
+    let again = crate::unitgraph::load(&units, false).unwrap();
+    register(sess, &again.crates, &dir, true).unwrap();
+    REG.with(|r| {
+        let r = r.borrow();
+        let reg = r.as_ref().unwrap();
+        assert_eq!(reg.units.len(), 5);
+        let shared = reg.units.iter().find(|u| u.name == "shared").unwrap();
+        assert_eq!(shared.features, ["full", "visit"]);
+        assert_eq!(shared.deps.len(), 1);
+        let helper = &reg.units[shared.deps[0].0];
+        assert_eq!(helper.name, "host_helper");
+        assert_eq!(helper.features, ["walk"]);
+        assert_eq!(helper.src_path, format!("{dir}/host_helper/src/lib.rs"));
+        let pm = reg.units.iter().find(|u| u.name == "macros").unwrap();
+        assert_eq!(reg.units[pm.deps[0].0].features, shared.features);
+    });
+    REG.with(|r| *r.borrow_mut() = saved);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Updates registered units with build-script `cfgs` and `env` outputs (`run.rs` after
@@ -538,7 +607,7 @@ pub fn register_and_strip(sess: &std::sync::Arc<crate::Session>, units: &mut [Cr
     // proc-macro crate
     let mut is_dep = vec![false; n];
     for u in units.iter() {
-        for (d, _) in &u.deps {
+        for (d, _) in u.deps.iter().chain(u.host.iter().flat_map(|h| &h.deps)) {
             is_dep[*d] = true;
         }
     }
@@ -557,6 +626,7 @@ pub fn register_and_strip(sess: &std::sync::Arc<crate::Session>, units: &mut [Cr
             units[i].src_path = empty.clone();
             units[i].deps.clear();
             units[i].features.clear();
+            units[i].host = None;
         }
     }
     Ok(())
@@ -578,7 +648,11 @@ pub fn outline_native(name: &str, kind: Kind) -> bool {
     let entry = REG.with(|r| r.borrow().as_ref().and_then(|r| {
         r.derives.iter().chain(&r.macros).find(|(n, e)| n == name && e.kind == kind).map(|(_, e)| e.clone())
     }));
-    entry.as_ref().is_some_and(|e| RUNNER.get().is_some_and(|r| if declaring() { r.declaration_surface(e) } else { r.native(e) }))
+    entry.as_ref().is_some_and(outline_native_entry)
+}
+
+pub(crate) fn outline_native_entry(entry: &Entry) -> bool {
+    RUNNER.get().is_some_and(|r| if declaring() { r.declaration_surface(entry) } else { r.native(entry) })
 }
 
 /// The outline can run only source-matched native entries. A source edit can
@@ -607,18 +681,17 @@ pub fn is_derive_helper(name: &str, derives: &[String]) -> bool {
     REG.with(|r| r.borrow().as_ref().map_or(false, |r| r.helpers.iter().any(|(d, hs)| derives.contains(d) && hs.iter().any(|h| h == name))))
 }
 
-/// Runs attribute macro `name`, as crate `krate` sees it (attr_entry_for), on its arguments
+/// Runs the resolved attribute macro, with `krate` as the calling crate, on its arguments
 /// and item (any thread but the world's).
-pub fn run_attr(sess: &std::sync::Arc<crate::Session>, krate: &str, name: &str, attr: &TokenStream, item: &TokenStream, call_span: Span) -> Result<TokenStream, String> {
+pub fn run_attr(sess: &std::sync::Arc<crate::Session>, krate: &str, e: &Entry, attr: &TokenStream, item: &TokenStream, call_span: Span) -> Result<TokenStream, String> {
     if in_world() {
         return Err("an attribute macro used while the macro world itself is being built".to_string());
     }
-    let e = attr_entry_for(krate, name).ok_or("unknown attribute macro")?;
     let _krate = with_call_krate(krate);
     match RUNNER.get() {
-        Some(r) if declaring() => r.declare(sess, &e, Some(attr), item, call_span),
-        Some(r) => r.call_attr(sess, &e, attr, item, call_span),
-        None => Err(no_runner(&e)),
+        Some(r) if declaring() => r.declare(sess, e, Some(attr), item, call_span),
+        Some(r) => r.call_attr(sess, e, attr, item, call_span),
+        None => Err(no_runner(e)),
     }
 }
 
@@ -658,10 +731,8 @@ fn collect_macro_rules_defs(root: &str, krate: &str, edition: u16) -> Vec<crate:
                 close += 1;
             }
             if close > open {
-                let mt: Vec<crate::macros::MTok> = toks[open + 1..close.min(toks.len())]
-                    .iter()
-                    .map(|t| crate::macros::MTok { kind: t.kind, text: String::from_utf8_lossy(&src[t.lo as usize..t.hi as usize]).into_owned(), pos: t.lo })
-                    .collect();
+                let mt = crate::macros::definition_tokens(&toks[open + 1..close.min(toks.len())],
+                    |lo, hi| &src[lo as usize..hi as usize]);
                 if let Ok(def) = crate::macros::parse_def(&name, krate, edition, &mt) {
                     defs.push(def);
                 }

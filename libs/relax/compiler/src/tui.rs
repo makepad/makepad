@@ -7,8 +7,8 @@
 //! prints above the bar and nothing is garbled. The thread redraws at most ~20 times a second from
 //! plain atomics (phase, crate counter, compiled functions); the compile path takes no lock and
 //! does no extra work. At first present only the bar ends; the transcript continues until exit.
-//! A signal or crash cannot lose data in a forwarding pipe. Only a confirmed clean exit
-//! deletes the transcript. Non-terminal runs keep the same plain output, with a log path.
+//! Fatal fault reports bypass the forwarding pipe through the saved stderr descriptor.
+//! Only a confirmed clean exit deletes the transcript. Non-terminal runs keep plain output.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
@@ -232,7 +232,7 @@ pub(crate) fn flush() {}
 #[cfg(unix)]
 pub use unix::{finish, start};
 #[cfg(unix)]
-pub(crate) use unix::flush;
+pub(crate) use unix::{flush, fault_fd};
 
 #[cfg(unix)]
 mod unix {
@@ -283,8 +283,14 @@ mod unix {
     static READER: Mutex<Option<Reader>> = Mutex::new(None);
     /// bytes read from the pipe that the display has not taken yet
     static TEE: Mutex<Vec<u8>> = Mutex::new(Vec::new());
-    /// the real stderr, for the panic hook when the display is busy
+    /// The real stderr, kept for process lifetime so a signal never races its close.
     static OUT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+    /// Fault reports bypass the tee: a fatal signal kills its forwarding threads.
+    pub(crate) fn fault_fd() -> i32 {
+        let fd = OUT.load(Ordering::Acquire);
+        if fd < 0 { 2 } else { fd }
+    }
 
     struct State {
         /// the real stderr (a dup of it)
@@ -511,16 +517,22 @@ mod unix {
             #[cfg(target_os = "linux")]
             fcntl(write_fd, 1031 /* F_SETPIPE_SZ */, 1 << 20);
         }
-        let out = unsafe { dup(2) };
+        let mut out = OUT.load(Ordering::Acquire);
+        if out < 0 {
+            out = unsafe { dup(2) };
+            if out >= 0 {
+                unsafe { fcntl(out, F_SETFD, FD_CLOEXEC) };
+                OUT.store(out, Ordering::Release);
+            }
+        }
         if out < 0 {
             unsafe { close(read_fd); close(write_fd); }
             return;
         }
         if unsafe { dup2(write_fd, 2) } < 0 {
-            unsafe { close(out); close(write_fd); close(read_fd); }
+            unsafe { close(write_fd); close(read_fd); }
             return;
         }
-        OUT.store(out, Ordering::Release);
         *READER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Reader { fd: read_fd, file: Some(writer) });
         *super::SESSION_LOG.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::zone_alloc::kept_with(|| path.clone()));
         // the path is named at the start with --verbose; a run that ends badly names it when it keeps the log
@@ -641,7 +653,6 @@ mod unix {
         unsafe { dup2(st.out, 2); close(st.write_fd); }
         drain_now();
         pump(st, true);
-        OUT.store(-1, Ordering::Release);
         let clean = EXIT_CODE.load(Ordering::Acquire) == 0 && !ABNORMAL.load(Ordering::Acquire);
         if clean {
             if let Err(e) = std::fs::remove_file(&st.path) {
@@ -650,7 +661,6 @@ mod unix {
         } else {
             out_all(st.out, format!("makepad-run: session log kept at {}\n", st.path.display()).as_bytes());
         }
-        unsafe { close(st.out) };
         *g = None;
     }
 

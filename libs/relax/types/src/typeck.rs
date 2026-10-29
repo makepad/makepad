@@ -875,9 +875,10 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
         let s = prog.syms.get("self").unwrap_or(0);
         let li = fcx.b.locals.len() as u32;
         fcx.b.locals.push(Local { name: s, ty: params[0], mutable, pat: u32::MAX });
-        // `self` is hygienic like any local: a macro defined before the fn does not see it
+        // rustc_resolve/src/late.rs::fresh_binding and ident.rs::resolve_ident_in_lexical_scope:
+        // `self` is a local with the receiver token's context, including a captured macro ident.
         fcx.local_hyg.resize(li as usize + 1, (Some(Vec::new()), 0));
-        let at = prog.files[file as usize].self_param_pos(ast.item(d.item).lo);
+        let at = fsig.self_param_pos;
         fcx.local_hyg[li as usize] = (Some(prog.files[file as usize].hyg_ctxt(at)), at);
         fcx.scopes.push((s, li));
         pi = 1;
@@ -5429,7 +5430,24 @@ impl<'a> Fcx<'a> {
                         Some(v) => v,
                         None => unit,
                     };
-                    if matches!(self.loops[i].kind, LoopKind::Loop | LoopKind::Block) {
+                    // a value of type `!` coerces to any break type (rustc CoerceMany::coerce ->
+                    // Coerce::coerce: `a.is_never()` is NeverToAny into the target): it fixes no
+                    // type of its own (async-stream's `break '__check (loop {})` in every yield)
+                    let never_value = t.is_some_and(|v| self.shallow(v) == self.tcx.tys.never);
+                    if never_value && matches!(self.loops[i].kind, LoopKind::Loop | LoopKind::Block) {
+                        // no break type yet: the target is a fresh variable, which falls back
+                        // like any variable a `!` flowed into (`let x = loop { break panic!() };`)
+                        let target = match self.loops[i].break_ty {
+                            Some(prev) => prev,
+                            None => {
+                                let v = self.fresh(0);
+                                self.diverging.push(v);
+                                self.loops[i].break_ty = Some(v);
+                                v
+                            }
+                        };
+                        if let Some(v) = x.get() { self.set_coerce(v.0, Coerce::Never, target); }
+                    } else if matches!(self.loops[i].kind, LoopKind::Loop | LoopKind::Block) {
                         match self.loops[i].break_ty {
                             Some(prev) => {
                                 // rustc check_expr_break: every `break` coerces to the loop's type
@@ -6503,7 +6521,9 @@ impl<'a> Fcx<'a> {
         if f.is_pub {
             return true;
         }
-        let target = self.prog.def(d).scope;
+        // rustc_resolve build_reduced_graph.rs: try_resolve_visibility restricts
+        // inherited visibility to nearest_parent_mod, not an anonymous block.
+        let target = self.prog.mods[self.prog.def(d).scope as usize].normal;
         let mut m = Some(self.module);
         let mut guard = 0;
         while let Some(cur) = m {
@@ -7539,7 +7559,8 @@ impl<'a> Fcx<'a> {
             // #[rustc_on_unimplemented] messages) for an unmet trait bound
             if let PredicateKind::Clause(crate::next_solver::ClauseKind::Trait(p)) = &predicate.kind {
                 let (prog, tcx) = (self.prog, self.tcx);
-                let msg = trait_error_message(prog, tcx, code, p, &mut |t| self.ty_str(t));
+                let mut msg = trait_error_message(prog, tcx, code, p, &mut |t| self.ty_str(t));
+                if code == "E0277" { msg.push_str(&crate::next_solver::diagnostics::auto_trait_failure_notes(&self.infcx, prog, &obligation.goal, Some(&self.b))); }
                 self.err(obligation.cause.span, format!("{code}: {msg}"));
                 continue;
             }
@@ -7681,7 +7702,20 @@ impl<'a> Fcx<'a> {
         }
         if name == "compile_error" && m.toks.hi > m.toks.lo {
             let f = &self.prog.files[self.file as usize];
-            let msg = crate::lit::unescape_str(f.tok_text(m.toks.lo));
+            // `compile_error!(concat!("..", $t))` (std's is_x86_feature_detected! fallback arm): the
+            // message is the literals' concatenation, as the eager concat! makes it
+            let first = f.tok_text(m.toks.lo);
+            let msg = if first.starts_with('"') || first.starts_with("r#") || first.starts_with("r\"") {
+                crate::lit::unescape_str(first)
+            } else {
+                let mut s = String::new();
+                for i in m.toks.lo..m.toks.hi {
+                    let t = f.tok_text(i);
+                    if t.starts_with('"') { s.push_str(&crate::lit::unescape_str(t)); }
+                    else if t.as_bytes().first().is_some_and(|c| c.is_ascii_digit()) { s.push_str(t); }
+                }
+                s
+            };
             self.err(lo, msg);
             return never;
         }

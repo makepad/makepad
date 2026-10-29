@@ -187,6 +187,7 @@ pub mod sizedness;
 mod normalize_at;
 
 pub mod inspect;
+pub(crate) mod diagnostics;
 pub mod select;
 pub mod codegen;
 pub mod vtable;

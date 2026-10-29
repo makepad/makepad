@@ -329,7 +329,7 @@ impl Fcx<'_> {
             if step.from_unsafe_deref && edition < 2018 {
                 crate::lint::emit(self.prog, self.b.def, &crate::lint::TYVAR_BEHIND_RAW_POINTER, self.file, lo, "type annotations needed");
             } else {
-                if !self.infcx.tainted_by_errors() && !self.tcx.tys.has_error(ty) { self.err(lo, "E0282: type annotations needed for method receiver".into()); }
+                if !self.infcx.tainted_by_errors() && !self.tcx.tys.has_error(ty) { let (r, t) = (self.ty_str(receiver), self.ty_str(ty)); self.err(lo, format!("E0282: type annotations needed for method receiver (the receiver `{r}` dereferences to `{t}`, still unknown)")); }
                 self.eq(ty, self.tcx.tys.error);
                 return Err(());
             }

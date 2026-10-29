@@ -404,9 +404,6 @@ pub struct Unit {
     pub coro_relower: relax_session::sync::Mutex<Vec<u32>>,
     /// drop_may_unwind answers
     pub unwind_drop_cache: crate::conc::MemoMap<TyId, bool>,
-    /// types whose drop_may_unwind / is_unpin answer is being computed, per thread
-    /// (0 drop, 1 unwind, 2 unpin): a recursive type meets its own placeholder on its own thread only
-    cycle_inprog: crate::conc::ShardMap<(u8, TyId, u32), ()>,
     /// (concrete type, dyn type) -> vtable address
     pub vtables: crate::conc::MemoMap<(TyId, TyId), u64>,
     /// static `Location` data per (file, line, col) (#[track_caller] arguments)
@@ -830,9 +827,8 @@ thread_local! {
     /// none): freed when the thread ends (every program thread has one -- they leaked, 80 KB and
     /// two mappings per thread, until a thread-spawning program ran out of mappings).
     static ALTSTACK: AltStack = const { AltStack(std::cell::Cell::new(0)) };
-    /// the top of this thread's stack (recorded by ensure_altstack; 0: unknown): frame walks
-    /// read only [sp, STACK_HI)
-    static STACK_HI: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// This thread's stack (recorded by ensure_altstack; (0, 0): unknown).
+    static STACK_BOUNDS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
     /// inside our fault handler on this thread: a second fault there is fatal, never handled again
     static IN_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// host code that may fault and holds nothing a fault could leave behind (no lock, no
@@ -888,11 +884,12 @@ impl Drop for FaultSafe {
     }
 }
 
-/// The frame-pointer chain from `fp`, bounded to this thread's stack [lo, STACK_HI): only
+/// The frame-pointer chain from `fp`, bounded to this thread's stack above `lo`: only
 /// aligned, strictly rising frame addresses inside it are read, so a corrupt chain ends the walk
 /// instead of faulting (signal-safe: no allocation, no lock). Returns the count written.
 fn walk_fp_bounded(mut fp: u64, lo: u64, out: &mut [u64]) -> usize {
-    let hi = STACK_HI.try_with(|c| c.get()).unwrap_or(0);
+    let (bottom, hi) = STACK_BOUNDS.try_with(|c| c.get()).unwrap_or((0, 0));
+    let lo = lo.max(bottom);
     let mut n = 0;
     while n < out.len() {
         if hi == 0 || fp & 7 != 0 || fp < lo || fp.saturating_add(16) > hi {
@@ -916,8 +913,8 @@ fn walk_fp_bounded(mut fp: u64, lo: u64, out: &mut [u64]) -> usize {
 /// still at [sp]. arm64: the link register returns into JIT code and the function made no frame
 /// record of its own (a non-leaf stores x30 in its record, so [fp+8] would equal it).
 fn leaf_of_jit(f: &os::fault::Fault) -> bool {
-    let hi = STACK_HI.try_with(|c| c.get()).unwrap_or(0);
-    if hi == 0 || f.sp & 7 != 0 || f.sp.saturating_add(8) > hi {
+    let (lo, hi) = STACK_BOUNDS.try_with(|c| c.get()).unwrap_or((0, 0));
+    if hi == 0 || f.sp < lo || f.sp & 7 != 0 || f.sp.saturating_add(8) > hi {
         return false;
     }
     if cfg!(target_arch = "aarch64") {
@@ -929,6 +926,28 @@ fn leaf_of_jit(f: &os::fault::Fault) -> bool {
     } else {
         in_jit_code(unsafe { *(f.sp as *const u64) })
     }
+}
+
+/// A bad indirect jump can lose the frame chain. These are candidate JIT return addresses,
+/// nearest the interrupted sp first; bounded by the recorded stack and the report's frame count.
+fn scan_jit_stack(f: &os::fault::Fault, out: &mut [u64]) -> usize {
+    let (lo, hi) = STACK_BOUNDS.try_with(|c| c.get()).unwrap_or((0, 0));
+    if f.sp < lo || f.sp >= hi || f.sp & 7 != 0 { return 0; }
+    let mut n = 0;
+    if !out.is_empty() && in_jit_code(f.lr.wrapping_sub(1)) {
+        out[n] = f.lr;
+        n += 1;
+    }
+    let mut p = f.sp;
+    while n < out.len() && p.saturating_add(8) <= hi {
+        let ret = unsafe { (p as *const u64).read() };
+        if in_jit_code(ret.wrapping_sub(1)) {
+            out[n] = ret;
+            n += 1;
+        }
+        p += 8;
+    }
+    n
 }
 
 /// A fault report line built on the stack (fault handlers: no allocation, no lock).
@@ -1039,8 +1058,8 @@ unsafe fn raw_name(l: &mut RawLine, a: u64, sp: u64) {
         l.put(b"the burst (scratch) arena");
         return;
     }
-    let hi = STACK_HI.try_with(|c| c.get()).unwrap_or(0);
-    if hi != 0 && a < hi && a.saturating_add(8 << 20) >= hi {
+    let (lo, hi) = STACK_BOUNDS.try_with(|c| c.get()).unwrap_or((0, 0));
+    if hi != 0 && a >= lo && a < hi {
         l.put(b"this thread's stack");
         if a < sp {
             l.put(b" below sp");
@@ -1062,18 +1081,37 @@ unsafe fn raw_name(l: &mut RawLine, a: u64, sp: u64) {
 }
 
 /// A fault that ends the process (or a nested one), from the fault handler with no allocation:
-/// one line with every number (pc, faulting address, sp/fp/lr, the raw frames), then one line
-/// per address naming it (raw_name: the JIT fn and its code version, glue, unit areas, host
-/// symbols).
+/// The fault's numbers reach stderr before stack reads, then candidate return addresses and
+/// their names (raw_name: the JIT fn and its code version, glue, unit areas, host symbols).
 fn raw_report(f: &os::fault::Fault, what: &str) {
-    let mut l = RawLine::new();
-    l.put(b"makepad-run: ").put(what.as_bytes()).put(b" (signal ").dec(f.sig as u64).put(b") on thread ").hex(os::thread::current());
-    l.put(b" pc ").hex(f.pc).put(b" addr ").hex(f.addr).put(b" sp ").hex(f.sp).put(b" fp ").hex(f.fp).put(b" lr ").hex(f.lr).put(b" frames");
     let mut raw = [0u64; 16];
-    let k = walk_fp_bounded(f.fp, f.sp, &mut raw);
-    for r in &raw[..k] {
+    // Print the header before touching the interrupted stack or naming any address.
+    raw_fault_line(f, what, &[], false);
+    let scanned = !in_jit_code(f.pc);
+    let k = if scanned { scan_jit_stack(f, &mut raw) } else { walk_fp_bounded(f.fp, f.sp, &mut raw) };
+    raw_report_frames(f, &raw[..k], scanned);
+}
+
+fn raw_fault_line(f: &os::fault::Fault, what: &str, raw: &[u64], scanned: bool) {
+    let mut l = RawLine::new();
+    l.put(b"makepad-run: ").put(what.as_bytes());
+    if cfg!(windows) { l.put(b" (exception ").hex(f.sig as u32 as u64); }
+    else { l.put(b" (signal ").dec(f.sig as u64); }
+    l.put(b") on thread ").hex(os::thread::current());
+    l.put(b" pc ").hex(f.pc).put(b" addr ").hex(f.addr).put(b" sp ").hex(f.sp).put(b" fp ").hex(f.fp).put(b" lr ").hex(f.lr).put(b" frames");
+    if scanned { l.put(b" (stack scan, candidates)"); }
+    for r in raw {
         l.put(b" ").hex(*r);
     }
+    l.flush();
+}
+
+/// Also used after recovery: the interrupted stack has already been unwound there.
+fn raw_report_frames(f: &os::fault::Fault, raw: &[u64], scanned: bool) {
+    let mut l = RawLine::new();
+    l.put(b"makepad-run:   frames");
+    if scanned { l.put(b" (stack scan, candidates)"); }
+    for r in &raw[..raw.len().min(16)] { l.put(b" ").hex(*r); }
     l.flush();
     unsafe {
         let kind: &[u8] = match f.kind {
@@ -1098,7 +1136,7 @@ fn raw_report(f: &os::fault::Fault, what: &str) {
             raw_name(&mut l, f.lr, f.sp);
             l.flush();
         }
-        for (i, r) in raw[..k].iter().enumerate() {
+        for (i, r) in raw.iter().enumerate() {
             l.put(b"makepad-run:   frame ").dec(i as u64).put(b" ").hex(*r).put(b" in ");
             raw_name(&mut l, r.wrapping_sub(1), f.sp);
             l.flush();
@@ -1115,7 +1153,7 @@ pub fn reassert_signals() {
 /// The calling thread moved to or from a program stack (relax_base::stack::on_program_stack):
 /// the stack bounds cached per thread (fault reports, frame walks, heap samples) are read again.
 pub(crate) fn program_stack_changed() {
-    let _ = STACK_HI.try_with(|c| if c.get() != 0 { c.set(os::fault::stack_hi_of_self()) });
+    let _ = STACK_BOUNDS.try_with(|c| if c.get().1 != 0 { c.set(os::fault::stack_bounds_of_self()) });
     crate::inspect::heap::stack_changed();
 }
 
@@ -1134,7 +1172,7 @@ pub(crate) fn ensure_altstack() {
     if ALTSTACK.try_with(|a| a.0.get() != 0 || { a.0.set(1); false }).unwrap_or(true) {
         return;
     }
-    STACK_HI.with(|c| c.set(os::fault::stack_hi_of_self()));
+    STACK_BOUNDS.with(|c| c.set(os::fault::stack_bounds_of_self()));
     let sp = os::fault::this_thread();
     let _ = ALTSTACK.try_with(|a| a.0.set(sp.max(1)));
 }
@@ -1566,6 +1604,12 @@ fn optimize_tree_panicked(up: *mut Unit, id: u32, p: Box<dyn std::any::Any + Sen
         eprintln!("makepad: O3 optimisation of slot {} ({}) panicked: {} -- O3 dropped for it", id, name, msg);
     }
     (id, Err(format!("optimize_tree panicked: {}", msg)))
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+extern "C" {
+    #[link_name = "pthread_atfork"]
+    fn host_pthread_atfork(prepare: Option<unsafe extern "C" fn()>, parent: Option<unsafe extern "C" fn()>, child: Option<unsafe extern "C" fn()>) -> i32;
 }
 
 /// fork() in a program run by Relax: the child has only the forking thread, and may go on
@@ -2248,8 +2292,8 @@ pub(crate) fn collect_frames(rbp: u64, pc: u64, pc_is_ret: bool) -> Vec<u64> {
     // the chain is read only inside this thread's stack (from here up): a corrupt frame pointer
     // ends the walk instead of faulting
     let here = &rbp as *const u64 as u64;
-    if STACK_HI.try_with(|c| c.get()).unwrap_or(0) == 0 {
-        let _ = STACK_HI.try_with(|c| c.set(os::fault::stack_hi_of_self()));
+    if STACK_BOUNDS.try_with(|c| c.get().1).unwrap_or(0) == 0 {
+        let _ = STACK_BOUNDS.try_with(|c| c.set(os::fault::stack_bounds_of_self()));
     }
     let mut raw = [0u64; FAULT_FRAMES + 16];
     let n = walk_fp_bounded(rbp, here.min(rbp), &mut raw);
@@ -3203,7 +3247,7 @@ unsafe fn on_fault_locked(f: &os::fault::Fault, hooks: &os::fault::Hooks) -> os:
         Containment::FatalReport => fatal_report(f),
         Containment::PassOn => {
             // not ours: the handler we replaced (a library's), else the default action
-            if !hooks.chained && f.kind != Kind::Trap {
+            if !hooks.chained {
                 raw_report(f, "fault outside JIT code, not contained: the process ends");
                 // MAKEPAD_RUN_FAULT_REGS (opt-in; allocates): after the raw lines
                 (hooks.debug)();
@@ -3329,13 +3373,7 @@ unsafe fn record_fault(f: &os::fault::Fault, code: u8) {
         r.addr = f.addr;
         r.guard_depth = GUARD_DEPTH.try_with(|g| g.get()).unwrap_or(0);
         r.const_eval_depth = CONST_EVAL_DEPTH.try_with(|g| g.get()).unwrap_or(0);
-        // a fault in a leaf JIT code called: its caller is the JIT frame the fp chain misses
-        let mut k = 0;
-        if !in_jit_code(f.pc) && leaf_of_jit(f) {
-            r.raw[0] = if cfg!(target_arch = "aarch64") { f.lr } else { *(f.sp as *const u64) };
-            k = 1;
-        }
-        r.n = k + walk_fp_bounded(f.fp, f.sp, &mut r.raw[k..]);
+        r.n = if in_jit_code(f.pc) { walk_fp_bounded(f.fp, f.sp, &mut r.raw) } else { scan_jit_stack(f, &mut r.raw) };
     });
 }
 
@@ -3349,12 +3387,18 @@ unsafe fn materialize_fault() {
         _ => return,
     };
     ensure_altstack();
+    // Fatal runs need a direct report before symbolication or any owner call can fail.
+    let f = os::fault::Fault { kind: rec.kind, sig: rec.sig, pc: rec.pc, sp: rec.sp, fp: rec.fp, addr: rec.addr, lr: 0 };
+    if rec.pending != 3 && rec.guard_depth == 0 && !(rec.const_eval_depth > 0 && (&*UNIT).prog.session.options.const_fuel)
+        && FAULTS_FATAL.load(Ordering::Relaxed) && !crate::domain::in_app_domain() {
+        raw_fault_line(&f, "fatal fault in program code: the process ends", &rec.raw[..rec.n.min(16)], !in_jit_code(rec.pc));
+        raw_report_frames(&f, &rec.raw[..rec.n], !in_jit_code(rec.pc));
+    }
     let frames = frames_from_raw(rec.pc, false, &rec.raw[..rec.n]);
     if rec.pending == 3 {
         PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: "hang".to_string(), message: "watchdog: the call did not return in time".to_string(), site: u64::MAX, frames, fault_addr: 0, location: String::new() }));
         return;
     }
-    let f = os::fault::Fault { kind: rec.kind, sig: rec.sig, pc: rec.pc, sp: rec.sp, fp: rec.fp, addr: rec.addr, lr: 0 };
     let kind = match rec.kind {
         Kind::Segv | Kind::Bus if is_stack_fault(rec.addr, rec.sp) => "stack overflow",
         Kind::Segv => "segfault",
@@ -3462,53 +3506,89 @@ impl Unit {
 
 // ------------------------------------------------------------ the unit
 
-crate::memo_local! {
-    /// The memoized recursive type queries in progress on this thread (drop_may_unwind 1,
-    /// is_unpin 2; outermost first) and the outermost entry a cycle was cut
-    /// at (usize::MAX: none). An answer computed below a cut of an entry still in progress
-    /// further out is provisional (it misses what that entry's other parts contribute) and is not
-    /// memoized: memoizing it made the answer depend on which type was asked first, and with it
-    /// the lowered code (Call vs Invoke, drop glue) -- O1 RIR that depended on build order.
-    static CYC_AT: std::cell::RefCell<Vec<(u8, TyId)>>;
-}
-thread_local! {
-    static CYC_CUT: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+/// Query-local SCCs: rustc_data_structures/src/graph/scc/mod.rs,
+/// SccsConstruction::walk_unvisited_node. Keep returned provisional members on the stack
+/// until their root completes; every member then has the root's answer. These queries
+/// combine with OR (drop, cycle = false) or AND (Unpin, cycle = true).
+#[derive(Default)]
+struct TypeCycle {
+    at: crate::fxhash::HashMap<TyId, usize>,
+    stack: Vec<(TyId, usize)>, // type, lowlink
+    current: Option<usize>,
 }
 
-// try_with: CYC_AT has a destructor, and a thread's TLS destructors may run compiled code that
-// is compiled right then (std's key_dtor): after CYC_AT is gone every answer counts as provisional.
-
-/// A cycle met (kind, t) in progress: note how far out it reaches.
-fn cyc_cut(kind: u8, t: TyId) {
-    let at = CYC_AT.try_with(|m| m.borrow().iter().rposition(|x| *x == (kind, t)).unwrap_or(0)).unwrap_or(0);
-    CYC_CUT.with(|c| c.set(c.get().min(at)));
-}
-
-/// Enters query (kind, t): its depth (usize::MAX: no record, the thread's TLS is being torn down).
-fn cyc_enter(kind: u8, t: TyId) -> usize {
-    CYC_AT
-        .try_with(|m| {
-            let mut m = m.borrow_mut();
-            m.push((kind, t));
-            m.len() - 1
-        })
-        .unwrap_or(usize::MAX)
-}
-
-/// Leaves the query at `depth`: whether its answer is provisional (not to be memoized).
-fn cyc_leave(depth: usize) -> bool {
-    if depth == usize::MAX {
-        return true;
-    }
-    let _ = CYC_AT.try_with(|m| m.borrow_mut().truncate(depth));
-    CYC_CUT.with(|c| {
-        let cut = c.get();
-        if cut >= depth {
-            // a cut of this query itself (or none): its answer is final
-            c.set(usize::MAX);
+impl TypeCycle {
+    fn query(&mut self, t: TyId, cache: &crate::conc::MemoMap<TyId, bool>, seed: bool, f: impl FnOnce(&mut Self) -> bool) -> bool {
+        if let Some(r) = cache.get(&t) { return r; }
+        if let Some(&at) = self.at.get(&t) {
+            let current = self.current.unwrap();
+            self.stack[current].1 = self.stack[current].1.min(at);
+            return seed;
         }
-        cut < depth
-    })
+        let depth = self.stack.len();
+        self.at.insert(t, depth);
+        self.stack.push((t, depth));
+        let parent = self.current.replace(depth);
+        let r = f(self);
+        self.current = parent;
+        let low = self.stack[depth].1;
+        if low == depth {
+            for (t, _) in self.stack.drain(depth..) {
+                self.at.remove(&t);
+                cache.insert(t, r);
+            }
+        } else if let Some(parent) = parent {
+            self.stack[parent].1 = self.stack[parent].1.min(low);
+        }
+        r
+    }
+}
+
+#[cfg(test)]
+mod type_cycle_tests {
+    use super::{TypeCycle, TyId};
+    use crate::conc::MemoMap;
+
+    fn walk(t: TyId, cycle: &mut TypeCycle, cache: &MemoMap<TyId, bool>, seed: bool, decisive: bool, visits: &mut [usize; 32]) -> bool {
+        cycle.query(t, cache, seed, |cycle| {
+            visits[t.0 as usize] += 1;
+            if t.0 == 30 { return if decisive { !seed } else { seed }; }
+            if t.0 == 31 { return seed; }
+            let mut changed = false;
+            for next in [(t.0 + 1) % 30, (t.0 + 2) % 30, 0] {
+                changed |= walk(TyId(next), cycle, cache, seed, decisive, visits) != seed;
+            }
+            if t.0 == 0 {
+                // The SCC is still provisional, including members whose calls returned.
+                for i in 0..30 { assert_eq!(cache.get(&TyId(i)), None); }
+                // An independent component below a cycle must keep its own answer.
+                changed |= walk(TyId(31), cycle, cache, seed, decisive, visits) != seed;
+                assert_eq!(cache.get(&TyId(31)), Some(seed));
+                changed |= walk(TyId(30), cycle, cache, seed, decisive, visits) != seed;
+            }
+            if changed { !seed } else { seed }
+        })
+    }
+
+    #[test]
+    fn recursive_types_are_computed_once_and_published_at_the_root() {
+        for seed in [false, true] {
+            for decisive in [false, true] {
+                for root in [0, 15, 29] {
+                    let cache = MemoMap::with_bits(4);
+                    let mut visits = [0; 32];
+                    let answer = if decisive { !seed } else { seed };
+                    assert_eq!(walk(TyId(root), &mut TypeCycle::default(), &cache, seed, decisive, &mut visits), answer);
+                    for i in 0..31 {
+                        assert_eq!(cache.get(&TyId(i)), Some(answer));
+                        assert_eq!(walk(TyId(i), &mut TypeCycle::default(), &cache, seed, decisive, &mut visits), answer);
+                    }
+                    assert_eq!(cache.get(&TyId(31)), Some(seed));
+                    assert_eq!(visits, [1; 32]);
+                }
+            }
+        }
+    }
 }
 
 /// A unit's data and statics parts of its reservation.
@@ -3726,7 +3806,6 @@ impl Unit {
             coro_selfref: Default::default(),
             coro_relower: Default::default(),
             unwind_drop_cache: Default::default(),
-            cycle_inprog: Default::default(),
             vtables: crate::conc::MemoMap::new_kept(16),
             locations: Default::default(),
             const_failed: std::collections::HashSet::new(),
@@ -4621,54 +4700,44 @@ impl Unit {
     /// `PhantomPinned` is not). Uncertain cases (trait objects without `+ Unpin`, opaque types,
     /// closures over them) answer false: the safe side for noalias.
     pub fn is_unpin(&self, t: TyId) -> bool {
+        self.is_unpin_inner(t, &mut TypeCycle::default())
+    }
+
+    fn is_unpin_inner(&self, t: TyId, cycle: &mut TypeCycle) -> bool {
         let t = self.tcx.tys.erase_regions(t);
         // a field's associated-type projection (`<A as Allocator<u8>>::AllocatedMemory`) names
         // the type it normalises to, as rustc's auto-trait selection sees it
         let t = self.tcx.try_normalize_erasing_regions(&self.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.prog), t).unwrap_or(t);
-        if let Some(b) = self.unpin_cache.get(&t) {
-            return b;
-        }
-        // a recursive type is Unpin unless something else says no
-        let ik = (2u8, t, crate::conc::thread_id());
-        if self.cycle_inprog.contains(&ik) {
-            cyc_cut(2, t);
-            return true;
-        }
-        self.cycle_inprog.insert(ik, ());
-        let my_depth = cyc_enter(2, t);
-        let r = match self.tcx.tys.kind(t).clone() {
-            TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::Never | TyKind::Str => true,
-            TyKind::Ref(..) | TyKind::Ptr(..) | TyKind::FnPtr(..) | TyKind::FnDef(..) => true,
-            TyKind::Tuple(v) => self.tcx.tys.list(v).iter().all(|x| self.is_unpin(*x)),
-            TyKind::Array(e, _) | TyKind::Slice(e) => self.is_unpin(e),
-            // an async block / fn body is !Unpin (rustc: it may hold references into itself)
-            TyKind::Closure(file, ce, crate::types::ClosureArgs { tupled_upvars_ty: up, .. }) => !self.tcx.coroutines.contains(&(file, ce)) && self.is_unpin(up),
-            TyKind::Adt(d, args, _) => {
-                if self.prog.name(d) == "PhantomPinned" {
-                    false
-                } else {
-                    let fields: Vec<TyId> = match self.tcx.adts.get(&d) {
-                        Some(a) => a.variants.iter().flat_map(|v| v.fields.iter().map(|f| f.ty)).collect(),
-                        None => Vec::new(),
-                    };
-                    let mut ok = true;
-                    for f in fields {
-                        let ft = self.tcx.tys.subst_erasing_regions(f, self.tcx.tys.list(args));
-                        if !self.is_unpin(ft) {
-                            ok = false;
-                            break;
+        cycle.query(t, &self.unpin_cache, true, |cycle| {
+            match self.tcx.tys.kind(t).clone() {
+                TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::Never | TyKind::Str => true,
+                TyKind::Ref(..) | TyKind::Ptr(..) | TyKind::FnPtr(..) | TyKind::FnDef(..) => true,
+                TyKind::Tuple(v) => self.tcx.tys.list(v).iter().all(|x| self.is_unpin_inner(*x, cycle)),
+                TyKind::Array(e, _) | TyKind::Slice(e) => self.is_unpin_inner(e, cycle),
+                // an async block / fn body is !Unpin (rustc: it may hold references into itself)
+                TyKind::Closure(file, ce, crate::types::ClosureArgs { tupled_upvars_ty: up, .. }) => !self.tcx.coroutines.contains(&(file, ce)) && self.is_unpin_inner(up, cycle),
+                TyKind::Adt(d, args, _) => {
+                    if self.prog.name(d) == "PhantomPinned" {
+                        false
+                    } else {
+                        let fields: Vec<TyId> = match self.tcx.adts.get(&d) {
+                            Some(a) => a.variants.iter().flat_map(|v| v.fields.iter().map(|f| f.ty)).collect(),
+                            None => Vec::new(),
+                        };
+                        let mut ok = true;
+                        for f in fields {
+                            let ft = self.tcx.tys.subst_erasing_regions(f, self.tcx.tys.list(args));
+                            if !self.is_unpin_inner(ft, cycle) {
+                                ok = false;
+                                break;
+                            }
                         }
+                        ok
                     }
-                    ok
                 }
+                _ => false,
             }
-            _ => false,
-        };
-        self.cycle_inprog.remove(&ik);
-        if !cyc_leave(my_depth) {
-            self.unpin_cache.insert(t, r);
-        }
-        r
+        })
     }
 
     /// The program's `#[global_allocator]` static and its type (rustc_metadata creader
@@ -4761,6 +4830,12 @@ impl Unit {
                     // so far (its state without the saved locals) answers this lowering; the
                     // lowering is repeated once the frame is known (coro_frame)
                     if self.coro_busy.lock().unwrap_or_else(|e| e.into_inner()).contains(&self.tcx.tys.erase_regions(ct)) {
+                        // a lowering ahead on a helper thread meanwhile: the layout so far is the
+                        // owner's poll lowering's alone; code made from it (an `async fn` returning
+                        // only its state byte, its callers passing 16 bytes) breaks the ABI. The
+                        // build is redone on the owner once the frame is known (r_spawn_e: tokio's
+                        // yield_now resumed after completion).
+                        lower_ahead_needs_unit();
                         let mut s = self.coro_selfref.lock().unwrap_or_else(|e| e.into_inner());
                         let ct = self.tcx.tys.erase_regions(ct);
                         if !s.contains(&ct) { let _k = crate::zone_alloc::kept(); s.push(ct); }
@@ -4833,6 +4908,11 @@ impl Unit {
             Ok(f) => u.coro_rir.insert(id, f),
             Err(e) => {
                 if u.fns[id as usize].build_err.is_none() {
+                    // its compile error surfaces when the body is first polled; say it now
+                    // (verbose): a frame without a layout is where a body's error is first met
+                    if crate::run::VERBOSE.load(Ordering::Relaxed) {
+                        eprintln!("makepad-run: coroutine frame of {} not built: {}", u.fns[id as usize].name, e.lines().next().unwrap_or(""));
+                    }
                     u.reload_errors.insert(id);
                     u.fns[id as usize].build_err = Some(e.into_boxed_str());
                 }
@@ -4875,85 +4955,79 @@ impl Unit {
     }
 
     /// Whether dropping a `t` can unwind: some Drop impl in it outside Relax's std (core /
-    /// alloc / std), or a trait object (its vtable's drop is unknown). std's Drop impls only
-    /// free memory and drop the values they own (their type arguments): a Vec<String> drop
+    /// alloc / std), or a trait object (its vtable's drop is unknown). std's Drop impls are
+    /// approximated as freeing memory and dropping their type arguments: a Vec<String> drop
     /// cannot unwind, a Vec<UserType> drop can if UserType's Drop is user code. A drop that
     /// cannot unwind is a plain call (no cleanup pad behind it).
     pub fn drop_may_unwind(&self, t: TyId) -> bool {
+        self.drop_may_unwind_inner(t, &mut TypeCycle::default())
+    }
+
+    fn drop_may_unwind_inner(&self, t: TyId, cycle: &mut TypeCycle) -> bool {
         let t = self.tcx.tys.erase_regions(t);
-        if let Some(b) = self.unwind_drop_cache.get(&t) {
-            return b;
-        }
-        if !self.tcx.needs_drop(&self.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.prog), t) {
-            return false;
-        }
-        // recursive types: assume no while computing (a cycle only goes through pointers); answers
-        // below such a cut are not memoized (cyc_leave)
-        let ik = (1u8, t, crate::conc::thread_id());
-        if self.cycle_inprog.contains(&ik) {
-            cyc_cut(1, t);
-            return false;
-        }
-        self.cycle_inprog.insert(ik, ());
-        let my_depth = cyc_enter(1, t);
-        let k = self.tcx.tys.kind(t).clone();
-        let r = match k {
-            TyKind::Adt(d, args, _) => {
-                let imp = self.tcx.adt_destructor(d).map(|dtor| self.prog.def(dtor.did).parent);
-                let user_impl = match imp {
-                    Some(i) if i != crate::program::NO_DEF => {
-                        let kr = self.prog.def(i).krate as usize;
-                        let name = self.prog.syms.str(self.prog.crates[kr].name);
-                        !matches!(name, "core" | "alloc" | "std")
-                    }
-                    Some(_) => true,
-                    None => false,
-                };
-                if user_impl {
-                    true
-                } else {
-                    let mut any = false;
-                    if imp.is_some() {
-                        // a std Drop impl drops what its type arguments own
-                        for a in self.tcx.tys.list(args.clone()).iter().copied() {
-                            if self.drop_may_unwind(a) {
-                                any = true;
+        cycle.query(t, &self.unwind_drop_cache, false, |cycle| {
+            // rustc_middle/src/ty/util.rs: Ty::needs_drop / needs_drop_components;
+            // rustc_mir_transform/src/shim.rs: build_drop_shim keeps unwind edges for
+            // destructor calls and field drops. Std destructor bodies are approximated below.
+            if !self.tcx.needs_drop(&self.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.prog), t) {
+                return false;
+            }
+            let k = self.tcx.tys.kind(t).clone();
+            match k {
+                TyKind::Adt(d, args, _) => {
+                    let imp = self.tcx.adt_destructor(d).map(|dtor| self.prog.def(dtor.did).parent);
+                    let user_impl = match imp {
+                        Some(i) if i != crate::program::NO_DEF => {
+                            let kr = self.prog.def(i).krate as usize;
+                            let name = self.prog.syms.str(self.prog.crates[kr].name);
+                            !matches!(name, "core" | "alloc" | "std")
+                        }
+                        Some(_) => true,
+                        None => false,
+                    };
+                    if user_impl {
+                        true
+                    } else {
+                        let mut any = false;
+                        if imp.is_some() {
+                            // Approximate std Drop through owned type arguments. This misses
+                            // callbacks: library/alloc/src/io/buffered/bufwriter.rs,
+                            // BufWriter::drop / flush_buf can unwind in Write::write.
+                            for a in self.tcx.tys.list(args.clone()).iter().copied() {
+                                if self.drop_may_unwind_inner(a, cycle) {
+                                    any = true;
+                                }
                             }
                         }
-                    }
-                    if let Some(adt) = self.tcx.adts.get(&d) {
-                        if !adt.is_union {
-                            for (vi, v) in adt.variants.iter().enumerate() {
-                                for fi in 0..v.fields.len() {
-                                    let ft = self.tcx.field_ty(&self.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.prog), d, vi as u32, fi as u32, self.tcx.tys.list(args));
-                                    if self.drop_may_unwind(ft) {
-                                        any = true;
+                        if let Some(adt) = self.tcx.adts.get(&d) {
+                            if !adt.is_union {
+                                for (vi, v) in adt.variants.iter().enumerate() {
+                                    for fi in 0..v.fields.len() {
+                                        let ft = self.tcx.field_ty(&self.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.prog), d, vi as u32, fi as u32, self.tcx.tys.list(args));
+                                        if self.drop_may_unwind_inner(ft, cycle) {
+                                            any = true;
+                                        }
                                     }
                                 }
                             }
                         }
+                        any
+                    }
+                }
+                TyKind::Tuple(v) => {
+                    let mut any = false;
+                    for x in self.tcx.tys.list(v).iter().copied() {
+                        if self.drop_may_unwind_inner(x, cycle) {
+                            any = true;
+                        }
                     }
                     any
                 }
+                TyKind::Array(e, n) => n.try_to_target_usize(&self.tcx.tys) != Some(0) && self.drop_may_unwind_inner(e, cycle),
+                TyKind::Closure(_, _, crate::types::ClosureArgs { tupled_upvars_ty: up, .. }) => self.drop_may_unwind_inner(up, cycle),
+                _ => true,
             }
-            TyKind::Tuple(v) => {
-                let mut any = false;
-                for x in self.tcx.tys.list(v).iter().copied() {
-                    if self.drop_may_unwind(x) {
-                        any = true;
-                    }
-                }
-                any
-            }
-            TyKind::Array(e, n) => n.try_to_target_usize(&self.tcx.tys) != Some(0) && self.drop_may_unwind(e),
-            TyKind::Closure(_, _, crate::types::ClosureArgs { tupled_upvars_ty: up, .. }) => self.drop_may_unwind(up),
-            _ => true,
-        };
-        self.cycle_inprog.remove(&ik);
-        if !cyc_leave(my_depth) {
-            self.unwind_drop_cache.insert(t, r);
-        }
-        r
+        })
     }
 
     /// The function of a closure type (its body is lowered from the owner instance's).
@@ -5838,6 +5912,46 @@ impl Unit {
     /// as const_addr_shared).
     pub fn const_block_shared(&self, body: &crate::typeck::Body, bl: crate::ast::BlockId, t: TyId) -> Option<Vec<u8>> {
         owner::call(owner::Class::Job, || unsafe { crate::ctfe::eval_const_block(&mut *self.self_ptr.0, body, bl, t) })
+    }
+
+    /// rustc_mir_transform/src/promote_consts.rs: Promoter::promote_temp. Evaluate the
+    /// extracted expression once; unsupported CTFE uses a compiled initializer, never runtime stores.
+    pub fn promoted_addr_shared(&self, body: &Body, e: crate::ast::ExprId, t: TyId, parent: u32) -> Result<u64, String> {
+        owner::call(owner::Class::Job, || unsafe { (&mut *self.self_ptr.0).eval_promoted(body, e, t, parent) })
+    }
+
+    fn eval_promoted(&mut self, body: &Body, e: crate::ast::ExprId, t: TyId, parent: u32) -> Result<u64, String> {
+        owner::pure_note(owner::PURE_BG_EVAL);
+        owner::forbid_in_publish("promoted initializer", parent);
+        let l = self.layout_of(t);
+        let bytes = match crate::ctfe::eval_promoted(self, body, e, t) {
+            Some(v) => v,
+            None => {
+                let mut cx = Lcx::new(self, body, format!("promoted {}:{}", body.file, e.0), parent);
+                cx.lower_promoted(e, t);
+                cx.finish();
+                if let Some(err) = cx.errors.first() { return Err(err.clone()); }
+                cx.f.verify()?;
+                let code = relax_codegen::native::compile(&self.prog.session.options, &cx.f, &self.env)?;
+                let entry = self.emit_or_redirect(&code.code, &code.relocs, "promoted initializer")?;
+                let buf = self.rw_data(l.size.max(1) as u64, l.align.max(8) as u64);
+                let result = {
+                    let _scope = ConstEvalScope::enter(&self.prog, body.def);
+                    unsafe { call_jit(self as *mut Unit, entry, buf) }
+                };
+                if BUSY_PENDING.with(|b| b.replace(false)) {
+                    std::panic::resume_unwind(Box::new(crate::preempt::OwnerBusy));
+                }
+                if let Err(p) = result {
+                    if p.message.contains(DEFERRED_RETRY) { DEFERRED_ABORT.with(|a| a.set(true)); }
+                    return Err(format!("E0080: promoted initializer: {}", p.message));
+                }
+                crate::ctfe::zero_undefined(self, t, buf);
+                unsafe { std::slice::from_raw_parts(buf as *const u8, l.size as usize) }.to_vec()
+            }
+        };
+        // Typed data preserves function-entry relocations in cached code, as for const items.
+        Ok(self.data(&bytes, l.align.max(1) as u64, crate::syms::DataKind::Typed(t)))
     }
 
     /// static_addr from shared lowering (a unit call, as const_addr_shared; lowering ahead reads an
@@ -10205,8 +10319,6 @@ pub(crate) struct Frame {
     o2_snapshot: bool,
     o3_first: bool,
     o3_first_at: u64,
-    cyc_at: Vec<(u8, TyId)>,
-    cyc_cut: usize,
     missing: (Vec<(u32, String)>, usize),
     rec: *const std::cell::Cell<Option<MainCompile>>,
     tainted: bool,
@@ -10240,8 +10352,6 @@ pub(crate) fn frame_enter(rec: *const ()) -> Frame {
         o2_snapshot: O2_SNAPSHOT.with(|c| c.replace(false)),
         o3_first: O3_FIRST.with(|c| c.replace(false)),
         o3_first_at: O3_FIRST_AT.with(|c| c.replace(0)),
-        cyc_at: CYC_AT.with(|m| std::mem::take(&mut *m.borrow_mut())),
-        cyc_cut: CYC_CUT.with(|c| c.replace(usize::MAX)),
         missing: crate::program::missing_save(),
         rec: MAIN_REC_AT.with(|r| r.replace(rec as *const std::cell::Cell<Option<MainCompile>>)),
         tainted: TAINTED.with(|t| t.replace(false)),
@@ -10273,8 +10383,6 @@ pub(crate) fn frame_leave(f: Frame) -> bool {
     O2_SNAPSHOT.with(|c| c.set(f.o2_snapshot));
     O3_FIRST.with(|c| c.set(f.o3_first));
     O3_FIRST_AT.with(|c| c.set(f.o3_first_at));
-    CYC_AT.with(|m| *m.borrow_mut() = f.cyc_at);
-    CYC_CUT.with(|c| c.set(f.cyc_cut));
     crate::program::missing_restore(f.missing);
     MAIN_REC_AT.with(|r| r.set(f.rec));
     // what a tainted request built is not kept for others to inline
@@ -20611,6 +20719,11 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"exit" => Some(recorded_exit as *const () as usize),
         #[cfg(unix)]
         b"fork" => Some(relax_fork as *const () as usize),
+        // glibc keeps pthread_atfork in libc_nonshared.a (a static wrapper of __register_atfork that
+        // every C program links): dlsym never finds it, so the loader's own linked copy answers
+        // (rand 0.8's ReseedingRng registers its fork handler at its first use)
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        b"pthread_atfork" => Some(host_pthread_atfork as *const () as usize),
         #[cfg(unix)]
         b"__relax_precompile" => Some(relax_precompile as *const () as usize),
         #[cfg(unix)]
@@ -23170,7 +23283,7 @@ fn typeck_ahead(f: &FrontShared, d: DefId, args: Vec<TyId>, depth: u32, queued: 
         if std::env::var_os("MAKEPAD_RUN_AHEAD_TRACE").is_some() {
             match &r {
                 Err(p) => eprintln!("ahead-panic {} : {}", prog.def_path(key.0), p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_default()),
-                Ok(b) if !b.errors.is_empty() => eprintln!("ahead-error {} : {}", prog.def_path(key.0), b.errors[0].chars().take(160).collect::<String>()),
+                Ok(b) if !b.errors.is_empty() => eprintln!("ahead-error {} {:?} : {}", prog.def_path(key.0), key.1, b.errors.join(" | ").chars().take(1500).collect::<String>()),
                 _ => {}
             }
         }

@@ -192,16 +192,19 @@ pub fn cmd_run(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
 /// The graph resolved here is the boot's (BOOT_UNITS): the resolve does not run twice.
 fn hosted_program(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> bool {
     let mut i = 0;
+    let mut flags = Vec::new();
+    let mut workspace = workspace_dir();
     while i < args.len() && args[i].starts_with("--") {
         match args[i].as_str() {
             // a build script's child (a saved graph) or a re-run: not a host decision made here
             "--units" => return true,
-            "--report-to" | "--run-dir" | "--workspace-dir" | "--cfg" | "--boundary" => i += 2,
+            "--offline" | "--frozen" => { flags.push(args[i].clone()); i += 1; }
+            "--workspace-dir" => { let Some(dir) = args.get(i + 1) else { return false }; workspace = dir.clone(); i += 2; }
+            "--report-to" | "--run-dir" | "--cfg" | "--boundary" => i += 2,
             _ => i += 1,
         }
     }
     let Some(package) = args.get(i).cloned() else { return false };
-    let mut flags = Vec::new();
     let mut words = args[i + 1..].iter().take_while(|a| a.as_str() != "--");
     while let Some(w) = words.next() {
         match w.as_str() {
@@ -211,7 +214,7 @@ fn hosted_program(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> boo
             _ => flags.push(w.clone()),
         }
     }
-    let Ok(units) = unitgraph::unit_graph(sess, &workspace_dir(), &package, &flags) else { return false };
+    let Ok(units) = unitgraph::unit_graph(sess, &workspace, &package, &flags) else { return false };
     let hal = units.units.iter().any(|u| u.name.replace('-', "_") == "makepad_hal");
     *BOOT_UNITS.lock().unwrap() = Some((package, flags, units));
     hal
@@ -286,18 +289,23 @@ pub(crate) fn take_boot_resolved() -> Option<Resolved> {
 }
 
 
-/// rustc's crate locator finds `extern crate proc_macro;` in the sysroot for any crate (a
-/// `#![crate_type = "proc-macro"]` file checked on its own, a test's helper). Relax's sysroot is
-/// its std dir, whose `proc_macro` the app graph otherwise never loads (proc-macro crates run in the
-/// macro host): a check whose root unit declares the crate gets it as a dependency unit.
+/// rustc's crate locator finds `extern crate proc_macro;` in the sysroot for any crate, of any
+/// crate type (rustc_metadata locator.rs / creader.rs `resolve_crate` on an `extern crate` item:
+/// sysroot crates need no `--extern`). Relax's sysroot is its std dir, whose `proc_macro` the app
+/// graph otherwise never loads (proc-macro crates run in the macro host with their own copy): every
+/// other unit that declares the crate gets it as a dependency unit, in check and run alike. That is
+/// how proc-macro2 is a plain library in a build script (string_cache_codegen in web_atoms'): there
+/// `proc_macro::is_available()` is false (no macro call on the thread) and it takes its fallback.
 fn with_sysroot_proc_macro(mut units: unitgraph::Units, std_dir: &str) -> unitgraph::Units {
     let pm_root = format!("{}/proc_macro/lib.rs", std_dir);
     if units.units.iter().any(|u| u.name == "proc_macro") || !crate::vfs::exists(&pm_root) { return units; }
     let wants = |u: &unitgraph::GraphUnit| crate::vfs::read_shared(&u.src_path).is_ok_and(|src| {
+        // the crate root's `extern crate proc_macro` (not `proc_macro2`): a cheap byte scan, where
+        // the item is in practice; a declaration in a submodule is not seen
         const NEEDLE: &[u8] = b"extern crate proc_macro";
-        src.windows(NEEDLE.len()).any(|w| w == NEEDLE)
+        src.windows(NEEDLE.len()).enumerate().any(|(i, w)| w == NEEDLE && !src.get(i + NEEDLE.len()).is_some_and(|&c| c == b'_' || c.is_ascii_alphanumeric()))
     });
-    let roots: Vec<usize> = units.roots.iter().copied().filter(|&r| r < units.units.len() && !units.units[r].kind.iter().any(|k| k == "proc-macro") && wants(&units.units[r])).collect();
+    let roots: Vec<usize> = (0..units.units.len()).filter(|&r| !units.units[r].kind.iter().any(|k| k == "proc-macro") && wants(&units.units[r])).collect();
     if roots.is_empty() { return units; }
     let pm = units.units.len();
     units.units.push(unitgraph::GraphUnit {
@@ -341,7 +349,7 @@ pub(crate) fn resolve_package(
     } else {
         std::fs::read(units_json).map_err(|e| format!("{}: {}", units_json, e)).and_then(|d| unitgraph::Units::from_json(&d))
     }?;
-    let units = if check_only { with_sysroot_proc_macro(units, std_dir) } else { units };
+    let units = with_sysroot_proc_macro(units, std_dir);
     let t_load = Instant::now();
     let mut g = unitgraph::load(&units, check_only)?;
     let t_loaded = Instant::now();
@@ -356,12 +364,15 @@ pub(crate) fn resolve_package(
             (MAIN_HOST.get().expect("run host").open)(&package, &dir)
         })
     });
-    // provided crates bind only to their own source (before substitution rewrites deps)
+    // provided crates bind only to their own source (before substitution rewrites deps); the
+    // sysroot proc_macro (with_sysroot_proc_macro) is part of Relax's std, not of their identity
+    let pm_root = crate::vfs::normalize_path(&format!("{}/proc_macro/lib.rs", std_dir));
+    let sysroot_pm: Vec<bool> = g.crates.iter().map(|c| c.name == "proc_macro" && crate::vfs::normalize_path(&c.src_path) == pm_root).collect();
     let pkgs: Vec<crate::srchash::SrcPkg> = g
         .crates
         .iter()
         .zip(g.pkg.iter())
-        .map(|(c, (dir, name, ver))| crate::srchash::SrcPkg { name: name.clone(), version: ver.clone(), dir: dir.clone(), features: c.features.clone(), deps: c.deps.iter().map(|d| d.0).collect(), proc_macro: c.proc_macro })
+        .map(|(c, (dir, name, ver))| crate::srchash::SrcPkg { name: name.clone(), version: ver.clone(), dir: dir.clone(), features: c.features.clone(), deps: c.deps.iter().map(|d| d.0).filter(|&d| !sysroot_pm.get(d).copied().unwrap_or(false)).collect(), proc_macro: c.proc_macro })
         .collect();
     let watches = boot || matches!(who, ResolveFor::Domain(id) if app_domain() == Some(id));
     let t_inputs = Instant::now();
@@ -407,7 +418,7 @@ pub(crate) fn resolve_package(
             // script's own child run never builds them again
             let triple = crate::cfg::CfgSet::host(sess, &[]).triple();
             let native_request = (options.allow_c && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none()).then(|| crate::native::Request { workspace, package, cargo_flags, relax_dir: target_dir, triple });
-            let scripts = unitgraph::run_build_scripts(sess, &mut g, target_dir, native_request.as_ref());
+            let scripts = unitgraph::run_build_scripts(sess, &mut g, target_dir, native_request.as_ref(), check_only);
             let scripts_ms = t_scripts.elapsed().as_secs_f64() * 1e3;
             let t_wait = Instant::now();
             (sources.map(|h| h.join().expect("provided source check")), scripts, scripts_ms, t_wait.elapsed().as_secs_f64() * 1e3)
@@ -519,6 +530,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     // `makepad test <package>` (lib.rs): the program is the package's test harness, not its main
     let mut harness = false;
     let mut no_fail_fast = false;
+    let mut cargo_flags = Vec::new();
     let mut i = 0;
     while i < args.len() && args[i].starts_with("--") {
         match args[i].as_str() {
@@ -526,6 +538,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
                 units_json = args[i + 1].clone();
                 i += 1;
             }
+            "--offline" | "--frozen" => cargo_flags.push(args[i].clone()),
             // how much is compiled ahead of the program's calls (jit::AheadPolicy); the
             // environment carries it to processes this one starts
             a if a.starts_with("--ahead=") => match crate::options::AheadLevel::parse(&a[8..]) {
@@ -734,7 +747,6 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     if !check && session.is_none() && !hosted && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none() {
         crate::inspect::start(&package);
     }
-    let mut cargo_flags = Vec::new();
     let mut prog_args: Vec<Vec<u8>> = vec![package.clone().into_bytes()];
     let mut k = i + 1;
     while k < args.len() && args[k] != "--" {

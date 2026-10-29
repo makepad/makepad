@@ -69,7 +69,7 @@ pub mod sync {
 }
 
 pub mod vec {
-    pub use core::vec::{from_elem, Drain, IntoIter, Vec};
+    pub use core::vec::{from_elem, Drain, ExtractIf, IntoIter, Vec};
 }
 
 pub mod task {

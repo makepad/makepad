@@ -179,9 +179,20 @@ impl<'a> Parser<'a> {
                 self.gen_args(&mut g, c, Vec::new(), Vec::new(), "")?;
             }
             "format" => {
+                // alloc's macro: `must_use({ let res = $crate::fmt::format(format_args!(..)); res })`
+                // -- the format temporaries (the Argument array, which is not Send) die at the
+                // `let`'s end inside the block, not at the end of the caller's statement (an
+                // `.await` later in that statement keeps a future Send: Robrix logout_state_machine)
+                // (core::fmt::__format_block is that call with a fixed String type; it keeps the
+                // caller's expected type out of the block, as in rustc:
+                // `input != format!(..)` with `input: &str` compares through PartialEq<String>)
                 let c = self.fmt_call(hi, false)?;
-                tg!(&mut g; #core() :: fmt :: format #open());
+                tg!(&mut g; #core() :: fmt :: __format_block #open());
+                g.open_brace();
+                tg!(&mut g; let __relax_format_res = #core() :: fmt :: format #open());
                 self.gen_args(&mut g, c, Vec::new(), Vec::new(), "")?;
+                tg!(&mut g; #close() ; __relax_format_res);
+                g.close_brace();
                 tg!(&mut g; #close());
             }
             "print" | "println" | "eprint" | "eprintln" => {
@@ -538,7 +549,9 @@ impl<'a> Parser<'a> {
             if self.pos >= hi {
                 break;
             }
-            if matches!(self.kind(), T::Ident | T::RawIdent) && self.nth(1) == T::Eq {
+            // rustc_builtin_macros/src/format.rs: parse_args uses Token::ident(),
+            // including keywords (rustc_ast/src/token.rs), for named arguments.
+            if self.kind().is_ident_like() && self.nth(1) == T::Eq {
                 let n = self.tok();
                 self.pos += 2;
                 let mut name = String::from_utf8_lossy(self.tok_text(n)).into_owned();

@@ -14,6 +14,8 @@ pub struct CrateUnit {
     pub features: Vec<String>,
     /// (unit index, extern crate name)
     pub deps: Vec<(usize, String)>,
+    /// Host-side resolution when the same source also has a target-side unit.
+    pub host: Option<HostUnit>,
     pub proc_macro: bool,
     /// the unit is a binary target (its `main` is checked)
     pub bin: bool,
@@ -23,6 +25,11 @@ pub struct CrateUnit {
     /// the package comes from a registry or git source (its cargo pkg_id is not `path+`): a
     /// third-party crate, wherever its sources are stored
     pub registry: bool,
+}
+
+pub struct HostUnit {
+    pub features: Vec<String>,
+    pub deps: Vec<(usize, String)>,
 }
 
 /// Returns the original crate name before any `__relax_v` multi-version suffix.
@@ -113,6 +120,7 @@ pub fn apply_substitutes(sess: &std::sync::Arc<crate::Session>, units: &mut [Cra
             u.edition = 2021;
             u.features.clear();
             u.deps.clear();
+            u.host = None;
         }
     }
     // proc-macro crates run in the JIT proc-macro host; the app graph sees them empty
@@ -258,7 +266,7 @@ pub fn load_units(path: &str) -> Result<Vec<CrateUnit>, String> {
             None => String::new(),
         };
         map.push(out.len());
-        out.push(CrateUnit { name, src_path, edition, features, deps,  proc_macro: kind_pm, bin: false, build_script, version, registry: !pkg.starts_with("path+") });
+        out.push(CrateUnit { name, src_path, edition, features, deps, host: None, proc_macro: kind_pm, bin: false, build_script, version, registry: !pkg.starts_with("path+") });
     }
     // remap dependency indices to deduplicated crate indices; drop build-script deps
     for c in out.iter_mut() {

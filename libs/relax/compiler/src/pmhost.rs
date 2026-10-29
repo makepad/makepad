@@ -172,7 +172,11 @@ pub static PH: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::A
 /// loaded (free_world: no expansions until a hot reload or a run-time module loads source), then
 /// rebuilt on the next need -- from the disk cache, so a rebuild compiles nothing.
 static WORLD: relax_session::sync::Mutex<Option<std::sync::Arc<Result<World, String>>>> = relax_session::sync::Mutex::new(None);
-static BOOT_WORLD: relax_session::sync::Mutex<Option<std::sync::Arc<Result<World, String>>>> = relax_session::sync::Mutex::new(None);
+/// the stage worlds, in build order: stage k holds the proc-macro crates whose own crates use only
+/// macros of stages < k (zbus_macros -> zvariant uses zvariant_derive -> zvariant_utils uses
+/// serde_derive: three stages). rustc builds each proc-macro crate after the ones its dependencies
+/// use; the stages are that order, one world per layer.
+static BOOT_WORLDS: relax_session::sync::Mutex<Vec<std::sync::Arc<Result<World, String>>>> = relax_session::sync::Mutex::new(Vec::new());
 /// held while the world is being built: other threads wait for that build
 static BUILDING: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
 
@@ -187,12 +191,10 @@ fn world_for(sess: &std::sync::Arc<crate::Session>, unit: usize) -> Option<std::
     if let Some(w) = world_now() {
         return Some(w);
     }
-    if let Some(bw) = BOOT_WORLD.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-        if let Ok(w) = bw.as_ref() {
-            if w.crate_of.get(unit).copied().unwrap_or(u32::MAX) != u32::MAX {
-                return Some(bw);
-            }
-        }
+    let stage = BOOT_WORLDS.lock().unwrap_or_else(|e| e.into_inner()).iter()
+        .find(|bw| bw.as_ref().as_ref().is_ok_and(|w| w.crate_of.get(unit).copied().unwrap_or(u32::MAX) != u32::MAX)).cloned();
+    if stage.is_some() {
+        return stage;
     }
     world(sess)
 }
@@ -203,15 +205,13 @@ fn world(sess: &std::sync::Arc<crate::Session>) -> Option<std::sync::Arc<Result<
     world_inner(sess, false)
 }
 
-thread_local! {
-    /// this thread holds BUILDING (it builds the world). Its boot-world loads clear IN_WORLD to
-    /// expand macros, so a macro the boot world lacks must not wait for BUILDING here: that wait
-    /// would be on itself.
-    static BUILDER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
+// macro_reg::world_builder: this thread holds BUILDING (it builds the world) or parses one of the
+// world's crates for it (preload jobs carry the loader's state). Its boot-world loads clear
+// IN_WORLD to expand macros, so a macro the boot world lacks must not wait for BUILDING here: that
+// wait would be on itself, or on a builder that waits for this parse.
 
 fn world_inner(sess: &std::sync::Arc<crate::Session>, prewarm: bool) -> Option<std::sync::Arc<Result<World, String>>> {
-    if in_world() || BUILDER.with(|b| b.get()) {
+    if in_world() || crate::macro_reg::world_builder() {
         return None;
     }
     if let Some(w) = world_now() {
@@ -232,11 +232,11 @@ fn world_inner(sess: &std::sync::Arc<crate::Session>, prewarm: bool) -> Option<s
     // restored also when build_world panics (the thread may be a pool worker that goes on)
     struct InWorld;
     impl Drop for InWorld {
-        fn drop(&mut self) { set_in_world(false); BUILDER.with(|b| b.set(false)); }
+        fn drop(&mut self) { set_in_world(false); crate::macro_reg::set_world_builder(false); }
     }
     let w = {
         set_in_world(true);
-        BUILDER.with(|b| b.set(true));
+        crate::macro_reg::set_world_builder(true);
         let _in_world = InWorld;
         std::sync::Arc::new(build_world(sess))
     };
@@ -254,16 +254,15 @@ fn world_inner(sess: &std::sync::Arc<crate::Session>, prewarm: bool) -> Option<s
 /// free_world drops the macro world when no macro call holds it; true when it went.
 /// Is the proc-macro world alive (an auxiliary unit)?
 pub fn world_alive() -> bool {
-    WORLD.lock().map(|g| g.is_some()).unwrap_or(true) || BOOT_WORLD.lock().map(|g| g.is_some()).unwrap_or(true)
+    WORLD.lock().map(|g| g.is_some()).unwrap_or(true) || BOOT_WORLDS.lock().map(|g| !g.is_empty()).unwrap_or(true)
 }
 
 pub fn free_world() -> bool {
-    let bw = {
-        let mut g = BOOT_WORLD.lock().unwrap_or_else(|e| e.into_inner());
-        match g.as_ref() {
-            Some(w) if std::sync::Arc::strong_count(w) == 1 => g.take(),
-            _ => None,
-        }
+    let bw: Vec<_> = {
+        let mut g = BOOT_WORLDS.lock().unwrap_or_else(|e| e.into_inner());
+        let (free, keep): (Vec<_>, Vec<_>) = g.drain(..).partition(|w| std::sync::Arc::strong_count(w) == 1);
+        *g = keep;
+        free
     };
     drop(bw);
     let w = {
@@ -398,6 +397,15 @@ fn build_world(sess: &std::sync::Arc<crate::Session>) -> Result<World, String> {
             stack.push(*d);
         }
     }
+    // the sysroot's proc_macro unit (run.rs with_sysroot_proc_macro, for proc-macro2 and the
+    // like) is the world's own proc_macro crate, in every world crate's deps already: a second
+    // crate on that file would give its closures two versions of one file
+    let pm_root = crate::vfs::normalize_path(&format!("{}/proc_macro/lib.rs", std_dir));
+    for i in 0..units.len() {
+        if units[i].name == "proc_macro" && crate::vfs::normalize_path(&units[i].src_path) == pm_root {
+            need[i] = false;
+        }
+    }
     // the sandbox's refusal, per crate: a refused crate (and crates using it) stays out of the
     // world; its macros report the reason at their call sites
     let mut refused: Vec<Option<String>> = vec![None; units.len()];
@@ -447,20 +455,46 @@ fn build_world(sess: &std::sync::Arc<crate::Session>) -> Result<World, String> {
                 }
             }
         }
-        let mut boot_need = vec![false; units.len()];
-        let mut bstack: Vec<usize> = (0..units.len()).filter(|&i| boot_root[i] && !uses_boot[i]).collect();
-        while let Some(i) = bstack.pop() {
-            if boot_need[i] || uses_boot[i] {
-                continue;
+        // stage worlds: each round takes the proc-macro roots whose dependency closure uses only
+        // macros of earlier stages (or none); its crates that use those get them from the stages
+        let n = units.len();
+        let closure = |p: usize| {
+            let mut c = vec![false; n];
+            let mut st = vec![p];
+            while let Some(i) = st.pop() {
+                if c[i] || !need[i] { continue; }
+                c[i] = true;
+                st.extend(units[i].deps.iter().map(|&(d, _)| d));
             }
-            boot_need[i] = true;
-            for &(d, _) in &units[i].deps {
-                bstack.push(d);
+            c
+        };
+        let mut have = vec![false; n];
+        loop {
+            let mut stage_need = vec![false; n];
+            let mut fresh = Vec::new();
+            for p in (0..n).filter(|&p| boot_root[p] && !have[p]) {
+                let c = closure(p);
+                let ready = (0..n).filter(|&x| c[x]).all(|x| units[x].deps.iter().all(|&(d, _)| d == x || !boot_root[d] || have[d] || d == p));
+                if ready {
+                    for x in (0..n).filter(|&x| c[x]) { stage_need[x] = true; }
+                    fresh.push(p);
+                }
             }
-        }
-        if boot_need.iter().any(|&b| b) {
-            let bw = build_world_inner(sess, &units, &std_dir, &boot_need, &vec![false; units.len()], refused.clone())?;
-            *BOOT_WORLD.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(Ok(bw)));
+            if fresh.is_empty() { break; }
+            let mut stage_uses = vec![false; n];
+            let mut progress = true;
+            while progress {
+                progress = false;
+                for i in 0..n {
+                    if stage_need[i] && !stage_uses[i] && units[i].deps.iter().any(|&(d, _)| (boot_root[d] && have[d]) || stage_uses[d]) {
+                        stage_uses[i] = true;
+                        progress = true;
+                    }
+                }
+            }
+            let bw = build_world_inner(sess, &units, &std_dir, &stage_need, &stage_uses, refused.clone())?;
+            BOOT_WORLDS.lock().unwrap_or_else(|e| e.into_inner()).push(std::sync::Arc::new(Ok(bw)));
+            for p in fresh { have[p] = true; }
         }
     }
     build_world_inner(sess, &units, &std_dir, &need, &uses_boot, refused)
@@ -787,7 +821,8 @@ fn call(sess: &std::sync::Arc<crate::Session>, entry: &Entry, attr: Option<&Toke
 /// After the program's files are loaded (no more expansions): the world's newly compiled code
 /// goes to the disk cache.
 pub fn flush_cache() {
-    for w in [BOOT_WORLD.lock().unwrap_or_else(|e| e.into_inner()).clone(), world_now()] {
+    let stages = BOOT_WORLDS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    for w in stages.into_iter().map(Some).chain([world_now()]) {
         if let Some(Ok(w)) = w.as_deref() {
             crate::owner::call(crate::owner::Class::Program, || {
                 let u = unsafe { &mut *w.u };

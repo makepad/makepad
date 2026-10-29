@@ -1,9 +1,9 @@
 //! Relax's built-in `arrayvec` crate: under Relax the crate path `arrayvec` resolves here
 //! (crate substitution, coord.md "SV1"). Behaviour follows arrayvec 0.7.6 (fixed capacity
 //! CAP, u32 length, panic messages, CapacityError); ported from it (Copyright (c) Ulrik Sverdrup
-//! "bluss" 2015-2023, MIT/Apache-2.0; see libs/relax/compiler/std/CREDITS.md). ArrayString is not
-//! provided (no supported client uses it). Needs const generics in Relax (coord.md F-STD2);
-//! the rustc path keeps the real crate and std/check_ext tests this file against it.
+//! "bluss" 2015-2023, MIT/Apache-2.0; see libs/relax/compiler/std/CREDITS.md).
+//! Includes ArrayString's API without optional external trait integrations.
+//! The rustc path keeps the real crate and std/check_ext tests this file against it.
 
 use core::borrow::{Borrow, BorrowMut};
 use core::cmp;
@@ -14,6 +14,9 @@ use core::mem::{self, ManuallyDrop, MaybeUninit};
 use core::ops::{Bound, Deref, DerefMut, RangeBounds};
 use core::ptr;
 use core::slice;
+
+mod array_string;
+pub use self::array_string::ArrayString;
 
 type LenUint = u32;
 

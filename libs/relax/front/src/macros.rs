@@ -62,7 +62,7 @@ pub struct MacroDef {
     pub exported: bool,
     pub arms: Vec<(Vec<MNode>, Vec<TNode>)>,
     /// a Relax built-in (builtins.rs `Builtin` as u8; 0: a `macro_rules!` macro)
-    pub builtin: u8,
+    pub builtin: u16,
     /// where a `macro_rules!` is defined: (file path, source position) -- its expansions'
     /// identifiers resolve local variables there (definition-site hygiene)
     pub def_file: String,
@@ -293,7 +293,12 @@ pub(crate) const LIT_FRAG: u32 = 1 << 29;
 pub(crate) const META_ONLY: u32 = 1 << 28;
 /// A `$b:block` fragment (rustc's `MetaVarKind::Block`): no labeled / unsafe block or closure body.
 pub(crate) const BLOCK_FRAG: u32 = 1 << 27;
-pub(crate) const FRAG_FLAGS: u32 = TY_FRAG | EXPR_FRAG | LIT_FRAG | META_ONLY | BLOCK_FRAG;
+/// A `$p:path` fragment, reparsed with type-mode generic arguments.
+pub(crate) const PATH_FRAG: u32 = 1 << 26;
+/// the `(` a transcription puts around an expression fragment of several tokens (rustc's invisible
+/// delimiters): never a call's argument list (`!div $n / 2` with `$n` = `64 / 2` is no `div(..)`)
+pub(crate) const WRAP_PAREN: u32 = 1 << 25;
+pub(crate) const FRAG_FLAGS: u32 = TY_FRAG | EXPR_FRAG | LIT_FRAG | META_ONLY | BLOCK_FRAG | PATH_FRAG | WRAP_PAREN;
 
 const GLOB_ID: Name = Name(0);
 const GLOB_SEP_ID: Name = Name(1);
@@ -672,16 +677,21 @@ impl MacroTable {
     /// `use Base as alias;`, `pub use self::m::ancestry as Name;`) join its prescanned ones, with
     /// the modules they sit in, so the crates loaded after it resolve macro paths through them
     /// (rustc resolves expansion-made imports like any other, rustc_resolve ident.rs). Its scope is
-    /// computed afresh on next use.
+    /// computed afresh on next use, including the macros its expansions defined.
     pub fn seal_crate(&mut self, k: &str) {
         self.sealed.insert(k.to_string());
-        let (Some(eu), Some(old)) = (self.exp_uses.get(k).cloned(), self.crates.get(k).cloned()) else { return };
+        let Some(old) = self.crates.get(k).cloned() else { return };
+        // rustc_resolve/src/build_reduced_graph.rs::define_macro puts every #[macro_export]
+        // in the root, including expansion output. A scope computed before file publication
+        // lacks those definitions; rebuild it before a dependent crate starts parsing.
+        let mut added = old.scope.get().is_some();
+        let eu = self.exp_uses.get(k);
+        if !added && eu.is_none() { return; }
         let mut uses = old.uses.clone();
         let mut renames = old.renames.clone();
         let mut mods = old.mods.clone();
         let mut externs = old.externs.clone();
-        let mut added = false;
-        let mut binds: Vec<(&(String, String), &Vec<String>)> = eu.iter().collect();
+        let mut binds: Vec<(&(String, String), &Vec<String>)> = eu.into_iter().flat_map(|u| u.iter()).collect();
         binds.sort();
         for ((m, b), path) in binds {
             // Glob-only generated modules need their parent bindings too.
@@ -1526,6 +1536,58 @@ impl MacroScope {
         self.resolve(names.id(name), names.id(cur), &path, names.id(module), true)
     }
 
+    /// An explicit binding, or an attribute exported through a glob. The outer Option keeps
+    /// an explicit import of the builtin from falling through to an outer scope's proc macro.
+    pub(crate) fn attr_import(&self, cur: &str, module: &str, uses: &[UseItem], name: &str) -> Option<Option<crate::macro_reg::Entry>> {
+        let mut seen = crate::fxhash::HashSet::default();
+        if let Some(u) = uses.iter().find(|u| u.bind.as_deref() == Some(name)) {
+            return Some(self.attr_path(cur, module, &u.path, &mut seen));
+        }
+        // a glob that brings the name conflicts with the prelude's builtin: rustc reports E0659
+        // (rustc_resolve ident.rs: AmbiguityKind::GlobVsOuter for macros). The builtin is kept
+        // (a check gap, not a choice of the macro)
+        for u in uses.iter().filter(|u| u.bind.is_none()) {
+            let mut path = u.path.clone();
+            path.push(name.into());
+            if self.attr_path(cur, module, &path, &mut seen).is_some() { return Some(None); }
+        }
+        None
+    }
+
+    fn attr_path(&self, cur: &str, module: &str, path: &[String], seen: &mut crate::fxhash::HashSet<(String, String, String)>) -> Option<crate::macro_reg::Entry> {
+        let (name, prefix) = path.split_last()?;
+        let r = Res { table: &self.table };
+        let (k, m) = if prefix.is_empty() { (cur, module) } else { r.resolve_mod(cur, module, prefix)? };
+        self.attr_in(k, m, name, k != cur, seen)
+    }
+
+    fn attr_in(&self, k: &str, m: &str, name: &str, public: bool, seen: &mut crate::fxhash::HashSet<(String, String, String)>) -> Option<crate::macro_reg::Entry> {
+        if !seen.insert((k.into(), m.into(), name.into())) { return None; }
+        let r = Res { table: &self.table };
+        if r.crate_root(k).1 == m {
+            if let Some(e) = crate::macro_reg::exported_attr(krate_name(k), name) { return Some(e); }
+        }
+        let uses = self.table.crates.get(k)?.uses.get(m)?;
+        if let Some(u) = uses.iter().find(|u| (!public || u.is_pub) && u.bind.as_deref() == Some(name)) {
+            return self.attr_path(k, m, &u.path, seen);
+        }
+        for u in uses.iter().filter(|u| (!public || u.is_pub) && u.bind.is_none()) {
+            let mut path = u.path.clone();
+            path.push(name.into());
+            if let Some(e) = self.attr_path(k, m, &path, seen) { return Some(e); }
+        }
+        None
+    }
+
+    pub(crate) fn attr_macro_use(&self, cur: &str, name: &str) -> Option<crate::macro_reg::Entry> {
+        let r = Res { table: &self.table };
+        for dep in self.table.macro_use.get(cur)?.iter().rev() {
+            let Some((k, m)) = r.extern_crate(cur, dep) else { continue };
+            if let Some(e) = self.attr_in(k, m, name, true, &mut Default::default()) { return Some(e); }
+        }
+        None
+    }
+
     pub fn finish(self) -> MacroUse {
         let names = self.table.names.clone();
         let uses = std::sync::Arc::unwrap_or_clone(self.local_uses.into_inner()).bindings.into_iter()
@@ -1997,7 +2059,7 @@ fn expansion_hash(d: &MacroDef) -> u128 {
     }
     let mut h = crate::sip::Sip128::new();
     h.str("macro-expansion");
-    h.str(&d.name); h.str(&d.krate); h.u8(d.builtin);
+    h.str(&d.name); h.str(&d.krate); h.u32(d.builtin as u32);
     h.u32(d.arms.len() as u32);
     for (a, b) in &d.arms { m(&mut h, a); t(&mut h, b); }
     h.finish128()
@@ -2283,6 +2345,8 @@ fn parse_matcher(toks: &[MTok], edition: u16) -> Result<Vec<MNode>, String> {
     let mut i = 0;
     while i < toks.len() {
         let t = &toks[i];
+        // rustc_expand mbe/macro_parser.rs: TtParser::match_one ignores matcher docs.
+        if t.kind == T::DocComment { i += 1; continue; }
         if t.kind == T::Dollar && i + 1 < toks.len() {
             let n = &toks[i + 1];
             if n.kind == T::OpenParen {
@@ -2695,6 +2759,7 @@ impl<'a> Parser<'a> {
                 // fragment took is its source span (rustc_parse break_and_eat / break_last_token)
                 let ok = r.is_ok() && e <= end && e > i;
                 let mut taken = None;
+                let mut split = None;
                 while self.tok_undo.len() > undo {
                     let (k, t) = self.tok_undo.pop().unwrap();
                     if !ok || (k as usize) < e {
@@ -2702,8 +2767,11 @@ impl<'a> Parser<'a> {
                     } else if k as usize == e {
                         // the earliest entry holds the unsplit token
                         taken = Some((t.lo, self.toks.at(e).lo));
+                        split = Some((k, t));
                     }
                 }
+                // Keep the remainder for this matcher, but restore it if the arm fails.
+                if let Some(s) = split { self.tok_undo.push(s); }
                 if ok { Some((e, taken, bare)) } else { None }
             }
         }
@@ -2721,6 +2789,20 @@ impl<'a> Parser<'a> {
     }
 
     fn match_seq(&mut self, nodes: &[MNode], i: &mut usize, end: usize, binds: &mut HashMap<String, Bind>) -> bool {
+        let undo = self.tok_undo.len();
+        let matched = self.match_seq_inner(nodes, i, end, binds);
+        if !matched { self.restore_match_tokens(undo); }
+        matched
+    }
+
+    fn restore_match_tokens(&mut self, undo: usize) {
+        while self.tok_undo.len() > undo {
+            let (k, t) = self.tok_undo.pop().unwrap();
+            self.toks.edit(k as usize, |x| *x = t);
+        }
+    }
+
+    fn match_seq_inner(&mut self, nodes: &[MNode], i: &mut usize, end: usize, binds: &mut HashMap<String, Bind>) -> bool {
         for n in nodes {
             match n {
                 MNode::Tok(m) => {
@@ -2803,11 +2885,9 @@ impl<'a> Parser<'a> {
         for (ni, n) in nodes.iter().enumerate() {
             match n {
                 TNode::Tok(t) => out.push(t.kind, &t.text, None, t.pos),
-                // `crate`, or `::__relax_crate_<name>` (two adjacent tokens)
-                TNode::Crate => match krate_path.strip_prefix("::") {
-                    Some(name) => out.push_run(krate_path, &[(T::PathSep, 2), (T::Ident, name.len())]),
-                    None => out.push(T::KwCrate, krate_path, None, u32::MAX),
-                },
+                // rustc_expand mbe/quoted.rs: parse_tree keeps `$crate` one Ident;
+                // rustc_parse parser/nonterminal.rs: get_macro_ident accepts it.
+                TNode::Crate => out.push(T::Ident, krate_path, None, u32::MAX),
                 TNode::Group(o, c, inner) => {
                     out.push(o.kind, &o.text, None, o.pos);
                     self.transcribe(inner, binds, idx, krate_path, out)?;
@@ -2822,13 +2902,26 @@ impl<'a> Parser<'a> {
                         let bare_macro = *f == Frag::Expr && taken.is_none() && ends && self.is_macro_call(*lo, *hi);
                         let wrap = *f == Frag::Expr && hi - lo + usize::from(taken.is_some()) > 1 && !*bare && !bare_macro;
                         if wrap {
-                            uses::synth_note(out.s.len() as u32 + 1);
+                            let at = out.s.len() as u32 + 1;
+                            uses::synth_note(at);
+                            out.groups.push((at, at | WRAP_PAREN | META_ONLY));
                             out.push(T::OpenParen, "(", None, u32::MAX);
                         }
                         let group_start = out.s.len() + 1;
+                        let mut groups = Vec::new();
                         for k in *lo..*hi {
                             let t = self.toks.at(k);
+                            // rustc_expand mbe/transcribe.rs: transcribe_pnr preserves
+                            // invisible groups inside every captured fragment, including
+                            // a path inside a type-macro call subsequently matched as tt.
+                            if let Some((end, flags)) = self.fragment_group(t.lo) {
+                                groups.push((end, out.s.len() as u32 + 1, flags));
+                            }
                             out.push(t.kind, &String::from_utf8_lossy(self.tok_text(t)), Some(t.lo), u32::MAX);
+                            while groups.last().is_some_and(|&(end, _, _)| end == t.hi) {
+                                let (_, start, flags) = groups.pop().unwrap();
+                                out.groups.push((start, out.s.len() as u32 | flags));
+                            }
                         }
                         if let Some((a, b)) = *taken {
                             let part = self.bytes(a, b);
@@ -2840,8 +2933,11 @@ impl<'a> Parser<'a> {
                         // (a `$t:ty` is a type nonterminal even when it is one token: where a bound is
                         // expected, it is not a trait -- rustc `parse_trait_bound`; the end carries TY_FRAG)
                         let ty_frag = *f == Frag::Ty && !wrap;
-                        let kind_flag = match f { Frag::Expr if !wrap => EXPR_FRAG, Frag::Literal => LIT_FRAG, Frag::Block if !wrap => BLOCK_FRAG, _ => 0 };
-                        let group = opaque && out.s.len() > group_start && (hi - lo + usize::from(taken.is_some()) > 1 || ty_frag);
+                        // rustc_expand mbe/transcribe.rs: transcribe_pnr wraps even a
+                        // one-token path in MetaVarKind::Path invisible delimiters.
+                        let path_frag = *f == Frag::Path;
+                        let kind_flag = match f { Frag::Expr if !wrap => EXPR_FRAG, Frag::Literal => LIT_FRAG, Frag::Block if !wrap => BLOCK_FRAG, Frag::Path => PATH_FRAG, _ => 0 };
+                        let group = opaque && out.s.len() > group_start && (hi - lo + usize::from(taken.is_some()) > 1 || ty_frag || path_frag);
                         if group || (kind_flag != 0 && out.s.len() > group_start) {
                             out.groups.push((group_start as u32, out.s.len() as u32 | if ty_frag { TY_FRAG } else { 0 } | kind_flag | if group { 0 } else { META_ONLY }));
                         }
@@ -2893,16 +2989,15 @@ impl<'a> Parser<'a> {
     /// doc comments the range is returned as it is; otherwise a copy is appended to the token
     /// list and its range returned.
     fn desugar_doc_comments(&mut self, lo: usize, hi: usize) -> (usize, usize) {
-        let base = self.src.len() as u32;
-        if lo == 0 || hi < lo || self.toks.at(hi).lo >= base {
+        if lo == 0 || hi < lo {
             return (lo, hi);
         }
         // (index of the token the docs precede, inner, text)
         let mut docs: Vec<(usize, bool, Vec<u8>)> = Vec::new();
         for j in lo..=hi {
             let (prev, t) = (self.toks.at(j - 1), self.toks.at(j));
-            if prev.hi < t.lo && t.lo <= base {
-                let gap = &self.src[prev.hi as usize..t.lo as usize];
+            if prev.hi < t.lo {
+                let gap = self.bytes(prev.hi, t.lo);
                 if gap.windows(2).any(|w| w == b"//" || w == b"/*") {
                     crate::pm_tokens::for_each_gap_doc(gap, |d| docs.push((j, d.inner, d.text.to_vec())));
                 }
@@ -2953,6 +3048,9 @@ impl<'a> Parser<'a> {
         for (arm, (matcher, body)) in def.arms.iter().enumerate() {
             let mut binds = HashMap::default();
             let mut i = lo;
+            // rustc_expand mbe/macro_rules.rs: try_match_macro starts each arm with
+            // a fresh parser. A failed arm must not leave grammar-split tokens behind.
+            let undo = self.tok_undo.len();
             if self.match_seq(matcher, &mut i, hi, &mut binds) && i == hi {
                 uses::used(def, arm as u32);
                 // `$crate` names the defining crate by identity (rustc: the `$crate` token keeps the
@@ -2961,12 +3059,15 @@ impl<'a> Parser<'a> {
                 // tokens can become the body of a macro another crate expands (a nested
                 // `macro_rules!`, or tokens passed on to a macro that defines one). `crate` would
                 // name the crate expanding that macro.
-                let krate_path = format!("::__relax_crate_{}", def.krate);
+                let krate_path = format!("__relax_crate_{}", def.krate);
                 let mut out = Transcript { edition: self.edition, ..Default::default() };
-                self.transcribe(body, &binds, &mut Vec::new(), &krate_path, &mut out)?;
+                let result = self.transcribe(body, &binds, &mut Vec::new(), &krate_path, &mut out);
+                self.restore_match_tokens(undo);
+                result?;
                 out.s.push(' ');
                 return Ok((out.s, out.toks, out.origins, out.bodies, out.groups));
             }
+            self.restore_match_tokens(undo);
         }
         Err(format!("no rule of `{}!` matches these arguments -- check the macro's patterns", def.name))
     }
@@ -3002,16 +3103,13 @@ impl Transcript {
             self.bodies.push((at, bp, t.len() as u32));
         }
         self.s.push_str(t);
-        self.toks.push(Tok { kind, lo: at, hi: at + t.len() as u32 });
-    }
-    /// One run of text (one leading space) that is several adjacent tokens: (kind, byte length).
-    fn push_run(&mut self, text: &str, pieces: &[(T, usize)]) {
-        self.s.push(' ');
-        let mut at = self.s.len() as u32;
-        self.s.push_str(text);
-        for &(kind, n) in pieces {
-            self.toks.push(Tok { kind, lo: at, hi: at + n as u32 });
-            at += n as u32;
+        // rustc_expand mbe/transcribe.rs: transcribe retains DocComment tokens.
+        // Keep ours as lexer trivia until parser_from_cx desugars the next call;
+        // a generated macro definition must still ignore docs in its matcher.
+        if kind == T::DocComment {
+            self.s.push('\n');
+        } else {
+            self.toks.push(Tok { kind, lo: at, hi: at + t.len() as u32 });
         }
     }
 }
@@ -3028,7 +3126,25 @@ fn lexed_kind(part: &[u8]) -> T {
 
 /// Owned tokens of a token range (definition bodies outlive the parse of their file).
 pub fn mtoks(p: &Parser, toks: &[Tok]) -> Vec<MTok> {
-    toks.iter().map(|t| MTok { kind: t.kind, text: String::from_utf8_lossy(p.tok_text(*t)).into_owned(), pos: t.lo }).collect()
+    definition_tokens(toks, |lo, hi| p.bytes(lo, hi))
+}
+
+/// rustc_expand mbe/quoted.rs: parse_tree retains DocComment tokens in definitions.
+/// Recover the lexer trivia for both the prescan and the parser's definitions.
+pub(crate) fn definition_tokens<'a>(toks: &[Tok], bytes: impl Fn(u32, u32) -> &'a [u8]) -> Vec<MTok> {
+    let mut out = Vec::with_capacity(toks.len());
+    let mut prev = toks.first().map_or(0, |t| t.lo);
+    for t in toks {
+        if prev < t.lo {
+            let gap = bytes(prev, t.lo);
+            crate::pm_tokens::for_each_gap_doc(gap, |d| out.push(MTok {
+                kind: T::DocComment, text: String::from_utf8_lossy(&gap[d.lo..d.hi]).into_owned(), pos: prev + d.lo as u32,
+            }));
+        }
+        out.push(MTok { kind: t.kind, text: String::from_utf8_lossy(bytes(t.lo, t.hi)).into_owned(), pos: t.lo });
+        prev = t.hi;
+    }
+    out
 }
 
 #[cfg(test)]

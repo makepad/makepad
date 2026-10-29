@@ -4,6 +4,7 @@
 //! memory, object ids. The HTTP transport is the caller's (it turns a [`smart_http::Request`] into
 //! a [`smart_http::Response`]); inflate is crate::inflate. Nothing is written anywhere: no
 //! checkout, index, refs, push or local repository.
+pub(crate) mod cargo;
 pub mod fetch;
 pub mod sha1;
 pub mod smart_http;

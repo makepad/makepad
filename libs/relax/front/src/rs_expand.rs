@@ -145,13 +145,13 @@ impl Parser<'_> {
                 self.pos = after;
                 continue;
             }
-            if let Some(k) = crate::builtins::attr_macro_at(self, &attrs) {
+            if let Some((k, entry)) = crate::builtins::attr_macro_at(self, &attrs) {
                 let attr = &attrs[k];
                 let mut name_at = attr.toks.lo as usize;
                 while name_at + 2 < attr.toks.hi as usize && self.toks.at(name_at + 1).kind == T::PathSep { name_at += 2; }
                 let name = String::from_utf8_lossy(self.tok_text(self.toks.at(name_at))).into_owned();
-                if crate::macro_reg::outline_native(&name, crate::macro_reg::Kind::Attr) {
-                    let x = crate::builtins::expand_attr_macro(self, attr, start, stop).map_err(|(pos, msg)| PErr { pos, msg })?;
+                if crate::macro_reg::outline_native_entry(&entry) {
+                    let x = crate::builtins::expand_attr_macro(self, &attrs, k, &entry, start, head, stop).map_err(|(pos, msg)| PErr { pos, msg })?;
                     self.pos = stop;
                     self.append_origins(&x, self.toks.at(head).lo);
                     let at = self.expand_toks(&x.text, &x.toks, self.toks.at(head).lo);

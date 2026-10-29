@@ -475,3 +475,10 @@ impl<T: Ord, const N: usize> From<[T; N]> for BTreeSet<T> {
         set
     }
 }
+
+// alloc/src/collections/btree/set.rs
+impl<T: fmt::Debug> fmt::Debug for Iter<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Iter").field(&self.iter.clone()).finish()
+    }
+}

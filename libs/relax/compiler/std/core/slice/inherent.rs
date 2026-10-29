@@ -245,6 +245,14 @@ impl<T> [T] {
             Some((&self[..mid], &self[mid..]))
         }
     }
+    // core/src/slice/mod.rs (stable 1.80; getrandom 0.4's sys_fill_exact)
+    pub const fn split_at_mut_checked(&mut self, mid: usize) -> Option<(&mut [T], &mut [T])> {
+        if mid > self.len() {
+            None
+        } else {
+            Some(super::split_at_mut(self, mid))
+        }
+    }
     pub fn split<F: FnMut(&T) -> bool>(&self, pred: F) -> Split<'_, T, F> {
         it::split(self, pred)
     }

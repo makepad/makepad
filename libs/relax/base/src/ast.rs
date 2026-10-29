@@ -1268,6 +1268,7 @@ pub struct FnSig {
     pub abi: Option<Option<Ident>>, // extern / extern "C"
     pub generics: Generics,
     pub self_param: Option<SelfParam>,
+    pub self_param_pos: u32, // receiver token position (0 when absent)
     pub params: List<Param>,
     pub variadic: bool,
     pub ret: Option<TyId>,

@@ -299,6 +299,16 @@ pub fn format(args: Arguments<'_>) -> crate::string::String {
     }
 }
 
+/// format!'s wrapper (Relax's builtin expands `format!(..)` to
+/// `fmt::__format_block({ let res = fmt::format(format_args!(..)); res })`, alloc's
+/// `must_use({ .. })`): a call with a fixed String type, so a caller's expected type (`input !=
+/// format!(..)` with `input: &str`) never reaches the block, whose `let` ends the temporaries.
+#[doc(hidden)]
+#[inline(always)]
+pub fn __format_block(s: crate::string::String) -> crate::string::String {
+    s
+}
+
 // ---------------------------------------------------------------- Formatter
 
 /// Configuration for one formatting call plus the output sink.

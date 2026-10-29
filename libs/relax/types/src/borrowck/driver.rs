@@ -217,7 +217,7 @@ fn report_fulfillment_errors(prog: &Program, tcx: &Tcx, infcx: &crate::infer::In
             NextSolverError::Overflow(o) => ("E0275", o),
         };
         if crate::wfcheck::obligations::predicate_mentions_error(infcx, &o.goal.predicate) { continue; }
-        let message = match &o.goal.predicate.kind {
+        let mut message = match &o.goal.predicate.kind {
             crate::next_solver::PredicateKind::Clause(crate::next_solver::ClauseKind::Trait(p)) => {
                 let message = typeck::trait_error_message(prog, tcx, code, p, &mut |t| typeck::ty_to_string(false, prog, tcx, t));
                 // rustc_on_unimplemented on `Send`/`Sync` for a future: "future cannot be sent between threads safely"
@@ -227,6 +227,7 @@ fn report_fulfillment_errors(prog: &Program, tcx: &Tcx, infcx: &crate::infer::In
             }
             predicate => crate::wfcheck::obligations::fulfillment_message(infcx, prog, code, &o.goal).unwrap_or_else(|| format!("unsatisfied obligation {predicate:?}")),
         };
+        if code == "E0277" { message.push_str(&crate::next_solver::diagnostics::auto_trait_failure_notes(infcx, prog, &o.goal, Some(typeck))); }
         let span = Span { file: typeck.file, lo: o.cause.span, hi: o.cause.span };
         let mut d = diagnostics::Diag::new(code, span, message);
         d.labels.push((span, String::new(), true));
@@ -268,6 +269,52 @@ pub fn ensure_coroutine_witnesses(prog: &Program, tcx: &Tcx, owner: DefId) {
     }));
     WITNESS_IN_FLIGHT.with(|f| { f.borrow_mut().pop(); });
     if let Err(p) = done { if crate::preempt::is_cancelled(&*p) { std::panic::resume_unwind(p); } }
+}
+
+/// rustc_trait_selection/src/error_reporting/traits/suggestions.rs::maybe_note_obligation_cause_for_async_await:
+/// match the failing type against saved locals at a yield, then against captures. Rebuild only for a diagnostic.
+pub(crate) fn coroutine_obligation_source(prog: &Program, tcx: &Tcx, current: &typeck::Body, coroutine: TyId, targets: &[TyId]) -> Option<(Span, Option<Span>, String, TyId)> {
+    let crate::types::TyKind::Closure(file, expr, args) = *tcx.tys.kind(coroutine) else { return None };
+    let crate::types::TyKind::FnDef(def, params, regions) = *tcx.tys.kind(args.parent_args) else { return None };
+    let queried;
+    let typeck = if def == current.def { current } else { queried = tcx.typeck(prog, def); &queried };
+    let full = tcx.complete_args(prog, def, tcx.tys.list(params), regions);
+    let matches = |ty| targets.iter().any(|&t| tcx.tys.erase_regions(t) == tcx.tys.erase_regions(ty));
+    let env = TypingEnv { limit: crate::tcx::RecursionLimit::for_item(prog, def), param_env: typeck.param_env.unwrap_or_default(), mode: crate::tcx::TypingMode::borrowck(tcx, prog, def) };
+    let state = crate::tcx::EvalState::new();
+    let eval = EvalCx::new(prog, tcx, env, &state);
+    let mut source = None;
+    if let Ok(root) = BuildRoot::new(BuildCx { prog, tcx, env, eval: &eval }, typeck) {
+        let owner = CheckedBody { owner: def, kind: OwnerKind::Closure(crate::ast::ExprId(expr)) };
+        if let Ok(mut mir) = build_mir(&root, owner) {
+            let provider = BuildProvider { prog, tcx, memo: Default::default() };
+            if mir_promoted(prog, tcx, env, &provider, &mut mir).is_ok() {
+                let movable = mir.coroutine.as_ref().is_some_and(|c| c.kind.movability() == crate::mir::Movability::Movable);
+                crate::mir::transform::coroutine::visit_suspend_points(&mir, movable, |saved, await_span| {
+                    for local in saved.iter() {
+                        let decl = &mir.local_decls[local];
+                        if source.is_some() || matches!(decl.local_info, crate::mir::LocalInfo::StaticRef { is_thread_local: false, .. } | crate::mir::LocalInfo::FakeBorrow) { continue; }
+                        let ty = tcx.instantiate_ty(prog, def, &full, decl.ty);
+                        if matches(ty) {
+                            let name = mir.var_debug_info.iter().find(|v| v.place.local.0 as usize == local && v.place.projection.is_empty()).map_or_else(|| "temporary".to_string(), |v| format!("`{}`", v.name));
+                            source = Some((decl.source_info.span, Some(await_span), name, ty));
+                        }
+                    }
+                });
+            }
+        }
+    }
+    if source.is_some() { return source; }
+    let crate::types::TyKind::Tuple(upvars) = *tcx.tys.kind(args.tupled_upvars_ty) else { return None };
+    let captures = typeck.min_captures.get(&expr)?;
+    for (capture, &ty) in captures.captures.iter().zip(tcx.tys.list(upvars)) {
+        if matches(ty) {
+            let span = capture.info.kind_span;
+            let name = prog.syms.str(typeck.locals[capture.place.root as usize].name);
+            return Some((Span { file, lo: span.lo, hi: span.hi }, None, format!("`{name}`"), ty));
+        }
+    }
+    None
 }
 
 /// What the bodies of one typeck root share.

@@ -88,6 +88,14 @@ pub fn eval_const_block(u: &mut Unit, body: &Body, bl: crate::ast::BlockId, t: T
     (v.len() == cx.size(t) as usize).then_some(v)
 }
 
+/// An already validated promoted rvalue. Reification uses fn_pointer's permanent JIT entries.
+pub fn eval_promoted(u: &mut Unit, body: &Body, e: ExprId, t: TyId) -> Option<Vec<u8>> {
+    if off(&u.prog.session.clone().options) || u.ptr_bytes() != 8 { return None; }
+    let mut cx = Ctx { u, steps: 0, depth: 0, trace: false, reason: None };
+    let v = cx.eval(body, &mut Vec::new(), e)?;
+    (v.len() == cx.size(t) as usize).then_some(v)
+}
+
 /// A successful N01 body is complete: constant queries resolve synchronously or unwind.
 fn check_quiet(u: &mut Unit, d: crate::program::DefId, args: &[TyId]) -> Option<std::sync::Arc<Body>> {
     let _o = crate::clock::origin("ctfe");
@@ -1068,6 +1076,8 @@ impl<'a> Ctx<'a> {
     }
 
     fn fn_pointer(&mut self, t: TyId) -> Option<Vec<u8>> {
+        // rustc_const_eval/src/interpret/cast.rs: InterpCx::cast reifies FnDef constants.
+        // Unit::entry is a permanent callable address, including before the body is compiled.
         let TyKind::FnDef(d, args, _) = self.kind(t) else { return None };
         let instance = self.u.tcx.resolve_instance_raw(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), d, self.u.tcx.tys.list(args)).ok()?;
         let crate::instance::InstanceKind::Item(d) = instance.def else { return None; };

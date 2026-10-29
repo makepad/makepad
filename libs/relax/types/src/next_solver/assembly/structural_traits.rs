@@ -24,12 +24,13 @@ fn coroutine_hidden_types(ecx: &EvalCtxt<'_, '_>, file: u32, expr: u32, owner: T
     let universe = if hidden.iter().any(|&t| erased(t)) { Some(ecx.delegate.create_next_universe()) } else { None };
     let next = std::cell::Cell::new(0u32);
     hidden.iter().map(|&t| {
-        let t = tcx.instantiate_ty(prog, def, &full, t);
-        let Some(universe) = universe else { return t };
-        tys.map_regions(t, &|r, _| if tys.region_kind(r) == crate::types::RegionKind::ReErased {
+        // rustc_traits/src/coroutine_witnesses.rs::coroutine_hidden_types binds the witness's
+        // erased regions before substituting args; regions inside a substituted T are not bound.
+        let t = if let Some(universe) = universe { tys.map_regions(t, &|r, _| if tys.region_kind(r) == crate::types::RegionKind::ReErased {
             let var = crate::types::BoundVar(next.get()); next.set(next.get() + 1);
             tys.intern_region(crate::types::RegionKind::RePlaceholder { universe, var })
-        } else { r }, 0)
+        } else { r }, 0) } else { t };
+        tcx.instantiate_ty(prog, def, &full, t)
     }).collect()
 }
 

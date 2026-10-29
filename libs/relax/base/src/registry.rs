@@ -2,7 +2,7 @@
 //! the .crate archives (static.crates.io) checked against the index's SHA-256, unpacked with
 //! Relax's own gzip and tar readers into a content-addressed cache in the workspace's relax dir
 //! (`<target>/relax/registry`, dirs.rs), offline-first: a cached index and a cached package are used as they are,
-//! the network is asked only for what is missing (MAKEPAD_RUN_OFFLINE=1: never). The network itself is
+//! the network is asked only for what is missing (Cargo offline settings or MAKEPAD_RUN_OFFLINE=1: never). The network itself is
 //! the embedder's ([`set_fetch`]: the makepad binary and the loader install an HTTPS GET), so this
 //! module does no I/O beyond files.
 //!
@@ -26,13 +26,9 @@ pub fn set_fetch(f: Fetch) {
 const INDEX: &str = "https://index.crates.io";
 const DOWNLOAD: &str = "https://static.crates.io/crates";
 
-fn offline() -> bool {
-    std::env::var_os("MAKEPAD_RUN_OFFLINE").is_some_and(|v| v != "0")
-}
-
-fn get(url: &str, what: &str) -> Result<Vec<u8>, String> {
-    if offline() {
-        return Err(format!("{} is not cached and MAKEPAD_RUN_OFFLINE is set", what));
+fn get(url: &str, what: &str, offline: bool) -> Result<Vec<u8>, String> {
+    if offline || crate::git::cargo::offline(&std::env::current_dir().map_err(|e| e.to_string())?)? {
+        return Err(format!("{} is not cached and network access is disabled (offline)", what));
     }
     let f = FETCH.get().ok_or_else(|| format!("{} is not cached and this process has no network access for registry packages", what))?;
     f(url).map_err(|e| format!("{}: {}: {}", what, url, e))
@@ -63,12 +59,12 @@ pub struct Release {
 }
 
 /// The index lines of `name` (cached under `<root>/index/`; fetched when not cached).
-fn releases(name: &str) -> Result<Vec<Release>, String> {
+fn releases(name: &str, offline: bool) -> Result<Vec<Release>, String> {
     let file = root()?.join("index").join(index_path(name));
     let text = match std::fs::read(&file) {
         Ok(t) => t,
         Err(_) => {
-            let body = get(&format!("{}/{}", INDEX, index_path(name)), &format!("the index entry of `{}`", name))?;
+            let body = get(&format!("{}/{}", INDEX, index_path(name)), &format!("the index entry of `{}`", name), offline)?;
             if let Some(dir) = file.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
             }
@@ -103,8 +99,8 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
 
 /// The newest non-yanked release of `name` that `req` (a cargo version requirement) accepts,
 /// and that every requirement in `also` accepts too.
-pub fn pick(name: &str, req: &str, also: &[String]) -> Result<Release, String> {
-    let rs = releases(name)?;
+pub fn pick(name: &str, req: &str, also: &[String], offline: bool) -> Result<Release, String> {
+    let rs = releases(name, offline)?;
     let mut best: Option<(Version, Release)> = None;
     for r in rs {
         let Some(v) = Version::parse(&r.version) else { continue };
@@ -123,18 +119,18 @@ pub fn pick(name: &str, req: &str, also: &[String]) -> Result<Release, String> {
 }
 
 /// The release of `name` at exactly `version` (a Cargo.lock entry).
-pub fn exact(name: &str, version: &str) -> Result<Release, String> {
-    releases(name)?.into_iter().find(|r| r.version == version).ok_or_else(|| format!("registry package `{}` {} is not in the crates.io index", name, version))
+pub fn exact(name: &str, version: &str, offline: bool) -> Result<Release, String> {
+    releases(name, offline)?.into_iter().find(|r| r.version == version).ok_or_else(|| format!("registry package `{}` {} is not in the crates.io index", name, version))
 }
 
 /// The unpacked sources of a release (fetched, checked and unpacked when not cached): a folder
 /// named by the package, its version and its checksum, holding `Cargo.toml`.
-pub fn sources(name: &str, r: &Release) -> Result<String, String> {
+pub fn sources(name: &str, r: &Release, offline: bool) -> Result<String, String> {
     let dir = root()?.join("src").join(format!("{}-{}-{}", name, r.version, &r.cksum[..16.min(r.cksum.len())]));
     let done = dir.join(".makepad-run-unpacked");
     if !done.is_file() {
         let what = format!("`{}` {}", name, r.version);
-        let body = get(&format!("{}/{}/{}-{}.crate", DOWNLOAD, name, name, r.version), &what)?;
+        let body = get(&format!("{}/{}/{}-{}.crate", DOWNLOAD, name, name, r.version), &what, offline)?;
         let got = crate::sha256::sha256_hex(&body);
         if !got.eq_ignore_ascii_case(&r.cksum) {
             return Err(format!("{}: the download's SHA-256 {} is not the index's {}", what, got, r.cksum));

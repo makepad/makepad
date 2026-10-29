@@ -32,7 +32,7 @@ fn amp_parse_medians() {
             let path = makepad.join(path);
             assert!(path.exists(), "missing macro source: {}", path.display());
             crate::crates::CrateUnit { name: name.into(), src_path: path.to_string_lossy().into_owned(), edition: 2021,
-                features: vec![], deps,  proc_macro, bin: false, build_script: false, version: "1.0.0".into(), registry: false }
+                features: vec![], deps, host: None, proc_macro, bin: false, build_script: false, version: "1.0.0".into(), registry: false }
         }).collect::<Vec<_>>();
         crate::pmhost::install();
         crate::macro_reg::register_and_strip(sess, &mut units, &crate::std_dir(), false).unwrap();
@@ -113,7 +113,7 @@ fn amp_parse_medians() {
             let mut p = crate::parser::Parser::new(sess, &text, toks, 2021);
             p.bctx = Some(std::rc::Rc::new(crate::builtins::FileCtx::new("amp", path, "amp", &snapshot.cfg)));
             p.ext = vec![b' '; bytes].into();
-            let id = crate::builtins::HOSTED + crate::macro_reg::bang_index("live_id").unwrap() as u8;
+            let id = crate::builtins::HOSTED + crate::macro_reg::bang_index("live_id").unwrap() as u16;
             crate::parse_work::begin();
             std::hint::black_box(crate::builtins::expand(&p, id, lo, lo + 1, call_lo, call_hi).unwrap());
             let t = crate::parse_work::finish();

@@ -2,8 +2,8 @@
 //! (crate substitution, coord.md "SV1") instead of compiling libs/smallvec. Behaviour follows
 //! smallvec 1.15.1 exactly (inline storage up to the array size, spill policy, capacities,
 //! panic messages); the algorithms are ported from it (Copyright (c) 2018 The Servo Project
-//! Developers, MIT/Apache-2.0; see libs/relax/compiler/std/CREDITS.md). Dialect form: no
-//! macro_rules (`smallvec!` is a Relax built-in that expands per SV2), no features.
+//! Developers, MIT/Apache-2.0; see libs/relax/compiler/std/CREDITS.md). `smallvec!` is a
+//! Relax built-in that expands per SV2; `smallvec_inline!` is exported without a feature gate.
 //! The rustc path keeps using the real crate; std/check_ext tests this file against it.
 
 extern crate alloc;
@@ -23,6 +23,20 @@ use core::ptr;
 use core::slice::{self, SliceIndex};
 
 mod arrays;
+
+// smallvec 1.15.1 src/lib.rs: smallvec_inline. Keep array-repeat semantics
+// (rustc compiler/rustc_hir_typeck/src/expr.rs: check_expr_repeat).
+#[macro_export]
+macro_rules! smallvec_inline {
+    (@one $x:expr) => (1usize);
+    ($elem:expr; $n:expr) => ({
+        $crate::SmallVec::<[_; $n]>::from_const([$elem; $n])
+    });
+    ($($x:expr),+ $(,)?) => ({
+        const N: usize = 0usize $(+ $crate::smallvec_inline!(@one $x))*;
+        $crate::SmallVec::<[_; N]>::from_const([$($x,)*])
+    });
+}
 
 /// Error type for APIs with fallible heap allocation.
 #[derive(Debug)]
@@ -130,6 +144,16 @@ impl<T, const N: usize> SmallVec<[T; N]> {
     /// Construct an empty vector without a heap allocation.
     pub const fn new_const() -> SmallVec<[T; N]> {
         SmallVec { capacity: 0, data: SmallVecData { inline: ManuallyDrop::new(MaybeUninit::uninit()) } }
+    }
+
+    // smallvec 1.15.1 src/lib.rs: SmallVec::from_const / from_const_with_len_unchecked.
+    pub const fn from_const(items: [T; N]) -> Self {
+        SmallVec { capacity: N, data: SmallVecData { inline: ManuallyDrop::new(MaybeUninit::new(items)) } }
+    }
+
+    /// Move an array inline; the caller must ensure `len <= N`.
+    pub const unsafe fn from_const_with_len_unchecked(items: [T; N], len: usize) -> Self {
+        SmallVec { capacity: len, data: SmallVecData { inline: ManuallyDrop::new(MaybeUninit::new(items)) } }
     }
 }
 

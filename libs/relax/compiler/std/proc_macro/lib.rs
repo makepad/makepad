@@ -55,6 +55,9 @@ pub struct Span {
 // per thread: the host runs expansions on every parse worker at once
 std::thread_local! {
     static CALL_SITE: std::cell::Cell<Span> = const { std::cell::Cell::new(Span { lo: 0, hi: 0, sl: 1, sc: 1, el: 1, ec: 1, file: 0 }) };
+    // a macro call is running on this thread (bridge): rustc's bridge state is per thread too
+    // (library/proc_macro/src/bridge/client.rs is_available: `state::with(|s| s.is_some())`)
+    static IN_MACRO: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl Span {
@@ -106,9 +109,10 @@ impl Span {
     }
 }
 
-/// A proc macro is running (the JIT host only calls macro code from a macro call).
+/// A proc macro is running on this thread (the macro host's bridge call); false in a build script
+/// or program that links proc_macro as a library (proc-macro2 then takes its fallback).
 pub fn is_available() -> bool {
-    true
+    IN_MACRO.with(|m| m.get())
 }
 
 #[derive(Clone, Debug)]
@@ -838,6 +842,10 @@ pub mod __relax {
         let mut r = Reader { b: inp, i: 0 };
         let call = r.span();
         CALL_SITE.with(|c| c.set(call));
+        // restored on unwind too (a panicking macro is reported by the host, the thread lives on)
+        struct InMacro(bool);
+        impl Drop for InMacro { fn drop(&mut self) { IN_MACRO.with(|m| m.set(self.0)); } }
+        let _in_macro = InMacro(IN_MACRO.with(|m| m.replace(true)));
         let input = r.stream();
         let out = if io.kind == 1 {
             let ab = unsafe { std::slice::from_raw_parts(io.attr, io.attr_len) };

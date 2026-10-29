@@ -69,6 +69,15 @@ pub mod detect {
         Adx = 50,
         Rdrand = 51,
         Rdseed = 52,
+        Vaes = 53,
+        Gfni = 54,
+        Avx512ifma = 55,
+        Avx512vbmi = 56,
+        Avx512vbmi2 = 57,
+        Avx512vnni = 58,
+        Avx512bitalg = 59,
+        Avx512vpopcntdq = 60,
+        Avxvnni = 61,
     }
 
     /// bit 63 = initialised
@@ -193,6 +202,16 @@ pub mod detect {
             | bit(Feature::Adx, e.ebx & (1 << 19) != 0)
             | bit(Feature::Rdrand, p.ecx & (1 << 30) != 0)
             | bit(Feature::Rdseed, e.ebx & (1 << 18) != 0)
+            // std_detect x86.rs: leaf 7 ecx / ebx and leaf 7.1 eax (chacha20 / aes / curve25519 backends)
+            | bit(Feature::Vaes, avx && e.ecx & (1 << 9) != 0)
+            | bit(Feature::Gfni, e.ecx & (1 << 8) != 0)
+            | bit(Feature::Avx512ifma, avx512 && e.ebx & (1 << 21) != 0)
+            | bit(Feature::Avx512vbmi, avx512 && e.ecx & (1 << 1) != 0)
+            | bit(Feature::Avx512vbmi2, avx512 && e.ecx & (1 << 6) != 0)
+            | bit(Feature::Avx512vnni, avx512 && e.ecx & (1 << 11) != 0)
+            | bit(Feature::Avx512bitalg, avx512 && e.ecx & (1 << 12) != 0)
+            | bit(Feature::Avx512vpopcntdq, avx512 && e.ecx & (1 << 14) != 0)
+            | bit(Feature::Avxvnni, avx && e1.eax & (1 << 4) != 0)
     }
 
     #[cfg(all(any(target_os = "linux", target_os = "android"), target_arch = "aarch64"))]
@@ -306,6 +325,15 @@ macro_rules! is_x86_feature_detected {
     ("adx") => { cfg!(target_feature = "adx") || $crate::arch::detect::check($crate::arch::detect::Feature::Adx) };
     ("rdrand") => { cfg!(target_feature = "rdrand") || $crate::arch::detect::check($crate::arch::detect::Feature::Rdrand) };
     ("rdseed") => { cfg!(target_feature = "rdseed") || $crate::arch::detect::check($crate::arch::detect::Feature::Rdseed) };
+    ("vaes") => { cfg!(target_feature = "vaes") || $crate::arch::detect::check($crate::arch::detect::Feature::Vaes) };
+    ("gfni") => { cfg!(target_feature = "gfni") || $crate::arch::detect::check($crate::arch::detect::Feature::Gfni) };
+    ("avx512ifma") => { cfg!(target_feature = "avx512ifma") || $crate::arch::detect::check($crate::arch::detect::Feature::Avx512ifma) };
+    ("avx512vbmi") => { cfg!(target_feature = "avx512vbmi") || $crate::arch::detect::check($crate::arch::detect::Feature::Avx512vbmi) };
+    ("avx512vbmi2") => { cfg!(target_feature = "avx512vbmi2") || $crate::arch::detect::check($crate::arch::detect::Feature::Avx512vbmi2) };
+    ("avx512vnni") => { cfg!(target_feature = "avx512vnni") || $crate::arch::detect::check($crate::arch::detect::Feature::Avx512vnni) };
+    ("avx512bitalg") => { cfg!(target_feature = "avx512bitalg") || $crate::arch::detect::check($crate::arch::detect::Feature::Avx512bitalg) };
+    ("avx512vpopcntdq") => { cfg!(target_feature = "avx512vpopcntdq") || $crate::arch::detect::check($crate::arch::detect::Feature::Avx512vpopcntdq) };
+    ("avxvnni") => { cfg!(target_feature = "avxvnni") || $crate::arch::detect::check($crate::arch::detect::Feature::Avxvnni) };
     ($t:tt,) => { $crate::is_x86_feature_detected!($t) };
     ($t:tt) => { compile_error!(concat!("unknown x86 target feature: ", $t)) };
 }

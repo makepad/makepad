@@ -229,6 +229,16 @@ pub(crate) fn free(ptr: *mut u8, layout: Layout) {
     }
 }
 
+// library/alloc/src/boxed.rs: Box::try_clone_from_ref_in uses DeallocDropGuard
+// to keep deallocation on the unwind path.
+pub(crate) struct DeallocGuard(pub(crate) *mut u8, pub(crate) Layout);
+
+impl Drop for DeallocGuard {
+    fn drop(&mut self) {
+        free(self.0, self.1);
+    }
+}
+
 /// rustc_builtin_macros global_allocator.rs: the `__rg_*` fns its expansion defines for a
 /// `#[global_allocator]` static, here generic over the static's type; the allocator shim
 /// (intrinsics_rt::rust_alloc & co) calls them with the static.

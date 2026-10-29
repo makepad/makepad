@@ -1936,6 +1936,19 @@ impl<'a> Lcx<'a> {
         }
     }
 
+    /// A promoted initializer has the same output-pointer ABI as a const initializer.
+    pub fn lower_promoted(&mut self, e: ExprId, t: TyId) {
+        self.const_init = true;
+        self.overflow_checks = true;
+        self.scan_addr_taken();
+        let out = self.f.vreg(Cls::I);
+        self.f.params.push(out);
+        self.pos = self.ast().expr(e).lo;
+        let v = self.lower_expr_coerced(e, t);
+        self.store_val(out, 0, t, v);
+        self.term(Term::Ret(Vec::new()));
+    }
+
     pub fn lower_fn_body(&mut self, def: DefId) {
         self.overflow_checks |= matches!(self.u.prog.def(def).kind, DefKind::Const | DefKind::AssocConst | DefKind::Static | DefKind::AnonConst);
         self.scan_addr_taken();
@@ -2491,6 +2504,35 @@ impl<'a> Lcx<'a> {
             }
         };
         let xt = self.body_ty(x);
+        if self.u.tcx.tys.has_error(xt) {
+            // a type check that left the operand untyped without an error, or an instantiation
+            // whose normalisation failed: name both so the hole is found from the report
+            let raw = self.b.ty(x);
+            let what = if self.u.tcx.tys.has_error(raw) { "the type check left it as" } else { "its instantiation normalised to" };
+            // the opaque types in it: an owner whose check had errors reveals no hidden type
+            fn opaques(tys: &crate::types::Types, t: TyId, out: &mut Vec<crate::program::DefId>, depth: u32) {
+                if depth > 8 { return; }
+                match tys.kind(t) {
+                    TyKind::Alias(_, AliasTy { kind: AliasTyKind::Opaque { def_id }, .. }) => { if !out.contains(def_id) { out.push(*def_id); } }
+                    TyKind::Ref(_, x, _) => opaques(tys, *x, out, depth + 1),
+                    TyKind::Adt(_, v, _) | TyKind::Tuple(v) => for &a in tys.list(*v).iter() { opaques(tys, a, out, depth + 1) },
+                    _ => {}
+                }
+            }
+            let mut ops = Vec::new();
+            opaques(&self.u.tcx.tys, raw, &mut ops, 0);
+            let mut why = String::new();
+            for o in ops {
+                let owner = self.u.prog.opaque_owner(o);
+                let b = self.u.tcx.typeck(&self.u.prog, owner);
+                why.push_str(&format!("; its opaque type is defined by {}{}", self.u.prog.def_path(owner),
+                    b.errors.first().map_or(" (checked without errors)".to_string(), |e| format!(", whose check failed: {e}"))));
+            }
+            let msg = format!("`.await` of a value with no type: {what} `{}` (checked type `{}`) in {}{why}",
+                crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, xt), crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, raw), self.f.name);
+            self.err(self.ast().expr(x).lo, msg);
+            return self.unit();
+        }
         let v = self.lower_expr(x);
         let (itf, fut_t) = {
             let u = self.u;
@@ -4776,8 +4818,13 @@ impl<'a> Lcx<'a> {
                 let a = self.f.vreg(Cls::I);
                 self.emit(Inst::IBin(IOp::Add, U64, a, p, off));
                 if self.unwind_on() && self.nounwind == 0 && self.u.drop_may_unwind(el) {
-                    // an element drop that panics: the elements after it still drop (rustc's
-                    // drop_in_place::<[T]> drop ladder), then unwinding goes on
+                    // rustc_mir_transform/src/elaborate_drop.rs: drop_loop_trio_for_slice
+                    // drops the suffix, then follows the enclosing unwind edge.
+                    let outer = match self.pad_fixed {
+                        Some(pad) => pad,
+                        None if self.cleanup_needed() => Some(self.cleanup_pad()),
+                        None => None,
+                    };
                     let (cur, pos) = (self.cur, self.pos);
                     let pad = self.f.block();
                     let ph = self.f.block();
@@ -4802,7 +4849,10 @@ impl<'a> Lcx<'a> {
                     self.emit(Inst::IBinI(IOp::Add, U64, j, j, 1));
                     self.goto(ph);
                     self.switch(pr);
-                    self.term(Term::Resume);
+                    match outer {
+                        Some(pad) => self.goto(pad),
+                        None => self.term(Term::Resume),
+                    }
                     self.cur = cur;
                     self.pos = pos;
                     let saved = self.pad_fixed.replace(Some(pad));
@@ -5691,8 +5741,9 @@ impl<'a> Lcx<'a> {
             ExprKind::Unary(UnOp::Neg | UnOp::Not, x) => self.promotable(x) && !self.b.binops.contains_key(&e.0),
             ExprKind::Array(v) | ExprKind::Tuple(v) => ast.list(v).iter().all(|x| self.promotable(*x)),
             ExprKind::Path(_) => match self.b.res.get(&e.0) {
-                // constants, unit constructors, fn items (`&VTable { f: g::<T> }`)
-                Some(Res::Def(d)) => matches!(self.u.prog.def(*d).kind, DefKind::Const | DefKind::AssocConst | DefKind::Variant | DefKind::Struct | DefKind::Fn | DefKind::AssocFn),
+                // rustc_mir_transform/src/promote_consts.rs: Validator::validate_operand
+                // accepts constants, including FnDef operands (`&VTable { f: g::<T> }`).
+                Some(Res::Def(d)) => matches!(self.u.prog.def(*d).kind, DefKind::Const | DefKind::AssocConst | DefKind::Variant | DefKind::Struct | DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn),
                 // rustc_mir_transform/src/promote_consts.rs:379-397: a substituted
                 // const parameter is a constant operand. Without this,
                 // `&VTable { tag: N, .. }` returns a stack temporary unless inlining
@@ -5702,15 +5753,26 @@ impl<'a> Lcx<'a> {
             },
             // braced struct literals of promotable fields (no `..base`)
             ExprKind::Struct(row) if ast.row(row).base == crate::ast::OptExprId::NONE && !ast.row(row).rest => ast.list(ast.row(row).fields).iter().all(|f| self.promotable(f.expr)),
-            ExprKind::Cast(x, _) => self.promotable(x),
+            // rustc_mir_transform/src/promote_consts.rs: Validator::validate_rvalue
+            // permits reification, but not PointerExposeProvenance.
+            ExprKind::Cast(x, _) => !(matches!(self.kind(t), TyKind::Int(_))
+                && matches!(self.kind(self.body_ty(x)), TyKind::Ptr(..) | TyKind::FnPtr(..) | TyKind::FnDef(..))) && self.promotable(x),
             // an inline const (`const { .. }`, `offset_of!`'s expansion) is a constant: rustc
             // promotes it (lowered here as code; promote_rvalue stores its value statically)
             ExprKind::ConstBlock(_) => true,
             ExprKind::AddrOf(false, false, x) => self.promotable(x),
-            ExprKind::Call(f, args) => match self.b.res.get(&strip_paren(ast, f).0) {
-                Some(Res::Def(d)) if matches!(self.u.prog.def(*d).kind, DefKind::Variant | DefKind::Struct) => ast.list(args).iter().all(|x| self.promotable(*x)),
-                _ => false,
-            },
+            ExprKind::Call(f, args) => {
+                let ctor = matches!(self.b.res.get(&strip_paren(ast, f).0), Some(Res::Def(d)) if matches!(self.u.prog.def(*d).kind, DefKind::Variant | DefKind::Struct));
+                // rustc_mir_transform/src/promote_consts.rs: Validator::validate_call.
+                // Runtime calls require #[rustc_promotable], even in an unsafe fn.
+                let call = match self.kind(self.body_ty(f)) {
+                    TyKind::FnDef(d, ..) => self.u.tcx.fn_sig(&self.u.prog, d).is_some_and(|s| s.is_const && s.rustc_promotable)
+                        && self.u.tcx.is_freeze(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), t)
+                        && self.promotable(f),
+                    _ => false,
+                };
+                (ctor || call) && ast.list(args).iter().all(|x| self.promotable(*x))
+            }
             _ => false,
         }
     }
@@ -5738,6 +5800,22 @@ impl<'a> Lcx<'a> {
                         self.emit(Inst::Addr(p, s));
                         return Some(p);
                     }
+                }
+            }
+        }
+        // rustc_mir_transform/src/promote_consts.rs: Promoter::promote_temp extracts
+        // the initializer; it never runs again in the borrowing function.
+        if shared && !self.const_init && self.layout(xt).size > 0 && self.u.tcx.is_freeze(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), xt) {
+            match self.u.promoted_addr_shared(self.b, x, xt, self.cur_fn) {
+                Ok(addr) => {
+                    let s = self.u.data_sym(addr);
+                    let p = self.f.vreg(Cls::I);
+                    self.emit(Inst::Addr(p, s));
+                    return Some(p);
+                }
+                Err(e) => {
+                    self.err(self.ast().expr(x).lo, e);
+                    return None;
                 }
             }
         }
@@ -12465,7 +12543,16 @@ pub fn emit_decode_tag(u: &Unit, f: &mut Func, b: u32, pos: u64, raw: Vec<VReg>,
     use crate::layout::TagEnc;
     if l.uninhabited { return None; }
     Some(match l.enc {
-        TagEnc::Direct => raw,
+        TagEnc::Direct => match l.tag {
+            // rustc_codegen_ssa/src/mir/operand.rs::OperandRef::codegen_get_discr:
+            // intcast the tag scalar, not the whole register carrying it.
+            Some((_, Mem::Int(bytes, signed))) if bytes < 8 && raw.len() == 1 => {
+                let d = f.vreg(Cls::I);
+                push_at(f, b, pos, Inst::Conv(Conv::IntToInt(IntTy { bits: bytes * 8, signed }), d, raw[0]));
+                vec![d]
+            }
+            _ => raw,
+        },
         TagEnc::Single(v) => {
             let d = f.vreg(Cls::I);
             let discr = adt.discriminant_for_variant(&u.tcx, &u.prog, v)?;
@@ -12834,9 +12921,8 @@ fn call_drop(u: &mut Unit, f: &mut Func, b: u32, addr: VReg, t: TyId) {
     }
 }
 
-/// Calls `items` (drop functions with their argument) in order; a call that may unwind gets an
-/// unwind edge to a pad calling the items after it, then Resume (rustc's drop elaboration: a
-/// value's remaining fields still drop when one drop panics).
+/// rustc_mir_transform/src/elaborate_drop.rs: drop_ladder. A call that may unwind gets
+/// an edge to the remaining drops, then Resume.
 fn glue_drop_seq(f: &mut Func, cur: &mut u32, items: &[(Callee, VReg, bool)]) {
     for k in 0..items.len() {
         let (c, a, may) = (&items[k].0, items[k].1, items[k].2);
@@ -12852,6 +12938,52 @@ fn glue_drop_seq(f: &mut Func, cur: &mut u32, items: &[(Callee, VReg, bool)]) {
             *cur = next;
         }
     }
+}
+
+/// rustc_mir_transform/src/elaborate_drop.rs: open_drop_for_multivariant builds a
+/// field ladder for the active variant on both normal and destructor-unwind paths.
+fn glue_drop_enum(u: &mut Unit, f: &mut Func, cur: &mut u32, p: VReg, t: TyId, unwind: bool) {
+    let TyKind::Adt(d, args, _) = u.tcx.tys.kind(t).clone() else { return; };
+    let adt = u.tcx.adts[&d].clone();
+    let l = u.layout_of(t);
+    // the discriminant: the tag, or the dataful variant's niche
+    if l.tag.is_none() && !matches!(l.enc, crate::layout::TagEnc::Single(_)) {
+        return;
+    }
+    let Some(tag) = emit_load_disc(u, f, *cur, 0, p, 0, &l, &adt) else { return; };
+    let join = f.block();
+    for (vi, v) in adt.variants.iter().enumerate() {
+        let fields: Vec<_> = (0..v.fields.len()).filter_map(|fi| {
+            let ft = u.tcx.field_ty(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), d, vi as u32, fi as u32, u.tcx.tys.list(args));
+            u.needs_drop_glue(ft).then_some((fi, ft))
+        }).collect();
+        if fields.is_empty() {
+            continue;
+        }
+        let c = f.vreg(Cls::I);
+        let discr = adt.discriminant_for_variant(&u.tcx, &u.prog, vi as u32).expect("existing drop variant").signed_value() as u128;
+        push(f, *cur, Inst::ICmpI(Cond::Eq, false, c, tag[0], discr as i64));
+        let c = if tag.len() == 2 {
+            let hi = f.vreg(Cls::I); let both = f.vreg(Cls::I);
+            push(f, *cur, Inst::ICmpI(Cond::Eq, false, hi, tag[1], (discr >> 64) as i64));
+            push(f, *cur, Inst::IBin(IOp::And, U64, both, c, hi)); both
+        } else { c };
+        let mut yes = f.block();
+        let no = f.block();
+        f.blocks[*cur as usize].term = Term::Branch(c, yes, no);
+        let mut items = Vec::new();
+        for (fi, ft) in fields {
+            let a = addr_off(f, yes, p, l.variant_fields[vi][fi]);
+            let id = u.fn_id(FnKey::Glue(crate::jit::GLUE_DROP, ft));
+            let may = unwind && u.drop_may_unwind(ft);
+            items.push((Callee::Fn(id), a, may));
+        }
+        glue_drop_seq(f, &mut yes, &items);
+        f.blocks[yes as usize].term = Term::Jump(join);
+        *cur = no;
+    }
+    f.blocks[*cur as usize].term = Term::Jump(join);
+    *cur = join;
 }
 
 /// Destructor identity: rustc_middle/src/ty/util.rs:376; call selection: rustc_mir_transform/src/elaborate_drop.rs:973.
@@ -12885,12 +13017,10 @@ fn drop_glue_body(u: &mut Unit, f: &mut Func, cur: &mut u32, p: VReg, t: TyId) {
                 Some(a) => a.clone(),
                 None => return,
             };
-            if adt.is_union || adt.is_enum {
+            if adt.is_union {
                 if let Some((c, _)) = user_drop.take() {
                     push(f, *cur, Inst::Call(c, vec![p], Vec::new()));
                 }
-            }
-            if adt.is_union {
                 return;
             }
             let l = u.layout_of(t);
@@ -12931,47 +13061,18 @@ fn drop_glue_body(u: &mut Unit, f: &mut Func, cur: &mut u32, p: VReg, t: TyId) {
                 glue_drop_seq(f, cur, &items);
                 return;
             }
-            // the discriminant: the tag, or for a null-pointer niche whether the pointer word is
-            // set (the dataful variant's disc when it is, the empty one's when it is null)
-            if l.tag.is_none() && !matches!(l.enc, crate::layout::TagEnc::Single(_)) {
-                return;
+            if let Some((c, may)) = user_drop.take() {
+                push(f, *cur, Inst::Call(c, vec![p], Vec::new()));
+                if may {
+                    let next = f.block();
+                    let mut pad = f.block();
+                    f.blocks[*cur as usize].term = Term::Invoke(next, pad);
+                    glue_drop_enum(u, f, &mut pad, p, t, false);
+                    f.blocks[pad as usize].term = Term::Resume;
+                    *cur = next;
+                }
             }
-            let Some(tag) = emit_load_disc(u, f, *cur, 0, p, 0, &l, &adt) else { return; };
-            let join = f.block();
-            for (vi, v) in adt.variants.iter().enumerate() {
-                let mut any = false;
-                for fi in 0..v.fields.len() {
-                    let ft = u.tcx.field_ty(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), d, vi as u32, fi as u32, u.tcx.tys.list(args));
-                    if u.needs_drop_glue(ft) {
-                        any = true;
-                    }
-                }
-                if !any {
-                    continue;
-                }
-                let c = f.vreg(Cls::I);
-                let discr = adt.discriminant_for_variant(&u.tcx, &u.prog, vi as u32).expect("existing drop variant").signed_value() as u128;
-                push(f, *cur, Inst::ICmpI(Cond::Eq, false, c, tag[0], discr as i64));
-                let c = if tag.len() == 2 {
-                    let hi = f.vreg(Cls::I); let both = f.vreg(Cls::I);
-                    push(f, *cur, Inst::ICmpI(Cond::Eq, false, hi, tag[1], (discr >> 64) as i64));
-                    push(f, *cur, Inst::IBin(IOp::And, U64, both, c, hi)); both
-                } else { c };
-                let yes = f.block();
-                let no = f.block();
-                f.blocks[*cur as usize].term = Term::Branch(c, yes, no);
-                for fi in 0..v.fields.len() {
-                    let ft = u.tcx.field_ty(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), d, vi as u32, fi as u32, u.tcx.tys.list(args));
-                    if u.needs_drop_glue(ft) {
-                        let a = addr_off(f, yes, p, l.variant_fields[vi][fi]);
-                        call_drop(u, f, yes, a, ft);
-                    }
-                }
-                f.blocks[yes as usize].term = Term::Jump(join);
-                *cur = no;
-            }
-            f.blocks[*cur as usize].term = Term::Jump(join);
-            *cur = join;
+            glue_drop_enum(u, f, cur, p, t, unwind);
         }
         TyKind::Tuple(v) => {
             let unwind = options.unwind;
@@ -13327,13 +13428,10 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u
                         }
                     }
                     Inst::Copy(dst, src, _) => {
-                        // pointers into the source itself do not travel with its bytes: a
-                        // value referenced from inside cannot be moved (borrowck), so a moved
-                        // copy's self-pointers are never used
-                        let mut r = read_through(&pts, &content, &uset, *src);
-                        for w in 0..wd {
-                            r[w] &= !pts[src.0 as usize * wd + w];
-                        }
+                        // A copied field can borrow a sibling in the source slot. Keep that
+                        // borrow (rustc_mir_transform/src/coroutine/layout.rs::locals_live_across_suspend_points;
+                        // rustc_mir_dataflow/src/impls/borrowed_locals.rs::MaybeBorrowedLocals::gen_statement).
+                        let r = read_through(&pts, &content, &uset, *src);
                         let pd = pts[dst.0 as usize * wd..][..wd].to_vec();
                         if empty(&pd) {
                             changed |= or(&mut uset, &r);

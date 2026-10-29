@@ -113,13 +113,15 @@ pub struct Parser<'a> {
     /// macro_rules body tokens -> their position in the definition: (expansion position,
     /// definition position, length), ascending
     pub body_origin: OSeg<'a, Maps>,
-    /// tokens split by `eat_gt` (`>>` -> `>`), with their old value
+    /// compound tokens split by the grammar, with their old value
     pub tok_undo: Vec<(u32, Tok)>,
     /// opaque macro fragments a transcription forwarded (start of the first token -> end of the
     /// last): a `$t:tt` matches one whole (rustc's interpolated nonterminal tokens)
     pub frag_groups: crate::fxhash::HashMap<u32, u32>,
     /// starts of the `$t:ty` substitutions of expansion text (not a trait where a bound is expected)
     ty_frags: crate::fxhash::HashSet<u32>,
+    /// starts of the `$p:path` substitutions (type-mode arguments even in expressions/patterns)
+    path_frags: crate::fxhash::HashSet<u32>,
     /// starts of the `$e:expr` / `$l:literal` substitutions of expansion text (check only): the kind
     meta_frags: crate::fxhash::HashMap<u32, &'static str>,
     /// starts of the `$b:block` substitutions of expansion text (check only)
@@ -211,6 +213,7 @@ impl<'a> Parser<'a> {
             tok_undo: Vec::new(),
             frag_groups: Default::default(),
             ty_frags: Default::default(),
+            path_frags: Default::default(),
             meta_frags: Default::default(),
             block_frags: Default::default(),
             synth_parens: Default::default(),
@@ -497,31 +500,31 @@ impl<'a> Parser<'a> {
         matches!(self.kind(), T::Ident | T::RawIdent)
     }
 
-    /// Split a compound token so its first char is consumed: `>>` -> `>` etc.
+    // rustc_parse parser/mod.rs: Parser::break_and_eat; rustc_ast token.rs:
+    // TokenKind::break_two_token_op. Speculative fragment parses restore every split.
+    fn break_and_eat(&mut self, expected: T) -> bool {
+        if self.eat(expected) { return true; }
+        let rest = match (expected, self.kind()) {
+            (T::Lt, T::Shl) => T::Lt,
+            (T::Lt, T::Le) => T::Eq,
+            (T::Lt, T::ShlEq) => T::Le,
+            (T::Lt, T::LArrow) => T::Minus,
+            (T::Gt, T::Shr) => T::Gt,
+            (T::Gt, T::Ge) => T::Eq,
+            (T::Gt, T::ShrEq) => T::Ge,
+            (T::And, T::AndAnd) => T::And,
+            (T::And, T::AndEq) => T::Eq,
+            (T::Or, T::OrOr) => T::Or,
+            (T::Or, T::OrEq) => T::Eq,
+            (T::Plus, T::PlusEq) => T::Eq,
+            _ => return false,
+        };
+        self.tok_undo.push((self.pos as u32, self.toks.at(self.pos)));
+        self.toks.edit(self.pos, |t| { t.kind = rest; t.lo += 1; });
+        true
+    }
     fn eat_gt(&mut self) -> bool {
-        if matches!(self.kind(), T::Shr | T::Ge | T::ShrEq) {
-            // a speculative parse (macro fragment matching) restores the split tokens
-            self.tok_undo.push((self.pos as u32, self.toks.at(self.pos)));
-        }
-        match self.kind() {
-            T::Gt => {
-                self.pos += 1;
-                true
-            }
-            T::Shr => {
-                self.toks.edit(self.pos, |t| { t.kind = T::Gt; t.lo += 1; });
-                true
-            }
-            T::Ge => {
-                self.toks.edit(self.pos, |t| { t.kind = T::Eq; t.lo += 1; });
-                true
-            }
-            T::ShrEq => {
-                self.toks.edit(self.pos, |t| { t.kind = T::Ge; t.lo += 1; });
-                true
-            }
-            _ => false,
-        }
+        self.break_and_eat(T::Gt)
     }
     fn expect_gt(&mut self) -> PResult<()> {
         if self.eat_gt() {
@@ -531,56 +534,13 @@ impl<'a> Parser<'a> {
         }
     }
     fn eat_lt(&mut self) -> bool {
-        match self.kind() {
-            T::Lt => {
-                self.pos += 1;
-                true
-            }
-            T::Shl => {
-                self.toks.edit(self.pos, |t| { t.kind = T::Lt; t.lo += 1; });
-                true
-            }
-            T::Le => {
-                self.toks.edit(self.pos, |t| { t.kind = T::Eq; t.lo += 1; });
-                true
-            }
-            T::ShlEq => {
-                self.toks.edit(self.pos, |t| { t.kind = T::Le; t.lo += 1; });
-                true
-            }
-            // rustc_parse break_and_eat: `<-` splits into `<` `-` (`f::<-1>()`)
-            T::LArrow => {
-                self.toks.edit(self.pos, |t| { t.kind = T::Minus; t.lo += 1; });
-                true
-            }
-            _ => false,
-        }
+        self.break_and_eat(T::Lt)
     }
     fn eat_amp(&mut self) -> bool {
-        match self.kind() {
-            T::And => {
-                self.pos += 1;
-                true
-            }
-            T::AndAnd => {
-                self.toks.edit(self.pos, |t| { t.kind = T::And; t.lo += 1; });
-                true
-            }
-            _ => false,
-        }
+        self.break_and_eat(T::And)
     }
     fn eat_or(&mut self) -> bool {
-        match self.kind() {
-            T::Or => {
-                self.pos += 1;
-                true
-            }
-            T::OrOr => {
-                self.toks.edit(self.pos, |t| { t.kind = T::Or; t.lo += 1; });
-                true
-            }
-            _ => false,
-        }
+        self.break_and_eat(T::Or)
     }
 
     // ------------------------------------------------------------ arenas
@@ -626,6 +586,12 @@ impl<'a> Parser<'a> {
         let mut i = self.pos + 1;
         while i < self.toks.len() {
             let k = self.toks.kind_at(i);
+            // parse_part has no invisible type/path-fragment boundaries (rustc_parse
+            // parser/{ty,path}.rs: parse_ty_common/parse_path); consume these with their expansion.
+            if (!self.ty_frags.is_empty() && self.ty_frags.contains(&{ self.toks.at(i).lo }))
+                || (!self.path_frags.is_empty() && self.path_frags.contains(&{ self.toks.at(i).lo })) {
+                return BodyOutline::Eager(5);
+            }
             match k {
                 T::OpenParen | T::OpenBracket | T::OpenBrace => stack.push(k),
                 T::CloseParen | T::CloseBracket | T::CloseBrace => {
@@ -969,39 +935,40 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// `#[name = m!(..)]`: rustc expands the macro of an attribute's value, so `m` must resolve at the
-    /// attribute (a macro_rules! defined further down does not).
+    /// rustc_expand expand.rs: fully_expand_fragment visits attribute value expressions;
+    /// rustc_attr_parsing parser.rs: expr_to_lit checks the expanded value.
     fn attr_value_macro(&mut self, toks: TokRange) -> PResult<()> {
         let (lo, hi) = (toks.lo as usize, toks.hi as usize);
-        if self.macros.is_none() || self.lazy_part || !crate::lexer::validation_enabled() || hi <= lo + 3 || hi > self.toks.len() { return Ok(()); }
-        // the path of the attribute (idents and `::`), then `=`, then one identifier and `!`
+        if !crate::lexer::validation_enabled() || hi <= lo + 3 || hi > self.toks.len() { return Ok(()); }
+        // the attribute's path, then `=`, then its expression
         let mut i = lo;
         while i < hi && matches!(self.toks.at(i).kind, T::Ident | T::RawIdent | T::PathSep) { i += 1; }
-        if i == lo || i + 3 >= hi || self.toks.at(i).kind != T::Eq || self.toks.at(i + 1).kind != T::Ident || self.toks.at(i + 2).kind != T::Not
-            || !matches!(self.toks.at(i + 3).kind, T::OpenParen | T::OpenBracket | T::OpenBrace) || (self.toks.at(i + 1).lo as usize) >= self.src.len() {
-            return Ok(());
-        }
-        let name = String::from_utf8_lossy(self.tok_text(self.toks.at(i + 1))).into_owned();
-        if crate::program::BUILTIN_MACROS.contains(&name.as_str()) || crate::builtins::macro_def(&name).is_some() || crate::macro_reg::has_macro(&name) || fmtmac::is_builtin(name.as_bytes()) {
-            return Ok(());
-        }
+        if i == lo || i + 3 >= hi || self.toks.at(i).kind != T::Eq { return Ok(()); }
         let (save, err_pos) = (self.pos, self.toks.at(i + 1).lo);
         self.pos = i + 1;
+        let call = self.mac_ahead();
+        if !call { self.pos = save; return Ok(()); }
         let path = self.path(true);
         self.pos = save;
         let path = path?;
-        let Some(def) = self.rules_macro(&path) else {
-            if self.name_imported(&name) { return Ok(()); }
-            return Err(PErr { pos: err_pos, msg: format!("cannot find macro `{name}` in this scope") });
-        };
-        // the call expands now: its arguments must match a rule
-        if def.builtin == 0 {
-            self.pos = i + 3;
-            let group = self.delim_tt();
-            self.pos = save;
-            let (_, args) = group?;
-            self.expand_call(&def, args, err_pos)?;
+        // rustc_expand module.rs: mod_file_path_from_attr rejects macros before loading modules.
+        if i == lo + 1 && self.tok_text(self.toks.at(lo)) == b"path" {
+            return Ok(());
         }
+        let seg = self.ast.segs(path.segs).last().unwrap();
+        let name = String::from_utf8_lossy(self.bytes(seg.name.lo, seg.name.hi)).into_owned();
+        if name == "compile_error" && i + 4 < hi && self.toks.at(i + 4).kind == T::Str {
+            let msg = crate::lit::unescape_str(&String::from_utf8_lossy(self.tok_text(self.toks.at(i + 4))));
+            return Err(PErr { pos: err_pos, msg });
+        }
+        if self.macros.is_none() || self.lazy_part {
+            if crate::builtins::builtin_macro_def(&name).is_none() { return Ok(()); }
+        } else if self.rules_macro(&path).is_none() {
+            if self.name_imported(&name) || crate::program::BUILTIN_MACROS.contains(&name.as_str()) || fmtmac::is_builtin(name.as_bytes()) { return Ok(()); }
+            return Err(PErr { pos: err_pos, msg: format!("cannot find macro `{name}` in this scope") });
+        }
+        let value = self.eager_macro_arg(TokRange { lo: (i + 1) as u32, hi: hi as u32 })?;
+        crate::builtins::eval_lit_range(self, value.lo as usize, value.hi as usize).map_err(|msg| PErr { pos: err_pos, msg })?;
         Ok(())
     }
 
@@ -1046,41 +1013,6 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// `#[doc = include_str!(..)]`: the value is a literal-producing macro call; it is expanded
-    /// (and so checked) like any other macro call (rustc expands macros in attribute values).
-    fn check_doc_value(&mut self, lo: usize, hi: usize) -> PResult<()> {
-        let kind = |p: &Self, i: usize| if i < hi { p.toks.at(i).kind } else { T::Eof };
-        if kind(self, lo + 1) != T::Eq || kind(self, lo + 2) != T::Ident || kind(self, lo + 3) != T::Not { return Ok(()); }
-        let mname = match self.tok_text(self.toks.at(lo + 2)) {
-            // the macro's own message is the error
-            b"compile_error" if kind(self, lo + 5) == T::Str => {
-                let msg = crate::lit::unescape_str(&String::from_utf8_lossy(self.tok_text(self.toks.at(lo + 5))));
-                return Err(PErr { pos: self.toks.at(lo + 2).lo, msg });
-            }
-            b"include_str" => "include_str",
-            b"include_bytes" => "include_bytes",
-            b"concat" => "concat",
-            b"env" => "env",
-            b"stringify" => "stringify",
-            _ => return Ok(()),
-        };
-        let call_lo = self.toks.at(lo + 2).lo;
-        if hi >= lo + 6 && matches!(self.toks.at(lo + 4).kind, T::OpenParen | T::OpenBracket | T::OpenBrace) {
-            if let Some((text, rtoks)) = self.builtin_with_rules_expanded(mname, TokRange { lo: (lo + 5) as u32, hi: (hi - 1) as u32 })? {
-                let start = self.expand_toks(&text, &rtoks, call_lo);
-                let end = self.toks.len() - 1;
-                if let Err(m) = crate::builtins::eval_lit_range(self, start, end) {
-                    return Err(PErr { pos: call_lo, msg: m });
-                }
-                return Ok(());
-            }
-        }
-        if let Err(m) = crate::builtins::eval_lit_range(self, lo + 2, hi) {
-            return Err(PErr { pos: call_lo, msg: m });
-        }
-        Ok(())
-    }
-
     fn check_attr_shape(&mut self, toks: TokRange) -> PResult<()> {
         let (lo, hi) = (toks.lo as usize, toks.hi as usize);
         if hi <= lo || hi > self.toks.len() || self.toks.kind_at(lo) != T::Ident {
@@ -1099,7 +1031,6 @@ impl<'a> Parser<'a> {
             b"cfg" => 0,
             b"cfg_attr" => 1,
             b"derive" => 2,
-            b"doc" => return self.check_doc_value(lo, hi),
             _ => return Ok(()),
         };
         let bad = |this: &Self, at: usize, what: &str| -> PResult<()> {
@@ -1551,6 +1482,25 @@ impl<'a> Parser<'a> {
     }
 
     fn rules_macro(&self, path: &Path) -> Option<crate::macros::MacroRef> {
+        let r = self.rules_macro_inner(path);
+        // MAKEPAD_RUN_TRACE=macnone:<name>: every unresolved call of a macro whose name contains <name>
+        if r.is_none() {
+            if let Some(want) = crate::preload::relax_trace().and_then(|t| t.split(',').find_map(|x| x.strip_prefix("macnone:"))) {
+                if let Some(seg) = self.ast.segs(path.segs).last() {
+                    let name = String::from_utf8_lossy(self.bytes(seg.name.lo, seg.name.hi)).to_string();
+                    if name.contains(want) {
+                        let segs: Vec<String> = self.ast.segs(path.segs).iter().map(|s| String::from_utf8_lossy(self.bytes(s.name.lo, s.name.hi)).to_string()).collect();
+                        let externs = self.macros.as_ref().and_then(|m| m.table.crates.get(&self.krate).map(|c| c.externs.iter().filter(|(k, _)| k.contains("futures")).map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>()));
+                        eprintln!("macnone {}! path {:?} global {} crate {} lazy_part {} macros {} in_world {} builder {} externs {:?} bang(futures_util) {:?}", name, segs, path.global(), self.krate, self.lazy_part, self.macros.is_some(),
+                            crate::macro_reg::in_world(), crate::macro_reg::world_builder(), externs, crate::macro_reg::bang_index_for("futures_util", &name));
+                    }
+                }
+            }
+        }
+        r
+    }
+
+    fn rules_macro_inner(&self, path: &Path) -> Option<crate::macros::MacroRef> {
         let m = self.macros.as_ref()?;
         let seg = self.ast.segs(path.segs).last()?;
         let name = String::from_utf8_lossy(self.bytes(seg.name.lo, seg.name.hi)).trim_start_matches("r#").to_string();
@@ -1559,7 +1509,11 @@ impl<'a> Parser<'a> {
         }
         // a skipped body calls only built-ins (body_outline checked each call where it was)
         if self.lazy_part {
-            return crate::builtins::builtin_macro_def(&name);
+            let d = crate::builtins::builtin_macro_def(&name);
+            if d.is_none() && crate::preload::relax_trace().is_some_and(|t| t.split(',').any(|x| x == "macmiss")) {
+                eprintln!("macmiss {}! in a lazily parsed body of crate {} (only built-ins resolve there)", name, self.krate);
+            }
+            return d;
         }
         // `dep::m!` / `crate::m!` / `$crate::m!` (expanded as `::dep::m!` or `crate::m!`): the
         // module part, resolved like an item path
@@ -1633,6 +1587,12 @@ impl<'a> Parser<'a> {
                 .unwrap_or(&self.krate);
             crate::builtins::macro_def_for(scope_krate, &name)
         };
+        // MAKEPAD_RUN_TRACE=macmiss: a qualified macro path that resolves to nothing (the call stays
+        // unexpanded and its body's check reports it as not supported)
+        if r.is_none() && bdef.is_none() && qual.is_some() && crate::preload::relax_trace().is_some_and(|t| t.split(',').any(|x| x == "macmiss")) {
+            eprintln!("macmiss {}! in crate {} module {:?} path {:?} lazy_part {} externs {:?}", name, self.krate, module, mpath, self.lazy_part,
+                qual.as_deref().and_then(|q| m.table.crates.get(&self.krate).and_then(|c| c.externs.get(q))));
+        }
         match r {
             Some(d) => Some(crate::builtins::override_rules(&self.session.options, d)),
             None => bdef.or_else(|| {
@@ -1691,13 +1651,45 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `name!(args)` of a built-in that takes literal arguments (`concat!`, `include!`, `env!`,
-    /// ...) with every argument that is a `macro_rules!` call replaced by its expansion text,
-    /// or None when no argument is one (the built-in then reads the arguments as they are).
-    /// rustc expands such arguments eagerly (rustc_builtin_macros `expr_to_spanned_string`).
-    fn builtin_with_rules_expanded(&mut self, name: &str, toks: TokRange) -> PResult<Option<(String, Vec<Tok>)>> {
+    /// rustc_builtin_macros util.rs: get_exprs_from_tts / expr_to_spanned_string fully expand
+    /// each expression before inspecting its literal. stringify! keeps its input unexpanded.
+    fn eager_macro_arg(&mut self, toks: TokRange) -> PResult<TokRange> {
+        let save = self.pos;
+        self.pos = toks.lo as usize;
+        let r = (|| {
+            if toks.lo == toks.hi || !self.mac_ahead() { return Ok(toks); }
+            let call_lo = self.lo();
+            let path = self.path(true)?;
+            self.expect(T::Not)?;
+            let (_, args) = self.delim_tt()?;
+            if self.pos != toks.hi as usize { return Ok(toks); }
+            let def = self.rules_macro(&path).or_else(|| {
+                if self.macros.is_some() { return None; }
+                let seg = self.ast.segs(path.segs).last()?;
+                crate::builtins::builtin_macro_def(&String::from_utf8_lossy(self.bytes(seg.name.lo, seg.name.hi)))
+            });
+            let Some(def) = def else { return Ok(toks); };
+            let save_expr = self.include_as_expr;
+            self.include_as_expr = true;
+            let start = self.expand_call(&def, args, call_lo);
+            self.include_as_expr = save_expr;
+            let start = start?;
+            let end = self.toks.len() - 1;
+            // in_expansion keeps every call in the chain on expand_call_inner's depth check
+            // (rustc_expand expand.rs: MacroExpander::expand_invoc).
+            self.in_expansion(start, |p| {
+                let value = p.eager_macro_arg(TokRange { lo: start as u32, hi: end as u32 })?;
+                p.pos = end;
+                Ok(value)
+            })
+        })();
+        self.pos = save;
+        r
+    }
+
+    /// Expand literal arguments before the built-in folds them, without another synthetic call.
+    fn eager_builtin_args(&mut self, toks: TokRange, call_lo: u32) -> PResult<TokRange> {
         let (lo, hi) = (toks.lo as usize, toks.hi as usize);
-        // top-level arguments
         let mut args = Vec::new();
         let mut depth = 0i32;
         let mut s = lo;
@@ -1712,94 +1704,26 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
         }
-        if hi > s {
-            args.push((s, hi));
-        }
+        if hi > s { args.push((s, hi)); }
         let mut any = false;
-        let mut out: Vec<(String, Vec<Tok>)> = Vec::new();
-        for (a, z) in args {
-            // `path ! (..)`: idents and `::` up to the `!`, then one delimited group to the end
-            let mut i = a;
-            while i < z && matches!(self.toks.kind_at(i), T::Ident | T::PathSep | T::KwCrate | T::Dollar) {
-                i += 1;
-            }
-            let call = i > a && i + 2 < z + 1 && self.toks.kind_at(i) == T::Not && matches!(self.toks.kind_at(i + 1), T::OpenParen | T::OpenBracket | T::OpenBrace) && matches!(self.toks.kind_at(z - 1), T::CloseParen | T::CloseBracket | T::CloseBrace);
-            let def = if call {
-                let name = String::from_utf8_lossy(self.tok_text(self.toks.at(i - 1))).trim_start_matches("r#").to_string();
-                let first = String::from_utf8_lossy(self.tok_text(self.toks.at(a))).into_owned();
-                let _ = first;
-                // the path's module part (idents, `crate`, `$crate` spelt `__relax_crate_x`)
-                let mut mpath: Vec<String> = Vec::new();
-                if self.toks.kind_at(a) == T::PathSep {
-                    mpath.push(String::new());
-                }
-                for k in a..i.saturating_sub(1) {
-                    if matches!(self.toks.kind_at(k), T::Ident | T::KwCrate) {
-                        mpath.push(String::from_utf8_lossy(self.tok_text(self.toks.at(k))).trim_start_matches("r#").to_string());
-                    }
-                }
-                if mpath.len() >= 2 && mpath[0].is_empty() && mpath[1].starts_with("__relax_crate_") {
-                    mpath.remove(0);
-                }
-                let module = self.cur_module();
-                match &self.macros {
-                    Some(m) => m.lookup(&name, &self.krate, &mpath, &module).filter(|d| d.builtin == 0),
-                    None => None,
-                }
-            } else {
-                None
-            };
-            // a nested `concat!(..)` with macro_rules calls inside: the same, recursively
-            let nested = if call && def.is_none() && self.tok_text(self.toks.at(i - 1)) == b"concat" {
-                self.builtin_with_rules_expanded("concat", TokRange { lo: (i + 2) as u32, hi: (z - 1) as u32 })?
-            } else {
-                None
-            };
-            match def {
-                Some(d) => {
-                    let (text, rtoks, _, _, _) = self.expand_rules(&d, i + 2, z - 1).map_err(|m| PErr { pos: self.toks.at(a).lo, msg: m })?;
-                    // its own output may hold more calls: concat! re-expands it as an argument
-                    if name == "concat" {
-                        out.push((text, rtoks));
-                    } else {
-                        let mut w = TokText::default();
-                        w.word(T::Ident, "concat");
-                        w.word(T::Not, "!");
-                        w.word(T::OpenParen, "(");
-                        w.append(&text, &rtoks);
-                        w.word(T::CloseParen, ")");
-                        out.push((w.s, w.toks));
-                    }
-                    any = true;
-                }
-                None if nested.is_some() => {
-                    out.push(nested.unwrap());
-                    any = true;
-                }
-                None => {
-                    let lo = self.toks.at(a).lo;
-                    let hi = self.toks.at(z - 1).hi;
-                    let toks: Vec<Tok> = (a..z).map(|k| { let t = self.toks.at(k); Tok { kind: t.kind, lo: t.lo - lo, hi: t.hi - lo } }).collect();
-                    out.push((String::from_utf8_lossy(self.bytes(lo, hi)).into_owned(), toks));
-                }
-            }
+        for (a, z) in &mut args {
+            let value = self.eager_macro_arg(TokRange { lo: *a as u32, hi: *z as u32 })?;
+            any |= value.lo as usize != *a;
+            (*a, *z) = (value.lo as usize, value.hi as usize);
         }
-        if !any {
-            return Ok(None);
-        }
+        if !any { return Ok(toks); }
         let mut w = TokText::default();
-        w.word(T::Ident, name);
-        w.word(T::Not, "!");
-        w.word(T::OpenParen, "(");
-        for (k, (text, toks)) in out.iter().enumerate() {
-            if k > 0 {
-                w.word(T::Comma, ",");
-                w.s.push(' ');
-            }
-            w.append(text, toks);
+        for (k, &(a, z)) in args.iter().enumerate() {
+            if k > 0 { w.word(T::Comma, ","); w.s.push(' '); }
+            if a == z { continue; }
+            let lo = self.toks.at(a).lo;
+            let hi = self.toks.at(z - 1).hi;
+            let rtoks: Vec<Tok> = (a..z).map(|i| { let t = self.toks.at(i); Tok { kind: t.kind, lo: t.lo - lo, hi: t.hi - lo } }).collect();
+            w.append(&String::from_utf8_lossy(self.bytes(lo, hi)), &rtoks);
         }
-        w.word(T::CloseParen, ")");
-        Ok(Some((w.s, w.toks)))
+        if hi > lo && self.toks.kind_at(hi - 1) == T::Comma { w.word(T::Comma, ","); }
+        let start = self.expand_toks(&w.s, &w.toks, call_lo);
+        Ok(TokRange { lo: start as u32, hi: (self.toks.len() - 1) as u32 })
     }
 
     /// Expands a call: appends the expansion's tokens (ending in Eof) and returns their start.
@@ -1824,27 +1748,22 @@ impl<'a> Parser<'a> {
     }
 
     fn expand_call_inner(&mut self, def: &crate::macros::MacroDef, toks: TokRange, call_lo: u32) -> PResult<usize> {
-        // rustc_expand expand_invoc: the crate's `#![recursion_limit = ".."]` bounds the expansion depth (a top-level call
-        // is at depth 1); the written limit is the root file's, other files keep the built-in bound
-        if let Some(limit) = self.written_recursion_limit() {
-            if self.exp_depth + 1 > limit {
-                return Err(PErr { pos: call_lo, msg: format!("recursion limit reached while expanding `{}!`", def.name) });
-            }
-        } else if self.exp_depth > 256 {
-            return Err(PErr { pos: call_lo, msg: format!("`{}!` expands more than 256 levels deep -- add a base case", def.name) });
+        // rustc_expand expand.rs: expand_invoc checks nested expansion depth (top-level: 1).
+        // rustc_interface limits.rs: get_recursion_limit defaults to 128.
+        if self.exp_depth + 1 > self.written_recursion_limit().unwrap_or(128) {
+            return Err(PErr { pos: call_lo, msg: format!("recursion limit reached while expanding `{}!`", def.name) });
         }
         let trace = crate::preload::relax_trace().map_or(false, |t| t.split(',').any(|p| p.strip_prefix("expand:").map_or(false, |n| def.name.contains(n))));
         use crate::builtins::Builtin as B;
-        if def.builtin < crate::builtins::HOSTED && matches!(crate::builtins::from_u8(def.builtin), B::Concat | B::Env | B::OptionEnv | B::Include | B::IncludeStr | B::IncludeBytes) {
-            // the arguments are expanded first (rustc expands macro calls among them
-            // eagerly: `concat!("{", asset_ref!("x"), "}")` with a user macro_rules)
-            if let Some((text, rtoks)) = self.builtin_with_rules_expanded(&def.name, toks)? {
-                return Ok(self.expand_toks(&text, &rtoks, call_lo));
-            }
-        }
+        let call_hi = self.toks.at(toks.hi as usize).hi;
+        let toks = if def.builtin < crate::builtins::HOSTED && matches!(crate::builtins::from_id(def.builtin), B::Concat | B::Env | B::OptionEnv | B::Include | B::IncludeStr | B::IncludeBytes) {
+            self.exp_depth += 1;
+            let args = self.eager_builtin_args(toks, call_lo);
+            self.exp_depth -= 1;
+            args?
+        } else { toks };
         if def.builtin != 0 {
             // built-in / hosted proc macro: tokens (its output is not re-lexed)
-            let call_hi = self.toks.at(toks.hi as usize).hi;
             let b = def.builtin;
             let x = match crate::preload::timed_named(4, &def.name, || crate::builtins::expand(self, b, toks.lo as usize, toks.hi as usize, call_lo, call_hi)) {
                 Ok(x) => x,
@@ -1893,14 +1812,23 @@ impl<'a> Parser<'a> {
             self.tok_origin.push((base + off, o, n));
         }
         for (a, b) in groups {
+            // Nested groups with the same start are emitted inner first; keep the outer kind.
             if b & crate::macros::TY_FRAG != 0 {
                 self.ty_frags.insert(base + a);
+                self.path_frags.remove(&(base + a));
+            }
+            if b & crate::macros::PATH_FRAG != 0 {
+                self.path_frags.insert(base + a);
+                self.ty_frags.remove(&(base + a));
             }
             if b & crate::macros::BLOCK_FRAG != 0 && crate::lexer::validation_enabled() {
                 self.block_frags.insert(base + a);
             }
             if b & (crate::macros::EXPR_FRAG | crate::macros::LIT_FRAG) != 0 && crate::lexer::validation_enabled() {
                 self.meta_frags.insert(base + a, if b & crate::macros::EXPR_FRAG != 0 { "expr" } else { "literal" });
+            }
+            if b & crate::macros::WRAP_PAREN != 0 {
+                self.synth_parens.insert(base + a);
             }
             if b & crate::macros::META_ONLY == 0 {
                 self.frag_groups.insert(base + a, base + (b & !crate::macros::FRAG_FLAGS));
@@ -2002,7 +1930,7 @@ impl<'a> Parser<'a> {
         self.include_as_expr = false;
         let start = start?;
         let rest = std::mem::take(&mut *self.cfg_select_rest.borrow_mut());
-        let include = def.builtin < crate::builtins::HOSTED && crate::builtins::from_u8(def.builtin) == crate::builtins::Builtin::Include;
+        let include = def.builtin < crate::builtins::HOSTED && crate::builtins::from_id(def.builtin) == crate::builtins::Builtin::Include;
         if trailing && def.builtin == 0 && crate::macros::uses::recording() {
             // a macro call ending a block is an expression (rustc_expand flat_map_stmt
             // `is_trailing_mac`): its expansion's `;` after the one expression is linted
@@ -2170,9 +2098,14 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// A `$s:stmt` fragment (no trailing `;` required).
+    /// rustc_parse parser/stmt.rs: parse_stmt_nonterminal/parse_stmt_without_recovery:
+    /// leave a let/expression's trailing `;`; a lone `;` is StmtKind::Empty.
     pub fn stmt_fragment(&mut self) -> PResult<()> {
         let attrs = self.outer_attrs()?;
+        if self.eat(T::Semi) {
+            if !attrs.is_empty() { return self.err("attributes without statement"); }
+            return Ok(());
+        }
         if self.kind() == T::KwLet {
             self.pos += 1;
             self.pat_top()?;
@@ -2264,10 +2197,10 @@ impl<'a> Parser<'a> {
             // an attribute macro (`#[proc_macro_attribute]` of the graph) replaces the item with
             // its output: the item is parsed for its extent only (no expansion), then dropped
             if !attrs.is_empty() && self.macros.is_some() && self.cfg_out == 0 {
-                if let Some(k) = crate::builtins::attr_macro_at(self, &attrs) {
-                    let attr = attrs[k].clone();
-                    self.parse_cfg_out(attrs)?;
-                    let x = crate::builtins::expand_attr_macro(self, &attr, item_tok, self.pos).map_err(|(pos, msg)| PErr { pos, msg })?;
+                if let Some((k, entry)) = crate::builtins::attr_macro_at(self, &attrs) {
+                    let head = self.pos;
+                    self.parse_cfg_out(attrs.clone())?;
+                    let x = crate::builtins::expand_attr_macro(self, &attrs, k, &entry, item_tok, head, self.pos).map_err(|(pos, msg)| PErr { pos, msg })?;
                     self.append_origins(&x, self.toks.at(item_tok).lo);
                     let start = self.expand_toks(&x.text, &x.toks, self.toks.at(item_tok).lo);
                     let v = self.in_expansion(start, |p| p.items_until(T::Eof))?;
@@ -2511,7 +2444,7 @@ impl<'a> Parser<'a> {
             T::KwUse => {
                 let use_lo = self.lo();
                 self.pos += 1;
-                let global = self.eat(T::PathSep);
+                let global = self.eat(T::PathSep) || self.at_dollar_crate();
                 let tree = self.use_tree()?;
                 self.expect(T::Semi)?;
                 // imports a macro expansion wrote (the file's own are in the prescan's tree)
@@ -2978,7 +2911,8 @@ impl<'a> Parser<'a> {
                 unsafe_,
                 abi,
                 generics,
-                self_param,
+                self_param: self_param.map(|(param, _)| param),
+                self_param_pos: self_param.map_or(0, |(_, pos)| pos),
                 params: self.ast.push_list(params),
                 variadic,
                 ret,
@@ -2992,7 +2926,7 @@ impl<'a> Parser<'a> {
         self.ty()
     }
 
-    fn fn_params(&mut self) -> PResult<(Option<SelfParam>, Vec<Param>, bool)> {
+    fn fn_params(&mut self) -> PResult<(Option<(SelfParam, u32)>, Vec<Param>, bool)> {
         self.expect(T::OpenParen)?;
         let mut self_param = None;
         let mut params = Vec::new();
@@ -3077,29 +3011,33 @@ impl<'a> Parser<'a> {
         Ok((pat, ty))
     }
 
-    fn self_param(&mut self) -> PResult<Option<SelfParam>> {
+    // rustc_parse/src/parser/function.rs::parse_self_param keeps the `self` token's span.
+    fn self_param(&mut self) -> PResult<Option<(SelfParam, u32)>> {
         let end = |k: T| matches!(k, T::Comma | T::CloseParen | T::Colon);
         match self.kind() {
             T::KwSelfValue if end(self.nth(1)) => {
+                let pos = self.tok().lo;
                 self.pos += 1;
                 if self.eat(T::Colon) {
                     let ty = self.ty()?;
-                    return Ok(Some(SelfParam::Typed(false, ty)));
+                    return Ok(Some((SelfParam::Typed(false, ty), pos)));
                 }
-                Ok(Some(SelfParam::Value(false)))
+                Ok(Some((SelfParam::Value(false), pos)))
             }
             T::KwMut if self.nth(1) == T::KwSelfValue && end(self.nth(2)) => {
+                let pos = self.toks.at(self.pos + 1).lo;
                 self.pos += 2;
                 if self.eat(T::Colon) {
                     let ty = self.ty()?;
-                    return Ok(Some(SelfParam::Typed(true, ty)));
+                    return Ok(Some((SelfParam::Typed(true, ty), pos)));
                 }
-                Ok(Some(SelfParam::Value(true)))
+                Ok(Some((SelfParam::Value(true), pos)))
             }
             T::And => {
                 let (lt, n) = if self.nth(1) == T::Lifetime { (Some(self.toks.at(self.pos + 1)), 2) } else { (None, 1) };
                 let (m, n2) = if self.nth(n) == T::KwMut { (true, n + 1) } else { (false, n) };
                 if self.nth(n2) == T::KwSelfValue && matches!(self.nth(n2 + 1), T::Comma | T::CloseParen) {
+                    let pos = self.toks.at(self.pos + n2).lo;
                     self.pos += n2 + 1;
                     let lt = match lt {
                         Some(t) => {
@@ -3111,7 +3049,7 @@ impl<'a> Parser<'a> {
                         }
                         None => None,
                     };
-                    Ok(Some(SelfParam::Ref(lt, m)))
+                    Ok(Some((SelfParam::Ref(lt, m), pos)))
                 } else {
                     Ok(None)
                 }
@@ -3481,18 +3419,7 @@ impl<'a> Parser<'a> {
 
     /// `+`, or the `+` of a `+=` (`<T: Clone += ()>`: a trailing bound `+` before a default's `=`).
     fn eat_plus(&mut self) -> bool {
-        match self.kind() {
-            T::Plus => {
-                self.pos += 1;
-                true
-            }
-            T::PlusEq => {
-                self.tok_undo.push((self.pos as u32, self.toks.at(self.pos)));
-                self.toks.edit(self.pos, |t| { t.kind = T::Eq; t.lo += 1; });
-                true
-            }
-            _ => false,
-        }
+        self.break_and_eat(T::Plus)
     }
 
     fn bounds(&mut self) -> PResult<List<Bound>> {
@@ -3551,11 +3478,36 @@ impl<'a> Parser<'a> {
 
     // ------------------------------------------------------------ paths
 
+    // rustc_resolve ident.rs: resolve_path sends `$crate` to resolve_crate_root,
+    // including under no_implicit_prelude. Its spelling remains one macro token.
+    fn at_dollar_crate(&self) -> bool {
+        self.kind() == T::Ident && self.tok_text(self.tok()).starts_with(b"__relax_crate_")
+    }
+
     /// Path in expression mode (`expr == true`: generics need `::<`) or type mode.
     pub fn path(&mut self, expr: bool) -> PResult<Path> {
+        // rustc_parse parser/path.rs: parse_path_inner; parser/mod.rs: eat_metavar_seq.
+        // A captured path uses type syntax only inside its invisible delimiters.
+        if let Some(hi) = self.path_fragment_end(self.tok().lo) {
+            if let Some(last) = (self.pos..self.toks.len()).find(|&i| self.toks.at(i).hi == hi) {
+                let end = last + 1;
+                let next = self.toks.at(end);
+                self.toks.edit(end, |t| *t = Tok { kind: T::Eof, lo: hi, hi });
+                let result = self.path_unfragmented(false);
+                let complete = self.pos == end;
+                self.toks.edit(end, |t| *t = next);
+                let path = result?;
+                if !complete { return self.err("unexpected token in path fragment"); }
+                return Ok(path);
+            }
+        }
+        self.path_unfragmented(expr)
+    }
+
+    fn path_unfragmented(&mut self, expr: bool) -> PResult<Path> {
         let lo = self.lo();
         let mut qself = QSelfId::NONE;
-        let mut global = false;
+        let mut global = self.at_dollar_crate();
         let mut segs = Vec::new();
         if self.kind() == T::Lt || self.kind() == T::Shl {
             self.eat_lt();
@@ -3651,9 +3603,10 @@ impl<'a> Parser<'a> {
                     GenericArg::Constraint(name, GenericArgsId::NONE, self.bounds()?)
                 }
                 // `Item<'a> = T` / `Item<'a>: Bound`; a path segment's `::<` form too
-                // (rustc parse_angle_arg reads a type, then reinterprets a one-segment path
+                // (rustc_parse parser/path.rs: parse_angle_arg reads a type, then reinterprets a one-segment path
                 // before `=` / `:` as the associated item with its generic arguments)
-                T::Ident | T::RawIdent if (self.nth(1) == T::Lt || (self.nth(1) == T::PathSep && self.nth(2) == T::Lt)) && self.gat_binding_ahead() => {
+                T::Ident | T::RawIdent if (matches!(self.nth(1), T::Lt | T::Shl | T::LArrow)
+                    || (self.nth(1) == T::PathSep && matches!(self.nth(2), T::Lt | T::Shl | T::LArrow))) && self.gat_binding_ahead() => {
                     let name = self.ident_tok()?;
                     self.eat(T::PathSep);
                     let ga = self.generic_args_angle()?;
@@ -3696,12 +3649,15 @@ impl<'a> Parser<'a> {
         let mut depth = 0i32;
         loop {
             match self.toks.kind_at(i) {
-                T::Lt => depth += 1,
+                T::Lt | T::LArrow => depth += 1,
                 T::Shl => depth += 2,
                 T::Gt => depth -= 1,
                 T::Shr => depth -= 2,
                 // `Item<'a>=T`: the `>=` closes the arguments and is the binding's `=`
                 T::Ge if depth == 1 => return true,
+                T::ShrEq if depth == 2 => return true,
+                T::Ge => depth -= 1,
+                T::ShrEq => depth -= 2,
                 T::Eof | T::Semi => return false,
                 // a const argument block `{ .. }`: skip to its end
                 T::OpenBrace => {
@@ -3785,7 +3741,48 @@ impl<'a> Parser<'a> {
         self.ty_inner(true)
     }
 
+    pub(super) fn ty_fragment_end(&self, lo: u32) -> Option<u32> {
+        if self.ty_frags.contains(&lo) { self.frag_groups.get(&lo).copied() } else { None }
+    }
+
+    fn path_fragment_end(&self, lo: u32) -> Option<u32> {
+        if self.path_frags.contains(&lo) { self.frag_groups.get(&lo).copied() } else { None }
+    }
+
+    pub(super) fn fragment_group(&self, lo: u32) -> Option<(u32, u32)> {
+        let end = *self.frag_groups.get(&lo)?;
+        let mut flags = 0;
+        if self.ty_frags.contains(&lo) { flags |= crate::macros::TY_FRAG; }
+        if self.path_frags.contains(&lo) { flags |= crate::macros::PATH_FRAG; }
+        if self.block_frags.contains(&lo) { flags |= crate::macros::BLOCK_FRAG; }
+        match self.meta_frags.get(&lo) {
+            Some(&"expr") => flags |= crate::macros::EXPR_FRAG,
+            Some(&"literal") => flags |= crate::macros::LIT_FRAG,
+            _ => {}
+        }
+        Some((end, flags))
+    }
+
     fn ty_inner(&mut self, plus: bool) -> PResult<TyId> {
+        // rustc_parse parser/ty.rs: parse_ty_common; parser/mod.rs: eat_metavar_seq.
+        // Reparse a captured type inside invisible delimiters (`as $t << n`).
+        if let Some(hi) = self.ty_fragment_end(self.tok().lo) {
+            if let Some(last) = (self.pos..self.toks.len()).find(|&i| self.toks.at(i).hi == hi) {
+                let end = last + 1;
+                let next = self.toks.at(end);
+                self.toks.edit(end, |t| *t = Tok { kind: T::Eof, lo: hi, hi });
+                let result = self.ty_unfragmented(true);
+                let complete = self.pos == end;
+                self.toks.edit(end, |t| *t = next);
+                let ty = result?;
+                if !complete { return self.err("unexpected token in type fragment"); }
+                return Ok(ty);
+            }
+        }
+        self.ty_unfragmented(plus)
+    }
+
+    fn ty_unfragmented(&mut self, plus: bool) -> PResult<TyId> {
         let t = match self.kind() {
             T::OpenParen => {
                 self.pos += 1;
@@ -4163,7 +4160,9 @@ impl<'a> Parser<'a> {
                     { let m = self.ast.push_row(MacCall { path, delim, toks, args }); Pat::Mac(m) }
                 } else {
                     let lo = self.lo();
-                    let simple = matches!(self.kind(), T::Ident | T::RawIdent) && !matches!(self.nth(1), T::PathSep | T::OpenParen | T::OpenBrace);
+                    // rustc_parse parser/pat.rs: can_be_ident_pat excludes path metavariables.
+                    let simple = !self.path_frags.contains(&{ self.tok().lo })
+                        && matches!(self.kind(), T::Ident | T::RawIdent) && !matches!(self.nth(1), T::PathSep | T::OpenParen | T::OpenBrace);
                     if simple && !matches!(self.nth(1), T::DotDot | T::DotDotEq | T::DotDotDot) {
                         let name = self.ident_tok()?;
                         let sub = if self.eat(T::At) { Some(self.pat_no_or()?) } else { None };
@@ -4303,6 +4302,20 @@ impl<'a> Parser<'a> {
             return Ok(Stmt::Empty);
         }
         if active && !self.pending_shape.is_empty() { self.check_pending_attrs()?; }
+        if active && self.at_item_start() && self.macros.is_some() && self.cfg_out == 0 {
+            if let Some((k, entry)) = crate::builtins::attr_macro_at(self, &attrs) {
+                let head = self.pos;
+                self.parse_cfg_out(attrs.clone())?;
+                let x = crate::builtins::expand_attr_macro(self, &attrs, k, &entry, item_tok, head, self.pos).map_err(|(pos, msg)| PErr { pos, msg })?;
+                self.append_origins(&x, self.toks.at(item_tok).lo);
+                let start = self.expand_toks(&x.text, &x.toks, self.toks.at(item_tok).lo);
+                let outer = std::mem::take(&mut self.extra_items);
+                let items = self.in_expansion(start, |p| p.items_until(T::Eof));
+                self.extra_items = outer;
+                self.extra_items.extend(items?);
+                return Ok(Stmt::Empty);
+            }
+        }
         let s = self.with_cfg_active(active, pend0, |p| p.stmt_after_attrs(attrs.clone(), item_tok))?;
         if matches!(s, Stmt::Item(_)) {
             if !active {
@@ -4380,7 +4393,7 @@ impl<'a> Parser<'a> {
                     self.include_as_expr = false;
                     let start = start?;
                     let rest = std::mem::take(&mut *self.cfg_select_rest.borrow_mut());
-                    let include = def.builtin < crate::builtins::HOSTED && crate::builtins::from_u8(def.builtin) == crate::builtins::Builtin::Include;
+                    let include = def.builtin < crate::builtins::HOSTED && crate::builtins::from_id(def.builtin) == crate::builtins::Builtin::Include;
                     let e = self.in_expansion(start, |p| {
                         let e = p.expr()?;
                         if include { p.incomplete_include_check(); p.skip_to_eof(); }
@@ -4628,6 +4641,11 @@ impl<'a> Parser<'a> {
 
     fn unary(&mut self, r: u8) -> PResult<ExprId> {
         let lo = self.lo();
+        // rustc_parse parser/mod.rs: maybe_recover_from_interpolated_ty_qpath
+        // diagnoses `$t::f`; a type fragment needs `<$t>::f` in an expression.
+        if self.ty_frags.contains(&{ self.tok().lo }) {
+            return self.err("expected expression, found type metavariable");
+        }
         match self.kind() {
             T::Minus => {
                 self.pos += 1;
@@ -4761,6 +4779,9 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
+                // a transcription's parentheses around an expression fragment are its invisible
+                // delimiters: an operand, never call arguments (rustc keeps the fragment opaque)
+                T::OpenParen if self.synth_parens.contains(&{ self.tok().lo }) => break,
                 T::OpenParen => {
                     let args = self.call_args()?;
                     let args = self.ast.push_list(args);
@@ -4864,6 +4885,12 @@ impl<'a> Parser<'a> {
 
     fn primary(&mut self, r: u8) -> PResult<ExprId> {
         let lo = self.lo();
+        // rustc_parse parser/expr.rs: parse_expr_bottom returns a Path expression
+        // for MetaVarKind::Path; calls follow, but `{ .. }` and `::` do not extend it.
+        if self.path_frags.contains(&{ self.tok().lo }) {
+            let path = self.path(true)?;
+            return Ok(self.mk_expr(ExprKind::Path(path), lo));
+        }
         // rustc parse_expr_bottom: only `let` and a parenthesised expression see ALLOW_LET
         let let_ok = r & ALLOW_LET != 0;
         let r = if matches!(self.kind(), T::KwLet | T::OpenParen) { r } else { r & !ALLOW_LET };
@@ -5093,7 +5120,7 @@ impl<'a> Parser<'a> {
                         self.include_as_expr = false;
                         let start = start?;
                         let rest = std::mem::take(&mut *self.cfg_select_rest.borrow_mut());
-                        let include = def.builtin < crate::builtins::HOSTED && crate::builtins::from_u8(def.builtin) == crate::builtins::Builtin::Include;
+                        let include = def.builtin < crate::builtins::HOSTED && crate::builtins::from_id(def.builtin) == crate::builtins::Builtin::Include;
                         let e = self.in_expansion(start, |p| {
                             let e = p.expr()?;
                             if p.kind() == T::Semi && def.builtin == 0 && crate::macros::uses::recording() {
@@ -5723,25 +5750,6 @@ impl ParsedFile {
     }
 
     /// Token `i`: the file's, then its lazily parsed bodies' expansion tokens.
-    /// The position of the `self` receiver token of the function item starting at `item_lo` (the
-    /// item's start when it has none in its parameter list): its hygiene context is the receiver's
-    /// own, which a macro may have passed in from the call site.
-    pub fn self_param_pos(&self, item_lo: u32) -> u32 {
-        let mut i = self.toks.partition_point(|t| t.lo < item_lo) as u32;
-        let mut depth = 0i32;
-        while (i as usize) < self.toks.len() {
-            match self.tok(i).kind {
-                T::OpenParen => depth += 1,
-                T::CloseParen => { depth -= 1; if depth <= 0 { break; } }
-                T::KwSelfValue if depth == 1 => return self.tok(i).lo,
-                T::OpenBrace | T::Semi if depth == 0 => break,
-                _ => {}
-            }
-            i += 1;
-        }
-        item_lo
-    }
-
     pub fn tok(&self, i: u32) -> Tok {
         match self.toks.get(i as usize) {
             Some(t) => t,

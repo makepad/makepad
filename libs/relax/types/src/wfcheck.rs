@@ -729,7 +729,11 @@ pub mod obligations {
         let goal = leaf_goal(infcx, prog, goal, 0);
         let ty_str = |t: TyId| crate::typeck::ty_to_string(false, prog, tcx, infcx.deeply_resolve_ignoring_regions(t));
         match &goal.predicate.kind {
-            PredicateKind::Clause(ClauseKind::Trait(p)) => Some(format!("{code}: {}", crate::typeck::trait_error_message(prog, tcx, code, p, &mut |t| ty_str(t)))),
+            PredicateKind::Clause(ClauseKind::Trait(p)) => {
+                let mut message = format!("{code}: {}", crate::typeck::trait_error_message(prog, tcx, code, p, &mut |t| ty_str(t)));
+                if code == "E0277" { message.push_str(&crate::next_solver::diagnostics::auto_trait_failure_notes(infcx, prog, &goal, None)); }
+                Some(message)
+            }
             PredicateKind::Clause(ClauseKind::Projection(p)) => {
                 let (AliasTerm::Ty(a), Term::Ty(t)) = (&p.projection_term, &p.term) else { return None };
                 Some(format!("E0271: type mismatch resolving `{}` == `{}`", ty_str(*a), ty_str(*t)))

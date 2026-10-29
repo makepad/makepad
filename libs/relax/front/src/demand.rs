@@ -637,9 +637,7 @@ impl Names {
             else { at += 1; }
         }
         let Some(definition) = definition else { return None; };
-        let mtoks = definition.iter().map(|t| crate::macros::MTok {
-            kind: t.kind, text: String::from_utf8_lossy(&src[t.lo as usize..t.hi as usize]).into_owned(), pos: t.lo,
-        }).collect::<Vec<_>>();
+        let mtoks = crate::macros::definition_tokens(definition, |lo, hi| &src[lo as usize..hi as usize]);
         let c = &self.crates[ci];
         let Ok(def) = crate::macros::parse_def(&name, &c.name, c.edition, &mtoks) else { return None; };
         fn names_only(nodes: &[crate::macros::MNode]) -> bool {

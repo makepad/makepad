@@ -1144,3 +1144,27 @@ unsafe impl<'a, K: Send, V: Send> Send for VacantEntry<'a, K, V> {}
 unsafe impl<'a, K: Sync, V: Sync> Sync for VacantEntry<'a, K, V> {}
 unsafe impl<'a, K: Send, V: Send, F: Send> Send for ExtractIf<'a, K, V, F> {}
 unsafe impl<'a, K: Sync, V: Sync, F: Sync> Sync for ExtractIf<'a, K, V, F> {}
+
+// alloc/src/collections/btree/map.rs: the borrowing iterators print their remaining items
+// (matrix-sdk-crypto's `debug!(users = ?request.device_keys.keys())`)
+impl<K: fmt::Debug, V> fmt::Debug for Keys<'_, K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.clone()).finish()
+    }
+}
+
+impl<K, V: fmt::Debug> fmt::Debug for Values<'_, K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.clone()).finish()
+    }
+}
+
+impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for Range<'_, K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut l = f.debug_list();
+        for (k, v) in self.clone() {
+            l.entry(&super::KvDebug(k, v));
+        }
+        l.finish()
+    }
+}

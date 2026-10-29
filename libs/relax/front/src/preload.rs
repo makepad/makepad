@@ -118,6 +118,15 @@ struct CrateCtx {
     edition: u16,
     cfg: CfgSet,
     table: Arc<MacroTable>,
+    /// the loader thread's macro-world state for this crate (macro_reg in_world, world_builder),
+    /// taken when it starts the crate's parses: a job runs with it on whichever thread parses it.
+    /// The macro world's loader turns macros on per crate (pmhost uses_boot); a worker that kept
+    /// its pool's start state waited for the world it was parsing for (the Robrix load hang).
+    world: (bool, bool),
+}
+
+fn world_state() -> (bool, bool) {
+    (crate::macro_reg::in_world(), crate::macro_reg::world_builder())
 }
 
 /// (crate index, file, its dir for `mod x;`, its module path)
@@ -200,7 +209,7 @@ impl Pool {
     pub fn start_parsing(&self, ci: u32, table: Arc<MacroTable>) {
         let mut st = self.st.lock().unwrap();
         let c = &self.crates[ci as usize];
-        let ctx = Arc::new(CrateCtx { context: self.contexts[ci as usize].clone(), name: c.name.clone(), edition: c.edition, cfg: c.cfg.clone(), table });
+        let ctx = Arc::new(CrateCtx { context: self.contexts[ci as usize].clone(), name: c.name.clone(), edition: c.edition, cfg: c.cfg.clone(), table, world: world_state() });
         for job in st.jobs.values_mut().filter(|j| j.krate == ci) { job.ctx = ctx.clone(); }
         st.parse_ready.insert(ci);
         self.cv.notify_all();
@@ -270,7 +279,7 @@ impl Pool {
                 {
                     if let Some(table) = table {
                         let ctx = &job.ctx;
-                        job.ctx = Arc::new(CrateCtx { context: ctx.context.clone(), name: ctx.name.clone(), edition: ctx.edition, cfg: ctx.cfg.clone(), table });
+                        job.ctx = Arc::new(CrateCtx { context: ctx.context.clone(), name: ctx.name.clone(), edition: ctx.edition, cfg: ctx.cfg.clone(), table, world: ctx.world });
                     }
                 }
                 self.cv.notify_all();
@@ -563,7 +572,7 @@ impl Pool {
             PREVIOUS_FILES.fetch_add(done.len() as u64, std::sync::atomic::Ordering::Relaxed);
         }
         if self.parse {
-            let ctx = Arc::new(CrateCtx { context: self.contexts[ci].clone(), name: c.name.clone(), edition: c.edition, cfg: c.cfg.clone(), table: Arc::new(table.clone()) });
+            let ctx = Arc::new(CrateCtx { context: self.contexts[ci].clone(), name: c.name.clone(), edition: c.edition, cfg: c.cfg.clone(), table: Arc::new(table.clone()), world: world_state() });
             for (path, src, toks) in lexed {
                 let mod_path = seen[&path].clone();
                 jobs.push(Job { krate: ci as u32, path, mod_path, src, toks, ctx: ctx.clone() });
@@ -633,6 +642,13 @@ impl Pool {
 /// retried in the loader's scope; only that scope can certify a parse error.
 fn parse_job(_sess: &std::sync::Arc<crate::Session>, job: Job, in_scope: bool) -> ((u32, String), Preparsed) {
     let Job { krate, path, mod_path, src, toks, ctx } = job;
+    struct World((bool, bool));
+    impl Drop for World {
+        fn drop(&mut self) { crate::macro_reg::set_in_world(self.0 .0); crate::macro_reg::set_world_builder(self.0 .1); }
+    }
+    let _world = World(world_state());
+    crate::macro_reg::set_in_world(ctx.world.0);
+    crate::macro_reg::set_world_builder(ctx.world.1);
     crate::why::event("parse", &path, 0, "", None);
     let src_len = src.len();
     let t = std::time::Instant::now();
@@ -802,7 +818,7 @@ struct Scanned {
 }
 
 /// The bindings of a `use` tree in tokens `lo..hi` (after `use`, before `;`) under `prefix`.
-fn use_tree(text: &dyn Fn(usize) -> String, toks: &[Tok], lo: usize, hi: usize, prefix: &[String], module: &str, is_pub: bool, out: &mut Vec<crate::macros::UseItem>) {
+pub(crate) fn use_tree(text: &dyn Fn(usize) -> String, toks: &[Tok], lo: usize, hi: usize, prefix: &[String], module: &str, is_pub: bool, out: &mut Vec<crate::macros::UseItem>) {
     let mut path: Vec<String> = prefix.to_vec();
     let mut i = lo;
     if i < hi && toks[i].kind == T::PathSep && prefix.is_empty() {
@@ -1208,10 +1224,8 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
                         i = close + 1;
                         continue;
                     }
-                    let mt: Vec<crate::macros::MTok> = toks[open + 1..close.min(toks.len())]
-                        .iter()
-                        .map(|t| crate::macros::MTok { kind: t.kind, text: String::from_utf8_lossy(&src[t.lo as usize..t.hi as usize]).into_owned(), pos: t.lo })
-                        .collect();
+                    let mt = crate::macros::definition_tokens(&toks[open + 1..close.min(toks.len())],
+                        |lo, hi| &src[lo as usize..hi as usize]);
                     if let Ok(mut def) = crate::macros::parse_def(&name, krate, edition, &mt) {
                         def.exported = attrs.exported;
                         if attrs.local_inner {

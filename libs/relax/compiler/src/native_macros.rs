@@ -93,7 +93,9 @@ fn validate_package(reg: &Reg, unit: usize, overlays: &std::collections::HashMap
     // copies are one crate). The proc-macro side of that graph is the accepted one plus that
     // feature's optional dependency, which no macro entry reaches.
     let optional = |alias: &str| u.name == "makepad_micro_proc_macro" && alias == "relax_lex" && u.features.iter().any(|f| f == "relax-tokens");
-    let deps: Vec<&(usize, String)> = u.deps.iter().filter(|(_, alias)| !optional(alias)).collect();
+    // the sysroot's proc_macro (run.rs with_sysroot_proc_macro) is no Cargo dependency
+    let sysroot = |dep: usize, alias: &str| alias == "proc_macro" && reg.units[dep].name == "proc_macro";
+    let deps: Vec<&(usize, String)> = u.deps.iter().filter(|(dep, alias)| !optional(alias) && !sysroot(*dep, alias)).collect();
     if deps.len() != expected.len() {
         return Err(error(root.join("Cargo.toml").display().to_string(), "dependency count differs".into()));
     }

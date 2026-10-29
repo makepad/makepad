@@ -915,20 +915,23 @@ fn free_altstack(sp: u64, size: usize) {
     crate::os::mem::free(sp - ALTSTACK_GUARD as u64, size + ALTSTACK_GUARD);
 }
 
-/// The highest address of the calling thread's stack (0: unknown). Called in normal context
-/// (jit::ensure_altstack); fault handlers read the recorded value to bound frame walks.
-pub fn stack_hi_of_self() -> u64 {
+/// The calling thread's stack bounds (0, 0: unknown). Recorded in normal context;
+/// fault handlers never query pthread attributes.
+pub fn stack_bounds_of_self() -> (u64, u64) {
     // a program stack (relax_base::stack::on_program_stack) replaces the OS thread's while it runs
-    if let Some((_, hi)) = crate::stack::program_stack_bounds() {
-        return hi as u64;
+    if let Some((lo, hi)) = crate::stack::program_stack_bounds() {
+        return (lo as u64, hi as u64);
     }
     #[cfg(target_os = "macos")]
     unsafe {
         extern "C" {
             fn pthread_self() -> usize;
             fn pthread_get_stackaddr_np(t: usize) -> *mut u8;
+            fn pthread_get_stacksize_np(t: usize) -> usize;
         }
-        pthread_get_stackaddr_np(pthread_self()) as u64
+        let t = pthread_self();
+        let hi = pthread_get_stackaddr_np(t) as u64;
+        (hi.saturating_sub(pthread_get_stacksize_np(t) as u64), hi)
     }
     #[cfg(any(target_os = "linux", target_os = "android"))]
     unsafe {
@@ -940,12 +943,12 @@ pub fn stack_hi_of_self() -> u64 {
         }
         let mut attr = [0u64; 16];
         if pthread_getattr_np(pthread_self(), attr.as_mut_ptr()) != 0 {
-            return 0;
+            return (0, 0);
         }
         let (mut addr, mut size) = (0usize, 0usize);
         let ok = pthread_attr_getstack(attr.as_ptr(), &mut addr, &mut size) == 0;
         pthread_attr_destroy(attr.as_mut_ptr());
-        if ok { (addr + size) as u64 } else { 0 }
+        if ok { (addr as u64, (addr + size) as u64) } else { (0, 0) }
     }
     #[cfg(windows)]
     unsafe {
@@ -954,7 +957,7 @@ pub fn stack_hi_of_self() -> u64 {
         }
         let (mut lo, mut hi) = (0usize, 0usize);
         GetCurrentThreadStackLimits(&mut lo, &mut hi);
-        hi as u64
+        (lo as u64, hi as u64)
     }
 }
 
@@ -965,12 +968,13 @@ pub fn raw_stderr(b: &[u8]) {
         extern "C" {
             fn write(fd: i32, buf: *const u8, n: usize) -> isize;
         }
-        let _ = write(2, b.as_ptr(), b.len());
+        let _ = write(crate::tui::fault_fd(), b.as_ptr(), b.len());
     }
     #[cfg(windows)]
     {
-        use std::io::Write;
-        let _ = std::io::stderr().write_all(b);
+        use crate::os::win32::*;
+        let mut written = 0;
+        unsafe { WriteFile(GetStdHandle(-12i32 as u32), b.as_ptr(), b.len() as u32, &mut written, std::ptr::null_mut()); }
     }
 }
 

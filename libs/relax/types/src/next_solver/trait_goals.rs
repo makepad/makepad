@@ -66,7 +66,16 @@ impl EvalCtxt<'_, '_> {
                     }
                 }
                 let key = crate::tcx::ty_key(&tcx.tys, ty);
-                for key in [key, crate::tcx::TyKey::Other] { if tcx.trait_impls.get(&(key, tr.def_id)).is_some_and(|v| !v.is_empty()) { return Err(NoSolution.into()); } }
+                // rustc_middle/src/ty/trait_def.rs::for_each_relevant_impl uses simplify_type:
+                // in particular, `Send for &T` does not suppress the structural impl for &mut T.
+                // TyKey is coarser (also for tuple/fn arity); only matching heads or blanket impls count.
+                let simplified = super::fast_reject::simplify_type(&tcx.tys, ty);
+                for key in [key, crate::tcx::TyKey::Other] {
+                    if tcx.trait_impls.get(&(key, tr.def_id)).is_some_and(|impls| impls.iter().any(|imp| {
+                        let head = super::fast_reject::simplify_type(&tcx.tys, tcx.impl_self[imp]);
+                        head.is_none() || head == simplified
+                    })) { return Err(NoSolution.into()); }
+                }
                 // We need to make sure to stall any coroutines we are inferring to avoid query cycles.
                 if tcx.is_coroutine(ty) && matches!(ecx.delegate.typing_mode.get(), crate::tcx::TypingMode::ErasedNotCoherence) {
                     // (trying to continue in the erased mode is not worth it)

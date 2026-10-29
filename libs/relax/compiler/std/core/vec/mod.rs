@@ -1,9 +1,11 @@
 //! Vec<T>: a contiguous growable array (alloc::vec).
 
 mod drain;
+mod extract_if;
 mod into_iter;
 
 pub use drain::Drain;
+pub use extract_if::ExtractIf;
 pub use into_iter::IntoIter;
 
 use crate::borrow::{Borrow, BorrowMut, Cow, ToOwned};
@@ -533,6 +535,17 @@ impl<T> Vec<T> {
         drain::new(self, start, end)
     }
 
+    /// library/alloc/src/vec/mod.rs `Vec::extract_if` (stable 1.87): removes and yields the
+    /// elements of `range` the filter selects.
+    pub fn extract_if<F, R>(&mut self, range: R, filter: F) -> ExtractIf<'_, T, F>
+    where
+        F: FnMut(&mut T) -> bool,
+        R: RangeBounds<usize>,
+    {
+        let (start, end) = crate::slice::range(&range, self.len);
+        extract_if::new(self, filter, start, end)
+    }
+
     pub fn clear(&mut self) {
         self.truncate(0)
     }
@@ -741,6 +754,9 @@ impl<'a> Drop for SetLenOnDrop<'a> {
 
 unsafe impl<#[may_dangle] T> Drop for Vec<T> {
     fn drop(&mut self) {
+        // library/alloc/src/vec/mod.rs: Vec::drop leaves deallocation to RawVec's
+        // field drop, including on unwind. A zero-sized layout has no allocation.
+        let _guard = heap::DeallocGuard(self.ptr.as_ptr() as *mut u8, Vec::<T>::current_layout(self.cap.get()));
         unsafe {
             if crate::mem::needs_drop::<T>() {
                 // one drop_in_place of the slice: an element whose drop panics does not stop
@@ -748,9 +764,6 @@ unsafe impl<#[may_dangle] T> Drop for Vec<T> {
                 let s = im::slice_from_raw_mut(self.ptr.as_ptr(), self.len) as *mut [T];
                 im::drop_in_place(s);
             }
-        }
-        if !is_zst::<T>() && self.cap.get() != 0 {
-            heap::free(self.ptr.as_ptr() as *mut u8, Vec::<T>::current_layout(self.cap.get()));
         }
     }
 }
@@ -1021,6 +1034,13 @@ impl<'a, T: Clone> From<Vec<T>> for Cow<'a, [T]> {
 impl<'a, T: Clone> From<&'a [T]> for Cow<'a, [T]> {
     fn from(s: &'a [T]) -> Cow<'a, [T]> {
         Cow::Borrowed(s)
+    }
+}
+/// library/alloc/src/vec/cow.rs (stable 1.77, cow_from_array_ref): `(&[]).into()` (Robrix)
+#[cfg(not(relax_check))]
+impl<'a, T: Clone, const N: usize> From<&'a [T; N]> for Cow<'a, [T]> {
+    fn from(s: &'a [T; N]) -> Cow<'a, [T]> {
+        Cow::Borrowed(s as &[_])
     }
 }
 

@@ -311,9 +311,14 @@ impl EvalCtxt<'_, '_> {
 impl InferCtxt<'_> {
     pub fn evaluate_root_goal_for_proof_tree(&self, prog: &crate::program::Program, goal: Goal) -> super::inspect::GoalEvaluation {
         let depth = self.recursion_limit(prog);
-        self.evaluate_root_goal_for_proof_tree_with_depth(prog, goal, depth)
+        self.evaluate_root_goal_for_proof_tree_with_depth(prog, goal, depth, true)
     }
-    fn evaluate_root_goal_for_proof_tree_with_depth(&self, prog: &crate::program::Program, goal: Goal, root_depth: usize) -> super::inspect::GoalEvaluation {
+    /// rustc_trait_selection/src/solve/inspect/analyse.rs: diagnostics inspect failed candidates too.
+    /// Keep their nested goals for this report only; the selection cache prunes them.
+    pub(crate) fn evaluate_root_goal_for_diagnostics(&self, prog: &crate::program::Program, goal: Goal) -> super::inspect::GoalEvaluation {
+        self.evaluate_root_goal_for_proof_tree_with_depth(prog, goal, self.recursion_limit(prog), false)
+    }
+    fn evaluate_root_goal_for_proof_tree_with_depth(&self, prog: &crate::program::Program, goal: Goal, root_depth: usize, cached: bool) -> super::inspect::GoalEvaluation {
         assert!(!self.typing_mode.get().is_erased_not_coherence());
         let goal = fold::fold_goal(self.tcx, &goal, &mut crate::infer::resolve::DeepVariableResolver::new(self));
         let opaques = self.resolved_opaque_types();
@@ -321,12 +326,19 @@ impl InferCtxt<'_> {
         let mut solver = SolverDelegate::new(self.tcx, prog);
         solver.cause = self.cause; solver.limit = self.recursion_limit;
         let input = solver.input(input);
-        let root = solver.evaluate_root_goal_for_proof_tree_raw_provider(input, root_depth);
-        let result = solver.result(root.result).0.clone();
+        let (result, final_revision, required_depth) = if cached {
+            let root = solver.evaluate_root_goal_for_proof_tree_raw_provider(input, root_depth);
+            (root.result, root.final_revision, root.required_depth)
+        } else {
+            let mut inspect = super::inspect::ProofTreeBuilder::new();
+            let (result, depth) = SearchGraph::evaluate_root_goal_for_proof_tree(&mut solver, root_depth, input, &mut inspect);
+            (result, inspect.unwrap(), depth)
+        };
+        let result = solver.result(result).0.clone();
         if let Ok(response) = &result {
             let (nested, _) = canonical::response::instantiate_and_apply_query_response(self, prog, &original, response); assert!(nested.is_empty());
         }
-        super::inspect::GoalEvaluation { uncanonicalized_goal: goal, orig_values: original, final_revision: root.final_revision, result, required_depth: root.required_depth }
+        super::inspect::GoalEvaluation { uncanonicalized_goal: goal, orig_values: original, final_revision, result, required_depth }
     }
 }
 

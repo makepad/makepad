@@ -5221,7 +5221,9 @@ pub fn blocks_in_expr(ast: &Ast, e: ExprId, out: &mut Vec<BlockId>) {
             blocks_in_ty(ast, *t, out);
         }
         ExprKind::Path(p) => blocks_in_path(ast, p, out),
-        ExprKind::Paren(x) | ExprKind::Unary(_, x) | ExprKind::AddrOf(_, _, x) | ExprKind::Try(x) | ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => {
+        // rustc_ast/src/visit.rs walk_expr visits Await's operand; its blocks need
+        // the anonymous modules rustc_resolve/src/late.rs resolve_block enters.
+        ExprKind::Paren(x) | ExprKind::Unary(_, x) | ExprKind::AddrOf(_, _, x) | ExprKind::Try(x) | ExprKind::Await(x) | ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => {
             blocks_in_expr(ast, *x, out)
         }
         // rustc_ast/src/visit.rs walk_expr: repeat counts contain lexical blocks too.

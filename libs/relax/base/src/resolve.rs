@@ -31,14 +31,15 @@
 //!   version, without, the newest the requirement accepts (one version per package);
 //! - git dependencies (`git = <url>` with `branch`, `tag` or `rev`, else the default branch; also
 //!   from `[workspace.dependencies]`, in dev-dependencies, in git packages' own manifests and as
-//!   `[patch]` replacements): the repository is fetched by Relax's own git client into its ONE store
-//!   file (git/fetch.rs, gitstore.rs: `<run home>/cache`, shared with `makepad run <git url>`) and
+//!   `[patch]` replacements): a completed Cargo checkout at the locked commit is read directly;
+//!   otherwise Cargo's bare db is imported, or Relax fetches it into its ONE store file
+//!   (git/fetch.rs, gitstore.rs: `<run home>/cache`, shared with `makepad run <git url>`) and
 //!   mounted read-only on the VFS at `<run home>/vfs/git/<name>-<url hash>/<commit>` (never
 //!   checked out). The commit: Cargo.lock's `git+<url>?<ref>#<commit>` source when it lists the
 //!   source (the lockfile wins); else the pin Relax recorded in `<relax dir>/git.lock` (the user's
 //!   Cargo.lock is never written); else the commit the remote's ref names now, recorded there.
-//!   Offline (MAKEPAD_RUN_OFFLINE or no answer), a pinned commit comes from the store (an error
-//!   when the store lost it), an unpinned ref from the store's newest fetch of it. The package is
+//!   Offline (Cargo's env/config, --offline/--frozen, MAKEPAD_RUN_OFFLINE or no answer), a pinned
+//!   commit must be local; an unpinned ref uses the store's newest fetch of it. The package is
 //!   found in the repository as cargo does it: every Cargo.toml of the tree (not under hidden
 //!   folders, a package's `target` folder or a nested repository), the root first, the first
 //!   `[package]` of that name; `workspace = true` fields inherit from the repository's own
@@ -331,6 +332,7 @@ struct GitDeps {
 pub struct Resolver {
     ws: std::rc::Rc<Workspace>,
     git: std::cell::RefCell<GitDeps>,
+    offline: bool,
     /// the workspaces that path packages outside `ws` (or excluded from it) inherit from: cargo
     /// resolves `workspace = true` against the package's OWN workspace root (find_root), not the
     /// root of the graph being built; by root dir
@@ -510,8 +512,11 @@ impl Resolver {
 
     /// `new` with git dependencies kept in `git` (tests).
     pub fn with(sess: &std::sync::Arc<crate::Session>, dir: &str, git: GitPlaces) -> Result<Resolver, String> {
+        let offline = crate::git::cargo::offline(std::path::Path::new(dir))?;
         let git = std::cell::RefCell::new(GitDeps { places: git, pins: None, mounts: Vec::new(), found: HashMap::new() });
-        Ok(Resolver { ws: std::rc::Rc::new(Workspace::load(&find_root(dir)?)?), git, owners: HashMap::new(), vendor: vendor_dir(dir)?, fetched: Default::default(), manifests: Vec::new(), by_dir: HashMap::new(), cfg: crate::cfg::CfgSet::host(sess, &[]), allow_c: sess.options.allow_c })
+        Ok(Resolver { ws: std::rc::Rc::new(Workspace::load(&find_root(dir)?)?), git, offline, owners: HashMap::new(), vendor: vendor_dir(dir)?, fetched: Default::default(), manifests: Vec::new(), by_dir: HashMap::new(), cfg: crate::cfg::CfgSet::host(sess, &[]), // a check resolves C-compiling packages too: their scripts are not run without --allow-c
+            // (unitgraph::run_build_scripts) and a check links nothing (`const_fuel` is check-only)
+            allow_c: sess.options.allow_c || sess.options.const_fuel })
     }
 
     fn registry_dir(&self, name: &str, req: &str) -> Result<String, String> {
@@ -543,7 +548,7 @@ impl Resolver {
         // the locked version from the crates.io index (registry.rs: cache first)
         let mut last = String::new();
         for v in vers {
-            match crate::registry::exact(name, v).and_then(|r| crate::registry::sources(name, &r)) {
+            match crate::registry::exact(name, v, self.offline).and_then(|r| crate::registry::sources(name, &r, self.offline)) {
                 Ok(d) => return Ok(d),
                 Err(e) => last = e,
             }
@@ -562,8 +567,8 @@ impl Resolver {
             reqs.push(req.to_string());
             return Ok(d.clone());
         }
-        let r = crate::registry::pick(name, req, &[])?;
-        let d = crate::registry::sources(name, &r)?;
+        let r = crate::registry::pick(name, req, &[], self.offline)?;
+        let d = crate::registry::sources(name, &r, self.offline)?;
         self.fetched.borrow_mut().insert(name.to_string(), (r.version.clone(), d.clone(), vec![req.to_string()]));
         Ok(d)
     }
@@ -939,9 +944,23 @@ impl Resolver {
         }
         let locked = self.ws.lock_git.iter().find(|(g, _)| g.same(src)).map(|(_, c)| *c);
         let pinned = if locked.is_some() { None } else { self.git_pin(src)? };
+        let revision = locked.or(pinned).or_else(|| match &src.reference {
+            crate::git::fetch::GitRef::Rev(rev) => crate::gitstore::from_hex(&rev.to_ascii_lowercase()),
+            _ => None,
+        });
+        if let Some(commit) = revision {
+            if let Some(checkout) = crate::git::cargo::checkout(&crate::git::cargo::home(), &src.url, &commit) {
+                // rustc compiler/rustc_interface/src/passes.rs::parse reads Input::File directly.
+                // Cargo owns fetching; a resolved source path needs no second fetch or VFS copy.
+                let root = normalize(&checkout.display().to_string());
+                let manifests = checkout_manifests(&root)?;
+                self.git.borrow_mut().mounts.push((src.clone(), root.clone(), commit, manifests.clone()));
+                return Ok((root, commit, manifests));
+            }
+        }
         let home = self.git.borrow().places.home.clone();
         let cache = home.join("cache");
-        let commit = crate::git::fetch::fetch_source(&cache, &src.url, &src.reference, locked.or(pinned))?;
+        let commit = crate::git::fetch::fetch_source(&cache, &src.url, &src.reference, revision, self.offline)?;
         if locked.is_none() && pinned.is_none() {
             self.set_git_pin(src, &commit)?;
         }
@@ -1125,6 +1144,24 @@ fn manifest_dirs(table: &[crate::gitstore::Entry]) -> Vec<String> {
         ka.cmp(&kb)
     });
     out
+}
+
+fn checkout_manifests(root: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut todo = vec![String::new()];
+    while let Some(rel) = todo.pop() {
+        let dir = if rel.is_empty() { root.to_string() } else { format!("{root}/{rel}") };
+        if !rel.is_empty() && crate::vfs::exists(format!("{dir}/.git")) { continue; }
+        let manifest = crate::vfs::is_file(format!("{dir}/Cargo.toml"));
+        if manifest { out.push(rel.clone()); }
+        let entries = crate::vfs::read_dir(&dir).map_err(|e| format!("{dir}: {e}"))?;
+        for (name, is_dir) in entries.into_iter().rev() {
+            if is_dir && !name.starts_with('.') && !(manifest && name == "target") {
+                todo.push(if rel.is_empty() { name } else { format!("{rel}/{name}") });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The workspace root for a start folder, as cargo finds it: the nearest folder at or above
@@ -1341,6 +1378,7 @@ enum Req {
 }
 
 pub struct Options {
+    pub offline: bool,
     pub no_default_features: bool,
     pub all_features: bool,
     pub features: Vec<String>,
@@ -1363,7 +1401,7 @@ pub enum TestSel {
 }
 
 pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
-    let mut o = Options { no_default_features: false, all_features: false, features: Vec::new(), bin: None, test: None };
+    let mut o = Options { offline: false, no_default_features: false, all_features: false, features: Vec::new(), bin: None, test: None };
     let mut lib = false;
     let mut bins = false;
     let mut bin_names: Vec<String> = Vec::new();
@@ -1393,6 +1431,7 @@ pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
                 tests.get_or_insert_with(Vec::new).push(v);
             }
             "--release" => {}
+            "--offline" | "--frozen" => o.offline = true,
             _ => {
                 if let Some(v) = f.strip_prefix("--features=") {
                     o.features.extend(v.split([',', ' ']).filter(|x| !x.is_empty()).map(str::to_string));
@@ -1685,6 +1724,7 @@ pub fn unit_graph(sess: &std::sync::Arc<crate::Session>, workspace: &str, packag
 pub fn unit_graph_with(sess: &std::sync::Arc<crate::Session>, workspace: &str, package: &str, flags: &[String], git: GitPlaces) -> Result<Units, String> {
     let o = parse_flags(flags)?;
     let mut r = Resolver::with(sess, workspace, git)?;
+    r.offline |= o.offline;
     let root = r.find_member(package)?;
     let rk = (root, false);
     let mut f = Feat { r: &mut r, dev_of: o.test.as_ref().map(|_| rk), nodes: HashMap::new(), work: Vec::new(), order: Vec::new() };
@@ -1925,6 +1965,15 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
             deps,
         });
     }
+    if std::env::var("MAKEPAD_RUN_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "units")) {
+        for (i, u) in out.iter().enumerate() {
+            let (k, _) = &units[i];
+            let m = &r.manifests[k.0];
+            let deps: Vec<&str> = u.deps.iter().map(|(d, _)| out[*d].name.as_str()).collect();
+            eprintln!("units: {} {} {} unit={} mode={} features=[{}] deps=[{}]", m.name, m.version,
+                if u.host { "host" } else { "target" }, u.name, u.mode, u.features.join(","), deps.join(","));
+        }
+    }
     Ok(Units { units: out, roots, bins })
 }
 
@@ -1945,6 +1994,64 @@ mod root_tests {
     /// the names of the package's units
     fn units(sess: &std::sync::Arc<crate::Session>, dir: &str, pkg: &str) -> Vec<String> {
         unit_graph(sess, dir, pkg, &[]).unwrap_or_else(|e| panic!("{dir} {pkg}: {e}")).units.into_iter().map(|u| u.name).collect()
+    }
+
+    #[test]
+    fn resolver_2_host_features() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let root = tree("host-features", &[
+            ("Cargo.toml", "[workspace]\nresolver = \"2\"\nmembers = [\"app\"]\nexclude = [\"macros\"]\n"),
+            ("app/Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\na-macro = { path = \"../macros/a\" }\nb-macro = { path = \"../macros/b\" }\nshared = { path = \"../macros/shared\", optional = true, default-features = false, features = [\"target\"] }\n[build-dependencies]\nshared = { path = \"../macros/shared\", default-features = false, features = [\"build\"] }\n[dev-dependencies]\nshared = { path = \"../macros/shared\", features = [\"dev\"] }\n[features]\ntarget-side = [\"dep:shared\"]\n"),
+            ("app/src/main.rs", "fn main() {}\n"),
+            ("app/build.rs", "fn main() {}\n"),
+            ("macros/Cargo.toml", "[workspace]\nresolver = \"2\"\nmembers = [\"a\", \"b\", \"shared\", \"optional\", \"unused\"]\n[workspace.dependencies]\nshared = { path = \"shared\", default-features = false, features = [\"parsing\"] }\n"),
+            ("macros/a/Cargo.toml", "[package]\nname = \"a-macro\"\nversion = \"0.1.0\"\n[lib]\nproc-macro = true\n[dependencies]\nshared = { workspace = true, features = [\"full\"] }\n"),
+            ("macros/a/src/lib.rs", ""),
+            ("macros/b/Cargo.toml", "[package]\nname = \"b-macro\"\nversion = \"0.1.0\"\n[lib]\nproc-macro = true\n[dependencies]\nshared = { workspace = true, features = [\"visit\"] }\n[features]\ndefault = [\"shared/extra-traits\", \"shared?/fold\"]\n"),
+            ("macros/b/src/lib.rs", ""),
+            ("macros/shared/Cargo.toml", "[package]\nname = \"shared\"\nversion = \"0.1.0\"\n[dependencies]\noptional = { path = \"../optional\", optional = true, default-features = false }\nunused = { path = \"../unused\", optional = true }\n[features]\ndefault = [\"std\"]\nstd = []\nparsing = []\nfull = [\"optional?/walk\", \"unused?/walk\"]\nvisit = [\"dep:optional\"]\nextra-traits = []\nfold = []\nbuild = []\ndev = []\ntarget = []\n"),
+            ("macros/shared/src/lib.rs", ""),
+            ("macros/optional/Cargo.toml", "[package]\nname = \"optional\"\nversion = \"0.1.0\"\n[features]\nwalk = []\n"),
+            ("macros/optional/src/lib.rs", ""),
+            ("macros/unused/Cargo.toml", "[package]\nname = \"unused\"\nversion = \"0.1.0\"\n[features]\nwalk = []\n"),
+            ("macros/unused/src/lib.rs", ""),
+        ]);
+        // Cargo reference features.md#feature-resolver-version-2: union on each side, no dev
+        // features for a build. rustc compiler/rustc_attr_parsing/src/attributes/cfg.rs::eval_config_entry
+        // tests the resulting feature cfg in this compilation's session.
+        for target in [false, true] {
+            let flags = if target { vec!["--features".to_string(), "target-side".to_string()] } else { Vec::new() };
+            let g = unit_graph(sess, &root, "app", &flags).unwrap();
+            let shared: Vec<_> = g.units.iter().filter(|u| u.name == "shared").collect();
+            assert_eq!(shared.len(), if target { 2 } else { 1 });
+            let host = shared.iter().find(|u| u.host).unwrap();
+            assert_eq!(host.features, ["build", "extra-traits", "fold", "full", "parsing", "visit"]);
+            let optional = &g.units[host.deps.iter().find(|(_, n)| n == "optional").unwrap().0];
+            assert!(optional.host);
+            assert_eq!(optional.features, ["walk"]);
+            assert!(!g.units.iter().any(|u| u.name == "unused"));
+            assert_eq!(g.units.iter().filter(|u| u.kind.iter().any(|k| k == "proc-macro")).count(), 2);
+            for pm in g.units.iter().filter(|u| u.kind.iter().any(|k| k == "proc-macro")) {
+                assert!(pm.host);
+                let dep = &g.units[pm.deps.iter().find(|(_, n)| n == "shared").unwrap().0];
+                assert!(dep.host);
+                assert_eq!(dep.features, host.features);
+            }
+            if target {
+                let app = shared.iter().find(|u| !u.host).unwrap();
+                assert_eq!(app.features, ["target"]);
+                assert!(app.deps.is_empty());
+            }
+        }
+        // A git member inherits from its repository's workspace too, with member features added.
+        let mut r = Resolver::new(sess, &root).unwrap();
+        let source = Source::Git(GitSrc { url: "https://example.invalid/macros".to_string(), reference: crate::git::fetch::GitRef::DefaultBranch });
+        let i = r.load(&format!("{root}/macros/b"), source).unwrap();
+        let d = &r.manifests[i].deps[0];
+        assert_eq!(d.features, ["parsing", "visit"]);
+        assert!(!d.default_features);
+        assert_eq!(d.path.as_deref(), Some(normalize(&format!("{root}/macros/shared")).as_str()));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

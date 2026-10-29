@@ -7,7 +7,7 @@
 //! build-dependencies and the script as a bin, run_one), with cargo's environment; its `cargo:`
 //! lines are read like cargo does, the output kept with cargo's rerun rules. No rustc.
 
-use crate::crates::CrateUnit;
+use crate::crates::{CrateUnit, HostUnit};
 pub use crate::resolve::{GraphUnit, Units};
 use relax_session::sync::Mutex;
 
@@ -142,8 +142,9 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
     let mut run_build: Vec<Option<(String, u16, Vec<String>, usize)>> = vec![None; n_units];
     let mut raw: Vec<RawUnit> = vec![RawUnit { name: String::new(), src_path: String::new(), edition: 2015, features: Vec::new(), proc_macro: false, deps: Vec::new(), run_script: false, pkg: Default::default() }; n_units];
     // a crate used on both sides (normal dependency and build-dependency / proc-macro side) is one
-    // crate here: the target side's unit decides its features (target units first; host units
-    // are cargo's opt-level 0 copies, or Relax's resolver marks them)
+    // crate here: keep the target side for the app and the host side for the macro world.
+    // Cargo reference features.md#feature-resolver-version-2 keeps their features separate;
+    // rustc compiler/rustc_metadata/src/creader.rs::CStore::load_proc_macro loads the host artifact.
     let mut order: Vec<usize> = (0..n_units).filter(|&ui| !units[ui].host).collect();
     order.extend((0..n_units).filter(|&ui| units[ui].host));
     for &ui in &order {
@@ -193,6 +194,9 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
         let norm = crate::vfs::normalize_path(&src_path);
         if let Some(i) = crate_paths.iter().position(|p| *p == norm) {
             map[ui] = i;
+            if u.host {
+                crates[i].host = Some(HostUnit { features, deps: udeps });
+            }
             if is_root_bin || (root == usize::MAX && roots.contains(&ui)) { root = i; }
             continue;
         }
@@ -214,7 +218,7 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
         if mode == "test" {
             test_crates.push(crates.len());
         }
-        crates.push(CrateUnit { name: tname, src_path, edition, features, deps: udeps,  proc_macro: pm, bin, build_script: false, version: ver.clone(), registry: !u.pkg_id.starts_with("path+") });
+        crates.push(CrateUnit { name: tname, src_path, edition, features, deps: udeps, host: None, proc_macro: pm, bin, build_script: false, version: ver.clone(), registry: !u.pkg_id.starts_with("path+") });
         crate_paths.push(norm);
         pkg.push((pkg_dir, pname, ver));
     }
@@ -269,6 +273,11 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
             }
         }
         c.deps = nd;
+        if let Some(h) = &mut c.host {
+            h.deps = h.deps.iter().filter_map(|(i, n)| {
+                map.get(*i).filter(|&&ci| ci != usize::MAX).map(|&ci| (ci, n.clone()))
+            }).collect();
+        }
     }
 
     let n = crates.len();
@@ -426,11 +435,14 @@ pub fn script_role(pkg: &str, features: &[String]) -> ScriptRole {
 /// Packages whose build script ran although it is to be removed: (package, script path).
 pub static TO_REMOVE: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
-pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, target_dir: &str, native: Option<&crate::native::Request>) -> Result<(), String> {
+/// `check_only` (`relax check`): a script that compiles C is not run without `--allow-c` (rustc's
+/// check never links native code): its crate gets an empty answer (OUT_DIR, no cfgs), said once.
+pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, target_dir: &str, native: Option<&crate::native::Request>, check_only: bool) -> Result<(), String> {
     let results: Mutex<Vec<(Vec<usize>, Result<String, String>, String)>> = Mutex::new(Vec::new());
     // the packages whose scripts compile or link C (native.rs): built by cargo with `--allow-c`,
     // an error naming the flag without it; Relax runs the other scripts
     let mut native_seeds: Vec<usize> = Vec::new();
+    let mut check_skipped: Vec<usize> = Vec::new();
     for (i, bs) in g.build_scripts.iter().enumerate() {
         let (_, pname, _) = &g.pkg[bs.krate];
         // A kept GPU-kernel script (`Artefact`) that links native code (makepad-ai-cuda's nvcc
@@ -444,6 +456,11 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
             if native.is_none() {
                 // a script that runs a C compiler cannot work without one; `links =` / DEP_
                 // metadata alone run under Relax as before
+                if why.contains("build-dependency") && check_only {
+                    eprintln!("makepad check: `{}`'s build script compiles C ({}): not run without `--allow-c` (its cfgs are left out)", pname, why);
+                    check_skipped.push(bs.krate);
+                    continue;
+                }
                 if why.contains("build-dependency") {
                     return Err(format!("`{}` compiles C ({}): it {}", pname, why, relax_session::options::C_GATE));
                 }
@@ -489,6 +506,12 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
             if native_krates.contains(&bs.krate) {
                 continue;
             }
+            if check_skipped.contains(&bs.krate) {
+                let out_dir = format!("{}/build/{}-unbuilt/out", target_dir, g.crates[bs.krate].name);
+                let _ = std::fs::create_dir_all(&out_dir);
+                results.lock().unwrap().push((bs.krates(), Ok(String::new()), out_dir));
+                continue;
+            }
             let results = &results;
             let (dir, pname, ver) = g.pkg[bs.krate].clone();
             let name = g.crates[bs.krate].name.clone();
@@ -528,20 +551,29 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
             });
         }
     });
-    apply_script_results(g, results.into_inner().unwrap())
+    apply_script_results(g, results.into_inner().unwrap(), check_only)
 }
 
 /// The scripts' `cargo:` lines into the graph: cfgs, link libraries, env (OUT_DIR included).
-fn apply_script_results(g: &mut Graph, results: Vec<(Vec<usize>, Result<String, String>, String)>) -> Result<(), String> {
+fn apply_script_results(g: &mut Graph, results: Vec<(Vec<usize>, Result<String, String>, String)>, check_only: bool) -> Result<(), String> {
     for (krates, r, out_dir) in results {
-        let stdout = r?;
-        for k in krates { apply_script_output(g, k, &stdout, out_dir.clone())?; }
+        let stdout = match r {
+            Ok(s) => s,
+            // a check without `--allow-c`: a script that needed a skipped C package (aws-lc-rs reads
+            // aws-lc-sys's DEP_ metadata) leaves its crate unconfigured, said once, not fatal
+            Err(e) if check_only => {
+                eprintln!("makepad check: {} (its crate is checked without the script's cfgs)", e.lines().next().unwrap_or(""));
+                String::new()
+            }
+            Err(e) => return Err(e),
+        };
+        for k in krates { apply_script_output(g, k, &stdout, out_dir.clone(), check_only)?; }
     }
     Ok(())
 }
 
 /// One crate's share of a script's output (`stdout`, its OUT_DIR).
-fn apply_script_output(g: &mut Graph, k: usize, stdout: &str, out_dir: String) -> Result<(), String> {
+fn apply_script_output(g: &mut Graph, k: usize, stdout: &str, out_dir: String, check_only: bool) -> Result<(), String> {
     g.env[k].push(("OUT_DIR".to_string(), out_dir));
     for line in stdout.lines() {
         let rest = match line.strip_prefix("cargo::").or_else(|| line.strip_prefix("cargo:")) {
@@ -558,6 +590,10 @@ fn apply_script_output(g: &mut Graph, k: usize, stdout: &str, out_dir: String) -
             };
             let name = name.split(':').next().unwrap_or(name).to_string();
             // a static library a script built (C, assembly): only `--allow-c` links one
+            // (a check links nothing: the library is not needed)
+            if kind == "static" && check_only {
+                continue;
+            }
             if kind == "static" {
                 return Err(format!("`{}`'s build script links the static library `{}` (native code): it {}", g.pkg[k].1, name, relax_session::options::C_GATE));
             }

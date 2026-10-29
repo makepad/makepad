@@ -1,10 +1,10 @@
 //! A repository at a ref into its store (gitstore.rs): the one fetch path of `makepad run <git url>`
 //! (the runner's fetch.rs: specs, mounts, `--cached`) and of git dependencies (resolve.rs). Smart
 //! HTTP (smart_http.rs) on the embedder's transport ([`set_http`]: relax_compiler::registry_net
-//! installs relax-light-http), so this module does no I/O beyond the store files. Nothing is
+//! installs relax-light-http), with local reads from Cargo's git cache and Relax's stores. Nothing is
 //! checked out: the store's path table of a commit is what its files are read from (vfs.rs).
 //!
-//! MAKEPAD_RUN_OFFLINE=1: no request; what the stores keep answers.
+//! Cargo offline settings and MAKEPAD_RUN_OFFLINE=1 forbid every request.
 use super::{build_info_refs_request, build_upload_pack_request, extract_pack_from_response, Advertisement, ObjectId, ObjectKind, Request, Response};
 use crate::gitstore::{self as store, Oid};
 use std::path::Path;
@@ -22,13 +22,13 @@ pub fn set_http(f: Http) {
     let _ = HTTP.set(f);
 }
 
-fn offline() -> bool {
-    std::env::var_os("MAKEPAD_RUN_OFFLINE").is_some_and(|v| v != "0")
+fn offline() -> Result<bool, String> {
+    super::cargo::offline(&std::env::current_dir().map_err(|e| e.to_string())?)
 }
 
 fn http(req: &Request, timeout: Duration) -> Result<Response, String> {
-    if offline() {
-        return Err("MAKEPAD_RUN_OFFLINE is set".into());
+    if offline()? {
+        return Err("git network access is disabled (offline)".into());
     }
     let f = HTTP.get().ok_or("this process has no network access for git")?;
     f(req, timeout)
@@ -112,7 +112,7 @@ pub fn keep_two(refs: &[store::Ref]) -> Vec<store::Ref> {
     out
 }
 
-fn now() -> u64 {
+pub(super) fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
@@ -148,12 +148,17 @@ pub fn fetch_repo(cache: &Path, repo: &Repo) -> Result<Oid, String> {
                 return Ok(pinned);
             }
         }
+        let home = super::cargo::home();
+        if super::cargo::import(&home, &repo.url, pinned, &path, &key)? { return Ok(pinned); }
         let incoming = cache.join("incoming").join(format!("{}.pack", store::hex(&pinned)));
         if let Ok(body) = std::fs::read(&incoming) {
             let _ = std::fs::remove_file(&incoming);
             let pack = extract_pack_from_response(&Response { status_code: 200, body }).map_err(|e| e.to_string())?.ok_or("the downloaded pack is empty")?;
             append_pack(&path, existing.as_ref(), &pack, store::Ref { key, commit: pinned, time: now() }, &repo.url)?;
             return Ok(pinned);
+        }
+        if offline()? {
+            return Err(super::cargo::missing(&home, &repo.url, &store::hex(&pinned)));
         }
     }
     match fetch_remote(cache, repo, existing.as_ref(), &path, key.clone()) {
@@ -341,14 +346,17 @@ fn is_hex(s: &str) -> bool {
 }
 
 /// A git source (`url` at `r`) in its store; returns the commit. `locked`: the commit a lockfile
-/// pins it to -- that commit from the store, else fetched, else an error (never another commit).
+/// pins it to -- that commit from local stores/Cargo's db, else fetched, else an error.
 /// Unlocked: the commit the remote's ref names now, fetched unless the store holds it; with the
-/// remote unreachable (or MAKEPAD_RUN_OFFLINE) the store's newest fetch of the ref, said so.
-pub fn fetch_source(cache: &Path, url: &str, r: &GitRef, locked: Option<Oid>) -> Result<Oid, String> {
+/// remote unreachable or offline the store's newest fetch of the ref, said so.
+pub fn fetch_source(cache: &Path, url: &str, r: &GitRef, locked: Option<Oid>, offline: bool) -> Result<Oid, String> {
     check_url(url)?;
     let path = store::store_path(cache, url);
     let existing = store::Store::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let key = r.key();
+    let home = super::cargo::home();
+    let offline = offline || self::offline()?;
+    let locked = locked.or_else(|| match r { GitRef::Rev(rev) => store::from_hex(&rev.to_ascii_lowercase()), _ => None });
     if let Some(c) = locked {
         if let Some(s) = &existing {
             if s.index.table(&c).is_some() {
@@ -358,11 +366,13 @@ pub fn fetch_source(cache: &Path, url: &str, r: &GitRef, locked: Option<Oid>) ->
                 return Ok(c);
             }
         }
+        if super::cargo::import(&home, url, c, &path, &key)? { return Ok(c); }
+        if offline { return Err(super::cargo::missing(&home, url, &store::hex(&c))); }
         let adv = advertisement(url).map_err(|e| format!("{url}: the locked commit {} is not in the store and the remote is unreachable: {e}", store::hex(&c)))?;
         fetch_commit(&path, existing.as_ref(), url, &adv, c, &key)?;
         return Ok(c);
     }
-    let adv = match advertisement(url) {
+    let adv = match if offline { Err(super::cargo::missing(&home, url, &key)) } else { advertisement(url) } {
         Ok(a) => a,
         Err(e) => {
             // a commit id (or an abbreviation of one) the store holds needs no remote; a ref is the

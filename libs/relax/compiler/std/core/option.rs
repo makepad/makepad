@@ -48,6 +48,21 @@ impl<T> Option<T> {
             None => None,
         }
     }
+    // core/src/option.rs (stable 1.33; futures-util's ForEach::poll)
+    pub fn as_pin_ref(self: crate::pin::Pin<&Self>) -> Option<crate::pin::Pin<&T>> {
+        match crate::pin::Pin::get_ref(self).as_ref() {
+            Some(x) => unsafe { Some(crate::pin::Pin::new_unchecked(x)) },
+            None => None,
+        }
+    }
+    pub fn as_pin_mut(self: crate::pin::Pin<&mut Self>) -> Option<crate::pin::Pin<&mut T>> {
+        unsafe {
+            match crate::pin::Pin::get_unchecked_mut(self).as_mut() {
+                Some(x) => Some(crate::pin::Pin::new_unchecked(x)),
+                None => None,
+            }
+        }
+    }
     pub const fn as_slice(&self) -> &[T] {
         match self {
             Some(x) => crate::slice::from_ref(x),

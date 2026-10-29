@@ -10,6 +10,12 @@ use crate::tcx::{Tcx, TypingEnv};
 /// argument excluded. A local is saved if it is used after the suspension point, or if it is live and has
 /// been previously borrowed; either way only while its storage is required.
 pub fn locals_live_across_suspend_points(body: &Body, movable: bool) -> BitSet {
+    visit_suspend_points(body, movable, |_, _| {})
+}
+
+/// rustc_mir_transform/src/coroutine/layout.rs::locals_live_across_suspend_points retains
+/// each yield's source_info and live locals for async obligation diagnostics.
+pub(crate) fn visit_suspend_points(body: &Body, movable: bool, mut visit: impl FnMut(&BitSet, Span)) -> BitSet {
     let n = body.local_decls.len();
     // The MIR locals that have been previously borrowed (even if they are still active).
     let borrowed_locals = iterate_to_fixpoint(body, &MaybeBorrowedLocals);
@@ -25,7 +31,7 @@ pub fn locals_live_across_suspend_points(body: &Body, movable: bool) -> BitSet {
     let mut live_locals_at_any_suspension_point = BitSet::new_empty(n);
     for (b, data) in body.basic_blocks.iter().enumerate() {
         let block = BasicBlock(b as u32);
-        let Some(Terminator { kind: TerminatorKind::Yield { .. }, .. }) = &data.terminator else { continue };
+        let Some(Terminator { kind: TerminatorKind::Yield { .. }, source_info }) = &data.terminator else { continue };
         // (an unreachable suspension point has the bottom state: nothing is live there)
         if !liveness.is_reachable(block) { continue; }
         let loc = Location { block, statement_index: data.statements.len() };
@@ -41,6 +47,7 @@ pub fn locals_live_across_suspend_points(body: &Body, movable: bool) -> BitSet {
         live_locals.intersect(requires_storage_cursor.get());
         // The coroutine argument is ignored.
         live_locals.remove(1);
+        visit(&live_locals, source_info.span);
         live_locals_at_any_suspension_point.union(&live_locals);
     }
     live_locals_at_any_suspension_point
