@@ -7,8 +7,8 @@ use std::{
 use wayland_client::{Connection, EventQueue};
 
 use crate::{
-    cx_native::EventFlow, wayland::wayland_state::WaylandState, x11::xlib_event::XlibEvent,
-    TimerEvent,
+    cx_native::EventFlow, os::linux::windowing_backend::UI_TICK_INTERVAL,
+    wayland::wayland_state::WaylandState, x11::xlib_event::XlibEvent, TimerEvent,
 };
 
 pub(crate) struct WaylandApp {
@@ -22,6 +22,8 @@ pub(crate) struct WaylandApp {
     pub event_queue: EventQueue<WaylandState>,
     connection: Connection,
     event_callback: Option<Box<dyn FnMut(&mut WaylandApp, XlibEvent) -> EventFlow>>,
+    /// The longest the next select may block, in seconds; `None` waits for an event or a wakeup.
+    pub ui_wait_limit: Option<f64>,
 }
 impl WaylandApp {
     pub fn new(
@@ -35,6 +37,7 @@ impl WaylandApp {
             event_queue,
             state: state,
             event_callback: Some(event_callback),
+            ui_wait_limit: None,
         }
     }
     pub fn event_loop(&mut self) {
@@ -61,6 +64,7 @@ impl WaylandApp {
                     // can respond and wake the select below. A WouldBlock just means the
                     // socket buffer is full; the messages stay queued and the next loop
                     // iteration retries, so only a dead connection is fatal.
+                    let mut wait_limit = self.ui_wait_limit;
                     if let Err(err) = self.event_queue.flush() {
                         let transient = matches!(
                             &err,
@@ -72,9 +76,17 @@ impl WaylandApp {
                             self.terminate_event_loop();
                             return;
                         }
+                        // Nothing wakes us for that retry, so don't sleep long.
+                        wait_limit = Some(wait_limit.map_or(UI_TICK_INTERVAL, |limit| limit.min(UI_TICK_INTERVAL)));
                     }
-                    if let Some(guard) = self.event_queue.prepare_read() {
-                        self.state.timers.select(guard.connection_fd().as_raw_fd());
+                    // A timer handler may have asked for a redraw, so paint right away.
+                    if timer_ids.is_empty() {
+                        if let Some(guard) = self.event_queue.prepare_read() {
+                            self.state.timers.select_fds_capped(
+                                std::iter::once(guard.connection_fd().as_raw_fd()),
+                                wait_limit,
+                            );
+                        }
                     }
                     self.state.event_flow = EventFlow::Poll;
                 }

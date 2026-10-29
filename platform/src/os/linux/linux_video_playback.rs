@@ -95,7 +95,7 @@ fn poll_pending_pipeline_drops() {
     }
 }
 
-/// Finish async pipeline teardowns. Safe to call every timer tick even with no
+/// Finish async pipeline teardowns. Safe to call on every UI tick even with no
 /// active players — needed so the last closed video still drains PENDING.
 pub fn poll_pending_gstreamer_teardowns() {
     poll_pending_pipeline_drops();
