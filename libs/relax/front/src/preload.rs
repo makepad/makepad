@@ -88,6 +88,9 @@ pub struct Preparsed {
     pub src_len: usize,
 }
 
+/// Files of parsed crates taken from an earlier record's images (Pool::previous), for the summary
+pub static PREVIOUS_FILES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Optional embedder check for complete worker/collection-scope parse equivalence.
 pub static VERIFY: std::sync::OnceLock<fn(&ParsedFile, &ParsedFile)> = std::sync::OnceLock::new();
 
@@ -166,6 +169,9 @@ pub struct Pool {
     crates: Vec<PreCrate>,
     /// parse on workers (false: the loader parses, from the scan's tokens)
     parse: bool,
+    /// per crate parsed (no crate image): its unchanged files' images from an earlier record
+    /// (CrateImages::previous_files), taken instead of a parse when the loader replays them
+    previous: Vec<Option<crate::crate_image::PreviousFiles>>,
     st: Mutex<PoolState>,
     cv: Condvar,
 }
@@ -545,6 +551,17 @@ impl Pool {
         files.sort();
         let mut prelexed = Vec::new();
         let mut jobs = Vec::new();
+        // an unchanged file's image from an earlier record of the crate: no parse (the loader
+        // replays its macro lookups in its scope, and parses it when one finds another answer)
+        let mut done = Vec::new();
+        if let Some(previous) = &self.previous[ci] {
+            let _reuse = crate::load_profile::span(c.cfg.session.runtime.profile, "publish-previous-images", &c.name);
+            lexed.retain(|(path, src, _)| match previous(path, crate::crate_image::file_hash(path, src), &seen[path]) {
+                Some(x) => { done.push((path.clone(), x)); false }
+                None => true,
+            });
+            PREVIOUS_FILES.fetch_add(done.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         if self.parse {
             let ctx = Arc::new(CrateCtx { context: self.contexts[ci].clone(), name: c.name.clone(), edition: c.edition, cfg: c.cfg.clone(), table: Arc::new(table.clone()) });
             for (path, src, toks) in lexed {
@@ -564,7 +581,7 @@ impl Pool {
         inputs.sort(); inputs.dedup();
         probes.sort(); probes.dedup();
         let ahead = CrateAhead { name: c.name.clone(), idx: ci as u32, defs, aliases, macro_use, mods: cmods, files, prelexed, inputs, probes, deferred, demand_plan, image: false, valid, complete };
-        Publication { ahead, jobs, done: Vec::new() }
+        Publication { ahead, jobs, done }
     }
 
     fn work(&self, sess: &std::sync::Arc<crate::Session>, _worker: usize) {
@@ -1253,6 +1270,8 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
     let planning = demand_plan.as_ref().is_some_and(|p| p.ready().is_none());
     let mut fps = vec![None; n];
     let mut restored = Vec::with_capacity(n);
+    let mut previous = Vec::with_capacity(n);
+    let mut wants_previous = Vec::new();
     let mut valid = Vec::with_capacity(n);
     for (ci, c) in crates.iter().enumerate() {
         let deps: Option<Vec<u128>> = c.image_deps.iter().map(|&d| fps.get(d).copied().flatten()).collect();
@@ -1263,7 +1282,7 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
         let plan = demand_plan.as_ref().and_then(|p| p.ready());
         let deferred = plan.map(|p| p.deferred(ci + plan_offset)).unwrap_or_default();
         let plan_id = plan.map_or(0, |p| p.selection_identity(ci + plan_offset));
-        let image = deps.and_then(|d| images.and_then(|i| {
+        let image = deps.as_ref().and_then(|d| images.and_then(|i| {
             let image = i.crate_image_selected(c, &d, plan_id, &deferred);
             if planning { image.or_else(|| i.crate_image(c, &d)) } else { image }
         }));
@@ -1272,7 +1291,24 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
             eprintln!("boot-trace: {} parsed: no valid crate image", c.name);
         }
         fps[ci] = image.as_ref().map(|i| i.fingerprint);
-        restored.push(if planning { image } else { image.filter(|i| !i.fp_only) });
+        let image = if planning { image } else { image.filter(|i| !i.fp_only) };
+        previous.push(None);
+        if image.is_none() { wants_previous.push((ci, deps)); }
+        restored.push(image);
+    }
+    // a parsed crate's unchanged files: earlier records' images (the proc-macro crates of the
+    // whole program known by now: those this load restores and those a partial restore kept)
+    if let Some(i) = images {
+        let mut procs: Vec<(String, Option<u128>)> = crates.iter().enumerate().filter(|(_, c)| c.proc_macro).map(|(k, c)| (c.name.clone(), fps[k])).collect();
+        procs.extend(i.retained_proc_macros().into_iter().map(|(n, f)| (n, Some(f))));
+        let proc = crate::crate_image::proc_fps(procs.into_iter());
+        for (ci, deps) in wants_previous {
+            let c = &crates[ci];
+            previous[ci] = if deps.is_some() || proc.is_some() { i.previous_files(c, deps.as_deref(), proc) } else { None };
+            if trace() {
+                eprintln!("boot-trace: {}: parsed; earlier images: {}", c.name, if previous[ci].is_some() { "yes" } else if deps.is_none() && proc.is_none() { "dependencies not restored" } else { "none" });
+            }
+        }
     }
     if let Some(images) = images { images.end_load(); }
     if sess.options.verbose && images.is_some() && (trace() || crate::memstat::enabled()) {
@@ -1324,7 +1360,7 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
         let seq = st.scan_seq;
         st.scans.insert((ci, seq), k);
     }
-    let pool = Arc::new(Pool { demand_plan, plan_offset, contexts, crates, parse: jobs >= 2, st: Mutex::new(st), cv: Condvar::new() });
+    let pool = Arc::new(Pool { demand_plan, plan_offset, contexts, crates, parse: jobs >= 2, previous, st: Mutex::new(st), cv: Condvar::new() });
     if let Some(plan) = &pool.demand_plan {
         let weak = Arc::downgrade(&pool);
         plan.on_early_publish(move || {

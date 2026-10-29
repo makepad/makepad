@@ -2,7 +2,7 @@
 
 macro_rules! mk_fn {
     ($name:ident = $v:expr) => {
-        pub fn $name() -> u32 { $v + 1 }
+        pub fn $name() -> u32 { $v + 1 } // EDIT mk_fn
     };
 }
 
@@ -54,7 +54,7 @@ pub fn data() -> usize { include_str!("../data.txt").len() }
 
 #[path = "alt.rs"]
 mod alt;
-pub fn alt_val() -> u32 { alt::val() + 1 }
+pub fn alt_val() -> u32 { alt::val() + alt::alt_made() }
 
 // What a code key must see of other items through names (cache/deps.rs): a glob import shadowed by a
 // new item, a method a macro's expansion calls (`write!` -> `write_fmt`), a macro's definition, a trait
@@ -80,3 +80,15 @@ pub fn greet_plain() -> u32 { Plain.greet() }
 pub fn apply(f: impl Fn(u32) -> u32) -> u32 { f(2) } // EDIT apit
 
 pub fn wrap<T: Default + std::fmt::Debug>() -> usize { format!("{:?}", T::default()).len() }
+
+// Values a static's or constant's initializer computes through const fns of this crate (cache.rs
+// record_const: the value entry is certified by the bodies CTFE ran)
+pub const fn cval(x: u32) -> u32 { x * 3 } // EDIT cval
+pub const fn cval_outer(x: u32) -> u32 { cval(x) + 1 }
+pub const FW_CONST: u32 = cval_outer(5);
+pub static FW_STATIC: u32 = cval(7) + 1;
+
+// an exported macro another crate's file uses (JITCOLD7: that file's image is taken after an edit
+// here only while its lookup replays to the same rules)
+#[macro_export]
+macro_rules! fw_twice { ($e:expr) => { $e * 2 } } // EDIT fw_twice

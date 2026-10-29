@@ -421,6 +421,7 @@ impl Program {
                 lazy: { let n = usize::get(&mut r)?; crate::parser::FileLazy::mapped(r.take(n)?) }, shared: false,
                 used: crate::macros::MacroUse::from_image(Default::default(), Default::default()),
                 prep: FilePrep { idents: Vec::new(), blocks: Default::default(), lines: 0 },
+                replay: Default::default(),
             };
             let k = p.file_crate[i];
             let c = p.crates.get(k as usize)?;

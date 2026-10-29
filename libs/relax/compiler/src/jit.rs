@@ -354,6 +354,10 @@ pub struct Unit {
     /// cache's dependency certificates are its transitive closure (cache.rs).
     pub body_deps: crate::fxhash::HashMap<u32, Vec<u32>>,
     pub statics: crate::fxhash::HashMap<DefId, u64>,
+    /// the certificates of the constants' and statics' values of this run (ConstCert; by
+    /// constant and arguments, a static with none): an evaluation that reads one takes it in.
+    /// A value with none here (made before any was kept, or by code) counts as made by code.
+    pub const_certs: crate::fxhash::HashMap<(DefId, Vec<TyId>), ConstCert>,
     /// `#[thread_local]` statics: where each thread's copy lives (thread_local_place)
     pub tls_places: crate::fxhash::HashMap<DefId, TlsPlace>,
     /// the statics' storage by address: start -> (static, size), so a pointer into a static
@@ -3702,6 +3706,7 @@ impl Unit {
             const_readers: Default::default(),
             body_deps: Default::default(),
             statics: Default::default(),
+            const_certs: Default::default(),
             tls_places: Default::default(),
             static_spans: Default::default(),
             sites: Default::default(),
@@ -5883,6 +5888,7 @@ impl Unit {
         }
         args.iter_mut().for_each(|t| *t = self.tcx.tys.erase_regions(*t));
         if let Some(&a) = self.consts.get(&(d, args.clone())) {
+            cert_note_value(self, d, &args);
             return Some(a);
         }
         // a constant that failed to evaluate is not re-run by every use (u64::MAX marks it)
@@ -5918,13 +5924,16 @@ impl Unit {
         struct Pop;
         impl Drop for Pop { fn drop(&mut self) { let _ = CONST_STACK.try_with(|s| { s.borrow_mut().pop(); }); } }
         let _ = CONST_STACK.try_with(|s| s.borrow_mut().push((d, args.clone())));
+        let cert = CertGuard::begin(FnKey::Inst(d, args.clone()));
         let evaluated = { let _pop = Pop; self.eval_init(d, args.clone(), false) };
+        let cert = cert.finish();
         match evaluated {
             Some(a) => {
                 if let Some(mut cache) = self.cache.take() {
-                    cache.record_const(self, d, &args, a);
+                    cache.record_const(self, d, &args, a, &cert);
                     self.cache = Some(cache);
                 }
+                crate::zone_alloc::kept_with(|| self.const_certs.insert((d, args.clone()), cert));
                 // the cache keeps the shared read-only image; the unit uses the per-domain one
                 // where the value reaches a static (domain.rs rehome_const)
                 let a = crate::domain::rehome_const(self, a);
@@ -5975,6 +5984,7 @@ impl Unit {
             // again into the same storage (its symbol already names that address)
             if DEFERRED_STATICS.lock().unwrap_or_else(|e| e.into_inner()).remove(&d.0) {
                 let pending = PendingInit::arm(d);
+                cert_note_code();
                 let r = self.run_init(d, Vec::new(), a);
                 pending.disarm();
                 if r.is_none() {
@@ -5985,6 +5995,7 @@ impl Unit {
                 crate::domain::capture_static(self, sym);
                 crate::domain::materialize(self, sym);
             }
+            cert_note_value(self, d, &[]);
             return a;
         }
         // A static has its address before its value (Reference items/static-items: statics may
@@ -6007,16 +6018,23 @@ impl Unit {
         // Restore the initial value into this run's writable storage. The cached
         // object is an immutable snapshot taken immediately after pure CTFE,
         // never the static's later (possibly mutated) contents.
+        let t_trace = static_trace().then(cpu_ns);
         let cached = unsafe { crate::cache::const_value(self.self_ptr.0, d, &[]) };
+        let ctfe_code = self.stats.ctfe_code;
         let ran = cached.is_none().then(|| {
             let pending = PendingInit::arm(d);
+            let cert = CertGuard::begin(FnKey::Inst(d, Vec::new()));
             let r = self.run_init(d, Vec::new(), buf);
             pending.disarm();
-            r
+            (r, cert.finish())
         });
+        if let Some(t0) = t_trace {
+            let how = if cached.is_some() { "cached" } else if self.stats.ctfe_code != ctfe_code { "code" } else { "ctfe" };
+            eprintln!("static-trace: {} {} {} {:.0} us", how, self.prog.syms.str(self.prog.crates[self.prog.def(d).krate as usize].name), self.prog.def_path(d), (cpu_ns() - t0) as f64 / 1e3);
+        }
         if let Some(initial) = cached {
             unsafe { std::ptr::copy_nonoverlapping(initial as *const u8, buf as *mut u8, l.size as usize); }
-        } else if ran.flatten().is_none() {
+        } else if ran.as_ref().and_then(|r| r.0).is_none() {
             // needs a skipped module: evaluated again (same storage) once the outer compile
             // loaded it; the build using it fails meanwhile (DEFERRED_ABORT)
             if DEFERRED_ABORT.with(|a| a.get()) {
@@ -6026,7 +6044,9 @@ impl Unit {
             crate::zone_alloc::kept_with(|| self.statics.insert(d, 0));
             return 0;
         } else {
-            self.record_static(d, t, buf);
+            let cert = ran.map(|r| r.1).expect("ran");
+            self.record_static(d, t, buf, &cert);
+            crate::zone_alloc::kept_with(|| self.const_certs.insert((d, Vec::new()), cert));
             self.validate_final(d, t, buf);
         }
         let sym = self.syms.intern(crate::syms::SymKind::Static(d), buf);
@@ -6167,7 +6187,7 @@ impl Unit {
     /// running its initializer's code) as the value entry the next run copies into its storage
     /// instead of running the initializer: an immutable snapshot taken before any other code
     /// sees the static, keyed by the static and the fingerprints of the crates it is made of.
-    fn record_static(&mut self, d: DefId, t: TyId, buf: u64) {
+    fn record_static(&mut self, d: DefId, t: TyId, buf: u64, cert: &ConstCert) {
         if !self.cache.as_ref().is_some_and(|c| c.mode != crate::cache::Mode::ReadOnly) {
             return;
         }
@@ -6179,13 +6199,14 @@ impl Unit {
         let initial = self.data(&bytes, l.align.max(8) as u64, crate::syms::DataKind::Typed(t));
         crate::ctfe::zero_undefined(self, t, initial);
         if let Some(mut cache) = self.cache.take() {
-            cache.record_const(self, d, &[], initial);
+            cache.record_const(self, d, &[], initial, cert);
             self.cache = Some(cache);
         }
     }
 
     fn run_init_code(&mut self, d: DefId, args: Vec<TyId>, buf: u64) -> Option<u64> {
         self.stats.ctfe_code += 1;
+        cert_note_code();
         if std::env::var_os("MAKEPAD_RUN_CTFE_TRACE").is_some() {
             eprintln!("ctfe: compiled {}", self.prog.def_path(d));
         }
@@ -20661,6 +20682,100 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
     }
 }
 
+/// What the initial value of a constant or static was computed from, for its value entry in the
+/// disk cache (cache.rs record_const): the bodies CTFE interpreted -- the initializer's and every
+/// `const fn` it ran (`keys`) -- and the certificates of the constants and statics it read
+/// (`items`, `idents`: those entries' bodies with their code keys and their crates). The value
+/// is a function of these bodies: while each has the code key it had, the evaluation runs the
+/// same way (const evaluation is deterministic and reads nothing else). `complete` false: some
+/// of it ran as code (run_init_code) or read a value with no certificate: the bodies it ran are
+/// not known, and only the coarse check (the fingerprints of the crates the value is named by)
+/// holds for it, as before certificates.
+#[derive(Clone, Debug)]
+pub struct ConstCert {
+    pub keys: Vec<FnKey>,
+    pub items: Vec<(Vec<u8>, u128)>,
+    pub idents: Vec<u128>,
+    pub complete: bool,
+}
+
+impl ConstCert {
+    /// `other` read by the evaluation this certificate is for
+    pub(crate) fn take_in(&mut self, other: &ConstCert) {
+        self.keys.extend(other.keys.iter().cloned());
+        self.items.extend(other.items.iter().cloned());
+        self.idents.extend(other.idents.iter().copied());
+        self.complete &= other.complete;
+    }
+}
+
+thread_local! {
+    /// the certificates of the initializers this thread is evaluating, outermost first (CertGuard)
+    static CONST_CERTS: std::cell::RefCell<Vec<ConstCert>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The evaluation of one initializer (`key`: its slot identity) records its certificate from
+/// here to `finish`; an evaluation that unwinds leaves the one around it incomplete.
+pub(crate) struct CertGuard(bool);
+impl CertGuard {
+    pub(crate) fn begin(key: FnKey) -> CertGuard {
+        crate::zone_alloc::kept_with(|| CONST_CERTS.with(|c| c.borrow_mut().push(ConstCert { keys: vec![key], items: Vec::new(), idents: Vec::new(), complete: true })));
+        CertGuard(true)
+    }
+    /// this evaluation's certificate; the evaluation around it (if any) read the value: it takes it in
+    pub(crate) fn finish(mut self) -> ConstCert {
+        self.0 = false;
+        crate::zone_alloc::kept_with(|| CONST_CERTS.with(|c| {
+            let mut c = c.borrow_mut();
+            let mine = c.pop().expect("a certificate per guard");
+            if let Some(outer) = c.last_mut() { outer.take_in(&mine); }
+            mine
+        }))
+    }
+}
+impl Drop for CertGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            let _ = CONST_CERTS.try_with(|c| {
+                let mut c = c.borrow_mut();
+                c.pop();
+                if let Some(outer) = c.last_mut() { outer.complete = false; }
+            });
+        }
+    }
+}
+
+/// CTFE interpreted body `key` (a `const fn` instance) for the evaluations recording
+pub(crate) fn cert_note_body(key: impl FnOnce() -> FnKey) {
+    let _ = CONST_CERTS.try_with(|c| {
+        let mut c = c.borrow_mut();
+        if let Some(top) = c.last_mut() { crate::zone_alloc::kept_with(|| top.keys.push(key())); }
+    });
+}
+
+/// The evaluations recording read constant/static `d`'s value (`args`): its certificate, if this
+/// run has one, else they are incomplete.
+pub(crate) fn cert_note_value(u: &Unit, d: DefId, args: &[TyId]) {
+    let _ = CONST_CERTS.try_with(|c| {
+        let mut c = c.borrow_mut();
+        let Some(top) = c.last_mut() else { return };
+        match u.const_certs.get(&(d, args.to_vec())) {
+            Some(cert) => crate::zone_alloc::kept_with(|| top.take_in(cert)),
+            None => top.complete = false,
+        }
+    });
+}
+
+/// The evaluations recording ran code: incomplete
+pub(crate) fn cert_note_code() {
+    let _ = CONST_CERTS.try_with(|c| if let Some(top) = c.borrow_mut().last_mut() { top.complete = false });
+}
+
+/// The evaluations recording read a value whose certificate is `cert` (a cache hit)
+pub(crate) fn cert_take_in(cert: &ConstCert) {
+    let _ = CONST_CERTS.try_with(|c| if let Some(top) = c.borrow_mut().last_mut() { crate::zone_alloc::kept_with(|| top.take_in(cert)) });
+}
+
 thread_local! {
     /// the constants (and their arguments) whose initializers this thread is evaluating, outermost first
     static CONST_STACK: std::cell::RefCell<Vec<(DefId, Vec<TyId>)>> = Default::default();
@@ -21406,13 +21521,16 @@ fn prefront_slot(front: &FrontShared, id: u32) -> bool {
         return false;
     };
     let t0 = cpu_ns();
+    if front.ahead.contains_key(&(d, args.clone())) { PREFRONTS[4].fetch_add(1, Ordering::Relaxed); }
     let why = {
         let _preemptible = crate::preempt::Preemptible::on();
         typeck_ahead(front, d, args, 0, false, false);
+        PREFRONTS[2].fetch_add(cpu_ns() - t0, Ordering::Relaxed);
         lower_ahead(front, id, true)
     };
     PREFRONTS[0].fetch_add(1, Ordering::Relaxed);
     PREFRONTS[1].fetch_add(cpu_ns() - t0, Ordering::Relaxed);
+    prefronted(id);
     let ok = front.lowered.lock().unwrap_or_else(|e| e.into_inner()).get(&id).is_some_and(|x| x.is_some());
     if !ok {
         let why = if why == AF_OK { AF_OTHER } else { why };
@@ -21529,8 +21647,15 @@ fn prefront_closure(front: &FrontShared, id: u32) -> bool {
     ok
 }
 
-/// Background fronts run off the owner by `take_prefronted` (count, cpu ns)
-pub static PREFRONTS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+/// Background fronts run off the owner by `take_prefronted` (count, cpu ns, of it type checks ns, distinct slots,
+/// fronts that found the body checked already)
+pub static PREFRONTS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+/// (instrument) the slots fronted (PREFRONTS[3] counts them)
+static PREFRONTED: std::sync::Mutex<Option<std::collections::HashSet<u32>>> = std::sync::Mutex::new(None);
+fn prefronted(id: u32) {
+    let mut s = PREFRONTED.lock().unwrap_or_else(|e| e.into_inner());
+    if crate::zone_alloc::kept_with(|| s.get_or_insert_with(Default::default).insert(id)) { PREFRONTS[3].fetch_add(1, Ordering::Relaxed); }
+}
 
 /// The take of a background build (rules I-PUB, I-PURE): `take` runs as a publish that may run no
 /// front; a slot it needed a front for is fronted here (`prefront_slot`) and `take` runs again.
@@ -24775,6 +24900,12 @@ impl Unit {
             let _ = self.provided_shared.set(set);
         }
     }
+}
+
+/// MAKEPAD_RUN_STATIC_TRACE=1: one line per static initialized (cached value, CTFE or code; CPU time)
+fn static_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_STATIC_TRACE").is_some())
 }
 
 /// The `#[global_allocator]` static of program `prog`

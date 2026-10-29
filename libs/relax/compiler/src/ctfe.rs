@@ -1301,6 +1301,7 @@ impl<'a> Ctx<'a> {
             (d, args)
         };
         if let Some(&a) = u.consts.get(&(d, args.clone())) {
+            crate::jit::cert_note_value(u, d, &args);
             return Some(a);
         }
         if u.const_failed.contains(&(d, args.clone())) || self.depth >= CALL_DEPTH {
@@ -1329,17 +1330,21 @@ impl<'a> Ctx<'a> {
         impl Drop for Pop { fn drop(&mut self) { let _ = CONSTS_READING.try_with(|c| { c.borrow_mut().pop(); }); } }
         let _ = CONSTS_READING.try_with(|c| c.borrow_mut().push((d, args.clone())));
         self.depth += 1;
+        let cert = crate::jit::CertGuard::begin(crate::jit::FnKey::Inst(d, args.clone()));
         let ok = { let _pop = Pop; eval_into(self.u, d, &args, buf) };
         self.depth -= 1;
         if !ok {
             return None;
         }
+        let cert = cert.finish();
         zero_undefined(self.u, t, buf);
         self.u.syms.set_data_kind(buf, crate::syms::DataKind::Typed(t));
         if let Some(mut cache) = self.u.cache.take() {
-            cache.record_const(self.u, d, &args, buf);
+            cache.record_const(self.u, d, &args, buf, &cert);
             self.u.cache = Some(cache);
         }
+        let u = &mut *self.u;
+        crate::zone_alloc::kept_with(|| u.const_certs.insert((d, args.clone()), cert));
         self.u.put_const(d, args, buf);
         Some(buf)
     }
@@ -1469,6 +1474,8 @@ impl<'a> Ctx<'a> {
             }
         };
         let bl = body.body?;
+        // (the value is made of this body too: the certificate of the evaluation names it)
+        crate::jit::cert_note_body(|| crate::jit::FnKey::Inst(d, gargs.clone()));
         let has_self = body.locals.first().is_some_and(|l| l.pat == u32::MAX && self.u.prog.syms.str(l.name) == "self");
         if body.param_pats.len() + usize::from(has_self) != args.len() {
             return None;

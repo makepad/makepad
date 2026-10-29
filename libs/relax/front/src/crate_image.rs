@@ -11,7 +11,7 @@ use crate::{
 use std::sync::Arc;
 
 // Demand certificates belong to the graph; crate records keep only their own selection.
-pub const VERSION: u32 = 21;
+pub const VERSION: u32 = 22;
 
 pub(crate) mod strings;
 
@@ -448,8 +448,25 @@ pub struct FileMeta {
     pub lazy: crate::parser::FileLazy,
     pub used: MacroUse,
     pub prep: FilePrep,
+    /// the parse's macro lookups for a replay (MacroUse::replay_bytes; empty: none): an edited
+    /// crate's unchanged file takes its image when they replay in the loader's scope
+    pub replay: Blob,
 }
-fields!(FileMeta, path, module, hash, shared, edition, src_len, token_input, lazy, used, prep);
+fields!(FileMeta, path, module, hash, shared, edition, src_len, token_input, lazy, used, prep, replay);
+
+/// Bytes, encoded as a length and the bytes (one copy, not a decode per byte)
+#[derive(Clone, Default)]
+pub struct Blob(pub Vec<u8>);
+impl Codec for Blob {
+    fn put(&self, w: &mut Vec<u8>) {
+        self.0.len().put(w);
+        w.extend_from_slice(&self.0);
+    }
+    fn get(r: &mut Decode<'_>) -> Option<Self> {
+        let n = usize::get(r)?;
+        Some(Blob(r.take(n)?.to_vec()))
+    }
+}
 pub fn file_meta(path: &str, module: &str, pf: &ParsedFile, used: &MacroUse, prep: &FilePrep, shared: bool) -> Vec<u8> {
     let _mem = crate::memstat::tag(crate::memstat::Tag::FrontRecord);
     let mut w = Vec::new();
@@ -463,7 +480,18 @@ pub fn file_meta(path: &str, module: &str, pf: &ParsedFile, used: &MacroUse, pre
     pf.lazy.put(&mut w);
     used.put(&mut w);
     prep.put(&mut w);
+    Blob(used.replay_bytes().unwrap_or_default()).put(&mut w);
     w
+}
+/// The program's proc-macro crates by name and fingerprint: what a parse of a file reads of other
+/// crates besides the macro lookups a replay checks. None: one's fingerprint is not known.
+pub fn proc_fps(crates: impl Iterator<Item = (String, Option<u128>)>) -> Option<u128> {
+    let mut v: Vec<(String, u128)> = crates.map(|(n, f)| Some((n, f?))).collect::<Option<_>>()?;
+    v.sort();
+    let mut h = crate::sip::Sip128::new();
+    h.str("proc-macro-deps");
+    for (n, f) in &v { h.str(n); h.u128(*f); }
+    Some(h.finish128())
 }
 pub fn file_hash(path: &str, src: &[u8]) -> u128 {
     let mut h = crate::sip::Sip128::new();
@@ -523,6 +551,10 @@ pub struct Record {
     pub ahead: CrateAhead,
     pub files: Vec<FileMeta>,
     pub selection_hash: u128,
+    /// proc_fps of the program when it was recorded (None: one was not known): an edited
+    /// dependency changes dep_fps, but a file's parse depends on it only through its macro lookups
+    /// (replayed) and proc macros (this)
+    pub proc_fps: Option<u128>,
 }
 // The fields a restore validates come first (RecordHead): the files' paths and hashes, then the
 // crate's own inputs and demand selection (CrateAhead's leading fields); the macro and module
@@ -533,13 +565,13 @@ impl Codec for Record {
         self.deps.put(w); self.dep_fps.put(w); self.lazy_auto.put(w); self.parse_options.put(w); self.selection_hash.put(w);
         self.files.len().put(w);
         for f in &self.files { f.path.put(w); f.hash.put(w); }
-        self.ahead.put(w); self.files.put(w);
+        self.ahead.put(w); self.files.put(w); self.proc_fps.put(w);
     }
     fn get(r: &mut Decode<'_>) -> Option<Self> {
         let (name, root, edition, cfg, proc_macro) = (Codec::get(r)?, Codec::get(r)?, Codec::get(r)?, Codec::get(r)?, Codec::get(r)?);
         let (deps, dep_fps, lazy_auto, parse_options, selection_hash) = (Codec::get(r)?, Codec::get(r)?, Codec::get(r)?, Codec::get(r)?, Codec::get(r)?);
         let _hashes: Vec<(String, u128)> = Codec::get(r)?;
-        Some(Self { name, root, edition, cfg, proc_macro, deps, dep_fps, lazy_auto, parse_options, ahead: Codec::get(r)?, files: Codec::get(r)?, selection_hash })
+        Some(Self { name, root, edition, cfg, proc_macro, deps, dep_fps, lazy_auto, parse_options, ahead: Codec::get(r)?, files: Codec::get(r)?, selection_hash, proc_fps: Codec::get(r)? })
     }
 }
 /// What validating a crate's record reads (`decode_record_head`): not its macro and module tables
@@ -621,6 +653,10 @@ pub trait DemandWriter {
     fn surface(&mut self, path: &str, hash: u128, src: &[u8], toks: &[crate::lexer::Tok]) -> Option<(DemandSlice, DemandSlice)>;
     fn definition(&mut self, def: &MacroDef) -> Option<(u128, usize)>;
 }
+/// An edited crate's unchanged files' images (CrateImages::previous_files): the image of the file
+/// at (path, source hash) as preparsed at that module path, when one is recorded
+pub type PreviousFiles = Arc<dyn Fn(&str, u128, &str) -> Option<crate::preload::Preparsed> + Send + Sync>;
+
 pub trait CrateImages {
     /// Validation is shared only during this immutable preload, never across edits.
     fn begin_load(&self, _crates: &[crate::preload::PreCrate]) {}
@@ -629,6 +665,14 @@ pub trait CrateImages {
     fn take_demand_plan(&self, _crates: &[crate::preload::PreCrate]) -> Option<Arc<crate::preload::DemandPlan>> { None }
     fn demand_parts(&self, _crates: &[crate::preload::PreCrate], _graph: u128) -> Option<DemandParts> { None }
     fn crate_image(&self, c: &crate::preload::PreCrate, dep_fps: &[u128]) -> Option<CrateImage>;
+    /// A crate that is parsed (no valid image): the images of its files from an earlier record
+    /// made with the same identity and dependency fingerprints (`dep_fps`; None: a dependency is
+    /// parsed in this load too), with their macro lookups to replay. None: no such record.
+    /// `proc_fps`: proc_fps of its dependencies now (None: not known): a record whose dependency
+    /// fingerprints differ is taken when that is the same.
+    fn previous_files(&self, _c: &crate::preload::PreCrate, _dep_fps: Option<&[u128]>, _proc_fps: Option<u128>) -> Option<PreviousFiles> { None }
+    /// The proc-macro crates a partial restore kept (not in this load), by name and fingerprint
+    fn retained_proc_macros(&self) -> Vec<(String, u128)> { Vec::new() }
     fn crate_image_selected(&self, c: &crate::preload::PreCrate, dep_fps: &[u128], plan: u128, deferred: &[String]) -> Option<CrateImage> {
         self.crate_image(c, dep_fps).filter(|image| image.ahead.demand_plan == plan && image.ahead.deferred == deferred)
     }

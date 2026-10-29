@@ -428,6 +428,11 @@ impl Store {
         mark_live(&self.path, &self.file, true);
     }
 
+    /// When the current generation's file was last written or stamped used (mark_live)
+    pub fn modified(&self) -> Option<std::time::SystemTime> {
+        std::fs::metadata(&self.file).and_then(|m| m.modified()).ok()
+    }
+
     /// Opens `path` without marking it used: a scan that may reject it (cache.rs candidate).
     pub fn open_unmarked(path: &Path) -> Option<Store> {
         let base = base_path(path);

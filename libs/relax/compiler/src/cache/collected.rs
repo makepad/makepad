@@ -414,6 +414,8 @@ impl FrontImages {
             if session.options.verbose { eprintln!("makepad-run collected: retained {} crates; rebuilding {} changed/dependent crates", prefix, pre.len() - prefix); }
             // the crates loaded after them find these as their dependencies (full_deps)
             *self.retained.lock().unwrap() = graph.crates[..prefix].iter().map(|((name, _), fp)| (name.clone(), *fp)).collect();
+            *self.retained_proc.lock().unwrap() = graph.crates[..prefix].iter().enumerate().filter(|(k, _)| prog.crates.get(*k).is_some_and(|c| c.proc_macro))
+                .map(|(_, ((name, _), fp))| (name.clone(), *fp)).collect();
         }
         if let Some(plan) = plan {
             self.pending_plan.lock().unwrap().take();

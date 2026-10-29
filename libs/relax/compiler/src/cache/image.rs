@@ -292,7 +292,9 @@ impl Cache {
     /// its definition), if the cache has one.
     fn static_value_obj(&mut self, u: &Unit, b: &[u8], data: &mut ImageData) -> Option<u32> {
         let def = self.dec_def(u, &mut D { b, p: 1 })?;
-        let (key, _) = self.const_key(u, def, &[])?;
+        let (key, _, _) = self.const_key(u, def, &[])?;
+        // (only a value this run certified: a stored one that no longer holds stays out)
+        if !self.const_live.contains(&key) { return None; }
         let payload = match self.pending.iter().find(|e| e.1.key == key && e.1.kind == KIND_CONST) {
             Some(e) => &e.1.payload[..],
             None => match self.get(key) {
@@ -300,7 +302,8 @@ impl Cache {
                 _ => return None,
             },
         };
-        let dk = u128::from_le_bytes(payload.try_into().ok()?);
+        // (the data key ends the payload, after the certificate)
+        let dk = u128::from_le_bytes(payload.get(payload.len().checked_sub(16)?..)?.try_into().ok()?);
         Some(data.index(dk))
     }
 
