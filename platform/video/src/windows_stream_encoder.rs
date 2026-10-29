@@ -699,6 +699,23 @@ impl WindowsStreamEncoder {
         out
     }
 
+    /// An NV12 shared texture `key` of the encoder's size (`makepad_hal::shared_texture`): copied on
+    /// the GPU into the encoder's device and encoded, no conversion, no CPU pass.
+    fn push_shared_nv12(&mut self, key: u64, pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
+        ensure_media_foundation()?;
+        let Some(hw) = self.hardware.as_mut() else {
+            return Err(VideoFileError::new(format!("no hardware encoder for GPU pictures ({})", self.hardware_note)));
+        };
+        let t0 = std::time::Instant::now();
+        let nv12 = makepad_hal::shared_texture::nv12_picture(key).map_err(VideoFileError::new)?;
+        let t1 = std::time::Instant::now();
+        let key_frame = std::mem::take(&mut self.force_keyframe);
+        let out = unsafe { hw.encode(&nv12, key_frame, pts_100ns) };
+        let us = |a: std::time::Instant, b: std::time::Instant| (b - a).as_micros().min(u32::MAX as u128) as u32;
+        self.timings = EncodeTimings { copy_us: us(t0, t1), convert_us: 0, encode_us: us(t1, std::time::Instant::now()) };
+        out
+    }
+
     fn set_kbps(&mut self, kbps: u32) {
         self.options.bitrate_kbps = kbps;
         if let Some(hw) = &self.hardware {
@@ -739,6 +756,8 @@ impl StreamEncoderOs for WindowsStreamEncoder {
         ready.wait(std::time::Duration::from_secs(2)).map_err(VideoFileError::new)?;
         match surface.format {
             SurfaceFormat::Bgra8 if tile.x0 == 0 && tile.y0 == 0 && tile.source_height == self.options.height => self.push_shared_texture(surface.id, pts_100ns),
+            // an NV12 picture of this tile's size, rendered into its planes: encoded as it lies
+            SurfaceFormat::Nv12 if tile.x0 == 0 && tile.y0 == 0 && tile.source_height == self.options.height => self.push_shared_nv12(surface.id, pts_100ns),
             SurfaceFormat::PackedNv12 if tile.y0 == 0 && tile.source_height == self.options.height => {
                 let [w, h] = [self.options.width, self.options.height];
                 let t0 = std::time::Instant::now();
@@ -750,7 +769,7 @@ impl StreamEncoderOs for WindowsStreamEncoder {
                 self.timings = EncodeTimings { copy_us: us(t0, t1), convert_us: 0, encode_us: us(t1, std::time::Instant::now()) };
                 out
             }
-            _ => Err(VideoFileError::new(format!("the stream encoder takes whole BGRA or columns of packed NV12 surfaces, not {tile:?} of {surface:?}"))),
+            _ => Err(VideoFileError::new(format!("the stream encoder takes whole BGRA or NV12 surfaces or columns of packed NV12 ones, not {tile:?} of {surface:?}"))),
         }
     }
 

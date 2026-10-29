@@ -58,6 +58,8 @@ impl<'a> Drop for CxDraw<'a> {
         if !self.fonts.borrow_mut().prepare_textures(self.cx) {
             self.cx.redraw_all();
         }
+        // After the first frame: index the installed fonts in the background.
+        crate::text::system_faces::start_prewarm(self.cx);
         self.pass_stack.clear();
         self.draw_list_stack.clear();
         self.cx.global::<CxDrawScratchPool>().0.push(CxDrawScratch {
@@ -103,6 +105,7 @@ impl<'a> CxDraw<'a> {
             return false;
         }
         let mut fonts = Fonts::new(cx, layouter::Settings::default());
+        fonts.set_system_fonts_first(cx.font_set().prefers_system_fonts());
         crate::text::scan::start(cx, &mut fonts);
         fonts.define_font_family(
             0.into(),
@@ -113,13 +116,21 @@ impl<'a> CxDraw<'a> {
             },
         );
         cx.set_global(Rc::new(RefCell::new(fonts)));
+        // A `System` font set asks the OS before any bundled face: its font
+        // index is built from now on, in the background, so the first miss
+        // finds it ready. (Other sets start it after the first frame.)
+        if cx.font_set().prefers_system_fonts() {
+            crate::text::system_faces::start_prewarm(cx);
+        }
         // a finished glyph upgrade (MSDF worker) raises the UI signal: redraw so the next draw
         // applies it, instead of keeping the stand-in glyphs until unrelated input
         cx.signal_hooks.push(|cx| {
+            // ... and a finished system font lookup (or index build) completes its families
             let waiting = cx
                 .get_global_ref::<Rc<RefCell<Fonts>>>()
                 .and_then(|fonts| fonts.try_borrow().ok().map(|fonts| fonts.msdf_results_waiting()))
-                .unwrap_or(false);
+                .unwrap_or(false)
+                | crate::text::system_faces::has_news(cx);
             if waiting {
                 cx.redraw_all();
             }

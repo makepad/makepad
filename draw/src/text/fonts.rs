@@ -350,6 +350,12 @@ impl Fonts {
     /// The OS fonts for the characters of `text` no face of the family
     /// covers ([`super::system_fallback`]); true when a face joined the
     /// families, so the text lays out again.
+    /// The OS fallback comes before the bundled CJK and emoji faces (a
+    /// `System` font set).
+    pub(crate) fn set_system_fonts_first(&mut self, first: bool) {
+        self.system_fallback.bundled_after = first;
+    }
+
     pub fn request_system_fallback(&mut self, id: FontFamilyId, text: &str) -> bool {
         self.system_fallback.request(&mut self.layouter, id, text)
     }

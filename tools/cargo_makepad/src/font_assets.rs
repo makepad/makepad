@@ -626,6 +626,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const LATIN: &[u8] = include_bytes!("../../../platform/tests/fixtures/font-assets-latin-v1.txt");
+    const SYSTEM: &[u8] = include_bytes!("../../../platform/tests/fixtures/font-assets-system-v1.txt");
     const INTERNATIONAL: &[u8] =
         include_bytes!("../../../platform/tests/fixtures/font-assets-international-v1.txt");
 
@@ -815,6 +816,19 @@ mod tests {
                 international_expected,
                 "International {path}"
             );
+        }
+    }
+
+    /// A `System` font set packs the Latin faces and neither CJK face nor
+    /// the emoji face (the OS draws those).
+    #[test]
+    fn system_allowlist_leaves_out_cjk_and_emoji() {
+        let system = FontAssetManifest::parse(SYSTEM).unwrap();
+        assert_eq!(system.set(), "System");
+        assert!(system.allows("makepad_widgets/resources/IBMPlexSans-Text.ttf"));
+        assert!(system.allows("makepad_widgets/resources/NotoSans-Regular.ttf"));
+        for big in ["LXGWWenKaiRegular.ttf", "LXGWWenKaiBold.ttf", "NotoColorEmoji.ttf"] {
+            assert!(!system.allows(&format!("makepad_widgets/resources/{big}")), "{big}");
         }
     }
 

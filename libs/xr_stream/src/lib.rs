@@ -1,9 +1,10 @@
 //! Remote rendering for headsets over Desk Link XR (`makepad_desk_link::xr`).
 //!
-//! - [`serve`] + [`XrServe`]: an app serves its XR view (a headset linking gives the process a
-//!   remote headset slot): it renders as on a headset (its XR pass, paced
-//!   by the headset's poses) into its own textures; `XrServe` packs each frame on the GPU and
-//!   hands it to the encoder (`makepad_desk_link::xr_host`), and mirrors it on the desktop.
+//! - [`XrServer`] (`server`): an app serves its XR view (a headset linking gives the process a
+//!   remote headset slot): it renders as on a headset (its XR pass, paced by the headset's
+//!   poses); the server takes each frame from the Cx's XR frame sink, packs it on the GPU,
+//!   encodes and sends it. The caption's [`XrCaptionButton`] installs it; [`XrMirrorView`] (or
+//!   [`DrawXrMirror::draw_headset`]) mirrors it on the desktop.
 //! - [`XrStreamClient`]: on the headset, a thin client: it sends each XR frame's pose (head,
 //!   eyes, controllers, hands) upstream, decodes the pictures on a worker thread and draws the
 //!   newest into the app's XR pass with [`DrawXrStream`], each eye its half of the picture.
@@ -45,16 +46,20 @@ const HOLD: usize = 6;
 mod auto;
 mod mirror;
 mod panel;
-mod serve;
-pub use mirror::XrMirrorView;
-pub use panel::{XrCaptionButton, XrStreamSettings};
-pub use serve::{serve, set_stream_mirror, set_stream_see_through, stream_aa, DrawXrBand, DrawXrMirror, StreamAa, StreamView, XrServe, STREAM_AA_DEFAULT, STREAM_AA_MODES};
 #[cfg(not(target_arch = "wasm32"))]
-pub use serve::{set_menu_toggles_streaming, streaming, tap_audio, XrAudioTap};
-/// The serving side's shaders, `mod.draw.XrServe` and the caption's `XrCaptionButton` (an app
-/// that serves registers them).
+pub mod server;
+mod settings_types;
+pub use mirror::{DrawXrMirror, XrMirrorView};
+pub use panel::{XrCaptionButton, XrStreamSettings};
+#[cfg(not(target_arch = "wasm32"))]
+pub use server::{LiveHeadset, ServerStats, XrServer};
+pub use settings_types::{HeadsetSettings, StreamAa, StreamView, STREAM_AA_DEFAULT, STREAM_AA_MODES};
+/// The serving side's shaders and widgets: the server's pack, the mirror and the caption's
+/// `XrCaptionButton` (an app with the control registers them).
 pub fn serve_script_mod(vm: &mut ScriptVm) -> ScriptValue {
-    serve::script_mod(vm);
+    #[cfg(not(target_arch = "wasm32"))]
+    server::script_mod(vm);
+    mirror::shader::script_mod(vm);
     mirror::script_mod(vm);
     panel::script_mod(vm)
 }
@@ -464,18 +469,6 @@ struct Shared {
     /// The server's settings for this headset's own mechanisms (`XrServerMsg::Headset`; None
     /// until it sent them).
     headset: Option<HeadsetSettings>,
-}
-
-/// What the server set for the headset's own per-frame mechanisms (the app executes them; see
-/// `XrServerMsg::Headset`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct HeadsetSettings {
-    pub foveation: u8,
-    pub eye_min_pct: u8,
-    pub eye_max_pct: u8,
-    pub multimodal: bool,
-    pub occlusion: bool,
-    pub ahead: u8,
 }
 
 /// The stats of one window (5 s).

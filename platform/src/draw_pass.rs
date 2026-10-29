@@ -882,9 +882,10 @@ impl XrWindowHold {
         }
     }
 
-    /// Whether the windows paint in this repaint (`now`: s); false holds them.
-    pub(crate) fn windows_paint(&mut self, now: f64) -> bool {
-        let paint = !self.on || self.input || ((self.caused || self.mirror) && now - self.painted_at >= 1.0 / Self::RATE_HZ);
+    /// Whether the windows paint in this repaint (`now`: s; `grab`: a screenshot or frame grab
+    /// waits for a painted window, which paints at once like input); false holds them.
+    pub(crate) fn windows_paint(&mut self, now: f64, grab: bool) -> bool {
+        let paint = !self.on || self.input || grab || ((self.caused || self.mirror) && now - self.painted_at >= 1.0 / Self::RATE_HZ);
         if paint {
             self.painted_at = now;
             self.input = false;

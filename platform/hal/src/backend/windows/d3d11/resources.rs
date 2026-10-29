@@ -106,8 +106,12 @@ impl Texture {
         }
         let mips = desc.mips.max(1);
         let shared = desc.usage & usage::SHARED != 0;
-        if shared && (depth || desc.format != format::BGRA8 || layers != 1 || mips != 1) {
-            return Err("only single-level BGRA8 textures are shared across processes".into());
+        let nv12 = desc.format == format::NV12;
+        if shared && (depth || !(desc.format == format::BGRA8 || nv12) || layers != 1 || mips != 1) {
+            return Err("only single-level BGRA8 or NV12 textures are shared".into());
+        }
+        if nv12 && (desc.w % 2 != 0 || desc.h % 2 != 0 || layers != 1 || mips != 1) {
+            return Err(format!("an NV12 texture is single-level with an even size, not {}x{}", desc.w, desc.h));
         }
         let mut misc = if cube { D3D11_RESOURCE_MISC_TEXTURECUBE.0 as u32 } else { 0 };
         if shared {
@@ -137,7 +141,16 @@ impl Texture {
         let target = target || shared.is_some();
         let mut rtv = Vec::new();
         let mut dsv = Vec::new();
-        if target {
+        if target && nv12 {
+            // a render target view per plane (a pass's layer picks it): luma R8, chroma RG8
+            for plane_format in [DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM] {
+                let mut d = D3D11_RENDER_TARGET_VIEW_DESC { Format: plane_format, ViewDimension: D3D11_RTV_DIMENSION_TEXTURE2D, Anonymous: Default::default() };
+                d.Anonymous.Texture2D = D3D11_TEX2D_RTV { MipSlice: 0 };
+                let mut v = None;
+                unsafe { dev.device.CreateRenderTargetView(res.as_ID3D11Resource(), Some(&d), Some(&mut v)) }.map_err(|e| hr("CreateRenderTargetView(NV12 plane)", e))?;
+                rtv.push(v.ok_or("CreateRenderTargetView returned nothing")?);
+            }
+        } else if target {
             for layer in 0..layers {
                 unsafe {
                     if depth {

@@ -121,7 +121,7 @@ pub use makepad_widgets_pdf::{makepad_pdf_parse, pdf_view, pdf_view::*};
 pub use makepad_widgets_voice::{voice_wave, voice_wave::*};
 
 #[cfg(feature = "browser")]
-pub use makepad_widgets_browser::{browser, browser::*};
+pub use makepad_widgets_browser::{web_view, web_view::*, native_app_view, native_app_view::*};
 
 /// The AI chat slot. The requests global is the core's and is here whether
 /// or not the slot is linked (the window manager and the screen recorder

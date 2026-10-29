@@ -96,6 +96,8 @@ pub fn dxgi(format: u32) -> Option<Fmt> {
         format::R32UINT => plain(DXGI_FORMAT_R32_UINT),
         format::BC7 => plain(DXGI_FORMAT_BC7_UNORM),
         format::BC5 => plain(DXGI_FORMAT_BC5_UNORM),
+        // sampled and rendered by plane: R8 views are its luma, RG8 views its chroma
+        format::NV12 => Some(Fmt { resource: DXGI_FORMAT_NV12, srv: DXGI_FORMAT_R8_UNORM, rtv: DXGI_FORMAT_R8_UNORM, dsv: DXGI_FORMAT_UNKNOWN }),
         format::DEPTH32F => Some(Fmt { resource: DXGI_FORMAT_R32_TYPELESS, srv: DXGI_FORMAT_R32_FLOAT, rtv: DXGI_FORMAT_UNKNOWN, dsv: DXGI_FORMAT_D32_FLOAT }),
         format::DEPTH24_STENCIL8 => Some(Fmt {
             resource: DXGI_FORMAT_R24G8_TYPELESS,

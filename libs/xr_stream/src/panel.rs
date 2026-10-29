@@ -8,7 +8,9 @@
 //! (`home::app_data_dir`, file `xr-stream`) and applied at start and on every change.
 
 use crate::auto::{Lever, XrAuto};
-use crate::serve::{self, StreamAa, StreamView, STREAM_AA_MODES};
+use crate::settings_types::{StreamAa, StreamView, STREAM_AA_MODES};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::XrServer;
 use makepad_widgets::*;
 
 script_mod! {
@@ -166,19 +168,17 @@ impl XrStreamSettings {
     }
 
     /// To the stream server (live): the manual values, Auto's for the rest.
-    pub fn apply(&self, auto: &XrAuto) {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn apply(&self, auto: &XrAuto, server: &XrServer) {
         let a = auto.values;
-        serve::set_stream_aa(self.aa.unwrap_or(a.aa));
-        serve::set_stream_render_scale(self.render_scale_pct.unwrap_or(a.render_scale_pct));
-        serve::set_stream_view(self.view);
-        serve::set_stream_mirror(self.mirror);
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            serve::set_streaming(self.streaming);
-            serve::set_stream_room_scan(self.room_scan);
-            serve::set_stream_bitrate_kbps(self.kbps.unwrap_or(a.kbps));
-            serve::set_stream_refresh_hz(self.hz);
-        }
+        server.set_aa(self.aa.unwrap_or(a.aa));
+        server.set_render_scale(self.render_scale_pct.unwrap_or(a.render_scale_pct));
+        server.set_view(self.view);
+        server.set_mirror(self.mirror);
+        server.set_streaming(self.streaming);
+        server.set_room_scan(self.room_scan);
+        server.set_bitrate_kbps(self.kbps.unwrap_or(a.kbps));
+        server.set_refresh_hz(self.hz);
     }
 }
 
@@ -194,25 +194,23 @@ pub enum XrLinkState {
     Live,
 }
 
-fn link_state() -> XrLinkState {
+fn link_state(cx: &mut Cx) -> XrLinkState {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if !serve::streaming() {
+        let Some(server) = XrServer::get(cx) else { return XrLinkState::Off };
+        if !server.streaming() {
             return XrLinkState::Off;
         }
-        if makepad_desk_link::xr_host::session_eye().is_some() {
+        if server.session_eye().is_some() {
             return XrLinkState::Live;
         }
         XrLinkState::Waiting
     }
     #[cfg(target_arch = "wasm32")]
-    XrLinkState::Off
-}
-
-/// Whether this process may serve XR: every native app with the control (a headset linking
-/// gives it the remote headset slot, `serve::serve`).
-fn serves() -> bool {
-    cfg!(not(target_arch = "wasm32"))
+    {
+        let _ = cx;
+        XrLinkState::Off
+    }
 }
 
 /// The caption's headset icon (the popover's anchor), coloured by the link's state.
@@ -281,7 +279,7 @@ impl Widget for XrStatsView {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         // without a headset one line
         #[cfg(not(target_arch = "wasm32"))]
-        let numbers = !makepad_desk_link::xr_host::headset_reports().is_empty();
+        let numbers = XrServer::get(cx.cx).is_some_and(|s| !s.headset_reports().is_empty());
         #[cfg(target_arch = "wasm32")]
         let numbers = false;
         let walk = if numbers { walk } else { Walk { height: Size::Fixed(16.0), ..walk } };
@@ -299,11 +297,12 @@ impl Widget for XrStatsView {
 #[cfg(not(target_arch = "wasm32"))]
 impl XrStatsView {
     fn draw_numbers(&mut self, cx: &mut Cx2d, rect: Rect) {
-        use makepad_desk_link::{xr::report as r, xr_host};
-        let reports = xr_host::headset_reports();
+        use makepad_desk_link::xr::report as r;
+        let Some(server) = XrServer::get(cx.cx) else { return };
+        let reports = server.headset_reports();
         let at = |k: usize| rect.pos + dvec2(0.0, k as f64 * 15.0);
         let Some(last) = reports.last() else {
-            let line = match link_state() {
+            let line = match link_state(cx.cx) {
                 XrLinkState::Off => "the stream is off: nothing drawn, encoded or sent".to_string(),
                 _ => "waiting for a headset (the XR Remote app on the headset finds this computer)".to_string(),
             };
@@ -317,7 +316,7 @@ impl XrStatsView {
             format!("repeats {:.1}/s: late {:.1} · server skipped {:.1} · queue cap {:.1} · no pose {:.1}", v(r::REPEATS), v(r::REPEAT_LATE), v(r::REPEAT_SERVER), v(r::REPEAT_DROPPED), v(r::REPEAT_NOPOSE)),
             format!("motion to photon {:.0} ms (net {:.1} decode {:.1} queue {:.1}) · lead {:.0} ms ({:.0} frames)", v(r::M2P_MS), v(r::NET_MS), v(r::DECODE_MS), v(r::WAIT_MS), v(r::LEAD_MS), v(r::AHEAD)),
             format!("uplink {:.0} poses/s ±{:.2} ms · env depth age {:.0} ms · headset GPU {:.1} of {:.1} ms, eye buffers {:.0}%", v(r::UPLINK), v(r::UPLINK_SD_MS), v(r::ENV_AGE_MS), v(r::CLIENT_GPU_MS), 1000.0 / v(r::DISPLAY).max(1.0), v(r::EYE_SCALE_PCT)),
-            format!("{} · AA {}", xr_host::server_line(), serve::stream_aa().name),
+            format!("{} · AA {}", server.server_line(), server.aa().name),
             if v(r::AUDIO_RECEIVED) > 0.0 {
                 format!("audio {:.0} ms (net {:.1} buffer {:.0}/{:.0} device {:.0}; pictures {:.0}) · lost {:.0} · underruns {:.0} · drift {:+.0} ppm",
                     v(r::AUDIO_MS), v(r::AUDIO_NET_MS), v(r::AUDIO_BUFFER_MS), v(r::AUDIO_TARGET_MS), v(r::AUDIO_DEVICE_MS), v(r::AUDIO_VIDEO_MS), v(r::AUDIO_LOST) + v(r::AUDIO_LATE), v(r::AUDIO_UNDERRUNS), v(r::AUDIO_DRIFT_PPM))
@@ -325,7 +324,7 @@ impl XrStatsView {
                 "audio: the headset hears none".to_string()
             },
         ];
-        let app = serve::app_line();
+        let app = server.app_line();
         if !app.is_empty() {
             lines.push(app);
         }
@@ -472,19 +471,18 @@ impl XrCaptionButton {
             return;
         }
         self.checked = true;
-        if !serves() {
-            return;
-        }
-        // the app's XR server: headsets find it from now on
-        serve::serve(&self.app);
-        let s = XrStreamSettings::load(&self.app);
-        s.apply(&self.auto);
+        // the app's XR server (none on the web): headsets find it from now on
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.streaming_seen = serve::streaming_changes();
+            let Some(server) = XrServer::install(cx, &self.app) else { return };
+            let s = XrStreamSettings::load(&self.app);
+            s.apply(&self.auto, &server);
+            self.streaming_seen = server.streaming_changes();
+            self.settings = Some(s);
+            self.timer = cx.start_interval(1.0);
         }
-        self.settings = Some(s);
-        self.timer = cx.start_interval(1.0);
+        #[cfg(target_arch = "wasm32")]
+        let _ = cx;
     }
 
     fn content(&self, path: &[LiveId]) -> WidgetRef {
@@ -510,20 +508,20 @@ impl XrCaptionButton {
         let view = STREAM_VIEWS.iter().position(|m| *m == s.view).unwrap_or(0);
         self.content(ids!(view)).as_drop_down().set_selected_item(cx, view);
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(p) = makepad_desk_link::xr_host::pairing() {
+        if let Some(p) = XrServer::get(cx).and_then(|s| s.pairing()) {
             self.content(ids!(pin)).as_text_input().set_text(cx, &p.pin);
         }
     }
 
     /// The PIN row's state: the headset paired, or looked for.
-    fn pin_state(&self) -> String {
+    fn pin_state(&self, cx: &mut Cx) -> String {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            use makepad_desk_link::xr_host;
-            let Some(p) = xr_host::pairing() else { return "the XR server has not started".to_string() };
-            let live = xr_host::live_headset();
+            let Some(server) = XrServer::get(cx) else { return "the XR server has not started".to_string() };
+            let Some(p) = server.pairing() else { return "the XR server has not started".to_string() };
+            let live = server.live_headset();
             if let Some(h) = &p.paired {
-                let linked = live.as_ref().is_some_and(|(i, _, _)| *i == h.instance);
+                let linked = live.as_ref().is_some_and(|l| l.instance == h.instance);
                 return format!("paired with {} ({:05x}){}", h.name, h.instance & 0xfffff, if linked { ", linked" } else { ", not linked now" });
             }
             if p.clash {
@@ -534,18 +532,21 @@ impl XrCaptionButton {
             }
             if p.pin.is_empty() {
                 return match live {
-                    Some((_, name, _)) => format!("{name} linked without pairing"),
+                    Some(l) => format!("{} linked without pairing", l.name),
                     None => "type the PIN the headset shows".to_string(),
                 };
             }
             "looking for the headset showing this PIN".to_string()
         }
         #[cfg(target_arch = "wasm32")]
-        String::new()
+        {
+            let _ = cx;
+            String::new()
+        }
     }
 
-    fn headline(&self) -> String {
-        match link_state() {
+    fn headline(&self, cx: &mut Cx) -> String {
+        match link_state(cx) {
             XrLinkState::Off => "XR headset · stream off".to_string(),
             XrLinkState::Waiting => "XR headset · waiting for a headset".to_string(),
             XrLinkState::Live => "XR headset · streaming".to_string(),
@@ -579,47 +580,49 @@ impl XrCaptionButton {
         line
     }
 
-    fn change(&mut self, f: impl FnOnce(&mut XrStreamSettings)) {
+    fn change(&mut self, cx: &mut Cx, f: impl FnOnce(&mut XrStreamSettings)) {
         let Some(s) = self.settings.as_mut() else { return };
         f(s);
         s.save(&self.app);
-        s.apply(&self.auto);
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.streaming_seen = serve::streaming_changes();
+        if let Some(server) = XrServer::get(cx) {
+            s.apply(&self.auto, &server);
+            self.streaming_seen = server.streaming_changes();
         }
+        #[cfg(target_arch = "wasm32")]
+        let _ = cx;
     }
 
     fn settings_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if let Some(on) = self.content(ids!(streaming)).as_check_box().changed(actions) {
-            self.change(|s| s.streaming = on);
+            self.change(cx, |s| s.streaming = on);
         }
         if let Some(on) = self.content(ids!(room_scan)).as_check_box().changed(actions) {
-            self.change(|s| s.room_scan = on);
+            self.change(cx, |s| s.room_scan = on);
         }
         if let Some(on) = self.content(ids!(mirror)).as_check_box().changed(actions) {
-            self.change(|s| s.mirror = on);
+            self.change(cx, |s| s.mirror = on);
         }
         if let Some(k) = self.content(ids!(bitrate)).as_drop_down().changed(actions) {
             let kbps = k.checked_sub(1).and_then(|k| STREAM_BITRATES_KBPS.get(k).copied());
-            self.change(|s| s.kbps = kbps);
+            self.change(cx, |s| s.kbps = kbps);
         }
         if let Some(k) = self.content(ids!(fps)).as_drop_down().changed(actions) {
             if let Some(hz) = STREAM_FPS.get(k).copied() {
-                self.change(|s| s.hz = hz);
+                self.change(cx, |s| s.hz = hz);
             }
         }
         if let Some(k) = self.content(ids!(aa)).as_drop_down().changed(actions) {
             let aa = k.checked_sub(1).and_then(|k| STREAM_AA_MODES.get(k).copied());
-            self.change(|s| s.aa = aa);
+            self.change(cx, |s| s.aa = aa);
         }
         if let Some(k) = self.content(ids!(render_scale)).as_drop_down().changed(actions) {
             let pct = k.checked_sub(1).and_then(|k| STREAM_RENDER_SCALES.get(k).copied());
-            self.change(|s| s.render_scale_pct = pct);
+            self.change(cx, |s| s.render_scale_pct = pct);
         }
         if let Some(k) = self.content(ids!(view)).as_drop_down().changed(actions) {
             if let Some(view) = STREAM_VIEWS.get(k).copied() {
-                self.change(|s| s.view = view);
+                self.change(cx, |s| s.view = view);
             }
         }
         // the PIN: any edit unpairs the paired headset; five digits look for the headset
@@ -632,40 +635,46 @@ impl XrCaptionButton {
             // any change unpairs at once (the headset is told, the link drops, both forget);
             // five digits then look for the headset showing them
             #[cfg(not(target_arch = "wasm32"))]
-            makepad_desk_link::xr_host::set_pin(&pin);
+            if let Some(server) = XrServer::get(cx) {
+                server.set_pin(&pin);
+            }
         }
     }
 
     /// Once a second: the icon's state, the headset's own switch (its menu button), the numbers
     /// while open.
     fn tick(&mut self, cx: &mut Cx) {
-        let state = link_state();
+        let state = link_state(cx);
         if let Some(mut icon) = self.popover.child_by_path(ids!(icon)).borrow_mut::<XrHeadsetIcon>() {
             icon.set_state(cx, state);
         }
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            let changes = serve::streaming_changes();
+        if let Some(server) = XrServer::get(cx) {
+            let changes = server.streaming_changes();
             if changes != self.streaming_seen {
                 // the headset's menu button turned the stream on or off: kept like a click
-                let on = serve::streaming();
-                self.change(|s| s.streaming = on);
+                let on = server.streaming();
+                self.change(cx, |s| s.streaming = on);
                 self.show_settings(cx);
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if let (Some(signals), Some(s)) = (self.auto.signals(), self.settings.as_ref()) {
-            let s = s.clone();
-            if self.auto.step(&signals, |l| s.auto(l), std::time::Instant::now()) {
-                makepad_widgets::log!("xr auto: {}", self.auto.note);
-                s.apply(&self.auto);
+        if let Some(server) = XrServer::get(cx) {
+            if let (Some(signals), Some(s)) = (self.auto.signals(&server), self.settings.as_ref()) {
+                let s = s.clone();
+                if self.auto.step(&signals, |l| s.auto(l), std::time::Instant::now()) {
+                    makepad_widgets::log!("xr auto: {}", self.auto.note);
+                    s.apply(&self.auto, &server);
+                }
             }
         }
         let popover = self.popover.as_popover();
         if popover.is_open() {
-            self.content(ids!(headline)).as_label().set_text(cx, &self.headline());
+            let line = self.headline(cx);
+            self.content(ids!(headline)).as_label().set_text(cx, &line);
             self.content(ids!(auto_note)).as_label().set_text(cx, &self.auto_line());
-            self.content(ids!(pin_state)).as_label().set_text(cx, &self.pin_state());
+            let line = self.pin_state(cx);
+            self.content(ids!(pin_state)).as_label().set_text(cx, &line);
             self.content(ids!(stats)).redraw(cx);
         }
     }
@@ -693,8 +702,10 @@ impl Widget for XrCaptionButton {
         let actions = cx.capture_actions(|cx| self.popover.handle_event(cx, event, scope));
         if self.popover.as_popover().opened(&actions) {
             self.show_settings(cx);
-            self.content(ids!(headline)).as_label().set_text(cx, &self.headline());
-            self.content(ids!(pin_state)).as_label().set_text(cx, &self.pin_state());
+            let line = self.headline(cx);
+            self.content(ids!(headline)).as_label().set_text(cx, &line);
+            let line = self.pin_state(cx);
+            self.content(ids!(pin_state)).as_label().set_text(cx, &line);
         }
         self.settings_actions(cx, &actions);
     }

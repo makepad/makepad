@@ -271,6 +271,8 @@ impl Device {
         }
         // External-image extensions form one capability, including their dependencies.
         let mut wanted = if optional.iter().all(|n| supported(n)) { optional.to_vec() } else { Vec::new() };
+        #[cfg(target_os = "android")]
+        if supported(vk::KHR_EXTERNAL_SEMAPHORE_FD_NAME) { wanted.push(vk::KHR_EXTERNAL_SEMAPHORE_FD_NAME); }
         #[cfg(target_os = "linux")]
         let mut timeline = vk::PhysicalDeviceTimelineSemaphoreFeatures::default();
         #[cfg(target_os = "linux")]
@@ -638,7 +640,7 @@ pub(super) type Later = Arc<Mutex<Vec<(std::time::Instant, LaterJob)>>>;
 
 /// The bounded channel carries wakeups only. Work spills into an owned FIFO and is never
 /// discarded on saturation. No driver call or job runs while the FIFO lock is held.
-pub(super) struct Worker {
+pub(crate) struct Worker {
     jobs: Arc<Mutex<VecDeque<Job>>>,
     later: Later,
     /// the wakeup sender: `None` once the worker was let go (`Drop`) or stopped (`stop`)

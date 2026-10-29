@@ -259,6 +259,7 @@ pub struct KeptFrame {
     frame: FramePacket,
     passes: Vec<Pass>,
     draws: Vec<Draw>,
+    layers: Vec<Layer>,
     arena: Vec<u8>,
     /// 8-aligned (the slices are read as words), never changed after `keep`
     bytes: Vec<Box<[u64]>>,
@@ -306,9 +307,19 @@ impl KeptFrame {
             d.inst.data = own(d.inst.data, &mut kept.bytes);
             kept.draws.push(d);
         }
+        for layer in view.layers.get(within(p.layers, view.layers.len())?)? {
+            let mut layer = *layer;
+            if layer.kind == Layer::DRAWS {
+                let r = within(layer.draws, view.draws.len())?;
+                if r.start < p.draws.off as usize || r.end > p.draws.off as usize + p.draws.len as usize { return None; }
+                layer.draws.off -= p.draws.off;
+            }
+            kept.layers.push(layer);
+        }
         kept.frame = FramePacket {
             passes: Range { off: 0, len: kept.passes.len() as u32 },
             draws: Range { off: 0, len: kept.draws.len() as u32 },
+            layers: Range { off: 0, len: kept.layers.len() as u32 },
             ..p
         };
         Some(kept)
@@ -316,7 +327,7 @@ impl KeptFrame {
 
     /// The frame as a batch of one packet (packet 0).
     pub fn view(&self) -> crate::buffers::CmdView<'_> {
-        crate::buffers::CmdView { session: HOST, cmds: &[], arena: &self.arena, frames: std::slice::from_ref(&self.frame), passes: &self.passes, draws: &self.draws }
+        crate::buffers::CmdView { session: HOST, cmds: &[], arena: &self.arena, frames: std::slice::from_ref(&self.frame), passes: &self.passes, draws: &self.draws, layers: &self.layers }
     }
 
     /// Whether the frame draws anything (none: the layer ends).
@@ -419,6 +430,10 @@ pub struct Session {
     /// the frame id of the newest frame submitted / finished
     pub frame: u64,
     pub last_frame_done: u64,
+    /// Headless inspection: the last frame's layer records. Occluder ranges address
+    /// `last_frame_occluders`; draw ranges retain the submitted packet's indices.
+    pub last_frame_layers: Vec<Layer>,
+    pub last_frame_occluders: Vec<[f32; 4]>,
     /// embedded windows (lent to the parent, no OS window: no display link of their own) that
     /// asked for a frame, and when the next one is due: `Hal::pump` paces them at display rate
     pub embedded_frames: Vec<Id>,
@@ -471,6 +486,8 @@ impl Session {
             stats: Stats::default(),
             frame: 0,
             last_frame_done: 0,
+            last_frame_layers: Vec::new(),
+            last_frame_occluders: Vec::new(),
             embedded_frames: Vec::new(),
             embedded_due_ns: 0,
             font_frames: Default::default(),

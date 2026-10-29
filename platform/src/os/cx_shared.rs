@@ -65,9 +65,10 @@ impl Cx {
     pub(crate) fn any_passes_dirty(&self) -> bool {
         // held windows (`XrWindowHold`) keep their recordings dirty without asking for a frame:
         // the headset's next frame (or another cause) paints them
-        let held = !self.xr_window_hold.wants_frame();
+        let held = !self.xr_window_hold.wants_frame() && self.screenshot_requests.is_empty() && self.run_view_frame_requests.is_empty();
         for draw_pass_id in self.passes.id_iter() {
-            if self.passes[draw_pass_id].paint_dirty && !(held && self.pass_root_window(draw_pass_id).is_some()) {
+            let pass = &self.passes[draw_pass_id];
+            if pass.paint_dirty && !(held && !pass.repaint_requested && self.pass_root_window(draw_pass_id).is_some()) {
                 return true;
             }
         }
@@ -286,19 +287,24 @@ impl Cx {
         // An offscreen XR pass (`info_flags::XR_OFFSCREEN`) produces textures the app hands on
         // (packs, mirrors them): it runs before everything else, its own producers before it.
         let xr_offscreen = self.xr_offscreen();
+        // a window pass asked to paint explicitly (a remote grab, `repaint_pass`)
+        let mut window_requested = false;
         for draw_pass_id in self.passes.id_iter() {
             let requested = std::mem::take(&mut self.passes[draw_pass_id].repaint_requested);
             if self.passes[draw_pass_id].paint_dirty
                 && (live[draw_pass_id.0] == Some(true) || requested)
             {
                 passes_todo.push(draw_pass_id);
+                window_requested |= requested && self.pass_root_window(draw_pass_id).is_some();
             }
         }
         // a remote headset streams: a drawing of only its frames leaves the windows as they are
         // (dirty, painted with everything recorded at their next cause), `XrWindowHold`
-        if self.xr_offscreen() && passes_todo.iter().any(|id| self.pass_root_window(*id).is_some()) {
+        if (self.xr_window_hold.on || self.xr_offscreen()) && passes_todo.iter().any(|id| self.pass_root_window(*id).is_some()) {
             let now = self.seconds_since_app_start();
-            if self.xr_window_hold.windows_paint(now) {
+            // a screenshot or a studio/inspect frame grab waits for a painted window: it paints
+            let grab = window_requested || !self.screenshot_requests.is_empty() || !self.run_view_frame_requests.is_empty();
+            if self.xr_window_hold.windows_paint(now, grab) {
                 self.xr_window_hold.painted += 1;
             } else {
                 self.xr_window_hold.held += 1;
@@ -1270,6 +1276,7 @@ impl Cx {
             StudioToApp::Tick
             | StudioToApp::Swapchain(_)
             | StudioToApp::WindowGeomChange { .. }
+            | StudioToApp::NativeApp(_)
             | StudioToApp::TweakRay(_) => {}
         }
         false
@@ -2448,6 +2455,40 @@ mod tests {
         cx.draw_lists[list.id()].clear_draw_items(redraw_id, recording_gen, uniforms_gen);
         cx.passes[pass.draw_pass_id()].main_draw_list_id = Some(list.id());
         (pass, list)
+    }
+
+    /// While a headset streams the window holds its frame for the headset's own frames, but a
+    /// screenshot or remote grab (and an explicit repaint) paints it at once: the desktop stays
+    /// grabbable and inspectable.
+    #[test]
+    fn a_held_window_paints_for_a_grab() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let window = crate::window::WindowHandle::new(&mut cx).window_id();
+        cx.windows[window].is_created = true;
+        let (pass, _list) = pass_with_current_list(&mut cx);
+        let pass = pass.draw_pass_id();
+        cx.passes[pass].parent = CxDrawPassParent::Window(window);
+        cx.windows[window].main_pass_id = Some(pass);
+        let mut todo = Vec::new();
+        cx.xr_hold_windows(true, false);
+        cx.xr_window_hold.painted_at = cx.seconds_since_app_start();
+        // the headset's frame redrew the window's list: held
+        cx.passes[pass].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(!todo.contains(&pass), "held for the headset's frame");
+        assert!(!cx.any_passes_dirty(), "a held window asks for no frame");
+        // a grab: painted at once
+        cx.screenshot_requests.push(makepad_studio_protocol::ScreenshotRequest { request_id: 7, kind_id: 0 });
+        assert!(cx.any_passes_dirty(), "a grab wakes the loop");
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&pass), "a grab paints the held window");
+        cx.screenshot_requests.clear();
+        // a remote present request (repaint_pass) likewise
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(!todo.contains(&pass));
+        cx.request_remote_window_present(window);
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&pass), "an explicit repaint paints the held window");
     }
 
     #[test]

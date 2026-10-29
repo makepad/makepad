@@ -26,6 +26,7 @@ use {
             loader::{FontDefinition, FontFamilyDefinition},
             rasterizer::{AtlasKind, RasterizedGlyph},
             slug_atlas::SlugGlyphCacheResult,
+            system_faces::{self, SystemFaceKey, SystemFaceState},
         },
         turtle::*,
         turtle::{Align, Walk},
@@ -1387,58 +1388,72 @@ impl DrawText {
             align,
             text,
         );
-        let has_missing_glyph = laidout
-            .rows
-            .iter()
-            .flat_map(|row| &row.glyphs)
-            .any(|glyph| glyph.id == 0);
-        // A glyph the family's own faces miss brings in its lazy CJK or emoji
-        // face (read from disk here, a memory map); laid out again at once,
-        // the text shows the real glyph on this very frame, not a box first.
-        if !has_missing_glyph {
+        let has_missing_glyph = |laidout: &LaidoutText| laidout.rows.iter().flat_map(|row| &row.glyphs).any(|glyph| glyph.id == 0);
+        if !has_missing_glyph(&laidout) {
             return laidout;
         }
-        let started = Cx::time_now();
+        let relayout = |cx: &mut Cx| {
+            self.layout_loaded(
+                cx,
+                first_row_indent_in_lpxs,
+                first_row_min_line_spacing_below_in_lpxs,
+                max_width_in_lpxs,
+                wrap,
+                align,
+                text,
+            )
+        };
         let mut laidout = laidout;
-        if self.text_style.font_family.request_lazy_fonts_for_glyph_miss(
-            cx,
-            text,
-            has_missing_glyph,
-        ) {
-            laidout = self.layout_loaded(
-                cx,
-                first_row_indent_in_lpxs,
-                first_row_min_line_spacing_below_in_lpxs,
-                max_width_in_lpxs,
-                wrap,
-                align,
-                text,
-            );
-            log!(
-                "lazy font face loaded and text laid out again in {:.2} ms",
-                (Cx::time_now() - started) * 1000.0
-            );
-            if !laidout.rows.iter().flat_map(|row| &row.glyphs).any(|glyph| glyph.id == 0) {
-                return laidout;
-            }
+        // A glyph the family's own faces miss comes from, in the order the
+        // font set says: the family's lazy bundled CJK or emoji face (read
+        // here, a memory map), and the OS's own font for that script
+        // (Devanagari, Arabic, Thai, ... in a Latin theme; with a `System`
+        // set also CJK and emoji, before the bundled faces). Laid out again
+        // at once, the text shows the real glyph on this very frame.
+        let system_first = cx.font_set().prefers_system_fonts();
+        // Under a `System` set the OS is asked first: while its font index is
+        // still being built (Linux, started with the fonts, some ms) the
+        // glyph waits for it instead of opening a bundled face it may not need.
+        if system_first && !crate::text::system_fonts::index_ready() {
+            return laidout;
         }
-        // What no face of the family draws (Devanagari, Arabic, Thai, ... in
-        // a Latin theme) comes from the OS's own font for that script.
-        let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
-        let found = fonts
-            .borrow_mut()
-            .request_system_fallback(self.text_style.font_family.to_font_family_id(), text);
-        if found {
-            laidout = self.layout_loaded(
-                cx,
-                first_row_indent_in_lpxs,
-                first_row_min_line_spacing_below_in_lpxs,
-                max_width_in_lpxs,
-                wrap,
-                align,
-                text,
-            );
+        for system in [system_first, !system_first] {
+            let started = Cx::time_now();
+            let found = if system {
+                let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+                let found = fonts
+                    .borrow_mut()
+                    .request_system_fallback(self.text_style.font_family.to_font_family_id(), text);
+                found
+            } else {
+                // Only what is still missing: an emoji the OS already drew
+                // does not bring in the bundled emoji face.
+                let missing: String = laidout
+                    .rows
+                    .iter()
+                    .flat_map(|row| {
+                        row.glyphs
+                            .iter()
+                            .filter(|glyph| glyph.id == 0)
+                            .filter_map(|glyph| row.text.get(glyph.cluster..).and_then(|rest| rest.chars().next()))
+                    })
+                    .collect();
+                self.text_style.font_family.request_lazy_fonts_for_glyph_miss(cx, &missing, true)
+            };
+            if !found {
+                continue;
+            }
+            laidout = relayout(cx);
+            if !system {
+                log!(
+                    "lazy font face loaded and text laid out again in {:.2} ms",
+                    (Cx::time_now() - started) * 1000.0
+                );
+            }
             cx.redraw_all();
+            if !has_missing_glyph(&laidout) {
+                break;
+            }
         }
         laidout
     }
@@ -1895,6 +1910,15 @@ pub struct FontMember {
     /// real glyph miss; zero keeps the ordinary eager behavior.
     #[live(0.0)]
     pub lazy: f32,
+    /// An installed font by family name instead of a packaged `res`:
+    /// `FontMember{system: "Menlo"}`, `"Segoe UI"`, or `"system-ui"` for the
+    /// OS's own UI face. `weight` (CSS, 400 when 0) and `italic` pick the
+    /// face. Not installed, the member is left out and the family draws
+    /// with its other members.
+    #[live]
+    pub system: String,
+    #[live]
+    pub italic: bool,
 }
 
 #[derive(Debug, Clone, Script, PartialEq)]
@@ -1922,6 +1946,9 @@ pub struct FontMemberDef {
     /// Variable-axis values as (tag, value); `wght` rides in `weight`.
     variations: Vec<(u32, f32)>,
     lazy: Option<LazyFontFamily>,
+    /// An installed face by family name (`resource_path` is then
+    /// `system:<name>`, an id only).
+    system: Option<SystemFaceKey>,
 }
 
 /// Axis values from `"wdth 125 slnt -8"`: pairs of a tag of up to four
@@ -2014,6 +2041,44 @@ impl FontFamily {
                 continue;
             }
 
+            if let Some(key) = &member.system {
+                if !fonts.is_font_known(font_id) {
+                    match system_faces::lookup(cx, key) {
+                        // Counted: the family stays incomplete and is defined
+                        // again on the redraw the answer brings.
+                        SystemFaceState::Pending => {}
+                        SystemFaceState::Missing => {
+                            fonts.note_font_unavailable(font_id);
+                            continue;
+                        }
+                        SystemFaceState::Found(face) => match SharedBytes::from_file_mmap_or_read(&face.path) {
+                            Ok(data) => fonts.define_font(
+                                font_id,
+                                FontDefinition {
+                                    data,
+                                    index: face.index,
+                                    ascender_fudge_in_ems: member.asc,
+                                    descender_fudge_in_ems: member.desc,
+                                    weight: font_member_weight(member),
+                                    variations: member.variations.clone(),
+                                },
+                            ),
+                            Err(error) => {
+                                if fonts.note_font_unavailable(font_id) {
+                                    error!("system font {:?} ({}) cannot be read: {error}", key.name, face.path.display());
+                                }
+                                continue;
+                            }
+                        },
+                    }
+                }
+                expected_member_count += 1;
+                if fonts.is_font_known(font_id) {
+                    font_ids.push(font_id);
+                }
+                continue;
+            }
+
             if !fonts.is_font_known(font_id) {
                 let font_data = cx.get_resource_font_bytes_by_path(&member.resource_path);
                 crate::trace!(
@@ -2046,8 +2111,14 @@ impl FontFamily {
                 } else if cx.script_resource_unavailable(&member.resource_path) {
                     // Not packaged with this app: the family renders without
                     // it (dropped, not asked for again every frame), and it
-                    // is said once, loudly, with the fix.
-                    if fonts.note_font_unavailable(font_id) && fonts.note_missing_font(&member.resource_path) {
+                    // is said once, loudly, with the fix. A bundled CJK or
+                    // emoji face a `System` font set leaves out is no fault:
+                    // the OS draws those.
+                    let expected_absent = member.lazy.is_some() && cx.font_set().prefers_system_fonts();
+                    if fonts.note_font_unavailable(font_id)
+                        && !expected_absent
+                        && fonts.note_missing_font(&member.resource_path)
+                    {
                         error!(
                             "font {:?} (member {}) is not packaged with this app, so its text will show as boxes. \
                             Declare it in `app_main!`, e.g. `font_assets: [MATH_VIEW_FONT_ASSET]`, \
@@ -2129,9 +2200,10 @@ impl FontFamily {
             self.members
                 .iter()
                 .filter(|member| {
-                    member
-                        .lazy
-                        .map_or(true, |lazy| fonts_ref.lazy_font_is_requested(family_id, lazy))
+                    member.system.is_none()
+                        && member
+                            .lazy
+                            .map_or(true, |lazy| fonts_ref.lazy_font_is_requested(family_id, lazy))
                 })
                 .map(|member| member.resource_path.as_str())
                 .collect::<Vec<_>>()
@@ -2229,6 +2301,7 @@ fn append_lazy_fallbacks(vm: &mut ScriptVm, members: &mut Vec<FontMemberDef>) {
             weight: fallback.asset.weight,
             variations: Vec::new(),
             lazy: Some(fallback.family),
+            system: None,
         });
     }
 }
@@ -2262,6 +2335,9 @@ fn font_member_font_id(member: &FontMemberDef) -> FontId {
     for (tag, value) in &member.variations {
         tag.hash(&mut hasher);
         value.to_bits().hash(&mut hasher);
+    }
+    if let Some(key) = &member.system {
+        key.hash(&mut hasher);
     }
     FontId::from(hasher.finish())
 }
@@ -2351,6 +2427,31 @@ impl ScriptHook for FontFamily {
                         2 => Some(LazyFontFamily::Emoji),
                         _ => None,
                     },
+                    system: None,
+                });
+            } else if !member.system.trim().is_empty() {
+                let key = SystemFaceKey::new(&member.system, member.weight, member.italic);
+                // Looked up from now on, in the background: by the first
+                // frame the answer is usually in.
+                system_faces::lookup(vm.cx_mut(), &key);
+                self.members.push(FontMemberDef {
+                    handle: None,
+                    resource_path: format!("system:{}", key.name),
+                    id: kv
+                        .key
+                        .as_id()
+                        .and_then(|id| id.as_string(|name| name.map(str::to_owned)))
+                        .unwrap_or_else(|| key.name.clone()),
+                    asc: member.asc,
+                    desc: member.desc,
+                    weight: member.weight,
+                    variations: {
+                        let mut v: Vec<(u32, f32)> = parse_font_axes(&member.axes).into_iter().filter(|(t, _)| *t != u32::from_be_bytes(*b"wght")).collect();
+                        v.sort_by_key(|(t, _)| *t);
+                        v
+                    },
+                    lazy: None,
+                    system: Some(key),
                 });
             } else {
                 crate::trace!("font", "family={:?} member {} dropped: res is None", self.id.0, i);

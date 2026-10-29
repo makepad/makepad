@@ -135,6 +135,7 @@ fn format_name(format: &TextureFormat) -> &'static str {
         TextureFormat::RenderRGf16 { .. } => "RenderRGf16",
         TextureFormat::RenderRu32 { .. } => "RenderRu32",
         TextureFormat::SharedBGRAu8 { .. } => "SharedBGRAu8",
+        TextureFormat::SharedNv12 { .. } => "SharedNv12",
         TextureFormat::VideoYuvPlane => "VideoYuvPlane",
         TextureFormat::VideoExternal => "VideoExternal",
         TextureFormat::VideoGlMemoryRgba => "VideoGlMemoryRgba",

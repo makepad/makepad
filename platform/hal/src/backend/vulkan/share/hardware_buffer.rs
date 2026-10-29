@@ -34,13 +34,21 @@ impl HardwareBuffer {
     pub(super) fn extensions() -> Vec<&'static CStr> { vec![vk::ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_NAME, vk::EXT_QUEUE_FAMILY_FOREIGN_NAME] }
 
     pub(super) fn allocate(dev: Arc<Device>, desc: TextureObj) -> Result<Arc<Image>, String> {
+        Self::allocate_with(dev, desc, 0)
+    }
+
+    pub(crate) fn compositor(dev: Arc<Device>, desc: TextureObj) -> Result<Arc<Image>, String> {
+        Self::allocate_with(dev, desc, 1 << 11) // AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY
+    }
+
+    fn allocate_with(dev: Arc<Device>, desc: TextureObj, extra_usage: u64) -> Result<Arc<Image>, String> {
         if desc.depth != 1 || desc.mips != 1 { return Err("AHardwareBuffer sharing requires one layer and mip".into()); }
         let native_format = match desc.format {
             format::RGBA8 => 1, format::RGBA16F => 0x16, format::DEPTH32F => 0x33, format::DEPTH24_STENCIL8 => 0x32,
             _ => return Err("this HAL format has no portable AHardwareBuffer allocation format".into()),
         };
         let native = Description { width: desc.w, height: desc.h, layers: 1, format: native_format,
-            usage: (1 << 8) | if desc.usage & usage::RENDER_TARGET != 0 { 1 << 9 } else { 0 }, ..Default::default() };
+            usage: extra_usage | (1 << 8) | if desc.usage & usage::RENDER_TARGET != 0 { 1 << 9 } else { 0 }, ..Default::default() };
         let mut buffer = std::ptr::null_mut();
         let status = unsafe { AHardwareBuffer_allocate(&native, &mut buffer) };
         if status != 0 || buffer.is_null() { return Err(format!("AHardwareBuffer allocation failed: {status}")); }

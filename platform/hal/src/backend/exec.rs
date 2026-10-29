@@ -106,6 +106,8 @@ fn unplaced_at_origin(mut geom: [f32; 4]) -> [f32; 4] {
 /// What the executor needs a device for. Every hook runs inside `hal_submit` with the state lock
 /// held, so it must not wait for the GPU. Borrowed slices are valid for the call only.
 pub trait Gpu {
+    /// Host-owned native layers may allocate texture aliases through the world.
+    fn native_layer(&mut self, _world: &mut World, _sid: u32, _c: &HalCmd) -> bool { false }
     /// Native device totals when available; otherwise admission uses the session ledgers.
     fn gpu_budget(&self) -> Option<(u64, u64)> { None }
     /// A texture's create failed with `error`. True when the backend keeps it waiting for room
@@ -522,6 +524,7 @@ pub fn free_session(world: &mut World, sid: u32) {
 }
 
 fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdView, now: u64) {
+    if matches!(c, HalCmd::NativeLayerCreate { .. } | HalCmd::NativeLayerOp { .. } | HalCmd::NativeLayerDestroy { .. }) && gpu.native_layer(world, sid, &c) { return; }
     // window commands that move objects between sessions work on the world
     match c {
         HalCmd::GpuBudget { epoch } => {
@@ -1511,7 +1514,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         HalCmd::DragReply { window, to, answer } => os_window(gpu, s, window, OsCmd::DragReply { id: window, to, answer }),
 
         // ---- media
-        HalCmd::VideoPrepare { .. } | HalCmd::VideoControl { .. } | HalCmd::AudioUse { .. } | HalCmd::AudioEntry { .. } | HalCmd::Midi { .. } | HalCmd::GameOut { .. } | HalCmd::Location { .. } | HalCmd::Permission { .. } | HalCmd::ViewOp { .. } | HalCmd::VideoInput { .. } => {
+        HalCmd::VideoPrepare { .. } | HalCmd::VideoControl { .. } | HalCmd::AudioUse { .. } | HalCmd::AudioEntry { .. } | HalCmd::Midi { .. } | HalCmd::GameOut { .. } | HalCmd::Location { .. } | HalCmd::Permission { .. } | HalCmd::NativeLayerCreate { .. } | HalCmd::NativeLayerOp { .. } | HalCmd::NativeLayerDestroy { .. } | HalCmd::VideoInput { .. } => {
             if !gpu.media(s, &c) {
                 media_unavailable(s, &c);
             }
@@ -1532,6 +1535,8 @@ fn direct_display(_gpu: &mut dyn Gpu, s: &mut Session, req: u64, command: crate:
 /// answer get their failure event, the rest are counted.
 fn media_unavailable(s: &mut Session, c: &HalCmd) {
     match c {
+        HalCmd::NativeLayerCreate { id, .. } => s.events.native_layer_state(*id, crate::native_layer::state::REALIZED, crate::native_layer::mode::UNSUPPORTED, 0, &[]),
+        HalCmd::NativeLayerDestroy { id } => s.events.native_layer_state(*id, crate::native_layer::state::CLOSED, 0, 0, &[]),
         HalCmd::VideoPrepare { video, .. } => s.events.video_status(*video, crate::media::video_status::ERROR, b"this backend has no media playback"),
         _ => {}
     }

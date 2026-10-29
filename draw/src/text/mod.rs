@@ -15,12 +15,13 @@ pub mod shaper;
 pub mod slice;
 pub mod slug_atlas;
 pub mod system_fallback;
+pub(crate) mod system_faces;
 #[cfg(test)]
 mod script_render_tests;
 
 // The font tables, outlines and rasterisation live in `makepad-font-core`, shared with the HAL's
 // font service; these paths stay the text stack's.
-pub use makepad_font_core::{font_atlas, font_face, geom, glyph_outline, glyph_raster_image, image, intern, msdfer, num, sdfer};
+pub use makepad_font_core::{font_atlas, font_face, geom, glyph_outline, glyph_raster_image, image, intern, msdfer, num, sdfer, system_fonts};
 pub mod substr;
 
 // Debug test commented out - requires png encoder

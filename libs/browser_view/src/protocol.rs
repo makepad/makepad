@@ -19,6 +19,8 @@ pub enum ViewOp {
     Navigate { url: String },
     Back,
     Forward,
+    /// Move through session history by `delta` entries (zero does nothing).
+    History { delta: i32 },
     Reload,
     Stop,
     /// The page takes (or loses) the keyboard.

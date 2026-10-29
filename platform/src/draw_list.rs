@@ -1235,6 +1235,7 @@ impl CxDrawListPool {
         self[id].retain_empty = false;
         self[id].zbias_hold = None;
         self[id].reset_zbias = false;
+        self[id].input_transparent = false;
         self[id].upload_priority = 2;
         self[id].owner = crate::gpu_ledger::innermost_owner();
         self[id].gpu_eviction_distance = f64::INFINITY;
@@ -1455,6 +1456,13 @@ impl DrawCallUniforms {
 
 #[repr(C)]
 pub enum CxDrawKind {
+    NativeLayer {
+        id: crate::native_layer::NativeLayerId,
+        rect: Rect,
+        /// Turtle clipping in list-local coordinates, before `view_shift`.
+        clip: (Vec2d, Vec2d),
+        style: crate::native_layer::NativeLayerStyle,
+    },
     SubList(DrawListId),
     DrawCall(CxDrawCall),
     Empty,
@@ -2381,6 +2389,8 @@ pub struct CxDrawList {
     /// Owners with a custom projection update this with their demand census.
     pub gpu_eviction_distance: f64,
     pub reset_zbias: bool,
+    /// This list's draws do not occlude input to native content below them.
+    pub input_transparent: bool,
     /// The glyphs this list's instances draw (session font, glyph, request kind), as the text
     /// drawn into it looked them up; cleared when the list is recorded again. Under the HAL a
     /// glyph's curves or pixels live in the host's store: while this list is alive (painted
@@ -2870,6 +2880,17 @@ impl CxDrawList {
         }
         self.rect_area_count = rect_id + 1;
         rect_id
+    }
+
+    pub fn append_native_layer(&mut self, redraw_id: u64, id: crate::native_layer::NativeLayerId, rect: Rect, style: crate::native_layer::NativeLayerStyle) {
+        let extent = f32::MAX as f64;
+        self.draw_items.push_item(redraw_id, CxDrawKind::NativeLayer {
+            id,
+            rect,
+            clip: (dvec2(-extent, -extent), dvec2(extent, extent)),
+            style,
+        });
+        self.find_appendable_draw_shader_check.push(0);
     }
 
     pub fn append_sub_list(&mut self, redraw_id: u64, sub_list_id: DrawListId) {

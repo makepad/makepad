@@ -289,9 +289,6 @@ hal_commands! {
     Location = 126, location { op: u32 };
     /// `permission_op::*` for `permission_kind::*`; answered by a `Permission` event with `req`.
     Permission = 127, permission { op: u32, kind: u32, req: u32 };
-    /// A native view over a window (`view_kind | view_op`): the system browser, a camera preview.
-    /// `view` is the app's id of it, `area`/`extra`/`data` as `view_op` says.
-    ViewOp = 128, view_op { window: obj, op: flags, view: u64, area: rect, extra: u32, data: rng };
     /// The cameras the slots read: `inputs` is `media::pack_u64s` of (camera, format) id pairs, one
     /// per slot; `consumers` the slots whose frames the app wants (`CameraFrame` events carry them).
     VideoInput = 129, video_input { consumers: u32, inputs: rng };
@@ -398,4 +395,12 @@ hal_commands! {
     /// XR window `id`'s headset runs its display at the supported refresh rate nearest to
     /// `millihertz` (0: the runtime's default).
     XrRefreshRate = 157, xr_refresh_rate { id: obj, millihertz: u32 };
+
+    /// Creates native content (`native_layer::kind`). WEB: UTF-8 initial URL; CAMERA_PREVIEW:
+    /// little-endian u64 input id followed by u64 format id. Placement comes from frame layers.
+    NativeLayerCreate = 160, native_layer_create { id: obj, kind: u32, params: rng };
+    /// Changes native content (`native_layer::op`); never changes its frame geometry.
+    NativeLayerOp = 161, native_layer_op { id: obj, op: u32, arg: u64, data: rng };
+    /// Releases the layer's content and its native resources.
+    NativeLayerDestroy = 162, native_layer_destroy { id: obj };
 }

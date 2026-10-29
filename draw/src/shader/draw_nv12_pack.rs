@@ -4,7 +4,8 @@
 //! samples 2 1 0 3 of the draw's output), rows h..3h/2 U0 V0 U1 V1 per texel, 4:2:0 2x2
 //! averages ([`DrawNv12Chroma`]); for 4:4:4 (`full`) w/4 x 3h, each chroma row the U V pairs of
 //! every pixel of one source row over two texture rows. The encoder copies the texture's rows into
-//! its picture planes on the GPU (no CPU pass). Colour: BT.709 limited range.
+//! its picture planes on the GPU (no CPU pass). Or (`lanes: 1`) one sample per pixel into the
+//! planes of an NV12 texture itself (`Nv12Target`). Colour: BT.709 limited range.
 
 use crate::{makepad_platform::*, shader::draw_quad::DrawQuad};
 
@@ -23,6 +24,7 @@ script_mod! {
         source: vec4(0.0, 0.0, 1.0, 1.0)
         extent: vec2(1.0, 1.0)
         scale: vec2(1.0, 1.0)
+        lanes: 4.0
         luma_at: fn(c: vec2, d: vec2, inv: vec2) -> float {
             let w = vec3(0.2126, 0.7152, 0.0722)
             var rgb = self.image.sample(c * inv).xyz
@@ -39,6 +41,11 @@ script_mod! {
             // the taps' offset: (s - 1) / 2 up to 2x, s / 4 above
             let d = min((s - vec2(1.0, 1.0)) * 0.5, s * 0.25)
             let row = self.source.y + (t.y + 0.5) * s.y
+            // an NV12 texture's luma plane: one sample per pixel
+            if self.lanes < 1.5 {
+                let y = self.luma_at(vec2(self.source.x + (t.x + 0.5) * s.x, row), d, inv)
+                return vec4(y, y, y, y)
+            }
             let x = t.x * 4.0 + 0.5
             let y0 = self.luma_at(vec2(self.source.x + x * s.x, row), d, inv)
             let y1 = self.luma_at(vec2(self.source.x + (x + 1.0) * s.x, row), d, inv)
@@ -59,6 +66,7 @@ script_mod! {
         extent: vec2(1.0, 1.0)
         full: 0.0
         scale: vec2(1.0, 1.0)
+        lanes: 4.0
         rgb_at: fn(c: vec2, d: vec2, inv: vec2) -> vec3 {
             if d.x + d.y > 0.0 {
                 return (self.image.sample((c + vec2(-d.x, -d.y)) * inv).xyz + self.image.sample((c + vec2(d.x, -d.y)) * inv).xyz
@@ -87,6 +95,13 @@ script_mod! {
             let c1 = self.rgb_at(p0 + vec2(step, 0.0), d, inv)
             let cu = vec3(-0.1146, -0.3854, 0.5)
             let cv = vec3(0.5, -0.4542, -0.0458)
+            // an NV12 texture's chroma plane (4:2:0): one U V pair per pixel, its 2x2 block
+            if self.lanes < 1.5 {
+                let c = self.rgb_at(self.source.xy + vec2(t.x * 2.0 + 1.0, t.y * 2.0 + 1.0) * s, d, inv)
+                let u = (128.0 + 224.0 * dot(c, cu)) / 255.0
+                let v = (128.0 + 224.0 * dot(c, cv)) / 255.0
+                return vec4(u, v, u, v)
+            }
             let u0 = (128.0 + 224.0 * dot(c0, cu)) / 255.0
             let v0 = (128.0 + 224.0 * dot(c0, cv)) / 255.0
             let u1 = (128.0 + 224.0 * dot(c1, cu)) / 255.0
@@ -111,6 +126,10 @@ pub struct DrawNv12Luma {
     /// Source pixels per output pixel (1: as they are; a supersampled image: filtered down).
     #[live]
     pub scale: Vec2f,
+    /// Samples per output texel: 4 (a BGRA8 texture holding the planes' bytes) or 1 (an NV12
+    /// texture's luma plane itself).
+    #[live]
+    pub lanes: f32,
 }
 
 #[derive(Script, ScriptHook)]
@@ -128,5 +147,9 @@ pub struct DrawNv12Chroma {
     /// Source pixels per output pixel (as [`DrawNv12Luma::scale`]).
     #[live]
     pub scale: Vec2f,
+    /// As [`DrawNv12Luma::lanes`]: 4 (two U V pairs per BGRA8 texel) or 1 (an NV12 texture's
+    /// chroma plane, one pair per pixel; 4:2:0 only).
+    #[live]
+    pub lanes: f32,
 }
 

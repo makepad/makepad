@@ -273,6 +273,7 @@ pub enum Event {
     AudioDevices(AudioDevicesEvent),
     MidiPorts(MidiPortsEvent),
     VideoInputs(VideoInputsEvent),
+    NativeLayer(crate::native_layer::NativeLayerEvent),
     NetworkResponses(NetworkResponsesEvent),
     /// Results of asynchronous operations submitted through [`Cx::storage`].
     Storage(StorageResponsesEvent),
@@ -462,6 +463,7 @@ impl Event {
             90 => "GpuPressure",
             91 => "TrayMenu",
             92 => "TrayClick",
+            93 => "NativeLayer",
             _ => panic!(),
         }
     }
@@ -565,6 +567,7 @@ impl Event {
             Self::GpuPressure(_) => 90,
             Self::TrayMenu(_) => 91,
             Self::TrayClick(_) => 92,
+            Self::NativeLayer(_) => 93,
 
             #[cfg(target_arch = "wasm32")]
             Self::ToWasmMsg(_) => 55,

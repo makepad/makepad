@@ -242,6 +242,7 @@ fn define_window_class() -> *const Class {
     }
     let mut decl = ClassDecl::new("HalWindow", class!(NSWindow)).unwrap();
     unsafe {
+        decl.add_method(sel!(makeFirstResponder:), super::super::media::web_state::make_first_responder as extern "C" fn(&Object, Sel, ObjcId) -> BOOL);
         decl.add_method(sel!(canBecomeMainWindow), yes as extern "C" fn(&Object, Sel) -> BOOL);
         decl.add_method(sel!(canBecomeKeyWindow), yes as extern "C" fn(&Object, Sel) -> BOOL);
     }
@@ -254,6 +255,7 @@ fn define_panel_class() -> *const Class {
     }
     let mut decl = ClassDecl::new("HalPanel", class!(NSPanel)).unwrap();
     unsafe {
+        decl.add_method(sel!(makeFirstResponder:), super::super::media::web_state::make_first_responder as extern "C" fn(&Object, Sel, ObjcId) -> BOOL);
         decl.add_method(sel!(canBecomeMainWindow), yes as extern "C" fn(&Object, Sel) -> BOOL);
         decl.add_method(sel!(canBecomeKeyWindow), yes as extern "C" fn(&Object, Sel) -> BOOL);
     }
@@ -414,6 +416,16 @@ fn marked_length(this: &Object) -> u64 {
 }
 
 fn define_view_class() -> *const Class {
+    extern "C" fn accepts_responder(_: &Object, _: Sel) -> BOOL { YES }
+    extern "C" fn hit_test(this: &Object, _: Sel, point: NSPoint) -> ObjcId {
+        unsafe {
+            let view = this as *const Object as ObjcId;
+            let parent: ObjcId = msg_send![this, superview];
+            let local: NSPoint = msg_send![this, convertPoint: point fromView: parent];
+            if let Some(hit) = super::super::media::layers::hit_test(view, local, nil) { return hit; }
+            msg_send![super(this, class!(NSView)), hitTest: point]
+        }
+    }
     extern "C" fn dealloc(this: &Object, _sel: Sel) {
         unsafe {
             let marked_text: ObjcId = *this.get_ivar("markedText");
@@ -877,9 +889,10 @@ fn define_view_class() -> *const Class {
         decl.add_method(sel!(mouseExited:), mouse_entered_exited as extern "C" fn(&Object, Sel, ObjcId));
         decl.add_method(sel!(wantsKeyDownForEvent:), yes_function as extern "C" fn(&Object, Sel, ObjcId) -> BOOL);
         decl.add_method(sel!(needsPanelToBecomeKey), needs_panel_to_become_key as extern "C" fn(&Object, Sel) -> BOOL);
-        decl.add_method(sel!(acceptsFirstResponder:), yes_function as extern "C" fn(&Object, Sel, ObjcId) -> BOOL);
-        decl.add_method(sel!(becomeFirstResponder:), yes_function as extern "C" fn(&Object, Sel, ObjcId) -> BOOL);
-        decl.add_method(sel!(resignFirstResponder:), yes_function as extern "C" fn(&Object, Sel, ObjcId) -> BOOL);
+        decl.add_method(sel!(acceptsFirstResponder), accepts_responder as extern "C" fn(&Object, Sel) -> BOOL);
+        decl.add_method(sel!(becomeFirstResponder), accepts_responder as extern "C" fn(&Object, Sel) -> BOOL);
+        decl.add_method(sel!(resignFirstResponder), accepts_responder as extern "C" fn(&Object, Sel) -> BOOL);
+        decl.add_method(sel!(hitTest:), hit_test as extern "C" fn(&Object, Sel, NSPoint) -> ObjcId);
         decl.add_method(sel!(displayLayer:), display_layer as extern "C" fn(&Object, Sel, ObjcId));
         decl.add_method(sel!(viewDidChangeEffectiveAppearance), view_did_change_effective_appearance as extern "C" fn(&Object, Sel));
         decl.add_method(sel!(draggingSession: sourceOperationMaskForDraggingContext:), dragging_session_source_operation_mask as extern "C" fn(&Object, Sel, ObjcId, i64) -> NSDragOperation);

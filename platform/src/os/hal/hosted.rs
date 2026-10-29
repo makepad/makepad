@@ -440,6 +440,12 @@ impl Cx {
 
     fn hal_hosted_message(&mut self, msg: StudioToApp) -> bool {
         match msg {
+            #[cfg(target_os = "linux")]
+            StudioToApp::NativeApp(event) => {
+                if let Some(inbox) = self.hal.hosted.as_mut().and_then(|h| h.inbox.as_mut()) {
+                    if let Err(error) = inbox.native(event) { crate::error!("hal native descriptors: {error}"); }
+                }
+            }
             StudioToApp::Swapchain(swapchain) => self.hal_hosted_swapchain(swapchain),
             // The shared-image protocol presents through DrawCompleteAndFlip.
             StudioToApp::RunViewFrameRequest(_) => {},
@@ -533,12 +539,18 @@ impl Cx {
         // Connect without waiting for Swapchain: the parent sends that metadata only after
         // it has written the FD batch. Each poll tries once until the parent listens.
         let inbox = crate::os::hosted_gpu::GpuInbox::start(&self.thread_spawner())?;
+        if crate::app_main::hosted_by_window_manager() {
+            makepad_hal::hosted_native::enable_bridge(crate::thread::SignalToUI::set_ui_signal);
+        }
         self.hal.hosted.as_mut().unwrap().inbox = Some(inbox);
         Ok(())
     }
 
     fn hal_hosted_descriptors(&mut self) {
         let Some(inbox) = self.hal.hosted.as_mut().and_then(|h| h.inbox.as_mut()) else { return };
+        for request in makepad_hal::hosted_native::take_outgoing() {
+            if let Err(error) = inbox.send_native(request) { crate::error!("hal native request: {error}"); }
+        }
         let loaded = match inbox.poll() {
             Ok(loaded) => loaded,
             Err(error) => { crate::error!("hal hosted descriptors: {error}"); return; }

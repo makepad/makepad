@@ -1,4 +1,4 @@
-use makepad_hal::buffers::{pack_drag_items, read_drag_items, read_items, read_pairs, read_strs, PipelineBlob};
+use makepad_hal::buffers::{pack_drag_items, read_drag_items, read_items, read_pairs, read_rects, read_strs, PipelineBlob, Wire};
 use makepad_hal::cmds::{sample_cmds, CMD_TABLE};
 use makepad_hal::events::{sample_events, EVENT_TABLE};
 use makepad_hal::session::{Miss, Table, World};
@@ -24,18 +24,18 @@ fn every_command_round_trips() {
     let expected = sample_cmds(&mut w);
     assert_eq!(expected.len(), CMD_TABLE.len());
     assert_eq!(w.cmds().len(), CMD_TABLE.len());
-    // 97 commands: 57 core (including ClipRead, GpuBudget, WindowChrome, WindowCaption and WindowDpiOverride, with
-    // timer start/stop counted separately), 6 embedded, 4 domains, 10 media, 3 fonts, 9 direct display/input
+    // 57 core (including ClipRead, GpuBudget, WindowChrome, WindowCaption and WindowDpiOverride, with
+    // timer start/stop counted separately), 6 embedded, 4 domains, 9 media, 3 native layers, 3 fonts, 9 direct display/input
     // (incl. DirectDisplayArrangement, DirectDisplayPacing, DirectTapToClick, DirectDisplayVirtual tag 153), 2 GL interop, 3 mobile system UI (MobileUi,
     // SelectionHandles, Haptic), 1 system back (BackUnhandled), 1 font touch (GlyphTouch, tag 150), 3 tray (TraySet,
     // TrayRemove, WindowAtTray tag 154), 3 XR frame (XrFrameEyes 155, XrPoseLead 156, XrRefreshRate 157).
     // The media section (tags 120-129, backend/apple/media) has its own budget.
     let media = CMD_TABLE.iter().filter(|t| (120..130).contains(&t.0)).count();
     let fonts = CMD_TABLE.iter().filter(|t| (130..133).contains(&t.0)).count();
-    assert_eq!(media, 10);
+    assert_eq!(media, 9);
     assert_eq!(fonts, 3);
     assert!(media <= 15, "the media section is budgeted at 15 commands, it has {media}");
-    assert_eq!(CMD_TABLE.len(), 57 + 6 + 4 + media + fonts + 9 + 2 + 4 + 1 + 3 + 3);
+    assert_eq!(CMD_TABLE.len(), 57 + 6 + 4 + media + fonts + 9 + 2 + 4 + 1 + 3 + 3 + 3);
     for ((cmd, want), (tag, name, _)) in w.cmds().iter().zip(&expected).zip(CMD_TABLE) {
         assert_eq!(cmd.tag, *tag, "{name}");
         let got = cmd.decode(w.arena()).unwrap_or_else(|| panic!("{name} does not decode"));
@@ -52,7 +52,7 @@ fn every_event_round_trips() {
     q.set_time(77);
     let expected = sample_events(&mut q);
     assert_eq!(expected.len(), EVENT_TABLE.len());
-    assert_eq!(EVENT_TABLE.len(), 98, "55 core (incl. Clipboard, GpuBudget, PayloadSize, MouseCancel, AppMessage, DeviceReset, GpuPressure, Redraw), 5 parent/child (85-89), 13 media, 4 font, 4 direct display/input 1 GL interop and 9 mobile (LongPress, ImeState, ImeAction, ImeResize, PhysicalKeyboard, SelectionHandle, TouchCancel, SafeArea, ImeAnimate) and 2 system back (BackGesture, BackPressed) and 2 tray (TrayMenu, TrayClick) and 2 XR (XrFrame, XrDepth) events");
+    assert_eq!(EVENT_TABLE.len(), 99, "55 core (incl. Clipboard, GpuBudget, PayloadSize, MouseCancel, AppMessage, DeviceReset, GpuPressure, Redraw), 5 parent/child (85-89), 13 media, 4 font, 4 direct display/input 1 GL interop and 9 mobile (LongPress, ImeState, ImeAction, ImeResize, PhysicalKeyboard, SelectionHandle, TouchCancel, SafeArea, ImeAnimate) and 2 system back (BackGesture, BackPressed) and 2 tray (TrayMenu, TrayClick) and 2 XR (XrFrame, XrDepth) and 1 native layer events");
     assert_eq!(EVENT_TABLE.iter().filter(|t| (120..133).contains(&t.0)).count(), 13);
     assert_eq!(EVENT_TABLE.iter().filter(|t| (100..104).contains(&t.0)).count(), 4);
     let tags: std::collections::HashSet<u16> = EVENT_TABLE.iter().map(|t| t.0).collect();
@@ -101,6 +101,144 @@ fn arrays_and_blobs_round_trip() {
     assert_eq!((p.code, p.bindings.as_slice(), p.vertex_layout.as_slice()), (&b"shader code"[..], &[1, 2, 3][..], &[7, 8][..]));
     assert_eq!((p.desc.shader, p.desc.name, p.desc.instance_stride, p.desc.varyings), (9, 3, 12, 5));
     assert!(PipelineBlob::parse(&blob[..20]).is_none());
+    let layer = Layer {
+        kind: Layer::NATIVE, native: Id::new(7, 3), draws: Range { off: 4, len: 9 },
+        rect: [2.0, 3.0, 80.0, 90.0], clip: [5.0, 6.0, 40.0, 50.0],
+        radius: [1.0, 2.0, 3.0, 4.0], opacity: 0.75,
+        transform: std::array::from_fn(|i| i as f32 * 0.125),
+        flags: native_layer::layer_flags::VISIBLE | native_layer::layer_flags::INPUT_PASSTHROUGH,
+        occluders: Range { off: 2, len: 3 }, ..Default::default()
+    };
+    let r = w.put_items(&[layer]);
+    assert_eq!(r.len as usize, Layer::SIZE);
+    assert_eq!(read_items::<Layer>(&w.arena()[r.off as usize..], 1).collect::<Vec<_>>(), [layer]);
+    assert_eq!(Layer::default().transform, NativeLayerGeom::default().transform);
+}
+
+#[test]
+fn native_layer_segments_use_only_later_draws_in_the_split_pass() {
+    let mut w = CmdWriter::new(1);
+    let win = Id::new(0, 1);
+    let geom = NativeLayerGeom { rect: [10.0, 10.0, 100.0, 100.0], clip: [20.0, 20.0, 60.0, 60.0], ..Default::default() };
+    // The next frame's element ranges must still address the batch, not restart at zero.
+    w.frame_begin(1, FrameMeta::default());
+    w.pass(Pass::default());
+    w.pass_native_layer(Id::new(9, 1), geom);
+    w.draw(Draw::default());
+    w.frame_end(win, target::WINDOW);
+    w.frame_begin(2, FrameMeta::default());
+    w.pass(Pass::default());
+    w.draw(Draw { bounds: geom.clip, ..Default::default() });
+    w.pass(Pass::default());
+    w.draw(Draw { bounds: geom.clip, ..Default::default() });
+    w.pass_native_layer(Id::new(1, 1), geom);
+    w.draw(Draw { bounds: [10.0, 30.0, 30.0, 30.0], ..Default::default() });
+    w.draw(Draw { bounds: geom.clip, flags: Draw::INPUT_TRANSPARENT, ..Default::default() });
+    w.draw(Draw { bounds: [f32::NAN; 4], ..Default::default() });
+    w.draw(Draw { bounds: [80.0, 20.0, 10.0, 10.0], ..Default::default() });
+    w.pass_native_layer(Id::new(2, 1), geom);
+    w.draw(Draw { bounds: [50.0, 50.0, 40.0, 40.0], ..Default::default() });
+    // Closing the split pass must finish its segment before another pass starts.
+    w.pass(Pass::default());
+    w.draw(Draw { bounds: geom.clip, ..Default::default() });
+    w.frame_end(win, target::WINDOW);
+    let buf = w.buf();
+    let view = unsafe { buf.view() }.unwrap();
+    assert_eq!(view.frames[1].layers, Range { off: 3, len: 5 });
+    let layers = &view.layers[3..8];
+    assert_eq!(layers.iter().map(|l| l.kind).collect::<Vec<_>>(), [Layer::DRAWS, Layer::NATIVE, Layer::DRAWS, Layer::NATIVE, Layer::DRAWS]);
+    assert_eq!(layers[0].draws, Range { off: 2, len: 1 });
+    assert_eq!(layers[2].draws, Range { off: 3, len: 4 });
+    assert_eq!(layers[4].draws, Range { off: 7, len: 1 });
+    assert_eq!(read_rects(view.arena, layers[1].occluders).collect::<Vec<_>>(), [[20.0, 30.0, 20.0, 30.0], [50.0, 50.0, 30.0, 30.0]]);
+    assert_eq!(read_rects(view.arena, layers[3].occluders).collect::<Vec<_>>(), [[50.0, 50.0, 30.0, 30.0]]);
+    // Retained packets rebase draws and layers, retaining the arena's occluder data.
+    let kept = session::KeptFrame::keep(&view, 1).unwrap();
+    let kept = kept.view();
+    assert_eq!(kept.frames[0].layers, Range { off: 0, len: 5 });
+    assert_eq!(kept.layers[0].draws, Range { off: 1, len: 1 });
+    assert_eq!(read_rects(kept.arena, kept.layers[1].occluders).count(), 2);
+}
+
+#[test]
+fn native_layer_occluders_merge_without_losing_coverage_or_growing_steady_state() {
+    let mut w = CmdWriter::new(1);
+    let rects: Vec<_> = (0..17).map(|i| [i as f32 * 4.0, 10.0, 2.0, 3.0]).collect();
+    let mut capacities = None;
+    for frame in 0..4 {
+        w.clear();
+        w.frame_begin(frame, FrameMeta::default());
+        w.pass(Pass::default());
+        w.pass_native_layer(Id::new(1, 1), NativeLayerGeom { rect: [0.0, 0.0, 100.0, 100.0], clip: [0.0, 0.0, 100.0, 100.0], ..Default::default() });
+        for rect in &rects { w.draw(Draw { bounds: *rect, ..Default::default() }); }
+        w.frame_end(Id::new(0, 1), target::WINDOW);
+        let buf = w.buf();
+        let view = unsafe { buf.view() }.unwrap();
+        let merged: Vec<_> = read_rects(view.arena, view.layers[1].occluders).collect();
+        assert_eq!(merged.len(), 8);
+        for r in &rects {
+            assert!(merged.iter().any(|m| m[0] <= r[0] && m[1] <= r[1] && m[0] + m[2] >= r[0] + r[2] && m[1] + m[3] >= r[1] + r[3]), "lost {r:?} in {merged:?}");
+        }
+        assert_eq!(view.layers[0].draws.len, 0);
+        if let Some(cap) = capacities { assert_eq!(w.capacities(), cap); }
+        capacities = Some(w.capacities());
+    }
+}
+
+#[test]
+fn native_layers_cannot_split_two_passes_of_one_frame() {
+    let mut w = CmdWriter::new(1);
+    w.frame_begin(1, FrameMeta::default());
+    w.pass(Pass::default());
+    w.pass_native_layer(Id::new(1, 1), NativeLayerGeom::default());
+    w.pass(Pass::default());
+    let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| w.pass_native_layer(Id::new(2, 1), NativeLayerGeom::default())));
+    assert_eq!(second.is_err(), cfg!(debug_assertions));
+    w.frame_end(Id::new(0, 1), target::WINDOW);
+    let buf = w.buf();
+    let view = unsafe { buf.view() }.unwrap();
+    assert_eq!(view.frames[0].layers.len, 3);
+    assert_eq!(view.layers.iter().filter(|l| l.kind == Layer::NATIVE).map(|l| l.native).collect::<Vec<_>>(), [Id::new(1, 1)]);
+}
+
+#[test]
+fn headless_reports_native_layers_unsupported_and_keeps_last_frame_geometry() {
+    let hal = Hal::new();
+    let sid = open(&hal, 0);
+    let mut w = CmdWriter::new(sid);
+    let window = Id::new(0, 1);
+    let layer = Id::new(2, 3);
+    w.window_create(window, window_kind::NORMAL, Id::NONE, [0.0, 0.0, 80.0, 80.0], false);
+    w.native_layer_create(layer, native_layer::kind::WEB, b"https://example.com");
+    w.frame_begin(1, FrameMeta::default());
+    w.pass(Pass::default());
+    w.pass_native_layer(layer, NativeLayerGeom { rect: [10.0, 10.0, 40.0, 40.0], clip: [10.0, 10.0, 30.0, 30.0], ..Default::default() });
+    w.draw(Draw { bounds: [20.0, 20.0, 40.0, 40.0], ..Default::default() });
+    w.frame_end(window, target::WINDOW);
+    hal.submit(&w.buf());
+    let mut store = EventStore::new(sid, 64, 4096);
+    let mut buf = store.buf();
+    let n = hal.pump(0, &mut buf);
+    assert!(store.reader(n, buf.arena_len).any(|(_, e)| matches!(e, HalEvent::NativeLayerState { id, what: native_layer::state::REALIZED, a: native_layer::mode::UNSUPPORTED, .. } if id == layer)));
+    hal.with_world(|world| {
+        let s = world.session(sid).unwrap();
+        assert_eq!(s.last_frame_layers.len(), 3);
+        assert_eq!(s.last_frame_layers[1].native, layer);
+        assert_eq!(s.last_frame_layers[1].occluders, Range { off: 0, len: 1 });
+        assert_eq!(s.last_frame_occluders, [[20.0, 20.0, 20.0, 20.0]]);
+    });
+    w.clear();
+    w.frame_begin(2, FrameMeta::default());
+    w.pass(Pass::default());
+    w.frame_end(window, target::WINDOW);
+    let buf = w.buf();
+    assert_eq!(unsafe { buf.view() }.unwrap().frames[0].layers.len, 0);
+    hal.submit(&buf);
+    hal.with_world(|world| {
+        let s = world.session(sid).unwrap();
+        assert!(s.last_frame_layers.is_empty());
+        assert!(s.last_frame_occluders.is_empty());
+    });
 }
 
 /// A texture the device cannot hold (no room, past its limits) is reported gone as an

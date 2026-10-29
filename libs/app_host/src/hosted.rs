@@ -425,6 +425,10 @@ impl HostedApp {
         self.aux_chan_listener.is_some()
             || self.inflight.is_some()
             || self.pending.is_some()
+            || self.outbox.as_ref().is_some_and(|o| {
+                let o = o.0.borrow();
+                !o.native.is_empty() || o.native_inflight != 0
+            })
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -1480,9 +1484,18 @@ impl HostedApp {
         // in-flight tag when it sees it done. A view taking only its own batch let the
         // windows' messages overtake each other: the child dropped the other window's
         // descriptors as stale and stalled on them.
+        while let Some(batch) = outbox.native.pop_front() {
+            if let Err(batch) = outbox.sender.try_send_native(batch) {
+                outbox.native.push_front(batch);
+                break;
+            }
+            outbox.native_inflight += 1;
+        }
+        outbox.receive_native();
         for sent in outbox.sender.poll() {
-            outbox.done_tags.push(sent.tag);
-            msgs.push(StudioToApp::Swapchain(sent.swapchain));
+            if sent.tag != u64::MAX { outbox.done_tags.push(sent.tag); }
+            else { outbox.native_inflight -= 1; }
+            msgs.push(sent.message);
         }
         if let Some(tag) = self.inflight {
             if let Some(at) = outbox.done_tags.iter().position(|done| *done == tag) {
@@ -1512,6 +1525,19 @@ struct OutboxState {
     next_tag: u64,
     /// Completed batches (already sent to the child) whose view has not seen them yet.
     done_tags: Vec<u64>,
+    native: std::collections::VecDeque<makepad_platform::shared_framebuf::NativeDescriptors>,
+    native_inflight: usize,
+    received: HashMap<u64, std::os::fd::OwnedFd>,
+    discarded: std::collections::HashSet<u64>,
+}
+
+#[cfg(target_os = "linux")]
+impl OutboxState {
+    fn receive_native(&mut self) {
+        for (id, fd) in self.sender.receive() {
+            if !self.discarded.remove(&id.as_u64()) { self.received.insert(id.as_u64(), fd); }
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1524,7 +1550,7 @@ thread_local! {
 #[cfg(target_os = "linux")]
 impl SharedOutbox {
     fn new(client: ClientId, sender: LinuxSwapchainSender) -> SharedOutbox {
-        let shared = SharedOutbox(std::rc::Rc::new(std::cell::RefCell::new(OutboxState { sender, next_tag: 0, done_tags: Vec::new() })));
+        let shared = SharedOutbox(std::rc::Rc::new(std::cell::RefCell::new(OutboxState { sender, next_tag: 0, done_tags: Vec::new(), native: Default::default(), native_inflight: 0, received: Default::default(), discarded: Default::default() })));
         OUTBOXES.with(|o| {
             let mut o = o.borrow_mut();
             o.retain(|_, weak| weak.strong_count() > 0);
@@ -1659,5 +1685,36 @@ mod pacing_tests {
         assert!(!app.beat_needed(), "nothing asked, nothing owed: no timer, no tick");
         app.tick_wanted = true;
         assert!(app.beat_needed());
+    }
+}
+
+/// Queue descriptors on the hosted child's existing ordered channel. False means its channel
+/// has not connected yet; the caller retains and retries the whole transaction.
+#[cfg(target_os = "linux")]
+pub fn native_descriptors(client: ClientId, batch: makepad_platform::shared_framebuf::NativeDescriptors)
+    -> Result<(), makepad_platform::shared_framebuf::NativeDescriptors> {
+    let Some(outbox) = SharedOutbox::of(client) else { return Err(batch); };
+    outbox.0.borrow_mut().native.push_back(batch);
+    // An idle child's view has no beat armed. Let its existing transport scheduler
+    // deliver this batch and its metadata even when neither window needs a redraw.
+    makepad_platform::thread::SignalToUI::set_ui_signal();
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub fn native_release_fence(client: ClientId, buffer: u64) -> Option<std::os::fd::OwnedFd> {
+    let outbox = SharedOutbox::of(client)?;
+    let mut outbox = outbox.0.borrow_mut();
+    outbox.receive_native();
+    outbox.received.remove(&buffer)
+}
+
+/// A layer closed while its release descriptor was in transit. Consume it without retaining it.
+#[cfg(target_os = "linux")]
+pub fn native_discard_release_fence(client: ClientId, buffer: u64) {
+    if let Some(outbox) = SharedOutbox::of(client) {
+        let mut outbox = outbox.0.borrow_mut();
+        outbox.receive_native();
+        if outbox.received.remove(&buffer).is_none() { outbox.discarded.insert(buffer); }
     }
 }

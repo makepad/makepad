@@ -10,7 +10,6 @@ pub mod capture;
 pub mod encode;
 #[cfg(target_os = "linux")]
 pub mod inject;
-pub mod rate;
 pub mod settings;
 
 /// A Desk Link event: on the WM's log and in `~/.makepad/wm/desk-link.log` (the WM's own
@@ -90,7 +89,7 @@ mod native {
     use super::encode::{EncodeStats, Encoder, Job, Subscribers, TilePlan};
     use makepad_widgets::makepad_platform::video_file::{GpuCompletion, SurfaceFormat, SurfaceHandle};
     use makepad_widgets::makepad_platform::video_file::{StreamVideoCodec, VideoStreamEncoder};
-    use super::rate::effort;
+    use makepad_desk_link::rate::effort;
     use makepad_widgets::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -193,7 +192,7 @@ mod native {
         /// (the same configuration again would only lose the new device too).
         lost_full_chroma: Vec<[u32; 2]>,
         /// The adaptive stream rate (`rate`), and the `Rate` last told the viewers.
-        rate: super::rate::RateControl,
+        rate: makepad_desk_link::rate::RateControl,
         told_rate: Option<ServerMsg>,
     }
 
@@ -600,7 +599,7 @@ mod native {
                 // H.265 bands answer to the viewers' decode (H.264 tiles are sized by the level)
                 let banded = want.hevc && self.settings.as_ref().is_none_or(|s| s.split == super::settings::Split::Tiles && s.tiles.is_none());
                 let streams = if banded { want.plan.tiles() } else { 0 };
-                let second = super::rate::Second { fps: self.fps, pictures: encoded, congested_ms, held_encoder, tile_ms, sent_kbps: bytes * 8 / 1000, size: want.stream, max_effort, decode_ms, streams };
+                let second = makepad_desk_link::rate::Second { fps: self.fps, pictures: encoded, congested_ms, held_encoder, tile_ms, sent_kbps: bytes * 8 / 1000, size: want.stream, max_effort, decode_ms, streams, link_queued: false };
                 let bands_were = self.rate.decode_bands(want.stream).0;
                 let ceiling = self.rate_ceiling(want.stream, want.full_chroma);
                 let was = self.rate.kbps(ceiling);
@@ -683,10 +682,10 @@ mod native {
                     let codec = if c.hevc { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
                     let max = VideoStreamEncoder::max_size(codec, c.full_chroma);
                     let split = self.settings.as_ref().map_or(super::settings::Split::Tiles, |s| s.split);
-                    let auto = TilePlan::new(stream, fps, split, VideoStreamEncoder::caps().engines, max, c.hevc, c.spread, self.rate.decode_bands(stream).0);
+                    let auto = TilePlan::new(stream, fps, split == super::settings::Split::Tiles, VideoStreamEncoder::caps().engines, max, c.hevc, c.spread, self.rate.decode_bands(stream).0);
                     // a `tiles = CxR` setting, never fewer than the encoder's size needs
                     let plan = match self.settings.as_ref().and_then(|s| s.tiles).filter(|_| split == super::settings::Split::Tiles) {
-                        Some((cols, r)) => TilePlan { cols: cols.max(TilePlan::new(stream, fps, super::settings::Split::Off, 1, max, c.hevc, false, 1).cols), rows: r },
+                        Some((cols, r)) => TilePlan { cols: cols.max(TilePlan::new(stream, fps, false, 1, max, c.hevc, false, 1).cols), rows: r },
                         None => auto,
                     };
                     Some(Want { screen_px: [s.x, s.y, s.width, s.height], stream, full_chroma: c.full_chroma, plan, hevc: c.hevc, sharp: c.sharp })

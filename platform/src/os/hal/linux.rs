@@ -20,6 +20,16 @@ pub(crate) fn dmabuf_ok(ok: bool) -> Result<(), String> {
 }
 
 impl Cx {
+    /// Upload tightly packed BGRA pixels into a shared image whose external readers have
+    /// released it. Completion must be observed before publishing it to a foreign reader.
+    pub fn upload_shared_bgra(&mut self, texture: &Texture, pixels: &[u8], width: u32, height: u32) -> Result<(), String> {
+        if pixels.len() != width as usize * height as usize * 4 { return Err("shared upload size mismatch".into()); }
+        let t = texture.texture_id();
+        let id = self.hal.frames.texture_hal_id(t.0, t.generation()).ok_or("shared image has no allocation")?;
+        self.hal.frames.w.texture_update(id, 0, [0, 0, width, height], 0, pixels);
+        Ok(())
+    }
+
     /// A shared texture's DMA-BUF (`create_shared_texture`, once `shared_texture_handle` is
     /// known): a new descriptor the caller owns and its layout as
     /// `makepad_hal::dmabuf::copy::Layout` words. For handing the image to another process

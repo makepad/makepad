@@ -8,7 +8,8 @@ use crate::{
     thread::{to_ui_bounded, TaskHandle, ThreadOptions, ThreadSpawner, ToUIReceiver},
 };
 use makepad_hal::{dmabuf::DmaBuf, hosted_ipc::{self, ClientEndpoint}};
-use makepad_studio_protocol::SharedSwapchain;
+use makepad_studio_protocol::{NativeAppEvent, NativeAppRequest, PresentableImageId, SharedSwapchain};
+use makepad_hal::hosted_native::{Incoming, Outgoing};
 use crate::makepad_network::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::{
     collections::VecDeque,
@@ -43,16 +44,19 @@ impl Drop for Interrupt {
 
 enum Reply {
     Loaded(LoadedSwapchain),
+    Native(Incoming),
+    Sent(NativeAppRequest),
     Failed(String),
 }
+enum Request { Swapchain(SwapchainRequest), Native(NativeAppEvent), Send(Outgoing) }
 
 pub(crate) struct GpuInbox {
     path: PathBuf,
     /// Hands the connected endpoint to the worker; None once connected.
     connect: Option<SyncSender<ClientEndpoint>>,
-    requests: SyncSender<SwapchainRequest>,
+    requests: SyncSender<Request>,
     replies: Option<ToUIReceiver<Reply>>,
-    pending: VecDeque<SwapchainRequest>,
+    pending: VecDeque<Request>,
     interrupt: Option<Interrupt>,
     stop: Arc<AtomicBool>,
     failed: Option<String>,
@@ -65,7 +69,7 @@ impl GpuInbox {
     pub fn start(spawner: &ThreadSpawner) -> Result<Self, String> {
         let path = aux_chan::client_path().map_err(|error| error.to_string())?;
         let (connect, connected) = sync_channel::<ClientEndpoint>(1);
-        let (requests, receive) = sync_channel::<SwapchainRequest>(4);
+        let (requests, receive) = sync_channel::<Request>(4);
         let (publish, replies) = to_ui_bounded(NonZeroUsize::new(4).unwrap());
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
@@ -87,6 +91,26 @@ impl GpuInbox {
                                     return Ok(())
                                 }
                             };
+                            let reply = match request {
+                            Request::Native(event) => {
+                                let mut fds = Vec::new();
+                                if let NativeAppEvent::Buffer { buffer, desc, .. } = &event {
+                                    for _ in &desc.planes {
+                                        let (id, fd) = endpoint.recv().map_err(|e| e.to_string())?;
+                                        if id.as_u64() != *buffer { return Err("native descriptor order mismatch".into()); }
+                                        fds.push(fd);
+                                    }
+                                }
+                                Reply::Native(Incoming { event, fds })
+                            }
+                            Request::Send(Outgoing { request, fence }) => {
+                                if let Some(fence) = fence {
+                                    let NativeAppRequest::Release { buffer, .. } = request else { return Err("unexpected native fence".into()) };
+                                    endpoint.send((PresentableImageId::from_u64(buffer), fence)).map_err(|e| e.to_string())?;
+                                }
+                                Reply::Sent(request)
+                            }
+                            Request::Swapchain(request) => {
                             let images = request
                                 .swapchain
                                 .presentable_images
@@ -97,8 +121,11 @@ impl GpuInbox {
                                 })
                                 .collect::<Result<Vec<_>, _>>()
                                 .map_err(|error| error.to_string())?;
+                            Reply::Loaded(LoadedSwapchain { request, images })
+                            }
+                            };
                             publish
-                                .send(Reply::Loaded(LoadedSwapchain { request, images }))
+                                .send(reply)
                                 .map_err(|_| "GPU inbox closed".to_string())?;
                         }
                         Ok(())
@@ -125,6 +152,11 @@ impl GpuInbox {
     }
 
     pub fn enqueue(&mut self, request: SwapchainRequest) -> Result<(), String> {
+        self.queue(Request::Swapchain(request))
+    }
+    pub fn native(&mut self, event: NativeAppEvent) -> Result<(), String> { self.queue(Request::Native(event)) }
+    pub fn send_native(&mut self, request: Outgoing) -> Result<(), String> { self.queue(Request::Send(request)) }
+    fn queue(&mut self, request: Request) -> Result<(), String> {
         if let Some(error) = &self.failed {
             return Err(error.clone());
         }
@@ -199,6 +231,8 @@ impl GpuInbox {
         {
             match reply {
                 Reply::Loaded(batch) => loaded.push(batch),
+                Reply::Native(incoming) => makepad_hal::hosted_native::receive(incoming),
+                Reply::Sent(request) => crate::Cx::send_studio_message(makepad_studio_protocol::AppToStudio::NativeApp(request)),
                 Reply::Failed(error) => self.fail(error),
             }
         }

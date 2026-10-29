@@ -194,7 +194,7 @@ pub enum SharedSwapchainCreateError {
 }
 
 #[cfg(target_os = "linux")]
-pub use crate::os::hosted_gpu_sender::{LinuxSwapchainSender, SentSwapchain};
+pub use crate::os::hosted_gpu_sender::{LinuxSwapchainSender, NativeDescriptors, SentSwapchain};
 
 /// An exported handle batch, with no CPU pixel payload. Ownership can move
 /// to a worker after Vulkan export has completed on the renderer thread.

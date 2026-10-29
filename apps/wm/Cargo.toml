@@ -87,5 +87,5 @@ makepad-xkb-keymap = { path = "../../libs/xkb_keymap" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Serving Desk Link (listener, TLS, fleet credentials): native desktops only
-makepad-desk-link = { path = "../../libs/desk_link", features = ["server"] }
+makepad-desk-link = { path = "../../libs/desk_link", features = ["server", "tiles"] }
 makepad-hal = { path = "../../platform/hal" }

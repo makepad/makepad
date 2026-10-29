@@ -86,73 +86,6 @@ pub struct XrFrameCpuBreakdown {
     pub resize_projection_ms: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct SystemBrowserId(pub LiveId);
-
-impl From<LiveId> for SystemBrowserId {
-    fn from(value: LiveId) -> Self {
-        Self(value)
-    }
-}
-
-pub struct CxSystemBrowser<'a> {
-    cx: &'a mut Cx,
-    id: SystemBrowserId,
-}
-
-impl<'a> CxSystemBrowser<'a> {
-    pub fn id(&self) -> SystemBrowserId {
-        self.id
-    }
-
-    pub fn spawn(&mut self, url: &str) {
-        if self.cx.script_data.std.host_io_only() { return; }
-        self.cx.platform_ops.push_back(CxOsOp::SpawnSystemBrowser {
-            browser_id: self.id.0,
-            url: url.to_string(),
-        });
-    }
-
-    pub fn update(&mut self, area: Area, visible: bool) {
-        self.cx.platform_ops.push_back(CxOsOp::UpdateSystemBrowser {
-            browser_id: self.id.0,
-            area,
-            visible,
-        });
-    }
-
-    pub fn detach(&mut self) {
-        self.cx.platform_ops.push_back(CxOsOp::DetachSystemBrowser {
-            browser_id: self.id.0,
-        });
-    }
-
-    pub fn set_url(&mut self, url: &str, replace: bool) {
-        if self.cx.script_data.std.host_io_only() { return; }
-        self.cx.platform_ops.push_back(CxOsOp::SetSystemBrowserUrl {
-            browser_id: self.id.0,
-            url: url.to_string(),
-            replace,
-        });
-    }
-
-    pub fn history_go(&mut self, delta: i32) {
-        if self.cx.script_data.std.host_io_only() { return; }
-        self.cx
-            .platform_ops
-            .push_back(CxOsOp::SystemBrowserHistoryGo {
-                browser_id: self.id.0,
-                delta,
-            });
-    }
-
-    pub fn close(&mut self) {
-        self.cx.platform_ops.push_back(CxOsOp::CloseSystemBrowser {
-            browser_id: self.id.0,
-        });
-    }
-}
-
 /// A system haptic (`Cx::haptic_feedback`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HapticFeedback { Click, VirtualKey, Tick }
@@ -491,41 +424,16 @@ pub enum CxOsOp {
         bool,
         bool,
     ),
-    AttachCameraNativePreview {
-        video_id: LiveId,
-        area: Area,
+    NativeLayerCreate {
+        id: crate::native_layer::NativeLayerId,
+        content: crate::native_layer::NativeContent,
     },
-    UpdateCameraNativePreview {
-        video_id: LiveId,
-        area: Area,
-        visible: bool,
+    NativeLayerOp {
+        id: crate::native_layer::NativeLayerId,
+        op: crate::native_layer::NativeLayerOperation,
     },
-    DetachCameraNativePreview {
-        video_id: LiveId,
-    },
-    SpawnSystemBrowser {
-        browser_id: LiveId,
-        url: String,
-    },
-    UpdateSystemBrowser {
-        browser_id: LiveId,
-        area: Area,
-        visible: bool,
-    },
-    DetachSystemBrowser {
-        browser_id: LiveId,
-    },
-    SetSystemBrowserUrl {
-        browser_id: LiveId,
-        url: String,
-        replace: bool,
-    },
-    SystemBrowserHistoryGo {
-        browser_id: LiveId,
-        delta: i32,
-    },
-    CloseSystemBrowser {
-        browser_id: LiveId,
+    NativeLayerDestroy {
+        id: crate::native_layer::NativeLayerId,
     },
     PrepareAudioPlayback(LiveId, VideoSource, bool, bool),
     BeginVideoPlayback(LiveId),
@@ -540,19 +448,6 @@ pub enum CxOsOp {
     SelectVideoTrack(LiveId, usize),
     SelectAudioTrack(LiveId, usize),
 
-    CreateWebView {
-        id: LiveId,
-        area: Area,
-        texture: Texture,
-        url: String,
-    },
-    UpdateWebView {
-        id: LiveId,
-        area: Area,
-    },
-    CloseWebView {
-        id: LiveId,
-    },
     SaveFileDialog(FileDialog),
     SelectFileDialog(FileDialog),
     SaveFolderDialog(FileDialog),
@@ -658,16 +553,10 @@ impl CxOsOp {
             #[cfg(target_arch = "wasm32")]
             Self::StorageRequestError { .. } => "StorageRequestError",
 
+            Self::NativeLayerCreate { .. } => "NativeLayerCreate",
+            Self::NativeLayerOp { .. } => "NativeLayerOp",
+            Self::NativeLayerDestroy { .. } => "NativeLayerDestroy",
             Self::PrepareVideoPlayback(..) => "PrepareVideoPlayback",
-            Self::AttachCameraNativePreview { .. } => "AttachCameraNativePreview",
-            Self::UpdateCameraNativePreview { .. } => "UpdateCameraNativePreview",
-            Self::DetachCameraNativePreview { .. } => "DetachCameraNativePreview",
-            Self::SpawnSystemBrowser { .. } => "SpawnSystemBrowser",
-            Self::UpdateSystemBrowser { .. } => "UpdateSystemBrowser",
-            Self::DetachSystemBrowser { .. } => "DetachSystemBrowser",
-            Self::SetSystemBrowserUrl { .. } => "SetSystemBrowserUrl",
-            Self::SystemBrowserHistoryGo { .. } => "SystemBrowserHistoryGo",
-            Self::CloseSystemBrowser { .. } => "CloseSystemBrowser",
             Self::PrepareAudioPlayback(..) => "PrepareAudioPlayback",
             Self::BeginVideoPlayback(..) => "BeginVideoPlayback",
             Self::PauseVideoPlayback(..) => "PauseVideoPlayback",
@@ -680,9 +569,6 @@ impl CxOsOp {
             Self::SetVideoPlaybackRate(..) => "SetVideoPlaybackRate",
             Self::SelectVideoTrack(..) => "SelectVideoTrack",
             Self::SelectAudioTrack(..) => "SelectAudioTrack",
-            Self::CreateWebView { .. } => "CreateWebView",
-            Self::UpdateWebView { .. } => "UpdateWebView",
-            Self::CloseWebView { .. } => "CloseWebView",
             Self::SaveFileDialog(..) => "SaveFileDialog",
             Self::SelectFileDialog(..) => "SelectFileDialog",
             Self::SaveFolderDialog(..) => "SaveFolderDialog",
@@ -1485,6 +1371,15 @@ impl Cx {
         let _ = on;
     }
 
+    /// Whether the app asked for a see-through view (`xr_set_see_through`; a remote headset's
+    /// server tells the headset).
+    pub fn xr_see_through(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal_xr_see_through_now() }
+        #[cfg(target_arch = "wasm32")]
+        { false }
+    }
+
     /// Where the XR passes' scene space sits in the room: `m` maps a scene point into the
     /// headset's tracking space, and the eye views the XR passes draw with become `view * m`,
     /// so shaders see scene (world) coordinates while the headset sees the room. A vehicle the
@@ -1568,13 +1463,6 @@ impl Cx {
     pub fn browser_history_go(&mut self, delta: i32) {
         if self.script_data.std.host_io_only() { return; }
         <Self as CxOsApi>::browser_history_go(self, delta);
-    }
-
-    pub fn system_browser(&mut self, id: impl Into<SystemBrowserId>) -> CxSystemBrowser<'_> {
-        CxSystemBrowser {
-            cx: self,
-            id: id.into(),
-        }
     }
 
     // Determines whether to show your application in the dock when it runs. The default value is true.
@@ -2347,6 +2235,9 @@ impl Cx {
     /// backends service this work on their ordinary next-render path.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn request_remote_window_present(&mut self, window_id: WindowId) {
+        // an external request waits for this window's frame: it paints also while a headset
+        // streams (`XrWindowHold`)
+        self.xr_window_hold.input = true;
         if let Some(pass) = self.windows[window_id].main_pass_id {
             self.repaint_pass_and_child_passes(pass);
         }
@@ -2774,25 +2665,6 @@ impl Cx {
                 }
             }
         }
-    }
-
-    pub fn attach_camera_native_preview(&mut self, video_id: LiveId, area: Area) {
-        self.platform_ops
-            .push_back(CxOsOp::AttachCameraNativePreview { video_id, area });
-    }
-
-    pub fn update_camera_native_preview(&mut self, video_id: LiveId, area: Area, visible: bool) {
-        self.platform_ops
-            .push_back(CxOsOp::UpdateCameraNativePreview {
-                video_id,
-                area,
-                visible,
-            });
-    }
-
-    pub fn detach_camera_native_preview(&mut self, video_id: LiveId) {
-        self.platform_ops
-            .push_back(CxOsOp::DetachCameraNativePreview { video_id });
     }
 
     pub fn begin_video_playback(&mut self, video_id: LiveId) {
@@ -3480,8 +3352,10 @@ mod host_io_tests {
         cx.open_system_openfile_dialog();
         cx.open_system_openfolder_dialog();
         cx.open_system_savefolder_dialog();
-        cx.system_browser(LiveId::unique()).spawn("https://example.invalid/private");
-        cx.system_browser(LiveId::unique()).set_url("https://example.invalid/private", false);
+        let layer = cx.native_layer_new(crate::native_layer::NativeContent::Web {
+            url: "https://example.invalid/private".to_string(),
+        });
+        cx.native_layer(layer.id()).navigate("https://example.invalid/private", false);
         cx.prepare_audio_playback(LiveId::unique(), VideoSource::Network("https://example.invalid/private".into()), false, false);
         cx.prepare_audio_playback(LiveId::unique(), VideoSource::Filesystem("/etc/passwd".into()), false, false);
         assert_eq!(cx.platform_ops.len(), before);

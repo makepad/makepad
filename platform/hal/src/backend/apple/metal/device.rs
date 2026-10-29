@@ -67,6 +67,7 @@ pub enum AllocJob {
 pub struct Submission {
     pub buffer: RcObjcId,
     pub entry: InFlightCb,
+    pub native_frames: Vec<super::super::media::layers::Frame>,
 }
 
 /// hardware: the command queue's pool, `newCommandQueueWithMaxCommandBufferCount` (the driver's
@@ -290,8 +291,8 @@ impl Device {
 
     /// Commits a command buffer through the submit thread (`commit` never runs on the backend
     /// thread). Saturated: it stays queued, in order, for the next flush.
-    pub fn commit(&mut self, buffer: RcObjcId, entry: InFlightCb) {
-        self.submit_retry.push_back(Submission { buffer, entry });
+    pub fn commit(&mut self, buffer: RcObjcId, entry: InFlightCb, native_frames: Vec<super::super::media::layers::Frame>) {
+        self.submit_retry.push_back(Submission { buffer, entry, native_frames });
         self.flush_submissions();
     }
 
@@ -488,6 +489,12 @@ fn spawn_submitter(in_flight: InFlightQueue, mailbox: Mailbox) -> (SyncSender<Su
                 let buffer = submission.buffer.as_id();
                 lock_in_flight(&in_flight).push_back(submission.entry);
                 let _: () = unsafe { msg_send![buffer, commit] };
+                if !submission.native_frames.is_empty() {
+                    let _: () = unsafe { msg_send![buffer, waitUntilScheduled] };
+                    let scheduled = super::super::media::layers::trace_enabled().then(Instant::now);
+                    let status: u64 = unsafe { msg_send![buffer, status] };
+                    if status != 5 { super::layers::scheduled(submission.native_frames, scheduled); }
+                }
                 drop(submission.buffer);
                 let _: () = unsafe { msg_send![pool, release] };
             }

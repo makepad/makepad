@@ -444,6 +444,7 @@ class MakepadSurface
         Context context = getContext();
         if (context instanceof MakepadActivity) {
             MakepadActivity activity = (MakepadActivity) context;
+            activity.nativeLayerSurfaceLost();
             if (activity.hasRecoverySnapshotAvailable()) {
                 activity.setSurfaceCoverVisible(true);
             }
@@ -615,6 +616,7 @@ class MakepadSurface
     // For some reason it only works if placed here and not in the parent layout.
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
+        if (!hasFocus()) return null;
         int inputType = InputType.TYPE_CLASS_TEXT;
 
         switch (mInputMode) {
@@ -773,7 +775,7 @@ class MakepadSurface
         mIsSecure = isSecure;
 
         // If config changed and keyboard is already showing, restart input to apply new settings
-        if (changed && mInputConnection != null) {
+        if (changed && mInputConnection != null && hasFocus()) {
             // Finalize any in-progress composition before restart to avoid stale state
             BaseInputConnection.removeComposingSpans(mEditable);
             InputMethodManager imm = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
@@ -1036,6 +1038,28 @@ public class MakepadActivity
     private boolean mNativesDeferred = false;
 
     private MakepadSurface view;
+    private NativeLayerContainer mNativeLayers;
+
+    void nativeLayerSurfaceLost() { if (mNativeLayers != null) mNativeLayers.surfaceLost(); }
+
+    public void createNativeWebLayer(int session, long id, byte[] url) {
+        runOnUiThread(() -> { if (mNativeLayers != null) mNativeLayers.create(session, id, url); });
+    }
+
+    public void nativeWebLayerOp(int session, long id, int op, long arg, byte[] data) {
+        runOnUiThread(() -> { if (mNativeLayers != null) mNativeLayers.operation(session, id, op, arg, data); });
+    }
+
+    public void destroyNativeWebLayer(int session, long id) {
+        runOnUiThread(() -> { if (mNativeLayers != null) mNativeLayers.destroy(session, id); });
+    }
+
+    public void applyNativeLayerFrame(long ticket, long serial, int session, long[] ids, float[] geometry, int segmentCount) {
+        runOnUiThread(() -> {
+            if (mNativeLayers != null) mNativeLayers.frame(ticket, serial, session, ids, geometry, segmentCount);
+            else MakepadNative.discardNativeLayerFrame(ticket);
+        });
+    }
     private final Handler mHandler = new Handler(Looper.getMainLooper());
     private InputManager mInputManager;
     private InputManager.InputDeviceListener mInputDeviceListener;
@@ -1289,6 +1313,7 @@ public class MakepadActivity
 
 
         view = new MakepadSurface(this);
+        view.setId(View.generateViewId());
         // Put it inside a parent layout which can resize it using padding
         ResizingLayout layout = new ResizingLayout(this);
         FrameLayout surfaceContentLayout = new FrameLayout(this);
@@ -1319,6 +1344,9 @@ public class MakepadActivity
 
         mRootLayout = new FrameLayout(this);
         mRootLayout.addView(layout);
+
+        mNativeLayers = new NativeLayerContainer(this, view);
+        mRootLayout.addView(mNativeLayers);
 
         mSurfaceCoverOverlay = new FrameLayout(this);
         mSurfaceCoverOverlay.setLayoutParams(new FrameLayout.LayoutParams(
@@ -1536,6 +1564,7 @@ public class MakepadActivity
             return;
         }
         unregisterPhysicalKeyboardListener();
+        if (mNativeLayers != null) { mNativeLayers.close(); mNativeLayers = null; }
         if (mBackCallback != null) {
             getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(mBackCallback);
             mBackCallback = null;
@@ -2422,6 +2451,7 @@ public class MakepadActivity
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
+                if (mNativeLayers != null && mNativeLayers.ownsFocus()) return;
                 if (show) {
                     if (view == null || view.getInputMode() == MakepadSurface.INPUT_MODE_NONE) {
                         return;
@@ -2474,6 +2504,7 @@ public class MakepadActivity
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
+                if (mNativeLayers != null && mNativeLayers.ownsFocus()) return;
                 if (view != null) {
                     view.updateImeTextState(
                         fullText,
@@ -3163,55 +3194,33 @@ public class MakepadActivity
         return speech().ttsLastError();
     }
 
-    public void attachCameraNativePreview(final long videoId, final int left, final int top, final int right, final int bottom) {
+    public void applyNativeCameraLayer(final long layerId, final int left, final int top,
+            final int right, final int bottom, final int clipLeft, final int clipTop,
+            final int clipRight, final int clipBottom, final boolean visible, final float opacity) {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                if (mCameraPreviewOverlay == null) {
-                    return;
-                }
-                CameraPreviewSurface preview = mCameraPreviewViews.get(videoId);
+                if (mCameraPreviewOverlay == null) return;
+                CameraPreviewSurface preview = mCameraPreviewViews.get(layerId);
                 if (preview == null) {
-                    preview = new CameraPreviewSurface(MakepadActivity.this, videoId);
-                    mCameraPreviewViews.put(videoId, preview);
+                    if (!visible) return;
+                    preview = new CameraPreviewSurface(MakepadActivity.this, layerId);
+                    mCameraPreviewViews.put(layerId, preview);
                     mCameraPreviewOverlay.addView(preview);
                 }
                 FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                    Math.max(1, right - left),
-                    Math.max(1, bottom - top)
-                );
+                    Math.max(1, right - left), Math.max(1, bottom - top));
                 lp.leftMargin = left;
                 lp.topMargin = top;
                 preview.setLayoutParams(lp);
-                preview.setVisibility(View.VISIBLE);
-            }
-        });
-    }
-
-    public void updateCameraNativePreview(final long videoId, final int left, final int top, final int right, final int bottom, final boolean visible) {
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                CameraPreviewSurface preview = mCameraPreviewViews.get(videoId);
-                if (preview == null) {
-                    if (visible) {
-                        attachCameraNativePreview(videoId, left, top, right, bottom);
-                    }
-                    return;
-                }
-                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                    Math.max(1, right - left),
-                    Math.max(1, bottom - top)
-                );
-                lp.leftMargin = left;
-                lp.topMargin = top;
-                preview.setLayoutParams(lp);
+                preview.setClipBounds(new android.graphics.Rect(clipLeft, clipTop, clipRight, clipBottom));
+                preview.setAlpha(opacity);
                 preview.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
             }
         });
     }
 
-    public void detachCameraNativePreview(final long videoId) {
+    public void detachNativeCameraLayer(final long videoId) {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
@@ -3451,7 +3460,6 @@ public class MakepadActivity
             runnable.cleanupVideoPlaybackResources();
             runnable = null;
         }
-        detachCameraNativePreview(videoId);
     }
     
                 

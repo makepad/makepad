@@ -13,11 +13,12 @@ use std::io::{self, Write};
 pub mod server;
 #[cfg(feature = "host")]
 pub mod host;
+pub mod rate;
+#[cfg(feature = "tiles")]
+pub mod tiles;
 pub mod xr;
 #[cfg(feature = "host")]
 pub mod xr_audio;
-#[cfg(feature = "host")]
-pub mod xr_host;
 #[cfg(feature = "server")]
 pub mod xr_pair;
 

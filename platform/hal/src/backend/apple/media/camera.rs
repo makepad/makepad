@@ -82,6 +82,7 @@ pub struct AvCaptureAccess {
     inputs: Vec<AvVideoInput>,
     streams: HashMap<CameraStreamKey, CameraStreamNode>,
     slot_streams: [Option<CameraStreamKey>; MAX_VIDEO_DEVICE_INDEX],
+    native_sources: HashMap<crate::types::Id, CameraStreamKey>,
     /// the slots that want frames (CPU consumers on the app side)
     consumers: Arc<Mutex<u32>>,
     /// the slot -> stream map the capture queues read
@@ -249,6 +250,7 @@ impl AvCaptureAccess {
             inputs: Default::default(),
             streams: Default::default(),
             slot_streams: [None; MAX_VIDEO_DEVICE_INDEX],
+            native_sources: HashMap::new(),
             consumers: Arc::new(Mutex::new(0)),
             routes: Arc::new(Mutex::new([None; MAX_VIDEO_DEVICE_INDEX])),
             frames: Frames::default(),
@@ -294,6 +296,7 @@ impl AvCaptureAccess {
         for key in self.slot_streams.iter().flatten() {
             required.insert(*key);
         }
+        required.extend(self.native_sources.values().copied());
         *self.routes.lock().unwrap_or_else(|e| e.into_inner()) = self.slot_streams;
 
         let existing_keys: Vec<_> = self.streams.keys().copied().collect();
@@ -334,6 +337,13 @@ impl AvCaptureAccess {
             }
             self.slot_streams[index] = self.key_for(*input_id, *format_id);
         }
+        self.reconcile_streams();
+    }
+
+    pub fn native_source(&mut self, id: crate::types::Id, source: Option<(u64, u64)>) {
+        if let Some((input_id, format_id)) = source {
+            self.native_sources.insert(id, CameraStreamKey { input_id, format_id });
+        } else { self.native_sources.remove(&id); }
         self.reconcile_streams();
     }
 

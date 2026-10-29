@@ -8,7 +8,7 @@ pub(crate) mod io;
 mod wayland;
 mod x11;
 pub mod direct;
-mod wm;
+pub(crate) mod wm;
 
 use super::exec::OsCmd;
 use super::log_enabled;

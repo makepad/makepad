@@ -346,6 +346,7 @@ pub unsafe fn register_natives(env: *mut JNIEnv, class: jclass) -> Result<Vec<St
     let natives = reg::reflect(env, class)?;
     let mut table = native_methods();
     table.extend(super::media::native_methods());
+    table.extend(super::native_layer::native_methods());
     reg::register(env, class, &natives, |name, sig| {
         let Some((_, expected, ptr)) = table.iter().find(|(n, _, _)| *n == name) else { return Ok(None); };
         if sig != *expected { return Err(format!("MakepadNative.{name}: expected {expected}, reflected {sig}")); }

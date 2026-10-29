@@ -106,6 +106,7 @@ pub struct Cx {
     pub null_cube_texture: Texture,
     pub windows: CxWindowPool,
     pub passes: CxDrawPassPool,
+    pub(crate) native_layers: crate::native_layer::CxNativeLayerPool,
     pub draw_lists: CxDrawListPool,
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,
@@ -1011,6 +1012,7 @@ impl Cx {
 
             windows: Default::default(),
             passes: Default::default(),
+            native_layers: Default::default(),
             draw_lists: Default::default(),
             draw_matrices: Default::default(),
             geometries: Default::default(),

@@ -336,16 +336,26 @@ impl LabelCache {
             let width = run.publication.width;
             if run.publication.missing_glyphs {
                 let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
-                let mut requested = false;
-                for family in [LazyFontFamily::Cjk, LazyFontFamily::Emoji] {
-                    requested |= fonts
-                        .borrow_mut()
-                        .take_lazy_font_request(key.family, family, text, true);
+                // The OS first under a `System` font set, the bundled lazy
+                // faces first otherwise (as `DrawText::layout`).
+                let system_first = cx.font_set().prefers_system_fonts();
+                let index_wait = system_first && !crate::text::system_fonts::index_ready();
+                let mut requested = system_first && fonts.borrow_mut().request_system_fallback(key.family, text);
+                if !requested && !index_wait {
+                    let mut lazy = false;
+                    for family in [LazyFontFamily::Cjk, LazyFontFamily::Emoji] {
+                        lazy |= fonts
+                            .borrow_mut()
+                            .take_lazy_font_request(key.family, family, text, true);
+                    }
+                    if lazy {
+                        draw.text_style.ensure_fonts_loaded(cx);
+                    }
+                    requested = lazy;
+                    if !system_first {
+                        requested |= fonts.borrow_mut().request_system_fallback(key.family, text);
+                    }
                 }
-                if requested {
-                    draw.text_style.ensure_fonts_loaded(cx);
-                }
-                requested |= fonts.borrow_mut().request_system_fallback(key.family, text);
                 if requested {
                     // The worker shapes with the family it was sent: send it
                     // again with its new faces, and this run with it.

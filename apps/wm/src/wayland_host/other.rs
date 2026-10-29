@@ -11,6 +11,9 @@ pub fn menu_apps() -> Vec<(String, String)> { Vec::new() }
 pub fn cursor_shape(_: ClientId) -> u32 { 0 }
 
 impl crate::App {
+    pub(crate) fn native_app_tick(&mut self, _cx: &mut makepad_widgets::Cx, _event: &makepad_widgets::Event) {}
+    pub(crate) fn native_app_request(&mut self, _cx: &mut makepad_widgets::Cx, _client: ClientId, _request: makepad_studio_protocol::NativeAppRequest) {}
+    pub(crate) fn native_app_owner_gone(&mut self, _client: ClientId) {}
     pub(crate) fn wayland_poll(&mut self, _cx: &mut makepad_widgets::Cx) {}
     pub(crate) fn wayland_launch(&mut self, _cx: &mut makepad_widgets::Cx, _app_id: &str) -> bool { false }
     pub(crate) fn wayland_close(&mut self, _client: ClientId) -> bool { false }

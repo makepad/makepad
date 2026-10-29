@@ -137,6 +137,10 @@ impl Cx {
         self.redraw_all();
     }
 
+    pub(crate) fn hal_xr_see_through_now(&self) -> bool {
+        SEE_THROUGH.with(|s| s.get())
+    }
+
     pub(crate) fn hal_xr_see_through(&mut self, on: bool) {
         SEE_THROUGH.with(|s| s.set(on));
         let Some(xr) = self.hal.xr.as_ref() else { return };

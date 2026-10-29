@@ -84,6 +84,26 @@ pub struct Image {
 }
 
 impl Image {
+    /// XRGB external buffers have undefined alpha. Sampling them must still be opaque.
+    #[cfg(target_os = "linux")]
+    pub(super) fn sample_alpha_one(&mut self) -> Result<(), String> {
+        let info = vk::ImageViewCreateInfo::default().image(self.image)
+            .format(vk_format(self.desc.format).ok_or("unknown image format")?)
+            .components(vk::ComponentMapping::default().a(vk::ComponentSwizzle::from_raw(2))) // VK_COMPONENT_SWIZZLE_ONE
+            .view_type(vk::ImageViewType::TYPE_2D_ARRAY).subresource_range(vk::ImageSubresourceRange::default()
+                .aspect_mask(self.aspect).level_count(self.desc.mips).layer_count(self.desc.depth));
+        unsafe {
+            let array = self.dev.raw.create_image_view(&info, None).map_err(error)?;
+            let view = match self.dev.raw.create_image_view(&info.view_type(vk::ImageViewType::TYPE_2D)
+                .subresource_range(vk::ImageSubresourceRange::default().aspect_mask(self.aspect).level_count(self.desc.mips).layer_count(1)), None) {
+                Ok(view) => view,
+                Err(e) => { self.dev.raw.destroy_image_view(array, None); return Err(error(e)); }
+            };
+            self.dev.raw.destroy_image_view(std::mem::replace(&mut self.view, view), None);
+            self.dev.raw.destroy_image_view(std::mem::replace(&mut self.array_view, array), None);
+        }
+        Ok(())
+    }
     pub fn new(dev: Arc<Device>, desc: TextureObj) -> Result<Arc<Self>, String> {
         let usage = image_usage(&desc);
         Self::new_with(dev, desc, vk::SampleCountFlags::TYPE_1, usage)

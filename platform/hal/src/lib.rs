@@ -47,6 +47,9 @@ pub mod wm_socket;
 pub mod linux_ipc;
 #[cfg(target_os = "linux")]
 pub mod hosted_ipc;
+/// The native-layer bridge used by process-hosted Cx; the WM HAL shell uses it directly.
+#[cfg(target_os = "linux")]
+pub use backend::linux::wm::native as hosted_native;
 pub mod cmds;
 pub mod codec;
 pub mod events;
@@ -70,6 +73,7 @@ pub mod framecap;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod inspect;
 pub mod media;
+pub mod native_layer;
 pub mod profile;
 pub mod threadcpu;
 pub mod session;

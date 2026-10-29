@@ -60,40 +60,8 @@ impl StageMode {
     }
 }
 
-/// The box an [`StageMode::MrBox`] stage shows the world in, in the room (tracking space):
-/// its centre, its turn about the room's up axis and its half extents (metres).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ClipBox {
-    pub center: Vec3f,
-    pub yaw: f32,
-    pub half: Vec3f,
-}
-
-impl ClipBox {
-    /// Room -> the unit box [-1, 1]^3 (column-major, as `Stage::matrix`).
-    pub fn unit_from_room(&self) -> Mat4f {
-        let (s, c) = (self.yaw.sin(), self.yaw.cos());
-        let inv = vec3f(1.0 / self.half.x.max(1.0e-4), 1.0 / self.half.y.max(1.0e-4), 1.0 / self.half.z.max(1.0e-4));
-        // local = R_y(-yaw) (room - center) / half: x' = c x - s z, z' = s x + c z
-        let mut m = Mat4f::identity();
-        m.v[0] = c * inv.x;
-        m.v[2] = s * inv.z;
-        m.v[5] = inv.y;
-        m.v[8] = -s * inv.x;
-        m.v[10] = c * inv.z;
-        let p = self.center;
-        m.v[12] = -(c * p.x - s * p.z) * inv.x;
-        m.v[13] = -p.y * inv.y;
-        m.v[14] = -(s * p.x + c * p.z) * inv.z;
-        m
-    }
-
-    /// A point given in the box's own frame (metres from its centre, unturned) in the room.
-    pub fn room_point(&self, local: Vec3f) -> Vec3f {
-        let (s, c) = (self.yaw.sin(), self.yaw.cos());
-        self.center + vec3f(local.x * c + local.z * s, local.y, -local.x * s + local.z * c)
-    }
-}
+/// The box an [`StageMode::MrBox`] stage shows the world in (the shared XR navigation's).
+pub use makepad_xr_nav::ClipBox;
 
 /// Default diorama scale: a 40-unit race track lands at ~2m across, which
 /// sits on a living-room floor without the player having to back away.

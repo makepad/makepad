@@ -36,10 +36,10 @@ pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
 
 // ---- desktop: the tap ----------------------------------------------------------------------
 
-/// The stream on (`xr_host::set_streaming`): off, nothing is sent and the desktop plays its own
+/// The stream on (`XrServer::set_streaming`, makepad-xr-stream): off, nothing is sent and the desktop plays its own
 /// sound again.
 static STREAM_ON: AtomicBool = AtomicBool::new(true);
-pub(crate) fn set_streaming(on: bool) {
+pub fn set_streaming(on: bool) {
     STREAM_ON.store(on, Ordering::Release);
 }
 

@@ -4,7 +4,7 @@
 
 #[cfg(target_os = "linux")]
 mod dma_buf;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(super) mod sync;
 #[cfg(target_os = "linux")]
 pub mod copy;
@@ -216,6 +216,14 @@ pub(super) fn foreign_support(dev: &Device) -> Option<DmaBufSupport> { NativeHan
 
 /// A host compositor's shared image (a hosted window's swapchain image) as a render target of
 /// this device, with the host's timeline: [`Image::hosted_writable`], [`Image::hosted_sequence`].
+#[cfg(target_os = "linux")]
+pub(crate) fn import_foreign(dev: Arc<Device>, native: Arc<NativeHandle>) -> Result<Arc<Image>, String> {
+    let opaque = native.fourcc == u32::from_le_bytes(*b"XR24");
+    let mut image = NativeHandle::import(dev, native)?;
+    if opaque { Arc::get_mut(&mut image).unwrap().sample_alpha_one()?; }
+    Ok(image)
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn import_hosted(dev: Arc<Device>, native: Arc<NativeHandle>) -> Result<Arc<Image>, String> {
     let image = NativeHandle::import(dev, native)?;

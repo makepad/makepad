@@ -111,6 +111,7 @@ impl Cx {
             }
         }
         match event {
+            HalEvent::NativeLayerState { id, what, a, b, data } => self.hal_native_layer_state(id, what, a, b, data),
             // ---- pointer
             HalEvent::MouseDown { window, x, y, button, mods } => {
                 let window_id = window_id(window);
@@ -869,6 +870,8 @@ impl Cx {
                 match self.hal.hosted.as_mut().map(|h| h.completed(window, frame)) {
                     Some(crate::os::hal::HostedDone::Publish(draw)) => {
                         if window_frame { crate::frame_trace::note_presented(); }
+                        #[cfg(target_os = "linux")]
+                        makepad_hal::hosted_native::presented(self.hal.frames.w.session(), window, frame);
                         Self::send_studio_message(crate::studio::AppToStudio::DrawCompleteAndFlip(draw))
                     }
                     // a hosted frame the GPU dropped: nothing to publish, paint it again

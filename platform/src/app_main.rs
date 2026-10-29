@@ -773,6 +773,23 @@ macro_rules! app_main {
     ( $app:ident, font_set: International, configure: $configure:expr ) => {
         $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [], $configure);
     };
+    // The OS draws CJK, emoji and every script the Latin faces miss; the web
+    // build, which has no OS fonts to read, is `Latin`.
+    ( $app:ident, font_set: System ) => {
+        $crate::app_main!($app, font_set: System, configure: |_cx: &mut Cx| {});
+    };
+    ( $app:ident, font_set: System, configure: $configure:expr ) => {
+        $crate::app_main!($app, font_set: System, font_assets: [], configure: $configure);
+    };
+    ( $app:ident, font_set: System, font_assets: [$($asset:expr),* $(,)?] ) => {
+        $crate::app_main!($app, font_set: System, font_assets: [$($asset),*], configure: |_cx: &mut Cx| {});
+    };
+    ( $app:ident, font_set: System, font_assets: [$($asset:expr),* $(,)?], configure: $configure:expr ) => {
+        #[cfg(target_arch = "wasm32")]
+        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [$($asset),*], $configure);
+        #[cfg(not(target_arch = "wasm32"))]
+        $crate::app_main!(@impl $app, $crate::FontSet::System, $crate::FontSet::Latin, $crate::SYSTEM_FONT_ASSET_MANIFEST, [$($asset),*], $configure);
+    };
     ( $app:ident, font_set: Latin, font_assets: [$($asset:expr),* $(,)?] ) => {
         $crate::app_main!($app, font_set: Latin, font_assets: [$($asset),*], configure: |_cx: &mut Cx| {});
     };
@@ -968,7 +985,7 @@ mod font_set_macro_compile_test {
 
     #[test]
     fn every_entry_point_uses_a_pre_frozen_font_selection() {
-        for set in [FontSet::Latin, FontSet::International] {
+        for set in [FontSet::Latin, FontSet::International, FontSet::System] {
             let cx = new_cx_with_font_set(Box::new(|_, _| {}), set, set);
             assert_eq!(cx.font_set(), set);
             assert!(cx.is_font_set_frozen());

@@ -8,6 +8,9 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::JoinHandle;
 
 pub enum Command {
+    Attach { stream: std::os::unix::net::UnixStream, token: u64 },
+    Disconnect(u32),
+    FrameDoneThrough { surface: SurfKey, serial: u64, time_ms: u32 },
     ConfigureToplevel { surface: SurfKey, width: i32, height: i32, states: Vec<u32> },
     CloseToplevel(SurfKey),
     DismissPopup(SurfKey),
@@ -88,8 +91,18 @@ impl Drop for Host {
 }
 
 fn apply(srv: &mut Server, comp: &mut Compositor, cmd: Command) -> bool {
+    let cmd = match cmd {
+        Command::Attach { stream, token } => {
+            if let Ok(client) = srv.add_client(comp, stream) { comp.events.push(UiEvent::ClientAttached { client, token }); }
+            return true;
+        }
+        cmd => cmd,
+    };
     let core = &mut srv.core;
     match cmd {
+        Command::Attach { .. } => unreachable!(),
+        Command::Disconnect(client) => core.kill(client),
+        Command::FrameDoneThrough { surface, serial, time_ms } => comp.frame_done_through(core, surface, serial, time_ms),
         Command::ConfigureToplevel { surface, width, height, states } => comp.configure_toplevel(core, surface, width, height, &states),
         Command::CloseToplevel(k) => comp.close_toplevel(core, k),
         Command::DismissPopup(k) => comp.dismiss_popup(core, k),

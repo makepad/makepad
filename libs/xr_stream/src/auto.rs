@@ -11,7 +11,7 @@
 //! budget; the headset's repeats by cause (late: the link or the decode; server skipped: the
 //! server's build; queue cap), pictures shown; the link's round trip against its idle one.
 
-use crate::serve::{StreamAa, MIN_RENDER_SCALE_PCT, STREAM_AA_MODES};
+use crate::settings_types::{StreamAa, MIN_RENDER_SCALE_PCT, STREAM_AA_MODES};
 use std::time::{Duration, Instant};
 
 /// Seconds after a change before the next one.
@@ -51,7 +51,7 @@ pub struct AutoValues {
 
 impl Default for AutoValues {
     fn default() -> Self {
-        AutoValues { kbps: 80_000, aa: crate::serve::STREAM_AA_DEFAULT, render_scale_pct: 100 }
+        AutoValues { kbps: 80_000, aa: crate::settings_types::STREAM_AA_DEFAULT, render_scale_pct: 100 }
     }
 }
 
@@ -193,14 +193,14 @@ impl XrAuto {
     /// This window's signals: the server's last window and the headset's last reports. None while
     /// no headset streams or before a new server window (Auto waits for fresh numbers).
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn signals(&mut self) -> Option<Signals> {
-        use makepad_desk_link::{xr::report as r, xr_host};
-        let server = xr_host::server_stats();
-        if xr_host::session_eye().is_none() || server.window == 0 || server.window == self.seen_window {
+    pub fn signals(&mut self, srv: &crate::XrServer) -> Option<Signals> {
+        use makepad_desk_link::xr::report as r;
+        let server = srv.stats();
+        if srv.session_eye().is_none() || server.window == 0 || server.window == self.seen_window {
             return None;
         }
         self.seen_window = server.window;
-        let reports = xr_host::headset_reports();
+        let reports = srv.headset_reports();
         if reports.len() < WINDOW {
             return None;
         }

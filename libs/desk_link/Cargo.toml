@@ -8,9 +8,11 @@ description = "Desk Link: the remote desktop wire protocol of the window manager
 [features]
 # The server (listener, TLS, fleet credentials, sessions): desktops that serve Desk Link.
 server = ["dep:makepad-network", "dep:makepad-teamtalk", "dep:makepad-core-util"]
+# The per-engine tile encoders every stream shares (`tiles`: the WM's desktop and the XR picture).
+tiles = ["dep:makepad-platform-video", "dep:makepad-hal"]
 # The deskhost engine (`host`): a picture source (a desktop's screens, a JIT host's render)
 # served through the platform's hardware encoder.
-host = ["server", "dep:makepad-platform-video", "dep:makepad-hal"]
+host = ["server", "tiles"]
 # The agent's driver (`desk-link-drive`): pictures decoded to PNGs, input from steps.
 drive = ["server", "dep:makepad-platform-video", "dep:makepad-zune-png", "dep:makepad-key-code"]
 

@@ -55,6 +55,9 @@ pub trait CxMediaApi {
             let t0 = crate::monotonic_seconds();
             fenced.call(info, buffer);
             crate::audio_output_tap::feed_audio_output_tap(index, info, buffer);
+            if crate::audio_output_tap::program_output_silenced(index) {
+                buffer.zero();
+            }
             meter.block(buffer.frame_count(), info.sample_rate, t0, crate::monotonic_seconds() - t0);
         };
         self.audio_output_box_os(index, Box::new(seam))

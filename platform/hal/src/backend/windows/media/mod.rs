@@ -304,11 +304,6 @@ impl Media {
                 }
                 true
             }
-            HalCmd::ViewOp { .. } => {
-                // no native views (system browser, camera preview) on Windows
-                s.stats.media_unsupported += 1;
-                true
-            }
             HalCmd::VideoInput { consumers, inputs } => {
                 let sm = self.sessions.entry(s.id).or_insert_with(|| SessionMedia::new(s.id));
                 let ids = read_u64s(inputs);

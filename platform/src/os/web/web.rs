@@ -1112,6 +1112,7 @@ impl Cx {
     }
 
     fn handle_platform_ops(&mut self) {
+        self.native_layer_retire();
         while let Some(op) = self.platform_ops.pop_front() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -1497,9 +1498,9 @@ impl Cx {
                     });
                 }
 
-                CxOsOp::AttachCameraNativePreview { .. }
-                | CxOsOp::UpdateCameraNativePreview { .. }
-                | CxOsOp::DetachCameraNativePreview { .. } => {}
+                CxOsOp::NativeLayerCreate { id, .. } => self.native_layer_event(id, crate::native_layer::NativeLayerEventKind::Realized(crate::native_layer::NativeLayerMode::Unsupported)),
+                CxOsOp::NativeLayerOp { .. } => {}
+                CxOsOp::NativeLayerDestroy { id } => self.native_layer_event(id, crate::native_layer::NativeLayerEventKind::Closed),
                 CxOsOp::SetVideoVolume(_, _) => {}
                 CxOsOp::SetVideoPlaybackRate(_, _) => {}
                 CxOsOp::PrepareAudioPlayback(_, _, _, _) => {}

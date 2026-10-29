@@ -456,6 +456,8 @@ impl Cmd {
 }
 
 pub enum Input {
+    /// AppKit hit testing and native delivery; Makepad hits return to the UI queue.
+    NativeClick { x: f64, y: f64 },
     Mouse {
         kind: MouseKind,
         x: f64,
@@ -724,7 +726,7 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "gseq", args: "[n=8] [every_ms=50] [scale=1] [w=ID] [out=DIR]", answers: "client side (frames service): n frames, a separate present per deadline; n=1..64, every_ms>=8, span<=60s", service: "ui", risk: CmdRisk::Read, params: "\"n\":{\"type\":\"integer\"},\"every_ms\":{\"type\":\"integer\"},\"scale\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"out\":{\"type\":\"string\"}", required: &[], positional: &[] },
     Command { words: "rec", args: "[out=DIR] [seconds=5] [fps=30] [codec=png|raw] [w=ID]", answers: "client side (frames cap=1): capture by streaming -- every presented frame is read back on the device and written here as frame_<slot>.png; prints {\"dir\",\"frames\",\"missing\",\"slots\",\"sz\"}; no video encoder on the device", service: "ui", risk: CmdRisk::Read, params: "\"seconds\":{\"type\":\"number\"},\"fps\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"out\":{\"type\":\"string\"}", required: &[], positional: &[] },
     Command { words: "gq", args: "[scale=1] [w=ID]", answers: "client side: FINISH HERE: grab every window, then quit. {\"png\":[paths],\"quit\":1}", service: "ui", risk: CmdRisk::Destructive, params: "\"scale\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"}", required: &[], positional: &[] },
-    Command { words: "mouse", args: "k=move|down|up|click|scroll|pinch x= y= [b=0] [dx= dy=] [scale= phase=begin|update|end] [scroll phase=touched|began|changed|ended|momentum|momentum_ended: a touchpad scroll] [time=] [hw=1] [shift=1 ctrl=1 alt=1 cmd=1] [w=ID] [wait=1]", answers: "inject a mouse event through the real event path", service: "ui", risk: CmdRisk::Act, params: "\"k\":{\"type\":\"string\",\"enum\":[\"move\",\"down\",\"up\",\"click\",\"scroll\",\"pinch\"]},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"b\":{\"type\":\"integer\"},\"dx\":{\"type\":\"number\"},\"dy\":{\"type\":\"number\"},\"scale\":{\"type\":\"number\"},\"phase\":{\"type\":\"string\",\"enum\":[\"begin\",\"update\",\"end\",\"touched\",\"began\",\"changed\",\"ended\",\"momentum\",\"momentum_ended\"]},\"time\":{\"type\":\"number\"},\"hw\":{\"type\":\"boolean\"},\"shift\":{\"type\":\"boolean\"},\"ctrl\":{\"type\":\"boolean\"},\"alt\":{\"type\":\"boolean\"},\"logo\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["k"], positional: &[] },
+    Command { words: "mouse", args: "k=move|down|up|click|scroll|pinch x= y= [b=0] [dx= dy=] [scale= phase=begin|update|end] [scroll phase=touched|began|changed|ended|momentum|momentum_ended: a touchpad scroll] [time=] [hw=1] [native=1: AppKit primary click] [shift=1 ctrl=1 alt=1 cmd=1] [w=ID] [wait=1]", answers: "inject a mouse event through the real event path", service: "ui", risk: CmdRisk::Act, params: "\"k\":{\"type\":\"string\",\"enum\":[\"move\",\"down\",\"up\",\"click\",\"scroll\",\"pinch\"]},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"b\":{\"type\":\"integer\"},\"dx\":{\"type\":\"number\"},\"dy\":{\"type\":\"number\"},\"scale\":{\"type\":\"number\"},\"phase\":{\"type\":\"string\",\"enum\":[\"begin\",\"update\",\"end\",\"touched\",\"began\",\"changed\",\"ended\",\"momentum\",\"momentum_ended\"]},\"time\":{\"type\":\"number\"},\"hw\":{\"type\":\"boolean\"},\"native\":{\"type\":\"boolean\"},\"shift\":{\"type\":\"boolean\"},\"ctrl\":{\"type\":\"boolean\"},\"alt\":{\"type\":\"boolean\"},\"logo\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["k"], positional: &[] },
     Command { words: "click", args: "x= y= [b=0] [w=ID] [wait=1]", answers: "mouse k=click", service: "ui", risk: CmdRisk::Act, params: "\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"b\":{\"type\":\"integer\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["x", "y"], positional: &[] },
     Command { words: "key", args: "t=TEXT | c=KeyA [k=down|up|press] [shift=1 ...] [w=ID] [wait=1]", answers: "type text or press a key (Escape ReturnKey Tab Backspace ArrowLeft F1 Key1 ..)", service: "ui", risk: CmdRisk::Act, params: "\"t\":{\"type\":\"string\",\"description\":\"text to type\"},\"c\":{\"type\":\"string\",\"description\":\"a key code: Escape ReturnKey Tab Backspace ArrowLeft F1 KeyA Key1 ..\"},\"k\":{\"type\":\"string\",\"enum\":[\"down\",\"up\",\"press\"]},\"shift\":{\"type\":\"boolean\"},\"ctrl\":{\"type\":\"boolean\"},\"alt\":{\"type\":\"boolean\"},\"logo\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "text", args: "t=TEXT [w=ID] [wait=1]", answers: "type text", service: "ui", risk: CmdRisk::Act, params: "\"t\":{\"type\":\"string\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["t"], positional: &[] },
@@ -961,6 +963,12 @@ pub fn route_mouse(p: &Params, force_kind: Option<&str>) -> Answer {
         hw,
         time,
     };
+    if p.flag(&["native"]) {
+        if !matches!(kind.as_str(), "click" | "tap") || button != 0 || hw || mods != Default::default() || time.is_some() {
+            return err("native=1 supports a primary click without hw, modifiers or a timestamp");
+        }
+        return send_input(window, vec![Input::NativeClick { x, y }], p.flag(&["wait"]));
+    }
     let inputs = match kind.as_str() {
         "move" => vec![mouse(MouseKind::Move)],
         "down" => vec![mouse(MouseKind::Move), mouse(MouseKind::Down)],

@@ -4,6 +4,10 @@ import android.view.Surface;
 import android.view.MotionEvent;
 
 public class MakepadNative {
+    public static native void onNativeLayerState(int session, long id, int what, long a, long b, String text);
+    public static native boolean commitNativeLayerFrame(long ticket, Object transaction, Object[] surfaces, int originX, int originY);
+    public static native void discardNativeLayerFrame(long ticket);
+    public static native void releaseNativeLayerSurfaces(Object[] surfaces);
     // belongs to MakepadActivity class
     public native static void activityOnCreate(Object activity);
     public native static void activityOnStart();

@@ -8,6 +8,8 @@
 //! shell events like any other shell's. A process that hosts other sessions (`makepad run`: the
 //! boot document and the app domains share one window) is one WM tile; lending is unchanged.
 
+pub mod native;
+
 use super::{io, lock, log_enabled, Key, Op, OsCmd, Protocol, Shared, Shell};
 use crate::backend::vulkan::share::import_hosted;
 use crate::backend::vulkan::surface::{FramePresenter, Offscreen, SurfaceState, VkSurfaceSource};
@@ -178,9 +180,10 @@ impl FramePresenter for Presenter {
                 sequence: image.hosted_sequence()? })
         });
         if log_enabled() { eprintln!("[hal-wm] frame done {:?}: {draw:?}", (session, window)); }
+        let shown = draw.is_some();
         lock(&self.0.finished).push(((session, window), draw));
         self.0.shared.signal();
-        presented(crate::clock_ns());
+        if shown { presented(crate::clock_ns()); }
     }
     fn scheduled(&self, session: u32, window: Id) {
         *lock(&self.0.in_flight).entry((session, window)).or_default() += 1;
@@ -475,6 +478,7 @@ impl App {
             eprintln!("[hal-wm] host: {}", format!("{msg:?}").chars().take(160).collect::<String>());
         }
         match msg {
+            StudioToApp::NativeApp(event) => self.native_message(event),
             StudioToApp::Swapchain(swapchain) => self.install(swapchain),
             StudioToApp::WindowGeomChange { window_id, dpi_factor, left, top, width, height } => {
                 if ![left, top, width, height, dpi_factor].iter().all(|v| v.is_finite()) || dpi_factor <= 0.0 || width < 0.0 || height < 0.0 { return; }
@@ -996,6 +1000,7 @@ impl Shell for App {
         }
     }
     fn dispatch(&mut self) -> Result<(), String> {
+        self.native_outgoing();
         if self.stopping { return Ok(()); }
         // The WM shares a swapchain only once this end of the descriptor channel is connected;
         // its listener exists from the adoption on.

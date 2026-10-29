@@ -73,6 +73,7 @@ struct Page {
     /// Applied at the next poll once the page exists.
     dark: Option<bool>,
     hidden: Option<bool>,
+    commands: Vec<ViewOp>,
     evals: Vec<(u64, String)>,
     /// CEF's evaluation numbers and the app's.
     eval_ids: Vec<(u64, u64)>,
@@ -138,6 +139,7 @@ impl Page {
             last_press: (f64::MIN, Vec2d::default(), 0),
             dark: None,
             hidden: None,
+            commands: Vec::new(),
             evals: Vec::new(),
             eval_ids: Vec::new(),
             ring: None,
@@ -161,12 +163,44 @@ impl Page {
         let Some((width, height, dpi)) = self.pixels() else { return };
         let Some(url) = self.url.take() else { return };
         match Browser::new(&url, width, height, dpi) {
-            Ok(browser) => self.browser = Some(browser),
+            Ok(browser) => {
+                self.browser = Some(browser);
+                for op in std::mem::take(&mut self.commands) { self.command(op); }
+            }
             Err(error) => {
                 eprintln!("browser host: page {:?}: {error}", self.view);
                 self.error = Some(error.to_string());
             }
         }
+    }
+
+    /// Commands received before the first geometry wait for the page.
+    fn command(&mut self, op: ViewOp) {
+        if matches!(op, ViewOp::CaptureLost) { self.pressed = MouseButton::empty(); }
+        let Some(browser) = &mut self.browser else {
+            self.commands.push(op);
+            return;
+        };
+        let _ = match op {
+            ViewOp::Back => browser.go_back(),
+            ViewOp::Forward => browser.go_forward(),
+            ViewOp::History { delta: -1 } => browser.go_back(),
+            ViewOp::History { delta: 1 } => browser.go_forward(),
+            ViewOp::History { delta: 0 } => Ok(()),
+            ViewOp::History { delta } => browser.execute_javascript(&format!("window.history.go({delta})")),
+            ViewOp::Reload => browser.reload(),
+            ViewOp::Stop => browser.stop_load(),
+            ViewOp::Focus { on } => browser.set_focus(on),
+            ViewOp::MouseMove { x, y, modifiers, leave } => browser.send_mouse_move(x, y, modifiers, leave),
+            ViewOp::MouseClick { x, y, modifiers, button, up, clicks } => browser.send_mouse_click(x, y, modifiers, button, up, clicks),
+            ViewOp::MouseWheel { x, y, modifiers, dx, dy } => browser.send_mouse_wheel(x, y, modifiers, dx, dy),
+            ViewOp::Key { kind, modifiers, windows_key_code, native_key_code, character, unmodified_character, system } => {
+                browser.send_key_event(kind, modifiers, windows_key_code, native_key_code, character, unmodified_character, system)
+            }
+            ViewOp::Text { text } => browser.ime_commit_text(&text),
+            ViewOp::CaptureLost => browser.send_capture_lost_event(),
+            _ => Ok(()),
+        };
     }
 
     fn navigate(&mut self, url: &str) {
@@ -329,6 +363,7 @@ impl App {
             page.view = None;
             page.evals.clear();
             page.eval_ids.clear();
+            page.commands.clear();
             page.pressed = MouseButton::empty();
             if self.focus == Some(view) {
                 self.focus = None;
@@ -351,25 +386,7 @@ impl App {
                     browser.disable_audio_capture();
                 }
             }
-            op => {
-                let Some(browser) = &mut page.browser else { return };
-                let _ = match op {
-                    ViewOp::Back => browser.go_back(),
-                    ViewOp::Forward => browser.go_forward(),
-                    ViewOp::Reload => browser.reload(),
-                    ViewOp::Stop => browser.stop_load(),
-                    ViewOp::Focus { on } => browser.set_focus(on),
-                    ViewOp::MouseMove { x, y, modifiers, leave } => browser.send_mouse_move(x, y, modifiers, leave),
-                    ViewOp::MouseClick { x, y, modifiers, button, up, clicks } => browser.send_mouse_click(x, y, modifiers, button, up, clicks),
-                    ViewOp::MouseWheel { x, y, modifiers, dx, dy } => browser.send_mouse_wheel(x, y, modifiers, dx, dy),
-                    ViewOp::Key { kind, modifiers, windows_key_code, native_key_code, character, unmodified_character, system } => {
-                        browser.send_key_event(kind, modifiers, windows_key_code, native_key_code, character, unmodified_character, system)
-                    }
-                    ViewOp::Text { text } => browser.ime_commit_text(&text),
-                    ViewOp::CaptureLost => browser.send_capture_lost_event(),
-                    _ => Ok(()),
-                };
-            }
+            op => page.command(op),
         }
     }
 

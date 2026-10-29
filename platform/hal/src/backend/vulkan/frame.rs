@@ -294,6 +294,12 @@ impl Vulkan {
     }
 
     pub(super) fn encode_frame(&mut self, s: &mut Session, sid: u32, target: Id, kind: u32, packet: u32, view: &CmdView, now: u64) -> Option<exec::SubmittedFrame> {
+        #[cfg(target_os = "android")]
+        let mut native_frame = self.native_layers.frame.take();
+        #[cfg(target_os = "android")]
+        let composited = native_frame.as_ref().is_some_and(|f| f.composited);
+        #[cfg(not(target_os = "android"))]
+        let composited = false;
         // a lost device draws nothing until it is replaced; the sessions heard DeviceLost once
         // (`Vulkan::recover`) and wait for DeviceReset
         if self.dev.lost.load(std::sync::atomic::Ordering::Acquire) { return None; }
@@ -378,14 +384,39 @@ impl Vulkan {
             if v.iter().all(|x| x.is_finite() && *x >= 0.0) { [m[0].max((v[0] + v[2]).ceil() as u32), m[1].max((v[1] + v[3]).ceil() as u32)] } else { m }
         });
         for pass in &view.passes[pr] {
+            #[cfg(target_os = "linux")] self.native_apps.begin_pass();
             let draws = &view.draws[slice(pass.draws, view.draws.len()).unwrap()];
+            #[cfg(target_os = "android")]
+            if let Some(frame) = native_frame.as_ref().filter(|f| f.composited && pass.color.iter().all(Id::is_none)) {
+                for segment in &frame.segments {
+                    let mut part = *pass;
+                    part.draws = segment.draws;
+                    part.load = [pass_load::CLEAR; 5];
+                    if segment.index != 0 { part.clear = [[0.0; 4]; 4]; }
+                    let draws = &view.draws[slice(segment.draws, view.draws.len()).unwrap()];
+                    let offset = [segment.rect[0], segment.rect[1]];
+                    match self.encode_pass(s, target, is_window, pick, &part, frame_size, draws, view, &mut batch, now, &mut deps, Some((&segment.slot.image, offset))) {
+                        Ok(_) => { s.stats.passes += 1; }
+                        Err(e) => { eprintln!("[hal-android-layer] segment: {e}"); s.bad(); return None; }
+                    }
+                    if segment.index == 0 {
+                        self.win.insert((sid, target.index), Texture { gen: target.gen, image: segment.slot.image.clone() });
+                    }
+                }
+                continue;
+            }
             let before = s.stats.skipped_draws;
             let missing = pick && draws.iter().any(|d| read_ids(view.arena, d.pick_tex).any(|t| self.pick_pending.contains(&(sid, t))));
             let mut failed = false;
-            match self.encode_pass(s, target, is_window, pick, pass, frame_size, draws, view, &mut batch, now, &mut deps) {
-                Ok(image) => { s.stats.passes += 1; if image.is_some() { window_image = image; } }
+            #[cfg(target_os = "linux")] let mut window_pass = false;
+            match self.encode_pass(s, target, is_window, pick, pass, frame_size, draws, view, &mut batch, now, &mut deps, None) {
+                Ok(image) => {
+                    #[cfg(target_os = "linux")] { window_pass = image.is_some(); }
+                    s.stats.passes += 1; if image.is_some() { window_image = image; }
+                }
                 Err(e) => { failed = true; eprintln!("[hal-vulkan] pass: {e}"); s.bad(); s.stats.skipped_draws += draws.len() as u64; }
             }
+            #[cfg(target_os = "linux")] self.native_apps.end_pass(sid, pass, !failed, pick, window_pass);
             if pick {
                 let incomplete = failed || missing || before != s.stats.skipped_draws;
                 for id in pass.color.into_iter().filter(|t| !t.is_none()) {
@@ -395,7 +426,7 @@ impl Vulkan {
             }
         }
         let mut presented = false;
-        if !pick {
+        if !pick && !composited {
             if let Some(image) = window_image {
                 #[cfg(target_os = "linux")]
                 if kind & target::CAPTURE != 0 {
@@ -469,8 +500,24 @@ impl Vulkan {
             }
         }
         self.compose = None;
+        #[cfg(target_os = "android")]
+        if let Some(mut frame) = native_frame.take() {
+            let semaphore = if composited {
+                match super::share::sync::Semaphore::sync_file(self.dev.clone()) {
+                    Ok(s) => Some(s),
+                    Err(e) => { eprintln!("[hal-android-layer] acquire semaphore: {e}"); return None; }
+                }
+            } else { None };
+            if composited {
+                let mailbox = self.mailbox.clone();
+                let token = Self::token(s);
+                let number = packet.frame;
+                frame.shown = Some(Box::new(move || mailbox.push(token, super::submit::Event::Presented { target, frame: number })));
+            }
+            batch.native_frame = Some((frame, semaphore));
+        }
         if !replay { batch.tickets.push(Ticket::Frame { token: Self::token(s), target, kind, frame: packet.frame, window: presented }); }
-        let scheduled = presented || batch.scanout.is_some();
+        let scheduled = presented || batch.scanout.is_some() || composited;
         if let Some(key) = prof_key.filter(|_| scheduled && !pick) {
             // the window frame is handed on (to the queue's present, a presenter, or the host
             // compositing it)
@@ -500,8 +547,9 @@ impl Vulkan {
     }
 
     fn encode_pass(&mut self, s: &mut Session, target: Id, is_window: bool, pick: bool, pass: &Pass, frame_size: [u32; 2], draws: &[Draw], view: &CmdView,
-        batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>) -> Result<Option<Arc<Image>>, String> {
+        batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>, segment: Option<(&Arc<Image>, [i32; 2])>) -> Result<Option<Arc<Image>>, String> {
         let v = pass.viewport;
+        let offset = segment.map_or([0, 0], |(_, offset)| offset);
         if v.iter().any(|v| !v.is_finite() || *v < 0.0) || v[2] <= 0.0 || v[3] <= 0.0 { return Err(format!("invalid pass viewport {v:?} (target {target:?}, window {is_window})")); }
         let views = pass_views(pass);
         if views > 1 && (!self.dev.multiview || pick) { return Err("a multiview pass on a device without multiview (or a pick pass)".into()); }
@@ -522,7 +570,7 @@ impl Vulkan {
         }
         if colors.is_empty() && is_window {
             let embedded = s.windows.get(s.id, target).ok().and_then(|w| w.val.embedded);
-            let image = match embedded {
+            let image = if let Some((image, _)) = segment { image.clone() } else { match embedded {
                 Some(em) => self.resolve(s, em.tex).ok_or("missing embedded window storage")?,
                 None => {
                     let key = self.window_key(s.id, target);
@@ -543,7 +591,7 @@ impl Vulkan {
                         },
                     }
                 }
-            };
+            } };
             window = Some(image.clone()); colors.push((0, image));
         }
         let depth = if pass.depth.is_none() { None } else { Some(self.resolve(s, pass.depth).ok_or("missing depth texture")?) };
@@ -571,7 +619,7 @@ impl Vulkan {
         let mut prepared = Vec::new();
         let attachments: Vec<_> = colors.iter().map(|(_, c)| c.clone()).chain(depth.iter().cloned()).collect();
         let target_size = [attachments.iter().map(|a| a.desc.w).min().unwrap(), attachments.iter().map(|a| a.desc.h).min().unwrap()];
-        if size[0] > target_size[0] || size[1] > target_size[1] {
+        if segment.is_none() && (size[0] > target_size[0] || size[1] > target_size[1]) {
             let id = pass.color.iter().copied().find(|id| !id.is_none()).unwrap_or(pass.depth);
             exec::clamped_pass(s, if id.is_none() { target } else { id }, size, target_size, pass.dpi);
         }
@@ -639,7 +687,7 @@ impl Vulkan {
         batch.framebuffers.push(framebuffer); batch.passes.push(render_pass.clone());
         // a viewport origin (one eye of a side-by-side stereo target) starts the render area: what
         // lies before it is neither cleared nor stored over
-        let origin = [(v[0] as u32).min(target_size[0]), (v[1] as u32).min(target_size[1])];
+        let origin = [((v[0] - offset[0] as f32).max(0.0) as u32).min(target_size[0]), ((v[1] - offset[1] as f32).max(0.0) as u32).min(target_size[1])];
         let area = vk::Rect2D { offset: vk::Offset2D { x: origin[0] as i32, y: origin[1] as i32 },
             extent: vk::Extent2D { width: target_size[0] - origin[0], height: target_size[1] - origin[1] } };
 
@@ -662,7 +710,7 @@ impl Vulkan {
             }
             None => None,
         };
-        let viewport = vk::Viewport { x: v[0], y: v[1] + v[3], width: v[2], height: -v[3], min_depth: 0.0, max_depth: 1.0 };
+        let viewport = vk::Viewport { x: v[0] - offset[0] as f32, y: v[1] + v[3] - offset[1] as f32, width: v[2], height: -v[3], min_depth: 0.0, max_depth: 1.0 };
         let run_shader = |me: &Self, s: &Session, d: &Draw| me.pipe.get(&(s.id, d.pipeline.index)).map_or_else(|| "?".to_string(), |p| gpu_prof::shader_name(s, &p.desc));
         let mut split_runs = SplitRuns::<u32>::default();
         let mut records: Vec<gpu_prof::DrawRecord> = Vec::new();
@@ -704,7 +752,8 @@ impl Vulkan {
                 let scissor = if d.scissor.iter().any(|n| n.is_nan()) { area } else {
                     // relative to the viewport origin, inside the render area
                     let [x, y, w, h] = d.scissor;
-                    let (x, y) = (x + origin[0] as f32, y + origin[1] as f32);
+                    let (x, y) = if segment.is_some() { (x + v[0] - offset[0] as f32, y + v[1] - offset[1] as f32) }
+                        else { (x + origin[0] as f32, y + origin[1] as f32) };
                     let x0 = x.max(origin[0] as f32).min(target_size[0] as f32) as u32;
                     let y0 = y.max(origin[1] as f32).min(target_size[1] as f32) as u32;
                     let x1 = (x + w).max(x0 as f32).min(target_size[0] as f32) as u32;
@@ -919,6 +968,8 @@ impl Vulkan {
         if fresh { self.write_set(set, bins, images); }
         s.ledger.touch(Kind::Pipeline, d.pipeline.index, d.pipeline.gen, s.frame, now);
         for id in [d.vb, d.ib, d.inst.id].into_iter().chain(d.ubufs).filter(|i| !i.is_none()) { s.ledger.touch(Kind::Buffer, id.index, id.gen, s.frame, now); }
+        #[cfg(target_os = "linux")]
+        for i in 0..p.code.textures.len() { self.native_apps.sample(s.id, id_at(arena, d.tex, i)); }
         Ok(Some(Prepared { pipeline, vertex, index, descriptors: set, offsets, first_instance }))
     }
 

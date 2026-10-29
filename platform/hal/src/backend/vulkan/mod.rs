@@ -8,8 +8,12 @@ mod media_gpu;
 #[cfg(target_os = "linux")]
 #[path = "../linux/media/capture_gpu.rs"]
 mod capture_gpu;
+#[cfg(target_os = "linux")]
+mod native_app;
 mod device;
 mod frame;
+#[cfg(target_os = "android")]
+mod native_layer;
 mod pipeline;
 mod prof;
 mod readback;
@@ -34,7 +38,7 @@ use crate::buffers::{CmdView, PipelineBlob};
 use crate::ledger::{Kind, LedgerEntry};
 use crate::session::*;
 use crate::types::*;
-use device::Worker;
+pub(crate) use device::Worker;
 use pipeline::{PassKey, RenderPass, State};
 pub(crate) use resources::{buffer_usage, Buffer};
 use submit::{Batch, Event, Mailbox, Token};
@@ -59,9 +63,13 @@ pub trait Shell: Send {
 
 pub struct Vulkan {
     #[cfg(target_os = "linux")]
+    native_apps: native_app::NativeApps,
+    #[cfg(target_os = "linux")]
     media: super::linux::media::Media,
     #[cfg(target_os = "android")]
     media: super::android::media::AndroidMedia,
+    #[cfg(target_os = "android")]
+    native_layers: native_layer::Layers,
     #[cfg(target_os = "linux")]
     capture_pool: FastMap<(u32, Id), Vec<Arc<Buffer>>>,
     #[cfg(target_os = "linux")]
@@ -200,7 +208,8 @@ impl Vulkan {
         info.set_device_name(&unsafe { std::ffi::CStr::from_ptr(dev.properties.device_name.as_ptr()) }.to_string_lossy());
         crate::gpu_limits::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
-        Ok(Self { #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: FastMap::default(), buf: FastMap::default(), pipe: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
+        Ok(Self { #[cfg(target_os = "linux")] native_apps: Default::default(), #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: FastMap::default(), buf: FastMap::default(), pipe: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
+            #[cfg(target_os = "android")] native_layers: Default::default(),
             passes: FastMap::default(), msaa: FastMap::default(), win: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), retained_stale: Default::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
             fallback: FastMap::default(), windows: surface::Windows::new(source), sharing,
             #[cfg(target_os = "linux")] foreign_support,
@@ -225,6 +234,13 @@ impl Vulkan {
 
     fn flush(&mut self) {
         if let Some(batch) = self.batch.take() { batch.finish(self.queue.as_ref().unwrap(), self.complete.clone(), self.mailbox.clone()); }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn native_drain(&mut self, world: &mut World) {
+        let mut native = std::mem::take(&mut self.native_apps);
+        native.drain(self, world);
+        self.native_apps = native;
     }
 
     fn resolve(&mut self, s: &mut Session, id: Id) -> Option<Arc<Image>> {
@@ -258,6 +274,7 @@ impl Vulkan {
                 }
                 Event::Presented { target, frame } => {
                     world.window_presented(sid, target, frame, 0, done.time);
+                    #[cfg(target_os = "linux")] self.native_apps.presented(sid, target, frame);
                     #[cfg(target_os = "linux")]
                     if let Some(shell) = self.shell { shell.presented(self.window_key(sid, target)); }
                 }
@@ -267,6 +284,7 @@ impl Vulkan {
                         if gpu_ns > 0 { s.stats.gpu_frames += 1; s.stats.gpu_ns_total += gpu_ns; s.stats.gpu_ns_max = s.stats.gpu_ns_max.max(gpu_ns); }
                     }
                     if window {
+                        #[cfg(target_os = "linux")] self.native_apps.presented(sid, target, frame);
                         world.window_presented(sid, target, frame, gpu_ns, done.time);
                         #[cfg(target_os = "linux")]
                         if let Some(shell) = self.shell { shell.presented(self.window_key(sid, target)); }
@@ -405,7 +423,7 @@ impl Backend for Vulkan {
         Ok(completion)
     }
     fn info(&self) -> HalInfo { self.info }
-    fn submit(&mut self, world: &mut World, sid: u32, view: &CmdView) { self.recover(world); self.drain(world); exec::submit(self, world, sid, view); self.flush(); }
+    fn submit(&mut self, world: &mut World, sid: u32, view: &CmdView) { self.recover(world); self.drain(world); #[cfg(target_os = "linux")] self.native_drain(world); exec::submit(self, world, sid, view); self.flush(); }
 
     /// The pipeline variants this batch's frames draw with first (a target layout and blend /
     /// depth-write / cull state the program was not built with), compiled before the batch runs:
@@ -469,6 +487,7 @@ impl Backend for Vulkan {
     fn step(&mut self, world: &mut World, sid: u32) {
         self.flush(); self.drain(world);
         self.recover(world);
+        #[cfg(target_os = "linux")] self.native_drain(world);
         #[cfg(target_os = "linux")]
         if let Some(shell) = self.shell {
             for (owner, id) in shell.drain_events(sid, world) {
@@ -495,6 +514,19 @@ impl Backend for Vulkan {
         }
         #[cfg(target_os = "android")]
         if let Some(s) = world.session_mut(sid) {
+            let waiting: Vec<_> = self.native_layers.pending.keys().filter(|(owner, _)| *owner == sid).copied().collect();
+            for key in waiting {
+                if let Some((kind, frame)) = self.native_layers.pending.remove(&key) {
+                    match self.native_layers.prepare(&self.dev, s, key.1, 0, &frame.view()) {
+                        Ok(native_layer::Plan::Busy) => { self.native_layers.pending.insert(key, (kind, frame)); }
+                        Ok(plan) => {
+                            if let native_layer::Plan::Ready(plan) = plan { self.native_layers.frame = Some(plan); }
+                            self.encode_frame(s, sid, key.1, kind, 0, &frame.view(), crate::clock_ns());
+                        }
+                        Err(e) => { eprintln!("[hal-android-layer] retry: {e}"); s.bad(); }
+                    }
+                }
+            }
             let mut media = std::mem::take(&mut self.media);
             media.drain(self, s);
             self.media = media;
@@ -508,13 +540,19 @@ impl Backend for Vulkan {
         // a lost device is tried again (`recover`) without anything else to wake the HAL
         let reset = self.lost_posted.then(|| world.now() + RESET_RETRY_NS);
         let timer = exec::next_timer(world, sid).into_iter().chain(watch).chain(reset).min();
+        #[cfg(target_os = "android")]
+        let timer = timer.into_iter().chain(self.native_layers.pending.keys().any(|(s, _)| *s == sid).then(|| world.now() + 8_000_000)).min();
         #[cfg(any(target_os = "linux", target_os = "android"))]
         { return timer.into_iter().chain(self.media.next_due(sid, world.now())).min(); }
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         timer
     }
     fn session_closed(&mut self, world: &mut World, sid: u32) {
+        #[cfg(target_os = "android")]
+        self.native_layers.close(sid);
         self.flush();
+        #[cfg(target_os = "linux")]
+        { let mut native = std::mem::take(&mut self.native_apps); native.close(self, world, sid); self.native_apps = native; }
         #[cfg(any(target_os = "linux", target_os = "android"))]
         self.media.session_closed(sid);
         #[cfg(target_os = "linux")]
@@ -639,6 +677,8 @@ impl exec::DeviceReset for Vulkan {
         #[cfg(target_os = "linux")]
         self.capture_pool.clear();
         self.tex.clear();
+        #[cfg(target_os = "android")]
+        self.native_layers.reset();
         self.buf.clear();
         self.win.clear();
         self.hosted_sizes.clear();
@@ -698,8 +738,17 @@ impl Drop for Vulkan {
 }
 
 impl Gpu for Vulkan {
+    #[cfg(target_os = "linux")]
+    fn native_layer(&mut self, world: &mut World, sid: u32, command: &crate::cmds::HalCmd) -> bool {
+        let mut native = std::mem::take(&mut self.native_apps);
+        let handled = native.command(self, world, sid, command);
+        self.native_apps = native;
+        handled
+    }
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn media(&mut self, s: &mut Session, c: &crate::cmds::HalCmd) -> bool {
+        #[cfg(target_os = "android")]
+        if self.native_layers.views.command(s, c) { return true; }
         let mut media = std::mem::take(&mut self.media);
         let handled = media.command(self, s, c);
         self.media = media;
@@ -762,6 +811,7 @@ impl Gpu for Vulkan {
         }
     }
     fn texture_destroy(&mut self, sid: u32, id: Id) {
+        #[cfg(target_os = "linux")] self.native_apps.forget_texture(sid, id);
         if self.tex.get(&(sid, id.index)).is_some_and(|t| t.gen <= id.gen) {
             if let Some(texture) = self.tex.remove(&(sid, id.index)) {
                 if let Some(registry) = self.sharing.registry() { registry.retire(sid, &texture.image); }
@@ -841,13 +891,50 @@ impl Gpu for Vulkan {
     fn pipeline_destroy(&mut self, sid: u32, id: Id) -> bool {
         if self.pipe.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) { return self.pipe.remove(&(sid, id.index)).is_some_and(|p| !p.announced); } false
     }
-    fn frame(&mut self, s: &mut Session, sid: u32, target: Id, kind: u32, packet: u32, view: &CmdView, now: u64) -> Option<exec::SubmittedFrame> { self.encode_frame(s, sid, target, kind, packet, view, now) }
+    fn frame(&mut self, s: &mut Session, sid: u32, target: Id, kind: u32, packet: u32, view: &CmdView, now: u64) -> Option<exec::SubmittedFrame> {
+        #[cfg(target_os = "android")]
+        if kind & !target::FLAGS == target::WINDOW && kind & (target::PICK | target::BADGES | target::REPLAY) == 0 {
+            self.media.native_frame(s, target, packet, view);
+            match self.native_layers.prepare(&self.dev, s, target, packet, view) {
+                Ok(native_layer::Plan::Ready(frame)) => self.native_layers.frame = Some(frame),
+                Ok(native_layer::Plan::Plain) => {},
+                Ok(native_layer::Plan::Busy) => {
+                    if let Some(frame) = KeptFrame::keep(view, packet) {
+                        if let Some((_, previous)) = self.native_layers.pending.insert((sid, target), (kind, frame)) {
+                            let frame = previous.view().frames[0].frame;
+                            s.events.frame_done(target, frame, 0, 0, 0.0, 0.0);
+                        }
+                    }
+                    return None;
+                }
+                Err(e) => { eprintln!("[hal-android-layer] {e}"); s.bad(); return None; }
+            }
+            if let Some((_, previous)) = self.native_layers.pending.remove(&(sid, target)) {
+                s.events.frame_done(target, previous.view().frames[0].frame, 0, 0, 0.0, 0.0);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut native = std::mem::take(&mut self.native_apps);
+            native.begin(self, s);
+            self.native_apps = native;
+        }
+        let result = self.encode_frame(s, sid, target, kind, packet, view, now);
+        #[cfg(target_os = "linux")]
+        if let Some(packet) = view.frames.get(packet as usize) {
+            self.native_apps.end(sid, target, packet.frame, result.as_ref().is_some_and(|r| r.window ||
+                crate::hosted_native::bridge_enabled() && kind & !crate::target::FLAGS == crate::target::WINDOW));
+        }
+        result
+    }
     fn pick(&mut self, s: &mut Session, window: Id, req: u32, pos: [f32; 2]) { self.read_pick(s, window, req, pos); }
     fn snapshot(&mut self, s: &mut Session, window: Id, req: u32) {
         let image = self.window_image(s, window); let rect = self.window_rect(s.id, window, image.as_deref()); self.read(s, image, req, rect, None);
     }
     fn window_copy(&mut self, s: &mut Session, window: Id, texture: Id, req: u32) { self.copy_window(s, window, texture, req); }
     fn window_closed(&mut self, sid: u32, id: Id) {
+        #[cfg(target_os = "android")]
+        self.native_layers.close_window(sid, id);
         #[cfg(target_os = "linux")]
         self.capture_pool.remove(&(sid, id));
         self.win.remove(&(sid, id.index)); self.hosted_sizes.remove(&(sid, id.index)); self.pick_ids.remove(&(sid, id));

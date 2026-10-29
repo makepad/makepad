@@ -76,6 +76,10 @@ pub(crate) struct DeferredFill {
 pub enum AlignEntry {
     Unset,
     Area(Area),
+    NativeLayer {
+        draw_list_id: DrawListId,
+        draw_item_id: usize,
+    },
     ShiftTurtle {
         area: Area,
         shift: Vec2d,
@@ -6084,6 +6088,17 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                         }
                     }
                 }
+                AlignEntry::NativeLayer { draw_list_id, draw_item_id } => {
+                    if let CxDrawKind::NativeLayer { rect, clip, .. } =
+                        &mut self.cx.draw_lists[*draw_list_id].draw_items[*draw_item_id].kind
+                    {
+                        rect.pos += d;
+                        if shift_clip {
+                            clip.0 += d;
+                            clip.1 += d;
+                        }
+                    }
+                }
                 AlignEntry::BeginClip(clip0, clip1) => {
                     *clip0 += d;
                     *clip1 += d;
@@ -6169,6 +6184,16 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                                 rect_area.draw_clip.0 = *clip0;
                                 rect_area.draw_clip.1 = *clip1;
                             }
+                        }
+                    }
+                }
+                AlignEntry::NativeLayer { draw_list_id, draw_item_id } => {
+                    if let Some((clip0, clip1)) = self.turtle_clips.last() {
+                        if let CxDrawKind::NativeLayer { clip, .. } =
+                            &mut self.cx.draw_lists[*draw_list_id].draw_items[*draw_item_id].kind
+                        {
+                            clip.0 = dvec2(clip.0.x.max(clip0.x), clip.0.y.max(clip0.y));
+                            clip.1 = dvec2(clip.1.x.min(clip1.x), clip.1.y.min(clip1.y));
                         }
                     }
                 }

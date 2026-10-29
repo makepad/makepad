@@ -2023,6 +2023,34 @@ mod imp {
                         continue;
                     }
                     let msg = match input {
+                        Input::NativeClick { x, y } => {
+                            #[cfg(target_os = "macos")]
+                            {
+                                let sid = cx.hal.frames.w.session();
+                                let id = crate::event::hal_intake::hal_window_id(window_id);
+                                let native = cx.windows[window_id].layout_vec2d_to_native_points(dvec2(x, y));
+                                let deadline = request.deadline;
+                                makepad_hal::backend::apple::media::native_click(sid, id, native.x, native.y,
+                                    move || std::time::Instant::now() < deadline && activity::user_seq_now() == user_seq,
+                                    move |result| match result {
+                                        Ok(true) => { let _ = tx.send(Reply::Text("{\"ok\":1,\"native\":1}".into())); }
+                                        Ok(false) => {
+                                            let inputs = [MouseKind::Move, MouseKind::Down, MouseKind::Up].into_iter().map(|kind| Input::Mouse {
+                                                kind, x, y, button: 0, dx: 0.0, dy: 0.0, mods: Default::default(), hw: false, time: None,
+                                            }).collect();
+                                            queue().lock().unwrap().push(QueuedCmd {
+                                                cmd: Cmd::Input { window: Some(window_id.id()), inputs, wait, tx },
+                                                user_seq: Some(user_seq), deadline,
+                                            });
+                                            wake();
+                                        }
+                                        Err(message) => { let _ = tx.send(Reply::Err(message.into())); }
+                                    });
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            { let _ = (x, y); let _ = tx.send(Reply::Err("native=1 requires AppKit".into())); }
+                            return;
+                        }
                         Input::Mouse {
                             kind,
                             x,

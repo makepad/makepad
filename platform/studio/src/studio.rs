@@ -377,6 +377,7 @@ pub enum AppToStudio {
     /// The child is idle and needs no Tick for `secs` seconds (its earliest
     /// timer). APPENDED LAST (ordinal tags).
     WakeIn(f64),
+    NativeApp(crate::NativeAppRequest),
 }
 
 #[derive(SerBin, DeBin, SerJson, DeJson, Debug, Clone)]
@@ -552,6 +553,7 @@ pub enum StudioToApp {
     DropFiles(RemoteDrop),
     /// Activation of one hosted window. Appended to preserve existing wire tags.
     WindowFocus { window_id: usize, focused: bool },
+    NativeApp(crate::NativeAppEvent),
 }
 
 /// A batch of host messages. On the wire every message is framed with its

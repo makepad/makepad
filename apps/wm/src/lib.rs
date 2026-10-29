@@ -2182,6 +2182,7 @@ impl App {
     }
 
     fn remove_client(&mut self, cx: &mut Cx, client: ClientId) {
+        self.native_app_owner_gone(client);
         // An app's later windows go with it; a later window going is forgotten here.
         for window in self.client_windows.forget(client) {
             self.remove_client(cx, window);
@@ -3399,6 +3400,7 @@ impl App {
 
     fn on_app_msg(&mut self, cx: &mut Cx, client: ClientId, msg: AppToStudio) {
         match msg {
+            AppToStudio::NativeApp(request) => self.native_app_request(cx, client, request),
             AppToStudio::CreateWindow { window_id, .. } => {
                 // A multi-window app (the VJ: console + output window)
                 // announces every window; the tile hosts the FIRST — the
@@ -6718,6 +6720,7 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.native_app_tick(cx, event);
         self.desk_link.handle_event(cx, event);
         // a virtual desktop that follows its viewer takes the window size of the viewer that connected last
         #[cfg(target_os = "linux")]

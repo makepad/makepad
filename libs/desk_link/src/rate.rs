@@ -1,8 +1,10 @@
-//! Desk Link's adaptive stream rate: one total rate for the whole stream (the encoder splits it
-//! over the tiles by area), decided once a second from what held the stream back.
+//! The adaptive stream rate of every Desk Link stream (a desktop's and an XR picture's): one
+//! total rate for the whole stream (the encoder splits it over the tiles by area), decided once
+//! a second from what held the stream back.
 //!
-//! - Link-bound (a viewer's socket backlog held pictures back: `congested`): the rate goes down
-//!   to below what was actually sent, the picture rate stays.
+//! - Link-bound (a viewer's socket backlog held pictures back: `congested`; or the link's round
+//!   trip grew past its idle one, [`LinkTrip`]: `link_queued`): the rate goes down to below
+//!   what was actually sent, the picture rate stays.
 //! - Encoder-bound (pictures waited for the encoder, not for a viewer, and its slowest tile took
 //!   most of a picture's time): that size takes the next step of [`effort`] (more streams, then
 //!   the encoder's fastest tuning, then 4:2:0 last, only after [`HALF_AFTER`] seconds still
@@ -24,7 +26,7 @@
 //! A session starts at the last rate a viewer left with (its link, measured), else at
 //! [`START_KBPS`] (or the ceiling, if lower). A fixed `kbps` setting turns all of this off.
 
-use makepad_desk_link::limit;
+use crate::limit;
 
 /// Where a stream starts before anything was measured (all tiles).
 pub const START_KBPS: u32 = 250_000;
@@ -100,6 +102,40 @@ pub struct Second {
     /// The streams a picture is encoded in now (H.265 bands; 0: decode is no matter here, e.g.
     /// H.264 tiles, which the decoder's level already sizes).
     pub streams: u32,
+    /// The link's round trip grew past its idle one this second ([`LinkTrip::queued`]): a
+    /// queue on the way, link-bound as a viewer's backlog is.
+    pub link_queued: bool,
+}
+
+/// A link's idle round trip, learned from the lowest seen (creeping up 2% a second so a changed
+/// route is learned), and whether a second's round trips say it queues: its median
+/// [`QUEUED_MS`] past the idle one. For a stream whose viewer reports each picture taken (the
+/// XR headset) rather than a socket backlog.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LinkTrip {
+    /// µs; 0 until the first second.
+    base_us: u32,
+}
+
+/// How much longer than the idle link a second's median round trip may take before the link
+/// counts as queueing (ms).
+pub const QUEUED_MS: f64 = 10.0;
+
+impl LinkTrip {
+    pub fn base_ms(&self) -> f64 {
+        self.base_us as f64 / 1000.0
+    }
+
+    /// A second's median and lowest round trip (ms; 0: none measured): whether the link queued.
+    pub fn queued(&mut self, trip_ms: f64, trip_min_ms: f64) -> bool {
+        if trip_ms <= 0.0 {
+            return false;
+        }
+        let min_us = (trip_min_ms * 1000.0) as u32;
+        let base = self.base_us;
+        self.base_us = if base == 0 { min_us } else { min_us.min(base + base / 50 + 1) };
+        trip_ms > self.base_ms() + QUEUED_MS
+    }
 }
 
 /// The bands a size streams in for the viewers' decoders, and the decode that asked for them.
@@ -130,6 +166,8 @@ struct Step {
 pub struct RateControl {
     /// 0: not started.
     kbps: u32,
+    /// The lowest the link pushes the rate (0: [`FLOOR_KBPS`]).
+    floor: u32,
     limit: u8,
     clean: u32,
     steps: Vec<Step>,
@@ -143,6 +181,23 @@ pub struct RateControl {
 }
 
 impl RateControl {
+    /// A controller whose link-bound rate never goes below `kbps`.
+    pub fn with_floor(kbps: u32) -> RateControl {
+        RateControl { floor: kbps, ..RateControl::default() }
+    }
+
+    fn floor(&self) -> u32 {
+        if self.floor == 0 { FLOOR_KBPS } else { self.floor }
+    }
+
+    /// From the start again: the rate the next [`Self::kbps`] says is the start rate under its
+    /// ceiling (the app changed the stream's bitrate: it applies at once).
+    pub fn restart(&mut self) {
+        self.kbps = 0;
+        self.limit = limit::START;
+        self.clean = 0;
+    }
+
     /// The rate now under `ceiling` (kbit/s, all tiles).
     pub fn kbps(&self, ceiling: u32) -> u32 {
         let k = if self.kbps == 0 { START_KBPS } else { self.kbps };
@@ -265,7 +320,7 @@ impl RateControl {
             // the viewer's backlog is its decoder's: more bands, not less rate
             self.clean = 0;
             changed = self.decode_step(s, budget_ms);
-        } else if s.congested_ms >= CONGESTED_MS {
+        } else if s.congested_ms >= CONGESTED_MS || s.link_queued {
             // what got through is what the link carries: the rate goes to most of that. Under
             // half the rate got through: a stall (a viewer that stopped reading), not a measure
             // of the link: down by a quarter. More than the rate got through: bursts, a little.
@@ -277,7 +332,7 @@ impl RateControl {
             } else {
                 kbps * 9 / 10
             }
-            .max(FLOOR_KBPS);
+            .max(self.floor());
             self.clean = 0;
             self.limit = limit::LINK;
         } else if encoder_bound {
@@ -354,7 +409,7 @@ mod tests {
     use super::*;
 
     fn second(congested_ms: f64, held_encoder: u64, tile_ms: f64, sent_kbps: u64, _full_chroma: bool) -> Second {
-        Second { fps: 120, pictures: 110, congested_ms, held_encoder, tile_ms, sent_kbps, size: [7680, 2160], max_effort: effort::HALF, decode_ms: 0.0, streams: 2 }
+        Second { fps: 120, pictures: 110, congested_ms, held_encoder, tile_ms, sent_kbps, size: [7680, 2160], max_effort: effort::HALF, decode_ms: 0.0, streams: 2, link_queued: false }
     }
 
     #[test]
@@ -507,7 +562,7 @@ mod tests {
     #[test]
     fn a_forced_444_stops_at_fast() {
         let mut r = RateControl::default();
-        let s = |held| Second { fps: 120, pictures: 110, congested_ms: 0.0, held_encoder: held, tile_ms: 9.0, sent_kbps: 1, size: [7680, 4320], max_effort: effort::FAST, decode_ms: 0.0, streams: 2 };
+        let s = |held| Second { fps: 120, pictures: 110, congested_ms: 0.0, held_encoder: held, tile_ms: 9.0, sent_kbps: 1, size: [7680, 4320], max_effort: effort::FAST, decode_ms: 0.0, streams: 2, link_queued: false };
         assert!(r.second(&s(40), 400_000));
         assert!(r.second(&s(40), 400_000));
         assert!(!r.second(&s(40), 400_000), "nothing more to give up");
@@ -592,9 +647,35 @@ mod tests {
     }
 
     #[test]
+    fn a_queueing_link_lowers_the_rate_and_a_restart_takes_the_cap_at_once() {
+        // an XR stream: one engine-bound shape (no effort steps), the headset's reports say the
+        // link's round trip
+        let mut trip = LinkTrip::default();
+        assert!(!trip.queued(0.0, 0.0), "nothing measured");
+        assert!(!trip.queued(6.0, 4.0));
+        assert_eq!(trip.base_ms(), 4.0);
+        assert!(!trip.queued(13.0, 3.0), "within QUEUED_MS of the idle trip");
+        assert!(trip.queued(25.0, 9.0), "a queue: the idle trip holds (it creeps up 2% a second)");
+        assert!(trip.base_ms() < 3.1);
+        let mut r = RateControl::with_floor(15_000);
+        let xr = |sent_kbps: u64, link_queued: bool| Second { fps: 90, pictures: 88, sent_kbps, size: [3712, 2784], max_effort: effort::SHARP, link_queued, ..Second::default() };
+        assert_eq!(r.kbps(100_000), 100_000, "starts at the app's bitrate");
+        r.second(&xr(90_000, true), 100_000);
+        assert_eq!(r.kbps(100_000), 76_500);
+        assert_eq!(r.limit(100_000), limit::LINK);
+        assert!(!r.second(&xr(70_000, false), 100_000), "no effort steps for a fixed shape");
+        for _ in 0..40 {
+            r.second(&xr(3_000, true), 100_000);
+        }
+        assert_eq!(r.kbps(100_000), 15_000, "its own floor");
+        r.restart();
+        assert_eq!(r.kbps(120_000), 120_000, "a new bitrate applies at once");
+    }
+
+    #[test]
     fn a_still_desktop_decides_nothing() {
         let mut r = RateControl::default();
-        let still = Second { fps: 120, pictures: 3, congested_ms: 0.0, held_encoder: 9, tile_ms: 20.0, sent_kbps: 2_000, size: [7680, 2160], max_effort: effort::HALF, decode_ms: 0.0, streams: 2 };
+        let still = Second { fps: 120, pictures: 3, congested_ms: 0.0, held_encoder: 9, tile_ms: 20.0, sent_kbps: 2_000, size: [7680, 2160], max_effort: effort::HALF, decode_ms: 0.0, streams: 2, link_queued: false };
         assert!(!r.second(&still, 400_000));
         assert_eq!(r.effort([7680, 2160], effort::HALF), effort::SHARP);
     }

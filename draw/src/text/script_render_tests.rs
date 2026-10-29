@@ -502,6 +502,7 @@ fn compare_glyphs(ours: &[(String, u16, f32, f32)], theirs: &[(String, u16, f32,
 fn script_render_samples() {
     let out = std::env::var_os("SCRIPT_RENDER_OUT").map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("script_render"));
     std::fs::create_dir_all(&out).unwrap();
+    makepad_font_core::system_fonts::prewarm();
     let (mut layouter, plex, theme) = theme_layouter();
     let mut fallback = SystemFallback::default();
     let mut report = String::new();

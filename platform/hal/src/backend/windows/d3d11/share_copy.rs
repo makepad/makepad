@@ -10,7 +10,7 @@ use super::device::{hr, lock, Device};
 use super::resources::shared_name;
 use makepad_windows_sys::Win32::Foundation::HANDLE;
 use makepad_windows_sys::Win32::Graphics::Direct3D11::*;
-use makepad_windows_sys::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use makepad_windows_sys::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
 use makepad_windows_sys::Win32::Graphics::Dxgi::{IDXGIKeyedMutex, DXGI_SHARED_RESOURCE_READ, DXGI_SHARED_RESOURCE_WRITE};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -23,6 +23,8 @@ struct Slot {
     mutex: IDXGIKeyedMutex,
     w: u32,
     h: u32,
+    /// An NV12 picture (`format::NV12` shared textures an encoder takes); else BGRA8.
+    nv12: bool,
 }
 
 // SAFETY: D3D11 resources of a multithread-protected device are free-threaded
@@ -55,11 +57,11 @@ fn slot(dev: &Device, key: u64) -> Result<Arc<Slot>, String> {
         .map_err(|e| hr(&format!("OpenSharedResourceByName {key:#x}"), e))?;
     let mut td = D3D11_TEXTURE2D_DESC::default();
     unsafe { res.GetDesc(&mut td) };
-    if td.Format != DXGI_FORMAT_B8G8R8A8_UNORM || td.ArraySize != 1 || td.MipLevels != 1 {
-        return Err(format!("shared texture {key:#x} is not single-level BGRA8"));
+    if !(td.Format == DXGI_FORMAT_B8G8R8A8_UNORM || td.Format == DXGI_FORMAT_NV12) || td.ArraySize != 1 || td.MipLevels != 1 {
+        return Err(format!("shared texture {key:#x} is not single-level BGRA8 or NV12"));
     }
     let mutex = unsafe { IDXGIKeyedMutex::query(res.as_raw()) }.map_err(|e| hr("IDXGIKeyedMutex", e))?;
-    let s = Arc::new(Slot { res, mutex, w: td.Width, h: td.Height });
+    let s = Arc::new(Slot { res, mutex, w: td.Width, h: td.Height, nv12: td.Format == DXGI_FORMAT_NV12 });
     lock(slots()).insert(key, s.clone());
     Ok(s)
 }
@@ -173,6 +175,15 @@ fn read_points(dev: &Device, src: &ID3D11Texture2D, w: u32, h: u32, points: &[[u
 /// CEF's accelerated paint) into slot `key`, top-left aligned, clipped to both. Returns the BGRA
 /// texels of `src` at `probes`.
 pub fn copy(src: isize, key: u64, probes: &[[u32; 2]]) -> Result<Vec<[u8; 4]>, String> {
+    let points: Vec<u32> = probes.iter().flat_map(|p| *p).collect();
+    let mut texels = vec![0u8; probes.len() * 4];
+    if !hal_shared_copy(src as i64, key, &points, &mut texels) {
+        return Err(last_error());
+    }
+    Ok(texels.chunks_exact(4).map(|t| [t[0], t[1], t[2], t[3]]).collect())
+}
+
+fn copy_impl(src: isize, key: u64, probes: &[[u32; 2]]) -> Result<Vec<[u8; 4]>, String> {
     let dev = process_device()?;
     let s = slot(&dev, key)?;
     let src = unsafe { device1(&dev)?.OpenSharedResource1(HANDLE(src as _), &ID3D11Texture2D::IID) }
@@ -191,6 +202,10 @@ pub fn copy(src: isize, key: u64, probes: &[[u32; 2]]) -> Result<Vec<[u8; 4]>, S
 
 /// Uploads `width` x `height` BGRA rows (`stride` bytes apart) into slot `key`, clipped to it.
 pub fn upload(key: u64, pixels: &[u8], width: u32, height: u32, stride: usize) -> Result<(), String> {
+    if hal_shared_upload(key, pixels, width, height, stride as u64) { Ok(()) } else { Err(last_error()) }
+}
+
+fn upload_impl(key: u64, pixels: &[u8], width: u32, height: u32, stride: usize) -> Result<(), String> {
     let dev = process_device()?;
     let s = slot(&dev, key)?;
     let (w, h) = (width.min(s.w), height.min(s.h));
@@ -228,6 +243,9 @@ fn picture_impl(key: u64, region: [u32; 4]) -> Result<ID3D11Texture2D, String> {
     let dev = process_device()?;
     let s = slot(&dev, key)?;
     let [x, y, w, h] = region;
+    if s.nv12 {
+        return Err(format!("shared texture {key:#x} is NV12: take it whole (`nv12_picture`)"));
+    }
     if w == 0 || h == 0 || x.checked_add(w).is_none_or(|v| v > s.w) || y.checked_add(h).is_none_or(|v| v > s.h) {
         return Err(format!("region {region:?} outside the {}x{} slot", s.w, s.h));
     }
@@ -294,6 +312,43 @@ fn converter(dev: &Device, input: [u32; 2], output: [u32; 2]) -> Result<std::syn
         *guard = Some(Converter { sizes, vdev, vctx, enumerator, processor });
     }
     Ok(guard)
+}
+
+/// The NV12 slot `key` copied whole on the GPU (its keyed mutex taken for the copy) into a new
+/// NV12 texture on [`device`]: an encoder's input as it lies, the slot free to be drawn again.
+pub fn nv12_picture(key: u64) -> Result<ID3D11Texture2D, String> {
+    unsafe { ID3D11Texture2D::from_raw(hal_shared_nv12_picture(key) as *mut _) }.map_err(|_| last_error())
+}
+
+fn nv12_picture_impl(key: u64) -> Result<ID3D11Texture2D, String> {
+    let dev = process_device()?;
+    let s = slot(&dev, key)?;
+    if !s.nv12 {
+        return Err(format!("shared texture {key:#x} is not NV12"));
+    }
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: s.w,
+        Height: s.h,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_NV12,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let mut out = None;
+    unsafe { dev.device.CreateTexture2D(&desc, None, Some(&mut out)) }.map_err(|e| hr("CreateTexture2D(NV12)", e))?;
+    let out: ID3D11Texture2D = out.ok_or("CreateTexture2D(NV12) returned nothing")?;
+    {
+        let _held = take(&s)?;
+        unsafe {
+            dev.ctx.CopyResource(out.as_ID3D11Resource(), s.res.as_ID3D11Resource());
+            dev.ctx.Flush();
+        }
+    }
+    Ok(out)
 }
 
 /// `picture` (a BGRA texture of [`device`], a [`picture`]) converted and scaled on the GPU into
@@ -367,6 +422,9 @@ fn read_impl(key: u64, region: [u32; 4]) -> Result<Vec<u8>, String> {
     let dev = process_device()?;
     let s = slot(&dev, key)?;
     let [x, y, w, h] = region;
+    if s.nv12 {
+        return Err(format!("shared texture {key:#x} is NV12: take it whole (`nv12_picture`)"));
+    }
     if w == 0 || h == 0 || x.checked_add(w).is_none_or(|v| v > s.w) || y.checked_add(h).is_none_or(|v| v > s.h) {
         return Err(format!("region {region:?} outside the {}x{} slot", s.w, s.h));
     }
@@ -484,6 +542,52 @@ pub fn hal_shared_to_nv12(picture: u64, width: u32, height: u32) -> u64 {
     // borrowed: the caller keeps its reference
     let _ = source.into_raw();
     match out {
+        Ok(t) => t.into_raw() as u64,
+        Err(e) => {
+            failed(e);
+            0
+        }
+    }
+}
+
+/// [`copy`]: `probes` as x, y pairs, their BGRA texels into `out` (4 bytes each).
+#[makepad_relax_api::relax_api]
+pub fn hal_shared_copy(src: i64, key: u64, probes: &[u32], out: &mut [u8]) -> bool {
+    let points: Vec<[u32; 2]> = probes.chunks_exact(2).map(|p| [p[0], p[1]]).collect();
+    match copy_impl(src as isize, key, &points) {
+        Ok(texels) if texels.len() * 4 <= out.len() => {
+            for (o, t) in out.chunks_exact_mut(4).zip(texels) {
+                o.copy_from_slice(&t);
+            }
+            true
+        }
+        Ok(_) => {
+            failed("the probes' buffer is short".into());
+            false
+        }
+        Err(e) => {
+            failed(e);
+            false
+        }
+    }
+}
+
+/// [`upload`].
+#[makepad_relax_api::relax_api]
+pub fn hal_shared_upload(key: u64, pixels: &[u8], width: u32, height: u32, stride: u64) -> bool {
+    match upload_impl(key, pixels, width, height, stride as usize) {
+        Ok(()) => true,
+        Err(e) => {
+            failed(e);
+            false
+        }
+    }
+}
+
+/// [`nv12_picture`]: an `ID3D11Texture2D*` for the caller.
+#[makepad_relax_api::relax_api]
+pub fn hal_shared_nv12_picture(key: u64) -> u64 {
+    match nv12_picture_impl(key) {
         Ok(t) => t.into_raw() as u64,
         Err(e) => {
             failed(e);
