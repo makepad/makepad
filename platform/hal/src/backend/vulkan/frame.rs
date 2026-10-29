@@ -18,6 +18,15 @@ use makepad_gpu_trace::kind as pass_kind;
 use makepad_vulkan::vk;
 use std::sync::Arc;
 
+/// A cached framebuffer's key: the render pass, the attachment views in order, the size.
+pub(super) type FbKey = (vk::RenderPass, Vec<vk::ImageView>, u32, u32);
+/// A framebuffer kept across frames, with the images whose views it names (alive while it is
+/// cached) and when it was last used.
+pub(super) struct Fb { pub raw: vk::Framebuffer, _keep: Vec<Arc<Image>>, used: u64 }
+/// How many framebuffers stay cached, and how long an unused one stays.
+const FB_CACHE: usize = 32;
+const FB_IDLE_NS: u64 = 3_000_000_000;
+
 /// A badge layer's composed images (`Vulkan::badged`): the free and held ones of the window's
 /// size, and the newest (what a snapshot of the window reads).
 #[derive(Default)]
@@ -644,6 +653,7 @@ impl Vulkan {
         }
         let mut attachment_views = Vec::new();
         let mut clear = Vec::new();
+        let keep_attachments = attachments.clone();
         batch.images.extend(attachments);
         // an MSAA pass: the multisampled images first (the render pass's order: colours, their
         // resolve targets, depth, its resolve target)
@@ -682,9 +692,28 @@ impl Vulkan {
             s.ledger.touch(Kind::Texture, pass.depth.index, pass.depth.gen, s.frame, now);
         }
         if let Some(view) = density { attachment_views.push(view); }
-        let framebuffer = unsafe { self.dev.raw.create_framebuffer(&vk::FramebufferCreateInfo::default().render_pass(render_pass.raw)
-            .attachments(&attachment_views).width(target_size[0]).height(target_size[1]).layers(1), None) }.map_err(error)?;
-        batch.framebuffers.push(framebuffer); batch.passes.push(render_pass.clone());
+        // The framebuffer, kept across frames (`Vulkan::fbs`): the attachments' images stay alive
+        // while it is cached, so its views stay valid; one the cache drops goes with this batch,
+        // destroyed after the GPU is done with everything submitted before it.
+        let fb_key: FbKey = (render_pass.raw, attachment_views.clone(), target_size[0], target_size[1]);
+        let framebuffer = match self.fbs.get_mut(&fb_key) {
+            Some(fb) => { fb.used = now; fb.raw }
+            None => {
+                let raw = unsafe { self.dev.raw.create_framebuffer(&vk::FramebufferCreateInfo::default().render_pass(render_pass.raw)
+                    .attachments(&attachment_views).width(target_size[0]).height(target_size[1]).layers(1), None) }.map_err(error)?;
+                crate::profile::count("vk framebuffer made");
+                let idle: Vec<FbKey> = self.fbs.iter().filter(|(_, f)| now.saturating_sub(f.used) > FB_IDLE_NS).map(|(k, _)| k.clone()).collect();
+                for k in idle { if let Some(f) = self.fbs.remove(&k) { batch.framebuffers.push(f.raw); } }
+                if self.fbs.len() >= FB_CACHE {
+                    if let Some(k) = self.fbs.iter().min_by_key(|(_, f)| f.used).map(|(k, _)| k.clone()) {
+                        if let Some(f) = self.fbs.remove(&k) { batch.framebuffers.push(f.raw); }
+                    }
+                }
+                self.fbs.insert(fb_key, Fb { raw, _keep: keep_attachments, used: now });
+                raw
+            }
+        };
+        batch.passes.push(render_pass.clone());
         // a viewport origin (one eye of a side-by-side stereo target) starts the render area: what
         // lies before it is neither cleared nor stored over
         let origin = [((v[0] - offset[0] as f32).max(0.0) as u32).min(target_size[0]), ((v[1] - offset[1] as f32).max(0.0) as u32).min(target_size[1])];
