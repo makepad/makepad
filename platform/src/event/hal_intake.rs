@@ -111,6 +111,7 @@ impl Cx {
             }
         }
         match event {
+            HalEvent::NativeLayerState { id, what, a, b, data } => self.hal_native_layer_state(id, what, a, b, data),
             // ---- pointer
             HalEvent::MouseDown { window, x, y, button, mods } => {
                 let window_id = window_id(window);
@@ -578,6 +579,7 @@ impl Cx {
                 }
                 let user_closed = crate::remote::take_window_close_requested(window_id.id()) || self.windows[window_id].is_created;
                 let title = self.windows[window_id].create_title.clone();
+                self.a11y.close_window(window_id);
                 self.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
                 self.windows[window_id].is_created = false;
                 if user_closed {
@@ -591,8 +593,11 @@ impl Cx {
                     hosted.window_closed(window_id);
                 }
                 self.hal.frames.window_closed(hal_window_id(window_id));
-                // a tray app lives on in its tray without windows
-                if !self.hal.windows.values().any(|w| w.confirmed) && !self.has_tray() {
+                // a tray app lives on in its tray without windows; an offscreen XR window (a remote
+                // headset's slot, `info_flags::XR_OFFSCREEN`) is on no screen: the app ends with its
+                // last window that is (Sandbox serving a headset closed by its caption)
+                let offscreen_xr = self.hal.xr.as_ref().filter(|_| self.xr_offscreen()).map(|xr| xr.window.0);
+                if !self.hal.windows.iter().any(|(id, w)| w.confirmed && Some(*id) != offscreen_xr) && !self.has_tray() {
                     if user_closed {
                         crate::remote::note_user_closed_last_window();
                     }
@@ -855,6 +860,7 @@ impl Cx {
                     if closes { crate::gpu_frame_timer::finish_frame(group); }
                 }
                 let window_frame = self.hal.frames.frame_done(window, frame);
+                self.hal_a11y_presented();
                 // a draw item's backing is reusable once the frame that last read it is done
                 self.textures.1.serials.complete(frame);
                 let pool = self.task_pool();
@@ -866,6 +872,8 @@ impl Cx {
                 match self.hal.hosted.as_mut().map(|h| h.completed(window, frame)) {
                     Some(crate::os::hal::HostedDone::Publish(draw)) => {
                         if window_frame { crate::frame_trace::note_presented(); }
+                        #[cfg(target_os = "linux")]
+                        makepad_hal::hosted_native::presented(self.hal.frames.w.session(), window, frame);
                         Self::send_studio_message(crate::studio::AppToStudio::DrawCompleteAndFlip(draw))
                     }
                     // a hosted frame the GPU dropped: nothing to publish, paint it again
@@ -976,6 +984,16 @@ impl Cx {
                     (K::SelectFolder | K::SaveFolder, false) => A::FolderSelected(paths.swap_remove(0)),
                 };
                 Cx::post_action(action);
+            }
+            HalEvent::A11yState { consumers, .. } => {
+                self.a11y_native_consumers = consumers;
+                if self.a11y.set_consumers(consumers | self.a11y_host_consumers) { self.redraw_all(); }
+            }
+            HalEvent::A11yAction { window, bytes } => {
+                match makepad_a11y::wire::decode_action(bytes) {
+                    Ok(action) => self.dispatch_a11y_action(window_id(window), action),
+                    Err(error) => crate::error!("{error}"),
+                }
             }
             HalEvent::Query { req, bytes } => self.hal_answer_query(req, bytes),
 
@@ -1152,6 +1170,13 @@ impl Cx {
         }
         if ui_signal {
             self.call_event_handler(&Event::Signal);
+        }
+        // a headset linked to the app's XR server: the remote headset slot is there from now on
+        // (an XR display), the app's next drawing finds it
+        if !self.hal.xr_remote_seen && makepad_hal::xr_remote::hal_xr_remote_enabled() {
+            self.hal.xr_remote_seen = true;
+            self.redraw_all();
+            did = true;
         }
         if SignalToUI::check_and_clear_action_signal() {
             self.handle_action_receiver();

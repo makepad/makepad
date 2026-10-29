@@ -19,7 +19,7 @@ use super::audio_tap::AudioTapAccess;
 use super::util::cfstring_ref_to_string;
 use super::util::OSError;
 use super::Signal;
-use crate::media::{audio_option, device_kind, name_hash, AudioBlock, AudioDeviceInfo, AudioFn};
+use crate::media::{audio_option, device_kind, name_hash, AudioBlock, AudioDeviceInfo, AudioEntry};
 use makepad_apple_sys::*;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,11 +29,7 @@ use std::sync::{Arc, Mutex};
 pub const MAX_AUDIO_DEVICE_INDEX: usize = 32;
 
 /// A registered entry.
-#[derive(Clone, Copy)]
-pub struct Entry {
-    pub f: AudioFn,
-    pub ctx: usize,
-}
+pub type Entry = AudioEntry;
 
 /// The entry of one device slot. Locked while the entry runs.
 pub type Slot = Arc<Mutex<Option<Entry>>>;
@@ -64,7 +60,7 @@ pub fn call_input(slot: &Slot, device: u64, time: Option<(f64, u64, f64)>, sampl
         None => (0, 0.0, 0, 0.0),
     };
     let mut block = AudioBlock { device, sample_rate, sample_time, host_time, rate_scalar, has_time, frames: buffer.frames as u32, channels: buffer.channels as u32, planes: planes.as_mut_ptr() };
-    (entry.f)(entry.ctx as *mut std::ffi::c_void, &mut block);
+    entry.call(&mut block);
 }
 
 pub struct AudioUnitAccess {
@@ -1077,7 +1073,7 @@ impl AudioUnit {
                 if let Some(entry) = *guard {
                     let (sample_time, host_time, rate_scalar) = unsafe { ((*time_stamp).mSampleTime, (*time_stamp).mHostTime, (*time_stamp).mRateScalar) };
                     let mut block = AudioBlock { device, sample_rate, sample_time, host_time, rate_scalar, has_time: 1, frames: frame_count, channels: channels as u32, planes: planes.as_mut_ptr() };
-                    (entry.f)(entry.ctx as *mut std::ffi::c_void, &mut block);
+                    entry.call(&mut block);
                 }
                 0
             }

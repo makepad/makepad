@@ -2588,7 +2588,7 @@ impl WifiUi {
         self.hotspot_ask = None;
     }
 
-    /// The nonsecret reading a remote snapshot (`/snap`) reports for the
+    /// The nonsecret reading a remote semantic tree (`ui`) reports for the
     /// open dropdown, so a proof can see the rows, the state and whether
     /// the prompt is up — never what was typed, not even its length.
     pub fn summary(&self) -> String {

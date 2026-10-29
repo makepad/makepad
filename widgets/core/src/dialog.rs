@@ -731,6 +731,14 @@ impl Dialog {
 }
 
 impl Widget for Dialog {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Dialog;
+        node.states = a11y_tree::States::MODAL;
+        node.states.set(a11y_tree::States::HIDDEN, !self.is_open());
+        makepad_platform::a11y::set_string(&mut node.name, &self.title);
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.is_open() && !self.dressed {
             self.dressed = true;

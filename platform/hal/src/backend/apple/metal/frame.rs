@@ -142,6 +142,7 @@ pub struct Batch {
     samples: Option<Arc<PassSamples>>,
     tickets: Vec<Ticket>,
     passes: Vec<(String, Vec<String>)>,
+    native_frames: Vec<super::super::media::layers::Frame>,
 }
 
 /// The state an encoder remembers, so a draw sets only what changed.
@@ -439,13 +440,20 @@ impl Metal {
         let ids: Vec<_> = self.restores.keys().copied().collect();
         for id in ids {
             let base = self.restores.remove(&id).expect("pending window restore");
+            let native = self.native_windows.composition((HOST, id), s.dpi);
+            self.native_sync = native.is_some();
             if let Some(dst) = self.window_target(s, HOST, id, base.w, base.h, now) {
                 self.copy_layer(base.tex.obj.as_id(), dst, [0, 0, base.w, base.h]);
+                if let Some(mut native) = native {
+                    if let Some(drawable) = self.frame_drawable.as_ref().and_then(|fd| fd.drawable.clone()) { native.frame.drawables.push(drawable); }
+                    self.batch.as_mut().expect("batch").native_frames.push(native.frame);
+                }
                 self.finish_window_frame(s, now, true);
                 self.dev.retire(Box::new(base.tex));
             } else {
                 self.restores.insert(id, base);
             }
+            self.native_sync = false;
         }
     }
 
@@ -612,7 +620,7 @@ impl Metal {
     pub(super) fn ensure_batch(&mut self) -> (ObjcId, u64) {
         if self.batch.is_none() {
             let (buffer, seq) = self.dev.new_command_buffer();
-            self.batch = Some(Batch { buffer, seq, opened: Instant::now(), samples: None, tickets: Vec::new(), passes: Vec::new() });
+            self.batch = Some(Batch { buffer, seq, opened: Instant::now(), samples: None, tickets: Vec::new(), passes: Vec::new(), native_frames: Vec::new() });
         }
         let b = self.batch.as_ref().expect("batch");
         (b.buffer.as_id(), b.seq)
@@ -653,7 +661,7 @@ impl Metal {
                 })]
             };
         }
-        self.dev.commit(batch.buffer, InFlightCb { seq: batch.seq, committed_at: None, passes: batch.passes });
+        self.dev.commit(batch.buffer, InFlightCb { seq: batch.seq, committed_at: None, passes: batch.passes }, batch.native_frames);
     }
 
     /// The batch is over: its command buffer goes out and the arena forgets the caller's memory.
@@ -733,6 +741,7 @@ impl Metal {
         let layer = shell.layer(owner, physical)?;
         let layer_id = layer.as_id();
         let drawable: ObjcId = unsafe {
+            if self.native_sync { let () = msg_send![layer_id, setPresentsWithTransaction: YES]; }
             let size: CGSize = msg_send![layer_id, drawableSize];
             if size.width as u32 != w || size.height as u32 != h {
                 let () = msg_send![layer_id, setDrawableSize: CGSize { width: w as f64, height: h as f64 }];
@@ -766,8 +775,8 @@ impl Metal {
         let drawable = RcObjcId::from_unowned(drawable);
         let texture: ObjcId = unsafe { msg_send![drawable.as_id(), texture] };
         let (cb, _) = self.ensure_batch();
-        unsafe {
-            let () = msg_send![cb, presentDrawable: drawable.as_id()];
+        if !self.native_sync {
+            unsafe { let () = msg_send![cb, presentDrawable: drawable.as_id()]; }
         }
         // the ledger's row of the window: three drawables of this size
         let now_size = (window.gen, w, h);
@@ -951,6 +960,38 @@ impl Metal {
         if sid == HOST && is_window && !pick && !badges {
             self.copy_layer_image(s, target, seq);
         }
+        let records = slice(p.layers, view.layers.len()).map(|r| &view.layers[r]).unwrap_or(&[]);
+        let native_frame = is_window && !pick && !badges && !replay
+            && (!records.is_empty() || self.native_windows.contains(sid, target));
+        let fallback = self.shell.is_none() || hosted || self.composing
+            || self.overlays.contains_key(&physical) || self.badged.contains_key(&physical.index)
+            || (owner, physical) != (sid, target)
+            || s.windows.get(sid, target).is_ok_and(|w| w.val.embedded.is_some() || w.val.adoptable)
+            || kind & (target::CAPTURE | target::SNAPSHOT) != 0;
+        let mut native = None;
+        if native_frame {
+            self.native_windows.discard_pending(sid, target);
+            if let Some(pass) = view.passes[passes.clone()].iter().find(|p| p.color.iter().all(|id| id.is_none())) {
+                let placement = self.media.native_frame(s, target, pass.dpi, records, view);
+                native = self.native_windows.prepare(s, target, (owner, physical), self.dev.device, pass, records, view, placement, fallback);
+                if native.is_none() {
+                    // A missing drawable must not commit new geometry against old pixels.
+                    // Complete the ticket as partial so the session retries, without waiting
+                    // for a main-thread closure or losing its frame-progress notification.
+                    s.stats.skipped_draws += 1;
+                    self.batch.as_mut().expect("batch").tickets.push(Ticket { sid, target, frame, font_frames: s.font_frames.clone(), time: PassTime::Buffer, window: false, kind, partial: true, prof: Vec::new(), prof_samples: samples.clone() });
+                    self.composing = false;
+                    self.prof_key = None;
+                    self.commit_batch();
+                    return Some(exec::SubmittedFrame { deps, window: false });
+                }
+            }
+        }
+        if native.is_none() && is_window && !pick && !replay {
+            native = self.native_windows.composition((owner, physical), s.dpi);
+        }
+        self.native_sync = native.is_some();
+        let sync_frame = self.native_sync;
         for pass in &view.passes[passes] {
             let Some(dr) = slice(pass.draws, view.draws.len()) else {
                 s.stats.bad_args += 1;
@@ -961,7 +1002,31 @@ impl Metal {
             let before = s.stats.skipped_draws;
             let pending_before = self.pending_draws;
             let missing_input = pick && view.draws[dr.clone()].iter().any(|draw| read_ids(view.arena, draw.pick_tex).any(|id| self.pick_pending.contains(&(sid, id))));
-            let shaders = self.encode_pass(s, sid, target, is_window, pick, pass, &view.draws[dr], view, cb, seq, index, &samples, frame, now, &mut deps, prof_key);
+            let split = native.as_ref().filter(|_| !fallback && pass.color.iter().all(|id| id.is_none()));
+            let shaders = if let Some(native) = split {
+                // seg0 keeps the original window viewport and target; each upper segment
+                // clears transparent colour and depth, with the same uniforms and zbias.
+                let base = records.first().filter(|g| g.kind == Layer::DRAWS).map_or(pass.draws, |g| g.draws);
+                let base_draws = slice(base, view.draws.len()).unwrap_or(dr.start..dr.start);
+                let mut pass = *pass;
+                pass.load[4] = pass_load::CLEAR;
+                let mut shaders = self.encode_pass(s, sid, target, is_window, pick, &pass, &view.draws[base_draws], view, cb, seq, index, &samples, frame, now, &mut deps, prof_key, None);
+                for segment in &native.segments {
+                    pass.clear[0] = [0.0; 4];
+                    pass.load[0] = pass_load::CLEAR;
+                    let Some(draws) = slice(segment.draws, view.draws.len()) else { continue };
+                    let segment_index = samples.as_ref().and_then(|x| x.reserve());
+                    let upper = self.encode_pass(s, sid, target, is_window, pick, &pass, &view.draws[draws], view, cb, seq, segment_index, &samples, frame, now, &mut deps, prof_key, Some(segment));
+                    if let Some(i) = segment_index { indices.push(i); }
+                    match (shaders.as_mut(), upper) {
+                        (Some(all), Some(upper)) => { all.extend(upper); s.stats.passes += 1; }
+                        _ => shaders = None,
+                    }
+                }
+                shaders
+            } else {
+                self.encode_pass(s, sid, target, is_window, pick, pass, &view.draws[dr], view, cb, seq, index, &samples, frame, now, &mut deps, prof_key, None)
+            };
             partial |= !pick && self.pending_draws != pending_before;
             if pick {
                 let incomplete = missing_input || shaders.is_none() || s.stats.skipped_draws != before;
@@ -981,6 +1046,29 @@ impl Metal {
                 }
             }
         }
+        let mut native_retained = false;
+        if window_encoded && native.is_some() && !fallback && self.retain {
+            // A retained window image must contain all Makepad segments, including transparent
+            // draws above native content. Upper layers are framebuffer-only: replay the existing
+            // draws into `win` rather than reading their drawables. Native pixels are unavailable.
+            if let Some(pass) = view.passes[slice(p.passes, view.passes.len())?].iter().find(|p| p.color.iter().all(|id| id.is_none())) {
+                let w = pass.viewport[2].max(1.0) as u32;
+                let h = pass.viewport[3].max(1.0) as u32;
+                if let (Some(texture), Some(drawable)) = (self.offscreen_target(s, sid, target, w, h, now), self.frame_drawable.as_ref().and_then(|f| f.drawable.clone())) {
+                    let retained = super::layers::Segment { draws: pass.draws, rect: [0.0, 0.0, w as f32, h as f32], drawable, texture, depth: None };
+                    let draws = slice(pass.draws, view.draws.len())?;
+                    let index = samples.as_ref().and_then(|x| x.reserve());
+                    let shaders = self.encode_pass(s, sid, target, is_window, false, pass, &view.draws[draws], view, cb, seq, index, &samples, frame, now, &mut deps, prof_key, Some(&retained));
+                    if let Some(i) = index { indices.push(i); }
+                    native_retained = shaders.is_some();
+                    window_encoded &= native_retained;
+                    if let Some(shaders) = shaders {
+                        s.stats.passes += 1;
+                        self.batch.as_mut().expect("batch").passes.push(("native retained image".into(), shaders));
+                    }
+                }
+            }
+        }
         if window_encoded && !pick && !hosted && !badges {
             window_encoded = self.composite_overlay(s, sid, target, now);
         }
@@ -997,7 +1085,19 @@ impl Metal {
             if kind & target::CAPTURE != 0 && !pick {
                 self.encode_capture(s, sid, target, now);
             }
-            self.finish_window_frame(s, now, kind & target::SNAPSHOT != 0);
+            if let Some(mut native) = native.take().filter(|_| window_encoded) {
+                native.frame.number = frame;
+                if let Some(drawable) = self.frame_drawable.as_ref().and_then(|fd| fd.drawable.clone()) {
+                    native.frame.drawables.push(drawable);
+                    native.frame.drawables.extend(native.segments.into_iter().map(|s| s.drawable));
+                }
+                // A lent/badged app can render into the host's retained image without owning
+                // a drawable. Still hide its upper surfaces; the host presents the composition.
+                self.batch.as_mut().expect("batch").native_frames.push(native.frame);
+            }
+            if native_retained { drop(self.frame_drawable.take()); }
+            else { self.finish_window_frame(s, now, kind & target::SNAPSHOT != 0); }
+            self.native_sync = false;
         }
         self.composing = false;
         self.prof_key = None;
@@ -1005,7 +1105,9 @@ impl Metal {
         if let Some(b) = self.batch.as_mut().filter(|_| !replay) {
             b.tickets.push(Ticket { sid, target, frame, font_frames: s.font_frames.clone(), time, window: window_encoded && !pick && !hosted, kind, partial, prof, prof_samples: samples.clone() });
         }
-        if alone {
+        if alone || sync_frame {
+            // Do not hold several unpresented native frames in a batch: segment drawable
+            // pools must stay available even when the main thread has not run its closure.
             self.commit_batch();
         }
         Some(exec::SubmittedFrame { deps, window: window_encoded && !pick && !hosted })
@@ -1070,12 +1172,18 @@ impl Metal {
         now: u64,
         deps: &mut Vec<LentRef>,
         prof_key: Option<FrameKey>,
+        segment: Option<&super::layers::Segment>,
     ) -> Option<Vec<String>> {
-        let viewport = pass.viewport;
-        let (vw, vh) = (viewport[2].max(0.0), viewport[3].max(0.0));
+        let mut viewport = pass.viewport;
+        if let Some(segment) = segment {
+            viewport[0] -= segment.rect[0];
+            viewport[1] -= segment.rect[1];
+        }
+        let (vw, vh) = segment.map_or((viewport[2].max(0.0), viewport[3].max(0.0)), |s| (s.rect[2], s.rect[3]));
         // ---- attachments
         let depth_only = self.depth_only(sid, is_window, pick, pass, draws);
         let mut colors: Vec<(usize, Id, ObjcId)> = Vec::new();
+        if let Some(segment) = segment { colors.push((0, Id::NONE, segment.texture)); }
         for (i, id) in pass.color.iter().enumerate() {
             if id.is_none() || depth_only {
                 continue;
@@ -1118,6 +1226,8 @@ impl Metal {
         }
         let depth = if pass.depth.is_none() {
             None
+        } else if let Some(depth) = segment.and_then(|s| s.depth) {
+            Some((pass.depth, depth))
         } else {
             match texture_obj(&mut self.tex, self.dev.device, s, pass.depth, seq) {
                 Some(obj) => Some((pass.depth, obj)),
@@ -1308,7 +1418,15 @@ impl Metal {
                     let _: () = msg_send![enc.id, setCullMode: cull];
                 }
             }
-            let scissor = (!d.scissor.iter().any(|v| v.is_nan())).then(|| d.scissor.map(|v| v.max(0.0) as u32));
+            let scissor = (!d.scissor.iter().any(|v| v.is_nan())).then(|| {
+                let mut r = d.scissor;
+                if let Some(segment) = segment {
+                    let x = r[0] - segment.rect[0];
+                    let y = r[1] - segment.rect[1];
+                    r = [x.max(0.0), y.max(0.0), (x + r[2] - x.max(0.0)).max(0.0), (y + r[3] - y.max(0.0)).max(0.0)];
+                }
+                r.map(|v| v.max(0.0) as u32)
+            });
             enc.set_scissor(scissor);
 
             // buffers: the geometry, the instances, then the uniform blocks

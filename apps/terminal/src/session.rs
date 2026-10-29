@@ -55,13 +55,14 @@ impl Session {
         cwd: Option<&Path>,
         shell: Option<&str>,
         command: Option<&str>,
+        env: &[(&str, &str)],
     ) -> io::Result<Session> {
         let mut pty = Pty::spawn(
             cols.max(2) as u16,
             rows.max(2) as u16,
             shell,
             command,
-            &[],
+            env,
             cwd,
         )?;
         let writer = pty.writer_clone();
@@ -184,7 +185,7 @@ mod tests {
     #[test]
     fn dropping_an_idle_session_does_not_block() {
         let mut session =
-            Session::spawn(80, 24, None, None, Some("sleep 30")).expect("a pty session");
+            Session::spawn(80, 24, None, None, Some("sleep 30"), &[]).expect("a pty session");
         // Give the job time to start and the reader thread time to park.
         std::thread::sleep(Duration::from_millis(300));
         session.drain();

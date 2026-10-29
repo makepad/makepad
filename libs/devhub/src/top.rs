@@ -33,7 +33,7 @@ pub fn parse_gpu_use(text: &str) -> Vec<GpuUse> {
 
 /// The driver's tool where it is installed (no PATH search on every call).
 pub fn nvidia_smi() -> Option<&'static str> {
-    ["/usr/bin/nvidia-smi", "/usr/local/bin/nvidia-smi", "/opt/bin/nvidia-smi"].into_iter().find(|p| std::path::Path::new(p).exists())
+    ["/usr/bin/nvidia-smi", "/usr/local/bin/nvidia-smi", "/opt/bin/nvidia-smi", "C:\\Windows\\System32\\nvidia-smi.exe"].into_iter().find(|p| std::path::Path::new(p).exists())
 }
 
 fn smi(args: &[&str]) -> Option<String> {
@@ -129,7 +129,31 @@ fn sample() -> (f64, Vec<ProcRow>) {
     (cpu, rows)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+fn sample() -> (f64, Vec<ProcRow>) {
+    let procs = || -> std::collections::HashMap<u32, (String, u64, u64)> {
+        crate::os::processes().into_iter().filter_map(|(pid, name, _)| crate::os::proc_numbers(pid).map(|(ns, rss)| (pid, (name, ns, rss)))).collect()
+    };
+    let (s0, p0) = (crate::os::cpu_times(), procs());
+    let t0 = std::time::Instant::now();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let (s1, p1) = (crate::os::cpu_times(), procs());
+    let ns = t0.elapsed().as_nanos().max(1) as f64;
+    let cpu = match (s0, s1) {
+        (Some(a), Some(b)) => cpu_pct(a, b),
+        _ => 0.0,
+    };
+    let rows = p1
+        .into_iter()
+        .map(|(pid, (name, t, rss))| {
+            let before = p0.get(&pid).map_or(t, |p| p.1);
+            ProcRow { pid, name, cpu_pct: t.saturating_sub(before) as f64 / ns * 100.0, rss_mb: rss as f64 / 1048576.0, gpu_mb: 0.0 }
+        })
+        .collect();
+    (cpu, rows)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 fn sample() -> (f64, Vec<ProcRow>) {
     // macOS (and the rest): `ps` gives a decaying CPU average per process; the machine's use is
     // their sum over the cores
@@ -203,7 +227,13 @@ fn argv_bytes(pid: u32) -> Option<Vec<u8>> {
     Some(out)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// Windows: the program's file name (another process's argv is not asked).
+#[cfg(windows)]
+pub fn label(pid: u32) -> Option<String> {
+    crate::os::exe_name(pid)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn label(_pid: u32) -> Option<String> {
     None
 }

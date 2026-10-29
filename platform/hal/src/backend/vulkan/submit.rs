@@ -203,6 +203,10 @@ pub(super) struct Batch {
     pub tickets: Vec<Ticket>,
     pub scanout: Option<(Arc<dyn super::surface::FramePresenter>, Arc<Image>, Token, Id, Id, u32, u64)>,
     pub present: Option<Present>,
+    #[cfg(target_os = "android")]
+    pub native_frame: Option<(crate::backend::android::native_layer::Frame, Option<Arc<super::share::sync::Semaphore>>)>,
+    #[cfg(target_os = "android")]
+    native_signal: Option<Arc<super::share::sync::Semaphore>>,
     /// The frame image a frame tap gets after the fence (`crate::frame_tap::offer`): its
     /// window as the core presents it (session, window) and an image nothing writes while held.
     pub tap: Option<(u32, Id, Arc<Image>)>,
@@ -229,7 +233,7 @@ pub(super) struct Batch {
     #[cfg(target_os = "linux")]
     pub external_signals: Vec<(Arc<super::share::sync::Semaphore>, u64)>,
     #[cfg(target_os = "linux")]
-    pub release_fence: Option<(Arc<super::share::sync::Semaphore>, crate::dmabuf::FenceReply)>,
+    pub release_fence: Option<(Arc<super::share::sync::Semaphore>, crate::completion::CompletionReply)>,
     /// Hosted images (a host's shared swapchain image with this writer's timeline) this batch
     /// rendered a frame into. Only these publish a frame on their timeline (`finish`): a batch
     /// that merely reads a hosted image (a snapshot or grab of the window) must neither wait
@@ -287,6 +291,8 @@ impl Batch {
             query: (vk::QueryPool::null(), 0), idle_query: (vk::QueryPool::null(), 0), prof: None, prof_key: None,
             images: Vec::new(), buffers: Vec::new(), pipelines: Vec::new(), passes: Vec::new(), framebuffers: Vec::new(),
             descriptors: FastMap::default(), tickets: Vec::new(), scanout: None, present: None, tap: None, arena: None, arenas: Vec::new(), reserve, allocs: 0, draw_counts: FastMap::default(),
+            #[cfg(target_os = "android")] native_frame: None,
+            #[cfg(target_os = "android")] native_signal: None,
             sets: FastMap::default(), set_key: Vec::new(), blocks: [(0, 0, vk::Buffer::null(), 0); 8], finished_ns: 0,
             #[cfg(target_os = "linux")] external_waits: Vec::new(),
             #[cfg(target_os = "linux")] external_signals: Vec::new(),
@@ -507,6 +513,13 @@ impl Batch {
             let waits: Vec<vk::Semaphore> = Vec::new();
             let signals: Vec<vk::Semaphore> = Vec::new();
             let stages: Vec<vk::PipelineStageFlags> = Vec::new();
+            #[cfg(target_os = "android")]
+            let signals = {
+                let mut signals = signals;
+                self.native_signal = self.native_frame.as_ref().and_then(|(_, sem)| sem.clone());
+                if let Some(sem) = &self.native_signal { signals.push(sem.raw); }
+                signals
+            };
             #[cfg(target_os = "linux")]
             let (mut waits, mut signals, mut stages) = (waits, signals, stages);
             #[cfg(target_os = "linux")]
@@ -538,6 +551,15 @@ impl Batch {
                     outcome
                 }
             };
+            #[cfg(target_os = "android")]
+            if outcome == Outcome::Ran {
+                if let Some(sem) = &self.native_signal {
+                    match sem.export(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD) {
+                        Ok(fd) => { if let Some((frame, _)) = self.native_frame.take() { frame.post(fd); } }
+                        Err(e) => eprintln!("[hal-android-layer] fence export: {e}; posting after GPU completion"),
+                    }
+                }
+            }
             #[cfg(target_os = "linux")]
             if outcome == Outcome::Ran {
                 if let Some((sem, reply)) = &self.release_fence {
@@ -762,6 +784,8 @@ impl Batch {
                 }
             }
         }
+        #[cfg(target_os = "android")]
+        if !failed { if let Some((frame, _)) = self.native_frame.take() { frame.post(None); } }
         let scanout = self.scanout.take();
         let tap = self.tap.take().filter(|_| !failed);
         let self_prof_key = self.prof_key;

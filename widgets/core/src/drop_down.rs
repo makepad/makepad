@@ -1017,6 +1017,92 @@ impl WidgetNode for DropDown {
 }
 
 impl Widget for DropDown {
+    fn semantics_parts(&self, _cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        if self.is_active {
+            return;
+        }
+        let Ok(map) = self.popup_global.map.try_borrow() else {
+            return;
+        };
+        let Some(menu) = map.get(&self.popup_menu_key()) else {
+            return;
+        };
+        // Templates share a popup; only its current owner may hide it.
+        if menu.tree_parent != self.widget_uid() {
+            return;
+        }
+        out.push((
+            0,
+            None,
+            a11y_tree::Node {
+                id: a11y_tree::NodeId::widget(menu.widget_uid().0),
+                role: a11y_tree::Role::Menu,
+                states: a11y_tree::States::HIDDEN,
+                ..Default::default()
+            },
+        ));
+    }
+
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        action: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionArg, ActionResult, Actions as A};
+        if self.disabled(cx) {
+            return ActionResult::Disabled;
+        }
+        if action.action == A::EXPAND {
+            self.set_active(cx);
+        } else if action.action == A::COLLAPSE {
+            self.set_closed(cx);
+        } else if action.action == A::SELECT {
+            let ActionArg::Text(label) = &action.arg else {
+                return ActionResult::Unsupported;
+            };
+            let Some(index) = self.labels.iter().position(|item| item == label) else {
+                return ActionResult::Unsupported;
+            };
+            if self.item_is_disabled(index) {
+                return ActionResult::Disabled;
+            }
+            self.selected_item = index;
+            cx.widget_action_with_data(
+                &self.action_data,
+                self.widget_uid(),
+                DropDownAction::Select(index),
+            );
+            self.emit_change(cx);
+            self.set_closed(cx);
+        } else {
+            return ActionResult::Unhandled;
+        }
+        self.redraw(cx);
+        ActionResult::Handled
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::ComboBox;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::EXPAND;
+        node.states.insert(a11y_tree::States::HAS_POPUP);
+        node.name =
+            (|| -> Option<String> { Some(self.selected_item_label()) })().unwrap_or_default();
+        node.value = self.selected_item_label();
+        node.states.set(a11y_tree::States::EXPANDED, self.is_active);
+        node.states
+            .set(a11y_tree::States::COLLAPSED, !self.is_active);
+        node.actions = a11y_tree::Actions::FOCUS
+            | a11y_tree::Actions::EXPAND
+            | a11y_tree::Actions::COLLAPSE
+            | a11y_tree::Actions::SELECT;
+    }
+
     /// Every item's label, and the list opened so the run draws it.
     fn scan(&mut self, cx: &mut Cx, _scan: &ScanEvent, _scope: &mut Scope) {
         for label in &self.labels {
@@ -1043,9 +1129,7 @@ impl Widget for DropDown {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
-    fn snapshot_selected(&self, _cx: &Cx) -> Option<String> {
-        Some(self.selected_item_label())
-    }
+
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         self.animator_handle_event(cx, event);

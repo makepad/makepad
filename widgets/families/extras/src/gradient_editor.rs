@@ -1972,6 +1972,14 @@ impl WidgetNode for GradientEditor {
 }
 
 impl Widget for GradientEditor {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value =
+            (|| -> Option<String> { Some(self.gradient.describe()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -2032,9 +2040,7 @@ impl Widget for GradientEditor {
         self.gradient.describe()
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.gradient.describe())
-    }
+
 }
 
 impl GradientEditorRef {

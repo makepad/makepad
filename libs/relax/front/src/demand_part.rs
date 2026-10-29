@@ -46,8 +46,8 @@ impl Codec for DemandPart {
         Some(Self { key: Codec::get(r)?, ..Self::default() })
     }
 }
-const PART_VERSION: u32 = 8;
-const PART_DOMAIN: &str = "demand-part-v8";
+const PART_VERSION: u32 = 9;
+const PART_DOMAIN: &str = "demand-part-v9";
 
 type Resolve<'a> = dyn FnMut(&str, u128) -> Option<&'static [u8]> + 'a;
 
@@ -197,7 +197,10 @@ impl DemandPart {
         Some(Self { key, inputs: Codec::get(&mut r)?, probes: Codec::get(&mut r)?,
             late_inputs: Codec::get(&mut r)?, ..Self::default() })
     }
-    pub fn read(key: u128, bytes: &[u8], images: &mut Resolve<'_>) -> Option<Self> {
+    /// The part of the crate at load position `ci`: a part is order-free (its files are its own
+    /// crate's, its dependencies a set of surface identities, its namespace spellings), so one
+    /// recorded at another position (a reordered load's base graph) reads as this crate's.
+    pub fn read(key: u128, bytes: &[u8], ci: usize, images: &mut Resolve<'_>) -> Option<Self> {
         if crate::crate_image::file_hash(PART_DOMAIN, bytes) != key { return None; }
         let mut r = Decode::new(bytes);
         if u32::get(&mut r)? != PART_VERSION { return None; }
@@ -234,6 +237,7 @@ impl DemandPart {
         let mut macro_records = Vec::new();
         part.macros = MacroPart::get_referenced(&mut r, &store, images, &mut definitions, &strings, &mut macro_records)?;
         part.files = Pack::unpack(&mut r, &strings)?;
+        for f in &mut part.files { f.ci = ci; }
         part.unindexed = Pack::unpack(&mut r, &strings)?;
         part.items = Pack::unpack(&mut r, &strings)?;
         part.eager = Pack::unpack(&mut r, &strings)?;
@@ -379,10 +383,13 @@ impl DemandPart {
 pub(crate) struct Recording {
     pending: relax_session::sync::Mutex<Option<(Vec<PreCrate>, Names, Vec<DemandPart>)>>,
     ready: relax_session::sync::Mutex<Vec<Arc<DemandPart>>>,
+    /// the plan's namespaces are its stored parts' plus their closure delta (a local
+    /// selection): with every part's namespace stored, that delta is the recording's too
+    kept_delta: Option<Arc<demand::ClosureDelta>>,
 }
 impl Recording {
-    pub(super) fn new(crates: &[PreCrate], names: Names, parts: Vec<DemandPart>) -> Self {
-        Self { pending: relax_session::sync::Mutex::new(Some((crates.to_vec(), names, parts))), ready: relax_session::sync::Mutex::new(Vec::new()) }
+    pub(super) fn new(crates: &[PreCrate], names: Names, parts: Vec<DemandPart>, kept_delta: Option<Arc<demand::ClosureDelta>>) -> Self {
+        Self { pending: relax_session::sync::Mutex::new(Some((crates.to_vec(), names, parts))), ready: relax_session::sync::Mutex::new(Vec::new()), kept_delta }
     }
 }
 impl DemandImage {
@@ -395,6 +402,20 @@ impl DemandImage {
         let Some((crates, final_names, mut parts)) = pending.take() else { return recording.ready.lock().unwrap().clone(); };
         let profile = crates.first().is_some_and(|c| c.cfg.session.runtime.profile);
         let _profile = crate::load_profile::span(profile, "rust-demand-record", "graph writer");
+        // nothing to take from the namespaces: every part keeps its stored one, and the delta the
+        // plan applied over them is the one to record (the namespaces are not rebuilt to find it)
+        if let Some(kept) = recording.kept_delta.as_ref().filter(|_| parts.iter().all(|p| !p.namespace.is_empty())) {
+            drop((final_names, crates));
+            if let Some(first) = parts.first_mut() {
+                if first.closure_delta.as_ref().is_none_or(|old| !old.same_image(kept)) { first.key = 0; }
+                first.closure_delta = Some(kept.clone());
+            }
+            if profile { eprintln!("rx-demand-record: {} parts, every namespace and the closure delta kept", parts.len()); }
+            let parts = parts.into_iter().map(Arc::new).collect::<Vec<_>>();
+            *recording.ready.lock().unwrap() = parts.clone();
+            drop(pending);
+            return parts;
+        }
         let t0 = std::time::Instant::now();
         let mut names = Names::new(&crates);
         // A crate's namespace is final once it is prepared: imports bind only in scopes of
@@ -423,7 +444,7 @@ impl DemandImage {
         for (ci, part) in parts.iter_mut().enumerate() {
             if fresh[ci] {
                 part.namespace_id = crate::crate_image::file_hash("", &part.namespace);
-                part.dependencies = names.reference_crates(ci).into_iter().filter(|&d| d < ci).map(|d| identities[d]).collect();
+                part.dependencies = super::dependency_identities(&names.reference_crates(ci).into_iter().filter(|&d| d < ci).collect::<Vec<_>>(), &identities);
                 part.seal_identity();
             }
             identities.push(part.surface_id);

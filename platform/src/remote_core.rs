@@ -324,7 +324,6 @@ pub struct QueuedCmd {
 pub enum Cmd {
     Activity(Sender<Reply>),
     Gamepads(Sender<Reply>),
-    Focus(Sender<Reply>),
     Input {
         window: Option<usize>,
         inputs: Vec<Input>,
@@ -340,22 +339,8 @@ pub enum Cmd {
         tx: Sender<Reply>,
     },
     CancelGrabs(Vec<u64>),
-    Dump {
-        /// One line per widget with its id path instead of the tree.
-        paths: bool,
-        tx: Sender<Reply>,
-    },
     /// The task pool's one-line summary (workers, jobs, queue waits).
     PoolSummary(Sender<Reply>),
-    Snap {
-        window: Option<usize>,
-        needle: String,
-        /// `q=path:a.b` / `path=a.b`: match id paths, exactly or as a
-        /// suffix of whole segments, instead of the substring search.
-        path: Option<String>,
-        all: bool,
-        tx: Sender<Reply>,
-    },
     /// Run `frames` frames of the virtual clock at `fps`; answered after
     /// the last is presented (and captured, while a capture runs).
     Step {
@@ -456,6 +441,8 @@ impl Cmd {
 }
 
 pub enum Input {
+    /// AppKit hit testing and native delivery; Makepad hits return to the UI queue.
+    NativeClick { x: f64, y: f64 },
     Mouse {
         kind: MouseKind,
         x: f64,
@@ -718,13 +705,12 @@ pub fn err(msg: &str) -> Answer {
 pub const COMMANDS: &[Command] = &[
     Command { words: "status", args: "[w=ID]", answers: "{\"app\",\"pid\",\"w\":[{\"i\":id,\"t\":title,\"sz\":[w,h],\"px\":[w,h],\"dpi\",\"pos\":[x,y]}],\"activity\"}", service: "ui", risk: CmdRisk::Read, params: "\"w\":{\"type\":\"integer\",\"description\":\"window id (status lists them)\"}", required: &[], positional: &[] },
     Command { words: "gamepads", args: "", answers: "connected controllers and their current input states", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
-    Command { words: "focus", args: "", answers: "{\"key\":{\"r\":[x,y,w,h],\"w\",\"p\":widget path}|null,\"window\":focused window|null}: who has the key focus (rect as snap gives it) and which window is focused", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "activity", args: "", answers: "native user activity: user_active, user_seq, idle_ms, quiet_ms, held, last_input, window (also in status)", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "grab", args: "[w=ID] [scale=1] [out=FILE]", answers: "client side (frames service): the window as a PNG file; prints {\"png\":path,\"w\",\"sz\",\"capture_ms\",\"encode_ms\",\"capture_kind\"}", service: "ui", risk: CmdRisk::Read, params: "\"w\":{\"type\":\"integer\"},\"scale\":{\"type\":\"number\"},\"out\":{\"type\":\"string\"}", required: &[], positional: &[] },
     Command { words: "gseq", args: "[n=8] [every_ms=50] [scale=1] [w=ID] [out=DIR]", answers: "client side (frames service): n frames, a separate present per deadline; n=1..64, every_ms>=8, span<=60s", service: "ui", risk: CmdRisk::Read, params: "\"n\":{\"type\":\"integer\"},\"every_ms\":{\"type\":\"integer\"},\"scale\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"out\":{\"type\":\"string\"}", required: &[], positional: &[] },
     Command { words: "rec", args: "[out=DIR] [seconds=5] [fps=30] [codec=png|raw] [w=ID]", answers: "client side (frames cap=1): capture by streaming -- every presented frame is read back on the device and written here as frame_<slot>.png; prints {\"dir\",\"frames\",\"missing\",\"slots\",\"sz\"}; no video encoder on the device", service: "ui", risk: CmdRisk::Read, params: "\"seconds\":{\"type\":\"number\"},\"fps\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"out\":{\"type\":\"string\"}", required: &[], positional: &[] },
     Command { words: "gq", args: "[scale=1] [w=ID]", answers: "client side: FINISH HERE: grab every window, then quit. {\"png\":[paths],\"quit\":1}", service: "ui", risk: CmdRisk::Destructive, params: "\"scale\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"}", required: &[], positional: &[] },
-    Command { words: "mouse", args: "k=move|down|up|click|scroll|pinch x= y= [b=0] [dx= dy=] [scale= phase=begin|update|end] [scroll phase=touched|began|changed|ended|momentum|momentum_ended: a touchpad scroll] [time=] [hw=1] [shift=1 ctrl=1 alt=1 cmd=1] [w=ID] [wait=1]", answers: "inject a mouse event through the real event path", service: "ui", risk: CmdRisk::Act, params: "\"k\":{\"type\":\"string\",\"enum\":[\"move\",\"down\",\"up\",\"click\",\"scroll\",\"pinch\"]},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"b\":{\"type\":\"integer\"},\"dx\":{\"type\":\"number\"},\"dy\":{\"type\":\"number\"},\"scale\":{\"type\":\"number\"},\"phase\":{\"type\":\"string\",\"enum\":[\"begin\",\"update\",\"end\",\"touched\",\"began\",\"changed\",\"ended\",\"momentum\",\"momentum_ended\"]},\"time\":{\"type\":\"number\"},\"hw\":{\"type\":\"boolean\"},\"shift\":{\"type\":\"boolean\"},\"ctrl\":{\"type\":\"boolean\"},\"alt\":{\"type\":\"boolean\"},\"logo\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["k"], positional: &[] },
+    Command { words: "mouse", args: "k=move|down|up|click|scroll|pinch x= y= [b=0] [dx= dy=] [scale= phase=begin|update|end] [scroll phase=touched|began|changed|ended|momentum|momentum_ended: a touchpad scroll] [time=] [hw=1] [native=1: AppKit primary click] [shift=1 ctrl=1 alt=1 cmd=1] [w=ID] [wait=1]", answers: "inject a mouse event through the real event path", service: "ui", risk: CmdRisk::Act, params: "\"k\":{\"type\":\"string\",\"enum\":[\"move\",\"down\",\"up\",\"click\",\"scroll\",\"pinch\"]},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"b\":{\"type\":\"integer\"},\"dx\":{\"type\":\"number\"},\"dy\":{\"type\":\"number\"},\"scale\":{\"type\":\"number\"},\"phase\":{\"type\":\"string\",\"enum\":[\"begin\",\"update\",\"end\",\"touched\",\"began\",\"changed\",\"ended\",\"momentum\",\"momentum_ended\"]},\"time\":{\"type\":\"number\"},\"hw\":{\"type\":\"boolean\"},\"native\":{\"type\":\"boolean\"},\"shift\":{\"type\":\"boolean\"},\"ctrl\":{\"type\":\"boolean\"},\"alt\":{\"type\":\"boolean\"},\"logo\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["k"], positional: &[] },
     Command { words: "click", args: "x= y= [b=0] [w=ID] [wait=1]", answers: "mouse k=click", service: "ui", risk: CmdRisk::Act, params: "\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"b\":{\"type\":\"integer\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["x", "y"], positional: &[] },
     Command { words: "key", args: "t=TEXT | c=KeyA [k=down|up|press] [shift=1 ...] [w=ID] [wait=1]", answers: "type text or press a key (Escape ReturnKey Tab Backspace ArrowLeft F1 Key1 ..)", service: "ui", risk: CmdRisk::Act, params: "\"t\":{\"type\":\"string\",\"description\":\"text to type\"},\"c\":{\"type\":\"string\",\"description\":\"a key code: Escape ReturnKey Tab Backspace ArrowLeft F1 KeyA Key1 ..\"},\"k\":{\"type\":\"string\",\"enum\":[\"down\",\"up\",\"press\"]},\"shift\":{\"type\":\"boolean\"},\"ctrl\":{\"type\":\"boolean\"},\"alt\":{\"type\":\"boolean\"},\"logo\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "text", args: "t=TEXT [w=ID] [wait=1]", answers: "type text", service: "ui", risk: CmdRisk::Act, params: "\"t\":{\"type\":\"string\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["t"], positional: &[] },
@@ -734,8 +720,6 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "net", args: "", answers: "the app's HTTP requests and network event queue, answered off the UI thread: a verdict per runtime first (STUCK: an answer waits unread in the app's queue, with when the app last read it / WAITING: in flight with nothing from the backend / OK), then per request: id, method and URL, the backend's answer and when, whether the app read it", service: "logs", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "midi", args: "a= b= c= [p=PORT] | k=ports n=NAME[,NAME] | k=out | k=reset", answers: "inject a MIDI message as if a device sent it; declare ports; read back what the app sent", service: "ui", risk: CmdRisk::Act, params: "\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"integer\"},\"c\":{\"type\":\"integer\"},\"p\":{\"type\":\"string\"},\"k\":{\"type\":\"string\",\"enum\":[\"ports\",\"out\",\"reset\"]},\"n\":{\"type\":\"string\"}", required: &[], positional: &[] },
     Command { words: "trace", args: "[topics=a,b] [off=1]", answers: "get / set the trace topics", service: "logs", risk: CmdRisk::Act, params: "\"topics\":{\"type\":\"string\"},\"off\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
-    Command { words: "snap", args: "[q=TEXT|path:a.b] [w=ID] [all=1]", answers: "widget rects ready to click: {\"s\":[{\"i\",\"ty\",\"r\":[x,y,w,h],\"w\",\"t\",\"p\"}]}", service: "ui", risk: CmdRisk::Read, params: "\"q\":{\"type\":\"string\",\"description\":\"text to find, or path:a.b\"},\"w\":{\"type\":\"integer\"},\"all\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
-    Command { words: "dump", args: "[paths=1]", answers: "the widget tree as indented text (id, type, x y w h); paths=1 one line per widget", service: "ui", risk: CmdRisk::Read, params: "\"paths\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "step", args: "[frames=1] [fps=60] [wait_loads=1] [w=ID]", answers: "--virtual-clock only: run frames of 1/fps; answers {\"frame\",\"time\"} after the last", service: "ui", risk: CmdRisk::Act, params: "\"frames\":{\"type\":\"integer\"},\"fps\":{\"type\":\"number\"},\"wait_loads\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "settled", args: "", answers: "{\"settled\":bool,\"reasons\":[next_frame|redraw|repaint|timer|step|shaders|loads],\"loads\":{kind:n}}", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "uicounts", args: "", answers: "{\"ins\":n,\"cyc\":n,\"cpu_ns\":n} of the UI thread so far (ins/cyc: thread_counters, user mode: macOS thread_selfcounts, Linux perf_event; else 0)", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
@@ -961,6 +945,12 @@ pub fn route_mouse(p: &Params, force_kind: Option<&str>) -> Answer {
         hw,
         time,
     };
+    if p.flag(&["native"]) {
+        if !matches!(kind.as_str(), "click" | "tap") || button != 0 || hw || mods != Default::default() || time.is_some() {
+            return err("native=1 supports a primary click without hw, modifiers or a timestamp");
+        }
+        return send_input(window, vec![Input::NativeClick { x, y }], p.flag(&["wait"]));
+    }
     let inputs = match kind.as_str() {
         "move" => vec![mouse(MouseKind::Move)],
         "down" => vec![mouse(MouseKind::Move), mouse(MouseKind::Down)],
@@ -1888,8 +1878,6 @@ mod tests {
             ("text", 1),
             ("drop", 1),
             ("trace", 1),
-            ("dump", 1),
-            ("snap", 1),
             ("step", 1),
             ("settled", 1),
             ("uicounts", 1),
@@ -1921,7 +1909,6 @@ mod tests {
             ("net", 1),
             ("midi", 1),
             ("cursor", 1),
-            ("focus", 1),
         ];
         for (line, used) in routes {
             let r = resolve(&words(line)).unwrap_or_else(|e| panic!("{line}: {e}"));
@@ -1930,8 +1917,9 @@ mod tests {
         let design = resolve(&words("design insert path=a")).unwrap();
         assert_eq!((design.key, design.sub.as_deref(), design.used), ("design", Some("insert"), 2));
         assert!(resolve(&words("design")).is_err());
-        // a sub-command word that is not one is a flag of the one-word command
-        assert_eq!(resolve(&words("snap all")).unwrap().used, 1);
+        for removed in ["snap", "dump", "focus"] {
+            assert!(resolve(&words(removed)).unwrap_err().contains("unknown command"));
+        }
         assert!(resolve(&words("nope")).unwrap_err().contains("unknown command"));
         // the table has no command the test above does not know of
         // design, and the four client-side ones

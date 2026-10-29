@@ -8,9 +8,8 @@
 //! ```text
 //! wait_frame [n]                        wait until the app answered n more frames (default 1); steps
 //!                                       wait 10 s, the run's first wait_frame MAKEPAD_HAL_FIRST_FRAME_S (300)
-//! click <widget path | x y>             press and release the primary button at the widget's
-//!                                       centre (the path suffix `/snap` reports) or at the point
-//! click <widget path> @ <dx> <dy>       the same at (dx, dy) from the widget's top-left corner
+//! click <query | x y>                   semantic press (path=a.b, role=button, name=Save) or raw point input
+//! click <query> @ <dx> <dy>             the same at (dx, dy) from the widget's top-left corner
 //! key <name> [mods]                     key down + up; mods: shift ctrl alt logo, joined by + or blanks
 //! text "<s>"                            typed text
 //! scroll dx dy x y                      wheel scroll at the point
@@ -19,7 +18,7 @@
 //! query <request>                       ask the app, keep the reply for `expect`
 //! expect <substring>                    the last query's reply contains it (asked again until it does);
 //!                                       a reply line ends with `\n`, so "\t15\n" means the text is exactly 15
-//! expect_text <widget path> "<text>"    the visible widget's text is exactly this (asked again until it is)
+//! expect_text <query>       "<text>"    the visible widget's text is exactly this (asked again until it is)
 //! snapshot <name>                       the widget tree now, written to `<snapshot_dir>/<name>.txt` (a backend
 //!                                       with a raster also writes the window as `<name>.png`)
 //! budget max_frame_ms <n>               longest CPU time Cx spent building one frame
@@ -33,12 +32,12 @@
 //!                                       to the app itself; input steps always go to the app itself
 //! ```
 //!
-//! The app answers the request `widgets` (generic: every app with a widget tree): one line per
-//! widget, tab separated: `path type visible x y w h window text`, positions window-local. The
-//! runner stops at the first failing step.
+//! `query ui [QUERY]` reads the semantic mirror. `query draw_owners` remains a renderer query.
+//! The runner stops at the first failing step.
 
 use crate::{input, ledger::Kind, session::World, Hal, Id, RawEvent};
 use makepad_key_code::{KeyCode, KEYCODE_VARIANTS};
+use makepad_a11y::{query::Query, render, ActionRequest, ActionResult, Actions, Node, States};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -303,63 +302,6 @@ impl Script {
     }
 }
 
-// ------------------------------------------------------------------ the widget reply
-
-/// One widget of the `widgets` reply.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Row {
-    pub path: String,
-    pub kind: String,
-    pub visible: bool,
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-    /// the HAL window the widget is in
-    pub window: Option<Id>,
-    pub text: String,
-}
-
-impl Row {
-    pub fn parse(line: &str) -> Option<Row> {
-        let mut f = line.splitn(9, '\t');
-        let path = f.next()?.to_string();
-        let kind = f.next()?.to_string();
-        let visible = f.next()? == "1";
-        let (x, y, w, h) = (f.next()?.parse().ok()?, f.next()?.parse().ok()?, f.next()?.parse().ok()?, f.next()?.parse().ok()?);
-        let window = f.next()?.split_once(':').and_then(|(i, g)| Some(Id::new(i.parse().ok()?, g.parse().ok()?)));
-        Some(Row { path, kind, visible, x, y, w, h, window, text: f.next().unwrap_or("").to_string() })
-    }
-
-    /// The reply line of a widget (the app side writes this).
-    pub fn encode(&self) -> String {
-        let clean = |s: &str| s.replace(['\t', '\n', '\r'], " ");
-        let window = self.window.map_or("-".to_string(), |w| format!("{}:{}", w.index, w.gen));
-        format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            clean(&self.path),
-            clean(&self.kind),
-            self.visible as u8,
-            self.x,
-            self.y,
-            self.w,
-            self.h,
-            window,
-            clean(&self.text)
-        )
-    }
-}
-
-/// A widget path matches a query when it is equal or ends with it after a `.`.
-pub fn path_matches(path: &str, query: &str) -> bool {
-    let query = query.trim_matches('.');
-    !query.is_empty() && (path == query || path.strip_suffix(query).is_some_and(|head| head.ends_with('.')))
-}
-
-fn parse_rows(reply: &str) -> Vec<Row> {
-    reply.lines().filter_map(Row::parse).collect()
-}
-
 // ------------------------------------------------------------------ the runner
 
 pub struct Config {
@@ -610,6 +552,16 @@ impl Runner {
     }
 
     fn ask_in(&self, hal: &Hal, session: u32, request: &str) -> Option<String> {
+        if request == "ui" || request.starts_with("ui ") {
+            crate::a11y::request_consumer_in(hal, makepad_a11y::consumer::TEST, true);
+            hal.wait_until(self.cfg.step_timeout, |_| crate::a11y::with_mirror(|m| m.trees.iter().any(|(k,t)| (*k >> 32) as u32 == session && !t.nodes.is_empty())));
+            let query = request.strip_prefix("ui").unwrap().trim();
+            let query = query.strip_prefix("q=").unwrap_or(query);
+            return Some(match self.semantic_rows(session, query) {
+                Ok(rows) => rows.iter().map(|(_,n)| render::node_line(n)).collect::<Vec<_>>().join("\n"),
+                Err(e) => format!("error: {e}"),
+            });
+        }
         hal.query(session, request.as_bytes(), self.cfg.step_timeout.min(Duration::from_secs(2))).map(|b| String::from_utf8_lossy(&b).into_owned())
     }
 
@@ -629,23 +581,35 @@ impl Runner {
         hal.with_world(|w| w.session(self.cfg.session).and_then(|s| s.windows.get(self.cfg.session, window).ok().map(|e| e.val.geom)))
     }
 
-    /// Asks for the widget tree until `pick` finds a row (the app needs a few frames to have one).
-    fn find_row(&self, hal: &Hal, what: &str, pick: impl Fn(&Row) -> bool) -> Result<Row, String> {
-        let deadline = Instant::now() + self.cfg.step_timeout;
-        let mut last = Vec::new();
-        loop {
-            // (the app's own widgets: input steps go to the app itself)
-            if let Some(reply) = self.ask_in(hal, self.cfg.session, "widgets") {
-                last = parse_rows(&reply);
-                if let Some(row) = last.iter().find(|r| r.visible && r.w > 0.0 && r.h > 0.0 && pick(r)) {
-                    return Ok(row.clone());
-                }
+    fn semantic_rows(&self, session: u32, query: &str) -> Result<Vec<(u64, Node)>, String> {
+        let q = Query::parse(query)?;
+        let mut trees = crate::a11y::with_mirror(|m| m.trees.iter().filter(|(k,_)| (**k >> 32) as u32 == session).map(|(k,t)| (*k,t.clone())).collect::<Vec<_>>());
+        trees.sort_by_key(|(k,_)| *k);
+        let mut all = q.clone(); all.nth = None;
+        let rows = trees.iter().flat_map(|(k,t)| all.find(t).into_iter().map(|n| (*k,n.clone()))).collect::<Vec<_>>();
+        Ok(match q.nth { Some(n) => rows.into_iter().nth(n).into_iter().collect(), None => rows })
+    }
+
+    fn find_node(&self, hal: &Hal, session: u32, query: &str) -> Result<(u64, Node), String> {
+        Query::parse(query)?;
+        crate::a11y::request_consumer_in(hal, makepad_a11y::consumer::TEST, true);
+        let mut rows = Vec::new();
+        hal.wait_until(self.cfg.step_timeout, |_| {
+            rows = self.semantic_rows(session, query).unwrap_or_default();
+            !rows.is_empty()
+        });
+        match rows.len() {
+            0 => Err(format!("no node matching `{query}`")),
+            1 => {
+                let (key,node) = rows.pop().unwrap();
+                let blocked = crate::a11y::with_tree(key, |tree| {
+                    tree.ancestors(node.id).into_iter().chain(std::iter::once(node.id))
+                        .any(|id| tree.node(id).is_some_and(|n| n.states.intersects(States::HIDDEN | States::DISABLED)))
+                }).unwrap_or(true);
+                if blocked { return Err(format!("node #{} is hidden or disabled", node.id.short())); }
+                Ok((key,node))
             }
-            if Instant::now() >= deadline {
-                let seen: Vec<String> = last.iter().filter(|r| r.visible).take(40).map(|r| format!("{}={:?}", r.path, r.text)).collect();
-                return Err(format!("no visible widget {what}; widgets: {}", seen.join(" ")));
-            }
-            std::thread::sleep(Duration::from_millis(20));
+            count => Err(format!("ambiguous query `{query}`: {count} nodes; use nth=")),
         }
     }
 
@@ -700,21 +664,16 @@ impl Runner {
             Step::Click(target) => {
                 let (win, x, y, what) = match target {
                     Target::Point(x, y) => (self.first_window(hal)?, *x, *y, format!("({x}, {y})")),
-                    Target::PathAt(path, dx, dy) => {
-                        let row = self.find_row(hal, &format!("`{path}`"), |r| path_matches(&r.path, path))?;
-                        let win = match row.window {
-                            Some(w) => w,
-                            None => self.first_window(hal)?,
-                        };
-                        (win, row.x + dx, row.y + dy, format!("{} at ({}, {})", row.path, row.x + dx, row.y + dy))
+                    Target::PathAt(query, dx, dy) => {
+                        let (key,node) = self.find_node(hal, session, query)?;
+                        let win = hal.with_world(|w| w.session(session).and_then(|s| s.windows.keys_of(session).into_iter().find(|id| id.index == key as u32))).ok_or("window closed")?;
+                        (win, node.bounds.x as f64 + dx, node.bounds.y as f64 + dy, format!("{} at ({dx}, {dy})", node.path))
                     }
-                    Target::Path(path) => {
-                        let row = self.find_row(hal, &format!("`{path}`"), |r| path_matches(&r.path, path))?;
-                        let win = match row.window {
-                            Some(w) => w,
-                            None => self.first_window(hal)?,
-                        };
-                        (win, row.x + row.w / 2.0, row.y + row.h / 2.0, format!("{} at ({}, {})", row.path, row.x + row.w / 2.0, row.y + row.h / 2.0))
+                    Target::Path(query) => {
+                        let (key,node) = self.find_node(hal, session, query)?;
+                        let req = crate::a11y::inject_action_in(hal, key, ActionRequest { req: 0, node: node.id, action: Actions::PRESS, arg: Default::default() });
+                        let result = crate::a11y::wait_done(req, self.cfg.step_timeout).map(ActionResult::from_u8).ok_or("press timed out; inspect before retrying")?;
+                        return if matches!(result, ActionResult::Handled | ActionResult::Fallback) { Ok(format!("{}: {}", result.short(), render::node_line(&node))) } else { Err(result.short().into()) };
                     }
                 };
                 hal.inject(session, RawEvent::mouse_move(win, x, y, 0.0, 0.0, 0));
@@ -778,25 +737,19 @@ impl Runner {
                     }
                 }
             }
-            Step::ExpectText(path, text) => {
-                let deadline = Instant::now() + self.cfg.step_timeout;
+            Step::ExpectText(query, text) => {
+                Query::parse(query)?;
+                crate::a11y::request_consumer_in(hal, makepad_a11y::consumer::TEST, true);
                 let mut seen = Vec::new();
-                loop {
-                    if let Some(reply) = self.ask(hal, "widgets") {
-                        let rows: Vec<Row> = parse_rows(&reply).into_iter().filter(|r| r.visible && path_matches(&r.path, path)).collect();
-                        if rows.iter().any(|r| r.text == *text) {
-                            return Ok(format!("{path} = {}", shorten(text, 80)));
-                        }
-                        seen = rows.iter().map(|r| format!("{:?}", r.text)).collect();
-                    }
-                    if Instant::now() >= deadline {
-                        return Err(format!("`{path}` is not {text:?}: visible texts {}", if seen.is_empty() { "(no visible widget)".to_string() } else { seen.join(" ") }));
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
+                let ok = hal.wait_until(self.cfg.step_timeout, |_| {
+                    seen = self.semantic_rows(self.target, query).unwrap_or_default();
+                    seen.iter().any(|(_,n)| !n.states.contains(States::HIDDEN) && (n.name == *text || n.value == *text || n.text.as_ref().is_some_and(|t| t.content == *text)))
+                });
+                if ok { Ok(format!("{query} = {}", shorten(text, 80))) }
+                else { Err(format!("`{query}` is not {text:?}: {}", seen.iter().map(|(_,n)| render::node_line(n)).collect::<Vec<_>>().join("; "))) }
             }
             Step::Snapshot(name) => {
-                let reply = self.ask(hal, "widgets").ok_or("no answer to the widget query")?;
+                let reply = self.ask(hal, "ui").ok_or("no semantic tree")?;
                 let rows = reply.lines().count();
                 match &self.cfg.snapshot_dir {
                     Some(dir) => {
@@ -887,9 +840,9 @@ mod tests {
     #[test]
     fn every_step_parses() {
         let steps = parse(
-            "# calculator\n\nwait_frame\nwait_frame 3\nclick k_add   # comment\nclick 12.5 30\nkey enter\nkey a shift+ctrl\nkey ArrowLeft alt logo\n\
-             text \"1 + \\\"2\\\"\"\nscroll 0 -40 10 20\nresize 800 600\nclock advance 250\nquery widgets\nexpect \"a b\"\nsnapshot first\n\
-             budget max_frame_ms 16.5\nbudget ledger_bytes <= 1000\nbudget stale_ids == 0\nsleep_frames 2\nclick tile @ 4 5.5\ndomain counter\ndomain -\nexpect_text display.result 15\n",
+            "# calculator\n\nwait_frame\nwait_frame 3\nclick path=k_add   # comment\nclick 12.5 30\nkey enter\nkey a shift+ctrl\nkey ArrowLeft alt logo\n\
+             text \"1 + \\\"2\\\"\"\nscroll 0 -40 10 20\nresize 800 600\nclock advance 250\nquery ui\nexpect \"a b\"\nsnapshot first\n\
+             budget max_frame_ms 16.5\nbudget ledger_bytes <= 1000\nbudget stale_ids == 0\nsleep_frames 2\nclick path=tile @ 4 5.5\ndomain counter\ndomain -\nexpect_text path=display.result 15\n",
         );
         let key = |n| key_index(n).unwrap();
         assert_eq!(
@@ -897,7 +850,7 @@ mod tests {
             vec![
                 Step::WaitFrame(1),
                 Step::WaitFrame(3),
-                Step::Click(Target::Path("k_add".into())),
+                Step::Click(Target::Path("path=k_add".into())),
                 Step::Click(Target::Point(12.5, 30.0)),
                 Step::Key { name: "enter".into(), key: key("ReturnKey"), mods: 0 },
                 Step::Key { name: "a".into(), key: key("KeyA"), mods: input::MOD_SHIFT | input::MOD_CONTROL },
@@ -906,26 +859,26 @@ mod tests {
                 Step::Scroll { dx: 0.0, dy: -40.0, x: 10.0, y: 20.0 },
                 Step::Resize { w: 800.0, h: 600.0 },
                 Step::ClockAdvance(250),
-                Step::Query("widgets".into()),
+                Step::Query("ui".into()),
                 Step::Expect("a b".into()),
                 Step::Snapshot("first".into()),
                 Step::Budget(Budget::MaxFrameMs(16.5)),
                 Step::Budget(Budget::LedgerBytes(1000)),
                 Step::Budget(Budget::StaleIds(0)),
                 Step::SleepFrames(2),
-                Step::Click(Target::PathAt("tile".into(), 4.0, 5.5)),
+                Step::Click(Target::PathAt("path=tile".into(), 4.0, 5.5)),
                 Step::Domain(Some("counter".into())),
                 Step::Domain(None),
-                Step::ExpectText("display.result".into(), "15".into()),
+                Step::ExpectText("path=display.result".into(), "15".into()),
             ]
         );
     }
 
     #[test]
     fn lines_keep_their_numbers_and_text() {
-        let s = Script::parse("# c\n\nclick k_add # go\n").unwrap();
+        let s = Script::parse("# c\n\nclick path=k_add # go\n").unwrap();
         assert_eq!(s.lines.len(), 1);
-        assert_eq!((s.lines[0].no, s.lines[0].text.as_str()), (3, "click k_add"));
+        assert_eq!((s.lines[0].no, s.lines[0].text.as_str()), (3, "click path=k_add"));
     }
 
     #[test]
@@ -953,21 +906,21 @@ mod tests {
     }
 
     #[test]
-    fn rows_round_trip() {
-        let row = Row { path: "root.k_add".into(), kind: "Button".into(), visible: true, x: 10.5, y: 20.0, w: 40.0, h: 30.0, window: Some(Id::new(2, 1)), text: "a\tb".into() };
-        let back = Row::parse(&row.encode()).unwrap();
-        assert_eq!(back, Row { text: "a b".into(), ..row });
-        assert_eq!(Row::parse("x\ty").map(|r| r.path), None);
-        let none = Row::parse("p\tT\t0\t1\t2\t3\t4\t-\t").unwrap();
-        assert_eq!((none.window, none.visible, none.text.as_str()), (None, false, ""));
+    fn semantic_queries_preserve_text_and_geometry() {
+        let node = Node { path: "root.k_add".into(), name: "a\tb".into(), bounds: makepad_a11y::Rect { x: 10.5, y: 20.0, w: 40.0, h: 30.0 }, ..Default::default() };
+        let q = Query::parse("path=k_add name=\"a\tb\"").unwrap();
+        assert!(q.matches(&node));
+        assert_eq!(node.bounds.center(), (30.5, 35.0));
+        assert!(Query::parse("bogus=x").is_err());
     }
 
     #[test]
     fn paths_match_by_suffix() {
-        assert!(path_matches("ui.keys.k_add", "k_add"));
-        assert!(path_matches("ui.keys.k_add", "keys.k_add"));
-        assert!(!path_matches("ui.keys.xk_add", "k_add"));
-        assert!(!path_matches("ui.keys.k_add", ""));
+        let matches = |path: &str, query: &str| Query::parse(query).unwrap().matches(&Node { path: path.into(), ..Default::default() });
+        assert!(matches("ui.keys.k_add", "path=k_add"));
+        assert!(matches("ui.keys.k_add", "path=keys.k_add"));
+        assert!(!matches("ui.keys.xk_add", "path=k_add"));
+        assert!(!matches("ui.keys.k_add", "path="));
     }
 
     #[test]

@@ -3291,6 +3291,70 @@ impl Slider {
 }
 
 impl Widget for Slider {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        action: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionArg, ActionResult, Actions as A};
+        let step = if self.step > 0.0 {
+            self.step
+        } else {
+            (self.max - self.min) / 100.0
+        };
+        let value = if action.action == A::SET_VALUE {
+            match &action.arg {
+                ActionArg::Number(v) if v.is_finite() => *v,
+                _ => return ActionResult::Unsupported,
+            }
+        } else if action.action == A::INCREMENT {
+            self.to_external() + step
+        } else if action.action == A::DECREMENT {
+            self.to_external() - step
+        } else {
+            return ActionResult::Unhandled;
+        };
+        if self.disabled(cx) {
+            return ActionResult::Disabled;
+        }
+        let uid = self.widget_uid();
+        self.set_value(cx, value);
+        self.emit_slide(cx, uid);
+        self.emit_end_slide(cx, uid);
+        ActionResult::Handled
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Slider;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text);
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE;
+        node.value = (|| -> Option<String> {
+            // The number the readout shows, unit and all, so a test waits on
+            // what a person reads rather than on a raw f64.
+            Some(format_readout(
+                self.to_external() * self.display_scale,
+                self.precision,
+                &self.unit,
+            ))
+        })()
+        .unwrap_or_default();
+        node.range = Some(a11y_tree::RangeValue {
+            min: self.min,
+            max: self.max,
+            now: self.to_external(),
+            step: self.step,
+        });
+        node.actions = a11y_tree::Actions::FOCUS
+            | a11y_tree::Actions::SET_VALUE
+            | a11y_tree::Actions::INCREMENT
+            | a11y_tree::Actions::DECREMENT;
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.animator_toggle(
             cx,
@@ -3588,6 +3652,7 @@ impl Widget for Slider {
             return DrawStep::done();
         }
         self.draw_walk_slider(cx, walk);
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
     }
 
@@ -3595,15 +3660,7 @@ impl Widget for Slider {
         format!("{}", self.to_external())
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        // The number the readout shows, unit and all, so a test waits on
-        // what a person reads rather than on a raw f64.
-        Some(format_readout(
-            self.to_external() * self.display_scale,
-            self.precision,
-            &self.unit,
-        ))
-    }
+
 
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         if let Ok(v) = v.parse::<f64>() {

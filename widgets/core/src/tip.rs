@@ -529,6 +529,12 @@ impl Tip {
 }
 
 impl Widget for Tip {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Tooltip;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // A hidden child leaves no walk behind, so neither does its
         // wrapper: an empty Fit box would still take the parent's spacing,
@@ -747,6 +753,12 @@ impl TipLayer {
 }
 
 impl Widget for TipLayer {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Tooltip;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         // The layer's own turtle gives the origin its overlay pass is
         // shifted FROM. It is not the room a tip has to fit in: a layer

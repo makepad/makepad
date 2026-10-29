@@ -325,6 +325,7 @@ script_mod! {
             close +: {svg: crate_resource("self:resources/icons/close.svg")}
             search +: {svg: crate_resource("self:resources/icons/search.svg")}
             cpu +: {svg: crate_resource("self:resources/icons/cpu.svg")}
+            thermometer +: {svg: crate_resource("self:resources/icons/thermometer.svg")}
             globe +: {svg: crate_resource("self:resources/icons/globe.svg")}
             play +: {svg: crate_resource("self:resources/icons/play.svg")}
             shirt +: {svg: crate_resource("self:resources/icons/shirt.svg")}
@@ -464,6 +465,8 @@ pub struct ShellIcons {
     #[live]
     pub cpu: DrawSvg,
     #[live]
+    pub thermometer: DrawSvg,
+    #[live]
     pub globe: DrawSvg,
     #[live]
     pub play: DrawSvg,
@@ -534,6 +537,8 @@ pub enum Ico {
     Close,
     Search,
     Cpu,
+    /// The temperature tray: an outlined tube over a filled bulb (the bar draws the column).
+    Thermometer,
     Speaker,
     Headphone,
     Lock,
@@ -591,6 +596,7 @@ impl ShellIcons {
             Ico::Close => &mut self.close,
             Ico::Search => &mut self.search,
             Ico::Cpu => &mut self.cpu,
+            Ico::Thermometer => &mut self.thermometer,
             Ico::Globe => &mut self.globe,
             Ico::Play => &mut self.play,
             Ico::Shirt => &mut self.shirt,

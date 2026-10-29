@@ -618,6 +618,12 @@ enum PickOutcome {
 }
 
 impl Widget for ItemGrid {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::List;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if !self.visible && event.requires_visibility() {
             return;

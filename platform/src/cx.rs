@@ -35,7 +35,7 @@ use {
     makepad_network::NetworkRuntime,
     makepad_script::*,
     makepad_studio_protocol::{
-        RunViewFrameData, RunViewFrameRequest, ScreenshotRequest, WidgetSnapshot,
+        RunViewFrameData, RunViewFrameRequest, ScreenshotRequest,
     },
     std::{
         any::{Any, TypeId},
@@ -106,7 +106,11 @@ pub struct Cx {
     pub null_cube_texture: Texture,
     pub windows: CxWindowPool,
     pub passes: CxDrawPassPool,
+    pub(crate) native_layers: crate::native_layer::CxNativeLayerPool,
     pub draw_lists: CxDrawListPool,
+    pub a11y: crate::a11y::CxA11y,
+    pub(crate) a11y_host_consumers: u32,
+    pub(crate) a11y_native_consumers: u32,
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,
     /// Shared-instance publications (cleanup DL-1 freeze): the registry that
@@ -161,6 +165,8 @@ pub struct Cx {
     pub(crate) new_next_frames: HashSet<NextFrame>,
     /// Frame requests made so far (`Cx::frame_requests`).
     pub(crate) frame_requests: u64,
+    /// The desktop windows while a remote headset streams (`Cx::xr_hold_windows`).
+    pub(crate) xr_window_hold: crate::draw_pass::XrWindowHold,
     /// A child its host says nothing shows of (`HostedVisible`: a hosted process over its
     /// socket, a HAL domain as an app message from its parent): next-frame callbacks and draws
     /// wait until it is shown again (`hosted_frames_held`).
@@ -287,8 +293,6 @@ pub struct Cx {
     pub(crate) run_view_frame_results: ToUIReceiver<Result<RunViewFrameData, String>>,
     #[allow(dead_code)]
     pub(crate) run_view_frame_encode_in_flight: bool,
-    pub(crate) widget_tree_dump_requests: Vec<u64>,
-    pub(crate) widget_snapshot_requests: Vec<u64>,
     /// Event ID that triggered a widget query cache invalidation.
     /// When Some(event_id), indicates that widgets should clear their query caches
     /// on the next event loop cycle. This ensures all views process the cache clear
@@ -300,10 +304,6 @@ pub struct Cx {
 
     /// The app's timers while `--virtual-clock` runs (see `remote::app_clock`).
     pub app_clock: crate::remote::app_clock::AppClock,
-    /// The widget snapshot with each widget's dotted id path from its window
-    /// root (named widgets only), registered by the widgets layer; the remote
-    /// bridge's `/snap` path addressing reads it.
-    pub widget_paths_callback: Option<fn(&Cx) -> Vec<(WidgetSnapshot, String)>>,
     /// The widget path and type of each given uid, registered by the widgets layer (frame capture
     /// attribution: `draw_owners`).
     pub widget_uid_paths_callback: Option<fn(&Cx, &[u64]) -> Vec<(u64, String, String)>>,
@@ -315,9 +315,6 @@ pub struct Cx {
     /// `Cx::register_async_load_probe`).
     pub(crate) async_load_probes: Vec<(&'static str, crate::cx_api::AsyncLoadProbe)>,
     pub widget_tree_ptr: *mut (),
-    pub widget_tree_dump_callback: Option<fn(&Cx) -> String>,
-    pub widget_query_callback: Option<fn(&Cx, &str) -> Vec<String>>,
-    pub widget_snapshot_callback: Option<fn(&Cx) -> Vec<WidgetSnapshot>>,
     /// Selects a cancel scope from the currently active widget hierarchy. The lookup
     /// returns the newest matching scope for a widget UID. Called only for a new
     /// Escape/Back press; widgets install this without a platform dependency on them.
@@ -1009,7 +1006,11 @@ impl Cx {
 
             windows: Default::default(),
             passes: Default::default(),
+            native_layers: Default::default(),
             draw_lists: Default::default(),
+            a11y: Default::default(),
+            a11y_host_consumers: 0,
+            a11y_native_consumers: 0,
             draw_matrices: Default::default(),
             geometries: Default::default(),
             textures,
@@ -1047,6 +1048,7 @@ impl Cx {
             studio_http: "".to_string(),
             new_next_frames: Default::default(),
             frame_requests: 0,
+            xr_window_hold: Default::default(),
             hosted_hidden: false,
 
             post_draw_hook: None,
@@ -1104,19 +1106,13 @@ impl Cx {
             pending_window_geom_changes: Default::default(),
             clear_hover_queued: false,
 
-            widget_tree_dump_requests: Default::default(),
-            widget_snapshot_requests: Default::default(),
             widget_query_invalidation_event: None,
             app_clock: Default::default(),
-            widget_paths_callback: None,
             widget_uid_paths_callback: None,
             draw_owners: None,
             draw_labels: Default::default(),
             async_load_probes: Vec::new(),
             widget_tree_ptr: std::ptr::null_mut(),
-            widget_tree_dump_callback: None,
-            widget_query_callback: None,
-            widget_snapshot_callback: None,
             cancel_scope_resolver: None,
             tweak_callback: None,
             design_preview_callback: None,

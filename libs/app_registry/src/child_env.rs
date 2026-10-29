@@ -9,6 +9,7 @@
 //! Every spawn site of the window manager, of the apps it hosts and of their tools (Code's runs,
 //! the terminal's shell) calls [`scrub`], so the rule holds down the whole process tree.
 
+use std::ffi::OsString;
 use std::process::Command;
 
 /// Read only by the direct-display shell and the WM's display settings.
@@ -36,6 +37,30 @@ pub fn child_makepad_env(value: &str) -> Option<String> {
         .filter(|t| !t.is_empty() && !matches!(*t, "linux_direct" | "direct" | "wayland" | "x11"))
         .collect();
     (!kept.is_empty()).then(|| kept.join("+"))
+}
+
+/// This process's environment as [`scrub`] leaves it for a child, for a spawn site that hands
+/// the child a whole environment block (the terminal's Windows PTY). Names compare as the OS
+/// does: ignoring case on Windows.
+pub fn scrubbed_vars() -> Vec<(OsString, OsString)> {
+    let same = |a: &str, b: &str| if cfg!(windows) { a.eq_ignore_ascii_case(b) } else { a == b };
+    let mut vars = Vec::new();
+    for (key, value) in std::env::vars_os() {
+        let name = key.to_string_lossy();
+        if DIRECT_SHELL_ENV.iter().chain(HOSTED_IDENTITY_ENV).any(|d| same(&name, d)) {
+            continue;
+        }
+        if same(&name, "MAKEPAD") {
+            match value.to_str().map(child_makepad_env) {
+                Some(Some(kept)) => vars.push((key, kept.into())),
+                Some(None) => {}
+                None => vars.push((key, value)),
+            }
+            continue;
+        }
+        vars.push((key, value));
+    }
+    vars
 }
 
 /// Clears the variables above from `command`'s environment (a host sets its child's own

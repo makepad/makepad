@@ -43,6 +43,8 @@ pub enum BarModule {
     Weather,
     SystemUpdate,
     Tray(usize),
+    /// The thermometer: the temperature graphs (`shell/temps.rs`), shown where sensors report.
+    Temps,
     Bluetooth,
     Gamepad,
     Network,
@@ -174,6 +176,8 @@ pub struct BarData {
     pub system_update: bool,
     /// The apps' tray icons (`ChildRelay::SetTray`, `crate::trays`), in the order they came.
     pub tray: Vec<BarTray>,
+    /// The thermometer's reading; `None` where no sensor reports (no item).
+    pub temps: Option<super::temps::Badge>,
     /// `None` renders the module in its "unavailable" reading: the icon at
     /// α .45, which is what an omarchy indicator does when its service is
     /// not there.
@@ -243,6 +247,7 @@ impl BarData {
             weather: None,
             system_update: false,
             tray: vec![],
+            temps: Some(super::temps::Badge { heat: super::temps::Heat::Normal, level: 0.45, tooltip: "CPU 58\u{b0}C \u{b7} GPU 44\u{b0}C".into() }),
             bluetooth: Some(true),
             network: Some(true),
             volume: Some(62),
@@ -780,6 +785,9 @@ impl ShellBar {
         for i in 0..data.tray.len() {
             v.push((BarModule::Tray(i), Ico::Dot, true));
         }
+        if data.temps.is_some() {
+            v.push((BarModule::Temps, Ico::Thermometer, true));
+        }
         v.push((
             BarModule::Bluetooth,
             match data.bluetooth {
@@ -1095,6 +1103,30 @@ impl ShellBar {
             if *module == BarModule::Audio && data.muted {
                 color = fade(fg, 0.45);
             }
+            // The thermometer: its column shows the hottest sensor's place between 30 °C and
+            // its limit, amber near a limit and red while one is over it.
+            if let (BarModule::Temps, Some(badge)) = (module, data.temps.as_ref()) {
+                use super::temps::Heat;
+                color = match badge.heat {
+                    Heat::Normal => fg,
+                    Heat::Warm => super::rgb(0xed, 0xa1, 0x00),
+                    Heat::Alarm => super::rgb(0xe3, 0x49, 0x48),
+                };
+                let g = rect(
+                    (cell.pos.x + (cell.size.x - canvas) * 0.5).floor(),
+                    (cell.pos.y + (cell.size.y - canvas) * 0.5).floor(),
+                    canvas,
+                    canvas,
+                );
+                self.d.icon(cx, Ico::Thermometer, g, color);
+                // the svg is 16 units: the tube's inside runs from 3.2 to the bulb at 11
+                let u = canvas / 16.0;
+                let level = badge.level.clamp(0.12, 1.0) as f64;
+                let top = 11.0 - level * (11.0 - 3.2);
+                self.d.solid(cx, rect(g.pos.x + 7.35 * u, g.pos.y + top * u, 1.3 * u, (11.2 - top) * u), color);
+                self.hits.push((seg, *module, cell));
+                continue;
+            }
             // An app's tray glyph, tinted like the bar's own icons (a template, as macOS
             // shows it); a tray without a glyph shows a dot.
             if let BarModule::Tray(i) = module {
@@ -1143,6 +1175,7 @@ impl ShellBar {
             BarModule::Weather => "Weather".into(),
             BarModule::SystemUpdate => "Pending updates".into(),
             BarModule::Tray(i) => data.tray.get(i).map(|t| t.tooltip.clone()).unwrap_or_default(),
+            BarModule::Temps => data.temps.as_ref().map(|b| b.tooltip.clone()).unwrap_or_default(),
             BarModule::Bluetooth => match data.bluetooth {
                 Some(true) => "Bluetooth on".into(),
                 Some(false) => "Bluetooth off".into(),
@@ -1244,6 +1277,32 @@ impl ShellBar {
 }
 
 impl Widget for ShellBar {
+    fn semantics(&self, _cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::Toolbar;
+        node.name = "Desktop bar".into();
+    }
+    fn semantics_parts(&self, _cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        if self.inert { return; }
+        for (seg, module, rect) in &self.hits {
+            let data = self.segments.get(*seg).map_or(&self.data, |s| &s.data);
+            let name = Self::tooltip_for(data, *module);
+            let name = if name.is_empty() { format!("{module:?}") } else { name };
+            out.push((LiveId::from_str(&format!("{seg}:{module:?}")).0, None, a11y_tree::Node {
+                role: a11y_tree::Role::Button, name,
+                bounds: makepad_platform::a11y::semantic_rect(*rect),
+                actions: a11y_tree::Actions::PRESS,
+                ..Default::default()
+            }));
+        }
+    }
+    fn handle_action(&mut self, cx: &mut Cx, action: &a11y_tree::ActionRequest, _scope: &mut Scope) -> a11y_tree::ActionResult {
+        if self.inert || action.action != a11y_tree::Actions::PRESS { return a11y_tree::ActionResult::Unhandled; }
+        let Some(key) = cx.a11y.action_part_key(action.node) else { return a11y_tree::ActionResult::Unhandled; };
+        let Some((seg,module,_)) = self.hits.iter().find(|(seg,module,_)| LiveId::from_str(&format!("{seg}:{module:?}")).0 == key) else { return a11y_tree::ActionResult::NoSuchNode; };
+        cx.widget_action(self.uid, press_action(*seg, *module, MouseButton::PRIMARY));
+        a11y_tree::ActionResult::Handled
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
         let r = cx.turtle().rect();

@@ -27,6 +27,10 @@ edition = "2021"
 license = "MIT"
 default-run = "makepad-app-wm"
 
+# the window manager is a desktop compositor (Linux; macOS hosts it for development): no web or mobile build
+[package.metadata.makepad]
+platforms = ["desktop"]
+
 [lib]
 name = "makepad_app_wm"
 path = "src/lib.rs"
@@ -48,6 +52,7 @@ default = ["tweaker"]
 tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 
 [dependencies]
+makepad-remote = { path = "../../libs/remote" }
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["charts", "color", "data", "dates", "chat", "dock", "rich_text", "dropzone", "vector", "glass", "nav_menus", "command_palette"] }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-studio-protocol = { path = "../../platform/studio" }
@@ -83,5 +88,5 @@ makepad-xkb-keymap = { path = "../../libs/xkb_keymap" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Serving Desk Link (listener, TLS, fleet credentials): native desktops only
-makepad-desk-link = { path = "../../libs/desk_link", features = ["server"] }
+makepad-desk-link = { path = "../../libs/desk_link", features = ["server", "tiles"] }
 makepad-hal = { path = "../../platform/hal" }

@@ -146,6 +146,12 @@ impl RecentList {
 }
 
 impl Widget for RecentList {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::List;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         match event.hits(cx, self.draw_row.area()) {
             Hit::FingerHoverIn(e) | Hit::FingerHoverOver(e) => {

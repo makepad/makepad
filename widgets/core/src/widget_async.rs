@@ -2580,12 +2580,12 @@ mod host_io_tests {
         let (mut cx, id) = context();
         cx.with_script_vm_id(id, |vm| {
             let widgets = vm.module(id!(widgets));
-            // Browser and MapView are families of their own, which an isolate
+            // WebView and MapView are families of their own, which an isolate
             // never gets (widgets_mod_with_host_io registers the core only).
             let keys = [
                 id!(Window), id!(WindowBase), id!(ScreenCap), id!(ScreenCapBase),
                 id!(WindowMenu), id!(WindowMenuBase), id!(CachedWidget),
-                id!(Browser), id!(BrowserBase), id!(MapView), id!(MapViewBase),
+                id!(WebView), id!(WebViewBase), id!(MapView), id!(MapViewBase),
             ];
             for key in keys {
                 let value = vm.value(widgets, key);

@@ -112,6 +112,22 @@ pub unsafe fn enter(heap: *const DomainHeap) {
     compiler::enter_domain(heap.as_ref().map_or(std::ptr::null(), |h| &*h.inner.arena as *const Arena));
 }
 
+/// The heap the calling thread allocates in, as `restore` takes it back (null: the system heap):
+/// a scoped entry (a foreign thread calling one domain's code) puts back what it found.
+pub fn current() -> *const () {
+    compiler::current_domain().cast()
+}
+
+/// Puts the calling thread back in the heap `current` returned.
+pub unsafe fn restore(heap: *const ()) {
+    compiler::enter_domain(heap.cast());
+}
+
+/// `enter`'s heap as `current` names it, for a scoped entry that switches without the registry.
+pub fn raw(heap: *const DomainHeap) -> *const () {
+    unsafe { heap.as_ref() }.map_or(std::ptr::null(), |h| &*h.inner.arena as *const Arena as *const ())
+}
+
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct Header {

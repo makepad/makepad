@@ -412,6 +412,10 @@ pub struct MpTerm {
     session: Option<Session>,
     #[rust]
     pub cwd: Option<PathBuf>,
+    /// Variables the session's shell starts with on top of this process's
+    /// environment (a host naming a context file for the job it runs).
+    #[rust]
+    pub env: Vec<(String, String)>,
     /// A transformed host supplies its screen area and local-to-screen mapping.
     #[rust]
     pub canvas_ime_anchor: Option<(Area, PopupAnchorTransform)>,
@@ -728,12 +732,14 @@ impl MpTerm {
                 self.bg_opacity = (active.clamp(0.0, 1.0), inactive.clamp(0.0, 1.0));
             }
         }
+        let env: Vec<(&str, &str)> = self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         match Session::spawn(
             cols,
             rows,
             self.cwd.as_deref(),
             None,
             self.command.as_deref(),
+            &env,
         ) {
             Ok(mut session) => {
                 // makepad-app-wm hands the splash theme's terminal palette down

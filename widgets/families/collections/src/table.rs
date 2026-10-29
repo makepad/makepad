@@ -992,6 +992,12 @@ fn align_x(align: TableAlign) -> f64 {
 }
 
 impl Widget for Table {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Grid;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.seed();
         // The model is taken by value for the pass: the draw loop calls back

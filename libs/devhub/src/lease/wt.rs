@@ -171,7 +171,9 @@ pub fn infos(repo: &Path) -> Result<Vec<Info>, String> {
     let cwds = live_cwds();
     let list = parse_worktrees(&git(Some(repo), None, &["worktree", "list", "--porcelain"])?);
     let mut out = Vec::new();
-    for e in list.into_iter().filter(|e| e.path.starts_with(&root)) {
+    // (Windows: git prints `C:/...`, canonical paths are `\\?\C:\...`: compare those of both)
+    let under = |p: &Path| p.starts_with(&root) || std::fs::canonicalize(p).is_ok_and(|c| c.starts_with(&root));
+    for e in list.into_iter().filter(|e| under(&e.path)) {
         let lane = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let merged = !e.head.is_empty() && git(Some(repo), None, &["merge-base", "--is-ancestor", &e.head, "work"]).is_ok();
         let (mut ahead, mut behind) = (0, 0);
@@ -398,7 +400,9 @@ mod tests {
         g(&root.join("ahead"), &["add", "-A"]);
         g(&root.join("ahead"), &["-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "-q", "-m", "two"]);
         std::fs::write(root.join("dirty/new.txt"), "x").unwrap();
-        let mut child = Command::new("sleep").arg("30").current_dir(root.join("busy")).spawn().unwrap();
+        // a process working in a worktree keeps it (Unix: its cwd is seen; Windows: an open cwd
+        // cannot be removed)
+        let mut child = if cfg!(windows) { Command::new("cmd").args(["/c", "ping -n 30 127.0.0.1 >nul"]).current_dir(root.join("busy")).spawn().unwrap() } else { Command::new("sleep").arg("30").current_dir(root.join("busy")).spawn().unwrap() };
         let list = infos(&repo).unwrap();
         assert_eq!(list.len(), 4);
         let r = prune(&repo).unwrap();
@@ -406,7 +410,7 @@ mod tests {
         assert!(get("merged").is_ok(), "{r:?}");
         assert!(get("ahead").unwrap_err().contains("not merged"));
         assert!(get("dirty").unwrap_err().contains("uncommitted"));
-        assert!(get("busy").unwrap_err().contains(&child.id().to_string()));
+        assert!(get("busy").is_err() && (cfg!(windows) || get("busy").unwrap_err().contains(&child.id().to_string())), "{r:?}");
         assert!(!root.join("merged").exists());
         assert!(git(Some(&repo), None, &["rev-parse", "--verify", "-q", "rc-merged"]).is_err());
         assert!(root.join("ahead/b.txt").exists() && root.join("dirty/new.txt").exists());

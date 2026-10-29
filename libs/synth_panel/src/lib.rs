@@ -8,6 +8,7 @@
 //!
 //! - [`displays`]: `SynthEnvelope`, `SynthFilter`, `SynthWave`, `SynthScope`.
 //! - [`keys`]: `SynthKeys`.
+//! - [`morph`]: a Morph's `SynthTable`, `SynthLfo` and `SynthMods`.
 //! - [`picker`]: `SynthPicker`.
 //! - [`generators`]: `SynthGen`, a code generator as a control.
 //! - [`tree`]: `ScoreTree`, the voices and their instruments (the panel's
@@ -24,6 +25,7 @@ pub mod generators;
 pub mod host;
 pub mod keys;
 pub mod live;
+pub mod morph;
 pub mod picker;
 pub mod shaders;
 pub mod spec;
@@ -39,6 +41,7 @@ pub fn script_mod(vm: &mut makepad_widgets::ScriptVm) {
     shaders::script_mod(vm);
     displays::script_mod(vm);
     keys::script_mod(vm);
+    morph::script_mod(vm);
     picker::script_mod(vm);
     generators::script_mod(vm);
     tree::script_mod(vm);

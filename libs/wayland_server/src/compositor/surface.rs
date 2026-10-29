@@ -41,7 +41,8 @@ pub(crate) struct Surface {
     pub scale: i32,
     pub transform: i32,
     pub has_buffer: bool,
-    pub frames: Vec<u32>,
+    pub frames: Vec<(u64, u32)>,
+    pub serial: u64,
     pub sub: Option<Sub>,
     /// Stacking of children; `0` is the surface itself.
     pub stack: Vec<u32>,
@@ -55,7 +56,7 @@ pub(crate) struct Surface {
 }
 impl Surface {
     pub fn new() -> Self {
-        Self { pending: Pending::default(), cached: None, scale: 1, transform: 0, has_buffer: false, frames: Vec::new(), sub: None,
+        Self { pending: Pending::default(), cached: None, scale: 1, transform: 0, has_buffer: false, frames: Vec::new(), serial: 0, sub: None,
                stack: vec![0], pending_stack: vec![0], xdg: None, buffer_size: (0, 0), vp: VpState::default(), viewport_obj: None, sync_obj: None, pending_sync: Default::default() }
     }
 }
@@ -222,7 +223,9 @@ impl Compositor {
         if let Some(t) = p.transform { s.transform = t; }
         if let Some(v) = p.viewport { s.vp = v; }
         match &update { BufferUpdate::Attach(_) | BufferUpdate::Dmabuf(_) => s.has_buffer = true, BufferUpdate::Detach => s.has_buffer = false, BufferUpdate::Keep => {} }
-        s.frames.extend(p.frames);
+        s.serial += 1;
+        let serial = s.serial;
+        s.frames.extend(p.frames.into_iter().map(|cb| (serial, cb)));
         let (scale, transform) = (s.scale, s.transform);
         let (src, size) = (s.vp.src, match (s.vp.dst, s.vp.src) {
             _ if !s.has_buffer => (0, 0),
@@ -231,7 +234,7 @@ impl Compositor {
             _ => (s.buffer_size.0 / scale.max(1), s.buffer_size.1 / scale.max(1)),
         });
         let is_parent = s.stack.len() > 1 || s.pending_stack.len() > 1;
-        self.events.push(UiEvent::Commit { surface: k, buffer: update, scale, transform, input_region, size, src });
+        self.events.push(UiEvent::Commit { surface: k, serial, buffer: update, scale, transform, input_region, size, src });
         self.xdg_after_apply(core, k);
         if is_parent { self.apply_children(core, k)?; }
         Ok(())
@@ -332,9 +335,15 @@ impl Compositor {
 
     /// Sends wl_callback.done for the surface's waiting frame callbacks.
     pub fn frame_done(&mut self, core: &mut Core, k: SurfKey, time_ms: u32) {
+        self.frame_done_through(core, k, u64::MAX, time_ms);
+    }
+
+    /// Only callbacks committed no later than the content the host actually presented.
+    pub fn frame_done_through(&mut self, core: &mut Core, k: SurfKey, serial: u64, time_ms: u32) {
         let Some(s) = self.surface(k) else { return };
-        let cbs = std::mem::take(&mut s.frames);
-        for cb in cbs {
+        let (cbs, pending): (Vec<_>, Vec<_>) = std::mem::take(&mut s.frames).into_iter().partition(|(at, _)| *at <= serial);
+        s.frames = pending;
+        for (_, cb) in cbs {
             let _ = core.send(k.0, cb, wl_callback::EVT_DONE, vec![Value::Uint(time_ms)]);
             // The callback is released to the client right away (delete_id).
             core.destroy_object(self, k.0, cb);
@@ -357,7 +366,7 @@ impl Compositor {
             "wl_surface" => {
                 if let Some(Obj::Surface(s)) = self.objs.get(&k) {
                     // Pending frame callbacks are dropped with the surface.
-                    let cbs: Vec<u32> = s.frames.iter().chain(s.pending.frames.iter()).copied().collect();
+                    let cbs: Vec<u32> = s.frames.iter().map(|(_, cb)| cb).chain(s.pending.frames.iter()).copied().collect();
                     let parent = s.sub.as_ref().map(|x| x.parent);
                     let was_xdg = s.xdg.is_some();
                     let _ = (cbs, was_xdg);

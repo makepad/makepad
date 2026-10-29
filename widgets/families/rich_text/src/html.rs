@@ -788,6 +788,12 @@ impl Html {
 }
 
 impl Widget for Html {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Document;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         // Route clicks on the summary line to the matching FoldButton so the
         // whole summary toggles, not just the triangle. Hit-test on the
@@ -1321,6 +1327,16 @@ impl WidgetMatchEvent for HtmlLink {
 }
 
 impl Widget for HtmlLink {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Link;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Event::ClearHover = event {
             self.animator_cut(cx, ids!(hover.off));

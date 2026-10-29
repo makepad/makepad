@@ -3,7 +3,7 @@
 //! requestStart. A callback larger than the scratch quantum is split, never truncated.
 use crate::{
     backend::android::jhelp,
-    media::{name_hash, AudioBlock, AudioDeviceInfo, AudioFn},
+    media::{name_hash, AudioBlock, AudioDeviceInfo, AudioEntry},
 };
 use makepad_jni_sys::{jvalue, registration as reg};
 use std::{
@@ -19,11 +19,7 @@ use std::{
 
 pub const AUDIO_BLOCK_FRAMES: usize = 1024;
 
-#[derive(Clone, Copy)]
-pub struct Entry {
-    pub function: AudioFn,
-    pub context: usize,
-}
+pub type Entry = AudioEntry;
 
 #[derive(Default)]
 pub struct Slot {
@@ -62,7 +58,7 @@ impl Slot {
             return;
         }
         if let Some(entry) = unsafe { *self.entry.get() } {
-            (entry.function)(entry.context as *mut c_void, block);
+            entry.call(block);
         }
         self.busy.store(false, Ordering::SeqCst);
     }

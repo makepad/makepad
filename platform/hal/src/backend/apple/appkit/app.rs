@@ -478,9 +478,25 @@ unsafe fn window_of_ns_event(event: ObjcId) -> Option<&'static Win> {
 unsafe fn process_ns_event(event: ObjcId) {
     let a = app();
     let kind: NSEventType = msg_send![event, type];
+    // sendEvent routes native input itself. The post-dispatch Makepad forwarding below must
+    // not duplicate a web view's keys, paste, scroll or magnify in the surrounding UI.
+    // Decide before dispatch: Tab may change first responder while this event is delivered.
+    let native_input = match kind {
+        NSEventType::NSKeyDown | NSEventType::NSKeyUp | NSEventType::NSFlagsChanged => {
+            key_window(event).is_some_and(|win| super::super::media::web_state::window_owns_focus(win.window))
+        }
+        NSEventType::NSScrollWheel | NSEventType::NSEventTypeMagnify => {
+            window_of_ns_event(event).is_some_and(|win| {
+                let point: NSPoint = msg_send![event, locationInWindow];
+                let local: NSPoint = msg_send![win.view, convertPoint: point fromView: nil];
+                super::super::media::layers::hit_test(win.view, local, nil).is_some_and(|hit| hit != nil && hit != win.view)
+            })
+        }
+        _ => false,
+    };
     // the receiving view records how its input context handled this event: marked text in
     // another view (or an inactive IME) must not consume it
-    if matches!(kind, NSEventType::NSKeyDown) {
+    if !native_input && matches!(kind, NSEventType::NSKeyDown) {
         a.ime.borrow_mut().begin_key_down();
     }
     // cleared so we can tell after `sendEvent:` whether the main menu took this event as a key
@@ -488,7 +504,7 @@ unsafe fn process_ns_event(event: ObjcId) {
     a.menu_command_fired.set(false);
     let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
     let () = msg_send![ns_app, sendEvent: event];
-    if kind as u64 == 21 {
+    if kind as u64 == 21 || native_input {
         return;
     }
     match kind {
@@ -632,6 +648,11 @@ impl App {
 
     pub(super) fn window_view(&self, sid: u32, id: Id) -> Option<ObjcId> {
         self.find(sid, id).map(|w| w.view)
+    }
+
+    pub(super) fn a11y_view(&self, key: u64) -> Option<ObjcId> {
+        self.windows.borrow().iter().find(|w| !w.retired.get()
+            && crate::a11y::window_key(w.sid.get(), w.id.get().index) == key).map(|w| w.view)
     }
 
     fn find(&self, sid: u32, id: Id) -> Option<&'static Win> {

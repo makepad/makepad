@@ -984,6 +984,21 @@ impl ProgressBar {
 }
 
 impl Widget for ProgressBar {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Progress;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value =
+            (|| -> Option<String> { Some(two_decimals(self.value)) })().unwrap_or_default();
+        node.range = (self.value >= 0.0).then_some(a11y_tree::RangeValue {
+            min: 0.0,
+            max: 1.0,
+            now: self.value,
+            step: 0.0,
+        });
+        node.states.set(a11y_tree::States::BUSY, self.value < 0.0);
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.drawn || self.value != self.target {
             // The first draw, or a script apply changed `value` behind the
@@ -1113,9 +1128,7 @@ impl Widget for ProgressBar {
         self.disabled
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(two_decimals(self.value))
-    }
+
 }
 
 impl ProgressBarRef {
@@ -1291,6 +1304,26 @@ impl ProgressRing {
 }
 
 impl Widget for ProgressRing {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Progress;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            Some(two_decimals(match self.shape {
+                ProgressShape::Rings => numbers(&self.values).first().copied().unwrap_or(0.0),
+                _ => self.value,
+            }))
+        })()
+        .unwrap_or_default();
+        node.range = (self.value >= 0.0).then_some(a11y_tree::RangeValue {
+            min: 0.0,
+            max: 1.0,
+            now: self.value,
+            step: 0.0,
+        });
+        node.states.set(a11y_tree::States::BUSY, self.value < 0.0);
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.drawn || self.value != self.target {
             let now = cx.seconds_since_app_start();
@@ -1391,12 +1424,7 @@ impl Widget for ProgressRing {
         self.disabled
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(two_decimals(match self.shape {
-            ProgressShape::Rings => numbers(&self.values).first().copied().unwrap_or(0.0),
-            _ => self.value,
-        }))
-    }
+
 }
 
 impl ProgressRingRef {
@@ -1562,6 +1590,20 @@ impl Gauge {
 }
 
 impl Widget for Gauge {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Meter;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value =
+            (|| -> Option<String> { Some(two_decimals(self.value)) })().unwrap_or_default();
+        node.range = Some(a11y_tree::RangeValue {
+            min: self.min,
+            max: self.max,
+            now: self.value,
+            step: 0.0,
+        });
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.drawn || self.value != self.target {
             let now = cx.seconds_since_app_start();
@@ -1683,9 +1725,7 @@ impl Widget for Gauge {
         self.disabled
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(two_decimals(self.value))
-    }
+
 }
 
 impl GaugeRef {
@@ -1888,6 +1928,15 @@ impl NavigationProgress {
 }
 
 impl Widget for NavigationProgress {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Progress;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value =
+            (|| -> Option<String> { Some(two_decimals(self.progress().unwrap_or(0.0))) })()
+                .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
         let rect = cx.turtle().rect();
@@ -1911,9 +1960,7 @@ impl Widget for NavigationProgress {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(two_decimals(self.progress().unwrap_or(0.0)))
-    }
+
 }
 
 impl NavigationProgressRef {

@@ -411,7 +411,7 @@ impl AiChatSlot {
         });
         match overlay {
             Some(overlay) => {
-                // Part of the tree under this slot: /snap and /d see it.
+                // Part of the tree under this slot: ui find and ui see it.
                 cx.widget_tree_insert_child(self.uid, live_id!(overlay), overlay.clone());
                 self.overlay = Some(overlay);
                 true
@@ -695,6 +695,11 @@ struct AiSlotToggleGuard {
 }
 
 impl Widget for AiChatSlot {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         // Requests from outside the tree land here (or in the intercept).
         self.take_requests(cx);

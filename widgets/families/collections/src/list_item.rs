@@ -575,6 +575,16 @@ impl ListItem {
 }
 
 impl Widget for ListItem {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::ListItem;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();

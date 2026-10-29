@@ -1367,7 +1367,8 @@ impl Program {
             for h in std::mem::take(&mut self.pool_workers) {
                 let _ = h.join();
             }
-            if self.demand_plan.as_ref().is_some_and(|p| p.counts().1 == 0) { self.demand_plan = None; }
+            // (a plan still planning is not waited for: it indexes files, or it would be done)
+            if self.demand_plan.as_ref().and_then(|p| p.ready()).is_some_and(|p| p.counts().1 == 0) { self.demand_plan = None; }
         }
         // The image contract covers this boot load only. Later generated files and live
         // module loads must not inherit the last boot crate's no-parse assertion.
@@ -1404,7 +1405,7 @@ impl Program {
         if let Some(plan) = &plan {
             // Failed collected restoration still owns the plan's source IDs.
             // Its AST/reuse cells and subsequent collection share that registry.
-            if let Some(context) = plan.contexts.first() { self.sources = context.sources().clone(); }
+            if let Some(context) = plan.contexts().first() { self.sources = context.sources().clone(); }
         }
         self.front_graph = (self.record_front && self.crates.is_empty() && self.sources.overridden_paths().is_empty())
             .then(|| crate::crate_image::GraphRecipe::new(&crates));
@@ -1421,7 +1422,7 @@ impl Program {
         if let Some(plan) = &plan {
             // A suffix retains the full recipe and dependency indices used by
             // the plan that certified its collected prefix.
-            self.load_recipe = plan.crates.clone();
+            self.load_recipe = plan.crates().to_vec();
         } else { for c in &crates {
             if let Some(saved) = self.load_recipe.iter_mut().find(|old| old.name == c.name && old.root == c.root) { *saved = c.clone(); }
             else { self.load_recipe.push(c.clone()); }

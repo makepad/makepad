@@ -714,9 +714,13 @@ mod tests {
     fn samples_a_busy_thread_by_name() {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let s2 = stop.clone();
+        // the sampler lists the threads once, when it starts: the spinner must be running (and
+        // so named) by then, or the run finds no thread of that name (0 samples)
+        let (started, ready) = std::sync::mpsc::channel();
         let h = std::thread::Builder::new()
             .name("prof-sampler-spin".into())
             .spawn(move || {
+                let _ = started.send(());
                 let mut x = 1u64;
                 while !s2.load(std::sync::atomic::Ordering::Relaxed) {
                     x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1));
@@ -724,6 +728,7 @@ mod tests {
                 x
             })
             .unwrap();
+        ready.recv().unwrap();
         let run = collect(0.5, 200, "prof-sampler-spin", false, &|| false);
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         h.join().unwrap();

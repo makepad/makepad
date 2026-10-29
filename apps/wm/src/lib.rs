@@ -19,6 +19,8 @@ use makepad_widgets::makepad_platform::hosted_relay::HostRelayServer;
 use makepad_widgets::tween::{ClockPolicy, LagSmoothing, TweenClock};
 use makepad_widgets::*;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod a11y;
 mod ai_bus;
 mod apps;
 mod binds;
@@ -234,7 +236,7 @@ script_mod! {
                         snap_overlay := SnapOverlay{}
                         shell_panel := ShellPanel{}
                         shell_menu := ShellMenu{}
-                        shell_notes := ShellNotifications{}
+                        shell_notes := ShellNotifications{a11y: {label: "Notifications"}}
                         shell_osd := ShellOsd{}
                         shot_overlay := ShotOverlay{}
                         // Over everything: a client's file dialog (shell/file_picker.rs).
@@ -263,7 +265,7 @@ script_mod! {
                         }
                         desktop_controls := View{
                             width: Fill height: Fill
-                            shell_bar := ShellBar{width: Fill height: Fill}
+                            shell_bar := ShellBar{a11y: {label: "Desktop bar"} width: Fill height: Fill}
                         }
                         phone_controls := PhoneSurface{visible: false}
                     }
@@ -648,6 +650,15 @@ pub struct App {
     status_worker: Option<TaskHandle<()>>,
     #[rust]
     status_sample: SampledStatus,
+    /// The temperature sampler (`shell/temps.rs`): a frame a second into the panel's history.
+    #[rust]
+    temps_rx: Option<std::sync::mpsc::Receiver<shell::temps::Frame>>,
+    #[rust]
+    temps_worker: Option<TaskHandle<()>>,
+    /// A warning episode began while another flyout was up: the temperature panel opens when
+    /// that one closes (unless the episode is over by then).
+    #[rust]
+    temps_alarm_pending: bool,
     #[rust]
     status_tick: u32,
     /// The clock's alternate format (right-click cycles it, `formatAlt`).
@@ -1388,6 +1399,7 @@ impl App {
             let shared = shared_swapchain_from_host_swapchain(&swapchain, cx);
             let mut msgs = vec![
                 StudioToApp::WindowGeomChange {
+                    screen_origin: None,
                     window_id,
                     dpi_factor: dpi,
                     left: 0.0,
@@ -2173,6 +2185,9 @@ impl App {
     }
 
     fn remove_client(&mut self, cx: &mut Cx, client: ClientId) {
+        self.native_app_owner_gone(client);
+        #[cfg(not(target_arch = "wasm32"))]
+        a11y::disconnected(client);
         // An app's later windows go with it; a later window going is forgotten here.
         for window in self.client_windows.forget(client) {
             self.remove_client(cx, window);
@@ -3198,6 +3213,8 @@ impl App {
                         .to_string_lossy()
                         .to_string();
                     if let Some(slot) = self.state_mut().clients.get_mut(&client) {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        a11y::connected(client, &slot.app, sender.clone());
                         slot.sender = Some(sender);
                         slot.socket = Some(socket);
                         if let Some(sender) = &slot.sender {
@@ -3233,6 +3250,8 @@ impl App {
                     if let Some(client) = client {
                         let mut adopted = false;
                         if let Some(slot) = self.state_mut().clients.get_mut(&client) {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            a11y::disconnected(client);
                             slot.sender = None;
                             slot.socket = None;
                             adopted = slot.external.is_some();
@@ -3389,7 +3408,10 @@ impl App {
     }
 
     fn on_app_msg(&mut self, cx: &mut Cx, client: ClientId, msg: AppToStudio) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if a11y::apply(client, &msg) { return; }
         match msg {
+            AppToStudio::NativeApp(request) => self.native_app_request(cx, client, request),
             AppToStudio::CreateWindow { window_id, .. } => {
                 // A multi-window app (the VJ: console + output window)
                 // announces every window; the tile hosts the FIRST — the
@@ -4798,6 +4820,64 @@ impl App {
         }
         #[cfg(target_os = "linux")]
         self.poll_linux_controls(cx);
+        #[cfg(target_os = "linux")]
+        self.update_temps(cx);
+    }
+
+    /// The temperature frames since the last tick go into the panel's history; the bar's
+    /// thermometer follows, the open panel redraws, and a new warning episode opens the panel
+    /// (once) on the active screen.
+    #[cfg(target_os = "linux")]
+    fn update_temps(&mut self, cx: &mut Cx) {
+        if self.temps_rx.is_none() {
+            match shell::temps::start_sampler(&cx.thread_spawner()) {
+                Ok((rx, worker)) => {
+                    self.temps_rx = Some(rx);
+                    self.temps_worker = Some(worker);
+                }
+                Err(error) => {
+                    log!("wm: could not start the temperature sampler: {error}");
+                    return;
+                }
+            }
+        }
+        let Some(rx) = &self.temps_rx else { return };
+        let frames: Vec<shell::temps::Frame> = rx.try_iter().collect();
+        if frames.is_empty() {
+            return;
+        }
+        let panel = self.ui.widget(cx, ids!(shell_panel));
+        let (badge, open, alarm, any_alarm) = {
+            let Some(mut p) = panel.borrow_mut::<shell::panels::ShellPanel>() else { return };
+            let mut alarm = false;
+            for f in frames {
+                alarm |= p.temps.push(f).episode_started;
+            }
+            let badge = (!p.temps.is_empty()).then(|| p.temps.badge.clone());
+            let open = p.open;
+            if open == Some(shell::panels::PanelKind::Temps) {
+                p.redraw(cx);
+            }
+            (badge, open, alarm, p.temps.any_alarm())
+        };
+        self.bar_sample.temps = badge;
+        // never over another open flyout (a password being typed, a scale being tried): the
+        // warning waits for it to close
+        self.temps_alarm_pending = (self.temps_alarm_pending || alarm) && any_alarm;
+        if self.temps_alarm_pending && open.is_none() {
+            self.temps_alarm_pending = false;
+            let seg = self.active_bar_segment();
+            self.toggle_shell_panel(cx, seg, BarModule::Temps);
+            if let Some(mut p) = panel.borrow_mut::<shell::panels::ShellPanel>() {
+                p.temps_show_alarm();
+                p.redraw(cx);
+            }
+        } else if alarm && open == Some(shell::panels::PanelKind::Temps) {
+            self.temps_alarm_pending = false;
+            if let Some(mut p) = panel.borrow_mut::<shell::panels::ShellPanel>() {
+                p.temps_show_alarm();
+            }
+        }
     }
 
     fn redraw_all(&mut self, cx: &mut Cx) {
@@ -6053,6 +6133,8 @@ fn scan_theme_color(source: &str, key: &str) -> Option<Vec4f> {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         #[cfg(not(target_arch = "wasm32"))]
+        makepad_hal::a11y::register_ui_router(a11y::dispatch);
+        #[cfg(not(target_arch = "wasm32"))]
         { self.domains.enabled = cx.hal_can_host_domains(); }
         // The one bus owner of this process tree: hosted apps' tools are
         // served through the process registry (ai_bus.rs).
@@ -6651,6 +6733,7 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.native_app_tick(cx, event);
         self.desk_link.handle_event(cx, event);
         // a virtual desktop that follows its viewer takes the window size of the viewer that connected last
         #[cfg(target_os = "linux")]
@@ -7072,6 +7155,8 @@ impl AppMain for App {
             }
         }
         if let Event::Signal = event {
+            #[cfg(not(target_arch = "wasm32"))]
+            a11y::flush();
             if SignalToUI::check_and_clear_ui_signal() && self.state.is_some() {
                 makepad_app_host::hosted::trace_host(host::wall_now(), "sig");
                 self.poll_backgrounds(cx);

@@ -85,6 +85,7 @@ fn grab(req: &Req) -> Result<(Arc<Capture>, Option<String>), String> {
         }
         hal.wake();
     };
+    crate::a11y::remote_activity();
     redraw(false);
     if let Some(sid) = session {
         hal.await_frames(sid, 1, Duration::from_millis(req.num("timeout", 3000)));
@@ -100,18 +101,18 @@ fn grab(req: &Req) -> Result<(Arc<Capture>, Option<String>), String> {
     let mut full = (*c).clone();
     full.backend = info.backend;
     full.dialect = if full.dialect == 0 { info.dialect } else { full.dialect };
-    // the app's widgets as laid out now (the frame just drawn), in target pixels
-    if let Some(reply) = hal.query(full.session, b"widgets", Duration::from_millis(req.num("widgets_ms", 5000))) {
+    // The same semantic mirror agents and screen readers see, in capture pixels.
+    let key = crate::a11y::window_key(full.session, full.target.index);
+    if let Some(tree) = crate::a11y::with_tree(key, Clone::clone) {
         let scale = full.dpi.max(0.01);
-        for line in String::from_utf8_lossy(&reply).lines() {
-            let Some(r) = crate::automation::Row::parse(line) else { continue };
-            if !r.visible || r.w <= 0.0 || r.h <= 0.0 || r.window.is_some_and(|w| w != full.target) {
-                continue;
+        tree.walk(|n,_| {
+            let b = n.bounds;
+            if !n.states.contains(makepad_a11y::States::HIDDEN) && !b.is_empty() {
+                full.widgets.push(CapWidget { path: n.path.clone(), kind: n.class.clone(), rect: [b.x * scale, b.y * scale, b.w * scale, b.h * scale], text: n.name.clone() });
             }
-            full.widgets.push(CapWidget { path: r.path, kind: r.kind, rect: [r.x as f32 * scale, r.y as f32 * scale, r.w as f32 * scale, r.h as f32 * scale], text: r.text });
-        }
+        });
     } else {
-        full.notes.push("the app did not answer the widgets query: draws are attributed to draw lists only".into());
+        full.notes.push("no semantic tree yet: draws are attributed to draw lists only".into());
     }
     let mut c = Arc::new(full);
     if !c.widgets.is_empty() {

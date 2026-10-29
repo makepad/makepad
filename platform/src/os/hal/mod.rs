@@ -10,6 +10,7 @@ mod display;
 mod domain_test;
 pub(crate) use domain::lent_id;
 pub(crate) use hosted::HostedDone;
+mod encode_surface;
 mod event_loop;
 mod fonts;
 #[cfg(not(target_os = "android"))]
@@ -23,7 +24,7 @@ mod query;
 mod readback;
 mod shader;
 mod software_video;
-mod xr;
+pub(crate) mod xr;
 
 pub use fonts::*;
 
@@ -117,6 +118,8 @@ pub struct HalClient {
     /// memory `hal_pump` writes events into, kept between turns
     pub(crate) events: Option<EventStore>,
     pub(crate) frames: FrameBuilder,
+    pub(crate) a11y_host_waiters: Vec<(u64, makepad_hal::Id, u64)>,
+    pub(crate) a11y_present_waiters: Vec<(u32, makepad_hal::Id, u64)>,
     /// HAL clock (ns) at `init_cx_os`: `seconds_since_app_start` counts from it
     pub(crate) start_ns: u64,
     pub(crate) windows: HashMap<usize, HalWindow>,
@@ -130,6 +133,9 @@ pub struct HalClient {
     pub(crate) hosted: Option<hosted::HostedClient>,
     /// the head-mounted display's stereo window (`xr_start_presenting`)
     pub(crate) xr: Option<xr::HalXr>,
+    /// a remote headset slot was offered when last looked (a headset linked: the app draws again
+    /// and finds an XR display, `Cx::xr_display`)
+    pub(crate) xr_remote_seen: bool,
     /// a window drag started by the app (`CxOsOp::StartDragging`): the in-window drag protocol
     /// synthesises Drag / Drop events from mouse move and up
     pub(crate) internal_drag_items: Option<Arc<Vec<DragItem>>>,
@@ -205,6 +211,8 @@ impl Default for HalClient {
             info: None,
             events: None,
             frames: FrameBuilder::default(),
+            a11y_present_waiters: Vec::new(),
+            a11y_host_waiters: Vec::new(),
             start_ns: 0,
             windows: HashMap::new(),
             window_created: false,
@@ -214,6 +222,7 @@ impl Default for HalClient {
             direct_display: Default::default(),
             hosted: None,
             xr: None,
+            xr_remote_seen: false,
             internal_drag_items: None,
             input_ns: 0,
             composing: false,

@@ -50,8 +50,7 @@ pub fn alive(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
-        false
+        crate::os::pid_alive(pid)
     }
 }
 
@@ -199,7 +198,21 @@ mod os {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+#[cfg(windows)]
+mod os {
+    use super::*;
+    pub fn proc(pid: u32) -> Option<Proc> {
+        let (cpu_ns, rss_bytes) = crate::os::proc_numbers(pid)?;
+        let threads = crate::os::processes().into_iter().find(|p| p.0 == pid).map_or(1, |p| p.2);
+        Some(Proc { cpu_ns, rss_bytes, threads })
+    }
+    pub fn machine() -> Machine {
+        let (total, avail) = crate::os::memory();
+        Machine { os: "windows", load1: 0.0, mem_total_mb: total >> 20, mem_avail_mb: avail >> 20, uptime_s: crate::os::uptime_s(), cpus: std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1), battery: None }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
 mod os {
     use super::*;
     pub fn proc(_pid: u32) -> Option<Proc> {

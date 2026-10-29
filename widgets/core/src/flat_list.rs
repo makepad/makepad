@@ -181,6 +181,75 @@ impl FlatList {
 }
 
 impl Widget for FlatList {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        request: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        if request.action != a11y_tree::Actions::SCROLL_INTO_VIEW {
+            return a11y_tree::ActionResult::Unhandled;
+        }
+        let a11y_tree::ActionArg::Number(index) = request.arg else {
+            return a11y_tree::ActionResult::Unsupported;
+        };
+        if !index.is_finite() || index < 0.0 || index.fract() != 0.0 {
+            return a11y_tree::ActionResult::Unsupported;
+        }
+        let mut rects: Vec<_> = self
+            .items
+            .values()
+            .filter(|item| item.widget.area().is_valid(cx))
+            .map(|item| item.widget.area().rect(cx))
+            .collect();
+        rects.sort_by(|a, b| {
+            a.pos
+                .y
+                .total_cmp(&b.pos.y)
+                .then(a.pos.x.total_cmp(&b.pos.x))
+        });
+        let Some(rect) = rects.get(index as usize) else {
+            return a11y_tree::ActionResult::Unsupported;
+        };
+        self.scroll_bars.scroll_into_view_abs(cx, *rect);
+        self.redraw(cx);
+        a11y_tree::ActionResult::Handled
+    }
+
+    fn semantics_parts(&self, cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        let mut items: Vec<_> = self
+            .items
+            .iter()
+            .filter(|(_, i)| i.widget.area().is_valid(cx))
+            .collect();
+        items.sort_by(|a, b| {
+            let a = a.1.widget.area().rect(cx).pos;
+            let b = b.1.widget.area().rect(cx).pos;
+            a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x))
+        });
+        for (index, (key, item)) in items.into_iter().enumerate() {
+            out.push((
+                key.0,
+                None,
+                a11y_tree::Node {
+                    id: a11y_tree::NodeId::widget(item.widget.widget_uid().0),
+                    role: a11y_tree::Role::ListItem,
+                    pos_in_set: index as u32 + 1,
+                    set_size: self.items.len() as u32,
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::List;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.set_size = self.items.len() as u32;
+        node.actions = a11y_tree::Actions::SCROLL_INTO_VIEW;
+    }
+
     fn clips_content(&self) -> bool {
         true
     }

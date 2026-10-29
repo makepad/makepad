@@ -13,8 +13,7 @@ use {
     },
     makepad_studio_protocol::{
         hub_protocol::FrameCodec, AppToStudio, EventSample, RunViewFrameData, RunViewFrameRequest,
-        RunViewKeyFocusRect, ScreenshotResponse, StudioToApp, WidgetQueryResponse, WidgetSnapshot,
-        WidgetSnapshotResponse, WidgetTreeDumpResponse,
+        RunViewKeyFocusRect, ScreenshotResponse, StudioToApp,
     },
     std::cell::{Cell, RefCell},
     std::collections::{HashMap, HashSet},
@@ -63,8 +62,12 @@ impl Cx {
 
     #[allow(unused)]
     pub(crate) fn any_passes_dirty(&self) -> bool {
+        // held windows (`XrWindowHold`) keep their recordings dirty without asking for a frame:
+        // the headset's next frame (or another cause) paints them
+        let held = !self.xr_window_hold.wants_frame() && self.screenshot_requests.is_empty() && self.run_view_frame_requests.is_empty();
         for draw_pass_id in self.passes.id_iter() {
-            if self.passes[draw_pass_id].paint_dirty {
+            let pass = &self.passes[draw_pass_id];
+            if pass.paint_dirty && !(held && !pass.repaint_requested && self.pass_root_window(draw_pass_id).is_some()) {
                 return true;
             }
         }
@@ -283,12 +286,29 @@ impl Cx {
         // An offscreen XR pass (`info_flags::XR_OFFSCREEN`) produces textures the app hands on
         // (packs, mirrors them): it runs before everything else, its own producers before it.
         let xr_offscreen = self.xr_offscreen();
+        // a window pass asked to paint explicitly (a remote grab, `repaint_pass`)
+        let mut window_requested = false;
         for draw_pass_id in self.passes.id_iter() {
             let requested = std::mem::take(&mut self.passes[draw_pass_id].repaint_requested);
             if self.passes[draw_pass_id].paint_dirty
                 && (live[draw_pass_id.0] == Some(true) || requested)
             {
                 passes_todo.push(draw_pass_id);
+                window_requested |= requested && self.pass_root_window(draw_pass_id).is_some();
+            }
+        }
+        // a remote headset streams: a drawing of only its frames leaves the windows as they are
+        // (dirty, painted with everything recorded at their next cause), `XrWindowHold`
+        if (self.xr_window_hold.on || self.xr_offscreen()) && passes_todo.iter().any(|id| self.pass_root_window(*id).is_some()) {
+            let now = self.seconds_since_app_start();
+            // a screenshot or a studio/inspect frame grab waits for a painted window: it paints
+            let grab = window_requested || !self.screenshot_requests.is_empty() || !self.run_view_frame_requests.is_empty();
+            if self.xr_window_hold.windows_paint(now, grab) {
+                self.xr_window_hold.painted += 1;
+            } else {
+                self.xr_window_hold.held += 1;
+                let passes = &*self;
+                passes_todo.retain(|id| passes.pass_root_window(*id).is_none());
             }
         }
         let depth_of = |start: DrawPassId| -> u64 {
@@ -758,38 +778,6 @@ impl Cx {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn send_studio_widget_tree_dump_response(&mut self, request_id: u64) {
-        self.widget_tree_dump_requests.push(request_id);
-        if self.in_draw_event {
-            return;
-        }
-        self.try_send_studio_widget_tree_dump_responses();
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn send_studio_widget_query_response(&self, request_id: u64, query: String) {
-        let rects = if let Some(callback) = self.widget_query_callback {
-            callback(self, &query)
-        } else {
-            Vec::new()
-        };
-        Cx::send_studio_message(AppToStudio::WidgetQuery(WidgetQueryResponse {
-            request_id,
-            query,
-            rects,
-        }));
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn send_studio_widget_snapshot_response(&mut self, request_id: u64) {
-        self.widget_snapshot_requests.push(request_id);
-        if self.in_draw_event {
-            return;
-        }
-        self.try_send_studio_widget_snapshot_responses();
-    }
-
     fn studio_key_focus_rect_response(&self) -> RunViewKeyFocusRect {
         let area = self.key_focus();
         if !area.is_valid(self) {
@@ -811,89 +799,6 @@ impl Cx {
         Cx::send_studio_message(AppToStudio::RunViewKeyFocusRect(
             self.studio_key_focus_rect_response(),
         ));
-    }
-
-    fn widget_tree_dump_ready(dump: &str) -> bool {
-        for line in dump.lines() {
-            let mut parts = line.split_whitespace();
-            let Some(first) = parts.next() else {
-                continue;
-            };
-            if first.starts_with('W') {
-                continue;
-            }
-            let tokens: Vec<&str> = line.split_whitespace().collect();
-            if tokens.len() < 2 {
-                continue;
-            }
-            let Some(h) = tokens.last().and_then(|v| v.parse::<i64>().ok()) else {
-                continue;
-            };
-            let Some(w) = tokens
-                .get(tokens.len().saturating_sub(2))
-                .and_then(|v| v.parse::<i64>().ok())
-            else {
-                continue;
-            };
-            if w > 0 && h > 0 {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn widget_snapshot_ready(widgets: &[WidgetSnapshot]) -> bool {
-        widgets
-            .iter()
-            .any(|widget| widget.visible && widget.width > 0 && widget.height > 0)
-    }
-
-    pub(crate) fn try_send_studio_widget_tree_dump_responses(&mut self) {
-        if self.widget_tree_dump_requests.is_empty() {
-            return;
-        }
-        if self.in_draw_event {
-            return;
-        }
-        let dump = if let Some(callback) = self.widget_tree_dump_callback {
-            callback(self)
-        } else {
-            "W1 0\n".to_string()
-        };
-        if !Self::widget_tree_dump_ready(&dump) {
-            return;
-        }
-        let request_ids: Vec<u64> = self.widget_tree_dump_requests.drain(..).collect();
-        for request_id in request_ids {
-            Cx::send_studio_message(AppToStudio::WidgetTreeDump(WidgetTreeDumpResponse {
-                request_id,
-                dump: dump.clone(),
-            }));
-        }
-    }
-
-    pub(crate) fn try_send_studio_widget_snapshot_responses(&mut self) {
-        if self.widget_snapshot_requests.is_empty() {
-            return;
-        }
-        if self.in_draw_event {
-            return;
-        }
-        let widgets = if let Some(callback) = self.widget_snapshot_callback {
-            callback(self)
-        } else {
-            Vec::new()
-        };
-        if !Self::widget_snapshot_ready(&widgets) {
-            return;
-        }
-        let request_ids: Vec<u64> = self.widget_snapshot_requests.drain(..).collect();
-        for request_id in request_ids {
-            Cx::send_studio_message(AppToStudio::WidgetSnapshot(WidgetSnapshotResponse {
-                request_id,
-                widgets: widgets.clone(),
-            }));
-        }
     }
 
     /// Hardware-faithful synthetic mouse move (remote `/m?hw=1`): the event
@@ -1142,15 +1047,39 @@ impl Cx {
             StudioToApp::RunViewFrameRequest(request) => {
                 self.queue_studio_run_view_frame_request(request);
             }
-            StudioToApp::WidgetTreeDump(request) => {
-                self.send_studio_widget_tree_dump_response(request.request_id);
+            StudioToApp::A11yState { consumers } => {
+                let first = self.a11y_host_consumers == 0 && consumers != 0;
+                self.a11y_host_consumers = consumers;
+                if self.a11y.set_consumers(consumers | self.a11y_native_consumers) || first {
+                    self.a11y.request_full();
+                    self.redraw_all();
+                }
             }
-            StudioToApp::WidgetQuery(request) => {
-                self.send_studio_widget_query_response(request.request_id, request.query);
+            StudioToApp::A11yRead { req, window, present } => {
+                #[cfg(not(target_arch = "wasm32"))]
+                if present {
+                    let target = self.windows.id_iter().find(|id| id.id() == window);
+                    if let Some(id) = target {
+                        let hal_id = crate::event::hal_intake::hal_window_id(id);
+                        self.hal.a11y_host_waiters.push((req, hal_id, self.hal.frames.window_submission(hal_id)));
+                        self.request_remote_window_present(id);
+                    }
+                } else {
+                    Self::send_studio_message(AppToStudio::A11yReadDone { req, user_seq: self.remote_activity.user_seq() });
+                }
+                #[cfg(target_arch = "wasm32")]
+                let _ = (req, window, present);
             }
-            StudioToApp::WidgetSnapshot(request) => {
-                self.send_studio_widget_snapshot_response(request.request_id);
+            StudioToApp::A11yAction { bytes } => {
+                match makepad_a11y::wire::decode_action(&bytes) {
+                    Ok(action) => {
+                        let target = self.a11y.node_window(action.node).unwrap_or(window_id);
+                        self.dispatch_a11y_action(target, action);
+                    }
+                    Err(error) => crate::error!("{error}"),
+                }
             }
+            StudioToApp::A11yType { text } => self.a11y_type_fallback(text),
             StudioToApp::Kill => {
                 self.call_event_handler(&Event::Shutdown);
                 return true;
@@ -1255,6 +1184,7 @@ impl Cx {
             StudioToApp::Tick
             | StudioToApp::Swapchain(_)
             | StudioToApp::WindowGeomChange { .. }
+            | StudioToApp::NativeApp(_)
             | StudioToApp::TweakRay(_) => {}
         }
         false
@@ -1430,11 +1360,15 @@ impl Cx {
 
     fn invoke_event_handler(&mut self, event: &Event) {
         let event_handler = self.event_handler.clone();
+        // what the user does to a window repaints it at once, also while a headset streams
+        // (`XrWindowHold`)
+        let input = std::mem::replace(&mut self.xr_window_hold.in_input, self.xr_window_hold.on && crate::draw_pass::XrWindowHold::is_input(event));
         // The active flag excludes aliasing, while the Rc keeps this stable
         // allocation alive even if the handler mutates `Cx`.
         unsafe {
             (&mut *event_handler.get())(self, event);
         }
+        self.xr_window_hold.in_input = input;
     }
 
     fn event_dispatch_is_reentrant(&self, event: &Event) -> bool {
@@ -1522,8 +1456,6 @@ impl Cx {
         }
 
         if Cx::has_studio_web_socket() {
-            self.try_send_studio_widget_tree_dump_responses();
-            self.try_send_studio_widget_snapshot_responses();
         }
 
         // Reset widget query invalidation after all views have processed it.
@@ -1556,7 +1488,7 @@ impl Cx {
         self.handle_pending_clear_hover();
     }
 
-    fn inner_key_focus_change(&mut self) {
+    pub(crate) fn inner_key_focus_change(&mut self) {
         if let Some((prev, focus)) = self.keyboard.cycle_key_focus_changed() {
             self.inner_call_event_handler(&Event::KeyFocus(KeyFocusEvent { prev, focus }));
         }
@@ -1829,6 +1761,7 @@ impl Cx {
         let mut draw_event = DrawEvent::default();
         std::mem::swap(&mut draw_event, &mut self.new_draw_event);
         draw_event.time = time;
+        if self.a11y.on { self.a11y.begin_frame(); }
         // one drawing, however many draw contexts the handler makes
         self.drawing_id += 1;
         self.drawing_start = self.redraw_id;
@@ -1853,6 +1786,8 @@ impl Cx {
             }
         }
 
+        self.a11y_finish_frame();
+
         // The frame's recording boundary: every draw list has finished
         // recording. The geometries dropped since the last redraw are freed
         // now, except those a live draw call still names (see
@@ -1863,8 +1798,6 @@ impl Cx {
         }
 
         if Cx::has_studio_web_socket() {
-            self.try_send_studio_widget_tree_dump_responses();
-            self.try_send_studio_widget_snapshot_responses();
         }
     }
 
@@ -2429,6 +2362,40 @@ mod tests {
         cx.draw_lists[list.id()].clear_draw_items(redraw_id, recording_gen, uniforms_gen);
         cx.passes[pass.draw_pass_id()].main_draw_list_id = Some(list.id());
         (pass, list)
+    }
+
+    /// While a headset streams the window holds its frame for the headset's own frames, but a
+    /// screenshot or remote grab (and an explicit repaint) paints it at once: the desktop stays
+    /// grabbable and inspectable.
+    #[test]
+    fn a_held_window_paints_for_a_grab() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let window = crate::window::WindowHandle::new(&mut cx).window_id();
+        cx.windows[window].is_created = true;
+        let (pass, _list) = pass_with_current_list(&mut cx);
+        let pass = pass.draw_pass_id();
+        cx.passes[pass].parent = CxDrawPassParent::Window(window);
+        cx.windows[window].main_pass_id = Some(pass);
+        let mut todo = Vec::new();
+        cx.xr_hold_windows(true, false);
+        cx.xr_window_hold.painted_at = cx.seconds_since_app_start();
+        // the headset's frame redrew the window's list: held
+        cx.passes[pass].paint_dirty = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(!todo.contains(&pass), "held for the headset's frame");
+        assert!(!cx.any_passes_dirty(), "a held window asks for no frame");
+        // a grab: painted at once
+        cx.screenshot_requests.push(makepad_studio_protocol::ScreenshotRequest { request_id: 7, kind_id: 0 });
+        assert!(cx.any_passes_dirty(), "a grab wakes the loop");
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&pass), "a grab paints the held window");
+        cx.screenshot_requests.clear();
+        // a remote present request (repaint_pass) likewise
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(!todo.contains(&pass));
+        cx.request_remote_window_present(window);
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&pass), "an explicit repaint paints the held window");
     }
 
     #[test]

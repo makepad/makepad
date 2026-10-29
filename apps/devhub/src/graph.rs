@@ -8,52 +8,7 @@ use makepad_shell_kit::ui::{rect, HAlign, ShellDraw};
 use makepad_shell_kit::{alpha, ShellTokens};
 use makepad_widgets::*;
 
-script_mod! {
-    use mod.prelude.widgets_internal.*
-    use mod.widgets.*
-
-    // One stretch of a trace: the line from line_a to line_b (quad pixels) and the fill below
-    // it, fading toward the plot's bottom (anchored to the plot, so neighbours meet seamlessly).
-    mod.widgets.DrawDevhubTrace = set_type_default() do #(DrawDevhubTrace::script_shader(vm)) {
-        ..mod.draw.DrawQuad
-        pixel: fn() {
-            let p = self.pos * self.rect_size
-            let dx = max(self.line_b.x - self.line_a.x, 0.0001)
-            let t = clamp((p.x - self.line_a.x) / dx, 0.0, 1.0)
-            let ly = mix(self.line_a.y, self.line_b.y, t)
-            let slope = (self.line_b.y - self.line_a.y) / dx
-            let d = abs(p.y - ly) / sqrt(1.0 + slope * slope)
-            let line = clamp(self.line_width * 0.5 - d + 0.5, 0.0, 1.0)
-            let below = clamp(p.y - ly + 0.5, 0.0, 1.0)
-            let g = clamp((p.y - self.plot_top) / max(self.plot_height, 1.0), 0.0, 1.0)
-            let fill = self.fill_alpha * below * (1.0 - 0.75 * g)
-            let a = max(line * self.color.a, fill)
-            return vec4(self.color.rgb * a, a)
-        }
-    }
-}
-
-/// Instance fields after the draw base, as the instance buffer reads them.
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-pub struct DrawDevhubTrace {
-    #[deref]
-    draw_super: DrawQuad,
-    #[live]
-    pub color: Vec4f,
-    #[live]
-    pub line_a: Vec2f,
-    #[live]
-    pub line_b: Vec2f,
-    #[live]
-    pub plot_top: f32,
-    #[live]
-    pub plot_height: f32,
-    #[live]
-    pub fill_alpha: f32,
-    #[live(1.5)]
-    pub line_width: f32,
-}
+use makepad_shell_kit::graph::{self as shell_graph, DrawShellTrace, Span};
 
 /// The view's colours, from the shell's theme tokens: text in three strengths mixed toward the
 /// panel's background (readable on any theme, unlike a darkened foreground), the accent and the
@@ -135,37 +90,11 @@ pub fn well(d: &mut ShellDraw, cx: &mut Cx2d, tok: &ShellTokens, p: &Palette, r:
     rect(r.pos.x + 1.0, r.pos.y + 24.0, r.size.x - 2.0, r.size.y - 24.0 - 19.0)
 }
 
-/// A trace of `(at, value)` samples on `0..max`; samples further apart than `gap` s are not
-/// joined.
+/// A trace of `(at, value)` samples on `0..max` over the last `WINDOW_S`; samples further apart
+/// than `gap` s are not joined.
 #[allow(clippy::too_many_arguments)]
-pub fn trace(g: &mut DrawDevhubTrace, cx: &mut Cx2d, plot: Rect, points: &mut dyn Iterator<Item = (f64, f32)>, now: f64, max: f32, gap: f64, color: Vec4f, fill: f32) {
-    if plot.size.x < 4.0 || plot.size.y < 4.0 {
-        return;
-    }
-    let bottom = plot.pos.y + plot.size.y;
-    let at = |t: f64, v: f32| dvec2(x_of(plot, t, now), bottom - ((v / max.max(1e-6)).clamp(0.0, 1.0) as f64) * (plot.size.y - 2.0));
-    g.color = color;
-    g.fill_alpha = fill;
-    g.line_width = 1.4;
-    let mut prev: Option<(f64, Vec2d)> = None;
-    for (t, v) in points {
-        let here = at(t, v);
-        if let Some((pt, a)) = prev {
-            if t - pt <= gap && here.x > plot.pos.x - 40.0 {
-                let (x0, x1) = (a.x.max(plot.pos.x), here.x.min(plot.pos.x + plot.size.x));
-                if x1 > x0 {
-                    let top = a.y.min(here.y) - 2.0;
-                    let quad = rect(a.x, top, (here.x - a.x).max(0.5), bottom - top);
-                    g.line_a = Vec2f { x: 0.0, y: (a.y - top) as f32 };
-                    g.line_b = Vec2f { x: (here.x - a.x) as f32, y: (here.y - top) as f32 };
-                    g.plot_top = (plot.pos.y - top) as f32;
-                    g.plot_height = plot.size.y as f32;
-                    g.draw_abs(cx, quad);
-                }
-            }
-        }
-        prev = Some((t, here));
-    }
+pub fn trace(g: &mut DrawShellTrace, cx: &mut Cx2d, plot: Rect, points: &mut dyn Iterator<Item = (f64, f32)>, now: f64, max: f32, gap: f64, color: Vec4f, fill: f32) {
+    shell_graph::trace(g, cx, plot, points, Span { t0: now - WINDOW_S, t1: now, lo: 0.0, hi: max.max(1e-6) }, gap, color, fill, 1.4);
 }
 
 /// The frame budget for frames that come about every `typical` ms: the display rate they keep

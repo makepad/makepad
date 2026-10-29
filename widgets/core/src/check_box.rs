@@ -1526,6 +1526,54 @@ impl CheckBox {
 }
 
 impl Widget for CheckBox {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        action: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionResult, Actions as A};
+        if action.action != A::TOGGLE && action.action != A::SELECT {
+            return ActionResult::Unhandled;
+        }
+        if self.disabled(cx) {
+            return ActionResult::Disabled;
+        }
+        let on = action.action == A::SELECT || !self.active(cx);
+        self.set_active(cx, on, Animate::Yes);
+        let uid = self.widget_uid();
+        cx.widget_action_with_data(&self.action_data, uid, CheckBoxAction::Change(on));
+        cx.widget_to_script_call(
+            uid,
+            NIL,
+            self.source.clone(),
+            self.on_click.clone(),
+            &[ScriptValue::from_bool(on)],
+        );
+        self.knob_motion_kick(cx, true);
+        ActionResult::Handled
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::CheckBox;
+        let state = self.state(cx);
+        let text = match state {
+            CheckState::On if !self.text_on.is_empty() => self.text_on.as_str(),
+            CheckState::Off if !self.text_off.is_empty() => self.text_off.as_str(),
+            _ => self.text.as_ref(),
+        };
+        makepad_platform::a11y::set_string(&mut node.name, text);
+        node.toggle = match state {
+            CheckState::On => a11y_tree::Toggle::On,
+            CheckState::Off => a11y_tree::Toggle::Off,
+            CheckState::Mixed => a11y_tree::Toggle::Mixed,
+        };
+        node.actions = a11y_tree::Actions::TOGGLE | a11y_tree::Actions::FOCUS;
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+    }
+
     /// Its texts, laid out (hidden or switched ones draw nothing).
     fn scan(&mut self, cx: &mut Cx, _scan: &ScanEvent, _scope: &mut Scope) {
         self.draw_text.scan_text(cx, self.text.as_ref());
@@ -1594,9 +1642,7 @@ impl Widget for CheckBox {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
-    fn snapshot_checked(&self, cx: &Cx) -> Option<bool> {
-        Some(self.active(cx))
-    }
+
 
     fn script_call(
         &mut self,

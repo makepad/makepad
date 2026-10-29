@@ -399,6 +399,14 @@ impl EmptyGlyph {
 }
 
 impl Widget for EmptyGlyph {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value =
+            (|| -> Option<String> { Some(self.mark.name().to_string()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -422,9 +430,7 @@ impl Widget for EmptyGlyph {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.mark.name().to_string())
-    }
+
 }
 
 impl EmptyGlyphRef {
@@ -566,6 +572,19 @@ impl WidgetNode for EmptyState {
 }
 
 impl Widget for EmptyState {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Status;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            if self.body.is_empty() {
+                return Some(self.heading.clone());
+            }
+            Some(format!("{} — {}", self.heading, self.body))
+        })()
+        .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -659,14 +678,7 @@ impl Widget for EmptyState {
         self.set_heading(cx, v);
     }
 
-    /// The heading and the body as one line, so a test can wait on the
-    /// wording rather than on which preset was used.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        if self.body.is_empty() {
-            return Some(self.heading.clone());
-        }
-        Some(format!("{} — {}", self.heading, self.body))
-    }
+
 }
 
 impl EmptyStateRef {

@@ -45,31 +45,11 @@ fn ink(png: &Path, rect: (usize, usize, usize, usize)) -> usize {
     count
 }
 
-/// Waits until the `status` label reports `phase` at frame `min_frame` or later.
-/// The frame counter counts draws: any redraw (a font answer arriving, a resize)
-/// adds to it, so the exact count is not a stable thing to wait for.
+/// Wait for the stress widget's draw counter. The semantic label describes the
+/// presented text, which can lag the counter emitted later in that same draw.
+/// The subsequent screenshot supplies the GPU presentation barrier.
 fn wait_status(app: &TestApp, phase: u32, min_frame: u64) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    let mut last = None;
-    while std::time::Instant::now() < deadline {
-        let status = app
-            .widget_snapshot()
-            .into_iter()
-            .find(|w| w.id == "status" && w.visible)
-            .and_then(|w| w.text);
-        if let Some(text) = &status {
-            let mut words = text.split_whitespace();
-            let parsed = (words.next(), words.next(), words.next(), words.next());
-            if let (Some("phase"), Some(p), Some("frame"), Some(f)) = parsed {
-                if p.parse() == Ok(phase) && f.parse::<u64>().is_ok_and(|f| f >= min_frame) {
-                    return;
-                }
-            }
-        }
-        last = status;
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    panic!("status never reached phase {phase} frame >= {min_frame} (last seen {last:?})");
+    app.wait_for_log_contains(&format!("atlas-stress: phase {phase} frame {min_frame}"));
 }
 
 #[test]
@@ -193,6 +173,7 @@ fn no_frame_shows_a_blank_glyph_and_a_retained_list_keeps_its_words() {
         assert!(still_ink > 200, "the still row drew no text ({still_ink})");
 
         app.locator(Selector::id("churn")).wait_visible().click();
+        let (mut log_seq, mut status) = (0, String::new());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
         let (mut sampled, mut blank_frames, mut still_changed) = (0, 0, 0);
         let blank_presented: u64;
@@ -200,12 +181,15 @@ fn no_frame_shows_a_blank_glyph_and_a_retained_list_keeps_its_words() {
         // which would redraw the still row. From the fresh frames on, every sample is one.
         loop {
             assert!(std::time::Instant::now() < deadline, "the churn did not finish");
-            let status = app
-                .widget_snapshot()
-                .into_iter()
-                .find(|w| w.id == "churn_status")
-                .and_then(|w| w.text)
-                .unwrap_or_default();
+            // Draw-phase diagnostics are emitted after the label was drawn. Read the
+            // counter log without forcing a redraw of the retained row under test.
+            let tail = app.log_since(log_seq).unwrap();
+            log_seq = tail.last_seq;
+            for line in tail.lines {
+                if let Some((_, phase)) = line.split_once("atlas-stress: churn ") {
+                    status = format!("churn {phase}");
+                }
+            }
             if status == "churn fresh" {
                 let shot = app.screenshot();
                 sampled += 1;
@@ -279,16 +263,20 @@ fn a_kept_draw_list_keeps_its_words() {
         let list_ink = ink(&reference, (0, list_y, WIDTH, 60));
         assert!(list_ink > 200, "the kept list drew no text ({list_ink}) {reference:?}");
         app.locator(Selector::id("churn")).wait_visible().click();
+        let (mut log_seq, mut status) = (0, String::new());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
         let (mut sampled, mut changed) = (0, 0);
         loop {
             assert!(std::time::Instant::now() < deadline, "the churn did not finish");
-            let status = app
-                .widget_snapshot()
-                .into_iter()
-                .find(|w| w.id == "churn_status")
-                .and_then(|w| w.text)
-                .unwrap_or_default();
+            // Draw-phase diagnostics are emitted after the label was drawn. Read the
+            // counter log without forcing a redraw of the retained row under test.
+            let tail = app.log_since(log_seq).unwrap();
+            log_seq = tail.last_seq;
+            for line in tail.lines {
+                if let Some((_, phase)) = line.split_once("atlas-stress: churn ") {
+                    status = format!("churn {phase}");
+                }
+            }
             if status == "churn fresh" || status.starts_with("churn done") {
                 let shot = app.screenshot();
                 sampled += 1;

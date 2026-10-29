@@ -1,52 +1,52 @@
-# Calculator input script for diff_full.sh: `click <widget name>`, `text <s>`, `step <frames>`, `snap`.
-# Every `snap` appends the display, the tape and the widget tree text to the state dump.
+# Calculator input script for diff_full.sh: `click <query>`, `text <s>`, `step <frames>`, `ui`.
+# Every `ui` appends the display, the tape and the widget tree text to the state dump.
 step 5
-snap
-click k_1
-click k_2
-click k_mul
-click k_3
-click k_dot
-click k_5
-click k_eq
+ui
+click path=k_1
+click path=k_2
+click path=k_mul
+click path=k_3
+click path=k_dot
+click path=k_5
+click path=k_eq
 step 3
-snap
-click k_clear
-click k_9
-click k_sqrt
-click k_eq
+ui
+click path=k_clear
+click path=k_9
+click path=k_sqrt
+click path=k_eq
 step 3
-snap
-click k_clear
-click k_4
-click k_5
-click k_sin
-click k_add
-click k_2
-click k_power
-click k_1
-click k_0
-click k_eq
+ui
+click path=k_clear
+click path=k_4
+click path=k_5
+click path=k_sin
+click path=k_add
+click path=k_2
+click path=k_power
+click path=k_1
+click path=k_0
+click path=k_eq
 step 3
-snap
-click k_clear
+ui
+click path=k_clear
 text 7*8-6/4
-click k_eq
+click path=k_eq
 step 3
-snap
-click k_clear
-click k_1
-click k_ln
-click k_add
-click k_pi
-click k_mul
-click k_e
-click k_eq
+ui
+click path=k_clear
+click path=k_1
+click path=k_ln
+click path=k_add
+click path=k_pi
+click path=k_mul
+click path=k_e
+click path=k_eq
 step 3
-snap
-click k_back
-click k_sign
-click k_percent
-click k_fact
+ui
+click path=k_back
+click path=k_sign
+click path=k_percent
+click path=k_fact
 step 3
-snap
+ui

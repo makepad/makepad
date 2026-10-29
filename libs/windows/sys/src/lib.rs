@@ -1009,6 +1009,11 @@ pub use import_SysFreeString::call as SysFreeString_raw;
 #[inline]
 pub unsafe fn SysFreeString(bstrString: Option<*mut u16>) -> () {
 import_SysFreeString::call(bstrString.unwrap_or(unsafe { ::core::mem::zeroed() }))}
+mod import_SysStringLen { #[link(name = "OLEAUT32", kind = "raw-dylib")] extern "system" { #[link_name = "SysStringLen"] pub fn call(pbstr: *mut u16) -> u32; } }
+pub use import_SysStringLen::call as SysStringLen_raw;
+#[inline]
+pub unsafe fn SysStringLen(pbstr: Option<*mut u16>) -> u32 {
+import_SysStringLen::call(pbstr.unwrap_or(unsafe { ::core::mem::zeroed() }))}
 pub const TRUE: crate::core::BOOL = crate::core::BOOL(1i64 as _);
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -11376,6 +11381,7 @@ pub unsafe fn Release(&self) -> u32 {
 impl Clone for IMMNotificationClient { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
 impl Drop for IMMNotificationClient { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
 impl ::core::cmp::PartialEq for IMMNotificationClient { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
 pub trait IMMNotificationClientImpl {
 fn OnDeviceStateChanged(&self, pwstrDeviceId: crate::core::PCWSTR, dwNewState: crate::Win32::Media::Audio::DEVICE_STATE) -> Result<(), crate::core::HRESULT>;
 fn OnDeviceAdded(&self, pwstrDeviceId: crate::core::PCWSTR) -> Result<(), crate::core::HRESULT>;
@@ -11383,7 +11389,8 @@ fn OnDeviceRemoved(&self, pwstrDeviceId: crate::core::PCWSTR) -> Result<(), crat
 fn OnDefaultDeviceChanged(&self, flow: crate::Win32::Media::Audio::EDataFlow, role: crate::Win32::Media::Audio::ERole, pwstrDefaultDeviceId: crate::core::PCWSTR) -> Result<(), crate::core::HRESULT>;
 fn OnPropertyValueChanged(&self, pwstrDeviceId: crate::core::PCWSTR, key: crate::Win32::Foundation::PROPERTYKEY) -> Result<(), crate::core::HRESULT>;
 }
-static IMPLEMENT_VTABLE_IMMNotificationClient: IMMNotificationClient_Vtbl = IMMNotificationClient_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+const _: () = assert!(::core::mem::size_of::<IMMNotificationClient_Vtbl>() == 8 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IMMNotificationClient: IMMNotificationClient_Vtbl = crate::Win32::Media::Audio::IMMNotificationClient_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
 OnDeviceStateChanged: thunk_IMMNotificationClient_OnDeviceStateChanged,
 OnDeviceAdded: thunk_IMMNotificationClient_OnDeviceAdded,
 OnDeviceRemoved: thunk_IMMNotificationClient_OnDeviceRemoved,
@@ -11411,8 +11418,8 @@ let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementat
 match implementation.OnPropertyValueChanged(pwstrDeviceId,key) { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
 }
 unsafe fn destroy_IMMNotificationClient(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IMMNotificationClientImpl>)); }
-impl crate::core::ObjectBuilder { pub fn add_IMMNotificationClient(&mut self, implementation: Box<dyn IMMNotificationClientImpl>) { let mut iids = Vec::new(); iids.push(IID_IMMNotificationClient); unsafe { self.add(&IMPLEMENT_VTABLE_IMMNotificationClient as *const IMMNotificationClient_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IMMNotificationClient, iids); } } }
-impl IMMNotificationClient { pub fn implement(implementation: Box<dyn IMMNotificationClientImpl>) -> Self { let mut object = crate::core::ObjectBuilder::new(); object.add_IMMNotificationClient(implementation); unsafe { Self::from_raw(object.finish().expect("one COM interface")).expect("allocated COM interface") } } }
+impl crate::core::ObjectBuilder { pub fn add_IMMNotificationClient(mut self, implementation: Box<dyn IMMNotificationClientImpl>) -> Self { let iids = vec![crate::Win32::Media::Audio::IMMNotificationClient::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IMMNotificationClient as *const IMMNotificationClient_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IMMNotificationClient, iids); } self } }
+impl IMMNotificationClient { pub fn implement(implementation: Box<dyn IMMNotificationClientImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IMMNotificationClient(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
 pub const In: crate::Win32::Media::Audio::DataFlow = crate::Win32::Media::Audio::DataFlow(0i64 as _);
 #[repr(C, packed(1))]
 #[derive(Clone, Copy)]
@@ -12914,10 +12921,12 @@ pub unsafe fn Release(&self) -> u32 {
 impl Clone for IMFMediaEngineNotify { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
 impl Drop for IMFMediaEngineNotify { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
 impl ::core::cmp::PartialEq for IMFMediaEngineNotify { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
 pub trait IMFMediaEngineNotifyImpl {
 fn EventNotify(&self, event: u32, param1: usize, param2: u32) -> Result<(), crate::core::HRESULT>;
 }
-static IMPLEMENT_VTABLE_IMFMediaEngineNotify: IMFMediaEngineNotify_Vtbl = IMFMediaEngineNotify_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+const _: () = assert!(::core::mem::size_of::<IMFMediaEngineNotify_Vtbl>() == 4 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IMFMediaEngineNotify: IMFMediaEngineNotify_Vtbl = crate::Win32::Media::MediaFoundation::IMFMediaEngineNotify_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
 EventNotify: thunk_IMFMediaEngineNotify_EventNotify,
 };
 unsafe extern "system" fn thunk_IMFMediaEngineNotify_EventNotify(this: *mut ::core::ffi::c_void,event: u32,param1: usize,param2: u32) -> crate::core::HRESULT {
@@ -12925,8 +12934,8 @@ let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementat
 match implementation.EventNotify(event,param1,param2) { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
 }
 unsafe fn destroy_IMFMediaEngineNotify(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IMFMediaEngineNotifyImpl>)); }
-impl crate::core::ObjectBuilder { pub fn add_IMFMediaEngineNotify(&mut self, implementation: Box<dyn IMFMediaEngineNotifyImpl>) { let mut iids = Vec::new(); iids.push(IID_IMFMediaEngineNotify); unsafe { self.add(&IMPLEMENT_VTABLE_IMFMediaEngineNotify as *const IMFMediaEngineNotify_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IMFMediaEngineNotify, iids); } } }
-impl IMFMediaEngineNotify { pub fn implement(implementation: Box<dyn IMFMediaEngineNotifyImpl>) -> Self { let mut object = crate::core::ObjectBuilder::new(); object.add_IMFMediaEngineNotify(implementation); unsafe { Self::from_raw(object.finish().expect("one COM interface")).expect("allocated COM interface") } } }
+impl crate::core::ObjectBuilder { pub fn add_IMFMediaEngineNotify(mut self, implementation: Box<dyn IMFMediaEngineNotifyImpl>) -> Self { let iids = vec![crate::Win32::Media::MediaFoundation::IMFMediaEngineNotify::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IMFMediaEngineNotify as *const IMFMediaEngineNotify_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IMFMediaEngineNotify, iids); } self } }
+impl IMFMediaEngineNotify { pub fn implement(implementation: Box<dyn IMFMediaEngineNotifyImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IMFMediaEngineNotify(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
 pub const IID_IMFMediaEngineSrcElements: crate::core::GUID = crate::core::GUID { data1: 2053002068, data2: 45332, data3: 19570, data4: [185,145,49,49,215,80,50,234,] };
 #[repr(C)]
 pub struct IMFMediaEngineSrcElements_Vtbl {
@@ -14589,12 +14598,14 @@ pub unsafe fn Release(&self) -> u32 {
 impl Clone for IMFSourceReaderCallback { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
 impl Drop for IMFSourceReaderCallback { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
 impl ::core::cmp::PartialEq for IMFSourceReaderCallback { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
 pub trait IMFSourceReaderCallbackImpl {
 fn OnReadSample(&self, hrStatus: crate::core::HRESULT, dwStreamIndex: u32, dwStreamFlags: u32, llTimestamp: i64, pSample: Option<&crate::Win32::Media::MediaFoundation::IMFSample>) -> Result<(), crate::core::HRESULT>;
 fn OnFlush(&self, dwStreamIndex: u32) -> Result<(), crate::core::HRESULT>;
 fn OnEvent(&self, dwStreamIndex: u32, pEvent: Option<&crate::Win32::Media::MediaFoundation::IMFMediaEvent>) -> Result<(), crate::core::HRESULT>;
 }
-static IMPLEMENT_VTABLE_IMFSourceReaderCallback: IMFSourceReaderCallback_Vtbl = IMFSourceReaderCallback_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+const _: () = assert!(::core::mem::size_of::<IMFSourceReaderCallback_Vtbl>() == 6 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IMFSourceReaderCallback: IMFSourceReaderCallback_Vtbl = crate::Win32::Media::MediaFoundation::IMFSourceReaderCallback_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
 OnReadSample: thunk_IMFSourceReaderCallback_OnReadSample,
 OnFlush: thunk_IMFSourceReaderCallback_OnFlush,
 OnEvent: thunk_IMFSourceReaderCallback_OnEvent,
@@ -14614,8 +14625,8 @@ let pEvent_borrow = if pEvent.is_null() { None } else { Some(::core::mem::Manual
 match implementation.OnEvent(dwStreamIndex,match &pEvent_borrow { Some(p) => Some(&**p), None => None }) { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
 }
 unsafe fn destroy_IMFSourceReaderCallback(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IMFSourceReaderCallbackImpl>)); }
-impl crate::core::ObjectBuilder { pub fn add_IMFSourceReaderCallback(&mut self, implementation: Box<dyn IMFSourceReaderCallbackImpl>) { let mut iids = Vec::new(); iids.push(IID_IMFSourceReaderCallback); unsafe { self.add(&IMPLEMENT_VTABLE_IMFSourceReaderCallback as *const IMFSourceReaderCallback_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IMFSourceReaderCallback, iids); } } }
-impl IMFSourceReaderCallback { pub fn implement(implementation: Box<dyn IMFSourceReaderCallbackImpl>) -> Self { let mut object = crate::core::ObjectBuilder::new(); object.add_IMFSourceReaderCallback(implementation); unsafe { Self::from_raw(object.finish().expect("one COM interface")).expect("allocated COM interface") } } }
+impl crate::core::ObjectBuilder { pub fn add_IMFSourceReaderCallback(mut self, implementation: Box<dyn IMFSourceReaderCallbackImpl>) -> Self { let iids = vec![crate::Win32::Media::MediaFoundation::IMFSourceReaderCallback::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IMFSourceReaderCallback as *const IMFSourceReaderCallback_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IMFSourceReaderCallback, iids); } self } }
+impl IMFSourceReaderCallback { pub fn implement(implementation: Box<dyn IMFSourceReaderCallbackImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IMFSourceReaderCallback(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
 pub const IID_IMFStreamDescriptor: crate::core::GUID = crate::core::GUID { data1: 1455439260, data2: 40379, data3: 17909, data4: [171,75,216,15,71,192,89,56,] };
 #[repr(C)]
 pub struct IMFStreamDescriptor_Vtbl {
@@ -16473,6 +16484,7 @@ pub unsafe fn Release(&self) -> u32 {
 impl Clone for IDataObject { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
 impl Drop for IDataObject { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
 impl ::core::cmp::PartialEq for IDataObject { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
 pub trait IDataObjectImpl {
 fn GetData(&self, pformatetcIn: *const crate::Win32::System::Com::FORMATETC) -> Result<crate::Win32::System::Com::STGMEDIUM, crate::core::HRESULT>;
 fn GetDataHere(&self, pformatetc: *const crate::Win32::System::Com::FORMATETC, pmedium: *mut crate::Win32::System::Com::STGMEDIUM) -> Result<(), crate::core::HRESULT>;
@@ -16484,7 +16496,8 @@ fn DAdvise(&self, pformatetc: *const crate::Win32::System::Com::FORMATETC, advf:
 fn DUnadvise(&self, dwConnection: u32) -> Result<(), crate::core::HRESULT>;
 fn EnumDAdvise(&self) -> Result<crate::Win32::System::Com::IEnumSTATDATA, crate::core::HRESULT>;
 }
-static IMPLEMENT_VTABLE_IDataObject: IDataObject_Vtbl = IDataObject_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+const _: () = assert!(::core::mem::size_of::<IDataObject_Vtbl>() == 12 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IDataObject: IDataObject_Vtbl = crate::Win32::System::Com::IDataObject_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
 GetData: thunk_IDataObject_GetData,
 GetDataHere: thunk_IDataObject_GetDataHere,
 QueryGetData: thunk_IDataObject_QueryGetData,
@@ -16539,8 +16552,8 @@ let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementat
 match implementation.EnumDAdvise() { Ok(value) => { *ppenumAdvise = value.into_raw(); crate::core::HRESULT(0) }, Err(error) => error }
 }
 unsafe fn destroy_IDataObject(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IDataObjectImpl>)); }
-impl crate::core::ObjectBuilder { pub fn add_IDataObject(&mut self, implementation: Box<dyn IDataObjectImpl>) { let mut iids = Vec::new(); iids.push(IID_IDataObject); unsafe { self.add(&IMPLEMENT_VTABLE_IDataObject as *const IDataObject_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IDataObject, iids); } } }
-impl IDataObject { pub fn implement(implementation: Box<dyn IDataObjectImpl>) -> Self { let mut object = crate::core::ObjectBuilder::new(); object.add_IDataObject(implementation); unsafe { Self::from_raw(object.finish().expect("one COM interface")).expect("allocated COM interface") } } }
+impl crate::core::ObjectBuilder { pub fn add_IDataObject(mut self, implementation: Box<dyn IDataObjectImpl>) -> Self { let iids = vec![crate::Win32::System::Com::IDataObject::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IDataObject as *const IDataObject_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IDataObject, iids); } self } }
+impl IDataObject { pub fn implement(implementation: Box<dyn IDataObjectImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IDataObject(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
 pub const IID_IDispatch: crate::core::GUID = crate::core::GUID { data1: 132096, data2: 0, data3: 0, data4: [192,0,0,0,0,0,0,70,] };
 #[repr(C)]
 pub struct IDispatch_Vtbl {
@@ -16646,13 +16659,15 @@ pub unsafe fn Release(&self) -> u32 {
 impl Clone for IEnumFORMATETC { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
 impl Drop for IEnumFORMATETC { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
 impl ::core::cmp::PartialEq for IEnumFORMATETC { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
 pub trait IEnumFORMATETCImpl {
 fn Next(&self, celt: u32, rgelt: *mut crate::Win32::System::Com::FORMATETC, pceltFetched: *mut u32) -> crate::core::HRESULT;
 fn Skip(&self, celt: u32) -> Result<(), crate::core::HRESULT>;
 fn Reset(&self) -> Result<(), crate::core::HRESULT>;
 fn Clone(&self) -> Result<crate::Win32::System::Com::IEnumFORMATETC, crate::core::HRESULT>;
 }
-static IMPLEMENT_VTABLE_IEnumFORMATETC: IEnumFORMATETC_Vtbl = IEnumFORMATETC_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+const _: () = assert!(::core::mem::size_of::<IEnumFORMATETC_Vtbl>() == 7 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IEnumFORMATETC: IEnumFORMATETC_Vtbl = crate::Win32::System::Com::IEnumFORMATETC_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
 Next: thunk_IEnumFORMATETC_Next,
 Skip: thunk_IEnumFORMATETC_Skip,
 Reset: thunk_IEnumFORMATETC_Reset,
@@ -16676,8 +16691,8 @@ let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementat
 match implementation.Clone() { Ok(value) => { *ppenum = value.into_raw(); crate::core::HRESULT(0) }, Err(error) => error }
 }
 unsafe fn destroy_IEnumFORMATETC(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IEnumFORMATETCImpl>)); }
-impl crate::core::ObjectBuilder { pub fn add_IEnumFORMATETC(&mut self, implementation: Box<dyn IEnumFORMATETCImpl>) { let mut iids = Vec::new(); iids.push(IID_IEnumFORMATETC); unsafe { self.add(&IMPLEMENT_VTABLE_IEnumFORMATETC as *const IEnumFORMATETC_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IEnumFORMATETC, iids); } } }
-impl IEnumFORMATETC { pub fn implement(implementation: Box<dyn IEnumFORMATETCImpl>) -> Self { let mut object = crate::core::ObjectBuilder::new(); object.add_IEnumFORMATETC(implementation); unsafe { Self::from_raw(object.finish().expect("one COM interface")).expect("allocated COM interface") } } }
+impl crate::core::ObjectBuilder { pub fn add_IEnumFORMATETC(mut self, implementation: Box<dyn IEnumFORMATETCImpl>) -> Self { let iids = vec![crate::Win32::System::Com::IEnumFORMATETC::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IEnumFORMATETC as *const IEnumFORMATETC_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IEnumFORMATETC, iids); } self } }
+impl IEnumFORMATETC { pub fn implement(implementation: Box<dyn IEnumFORMATETCImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IEnumFORMATETC(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
 pub const IID_IEnumMoniker: crate::core::GUID = crate::core::GUID { data1: 258, data2: 0, data3: 0, data4: [192,0,0,0,0,0,0,70,] };
 #[repr(C)]
 pub struct IEnumMoniker_Vtbl {
@@ -18553,6 +18568,35 @@ pub unsafe fn Process32NextW(hSnapshot: crate::Win32::Foundation::HANDLE,lppe: *
 let hr__ = import_Process32NextW::call(hSnapshot,lppe); hr__.ok()?;
 Ok(())
 }
+pub const TH32CS_SNAPPROCESS: crate::Win32::System::Diagnostics::ToolHelp::CREATE_TOOLHELP_SNAPSHOT_FLAGS = crate::Win32::System::Diagnostics::ToolHelp::CREATE_TOOLHELP_SNAPSHOT_FLAGS(2u64 as _);
+pub const TH32CS_SNAPTHREAD: crate::Win32::System::Diagnostics::ToolHelp::CREATE_TOOLHELP_SNAPSHOT_FLAGS = crate::Win32::System::Diagnostics::ToolHelp::CREATE_TOOLHELP_SNAPSHOT_FLAGS(4u64 as _);
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct THREADENTRY32 {
+pub dwSize: u32,
+pub cntUsage: u32,
+pub th32ThreadID: u32,
+pub th32OwnerProcessID: u32,
+pub tpBasePri: i32,
+pub tpDeltaPri: i32,
+pub dwFlags: u32,
+}
+impl THREADENTRY32 { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for THREADENTRY32 { fn default() -> Self {Self::default()} }
+mod import_Thread32First { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "Thread32First"] pub fn call(hSnapshot: crate::Win32::Foundation::HANDLE,lpte: *mut crate::Win32::System::Diagnostics::ToolHelp::THREADENTRY32) -> crate::core::BOOL; } }
+pub use import_Thread32First::call as Thread32First_raw;
+#[inline]
+pub unsafe fn Thread32First(hSnapshot: crate::Win32::Foundation::HANDLE,lpte: *mut crate::Win32::System::Diagnostics::ToolHelp::THREADENTRY32) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_Thread32First::call(hSnapshot,lpte); hr__.ok()?;
+Ok(())
+}
+mod import_Thread32Next { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "Thread32Next"] pub fn call(hSnapshot: crate::Win32::Foundation::HANDLE,lpte: *mut crate::Win32::System::Diagnostics::ToolHelp::THREADENTRY32) -> crate::core::BOOL; } }
+pub use import_Thread32Next::call as Thread32Next_raw;
+#[inline]
+pub unsafe fn Thread32Next(hSnapshot: crate::Win32::Foundation::HANDLE,lpte: *mut crate::Win32::System::Diagnostics::ToolHelp::THREADENTRY32) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_Thread32Next::call(hSnapshot,lpte); hr__.ok()?;
+Ok(())
+}
 }
 }
 pub mod IO {
@@ -18639,6 +18683,20 @@ impl ::core::ops::BitXor for JOBOBJECTINFOCLASS { type Output = Self; fn bitxor(
 impl ::core::ops::Not for JOBOBJECTINFOCLASS { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION {
+pub TotalUserTime: i64,
+pub TotalKernelTime: i64,
+pub ThisPeriodTotalUserTime: i64,
+pub ThisPeriodTotalKernelTime: i64,
+pub TotalPageFaultCount: u32,
+pub TotalProcesses: u32,
+pub ActiveProcesses: u32,
+pub TotalTerminatedProcesses: u32,
+}
+impl JOBOBJECT_BASIC_ACCOUNTING_INFORMATION { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for JOBOBJECT_BASIC_ACCOUNTING_INFORMATION { fn default() -> Self {Self::default()} }
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
 pub PerProcessUserTimeLimit: i64,
 pub PerJobUserTimeLimit: i64,
@@ -18652,6 +18710,15 @@ pub SchedulingClass: u32,
 }
 impl JOBOBJECT_BASIC_LIMIT_INFORMATION { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
 impl ::core::default::Default for JOBOBJECT_BASIC_LIMIT_INFORMATION { fn default() -> Self {Self::default()} }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct JOBOBJECT_BASIC_PROCESS_ID_LIST {
+pub NumberOfAssignedProcesses: u32,
+pub NumberOfProcessIdsInList: u32,
+pub ProcessIdList: [usize; 1],
+}
+impl JOBOBJECT_BASIC_PROCESS_ID_LIST { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for JOBOBJECT_BASIC_PROCESS_ID_LIST { fn default() -> Self {Self::default()} }
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
@@ -18677,12 +18744,28 @@ impl ::core::ops::BitAnd for JOB_OBJECT_LIMIT { type Output = Self; fn bitand(se
 impl ::core::ops::BitXor for JOB_OBJECT_LIMIT { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
 impl ::core::ops::Not for JOB_OBJECT_LIMIT { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
 pub const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: crate::Win32::System::JobObjects::JOB_OBJECT_LIMIT = crate::Win32::System::JobObjects::JOB_OBJECT_LIMIT(8192u64 as _);
+pub const JobObjectBasicAccountingInformation: crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS = crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS(1i64 as _);
+pub const JobObjectBasicProcessIdList: crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS = crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS(3i64 as _);
 pub const JobObjectExtendedLimitInformation: crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS = crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS(9i64 as _);
+mod import_QueryInformationJobObject { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "QueryInformationJobObject"] pub fn call(hJob: crate::Win32::Foundation::HANDLE,JobObjectInformationClass: crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS,lpJobObjectInformation: *mut ::core::ffi::c_void,cbJobObjectInformationLength: u32,lpReturnLength: *mut u32) -> crate::core::BOOL; } }
+pub use import_QueryInformationJobObject::call as QueryInformationJobObject_raw;
+#[inline]
+pub unsafe fn QueryInformationJobObject(hJob: Option<crate::Win32::Foundation::HANDLE>,JobObjectInformationClass: crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS,lpJobObjectInformation: *mut ::core::ffi::c_void,cbJobObjectInformationLength: u32,lpReturnLength: Option<*mut u32>) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_QueryInformationJobObject::call(hJob.unwrap_or(unsafe { ::core::mem::zeroed() }),JobObjectInformationClass,lpJobObjectInformation,cbJobObjectInformationLength,lpReturnLength.unwrap_or(::core::ptr::null_mut())); hr__.ok()?;
+Ok(())
+}
 mod import_SetInformationJobObject { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "SetInformationJobObject"] pub fn call(hJob: crate::Win32::Foundation::HANDLE,JobObjectInformationClass: crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS,lpJobObjectInformation: *const ::core::ffi::c_void,cbJobObjectInformationLength: u32) -> crate::core::BOOL; } }
 pub use import_SetInformationJobObject::call as SetInformationJobObject_raw;
 #[inline]
 pub unsafe fn SetInformationJobObject(hJob: crate::Win32::Foundation::HANDLE,JobObjectInformationClass: crate::Win32::System::JobObjects::JOBOBJECTINFOCLASS,lpJobObjectInformation: *const ::core::ffi::c_void,cbJobObjectInformationLength: u32) -> Result<(), crate::core::HRESULT> {
 let hr__ = import_SetInformationJobObject::call(hJob,JobObjectInformationClass,lpJobObjectInformation,cbJobObjectInformationLength); hr__.ok()?;
+Ok(())
+}
+mod import_TerminateJobObject { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "TerminateJobObject"] pub fn call(hJob: crate::Win32::Foundation::HANDLE,uExitCode: u32) -> crate::core::BOOL; } }
+pub use import_TerminateJobObject::call as TerminateJobObject_raw;
+#[inline]
+pub unsafe fn TerminateJobObject(hJob: crate::Win32::Foundation::HANDLE,uExitCode: u32) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_TerminateJobObject::call(hJob,uExitCode); hr__.ok()?;
 Ok(())
 }
 }
@@ -18959,11 +19042,13 @@ pub unsafe fn Release(&self) -> u32 {
 impl Clone for IDropSource { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
 impl Drop for IDropSource { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
 impl ::core::cmp::PartialEq for IDropSource { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
 pub trait IDropSourceImpl {
 fn QueryContinueDrag(&self, fEscapePressed: crate::core::BOOL, grfKeyState: crate::Win32::System::SystemServices::MODIFIERKEYS_FLAGS) -> crate::core::HRESULT;
 fn GiveFeedback(&self, dwEffect: crate::Win32::System::Ole::DROPEFFECT) -> crate::core::HRESULT;
 }
-static IMPLEMENT_VTABLE_IDropSource: IDropSource_Vtbl = IDropSource_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+const _: () = assert!(::core::mem::size_of::<IDropSource_Vtbl>() == 5 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IDropSource: IDropSource_Vtbl = crate::Win32::System::Ole::IDropSource_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
 QueryContinueDrag: thunk_IDropSource_QueryContinueDrag,
 GiveFeedback: thunk_IDropSource_GiveFeedback,
 };
@@ -18974,8 +19059,8 @@ unsafe extern "system" fn thunk_IDropSource_GiveFeedback(this: *mut ::core::ffi:
 let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IDropSourceImpl>);
 implementation.GiveFeedback(dwEffect)}
 unsafe fn destroy_IDropSource(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IDropSourceImpl>)); }
-impl crate::core::ObjectBuilder { pub fn add_IDropSource(&mut self, implementation: Box<dyn IDropSourceImpl>) { let mut iids = Vec::new(); iids.push(IID_IDropSource); unsafe { self.add(&IMPLEMENT_VTABLE_IDropSource as *const IDropSource_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IDropSource, iids); } } }
-impl IDropSource { pub fn implement(implementation: Box<dyn IDropSourceImpl>) -> Self { let mut object = crate::core::ObjectBuilder::new(); object.add_IDropSource(implementation); unsafe { Self::from_raw(object.finish().expect("one COM interface")).expect("allocated COM interface") } } }
+impl crate::core::ObjectBuilder { pub fn add_IDropSource(mut self, implementation: Box<dyn IDropSourceImpl>) -> Self { let iids = vec![crate::Win32::System::Ole::IDropSource::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IDropSource as *const IDropSource_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IDropSource, iids); } self } }
+impl IDropSource { pub fn implement(implementation: Box<dyn IDropSourceImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IDropSource(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
 pub const IID_IDropTarget: crate::core::GUID = crate::core::GUID { data1: 290, data2: 0, data3: 0, data4: [192,0,0,0,0,0,0,70,] };
 #[repr(C)]
 pub struct IDropTarget_Vtbl {
@@ -19028,13 +19113,15 @@ pub unsafe fn Release(&self) -> u32 {
 impl Clone for IDropTarget { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
 impl Drop for IDropTarget { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
 impl ::core::cmp::PartialEq for IDropTarget { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
 pub trait IDropTargetImpl {
 fn DragEnter(&self, pDataObj: Option<&crate::Win32::System::Com::IDataObject>, grfKeyState: crate::Win32::System::SystemServices::MODIFIERKEYS_FLAGS, pt: crate::Win32::Foundation::POINTL, pdwEffect: *mut crate::Win32::System::Ole::DROPEFFECT) -> Result<(), crate::core::HRESULT>;
 fn DragOver(&self, grfKeyState: crate::Win32::System::SystemServices::MODIFIERKEYS_FLAGS, pt: crate::Win32::Foundation::POINTL, pdwEffect: *mut crate::Win32::System::Ole::DROPEFFECT) -> Result<(), crate::core::HRESULT>;
 fn DragLeave(&self) -> Result<(), crate::core::HRESULT>;
 fn Drop(&self, pDataObj: Option<&crate::Win32::System::Com::IDataObject>, grfKeyState: crate::Win32::System::SystemServices::MODIFIERKEYS_FLAGS, pt: crate::Win32::Foundation::POINTL, pdwEffect: *mut crate::Win32::System::Ole::DROPEFFECT) -> Result<(), crate::core::HRESULT>;
 }
-static IMPLEMENT_VTABLE_IDropTarget: IDropTarget_Vtbl = IDropTarget_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+const _: () = assert!(::core::mem::size_of::<IDropTarget_Vtbl>() == 7 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IDropTarget: IDropTarget_Vtbl = crate::Win32::System::Ole::IDropTarget_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
 DragEnter: thunk_IDropTarget_DragEnter,
 DragOver: thunk_IDropTarget_DragOver,
 DragLeave: thunk_IDropTarget_DragLeave,
@@ -19059,8 +19146,8 @@ let pDataObj_borrow = if pDataObj.is_null() { None } else { Some(::core::mem::Ma
 match implementation.Drop(match &pDataObj_borrow { Some(p) => Some(&**p), None => None },grfKeyState,pt,pdwEffect) { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
 }
 unsafe fn destroy_IDropTarget(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IDropTargetImpl>)); }
-impl crate::core::ObjectBuilder { pub fn add_IDropTarget(&mut self, implementation: Box<dyn IDropTargetImpl>) { let mut iids = Vec::new(); iids.push(IID_IDropTarget); unsafe { self.add(&IMPLEMENT_VTABLE_IDropTarget as *const IDropTarget_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IDropTarget, iids); } } }
-impl IDropTarget { pub fn implement(implementation: Box<dyn IDropTargetImpl>) -> Self { let mut object = crate::core::ObjectBuilder::new(); object.add_IDropTarget(implementation); unsafe { Self::from_raw(object.finish().expect("one COM interface")).expect("allocated COM interface") } } }
+impl crate::core::ObjectBuilder { pub fn add_IDropTarget(mut self, implementation: Box<dyn IDropTargetImpl>) -> Self { let iids = vec![crate::Win32::System::Ole::IDropTarget::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IDropTarget as *const IDropTarget_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IDropTarget, iids); } self } }
+impl IDropTarget { pub fn implement(implementation: Box<dyn IDropTargetImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IDropTarget(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
 pub const IID_IRecordInfo: crate::core::GUID = crate::core::GUID { data1: 47, data2: 0, data3: 0, data4: [192,0,0,0,0,0,0,70,] };
 #[repr(C)]
 pub struct IRecordInfo_Vtbl {
@@ -19248,6 +19335,40 @@ pub unsafe fn RevokeDragDrop(hwnd: crate::Win32::Foundation::HWND) -> Result<(),
 let hr__ = import_RevokeDragDrop::call(hwnd); hr__.ok()?;
 Ok(())
 }
+mod import_SafeArrayAccessData { #[link(name = "OLEAUT32", kind = "raw-dylib")] extern "system" { #[link_name = "SafeArrayAccessData"] pub fn call(psa: *const crate::Win32::System::Com::SAFEARRAY,ppvData: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT; } }
+pub use import_SafeArrayAccessData::call as SafeArrayAccessData_raw;
+#[inline]
+pub unsafe fn SafeArrayAccessData(psa: *const crate::Win32::System::Com::SAFEARRAY) -> Result<*mut ::core::ffi::c_void, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = import_SafeArrayAccessData::call(psa,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+mod import_SafeArrayCreateVector { #[link(name = "OLEAUT32", kind = "raw-dylib")] extern "system" { #[link_name = "SafeArrayCreateVector"] pub fn call(vt: crate::Win32::System::Variant::VARENUM,lLbound: i32,cElements: u32) -> *mut crate::Win32::System::Com::SAFEARRAY; } }
+pub use import_SafeArrayCreateVector::call as SafeArrayCreateVector_raw;
+#[inline]
+pub unsafe fn SafeArrayCreateVector(vt: crate::Win32::System::Variant::VARENUM,lLbound: i32,cElements: u32) -> *mut crate::Win32::System::Com::SAFEARRAY {
+import_SafeArrayCreateVector::call(vt,lLbound,cElements)}
+mod import_SafeArrayDestroy { #[link(name = "OLEAUT32", kind = "raw-dylib")] extern "system" { #[link_name = "SafeArrayDestroy"] pub fn call(psa: *const crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT; } }
+pub use import_SafeArrayDestroy::call as SafeArrayDestroy_raw;
+#[inline]
+pub unsafe fn SafeArrayDestroy(psa: *const crate::Win32::System::Com::SAFEARRAY) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_SafeArrayDestroy::call(psa); hr__.ok()?;
+Ok(())
+}
+mod import_SafeArrayPutElement { #[link(name = "OLEAUT32", kind = "raw-dylib")] extern "system" { #[link_name = "SafeArrayPutElement"] pub fn call(psa: *const crate::Win32::System::Com::SAFEARRAY,rgIndices: *const i32,pv: *const ::core::ffi::c_void) -> crate::core::HRESULT; } }
+pub use import_SafeArrayPutElement::call as SafeArrayPutElement_raw;
+#[inline]
+pub unsafe fn SafeArrayPutElement(psa: *const crate::Win32::System::Com::SAFEARRAY,rgIndices: *const i32,pv: *const ::core::ffi::c_void) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_SafeArrayPutElement::call(psa,rgIndices,pv); hr__.ok()?;
+Ok(())
+}
+mod import_SafeArrayUnaccessData { #[link(name = "OLEAUT32", kind = "raw-dylib")] extern "system" { #[link_name = "SafeArrayUnaccessData"] pub fn call(psa: *const crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT; } }
+pub use import_SafeArrayUnaccessData::call as SafeArrayUnaccessData_raw;
+#[inline]
+pub unsafe fn SafeArrayUnaccessData(psa: *const crate::Win32::System::Com::SAFEARRAY) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_SafeArrayUnaccessData::call(psa); hr__.ok()?;
+Ok(())
+}
 }
 pub mod Performance {
 #[repr(transparent)]
@@ -19355,6 +19476,50 @@ pub unsafe fn CreatePipe(hReadPipe: *mut crate::Win32::Foundation::HANDLE,hWrite
 let hr__ = import_CreatePipe::call(hReadPipe,hWritePipe,lpPipeAttributes.unwrap_or(::core::ptr::null()),nSize); hr__.ok()?;
 Ok(())
 }
+}
+pub mod Power {
+mod import_GetSystemPowerStatus { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetSystemPowerStatus"] pub fn call(lpSystemPowerStatus: *mut crate::Win32::System::Power::SYSTEM_POWER_STATUS) -> crate::core::BOOL; } }
+pub use import_GetSystemPowerStatus::call as GetSystemPowerStatus_raw;
+#[inline]
+pub unsafe fn GetSystemPowerStatus(lpSystemPowerStatus: *mut crate::Win32::System::Power::SYSTEM_POWER_STATUS) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_GetSystemPowerStatus::call(lpSystemPowerStatus); hr__.ok()?;
+Ok(())
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SYSTEM_POWER_STATUS {
+pub ACLineStatus: u8,
+pub BatteryFlag: u8,
+pub BatteryLifePercent: u8,
+pub SystemStatusFlag: u8,
+pub BatteryLifeTime: u32,
+pub BatteryFullLifeTime: u32,
+}
+impl SYSTEM_POWER_STATUS { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for SYSTEM_POWER_STATUS { fn default() -> Self {Self::default()} }
+}
+pub mod ProcessStatus {
+mod import_K32GetProcessMemoryInfo { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "K32GetProcessMemoryInfo"] pub fn call(Process: crate::Win32::Foundation::HANDLE,ppsmemCounters: *mut crate::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS,cb: u32) -> crate::core::BOOL; } }
+pub use import_K32GetProcessMemoryInfo::call as K32GetProcessMemoryInfo_raw;
+#[inline]
+pub unsafe fn K32GetProcessMemoryInfo(Process: crate::Win32::Foundation::HANDLE,ppsmemCounters: *mut crate::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS,cb: u32) -> crate::core::BOOL {
+import_K32GetProcessMemoryInfo::call(Process,ppsmemCounters,cb)}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PROCESS_MEMORY_COUNTERS {
+pub cb: u32,
+pub PageFaultCount: u32,
+pub PeakWorkingSetSize: usize,
+pub WorkingSetSize: usize,
+pub QuotaPeakPagedPoolUsage: usize,
+pub QuotaPagedPoolUsage: usize,
+pub QuotaPeakNonPagedPoolUsage: usize,
+pub QuotaNonPagedPoolUsage: usize,
+pub PagefileUsage: usize,
+pub PeakPagefileUsage: usize,
+}
+impl PROCESS_MEMORY_COUNTERS { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for PROCESS_MEMORY_COUNTERS { fn default() -> Self {Self::default()} }
 }
 pub mod Registry {
 #[repr(transparent)]
@@ -19544,6 +19709,11 @@ let hr__ = import_OpenInputDesktop::call(dwFlags,crate::core::BOOL(fInherit as i
 }
 }
 pub mod SystemInformation {
+mod import_GetNativeSystemInfo { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetNativeSystemInfo"] pub fn call(lpSystemInfo: *mut crate::Win32::System::SystemInformation::SYSTEM_INFO) -> (); } }
+pub use import_GetNativeSystemInfo::call as GetNativeSystemInfo_raw;
+#[inline]
+pub unsafe fn GetNativeSystemInfo(lpSystemInfo: *mut crate::Win32::System::SystemInformation::SYSTEM_INFO) -> () {
+import_GetNativeSystemInfo::call(lpSystemInfo)}
 mod import_GetSystemDirectoryW { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetSystemDirectoryW"] pub fn call(lpBuffer: crate::core::PWSTR,uSize: u32) -> u32; } }
 pub use import_GetSystemDirectoryW::call as GetSystemDirectoryW_raw;
 #[inline]
@@ -19554,6 +19724,11 @@ pub use import_GetTickCount::call as GetTickCount_raw;
 #[inline]
 pub unsafe fn GetTickCount() -> u32 {
 import_GetTickCount::call()}
+mod import_GetTickCount64 { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetTickCount64"] pub fn call() -> u64; } }
+pub use import_GetTickCount64::call as GetTickCount64_raw;
+#[inline]
+pub unsafe fn GetTickCount64() -> u64 {
+import_GetTickCount64::call()}
 mod import_GlobalMemoryStatusEx { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GlobalMemoryStatusEx"] pub fn call(lpBuffer: *mut crate::Win32::System::SystemInformation::MEMORYSTATUSEX) -> crate::core::BOOL; } }
 pub use import_GlobalMemoryStatusEx::call as GlobalMemoryStatusEx_raw;
 #[inline]
@@ -19576,6 +19751,50 @@ pub ullAvailExtendedVirtual: u64,
 }
 impl MEMORYSTATUSEX { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
 impl ::core::default::Default for MEMORYSTATUSEX { fn default() -> Self {Self::default()} }
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct PROCESSOR_ARCHITECTURE(pub u16);
+impl PROCESSOR_ARCHITECTURE { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for PROCESSOR_ARCHITECTURE { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for PROCESSOR_ARCHITECTURE { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for PROCESSOR_ARCHITECTURE {}
+impl ::core::fmt::Debug for PROCESSOR_ARCHITECTURE { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for PROCESSOR_ARCHITECTURE { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for PROCESSOR_ARCHITECTURE { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for PROCESSOR_ARCHITECTURE { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for PROCESSOR_ARCHITECTURE { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SYSTEM_INFO {
+pub Anonymous: crate::Win32::System::SystemInformation::SYSTEM_INFO_0,
+pub dwPageSize: u32,
+pub lpMinimumApplicationAddress: *mut ::core::ffi::c_void,
+pub lpMaximumApplicationAddress: *mut ::core::ffi::c_void,
+pub dwActiveProcessorMask: usize,
+pub dwNumberOfProcessors: u32,
+pub dwProcessorType: u32,
+pub dwAllocationGranularity: u32,
+pub wProcessorLevel: u16,
+pub wProcessorRevision: u16,
+}
+impl SYSTEM_INFO { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for SYSTEM_INFO { fn default() -> Self {Self::default()} }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union SYSTEM_INFO_0 {
+pub dwOemId: u32,
+pub Anonymous: crate::Win32::System::SystemInformation::SYSTEM_INFO_0_0,
+}
+impl SYSTEM_INFO_0 { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for SYSTEM_INFO_0 { fn default() -> Self {Self::default()} }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SYSTEM_INFO_0_0 {
+pub wProcessorArchitecture: crate::Win32::System::SystemInformation::PROCESSOR_ARCHITECTURE,
+pub wReserved: u16,
+}
+impl SYSTEM_INFO_0_0 { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for SYSTEM_INFO_0_0 { fn default() -> Self {Self::default()} }
 }
 pub mod SystemServices {
 pub const MK_CONTROL: crate::Win32::System::SystemServices::MODIFIERKEYS_FLAGS = crate::Win32::System::SystemServices::MODIFIERKEYS_FLAGS(8u64 as _);
@@ -19629,6 +19848,10 @@ pub use import_AvSetMmThreadCharacteristicsW::call as AvSetMmThreadCharacteristi
 pub unsafe fn AvSetMmThreadCharacteristicsW(TaskName: crate::core::PCWSTR,TaskIndex: *mut u32) -> Result<crate::Win32::System::Threading::AVRT_TASK_HANDLE, crate::core::HRESULT> {
 let hr__ = import_AvSetMmThreadCharacteristicsW::call(TaskName,TaskIndex); if hr__.is_invalid() {return Err(crate::core::HRESULT::from_thread());} return Ok(hr__);
 }
+pub const BELOW_NORMAL_PRIORITY_CLASS: crate::Win32::System::Threading::PROCESS_CREATION_FLAGS = crate::Win32::System::Threading::PROCESS_CREATION_FLAGS(16384u64 as _);
+pub const CREATE_NEW_PROCESS_GROUP: crate::Win32::System::Threading::PROCESS_CREATION_FLAGS = crate::Win32::System::Threading::PROCESS_CREATION_FLAGS(512u64 as _);
+pub const CREATE_NO_WINDOW: crate::Win32::System::Threading::PROCESS_CREATION_FLAGS = crate::Win32::System::Threading::PROCESS_CREATION_FLAGS(134217728u64 as _);
+pub const CREATE_SUSPENDED: crate::Win32::System::Threading::PROCESS_CREATION_FLAGS = crate::Win32::System::Threading::PROCESS_CREATION_FLAGS(4u64 as _);
 mod import_CreateEventA { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "CreateEventA"] pub fn call(lpEventAttributes: *const crate::Win32::Security::SECURITY_ATTRIBUTES,bManualReset: crate::core::BOOL,bInitialState: crate::core::BOOL,lpName: crate::core::PCSTR) -> crate::Win32::Foundation::HANDLE; } }
 pub use import_CreateEventA::call as CreateEventA_raw;
 #[inline]
@@ -19695,6 +19918,13 @@ pub unsafe fn GetProcessTimes(hProcess: crate::Win32::Foundation::HANDLE,lpCreat
 let hr__ = import_GetProcessTimes::call(hProcess,lpCreationTime,lpExitTime,lpKernelTime,lpUserTime); hr__.ok()?;
 Ok(())
 }
+mod import_GetSystemTimes { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetSystemTimes"] pub fn call(lpIdleTime: *mut crate::Win32::Foundation::FILETIME,lpKernelTime: *mut crate::Win32::Foundation::FILETIME,lpUserTime: *mut crate::Win32::Foundation::FILETIME) -> crate::core::BOOL; } }
+pub use import_GetSystemTimes::call as GetSystemTimes_raw;
+#[inline]
+pub unsafe fn GetSystemTimes(lpIdleTime: Option<*mut crate::Win32::Foundation::FILETIME>,lpKernelTime: Option<*mut crate::Win32::Foundation::FILETIME>,lpUserTime: Option<*mut crate::Win32::Foundation::FILETIME>) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_GetSystemTimes::call(lpIdleTime.unwrap_or(::core::ptr::null_mut()),lpKernelTime.unwrap_or(::core::ptr::null_mut()),lpUserTime.unwrap_or(::core::ptr::null_mut())); hr__.ok()?;
+Ok(())
+}
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct IO_COUNTERS {
@@ -19733,6 +19963,12 @@ pub use import_OpenSemaphoreW::call as OpenSemaphoreW_raw;
 #[inline]
 pub unsafe fn OpenSemaphoreW(dwDesiredAccess: crate::Win32::System::Threading::SYNCHRONIZATION_ACCESS_RIGHTS,bInheritHandle: bool,lpName: crate::core::PCWSTR) -> Result<crate::Win32::Foundation::HANDLE, crate::core::HRESULT> {
 let hr__ = import_OpenSemaphoreW::call(dwDesiredAccess,crate::core::BOOL(bInheritHandle as i32),lpName); if hr__.is_invalid() {return Err(crate::core::HRESULT::from_thread());} return Ok(hr__);
+}
+mod import_OpenThread { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "OpenThread"] pub fn call(dwDesiredAccess: crate::Win32::System::Threading::THREAD_ACCESS_RIGHTS,bInheritHandle: crate::core::BOOL,dwThreadId: u32) -> crate::Win32::Foundation::HANDLE; } }
+pub use import_OpenThread::call as OpenThread_raw;
+#[inline]
+pub unsafe fn OpenThread(dwDesiredAccess: crate::Win32::System::Threading::THREAD_ACCESS_RIGHTS,bInheritHandle: bool,dwThreadId: u32) -> Result<crate::Win32::Foundation::HANDLE, crate::core::HRESULT> {
+let hr__ = import_OpenThread::call(dwDesiredAccess,crate::core::BOOL(bInheritHandle as i32),dwThreadId); if hr__.is_invalid() {return Err(crate::core::HRESULT::from_thread());} return Ok(hr__);
 }
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -19780,7 +20016,11 @@ impl ::core::ops::BitOr for PROCESS_NAME_FORMAT { type Output = Self; fn bitor(s
 impl ::core::ops::BitAnd for PROCESS_NAME_FORMAT { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
 impl ::core::ops::BitXor for PROCESS_NAME_FORMAT { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
 impl ::core::ops::Not for PROCESS_NAME_FORMAT { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const PROCESS_QUERY_INFORMATION: crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS = crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS(1024u64 as _);
 pub const PROCESS_QUERY_LIMITED_INFORMATION: crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS = crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS(4096u64 as _);
+pub const PROCESS_SET_QUOTA: crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS = crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS(256u64 as _);
+pub const PROCESS_TERMINATE: crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS = crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS(1u64 as _);
+pub const PROCESS_VM_READ: crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS = crate::Win32::System::Threading::PROCESS_ACCESS_RIGHTS(16u64 as _);
 pub const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: u32 = 131094;
 mod import_QueryFullProcessImageNameW { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "QueryFullProcessImageNameW"] pub fn call(hProcess: crate::Win32::Foundation::HANDLE,dwFlags: crate::Win32::System::Threading::PROCESS_NAME_FORMAT,lpExeName: crate::core::PWSTR,lpdwSize: *mut u32) -> crate::core::BOOL; } }
 pub use import_QueryFullProcessImageNameW::call as QueryFullProcessImageNameW_raw;
@@ -19796,6 +20036,11 @@ pub unsafe fn ReleaseSemaphore(hSemaphore: crate::Win32::Foundation::HANDLE,lRel
 let hr__ = import_ReleaseSemaphore::call(hSemaphore,lReleaseCount,lpPreviousCount.unwrap_or(::core::ptr::null_mut())); hr__.ok()?;
 Ok(())
 }
+mod import_ResumeThread { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "ResumeThread"] pub fn call(hThread: crate::Win32::Foundation::HANDLE) -> u32; } }
+pub use import_ResumeThread::call as ResumeThread_raw;
+#[inline]
+pub unsafe fn ResumeThread(hThread: crate::Win32::Foundation::HANDLE) -> u32 {
+import_ResumeThread::call(hThread)}
 pub const SEMAPHORE_MODIFY_STATE: crate::Win32::System::Threading::SYNCHRONIZATION_ACCESS_RIGHTS = crate::Win32::System::Threading::SYNCHRONIZATION_ACCESS_RIGHTS(2u64 as _);
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -19866,6 +20111,19 @@ pub use import_Sleep::call as Sleep_raw;
 #[inline]
 pub unsafe fn Sleep(dwMilliseconds: u32) -> () {
 import_Sleep::call(dwMilliseconds)}
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct THREAD_ACCESS_RIGHTS(pub u32);
+impl THREAD_ACCESS_RIGHTS { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for THREAD_ACCESS_RIGHTS { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for THREAD_ACCESS_RIGHTS { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for THREAD_ACCESS_RIGHTS {}
+impl ::core::fmt::Debug for THREAD_ACCESS_RIGHTS { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for THREAD_ACCESS_RIGHTS { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for THREAD_ACCESS_RIGHTS { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for THREAD_ACCESS_RIGHTS { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for THREAD_ACCESS_RIGHTS { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const THREAD_SUSPEND_RESUME: crate::Win32::System::Threading::THREAD_ACCESS_RIGHTS = crate::Win32::System::Threading::THREAD_ACCESS_RIGHTS(2u64 as _);
 mod import_TerminateProcess { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "TerminateProcess"] pub fn call(hProcess: crate::Win32::Foundation::HANDLE,uExitCode: u32) -> crate::core::BOOL; } }
 pub use import_TerminateProcess::call as TerminateProcess_raw;
 #[inline]
@@ -19990,10 +20248,65 @@ pub pRecInfo: *mut ::core::ffi::c_void,
 }
 impl VARIANT_0_0_0_0 { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
 impl ::core::default::Default for VARIANT_0_0_0_0 { fn default() -> Self {Self::default()} }
+pub const VT_ARRAY: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(8192u64 as _);
+pub const VT_BLOB: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(65u64 as _);
+pub const VT_BLOB_OBJECT: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(70u64 as _);
+pub const VT_BOOL: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(11u64 as _);
+pub const VT_BSTR: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(8u64 as _);
+pub const VT_BSTR_BLOB: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(4095u64 as _);
+pub const VT_BYREF: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(16384u64 as _);
+pub const VT_CARRAY: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(28u64 as _);
+pub const VT_CF: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(71u64 as _);
+pub const VT_CLSID: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(72u64 as _);
+pub const VT_CY: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(6u64 as _);
+pub const VT_DATE: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(7u64 as _);
+pub const VT_DECIMAL: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(14u64 as _);
+pub const VT_DISPATCH: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(9u64 as _);
+pub const VT_EMPTY: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(0u64 as _);
+pub const VT_ERROR: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(10u64 as _);
+pub const VT_FILETIME: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(64u64 as _);
+pub const VT_HRESULT: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(25u64 as _);
+pub const VT_I1: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(16u64 as _);
+pub const VT_I2: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(2u64 as _);
+pub const VT_I4: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(3u64 as _);
 pub const VT_I8: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(20u64 as _);
+pub const VT_ILLEGAL: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(65535u64 as _);
+pub const VT_ILLEGALMASKED: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(4095u64 as _);
+pub const VT_INT: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(22u64 as _);
+pub const VT_INT_PTR: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(37u64 as _);
+pub const VT_LPSTR: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(30u64 as _);
 pub const VT_LPWSTR: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(31u64 as _);
+pub const VT_NULL: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(1u64 as _);
+pub const VT_PTR: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(26u64 as _);
+pub const VT_R4: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(4u64 as _);
+pub const VT_R8: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(5u64 as _);
+pub const VT_RECORD: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(36u64 as _);
+pub const VT_RESERVED: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(32768u64 as _);
+pub const VT_SAFEARRAY: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(27u64 as _);
+pub const VT_STORAGE: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(67u64 as _);
+pub const VT_STORED_OBJECT: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(69u64 as _);
+pub const VT_STREAM: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(66u64 as _);
+pub const VT_STREAMED_OBJECT: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(68u64 as _);
+pub const VT_TYPEMASK: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(4095u64 as _);
+pub const VT_UI1: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(17u64 as _);
+pub const VT_UI2: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(18u64 as _);
 pub const VT_UI4: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(19u64 as _);
 pub const VT_UI8: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(21u64 as _);
+pub const VT_UINT: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(23u64 as _);
+pub const VT_UINT_PTR: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(38u64 as _);
+pub const VT_UNKNOWN: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(13u64 as _);
+pub const VT_USERDEFINED: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(29u64 as _);
+pub const VT_VARIANT: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(12u64 as _);
+pub const VT_VECTOR: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(4096u64 as _);
+pub const VT_VERSIONED_STREAM: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(73u64 as _);
+pub const VT_VOID: crate::Win32::System::Variant::VARENUM = crate::Win32::System::Variant::VARENUM(24u64 as _);
+mod import_VariantClear { #[link(name = "OLEAUT32", kind = "raw-dylib")] extern "system" { #[link_name = "VariantClear"] pub fn call(pvarg: *mut crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT; } }
+pub use import_VariantClear::call as VariantClear_raw;
+#[inline]
+pub unsafe fn VariantClear(pvarg: *mut crate::Win32::System::Variant::VARIANT) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_VariantClear::call(pvarg); hr__.ok()?;
+Ok(())
+}
 }
 pub mod WinRT {
 #[repr(transparent)]
@@ -20138,6 +20451,4762 @@ pub const GMEM_DDESHARE: u32 = 8192;
 }
 }
 pub mod UI {
+pub mod Accessibility {
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct AutomationElementMode(pub i32);
+impl AutomationElementMode { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for AutomationElementMode { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for AutomationElementMode { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for AutomationElementMode {}
+impl ::core::fmt::Debug for AutomationElementMode { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for AutomationElementMode { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for AutomationElementMode { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for AutomationElementMode { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for AutomationElementMode { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const CUIAutomation: crate::core::GUID = crate::core::GUID { data1: 4282964900, data2: 24815, data3: 16897, data4: [170,135,84,16,62,239,89,78,] };
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct ExpandCollapseState(pub i32);
+impl ExpandCollapseState { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for ExpandCollapseState { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for ExpandCollapseState { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for ExpandCollapseState {}
+impl ::core::fmt::Debug for ExpandCollapseState { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for ExpandCollapseState { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for ExpandCollapseState { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for ExpandCollapseState { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for ExpandCollapseState { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const ExpandCollapseState_Collapsed: crate::Win32::UI::Accessibility::ExpandCollapseState = crate::Win32::UI::Accessibility::ExpandCollapseState(0i64 as _);
+pub const ExpandCollapseState_Expanded: crate::Win32::UI::Accessibility::ExpandCollapseState = crate::Win32::UI::Accessibility::ExpandCollapseState(1i64 as _);
+pub const ExpandCollapseState_LeafNode: crate::Win32::UI::Accessibility::ExpandCollapseState = crate::Win32::UI::Accessibility::ExpandCollapseState(3i64 as _);
+pub const ExpandCollapseState_PartiallyExpanded: crate::Win32::UI::Accessibility::ExpandCollapseState = crate::Win32::UI::Accessibility::ExpandCollapseState(2i64 as _);
+pub const IID_IAccessible: crate::core::GUID = crate::core::GUID { data1: 1636251360, data2: 15421, data3: 4559, data4: [129,12,0,170,0,56,155,113,] };
+#[repr(C)]
+pub struct IAccessible_Vtbl {
+pub base__: crate::Win32::System::Com::IDispatch_Vtbl,
+pub get_accParent: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,ppdispParent: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_accChildCount: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pcountChildren: *mut i32) -> crate::core::HRESULT,
+pub get_accChild: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,varChild: crate::Win32::System::Variant::VARIANT,ppdispChild: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_accName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,varChild: crate::Win32::System::Variant::VARIANT,pszName: *mut *mut u16) -> crate::core::HRESULT,
+pub get_accValue: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,varChild: crate::Win32::System::Variant::VARIANT,pszValue: *mut *mut u16) -> crate::core::HRESULT,
+pub get_accDescription: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,varChild: crate::Win32::System::Variant::VARIANT,pszDescription: *mut *mut u16) -> crate::core::HRESULT,
+pub get_accRole: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,varChild: crate::Win32::System::Variant::VARIANT,pvarRole: *mut crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+pub get_accState: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,varChild: crate::Win32::System::Variant::VARIANT,pvarState: *mut crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+pub get_accHelp: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,varChild: crate::Win32::System::Variant::VARIANT,pszHelp: *mut *mut u16) -> crate::core::HRESULT,
+pub get_accHelpTopic: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pszHelpFile: *mut *mut u16,varChild: crate::Win32::System::Variant::VARIANT,pidTopic: *mut i32) -> crate::core::HRESULT,
+pub get_accKeyboardShortcut: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,varChild: crate::Win32::System::Variant::VARIANT,pszKeyboardShortcut: *mut *mut u16) -> crate::core::HRESULT,
+pub get_accFocus: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pvarChild: *mut crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+pub get_accSelection: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pvarChildren: *mut crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+pub get_accDefaultAction: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,varChild: crate::Win32::System::Variant::VARIANT,pszDefaultAction: *mut *mut u16) -> crate::core::HRESULT,
+pub accSelect: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,flagsSelect: i32,varChild: crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+pub accLocation: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pxLeft: *mut i32,pyTop: *mut i32,pcxWidth: *mut i32,pcyHeight: *mut i32,varChild: crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+pub accNavigate: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,navDir: i32,varStart: crate::Win32::System::Variant::VARIANT,pvarEndUpAt: *mut crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+pub accHitTest: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,xLeft: i32,yTop: i32,pvarChild: *mut crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+pub accDoDefaultAction: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,varChild: crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+pub put_accName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,varChild: crate::Win32::System::Variant::VARIANT,szName: *mut u16) -> crate::core::HRESULT,
+pub put_accValue: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,varChild: crate::Win32::System::Variant::VARIANT,szValue: *mut u16) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IAccessible(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IAccessible {
+pub const IID: crate::core::GUID = IID_IAccessible;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IAccessible_Vtbl { unsafe { &**(self.as_raw() as *const *const IAccessible_Vtbl) } }
+pub fn as_IDispatch(&self) -> &crate::Win32::System::Com::IDispatch { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IDispatch) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn get_accParent(&self) -> Result<crate::Win32::System::Com::IDispatch, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_accParent)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::System::Com::IDispatch::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_accChildCount(&self) -> Result<i32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_accChildCount)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_accChild(&self,varChild: crate::Win32::System::Variant::VARIANT) -> Result<crate::Win32::System::Com::IDispatch, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_accChild)(self.as_raw(),varChild,&mut result__); hr__.ok()?;
+crate::Win32::System::Com::IDispatch::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_accName(&self,varChild: crate::Win32::System::Variant::VARIANT) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_accName)(self.as_raw(),varChild,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_accValue(&self,varChild: crate::Win32::System::Variant::VARIANT) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_accValue)(self.as_raw(),varChild,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_accDescription(&self,varChild: crate::Win32::System::Variant::VARIANT) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_accDescription)(self.as_raw(),varChild,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_accRole(&self,varChild: crate::Win32::System::Variant::VARIANT) -> Result<crate::Win32::System::Variant::VARIANT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_accRole)(self.as_raw(),varChild,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_accState(&self,varChild: crate::Win32::System::Variant::VARIANT) -> Result<crate::Win32::System::Variant::VARIANT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_accState)(self.as_raw(),varChild,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_accHelp(&self,varChild: crate::Win32::System::Variant::VARIANT) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_accHelp)(self.as_raw(),varChild,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_accHelpTopic(&self,pszHelpFile: *mut *mut u16,varChild: crate::Win32::System::Variant::VARIANT,pidTopic: *mut i32) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().get_accHelpTopic)(self.as_raw(),pszHelpFile,varChild,pidTopic); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn get_accKeyboardShortcut(&self,varChild: crate::Win32::System::Variant::VARIANT) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_accKeyboardShortcut)(self.as_raw(),varChild,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_accFocus(&self) -> Result<crate::Win32::System::Variant::VARIANT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_accFocus)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_accSelection(&self) -> Result<crate::Win32::System::Variant::VARIANT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_accSelection)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_accDefaultAction(&self,varChild: crate::Win32::System::Variant::VARIANT) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_accDefaultAction)(self.as_raw(),varChild,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn accSelect(&self,flagsSelect: i32,varChild: crate::Win32::System::Variant::VARIANT) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().accSelect)(self.as_raw(),flagsSelect,varChild); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn accLocation(&self,pxLeft: *mut i32,pyTop: *mut i32,pcxWidth: *mut i32,pcyHeight: *mut i32,varChild: crate::Win32::System::Variant::VARIANT) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().accLocation)(self.as_raw(),pxLeft,pyTop,pcxWidth,pcyHeight,varChild); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn accNavigate(&self,navDir: i32,varStart: crate::Win32::System::Variant::VARIANT) -> Result<crate::Win32::System::Variant::VARIANT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().accNavigate)(self.as_raw(),navDir,varStart,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn accHitTest(&self,xLeft: i32,yTop: i32) -> Result<crate::Win32::System::Variant::VARIANT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().accHitTest)(self.as_raw(),xLeft,yTop,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn accDoDefaultAction(&self,varChild: crate::Win32::System::Variant::VARIANT) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().accDoDefaultAction)(self.as_raw(),varChild); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn put_accName(&self,varChild: crate::Win32::System::Variant::VARIANT,szName: *mut u16) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().put_accName)(self.as_raw(),varChild,szName); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn put_accValue(&self,varChild: crate::Win32::System::Variant::VARIANT,szValue: *mut u16) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().put_accValue)(self.as_raw(),varChild,szValue); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn GetTypeInfoCount(&self) -> Result<u32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().base__.GetTypeInfoCount)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetTypeInfo(&self,iTInfo: u32,lcid: u32) -> Result<crate::Win32::System::Com::ITypeInfo, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().base__.GetTypeInfo)(self.as_raw(),iTInfo,lcid,&mut result__); hr__.ok()?;
+crate::Win32::System::Com::ITypeInfo::from_raw(result__)
+}
+#[inline]
+pub unsafe fn GetIDsOfNames(&self,riid: *const crate::core::GUID,rgszNames: *const crate::core::PWSTR,cNames: u32,lcid: u32,rgDispId: *mut i32) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().base__.GetIDsOfNames)(self.as_raw(),riid,rgszNames,cNames,lcid,rgDispId); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn Invoke(&self,dispIdMember: i32,riid: *const crate::core::GUID,lcid: u32,wFlags: crate::Win32::System::Com::DISPATCH_FLAGS,pDispParams: *const crate::Win32::System::Com::DISPPARAMS,pVarResult: Option<*mut crate::Win32::System::Variant::VARIANT>,pExcepInfo: Option<*mut crate::Win32::System::Com::EXCEPINFO>,puArgErr: Option<*mut u32>) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().base__.Invoke)(self.as_raw(),dispIdMember,riid,lcid,wFlags,pDispParams,pVarResult.unwrap_or(::core::ptr::null_mut()),pExcepInfo.unwrap_or(::core::ptr::null_mut()),puArgErr.unwrap_or(::core::ptr::null_mut())); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.base__.Release)(self.as_raw())}
+}
+impl Clone for IAccessible { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IAccessible { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IAccessible { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IExpandCollapseProvider: crate::core::GUID = crate::core::GUID { data1: 3628585893, data2: 51888, data3: 19096, data4: [140,50,236,180,92,89,173,36,] };
+#[repr(C)]
+pub struct IExpandCollapseProvider_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub Expand: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub Collapse: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_ExpandCollapseState: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::Win32::UI::Accessibility::ExpandCollapseState) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IExpandCollapseProvider(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IExpandCollapseProvider {
+pub const IID: crate::core::GUID = IID_IExpandCollapseProvider;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IExpandCollapseProvider_Vtbl { unsafe { &**(self.as_raw() as *const *const IExpandCollapseProvider_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn Expand(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().Expand)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn Collapse(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().Collapse)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn get_ExpandCollapseState(&self) -> Result<crate::Win32::UI::Accessibility::ExpandCollapseState, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ExpandCollapseState)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IExpandCollapseProvider { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IExpandCollapseProvider { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IExpandCollapseProvider { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait IExpandCollapseProviderImpl: Send + Sync {
+fn Expand(&self) -> Result<(), crate::core::HRESULT>;
+fn Collapse(&self) -> Result<(), crate::core::HRESULT>;
+fn get_ExpandCollapseState(&self) -> Result<crate::Win32::UI::Accessibility::ExpandCollapseState, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<IExpandCollapseProvider_Vtbl>() == 6 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IExpandCollapseProvider: IExpandCollapseProvider_Vtbl = crate::Win32::UI::Accessibility::IExpandCollapseProvider_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+Expand: thunk_IExpandCollapseProvider_Expand,
+Collapse: thunk_IExpandCollapseProvider_Collapse,
+get_ExpandCollapseState: thunk_IExpandCollapseProvider_get_ExpandCollapseState,
+};
+unsafe extern "system" fn thunk_IExpandCollapseProvider_Expand(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IExpandCollapseProviderImpl>);
+match implementation.Expand() { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IExpandCollapseProvider_Collapse(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IExpandCollapseProviderImpl>);
+match implementation.Collapse() { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IExpandCollapseProvider_get_ExpandCollapseState(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::Win32::UI::Accessibility::ExpandCollapseState) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IExpandCollapseProviderImpl>);
+match implementation.get_ExpandCollapseState() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_IExpandCollapseProvider(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IExpandCollapseProviderImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_IExpandCollapseProvider(mut self, implementation: Box<dyn IExpandCollapseProviderImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::IExpandCollapseProvider::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IExpandCollapseProvider as *const IExpandCollapseProvider_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IExpandCollapseProvider, iids); } self } }
+impl IExpandCollapseProvider { pub fn implement(implementation: Box<dyn IExpandCollapseProviderImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IExpandCollapseProvider(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_IGridItemProvider: crate::core::GUID = crate::core::GUID { data1: 3492102641, data2: 64385, data3: 19812, data4: [174,50,245,32,248,166,219,209,] };
+#[repr(C)]
+pub struct IGridItemProvider_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub get_Row: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut i32) -> crate::core::HRESULT,
+pub get_Column: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut i32) -> crate::core::HRESULT,
+pub get_RowSpan: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut i32) -> crate::core::HRESULT,
+pub get_ColumnSpan: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut i32) -> crate::core::HRESULT,
+pub get_ContainingGrid: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IGridItemProvider(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IGridItemProvider {
+pub const IID: crate::core::GUID = IID_IGridItemProvider;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IGridItemProvider_Vtbl { unsafe { &**(self.as_raw() as *const *const IGridItemProvider_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn get_Row(&self) -> Result<i32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_Row)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_Column(&self) -> Result<i32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_Column)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_RowSpan(&self) -> Result<i32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_RowSpan)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_ColumnSpan(&self) -> Result<i32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ColumnSpan)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_ContainingGrid(&self) -> Result<crate::Win32::UI::Accessibility::IRawElementProviderSimple, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ContainingGrid)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IRawElementProviderSimple::from_raw(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IGridItemProvider { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IGridItemProvider { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IGridItemProvider { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait IGridItemProviderImpl: Send + Sync {
+fn get_Row(&self) -> Result<i32, crate::core::HRESULT>;
+fn get_Column(&self) -> Result<i32, crate::core::HRESULT>;
+fn get_RowSpan(&self) -> Result<i32, crate::core::HRESULT>;
+fn get_ColumnSpan(&self) -> Result<i32, crate::core::HRESULT>;
+fn get_ContainingGrid(&self) -> Result<crate::Win32::UI::Accessibility::IRawElementProviderSimple, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<IGridItemProvider_Vtbl>() == 8 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IGridItemProvider: IGridItemProvider_Vtbl = crate::Win32::UI::Accessibility::IGridItemProvider_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+get_Row: thunk_IGridItemProvider_get_Row,
+get_Column: thunk_IGridItemProvider_get_Column,
+get_RowSpan: thunk_IGridItemProvider_get_RowSpan,
+get_ColumnSpan: thunk_IGridItemProvider_get_ColumnSpan,
+get_ContainingGrid: thunk_IGridItemProvider_get_ContainingGrid,
+};
+unsafe extern "system" fn thunk_IGridItemProvider_get_Row(this: *mut ::core::ffi::c_void,pRetVal: *mut i32) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IGridItemProviderImpl>);
+match implementation.get_Row() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IGridItemProvider_get_Column(this: *mut ::core::ffi::c_void,pRetVal: *mut i32) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IGridItemProviderImpl>);
+match implementation.get_Column() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IGridItemProvider_get_RowSpan(this: *mut ::core::ffi::c_void,pRetVal: *mut i32) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IGridItemProviderImpl>);
+match implementation.get_RowSpan() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IGridItemProvider_get_ColumnSpan(this: *mut ::core::ffi::c_void,pRetVal: *mut i32) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IGridItemProviderImpl>);
+match implementation.get_ColumnSpan() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IGridItemProvider_get_ContainingGrid(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IGridItemProviderImpl>);
+match implementation.get_ContainingGrid() { Ok(value) => { *pRetVal = value.into_raw(); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_IGridItemProvider(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IGridItemProviderImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_IGridItemProvider(mut self, implementation: Box<dyn IGridItemProviderImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::IGridItemProvider::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IGridItemProvider as *const IGridItemProvider_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IGridItemProvider, iids); } self } }
+impl IGridItemProvider { pub fn implement(implementation: Box<dyn IGridItemProviderImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IGridItemProvider(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_IGridProvider: crate::core::GUID = crate::core::GUID { data1: 2977784199, data2: 2311, data3: 17995, data4: [161,104,14,241,122,21,114,177,] };
+#[repr(C)]
+pub struct IGridProvider_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub GetItem: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,row: i32,column: i32,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_RowCount: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut i32) -> crate::core::HRESULT,
+pub get_ColumnCount: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut i32) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IGridProvider(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IGridProvider {
+pub const IID: crate::core::GUID = IID_IGridProvider;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IGridProvider_Vtbl { unsafe { &**(self.as_raw() as *const *const IGridProvider_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn GetItem(&self,row: i32,column: i32) -> Result<crate::Win32::UI::Accessibility::IRawElementProviderSimple, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetItem)(self.as_raw(),row,column,&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IRawElementProviderSimple::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_RowCount(&self) -> Result<i32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_RowCount)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_ColumnCount(&self) -> Result<i32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ColumnCount)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IGridProvider { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IGridProvider { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IGridProvider { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait IGridProviderImpl: Send + Sync {
+fn GetItem(&self, row: i32, column: i32) -> Result<crate::Win32::UI::Accessibility::IRawElementProviderSimple, crate::core::HRESULT>;
+fn get_RowCount(&self) -> Result<i32, crate::core::HRESULT>;
+fn get_ColumnCount(&self) -> Result<i32, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<IGridProvider_Vtbl>() == 6 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IGridProvider: IGridProvider_Vtbl = crate::Win32::UI::Accessibility::IGridProvider_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+GetItem: thunk_IGridProvider_GetItem,
+get_RowCount: thunk_IGridProvider_get_RowCount,
+get_ColumnCount: thunk_IGridProvider_get_ColumnCount,
+};
+unsafe extern "system" fn thunk_IGridProvider_GetItem(this: *mut ::core::ffi::c_void,row: i32,column: i32,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IGridProviderImpl>);
+match implementation.GetItem(row,column) { Ok(value) => { *pRetVal = value.into_raw(); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IGridProvider_get_RowCount(this: *mut ::core::ffi::c_void,pRetVal: *mut i32) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IGridProviderImpl>);
+match implementation.get_RowCount() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IGridProvider_get_ColumnCount(this: *mut ::core::ffi::c_void,pRetVal: *mut i32) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IGridProviderImpl>);
+match implementation.get_ColumnCount() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_IGridProvider(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IGridProviderImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_IGridProvider(mut self, implementation: Box<dyn IGridProviderImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::IGridProvider::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IGridProvider as *const IGridProvider_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IGridProvider, iids); } self } }
+impl IGridProvider { pub fn implement(implementation: Box<dyn IGridProviderImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IGridProvider(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_IInvokeProvider: crate::core::GUID = crate::core::GUID { data1: 1425846859, data2: 57742, data3: 18338, data4: [180,211,236,203,231,117,153,162,] };
+#[repr(C)]
+pub struct IInvokeProvider_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub Invoke: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IInvokeProvider(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IInvokeProvider {
+pub const IID: crate::core::GUID = IID_IInvokeProvider;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IInvokeProvider_Vtbl { unsafe { &**(self.as_raw() as *const *const IInvokeProvider_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn Invoke(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().Invoke)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IInvokeProvider { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IInvokeProvider { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IInvokeProvider { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait IInvokeProviderImpl: Send + Sync {
+fn Invoke(&self) -> Result<(), crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<IInvokeProvider_Vtbl>() == 4 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IInvokeProvider: IInvokeProvider_Vtbl = crate::Win32::UI::Accessibility::IInvokeProvider_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+Invoke: thunk_IInvokeProvider_Invoke,
+};
+unsafe extern "system" fn thunk_IInvokeProvider_Invoke(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IInvokeProviderImpl>);
+match implementation.Invoke() { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_IInvokeProvider(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IInvokeProviderImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_IInvokeProvider(mut self, implementation: Box<dyn IInvokeProviderImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::IInvokeProvider::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IInvokeProvider as *const IInvokeProvider_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IInvokeProvider, iids); } self } }
+impl IInvokeProvider { pub fn implement(implementation: Box<dyn IInvokeProviderImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IInvokeProvider(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_IRangeValueProvider: crate::core::GUID = crate::core::GUID { data1: 920419055, data2: 13286, data3: 18065, data4: [175,225,43,231,39,75,61,51,] };
+#[repr(C)]
+pub struct IRangeValueProvider_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub SetValue: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,val: f64) -> crate::core::HRESULT,
+pub get_Value: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT,
+pub get_IsReadOnly: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_Maximum: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT,
+pub get_Minimum: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT,
+pub get_LargeChange: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT,
+pub get_SmallChange: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IRangeValueProvider(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IRangeValueProvider {
+pub const IID: crate::core::GUID = IID_IRangeValueProvider;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IRangeValueProvider_Vtbl { unsafe { &**(self.as_raw() as *const *const IRangeValueProvider_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn SetValue(&self,val: f64) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().SetValue)(self.as_raw(),val); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn get_Value(&self) -> Result<f64, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_Value)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_IsReadOnly(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_IsReadOnly)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_Maximum(&self) -> Result<f64, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_Maximum)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_Minimum(&self) -> Result<f64, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_Minimum)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_LargeChange(&self) -> Result<f64, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_LargeChange)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_SmallChange(&self) -> Result<f64, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_SmallChange)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IRangeValueProvider { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IRangeValueProvider { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IRangeValueProvider { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait IRangeValueProviderImpl: Send + Sync {
+fn SetValue(&self, val: f64) -> Result<(), crate::core::HRESULT>;
+fn get_Value(&self) -> Result<f64, crate::core::HRESULT>;
+fn get_IsReadOnly(&self) -> Result<crate::core::BOOL, crate::core::HRESULT>;
+fn get_Maximum(&self) -> Result<f64, crate::core::HRESULT>;
+fn get_Minimum(&self) -> Result<f64, crate::core::HRESULT>;
+fn get_LargeChange(&self) -> Result<f64, crate::core::HRESULT>;
+fn get_SmallChange(&self) -> Result<f64, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<IRangeValueProvider_Vtbl>() == 10 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IRangeValueProvider: IRangeValueProvider_Vtbl = crate::Win32::UI::Accessibility::IRangeValueProvider_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+SetValue: thunk_IRangeValueProvider_SetValue,
+get_Value: thunk_IRangeValueProvider_get_Value,
+get_IsReadOnly: thunk_IRangeValueProvider_get_IsReadOnly,
+get_Maximum: thunk_IRangeValueProvider_get_Maximum,
+get_Minimum: thunk_IRangeValueProvider_get_Minimum,
+get_LargeChange: thunk_IRangeValueProvider_get_LargeChange,
+get_SmallChange: thunk_IRangeValueProvider_get_SmallChange,
+};
+unsafe extern "system" fn thunk_IRangeValueProvider_SetValue(this: *mut ::core::ffi::c_void,val: f64) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRangeValueProviderImpl>);
+match implementation.SetValue(val) { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IRangeValueProvider_get_Value(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRangeValueProviderImpl>);
+match implementation.get_Value() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IRangeValueProvider_get_IsReadOnly(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::core::BOOL) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRangeValueProviderImpl>);
+match implementation.get_IsReadOnly() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IRangeValueProvider_get_Maximum(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRangeValueProviderImpl>);
+match implementation.get_Maximum() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IRangeValueProvider_get_Minimum(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRangeValueProviderImpl>);
+match implementation.get_Minimum() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IRangeValueProvider_get_LargeChange(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRangeValueProviderImpl>);
+match implementation.get_LargeChange() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IRangeValueProvider_get_SmallChange(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRangeValueProviderImpl>);
+match implementation.get_SmallChange() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_IRangeValueProvider(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IRangeValueProviderImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_IRangeValueProvider(mut self, implementation: Box<dyn IRangeValueProviderImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::IRangeValueProvider::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IRangeValueProvider as *const IRangeValueProvider_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IRangeValueProvider, iids); } self } }
+impl IRangeValueProvider { pub fn implement(implementation: Box<dyn IRangeValueProviderImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IRangeValueProvider(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_IRawElementProviderFragment: crate::core::GUID = crate::core::GUID { data1: 4144381352, data2: 33625, data3: 17308, data4: [146,151,187,197,41,154,125,135,] };
+#[repr(C)]
+pub struct IRawElementProviderFragment_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub Navigate: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,direction: crate::Win32::UI::Accessibility::NavigateDirection,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetRuntimeId: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub get_BoundingRectangle: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::Win32::UI::Accessibility::UiaRect) -> crate::core::HRESULT,
+pub GetEmbeddedFragmentRoots: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub SetFocus: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_FragmentRoot: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IRawElementProviderFragment(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IRawElementProviderFragment {
+pub const IID: crate::core::GUID = IID_IRawElementProviderFragment;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IRawElementProviderFragment_Vtbl { unsafe { &**(self.as_raw() as *const *const IRawElementProviderFragment_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn Navigate(&self,direction: crate::Win32::UI::Accessibility::NavigateDirection) -> Result<Option<crate::Win32::UI::Accessibility::IRawElementProviderFragment>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().Navigate)(self.as_raw(),direction,&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::IRawElementProviderFragment::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn GetRuntimeId(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetRuntimeId)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_BoundingRectangle(&self) -> Result<crate::Win32::UI::Accessibility::UiaRect, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_BoundingRectangle)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetEmbeddedFragmentRoots(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetEmbeddedFragmentRoots)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn SetFocus(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().SetFocus)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn get_FragmentRoot(&self) -> Result<crate::Win32::UI::Accessibility::IRawElementProviderFragmentRoot, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_FragmentRoot)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IRawElementProviderFragmentRoot::from_raw(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IRawElementProviderFragment { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IRawElementProviderFragment { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IRawElementProviderFragment { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait IRawElementProviderFragmentImpl: Send + Sync {
+fn Navigate(&self, direction: crate::Win32::UI::Accessibility::NavigateDirection) -> Result<Option<crate::Win32::UI::Accessibility::IRawElementProviderFragment>, crate::core::HRESULT>;
+fn GetRuntimeId(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT>;
+fn get_BoundingRectangle(&self) -> Result<crate::Win32::UI::Accessibility::UiaRect, crate::core::HRESULT>;
+fn GetEmbeddedFragmentRoots(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT>;
+fn SetFocus(&self) -> Result<(), crate::core::HRESULT>;
+fn get_FragmentRoot(&self) -> Result<crate::Win32::UI::Accessibility::IRawElementProviderFragmentRoot, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<IRawElementProviderFragment_Vtbl>() == 9 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IRawElementProviderFragment: IRawElementProviderFragment_Vtbl = crate::Win32::UI::Accessibility::IRawElementProviderFragment_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+Navigate: thunk_IRawElementProviderFragment_Navigate,
+GetRuntimeId: thunk_IRawElementProviderFragment_GetRuntimeId,
+get_BoundingRectangle: thunk_IRawElementProviderFragment_get_BoundingRectangle,
+GetEmbeddedFragmentRoots: thunk_IRawElementProviderFragment_GetEmbeddedFragmentRoots,
+SetFocus: thunk_IRawElementProviderFragment_SetFocus,
+get_FragmentRoot: thunk_IRawElementProviderFragment_get_FragmentRoot,
+};
+unsafe extern "system" fn thunk_IRawElementProviderFragment_Navigate(this: *mut ::core::ffi::c_void,direction: crate::Win32::UI::Accessibility::NavigateDirection,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRawElementProviderFragmentImpl>);
+match implementation.Navigate(direction) { Ok(value) => { *pRetVal = value.map_or(::core::ptr::null_mut(), |v| v.into_raw()); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IRawElementProviderFragment_GetRuntimeId(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRawElementProviderFragmentImpl>);
+match implementation.GetRuntimeId() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IRawElementProviderFragment_get_BoundingRectangle(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::Win32::UI::Accessibility::UiaRect) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRawElementProviderFragmentImpl>);
+match implementation.get_BoundingRectangle() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IRawElementProviderFragment_GetEmbeddedFragmentRoots(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRawElementProviderFragmentImpl>);
+match implementation.GetEmbeddedFragmentRoots() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IRawElementProviderFragment_SetFocus(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRawElementProviderFragmentImpl>);
+match implementation.SetFocus() { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IRawElementProviderFragment_get_FragmentRoot(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRawElementProviderFragmentImpl>);
+match implementation.get_FragmentRoot() { Ok(value) => { *pRetVal = value.into_raw(); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_IRawElementProviderFragment(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IRawElementProviderFragmentImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_IRawElementProviderFragment(mut self, implementation: Box<dyn IRawElementProviderFragmentImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::IRawElementProviderFragment::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IRawElementProviderFragment as *const IRawElementProviderFragment_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IRawElementProviderFragment, iids); } self } }
+impl IRawElementProviderFragment { pub fn implement(implementation: Box<dyn IRawElementProviderFragmentImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IRawElementProviderFragment(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_IRawElementProviderFragmentRoot: crate::core::GUID = crate::core::GUID { data1: 1645011621, data2: 43919, data3: 16553, data4: [134,203,222,60,117,89,155,88,] };
+#[repr(C)]
+pub struct IRawElementProviderFragmentRoot_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub ElementProviderFromPoint: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,x: f64,y: f64,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetFocus: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IRawElementProviderFragmentRoot(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IRawElementProviderFragmentRoot {
+pub const IID: crate::core::GUID = IID_IRawElementProviderFragmentRoot;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IRawElementProviderFragmentRoot_Vtbl { unsafe { &**(self.as_raw() as *const *const IRawElementProviderFragmentRoot_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn ElementProviderFromPoint(&self,x: f64,y: f64) -> Result<Option<crate::Win32::UI::Accessibility::IRawElementProviderFragment>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().ElementProviderFromPoint)(self.as_raw(),x,y,&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::IRawElementProviderFragment::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn GetFocus(&self) -> Result<Option<crate::Win32::UI::Accessibility::IRawElementProviderFragment>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetFocus)(self.as_raw(),&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::IRawElementProviderFragment::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IRawElementProviderFragmentRoot { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IRawElementProviderFragmentRoot { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IRawElementProviderFragmentRoot { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait IRawElementProviderFragmentRootImpl: Send + Sync {
+fn ElementProviderFromPoint(&self, x: f64, y: f64) -> Result<Option<crate::Win32::UI::Accessibility::IRawElementProviderFragment>, crate::core::HRESULT>;
+fn GetFocus(&self) -> Result<Option<crate::Win32::UI::Accessibility::IRawElementProviderFragment>, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<IRawElementProviderFragmentRoot_Vtbl>() == 5 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IRawElementProviderFragmentRoot: IRawElementProviderFragmentRoot_Vtbl = crate::Win32::UI::Accessibility::IRawElementProviderFragmentRoot_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+ElementProviderFromPoint: thunk_IRawElementProviderFragmentRoot_ElementProviderFromPoint,
+GetFocus: thunk_IRawElementProviderFragmentRoot_GetFocus,
+};
+unsafe extern "system" fn thunk_IRawElementProviderFragmentRoot_ElementProviderFromPoint(this: *mut ::core::ffi::c_void,x: f64,y: f64,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRawElementProviderFragmentRootImpl>);
+match implementation.ElementProviderFromPoint(x,y) { Ok(value) => { *pRetVal = value.map_or(::core::ptr::null_mut(), |v| v.into_raw()); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IRawElementProviderFragmentRoot_GetFocus(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRawElementProviderFragmentRootImpl>);
+match implementation.GetFocus() { Ok(value) => { *pRetVal = value.map_or(::core::ptr::null_mut(), |v| v.into_raw()); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_IRawElementProviderFragmentRoot(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IRawElementProviderFragmentRootImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_IRawElementProviderFragmentRoot(mut self, implementation: Box<dyn IRawElementProviderFragmentRootImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::IRawElementProviderFragmentRoot::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IRawElementProviderFragmentRoot as *const IRawElementProviderFragmentRoot_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IRawElementProviderFragmentRoot, iids); } self } }
+impl IRawElementProviderFragmentRoot { pub fn implement(implementation: Box<dyn IRawElementProviderFragmentRootImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IRawElementProviderFragmentRoot(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_IRawElementProviderSimple: crate::core::GUID = crate::core::GUID { data1: 3604834513, data2: 34557, data3: 17202, data4: [134,102,154,190,222,162,210,76,] };
+#[repr(C)]
+pub struct IRawElementProviderSimple_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub get_ProviderOptions: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::Win32::UI::Accessibility::ProviderOptions) -> crate::core::HRESULT,
+pub GetPatternProvider: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,patternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetPropertyValue: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,pRetVal: *mut crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+pub get_HostRawElementProvider: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IRawElementProviderSimple(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IRawElementProviderSimple {
+pub const IID: crate::core::GUID = IID_IRawElementProviderSimple;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IRawElementProviderSimple_Vtbl { unsafe { &**(self.as_raw() as *const *const IRawElementProviderSimple_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn get_ProviderOptions(&self) -> Result<crate::Win32::UI::Accessibility::ProviderOptions, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ProviderOptions)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetPatternProvider(&self,patternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID) -> Result<Option<crate::Win32::System::Com::IUnknown>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetPatternProvider)(self.as_raw(),patternId,&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::System::Com::IUnknown::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn GetPropertyValue(&self,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID) -> Result<crate::Win32::System::Variant::VARIANT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetPropertyValue)(self.as_raw(),propertyId,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_HostRawElementProvider(&self) -> Result<Option<crate::Win32::UI::Accessibility::IRawElementProviderSimple>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_HostRawElementProvider)(self.as_raw(),&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::IRawElementProviderSimple::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IRawElementProviderSimple { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IRawElementProviderSimple { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IRawElementProviderSimple { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait IRawElementProviderSimpleImpl: Send + Sync {
+fn get_ProviderOptions(&self) -> Result<crate::Win32::UI::Accessibility::ProviderOptions, crate::core::HRESULT>;
+fn GetPatternProvider(&self, patternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID) -> Result<Option<crate::Win32::System::Com::IUnknown>, crate::core::HRESULT>;
+fn GetPropertyValue(&self, propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID) -> Result<crate::Win32::System::Variant::VARIANT, crate::core::HRESULT>;
+fn get_HostRawElementProvider(&self) -> Result<Option<crate::Win32::UI::Accessibility::IRawElementProviderSimple>, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<IRawElementProviderSimple_Vtbl>() == 7 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IRawElementProviderSimple: IRawElementProviderSimple_Vtbl = crate::Win32::UI::Accessibility::IRawElementProviderSimple_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+get_ProviderOptions: thunk_IRawElementProviderSimple_get_ProviderOptions,
+GetPatternProvider: thunk_IRawElementProviderSimple_GetPatternProvider,
+GetPropertyValue: thunk_IRawElementProviderSimple_GetPropertyValue,
+get_HostRawElementProvider: thunk_IRawElementProviderSimple_get_HostRawElementProvider,
+};
+unsafe extern "system" fn thunk_IRawElementProviderSimple_get_ProviderOptions(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::Win32::UI::Accessibility::ProviderOptions) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRawElementProviderSimpleImpl>);
+match implementation.get_ProviderOptions() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IRawElementProviderSimple_GetPatternProvider(this: *mut ::core::ffi::c_void,patternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRawElementProviderSimpleImpl>);
+match implementation.GetPatternProvider(patternId) { Ok(value) => { *pRetVal = value.map_or(::core::ptr::null_mut(), |v| v.into_raw()); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IRawElementProviderSimple_GetPropertyValue(this: *mut ::core::ffi::c_void,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,pRetVal: *mut crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRawElementProviderSimpleImpl>);
+match implementation.GetPropertyValue(propertyId) { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IRawElementProviderSimple_get_HostRawElementProvider(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IRawElementProviderSimpleImpl>);
+match implementation.get_HostRawElementProvider() { Ok(value) => { *pRetVal = value.map_or(::core::ptr::null_mut(), |v| v.into_raw()); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_IRawElementProviderSimple(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IRawElementProviderSimpleImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_IRawElementProviderSimple(mut self, implementation: Box<dyn IRawElementProviderSimpleImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::IRawElementProviderSimple::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IRawElementProviderSimple as *const IRawElementProviderSimple_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IRawElementProviderSimple, iids); } self } }
+impl IRawElementProviderSimple { pub fn implement(implementation: Box<dyn IRawElementProviderSimpleImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IRawElementProviderSimple(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_IScrollItemProvider: crate::core::GUID = crate::core::GUID { data1: 593544980, data2: 19441, data3: 19238, data4: [186,101,155,33,49,97,39,235,] };
+#[repr(C)]
+pub struct IScrollItemProvider_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub ScrollIntoView: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IScrollItemProvider(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IScrollItemProvider {
+pub const IID: crate::core::GUID = IID_IScrollItemProvider;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IScrollItemProvider_Vtbl { unsafe { &**(self.as_raw() as *const *const IScrollItemProvider_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn ScrollIntoView(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().ScrollIntoView)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IScrollItemProvider { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IScrollItemProvider { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IScrollItemProvider { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait IScrollItemProviderImpl: Send + Sync {
+fn ScrollIntoView(&self) -> Result<(), crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<IScrollItemProvider_Vtbl>() == 4 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IScrollItemProvider: IScrollItemProvider_Vtbl = crate::Win32::UI::Accessibility::IScrollItemProvider_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+ScrollIntoView: thunk_IScrollItemProvider_ScrollIntoView,
+};
+unsafe extern "system" fn thunk_IScrollItemProvider_ScrollIntoView(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IScrollItemProviderImpl>);
+match implementation.ScrollIntoView() { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_IScrollItemProvider(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IScrollItemProviderImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_IScrollItemProvider(mut self, implementation: Box<dyn IScrollItemProviderImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::IScrollItemProvider::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IScrollItemProvider as *const IScrollItemProvider_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IScrollItemProvider, iids); } self } }
+impl IScrollItemProvider { pub fn implement(implementation: Box<dyn IScrollItemProviderImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IScrollItemProvider(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_IScrollProvider: crate::core::GUID = crate::core::GUID { data1: 3012264055, data2: 8131, data3: 17061, data4: [140,174,212,12,34,21,5,90,] };
+#[repr(C)]
+pub struct IScrollProvider_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub Scroll: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,horizontalAmount: crate::Win32::UI::Accessibility::ScrollAmount,verticalAmount: crate::Win32::UI::Accessibility::ScrollAmount) -> crate::core::HRESULT,
+pub SetScrollPercent: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,horizontalPercent: f64,verticalPercent: f64) -> crate::core::HRESULT,
+pub get_HorizontalScrollPercent: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT,
+pub get_VerticalScrollPercent: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT,
+pub get_HorizontalViewSize: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT,
+pub get_VerticalViewSize: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT,
+pub get_HorizontallyScrollable: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_VerticallyScrollable: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IScrollProvider(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IScrollProvider {
+pub const IID: crate::core::GUID = IID_IScrollProvider;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IScrollProvider_Vtbl { unsafe { &**(self.as_raw() as *const *const IScrollProvider_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn Scroll(&self,horizontalAmount: crate::Win32::UI::Accessibility::ScrollAmount,verticalAmount: crate::Win32::UI::Accessibility::ScrollAmount) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().Scroll)(self.as_raw(),horizontalAmount,verticalAmount); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn SetScrollPercent(&self,horizontalPercent: f64,verticalPercent: f64) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().SetScrollPercent)(self.as_raw(),horizontalPercent,verticalPercent); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn get_HorizontalScrollPercent(&self) -> Result<f64, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_HorizontalScrollPercent)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_VerticalScrollPercent(&self) -> Result<f64, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_VerticalScrollPercent)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_HorizontalViewSize(&self) -> Result<f64, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_HorizontalViewSize)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_VerticalViewSize(&self) -> Result<f64, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_VerticalViewSize)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_HorizontallyScrollable(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_HorizontallyScrollable)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_VerticallyScrollable(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_VerticallyScrollable)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IScrollProvider { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IScrollProvider { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IScrollProvider { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait IScrollProviderImpl: Send + Sync {
+fn Scroll(&self, horizontalAmount: crate::Win32::UI::Accessibility::ScrollAmount, verticalAmount: crate::Win32::UI::Accessibility::ScrollAmount) -> Result<(), crate::core::HRESULT>;
+fn SetScrollPercent(&self, horizontalPercent: f64, verticalPercent: f64) -> Result<(), crate::core::HRESULT>;
+fn get_HorizontalScrollPercent(&self) -> Result<f64, crate::core::HRESULT>;
+fn get_VerticalScrollPercent(&self) -> Result<f64, crate::core::HRESULT>;
+fn get_HorizontalViewSize(&self) -> Result<f64, crate::core::HRESULT>;
+fn get_VerticalViewSize(&self) -> Result<f64, crate::core::HRESULT>;
+fn get_HorizontallyScrollable(&self) -> Result<crate::core::BOOL, crate::core::HRESULT>;
+fn get_VerticallyScrollable(&self) -> Result<crate::core::BOOL, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<IScrollProvider_Vtbl>() == 11 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IScrollProvider: IScrollProvider_Vtbl = crate::Win32::UI::Accessibility::IScrollProvider_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+Scroll: thunk_IScrollProvider_Scroll,
+SetScrollPercent: thunk_IScrollProvider_SetScrollPercent,
+get_HorizontalScrollPercent: thunk_IScrollProvider_get_HorizontalScrollPercent,
+get_VerticalScrollPercent: thunk_IScrollProvider_get_VerticalScrollPercent,
+get_HorizontalViewSize: thunk_IScrollProvider_get_HorizontalViewSize,
+get_VerticalViewSize: thunk_IScrollProvider_get_VerticalViewSize,
+get_HorizontallyScrollable: thunk_IScrollProvider_get_HorizontallyScrollable,
+get_VerticallyScrollable: thunk_IScrollProvider_get_VerticallyScrollable,
+};
+unsafe extern "system" fn thunk_IScrollProvider_Scroll(this: *mut ::core::ffi::c_void,horizontalAmount: crate::Win32::UI::Accessibility::ScrollAmount,verticalAmount: crate::Win32::UI::Accessibility::ScrollAmount) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IScrollProviderImpl>);
+match implementation.Scroll(horizontalAmount,verticalAmount) { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IScrollProvider_SetScrollPercent(this: *mut ::core::ffi::c_void,horizontalPercent: f64,verticalPercent: f64) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IScrollProviderImpl>);
+match implementation.SetScrollPercent(horizontalPercent,verticalPercent) { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IScrollProvider_get_HorizontalScrollPercent(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IScrollProviderImpl>);
+match implementation.get_HorizontalScrollPercent() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IScrollProvider_get_VerticalScrollPercent(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IScrollProviderImpl>);
+match implementation.get_VerticalScrollPercent() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IScrollProvider_get_HorizontalViewSize(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IScrollProviderImpl>);
+match implementation.get_HorizontalViewSize() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IScrollProvider_get_VerticalViewSize(this: *mut ::core::ffi::c_void,pRetVal: *mut f64) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IScrollProviderImpl>);
+match implementation.get_VerticalViewSize() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IScrollProvider_get_HorizontallyScrollable(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::core::BOOL) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IScrollProviderImpl>);
+match implementation.get_HorizontallyScrollable() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IScrollProvider_get_VerticallyScrollable(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::core::BOOL) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IScrollProviderImpl>);
+match implementation.get_VerticallyScrollable() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_IScrollProvider(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IScrollProviderImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_IScrollProvider(mut self, implementation: Box<dyn IScrollProviderImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::IScrollProvider::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IScrollProvider as *const IScrollProvider_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IScrollProvider, iids); } self } }
+impl IScrollProvider { pub fn implement(implementation: Box<dyn IScrollProviderImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IScrollProvider(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_ISelectionItemProvider: crate::core::GUID = crate::core::GUID { data1: 717936648, data2: 45780, data3: 17709, data4: [164,7,145,255,26,209,103,178,] };
+#[repr(C)]
+pub struct ISelectionItemProvider_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub Select: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub AddToSelection: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub RemoveFromSelection: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_IsSelected: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_SelectionContainer: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct ISelectionItemProvider(::core::ptr::NonNull<::core::ffi::c_void>);
+impl ISelectionItemProvider {
+pub const IID: crate::core::GUID = IID_ISelectionItemProvider;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &ISelectionItemProvider_Vtbl { unsafe { &**(self.as_raw() as *const *const ISelectionItemProvider_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn Select(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().Select)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn AddToSelection(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().AddToSelection)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn RemoveFromSelection(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().RemoveFromSelection)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn get_IsSelected(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_IsSelected)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_SelectionContainer(&self) -> Result<crate::Win32::UI::Accessibility::IRawElementProviderSimple, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_SelectionContainer)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IRawElementProviderSimple::from_raw(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for ISelectionItemProvider { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for ISelectionItemProvider { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for ISelectionItemProvider { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait ISelectionItemProviderImpl: Send + Sync {
+fn Select(&self) -> Result<(), crate::core::HRESULT>;
+fn AddToSelection(&self) -> Result<(), crate::core::HRESULT>;
+fn RemoveFromSelection(&self) -> Result<(), crate::core::HRESULT>;
+fn get_IsSelected(&self) -> Result<crate::core::BOOL, crate::core::HRESULT>;
+fn get_SelectionContainer(&self) -> Result<crate::Win32::UI::Accessibility::IRawElementProviderSimple, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<ISelectionItemProvider_Vtbl>() == 8 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_ISelectionItemProvider: ISelectionItemProvider_Vtbl = crate::Win32::UI::Accessibility::ISelectionItemProvider_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+Select: thunk_ISelectionItemProvider_Select,
+AddToSelection: thunk_ISelectionItemProvider_AddToSelection,
+RemoveFromSelection: thunk_ISelectionItemProvider_RemoveFromSelection,
+get_IsSelected: thunk_ISelectionItemProvider_get_IsSelected,
+get_SelectionContainer: thunk_ISelectionItemProvider_get_SelectionContainer,
+};
+unsafe extern "system" fn thunk_ISelectionItemProvider_Select(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ISelectionItemProviderImpl>);
+match implementation.Select() { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ISelectionItemProvider_AddToSelection(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ISelectionItemProviderImpl>);
+match implementation.AddToSelection() { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ISelectionItemProvider_RemoveFromSelection(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ISelectionItemProviderImpl>);
+match implementation.RemoveFromSelection() { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ISelectionItemProvider_get_IsSelected(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::core::BOOL) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ISelectionItemProviderImpl>);
+match implementation.get_IsSelected() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ISelectionItemProvider_get_SelectionContainer(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ISelectionItemProviderImpl>);
+match implementation.get_SelectionContainer() { Ok(value) => { *pRetVal = value.into_raw(); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_ISelectionItemProvider(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn ISelectionItemProviderImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_ISelectionItemProvider(mut self, implementation: Box<dyn ISelectionItemProviderImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::ISelectionItemProvider::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_ISelectionItemProvider as *const ISelectionItemProvider_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_ISelectionItemProvider, iids); } self } }
+impl ISelectionItemProvider { pub fn implement(implementation: Box<dyn ISelectionItemProviderImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_ISelectionItemProvider(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_ISelectionProvider: crate::core::GUID = crate::core::GUID { data1: 4220191663, data2: 15327, data3: 18644, data4: [189,54,26,101,121,59,225,104,] };
+#[repr(C)]
+pub struct ISelectionProvider_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub GetSelection: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub get_CanSelectMultiple: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_IsSelectionRequired: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct ISelectionProvider(::core::ptr::NonNull<::core::ffi::c_void>);
+impl ISelectionProvider {
+pub const IID: crate::core::GUID = IID_ISelectionProvider;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &ISelectionProvider_Vtbl { unsafe { &**(self.as_raw() as *const *const ISelectionProvider_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn GetSelection(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetSelection)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CanSelectMultiple(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CanSelectMultiple)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_IsSelectionRequired(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_IsSelectionRequired)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for ISelectionProvider { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for ISelectionProvider { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for ISelectionProvider { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait ISelectionProviderImpl: Send + Sync {
+fn GetSelection(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT>;
+fn get_CanSelectMultiple(&self) -> Result<crate::core::BOOL, crate::core::HRESULT>;
+fn get_IsSelectionRequired(&self) -> Result<crate::core::BOOL, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<ISelectionProvider_Vtbl>() == 6 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_ISelectionProvider: ISelectionProvider_Vtbl = crate::Win32::UI::Accessibility::ISelectionProvider_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+GetSelection: thunk_ISelectionProvider_GetSelection,
+get_CanSelectMultiple: thunk_ISelectionProvider_get_CanSelectMultiple,
+get_IsSelectionRequired: thunk_ISelectionProvider_get_IsSelectionRequired,
+};
+unsafe extern "system" fn thunk_ISelectionProvider_GetSelection(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ISelectionProviderImpl>);
+match implementation.GetSelection() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ISelectionProvider_get_CanSelectMultiple(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::core::BOOL) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ISelectionProviderImpl>);
+match implementation.get_CanSelectMultiple() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ISelectionProvider_get_IsSelectionRequired(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::core::BOOL) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ISelectionProviderImpl>);
+match implementation.get_IsSelectionRequired() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_ISelectionProvider(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn ISelectionProviderImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_ISelectionProvider(mut self, implementation: Box<dyn ISelectionProviderImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::ISelectionProvider::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_ISelectionProvider as *const ISelectionProvider_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_ISelectionProvider, iids); } self } }
+impl ISelectionProvider { pub fn implement(implementation: Box<dyn ISelectionProviderImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_ISelectionProvider(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_ITableItemProvider: crate::core::GUID = crate::core::GUID { data1: 3111341990, data2: 30495, data3: 19832, data4: [156,144,37,23,153,147,73,205,] };
+#[repr(C)]
+pub struct ITableItemProvider_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub GetRowHeaderItems: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub GetColumnHeaderItems: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct ITableItemProvider(::core::ptr::NonNull<::core::ffi::c_void>);
+impl ITableItemProvider {
+pub const IID: crate::core::GUID = IID_ITableItemProvider;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &ITableItemProvider_Vtbl { unsafe { &**(self.as_raw() as *const *const ITableItemProvider_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn GetRowHeaderItems(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetRowHeaderItems)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetColumnHeaderItems(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetColumnHeaderItems)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for ITableItemProvider { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for ITableItemProvider { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for ITableItemProvider { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait ITableItemProviderImpl: Send + Sync {
+fn GetRowHeaderItems(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT>;
+fn GetColumnHeaderItems(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<ITableItemProvider_Vtbl>() == 5 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_ITableItemProvider: ITableItemProvider_Vtbl = crate::Win32::UI::Accessibility::ITableItemProvider_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+GetRowHeaderItems: thunk_ITableItemProvider_GetRowHeaderItems,
+GetColumnHeaderItems: thunk_ITableItemProvider_GetColumnHeaderItems,
+};
+unsafe extern "system" fn thunk_ITableItemProvider_GetRowHeaderItems(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITableItemProviderImpl>);
+match implementation.GetRowHeaderItems() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITableItemProvider_GetColumnHeaderItems(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITableItemProviderImpl>);
+match implementation.GetColumnHeaderItems() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_ITableItemProvider(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn ITableItemProviderImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_ITableItemProvider(mut self, implementation: Box<dyn ITableItemProviderImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::ITableItemProvider::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_ITableItemProvider as *const ITableItemProvider_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_ITableItemProvider, iids); } self } }
+impl ITableItemProvider { pub fn implement(implementation: Box<dyn ITableItemProviderImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_ITableItemProvider(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_ITableProvider: crate::core::GUID = crate::core::GUID { data1: 2626028437, data2: 38835, data3: 18698, data4: [181,42,133,140,194,42,241,102,] };
+#[repr(C)]
+pub struct ITableProvider_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub GetRowHeaders: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub GetColumnHeaders: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub get_RowOrColumnMajor: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::Win32::UI::Accessibility::RowOrColumnMajor) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct ITableProvider(::core::ptr::NonNull<::core::ffi::c_void>);
+impl ITableProvider {
+pub const IID: crate::core::GUID = IID_ITableProvider;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &ITableProvider_Vtbl { unsafe { &**(self.as_raw() as *const *const ITableProvider_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn GetRowHeaders(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetRowHeaders)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetColumnHeaders(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetColumnHeaders)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_RowOrColumnMajor(&self) -> Result<crate::Win32::UI::Accessibility::RowOrColumnMajor, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_RowOrColumnMajor)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for ITableProvider { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for ITableProvider { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for ITableProvider { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait ITableProviderImpl: Send + Sync {
+fn GetRowHeaders(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT>;
+fn GetColumnHeaders(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT>;
+fn get_RowOrColumnMajor(&self) -> Result<crate::Win32::UI::Accessibility::RowOrColumnMajor, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<ITableProvider_Vtbl>() == 6 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_ITableProvider: ITableProvider_Vtbl = crate::Win32::UI::Accessibility::ITableProvider_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+GetRowHeaders: thunk_ITableProvider_GetRowHeaders,
+GetColumnHeaders: thunk_ITableProvider_GetColumnHeaders,
+get_RowOrColumnMajor: thunk_ITableProvider_get_RowOrColumnMajor,
+};
+unsafe extern "system" fn thunk_ITableProvider_GetRowHeaders(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITableProviderImpl>);
+match implementation.GetRowHeaders() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITableProvider_GetColumnHeaders(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITableProviderImpl>);
+match implementation.GetColumnHeaders() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITableProvider_get_RowOrColumnMajor(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::Win32::UI::Accessibility::RowOrColumnMajor) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITableProviderImpl>);
+match implementation.get_RowOrColumnMajor() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_ITableProvider(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn ITableProviderImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_ITableProvider(mut self, implementation: Box<dyn ITableProviderImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::ITableProvider::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_ITableProvider as *const ITableProvider_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_ITableProvider, iids); } self } }
+impl ITableProvider { pub fn implement(implementation: Box<dyn ITableProviderImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_ITableProvider(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_ITextProvider: crate::core::GUID = crate::core::GUID { data1: 898222380, data2: 25587, data3: 17255, data4: [153,187,173,166,83,183,124,242,] };
+#[repr(C)]
+pub struct ITextProvider_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub GetSelection: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub GetVisibleRanges: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub RangeFromChild: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,childElement: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub RangeFromPoint: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,point: crate::Win32::UI::Accessibility::UiaPoint,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_DocumentRange: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_SupportedTextSelection: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::Win32::UI::Accessibility::SupportedTextSelection) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct ITextProvider(::core::ptr::NonNull<::core::ffi::c_void>);
+impl ITextProvider {
+pub const IID: crate::core::GUID = IID_ITextProvider;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &ITextProvider_Vtbl { unsafe { &**(self.as_raw() as *const *const ITextProvider_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn GetSelection(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetSelection)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetVisibleRanges(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetVisibleRanges)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn RangeFromChild(&self,childElement: &crate::Win32::UI::Accessibility::IRawElementProviderSimple) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().RangeFromChild)(self.as_raw(),childElement.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::ITextRangeProvider::from_raw(result__)
+}
+#[inline]
+pub unsafe fn RangeFromPoint(&self,point: crate::Win32::UI::Accessibility::UiaPoint) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().RangeFromPoint)(self.as_raw(),point,&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::ITextRangeProvider::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_DocumentRange(&self) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_DocumentRange)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::ITextRangeProvider::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_SupportedTextSelection(&self) -> Result<crate::Win32::UI::Accessibility::SupportedTextSelection, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_SupportedTextSelection)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for ITextProvider { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for ITextProvider { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for ITextProvider { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait ITextProviderImpl: Send + Sync {
+fn GetSelection(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT>;
+fn GetVisibleRanges(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT>;
+fn RangeFromChild(&self, childElement: Option<&crate::Win32::UI::Accessibility::IRawElementProviderSimple>) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT>;
+fn RangeFromPoint(&self, point: crate::Win32::UI::Accessibility::UiaPoint) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT>;
+fn get_DocumentRange(&self) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT>;
+fn get_SupportedTextSelection(&self) -> Result<crate::Win32::UI::Accessibility::SupportedTextSelection, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<ITextProvider_Vtbl>() == 9 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_ITextProvider: ITextProvider_Vtbl = crate::Win32::UI::Accessibility::ITextProvider_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+GetSelection: thunk_ITextProvider_GetSelection,
+GetVisibleRanges: thunk_ITextProvider_GetVisibleRanges,
+RangeFromChild: thunk_ITextProvider_RangeFromChild,
+RangeFromPoint: thunk_ITextProvider_RangeFromPoint,
+get_DocumentRange: thunk_ITextProvider_get_DocumentRange,
+get_SupportedTextSelection: thunk_ITextProvider_get_SupportedTextSelection,
+};
+unsafe extern "system" fn thunk_ITextProvider_GetSelection(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextProviderImpl>);
+match implementation.GetSelection() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextProvider_GetVisibleRanges(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextProviderImpl>);
+match implementation.GetVisibleRanges() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextProvider_RangeFromChild(this: *mut ::core::ffi::c_void,childElement: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextProviderImpl>);
+let childElement_borrow = if childElement.is_null() { None } else { Some(::core::mem::ManuallyDrop::new(crate::Win32::UI::Accessibility::IRawElementProviderSimple::from_raw(childElement).expect("non-null callback interface"))) };
+match implementation.RangeFromChild(match &childElement_borrow { Some(p) => Some(&**p), None => None }) { Ok(value) => { *pRetVal = value.into_raw(); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextProvider_RangeFromPoint(this: *mut ::core::ffi::c_void,point: crate::Win32::UI::Accessibility::UiaPoint,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextProviderImpl>);
+match implementation.RangeFromPoint(point) { Ok(value) => { *pRetVal = value.into_raw(); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextProvider_get_DocumentRange(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextProviderImpl>);
+match implementation.get_DocumentRange() { Ok(value) => { *pRetVal = value.into_raw(); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextProvider_get_SupportedTextSelection(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::Win32::UI::Accessibility::SupportedTextSelection) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextProviderImpl>);
+match implementation.get_SupportedTextSelection() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_ITextProvider(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn ITextProviderImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_ITextProvider(mut self, implementation: Box<dyn ITextProviderImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::ITextProvider::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_ITextProvider as *const ITextProvider_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_ITextProvider, iids); } self } }
+impl ITextProvider { pub fn implement(implementation: Box<dyn ITextProviderImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_ITextProvider(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_ITextProvider2: crate::core::GUID = crate::core::GUID { data1: 231073517, data2: 15894, data3: 19441, data4: [143,154,169,121,135,139,193,149,] };
+#[repr(C)]
+pub struct ITextProvider2_Vtbl {
+pub base__: crate::Win32::UI::Accessibility::ITextProvider_Vtbl,
+pub RangeFromAnnotation: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,annotationElement: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetCaretRange: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,isActive: *mut crate::core::BOOL,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct ITextProvider2(::core::ptr::NonNull<::core::ffi::c_void>);
+impl ITextProvider2 {
+pub const IID: crate::core::GUID = IID_ITextProvider2;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &ITextProvider2_Vtbl { unsafe { &**(self.as_raw() as *const *const ITextProvider2_Vtbl) } }
+pub fn as_ITextProvider(&self) -> &crate::Win32::UI::Accessibility::ITextProvider { unsafe { &*(self as *const Self as *const crate::Win32::UI::Accessibility::ITextProvider) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn RangeFromAnnotation(&self,annotationElement: &crate::Win32::UI::Accessibility::IRawElementProviderSimple) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().RangeFromAnnotation)(self.as_raw(),annotationElement.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::ITextRangeProvider::from_raw(result__)
+}
+#[inline]
+pub unsafe fn GetCaretRange(&self,isActive: *mut crate::core::BOOL,pRetVal: *mut Option<crate::Win32::UI::Accessibility::ITextRangeProvider>) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().GetCaretRange)(self.as_raw(),isActive,pRetVal as _); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn GetSelection(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().base__.GetSelection)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetVisibleRanges(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().base__.GetVisibleRanges)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn RangeFromChild(&self,childElement: &crate::Win32::UI::Accessibility::IRawElementProviderSimple) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().base__.RangeFromChild)(self.as_raw(),childElement.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::ITextRangeProvider::from_raw(result__)
+}
+#[inline]
+pub unsafe fn RangeFromPoint(&self,point: crate::Win32::UI::Accessibility::UiaPoint) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().base__.RangeFromPoint)(self.as_raw(),point,&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::ITextRangeProvider::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_DocumentRange(&self) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().base__.get_DocumentRange)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::ITextRangeProvider::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_SupportedTextSelection(&self) -> Result<crate::Win32::UI::Accessibility::SupportedTextSelection, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().base__.get_SupportedTextSelection)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.base__.Release)(self.as_raw())}
+}
+impl Clone for ITextProvider2 { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for ITextProvider2 { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for ITextProvider2 { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait ITextProvider2Impl: Send + Sync {
+fn GetSelection(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT>;
+fn GetVisibleRanges(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT>;
+fn RangeFromChild(&self, childElement: Option<&crate::Win32::UI::Accessibility::IRawElementProviderSimple>) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT>;
+fn RangeFromPoint(&self, point: crate::Win32::UI::Accessibility::UiaPoint) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT>;
+fn get_DocumentRange(&self) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT>;
+fn get_SupportedTextSelection(&self) -> Result<crate::Win32::UI::Accessibility::SupportedTextSelection, crate::core::HRESULT>;
+fn RangeFromAnnotation(&self, annotationElement: Option<&crate::Win32::UI::Accessibility::IRawElementProviderSimple>) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT>;
+fn GetCaretRange(&self, isActive: *mut crate::core::BOOL) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<ITextProvider2_Vtbl>() == 11 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_ITextProvider2: ITextProvider2_Vtbl = crate::Win32::UI::Accessibility::ITextProvider2_Vtbl { base__: crate::Win32::UI::Accessibility::ITextProvider_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+GetSelection: thunk_ITextProvider2_GetSelection,
+GetVisibleRanges: thunk_ITextProvider2_GetVisibleRanges,
+RangeFromChild: thunk_ITextProvider2_RangeFromChild,
+RangeFromPoint: thunk_ITextProvider2_RangeFromPoint,
+get_DocumentRange: thunk_ITextProvider2_get_DocumentRange,
+get_SupportedTextSelection: thunk_ITextProvider2_get_SupportedTextSelection,
+},
+RangeFromAnnotation: thunk_ITextProvider2_RangeFromAnnotation,
+GetCaretRange: thunk_ITextProvider2_GetCaretRange,
+};
+unsafe extern "system" fn thunk_ITextProvider2_GetSelection(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextProvider2Impl>);
+match implementation.GetSelection() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextProvider2_GetVisibleRanges(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextProvider2Impl>);
+match implementation.GetVisibleRanges() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextProvider2_RangeFromChild(this: *mut ::core::ffi::c_void,childElement: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextProvider2Impl>);
+let childElement_borrow = if childElement.is_null() { None } else { Some(::core::mem::ManuallyDrop::new(crate::Win32::UI::Accessibility::IRawElementProviderSimple::from_raw(childElement).expect("non-null callback interface"))) };
+match implementation.RangeFromChild(match &childElement_borrow { Some(p) => Some(&**p), None => None }) { Ok(value) => { *pRetVal = value.into_raw(); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextProvider2_RangeFromPoint(this: *mut ::core::ffi::c_void,point: crate::Win32::UI::Accessibility::UiaPoint,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextProvider2Impl>);
+match implementation.RangeFromPoint(point) { Ok(value) => { *pRetVal = value.into_raw(); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextProvider2_get_DocumentRange(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextProvider2Impl>);
+match implementation.get_DocumentRange() { Ok(value) => { *pRetVal = value.into_raw(); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextProvider2_get_SupportedTextSelection(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::Win32::UI::Accessibility::SupportedTextSelection) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextProvider2Impl>);
+match implementation.get_SupportedTextSelection() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextProvider2_RangeFromAnnotation(this: *mut ::core::ffi::c_void,annotationElement: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextProvider2Impl>);
+let annotationElement_borrow = if annotationElement.is_null() { None } else { Some(::core::mem::ManuallyDrop::new(crate::Win32::UI::Accessibility::IRawElementProviderSimple::from_raw(annotationElement).expect("non-null callback interface"))) };
+match implementation.RangeFromAnnotation(match &annotationElement_borrow { Some(p) => Some(&**p), None => None }) { Ok(value) => { *pRetVal = value.into_raw(); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextProvider2_GetCaretRange(this: *mut ::core::ffi::c_void,isActive: *mut crate::core::BOOL,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextProvider2Impl>);
+match implementation.GetCaretRange(isActive) { Ok(value) => { *pRetVal = value.into_raw(); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_ITextProvider2(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn ITextProvider2Impl>)); }
+impl crate::core::ObjectBuilder { pub fn add_ITextProvider2(mut self, implementation: Box<dyn ITextProvider2Impl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::ITextProvider2::IID,crate::Win32::UI::Accessibility::ITextProvider::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_ITextProvider2 as *const ITextProvider2_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_ITextProvider2, iids); } self } }
+impl ITextProvider2 { pub fn implement(implementation: Box<dyn ITextProvider2Impl>) -> Self { let object = crate::core::ObjectBuilder::new().add_ITextProvider2(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_ITextRangeProvider: crate::core::GUID = crate::core::GUID { data1: 1397206395, data2: 50005, data3: 18168, data4: [175,245,144,144,51,88,47,99,] };
+#[repr(C)]
+pub struct ITextRangeProvider_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub Clone: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub Compare: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,range: *mut ::core::ffi::c_void,pRetVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub CompareEndpoints: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,endpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint,targetRange: *mut ::core::ffi::c_void,targetEndpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint,pRetVal: *mut i32) -> crate::core::HRESULT,
+pub ExpandToEnclosingUnit: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,unit: crate::Win32::UI::Accessibility::TextUnit) -> crate::core::HRESULT,
+pub FindAttribute: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,attributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID,val: crate::Win32::System::Variant::VARIANT,backward: crate::core::BOOL,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub FindText: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,text: *mut u16,backward: crate::core::BOOL,ignoreCase: crate::core::BOOL,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetAttributeValue: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,attributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID,pRetVal: *mut crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+pub GetBoundingRectangles: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub GetEnclosingElement: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetText: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,maxLength: i32,pRetVal: *mut *mut u16) -> crate::core::HRESULT,
+pub Move: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,unit: crate::Win32::UI::Accessibility::TextUnit,count: i32,pRetVal: *mut i32) -> crate::core::HRESULT,
+pub MoveEndpointByUnit: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,endpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint,unit: crate::Win32::UI::Accessibility::TextUnit,count: i32,pRetVal: *mut i32) -> crate::core::HRESULT,
+pub MoveEndpointByRange: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,endpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint,targetRange: *mut ::core::ffi::c_void,targetEndpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint) -> crate::core::HRESULT,
+pub Select: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub AddToSelection: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub RemoveFromSelection: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub ScrollIntoView: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,alignToTop: crate::core::BOOL) -> crate::core::HRESULT,
+pub GetChildren: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct ITextRangeProvider(::core::ptr::NonNull<::core::ffi::c_void>);
+impl ITextRangeProvider {
+pub const IID: crate::core::GUID = IID_ITextRangeProvider;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &ITextRangeProvider_Vtbl { unsafe { &**(self.as_raw() as *const *const ITextRangeProvider_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn Clone(&self) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().Clone)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::ITextRangeProvider::from_raw(result__)
+}
+#[inline]
+pub unsafe fn Compare(&self,range: &crate::Win32::UI::Accessibility::ITextRangeProvider) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().Compare)(self.as_raw(),range.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn CompareEndpoints(&self,endpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint,targetRange: &crate::Win32::UI::Accessibility::ITextRangeProvider,targetEndpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint) -> Result<i32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CompareEndpoints)(self.as_raw(),endpoint,targetRange.as_raw(),targetEndpoint,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn ExpandToEnclosingUnit(&self,unit: crate::Win32::UI::Accessibility::TextUnit) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().ExpandToEnclosingUnit)(self.as_raw(),unit); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn FindAttribute(&self,attributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID,val: crate::Win32::System::Variant::VARIANT,backward: bool) -> Result<Option<crate::Win32::UI::Accessibility::ITextRangeProvider>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().FindAttribute)(self.as_raw(),attributeId,val,crate::core::BOOL(backward as i32),&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::ITextRangeProvider::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn FindText(&self,text: *mut u16,backward: bool,ignoreCase: bool) -> Result<Option<crate::Win32::UI::Accessibility::ITextRangeProvider>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().FindText)(self.as_raw(),text,crate::core::BOOL(backward as i32),crate::core::BOOL(ignoreCase as i32),&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::ITextRangeProvider::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn GetAttributeValue(&self,attributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID) -> Result<crate::Win32::System::Variant::VARIANT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetAttributeValue)(self.as_raw(),attributeId,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetBoundingRectangles(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetBoundingRectangles)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetEnclosingElement(&self) -> Result<crate::Win32::UI::Accessibility::IRawElementProviderSimple, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetEnclosingElement)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IRawElementProviderSimple::from_raw(result__)
+}
+#[inline]
+pub unsafe fn GetText(&self,maxLength: i32) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetText)(self.as_raw(),maxLength,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn Move(&self,unit: crate::Win32::UI::Accessibility::TextUnit,count: i32) -> Result<i32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().Move)(self.as_raw(),unit,count,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn MoveEndpointByUnit(&self,endpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint,unit: crate::Win32::UI::Accessibility::TextUnit,count: i32) -> Result<i32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().MoveEndpointByUnit)(self.as_raw(),endpoint,unit,count,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn MoveEndpointByRange(&self,endpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint,targetRange: &crate::Win32::UI::Accessibility::ITextRangeProvider,targetEndpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().MoveEndpointByRange)(self.as_raw(),endpoint,targetRange.as_raw(),targetEndpoint); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn Select(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().Select)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn AddToSelection(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().AddToSelection)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn RemoveFromSelection(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().RemoveFromSelection)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn ScrollIntoView(&self,alignToTop: bool) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().ScrollIntoView)(self.as_raw(),crate::core::BOOL(alignToTop as i32)); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn GetChildren(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetChildren)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for ITextRangeProvider { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for ITextRangeProvider { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for ITextRangeProvider { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait ITextRangeProviderImpl: Send + Sync {
+fn Clone(&self) -> Result<crate::Win32::UI::Accessibility::ITextRangeProvider, crate::core::HRESULT>;
+fn Compare(&self, range: Option<&crate::Win32::UI::Accessibility::ITextRangeProvider>) -> Result<crate::core::BOOL, crate::core::HRESULT>;
+fn CompareEndpoints(&self, endpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint, targetRange: Option<&crate::Win32::UI::Accessibility::ITextRangeProvider>, targetEndpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint) -> Result<i32, crate::core::HRESULT>;
+fn ExpandToEnclosingUnit(&self, unit: crate::Win32::UI::Accessibility::TextUnit) -> Result<(), crate::core::HRESULT>;
+fn FindAttribute(&self, attributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID, val: crate::Win32::System::Variant::VARIANT, backward: crate::core::BOOL) -> Result<Option<crate::Win32::UI::Accessibility::ITextRangeProvider>, crate::core::HRESULT>;
+fn FindText(&self, text: *mut u16, backward: crate::core::BOOL, ignoreCase: crate::core::BOOL) -> Result<Option<crate::Win32::UI::Accessibility::ITextRangeProvider>, crate::core::HRESULT>;
+fn GetAttributeValue(&self, attributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID) -> Result<crate::Win32::System::Variant::VARIANT, crate::core::HRESULT>;
+fn GetBoundingRectangles(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT>;
+fn GetEnclosingElement(&self) -> Result<crate::Win32::UI::Accessibility::IRawElementProviderSimple, crate::core::HRESULT>;
+fn GetText(&self, maxLength: i32) -> Result<*mut u16, crate::core::HRESULT>;
+fn Move(&self, unit: crate::Win32::UI::Accessibility::TextUnit, count: i32) -> Result<i32, crate::core::HRESULT>;
+fn MoveEndpointByUnit(&self, endpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint, unit: crate::Win32::UI::Accessibility::TextUnit, count: i32) -> Result<i32, crate::core::HRESULT>;
+fn MoveEndpointByRange(&self, endpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint, targetRange: Option<&crate::Win32::UI::Accessibility::ITextRangeProvider>, targetEndpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint) -> Result<(), crate::core::HRESULT>;
+fn Select(&self) -> Result<(), crate::core::HRESULT>;
+fn AddToSelection(&self) -> Result<(), crate::core::HRESULT>;
+fn RemoveFromSelection(&self) -> Result<(), crate::core::HRESULT>;
+fn ScrollIntoView(&self, alignToTop: crate::core::BOOL) -> Result<(), crate::core::HRESULT>;
+fn GetChildren(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<ITextRangeProvider_Vtbl>() == 21 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_ITextRangeProvider: ITextRangeProvider_Vtbl = crate::Win32::UI::Accessibility::ITextRangeProvider_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+Clone: thunk_ITextRangeProvider_Clone,
+Compare: thunk_ITextRangeProvider_Compare,
+CompareEndpoints: thunk_ITextRangeProvider_CompareEndpoints,
+ExpandToEnclosingUnit: thunk_ITextRangeProvider_ExpandToEnclosingUnit,
+FindAttribute: thunk_ITextRangeProvider_FindAttribute,
+FindText: thunk_ITextRangeProvider_FindText,
+GetAttributeValue: thunk_ITextRangeProvider_GetAttributeValue,
+GetBoundingRectangles: thunk_ITextRangeProvider_GetBoundingRectangles,
+GetEnclosingElement: thunk_ITextRangeProvider_GetEnclosingElement,
+GetText: thunk_ITextRangeProvider_GetText,
+Move: thunk_ITextRangeProvider_Move,
+MoveEndpointByUnit: thunk_ITextRangeProvider_MoveEndpointByUnit,
+MoveEndpointByRange: thunk_ITextRangeProvider_MoveEndpointByRange,
+Select: thunk_ITextRangeProvider_Select,
+AddToSelection: thunk_ITextRangeProvider_AddToSelection,
+RemoveFromSelection: thunk_ITextRangeProvider_RemoveFromSelection,
+ScrollIntoView: thunk_ITextRangeProvider_ScrollIntoView,
+GetChildren: thunk_ITextRangeProvider_GetChildren,
+};
+unsafe extern "system" fn thunk_ITextRangeProvider_Clone(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+match implementation.Clone() { Ok(value) => { *pRetVal = value.into_raw(); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_Compare(this: *mut ::core::ffi::c_void,range: *mut ::core::ffi::c_void,pRetVal: *mut crate::core::BOOL) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+let range_borrow = if range.is_null() { None } else { Some(::core::mem::ManuallyDrop::new(crate::Win32::UI::Accessibility::ITextRangeProvider::from_raw(range).expect("non-null callback interface"))) };
+match implementation.Compare(match &range_borrow { Some(p) => Some(&**p), None => None }) { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_CompareEndpoints(this: *mut ::core::ffi::c_void,endpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint,targetRange: *mut ::core::ffi::c_void,targetEndpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint,pRetVal: *mut i32) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+let targetRange_borrow = if targetRange.is_null() { None } else { Some(::core::mem::ManuallyDrop::new(crate::Win32::UI::Accessibility::ITextRangeProvider::from_raw(targetRange).expect("non-null callback interface"))) };
+match implementation.CompareEndpoints(endpoint,match &targetRange_borrow { Some(p) => Some(&**p), None => None },targetEndpoint) { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_ExpandToEnclosingUnit(this: *mut ::core::ffi::c_void,unit: crate::Win32::UI::Accessibility::TextUnit) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+match implementation.ExpandToEnclosingUnit(unit) { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_FindAttribute(this: *mut ::core::ffi::c_void,attributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID,val: crate::Win32::System::Variant::VARIANT,backward: crate::core::BOOL,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+match implementation.FindAttribute(attributeId,val,backward) { Ok(value) => { *pRetVal = value.map_or(::core::ptr::null_mut(), |v| v.into_raw()); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_FindText(this: *mut ::core::ffi::c_void,text: *mut u16,backward: crate::core::BOOL,ignoreCase: crate::core::BOOL,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+match implementation.FindText(text,backward,ignoreCase) { Ok(value) => { *pRetVal = value.map_or(::core::ptr::null_mut(), |v| v.into_raw()); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_GetAttributeValue(this: *mut ::core::ffi::c_void,attributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID,pRetVal: *mut crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+match implementation.GetAttributeValue(attributeId) { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_GetBoundingRectangles(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+match implementation.GetBoundingRectangles() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_GetEnclosingElement(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+match implementation.GetEnclosingElement() { Ok(value) => { *pRetVal = value.into_raw(); crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_GetText(this: *mut ::core::ffi::c_void,maxLength: i32,pRetVal: *mut *mut u16) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+match implementation.GetText(maxLength) { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_Move(this: *mut ::core::ffi::c_void,unit: crate::Win32::UI::Accessibility::TextUnit,count: i32,pRetVal: *mut i32) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+match implementation.Move(unit,count) { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_MoveEndpointByUnit(this: *mut ::core::ffi::c_void,endpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint,unit: crate::Win32::UI::Accessibility::TextUnit,count: i32,pRetVal: *mut i32) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+match implementation.MoveEndpointByUnit(endpoint,unit,count) { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_MoveEndpointByRange(this: *mut ::core::ffi::c_void,endpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint,targetRange: *mut ::core::ffi::c_void,targetEndpoint: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+let targetRange_borrow = if targetRange.is_null() { None } else { Some(::core::mem::ManuallyDrop::new(crate::Win32::UI::Accessibility::ITextRangeProvider::from_raw(targetRange).expect("non-null callback interface"))) };
+match implementation.MoveEndpointByRange(endpoint,match &targetRange_borrow { Some(p) => Some(&**p), None => None },targetEndpoint) { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_Select(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+match implementation.Select() { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_AddToSelection(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+match implementation.AddToSelection() { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_RemoveFromSelection(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+match implementation.RemoveFromSelection() { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_ScrollIntoView(this: *mut ::core::ffi::c_void,alignToTop: crate::core::BOOL) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+match implementation.ScrollIntoView(alignToTop) { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_ITextRangeProvider_GetChildren(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn ITextRangeProviderImpl>);
+match implementation.GetChildren() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_ITextRangeProvider(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn ITextRangeProviderImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_ITextRangeProvider(mut self, implementation: Box<dyn ITextRangeProviderImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::ITextRangeProvider::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_ITextRangeProvider as *const ITextRangeProvider_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_ITextRangeProvider, iids); } self } }
+impl ITextRangeProvider { pub fn implement(implementation: Box<dyn ITextRangeProviderImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_ITextRangeProvider(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_IToggleProvider: crate::core::GUID = crate::core::GUID { data1: 1456475088, data2: 50420, data3: 17212, data4: [168,54,26,82,165,126,8,146,] };
+#[repr(C)]
+pub struct IToggleProvider_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub Toggle: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_ToggleState: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::Win32::UI::Accessibility::ToggleState) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IToggleProvider(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IToggleProvider {
+pub const IID: crate::core::GUID = IID_IToggleProvider;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IToggleProvider_Vtbl { unsafe { &**(self.as_raw() as *const *const IToggleProvider_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn Toggle(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().Toggle)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn get_ToggleState(&self) -> Result<crate::Win32::UI::Accessibility::ToggleState, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ToggleState)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IToggleProvider { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IToggleProvider { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IToggleProvider { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait IToggleProviderImpl: Send + Sync {
+fn Toggle(&self) -> Result<(), crate::core::HRESULT>;
+fn get_ToggleState(&self) -> Result<crate::Win32::UI::Accessibility::ToggleState, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<IToggleProvider_Vtbl>() == 5 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IToggleProvider: IToggleProvider_Vtbl = crate::Win32::UI::Accessibility::IToggleProvider_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+Toggle: thunk_IToggleProvider_Toggle,
+get_ToggleState: thunk_IToggleProvider_get_ToggleState,
+};
+unsafe extern "system" fn thunk_IToggleProvider_Toggle(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IToggleProviderImpl>);
+match implementation.Toggle() { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IToggleProvider_get_ToggleState(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::Win32::UI::Accessibility::ToggleState) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IToggleProviderImpl>);
+match implementation.get_ToggleState() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_IToggleProvider(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IToggleProviderImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_IToggleProvider(mut self, implementation: Box<dyn IToggleProviderImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::IToggleProvider::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IToggleProvider as *const IToggleProvider_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IToggleProvider, iids); } self } }
+impl IToggleProvider { pub fn implement(implementation: Box<dyn IToggleProviderImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IToggleProvider(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+pub const IID_IUIAutomation: crate::core::GUID = crate::core::GUID { data1: 818668925, data2: 55760, data3: 17706, data4: [171,19,122,197,172,72,37,238,] };
+#[repr(C)]
+pub struct IUIAutomation_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub CompareElements: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,el1: *mut ::core::ffi::c_void,el2: *mut ::core::ffi::c_void,areSame: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub CompareRuntimeIds: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,runtimeId1: *const crate::Win32::System::Com::SAFEARRAY,runtimeId2: *const crate::Win32::System::Com::SAFEARRAY,areSame: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub GetRootElement: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,root: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub ElementFromHandle: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,hwnd: crate::Win32::Foundation::HWND,element: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub ElementFromPoint: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pt: crate::Win32::Foundation::POINT,element: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetFocusedElement: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetRootElementBuildCache: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,cacheRequest: *mut ::core::ffi::c_void,root: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub ElementFromHandleBuildCache: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,hwnd: crate::Win32::Foundation::HWND,cacheRequest: *mut ::core::ffi::c_void,element: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub ElementFromPointBuildCache: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pt: crate::Win32::Foundation::POINT,cacheRequest: *mut ::core::ffi::c_void,element: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetFocusedElementBuildCache: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,cacheRequest: *mut ::core::ffi::c_void,element: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub CreateTreeWalker: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pCondition: *mut ::core::ffi::c_void,walker: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_ControlViewWalker: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,walker: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_ContentViewWalker: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,walker: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_RawViewWalker: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,walker: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_RawViewCondition: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,condition: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_ControlViewCondition: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,condition: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_ContentViewCondition: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,condition: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub CreateCacheRequest: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,cacheRequest: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub CreateTrueCondition: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,newCondition: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub CreateFalseCondition: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,newCondition: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub CreatePropertyCondition: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,value: crate::Win32::System::Variant::VARIANT,newCondition: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub CreatePropertyConditionEx: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,value: crate::Win32::System::Variant::VARIANT,flags: crate::Win32::UI::Accessibility::PropertyConditionFlags,newCondition: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub CreateAndCondition: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,condition1: *mut ::core::ffi::c_void,condition2: *mut ::core::ffi::c_void,newCondition: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub CreateAndConditionFromArray: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,conditions: *const crate::Win32::System::Com::SAFEARRAY,newCondition: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub CreateAndConditionFromNativeArray: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,conditions: *const *mut ::core::ffi::c_void,conditionCount: i32,newCondition: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub CreateOrCondition: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,condition1: *mut ::core::ffi::c_void,condition2: *mut ::core::ffi::c_void,newCondition: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub CreateOrConditionFromArray: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,conditions: *const crate::Win32::System::Com::SAFEARRAY,newCondition: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub CreateOrConditionFromNativeArray: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,conditions: *const *mut ::core::ffi::c_void,conditionCount: i32,newCondition: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub CreateNotCondition: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,condition: *mut ::core::ffi::c_void,newCondition: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub AddAutomationEventHandler: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,eventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID,element: *mut ::core::ffi::c_void,scope: crate::Win32::UI::Accessibility::TreeScope,cacheRequest: *mut ::core::ffi::c_void,handler: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub RemoveAutomationEventHandler: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,eventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID,element: *mut ::core::ffi::c_void,handler: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub AddPropertyChangedEventHandlerNativeArray: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,scope: crate::Win32::UI::Accessibility::TreeScope,cacheRequest: *mut ::core::ffi::c_void,handler: *mut ::core::ffi::c_void,propertyArray: *const crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,propertyCount: i32) -> crate::core::HRESULT,
+pub AddPropertyChangedEventHandler: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,scope: crate::Win32::UI::Accessibility::TreeScope,cacheRequest: *mut ::core::ffi::c_void,handler: *mut ::core::ffi::c_void,propertyArray: *const crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub RemovePropertyChangedEventHandler: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,handler: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub AddStructureChangedEventHandler: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,scope: crate::Win32::UI::Accessibility::TreeScope,cacheRequest: *mut ::core::ffi::c_void,handler: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub RemoveStructureChangedEventHandler: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,handler: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub AddFocusChangedEventHandler: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,cacheRequest: *mut ::core::ffi::c_void,handler: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub RemoveFocusChangedEventHandler: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,handler: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub RemoveAllEventHandlers: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub IntNativeArrayToSafeArray: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,array: *const i32,arrayCount: i32,safeArray: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub IntSafeArrayToNativeArray: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,intArray: *const crate::Win32::System::Com::SAFEARRAY,array: *mut *mut i32,arrayCount: *mut i32) -> crate::core::HRESULT,
+pub RectToVariant: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,rc: crate::Win32::Foundation::RECT,var: *mut crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+pub VariantToRect: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,var: crate::Win32::System::Variant::VARIANT,rc: *mut crate::Win32::Foundation::RECT) -> crate::core::HRESULT,
+pub SafeArrayToRectNativeArray: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,rects: *const crate::Win32::System::Com::SAFEARRAY,rectArray: *mut *mut crate::Win32::Foundation::RECT,rectArrayCount: *mut i32) -> crate::core::HRESULT,
+pub CreateProxyFactoryEntry: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,factory: *mut ::core::ffi::c_void,factoryEntry: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_ProxyFactoryMapping: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,factoryMapping: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetPropertyProgrammaticName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,property: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,name: *mut *mut u16) -> crate::core::HRESULT,
+pub GetPatternProgrammaticName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pattern: crate::Win32::UI::Accessibility::UIA_PATTERN_ID,name: *mut *mut u16) -> crate::core::HRESULT,
+pub PollForPotentialSupportedPatterns: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pElement: *mut ::core::ffi::c_void,patternIds: *mut *mut crate::Win32::System::Com::SAFEARRAY,patternNames: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub PollForPotentialSupportedProperties: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pElement: *mut ::core::ffi::c_void,propertyIds: *mut *mut crate::Win32::System::Com::SAFEARRAY,propertyNames: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub CheckNotSupported: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,value: crate::Win32::System::Variant::VARIANT,isNotSupported: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_ReservedNotSupportedValue: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,notSupportedValue: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_ReservedMixedAttributeValue: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,mixedAttributeValue: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub ElementFromIAccessible: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,accessible: *mut ::core::ffi::c_void,childId: i32,element: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub ElementFromIAccessibleBuildCache: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,accessible: *mut ::core::ffi::c_void,childId: i32,cacheRequest: *mut ::core::ffi::c_void,element: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IUIAutomation(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IUIAutomation {
+pub const IID: crate::core::GUID = IID_IUIAutomation;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IUIAutomation_Vtbl { unsafe { &**(self.as_raw() as *const *const IUIAutomation_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn CompareElements(&self,el1: &crate::Win32::UI::Accessibility::IUIAutomationElement,el2: &crate::Win32::UI::Accessibility::IUIAutomationElement) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CompareElements)(self.as_raw(),el1.as_raw(),el2.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn CompareRuntimeIds(&self,runtimeId1: *const crate::Win32::System::Com::SAFEARRAY,runtimeId2: *const crate::Win32::System::Com::SAFEARRAY) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CompareRuntimeIds)(self.as_raw(),runtimeId1,runtimeId2,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetRootElement(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetRootElement)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn ElementFromHandle(&self,hwnd: crate::Win32::Foundation::HWND) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().ElementFromHandle)(self.as_raw(),hwnd,&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn ElementFromPoint(&self,pt: crate::Win32::Foundation::POINT) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().ElementFromPoint)(self.as_raw(),pt,&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn GetFocusedElement(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetFocusedElement)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn GetRootElementBuildCache(&self,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetRootElementBuildCache)(self.as_raw(),cacheRequest.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn ElementFromHandleBuildCache(&self,hwnd: crate::Win32::Foundation::HWND,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().ElementFromHandleBuildCache)(self.as_raw(),hwnd,cacheRequest.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn ElementFromPointBuildCache(&self,pt: crate::Win32::Foundation::POINT,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().ElementFromPointBuildCache)(self.as_raw(),pt,cacheRequest.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn GetFocusedElementBuildCache(&self,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetFocusedElementBuildCache)(self.as_raw(),cacheRequest.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn CreateTreeWalker(&self,pCondition: &crate::Win32::UI::Accessibility::IUIAutomationCondition) -> Result<crate::Win32::UI::Accessibility::IUIAutomationTreeWalker, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CreateTreeWalker)(self.as_raw(),pCondition.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationTreeWalker::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_ControlViewWalker(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationTreeWalker, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ControlViewWalker)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationTreeWalker::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_ContentViewWalker(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationTreeWalker, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ContentViewWalker)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationTreeWalker::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_RawViewWalker(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationTreeWalker, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_RawViewWalker)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationTreeWalker::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_RawViewCondition(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCondition, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_RawViewCondition)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCondition::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_ControlViewCondition(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCondition, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ControlViewCondition)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCondition::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_ContentViewCondition(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCondition, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ContentViewCondition)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCondition::from_raw(result__)
+}
+#[inline]
+pub unsafe fn CreateCacheRequest(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCacheRequest, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CreateCacheRequest)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCacheRequest::from_raw(result__)
+}
+#[inline]
+pub unsafe fn CreateTrueCondition(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCondition, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CreateTrueCondition)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCondition::from_raw(result__)
+}
+#[inline]
+pub unsafe fn CreateFalseCondition(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCondition, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CreateFalseCondition)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCondition::from_raw(result__)
+}
+#[inline]
+pub unsafe fn CreatePropertyCondition(&self,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,value: crate::Win32::System::Variant::VARIANT) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCondition, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CreatePropertyCondition)(self.as_raw(),propertyId,value,&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCondition::from_raw(result__)
+}
+#[inline]
+pub unsafe fn CreatePropertyConditionEx(&self,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,value: crate::Win32::System::Variant::VARIANT,flags: crate::Win32::UI::Accessibility::PropertyConditionFlags) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCondition, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CreatePropertyConditionEx)(self.as_raw(),propertyId,value,flags,&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCondition::from_raw(result__)
+}
+#[inline]
+pub unsafe fn CreateAndCondition(&self,condition1: &crate::Win32::UI::Accessibility::IUIAutomationCondition,condition2: &crate::Win32::UI::Accessibility::IUIAutomationCondition) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCondition, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CreateAndCondition)(self.as_raw(),condition1.as_raw(),condition2.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCondition::from_raw(result__)
+}
+#[inline]
+pub unsafe fn CreateAndConditionFromArray(&self,conditions: *const crate::Win32::System::Com::SAFEARRAY) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCondition, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CreateAndConditionFromArray)(self.as_raw(),conditions,&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCondition::from_raw(result__)
+}
+#[inline]
+pub unsafe fn CreateAndConditionFromNativeArray(&self,conditions: &[Option<crate::Win32::UI::Accessibility::IUIAutomationCondition>]) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCondition, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CreateAndConditionFromNativeArray)(self.as_raw(),conditions.as_ptr() as _,conditions.len() as _,&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCondition::from_raw(result__)
+}
+#[inline]
+pub unsafe fn CreateOrCondition(&self,condition1: &crate::Win32::UI::Accessibility::IUIAutomationCondition,condition2: &crate::Win32::UI::Accessibility::IUIAutomationCondition) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCondition, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CreateOrCondition)(self.as_raw(),condition1.as_raw(),condition2.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCondition::from_raw(result__)
+}
+#[inline]
+pub unsafe fn CreateOrConditionFromArray(&self,conditions: *const crate::Win32::System::Com::SAFEARRAY) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCondition, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CreateOrConditionFromArray)(self.as_raw(),conditions,&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCondition::from_raw(result__)
+}
+#[inline]
+pub unsafe fn CreateOrConditionFromNativeArray(&self,conditions: &[Option<crate::Win32::UI::Accessibility::IUIAutomationCondition>]) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCondition, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CreateOrConditionFromNativeArray)(self.as_raw(),conditions.as_ptr() as _,conditions.len() as _,&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCondition::from_raw(result__)
+}
+#[inline]
+pub unsafe fn CreateNotCondition(&self,condition: &crate::Win32::UI::Accessibility::IUIAutomationCondition) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCondition, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CreateNotCondition)(self.as_raw(),condition.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCondition::from_raw(result__)
+}
+#[inline]
+pub unsafe fn AddAutomationEventHandler(&self,eventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID,element: &crate::Win32::UI::Accessibility::IUIAutomationElement,scope: crate::Win32::UI::Accessibility::TreeScope,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest,handler: &crate::Win32::UI::Accessibility::IUIAutomationEventHandler) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().AddAutomationEventHandler)(self.as_raw(),eventId,element.as_raw(),scope,cacheRequest.as_raw(),handler.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn RemoveAutomationEventHandler(&self,eventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID,element: &crate::Win32::UI::Accessibility::IUIAutomationElement,handler: &crate::Win32::UI::Accessibility::IUIAutomationEventHandler) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().RemoveAutomationEventHandler)(self.as_raw(),eventId,element.as_raw(),handler.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn AddPropertyChangedEventHandlerNativeArray(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement,scope: crate::Win32::UI::Accessibility::TreeScope,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest,handler: &crate::Win32::UI::Accessibility::IUIAutomationPropertyChangedEventHandler,propertyArray: &[crate::Win32::UI::Accessibility::UIA_PROPERTY_ID]) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().AddPropertyChangedEventHandlerNativeArray)(self.as_raw(),element.as_raw(),scope,cacheRequest.as_raw(),handler.as_raw(),propertyArray.as_ptr() as _,propertyArray.len() as _); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn AddPropertyChangedEventHandler(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement,scope: crate::Win32::UI::Accessibility::TreeScope,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest,handler: &crate::Win32::UI::Accessibility::IUIAutomationPropertyChangedEventHandler,propertyArray: *const crate::Win32::System::Com::SAFEARRAY) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().AddPropertyChangedEventHandler)(self.as_raw(),element.as_raw(),scope,cacheRequest.as_raw(),handler.as_raw(),propertyArray); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn RemovePropertyChangedEventHandler(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement,handler: &crate::Win32::UI::Accessibility::IUIAutomationPropertyChangedEventHandler) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().RemovePropertyChangedEventHandler)(self.as_raw(),element.as_raw(),handler.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn AddStructureChangedEventHandler(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement,scope: crate::Win32::UI::Accessibility::TreeScope,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest,handler: &crate::Win32::UI::Accessibility::IUIAutomationStructureChangedEventHandler) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().AddStructureChangedEventHandler)(self.as_raw(),element.as_raw(),scope,cacheRequest.as_raw(),handler.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn RemoveStructureChangedEventHandler(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement,handler: &crate::Win32::UI::Accessibility::IUIAutomationStructureChangedEventHandler) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().RemoveStructureChangedEventHandler)(self.as_raw(),element.as_raw(),handler.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn AddFocusChangedEventHandler(&self,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest,handler: &crate::Win32::UI::Accessibility::IUIAutomationFocusChangedEventHandler) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().AddFocusChangedEventHandler)(self.as_raw(),cacheRequest.as_raw(),handler.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn RemoveFocusChangedEventHandler(&self,handler: &crate::Win32::UI::Accessibility::IUIAutomationFocusChangedEventHandler) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().RemoveFocusChangedEventHandler)(self.as_raw(),handler.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn RemoveAllEventHandlers(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().RemoveAllEventHandlers)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn IntNativeArrayToSafeArray(&self,array: &[i32]) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().IntNativeArrayToSafeArray)(self.as_raw(),array.as_ptr() as _,array.len() as _,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn IntSafeArrayToNativeArray(&self,intArray: *const crate::Win32::System::Com::SAFEARRAY,array: *mut *mut i32,arrayCount: *mut i32) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().IntSafeArrayToNativeArray)(self.as_raw(),intArray,array,arrayCount); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn RectToVariant(&self,rc: crate::Win32::Foundation::RECT) -> Result<crate::Win32::System::Variant::VARIANT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().RectToVariant)(self.as_raw(),rc,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn VariantToRect(&self,var: crate::Win32::System::Variant::VARIANT) -> Result<crate::Win32::Foundation::RECT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().VariantToRect)(self.as_raw(),var,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn SafeArrayToRectNativeArray(&self,rects: *const crate::Win32::System::Com::SAFEARRAY,rectArray: *mut *mut crate::Win32::Foundation::RECT,rectArrayCount: *mut i32) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().SafeArrayToRectNativeArray)(self.as_raw(),rects,rectArray,rectArrayCount); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn CreateProxyFactoryEntry(&self,factory: &crate::Win32::UI::Accessibility::IUIAutomationProxyFactory) -> Result<crate::Win32::UI::Accessibility::IUIAutomationProxyFactoryEntry, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CreateProxyFactoryEntry)(self.as_raw(),factory.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationProxyFactoryEntry::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_ProxyFactoryMapping(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationProxyFactoryMapping, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ProxyFactoryMapping)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationProxyFactoryMapping::from_raw(result__)
+}
+#[inline]
+pub unsafe fn GetPropertyProgrammaticName(&self,property: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetPropertyProgrammaticName)(self.as_raw(),property,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetPatternProgrammaticName(&self,pattern: crate::Win32::UI::Accessibility::UIA_PATTERN_ID) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetPatternProgrammaticName)(self.as_raw(),pattern,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn PollForPotentialSupportedPatterns(&self,pElement: &crate::Win32::UI::Accessibility::IUIAutomationElement,patternIds: *mut *mut crate::Win32::System::Com::SAFEARRAY,patternNames: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().PollForPotentialSupportedPatterns)(self.as_raw(),pElement.as_raw(),patternIds,patternNames); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn PollForPotentialSupportedProperties(&self,pElement: &crate::Win32::UI::Accessibility::IUIAutomationElement,propertyIds: *mut *mut crate::Win32::System::Com::SAFEARRAY,propertyNames: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().PollForPotentialSupportedProperties)(self.as_raw(),pElement.as_raw(),propertyIds,propertyNames); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn CheckNotSupported(&self,value: crate::Win32::System::Variant::VARIANT) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CheckNotSupported)(self.as_raw(),value,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_ReservedNotSupportedValue(&self) -> Result<crate::Win32::System::Com::IUnknown, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ReservedNotSupportedValue)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::System::Com::IUnknown::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_ReservedMixedAttributeValue(&self) -> Result<crate::Win32::System::Com::IUnknown, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ReservedMixedAttributeValue)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::System::Com::IUnknown::from_raw(result__)
+}
+#[inline]
+pub unsafe fn ElementFromIAccessible(&self,accessible: &crate::Win32::UI::Accessibility::IAccessible,childId: i32) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().ElementFromIAccessible)(self.as_raw(),accessible.as_raw(),childId,&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn ElementFromIAccessibleBuildCache(&self,accessible: &crate::Win32::UI::Accessibility::IAccessible,childId: i32,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().ElementFromIAccessibleBuildCache)(self.as_raw(),accessible.as_raw(),childId,cacheRequest.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IUIAutomation { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IUIAutomation { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IUIAutomation { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IUIAutomationCacheRequest: crate::core::GUID = crate::core::GUID { data1: 3005911733, data2: 48165, data3: 16504, data4: [156,8,215,238,149,196,142,3,] };
+#[repr(C)]
+pub struct IUIAutomationCacheRequest_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub AddProperty: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID) -> crate::core::HRESULT,
+pub AddPattern: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,patternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID) -> crate::core::HRESULT,
+pub Clone: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,clonedRequest: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_TreeScope: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,scope: *mut crate::Win32::UI::Accessibility::TreeScope) -> crate::core::HRESULT,
+pub put_TreeScope: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,scope: crate::Win32::UI::Accessibility::TreeScope) -> crate::core::HRESULT,
+pub get_TreeFilter: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,filter: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub put_TreeFilter: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,filter: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_AutomationElementMode: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,mode: *mut crate::Win32::UI::Accessibility::AutomationElementMode) -> crate::core::HRESULT,
+pub put_AutomationElementMode: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,mode: crate::Win32::UI::Accessibility::AutomationElementMode) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IUIAutomationCacheRequest(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IUIAutomationCacheRequest {
+pub const IID: crate::core::GUID = IID_IUIAutomationCacheRequest;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IUIAutomationCacheRequest_Vtbl { unsafe { &**(self.as_raw() as *const *const IUIAutomationCacheRequest_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn AddProperty(&self,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().AddProperty)(self.as_raw(),propertyId); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn AddPattern(&self,patternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().AddPattern)(self.as_raw(),patternId); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn Clone(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCacheRequest, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().Clone)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCacheRequest::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_TreeScope(&self) -> Result<crate::Win32::UI::Accessibility::TreeScope, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_TreeScope)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn put_TreeScope(&self,scope: crate::Win32::UI::Accessibility::TreeScope) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().put_TreeScope)(self.as_raw(),scope); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn get_TreeFilter(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCondition, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_TreeFilter)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCondition::from_raw(result__)
+}
+#[inline]
+pub unsafe fn put_TreeFilter(&self,filter: &crate::Win32::UI::Accessibility::IUIAutomationCondition) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().put_TreeFilter)(self.as_raw(),filter.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn get_AutomationElementMode(&self) -> Result<crate::Win32::UI::Accessibility::AutomationElementMode, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_AutomationElementMode)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn put_AutomationElementMode(&self,mode: crate::Win32::UI::Accessibility::AutomationElementMode) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().put_AutomationElementMode)(self.as_raw(),mode); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IUIAutomationCacheRequest { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IUIAutomationCacheRequest { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IUIAutomationCacheRequest { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IUIAutomationCondition: crate::core::GUID = crate::core::GUID { data1: 892337064, data2: 2419, data3: 17276, data4: [166,31,246,76,175,216,29,249,] };
+#[repr(C)]
+pub struct IUIAutomationCondition_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+}
+#[repr(transparent)]
+pub struct IUIAutomationCondition(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IUIAutomationCondition {
+pub const IID: crate::core::GUID = IID_IUIAutomationCondition;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IUIAutomationCondition_Vtbl { unsafe { &**(self.as_raw() as *const *const IUIAutomationCondition_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IUIAutomationCondition { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IUIAutomationCondition { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IUIAutomationCondition { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IUIAutomationElement: crate::core::GUID = crate::core::GUID { data1: 3525380266, data2: 35525, data3: 18853, data4: [131,123,55,187,179,215,89,30,] };
+#[repr(C)]
+pub struct IUIAutomationElement_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub SetFocus: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetRuntimeId: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,runtimeId: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub FindFirst: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,scope: crate::Win32::UI::Accessibility::TreeScope,condition: *mut ::core::ffi::c_void,found: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub FindAll: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,scope: crate::Win32::UI::Accessibility::TreeScope,condition: *mut ::core::ffi::c_void,found: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub FindFirstBuildCache: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,scope: crate::Win32::UI::Accessibility::TreeScope,condition: *mut ::core::ffi::c_void,cacheRequest: *mut ::core::ffi::c_void,found: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub FindAllBuildCache: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,scope: crate::Win32::UI::Accessibility::TreeScope,condition: *mut ::core::ffi::c_void,cacheRequest: *mut ::core::ffi::c_void,found: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub BuildUpdatedCache: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,cacheRequest: *mut ::core::ffi::c_void,updatedElement: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetCurrentPropertyValue: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,retVal: *mut crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+pub GetCurrentPropertyValueEx: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,ignoreDefaultValue: crate::core::BOOL,retVal: *mut crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+pub GetCachedPropertyValue: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,retVal: *mut crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+pub GetCachedPropertyValueEx: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,ignoreDefaultValue: crate::core::BOOL,retVal: *mut crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+pub GetCurrentPatternAs: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,patternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID,riid: *const crate::core::GUID,patternObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetCachedPatternAs: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,patternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID,riid: *const crate::core::GUID,patternObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetCurrentPattern: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,patternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID,patternObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetCachedPattern: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,patternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID,patternObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetCachedParent: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,parent: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetCachedChildren: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,children: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_CurrentProcessId: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut i32) -> crate::core::HRESULT,
+pub get_CurrentControlType: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID) -> crate::core::HRESULT,
+pub get_CurrentLocalizedControlType: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CurrentName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CurrentAcceleratorKey: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CurrentAccessKey: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CurrentHasKeyboardFocus: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CurrentIsKeyboardFocusable: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CurrentIsEnabled: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CurrentAutomationId: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CurrentClassName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CurrentHelpText: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CurrentCulture: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut i32) -> crate::core::HRESULT,
+pub get_CurrentIsControlElement: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CurrentIsContentElement: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CurrentIsPassword: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CurrentNativeWindowHandle: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::Win32::Foundation::HWND) -> crate::core::HRESULT,
+pub get_CurrentItemType: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CurrentIsOffscreen: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CurrentOrientation: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::Win32::UI::Accessibility::OrientationType) -> crate::core::HRESULT,
+pub get_CurrentFrameworkId: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CurrentIsRequiredForForm: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CurrentItemStatus: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CurrentBoundingRectangle: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::Win32::Foundation::RECT) -> crate::core::HRESULT,
+pub get_CurrentLabeledBy: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_CurrentAriaRole: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CurrentAriaProperties: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CurrentIsDataValidForForm: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CurrentControllerFor: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_CurrentDescribedBy: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_CurrentFlowsTo: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_CurrentProviderDescription: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CachedProcessId: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut i32) -> crate::core::HRESULT,
+pub get_CachedControlType: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID) -> crate::core::HRESULT,
+pub get_CachedLocalizedControlType: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CachedName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CachedAcceleratorKey: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CachedAccessKey: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CachedHasKeyboardFocus: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CachedIsKeyboardFocusable: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CachedIsEnabled: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CachedAutomationId: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CachedClassName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CachedHelpText: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CachedCulture: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut i32) -> crate::core::HRESULT,
+pub get_CachedIsControlElement: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CachedIsContentElement: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CachedIsPassword: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CachedNativeWindowHandle: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::Win32::Foundation::HWND) -> crate::core::HRESULT,
+pub get_CachedItemType: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CachedIsOffscreen: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CachedOrientation: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::Win32::UI::Accessibility::OrientationType) -> crate::core::HRESULT,
+pub get_CachedFrameworkId: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CachedIsRequiredForForm: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CachedItemStatus: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CachedBoundingRectangle: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::Win32::Foundation::RECT) -> crate::core::HRESULT,
+pub get_CachedLabeledBy: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_CachedAriaRole: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CachedAriaProperties: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CachedIsDataValidForForm: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CachedControllerFor: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_CachedDescribedBy: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_CachedFlowsTo: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_CachedProviderDescription: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub GetClickablePoint: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,clickable: *mut crate::Win32::Foundation::POINT,gotClickable: *mut crate::core::BOOL) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IUIAutomationElement(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IUIAutomationElement {
+pub const IID: crate::core::GUID = IID_IUIAutomationElement;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IUIAutomationElement_Vtbl { unsafe { &**(self.as_raw() as *const *const IUIAutomationElement_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn SetFocus(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().SetFocus)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn GetRuntimeId(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetRuntimeId)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn FindFirst(&self,scope: crate::Win32::UI::Accessibility::TreeScope,condition: &crate::Win32::UI::Accessibility::IUIAutomationCondition) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().FindFirst)(self.as_raw(),scope,condition.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn FindAll(&self,scope: crate::Win32::UI::Accessibility::TreeScope,condition: &crate::Win32::UI::Accessibility::IUIAutomationCondition) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElementArray, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().FindAll)(self.as_raw(),scope,condition.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElementArray::from_raw(result__)
+}
+#[inline]
+pub unsafe fn FindFirstBuildCache(&self,scope: crate::Win32::UI::Accessibility::TreeScope,condition: &crate::Win32::UI::Accessibility::IUIAutomationCondition,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().FindFirstBuildCache)(self.as_raw(),scope,condition.as_raw(),cacheRequest.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn FindAllBuildCache(&self,scope: crate::Win32::UI::Accessibility::TreeScope,condition: &crate::Win32::UI::Accessibility::IUIAutomationCondition,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElementArray, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().FindAllBuildCache)(self.as_raw(),scope,condition.as_raw(),cacheRequest.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElementArray::from_raw(result__)
+}
+#[inline]
+pub unsafe fn BuildUpdatedCache(&self,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().BuildUpdatedCache)(self.as_raw(),cacheRequest.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn GetCurrentPropertyValue(&self,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID) -> Result<crate::Win32::System::Variant::VARIANT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetCurrentPropertyValue)(self.as_raw(),propertyId,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetCurrentPropertyValueEx(&self,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,ignoreDefaultValue: bool) -> Result<crate::Win32::System::Variant::VARIANT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetCurrentPropertyValueEx)(self.as_raw(),propertyId,crate::core::BOOL(ignoreDefaultValue as i32),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetCachedPropertyValue(&self,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID) -> Result<crate::Win32::System::Variant::VARIANT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetCachedPropertyValue)(self.as_raw(),propertyId,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetCachedPropertyValueEx(&self,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,ignoreDefaultValue: bool) -> Result<crate::Win32::System::Variant::VARIANT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetCachedPropertyValueEx)(self.as_raw(),propertyId,crate::core::BOOL(ignoreDefaultValue as i32),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetCurrentPatternAs(&self,patternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID,riid: *const crate::core::GUID) -> Result<*mut ::core::ffi::c_void, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetCurrentPatternAs)(self.as_raw(),patternId,riid,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetCachedPatternAs(&self,patternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID,riid: *const crate::core::GUID) -> Result<*mut ::core::ffi::c_void, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetCachedPatternAs)(self.as_raw(),patternId,riid,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetCurrentPattern(&self,patternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID) -> Result<crate::Win32::System::Com::IUnknown, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetCurrentPattern)(self.as_raw(),patternId,&mut result__); hr__.ok()?;
+crate::Win32::System::Com::IUnknown::from_raw(result__)
+}
+#[inline]
+pub unsafe fn GetCachedPattern(&self,patternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID) -> Result<crate::Win32::System::Com::IUnknown, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetCachedPattern)(self.as_raw(),patternId,&mut result__); hr__.ok()?;
+crate::Win32::System::Com::IUnknown::from_raw(result__)
+}
+#[inline]
+pub unsafe fn GetCachedParent(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetCachedParent)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn GetCachedChildren(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElementArray, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetCachedChildren)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElementArray::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentProcessId(&self) -> Result<i32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentProcessId)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentControlType(&self) -> Result<crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentControlType)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentLocalizedControlType(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentLocalizedControlType)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentName(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentName)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentAcceleratorKey(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentAcceleratorKey)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentAccessKey(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentAccessKey)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentHasKeyboardFocus(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentHasKeyboardFocus)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentIsKeyboardFocusable(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentIsKeyboardFocusable)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentIsEnabled(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentIsEnabled)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentAutomationId(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentAutomationId)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentClassName(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentClassName)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentHelpText(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentHelpText)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentCulture(&self) -> Result<i32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentCulture)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentIsControlElement(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentIsControlElement)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentIsContentElement(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentIsContentElement)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentIsPassword(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentIsPassword)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentNativeWindowHandle(&self) -> Result<crate::Win32::Foundation::HWND, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentNativeWindowHandle)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentItemType(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentItemType)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentIsOffscreen(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentIsOffscreen)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentOrientation(&self) -> Result<crate::Win32::UI::Accessibility::OrientationType, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentOrientation)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentFrameworkId(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentFrameworkId)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentIsRequiredForForm(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentIsRequiredForForm)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentItemStatus(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentItemStatus)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentBoundingRectangle(&self) -> Result<crate::Win32::Foundation::RECT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentBoundingRectangle)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentLabeledBy(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentLabeledBy)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentAriaRole(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentAriaRole)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentAriaProperties(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentAriaProperties)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentIsDataValidForForm(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentIsDataValidForForm)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentControllerFor(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElementArray, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentControllerFor)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElementArray::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentDescribedBy(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElementArray, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentDescribedBy)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElementArray::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentFlowsTo(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElementArray, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentFlowsTo)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElementArray::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentProviderDescription(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentProviderDescription)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedProcessId(&self) -> Result<i32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedProcessId)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedControlType(&self) -> Result<crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedControlType)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedLocalizedControlType(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedLocalizedControlType)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedName(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedName)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedAcceleratorKey(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedAcceleratorKey)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedAccessKey(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedAccessKey)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedHasKeyboardFocus(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedHasKeyboardFocus)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedIsKeyboardFocusable(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedIsKeyboardFocusable)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedIsEnabled(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedIsEnabled)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedAutomationId(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedAutomationId)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedClassName(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedClassName)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedHelpText(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedHelpText)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedCulture(&self) -> Result<i32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedCulture)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedIsControlElement(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedIsControlElement)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedIsContentElement(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedIsContentElement)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedIsPassword(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedIsPassword)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedNativeWindowHandle(&self) -> Result<crate::Win32::Foundation::HWND, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedNativeWindowHandle)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedItemType(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedItemType)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedIsOffscreen(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedIsOffscreen)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedOrientation(&self) -> Result<crate::Win32::UI::Accessibility::OrientationType, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedOrientation)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedFrameworkId(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedFrameworkId)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedIsRequiredForForm(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedIsRequiredForForm)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedItemStatus(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedItemStatus)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedBoundingRectangle(&self) -> Result<crate::Win32::Foundation::RECT, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedBoundingRectangle)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedLabeledBy(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedLabeledBy)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_CachedAriaRole(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedAriaRole)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedAriaProperties(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedAriaProperties)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedIsDataValidForForm(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedIsDataValidForForm)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedControllerFor(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElementArray, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedControllerFor)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElementArray::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_CachedDescribedBy(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElementArray, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedDescribedBy)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElementArray::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_CachedFlowsTo(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElementArray, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedFlowsTo)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElementArray::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_CachedProviderDescription(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedProviderDescription)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetClickablePoint(&self,clickable: *mut crate::Win32::Foundation::POINT,gotClickable: *mut crate::core::BOOL) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().GetClickablePoint)(self.as_raw(),clickable,gotClickable); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IUIAutomationElement { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IUIAutomationElement { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IUIAutomationElement { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IUIAutomationElementArray: crate::core::GUID = crate::core::GUID { data1: 338773397, data2: 46268, data3: 16469, data4: [149,242,88,242,228,44,152,85,] };
+#[repr(C)]
+pub struct IUIAutomationElementArray_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub get_Length: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,length: *mut i32) -> crate::core::HRESULT,
+pub GetElement: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,index: i32,element: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IUIAutomationElementArray(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IUIAutomationElementArray {
+pub const IID: crate::core::GUID = IID_IUIAutomationElementArray;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IUIAutomationElementArray_Vtbl { unsafe { &**(self.as_raw() as *const *const IUIAutomationElementArray_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn get_Length(&self) -> Result<i32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_Length)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetElement(&self,index: i32) -> Result<crate::Win32::UI::Accessibility::IUIAutomationElement, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetElement)(self.as_raw(),index,&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IUIAutomationElementArray { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IUIAutomationElementArray { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IUIAutomationElementArray { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IUIAutomationEventHandler: crate::core::GUID = crate::core::GUID { data1: 342637591, data2: 61742, data3: 20002, data4: [140,39,248,148,185,183,156,105,] };
+#[repr(C)]
+pub struct IUIAutomationEventHandler_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub HandleAutomationEvent: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,sender: *mut ::core::ffi::c_void,eventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IUIAutomationEventHandler(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IUIAutomationEventHandler {
+pub const IID: crate::core::GUID = IID_IUIAutomationEventHandler;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IUIAutomationEventHandler_Vtbl { unsafe { &**(self.as_raw() as *const *const IUIAutomationEventHandler_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn HandleAutomationEvent(&self,sender: &crate::Win32::UI::Accessibility::IUIAutomationElement,eventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().HandleAutomationEvent)(self.as_raw(),sender.as_raw(),eventId); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IUIAutomationEventHandler { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IUIAutomationEventHandler { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IUIAutomationEventHandler { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IUIAutomationFocusChangedEventHandler: crate::core::GUID = crate::core::GUID { data1: 3262183093, data2: 23657, data3: 17040, data4: [151,69,122,127,151,22,148,104,] };
+#[repr(C)]
+pub struct IUIAutomationFocusChangedEventHandler_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub HandleFocusChangedEvent: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,sender: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IUIAutomationFocusChangedEventHandler(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IUIAutomationFocusChangedEventHandler {
+pub const IID: crate::core::GUID = IID_IUIAutomationFocusChangedEventHandler;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IUIAutomationFocusChangedEventHandler_Vtbl { unsafe { &**(self.as_raw() as *const *const IUIAutomationFocusChangedEventHandler_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn HandleFocusChangedEvent(&self,sender: &crate::Win32::UI::Accessibility::IUIAutomationElement) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().HandleFocusChangedEvent)(self.as_raw(),sender.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IUIAutomationFocusChangedEventHandler { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IUIAutomationFocusChangedEventHandler { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IUIAutomationFocusChangedEventHandler { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IUIAutomationInvokePattern: crate::core::GUID = crate::core::GUID { data1: 4214718398, data2: 36518, data3: 18133, data4: [156,115,100,153,100,45,48,89,] };
+#[repr(C)]
+pub struct IUIAutomationInvokePattern_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub Invoke: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IUIAutomationInvokePattern(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IUIAutomationInvokePattern {
+pub const IID: crate::core::GUID = IID_IUIAutomationInvokePattern;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IUIAutomationInvokePattern_Vtbl { unsafe { &**(self.as_raw() as *const *const IUIAutomationInvokePattern_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn Invoke(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().Invoke)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IUIAutomationInvokePattern { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IUIAutomationInvokePattern { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IUIAutomationInvokePattern { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IUIAutomationPropertyChangedEventHandler: crate::core::GUID = crate::core::GUID { data1: 1087190996, data2: 51030, data3: 19212, data4: [140,111,189,223,238,177,59,80,] };
+#[repr(C)]
+pub struct IUIAutomationPropertyChangedEventHandler_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub HandlePropertyChangedEvent: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,sender: *mut ::core::ffi::c_void,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,newValue: crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IUIAutomationPropertyChangedEventHandler(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IUIAutomationPropertyChangedEventHandler {
+pub const IID: crate::core::GUID = IID_IUIAutomationPropertyChangedEventHandler;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IUIAutomationPropertyChangedEventHandler_Vtbl { unsafe { &**(self.as_raw() as *const *const IUIAutomationPropertyChangedEventHandler_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn HandlePropertyChangedEvent(&self,sender: &crate::Win32::UI::Accessibility::IUIAutomationElement,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,newValue: crate::Win32::System::Variant::VARIANT) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().HandlePropertyChangedEvent)(self.as_raw(),sender.as_raw(),propertyId,newValue); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IUIAutomationPropertyChangedEventHandler { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IUIAutomationPropertyChangedEventHandler { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IUIAutomationPropertyChangedEventHandler { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IUIAutomationProxyFactory: crate::core::GUID = crate::core::GUID { data1: 2243514061, data2: 33949, data3: 17078, data4: [185,77,214,219,35,253,245,164,] };
+#[repr(C)]
+pub struct IUIAutomationProxyFactory_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub CreateProvider: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,hwnd: crate::Win32::Foundation::HWND,idObject: i32,idChild: i32,provider: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_ProxyFactoryId: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,factoryId: *mut *mut u16) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IUIAutomationProxyFactory(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IUIAutomationProxyFactory {
+pub const IID: crate::core::GUID = IID_IUIAutomationProxyFactory;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IUIAutomationProxyFactory_Vtbl { unsafe { &**(self.as_raw() as *const *const IUIAutomationProxyFactory_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn CreateProvider(&self,hwnd: crate::Win32::Foundation::HWND,idObject: i32,idChild: i32) -> Result<crate::Win32::UI::Accessibility::IRawElementProviderSimple, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().CreateProvider)(self.as_raw(),hwnd,idObject,idChild,&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IRawElementProviderSimple::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_ProxyFactoryId(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ProxyFactoryId)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IUIAutomationProxyFactory { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IUIAutomationProxyFactory { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IUIAutomationProxyFactory { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IUIAutomationProxyFactoryEntry: crate::core::GUID = crate::core::GUID { data1: 3574482734, data2: 46667, data3: 18700, data4: [188,161,211,6,150,249,242,137,] };
+#[repr(C)]
+pub struct IUIAutomationProxyFactoryEntry_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub get_ProxyFactory: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,factory: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_ClassName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,className: *mut *mut u16) -> crate::core::HRESULT,
+pub get_ImageName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,imageName: *mut *mut u16) -> crate::core::HRESULT,
+pub get_AllowSubstringMatch: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,allowSubstringMatch: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CanCheckBaseClass: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,canCheckBaseClass: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_NeedsAdviseEvents: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,adviseEvents: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub put_ClassName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,className: crate::core::PCWSTR) -> crate::core::HRESULT,
+pub put_ImageName: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,imageName: crate::core::PCWSTR) -> crate::core::HRESULT,
+pub put_AllowSubstringMatch: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,allowSubstringMatch: crate::core::BOOL) -> crate::core::HRESULT,
+pub put_CanCheckBaseClass: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,canCheckBaseClass: crate::core::BOOL) -> crate::core::HRESULT,
+pub put_NeedsAdviseEvents: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,adviseEvents: crate::core::BOOL) -> crate::core::HRESULT,
+pub SetWinEventsForAutomationEvent: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,eventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,winEvents: *const crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub GetWinEventsForAutomationEvent: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,eventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,winEvents: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IUIAutomationProxyFactoryEntry(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IUIAutomationProxyFactoryEntry {
+pub const IID: crate::core::GUID = IID_IUIAutomationProxyFactoryEntry;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IUIAutomationProxyFactoryEntry_Vtbl { unsafe { &**(self.as_raw() as *const *const IUIAutomationProxyFactoryEntry_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn get_ProxyFactory(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationProxyFactory, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ProxyFactory)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationProxyFactory::from_raw(result__)
+}
+#[inline]
+pub unsafe fn get_ClassName(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ClassName)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_ImageName(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_ImageName)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_AllowSubstringMatch(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_AllowSubstringMatch)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CanCheckBaseClass(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CanCheckBaseClass)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_NeedsAdviseEvents(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_NeedsAdviseEvents)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn put_ClassName(&self,className: crate::core::PCWSTR) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().put_ClassName)(self.as_raw(),className); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn put_ImageName(&self,imageName: crate::core::PCWSTR) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().put_ImageName)(self.as_raw(),imageName); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn put_AllowSubstringMatch(&self,allowSubstringMatch: bool) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().put_AllowSubstringMatch)(self.as_raw(),crate::core::BOOL(allowSubstringMatch as i32)); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn put_CanCheckBaseClass(&self,canCheckBaseClass: bool) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().put_CanCheckBaseClass)(self.as_raw(),crate::core::BOOL(canCheckBaseClass as i32)); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn put_NeedsAdviseEvents(&self,adviseEvents: bool) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().put_NeedsAdviseEvents)(self.as_raw(),crate::core::BOOL(adviseEvents as i32)); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn SetWinEventsForAutomationEvent(&self,eventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,winEvents: *const crate::Win32::System::Com::SAFEARRAY) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().SetWinEventsForAutomationEvent)(self.as_raw(),eventId,propertyId,winEvents); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn GetWinEventsForAutomationEvent(&self,eventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID,propertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetWinEventsForAutomationEvent)(self.as_raw(),eventId,propertyId,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IUIAutomationProxyFactoryEntry { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IUIAutomationProxyFactoryEntry { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IUIAutomationProxyFactoryEntry { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IUIAutomationProxyFactoryMapping: crate::core::GUID = crate::core::GUID { data1: 165879320, data2: 34605, data3: 18547, data4: [147,209,30,84,30,193,51,253,] };
+#[repr(C)]
+pub struct IUIAutomationProxyFactoryMapping_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub get_Count: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,count: *mut u32) -> crate::core::HRESULT,
+pub GetTable: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,table: *mut *mut crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub GetEntry: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,index: u32,entry: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub SetTable: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,factoryList: *const crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub InsertEntries: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,before: u32,factoryList: *const crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+pub InsertEntry: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,before: u32,factory: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub RemoveEntry: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,index: u32) -> crate::core::HRESULT,
+pub ClearTable: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub RestoreDefaultTable: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IUIAutomationProxyFactoryMapping(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IUIAutomationProxyFactoryMapping {
+pub const IID: crate::core::GUID = IID_IUIAutomationProxyFactoryMapping;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IUIAutomationProxyFactoryMapping_Vtbl { unsafe { &**(self.as_raw() as *const *const IUIAutomationProxyFactoryMapping_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn get_Count(&self) -> Result<u32, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_Count)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetTable(&self) -> Result<*mut crate::Win32::System::Com::SAFEARRAY, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetTable)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn GetEntry(&self,index: u32) -> Result<crate::Win32::UI::Accessibility::IUIAutomationProxyFactoryEntry, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetEntry)(self.as_raw(),index,&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationProxyFactoryEntry::from_raw(result__)
+}
+#[inline]
+pub unsafe fn SetTable(&self,factoryList: *const crate::Win32::System::Com::SAFEARRAY) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().SetTable)(self.as_raw(),factoryList); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn InsertEntries(&self,before: u32,factoryList: *const crate::Win32::System::Com::SAFEARRAY) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().InsertEntries)(self.as_raw(),before,factoryList); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn InsertEntry(&self,before: u32,factory: &crate::Win32::UI::Accessibility::IUIAutomationProxyFactoryEntry) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().InsertEntry)(self.as_raw(),before,factory.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn RemoveEntry(&self,index: u32) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().RemoveEntry)(self.as_raw(),index); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn ClearTable(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().ClearTable)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn RestoreDefaultTable(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().RestoreDefaultTable)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IUIAutomationProxyFactoryMapping { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IUIAutomationProxyFactoryMapping { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IUIAutomationProxyFactoryMapping { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IUIAutomationStructureChangedEventHandler: crate::core::GUID = crate::core::GUID { data1: 3894221646, data2: 4549, data3: 17144, data4: [151,84,231,3,108,121,240,84,] };
+#[repr(C)]
+pub struct IUIAutomationStructureChangedEventHandler_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub HandleStructureChangedEvent: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,sender: *mut ::core::ffi::c_void,changeType: crate::Win32::UI::Accessibility::StructureChangeType,runtimeId: *const crate::Win32::System::Com::SAFEARRAY) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IUIAutomationStructureChangedEventHandler(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IUIAutomationStructureChangedEventHandler {
+pub const IID: crate::core::GUID = IID_IUIAutomationStructureChangedEventHandler;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IUIAutomationStructureChangedEventHandler_Vtbl { unsafe { &**(self.as_raw() as *const *const IUIAutomationStructureChangedEventHandler_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn HandleStructureChangedEvent(&self,sender: &crate::Win32::UI::Accessibility::IUIAutomationElement,changeType: crate::Win32::UI::Accessibility::StructureChangeType,runtimeId: *const crate::Win32::System::Com::SAFEARRAY) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().HandleStructureChangedEvent)(self.as_raw(),sender.as_raw(),changeType,runtimeId); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IUIAutomationStructureChangedEventHandler { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IUIAutomationStructureChangedEventHandler { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IUIAutomationStructureChangedEventHandler { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IUIAutomationTogglePattern: crate::core::GUID = crate::core::GUID { data1: 2496626776, data2: 39821, data3: 19129, data4: [139,253,76,208,163,60,140,112,] };
+#[repr(C)]
+pub struct IUIAutomationTogglePattern_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub Toggle: unsafe extern "system" fn(this: *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_CurrentToggleState: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::Win32::UI::Accessibility::ToggleState) -> crate::core::HRESULT,
+pub get_CachedToggleState: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::Win32::UI::Accessibility::ToggleState) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IUIAutomationTogglePattern(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IUIAutomationTogglePattern {
+pub const IID: crate::core::GUID = IID_IUIAutomationTogglePattern;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IUIAutomationTogglePattern_Vtbl { unsafe { &**(self.as_raw() as *const *const IUIAutomationTogglePattern_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn Toggle(&self) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().Toggle)(self.as_raw()); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn get_CurrentToggleState(&self) -> Result<crate::Win32::UI::Accessibility::ToggleState, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentToggleState)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedToggleState(&self) -> Result<crate::Win32::UI::Accessibility::ToggleState, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedToggleState)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IUIAutomationTogglePattern { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IUIAutomationTogglePattern { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IUIAutomationTogglePattern { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IUIAutomationTreeWalker: crate::core::GUID = crate::core::GUID { data1: 1078117924, data2: 14492, data3: 19196, data4: [166,48,157,248,84,165,65,252,] };
+#[repr(C)]
+pub struct IUIAutomationTreeWalker_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub GetParentElement: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,parent: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetFirstChildElement: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,first: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetLastChildElement: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,last: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetNextSiblingElement: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,next: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetPreviousSiblingElement: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,previous: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub NormalizeElement: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,normalized: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetParentElementBuildCache: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,cacheRequest: *mut ::core::ffi::c_void,parent: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetFirstChildElementBuildCache: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,cacheRequest: *mut ::core::ffi::c_void,first: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetLastChildElementBuildCache: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,cacheRequest: *mut ::core::ffi::c_void,last: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetNextSiblingElementBuildCache: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,cacheRequest: *mut ::core::ffi::c_void,next: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub GetPreviousSiblingElementBuildCache: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,cacheRequest: *mut ::core::ffi::c_void,previous: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub NormalizeElementBuildCache: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,element: *mut ::core::ffi::c_void,cacheRequest: *mut ::core::ffi::c_void,normalized: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+pub get_Condition: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,condition: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IUIAutomationTreeWalker(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IUIAutomationTreeWalker {
+pub const IID: crate::core::GUID = IID_IUIAutomationTreeWalker;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IUIAutomationTreeWalker_Vtbl { unsafe { &**(self.as_raw() as *const *const IUIAutomationTreeWalker_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn GetParentElement(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement) -> Result<Option<crate::Win32::UI::Accessibility::IUIAutomationElement>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetParentElement)(self.as_raw(),element.as_raw(),&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn GetFirstChildElement(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement) -> Result<Option<crate::Win32::UI::Accessibility::IUIAutomationElement>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetFirstChildElement)(self.as_raw(),element.as_raw(),&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn GetLastChildElement(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement) -> Result<Option<crate::Win32::UI::Accessibility::IUIAutomationElement>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetLastChildElement)(self.as_raw(),element.as_raw(),&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn GetNextSiblingElement(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement) -> Result<Option<crate::Win32::UI::Accessibility::IUIAutomationElement>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetNextSiblingElement)(self.as_raw(),element.as_raw(),&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn GetPreviousSiblingElement(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement) -> Result<Option<crate::Win32::UI::Accessibility::IUIAutomationElement>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetPreviousSiblingElement)(self.as_raw(),element.as_raw(),&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn NormalizeElement(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement) -> Result<Option<crate::Win32::UI::Accessibility::IUIAutomationElement>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().NormalizeElement)(self.as_raw(),element.as_raw(),&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn GetParentElementBuildCache(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest) -> Result<Option<crate::Win32::UI::Accessibility::IUIAutomationElement>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetParentElementBuildCache)(self.as_raw(),element.as_raw(),cacheRequest.as_raw(),&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn GetFirstChildElementBuildCache(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest) -> Result<Option<crate::Win32::UI::Accessibility::IUIAutomationElement>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetFirstChildElementBuildCache)(self.as_raw(),element.as_raw(),cacheRequest.as_raw(),&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn GetLastChildElementBuildCache(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest) -> Result<Option<crate::Win32::UI::Accessibility::IUIAutomationElement>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetLastChildElementBuildCache)(self.as_raw(),element.as_raw(),cacheRequest.as_raw(),&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn GetNextSiblingElementBuildCache(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest) -> Result<Option<crate::Win32::UI::Accessibility::IUIAutomationElement>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetNextSiblingElementBuildCache)(self.as_raw(),element.as_raw(),cacheRequest.as_raw(),&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn GetPreviousSiblingElementBuildCache(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest) -> Result<Option<crate::Win32::UI::Accessibility::IUIAutomationElement>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().GetPreviousSiblingElementBuildCache)(self.as_raw(),element.as_raw(),cacheRequest.as_raw(),&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn NormalizeElementBuildCache(&self,element: &crate::Win32::UI::Accessibility::IUIAutomationElement,cacheRequest: &crate::Win32::UI::Accessibility::IUIAutomationCacheRequest) -> Result<Option<crate::Win32::UI::Accessibility::IUIAutomationElement>, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().NormalizeElementBuildCache)(self.as_raw(),element.as_raw(),cacheRequest.as_raw(),&mut result__); hr__.ok()?;
+if result__.is_null() { return Ok(None); }
+crate::Win32::UI::Accessibility::IUIAutomationElement::from_raw(result__).map(Some)
+}
+#[inline]
+pub unsafe fn get_Condition(&self) -> Result<crate::Win32::UI::Accessibility::IUIAutomationCondition, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_Condition)(self.as_raw(),&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IUIAutomationCondition::from_raw(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IUIAutomationTreeWalker { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IUIAutomationTreeWalker { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IUIAutomationTreeWalker { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IUIAutomationValuePattern: crate::core::GUID = crate::core::GUID { data1: 2840385713, data2: 2116, data3: 19670, data4: [157,45,100,5,55,171,57,233,] };
+#[repr(C)]
+pub struct IUIAutomationValuePattern_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub SetValue: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,val: *mut u16) -> crate::core::HRESULT,
+pub get_CurrentValue: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CurrentIsReadOnly: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+pub get_CachedValue: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_CachedIsReadOnly: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,retVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IUIAutomationValuePattern(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IUIAutomationValuePattern {
+pub const IID: crate::core::GUID = IID_IUIAutomationValuePattern;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IUIAutomationValuePattern_Vtbl { unsafe { &**(self.as_raw() as *const *const IUIAutomationValuePattern_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn SetValue(&self,val: *mut u16) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().SetValue)(self.as_raw(),val); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn get_CurrentValue(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentValue)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CurrentIsReadOnly(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CurrentIsReadOnly)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedValue(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedValue)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_CachedIsReadOnly(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_CachedIsReadOnly)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IUIAutomationValuePattern { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IUIAutomationValuePattern { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IUIAutomationValuePattern { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+pub const IID_IValueProvider: crate::core::GUID = crate::core::GUID { data1: 3348320640, data2: 28595, data3: 16897, data4: [177,116,125,247,58,219,246,74,] };
+#[repr(C)]
+pub struct IValueProvider_Vtbl {
+pub base__: crate::Win32::System::Com::IUnknown_Vtbl,
+pub SetValue: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,val: crate::core::PCWSTR) -> crate::core::HRESULT,
+pub get_Value: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut u16) -> crate::core::HRESULT,
+pub get_IsReadOnly: unsafe extern "system" fn(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::core::BOOL) -> crate::core::HRESULT,
+}
+#[repr(transparent)]
+pub struct IValueProvider(::core::ptr::NonNull<::core::ffi::c_void>);
+impl IValueProvider {
+pub const IID: crate::core::GUID = IID_IValueProvider;
+pub fn as_raw(&self) -> *mut ::core::ffi::c_void { self.0.as_ptr() }
+pub fn into_raw(self) -> *mut ::core::ffi::c_void { let p = self.as_raw(); ::core::mem::forget(self); p }
+pub unsafe fn from_raw(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { match ::core::ptr::NonNull::new(raw) { Some(p) => Ok(Self(p)), None => Err(crate::core::HRESULT(-2147467261)) } }
+pub unsafe fn query(raw: *mut ::core::ffi::c_void) -> Result<Self, crate::core::HRESULT> { Self::from_raw(crate::core::query(raw, &Self::IID)?) }
+pub fn vtable(&self) -> &IValueProvider_Vtbl { unsafe { &**(self.as_raw() as *const *const IValueProvider_Vtbl) } }
+pub fn as_IUnknown(&self) -> &crate::Win32::System::Com::IUnknown { unsafe { &*(self as *const Self as *const crate::Win32::System::Com::IUnknown) } }
+#[inline]
+pub unsafe fn SetValue(&self,val: crate::core::PCWSTR) -> Result<(), crate::core::HRESULT> {
+let hr__ = (self.vtable().SetValue)(self.as_raw(),val); hr__.ok()?;
+Ok(())
+}
+#[inline]
+pub unsafe fn get_Value(&self) -> Result<*mut u16, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_Value)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn get_IsReadOnly(&self) -> Result<crate::core::BOOL, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = (self.vtable().get_IsReadOnly)(self.as_raw(),&mut result__); hr__.ok()?;
+Ok(result__)
+}
+#[inline]
+pub unsafe fn QueryInterface(&self,riid: *const crate::core::GUID,ppvObject: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT {
+(self.vtable().base__.QueryInterface)(self.as_raw(),riid,ppvObject)}
+#[inline]
+pub unsafe fn AddRef(&self) -> u32 {
+(self.vtable().base__.AddRef)(self.as_raw())}
+#[inline]
+pub unsafe fn Release(&self) -> u32 {
+(self.vtable().base__.Release)(self.as_raw())}
+}
+impl Clone for IValueProvider { fn clone(&self) -> Self { unsafe { crate::core::add_ref(self.as_raw()); Self(self.0) } } }
+impl Drop for IValueProvider { fn drop(&mut self) { unsafe { crate::core::release(self.as_raw()); } } }
+impl ::core::cmp::PartialEq for IValueProvider { fn eq(&self, other: &Self) -> bool { self.as_raw() == other.as_raw() } }
+/// Callback methods may receive raw ABI pointers; validate them before use.
+pub trait IValueProviderImpl: Send + Sync {
+fn SetValue(&self, val: crate::core::PCWSTR) -> Result<(), crate::core::HRESULT>;
+fn get_Value(&self) -> Result<*mut u16, crate::core::HRESULT>;
+fn get_IsReadOnly(&self) -> Result<crate::core::BOOL, crate::core::HRESULT>;
+}
+const _: () = assert!(::core::mem::size_of::<IValueProvider_Vtbl>() == 6 * ::core::mem::size_of::<unsafe extern "system" fn()>());
+static IMPLEMENT_VTABLE_IValueProvider: IValueProvider_Vtbl = crate::Win32::UI::Accessibility::IValueProvider_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },
+SetValue: thunk_IValueProvider_SetValue,
+get_Value: thunk_IValueProvider_get_Value,
+get_IsReadOnly: thunk_IValueProvider_get_IsReadOnly,
+};
+unsafe extern "system" fn thunk_IValueProvider_SetValue(this: *mut ::core::ffi::c_void,val: crate::core::PCWSTR) -> crate::core::HRESULT {
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IValueProviderImpl>);
+match implementation.SetValue(val) { Ok(value) => { let _ = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IValueProvider_get_Value(this: *mut ::core::ffi::c_void,pRetVal: *mut *mut u16) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IValueProviderImpl>);
+match implementation.get_Value() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe extern "system" fn thunk_IValueProvider_get_IsReadOnly(this: *mut ::core::ffi::c_void,pRetVal: *mut crate::core::BOOL) -> crate::core::HRESULT {
+if pRetVal.is_null() {return crate::core::HRESULT(-2147467261);}
+*pRetVal = ::core::mem::zeroed();
+let implementation = &*((* (this as *const crate::core::ObjectSlot)).implementation as *const Box<dyn IValueProviderImpl>);
+match implementation.get_IsReadOnly() { Ok(value) => { *pRetVal = value; crate::core::HRESULT(0) }, Err(error) => error }
+}
+unsafe fn destroy_IValueProvider(raw: *mut ::core::ffi::c_void) { drop(Box::from_raw(raw as *mut Box<dyn IValueProviderImpl>)); }
+impl crate::core::ObjectBuilder { pub fn add_IValueProvider(mut self, implementation: Box<dyn IValueProviderImpl>) -> Self { let iids = vec![crate::Win32::UI::Accessibility::IValueProvider::IID,]; unsafe { self.add(&IMPLEMENT_VTABLE_IValueProvider as *const IValueProvider_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_IValueProvider, iids); } self } }
+impl IValueProvider { pub fn implement(implementation: Box<dyn IValueProviderImpl>) -> Self { let object = crate::core::ObjectBuilder::new().add_IValueProvider(implementation); unsafe { Self::from_raw(object.finish().expect("COM object")).expect("allocated COM interface") } } }
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct LiveSetting(pub i32);
+impl LiveSetting { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for LiveSetting { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for LiveSetting { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for LiveSetting {}
+impl ::core::fmt::Debug for LiveSetting { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for LiveSetting { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for LiveSetting { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for LiveSetting { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for LiveSetting { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const LiveSetting_Property_GUID: crate::core::GUID = crate::core::GUID { data1: 3240873358, data2: 10894, data3: 18768, data4: [138,231,54,37,17,29,88,235,] };
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct NavigateDirection(pub i32);
+impl NavigateDirection { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for NavigateDirection { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for NavigateDirection { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for NavigateDirection {}
+impl ::core::fmt::Debug for NavigateDirection { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for NavigateDirection { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for NavigateDirection { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for NavigateDirection { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for NavigateDirection { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const NavigateDirection_FirstChild: crate::Win32::UI::Accessibility::NavigateDirection = crate::Win32::UI::Accessibility::NavigateDirection(3i64 as _);
+pub const NavigateDirection_LastChild: crate::Win32::UI::Accessibility::NavigateDirection = crate::Win32::UI::Accessibility::NavigateDirection(4i64 as _);
+pub const NavigateDirection_NextSibling: crate::Win32::UI::Accessibility::NavigateDirection = crate::Win32::UI::Accessibility::NavigateDirection(1i64 as _);
+pub const NavigateDirection_Parent: crate::Win32::UI::Accessibility::NavigateDirection = crate::Win32::UI::Accessibility::NavigateDirection(0i64 as _);
+pub const NavigateDirection_PreviousSibling: crate::Win32::UI::Accessibility::NavigateDirection = crate::Win32::UI::Accessibility::NavigateDirection(2i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct NotificationKind(pub i32);
+impl NotificationKind { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for NotificationKind { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for NotificationKind { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for NotificationKind {}
+impl ::core::fmt::Debug for NotificationKind { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for NotificationKind { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for NotificationKind { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for NotificationKind { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for NotificationKind { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const NotificationKind_ActionAborted: crate::Win32::UI::Accessibility::NotificationKind = crate::Win32::UI::Accessibility::NotificationKind(3i64 as _);
+pub const NotificationKind_ActionCompleted: crate::Win32::UI::Accessibility::NotificationKind = crate::Win32::UI::Accessibility::NotificationKind(2i64 as _);
+pub const NotificationKind_ItemAdded: crate::Win32::UI::Accessibility::NotificationKind = crate::Win32::UI::Accessibility::NotificationKind(0i64 as _);
+pub const NotificationKind_ItemRemoved: crate::Win32::UI::Accessibility::NotificationKind = crate::Win32::UI::Accessibility::NotificationKind(1i64 as _);
+pub const NotificationKind_Other: crate::Win32::UI::Accessibility::NotificationKind = crate::Win32::UI::Accessibility::NotificationKind(4i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct NotificationProcessing(pub i32);
+impl NotificationProcessing { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for NotificationProcessing { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for NotificationProcessing { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for NotificationProcessing {}
+impl ::core::fmt::Debug for NotificationProcessing { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for NotificationProcessing { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for NotificationProcessing { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for NotificationProcessing { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for NotificationProcessing { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const NotificationProcessing_All: crate::Win32::UI::Accessibility::NotificationProcessing = crate::Win32::UI::Accessibility::NotificationProcessing(2i64 as _);
+pub const NotificationProcessing_CurrentThenMostRecent: crate::Win32::UI::Accessibility::NotificationProcessing = crate::Win32::UI::Accessibility::NotificationProcessing(4i64 as _);
+pub const NotificationProcessing_ImportantAll: crate::Win32::UI::Accessibility::NotificationProcessing = crate::Win32::UI::Accessibility::NotificationProcessing(0i64 as _);
+pub const NotificationProcessing_ImportantCurrentThenMostRecent: crate::Win32::UI::Accessibility::NotificationProcessing = crate::Win32::UI::Accessibility::NotificationProcessing(5i64 as _);
+pub const NotificationProcessing_ImportantMostRecent: crate::Win32::UI::Accessibility::NotificationProcessing = crate::Win32::UI::Accessibility::NotificationProcessing(1i64 as _);
+pub const NotificationProcessing_MostRecent: crate::Win32::UI::Accessibility::NotificationProcessing = crate::Win32::UI::Accessibility::NotificationProcessing(3i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct OrientationType(pub i32);
+impl OrientationType { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for OrientationType { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for OrientationType { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for OrientationType {}
+impl ::core::fmt::Debug for OrientationType { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for OrientationType { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for OrientationType { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for OrientationType { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for OrientationType { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const OrientationType_Horizontal: crate::Win32::UI::Accessibility::OrientationType = crate::Win32::UI::Accessibility::OrientationType(1i64 as _);
+pub const OrientationType_None: crate::Win32::UI::Accessibility::OrientationType = crate::Win32::UI::Accessibility::OrientationType(0i64 as _);
+pub const OrientationType_Vertical: crate::Win32::UI::Accessibility::OrientationType = crate::Win32::UI::Accessibility::OrientationType(2i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct PropertyConditionFlags(pub i32);
+impl PropertyConditionFlags { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for PropertyConditionFlags { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for PropertyConditionFlags { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for PropertyConditionFlags {}
+impl ::core::fmt::Debug for PropertyConditionFlags { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for PropertyConditionFlags { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for PropertyConditionFlags { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for PropertyConditionFlags { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for PropertyConditionFlags { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct ProviderOptions(pub i32);
+impl ProviderOptions { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for ProviderOptions { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for ProviderOptions { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for ProviderOptions {}
+impl ::core::fmt::Debug for ProviderOptions { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for ProviderOptions { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for ProviderOptions { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for ProviderOptions { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for ProviderOptions { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const ProviderOptions_ClientSideProvider: crate::Win32::UI::Accessibility::ProviderOptions = crate::Win32::UI::Accessibility::ProviderOptions(1i64 as _);
+pub const ProviderOptions_HasNativeIAccessible: crate::Win32::UI::Accessibility::ProviderOptions = crate::Win32::UI::Accessibility::ProviderOptions(128i64 as _);
+pub const ProviderOptions_NonClientAreaProvider: crate::Win32::UI::Accessibility::ProviderOptions = crate::Win32::UI::Accessibility::ProviderOptions(4i64 as _);
+pub const ProviderOptions_OverrideProvider: crate::Win32::UI::Accessibility::ProviderOptions = crate::Win32::UI::Accessibility::ProviderOptions(8i64 as _);
+pub const ProviderOptions_ProviderOwnsSetFocus: crate::Win32::UI::Accessibility::ProviderOptions = crate::Win32::UI::Accessibility::ProviderOptions(16i64 as _);
+pub const ProviderOptions_RefuseNonClientSupport: crate::Win32::UI::Accessibility::ProviderOptions = crate::Win32::UI::Accessibility::ProviderOptions(64i64 as _);
+pub const ProviderOptions_ServerSideProvider: crate::Win32::UI::Accessibility::ProviderOptions = crate::Win32::UI::Accessibility::ProviderOptions(2i64 as _);
+pub const ProviderOptions_UseClientCoordinates: crate::Win32::UI::Accessibility::ProviderOptions = crate::Win32::UI::Accessibility::ProviderOptions(256i64 as _);
+pub const ProviderOptions_UseComThreading: crate::Win32::UI::Accessibility::ProviderOptions = crate::Win32::UI::Accessibility::ProviderOptions(32i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct RowOrColumnMajor(pub i32);
+impl RowOrColumnMajor { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for RowOrColumnMajor { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for RowOrColumnMajor { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for RowOrColumnMajor {}
+impl ::core::fmt::Debug for RowOrColumnMajor { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for RowOrColumnMajor { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for RowOrColumnMajor { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for RowOrColumnMajor { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for RowOrColumnMajor { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const RowOrColumnMajor_ColumnMajor: crate::Win32::UI::Accessibility::RowOrColumnMajor = crate::Win32::UI::Accessibility::RowOrColumnMajor(1i64 as _);
+pub const RowOrColumnMajor_Indeterminate: crate::Win32::UI::Accessibility::RowOrColumnMajor = crate::Win32::UI::Accessibility::RowOrColumnMajor(2i64 as _);
+pub const RowOrColumnMajor_RowMajor: crate::Win32::UI::Accessibility::RowOrColumnMajor = crate::Win32::UI::Accessibility::RowOrColumnMajor(0i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct ScrollAmount(pub i32);
+impl ScrollAmount { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for ScrollAmount { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for ScrollAmount { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for ScrollAmount {}
+impl ::core::fmt::Debug for ScrollAmount { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for ScrollAmount { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for ScrollAmount { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for ScrollAmount { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for ScrollAmount { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const ScrollAmount_LargeDecrement: crate::Win32::UI::Accessibility::ScrollAmount = crate::Win32::UI::Accessibility::ScrollAmount(0i64 as _);
+pub const ScrollAmount_LargeIncrement: crate::Win32::UI::Accessibility::ScrollAmount = crate::Win32::UI::Accessibility::ScrollAmount(3i64 as _);
+pub const ScrollAmount_NoAmount: crate::Win32::UI::Accessibility::ScrollAmount = crate::Win32::UI::Accessibility::ScrollAmount(2i64 as _);
+pub const ScrollAmount_SmallDecrement: crate::Win32::UI::Accessibility::ScrollAmount = crate::Win32::UI::Accessibility::ScrollAmount(1i64 as _);
+pub const ScrollAmount_SmallIncrement: crate::Win32::UI::Accessibility::ScrollAmount = crate::Win32::UI::Accessibility::ScrollAmount(4i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct StructureChangeType(pub i32);
+impl StructureChangeType { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for StructureChangeType { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for StructureChangeType { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for StructureChangeType {}
+impl ::core::fmt::Debug for StructureChangeType { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for StructureChangeType { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for StructureChangeType { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for StructureChangeType { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for StructureChangeType { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const StructureChangeType_ChildAdded: crate::Win32::UI::Accessibility::StructureChangeType = crate::Win32::UI::Accessibility::StructureChangeType(0i64 as _);
+pub const StructureChangeType_ChildRemoved: crate::Win32::UI::Accessibility::StructureChangeType = crate::Win32::UI::Accessibility::StructureChangeType(1i64 as _);
+pub const StructureChangeType_ChildrenBulkAdded: crate::Win32::UI::Accessibility::StructureChangeType = crate::Win32::UI::Accessibility::StructureChangeType(3i64 as _);
+pub const StructureChangeType_ChildrenBulkRemoved: crate::Win32::UI::Accessibility::StructureChangeType = crate::Win32::UI::Accessibility::StructureChangeType(4i64 as _);
+pub const StructureChangeType_ChildrenInvalidated: crate::Win32::UI::Accessibility::StructureChangeType = crate::Win32::UI::Accessibility::StructureChangeType(2i64 as _);
+pub const StructureChangeType_ChildrenReordered: crate::Win32::UI::Accessibility::StructureChangeType = crate::Win32::UI::Accessibility::StructureChangeType(5i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct SupportedTextSelection(pub i32);
+impl SupportedTextSelection { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for SupportedTextSelection { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for SupportedTextSelection { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for SupportedTextSelection {}
+impl ::core::fmt::Debug for SupportedTextSelection { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for SupportedTextSelection { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for SupportedTextSelection { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for SupportedTextSelection { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for SupportedTextSelection { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const SupportedTextSelection_Multiple: crate::Win32::UI::Accessibility::SupportedTextSelection = crate::Win32::UI::Accessibility::SupportedTextSelection(2i64 as _);
+pub const SupportedTextSelection_None: crate::Win32::UI::Accessibility::SupportedTextSelection = crate::Win32::UI::Accessibility::SupportedTextSelection(0i64 as _);
+pub const SupportedTextSelection_Single: crate::Win32::UI::Accessibility::SupportedTextSelection = crate::Win32::UI::Accessibility::SupportedTextSelection(1i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct TextPatternRangeEndpoint(pub i32);
+impl TextPatternRangeEndpoint { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for TextPatternRangeEndpoint { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for TextPatternRangeEndpoint { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for TextPatternRangeEndpoint {}
+impl ::core::fmt::Debug for TextPatternRangeEndpoint { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for TextPatternRangeEndpoint { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for TextPatternRangeEndpoint { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for TextPatternRangeEndpoint { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for TextPatternRangeEndpoint { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const TextPatternRangeEndpoint_End: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint = crate::Win32::UI::Accessibility::TextPatternRangeEndpoint(1i64 as _);
+pub const TextPatternRangeEndpoint_Start: crate::Win32::UI::Accessibility::TextPatternRangeEndpoint = crate::Win32::UI::Accessibility::TextPatternRangeEndpoint(0i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct TextUnit(pub i32);
+impl TextUnit { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for TextUnit { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for TextUnit { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for TextUnit {}
+impl ::core::fmt::Debug for TextUnit { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for TextUnit { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for TextUnit { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for TextUnit { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for TextUnit { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const TextUnit_Character: crate::Win32::UI::Accessibility::TextUnit = crate::Win32::UI::Accessibility::TextUnit(0i64 as _);
+pub const TextUnit_Document: crate::Win32::UI::Accessibility::TextUnit = crate::Win32::UI::Accessibility::TextUnit(6i64 as _);
+pub const TextUnit_Format: crate::Win32::UI::Accessibility::TextUnit = crate::Win32::UI::Accessibility::TextUnit(1i64 as _);
+pub const TextUnit_Line: crate::Win32::UI::Accessibility::TextUnit = crate::Win32::UI::Accessibility::TextUnit(3i64 as _);
+pub const TextUnit_Page: crate::Win32::UI::Accessibility::TextUnit = crate::Win32::UI::Accessibility::TextUnit(5i64 as _);
+pub const TextUnit_Paragraph: crate::Win32::UI::Accessibility::TextUnit = crate::Win32::UI::Accessibility::TextUnit(4i64 as _);
+pub const TextUnit_Word: crate::Win32::UI::Accessibility::TextUnit = crate::Win32::UI::Accessibility::TextUnit(2i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct ToggleState(pub i32);
+impl ToggleState { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for ToggleState { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for ToggleState { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for ToggleState {}
+impl ::core::fmt::Debug for ToggleState { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for ToggleState { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for ToggleState { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for ToggleState { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for ToggleState { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const ToggleState_Indeterminate: crate::Win32::UI::Accessibility::ToggleState = crate::Win32::UI::Accessibility::ToggleState(2i64 as _);
+pub const ToggleState_Off: crate::Win32::UI::Accessibility::ToggleState = crate::Win32::UI::Accessibility::ToggleState(0i64 as _);
+pub const ToggleState_On: crate::Win32::UI::Accessibility::ToggleState = crate::Win32::UI::Accessibility::ToggleState(1i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct TreeScope(pub i32);
+impl TreeScope { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for TreeScope { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for TreeScope { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for TreeScope {}
+impl ::core::fmt::Debug for TreeScope { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for TreeScope { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for TreeScope { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for TreeScope { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for TreeScope { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const UIA_AcceleratorKeyPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30006i64 as _);
+pub const UIA_AccessKeyPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30007i64 as _);
+pub const UIA_ActiveTextPositionChangedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20036i64 as _);
+pub const UIA_AfterParagraphSpacingAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40042i64 as _);
+pub const UIA_AnimationStyleAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40000i64 as _);
+pub const UIA_AnnotationAnnotationTypeIdPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30113i64 as _);
+pub const UIA_AnnotationAnnotationTypeNamePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30114i64 as _);
+pub const UIA_AnnotationAuthorPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30115i64 as _);
+pub const UIA_AnnotationDateTimePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30116i64 as _);
+pub const UIA_AnnotationObjectsAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40032i64 as _);
+pub const UIA_AnnotationObjectsPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30156i64 as _);
+pub const UIA_AnnotationPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10023i64 as _);
+pub const UIA_AnnotationTargetPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30117i64 as _);
+pub const UIA_AnnotationTypesAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40031i64 as _);
+pub const UIA_AnnotationTypesPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30155i64 as _);
+pub const UIA_AppBarControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50040i64 as _);
+pub const UIA_AriaPropertiesPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30102i64 as _);
+pub const UIA_AriaRolePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30101i64 as _);
+pub const UIA_AsyncContentLoadedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20006i64 as _);
+pub const UIA_AutomationFocusChangedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20005i64 as _);
+pub const UIA_AutomationIdPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30011i64 as _);
+pub const UIA_AutomationPropertyChangedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20004i64 as _);
+pub const UIA_BackgroundColorAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40001i64 as _);
+pub const UIA_BeforeParagraphSpacingAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40041i64 as _);
+pub const UIA_BoundingRectanglePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30001i64 as _);
+pub const UIA_BulletStyleAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40002i64 as _);
+pub const UIA_ButtonControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50000i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct UIA_CONTROLTYPE_ID(pub i32);
+impl UIA_CONTROLTYPE_ID { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for UIA_CONTROLTYPE_ID { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for UIA_CONTROLTYPE_ID { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for UIA_CONTROLTYPE_ID {}
+impl ::core::fmt::Debug for UIA_CONTROLTYPE_ID { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for UIA_CONTROLTYPE_ID { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for UIA_CONTROLTYPE_ID { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for UIA_CONTROLTYPE_ID { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for UIA_CONTROLTYPE_ID { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const UIA_CalendarControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50001i64 as _);
+pub const UIA_CapStyleAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40003i64 as _);
+pub const UIA_CaretBidiModeAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40039i64 as _);
+pub const UIA_CaretPositionAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40038i64 as _);
+pub const UIA_CenterPointPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30165i64 as _);
+pub const UIA_ChangesEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20034i64 as _);
+pub const UIA_CheckBoxControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50002i64 as _);
+pub const UIA_ClassNamePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30012i64 as _);
+pub const UIA_ClickablePointPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30014i64 as _);
+pub const UIA_ComboBoxControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50003i64 as _);
+pub const UIA_ControlTypePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30003i64 as _);
+pub const UIA_ControllerForPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30104i64 as _);
+pub const UIA_CultureAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40004i64 as _);
+pub const UIA_CulturePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30015i64 as _);
+pub const UIA_CustomControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50025i64 as _);
+pub const UIA_CustomNavigationPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10033i64 as _);
+pub const UIA_DataGridControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50028i64 as _);
+pub const UIA_DataItemControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50029i64 as _);
+pub const UIA_DescribedByPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30105i64 as _);
+pub const UIA_DockDockPositionPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30069i64 as _);
+pub const UIA_DockPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10011i64 as _);
+pub const UIA_DocumentControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50030i64 as _);
+pub const UIA_DragDropEffectPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30139i64 as _);
+pub const UIA_DragDropEffectsPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30140i64 as _);
+pub const UIA_DragGrabbedItemsPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30144i64 as _);
+pub const UIA_DragIsGrabbedPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30138i64 as _);
+pub const UIA_DragPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10030i64 as _);
+pub const UIA_Drag_DragCancelEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20027i64 as _);
+pub const UIA_Drag_DragCompleteEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20028i64 as _);
+pub const UIA_Drag_DragStartEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20026i64 as _);
+pub const UIA_DropTargetDropTargetEffectPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30142i64 as _);
+pub const UIA_DropTargetDropTargetEffectsPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30143i64 as _);
+pub const UIA_DropTargetPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10031i64 as _);
+pub const UIA_DropTarget_DragEnterEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20029i64 as _);
+pub const UIA_DropTarget_DragLeaveEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20030i64 as _);
+pub const UIA_DropTarget_DroppedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20031i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct UIA_EVENT_ID(pub i32);
+impl UIA_EVENT_ID { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for UIA_EVENT_ID { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for UIA_EVENT_ID { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for UIA_EVENT_ID {}
+impl ::core::fmt::Debug for UIA_EVENT_ID { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for UIA_EVENT_ID { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for UIA_EVENT_ID { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for UIA_EVENT_ID { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for UIA_EVENT_ID { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const UIA_E_ELEMENTNOTAVAILABLE: u32 = 2147746305;
+pub const UIA_E_ELEMENTNOTENABLED: u32 = 2147746304;
+pub const UIA_E_INVALIDOPERATION: u32 = 2148734217;
+pub const UIA_E_NOCLICKABLEPOINT: u32 = 2147746306;
+pub const UIA_E_NOTSUPPORTED: u32 = 2147746308;
+pub const UIA_E_PROXYASSEMBLYNOTLOADED: u32 = 2147746307;
+pub const UIA_E_TIMEOUT: u32 = 2148734213;
+pub const UIA_EditControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50004i64 as _);
+pub const UIA_ExpandCollapseExpandCollapseStatePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30070i64 as _);
+pub const UIA_ExpandCollapsePatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10005i64 as _);
+pub const UIA_FillColorPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30160i64 as _);
+pub const UIA_FillTypePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30162i64 as _);
+pub const UIA_FlowsFromPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30148i64 as _);
+pub const UIA_FlowsToPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30106i64 as _);
+pub const UIA_FontNameAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40005i64 as _);
+pub const UIA_FontSizeAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40006i64 as _);
+pub const UIA_FontWeightAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40007i64 as _);
+pub const UIA_ForegroundColorAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40008i64 as _);
+pub const UIA_FrameworkIdPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30024i64 as _);
+pub const UIA_FullDescriptionPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30159i64 as _);
+pub const UIA_GridColumnCountPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30063i64 as _);
+pub const UIA_GridItemColumnPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30065i64 as _);
+pub const UIA_GridItemColumnSpanPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30067i64 as _);
+pub const UIA_GridItemContainingGridPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30068i64 as _);
+pub const UIA_GridItemPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10007i64 as _);
+pub const UIA_GridItemRowPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30064i64 as _);
+pub const UIA_GridItemRowSpanPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30066i64 as _);
+pub const UIA_GridPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10006i64 as _);
+pub const UIA_GridRowCountPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30062i64 as _);
+pub const UIA_GroupControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50026i64 as _);
+pub const UIA_HasKeyboardFocusPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30008i64 as _);
+pub const UIA_HeaderControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50034i64 as _);
+pub const UIA_HeaderItemControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50035i64 as _);
+pub const UIA_HeadingLevelPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30173i64 as _);
+pub const UIA_HelpTextPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30013i64 as _);
+pub const UIA_HorizontalTextAlignmentAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40009i64 as _);
+pub const UIA_HostedFragmentRootsInvalidatedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20025i64 as _);
+pub const UIA_HyperlinkControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50005i64 as _);
+pub const UIA_ImageControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50006i64 as _);
+pub const UIA_IndentationFirstLineAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40010i64 as _);
+pub const UIA_IndentationLeadingAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40011i64 as _);
+pub const UIA_IndentationTrailingAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40012i64 as _);
+pub const UIA_InputDiscardedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20022i64 as _);
+pub const UIA_InputReachedOtherElementEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20021i64 as _);
+pub const UIA_InputReachedTargetEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20020i64 as _);
+pub const UIA_InvokePatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10000i64 as _);
+pub const UIA_Invoke_InvokedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20009i64 as _);
+pub const UIA_IsActiveAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40036i64 as _);
+pub const UIA_IsAnnotationPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30118i64 as _);
+pub const UIA_IsContentElementPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30017i64 as _);
+pub const UIA_IsControlElementPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30016i64 as _);
+pub const UIA_IsCustomNavigationPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30151i64 as _);
+pub const UIA_IsDataValidForFormPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30103i64 as _);
+pub const UIA_IsDialogPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30174i64 as _);
+pub const UIA_IsDockPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30027i64 as _);
+pub const UIA_IsDragPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30137i64 as _);
+pub const UIA_IsDropTargetPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30141i64 as _);
+pub const UIA_IsEnabledPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30010i64 as _);
+pub const UIA_IsExpandCollapsePatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30028i64 as _);
+pub const UIA_IsGridItemPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30029i64 as _);
+pub const UIA_IsGridPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30030i64 as _);
+pub const UIA_IsHiddenAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40013i64 as _);
+pub const UIA_IsInvokePatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30031i64 as _);
+pub const UIA_IsItalicAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40014i64 as _);
+pub const UIA_IsItemContainerPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30108i64 as _);
+pub const UIA_IsKeyboardFocusablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30009i64 as _);
+pub const UIA_IsLegacyIAccessiblePatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30090i64 as _);
+pub const UIA_IsMultipleViewPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30032i64 as _);
+pub const UIA_IsObjectModelPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30112i64 as _);
+pub const UIA_IsOffscreenPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30022i64 as _);
+pub const UIA_IsPasswordPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30019i64 as _);
+pub const UIA_IsPeripheralPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30150i64 as _);
+pub const UIA_IsRangeValuePatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30033i64 as _);
+pub const UIA_IsReadOnlyAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40015i64 as _);
+pub const UIA_IsRequiredForFormPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30025i64 as _);
+pub const UIA_IsScrollItemPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30035i64 as _);
+pub const UIA_IsScrollPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30034i64 as _);
+pub const UIA_IsSelectionItemPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30036i64 as _);
+pub const UIA_IsSelectionPattern2AvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30168i64 as _);
+pub const UIA_IsSelectionPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30037i64 as _);
+pub const UIA_IsSpreadsheetItemPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30132i64 as _);
+pub const UIA_IsSpreadsheetPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30128i64 as _);
+pub const UIA_IsStylesPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30127i64 as _);
+pub const UIA_IsSubscriptAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40016i64 as _);
+pub const UIA_IsSuperscriptAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40017i64 as _);
+pub const UIA_IsSynchronizedInputPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30110i64 as _);
+pub const UIA_IsTableItemPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30039i64 as _);
+pub const UIA_IsTablePatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30038i64 as _);
+pub const UIA_IsTextChildPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30136i64 as _);
+pub const UIA_IsTextEditPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30149i64 as _);
+pub const UIA_IsTextPattern2AvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30119i64 as _);
+pub const UIA_IsTextPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30040i64 as _);
+pub const UIA_IsTogglePatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30041i64 as _);
+pub const UIA_IsTransformPattern2AvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30134i64 as _);
+pub const UIA_IsTransformPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30042i64 as _);
+pub const UIA_IsValuePatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30043i64 as _);
+pub const UIA_IsVirtualizedItemPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30109i64 as _);
+pub const UIA_IsWindowPatternAvailablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30044i64 as _);
+pub const UIA_ItemContainerPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10019i64 as _);
+pub const UIA_ItemStatusPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30026i64 as _);
+pub const UIA_ItemTypePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30021i64 as _);
+pub const UIA_LabeledByPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30018i64 as _);
+pub const UIA_LandmarkTypePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30157i64 as _);
+pub const UIA_LayoutInvalidatedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20008i64 as _);
+pub const UIA_LegacyIAccessibleChildIdPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30091i64 as _);
+pub const UIA_LegacyIAccessibleDefaultActionPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30100i64 as _);
+pub const UIA_LegacyIAccessibleDescriptionPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30094i64 as _);
+pub const UIA_LegacyIAccessibleHelpPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30097i64 as _);
+pub const UIA_LegacyIAccessibleKeyboardShortcutPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30098i64 as _);
+pub const UIA_LegacyIAccessibleNamePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30092i64 as _);
+pub const UIA_LegacyIAccessiblePatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10018i64 as _);
+pub const UIA_LegacyIAccessibleRolePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30095i64 as _);
+pub const UIA_LegacyIAccessibleSelectionPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30099i64 as _);
+pub const UIA_LegacyIAccessibleStatePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30096i64 as _);
+pub const UIA_LegacyIAccessibleValuePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30093i64 as _);
+pub const UIA_LevelPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30154i64 as _);
+pub const UIA_LineSpacingAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40040i64 as _);
+pub const UIA_LinkAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40035i64 as _);
+pub const UIA_ListControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50008i64 as _);
+pub const UIA_ListItemControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50007i64 as _);
+pub const UIA_LiveRegionChangedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20024i64 as _);
+pub const UIA_LiveSettingPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30135i64 as _);
+pub const UIA_LocalizedControlTypePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30004i64 as _);
+pub const UIA_LocalizedLandmarkTypePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30158i64 as _);
+pub const UIA_MarginBottomAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40018i64 as _);
+pub const UIA_MarginLeadingAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40019i64 as _);
+pub const UIA_MarginTopAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40020i64 as _);
+pub const UIA_MarginTrailingAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40021i64 as _);
+pub const UIA_MenuBarControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50010i64 as _);
+pub const UIA_MenuClosedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20007i64 as _);
+pub const UIA_MenuControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50009i64 as _);
+pub const UIA_MenuItemControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50011i64 as _);
+pub const UIA_MenuModeEndEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20019i64 as _);
+pub const UIA_MenuModeStartEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20018i64 as _);
+pub const UIA_MenuOpenedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20003i64 as _);
+pub const UIA_MultipleViewCurrentViewPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30071i64 as _);
+pub const UIA_MultipleViewPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10008i64 as _);
+pub const UIA_MultipleViewSupportedViewsPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30072i64 as _);
+pub const UIA_NamePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30005i64 as _);
+pub const UIA_NativeWindowHandlePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30020i64 as _);
+pub const UIA_NotificationEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20035i64 as _);
+pub const UIA_ObjectModelPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10022i64 as _);
+pub const UIA_OptimizeForVisualContentPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30111i64 as _);
+pub const UIA_OrientationPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30023i64 as _);
+pub const UIA_OutlineColorPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30161i64 as _);
+pub const UIA_OutlineStylesAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40022i64 as _);
+pub const UIA_OutlineThicknessPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30164i64 as _);
+pub const UIA_OverlineColorAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40023i64 as _);
+pub const UIA_OverlineStyleAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40024i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct UIA_PATTERN_ID(pub i32);
+impl UIA_PATTERN_ID { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for UIA_PATTERN_ID { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for UIA_PATTERN_ID { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for UIA_PATTERN_ID {}
+impl ::core::fmt::Debug for UIA_PATTERN_ID { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for UIA_PATTERN_ID { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for UIA_PATTERN_ID { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for UIA_PATTERN_ID { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for UIA_PATTERN_ID { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct UIA_PROPERTY_ID(pub i32);
+impl UIA_PROPERTY_ID { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for UIA_PROPERTY_ID { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for UIA_PROPERTY_ID { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for UIA_PROPERTY_ID {}
+impl ::core::fmt::Debug for UIA_PROPERTY_ID { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for UIA_PROPERTY_ID { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for UIA_PROPERTY_ID { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for UIA_PROPERTY_ID { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for UIA_PROPERTY_ID { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const UIA_PaneControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50033i64 as _);
+pub const UIA_PositionInSetPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30152i64 as _);
+pub const UIA_ProcessIdPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30002i64 as _);
+pub const UIA_ProgressBarControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50012i64 as _);
+pub const UIA_ProviderDescriptionPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30107i64 as _);
+pub const UIA_RadioButtonControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50013i64 as _);
+pub const UIA_RangeValueIsReadOnlyPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30048i64 as _);
+pub const UIA_RangeValueLargeChangePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30051i64 as _);
+pub const UIA_RangeValueMaximumPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30050i64 as _);
+pub const UIA_RangeValueMinimumPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30049i64 as _);
+pub const UIA_RangeValuePatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10003i64 as _);
+pub const UIA_RangeValueSmallChangePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30052i64 as _);
+pub const UIA_RangeValueValuePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30047i64 as _);
+pub const UIA_RotationPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30166i64 as _);
+pub const UIA_RuntimeIdPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30000i64 as _);
+pub const UIA_SayAsInterpretAsAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40043i64 as _);
+pub const UIA_ScrollBarControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50014i64 as _);
+pub const UIA_ScrollHorizontalScrollPercentPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30053i64 as _);
+pub const UIA_ScrollHorizontalViewSizePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30054i64 as _);
+pub const UIA_ScrollHorizontallyScrollablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30057i64 as _);
+pub const UIA_ScrollItemPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10017i64 as _);
+pub const UIA_ScrollPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10004i64 as _);
+pub const UIA_ScrollVerticalScrollPercentPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30055i64 as _);
+pub const UIA_ScrollVerticalViewSizePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30056i64 as _);
+pub const UIA_ScrollVerticallyScrollablePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30058i64 as _);
+pub const UIA_Selection2CurrentSelectedItemPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30171i64 as _);
+pub const UIA_Selection2FirstSelectedItemPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30169i64 as _);
+pub const UIA_Selection2ItemCountPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30172i64 as _);
+pub const UIA_Selection2LastSelectedItemPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30170i64 as _);
+pub const UIA_SelectionActiveEndAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40037i64 as _);
+pub const UIA_SelectionCanSelectMultiplePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30060i64 as _);
+pub const UIA_SelectionIsSelectionRequiredPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30061i64 as _);
+pub const UIA_SelectionItemIsSelectedPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30079i64 as _);
+pub const UIA_SelectionItemPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10010i64 as _);
+pub const UIA_SelectionItemSelectionContainerPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30080i64 as _);
+pub const UIA_SelectionItem_ElementAddedToSelectionEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20010i64 as _);
+pub const UIA_SelectionItem_ElementRemovedFromSelectionEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20011i64 as _);
+pub const UIA_SelectionItem_ElementSelectedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20012i64 as _);
+pub const UIA_SelectionPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10001i64 as _);
+pub const UIA_SelectionSelectionPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30059i64 as _);
+pub const UIA_Selection_InvalidatedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20013i64 as _);
+pub const UIA_SemanticZoomControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50039i64 as _);
+pub const UIA_SeparatorControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50038i64 as _);
+pub const UIA_SizeOfSetPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30153i64 as _);
+pub const UIA_SizePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30167i64 as _);
+pub const UIA_SliderControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50015i64 as _);
+pub const UIA_SpinnerControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50016i64 as _);
+pub const UIA_SplitButtonControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50031i64 as _);
+pub const UIA_SpreadsheetItemAnnotationObjectsPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30130i64 as _);
+pub const UIA_SpreadsheetItemAnnotationTypesPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30131i64 as _);
+pub const UIA_SpreadsheetItemFormulaPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30129i64 as _);
+pub const UIA_SpreadsheetItemPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10027i64 as _);
+pub const UIA_SpreadsheetPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10026i64 as _);
+pub const UIA_StatusBarControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50017i64 as _);
+pub const UIA_StrikethroughColorAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40025i64 as _);
+pub const UIA_StrikethroughStyleAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40026i64 as _);
+pub const UIA_StructureChangedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20002i64 as _);
+pub const UIA_StyleIdAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40034i64 as _);
+pub const UIA_StyleNameAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40033i64 as _);
+pub const UIA_StylesExtendedPropertiesPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30126i64 as _);
+pub const UIA_StylesFillColorPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30122i64 as _);
+pub const UIA_StylesFillPatternColorPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30125i64 as _);
+pub const UIA_StylesFillPatternStylePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30123i64 as _);
+pub const UIA_StylesPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10025i64 as _);
+pub const UIA_StylesShapePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30124i64 as _);
+pub const UIA_StylesStyleIdPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30120i64 as _);
+pub const UIA_StylesStyleNamePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30121i64 as _);
+pub const UIA_SynchronizedInputPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10021i64 as _);
+pub const UIA_SystemAlertEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20023i64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct UIA_TEXTATTRIBUTE_ID(pub i32);
+impl UIA_TEXTATTRIBUTE_ID { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for UIA_TEXTATTRIBUTE_ID { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for UIA_TEXTATTRIBUTE_ID { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for UIA_TEXTATTRIBUTE_ID {}
+impl ::core::fmt::Debug for UIA_TEXTATTRIBUTE_ID { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for UIA_TEXTATTRIBUTE_ID { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for UIA_TEXTATTRIBUTE_ID { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for UIA_TEXTATTRIBUTE_ID { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for UIA_TEXTATTRIBUTE_ID { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const UIA_TabControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50018i64 as _);
+pub const UIA_TabItemControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50019i64 as _);
+pub const UIA_TableColumnHeadersPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30082i64 as _);
+pub const UIA_TableControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50036i64 as _);
+pub const UIA_TableItemColumnHeaderItemsPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30085i64 as _);
+pub const UIA_TableItemPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10013i64 as _);
+pub const UIA_TableItemRowHeaderItemsPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30084i64 as _);
+pub const UIA_TablePatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10012i64 as _);
+pub const UIA_TableRowHeadersPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30081i64 as _);
+pub const UIA_TableRowOrColumnMajorPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30083i64 as _);
+pub const UIA_TabsAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40027i64 as _);
+pub const UIA_TextChildPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10029i64 as _);
+pub const UIA_TextControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50020i64 as _);
+pub const UIA_TextEditPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10032i64 as _);
+pub const UIA_TextEdit_ConversionTargetChangedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20033i64 as _);
+pub const UIA_TextEdit_TextChangedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20032i64 as _);
+pub const UIA_TextFlowDirectionsAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40028i64 as _);
+pub const UIA_TextPattern2Id: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10024i64 as _);
+pub const UIA_TextPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10014i64 as _);
+pub const UIA_Text_TextChangedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20015i64 as _);
+pub const UIA_Text_TextSelectionChangedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20014i64 as _);
+pub const UIA_ThumbControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50027i64 as _);
+pub const UIA_TitleBarControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50037i64 as _);
+pub const UIA_TogglePatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10015i64 as _);
+pub const UIA_ToggleToggleStatePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30086i64 as _);
+pub const UIA_ToolBarControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50021i64 as _);
+pub const UIA_ToolTipClosedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20001i64 as _);
+pub const UIA_ToolTipControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50022i64 as _);
+pub const UIA_ToolTipOpenedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20000i64 as _);
+pub const UIA_Transform2CanZoomPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30133i64 as _);
+pub const UIA_Transform2ZoomLevelPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30145i64 as _);
+pub const UIA_Transform2ZoomMaximumPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30147i64 as _);
+pub const UIA_Transform2ZoomMinimumPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30146i64 as _);
+pub const UIA_TransformCanMovePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30087i64 as _);
+pub const UIA_TransformCanResizePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30088i64 as _);
+pub const UIA_TransformCanRotatePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30089i64 as _);
+pub const UIA_TransformPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10016i64 as _);
+pub const UIA_TreeControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50023i64 as _);
+pub const UIA_TreeItemControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50024i64 as _);
+pub const UIA_UnderlineColorAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40029i64 as _);
+pub const UIA_UnderlineStyleAttributeId: crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID = crate::Win32::UI::Accessibility::UIA_TEXTATTRIBUTE_ID(40030i64 as _);
+pub const UIA_ValueIsReadOnlyPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30046i64 as _);
+pub const UIA_ValuePatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10002i64 as _);
+pub const UIA_ValueValuePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30045i64 as _);
+pub const UIA_VirtualizedItemPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10020i64 as _);
+pub const UIA_VisualEffectsPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30163i64 as _);
+pub const UIA_WindowCanMaximizePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30073i64 as _);
+pub const UIA_WindowCanMinimizePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30074i64 as _);
+pub const UIA_WindowControlTypeId: crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID = crate::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(50032i64 as _);
+pub const UIA_WindowIsModalPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30077i64 as _);
+pub const UIA_WindowIsTopmostPropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30078i64 as _);
+pub const UIA_WindowPatternId: crate::Win32::UI::Accessibility::UIA_PATTERN_ID = crate::Win32::UI::Accessibility::UIA_PATTERN_ID(10009i64 as _);
+pub const UIA_WindowWindowInteractionStatePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30076i64 as _);
+pub const UIA_WindowWindowVisualStatePropertyId: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID = crate::Win32::UI::Accessibility::UIA_PROPERTY_ID(30075i64 as _);
+pub const UIA_Window_WindowClosedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20017i64 as _);
+pub const UIA_Window_WindowOpenedEventId: crate::Win32::UI::Accessibility::UIA_EVENT_ID = crate::Win32::UI::Accessibility::UIA_EVENT_ID(20016i64 as _);
+pub const UiaAppendRuntimeId: u32 = 3;
+mod import_UiaClientsAreListening { #[link(name = "UIAutomationCore", kind = "raw-dylib")] extern "system" { #[link_name = "UiaClientsAreListening"] pub fn call() -> crate::core::BOOL; } }
+pub use import_UiaClientsAreListening::call as UiaClientsAreListening_raw;
+#[inline]
+pub unsafe fn UiaClientsAreListening() -> crate::core::BOOL {
+import_UiaClientsAreListening::call()}
+mod import_UiaDisconnectAllProviders { #[link(name = "UIAutomationCore", kind = "raw-dylib")] extern "system" { #[link_name = "UiaDisconnectAllProviders"] pub fn call() -> crate::core::HRESULT; } }
+pub use import_UiaDisconnectAllProviders::call as UiaDisconnectAllProviders_raw;
+#[inline]
+pub unsafe fn UiaDisconnectAllProviders() -> Result<(), crate::core::HRESULT> {
+let hr__ = import_UiaDisconnectAllProviders::call(); hr__.ok()?;
+Ok(())
+}
+mod import_UiaDisconnectProvider { #[link(name = "UIAutomationCore", kind = "raw-dylib")] extern "system" { #[link_name = "UiaDisconnectProvider"] pub fn call(pProvider: *mut ::core::ffi::c_void) -> crate::core::HRESULT; } }
+pub use import_UiaDisconnectProvider::call as UiaDisconnectProvider_raw;
+#[inline]
+pub unsafe fn UiaDisconnectProvider(pProvider: &crate::Win32::UI::Accessibility::IRawElementProviderSimple) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_UiaDisconnectProvider::call(pProvider.as_raw()); hr__.ok()?;
+Ok(())
+}
+mod import_UiaGetReservedNotSupportedValue { #[link(name = "UIAutomationCore", kind = "raw-dylib")] extern "system" { #[link_name = "UiaGetReservedNotSupportedValue"] pub fn call(punkNotSupportedValue: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT; } }
+pub use import_UiaGetReservedNotSupportedValue::call as UiaGetReservedNotSupportedValue_raw;
+#[inline]
+pub unsafe fn UiaGetReservedNotSupportedValue() -> Result<crate::Win32::System::Com::IUnknown, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = import_UiaGetReservedNotSupportedValue::call(&mut result__); hr__.ok()?;
+crate::Win32::System::Com::IUnknown::from_raw(result__)
+}
+mod import_UiaHostProviderFromHwnd { #[link(name = "UIAutomationCore", kind = "raw-dylib")] extern "system" { #[link_name = "UiaHostProviderFromHwnd"] pub fn call(hwnd: crate::Win32::Foundation::HWND,ppProvider: *mut *mut ::core::ffi::c_void) -> crate::core::HRESULT; } }
+pub use import_UiaHostProviderFromHwnd::call as UiaHostProviderFromHwnd_raw;
+#[inline]
+pub unsafe fn UiaHostProviderFromHwnd(hwnd: crate::Win32::Foundation::HWND) -> Result<crate::Win32::UI::Accessibility::IRawElementProviderSimple, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = import_UiaHostProviderFromHwnd::call(hwnd,&mut result__); hr__.ok()?;
+crate::Win32::UI::Accessibility::IRawElementProviderSimple::from_raw(result__)
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct UiaPoint {
+pub x: f64,
+pub y: f64,
+}
+impl UiaPoint { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for UiaPoint { fn default() -> Self {Self::default()} }
+mod import_UiaRaiseAutomationEvent { #[link(name = "UIAutomationCore", kind = "raw-dylib")] extern "system" { #[link_name = "UiaRaiseAutomationEvent"] pub fn call(pProvider: *mut ::core::ffi::c_void,id: crate::Win32::UI::Accessibility::UIA_EVENT_ID) -> crate::core::HRESULT; } }
+pub use import_UiaRaiseAutomationEvent::call as UiaRaiseAutomationEvent_raw;
+#[inline]
+pub unsafe fn UiaRaiseAutomationEvent(pProvider: &crate::Win32::UI::Accessibility::IRawElementProviderSimple,id: crate::Win32::UI::Accessibility::UIA_EVENT_ID) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_UiaRaiseAutomationEvent::call(pProvider.as_raw(),id); hr__.ok()?;
+Ok(())
+}
+mod import_UiaRaiseAutomationPropertyChangedEvent { #[link(name = "UIAutomationCore", kind = "raw-dylib")] extern "system" { #[link_name = "UiaRaiseAutomationPropertyChangedEvent"] pub fn call(pProvider: *mut ::core::ffi::c_void,id: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,oldValue: crate::Win32::System::Variant::VARIANT,newValue: crate::Win32::System::Variant::VARIANT) -> crate::core::HRESULT; } }
+pub use import_UiaRaiseAutomationPropertyChangedEvent::call as UiaRaiseAutomationPropertyChangedEvent_raw;
+#[inline]
+pub unsafe fn UiaRaiseAutomationPropertyChangedEvent(pProvider: &crate::Win32::UI::Accessibility::IRawElementProviderSimple,id: crate::Win32::UI::Accessibility::UIA_PROPERTY_ID,oldValue: crate::Win32::System::Variant::VARIANT,newValue: crate::Win32::System::Variant::VARIANT) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_UiaRaiseAutomationPropertyChangedEvent::call(pProvider.as_raw(),id,oldValue,newValue); hr__.ok()?;
+Ok(())
+}
+mod import_UiaRaiseNotificationEvent { #[link(name = "UIAutomationCore", kind = "raw-dylib")] extern "system" { #[link_name = "UiaRaiseNotificationEvent"] pub fn call(provider: *mut ::core::ffi::c_void,notificationKind: crate::Win32::UI::Accessibility::NotificationKind,notificationProcessing: crate::Win32::UI::Accessibility::NotificationProcessing,displayString: *mut u16,activityId: *mut u16) -> crate::core::HRESULT; } }
+pub use import_UiaRaiseNotificationEvent::call as UiaRaiseNotificationEvent_raw;
+#[inline]
+pub unsafe fn UiaRaiseNotificationEvent(provider: &crate::Win32::UI::Accessibility::IRawElementProviderSimple,notificationKind: crate::Win32::UI::Accessibility::NotificationKind,notificationProcessing: crate::Win32::UI::Accessibility::NotificationProcessing,displayString: Option<*mut u16>,activityId: *mut u16) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_UiaRaiseNotificationEvent::call(provider.as_raw(),notificationKind,notificationProcessing,displayString.unwrap_or(unsafe { ::core::mem::zeroed() }),activityId); hr__.ok()?;
+Ok(())
+}
+mod import_UiaRaiseStructureChangedEvent { #[link(name = "UIAutomationCore", kind = "raw-dylib")] extern "system" { #[link_name = "UiaRaiseStructureChangedEvent"] pub fn call(pProvider: *mut ::core::ffi::c_void,structureChangeType: crate::Win32::UI::Accessibility::StructureChangeType,pRuntimeId: *mut i32,cRuntimeIdLen: i32) -> crate::core::HRESULT; } }
+pub use import_UiaRaiseStructureChangedEvent::call as UiaRaiseStructureChangedEvent_raw;
+#[inline]
+pub unsafe fn UiaRaiseStructureChangedEvent(pProvider: &crate::Win32::UI::Accessibility::IRawElementProviderSimple,structureChangeType: crate::Win32::UI::Accessibility::StructureChangeType,pRuntimeId: *mut i32,cRuntimeIdLen: i32) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_UiaRaiseStructureChangedEvent::call(pProvider.as_raw(),structureChangeType,pRuntimeId,cRuntimeIdLen); hr__.ok()?;
+Ok(())
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct UiaRect {
+pub left: f64,
+pub top: f64,
+pub width: f64,
+pub height: f64,
+}
+impl UiaRect { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for UiaRect { fn default() -> Self {Self::default()} }
+mod import_UiaReturnRawElementProvider { #[link(name = "UIAutomationCore", kind = "raw-dylib")] extern "system" { #[link_name = "UiaReturnRawElementProvider"] pub fn call(hwnd: crate::Win32::Foundation::HWND,wParam: crate::Win32::Foundation::WPARAM,lParam: crate::Win32::Foundation::LPARAM,el: *mut ::core::ffi::c_void) -> crate::Win32::Foundation::LRESULT; } }
+pub use import_UiaReturnRawElementProvider::call as UiaReturnRawElementProvider_raw;
+#[inline]
+pub unsafe fn UiaReturnRawElementProvider(hwnd: crate::Win32::Foundation::HWND,wParam: crate::Win32::Foundation::WPARAM,lParam: crate::Win32::Foundation::LPARAM,el: &crate::Win32::UI::Accessibility::IRawElementProviderSimple) -> crate::Win32::Foundation::LRESULT {
+import_UiaReturnRawElementProvider::call(hwnd,wParam,lParam,el.as_raw())}
+pub const UiaRootObjectId: i32 = -25;
+}
 pub mod Controls {
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -23146,6 +28215,7 @@ pub const WM_ENTERSIZEMOVE: u32 = 561;
 pub const WM_ERASEBKGND: u32 = 20;
 pub const WM_EXITSIZEMOVE: u32 = 562;
 pub const WM_GETMINMAXINFO: u32 = 36;
+pub const WM_GETOBJECT: u32 = 61;
 pub const WM_IME_CHAR: u32 = 646;
 pub const WM_IME_COMPOSITION: u32 = 271;
 pub const WM_IME_ENDCOMPOSITION: u32 = 270;

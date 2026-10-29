@@ -67,6 +67,7 @@ pub enum AllocJob {
 pub struct Submission {
     pub buffer: RcObjcId,
     pub entry: InFlightCb,
+    pub native_frames: Vec<super::super::media::layers::Frame>,
 }
 
 /// hardware: the command queue's pool, `newCommandQueueWithMaxCommandBufferCount` (the driver's
@@ -109,6 +110,8 @@ pub struct Device {
     pub completed: Arc<AtomicU64>,
     /// the sequence number of the newest command buffer created
     pub seq: u64,
+    /// frame completions waiting for a command buffer number (`when_completed`)
+    waiters: Arc<Mutex<Vec<(u64, crate::completion::CompletionReply)>>>,
     pub mailbox: Mailbox,
     alloc_tx: Option<SyncSender<AllocJob>>,
     alloc_thread: Option<std::thread::JoinHandle<()>>,
@@ -205,6 +208,7 @@ impl Device {
             name,
             unified_memory,
             completed,
+            waiters: Default::default(),
             seq: 0,
             mailbox,
             alloc_tx: Some(alloc_tx),
@@ -270,9 +274,11 @@ impl Device {
         let seq = self.seq;
         let completed = self.completed.clone();
         let in_flight = self.in_flight.clone();
+        let waiters = self.waiters.clone();
         let () = unsafe {
             msg_send![buffer.as_id(), addCompletedHandler: &objc_block!(move |cb: ObjcId| {
                 completed.fetch_max(seq, Ordering::AcqRel);
+                answer_waiters(&waiters, completed.load(Ordering::Acquire));
                 let entry = {
                     let mut queue = lock_in_flight(&in_flight);
                     queue.iter().position(|e| e.seq == seq).and_then(|at| queue.remove(at))
@@ -285,8 +291,8 @@ impl Device {
 
     /// Commits a command buffer through the submit thread (`commit` never runs on the backend
     /// thread). Saturated: it stays queued, in order, for the next flush.
-    pub fn commit(&mut self, buffer: RcObjcId, entry: InFlightCb) {
-        self.submit_retry.push_back(Submission { buffer, entry });
+    pub fn commit(&mut self, buffer: RcObjcId, entry: InFlightCb, native_frames: Vec<super::super::media::layers::Frame>) {
+        self.submit_retry.push_back(Submission { buffer, entry, native_frames });
         self.flush_submissions();
     }
 
@@ -430,6 +436,31 @@ impl Device {
     }
 }
 
+impl Device {
+    /// Answers `reply` once every command buffer up to the newest one created has completed.
+    pub fn when_completed(&self, reply: crate::completion::CompletionReply) {
+        crate::lock(&self.waiters).push((self.seq, reply));
+        // a buffer that completed meanwhile answered nobody: answer it here
+        answer_waiters(&self.waiters, self.completed.load(Ordering::Acquire));
+    }
+}
+
+/// Answers the waiters whose command buffers completed (`done` and below).
+fn answer_waiters(waiters: &Mutex<Vec<(u64, crate::completion::CompletionReply)>>, done: u64) {
+    let ready: Vec<_> = {
+        let mut w = crate::lock(waiters);
+        if w.is_empty() {
+            return;
+        }
+        let (ready, rest) = std::mem::take(&mut *w).into_iter().partition(|(seq, _)| *seq <= done);
+        *w = rest;
+        ready
+    };
+    for (_, reply) in ready {
+        reply.send(Ok(None));
+    }
+}
+
 impl Drop for Device {
     fn drop(&mut self) {
         self.watchdog_stop.store(true, Ordering::Release);
@@ -458,6 +489,12 @@ fn spawn_submitter(in_flight: InFlightQueue, mailbox: Mailbox) -> (SyncSender<Su
                 let buffer = submission.buffer.as_id();
                 lock_in_flight(&in_flight).push_back(submission.entry);
                 let _: () = unsafe { msg_send![buffer, commit] };
+                if !submission.native_frames.is_empty() {
+                    let _: () = unsafe { msg_send![buffer, waitUntilScheduled] };
+                    let scheduled = super::super::media::layers::trace_enabled().then(Instant::now);
+                    let status: u64 = unsafe { msg_send![buffer, status] };
+                    if status != 5 { super::layers::scheduled(submission.native_frames, scheduled); }
+                }
                 drop(submission.buffer);
                 let _: () = unsafe { msg_send![pool, release] };
             }

@@ -272,6 +272,11 @@ pub struct CornerCapView {
 }
 
 impl Widget for CornerCapView {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // The children and the caps go inside ONE turtle of our own so that
         // the parent sees a single walk. A quad drawn after a child's walk

@@ -170,6 +170,7 @@ impl App {
         let mut msgs = Vec::new();
         if viewport.x >= 1.0 && viewport.y >= 1.0 {
             msgs.push(StudioToApp::WindowGeomChange {
+                    screen_origin: None,
                 window_id, dpi_factor: dpi, left: 0.0, top: 0.0, width: viewport.x, height: viewport.y,
             });
         }

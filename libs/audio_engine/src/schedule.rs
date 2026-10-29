@@ -774,6 +774,7 @@ pub fn compile<E: Ext, B: Default>(slice: &OwnerSlice, generation: u64, incarnat
                 inst_class = match inst {
                     makepad_score_player::Inst::Ironfish { .. } => 1,
                     makepad_score_player::Inst::Shader { .. } => 2,
+                    makepad_score_player::Inst::Morph { .. } => 8,
                     // A choir is made for its singers and style, and for a
                     // library singer that has (or has not yet) arrived.
                     makepad_score_player::Inst::Voice { .. } => {
@@ -1065,6 +1066,21 @@ fn loop_inst(node: &LiveNode) -> Result<makepad_score_player::Inst, PlanError> {
             };
             let program = number(node, "program").unwrap_or(0.0).max(0.0) as usize;
             Inst::Ironfish { key, patch: makepad_score_player::presets::iron_patch(program, &values) }
+        }
+        // Morph: its patch text (checked by the score), the samples its
+        // oscillators read, and the tables built here, off the audio thread.
+        "morph" => {
+            let patch = makepad_audio_synth::morph::MorphPatch::parse(text(node, "morph").unwrap_or("")).map_err(|error| PlanError::at(&node.id, Some("morph"), error))?;
+            let names: Vec<String> = match node.param("morph_src") {
+                Some(Literal::Arr(items)) => items.iter().map(|item| match item {
+                    Literal::Str(name) => name.clone(),
+                    _ => String::new(),
+                }).collect(),
+                _ => Vec::new(),
+            };
+            let sample = |o: usize| names.get(o).filter(|n| !n.is_empty()).and_then(|n| crate::feed::samples::get(n)).map(|s| makepad_audio_synth::kit::osc::SampleBuf { data: s.left.clone(), rate: s.rate });
+            let src = patch.sources([sample(0), sample(1), sample(2)]);
+            Inst::Morph { key, patch: Arc::new(patch), src }
         }
         "shader" => {
             let (shader, params) = shader_of(node, makepad_score_player::shader::Kind::Instrument)?;

@@ -12,11 +12,12 @@ pub use app_process::ShutdownOutcome;
 pub use error::{IntoTestResult, TestError, TestResult};
 pub use makepad_studio_protocol::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, RemoteKeyModifiers, RemoteMouseDown,
-    RemoteMouseMove, RemoteMouseUp, StudioToApp, TextInputEvent, WidgetSnapshot,
+    RemoteMouseMove, RemoteMouseUp, StudioToApp, TextInputEvent,
 };
 pub use makepad_test_macros::makepad_test;
-pub use remote::WindowInfo;
-pub use runtime::{run_with_config, Locator, TestApp, TestConfig, WidgetMatch};
+pub use remote::{WindowInfo, NodeMatch, UiSnapshot, LogTail};
+pub use makepad_a11y::{Node, NodeId, Role, States, Actions, Toggle};
+pub use runtime::{run_with_config, Locator, TestApp, TestConfig};
 pub use selector::Selector;
 
 #[doc(hidden)]

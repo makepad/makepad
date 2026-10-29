@@ -194,6 +194,12 @@ impl Node {
         let sync_ctx = Arc::new(crate::sync::NodeCtx { machine: conf.name.clone(), publish: Arc::new(move |r| { s2.emit(&r.to_json()); }) });
         crate::sync::register_master(&master_ep, &sync_ctx);
         crate::lease::exec::register(&master_ep, &sync_ctx);
+        let (machine, s3) = (conf.name.clone(), sink.clone());
+        master_ep.register(
+            "jitcache",
+            1,
+            lines::service("jitcache", Arc::new(move |line, out| crate::jitcache::service(&machine, line, out, &|r| { s3.emit(&r.to_json()); }))),
+        );
         listen_control(&master_ep)?;
         let mut node = Node { conf, local, master_ep, peers, addr: None, lan_off: None };
         let Some(trust) = trust else {

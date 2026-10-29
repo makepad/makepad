@@ -38,11 +38,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 mod collected;
-pub use collected::{CollectedCache, CollectedRecord, CollectedWritten};
+pub use collected::{CollectedCache, CollectedDest, CollectedRecord, CollectedWritten};
 mod image;
 use image::{ManifestImage, IMAGE_MAGIC};
 pub(crate) use image::{complete_identities_unit, ids_report_unit, image_broken_unit, image_slot_by_key_unit, name_unnamed_unit, prelink_unit, PrelinkedSlot};
 mod items;
+mod deps;
 mod demand;
 mod front_run;
 pub use front_run::FrontSink;
@@ -59,7 +60,7 @@ const KIND_BORROWCK: u32 = 4;
 /// the checker's own version: bump when its rules change (old verdicts are then ignored)
 pub const BORROWCK_VERSION: u32 = 2;
 /// the coherence check's own version: bump when its rules change
-const COHERENCE_VERSION: u32 = 1;
+const COHERENCE_VERSION: u32 = 2;
 
 /// Immutable driver view for Gandalf's generic owner discovery. No Unit/cache
 /// callbacks under the front read lock, and no need to construct an instance key
@@ -145,6 +146,15 @@ const KIND_FRONT_GRAPH: u32 = 8;
 const KIND_DEMAND_PART: u32 = 13;
 /// a graph store's list of the crate stores its demand parts take images from (prune keeps them)
 const KIND_DEMAND_STORES: u32 = 16;
+/// the names a fn body's macro expansions produced (cache/deps.rs exp_names), keyed by the code
+/// key the fn has without them: a later run keys the fn's code without parsing its body
+const KIND_EXP_NAMES: u32 = 17;
+/// the program's item graph (cache/deps.rs Deps::encode), one per program (its root crate's code
+/// store, under a key of the program's view: replaced when the program changes)
+const KIND_DEPS: u32 = 18;
+/// a program's last load order (cache.rs load_order): its crates (name, root), in order, keyed by
+/// the graph's crate set (GraphRecipe::set)
+const KIND_FRONT_ORDER: u32 = 19;
 const KIND_CONST: u32 = 9;
 const KIND_WARM_OUTCOME: u32 = 10;
 /// stores a front image was mapped from: kept for the rest of the process (the arrays point
@@ -407,6 +417,10 @@ pub struct CacheStats {
     /// already; wall ns of the whole prelink
     pub prelinked: u64,
     pub prelink_changed: u64,
+    /// image slots naming a changed crate prelinked after all (their key and certificate as
+    /// recorded), and the ns their check took
+    pub prelink_rekeyed: u64,
+    pub prelink_check_ns: u64,
     pub prelink_failed: u64,
     pub prelink_had_code: u64,
     pub prelink_ns: u64,
@@ -518,6 +532,15 @@ pub struct Cache {
     /// the same without the bound crates: what a collected image stores (run, check and
     /// check --boundary of one program bind different sets, the image is shared by all)
     iface_plain: Vec<u128>,
+    /// per crate: its view (items.rs crate_views, bound crates folded in): what code keys and
+    /// store names take from the crate besides its items
+    view: Vec<u128>,
+    /// the program's item graph (cache/deps.rs), built on the first key that needs it
+    deps: Option<std::sync::Arc<deps::Deps>>,
+    /// (crate, name) -> what the name finds from the crate (deps.rs name_closure)
+    name_memo: HashMap<(u32, deps::Name), u128>,
+    /// per definition: its body's names, as one closure hash (code keys)
+    body_names: HashMap<DefId, u128>,
     /// per file: its interface hash and the fn bodies outside it
     digests: Vec<Option<std::sync::Arc<items::FileDigest>>>,
     /// per definition: its body (when a hole) and position digest, hashed (code keys)
@@ -532,6 +555,15 @@ pub struct Cache {
     verdict_rejected: HashSet<u128>,
     /// per slot: the crates its key names (a certificate's fast path)
     slot_crates: HashMap<u32, Vec<u32>>,
+    /// value entries (record_const) whose stored certificate no longer holds: recorded again
+    const_stale: HashSet<u128>,
+    /// value entries this run validated or recorded: the startup image takes only these
+    const_live: HashSet<u128>,
+    /// the code keys of the bodies value certificates name (code_key_bytes by identity)
+    const_body_keys: HashMap<FnKey, Option<(u128, Vec<u32>, Vec<u8>)>>,
+    /// per crate: the indexes of its opened crate stores (has_front_key_in_crate)
+    front_stores_of: Vec<Vec<u32>>,
+    front_stores_n: usize,
     /// while a key is encoded: the definitions it names (their local bodies join the key)
     enc_defs: Option<Vec<DefId>>,
     /// crate identity hash -> crate index
@@ -605,11 +637,19 @@ pub struct Cache {
     pub manifest_uncached: usize,
     /// of the slots before the first present: how many had a code entry when it was recorded
     manifest_present_cached: usize,
-    /// the loaded manifest's code keys by the hash of their slot's identity bytes, when the
-    /// manifest was recorded from exactly this run's sources (manifest_sources_key): a slot's
-    /// code key is then taken as recorded instead of hashing the bodies it is made from again
-    /// (code_key_bytes). Empty otherwise.
+    /// the loaded manifest's code keys by the hash of their slot's identity bytes: a slot's code
+    /// key is taken as recorded instead of hashing the bodies it is made from again
+    /// (code_key_bytes) when every crate its identity names is as the manifest was recorded
+    /// from (`manifest_key_crates`). Empty without a manifest whose entries are all here.
     manifest_keys: HashMap<u128, u128>,
+    /// per crate: unchanged since the manifest was recorded (its fingerprint, which covers its
+    /// dependencies, is the one in the manifest's startup image); None: every crate (the manifest
+    /// was recorded from exactly this run's sources, manifest_sources_key). A slot whose crates
+    /// are all unchanged has its recorded key -- the startup image's rule for prelinking its code.
+    manifest_key_crates: Option<Vec<bool>>,
+    /// the loaded manifest's code keys, in `manifest`'s order (0: none): a slot whose key this
+    /// run's manifest changes had its old entry superseded (record_manifest removes it)
+    manifest_old_keys: Vec<u128>,
     /// the manifest's prelinked startup image (the code of its slots before the first present,
     /// stored once relocatable against a table of this run's identities: `prelink`)
     image: Option<ManifestImage>,
@@ -729,6 +769,28 @@ fn hash_bytes(b: &[u8]) -> u128 {
     crate::sip::hash_bytes(b)
 }
 
+/// What opening a cache reads of a unit: its program and types, and the settings the cache is
+/// keyed by (OpenFrom::of)
+pub struct OpenFrom<'a> {
+    pub prog: &'a crate::program::Program,
+    pub tcx: &'a crate::tcx::Tcx,
+    pub opt: relax_codegen::opt::OptCfg,
+    pub tier1: bool,
+    pub global_allocator: Option<DefId>,
+    pub provided: Vec<(u32, u64)>,
+}
+impl<'a> OpenFrom<'a> {
+    pub fn of(u: &'a Unit) -> Self {
+        Self::with(u, &u.prog, &u.tcx)
+    }
+    /// `u`'s settings with program `prog` and types `tcx` (the same program: a settle rebuild's
+    /// new state)
+    pub fn with(u: &Unit, prog: &'a crate::program::Program, tcx: &'a crate::tcx::Tcx) -> Self {
+        OpenFrom { prog, tcx, opt: u.opt.clone(), tier1: u.tier1.is_some(), global_allocator: crate::jit::global_allocator_static_of(prog),
+            provided: u.provided.iter().map(|(k, pc)| (*k, pc.binding)).collect() }
+    }
+}
+
 impl Cache {
     /// Opens the cache for this unit: the directory for this Relax build and target, every
     /// pack's index (packs whose recorded late macro inputs changed are skipped).
@@ -748,17 +810,32 @@ impl Cache {
 
     /// The one opener: cache root `root`, optionally with the restored collected graph.
     pub fn open_in_collected(u: &Unit, mode: Mode, root: PathBuf, collected: Option<&CollectedCache>) -> Result<Cache, String> {
-        let runtime = u.prog.session.runtime.clone();
-        let options = &u.prog.session.clone().options;
+        Self::open_from(&OpenFrom::of(u), mode, root, collected)
+    }
+
+    /// The one opener, from what it reads of a unit (`from`): also off the owner thread, for a
+    /// program no other thread reaches (settle_rebuild opens the new state's cache before its
+    /// replace).
+    pub fn open_from(from: &OpenFrom<'_>, mode: Mode, root: PathBuf, collected: Option<&CollectedCache>) -> Result<Cache, String> {
+        let runtime = from.prog.session.runtime.clone();
+        let options = &from.prog.session.clone().options;
         let verbose = options.verbose;
         let t0 = std::time::Instant::now();
         pack::ensure_private_dir(&root)?;
         let dir = root.join("cache");
         pack::ensure_private_dir(&dir)?;
-        let prog = &u.prog;
-        let collected = collected.filter(|c| c.fps.len() <= prog.crates.len()
+        let prog = &from.prog;
+        // a partial restore's (an edited start): the kept crates' definition tables
+        let kept = collected.filter(|c| c.kept.is_some_and(|(k, _)| k <= prog.crates.len() && k <= c.fps.len()));
+        let collected = collected.filter(|c| c.kept.is_none() && c.fps.len() <= prog.crates.len()
             && c.defs == prog.defs.len() && c.files == prog.files.len());
-        let fps = collected.map_or_else(|| crate::stable::crate_fingerprints(prog), |c| c.fps.clone());
+        // a partial restore's kept crates: the fingerprints and interfaces of the image (their
+        // inputs are the certified ones); only the crates loaded after them are hashed
+        let kept_n = kept.and_then(|c| c.kept).map_or(0, |(k, _)| k);
+        let fps = match collected {
+            Some(c) => c.fps.clone(),
+            None => crate::stable::crate_fingerprints_from(prog, kept.map_or(&[][..], |c| &c.fps[..kept_n])),
+        };
         // A swap preserves the original cache prefix; runtime crates stay outside boot stores.
         let ncr = fps.len();
         let t_fp = t0.elapsed();
@@ -779,19 +856,19 @@ impl Cache {
         cfgh.u32(ENTRY_VERSION);
         cfgh.u32(STORE_FORMAT);
         cfgh.u128(crate::codegen_id::id());
-        let o = &u.opt;
+        let o = &from.opt;
         for b in [o.inline, o.inline_all, o.fold, o.cse, o.sroa, o.licm, o.imm, o.layout] {
             cfgh.u8(b as u8);
         }
-        cfgh.u8(u.tier1.is_some() as u8);
+        cfgh.u8(from.tier1 as u8);
         // which crates are bound to the loader's rustc build (provided.rs) is in the interface
         // fingerprints (items::apply_bound), so only the code that can reach a bound crate is keyed by it
-        cfgh.u128(u.prog.session.options.fingerprint());
+        cfgh.u128(from.prog.session.options.fingerprint());
         // the static a #[global_allocator] program's allocator shim calls: code inlining a shim
         // caller (core::heap::alloc & co) is certified by crate fingerprints, which do not show
         // whether or which allocator the program has (the static's type is in the shim callers'
         // own keys, code_key_bytes)
-        match u.global_allocator_static() {
+        match from.global_allocator {
             Some(s) => {
                 cfgh.u8(1);
                 cfgh.u128(crate_ident.get(prog.def(s).krate as usize).copied().unwrap_or(0));
@@ -814,6 +891,10 @@ impl Cache {
             fps,
             iface: Vec::new(),
             iface_plain: Vec::new(),
+            view: Vec::new(),
+            deps: None,
+            name_memo: HashMap::new(),
+            body_names: HashMap::new(),
             digests: Vec::new(),
             def_bodies: HashMap::new(),
             code_path: Vec::new(),
@@ -821,6 +902,11 @@ impl Cache {
             cert_rejected: HashSet::new(),
             verdict_rejected: HashSet::new(),
             slot_crates: HashMap::new(),
+            const_stale: HashSet::new(),
+            const_live: HashSet::new(),
+            const_body_keys: HashMap::new(),
+            front_stores_of: Vec::new(),
+            front_stores_n: 0,
             enc_defs: None,
             crate_by_ident,
             crate_ident,
@@ -854,6 +940,8 @@ impl Cache {
             manifest_missing: 0,
             manifest_uncached: 0,
             manifest_keys: HashMap::new(),
+            manifest_key_crates: None,
+            manifest_old_keys: Vec::new(),
             manifest_present_cached: 0,
             image: None,
             image_ids: None,
@@ -900,21 +988,37 @@ impl Cache {
                 c.digests = vec![None; prog.files.len()];
                 c.iface_plain = cc.ifaces.clone();
             }
-            None => {
-                c.digests = items::file_digests(prog);
-                c.iface_plain = items::crate_ifaces(prog, &c.fps, &c.digests);
-                c.iface_plain.truncate(ncr);
-            }
+            None => match kept.filter(|k| k.ifaces.len() >= kept_n && std::env::var_os("MAKEPAD_RUN_CACHE_IFACE").is_none()) {
+                // the crates loaded after the kept ones: their files, on several threads (a kept
+                // file is digested when a key needs it, def_body)
+                Some(kc) => {
+                    c.digests = vec![None; prog.files.len()];
+                    let want: Vec<usize> = (0..prog.files.len()).filter(|&f| prog.file_crate.get(f).is_some_and(|&k| k as usize >= kept_n)).collect();
+                    items::file_digests_of(prog, &want, &mut c.digests);
+                    c.iface_plain = items::crate_ifaces_from(prog, &c.fps, &c.digests, &kc.ifaces[..kept_n]);
+                    c.iface_plain.truncate(ncr);
+                }
+                None => {
+                    // (every file, on several threads)
+                    c.digests = items::file_digests(prog);
+                    c.iface_plain = items::crate_ifaces(prog, &c.fps, &c.digests);
+                    c.iface_plain.truncate(ncr);
+                }
+            },
         }
-        let provided: Vec<(u32, u64)> = u.provided.iter().map(|(k, pc)| (*k, pc.binding)).collect();
+        let provided: Vec<(u32, u64)> = from.provided.clone();
         c.iface = items::apply_bound(prog, &c.iface_plain, &provided);
+        // the views (a restored collected program digests no file: its interfaces are restored)
+        let mut view = items::crate_views(prog, &c.iface_plain, &deps::atomic_crates(prog, ncr));
+        view.truncate(ncr);
+        c.view = items::apply_bound(prog, &view, &provided);
         c.stats.iface_ns = t_if.elapsed().as_nanos() as u64;
         // MAKEPAD_RUN_CACHE_IFACE=<file>: every file's interface hash and crate's interface
         // fingerprint (which file made an edit's crate recompile)
         if let Ok(path) = std::env::var("MAKEPAD_RUN_CACHE_IFACE") {
             let mut out = String::new();
             for (ci, v) in c.iface.iter().enumerate() {
-                out.push_str(&format!("crate\t{}\t{:032x}\n", prog.syms.str(prog.crates[ci].name), v));
+                out.push_str(&format!("crate\t{}\t{:032x}\t{:032x}\n", prog.syms.str(prog.crates[ci].name), v, c.view.get(ci).copied().unwrap_or(0)));
             }
             for (i, d) in c.digests.iter().enumerate() {
                 if let Some(d) = d {
@@ -931,8 +1035,10 @@ impl Cache {
                 }
             }
         }
+        // named by the view: an edit of the crate's items keeps its store (the entries' keys say
+        // which code still holds)
         for ci in 0..ncr {
-            c.code_path.push(dir.join(code_store_name(options, prog.syms.str(prog.crates[ci].name), c.iface[ci])));
+            c.code_path.push(dir.join(code_store_name(options, prog.syms.str(prog.crates[ci].name), c.view[ci])));
         }
         c.depth = crate_depths(prog);
         c.stale = vec![false; ncr];
@@ -1071,8 +1177,12 @@ impl Cache {
         c.stats.index_entries = (c.index.len() + c.mapped_index.as_ref().map_or(0, |m| m.len())) as u64;
         let t_packs = t0.elapsed();
         // Load-time front writes make a cold cache nonempty, but need no code definition maps.
-        if c.has_code_entries() && !collected.is_some_and(|graph| c.restore_collected_definitions(&u.prog, graph.definitions)) {
-            c.build_def_maps(u);
+        if c.has_code_entries() && !collected.is_some_and(|graph| c.restore_collected_definitions(&from.prog, graph.definitions)) {
+            match kept.and_then(|cc| cc.kept.map(|(k, d)| (cc, k, d))) {
+                // the kept crates' tables mapped, the others' maps built
+                Some((cc, k, d)) if c.restore_kept_definitions(&from.prog, cc.definitions, cc.defs, cc.fps.len(), k, d) => c.build_def_maps_from(from.prog, from.tcx, k),
+                _ => c.build_def_maps(from.prog, from.tcx),
+            }
         }
         c.stats.open_ns = t0.elapsed().as_nanos() as u64;
         if crate::preload::trace() {
@@ -1111,12 +1221,21 @@ impl Cache {
 
     /// Image availability is local to the crate's store, even when another world already
     /// mapped the same source (the process-wide key index may point at that other store).
-    fn has_front_key_in_crate(&self, krate: u32, key: u128) -> bool {
-        let stored = self.stores.iter().any(|st| {
-            self.crate_path.get(krate as usize) == Some(&st.path)
-                && st.index.binary_search_by_key(&key, |e| e.key).ok().is_some_and(|i| st.index[i].kind == KIND_FRONT_REF)
-        });
-        stored || self.pending.iter().any(|(c, e)| *c == krate && e.key == key && e.kind == KIND_FRONT_REF)
+    fn has_front_key_in_crate(&mut self, krate: u32, key: u128) -> bool {
+        // (the crate's opened stores, found once: every mid-run write asks for every file)
+        if self.front_stores_of.len() != self.crate_path.len() || self.front_stores_n != self.stores.len() {
+            self.front_stores_n = self.stores.len();
+            let mut of = vec![Vec::new(); self.crate_path.len()];
+            for (si, st) in self.stores.iter().enumerate() {
+                if let Some(k) = self.crate_path.iter().position(|p| *p == st.path) { of[k].push(si as u32); }
+            }
+            self.front_stores_of = of;
+        }
+        let stored = self.front_stores_of.get(krate as usize).is_some_and(|v| v.iter().any(|&si| {
+            let st = &self.stores[si as usize];
+            st.index.binary_search_by_key(&key, |e| e.key).ok().is_some_and(|i| st.index[i].kind == KIND_FRONT_REF)
+        }));
+        stored || self.pending_keys.contains(&key) && self.pending.iter().any(|(c, e)| *c == krate && e.key == key && e.kind == KIND_FRONT_REF)
     }
 
     /// Queues references to file `path`'s images (`main`, `part`: where they are) for crate
@@ -1133,8 +1252,10 @@ impl Cache {
         let mut n = 0;
         for (key, loc) in [(Self::front_key(path, source_hash), main), (Self::front_part_key(path, source_hash), part)] {
             let Some(loc) = loc else { continue };
-            if self.front_reserved.contains(&(krate, key)) || self.has_front_key_in_crate(krate, key) { continue; }
+            if self.front_reserved.contains(&(krate, key)) { continue; }
+            // (found or queued now: the next write's scan takes the memo)
             self.front_reserved.insert((krate, key));
+            if self.has_front_key_in_crate(krate, key) { continue; }
             self.pending_keys.insert(key);
             self.push_pending(krate, NewEntry { key, kind: KIND_FRONT_REF, payload: front_run::encode_ref(loc) });
             n += 1;
@@ -1271,7 +1392,14 @@ impl Cache {
     /// Every crate's map from definition key to definition, built on several threads (cache
     /// open, before main: nothing changes the program meanwhile). A warm start decodes
     /// definitions of most crates; building their maps lazily on the main thread cost ~30 ms.
-    fn build_def_maps(&mut self, u: &Unit) {
+    fn build_def_maps(&mut self, prog: &crate::program::Program, tcx: &crate::tcx::Tcx) {
+        self.build_def_maps_from(prog, tcx, 0);
+    }
+
+    /// build_def_maps of the crates from `first` on (the ones before have mapped tables).
+    fn build_def_maps_from(&mut self, prog: &crate::program::Program, tcx: &crate::tcx::Tcx, first: usize) {
+        struct ProgTcx<'a> { prog: &'a crate::program::Program, tcx: &'a crate::tcx::Tcx }
+        let u = &ProgTcx { prog, tcx };
         let mut by = vec![Vec::new(); u.prog.crates.len()];
         for i in 0..u.prog.defs.len() {
             let d = DefId(i as u32);
@@ -1280,11 +1408,11 @@ impl Cache {
             }
         }
         self.crate_defs_n = u.prog.defs.len();
-        let mut order: Vec<usize> = (0..by.len()).filter(|c| !by[*c].is_empty()).collect();
+        let mut order: Vec<usize> = (first..by.len()).filter(|c| !by[*c].is_empty()).collect();
         order.sort_by_key(|c| std::cmp::Reverse(by[*c].len()));
         let n = std::thread::available_parallelism().map_or(4, |x| x.get()).clamp(1, 8);
         let next = std::sync::atomic::AtomicUsize::new(0);
-        struct Shared<'a>(&'a Unit);
+        struct Shared<'a>(&'a ProgTcx<'a>);
         unsafe impl Sync for Shared<'_> {}
         let sh = Shared(u);
         let ci = &self.crate_ident;
@@ -1325,7 +1453,9 @@ impl Cache {
             self.def_maps.insert(c, m);
             self.def_keys.extend(memo);
         }
-        self.crate_defs = vec![Vec::new(); u.prog.crates.len()];
+        // the crates before `first` keep their lists: dec_def builds such a map on its first miss
+        for v in by.iter_mut().skip(first) { *v = Vec::new(); }
+        self.crate_defs = by;
     }
 
     /// A file version in an entry: its path and source hash (see file_ids).
@@ -1430,7 +1560,13 @@ impl Cache {
             self.mapped_definitions = None;
         }
         if let Some(mapped) = &self.mapped_definitions {
-            return mapped.definition(c, k);
+            // (a partial restore's tables hold for its kept crates' definitions before its suffix;
+            // the rest -- the other crates, a kept crate's on-demand tail -- go by the maps)
+            match mapped.definition(c, k) {
+                Some(d) => return Some(d),
+                None if !mapped.partial() => return None,
+                None => {}
+            }
         }
         if !self.def_maps.contains_key(&c) {
             let t0 = relax_backend::cpu_ns();
@@ -2041,6 +2177,21 @@ impl Cache {
         Some((k, bytes))
     }
 
+    /// Whether the slot identity `b` (enc_fnkey bytes) names only crates unchanged since the
+    /// loaded manifest was recorded (`manifest_key_crates`): its code key is then the recorded
+    /// one, as for every slot of those crates (a closure, named by its file: no).
+    pub(super) fn identity_unchanged(&self, b: &[u8]) -> bool {
+        if self.manifest_keys.is_empty() || !crate::reload::edited_crates().is_empty() { return false; }
+        let Some(ok) = &self.manifest_key_crates else { return true };
+        let mut all = true;
+        let mut d = D { b, p: 0 };
+        let read = image::skip_fnkey(&mut d, 0, &mut |a| all &= match a {
+            image::Atom::Crate(ident) => self.crate_by_ident.get(&ident).is_some_and(|&c| ok.get(c as usize) == Some(&true)),
+            image::Atom::File(_) => false,
+        });
+        read.is_some() && d.p == b.len() && all
+    }
+
     fn code_key_bytes(&mut self, u: &Unit, key: &FnKey) -> Option<(u128, Vec<u32>, Vec<u8>)> {
         let mut e = E::default();
         let mut crates = Vec::new();
@@ -2068,31 +2219,256 @@ impl Cache {
         crates.sort_unstable();
         crates.dedup();
         let dom = self.dominant(&crates);
-        // a slot of the startup manifest, recorded from these sources and none edited since:
-        // its key as recorded (the bodies below hash to what they hashed to then)
-        let recorded = if self.manifest_keys.is_empty() || !crate::reload::edited_crates().is_empty() { None } else { self.manifest_keys.get(&identity_hash(&e.0)).copied() };
+        // a slot of the startup manifest whose crates are as it was recorded from and none
+        // edited since: its key as recorded (the bodies below hash to what they hashed to then)
+        let unchanged = |c: &u32| self.manifest_key_crates.as_ref().is_none_or(|ok| ok.get(*c as usize) == Some(&true));
+        let recorded = if self.manifest_keys.is_empty() || !crate::reload::edited_crates().is_empty() || !crates.iter().all(unchanged) { None }
+            else { self.manifest_keys.get(&identity_hash(&e.0)).copied() };
         let k = match recorded {
             Some(k) => k,
             None => {
+                let g = self.deps_graph(u);
                 let mut h = Sip128::new();
-                h.str("code");
+                h.str("code-deps");
                 h.u128(self.cfg);
                 h.write(&e.0);
                 h.write(&shim.0);
+                // what the crates give besides their items (deps.rs): name, cfg, dependencies,
+                // bound crates, the whole fingerprints of the sysroot, and the items every node of
+                // the crate sees (inner attributes, glob imports)
                 for &c in &crates {
-                    h.u128(*self.iface.get(c as usize)?);
+                    h.u128(*self.view.get(c as usize)?);
+                    h.u128(g.always(c));
+                }
+                // the items the identity names (the definition, the types of its arguments): what
+                // they reach of the program's interfaces; one with no node (an item a fn body
+                // defines) by its crate's whole interface fingerprint
+                let mut defs = named.clone();
+                defs.sort_unstable_by_key(|d| d.0);
+                defs.dedup();
+                for d in defs {
+                    match g.def_closure(&u.prog, d) {
+                        Some(x) => h.u128(x),
+                        None if g.in_graph(&u.prog, d) => {
+                            h.str("coarse");
+                            h.u128(*self.iface.get(u.prog.def(d).krate as usize)?);
+                        }
+                        None => {}
+                    }
                 }
                 // the bodies the code is made from: the definition's, a closure's enclosing fns'
-                for d in key_defs(u, key) {
+                // -- their text and position, and what the names in them find
+                let kd = key_defs(u, key);
+                for &d in &kd {
                     h.u128(self.def_body(u, d));
+                    h.u128(self.body_names_of(u, d, &g));
                 }
                 // types defined in a fn body (their text is that body's)
                 self.local_bodies(u, &named, &mut h);
+                let k0 = h.finish128();
+                // and what the names of their macro expansions find (unknown until the body is
+                // parsed or an earlier run recorded them: no key yet, none remembered)
+                let mut h = Sip128::new();
+                h.str("code-exp");
+                h.u128(k0);
+                for &d in &kd {
+                    match self.exp_closure(u, d, k0, dom, &g) {
+                        Some(x) => h.u128(x),
+                        None => {
+                            self.key_waits = true;
+                            return None;
+                        }
+                    }
+                }
                 h.finish128()
             }
         };
         self.key_crate.insert(k, dom);
         Some((k, crates, e.0))
+    }
+
+    /// The item graph (cache/deps.rs), on the first need: the stored one when it was built from
+    /// this program's very sources (a warm start maps it), else built over it -- the rows of the
+    /// crates whose sources and dependencies are as it was built from are taken over, only the
+    /// other crates' boot files are digested and walked (a restored collected program digests
+    /// files lazily) -- and recorded for the next start. MAKEPAD_RUN_DEPS_VERIFY=1: a graph built
+    /// over a stored one is checked against one built from scratch.
+    fn deps_graph(&mut self, u: &Unit) -> std::sync::Arc<deps::Deps> {
+        if let Some(g) = &self.deps {
+            return g.clone();
+        }
+        let t0 = std::time::Instant::now();
+        let prog = &u.prog;
+        let ncr = self.iface.len();
+        let valid = deps::Deps::valid(prog, self.cfg, &self.fps);
+        let root = self.manifest_root.unwrap_or(ncr.saturating_sub(1) as u32);
+        let key = self.deps_key(root);
+        let stored = key.and_then(|k| {
+            let (si, _) = self.index_at(k)?;
+            let store = self.stores.get(si as usize)?.clone();
+            let (kind, p) = self.get_checked(k)?;
+            if kind != KIND_DEPS { return None; }
+            // SAFETY: `store` (kept by the graph) holds the mapping
+            let p: &'static [u8] = unsafe { std::slice::from_raw_parts(p.as_ptr(), p.len()) };
+            deps::Deps::read(prog, ncr, p, store)
+        });
+        if stored.as_ref().is_some_and(|g| g.built_from() == valid && g.crate_count() == prog.crates.len()) {
+            let g = std::sync::Arc::new(stored.unwrap());
+            if self.verbose {
+                eprintln!("makepad-run cache: item graph: {} nodes mapped in {:.1} ms", g.nodes_n, t0.elapsed().as_secs_f64() * 1e3);
+            }
+            self.deps = Some(g.clone());
+            return g;
+        }
+        if self.digests.len() < prog.files.len() {
+            self.digests.resize(prog.files.len(), None);
+        }
+        let atomic = deps::atomic_crates(prog, ncr);
+        let digest = |clean: &[bool], digests: &mut Vec<Option<std::sync::Arc<items::FileDigest>>>| {
+            let want: Vec<usize> = (0..prog.boot_files.min(prog.files.len()))
+                .filter(|&f| digests[f].is_none() && prog.file_crate.get(f).is_some_and(|&c| !atomic.get(c as usize).copied().unwrap_or(true) && !clean.get(c as usize).copied().unwrap_or(false)))
+                .collect();
+            items::file_digests_of(prog, &want, digests);
+            want.len()
+        };
+        // (a graph whose component ids ran far is not built over: the next one starts them again)
+        let stored = stored.filter(|g| g.ids_left());
+        let clean = deps::Deps::clean_crates(prog, &self.iface_plain, stored.as_ref());
+        let mut digested = digest(&clean, &mut self.digests);
+        let t_dg = t0.elapsed();
+        let built = deps::Deps::build(prog, &self.digests, &self.iface_plain, valid, stored.as_ref());
+        let over = built.is_some() && clean.iter().any(|&c| c);
+        let g = match built {
+            Some(g) => g,
+            None => {
+                // the alias or macro names changed: every crate is walked
+                digested += digest(&[], &mut self.digests);
+                deps::Deps::build(prog, &self.digests, &self.iface_plain, valid, None).expect("a graph built from scratch")
+            }
+        };
+        if self.verbose {
+            eprintln!("makepad-run cache: item graph: {} nodes ({} walked, {} of {} crates taken over), {} edges, {} coarse, built in {:.1} ms (digests of {} files {:.1} ms; files to {:.1}, edges to {:.1}, components to {:.1}, hashed to {:.1})",
+                g.nodes_n, g.walked, if over { clean.iter().filter(|&&c| c).count() } else { 0 }, clean.len(), g.edges, g.coarse, t0.elapsed().as_secs_f64() * 1e3,
+                digested, t_dg.as_secs_f64() * 1e3, g.phases[0], g.phases[1], g.phases[2], g.phases[3]);
+        }
+        if over && std::env::var("MAKEPAD_RUN_DEPS_VERIFY").is_ok_and(|v| v == "1") {
+            digest(&[], &mut self.digests);
+            let scratch = deps::Deps::build(prog, &self.digests, &self.iface_plain, valid, None).expect("a graph built from scratch");
+            match g.same_closures(&scratch) {
+                Ok(()) => eprintln!("makepad-run cache: item graph verified: built over the stored graph = built from scratch"),
+                Err(e) => eprintln!("makepad-run cache: item graph verify FAILED: {e}"),
+            }
+        }
+        if let Some(k) = key.filter(|_| self.mode != Mode::ReadOnly && (root as usize) < ncr) {
+            // (one slot per root: the newest graph replaces the one it was built over)
+            self.pending_keys.insert(k);
+            self.push_pending(root, NewEntry { key: k, kind: KIND_DEPS, payload: g.encode() });
+        }
+        let g = std::sync::Arc::new(g);
+        self.deps = Some(g.clone());
+        g
+    }
+
+    /// The key of the stored item graph of the program rooted at crate `root`: one per root and
+    /// Relax build (a newer graph replaces it; Deps::valid says what it was built from).
+    fn deps_key(&self, root: u32) -> Option<u128> {
+        let mut h = Sip128::new();
+        h.str("deps-graph-v2");
+        h.u128(self.cfg);
+        h.u128(*self.crate_ident.get(root as usize)?);
+        Some(h.finish128())
+    }
+
+    /// File `f`'s digest (made on the first need).
+    fn digest_of(&mut self, u: &Unit, f: usize) -> Option<std::sync::Arc<items::FileDigest>> {
+        let pf = u.prog.files.get(f)?;
+        if self.digests.len() <= f {
+            self.digests.resize(u.prog.files.len(), None);
+        }
+        Some(self.digests[f].get_or_insert_with(|| std::sync::Arc::new(items::file_digest(pf))).clone())
+    }
+
+    /// What name `n` finds from crate `c` (memo of deps.rs name_closure).
+    fn name_closure(&mut self, g: &deps::Deps, c: u32, n: deps::Name) -> u128 {
+        *self.name_memo.entry((c, n)).or_insert_with(|| g.name_closure(c, n))
+    }
+
+    /// Definition `d`'s body (when a hole: deps.rs): what the names written in it find.
+    fn body_names_of(&mut self, u: &Unit, d: DefId, g: &deps::Deps) -> u128 {
+        if let Some(&k) = self.body_names.get(&d) {
+            return k;
+        }
+        let def = u.prog.def(d);
+        let (f, item, c) = (def.file as usize, def.item, def.krate);
+        let mut h = Sip128::new();
+        h.str("body-names");
+        if let Some(dg) = self.digest_of(u, f) {
+            if let Some((lo, hi)) = dg.body_span(item) {
+                let (mut names, mut invoked) = (Vec::new(), Vec::new());
+                deps::scan(&u.prog.files[f].src, &[(lo, hi)], &[], &mut names, &mut invoked);
+                names.sort_unstable();
+                names.dedup();
+                let mut v: Vec<u128> = names.iter().map(|&n| self.name_closure(g, c, n)).filter(|&x| x != 0).collect();
+                v.sort_unstable();
+                v.dedup();
+                h.u32(v.len() as u32);
+                for x in v { h.u128(x); }
+            }
+        }
+        let k = h.finish128();
+        self.body_names.insert(d, k);
+        k
+    }
+
+    /// What the names of the macro expansions in definition `d`'s body find (0: its body invokes
+    /// no macro that can name anything; deps.rs). The names come from the body's parse in this run
+    /// (then recorded under `k0`, the code key without them, for a later run) or from that record.
+    /// None: the body is not parsed and nothing was recorded (the key is not known yet).
+    fn exp_closure(&mut self, u: &Unit, d: DefId, k0: u128, dom: u32, g: &deps::Deps) -> Option<u128> {
+        let def = u.prog.def(d);
+        let (f, item, c) = (def.file as usize, def.item, def.krate);
+        let Some(dg) = self.digest_of(u, f) else { return Some(0) };
+        let Some((lo, hi)) = dg.body_span(item) else { return Some(0) };
+        let pf = &u.prog.files[f];
+        let (mut names, mut invoked) = (Vec::new(), Vec::new());
+        deps::scan(&pf.src, &[(lo, hi)], &[], &mut names, &mut invoked);
+        if !invoked.iter().any(|&m| g.loud(m)) {
+            return Some(0);
+        }
+        let mut kh = Sip128::new();
+        kh.str("exp-names");
+        kh.u128(k0);
+        kh.u128(self.def_key(u, d));
+        let ekey = kh.finish128();
+        let owner = dg.hole_owner(item);
+        let lazy = matches!(pf.ast.items.get(owner as usize).map(|it| &it.kind), Some(crate::ast::ItemKind::Fn(_, None, _)));
+        let names = match deps::exp_names(pf, lo, hi, lazy) {
+            Some(n) => {
+                if self.mode != Mode::ReadOnly && !self.has_index(&ekey) && self.pending_keys.insert(ekey) {
+                    let mut p = Vec::with_capacity(4 + n.len() * 8);
+                    p.extend_from_slice(&(n.len() as u32).to_le_bytes());
+                    for x in &n { p.extend_from_slice(&x.to_le_bytes()); }
+                    self.push_pending(dom, NewEntry { key: ekey, kind: KIND_EXP_NAMES, payload: p });
+                }
+                n
+            }
+            None => match self.get_checked(ekey) {
+                Some((KIND_EXP_NAMES, p)) => {
+                    let n = u32::from_le_bytes(p.get(0..4)?.try_into().ok()?) as usize;
+                    if p.len() != 4 + n * 8 { return None; }
+                    (0..n).map(|i| u64::from_le_bytes(p[4 + i * 8..12 + i * 8].try_into().unwrap())).collect()
+                }
+                _ => return None,
+            },
+        };
+        let mut v: Vec<u128> = names.iter().map(|&n| self.name_closure(g, c, n)).filter(|&x| x != 0).collect();
+        v.sort_unstable();
+        v.dedup();
+        let mut h = Sip128::new();
+        h.str("exp-closure");
+        h.u32(v.len() as u32);
+        for x in v { h.u128(x); }
+        Some(h.finish128())
     }
 
     /// The bodies that define any of `named` (local items), into a key.
@@ -2162,17 +2538,19 @@ impl Cache {
 
     /// The key of the run's coherence verdict (orphan rules, overlapping impls: Tcx::report_coherence):
     /// the checker version, the cache configuration (Relax build, options), every crate's
-    /// fingerprint (all its files' text, cfg, dependencies) and the files the program's impls come
-    /// from (the selection loads a subset of files). A clean verdict under this key is stored
+    /// interface fingerprint (its items outside fn bodies, cfg, dependencies) and the files the
+    /// program's impls come from (the selection loads a subset of files). A clean verdict under this key is stored
     /// as a borrowck-kind entry with an empty payload. None after a live edit.
     pub fn coherence_key(&self, prog: &crate::program::Program) -> Option<u128> {
-        if !crate::reload::edited_crates().is_empty() || self.fps.len() != prog.crates.len() { return None; }
+        if !crate::reload::edited_crates().is_empty() || self.iface_plain.len() != prog.crates.len() { return None; }
         let mut h = Sip128::new();
         h.str("coherence-verdict");
         h.u32(COHERENCE_VERSION);
         h.u128(self.cfg);
-        h.u32(self.fps.len() as u32);
-        for fp in &self.fps { h.u128(*fp); }
+        // by the crates' interfaces (their impls and every item they can name; a fn body is
+        // interface when it declares an impl), not their whole texts: a body edit checks nothing
+        h.u32(self.iface_plain.len() as u32);
+        for i in &self.iface_plain { h.u128(*i); }
         let mut from = vec![false; prog.files.len()];
         for im in &prog.impls {
             *from.get_mut(prog.def(im.def).file as usize)? = true;
@@ -2584,16 +2962,15 @@ impl Cache {
             return;
         }
         self.pending_keys.insert(key);
-        // a replacement without a stored entry makes the startup image be written again; one that
-        // moves its slot's tier up (O1 -> O2/O3) counts like a stale image slot (record_manifest:
-        // rewritten past 2%); an O3 payload replacing an O3 entry neither (PGO-driven O3 code
-        // differs run to run; every warm run rewrote the whole image)
+        // a replacement of an entry with no recorded tier, and one that moves its slot's tier up
+        // (O1 -> O2/O3), count like a stale image slot (record_manifest: rewritten past 2%; the
+        // next start leaves a slot lazy whose entry outranks its image code, img_live, and the
+        // image code of an entry replaced at the same tier is code for the same key); an O3
+        // payload replacing an O3 entry neither (PGO-driven O3 code differs run to run; every
+        // warm run rewrote the whole image)
         if replace && (existing || self.linked.contains(&id)) {
             match self.entry_tier(key) {
-                None => {
-                    self.image_rewrite = true;
-                    self.stats.rewrite_why[0] += 1;
-                }
+                None => self.stats.rewrite_why[0] += 1,
                 Some(old) if payload_tier(&payload).is_some_and(|new| tier_rank(new) > tier_rank(old)) => self.stats.rewrite_why[1] += 1,
                 Some(_) => {}
             }
@@ -2881,7 +3258,9 @@ impl Cache {
         let mut h = Sip128::new();
         h.str("startup slots");
         h.u128(self.cfg);
-        h.u128(*self.iface.get(root as usize)?);
+        // the program's view, not its interface: the manifest names each slot's key, which says
+        // whether its entry holds after an edit (load_manifest)
+        h.u128(*self.view.get(root as usize)?);
         Some(h.finish128())
     }
 
@@ -2926,6 +3305,10 @@ impl Cache {
         self.manifest_len = old.manifest_len;
         self.collected_committed = true;
         self.stats = old.stats.clone();
+        // the same program (settle_rebuild compares it): the same item graph and definitions
+        self.deps = old.deps.clone();
+        self.name_memo = old.name_memo.clone();
+        self.body_names = old.body_names.clone();
     }
 
     /// Reads the newest startup manifest of the program rooted at crate `root` (and its
@@ -2959,21 +3342,31 @@ impl Cache {
                     Some(present.min(n))
                 })();
                 if let Some(present) = ok {
-                    // recorded from these very sources: its keys are this run's keys
-                    let sources = self.manifest_sources_key(key);
-                    if missing == 0 && self.mode != Mode::Verify && pk.get(sources).is_some_and(|(kind, p)| kind == KIND_MANIFEST && D { b: p, p: 0 }.u128() == Some(self.sources_fp())) {
-                        self.manifest_keys = out.iter().zip(&keys).filter(|(_, k)| **k != 0).map(|(b, k)| (identity_hash(b), *k)).collect();
-                    }
-                    self.manifest = out;
-                    self.manifest_present = present;
-                    self.manifest_missing = missing;
-                    self.manifest_uncached = uncached;
-                    self.manifest_present_cached = present_cached;
                     // the image section after the slot list (the store keeps the mapping alive)
                     if d.u32() == Some(IMAGE_MAGIC) {
                         let rest = &p[d.p..];
                         self.image = Some(ManifestImage { _store: pk.clone(), at: rest.as_ptr() as usize, len: rest.len() });
                     }
+                    // recorded from these very sources: its keys are this run's keys; else those
+                    // of the slots whose crates its image records with this run's fingerprints
+                    let sources = self.manifest_sources_key(key);
+                    let same = pk.get(sources).is_some_and(|(kind, p)| kind == KIND_MANIFEST && D { b: p, p: 0 }.u128() == Some(self.sources_fp()));
+                    let crates = if same { Some(None) } else {
+                        self.image.as_ref().and_then(|im| image::image_crates(im.bytes())).map(|recorded| {
+                            let recorded: HashMap<u128, u128> = recorded.into_iter().collect();
+                            Some(self.crate_ident.iter().zip(&self.fps).map(|(id, fp)| recorded.get(id) == Some(fp)).collect())
+                        })
+                    };
+                    if let Some(crates) = crates.filter(|_| missing == 0 && self.mode != Mode::Verify) {
+                        self.manifest_keys = out.iter().zip(&keys).filter(|(_, k)| **k != 0).map(|(b, k)| (identity_hash(b), *k)).collect();
+                        self.manifest_key_crates = crates;
+                    }
+                    self.manifest = out;
+                    self.manifest_old_keys = keys;
+                    self.manifest_present = present;
+                    self.manifest_missing = missing;
+                    self.manifest_uncached = uncached;
+                    self.manifest_present_cached = present_cached;
                     self.image_rewrite = self.image.is_none();
                 }
                 return;
@@ -2997,7 +3390,7 @@ impl Cache {
             }
         }
         let _mem = crate::memstat::tag(crate::memstat::Tag::CacheStore);
-        if self.mode == Mode::ReadOnly || order.is_empty() || (self.manifest_done && order.len() <= self.manifest_len && !self.image_rewrite && self.stats.rewrite_why[1] as usize * 50 <= self.image_slots) {
+        if self.mode == Mode::ReadOnly || order.is_empty() || (self.manifest_done && order.len() <= self.manifest_len && !self.image_rewrite && (self.stats.rewrite_why[0] + self.stats.rewrite_why[1]) as usize * 50 <= self.image_slots) {
             return true;
         }
         // at exit the slots' keys can no longer be made: after the mid-run manifest the exit
@@ -3010,11 +3403,12 @@ impl Cache {
         let Some(key) = self.manifest_key(root) else { self.manifest_done = true; self.manifest_len = order.len(); return true };
         // what earlier spills of this run wrote: the image takes those entries too
         self.index_written();
+        crate::run::yield_section("manifest keys");
         let mut list: Vec<(Vec<u8>, u128)> = Vec::with_capacity(order.len());
         let mut before_present = 0;
         let mut present_ids = Vec::new();
         for (n, &id) in order.iter().enumerate() {
-            if n % 256 == 255 && stop() { return false; }
+            if n % 64 == 63 && stop() { return false; }
             if let Some(b) = self.slot_bytes(u, id) {
                 let entry = match self.slot_key(u, id) {
                     Some(k) if self.has_index(&k) || self.pending_keys.contains(&k) => k,
@@ -3028,12 +3422,14 @@ impl Cache {
             }
         }
         if self.verbose { eprintln!("makepad-run cache: manifest phases: {} slots keyed in {:.1} ms", order.len(), t0.elapsed().as_secs_f64() * 1e3); }
+        if stop() { return false; }
+        crate::run::yield_section("manifest compare");
         let old: HashSet<&[u8]> = self.manifest.iter().map(|b| b.as_slice()).collect();
         let new = list.iter().filter(|b| !old.contains(b.0.as_slice())).count();
         // the same start as before (within 2%), the loaded manifest still valid and its image
         // current (within 2%, and covering all but 2% of its cached slots): no new one
         let image_current = !self.image_rewrite
-            && (self.image_slots == 0 || ((self.image_stale + self.stats.rewrite_why[1] as usize) * 50 <= self.image_slots && self.image_slots * 50 >= self.manifest_present_cached * 49));
+            && (self.image_slots == 0 || ((self.image_stale + (self.stats.rewrite_why[0] + self.stats.rewrite_why[1]) as usize) * 50 <= self.image_slots && self.image_slots * 50 >= self.manifest_present_cached * 49));
         if self.startup_manifest_valid() && new * 50 <= list.len() && image_current {
             self.manifest_done = true; self.manifest_len = order.len();
             return true;
@@ -3042,33 +3438,67 @@ impl Cache {
             eprintln!("makepad-run cache: startup manifest rewritten: valid {} (missing {}), {} new of {}, image rewrite {} (replacements without a stored entry {}, tier-ups {}), image slots {} stale {} cached at present {}",
                 self.startup_manifest_valid(), self.manifest_missing, new, list.len(), self.image_rewrite, self.stats.rewrite_why[0], self.stats.rewrite_why[1], self.image_slots, self.image_stale, self.manifest_present_cached);
         }
+        crate::run::yield_section("manifest image");
         let img = if self.mode != Mode::Verify && !self.image_bad {
             match self.build_image(u, &present_ids, stop) { Err(()) => return false, Ok(img) => img }
         } else { None };
-        self.manifest_done = true; self.manifest_len = order.len();
         // at exit no key can be made any more (slot_key): slots no lookup or record keyed this
         // run fall out of the image. A rewrite then (O2/O3 code replaced startup code since the
         // mid-run write) must not replace the loaded image with one covering fewer slots: the
         // next start would prelink a fraction of it (Calculator: 16,000 -> 2 slots)
+        crate::run::yield_section("manifest tail");
+        if stop() { return false; }
         let n_img = img.as_ref().map_or(0, |i| i.1 as usize);
         if crate::preempt::is_stopped() && self.image_slots > 0 && n_img * 50 < self.image_slots * 49 && !self.image_bad {
             if self.verbose {
                 eprintln!("makepad-run cache: startup manifest kept: at exit the image would cover {} of the {} slots the loaded one has", n_img, self.image_slots);
             }
+            self.manifest_done = true; self.manifest_len = order.len();
             return true;
         }
+        // the entry first (the yield checks: nothing is queued before the last of them)
+        crate::run::yield_section("manifest entry");
         let mut e = E::default();
         e.u32(ENTRY_VERSION);
         e.u32(list.len() as u32);
         e.u32(before_present as u32);
-        for (b, entry) in &list {
+        for (i, (b, entry)) in list.iter().enumerate() {
+            if i % 1024 == 1023 && stop() { return false; }
             e.bytes(b);
             e.u128(*entry);
         }
         if let Some((img, _)) = img {
             e.u32(IMAGE_MAGIC);
-            e.0.extend_from_slice(&img);
+            for part in img.chunks(1 << 20) {
+                e.0.extend_from_slice(part);
+                if stop() { return false; }
+            }
         }
+        // the code entries this manifest supersedes: a slot of the loaded manifest whose key
+        // changed (an edit reached what its code is made from) left its old entry behind under a
+        // key nothing names any more (code stores are named by the crate's view, which an edit
+        // keeps). Removed with this manifest's write, its bytes are dead space: the store
+        // rewrite drops them once they outgrow a quarter of the live ones (store.rs append).
+        crate::run::yield_section("manifest superseded");
+        let mut gone: Vec<u128> = Vec::new();
+        if self.manifest.len() == self.manifest_old_keys.len() {
+            let old_keys: HashMap<&[u8], u128> = self.manifest.iter().zip(&self.manifest_old_keys)
+                .filter(|(_, k)| **k != 0).map(|(b, k)| (b.as_slice(), *k)).collect();
+            for (i, (b, k)) in list.iter().enumerate() {
+                if i % 1024 == 1023 && stop() { return false; }
+                if let Some(o) = old_keys.get(b.as_slice()).filter(|o| *k != 0 && **o != *k && !self.pending_keys.contains(o)) { gone.push(*o); }
+            }
+        }
+        // (past the last yield check: this manifest is the run's)
+        self.manifest_done = true; self.manifest_len = order.len();
+        let mut removed = 0;
+        for o in gone {
+            let Some((p, _)) = self.index_at(o) else { continue };
+            let Some(c) = self.code_path.iter().position(|cp| *cp == self.stores[p as usize].path) else { continue };
+            self.push_pending(c as u32, NewEntry { key: o, kind: crate::store::KIND_REMOVED, payload: Vec::new() });
+            removed += 1;
+        }
+        if self.verbose && removed != 0 { eprintln!("makepad-run cache: {} code entries superseded by this manifest: removed", removed); }
         self.push_pending(root, NewEntry { key, kind: KIND_MANIFEST, payload: e.0 });
         // the sources the keys above were made from (none after a live edit: this run's
         // fingerprints describe its start, not the edited files)
@@ -4136,6 +4566,43 @@ fn front_graph_key(identity: u128) -> u128 {
     h.u128(identity);
     h.finish128()
 }
+fn front_order_key(set: u128) -> u128 {
+    let mut h = Sip128::new();
+    h.str("front-order");
+    h.u128(crate::codegen_id::id());
+    h.str(std::env::consts::ARCH); h.str(std::env::consts::OS);
+    h.u128(set);
+    h.finish128()
+}
+fn front_order_path(dir: &std::path::Path, set: u128) -> PathBuf {
+    dir.join(format!("front_order-{:016x}.rcs", front_order_key(set) as u64))
+}
+/// The load order the last collected image of a program with these crates was recorded in.
+fn read_front_order(dir: &std::path::Path, set: u128) -> Option<Vec<(String, String)>> {
+    let store = Store::open(&front_order_path(dir, set))?;
+    let (kind, bytes) = store.get(front_order_key(set))?;
+    if kind != KIND_FRONT_ORDER { return None; }
+    crate::crate_image::decode(bytes)
+}
+/// Records `recipe`'s order as its crate set's last one (after its collected image is written:
+/// the next start loads in this order and restores that image). Unchanged: nothing written.
+pub(crate) fn write_front_order(dir: &std::path::Path, recipe: &crate::crate_image::GraphRecipe) {
+    if read_front_order(dir, recipe.set).as_ref() == Some(&recipe.crates) { return; }
+    let entry = NewEntry { key: front_order_key(recipe.set), kind: KIND_FRONT_ORDER, payload: crate::crate_image::encode(&recipe.crates) };
+    let _ = crate::store::append(&front_order_path(dir, recipe.set), vec![entry], true);
+}
+
+/// The stored graph a reordered load restores its leading crates from (FrontImages::load_order):
+/// the last recorded order of the same crates, of which this load keeps the first `common`.
+pub(crate) struct BaseOrder {
+    pub(crate) set: u128,
+    pub(crate) identity: u128,
+    pub(crate) pre: Vec<crate::preload::PreCrate>,
+    pub(crate) common: usize,
+}
+/// Each crate's recorded front record as FrontImages::prefix_records reads it.
+pub(crate) type PrefixRecords = Vec<Result<(u128, Vec<String>), &'static str>>;
+
 fn demand_stores_key(identity: u128) -> u128 {
     let mut h = Sip128::new();
     h.str("demand-stores");
@@ -4159,7 +4626,8 @@ struct FrontGraphWrite {
     options: crate::options::Options,
     recipe: crate::crate_image::GraphRecipe,
     fps: Vec<Option<u128>>,
-    demand: Option<std::sync::Arc<crate::preload::DemandImage>>,
+    /// the load's demand plan: its image is taken on the writer (a plan still planning is not waited for here)
+    demand: Option<std::sync::Arc<crate::preload::DemandPlan>>,
     profile: bool,
 }
 static FRONT_GRAPH_WRITES: relax_session::sync::Mutex<Vec<FrontGraphWrite>> = relax_session::sync::Mutex::new(Vec::new());
@@ -4170,7 +4638,7 @@ impl FrontGraphWrite {
         if recipe.crates.len() != prog.crates.len() || recipe.crates.iter().zip(&prog.crates)
             .any(|(key, c)| prog.syms.str(c.name) != key.0 || c.root_path() != key.1) { return None; }
         Some(Self { dir: dir.to_owned(), options: prog.session.options.clone(), recipe: recipe.clone(),
-            fps: fps.to_vec(), demand: prog.demand_plan.as_ref().map(|p| p.image.clone()), profile: prog.session.runtime.profile })
+            fps: fps.to_vec(), demand: prog.demand_plan.clone(), profile: prog.session.runtime.profile })
     }
 }
 
@@ -4256,7 +4724,7 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
     let (dir, recipe, fps) = (&job.dir, &job.recipe, &job.fps);
     let mut graph = crate::crate_image::GraphImage {
         identity: recipe.identity, crates: Vec::new(), inputs: Vec::new(), stamps: Vec::new(), probes: Vec::new(),
-        demand_image: job.demand.clone(),
+        demand_image: job.demand.as_ref().map(|p| p.image.clone()),
     };
     let mut inputs = std::collections::BTreeMap::new();
     let mut probes = std::collections::BTreeMap::new();
@@ -4266,12 +4734,12 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
         let store = Store::open(&dir.join(front_store_name(&job.options, &key.0, fp)))?;
         let (kind, bytes) = store.get(front_crate_key(&key.0, &key.1))?;
         if kind != KIND_FRONT_CRATE { return None; }
-        let rec: crate::crate_image::Record = crate::crate_image::decode(bytes)?;
-        if !rec.ahead.complete || rec.name != key.0 || rec.root != key.1 { return None; }
-        for (path, hash) in rec.ahead.inputs.into_iter().chain(rec.files.into_iter().map(|f| (f.path, f.hash))) {
+        let rec = crate::crate_image::decode_record_head(bytes)?;
+        if !rec.complete || rec.name != key.0 || rec.root != key.1 { return None; }
+        for (path, hash) in rec.inputs.into_iter().chain(rec.files) {
             if inputs.insert(path, hash).is_some_and(|old| old != hash) { return None; }
         }
-        for (path, exists) in rec.ahead.probes {
+        for (path, exists) in rec.probes {
             if probes.insert(path, exists).is_some_and(|old| old != exists) { return None; }
         }
         graph.crates.push((key.clone(), fp));
@@ -4279,7 +4747,8 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
     // Selection reads even skipped files and negative module candidates. Keep
     // that global proof in the graph, not in any crate's input certificate.
     // Replacing this record also refreshes demand when the final crate is clean.
-    if let Some(demand) = &graph.demand_image {
+    // (a carried plan's proof is the earlier load's: its parts carry their own inputs)
+    if let Some(demand) = graph.demand_image.as_ref().filter(|_| !job.demand.as_ref().is_some_and(|p| p.is_carried())) {
         for (path, hash) in &demand.inputs {
             if inputs.insert(path.clone(), *hash).is_some_and(|old| old != *hash) { return None; }
         }
@@ -4303,7 +4772,8 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
     let path = front_graph_path(dir, recipe.identity);
     let mut entries = Vec::new();
     if let Some(demand) = &graph.demand_image {
-        let previous = Store::open(&path);
+        // retained parts: this graph's store, or a reordered load's base graph's
+        let previous = [Some(path.clone()), recipe.base.map(|b| front_graph_path(dir, b))].into_iter().flatten().filter_map(|p| Store::open(&p)).collect::<Vec<_>>();
         let mut header = (**demand).clone();
         let recorded = { let _r = crate::load_profile::span(job.profile, "front-graph-demand-record", "graph writer"); demand.recorded_parts() };
         mark("demand-record");
@@ -4327,7 +4797,7 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
             let (key, payload) = match body? {
                 Some(body) => body,
                 None => {
-                    let (kind, bytes) = previous.as_ref()?.get(part.key)?;
+                    let (kind, bytes) = previous.iter().find_map(|st| st.get(part.key))?;
                     if kind != KIND_DEMAND_PART { return None; }
                     (part.key, bytes.to_vec())
                 }
@@ -4353,7 +4823,7 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
         let parts: Vec<String> = marks.iter().map(|&(n, t)| { let d = t - prev; prev = t; format!("{}={:.0}", n, d) }).collect();
         eprintln!("makepad-run front: graph recorded ({} crates, {} inputs) in {:.0} ms: {}", graph.crates.len(), graph.inputs.len(), prev, parts.join(" "));
     }
-    if let (Some(source), Some(written)) = (&job.demand, &graph.demand_image) { source.recording_written(written.parts.clone()); }
+    if let (Some(source), Some(written)) = (&job.demand, &graph.demand_image) { source.image.recording_written(written.parts.clone()); }
     Some(())
 }
 
@@ -4369,17 +4839,31 @@ pub struct FrontImages {
     content_hashes: std::sync::atomic::AtomicU64,
     probes: relax_session::sync::Mutex<Option<HashMap<String, bool>>>,
     stores: relax_session::sync::Mutex<HashMap<(String, String), PathBuf>>,
-    certificate: relax_session::sync::Mutex<Option<crate::crate_image::GraphImage>>,
+    certificate: relax_session::sync::Mutex<Option<std::sync::Arc<crate::crate_image::GraphImage>>>,
+    /// the begun load's graph as read from its store (begin_load), certified or not: the restore and
+    /// the demand plan's lookups read it once
+    graph_read: relax_session::sync::Mutex<Option<std::sync::Arc<crate::crate_image::GraphImage>>>,
     begun: relax_session::sync::Mutex<Option<u128>>,
     /// the crates a partial collected restore kept (name, fingerprint): the crates loaded after
     /// them name them as dependencies (restore_collected, full_deps)
     retained: relax_session::sync::Mutex<Vec<(String, u128)>>,
+    /// of them, the proc-macro crates (CrateImages::retained_proc_macros)
+    retained_proc: relax_session::sync::Mutex<Vec<(String, u128)>>,
+    /// a reordered load's stored graph (load_order): the restore keeps its leading crates
+    base: relax_session::sync::Mutex<Option<BaseOrder>>,
+    /// the records load_order read of graph `.0` (the restore reads them once)
+    records: relax_session::sync::Mutex<Option<(u128, PrefixRecords)>>,
     // A failed collected restore must hand its completed plan to ordinary preload.
     pending_plan: relax_session::sync::Mutex<Option<(u128, std::sync::Arc<crate::preload::DemandPlan>)>>,
     /// writes the images of the files this run parses (None: a read-only cache)
     sink: Option<std::sync::Arc<FrontSink>>,
 }
 impl FrontImages {
+    /// Graph `identity` as its store holds it: the begun load's read when it is that graph.
+    pub(crate) fn front_graph(&self, identity: u128) -> Option<std::sync::Arc<crate::crate_image::GraphImage>> {
+        if let Some(g) = self.graph_read.lock().unwrap().as_ref().filter(|g| g.identity == identity) { return Some(g.clone()); }
+        read_front_graph(&self.dir, identity).map(std::sync::Arc::new)
+    }
     pub fn open(options: &crate::options::Options) -> Option<Self> {
         // A build script's run (its own small world: std plus the script's crates) keeps no
         // front images: they are read only when a script runs again, which a cached build
@@ -4597,6 +5081,88 @@ impl FrontImages {
     }
 }
 impl FrontImages {
+    /// CrateImages::previous_files: the newest record of crate `c` (among its stores) whose
+    /// identity is `c`'s -- name, root, edition, cfg, kind, dependencies and their fingerprints,
+    /// parser options -- with a complete scan and current late inputs (include!/env!): its files'
+    /// images by path, source hash and module path, each taken at most once, with its replay data
+    /// (a file recorded without it is parsed). Taking one maps it as a crate image's file is
+    /// (its lazily parsed part is not taken: the bodies are parsed on demand in this crate's
+    /// scope). The record's late inputs are noted for the crate's next record.
+    fn previous_files_of(&self, c: &crate::preload::PreCrate, deps: Option<&[u128]>, proc_fps: Option<u128>) -> Option<crate::crate_image::PreviousFiles> {
+        use crate::crate_image::{decode, FileMeta, Record};
+        let tr = |path: &std::path::Path, why: &str| if crate::preload::trace() { eprintln!("boot-trace: {}: earlier record {} not taken: {}", c.name, path.display(), why); };
+        let deps = deps.and_then(|d| self.full_deps(c, d));
+        if deps.is_none() && proc_fps.is_none() {
+            tr(&self.dir, "dependency fingerprints");
+            return None;
+        }
+        let options = &c.cfg.session.options;
+        let mut cfg = c.cfg.set.clone();
+        cfg.sort();
+        let prefix = format!("{}-", c.name);
+        let paths: Vec<_> = crate::store::stores_with_prefix(&self.dir, &prefix).into_iter()
+            .filter(|p| p.file_name().is_some_and(|n| n.len() == prefix.len() + 20)).collect();
+        let present: HashSet<String> = std::iter::once(c.name.clone()).collect();
+        // every such record's files, the newest record's first (any one at a path and source hash
+        // is the same parse)
+        let mut stores: Vec<_> = paths.iter().filter_map(|p| { let st = Store::open_unmarked(p); if st.is_none() { tr(p, "open"); } st })
+            .map(|st| (st.modified(), std::sync::Arc::new(st))).collect();
+        stores.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut files: HashMap<(String, u128), (FileMeta, std::sync::Arc<Store>, usize)> = HashMap::new();
+        for (_, st) in stores {
+            let path = st.path.clone();
+            let Some((KIND_FRONT_CRATE, b)) = st.get(front_crate_key(&c.name, &c.root)) else { continue };
+            let Some(rec) = decode::<Record>(b) else { tr(&path, "decode"); continue };
+            let same = rec.name == c.name && rec.root == c.root && rec.edition == c.edition && rec.cfg == cfg && rec.proc_macro == c.proc_macro
+                && rec.deps == c.image_dep_names && (deps.as_ref().is_some_and(|d| rec.dep_fps == *d) || proc_fps.is_some() && rec.proc_fps == proc_fps) && rec.lazy_auto == crate::parser::lazy_auto()
+                && rec.parse_options == crate::crate_image::parse_options(options) && rec.ahead.complete;
+            if !same {
+                if crate::preload::trace() {
+                    let checks = [rec.name == c.name, rec.root == c.root, rec.edition == c.edition, rec.cfg == cfg, rec.proc_macro == c.proc_macro, rec.deps == c.image_dep_names,
+                        deps.as_ref().is_some_and(|d| rec.dep_fps == *d), proc_fps.is_some() && rec.proc_fps == proc_fps, rec.lazy_auto == crate::parser::lazy_auto(), rec.ahead.complete];
+                    eprintln!("boot-trace: {}: earlier record {} not taken: identity {:?} (proc {:?} recorded {:?})", c.name, path.display(), checks, proc_fps.map(|x| x as u64), rec.proc_fps.map(|x| x as u64));
+                }
+                continue;
+            }
+            if !ledger_current(&st, &present, &mut HashMap::new()) { tr(&path, "late inputs"); continue; }
+            let before = files.len();
+            for f in rec.files {
+                if f.replay.0.is_empty() || files.contains_key(&(f.path.clone(), f.hash)) { continue; }
+                let key = Cache::front_key(&f.path, f.hash);
+                let Ok(ix) = st.index.binary_search_by_key(&key, |e| e.key) else { continue };
+                if !matches!(st.get_at(ix, key), Some((KIND_FRONT_REF, _))) { continue; }
+                files.insert((f.path.clone(), f.hash), (f, st.clone(), ix));
+            }
+            if files.len() == before { tr(&path, "no file with replay data"); continue; }
+            replay_front_ledger(&st)?;
+            if crate::preload::trace() { eprintln!("boot-trace: {}: parsed, unchanged files' images from {}", c.name, path.display()); }
+        }
+        if files.is_empty() { return None; }
+        let sink = self.sink();
+        let files = std::sync::Mutex::new(files);
+        Some(std::sync::Arc::new(move |path: &str, hash: u128, module: &str| {
+            let (mut f, st, ix) = files.lock().unwrap().remove(&(path.to_string(), hash))?;
+            if f.module != module { return None; }
+            let key = Cache::front_key(&f.path, f.hash);
+            let (loc, img) = front_file_entry(&st, ix, key)?;
+            let mut pf = crate::front::restore(&mut f, img)?;
+            pf.image = Some(loc);
+            pf.sink = sink.clone();
+            if f.prep.idents.iter().any(|&(lo, hi)| lo > hi || hi as usize > pf.src.len()) { return None; }
+            let used = crate::macros::MacroUse::from_replay(f.used.local, f.used.uses, &f.replay.0)?;
+            // (a store an image is taken from is in use: the cap keeps it)
+            st.mark_used();
+            Some(crate::preload::Preparsed {
+                error: None,
+                parsed: Some((pf, used)),
+                prep: Some(f.prep),
+                mod_path: f.module,
+                src_len: f.src_len as usize,
+                verify: crate::front::verify().then_some(crate::front::verify_file),
+            })
+        }))
+    }
+
     /// Crate `c`'s dependency fingerprints in its record's order: `deps` are those of its
     /// dependencies loaded in this batch; the ones a partial collected restore kept are not
     /// in the batch (run.rs drops them from `image_deps`), their fingerprints come from the
@@ -4666,7 +5232,8 @@ impl crate::crate_image::CrateImages for FrontImages {
         let rejected = |why: &str| if crate::preload::trace() {
             eprintln!("makepad-run front: graph certificate not restored: {}", why);
         };
-        let Some(graph) = read_front_graph(&self.dir, recipe.identity) else { rejected("store"); return; };
+        let Some(graph) = read_front_graph(&self.dir, recipe.identity).map(std::sync::Arc::new) else { rejected("store"); return; };
+        *self.graph_read.lock().unwrap() = Some(graph.clone());
         if graph.identity != recipe.identity || graph.crates.len() != recipe.crates.len()
             || !graph.crates.iter().zip(&recipe.crates).all(|((key, _), expected)| key == expected)
             { rejected("recipe"); return; }
@@ -4721,17 +5288,20 @@ impl crate::crate_image::CrateImages for FrontImages {
         }
     }
     fn end_load(&self) {
+        *self.base.lock().unwrap() = None;
+        *self.records.lock().unwrap() = None;
         self.hashes.lock().unwrap().take();
         *self.probes.lock().unwrap() = None;
         self.stores.lock().unwrap().clear();
         *self.certificate.lock().unwrap() = None;
+        *self.graph_read.lock().unwrap() = None;
         *self.begun.lock().unwrap() = None;
     }
     fn demand_image(&self, crates: &[crate::preload::PreCrate], graph: u128) -> Option<std::sync::Arc<crate::preload::DemandImage>> {
         let recipe = crate::crate_image::GraphRecipe::new(crates);
-        let saved = read_front_graph(&self.dir, recipe.identity)?;
+        let saved = self.front_graph(recipe.identity)?;
         if saved.identity != recipe.identity || saved.crates.iter().map(|(key, _)| key).ne(recipe.crates.iter()) { return None; }
-        let image = saved.demand_image?;
+        let image = saved.demand_image.clone()?;
         if image.graph != graph || image.eager_prefix > crates.len() { return None; }
         let indexed: std::collections::BTreeSet<_> = image.files.iter().map(|f| (f.ci, f.path.as_str())).collect();
         if indexed.iter().any(|(ci, _)| *ci >= crates.len())
@@ -4769,13 +5339,28 @@ impl crate::crate_image::CrateImages for FrontImages {
     }
     fn demand_parts(&self, crates: &[crate::preload::PreCrate], graph: u128) -> Option<crate::crate_image::DemandParts> {
         let recipe = crate::crate_image::GraphRecipe::new(crates);
-        let Some(saved) = read_front_graph(&self.dir, recipe.identity) else { return None; };
-        if saved.identity != recipe.identity || saved.crates.iter().map(|(key, _)| key).ne(recipe.crates.iter()) { return None; }
-        let Some(image) = saved.demand_image.filter(|image| image.graph == graph && image.parts.len() == crates.len()) else { return None; };
-        let path = front_graph_path(&self.dir, recipe.identity);
+        // a reordered load (load_order): the base graph's parts, each crate's taken at its position
+        // there (a part is order-free: DemandPart::read); the plan validates each one as usual
+        let (identity, graph, reordered) = match self.front_graph(recipe.identity) {
+            Some(_) => (recipe.identity, graph, false),
+            None => {
+                let base = self.base.lock().unwrap();
+                let base = base.as_ref().filter(|b| b.set == recipe.set)?;
+                (base.identity, crate::preload::demand_recipe_identity(&base.pre), true)
+            }
+        };
+        let Some(saved) = self.front_graph(identity) else { return None; };
+        if saved.identity != identity || saved.crates.len() != crates.len() { return None; }
+        // this load's crate k is the stored graph's crate from[k]
+        let at: HashMap<&(String, String), usize> = saved.crates.iter().enumerate().map(|(j, (key, _))| (key, j)).collect();
+        let from: Vec<usize> = recipe.crates.iter().map(|key| at.get(key).copied()).collect::<Option<_>>()?;
+        if !reordered && from.iter().enumerate().any(|(k, &j)| k != j) { return None; }
+        let Some(image) = saved.demand_image.clone().filter(|image| image.graph == graph && image.parts.len() == crates.len()) else { return None; };
+        let path = front_graph_path(&self.dir, identity);
         let store = Store::open(&path)?;
         let profile = crates.first().is_some_and(|c| c.cfg.session.runtime.profile);
-        let keys = image.parts.iter().zip(crates).map(|(part, c)| {
+        let keys = from.iter().zip(crates).map(|(&j, c)| {
+            let part = &image.parts[j];
             let (kind, bytes) = store.get(part.key)?;
             if kind != KIND_DEMAND_PART { return None; }
             let part = crate::preload::DemandPart::read_header(part.key, bytes)?;
@@ -4801,28 +5386,34 @@ impl crate::crate_image::CrateImages for FrontImages {
             Some(part.key)
         }).collect::<Vec<_>>();
         let valid = keys.iter().map(Option::is_some).collect::<Vec<_>>();
-        let eager_prefix = valid.iter().take(image.eager_prefix).take_while(|v| **v).count();
+        if profile && reordered {
+            eprintln!("rust-demand-parts: reordered load takes {} of {} stored parts ({} moved)", valid.iter().filter(|v| **v).count(), crates.len(), from.iter().enumerate().filter(|(k, j)| k != *j).count());
+        }
         // Stale parts are comparison evidence only, never reusable input. Keep
         // their old demand-out/export sets to validate an edited local selection.
-        let keys = image.parts.iter().map(|p| Some(p.key)).collect::<Vec<_>>();
-        let path = front_graph_path(&self.dir, recipe.identity);
+        let keys = from.iter().map(|&j| Some(image.parts[j].key)).collect::<Vec<_>>();
+        let path = front_graph_path(&self.dir, identity);
         let crates_profile = crates.first().is_some_and(|c| c.cfg.session.runtime.profile);
         let crate_names = crates.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
         let image_dir = self.dir.clone();
-        Some(crate::crate_image::DemandParts { eager_prefix, valid, load: std::sync::Arc::new(move || {
+        let last = crates.len().saturating_sub(1);
+        // (a reordered load takes its new last crate in full: always sound, and nothing waits for
+        // the closure, which records what it would defer for the next start)
+        let last_selected = reordered || image.files.iter().filter(|f| f.ci == last).all(|f| image.reached.contains(&(last, f.path.clone())));
+        Some(crate::crate_image::DemandParts { valid, last_selected, load: std::sync::Arc::new(move || {
             let _profile = crate::load_profile::span(crates_profile, "rust-demand-parts", "load");
             let store = Store::open(&path);
             let chunk = keys.len().div_ceil(crate::preload::jobs().max(1)).max(1);
             crate::pool::scope(|scope| {
-                let handles = keys.chunks(chunk).zip(crate_names.chunks(chunk)).map(|(keys, names)| {
+                let handles = keys.chunks(chunk).zip(crate_names.chunks(chunk)).enumerate().map(|(n, (keys, names))| {
                     let store = &store;
                     let image_dir = &image_dir;
-                    scope.spawn(move || { keys.iter().zip(names).map(|(key, name)| {
+                    scope.spawn(move || { keys.iter().zip(names).enumerate().map(|(i, (key, name))| {
                         let key = (*key)?;
                         let (kind, bytes) = store.as_ref()?.get(key)?;
                         if kind != KIND_DEMAND_PART { return None; }
                         let mut images = demand::ReadImages::default();
-                        let part = crate::preload::DemandPart::read(key, bytes, &mut |name, key| images.get(image_dir, name, key));
+                        let part = crate::preload::DemandPart::read(key, bytes, n * chunk + i, &mut |name, key| images.get(image_dir, name, key));
                         if crates_profile && part.is_none() { eprintln!("rust-demand-part-invalid: {name} payload decode"); }
                         part.map(std::sync::Arc::new)
                     }).collect::<Vec<_>>() })
@@ -4834,6 +5425,12 @@ impl crate::crate_image::CrateImages for FrontImages {
 
     fn crate_image(&self, c: &crate::preload::PreCrate, deps: &[u128]) -> Option<crate::crate_image::CrateImage> {
         self.selected_image(c, deps, None)
+    }
+    fn previous_files(&self, c: &crate::preload::PreCrate, deps: Option<&[u128]>, proc_fps: Option<u128>) -> Option<crate::crate_image::PreviousFiles> {
+        self.previous_files_of(c, deps, proc_fps)
+    }
+    fn retained_proc_macros(&self) -> Vec<(String, u128)> {
+        self.retained_proc.lock().unwrap().clone()
     }
     fn crate_image_selected(&self, c: &crate::preload::PreCrate, deps: &[u128], plan: u128, deferred: &[String]) -> Option<crate::crate_image::CrateImage> {
         self.selected_image(c, deps, Some((plan, deferred)))
@@ -4903,6 +5500,7 @@ struct FrontRecordView {
     dep_fps: Option<Vec<u128>>,
     fingerprint: Option<u128>,
     selection_hash: u128,
+    proc_fps: Option<u128>,
 }
 
 struct FrontRecordFile {
@@ -4944,6 +5542,8 @@ impl FrontRecordView {
                 }
             }).collect(),
             deps, dep_fps, fingerprint: fingerprint(ci), selection_hash: c.context.fingerprint(),
+            proc_fps: crate::crate_image::proc_fps(prog.crates.iter().enumerate().filter(|(_, d)| d.proc_macro)
+                .map(|(k, d)| (prog.syms.str(d.name).to_owned(), fingerprint(k)))),
         })
     }
 }
@@ -5011,6 +5611,7 @@ fn front_record_from(prog: &FrontRecordView) -> Option<crate::crate_image::Recor
         ahead,
         files,
         selection_hash: prog.selection_hash,
+        proc_fps: prog.proc_fps,
     };
     let canon = crate::crate_image::canon_deps(rec.deps.iter().map(|x| x.1.clone()).zip(rec.dep_fps.iter().copied()).collect());
     let fp = crate::crate_image::fingerprint(&name, &rec.root, rec.edition, rec.proc_macro, &rec.cfg, rec.file_hashes().into_iter(), &canon, rec.selection_hash);
@@ -5203,8 +5804,14 @@ impl ColdFront {
         let _profile = crate::load_profile::span(prog.session.runtime.profile, "front-record-enqueue", prog.syms.str(prog.crates[ci].name));
         // a crate loaded from its image (or a collected graph): its store has its record and
         // its files' references
-        if prog.front_ahead.get(ci).is_some_and(|a| a.is_empty()) { return; }
-        let Some(view) = FrontRecordView::new(prog, ci, |k| self.fps.get(k).copied().flatten()) else { return };
+        if prog.front_ahead.get(ci).is_some_and(|a| a.is_empty()) {
+            if crate::preload::trace() { eprintln!("boot-trace: {}: no crate record: loaded from an image", prog.syms.str(prog.crates[ci].name)); }
+            return;
+        }
+        let Some(view) = FrontRecordView::new(prog, ci, |k| self.fps.get(k).copied().flatten()) else {
+            if crate::preload::trace() { eprintln!("boot-trace: {}: no crate record: no view", prog.syms.str(prog.crates[ci].name)); }
+            return;
+        };
         let path = dir.join(front_store_name(&prog.session.options, &view.name, self.fps[ci].unwrap()));
         let late = crate::sip::late_inputs();
         let marks = front_run::run_marks();
@@ -5351,6 +5958,7 @@ fn write_front_record(job: FrontWrite) -> Result<Option<usize>, String> {
         front_record_from(&prog)
     };
     let recorded = rec.is_some();
+    if crate::preload::trace() { eprintln!("boot-trace: {}: crate record {} to {}", name, if recorded { "written" } else { "not written" }, path.display()); }
     if let Some(rec) = rec {
         entries.push(NewEntry { key: front_crate_key(&rec.name, &rec.root), kind: KIND_FRONT_CRATE, payload: crate::crate_image::encode(&rec) });
     }
@@ -5421,7 +6029,9 @@ mod cold_tests {
         std::fs::write(&called, "pub fn value() -> u32 { 8 }").unwrap();
         std::fs::File::options().write(true).open(&called).unwrap().set_modified(mtime).unwrap();
         let edited = load(Some(&images), false);
-        assert!(edited.files.iter().all(|f| !f.src.is_mapped()), "an edit with the same size and mtime is detected");
+        // (the edited file is parsed; the unchanged root may take its earlier image: previous_files)
+        let parsed = |p: &crate::program::Program| p.files.iter().zip(&p.file_paths).find(|(_, path)| path.ends_with("called.rs")).is_some_and(|(f, _)| !f.src.is_mapped());
+        assert!(parsed(&edited), "an edit with the same size and mtime is detected");
         assert!(images.content_hashes.load(std::sync::atomic::Ordering::Relaxed) > 0);
         // a graph recorded within the racy window of the edit carries no stat for that file
         let mut edited = edited;
@@ -5432,7 +6042,7 @@ mod cold_tests {
         std::fs::write(&called, "pub fn value() -> u32 { 9 }").unwrap();
         std::fs::File::options().write(true).open(&called).unwrap().set_modified(mtime).unwrap();
         let again = load(Some(&images), false);
-        assert!(again.files.iter().all(|f| !f.src.is_mapped()), "the racy case: same size, restored mtime");
+        assert!(parsed(&again), "the racy case: same size, restored mtime");
     }
 
 
@@ -5615,7 +6225,7 @@ mod cold_tests {
         std::fs::write(&pre[5].root, "pub fn top() -> u32 { mid::mid() + 2 }").unwrap();
         let (kept, _, proof) = images.restore_collected(sess, &pre).expect("prefix restore");
         assert_eq!(kept.crates.len(), 5, "crates below the edited one");
-        assert!(proof.is_none(), "a partial restore has no whole-graph proof");
+        assert!(proof.is_some_and(|p| p.kept.is_some_and(|(k, _)| k == 5)), "a partial restore keeps only the kept crates' definition tables");
         // the next run after recording the edited sources restores everything again
         record(&images);
         assert_eq!(images.restore_collected(sess, &pre).unwrap().0.crates.len(), names.len());
@@ -5623,6 +6233,89 @@ mod cold_tests {
         std::fs::write(&pre[3].root, "pub fn value() -> u64 { 7 }").unwrap();
         let (kept, _, _) = images.restore_collected(sess, &pre).expect("prefix restore");
         assert_eq!(kept.crates.len(), 3, "only the crates below the changed one");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn load_order_moves_changed_crates_last() {
+        isolated_test!(load_order_moves_changed_crates_last);
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let dir = std::env::temp_dir().join(format!("relax-load-order-{}-{}", std::process::id(), crate::clock::wall_ns()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = crate::cfg::CfgSet::host(sess, &[]);
+        // three padding crates stand where std's are; `late` depends on nothing but loads after `top`
+        let names = ["pad0", "pad1", "pad2", "low", "mid", "top", "late"];
+        let mut pre = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            let package = dir.join(name);
+            std::fs::create_dir(&package).unwrap();
+            let root = package.join("lib.rs").to_string_lossy().into_owned();
+            let (text, deps): (String, Vec<usize>) = match *name {
+                "low" => ("pub fn value() -> u32 { 7 }".into(), vec![]),
+                "mid" => ("pub fn mid() -> u32 { low::value() as u32 + 1 }".into(), vec![3]),
+                "top" => ("pub fn top() -> u32 { mid::mid() + 1 }".into(), vec![4]),
+                _ => (format!("pub fn f{i}() -> u32 {{ {i} }}"), vec![]),
+            };
+            std::fs::write(&root, text).unwrap();
+            pre.push(crate::preload::PreCrate {  name: name.to_string(), root, edition: 2021, cfg: cfg.clone(),
+                deps: deps.iter().map(|&d| (names[d].to_string(), names[d].to_string())).collect(), proc_macro: false,
+                image_deps: deps.clone(), image_dep_names: deps.iter().map(|&d| (names[d].to_string(), names[d].to_string())).collect() });
+        }
+        let store = dir.join("cache");
+        let load = |pre: &[crate::preload::PreCrate], images: &FrontImages| {
+            let mut prog = crate::program::Program::new(sess);
+            prog.record_front = true;
+            prog.front_sink = Some(FrontSink::for_dir(&store));
+            prog.preload_images(pre.to_vec(), Some(images));
+            for c in pre {
+                let deps = c.image_deps.iter().map(|&d| (prog.syms.intern(&pre[d].name), d as u32)).collect();
+                prog.load_crate(&c.name, &c.root, c.edition, c.cfg.clone(), deps).unwrap();
+            }
+            prog.resolve_imports();
+            assert!(prog.errors.is_empty(), "{:?}", prog.errors);
+            prog
+        };
+        let images = FrontImages { dir: store.clone(), ..Default::default() };
+        // a run that loads in `pre`'s order and records its collected graph (and with it the order)
+        let record = |pre: &[crate::preload::PreCrate]| {
+            let mut prog = load(pre, &images);
+            ColdFront::default().finish_in(&mut prog, store.clone());
+            let prog = load(pre, &images);
+            let mut tcx = crate::tcx::Tcx::new();
+            tcx.collect(&prog);
+            let unit = Unit::new(prog, tcx, 0);
+            let mut cache = Cache::open_in(&unit, Mode::On, dir.join("collected")).unwrap();
+            cache.dir = store.clone();
+            cache.crate_path = unit.prog.crates.iter().enumerate().map(|(i, c)|
+                store.join(front_store_name(&sess.options, unit.prog.syms.str(c.name), cache.fps[i]))).collect();
+            cache.record_collected(&unit.prog, &unit.tcx).expect("record collected graph");
+        };
+        let ordered = |pre: &[crate::preload::PreCrate]| -> Vec<crate::preload::PreCrate> {
+            match images.load_order(pre, 3) { Some(order) => crate::preload::reorder(pre, &order).unwrap(), None => pre.to_vec() }
+        };
+        let order_names = |pre: &[crate::preload::PreCrate]| pre.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(" ");
+        record(&pre);
+        // unchanged: the recorded order, everything restored
+        let now = ordered(&pre);
+        assert_eq!(order_names(&now), order_names(&pre));
+        assert_eq!(images.restore_collected(sess, &now).unwrap().0.crates.len(), names.len());
+        // an edit of `low`: it and its dependents load last; the restore keeps the crates before it
+        std::fs::write(&pre[3].root, "pub fn value() -> u32 { 8 }").unwrap();
+        let now = ordered(&pre);
+        assert_eq!(order_names(&now), "pad0 pad1 pad2 late low mid top");
+        let (kept, _, _) = images.restore_collected(sess, &now).expect("prefix restore");
+        assert_eq!(kept.crates.len(), 3, "the crates the stored order keeps in place");
+        record(&now);
+        // the next edit of `low`: the order holds, and `late` is kept too
+        std::fs::write(&pre[3].root, "pub fn value() -> u32 { 9 }").unwrap();
+        let again = ordered(&pre);
+        assert_eq!(order_names(&again), "pad0 pad1 pad2 late low mid top");
+        let (kept, _, _) = images.restore_collected(sess, &again).expect("prefix restore");
+        assert_eq!(kept.crates.len(), 4, "every crate the edit cannot reach");
+        // a restore of the reordered graph is the same program as loading it
+        record(&again);
+        let (whole, _, _) = images.restore_collected(sess, &ordered(&pre)).expect("unchanged sources restore");
+        assert_eq!(whole.crates.iter().map(|c| whole.syms.str(c.name).to_string()).collect::<Vec<_>>().join(" "), "pad0 pad1 pad2 late low mid top");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -6087,7 +6780,8 @@ mod data_tests {
             slots.push(id);
         }
         assert_eq!(cache.stats.recorded, fixtures.len() as u64);
-        assert_eq!(cache.flush().unwrap(), fixtures.len());
+        // and the program's item graph (cache/deps.rs), recorded with the first key
+        assert_eq!(cache.flush().unwrap(), fixtures.len() + 1);
         drop(cache);
         let mut warm = open_test_cache(&u, &root.join("cache"));
         for id in slots {
@@ -7281,6 +7975,18 @@ impl Linker {
         }
     }
 
+    /// cert_valid of the code entry `key` (None: no such code entry, or it does not decode).
+    pub(super) fn entry_cert_valid(&mut self, u: &mut Unit, key: u128) -> Option<bool> {
+        let (p, i) = self.cache().index_at(key)?;
+        let pack = self.cache().stores[p as usize].clone();
+        let (kind, payload) = pack.get_checked_at(i as usize, key)?;
+        if kind != KIND_CODE || payload.is_empty() { return None; }
+        let t0 = relax_backend::cpu_ns();
+        let r = self.cert_valid_inner(u, payload);
+        self.cache().stats.cert_check_ns += relax_backend::cpu_ns() - t0;
+        r
+    }
+
     /// Whether every slot a code entry's certificate names still has the recorded key. None:
     /// the payload does not decode.
     fn cert_valid(&mut self, u: &mut Unit, payload: &[u8]) -> Option<bool> {
@@ -7309,6 +8015,8 @@ impl Linker {
         for _ in 0..n {
             let b = d.bytes()?;
             let want = d.u128()?;
+            // (a slot of the crates unchanged since the manifest keeps its recorded key)
+            if self.cache().identity_unchanged(b) { continue; }
             let Some(s) = self.slot_of_bytes(u, b) else { return Some(false) };
             if self.cache().slot_key(u, s) != Some(want) {
                 return Some(false);
@@ -7458,29 +8166,89 @@ pub(crate) unsafe fn slot_for_bytes_unit(up: *mut Unit, bytes: &[u8]) -> Option<
 }
 
 impl Cache {
-    /// Constants (including generated array lengths) use the same dependency
-    /// fingerprints as code, with a separate namespace for their evaluated value.
-    fn const_key(&mut self, u: &Unit, def: DefId, args: &[TyId]) -> Option<(u128, u32)> {
+    /// The value entry of a constant (including generated array lengths) or static: keyed by its
+    /// identity alone (one entry per value; a newer one replaces it), certified by what the value
+    /// was computed from (`ConstCert`, checked by `const_entry`). Also the crate whose store the
+    /// entry goes to and the crates the identity names.
+    fn const_key(&mut self, u: &Unit, def: DefId, args: &[TyId]) -> Option<(u128, u32, Vec<u32>)> {
         // Fingerprints describe startup inputs. Live edits can change a value's
         // transitive initializer dependencies before the next patch is installed.
         if !crate::reload::edited_crates().is_empty() { return None; }
         let mut e = E::default();
         let mut crates = Vec::new();
         if self.enc_fnkey(u, &FnKey::Inst(def, args.to_vec()), &mut e, &mut crates, 0).is_none() { return None; }
+        if crates.iter().any(|&c| c as usize >= self.crate_ident.len()) { return None; }
         crates.sort_unstable();
         crates.dedup();
         let mut h = Sip128::new();
-        h.str("const-value");
+        h.str("const-value-v2");
         h.u128(self.cfg);
         h.write(&e.0);
-        for &c in &crates { h.u128(*self.fps.get(c as usize)?); h.u128(*self.iface.get(c as usize)?); }
-        Some((h.finish128(), self.dominant(&crates)))
+        let dom = self.dominant(&crates);
+        Some((h.finish128(), dom, crates))
     }
 
-    pub fn record_const(&mut self, u: &Unit, def: DefId, args: &[TyId], addr: u64) -> Option<()> {
+    /// The code key, crates and identity bytes of body `key` (memo for the run)
+    fn const_body_key(&mut self, u: &Unit, key: &FnKey) -> Option<(u128, Vec<u32>, Vec<u8>)> {
+        if let Some(k) = self.const_body_keys.get(key) {
+            return k.clone();
+        }
+        let outer = std::mem::replace(&mut self.key_waits, false);
+        let k = self.code_key_bytes(u, key);
+        if !self.key_waits { self.const_body_keys.insert(key.clone(), k.clone()); }
+        self.key_waits |= outer;
+        k
+    }
+
+    /// A value entry's certificate: complete (u8), the crates of its fast path (their idents and
+    /// a hash of their whole fingerprints now: while it is the same, nothing the bodies are made
+    /// of changed), and for a complete one each body by its identity with its code key. An
+    /// incomplete certificate (the value ran code, or read one that did) holds only by the fast
+    /// path over the crates its identity names (whose fingerprints cover their dependencies).
+    fn const_cert_bytes(&mut self, u: &Unit, own: &[u32], cert: &crate::jit::ConstCert) -> Option<Vec<u8>> {
+        let mut complete = cert.complete;
+        let mut items: Vec<(Vec<u8>, u128)> = Vec::new();
+        let mut crates: Vec<u32> = own.to_vec();
+        let mut idents: Vec<u128> = Vec::new();
+        if complete {
+            for k in &cert.keys {
+                match self.const_body_key(u, k) {
+                    Some((key, cr, bytes)) => {
+                        crates.extend(cr);
+                        items.push((bytes, key));
+                    }
+                    None => { complete = false; break; }
+                }
+            }
+        }
+        if complete {
+            items.extend(cert.items.iter().cloned());
+            idents.extend(cert.idents.iter().copied());
+            items.sort_unstable();
+            items.dedup();
+        } else {
+            items.clear();
+        }
+        for &c in &crates { idents.push(*self.crate_ident.get(c as usize)?); }
+        idents.sort_unstable();
+        idents.dedup();
+        let mut e = E::default();
+        e.u8(complete as u8);
+        e.u32(idents.len() as u32);
+        for &i in &idents { e.u128(i); }
+        e.u128(self.cert_fps(&idents)?);
+        e.u32(items.len() as u32);
+        for (b, k) in items {
+            e.bytes(&b);
+            e.u128(k);
+        }
+        Some(e.0)
+    }
+
+    pub fn record_const(&mut self, u: &Unit, def: DefId, args: &[TyId], addr: u64, cert: &crate::jit::ConstCert) -> Option<()> {
         if self.mode == Mode::ReadOnly { return None; }
-        let (key, krate) = self.const_key(u, def, args)?;
-        if self.has_index(&key) || self.pending_keys.contains(&key) { return Some(()); }
+        let (key, krate, own) = self.const_key(u, def, args)?;
+        if self.pending_keys.contains(&key) || (self.has_index(&key) && !self.const_stale.contains(&key)) { return Some(()); }
         let SymKind::Data(idx) = u.syms.kind(u.data_sym(addr).id)? else { return None; };
         // A recursive compile can inspect this object before its initializer finishes.
         self.data_key.remove(&idx);
@@ -7490,23 +8258,64 @@ impl Cache {
         let data = self.data_entry(u, idx);
         self.cur_crate = previous;
         let data = data?;
+        let mut payload = self.const_cert_bytes(u, &own, cert)?;
+        payload.extend_from_slice(&data.to_le_bytes());
         self.pending_keys.insert(key);
-        self.push_pending(krate, NewEntry { key, kind: KIND_CONST, payload: data.to_le_bytes().to_vec() });
+        self.const_live.insert(key);
+        self.push_pending(krate, NewEntry { key, kind: KIND_CONST, payload });
         Some(())
+    }
+
+    /// Value entry `payload`'s data key, when its certificate holds (fast path, or every body it
+    /// names has the code key it had), with the certificate a reader takes in. None: it does
+    /// not hold or does not decode.
+    fn const_entry(&mut self, u: &mut Unit, payload: &[u8]) -> Option<(u128, crate::jit::ConstCert)> {
+        let mut d = D { b: payload, p: 0 };
+        let complete = d.u8()? == 1;
+        let nc = d.u32()? as usize;
+        let mut idents = Vec::with_capacity(nc.min(64));
+        for _ in 0..nc { idents.push(d.u128()?); }
+        let fps = d.u128()?;
+        let fast = self.cert_fps(&idents) == Some(fps);
+        if !fast && !complete { return None; }
+        let n = d.u32()? as usize;
+        let mut items = Vec::with_capacity(n.min(256));
+        for _ in 0..n {
+            let b = d.bytes()?;
+            let want = d.u128()?;
+            if !fast && !self.identity_unchanged(b) {
+                let key = unsafe { Linker::new(self) }.dec_fnkey(u, &mut D { b, p: 0 }, 0)?;
+                if self.const_body_key(u, &key).map(|k| k.0) != Some(want) { return None; }
+            }
+            items.push((b.to_vec(), want));
+        }
+        let data = u128::from_le_bytes(d.b.get(d.p..d.p + 16)?.try_into().ok()?);
+        (d.p + 16 == payload.len()).then(|| (data, crate::jit::ConstCert { keys: Vec::new(), items, idents, complete }))
     }
 }
 
 /// Hydrate a completed immutable value, including relocations, with the cache
-/// available to any initializer needed to resolve its symbols.
+/// available to any initializer needed to resolve its symbols. The evaluation reading it (if
+/// any) takes in its certificate; this run keeps it for later readers.
 pub(crate) unsafe fn const_value(up: *mut Unit, def: DefId, args: &[TyId]) -> Option<u64> {
     let c = (&*up).cache.as_ref()?.get();
-    let (key, _) = (&mut *c).const_key(&*up, def, args)?;
-    let data = {
+    let (key, _, _) = (&mut *c).const_key(&*up, def, args)?;
+    let payload = {
         let (kind, payload) = (&*c).get(key)?;
         if kind != KIND_CONST { return None; }
-        u128::from_le_bytes(payload.try_into().ok()?)
+        // (the store's mapping outlives this lookup: the payload is read before any write)
+        std::slice::from_raw_parts(payload.as_ptr(), payload.len())
     };
-    Linker::new(c).link_data(&mut *up, data)
+    let Some((data, cert)) = (&mut *c).const_entry(&mut *up, payload) else {
+        (&mut *c).const_stale.insert(key);
+        return None;
+    };
+    let a = Linker::new(c).link_data(&mut *up, data)?;
+    (&mut *c).const_live.insert(key);
+    crate::jit::cert_take_in(&cert);
+    let u = &mut *up;
+    crate::zone_alloc::kept_with(|| u.const_certs.insert((def, args.to_vec()), cert));
+    Some(a)
 }
 
 impl Cache {

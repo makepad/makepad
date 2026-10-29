@@ -257,6 +257,7 @@ fn instrument_words(doc: &ScoreDoc, outline: &source::Outline, src: &str, inst: 
         },
         InstKind::Sampler { .. } => "sampler".into(),
         InstKind::Ironfish { .. } => field("program").map_or_else(|| "ironfish".into(), |p| format!("ironfish {p}")),
+        InstKind::Morph { .. } => field("preset").map_or_else(|| "morph".into(), |p| format!("morph {p}")),
         InstKind::Shader { shader, .. } => shader.lib.as_deref().map_or_else(|| "shader synth".into(), words),
         InstKind::Voice { profile, .. } => format!("{} voice", words(profile)),
         InstKind::Input { .. } => "audio in".into(),

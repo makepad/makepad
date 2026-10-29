@@ -1120,17 +1120,15 @@ impl Tcx {
         self.inferred_outlives_overflow.clear();
         if gone.is_empty() { self.publish_collected(); return; }
         let gone: crate::fxhash::HashSet<_> = gone.iter().copied().collect();
-        self.sigs.retain(|d, _| !gone.contains(d));
-        self.adts.retain(|d, _| !gone.contains(d));
-        self.ctor_sigs.retain(|d, _| !gone.contains(d));
-        self.const_tys.retain(|d| !gone.contains(d));
-        self.nominal_region_contracts.retain(|d, _| !gone.contains(d));
-        self.contracts_waiting.retain(|d| !gone.contains(d));
-        self.impl_self.retain(|d, _| !gone.contains(d));
-        self.impl_trait.retain(|d, _| !gone.contains(d));
+        // a removal per key: a table read in place from a collected image decodes none of its other rows
+        for d in &gone {
+            self.sigs.remove(d); self.adts.remove(d); self.ctor_sigs.remove(d);
+            self.nominal_region_contracts.remove(d); self.contracts_waiting.remove(d);
+            self.impl_self.remove(d); self.impl_trait.remove(d); self.trait_closure.remove(d);
+        }
+        self.const_tys.remove_all(&gone);
         for impls in self.trait_impls_of.values_mut() { impls.retain(|d| !gone.contains(d)); }
         self.opaques.retain(|k, _| !gone.contains(k));
-        self.trait_closure.retain(|d, _| !gone.contains(d));
         self.publish_collected();
     }
 

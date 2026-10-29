@@ -218,6 +218,8 @@ struct Fresh {
     prog: Program,
     tcx: Tcx,
     collected: crate::cache::CollectedCache,
+    /// its cache, opened before the replace (off the owner thread)
+    cache: Option<crate::cache::Cache>,
 }
 
 /// Runs the rebuild. Called by the monitor thread once the run has settled and its collected
@@ -305,7 +307,7 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
             images.restore_collected(&sess, &pre)
         }));
         match restored {
-            Ok(Some((prog, tcx, Some(collected)))) => Fresh { prog, tcx, collected },
+            Ok(Some((prog, tcx, Some(collected)))) => Fresh { prog, tcx, collected, cache: None },
             Ok(Some(_)) => return Outcome::Retry("only a prefix of the program was restored".into()),
             Ok(None) => return Outcome::Retry("the collected image was not restored".into()),
             Err(_) => return Outcome::Retry("the restore panicked".into()),
@@ -315,7 +317,32 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
     let restore_ms = ms(t);
     trace(&format!("restored in {restore_ms:.1} ms"));
 
-    // 3. the replace, on the owner under a front write
+    // 3. the replace, on the owner under a front write; what the cache recorded so far is
+    // written first, off the owner (the replace writes only what comes after this)
+    // ... and the new state's cache opened, off the owner too: the new program is this thread's
+    // alone until the replace (what the old cache records meanwhile is written by the replace
+    // and found by the next start)
+    let (spill, settings) = owner::call(owner::Class::Program, || unsafe {
+        let u = &mut *up;
+        u.flush_cache_records();
+        (u.cache.as_mut().and_then(|c| c.spill_take()), (u.opt.clone(), u.tier1.is_some(), u.provided.iter().map(|(k, pc)| (*k, pc.binding)).collect::<Vec<_>>()))
+    });
+    if let Some(s) = spill {
+        if let Err(e) = s.write() { return Outcome::Retry(format!("the cache spill failed: {e}")); }
+    }
+    let mut fresh = fresh;
+    let t_open = Instant::now();
+    {
+        let (opt, tier1, provided) = settings;
+        let from = crate::cache::OpenFrom { prog: &fresh.prog, tcx: &fresh.tcx, opt, tier1, global_allocator: crate::jit::global_allocator_static_of(&fresh.prog), provided };
+        let mut cache = match crate::cache::Cache::open_from(&from, mode, crate::dirs::relax_dir(), Some(&fresh.collected)) {
+            Ok(c) => c,
+            Err(e) => return Outcome::Retry(format!("the cache did not open: {e}")),
+        };
+        cache.load_manifest(crate::layout::root_crate());
+        fresh.cache = Some(cache);
+    }
+    trace(&format!("cache opened in {:.1} ms", ms(t_open)));
     let t = Instant::now();
     let replaced = owner::call(owner::Class::Program, || unsafe { replace(up, &sess, mode, fresh, before) });
     let old = match replaced {
@@ -359,27 +386,36 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
             return Err(format!("slot {i} is being built"));
         }
     }
-    let Fresh { prog, mut tcx, collected } = fresh;
+    let t_r = Instant::now();
+    let mut laps: Vec<(&str, f64)> = Vec::new();
+    let lap = |w: &'static str, laps: &mut Vec<(&'static str, f64)>| laps.push((w, t_r.elapsed().as_secs_f64() * 1e3));
+    let Fresh { prog, mut tcx, collected: _, cache: fresh_cache } = fresh;
     // the types interned since the encode, copied from the live interner: ids stay identical
     tcx.tys.top_up_from(&u.tcx.tys).ok_or("the image holds more types than the program")?;
     compare((&u.prog, &u.tcx), (&prog, &tcx))?;
+    lap("compare", &mut laps);
+    // (the steps up to the swap give way to the main thread: the rebuild is tried again later)
+    let yielded = || owner::main_waiting() && !crate::jit::QUIT_SEEN.load(Ordering::Relaxed);
+    if yielded() { return Err("yielded to the main thread".into()); }
     // what was recorded since the spill before the encode (a few entries) is written before the
     // new cache opens the stores: a rebuild never waits for spills
     u.flush_cache_records();
     if let Some(s) = u.cache.as_mut().and_then(|c| c.spill_take()) {
         s.write().map_err(|e| format!("the cache spill failed: {e}"))?;
     }
+    lap("spill", &mut laps);
     // the cache, as the warm start opens it, and what the old one learned
-    let root = crate::layout::root_crate();
-    let mut cache = crate::cache::Cache::open_collected(u, mode, Some(&collected)).map_err(|e| format!("the cache did not open: {e}"))?;
-    cache.load_manifest(root);
+    let _ = mode;
+    let mut cache = fresh_cache.ok_or("no cache")?;
+    lap("cache open", &mut laps);
+    if yielded() { return Err("yielded to the main thread".into()); }
     if let Some(old) = u.cache.as_ref() {
         cache.inherit_run_state(old);
     }
     let mut front = FrontShared::new(sess);
     front.census_id = u.front.census_id;
     front.checker_id = u.front.checker_id;
-    front.warm_cache.store(u.front.warm_cache.load(Ordering::Relaxed), Ordering::Relaxed);
+    front.linked_start.store(u.front.linked_start.load(Ordering::Relaxed), Ordering::Relaxed);
     for (i, f) in u.fns.iter().enumerate() {
         front.slot_keys.insert(i as u32, f.key.clone());
     }
@@ -388,6 +424,8 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
     let const_failed = u.const_failed.clone();
     let query_errors = tcx.dcx.clone();
     let checked_epoch = u.tcx.collect_epoch.load(Ordering::SeqCst);
+    lap("front state", &mut laps);
+    if yielded() { return Err("yielded to the main thread".into()); }
     // the replace: nothing can fail from here
     u.front.retire_memos();
     // the old front state names the old program: no reader may reach it after the replace (a
@@ -443,5 +481,10 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
     crate::run::set_diagnostics(u.tcx.dcx.clone());
     // every thread's compiler memos go at its next access (dropped there, by value)
     relax_session::memo_local::retire_all();
+    lap("swap", &mut laps);
+    if crate::run::VERBOSE.load(Ordering::Relaxed) {
+        trace(&format!("replace steps (ms to): {}", laps.iter().map(|(w, t)| format!("{w} {t:.1}")).collect::<Vec<_>>().join(", ")));
+        eprintln!("makepad-run settle rebuild replace (ms to): {}", laps.iter().map(|(w, t)| format!("{w} {t:.1}")).collect::<Vec<_>>().join(", "));
+    }
     Ok(old)
 }

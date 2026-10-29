@@ -22,6 +22,10 @@
 //!   long sessions never accumulate delay or hit periodic underruns,
 //! - goes idle after 200 ms without data so silent peers cost nothing to render,
 //! - resynchronises when the sender jumps more than a ring ahead.
+//!
+//! Frames may carry interleaved channels ([`PlayoutConfig::channels`], 1 or 2):
+//! a frame's samples are then `frame * channels` long, fades and timings count
+//! frames, and [`Playout::render_interleaved`] resamples each channel in step.
 
 use crate::resample::Resampler;
 use crate::wire::{INTERNAL_RATE, MAX_FRAME};
@@ -240,8 +244,11 @@ pub struct PlayoutConfig {
     pub start_target: u32,
     pub min_target: u32,
     pub max_target: u32,
-    /// Frame length assumed before the first frame tells the real one.
+    /// Frame length assumed before the first frame tells the real one
+    /// (samples: frames times channels).
     pub default_frame: usize,
+    /// Interleaved channels per frame (1: mono, 2: stereo).
+    pub channels: usize,
 }
 
 impl Default for PlayoutConfig {
@@ -251,6 +258,7 @@ impl Default for PlayoutConfig {
             min_target: 1,
             max_target: 8,
             default_frame: 240,
+            channels: 1,
         }
     }
 }
@@ -311,6 +319,8 @@ pub struct Playout {
     dry_samples: u32,
     idle: bool,
     resampler: Resampler,
+    /// The second channel's resampler (stereo), stepped with the first.
+    resampler_right: Resampler,
     pub stats: PlayoutStats,
 }
 
@@ -340,6 +350,7 @@ impl Playout {
             dry_samples: 0,
             idle: false,
             resampler: Resampler::new(),
+            resampler_right: Resampler::new(),
             stats: PlayoutStats::default(),
         };
         p.reset();
@@ -369,7 +380,32 @@ impl Playout {
         self.dry_samples = 0;
         self.idle = false;
         self.resampler.reset();
+        self.resampler_right.reset();
         self.stats = PlayoutStats::default();
+    }
+
+    fn channels(&self) -> usize {
+        self.cfg.channels.clamp(1, 2)
+    }
+
+    /// Samples (all channels) in `ms` milliseconds.
+    fn samples_in_ms(&self, ms: f32) -> f32 {
+        ms * INTERNAL_RATE as f32 / 1000.0 * self.channels() as f32
+    }
+
+    /// The least target (frames): raised by the app to add delay on purpose
+    /// (to line the sound up with a picture that comes later), never above
+    /// the most. The buffer grows to it by the rate nudge, without a gap.
+    pub fn set_min_target(&mut self, frames: u32) {
+        let frames = frames.clamp(1, self.cfg.max_target.max(1));
+        self.cfg.min_target = frames;
+        if self.target < frames {
+            self.target = frames;
+        }
+    }
+
+    pub fn min_target(&self) -> u32 {
+        self.cfg.min_target
     }
 
     pub fn target_frames(&self) -> u32 {
@@ -388,7 +424,7 @@ impl Playout {
 
     /// True while audible frames are being played.
     pub fn is_talking(&self) -> bool {
-        self.synced && !self.idle && (self.quiet_samples as f32) < TALKING_HOLD_MS * INTERNAL_RATE as f32 / 1000.0
+        self.synced && !self.idle && (self.quiet_samples as f32) < self.samples_in_ms(TALKING_HOLD_MS)
     }
 
     /// Audio waiting to be played, in milliseconds (ring + current frame).
@@ -398,7 +434,7 @@ impl Playout {
         }
         let queued = ring.queued(self.read_seq) as f32 * self.frame_len as f32;
         let current = (self.frame_len - self.frame_pos.min(self.frame_len)) as f32;
-        (queued + current) * 1000.0 / INTERNAL_RATE as f32
+        (queued + current) * 1000.0 / INTERNAL_RATE as f32 / self.channels() as f32
     }
 
     /// Whether [`Playout::render`] would produce anything but zeros. An idle
@@ -411,6 +447,7 @@ impl Playout {
             self.idle = false;
             self.dry_samples = 0;
             self.resampler.reset();
+            self.resampler_right.reset();
             self.frame_pos = self.frame_len;
             self.need_fade_in = true;
             return true;
@@ -430,9 +467,12 @@ impl Playout {
     fn conceal(&mut self) {
         let len = self.last_len.clamp(1, MAX_FRAME);
         if self.conceal_run == 0 {
-            // Repeat the last good frame, fading to zero across it.
+            // Repeat the last good frame, fading to zero across it (per
+            // frame: the channels of one frame fade together).
+            let ch = self.channels();
+            let frames = (len / ch).max(1);
             for i in 0..len {
-                let g = 1.0 - (i as f32 + 1.0) / len as f32;
+                let g = 1.0 - ((i / ch) as f32 + 1.0) / frames as f32;
                 self.frame[i] = self.last[i] * g;
             }
         } else {
@@ -506,7 +546,15 @@ impl Playout {
                 self.last[..self.frame_len].copy_from_slice(&self.frame[..self.frame_len]);
                 self.last_len = self.frame_len;
                 if self.need_fade_in {
-                    crate::dsp::fade_in(&mut self.frame[..self.frame_len], EDGE_FADE);
+                    let ch = self.channels();
+                    if ch == 1 {
+                        crate::dsp::fade_in(&mut self.frame[..self.frame_len], EDGE_FADE);
+                    } else {
+                        let n = EDGE_FADE.min(self.frame_len / ch).max(1);
+                        for (i, v) in self.frame[..n * ch].iter_mut().enumerate() {
+                            *v *= (i / ch) as f32 / n as f32;
+                        }
+                    }
                     self.need_fade_in = false;
                 }
                 self.conceal_run = 0;
@@ -547,7 +595,7 @@ impl Playout {
                     }
                     self.conceal();
                     self.dry_samples = self.dry_samples.saturating_add(self.frame_len as u32);
-                    if (self.dry_samples as f32) >= IDLE_MS * INTERNAL_RATE as f32 / 1000.0 {
+                    if (self.dry_samples as f32) >= self.samples_in_ms(IDLE_MS) {
                         self.idle = true;
                     }
                 }
@@ -601,6 +649,42 @@ impl Playout {
             *o = rs.pull(|| self.next_sample(ring));
         }
         self.resampler = rs;
+    }
+
+    /// Fill `out` (overwriting; interleaved, [`PlayoutConfig::channels`] per
+    /// frame) at `out_rate`. Both channels go through resamplers that step
+    /// together, so each output frame takes the same input frames for both.
+    pub fn render_interleaved(&mut self, ring: &JitterRing, out_rate: f64, out: &mut [f32]) {
+        if self.channels() == 1 {
+            return self.render(ring, out_rate, out);
+        }
+        let mut left = std::mem::take(&mut self.resampler);
+        let mut right = std::mem::take(&mut self.resampler_right);
+        left.set_ratio(INTERNAL_RATE, out_rate, self.nudge);
+        right.set_ratio(INTERNAL_RATE, out_rate, self.nudge);
+        for o in out.chunks_exact_mut(2) {
+            // the right channel's inputs of this output frame, as the left
+            // one pulled them (a few at most: the step is near the rates' ratio)
+            let mut pending = [0.0f32; 16];
+            let mut n = 0;
+            o[0] = left.pull(|| {
+                let l = self.next_sample(ring);
+                let r = self.next_sample(ring);
+                if n < pending.len() {
+                    pending[n] = r;
+                }
+                n += 1;
+                l
+            });
+            let mut k = 0;
+            o[1] = right.pull(|| {
+                let r = pending[k.min(pending.len() - 1)];
+                k += 1;
+                r
+            });
+        }
+        self.resampler = left;
+        self.resampler_right = right;
     }
 }
 
@@ -863,6 +947,36 @@ mod tests {
         // Excess delay was bled off by speed, not by dropping frames: the
         // reader caught up so the queue sits at the target.
         assert!(ring.queued(p.read_seq) <= 3);
+    }
+
+    /// Stereo frames: each channel plays its own samples in order, a lost
+    /// frame is concealed for both at once, and the drift nudge keeps the
+    /// queue at its target.
+    #[test]
+    fn stereo_frames_keep_their_channels_and_conceal_together() {
+        let ring = JitterRing::new();
+        let mut p = Playout::new(PlayoutConfig { channels: 2, default_frame: 2 * FRAME, ..cfg() });
+        // left: a ramp per frame, right: its negative
+        let frame = |seq: u32| -> Vec<i16> { (0..FRAME).flat_map(|i| { let v = 1000 + (seq as i16 % 20) * 500 + i as i16; [v, -v] }).collect() };
+        let mut out = vec![0.0f32; 2 * FRAME];
+        let mut seq = 0u32;
+        for _ in 0..2 {
+            ring.insert(seq, &frame(seq), false);
+            seq += 1;
+        }
+        for step in 0..400u32 {
+            if step != 200 {
+                ring.insert(seq, &frame(seq), false);
+            }
+            seq += 1;
+            p.render_interleaved(&ring, 48000.0, &mut out);
+            for f in out.chunks_exact(2) {
+                assert!((f[0] + f[1]).abs() < 1e-4, "step {step}: channels apart {f:?}");
+            }
+        }
+        assert_eq!(p.stats.concealed, 1);
+        assert_eq!(p.stats.underruns, 0);
+        assert!((p.buffered_ms(&ring) - 2.0 * 5.0).abs() <= 5.0, "buffered {}", p.buffered_ms(&ring));
     }
 
     #[test]

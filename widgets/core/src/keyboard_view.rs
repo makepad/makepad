@@ -205,6 +205,11 @@ impl KeyboardView {
 }
 
 impl Widget for KeyboardView {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Some(e) = self.next_frame.is_event(event) {
             match self.anim_state {

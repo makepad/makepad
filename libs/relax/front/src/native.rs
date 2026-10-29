@@ -394,7 +394,7 @@ pub fn wrapper() -> Option<i32> {
     let args: Vec<String> = std::env::args().collect();
     // a build script stub (cargo runs what the wrapper left as the script): nothing to do
     let stem = std::path::Path::new(&args[0]).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    if std::env::var_os("OUT_DIR").is_some() && (stem.starts_with("build_script_build") || stem.starts_with("build-script-build")) {
+    if std::env::var_os("OUT_DIR").is_some() && (stem.starts_with("build_script_") || stem.starts_with("build-script-")) {
         return Some(0);
     }
     // cargo runs `<wrapper> <rustc> <args>`
@@ -424,7 +424,7 @@ pub fn wrapper() -> Option<i32> {
         Some(n) => {
             let pkg = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
             let list = |v: &str| std::env::var(v).unwrap_or_default().split(',').any(|x| x == pkg);
-            if n == "build_script_build" { scripts.split(',').any(|x| x == pkg) } else { list("MAKEPAD_RUN_NATIVE_LIBS") }
+            if n.starts_with("build_script_") { scripts.split(',').any(|x| x == pkg) } else { list("MAKEPAD_RUN_NATIVE_LIBS") }
         }
     };
     if real {

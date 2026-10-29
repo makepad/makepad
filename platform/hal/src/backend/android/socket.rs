@@ -20,24 +20,28 @@ pub fn open(id: i64, host: &str, port: i32, tls: bool, ignore_cert: bool) -> boo
 }
 
 /// Reads into `out` (blocking until some bytes arrive or the read timeout passes). `Some(n)`: `n`
-/// bytes, 0 for a read timeout; `None`: the stream is closed or failed.
+/// bytes, 0 for a read timeout; `None`: the stream is closed or failed. Java's reader thread
+/// fills a ring; this takes what it holds straight into `out` (a direct buffer over it: no array
+/// per read, one copy).
 pub fn read_into(id: i64, out: &mut [u8]) -> Option<usize> {
+    static READ: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     call(|env, act| unsafe {
-        let m = method(env, act, c"socketStreamRead", c"(JI)[B");
+        let m = cached(env, act, &READ, c"socketStreamReadInto", c"(JLjava/nio/ByteBuffer;)I");
         if m.is_null() { return None; }
-        let arr = ((**env).CallObjectMethodA.unwrap())(env, act, m, [jvalue { j: id }, jvalue { i: out.len() as i32 }].as_ptr());
-        if arr.is_null() { clear(env); return None; }
-        let len = (((**env).GetArrayLength.unwrap())(env, arr) as usize).min(out.len());
-        ((**env).GetByteArrayRegion.unwrap())(env, arr, 0, len as i32, out.as_mut_ptr() as *mut jbyte);
-        ((**env).DeleteLocalRef.unwrap())(env, arr);
-        Some(len)
+        let buf = ((**env).NewDirectByteBuffer.unwrap())(env, out.as_mut_ptr() as *mut std::ffi::c_void, out.len() as i64);
+        if buf.is_null() { clear(env); return None; }
+        let n = ((**env).CallIntMethodA.unwrap())(env, act, m, [jvalue { j: id }, jvalue { l: buf }].as_ptr());
+        ((**env).DeleteLocalRef.unwrap())(env, buf);
+        if ((**env).ExceptionCheck.unwrap())(env) != 0 { clear(env); return None; }
+        if n < 0 { None } else { Some((n as usize).min(out.len())) }
     }).flatten()
 }
 
 /// Bytes written, or -1.
 pub fn write(id: i64, data: &[u8]) -> i32 {
     call(|env, act| unsafe {
-        let m = method(env, act, c"socketStreamWrite", c"(J[B)I");
+        static WRITE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let m = cached(env, act, &WRITE, c"socketStreamWrite", c"(J[B)I");
         if m.is_null() { return -1; }
         let arr = ((**env).NewByteArray.unwrap())(env, data.len() as i32);
         ((**env).SetByteArrayRegion.unwrap())(env, arr, 0, data.len() as i32, data.as_ptr() as *const jbyte);
@@ -80,6 +84,17 @@ pub fn close(id: i64) {
 
 unsafe fn clear(env: *mut JNIEnv) {
     if ((**env).ExceptionCheck.unwrap())(env) != 0 { ((**env).ExceptionClear.unwrap())(env); }
+}
+/// A method id looked up once (the Activity's class lives as long as the process).
+unsafe fn cached(env: *mut JNIEnv, obj: jobject, slot: &std::sync::OnceLock<usize>, name: &std::ffi::CStr, sig: &std::ffi::CStr) -> jmethodID {
+    if let Some(m) = slot.get() {
+        return *m as jmethodID;
+    }
+    let m = method(env, obj, name, sig);
+    if !m.is_null() {
+        let _ = slot.set(m as usize);
+    }
+    m
 }
 unsafe fn method(env: *mut JNIEnv, obj: jobject, name: &std::ffi::CStr, sig: &std::ffi::CStr) -> jmethodID {
     let cls = ((**env).GetObjectClass.unwrap())(env, obj);

@@ -17,8 +17,8 @@ pub const GM_FAMILIES: [&str; 16] = [
 /// The groups a picker shows, in order: the instruments made here, the
 /// General MIDI set by family and its kits, the library's and the
 /// person's own, then the ways out and in.
-pub const GROUPS: [&str; 30] = [
-    "My instruments", "Synths", "Shader instruments", "Drum kits", "GM drum kits", "Piano", "Ironfish",
+pub const GROUPS: [&str; 31] = [
+    "My instruments", "Synths", "Morph", "Shader instruments", "Drum kits", "GM drum kits", "Piano", "Ironfish",
     "GM pianos", "GM chromatic percussion", "GM organs", "GM guitars", "GM basses", "GM strings", "GM ensembles", "GM brass",
     "GM reeds", "GM pipes", "GM synth leads", "GM synth pads", "GM synth effects", "GM ethnic", "GM percussive", "GM sound effects",
     "SoundFonts", "Samplers", "Voices", "Neural singers", "Library singers", "Audio in", "MIDI out",
@@ -138,6 +138,9 @@ pub fn catalog(doc: Option<&ScoreDoc>, available: &Available) -> Vec<Choice> {
         let _ = i;
         out.push(choice("Ironfish", program.to_string(), "Ironfish: 16 voices with its own chorus, delay and reverb".into(), "Ironfish", vec![("program", quoted(program))]));
     }
+    for (name, about, _) in makepad_audio_synth::morph::PRESETS {
+        out.push(choice("Morph", name.replace('_', " "), format!("Morph wavetable synth: {about}"), "Morph", vec![("preset", atom(name))]));
+    }
     out.push(choice("Audio in", "input".into(), "the audio input (a microphone, a line in) as it comes, through the loop's FX".into(), "Instrument", vec![("kind", "@input".into())]));
     // Outboard gear on MIDI channels (every output; `port:` names one).
     for channel in 1..=16 {
@@ -203,7 +206,7 @@ pub fn catalog(doc: Option<&ScoreDoc>, available: &Available) -> Vec<Choice> {
 }
 
 /// The node types that are instruments.
-pub const INSTRUMENT_TYPES: [&str; 7] = ["Synth", "Drums", "Sampler", "Ironfish", "Shader", "Voice", "Instrument"];
+pub const INSTRUMENT_TYPES: [&str; 8] = ["Synth", "Drums", "Sampler", "Ironfish", "Morph", "Shader", "Voice", "Instrument"];
 
 /// The key of the choice `node` is now, if it is one of them.
 pub fn current_key(src: &str, node: &str) -> Option<String> {
@@ -215,6 +218,7 @@ pub fn current_key(src: &str, node: &str) -> Option<String> {
         "Shader" => vec![("lib".into(), value("lib")?)],
         "Drums" => vec![("kit".into(), value("kit")?)],
         "Ironfish" => vec![("program".into(), value("program")?)],
+        "Morph" => vec![("preset".into(), value("preset")?)],
         "Voice" if value("engine").as_deref() == Some("@neural") => vec![("engine".into(), "@neural".into())],
         "Voice" => vec![("profile".into(), value("profile")?)],
         "Sampler" => vec![("src".into(), value("src")?)],
@@ -258,6 +262,7 @@ fn kept(from: &str, to: &str, key: &str) -> bool {
         ("Instrument", "Instrument") => &["gain", "port"],
         ("Voice", "Voice") => &["choir", "parts", "vibrato", "vibrato_rate", "vibrato_delay", "portamento", "scoop", "breath", "drift", "jitter"],
         ("Sampler", "Sampler") => &["root", "attack", "release"],
+        ("Morph", "Morph") => &["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "macro_names", "mono", "legato", "glide", "level", "poly"],
         ("Ironfish", "Ironfish") => &["cutoff", "resonance", "env", "attack", "decay", "sustain", "release", "sub", "noise", "glide", "crush", "delay", "chorus", "reverb", "output"],
         _ => &[],
     };

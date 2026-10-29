@@ -579,6 +579,17 @@ impl TreeSelect {
 }
 
 impl Widget for TreeSelect {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::ComboBox;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::EXPAND;
+        node.states.insert(a11y_tree::States::HAS_POPUP);
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.seed();
 

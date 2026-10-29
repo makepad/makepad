@@ -1,0 +1,13 @@
+// CI for makepad-app-devhub. devhub is a tray app and a single-instance service of macOS and
+// Linux (its master, nodes and leases are unix sockets and processes; the CI mini runs its own
+// devhub node, so a second one quits with "a devhub already serves"): it opens no window at
+// start, and the default smoke test (launch, wait for a window, grab and judge it) cannot pass
+// here. Its checks are the builds of the platforms it runs on.
+
+use mod.std.*
+use mod.ci;
+
+ci.step("check other platforms", fn(){
+    ci.check_targets({packages: ["makepad-app-devhub"] targets: ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]})
+})
+nil

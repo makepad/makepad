@@ -230,6 +230,11 @@ impl ScriptHook for AdaptiveView {
 }
 
 impl Widget for AdaptiveView {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.widget_match_event(cx, event, scope);
         if let Some(active_widget) = self.active_widget.as_mut() {

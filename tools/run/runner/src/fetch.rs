@@ -147,6 +147,93 @@ pub fn mount(home: &Path, snap: &Snapshot) -> Result<String, String> {
     Ok(root)
 }
 
+/// `makepad export`: writes the snapshot's files into `out` as one working tree (the mounted
+/// repositories at their folders), then the edits folder's files over them (MAKEPAD_RUN_EDITS: what
+/// the app's runs read instead of the store's), so a native build (cargo) sees what the app runs.
+/// Files whose bytes are already there are left alone (their times too: cargo rebuilds only what
+/// changed); files an earlier export wrote that this one does not are removed
+/// (`<out>/.makepad-export` lists what it wrote). Returns (files in the tree, files written).
+pub fn export(snap: &Snapshot, edits: Option<&Path>, out: &Path) -> Result<(usize, usize), String> {
+    use std::collections::BTreeSet;
+    let mut files: BTreeSet<String> = BTreeSet::new();
+    let mut wrote = 0usize;
+    let mut put = |rel: &str, data: &[u8], exec: bool, files: &mut BTreeSet<String>| -> Result<(), String> {
+        if rel.is_empty() || rel.split('/').any(|c| c.is_empty() || c == "." || c == ".." || c.contains('\\')) || rel == ".makepad-export" {
+            return Ok(());
+        }
+        let path = out.join(rel);
+        if std::fs::read(&path).ok().as_deref() != Some(data) {
+            if let Some(p) = path.parent() {
+                std::fs::create_dir_all(p).map_err(|e| format!("{}: {e}", p.display()))?;
+            }
+            std::fs::write(&path, data).map_err(|e| format!("{}: {e}", path.display()))?;
+            #[cfg(unix)]
+            if exec {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+            }
+            wrote += 1;
+        }
+        let _ = exec;
+        files.insert(rel.to_string());
+        Ok(())
+    };
+    // the edits folder's files: written instead of the store's
+    let mut edited: Vec<(String, PathBuf)> = Vec::new();
+    if let Some(edits) = edits {
+        fn walk(dir: &Path, rel: &str, out: &mut Vec<(String, PathBuf)>) {
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if rel.is_empty() && name.starts_with(".makepad-run-") {
+                    continue;
+                }
+                let r = if rel.is_empty() { name } else { format!("{rel}/{name}") };
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, &r, out);
+                } else if p.is_file() {
+                    out.push((r, p));
+                }
+            }
+        }
+        walk(edits, "", &mut edited);
+    }
+    let edited_set: BTreeSet<String> = edited.iter().map(|(r, _)| r.clone()).collect();
+    // the root first, then each mount (a mounted repository's folder is its, not the root's)
+    for (dir, store_path, commit) in &snap.parts {
+        let store = relax_compiler::gitstore::Store::open(store_path).map_err(|e| format!("{}: {e}", store_path.display()))?.ok_or_else(|| format!("{}: no store", store_path.display()))?;
+        let table = store.index.table(commit).ok_or_else(|| format!("{}: commit {} is not in it", store_path.display(), relax_compiler::gitstore::hex(commit)))?;
+        for e in table {
+            if e.mode != 0o100644 && e.mode != 0o100755 {
+                continue;
+            }
+            let rel = if dir.is_empty() { e.path.clone() } else { format!("{dir}/{}", e.path) };
+            if edited_set.contains(&rel) {
+                continue;
+            }
+            if snap.parts.iter().any(|(d, _, _)| d.len() > dir.len() && !d.is_empty() && rel.starts_with(&format!("{d}/"))) {
+                continue;
+            }
+            let (_, data) = store.object(&e.oid).map_err(|x| format!("{}: {x}", store_path.display()))?.ok_or_else(|| format!("{}: {} is missing", store_path.display(), e.path))?;
+            put(&rel, &data, e.mode == 0o100755, &mut files)?;
+        }
+    }
+    for (rel, p) in edited {
+        let data = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        put(&rel, &data, false, &mut files)?;
+    }
+    let manifest = out.join(".makepad-export");
+    for old in std::fs::read_to_string(&manifest).unwrap_or_default().lines() {
+        if !files.contains(old) && !old.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
+            let _ = std::fs::remove_file(out.join(old));
+        }
+    }
+    let text: String = files.iter().map(|f| format!("{f}\n")).collect();
+    std::fs::write(&manifest, text).map_err(|e| format!("{}: {e}", manifest.display()))?;
+    Ok((files.len(), wrote))
+}
+
 /// Splits `run`/`fetch` words into (options for the run, spec, `--cached`, the rest after the
 /// URL). None when no URL is among them.
 pub fn split_args(args: &[String]) -> Option<Result<(Vec<String>, Spec, bool, Vec<String>), String>> {
@@ -386,6 +473,20 @@ mod tests {
         let size = std::fs::metadata(path).unwrap().len();
         fetch(&home, &spec).unwrap();
         assert_eq!(std::fs::metadata(path).unwrap().len(), size);
+
+        // export: the tree with the edits folder's files over it; again, nothing written; an edit
+        // gone, the release's file back
+        let edits = dir.join("edits");
+        write(&edits, &[("src/deep/mod.rs", "pub fn g() {}\n"), (".makepad-run-edits", "src/deep/mod.rs\tnew\n")]);
+        let out = dir.join("export");
+        assert_eq!(export(&snap, Some(&edits), &out).unwrap(), (4, 4));
+        assert_eq!(std::fs::read_to_string(out.join("src/deep/mod.rs")).unwrap(), "pub fn g() {}\n");
+        assert_eq!(std::fs::read_to_string(out.join("README")).unwrap(), "new\n");
+        assert!(!out.join(".makepad-run-edits").exists());
+        assert_eq!(export(&snap, Some(&edits), &out).unwrap(), (4, 0));
+        std::fs::remove_file(edits.join("src/deep/mod.rs")).unwrap();
+        assert_eq!(export(&snap, Some(&edits), &out).unwrap(), (4, 1));
+        assert_eq!(std::fs::read_to_string(out.join("src/deep/mod.rs")).unwrap(), "pub fn f() {}\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

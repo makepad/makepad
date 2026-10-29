@@ -84,7 +84,41 @@ pub struct Image {
 }
 
 impl Image {
+    /// XRGB external buffers have undefined alpha. Sampling them must still be opaque.
+    #[cfg(target_os = "linux")]
+    pub(super) fn sample_alpha_one(&mut self) -> Result<(), String> {
+        let info = vk::ImageViewCreateInfo::default().image(self.image)
+            .format(vk_format(self.desc.format).ok_or("unknown image format")?)
+            .components(vk::ComponentMapping::default().a(vk::ComponentSwizzle::from_raw(2))) // VK_COMPONENT_SWIZZLE_ONE
+            .view_type(vk::ImageViewType::TYPE_2D_ARRAY).subresource_range(vk::ImageSubresourceRange::default()
+                .aspect_mask(self.aspect).level_count(self.desc.mips).layer_count(self.desc.depth));
+        unsafe {
+            let array = self.dev.raw.create_image_view(&info, None).map_err(error)?;
+            let view = match self.dev.raw.create_image_view(&info.view_type(vk::ImageViewType::TYPE_2D)
+                .subresource_range(vk::ImageSubresourceRange::default().aspect_mask(self.aspect).level_count(self.desc.mips).layer_count(1)), None) {
+                Ok(view) => view,
+                Err(e) => { self.dev.raw.destroy_image_view(array, None); return Err(error(e)); }
+            };
+            self.dev.raw.destroy_image_view(std::mem::replace(&mut self.view, view), None);
+            self.dev.raw.destroy_image_view(std::mem::replace(&mut self.array_view, array), None);
+        }
+        Ok(())
+    }
     pub fn new(dev: Arc<Device>, desc: TextureObj) -> Result<Arc<Self>, String> {
+        let usage = image_usage(&desc);
+        Self::new_with(dev, desc, vk::SampleCountFlags::TYPE_1, usage)
+    }
+
+    /// A multisampled render target of `samples` per pixel shaped like `like` (format, size,
+    /// layers): an MSAA pass renders into it and resolves into `like`'s image. Only an
+    /// attachment, never sampled or copied.
+    pub fn multisampled(dev: Arc<Device>, like: &TextureObj, samples: u32) -> Result<Arc<Self>, String> {
+        let desc = TextureObj { mips: 1, lent: None, imported: false, ..like.clone() };
+        let usage = if format::is_depth(desc.format) { vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT } else { vk::ImageUsageFlags::COLOR_ATTACHMENT };
+        Self::new_with(dev, desc, vk::SampleCountFlags(samples), usage)
+    }
+
+    fn new_with(dev: Arc<Device>, desc: TextureObj, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags) -> Result<Arc<Self>, String> {
         let fmt = vk_format(desc.format).ok_or("unknown texture format")?;
         if desc.w == 0 || desc.h == 0 || desc.depth == 0 || desc.mips == 0
             || desc.mips > 32 - desc.w.max(desc.h).leading_zeros()
@@ -93,7 +127,7 @@ impl Image {
             return Err("invalid texture dimensions or mip count".into());
         }
         let features = dev.formats[desc.format as usize].optimal_tiling_features;
-        let mut needed = vk::FormatFeatureFlags::SAMPLED_IMAGE;
+        let mut needed = if samples == vk::SampleCountFlags::TYPE_1 { vk::FormatFeatureFlags::SAMPLED_IMAGE } else { vk::FormatFeatureFlags::empty() };
         if format::is_depth(desc.format) { needed |= vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT; }
         if desc.usage & usage::RENDER_TARGET != 0 {
             if !format::is_depth(desc.format) { needed |= vk::FormatFeatureFlags::COLOR_ATTACHMENT; }
@@ -104,8 +138,8 @@ impl Image {
             .flags(if desc.is_cube() { vk::ImageCreateFlags::CUBE_COMPATIBLE } else { vk::ImageCreateFlags::empty() })
             .image_type(vk::ImageType::TYPE_2D).format(fmt)
             .extent(vk::Extent3D { width: desc.w, height: desc.h, depth: 1 })
-            .mip_levels(desc.mips).array_layers(desc.depth).samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL).usage(image_usage(&desc))
+            .mip_levels(desc.mips).array_layers(desc.depth).samples(samples)
+            .tiling(vk::ImageTiling::OPTIMAL).usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE).initial_layout(vk::ImageLayout::UNDEFINED);
         let image = unsafe { dev.raw.create_image(&info, None) }.map_err(error)?;
         let req = unsafe { dev.raw.get_image_memory_requirements(image) };

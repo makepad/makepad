@@ -16,6 +16,21 @@ pub enum Poll<T> {
 
 pub use Poll::{Pending, Ready};
 
+/// `ready!(poll)` (core/src/task/ready.rs): the value of a `Poll::Ready`, or an early
+/// `return Poll::Pending`.
+#[macro_export]
+macro_rules! __relax_task_ready {
+    ($e:expr $(,)?) => {
+        match $e {
+            $crate::task::Poll::Ready(t) => t,
+            $crate::task::Poll::Pending => {
+                return $crate::task::Poll::Pending;
+            }
+        }
+    };
+}
+pub use __relax_task_ready as ready;
+
 impl<T> Poll<T> {
     pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Poll<U> {
         match self {

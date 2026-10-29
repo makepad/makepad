@@ -225,6 +225,7 @@ impl Cx {
 
     /// Drains the platform ops into HAL commands. False when the app asked to quit.
     pub(crate) fn hal_handle_platform_ops(&mut self) -> bool {
+        self.native_layer_retire();
         while let Some(op) = self.platform_ops.pop_front() {
             match op {
                 CxOsOp::SetOwnChrome(own) => {
@@ -602,7 +603,19 @@ impl Cx {
                 CxOsOp::SaveFileDialog(settings) => self.hal_file_dialog(DialogKind::SaveFile, settings),
                 CxOsOp::SelectFolderDialog(settings) => self.hal_file_dialog(DialogKind::SelectFolder, settings),
                 CxOsOp::SaveFolderDialog(settings) => self.hal_file_dialog(DialogKind::SaveFolder, settings),
-                CxOsOp::AccessibilityUpdate(_) => self.hal.frames.gap("accessibility updates arrive in phase 5"),
+                CxOsOp::A11yUpdate { window, bytes } => {
+                    if self.a11y_host_consumers != 0 {
+                        Self::send_studio_message(crate::studio::AppToStudio::A11yUpdate { window: window.id(), bytes: bytes.clone() });
+                    }
+                    self.hal.frames.w.a11y_update(hal_window_id(window), &bytes);
+                    self.a11y.recycle_bytes(window, bytes);
+                }
+                CxOsOp::A11yActionDone { req, result } => {
+                    if self.a11y_host_consumers != 0 {
+                        Self::send_studio_message(crate::studio::AppToStudio::A11yActionDone { req, result });
+                    }
+                    self.hal.frames.w.a11y_action_done(req, result as u32);
+                }
                 CxOsOp::CheckPermission { permission, request_id } => self.hal_permission(makepad_hal::media::permission_op::CHECK, permission, request_id),
                 CxOsOp::RequestPermission { permission, request_id } => self.hal_permission(makepad_hal::media::permission_op::REQUEST, permission, request_id),
                 CxOsOp::StartLocationUpdates => self.hal_location(makepad_hal::media::location_op::START),
@@ -624,15 +637,9 @@ impl Cx {
                 CxOsOp::SetVideoPlaybackRate(v, rate) => self.hal_video_control(v, makepad_hal::media::video_op::RATE, (rate as f32).to_bits() as u64),
                 CxOsOp::SelectVideoTrack(v, track) => self.hal_video_control(v, makepad_hal::media::video_op::SELECT_VIDEO_TRACK, track as u64),
                 CxOsOp::SelectAudioTrack(v, track) => self.hal_video_control(v, makepad_hal::media::video_op::SELECT_AUDIO_TRACK, track as u64),
-                op @ (CxOsOp::AttachCameraNativePreview { .. } | CxOsOp::UpdateCameraNativePreview { .. } | CxOsOp::DetachCameraNativePreview { .. }) => self.hal_camera_preview(op),
-                op @ (CxOsOp::SpawnSystemBrowser { .. }
-                | CxOsOp::UpdateSystemBrowser { .. }
-                | CxOsOp::DetachSystemBrowser { .. }
-                | CxOsOp::SetSystemBrowserUrl { .. }
-                | CxOsOp::SystemBrowserHistoryGo { .. }
-                | CxOsOp::CloseSystemBrowser { .. }) => self.hal_system_browser(op),
-                // the macOS backend never had embedded web views either
-                CxOsOp::CreateWebView { .. } | CxOsOp::UpdateWebView { .. } | CxOsOp::CloseWebView { .. } => self.hal.frames.gap("web views are not implemented on macOS"),
+                CxOsOp::NativeLayerCreate { id, content } => self.hal_native_layer_create(id, content),
+                CxOsOp::NativeLayerOp { id, op } => self.hal_native_layer_op(id, op),
+                CxOsOp::NativeLayerDestroy { id } => self.hal.frames.w.native_layer_destroy(id.hal()),
                 CxOsOp::XrStartPresenting => self.hal_xr_start(),
                 CxOsOp::XrStopPresenting => self.hal_xr_stop(),
                 CxOsOp::XrSetRenderScale(_)

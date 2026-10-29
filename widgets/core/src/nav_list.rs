@@ -266,6 +266,12 @@ impl NavList {
 }
 
 impl Widget for NavList {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::List;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // A list declared in markup has to show its destinations without the
         // host saying anything, and has to still do so after a reload.

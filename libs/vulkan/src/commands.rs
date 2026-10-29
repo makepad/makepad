@@ -58,6 +58,7 @@ pub type PfnCreatePipelineCache = unsafe extern "system" fn(Device, *const Pipel
 pub type PfnCreatePipelineLayout = unsafe extern "system" fn(Device, *const PipelineLayoutCreateInfo, *const AllocationCallbacks, *mut PipelineLayout) -> Result;
 pub type PfnCreateQueryPool = unsafe extern "system" fn(Device, *const QueryPoolCreateInfo, *const AllocationCallbacks, *mut QueryPool) -> Result;
 pub type PfnCreateRenderPass = unsafe extern "system" fn(Device, *const RenderPassCreateInfo, *const AllocationCallbacks, *mut RenderPass) -> Result;
+pub type PfnCreateRenderPass2 = unsafe extern "system" fn(Device, *const RenderPassCreateInfo2, *const AllocationCallbacks, *mut RenderPass) -> Result;
 pub type PfnCreateSampler = unsafe extern "system" fn(Device, *const SamplerCreateInfo, *const AllocationCallbacks, *mut Sampler) -> Result;
 pub type PfnCreateSamplerYcbcrConversion = unsafe extern "system" fn(Device, *const SamplerYcbcrConversionCreateInfo, *const AllocationCallbacks, *mut SamplerYcbcrConversion) -> Result;
 pub type PfnCreateSemaphore = unsafe extern "system" fn(Device, *const SemaphoreCreateInfo, *const AllocationCallbacks, *mut Semaphore) -> Result;
@@ -324,6 +325,7 @@ pub struct DeviceTable {
     pub create_pipeline_layout: Option<PfnCreatePipelineLayout>,
     pub create_query_pool: Option<PfnCreateQueryPool>,
     pub create_render_pass: Option<PfnCreateRenderPass>,
+    pub create_render_pass2: Option<PfnCreateRenderPass2>,
     pub create_sampler: Option<PfnCreateSampler>,
     pub create_sampler_ycbcr_conversion: Option<PfnCreateSamplerYcbcrConversion>,
     pub create_semaphore: Option<PfnCreateSemaphore>,
@@ -444,6 +446,7 @@ impl DeviceTable { pub unsafe fn load(handle: Device, get: PfnGetDeviceProcAddr)
         create_pipeline_layout: core::mem::transmute::<PfnVoidFunction, Option<PfnCreatePipelineLayout>>(lookup(c"vkCreatePipelineLayout")),
         create_query_pool: core::mem::transmute::<PfnVoidFunction, Option<PfnCreateQueryPool>>(lookup(c"vkCreateQueryPool")),
         create_render_pass: core::mem::transmute::<PfnVoidFunction, Option<PfnCreateRenderPass>>(lookup(c"vkCreateRenderPass")),
+        create_render_pass2: core::mem::transmute::<PfnVoidFunction, Option<PfnCreateRenderPass2>>(lookup(c"vkCreateRenderPass2").or_else(|| lookup(c"vkCreateRenderPass2KHR"))),
         create_sampler: core::mem::transmute::<PfnVoidFunction, Option<PfnCreateSampler>>(lookup(c"vkCreateSampler")),
         create_sampler_ycbcr_conversion: core::mem::transmute::<PfnVoidFunction, Option<PfnCreateSamplerYcbcrConversion>>(lookup(c"vkCreateSamplerYcbcrConversion").or_else(|| lookup(c"vkCreateSamplerYcbcrConversionKHR"))),
         create_semaphore: core::mem::transmute::<PfnVoidFunction, Option<PfnCreateSemaphore>>(lookup(c"vkCreateSemaphore")),
@@ -987,6 +990,15 @@ impl crate::Device {
     #[inline]
     pub unsafe fn create_render_pass(&self, create_info: &RenderPassCreateInfo, allocator: Option<&AllocationCallbacks>) -> std::result::Result<RenderPass, Result> {
         let call = self.table.create_render_pass.expect("vkCreateRenderPass is unavailable");
+        let mut value: RenderPass = RenderPass::default();
+        call(self.handle, create_info, allocator.map_or(core::ptr::null(), |v| v as *const AllocationCallbacks), &mut value).result()?;
+        Ok(value)
+    }
+}
+impl crate::Device {
+    #[inline]
+    pub unsafe fn create_render_pass2(&self, create_info: &RenderPassCreateInfo2, allocator: Option<&AllocationCallbacks>) -> std::result::Result<RenderPass, Result> {
+        let call = self.table.create_render_pass2.expect("vkCreateRenderPass2 is unavailable");
         let mut value: RenderPass = RenderPass::default();
         call(self.handle, create_info, allocator.map_or(core::ptr::null(), |v| v as *const AllocationCallbacks), &mut value).result()?;
         Ok(value)

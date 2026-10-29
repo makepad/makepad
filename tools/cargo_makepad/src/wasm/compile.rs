@@ -869,6 +869,16 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             )?;
         }
         if name == "makepad-platform" {
+            runtime_js.push((
+                dep_dir.join("src/os/web/a11y.js"),
+                app_dir.join("makepad_platform/a11y.js"),
+            ));
+            cp_brotli(
+                &dep_dir.join("src/os/web/a11y.js"),
+                &app_dir.join("makepad_platform/a11y.js"),
+                false,
+                config.brotli,
+            )?;
             runtime_js.push((dep_dir.join("src/os/web/web.js"), app_dir.join("makepad_platform/web.js")));
             runtime_js.push((dep_dir.join("src/os/web/web_gl.js"), app_dir.join("makepad_platform/web_gl.js")));
             cp_brotli(

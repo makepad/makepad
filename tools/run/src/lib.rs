@@ -48,6 +48,7 @@ fn init() {
     {
         relax_compiler::inspect::register_host_inspect("cap", makepad_hal::inspect::dispatch);
         relax_compiler::inspect::register_host_commands(makepad_hal::framecap::COMMANDS);
+        relax_compiler::inspect::register_host_commands(makepad_hal::a11y::COMMANDS);
     }
 }
 

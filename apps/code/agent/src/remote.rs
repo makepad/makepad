@@ -6,7 +6,7 @@
 //! - `apps`: what runs where, with each app's AI services (`app` service) and tool counts;
 //! - `app_tools`: one target's manifest(s) as compact text;
 //! - `app_call`: one AI tool call (`service.tool` + JSON args);
-//! - `ui`: the app's built-in remote commands (dump, snap, click, text, key, grab, ...);
+//! - `ui`: the app's built-in remote commands (ui, ui find, ui act, ui type, key, grab, ...);
 //! - `launch`: start an app on a host (into its window manager when one runs there);
 //! - `list_apps`, `build_app`, `run_app`, `stop_app`, `app_status`, `app_logs`: build and run the
 //!   workspace's own apps through the run manager the RUN panel shows (runs.rs); a run starts

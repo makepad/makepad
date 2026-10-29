@@ -14,9 +14,11 @@ use super::super::super::{
 use makepad_hal::{buffers::{read_items, Wire}, window_kind, Id, XrDepth, XrFrame, XrPose};
 use std::rc::Rc;
 
-/// Near and far planes of the eye projections (metres in the room).
-const EYE_NEAR: f32 = 0.05;
-const EYE_FAR: f32 = 2000.0;
+/// Near and far planes of the eye projections (metres in the room): the HAL's one definition.
+use makepad_hal::{XR_EYE_FAR_M as EYE_FAR, XR_EYE_NEAR_M as EYE_NEAR};
+
+/// The app uses the room field (`Cx::xr_set_room_field`): the depth readback is integrated.
+pub(crate) static ROOM_FIELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) struct HalXr {
     /// the Cx window standing for the HAL's XR window
@@ -45,6 +47,14 @@ pub(crate) struct HalXr {
     pub(crate) env_images: Vec<(u64, crate::texture::Texture)>,
     /// the display time of the frame that acquired the current `env_depth` image
     pub(crate) env_depth_ns: u64,
+    /// `Cx::xr_set_scene_to_room`: the XR passes' scene space into the room (tracking space);
+    /// the eye views of the pass uniforms are composed with it (identity: the scene is the room)
+    pub(crate) scene_to_room: Mat4f,
+    /// `Cx::xr_set_supersample`: an offscreen XR pass (`info_flags::XR_OFFSCREEN`) renders at
+    /// this many of its eye pixels per axis (1: the eye size); the app filters it down itself
+    pub(crate) supersample: f32,
+    /// `Cx::xr_set_msaa`: the XR passes' samples per pixel (1: none)
+    pub(crate) msaa: u32,
 }
 
 /// A local-space point seen by eye 0's environment depth camera: its depth along that camera's
@@ -78,6 +88,8 @@ fn env_depth_at(header: &XrDepth, texels: &[u16], p: [f32; 3]) -> Option<(f32, O
 
 // asked before the XR window exists: applied when it is made
 thread_local! { static SEE_THROUGH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+thread_local! { static SUPERSAMPLE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) }; }
+thread_local! { static MSAA: std::cell::Cell<u32> = const { std::cell::Cell::new(1) }; }
 thread_local! { static REFRESH_MHZ: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
 
 fn pose(p: &XrPose) -> Pose {
@@ -95,10 +107,18 @@ pub(crate) fn eye_matrices(frame: &XrFrame, i: usize) -> (Mat4f, Mat4f) {
 }
 
 impl Cx {
+    /// The HAL's info flags as they are now: a remote headset slot is offered from the moment a
+    /// headset links (`makepad_hal::xr_remote::hal_xr_remote_enable`), after the HAL opened.
+    pub(crate) fn hal_info_flags(&self) -> u32 {
+        let Some(info) = self.hal.info else { return 0 };
+        let remote = if makepad_hal::xr_remote::hal_xr_remote_enabled() { makepad_hal::info_flags::XR | makepad_hal::info_flags::XR_OFFSCREEN } else { 0 };
+        info.flags | remote
+    }
+
     /// `xr_start_presenting`: the XR window, once (a backend without XR: nothing to present on).
     pub(crate) fn hal_xr_start(&mut self) {
         if self.hal.xr.is_some() { return; }
-        if !self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::XR != 0) {
+        if self.hal_info_flags() & makepad_hal::info_flags::XR == 0 {
             self.hal.frames.gap("XR presenting needs a head-mounted display (info_flags::XR)");
             return;
         }
@@ -109,12 +129,16 @@ impl Cx {
         self.hal.windows.insert(window.0, super::HalWindow::default());
         // the HAL sizes it (its first Geom confirms it)
         self.hal.frames.w.window_create(hal_window_id(window), window_kind::XR, Id::NONE, [0.0; 4], false);
-        self.hal.xr = Some(HalXr { window, frame: None, display_ns: 0, clock_offset_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None, hand_check_at: None, env_images: Vec::new(), env_depth_ns: 0 });
+        self.hal.xr = Some(HalXr { window, frame: None, display_ns: 0, clock_offset_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None, hand_check_at: None, env_images: Vec::new(), env_depth_ns: 0, scene_to_room: Mat4f::identity(), supersample: SUPERSAMPLE.with(|s| s.get()), msaa: MSAA.with(|m| m.get()) });
         if SEE_THROUGH.with(|s| s.get()) { self.hal_xr_see_through(true); }
         let refresh = REFRESH_MHZ.with(|r| r.get());
         if refresh != 0 { self.hal_xr_refresh_rate(refresh); }
         // the XR passes paint into it from now on
         self.redraw_all();
+    }
+
+    pub(crate) fn hal_xr_see_through_now(&self) -> bool {
+        SEE_THROUGH.with(|s| s.get())
     }
 
     pub(crate) fn hal_xr_see_through(&mut self, on: bool) {
@@ -130,6 +154,41 @@ impl Cx {
         for e in &eyes { makepad_hal::buffers::Wire::write(e, &mut bytes); }
         bytes.extend_from_slice(&focus_m.to_le_bytes());
         self.hal.frames.w.xr_frame_eyes(hal_window_id(xr.window), &bytes);
+    }
+
+    /// `Cx::xr_set_supersample`: the offscreen XR pass repaints at its new size.
+    pub(crate) fn hal_xr_supersample(&mut self, scale: f32) {
+        let scale = if scale.is_finite() { scale.clamp(0.5, 2.0) } else { 1.0 };
+        SUPERSAMPLE.with(|s| s.set(scale));
+        let Some(xr) = self.hal.xr.as_mut() else { return };
+        if xr.supersample == scale { return; }
+        xr.supersample = scale;
+        let passes: Vec<_> = self.passes.id_iter().filter(|p| matches!(self.passes[*p].parent, CxDrawPassParent::Xr)).collect();
+        for pass in passes { self.redraw_pass_and_child_passes(pass); }
+    }
+
+    /// `Cx::xr_set_msaa`: the XR passes repaint with that many samples per pixel (a count
+    /// the HAL has, `HalInfo::msaa`; else 1).
+    pub(crate) fn hal_xr_msaa(&mut self, samples: u32) {
+        let supported = self.hal.info.map_or(1, |i| i.msaa);
+        // the most samples the GPU has up to the count asked for
+        let samples = [8u32, 4, 2].into_iter().find(|n| *n <= samples && supported & n != 0).unwrap_or(1);
+        MSAA.with(|m| m.set(samples));
+        let Some(xr) = self.hal.xr.as_mut() else { return };
+        if xr.msaa == samples { return; }
+        xr.msaa = samples;
+        let passes: Vec<_> = self.passes.id_iter().filter(|p| matches!(self.passes[*p].parent, CxDrawPassParent::Xr)).collect();
+        for pass in passes { self.redraw_pass_and_child_passes(pass); }
+    }
+
+    /// The XR passes' samples per pixel (`Cx::xr_set_msaa`).
+    pub(crate) fn hal_xr_msaa_now(&self) -> u32 {
+        self.hal.xr.as_ref().map_or(1, |xr| xr.msaa)
+    }
+
+    /// The offscreen XR pass's pixels per eye pixel (`Cx::xr_set_supersample`).
+    pub(crate) fn hal_xr_supersample_now(&self) -> f32 {
+        self.hal.xr.as_ref().map_or(1.0, |xr| xr.supersample)
     }
 
     /// `Cx::xr_set_pose_lead`.
@@ -187,9 +246,12 @@ impl Cx {
         });
         xr.last = state.clone();
         // the XR pass draws with the new eyes
+        // (what is redrawn from here is the headset's: `XrWindowHold`)
+        let in_xr = std::mem::replace(&mut self.xr_window_hold.in_xr, true);
         let passes: Vec<_> = self.passes.id_iter().filter(|p| matches!(self.passes[*p].parent, CxDrawPassParent::Xr)).collect();
         for pass in passes { self.redraw_pass_and_child_passes(pass); }
         self.call_event_handler(&Event::XrUpdate(XrUpdateEvent { state, last }));
+        self.xr_window_hold.in_xr = in_xr;
     }
 
     /// An `XrDepth`: the headset's environment depth. A header alone announces a newly
@@ -220,6 +282,8 @@ impl Cx {
             xr.env_depth_ns = display_ns;
             return;
         };
+        // (a readback still in flight when the app stopped wanting the field: dropped)
+        if !ROOM_FIELD.load(std::sync::atomic::Ordering::Acquire) { return; }
         let all: Vec<u16> = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
         let Some(xr) = self.hal.xr.as_mut() else { return };
         if xr.depth_writer.is_none() {
@@ -261,15 +325,23 @@ impl Cx {
         }
     }
 
+    /// `Cx::xr_set_scene_to_room`.
+    pub(crate) fn hal_xr_scene_to_room(&mut self, m: Mat4f) {
+        if let Some(xr) = self.hal.xr.as_mut() { xr.scene_to_room = m; }
+    }
+
     /// The uniforms of eye `i` for an XR pass: its own uniforms with that eye's camera (left
     /// and right fields alike: each eye is a pass of its own).
     pub(crate) fn hal_xr_eye_uniforms(&mut self, base: &DrawPassUniforms, i: usize) -> Option<&DrawPassUniforms> {
         let xr = self.hal.xr.as_mut()?;
         let frame = xr.frame?;
         let (view, projection) = eye_matrices(&frame, i);
+        let view = Mat4f::mul(&view, &xr.scene_to_room);
         let inv = view.invert();
+        let msaa = xr.msaa as f32;
         let u = &mut xr.eye_uniforms[i];
         *u = *base;
+        u.msaa_samples = msaa;
         u.camera_view = view; u.camera_view_r = view;
         u.camera_projection = projection; u.camera_projection_r = projection;
         u.depth_view = view; u.depth_view_r = view;
@@ -285,8 +357,12 @@ impl Cx {
         let frame = xr.frame?;
         let (view, projection) = eye_matrices(&frame, 0);
         let (view_r, projection_r) = eye_matrices(&frame, 1);
+        let view = Mat4f::mul(&view, &xr.scene_to_room);
+        let view_r = Mat4f::mul(&view_r, &xr.scene_to_room);
+        let msaa = xr.msaa as f32;
         let u = &mut xr.eye_uniforms[0];
         *u = *base;
+        u.msaa_samples = msaa;
         u.camera_view = view; u.camera_view_r = view_r;
         u.camera_projection = projection; u.camera_projection_r = projection_r;
         u.depth_view = view; u.depth_view_r = view_r;

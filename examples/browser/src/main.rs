@@ -1,25 +1,29 @@
 pub use makepad_widgets;
 
-use makepad_browser_view::{BrowserViews, ViewId};
-use makepad_widgets::image::DrawImage;
 use makepad_widgets::*;
 use std::collections::HashMap;
 
 app_main!(App);
 
 const INITIAL_URL: &str = "https://makepad.nl";
-const HOSTED_URL: &str = "https://www.google.nl";
 const NATIVE_BROWSER_COUNT: usize = 20;
+const INITIAL_TAB: usize = if cfg!(target_os = "android") { 2 } else { 0 };
+
+// Self-contained: the sandwich/input proof needs no network or external page.
+const SANDWICH_URL: &str = concat!(
+    "data:text/html;charset=utf-8,<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>Sandwich page</title>",
+    "<style>body{margin:0;padding:28px;background:aliceblue;color:midnightblue;font:20px sans-serif}",
+    "input,button,a{font:inherit;margin:12px;padding:12px}section{height:480px}</style></head><body>",
+    "<h1>Engine-host texture</h1><p>The popup covers this page; the rest accepts input.</p>",
+    "<section><p style='padding-top:100px'>Type here:</p><input style='position:absolute;left:380px;top:160px;width:220px;height:32px;margin:0;padding:4px' placeholder='Text and IME input' onfocus='document.title=`Native input focused`' ",
+    "oninput='document.title=this.value||`Sandwich page`'><button onclick='document.title=`Page clicked`'>Click page</button>",
+    "<a href='%23second'>History entry</a></section><h2 id='second'>Page scroll target</h2>",
+    "<section>Scroll inside the page, or beside it to move the Makepad list.</section></body></html>",
+);
 
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
-
-    mod.widgets.HostedPageBase = #(HostedPage::register_widget(vm))
-    mod.widgets.HostedPage = set_type_default() do mod.widgets.HostedPageBase{
-        width: Fill
-        height: Fill
-    }
 
     mod.widgets.NativeBrowserListBase = #(NativeBrowserList::register_widget(vm))
     mod.widgets.NativeBrowserList = set_type_default() do mod.widgets.NativeBrowserListBase{
@@ -62,7 +66,7 @@ script_mod! {
                     }
                 }
 
-                browser := Browser{
+                browser := WebView{
                     width: Fill
                     height: Fill
                     url: "https://makepad.nl"
@@ -76,8 +80,8 @@ script_mod! {
         height: Fill
 
         root := DockTabs{
-            tabs: [@cef_tab @native_tab]
-            selected: 0
+            tabs: [@cef_tab @native_tab @sandwich_tab]
+            selected: #(INITIAL_TAB)
             closable: false
         }
 
@@ -93,11 +97,19 @@ script_mod! {
             kind: @TabNative
         }
 
+        sandwich_tab := DockTab{
+            name: "Textured sandwich"
+            template: @PermanentTab
+            kind: @TabSandwich
+        }
+
         TabCEF := View{
             width: Fill
             height: Fill
 
-            cef_browser := mod.widgets.HostedPage{
+            cef_browser := WebView{
+                prefer_textured: true
+                url: "https://www.google.nl"
                 width: Fill
                 height: Fill
             }
@@ -127,13 +139,95 @@ script_mod! {
                 }
 
                 Label{
-                    text: "This tab keeps 20 persistent system browsers attached to their Browser widgets while the Dock tab is active."
+                    text: "This tab keeps 20 persistent web views. Their mode follows platform support."
                     draw_text.color: #x94a7d4
                     draw_text.text_style.font_size: 10
                 }
             }
 
             native_browser_list := mod.widgets.NativeBrowserList{}
+        }
+
+        TabSandwich := View{
+            width: Fill
+            height: Fill
+            flow: Overlay
+
+            sandwich_scroll := ScrollYView{
+                width: Fill
+                height: Fill
+                flow: Down
+                spacing: 18
+                padding: Inset{left: 24 right: 24 top: 100 bottom: 24}
+
+                Label{
+                    text: "Native layer sandwich"
+                    draw_text.text_style: theme.font_bold{font_size: 24}
+                }
+                Label{
+                    width: Fill
+                    text: "Scroll the page to move the web view between ordinary Makepad content."
+                }
+                sandwich_web := WebView{
+                    width: Fill
+                    height: 540
+                    border_radius: 12
+                    url: #(SANDWICH_URL)
+                }
+                page_controls := View{
+                    width: Fill height: Fit flow: Flow.Right{wrap: true} spacing: 8
+                    page_back := Button{text: "Back"}
+                    page_forward := Button{text: "Forward"}
+                    page_reload := Button{text: "Reload"}
+                    page_stop := Button{text: "Stop"}
+                    page_status := Label{text: "Waiting for page"}
+                }
+                RoundedView{
+                    width: Fill
+                    height: 420
+                    padding: Inset{left: 20 top: 20 right: 20 bottom: 20}
+                    draw_bg +: {color: theme.color_bg_app}
+                    Label{text: "Makepad content below the web view"}
+                }
+            }
+
+            // Drawn after the native slot: scrolling the retained list underneath this
+            // fixed header exercises view_shift and the upper surface in the same frame.
+            sandwich_header := RoundedView{
+                width: Fill
+                height: 76
+                padding: Inset{left: 24 right: 24 top: 18 bottom: 18}
+                draw_bg +: {color: #x17191d border_radius: 12}
+                Label{
+                    text: "Sandwich: fixed Makepad header above native content"
+                    draw_text.color: #fff
+                    draw_text.text_style: theme.font_bold{font_size: 18}
+                }
+            }
+
+            // Drawn after the scroll view, across its native layer's bounds.
+            RoundedView{
+                width: 300
+                cursor: MouseCursor.Default
+                height: Fit
+                margin: Inset{left: 40 top: 180}
+                padding: Inset{left: 18 right: 18 top: 18 bottom: 18}
+                flow: Down
+                spacing: 10
+                draw_bg +: {color: #x293c62 border_radius: 12}
+                Label{
+                    text: "Floating popup"
+                    draw_text.color: #fff
+                    draw_text.text_style: theme.font_bold{font_size: 15}
+                }
+                Label{
+                    width: Fill
+                    text: "This popup is drawn after the web view."
+                    draw_text.color: #fff
+                }
+                popup_button := Button{text: "Test popup input"}
+                popup_status := Label{text: "Waiting for a click" draw_text.color: #fff}
+            }
         }
     }
 
@@ -152,63 +246,6 @@ script_mod! {
     }
 }
 
-/// A page of the browser host (Chromium in its own process, the one CEF
-/// path): drawn from its frame ring, sized to the widget, given its hits.
-#[derive(Script, ScriptHook, Widget)]
-pub struct HostedPage {
-    #[uid]
-    uid: WidgetUid,
-    #[source]
-    source: ScriptObjectRef,
-    #[walk]
-    walk: Walk,
-    #[redraw]
-    #[live]
-    draw_bg: DrawImage,
-    #[rust]
-    views: Option<BrowserViews>,
-    #[rust]
-    view: Option<ViewId>,
-}
-
-impl Widget for HostedPage {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        let Some(views) = &mut self.views else { return };
-        if views.handle_event(cx, event) {
-            self.draw_bg.redraw(cx);
-        }
-        let Some(view) = self.view else { return };
-        let area = self.draw_bg.area();
-        let hit = event.hits_with_capture_overload(cx, area, true);
-        if let Hit::FingerDown(_) = hit {
-            cx.set_key_focus(area);
-        }
-        let rect = area.is_valid(cx).then(|| area.rect(cx));
-        views.forward_hit(cx, view, &hit, |abs| rect.map(|rect| abs - rect.pos));
-    }
-
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        let rect = cx.peek_walk_turtle(walk);
-        let views = self.views.get_or_insert_with(|| BrowserViews::new("makepad-example-browser"));
-        if self.view.is_none() {
-            self.view = views.open(HOSTED_URL, true, 0xff00_0000);
-        }
-        if let Some(view) = self.view {
-            views.set_size(view, rect.size, cx.current_dpi_factor());
-        }
-        views.service(cx);
-        match self.view.and_then(|view| views.frame(view)) {
-            Some(frame) if frame.info.width > 0 => {
-                self.draw_bg.image_scale = vec2(frame.info.width as f32 / frame.alloc[0] as f32, frame.info.height as f32 / frame.alloc[1] as f32);
-                self.draw_bg.draw_vars.set_texture(0, &frame.texture);
-            }
-            _ => self.draw_bg.draw_vars.empty_texture(0),
-        }
-        self.draw_bg.draw_walk(cx, walk);
-        DrawStep::done()
-    }
-}
-
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
@@ -224,7 +261,7 @@ pub struct NativeBrowserList {
     #[rust]
     bindings: HashMap<WidgetUid, usize>,
     #[rust]
-    browsers: HashMap<WidgetUid, BrowserRef>,
+    browsers: HashMap<WidgetUid, WebViewRef>,
 }
 
 impl NativeBrowserList {
@@ -242,7 +279,7 @@ impl NativeBrowserList {
     fn bind_item(&mut self, cx: &mut Cx, item: &WidgetRef, item_id: usize) {
         let widget_uid = item.widget_uid();
         let is_new_browser = !self.browsers.contains_key(&widget_uid);
-        let browser = item.browser(cx, ids!(browser));
+        let browser = item.web_view(cx, ids!(browser));
         browser.set_visible(cx, self.active);
 
         if self.bindings.get(&widget_uid) != Some(&item_id) {
@@ -296,6 +333,17 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        let sandwich = self.ui.dock(cx, ids!(dock)).item(id!(sandwich_tab));
+        let page = sandwich.web_view(cx, ids!(sandwich_web));
+        if sandwich.button(cx, ids!(page_back)).clicked(actions) { page.history(cx, -1); }
+        if sandwich.button(cx, ids!(page_forward)).clicked(actions) { page.history(cx, 1); }
+        if sandwich.button(cx, ids!(page_reload)).clicked(actions) { page.reload(cx); }
+        if sandwich.button(cx, ids!(page_stop)).clicked(actions) { page.stop(cx); }
+        let state = page.state();
+        sandwich.label(cx, ids!(page_status)).set_text(cx, &format!("{:?}: {}{}", state.mode, state.title, if state.loading { " (loading)" } else { "" }));
+        if sandwich.button(cx, ids!(popup_button)).clicked(actions) {
+            sandwich.label(cx, ids!(popup_status)).set_text(cx, "Popup received the click");
+        }
         for action in actions {
             let Some(action) = action.as_widget_action() else {
                 continue;
@@ -318,8 +366,24 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Startup = event {
             self.set_native_tab_active(cx, false);
+            if std::env::args().any(|arg| arg == "--sandwich") {
+                self.ui.dock(cx, ids!(dock)).select_tab(cx, id!(sandwich_tab));
+            }
         }
         self.match_event(cx, event);
+        static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let trace = *TRACE.get_or_init(|| std::env::var("MAKEPAD_NATIVE_LAYER_TRACE").is_ok_and(|v| v == "1"));
+        if trace && matches!(event, Event::Draw(_)) {
+            // Sample the offset the turtle is about to use. Drawing the scroll bars later
+            // clamps their stored position, after this frame's rubber-band layout was drawn.
+            let sandwich = self.ui.dock(cx, ids!(dock)).item(id!(sandwich_tab));
+            // Dock creates the page during its first draw; its initial scroll is zero.
+            let scroll_y = sandwich.view(cx, ids!(sandwich_scroll)).scroll_extent().map_or(0.0, |extent| extent.pos.y);
+            eprintln!("[sandwich] next_frame={} scroll_y={scroll_y}", cx.frame_submission_serial() + 1);
+        }
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        if trace {
+            if let Event::NativeLayer(e) = event { eprintln!("[sandwich] native_event={e:?}"); }
+        }
     }
 }

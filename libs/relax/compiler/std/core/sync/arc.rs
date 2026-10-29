@@ -43,6 +43,9 @@ pub struct Arc<T: ?Sized> {
     _marker: crate::marker::PhantomData<T>,
 }
 
+// as std (alloc/src/sync.rs, rc.rs): the pointee is never moved through the pointer
+impl<T: ?Sized> crate::marker::Unpin for Arc<T> {}
+
 unsafe impl<T: ?Sized + Sync + Send> Send for Arc<T> {}
 unsafe impl<T: ?Sized + Sync + Send> Sync for Arc<T> {}
 

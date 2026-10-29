@@ -518,6 +518,28 @@ pub(crate) fn rt_compile(t0: u64, dt: u64) {
 
 /// Frames the program presented (the `jit` answer's fps).
 pub static FRAMES: AtomicU64 = AtomicU64::new(0);
+/// frames that ended after a frame at or after the first present
+static FRAMES_AFTER_PRESENT: AtomicU64 = AtomicU64::new(0);
+/// How long after the first present the startup image's window stays open at most
+const IMAGE_WINDOW_NS: u64 = 1_000_000_000;
+
+/// The UI thread's first frames after the first present are on: the present is less than a second
+/// old, or the UI thread is still in the burst of JIT waits that began with them (jit::ui_burst).
+/// False before any present (a program that presents nothing has no first frames).
+pub fn in_first_frames() -> bool {
+    let fp = present_ns();
+    fp != 0 && (wall_ns() < fp + 1_000_000_000 || crate::jit::ui_burst() && wall_ns() < fp + 10_000_000_000)
+}
+
+/// The startup image's window: until the first present, and then until the frame after it is
+/// presented (at most IMAGE_WINDOW_NS). The slots installed in it are the next start's image
+/// (jit.rs ORDER_PRESENT_LEN): the first frames after the present call hundreds of fns no earlier
+/// frame did (Sandbox: ~270 back to back right at the present, 50-90 ms of cached links on the
+/// UI thread, enough for the JIT indicator), and those are prelinked at the next start instead.
+pub fn image_window_open() -> bool {
+    let fp = present_ns();
+    fp == 0 || FRAMES_AFTER_PRESENT.load(Relaxed) == 0 && wall_ns() < fp + IMAGE_WINDOW_NS
+}
 
 /// The program presented a frame (makepad-platform calls the loader symbol `relax_frame_done`
 /// after each frame the HAL finished; on the thread that handles the HAL's events).
@@ -535,6 +557,9 @@ pub(crate) extern "C" fn relax_frame_done() {
         episode_at(EP_SUM.load(Relaxed) + dt, now);
     }
     let last = LAST_FRAME.swap(now, Relaxed);
+    if fp != 0 && last >= fp && FRAMES_AFTER_PRESENT.fetch_add(1, Relaxed) == 0 && crate::run::VERBOSE.load(Relaxed) {
+        eprintln!("makepad-run startup image window closed at +{:.0} ms after the first present ({} startup slots)", ms(now - fp), crate::jit::ORDER_PRESENT_LEN.load(Relaxed));
+    }
     episode_end();
     let compiled = MAIN_COMPILE_NS.load(Relaxed);
     static COMPILED_AT_LAST: AtomicU64 = AtomicU64::new(0);

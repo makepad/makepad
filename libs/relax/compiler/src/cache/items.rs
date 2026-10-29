@@ -19,6 +19,25 @@ impl FileDigest {
     fn hole(&self, item: u32) -> Option<(u32, u32)> {
         self.holes.binary_search_by_key(&item, |h| h.0).ok().map(|i| (self.holes[i].1, self.holes[i].2))
     }
+    /// Every hole's span (deps.rs: the text outside the interface).
+    pub(crate) fn hole_spans(&self) -> Vec<(u32, u32)> {
+        self.holes.iter().map(|h| (h.1, h.2)).collect()
+    }
+    /// The item whose hole defines item `item` (`item` itself when none does).
+    pub(crate) fn hole_owner(&self, item: ItemId) -> u32 {
+        match self.nested_in.binary_search_by_key(&item.0, |x| x.0) {
+            Ok(k) => self.nested_in[k].1,
+            Err(_) => item.0,
+        }
+    }
+    /// The hole whose body defines item `item` (or `item`'s own hole): its span.
+    pub(crate) fn body_span(&self, item: ItemId) -> Option<(u32, u32)> {
+        let item = match self.nested_in.binary_search_by_key(&item.0, |x| x.0) {
+            Ok(k) => self.nested_in[k].1,
+            Err(_) => item.0,
+        };
+        self.hole(item)
+    }
 }
 
 fn text_range(pf: &ParsedFile) -> (u32, u32) {
@@ -102,9 +121,22 @@ fn digest_into(pf: &ParsedFile, mut text: Option<&mut Vec<u8>>) -> FileDigest {
                 _ => continue,
             };
             if blo < lo || bhi > hi || blo < it.lo || blo >= bhi || bhi > it.hi { continue; }
-            // `impl Trait` in the signature: callers' types are the body's
+            // `impl Trait` in the return type: callers' types are the body's. (In an argument the
+            // fn is generic: an instance is a slot of its own, keyed by this body.) An `impl` after
+            // the first `->` outside brackets: an arrow inside the generics (`F: Fn() -> u32`)
+            // comes first and only makes an argument's `impl` count as the return's.
             let t0 = pf.toks.partition_point(|t| t.lo < it.lo);
-            if pf.toks.iter_from(t0).take_while(|t| t.lo < blo).any(|t| t.kind == T::KwImpl) { continue; }
+            let mut depth = 0i32;
+            let mut ret = false;
+            if pf.toks.iter_from(t0).take_while(|t| t.lo < blo).any(|t| {
+                match t.kind {
+                    T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
+                    T::CloseParen | T::CloseBracket | T::CloseBrace => depth -= 1,
+                    T::RArrow if depth <= 0 => ret = true,
+                    _ => {}
+                }
+                ret && t.kind == T::KwImpl
+            }) { continue; }
             // the items the body defines (written there or expanded from there)
             let Some(v) = (if eager { in_body(blo, bhi) } else { Some(Vec::new()) }) else { continue };
             nested_in.extend(v.into_iter().map(|x| (x, i as u32)));
@@ -280,6 +312,12 @@ pub(crate) fn pos_digest(pf: &ParsedFile, d: &FileDigest, item: ItemId) -> u128 
 /// dependencies' interface fingerprints. A proc-macro crate's whole fingerprint (its fn bodies
 /// make the expansions of every crate that uses it).
 pub(crate) fn crate_ifaces(prog: &crate::program::Program, fps: &[u128], digests: &[Option<std::sync::Arc<FileDigest>>]) -> Vec<u128> {
+    crate_ifaces_from(prog, fps, digests, &[])
+}
+
+/// `crate_ifaces` when the first crates' interfaces are `known` (a partial collected restore keeps
+/// them): only the other crates' files need digests.
+pub(crate) fn crate_ifaces_from(prog: &crate::program::Program, fps: &[u128], digests: &[Option<std::sync::Arc<FileDigest>>], known: &[u128]) -> Vec<u128> {
     let nc = prog.crates.len();
     let mut per: Vec<Sip128> = (0..nc)
         .map(|c| {
@@ -304,6 +342,7 @@ pub(crate) fn crate_ifaces(prog: &crate::program::Program, fps: &[u128], digests
     }
     let mut out = vec![0u128; nc];
     let mut done = vec![false; nc];
+    for (c, &k) in known.iter().enumerate().take(nc) { out[c] = k; done[c] = true; }
     fn go(c: usize, prog: &crate::program::Program, per: &[Sip128], out: &mut Vec<u128>, done: &mut Vec<bool>, depth: u32) -> u128 {
         if done[c] || depth > 512 {
             return out[c];
@@ -324,6 +363,46 @@ pub(crate) fn crate_ifaces(prog: &crate::program::Program, fps: &[u128], digests
     }
     for c in 0..nc {
         go(c, prog, &per, &mut out, &mut done, 0);
+    }
+    out
+}
+
+/// Per crate: its view -- what its code's keys take from the crate itself besides its items
+/// (deps.rs): its name, root, edition, cfg and proc-macro-ness, its dependencies by alias with
+/// their views, and the interface fingerprint (`ifaces`: a proc-macro crate's is its whole
+/// fingerprint -- its code makes the expansions of the crates using it) of a crate whose items are
+/// not in the graph (`atomic`: sysroot and proc-macro crates). Bound crates are folded in by
+/// apply_bound as for the interface fingerprints.
+pub(crate) fn crate_views(prog: &crate::program::Program, ifaces: &[u128], atomic: &[bool]) -> Vec<u128> {
+    let nc = prog.crates.len();
+    let mut out = vec![0u128; nc];
+    let mut done = vec![false; nc];
+    fn go(c: usize, prog: &crate::program::Program, ifaces: &[u128], atomic: &[bool], out: &mut Vec<u128>, done: &mut Vec<bool>, depth: u32) -> u128 {
+        if done[c] || depth > 512 {
+            return out[c];
+        }
+        let ci = &prog.crates[c];
+        let mut h = crate::crate_image::fingerprint_head(prog.syms.str(ci.name), ci.root_path(), ci.edition, ci.proc_macro, &ci.cfg.set);
+        h.str("view");
+        if atomic.get(c).copied().unwrap_or(true) {
+            h.u128(ifaces.get(c).copied().unwrap_or(0));
+        }
+        let mut named: Vec<(String, u128)> = Vec::new();
+        for &(alias, d) in &ci.deps {
+            if d as usize == c { continue; }
+            let v = go(d as usize, prog, ifaces, atomic, out, done, depth + 1);
+            named.push((format!("{}={}", prog.syms.str(alias), prog.syms.str(prog.crates[d as usize].name)), v));
+        }
+        named.sort();
+        named.dedup();
+        h.u32(named.len() as u32);
+        for (n, v) in named { h.str(&n); h.u128(v); }
+        out[c] = h.finish128();
+        done[c] = true;
+        out[c]
+    }
+    for c in 0..nc {
+        go(c, prog, ifaces, atomic, &mut out, &mut done, 0);
     }
     out
 }
@@ -384,6 +463,38 @@ pub(crate) fn apply_bound(prog: &crate::program::Program, plain: &[u128], bound:
         }
         h.finish128()
     }).collect()
+}
+
+/// The digests of files `want` into `out` (indexed by file), on several threads.
+pub(crate) fn file_digests_of(prog: &crate::program::Program, want: &[usize], out: &mut [Option<std::sync::Arc<FileDigest>>]) {
+    if want.is_empty() { return; }
+    struct Shared<'a>(&'a [std::sync::Arc<ParsedFile>]);
+    // read-only: the parses are complete (their lazily built tables are OnceLocks)
+    unsafe impl Sync for Shared<'_> {}
+    let files = Shared(&prog.files);
+    let threads = std::thread::available_parallelism().map_or(4, |x| x.get()).clamp(1, 8);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let parts: Vec<Vec<(usize, FileDigest)>> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..threads)
+            .map(|_| {
+                let (files, next) = (&files, &next);
+                s.spawn(move || {
+                    let mut v = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&f) = want.get(i) else { break };
+                        let Some(pf) = files.0.get(f) else { continue };
+                        v.push((f, file_digest(pf)));
+                    }
+                    v
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap_or_default()).collect()
+    });
+    for (i, d) in parts.into_iter().flatten() {
+        if let Some(o) = out.get_mut(i) { *o = Some(std::sync::Arc::new(d)); }
+    }
 }
 
 /// Every file's digest, on several threads (the cache's open).

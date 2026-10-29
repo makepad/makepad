@@ -132,10 +132,19 @@ fn frame(s: &mut Session, sid: u32, _target: Id, _kind: u32, packet: u32, view: 
         let a = r.off as usize;
         a.checked_add(r.len as usize).filter(|e| *e <= len).map(|e| a..e)
     };
-    let (Some(pr), Some(_)) = (slice(p.passes, view.passes.len()), slice(p.draws, view.draws.len())) else {
+    let (Some(pr), Some(_), Some(lr)) = (slice(p.passes, view.passes.len()), slice(p.draws, view.draws.len()), slice(p.layers, view.layers.len())) else {
         s.stats.bad_args += 1;
         return None;
     };
+    s.last_frame_layers.clear();
+    s.last_frame_occluders.clear();
+    for layer in &view.layers[lr] {
+        let mut layer = *layer;
+        let off = s.last_frame_occluders.len() as u32;
+        s.last_frame_occluders.extend(crate::buffers::read_rects(view.arena, layer.occluders));
+        layer.occluders = Range { off, len: s.last_frame_occluders.len() as u32 - off };
+        s.last_frame_layers.push(layer);
+    }
     let frame = p.frame;
     s.frame = frame;
     s.font_frames.submitted(frame);

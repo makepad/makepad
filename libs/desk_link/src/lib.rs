@@ -13,11 +13,16 @@ use std::io::{self, Write};
 pub mod server;
 #[cfg(feature = "host")]
 pub mod host;
+pub mod rate;
+#[cfg(feature = "tiles")]
+pub mod tiles;
 pub mod xr;
 #[cfg(feature = "host")]
-pub mod xr_host;
+pub mod xr_audio;
+#[cfg(feature = "server")]
+pub mod xr_pair;
 
-pub const VERSION: u16 = 7;
+pub const VERSION: u16 = 8;
 pub const DEFAULT_PORT: u16 = 8790;
 /// The largest message either side accepts (a key frame of a big desktop fits many times over).
 pub const MAX_MESSAGE: usize = 16 << 20;
@@ -151,6 +156,8 @@ pub struct ScreenInfo {
 /// Viewer -> server.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ClientMsg {
+    /// Semantic command on the desktop, under the same fleet admin right as input.
+    A11yQuery { req: u64, line: String },
     /// First message. `authorization` is the fleet proof (`MKID ...`) bound to the server's
     /// certificate; `screen` < 0 asks for the server's default screen; `paused` opens the
     /// session without video (a background session of the viewer's list).
@@ -196,6 +203,7 @@ pub enum ClientMsg {
 /// Server -> viewer.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ServerMsg {
+    A11yReply { req: u64, text: String },
     /// The session is open. `stream` is the picture size of `screen` (its output size); `input`
     /// says whether input is injected, `input_note` why not.
     Welcome { version: u16, session: u32, screens: Vec<ScreenInfo>, screen: u32, stream: [u32; 2], input: bool, input_note: String, server: String },
@@ -357,12 +365,17 @@ mod tag {
     pub const CLIPBOARD_S: u8 = 106;
     pub const BYE: u8 = 107;
     pub const RATE: u8 = 108;
+    pub const A11Y_QUERY: u8 = 25;
+    pub const A11Y_REPLY: u8 = 109;
 }
 
 impl ClientMsg {
     pub fn encode(&self) -> Vec<u8> {
         use tag::*;
         match self {
+            ClientMsg::A11yQuery { req, line } => {
+                let mut w = Out::new(A11Y_QUERY); w.u64(*req); w.str(line); w.done()
+            }
             ClientMsg::Hello { version, name, authorization, screen, paused, caps } => {
                 let mut o = Out::new(HELLO);
                 o.u16(*version).str(name).str(authorization).i32(*screen).u8(*paused as u8).u32(*caps);
@@ -443,6 +456,7 @@ impl ClientMsg {
         use tag::*;
         let mut r = In { b: payload };
         Ok(match ty {
+            A11Y_QUERY => ClientMsg::A11yQuery { req: r.u64()?, line: r.str()? },
             HELLO => ClientMsg::Hello { version: r.u16()?, name: r.str()?, authorization: r.str()?, screen: r.i32()?, paused: r.bool()?, caps: r.u32()? },
             PAUSE => ClientMsg::Pause,
             RESUME => ClientMsg::Resume,
@@ -472,6 +486,9 @@ impl ServerMsg {
     pub fn encode(&self) -> Vec<u8> {
         use tag::*;
         match self {
+            ServerMsg::A11yReply { req, text } => {
+                let mut w = Out::new(A11Y_REPLY); w.u64(*req); w.str(text); w.done()
+            }
             ServerMsg::Welcome { version, session, screens, screen, stream, input, input_note, server } => {
                 let mut o = Out::new(WELCOME);
                 o.u16(*version).u32(*session).u32(screens.len() as u32);
@@ -524,6 +541,7 @@ impl ServerMsg {
         use tag::*;
         let mut r = In { b: payload };
         Ok(match ty {
+            A11Y_REPLY => ServerMsg::A11yReply { req: r.u64()?, text: r.str()? },
             WELCOME => {
                 let version = r.u16()?;
                 let session = r.u32()?;

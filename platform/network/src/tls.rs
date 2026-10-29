@@ -21,8 +21,14 @@
 //! [`KnownHosts`] (first contact, warns loudly on a change). TLS 1.2 is the
 //! floor everywhere;
 //! TLS 1.3 is used where both stacks have it (OpenSSL, Schannel on recent
-//! Windows). SecureTransport stops at TLS 1.2, with ECDHE-ECDSA AEAD suites
-//! only.
+//! Windows). SecureTransport stops at TLS 1.2, with ECDHE AEAD suites only
+//! (RSA or ECDSA certificates).
+//!
+//! [`crate::SocketStream::connect_capture_resuming`] opens a second
+//! connection that resumes an earlier one's TLS session (FTPS data
+//! channels need it). Schannel does not resume sessions of servers without
+//! the extended master secret (RFC 7627); that connection fails with
+//! `Unsupported` rather than going on unresumed.
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -1060,9 +1066,9 @@ mod server_tests {
             }
             outcomes
         });
-        let (mut client, seen) = crate::SocketStream::connect_capture("127.0.0.1", &port).unwrap();
-        assert_eq!(seen, certificate, "the captured DER is the server leaf certificate");
-        assert_eq!(fingerprint(&seen), pin, "the captured fingerprint is the server certificate's");
+        let (mut client, chain) = crate::SocketStream::connect_capture_chain("127.0.0.1", &port).unwrap();
+        assert_eq!(chain.first(), Some(&certificate), "chain capture returns the server leaf first");
+        assert_eq!(fingerprint(&chain[0]), pin, "the captured fingerprint is the server certificate's");
         client.write_all(b"hello").unwrap();
         let mut echo = [0u8; 5];
         client.read_exact(&mut echo).unwrap();

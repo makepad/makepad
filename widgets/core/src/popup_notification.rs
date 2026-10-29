@@ -68,6 +68,12 @@ impl ScriptHook for PopupNotification {
 }
 
 impl Widget for PopupNotification {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Status;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         self.opened && self.cancel_children_impl(visit)
     }

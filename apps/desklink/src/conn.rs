@@ -214,6 +214,7 @@ pub struct Connection {
     /// The size of the window that shows it (its desktop follows it).
     pub view: Arc<ViewWindow>,
     tx: Sender<ClientMsg>,
+    semantic: Arc<crate::a11y::Endpoint>,
     paused: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     /// Drop the session and open it again now (`Connection::reconnect`).
@@ -225,6 +226,7 @@ impl Drop for Connection {
     /// The network thread (and its decoder) ends within its connect / handshake bound and is
     /// joined: nothing outlives the connection.
     fn drop(&mut self) {
+        self.semantic.connected(false);
         self.stop.store(true, Ordering::Release);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -244,7 +246,8 @@ impl Connection {
         let reconnect = Arc::new(AtomicBool::new(false));
         let max_backoff = Duration::from_secs(30);
         let view = Arc::new(ViewWindow::default());
-        let net = Net { host: host.clone(), port, shared: shared.clone(), latest: latest.clone(), history: history.clone(), view: view.clone(), rx, paused: paused.clone(), stop: stop.clone(), reconnect: reconnect.clone(), signal, cmd: tx.clone(), max_backoff };
+        let semantic = crate::a11y::register(&name, tx.clone());
+        let net = Net { semantic: semantic.clone(), host: host.clone(), port, shared: shared.clone(), latest: latest.clone(), history: history.clone(), view: view.clone(), rx, paused: paused.clone(), stop: stop.clone(), reconnect: reconnect.clone(), signal, cmd: tx.clone(), max_backoff };
         let thread = match std::thread::Builder::new().name(format!("desklink-net-{host}")).spawn(move || net.run()) {
             Ok(t) => Some(t),
             Err(e) => {
@@ -252,7 +255,7 @@ impl Connection {
                 None
             }
         };
-        Connection { name, host, port, shared, latest, history, view, tx, paused, stop, reconnect, thread }
+        Connection { name, host, port, shared, latest, history, view, tx, semantic, paused, stop, reconnect, thread }
     }
 
     /// A desktop played from an Annex-B dump (dev: `--dump-play`): its pictures decoded the way
@@ -268,7 +271,8 @@ impl Connection {
         shared.lock().unwrap().state = Some(State::Connected);
         let (s, l, h, st) = (shared.clone(), latest.clone(), history.clone(), stop.clone());
         let thread = std::thread::Builder::new().name("desklink-dump".into()).spawn(move || play_loop(path, gpu, still, s, l, h, st, signal)).ok();
-        Connection { name: "dump".into(), host: "dump".into(), port: 0, shared, latest, history, view: Arc::new(ViewWindow::default()), tx, paused: Arc::new(AtomicBool::new(false)), stop, reconnect: Arc::new(AtomicBool::new(false)), thread }
+        let semantic = crate::a11y::register("dump", tx.clone());
+        Connection { semantic, name: "dump".into(), host: "dump".into(), port: 0, shared, latest, history, view: Arc::new(ViewWindow::default()), tx, paused: Arc::new(AtomicBool::new(false)), stop, reconnect: Arc::new(AtomicBool::new(false)), thread }
     }
 
     pub fn send(&self, msg: ClientMsg) {
@@ -298,6 +302,7 @@ impl Connection {
 }
 
 struct Net {
+    semantic: Arc<crate::a11y::Endpoint>,
     host: String,
     port: u16,
     shared: Arc<Mutex<Shared>>,
@@ -334,6 +339,7 @@ impl Net {
                 Ok(reason) => reason,
                 Err(e) => e,
             };
+            self.semantic.connected(false);
             if self.stop.load(Ordering::Acquire) {
                 return;
             }
@@ -479,6 +485,9 @@ impl Net {
             loop {
                 match self.rx.try_recv() {
                     Ok(msg) => {
+                        if let ClientMsg::A11yQuery { req, .. } = &msg {
+                            if !self.semantic.pending(*req) { continue; }
+                        }
                         if let Err(e) = proto::write_all(&mut stream, &msg.encode()) {
                             failed = Some(format!("write: {e}"));
                             break;
@@ -524,6 +533,7 @@ impl Net {
                         s.session += 1;
                         s.state = Some(State::Connected);
                         drop(s);
+                        self.semantic.connected(true);
                         self.signal.set();
                     }
                     ServerMsg::Refused { reason } => {
@@ -580,6 +590,7 @@ impl Net {
                         drop(s);
                         self.signal.set();
                     }
+                    ServerMsg::A11yReply { req, text } => self.semantic.reply(req, text),
                     ServerMsg::Clipboard { .. } => {}
                 }
             }

@@ -17,7 +17,7 @@ use makepad_render::makepad_render_material::ibl;
 use makepad_render::sun::{env_exposure, env_sun_dir, env_sun_rig, EnvLighting};
 use makepad_scene::{Ibl, IblSource, TextureRef, World};
 
-/// Fab's default site (libs/fab api::SkyState::default): Amsterdam-ish,
+/// Fab's default site (the Fab shell's SkyState::default): Amsterdam-ish,
 /// midsummer, CEST.
 const LAT: f32 = 52.37;
 const LON: f32 = 4.9;

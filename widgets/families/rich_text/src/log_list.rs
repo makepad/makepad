@@ -879,6 +879,12 @@ impl LogList {
 }
 
 impl Widget for LogList {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Log;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // Read from the live fields every frame so that a filter typed into
         // the DSL, a live reload, and a host calling the setters all take

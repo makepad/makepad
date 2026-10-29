@@ -396,6 +396,21 @@ fn gather(level: Vec<WidgetRef>, out: &mut Vec<WidgetRef>, depth: usize) {
 }
 
 impl Widget for RadioGroup {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::RadioGroup;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> { Some(self.chosen.to_string()) })().unwrap_or_default();
+        node.name = (|| -> Option<String> { Some(self.answer_text()) })().unwrap_or_default();
+        node.value = self.answer_text();
+        node.range = Some(a11y_tree::RangeValue {
+            min: 0.0,
+            max: self.items.len().saturating_sub(1) as f64,
+            now: self.chosen as f64,
+            step: 1.0,
+        });
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.collect();
         self.push_disabled(cx.cx.cx);
@@ -597,15 +612,7 @@ impl Widget for RadioGroup {
         self.disabled
     }
 
-    /// The index of the answer, so a test can wait on the number rather than
-    /// on the words.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.chosen.to_string())
-    }
 
-    fn snapshot_selected(&self, _cx: &Cx) -> Option<String> {
-        Some(self.answer_text())
-    }
 }
 
 impl RadioGroupRef {

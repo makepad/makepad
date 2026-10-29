@@ -95,6 +95,9 @@ pub struct Rc<T: ?Sized> {
     _marker: crate::marker::PhantomData<T>,
 }
 
+// as std (alloc/src/sync.rs, rc.rs): the pointee is never moved through the pointer
+impl<T: ?Sized> crate::marker::Unpin for Rc<T> {}
+
 // library/alloc/src/rc.rs:330-338: the count is shared and non-atomic.
 impl<T: ?Sized> !Send for Rc<T> {}
 impl<T: ?Sized> !Sync for Rc<T> {}

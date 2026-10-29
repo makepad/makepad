@@ -452,7 +452,11 @@ fn widget_register_impl(
         .add("{");
     tb.add("    fn register_widget(vm: &mut ScriptVm)->ScriptValue{");
     tb.add("        register_widget!(vm.cx_mut(), ").ident(struct_name).add(");");
-    tb.add("        Self::script_component(vm)");
+    tb.add("        let value = Self::script_proto(vm);");
+    tb.add("        ScriptValue::script_proto(vm);");
+    tb.add("        vm.heap_mut().define_type_property(value.into(), live_id!(a11y), ScriptValue::script_type_id_static());");
+    tb.add("        vm.heap_mut().freeze_component(value.into());");
+    tb.add("        value");
     tb.add("    }");
     tb.add("}");
 }

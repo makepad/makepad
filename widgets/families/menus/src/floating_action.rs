@@ -1943,6 +1943,16 @@ impl FloatingActionItem {
 }
 
 impl Widget for FloatingActionItem {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Button;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.button.handle_event(cx, event, scope);
     }
@@ -3028,6 +3038,25 @@ impl Drop for FloatingAction {
 }
 
 impl Widget for FloatingAction {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Button;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+        node.value = (|| -> Option<String> {
+            Some(snapshot_text(
+                self.open,
+                self.pinned,
+                self.dial,
+                self.anchor,
+            ))
+        })()
+        .unwrap_or_default();
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         // Before anything can take a lock of its own this event. The window
         // does this too; this is for a tree with no window above it.
@@ -3382,9 +3411,7 @@ impl Widget for FloatingAction {
         DrawStep::done()
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(snapshot_text(self.open, self.pinned, self.dial, self.anchor))
-    }
+
 }
 
 impl FloatingActionRef {

@@ -41,7 +41,7 @@ pub fn path() -> PathBuf {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    crate::os::home_dir()
 }
 
 /// `wm_flags=(--jit sandbox)` of the installed session script, read as data (never run).

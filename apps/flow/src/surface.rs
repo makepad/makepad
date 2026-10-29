@@ -239,7 +239,7 @@ impl WidgetNode for SurfaceView {
         self.area.redraw(cx);
     }
 
-    /// The mounted root is this widget's one child, so tree walks, `/snap`
+    /// The mounted root is this widget's one child, so tree walks, `ui find`
     /// and by-path lookups reach the surface's controls.
     fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
         if let Some(root) = self.host.as_ref().and_then(FaceHost::surface_root) {

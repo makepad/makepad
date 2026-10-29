@@ -442,7 +442,18 @@ pub(crate) fn resolve_package(
         *CRATE_DIRS.lock().unwrap() = g.crates.iter().zip(g.pkg.iter()).map(|(c, (dir, _, _))| (c.name.clone(), dir.clone())).collect();
     }
     // every crate's cfg set (its env!() environment is set when it is loaded: `set_crate_env`)
-    let order = crate::crates::topo_order(&g.crates);
+    // the root package's crates, and whatever depends on them, load last: the crates an edit
+    // of the app reaches are a suffix from the first start on (FrontImages::load_order keeps
+    // that for the crates edited later)
+    let order = {
+        let topo = crate::crates::topo_order(&g.crates);
+        let root_dir = &g.pkg[g.root].0;
+        let mut late: Vec<bool> = g.pkg.iter().map(|(dir, _, _)| dir == root_dir).collect();
+        for &ci in &topo { if !late[ci] && g.crates[ci].deps.iter().any(|(d, _)| late.get(*d).copied().unwrap_or(false)) { late[ci] = true; } }
+        let (mut first, last): (Vec<usize>, Vec<usize>) = topo.into_iter().partition(|&ci| !late[ci]);
+        first.extend(last);
+        first
+    };
     let mut cfgs: Vec<crate::cfg::CfgSet> = Vec::with_capacity(g.crates.len());
     for (ci, c) in g.crates.iter().enumerate() {
         let mut cs = crate::program_cfg(sess, &c.features);
@@ -710,6 +721,13 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             eprintln!("makepad: edit conflict: {c}");
             report("note", &c);
         }
+        // the app's own folders written out for tools outside the run (vfs.rs SEED)
+        if let Some(seed) = std::env::var("MAKEPAD_RUN_EDITS_SEED").ok().filter(|s| !s.is_empty()) {
+            let folders: Vec<String> = seed.split(',').map(str::to_string).collect();
+            if let Err(e) = crate::vfs::seed_edits(&folders) {
+                eprintln!("makepad: writing the app's source into its edits folder: {e}");
+            }
+        }
     }
     let package = args[i].clone();
     // makepad inspect: the program answers questions from now on (compiles included)
@@ -831,6 +849,21 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         pre_index[ci] = pre.len();
         pre.push(crate::preload::PreCrate { name: c.name.clone(), root: c.src_path.clone(), edition: c.edition, cfg: cfgs[ci].clone(), deps,  proc_macro: c.proc_macro, image_deps, image_dep_names });
     }
+    let front_images = crate::cache::FrontImages::open(options);
+    // the load order the stored image was recorded in, with the changed crates and their
+    // dependents last (FrontImages::load_order): the restore keeps every crate before them
+    let order = match front_images.as_ref().filter(|_| !check).and_then(|images| images.load_order(&pre, std_count)) {
+        Some(perm) => match crate::preload::reorder(&pre, &perm) {
+            Some(reordered) => {
+                let order: Vec<usize> = perm[std_count..].iter().map(|&k| order[k - std_count]).collect();
+                for (k, &ci) in order.iter().enumerate() { pre_index[ci] = std_count + k; }
+                pre = reordered;
+                order
+            }
+            None => order,
+        },
+        None => order,
+    };
     let tp = Instant::now();
     let root_dir = crate::unitgraph::manifest_dir_of(&g.crates[g.root].src_path);
     // the one app-crate rule (borrowck::event): check, serve and run share it
@@ -844,7 +877,6 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     // `makepad check` borrow-checks every crate it loads: all keep their user-written types
     if check { crate::borrowck::event::set_check_scope(); }
     jit::settle_rebuild::remember_boot(&pre);
-    let front_images = crate::cache::FrontImages::open(options);
     prog.record_front = front_images.is_some();
     prog.front_sink = front_images.as_ref().and_then(|images| images.sink());
     if front_images.is_none() && (crate::preload::trace() || crate::memstat::enabled()) {
@@ -902,7 +934,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     if collected_restored {
         core = prog.prelude_crate.expect("collected graph prelude");
     } else {
-        let recipe = crate::crate_image::GraphRecipe::new(&pre);
+        // (a reordered load's base graph: the restore's)
+        let recipe = crate::crate_image::GraphRecipe { base: prog.front_graph.as_ref().and_then(|r| r.base), ..crate::crate_image::GraphRecipe::new(&pre) };
         let replay = (restored_crates != 0).then(|| pre.clone());
         let mut remaining: Vec<_> = pre.into_iter().skip(restored_crates).collect();
         for c in &mut remaining {
@@ -1378,7 +1411,12 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
                 let warm = c.startup_manifest_valid() && c.stats.packs_rejected == 0 && c.stats.packs as usize == u.prog.crates.len() && (!u.prog.record_front || u.prog.front_restored.iter().all(|r| *r));
                 relax_codegen::warm::classify(warm);
                 crate::run_state::emit(crate::run_state::Event::Warm { domain: None, warm });
-                u.front.warm_cache.store(warm, Ordering::Relaxed);
+                // the startup links cached code (warm, or an edited start of a program that ran
+                // before: its manifest's entries are all in the cache): no speculative body checks
+                // ahead of the lazy compiles -- an edited start's slots link stored code but for the
+                // few the edit reaches, and a build checks its own body (an edited Sandbox start
+                // checked 80k bodies ahead, 13 s cpu, for 31 its 8 builds took)
+                u.front.linked_start.store(c.startup_manifest_valid() && c.stats.packs_rejected == 0, Ordering::Relaxed);
                 jit::CODE_CACHE_EMPTY.store(c.stats.code_stores == 0, Ordering::Relaxed);
                 if warm {
                     warm_start = Some((c.manifest.len(), c.manifest_present, c.manifest_uncached));
@@ -1501,9 +1539,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         if let Some(c) = unsafe { (*up).cache.as_ref() } {
             let s = &c.stats;
             let ms = |ns: u64| ns as f64 / 1e6;
-            verbose!("makepad-run cache: prelinked {} startup slots and {} data objects in {:.1} ms (image read {:.1}, keys {:.1}, symbols {:.1}, placed+linked+installed {:.1}; {} left lazy: {} stale, {} unresolved, {} had code)", s.prelinked, s.prelink_data, t_pre.elapsed().as_secs_f64() * 1e3,
-                ms(s.prelink_parse_ns), ms(s.prelink_keys_ns), ms(s.prelink_syms_ns), ms(s.prelink_ns.saturating_sub(s.prelink_parse_ns + s.prelink_keys_ns + s.prelink_syms_ns)),
-                s.prelink_changed + s.prelink_failed + s.prelink_had_code, s.prelink_changed, s.prelink_failed, s.prelink_had_code);
+            verbose!("makepad-run cache: prelinked {} startup slots and {} data objects in {:.1} ms (image read {:.1}, keys {:.1}, symbols {:.1}, placed+linked+installed {:.1}; {} naming a changed crate kept, checked in {:.1}; {} left lazy: {} stale, {} unresolved, {} had code)", s.prelinked, s.prelink_data, t_pre.elapsed().as_secs_f64() * 1e3,
+                ms(s.prelink_parse_ns), ms(s.prelink_keys_ns), ms(s.prelink_syms_ns), ms(s.prelink_ns.saturating_sub(s.prelink_parse_ns + s.prelink_keys_ns + s.prelink_syms_ns + s.prelink_check_ns)),
+                s.prelink_rekeyed, ms(s.prelink_check_ns), s.prelink_changed + s.prelink_failed + s.prelink_had_code, s.prelink_changed, s.prelink_failed, s.prelink_had_code);
         }
     }
     unsafe { jit::spec_seed_manifest(up) };
@@ -2977,6 +3015,34 @@ pub(crate) fn push_front_images(prog: &crate::program::Program, c: &mut crate::c
     n
 }
 
+/// (verbose) a background owner request's longest stretch between two of its yield checks (the
+/// longest the main thread could wait behind it), and the check that ended it
+struct YieldProbe(std::sync::Mutex<(Option<Instant>, f64, &'static str, u32, &'static str)>);
+/// (YieldProbe) the section of a background owner request running now: a gap between two
+/// checks is reported by the section it began in
+pub(crate) static YIELD_SECTION: relax_session::sync::Mutex<&'static str> = relax_session::sync::Mutex::new("");
+pub(crate) fn yield_section(s: &'static str) { *YIELD_SECTION.lock().unwrap_or_else(|e| e.into_inner()) = s; }
+impl YieldProbe {
+    fn new() -> Self { Self(std::sync::Mutex::new((None, 0.0, "", 0, ""))) }
+    fn start(&self) { self.0.lock().unwrap_or_else(|e| e.into_inner()).0 = Some(Instant::now()); }
+    fn tick(&self, at: &'static str) {
+        let now = Instant::now();
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let section = *YIELD_SECTION.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(l) = g.0 {
+            let ms = (now - l).as_secs_f64() * 1e3;
+            if ms > g.1 { g.1 = ms; g.2 = if g.4.is_empty() { at } else { g.4 }; }
+        }
+        g.4 = section;
+        g.0 = Some(now);
+        g.3 += 1;
+    }
+    fn report(&self, what: &str) {
+        let g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if g.1 >= 5.0 { verbose!("makepad-run cache: {} held the owner up to {:.1} ms without a yield check (ending at {}; {} checks)", what, g.1, g.2, g.3); }
+    }
+}
+
 /// Why a mid-run pass did not record the collected program, said once per distinct reason (verbose).
 fn collected_skip(why: &'static str) {
     static LAST: relax_session::sync::Mutex<&'static str> = relax_session::sync::Mutex::new("");
@@ -3010,12 +3076,17 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
     // the files whose front images this write holds: the collected program below is recorded
     // only if no file was loaded since (its restore maps every file from these images)
     let mut imaged_files = usize::MAX;
+    let probe = YieldProbe::new();
     let Some(Some((held, spill))) = unit_call(wait, || {
     let held = Instant::now();
+    probe.start();
+    yield_section("mid write");
     let spill = {
         let u = unsafe { &mut *up };
         u.flush_cache_records();
         parts[3] = held.elapsed().as_secs_f64() * 1e3;
+        probe.tick("records");
+        yield_section("manifest");
         // the startup manifest, once its window has closed (first present + 5 s after main):
         // what the exit recorded before, so a killed or force-quit app starts warm too; the exit
         // writes it again only if O2 code replaced startup code since (record_manifest)
@@ -3028,7 +3099,7 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
             let mut cache = u.cache.take();
             if let Some(c) = cache.as_mut() {
                 // a frame's lazy compile goes first: the manifest is made again by a later write
-                let stop = || crate::owner::main_waiting() && !jit::QUIT_SEEN.load(Ordering::Relaxed);
+                let stop = || { probe.tick("manifest"); crate::owner::main_waiting() && !jit::QUIT_SEEN.load(Ordering::Relaxed) };
                 if !c.record_manifest(u, crate::layout::root_crate(), &order, present, &stop) {
                     MID_MANIFEST_DONE.store(false, Ordering::Relaxed);
                     verbose!("makepad-run cache: startup manifest yielded to the main thread; retried later");
@@ -3040,20 +3111,31 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
         let Some(c) = u.cache.as_mut() else {
             return None;
         };
+        yield_section("borrowck keys");
+        probe.tick("manifest end");
         for (k, v) in crate::borrowck::lazy::take_verdict_keys() {
             c.record_borrowck(k, v);
         }
+        probe.tick("borrowck keys");
         if front_recordable() {
+            yield_section("front images");
             n_imgs += push_front_images(&u.prog, c);
             parts[1] = held.elapsed().as_secs_f64() * 1e3;
+            yield_section("crate records");
+            probe.tick("front images");
             c.record_front_crates(&u.prog);
             parts[2] = held.elapsed().as_secs_f64() * 1e3;
+            yield_section("spill take");
+            probe.tick("crate records");
             imaged_files = u.prog.files.len();
         }
-        c.spill_take()
+        let s = c.spill_take();
+        probe.tick("spill take");
+        s
     };
     Some((held, spill))
     }) else { return None };
+    probe.report("mid write");
     let held1 = held.elapsed().as_secs_f64() * 1e3;
     let n = match spill {
         Some(s) => s.write().ok()?,
@@ -3076,7 +3158,10 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
         // Encoded on the owner thread, but never in the main thread's way: the encode stops when
         // the main thread waits for the owner thread (a frame's lazy compile) and a later pass
         // tries again; the store write runs after the owner thread releases it.
+        let cprobe = YieldProbe::new();
         if let Some((ready, retired_boot, t)) = unit_call(wait, || {
+            cprobe.start();
+            yield_section("collected");
             let mut ready = None;
             let mut retired_boot = None;
             let t = Instant::now();
@@ -3100,7 +3185,7 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
                 }
                 if u.prog.files.len() != imaged_files { collected_skip("files were loaded since the front images were taken"); }
                 if let Some(c) = u.cache.as_mut().filter(|_| u.prog.files.len() == imaged_files) {
-                    let stop = || crate::owner::main_waiting() && !jit::QUIT_SEEN.load(Ordering::Relaxed);
+                    let stop = || { cprobe.tick("collected"); crate::owner::main_waiting() && !jit::QUIT_SEEN.load(Ordering::Relaxed) };
                     match c.encode_collected(&u.prog, &u.tcx, &stop) {
                         crate::cache::CollectedRecord::Ready(dest, payload) => { MID_COLLECTED_TRIED.store(true, Ordering::Relaxed); ready = Some((u.prog.session.options.verbose.then_some(c.collected_crates(&u.prog)), dest, payload)); }
                         crate::cache::CollectedRecord::Current => { MID_COLLECTED_TRIED.store(true, Ordering::Relaxed); COLLECTED_CURRENT.store(true, Ordering::Relaxed); retired_boot = Some(c.finish_collected()); }
@@ -3109,8 +3194,10 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
                     }
                 }
             }
+            cprobe.tick("collected end");
             (ready, retired_boot, t)
         }) {
+            cprobe.report("collected record");
             verbose!("makepad-run cache: collected record held the owner {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
             drop(retired_boot);
             if let Some((report, dest, payload)) = ready {
@@ -3340,14 +3427,15 @@ fn summary_inner(why: &str) {
             let b = |i: usize| crate::owner::BAILS[i].load(Ordering::Relaxed);
             let pf = |i: usize| jit::PREFRONTS[i].load(Ordering::Relaxed);
             let fail: Vec<String> = (1..jit::PREFRONT_FAIL.len()).map(|i| format!("{} {}", jit::PREFRONT_FAIL_NAMES[i], jit::PREFRONT_FAIL[i].load(Ordering::Relaxed))).collect();
-            verbose!("makepad-run: background takes (rule I-PURE): {} fronts run off the owner ({:.0} ms cpu; made nothing: {}); bails: front {}, initializer {}, jit {}, wait {}; builds dropped {}",
-                pf(0), pf(1) as f64 / 1e6, fail.join(", "), b(0), b(1), b(2), b(3), b(crate::owner::BAIL_DROPPED));
+            verbose!("makepad-run: background takes (rule I-PURE): {} fronts run off the owner ({:.0} ms cpu, type checks {:.0} ms; {} distinct instance slots, {} found the body checked; made nothing: {}); bails: front {}, initializer {}, jit {}, wait {}; builds dropped {}",
+                pf(0), pf(1) as f64 / 1e6, pf(2) as f64 / 1e6, pf(3), pf(4), fail.join(", "), b(0), b(1), b(2), b(3), b(crate::owner::BAIL_DROPPED));
             let m = |i: usize| crate::owner::MAIN_ACC[i].load(Ordering::Relaxed);
             verbose!("makepad-run: main thread's {} owner requests: waited {:.0} ms (queue delay before service {:.0} ms, wake delay after completion {:.0} ms); by wait length <20us {} ({:.0} ms), <200us {} ({:.0} ms), <2ms {} ({:.0} ms), longer {} ({:.0} ms)",
                 m(0), m(1) as f64 / 1e6, m(2) as f64 / 1e6, m(3) as f64 / 1e6, m(4), m(5) as f64 / 1e6, m(6), m(7) as f64 / 1e6, m(8), m(9) as f64 / 1e6, m(10), m(11) as f64 / 1e6);
             verbose!("makepad-run: owner by site: {}", crate::owner::sites_summary(14));
             verbose!("makepad-run: publish O1 on the owner by kind: {}", jit::publish_opt_summary());
             verbose!("makepad-run: O3 candidate takes: {}", jit::cand_skip_summary());
+            verbose!("makepad-run: fronts off the owner by job: {}", jit::prefront_site_summary());
             verbose!("makepad-run: O3 install records on the owner: {}x {:.0} ms", jit::O3_INSTALL_REC[0].load(std::sync::atomic::Ordering::Relaxed), jit::O3_INSTALL_REC[1].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6);
             verbose!("makepad-run: O3 owner cpu by part: {}", jit::o3_owner_summary());
         }

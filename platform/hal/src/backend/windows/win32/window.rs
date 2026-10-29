@@ -5,7 +5,7 @@
 //! click or a caption drag, as on X11).
 
 use super::super::super::exec::OsCmd;
-use super::{clipboard, dialog, drag, identity, ime, keys, lock, log_enabled, menu, rawinput, tray, Key, Native, Op, Shared, WM_HAL_OPS};
+use super::{a11y, clipboard, dialog, drag, identity, ime, keys, lock, log_enabled, menu, rawinput, tray, Key, Native, Op, Shared, WM_HAL_OPS};
 use crate::types::*;
 use crate::Id;
 use makepad_windows_sys::core::PCWSTR;
@@ -64,6 +64,8 @@ pub(super) struct Win {
     pub(super) buttons: Cell<u32>,
     last_pos: Cell<(f64, f64)>,
     no_focus: bool,
+    /// Native inspection keeps an HWND without ever showing or activating it.
+    hidden: bool,
     pub(super) ime: ime::ImeState,
     /// the app's last answer to a `DragOver` (`drag_response`): what an OLE drop gets now
     pub(super) drag_answer: Cell<u32>,
@@ -311,8 +313,10 @@ unsafe extern "system" fn dispatch_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
 
 fn apply(s: &'static Shared, op: Op) {
     match op {
+        Op::A11yNotify(key, update) => a11y::notify(key, update),
         Op::Cmd(sid, cmd) => command(s, sid, cmd),
         Op::CloseSession(sid) => {
+            a11y::close_session(sid);
             let wins: Vec<Rc<Win>> = APP.with_borrow(|a| a.wins.values().filter(|w| w.own.0 == sid).cloned().collect());
             for w in wins {
                 w.silent.set(true);
@@ -331,7 +335,11 @@ fn apply(s: &'static Shared, op: Op) {
         }
         Op::Lend { host, session, alias } => {
             if let Some(w) = find((crate::session::HOST, host)) {
+                let old = w.recipient.get();
+                a11y::unregister(crate::a11y::window_key(old.0, old.1.index));
                 w.recipient.set(if session == crate::session::HOST { (crate::session::HOST, host) } else { (session, alias) });
+                let new = w.recipient.get();
+                a11y::register(crate::a11y::window_key(new.0, new.1.index), w.hwnd.get());
                 publish_geom(&w);
             }
         }
@@ -347,6 +355,7 @@ fn apply(s: &'static Shared, op: Op) {
 }
 
 fn show(w: &Win) {
+    if w.hidden { return; }
     unsafe {
         let cmd = if w.no_focus || w.popup() { SW_SHOWNOACTIVATE } else { SW_SHOW };
         let _ = ShowWindow(w.hwnd.get(), cmd);
@@ -405,6 +414,7 @@ fn create(s: &'static Shared, sid: u32, id: Id, kind: u32, parent: Id, geom: [f3
         buttons: Cell::new(0),
         last_pos: Cell::new((0.0, 0.0)),
         no_focus: flags & open_flags::NO_FOCUS != 0,
+        hidden: std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some(),
         ime: ime::ImeState::default(),
         drag_answer: Cell::new(input::drag_response::NONE),
         drop_target: RefCell::new(None),
@@ -428,6 +438,7 @@ fn create(s: &'static Shared, sid: u32, id: Id, kind: u32, parent: Id, geom: [f3
         s.push(key, |q, id| q.closed(id));
         return;
     }
+    a11y::register(crate::a11y::window_key(key.0, key.1.index), hwnd);
     *win.native.borrow_mut() = Some(s.register(key, hwnd, win.popup()));
     if !win.popup() {
         unsafe {
@@ -553,6 +564,7 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
         }
         OsCmd::WindowState { id, state } => {
             if let Some(w) = target(id) {
+                if w.hidden { return; }
                 // fullscreen is a maximize over the whole monitor: switching between the two
                 // goes through the normal rect, so a later restore finds it
                 let full = state == window_state::FULLSCREEN;
@@ -600,6 +612,7 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
         }
         OsCmd::ActivateApp => {
             if let Some(w) = APP.with_borrow(|a| session_window(a, sid).cloned()) {
+                if w.hidden { return; }
                 unsafe {
                     let _ = SetForegroundWindow(w.hwnd.get());
                 }
@@ -634,6 +647,7 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
         OsCmd::TraySet { tray, w, h, alpha, tooltip, items, .. } => tray::set(sid, tray, w, h, alpha, tooltip, items),
         OsCmd::WindowAtTray { id, tray, w, h } => {
             if let Some(win) = target(id) {
+                if win.hidden { return; }
                 tray::window_at(sid, win.hwnd.get(), tray, w, h);
                 publish_geom(&win);
             }
@@ -976,6 +990,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
     }
     let Some(w) = win_of(hwnd) else { return DefWindowProcW(hwnd, msg, wparam, lparam) };
     match msg {
+        WM_GETOBJECT if lparam.0 as i32 == makepad_windows_sys::Win32::UI::Accessibility::UiaRootObjectId => {
+            let key = w.recipient.get();
+            return a11y::get_object(crate::a11y::window_key(key.0, key.1.index), hwnd, wparam, lparam);
+        }
         WM_NCCALCSIZE if wparam.0 != 0 && !w.popup() => {
             // the client covers the whole window; a maximized window keeps its frame's inset so
             // its client matches the work area (unless it is chromeless when maximized)
@@ -1109,6 +1127,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             return LRESULT(0);
         }
         WM_DESTROY => {
+            let key = w.recipient.get();
+            a11y::unregister(crate::a11y::window_key(key.0, key.1.index));
             if !w.popup() {
                 identity::window_destroyed(hwnd);
             }

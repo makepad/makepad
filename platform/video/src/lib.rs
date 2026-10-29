@@ -54,10 +54,12 @@ pub mod nv12;
 pub mod stream_debug;
 pub mod stream_decoder;
 pub mod stream_encoder;
+pub mod surface;
 
 pub use color::{VideoColor, VideoColorUniforms, VideoMatrix, VideoPrimaries, VideoRange, VideoTransfer};
 pub use stream_decoder::{DecodedFrame, DecodedPicture, PicturePlane, VideoStreamDecoder};
-pub use stream_encoder::{EncodedPacket, GpuReady, QpGrid, StreamTile, StreamTuning, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
+pub use stream_encoder::{EncodeTimings, EncodedPacket, EncoderCaps, QpGrid, StreamTile, StreamTuning, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
+pub use surface::{completion_notified, CompletionSource, GpuCompletion, SurfaceFormat, SurfaceHandle, SurfaceKind, SyncFile};
 
 use std::fmt;
 
@@ -323,7 +325,7 @@ impl GpuPictureMaker {
     /// range. Apple only ([`Self::TAKES_PLANES`]).
     pub fn nv12_picture(&mut self, handle: u64, width: u32, height: u32, color: VideoColor) -> Result<GpuPicture, VideoFileError> {
         #[cfg(target_vendor = "apple")]
-        return unsafe { self.intake.nv12_picture(handle, width, height, color.range == VideoRange::Full) };
+        return unsafe { self.intake.nv12_picture(handle, 0, width, height, color.range == VideoRange::Full) };
         #[cfg(not(target_vendor = "apple"))]
         {
             let _ = (handle, width, height, color);

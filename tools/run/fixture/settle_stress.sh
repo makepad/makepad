@@ -26,8 +26,10 @@ fi
 PERIOD=${PERIOD:-300}
 AFTER=${AFTER:-8}
 WAIT=${WAIT:-90}
-PROBE=${PROBE:-makepad_platform::remote::imp::path_dump}
-DRIVE=${DRIVE:-dump paths=1}
+# the probe runs on the UI thread once per drive request (`activity` is answered by imp::apply);
+# `ui` no longer reaches app code: the HAL answers it from the semantics tree it holds
+PROBE=${PROBE:-makepad_platform::remote::imp::apply}
+DRIVE=${DRIVE:-activity}
 dir=$(mktemp -d "${TMPDIR:-/tmp}/settle_stress.XXXXXX") || exit 1
 fails=0
 k=0

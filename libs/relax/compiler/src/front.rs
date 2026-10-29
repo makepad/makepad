@@ -439,7 +439,7 @@ pub fn summary() -> Option<String> {
         return None;
     }
     Some(format!(
-        "makepad-run front: {} parts (lazily parsed bodies) mapped, {} recorded; {} files mapped from images ({:.1} MB of heap released), {} recorded ({:.1} MB), {} images not matching the parse, {} mapped arrays copied back by a change ({:.1} MB)",
+        "makepad-run front: {} parts (lazily parsed bodies) mapped, {} recorded; {} files mapped from images ({:.1} MB of heap released), {} recorded ({:.1} MB), {} images not matching the parse, {} mapped arrays copied back by a change ({:.1} MB); {} files of parsed crates taken from earlier images",
         PARTS_MAPPED.load(Ordering::Relaxed),
         PARTS_RECORDED.load(Ordering::Relaxed),
         m,
@@ -448,7 +448,8 @@ pub fn summary() -> Option<String> {
         RECORDED_BYTES.load(Ordering::Relaxed) as f64 / 1e6,
         bad,
         crate::arena::COPIES.load(Ordering::Relaxed),
-        crate::arena::COPIED_BYTES.load(Ordering::Relaxed) as f64 / 1e6
+        crate::arena::COPIED_BYTES.load(Ordering::Relaxed) as f64 / 1e6,
+        crate::preload::PREVIOUS_FILES.load(Ordering::Relaxed)
     ))
 }
 

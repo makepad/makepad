@@ -47,6 +47,8 @@ pub const EXT_YCBCR_2PLANE_444_FORMATS_NAME: &CStr = c"VK_EXT_ycbcr_2plane_444_f
 pub const FALSE: u32 = 0;
 pub const KHR_ANDROID_SURFACE_NAME: &CStr = c"VK_KHR_android_surface";
 pub const KHR_CALIBRATED_TIMESTAMPS_NAME: &CStr = c"VK_KHR_calibrated_timestamps";
+pub const KHR_CREATE_RENDERPASS_2_NAME: &CStr = c"VK_KHR_create_renderpass2";
+pub const KHR_DEPTH_STENCIL_RESOLVE_NAME: &CStr = c"VK_KHR_depth_stencil_resolve";
 pub const KHR_DISPLAY_NAME: &CStr = c"VK_KHR_display";
 pub const KHR_DRIVER_PROPERTIES_NAME: &CStr = c"VK_KHR_driver_properties";
 pub const KHR_EXTERNAL_MEMORY_FD_NAME: &CStr = c"VK_KHR_external_memory_fd";
@@ -3094,6 +3096,50 @@ impl AttachmentDescription {
     #[inline]
     pub fn final_layout(mut self, value: ImageLayout) -> Self { self.final_layout = value; self }
 }
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct AttachmentDescription2 {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub flags: AttachmentDescriptionFlags,
+    pub format: Format,
+    pub samples: SampleCountFlags,
+    pub load_op: AttachmentLoadOp,
+    pub store_op: AttachmentStoreOp,
+    pub stencil_load_op: AttachmentLoadOp,
+    pub stencil_store_op: AttachmentStoreOp,
+    pub initial_layout: ImageLayout,
+    pub final_layout: ImageLayout,
+}
+impl Default for AttachmentDescription2 { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000109000);
+    value
+} }
+unsafe impl Send for AttachmentDescription2 {}
+unsafe impl Sync for AttachmentDescription2 {}
+impl AttachmentDescription2 {
+    #[inline]
+    pub fn flags(mut self, value: AttachmentDescriptionFlags) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn format(mut self, value: Format) -> Self { self.format = value; self }
+    #[inline]
+    pub fn samples(mut self, value: SampleCountFlags) -> Self { self.samples = value; self }
+    #[inline]
+    pub fn load_op(mut self, value: AttachmentLoadOp) -> Self { self.load_op = value; self }
+    #[inline]
+    pub fn store_op(mut self, value: AttachmentStoreOp) -> Self { self.store_op = value; self }
+    #[inline]
+    pub fn stencil_load_op(mut self, value: AttachmentLoadOp) -> Self { self.stencil_load_op = value; self }
+    #[inline]
+    pub fn stencil_store_op(mut self, value: AttachmentStoreOp) -> Self { self.stencil_store_op = value; self }
+    #[inline]
+    pub fn initial_layout(mut self, value: ImageLayout) -> Self { self.initial_layout = value; self }
+    #[inline]
+    pub fn final_layout(mut self, value: ImageLayout) -> Self { self.final_layout = value; self }
+    #[inline]
+    pub fn next_external_format_android(mut self, next: &mut ExternalFormatANDROID) -> Self { unsafe { append_extension((next as *mut ExternalFormatANDROID).cast(), self.p_next.cast()); } self.p_next = next as *mut ExternalFormatANDROID as *const core::ffi::c_void; self }
+}
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AttachmentDescriptionFlags(pub u32);
@@ -3166,6 +3212,30 @@ impl AttachmentReference {
     pub fn attachment(mut self, value: u32) -> Self { self.attachment = value; self }
     #[inline]
     pub fn layout(mut self, value: ImageLayout) -> Self { self.layout = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct AttachmentReference2 {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub attachment: u32,
+    pub layout: ImageLayout,
+    pub aspect_mask: ImageAspectFlags,
+}
+impl Default for AttachmentReference2 { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000109001);
+    value
+} }
+unsafe impl Send for AttachmentReference2 {}
+unsafe impl Sync for AttachmentReference2 {}
+impl AttachmentReference2 {
+    #[inline]
+    pub fn attachment(mut self, value: u32) -> Self { self.attachment = value; self }
+    #[inline]
+    pub fn layout(mut self, value: ImageLayout) -> Self { self.layout = value; self }
+    #[inline]
+    pub fn aspect_mask(mut self, value: ImageAspectFlags) -> Self { self.aspect_mask = value; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -8125,6 +8195,33 @@ impl PhysicalDeviceCooperativeMatrixPropertiesKHR {
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct PhysicalDeviceDepthStencilResolveProperties {
+    pub s_type: StructureType,
+    pub p_next: *mut core::ffi::c_void,
+    pub supported_depth_resolve_modes: ResolveModeFlags,
+    pub supported_stencil_resolve_modes: ResolveModeFlags,
+    pub independent_resolve_none: Bool32,
+    pub independent_resolve: Bool32,
+}
+impl Default for PhysicalDeviceDepthStencilResolveProperties { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000199000);
+    value
+} }
+unsafe impl Send for PhysicalDeviceDepthStencilResolveProperties {}
+unsafe impl Sync for PhysicalDeviceDepthStencilResolveProperties {}
+impl PhysicalDeviceDepthStencilResolveProperties {
+    #[inline]
+    pub fn supported_depth_resolve_modes(mut self, value: ResolveModeFlags) -> Self { self.supported_depth_resolve_modes = value; self }
+    #[inline]
+    pub fn supported_stencil_resolve_modes(mut self, value: ResolveModeFlags) -> Self { self.supported_stencil_resolve_modes = value; self }
+    #[inline]
+    pub fn independent_resolve_none(mut self, value: bool) -> Self { self.independent_resolve_none = value as u32; self }
+    #[inline]
+    pub fn independent_resolve(mut self, value: bool) -> Self { self.independent_resolve = value as u32; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct PhysicalDeviceDriverProperties {
     pub s_type: StructureType,
     pub p_next: *mut core::ffi::c_void,
@@ -9095,6 +9192,8 @@ impl PhysicalDeviceProperties2 {
     pub fn properties(mut self, value: PhysicalDeviceProperties) -> Self { self.properties = value; self }
     #[inline]
     pub fn next_physical_device_cooperative_matrix_properties_khr(mut self, next: &mut PhysicalDeviceCooperativeMatrixPropertiesKHR) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceCooperativeMatrixPropertiesKHR).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceCooperativeMatrixPropertiesKHR as *mut core::ffi::c_void; self }
+    #[inline]
+    pub fn next_physical_device_depth_stencil_resolve_properties(mut self, next: &mut PhysicalDeviceDepthStencilResolveProperties) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceDepthStencilResolveProperties).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceDepthStencilResolveProperties as *mut core::ffi::c_void; self }
     #[inline]
     pub fn next_physical_device_driver_properties(mut self, next: &mut PhysicalDeviceDriverProperties) -> Self { unsafe { append_extension((next as *mut PhysicalDeviceDriverProperties).cast(), self.p_next.cast()); } self.p_next = next as *mut PhysicalDeviceDriverProperties as *mut core::ffi::c_void; self }
     #[inline]
@@ -11634,6 +11733,50 @@ impl RenderPassCreateInfo {
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct RenderPassCreateInfo2 {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub flags: RenderPassCreateFlags,
+    pub attachment_count: u32,
+    pub p_attachments: *const AttachmentDescription2,
+    pub subpass_count: u32,
+    pub p_subpasses: *const SubpassDescription2,
+    pub dependency_count: u32,
+    pub p_dependencies: *const SubpassDependency2,
+    pub correlated_view_mask_count: u32,
+    pub p_correlated_view_masks: *const u32,
+}
+impl Default for RenderPassCreateInfo2 { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000109004);
+    value
+} }
+unsafe impl Send for RenderPassCreateInfo2 {}
+unsafe impl Sync for RenderPassCreateInfo2 {}
+impl RenderPassCreateInfo2 {
+    #[inline]
+    pub fn flags(mut self, value: RenderPassCreateFlags) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn attachment_count(mut self, value: u32) -> Self { self.attachment_count = value; self }
+    #[inline]
+    pub fn attachments(mut self, value: &[AttachmentDescription2]) -> Self { self.attachment_count = value.len() as _; self.p_attachments = value.as_ptr(); self }
+    #[inline]
+    pub fn subpass_count(mut self, value: u32) -> Self { self.subpass_count = value; self }
+    #[inline]
+    pub fn subpasses(mut self, value: &[SubpassDescription2]) -> Self { self.subpass_count = value.len() as _; self.p_subpasses = value.as_ptr(); self }
+    #[inline]
+    pub fn dependency_count(mut self, value: u32) -> Self { self.dependency_count = value; self }
+    #[inline]
+    pub fn dependencies(mut self, value: &[SubpassDependency2]) -> Self { self.dependency_count = value.len() as _; self.p_dependencies = value.as_ptr(); self }
+    #[inline]
+    pub fn correlated_view_mask_count(mut self, value: u32) -> Self { self.correlated_view_mask_count = value; self }
+    #[inline]
+    pub fn correlated_view_masks(mut self, value: &[u32]) -> Self { self.correlated_view_mask_count = value.len() as _; self.p_correlated_view_masks = value.as_ptr(); self }
+    #[inline]
+    pub fn next_render_pass_fragment_density_map_create_info_ext(mut self, next: &mut RenderPassFragmentDensityMapCreateInfoEXT) -> Self { unsafe { append_extension((next as *mut RenderPassFragmentDensityMapCreateInfoEXT).cast(), self.p_next.cast()); } self.p_next = next as *mut RenderPassFragmentDensityMapCreateInfoEXT as *const core::ffi::c_void; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct RenderPassFragmentDensityMapCreateInfoEXT {
     pub s_type: StructureType,
     pub p_next: *const core::ffi::c_void,
@@ -11689,6 +11832,7 @@ pub struct ResolveModeFlags(pub u32);
 impl ResolveModeFlags {
     pub const fn from_raw(value: u32) -> Self { Self(value) }
     pub const fn as_raw(self) -> u32 { self.0 }
+    pub const SAMPLE_ZERO: Self = Self(1 as u32);
     #[inline]
     pub const fn from_bits_retain(value: u32) -> Self { Self(value) }
     #[inline]
@@ -12637,6 +12781,8 @@ impl StructureType {
     pub const ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID: Self = Self(1000129001 as i32);
     pub const ANDROID_SURFACE_CREATE_INFO_KHR: Self = Self(1000008000 as i32);
     pub const APPLICATION_INFO: Self = Self(0 as i32);
+    pub const ATTACHMENT_DESCRIPTION_2: Self = Self(1000109000 as i32);
+    pub const ATTACHMENT_REFERENCE_2: Self = Self(1000109001 as i32);
     pub const BIND_VIDEO_SESSION_MEMORY_INFO_KHR: Self = Self(1000023004 as i32);
     pub const BUFFER_CREATE_INFO: Self = Self(12 as i32);
     pub const BUFFER_DEVICE_ADDRESS_INFO: Self = Self(1000244001 as i32);
@@ -12690,6 +12836,7 @@ impl StructureType {
     pub const MEMORY_GET_FD_INFO_KHR: Self = Self(1000074002 as i32);
     pub const PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR: Self = Self(1000506000 as i32);
     pub const PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_KHR: Self = Self(1000506002 as i32);
+    pub const PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES: Self = Self(1000199000 as i32);
     pub const PHYSICAL_DEVICE_DRIVER_PROPERTIES: Self = Self(1000196000 as i32);
     pub const PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO: Self = Self(1000071000 as i32);
     pub const PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO: Self = Self(1000076000 as i32);
@@ -12740,6 +12887,7 @@ impl StructureType {
     pub const QUEUE_FAMILY_VIDEO_PROPERTIES_KHR: Self = Self(1000023012 as i32);
     pub const RENDER_PASS_BEGIN_INFO: Self = Self(43 as i32);
     pub const RENDER_PASS_CREATE_INFO: Self = Self(38 as i32);
+    pub const RENDER_PASS_CREATE_INFO_2: Self = Self(1000109004 as i32);
     pub const RENDER_PASS_FRAGMENT_DENSITY_MAP_CREATE_INFO_EXT: Self = Self(1000218002 as i32);
     pub const RENDER_PASS_MULTIVIEW_CREATE_INFO: Self = Self(1000053000 as i32);
     pub const SAMPLER_CREATE_INFO: Self = Self(31 as i32);
@@ -12751,6 +12899,9 @@ impl StructureType {
     pub const SEMAPHORE_WAIT_INFO: Self = Self(1000207004 as i32);
     pub const SHADER_MODULE_CREATE_INFO: Self = Self(16 as i32);
     pub const SUBMIT_INFO: Self = Self(4 as i32);
+    pub const SUBPASS_DEPENDENCY_2: Self = Self(1000109003 as i32);
+    pub const SUBPASS_DESCRIPTION_2: Self = Self(1000109002 as i32);
+    pub const SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE: Self = Self(1000199001 as i32);
     pub const SWAPCHAIN_CREATE_INFO_KHR: Self = Self(1000001000 as i32);
     pub const TIMELINE_SEMAPHORE_SUBMIT_INFO: Self = Self(1000207003 as i32);
     pub const VIDEO_BEGIN_CODING_INFO_KHR: Self = Self(1000023008 as i32);
@@ -12888,6 +13039,11 @@ match self.0 {
     1000077000 => f.write_str("EXPORT_SEMAPHORE_CREATE_INFO"),
     1000079000 => f.write_str("IMPORT_SEMAPHORE_FD_INFO_KHR"),
     1000079001 => f.write_str("SEMAPHORE_GET_FD_INFO_KHR"),
+    1000109000 => f.write_str("ATTACHMENT_DESCRIPTION_2"),
+    1000109001 => f.write_str("ATTACHMENT_REFERENCE_2"),
+    1000109002 => f.write_str("SUBPASS_DESCRIPTION_2"),
+    1000109003 => f.write_str("SUBPASS_DEPENDENCY_2"),
+    1000109004 => f.write_str("RENDER_PASS_CREATE_INFO_2"),
     1000127001 => f.write_str("MEMORY_DEDICATED_ALLOCATE_INFO"),
     1000128000 => f.write_str("DEBUG_UTILS_OBJECT_NAME_INFO_EXT"),
     1000128002 => f.write_str("DEBUG_UTILS_LABEL_EXT"),
@@ -12907,6 +13063,8 @@ match self.0 {
     1000158005 => f.write_str("IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT"),
     1000184000 => f.write_str("CALIBRATED_TIMESTAMP_INFO_KHR"),
     1000196000 => f.write_str("PHYSICAL_DEVICE_DRIVER_PROPERTIES"),
+    1000199000 => f.write_str("PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES"),
+    1000199001 => f.write_str("SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE"),
     1000207000 => f.write_str("PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES"),
     1000207002 => f.write_str("SEMAPHORE_TYPE_CREATE_INFO"),
     1000207003 => f.write_str("TIMELINE_SEMAPHORE_SUBMIT_INFO"),
@@ -13132,6 +13290,45 @@ impl SubpassDependency {
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct SubpassDependency2 {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub src_subpass: u32,
+    pub dst_subpass: u32,
+    pub src_stage_mask: PipelineStageFlags,
+    pub dst_stage_mask: PipelineStageFlags,
+    pub src_access_mask: AccessFlags,
+    pub dst_access_mask: AccessFlags,
+    pub dependency_flags: DependencyFlags,
+    pub view_offset: i32,
+}
+impl Default for SubpassDependency2 { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000109003);
+    value
+} }
+unsafe impl Send for SubpassDependency2 {}
+unsafe impl Sync for SubpassDependency2 {}
+impl SubpassDependency2 {
+    #[inline]
+    pub fn src_subpass(mut self, value: u32) -> Self { self.src_subpass = value; self }
+    #[inline]
+    pub fn dst_subpass(mut self, value: u32) -> Self { self.dst_subpass = value; self }
+    #[inline]
+    pub fn src_stage_mask(mut self, value: PipelineStageFlags) -> Self { self.src_stage_mask = value; self }
+    #[inline]
+    pub fn dst_stage_mask(mut self, value: PipelineStageFlags) -> Self { self.dst_stage_mask = value; self }
+    #[inline]
+    pub fn src_access_mask(mut self, value: AccessFlags) -> Self { self.src_access_mask = value; self }
+    #[inline]
+    pub fn dst_access_mask(mut self, value: AccessFlags) -> Self { self.dst_access_mask = value; self }
+    #[inline]
+    pub fn dependency_flags(mut self, value: DependencyFlags) -> Self { self.dependency_flags = value; self }
+    #[inline]
+    pub fn view_offset(mut self, value: i32) -> Self { self.view_offset = value; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct SubpassDescription {
     pub flags: SubpassDescriptionFlags,
     pub pipeline_bind_point: PipelineBindPoint,
@@ -13170,6 +13367,80 @@ impl SubpassDescription {
     pub fn preserve_attachment_count(mut self, value: u32) -> Self { self.preserve_attachment_count = value; self }
     #[inline]
     pub fn preserve_attachments(mut self, value: &[u32]) -> Self { self.preserve_attachment_count = value.len() as _; self.p_preserve_attachments = value.as_ptr(); self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SubpassDescription2 {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub flags: SubpassDescriptionFlags,
+    pub pipeline_bind_point: PipelineBindPoint,
+    pub view_mask: u32,
+    pub input_attachment_count: u32,
+    pub p_input_attachments: *const AttachmentReference2,
+    pub color_attachment_count: u32,
+    pub p_color_attachments: *const AttachmentReference2,
+    pub p_resolve_attachments: *const AttachmentReference2,
+    pub p_depth_stencil_attachment: *const AttachmentReference2,
+    pub preserve_attachment_count: u32,
+    pub p_preserve_attachments: *const u32,
+}
+impl Default for SubpassDescription2 { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000109002);
+    value
+} }
+unsafe impl Send for SubpassDescription2 {}
+unsafe impl Sync for SubpassDescription2 {}
+impl SubpassDescription2 {
+    #[inline]
+    pub fn flags(mut self, value: SubpassDescriptionFlags) -> Self { self.flags = value; self }
+    #[inline]
+    pub fn pipeline_bind_point(mut self, value: PipelineBindPoint) -> Self { self.pipeline_bind_point = value; self }
+    #[inline]
+    pub fn view_mask(mut self, value: u32) -> Self { self.view_mask = value; self }
+    #[inline]
+    pub fn input_attachment_count(mut self, value: u32) -> Self { self.input_attachment_count = value; self }
+    #[inline]
+    pub fn input_attachments(mut self, value: &[AttachmentReference2]) -> Self { self.input_attachment_count = value.len() as _; self.p_input_attachments = value.as_ptr(); self }
+    #[inline]
+    pub fn color_attachment_count(mut self, value: u32) -> Self { self.color_attachment_count = value; self }
+    #[inline]
+    pub fn color_attachments(mut self, value: &[AttachmentReference2]) -> Self { self.color_attachment_count = value.len() as _; self.p_color_attachments = value.as_ptr(); self }
+    #[inline]
+    pub fn resolve_attachments(mut self, value: &[AttachmentReference2]) -> Self { self.color_attachment_count = value.len() as _; self.p_resolve_attachments = value.as_ptr(); self }
+    #[inline]
+    pub fn depth_stencil_attachment(mut self, value: &AttachmentReference2) -> Self { self.p_depth_stencil_attachment = value; self }
+    #[inline]
+    pub fn preserve_attachment_count(mut self, value: u32) -> Self { self.preserve_attachment_count = value; self }
+    #[inline]
+    pub fn preserve_attachments(mut self, value: &[u32]) -> Self { self.preserve_attachment_count = value.len() as _; self.p_preserve_attachments = value.as_ptr(); self }
+    #[inline]
+    pub fn next_subpass_description_depth_stencil_resolve(mut self, next: &mut SubpassDescriptionDepthStencilResolve) -> Self { unsafe { append_extension((next as *mut SubpassDescriptionDepthStencilResolve).cast(), self.p_next.cast()); } self.p_next = next as *mut SubpassDescriptionDepthStencilResolve as *const core::ffi::c_void; self }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SubpassDescriptionDepthStencilResolve {
+    pub s_type: StructureType,
+    pub p_next: *const core::ffi::c_void,
+    pub depth_resolve_mode: ResolveModeFlags,
+    pub stencil_resolve_mode: ResolveModeFlags,
+    pub p_depth_stencil_resolve_attachment: *const AttachmentReference2,
+}
+impl Default for SubpassDescriptionDepthStencilResolve { fn default() -> Self {
+    let mut value: Self = unsafe { core::mem::zeroed() };
+    value.s_type = StructureType(1000199001);
+    value
+} }
+unsafe impl Send for SubpassDescriptionDepthStencilResolve {}
+unsafe impl Sync for SubpassDescriptionDepthStencilResolve {}
+impl SubpassDescriptionDepthStencilResolve {
+    #[inline]
+    pub fn depth_resolve_mode(mut self, value: ResolveModeFlags) -> Self { self.depth_resolve_mode = value; self }
+    #[inline]
+    pub fn stencil_resolve_mode(mut self, value: ResolveModeFlags) -> Self { self.stencil_resolve_mode = value; self }
+    #[inline]
+    pub fn depth_stencil_resolve_attachment(mut self, value: &AttachmentReference2) -> Self { self.p_depth_stencil_resolve_attachment = value; self }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]

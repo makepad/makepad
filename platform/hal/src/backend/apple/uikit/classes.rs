@@ -189,6 +189,11 @@ fn define_view_controller() -> *const Class {
 // ------------------------------------------------------------------ the window view
 
 fn define_view() -> *const Class {
+    extern "C" fn hit_test(this: &Object, _: Sel, point: NSPoint, event: ObjcId) -> ObjcId {
+        let view = this as *const Object as ObjcId;
+        if let Some(hit) = super::super::media::layers::hit_test(view, point, event) { return hit; }
+        unsafe { msg_send![super(this, class!(UIView)), hitTest: point withEvent: event] }
+    }
     extern "C" fn layer_class(_: &Class, _: Sel) -> *const Class {
         class!(CAMetalLayer)
     }
@@ -230,7 +235,9 @@ fn define_view() -> *const Class {
     }
     let mut decl = ClassDecl::new("HalView", class!(UIView)).unwrap();
     decl.add_ivar::<*mut c_void>("hal_win");
+    super::a11y::add_view_methods(&mut decl);
     unsafe {
+        decl.add_method(sel!(hitTest:withEvent:), hit_test as extern "C" fn(&Object, Sel, NSPoint, ObjcId) -> ObjcId);
         decl.add_class_method(sel!(layerClass), layer_class as extern "C" fn(&Class, Sel) -> *const Class);
         decl.add_method(sel!(layoutSubviews), layout_subviews as extern "C" fn(&Object, Sel));
         // tvOS: the remote's touch surface is no pointer on the screen (game input reads it)

@@ -13,7 +13,8 @@
 //! Output is normalized to Annex-B for the transport.
 
 use crate::annex_b;
-use crate::stream_encoder::{EncodedPacket, StreamVideoCodec, VideoStreamEncoderOptions};
+use crate::stream_encoder::{EncodeTimings, EncodedPacket, EncoderCaps, StreamEncoderOs, StreamTile, StreamTuning, StreamVideoCodec, VideoStreamEncoderOptions};
+use crate::surface::{GpuCompletion, SurfaceFormat, SurfaceHandle, SurfaceKind};
 use crate::windows_encoder::{ensure_media_foundation, hr_err};
 use crate::windows_mft;
 use crate::VideoFileError;
@@ -212,14 +213,46 @@ struct HardwareMft {
     /// The stream's newest SPS and PPS (Annex-B): sent in band ahead of every IDR the encoder
     /// gives without them (a forced key frame of some MFTs carries only the IDR slice).
     headers: Vec<u8>,
+    /// H.265 (else H.264): which NAL types are parameter sets and IDRs.
+    hevc: bool,
+}
+
+/// The MFT output subtype of `codec`.
+fn subtype(codec: StreamVideoCodec) -> windows::core::GUID {
+    match codec {
+        StreamVideoCodec::H264 => MFVideoFormat_H264,
+        StreamVideoCodec::Hevc => MFVideoFormat_HEVC,
+    }
+}
+
+/// Whether this machine has a hardware H.265 encoder MFT that takes NV12 (asked once).
+fn hardware_hevc() -> bool {
+    static HEVC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HEVC.get_or_init(|| unsafe {
+        if ensure_media_foundation().is_err() {
+            return false;
+        }
+        let input = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_NV12 };
+        let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_HEVC };
+        let mut activates: *mut *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut count = 0u32;
+        let ok = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG(MFT_ENUM_FLAG_HARDWARE.0 | MFT_ENUM_FLAG_SORTANDFILTER.0), Some(&input), Some(&output), &mut activates, &mut count).is_ok();
+        if !activates.is_null() {
+            for i in 0..count as usize {
+                drop(IMFActivate::from_raw(*activates.add(i)));
+            }
+            windows::Win32::System::Com::CoTaskMemFree(Some(activates as *const _));
+        }
+        ok && count > 0
+    })
 }
 
 impl HardwareMft {
-    /// The first hardware H.264 encoder that takes NV12, set up for a live view, or None
+    /// The first hardware encoder of the stream's codec that takes NV12, set up for a live view, or None
     /// (no hardware encoder, or it refused the setup: `Err` says why).
     unsafe fn open(options: &VideoStreamEncoderOptions) -> Result<Option<HardwareMft>, VideoFileError> {
         let input = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_NV12 };
-        let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_H264 };
+        let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: subtype(options.codec) };
         let mut activates: *mut *mut std::ffi::c_void = std::ptr::null_mut();
         let mut count = 0u32;
         MFTEnumEx(
@@ -309,6 +342,7 @@ impl HardwareMft {
             duration_100ns: 10_000_000 / options.fps.max(1) as i64,
             name: if notes.is_empty() { name } else { format!("{name}; {}", notes.join(", ")) },
             headers: Vec::new(),
+            hevc: options.codec == StreamVideoCodec::Hevc,
         })
     }
 
@@ -362,7 +396,7 @@ impl HardwareMft {
                 buffer.Lock(&mut ptr, None, Some(&mut len)).map_err(|e| hr_err("Lock(out)", e))?;
                 let raw = std::slice::from_raw_parts(ptr, len as usize).to_vec();
                 buffer.Unlock().map_err(|e| hr_err("Unlock(out)", e))?;
-                let (data, is_key) = in_band_headers(&mut self.headers, normalize_to_annex_b(&raw));
+                let (data, is_key) = in_band_headers(&mut self.headers, normalize_to_annex_b(&raw), self.hevc);
                 packets.push(EncodedPacket { data, pts_100ns: 0, is_key });
             }
         }
@@ -402,13 +436,23 @@ const NAL_TYPE_AUD: u8 = 9;
 /// metadata roots yet (tools/winbind/apis.txt; regenerating needs the .winmd inputs).
 const CODECAPI_AVENC_COMMON_MAX_BITRATE: windows::core::GUID = windows::core::GUID { data1: 0x9651eae4, data2: 0x39b9, data3: 0x4ebf, data4: [0x85, 0xef, 0xd7, 0xf4, 0x44, 0xec, 0x74, 0x65] };
 
-fn in_band_headers(headers: &mut Vec<u8>, data: Vec<u8>) -> (Vec<u8>, bool) {
+fn in_band_headers(headers: &mut Vec<u8>, data: Vec<u8>, hevc: bool) -> (Vec<u8>, bool) {
     let nals = annex_b::split_annex_b(&data);
-    let has = |t: u8| nals.iter().any(|n| annex_b::nal_unit_type(n) == t);
-    let (sps, pps, idr) = (has(annex_b::NAL_TYPE_SPS), has(annex_b::NAL_TYPE_PPS), has(annex_b::NAL_TYPE_IDR));
+    let ty = |n: &[u8]| if hevc { annex_b::hevc_nal_unit_type(n) } else { annex_b::nal_unit_type(n) };
+    // H.265: VPS, SPS, PPS and the IDR slices (IDR_W_RADL, IDR_N_LP); H.264: SPS, PPS, IDR
+    let param = |t: u8| if hevc { matches!(t, annex_b::HEVC_NAL_TYPE_VPS | annex_b::HEVC_NAL_TYPE_SPS | annex_b::HEVC_NAL_TYPE_PPS) } else { matches!(t, annex_b::NAL_TYPE_SPS | annex_b::NAL_TYPE_PPS) };
+    let is_idr = |t: u8| if hevc { matches!(t, 19 | 20) } else { t == annex_b::NAL_TYPE_IDR };
+    let aud = if hevc { 35 } else { NAL_TYPE_AUD };
+    let (sps, pps, idr) = if hevc {
+        let has = |t: u8| nals.iter().any(|n| ty(n) == t);
+        (has(annex_b::HEVC_NAL_TYPE_VPS) && has(annex_b::HEVC_NAL_TYPE_SPS), has(annex_b::HEVC_NAL_TYPE_PPS), nals.iter().any(|n| is_idr(ty(n))))
+    } else {
+        let has = |t: u8| nals.iter().any(|n| ty(n) == t);
+        (has(annex_b::NAL_TYPE_SPS), has(annex_b::NAL_TYPE_PPS), nals.iter().any(|n| is_idr(ty(n))))
+    };
     if sps && pps {
         headers.clear();
-        for n in nals.iter().filter(|n| matches!(annex_b::nal_unit_type(n), annex_b::NAL_TYPE_SPS | annex_b::NAL_TYPE_PPS)) {
+        for n in nals.iter().filter(|n| param(ty(n))) {
             annex_b::push_annex_b_nal(headers, n);
         }
     }
@@ -423,7 +467,7 @@ fn in_band_headers(headers: &mut Vec<u8>, data: Vec<u8>) -> (Vec<u8>, bool) {
     let mut out = Vec::with_capacity(headers.len() + data.len());
     let mut put = false;
     for n in &nals {
-        if !put && annex_b::nal_unit_type(n) != NAL_TYPE_AUD {
+        if !put && ty(n) != aud {
             out.extend_from_slice(headers);
             put = true;
         }
@@ -448,13 +492,14 @@ unsafe fn set_types(transform: &IMFTransform, options: &VideoStreamEncoderOption
     let out_type = MFCreateMediaType().map_err(|e| hr_err("MFCreateMediaType(out)", e))?;
     let a = out_type.as_IMFAttributes();
     a.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(|e| hr_err("set out major type", e))?;
-    a.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264).map_err(|e| hr_err("set out subtype", e))?;
+    a.SetGUID(&MF_MT_SUBTYPE, &subtype(options.codec)).map_err(|e| hr_err("set out subtype", e))?;
     a.SetUINT32(&MF_MT_AVG_BITRATE, options.bitrate_kbps.saturating_mul(1000)).map_err(|e| hr_err("set out bitrate", e))?;
     a.SetUINT64(&MF_MT_FRAME_SIZE, size).map_err(|e| hr_err("set out frame size", e))?;
     a.SetUINT64(&MF_MT_FRAME_RATE, rate).map_err(|e| hr_err("set out frame rate", e))?;
     a.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32).map_err(|e| hr_err("set out interlace mode", e))?;
-    // High profile (eAVEncH264VProfile_High = 100); the encoder picks the level for the size and rate
-    let _ = a.SetUINT32(&MF_MT_VIDEO_PROFILE, 100);
+    // H.264 High (eAVEncH264VProfile_High = 100), H.265 Main (eAVEncH265VProfile_Main_420_8 = 1);
+    // the encoder picks the level for the size and rate
+    let _ = a.SetUINT32(&MF_MT_VIDEO_PROFILE, if options.codec == StreamVideoCodec::Hevc { 1 } else { 100 });
     set_bt709(a);
     transform.SetOutputType(0, &out_type, 0).map_err(|e| hr_err("IMFTransform::SetOutputType", e))?;
     let in_type = MFCreateMediaType().map_err(|e| hr_err("MFCreateMediaType(in)", e))?;
@@ -481,7 +526,8 @@ pub struct WindowsStreamEncoder {
     /// The GPU's encoder; the software MFT below only on a machine without one.
     hardware: Option<HardwareMft>,
     options: VideoStreamEncoderOptions,
-    transform: IMFTransform,
+    /// The software H.264 MFT: only without a hardware encoder.
+    transform: Option<IMFTransform>,
     provides_samples: bool,
     output_buffer_size: u32,
     duration_100ns: i64,
@@ -490,19 +536,27 @@ pub struct WindowsStreamEncoder {
     pending_pts: VecDeque<i64>,
     /// Why the GPU's encoder is not used (empty when it is).
     hardware_note: String,
-    /// The last shared-texture picture's stages (µs): copy out of the slot, NV12 conversion, encode.
-    stages: [u32; 3],
+    /// The last surface picture's stages.
+    timings: EncodeTimings,
 }
 
 impl WindowsStreamEncoder {
-    pub fn new(options: &VideoStreamEncoderOptions) -> Result<Self, VideoFileError> {
+    fn new(options: &VideoStreamEncoderOptions) -> Result<Self, VideoFileError> {
         ensure_media_foundation()?;
         let (hardware, hardware_note) = match unsafe { HardwareMft::open(options) } {
             Ok(Some(hw)) => (Some(hw), String::new()),
-            Ok(None) => (None, "no hardware H.264 encoder MFT takes NV12 here".to_string()),
+            Ok(None) => (None, format!("no hardware {:?} encoder MFT takes NV12 here", options.codec)),
             Err(e) => (None, format!("the hardware encoder refused the setup: {e:?}")),
         };
-        let (transform, provides_samples, output_buffer_size) = create_and_negotiate(options)?;
+        let (transform, provides_samples, output_buffer_size) = match hardware {
+            Some(_) => (None, false, 0),
+            // the software encoder is H.264's
+            None if options.codec != StreamVideoCodec::H264 => return Err(VideoFileError::new(hardware_note)),
+            None => {
+                let (t, p, o) = create_and_negotiate(options)?;
+                (Some(t), p, o)
+            }
+        };
         Ok(Self {
             hardware,
             options: *options,
@@ -514,13 +568,13 @@ impl WindowsStreamEncoder {
             force_keyframe: true, // the first frame is always a keyframe
             pending_pts: VecDeque::new(),
             hardware_note,
-            stages: [0; 3],
+            timings: EncodeTimings::default(),
         })
     }
 
     fn recreate(&mut self) -> Result<(), VideoFileError> {
         let (transform, provides_samples, output_buffer_size) = create_and_negotiate(&self.options)?;
-        self.transform = transform;
+        self.transform = Some(transform);
         self.provides_samples = provides_samples;
         self.output_buffer_size = output_buffer_size;
         self.frames_since_keyframe = 0;
@@ -528,7 +582,7 @@ impl WindowsStreamEncoder {
         Ok(())
     }
 
-    pub fn push_frame_nv12(&mut self, nv12: &[u8], pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
+    fn push_frame_nv12(&mut self, nv12: &[u8], pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
         // COM apartment state is thread-local: `new()` initialized the MTA
         // only on the thread that constructed this encoder. Since this type
         // is `Send` (see the impl below) and callers may legitimately push
@@ -555,8 +609,9 @@ impl WindowsStreamEncoder {
 
         let sample = make_input_sample(nv12, pts_100ns, self.duration_100ns)?;
         let mut packets = Vec::new();
+        let transform = self.transform.clone().ok_or_else(|| VideoFileError::new("no software encoder"))?;
         let hr = unsafe {
-            self.transform
+            transform
                 .ProcessInput(0, &sample, 0)
                 .err()
                 .unwrap_or(HRESULT(0))
@@ -566,7 +621,7 @@ impl WindowsStreamEncoder {
             // HRESULT is reported if the transform still rejects the input.
             packets.append(&mut self.drain_available()?);
             let retry_hr = unsafe {
-                self.transform
+                transform
                     .ProcessInput(0, &sample, 0)
                     .err()
                     .unwrap_or(HRESULT(0))
@@ -585,6 +640,7 @@ impl WindowsStreamEncoder {
 
     fn drain_available(&mut self) -> Result<Vec<EncodedPacket>, VideoFileError> {
         let mut packets = Vec::new();
+        let transform = self.transform.clone().ok_or_else(|| VideoFileError::new("no software encoder"))?;
         loop {
             let provided = if self.provides_samples {
                 None
@@ -592,7 +648,7 @@ impl WindowsStreamEncoder {
                 Some(make_output_sample(self.output_buffer_size)?)
             };
             let (hr, _status, sample) =
-                unsafe { windows_mft::process_output(&self.transform, provided) };
+                unsafe { windows_mft::process_output(&transform, provided) };
             if hr.0 == MF_E_TRANSFORM_NEED_MORE_INPUT.0 {
                 break;
             }
@@ -621,14 +677,11 @@ impl WindowsStreamEncoder {
         Ok(packets)
     }
 
-    pub fn request_keyframe(&mut self) {
-        self.force_keyframe = true;
-    }
 
     /// A picture straight from the HAL's shared texture `key` (`makepad_hal::shared_texture`:
     /// BGRA, its keyed mutex taken for the copy), converted to NV12 on the GPU and encoded by
     /// the hardware encoder.
-    pub fn push_shared_texture(&mut self, key: u64, pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
+    fn push_shared_texture(&mut self, key: u64, pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
         ensure_media_foundation()?;
         let [w, h] = [self.options.width, self.options.height];
         let Some(hw) = self.hardware.as_mut() else {
@@ -642,11 +695,28 @@ impl WindowsStreamEncoder {
         let key_frame = std::mem::take(&mut self.force_keyframe);
         let out = unsafe { hw.encode(&nv12, key_frame, pts_100ns) };
         let us = |a: std::time::Instant, b: std::time::Instant| (b - a).as_micros().min(u32::MAX as u128) as u32;
-        self.stages = [us(t0, t1), us(t1, t2), us(t2, std::time::Instant::now())];
+        self.timings = EncodeTimings { copy_us: us(t0, t1), convert_us: us(t1, t2), encode_us: us(t2, std::time::Instant::now()) };
         out
     }
 
-    pub fn set_bitrate_kbps(&mut self, kbps: u32) {
+    /// An NV12 shared texture `key` of the encoder's size (`makepad_hal::shared_texture`): copied on
+    /// the GPU into the encoder's device and encoded, no conversion, no CPU pass.
+    fn push_shared_nv12(&mut self, key: u64, pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
+        ensure_media_foundation()?;
+        let Some(hw) = self.hardware.as_mut() else {
+            return Err(VideoFileError::new(format!("no hardware encoder for GPU pictures ({})", self.hardware_note)));
+        };
+        let t0 = std::time::Instant::now();
+        let nv12 = makepad_hal::shared_texture::nv12_picture(key).map_err(VideoFileError::new)?;
+        let t1 = std::time::Instant::now();
+        let key_frame = std::mem::take(&mut self.force_keyframe);
+        let out = unsafe { hw.encode(&nv12, key_frame, pts_100ns) };
+        let us = |a: std::time::Instant, b: std::time::Instant| (b - a).as_micros().min(u32::MAX as u128) as u32;
+        self.timings = EncodeTimings { copy_us: us(t0, t1), convert_us: 0, encode_us: us(t1, std::time::Instant::now()) };
+        out
+    }
+
+    fn set_kbps(&mut self, kbps: u32) {
         self.options.bitrate_kbps = kbps;
         if let Some(hw) = &self.hardware {
             let _ = unsafe { windows_mft::set_codec_api_u32(&hw.transform, &CODECAPI_AVEncCommonMeanBitRate, kbps.saturating_mul(1000)) };
@@ -654,16 +724,69 @@ impl WindowsStreamEncoder {
         }
     }
 
-    /// The last shared-texture picture's stages (µs): copy, conversion, encode.
-    pub fn stages(&self) -> [u32; 3] {
-        self.stages
-    }
-
-    pub fn description(&self) -> String {
+    fn info(&self) -> String {
         match &self.hardware {
-            Some(hw) => format!("H.264 {}x{} {} fps {} kbit/s on {}", self.options.width, self.options.height, self.options.fps, self.options.bitrate_kbps, hw.name),
+            Some(hw) => format!("{} {}x{} {} fps {} kbit/s on {}", if hw.hevc { "H.265" } else { "H.264" }, self.options.width, self.options.height, self.options.fps, self.options.bitrate_kbps, hw.name),
             None => format!("H.264 {}x{} {} fps {} kbit/s (software encoder: {})", self.options.width, self.options.height, self.options.fps, self.options.bitrate_kbps, self.hardware_note),
         }
+    }
+}
+
+impl StreamEncoderOs for WindowsStreamEncoder {
+    fn caps() -> EncoderCaps {
+        // two sessions encode a picture's columns at once (on two engines where the GPU has them)
+        EncoderCaps { engines: 2, tiles: true, full_chroma: false, hevc: hardware_hevc() }
+    }
+
+    fn open(options: &VideoStreamEncoderOptions, _tile: StreamTile, _tuning: StreamTuning) -> Result<Self, VideoFileError> {
+        Self::new(options)
+    }
+
+    fn encode_nv12(&mut self, nv12: &[u8], pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
+        self.push_frame_nv12(nv12, pts_100ns)
+    }
+
+    /// A keyed-mutex surface (its keyed mutex orders the read after the frame that drew it,
+    /// so `ready` is complete once submitted): a BGRA picture converted on the GPU; the column
+    /// `tile` of a packed NV12 one read as the NV12 bytes it holds and encoded from those.
+    fn encode_surface(&mut self, surface: &SurfaceHandle, tile: StreamTile, ready: &GpuCompletion, pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
+        if surface.kind != SurfaceKind::D3d11Keyed {
+            return Err(VideoFileError::new(format!("the stream encoder takes keyed D3D11 surfaces, not {surface:?}")));
+        }
+        ready.wait(std::time::Duration::from_secs(2)).map_err(VideoFileError::new)?;
+        match surface.format {
+            SurfaceFormat::Bgra8 if tile.x0 == 0 && tile.y0 == 0 && tile.source_height == self.options.height => self.push_shared_texture(surface.id, pts_100ns),
+            // an NV12 picture of this tile's size, rendered into its planes: encoded as it lies
+            SurfaceFormat::Nv12 if tile.x0 == 0 && tile.y0 == 0 && tile.source_height == self.options.height => self.push_shared_nv12(surface.id, pts_100ns),
+            SurfaceFormat::PackedNv12 if tile.y0 == 0 && tile.source_height == self.options.height => {
+                let [w, h] = [self.options.width, self.options.height];
+                let t0 = std::time::Instant::now();
+                // texels: four bytes of a plane row each, the luma rows then the chroma rows
+                let nv12 = makepad_hal::shared_texture::read(surface.id, [tile.x0 / 4, 0, w / 4, h + h / 2]).map_err(VideoFileError::new)?;
+                let t1 = std::time::Instant::now();
+                let out = self.push_frame_nv12(&nv12, pts_100ns);
+                let us = |a: std::time::Instant, b: std::time::Instant| (b - a).as_micros().min(u32::MAX as u128) as u32;
+                self.timings = EncodeTimings { copy_us: us(t0, t1), convert_us: 0, encode_us: us(t1, std::time::Instant::now()) };
+                out
+            }
+            _ => Err(VideoFileError::new(format!("the stream encoder takes whole BGRA or NV12 surfaces or columns of packed NV12 ones, not {tile:?} of {surface:?}"))),
+        }
+    }
+
+    fn request_keyframe(&mut self) {
+        self.force_keyframe = true;
+    }
+
+    fn set_bitrate_kbps(&mut self, kbps: u32) {
+        self.set_kbps(kbps);
+    }
+
+    fn timings(&self) -> EncodeTimings {
+        self.timings
+    }
+
+    fn description(&self) -> String {
+        self.info()
     }
 }
 
@@ -686,18 +809,18 @@ mod tests {
     #[test]
     fn every_idr_carries_its_parameter_sets() {
         let mut headers = Vec::new();
-        let (first, key) = in_band_headers(&mut headers, au(&[7, 8, 5]));
+        let (first, key) = in_band_headers(&mut headers, au(&[7, 8, 5]), false);
         assert!(key);
         assert_eq!(first, au(&[7, 8, 5]));
-        let (p, key) = in_band_headers(&mut headers, au(&[1]));
+        let (p, key) = in_band_headers(&mut headers, au(&[1]), false);
         assert!(!key);
         assert_eq!(p, au(&[1]));
         // a forced IDR without SPS/PPS gets the stream's
-        let (idr, key) = in_band_headers(&mut headers, au(&[9, 5]));
+        let (idr, key) = in_band_headers(&mut headers, au(&[9, 5]), false);
         assert!(key);
         assert_eq!(idr, au(&[9, 7, 8, 5]));
-        assert_eq!(in_band_headers(&mut headers, au(&[5])).0, au(&[7, 8, 5]));
+        assert_eq!(in_band_headers(&mut headers, au(&[5]), false).0, au(&[7, 8, 5]));
         // SPS alone (no IDR) is not a key frame
-        assert!(!in_band_headers(&mut headers, au(&[7, 8, 1])).1);
+        assert!(!in_band_headers(&mut headers, au(&[7, 8, 1]), false).1);
     }
 }

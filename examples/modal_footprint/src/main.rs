@@ -38,24 +38,28 @@ script_mod! {
     use mod.widgets.*
 
     let Header = SolidView{
+        a11y: {role: "group" label: "Header"}
         width: Fill
         height: 40
         draw_bg +: { color: #x2a3350 }
     }
 
     let Footer = SolidView{
+        a11y: {role: "group" label: "Footer"}
         width: Fill
         height: 40
         draw_bg +: { color: #x503030 }
     }
 
     let Body = SolidView{
+        a11y: {role: "group" label: "Body"}
         width: Fill
         height: Fill
         draw_bg +: { color: #x203020 }
     }
 
     let DialogCard = RoundedView{
+        a11y: {role: "group" label: "Dialog card"}
         width: 220
         height: Fit
         flow: Down
@@ -84,6 +88,7 @@ script_mod! {
 
                         // ---- control: the same column, no modals ----
                         plain_column := View{
+                            a11y: {role: "group" label: "Control column"}
                             width: Fill
                             height: Fill
                             flow: Down
@@ -94,6 +99,7 @@ script_mod! {
 
                         // ---- specimen: three modals parked in the column ----
                         modal_column := View{
+                            a11y: {role: "group" label: "Modal column"}
                             width: Fill
                             height: Fill
                             flow: Down
@@ -104,6 +110,7 @@ script_mod! {
                                 open_button := Button{text: "Open"}
                             }
                             dialog_a := Modal{
+                                bg_view +: {a11y: {role: "group" label: "Backdrop"}}
                                 content +: {
                                     DialogCard{
                                         Label{text: "DIALOG A"}
@@ -134,6 +141,7 @@ script_mod! {
                         // the dialog card on both sides, so a test can check
                         // the covered and the uncovered halves.
                         deep_band := SolidView{
+                            a11y: {role: "group" label: "Depth specimen"}
                             width: 340
                             height: 60
                             abs_pos: vec2(90.0, 160.0)

@@ -25,7 +25,7 @@ pub struct FileIndex {
 
 /// A certified demand closure. Per-file index projections are retained beside
 /// their paths; a warm load decodes these rather than indexing again.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct DemandImage {
     pub graph: u128,
     pub fingerprint: u128,
@@ -45,11 +45,18 @@ pub struct DemandImage {
 struct EarlyCrates {
     prefix: std::sync::atomic::AtomicUsize,
     notify: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
+    /// wakes `PendingPlan::wait_progress` (a publication or the plan's completion)
+    wake: (relax_session::sync::Mutex<()>, relax_session::sync::Condvar),
 }
 impl EarlyCrates {
     fn publish(&self, prefix: usize) {
         self.prefix.fetch_max(prefix, std::sync::atomic::Ordering::Release);
         if let Some(notify) = self.notify.get() { notify(); }
+        self.wake_all();
+    }
+    fn wake_all(&self) {
+        let _g = self.wake.0.lock().unwrap_or_else(|e| e.into_inner());
+        self.wake.1.notify_all();
     }
 }
 
@@ -63,8 +70,22 @@ pub struct PendingPlan {
     plan: std::sync::OnceLock<Plan>,
     early: EarlyCrates,
     parts: Option<crate::crate_image::DemandParts>,
+    /// the stored plan of an earlier load, taken over without planning (`carried`): its inputs
+    /// and probes are that load's, not this one's
+    carried: bool,
 }
 impl PendingPlan {
+    /// The plan an earlier load of these crates recorded (`image`), taken as it is: an edited start
+    /// whose last crate is unchanged and was selected in full loads every crate in full whatever
+    /// the edit (a full selection is always a sound one), so nothing is planned. Its parts stay
+    /// the stored ones (the next plan validates them by their own inputs).
+    pub fn carried(crates: &[PreCrate], contexts: Vec<Arc<crate::source_context::Context>>, image: Arc<DemandImage>) -> Self {
+        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts: None, carried: true };
+        let plan = Plan::build(&pending.pending_crates, pending.pending_contexts.clone(), Some(image), &pending.early, None);
+        let _ = pending.plan.set(plan);
+        pending
+    }
+    pub fn is_carried(&self) -> bool { self.carried }
     pub fn new(crates: &[PreCrate], contexts: Vec<Arc<crate::source_context::Context>>, images: Option<&dyn crate::crate_image::CrateImages>, parallel: bool) -> Self {
         let image = if crates.iter().any(|c| c.cfg.session.runtime.lazy_verify) { None }
             else { images.and_then(|images| images.demand_image(crates, recipe_identity(crates))) };
@@ -72,8 +93,9 @@ impl PendingPlan {
             && !crates.iter().any(|c| c.cfg.session.runtime.lazy_verify) {
             images.and_then(|i| i.demand_parts(crates, recipe_identity(crates)))
         } else { None };
-        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts };
-        if let Some(parts) = &pending.parts { pending.early.publish(parts.eager_prefix); }
+        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts, carried: false };
+        // The crates selected in full (Plan::build) are known before planning.
+        pending.early.publish(selected_prefix(crates, pending.parts.as_ref()));
         if image.is_some() || !parallel {
             let plan = Plan::build(&pending.pending_crates, pending.pending_contexts.clone(), image, &pending.early, pending.parts.as_ref());
             let _ = pending.plan.set(plan);
@@ -83,8 +105,24 @@ impl PendingPlan {
     pub fn complete(&self) {
         let _reads = self.pending_contexts.first().map(|c| c.bind_source_reads());
         let _ = std::ops::Deref::deref(self);
+        self.early.wake_all();
     }
     pub fn ready(&self) -> Option<&Plan> { self.plan.get() }
+    /// The crates' source contexts (the plan's own, without waiting for it).
+    pub fn contexts(&self) -> &[Arc<crate::source_context::Context>] { &self.pending_contexts }
+    /// The crates the plan is for (without waiting for it).
+    pub fn crates(&self) -> &[PreCrate] { &self.pending_crates }
+    /// How many load-order crates are selected in full so far (`eagerly_selected`).
+    pub fn early_prefix(&self) -> usize { self.early.prefix.load(std::sync::atomic::Ordering::Acquire) }
+    /// Waits until the early prefix passes `seen` or the plan is complete (a caller that needs
+    /// the selection of a crate: its early selection, or the plan's).
+    pub fn wait_progress(&self, seen: usize) {
+        let mut g = self.early.wake.0.lock().unwrap_or_else(|e| e.into_inner());
+        while self.ready().is_none() && self.early_prefix() <= seen {
+            // (re-checked now and then: a plan made by another dereference wakes nobody)
+            g = self.early.wake.1.wait_timeout(g, std::time::Duration::from_millis(20)).unwrap_or_else(|e| e.into_inner()).0;
+        }
+    }
     pub fn eagerly_selected(&self, ci: usize) -> bool {
         ci < self.early.prefix.load(std::sync::atomic::Ordering::Acquire)
     }
@@ -212,7 +250,12 @@ impl Plan {
         let mut expansion_failures = BTreeMap::new();
         let mut eager_bodies = BTreeMap::new();
         let mut prepared_items = BTreeMap::new();
-        let mut eager_prefix = 0;
+        // The closure selects among the last crate's files (`lazy_from`); the load takes the
+        // last crate in full too when the plan these parts come from deferred none of its files
+        // (`eager_prefix`).
+        let lazy_from = eager_prefix(crates);
+        let eager_prefix = selected_prefix(crates, stored);
+        early.publish(eager_prefix);
         let mut prepared_files = Vec::new();
         let mut unindexed_files = Vec::new();
         if rust_lazy {
@@ -283,7 +326,7 @@ impl Plan {
                 let (ci, scans, aliases, _) = &mut discovered[k];
                 let c = &crates[*ci];
                 let _crate_profile = crate::load_profile::span(profile, "rust-demand-outline-crate", &c.name);
-                let dependencies = dependency_crates[*ci].iter().map(|&d| identities[d]).collect::<Vec<_>>();
+                let dependencies = dependency_identities(&dependency_crates[*ci], &identities);
                 let reusable = saved.get(*ci).and_then(Option::as_ref)
                     .filter(|part| part.dependencies == dependencies);
                 if profile && reusable.is_none() && saved.get(*ci).and_then(Option::as_ref).is_some() {
@@ -301,10 +344,6 @@ impl Plan {
                     identities.push(part.surface_id);
                     reused_outline.insert(*ci);
                     restored_surfaces.extend(part.outlined.iter().map(|(p, m)| (*ci, p.clone(), m.clone())));
-                    if *ci == eager_prefix && *ci + 1 < crates.len() {
-                        eager_prefix += 1;
-                        early.publish(eager_prefix);
-                    }
                     if profile { eprintln!("rust-demand-part: {} restored outline", c.name); }
                     continue;
                 }
@@ -519,11 +558,6 @@ impl Plan {
                 if !saved.is_empty() { part.seal_identity(); }
                 identities.push(part.surface_id);
                 if profile { eprintln!("rust-demand-part: {} rebuilt outline", c.name); }
-                if *ci == eager_prefix && *ci + 1 < crates.len()
- {
-                    eager_prefix += 1;
-                    early.publish(eager_prefix);
-                }
             }
             drop(finish);
             });
@@ -665,6 +699,7 @@ impl Plan {
         // references need neither mapped origins nor a second lowering stream.
         let surfaces = rust.iter().map(|(ci, path, module, scan)| ((*ci, path.as_str(), module.as_str()), (&scan.src, &scan.toks))).collect::<BTreeMap<_, _>>();
         let closure_profile = crate::load_profile::span(profile, if rust_lazy { "rust-demand-selection" } else { "rust-demand-closure" }, "load");
+        let mut kept_delta: Option<Arc<demand::ClosureDelta>> = None;
         if rust_lazy {
             // Item-level closure: a reached file declares its items; only used
             // items (and their impls/members) add references.
@@ -680,7 +715,7 @@ impl Plan {
                 });
                 items::FileInput { ci: file.ci, path: &file.path, module: &file.module, index: file, surface, items,
                     
-                    eager_bodies: eager_bodies.get(&(file.ci, file.path.clone(), file.module.clone())), force, root: file.path == crates[file.ci].root || file.ci < eager_prefix }
+                    eager_bodies: eager_bodies.get(&(file.ci, file.path.clone(), file.module.clone())), force, root: file.path == crates[file.ci].root || file.ci < lazy_from }
             }).collect::<Vec<_>>();
             let implicit = names.implicit_demands().into_iter().filter(|name| names.is_trait(name)).collect::<BTreeSet<_>>();
             drop(inputs_profile);
@@ -688,10 +723,17 @@ impl Plan {
                 items::closure(names, inputs, demands.clone(), &implicit, jobs(), profile, parts, incoming)
             };
             let edited = (0..crates.len()).filter(|ci| !reused_outline.contains(ci)).collect::<BTreeSet<_>>();
+            if profile {
+                let surface = edited.iter().filter(|&&ci| previous.get(ci).and_then(|p| p.as_ref()).is_none_or(|old| old.surface_id != parts[ci].surface_id)).map(|&ci| crates[ci].name.as_str()).collect::<Vec<_>>();
+                let transfer = edited.iter().filter(|&&ci| previous.get(ci).and_then(|p| p.as_ref()).is_none_or(|old| !parts[ci].same_transfer(old))).map(|&ci| crates[ci].name.as_str()).collect::<Vec<_>>();
+                let roots = previous.first().and_then(|p| p.as_ref()).and_then(|p| p.roots.as_ref()).map(|(s, f, p)| (s == &demands, f == &forced, *p == lazy_from));
+                eprintln!("rust-demand-local: previous {}/{} edited {:?} surface changed {:?} transfer changed {:?} roots (seeds, forced, prefix) {:?}",
+                    previous.iter().filter(|p| p.is_some()).count(), crates.len(), edited.iter().map(|&ci| crates[ci].name.as_str()).collect::<Vec<_>>(), surface, transfer, roots);
+            }
             let local_candidate = previous.len() == crates.len() && previous.iter().all(Option::is_some)
                 && !edited.is_empty() && edited.iter().all(|&ci| previous[ci].as_ref().is_some_and(|old| old.surface_id == parts[ci].surface_id && parts[ci].same_transfer(old)))
                 && previous[0].as_ref().and_then(|p| p.roots.as_ref()).is_some_and(|(old_seeds, old_forced, prefix)|
-                    old_seeds == &demands && old_forced == &forced && *prefix == eager_prefix);
+                    old_seeds == &demands && old_forced == &forced && *prefix == lazy_from);
             let local_result = if local_candidate {
                 let _local = crate::load_profile::span(profile, "rust-demand-local-selection", "edited crates");
                 if let Some(delta) = previous[0].as_ref().and_then(|p| p.closure_delta.as_deref()).and_then(demand::ClosureDelta::decoded) {
@@ -715,6 +757,9 @@ impl Plan {
             let local_result = local_result.filter(|_| edited.iter().all(|&ci|
                 parts[ci].boundary.same_outgoing(&previous[ci].as_ref().unwrap().boundary, &crates[ci].name)));
             let result = if let Some((selected, local)) = local_result {
+                // the namespaces are the stored ones plus the stored closure delta: the recording
+                // keeps that delta (Recording::kept_delta) instead of rebuilding every namespace
+                kept_delta = previous[0].as_ref().and_then(|p| p.closure_delta.clone());
                 let mut reached = files.iter().map(|file| !edited.contains(&file.ci) && previous[file.ci].as_ref().unwrap().reached.contains(&file.path)).collect::<Vec<_>>();
                 let mut reasons = vec![("stored-boundary".into(), String::new()); files.len()];
                 for (i, &f) in selected.iter().enumerate() { reached[f] = local.reached[i]; reasons[f] = local.reasons[i].clone(); }
@@ -730,7 +775,7 @@ impl Plan {
                 }
                 select(&mut names, &mut inputs, &mut parts, None)
             };
-            parts[0].roots = Some((demands.clone(), forced.clone(), eager_prefix));
+            parts[0].roots = Some((demands.clone(), forced.clone(), lazy_from));
             let _publish_profile = crate::load_profile::span(profile, "rust-demand-closure-publish", "load");
             for (f, file) in files.iter().enumerate() {
                 if !result.reached[f] { continue; }
@@ -793,7 +838,7 @@ impl Plan {
         }
         let image_profile = crate::load_profile::span(profile, "rust-demand-certify-image", "load");
         let headers = parts.iter().map(|p| Arc::new(DemandPart { key: p.key, ..DemandPart::default() })).collect();
-        let recording = rust_lazy.then(|| Arc::new(part::Recording::new(crates, names, parts)));
+        let recording = rust_lazy.then(|| Arc::new(part::Recording::new(crates, names, parts, kept_delta)));
         plan.image = Arc::new(DemandImage { graph, fingerprint, inputs: inputs.into_iter().collect(),
             probes: plan.probes.clone(), late_inputs, files, reached: plan.reached.clone(),
             opaque_crates: forced.len(), eager_prefix,
@@ -812,6 +857,7 @@ impl Plan {
     }
 
     pub fn deferred(&self, ci: usize) -> Vec<String> {
+        if ci < self.image.eager_prefix { return Vec::new(); }
         self.indexed.range((ci, String::new())..(ci + 1, String::new()))
             .filter(|k| !self.reached.contains(*k)).map(|k| k.1.clone()).collect()
     }
@@ -819,7 +865,7 @@ impl Plan {
     pub fn skips(&self, root: &str, path: &str) -> bool {
         self.crates.iter().position(|c| c.root == root).is_some_and(|ci| {
             let key = (ci, path.to_owned());
-            self.indexed.contains(&key) && !self.reached.contains(&key)
+            ci >= self.image.eager_prefix && self.indexed.contains(&key) && !self.reached.contains(&key)
         })
     }
 
@@ -906,6 +952,30 @@ impl Plan {
         }
         Ok(())
     }
+}
+
+/// The load-order prefix selected in full: every crate but the last (whose selection is the closure's
+/// result). Only a Rust-lazy plan selects at all.
+/// A part's dependency pin: the surface identities of the crates its namespace read, as a set
+/// (sorted), so a crate whose dependencies load in another relative order (a reordered load moves
+/// changed crates last) keeps its part.
+pub(super) fn dependency_identities(crates: &[usize], identities: &[u128]) -> Vec<u128> {
+    let mut v: Vec<u128> = crates.iter().map(|&d| identities[d]).collect();
+    v.sort_unstable();
+    v
+}
+
+fn eager_prefix(crates: &[PreCrate]) -> usize {
+    if crates.first().is_some_and(|c| c.cfg.session.options.rs_lazy) { crates.len().saturating_sub(1) } else { 0 }
+}
+
+/// The load-order prefix the load takes in full: `eager_prefix`, and the last crate too when the plan
+/// the stored parts come from reached all of its files (a full selection is always a sound one, and
+/// nothing then waits for the closure; the closure still runs and records what it would defer, so a
+/// later start whose plan defers part of the last crate selects again).
+fn selected_prefix(crates: &[PreCrate], stored: Option<&crate::crate_image::DemandParts>) -> usize {
+    let prefix = eager_prefix(crates);
+    prefix + usize::from(prefix + 1 == crates.len() && stored.is_some_and(|p| p.last_selected))
 }
 
 /// Crates a dependency-ready crate may start expanding ahead of publication (`Plan::build`).

@@ -1,6 +1,8 @@
 //! The Linux side: the server thread, per-surface textures, launching client processes and
 //! turning a mapped toplevel into a client slot with a tile.
 
+mod embedded;
+
 use super::*;
 use crate::{clients, App};
 use makepad_widgets::*;
@@ -8,7 +10,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::{Child, Command as Process, Stdio};
-use makepad_widgets::makepad_platform::foreign_dmabuf::{ForeignDmabuf, ForeignDmabufPlane, ForeignDmabufFence};
+use makepad_widgets::makepad_platform::foreign_dmabuf::{ForeignDmabuf, ForeignDmabufPlane};
+use makepad_widgets::makepad_platform::video_file::GpuCompletion;
 use wayland_server::compositor::{Board, BufferUpdate, DmabufConfig, DmabufFrame, Frame, OutputInfo, Rect as WRect, UiEvent};
 use wayland_server::host::{Command, Host};
 use wayland_server::compositor::xdg::{STATE_ACTIVATED, STATE_TILED_BOTTOM, STATE_TILED_LEFT, STATE_TILED_RIGHT, STATE_TILED_TOP};
@@ -36,6 +39,11 @@ struct Win {
 
 #[derive(Default)]
 struct Shared {
+    embedded: HashMap<(ClientId, makepad_studio_protocol::NativeAppId), embedded::Embedded>,
+    embedded_connections: HashMap<u32, (ClientId, makepad_studio_protocol::NativeAppId)>,
+    embedded_pending: HashMap<u64, (ClientId, makepad_studio_protocol::NativeAppId)>,
+    embedded_focus: Option<(ClientId, makepad_studio_protocol::NativeAppId)>,
+    next_embedded: u64,
     host: Option<Host>,
     dir: PathBuf,
     images: HashMap<Surf, Image>,
@@ -52,7 +60,7 @@ struct Shared {
     cursors: HashMap<u32, u32>,
     /// Imported client dmabufs, by (client, wl_buffer id).
     imports: HashMap<(u32, u32), Texture>,
-    releases: Vec<(u32, u32, ForeignDmabufFence)>,
+    releases: Vec<(u32, u32, GpuCompletion)>,
     release_retry: Vec<(u32, u32)>,
     /// The last text the makepad apps copied (clipboard) and selected (primary), handed to the
     /// server when it starts: a browser opened after a copy pastes it.
@@ -210,9 +218,9 @@ impl Shared {
 
     /// Tells the client its dmabuf buffer may be reused once what the GPU has been given is done.
     fn release(&mut self, cx: &mut Cx, client: u32, buffer: u32) {
-        match cx.foreign_dmabuf_fence() {
-            Ok(mut release) => match release.poll() {
-                Some(Ok(fence)) => host_send(self, Command::BufferDone { client, buffer, fence }),
+        match cx.frame_completion() {
+            Ok(release) => match release.poll() {
+                Some(Ok(())) => host_send(self, Command::BufferDone { client, buffer, fence: release.sync_file() }),
                 Some(Err(error)) => {
                     log!("wm: dmabuf release deferred: {error}");
                     self.release_retry.push((client, buffer));
@@ -229,9 +237,9 @@ impl Shared {
     fn poll_releases(&mut self, cx: &mut Cx) {
         for (client, buffer) in std::mem::take(&mut self.release_retry) { self.release(cx, client, buffer); }
         let mut pending = Vec::new();
-        for (client, buffer, mut release) in std::mem::take(&mut self.releases) {
+        for (client, buffer, release) in std::mem::take(&mut self.releases) {
             match release.poll() {
-                Some(Ok(fence)) => host_send(self, Command::BufferDone { client, buffer, fence }),
+                Some(Ok(())) => host_send(self, Command::BufferDone { client, buffer, fence: release.sync_file() }),
                 Some(Err(error)) => {
                     log!("wm: dmabuf release deferred: {error}");
                     self.release_retry.push((client, buffer));
@@ -267,6 +275,7 @@ impl Shared {
 impl App {
     /// Drains the server's events: images, window meta, mapping and closing.
     pub(crate) fn wayland_poll(&mut self, cx: &mut Cx) {
+        self.native_app_poll(cx);
         with(|s| s.poll_releases(cx));
         let events: Vec<UiEvent> = with(|s| {
             s.children.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
@@ -279,7 +288,9 @@ impl App {
     }
 
     fn wayland_event(&mut self, cx: &mut Cx, ev: UiEvent) {
+        let Some(ev) = self.native_app_event(cx, ev) else { return };
         match ev {
+            UiEvent::ClientAttached { .. } => {}
             UiEvent::ToplevelNew { surface } => with(|s| { s.unmapped.insert(surface, (String::new(), String::new())); }),
             UiEvent::ToplevelTitle { surface, title } => {
                 let client = with(|s| {
@@ -438,6 +449,23 @@ impl App {
         true
     }
 
+    fn wayland_server(&mut self, cx: &mut Cx) -> Result<(String, PathBuf), String> {
+        let area = self.desk_area(cx);
+        with(|s| {
+            if s.host.is_none() {
+                let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+                let output = OutputInfo { width: area.w as i32, height: area.h as i32, ..Default::default() };
+                let host = Host::spawn(&dir, "wayland-wm", output, keymap_layout(), dmabuf_config(cx), || SignalToUI::set_ui_signal()).map_err(|e| e.to_string())?;
+                for (board, text) in [Board::Clipboard, Board::Primary].into_iter().zip(s.selection.clone()) {
+                    if let Some(text) = text { host.send(Command::SetSelection { board, text }); }
+                }
+                s.dir = dir;
+                s.host = Some(host);
+            }
+            Ok((s.host.as_ref().unwrap().socket.clone(), s.dir.clone()))
+        })
+    }
+
     /// `wayland=<command line>` or a catalog id `wl.<name>` starts a Wayland client of the WM's own server.
     pub(crate) fn wayland_launch(&mut self, cx: &mut Cx, app_id: &str) -> bool {
         // Our own browser's id opens the Chromium that replaces it, when it is listed.
@@ -459,25 +487,10 @@ impl App {
         };
         let Some(program) = argv.first().cloned() else { return true };
         let line = argv.join(" ");
-        let area = self.desk_area(cx);
-        let socket = match with(|s| -> std::io::Result<String> {
-            if s.host.is_none() {
-                let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-                let output = OutputInfo { width: area.w as i32, height: area.h as i32, ..Default::default() };
-                let dmabuf = dmabuf_config(cx);
-                let host = Host::spawn(&dir, "wayland-wm", output, keymap_layout(), dmabuf, || SignalToUI::set_ui_signal())?;
-                for (board, text) in [Board::Clipboard, Board::Primary].into_iter().zip(s.selection.clone()) {
-                    if let Some(text) = text { host.send(Command::SetSelection { board, text }); }
-                }
-                s.dir = dir;
-                s.host = Some(host);
-            }
-            Ok(s.host.as_ref().unwrap().socket.clone())
-        }) {
-            Ok(n) => n,
-            Err(e) => { log!("wm: wayland server failed to start: {e}"); return true; }
+        let (socket, dir) = match self.wayland_server(cx) {
+            Ok(server) => server,
+            Err(error) => { log!("wm: wayland server failed to start: {error}"); return true; }
         };
-        let dir = with(|s| s.dir.clone());
         let mut p = Process::new(&program);
         makepad_app_registry::child_env::scrub(&mut p);
         p.args(&argv[1..]).envs(env).env("WAYLAND_DISPLAY", &socket).env("XDG_RUNTIME_DIR", &dir).env("XDG_SESSION_TYPE", "wayland")
@@ -505,7 +518,11 @@ fn catalog_apps() -> Vec<catalog::ForeignApp> {
         let mut c = c.borrow_mut();
         if c.as_ref().is_none_or(|(at, _)| at.elapsed() > std::time::Duration::from_secs(5)) {
             let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-            *c = Some((std::time::Instant::now(), catalog::load(&home)));
+            let apps = if std::env::var_os("MAKEPAD_HOME").is_some_and(|v| !v.is_empty()) {
+                std::fs::read_to_string(crate::theme::makepad_home().join("wm/wayland_apps.txt"))
+                    .map(|text| catalog::parse_config(&text, &home)).unwrap_or_default()
+            } else { catalog::load(&home) };
+            *c = Some((std::time::Instant::now(), apps));
         }
         c.as_ref().unwrap().1.clone()
     })

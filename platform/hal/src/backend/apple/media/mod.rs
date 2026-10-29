@@ -32,15 +32,21 @@ mod permission;
 mod probe;
 mod util;
 mod video;
-mod views;
+#[cfg(not(target_os = "tvos"))]
+pub(crate) mod web_state;
+pub(crate) mod layers;
 
+#[cfg(target_os = "macos")]
+pub use layers::native_click;
 pub use probe::video_h264_probe;
 pub use video::can_play_type;
 
 use crate::cmds::HalCmd;
-use crate::media::{audio_dir, game_op, view_kind, view_op, location_kind, location_op, midi_op, permission_kind, permission_op, permission_status, read_u64s, video_mode, video_op, video_status};
+use crate::media::{audio_dir, game_op, location_kind, location_op, midi_op, permission_kind, permission_op, permission_status, read_u64s, video_mode, video_op, video_status};
 use crate::session::{Session, TextureObj};
-use crate::types::{format, usage, Id};
+use crate::types::{format, usage, Id, Layer};
+use crate::native_layer::{kind as layer_kind, op as layer_op, state as layer_state, mode as layer_mode};
+use crate::buffers::CmdView;
 use makepad_apple_sys::*;
 use std::any::Any;
 use std::collections::HashMap;
@@ -128,6 +134,9 @@ struct SessionMedia {
     camera_frames: Signal,
     /// camera previews (a player of camera source): the (camera, format) each shows
     previews: HashMap<u64, (u64, u64)>,
+    native_layers: HashMap<Id, u32>,
+    native_sources: HashMap<Id, (u64, u64)>,
+    native_realized: Arc<Mutex<Vec<(Id, bool)>>>,
 }
 
 impl SessionMedia {
@@ -149,6 +158,9 @@ impl SessionMedia {
             camera_change: Signal::new(sid),
             camera_frames: Signal::new(sid),
             previews: HashMap::new(),
+            native_layers: HashMap::new(),
+            native_sources: HashMap::new(),
+            native_realized: Arc::default(),
         }
     }
 
@@ -232,8 +244,7 @@ impl Media {
                     let access = lock(&access);
                     if dir == audio_dir::INPUT { access.input_cb[index].clone() } else { access.output_cb[index].clone() }
                 };
-                // SAFETY: a non-zero `entry` is the address of the `extern "C" fn` the app registered
-                let entry = (entry != 0).then(|| audio::Entry { f: unsafe { std::mem::transmute::<usize, crate::media::AudioFn>(entry as usize) }, ctx: ctx as usize });
+                let entry = audio::Entry::from_cmd(entry, ctx);
                 // waits for a block of the old entry that is running: when this returns the old
                 // entry is not called any more
                 *lock(&slot) = entry;
@@ -277,25 +288,51 @@ impl Media {
                 }
                 true
             }
-            HalCmd::ViewOp { window, op, view, area, extra, data } => {
+            HalCmd::NativeLayerCreate { id, kind, params } => {
+                if !matches!(kind, layer_kind::WEB | layer_kind::CAMERA_PREVIEW) || (cfg!(target_os = "tvos") && kind == layer_kind::WEB) { return false; }
                 let sm = self.sessions.entry(s.id).or_insert_with(|| SessionMedia::new(s.id));
-                // a camera preview shows the capture session of its camera
-                let mut session = 0usize;
-                if op & 0xff00 == view_kind::CAMERA && op & 0xff == view_op::UPDATE {
-                    if let (Some(&(input, format)), Some(camera)) = (sm.previews.get(&view), &sm.camera) {
-                        if let Some(found) = lock(camera).session_for(input, format) {
-                            unsafe {
-                                let _: ObjcId = msg_send![found, retain];
-                            }
-                            session = found as usize;
-                        }
-                    }
+                if kind == layer_kind::CAMERA_PREVIEW {
+                    let ids = read_u64s(params);
+                    if ids.len() != 2 { s.bad(); return true; }
+                    sm.native_sources.insert(id, (ids[0], ids[1]));
+                    lock(&sm.camera()).native_source(id, Some((ids[0], ids[1])));
                 }
-                let cmd = views::ViewCmd { sid: s.id, window, op, view, area, extra, data: data.to_vec(), session };
-                // native views live on the window system's main thread; offscreen sessions have none
-                if !super::shell::on_main(move || views::apply(cmd)) {
-                    s.stats.media_unsupported += 1;
+                let sid = s.id;
+                let params = params.to_vec();
+                let realized = sm.native_realized.clone();
+                let signal = sm.system.clone();
+                if super::shell::on_main(move || {
+                    let supported = layers::create(sid, id, kind, params);
+                    lock(&realized).push((id, supported));
+                    signal.set();
+                }) { sm.native_layers.insert(id, kind); }
+                else {
+                    if sm.native_sources.remove(&id).is_some() { lock(&sm.camera()).native_source(id, None); }
+                    s.events.native_layer_state(id, layer_state::REALIZED, layer_mode::UNSUPPORTED, 0, b"");
                 }
+                true
+            }
+            HalCmd::NativeLayerOp { id, op, arg, data } => {
+                let Some(sm) = self.sessions.get_mut(&s.id).filter(|sm| sm.native_layers.contains_key(&id)) else { return false; };
+                if op == layer_op::CAMERA_SOURCE && sm.native_layers.get(&id) == Some(&layer_kind::CAMERA_PREVIEW) {
+                    let ids = read_u64s(data);
+                    if ids.len() != 1 { s.bad(); return true; }
+                    sm.native_sources.insert(id, (arg, ids[0]));
+                    lock(&sm.camera()).native_source(id, Some((arg, ids[0])));
+                } else {
+                    let sid = s.id;
+                    let data = data.to_vec();
+                    super::shell::on_main(move || layers::operate(sid, id, op, arg, data));
+                }
+                true
+            }
+            HalCmd::NativeLayerDestroy { id } => {
+                let Some(sm) = self.sessions.get_mut(&s.id) else { return false; };
+                if sm.native_layers.remove(&id).is_none() { return false; }
+                if sm.native_sources.remove(&id).is_some() { lock(&sm.camera()).native_source(id, None); }
+                let sid = s.id;
+                super::shell::on_main(move || layers::destroy(sid, id));
+                s.events.native_layer_state(id, layer_state::CLOSED, 0, 0, b"");
                 true
             }
             HalCmd::VideoInput { consumers, inputs } => {
@@ -343,11 +380,29 @@ impl Media {
         }
     }
 
+    /// Copies packet-owned placement and input data before submit returns. Presentation owns
+    /// these references until its transaction (or until a newer frame replaces it).
+    pub fn native_frame(&self, s: &Session, window: Id, dpi: f32, records: &[Layer], view: &CmdView) -> layers::Frame {
+        let mut frame = layers::Frame::new(s.id, window, dpi);
+        let Some(sm) = self.sessions.get(&s.id) else { return frame; };
+        frame.placements = records.iter().filter(|g| g.kind == Layer::NATIVE && sm.native_layers.contains_key(&g.native)).map(|geometry| {
+            let mut session = 0;
+            if let (Some(&(input, format)), Some(camera)) = (sm.native_sources.get(&geometry.native), &sm.camera) {
+                if let Some(found) = lock(camera).session_for(input, format) {
+                    unsafe { let _: ObjcId = msg_send![found, retain]; }
+                    session = found as usize;
+                }
+            }
+            layers::Placement { geometry: *geometry, session, occluders: crate::buffers::read_rects(view.arena, geometry.occluders).collect() }
+        }).collect();
+        frame
+    }
+
     fn video_prepare(&mut self, sink: &mut dyn Sink, s: &mut Session, tex: Id, mode: u16, video: u64, planes: [Id; 3], src: &[u8]) {
         let sm = self.sessions.entry(s.id).or_insert_with(|| SessionMedia::new(s.id));
         if mode & video_mode::CAMERA != 0 {
             // a camera preview: the camera runs for the preview only (no frames to the app); the
-            // native view comes with the `ViewOp`s
+            // native host comes with the native-layer frame records
             let ids = read_u64s(src);
             let (Some(&input), Some(&format)) = (ids.first(), ids.get(1)) else {
                 s.bad();
@@ -400,9 +455,6 @@ impl Media {
             if let Some(camera) = &sm.camera {
                 lock(camera).use_video_input(&[], 0);
             }
-            let (sid, window) = (s.id, Id::NONE);
-            let cmd = views::ViewCmd { sid, window, op: view_kind::CAMERA | view_op::CLOSE, view: video, area: [0.0; 4], extra: 0, data: Vec::new(), session: 0 };
-            super::shell::on_main(move || views::apply(cmd));
             s.events.video_status(video, video_status::RELEASED, b"");
             return;
         }
@@ -448,6 +500,15 @@ impl Media {
             }
         }
         if sm.system.take() {
+            let realized = std::mem::take(&mut *lock(&sm.native_realized));
+            for (id, supported) in realized {
+                if !sm.native_layers.contains_key(&id) { continue; }
+                if !supported {
+                    sm.native_layers.remove(&id);
+                    if sm.native_sources.remove(&id).is_some() { lock(&sm.camera()).native_source(id, None); }
+                }
+                s.events.native_layer_state(id, layer_state::REALIZED, if supported { layer_mode::COMPOSITED } else { layer_mode::UNSUPPORTED }, 0, b"");
+            }
             for (req, kind, status) in std::mem::take(&mut *lock(&sm.permissions)) {
                 s.events.permission(req, kind, status);
             }
@@ -551,7 +612,7 @@ impl Media {
             }
             // the session's native views leave its windows
             let sid_closing = sid;
-            super::shell::on_main(move || views::close_session(sid_closing));
+            super::shell::on_main(move || layers::close_session(sid_closing));
             // the entries go first: a block of the realtime thread that is running finishes, no
             // later one calls into the session (which is gone)
             if let Some(audio) = sm.audio.take() {

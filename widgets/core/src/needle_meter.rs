@@ -326,6 +326,20 @@ impl NeedleMeter {
 }
 
 impl Widget for NeedleMeter {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Meter;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value =
+            (|| -> Option<String> { Some(format!("{:.2}", self.value())) })().unwrap_or_default();
+        node.range = Some(a11y_tree::RangeValue {
+            min: 0.0,
+            max: 1.0,
+            now: self.value(),
+            step: 0.0,
+        });
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         // A script can write any number here; one that is no number is 0,
         // or it would never compare equal to itself and redraw for ever.
@@ -392,9 +406,7 @@ impl Widget for NeedleMeter {
         self.disabled
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format!("{:.2}", self.value()))
-    }
+
 }
 
 impl NeedleMeterRef {

@@ -173,6 +173,42 @@ impl Wire for u32 {
     }
 }
 
+impl Wire for [f32; 4] {
+    const SIZE: usize = 16;
+    fn write(&self, out: &mut Vec<u8>) {
+        for v in self { w32(out, v.to_bits()); }
+    }
+    fn read(b: &[u8]) -> Self {
+        std::array::from_fn(|i| f32::from_bits(r32(b, i * 4)))
+    }
+}
+
+impl Wire for Layer {
+    const SIZE: usize = 148;
+    fn write(&self, out: &mut Vec<u8>) {
+        for v in [self.kind, self.draws.off, self.draws.len, self.native.index, self.native.gen] {
+            w32(out, v);
+        }
+        for v in self.rect.iter().chain(&self.clip).chain(&self.radius).chain(&self.transform) {
+            w32(out, v.to_bits());
+        }
+        w32(out, self.opacity.to_bits());
+        for v in [self.flags, self.occluders.off, self.occluders.len] { w32(out, v); }
+    }
+    fn read(b: &[u8]) -> Self {
+        let floats = |at| std::array::from_fn(|i| f32::from_bits(r32(b, at + i * 4)));
+        Self {
+            kind: r32(b, 0),
+            draws: Range { off: r32(b, 4), len: r32(b, 8) },
+            native: Id::new(r32(b, 12), r32(b, 16)),
+            rect: floats(20), clip: floats(36), radius: floats(52),
+            transform: std::array::from_fn(|i| f32::from_bits(r32(b, 68 + i * 4))),
+            opacity: f32::from_bits(r32(b, 132)), flags: r32(b, 136),
+            occluders: Range { off: r32(b, 140), len: r32(b, 144) },
+        }
+    }
+}
+
 impl Wire for PipelineDesc {
     const SIZE: usize = 72;
     fn write(&self, out: &mut Vec<u8>) {
@@ -230,6 +266,13 @@ pub fn read_strs(bytes: &[u8], count: u32) -> Vec<String> {
 pub fn read_pairs(arena: &[u8], r: Range) -> impl Iterator<Item = [u32; 2]> + '_ {
     let (a, b) = (r.off as usize * 8, (r.off as usize).saturating_add(r.len as usize).saturating_mul(8));
     arena.get(a..b).unwrap_or(&[]).chunks_exact(8).map(<[u32; 2]>::read)
+}
+
+/// Native-layer occluders: an element range of 16-byte x, y, width, height rectangles.
+pub fn read_rects(arena: &[u8], r: Range) -> impl Iterator<Item = [f32; 4]> + '_ {
+    let a = (r.off as usize).saturating_mul(16);
+    let b = (r.off as usize).saturating_add(r.len as usize).saturating_mul(16);
+    arena.get(a..b).unwrap_or(&[]).chunks_exact(16).map(<[f32; 4]>::read)
 }
 
 /// The ids an element range of the arena names (see [`CmdWriter::put_ids`]); a range that leaves
@@ -396,6 +439,37 @@ impl<'a> PipelineBlob<'a> {
 
 // ------------------------------------------------------------------ CmdWriter
 
+fn intersect_rect(a: [f32; 4], b: [f32; 4]) -> Option<[f32; 4]> {
+    if !a.iter().chain(&b).all(|v| v.is_finite()) { return None; }
+    let x0 = a[0].max(b[0]);
+    let y0 = a[1].max(b[1]);
+    let x1 = (a[0] + a[2]).min(b[0] + b[2]);
+    let y1 = (a[1] + a[3]).min(b[1] + b[3]);
+    (x1 > x0 && y1 > y0).then_some([x0, y0, x1 - x0, y1 - y0])
+}
+
+fn union_rect(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let x = a[0].min(b[0]);
+    let y = a[1].min(b[1]);
+    [x, y, (a[0] + a[2]).max(b[0] + b[2]) - x, (a[1] + a[3]).max(b[1] + b[3]) - y]
+}
+
+fn merge_closest(rects: &mut [[f32; 4]; 9]) {
+    let mut best = (f64::INFINITY, f64::INFINITY, 0, 1);
+    for i in 0..rects.len() {
+        for j in i + 1..rects.len() {
+            let (a, b) = (rects[i], rects[j]);
+            let dx = (a[0] as f64 - b[0] as f64 - b[2] as f64).max(b[0] as f64 - a[0] as f64 - a[2] as f64).max(0.0);
+            let dy = (a[1] as f64 - b[1] as f64 - b[3] as f64).max(b[1] as f64 - a[1] as f64 - a[3] as f64).max(0.0);
+            let union = union_rect(a, b);
+            let score = (dx * dx + dy * dy, union[2] as f64 * union[3] as f64, i, j);
+            if score < best { best = score; }
+        }
+    }
+    rects[best.2] = union_rect(rects[best.2], rects[best.3]);
+    rects[best.3] = rects[8];
+}
+
 /// Cx's builder of one loop turn's CmdBuf. Every vector keeps its capacity across [`clear`], so a
 /// steady-state frame allocates nothing.
 ///
@@ -408,6 +482,11 @@ pub struct CmdWriter {
     frames: Vec<FramePacket>,
     passes: Vec<Pass>,
     draws: Vec<Draw>,
+    layers: Vec<Layer>,
+    // Optional precise input bounds, only for draws following a native slot. CPU-side
+    // builder scratch: the wire contract still carries the resulting Layer.occluders.
+    input_draws: Vec<(usize, Range)>,
+    input_rects: Vec<[f32; 4]>,
     open_frame: Option<OpenFrame>,
 }
 
@@ -416,7 +495,10 @@ struct OpenFrame {
     meta: FrameMeta,
     pass0: u32,
     draw0: u32,
+    layer0: u32,
     pass_draw0: Option<u32>,
+    split_pass: Option<usize>,
+    segment_draw0: u32,
 }
 
 impl CmdWriter {
@@ -483,6 +565,14 @@ impl CmdWriter {
         Range { off, len: ids.len() as u32 }
     }
 
+    /// Copies x, y, width, height rectangles and returns their ELEMENT range in the arena.
+    pub fn put_rects(&mut self, rects: &[[f32; 4]]) -> Range {
+        while self.arena.len() % 16 != 0 { self.arena.push(0); }
+        let off = (self.arena.len() / 16) as u32;
+        for rect in rects { rect.write(&mut self.arena); }
+        Range { off, len: rects.len() as u32 }
+    }
+
     /// Copies strings (u32 length + bytes each) into the arena; read back with [`read_strs`].
     pub fn put_strs(&mut self, strs: &[&str]) -> Range {
         let off = self.arena.len();
@@ -522,7 +612,10 @@ impl CmdWriter {
     /// Starts a FramePacket; passes and draws follow, then [`CmdWriter::frame_end`].
     pub fn frame_begin(&mut self, frame: u64, meta: FrameMeta) {
         assert!(self.open_frame.is_none(), "CmdWriter: frame_begin inside a frame");
-        self.open_frame = Some(OpenFrame { frame, meta, pass0: self.passes.len() as u32, draw0: self.draws.len() as u32, pass_draw0: None });
+        self.open_frame = Some(OpenFrame {
+            frame, meta, pass0: self.passes.len() as u32, draw0: self.draws.len() as u32,
+            layer0: self.layers.len() as u32, pass_draw0: None, split_pass: None, segment_draw0: 0,
+        });
     }
 
     /// Stamps the open frame's `build_end_ns` (the builder knows it only after the walk).
@@ -535,6 +628,9 @@ impl CmdWriter {
     fn close_pass(&mut self) {
         let f = self.open_frame.as_mut().expect("CmdWriter: no open frame");
         if let Some(d0) = f.pass_draw0.take() {
+            if f.split_pass == Some(self.passes.len() - 1) {
+                self.layers.push(Layer { draws: Range { off: f.segment_draw0, len: self.draws.len() as u32 - f.segment_draw0 }, ..Default::default() });
+            }
             let last = self.passes.last_mut().expect("open pass");
             last.draws = Range { off: d0, len: self.draws.len() as u32 - d0 };
         }
@@ -553,16 +649,98 @@ impl CmdWriter {
         self.draws.push(draw);
     }
 
+    pub fn pass_has_native_layers(&self) -> bool {
+        self.open_frame.as_ref().is_some_and(|f| f.pass_draw0.is_some() && f.split_pass == Some(self.passes.len() - 1))
+    }
+
+    /// Preserve the holes between a batched draw's instances for native hit testing,
+    /// without splitting its GPU draw call or changing the surface's union bounds.
+    pub fn draw_with_input_rects(&mut self, draw: Draw, rects: impl Iterator<Item = [f32; 4]>) {
+        let off = self.input_rects.len() as u32;
+        self.input_rects.extend(rects);
+        self.input_draws.push((self.draws.len(), Range { off, len: self.input_rects.len() as u32 - off }));
+        self.draw(draw);
+    }
+
+    /// Splits the open window pass at this draw position. A frame may split only one pass;
+    /// attempts to split a second pass are ignored (and diagnosed in debug builds).
+    pub fn pass_native_layer(&mut self, native: Id, geom: NativeLayerGeom) {
+        let f = self.open_frame.as_mut().expect("CmdWriter: native layer outside a frame");
+        let d0 = f.pass_draw0.expect("CmdWriter: native layer outside a pass");
+        let pass = self.passes.len() - 1;
+        if f.split_pass.is_some_and(|previous| previous != pass) {
+            debug_assert!(false, "CmdWriter: native layers in a second pass");
+            return;
+        }
+        if f.split_pass.is_none() {
+            f.split_pass = Some(pass);
+            f.segment_draw0 = d0;
+        }
+        let end = self.draws.len() as u32;
+        self.layers.push(Layer { draws: Range { off: f.segment_draw0, len: end - f.segment_draw0 }, ..Default::default() });
+        self.layers.push(Layer {
+            kind: Layer::NATIVE, native, rect: geom.rect, clip: geom.clip, radius: geom.radius,
+            transform: geom.transform, opacity: geom.opacity, flags: geom.flags,
+            ..Default::default()
+        });
+        f.segment_draw0 = end;
+    }
+
+    fn layer_occluders(&mut self, start: usize) {
+        for index in start..self.layers.len() {
+            if self.layers[index].kind != Layer::NATIVE { continue; }
+            let clip = self.layers[index].clip;
+            // Streaming closest-pair union keeps the temporary set bounded as well as the
+            // wire payload: O(input rects * 8^2) per native layer; the reduction allocates nothing.
+            let mut rects = [[0.0; 4]; 9];
+            let mut count = 0;
+            for later in index + 1..self.layers.len() {
+                let layer = &self.layers[later];
+                if layer.kind != Layer::DRAWS { continue; }
+                let a = layer.draws.off as usize;
+                let mut precise = self.input_draws.partition_point(|(index, _)| *index < a);
+                for (draw_index, draw) in self.draws[a..a + layer.draws.len as usize].iter().enumerate() {
+                    if draw.flags & Draw::INPUT_TRANSPARENT != 0 { continue; }
+                    while self.input_draws.get(precise).is_some_and(|(index, _)| *index < a + draw_index) { precise += 1; }
+                    let bounds = match self.input_draws.get(precise).filter(|(index, _)| *index == a + draw_index) {
+                        Some((_, range)) => &self.input_rects[range.off as usize..(range.off + range.len) as usize],
+                        None => std::slice::from_ref(&draw.bounds),
+                    };
+                    for &bound in bounds {
+                        let Some(rect) = intersect_rect(bound, clip) else { continue; };
+                        let contains = |a: [f32; 4], b: [f32; 4]| a[0] <= b[0] && a[1] <= b[1]
+                            && a[0] + a[2] >= b[0] + b[2] && a[1] + a[3] >= b[1] + b[3];
+                        if rects[..count].iter().any(|&r| contains(r, rect)) { continue; }
+                        let mut keep = 0;
+                        for i in 0..count {
+                            if !contains(rect, rects[i]) { rects[keep] = rects[i]; keep += 1; }
+                        }
+                        count = keep;
+                        rects[count] = rect;
+                        count += 1;
+                        if count == rects.len() {
+                            merge_closest(&mut rects);
+                            count -= 1;
+                        }
+                    }
+                }
+            }
+            self.layers[index].occluders = self.put_rects(&rects[..count]);
+        }
+    }
+
     /// Closes the packet and writes the `Frame` command that renders it to `target`
     /// (`target::WINDOW` / `target::TEXTURE`).
     pub fn frame_end(&mut self, target_id: Id, target_kind: u32) {
         self.close_pass();
         let f = self.open_frame.take().expect("CmdWriter: frame_end without frame_begin");
+        self.layer_occluders(f.layer0 as usize);
         let packet = self.frames.len() as u32;
         self.frames.push(FramePacket {
             frame: f.frame,
             passes: Range { off: f.pass0, len: self.passes.len() as u32 - f.pass0 },
             draws: Range { off: f.draw0, len: self.draws.len() as u32 - f.draw0 },
+            layers: Range { off: f.layer0, len: self.layers.len() as u32 - f.layer0 },
             meta: f.meta,
         });
         self.push(Cmd::frame(target_id, target_kind, packet));
@@ -579,6 +757,7 @@ impl CmdWriter {
             frames: Slice::of(&self.frames),
             passes: Slice::of(&self.passes),
             draws: Slice::of(&self.draws),
+            layers: Slice::of(&self.layers),
         }
     }
 
@@ -589,13 +768,16 @@ impl CmdWriter {
         self.frames.clear();
         self.passes.clear();
         self.draws.clear();
+        self.layers.clear();
+        self.input_draws.clear();
+        self.input_rects.clear();
         self.open_frame = None;
     }
 
-    /// Capacities (cmds, arena bytes, frames, passes, draws): tests use them to show a steady
+    /// Capacities (cmds, arena bytes, frames, passes, draws, layers): tests show a steady
     /// state does not grow.
-    pub fn capacities(&self) -> [usize; 5] {
-        [self.cmds.capacity(), self.arena.capacity(), self.frames.capacity(), self.passes.capacity(), self.draws.capacity()]
+    pub fn capacities(&self) -> [usize; 6] {
+        [self.cmds.capacity(), self.arena.capacity(), self.frames.capacity(), self.passes.capacity(), self.draws.capacity(), self.layers.capacity()]
     }
 }
 
@@ -615,6 +797,7 @@ pub struct CmdView<'a> {
     pub frames: &'a [FramePacket],
     pub passes: &'a [Pass],
     pub draws: &'a [Draw],
+    pub layers: &'a [Layer],
 }
 
 impl CmdBuf {
@@ -631,6 +814,7 @@ impl CmdBuf {
             frames: self.frames.as_slice()?,
             passes: self.passes.as_slice()?,
             draws: self.draws.as_slice()?,
+            layers: self.layers.as_slice()?,
         })
     }
 }

@@ -210,44 +210,6 @@ fn permission_of(code: u32) -> Permission {
 }
 
 impl Cx {
-    /// The window an area is in and its rects there: unclipped and clipped, in window points
-    /// with y up from the window's bottom (what AppKit places a view by).
-    pub(super) fn hal_view_rects(&self, area: &crate::area::Area) -> Option<(crate::window::WindowId, crate::makepad_math::Rect, crate::makepad_math::Rect)> {
-        let draw_list_id = area.draw_list_id()?;
-        let draw_pass_id = self.draw_lists[draw_list_id].draw_pass_id?;
-        let window_id = self.get_pass_window_id(draw_pass_id)?;
-        if !self.hal.window_ready(window_id) {
-            return None;
-        }
-        let win_h = self.windows[window_id].window_geom.inner_size.y;
-        let flip = |mut r: crate::makepad_math::Rect| {
-            r.pos.y = win_h - r.pos.y - r.size.y;
-            r
-        };
-        Some((window_id, flip(area.rect(self)), flip(area.clipped_rect(self))))
-    }
-
-    /// The system browser ops.
-    pub(crate) fn hal_system_browser(&mut self, op: crate::cx_api::CxOsOp) {
-        use crate::cx_api::CxOsOp;
-        use media::{view_kind::BROWSER, view_op};
-        match op {
-            CxOsOp::SpawnSystemBrowser { browser_id, url } => self.hal.frames.w.view_op(Id::NONE, BROWSER | view_op::CREATE, browser_id.0, [0.0; 4], 0, url.as_bytes()),
-            CxOsOp::UpdateSystemBrowser { browser_id, area, visible } => {
-                let Some((window_id, unclipped, clipped)) = self.hal_view_rects(&area) else { return };
-                let rect = |r: crate::makepad_math::Rect| [r.pos.x as f32, r.pos.y as f32, r.size.x as f32, r.size.y as f32];
-                let clip: Vec<u8> = rect(clipped).iter().flat_map(|v| v.to_le_bytes()).collect();
-                let window = crate::event::hal_intake::hal_window_id(window_id);
-                self.hal.frames.w.view_op(window, BROWSER | view_op::UPDATE, browser_id.0, rect(unclipped), visible as u32, &clip);
-            }
-            CxOsOp::DetachSystemBrowser { browser_id } => self.hal.frames.w.view_op(Id::NONE, BROWSER | view_op::DETACH, browser_id.0, [0.0; 4], 0, &[]),
-            CxOsOp::SetSystemBrowserUrl { browser_id, url, replace } => self.hal.frames.w.view_op(Id::NONE, BROWSER | view_op::SET_URL, browser_id.0, [0.0; 4], replace as u32, url.as_bytes()),
-            CxOsOp::SystemBrowserHistoryGo { browser_id, delta } => self.hal.frames.w.view_op(Id::NONE, BROWSER | view_op::HISTORY, browser_id.0, [0.0; 4], delta as u32, &[]),
-            CxOsOp::CloseSystemBrowser { browser_id } => self.hal.frames.w.view_op(Id::NONE, BROWSER | view_op::CLOSE, browser_id.0, [0.0; 4], 0, &[]),
-            _ => {}
-        }
-    }
-
     /// A permission check or request: the status arrives as `Event::PermissionResult`.
     pub(crate) fn hal_permission(&mut self, op: u32, permission: Permission, request_id: i32) {
         self.hal.frames.w.permission(op, permission_code(permission), request_id as u32);

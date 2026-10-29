@@ -66,7 +66,7 @@ pub(crate) fn export_fence(fd: &OwnedFd) -> Option<OwnedFd> {
     Some(unsafe { OwnedFd::from_raw_fd(a.fd) })
 }
 /// Whether a sync_file has signalled.
-pub(crate) fn fence_ready(fd: &OwnedFd) -> bool {
+pub fn fence_ready(fd: &OwnedFd) -> bool {
     let mut p = sys::pollfd { fd: fd.as_raw_fd(), events: sys::POLLIN, revents: 0 };
     unsafe { sys::poll(&mut p, 1, 0) != 0 }
 }

@@ -1065,6 +1065,15 @@ impl Carousel {
 }
 
 impl Widget for Carousel {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value =
+            (|| -> Option<String> { Some(format!("{} of {}", self.page() + 1, self.stops())) })()
+                .unwrap_or_default();
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
     }
@@ -1416,11 +1425,7 @@ impl Widget for Carousel {
         self.items.get(self.page()).map(|item| item.text.clone()).unwrap_or_default()
     }
 
-    /// Where the strip is resting, so a test can ask rather than compare
-    /// two pictures of a moving thing.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format!("{} of {}", self.page() + 1, self.stops()))
-    }
+
 }
 
 impl CarouselRef {

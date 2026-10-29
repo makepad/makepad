@@ -2059,6 +2059,12 @@ impl WaveformRef {
 // ---- the Widget impl ------------------------------------------------------
 
 impl Widget for Waveform {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     /// The catalogue's Disabled control calls this and returns before the
     /// branch that would log an error (app.rs:219-230), and the trait
     /// defaults do nothing at all (widget.rs:338) — so without this pair the

@@ -132,7 +132,9 @@ fn input_payloads_go_to_the_overlay_but_geometry_and_frame_beats_reach_the_app()
     assert_eq!(received.0.time_ns, 1234);
     assert_eq!(received.1, payload);
     let app = take(&hal, sid);
-    assert_eq!(app.iter().map(|(e, _)| e.tag).collect::<Vec<_>>(), [tag::FrameReady, tag::Geom]);
+    // the composed panel's layer going on asks the app for a complete frame under it (Redraw,
+    // exec.rs sync_layer); then the frame beat and the geometry
+    assert_eq!(app.iter().map(|(e, _)| e.tag).collect::<Vec<_>>(), [tag::Redraw, tag::FrameReady, tag::Geom]);
     assert!(app.iter().all(|(event, _)| event.window == APP_WINDOW));
     overlay(&hal, HOST, false);
     hal.with_world(|w| w.window_event(sid, text, payload));

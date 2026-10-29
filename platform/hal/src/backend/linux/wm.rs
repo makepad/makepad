@@ -8,6 +8,9 @@
 //! shell events like any other shell's. A process that hosts other sessions (`makepad run`: the
 //! boot document and the app domains share one window) is one WM tile; lending is unchanged.
 
+pub(crate) mod a11y;
+pub mod native;
+
 use super::{io, lock, log_enabled, Key, Op, OsCmd, Protocol, Shared, Shell};
 use crate::backend::vulkan::share::import_hosted;
 use crate::backend::vulkan::surface::{FramePresenter, Offscreen, SurfaceState, VkSurfaceSource};
@@ -178,9 +181,10 @@ impl FramePresenter for Presenter {
                 sequence: image.hosted_sequence()? })
         });
         if log_enabled() { eprintln!("[hal-wm] frame done {:?}: {draw:?}", (session, window)); }
+        let shown = draw.is_some();
         lock(&self.0.finished).push(((session, window), draw));
         self.0.shared.signal();
-        presented(crate::clock_ns());
+        if shown { presented(crate::clock_ns()); }
     }
     fn scheduled(&self, session: u32, window: Id) {
         *lock(&self.0.in_flight).entry((session, window)).or_default() += 1;
@@ -313,7 +317,7 @@ struct Win {
     /// Frames already on the GPU when that FrameReady went out: their completions come back
     /// first and are not its frame (they must not end the Tick before its frame is drawn).
     ahead: u32,
-    geom: Option<([f64; 4], f64)>,
+    geom: Option<([f64; 4], f64, Option<(f64, f64)>)>,
     /// A tray dropdown (`window_kind::DROPDOWN`): the WM shows it as a flyout under the tray's
     /// bar item, never as a tile.
     dropdown: bool,
@@ -329,7 +333,7 @@ pub(super) struct App {
     windows: HashMap<Key, Win>,
     /// Geometry the WM sent for a window this process has not made yet (it sizes the tile's
     /// first window at adoption): applied when the window is made.
-    early: HashMap<usize, ([f64; 4], f64)>,
+    early: HashMap<usize, ([f64; 4], f64, Option<(f64, f64)>)>,
     next_window: usize,
     /// A Tick is being answered: TickDone goes out with its frame (or at once without one).
     ticking: bool,
@@ -379,6 +383,7 @@ impl App {
             finished: Default::default(), in_flight: Default::default(), device: Default::default() });
         STATE.set(state.clone()).map_err(|_| "WM-hosted shell already connected")?;
         let hub = Hub::connect(admission.port, admission.client, &name, state.clone())?;
+        a11y::start(hub.clone());
         // Under the WM a makepad window draws its own caption (the WM draws title bars only for
         // foreign Wayland windows): the app's windows get client-side chrome as on a Wayland
         // compositor without server decorations. Its caption's drag query and its window
@@ -438,7 +443,7 @@ impl App {
         match images {
             Ok(images) => {
                 if log_enabled() { eprintln!("[hal-wm] window {} has {} shared images of {}x{}", swapchain.window_id, images.len(), swapchain.alloc_width, swapchain.alloc_height); }
-                let pixels = self.windows.get(&key).and_then(|w| w.geom).map_or([swapchain.alloc_width, swapchain.alloc_height], |(g, dpi)| pixels(g, dpi));
+                let pixels = self.windows.get(&key).and_then(|w| w.geom).map_or([swapchain.alloc_width, swapchain.alloc_height], |(g, dpi, _)| pixels(g, dpi));
                 lock(&self.state.rings).insert(key, Ring { window_id: swapchain.window_id, alloc: [swapchain.alloc_width, swapchain.alloc_height],
                     pixels, images, next: 0, starved: None });
                 // A frame asked for before there was anywhere to draw it.
@@ -452,11 +457,18 @@ impl App {
 
     fn push_geom(&self, key: Key) {
         let Some(w) = self.windows.get(&key) else { return };
-        let Some((g, dpi)) = w.geom else { return };
+        let Some((g, dpi, origin)) = w.geom else { return };
+        crate::a11y::set_screen_origin(crate::a11y::window_key(w.recipient.0, w.recipient.1.index), origin.map(|(x,y)| (x as f32,y as f32)));
         self.state.shared.push(w.recipient, |q, id| {
             q.display(id, dpi as f32, 60.0);
             q.geom(id, g[0], g[1], g[2], g[3], dpi as f32, window_state::RESTORE);
         });
+    }
+
+    /// The window the WM shows as this process's tile: its first (a tray dropdown is a flyout,
+    /// never the tile).
+    fn tile_window(&self) -> Option<Key> {
+        self.windows.iter().filter(|(_, w)| !w.dropdown).min_by_key(|(_, w)| w.window_id).map(|(k, _)| *k)
     }
 
     /// The first window: input without a window id lands there.
@@ -465,21 +477,27 @@ impl App {
     }
 
     fn message(&mut self, msg: StudioToApp) {
+        if a11y::request(&msg) { return; }
         if log_enabled() && !matches!(msg, StudioToApp::MouseMove(_)) {
             eprintln!("[hal-wm] host: {}", format!("{msg:?}").chars().take(160).collect::<String>());
         }
         match msg {
+            StudioToApp::NativeApp(event) => self.native_message(event),
             StudioToApp::Swapchain(swapchain) => self.install(swapchain),
-            StudioToApp::WindowGeomChange { window_id, dpi_factor, left, top, width, height } => {
+            StudioToApp::WindowGeomChange { window_id, dpi_factor, left, top, width, height, screen_origin } => {
                 if ![left, top, width, height, dpi_factor].iter().all(|v| v.is_finite()) || dpi_factor <= 0.0 || width < 0.0 || height < 0.0 { return; }
                 let geom = [left, top, width, height];
                 let Some(key) = self.key_of(window_id) else {
-                    self.early.insert(window_id, (geom, dpi_factor));
+                    self.early.insert(window_id, (geom, dpi_factor, screen_origin));
                     return;
                 };
-                if let Some(w) = self.windows.get_mut(&key) { w.geom = Some((geom, dpi_factor)); }
+                let resized = self.windows.get(&key).and_then(|w| w.geom).is_none_or(|(old, dpi, _)| old != geom || dpi != dpi_factor);
+                if let Some(w) = self.windows.get_mut(&key) {
+                    w.geom = Some((geom, dpi_factor, screen_origin));
+                    crate::a11y::set_screen_origin(crate::a11y::window_key(w.recipient.0, w.recipient.1.index), screen_origin.map(|(x,y)| (x as f32,y as f32)));
+                }
                 if let Some(ring) = lock(&self.state.rings).get_mut(&key) { ring.pixels = pixels(geom, dpi_factor); }
-                self.push_geom(key);
+                if resized { self.push_geom(key); }
             }
             StudioToApp::Tick => {
                 self.asked_frame = false;
@@ -528,7 +546,11 @@ impl App {
             }
             // The WM closed the tile: each window is asked to close, as a window manager's
             // close button asks (the app may save first; `makepad run` ends the run).
+            // With no window left to ask (the app closed its own), the process is asked to quit.
             StudioToApp::Kill => {
+                if self.windows.is_empty() {
+                    self.quit();
+                }
                 for key in self.windows.keys() {
                     self.state.shared.push(*key, |q, id| q.close_requested(id));
                 }
@@ -725,6 +747,7 @@ impl App {
     /// keeps running): it lets go of the old WM's shared images and waits for the next WM at
     /// the same socket. Nothing draws meanwhile; timers, signals and the app's work go on.
     fn detach(&mut self) {
+        a11y::detached();
         eprintln!("[hal-wm] the makepad WM went away; this process keeps its tray and waits for the next WM");
         self.detached_at = Some(std::time::Instant::now());
         lock(&self.state.rings).clear();
@@ -784,6 +807,7 @@ impl App {
             }
         };
         eprintln!("[hal-wm] the makepad WM at {} hosts this process again as client {} ({name})", path.display(), admission.client);
+        a11y::start(hub.clone());
         self.hub = hub;
         self.aux_path = hosted_ipc::aux_path(admission.port, &admission.client.to_string());
         self.detached_at = None;
@@ -818,6 +842,7 @@ impl Shell for App {
                     let dropdown = kind & 0xff == window_kind::DROPDOWN;
                     self.windows.insert((sid, id), Win { window_id, recipient: (sid, id), requested: false, awaiting: false, ahead: 0, geom, dropdown });
                     self.hub.send(vec![AppToStudio::CreateWindow { window_id, kind_id: if dropdown { window_kind::DROPDOWN as usize } else { 0 } }]);
+                    a11y::window(window_id, Some((sid, id)));
                     let focused = self.wm_focus.get(&window_id).copied().unwrap_or(true);
                     self.state.shared.push((sid, id), |q, id| q.focus(id, focused));
                     self.replay_wm_state((sid, id));
@@ -825,11 +850,19 @@ impl Shell for App {
                 }
                 OsCmd::WindowClose { id } => {
                     let Some(key) = self.resolve((sid, id)) else { return };
+                    let tile = self.tile_window() == Some(key);
                     if let Some(w) = self.windows.remove(&key) {
+                        a11y::window(w.window_id, None);
                         lock(&self.state.rings).remove(&key);
                         lock(&self.state.in_flight).remove(&key);
                         self.state.shared.push(w.recipient, |q, id| q.closed(id));
                         self.finish_tick();
+                        // The app closed the window the WM shows as its tile (its caption's close
+                        // said yes): the WM closes the tile, as a native window's close takes the
+                        // window off the screen. It asks the process to end with it (`Kill`).
+                        if tile {
+                            self.window_op(window_op::CLOSE);
+                        }
                     }
                 }
                 // The app's caption buttons: the WM minimises, maximises or closes the tile.
@@ -967,6 +1000,7 @@ impl Shell for App {
                 let key = (session::HOST, host);
                 if let Some(w) = self.windows.get_mut(&key) {
                     w.recipient = (session, alias);
+                    a11y::window(w.window_id, Some(w.recipient));
                     w.awaiting = false;
                     let focused = self.wm_focus.get(&w.window_id).copied().unwrap_or(true);
                     self.push_geom(key);
@@ -979,6 +1013,7 @@ impl Shell for App {
         }
     }
     fn dispatch(&mut self) -> Result<(), String> {
+        self.native_outgoing();
         if self.stopping { return Ok(()); }
         // The WM shares a swapchain only once this end of the descriptor channel is connected;
         // its listener exists from the adoption on.
@@ -1023,6 +1058,7 @@ impl Shell for App {
     }
     fn shutdown(&mut self) {
         self.stopping = true;
+        a11y::stop();
         self.hub.close();
     }
     fn empty(&self) -> bool {
@@ -1326,7 +1362,7 @@ mod tests {
 
     /// `makepad run` under the WM draws its own caption: the WM's drag query reaches the app's
     /// window (lent to the app's domain), the app's answer goes back under the WM's id, and the
-    /// caption buttons of the lent window become the WM's window ops.
+    /// caption buttons of the lent window become the WM's window ops; the app closing that window closes the tile.
     #[test]
     fn the_caption_of_a_lent_window_answers_the_wm_and_the_wm_appearance_reaches_host_dark() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1337,7 +1373,7 @@ mod tests {
             let mut byte = [0u8];
             while !request.ends_with(b"\r\n\r\n") { stream.read_exact(&mut byte).unwrap(); request.push(byte[0]); }
             stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").unwrap();
-            (0..4).map(|_| AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0).collect::<Vec<_>>()
+            (0..5).map(|_| AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0).collect::<Vec<_>>()
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
@@ -1369,6 +1405,13 @@ mod tests {
         assert!(lock(&app.state.shared.inbox).contains_key(&session::HOST), "the load screen is woken");
         app.message(StudioToApp::Custom(HostedAppearance { dark: false }.to_json()));
         assert_eq!(super::super::host_dark(), Some(false));
+        // the app's caption close said yes and the app closed its window: the WM closes the tile,
+        // and its Kill then finds no window to ask, so the process is asked to quit
+        app.command(Op::Cmd(lent.0, OsCmd::WindowClose { id: lent.1 }));
+        assert!(app.windows.is_empty());
+        assert!(!app.quit_sent);
+        app.message(StudioToApp::Kill);
+        assert!(app.quit_sent, "a Kill with no window left quits the process");
         lock(&app.state.shared.inbox).remove(&session::HOST);
         lock(&app.state.shared.inbox).remove(&lent.0);
         let custom = |batch: &Vec<AppToStudio>| match batch.as_slice() {
@@ -1380,6 +1423,7 @@ mod tests {
         assert_eq!(HostedDragAnswer::parse(&sent[1]), Some(HostedDragAnswer { id: 12, response: drag_answer::CLIENT, double_click: drag_double::MAXIMISE }));
         assert_eq!(HostedWindowOp::parse(&sent[2]), Some(HostedWindowOp { op: window_op::MAXIMIZE }));
         assert_eq!(HostedWindowOp::parse(&sent[3]), Some(HostedWindowOp { op: window_op::MINIMIZE }));
+        assert_eq!(HostedWindowOp::parse(&sent[4]), Some(HostedWindowOp { op: window_op::CLOSE }));
     }
 
     /// `makepad run` under the WM: the WM's style sheet and its activation of the tile arrive while

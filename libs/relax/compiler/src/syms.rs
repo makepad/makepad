@@ -511,6 +511,13 @@ fn obj_ptrs(u: &Unit, idx: u32) -> Option<(u64, u64, std::sync::Arc<Vec<(u32, Op
             }
         }
         DataKind::Typed(t) => {
+            // The walk reads the program, the type context and layouts: front state, which a
+            // front write changes (adopt_collected_tables frees the type interner's arena chunks
+            // its image now holds) or replaces (the settle rebuild). Optimiser passes ask here
+            // from any compile thread (an O3 worker's simplify): off the owner the walk runs under
+            // a front read -- the one the thread holds, or its own. (Without it an O3 worker read a
+            // freed chunk in Types::flags during a cold run's adopt: SIGSEGV, JITCOLD3.)
+            let _front = (!crate::owner::is_owner() && crate::jit::front_reads_held() == 0).then(|| crate::jit::front_read("ro data walk"));
             let mut words = Vec::new();
             if walk(u, *t, start, 0, &mut words, 0, &mut Vec::new()).is_none() {
                 opaque = true;

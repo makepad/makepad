@@ -234,7 +234,7 @@ fn capture_loop(adapter: IDXGIAdapter1, output: IDXGIOutput, frames: Sender<Fram
                         ctx.CopyResource(s.texture.as_ID3D11Resource(), texture.as_ID3D11Resource());
                         let _ = s.mutex.ReleaseSync(0);
                         ctx.Flush();
-                        let _ = frames.send(Frame { picture: Picture::Shared(s.key), width: s.width, height: s.height, captured_ns: clock_ns(), _hold: Box::new(()) });
+                        let _ = frames.send(Frame { picture: Picture::Shared(makepad_video::SurfaceHandle::new(s.key, makepad_video::SurfaceKind::D3d11Keyed, [s.width, s.height], makepad_video::SurfaceFormat::Bgra8)), width: s.width, height: s.height, captured_ns: clock_ns(), _hold: Box::new(()) });
                     }
                 }
             }

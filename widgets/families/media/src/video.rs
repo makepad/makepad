@@ -1,4 +1,5 @@
 use crate::{
+    image::DrawImage,
     image_cache::ImageCacheImpl,
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -317,7 +318,9 @@ pub struct Video {
     #[live(VideoCameraPreviewMode::Auto)]
     camera_preview_mode: VideoCameraPreviewMode,
     #[rust]
-    native_preview_attached: bool,
+    native_preview: Option<NativeLayer>,
+    #[live]
+    draw_native_preview: DrawImage,
 
     // Playback
     #[live(false)]
@@ -752,6 +755,12 @@ pub enum VideoAction {
 }
 
 impl Widget for Video {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     /// Video plays through the web runtime's media element.
     fn scan(&mut self, _cx: &mut Cx, scan: &ScanEvent, _scope: &mut Scope) {
         scan.need_js_feature("video-playback");
@@ -797,6 +806,12 @@ impl Widget for Video {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         match event {
+            Event::NativeLayer(event)
+                if self.native_preview.as_ref().is_some_and(|layer| layer.id() == event.layer) =>
+            {
+                self.redraw(cx);
+            }
+            Event::Shutdown => self.close_native_camera_preview(cx),
             Event::VideoYuvTexturesReady(event) => {
                 if event.video_id == self.id {
                     self.tex_y = Some(event.tex_y.clone());
@@ -940,10 +955,7 @@ impl Widget for Video {
                     self.playback_state = PlaybackState::Unprepared;
                     self.video_tracks.clear();
                     self.audio_tracks.clear();
-                    if self.native_preview_attached {
-                        cx.detach_camera_native_preview(self.id);
-                        self.native_preview_attached = false;
-                    }
+                    self.close_native_camera_preview(cx);
                     cx.widget_action(uid, VideoAction::PlayerReset);
                 }
             }
@@ -1009,32 +1021,44 @@ impl Video {
             )
     }
 
-    fn sync_native_camera_preview(&mut self, cx: &mut Cx) {
+    fn close_native_camera_preview(&mut self, cx: &mut Cx) {
+        if let Some(layer) = self.native_preview.take() {
+            cx.native_layer(layer.id()).close();
+        }
+    }
+
+    fn sync_native_camera_preview(&mut self, cx: &mut Cx2d) {
         if !self.should_use_native_camera_preview() {
-            if self.native_preview_attached {
-                cx.detach_camera_native_preview(self.id);
-                self.native_preview_attached = false;
-            }
+            self.close_native_camera_preview(cx);
             return;
         }
-
-        let area = self.draw_bg.area();
-        let visible = self.playback_state != PlaybackState::CleaningUp
-            && self.playback_state != PlaybackState::Unprepared;
-
-        if !visible {
-            if self.native_preview_attached {
-                cx.detach_camera_native_preview(self.id);
-                self.native_preview_attached = false;
-            }
+        if matches!(self.playback_state, PlaybackState::CleaningUp | PlaybackState::Unprepared) {
             return;
         }
-
-        if !self.native_preview_attached {
-            cx.attach_camera_native_preview(self.id, area);
-            self.native_preview_attached = true;
+        if self.native_preview.is_none() {
+            let VideoDataSource::Camera { input_id, format_id } = &self.source else {
+                return;
+            };
+            self.native_preview = Some(cx.native_layer_new(NativeContent::CameraPreview {
+                video_id: self.id,
+                input: VideoInputId(*input_id),
+                format: VideoFormatId(*format_id),
+            }));
         }
-        cx.update_camera_native_preview(self.id, area, visible);
+        let rect = self.draw_bg.area().rect(cx);
+        let mut opacity = [1.0];
+        self.draw_bg.draw_vars.get_instance(cx, id!(opacity), &mut opacity);
+        let style = NativeLayerStyle {
+            opacity: opacity[0] as f64,
+            ..NativeLayerStyle::default()
+        };
+        if let NativeLayerMode::Textured(texture) =
+            self.native_preview.as_ref().unwrap().draw(cx, rect, style)
+        {
+            self.draw_native_preview.opacity = opacity[0];
+            self.draw_native_preview.draw_vars.set_texture(0, &texture);
+            self.draw_native_preview.draw_abs(cx, rect);
+        }
     }
 
     fn clear_session_source_registration(&mut self) {
@@ -1251,10 +1275,7 @@ impl Video {
                 self.playback_state = PlaybackState::Unprepared;
                 self.should_prepare_playback = false;
                 self.last_error = Some(event.error.clone());
-                if self.native_preview_attached {
-                    cx.detach_camera_native_preview(self.id);
-                    self.native_preview_attached = false;
-                }
+                self.close_native_camera_preview(cx);
                 self.redraw(cx);
             }
         }
@@ -1330,10 +1351,7 @@ impl Video {
             && self.playback_state != PlaybackState::CleaningUp
         {
             cx.cleanup_video_playback_resources(self.id);
-            if self.native_preview_attached {
-                cx.detach_camera_native_preview(self.id);
-                self.native_preview_attached = false;
-            }
+            self.close_native_camera_preview(cx);
 
             self.playback_state = PlaybackState::CleaningUp;
             self.autoplay = false;
@@ -1363,9 +1381,8 @@ impl Video {
             return;
         }
         self.camera_preview_mode = mode;
-        if self.native_preview_attached && !self.should_use_native_camera_preview() {
-            cx.detach_camera_native_preview(self.id);
-            self.native_preview_attached = false;
+        if !self.should_use_native_camera_preview() {
+            self.close_native_camera_preview(cx);
         }
         self.redraw(cx);
     }

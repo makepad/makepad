@@ -784,6 +784,24 @@ impl EaseCurve {
 }
 
 impl Widget for EaseCurve {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            if self.sampled {
+                return Some(format!("{:?}", self.easing));
+            }
+            let mut s = String::new();
+            write_cubic_bezier(&mut s, self.pts);
+            if matches!(self.easing, Easing::CubicBezier { .. }) {
+                s.push_str(" precise");
+            }
+            Some(s)
+        })()
+        .unwrap_or_default();
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Some(dt) = self.clock.tick(cx, event) {
             // The chain runs only while the dot is on screen: a curve that
@@ -1004,17 +1022,7 @@ impl Widget for EaseCurve {
         DrawStep::done()
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        if self.sampled {
-            return Some(format!("{:?}", self.easing));
-        }
-        let mut s = String::new();
-        write_cubic_bezier(&mut s, self.pts);
-        if matches!(self.easing, Easing::CubicBezier { .. }) {
-            s.push_str(" precise");
-        }
-        Some(s)
-    }
+
 }
 
 impl EaseCurveRef {
@@ -1287,6 +1295,13 @@ impl EaseEditor {
 }
 
 impl Widget for EaseEditor {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> { Some(self.readout.clone()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.dressed {
             self.dress(cx);
@@ -1363,9 +1378,7 @@ impl Widget for EaseEditor {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.readout.clone())
-    }
+
 }
 
 impl EaseEditorRef {

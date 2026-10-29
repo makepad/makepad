@@ -204,6 +204,10 @@ impl Types {
     /// those rows name, and a bucket head past the count is followed down its chain to the first
     /// row below it.
     pub fn collected_writer(&self) -> Option<crate::image::Writer<'_>> {
+        self.collected_writer_with(&|| false)
+    }
+    /// collected_writer, asking `stop` every 64k rows and bucket heads (None: it said yes)
+    pub fn collected_writer_with(&self, stop: &dyn Fn() -> bool) -> Option<crate::image::Writer<'_>> {
         let n = self.len();
         let mut meta = Vec::new();
         let kinds: Vec<RegionKind> = self.regions.kinds.iter().copied().collect();
@@ -215,14 +219,22 @@ impl Types {
             self.i32_, self.i64_, self.u8_, self.u32_, self.u64_, self.usize_, self.isize_,
             self.f32_, self.f64_, self.str_ref] { t.put(&mut meta); }
         let mapped_rows = self.image.as_ref().map_or(&[][..], |image| image.rows);
-        let rows: Vec<Entry> = (mapped_rows.len()..n).map(|i| *self.entry(TyId(i as u32))).collect();
-        if !rows.iter().all(|r| r.next as usize <= n && (r.erased.0 as usize) < n) { return None; }
-        let buckets: Vec<u32> = self.buckets.iter().enumerate().filter_map(|(i, head)| {
+        let mut rows: Vec<Entry> = Vec::with_capacity(n.saturating_sub(mapped_rows.len()));
+        for i in mapped_rows.len()..n {
+            if i % 65536 == 65535 && stop() { return None; }
+            let r = *self.entry(TyId(i as u32));
+            if !(r.next as usize <= n && (r.erased.0 as usize) < n) { return None; }
+            rows.push(r);
+        }
+        let mut buckets: Vec<u32> = Vec::new();
+        for (i, head) in self.buckets.iter().enumerate() {
+            if i % 65536 == 65535 && stop() { return None; }
             // Acquire: the rows a head names are published before it
             let mut head = head.load(Ordering::Acquire);
             while head as usize > n { head = self.entry(TyId(head - 1)).next; }
-            (head != 0).then_some([i as u32, head])
-        }).flatten().collect();
+            if head != 0 { buckets.push(i as u32); buckets.push(head); }
+        }
+        if stop() { return None; }
         // list bucket heads before the words: every head (and the rows taken above) names a list
         // published before the words are copied, so the image never holds a head past its words
         let list_buckets = self.lists.bucket_pairs();

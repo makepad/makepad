@@ -61,8 +61,8 @@ fn clear_build_env(cmd: &mut Command) {
 }
 
 fn niced(program: &Path, args: &[String]) -> Command {
-    let mut cmd = Command::new("nice");
-    cmd.arg("-n").arg("15").arg(program).args(args);
+    let mut cmd = crate::os::niced(program.as_os_str());
+    cmd.args(args);
     cmd
 }
 
@@ -165,8 +165,8 @@ pub fn prebuild(conf: &SyncConf) -> Built {
                 let runner = if jit.iter().any(|j| j == id) { Runner::Jit } else { Runner::Native };
                 let cmd = AppLaunch::build_command(app, runner, root.clone())?;
                 // the launch's own command and env, niced, offline, with the job count
-                let mut n = Command::new("nice");
-                n.arg("-n").arg("15").arg(cmd.get_program()).args(cmd.get_args());
+                let mut n = crate::os::niced(cmd.get_program());
+                n.args(cmd.get_args());
                 for (k, v) in cmd.get_envs() {
                     match v {
                         Some(v) => n.env(k, v),

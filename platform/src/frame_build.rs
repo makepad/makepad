@@ -182,38 +182,40 @@ pub(crate) struct FrameBuilder {
     pub(crate) stats: BuildStats,
 }
 
-/// The target pixels a 2D draw's instances cover (x, y, w, h): the union of their clipped rects
-/// (`rect_pos` / `rect_size` / `draw_clip`), shifted by the list's scroll. NaN (unknown) for a
-/// shader without a rect, a list with a view transform (3D), or no instance data at hand.
-fn instance_bounds(m: &CxDrawShaderMapping, list: &DrawListUniforms, item: &CxDrawItem, slots: usize, instances: usize, (ox, oy, dpi): (f32, f32, f32)) -> [f32; 4] {
-    let unknown = [f32::NAN; 4];
-    let (Some(rp), Some(rs)) = (m.rect_pos, m.rect_size) else { return unknown };
-    if list.view_transform != crate::makepad_math::Mat4f::identity() || slots == 0 {
-        return unknown;
-    }
-    let Some(data) = item.retained_instances.as_ref().map(|v| v.data()).or(item.instances.as_deref()) else { return unknown };
-    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    for inst in data.chunks_exact(slots).take(instances) {
+/// Each clipped instance's target-pixel rect. Keep the pieces for native input: the
+/// union of four corner decorations covers a whole window, though the corners do not.
+fn instance_rects<'a>(m: &CxDrawShaderMapping, list: &'a DrawListUniforms, item: &'a CxDrawItem,
+    slots: usize, instances: usize, (ox, oy, dpi): (f32, f32, f32)) -> Option<impl Iterator<Item = [f32; 4]> + 'a>
+{
+    let (rp, rs) = (m.rect_pos?, m.rect_size?);
+    if list.view_transform != crate::makepad_math::Mat4f::identity() || slots == 0 { return None; }
+    let data = item.retained_instances.as_ref().map(|v| v.data()).or(item.instances.as_deref())?;
+    let draw_clip = m.draw_clip;
+    Some(data.chunks_exact(slots).take(instances).filter_map(move |inst| {
         let (mut a, mut b) = (inst[rp], inst[rp + 1]);
         let (mut c, mut d) = (a + inst[rs], b + inst[rs + 1]);
-        if let Some(k) = m.draw_clip {
-            a = a.max(inst[k]);
-            b = b.max(inst[k + 1]);
-            c = c.min(inst[k + 2]);
-            d = d.min(inst[k + 3]);
+        if let Some(k) = draw_clip {
+            a = a.max(inst[k]); b = b.max(inst[k + 1]);
+            c = c.min(inst[k + 2]); d = d.min(inst[k + 3]);
         }
-        if c > a && d > b {
-            x0 = x0.min(a);
-            y0 = y0.min(b);
-            x1 = x1.max(c);
-            y1 = y1.max(d);
-        }
+        a = (a + list.view_shift.x).max(list.view_clip.x);
+        b = (b + list.view_shift.y).max(list.view_clip.y);
+        c = (c + list.view_shift.x).min(list.view_clip.z);
+        d = (d + list.view_shift.y).min(list.view_clip.w);
+        (c > a && d > b).then_some([(a - ox) * dpi, (b - oy) * dpi, (c - a) * dpi, (d - b) * dpi])
+    }))
+}
+
+/// Draw bounds still size the Metal surface by the union; native input uses its pieces.
+fn instance_bounds(m: &CxDrawShaderMapping, list: &DrawListUniforms, item: &CxDrawItem, slots: usize, instances: usize, pass_px: (f32, f32, f32)) -> [f32; 4] {
+    let Some(rects) = instance_rects(m, list, item, slots, instances, pass_px) else { return [f32::NAN; 4]; };
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for r in rects {
+        x0 = x0.min(r[0]); y0 = y0.min(r[1]);
+        x1 = x1.max(r[0] + r[2]); y1 = y1.max(r[1] + r[3]);
     }
-    if x1 <= x0 || y1 <= y0 {
-        return unknown;
-    }
-    let (sx, sy) = (list.view_shift.x - ox, list.view_shift.y - oy);
-    [(x0 + sx) * dpi, (y0 + sy) * dpi, (x1 - x0) * dpi, (y1 - y0) * dpi]
+    if x1 <= x0 || y1 <= y0 { return [0.0; 4]; }
+    [x0, y0, x1 - x0, y1 - y0]
 }
 
 impl FrameBuilder {
@@ -519,6 +521,7 @@ pub(crate) fn hal_format(pixel: &TexturePixel) -> Option<u32> {
         TexturePixel::Bc7 => format::BC7,
         TexturePixel::Bc5 => format::BC5,
         TexturePixel::Astc4x4 => format::ASTC4X4,
+        TexturePixel::Nv12 => format::NV12,
         _ => return None,
     })
 }
@@ -633,6 +636,23 @@ impl Cx {
         let origin = self.textures[id].origin.clone();
         let hal = self.hal.frames.texture_create(id.0, id.generation(),
             usage::SHARED | usage::SAMPLED | usage::RENDER_TARGET, format::BGRA8,
+            width, height, 1, 1, &origin);
+        self.hal.frames.w.texture_share(hal);
+        texture
+    }
+
+    /// As [`Self::create_shared_texture`], a two-plane 4:2:0 picture (`TextureFormat::SharedNv12`,
+    /// `width` x `height`, both even): a pass renders into one plane (`DrawPass::set_color_texture_face`:
+    /// 0 luma, 1 chroma at half the size), an encoder reads it as its NV12 input. D3D11 alone
+    /// (elsewhere the HAL refuses it).
+    #[track_caller]
+    pub fn create_shared_nv12_texture(&mut self, width: usize, height: usize) -> Texture {
+        let texture = Texture::new_with_format(self, TextureFormat::SharedNv12 { width, height, initial: true });
+        let id = texture.texture_id();
+        self.textures[id].alloc_shared();
+        let origin = self.textures[id].origin.clone();
+        let hal = self.hal.frames.texture_create(id.0, id.generation(),
+            usage::SHARED | usage::RENDER_TARGET, format::NV12,
             width, height, 1, 1, &origin);
         self.hal.frames.w.texture_share(hal);
         texture
@@ -1127,7 +1147,7 @@ impl Cx {
         let stereo = matches!(self.passes[pass_id].parent, CxDrawPassParent::Xr);
         // an XR display without a display of its own (`info_flags::XR_OFFSCREEN`): the XR pass
         // renders into its own textures, eyes side by side; the XR window only paces it
-        let offscreen_xr = stereo && self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::XR_OFFSCREEN != 0);
+        let offscreen_xr = stereo && self.hal_info_flags() & makepad_hal::info_flags::XR_OFFSCREEN != 0;
         let multiview = stereo && !offscreen_xr && !picking && self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::MULTIVIEW != 0);
         let (window, is_window) = match self.passes[pass_id].parent {
             CxDrawPassParent::Window(w) => (Some(w), true),
@@ -1210,6 +1230,13 @@ impl Cx {
         // A window's target is its surface: exactly round(inner size * dpi), the size the HAL made it
         // (the pass rect is ceiled in points, which at a fractional scale is up to 2 px more than the surface).
         let size = match window {
+            // an offscreen XR pass supersampled (`Cx::xr_set_supersample`): each eye's half
+            // scaled alike, whole pixels
+            Some(w) if offscreen_xr && self.windows.is_valid(w) && self.windows[w].window_geom.inner_size.x > 0.0 => {
+                let s = self.hal_xr_supersample_now() as f64;
+                let eye = self.windows[w].window_geom.inner_size;
+                crate::makepad_math::dvec2(2.0 * (eye.x * 0.5 * s).round(), (eye.y * s).round())
+            }
             Some(w) if self.windows.is_valid(w) && self.windows[w].window_geom.inner_size.x > 0.0 => (self.windows[w].window_geom.inner_size * dpi).round(),
             _ => {
                 let (w, h) = Self::pass_pixel_size(pass_rect.size, dpi);
@@ -1244,6 +1271,8 @@ impl Cx {
         // attachments, and a viewport rounding up would exceed them
         pass.viewport = [0.0, 0.0, tw as f32, th as f32];
         pass.dpi = dpi as f32;
+        // an XR pass multisampled (`Cx::xr_set_msaa`; never a pick)
+        if stereo && !picking { pass.samples = self.hal_xr_msaa_now(); }
         if is_window {
             if let Some((_, image)) = hosted_target {
                 pass.color[0] = image;
@@ -1440,6 +1469,42 @@ impl Cx {
                     *child += steps as f32 * step;
                 } else {
                     self.fb_list(fb, pass_id, sub, sploded, child, step, serial);
+                }
+                continue;
+            }
+            if let crate::draw_list::CxDrawKind::NativeLayer { id, rect, clip, style } = self.draw_lists[list_id].draw_items[item_id].kind {
+                if !sploded && self.pick.paint.is_none() && self.native_layer_window_pass(pass_id)
+                    && matches!(self.native_layer_mode(id), crate::native_layer::NativeLayerMode::Composited)
+                {
+                    let list = &self.draw_lists[list_id].draw_list_uniforms;
+                    let (ox, oy, dpi) = fb.pass_px;
+                    let x = rect.pos.x as f32 + list.view_shift.x;
+                    let y = rect.pos.y as f32 + list.view_shift.y;
+                    let x1 = x.max(clip.0.x as f32 + list.view_shift.x).max(list.view_clip.x);
+                    let y1 = y.max(clip.0.y as f32 + list.view_shift.y).max(list.view_clip.y);
+                    let x2 = (x + rect.size.x as f32).min(clip.1.x as f32 + list.view_shift.x).min(list.view_clip.z);
+                    let y2 = (y + rect.size.y as f32).min(clip.1.y as f32 + list.view_shift.y).min(list.view_clip.w);
+                    let mut flags = makepad_hal::native_layer::layer_flags::VISIBLE;
+                    if style.input_passthrough {
+                        flags |= makepad_hal::native_layer::layer_flags::INPUT_PASSTHROUGH;
+                    }
+                    // Conjugate the logical-space transform into window pixels: S T S^-1,
+                    // where S applies the pass origin and dpi, as the draw bounds do.
+                    let mut transform = list.view_transform.v;
+                    transform[12] = (list.view_transform.v[12] + transform[0] * ox + transform[4] * oy - ox) * dpi;
+                    transform[13] = (list.view_transform.v[13] + transform[1] * ox + transform[5] * oy - oy) * dpi;
+                    transform[14] = (list.view_transform.v[14] + transform[2] * ox + transform[6] * oy) * dpi;
+                    transform[3] /= dpi;
+                    transform[7] /= dpi;
+                    transform[11] /= dpi;
+                    fb.w.pass_native_layer(id.hal(), makepad_hal::NativeLayerGeom {
+                        rect: [(x - ox) * dpi, (y - oy) * dpi, rect.size.x as f32 * dpi, rect.size.y as f32 * dpi],
+                        clip: [(x1 - ox) * dpi, (y1 - oy) * dpi, (x2 - x1).max(0.0) * dpi, (y2 - y1).max(0.0) * dpi],
+                        radius: style.radius.map(|r| r.max(0.0) as f32 * dpi),
+                        transform,
+                        opacity: style.opacity.clamp(0.0, 1.0) as f32,
+                        flags,
+                    });
                 }
                 continue;
             }
@@ -1655,6 +1720,9 @@ impl Cx {
         let call = item.kind.draw_call().expect("a draw call");
         let sh = &self.draw_shaders[shader_index];
         let mut flags = 0;
+        if list.input_transparent {
+            flags |= Draw::INPUT_TRANSPARENT;
+        }
         if call.options.depth_write {
             flags |= Draw::DEPTH_WRITE;
         }
@@ -1704,7 +1772,15 @@ impl Cx {
         if let Some(o) = self.draw_owners.as_mut() {
             o.draw(list_id.index(), item_id, slots, instances);
         }
-        fb.w.draw(draw);
+        if !list.input_transparent && fb.w.pass_has_native_layers() {
+            if let Some(rects) = instance_rects(&sh.mapping, &list.draw_list_uniforms, item, slots, instances, fb.pass_px) {
+                fb.w.draw_with_input_rects(draw, rects);
+            } else {
+                fb.w.draw(draw);
+            }
+        } else {
+            fb.w.draw(draw);
+        }
         fb.stats.draws += 1;
         // consumed: the encode that presents this content happened
         let call_gen = call.uniforms_gen;

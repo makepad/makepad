@@ -46,6 +46,9 @@ fn needs_no_glyph(ch: char) -> bool {
 pub(crate) struct SystemFallback {
     /// (character, heavy) pairs looked up already.
     attempted: FxHashSet<(char, bool)>,
+    /// The OS comes before the bundled CJK and emoji faces (a `System`
+    /// font set): a miss here is not the end of the chain.
+    pub(crate) bundled_after: bool,
 }
 
 impl SystemFallback {
@@ -53,6 +56,12 @@ impl SystemFallback {
     /// True when a face joined the families (lay the text out again).
     pub(crate) fn request(&mut self, layouter: &mut Layouter, family_id: FontFamilyId, text: &str) -> bool {
         if text.is_ascii() || !layouter.is_font_family_known(family_id) {
+            return false;
+        }
+        // The installed-font index is still being built in the background
+        // (Linux, Windows, Android): asked again on the redraw it brings,
+        // never waited for here.
+        if !system_fonts::index_ready() {
             return false;
         }
         let family = layouter.get_or_load_font_family(family_id);
@@ -142,7 +151,11 @@ impl SystemFallback {
             for ch in chars.chars() {
                 let covered = found.as_ref().is_some_and(|face| face.with_ttf_parser_face(|f| f.glyph_index(ch).is_some()));
                 if !covered && mark_missing_glyph_for_warning(&WARNED_MISSING_GLYPHS, ch) {
-                    log!("{} (no system font either)", missing_glyph_message(ch, &diagnostics));
+                    if self.bundled_after {
+                        log!("{} (no system font; the bundled faces are next)", missing_glyph_message(ch, &diagnostics));
+                    } else {
+                        log!("{} (no system font either)", missing_glyph_message(ch, &diagnostics));
+                    }
                 }
             }
             added.extend(found);
@@ -174,6 +187,7 @@ mod tests {
     /// Skipped where the OS has no Devanagari font.
     #[test]
     fn devanagari_comes_from_the_os_and_is_shaped() {
+        system_fonts::prewarm();
         if system_fonts::fallback_candidates("कि", false).is_empty() {
             println!("no Devanagari system font here: skipped");
             return;

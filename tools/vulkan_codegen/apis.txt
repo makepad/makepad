@@ -133,6 +133,8 @@ type VkIndexType
 type VkInstance
 type VkInstanceCreateInfo
 const VK_KHR_ANDROID_SURFACE_EXTENSION_NAME
+const VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME
+const VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME
 const VK_KHR_DISPLAY_EXTENSION_NAME
 const VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME
 const VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME
@@ -213,6 +215,9 @@ type VkRect2D
 type VkRenderPass
 type VkRenderPassBeginInfo
 type VkRenderPassCreateInfo
+type VkRenderPassCreateInfo2
+type VkSubpassDescriptionDepthStencilResolve
+type VkPhysicalDeviceDepthStencilResolveProperties
 type VkRenderPassFragmentDensityMapCreateInfoEXT
 type VkRenderPassMultiviewCreateInfo
 type VkResult
@@ -443,6 +448,7 @@ value VkResult NOT_READY
 value VkResult SUCCESS
 value VkResult TIMEOUT
 value VkSampleCountFlags TYPE_1
+value VkResolveModeFlags SAMPLE_ZERO
 value VkSamplerAddressMode CLAMP_TO_BORDER
 value VkSamplerAddressMode CLAMP_TO_EDGE
 value VkSamplerAddressMode MIRRORED_REPEAT
@@ -499,6 +505,8 @@ device vkCreatePipelineLayout
 device vkCreatePipelineCache
 device vkCreateQueryPool
 device vkCreateRenderPass
+# MSAA passes: multisampled attachments resolved at the end of the subpass, depth too
+device vkCreateRenderPass2
 device vkCreateSampler
 device vkCreateSamplerYcbcrConversion
 device vkCreateSemaphore

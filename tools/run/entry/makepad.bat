@@ -99,16 +99,22 @@ rmdir /s /q "%STAGE%"
 for %%P in (%PARTS%) do del "%DOWNLOADS%\%%P-%RUST_VERSION%-%TRIPLE%.tar.gz" 2>nul
 :have_rust
 
-rem --- 2. The loader's source: the service's latest loader release (offline: the one built before)
-set "LATEST=%CACHE%\loader-latest.json"
-del "%LATEST%" 2>nul
-curl.exe -fsS --proto =https -m 60 "%SERVICE%/public/app/relax/latest" -o "%LATEST%" 2>>"%LOGS%\download.log"
-set "VERSION=" & set "ZIPNAME=" & set "ZIPBYTES=" & set "ZIPSHA="
-if exist "%LATEST%" for /f "tokens=1-4" %%A in ('powershell -NoProfile -Command "$j = Get-Content -Raw '%LATEST%' | ConvertFrom-Json; '{0} {1} {2} {3}' -f $j.release, $j.archive.name, $j.archive.bytes, $j.archive.sha256"') do (
-    set "VERSION=%%A" & set "ZIPNAME=%%B" & set "ZIPBYTES=%%C" & set "ZIPSHA=%%D"
-)
+rem --- 2. The runner release and its loader's source, cut from the same Makepad commit (so the two
+rem always fit). With arguments a loader compiled before stays as it is (the runner and the apps it
+rem recorded were made for it); offline, the one built before.
 rem One source folder for every version (target\ inside it: makepad finds its std two levels up).
 set "SRC=%CACHE%\loader\src"
+if not exist "%CACHE%\runner" mkdir "%CACHE%\runner"
+set "RUNNER=%CACHE%\runner\latest.json"
+del "%RUNNER%" 2>nul
+set "ASK="
+if "%~1"=="" set "ASK=1"
+if not exist "%SRC%\.built" set "ASK=1"
+if defined ASK curl.exe -fsS --proto =https -m 60 "%SERVICE%/public/app/runner/latest" -o "%RUNNER%" 2>>"%LOGS%\download.log"
+set "REL=" & set "VERSION=" & set "ZIPNAME=" & set "ZIPBYTES=" & set "ZIPSHA="
+if exist "%RUNNER%" for /f "tokens=1-5" %%A in ('powershell -NoProfile -Command "$j = Get-Content -Raw '%RUNNER%' | ConvertFrom-Json; '{0} {1} {2} {3} {4}' -f $j.release, $j.loader.commit, $j.loader.name, $j.loader.bytes, $j.loader.sha256"') do (
+    set "REL=%%A" & set "VERSION=%%B" & set "ZIPNAME=%%C" & set "ZIPBYTES=%%D" & set "ZIPSHA=%%E"
+)
 if not defined VERSION if exist "%SRC%\.version" set /p VERSION=<"%SRC%\.version"
 if not defined VERSION (echo   Could not reach the release service ^(%SERVICE%^) and no loader is here yet. Check the connection, then run this again. & exit /b 1)
 set "MAKEPAD=%SRC%\target\host\makepad.exe"
@@ -116,12 +122,14 @@ set "BUILT=%VERSION% %RUST_VERSION% %TRIPLE%"
 set "HAVE_BUILT="
 if exist "%SRC%\.built" set /p HAVE_BUILT=<"%SRC%\.built"
 if exist "%MAKEPAD%" if "%HAVE_BUILT%"=="%BUILT%" goto :have_loader
+rem a loader compiled for another Makepad commit than the runner's does not run it: say so, once
+if exist "%MAKEPAD%" if defined HAVE_BUILT for /f "tokens=1" %%H in ("%HAVE_BUILT%") do if not "%%H"=="%VERSION%" echo   Makepad's loader was compiled for Makepad %%H; compiling it for this runner ^(%VERSION%^).
 set "HAVE_VERSION="
 if exist "%SRC%\.version" set /p HAVE_VERSION=<"%SRC%\.version"
 if not "%HAVE_VERSION%"=="%VERSION%" (
     if not defined ZIPNAME (echo   The release service did not answer; the loader's source is not here yet. Check the connection, then run this again. & exit /b 1)
     echo   Makepad's loader: downloading its source
-    curl.exe -fsS --proto =https --retry 3 "%SERVICE%/public/app/relax/%VERSION%/%ZIPNAME%" -o "%DOWNLOADS%\%ZIPNAME%" 2>>"%LOGS%\download.log" || (echo   The download stopped. & exit /b 1)
+    curl.exe -fsS --proto =https --retry 3 "%SERVICE%/public/app/runner/%REL%/%ZIPNAME%" -o "%DOWNLOADS%\%ZIPNAME%" 2>>"%LOGS%\download.log" || (echo   The download stopped. & exit /b 1)
     for %%S in ("%DOWNLOADS%\%ZIPNAME%") do if not "%%~zS"=="%ZIPBYTES%" (del "%DOWNLOADS%\%ZIPNAME%" & echo   The loader's source has the wrong size. & exit /b 1)
     call :verify "%DOWNLOADS%\%ZIPNAME%" "%ZIPSHA%" || (del "%DOWNLOADS%\%ZIPNAME%" & echo   Checksum mismatch for %ZIPNAME%. & exit /b 1)
     if exist "%CACHE%\loader\.unpack" rmdir /s /q "%CACHE%\loader\.unpack"
@@ -129,13 +137,13 @@ if not "%HAVE_VERSION%"=="%VERSION%" (
     tar.exe -xf "%DOWNLOADS%\%ZIPNAME%" -C "%CACHE%\loader\.unpack" || (echo   Unpacking the loader's source failed. Run this again. & exit /b 1)
     if not exist "%SRC%\Cargo.toml" (
         if exist "%SRC%" rmdir /s /q "%SRC%"
-        move "%CACHE%\loader\.unpack\%VERSION%" "%SRC%" >nul || exit /b 1
+        move "%CACHE%\loader\.unpack\%REL%" "%SRC%" >nul || exit /b 1
     ) else (
         rem an update: changed files replaced (with the time of now, so cargo sees them as changed),
         rem files the new version no longer has removed, the rest (and target\) left as they are
         echo   Makepad's loader: updating its source to %VERSION%
         powershell -NoProfile -Command ^
-            "$new = '%CACHE%\loader\.unpack\%VERSION%'; $src = '%SRC%'; $now = Get-Date; $keep = @{};" ^
+            "$new = '%CACHE%\loader\.unpack\%REL%'; $src = '%SRC%'; $now = Get-Date; $keep = @{};" ^
             "foreach ($f in Get-ChildItem -LiteralPath $new -Recurse -File) { $rel = $f.FullName.Substring($new.Length + 1); $keep[$rel] = 1; $dst = Join-Path $src $rel;" ^
             "  if (-not (Test-Path -LiteralPath $dst) -or (Get-FileHash -LiteralPath $f.FullName).Hash -ne (Get-FileHash -LiteralPath $dst).Hash) {" ^
             "    New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null; Move-Item -Force -LiteralPath $f.FullName -Destination $dst; (Get-Item -LiteralPath $dst).LastWriteTime = $now } };" ^
@@ -176,9 +184,6 @@ if not "%~1"=="" (
 rem --- 4. The runner's launch record, then `makepad` alone runs it (makepad launch.rs) ------------
 rem The service's latest licence-free `runner` release: its repositories on the service's read-only
 rem git face, the one at `makepad` the workspace, the others mounted at their folders.
-set "RUNNER=%CACHE%\runner\latest.json"
-del "%RUNNER%" 2>nul
-curl.exe -fsS --proto =https -m 60 "%SERVICE%/public/app/runner/latest" -o "%RUNNER%" 2>>"%LOGS%\download.log"
 if exist "%RUNNER%" (
     powershell -NoProfile -Command ^
         "$j = Get-Content -Raw '%RUNNER%' | ConvertFrom-Json; $g = '%SERVICE%/public/git/runner'; $r = $j.release;" ^

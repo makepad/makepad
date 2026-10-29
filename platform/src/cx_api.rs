@@ -86,73 +86,6 @@ pub struct XrFrameCpuBreakdown {
     pub resize_projection_ms: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct SystemBrowserId(pub LiveId);
-
-impl From<LiveId> for SystemBrowserId {
-    fn from(value: LiveId) -> Self {
-        Self(value)
-    }
-}
-
-pub struct CxSystemBrowser<'a> {
-    cx: &'a mut Cx,
-    id: SystemBrowserId,
-}
-
-impl<'a> CxSystemBrowser<'a> {
-    pub fn id(&self) -> SystemBrowserId {
-        self.id
-    }
-
-    pub fn spawn(&mut self, url: &str) {
-        if self.cx.script_data.std.host_io_only() { return; }
-        self.cx.platform_ops.push_back(CxOsOp::SpawnSystemBrowser {
-            browser_id: self.id.0,
-            url: url.to_string(),
-        });
-    }
-
-    pub fn update(&mut self, area: Area, visible: bool) {
-        self.cx.platform_ops.push_back(CxOsOp::UpdateSystemBrowser {
-            browser_id: self.id.0,
-            area,
-            visible,
-        });
-    }
-
-    pub fn detach(&mut self) {
-        self.cx.platform_ops.push_back(CxOsOp::DetachSystemBrowser {
-            browser_id: self.id.0,
-        });
-    }
-
-    pub fn set_url(&mut self, url: &str, replace: bool) {
-        if self.cx.script_data.std.host_io_only() { return; }
-        self.cx.platform_ops.push_back(CxOsOp::SetSystemBrowserUrl {
-            browser_id: self.id.0,
-            url: url.to_string(),
-            replace,
-        });
-    }
-
-    pub fn history_go(&mut self, delta: i32) {
-        if self.cx.script_data.std.host_io_only() { return; }
-        self.cx
-            .platform_ops
-            .push_back(CxOsOp::SystemBrowserHistoryGo {
-                browser_id: self.id.0,
-                delta,
-            });
-    }
-
-    pub fn close(&mut self) {
-        self.cx.platform_ops.push_back(CxOsOp::CloseSystemBrowser {
-            browser_id: self.id.0,
-        });
-    }
-}
-
 /// A system haptic (`Cx::haptic_feedback`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HapticFeedback { Click, VirtualKey, Tick }
@@ -245,22 +178,6 @@ pub trait CxOsApi {
     /*
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
-}
-
-/// Type-erased accessibility tree update payload. PartialEq always returns
-/// false — accessibility updates are never deduplicated.
-pub struct AccessibilityUpdatePayload(pub Box<dyn std::any::Any + Send>);
-
-impl PartialEq for AccessibilityUpdatePayload {
-    fn eq(&self, _other: &Self) -> bool {
-        false
-    }
-}
-
-impl std::fmt::Debug for AccessibilityUpdatePayload {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "AccessibilityUpdatePayload(..)")
-    }
 }
 
 /// A set of screen edges, for [`Cx::defer_system_gestures`].
@@ -447,7 +364,8 @@ pub enum CxOsOp {
         end: Vec2d,
     },
     HideSelectionHandles,
-    AccessibilityUpdate(AccessibilityUpdatePayload),
+    A11yUpdate { window: WindowId, bytes: Vec<u8> },
+    A11yActionDone { req: u64, result: u8 },
 
     CheckPermission {
         permission: crate::permission::Permission,
@@ -491,41 +409,16 @@ pub enum CxOsOp {
         bool,
         bool,
     ),
-    AttachCameraNativePreview {
-        video_id: LiveId,
-        area: Area,
+    NativeLayerCreate {
+        id: crate::native_layer::NativeLayerId,
+        content: crate::native_layer::NativeContent,
     },
-    UpdateCameraNativePreview {
-        video_id: LiveId,
-        area: Area,
-        visible: bool,
+    NativeLayerOp {
+        id: crate::native_layer::NativeLayerId,
+        op: crate::native_layer::NativeLayerOperation,
     },
-    DetachCameraNativePreview {
-        video_id: LiveId,
-    },
-    SpawnSystemBrowser {
-        browser_id: LiveId,
-        url: String,
-    },
-    UpdateSystemBrowser {
-        browser_id: LiveId,
-        area: Area,
-        visible: bool,
-    },
-    DetachSystemBrowser {
-        browser_id: LiveId,
-    },
-    SetSystemBrowserUrl {
-        browser_id: LiveId,
-        url: String,
-        replace: bool,
-    },
-    SystemBrowserHistoryGo {
-        browser_id: LiveId,
-        delta: i32,
-    },
-    CloseSystemBrowser {
-        browser_id: LiveId,
+    NativeLayerDestroy {
+        id: crate::native_layer::NativeLayerId,
     },
     PrepareAudioPlayback(LiveId, VideoSource, bool, bool),
     BeginVideoPlayback(LiveId),
@@ -540,19 +433,6 @@ pub enum CxOsOp {
     SelectVideoTrack(LiveId, usize),
     SelectAudioTrack(LiveId, usize),
 
-    CreateWebView {
-        id: LiveId,
-        area: Area,
-        texture: Texture,
-        url: String,
-    },
-    UpdateWebView {
-        id: LiveId,
-        area: Area,
-    },
-    CloseWebView {
-        id: LiveId,
-    },
     SaveFileDialog(FileDialog),
     SelectFileDialog(FileDialog),
     SaveFolderDialog(FileDialog),
@@ -642,7 +522,8 @@ impl CxOsOp {
             Self::ShowSelectionHandles { .. } => "ShowSelectionHandles",
             Self::UpdateSelectionHandles { .. } => "UpdateSelectionHandles",
             Self::HideSelectionHandles => "HideSelectionHandles",
-            Self::AccessibilityUpdate(..) => "AccessibilityUpdate",
+            Self::A11yUpdate { .. } => "A11yUpdate",
+            Self::A11yActionDone { .. } => "A11yActionDone",
 
             Self::CheckPermission { .. } => "CheckPermission",
             Self::RequestPermission { .. } => "RequestPermission",
@@ -658,16 +539,10 @@ impl CxOsOp {
             #[cfg(target_arch = "wasm32")]
             Self::StorageRequestError { .. } => "StorageRequestError",
 
+            Self::NativeLayerCreate { .. } => "NativeLayerCreate",
+            Self::NativeLayerOp { .. } => "NativeLayerOp",
+            Self::NativeLayerDestroy { .. } => "NativeLayerDestroy",
             Self::PrepareVideoPlayback(..) => "PrepareVideoPlayback",
-            Self::AttachCameraNativePreview { .. } => "AttachCameraNativePreview",
-            Self::UpdateCameraNativePreview { .. } => "UpdateCameraNativePreview",
-            Self::DetachCameraNativePreview { .. } => "DetachCameraNativePreview",
-            Self::SpawnSystemBrowser { .. } => "SpawnSystemBrowser",
-            Self::UpdateSystemBrowser { .. } => "UpdateSystemBrowser",
-            Self::DetachSystemBrowser { .. } => "DetachSystemBrowser",
-            Self::SetSystemBrowserUrl { .. } => "SetSystemBrowserUrl",
-            Self::SystemBrowserHistoryGo { .. } => "SystemBrowserHistoryGo",
-            Self::CloseSystemBrowser { .. } => "CloseSystemBrowser",
             Self::PrepareAudioPlayback(..) => "PrepareAudioPlayback",
             Self::BeginVideoPlayback(..) => "BeginVideoPlayback",
             Self::PauseVideoPlayback(..) => "PauseVideoPlayback",
@@ -680,9 +555,6 @@ impl CxOsOp {
             Self::SetVideoPlaybackRate(..) => "SetVideoPlaybackRate",
             Self::SelectVideoTrack(..) => "SelectVideoTrack",
             Self::SelectAudioTrack(..) => "SelectAudioTrack",
-            Self::CreateWebView { .. } => "CreateWebView",
-            Self::UpdateWebView { .. } => "UpdateWebView",
-            Self::CloseWebView { .. } => "CloseWebView",
             Self::SaveFileDialog(..) => "SaveFileDialog",
             Self::SelectFileDialog(..) => "SelectFileDialog",
             Self::SaveFolderDialog(..) => "SaveFolderDialog",
@@ -1010,14 +882,27 @@ impl Cx {
             }
             // Linux PRIO_PROCESS, who=0 addresses the current task/thread,
             // not the whole process. Keep SCHED_OTHER; no realtime privilege.
-            // Interactive uses nice 0 (unprivileged), light 1 and utility 5.
-            let nice = match priority {
+            // Interactive uses the process's nice (0 normally), light +1 and
+            // utility +5. The ladder is relative to the nice the process was
+            // started with: an unprivileged thread can raise its nice but not
+            // lower it, so under `nice 10` absolute values below 10 would fail.
+            // A boosted (negative) process keeps the absolute ladder.
+            static BASE: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+            let base = *BASE.get_or_init(|| {
+                unsafe extern "C" {
+                    fn getpid() -> i32;
+                }
+                // the thread group leader's nice: the nice the process was started with
+                unsafe { getpriority(0, getpid() as u32) }.clamp(0, 19)
+            });
+            let step = match priority {
                 CxThreadPriority::Normal | CxThreadPriority::UserInteractive => 0,
                 CxThreadPriority::UserInitiated => 1,
                 CxThreadPriority::Utility => 5,
                 CxThreadPriority::Background => 10,
                 CxThreadPriority::Idle => 15,
             };
+            let nice = (base + step).min(19);
             let applied = unsafe { setpriority(0, 0, nice) == 0 && getpriority(0, 0) == nice };
             if applied {
                 PriorityStatus::Applied
@@ -1325,14 +1210,79 @@ impl Cx {
     /// and the app hands them on (an encoder); they paint before every other pass.
     pub fn xr_offscreen(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
-        { self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::XR_OFFSCREEN != 0) }
+        { self.hal_info_flags() & makepad_hal::info_flags::XR_OFFSCREEN != 0 }
         #[cfg(target_arch = "wasm32")]
         { false }
     }
 
+    /// While a remote headset streams (`on`), the desktop windows paint for their own causes
+    /// only, not for the headset's frames (`XrWindowHold`): input at once, other UI changes at
+    /// most 15 a second; `mirror`: a window shows the headset's view (it paints from the
+    /// headset's frames at that rate). Off: the windows paint as always (at once, with what
+    /// was held).
+    pub fn xr_hold_windows(&mut self, on: bool, mirror: bool) {
+        let hold = &mut self.xr_window_hold;
+        if hold.on && !on {
+            hold.input = true;
+        }
+        hold.on = on;
+        hold.mirror = mirror;
+    }
+
+    /// The window repaints that painted and that were held (`xr_hold_windows`), counted since
+    /// the start.
+    pub fn xr_window_counts(&self) -> (u64, u64) {
+        (self.xr_window_hold.painted, self.xr_window_hold.held)
+    }
+
+    /// Supersampling of an offscreen XR display's passes (`xr_offscreen`; a no-op elsewhere):
+    /// they render at `scale` (0.5..2) of the eye pixels per axis, both eyes side by side, and
+    /// the app filters them down (or scales them up) to the eye size itself (a remote headset's
+    /// encoder input).
+    pub fn xr_set_supersample(&mut self, scale: f32) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hal_xr_supersample(scale);
+        #[cfg(target_arch = "wasm32")]
+        let _ = scale;
+    }
+
+    /// Multisampling of the XR passes (both eyes): `samples` per pixel (2, 4 or 8 where the
+    /// GPU has that count, `xr_msaa_counts`; 1 or anything else: none), resolved into the
+    /// passes' colour and depth textures at the end of each eye.
+    pub fn xr_set_msaa(&mut self, samples: u32) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hal_xr_msaa(samples);
+        #[cfg(target_arch = "wasm32")]
+        let _ = samples;
+    }
+
+    /// The XR passes' samples per pixel now (1: no MSAA).
+    pub fn xr_msaa(&self) -> u32 {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal_xr_msaa_now() }
+        #[cfg(target_arch = "wasm32")]
+        { 1 }
+    }
+
+    /// The MSAA sample counts this GPU has (bit n: 2^n samples per pixel; 1: none).
+    pub fn xr_msaa_counts(&self) -> u32 {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal.info.map_or(1, |i| i.msaa) }
+        #[cfg(target_arch = "wasm32")]
+        { 1 }
+    }
+
+    /// The offscreen XR passes' pixels per eye pixel (1 without supersampling).
+    pub fn xr_supersample(&self) -> f32 {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal_xr_supersample_now() }
+        #[cfg(target_arch = "wasm32")]
+        { 1.0 }
+    }
+
     pub fn xr_display(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
-        { self.hal.info.is_some_and(|i| i.flags & makepad_hal::info_flags::XR != 0) }
+        { self.hal_info_flags() & makepad_hal::info_flags::XR != 0 }
         #[cfg(target_arch = "wasm32")]
         { false }
     }
@@ -1352,11 +1302,33 @@ impl Cx {
     /// infinite: `z = near / (1 - d)`; the first row is the bottom of the view), and its header
     /// (size, each eye's depth camera). For per-pixel tests against the room (real things in
     /// front of virtual ones).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn xr_environment_depth(&self) -> Option<(crate::texture::Texture, makepad_hal::XrDepth)> {
+        self.hal.xr.as_ref()?.env_depth.clone()
+    }
+
+    /// Whether this app uses the headset's room field (`xr_tsdf`: its physics, particles or
+    /// field view). Off at start: the headset's environment depth is then only the GPU image
+    /// (`xr_environment_depth`, occlusion); on, it is read back and integrated into the field
+    /// (a core of a headset's CPU), and a remote headset is asked for its field (the serving
+    /// side forwards `xr_room_field_wanted`). Call it whenever the need changes (every frame is
+    /// fine).
+    pub fn xr_set_room_field(&mut self, on: bool) {
         #[cfg(not(target_arch = "wasm32"))]
-        { self.hal.xr.as_ref()?.env_depth.clone() }
+        if crate::os::hal::xr::ROOM_FIELD.swap(on, std::sync::atomic::Ordering::AcqRel) != on {
+            makepad_hal::hal_xr_depth_readback(on);
+            if !on { if let Some(xr) = self.hal.xr.as_mut() { xr.depth_writer = None; } }
+        }
         #[cfg(target_arch = "wasm32")]
-        { None }
+        let _ = on; // no headset on the web
+    }
+
+    /// Whether this app uses the room field (`xr_set_room_field`).
+    pub fn xr_room_field_wanted(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        return crate::os::hal::xr::ROOM_FIELD.load(std::sync::atomic::Ordering::Acquire);
+        #[cfg(target_arch = "wasm32")]
+        false
     }
 
     /// The XR window's next frame shows with these eyes instead of its `XrFrame`'s: a picture
@@ -1365,11 +1337,9 @@ impl Cx {
     /// pose. `focus_m`: the depth (metres along the view) of what the picture shows, for the
     /// compositor's positional correction (0: rotation only). Set before the frame is drawn; it
     /// holds for that one frame.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn xr_present_eyes(&mut self, eyes: [makepad_hal::XrEye; 2], focus_m: f32) {
-        #[cfg(not(target_arch = "wasm32"))]
         self.hal_xr_present_eyes(eyes, focus_m);
-        #[cfg(target_arch = "wasm32")]
-        let _ = (eyes, focus_m);
     }
 
     /// The headset's display runs at its supported refresh rate nearest to `hz` (0: the
@@ -1398,6 +1368,28 @@ impl Cx {
         self.hal_xr_see_through(on);
         #[cfg(target_arch = "wasm32")]
         let _ = on;
+    }
+
+    /// Whether the app asked for a see-through view (`xr_set_see_through`; a remote headset's
+    /// server tells the headset).
+    pub fn xr_see_through(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal_xr_see_through_now() }
+        #[cfg(target_arch = "wasm32")]
+        { false }
+    }
+
+    /// Where the XR passes' scene space sits in the room: `m` maps a scene point into the
+    /// headset's tracking space, and the eye views the XR passes draw with become `view * m`,
+    /// so shaders see scene (world) coordinates while the headset sees the room. A vehicle the
+    /// view rides with, or a world shown at another scale, is this one matrix instead of a
+    /// transform on every draw. Set per frame; identity (the default) = the scene is the room.
+    /// The eyes `xr_eye_matrices` and `xr_frame_wire` report stay in tracking space.
+    pub fn xr_set_scene_to_room(&mut self, m: crate::makepad_math::Mat4f) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hal_xr_scene_to_room(m);
+        #[cfg(target_arch = "wasm32")]
+        let _ = m;
     }
 
     pub fn xr_start_presenting(&mut self) {
@@ -1470,13 +1462,6 @@ impl Cx {
     pub fn browser_history_go(&mut self, delta: i32) {
         if self.script_data.std.host_io_only() { return; }
         <Self as CxOsApi>::browser_history_go(self, delta);
-    }
-
-    pub fn system_browser(&mut self, id: impl Into<SystemBrowserId>) -> CxSystemBrowser<'_> {
-        CxSystemBrowser {
-            cx: self,
-            id: id.into(),
-        }
     }
 
     // Determines whether to show your application in the dock when it runs. The default value is true.
@@ -1819,17 +1804,6 @@ impl Cx {
         if self.script_data.std.host_io_only() { return; }
         self.platform_ops
             .push_back(CxOsOp::SetPrimarySelection(content.to_owned()));
-    }
-
-    /// Forward an accessibility tree update to the platform adapter.
-    ///
-    /// The `update` is a type-erased `accesskit::TreeUpdate`. Platform backends
-    /// downcast it when an accessibility adapter is active.
-    pub fn update_accessibility_tree(&mut self, update: Box<dyn std::any::Any + Send>) {
-        self.platform_ops
-            .push_back(CxOsOp::AccessibilityUpdate(AccessibilityUpdatePayload(
-                update,
-            )));
     }
 
     /// Show native selection handles at the given start and end positions (mobile).
@@ -2249,6 +2223,9 @@ impl Cx {
     /// backends service this work on their ordinary next-render path.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn request_remote_window_present(&mut self, window_id: WindowId) {
+        // an external request waits for this window's frame: it paints also while a headset
+        // streams (`XrWindowHold`)
+        self.xr_window_hold.input = true;
         if let Some(pass) = self.windows[window_id].main_pass_id {
             self.repaint_pass_and_child_passes(pass);
         }
@@ -2330,6 +2307,7 @@ impl Cx {
     pub fn redraw_all(&mut self) {
         self.frame_requests += 1;
         crate::frame_sources::note(crate::frame_sources::Kind::Redraw, std::panic::Location::caller());
+        self.xr_window_hold.note_redraw();
         self.new_draw_event.redraw_all = true;
     }
 
@@ -2360,6 +2338,7 @@ impl Cx {
         }
         self.frame_requests += 1;
         crate::frame_sources::note(crate::frame_sources::Kind::Redraw, std::panic::Location::caller());
+        self.xr_window_hold.note_redraw();
         self.redraw_list_in_draw(draw_list_id);
     }
 
@@ -2383,6 +2362,7 @@ impl Cx {
         }
         self.frame_requests += 1;
         crate::frame_sources::note(crate::frame_sources::Kind::Redraw, std::panic::Location::caller());
+        self.xr_window_hold.note_redraw();
         if self
             .new_draw_event
             .draw_lists_and_children
@@ -2673,25 +2653,6 @@ impl Cx {
                 }
             }
         }
-    }
-
-    pub fn attach_camera_native_preview(&mut self, video_id: LiveId, area: Area) {
-        self.platform_ops
-            .push_back(CxOsOp::AttachCameraNativePreview { video_id, area });
-    }
-
-    pub fn update_camera_native_preview(&mut self, video_id: LiveId, area: Area, visible: bool) {
-        self.platform_ops
-            .push_back(CxOsOp::UpdateCameraNativePreview {
-                video_id,
-                area,
-                visible,
-            });
-    }
-
-    pub fn detach_camera_native_preview(&mut self, video_id: LiveId) {
-        self.platform_ops
-            .push_back(CxOsOp::DetachCameraNativePreview { video_id });
     }
 
     pub fn begin_video_playback(&mut self, video_id: LiveId) {
@@ -3379,8 +3340,10 @@ mod host_io_tests {
         cx.open_system_openfile_dialog();
         cx.open_system_openfolder_dialog();
         cx.open_system_savefolder_dialog();
-        cx.system_browser(LiveId::unique()).spawn("https://example.invalid/private");
-        cx.system_browser(LiveId::unique()).set_url("https://example.invalid/private", false);
+        let layer = cx.native_layer_new(crate::native_layer::NativeContent::Web {
+            url: "https://example.invalid/private".to_string(),
+        });
+        cx.native_layer(layer.id()).navigate("https://example.invalid/private", false);
         cx.prepare_audio_playback(LiveId::unique(), VideoSource::Network("https://example.invalid/private".into()), false, false);
         cx.prepare_audio_playback(LiveId::unique(), VideoSource::Filesystem("/etc/passwd".into()), false, false);
         assert_eq!(cx.platform_ops.len(), before);

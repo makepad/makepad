@@ -19,6 +19,7 @@
 //! `super::shell`, shared with the UIKit shell.
 
 mod app;
+pub(super) mod a11y;
 mod classes;
 mod clipboard;
 mod drag_out;

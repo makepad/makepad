@@ -595,6 +595,13 @@ impl TagField {
 }
 
 impl Widget for TagField {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> { Some(self.tags.join(", ")) })().unwrap_or_default();
+    }
+
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,
@@ -819,9 +826,7 @@ impl Widget for TagField {
         self.set_tags(cx, tags);
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.tags.join(", "))
-    }
+
 
     /// One `disabled` reaches everything inside, rather than each caller
     /// remembering the box, the input, the clear control and every chip.

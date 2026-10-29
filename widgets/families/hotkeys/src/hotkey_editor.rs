@@ -553,6 +553,19 @@ impl HotkeyEditor {
 }
 
 impl Widget for HotkeyEditor {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            Some(match self.capturing {
+                Some(id) => format!("capturing {}", id),
+                None => format!("{} rows", self.rows.len()),
+            })
+        })()
+        .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -893,13 +906,7 @@ impl Widget for HotkeyEditor {
         self.set_query(cx, v);
     }
 
-    /// The row listening for a chord, or the number of rows drawn.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(match self.capturing {
-            Some(id) => format!("capturing {}", id),
-            None => format!("{} rows", self.rows.len()),
-        })
-    }
+
 }
 
 impl HotkeyEditorRef {

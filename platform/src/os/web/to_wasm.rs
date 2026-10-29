@@ -98,12 +98,24 @@ impl Into<XrCapabilities> for WXrCapabilities {
 
 #[derive(ToWasm)]
 pub struct ToWasmInit {
+    pub a11y_enabled: bool,
     pub gpu_info: WGpuInfo,
     pub cpu_cores: u32,
     pub wasm_memory_max_pages: u32,
     pub xr_capabilities: WXrCapabilities,
     pub browser_info: WBrowserInfo,
     pub window_info: WWindowInfo,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmA11yState {
+    pub enabled: bool,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmA11yAction {
+    pub window: u32,
+    pub bytes: WasmDataU8,
 }
 
 #[derive(ToWasm)]

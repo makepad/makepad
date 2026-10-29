@@ -287,6 +287,16 @@ impl NumberSpin {
 }
 
 impl Widget for NumberSpin {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Button;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.disabled = disabled;
         self.draw_bg.disabled = if disabled { 1.0 } else { 0.0 };
@@ -772,6 +782,16 @@ impl NumberField {
 }
 
 impl Widget for NumberField {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::SpinButton;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE;
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.disabled = disabled;
         self.sync_disabled(cx, Animate::Yes);

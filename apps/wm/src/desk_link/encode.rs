@@ -1,18 +1,19 @@
-//! Desk Link's encoder thread: the capture's picture texture (registered as a DMA-BUF) goes to
-//! `makepad_video::VideoStreamEncoder` with the fence of the frame that rendered it, and each
+//! Desk Link's encoder thread: the capture's picture texture (its encode surface) goes to
+//! `makepad_video::VideoStreamEncoder` with the completion of the frame that rendered it, and each
 //! encoded picture to every watching viewer. The UI thread only queues jobs (never waits).
 //!
-//! A GPU with several encode engines (`VideoStreamEncoder::engines`) runs one stream per engine,
+//! A GPU with several encode engines (`EncoderCaps::engines`) runs one stream per engine,
 //! each on a worker thread of its own: as tiles (each picture split into bands, encoded at once:
 //! the lowest latency, the default) or interleaved (the engines take whole pictures in turn:
 //! the most pictures per second at one picture's latency). A picture larger than one stream
-//! takes (`VideoStreamEncoder::max_size`, e.g. 4096 wide for H.264 on NVIDIA) is cut into columns
+//! takes (`VideoStreamEncoder::max_size`, e.g. 4096 wide for H.264 on some GPUs) is cut into columns
 //! as well (`TilePlan`); the tiles of a picture spread over all engines. Tiles of two pictures
 //! may be in flight at once (each engine encodes its tiles in order), so a picture's encode
 //! overlaps the next one's copy and submit.
 
 use makepad_desk_link as proto;
-use makepad_widgets::makepad_platform::video_file::{GpuReady, StreamTile, StreamTuning, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
+use makepad_desk_link::tiles::{TileDone, TileEncoders, TileSink, TileSpec, TileWork};
+use makepad_widgets::makepad_platform::video_file::{GpuCompletion, StreamTile, SurfaceHandle, StreamTuning, StreamVideoCodec, VideoStreamEncoder, VideoStreamEncoderOptions};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -26,23 +27,13 @@ pub use super::settings::Split;
 /// picture goes to them: `Feed::admit`).
 pub type Subscribers = Arc<Mutex<Vec<(Sender<Out>, Arc<Feed>)>>>;
 
-/// The release fence of the frame that rendered a picture (Linux), or nothing to wait for.
-pub enum Fence {
-    #[cfg(target_os = "linux")]
-    Linux(makepad_widgets::makepad_platform::foreign_dmabuf::ForeignDmabufFence),
-    None,
-}
-
 pub enum Job {
     /// `refine`: the last picture again at a near-lossless QP (the desktop held still). `held`:
     /// its texture is not drawn over until every engine's read of it is done (dropped then).
     /// `hevc`: H.265 (else H.264); `sharp`: the encoder's best pictures per bit (else its
     /// fastest).
-    Picture { handle: u64, held: InFlight, size: [u32; 2], fence: Fence, built_ns: u64, fps: u32, kbps: u32, split: Split, full_chroma: bool, refine: bool, plan: TilePlan, hevc: bool, sharp: bool },
+    Picture { surface: SurfaceHandle, held: InFlight, size: [u32; 2], ready: GpuCompletion, built_ns: u64, fps: u32, kbps: u32, split: Split, full_chroma: bool, refine: bool, plan: TilePlan, hevc: bool, sharp: bool },
     Keyframe,
-    /// The picture texture's registration `handle` is released (after the pictures queued
-    /// before it were encoded).
-    Release(u64),
     /// The GPU device was replaced (`Event::GpuReset`): the encoder is opened again on the new
     /// one with the next picture, which starts with a key frame.
     Reset,
@@ -85,29 +76,9 @@ impl Encoder {
     }
 }
 
-/// The fence's sync_file once published (the frame was submitted), waiting briefly for it.
-fn ready(fence: Fence) -> Result<GpuReady, String> {
-    match fence {
-        Fence::None => Ok(GpuReady::Done),
-        #[cfg(target_os = "linux")]
-        Fence::Linux(mut fence) => {
-            let started = Instant::now();
-            loop {
-                match fence.poll() {
-                    Some(Ok(Some(fd))) => return Ok(GpuReady::SyncFile(fd)),
-                    Some(Ok(None)) => return Ok(GpuReady::Done),
-                    Some(Err(e)) => return Err(format!("frame fence: {e}")),
-                    None if started.elapsed() > Duration::from_secs(2) => return Err("the frame's fence was never published".into()),
-                    None => std::thread::sleep(Duration::from_micros(200)),
-                }
-            }
-        }
-    }
-}
-
-/// One engine's stream: its encoder, the part of each picture it takes, and its worker.
+/// One engine's stream: the part of each picture it takes (its worker is the tile fan-out's,
+/// `makepad_desk_link::tiles`).
 struct Stream {
-    tx: Sender<Work>,
     /// Its share of the picture's area: of the whole stream's rate.
     share: f64,
     /// Its tile's first column and row (tiles), or 0, 0 (whole pictures).
@@ -115,17 +86,10 @@ struct Stream {
     y0: u32,
 }
 
-struct Work {
-    handle: u64,
-    /// Dropped with the last engine's work: the texture may be drawn over.
-    _held: Arc<InFlight>,
-    ready: GpuReady,
-    frame: u32,
-    key: bool,
-    refine: bool,
-    built_ns: u64,
-    /// This stream's rate (kbit/s): set on the encoder when it changed.
-    kbps: u32,
+/// The streams of a shape: their parts and their workers (one tile each).
+struct Streams {
+    list: Vec<Stream>,
+    workers: TileEncoders<(u32, u64)>,
 }
 
 /// What the streams are opened for: a picture of another shape opens them again.
@@ -160,16 +124,17 @@ const REFINE_AFTER: Duration = Duration::from_millis(120);
 /// The streams for `size` with `split` on this machine's engines: each a worker thread owning
 /// its encoder. Bands are whole macroblock rows except the last, so they cover the picture's rows
 /// exactly once (pixel-exact seams).
-fn open_streams(size: [u32; 2], fps: u32, kbps: u32, shape: Shape, done: &Sender<Done>) -> Result<(Vec<Stream>, bool), String> {
+fn open_streams(size: [u32; 2], fps: u32, kbps: u32, shape: Shape, done: &Sender<Done>) -> Result<(Streams, bool), String> {
     let Shape { split, full_chroma, plan, hevc, sharp, .. } = shape;
-    let engines = VideoStreamEncoder::engines().max(1);
+    let engines = VideoStreamEncoder::caps().engines.max(1);
     // tiles: one stream per tile, the engines in turn; whole pictures interleaved over the
     // engines, or one stream
     let tiles = plan.tiles() > 1;
     let n = if tiles { plan.tiles() } else if split == Split::Interleave && size[1] >= 64 { engines } else { 1 } as usize;
     let cols = TilePlan::columns(size[0], plan.cols);
     let rows = TilePlan::bands(size[1], plan.rows);
-    let mut streams = Vec::with_capacity(n);
+    let mut list = Vec::with_capacity(n);
+    let mut specs = Vec::with_capacity(n);
     for i in 0..n {
         let ((x0, w), (y0, h)) = if tiles { (cols[i % cols.len()], rows[i / cols.len()]) } else { ((0, size[0]), (0, size[1])) };
         // an interleaved stream carries every n-th picture
@@ -177,46 +142,30 @@ fn open_streams(size: [u32; 2], fps: u32, kbps: u32, shape: Shape, done: &Sender
         // the whole stream's rate by area: a tile its own share, interleaved streams each the
         // whole rate at their share of the pictures
         let share = if tiles { (w as f64 * h as f64) / (size[0] as f64 * size[1] as f64).max(1.0) } else { 1.0 / n as f64 };
-        let kbps = share_kbps(kbps, share);
         let codec = if hevc { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
-        let options = VideoStreamEncoderOptions { codec, width: w, height: h, fps: stream_fps, bitrate_kbps: kbps, keyint: 0, low_latency: true, full_chroma };
+        let options = VideoStreamEncoderOptions { codec, width: w, height: h, fps: stream_fps, bitrate_kbps: share_kbps(kbps, share), keyint: 0, low_latency: true, full_chroma };
         let tile = StreamTile { engine: i as u32 % engines, x0, y0, source_height: size[1] };
-        let tuning = StreamTuning { sharp, ..StreamTuning::default() };
-        let mut encoder = VideoStreamEncoder::new_tuned(options, tile, tuning).map_err(|e| format!("{e:?}"))?;
-        super::note(&format!("desk link stream {}/{n}{}: {}", i + 1, if n == 1 { String::new() } else if tiles { format!(" (tile {x0},{y0} {w}x{h} of {}x{}, engine {})", plan.cols, plan.rows, i as u32 % engines) } else { " (interleaved)".into() }, encoder.description()));
-        let (tx, rx) = channel::<Work>();
-        let done = done.clone();
-        std::thread::Builder::new()
-            .name(format!("desk-link-encode-{i}"))
-            .spawn(move || {
-                let mut applied = kbps;
-                while let Ok(w) = rx.recv() {
-                    if w.kbps != applied && w.kbps != 0 {
-                        encoder.set_bitrate_kbps(w.kbps);
-                        applied = w.kbps;
-                    }
-                    if w.key {
-                        encoder.request_keyframe();
-                    } else if w.refine {
-                        encoder.request_refinement();
-                    }
-                    let pushed = makepad_hal::clock_ns();
-                    let out = encoder.push_shared_texture(w.handle, w.ready, w.frame as i64).map_err(|e| format!("{e:?}")).map(|packets| packets.into_iter().flat_map(|p| p.data).collect::<Vec<u8>>());
-                    let encoded = makepad_hal::clock_ns();
-                    if done.send((i, w.frame, w.built_ns, encoded, w.key, encoded.saturating_sub(pushed) / 1000, out)).is_err() {
-                        return;
-                    }
-                }
-            })
-            .map_err(|e| e.to_string())?;
-        streams.push(Stream { tx, share, x0, y0 });
+        specs.push(TileSpec { options, tile, tuning: StreamTuning { sharp, ..StreamTuning::default() } });
+        list.push(Stream { share, x0, y0 });
     }
-    Ok((streams, tiles))
+    let done = done.clone();
+    let sink: TileSink<(u32, u64)> = Arc::new(move |d: TileDone<(u32, u64)>| {
+        let took_us = d.push().as_micros() as u64;
+        let out = d.packets.map(|packets| packets.into_iter().flat_map(|p| p.data).collect::<Vec<u8>>());
+        let _ = done.send((d.tile, d.tag.0, d.tag.1, d.encoded_ns, d.key, took_us, out));
+    });
+    let workers = TileEncoders::open("desk-link-encode", specs, sink)?;
+    for i in 0..n {
+        let (tile, [w, h]) = workers.tile(i);
+        let where_ = if n == 1 { String::new() } else if tiles { format!(" (tile {},{} {w}x{h} of {}x{}, engine {})", tile.x0, tile.y0, plan.cols, plan.rows, tile.engine) } else { " (interleaved)".into() };
+        super::note(&format!("desk link stream {}/{n}{where_}: {}", i + 1, workers.description(i)));
+    }
+    Ok((Streams { list, workers }, tiles))
 }
 
 fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + Sync>, stats: Arc<EncodeStats>) {
     // the streams, for (size, split); dropping them ends their workers
-    let mut streams: Option<(Vec<Stream>, [u32; 2], Shape, bool)> = None;
+    let mut streams: Option<(Streams, [u32; 2], Shape, bool)> = None;
     let (done_tx, done_rx) = channel::<Done>();
     let mut in_flight = 0usize;
     // the tiles of the pictures being encoded (at most two): each picture's frame and parts
@@ -250,9 +199,9 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
     // encoded near lossless (it stays so until a picture changes something)
     let last_change = std::cell::Cell::new(Instant::now());
     let refining: std::cell::Cell<Option<u32>> = std::cell::Cell::new(None);
-    let take = |d: Done, streams: &Option<(Vec<Stream>, [u32; 2], Shape, bool)>, gathering: &mut Gathering, failed: &mut bool, fail: &mut dyn FnMut(String)| {
+    let take = |d: Done, streams: &Option<(Streams, [u32; 2], Shape, bool)>, gathering: &mut Gathering, failed: &mut bool, fail: &mut dyn FnMut(String)| {
         let (i, frame, built_ns, encoded_ns, key, took_us, out) = d;
-        let Some((list, _, shape, tiles)) = streams else { return };
+        let Some((Streams { list, .. }, _, shape, tiles)) = streams else { return };
         let codec = if shape.hevc { proto::pref::HEVC } else { proto::pref::H264 };
         let parts = if *tiles { list.len() } else { 1 };
         match out {
@@ -311,17 +260,13 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
         }
         match job {
             Job::Keyframe => key_wanted = true,
-            Job::Release(_handle) => {
-                #[cfg(target_os = "linux")]
-                makepad_hal::dmabuf::hal_dmabuf_release(_handle);
-            }
             Job::Reset => {
                 streams = None;
                 key_wanted = true;
             }
-            Job::Picture { handle, held, size, fence, built_ns, fps, kbps, split, full_chroma, refine, plan, hevc, sharp } => {
+            Job::Picture { surface, held, size, ready, built_ns, fps, kbps, split, full_chroma, refine, plan, hevc, sharp } => {
                 let shape = Shape { split, full_chroma, fps, plan, hevc, sharp };
-                let held = Arc::new(held);
+                let held: Arc<dyn Send + Sync> = Arc::new(held);
                 // still (no picture, or pictures that change nothing) for REFINE_AFTER: near-lossless
                 // pictures from this one on, until one changes something
                 if refining.get().is_none() && (refine || last_change.get().elapsed() >= REFINE_AFTER) {
@@ -360,14 +305,7 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                         }
                     }
                 }
-                let ready = match ready(fence) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        fail(format!("desk link stream: {e}"));
-                        continue;
-                    }
-                };
-                let (list, _, _, tiles) = streams.as_ref().unwrap();
+                let (Streams { list, workers }, _, _, tiles) = streams.as_ref().unwrap();
                 let tiles = *tiles;
                 if std::mem::take(&mut key_wanted) {
                     keys_left = if tiles { 1 } else { list.len() };
@@ -383,13 +321,9 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                         take(d, &streams, &mut gathering, &mut failed, &mut fail);
                     }
                     // every engine on its tiles of this picture at once
-                    let mut readies = vec![ready];
-                    for _ in 1..n {
-                        readies.push(clone_ready(&readies[0]));
-                    }
                     gathering.push_back((frame, vec![None; n], 0));
-                    for (s, ready) in list.iter().zip(readies) {
-                        let _ = s.tx.send(Work { handle, _held: held.clone(), ready, frame, key, refine, built_ns, kbps: share_kbps(kbps, s.share) });
+                    for (i, s) in list.iter().enumerate() {
+                        workers.push(i, TileWork { surface: surface.clone(), held: held.clone(), ready: ready.clone(), kbps: share_kbps(kbps, s.share), key, refine, pts_100ns: frame as i64, tag: (frame, built_ns) });
                         in_flight += 1;
                     }
                     while let Ok(d) = done_rx.try_recv() {
@@ -404,8 +338,8 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
                         in_flight -= 1;
                         take(d, &streams, &mut gathering, &mut failed, &mut fail);
                     }
-                    let s = &list[frame as usize % n];
-                    let _ = s.tx.send(Work { handle, _held: held, ready, frame, key, refine, built_ns, kbps: share_kbps(kbps, s.share) });
+                    let i = frame as usize % n;
+                    workers.push(i, TileWork { surface, held, ready, kbps: share_kbps(kbps, list[i].share), key, refine, pts_100ns: frame as i64, tag: (frame, built_ns) });
                     in_flight += 1;
                     // answers that came meanwhile go out at once
                     while let Ok(d) = done_rx.try_recv() {
@@ -418,13 +352,3 @@ fn run(rx: Receiver<Job>, subscribers: Subscribers, wake: Arc<dyn Fn() + Send + 
         }
     }
 }
-
-/// The same readiness for another engine (the sync_file duplicated).
-fn clone_ready(ready: &GpuReady) -> GpuReady {
-    match ready {
-        GpuReady::Done => GpuReady::Done,
-        #[cfg(target_os = "linux")]
-        GpuReady::SyncFile(fd) => fd.try_clone().map(GpuReady::SyncFile).unwrap_or(GpuReady::Done),
-    }
-}
-

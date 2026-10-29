@@ -459,8 +459,7 @@ mod tests {
     /// Builder ids that are deliberately not registry apps, with the reason.
     /// Every other app Builder builds is in the registry (the ones the WM
     /// does not host are `wm_launchable: false`).
-    const BUILDER_ONLY: &[(&str, &str)] =
-        &[("gltf", "makepad-fab-loader-gltf is Fab's loader library: it builds no binary to run")];
+    const BUILDER_ONLY: &[(&str, &str)] = &[];
 
     /// The checkout these tests were compiled in.
     fn test_root() -> PathBuf {

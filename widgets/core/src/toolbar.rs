@@ -581,6 +581,13 @@ impl Toolbar {
 }
 
 impl Widget for Toolbar {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Toolbar;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> { Some(self.title.clone()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -650,9 +657,7 @@ impl Widget for Toolbar {
         self.set_title(cx, v);
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.title.clone())
-    }
+
 }
 
 impl ToolbarRef {
@@ -805,6 +810,19 @@ impl PageHeader {
 }
 
 impl Widget for PageHeader {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            if self.subtitle.is_empty() {
+                return Some(self.title.clone());
+            }
+            Some(format!("{} \u{2014} {}", self.title, self.subtitle))
+        })()
+        .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -869,14 +887,7 @@ impl Widget for PageHeader {
         self.set_title(cx, v);
     }
 
-    /// The title and the subtitle as one line, so a test can wait on the
-    /// wording rather than on which property it came from.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        if self.subtitle.is_empty() {
-            return Some(self.title.clone());
-        }
-        Some(format!("{} \u{2014} {}", self.title, self.subtitle))
-    }
+
 }
 
 impl PageHeaderRef {

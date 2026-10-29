@@ -31,6 +31,8 @@ mod cx_api;
 mod shared_bytes;
 
 pub mod action;
+pub mod a11y;
+pub use makepad_a11y as a11y_tree;
 pub mod game_input;
 pub mod frame_trace;
 pub mod frame_sources;
@@ -43,6 +45,8 @@ pub mod script;
 pub mod thread;
 pub mod storage;
 pub mod video;
+pub mod native_layer;
+pub use native_layer::{NativeContent, NativeLayer, NativeLayerId, NativeLayerStyle, NativeLayerMode, NativeLayerHandle, NativeLayerEvent, NativeLayerEventKind};
 pub mod gpu_texture;
 #[cfg(target_os = "linux")]
 pub mod foreign_dmabuf;
@@ -198,7 +202,7 @@ pub use crate::cx::{
     first_present_seen, launched_hidden_until_first_present,startup_trace_first_present,
     startup_acc, startup_since_exec_ms, startup_trace, startup_trace_enabled, startup_trace_flush,
 };
-pub use crate::cx_api::{can_play_type, CxSystemBrowser, SystemBrowserId};
+pub use crate::cx_api::can_play_type;
 pub use crate::xr_tsdf::{
     XrDepthAlignHeightMap, XrTsdfCooperativeStepResult, XrTsdfCooperativeStepStats,
 };
@@ -244,16 +248,16 @@ pub use {
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
         cx::{Cx, CxMemoryReport, CxRef, GpuBackend, LinuxWindowParams, OsType},
-        cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, HapticFeedback, OpenUrlInPlace, ScreenEdges},
+        cx_api::{ CxOsApi, CxOsOp, CxThreadPriority, HapticFeedback, OpenUrlInPlace, ScreenEdges},
         display_context::{DisplayContext, ScreenOrientation, SystemBarAppearance},
         font_policy::{
             extend_font_asset_manifest, font_asset_manifest_len, FontAsset, FontChain, FontPolicy,
             FontRole, FontSet, LazyFontAsset, LazyFontFamily, FONT_ASSET_MANIFEST_SECTION, LAZY_FONT_FACES, LAZY_FONT_FALLBACKS,
             INTERNATIONAL_FONT_ASSET_MANIFEST, LATIN_FONT_ASSET_MANIFEST,
-            LATIN_FONT_ASSET_PACKAGE_MANIFEST, MATH_VIEW_FONT_ASSET, INTER_FONT_ASSET,
+            LATIN_FONT_ASSET_PACKAGE_MANIFEST, SYSTEM_FONT_ASSET_MANIFEST, MATH_VIEW_FONT_ASSET, INTER_FONT_ASSET,
             ROBOTO_FLEX_FONT_ASSET, UI_SYMBOL_FALLBACK,
         },
-        draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId, DrawListRecordingStorage},
+        draw_list::{CxDrawCall, CxDrawKind, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId, DrawListRecordingStorage},
         shared_instances::{
             upload_pacing, FrameLease, FrameLeases, PublicationAccounting, PublicationIds, Publications,
             PublishBackpressure, PublishError, PublishHints, PublishReceipt, ReceiptPhase, SharedInstances,

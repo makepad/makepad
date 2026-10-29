@@ -1,6 +1,6 @@
 //! The inspect client's text answers: inspect's own commands go through the one renderer
 //! ([`makepad_prof_stream::answer`], which Scope's Live console calls too); the app's
-//! remote-control commands (`snap`, `dump`, `click`, ..) keep their own output.
+//! remote-control commands (`ui`, `ui find`, `ui act`, ..) keep their own output.
 
 use makepad_prof_stream::answer::{self, Request};
 

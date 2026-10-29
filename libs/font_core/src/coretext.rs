@@ -719,7 +719,7 @@ mod tests {
     fn single_face_font_passes_through() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../widgets/resources/IBMPlexSans-Text.ttf"
+            "/../../widgets/resources/IBMPlexSans-Text.ttf"
         );
         let data = std::fs::read(path).expect("bundled font should exist");
         let extracted = extract_single_face_sfnt(&data, 0).expect("pass-through should work");

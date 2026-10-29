@@ -1443,3 +1443,146 @@ Windows.Win32.UI.Shell.Shell_NotifyIconGetRect
 Windows.Win32.UI.Shell.NOTIFYICONIDENTIFIER
 Windows.Win32.Graphics.Gdi.MonitorFromRect
 Windows.Win32.UI.WindowsAndMessaging.SWP_SHOWWINDOW
+Windows.Win32.System.JobObjects.TerminateJobObject
+Windows.Win32.System.JobObjects.QueryInformationJobObject
+Windows.Win32.System.JobObjects.JOBOBJECT_BASIC_ACCOUNTING_INFORMATION
+Windows.Win32.System.JobObjects.JobObjectBasicAccountingInformation
+Windows.Win32.System.JobObjects.JOBOBJECT_BASIC_PROCESS_ID_LIST
+Windows.Win32.System.JobObjects.JobObjectBasicProcessIdList
+Windows.Win32.System.Diagnostics.ToolHelp.Thread32First
+Windows.Win32.System.Diagnostics.ToolHelp.Thread32Next
+Windows.Win32.System.Diagnostics.ToolHelp.THREADENTRY32
+Windows.Win32.System.Diagnostics.ToolHelp.TH32CS_SNAPTHREAD
+Windows.Win32.System.Diagnostics.ToolHelp.TH32CS_SNAPPROCESS
+Windows.Win32.System.Threading.OpenThread
+Windows.Win32.System.Threading.ResumeThread
+Windows.Win32.System.Threading.THREAD_SUSPEND_RESUME
+Windows.Win32.System.Threading.GetSystemTimes
+Windows.Win32.System.Threading.CREATE_SUSPENDED
+Windows.Win32.System.Threading.CREATE_NEW_PROCESS_GROUP
+Windows.Win32.System.Threading.CREATE_NO_WINDOW
+Windows.Win32.System.Threading.BELOW_NORMAL_PRIORITY_CLASS
+Windows.Win32.System.Threading.PROCESS_TERMINATE
+Windows.Win32.System.Threading.PROCESS_SET_QUOTA
+Windows.Win32.System.Threading.PROCESS_QUERY_INFORMATION
+Windows.Win32.System.Threading.PROCESS_VM_READ
+Windows.Win32.System.ProcessStatus.K32GetProcessMemoryInfo
+Windows.Win32.System.ProcessStatus.PROCESS_MEMORY_COUNTERS
+Windows.Win32.System.SystemInformation.GetNativeSystemInfo
+Windows.Win32.System.SystemInformation.SYSTEM_INFO
+Windows.Win32.System.SystemInformation.GetTickCount64
+Windows.Win32.System.Power.GetSystemPowerStatus
+Windows.Win32.System.Power.SYSTEM_POWER_STATUS
+
+# UI Automation providers are called concurrently, including destruction.
+# Explicit bounds preserve apartment-local implementations of other interfaces.
+implement Windows.Win32.UI.Accessibility.IRawElementProviderSimple: Send + Sync
+implement Windows.Win32.UI.Accessibility.IRawElementProviderFragment: Send + Sync
+implement Windows.Win32.UI.Accessibility.IRawElementProviderFragmentRoot: Send + Sync
+implement Windows.Win32.UI.Accessibility.IInvokeProvider: Send + Sync
+implement Windows.Win32.UI.Accessibility.IToggleProvider: Send + Sync
+implement Windows.Win32.UI.Accessibility.IValueProvider: Send + Sync
+implement Windows.Win32.UI.Accessibility.IRangeValueProvider: Send + Sync
+implement Windows.Win32.UI.Accessibility.ISelectionProvider: Send + Sync
+implement Windows.Win32.UI.Accessibility.ISelectionItemProvider: Send + Sync
+implement Windows.Win32.UI.Accessibility.IExpandCollapseProvider: Send + Sync
+implement Windows.Win32.UI.Accessibility.IScrollProvider: Send + Sync
+implement Windows.Win32.UI.Accessibility.IScrollItemProvider: Send + Sync
+implement Windows.Win32.UI.Accessibility.ITextProvider: Send + Sync
+implement Windows.Win32.UI.Accessibility.ITextProvider2: Send + Sync
+implement Windows.Win32.UI.Accessibility.ITextRangeProvider: Send + Sync
+implement Windows.Win32.UI.Accessibility.IGridProvider: Send + Sync
+implement Windows.Win32.UI.Accessibility.IGridItemProvider: Send + Sync
+implement Windows.Win32.UI.Accessibility.ITableProvider: Send + Sync
+implement Windows.Win32.UI.Accessibility.ITableItemProvider: Send + Sync
+Windows.Win32.UI.Accessibility.UiaReturnRawElementProvider
+Windows.Win32.UI.Accessibility.UiaHostProviderFromHwnd
+Windows.Win32.UI.Accessibility.UiaRaiseAutomationEvent
+Windows.Win32.UI.Accessibility.UiaRaiseAutomationPropertyChangedEvent
+Windows.Win32.UI.Accessibility.UiaRaiseStructureChangedEvent
+Windows.Win32.UI.Accessibility.UiaRaiseNotificationEvent
+Windows.Win32.UI.Accessibility.UiaClientsAreListening
+Windows.Win32.UI.Accessibility.UiaDisconnectProvider
+Windows.Win32.UI.Accessibility.UiaDisconnectAllProviders
+Windows.Win32.UI.Accessibility.UiaRootObjectId
+Windows.Win32.UI.Accessibility.UiaAppendRuntimeId
+Windows.Win32.UI.WindowsAndMessaging.WM_GETOBJECT
+constants Windows.Win32.UI.Accessibility.UIA_*PropertyId
+constants Windows.Win32.UI.Accessibility.UIA_*ControlTypeId
+constants Windows.Win32.UI.Accessibility.UIA_*PatternId
+constants Windows.Win32.UI.Accessibility.UIA_*EventId
+constants Windows.Win32.UI.Accessibility.UIA_E_*
+Windows.Win32.UI.Accessibility.ProviderOptions
+constants Windows.Win32.UI.Accessibility.ProviderOptions_*
+Windows.Win32.UI.Accessibility.NavigateDirection
+constants Windows.Win32.UI.Accessibility.NavigateDirection_*
+Windows.Win32.UI.Accessibility.StructureChangeType
+constants Windows.Win32.UI.Accessibility.StructureChangeType_*
+Windows.Win32.UI.Accessibility.ToggleState
+constants Windows.Win32.UI.Accessibility.ToggleState_*
+Windows.Win32.UI.Accessibility.ExpandCollapseState
+constants Windows.Win32.UI.Accessibility.ExpandCollapseState_*
+Windows.Win32.UI.Accessibility.RowOrColumnMajor
+constants Windows.Win32.UI.Accessibility.RowOrColumnMajor_*
+Windows.Win32.UI.Accessibility.ScrollAmount
+constants Windows.Win32.UI.Accessibility.ScrollAmount_*
+Windows.Win32.UI.Accessibility.SupportedTextSelection
+constants Windows.Win32.UI.Accessibility.SupportedTextSelection_*
+Windows.Win32.UI.Accessibility.TextPatternRangeEndpoint
+constants Windows.Win32.UI.Accessibility.TextPatternRangeEndpoint_*
+Windows.Win32.UI.Accessibility.TextUnit
+constants Windows.Win32.UI.Accessibility.TextUnit_*
+Windows.Win32.UI.Accessibility.NotificationKind
+constants Windows.Win32.UI.Accessibility.NotificationKind_*
+Windows.Win32.UI.Accessibility.NotificationProcessing
+constants Windows.Win32.UI.Accessibility.NotificationProcessing_*
+Windows.Win32.UI.Accessibility.OrientationType
+constants Windows.Win32.UI.Accessibility.OrientationType_*
+Windows.Win32.UI.Accessibility.LiveSetting
+constants Windows.Win32.UI.Accessibility.LiveSetting_*
+Windows.Win32.UI.Accessibility.UiaRect
+Windows.Win32.System.Variant.VariantClear
+constants Windows.Win32.System.Variant.VT_*
+Windows.Win32.System.Ole.SafeArrayCreateVector
+Windows.Win32.System.Ole.SafeArrayPutElement
+Windows.Win32.System.Ole.SafeArrayAccessData
+Windows.Win32.System.Ole.SafeArrayUnaccessData
+Windows.Win32.System.Ole.SafeArrayDestroy
+
+# In-process client for comparing the provider tree with the mirror.
+Windows.Win32.UI.Accessibility.IUIAutomation
+Windows.Win32.UI.Accessibility.CUIAutomation
+Windows.Win32.UI.Accessibility.IUIAutomationElement
+Windows.Win32.UI.Accessibility.IUIAutomationElementArray
+Windows.Win32.UI.Accessibility.IUIAutomationTreeWalker
+Windows.Win32.UI.Accessibility.IUIAutomationCondition
+Windows.Win32.UI.Accessibility.IUIAutomationInvokePattern
+Windows.Win32.UI.Accessibility.IUIAutomationValuePattern
+Windows.Win32.UI.Accessibility.IUIAutomationTogglePattern
+
+# Successful null interface results denote missing patterns, matches or neighbours.
+nullable Windows.Win32.UI.Accessibility.IRawElementProviderSimple.GetPatternProvider.pRetVal
+nullable Windows.Win32.UI.Accessibility.IRawElementProviderSimple.get_HostRawElementProvider.pRetVal
+nullable Windows.Win32.UI.Accessibility.IRawElementProviderFragment.Navigate.pRetVal
+nullable Windows.Win32.UI.Accessibility.IRawElementProviderFragmentRoot.ElementProviderFromPoint.pRetVal
+nullable Windows.Win32.UI.Accessibility.IRawElementProviderFragmentRoot.GetFocus.pRetVal
+nullable Windows.Win32.UI.Accessibility.ITextRangeProvider.FindAttribute.pRetVal
+nullable Windows.Win32.UI.Accessibility.ITextRangeProvider.FindText.pRetVal
+nullable Windows.Win32.UI.Accessibility.IUIAutomationTreeWalker.GetParentElement.parent
+nullable Windows.Win32.UI.Accessibility.IUIAutomationTreeWalker.GetFirstChildElement.first
+nullable Windows.Win32.UI.Accessibility.IUIAutomationTreeWalker.GetLastChildElement.last
+nullable Windows.Win32.UI.Accessibility.IUIAutomationTreeWalker.GetNextSiblingElement.next
+nullable Windows.Win32.UI.Accessibility.IUIAutomationTreeWalker.GetPreviousSiblingElement.previous
+nullable Windows.Win32.UI.Accessibility.IUIAutomationTreeWalker.NormalizeElement.normalized
+nullable Windows.Win32.UI.Accessibility.IUIAutomationTreeWalker.GetParentElementBuildCache.parent
+nullable Windows.Win32.UI.Accessibility.IUIAutomationTreeWalker.GetFirstChildElementBuildCache.first
+nullable Windows.Win32.UI.Accessibility.IUIAutomationTreeWalker.GetLastChildElementBuildCache.last
+nullable Windows.Win32.UI.Accessibility.IUIAutomationTreeWalker.GetNextSiblingElementBuildCache.next
+nullable Windows.Win32.UI.Accessibility.IUIAutomationTreeWalker.GetPreviousSiblingElementBuildCache.previous
+nullable Windows.Win32.UI.Accessibility.IUIAutomationTreeWalker.NormalizeElementBuildCache.normalized
+
+# Text-provider attributes and UTF-16 strings used by the Win32 semantic adapter.
+Windows.Win32.UI.Accessibility.UiaGetReservedNotSupportedValue
+Windows.Win32.UI.Accessibility.UIA_TextPattern2Id
+constants Windows.Win32.UI.Accessibility.UIA_*AttributeId
+Windows.Win32.Foundation.SysStringLen

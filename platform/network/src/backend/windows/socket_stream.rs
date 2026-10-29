@@ -142,6 +142,19 @@ impl SocketStream {
     /// WinRT: a WinRT socket cannot safely issue a second blocking operation
     /// on the same thread.
     pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, Vec<u8>)> {
+        Self::capture(host, port, None)
+    }
+
+    /// Like [`Self::connect_capture`], resuming the TLS session of `session_of`
+    /// (an earlier captured connection to `host`; FTPS data channels need this).
+    pub fn connect_capture_resuming(host: &str, port: &str, session_of: &Self) -> io::Result<(Self, Vec<u8>)> {
+        let Some(earlier) = session_of.schannel.as_ref() else {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "no captured TLS session to resume"));
+        };
+        Self::capture(host, port, Some(earlier))
+    }
+
+    fn capture(host: &str, port: &str, resume: Option<&crate::tls::platform::ServerStream>) -> io::Result<(Self, Vec<u8>)> {
         use std::net::ToSocketAddrs;
         let port: u16 = port.parse().map_err(|_| io_other("bad port"))?;
         let mut last = None;
@@ -150,7 +163,7 @@ impl SocketStream {
                 Ok(tcp) => {
                     let _ = tcp.set_nodelay(true);
                     tcp.set_read_timeout(Some(Duration::from_secs(20)))?;
-                    let (stream, der) = crate::tls::platform::connect_capture(tcp, host)?;
+                    let (stream, der) = crate::tls::platform::connect_capture(tcp, host, resume)?;
                     stream.tcp().set_read_timeout(None)?;
                     return Ok((Self { socket: None, reader: None, writer: None, schannel: Some(stream) }, der));
                 }
@@ -158,6 +171,15 @@ impl SocketStream {
             }
         }
         Err(last.unwrap_or_else(|| io_other("no address")))
+    }
+
+    pub fn connect_capture_chain(host: &str, port: &str) -> io::Result<(Self, Vec<Vec<u8>>)> {
+        let (mut socket, _) = Self::connect_capture(host, port)?;
+        let result = socket.schannel.as_mut().ok_or_else(|| io_other("TLS stream required"))?.peer_chain_der();
+        match result {
+            Ok(chain) => Ok((socket, chain)),
+            Err(e) => { socket.shutdown(); Err(e) }
+        }
     }
 
     pub fn into_tls(self, _host: &str, _ignore_ssl_cert: bool) -> io::Result<Self> {

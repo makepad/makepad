@@ -15,6 +15,8 @@ pub mod mouse;
 pub mod relay;
 pub mod shared_framebuf;
 pub mod studio;
+pub mod native_app;
+pub use native_app::*;
 
 /// The hosted wire's fingerprint: every source file whose types travel
 /// between a host and its `--stdin-loop` children (binary, by ordinal), and
@@ -33,5 +35,6 @@ pub const WIRE: u64 = {
     hash = fingerprint(hash, include_bytes!("relay.rs"));
     hash = fingerprint(hash, include_bytes!("shared_framebuf.rs"));
     hash = fingerprint(hash, include_bytes!("studio.rs"));
+    hash = fingerprint(hash, include_bytes!("native_app.rs"));
     hash
 };

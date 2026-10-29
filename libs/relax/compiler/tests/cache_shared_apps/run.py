@@ -16,6 +16,7 @@ STD = os.path.normpath(os.path.join(HERE, "..", "..", "std"))
 PLAIN = ["unrelated", "uses_unrelated", "area", "sum_to", "add"]
 FW = "fw/src/lib.rs"
 E_ADD = (FW, "pub fn add(a: u32, b: u32) -> u32 { a + b } // EDIT add", "pub fn add(a: u32, b: u32) -> u32 { a + b + 100 } // EDIT add")
+E_WRAP = 'pub fn wrap<T: Default + std::fmt::Debug>() -> usize { format!("{:?}", T::default()).len() }'
 E_SHAPE = (FW, "pub struct Shape { pub w: u32, pub h: u32 } // EDIT shape", "pub struct Shape { pub w: u32, pub h: u32, pub d: u64 } // EDIT shape")
 # a scenario: first/second app, edits applied to the tree between the runs (or, with "tree2", to a second copy of the
 # tree the second app runs in: same crate names at other paths), env of the two runs, the first command (run|check),
@@ -56,6 +57,38 @@ SCENARIOS = {
     # app -> mid -> fw: fw's interface changes, mid's source does not
     "mid_iface": dict(first="app_g", second="app_g", edits=[E_SHAPE], compiled=["mid_area", "mid_shape_size"]),
     "mid_body": dict(first="app_g", second="app_g", edits=[E_ADD], hit=["mid_area", "mid_shape_size"], compiled=["add"]),
+    # JITCOLD2: an edit outside fn bodies recompiles what names it, not the crate (cache/deps.rs). Each must
+    # recompile the fn whose meaning changes (and show it in the output) and keep the plain fns linked.
+    "add_item": dict(first="app_a", second="app_a", edits=[(FW, E_WRAP, E_WRAP + "\npub fn brand_new() -> u32 { 9 }")],
+                     hit=PLAIN + ["uses_which", "sink_len", "uses_seven", "greet_plain", "apply", "from_macro"]),
+    "shadow": dict(first="app_a", second="app_a", edits=[(FW, "// EDIT shadow", "pub fn which() -> u32 { 2 } // EDIT shadow")],
+                   hit=PLAIN, compiled=["uses_which"], observable=True),
+    "inherent": dict(first="app_a", second="app_a", edits=[(FW, "// EDIT inherent", "impl Sink { pub fn write_fmt(&mut self, _a: std::fmt::Arguments) -> std::fmt::Result { self.0 += 100; Ok(()) } } // EDIT inherent")],
+                     hit=PLAIN, compiled=["sink_len"], observable=True),
+    "seven": dict(first="app_a", second="app_a", edits=[(FW, "macro_rules! seven { () => { 7 } } // EDIT seven", "macro_rules! seven { () => { 8 } } // EDIT seven")],
+                  hit=PLAIN, compiled=["uses_seven"], observable=True),
+    "greet": dict(first="app_a", second="app_a", edits=[(FW, "impl Greet for Plain {} // EDIT greet", "impl Greet for Plain { fn greet(&self) -> u32 { 2 } } // EDIT greet")],
+                  hit=PLAIN, compiled=["greet_plain"], observable=True),
+    "apit": dict(first="app_a", second="app_a", edits=[(FW, "pub fn apply(f: impl Fn(u32) -> u32) -> u32 { f(2) } // EDIT apit", "pub fn apply(f: impl Fn(u32) -> u32) -> u32 { f(3) } // EDIT apit")],
+                 hit=PLAIN, compiled=["apply"], observable=True),
+    # JITCOLD7: a static's/constant's value entry holds while the bodies its evaluation ran keep their code keys:
+    # an edit of a const fn another crate's static (or a constant it reads, or a static it points to) ran must
+    # evaluate it again; an edit of the app's own const fn too
+    "const_fn": dict(first="app_a", second="app_a", edits=[(FW, "pub const fn cval(x: u32) -> u32 { x * 3 } // EDIT cval", "pub const fn cval(x: u32) -> u32 { x * 5 } // EDIT cval")],
+                     hit=PLAIN, observable=True),
+    "own_const_fn": dict(first="app_a", second="app_a", edits=[("app_a/src/main.rs", "const fn own_c(x: u32) -> u32 { x + 4 } // EDIT own_c", "const fn own_c(x: u32) -> u32 { x + 40 } // EDIT own_c")],
+                         hit=PLAIN, observable=True),
+    # JITCOLD7: an edited crate's unchanged file takes its earlier image only while its macro lookups replay to the
+    # same rules: the macro's rules change in another file (alt.rs uses mk_fn! of lib.rs)
+    "macro_rules_other_file": dict(first="app_a", second="app_a", edits=[(FW, "pub fn $name() -> u32 { $v + 1 } // EDIT mk_fn", "pub fn $name() -> u32 { $v + 2 } // EDIT mk_fn")],
+                                   hit=["unrelated", "area", "sum_to", "add"], observable=True),
+    # JITCOLD7: a dependency's edit keeps a dependent crate's unchanged files from their images only while their
+    # macro lookups replay: the rules of an exported macro app_a uses change in fw
+    "dep_macro_rules": dict(first="app_a", second="app_a", edits=[(FW, "macro_rules! fw_twice { ($e:expr) => { $e * 2 } } // EDIT fw_twice", "macro_rules! fw_twice { ($e:expr) => { $e * 3 } } // EDIT fw_twice")],
+                            hit=["unrelated", "area", "sum_to", "add"], observable=True),
+    # an app's own new item: the framework and the app's other fns stay linked
+    "own_item": dict(first="app_a", second="app_a", edits=[("app_a/src/main.rs", "fn own_a(x: u32) -> u32 { x * 9 + 2 }", "fn own_a(x: u32) -> u32 { x * 9 + 2 }\nfn own_b() -> u32 { 3 }")],
+                     hit=PLAIN + ["own_a", "uses_which", "sink_len"]),
 }
 MIN_HITS = {}
 

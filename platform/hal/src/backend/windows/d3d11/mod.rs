@@ -48,6 +48,7 @@ struct Pipe {
 
 pub struct D3d11 {
     shell: Option<&'static win32::Shared>,
+    a11y_update: Option<win32::a11y::Update>,
     dev: Arc<Device>,
     info: HalInfo,
     tex: HashMap<(u32, u32), Tex>,
@@ -133,6 +134,7 @@ impl D3d11 {
         }
         Ok(Self {
             shell,
+            a11y_update: None,
             cb_arena: Arena::new(&dev, 256 * 1024, true)?,
             word_arena: Arena::new(&dev, 256 * 1024, false)?,
             scratch: Default::default(),
@@ -301,6 +303,11 @@ impl D3d11 {
 }
 
 impl Backend for D3d11 {
+    /// Complete once submitted: a shared texture's keyed mutex, released at the end of the pass
+    /// that drew it, orders the reader's GPU use after it.
+    fn frame_completion(&mut self, _session: u32, _notify: std::sync::Arc<dyn Fn() + Send + Sync>) -> Result<crate::completion::Completion, String> {
+        Ok(crate::completion::Completion::done())
+    }
     fn info(&self) -> HalInfo {
         self.info
     }
@@ -438,6 +445,13 @@ impl exec::DeviceReset for D3d11 {
 }
 
 impl Gpu for D3d11 {
+    fn a11y_prepare(&mut self, window: u64, update: &makepad_a11y::TreeUpdate) {
+        if self.shell.is_some() { self.a11y_update = Some(win32::a11y::prepare(window, update)); }
+    }
+    fn a11y_notify(&mut self, window: u64, notifications: &[makepad_a11y::Notification]) {
+        if let (Some(shell), Some(update)) = (self.shell, self.a11y_update.take()) { win32::a11y::queue(shell, window, update, notifications); }
+    }
+
     fn media(&mut self, s: &mut Session, c: &crate::cmds::HalCmd) -> bool {
         self.media.command(&mut super::media::Sink { dev: &self.dev, tex: &mut self.tex, now: crate::clock_ns() }, s, c)
     }

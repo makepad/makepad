@@ -356,6 +356,8 @@ pub struct Renderer {
     /// Applied as the scene draw list's view transform, so it costs one
     /// uniform and never invalidates the static slabs. See stage.rs.
     stage: Stage,
+    /// The box an `MrBox` stage shows the world in (`set_clip_box`).
+    clip_box: Option<crate::stage::ClipBox>,
     /// How many casters get a projected silhouette before the rest fall
     /// back to blobs. A per-device dial: a Quest can afford fewer than a PC
     /// even though both cost one instance, because the projection math runs
@@ -731,6 +733,7 @@ impl Default for Renderer {
             placed_scene_signature: None,
             placed_prefix: None,
             stage: Stage::default(),
+            clip_box: None,
             shadow_budget: DEFAULT_SHADOW_BUDGET,
             vfx: Default::default(),
             ao_textures: Vec::new(),

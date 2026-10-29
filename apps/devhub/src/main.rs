@@ -7,6 +7,10 @@
 //! - Node (a Linux WM): a tray icon in the WM's bar with a status menu; it serves this machine's
 //!   JITs to the master. Quit writes `enabled = off` into its conf, so the WM leaves it off until
 //!   the person starts it from the launcher.
+//! - Node (Windows): the same tray, in the notification area, started at logon by the per-user
+//!   task `tools/devhub/windows/install-node.ps1` makes (through `cargo run`, under a headless
+//!   console: no window); its conf is `%USERPROFILE%\.makepad\devhub\node.conf` unless the env
+//!   names one.
 //!
 //! Without the fleet identity (`~/.makepad/fleet`, tools/fleet-identity.md) both serve this
 //! machine's JITs only. `makepad devhub serve [--node <conf>]` runs the same core without a
@@ -141,11 +145,15 @@ struct MasterCore {
     detail: Arc<Mutex<Vec<String>>>,
     /// the outcome of the last confirmed action
     note: Arc<Mutex<String>>,
+    /// a confirmation a background answer prepared (a sized JIT cache clear)
+    pending: Arc<Mutex<Option<Confirm>>>,
 }
 
 struct NodeCore {
     node: Node,
     conf_path: PathBuf,
+    /// the task view's JIT cache clear (answers come from a worker thread)
+    cache: Arc<Mutex<taskview::CacheUi>>,
 }
 
 impl NodeCore {
@@ -174,6 +182,109 @@ fn node_ask(machine: &str, service: &str, line: &str) -> Vec<String> {
         out.push(format!("error: {e}"));
     }
     out
+}
+
+/// A machine's `jitcache` service (this machine's on the control socket, a node's through the
+/// router): its answer lines, an error as an `err` line.
+fn jitcache_ask(machine: &str, local: bool, line: &str) -> Vec<String> {
+    let c = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(proto::control_socket()), "devhub-panel");
+    makepad_devhub::cli::ask(&c, (!local).then_some(machine), "jitcache", line).unwrap_or_else(|e| vec![format!("{{\"err\":{}}}", makepad_remote::json_str(&e))])
+}
+
+/// The confirmation of a JIT cache clear from its plan: what goes, who runs on it.
+fn jitcache_question(machine: &str, app: Option<&str>, plan: &[String]) -> Result<Confirm, String> {
+    let (mut bytes, mut caches, mut users, mut unannounced, mut dirs) = (0u64, 0u64, Vec::<String>::new(), false, Vec::<String>::new());
+    for l in plan {
+        let v = makepad_strict_json::parse(l.as_bytes()).map_err(|_| format!("{machine}: {l}"))?;
+        if let Some(e) = v.get("err").and_then(|x| x.as_str()) {
+            return Err(format!("{machine}: {e}"));
+        }
+        if let Some(t) = v.get("total_bytes").and_then(|x| x.as_u64()) {
+            bytes = t;
+            caches = v.get("caches").and_then(|x| x.as_u64()).unwrap_or(0);
+        }
+        if let Some(d) = v.get("dir").and_then(|x| x.as_str()) {
+            dirs.push(d.to_string());
+        }
+        if let Some(u) = v.get("users").and_then(|x| x.as_arr()) {
+            users.extend(u.iter().filter_map(|x| Some(format!("{}#{}", x.get("app")?.as_str()?.trim_start_matches("makepad-app-"), x.get("pid")?.as_u64()?))));
+            unannounced |= u.is_empty() && v.get("held").and_then(|x| x.as_u64()).unwrap_or(0) > 0;
+        }
+    }
+    if caches == 0 {
+        return Err(format!("{machine}: no JIT cache{} here", app.map_or(String::new(), |a| format!(" of {a}"))));
+    }
+    if unannounced {
+        users.push("a makepad check/test".into());
+    }
+    let what = app.map_or(format!("{machine}'s JIT cache"), |a| format!("{a}'s JIT cache on {machine}"));
+    let busy = if users.is_empty() { String::new() } else { format!(" Running on it (keeps running): {}.", users.join(", ")) };
+    Ok(Confirm::ClearJit {
+        machine: machine.to_string(),
+        app: app.map(str::to_string),
+        question: format!(
+            "Clear {what}? Frees {}; the next start is cold.{busy} Removes {}only: {}. Keeps ~/.cargo, every target/ build, downloaded packages and sources.",
+            makepad_devhub::jitcache::human(bytes),
+            if app.is_some() { "that app's files in " } else { "" },
+            dirs.iter().map(|d| format!("{d}/{{{}}}", makepad_devhub::jitcache::CLEARED.join(","))).collect::<Vec<_>>().join(", ")
+        ),
+        force: !users.is_empty(),
+    })
+}
+
+/// The node's own JIT cache clear from its task view: sized, confirmed, cleared, on a worker
+/// thread (a walk of the cache), through the node's own control socket.
+fn node_clear_jit(n: &NodeCore, a: TasksAction) {
+    let (cache, machine) = (n.cache.clone(), n.node.conf.name.clone());
+    let line = match a {
+        TasksAction::ClearJitCancel => {
+            let mut c = cache.lock().unwrap();
+            c.ask = None;
+            c.note.clear();
+            return;
+        }
+        TasksAction::ClearJit => "jitcache plan".to_string(),
+        TasksAction::ClearJitConfirmed(force) => format!("jitcache clear{}", if force { " force" } else { "" }),
+        _ => return,
+    };
+    {
+        let mut c = cache.lock().unwrap();
+        c.note = if c.ask.take().is_some() { "clearing\u{2026}".into() } else { "sizing\u{2026}".into() };
+    }
+    std::thread::spawn(move || {
+        let out = jitcache_ask(&machine, true, &line);
+        let mut c = cache.lock().unwrap();
+        if line == "jitcache plan" {
+            match jitcache_question(&machine, None, &out) {
+                Ok(Confirm::ClearJit { question, force, .. }) => {
+                    c.ask = Some((question, force));
+                    c.note.clear();
+                }
+                Ok(_) => {}
+                Err(e) => c.note = e,
+            }
+            return;
+        }
+        let get = |k: &str| out.iter().find_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()?.get(k)?.as_str().map(str::to_string));
+        c.note = get("err").or_else(|| get("line")).unwrap_or_else(|| "no answer".into());
+    });
+}
+
+/// Sizes a machine's JIT cache (a walk of it, on the machine: never on the UI thread), then
+/// leaves the confirmation for the panel.
+fn size_jit_cache(m: &MasterCore, machine: String, app: Option<String>) {
+    let (note, pending, local) = (m.note.clone(), m.pending.clone(), machine == m.master.name);
+    *note.lock().unwrap() = format!("sizing the JIT cache on {machine}\u{2026}");
+    std::thread::spawn(move || {
+        let line = format!("jitcache plan{}", app.as_deref().map_or(String::new(), |a| format!(" app={a}")));
+        match jitcache_question(&machine, app.as_deref(), &jitcache_ask(&machine, local, &line)) {
+            Ok(c) => {
+                note.lock().unwrap().clear();
+                *pending.lock().unwrap() = Some(c);
+            }
+            Err(e) => *note.lock().unwrap() = e,
+        }
+    });
 }
 
 fn start_master() -> Result<MasterCore, String> {
@@ -211,7 +322,7 @@ fn start_master() -> Result<MasterCore, String> {
             *d.lock().unwrap() = lines;
         }
     });
-    Ok(MasterCore { master, looking, snapshot, drill, detail, note: Arc::new(Mutex::new(String::new())) })
+    Ok(MasterCore { master, looking, snapshot, drill, detail, note: Arc::new(Mutex::new(String::new())), pending: Arc::new(Mutex::new(None)) })
 }
 
 fn start_node(conf_path: PathBuf) -> Result<Option<NodeCore>, String> {
@@ -232,12 +343,14 @@ fn start_node(conf_path: PathBuf) -> Result<Option<NodeCore>, String> {
             (None, None) => "local only".into(),
         }
     ));
-    Ok(Some(NodeCore { node, conf_path }))
+    Ok(Some(NodeCore { node, conf_path, cache: Arc::new(Mutex::new(Default::default())) }))
 }
 
 fn start_core() -> Result<Option<Core>, String> {
     match std::env::var_os(NODE_CONF_ENV).filter(|p| !p.is_empty()) {
         Some(p) => Ok(start_node(PathBuf::from(p))?.map(Core::Node)),
+        // the master is the Mac's: on Windows devhub is always a node (its logon task's tray)
+        None if cfg!(windows) => Ok(start_node(proto::home().join("node.conf"))?.map(Core::Node)),
         None => Ok(Some(Core::Master(start_master()?))),
     }
 }
@@ -313,7 +426,7 @@ impl App {
         }
         if let Some(Core::Node(n)) = &self.core {
             if self.node_drop.is_open() {
-                let head = Head { name: n.node.conf.name.clone(), lan: n.lan(), dev: makepad_devhub::lease::exec::writes_allowed(), leases: makepad_devhub::lease::exec::held() };
+                let head = Head { name: n.node.conf.name.clone(), lan: n.lan(), dev: makepad_devhub::lease::exec::writes_allowed(), leases: makepad_devhub::lease::exec::held(), cache: n.cache.lock().unwrap().clone() };
                 if let Some(mut v) = self.ui.widget(cx, ids!(tasks)).borrow_mut::<DevhubTasks>() {
                     v.head = head;
                     v.redraw(cx);
@@ -359,6 +472,9 @@ impl App {
             }
         }
         self.state.note = m.note.lock().unwrap().clone();
+        if let Some(c) = m.pending.lock().unwrap().take() {
+            self.state.confirm = Some(c);
+        }
         self.state.status = status;
         let st = self.state.clone();
         for id in [ids!(drop_view), ids!(hub_view)] {
@@ -437,6 +553,7 @@ impl App {
             let _ = std::fs::write(&n.conf_path, format!("enabled = off\n{}\n", kept.join("\n")));
         }
         let _ = std::fs::remove_file(proto::control_socket());
+        let _ = std::fs::remove_file(proto::home().join("node.pid"));
         installed::clear_pid();
         cx.remove_tray(TRAY);
         cx.quit();
@@ -497,6 +614,10 @@ impl App {
                         self.state.view = "log";
                         let _ = m.drill.send((machine, pid, "!log".into()));
                     }
+                    JitDo::ClearCache => {
+                        let app = self.state.machines.iter().find(|x| x.name == machine).and_then(|x| x.jits.iter().find(|j| j.pid == pid)).map(|j| j.app.clone());
+                        size_jit_cache(m, machine, app);
+                    }
                     JitDo::Lease => {
                         let key = (machine.clone(), pid);
                         let mut out = Vec::new();
@@ -520,6 +641,22 @@ impl App {
                 }
             }
             DevhubAction::Ask(c) => self.state.confirm = Some(c),
+            DevhubAction::ClearJit(machine, app) => size_jit_cache(m, machine, app),
+            DevhubAction::Confirmed(Confirm::ClearJit { machine, app, force, .. }) => {
+                self.state.confirm = None;
+                let (note, local) = (m.note.clone(), machine == m.master.name);
+                *note.lock().unwrap() = format!("clearing the JIT cache on {machine}\u{2026}");
+                std::thread::spawn(move || {
+                    let line = format!("jitcache clear{}{}", app.as_deref().map_or(String::new(), |a| format!(" app={a}")), if force { " force" } else { "" });
+                    let out = jitcache_ask(&machine, local, &line);
+                    let get = |k: &str| out.iter().find_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()?.get(k)?.as_str().map(str::to_string));
+                    *note.lock().unwrap() = match (get("err"), get("line")) {
+                        (Some(e), _) => format!("{machine}: {e}"),
+                        (None, Some(l)) => format!("{machine}: {l}"),
+                        (None, None) => format!("{machine}: no answer"),
+                    };
+                });
+            }
             DevhubAction::Cancel => self.state.confirm = None,
             DevhubAction::Confirmed(c) => {
                 self.state.confirm = None;
@@ -537,6 +674,7 @@ impl App {
                             lm.serve("evict", who, &mut out);
                             format!("{who} evicted and blocked")
                         }
+                        Confirm::ClearJit { .. } => String::new(),
                         Confirm::Override(n, to) => {
                             lm.serve("override", &format!("{n}{}", to.as_ref().map_or(String::new(), |t| format!(" --to {t}"))), &mut out);
                             format!("{n} taken")
@@ -583,6 +721,10 @@ impl MatchEvent for App {
             return;
         }
         installed::write_pid();
+        if matches!(self.core, Some(Core::Node(_))) {
+            // what stops this node by pid (a Windows logon task's hub, a test by hand)
+            let _ = std::fs::write(proto::home().join("node.pid"), format!("{}\n", std::process::id()));
+        }
         self.login = installed::login();
         self.state.tab = Tab::Fleet;
         self.state.view = "jit";
@@ -619,8 +761,15 @@ impl MatchEvent for App {
             self.sync_live(cx);
         }
         for action in actions {
-            if let Some(TasksAction::Quit) = action.as_widget_action().map(|wa| wa.cast::<TasksAction>()) {
-                return self.quit_from_view(cx);
+            match action.as_widget_action().map(|wa| wa.cast::<TasksAction>()) {
+                Some(TasksAction::Quit) => return self.quit_from_view(cx),
+                Some(a @ (TasksAction::ClearJit | TasksAction::ClearJitConfirmed(_) | TasksAction::ClearJitCancel)) => {
+                    if let Some(Core::Node(n)) = &self.core {
+                        node_clear_jit(n, a);
+                    }
+                    self.refresh(cx);
+                }
+                _ => {}
             }
         }
     }
@@ -635,7 +784,6 @@ impl AppMain for App {
         crate::makepad_widgets::script_mod(vm);
         makepad_shell_kit::eval_default_theme(vm);
         makepad_shell_kit::script_mod(vm);
-        crate::graph::script_mod(vm);
         crate::view::script_mod(vm);
         crate::taskview::script_mod(vm);
         self::script_mod(vm)

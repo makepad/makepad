@@ -347,6 +347,12 @@ impl StackNavigationView {
 }
 
 impl Widget for StackNavigationView {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         // The animator first: it flushes deferred cuts, which the slide host
         // then overrides while it plays.
@@ -826,6 +832,12 @@ impl ScriptHook for StackNavigation {
 }
 
 impl Widget for StackNavigation {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.step_interactive_pop_release(cx, event);
 

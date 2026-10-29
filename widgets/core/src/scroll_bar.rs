@@ -1,3 +1,4 @@
+use crate::widget::*;
 use crate::animator::*;
 use crate::event::{ScrollPhase, TAP_COUNT_DISTANCE};
 use crate::makepad_derive_widget::*;
@@ -275,11 +276,14 @@ enum ScrollState {
     },
 }
 
-#[derive(Script, ScriptHook, Animator)]
+#[derive(Script, ScriptHook, Animator, Widget)]
 pub struct ScrollBar {
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[live]
+    #[redraw]
     draw_bg: DrawScrollBar,
     /// Whether the handle is drawn and can be grabbed. With it off the view still
     /// scrolls by wheel, trackpad and API, there's just nothing to click.
@@ -1208,6 +1212,13 @@ impl ScrollBar {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction),
     ) {
+        if let Event::A11yAction(request) = event {
+            if request.node.uid() == self.uid.0 {
+                let result = self.handle_action(cx, request, &mut Scope::empty());
+                if result == a11y_tree::ActionResult::Handled { dispatch_action(cx, self.make_scroll_action()); }
+                cx.a11y.record_action(request.req, result);
+            }
+        }
         self.handle_flick(cx, event, dispatch_action);
         self.handle_bounce(cx, event, dispatch_action);
 
@@ -1514,6 +1525,7 @@ impl ScrollBar {
                 }
             };
             self.draw_bg.draw_rel(cx, rect);
+            if cx.a11y.on { crate::semantics::record_leaf(self, cx); }
         }
 
         // see if we need to clamp
@@ -1529,6 +1541,57 @@ impl ScrollBar {
     }
 }
 
+impl Widget for ScrollBar {
+    fn semantics(&self, _cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::ScrollBar;
+        let vertical = matches!(self.axis, ScrollAxis::Vertical);
+        node.states = if vertical {
+            a11y_tree::States::VERTICAL
+        } else {
+            a11y_tree::States::HORIZONTAL
+        };
+        node.range = Some(a11y_tree::RangeValue {
+            min: 0.0,
+            max: self.scroll_limit(),
+            now: self.scroll_pos,
+            step: 0.0,
+        });
+        node.actions = a11y_tree::Actions::SCROLL | a11y_tree::Actions::SET_VALUE;
+    }
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        action: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionArg, ActionResult, Actions as A};
+        let value = if action.action == A::SCROLL {
+            let ActionArg::Scroll(x, y) = action.arg else {
+                return ActionResult::Unsupported;
+            };
+            self.scroll_pos
+                + if matches!(self.axis, ScrollAxis::Vertical) {
+                    y as f64
+                } else {
+                    x as f64
+                }
+        } else if action.action == A::SET_VALUE {
+            let ActionArg::Number(value) = action.arg else {
+                return ActionResult::Unsupported;
+            };
+            value
+        } else {
+            return ActionResult::Unhandled;
+        };
+        if !value.is_finite() {
+            return ActionResult::Unsupported;
+        }
+        self.set_scroll_pos(cx, value);
+        self.draw_bg.redraw(cx);
+        ActionResult::Handled
+    }
+}
+
 /// The pointer-capture rule, as it applies to a box that drag-scrolls its
 /// content: while another control holds the MOUSE, the box's own gestures
 /// stand down; a TOUCH held elsewhere changes nothing.
@@ -1539,7 +1602,6 @@ mod pointer_capture_tests {
     use crate::event::{ScrollEvent, TouchPoint, TouchState, TouchUpdateEvent};
     use crate::makepad_draw::cx_draw::CxDraw;
     use crate::view::View;
-    use crate::widget::*;
     use std::cell::Cell;
 
     const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };

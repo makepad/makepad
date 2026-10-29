@@ -114,6 +114,45 @@ impl Renderer {
             }
         }
 
+        // 5.2 An MR box stage's box: its twelve edges as thin light bars, just inside the box
+        // (the scene list clips to it), so the box reads as a glass case over the room.
+        if let (Some(b), StageMode::MrBox) = (self.clip_box, self.stage.mode) {
+            const BAR: f32 = 0.003;
+            let (s, c) = (b.yaw.sin(), b.yaw.cos());
+            // the box's own frame in the room (turn + centre), then into the world the scene
+            // draws in (the stage's inverse: the XR eye views carry the stage)
+            let mut box_frame = Mat4f::identity();
+            box_frame.v[0] = c;
+            box_frame.v[2] = -s;
+            box_frame.v[8] = s;
+            box_frame.v[10] = c;
+            box_frame.v[12] = b.center.x;
+            box_frame.v[13] = b.center.y;
+            box_frame.v[14] = b.center.z;
+            let transform = Mat4f::mul(&self.stage.matrix().invert(), &box_frame);
+            let h = vec3(b.half.x - BAR, b.half.y - BAR, b.half.z - BAR);
+            draws.alpha.cube.cube.transform = transform;
+            draws.alpha.cube.cube.color = vec4(0.72, 0.86, 1.0, 0.55);
+            draws.alpha.cube.cube.depth_clip = 1.0;
+            draws.alpha.cube.glow = 0.8;
+            draws.alpha.cube.color_adjust_ctl = vec4(0.0, 1.0, 1.0, 0.0);
+            for axis in 0..3 {
+                for a in [-1.0f32, 1.0] {
+                    for d in [-1.0f32, 1.0] {
+                        let (pos, size) = match axis {
+                            0 => (vec3(0.0, a * h.y, d * h.z), vec3(h.x * 2.0, BAR, BAR)),
+                            1 => (vec3(a * h.x, 0.0, d * h.z), vec3(BAR, h.y * 2.0, BAR)),
+                            _ => (vec3(a * h.x, d * h.y, 0.0), vec3(BAR, BAR, h.z * 2.0)),
+                        };
+                        draws.alpha.cube.cube.cube_pos = pos;
+                        draws.alpha.cube.cube.cube_size = size;
+                        draws.alpha.cube.cube.draw(cx);
+                        stats.dyn_instances += 1;
+                    }
+                }
+            }
+        }
+
         // 5.5 Volumetric smoke clouds: raymarched spheres, depth-tested
         // against the world, never depth-written.
         if !self.smoke_volumes.is_empty() {

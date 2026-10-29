@@ -344,8 +344,10 @@ pub unsafe fn register_natives(env: *mut JNIEnv, class: jclass) -> Result<Vec<St
         eprintln!("[hal-android] fleet: {e}");
     }
     let natives = reg::reflect(env, class)?;
+    super::a11y::check_natives(&natives)?;
     let mut table = native_methods();
     table.extend(super::media::native_methods());
+    table.extend(super::native_layer::native_methods());
     reg::register(env, class, &natives, |name, sig| {
         let Some((_, expected, ptr)) = table.iter().find(|(n, _, _)| *n == name) else { return Ok(None); };
         if sig != *expected { return Err(format!("MakepadNative.{name}: expected {expected}, reflected {sig}")); }
@@ -355,7 +357,7 @@ pub unsafe fn register_natives(env: *mut JNIEnv, class: jclass) -> Result<Vec<St
 
 /// Names and ABI checks, never a second source of Java's reflected registration descriptors.
 pub fn native_methods() -> Vec<(&'static str, &'static str, *mut c_void)> {
-    vec![
+    let mut methods = vec![
         ("activityOnCreate", "(Ljava/lang/Object;)V", create as *mut c_void),
         ("activityOnStart", "()V", start as *mut c_void),
         ("activityOnResume", "()V", resume as *mut c_void),
@@ -385,5 +387,7 @@ pub fn native_methods() -> Vec<(&'static str, &'static str, *mut c_void)> {
         ("onImeTextStateChanged", "(Ljava/lang/String;IIII)V", ime_state as *mut c_void),
         ("onImeEditorAction", "(I)V", ime_action as *mut c_void),
         ("onSelectionHandleDrag", "(IIFFJ)V", selection_handle as *mut c_void),
-    ]
+    ];
+    methods.extend(super::a11y::native_methods());
+    methods
 }

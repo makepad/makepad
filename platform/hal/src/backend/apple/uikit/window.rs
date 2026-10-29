@@ -147,6 +147,7 @@ impl Win {
     }
 
     pub fn lend(&self, sid: u32, id: Id) {
+        super::a11y::drop_window(crate::a11y::window_key(self.sid.get(), self.id.get().index));
         self.sid.set(sid);
         self.id.set(id);
         self.want_frame.set(false);
@@ -242,6 +243,7 @@ impl Win {
         if self.retired.replace(true) {
             return;
         }
+        super::a11y::drop_window(crate::a11y::window_key(self.sid.get(), self.id.get().index));
         Shared::global().unregister_layer(self.owner_sid, self.owner_id);
         unsafe {
             let link = self.link.replace(nil);

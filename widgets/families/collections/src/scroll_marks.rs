@@ -381,6 +381,11 @@ impl AnnotatedScrollBar {
 }
 
 impl Widget for AnnotatedScrollBar {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.draw_bg.begin(cx, walk, self.layout);
         let size = cx.turtle().rect().size;

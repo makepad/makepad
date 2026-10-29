@@ -228,6 +228,16 @@ pub struct LinkLabel {
 }
 
 impl Widget for LinkLabel {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Link;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+    }
+
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,

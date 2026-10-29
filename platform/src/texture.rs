@@ -705,6 +705,14 @@ pub enum TextureFormat {
         id: crate::shared_framebuf::PresentableImageId,
         initial: bool,
     },
+    /// A two-plane 4:2:0 picture an encoder reads where it lies (`Cx::create_shared_nv12_texture`):
+    /// a pass renders into one plane (`DrawPass::set_color_texture_face`: 0 luma at its size,
+    /// 1 chroma U V at half). D3D11 alone.
+    SharedNv12 {
+        width: usize,
+        height: usize,
+        initial: bool,
+    },
     /// A single YUV plane texture (Y, U, or V). Backend-managed — the render
     /// backend or platform layer creates/uploads the GPU texture directly.
     /// Used for both I420 (three R8 planes) and NV12 (R8 luma + RG8 chroma).
@@ -797,6 +805,7 @@ impl std::fmt::Debug for TextureFormat {
                 f,
                 "TextureFormat::SharedBGRAu8(width:{width},height:{height})"
             ),
+            TextureFormat::SharedNv12 { width, height, .. } => write!(f, "TextureFormat::SharedNv12(width:{width},height:{height})"),
             TextureFormat::VideoYuvPlane => write!(f, "TextureFormat::VideoYuvPlane"),
             TextureFormat::VideoExternal => write!(f, "TextureFormat::VideoExternal"),
             TextureFormat::VideoGlMemoryRgba => write!(f, "TextureFormat::VideoGlMemoryRgba"),
@@ -983,6 +992,8 @@ pub(crate) enum TexturePixel {
     Bc7,
     Bc5,
     Astc4x4,
+    /// Two-plane 4:2:0 (a shared encoder picture).
+    Nv12,
 }
 
 impl CxTexture {
@@ -1028,6 +1039,7 @@ impl CxTexture {
             TextureFormat::RenderRGf16 { initial, .. } => initial,
             TextureFormat::RenderRu32 { initial, .. } => initial,
             TextureFormat::SharedBGRAu8 { initial, .. } => initial,
+            TextureFormat::SharedNv12 { initial, .. } => initial,
             _ => panic!(),
         }
     }
@@ -1061,6 +1073,7 @@ impl CxTexture {
             TextureFormat::RenderRGf16 { initial, .. } => initial,
             TextureFormat::RenderRu32 { initial, .. } => initial,
             TextureFormat::SharedBGRAu8 { initial, .. } => initial,
+            TextureFormat::SharedNv12 { initial, .. } => initial,
             _ => panic!(),
         } = initial;
     }
@@ -1178,7 +1191,7 @@ impl TextureFormat {
 
     pub fn is_shared(&self) -> bool {
         match self {
-            Self::SharedBGRAu8 { .. } => true,
+            Self::SharedBGRAu8 { .. } | Self::SharedNv12 { .. } => true,
             _ => false,
         }
     }
@@ -1476,6 +1489,12 @@ impl TextureFormat {
                 width: *width,
                 height: *height,
                 pixel: TexturePixel::BGRAu8,
+                category: TextureCategory::Shared,
+            }),
+            Self::SharedNv12 { width, height, .. } => Some(TextureAlloc {
+                width: *width,
+                height: *height,
+                pixel: TexturePixel::Nv12,
                 category: TextureCategory::Shared,
             }),
             _ => None,

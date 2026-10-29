@@ -27,6 +27,8 @@ use makepad_network::tls::{TlsIdentity, TlsServer, TlsStream};
 use std::io::Read;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+mod a11y;
+
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -651,6 +653,8 @@ impl SessionCtx {
             }
         };
         let (out_tx, out_rx) = channel::<Out>();
+        // Created only after the same Need::Admin gate as input injection.
+        let mut semantic = a11y::Session::new(self.session, out_tx.clone());
         let feed = Arc::new(Feed::new(paused));
         self.send_ui(ToUi::Opened {
             session: self.session,
@@ -717,6 +721,10 @@ impl SessionCtx {
                     ClientMsg::Ping { client_ns } => {
                         let pong = ServerMsg::Pong { client_ns, server_ns: (self.clock)() }.encode();
                         proto::write_all(&mut stream, &pong).map_err(|e| format!("write: {e}"))?;
+                        None
+                    }
+                    ClientMsg::A11yQuery { req, line } => {
+                        semantic.submit(req, line);
                         None
                     }
                     ClientMsg::Pause => Some(Control::Pause),

@@ -1085,6 +1085,12 @@ impl Dropzone {
 }
 
 impl Widget for Dropzone {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         if self.disabled != disabled {
             self.disabled = disabled;
@@ -1658,6 +1664,12 @@ impl FileList {
 }
 
 impl Widget for FileList {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::List;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         if self.disabled != disabled {
             self.disabled = disabled;
@@ -2414,6 +2426,12 @@ impl ImageWell {
 }
 
 impl Widget for ImageWell {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         if self.disabled != disabled {
             self.disabled = disabled;

@@ -11,6 +11,7 @@ pub mod geometry;
 pub mod image_cache;
 pub mod match_event;
 pub mod nav;
+pub mod native_layer;
 pub mod overlay;
 pub mod render_target;
 pub mod scene_3d;
@@ -21,6 +22,7 @@ pub mod svg;
 pub mod text;
 pub mod turtle;
 pub mod vector;
+pub mod xr_sink;
 
 pub use crate::{
     cx_2d::Cx2d,
@@ -37,6 +39,7 @@ pub use crate::{
     },
     match_event::MatchEvent,
     nav::{NavItem, NavOrder, NavRole, NavScrollIndex, NavStop},
+    native_layer::NativeLayerDraw,
     overlay::Overlay,
     render_target::{RenderTarget, RenderTargetFormat, RenderTargetPool},
     scene_3d::{SceneDrawCallAnchor, SceneScope3D, SceneState3D},
@@ -79,6 +82,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     crate::shader::video_color::script_mod(vm);
     crate::shader::draw_nv12::script_mod(vm);
     crate::shader::draw_nv12_pack::script_mod(vm);
+    crate::shader::draw_fxaa::script_mod(vm);
     crate::shader::draw_cube::script_mod(vm);
     makepad_script::glyph_coverage::script_mod(vm);
     crate::shader::draw_glyph::script_mod(vm);

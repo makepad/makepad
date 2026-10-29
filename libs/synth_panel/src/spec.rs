@@ -29,6 +29,14 @@ pub struct ParamSpec {
     pub bipolar: bool,
     /// Choices for an option field (`osc: @saw`); empty for numbers.
     pub options: Vec<String>,
+    /// The module it belongs to (a Morph's `osc_a`, `filter1`, `lfo2` …;
+    /// empty where a node type has no groups): what a lens or a panel
+    /// gathers into one module.
+    pub group: &'static str,
+    /// A mod row may move it (a Morph's mod destinations).
+    pub modulatable: bool,
+    /// One line about it, for the AI and tooltips.
+    pub about: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,12 +62,12 @@ pub const LFO_SHAPES: [&str; 5] = ["sine", "tri", "saw", "square", "random"];
 
 impl ParamSpec {
     fn num(key: &str, label: &'static str, min: f64, max: f64, default: f64, taper: Taper, unit: Unit) -> ParamSpec {
-        ParamSpec { key: key.to_string(), label, min, max, default, taper, unit, bipolar: false, options: Vec::new() }
+        ParamSpec { key: key.to_string(), label, min, max, default, taper, unit, bipolar: false, options: Vec::new(), group: "", modulatable: false, about: "" }
     }
 
     fn choice(key: &str, label: &'static str, options: &[&str]) -> ParamSpec {
         let options: Vec<String> = options.iter().map(|o| o.to_string()).collect();
-        ParamSpec { key: key.to_string(), label, min: 0.0, max: (options.len().max(1) - 1) as f64, default: 0.0, taper: Taper::Int, unit: Unit::None, bipolar: false, options }
+        ParamSpec { key: key.to_string(), label, min: 0.0, max: (options.len().max(1) - 1) as f64, default: 0.0, taper: Taper::Int, unit: Unit::None, bipolar: false, options, group: "", modulatable: false, about: "" }
     }
 
     /// Only these choices, in this order (`Switch{param: @osc options: [@saw @square]}`).
@@ -82,7 +90,7 @@ impl ParamSpec {
             Some(v) if v < 0.0 => (v * 2.0, -v * 2.0),
             _ => (0.0, 1.0),
         };
-        ParamSpec { key: key.to_string(), label: "", min, max, default: value.unwrap_or(0.0), taper: Taper::Linear, unit: Unit::None, bipolar: min < 0.0, options: Vec::new() }
+        ParamSpec { key: key.to_string(), label: "", min, max, default: value.unwrap_or(0.0), taper: Taper::Linear, unit: Unit::None, bipolar: min < 0.0, options: Vec::new(), group: "", modulatable: false, about: "" }
     }
 
     pub fn is_choice(&self) -> bool {
@@ -167,8 +175,62 @@ impl ParamSpec {
     }
 }
 
+/// A Morph field from the synth kit's schema (the one table its engine,
+/// the score and the AI read).
+fn morph_spec(key: &str) -> Option<ParamSpec> {
+    use makepad_audio_synth::kit::schema::{Curve, Unit as K};
+    let p = makepad_audio_synth::morph::layout().schema.param(key)?;
+    let taper = match p.curve {
+        Curve::Log => Taper::Log,
+        Curve::Linear => Taper::Linear,
+        Curve::Int | Curve::Choice | Curve::Bool => Taper::Int,
+    };
+    let unit = match (p.curve, p.unit) {
+        (Curve::Bool, _) => Unit::Bool,
+        (_, K::Hz) => Unit::Hz,
+        (_, K::Secs) => Unit::Secs,
+        (_, K::Ms) => Unit::Ms,
+        (_, K::Beats) => Unit::Beats,
+        (_, K::Cents) => Unit::Cents,
+        (_, K::Semis) => Unit::Semis,
+        (_, K::Db) => Unit::Db,
+        (_, K::Percent) => Unit::Percent,
+        (_, K::None) => Unit::None,
+    };
+    Some(ParamSpec {
+        key: key.to_string(),
+        label: p.label.as_str(),
+        min: p.min as f64,
+        max: p.max as f64,
+        default: p.default as f64,
+        taper,
+        unit,
+        bipolar: p.bipolar,
+        options: p.options.iter().map(|o| o.to_string()).collect(),
+        group: p.group.as_str(),
+        modulatable: p.modulatable,
+        about: p.about,
+    })
+}
+
+/// A node type's modules: (group, its line, its fields in order), for
+/// lenses and panels that draw a module at a time (Morph's; empty for the
+/// others).
+pub fn groups(ty: &str) -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
+    match ty {
+        "Morph" => {
+            let schema = &makepad_audio_synth::morph::layout().schema;
+            schema.groups.iter().map(|g| (g.name.as_str(), g.about, schema.group(&g.name).map(|p| p.key.as_str()).collect())).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// The table for a node of type `ty` (`Synth`, `Drums`, `Loop`, an FX).
 pub fn spec(ty: &str, key: &str) -> Option<ParamSpec> {
+    if ty == "Morph" {
+        return morph_spec(key);
+    }
     use Taper::*;
     use Unit::*;
     let s = |label, min, max, default, taper, unit| Some(ParamSpec::num(key, label, min, max, default, taper, unit));
@@ -280,7 +342,7 @@ pub fn spec_or_generic(ty: &str, key: &str, value: Option<f64>) -> ParamSpec {
 
 /// Whether a node type is an instrument (has notes), an effect, or a loop.
 pub fn is_instrument(ty: &str) -> bool {
-    matches!(ty, "Synth" | "Drums" | "Sampler")
+    matches!(ty, "Synth" | "Drums" | "Sampler" | "Morph")
 }
 
 pub fn is_fx(ty: &str) -> bool {
@@ -295,6 +357,7 @@ pub fn keys(ty: &str) -> Vec<&'static str> {
             "vib_depth", "width", "fm", "index", "index_to", "cutoff_to", "sweep", "pluck", "noise", "gain",
         ],
         "Drums" => vec!["kit"],
+        "Morph" => makepad_audio_synth::morph::layout().schema.params.iter().map(|p| p.key.as_str()).collect(),
         "Instrument" => vec!["preset", "gain", "bank", "program", "channel"],
         "Loop" => vec!["amp", "pan", "beats", "mute", "solo"],
         "Clock" => vec!["bpm", "swing"],

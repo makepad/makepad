@@ -597,6 +597,14 @@ impl LevelMeter {
 }
 
 impl Widget for LevelMeter {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Meter;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> { Some(format!("{:.2}", self.ballistics.value())) })()
+            .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.sync();
         if self.level != self.seeded {
@@ -669,9 +677,7 @@ impl Widget for LevelMeter {
         self.disabled
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format!("{:.2}", self.ballistics.value()))
-    }
+
 }
 
 impl LevelMeterRef {

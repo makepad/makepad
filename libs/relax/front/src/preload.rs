@@ -13,7 +13,7 @@ use relax_session::sync::{Condvar, Mutex};
 mod lazy;
 pub use lazy::PendingPlan as DemandPlan;
 pub(crate) use lazy::items as rs_items;
-pub use lazy::{DemandPart, DemandImage, FileIndex as FileIndex};
+pub use lazy::{DemandPart, DemandImage, FileIndex as FileIndex, recipe_identity as demand_recipe_identity};
 
 pub(crate) fn configured_tokens(src: &[u8], tokens: &[Tok], cfg: &CfgSet) -> Vec<Tok> {
     lazy::demand::active_tokens(src, tokens, cfg)
@@ -32,6 +32,19 @@ pub struct PreCrate {
     /// Indices in this preload, in Program dependency order (including implicit std).
     pub image_deps: Vec<usize>,
     pub image_dep_names: Vec<(String, String)>,
+}
+
+/// `crates` in the load order `order` (positions in `crates`, each once), the dependency indices
+/// renumbered; None when that order puts a crate before one of its dependencies.
+pub fn reorder(crates: &[PreCrate], order: &[usize]) -> Option<Vec<PreCrate>> {
+    let mut at = vec![usize::MAX; crates.len()];
+    for (j, &i) in order.iter().enumerate() { *at.get_mut(i)? = j; }
+    if order.len() != crates.len() || at.contains(&usize::MAX) { return None; }
+    order.iter().enumerate().map(|(j, &i)| {
+        let mut c = crates[i].clone();
+        c.image_deps = c.image_deps.iter().map(|&d| at.get(d).copied().filter(|&k| k < j)).collect::<Option<_>>()?;
+        Some(c)
+    }).collect()
 }
 
 /// What load_crate takes for one crate.
@@ -75,6 +88,9 @@ pub struct Preparsed {
     pub src_len: usize,
 }
 
+/// Files of parsed crates taken from an earlier record's images (Pool::previous), for the summary
+pub static PREVIOUS_FILES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Optional embedder check for complete worker/collection-scope parse equivalence.
 pub static VERIFY: std::sync::OnceLock<fn(&ParsedFile, &ParsedFile)> = std::sync::OnceLock::new();
 
@@ -113,7 +129,6 @@ type ScanPriority = (usize, u64);
 
 struct PoolState {
     stopped: bool,
-    plan_pending: bool,
     planning: bool,
     /// Crates whose loader has published the dependency macro imports and own definitions.
     parse_ready: HashSet<u32>,
@@ -154,6 +169,9 @@ pub struct Pool {
     crates: Vec<PreCrate>,
     /// parse on workers (false: the loader parses, from the scan's tokens)
     parse: bool,
+    /// per crate parsed (no crate image): its unchanged files' images from an earlier record
+    /// (CrateImages::previous_files), taken instead of a parse when the loader replays them
+    previous: Vec<Option<crate::crate_image::PreviousFiles>>,
     st: Mutex<PoolState>,
     cv: Condvar,
 }
@@ -172,7 +190,6 @@ impl Drop for Pool {
 }
 
 enum Work {
-    Plan,
     Scan(ScanKey),
     Parse(Job),
 }
@@ -363,9 +380,9 @@ impl Pool {
 
     fn selection_ready(&self, st: &PoolState, ci: usize) -> bool {
         let pending = self.demand_plan.as_ref().filter(|p| p.ready().is_none());
-        // The eager prefix is retained in full; the last crate also needs the
+        // The eager prefix is retained in full; a crate after it (the last one) needs the
         // whole-graph certificate. Use the same gate for preparation and commit.
-        st.planning == false || pending.is_none_or(|p| ci + 1 != self.crates.len() && p.eagerly_selected(ci + self.plan_offset))
+        st.planning == false || pending.is_none_or(|p| p.eagerly_selected(ci + self.plan_offset))
     }
 
     /// Publish complete prescans in load order. Only queue transfers hold st:
@@ -534,6 +551,17 @@ impl Pool {
         files.sort();
         let mut prelexed = Vec::new();
         let mut jobs = Vec::new();
+        // an unchanged file's image from an earlier record of the crate: no parse (the loader
+        // replays its macro lookups in its scope, and parses it when one finds another answer)
+        let mut done = Vec::new();
+        if let Some(previous) = &self.previous[ci] {
+            let _reuse = crate::load_profile::span(c.cfg.session.runtime.profile, "publish-previous-images", &c.name);
+            lexed.retain(|(path, src, _)| match previous(path, crate::crate_image::file_hash(path, src), &seen[path]) {
+                Some(x) => { done.push((path.clone(), x)); false }
+                None => true,
+            });
+            PREVIOUS_FILES.fetch_add(done.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         if self.parse {
             let ctx = Arc::new(CrateCtx { context: self.contexts[ci].clone(), name: c.name.clone(), edition: c.edition, cfg: c.cfg.clone(), table: Arc::new(table.clone()) });
             for (path, src, toks) in lexed {
@@ -553,7 +581,7 @@ impl Pool {
         inputs.sort(); inputs.dedup();
         probes.sort(); probes.dedup();
         let ahead = CrateAhead { name: c.name.clone(), idx: ci as u32, defs, aliases, macro_use, mods: cmods, files, prelexed, inputs, probes, deferred, demand_plan, image: false, valid, complete };
-        Publication { ahead, jobs, done: Vec::new() }
+        Publication { ahead, jobs, done }
     }
 
     fn work(&self, sess: &std::sync::Arc<crate::Session>, _worker: usize) {
@@ -563,10 +591,6 @@ impl Pool {
                 let mut st = self.st.lock().unwrap();
                 loop {
                     if st.stopped { return; }
-                    if st.plan_pending {
-                        st.plan_pending = false;
-                        break Work::Plan;
-                    }
                     let scan = Self::next_scan(&st, None);
                     // Syntax, derives and file preparation run on workers. The loader
                     // validates recorded macro lookups in its exact textual environment
@@ -589,13 +613,6 @@ impl Pool {
                 }
             };
             match w {
-                Work::Plan => {
-                    if let Some(plan) = &self.demand_plan { let _ = std::ops::Deref::deref(&**plan); }
-                    let mut st = self.st.lock().unwrap();
-                    st.planning = false;
-                    drop(self.publish(st));
-                    self.cv.notify_all();
-                }
                 Work::Scan(k) => self.scan(k),
                 Work::Parse(job) => {
                     let ((krate, path), x) = parse_job(sess, job, false);
@@ -1242,16 +1259,19 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
         for c in &crates { crate::why::edge(&c.root, crate::why::Cause::new(&c.root, 1, "crate-root", &c.name)); }
     }
     let n = crates.len();
-    let plan_offset = plan.as_ref().map_or(0, |p| p.crates.len().checked_sub(n).expect("preload is a suffix of the demand plan"));
+    // (the plan's own crates and contexts: a pending plan is not waited for here)
+    let plan_offset = plan.as_ref().map_or(0, |p| p.crates().len().checked_sub(n).expect("preload is a suffix of the demand plan"));
     let contexts = plan.as_ref().map(|p| {
-        assert!(p.crates[plan_offset..].iter().zip(&crates).all(|(a, b)| a.name == b.name && a.root == b.root));
-        p.contexts[plan_offset..].to_vec()
+        assert!(p.crates()[plan_offset..].iter().zip(&crates).all(|(a, b)| a.name == b.name && a.root == b.root));
+        p.contexts()[plan_offset..].to_vec()
     }).or(contexts).unwrap_or_else(|| crate::source_context::Context::for_crates(&crates, sources, sess));
     let demand_plan = plan.or_else(|| (!sess.options.source_eager && sess.options.rs_lazy).then(|| Arc::new(DemandPlan::new(&crates, contexts.clone(), images, jobs >= 2))))
         .filter(|plan| plan.ready().map_or(true, |p| p.counts().1 != 0));
     let planning = demand_plan.as_ref().is_some_and(|p| p.ready().is_none());
     let mut fps = vec![None; n];
     let mut restored = Vec::with_capacity(n);
+    let mut previous = Vec::with_capacity(n);
+    let mut wants_previous = Vec::new();
     let mut valid = Vec::with_capacity(n);
     for (ci, c) in crates.iter().enumerate() {
         let deps: Option<Vec<u128>> = c.image_deps.iter().map(|&d| fps.get(d).copied().flatten()).collect();
@@ -1262,7 +1282,7 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
         let plan = demand_plan.as_ref().and_then(|p| p.ready());
         let deferred = plan.map(|p| p.deferred(ci + plan_offset)).unwrap_or_default();
         let plan_id = plan.map_or(0, |p| p.selection_identity(ci + plan_offset));
-        let image = deps.and_then(|d| images.and_then(|i| {
+        let image = deps.as_ref().and_then(|d| images.and_then(|i| {
             let image = i.crate_image_selected(c, &d, plan_id, &deferred);
             if planning { image.or_else(|| i.crate_image(c, &d)) } else { image }
         }));
@@ -1271,7 +1291,24 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
             eprintln!("boot-trace: {} parsed: no valid crate image", c.name);
         }
         fps[ci] = image.as_ref().map(|i| i.fingerprint);
-        restored.push(if planning { image } else { image.filter(|i| !i.fp_only) });
+        let image = if planning { image } else { image.filter(|i| !i.fp_only) };
+        previous.push(None);
+        if image.is_none() { wants_previous.push((ci, deps)); }
+        restored.push(image);
+    }
+    // a parsed crate's unchanged files: earlier records' images (the proc-macro crates of the
+    // whole program known by now: those this load restores and those a partial restore kept)
+    if let Some(i) = images {
+        let mut procs: Vec<(String, Option<u128>)> = crates.iter().enumerate().filter(|(_, c)| c.proc_macro).map(|(k, c)| (c.name.clone(), fps[k])).collect();
+        procs.extend(i.retained_proc_macros().into_iter().map(|(n, f)| (n, Some(f))));
+        let proc = crate::crate_image::proc_fps(procs.into_iter());
+        for (ci, deps) in wants_previous {
+            let c = &crates[ci];
+            previous[ci] = if deps.is_some() || proc.is_some() { i.previous_files(c, deps.as_deref(), proc) } else { None };
+            if trace() {
+                eprintln!("boot-trace: {}: parsed; earlier images: {}", c.name, if previous[ci].is_some() { "yes" } else if deps.is_none() && proc.is_none() { "dependencies not restored" } else { "none" });
+            }
+        }
     }
     if let Some(images) = images { images.end_load(); }
     if sess.options.verbose && images.is_some() && (trace() || crate::memstat::enabled()) {
@@ -1287,7 +1324,6 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
         else { (0..n).map(|_| None).collect() };
     let mut st = PoolState {
         stopped: false,
-        plan_pending: planning,
         planning,
         parse_ready: Default::default(),
         images: restored,
@@ -1324,7 +1360,7 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
         let seq = st.scan_seq;
         st.scans.insert((ci, seq), k);
     }
-    let pool = Arc::new(Pool { demand_plan, plan_offset, contexts, crates, parse: jobs >= 2, st: Mutex::new(st), cv: Condvar::new() });
+    let pool = Arc::new(Pool { demand_plan, plan_offset, contexts, crates, parse: jobs >= 2, previous, st: Mutex::new(st), cv: Condvar::new() });
     if let Some(plan) = &pool.demand_plan {
         let weak = Arc::downgrade(&pool);
         plan.on_early_publish(move || {
@@ -1338,6 +1374,24 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
     {
         let st = pool.st.lock().unwrap();
         drop(pool.publish(st));
+    }
+    if planning {
+        // The plan completes on its own thread, not a parse worker: the load joins its workers
+        // when its last crate is in, and a load that does not wait for the plan (the crates it
+        // selects in full) must not wait there either. Completion publishes what waited for it.
+        let weak = Arc::downgrade(&pool);
+        let plan = pool.demand_plan.clone().expect("a planning pool has a plan");
+        let in_world = crate::macro_reg::in_world();
+        let _ = std::thread::Builder::new().name("run-demand-select".into()).spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+            crate::macro_reg::set_in_world(in_world);
+            plan.complete();
+            if let Some(pool) = weak.upgrade() {
+                let mut st = pool.st.lock().unwrap();
+                st.planning = false;
+                drop(pool.publish(st));
+                pool.cv.notify_all();
+            }
+        });
     }
     let mut handles = Vec::new();
     if jobs >= 2 {

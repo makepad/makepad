@@ -2,37 +2,9 @@
 //! carry registry tickets. Driver objects never escape the Vulkan backend.
 use crate::{backend::vulkan::share, session::Session, Hal, Id};
 use std::os::fd::OwnedFd;
-use std::sync::{mpsc::{sync_channel, Receiver, SyncSender, TryRecvError}, Arc, Mutex};
+use std::sync::Arc;
 
 pub use share::{DmaBufSupport as Support, NativeHandle as DmaBuf, OpaqueMemory};
-
-/// A queue-ordered release. `Some(Ok(None))` means GPU work is already complete;
-/// `None` means the submit worker has not published the result yet.
-pub struct Fence { rx: Receiver<Result<Option<OwnedFd>, String>> }
-impl Fence {
-    pub fn poll(&mut self) -> Option<Result<Option<OwnedFd>, String>> {
-        match self.rx.try_recv() {
-            Ok(value) => Some(value),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => Some(Err("external-image release worker stopped".into())),
-        }
-    }
-}
-
-pub(crate) struct FenceReply {
-    tx: Mutex<Option<SyncSender<Result<Option<OwnedFd>, String>>>>,
-    wake: Arc<dyn Fn() + Send + Sync>,
-}
-impl FenceReply {
-    pub fn send(&self, value: Result<Option<OwnedFd>, String>) {
-        let tx = crate::lock(&self.tx).take();
-        if let Some(tx) = tx { let _ = tx.try_send(value); (self.wake)(); }
-    }
-    pub fn new(wake: Arc<dyn Fn() + Send + Sync>) -> (Fence, Self) {
-        let (tx, rx) = sync_channel(1);
-        (Fence { rx }, Self { tx: Mutex::new(Some(tx)), wake })
-    }
-}
 
 /// Backend implementation of the native descriptor facade.
 pub trait Api {
@@ -42,8 +14,6 @@ pub trait Api {
     fn handle(&self, session: u32, ticket: u64) -> Option<Arc<DmaBuf>>;
     fn release(&self, session: u32, ticket: u64);
     fn acquire(&mut self, session: u32, texture: Id) -> Result<(), String>;
-    /// A release fence for the session's submitted work; `notify` when it signals.
-    fn fence(&mut self, session: u32, notify: Arc<dyn Fn() + Send + Sync>) -> Result<Fence, String>;
     fn available(&self, session: u32, texture: Id) -> Result<bool, String>;
     fn sequence(&self, session: u32, texture: Id) -> Result<u64, String>;
     fn copy_frame(&mut self, session: &mut Session, source: Id, destination: Id, sequence: u64) -> Result<(), String>;
@@ -71,9 +41,6 @@ impl Hal {
     /// The caller has observed the writer's implicit/explicit acquire fence before this call.
     pub fn dmabuf_acquire(&self, session: u32, texture: Id) -> Result<(), String> {
         self.with_dmabuf(session, |api, s| api.acquire(s.id, texture))
-    }
-    pub fn dmabuf_fence(&self, session: u32, notify: Arc<dyn Fn() + Send + Sync>) -> Result<Fence, String> {
-        self.with_dmabuf(session, |api, s| api.fence(s.id, notify))
     }
     pub fn dmabuf_write_available(&self, session: u32, texture: Id) -> Result<bool, String> {
         self.with_dmabuf(session, |api, s| api.available(s.id, texture))
@@ -317,44 +284,3 @@ pub fn hal_dmabuf_support(session: u32, formats: &mut [u64], node: &mut [u8]) ->
     DmabufSupportInfo { found: true, render_device: support.render_device, node_len: path.len() as u64, format_count: support.formats.len() as u64 }
 }
 
-/// The fences `hal_dmabuf_fence` handed out, by number.
-static FENCES: Mutex<Option<std::collections::HashMap<u64, Fence>>> = Mutex::new(None);
-static NEXT_FENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-/// `Hal::dmabuf_fence`: a queue-ordered release of `session`'s foreign images; `notify` is called
-/// (any thread) once it is published. Its number for `hal_dmabuf_fence_poll`, 0 when failed.
-#[makepad_relax_api::relax_api]
-pub fn hal_dmabuf_fence(session: u32, notify: extern "C" fn()) -> u64 {
-    match Hal::global().dmabuf_fence(session, Arc::new(move || notify())) {
-        Ok(fence) => {
-            let id = NEXT_FENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::lock(&FENCES).get_or_insert_with(Default::default).insert(id, fence);
-            id
-        }
-        Err(error) => { failed(error); 0 }
-    }
-}
-
-/// Polls fence `fence`: 0 pending; 1 signaled, `fd` the sync_file the caller owns (-1: the GPU
-/// work was complete already); -1 failed (or an unknown fence). A fence that answered is gone.
-#[makepad_relax_api::relax_api]
-pub fn hal_dmabuf_fence_poll(fence: u64, fd: &mut i32) -> i32 {
-    use std::os::fd::IntoRawFd;
-    let mut fences = crate::lock(&FENCES);
-    let Some(pending) = fences.get_or_insert_with(Default::default).get_mut(&fence) else { failed("unknown DMA-BUF fence".into()); return -1 };
-    let answer = pending.poll();
-    if answer.is_some() {
-        fences.as_mut().map(|f| f.remove(&fence));
-    }
-    match answer {
-        None => 0,
-        Some(Ok(sync)) => { *fd = sync.map_or(-1, |s| s.into_raw_fd()); 1 }
-        Some(Err(error)) => { failed(error); -1 }
-    }
-}
-
-/// Forgets fence `fence` unanswered (its release still happens).
-#[makepad_relax_api::relax_api]
-pub fn hal_dmabuf_fence_drop(fence: u64) {
-    crate::lock(&FENCES).as_mut().map(|f| f.remove(&fence));
-}

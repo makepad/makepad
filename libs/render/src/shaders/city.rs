@@ -75,7 +75,8 @@ script_mod! {
         pixel: fn() {
             self.door_window()
             var tex = self.base_texel()
-            if tex.w < 0.5 { self.clip() }
+            let cut = self.cut_coverage(tex.w, 0.5)
+            if cut <= 0.0 { self.clip() }
             let kind = self.metallic
             let night = self.city.x
             var orm = self.orm_map.sample_repeat(self.v_uv)
@@ -291,7 +292,7 @@ script_mod! {
                     lit = lit + glow * min(1.0, cap / max(glow.x, 0.0001))
                 }
             }
-            return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(self.to_display(lit), self.v_fog, pos, self.fog_density), 1.0), pos, n), pos, n)
+            return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(self.to_display(lit), self.v_fog, pos, self.fog_density), self.cut_alpha(cut)), pos, n), pos, n)
         }
 
         fragment: fn() {

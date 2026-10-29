@@ -28,7 +28,11 @@ pub mod glsl;
 pub mod gl_interop;
 pub mod automation;
 pub mod buffers;
+pub mod call_scope;
+pub mod completion;
 pub mod clock;
+#[cfg_attr(not(any(test, target_os = "android")), allow(dead_code))]
+mod xr_carry;
 pub mod fake_camera;
 pub mod clipboard;
 pub mod drag_promise;
@@ -43,6 +47,9 @@ pub mod wm_socket;
 pub mod linux_ipc;
 #[cfg(target_os = "linux")]
 pub mod hosted_ipc;
+/// The native-layer bridge used by process-hosted Cx; the WM HAL shell uses it directly.
+#[cfg(target_os = "linux")]
+pub use backend::linux::wm::native as hosted_native;
 pub mod cmds;
 pub mod codec;
 pub mod events;
@@ -58,7 +65,6 @@ pub mod stream_encode;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod stream_decode;
 pub mod stream_pack;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod xr_remote;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod frame_tap;
@@ -66,7 +72,9 @@ pub mod frame_tap;
 pub mod framecap;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod inspect;
+pub mod a11y;
 pub mod media;
+pub mod native_layer;
 pub mod profile;
 pub mod threadcpu;
 pub mod session;
@@ -339,6 +347,14 @@ mod open_file_limit_tests {
     }
 }
 
+/// The backend's capabilities with what the HAL itself adds: a remote headset slot
+/// (`xr_remote`) under any GPU backend.
+fn backend_info_of(b: &dyn Backend) -> HalInfo {
+    let mut info = b.info();
+    info.flags |= xr_remote::info_flags();
+    info
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -383,6 +399,8 @@ impl Hal {
     }
 
     fn open_as(&self, req: &OpenReq, caps: Caps, trusted: bool, host_session: bool) -> HalInfo {
+        #[cfg(target_os = "linux")]
+        backend::linux::atspi::start();
         let refused = HalInfo { backend: backend_id::NONE, ..Default::default() };
         let mut guard = lock(&self.state);
         let st = &mut *guard;
@@ -459,6 +477,8 @@ impl Hal {
                 Some(b) => {
                     st.backend = Some((b.info().backend, b));
                     st.backend_inits += 1;
+                    // a remote headset slot's XR window events wake the pumps like the backend's
+                    xr_remote::set_wake(notify.clone());
                 }
                 None => return refused,
             },
@@ -467,7 +487,7 @@ impl Hal {
         if st.world.font_notify.is_none() {
             st.world.font_notify = Some(notify.clone());
         }
-        let mut info = st.backend.as_ref().expect("backend").1.info();
+        let mut info = backend_info_of(&*st.backend.as_ref().expect("backend").1);
         if req.parent != 0 || req.flags & open_flags::OFFSCREEN_WINDOWS != 0 {
             info.flags &= !info_flags::DIRECT_DISPLAY;
         }
@@ -624,7 +644,7 @@ impl Hal {
 
     /// The backend this Hal runs (`backend_id`) and its shader dialect, once one is open.
     pub fn backend_info(&self) -> Option<HalInfo> {
-        lock(&self.state).backend.as_ref().map(|(_, b)| b.info())
+        lock(&self.state).backend.as_ref().map(|(_, b)| backend_info_of(&**b))
     }
 
     /// Executes a batch. The slices in `buf` are read during this call only.
@@ -704,6 +724,7 @@ impl Hal {
                 let st = &mut *guard;
                 if let Some((_, b)) = st.backend.as_mut() {
                     b.step(&mut st.world, sid);
+                    xr_remote::drain_events(sid, &mut st.world);
                     // glyphs the font workers finished go to the atlas and to the sessions
                     if let Some(gpu) = b.host_gpu() {
                         font::service(gpu, &mut st.world);
@@ -1541,6 +1562,37 @@ pub fn hal_xr_linear_frames(on: bool) {
     let _ = on;
 }
 
+/// The XR window's stereo view paused (`on`): no frame is asked of the app and none is shown
+/// (only the room: passthrough); the frame loop, the input, the uplink's poses and the depth
+/// provider go on. A streamed view whose stream is off. Android XR; elsewhere nothing.
+#[relax_api]
+pub fn hal_xr_stereo_paused(on: bool) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::stereo_paused(on);
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
+}
+
+/// The XR panel (the host window as a quad layer in the room): `show` 0 the default rule (shown
+/// without an XR window; over one only after a thumbstick click), 1 always, 2 never; it hangs
+/// `distance_m` away and is `width_m` wide; `follow`: it stays in front of the person, following
+/// the head lazily (it recentres smoothly once the view drifts off it), display only (no
+/// pointer). The image is the window's own frames: a window that draws nothing new costs no
+/// GPU work. Android XR; elsewhere nothing.
+#[relax_api]
+pub fn hal_xr_panel(show: u32, distance_m: f32, width_m: f32, follow: bool) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::panel(show, distance_m, width_m, follow);
+    #[cfg(not(target_os = "android"))]
+    let _ = (show, distance_m, width_m, follow);
+}
+
+/// The near and far planes of every XR eye projection (metres in the room): the app's eye
+/// passes, a remote headset's stream (its depth band decoded with them) and its warp. The one
+/// definition.
+pub const XR_EYE_NEAR_M: f32 = 0.05;
+pub const XR_EYE_FAR_M: f32 = 2000.0;
+
 /// The XR window's fixed foveation (Android XR: the runtime's foveation profile in the
 /// projection chains' fragment density maps; 0 none, 1 low, 2 medium, 3 high), applied from the
 /// next display frame. Elsewhere nothing.
@@ -1559,6 +1611,17 @@ pub fn hal_xr_foveation(level: u32) {
 pub fn hal_xr_environment_depth(on: bool) {
     #[cfg(target_os = "android")]
     backend::android::xr::environment_depth(on);
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
+}
+
+/// The environment depth images are read back to the app for its room field (`on`; off at
+/// start: the app gets only the GPU image, no copy and no CPU work). Android XR; elsewhere
+/// nothing.
+#[relax_api]
+pub fn hal_xr_depth_readback(on: bool) {
+    #[cfg(target_os = "android")]
+    backend::android::xr::depth_readback(on);
     #[cfg(not(target_os = "android"))]
     let _ = on;
 }

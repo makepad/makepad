@@ -12,6 +12,13 @@ pub const FONT_ASSET_MANIFEST_SECTION: &str = "makepad.font-assets.v1";
 pub enum FontSet {
     Latin,
     International,
+    /// The Latin UI faces, with every other script, CJK and emoji drawn by
+    /// the operating system's own fonts. The package carries no CJK or emoji
+    /// face (about 3 MB of fonts instead of about 50 MB); where the bundled
+    /// ones can be read anyway (a source checkout under `makepad run`) they
+    /// are the last resort after the OS. On the web, which has no OS fonts to
+    /// read, it is `Latin`.
+    System,
 }
 
 impl FontSet {
@@ -28,6 +35,7 @@ impl FontSet {
         match self {
             Self::Latin => "Latin",
             Self::International => "International",
+            Self::System => "System",
         }
     }
 
@@ -35,13 +43,21 @@ impl FontSet {
         match self {
             Self::Latin => &LATIN_POLICY,
             Self::International => &INTERNATIONAL_POLICY,
+            Self::System => &SYSTEM_POLICY,
         }
+    }
+
+    /// Whether the OS fonts come before the bundled CJK and emoji faces, and
+    /// a bundled face this package does not carry is left out without a word.
+    pub const fn prefers_system_fonts(self) -> bool {
+        matches!(self, Self::System)
     }
 
     pub const fn manifest_bytes(self) -> &'static [u8] {
         match self {
             Self::Latin => LATIN_FONT_ASSET_MANIFEST,
             Self::International => INTERNATIONAL_FONT_ASSET_MANIFEST,
+            Self::System => SYSTEM_FONT_ASSET_MANIFEST,
         }
     }
 }
@@ -194,7 +210,7 @@ impl FontPolicy {
     /// Large fallback members registered with a Latin/UI family but excluded
     /// from its eager asset set and manifest.
     pub const fn lazy_chain(&self, role: FontRole) -> &'static [LazyFontAsset] {
-        if !matches!(self.set, FontSet::Latin) {
+        if !matches!(self.set, FontSet::Latin | FontSet::System) {
             return NO_LAZY_FONTS;
         }
         match role {
@@ -398,6 +414,17 @@ const INTERNATIONAL_POLICY: FontPolicy = FontPolicy {
     assets: INTERNATIONAL_ASSETS,
 };
 
+const SYSTEM_POLICY: FontPolicy = FontPolicy {
+    set: FontSet::System,
+    regular: FontChain { role: FontRole::Regular, members: LATIN_REGULAR },
+    bold: FontChain { role: FontRole::Bold, members: LATIN_BOLD },
+    italic: FontChain { role: FontRole::Italic, members: LATIN_ITALIC },
+    bold_italic: FontChain { role: FontRole::BoldItalic, members: LATIN_BOLD_ITALIC },
+    monospace: FontChain { role: FontRole::Monospace, members: MONOSPACE },
+    icons: FontChain { role: FontRole::Icons, members: ICONS },
+    assets: LATIN_ASSETS,
+};
+
 pub const LATIN_FONT_ASSET_MANIFEST: &[u8; 485] = b"format=makepad.font-assets.v1\nset=Latin\nasset=makepad_widgets/resources/IBMPlexSans-Text.ttf\nasset=makepad_widgets/resources/IBMPlexSans-SemiBold.ttf\nasset=makepad_widgets/resources/IBMPlexSans-Italic.ttf\nasset=makepad_widgets/resources/IBMPlexSans-BoldItalic.ttf\nasset=makepad_widgets/resources/LiberationMono-Regular.ttf\nasset=makepad_widgets/resources/fa-solid-900.ttf\nasset=makepad_widgets/resources/jetbrains_mono_variable.ttf\nasset=makepad_widgets/resources/NotoSans-Regular.ttf\n";
 
 /// The wasm/package payload for the Latin/UI runtime set. The final three
@@ -414,6 +441,9 @@ pub const LATIN_FONT_ASSET_PACKAGE_MANIFEST: &[u8; LATIN_PACKAGE_MANIFEST_LEN] =
     &extend_font_asset_manifest(LATIN_FONT_ASSET_MANIFEST, LATIN_LAZY_PACKAGE_ASSETS);
 
 pub const INTERNATIONAL_FONT_ASSET_MANIFEST: &[u8; 536] = b"format=makepad.font-assets.v1\nset=International\nasset=makepad_widgets/resources/IBMPlexSans-Text.ttf\nasset=makepad_widgets/resources/IBMPlexSans-SemiBold.ttf\nasset=makepad_widgets/resources/IBMPlexSans-Italic.ttf\nasset=makepad_widgets/resources/IBMPlexSans-BoldItalic.ttf\nasset=makepad_widgets/resources/LiberationMono-Regular.ttf\nasset=makepad_widgets/resources/fa-solid-900.ttf\nasset=makepad_widgets/resources/LXGWWenKaiRegular.ttf\nasset=makepad_widgets/resources/LXGWWenKaiBold.ttf\nasset=makepad_widgets/resources/NotoColorEmoji.ttf\n";
+
+/// The Latin faces only: CJK, emoji and other scripts are the OS's.
+pub const SYSTEM_FONT_ASSET_MANIFEST: &[u8; 486] = b"format=makepad.font-assets.v1\nset=System\nasset=makepad_widgets/resources/IBMPlexSans-Text.ttf\nasset=makepad_widgets/resources/IBMPlexSans-SemiBold.ttf\nasset=makepad_widgets/resources/IBMPlexSans-Italic.ttf\nasset=makepad_widgets/resources/IBMPlexSans-BoldItalic.ttf\nasset=makepad_widgets/resources/LiberationMono-Regular.ttf\nasset=makepad_widgets/resources/fa-solid-900.ttf\nasset=makepad_widgets/resources/jetbrains_mono_variable.ttf\nasset=makepad_widgets/resources/NotoSans-Regular.ttf\n";
 
 const fn bytes_equal(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
@@ -576,7 +606,7 @@ mod tests {
 
     #[test]
     fn assets_are_the_exact_unique_union_of_role_chains() {
-        for set in [FontSet::Latin, FontSet::International] {
+        for set in [FontSet::Latin, FontSet::International, FontSet::System] {
             let policy = set.policy();
             let mut union = HashMap::new();
             for role in [
@@ -636,6 +666,11 @@ mod tests {
             FontSet::International.manifest_bytes(),
             include_bytes!("../tests/fixtures/font-assets-international-v1.txt")
         );
+        assert_eq!(
+            FontSet::System.manifest_bytes(),
+            include_bytes!("../tests/fixtures/font-assets-system-v1.txt")
+        );
+        assert_eq!(FontSet::System.manifest_bytes(), fixture(FontSet::System).as_bytes());
         assert_eq!(FontSet::Latin.manifest_bytes(), fixture(FontSet::Latin).as_bytes());
         assert_eq!(
             FontSet::International.manifest_bytes(),
@@ -649,6 +684,16 @@ mod tests {
         assert!(!manifest.contains("LXGW"));
         assert!(!manifest.contains("NotoColorEmoji"));
         assert!(!manifest.contains("GoNoto"));
+    }
+
+    #[test]
+    fn system_package_carries_no_cjk_or_emoji_face() {
+        let manifest = std::str::from_utf8(FontSet::System.manifest_bytes()).unwrap();
+        assert!(!manifest.contains("LXGW"));
+        assert!(!manifest.contains("NotoColorEmoji"));
+        assert!(FontSet::System.prefers_system_fonts());
+        assert!(!FontSet::Latin.prefers_system_fonts() && !FontSet::International.prefers_system_fonts());
+        assert_eq!(FontSet::System.policy().regular, FontSet::Latin.policy().regular);
     }
 
     #[test]

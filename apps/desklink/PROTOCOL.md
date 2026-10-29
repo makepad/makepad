@@ -1,4 +1,4 @@
-# Desk Link protocol, version 7
+# Desk Link protocol, version 8
 
 Desk Link is how a viewer (this app) sees and drives a desktop (the window manager's
 `desk_link` server, `apps/wm/src/desk_link/`; the macOS / Windows Desk Host; a JIT host serving
@@ -278,3 +278,27 @@ follows the last `SelectScreen`. **Last connection wins**: a desktop that follow
 takes the `Window` of the viewer that connected last (not view-only, its window said); the
 earlier ones see that size scaled. When it leaves, the one that connected before it decides
 again (`server::size_owner`).
+
+## Semantic inspection (version 8)
+
+Version 8 adds viewer message **25**, `A11yQuery { req u64, line str }`, and desktop
+message **109**, `A11yReply { req u64, text str }`. The text is the ordinary `ui`
+interpreter reply (including JSON when requested); request IDs correlate concurrent callers.
+Only `ui` commands are accepted. The desktop runs them on reusable session workers so a wait
+cannot hold up pings, video, input, or the semantic action that satisfies it. Workers
+grow to the session's observed query concurrency and stop when it disconnects. The same TLS fleet proof and `Need::Admin` check
+that authorizes input injection guards every query, including `ui act` and `ui type`.
+Hardware input availability (`Welcome.input`) is independent of this authorization.
+
+Agents address the viewer with `ui machine=TAB ...`, where TAB is the desktop's name
+or zero-based tab index. `ui machine=list` lists the available tab indices and names.
+The selector is removed before sending the command. For a WM desktop, use
+`ui machine=TAB app=CLIENT_ID ...` (or the unique app name); unqualified `ui` includes
+the shell and connected hosted trees. `app=shell` selects the WM's local HAL sessions,
+including modules and domains. Actions and snapshots should name their app; `w=`
+then selects a window within it. `if_user_seq` is checked on the selected desktop/app,
+not against the viewer's activity counter.
+
+A disconnected or timed-out query reports an error; actions are never replayed on reconnect.
+Version 7 peers are refused during Hello. Live tree embedding in the viewer's own OS
+accessibility tree is not part of the query/reply transport.

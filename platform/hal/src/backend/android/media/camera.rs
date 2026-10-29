@@ -10,7 +10,8 @@ pub(super) enum Command {
     Inputs(u64, u32, Vec<Key>),
     Prepare(Ticket, Key, bool),
     Control(Ticket, u32),
-    View(Ticket, u16, [f32; 4], bool),
+    Source(Ticket, Key),
+    Place(Ticket, crate::types::Layer),
 }
 struct Device { id: CString, desc: VideoInputInfo }
 struct Preview { ticket: Ticket, key: Key, native: bool, active: bool, size: Option<[u32; 2]>, window: Option<Window> }
@@ -50,7 +51,7 @@ impl Engine for Camera {
             Command::Inputs(epoch, consumers, inputs) => { self.epoch = epoch; self.consumers = consumers; self.inputs = inputs; }
             Command::Prepare(ticket, key, native) => {
                 lock(routes()).insert(ticket.token, Route { surfaces: self.surfaces.clone(), thread: std::thread::current() });
-                self.previews.insert(ticket.video, Preview { ticket, key, native, active: true, size: None, window: None });
+                self.previews.insert(ticket.token, Preview { ticket, key, native, active: true, size: None, window: None });
                 if !self.devices.iter().any(|d| d.desc.id == key.0 && d.desc.formats.iter().any(|f| f.id == key.1)) {
                     self.enumerate(false);
                     if !self.devices.iter().any(|d| d.desc.id == key.0 && d.desc.formats.iter().any(|f| f.id == key.1)) {
@@ -59,39 +60,40 @@ impl Engine for Camera {
                 }
             }
             Command::Control(ticket, op) => {
-                if !self.previews.get(&ticket.video).is_some_and(|p| p.ticket == ticket) { return; }
+                if !self.previews.get(&ticket.token).is_some_and(|p| p.ticket == ticket) { return; }
                 match op {
                     video_op::CLEANUP => {
-                        self.previews.remove(&ticket.video);
+                        self.previews.remove(&ticket.token);
                         lock(routes()).remove(&ticket.token);
                         detach(ticket);
                         self.reconcile();
                         self.output.push(Message::Status(ticket, video_status::RELEASED, String::new()));
                         return;
                     }
-                    video_op::PLAY | video_op::RESUME => self.previews.get_mut(&ticket.video).unwrap().active = true,
-                    video_op::PAUSE => self.previews.get_mut(&ticket.video).unwrap().active = false,
+                    video_op::PLAY | video_op::RESUME => self.previews.get_mut(&ticket.token).unwrap().active = true,
+                    video_op::PAUSE => self.previews.get_mut(&ticket.token).unwrap().active = false,
                     _ => {}, // camera sources have no audio, timeline or selectable tracks
                 }
             }
-            Command::View(ticket, op, area, visible) => {
-                let Some(p) = self.previews.get_mut(&ticket.video).filter(|p| p.ticket == ticket) else { return; };
-                if matches!(op, view_op::DETACH | view_op::CLOSE) {
-                    p.window = None;
-                    detach(ticket);
-                } else if matches!(op, view_op::CREATE | view_op::UPDATE) {
-                    let shared = Shared::global();
-                    let dpi = shared.dpi();
-                    let height = lock(&shared.registry).window.as_ref().map(|w| w.size()[1]).unwrap_or(0) as f32;
-                    let left = (area[0] * dpi).round() as i32;
-                    let top = (height - (area[1] + area[3]) * dpi).round() as i32;
-                    let right = ((area[0] + area[2]) * dpi).round() as i32;
-                    let bottom = (height - area[1] * dpi).round() as i32;
-                    let result = java(|env, activity| unsafe {
-                        void(env, activity, c"updateCameraNativePreview", c"(JIIIIZ)V", &[jvalue { j: ticket.token as i64 }, jvalue { i: left }, jvalue { i: top }, jvalue { i: right }, jvalue { i: bottom }, jvalue { z: visible as u8 }])
-                    });
-                    if let Err(e) = result { self.output.push(Message::Status(ticket, video_status::ERROR, e)); }
-                }
+            Command::Source(ticket, key) => {
+                if let Some(p) = self.previews.get_mut(&ticket.token) { p.key = key; p.size = None; }
+            }
+            Command::Place(ticket, geometry) => {
+                if !self.previews.contains_key(&ticket.token) { return; }
+                let [x, y, w, h] = geometry.rect;
+                let [cx, cy, cw, ch] = geometry.clip;
+                let visible = geometry.flags & crate::native_layer::layer_flags::VISIBLE != 0 && cw > 0.0 && ch > 0.0;
+                let result = java(|env, activity| unsafe {
+                    void(env, activity, c"applyNativeCameraLayer", c"(JIIIIIIIIZF)V", &[
+                        jvalue { j: ticket.token as i64 },
+                        jvalue { i: x.round() as i32 }, jvalue { i: y.round() as i32 },
+                        jvalue { i: (x + w).round() as i32 }, jvalue { i: (y + h).round() as i32 },
+                        jvalue { i: (cx - x).round() as i32 }, jvalue { i: (cy - y).round() as i32 },
+                        jvalue { i: (cx + cw - x).round() as i32 }, jvalue { i: (cy + ch - y).round() as i32 },
+                        jvalue { z: visible as u8 }, jvalue { f: geometry.opacity.clamp(0.0, 1.0) },
+                    ])
+                });
+                if let Err(e) = result { self.output.push(Message::Status(ticket, video_status::ERROR, e)); }
             }
         }
         self.reconcile();
@@ -203,7 +205,7 @@ impl Drop for Camera {
     }
 }
 fn detach(ticket: Ticket) {
-    if let Err(e) = java(|env, activity| unsafe { void(env, activity, c"detachCameraNativePreview", c"(J)V", &[jvalue { j: ticket.token as i64 }]) }) { eprintln!("[hal-android-camera] detach: {e}"); }
+    if let Err(e) = java(|env, activity| unsafe { void(env, activity, c"detachNativeCameraLayer", c"(J)V", &[jvalue { j: ticket.token as i64 }]) }) { eprintln!("[hal-android-camera] detach: {e}"); }
 }
 unsafe extern "system" fn surface_ready(env: *mut JNIEnv, _: jclass, token: jlong, surface: jobject, _: jint, _: jint) {
     let route = lock(routes()).get(&(token as u64)).cloned();

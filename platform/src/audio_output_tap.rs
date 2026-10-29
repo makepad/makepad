@@ -213,6 +213,19 @@ pub(crate) fn feed_audio_output_tap(output: usize, info: AudioInfo, buffer: &Aud
     EPOCH.fetch_add(1, Ordering::SeqCst);
 }
 
+/// The program output plays silent while this is on (its taps still hear every buffer): the
+/// app's sound plays elsewhere instead (a streaming headset's, set from that tap). A plain
+/// atomic, so a tap may set it on the realtime thread.
+static SILENCED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_program_output_silenced(on: bool) {
+    SILENCED.store(on, Ordering::Release);
+}
+
+pub(crate) fn program_output_silenced(output: usize) -> bool {
+    output == PROGRAM_OUTPUT && SILENCED.load(Ordering::Acquire)
+}
+
 /// The registry is one per process, so its tests take turns -- at module
 /// scope rather than inside the test module, because the seam that wraps
 /// this feed has a test of its own and it has to take the same turn.

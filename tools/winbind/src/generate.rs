@@ -16,6 +16,7 @@ struct Generator {
     selected: BTreeSet<String>,
     output: BTreeMap<String, String>,
     callbacks: BTreeSet<String>,
+    thread_safe_callbacks: BTreeSet<String>,
     nullable: BTreeSet<String>,
 }
 fn short(name: &str) -> &str {
@@ -82,6 +83,7 @@ impl Generator {
             selected: BTreeSet::new(),
             output: BTreeMap::new(),
             callbacks: BTreeSet::new(),
+            thread_safe_callbacks: BTreeSet::new(),
             nullable: BTreeSet::new(),
         };
         for p in paths {
@@ -162,6 +164,35 @@ impl Generator {
         } else {
             false
         }
+    }
+    fn require_callback(&mut self, name: &str, thread_safe: bool) {
+        self.require(name);
+        self.callbacks.insert(name.to_string());
+        if thread_safe {
+            self.thread_safe_callbacks.insert(name.to_string());
+        }
+        let item = self.index[name];
+        let base = self.files[item.file].base(item.id);
+        if !base.is_empty() && short(&base) != "IUnknown" {
+            self.require_callback(&base, thread_safe);
+        }
+    }
+    fn require_constants(&mut self, pattern: &str) {
+        let (prefix, suffix) = pattern.split_once('*').expect("constant pattern needs *");
+        assert!(!suffix.contains('*'), "constant pattern supports one *");
+        let names: Vec<_> = self.index.iter().filter_map(|(name, item)| {
+            (item.table == 4 && name.starts_with(prefix) && name.ends_with(suffix))
+                .then(|| name.clone())
+        }).collect();
+        assert!(!names.is_empty(), "constant pattern matched nothing: {pattern}");
+        for name in names {
+            self.require(&name);
+        }
+    }
+    fn nullable_param(&self, item: Item, m: &Method, p: &Param) -> bool {
+        p.flags & 16 != 0 || self.nullable.contains(
+            &(self.files[item.file].type_name(item.owner << 2) + "." + &m.name + "." + &p.name)
+        )
     }
     fn require(&mut self, name: &str) {
         if name.is_empty() || name.starts_with("System.") || self.selected.contains(name) {
@@ -853,7 +884,11 @@ impl Generator {
         let ret = if let Some(i) = retval {
             let s = &m.params[i].sig.args[0];
             if self.iface(&s.name) {
-                path(&s.name)
+                if self.nullable_param(item, m, &m.params[i]) {
+                    String::from("Option<") + &path(&s.name) + ">"
+                } else {
+                    path(&s.name)
+                }
             } else {
                 self.abi(s, false)
             }
@@ -896,8 +931,15 @@ impl Generator {
             if let Some(i) = retval {
                 let s = &m.params[i].sig.args[0];
                 if self.iface(&s.name) {
+                    if self.nullable_param(item, m, &m.params[i]) {
+                        out.push_str("if result__.is_null() { return Ok(None); }\n");
+                    }
                     out.push_str(&path(&s.name));
-                    out.push_str("::from_raw(result__)\n");
+                    out.push_str("::from_raw(result__)");
+                    if self.nullable_param(item, m, &m.params[i]) {
+                        out.push_str(".map(Some)");
+                    }
+                    out.push('\n');
                 } else {
                     out.push_str("Ok(result__)\n");
                 }
@@ -1088,8 +1130,15 @@ pub fn run(mut args: std::env::Args) {
             continue;
         }
         if let Some(name) = line.strip_prefix("implement ") {
-            g.callbacks.insert(name.to_string());
-            g.require(name);
+            let (name, thread_safe) = if let Some((name, bounds)) = name.split_once(':') {
+                assert_eq!(bounds.trim(), "Send + Sync", "unsupported callback bounds");
+                (name.trim(), true)
+            } else {
+                (name, false)
+            };
+            g.require_callback(name, thread_safe);
+        } else if let Some(pattern) = line.strip_prefix("constants ") {
+            g.require_constants(pattern);
         } else if let Some(name) = line.strip_prefix("nullable ") {
             g.nullable.insert(name.to_string());
         } else if line.starts_with("winrt ") {
@@ -1183,17 +1232,27 @@ impl Generator {
         }
         None
     }
-    fn emit_callback(&self, item: Item, n: &str, out: &mut String) {
+    fn callback_vtable(
+        &self,
+        item: Item,
+        n: &str,
+        out: &mut String,
+        thunks: &mut String,
+        method_count: &mut usize,
+    ) -> String {
         let f = &self.files[item.file];
-        let base = f.base(item.id);
-        if short(&base) != "IUnknown" {
-            fail("callback generator currently requires an IUnknown base");
+        *method_count += f.range(2, item.id, 5, 6).len();
+        let name = f.type_name(item.id << 2);
+        if short(&name) == "IUnknown" {
+            return String::from("crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release }");
         }
-        out.push_str("pub trait ");
-        out.push_str(n);
-        out.push_str("Impl {\n");
-        let mut thunks = String::new();
-        let mut initializer=String::from("static IMPLEMENT_VTABLE_")+n+": "+n+"_Vtbl = "+n+"_Vtbl { base__: crate::core::IUnknown_Vtbl { QueryInterface: crate::core::object_query, AddRef: crate::core::object_add_ref, Release: crate::core::object_release },\n";
+        let base = f.base(item.id);
+        if base.is_empty() {
+            fail("implemented interface must derive from IUnknown");
+        }
+        let mut initializer = path(&name) + "_Vtbl { base__: "
+            + &self.callback_vtable(self.index[&base], n, out, thunks, method_count)
+            + ",\n";
         for id in f.range(2, item.id, 5, 6) {
             let m = f.method(id);
             let mn = ident(&m.name);
@@ -1208,7 +1267,11 @@ impl Generator {
             if let Some(i) = retval {
                 let s = &m.params[i].sig.args[0];
                 output = if self.iface(&s.name) {
-                    path(&s.name)
+                    if self.nullable_param(item, &m, &m.params[i]) {
+                        String::from("Option<") + &path(&s.name) + ">"
+                    } else {
+                        path(&s.name)
+                    }
                 } else {
                     self.abi(s, false)
                 };
@@ -1270,7 +1333,7 @@ impl Generator {
             thunks.push_str("unsafe extern \"system\" fn ");
             thunks.push_str(&tn);
             thunks.push('(');
-            self.params_abi(f, &m, &mut thunks, true);
+            self.params_abi(f, &m, thunks, true);
             thunks.push_str(") -> ");
             thunks.push_str(&self.return_abi(&m.ret));
             thunks.push_str(" {\n");
@@ -1304,7 +1367,11 @@ impl Generator {
                     thunks.push_str(&ident(&m.params[i].name));
                     thunks.push_str(" = value");
                     if self.iface(&s.name) {
-                        thunks.push_str(".into_raw()");
+                        if self.nullable_param(item, &m, &m.params[i]) {
+                            thunks.push_str(".map_or(::core::ptr::null_mut(), |v| v.into_raw())");
+                        } else {
+                            thunks.push_str(".into_raw()");
+                        }
                     }
                     thunks.push(';');
                 } else {
@@ -1314,9 +1381,34 @@ impl Generator {
             }
             thunks.push_str("}\n");
         }
+        initializer.push('}');
+        initializer
+    }
+    fn emit_callback(&self, item: Item, n: &str, out: &mut String) {
+        out.push_str("/// Callback methods may receive raw ABI pointers; validate them before use.\n");
+        out.push_str("pub trait ");
+        out.push_str(n);
+        out.push_str("Impl");
+        if self.thread_safe_callbacks.contains(&self.files[item.file].type_name(item.id << 2)) {
+            out.push_str(": Send + Sync");
+        }
+        out.push_str(" {\n");
+        let mut thunks = String::new();
+        let mut method_count = 0;
+        let initializer = self.callback_vtable(item, n, out, &mut thunks, &mut method_count);
         out.push_str("}\n");
-        initializer.push_str("};\n");
+        out.push_str("const _: () = assert!(::core::mem::size_of::<");
+        out.push_str(n);
+        out.push_str("_Vtbl>() == ");
+        out.push_str(&method_count.to_string());
+        out.push_str(" * ::core::mem::size_of::<unsafe extern \"system\" fn()>());\n");
+        out.push_str("static IMPLEMENT_VTABLE_");
+        out.push_str(n);
+        out.push_str(": ");
+        out.push_str(n);
+        out.push_str("_Vtbl = ");
         out.push_str(&initializer);
+        out.push_str(";\n");
         out.push_str(&thunks);
         out.push_str("unsafe fn destroy_");
         out.push_str(n);
@@ -1324,25 +1416,31 @@ impl Generator {
         out.push_str(n);
         out.push_str("Impl>)); }\nimpl crate::core::ObjectBuilder { pub fn add_");
         out.push_str(n);
-        out.push_str("(&mut self, implementation: Box<dyn ");
+        out.push_str("(mut self, implementation: Box<dyn ");
         out.push_str(n);
-        out.push_str("Impl>) { let mut iids = Vec::new(); iids.push(IID_");
-        out.push_str(n);
-        out.push_str("); unsafe { self.add(&IMPLEMENT_VTABLE_");
+        out.push_str("Impl>) -> Self { let iids = vec![");
+        let mut current = self.files[item.file].type_name(item.id << 2);
+        while !current.is_empty() && short(&current) != "IUnknown" {
+            out.push_str(&path(&current));
+            out.push_str("::IID,");
+            let ci = self.index[&current];
+            current = self.files[ci.file].base(ci.id);
+        }
+        out.push_str("]; unsafe { self.add(&IMPLEMENT_VTABLE_");
         out.push_str(n);
         out.push_str(" as *const ");
         out.push_str(n);
         out.push_str("_Vtbl as *const ::core::ffi::c_void, Box::into_raw(Box::new(implementation)) as *mut ::core::ffi::c_void, destroy_");
         out.push_str(n);
-        out.push_str(", iids); } } }\nimpl ");
+        out.push_str(", iids); } self } }\nimpl ");
         out.push_str(n);
         out.push_str(" { pub fn implement(implementation: Box<dyn ");
         out.push_str(n);
         out.push_str(
-            "Impl>) -> Self { let mut object = crate::core::ObjectBuilder::new(); object.add_",
+            "Impl>) -> Self { let object = crate::core::ObjectBuilder::new().add_",
         );
         out.push_str(n);
-        out.push_str("(implementation); unsafe { Self::from_raw(object.finish().expect(\"one COM interface\")).expect(\"allocated COM interface\") } } }\n");
+        out.push_str("(implementation); unsafe { Self::from_raw(object.finish().expect(\"COM object\")).expect(\"allocated COM interface\") } } }\n");
     }
 }
 

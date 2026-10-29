@@ -106,7 +106,8 @@ returns the patch; without one, at the end of a styling session:
 1. Read `tweak final`. If annotations produced a `png`, inspect it; the
    strokes are part of the user's feedback.
 2. Resolve each dotted widget path to its `script_mod!` declaration.
-   Skip anonymous `-` segments when searching. `dump` shows the same ids.
+   Skip anonymous `-` segments when searching. `ui find path=... json=1`
+   reports semantic nodes with their widget paths.
 3. Write properties at the most specific existing instance declaration.
    Create an instance override only if no appropriate site exists.
 4. Preserve typed-property merging with `+:`. Plain walk/layout properties

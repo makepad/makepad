@@ -4,7 +4,7 @@ use makepad_apple_sys::{
     CFArrayCreate, CFArrayGetCount, CFArrayGetValueAtIndex, CFDataGetBytePtr, CFDataGetLength,
     CFRelease, OSStatus, SSLClose, SSLConnectionRef, SSLContextRef, SSLCopyPeerTrust,
     SSLCreateContext, SSLHandshake, SSLProtocol, SSLRead, SSLSetCertificate, SSLSetConnection,
-    SSLSetIOFuncs, SSLSetPeerDomainName, SSLSetProtocolVersionMin, SSLSetSessionOption, SSLWrite,
+    SSLSetIOFuncs, SSLSetPeerDomainName, SSLSetPeerID, SSLSetProtocolVersionMin, SSLSetSessionOption, SSLWrite,
     SecCertificateCopyData, SecCertificateRef, SecIdentityRef, SecTrustCopyCertificateChain,
     SecTrustRef,
 };
@@ -13,6 +13,7 @@ use std::{
     io::{Read, Write},
     net::{Shutdown, TcpStream},
     ptr,
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -135,6 +136,10 @@ pub(crate) struct SecureTransportStream {
     tcp_stream: Box<TcpStream>,
     ssl_context: SSLContextRef,
     is_closed: bool,
+    /// Key of this connection's session in SecureTransport's client session
+    /// cache (captured client connections only): a connection made with the
+    /// same key resumes the session.
+    peer_id: Option<[u8; 16]>,
 }
 
 #[link(name = "Security", kind = "framework")]
@@ -144,35 +149,42 @@ extern "C" {
 
 /// kTLSProtocol12: the floor for the pinned and server paths.
 const TLS_PROTOCOL_12: SSLProtocol = 8;
-/// ECDHE-ECDSA with AES-GCM or ChaCha20-Poly1305 (the tunnel's P-256 keys).
-const MODERN_ECDSA_SUITES: [u16; 3] = [0xC02B, 0xC02C, 0xCCA9];
+/// ECDHE with RSA or ECDSA authentication, AEAD only.
+const MODERN_SUITES: [u16; 6] = [0xC02B, 0xC02C, 0xCCA9, 0xC02F, 0xC030, 0xCCA8];
 
-/// The leaf certificate's DER from a context past server authentication.
-fn peer_leaf_der(ssl_context: SSLContextRef) -> io::Result<Vec<u8>> {
+/// A fresh session cache key per captured connection (unique in the process).
+fn next_peer_id() -> [u8; 16] {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let mut id = [0u8; 16];
+    id[..8].copy_from_slice(b"mp-tls-1");
+    id[8..].copy_from_slice(&NEXT.fetch_add(1, Ordering::Relaxed).to_be_bytes());
+    id
+}
+
+/// Peer certificate DERs, leaf first, from a context past authentication.
+fn peer_chain_der(ssl_context: SSLContextRef) -> io::Result<Vec<Vec<u8>>> {
     let mut trust: SecTrustRef = ptr::null();
     check_ssl_status("SSLCopyPeerTrust", unsafe { SSLCopyPeerTrust(ssl_context, &mut trust) })?;
-    if trust.is_null() {
-        return Err(io_other("server sent no certificate"));
-    }
+    if trust.is_null() { return Err(io_other("server sent no certificate")); }
     unsafe {
         let chain = SecTrustCopyCertificateChain(trust);
         CFRelease(trust);
-        if chain.is_null() || CFArrayGetCount(chain) < 1 {
-            if !chain.is_null() {
-                CFRelease(chain);
+        if chain.is_null() { return Err(io_other("server sent no certificate")); }
+        let result = (|| {
+            let mut certificates = Vec::new();
+            for i in 0..CFArrayGetCount(chain) {
+                let cert = CFArrayGetValueAtIndex(chain, i) as SecCertificateRef;
+                let data = SecCertificateCopyData(cert);
+                if data.is_null() { return Err(io_other("cannot read server certificate")); }
+                let len = CFDataGetLength(data) as usize;
+                certificates.push(std::slice::from_raw_parts(CFDataGetBytePtr(data), len).to_vec());
+                CFRelease(data);
             }
-            return Err(io_other("server sent no certificate"));
-        }
-        let leaf = CFArrayGetValueAtIndex(chain, 0) as SecCertificateRef;
-        let data = SecCertificateCopyData(leaf);
+            if certificates.is_empty() { return Err(io_other("server sent no certificate")); }
+            Ok(certificates)
+        })();
         CFRelease(chain);
-        if data.is_null() {
-            return Err(io_other("cannot read server certificate"));
-        }
-        let len = CFDataGetLength(data) as usize;
-        let bytes = std::slice::from_raw_parts(CFDataGetBytePtr(data), len).to_vec();
-        CFRelease(data);
-        Ok(bytes)
+        result
     }
 }
 
@@ -239,14 +251,17 @@ impl SecureTransportStream {
             tcp_stream,
             ssl_context,
             is_closed: false,
+            peer_id: None,
         })
     }
 
     /// Client handshake without CA validation (self-signed servers): the
     /// server's leaf certificate DER is taken at the server-auth break
-    /// and returned, for the caller to authenticate. TLS 1.2+,
-    /// ECDHE-ECDSA AEAD suites only.
-    pub(crate) fn connect_capture(tcp_stream: TcpStream) -> io::Result<(Self, Vec<u8>)> {
+    /// and returned, for the caller to authenticate. TLS 1.2+, ECDHE AEAD
+    /// suites only. `peer_id`: the session cache key; the key of an earlier
+    /// connection resumes its session (an abbreviated handshake, whose leaf
+    /// comes from the cached session).
+    pub(crate) fn connect_capture(tcp_stream: TcpStream, peer_id: [u8; 16]) -> io::Result<(Self, Vec<u8>)> {
         // A peer that never answers (not a TLS server) must not hang us.
         tcp_stream.set_read_timeout(Some(Duration::from_secs(20)))?;
         let mut tcp_stream = Box::new(tcp_stream);
@@ -256,6 +271,9 @@ impl SecureTransportStream {
         }
         let result = (|| -> io::Result<Vec<u8>> {
             Self::configure(ssl_context, &mut tcp_stream)?;
+            check_ssl_status("SSLSetPeerID", unsafe {
+                SSLSetPeerID(ssl_context, peer_id.as_ptr() as *const std::ffi::c_void, peer_id.len())
+            })?;
             check_ssl_status("SSLSetSessionOption(BreakOnServerAuth)", unsafe {
                 SSLSetSessionOption(ssl_context, kSSLSessionOptionBreakOnServerAuth, true)
             })?;
@@ -263,11 +281,13 @@ impl SecureTransportStream {
             loop {
                 let status = unsafe { SSLHandshake(ssl_context) };
                 match status {
-                    SSL_OK => {
-                        return seen.ok_or_else(|| io_other("TLS handshake finished without a server certificate"))
-                    }
+                    // A resumed session has no server-auth break.
+                    SSL_OK => return match seen {
+                        Some(leaf) => Ok(leaf),
+                        None => Ok(peer_chain_der(ssl_context)?.remove(0)),
+                    },
                     s if s == errSSLServerAuthCompleted => {
-                        let leaf = peer_leaf_der(ssl_context)?;
+                        let leaf = peer_chain_der(ssl_context)?.remove(0);
                         seen = Some(leaf);
                     }
                     ERR_SSL_WOULD_BLOCK => {
@@ -288,7 +308,7 @@ impl SecureTransportStream {
             }
         };
         tcp_stream.set_read_timeout(None)?;
-        Ok((Self { tcp_stream, ssl_context, is_closed: false }, der))
+        Ok((Self { tcp_stream, ssl_context, is_closed: false, peer_id: Some(peer_id) }, der))
     }
 
     /// Server handshake with an in-memory identity.
@@ -326,7 +346,7 @@ impl SecureTransportStream {
             }
             return Err(err);
         }
-        Ok(Self { tcp_stream, ssl_context, is_closed: false })
+        Ok(Self { tcp_stream, ssl_context, is_closed: false, peer_id: None })
     }
 
     fn configure(ssl_context: SSLContextRef, tcp_stream: &mut Box<TcpStream>) -> io::Result<()> {
@@ -340,7 +360,7 @@ impl SecureTransportStream {
             SSLSetProtocolVersionMin(ssl_context, TLS_PROTOCOL_12)
         })?;
         check_ssl_status("SSLSetEnabledCiphers", unsafe {
-            SSLSetEnabledCiphers(ssl_context, MODERN_ECDSA_SUITES.as_ptr(), MODERN_ECDSA_SUITES.len())
+            SSLSetEnabledCiphers(ssl_context, MODERN_SUITES.as_ptr(), MODERN_SUITES.len())
         })
     }
 
@@ -441,8 +461,23 @@ impl Write for SecureTransportStream {
         }
     }
 
+    /// Sends what SecureTransport still holds: a write that ran into the socket's send timeout
+    /// was taken whole (`processed`) but part of its record stayed queued in the context, and
+    /// only a later SSLWrite sends it. An empty SSLWrite services that queue and writes nothing
+    /// new; WouldBlock means some is still queued (call again). Without it the tail of a stream
+    /// written under a send timeout never left (the stream ended short when it was closed).
     fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+        if self.is_closed {
+            return Ok(());
+        }
+        let mut processed = 0usize;
+        let status = unsafe { SSLWrite(self.ssl_context, [0u8; 1].as_ptr() as *const std::ffi::c_void, 0, &mut processed) };
+        match status {
+            SSL_OK => Ok(()),
+            ERR_SSL_WOULD_BLOCK => Err(io::Error::new(io::ErrorKind::WouldBlock, "SSLWrite flush would block")),
+            ERR_SSL_CLOSED_ABORT => Err(io::Error::new(io::ErrorKind::ConnectionAborted, "SSLWrite connection aborted")),
+            _ => Err(io_other(format!("SSLWrite (flush) failed with status {status}"))),
+        }
     }
 }
 
@@ -476,8 +511,33 @@ impl SocketStream {
     pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, Vec<u8>)> {
         let tcp_stream = connect_lan(host, port)?;
         let _ = tcp_stream.set_nodelay(true);
-        let (stream, der) = SecureTransportStream::connect_capture(tcp_stream)?;
+        let (stream, der) = SecureTransportStream::connect_capture(tcp_stream, next_peer_id())?;
         Ok((SocketStream::Tls(stream), der))
+    }
+
+    /// Like [`Self::connect_capture`], resuming the TLS session of `session_of`
+    /// (an earlier captured connection; FTPS data channels need this).
+    pub fn connect_capture_resuming(host: &str, port: &str, session_of: &Self) -> io::Result<(Self, Vec<u8>)> {
+        let SocketStream::Tls(SecureTransportStream { peer_id: Some(peer_id), .. }) = session_of else {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "no captured TLS session to resume"));
+        };
+        let peer_id = *peer_id;
+        let tcp_stream = connect_lan(host, port)?;
+        let _ = tcp_stream.set_nodelay(true);
+        let (stream, der) = SecureTransportStream::connect_capture(tcp_stream, peer_id)?;
+        Ok((SocketStream::Tls(stream), der))
+    }
+
+    pub fn connect_capture_chain(host: &str, port: &str) -> io::Result<(Self, Vec<Vec<u8>>)> {
+        let (mut socket, _) = Self::connect_capture(host, port)?;
+        let result = match &socket {
+            Self::Tls(stream) => peer_chain_der(stream.ssl_context),
+            Self::Plain(_) => Err(io_other("TLS stream required")),
+        };
+        match result {
+            Ok(chain) => Ok((socket, chain)),
+            Err(e) => { socket.shutdown(); Err(e) }
+        }
     }
 
     pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {

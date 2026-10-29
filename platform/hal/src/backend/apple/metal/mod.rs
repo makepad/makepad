@@ -14,6 +14,7 @@
 
 mod device;
 mod frame;
+mod layers;
 mod media;
 mod pipeline;
 mod readback;
@@ -103,6 +104,8 @@ pub struct Metal {
     retain: bool,
     /// the drawable the window frame being encoded renders into
     frame_drawable: Option<frame::FrameDrawable>,
+    native_windows: layers::Windows,
+    native_sync: bool,
     /// the size the ledger last saw of each real window's drawables
     layer_sizes: FastMap<(u32, u32), (u32, u32, u32)>,
     /// video playback, audio, camera ...: everything of os/apple that is not Metal or AppKit
@@ -192,6 +195,8 @@ impl Metal {
             shell,
             retain: flags & open_flags::RETAIN_WINDOWS != 0,
             frame_drawable: None,
+            native_windows: layers::Windows::default(),
+            native_sync: false,
             layer_sizes: FastMap::default(),
             media: Media::new(),
             capture: None,
@@ -322,6 +327,7 @@ impl Metal {
             return;
         }
         self.housekept_ns = now;
+        self.native_windows.expire();
         // recording is over (no frame asked for a capture for a while): the buffers go back
         if self.capture.is_some() && now.saturating_sub(self.capture_ns) > CAPTURE_IDLE_NS {
             self.capture = None;
@@ -391,6 +397,13 @@ impl Metal {
 unsafe impl Send for Metal {}
 
 impl Backend for Metal {
+    /// Answered once the command buffers made so far ran (an IOSurface reader on another queue
+    /// or device reads after it).
+    fn frame_completion(&mut self, _session: u32, notify: std::sync::Arc<dyn Fn() + Send + Sync>) -> Result<crate::completion::Completion, String> {
+        let (completion, reply) = crate::completion::CompletionReply::new(notify);
+        self.dev.when_completed(reply);
+        Ok(completion)
+    }
     fn info(&self) -> HalInfo {
         self.info
     }
@@ -446,10 +459,11 @@ impl Backend for Metal {
                 .min()
         });
         let restore = (sid == HOST && !self.restores.is_empty()).then(|| world.now() + 16_666_667);
-        timer.into_iter().chain(trim).chain(restore).min()
+        timer.into_iter().chain(trim).chain(restore).chain(self.native_windows.next_due(sid, world.now())).min()
     }
 
     fn session_closed(&mut self, world: &mut World, sid: u32) {
+        self.native_windows.close(sid, None);
         // commands this session left pending belong to its objects: they go out first
         self.end_batch();
         let lent: Vec<_> = self.window_aliases.iter().filter(|((s, _), _)| *s == sid).map(|((_, id), host)| (*id, *host)).collect();
@@ -502,6 +516,16 @@ impl Backend for Metal {
 }
 
 impl Gpu for Metal {
+    #[cfg(target_os = "macos")]
+    fn a11y_notify(&mut self, window: u64, notifications: &[makepad_a11y::Notification]) {
+        super::appkit::a11y::notify(window, notifications);
+    }
+
+    #[cfg(any(target_os = "ios", target_os = "tvos"))]
+    fn a11y_notify(&mut self, window: u64, notifications: &[makepad_a11y::Notification]) {
+        super::uikit::a11y::notify(window, notifications);
+    }
+
     fn gpu_budget(&self) -> Option<(u64, u64)> {
         Some((self.info.working_set, self.dev.device_allocated()))
     }
@@ -646,6 +670,8 @@ impl Gpu for Metal {
     }
 
     fn window_closed(&mut self, sid: u32, id: Id) {
+        self.native_windows.close(sid, Some(id));
+        super::shell::on_main(move || super::media::layers::close_window(sid, id));
         if sid == HOST {
             self.drop_overlay(id);
             if let Some(Some(composed)) = self.badged.remove(&id.index) { self.dev.retire(Box::new(composed.tex)); }
@@ -690,6 +716,7 @@ impl Gpu for Metal {
     }
 
     fn media(&mut self, s: &mut Session, c: &crate::cmds::HalCmd) -> bool {
+        if let crate::cmds::HalCmd::NativeLayerDestroy { id } = c { self.native_windows.destroyed(s.id, *id); }
         let now = crate::clock_ns();
         self.media.command(&mut media::MetalSink { dev: &self.dev, tex: &mut self.tex, now }, s, c)
     }

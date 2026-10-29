@@ -1544,7 +1544,7 @@ impl PortalList {
         cx.end_turtle_with_area(&mut self.area);
         self.visible_items = visible_items;
         self.last_visible_id = last_visible_id;
-    
+
         // The coast is over the instant the list is drawn at the edge it was headed
         // toward; the rest of the OS stream (which can outlive the edge by a second
         // or more) must not keep moving it. A bouncing edge takes the remaining
@@ -3190,6 +3190,71 @@ impl WidgetNode for PortalList {
 }
 
 impl Widget for PortalList {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        action: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        if action.action == a11y_tree::Actions::SCROLL {
+            let a11y_tree::ActionArg::Scroll(x, y) = action.arg else {
+                return a11y_tree::ActionResult::Unsupported;
+            };
+            let delta = if self.vec_index == Vec2Index::X { x } else { y } as f64;
+            if !delta.is_finite() {
+                return a11y_tree::ActionResult::Unsupported;
+            }
+            self.stop_all_scroll_motion();
+            self.delta_top_scroll(cx, -delta, true, false, 0.0, false, true);
+            self.redraw(cx);
+            return a11y_tree::ActionResult::Handled;
+        }
+        if action.action != a11y_tree::Actions::SCROLL_INTO_VIEW {
+            return a11y_tree::ActionResult::Unhandled;
+        }
+        let a11y_tree::ActionArg::Number(index) = action.arg else {
+            return a11y_tree::ActionResult::Unsupported;
+        };
+        if !index.is_finite()
+            || index.fract() != 0.0
+            || index < self.range_start as f64
+            || index >= self.range_end as f64
+        {
+            return a11y_tree::ActionResult::Unsupported;
+        }
+        self.set_first_id_and_scroll(index as usize, 0.0);
+        self.redraw(cx);
+        a11y_tree::ActionResult::Handled
+    }
+    fn semantics_parts(&self, cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        for (index, item) in self.items.iter() {
+            if !item.widget.area().is_valid(cx) {
+                continue;
+            }
+            out.push((
+                *index as u64,
+                None,
+                a11y_tree::Node {
+                    id: a11y_tree::NodeId::widget(item.widget.widget_uid().0),
+                    role: a11y_tree::Role::ListItem,
+                    pos_in_set: index.saturating_sub(self.range_start).saturating_add(1) as u32,
+                    set_size: u32::try_from(self.range_end.saturating_sub(self.range_start))
+                        .unwrap_or(u32::MAX),
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::List;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.set_size =
+            u32::try_from(self.range_end.saturating_sub(self.range_start)).unwrap_or(u32::MAX);
+        node.actions = a11y_tree::Actions::SCROLL_INTO_VIEW | a11y_tree::Actions::SCROLL;
+    }
+
     fn clips_content(&self) -> bool {
         true
     }

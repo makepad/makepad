@@ -11,7 +11,9 @@
 //! realtime session pushing frames one at a time.
 
 use crate::annex_b;
-use crate::stream_encoder::{EncodedPacket, StreamVideoCodec, VideoStreamEncoderOptions};
+use crate::apple_texture_intake::TextureIntake;
+use crate::stream_encoder::{EncodeTimings, EncodedPacket, EncoderCaps, StreamEncoderOs, StreamTile, StreamTuning, StreamVideoCodec, VideoStreamEncoderOptions};
+use crate::surface::{GpuCompletion, SurfaceFormat, SurfaceHandle, SurfaceKind};
 use crate::VideoFileError;
 use makepad_apple_sys::*;
 use std::os::raw::c_void;
@@ -38,6 +40,8 @@ fn cmtime_to_hns(t: CMTime) -> i64 {
 
 struct EncoderShared {
     packets: Vec<(Vec<u8>, i64, bool)>,
+    /// H.265: a key frame's parameter sets are VPS, SPS and PPS (else SPS and PPS).
+    hevc: bool,
 }
 
 /// True when the sample's attachments array does NOT carry
@@ -70,23 +74,24 @@ unsafe extern "C" fn encode_output_callback(
     if is_key {
         let format_desc = CMSampleBufferGetFormatDescription(sample_buffer);
         if !format_desc.is_null() {
-            for index in 0..2usize {
+            let hevc = shared.lock().map_or(false, |s| s.hevc);
+            let get = if hevc { CMVideoFormatDescriptionGetHEVCParameterSetAtIndex } else { CMVideoFormatDescriptionGetH264ParameterSetAtIndex };
+            // the count comes with the first one (H.264: SPS, PPS; H.265: VPS, SPS, PPS)
+            let mut count: usize = if hevc { 3 } else { 2 };
+            let mut index = 0usize;
+            while index < count {
                 let mut ptr: *const u8 = std::ptr::null();
                 let mut size: usize = 0;
-                let mut count: usize = 0;
                 let mut nal_header_len: i32 = 0;
-                let st = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-                    format_desc,
-                    index,
-                    &mut ptr,
-                    &mut size,
-                    &mut count,
-                    &mut nal_header_len,
-                );
-                if st == 0 && !ptr.is_null() && size > 0 {
+                let st = get(format_desc, index, &mut ptr, &mut size, &mut count, &mut nal_header_len);
+                if st != 0 {
+                    break;
+                }
+                if !ptr.is_null() && size > 0 {
                     let nal = std::slice::from_raw_parts(ptr, size);
                     annex_b::push_annex_b_nal(&mut out, nal);
                 }
+                index += 1;
             }
         }
     }
@@ -126,15 +131,21 @@ pub struct AppleStreamEncoder {
     height: u32,
     frame_duration: CMTime,
     force_keyframe: bool,
+    hevc: bool,
+    bitrate_kbps: u32,
+    fps: u32,
+    /// Packed NV12 surfaces into the encoder's NV12 buffers (made on the first one).
+    intake: Option<TextureIntake>,
+    timings: EncodeTimings,
 }
 
 impl AppleStreamEncoder {
-    pub fn new(options: &VideoStreamEncoderOptions) -> Result<Self, VideoFileError> {
+    fn new(options: &VideoStreamEncoderOptions) -> Result<Self, VideoFileError> {
         let codec_type = match options.codec {
             StreamVideoCodec::H264 => kCMVideoCodecType_H264,
             StreamVideoCodec::Hevc => kCMVideoCodecType_HEVC,
         };
-        let shared = Box::new(Mutex::new(EncoderShared { packets: Vec::new() }));
+        let shared = Box::new(Mutex::new(EncoderShared { packets: Vec::new(), hevc: options.codec == StreamVideoCodec::Hevc }));
         let refcon = shared.as_ref() as *const Mutex<EncoderShared> as *mut c_void;
         let mut session: VTCompressionSessionRef = std::ptr::null_mut();
         // the low-latency mode of the encoder (macOS 11.3+) for a live view
@@ -212,6 +223,11 @@ impl AppleStreamEncoder {
                 epoch: 0,
             },
             force_keyframe: false,
+            hevc: options.codec == StreamVideoCodec::Hevc,
+            bitrate_kbps: options.bitrate_kbps,
+            fps: options.fps,
+            intake: None,
+            timings: EncodeTimings::default(),
         })
     }
 
@@ -256,17 +272,10 @@ impl AppleStreamEncoder {
         Ok(pixel_buffer)
     }
 
-    pub fn push_frame_nv12(&mut self, nv12: &[u8], pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
-        unsafe {
-            let pixel_buffer = self.make_pixel_buffer(nv12)?;
-            self.encode_pixel_buffer(pixel_buffer, pts_100ns)
-        }
-    }
-
     /// The picture in the IOSurface `surface_id` (NV12 '420v'/'420f' or BGRA: a screen
     /// capture's frame, a shared texture), encoded as it lies in GPU memory. The surface must
     /// stay alive (its owner holds it) for the call.
-    pub fn push_shared_texture(&mut self, surface_id: u64, pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
+    unsafe fn encode_iosurface(&mut self, surface_id: u64, pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
         unsafe {
             let surface = IOSurfaceLookup(surface_id as IOSurfaceID);
             if surface.is_null() {
@@ -326,13 +335,74 @@ impl AppleStreamEncoder {
             .map(|(data, pts_100ns, is_key)| EncodedPacket { data, pts_100ns, is_key })
             .collect())
     }
+}
 
-    pub fn request_keyframe(&mut self) {
+impl StreamEncoderOs for AppleStreamEncoder {
+    fn caps() -> EncoderCaps {
+        // two sessions encode a picture's columns at once (the media engine overlaps their work)
+        EncoderCaps { engines: 2, tiles: true, full_chroma: false, hevc: true }
+    }
+
+    fn open(options: &VideoStreamEncoderOptions, _tile: StreamTile, _tuning: StreamTuning) -> Result<Self, VideoFileError> {
+        Self::new(options)
+    }
+
+    fn encode_nv12(&mut self, nv12: &[u8], pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
+        unsafe {
+            let pixel_buffer = self.make_pixel_buffer(nv12)?;
+            self.encode_pixel_buffer(pixel_buffer, pts_100ns)
+        }
+    }
+
+    /// An IOSurface: a BGRA or NV12 one as it lies in GPU memory; a packed NV12 one copied on the
+    /// GPU into the encoder's NV12 buffer once the frame that drew it ran.
+    fn encode_surface(&mut self, surface: &SurfaceHandle, tile: StreamTile, ready: &GpuCompletion, pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
+        if surface.kind != SurfaceKind::IoSurface {
+            return Err(VideoFileError::new(format!("the stream encoder takes IOSurfaces, not {surface:?}")));
+        }
+        ready.wait(std::time::Duration::from_secs(2)).map_err(VideoFileError::new)?;
+        let t1 = std::time::Instant::now();
+        let us = |a: std::time::Instant, b: std::time::Instant| (b - a).as_micros().min(u32::MAX as u128) as u32;
+        let whole = tile.x0 == 0 && tile.y0 == 0 && tile.source_height == self.height && surface.size[0] == self.width;
+        if tile.y0 != 0 || (surface.format != SurfaceFormat::PackedNv12 && !whole) {
+            return Err(VideoFileError::new(format!("the stream encoder takes columns of packed NV12 surfaces only, not {tile:?} of {surface:?}")));
+        }
+        match surface.format {
+            SurfaceFormat::Bgra8 | SurfaceFormat::Nv12 => {
+                let out = unsafe { self.encode_iosurface(surface.id, pts_100ns) };
+                self.timings = EncodeTimings { copy_us: 0, convert_us: 0, encode_us: us(t1, std::time::Instant::now()) };
+                out
+            }
+            SurfaceFormat::PackedNv12 => {
+                if self.intake.is_none() {
+                    self.intake = Some(TextureIntake::new()?);
+                }
+                let intake = self.intake.as_mut().unwrap();
+                let picture = unsafe { intake.nv12_picture(surface.id, tile.x0, self.width, self.height, false)? };
+                let t2 = std::time::Instant::now();
+                // the encode releases its own reference; the picture keeps (and drops) its own
+                let out = unsafe { self.encode_pixel_buffer(CVPixelBufferRetain(picture.buffer), pts_100ns) };
+                self.timings = EncodeTimings { copy_us: us(t1, t2), convert_us: 0, encode_us: us(t2, std::time::Instant::now()) };
+                out
+            }
+        }
+    }
+
+    fn request_keyframe(&mut self) {
         self.force_keyframe = true;
     }
 
-    pub fn set_bitrate_kbps(&mut self, kbps: u32) {
+    fn set_bitrate_kbps(&mut self, kbps: u32) {
+        self.bitrate_kbps = kbps;
         unsafe { set_i32_property(self.session, kVTCompressionPropertyKey_AverageBitRate, (kbps as i64 * 1000).min(i32::MAX as i64) as i32) };
+    }
+
+    fn timings(&self) -> EncodeTimings {
+        self.timings
+    }
+
+    fn description(&self) -> String {
+        format!("{} {}x{} {} fps {} kbit/s (VideoToolbox)", if self.hevc { "H.265" } else { "H.264" }, self.width, self.height, self.fps, self.bitrate_kbps)
     }
 }
 

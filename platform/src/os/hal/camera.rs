@@ -323,31 +323,6 @@ impl Cx {
         self.hal.frames.w.video_prepare(Id::NONE, media::video_mode::CAMERA, video_id.0, Id::NONE, Id::NONE, Id::NONE, &ids);
     }
 
-    /// The preview ops: attach / update / detach of the native view over the window.
-    pub(crate) fn hal_camera_preview(&mut self, op: crate::cx_api::CxOsOp) {
-        use crate::cx_api::CxOsOp;
-        use media::{view_kind::CAMERA, view_op};
-        let (video_id, area, visible, detach) = match op {
-            CxOsOp::AttachCameraNativePreview { video_id, area } => (video_id, Some(area), true, false),
-            CxOsOp::UpdateCameraNativePreview { video_id, area, visible } => (video_id, Some(area), visible, false),
-            CxOsOp::DetachCameraNativePreview { video_id } => (video_id, None, false, true),
-            _ => return,
-        };
-        if detach {
-            self.hal.frames.w.view_op(Id::NONE, CAMERA | view_op::DETACH, video_id.0, [0.0; 4], 0, &[]);
-            return;
-        }
-        let Some(area) = area else { return };
-        let Some((window_id, _, clipped)) = self.hal_view_rects(&area) else { return };
-        if !self.hal.camera.previews.contains_key(&video_id) {
-            return;
-        }
-        let rect = [clipped.pos.x as f32, clipped.pos.y as f32, clipped.size.x as f32, clipped.size.y as f32];
-        let window = crate::event::hal_intake::hal_window_id(window_id);
-        // the HAL knows which camera the preview shows (it was prepared with it)
-        self.hal.frames.w.view_op(window, CAMERA | view_op::UPDATE, video_id.0, rect, visible as u32, &[]);
-    }
-
     /// The camera events of the HAL.
     pub(crate) fn hal_camera_event(&mut self, event: HalEvent<'_>) {
         match event {

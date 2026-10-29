@@ -1,4 +1,5 @@
 pub mod draw_cube;
+pub mod draw_fxaa;
 pub mod draw_glyph;
 pub mod draw_nv12;
 pub mod draw_nv12_pack;

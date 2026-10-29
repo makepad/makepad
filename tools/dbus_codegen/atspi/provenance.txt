@@ -1,0 +1,42 @@
+Inputs for tools/dbus_codegen (AT-SPI2 glue). The .xml files are not committed: regenerate them on a
+Linux node with at-spi2-core installed. They are the D-Bus introspection data that the installed
+accessibility bridge library carries (one string per interface), extracted from that file:
+
+  ssh arch@<node> 'python3 - /usr/lib/libatk-bridge-2.0.so' < tools/dbus_codegen/extract_atspi.py > all.txt
+  (then split at the '@@@ <interface>' lines; each file is <node><interface ...>...</interface></node>)
+
+Source: Arch Linux package at-spi2-core 2.60.6-1, /usr/lib/libatk-bridge-2.0.so on node 10.0.0.100
+sha256 of that library: d059ddadadb2171b115322dd7f4e5eb690a1679775bd9eca6788f26c241cae74
+Role numbers are checked against /usr/include/at-spi-2.0/atspi/atspi-constants.h of the same package.
+at-spi2-core is LGPL-2.1-or-later; these interface descriptions are used as generator input only and are
+not copied into the repository. Generated Rust code is produced from them by our own generator.
+
+Per-file SHA-256:
+e5ff4ac9a754aa07d8e21f30af3833770499460b69d8e8acef1156175981674d  atspi-constants.h
+09935d53d9592d3bf62311d8999c2e828fdf99e6b4ce517348bb64c7c6e2a96d  org.a11y.atspi.Accessible.xml
+1723e556d4a28bb14e5fc71f2912aba21a108c6d43f8bf8c6fe79e03f23b10bd  org.a11y.atspi.Action.xml
+752599b52135dd6e3dfd68dd86c0a1c76090174f73f7f9fa948858f3b79e50ea  org.a11y.atspi.Application.xml
+6a59f40a94812f11a76b8cf171fd5d77b5b0c0c8ba6622a59961e27337f9a801  org.a11y.atspi.Cache.xml
+bcd0f7718bf1c652bcdc323d6071ea3e2ce04a23039aabdde4787a993ec03139  org.a11y.atspi.Collection.xml
+c5d93038d292aa2c5c3945ddd958145d3f4895ce09aef61be150e6cf51b84b89  org.a11y.atspi.Component.xml
+1e0fcac8e511b86b1a64caf2b4fec0831837edd68c91ad8ea4032f28c8359843  org.a11y.atspi.DeviceEventController.xml
+145741ffd89dd6d64d0b141d3975d053ae732600f75dbfa88a6f441e97951965  org.a11y.atspi.DeviceEventListener.xml
+93e0d8d990e653763ac9d76604bafff79eb72f92627dfd5732f42ddfcb503d18  org.a11y.atspi.Document.xml
+1ee84006e4a5e91bc5fbf247de9fedf69afda3f988f0e913ce5c1bb63ba93498  org.a11y.atspi.EditableText.xml
+291cd9d20ccde57dd53600aea8bd0020f21a4887230a54fdd1f5b96abaca1ba0  org.a11y.atspi.Event.Document.xml
+141ef1a3a7702453e4c9331ba9427272a82c5be970c087a7f64ad30dfdc8f7b5  org.a11y.atspi.Event.Focus.xml
+cbdb4474202733544804cd1fbfb2afd9a309d9a336b2cc28a14ed5d80ec01fee  org.a11y.atspi.Event.Keyboard.xml
+15648a97ead1059165ba7f830765369742633daf67dfe2849c5b49804dbcf18f  org.a11y.atspi.Event.Mouse.xml
+99c931214fba012b8725a92a5a4372979432a56a9970a71204fa71ea60bf0209  org.a11y.atspi.Event.Object.xml
+0b673bca2044ad486489f3de7b846844fb4343165c09d7067c026fd7f0c704ed  org.a11y.atspi.Event.Terminal.xml
+1ad2ffbdeff2d52de5bdc7d58d45c00d337c6acd7e674223797e4699d5a74c66  org.a11y.atspi.Event.Window.xml
+02442e25c26dd71e27953e842325c8318466851063ce7902d5c0cd44691af652  org.a11y.atspi.Hyperlink.xml
+2b1310cd7386b81d4f0e5c3277e619e444362e18ba3f0e7b331d538c08ea57ee  org.a11y.atspi.Hypertext.xml
+3f06c92d853eb9557431cdf7dbac7613064e014fbfd051cb1a01a30021bef7ab  org.a11y.atspi.Image.xml
+86f7e670953d7999bf9e8c0b1704a3aef6aeb947de5efbe709c922d0fc6baa44  org.a11y.atspi.Registry.xml
+cb8e63a983db56eef9afad4d73788a29d693cf308d1aad6317b279cc269b50a7  org.a11y.atspi.Selection.xml
+c7d777500223f34bbfae76274d2b310f2a501d54216eb2aea3d5a302ac55b9c7  org.a11y.atspi.Socket.xml
+ab428bab35c2b912ca9e1b32bf7239bcf6f90401f1466dce7162526a509b5948  org.a11y.atspi.Table.xml
+ea62c3f29f6c33972cf04caaa4ffb3e6e999bcd10a03401bc17b3f95375d1b7d  org.a11y.atspi.TableCell.xml
+6bad8764d752f77cecc06fabe5507c925e599105c887d58085ac3179a92b8884  org.a11y.atspi.Text.xml
+5f3ea3d3a2db668ee35330235ac769788935a5d4e58bf6529f30f3129bf830f6  org.a11y.atspi.Value.xml

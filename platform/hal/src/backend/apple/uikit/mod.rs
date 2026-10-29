@@ -14,6 +14,7 @@
 //! os/apple/tvos/*: what used to call into Cx writes `RawEvent`s for the session now; the
 //! fingers / tap / hit logic is Cx's (`hal_intake`).
 
+pub(crate) mod a11y;
 mod app;
 mod classes;
 #[cfg(target_os = "ios")]

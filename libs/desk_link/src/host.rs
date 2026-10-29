@@ -11,7 +11,7 @@
 
 use crate::server::{self, Control, Feed, Geometry, InputFactory, Log, Out, Server, ServerConfig, ToUi};
 use crate::{self as proto, ScreenInfo, ServerMsg};
-use makepad_video::{GpuReady, VideoStreamEncoder, VideoStreamEncoderOptions};
+use makepad_video::{VideoStreamEncoder, VideoStreamEncoderOptions};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -37,9 +37,9 @@ pub struct Frame {
 }
 
 pub enum Picture {
-    /// The platform's shared-texture handle (macOS: the IOSurface id; Windows: the wire key of
-    /// a keyed-mutex shared texture): `VideoStreamEncoder::push_shared_texture`.
-    Shared(u64),
+    /// A GPU surface (macOS: a captured NV12 IOSurface; Windows: a keyed-mutex BGRA shared
+    /// texture), complete when captured: `VideoStreamEncoder::push_surface`.
+    Shared(makepad_video::SurfaceHandle),
     /// Tightly packed NV12 (`width` x `height`, BT.709 limited range): a JIT host's GPU
     /// readback, `VideoStreamEncoder::push_frame_nv12`.
     Nv12(Vec<u8>),
@@ -406,6 +406,11 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
     // the newest captured frame not yet encoded: held while a viewer is behind, so the last
     // change of a screen that then goes still is still sent (frames come only on change)
     let mut pending: Option<Frame> = None;
+    // the last frame encoded, and when it was last encoded again: a still screen sends no
+    // frames, so a viewer that came, resumed or asked for a key frame gets it again (a key
+    // frame of what the screen shows) instead of waiting for the screen to change
+    let mut shown: Option<Frame> = None;
+    let mut reshown = Instant::now();
     let mut key_wanted = true;
     let mut frame_no: u32 = 0;
     let mut cursor: Option<(u16, u16, bool, u8)> = None;
@@ -584,6 +589,7 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
                     Ok(()) => {
                         // frames of the capture before are dropped: they are in its format
                         while frame_rx.try_recv().is_ok() {}
+                        shown = None;
                         capturing = Some((screen, fps));
                         key_wanted = true;
                     }
@@ -601,6 +607,7 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
                 desktop.stop_capture();
                 capturing = None;
                 pending = None;
+                shown = None;
             }
             _ => {}
         }
@@ -637,6 +644,15 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
         if congested {
             continue;
         }
+        let unsynced = viewers.iter().any(|v| !v.synced && !v.feed.paused.load(Ordering::Acquire));
+        if pending.is_none() && unsynced && reshown.elapsed() >= Duration::from_millis(250) {
+            if let Some(mut again) = shown.take() {
+                // a time of its own: the encoder's times only go forward
+                again.captured_ns = clock_ns();
+                pending = Some(again);
+                reshown = Instant::now();
+            }
+        }
         let Some(frame) = pending.take() else { continue };
         let size = [frame.width / 4 * 4, frame.height / 2 * 2];
         if encoder.as_ref().is_none_or(|(_, s, f, c)| *s != size || *f != fps || *c != codec) {
@@ -665,7 +681,6 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
         }
         let (enc, _, _, _) = encoder.as_mut().unwrap();
         // a key frame: asked for, a viewer not in step, or the scheduled one
-        let unsynced = viewers.iter().any(|v| !v.synced && !v.feed.paused.load(Ordering::Acquire));
         if settings.key_every > 0 && last_key.elapsed() >= Duration::from_secs(settings.key_every as u64) {
             key_wanted = true;
         }
@@ -676,7 +691,9 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
         // the encode is synchronous: the frame (its surface) is held until it returns
         let push_ns = clock_ns();
         let pushed = push(enc, &frame, size);
-        timing.add(push_ns.saturating_sub(frame.captured_ns), clock_ns() - push_ns, enc.stages());
+        let captured_ns = frame.captured_ns;
+        shown = Some(frame);
+        timing.add(push_ns.saturating_sub(captured_ns), clock_ns() - push_ns, enc.timings());
         if timing.since.elapsed() >= Duration::from_secs(10) {
             log(&timing.line());
             timing = Timing::default();
@@ -698,7 +715,7 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
                     if p.is_key {
                         last_key = Instant::now();
                     }
-                    let bytes = proto::encode_video(frame_no, p.is_key, frame.captured_ns, encoded_ns, 0, (0, 1, 0, 0), wire_codec(codec), &p.data);
+                    let bytes = proto::encode_video(frame_no, p.is_key, captured_ns, encoded_ns, 0, (0, 1, 0, 0), wire_codec(codec), &p.data);
                     for v in viewers.iter_mut() {
                         if !v.feed.admit(frame_no, p.is_key) {
                             continue;
@@ -739,7 +756,7 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
 fn push(enc: &mut VideoStreamEncoder, frame: &Frame, size: [u32; 2]) -> Result<Vec<makepad_video::EncodedPacket>, makepad_video::VideoFileError> {
     let pts = (frame.captured_ns / 100) as i64;
     match &frame.picture {
-        Picture::Shared(handle) => enc.push_shared_texture(*handle, GpuReady::Done, pts),
+        Picture::Shared(surface) => enc.push_surface(surface, &makepad_video::GpuCompletion::done(), pts),
         Picture::Nv12(nv12) if [frame.width, frame.height] == size => enc.push_frame_nv12(nv12, pts),
         Picture::Nv12(nv12) => enc.push_frame_nv12(&crop_nv12(nv12, frame.width, frame.height, size), pts),
     }
@@ -788,7 +805,7 @@ pub struct Timing {
     pub since: Instant,
     wait_us: Vec<u32>,
     encode_us: Vec<u32>,
-    /// The platform's stages of the encode call (see `VideoStreamEncoder::stages`), summed.
+    /// The platform's stages of the encode call (`VideoStreamEncoder::timings`), summed.
     stages: [u64; 3],
 }
 
@@ -799,8 +816,8 @@ impl Default for Timing {
 }
 
 impl Timing {
-    pub fn add(&mut self, wait_ns: u64, encode_ns: u64, stages: [u32; 3]) {
-        for (sum, s) in self.stages.iter_mut().zip(stages) {
+    pub fn add(&mut self, wait_ns: u64, encode_ns: u64, t: makepad_video::EncodeTimings) {
+        for (sum, s) in self.stages.iter_mut().zip([t.copy_us, t.convert_us, t.encode_us]) {
             *sum += s as u64;
         }
         self.wait_us.push((wait_ns / 1000).min(u32::MAX as u64) as u32);

@@ -288,3 +288,26 @@ and put the room a shadow needs inside the control's own rect
   vector result in an array: `[v]`.
 - Measure a Motion document with `makepad-motion bench doc --realtime`. The
   Stage guide `stage-motion/performance.md` has the rules and budgets.
+
+### Accessibility overrides
+
+Any widget can override its semantic description through its source object:
+
+```rust
+save := Button{
+    text: "Save"
+    a11y: {role: Button label: "Save document" description: "Writes the current document"}
+}
+caption := Label{text: "Name" a11y: {label_for: @name}}
+name := TextInput{}
+status := Label{text: "Saved" a11y: {live: @Polite}}
+decoration := Icon{a11y: {hidden: true}}
+```
+
+Roles also accept their semantic name as a string (for example `"heading"`).
+`live` accepts `@Off`, `@Polite` or `@Assertive`. `hidden: true` removes the
+whole subtree. `label_for` accepts an id or a dotted path string and makes the
+target's `labelled_by` relation point to this label. Widgets supply their normal
+role, value, states, actions and text geometry through `Widget::semantics`;
+overrides are applied afterwards. Semantic actions use `Widget::handle_action`
+and emit the same widget actions as input.

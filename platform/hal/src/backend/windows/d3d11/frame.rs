@@ -450,8 +450,9 @@ impl D3d11 {
             return Err("pass has no attachments".into());
         }
         for (i, color) in &colors {
-            if color.desc.usage & usage::RENDER_TARGET == 0 || format::is_depth(color.desc.format) || pass.layer[*i] >= color.desc.depth.max(1)
-                || size[0] > color.desc.w || size[1] > color.desc.h {
+            let [w, h] = plane_size(color, pass.layer[*i]);
+            if color.desc.usage & usage::RENDER_TARGET == 0 || format::is_depth(color.desc.format) || pass.layer[*i] >= color.desc.depth.max(1).max(format::planes(color.desc.format))
+                || size[0] > w || size[1] > h {
                 return Err(format!("invalid color attachment {i}: pass {size:?} target {}x{}", color.desc.w, color.desc.h));
             }
         }
@@ -468,8 +469,8 @@ impl D3d11 {
                 return Err("a shared image is in use by the other process; the frame is retried".into());
             }
         }
-        let target_size = [colors.iter().map(|(_, c)| c.desc.w).chain(depth.iter().map(|d| d.desc.w)).min().unwrap(),
-            colors.iter().map(|(_, c)| c.desc.h).chain(depth.iter().map(|d| d.desc.h)).min().unwrap()];
+        let target_size = [colors.iter().map(|(i, c)| plane_size(c, pass.layer[*i])[0]).chain(depth.iter().map(|d| d.desc.w)).min().unwrap(),
+            colors.iter().map(|(i, c)| plane_size(c, pass.layer[*i])[1]).chain(depth.iter().map(|d| d.desc.h)).min().unwrap()];
 
         // ---- lay out the draws' transient bytes
         let mut sc = std::mem::take(&mut self.scratch);
@@ -798,5 +799,15 @@ impl D3d11 {
             index_first: d.index[0],
             index_count: d.index[1],
         }))
+    }
+}
+
+/// The size of the plane a pass renders into: an NV12 texture's chroma (layer 1) is half its
+/// size both ways; any other layer is the texture's size.
+fn plane_size(t: &Texture, layer: u32) -> [u32; 2] {
+    if t.desc.format == format::NV12 && layer == 1 {
+        [t.desc.w / 2, t.desc.h / 2]
+    } else {
+        [t.desc.w, t.desc.h]
     }
 }

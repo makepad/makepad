@@ -25,7 +25,7 @@ use windows::{
                 CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
                 TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
                 EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
+                PROCESS_CREATION_FLAGS, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW,
             },
         },
     },
@@ -125,9 +125,10 @@ impl Pty {
         rows: u16,
         shell: Option<&str>,
         command: Option<&str>,
-        _env: &[(&str, &str)],
+        env: &[(&str, &str)],
         cwd: Option<&std::path::Path>,
     ) -> io::Result<Self> {
+        let env_block = windows_env_block(env);
         let shell = shell
             .map(str::to_owned)
             .unwrap_or_else(|| "cmd.exe".to_owned());
@@ -224,8 +225,8 @@ impl Pty {
                 None,
                 None,
                 false,
-                EXTENDED_STARTUPINFO_PRESENT,
-                None,
+                PROCESS_CREATION_FLAGS(EXTENDED_STARTUPINFO_PRESENT.0 | CREATE_UNICODE_ENVIRONMENT),
+                Some(env_block.as_ptr() as *const std::ffi::c_void),
                 Some(cwd_ptr),
                 &startup_info.StartupInfo,
                 &mut process_info,
@@ -689,6 +690,47 @@ fn wide_null_os(value: &std::ffi::OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
+/// CreateProcessW's flag for a UTF-16 environment block (winbase.h; not in the generated bindings).
+#[cfg(windows)]
+const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
+
+/// The shell's environment block, as the Unix spawn builds it: this process's environment
+/// scrubbed of what never passes to a child (child_env), the terminal's colour variables, then
+/// the host's `env` (a host naming a context file for the job it runs). Names ignore case and
+/// the block is sorted by name, as Windows expects.
+#[cfg(windows)]
+fn windows_env_block(env: &[(&str, &str)]) -> Vec<u16> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStrExt;
+    let mut vars = makepad_app_registry::child_env::scrubbed_vars();
+    let set = |vars: &mut Vec<(OsString, OsString)>, key: &str, value: Option<&str>| {
+        vars.retain(|(k, _)| !k.to_string_lossy().eq_ignore_ascii_case(key));
+        if let Some(value) = value {
+            vars.push((key.into(), value.into()));
+        }
+    };
+    set(&mut vars, "COLORTERM", Some("truecolor"));
+    set(&mut vars, "NO_COLOR", None);
+    set(&mut vars, "TERM_PROGRAM", Some("terminal"));
+    set(&mut vars, "TERM_PROGRAM_VERSION", Some(env!("CARGO_PKG_VERSION")));
+    for (key, value) in env {
+        set(&mut vars, key, Some(value));
+    }
+    vars.sort_by_key(|(k, _)| k.to_string_lossy().to_uppercase());
+    let mut block = Vec::new();
+    for (key, value) in &vars {
+        block.extend(key.encode_wide());
+        block.push(u16::from(b'='));
+        block.extend(value.encode_wide());
+        block.push(0);
+    }
+    if vars.is_empty() {
+        block.push(0);
+    }
+    block.push(0);
+    block
+}
+
 #[cfg(windows)]
 fn windows_shell_command(shell: &str, command: Option<&str>) -> String {
     match command {
@@ -1010,5 +1052,31 @@ mod libc_ffi {
         pub ws_col: u16,
         pub ws_xpixel: u16,
         pub ws_ypixel: u16,
+    }
+}
+
+#[cfg(test)]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+mod tests {
+    use super::*;
+
+    /// The host's `env` reaches the shell's job (a runner agent tab finds MAKEPAD_AGENT_CONTEXT
+    /// this way), and the parent's own environment still does (PATH finds the shell's tools).
+    #[test]
+    fn the_job_sees_the_host_env() {
+        let job = if cfg!(windows) { "echo [%MPTERM_ENV_TEST%]" } else { "echo [$MPTERM_ENV_TEST]" };
+        let pty = Pty::spawn(80, 24, None, Some(job), &[("MPTERM_ENV_TEST", "from-the-host")], None).expect("a pty");
+        let mut out = Vec::new();
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < std::time::Duration::from_secs(20) {
+            match pty.try_read() {
+                Some(bytes) => out.extend(bytes),
+                None => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+            if String::from_utf8_lossy(&out).contains("[from-the-host]") {
+                return;
+            }
+        }
+        panic!("the job never printed the host's variable: {:?}", String::from_utf8_lossy(&out));
     }
 }

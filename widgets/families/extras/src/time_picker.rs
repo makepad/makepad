@@ -806,6 +806,11 @@ impl TimeColumn {
 }
 
 impl Widget for TimeColumn {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         if self.disabled != disabled {
             self.disabled = disabled;
@@ -1152,6 +1157,17 @@ impl TimeField {
 }
 
 impl Widget for TimeField {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::ComboBox;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::EXPAND;
+        node.states.insert(a11y_tree::States::HAS_POPUP);
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.disabled = disabled;
         self.well.set_disabled(cx, disabled);
@@ -1461,6 +1477,12 @@ impl TimePicker {
 }
 
 impl Widget for TimePicker {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         if self.disabled != disabled {
             self.disabled = disabled;

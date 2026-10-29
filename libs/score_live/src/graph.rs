@@ -55,7 +55,7 @@ pub fn project(doc: &ScoreDoc) -> ScoreGraph {
     for (name, ty) in &doc.order {
         let (role, inputs, outputs) = match ty.as_str() {
             "Clock" => ("clock", vec![], vec![port("clock", "clock", false)]),
-            "Synth" | "Drums" | "Sampler" | "Ironfish" | "Shader" | "Voice" | "Instrument" => ("inst", vec![], vec![port("inst", "inst", false)]),
+            "Synth" | "Drums" | "Sampler" | "Ironfish" | "Morph" | "Shader" | "Voice" | "Instrument" => ("inst", vec![], vec![port("inst", "inst", false)]),
             "Loop" | "Stinger" => ("loop", vec![port("play", "inst", false)], vec![port("audio", "audio", false)]),
             "Section" => ("section", vec![], vec![]),
             _ => {

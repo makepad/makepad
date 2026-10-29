@@ -59,6 +59,7 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-example-aichat"}
     RunStudioRelease{name: "makepad-example-box3d"}
     RunStudioRelease{name: "makepad-example-browser"}
+    RunStudioRelease{name: "makepad-example-native-app-view"}
     RunStudioRelease{name: "makepad-example-charts"}
     RunStudioRelease{name: "makepad-example-windows-blur"}
     RunStudioRelease{name: "makepad-example-splash"}
@@ -86,7 +87,6 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-studio"}
     RunStudioRelease{name: "makepad-example-xr"}
     RunStudioRelease{name: "makepad-example-cad"}
-    RunStudioRelease{name: "makepad-app-fab"}
     RunStudioRelease{name: "makepad-example-screen-span"}
     RunQuest{name: "makepad-example-xr-quest", run:"makepad-example-xr"}
 ])

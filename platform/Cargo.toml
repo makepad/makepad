@@ -20,6 +20,7 @@ name = "ui_hang"
 harness = false
 
 [dependencies]
+makepad-a11y = { path = "../libs/a11y", version = "0.1.0" }
 makepad-relax = { workspace = true }
 makepad-alloc-epoch = { path = "../libs/alloc_epoch", version = "1.0.0" }
 makepad-stack = { path = "../libs/stack", version = "1.0.0" }

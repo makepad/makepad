@@ -25,6 +25,7 @@ script_mod! {
                 body +: {
                     flow: Down
                     cached_pane := CachedView{
+                        a11y: {role: "group" label: "Cached pane"}
                         width: Fill
                         height: Fill
                         flow: Down

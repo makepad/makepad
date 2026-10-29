@@ -17,8 +17,8 @@ const EVAL_LIMIT: usize = 4_000_000;
 pub const CYCLE_LIMIT: usize = 1_000_000;
 
 /// The node types a score is made of.
-pub const NODE_TYPES: [&str; 28] = [
-    "Clock", "Synth", "Drums", "Sampler", "Ironfish", "Loop", "Stinger", "Section", "Lowpass", "Highpass", "Bandpass", "Filter", "Delay", "Reverb",
+pub const NODE_TYPES: [&str; 29] = [
+    "Clock", "Synth", "Drums", "Sampler", "Ironfish", "Morph", "Loop", "Stinger", "Section", "Lowpass", "Highpass", "Bandpass", "Filter", "Delay", "Reverb",
     "Drive", "Crush", "Chorus", "Comp", "Duck", "Bus", "Limiter", "Eq", "Width", "Voice", "Shader", "ShaderFx", "Instrument", "Score",
 ];
 

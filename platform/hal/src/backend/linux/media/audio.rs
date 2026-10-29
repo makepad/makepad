@@ -1,14 +1,10 @@
 //! Realtime entries shared by the ALSA and PulseAudio transports.
-use crate::media::{AudioBlock, AudioFn};
+use crate::media::{AudioBlock, AudioEntry};
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-#[derive(Clone, Copy)]
-pub struct Entry {
-    pub function: AudioFn,
-    pub context: usize,
-}
+pub type Entry = AudioEntry;
 
 /// The realtime side never waits for the control thread. Replacement disables admission,
 /// then waits only for the already admitted block, as required by AudioEntry's ABI.
@@ -69,7 +65,7 @@ impl Slot {
                     channels: 2,
                     planes: planes.as_mut_ptr(),
                 };
-                (entry.function)(entry.context as *mut _, &mut block);
+                entry.call(&mut block);
             }
         }
         self.busy.store(false, Ordering::SeqCst);

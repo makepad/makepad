@@ -79,7 +79,7 @@ pub fn tail_seconds(doc: &ScoreDoc) -> f64 {
         let ring = match &inst.kind {
             crate::model::InstKind::Synth { recipe, .. } => recipe.layers().iter().map(|l| l.release as f64).fold(0.0, f64::max) + 0.5,
             crate::model::InstKind::Native { native, .. } if native == "piano" => 6.0,
-            crate::model::InstKind::Voice { .. } | crate::model::InstKind::Ironfish { .. } => 3.0,
+            crate::model::InstKind::Voice { .. } | crate::model::InstKind::Ironfish { .. } | crate::model::InstKind::Morph { .. } => 3.0,
             _ => 0.0,
         };
         tail = tail.max(ring);

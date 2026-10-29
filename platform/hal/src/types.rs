@@ -142,6 +142,8 @@ pub struct CmdBuf {
     /// `[Pass]` and `[Draw]` of every frame in `frames` (element ranges, see [`FramePacket`])
     pub passes: Slice,
     pub draws: Slice,
+    /// `[Layer]` of every frame, addressed by `FramePacket::layers`.
+    pub layers: Slice,
 }
 
 /// One fire-and-forget command. `a` is decoded per `tag` by the generated constructors and
@@ -350,8 +352,9 @@ impl OpenReq {
             Ok("offscreen") if cfg!(target_vendor = "apple") => (backend_id::METAL, open_flags::OFFSCREEN_WINDOWS),
             Ok("offscreen") if cfg!(target_os = "linux") => (backend_id::AUTO, open_flags::OFFSCREEN_WINDOWS),
             Ok("offscreen") if cfg!(windows) => (backend_id::D3D11, open_flags::OFFSCREEN_WINDOWS),
-            Ok("d3d11") if cfg!(windows) && !hidden => (backend_id::D3D11, window_flags),
-            Ok("d3d11") if cfg!(windows) => (backend_id::D3D11, window_flags | open_flags::OFFSCREEN_WINDOWS),
+            // An explicit native backend keeps OS windows for accessibility/automation.
+            // MAKEPAD_HIDE_WINDOWS hides the Win32 HWNDs; "offscreen" creates none.
+            Ok("d3d11") if cfg!(windows) => (backend_id::D3D11, window_flags),
             Ok("offscreen") => (backend_id::HEADLESS, 0),
             Ok("metal") => (backend_id::METAL, window_flags),
             Ok("gl") if cfg!(target_os = "linux") => (backend_id::GL, window_flags | if hidden { open_flags::OFFSCREEN_WINDOWS } else { 0 }),
@@ -380,6 +383,8 @@ pub struct HalInfo {
     pub flags: u32,
     /// bit per [`format`]
     pub formats: u64,
+    /// The sample counts a pass may ask for ([`Pass::samples`]): bit n set = 2^n samples per
+    /// pixel (1: single sampling only, no MSAA).
     pub msaa: u32,
     pub dpi: f32,
     pub max_texture: u32,
@@ -476,13 +481,18 @@ pub mod format {
     /// of the Android XR projection chains only (`hal_xr_linear_frames`), outside the texture
     /// formats every backend lists (`COUNT`); Vulkan alone maps it.
     pub const RGBA8_SRGB: u32 = 32;
+    /// A two-plane 4:2:0 picture for a video encoder: luma (one byte per pixel) then chroma (U V
+    /// at half resolution both ways). A render pass draws into one plane, its layer: 0 luma (an
+    /// R8 target of the texture's size), 1 chroma (RG8, half the size). Outside `COUNT`: D3D11
+    /// alone maps it (a shared texture an encoder reads where it lies).
+    pub const NV12: u32 = 33;
 
     /// Bytes per texel; 0 for an unknown format.
     pub const fn texel_bytes(f: u32) -> u64 {
         match f {
             RGBA8 | BGRA8 | DEPTH32F | DEPTH24_STENCIL8 | R32F | RG16F | R32UINT | RGBA8_SRGB => 4,
-            // 16 bytes per 4x4 texels
-            R8 | BC7 | BC5 | ASTC4X4 => 1,
+            // 16 bytes per 4x4 texels; NV12: its luma plane's (the chroma adds half: `level_bytes`)
+            R8 | BC7 | BC5 | ASTC4X4 | NV12 => 1,
             RG8 => 2,
             RGBA16F => 8,
             RGBA32F => 16,
@@ -494,6 +504,7 @@ pub mod format {
         match f {
             RGBA8 => "Rgba8",
             RGBA8_SRGB => "Rgba8Srgb",
+            NV12 => "Nv12",
             BGRA8 => "Bgra8",
             R8 => "R8",
             RG8 => "Rg8",
@@ -515,6 +526,11 @@ pub mod format {
         f == DEPTH32F || f == DEPTH24_STENCIL8
     }
 
+    /// The render-target planes of `f` (a pass's layer picks one): 2 for NV12, else 1.
+    pub const fn planes(f: u32) -> u32 {
+        if f == NV12 { 2 } else { 1 }
+    }
+
     pub const fn is_block(f: u32) -> bool {
         matches!(f, BC7 | BC5 | ASTC4X4)
     }
@@ -524,6 +540,8 @@ pub mod format {
     pub fn level_bytes(f: u32, w: u32, h: u32) -> u64 {
         if is_block(f) {
             (w.max(1) as u64).div_ceil(4) * (h.max(1) as u64).div_ceil(4) * 16
+        } else if f == NV12 {
+            w.max(1) as u64 * h.max(1) as u64 * 3 / 2
         } else {
             w.max(1) as u64 * h.max(1) as u64 * texel_bytes(f)
         }
@@ -1071,6 +1089,13 @@ pub struct Pass {
     /// draws run their pipelines' multiview stages once and the GPU renders every layer, the
     /// pass uniforms' `_r` matrices being the second view's.
     pub views: u32,
+    /// Samples per pixel: 0 or 1 single sampling; 2, 4 or 8 (a count in [`HalInfo::msaa`],
+    /// else single sampled) an MSAA pass: it renders into multisampled colour and depth images
+    /// of its attachments' formats and size the backend keeps per attachment, resolved into the
+    /// attachments at its end (colour: the samples' average; depth: sample 0). A pass that loads
+    /// continues the multisampled images (the second eye of a side-by-side target), not what
+    /// another pass wrote into the attachments.
+    pub samples: u32,
     pub uniforms: Slice,
     pub draws: Range,
     pub name: StrId,
@@ -1134,7 +1159,7 @@ pub struct Draw {
     pub scissor: [f32; 4],
     pub zbias: f32,
     pub pick: u32,
-    /// [`Draw::DEPTH_WRITE`] | [`Draw::CULL`] | [`Draw::BLEND`]
+    /// [`Draw::DEPTH_WRITE`] | [`Draw::CULL`] | [`Draw::BLEND`] and the other `Draw` flag bits.
     pub flags: u32,
     pub owner: StrId,
     /// Cx draw-list id, draw-item id and the list's debug name
@@ -1154,9 +1179,71 @@ impl Draw {
     /// triangles drawn as their edges (frame capture's wireframe view; backends without a line
     /// fill mode draw them filled)
     pub const WIREFRAME: u32 = 16;
+    /// This draw never occludes input to native content below it.
+    pub const INPUT_TRANSPARENT: u32 = 32;
 }
 
 unsafe impl Plain for Draw {}
+
+/// Geometry resolved by the frame builder in window pixels. Rectangles are x, y, width,
+/// height; the transform is column-major. Radius order is top-left, top-right, bottom-right,
+/// bottom-left.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NativeLayerGeom {
+    pub rect: [f32; 4],
+    pub clip: [f32; 4],
+    pub radius: [f32; 4],
+    pub transform: [f32; 16],
+    pub opacity: f32,
+    pub flags: u32,
+}
+
+impl Default for NativeLayerGeom {
+    fn default() -> Self {
+        Self {
+            rect: [0.0; 4], clip: [0.0; 4], radius: [0.0; 4],
+            transform: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                        0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            opacity: 1.0, flags: crate::native_layer::layer_flags::VISIBLE,
+        }
+    }
+}
+
+/// One segment of a window pass. DRAWS names elements of the batch's draw array, all from the
+/// same pass. NATIVE carries a layer's unclipped rect and clip in window pixels (x, y, width,
+/// height), corner radii, and a column-major transform. `occluders` is an ELEMENT range of
+/// `[f32; 4]` x, y, width, height rectangles in the byte arena (`buffers::read_rects`).
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layer {
+    pub kind: u32,
+    pub draws: Range,
+    pub native: Id,
+    pub rect: [f32; 4],
+    pub clip: [f32; 4],
+    pub radius: [f32; 4],
+    pub transform: [f32; 16],
+    pub opacity: f32,
+    pub flags: u32,
+    pub occluders: Range,
+}
+
+impl Layer {
+    pub const DRAWS: u32 = 0;
+    pub const NATIVE: u32 = 1;
+}
+
+impl Default for Layer {
+    fn default() -> Self {
+        let g = NativeLayerGeom::default();
+        Self { kind: Self::DRAWS, draws: Range::default(), native: Id::NONE,
+            rect: g.rect, clip: g.clip, radius: g.radius, transform: g.transform,
+            opacity: g.opacity, flags: g.flags, occluders: Range::default() }
+    }
+}
+
+unsafe impl Plain for Layer {}
 
 /// Timing Cx measured for the frame, in absolute raw monotonic ns (see [`clock_ns`]).
 #[relax_api(plain)]
@@ -1190,6 +1277,8 @@ pub struct FramePacket {
     pub frame: u64,
     pub passes: Range,
     pub draws: Range,
+    /// Element range into `CmdBuf::layers`. Empty preserves the unsplit rendering path.
+    pub layers: Range,
     pub meta: FrameMeta,
 }
 

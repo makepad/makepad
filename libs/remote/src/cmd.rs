@@ -30,8 +30,13 @@ pub fn answer(dispatch: fn(&Req, &mut Out), line: &str) -> (Vec<u8>, bool) {
 /// As [`answer`], writing the reply's lines to `w` as they are produced (a host streams them on).
 /// Returns whether the reply was cut at the size limit.
 pub fn answer_to(dispatch: fn(&Req, &mut Out), line: &str, w: &mut dyn Write) -> bool {
+    answer_to_cancellable(dispatch, line, w, None)
+}
+
+/// In-memory/streaming consumer with the same cancellation as a remote channel.
+pub fn answer_to_cancellable(dispatch: fn(&Req, &mut Out), line: &str, w: &mut dyn Write, gone: Option<Gone>) -> bool {
     let req = Req::parse(line);
-    let mut out = Out { w, bytes: 0, limit: if req.get("full") == Some("1") { usize::MAX } else { LIMIT }, truncated: false, ok: true, gone: None };
+    let mut out = Out { w, bytes: 0, limit: if req.get("full") == Some("1") { usize::MAX } else { LIMIT }, truncated: false, ok: true, gone };
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(&req, &mut out)));
     if r.is_err() {
         out.err("internal error in this command (inspect bug)");

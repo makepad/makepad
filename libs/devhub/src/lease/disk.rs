@@ -123,16 +123,16 @@ pub fn plan(items: &[Item], free: u64, floor: u64, user_machine: bool) -> Plan {
 
 /// Bytes on disk (allocated blocks) under `p` and its newest mtime; symlinks are not followed.
 pub fn dir_size(p: &Path) -> (u64, u64) {
-    use std::os::unix::fs::MetadataExt;
     let Ok(m) = std::fs::symlink_metadata(p) else { return (0, 0) };
-    let (mut bytes, mut newest) = (m.blocks() * 512, m.mtime().max(0) as u64);
+    let (mut bytes, mut newest) = crate::os::on_disk(&m);
     if m.is_dir() {
         let mut stack = vec![p.to_path_buf()];
         while let Some(d) = stack.pop() {
             for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
                 let Ok(m) = e.metadata() else { continue };
-                bytes += m.blocks() * 512;
-                newest = newest.max(m.mtime().max(0) as u64);
+                let (b, t) = crate::os::on_disk(&m);
+                bytes += b;
+                newest = newest.max(t);
                 if m.is_dir() {
                     stack.push(e.path());
                 }

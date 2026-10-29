@@ -125,9 +125,9 @@
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["standalone", "localai"], "mobile": false
   },
   {
-    "id": "fab", "label": "Fab", "package": "makepad-app-fab",
-    "dir": "apps/fab", "bin": "makepad-app-fab", "manifest": null, "args": [],
-    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["gltf"], "mobile": false
+    "id": "fab", "label": "Fab", "package": "makepad-fab",
+    "dir": "apps/commercial/fab/app", "bin": "makepad-fab", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
   },
   {
     "id": "scope", "label": "Scope", "package": "makepad-scope",

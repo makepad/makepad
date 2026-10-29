@@ -26,7 +26,7 @@ impl CmdRisk {
 /// One remote command.
 #[derive(Clone, Copy)]
 pub struct Command {
-    /// The command words (`snap`, `cap start`).
+    /// The command words (`ui find`, `cap start`).
     pub words: &'static str,
     /// The usage line `help` prints.
     pub args: &'static str,
@@ -44,7 +44,7 @@ pub struct Command {
 
 /// The built-in services: id, label, brief.
 pub const SERVICES: &[(&str, &str, &str)] = &[
-    ("ui", "Window", "The app's window as a person uses it: read its widgets (snap gives rects ready to click, dump the tree), inject mouse, keys and text through the real event path, resize, wait until it settled, record or grab frames. Coordinates are window points as snap reports them."),
+    ("ui", "Window", "The app's window as a person uses it: read and act on its semantic tree (ui, ui find, ui act, ui type), inject raw mouse, keys and text for input tests, resize, wait until it settled, record or grab frames. Coordinates are window points as ui reports them."),
     ("edit", "Design", "Live design edits: the tweaker overlay, structural Splash edits (design) and hot-patched shader constants."),
     ("logs", "Logs", "The app's log lines and trace topics."),
     ("inspect", "Inspect", "Where the app's GPU memory is."),
@@ -219,3 +219,6 @@ mod tests {
         assert_eq!(instance_lines(&[&CLICK]).len(), 1);
     }
 }
+
+/// Arguments of the semantic ui tools, shared by their generated MCP manifests.
+pub const UI_PARAMS: &str = r#""app":{"type":"string","description":"hosted app name or client ID; shell selects local sessions"},"machine":{"type":"string","description":"Desk Link tab name or zero-based index; list enumerates tabs"},"q":{"type":"string"},"node":{"type":"string"},"w":{"type":"string"},"role":{"type":"string"},"name":{"type":"string"},"text":{"type":"string"},"value":{"type":"string"},"state":{"type":"string"},"path":{"type":"string"},"class":{"type":"string"},"action":{"type":"string"},"v":{"type":"string"},"t":{"type":"string"},"from":{"type":"integer"},"to":{"type":"integer"},"dx":{"type":"number"},"dy":{"type":"number"},"nth":{"type":"integer"},"depth":{"type":"integer"},"wait":{"type":"boolean"},"gone":{"type":"boolean"},"changed":{"type":"boolean"},"count":{"type":"integer"},"timeout_ms":{"type":"integer"},"if_user_seq":{"type":"integer"},"json":{"type":"boolean"},"a":{"type":"string"},"b":{"type":"string"},"since":{"type":"integer"},"act":{"type":"boolean"}"#;

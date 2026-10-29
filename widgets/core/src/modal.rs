@@ -257,6 +257,14 @@ impl ScriptHook for Modal {
 }
 
 impl Widget for Modal {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Dialog;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states.set(a11y_tree::States::MODAL, true);
+        node.states.set(a11y_tree::States::HIDDEN, !self.is_open);
+    }
+
     /// Opened, so the run draws its content.
     fn scan(&mut self, cx: &mut Cx, _scan: &ScanEvent, _scope: &mut Scope) {
         self.open(cx);

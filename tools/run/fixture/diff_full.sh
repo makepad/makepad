@@ -7,7 +7,7 @@
 #            diff_full.allow lists the tests that differ by design (crash on purpose, timings, harness
 #            features): counted as allowed, not failures.
 #   replay   tools/run/fixture/replay/calculator.txt (clicks, text, frames) drives the Calculator built natively
-#            and under `makepad run` (O3 forced on with call threshold 1); the state dumps (`snap all=1` after each
+#            and under `makepad run` (O3 forced on with call threshold 1); the state dumps (`ui` after each
 #            checkpoint: display, tape, widget tree with rects and text) must be identical.
 # Usage: tools/run/fixture/diff_full.sh [corpus|replay]      (default both; replay-only on a machine without rustc deps)
 # Env: TARGET (target/release), DIFF_CORPUS (dir of *.rs tests, default libs/relax/compiler/tests), DIFF_CACHE, DIFF_JOBS (default 8), DIFF_NATIVE_CALC (prebuilt native calculator;
@@ -89,12 +89,12 @@ if [ $what = all ] || [ $what = replay ]; then
         # "settled":true with the window's widget tree in place (a cold JIT start draws its first
         # frame seconds after the remote socket answers; clicks before it hit nothing)
         until TMPDIR="$d/tmp" "$M" inspect $pid settled 2>/dev/null | grep -q '"settled":true' \
-            && TMPDIR="$d/tmp" "$M" inspect $pid dump 2>/dev/null | grep -q ' main_window '; do
+            && TMPDIR="$d/tmp" "$M" inspect $pid ui 2>/dev/null | grep -q ' window '; do
             n=$((n + 1)); [ $n -ge 600 ] && break
             kill -0 $pid 2>/dev/null || break
             sleep 0.2
         done
-        TMPDIR="$d/tmp" "$M" inspect $pid dump > "$d/tree0" 2>&1
+        TMPDIR="$d/tmp" "$M" inspect $pid ui > "$d/tree0" 2>&1
         : > "$d/state"
         while read -r verb arg; do
             case $verb in
@@ -102,12 +102,9 @@ if [ $what = all ] || [ $what = replay ]; then
             step) TMPDIR="$d/tmp" "$M" inspect $pid step frames=$arg wait_loads=1 > /dev/null 2>&1 ;;
             text) TMPDIR="$d/tmp" "$M" inspect $pid key t="$arg" wait=1 > /dev/null 2>&1 ;;
             click)
-                xy=$(awk -v n="$arg" '$3 == n { printf "x=%d y=%d", $5 + $7 / 2, $6 + $8 / 2 }' "$d/tree0")
-                TMPDIR="$d/tmp" "$M" inspect $pid click $xy wait=1 > /dev/null 2>&1 ;;
-            # one widget per line, sorted: a PortalList's items come out in hash order (it differs
-            # between two native runs too)
-            snap) echo "-- snap" >> "$d/state"; TMPDIR="$d/tmp" "$M" inspect $pid snap all=1 2>&1 | sed 's/},{/\
-/g' | sort >> "$d/state" ;;
+                TMPDIR="$d/tmp" "$M" inspect $pid ui act q="$arg" press wait=1 > /dev/null 2>&1 ;;
+            # Semantic tree order is stable; process-local node IDs are not.
+            ui) echo "-- ui" >> "$d/state"; TMPDIR="$d/tmp" "$M" inspect $pid ui 2>&1 | sed -E 's/#[0-9a-f]+/#NODE/g' >> "$d/state" ;;
             esac
         done < "$here/replay/calculator.txt"
         TMPDIR="$d/tmp" "$M" inspect $pid quit > /dev/null 2>&1

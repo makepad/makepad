@@ -114,12 +114,10 @@ unsafe fn create_view(root: ObjcId) -> ObjcId {
     if responds == YES {
         let () = msg_send![view, setFocusEffect: nil];
     }
-    // Full Keyboard Access skips it (no forced visible focus caret); keys still arrive
-    let () = msg_send![view, setIsAccessibilityElement: YES];
-    let responds: BOOL = msg_send![view, respondsToSelector: sel!(setAccessibilityRespondsToUserInteraction:)];
-    if responds == YES {
-        let () = msg_send![view, setAccessibilityRespondsToUserInteraction: NO];
-    }
+    // The semantic field owns accessibility focus and geometry. This view remains the
+    // real keyboard/UITextInput client, reached through accessibilityTextInputResponder.
+    let () = msg_send![view, setIsAccessibilityElement: NO];
+    let () = msg_send![view, setAccessibilityElementsHidden: YES];
     let () = msg_send![root, addSubview: view];
     view
 }
@@ -343,6 +341,32 @@ pub(super) fn focused() -> bool {
     view != nil && unsafe { msg_send![view, isFirstResponder] }
 }
 
+fn accessibility_view(key: u64, node: makepad_a11y::NodeId) -> ObjcId {
+    let t = text();
+    if !t.owner.get().is_some_and(|w| !w.retired.get()
+        && crate::a11y::window_key(w.sid.get(), w.id.get().index) == key) { return nil; }
+    let owns_field = crate::a11y::with_tree(key, |tree| tree.focus == node
+        && tree.node(node).is_some_and(|n| n.role.is_text_input()
+            && n.states.contains(makepad_a11y::States::EDITABLE)
+            && !n.states.intersects(makepad_a11y::States::DISABLED | makepad_a11y::States::HIDDEN)))
+        .unwrap_or(false);
+    if owns_field { t.view.get() } else { nil }
+}
+
+/// Public UIAccessibility text-input forwarding (iOS 18.1+), only for the active field.
+pub(super) fn accessibility_responder(key: u64, node: makepad_a11y::NodeId) -> ObjcId {
+    let view = accessibility_view(key, node);
+    if view != nil && unsafe { msg_send![view, isFirstResponder] } { view } else { nil }
+}
+
+pub(super) fn accessibility_activate(key: u64, node: makepad_a11y::NodeId) {
+    let view = accessibility_view(key, node);
+    if view != nil {
+        unsafe { let _: BOOL = msg_send![view, becomeFirstResponder]; }
+    }
+    // A different field first goes through the queued FOCUS action, then ImeShow/show.
+}
+
 /// (multiline, submit on enter, read only) of the focused field, for a hardware Enter.
 pub(super) fn enter_config() -> Option<(bool, bool, bool)> {
     let view = text().view.get();
@@ -528,15 +552,8 @@ unsafe fn navigation_key(command: ObjcId) {
 /// `HalTextView`: the `UITextView` the keyboard talks to, transparent to touches, with its
 /// geometry answers pointing at the app's caret.
 fn define_text_view() -> *const Class {
-    extern "C" fn yes(_: &Object, _: Sel) -> BOOL {
-        YES
-    }
-    extern "C" fn nil_object(_: &Object, _: Sel) -> ObjcId {
-        nil
-    }
-    // empty focus geometry: Full Keyboard Access has nothing to draw its cursor over
-    extern "C" fn accessibility_path(_: &Object, _: Sel) -> ObjcId {
-        unsafe { msg_send![class!(UIBezierPath), bezierPathWithRect: NSRect { origin: NSPoint { x: 0.0, y: 0.0 }, size: NSSize { width: 0.0, height: 0.0 } }] }
+    extern "C" fn no(_: &Object, _: Sel) -> BOOL {
+        NO
     }
     // the app owns hit-testing and caret placement
     extern "C" fn point_inside(_: &Object, _: Sel, _: NSPoint, _: ObjcId) -> BOOL {
@@ -614,9 +631,8 @@ fn define_text_view() -> *const Class {
     // the app is writing into the view: its callbacks do not echo back
     decl.add_ivar::<BOOL>("programmatic_update");
     unsafe {
-        decl.add_method(sel!(canBecomeFocused), yes as extern "C" fn(&Object, Sel) -> BOOL);
-        decl.add_method(sel!(focusEffect), nil_object as extern "C" fn(&Object, Sel) -> ObjcId);
-        decl.add_method(sel!(accessibilityPath), accessibility_path as extern "C" fn(&Object, Sel) -> ObjcId);
+        decl.add_method(sel!(canBecomeFocused), no as extern "C" fn(&Object, Sel) -> BOOL);
+        decl.add_method(sel!(isAccessibilityElement), no as extern "C" fn(&Object, Sel) -> BOOL);
         decl.add_method(sel!(pointInside:withEvent:), point_inside as extern "C" fn(&Object, Sel, NSPoint, ObjcId) -> BOOL);
         decl.add_method(sel!(caretRectForPosition:), caret_rect as extern "C" fn(&Object, Sel, ObjcId) -> NSRect);
         decl.add_method(sel!(firstRectForRange:), first_rect as extern "C" fn(&Object, Sel, ObjcId) -> NSRect);

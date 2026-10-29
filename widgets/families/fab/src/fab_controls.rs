@@ -1,7 +1,7 @@
 //! The "fab" control set — the fab app's control styling
-//! (libs/fab/src/ui: the drag-numeric field, the color picker, the row /
+//! (the Fab shell's ui: the drag-numeric field, the color picker, the row /
 //! panel / search visual language) ported into the widget library as a
-//! named, reusable set. Nothing here depends on libs/fab: the code and the
+//! named, reusable set. Nothing here depends on the Fab shell: the code and the
 //! token table are carried over and adapted; the fab app itself migrates to
 //! these later.
 //!
@@ -2059,7 +2059,17 @@ impl FabValueInput {
 }
 
 impl Widget for FabValueInput {
-    // The generic switch and the bridge's /snap `enabled` column both go
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::SpinButton;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE;
+    }
+
+    // The generic switch and the bridge's ui find `enabled` column both go
     // through these, so what they say is what the field does.
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.set_enabled(cx, !disabled);
@@ -3110,6 +3120,16 @@ impl FabSlider {
 }
 
 impl Widget for FabSlider {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Slider;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE;
+    }
+
     // The generic switch and the bridge's `enabled` column both come through
     // here, so what they say is what the row does.
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
@@ -3973,6 +3993,16 @@ impl FabKnob {
 }
 
 impl Widget for FabKnob {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Slider;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE;
+    }
+
     // The generic switch and the bridge's `enabled` column both come through
     // here, so what they say is what the knob does.
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
@@ -4428,6 +4458,12 @@ impl FabDiagonalLabel {
 }
 
 impl Widget for FabDiagonalLabel {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::StaticText;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn text(&self) -> String {
         self.text.clone()
     }
@@ -4585,6 +4621,16 @@ impl FabColorWheel {
 }
 
 impl Widget for FabColorWheel {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Slider;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE;
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let _ = self.draw_wheel.draw_walk(cx, walk);
         DrawStep::done()
@@ -4763,6 +4809,12 @@ impl FabPaletteStrip {
 }
 
 impl Widget for FabPaletteStrip {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::List;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, Layout::flow_down());
         let width = cx.turtle().rect().size.x;
@@ -5515,6 +5567,12 @@ impl FabPaletteCarousel {
 }
 
 impl Widget for FabPaletteCarousel {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::List;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -6229,7 +6287,7 @@ impl FabColorPick {
         }
         self.draw_swatch.redraw(cx);
         // The popover's controls join the widget tree under this swatch
-        // while it is open, so the remote bridge (/snap) and the tweaker's
+        // while it is open, so the remote bridge (ui find) and the tweaker's
         // tree walks can reach the `pick` button and the fields.
         let uid = self.uid;
         let mut kids = Vec::new();
@@ -6318,6 +6376,11 @@ impl WidgetNode for FabColorPick {
 }
 
 impl Widget for FabColorPick {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let rgba = self.rgba();
         self.draw_swatch.swatch = vec4(rgba[0], rgba[1], rgba[2], rgba[3]);

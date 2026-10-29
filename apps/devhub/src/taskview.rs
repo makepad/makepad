@@ -4,7 +4,8 @@
 //! the display's budget and its CPU). The node's tray dropdown is this view; the master's panel
 //! draws the same card for the selected JIT ([`jit_card`]).
 
-use crate::graph::{self, DrawDevhubTrace, Palette};
+use crate::graph::{self, Palette};
+use makepad_shell_kit::graph::DrawShellTrace;
 use crate::live::{Board, JitLive, MachineLive, WINDOW_S};
 use crate::view::dur;
 use makepad_shell_kit::ui::{contains, rect, DrawShellFill, HAlign, Ico, ShellDraw};
@@ -40,11 +41,27 @@ pub struct Head {
     pub dev: bool,
     /// (id, lane, kind)
     pub leases: Vec<(String, String, &'static str)>,
+    /// the JIT cache clear: its confirmation and its last outcome
+    pub cache: CacheUi,
+}
+
+/// The node's JIT cache clear, as the footer shows it.
+#[derive(Clone, Debug, Default)]
+pub struct CacheUi {
+    /// sized and waiting for the click that confirms: (question, force)
+    pub ask: Option<(String, bool)>,
+    /// sizing / clearing / the outcome
+    pub note: String,
 }
 
 #[derive(Clone, Debug, Default)]
 pub enum TasksAction {
     Quit,
+    /// size this machine's JIT cache, then ask
+    ClearJit,
+    /// the confirmation: (force)
+    ClearJitConfirmed(bool),
+    ClearJitCancel,
     #[default]
     None,
 }
@@ -86,7 +103,7 @@ pub fn view_now(board: &Board) -> f64 {
 /// One JIT's card in `r` (its width; the height it takes is returned). `cpu_text` stands in for
 /// the CPU graph where the OS numbers are another machine's (the master's routed view).
 #[allow(clippy::too_many_arguments)]
-pub fn jit_card(d: &mut ShellDraw, g: &mut DrawDevhubTrace, cx: &mut Cx2d, tok: &ShellTokens, p: &Palette, r: Rect, j: &JitLive, now: f64, cpu_text: Option<&str>) -> f64 {
+pub fn jit_card(d: &mut ShellDraw, g: &mut DrawShellTrace, cx: &mut Cx2d, tok: &ShellTokens, p: &Palette, r: Rect, j: &JitLive, now: f64, cpu_text: Option<&str>) -> f64 {
     let x = r.pos.x;
     let w = r.size.x;
     let mut y = r.pos.y;
@@ -204,7 +221,7 @@ pub struct DevhubTasks {
     #[live]
     d: ShellDraw,
     #[live]
-    g: DrawDevhubTrace,
+    g: DrawShellTrace,
     #[live]
     tokens: ShellTokens,
     /// the sampler's rings, read under its lock while drawing (the sampler holds it briefly)
@@ -214,8 +231,15 @@ pub struct DevhubTasks {
     pub head: Head,
     #[rust]
     quit: Rect,
+    /// the footer's JIT cache buttons: clear (or confirm), cancel
+    #[rust]
+    clear: Rect,
+    #[rust]
+    cancel: Rect,
     #[rust]
     hot: bool,
+    #[rust]
+    hot_clear: u8,
     #[rust]
     scroll: f64,
     /// the content's height at the last draw (the dropdown fits itself to it)
@@ -328,6 +352,33 @@ impl DevhubTasks {
         // the footer: what is sampled, and Quit
         self.d.separator(cx, rect(x, y, w, 1.0), p.fg, 0.10);
         y += 10.0;
+        // the JIT cache: Clear sizes it, then the same place asks to confirm
+        self.cancel = Rect::default();
+        match &head.cache.ask {
+            Some((question, force)) => {
+                let lines = self.d.wrap(cx, false, tok.font.caption, question, w, 6);
+                for l in &lines {
+                    self.d.label(cx, rect(x, y, w, 16.0), false, tok.font.caption, p.fg, HAlign::Left, l);
+                    y += 16.0;
+                }
+                y += 4.0;
+                let verb = if *force { "Clear anyway" } else { "Clear" };
+                let bw = self.d.measure(cx, false, tok.font.caption, verb) + 24.0;
+                self.clear = rect(x, y, bw, 24.0);
+                self.cancel = rect(x + bw + 8.0, y, 80.0, 24.0);
+                self.d.button(cx, self.clear, &tok, if self.hot_clear == 1 { CtrlState::Hover } else { CtrlState::Normal }, None, verb, tok.font.caption, p.fg, true);
+                self.d.button(cx, self.cancel, &tok, if self.hot_clear == 2 { CtrlState::Hover } else { CtrlState::Normal }, None, "Cancel", tok.font.caption, p.fg, true);
+                y += 32.0;
+            }
+            None => {
+                let label = "Clear JIT cache";
+                let bw = self.d.measure(cx, false, tok.font.caption, label) + 24.0;
+                self.clear = rect(x, y, bw, 24.0);
+                self.d.button(cx, self.clear, &tok, if self.hot_clear == 1 { CtrlState::Hover } else { CtrlState::Normal }, None, label, tok.font.caption, p.fg, true);
+                self.d.label_elided(cx, rect(x + bw + 8.0, y, w - bw - 8.0, 24.0), false, tok.font.caption, p.secondary, HAlign::Left, &head.cache.note);
+                y += 32.0;
+            }
+        }
         let label = "Quit devhub";
         let bw = self.d.measure(cx, false, tok.font.caption, label) + 24.0;
         self.quit = rect(x + w - bw, y, bw, 24.0);
@@ -363,12 +414,22 @@ impl Widget for DevhubTasks {
         match event {
             Event::MouseMove(e) => {
                 let hot = contains(self.quit, e.abs);
-                if hot != self.hot {
+                let hot_clear = if contains(self.clear, e.abs) { 1 } else if contains(self.cancel, e.abs) { 2 } else { 0 };
+                if hot != self.hot || hot_clear != self.hot_clear {
                     self.hot = hot;
+                    self.hot_clear = hot_clear;
                     self.redraw(cx);
                 }
             }
             Event::MouseDown(e) if contains(self.quit, e.abs) => cx.widget_action(self.uid, TasksAction::Quit),
+            Event::MouseDown(e) if contains(self.clear, e.abs) => {
+                let a = match &self.head.cache.ask {
+                    Some((_, force)) => TasksAction::ClearJitConfirmed(*force),
+                    None => TasksAction::ClearJit,
+                };
+                cx.widget_action(self.uid, a);
+            }
+            Event::MouseDown(e) if contains(self.cancel, e.abs) => cx.widget_action(self.uid, TasksAction::ClearJitCancel),
             Event::Scroll(e) => {
                 let max = (self.content_h - self.view_h).max(0.0);
                 let next = (self.scroll + e.scroll.y).clamp(0.0, max);

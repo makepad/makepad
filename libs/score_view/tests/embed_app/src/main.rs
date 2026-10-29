@@ -32,6 +32,7 @@ script_mod! {
                     draw_bg +: { color: #182029 }
 
                     score_host := View {
+                        a11y: {role: "group" label: "Score preview"}
                         width: 1318
                         height: 181
                         score := ScoreView {
@@ -49,6 +50,7 @@ script_mod! {
                         status := Label { text: "1318x181" }
                     }
                     texture_host := View {
+                        a11y: {role: "group" label: "Texture preview"}
                         width: 600
                         height: 64
                         texture_sibling := mod.widgets.TextureSibling {

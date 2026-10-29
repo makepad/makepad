@@ -406,10 +406,16 @@ struct LookupInputs {
     reads: HashMap<LookupInput, InputValue>,
     dependencies: HashMap<u64, std::sync::Arc<LookupInputs>>,
 }
+static LOOKUP_INPUT_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 impl LookupInputs {
     fn new(table: &MacroTable) -> Self {
-        static IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        Self { id: IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed), graph: table.lookup_graph.clone(),
+        Self { id: LOOKUP_INPUT_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed), graph: table.lookup_graph.clone(),
+            reads: Default::default(), dependencies: Default::default() }
+    }
+    /// the inputs of a decoded lookup (MacroUse::from_replay): of no table's lineage, never
+    /// unchanged (its replay resolves the lookup again)
+    fn detached() -> Self {
+        Self { id: LOOKUP_INPUT_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed), graph: std::sync::Arc::new(()),
             reads: Default::default(), dependencies: Default::default() }
     }
     fn read(&mut self, table: &MacroTable, key: LookupInput) {
@@ -1364,6 +1370,18 @@ pub struct Looked {
     nuses: u32,
     got: Option<MacroRef>,
     inputs: std::sync::Arc<LookupInputs>,
+    /// a lookup decoded from a file image's replay data (MacroUse::from_replay): its answer by
+    /// what expansions depend on, not by object (`got` is None then)
+    was: Option<Option<GotWas>>,
+}
+
+/// A recorded lookup's answer as a later run compares it: the definition's expansion_hash and
+/// where it is written (None in Looked::was: nothing was found)
+#[derive(Clone)]
+struct GotWas {
+    hash: u128,
+    def_file: String,
+    def_pos: u32,
 }
 
 /// A finished parse's definitions (to append to the table in load order) and its lookups.
@@ -1378,6 +1396,8 @@ pub struct MacroUse {
     names: Option<std::sync::Arc<MacroNames>>,
     /// the parse's `use` bindings (MacroScope::add_use), for the crate's table
     pub uses: crate::fxhash::HashMap<(String, String), Vec<String>>,
+    /// decoded from a file image's replay data (from_replay): those bytes, recorded again as they are
+    replay_image: Option<std::sync::Arc<[u8]>>,
 }
 
 fn ptr_of(d: &Option<MacroRef>) -> usize {
@@ -1494,7 +1514,7 @@ impl MacroScope {
         let r = with_strs(names, path, |path| lookup_in(&self.table, &self.local, names.str(name), names.str(cur), path, names.str(module)))
             .or_else(|| self.lookup_via_local_use(name, cur, path, module, &mut memo, &mut inputs));
         if record {
-            self.looked.borrow_mut().push(Looked { name, path: key.path.clone(), module, nlocal: self.local.len() as u32, nuses: self.uses_log.borrow().len() as u32, got: r.clone(), inputs: std::sync::Arc::new(inputs) });
+            self.looked.borrow_mut().push(Looked { name, path: key.path.clone(), module, nlocal: self.local.len() as u32, nuses: self.uses_log.borrow().len() as u32, got: r.clone(), inputs: std::sync::Arc::new(inputs), was: None });
         }
         memo.queries.insert(key, r.clone());
         r
@@ -1511,7 +1531,7 @@ impl MacroScope {
         let uses = std::sync::Arc::unwrap_or_clone(self.local_uses.into_inner()).bindings.into_iter()
             .map(|((m, b), p)| ((names.str(m).to_string(), names.str(b).to_string()), p.iter().map(|&x| names.str(x).to_string()).collect()))
             .collect();
-        MacroUse { trusted_image: false, local: self.local, looked: self.looked.into_inner(), uses_base: self.uses_base, uses_log: self.uses_log.into_inner(), names: Some(names), uses }
+        MacroUse { trusted_image: false, local: self.local, looked: self.looked.into_inner(), uses_base: self.uses_base, uses_log: self.uses_log.into_inner(), names: Some(names), uses, replay_image: None }
     }
 }
 
@@ -1774,7 +1794,111 @@ impl ImportLookup<'_> {
 
 impl MacroUse {
     pub fn from_image(local: Vec<MacroRef>, uses: crate::fxhash::HashMap<(String, String), Vec<String>>) -> Self {
-        Self { local, uses, looked: Vec::new(), uses_base: Default::default(), uses_log: Vec::new(), names: None, trusted_image: true }
+        Self { local, uses, looked: Vec::new(), uses_base: Default::default(), uses_log: Vec::new(), names: None, trusted_image: true, replay_image: None }
+    }
+
+    /// The lookups of this parse for a later run's replay (`from_replay`): names as strings,
+    /// each answer by its expansion_hash and position. None: nothing to replay (an image's).
+    pub fn replay_bytes(&self) -> Option<Vec<u8>> {
+        if let Some(b) = &self.replay_image { return Some(b.to_vec()); }
+        let names = self.names.as_ref()?;
+        let mut strs: Vec<String> = Vec::new();
+        let mut ix: HashMap<Name, u32> = HashMap::default();
+        let mut id = |n: Name, strs: &mut Vec<String>| *ix.entry(n).or_insert_with(|| { strs.push(names.str(n).to_string()); strs.len() as u32 - 1 });
+        let mut w = Vec::new();
+        let put = |w: &mut Vec<u8>, x: u32| w.extend_from_slice(&x.to_le_bytes());
+        let put_s = |w: &mut Vec<u8>, s: &str| { w.extend_from_slice(&(s.len() as u32).to_le_bytes()); w.extend_from_slice(s.as_bytes()); };
+        let mut hashes: HashMap<usize, u128> = HashMap::default();
+        put(&mut w, self.looked.len() as u32);
+        for l in &self.looked {
+            put(&mut w, id(l.name, &mut strs));
+            put(&mut w, l.path.len() as u32);
+            for &p in l.path.iter() { put(&mut w, id(p, &mut strs)); }
+            put(&mut w, id(l.module, &mut strs));
+            put(&mut w, l.nlocal);
+            put(&mut w, l.nuses);
+            match &l.got {
+                None => w.push(0),
+                Some(d) => {
+                    w.push(1);
+                    let h = *hashes.entry(std::sync::Arc::as_ptr(d) as usize).or_insert_with(|| expansion_hash(d));
+                    w.extend_from_slice(&h.to_le_bytes());
+                    put_s(&mut w, &d.def_file);
+                    put(&mut w, d.def_pos);
+                }
+            }
+        }
+        let mut bindings = |w: &mut Vec<u8>, strs: &mut Vec<String>, it: &mut dyn Iterator<Item = (&(Name, Name), &Vec<Name>)>, n: usize| {
+            put(w, n as u32);
+            for ((m, b), path) in it {
+                put(w, id(*m, strs)); put(w, id(*b, strs));
+                put(w, path.len() as u32);
+                for &p in path { put(w, id(p, strs)); }
+            }
+        };
+        bindings(&mut w, &mut strs, &mut self.uses_base.bindings.iter(), self.uses_base.bindings.len());
+        bindings(&mut w, &mut strs, &mut self.uses_log.iter().map(|(k, v)| (k, v)), self.uses_log.len());
+        let mut out = Vec::with_capacity(w.len() + strs.iter().map(|s| s.len() + 4).sum::<usize>() + 4);
+        put(&mut out, strs.len() as u32);
+        for s in &strs { put_s(&mut out, s); }
+        out.extend_from_slice(&w);
+        Some(out)
+    }
+
+    /// An image's lookups (`local` and `uses` as from_image) with its replay data
+    /// (replay_bytes): replayed against the loader's table like a speculative parse's, the
+    /// answers compared by what their expansions depend on. None: the data does not decode.
+    pub fn from_replay(local: Vec<MacroRef>, uses: crate::fxhash::HashMap<(String, String), Vec<String>>, bytes: &[u8]) -> Option<Self> {
+        struct R<'a>(&'a [u8]);
+        impl<'a> R<'a> {
+            fn take(&mut self, n: usize) -> Option<&'a [u8]> { let x = self.0.get(..n)?; self.0 = &self.0[n..]; Some(x) }
+            fn u32(&mut self) -> Option<u32> { Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?)) }
+            fn str(&mut self) -> Option<&'a str> { let n = self.u32()? as usize; std::str::from_utf8(self.take(n)?).ok() }
+        }
+        let mut r = R(bytes);
+        let names = std::sync::Arc::new(MacroNames::default());
+        let n = r.u32()? as usize;
+        if n > bytes.len() { return None; }
+        let strs: Vec<Name> = (0..n).map(|_| Some(names.id(r.str()?))).collect::<Option<_>>()?;
+        let name = |r: &mut R| -> Option<Name> { strs.get(r.u32()? as usize).copied() };
+        let nl = r.u32()? as usize;
+        if nl > bytes.len() { return None; }
+        let inputs = std::sync::Arc::new(LookupInputs::detached());
+        let mut looked = Vec::with_capacity(nl);
+        for _ in 0..nl {
+            let nm = name(&mut r)?;
+            let np = r.u32()? as usize;
+            if np > bytes.len() { return None; }
+            let path: Box<[Name]> = (0..np).map(|_| name(&mut r)).collect::<Option<_>>()?;
+            let module = name(&mut r)?;
+            let (nlocal, nuses) = (r.u32()?, r.u32()?);
+            if nlocal as usize > local.len() { return None; }
+            let was = match r.take(1)?[0] {
+                0 => None,
+                1 => {
+                    let hash = u128::from_le_bytes(r.take(16)?.try_into().ok()?);
+                    let def_file = r.str()?.to_string();
+                    Some(GotWas { hash, def_file, def_pos: r.u32()? })
+                }
+                _ => return None,
+            };
+            looked.push(Looked { name: nm, path, module, nlocal, nuses, got: None, inputs: inputs.clone(), was: Some(was) });
+        }
+        let bindings = |r: &mut R| -> Option<Vec<((Name, Name), Vec<Name>)>> {
+            let n = r.u32()? as usize;
+            if n > bytes.len() { return None; }
+            (0..n).map(|_| {
+                let k = (name(r)?, name(r)?);
+                let np = r.u32()? as usize;
+                if np > bytes.len() { return None; }
+                Some((k, (0..np).map(|_| name(r)).collect::<Option<Vec<_>>>()?))
+            }).collect()
+        };
+        let base = bindings(&mut r)?;
+        let uses_log = bindings(&mut r)?;
+        if !r.0.is_empty() || looked.iter().any(|l| l.nuses as usize > uses_log.len()) { return None; }
+        let uses_base = std::sync::Arc::new(LocalImports { bindings: base.into_iter().collect(), index: Default::default() });
+        Some(Self { trusted_image: false, local, looked, uses_base, uses_log, names: Some(names), uses, replay_image: Some(bytes.into()) })
     }
 
     /// Did every lookup get what it gets against `table` (the table as a sequential parse at
@@ -1818,11 +1942,22 @@ impl MacroUse {
             let moved: Box<[Name]>;
             let path = if foreign { moved = l.path.iter().map(|&p| tr(p)).collect(); &moved[..] } else { &l.path[..] };
             let now = scope.resolve(tr(l.name), cur_id, path, tr(l.module), false);
-            let ok = ptr_of(&now) == ptr_of(&l.got)
-                || match (&now, &l.got) {
-                    (Some(a), Some(b)) => a.def_file != here && b.def_file != here && same_expansion(a, b),
+            let ok = match &l.was {
+                // (an image's lookup: the same definition by what its expansion depends on -- the
+                // file's source is the image's, so a definition written in it at the same place
+                // with the same rules expands the same, hygiene included)
+                Some(was) => match (&now, was) {
+                    (None, None) => true,
+                    (Some(a), Some(w)) => expansion_hash(a) == w.hash
+                        && (a.def_file != here && w.def_file != here || a.def_file == w.def_file && a.def_pos == w.def_pos),
                     _ => false,
-                };
+                },
+                None => ptr_of(&now) == ptr_of(&l.got)
+                    || match (&now, &l.got) {
+                        (Some(a), Some(b)) => a.def_file != here && b.def_file != here && same_expansion(a, b),
+                        _ => false,
+                    },
+            };
             if !ok && crate::preload::trace() {
                 let path: Vec<&str> = l.path.iter().map(|&p| from.str(p)).collect();
                 eprintln!("boot-trace-replay: {} in {} path {:?} before {:?} now {:?}", from.str(l.name), here, path, l.got.as_ref().map(|d| (&d.name, &d.krate, &d.def_file, d.def_pos, d.builtin)), now.as_ref().map(|d| (&d.name, &d.krate, &d.def_file, d.def_pos, d.builtin)));
@@ -1830,6 +1965,42 @@ impl MacroUse {
             ok
         })
     }
+}
+
+/// A hash of what same_expansion compares: definitions with equal hashes expand the same anywhere
+/// outside their files (name, crate, built-in kind, the rules' token kinds and texts).
+fn expansion_hash(d: &MacroDef) -> u128 {
+    fn tok(h: &mut crate::sip::Sip128, t: &MTok) { h.u8(t.kind as u8); h.str(&t.text); }
+    fn opt(h: &mut crate::sip::Sip128, t: &Option<MTok>) { match t { None => h.u8(0), Some(t) => { h.u8(1); tok(h, t) } } }
+    fn m(h: &mut crate::sip::Sip128, v: &[MNode]) {
+        h.u32(v.len() as u32);
+        for x in v {
+            match x {
+                MNode::Tok(t) => { h.u8(0); tok(h, t) }
+                MNode::Var(n, f) => { h.u8(1); h.str(n); h.u8(*f as u8) }
+                MNode::Rep(v, s, o) => { h.u8(2); h.u8(*o); opt(h, s); m(h, v) }
+                MNode::Group(o, c, v) => { h.u8(3); tok(h, o); tok(h, c); m(h, v) }
+            }
+        }
+    }
+    fn t(h: &mut crate::sip::Sip128, v: &[TNode]) {
+        h.u32(v.len() as u32);
+        for x in v {
+            match x {
+                TNode::Tok(p) => { h.u8(0); tok(h, p) }
+                TNode::Var(n) => { h.u8(1); h.str(n) }
+                TNode::Rep(v, s, o) => { h.u8(2); h.u8(*o); opt(h, s); t(h, v) }
+                TNode::Group(o, c, v) => { h.u8(3); tok(h, o); tok(h, c); t(h, v) }
+                TNode::Crate => h.u8(4),
+            }
+        }
+    }
+    let mut h = crate::sip::Sip128::new();
+    h.str("macro-expansion");
+    h.str(&d.name); h.str(&d.krate); h.u8(d.builtin);
+    h.u32(d.arms.len() as u32);
+    for (a, b) in &d.arms { m(&mut h, a); t(&mut h, b); }
+    h.finish128()
 }
 
 /// Two definitions expand the same anywhere outside their files (token text, not positions).

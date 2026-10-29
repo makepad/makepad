@@ -15,6 +15,20 @@ use std::{
     time::Duration,
 };
 
+// Prefer the active checkout when the packaging tool was built on a build node or in
+// another worktree. Its Java, resources and signing assets must match the app's sources.
+fn android_tool_sources() -> PathBuf {
+    if let Ok(cwd) = std::env::current_dir() {
+        for root in cwd.ancestors() {
+            let tool = root.join("tools/cargo_makepad");
+            if tool.join("src/android/java/dev/makepad/android/MakepadActivity.java").is_file() {
+                return tool;
+            }
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
 fn aapt_path(sdk_dir: &Path, urls: &AndroidSDKUrls) -> PathBuf {
     sdk_dir
         .join(BUILD_TOOLS_DIR)
@@ -1107,7 +1121,7 @@ fn prepare_build(opts: &PrepareBuildOpts<'_>) -> Result<BuildPaths, String> {
     mkdir(&out_dir)?;
     mkdir(&java_out_dir)?;
 
-    let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cargo_manifest_dir = android_tool_sources();
     cp_all(&cargo_manifest_dir.join("src/android/res"), &res_dir, false)?;
 
     let build_crate_dir = get_crate_dir(opts.build_crate)?;
@@ -1234,7 +1248,7 @@ fn compile_java(
     extra_sources: &[PathBuf],
 ) -> Result<(), String> {
     let makepad_package_path = "dev/makepad/android";
-    let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cargo_manifest_dir = android_tool_sources();
     let java_home = sdk_dir.join("openjdk");
     let cwd = std::env::current_dir().unwrap();
     let javac_stamp = build_paths.java_out_dir.join("javac.inputs");
@@ -1249,7 +1263,9 @@ fn compile_java(
     let java_sources = vec![
         r_class_path.clone(),
         makepad_java_classes_dir.join("MakepadNative.java"),
+        makepad_java_classes_dir.join("MakepadA11yProvider.java"),
         makepad_java_classes_dir.join("MakepadActivity.java"),
+        makepad_java_classes_dir.join("NativeLayerContainer.java"),
         makepad_java_classes_dir.join("MakepadInputConnection.java"),
         makepad_java_classes_dir.join("MakepadNetwork.java"),
         makepad_java_classes_dir.join("MakepadSpeech.java"),
@@ -1855,7 +1871,7 @@ fn add_rust_library(
 
 /// The Khronos OpenXR loader for Android arm64, kept in-tree (`tools/cargo_makepad/quest`).
 fn quest_openxr_loader() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("quest/libopenxr_loader.so")
+    android_tool_sources().join("quest/libopenxr_loader.so")
 }
 
 fn add_resources(
@@ -2094,7 +2110,7 @@ fn sign_apk(sdk_dir: &Path, build_paths: &BuildPaths, urls: &AndroidSDKUrls) -> 
 /// Sign `apk` in place with the bundled debug keystore (apksigner).
 pub fn sign_apk_debug(sdk_dir: &Path, urls: &AndroidSDKUrls, apk: &Path) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
-    let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cargo_manifest_dir = android_tool_sources();
     let java_home = sdk_dir.join("openjdk");
 
     shell_env_cap(
@@ -2828,7 +2844,7 @@ pub fn build_aab(
 
     println!("AAB Build completed: {}", aab_paths.dst_aab.display());
     if let Some(opts) = &signing {
-        let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cargo_manifest_dir = android_tool_sources();
         if opts.keystore == cargo_manifest_dir.join("debug.keystore") {
             println!(
                 "NOTE: signed with the bundled debug keystore. The Play Store will reject this AAB. Pass --keystore=<path> --keystore-pass=<pw> --keystore-key-alias=<alias> --keystore-key-pass=<pw> to sign with a release keystore."
@@ -3182,7 +3198,7 @@ pub fn build_host(
         resolved.java_url, resolved.app_label, resolved.version_code, resolved.version_name, build_crate
     );
     build_r_class(sdk_dir, &build_paths, urls)?;
-    let run_java = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/android/java/dev/makepad/run/RunActivity.java");
+    let run_java = android_tool_sources().join("src/android/java/dev/makepad/run/RunActivity.java");
     compile_java(sdk_dir, &build_paths, urls, &[run_java])?;
     build_dex(sdk_dir, &build_paths, urls)?;
     build_unaligned_apk(sdk_dir, &build_paths, urls)?;

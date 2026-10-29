@@ -35,6 +35,12 @@ use super::{alpha, darker, CtrlState, ShellTokens};
 #[cfg(target_os = "linux")]
 #[path = "panels_linux.rs"]
 mod linux;
+/// The temperature tray's flyout.
+#[path = "temps_panel.rs"]
+mod temps_view;
+use temps_view::TempsView;
+use super::temps::Temps;
+use makepad_shell_kit::graph::DrawShellTrace;
 /// The BlackShark headset's row and settings view (Controllers & devices).
 #[cfg(target_os = "linux")]
 #[path = "blackshark/panel_linux.rs"]
@@ -154,6 +160,8 @@ pub enum PanelKind {
     Tray(usize),
     /// Who is viewing this desktop over Desk Link, each with Disconnect.
     DeskLink,
+    /// The temperature graphs (the thermometer tray item).
+    Temps,
 }
 
 impl PanelKind {
@@ -168,6 +176,7 @@ impl PanelKind {
             BarModule::Gamepad => PanelKind::Gamepad,
             BarModule::Tray(i) => PanelKind::Tray(i),
             BarModule::DeskLink => PanelKind::DeskLink,
+            BarModule::Temps => PanelKind::Temps,
             _ => return None,
         })
     }
@@ -183,13 +192,16 @@ impl PanelKind {
             PanelKind::Gamepad => BarModule::Gamepad,
             PanelKind::Tray(i) => BarModule::Tray(i),
             PanelKind::DeskLink => BarModule::DeskLink,
+            PanelKind::Temps => BarModule::Temps,
         }
     }
 
-    /// `contentWidth` — 560 for the calendar, 300 for a tray menu, 380 for the rest.
+    /// `contentWidth` — 560 for the calendar, 520 for the temperature graphs, 300 for a tray
+    /// menu, 380 for the rest.
     pub fn content_width(self) -> f64 {
         match self {
             PanelKind::Clock => 560.0,
+            PanelKind::Temps => 520.0,
             PanelKind::Tray(_) => 300.0,
             _ => 380.0,
         }
@@ -320,6 +332,7 @@ script_mod! {
         height: Fill
         draw_bg +: {}
         d +: {}
+        trace +: {}
     }
 }
 
@@ -358,6 +371,10 @@ enum Hit {
     DeskLinkDisconnect(u32),
     /// An enabled item of the open tray menu (its id).
     TrayItem(u64),
+    /// The temperature panel's range chip (`temps_view::RANGES`), its Live chip, a graph (pan).
+    TempsRange(usize),
+    TempsLive,
+    TempsPlot(usize),
     #[cfg(target_os = "linux")]
     PairXbox(usize),
     /// The BlackShark headset's row and settings view.
@@ -479,8 +496,15 @@ pub struct ShellPanel {
     d: ShellDraw,
     #[live]
     tokens: ShellTokens,
+    #[live]
+    trace: DrawShellTrace,
     #[rust]
     pub open: Option<PanelKind>,
+    /// The sensors and their history (the WM pushes a frame a second; drawn only while open).
+    #[rust]
+    pub temps: Temps,
+    #[rust]
+    temps_view: TempsView,
     #[rust]
     pub data: PanelData,
     /// Where the owning bar module sits, so the card can center on it.
@@ -786,6 +810,8 @@ impl ShellPanel {
     /// preview) goes now.
     fn left_panel(&mut self, was_open: Option<PanelKind>) {
         self.dragging = None;
+        self.temps_view.drag = None;
+        self.temps_view.hover = None;
         self.peripheral_scroll = 0;
         #[cfg(target_os = "linux")]
         {
@@ -953,6 +979,7 @@ impl ShellPanel {
                 + self.headset_list_rows()) as f64,
             PanelKind::Tray(_) => self.tray_menu_height(),
             PanelKind::DeskLink => 52.0 + makepad_desk_link_panel::VIEWER_ROW * self.data.desk_link.len().max(1) as f64,
+            PanelKind::Temps => self.temps_height(),
         } + pad * 2.0;
         // The body is inset by the padding AND the popup border. The
         // Display panel's plan is sized to the body, so its card asks for
@@ -1005,6 +1032,7 @@ impl ShellPanel {
             }
             PanelKind::Tray(_) => self.draw_tray_menu(cx, body),
             PanelKind::DeskLink => self.draw_desk_link(cx, body),
+            PanelKind::Temps => self.draw_temps(cx, body),
             PanelKind::Gamepad => self.draw_game_controllers(cx, body),
             PanelKind::Bluetooth => {
                 let (hero, rest) = cut_top(body, 40.0);
@@ -2488,7 +2516,8 @@ impl ShellPanel {
     /// The network list scrolls with the wheel once it is longer than the
     /// dropdown shows.
     pub fn wants_scroll(&self, p: Vec2d) -> bool {
-        (self.open == Some(PanelKind::Audio) && self.device_picker.is_some() && contains(self.card, p))
+        (self.open == Some(PanelKind::Temps) && contains(self.card, p))
+            || (self.open == Some(PanelKind::Audio) && self.device_picker.is_some() && contains(self.card, p))
             || (self.open == Some(PanelKind::Gamepad) && contains(self.card, p))
             || (self.open == Some(PanelKind::Monitor) && self.gpu_picker && self.gpu_overflow && contains(self.card, p))
             || (self.open == Some(PanelKind::Network)
@@ -2515,8 +2544,8 @@ impl ShellPanel {
         150.0
     }
 
-    pub fn wants_scroll(&self, _p: Vec2d) -> bool {
-        false
+    pub fn wants_scroll(&self, p: Vec2d) -> bool {
+        self.open == Some(PanelKind::Temps) && contains(self.card, p)
     }
 }
 
@@ -2533,6 +2562,17 @@ impl Widget for ShellPanel {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if self.inert || self.open.is_none() {
             return;
+        }
+        if self.open == Some(PanelKind::Temps) {
+            match event {
+                Event::Scroll(e) if contains(self.card, e.abs) => {
+                    self.temps_scroll(cx, e.abs, e.scroll, e.modifiers);
+                    return;
+                }
+                Event::MouseMove(e) => self.temps_pointer(cx, e.abs),
+                Event::MouseUp(_) => self.temps_release(),
+                _ => {}
+            }
         }
         match event {
             Event::MouseMove(e) => {
@@ -2629,6 +2669,7 @@ impl Widget for ShellPanel {
                                 super::system_linux::SystemCommand::PairXbox(receiver.id.clone()))));
                         }
                     }
+                    Some(hit @ (Hit::TempsRange(_) | Hit::TempsLive | Hit::TempsPlot(_))) => self.temps_press(cx, hit, e.abs),
                     Some(Hit::DeskLinkDisconnect(session)) => {
                         cx.widget_action(self.uid, ShellPanelAction::DeskLinkDisconnect(session));
                     }
@@ -2693,13 +2734,14 @@ impl Widget for ShellPanel {
         }
     }
 
-    /// What a remote snapshot (`/snap`) reads off the open flyout: the
+    /// What a remote semantic tree (`ui`) reads off the open flyout: the
     /// Wi-Fi dropdown's nonsecret state, so a proof can see its rows and
     /// prompt without a picture. A typed password is never part of it.
     #[cfg(target_os = "linux")]
     fn text(&self) -> String {
         match self.open {
             Some(PanelKind::Network) => self.wifi.summary(),
+            Some(PanelKind::Temps) => self.temps.summary(),
             Some(PanelKind::Audio | PanelKind::Monitor | PanelKind::Power) => self.system_summary(),
             Some(PanelKind::Gamepad) if self.headset_view => self.headset_text(),
             Some(PanelKind::Gamepad) => {

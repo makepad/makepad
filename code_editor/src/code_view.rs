@@ -673,6 +673,12 @@ impl CodeView {
 }
 
 impl Widget for CodeView {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        if let Some(session) = &self.session {
+            self.editor.semantics(cx, session, node);
+        }
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // alright so.
         self.lazy_init_session();

@@ -182,6 +182,21 @@ impl Master {
             s.emit(&r.to_json());
             o(&r);
         }));
+        // `jitcache plan|clear`: this Mac's JIT caches (a node's through `route <node> jitcache`)
+        let (s, o, me) = (sink.clone(), on_record.clone(), name.to_string());
+        ep.register(
+            "jitcache",
+            1,
+            makepad_remote::lines::service(
+                "jitcache",
+                Arc::new(move |line, out| {
+                    crate::jitcache::service(&me, line, out, &|r| {
+                        s.emit(&r.to_json());
+                        o(&r);
+                    })
+                }),
+            ),
+        );
         crate::node::listen_control(&ep)?;
         *slot.lock().unwrap() = Some((sink.clone(), on_record.clone()));
         let m = Arc::new(Master { name: name.to_string(), local, hub, sink, followed: Mutex::new(HashSet::new()), heard, on_record, inbox, leases, recent });

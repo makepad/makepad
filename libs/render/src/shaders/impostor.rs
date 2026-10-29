@@ -66,8 +66,9 @@ script_mod! {
             let s2 = max(dot(ax, ax), 0.000001)
             let cw = (m * vec4(center.x, center.y, center.z, 1.0)).xyz
             let eye = (self.draw_pass.camera_inv * vec4(0.0, 0.0, 0.0, 1.0)).xyz
-            let cam_r = (self.draw_pass.camera_inv * vec4(1.0, 0.0, 0.0, 0.0)).xyz
-            let cam_u = (self.draw_pass.camera_inv * vec4(0.0, 1.0, 0.0, 0.0)).xyz
+            // unit axes: a scaled view (an XR box's stage rides in it) must not size the quad
+            let cam_r = normalize((self.draw_pass.camera_inv * vec4(1.0, 0.0, 0.0, 0.0)).xyz)
+            let cam_u = normalize((self.draw_pass.camera_inv * vec4(0.0, 1.0, 0.0, 0.0)).xyz)
             // World directions into the copy's frame (uniform scale).
             let to_eye = eye - cw
             let vd = normalize(vec3(dot(ax, to_eye), dot(ay, to_eye), dot(az, to_eye)))
@@ -149,7 +150,8 @@ script_mod! {
             let a1 = self.imp_albedo(self.v_imp_a.zw, self.v_imp_c.y)
             let a2 = self.imp_albedo(self.v_imp_b.xy, self.v_imp_c.z)
             let cover = a0.w * w0 + a1.w * w1 + a2.w * w2
-            if cover < 0.5 { self.clip() }
+            let cut = self.cut_coverage(cover, 0.5)
+            if cut <= 0.0 { self.clip() }
             // Colour and normal from the views that cover this pixel.
             let k0 = w0 * a0.w
             let k1 = w1 * a1.w
@@ -178,7 +180,7 @@ script_mod! {
             let through = back * back * back * 0.5
             let ambient = mix(self.sun_ground, self.sun_sky, clamp(n.y * 0.5 + 0.5, 0.0, 1.0)) * sao
             let lit = albedo * (ambient + self.sun_color * (wrap + through))
-            return vec4(self.scene_fogged(self.to_display(lit), self.v_fog, wp, self.fog_density), 1.0)
+            return vec4(self.scene_fogged(self.to_display(lit), self.v_fog, wp, self.fog_density), self.cut_alpha(cut))
         }
 
         fragment: fn() {

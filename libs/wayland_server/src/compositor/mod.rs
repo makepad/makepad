@@ -6,7 +6,7 @@ mod data;
 pub use data::{Board, SelectionReader, TEXT_MIMES};
 mod dmabuf;
 mod syncobj;
-pub use dmabuf::{DmabufBuffer, DmabufConfig, DmabufFrame, DmabufPlane};
+pub use dmabuf::{fence_ready, DmabufBuffer, DmabufConfig, DmabufFrame, DmabufPlane};
 mod ext;
 mod input;
 mod surface;
@@ -33,8 +33,10 @@ pub enum BufferUpdate { Keep, Detach, Attach(Frame), Dmabuf(DmabufFrame) }
 
 #[derive(Debug)]
 pub enum UiEvent {
+    /// A host supplied connection, correlated without trusting the client's app_id.
+    ClientAttached { client: ClientId, token: u64 },
     /// `size` is the surface's logical size (0x0 without a buffer); `src` the viewport crop in buffer pixels.
-    Commit { surface: SurfKey, buffer: BufferUpdate, scale: i32, transform: i32, input_region: Option<Vec<(Rect, bool)>>, size: (i32, i32), src: Option<(f64, f64, f64, f64)> },
+    Commit { surface: SurfKey, serial: u64, buffer: BufferUpdate, scale: i32, transform: i32, input_region: Option<Vec<(Rect, bool)>>, size: (i32, i32), src: Option<(f64, f64, f64, f64)> },
     /// Child surfaces of `parent` bottom to top (`None` marks the parent's own layer) with offsets.
     SubsurfaceTree { parent: SurfKey, stack: Vec<Option<(SurfKey, (i32, i32))>> },
     ToplevelNew { surface: SurfKey },

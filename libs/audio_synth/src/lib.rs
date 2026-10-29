@@ -17,6 +17,11 @@
 //!   starter), electric/turbine/rotor models, tyres, road and wind.
 //! - [`instrument`], [`poly`]: the [`instrument::Instrument`] trait and a
 //!   recipe poly-synth (music is Stage's scores, `makepad-stage-score`).
+//! - [`kit`]: the synth kit: wavetable/granular/spectral/sample
+//!   oscillators with warps and unison, envelopes, LFOs (drawn, chaos,
+//!   paths), the mod matrix, the arp, the filter and effects slots, all
+//!   behind one parameter schema; [`morph`]: the wavetable synth layout
+//!   over it.
 //! - [`bus`]: the game mixer that owns all of the above on the audio
 //!   thread with fixed voice pools and graceful stealing.
 //!
@@ -31,6 +36,8 @@ pub mod instrument;
 #[cfg(feature = "instruments")]
 pub mod instruments;
 pub mod ironfish;
+pub mod kit;
+pub mod morph;
 pub mod poly;
 pub mod recipe;
 pub mod reverb;

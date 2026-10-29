@@ -66,6 +66,7 @@ pub struct MpWaylandView {
     #[live]
     draw_fg: DrawForeign,
     #[rust]
+    #[area]
     area: Area,
     #[rust]
     client: Option<ClientId>,
@@ -112,7 +113,7 @@ impl ScriptHook for MpWaylandView {
 }
 
 /// `wp_cursor_shape_v1` shape number to our cursor.
-fn cursor_of(shape: u32) -> MouseCursor {
+pub(crate) fn cursor_of(shape: u32) -> MouseCursor {
     match shape {
         2 => MouseCursor::Default, 3 => MouseCursor::Help, 4 => MouseCursor::Hand, 5 => MouseCursor::Wait, 6 => MouseCursor::Wait,
         7 => MouseCursor::Crosshair, 8 => MouseCursor::Crosshair, 9 => MouseCursor::Text, 10 => MouseCursor::Text, 11 => MouseCursor::Hand,
@@ -149,7 +150,11 @@ pub fn evdev_of(k: KeyCode) -> Option<u16> {
 }
 
 fn button_code(device: &DigitDevice) -> u32 {
-    let b = device.mouse_button().unwrap_or(MouseButton::PRIMARY);
+    evdev_button(device.mouse_button().unwrap_or(MouseButton::PRIMARY).bits())
+}
+
+pub(crate) fn evdev_button(button: u32) -> u32 {
+    let b = MouseButton::from_bits_truncate(button);
     if b.contains(MouseButton::SECONDARY) { 0x111 }
     else if b.contains(MouseButton::MIDDLE) { 0x112 }
     else if b.contains(MouseButton::BACK) { 0x113 }
@@ -288,14 +293,9 @@ impl MpWaylandView {
                     // Every scroll arrives as a mouse device: a wheel is the one with
                     // no gesture phase. Trackpad deltas (and their momentum) go as
                     // smooth continuous axis values, never as wheel notches.
-                    if e.device.is_mouse() && e.phase == makepad_widgets::makepad_platform::event::ScrollPhase::None {
-                        // A wheel notch arrives as 40 px on the direct (evdev) backend and 60 px on windowed ones.
-                        let ticks = ((v / 50.0).round() as i32).clamp(-20, 20);
-                        let ticks = if ticks == 0 { v.signum() as i32 } else { ticks };
-                        wayland_host::send(ViewCmd::PointerAxis { axis, value: ticks as f64 * 10.0, v120: ticks * 120 });
-                    } else {
-                        wayland_host::send(ViewCmd::PointerAxis { axis, value: v, v120: 0 });
-                    }
+                    let precise = !(e.device.is_mouse() && e.phase == makepad_widgets::makepad_platform::event::ScrollPhase::None);
+                    let (value, v120) = axis_value(v, precise);
+                    wayland_host::send(ViewCmd::PointerAxis { axis, value, v120 });
                 }
             }
             Hit::KeyDown(e) if !e.is_repeat && !from_popup => {
@@ -446,4 +446,13 @@ pub fn draw_foreign_icon(cx: &mut Cx2d, id: &str, rect: Rect, opacity: f32) -> b
         draw.draw_abs(cx, rect);
         true
     })
+}
+
+/// The same wheel/continuous-axis mapping for tiles and embedded native views.
+pub(crate) fn axis_value(value: f64, precise: bool) -> (f64, i32) {
+    if precise { (value, 0) } else {
+        let ticks = ((value / 50.0).round() as i32).clamp(-20, 20);
+        let ticks = if ticks == 0 { value.signum() as i32 } else { ticks };
+        (ticks as f64 * 10.0, ticks * 120)
+    }
 }

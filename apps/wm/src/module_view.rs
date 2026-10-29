@@ -107,6 +107,7 @@ pub struct MpModuleView {
     #[rust]
     vm_id: SplashVmId,
     #[rust]
+    #[area]
     area: Area,
     /// FOCUS RULE (see `MpRunView`): a preview never takes the keyboard.
     #[rust(true)]

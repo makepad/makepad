@@ -13,7 +13,7 @@
 //! and its stem gives a column of pixels whose coverage integrates to a
 //! sub-pixel edge position.
 
-use makepad_test::{makepad_test, run_with_config, Selector, TestApp, TestConfig, WidgetSnapshot};
+use makepad_test::{makepad_test, run_with_config, Selector, TestApp, TestConfig, NodeMatch};
 use std::path::Path;
 
 /// How far the ink center may sit from the box center, in logical pixels.
@@ -148,17 +148,17 @@ impl Measurement {
 /// past its own rect to hide the seam with the dock body); otherwise it falls
 /// back to the widget rect the app reports, which is rounded to whole logical
 /// pixels.
-fn measure(frame: &Frame, snap: &WidgetSnapshot, dpi: f64) -> Measurement {
+fn measure(frame: &Frame, snap: &NodeMatch, dpi: f64) -> Measurement {
     let rect = DevRect {
-        x0: (snap.x as f64 * dpi).round() as usize,
-        y0: (snap.y as f64 * dpi).round() as usize,
-        x1: ((snap.x + snap.width) as f64 * dpi).round() as usize,
-        y1: ((snap.y + snap.height) as f64 * dpi).round() as usize,
+        x0: (snap.x() as f64 * dpi).round() as usize,
+        y0: (snap.y() as f64 * dpi).round() as usize,
+        x1: ((snap.x() + snap.width()) as f64 * dpi).round() as usize,
+        y1: ((snap.y() + snap.height()) as f64 * dpi).round() as usize,
     };
     assert!(
         rect.x1 <= frame.width && rect.y1 <= frame.height && rect.x1 > rect.x0 + 12,
         "widget {} rect {rect:?} is not on the frame",
-        snap.id
+        snap.path
     );
     let fill = fill_value(frame, &rect);
 
@@ -192,7 +192,7 @@ fn measure(frame: &Frame, snap: &WidgetSnapshot, dpi: f64) -> Measurement {
     assert!(
         !text_rows.is_empty(),
         "widget {} has no legible ink over fill {fill}",
-        snap.id
+        snap.path
     );
     let window = (text_rows[0].saturating_sub(2))..=(text_rows[text_rows.len() - 1] + 2);
     let mass = |x: usize| {
@@ -215,7 +215,7 @@ fn measure(frame: &Frame, snap: &WidgetSnapshot, dpi: f64) -> Measurement {
     assert!(
         (peak - fill).abs() > 40.0,
         "widget {} has no legible ink (peak {peak}, fill {fill})",
-        snap.id
+        snap.path
     );
     let (ink_top, ink_bottom) =
         band_edges(frame, stem, *window.start(), *window.end(), peak, fill);
@@ -246,7 +246,7 @@ fn measure(frame: &Frame, snap: &WidgetSnapshot, dpi: f64) -> Measurement {
     let (box_center, box_source) = match sampled {
         Some((top, bottom)) => ((top + bottom) / 2.0, "pixels"),
         None => (
-            (snap.y as f64 + snap.height as f64 / 2.0) * dpi,
+            (snap.y() as f64 + snap.height() as f64 / 2.0) * dpi,
             "widget rect",
         ),
     };
@@ -259,8 +259,8 @@ fn measure(frame: &Frame, snap: &WidgetSnapshot, dpi: f64) -> Measurement {
     }
 }
 
-fn dpi_of(frame: &Frame, widgets: &[WidgetSnapshot]) -> f64 {
-    let widest = widgets.iter().map(|w| w.width).max().unwrap_or(0);
+fn dpi_of(frame: &Frame, widgets: &[NodeMatch]) -> f64 {
+    let widest = widgets.iter().map(|w| w.width()).max().unwrap_or(0);
     assert!(widest > 0, "no widgets in snapshot");
     let dpi = frame.width as f64 / widest as f64;
     assert!(
@@ -271,24 +271,24 @@ fn dpi_of(frame: &Frame, widgets: &[WidgetSnapshot]) -> f64 {
     dpi.round()
 }
 
-fn snapshot_of<'a>(widgets: &'a [WidgetSnapshot], id: &str) -> &'a WidgetSnapshot {
+fn snapshot_of<'a>(widgets: &'a [NodeMatch], id: &str) -> &'a NodeMatch {
     widgets
         .iter()
-        .find(|w| w.id == id && w.visible)
+        .find(|w| w.path.rsplit('.').next() == Some(id )&& w.visible())
         .unwrap_or_else(|| panic!("no visible widget with id `{id}`"))
 }
 
-fn tab_snapshot<'a>(widgets: &'a [WidgetSnapshot], name: &str) -> &'a WidgetSnapshot {
+fn tab_snapshot<'a>(widgets: &'a [NodeMatch], name: &str) -> &'a NodeMatch {
     widgets
         .iter()
-        .find(|w| w.widget_type == "DockTab" && w.text.as_deref() == Some(name) && w.visible)
+        .find(|w| w.role == makepad_test::Role::Tab && w.name == name && w.visible())
         .unwrap_or_else(|| panic!("no visible DockTab named `{name}`"))
 }
 
 /// Every specimen on the page, measured and asserted in one pass.
 fn assert_page_is_centered(app: TestApp, label: &str) {
     app.locator(Selector::id("btn_10")).wait_visible();
-    let widgets = app.widget_snapshot();
+    let widgets = app.widget_snapshot().nodes();
     let shot = app.screenshot();
     let frame = Frame::decode(&shot);
     let dpi = dpi_of(&frame, &widgets);
@@ -299,7 +299,7 @@ fn assert_page_is_centered(app: TestApp, label: &str) {
         "drop_14", "label_box",
     ];
     let mut worst: Option<(String, f64)> = None;
-    let mut check = |name: String, snap: &WidgetSnapshot| {
+    let mut check = |name: String, snap: &NodeMatch| {
         let m = measure(&frame, snap, dpi);
         let delta = m.delta_lpx(dpi);
         println!(

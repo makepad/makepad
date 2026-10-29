@@ -345,10 +345,7 @@ impl Media {
                     return true;
                 }
                 let slot = sm.entries.slot(dir as usize, index as usize);
-                slot.replace((entry != 0).then(|| audio::Entry {
-                    function: unsafe { std::mem::transmute::<usize, AudioFn>(entry as usize) },
-                    context: ctx as usize,
-                }));
+                slot.replace(audio::Entry::from_cmd(entry, ctx));
                 Request::Audio {
                     direction: None,
                     devices: Vec::new(),

@@ -293,8 +293,8 @@ it used (this one and any build or bench node):
    launch your own instance with `--remote` (a Unix socket, no TCP port).
 2. Read its startup line `[makepad-remote] pid=<pid> app=<app> socket=<path>`.
 3. Run `makepad-remote app <pid> help` for the running binary's commands.
-4. Use `snap q=...` to find widget rectangles, then inject input.
-5. Inspect results through snapshots/logs and, when needed, `grab`.
+4. Use `ui find q=...` to find semantic nodes, then `ui act node=ID press wait=1`.
+5. Inspect results through `ui`, `ui diff`, and logs and, when needed, `grab`.
 6. Finish with `gq` and confirm shutdown.
 
 Commands are `makepad-remote app <pid|app-name|socket> <command> [k=v ...]`

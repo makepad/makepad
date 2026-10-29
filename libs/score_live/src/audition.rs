@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn every_instrument_auditions_or_says_why_not() {
         let all = catalog(None, &Available::default());
-        let mut groups = vec!["Synths", "Drum kits", "Piano", "Ironfish", "Voices", "Shader instruments", "MIDI out", "Audio in"];
+        let mut groups = vec!["Synths", "Morph", "Drum kits", "Piano", "Ironfish", "Voices", "Shader instruments", "MIDI out", "Audio in"];
         // The neural singer, where a voice is installed (MAKEPAD_CANTOR_MODEL).
         if makepad_score_player::sung::neural::model_path().is_file() {
             groups.push("Neural singers");

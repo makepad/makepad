@@ -317,6 +317,54 @@ impl Drop for DropSlider {
 }
 
 impl Widget for DropSlider {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        request: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionArg, ActionResult, Actions};
+        let step = (self.max - self.min) / 100.0;
+        let value = match (request.action, &request.arg) {
+            (Actions::SET_VALUE, ActionArg::Number(value)) => *value,
+            (Actions::INCREMENT, _) => self.value + step,
+            (Actions::DECREMENT, _) => self.value - step,
+            _ => return ActionResult::Unhandled,
+        };
+        if self.disabled(cx) {
+            return ActionResult::Disabled;
+        }
+        if !value.is_finite() {
+            return ActionResult::Unsupported;
+        }
+        let value = value.clamp(self.min, self.max);
+        if value != self.value {
+            self.value = value;
+            self.value_init = true;
+            cx.widget_action(self.widget_uid(), DropSliderAction::Changed(value));
+            self.redraw_all(cx);
+        }
+        ActionResult::Handled
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::Slider;
+        node.value = self.readout();
+        node.range = Some(a11y_tree::RangeValue {
+            min: self.min,
+            max: self.max,
+            now: self.value,
+            step: (self.max - self.min) / 100.0,
+        });
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS
+            | a11y_tree::Actions::SET_VALUE
+            | a11y_tree::Actions::INCREMENT
+            | a11y_tree::Actions::DECREMENT;
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();

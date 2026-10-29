@@ -5,7 +5,7 @@
 //! hosts (the WM, Stage) for the sending side.
 
 use crate::dmabuf::{DmaBuf, OpaqueMemory};
-use crate::linux_ipc::{self, Channel, FixedSizeEncoding};
+use crate::linux_ipc::{Channel, FixedSizeEncoding};
 use makepad_studio_protocol::{PresentableImageId, SharedPresentableImage};
 use std::io;
 use std::os::fd::{BorrowedFd, OwnedFd};
@@ -13,7 +13,8 @@ use std::path::PathBuf;
 
 /// Host to client: an image id and one of its descriptors.
 pub type H2C = (PresentableImageId, OwnedFd);
-pub type C2H = linux_ipc::Never;
+/// Client-to-host completion fences, correlated by the allocation ID.
+pub type C2H = (PresentableImageId, OwnedFd);
 pub type HostEndpoint = Channel<H2C, C2H>;
 pub type ClientEndpoint = Channel<C2H, H2C>;
 

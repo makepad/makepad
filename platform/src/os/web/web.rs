@@ -259,6 +259,11 @@ impl Cx {
             match block_id {
                 live_id!(ToWasmInit) => {
                     let tw = ToWasmInit::read_to_wasm(&mut to_wasm);
+                    self.a11y.set_consumers(if tw.a11y_enabled {
+                        makepad_a11y::consumer::OS
+                    } else {
+                        0
+                    });
                     #[cfg(target_feature = "atomics")]
                     crate::web_alloc::prefill_main_thread_cache();
                     self.cpu_cores = (tw.cpu_cores as usize).max(1);
@@ -300,6 +305,36 @@ impl Cx {
                     self.redraw_all();
                 }
 
+                live_id!(ToWasmA11yState) => {
+                    let tw = ToWasmA11yState::read_to_wasm(&mut to_wasm);
+                    if self.a11y.set_consumers(if tw.enabled {
+                        makepad_a11y::consumer::OS
+                    } else {
+                        0
+                    }) {
+                        self.redraw_all();
+                    }
+                }
+                live_id!(ToWasmA11yAction) => {
+                    let tw = ToWasmA11yAction::read_to_wasm(&mut to_wasm);
+                    match makepad_a11y::wire::decode_action(tw.bytes.as_slice()) {
+                        Ok(request) => {
+                            if let Some(window) = self
+                                .windows
+                                .current_id_zero()
+                                .filter(|id| id.0 == tw.window as usize)
+                            {
+                                self.dispatch_a11y_action(window, request);
+                            } else {
+                                self.platform_ops.push_back(CxOsOp::A11yActionDone {
+                                    req: request.req,
+                                    result: makepad_a11y::ActionResult::NoSuchNode as u8,
+                                });
+                            }
+                        }
+                        Err(error) => crate::error!("web accessibility action: {error}"),
+                    }
+                }
                 live_id!(ToWasmResizeWindow) => {
                     let tw = ToWasmResizeWindow::read_to_wasm(&mut to_wasm);
                     if let Some(event) = self.windows.web_resize_window_geom(
@@ -1112,6 +1147,7 @@ impl Cx {
     }
 
     fn handle_platform_ops(&mut self) {
+        self.native_layer_retire();
         while let Some(op) = self.platform_ops.pop_front() {
             match op {
                 CxOsOp::CreateWindow(window_id) => {
@@ -1212,7 +1248,21 @@ impl Cx {
                 CxOsOp::ShowSelectionHandles { .. } => {}
                 CxOsOp::UpdateSelectionHandles { .. } => {}
                 CxOsOp::HideSelectionHandles => {}
-                CxOsOp::AccessibilityUpdate(_) => {}
+                CxOsOp::A11yUpdate { window, bytes } => {
+                    if self.windows.current_id_zero() == Some(window) {
+                        self.os.from_wasm(FromWasmA11yUpdate {
+                            window: window.0 as u32,
+                            bytes: WasmDataU8::from_vec_u8(bytes),
+                        });
+                    }
+                }
+                CxOsOp::A11yActionDone { req, result } => {
+                    self.os.from_wasm(FromWasmA11yActionDone {
+                        req_lo: req as u32,
+                        req_hi: (req >> 32) as u32,
+                        result: result as u32,
+                    });
+                }
                 CxOsOp::StartDragging(items) => {
                     self.drag_drop.start_internal_drag(items);
                 }
@@ -1497,9 +1547,9 @@ impl Cx {
                     });
                 }
 
-                CxOsOp::AttachCameraNativePreview { .. }
-                | CxOsOp::UpdateCameraNativePreview { .. }
-                | CxOsOp::DetachCameraNativePreview { .. } => {}
+                CxOsOp::NativeLayerCreate { id, .. } => self.native_layer_event(id, crate::native_layer::NativeLayerEventKind::Realized(crate::native_layer::NativeLayerMode::Unsupported)),
+                CxOsOp::NativeLayerOp { .. } => {}
+                CxOsOp::NativeLayerDestroy { id } => self.native_layer_event(id, crate::native_layer::NativeLayerEventKind::Closed),
                 CxOsOp::SetVideoVolume(_, _) => {}
                 CxOsOp::SetVideoPlaybackRate(_, _) => {}
                 CxOsOp::PrepareAudioPlayback(_, _, _, _) => {}
@@ -1569,6 +1619,8 @@ impl CxOsApi for Cx {
 
         self.os.append_to_wasm_js(&[
             ToWasmInit::to_js_code(),
+            ToWasmA11yState::to_js_code(),
+            ToWasmA11yAction::to_js_code(),
             ToWasmResizeWindow::to_js_code(),
             ToWasmAnimationFrame::to_js_code(),
             ToWasmTouchUpdate::to_js_code(),
@@ -1626,6 +1678,8 @@ impl CxOsApi for Cx {
 
         self.os.append_from_wasm_js(&[
             FromWasmStartTimer::to_js_code(),
+            FromWasmA11yUpdate::to_js_code(),
+            FromWasmA11yActionDone::to_js_code(),
             FromWasmStopTimer::to_js_code(),
             FromWasmFullScreen::to_js_code(),
             FromWasmNormalScreen::to_js_code(),
@@ -1880,6 +1934,9 @@ pub unsafe extern "C" fn wasm_get_js_message_bridge(cx_ptr: u32) -> u32 {
     let mut out = String::new();
 
     out.push_str("return {\n");
+    out.push_str("a11y: ");
+    out.push_str(&makepad_a11y::wire_js::javascript());
+    out.push_str(",\n");
     out.push_str("ToWasmMsg:class extends ToWasmMsg{\n");
     for to_wasm in &cx.os.to_wasm_js {
         out.push_str(to_wasm);

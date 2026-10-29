@@ -180,6 +180,11 @@ impl WidgetNode for CachedWidget {
 }
 
 impl Widget for CachedWidget {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Some(widget) = &self.widget {
             widget.handle_event(cx, event, scope);

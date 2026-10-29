@@ -113,6 +113,8 @@ impl FontAssetManifest {
             elf_section(&bytes, ELF_MANIFEST_SECTION)?
         } else if is_macho(&bytes) {
             macho_section(&bytes, MACHO_MANIFEST_SECTION)?
+        } else if bytes.starts_with(b"MZ") {
+            pe_section(&bytes, ELF_MANIFEST_SECTION)?
         } else {
             return Err(format!(
                 "cannot read {MANIFEST_SECTION} from unsupported native artifact {path:?}"
@@ -514,6 +516,51 @@ fn elf_section<'a>(bytes: &'a [u8], wanted: &str) -> Result<&'a [u8], String> {
     found.ok_or_else(|| format!("native artifact is missing required section {wanted:?}"))
 }
 
+/// A section of a Windows PE image. The MSVC linker keeps only the first 8 bytes of a long
+/// section name in an image (`.makepad.font-assets.v1` becomes `.makepad`); GNU ld writes `/N`, an
+/// offset into the COFF string table. The payload is the section's VirtualSize (its raw data is
+/// padded to the file alignment), without trailing zero padding.
+fn pe_section<'a>(bytes: &'a [u8], wanted: &str) -> Result<&'a [u8], String> {
+    let pe = byte_order(bytes, 0x3c, 4, true)? as usize;
+    if bytes.get(pe..pe + 4) != Some(b"PE\0\0") {
+        return Err("invalid PE signature".to_string());
+    }
+    let coff = pe + 4;
+    let sections = byte_order(bytes, coff + 2, 2, true)? as usize;
+    let symbols_at = byte_order(bytes, coff + 8, 4, true)? as usize;
+    let symbols = byte_order(bytes, coff + 12, 4, true)? as usize;
+    let optional = byte_order(bytes, coff + 16, 2, true)? as usize;
+    let table = coff + 20 + optional;
+    let mut found = None;
+    let mut names = Vec::new();
+    for index in 0..sections {
+        let header = bytes
+            .get(table + index * 40..table + index * 40 + 40)
+            .ok_or_else(|| "truncated PE section table".to_string())?;
+        let short = c_name(&header[..8])?;
+        let name = match short.strip_prefix('/').map(str::parse::<usize>) {
+            Some(Ok(offset)) if symbols_at != 0 => {
+                let strings = symbols_at + symbols * 18;
+                c_name(bytes.get(strings + offset..).ok_or_else(|| "invalid PE section-name offset".to_string())?)?
+            }
+            _ => short,
+        };
+        names.push(name.to_string());
+        let matches = name == wanted || (name.len() == 8 && wanted.len() > 8 && wanted.starts_with(name));
+        if matches {
+            let virtual_size = byte_order(header, 8, 4, true)?;
+            let raw_size = byte_order(header, 16, 4, true)?;
+            let raw_at = byte_order(header, 20, 4, true)?;
+            let payload = object_slice(bytes, raw_at, virtual_size.min(raw_size))?;
+            let end = payload.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
+            if found.replace(&payload[..end]).is_some() {
+                return Err(format!("duplicate PE section {wanted:?}"));
+            }
+        }
+    }
+    found.ok_or_else(|| format!("native artifact is missing required section {wanted:?} (PE sections: {})", names.join(" ")))
+}
+
 fn is_macho(bytes: &[u8]) -> bool {
     matches!(bytes.get(..4), Some(b"\xcf\xfa\xed\xfe" | b"\xfe\xed\xfa\xcf" | b"\xce\xfa\xed\xfe" | b"\xfe\xed\xfa\xce"))
 }
@@ -579,6 +626,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const LATIN: &[u8] = include_bytes!("../../../platform/tests/fixtures/font-assets-latin-v1.txt");
+    const SYSTEM: &[u8] = include_bytes!("../../../platform/tests/fixtures/font-assets-system-v1.txt");
     const INTERNATIONAL: &[u8] =
         include_bytes!("../../../platform/tests/fixtures/font-assets-international-v1.txt");
 
@@ -661,6 +709,41 @@ mod tests {
         elf
     }
 
+    /// A PE image as MSVC links it (`short`: the section name truncated to 8 bytes) or as GNU ld
+    /// does (a `/4` name in the COFF string table), its raw data padded to 512 bytes.
+    fn fixture_pe(manifest: &[u8], short: bool) -> Vec<u8> {
+        const PE: usize = 0x40;
+        const OPTIONAL: usize = 0xf0;
+        let table = PE + 4 + 20 + OPTIONAL;
+        let raw_at = 0x200;
+        let raw_size = manifest.len().div_ceil(512) * 512;
+        let strings_at = raw_at + raw_size;
+        let mut pe = vec![0; strings_at];
+        pe[..2].copy_from_slice(b"MZ");
+        write_u32(&mut pe, 0x3c, PE as u32);
+        pe[PE..PE + 4].copy_from_slice(b"PE\0\0");
+        write_u16(&mut pe, PE + 4 + 2, 2);
+        write_u16(&mut pe, PE + 4 + 16, OPTIONAL as u16);
+        pe[table..table + 5].copy_from_slice(b".text");
+        let section = table + 40;
+        if short {
+            pe[section..section + 8].copy_from_slice(b".makepad");
+        } else {
+            pe[section..section + 2].copy_from_slice(b"/4");
+            write_u32(&mut pe, PE + 4 + 8, strings_at as u32);
+            let mut strings = vec![0u8; 4];
+            strings.extend_from_slice(b".makepad.font-assets.v1\0");
+            let size = strings.len() as u32;
+            write_u32(&mut strings, 0, size);
+            pe.extend_from_slice(&strings);
+        }
+        write_u32(&mut pe, section + 8, manifest.len() as u32);
+        write_u32(&mut pe, section + 16, raw_size as u32);
+        write_u32(&mut pe, section + 20, raw_at as u32);
+        pe[raw_at..raw_at + manifest.len()].copy_from_slice(manifest);
+        pe
+    }
+
     fn fixture_macho64(manifest: &[u8]) -> Vec<u8> {
         const HEADER: usize = 32;
         const SEGMENT: usize = 72;
@@ -701,9 +784,13 @@ mod tests {
     fn extracts_native_manifest_from_elf_and_macho_sections() {
         let elf = fixture_elf64(INTERNATIONAL);
         let macho = fixture_macho64(INTERNATIONAL);
+        let msvc = fixture_pe(INTERNATIONAL, true);
+        let gnu = fixture_pe(INTERNATIONAL, false);
         for payload in [
             elf_section(&elf, ELF_MANIFEST_SECTION).unwrap(),
             macho_section(&macho, MACHO_MANIFEST_SECTION).unwrap(),
+            pe_section(&msvc, ELF_MANIFEST_SECTION).unwrap(),
+            pe_section(&gnu, ELF_MANIFEST_SECTION).unwrap(),
         ] {
             let manifest = FontAssetManifest::parse(payload).unwrap();
             assert_eq!(manifest.set(), "International");
@@ -729,6 +816,19 @@ mod tests {
                 international_expected,
                 "International {path}"
             );
+        }
+    }
+
+    /// A `System` font set packs the Latin faces and neither CJK face nor
+    /// the emoji face (the OS draws those).
+    #[test]
+    fn system_allowlist_leaves_out_cjk_and_emoji() {
+        let system = FontAssetManifest::parse(SYSTEM).unwrap();
+        assert_eq!(system.set(), "System");
+        assert!(system.allows("makepad_widgets/resources/IBMPlexSans-Text.ttf"));
+        assert!(system.allows("makepad_widgets/resources/NotoSans-Regular.ttf"));
+        for big in ["LXGWWenKaiRegular.ttf", "LXGWWenKaiBold.ttf", "NotoColorEmoji.ttf"] {
+            assert!(!system.allows(&format!("makepad_widgets/resources/{big}")), "{big}");
         }
     }
 

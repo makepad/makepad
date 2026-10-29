@@ -405,6 +405,12 @@ impl ScreenCap {
 }
 
 impl Widget for ScreenCap {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Event::KeyDown(ke) = event {
             // Every Makepad app can record itself: the hotkey needs no dev

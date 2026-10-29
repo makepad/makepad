@@ -4,6 +4,16 @@ import android.view.Surface;
 import android.view.MotionEvent;
 
 public class MakepadNative {
+    // ABI checked against the Android adapter's single Rust native table at registration.
+    public static native Object[] a11yNode(int virtualId);
+    public static native long a11yAction(int virtualId, int action, String text, int start, int end, float value, boolean wait);
+    public static native int a11yHitTest(float x, float y);
+    public static native int a11yFindFocus(int focus);
+    public static native void a11yState(boolean enabled, boolean touchExploration);
+    public static native void onNativeLayerState(int session, long id, int what, long a, long b, String text);
+    public static native boolean commitNativeLayerFrame(long ticket, Object transaction, Object[] surfaces, int originX, int originY);
+    public static native void discardNativeLayerFrame(long ticket);
+    public static native void releaseNativeLayerSurfaces(Object[] surfaces);
     // belongs to MakepadActivity class
     public native static void activityOnCreate(Object activity);
     public native static void activityOnStart();

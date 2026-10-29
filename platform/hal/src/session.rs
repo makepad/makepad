@@ -259,6 +259,7 @@ pub struct KeptFrame {
     frame: FramePacket,
     passes: Vec<Pass>,
     draws: Vec<Draw>,
+    layers: Vec<Layer>,
     arena: Vec<u8>,
     /// 8-aligned (the slices are read as words), never changed after `keep`
     bytes: Vec<Box<[u64]>>,
@@ -306,9 +307,19 @@ impl KeptFrame {
             d.inst.data = own(d.inst.data, &mut kept.bytes);
             kept.draws.push(d);
         }
+        for layer in view.layers.get(within(p.layers, view.layers.len())?)? {
+            let mut layer = *layer;
+            if layer.kind == Layer::DRAWS {
+                let r = within(layer.draws, view.draws.len())?;
+                if r.start < p.draws.off as usize || r.end > p.draws.off as usize + p.draws.len as usize { return None; }
+                layer.draws.off -= p.draws.off;
+            }
+            kept.layers.push(layer);
+        }
         kept.frame = FramePacket {
             passes: Range { off: 0, len: kept.passes.len() as u32 },
             draws: Range { off: 0, len: kept.draws.len() as u32 },
+            layers: Range { off: 0, len: kept.layers.len() as u32 },
             ..p
         };
         Some(kept)
@@ -316,7 +327,7 @@ impl KeptFrame {
 
     /// The frame as a batch of one packet (packet 0).
     pub fn view(&self) -> crate::buffers::CmdView<'_> {
-        crate::buffers::CmdView { session: HOST, cmds: &[], arena: &self.arena, frames: std::slice::from_ref(&self.frame), passes: &self.passes, draws: &self.draws }
+        crate::buffers::CmdView { session: HOST, cmds: &[], arena: &self.arena, frames: std::slice::from_ref(&self.frame), passes: &self.passes, draws: &self.draws, layers: &self.layers }
     }
 
     /// Whether the frame draws anything (none: the layer ends).
@@ -419,6 +430,10 @@ pub struct Session {
     /// the frame id of the newest frame submitted / finished
     pub frame: u64,
     pub last_frame_done: u64,
+    /// Headless inspection: the last frame's layer records. Occluder ranges address
+    /// `last_frame_occluders`; draw ranges retain the submitted packet's indices.
+    pub last_frame_layers: Vec<Layer>,
+    pub last_frame_occluders: Vec<[f32; 4]>,
     /// embedded windows (lent to the parent, no OS window: no display link of their own) that
     /// asked for a frame, and when the next one is due: `Hal::pump` paces them at display rate
     pub embedded_frames: Vec<Id>,
@@ -467,10 +482,17 @@ impl Session {
             windows: Table::default(),
             timers: FastMap::default(),
             ledger: Ledger::default(),
-            events: EventQueue::new(),
+            events: {
+                let mut events = EventQueue::new();
+                let consumers = crate::a11y::consumers();
+                if consumers != 0 { events.a11y_state(1, consumers); }
+                events
+            },
             stats: Stats::default(),
             frame: 0,
             last_frame_done: 0,
+            last_frame_layers: Vec::new(),
+            last_frame_occluders: Vec::new(),
             embedded_frames: Vec::new(),
             embedded_due_ns: 0,
             font_frames: Default::default(),
@@ -514,7 +536,6 @@ impl Clock {
 /// All sessions.
 pub struct World {
     sessions: FastMap<u32, Session>,
-    next_session: u32,
     next_host_window: u32,
     pub clock: Clock,
     /// the domains (sessions started by `DomainStart`), kept after they exit
@@ -619,7 +640,6 @@ impl World {
         sessions.insert(HOST, Session::new(HOST, 0));
         World {
             sessions,
-            next_session: 1,
             next_host_window: 0,
             clock: Clock::default(),
             domains: BTreeMap::new(),
@@ -679,8 +699,11 @@ impl World {
 
     /// Opens a session and returns its id.
     pub fn open(&mut self, app_key: u64) -> u32 {
-        let id = self.next_session;
-        self.next_session += 1;
+        // Mirrors and action completions are process-wide, including for independent HALs.
+        // Reusing an id in another World lets its teardown erase a live session's requests.
+        static NEXT_SESSION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+        let id = NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(id != HOST, "session id space exhausted");
         let mut s = Session::new(id, app_key);
         s.device_generation = self.device_generation;
         self.sessions.insert(id, s);
@@ -750,6 +773,7 @@ impl World {
     /// under the same id.
     pub fn finish_close(&mut self, id: u32, how: CloseAs) -> bool {
         let Some(mut s) = self.sessions.remove(&id) else { return false };
+        crate::a11y::close_session(id);
         self.listeners.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
         // its fonts and its interest in glyphs end; the glyphs stay in the host's atlas
         if let Some(fonts) = self.fonts.as_mut() {
@@ -1225,6 +1249,7 @@ impl World {
         let s = self.sessions.get_mut(&session).ok_or(Miss::Stale)?;
         let parent = s.parent;
         let e = s.windows.remove(session, id)?;
+        crate::a11y::drop_window(session, id.index);
         if let Some(host) = e.val.alias_of {
             self.unlend(host);
         }

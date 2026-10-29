@@ -101,7 +101,7 @@ fn child_pass_composites_into_the_window(app: TestApp) {
         .wait_visible()
         .snapshot();
     assert!(
-        pane.width > 0 && pane.height > 0,
+        pane.width() > 0 && pane.height() > 0,
         "cached_pane has no rect: {pane:?}"
     );
 

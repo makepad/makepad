@@ -19,3 +19,8 @@ makepad-app-registry = { path = "../app_registry", optional = true }
 # checkout (tools/run/android_host) builds without it and installs its source store instead
 default = ["checkout"]
 checkout = ["dep:makepad-app-registry"]
+
+[target.'cfg(windows)'.dependencies.windows]
+package = "makepad-windows-sys"
+path = "../windows/sys"
+version = "0.1.0"

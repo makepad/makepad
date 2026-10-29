@@ -130,9 +130,15 @@ pub fn proc_start(pid: u32) -> Option<u64> {
     Some(u64_at(120) * 1_000_000 + u64_at(128))
 }
 
+/// Windows: the creation time (100 ns since 1601).
+#[cfg(windows)]
+pub fn proc_start(pid: u32) -> Option<u64> {
+    crate::group::start_time(pid)
+}
+
 /// Other Unix targets (iOS): no start time, only whether the process exists (signal 0 probe;
 /// the process list module is the server binary's, not this library's).
-#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android", target_os = "macos"))))]
 pub fn proc_start(pid: u32) -> Option<u64> {
     extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
@@ -260,7 +266,6 @@ fn parse_spec(mut words: Vec<&str>) -> Result<Spec, &'static str> {
     Ok(Spec { app: app.to_string(), args: args.join(" "), cwd })
 }
 
-#[cfg(unix)]
 fn launch(st: &State, words: Vec<&str>, out: &mut Vec<String>) {
     match parse_spec(words) {
         Ok(spec) => match start(st, &spec) {
@@ -272,16 +277,15 @@ fn launch(st: &State, words: Vec<&str>, out: &mut Vec<String>) {
 }
 
 /// Starts the launcher on `spec`, records it in the ledger and in memory.
-#[cfg(unix)]
 fn start(st: &State, spec: &Spec) -> Result<Launched, String> {
-    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let Some((exe, prefix)) = st.cfg.launch.split_first() else { return Err("this relay has no launcher configured".into()) };
     let log = std::env::temp_dir().join(format!("makepad-remote-launch-{}-{}.log", std::process::id(), crate::cmd::wall_ms()));
     let logfile = std::fs::File::create(&log).map_err(|_| "cannot create the session log".to_string())?;
     let logfile2 = logfile.try_clone().map_err(|_| "cannot create the session log".to_string())?;
     let mut cmd = Command::new(exe);
-    cmd.args(prefix).arg(&spec.app).args(spec.args.split_whitespace()).stdin(Stdio::null()).stdout(logfile).stderr(logfile2).process_group(0);
+    cmd.args(prefix).arg(&spec.app).args(spec.args.split_whitespace()).stdin(Stdio::null()).stdout(logfile).stderr(logfile2);
+    crate::group::detach(&mut cmd);
     for (k, v) in &st.cfg.env {
         cmd.env(k, v);
     }
@@ -316,17 +320,8 @@ fn start(st: &State, spec: &Spec) -> Result<Launched, String> {
     Ok(rec)
 }
 
-#[cfg(not(unix))]
-fn launch(_: &State, _: Vec<&str>, out: &mut Vec<String>) {
-    err(out, "session launch is not available on Windows yet");
-}
-
 /// Signals a running launched session's process group and returns the record's exit cell.
-#[cfg(unix)]
 fn signal_session(st: &State, pid: u32) -> Result<(), String> {
-    extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
     adopt(st);
     let l = st.launched.lock().unwrap();
     let Some(rec) = l.iter().find(|l| l.pid == pid) else { return Err(format!("pid {pid} was not launched by a relay on this host")) };
@@ -334,7 +329,7 @@ fn signal_session(st: &State, pid: u32) -> Result<(), String> {
         return Err(format!("pid {pid} has already exited"));
     }
     // the session is its own process group (its windows, helpers and threads end with it)
-    if unsafe { kill(-(pid as i32), 15) } != 0 {
+    if !crate::group::signal(pid, false) {
         return Err(format!("cannot signal {pid}"));
     }
     // a session that ignores SIGTERM (or is stuck) is ended for good after 3 s
@@ -343,13 +338,12 @@ fn signal_session(st: &State, pid: u32) -> Result<(), String> {
         std::thread::sleep(Duration::from_secs(3));
         let running = if own { exit.lock().unwrap().is_none() } else { proc_start(pid) == Some(start) };
         if running {
-            unsafe { kill(-(pid as i32), 9) };
+            crate::group::signal(pid, true);
         }
     });
     Ok(())
 }
 
-#[cfg(unix)]
 fn kill(st: &State, pid: u32, out: &mut Vec<String>) {
     match signal_session(st, pid) {
         Ok(_) => out.push(format!("{{\"killed\":{pid}}}")),
@@ -357,13 +351,7 @@ fn kill(st: &State, pid: u32, out: &mut Vec<String>) {
     }
 }
 
-#[cfg(not(unix))]
-fn kill(_: &State, _: u32, out: &mut Vec<String>) {
-    err(out, "session kill is not available on Windows yet");
-}
-
 /// Relax owns its domain lifecycle. Native processes retain their process-level lifecycle.
-#[cfg(unix)]
 fn relaunch(st: &State, pid: u32, out: &mut Vec<String>) {
     // A Relax process keeps its endpoint, window and device. Never signal or replace it.
     // The configured `makepad run` launcher is also authoritative before discovery starts.

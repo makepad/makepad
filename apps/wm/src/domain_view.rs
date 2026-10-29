@@ -54,7 +54,7 @@ pub struct MpDomainView {
     #[find] #[redraw] #[live] title: WidgetRef,
     #[find] #[redraw] #[live] spinner: WidgetRef,
     #[rust] progress: f32,
-    #[rust] area: Area,
+    #[rust] #[area] area: Area,
     #[rust] client: Option<ClientId>,
     #[rust] domain: Option<u32>,
     #[rust] window: Option<LentId>,

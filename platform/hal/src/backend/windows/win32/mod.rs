@@ -16,6 +16,7 @@
 //! worker), `drag` (OLE drag and drop), `clipboard` (text, images, file lists) and `rawinput`
 //! (raw mouse motion and the pointer lock).
 
+pub(crate) mod a11y;
 mod clipboard;
 mod dialog;
 mod drag;
@@ -56,6 +57,7 @@ pub(crate) fn log_enabled() -> bool {
 const WM_HAL_OPS: u32 = WM_APP + 1;
 
 pub(crate) enum Op {
+    A11yNotify(u64, a11y::Update),
     Cmd(u32, OsCmd),
     CloseSession(u32),
     Lend { host: Id, session: u32, alias: Id },

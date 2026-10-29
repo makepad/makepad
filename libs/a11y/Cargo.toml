@@ -1,0 +1,11 @@
+[package]
+name = "makepad-a11y"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Makepad's semantic UI tree: nodes, roles, states and actions, its wire format, the platform-side mirror, queries and text renderings. Shared by Cx, the HAL's OS adapters and the automation tools"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]

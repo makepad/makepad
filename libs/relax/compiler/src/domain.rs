@@ -193,6 +193,116 @@ pub fn enter(base: u64) -> u64 {
     }
 }
 
+/// A domain's code as something native calls it back with (`foreign_scope`): its static block
+/// and heap, read with no lock by `foreign_enter` on whatever thread the call comes. Records are
+/// never freed (one per domain incarnation that registers a callback): a stale scope is marked
+/// dead by `destroy` and enters nothing.
+struct ForeignScope {
+    base: std::sync::atomic::AtomicU64,
+    /// the heap's arena (`zone_alloc::domain::raw`; null: the system heap)
+    heap: *const (),
+}
+unsafe impl Send for ForeignScope {}
+unsafe impl Sync for ForeignScope {}
+
+static SCOPES: Mutex<Vec<&'static ForeignScope>> = Mutex::new(Vec::new());
+
+/// What a callback that the calling thread's code hands to native code (an audio entry, a fence
+/// notify, any function native code calls later on a thread of its own) must run in: the
+/// calling thread's domain. Native code records it with the callback and calls `foreign_enter`
+/// / `foreign_leave` around each call, so the callback sees this domain's statics and allocates
+/// in its heap on whatever thread it is called (a thread nothing put in a domain is in the
+/// default one: `rt_tls_block`). 0 for a thread that never ran JIT code. Takes a lock:
+/// call it where the callback is registered, never on a realtime path.
+pub fn foreign_scope() -> u64 {
+    match crate::jit::tls_block_if_any() {
+        0 => 0,
+        // the thread's own heap is its domain's (`enter` puts it in both)
+        b => scope_record(unsafe { *(b as *const u64) }, crate::zone_alloc::domain::current()),
+    }
+}
+
+/// `foreign_scope` of the domain whose static block is at `base` (0: none), as native code that
+/// is in no domain names it.
+pub fn foreign_scope_of(base: u64) -> u64 {
+    let heap = domains().iter().find(|d| d.info.base == base && base != 0)
+        .and_then(|d| d.heap.as_deref()).map_or(std::ptr::null(), |h| crate::zone_alloc::domain::raw(h));
+    scope_record(base, heap)
+}
+
+fn scope_record(base: u64, heap: *const ()) -> u64 {
+    if base == 0 {
+        return 0;
+    }
+    let _kept = crate::zone_alloc::kept();
+    let mut scopes = SCOPES.lock().unwrap_or_else(|e| e.into_inner());
+    let found = scopes.iter().find(|s| s.base.load(std::sync::atomic::Ordering::Acquire) == base && s.heap == heap).copied();
+    let s = found.unwrap_or_else(|| {
+        let s: &'static ForeignScope = Box::leak(Box::new(ForeignScope { base: std::sync::atomic::AtomicU64::new(base), heap }));
+        scopes.push(s);
+        s
+    });
+    s as *const ForeignScope as u64
+}
+
+/// What `foreign_enter` found on the thread, for `foreign_leave`.
+#[derive(Clone, Copy)]
+pub struct ForeignSaved {
+    base: u64,
+    heap: *const (),
+    entered: bool,
+}
+
+impl ForeignSaved {
+    /// As plain words (a host hook that cannot name this type carries it so).
+    pub fn into_words(self) -> [u64; 3] {
+        [self.base, self.heap as u64, self.entered as u64]
+    }
+    pub fn from_words(w: [u64; 3]) -> ForeignSaved {
+        ForeignSaved { base: w[0], heap: w[1] as *const (), entered: w[2] != 0 }
+    }
+}
+
+/// Puts the calling thread (any: a realtime audio thread, a driver's worker) in the domain of
+/// `scope` (`foreign_scope`) for a call into its code. Realtime safe: no lock, no allocation but
+/// the thread's own thread-local block on its first call into JIT code (as that first call
+/// would anyway). Nests; `foreign_leave` puts back what it found.
+#[inline]
+pub fn foreign_enter(scope: u64) -> ForeignSaved {
+    let none = ForeignSaved { base: 0, heap: std::ptr::null(), entered: false };
+    if scope == 0 {
+        return none;
+    }
+    let s = unsafe { &*(scope as *const ForeignScope) };
+    let base = s.base.load(std::sync::atomic::Ordering::Acquire);
+    if base == 0 {
+        return none;
+    }
+    let slot = crate::jit::tls_block() as *mut u64;
+    let heap = crate::zone_alloc::domain::current();
+    unsafe {
+        let prev = std::mem::replace(&mut *slot, base);
+        if heap != s.heap {
+            crate::zone_alloc::domain::restore(s.heap);
+        }
+        ForeignSaved { base: prev, heap, entered: true }
+    }
+}
+
+/// Ends the call `foreign_enter` began on this thread.
+#[inline]
+pub fn foreign_leave(saved: ForeignSaved) {
+    if !saved.entered {
+        return;
+    }
+    unsafe {
+        *(crate::jit::tls_block() as *mut u64) = saved.base;
+        if crate::zone_alloc::domain::current() != saved.heap {
+            crate::zone_alloc::domain::restore(saved.heap);
+        }
+    }
+}
+
 /// For Relax std (`__relax_domain_base`): the base a thread it starts inherits.
 pub extern "C" fn relax_domain_base() -> u64 {
     current()
@@ -364,6 +474,9 @@ pub fn create(u: &Unit) -> u64 {
 
 /// Gives a domain's block back (every thread of the domain is gone).
 pub fn destroy(base: u64) {
+    for sc in SCOPES.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        let _ = sc.base.compare_exchange(base, 0, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed);
+    }
     forget_tls_keys(base);
     BLOCKS.lock().unwrap_or_else(|e| e.into_inner()).retain(|b| *b != base);
     if crate::web32::on() { crate::web32::free(base, BLOCK_SIZE) } else { crate::os::mem::free(base, BLOCK_SIZE) }

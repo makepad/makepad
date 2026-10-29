@@ -1445,6 +1445,12 @@ impl Calendar {
 }
 
 impl Widget for Calendar {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Grid;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
     }

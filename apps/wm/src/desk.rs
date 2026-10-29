@@ -2698,6 +2698,22 @@ impl WmDesk {
 }
 
 impl Widget for WmDesk {
+    fn semantics(&self, _cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::Pane;
+        node.name = "Desktop".into();
+    }
+    fn semantics_parts(&self, cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        for (client, item) in &self.items {
+            if !item.area().is_valid(cx) { continue; }
+            out.push((*client, None, a11y_tree::Node {
+                id: a11y_tree::NodeId::widget(item.widget_uid().0),
+                role: a11y_tree::Role::Pane,
+                name: self.window_apps.get(client).or_else(|| self.titles.get(client)).cloned().unwrap_or_else(|| format!("App {client}")),
+                ..Default::default()
+            }));
+        }
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.vr_lens = None;
         frametrace::begin_frame();

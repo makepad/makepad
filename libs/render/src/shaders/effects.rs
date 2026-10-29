@@ -174,13 +174,15 @@ script_mod! {
             // across it, so every star draws the little comet it actually is.
             self.world = self.draw_list.view_transform * vec4(center.x, center.y, center.z, 1.0)
             let view_pos = self.draw_pass.camera_view * self.world
+            // world units to view units (a stage's scale: an XR box, a diorama)
+            let vs = length((self.draw_pass.camera_view * (self.draw_list.view_transform * vec4(1.0, 0.0, 0.0, 0.0))).xyz)
             let life_t = clamp(t / self.launch_life.w, 0.0, 1.0)
             // Beads shrink and dim toward the tail, so a streak has a bright
             // head and fades back toward the burst centre.
             let tail_t = trail_i / trail_n
             let taper = 1.0 - tail_t * 0.75
             let size = self.params.z * (1.0 - life_t * 0.6) * taper
-                * self.spark_size(life_t, r1, r3)
+                * self.spark_size(life_t, r1, r3) * vs
 
             let corner = self.geom.geom_pos
             let billboard = vec4(
@@ -265,7 +267,8 @@ script_mod! {
             self.world = self.draw_list.view_transform
                 * vec4(center.x, center.y, center.z, 1.0)
             let view_pos = self.draw_pass.camera_view * self.world
-            let size = self.flare_pos.w
+            // world units to view units (a stage's scale: an XR box, a diorama)
+            let size = self.flare_pos.w * length((self.draw_pass.camera_view * (self.draw_list.view_transform * vec4(1.0, 0.0, 0.0, 0.0))).xyz)
             let corner = self.geom.geom_pos
             let billboard = vec4(
                 view_pos.x + corner.x * size,

@@ -348,6 +348,12 @@ const DOUBLE_TAP_SLOP: f64 = 48.0;
 const FADE_SECS: f64 = 0.15;
 
 impl Widget for PlayerControls {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Toolbar;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // The safe area moves with every rotation, so it is read per draw
         // rather than baked into the DSL padding.

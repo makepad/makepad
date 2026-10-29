@@ -166,6 +166,88 @@ impl RenderTarget {
     }
 }
 
+/// An NV12 picture drawn on the GPU into its two planes (a shared texture an encoder takes as
+/// it lies: `Cx::create_shared_nv12_texture`): a luma pass at the picture's size and a chroma
+/// pass at half of it, each its own draw list. Draw one sample per pixel into each (the NV12
+/// pack shaders' `lanes: 1`).
+pub struct Nv12Target {
+    pub texture: Texture,
+    pub luma: DrawPass,
+    pub chroma: DrawPass,
+    luma_list: DrawList2d,
+    chroma_list: DrawList2d,
+    size: (u32, u32),
+}
+
+impl Nv12Target {
+    pub fn new(cx: &mut Cx, name: &'static str) -> Self {
+        Self {
+            texture: unsized_texture(cx),
+            luma: DrawPass::new_with_name(cx, name),
+            chroma: DrawPass::new_with_name(cx, name),
+            luma_list: DrawList2d::new(cx),
+            chroma_list: DrawList2d::new(cx),
+            size: (0, 0),
+        }
+    }
+
+    /// Size it (even): a new texture only when the size changed. Returns whether it did.
+    pub fn ensure(&mut self, cx: &mut Cx, size: (u32, u32)) -> bool {
+        let size = (size.0.max(2) & !1, size.1.max(2) & !1);
+        if self.size == size {
+            return false;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.texture = cx.create_shared_nv12_texture(size.0 as usize, size.1 as usize);
+        }
+        // the browser shares no textures with an encoder: a plain target
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.texture = Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 { size: TextureSize::Fixed { width: size.0 as usize, height: size.1 as usize }, initial: true });
+        }
+        self.size = size;
+        true
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    /// Begin the luma plane (its pixel size, dpi 1), cleared to `clear` (its first channel).
+    pub fn begin_luma(&mut self, cx: &mut Cx2d, clear: f32) {
+        let size = dvec2(self.size.0 as f64, self.size.1 as f64);
+        Self::begin_plane(cx, &self.luma, &mut self.luma_list, &self.texture, 0, size, vec4(clear, 0.0, 0.0, 0.0));
+    }
+
+    /// Begin the chroma plane (half the size), cleared to `clear` (U, V).
+    pub fn begin_chroma(&mut self, cx: &mut Cx2d, clear: Vec2f) {
+        let size = dvec2((self.size.0 / 2) as f64, (self.size.1 / 2) as f64);
+        Self::begin_plane(cx, &self.chroma, &mut self.chroma_list, &self.texture, 1, size, vec4(clear.x, clear.y, 0.0, 0.0));
+    }
+
+    pub fn end_luma(&mut self, cx: &mut Cx2d) {
+        cx.end_pass_sized_turtle();
+        self.luma_list.end(cx);
+        cx.end_pass(&self.luma);
+    }
+
+    pub fn end_chroma(&mut self, cx: &mut Cx2d) {
+        cx.end_pass_sized_turtle();
+        self.chroma_list.end(cx);
+        cx.end_pass(&self.chroma);
+    }
+
+    fn begin_plane(cx: &mut Cx2d, pass: &DrawPass, list: &mut DrawList2d, texture: &Texture, plane: u32, size: Vec2d, clear: Vec4f) {
+        pass.set_size(cx, size);
+        pass.set_color_texture_face(cx, texture, plane, DrawPassClearColor::ClearWith(clear));
+        cx.make_child_pass(pass);
+        cx.begin_pass(pass, Some(1.0));
+        list.begin_always(cx);
+        cx.begin_root_turtle(size, Layout::flow_overlay());
+    }
+}
+
 struct Pooled {
     target: RenderTarget,
     /// Taken in the frame being drawn.
