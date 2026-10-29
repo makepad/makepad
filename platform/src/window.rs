@@ -415,12 +415,35 @@ pub(crate) fn default_app_id() -> String {
         .unwrap_or_else(|| "Makepad".to_string())
 }
 
+/// The lane a test instance runs for (`MAKEPAD_TEST_LANE`, set by devhub for every lane run).
+pub fn test_lane() -> Option<&'static str> {
+    static LANE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LANE.get_or_init(|| {
+        let lane: String = std::env::var("MAKEPAD_TEST_LANE").ok()?.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).take(48).collect();
+        (!lane.is_empty()).then_some(lane)
+    })
+    .as_deref()
+}
+
+/// A window's title as people see it: a lane's test instance says so first (`TEST: lane <name>`,
+/// in the OS title and the app-drawn caption alike), an agent's `--remote` run says so last.
+pub fn badge_window_title(title: String) -> String {
+    let title = match test_lane() {
+        Some(lane) => {
+            let badge = format!("TEST: lane {lane} · ");
+            if title.starts_with(&badge) { title } else { format!("{badge}{title}") }
+        }
+        None => title,
+    };
+    crate::remote::tag_window_title(title)
+}
+
 impl WindowHandle {
     pub fn new(cx: &mut Cx) -> Self {
         let window = cx.windows.alloc();
         let cxwindow = &mut cx.windows[window.window_id()];
         cxwindow.is_created = false;
-        cxwindow.create_title = crate::remote::tag_window_title("Makepad".to_string());
+        cxwindow.create_title = crate::window::badge_window_title("Makepad".to_string());
         cxwindow.create_inner_size = None;
         cxwindow.create_position = None;
         cxwindow.create_app_id = default_app_id();
@@ -614,7 +637,7 @@ impl ScriptHook for ScriptWindowHandle {
 
 impl WindowHandle {
     pub fn set_title(&self, cx: &mut Cx, title: String) {
-        let title = crate::remote::tag_window_title(title);
+        let title = crate::window::badge_window_title(title);
         let window_id = self.window_id();
         if cx.windows[window_id].create_title == title {
             return;
@@ -643,7 +666,7 @@ impl WindowHandle {
         title: String,
     ) {
         let window = &mut cx.windows[self.window_id()];
-        window.create_title = crate::remote::tag_window_title(title);
+        window.create_title = crate::window::badge_window_title(title);
         window.create_position = Some(position);
         window.create_inner_size = Some(inner_size);
         window.is_fullscreen = is_fullscreen;

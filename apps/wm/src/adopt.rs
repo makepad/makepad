@@ -40,11 +40,15 @@ pub(crate) struct Adopted {
     pub crate_name: String,
     /// The WM launched it (`expect`): its slot and tile exist already.
     pub launched: bool,
+    /// A lane's test instance (`lane=` on the socket).
+    pub test_lane: Option<String>,
 }
 
 pub(crate) struct Adoptions {
     pub path: std::path::PathBuf,
     rx: Receiver<Adopted>,
+    /// `makepad-wm launch <id>` requests (devhub's `show`, a shell): the dock's launch-or-focus.
+    launches: Receiver<String>,
 }
 
 impl Adoptions {
@@ -66,6 +70,7 @@ impl Adoptions {
         let path = socket.path.clone();
         host::set_child_env(wm_socket::SOCKET_ENV, path.as_os_str());
         let (tx, rx) = channel();
+        let (launch_tx, launches) = channel();
         let worker = cx.thread_spawner().spawn_worker(ThreadOptions { name: Some("wm-socket".into()), ..Default::default() }, move || {
             let mut next = FIRST_ADOPTED_CLIENT;
             for stream in socket.listener.incoming() {
@@ -76,10 +81,17 @@ impl Adoptions {
                         next += 1;
                         next - 1
                     });
-                    tx.send(Adopted { client, pid: request.pid, crate_name: request.crate_name.clone(), launched: launched.is_some() })
+                    tx.send(Adopted { client, pid: request.pid, crate_name: request.crate_name.clone(), launched: launched.is_some(), test_lane: request.test_lane.clone() })
                         .map_err(|_| "the WM is shutting down".to_string())?;
                     SignalToUI::set_ui_signal();
                     Ok(Admission { port: hub_port, client })
+                }, |app| {
+                    if makepad_app_registry::find(app).is_none_or(|e| !e.wm_launchable) {
+                        return Err(format!("no dock app {app}"));
+                    }
+                    launch_tx.send(app.to_string()).map_err(|_| "the WM is shutting down".to_string())?;
+                    SignalToUI::set_ui_signal();
+                    Ok(())
                 });
                 if let Err(e) = served {
                     log!("wm: socket: {e}");
@@ -94,7 +106,7 @@ impl Adoptions {
             }
         }
         log!("wm: published {} for apps started in this session", path.display());
-        Some(Adoptions { path, rx })
+        Some(Adoptions { path, rx, launches })
     }
 }
 
@@ -104,7 +116,12 @@ impl App {
     pub(crate) fn drain_adoptions(&mut self, cx: &mut Cx) {
         let Some(adoptions) = self.adoptions.as_ref() else { return };
         let adopted: Vec<Adopted> = adoptions.rx.try_iter().collect();
-        for Adopted { client, pid, crate_name, launched } in adopted {
+        let launches: Vec<String> = adoptions.launches.try_iter().collect();
+        for app in launches {
+            log!("wm: socket asks for the dock's {app}");
+            self.launch_app(cx, &app);
+        }
+        for Adopted { client, pid, crate_name, launched, test_lane } in adopted {
             if launched {
                 log!("wm: {crate_name} (pid {pid}), launched as client {client}, asked for its window");
                 continue;
@@ -135,8 +152,12 @@ impl App {
                     .map(|mut d| d.with_run_view(cx, client, |cx, v| v.set_run_target(cx, client, 0, hub_port)));
                 continue;
             }
-            log!("wm: {label} (pid {pid}) came to the WM by itself; client {client}");
-            let slot = clients::ClientSlot::adopted(client, &app, pid);
+            log!("wm: {label} (pid {pid}) came to the WM by itself; client {client}{}", test_lane.as_ref().map_or(String::new(), |l| format!(" (TEST instance of lane {l})")));
+            let mut slot = clients::ClientSlot::adopted(client, &app, pid);
+            if let Some(lane) = test_lane {
+                slot.test_lane = Some(lane);
+                slot.set_title(&label);
+            }
             let area = self.desk_area(cx);
             let state = self.state_mut();
             state.clients.insert(client, slot);

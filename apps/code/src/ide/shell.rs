@@ -555,6 +555,10 @@ impl IdeShell {
         let dock = self.view.dock(cx, ids!(dock));
         for e in self.editors.iter_mut() {
             let Some(new) = moved(&e.path) else { continue };
+            if e.dirty {
+                makepad_widgets::makepad_platform::restart::set_unsaved(&e.path, None);
+                makepad_widgets::makepad_platform::restart::set_unsaved(&new, Some(&file_name(&new)));
+            }
             e.path = new.clone();
             let title = if e.dirty { format!("{} ●", file_name(&new)) } else { file_name(&new) };
             dock.set_tab_title(cx, e.tab, title);
@@ -634,6 +638,8 @@ impl IdeShell {
                 FileEditorAction::Dirty(dirty) => {
                     if let Some(e) = self.editors.iter_mut().find(|e| e.uid == wa.widget_uid) {
                         e.dirty = dirty;
+                        // a new version's restart waits for (and asks about) unsaved files
+                        makepad_widgets::makepad_platform::restart::set_unsaved(&e.path, dirty.then(|| file_name(&e.path)).as_deref());
                         let title = if dirty { format!("{} ●", file_name(&e.path)) } else { file_name(&e.path) };
                         let tab = e.tab;
                         self.view.dock(cx, ids!(dock)).set_tab_title(cx, tab, title);
@@ -721,6 +727,9 @@ impl IdeShell {
 
     fn close_tab(&mut self, cx: &mut Cx, tab: LiveId) {
         self.view.dock(cx, ids!(dock)).close_tab(cx, tab);
+        for e in self.editors.iter().filter(|e| e.tab == tab) {
+            makepad_widgets::makepad_platform::restart::set_unsaved(&e.path, None);
+        }
         self.editors.retain(|e| e.tab != tab);
         self.terminals.retain(|t| *t != tab);
         if self.chats.iter().any(|c| c.tab == tab) {

@@ -39,8 +39,8 @@ impl CliKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            CliKind::ClaudeCode => "Claude Code",
-            CliKind::Codex => "Codex",
+            CliKind::ClaudeCode => "Claude Code (this machine)",
+            CliKind::Codex => "Codex (this machine)",
         }
     }
 

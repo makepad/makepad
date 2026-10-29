@@ -16,6 +16,8 @@ use crate::ir::{self, Bin, Block, Cmp, Op, Program, Region, Stmt as IS, Ty, Un, 
 
 pub mod kernel;
 mod portable;
+mod front;
+pub use front::{AirBuilder, MathFn};
 
 /// Which front end a program is lowered for.
 #[relax_api(plain)]

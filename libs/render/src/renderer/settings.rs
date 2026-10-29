@@ -430,6 +430,13 @@ impl Renderer {
         self.pbr_materials_enabled = enabled;
     }
 
+    /// The per-element lookup the static draw takes (`elem_map`, slot 6, and
+    /// `elem_ctl` = (width, height, 0, enable)), applied to the PBR lane too
+    /// so hidden and offset elements agree across lanes. `None` turns it off.
+    pub fn set_element_lookup(&mut self, lookup: Option<(Texture, [f32; 4])>) {
+        self.element_lookup = lookup;
+    }
+
     pub fn pbr_materials_enabled(&self) -> bool {
         self.pbr_materials_enabled
     }

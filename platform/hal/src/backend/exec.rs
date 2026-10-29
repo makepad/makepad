@@ -73,6 +73,8 @@ pub enum OsCmd {
     XrPoseLead { id: Id, lead_ns: u64 },
     /// `HalCmd::XrRefreshRate`.
     XrRefreshRate { id: Id, millihertz: u32 },
+    /// `HalCmd::XrHaptic`.
+    XrHaptic { id: Id, hand: u32, amplitude: f32, duration_us: u32 },
     FileDialog { req: u32, kind: u32, title: String, location: String, filename: String, filters: Vec<String> },
     ShareText { text: String },
     ClipboardActions { id: Id, show: bool, area: [f32; 4], selection: bool },
@@ -1080,6 +1082,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         HalCmd::WindowVisuals { id, visuals, params } => os_window(gpu, s, id, OsCmd::WindowVisuals { id, visuals, params }),
         HalCmd::XrPoseLead { id, lead_ns } => os_window(gpu, s, id, OsCmd::XrPoseLead { id, lead_ns }),
         HalCmd::XrRefreshRate { id, millihertz } => os_window(gpu, s, id, OsCmd::XrRefreshRate { id, millihertz }),
+        HalCmd::XrHaptic { id, hand, amplitude, duration_us } => os_window(gpu, s, id, OsCmd::XrHaptic { id, hand, amplitude, duration_us }),
         HalCmd::XrFrameEyes { id, eyes } => {
             let mut it = crate::buffers::read_items::<crate::XrEye>(eyes, 2);
             let at = 2 * <crate::XrEye as crate::buffers::Wire>::SIZE;

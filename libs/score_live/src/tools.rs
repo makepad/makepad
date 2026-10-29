@@ -33,6 +33,8 @@ pub fn call(name: &str, args: &Value, open: Option<&str>) -> Result<Value, Strin
         Some("score_listen") => listen_args(args, open).map(|(json, _)| json),
         Some("instrument_search") => Ok(instrument_search(args)),
         Some("morph_params") => Ok(morph_params(args)),
+        Some("tandem_params") => Ok(tandem_params(args)),
+        Some("tandem_patches") => Ok(tandem_patches(args)),
         _ => Err(format!("no score tool `{name}`")),
     }
 }
@@ -113,6 +115,65 @@ pub fn morph_params(args: &Value) -> Value {
         ("presets", Value::Arr(morph::PRESETS.iter().map(|(n, about, _)| json::s(format!("{n}: {about}"))).collect())),
         ("groups", Value::Arr(schema.groups.iter().map(|g| json::s(g.name.clone())).collect())),
     ])
+}
+
+/// `tandem_params`: Tandem's schema as the AI reads it.
+pub fn tandem_params(args: &Value) -> Value {
+    use makepad_audio_synth::tandem::schema;
+    let groups: Vec<String> = match args.get("groups") {
+        Some(Value::Arr(items)) => items.iter().filter_map(|g| g.as_str().map(str::to_string)).collect(),
+        _ => Vec::new(),
+    };
+    let int = |k: &str| match args.get(k) {
+        Some(Value::Int(n)) => Some(*n),
+        Some(Value::F64(n)) => Some(*n as i64),
+        _ => None,
+    };
+    let s = schema::schema();
+    let mut out = vec![("structure", json::s(schema::STRUCTURE.to_string())), ("types", json::s(schema::describe_types()))];
+    if !groups.is_empty() {
+        let wanted: Vec<&str> = groups.iter().map(String::as_str).collect();
+        out.push(("params", json::s(s.describe(&wanted))));
+    }
+    if let Some(t) = int("osc_type") {
+        out.push(("osc", json::s(schema::describe_osc(t.clamp(0, 11) as u8))));
+    }
+    if let Some(t) = int("fx_type") {
+        out.push(("fx", json::s(schema::describe_fx(t.clamp(0, 31) as u8))));
+    }
+    out.push(("groups", Value::Arr(s.groups.iter().map(|g| json::s(g.name.clone())).collect())));
+    json::obj(out)
+}
+
+/// `tandem_patches`: library patches by words, or the categories.
+pub fn tandem_patches(args: &Value) -> Value {
+    let cats = crate::tandem_library::categories();
+    if cats.is_empty() {
+        return json::obj(vec![("installed", Value::Bool(false)), ("note", json::s("the hybrid patch library is not installed: Resources offers it (an opt-in GPL-3 download)".to_string()))]);
+    }
+    let query = args.get("query").and_then(Value::as_str).unwrap_or("").to_lowercase();
+    let limit = match args.get("limit") {
+        Some(Value::Int(n)) => (*n).clamp(1, 100) as usize,
+        _ => 20,
+    };
+    if query.trim().is_empty() {
+        let list = cats.iter().map(|c| json::s(format!("{}: {}", c.name, c.patches.len()))).collect();
+        return json::obj(vec![("installed", Value::Bool(true)), ("categories", Value::Arr(list))]);
+    }
+    let words: Vec<&str> = query.split_whitespace().collect();
+    let mut hits: Vec<(usize, String)> = Vec::new();
+    for c in &cats {
+        for p in &c.patches {
+            let hay = format!("{} {}", c.name, p.name).to_lowercase();
+            let score = words.iter().filter(|w| hay.contains(*w)).count();
+            if score > 0 {
+                hits.push((score, format!("{}/{}", c.name, p.name)));
+            }
+        }
+    }
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let list = hits.into_iter().take(limit).map(|(_, n)| json::s(n)).collect();
+    json::obj(vec![("installed", Value::Bool(true)), ("patches", Value::Arr(list))])
 }
 
 /// `instrument_search`: the palette's best matches for a description.

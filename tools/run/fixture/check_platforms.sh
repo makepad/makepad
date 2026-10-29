@@ -37,5 +37,7 @@ if [ $rc != 0 ]; then
   done
   [ -z "$fail" ] && fail=" rc$rc($(grep -E '^error' "$log/check" | head -1 | cut -c1-160))"
 fi
-if [ -n "$fail" ]; then echo "PLATFORMS-FAIL:$fail ($secs s)"; exit 1; fi
-echo "PLATFORMS-OK$targets [$pkgs] ($secs s)"
+# whose verdict this is (a lane reading it from a shared file checks them)
+who="[lease ${DEVHUB_LEASE:-none} lane ${MAKEPAD_TEST_LANE:-none} at $(git rev-parse --short=10 HEAD 2>/dev/null || echo unknown)]"
+if [ -n "$fail" ]; then echo "PLATFORMS-FAIL:$fail ($secs s) $who"; exit 1; fi
+echo "PLATFORMS-OK$targets [$pkgs] ($secs s) $who"

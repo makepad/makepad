@@ -196,6 +196,17 @@ pub(super) fn pose_lead(lead_ns: u64) {
     POSE_LEAD_NS.store(lead_ns.min(500_000_000) as i64, Ordering::Release);
 }
 
+/// Controller buzzes asked for (`HalCmd::XrHaptic`: hand, amplitude, duration µs), played by the
+/// XR thread after its next action sync.
+static HAPTICS: std::sync::Mutex<Vec<(u32, f32, u32)>> = std::sync::Mutex::new(Vec::new());
+
+pub(super) fn haptic(hand: u32, amplitude: f32, duration_us: u32) {
+    let mut q = lock(&HAPTICS);
+    if q.len() < 16 {
+        q.push((hand.min(1), amplitude, duration_us.min(1_000_000)));
+    }
+}
+
 /// The refresh rate the XR window asked for (mHz, 0: the runtime's default; `HalCmd::XrRefreshRate`),
 /// requested by the XR thread when it differs from the one it requested last.
 static REFRESH_MHZ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -2186,7 +2197,13 @@ fn track(rt: Arc<Runtime>, inputs: Arc<Mutex<SharedInputs>>, session: XrSession,
             Some(f) => Some((f.controllers, f.hands)),
             None => {
                 let mut inputs = lock(&inputs);
-                inputs.0.poll(xr, session, local_space, target).map(|(controllers, mut hands)| {
+                let polled = inputs.0.poll(xr, session, local_space, target);
+                if polled.is_some() {
+                    for (hand, amplitude, duration_us) in std::mem::take(&mut *lock(&HAPTICS)) {
+                        inputs.0.apply_haptic(xr, session, hand, amplitude, duration_us);
+                    }
+                }
+                polled.map(|(controllers, mut hands)| {
                     // The hands as the runtime predicts them for its newest display frame (what a
                     // native app draws), interpolated between the tracker's samples and moved
                     // ahead by at most `hand_lead_cap` (`HandKey`). Located at the far

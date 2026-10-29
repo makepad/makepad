@@ -41,6 +41,7 @@ pub mod midi;
 pub mod model;
 pub mod render;
 pub mod source;
+pub mod tandem_library;
 pub mod templates;
 pub mod theory;
 pub mod tools;

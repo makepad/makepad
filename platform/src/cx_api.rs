@@ -86,6 +86,11 @@ pub struct XrFrameCpuBreakdown {
     pub resize_projection_ms: f64,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    static XR_HAPTICS: std::cell::RefCell<Vec<crate::event::xr::XrHapticPulse>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// A system haptic (`Cx::haptic_feedback`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HapticFeedback { Click, VirtualKey, Tick }
@@ -1215,18 +1220,28 @@ impl Cx {
         { false }
     }
 
-    /// While a remote headset streams (`on`), the desktop windows paint for their own causes
-    /// only, not for the headset's frames (`XrWindowHold`): input at once, other UI changes at
-    /// most 15 a second; `mirror`: a window shows the headset's view (it paints from the
-    /// headset's frames at that rate). Off: the windows paint as always (at once, with what
-    /// was held).
+    /// While a remote headset streams (`on`: its frames flow), the desktop windows paint for
+    /// their own causes at their own pacing, never for the headset's frames alone, and the heavy
+    /// views (`DrawPass::set_xr_pause`) pause on their last picture (`XrWindowHold`); `mirror`: a
+    /// window shows the headset's view (it paints from the headset's frames at most 15 a
+    /// second). Off: everything paints as always (at once, with what was held).
     pub fn xr_hold_windows(&mut self, on: bool, mirror: bool) {
+        let changed = self.xr_window_hold.on != on;
         let hold = &mut self.xr_window_hold;
-        if hold.on && !on {
-            hold.input = true;
-        }
         hold.on = on;
         hold.mirror = mirror;
+        if changed {
+            // the heavy views show their new state (viewed in the headset, or live again):
+            // everything draws and paints once at once
+            self.redraw_all();
+            self.xr_window_hold.input = true;
+        }
+    }
+
+    /// A remote headset streams (`xr_hold_windows`): the heavy views pause, an app shows them as
+    /// viewed in the headset (or a mirror).
+    pub fn xr_headset_streaming(&self) -> bool {
+        self.xr_window_hold.on
     }
 
     /// The window repaints that painted and that were held (`xr_hold_windows`), counted since
@@ -1359,6 +1374,35 @@ impl Cx {
         self.hal_xr_pose_lead(lead_ns);
         #[cfg(target_arch = "wasm32")]
         let _ = lead_ns;
+    }
+
+    /// A short buzz on a controller (`hand` 0 left, 1 right; `amplitude` 0..1): a remote
+    /// headset's server sends it down the link ([`Cx::xr_take_haptics`]); a headset of this
+    /// process's own plays it on its controller. Nothing without a headset.
+    pub fn xr_haptic(&mut self, hand: usize, amplitude: f32, seconds: f32) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let pulse = crate::event::xr::XrHapticPulse { hand: hand.min(1) as u8, amplitude: amplitude.clamp(0.0, 1.0), seconds: seconds.clamp(0.0, 1.0) };
+            XR_HAPTICS.with(|q| {
+                let mut q = q.borrow_mut();
+                // a backlog (no server draining it) never grows: the newest pulses win
+                if q.len() >= 16 {
+                    q.remove(0);
+                }
+                q.push(pulse);
+            });
+            self.hal_xr_haptic(pulse);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (hand, amplitude, seconds);
+    }
+
+    /// The controller buzzes asked for since the last call (`xr_haptic`), for a remote
+    /// headset's server to send; `into` is cleared first.
+    pub fn xr_take_haptics(&mut self, into: &mut Vec<crate::event::xr::XrHapticPulse>) {
+        into.clear();
+        #[cfg(not(target_arch = "wasm32"))]
+        XR_HAPTICS.with(|q| into.append(&mut q.borrow_mut()));
     }
 
     /// The headset's view is see-through: the room shows wherever the XR passes leave alpha 0

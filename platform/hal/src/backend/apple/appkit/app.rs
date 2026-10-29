@@ -1232,7 +1232,7 @@ fn command(sid: u32, cmd: OsCmd) {
         }
         OsCmd::TrayRemove { tray } => super::tray::remove(sid, tray),
         // (no headset here)
-        OsCmd::XrFrameEyes { .. } | OsCmd::XrPoseLead { .. } | OsCmd::XrRefreshRate { .. } => {}
+        OsCmd::XrFrameEyes { .. } | OsCmd::XrPoseLead { .. } | OsCmd::XrRefreshRate { .. } | OsCmd::XrHaptic { .. } => {}
         OsCmd::FileDialog { req, kind, title, location, filename, filters } => file_dialog(sid, req, kind, &title, &location, &filename, &filters),
         OsCmd::DragReply { id, to, answer } => {
             if let Some(win) = window_of(id) {

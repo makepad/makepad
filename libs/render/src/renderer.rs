@@ -413,6 +413,11 @@ pub struct Renderer {
     /// out of `self` for the duration of the draw so the loop can still
     /// borrow the model tables.
     pbr_draw: Option<Box<DrawScenePbr>>,
+    /// The host's per-element lookup (`elem_map` + `elem_ctl`, see
+    /// shaders/skinned.rs) for the lanes the renderer draws itself: a host
+    /// that hides or offsets elements through its static draw gets the same
+    /// on the PBR lane.
+    element_lookup: Option<(Texture, [f32; 4])>,
     custom_draws: std::collections::BTreeMap<String, Box<CustomMaterial>>,
     /// Image-based lighting for Splash materials (renderer/ibl.rs).
     ibl: ibl::IblState,
@@ -755,6 +760,7 @@ impl Default for Renderer {
             detail_fallback: None,
             orm_fallback: None,
             pbr_draw: None,
+            element_lookup: None,
             custom_draws: Default::default(),
             ibl: Default::default(),
             stock_ibl: Default::default(),

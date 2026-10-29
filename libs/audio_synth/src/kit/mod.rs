@@ -17,9 +17,28 @@
 //! - [`filter`], [`fx`]: the filter and effects SLOTS (the shared families
 //!   arrive with the clean-room specs; for now this crate's own DSP).
 //!
+//! - [`core`]: the hybrid family's shared conventions (blocks, pitch/dB
+//!   maths, amplitude and pan laws, slot values and definitions, the
+//!   smoothed biquad, the half-band 2x sampler).
+//! - [`flt`], [`shaper`]: the filter family (36 types with subtypes) and the
+//!   waveshaper family (43 types).
+//! - [`oscs`]: the hybrid oscillators (classic, sine, wavetable, window,
+//!   S&H noise, audio in, FM2, FM3, modern, string, twist, alias).
+//! - [`mods`]: envelopes (digital/analog), LFOs with step sequencer, MSEG
+//!   and envelope shapes, controller smoothing.
+//! - [`fxs`]: the effects family (one module per effect).
+//! - [`formula`]: Formula LFO scripts compiled to AIR (no interpreter).
+//!
 //! Nothing in a render path allocates, locks or does I/O.
 
 pub mod arp;
+pub mod core;
+pub mod flt;
+pub mod formula;
+pub mod fxs;
+pub mod mods;
+pub mod oscs;
+pub mod shaper;
 pub mod env;
 pub mod filter;
 pub mod fx;

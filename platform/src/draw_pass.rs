@@ -275,6 +275,14 @@ impl DrawPass {
         DrawPassId(self.0.id)
     }
 
+    /// This pass is a heavy view (a 3D viewport): while a remote headset streams
+    /// (`Cx::xr_headset_streaming`) it and the passes painting for it pause on their last
+    /// picture (the GPU goes to the headset's eyes); the rest of its window stays live. The app
+    /// shows the view's state over it (viewing in the headset, or a mirror).
+    pub fn set_xr_pause(&self, cx: &mut Cx, on: bool) {
+        cx.passes[self.draw_pass_id()].xr_pause = on;
+    }
+
     pub fn set_as_xr_pass(&self, cx: &mut Cx) {
         let cxpass = &mut cx.passes[self.draw_pass_id()];
         cxpass.parent = CxDrawPassParent::Xr;
@@ -693,6 +701,10 @@ pub struct CxDrawPass {
     /// it paints once even while orphaned (a thumbnail sheet re-executed for
     /// a texture readback). Cleared when the repaint order is computed.
     pub repaint_requested: bool,
+    /// A heavy view (a 3D viewport) that pauses while a remote headset streams
+    /// ([`DrawPass::set_xr_pause`]): it and the passes painting for it keep their last
+    /// picture; the window around it stays live.
+    pub xr_pause: bool,
     /// Set by a backend while painting this pass when something in it needs the
     /// next frame too: a shader that reads `draw_pass.time`, or a draw call it had to skip.
     pub repaint_next: bool,
@@ -812,6 +824,7 @@ impl Default for CxDrawPass {
             live_with_parent: false,
             attached_by: None,
             repaint_requested: false,
+            xr_pause: false,
             repaint_next: false,
             time_owed: false,
             painted_serial: 0,
@@ -834,13 +847,13 @@ pub fn union_rects(a: Rect, b: Rect) -> Rect {
     Rect { pos: dvec2(x0, y0), size: dvec2(x1 - x0, y1 - y0) }
 }
 
-/// The desktop windows while a remote headset streams (`Cx::xr_hold_windows`): the GPU's time
-/// goes to the headset's eyes. A drawing caused only by the headset's frames (redraws asked for
-/// while an `Event::XrUpdate` is handled) paints the XR passes and what they feed, not the
-/// windows: a window keeps its last frame (no present). Input on a window (and a resize) paints
-/// it at once; any other UI change (an animation, a game's HUD, a progress line) paints at most
-/// [`XrWindowHold::RATE_HZ`] a second, with everything recorded since; a window showing the
-/// headset's view (a mirror, `mirror`) paints from the headset's frames at that rate too.
+/// The desktop windows while a remote headset streams (`Cx::xr_hold_windows`). The windows stay
+/// live at their own pacing: input and every other cause of theirs (an animation, a video, a
+/// popover) paint as always, never waiting for the headset's frames. Only what the headset's
+/// frames alone cause (redraws asked for while an `Event::XrUpdate` is handled) leaves the
+/// windows as they are, and the heavy views (`DrawPass::set_xr_pause`) pause on their last
+/// picture: the GPU's time goes to the headset's eyes. A window showing the headset's view (a
+/// mirror, `mirror`) paints from the headset's frames at most [`XrWindowHold::RATE_HZ`] a second.
 #[derive(Clone, Debug, Default)]
 pub struct XrWindowHold {
     /// Holding (a headset streams).
@@ -862,7 +875,8 @@ pub struct XrWindowHold {
 }
 
 impl XrWindowHold {
-    /// The most a held window paints for what is not input (frames a second).
+    /// The most a window showing the headset's view (a mirror) paints from its frames (frames
+    /// a second).
     pub const RATE_HZ: f64 = 15.0;
 
     /// Input (and a window's change of shape): what the user does to a window.
@@ -885,7 +899,7 @@ impl XrWindowHold {
     /// Whether the windows paint in this repaint (`now`: s; `grab`: a screenshot or frame grab
     /// waits for a painted window, which paints at once like input); false holds them.
     pub(crate) fn windows_paint(&mut self, now: f64, grab: bool) -> bool {
-        let paint = !self.on || self.input || grab || ((self.caused || self.mirror) && now - self.painted_at >= 1.0 / Self::RATE_HZ);
+        let paint = !self.on || self.input || self.caused || grab || (self.mirror && now - self.painted_at >= 1.0 / Self::RATE_HZ);
         if paint {
             self.painted_at = now;
             self.input = false;
@@ -894,10 +908,11 @@ impl XrWindowHold {
         paint
     }
 
-    /// Whether a held window's recordings ask for a frame now (the rate's next slot comes with
-    /// the headset's next frame).
+    /// Whether a window's recordings ask for a frame now: always for its own causes; a drawing
+    /// of only the headset's frames waits (the mirror's next slot comes with the headset's next
+    /// frame).
     pub(crate) fn wants_frame(&self) -> bool {
-        !self.on || self.input
+        !self.on || self.input || self.caused
     }
 }
 

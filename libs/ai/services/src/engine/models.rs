@@ -39,9 +39,10 @@ fn local_weights() -> Option<std::path::PathBuf> {
     }
 }
 
-/// The hub row alone, for a panel refreshing its menu when discovery lands.
-pub fn hub_row() -> ProviderRow {
-    super::local_model::local_row(local_weights().as_deref(), cfg!(feature = "localai"))
+/// The hub rows alone (the election, then each other model the hubs
+/// serve), for a panel refreshing its menu when discovery lands.
+pub fn hub_rows(local_only: bool) -> Vec<ProviderRow> {
+    super::local_model::hub_rows(local_weights().as_deref(), cfg!(feature = "localai"), local_only)
 }
 
 /// The Anthropic model the cloud adapter asks for.
@@ -53,8 +54,9 @@ pub fn provider_rows(local_only: bool) -> Vec<ProviderRow> {
     // The AI hub is always listed: the hub's election finds the model where
     // it is resident — a node on this machine, the fleet's chat box, or
     // (with local AI built in) the weights here — and the row says honestly
-    // when none of those answers.
-    rows.push(hub_row());
+    // when none of those answers. Every other model the hubs serve (the
+    // hub's own Claude Code among them) is a row of its own.
+    rows.extend(hub_rows(local_only));
     let claude_unavailable = if local_only {
         Some("local AI only".into())
     } else if claude_key().is_none() {
@@ -67,7 +69,7 @@ pub fn provider_rows(local_only: bool) -> Vec<ProviderRow> {
         label: format!("Claude API · {DEFAULT_CLAUDE_MODEL}"),
         unavailable: claude_unavailable,
     });
-    // The person's own logged-in CLIs on this machine.
+    // The person's own logged-in CLIs, run on this machine by this app.
     for kind in [CliKind::ClaudeCode, CliKind::Codex] {
         let unavailable = if local_only { Some("local AI only".into()) } else { kind.unavailable() };
         rows.push(ProviderRow { choice: ProviderChoice::Cloud(kind.slug().into()), label: kind.label().into(), unavailable });
@@ -109,6 +111,7 @@ pub fn fallback_choice(choice: &ProviderChoice) -> Option<ProviderChoice> {
     }
     #[cfg(not(feature = "localai"))]
     {
+        // A named hub model stands: it is a menu pick of a hub that answered.
         if !choice.is_local() {
             return None;
         }
@@ -129,6 +132,9 @@ pub fn build_model(choice: &ProviderChoice, local_only: bool) -> Result<Box<dyn 
         // With or without weights on this machine: the election decides
         // where the model runs, and the first line says so if nowhere.
         ProviderChoice::Local => Ok(Box::new(LocalModel::new(local_weights()))),
+        // The hub's Claude runs at Anthropic: refused under the lock.
+        ProviderChoice::Hub(_) if local_only && choice.is_cloud() => Err("local AI only".into()),
+        ProviderChoice::Hub(model) => Ok(Box::new(LocalModel::for_hub_model(model))),
         ProviderChoice::Cloud(slug) if slug == "none" => Ok(Box::new(NoModel)),
         ProviderChoice::Cloud(_) if local_only => Err("local AI only".into()),
         ProviderChoice::Cloud(slug) if slug == CLAUDE_DESKTOP => {

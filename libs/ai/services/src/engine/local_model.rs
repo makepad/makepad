@@ -11,9 +11,9 @@
 //! travels the same way.
 
 use crate::engine::{Model, ModelEvent, ModelImage, ToolDefinition};
-use crate::state::{ProviderChoice, ProviderRow};
+use crate::state::{ProviderChoice, ProviderRow, HUB_CLAUDE_MODEL};
 use makepad_ai_hub::hub::{AiHub, ChatConfig};
-use makepad_ai_hub::hub_chat::{ChatRoute, HubChatSession};
+use makepad_ai_hub::hub_chat::{ChatRoute, HubChatConfig, HubChatSession, HubOffer};
 use makepad_ai_hub::local_llm::{ChatEvent, LocalLlmConfig, ToolSpec};
 use makepad_ai_hub::providers::provider::ToolImage;
 use makepad_platform::thread::SignalToUI;
@@ -146,13 +146,13 @@ fn is_chat_gguf(path: &Path) -> bool {
     lower.ends_with(".gguf") && !lower.contains("mmproj") && !lower.contains("ocr")
 }
 
-/// What discovery knows about a hub with a chat model on the LAN.
+/// What discovery knows about the hubs' chat models.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum HubFind {
     Idle,
     Searching,
-    /// `AI hub · 149 (Qwen3.8 27B)`.
-    Found(String),
+    /// Every chat model the hubs serve, each at its best-ranked hub.
+    Found(Vec<HubOffer>),
     Missing { at: Instant },
 }
 
@@ -200,10 +200,15 @@ fn hub_find() -> HubFind {
     drop(slot);
     if start {
         let spawned = std::thread::Builder::new().name("ai-hub-find".into()).spawn(|| {
-            set_hub_find(match makepad_ai_hub::hub_chat::probe_fleet_chat() {
-                Ok(route) => HubFind::Found(route_label(&route)),
-                Err(_) => HubFind::Missing { at: Instant::now() },
+            // Each hub that answers shows at once; a beacon that lands later
+            // adds its models.
+            let found = makepad_ai_hub::hub_chat::probe_fleet_inventory(|offers| {
+                set_hub_find(HubFind::Found(offers.to_vec()));
+                SignalToUI::set_ui_signal();
             });
+            if found.is_err() {
+                set_hub_find(HubFind::Missing { at: Instant::now() });
+            }
             SignalToUI::set_ui_signal();
         });
         if spawned.is_err() {
@@ -213,31 +218,70 @@ fn hub_find() -> HubFind {
     now
 }
 
-/// `AI hub · 149 (Qwen3.8 27B)` for an elected route.
+fn this_machine() -> &'static str {
+    if cfg!(target_os = "macos") { "this Mac" } else { "this machine" }
+}
+
+/// `AI hub · 149 · Qwen3.8 27B` for an elected route.
 fn route_label(route: &ChatRoute) -> String {
-    let this_machine = if cfg!(target_os = "macos") { "this Mac" } else { "this machine" };
     match route {
-        ChatRoute::Fleet { base, model } => {
-            format!("AI hub · {} ({})", node_short_name(base), model_short_name(Path::new(model)))
-        }
-        ChatRoute::InProcess { model } => format!("AI hub · {this_machine} ({})", model_short_name(Path::new(model))),
-        ChatRoute::MachineNode { .. } => format!("AI hub · {this_machine}"),
+        ChatRoute::Fleet { base, model } => format!("AI hub · {} · {}", hub_short_name(base), model_display(model)),
+        ChatRoute::InProcess { model } => format!("AI hub · {} · {}", this_machine(), model_short_name(Path::new(model))),
+        ChatRoute::MachineNode { .. } => format!("AI hub · {}", this_machine()),
     }
 }
 
-/// The provider menu's hub row, listed in every build. A hub found on the
-/// LAN names its node and model; otherwise it reads "searching…" while
-/// discovery runs and "no hub found" after, unselectable, unless this build
-/// has the in-process runtime (`weights` is then the machine's own model,
-/// which can always answer).
-pub(super) fn local_row(weights: Option<&Path>, has_runtime: bool) -> ProviderRow {
-    let (label, unavailable) = match hub_find() {
-        HubFind::Found(label) => (label, None),
-        _ if has_runtime => (local_label(weights), None),
-        HubFind::Missing { .. } => ("AI hub".to_string(), Some("no hub found".to_string())),
-        HubFind::Idle | HubFind::Searching => ("AI hub".to_string(), Some("searching…".to_string())),
+/// A hub model as the person knows it: the hub's Claude is "Claude Code",
+/// a weights id reads as `Qwen3.5 4B`.
+fn model_display(model: &str) -> String {
+    if model == HUB_CLAUDE_MODEL { "Claude Code".to_string() } else { model_short_name(Path::new(model)) }
+}
+
+/// One offer's menu label: `AI hub · 222 · Claude Code`.
+fn offer_label(offer: &HubOffer) -> String {
+    let name = if offer.backend == HUB_CLAUDE_MODEL { "Claude Code".to_string() } else { model_display(&offer.model) };
+    format!("AI hub · {} · {name}", hub_short_name(&offer.base))
+}
+
+/// The provider menu's hub rows, listed in every build. Found hubs give one
+/// row per chat model they serve: the first local model (in hub order, the
+/// election's own ranking) is the election's row (`Local`, the default),
+/// every other model its own row (`Hub`: exactly that model), the hub's
+/// Claude among them — a cloud model, so "local AI only" refuses it.
+/// Otherwise one row reads "searching…" while discovery runs and "no hub
+/// found" after, unselectable, unless this build has the in-process runtime
+/// (`weights` is then the machine's own model, which can always answer).
+pub(super) fn hub_rows(weights: Option<&Path>, has_runtime: bool, local_only: bool) -> Vec<ProviderRow> {
+    let offers = match hub_find() {
+        HubFind::Found(offers) => offers,
+        found => {
+            let (label, unavailable) = match found {
+                _ if has_runtime => (local_label(weights), None),
+                HubFind::Missing { .. } => ("AI hub".to_string(), Some("no hub found".to_string())),
+                _ => ("AI hub".to_string(), Some("searching…".to_string())),
+            };
+            return vec![ProviderRow { choice: ProviderChoice::Local, label, unavailable }];
+        }
     };
-    ProviderRow { choice: ProviderChoice::Local, label, unavailable }
+    offer_rows(&offers, weights, has_runtime, local_only)
+}
+
+fn offer_rows(offers: &[HubOffer], weights: Option<&Path>, has_runtime: bool, local_only: bool) -> Vec<ProviderRow> {
+    let elected = offers.iter().position(|o| o.model != HUB_CLAUDE_MODEL && o.backend != HUB_CLAUDE_MODEL);
+    let mut rows = vec![match elected {
+        Some(at) => ProviderRow { choice: ProviderChoice::Local, label: offer_label(&offers[at]), unavailable: None },
+        None if has_runtime => ProviderRow { choice: ProviderChoice::Local, label: local_label(weights), unavailable: None },
+        None => ProviderRow { choice: ProviderChoice::Local, label: "AI hub".to_string(), unavailable: Some("no local model on the hubs".to_string()) },
+    }];
+    for (i, offer) in offers.iter().enumerate() {
+        if Some(i) == elected {
+            continue;
+        }
+        let choice = ProviderChoice::Hub(offer.model.clone());
+        let unavailable = (local_only && choice.is_cloud()).then(|| "local AI only".to_string());
+        rows.push(ProviderRow { choice, label: offer_label(offer), unavailable });
+    }
+    rows
 }
 
 /// The provider chip's base label: the local weights when there are any.
@@ -268,6 +312,18 @@ fn model_short_name(path: &Path) -> String {
     }
 }
 
+/// A hub's short name: its LAN octet, this machine's own for a loopback hub
+/// (one hub answers on both), else "this Mac".
+fn hub_short_name(base: &str) -> String {
+    if makepad_ai_hub::hub_order::host_of(base).starts_with("127.") || makepad_ai_hub::hub_order::host_of(base) == "localhost" {
+        return match makepad_ai_hub::hub_order::own_lan_ip() {
+            Some(std::net::IpAddr::V4(ip)) => ip.octets()[3].to_string(),
+            _ => this_machine().to_string(),
+        };
+    }
+    node_short_name(base)
+}
+
 fn node_short_name(base: &str) -> String {
     let authority = base.split_once("://").map_or(base, |(_, rest)| rest)
         .split('/').next().unwrap_or(base);
@@ -287,6 +343,9 @@ pub struct LocalModel {
     /// The weights on this machine, when it has any. `None` is fine: the
     /// election still reaches a node here or on the fleet.
     model_path: Option<PathBuf>,
+    /// Exactly this hub model (`ProviderChoice::Hub`), never another;
+    /// `None`: the election picks.
+    hub_model: Option<String>,
     session: Option<HubChatSession>,
     system: String,
     tools: Vec<ToolDefinition>,
@@ -306,6 +365,7 @@ impl LocalModel {
         let label = local_label(model_path.as_deref());
         LocalModel {
             model_path,
+            hub_model: None,
             session: None,
             system: String::new(),
             tools: Vec::new(),
@@ -318,6 +378,15 @@ impl LocalModel {
         }
     }
 
+    /// Exactly `model` as a hub serves it (`claude-cli`: the hub's Claude
+    /// Code), at the best-ranked hub that does; no weights load here.
+    pub fn for_hub_model(model: &str) -> Self {
+        let mut this = LocalModel::new(None);
+        this.hub_model = Some(model.to_string());
+        this.label = format!("AI hub · {}", model_display(model));
+        this
+    }
+
     fn start_session(&mut self) {
         let mut llm = LocalLlmConfig::new(self.model_path.clone().unwrap_or_default());
         llm.max_context = MAX_CONTEXT;
@@ -328,12 +397,20 @@ impl LocalModel {
             .iter()
             .map(|t| ToolSpec::new(t.name.clone(), t.description.clone(), t.parameters.clone()))
             .collect();
-        self.session = Some(AiHub::in_process().start_local_chat(ChatConfig {
-            llm,
-            system_prompt: self.system.clone(),
-            tools,
-            wake: Some(Arc::new(SignalToUI::set_ui_signal)),
-        }));
+        let wake: Option<makepad_ai_hub::local_llm::WakeHook> = Some(Arc::new(SignalToUI::set_ui_signal));
+        self.session = Some(match &self.hub_model {
+            // The same session start_local_chat makes, pinned to the model.
+            Some(model) => HubChatSession::start(HubChatConfig {
+                llm,
+                preferred_model: Some(model.clone()),
+                max_tokens: Some(u32::MAX),
+                thinking: None,
+                system_prompt: self.system.clone(),
+                tools,
+                wake,
+            }),
+            None => AiHub::in_process().start_local_chat(ChatConfig { llm, system_prompt: self.system.clone(), tools, wake }),
+        });
         self.awaiting = 0;
         self.results.clear();
         self.pending_update = None;
@@ -370,20 +447,14 @@ fn with_update(update: Option<String>, text: &str) -> String {
 
 impl Model for LocalModel {
     /// Name the elected node and its model, which may differ from the
-    /// weights on this machine: `AI hub · 149 (Qwen3.8 27B)`.
+    /// weights on this machine: `AI hub · 149 · Qwen3.8 27B`.
     fn label(&self) -> String {
-        let this_machine = if cfg!(target_os = "macos") { "this Mac" } else { "this machine" };
         match self.session.as_ref().and_then(|s| s.route()) {
-            Some(ChatRoute::Fleet { base, model }) => {
-                format!("AI hub · {} ({})", node_short_name(&base), model_short_name(Path::new(&model)))
-            }
-            Some(ChatRoute::InProcess { model }) => {
-                format!("AI hub · {this_machine} ({})", model_short_name(Path::new(&model)))
-            }
             Some(ChatRoute::MachineNode { .. }) => {
                 let model = self.model_path.as_deref().map(model_short_name).unwrap_or_else(|| "auto".into());
-                format!("AI hub · {this_machine} ({model})")
+                format!("AI hub · {} · {model}", this_machine())
             }
+            Some(route) => route_label(&route),
             None => self.label.clone(),
         }
     }
@@ -615,27 +686,61 @@ mod tests {
     #[test]
     fn route_labels_name_node_and_model() {
         let route = ChatRoute::Fleet { base: "http://10.0.0.149:8785".into(), model: "qwen3.8-27b".into() };
-        assert_eq!(route_label(&route), "AI hub · 149 (Qwen3.8 27B)");
+        assert_eq!(route_label(&route), "AI hub · 149 · Qwen3.8 27B");
+        let claude = ChatRoute::Fleet { base: "https://10.0.0.222:8124".into(), model: HUB_CLAUDE_MODEL.into() };
+        assert_eq!(route_label(&claude), "AI hub · 222 · Claude Code");
+        assert_eq!(makepad_ai_hub::claude_cli::MODEL_ID, HUB_CLAUDE_MODEL);
+    }
+
+    fn offer(base: &str, model: &str, backend: &str) -> HubOffer {
+        HubOffer { base: base.into(), model: model.into(), backend: backend.into() }
+    }
+
+    #[test]
+    fn every_hub_model_is_its_own_row() {
+        let offers = vec![
+            offer("https://10.0.0.222:8124", "claude-cli", "claude-cli"),
+            offer("https://10.0.0.222:8124", "qwen3.5-4b", "llm"),
+            offer("https://10.0.0.149:8123", "qwen3.8-27b", "llm"),
+        ];
+        let rows = offer_rows(&offers, None, false, false);
+        let shown: Vec<(String, String, Option<String>)> = rows.iter().map(|r| (r.choice.slug(), r.label.clone(), r.unavailable.clone())).collect();
+        assert_eq!(shown, vec![
+            ("local".into(), "AI hub · 222 · Qwen3.5 4B".into(), None),
+            ("hub:claude-cli".into(), "AI hub · 222 · Claude Code".into(), None),
+            ("hub:qwen3.8-27b".into(), "AI hub · 149 · Qwen3.8 27B".into(), None),
+        ]);
+        // Local AI only: the hub's Claude is a cloud model.
+        let locked = offer_rows(&offers, None, false, true);
+        assert_eq!(locked[1].unavailable.as_deref(), Some("local AI only"));
+        assert_eq!(locked[2].unavailable, None);
+        // A hub with only its Claude: the election has nothing local to pick.
+        let only = offer_rows(&offers[..1], None, false, false);
+        assert_eq!(only[0].unavailable.as_deref(), Some("no local model on the hubs"));
+        assert_eq!(only[1].choice, ProviderChoice::Hub("claude-cli".into()));
     }
 
     #[test]
     fn hub_row_without_runtime_is_unselectable_until_found() {
         set_hub_find(HubFind::Searching);
-        let row = local_row(None, false);
+        let row = hub_rows(None, false, false).remove(0);
         assert_eq!((row.label.as_str(), row.unavailable.as_deref()), ("AI hub", Some("searching…")));
         set_hub_find(HubFind::Missing { at: Instant::now() });
-        assert_eq!(local_row(None, false).unavailable.as_deref(), Some("no hub found"));
-        assert_eq!(local_row(None, true).unavailable, None);
-        set_hub_find(HubFind::Found("AI hub · 149 (Qwen3.8 27B)".into()));
-        let row = local_row(None, false);
-        assert_eq!((row.label.as_str(), row.unavailable), ("AI hub · 149 (Qwen3.8 27B)", None));
+        assert_eq!(hub_rows(None, false, false)[0].unavailable.as_deref(), Some("no hub found"));
+        assert_eq!(hub_rows(None, true, false)[0].unavailable, None);
+        set_hub_find(HubFind::Found(vec![offer("http://10.0.0.149:8785", "qwen3.8-27b", "llm")]));
+        let rows = hub_rows(None, false, false);
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].label.as_str(), rows[0].unavailable.clone()), ("AI hub · 149 · Qwen3.8 27B", None));
     }
 
     /// Against the real LAN: `cargo test -- --ignored hub_on_the_lan`.
     #[test]
     #[ignore]
     fn hub_on_the_lan() {
-        let route = makepad_ai_hub::hub_chat::probe_fleet_chat().expect("a hub with a chat model on the LAN");
-        println!("LAN hub row: {}", route_label(&route));
+        let offers = makepad_ai_hub::hub_chat::probe_fleet_inventory(|_| {}).expect("a hub with a chat model on the LAN");
+        for row in offer_rows(&offers, None, false, false) {
+            println!("LAN hub row: {} ({})", row.label, row.choice.slug());
+        }
     }
 }

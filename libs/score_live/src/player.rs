@@ -128,6 +128,10 @@ fn inst_fields(doc: &ScoreDoc, l: &LoopDef) -> Vec<(&'static str, Literal)> {
             ("inst", text("morph")), ("morph", text(patch)),
             ("morph_src", Literal::Arr(srcs.iter().map(|s| text(&s.as_ref().map(sample_name).unwrap_or_default())).collect())),
         ],
+        Some(InstKind::Tandem { path, set, .. }) => vec![
+            ("inst", text("tandem")), ("tandem_path", text(path)),
+            ("tandem_set", text(&set.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" "))),
+        ],
         Some(InstKind::Ironfish { program, values }) => vec![("inst", text("ironfish")), ("program", num(*program as f64)), ("iron", style(values))],
         None => {
             // A drum pattern without an instrument plays the default kit.

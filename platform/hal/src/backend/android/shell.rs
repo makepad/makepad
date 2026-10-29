@@ -142,6 +142,7 @@ impl Shell for AndroidShell {
             OsCmd::XrPoseLead { id, lead_ns } if lock(&Shared::global().registry).xr_window == Some((sid, id)) => { super::xr::pose_lead(lead_ns); true }
             // (the display's, whichever window asks: it may come before the XR window is registered)
             OsCmd::XrRefreshRate { millihertz, .. } => { super::xr::refresh_rate(millihertz); true }
+            OsCmd::XrHaptic { hand, amplitude, duration_us, .. } => { super::xr::haptic(hand, amplitude, duration_us); true }
             OsCmd::FrameRequest { id } => { lock(&Shared::global().state).pending.insert((sid, id)); jni::request_frame(); true }
             cmd @ (OsCmd::ImeShow { .. } | OsCmd::ImeHide { .. } | OsCmd::ImeSync { .. }) => {
                 if lock(&Shared::global().state).ime_session != Some(sid) { return false; }

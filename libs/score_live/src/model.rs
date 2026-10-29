@@ -77,6 +77,11 @@ pub enum InstKind {
     /// Morph, the wavetable synth: its patch in text form (checked) and the
     /// library samples its three oscillators read (`a_src` …).
     Morph { patch: String, srcs: [Option<AssetRef>; 3] },
+    /// Tandem, the hybrid synth that plays the hybrid patch library: the
+    /// patch's name (`Category/Name`, empty = the init patch), the file it
+    /// was found at (empty when the library is not installed), and the
+    /// parameters the score sets over it (storage names, raw values).
+    Tandem { patch: String, path: String, set: Vec<(String, f32)> },
     /// An audio shader instrument; `mono` plays one voice, legato.
     Shader { shader: ShaderDef, mono: bool },
     /// Sung voices (`sing(...)`): a singer profile (a built-in name, or a
@@ -416,7 +421,7 @@ impl ScoreDoc {
                 InstKind::Sampler { src, .. } => out.push(src.clone()),
                 InstKind::Morph { srcs, .. } => out.extend(srcs.iter().flatten().cloned()),
                 InstKind::Drums { slots, .. } => out.extend(slots.iter().filter_map(|s| s.sample.clone())),
-                InstKind::Synth { .. } | InstKind::Ironfish { .. } | InstKind::Shader { .. } | InstKind::Voice { .. } | InstKind::Native { .. } | InstKind::Midi { .. } | InstKind::Input { .. } => {}
+                InstKind::Synth { .. } | InstKind::Tandem { .. } | InstKind::Ironfish { .. } | InstKind::Shader { .. } | InstKind::Voice { .. } | InstKind::Native { .. } | InstKind::Midi { .. } | InstKind::Input { .. } => {}
             }
         }
         out.sort_by(|a, b| (&a.id, &a.rev).cmp(&(&b.id, &b.rev)));
@@ -627,6 +632,48 @@ impl Reader<'_> {
                 InstKind::Morph { patch: String::new(), srcs }
             }
         }
+    }
+
+    /// A Tandem: its patch by name (found in the installed library) and the
+    /// parameters set over it, each checked against the catalogue.
+    fn tandem(&mut self, node: &str, obj: &Obj) -> InstKind {
+        use makepad_audio_synth::tandem::catalog::catalog;
+        let mut patch = String::new();
+        let mut set = Vec::new();
+        for (key, value) in &obj.fields {
+            match key.as_str() {
+                "at" => {}
+                "patch" => match value {
+                    V::Str(s) | V::Id(s) => patch = s.trim_start_matches('@').to_string(),
+                    V::Nil => {}
+                    _ => self.err(node, Some("patch"), "`patch` is a library patch's name: \"Leads/Name\" (tandem_patches lists them)"),
+                },
+                k => {
+                    let Some(info) = catalog().index(k).map(|i| &catalog().params[i]) else {
+                        self.err(node, Some(k), format!("`{k}` is not a Tandem parameter (tandem_params lists them)"));
+                        continue;
+                    };
+                    match value {
+                        V::Num(n) => set.push((k.to_string(), *n as f32)),
+                        V::Bool(b) => set.push((k.to_string(), *b as u8 as f32)),
+                        _ => self.err(node, Some(k), format!("`{k}` is a number ({}..{} raw)", info.min, info.max)),
+                    }
+                }
+            }
+        }
+        let path = if patch.is_empty() {
+            String::new()
+        } else {
+            match crate::tandem_library::find(&patch) {
+                Some(p) => p.to_string_lossy().into_owned(),
+                None if crate::tandem_library::active().is_none() => String::new(),
+                None => {
+                    self.err(node, Some("patch"), format!("no library patch `{patch}` (tandem_patches lists them)"));
+                    String::new()
+                }
+            }
+        };
+        InstKind::Tandem { patch, path, set }
     }
 
     fn flag(&mut self, node: &str, obj: &Obj, key: &str) -> bool {
@@ -1004,6 +1051,12 @@ pub const MORPH_EXTRA: [&str; 19] = [
     "lfo4_points", "lfo5_points", "lfo6_points", "lfo7_points", "lfo8_points", "at",
 ];
 
+/// Every field a Tandem reads: `patch`, `at` and every catalogue parameter.
+pub fn tandem_fields() -> Vec<&'static str> {
+    let c = makepad_audio_synth::tandem::catalog::catalog();
+    ["patch", "at"].into_iter().chain(c.params.iter().map(|p| p.name.as_str())).collect()
+}
+
 /// Every field a Morph reads: its schema's parameters and [`MORPH_EXTRA`].
 pub fn morph_fields() -> Vec<&'static str> {
     let schema = &makepad_audio_synth::morph::layout().schema;
@@ -1098,6 +1151,7 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
             "Sampler" => SAMPLER_FIELDS.to_vec(),
             "Ironfish" => IRON_FIELDS.to_vec(),
             "Morph" => morph_fields(),
+            "Tandem" => tandem_fields(),
             "Instrument" => INSTRUMENT_FIELDS.to_vec(),
             "Voice" => VOICE_FIELDS.to_vec(),
             "Loop" | "Stinger" => LOOP_FIELDS.to_vec(),
@@ -1217,6 +1271,10 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
             }
             "Morph" => {
                 let kind = r.morph(n, obj);
+                doc.insts.push(InstDef { name: name.clone(), kind });
+            }
+            "Tandem" => {
+                let kind = r.tandem(n, obj);
                 doc.insts.push(InstDef { name: name.clone(), kind });
             }
             "Sampler" => {
@@ -1605,7 +1663,7 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
     let fx_names: Vec<&str> = doc.fx.iter().map(|f| f.name.as_str()).collect();
     for l in &doc.loops {
         match &l.play {
-            Some(play) if !is(play, &["Synth", "Drums", "Sampler", "Ironfish", "Morph", "Shader", "Voice", "Instrument"]) => r.err(&l.name, Some("play"), format!("`{play}` is not an instrument in Score{{…}}")),
+            Some(play) if !is(play, &["Synth", "Drums", "Sampler", "Ironfish", "Morph", "Tandem", "Shader", "Voice", "Instrument"]) => r.err(&l.name, Some("play"), format!("`{play}` is not an instrument in Score{{…}}")),
             None if l.hits.as_ref().is_none_or(|h| h.drum.is_none()) && l.code.is_some() => r.err(&l.name, Some("play"), "a loop names the instrument it plays: play: synth"),
             _ => {}
         }

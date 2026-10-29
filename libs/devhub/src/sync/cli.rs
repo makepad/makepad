@@ -28,6 +28,13 @@ pub const HELP: &str = "  sync words (the master; nodes by hub name, `all` = eve
   launch <node> --lease <id> [--visible|--hidden] [--lan] [K=V...] <app> [args...]
                                                 start <app> (registry name or package) under makepad run on the
                                                 node; prints its JIT id (--lease defaults to $DEVHUB_LEASE)
+                                                (a lane's TEST instance: badged, not the dock's app, LAN off
+                                                unless --lan)
+  show <node> <app>                             open the node's WM dock app <app> (launch-or-focus: the user's
+                                                one instance, the latest synced tree under the JIT); how a lane
+                                                shows the user what it landed
+  open <app>                                    on a WM machine's shell: open this machine's dock app <app>
+                                                (what clicking it in the dock does)
   restart <node>/<pid>                          stop a launch and start it again (same lease, env, args)
   stop <node>/<pid>                             stop a launch by its JIT id (also <node>/<app>#<pid>)
   launched <node>                               the node's running launches
@@ -578,12 +585,22 @@ fn jit_id(s: &str) -> Option<(String, u32)> {
 
 pub fn main(args: &[&str]) -> Option<i32> {
     let verb = *args.first()?;
-    if !matches!(verb, "sync" | "launch" | "stop" | "launched" | "launch-log" | "wm-restart" | "rebuild" | "restart") {
+    if !matches!(verb, "sync" | "launch" | "show" | "open" | "stop" | "launched" | "launch-log" | "wm-restart" | "rebuild" | "restart") {
         return None;
     }
     if args.len() < 2 || matches!(args[1], "-h" | "--help" | "help") {
         println!("{HELP}");
         return Some(if args.len() < 2 { 2 } else { 0 });
+    }
+    // the dock's app on this machine, from its own shell: no hub, no master
+    if let ("open", [app]) = (verb, &args[1..]) {
+        return Some(match super::launch::show(app) {
+            Ok(_) => 0,
+            Err(e) => {
+                eprintln!("makepad devhub open: {e}");
+                1
+            }
+        });
     }
     let c = match control() {
         Ok(c) => c,
@@ -652,6 +669,7 @@ pub fn main(args: &[&str]) -> Option<i32> {
             }
         },
         ("launched", [node]) => out(node, ask(&c, node, "launch", "list")),
+        ("show", [node, app]) => out(node, ask(&c, node, "launch", &format!("show {app}"))),
         ("launch-log", [id, rest @ ..]) => match jit_id(id) {
             Some((n, pid)) => out(&n, ask(&c, &n, "launch", &format!("log {pid} {}", rest.first().unwrap_or(&"40")))),
             None => {

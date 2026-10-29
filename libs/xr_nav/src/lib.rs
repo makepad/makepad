@@ -287,6 +287,17 @@ impl XrNav {
         self.origin = self.anchor() - v.room_from_world(world);
     }
 
+    /// Free: show the world at `scale` (clamped to the range), the world point at the anchor
+    /// staying there; any zoom in progress ends there.
+    pub fn set_scale(&mut self, scale: f32) {
+        let scale = scale.clamp(self.config.scale_min, self.config.scale_max);
+        let a = self.anchor();
+        let at = self.view().world_from_room(a);
+        self.scale = scale;
+        self.zoom_target = scale;
+        self.center_on(at);
+    }
+
     /// The anchor in the room.
     pub fn anchor(&self) -> Vec3f {
         let a = self.config.anchor;

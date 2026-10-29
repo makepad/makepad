@@ -7,12 +7,14 @@
 //! the overlay keyed by the same ids: the linked `AppModule`, and the
 //! hosting each app gets. The linked modules come from the BUILD
 //! (`build.rs`): the desktop `wm` binary links none, the all-in-one links
-//! its app crates. Desktop default is Process (decision 5): a linked
-//! module is still launched as a process unless `~/.makepad/wm/apps.splash`
-//! says otherwise (a settings file, never an environment variable) or a
-//! dev run passes `--module <id>`. `id: Jit` keeps the app a process but runs
-//! it under the JIT (`makepad run <package>`, `Runner::Jit`) instead of its
-//! release binary. A build without processes — the web,
+//! its app crates. Desktop default is a process under the JIT (`makepad run
+//! <package>` started by `cargo run --profile host -p makepad-run` in the
+//! checkout, `Runner::Jit`; the user's rule, 2026-10-29: every dock app runs
+//! the latest synced tree under the JIT): a linked module is still launched
+//! that way unless `~/.makepad/wm/apps.splash` says otherwise (a settings
+//! file, never an environment variable) or a dev run passes `--module <id>`.
+//! `id: Process` runs the app's own release binary instead (`cargo run
+//! --release -p <package>`, `Runner::Native`). A build without processes — the web,
 //! iOS, or a desktop all-in-one with `modules_only` — ignores the switch:
 //! everything is a module there.
 
@@ -24,9 +26,10 @@ use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hosting {
+    /// A process of the app's own release binary (`id: Process`).
     Process,
     Module,
-    /// A process running under the JIT: `makepad run <package>`.
+    /// A process running under the JIT: `makepad run <package>`. The desktop default.
     Jit,
 }
 
@@ -135,7 +138,8 @@ impl AppRegistry {
     }
 
     /// How a launch of `id` is hosted. With processes: Module only when a
-    /// module is linked AND the person (or the dev flag) asked for it. In a
+    /// module is linked AND the person (or the dev flag) asked for it, its
+    /// release binary when the settings say `id: Process`, else the JIT. In a
     /// build without processes (the web, iOS, a modules-only desktop
     /// build): every linked module is a module, and everything else is
     /// simply not there.
@@ -145,13 +149,13 @@ impl AppRegistry {
         }
         match self.overrides.get(id) {
             Some(Hosting::Module) if self.module(id).is_some() => Hosting::Module,
-            Some(Hosting::Jit) => Hosting::Jit,
-            _ => Hosting::Process,
+            Some(Hosting::Process) => Hosting::Process,
+            _ => Hosting::Jit,
         }
     }
 
-    /// What runs a process launch of `id`: the JIT when the settings say `id: Jit`, else its
-    /// release binary.
+    /// What runs a process launch of `id`: the JIT, unless the settings say `id: Process` (its
+    /// release binary).
     pub fn runner(&self, id: &str) -> makepad_app_registry::Runner {
         match self.hosting(id) {
             Hosting::Jit => makepad_app_registry::Runner::Jit,
@@ -263,7 +267,21 @@ mod tests {
         let _ = std::fs::remove_dir(&dir);
         assert_eq!(registry.hosting("sandbox"), Hosting::Jit);
         assert_eq!(registry.runner("sandbox"), makepad_app_registry::Runner::Jit);
+        assert_eq!(registry.runner("terminal"), makepad_app_registry::Runner::Jit, "the desktop default is the JIT");
+    }
+
+    #[test]
+    fn a_process_override_runs_the_release_binary() {
+        assert_eq!(AppRegistry::parse_overrides("{ Terminal: Process }"), vec![("terminal".to_string(), Hosting::Process)]);
+        let dir = std::env::temp_dir().join(format!("wm-apps-process-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("apps.splash");
+        std::fs::write(&settings, "terminal: Process\n").unwrap();
+        let registry = AppRegistry::load(&settings, &[], &build(false, false), true);
+        let _ = std::fs::remove_file(&settings);
+        let _ = std::fs::remove_dir(&dir);
         assert_eq!(registry.runner("terminal"), makepad_app_registry::Runner::Native);
+        assert_eq!(registry.runner("files"), makepad_app_registry::Runner::Jit);
     }
 
     #[test]
@@ -271,7 +289,7 @@ mod tests {
         let flags = ["-scale=1.3".to_string(), "--jit".to_string(), "Sandbox".to_string()];
         let registry = AppRegistry::load(Path::new("/nonexistent/apps.splash"), &flags, &build(false, false), true);
         assert_eq!(registry.runner("sandbox"), makepad_app_registry::Runner::Jit);
-        assert_eq!(registry.runner("terminal"), makepad_app_registry::Runner::Native);
+        assert_eq!(registry.runner("terminal"), makepad_app_registry::Runner::Jit);
     }
 
     #[test]
@@ -279,13 +297,13 @@ mod tests {
         let flags = ["--module".to_string(), "sheets".to_string(), "--module".to_string(), "files".to_string()];
         let registry = AppRegistry::load(Path::new("/nonexistent/apps.splash"), &flags, &build(false, false), true);
         // files has no linked module: the flag cannot make it one.
-        assert_eq!(registry.hosting("files"), Hosting::Process);
-        assert_eq!(registry.hosting("terminal"), Hosting::Process);
+        assert_eq!(registry.hosting("files"), Hosting::Jit);
+        assert_eq!(registry.hosting("terminal"), Hosting::Jit);
         assert_eq!(registry.hosting("sheets"), Hosting::Module);
         assert!(registry.linked_ids().contains(&"sheets"));
         assert!(!registry.pane_in_process(), "no assistant linked");
         let plain = AppRegistry::load(Path::new("/nonexistent/apps.splash"), &[], &build(false, true), true);
-        assert_eq!(plain.hosting("sheets"), Hosting::Process, "desktop default is a process");
+        assert_eq!(plain.hosting("sheets"), Hosting::Jit, "desktop default is a process under the JIT");
         assert!(!plain.pane_in_process(), "the desktop's assistant is the child process unless switched");
         assert_eq!(plain.launchable(), Launchable { linked: vec!["sheets"], processes: true, mobile: false });
     }

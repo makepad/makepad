@@ -237,6 +237,17 @@ impl AppLaunch {
         if self.building || self.run {
             crate::cargo_env(&mut command);
         }
+        // The registry's launch, whatever its launcher's environment: a lane shell's target dir
+        // and test switches reach neither the app nor a checkout's cargo (which builds into the
+        // checkout's own target/, as the prebuild did). A Builder build keeps its shared target.
+        if !self.building || self.run || crate::builder_install().is_none() {
+            crate::child_env::scrub_lane(&mut command);
+        }
+        // The app itself gets this machine's settings for it (`machine::launch_env`); a host
+        // adds its own after this.
+        if !self.building || self.run {
+            command.envs(crate::machine::launch_env(self.app.id, self.runner == Runner::Jit));
+        }
         if let Some(root) = &self.root {
             command.current_dir(root);
         }
@@ -438,8 +449,10 @@ mod tests {
             let run = run.unwrap();
             let build = AppLaunch::build_command(entry, runner, root.clone()).unwrap();
             let args = |c: &Command| c.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
+            // what this machine sets for the app at run time is not a build input
+            let machine: Vec<String> = crate::machine::launch_env(id, runner == Runner::Jit).into_iter().map(|(k, _)| k).collect();
             let envs = |c: &Command| {
-                let mut v: Vec<_> = c.get_envs().map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string()))).collect();
+                let mut v: Vec<_> = c.get_envs().filter(|(k, _)| !machine.iter().any(|m| k.to_str() == Some(m.as_str()))).map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string()))).collect();
                 v.sort();
                 v
             };

@@ -60,6 +60,23 @@ impl Cx {
         }
     }
 
+    /// A pass of a heavy view (`DrawPass::set_xr_pause`): it, or a pass it paints for before
+    /// a window.
+    pub(crate) fn pass_xr_paused(&self, start: DrawPassId) -> bool {
+        let mut walk = start;
+        for _ in 0..64 {
+            let pass = &self.passes[walk];
+            if pass.xr_pause {
+                return true;
+            }
+            match pass.parent {
+                CxDrawPassParent::DrawPass(parent) => walk = parent,
+                _ => return false,
+            }
+        }
+        false
+    }
+
     #[allow(unused)]
     pub(crate) fn any_passes_dirty(&self) -> bool {
         // held windows (`XrWindowHold`) keep their recordings dirty without asking for a frame:
@@ -67,7 +84,8 @@ impl Cx {
         let held = !self.xr_window_hold.wants_frame() && self.screenshot_requests.is_empty() && self.run_view_frame_requests.is_empty();
         for draw_pass_id in self.passes.id_iter() {
             let pass = &self.passes[draw_pass_id];
-            if pass.paint_dirty && !(held && !pass.repaint_requested && self.pass_root_window(draw_pass_id).is_some()) {
+            let paused = self.xr_window_hold.on && !pass.repaint_requested && self.pass_xr_paused(draw_pass_id);
+            if pass.paint_dirty && !paused && !(held && !pass.repaint_requested && self.pass_root_window(draw_pass_id).is_some()) {
                 return true;
             }
         }
@@ -297,8 +315,14 @@ impl Cx {
                 window_requested |= requested && self.pass_root_window(draw_pass_id).is_some();
             }
         }
-        // a remote headset streams: a drawing of only its frames leaves the windows as they are
-        // (dirty, painted with everything recorded at their next cause), `XrWindowHold`
+        // a remote headset streams: the heavy views pause on their last picture (dirty, painted
+        // once it stops), `DrawPass::set_xr_pause`
+        if self.xr_window_hold.on {
+            let passes = &*self;
+            passes_todo.retain(|id| !passes.pass_xr_paused(*id));
+        }
+        // and a drawing of only its frames leaves the windows as they are (dirty, painted with
+        // everything recorded at their next cause), `XrWindowHold`
         if (self.xr_window_hold.on || self.xr_offscreen()) && passes_todo.iter().any(|id| self.pass_root_window(*id).is_some()) {
             let now = self.seconds_since_app_start();
             // a screenshot or a studio/inspect frame grab waits for a painted window: it paints
@@ -2396,6 +2420,38 @@ mod tests {
         cx.request_remote_window_present(window);
         cx.compute_pass_repaint_order(&mut todo);
         assert!(todo.contains(&pass), "an explicit repaint paints the held window");
+    }
+
+    #[test]
+    fn a_held_window_stays_live_and_only_its_heavy_view_pauses() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let window = crate::window::WindowHandle::new(&mut cx).window_id();
+        cx.windows[window].is_created = true;
+        let (win_pass, _list) = pass_with_current_list(&mut cx);
+        let win_pass = win_pass.draw_pass_id();
+        cx.passes[win_pass].parent = CxDrawPassParent::Window(window);
+        cx.windows[window].main_pass_id = Some(win_pass);
+        let (view, _view_list) = pass_with_current_list(&mut cx);
+        view.set_xr_pause(&mut cx, true);
+        let view = view.draw_pass_id();
+        cx.passes[view].parent = CxDrawPassParent::DrawPass(win_pass);
+        let mut todo = Vec::new();
+        cx.xr_hold_windows(true, false);
+        // the window's own cause (a popover, an animation): painted at once, a frame asked for
+        cx.passes[win_pass].paint_dirty = true;
+        cx.passes[view].paint_dirty = true;
+        cx.xr_window_hold.note_redraw();
+        assert!(cx.any_passes_dirty(), "the window's own change asks for a frame");
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&win_pass), "the window stays live while the headset streams");
+        assert!(!todo.contains(&view), "the heavy view pauses");
+        // only the paused view is dirty: no frame is asked for it
+        cx.passes[win_pass].paint_dirty = false;
+        assert!(!cx.any_passes_dirty(), "a paused view asks for no frame");
+        // the headset stops: the view paints again
+        cx.xr_hold_windows(false, false);
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.contains(&view), "the view paints once the headset stops");
     }
 
     #[test]

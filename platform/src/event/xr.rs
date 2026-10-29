@@ -979,6 +979,15 @@ pub struct XrSyncAnchor {
     pub anchor: XrAnchor,
 }
 
+/// A controller buzz an XR app asked for (`Cx::xr_haptic`): which hand (0 left, 1 right), how
+/// strong (0..1) and how long.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct XrHapticPulse {
+    pub hand: u8,
+    pub amplitude: f32,
+    pub seconds: f32,
+}
+
 #[derive(Clone, Debug, Default, SerBin, DeBin)]
 pub struct XrState {
     pub time: f64,

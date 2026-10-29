@@ -154,9 +154,11 @@ pub fn mesh_boolean_with(
             return TriMesh::new();
         }
         let c = class_a[ti];
+        // A face of A touching B face to face: inside a union (dropped), no
+        // volume of an intersection (dropped), still A's surface after A - B.
         let mut keep = match op {
             BoolOp::Union => c == TriLocation::Outside,
-            BoolOp::Difference => c == TriLocation::Outside,
+            BoolOp::Difference => c == TriLocation::Outside || c == TriLocation::Touching,
             BoolOp::Intersection => c == TriLocation::Inside || c == TriLocation::OnBoundary,
         };
 
@@ -209,7 +211,8 @@ pub fn mesh_boolean_with(
         }
         let c = class_b[ti];
 
-        // Base selection
+        // Base selection (a face of B touching A face to face is kept by no
+        // operation: inside a union, not inside A for the others).
         let keep = match op {
             BoolOp::Union => c == TriLocation::Outside,
             BoolOp::Intersection => c == TriLocation::Inside || c == TriLocation::OnBoundary,

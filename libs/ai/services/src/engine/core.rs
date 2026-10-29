@@ -16,6 +16,7 @@ use crate::engine::registry::{RegistryUp, ServiceRegistry};
 use crate::engine::{Model, ModelEvent, ToolDefinition};
 use crate::state::*;
 use crate::wire::*;
+use makepad_micro_serde::*;
 use makepad_strict_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Sender;
@@ -32,6 +33,26 @@ pub const MAX_SUBSCRIPTIONS: usize = 16;
 pub const MAX_SUBSCRIPTION_QUEUE: usize = 64;
 /// Minimum time between model wakes for one conversation.
 pub const WAKE_INTERVAL_SECS: f64 = 2.0;
+/// A tool result's bytes kept in a saved chat.
+const SAVED_RESULT_BYTES: usize = 2048;
+/// The earlier conversation told to the model after a restart, at most.
+const RESUMED_BYTES: usize = 24 * 1024;
+
+/// A conversation on disk ([`EngineCore::saved_chat`]).
+#[derive(SerJson, DeJson)]
+struct SavedChat {
+    version: u32,
+    rows: Vec<SavedRow>,
+}
+
+#[derive(SerJson, DeJson)]
+struct SavedRow {
+    /// `user`, `assistant`, `tool`, `tool_failed`.
+    kind: String,
+    /// A tool's canonical name.
+    title: String,
+    text: String,
+}
 
 /// What the host should do after a `pump`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,6 +111,8 @@ struct Parked {
     proposed: String,
     /// Opened by the person (`propose`), not asked by the model.
     by_person: bool,
+    /// The tool's canonical name (`fab.save`): what "always in this chat" allows.
+    grant: String,
 }
 
 /// What the model is told when the person changed a parked call's
@@ -157,6 +180,13 @@ pub struct EngineCore {
     state: EngineState,
     pending: HashMap<String, Pending>,
     parked: HashMap<String, Parked>,
+    /// Tools the person allowed for the rest of this conversation (by
+    /// canonical name): their calls run without a card. Cleared with the
+    /// conversation; the person can take each back.
+    allowed: std::collections::BTreeSet<String>,
+    /// The conversation from before a restart ([`Self::restore_chat`]), told
+    /// to the model once with the next line.
+    resumed: Option<String>,
     /// Calls from outside the conversation (an MCP client), by call id:
     /// where each one's result goes when its card lands.
     external: HashMap<String, Sender<ToolResult>>,
@@ -192,6 +222,8 @@ impl EngineCore {
             state,
             pending: HashMap::new(),
             parked: HashMap::new(),
+            allowed: std::collections::BTreeSet::new(),
+            resumed: None,
             external: HashMap::new(),
             awaiting: None,
             notes: HashMap::new(),
@@ -282,9 +314,82 @@ impl EngineCore {
         self.state.rate = None;
         self.turn_active = true;
         let dynamic = self.registry.dynamic_context();
-        let context = self.turn_context(dynamic);
+        let mut context = self.turn_context(dynamic);
+        if let Some(earlier) = self.resumed.take() {
+            context = format!("# The conversation before the app restarted (the model and tools now are as the current state says)\n{earlier}\n\n{context}");
+        }
         self.model.send_user(text, &context);
         self.state.touch();
+    }
+
+    /// The conversation as it can be kept on disk: what the person said,
+    /// the answers, and each tool call with how it ended (bounded). A host
+    /// writes it after changes and hands it to [`Self::restore_chat`] after a
+    /// restart (a crash, a live-patch relaunch).
+    pub fn saved_chat(&self) -> String {
+        let rows: Vec<SavedRow> = self
+            .state
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::User { text } => Some(SavedRow { kind: "user".into(), title: String::new(), text: text.clone() }),
+                Entry::Assistant { text, streaming: false } if !text.trim().is_empty() => {
+                    Some(SavedRow { kind: "assistant".into(), title: String::new(), text: text.clone() })
+                }
+                Entry::Tool(t) => match &t.status {
+                    ToolStatus::Done { outcome, text, .. } => {
+                        let mut text = text.clone();
+                        truncate_to_char_boundary(&mut text, SAVED_RESULT_BYTES);
+                        let kind = if matches!(outcome, ToolOutcome::Ok) { "tool" } else { "tool_failed" };
+                        Some(SavedRow { kind: kind.into(), title: canonical_name(&t.service, &t.tool), text })
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        SavedChat { version: 1, rows }.serialize_json()
+    }
+
+    /// Bring back a conversation [`Self::saved_chat`] wrote: its lines show
+    /// again, and the model is told the earlier conversation with the next
+    /// line (every provider starts fresh after a restart).
+    pub fn restore_chat(&mut self, saved: &str) -> Result<(), String> {
+        let chat = SavedChat::deserialize_json(saved).map_err(|e| format!("the saved chat does not read: {e:?}"))?;
+        if chat.version != 1 || chat.rows.is_empty() {
+            return Err("no saved chat".into());
+        }
+        let mut earlier = String::new();
+        for row in &chat.rows {
+            match row.kind.as_str() {
+                "user" => self.state.push(Entry::User { text: row.text.clone() }),
+                "assistant" => self.state.push(Entry::Assistant { text: row.text.clone(), streaming: false }),
+                "tool" | "tool_failed" => {
+                    let mut line = row.text.lines().next().unwrap_or("").to_string();
+                    truncate_to_char_boundary(&mut line, 160);
+                    let verdict = if row.kind == "tool" { "done" } else { "failed" };
+                    self.state.push(Entry::System { text: format!("{} {verdict}: {line}", row.title) });
+                }
+                _ => continue,
+            }
+            let label = match row.kind.as_str() {
+                "user" => "[user]".to_string(),
+                "assistant" => "[assistant]".to_string(),
+                kind => format!("[{} {}]", if kind == "tool" { "tool result" } else { "tool failed" }, row.title),
+            };
+            earlier.push_str(&format!("{label}\n{}\n", row.text.trim()));
+        }
+        // The newest part of it, within the budget.
+        if earlier.len() > RESUMED_BYTES {
+            let mut cut = earlier.len() - RESUMED_BYTES;
+            while !earlier.is_char_boundary(cut) {
+                cut += 1;
+            }
+            earlier = format!("[...earlier lines left out]\n{}", &earlier[cut..]);
+        }
+        self.state.push(Entry::System { text: "Restored the conversation from before the restart".into() });
+        self.resumed = Some(earlier);
+        Ok(())
     }
 
     /// What the person is looking at: a chip on the composer. While it is
@@ -436,6 +541,8 @@ impl EngineCore {
     /// A new conversation: same services, same provider, empty transcript.
     pub fn clear(&mut self, now: f64) {
         self.cancel(now);
+        self.allowed.clear();
+        self.resumed = None;
         self.drop_subscriptions();
         self.model.reset();
         self.state.entries.clear();
@@ -443,6 +550,33 @@ impl EngineCore {
         self.state.rate = None;
         self.state.status = Status::Idle;
         self.seen_generation = None;
+        self.state.touch();
+    }
+
+    /// The person's "always in this chat" on a parked call: its tool runs
+    /// without a card for the rest of the conversation (see [`Self::allowed`]),
+    /// starting with this call (run with `args` as [`Self::confirm_with`]).
+    pub fn allow_for_chat(&mut self, call_id: &str, args: Option<String>, now: f64) -> Result<(), String> {
+        let Some(grant) = self.parked.get(call_id).map(|parked| parked.grant.clone()) else { return Ok(()) };
+        self.confirm_with(call_id, true, args, now)?;
+        self.allowed.insert(grant);
+        self.state.touch();
+        Ok(())
+    }
+
+    /// The tools allowed for this conversation, by canonical name.
+    pub fn allowed(&self) -> impl Iterator<Item = &str> {
+        self.allowed.iter().map(String::as_str)
+    }
+
+    /// Take back what "always in this chat" allowed: one tool, or all (`None`).
+    pub fn revoke(&mut self, tool: Option<&str>) {
+        match tool {
+            Some(tool) => {
+                self.allowed.remove(tool);
+            }
+            None => self.allowed.clear(),
+        }
         self.state.touch();
     }
 
@@ -818,7 +952,8 @@ impl EngineCore {
         }
         let risk = def.risk.max(self.registry.risk_floor(&app));
         let call = ServiceCall { call_id: call_id.clone(), tool: tool.clone(), args: args_json, caller: None };
-        let gated = risk >= Risk::Request && (!from_console || self.external.contains_key(&call_id));
+        let grant = canonical_name(&app, &tool);
+        let gated = risk >= Risk::Request && (!from_console || self.external.contains_key(&call_id)) && !self.allowed.contains(&grant);
         // A proposal that only looks or changes the app's own state (Read,
         // Act) runs at once as a console call, with no card; a request or a
         // destructive one parks.
@@ -847,7 +982,7 @@ impl EngineCore {
                 t.status = ToolStatus::Confirm;
                 t.card = card;
             }
-            self.parked.insert(call_id.clone(), Parked { endpoint, proposed: call.args.clone(), by_person: propose, call, from_console, schema });
+            self.parked.insert(call_id.clone(), Parked { endpoint, proposed: call.args.clone(), by_person: propose, call, from_console, schema, grant });
             self.state.touch();
             return Some(EngineEvent::Confirm { call_id });
         }

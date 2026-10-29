@@ -1,5 +1,6 @@
 use crate::gauss_stack::GaussStack;
 use crate::{
+    button::ButtonWidgetExt,
     desktop_button::{DesktopButtonWidgetExt, DesktopButtonWidgetRefExt},
     widget_hooks::WidgetHooks,
     gauss_view::{
@@ -127,6 +128,7 @@ script_mod! {
     use mod.widgets.AiChatSlot
     use mod.widgets.VoiceWave
     use mod.widgets.MenuItem
+    use mod.widgets.ButtonFlat
     use mod.draw.KeyCode
 
     set_type_default() do #(DrawGaussDownsample::script_shader(vm)){
@@ -343,6 +345,16 @@ script_mod! {
                 }
             }
             voice_wave := VoiceWave {}
+            // A new version is ready (a landed change the JIT could not patch in, or a rebuilt
+            // JIT) and the app has unsaved work, so its restart waits (`AppMain::can_restart`):
+            // shown with the app's reason, "Restart" restarts now with the app's state.
+            restart_notice := View {
+                visible: false
+                width: Fit height: Fill flow: Right align: Align{y: 0.5} spacing: 6
+                margin: Inset{left: 6 right: 6}
+                restart_text := Label { text: "New version ready" }
+                restart_button := ButtonFlat { text: "Restart" }
+            }
             // Under `makepad run` the JIT ring sits here, at the caption's right (left of the
             // window buttons): an app's caption controls keep out of its room
             // (`Cx::caption_badge_room`, set in `sync_caption_bar_state`).
@@ -675,6 +687,9 @@ pub struct Window {
     /// The source title last synced, compared before allocating the displayed title.
     #[rust]
     last_synced_title: Option<String>,
+    /// The postponed restart's reason the caption shows (`restart_notice`).
+    #[rust]
+    restart_notice: Option<String>,
     #[rust]
     caption_centering_inputs: Option<(f64, f64)>,
     /// How an `Overlay` caption label's title was last laid out.
@@ -1141,7 +1156,7 @@ impl Window {
         });
         let bar_content = self.view(cx, ids!(caption_bar)).borrow().is_some_and(|view| {
             view.children.iter().any(|(id, _)| !matches!(*id,
-                id!(hosted_controls_gap) | id!(caption_label) | id!(voice_wave) | id!(jit_ring_gap) | id!(windows_buttons) | id!(web_fullscreen)))
+                id!(hosted_controls_gap) | id!(caption_label) | id!(voice_wave) | id!(restart_notice) | id!(jit_ring_gap) | id!(windows_buttons) | id!(web_fullscreen)))
         });
         let content = label_content || bar_content;
         self.caption_has_content = Some(content);
@@ -1269,13 +1284,14 @@ impl Window {
                     .set_visible(cx, custom_chrome && !lights);
                 self.hosted_mac_controls = custom_chrome && lights && self.stock_caption();
             }
-            OsType::LinuxDirect | OsType::Android(_) => {
-                //self.frame.get_view(ids!(caption_bar)).set_visible(false);
+            // No window chrome of our own here (the screen, the phone, the
+            // browser, an offscreen host): a title-only caption stays away,
+            // but an app's caption controls are its only way to them, so they
+            // stay as a content toolbar without window buttons.
+            _ => {
+                self.view(cx, ids!(caption_bar))
+                    .set_visible(cx, self.stock_caption() && has_content);
             }
-            OsType::Web(_) => {
-                // self.frame.get_view(ids!(caption_bar)).set_visible(false);
-            }
-            _ => (),
         }
         self.view(cx, ids!(hosted_controls_gap)).set_visible(cx, self.hosted_mac_controls);
         // An app's own gap for the traffic lights macOS draws over the caption's left
@@ -1675,6 +1691,28 @@ impl Window {
         }
     }
 
+    /// Shows the caption's "new version ready" while a restart waits for the app's unsaved work
+    /// (`makepad_platform::restart::postponed`), with the app's reason as the button's hint.
+    fn sync_restart_notice(&mut self, cx: &mut Cx) {
+        let why = makepad_platform::restart::postponed();
+        if why == self.restart_notice {
+            return;
+        }
+        let notice = self.view(cx, ids!(caption_bar.restart_notice));
+        if notice.borrow().is_none() {
+            return;
+        }
+        notice.set_visible(cx, why.is_some());
+        if let Some(why) = &why {
+            self.label(cx, ids!(caption_bar.restart_notice.restart_text)).set_text(cx, "New version ready");
+            log!("window: a new version is ready; the restart waits: {why}");
+        }
+        self.restart_notice = why;
+        self.caption_has_content = None;
+        self.drag_query_cache = None;
+        self.view.redraw(cx);
+    }
+
     fn sync_caption_title(&mut self, cx: &mut Cx) {
         let title = if self.window.title.is_empty() {
             &cx.windows[self.window.handle.window_id()].create_title
@@ -1685,11 +1723,12 @@ impl Window {
             return;
         }
         let source_title = title.clone();
-        // Under `--remote` the title carries a `[remote]` tag, so a human who
-        // finds this window lingering can tell it belongs to an agent. Apps that
-        // draw their own caption bar must show it too, not just the OS title bar.
-        // No-op (and idempotent) when the remote server is not running.
-        let title = crate::makepad_platform::remote::tag_window_title(source_title.clone());
+        // A lane's test instance says so first (`TEST: lane <name>`), and under
+        // `--remote` the title carries a `[remote]` tag, so a human who finds this
+        // window lingering can tell it is not the dock's app. Apps that draw their
+        // own caption bar must show it too, not just the OS title bar. Idempotent;
+        // a no-op for the dock's own instance.
+        let title = crate::makepad_platform::badge_window_title(source_title.clone());
         if !title.is_empty() {
             let label = self.label(cx, ids!(caption_label.label));
             if label.borrow().is_none() {
@@ -1750,6 +1789,7 @@ impl Window {
         self.sync_caption_bar_state(cx);
         self.sync_caption_bar_height(cx);
         self.sync_caption_title(cx);
+        self.sync_restart_notice(cx);
         self.sync_system_bar_appearance(cx);
 
         if self.initialized {
@@ -3399,6 +3439,10 @@ impl Widget for Window {
             }
             if let Some(voice) = WidgetHooks::voice(cx) {
                 (voice.window_actions)(cx, actions, &mut self.view, scope);
+            }
+            if self.restart_notice.is_some() && self.button(cx, ids!(caption_bar.restart_notice.restart_button)).clicked(actions) {
+                // the person's answer to "new version ready": restart now, unsaved work and all
+                makepad_platform::restart::restart_anyway();
             }
             if self
                 .desktop_button(cx, ids!(windows_buttons.min))

@@ -14,6 +14,7 @@
 use makepad_midi_library::chip::hvsc;
 use makepad_midi_library::{dataset, index};
 use makepad_model_install::{self as models, InstallHandle, InstallMsg, Installable};
+use makepad_score_live::tandem_library;
 use makepad_widgets::*;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 
@@ -63,6 +64,8 @@ script_mod! {
                 resources_midi := Row{}
                 resources_research := Row{}
                 resources_sid := Row{}
+                resources_patches := Row{}
+                resources_patches_old := Row{}
             }
         }
     }
@@ -70,11 +73,25 @@ script_mod! {
 
 /// The rows: the SoundFont, the song library, its research extras, the SID
 /// collection.
-const ROWS: [LiveId; 4] = [live_id!(resources_gm), live_id!(resources_midi), live_id!(resources_research), live_id!(resources_sid)];
+const ROWS: [LiveId; 6] = [
+    live_id!(resources_gm),
+    live_id!(resources_midi),
+    live_id!(resources_research),
+    live_id!(resources_sid),
+    live_id!(resources_patches),
+    live_id!(resources_patches_old),
+];
 const GM_ROW: usize = 0;
 const MIDI: usize = 1;
 const RESEARCH: usize = 2;
 const SID: usize = 3;
+/// The hybrid patch library: the current set and the older stable one.
+const PATCHES: usize = 4;
+const PATCHES_OLD: usize = 5;
+
+fn patch_set(row: usize) -> &'static Installable {
+    if row == PATCHES { &tandem_library::CURRENT } else { &tandem_library::STABLE }
+}
 
 const GM: &Installable = &makepad_score_live::gm_font::GM_SOUNDFONT;
 
@@ -88,6 +105,7 @@ fn files(row: usize) -> Vec<&'static Installable> {
         GM_ROW => vec![GM],
         MIDI => dataset::FILES.to_vec(),
         RESEARCH => dataset::RESEARCH.to_vec(),
+        PATCHES | PATCHES_OLD => vec![patch_set(row)],
         _ => vec![&hvsc::ARCHIVE],
     }
 }
@@ -111,6 +129,10 @@ enum Job {
     Index(Progress<usize>),
     /// The SID collection unpacked: the tunes packed.
     Unpack(Progress<usize>),
+    /// A patch library unpacked: its patches.
+    Patches(Progress<usize>),
+    /// A patch library's unpacked files checked against its manifest.
+    PatchesVerify(Progress<usize>),
 }
 
 /// Run `work` on a worker that reports its progress.
@@ -136,6 +158,11 @@ fn start_index() -> Job {
 /// Unpack the SID collection on a worker.
 fn start_unpack() -> Job {
     Job::Unpack(worker("sid-unpack", |progress| hvsc::unpack(4, progress)))
+}
+
+/// Unpack a patch library on a worker.
+fn start_patches(row: usize) -> Job {
+    Job::Patches(worker("patch-unpack", move |progress| crate::patch_library::unpack(patch_set(row), progress)))
 }
 
 /// Whether the song library's catalogue is built.
@@ -188,6 +215,9 @@ impl Resources {
         } else if self.job.is_none() && self.rows[SID].installed == Some(true) && !hvsc::unpacked() {
             self.job = Some((SID, start_unpack()));
             self.run(cx);
+        } else if let Some(row) = [PATCHES, PATCHES_OLD].into_iter().find(|r| self.job.is_none() && self.rows[*r].installed == Some(true) && !tandem_library::unpacked(patch_set(*r))) {
+            self.job = Some((row, start_patches(row)));
+            self.run(cx);
         }
         self.sync(cx, ui);
         ui.modal(cx, ids!(resources_panel)).open(cx);
@@ -230,7 +260,16 @@ impl Resources {
             if ui.button(cx, ids!((id).stop)).clicked(actions) && matches!(self.job, Some((r, _)) if r == row) {
                 self.stop();
             }
-            if ui.button(cx, ids!((id).verify)).clicked(actions) && idle && have {
+            if ui.button(cx, ids!((id).verify)).clicked(actions) && idle && have && matches!(row, PATCHES | PATCHES_OLD) {
+                let rx = worker("patch-verify", move |progress| {
+                    models::verify(patch_set(row), &mut |_, _| {}).map_err(|error| format!("{}: {error}", file_name(patch_set(row))))?;
+                    crate::patch_library::verify(patch_set(row), progress)
+                });
+                self.job = Some((row, Job::PatchesVerify(rx)));
+                self.rows[row].note = "verifying…".into();
+                self.run(cx);
+                self.sync(cx, ui);
+            } else if ui.button(cx, ids!((id).verify)).clicked(actions) && idle && have {
                 let rx = worker("resource-verify", move |_| {
                     for model in files(row) {
                         models::verify(model, &mut |_, _| {}).map_err(|error| format!("{}: {error}", file_name(model)))?;
@@ -244,6 +283,11 @@ impl Resources {
             }
             if ui.button(cx, ids!((id).remove)).clicked(actions) && idle {
                 let mut failed: Vec<String> = files(row).into_iter().filter_map(|model| models::uninstall(model).err()).collect();
+                if matches!(row, PATCHES | PATCHES_OLD) {
+                    if let Err(error) = crate::patch_library::remove_unpacked(patch_set(row)) {
+                        failed.push(error);
+                    }
+                }
                 let made = match row {
                     MIDI => vec![index::index_path()],
                     SID => vec![hvsc::pack_path(), hvsc::offsets_path(), hvsc::catalogue_path()],
@@ -320,6 +364,14 @@ impl Resources {
                     Ok(tunes) => format!("{tunes} tunes unpacked: search them in the Song library (sid, c64)"),
                     Err(error) => format!("not unpacked: {error}"),
                 }),
+                Job::Patches(rx) => Self::drain(rx, &mut self.progress, |result| match result {
+                    Ok(patches) => format!("{patches} patches unpacked: play them with Tandem{{patch: …}} (tandem_patches finds them)"),
+                    Err(error) => format!("not unpacked: {error}"),
+                }),
+                Job::PatchesVerify(rx) => Self::drain(rx, &mut self.progress, |result| match result {
+                    Ok(files) => format!("verified: the archive and all {files} unpacked files match"),
+                    Err(error) => format!("verify failed: {error}"),
+                }),
                 Job::Verify(rx) => Self::drain(rx, &mut self.progress, |result| match result {
                     Ok(()) => "verified: the SHA-256 matches".into(),
                     Err(error) => format!("verify failed: {error}"),
@@ -331,7 +383,7 @@ impl Resources {
         }
         if let Some((row, note)) = finished {
             let was_install = matches!(self.job, Some((_, Job::Install(_))));
-            let built = matches!(self.job, Some((_, Job::Index(_) | Job::Unpack(_))));
+            let built = matches!(self.job, Some((_, Job::Index(_) | Job::Unpack(_) | Job::Patches(_))));
             self.rows[row].note = note;
             self.job = None;
             self.progress = None;
@@ -345,6 +397,8 @@ impl Resources {
                 self.job = Some((MIDI, start_index()));
             } else if was_install && row == SID && self.rows[SID].installed == Some(true) {
                 self.job = Some((SID, start_unpack()));
+            } else if was_install && matches!(row, PATCHES | PATCHES_OLD) && self.rows[row].installed == Some(true) {
+                self.job = Some((row, start_patches(row)));
             }
         }
         if self.job.is_none() {
@@ -384,6 +438,23 @@ impl Resources {
                     "Genre annotations and listeners' tags for the song library's songs, so searches by genre and mood find more. Their terms allow research and non-commercial use only: they are not part of the song library's download, and the library works without them.".to_string(),
                     sources().join("\n\n"),
                 ),
+                PATCHES | PATCHES_OLD => {
+                    let set = patch_set(row);
+                    let (caps, which) = if row == PATCHES {
+                        ("HYBRID PATCH LIBRARY", "Surge XT's current patches, wavetables and presets (patch format revision 31, upstream commit dab78c6)")
+                    } else {
+                        ("HYBRID PATCH LIBRARY: OLDER RELEASE", "Surge XT 1.3.4's content (revision 25, migrated as it loads); install it only if you want that release's set")
+                    };
+                    (
+                        caps.to_string(),
+                        format!("Surge XT patch library · {} · GPL-3.0-or-later", megabytes(bytes)),
+                        format!(
+                            "{which}: about 3,500 factory and third-party patches that Synth's Tandem instrument plays (`Tandem{{patch: \"Leads/Name\"}}`), unpacked to {} with a hash of every file. GPL-3: Synth does not ship them; you download them here.",
+                            tandem_library::data_dir(set).display()
+                        ),
+                        sources().join("\n\n"),
+                    )
+                }
                 _ => (
                     "C64 SID COLLECTION".to_string(),
                     format!("Commodore 64 tunes · {} · {}", megabytes(bytes), hvsc::LICENSE),
@@ -405,6 +476,10 @@ impl Resources {
                 (None, Some((_, Job::Unpack(_)))) if mine => "installed · unpacking the tunes…".into(),
                 _ if have && row == MIDI && state.note.is_empty() && !indexed() => "installed · not catalogued yet".into(),
                 _ if have && row == SID && state.note.is_empty() && !hvsc::unpacked() => "installed · not unpacked yet".into(),
+                (Some((done, total)), Some((_, Job::Patches(_)))) if mine => format!("installed · unpacking {done}/{total} files"),
+                (None, Some((_, Job::Patches(_)))) if mine => "installed · unpacking…".into(),
+                (Some((done, total)), Some((_, Job::PatchesVerify(_)))) if mine => format!("verifying {done}/{total} files"),
+                _ if have && matches!(row, PATCHES | PATCHES_OLD) && state.note.is_empty() && !tandem_library::unpacked(patch_set(row)) => "installed · not unpacked yet".into(),
                 _ if have && state.note.is_empty() => "installed: every file at its pinned size".into(),
                 _ if have => format!("installed · {}", state.note),
                 _ if state.note.is_empty() => "not installed".into(),

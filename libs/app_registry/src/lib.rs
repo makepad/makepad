@@ -85,13 +85,14 @@ pub struct AppEntry {
 mod table;
 mod launch;
 pub mod child_env;
+pub mod machine;
 
 pub use launch::{cargo_progress, launch_argv, read_output, AppLaunch, BuildPolicy, LaunchEvent, LaunchKind, ProcessOutput, Runner};
 
 impl AppEntry {
     /// What the checkout helpers need to know about it.
     pub fn target(&self) -> AppTarget<'static> {
-        AppTarget { id: self.id, package: self.package, dir: self.dir, bin: self.bin, manifest: self.manifest }
+        AppTarget { id: self.id, package: self.package, dir: self.dir, bin: self.bin, manifest: self.manifest, profile: "release" }
     }
 }
 
@@ -104,11 +105,16 @@ pub struct AppTarget<'a> {
     pub dir: &'a str,
     pub bin: &'a str,
     pub manifest: Option<&'a str>,
+    /// The cargo profile it is built with: `release` for an app, `host` for the JIT tool (the
+    /// workspace's thin-LTO native profile every launcher of `makepad run` uses).
+    pub profile: &'a str,
 }
 
-/// The `makepad` tool that runs apps from source (`makepad run`, tools/run).
+/// The `makepad` tool that runs apps from source (`makepad run`, tools/run). Every launcher
+/// builds and starts it the one way, `cargo run --profile host -p makepad-run --bin makepad`
+/// in the checkout, so the JIT that runs an app is always the checkout's own.
 pub const MAKEPAD_RUN: AppTarget<'static> =
-    AppTarget { id: "makepad-run", package: "makepad-run", dir: "tools/run", bin: "makepad", manifest: None };
+    AppTarget { id: "makepad-run", package: "makepad-run", dir: "tools/run", bin: "makepad", manifest: None, profile: "host" };
 
 /// Every app: the menu rows first, in menu order (table.rs enforces it),
 /// then the hidden ones.
@@ -250,7 +256,7 @@ pub fn checkout_binary(app: &AppTarget, root: &Path, target_dir: Option<&OsStr>)
         .unwrap_or_else(|| root.to_path_buf());
     // A relative target dir is cargo's, relative to where it runs: here.
     let target = target_dir.map(|dir| workspace.join(dir)).unwrap_or_else(|| workspace.join("target"));
-    let mut path = target.join("release").join(app.bin);
+    let mut path = target.join(app.profile).join(app.bin);
     if cfg!(windows) {
         path.set_extension("exe");
     }
@@ -325,7 +331,7 @@ pub fn build_argv_features(app: &AppTarget, root: &Path, features: &str) -> (Pat
 /// `cargo run` of `app` from the checkout `root` with `app_args` after `--`: cargo
 /// recompiles what changed (nothing, when fresh) and then starts the app in its place
 /// (Unix: the same process). How a checkout launches a hosted app: it never starts a
-/// binary older than its sources. Release, always.
+/// binary older than its sources. Release (the JIT tool: the `host` profile), always.
 pub fn run_argv(app: &AppTarget, root: &Path, app_args: &[String]) -> (PathBuf, Vec<String>) {
     run_argv_features(app, root, "", app_args)
 }
@@ -403,8 +409,12 @@ pub fn cargo_command(program: &Path, args: &[String], root: &Path) -> Command {
 fn cargo_argv(app: &AppTarget, root: &Path, features: &str) -> (PathBuf, Vec<String>) {
     let manifest = root.join(app.manifest.unwrap_or("Cargo.toml"));
     let manifest = manifest.to_string_lossy();
-    let args = ["build", "--release", "--manifest-path", &manifest, "-p", app.package, "--bin", app.bin];
-    let mut args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+    let mut args: Vec<String> = vec!["build".to_string()];
+    match app.profile {
+        "release" => args.push("--release".to_string()),
+        profile => args.extend(["--profile".to_string(), profile.to_string()]),
+    }
+    args.extend(["--manifest-path", &manifest, "-p", app.package, "--bin", app.bin].iter().map(|arg| arg.to_string()));
     if !features.trim().is_empty() {
         args.extend(["--features".to_string(), features.trim().to_string()]);
     }
@@ -639,7 +649,7 @@ mod tests {
         assert!(!envs.iter().any(|(k, _)| k == "CARGO_TARGET_DIR"), "the target dir stays the launcher's");
         assert_eq!(command.get_current_dir(), Some(root));
         let args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert_eq!(&args[..2], ["build", "--release"]);
+        assert_eq!(&args[..3], ["build", "--profile", "host"], "the JIT tool builds with the host profile");
     }
 
     /// From a checkout an app starts as `cargo run --release` of exactly its binary, the

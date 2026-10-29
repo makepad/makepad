@@ -8,15 +8,18 @@ use super::{Log, ServerShared};
 use makepad_desk_link::xr::*;
 use makepad_widgets::makepad_platform::makepad_hal::{self, xr_remote as hal};
 use makepad_widgets::makepad_platform::video_file::{StreamVideoCodec, VideoStreamEncoder};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// A headset on a loop (`MAKEPAD_XR_REMOTE_SELFTEST=1`): synthetic poses at 72 Hz (the head turning
 /// slowly, eyes 64 mm apart, ±45° fields) drive the app's XR window exactly as a headset's would, and
 /// every picture is encoded and measured, then dropped (and counted decoded at once). The server
-/// side's numbers without a headset.
-pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2]) {
+/// side's numbers without a headset. It ends like a session when the server is switched off
+/// (`stop`: its listener's). A headset that goes away, for tests: `MAKEPAD_XR_REMOTE_SELFTEST_POSES_S=n`
+/// sends poses for n seconds and then none (linked, idle: taken off, asleep), and
+/// `MAKEPAD_XR_REMOTE_SELFTEST_LINK_S=m` ends the session after m seconds (gone).
+pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<AtomicBool>) {
     let log = shared.log.clone();
     use makepad_hal::{buffers::Wire, XrEye, XrFrame, XrPose};
     let codec = if VideoStreamEncoder::caps().hevc { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
@@ -27,11 +30,30 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2]) {
     log(&format!("xr selftest: {}x{} {codec:?} in {} tile(s) on {}", core.size[0], core.size[1], core.tiles, core.description));
     hal::hal_xr_remote_enable();
     hal::hal_xr_remote_attach(eye[0], eye[1], 72_000);
+    *shared.live_headset.lock().unwrap() = Some(super::LiveHeadset { instance: 0, name: "Selftest headset".into(), session: 0 });
+    let secs = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<f64>().ok()).map(Duration::from_secs_f64);
+    let (poses_for, link_for) = (secs("MAKEPAD_XR_REMOTE_SELFTEST_POSES_S"), secs("MAKEPAD_XR_REMOTE_SELFTEST_LINK_S"));
     let _ = std::thread::Builder::new().name("xr-selftest".into()).spawn(move || {
         let start = Instant::now();
         let mut seq = 0u64;
         let mut stats = PumpStats::new();
-        loop {
+        let mut idle_told = false;
+        while !stop.load(Ordering::Acquire) {
+            if link_for.is_some_and(|d| start.elapsed() >= d) {
+                log("xr selftest: the headset went away");
+                break;
+            }
+            if poses_for.is_some_and(|d| start.elapsed() >= d) {
+                // linked and idle: no poses (the app is woken once, as by a session's loop)
+                if !idle_told {
+                    idle_told = true;
+                    log("xr selftest: the headset went idle (no poses)");
+                    std::thread::sleep(Duration::from_millis(super::FLOWING_NS / 1_000_000 + 10));
+                    shared.wake();
+                }
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
             seq += 1;
             let t = start.elapsed().as_secs_f32();
             let yaw = (t * 0.5).sin() * 0.6;
@@ -77,6 +99,12 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2]) {
                 shared.push_report(v);
             }
         }
+        // switched off: ended like a session (its encoders go with the core)
+        *shared.live_headset.lock().unwrap() = None;
+        shared.reports.lock().unwrap().clear();
+        core.stop();
+        shared.wake();
+        log("xr selftest: ended");
     });
 }
 

@@ -1,6 +1,6 @@
 //! The SCORE desk: one score, live-coded music (makepad-score-live), in
-//! three areas under a compact header (the score's name and state, its
-//! transport, the folds, save and the menu):
+//! three areas under the window's caption (`SynthCaption`: the score's name
+//! and state, its transport, the view toggles, save and the menu):
 //!
 //! - the code, each node a block with its lens under its first line
 //!   (`code/`): the score as written and played with;
@@ -45,6 +45,7 @@ use makepad_editor_panel::EditorPanelWidgetRefExt;
 use makepad_score_live::model::ScoreDoc;
 use makepad_score_live::{source, LiveConfig, LiveScore, Status};
 use makepad_widgets::*;
+use makepad_widgets::value_input::ValueInputWidgetRefExt;
 use tabs::{PaneTabs, TabsAction};
 
 script_mod! {
@@ -59,10 +60,8 @@ script_mod! {
     let Meta = Label{width: Fit text: "" draw_text +: {color: stage.muted text_style: theme.font_regular{font_size: 8}}}
     let Tool = StageButton{width: Fit height: 24 margin: 0 padding: Inset{left: 9 right: 9} spacing: 6
         draw_text +: {text_style: theme.font_regular{font_size: 8.5}}}
-    let IconTool = StageIconButton{margin: 0}
     let GlyphTool = StageButton{width: 26 height: 24 margin: 0 padding: 0 align: Align{x: 0.5 y: 0.5}
         draw_text +: {text_style: theme.font_code{font_size: 8.5}}}
-    let Divider = SolidView{width: 1 height: 16 margin: Inset{left: 4 right: 4} draw_bg +: {color: stage.separator}}
     let MenuRow = StageButton{width: Fill height: 28 margin: 0 padding: Inset{left: 10 right: 10} align: Align{x: 0.0 y: 0.5}
         draw_bg +: {color: stage.menu color_hover: stage.control_hover border_size: 0.0}
         draw_text +: {text_style: theme.font_regular{font_size: 9}}}
@@ -75,46 +74,70 @@ script_mod! {
 
     let DeskSplit = Splitter{size: 8 draw_bg +: {color_bg: stage.bg color: stage.border_hi color_hover: stage.accent color_drag: stage.accent splitter_pad: 3 bar_size: 28}}
 
+    // The caption's controls: flat icons that light while on (`lit_flat`).
+    let CapIcon = StageIconButton{width: 28 height: 24 margin: 0 icon_walk: Walk{width: 13 height: Fit}
+        draw_bg +: {color: #0000 color_focus: #0000 color_hover: stage.control_hover color_down: stage.control_down border_size: 0.0 border_radius: 4.0}
+        draw_icon +: {color: stage.secondary}}
+    let CapDivider = SolidView{width: 1 height: 14 margin: Inset{left: 6 right: 6} draw_bg +: {color: stage.separator}}
+
+    // The window's caption (app-drawn on every platform, `main.rs` hangs
+    // it in the window's caption bar): the score's name and state, its
+    // transport, the view toggles, save and the menu. The window buttons
+    // keep their place (the traffic lights' room at the left on macOS and
+    // under a macOS-style WM, the buttons at the right on Windows and Linux);
+    // the empty bar, the name and the state drag the window.
+    mod.widgets.SynthCaption = View{width: Fill height: Fill flow: Right spacing: 0 padding: Inset{left: 8 right: 6} align: Align{y: 0.5}
+        // The document. The two sides share the bar equally, so the
+        // transport stays centred whatever the name and state say.
+        View{width: Fill height: Fill flow: Right spacing: 7 align: Align{y: 0.5} clip_x: true
+            Icon{icon_walk: Walk{width: 12 height: Fit} draw_icon +: {color: stage.faint svg: crate_resource("self:resources/icons/note.svg")}}
+            score_name := Label{width: Fit text: "" draw_text +: {color: stage.text_hi text_style: theme.font_bold{font_size: 10}}}
+            View{width: Fit height: Fit flow: Right spacing: 5 margin: Inset{left: 2} align: Align{y: 0.5}
+                score_dot := RoundedView{visible: false width: 6 height: 6 show_bg: true draw_bg +: {color: stage.amber border_radius: 3.0}}
+                score_state := Meta{}}
+        }
+        // The transport: play/pause, stop, where it is and its tempo.
+        // Seeking and loops are the tracker's.
+        score_transport := View{width: Fit height: Fill flow: Right spacing: 1 margin: Inset{left: 12 right: 12} align: Align{y: 0.5}
+            Tip{text: "Play the score (Space)"
+                score_play := CapIcon{icon_walk: Walk{width: 10 height: Fit} draw_icon +: {svg: crate_resource("self:resources/icons/play.svg")}}}
+            Tip{text: "Pause: the transport holds its position (Space)"
+                score_pause := CapIcon{visible: false icon_walk: Walk{width: 10 height: Fit} draw_icon +: {svg: crate_resource("self:resources/icons/pause.svg")}}}
+            Tip{text: "Stop and return to the first bar"
+                score_stop := CapIcon{icon_walk: Walk{width: 9 height: Fit} draw_icon +: {svg: crate_resource("self:resources/icons/stop.svg")}}}
+            RoundedView{width: Fit height: 22 flow: Right spacing: 8 margin: Inset{left: 6} padding: Inset{left: 10 right: 2} align: Align{y: 0.5} show_bg: true
+                draw_bg +: {color: stage.well border_color: stage.line_faint border_size: 1 border_radius: 4}
+                score_pos := Label{width: 30 text: "1.1" draw_text +: {color: stage.text_hi text_style: theme.font_code{font_size: 9}}}
+                score_time := Label{width: Fit text: "0:00" draw_text +: {color: stage.muted text_style: theme.font_code{font_size: 8}}}
+                SolidView{width: 1 height: 12 draw_bg +: {color: stage.separator}}
+                Tip{text: "Tempo: drag sideways to change it, click to type (writes the score's clock)"
+                    score_bpm := ValueInput{width: 64 height: 18 min: 20 max: 400 step: 0.5 precision: 0 suffix: " bpm"
+                        arrow_color: stage.faint
+                        draw_bg +: {color: #0000 border_color: #0000}
+                        draw_text +: {color: stage.secondary text_style: theme.font_code{font_size: 8 line_spacing: 1.0}}
+                        text_input +: {draw_bg +: {border_size: 0.0} draw_text +: {text_style: theme.font_code{font_size: 8}}}}}
+            }
+        }
+        // The view toggles, save and the menu.
+        View{width: Fill height: Fill flow: Right spacing: 1 align: Align{x: 1.0 y: 0.5}
+            score_fold_code_tip := Tip{text: ""
+                score_fold_code := CapIcon{draw_icon +: {svg: crate_resource("self:resources/icons/fold.svg")}}}
+            score_fold_lens_tip := Tip{text: ""
+                score_fold_lens := CapIcon{draw_icon +: {svg: crate_resource("self:resources/icons/lens.svg")}}}
+            score_side_tip := Tip{text: ""
+                score_side := CapIcon{draw_icon +: {svg: crate_resource("self:resources/icons/side.svg")}}}
+            CapDivider{}
+            score_save_tip := Tip{text: "Save the score into the library (⌘S)"
+                score_save := CapIcon{icon_walk: Walk{width: 12 height: Fit} draw_icon +: {svg: crate_resource("self:resources/icons/save.svg")}}}
+            Tip{text: "New score, open, export, the song library and resources"
+                score_more := CapIcon{icon_walk: Walk{width: 12 height: Fit} draw_icon +: {svg: crate_resource("self:resources/icons/more.svg")}}}
+        }
+    }
+
     // The desk: the code (with its lenses) and the side panel's tabs over
     // the tracker. Every bar drags; the side panel and the tracker fold.
     mod.widgets.SynthDesk = View{width: Fill height: Fill flow: Overlay
       View{width: Fill height: Fill flow: Down spacing: 8 padding: 8
-        score_head := RoundedView{width: Fill height: 42 flow: Right spacing: 4 padding: Inset{left: 14 right: 8} align: Align{y: 0.5} show_bg: true
-            draw_bg +: {color: stage.panel border_color: stage.separator border_size: 1 border_radius: 6}
-            View{width: Fit height: Fit margin: Inset{right: 4} Icon{icon_walk: Walk{width: 13 height: Fit} draw_icon +: {color: stage.faint svg: crate_resource("self:resources/icons/note.svg")}}}
-            score_name_tip := Tip{text: ""
-                score_name := Label{width: Fit text: "" draw_text +: {color: stage.text_hi text_style: theme.font_bold{font_size: 10.5}}}}
-            score_state_tip := Tip{text: "" View{width: Fit height: 18 flow: Right spacing: 6 margin: Inset{left: 6 bottom: 2} align: Align{y: 0.5}
-                score_dot := RoundedView{visible: false width: 7 height: 7 show_bg: true draw_bg +: {color: stage.amber border_radius: 3.5}}
-                score_state := Meta{}}}
-            Divider{margin: Inset{left: 12 right: 8}}
-            // The transport: play/pause, stop, where it is and its tempo.
-            // Seeking and loops are the tracker's.
-            score_transport := View{width: Fit height: 26 flow: Right spacing: 2 align: Align{y: 0.5}
-                Tip{text: "Play the score (Space)"
-                    score_play := IconTool{icon_walk: Walk{width: 10 height: Fit} draw_icon +: {svg: crate_resource("self:resources/icons/play.svg")}}}
-                Tip{text: "Pause: the transport holds its position"
-                    score_pause := IconTool{visible: false icon_walk: Walk{width: 10 height: Fit} draw_icon +: {svg: crate_resource("self:resources/icons/pause.svg")}}}
-                Tip{text: "Stop and return to the first bar"
-                    score_stop := IconTool{icon_walk: Walk{width: 9 height: Fit} draw_icon +: {svg: crate_resource("self:resources/icons/stop.svg")}}}
-                Tip{text: "Where the score is: bar.beat, and the time of its length once through (of the cycle, for a score of loops)"
-                    RoundedView{width: Fit height: 24 flow: Right spacing: 8 margin: Inset{left: 8} padding: Inset{left: 10 right: 10} align: Align{y: 0.5} show_bg: true
-                        draw_bg +: {color: stage.well border_color: stage.line_faint border_size: 1 border_radius: 4}
-                        score_pos := Label{width: 34 text: "1.1" draw_text +: {color: stage.text_hi text_style: theme.font_code{font_size: 9.5}}}
-                        score_time := Label{width: Fit text: "0:00" draw_text +: {color: stage.muted text_style: theme.font_code{font_size: 8}}}
-                        SolidView{width: 1 height: 12 draw_bg +: {color: stage.separator}}
-                        score_bpm := Label{width: Fit text: "120 bpm" draw_text +: {color: stage.secondary text_style: theme.font_code{font_size: 8}}}}}
-            }
-            View{width: Fill height: 1}
-            Tip{text: "Fold every block's code: the lenses show, a rack of the code's own controls (again: unfold)" score_fold_code := Tool{text: "Fold code"}}
-            Tip{text: "Hide every lens: only the code shows (again: show them)" score_fold_lens := Tool{text: "Hide lenses"}}
-            Divider{}
-            score_save_tip := Tip{text: "Save the score into the library (⌘S)"
-                score_save := IconTool{icon_walk: Walk{width: 11 height: Fit} draw_icon +: {svg: crate_resource("self:resources/icons/save.svg")}}}
-            Tip{text: "The side panel: the AI chat, the library and the editor panel" score_side := Tool{text: "Side"}}
-            Tip{text: "New score, open, export, the song library and resources"
-                score_more := IconTool{icon_walk: Walk{width: 11 height: Fit} draw_icon +: {svg: crate_resource("self:resources/icons/more.svg")}}}
-        }
         tracker_split := DeskSplit{width: Fill height: Fill axis: SplitterAxis.Vertical align: SplitterAlign.FromB(300) fold: SplitterCollapse.B min_horizontal: 240 max_horizontal: 160
           a: View{width: Fill height: Fill
             side_split := DeskSplit{width: Fill height: Fill axis: SplitterAxis.Horizontal align: SplitterAlign.FromB(380) fold: SplitterCollapse.B min_vertical: 420 max_vertical: 300
@@ -192,7 +215,7 @@ script_mod! {
         }
       }
         // The document menu, hung under ⋯.
-        score_menu := View{visible: false width: Fill height: Fill align: Align{x: 1.0 y: 0.0} padding: Inset{top: 46 right: 8}
+        score_menu := View{visible: false width: Fill height: Fill align: Align{x: 1.0 y: 0.0} padding: Inset{top: 4 right: 8}
             score_menu_box := RoundedView{width: 280 height: Fit flow: Down padding: 4 show_bg: true
                 draw_bg +: {color: stage.menu border_color: stage.border_hi border_size: 1.0 border_radius: 5.0}
                 score_new := MenuRow{text: "New score"}
@@ -203,6 +226,7 @@ script_mod! {
                 score_songs := MenuRow{text: "Song library…"}
                 score_open_music := MenuRow{text: "Open a music file…"}
                 score_resources := MenuRow{text: "Resources…"}
+                score_about := MenuRow{text: "About Synth…"}
                 MenuRule{}
                 score_make := MenuRow{text: "Make the editor panel's tweaks (AI)"}
                 score_menu_focus := MenuRow{text: "Fold code to the panel"}
@@ -210,6 +234,7 @@ script_mod! {
             }
         }
         resources_panel := mod.widgets.SynthResourcesPanel{}
+        about_panel := mod.widgets.SynthAboutPanel{}
         song_library_panel := mod.widgets.SynthSongLibraryPanel{}
     }
 }
@@ -238,6 +263,8 @@ impl Side {
 /// How far ahead of the output the composer schedules, in seconds: more
 /// than a UI frame and a device buffer, so a loop never starts late.
 const LOOKAHEAD: f64 = 0.15;
+/// Tempo changes closer together than this (seconds) are one undo step.
+const BPM_JOIN: f64 = 0.8;
 /// The pause after typing before the text is applied.
 const SETTLE: f64 = 0.35;
 
@@ -279,7 +306,7 @@ pub struct Desk {
     loops_shown: Vec<(u64, u64)>,
     /// The Code view's folds (per score).
     folds: Folds,
-    /// The header's document menu is open.
+    /// The caption's document menu is open.
     menu: bool,
     /// The position's arrangement (built per revision).
     arrangement: transport::Arrangement,
@@ -289,6 +316,8 @@ pub struct Desk {
     /// The tempo the transport was last given, and shown.
     bpm_written: Option<f64>,
     bpm_shown: Option<f64>,
+    /// When the caption's tempo was last written (a scrub joins one undo step).
+    bpm_typed_at: f64,
     /// The open score as a document.
     pub document: Document,
     /// The last splice gesture (a drag's steps are one undo group).
@@ -337,7 +366,7 @@ impl Default for Desk {
             engine: Engine::default(), live: None, module: None, source: String::new(), revision: 0, sent: String::new(), variant_live: None, played: String::new(),
             doc: None, status: Status::default(), typed: false, timer: Timer::default(), frame: NextFrame::default(), idle: Timer::default(),
             started: false, code_shown: 0, loops_shown: Vec::new(), folds: Folds::default(), menu: false, arrangement: transport::Arrangement::default(), arranged: 0, looping: None,
-            bpm_written: None, bpm_shown: None, document: Document::default(), gesture: 0, panel: panel::ScorePanel::default(), vary: vary::VaryDesk::default(),
+            bpm_written: None, bpm_shown: None, bpm_typed_at: f64::NEG_INFINITY, document: Document::default(), gesture: 0, panel: panel::ScorePanel::default(), vary: vary::VaryDesk::default(),
             vary_ai_made: None, batch: batch::BatchDesk::default(), tracker: Default::default(), preview_main: true, audition: None, auditioned: None, audition_rx: None, code_preview: None,
             jobs: run::Jobs::default(), lib: lib_pane::LibPane::default(), samples_asked: Default::default(), save_clean: None, gm_known: None,
             side_open: true, side: Side::Chat,
@@ -345,7 +374,7 @@ impl Default for Desk {
     }
 }
 
-/// A header toggle's face: lit (`accent_wash`, accent ink) while on.
+/// A pane toggle's face: lit (`accent_wash`, accent ink) while on.
 fn lit(cx: &mut Cx, ui: &WidgetRef, id: &[LiveId], on: bool) {
     let p = makepad_look::palette::get(cx);
     let (face, hover, ink) = if on { (p.accent_wash, p.accent_wash, p.accent) } else { (p.control, p.control_hover, p.label) };
@@ -357,6 +386,34 @@ fn lit(cx: &mut Cx, ui: &WidgetRef, id: &[LiveId], on: bool) {
         draw_text +: {color: #(ink) color_focus: #(ink) color_hover: #(ink)}
     });
     button.redraw(cx);
+}
+
+/// A caption toggle's face: lit (`accent_wash`, accent ink) while on, flat
+/// (the caption's own ground, a face only under the pointer) while off.
+fn lit_flat(cx: &mut Cx, ui: &WidgetRef, id: &[LiveId], on: bool) {
+    let p = makepad_look::palette::get(cx);
+    let (face, hover, ink) = if on { (p.accent_wash, p.accent_wash, p.accent) } else { (0, p.control_hover, p.secondary) };
+    let (face, hover, ink) = (Vec4f::from_u32(face), Vec4f::from_u32(hover), Vec4f::from_u32(ink));
+    let mut button = ui.button(cx, id);
+    script_apply_eval!(cx, button, {
+        draw_bg +: {color: #(face) color_focus: #(face) color_hover: #(hover)}
+        draw_icon +: {color: #(ink) color_focus: #(ink) color_hover: #(ink)}
+    });
+    button.redraw(cx);
+}
+
+/// Set a `Tip`'s text when it changed.
+fn set_tip(cx: &mut Cx, ui: &WidgetRef, id: &[LiveId], text: &str) {
+    if let Some(mut tip) = ui.widget(cx, id).borrow_mut::<makepad_widgets::tip::Tip>() {
+        if tip.text != text {
+            tip.text = text.to_string();
+        }
+    }
+}
+
+/// The node a score's tempo is written to: its `Clock{}`.
+fn clock_node(src: &str) -> Option<String> {
+    source::outline(src).nodes.into_iter().find(|n| n.type_name == "Clock").map(|n| n.name)
 }
 
 /// The blank score a new document starts from.
@@ -396,21 +453,25 @@ impl Desk {
         if let Some(mut tabs) = ui.widget(cx, ids!(side_tabs)).borrow_mut::<PaneTabs>() {
             tabs.set_selected(cx, Side::ALL.iter().position(|s| *s == side).unwrap_or(0));
         }
-        lit(cx, ui, ids!(score_side), open);
+        lit_flat(cx, ui, ids!(score_side), open);
+        set_tip(cx, ui, ids!(score_side_tip), if open { "Hide the side panel: the AI chat, the library and the editor panel" } else { "Show the side panel: the AI chat, the library and the editor panel" });
         ui.redraw(cx);
     }
 
-    /// The header's fold-all toggles, as the folds are.
+    /// The caption's fold-all toggles, as the folds are: the code toggle
+    /// lit while every block's code is folded, the lens toggle while the
+    /// lenses show.
     fn show_folds(&mut self, cx: &mut Cx, ui: &WidgetRef) {
-        lit(cx, ui, ids!(score_fold_code), self.folds.code_all);
-        lit(cx, ui, ids!(score_fold_lens), self.folds.lens_all);
-        let (code, lens) = (if self.folds.code_all { "Unfold code" } else { "Fold code" }, if self.folds.lens_all { "Show lenses" } else { "Hide lenses" });
-        if ui.button(cx, ids!(score_fold_code)).text() != code {
-            ui.button(cx, ids!(score_fold_code)).set_text(cx, code);
-        }
-        if ui.button(cx, ids!(score_fold_lens)).text() != lens {
-            ui.button(cx, ids!(score_fold_lens)).set_text(cx, lens);
-        }
+        lit_flat(cx, ui, ids!(score_fold_code), self.folds.code_all);
+        lit_flat(cx, ui, ids!(score_fold_lens), !self.folds.lens_all);
+        let code = if self.folds.code_all {
+            "Unfold the code: every block shows its code again"
+        } else {
+            "Fold the code: every block shows only its lens, a rack of the code's own controls"
+        };
+        let lens = if self.folds.lens_all { "Show the lenses under each block's first line" } else { "Hide the lenses: only the code shows" };
+        set_tip(cx, ui, ids!(score_fold_code_tip), code);
+        set_tip(cx, ui, ids!(score_fold_lens_tip), lens);
     }
 
     /// Fold the code as the folds say, and (while the panel's focus is on)
@@ -472,6 +533,11 @@ impl Desk {
             self.transport(false);
             self.seek(0.0, 0.0);
         }
+        // The caption's tempo: written to the score's clock, a scrub's steps
+        // one undo step, each sounding as it lands.
+        if let Some(bpm) = ui.widget(cx, ids!(score_bpm)).as_value_input().changed(actions) {
+            self.write_bpm(cx, ui, bpm);
+        }
         if ui.button(cx, ids!(score_more)).clicked(actions) {
             self.set_menu(cx, ui, !self.menu);
         }
@@ -489,7 +555,7 @@ impl Desk {
             self.folds.set_all(false, on);
             self.folds_changed(cx, ui);
         }
-        let picked = [ids!(score_new), ids!(score_save_as), ids!(score_open_file), ids!(score_export), ids!(score_songs), ids!(score_open_music), ids!(score_resources), ids!(score_make), ids!(score_menu_focus), ids!(score_preview_main)].into_iter().any(|id| ui.button(cx, id).clicked(actions));
+        let picked = [ids!(score_new), ids!(score_save_as), ids!(score_open_file), ids!(score_export), ids!(score_songs), ids!(score_open_music), ids!(score_resources), ids!(score_about), ids!(score_make), ids!(score_menu_focus), ids!(score_preview_main)].into_iter().any(|id| ui.button(cx, id).clicked(actions));
         if picked {
             self.set_menu(cx, ui, false);
         }
@@ -559,6 +625,23 @@ impl Desk {
                 }
                 ScoreEditorAction::None => {}
             }
+        }
+    }
+
+    /// Write `bpm` into the score's `Clock{}`; changes within a moment of
+    /// each other (a scrub) join one undo step. A score without a clock
+    /// keeps its tempo, and the field shows it again.
+    fn write_bpm(&mut self, cx: &mut Cx, ui: &WidgetRef, bpm: f64) {
+        let now = cx.seconds_since_app_start();
+        let splice = clock_node(&self.source).and_then(|node| source::set_field(&self.source, &node, "bpm", &source::fmt_num(bpm, 1)).ok());
+        match splice {
+            Some(s) => {
+                let joined = now - self.bpm_typed_at < BPM_JOIN;
+                self.bpm_typed_at = now;
+                self.splice_joined(cx, ui, s.start, s.end, &s.text, joined);
+            }
+            // The field shows the score's tempo again on the next turn.
+            None => self.bpm_shown = None,
         }
     }
 
@@ -703,7 +786,7 @@ impl Desk {
             self.code_shown = 0;
         }
         self.pump_panel(cx, ui);
-        self.pump_header(cx, ui);
+        self.pump_caption(cx, ui);
         self.pump_transport(cx, ui);
         self.pump_code(cx, ui);
         self.pump_tracker(cx, ui);
@@ -712,8 +795,8 @@ impl Desk {
         }
     }
 
-    /// The header: the title, the state, the save button.
-    fn pump_header(&mut self, cx: &mut Cx, ui: &WidgetRef) {
+    /// The caption's document: the title, the state, the save button.
+    fn pump_caption(&mut self, cx: &mut Cx, ui: &WidgetRef) {
         let p = makepad_look::palette::get(cx);
         let edited = self.document.edited(&self.source);
         let (dot, state, tip) = match (&self.document.path, edited) {
@@ -733,15 +816,16 @@ impl Desk {
         if ui.label(cx, ids!(score_name)).text() != shown {
             ui.label(cx, ids!(score_name)).set_text(cx, &shown);
         }
-        if let Some(mut name_tip) = ui.widget(cx, ids!(score_name_tip)).borrow_mut::<makepad_widgets::tip::Tip>() {
-            name_tip.text = title;
-        }
         if ui.label(cx, ids!(score_state)).text() != state {
             ui.label(cx, ids!(score_state)).set_text(cx, &state);
         }
-        if let Some(mut state_tip) = ui.widget(cx, ids!(score_state_tip)).borrow_mut::<makepad_widgets::tip::Tip>() {
-            state_tip.text = tip;
-        }
+        // The state's explanation rides on save (the name and the state are
+        // the caption's drag area, so they carry no tip of their own).
+        let key = if matches!(cx.os_type(), OsType::Macos | OsType::Ios(_)) { "⌘S" } else { "Ctrl+S" };
+        set_tip(cx, ui, ids!(score_save_tip), &format!("Save the score into the library ({key}) · {state}: {tip}"));
+        // The window's own title (the Dock, the task switcher, the WM's
+        // window list) names the score.
+        ui.window(cx, ids!(main_window)).set_title(cx, &format!("{title} · Makepad Synth"));
         let clean = self.document.path.is_some() && !edited;
         if self.save_clean != Some(clean) {
             self.save_clean = Some(clean);
@@ -757,7 +841,7 @@ impl Desk {
         }
     }
 
-    /// The header's transport: play/pause, the position and the tempo.
+    /// The caption's transport: play/pause, the position and the tempo.
     fn pump_transport(&mut self, cx: &mut Cx, ui: &WidgetRef) {
         if let Some(doc) = &self.doc {
             if self.arranged != self.revision {
@@ -785,7 +869,7 @@ impl Desk {
         if ui.button(cx, ids!(score_play)).visible() == playing {
             ui.button(cx, ids!(score_play)).set_visible(cx, !playing);
             ui.button(cx, ids!(score_pause)).set_visible(cx, playing);
-            lit(cx, ui, ids!(score_pause), true);
+            lit_flat(cx, ui, ids!(score_pause), true);
         }
         let a = &self.arrangement;
         let at = self.song_beat().unwrap_or(self.status.beat);
@@ -801,7 +885,12 @@ impl Desk {
         let bpm = if self.status.playing && self.status.bpm > 0.0 { self.status.bpm } else { self.bpm_written.unwrap_or(self.status.bpm.max(1.0)) };
         if self.bpm_shown.is_none_or(|b| (b - bpm).abs() > 0.05) {
             self.bpm_shown = Some(bpm);
-            ui.label(cx, ids!(score_bpm)).set_text(cx, &format!("{} bpm", source::fmt_num(bpm, 1)));
+            let field = ui.widget(cx, ids!(score_bpm));
+            if let Some(mut input) = field.borrow_mut::<makepad_widgets::value_input::ValueInput>() {
+                // A whole tempo shows whole; one with a fraction shows it.
+                input.precision = if (bpm - bpm.round()).abs() > 0.05 { 1.0 } else { 0.0 };
+            }
+            field.as_value_input().set_value(cx, bpm);
         }
     }
     /// The composer, feeding the app's slot.
@@ -943,11 +1032,11 @@ impl Desk {
         }
     }
 
-    /// Open or close the header's ⋯ menu.
+    /// Open or close the caption's ⋯ menu.
     fn set_menu(&mut self, cx: &mut Cx, ui: &WidgetRef, open: bool) {
         self.menu = open;
         ui.view(cx, ids!(score_menu)).set_visible(cx, open);
-        lit(cx, ui, ids!(score_more), open);
+        lit_flat(cx, ui, ids!(score_more), open);
         ui.redraw(cx);
     }
 

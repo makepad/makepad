@@ -147,6 +147,17 @@ impl Cx {
         self.hal.frames.w.window_visuals(hal_window_id(xr.window), on as u32, [0.0; 4]);
     }
 
+    /// `Cx::xr_haptic`: the HAL plays it on the XR window's controller, a headset of this
+    /// process's own. A remote headset's window (offscreen XR: the stream server sends the
+    /// pulse down its link) is not told.
+    pub(crate) fn hal_xr_haptic(&mut self, pulse: crate::event::xr::XrHapticPulse) {
+        if self.hal_info_flags() & makepad_hal::info_flags::XR_OFFSCREEN != 0 {
+            return;
+        }
+        let Some(xr) = self.hal.xr.as_ref() else { return };
+        self.hal.frames.w.xr_haptic(hal_window_id(xr.window), pulse.hand as u32, pulse.amplitude, (pulse.seconds * 1e6) as u32);
+    }
+
     /// `Cx::xr_present_eyes`: the eyes of the XR window's next frame.
     pub(crate) fn hal_xr_present_eyes(&mut self, eyes: [makepad_hal::XrEye; 2], focus_m: f32) {
         let Some(xr) = self.hal.xr.as_ref() else { return };

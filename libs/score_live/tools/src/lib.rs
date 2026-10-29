@@ -66,8 +66,26 @@ pub const MORPH_PARAMS: ScoreToolDef = ScoreToolDef {
     args_doc: r#"{"groups": ["osc_a", "lfo1"]}"#,
 };
 
+pub const TANDEM_PARAMS: ScoreToolDef = ScoreToolDef {
+    name: "tandem.params",
+    api_name: "tandem_params",
+    description: "Tandem, the hybrid synth node that plays the hybrid patch library (`Tandem{patch: \"Leads/Name\" a_filter1_cutoff: 12}`): how it is written, its parameters one line each (`storage_name range =default: meaning`, raw units) for some groups (a_scene a_osc1 a_mixer a_filters a_env1 a_lfo0 ... b_* fx1..fx16 global; a prefix with * matches), what an oscillator type's param0..6 mean (`osc_type`), what an effect type's p0..p11 mean (`fx_type`), and the type lists (filters with subtypes, waveshapers, effects, mod sources).",
+    input: r#"{"type": "object", "properties": {"groups": {"type": "array", "items": {"type": "string", "description": "a group, or a prefix with *"}, "description": "only these groups (default: none, just the structure and type lists)"}, "osc_type": {"type": "integer", "minimum": 0, "maximum": 11, "description": "describe this oscillator type's slots"}, "fx_type": {"type": "integer", "minimum": 0, "maximum": 31, "description": "describe this effect type's slots"}}}"#,
+    output: r#"{"type": "object", "additionalProperties": true, "properties": {"structure": {"type": "string", "description": "how a Tandem is written"}, "params": {"type": "string", "description": "one line a parameter, by group"}, "types": {"type": "string", "description": "the type lists"}, "osc": {"type": "string", "description": "the oscillator type's slots"}, "fx": {"type": "string", "description": "the effect type's slots"}, "groups": {"type": "array", "items": {"type": "string", "description": "a group name"}, "description": "every group"}}, "required": ["structure"]}"#,
+    args_doc: r#"{"groups": ["a_filters"], "osc_type": 2}"#,
+};
+
+pub const TANDEM_PATCHES: ScoreToolDef = ScoreToolDef {
+    name: "tandem.patches",
+    api_name: "tandem_patches",
+    description: "Find patches of the hybrid patch library (an opt-in download in Resources) for `Tandem{patch: …}`: by words in their category and name (\"bass\", \"pad warm\", \"Jacky Ligon\"), best first, each as `Category/Name` with its category. Without a query: the categories and their patch counts. Says so when the library is not installed.",
+    input: r#"{"type": "object", "properties": {"query": {"type": "string", "description": "words to match in category and name"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "how many (default 20)"}}}"#,
+    output: r#"{"type": "object", "additionalProperties": true, "properties": {"installed": {"type": "boolean", "description": "whether a library is installed"}, "patches": {"type": "array", "items": {"type": "string", "description": "Category/Name"}, "description": "best first"}, "categories": {"type": "array", "items": {"type": "string", "description": "category: count"}, "description": "when no query"}}, "required": ["installed"]}"#,
+    args_doc: r#"{"query": "warm pad", "limit": 10}"#,
+};
+
 /// Every Score tool, in the order registries list them.
-pub const TOOLS: [ScoreToolDef; 5] = [GUIDE, CHECK, LISTEN, INSTRUMENT_SEARCH, MORPH_PARAMS];
+pub const TOOLS: [ScoreToolDef; 7] = [GUIDE, CHECK, LISTEN, INSTRUMENT_SEARCH, MORPH_PARAMS, TANDEM_PARAMS, TANDEM_PATCHES];
 
 /// The Score tool named `name`, dotted or underscored.
 pub fn find(name: &str) -> Option<&'static ScoreToolDef> {

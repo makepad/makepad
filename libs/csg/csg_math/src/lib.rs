@@ -1,6 +1,7 @@
 #![cfg_attr(feature = "nightly", feature(portable_simd))]
 
 pub mod bbox;
+pub mod fast_hash;
 pub mod mat4;
 pub mod plane;
 pub mod portable;

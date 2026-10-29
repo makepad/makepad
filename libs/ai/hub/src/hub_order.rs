@@ -27,7 +27,7 @@ pub fn host_of(base: &str) -> &str {
 }
 
 /// This host's primary address (the one a packet off this machine would leave from).
-fn own_lan_ip() -> Option<IpAddr> {
+pub fn own_lan_ip() -> Option<IpAddr> {
     static IP: std::sync::OnceLock<Option<IpAddr>> = std::sync::OnceLock::new();
     *IP.get_or_init(|| {
         let socket = UdpSocket::bind("0.0.0.0:0").ok()?;

@@ -19,7 +19,40 @@ pub fn sdf_to_mesh(
 ) -> TriMesh {
     let sdf: Arc<dyn Sdf3 + Send + Sync> = Arc::new(sdf);
     let grid = SdfGrid3::from_sdf(sdf.clone(), min, max, depth);
-    mesh_from_grid(&grid, sdf.as_ref())
+    // The cells of the top two levels' 64 subtrees are built in parallel
+    // (each one's vertices need normals: several field evaluations each);
+    // the result is the sequential octree.
+    let octree = cells_parallel(grid.root, grid.min, grid.max, 0, sdf.clone(), 2);
+    mesh_from_cells(&octree)
+}
+
+fn cells_parallel(node: Node, min: Vec3d, max: Vec3d, depth: usize, sdf: Arc<dyn Sdf3 + Send + Sync>, levels: usize) -> Cell {
+    let children = match node {
+        Node::Branch { children } if levels > 0 => *children,
+        node => return Cell::from_grid(&node, min, max, depth, sdf.as_ref()),
+    };
+    let mid = min.lerp(max, 0.5);
+    let tasks: Vec<_> = children
+        .into_iter()
+        .enumerate()
+        .map(|(i, child)| {
+            let (lo, hi) = child_box(min, mid, max, i);
+            let sdf = sdf.clone();
+            move || cells_parallel(child, lo, hi, depth + 1, sdf, levels - 1)
+        })
+        .collect();
+    let cells: Vec<Cell> = makepad_csg_math::thread_pool::parallel_for(tasks);
+    let cells: [Cell; 8] = cells.try_into().unwrap_or_else(|_| unreachable!("eight children"));
+    Cell::Branch { child_cells: Box::new(cells) }
+}
+
+/// Child `i`'s box (bit 0: x, bit 1: y, bit 2: z upper half), as in [`Cell::from_grid`].
+fn child_box(min: Vec3d, mid: Vec3d, max: Vec3d, i: usize) -> (Vec3d, Vec3d) {
+    let pick = |bit: usize, lo: f64, m: f64, hi: f64| if i & bit == 0 { (lo, m) } else { (m, hi) };
+    let (x0, x1) = pick(1, min.x, mid.x, max.x);
+    let (y0, y1) = pick(2, min.y, mid.y, max.y);
+    let (z0, z1) = pick(4, min.z, mid.z, max.z);
+    (Vec3d::new(x0, y0, z0), Vec3d::new(x1, y1, z1))
 }
 
 /// Sequential counterpart of [`sdf_to_mesh`] for a borrowed field. The
@@ -33,46 +66,67 @@ pub fn sdf_to_mesh_ref(
     depth: usize,
 ) -> TriMesh {
     let grid = SdfGrid3::from_sdf_ref(sdf, min, max, depth);
-    mesh_from_grid(&grid, sdf)
+    mesh_from_cells(&from_grid(&grid, sdf))
 }
 
-fn mesh_from_grid(grid: &SdfGrid3, sdf: &dyn Sdf3) -> TriMesh {
-    let octree = from_grid(grid, sdf);
+fn mesh_from_cells(octree: &Cell) -> TriMesh {
 
     let mut vertices: Vec<Vec3d> = Vec::new();
     let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut ids: makepad_csg_math::fast_hash::FastMap<[u64; 3], u32> = Default::default();
 
     octree.traverse_leaf_edges(&mut |edge: Edge| {
-        if let Some(Some(_)) = edge.sign_change_direction() {
-            if let Some(vs) = edge.vertices() {
-                let emit_tri = |verts: &mut Vec<Vec3d>,
-                                tris: &mut Vec<[u32; 3]>,
-                                a: (Vec3d, Vec3d),
-                                b: (Vec3d, Vec3d),
-                                c: (Vec3d, Vec3d)| {
-                    let base = verts.len() as u32;
-                    verts.push(a.0);
-                    verts.push(b.0);
-                    verts.push(c.0);
-                    let geo_normal = (b.0 - a.0).cross(c.0 - a.0);
-                    let avg_sdf_normal = a.1 + b.1 + c.1;
-                    if geo_normal.dot(avg_sdf_normal) < 0.0 {
-                        tris.push([base, base + 2, base + 1]);
-                    } else {
-                        tris.push([base, base + 1, base + 2]);
-                    }
-                };
-                match vs.len() {
-                    3 => {
-                        emit_tri(&mut vertices, &mut triangles, vs[0], vs[1], vs[2]);
-                    }
-                    4 => {
-                        emit_tri(&mut vertices, &mut triangles, vs[0], vs[1], vs[2]);
-                        emit_tri(&mut vertices, &mut triangles, vs[2], vs[1], vs[3]);
-                    }
-                    _ => {}
+        let Some(Some(inside_low)) = edge.sign_change_direction() else { return };
+        let Some(vs) = edge.vertices() else { return };
+        // A cell's vertex is shared by every quad around it: index it once by
+        // its exact position (what the weld below would do first).
+        let mut index = |p: Vec3d| -> u32 {
+            let next = vertices.len() as u32;
+            *ids.entry([p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]).or_insert_with(|| {
+                vertices.push(p);
+                next
+            })
+        };
+        if vs.len() == 4 {
+            // The four cells sit in a 2x2 layout around the edge (cyclic order
+            // 0, 1, 3, 2) and each vertex inside its own cell, so the quad's
+            // area along the edge's axis gives the layout's turn; the surface
+            // faces from the inside end of the edge to the outside end. Both
+            // triangles of the quad, and every quad, wind by that rule alone.
+            let along = {
+                let a = (vs[3].0 - vs[0].0).cross(vs[2].0 - vs[1].0);
+                [a.x, a.y, a.z][edge.axis]
+            };
+            if along != 0.0 {
+                let ids = [index(vs[0].0), index(vs[1].0), index(vs[2].0), index(vs[3].0)];
+                if (along > 0.0) == inside_low {
+                    triangles.push([ids[0], ids[1], ids[2]]);
+                    triangles.push([ids[1], ids[3], ids[2]]);
+                } else {
+                    triangles.push([ids[0], ids[2], ids[1]]);
+                    triangles.push([ids[1], ids[2], ids[3]]);
                 }
+                return;
             }
+        }
+        // A degenerate layout: wind by the field's normals.
+        let mut emit_tri = |a: (Vec3d, Vec3d), b: (Vec3d, Vec3d), c: (Vec3d, Vec3d)| {
+            let (ia, ib, ic) = (index(a.0), index(b.0), index(c.0));
+            let geo_normal = (b.0 - a.0).cross(c.0 - a.0);
+            let avg_sdf_normal = a.1 + b.1 + c.1;
+            if geo_normal.dot(avg_sdf_normal) < 0.0 {
+                triangles.push([ia, ic, ib]);
+            } else {
+                triangles.push([ia, ib, ic]);
+            }
+        };
+        match vs.len() {
+            3 => emit_tri(vs[0], vs[1], vs[2]),
+            4 => {
+                emit_tri(vs[0], vs[1], vs[2]);
+                emit_tri(vs[2], vs[1], vs[3]);
+            }
+            _ => {}
         }
     });
 
@@ -164,7 +218,11 @@ impl Cell {
                         }
                         n.normalize()
                     };
-                    Some((compute_vertex(&pns), avg_normal))
+                    // Kept inside its cell: the quads around it then wind
+                    // consistently (see mesh_from_cells).
+                    let v = compute_vertex(&pns);
+                    let v = Vec3d::new(v.x.clamp(min.x, max.x), v.y.clamp(min.y, max.y), v.z.clamp(min.z, max.z));
+                    Some((v, avg_normal))
                 };
 
                 Cell::Leaf {

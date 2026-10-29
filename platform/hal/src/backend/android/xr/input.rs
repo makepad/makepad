@@ -38,6 +38,20 @@ impl CxOpenXrInputs {
         Some(([left_controller, right_controller], [left_hand, right_hand]))
     }
 
+    /// A buzz on a controller (`hand` 0 left, 1 right): `HalCmd::XrHaptic`.
+    pub fn apply_haptic(&self, xr: &LibOpenXr, session: XrSession, hand: u32, amplitude: f32, duration_us: u32) {
+        let path = if hand == 0 { self.left_controller.path } else { self.right_controller.path };
+        let info = XrHapticActionInfo { ty: XrStructureType::HAPTIC_ACTION_INFO, next: std::ptr::null(), action: self.actions.haptic_action, subaction_path: path };
+        let buzz = XrHapticVibration {
+            ty: XrStructureType::HAPTIC_VIBRATION,
+            next: std::ptr::null(),
+            duration: XrDuration(duration_us as i64 * 1000),
+            frequency: 0.0,
+            amplitude: amplitude.clamp(0.0, 1.0),
+        };
+        unsafe { (xr.xrApplyHapticFeedback)(session, &info, &buzz) }.log_error("xrApplyHapticFeedback");
+    }
+
     /// Each controller's grip and aim located at `time` with their velocities, as
     /// `locate_hand_grips` gives them (the spaces `poll` reads: the held or the detached
     /// controller's). The actions must have been synced (`poll`).
@@ -95,6 +109,8 @@ struct CxOpenXrInputActions {
     touch_thumbrest_action: XrAction,
     aim_pose_action: XrAction,
     grip_pose_action: XrAction,
+    /// Both controllers' haptic output (`apply_haptic`).
+    haptic_action: XrAction,
 }
 
 pub struct CxOpenXrInputs {
@@ -670,6 +686,14 @@ impl CxOpenXrInputs {
             "",
             &hand_paths,
         )?;
+        let haptic_action = XrAction::new(
+            xr,
+            action_set,
+            XrActionType::VIBRATION_OUTPUT,
+            "haptic",
+            "",
+            &hand_paths,
+        )?;
         let grip_pose_action = XrAction::new(
             xr,
             action_set,
@@ -785,6 +809,8 @@ impl CxOpenXrInputs {
                 click_menu_action,
                 "/user/hand/left/input/menu/click",
             )?,
+            XrActionSuggestedBinding::new(xr, instance, haptic_action, "/user/hand/left/output/haptic")?,
+            XrActionSuggestedBinding::new(xr, instance, haptic_action, "/user/hand/right/output/haptic")?,
             XrActionSuggestedBinding::new(
                 xr,
                 instance,
@@ -1002,6 +1028,7 @@ impl CxOpenXrInputs {
             touch_thumbrest_action,
             aim_pose_action,
             grip_pose_action,
+            haptic_action,
         };
 
         Ok(CxOpenXrInputs {

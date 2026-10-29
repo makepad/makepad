@@ -425,7 +425,7 @@ pub use {
         window::{
             CxWindowPool, MacosWindowChrome, MacosWindowConfig, MacosWindowKind, MacosWindowLevel,
             ScriptWindowHandle, WaylandDecorationPreference, WindowBackdrop, WindowHandle,
-            WindowIcon, WindowIconBuffer, WindowId, WindowVisuals,
+            WindowIcon, WindowIconBuffer, WindowId, WindowVisuals, badge_window_title, test_lane,
         },
         window_snapshot::WindowSnapshotState,
         xr_tsdf::{

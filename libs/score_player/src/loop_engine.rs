@@ -7,6 +7,7 @@
 use crate::event::{Event, EventKind, NoteOpts};
 use makepad_audio_synth::ironfish::{Ironfish, IronfishPatch};
 use makepad_audio_synth::morph::{Morph, MorphPatch, MorphSources};
+use makepad_audio_synth::tandem::{program::Program as TandemProgram, Tandem};
 use makepad_audio_synth::instrument::{Control, Instrument as NativeInstrument};
 use makepad_audio_synth::instruments::InstrumentKind;
 use makepad_audio_synth::recipe::Recipe;
@@ -191,6 +192,9 @@ pub enum Inst {
     /// Morph, the wavetable synth: its voices and rack live in the loop's
     /// engine; a new patch (another `Arc`) plays from the next chunk.
     Morph { key: u64, patch: Arc<MorphPatch>, src: Arc<MorphSources> },
+    /// Tandem, the hybrid synth: its compiled patch (built off the audio
+    /// thread); its two scenes and effects live in the loop's engine.
+    Tandem { key: u64, prog: Arc<TandemProgram> },
     /// An audio shader instrument: its voices live in the loop's engine;
     /// `params` are (index, value) pairs set on it.
     Shader { key: u64, shader: AudioShaderRef, params: Arc<[(u16, f32)]>, mono: bool },
@@ -222,7 +226,7 @@ pub enum Inst {
 impl Inst {
     pub fn key(&self) -> u64 {
         match self {
-            Inst::Synth { key, .. } | Inst::Drums { key, .. } | Inst::Sampler { key, .. } | Inst::Ironfish { key, .. } | Inst::Morph { key, .. } | Inst::Shader { key, .. } | Inst::Voice { key, .. } | Inst::Native { key, .. } | Inst::Midi { key, .. } | Inst::Input { key, .. } => *key,
+            Inst::Synth { key, .. } | Inst::Drums { key, .. } | Inst::Sampler { key, .. } | Inst::Ironfish { key, .. } | Inst::Morph { key, .. } | Inst::Tandem { key, .. } | Inst::Shader { key, .. } | Inst::Voice { key, .. } | Inst::Native { key, .. } | Inst::Midi { key, .. } | Inst::Input { key, .. } => *key,
             #[cfg(not(target_arch = "wasm32"))]
             Inst::Neural { key, .. } => *key,
             Inst::Silent => 0,
@@ -279,6 +283,8 @@ pub struct LoopEngine {
     iron_offs: Box<[(f64, u8)]>,
     /// A Morph loop's synth (its notes' ends share `iron_offs`).
     morph: Option<Box<Morph>>,
+    /// A Tandem loop's synth (its notes' ends share `iron_offs`).
+    tandem: Option<Box<Tandem>>,
     /// A shader loop's instrument; per voice (end beat, serial); the
     /// params last set (their list's address).
     shader: Option<Box<ShaderInst>>,
@@ -363,6 +369,7 @@ impl LoopEngine {
             iron: None,
             iron_offs: Box::new([]),
             morph: None,
+            tandem: None,
             shader: None,
             shader_voices: Box::new([]),
             shader_handles: Box::new([]),
@@ -450,6 +457,12 @@ impl LoopEngine {
         }
         if let Inst::Morph { patch, src, .. } = inst {
             engine.morph = Some(Box::new(Morph::new(rate, patch.clone(), src.clone())));
+            engine.iron_offs = vec![(f64::INFINITY, 0); MAX_IRON_HELD].into_boxed_slice();
+        }
+        if let Inst::Tandem { prog, .. } = inst {
+            let mut t = Box::new(Tandem::new(rate));
+            t.set_program(prog.clone());
+            engine.tandem = Some(t);
             engine.iron_offs = vec![(f64::INFINITY, 0); MAX_IRON_HELD].into_boxed_slice();
         }
         if let Inst::Shader { shader, params, .. } = inst {
@@ -1053,6 +1066,70 @@ impl LoopEngine {
         self.morph = Some(morph);
     }
 
+    /// A Tandem loop's chunk: its notes on and off on their frames (as a
+    /// Morph loop's), on the pass's tempo.
+    fn render_tandem(&mut self, prog: &Arc<TandemProgram>, l: &mut [f32], r: &mut [f32], frames: usize, t: &Tempo) {
+        let Some(mut synth) = self.tandem.take() else { return };
+        if !Arc::ptr_eq(synth.program(), prog) {
+            synth.set_program(prog.clone());
+        }
+        if t.per_frame > 0.0 {
+            synth.set_tempo(t.per_frame * synth.sample_rate() as f64 * 60.0);
+        }
+        if t.moving() {
+            let beat1 = self.take_events(frames, t);
+            for (index, (off, _)) in self.iron_offs.iter().enumerate() {
+                if *off < beat1 && self.nacts < MAX_LOOP_ACTS {
+                    let f = (t.frame_of(*off) - 1e-6).ceil().max(0.0) as usize;
+                    self.acts[self.nacts] = Act { frame: f.min(frames - 1) as u16, event: None, release: index as u8 };
+                    self.nacts += 1;
+                }
+            }
+        }
+        self.acts[..self.nacts].sort_unstable_by_key(|a| (a.frame, a.event.is_some()));
+        let mut at = 0usize;
+        for a in 0..=self.nacts {
+            let end = if a < self.nacts { self.acts[a].frame as usize } else { frames };
+            if end > at {
+                synth.render(&mut l[at..end], &mut r[at..end]);
+                at = end;
+            }
+            if a < self.nacts {
+                let act = self.acts[a];
+                match act.event {
+                    None => {
+                        let (_, note) = self.iron_offs[act.release as usize];
+                        self.iron_offs[act.release as usize] = (f64::INFINITY, 0);
+                        synth.note_off(0, note, 64);
+                    }
+                    Some(event) => {
+                        if matches!(event.kind, EventKind::Program(_) | EventKind::Pedal) {
+                            continue;
+                        }
+                        let note = event.note.round().clamp(0.0, 127.0) as u8;
+                        let velocity = (event.vel * 127.0).round().clamp(1.0, 127.0) as u8;
+                        for off in self.iron_offs.iter_mut().filter(|(_, held)| *held == note) {
+                            if off.0.is_finite() {
+                                synth.note_off(0, note, 64);
+                                *off = (f64::INFINITY, 0);
+                            }
+                        }
+                        synth.note_on(0, note, velocity);
+                        let len = if event.dur > 0.0 { event.dur as f64 } else { HELD_DEFAULT_BEATS };
+                        match self.iron_offs.iter_mut().find(|(off, _)| !off.is_finite()) {
+                            Some(slot) => *slot = (event.beat + len, note),
+                            None => {
+                                synth.note_off(0, note, 64);
+                                self.dropped += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.tandem = Some(synth);
+    }
+
     /// An Ironfish loop's chunk: its notes on and off on their frames.
     fn render_iron(&mut self, patch: &IronfishPatch, l: &mut [f32], r: &mut [f32], frames: usize, t: &Tempo) {
         let Some(mut iron) = self.iron.take() else { return };
@@ -1130,6 +1207,7 @@ impl LoopEngine {
         match inst {
             Inst::Ironfish { patch, .. } => return self.render_iron(patch, l, r, frames, t),
             Inst::Morph { patch, src, .. } => return self.render_morph(patch, src, l, r, frames, rate, t),
+            Inst::Tandem { prog, .. } => return self.render_tandem(prog, l, r, frames, t),
             Inst::Shader { params, mono, .. } => return self.render_shader(params, *mono, l, r, frames, t),
             Inst::Voice { .. } => return self.render_voice(l, r, frames, rate, t),
             #[cfg(not(target_arch = "wasm32"))]

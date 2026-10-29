@@ -36,7 +36,7 @@ use makepad_desk_link::xr_pair::ServerPairing;
 use makepad_widgets::*;
 use pipeline::Live;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
@@ -47,6 +47,9 @@ pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
 pub(crate) fn nv12_planes() -> bool {
     cfg!(target_os = "windows")
 }
+
+/// How recent the headset's last pose is while its frames count as flowing (ns).
+pub(crate) const FLOWING_NS: u64 = 250_000_000;
 
 /// The display rates a headset may run at (Hz).
 pub const REFRESH_RATES: [u32; 4] = [72, 80, 90, 120];
@@ -104,6 +107,9 @@ pub(crate) struct ServerShared {
     pub(crate) view: AtomicU8,
     /// How many times the stream was turned on or off (the panel follows it).
     pub(crate) streaming_changes: AtomicU32,
+    /// When the headset's last pose came (`makepad_hal::clock_ns`; 0: none): the desktop is held
+    /// for the headset only while its frames flow (`frames_flowing`).
+    pub(crate) pose_ns: AtomicU64,
     /// The display rate asked of a streaming headset (Hz; 0: its own), the stream's bitrate
     /// (kbit/s, all tiles: the rate controller never goes above it).
     pub(crate) refresh_hz: AtomicU32,
@@ -116,6 +122,11 @@ pub(crate) struct ServerShared {
     /// The headset's per-second reports (`XrClientMsg::Report`), the last minute, oldest first.
     pub(crate) reports: Mutex<VecDeque<Vec<f32>>>,
     pub(crate) headset_settings: Mutex<HeadsetSettings>,
+    /// The app's controller buzzes (`Cx::xr_haptic`) for a headset that plays them, oldest
+    /// first; the session sends them down the link.
+    pub(crate) haptics: Mutex<Vec<makepad_widgets::makepad_platform::event::xr::XrHapticPulse>>,
+    /// The linked headset plays haptics (`codecs::HAPTICS` in its hello).
+    pub(crate) haptics_ok: AtomicBool,
     pub(crate) pairing: Mutex<Option<Arc<Mutex<ServerPairing>>>>,
     pub(crate) live_headset: Mutex<Option<LiveHeadset>>,
     pub(crate) server_line: Mutex<String>,
@@ -140,6 +151,7 @@ impl ServerShared {
             app_see_through: AtomicBool::new(true),
             view: AtomicU8::new(0),
             streaming_changes: AtomicU32::new(0),
+            pose_ns: AtomicU64::new(0),
             refresh_hz: AtomicU32::new(0),
             bitrate_kbps: AtomicU32::new(80_000),
             aa: AtomicU8::new(3),
@@ -147,6 +159,8 @@ impl ServerShared {
             mirror: AtomicBool::new(true),
             reports: Mutex::new(VecDeque::new()),
             headset_settings: Mutex::new(HeadsetSettings::DEFAULT),
+            haptics: Mutex::new(Vec::new()),
+            haptics_ok: AtomicBool::new(false),
             pairing: Mutex::new(None),
             live_headset: Mutex::new(None),
             server_line: Mutex::new(String::new()),
@@ -168,6 +182,14 @@ impl ServerShared {
             makepad_desk_link::xr_audio::set_streaming(on);
             self.wake();
         }
+    }
+
+    /// A headset is linked, the stream runs and its poses come (the last one within
+    /// `FLOWING_NS`): only then are the desktop windows held for it. A linked headset that sends
+    /// none (asleep, taken off, not visible) never holds the desktop.
+    pub(crate) fn frames_flowing(&self) -> bool {
+        let at = self.pose_ns.load(Ordering::Acquire);
+        at != 0 && self.streaming() && self.session_eye().is_some() && makepad_widgets::makepad_platform::makepad_hal::clock_ns().saturating_sub(at) < FLOWING_NS
     }
 
     pub(crate) fn streaming(&self) -> bool {
@@ -242,14 +264,26 @@ impl ServerShared {
 #[derive(Clone)]
 pub struct XrServer {
     pub(crate) shared: Arc<ServerShared>,
+    host: Arc<session::Host>,
 }
 
-/// The process's server in the Cx, and its listener (it runs until the process ends).
+/// The process's server in the Cx.
 #[derive(Default)]
 struct XrServerSlot {
     server: Option<XrServer>,
-    _listener: Option<session::Listener>,
     tried: bool,
+}
+
+/// The stream switch this launch starts with, when one is given: `MAKEPAD_XR_STREAM=off|on`
+/// (also `0|1`) or `--xr-stream=off|on`; it overrides the app's kept switch for this launch (a
+/// change in the panel is kept again).
+pub fn launch_enabled() -> Option<bool> {
+    let parse = |v: &str| match v.trim().to_ascii_lowercase().as_str() {
+        "off" | "0" | "false" | "no" => Some(false),
+        "on" | "1" | "true" | "yes" => Some(true),
+        _ => None,
+    };
+    std::env::args().find_map(|a| a.strip_prefix("--xr-stream=").and_then(parse)).or_else(|| std::env::var("MAKEPAD_XR_STREAM").ok().as_deref().and_then(parse))
 }
 
 impl XrServer {
@@ -270,9 +304,9 @@ impl XrServer {
             log("xr host: local network off for this instance (MAKEPAD_LAN=1 allows it)");
             return None;
         }
-        let server = XrServer { shared: Arc::new(ServerShared::new(log.clone())) };
+        let shared = Arc::new(ServerShared::new(log.clone()));
         let signal = SignalToUI::new();
-        *server.shared.wake.lock().unwrap() = Some(signal.clone());
+        *shared.wake.lock().unwrap() = Some(signal.clone());
         // the headset's room field, mirrored into this process's field store: the app's physics
         // (its hit-surface queries) collides with the real room
         let mirror: Mutex<Option<makepad_widgets::makepad_platform::xr_tsdf::BrickMirror>> = Mutex::new(None);
@@ -283,23 +317,23 @@ impl XrServer {
             mirror.get_or_insert_with(BrickMirror::default).apply(&makepad_widgets::makepad_platform::xr_tsdf::xr_tsdf_store(), BrickGrid { voxel_size, chunk_edge }, &bricks);
         });
         let pairing = makepad_widgets::makepad_platform::home::app_data_dir(app).map(|d| d.join("xr-pairing"));
-        let listener = match session::Listener::start(server.shared.clone(), app, pairing, world) {
-            Ok(l) => l,
+        let host = match session::Host::new(&shared, app, pairing, world) {
+            Ok(h) => Arc::new(h),
             Err(e) => {
                 log(&e);
                 return None;
             }
         };
-        if std::env::var("MAKEPAD_XR_REMOTE_SELFTEST").as_deref() == Ok("1") {
-            debug::selftest(server.shared.clone(), [1680, 1760]);
-        }
+        let server = XrServer { shared, host };
+        // on unless the app's kept switch or this launch says off
+        let on = launch_enabled().unwrap_or_else(|| crate::panel::XrStreamSettings::load(app).streaming);
+        server.set_enabled(on);
         // the app's XR pass frames from now on, and its sound
         let pack = sink::XrPack::new(cx, server.clone(), signal);
         makepad_widgets::makepad_draw::xr_sink::set_xr_frame_sink(cx, Box::new(pack));
         sink::tap_audio_output();
         let slot = cx.global::<XrServerSlot>();
         slot.server = Some(server.clone());
-        slot._listener = Some(listener);
         Some(server)
     }
 
@@ -308,13 +342,45 @@ impl XrServer {
         cx.global::<XrServerSlot>().server.clone()
     }
 
-    /// The stream on or off: off, the app draws no XR frames for the headset, nothing is
-    /// encoded or sent (sound neither), and the headset stops all of its stream work (it shows
-    /// the room). On again: a key picture first.
+    /// The desktop's stream switch: off, nothing of the server runs: it listens on no port,
+    /// answers no pairing probe, a linked headset is told and its session ends (its encoders
+    /// with it), the desktop paints as always. On: it listens again (on a new port; headsets
+    /// find it by their probe) and a paired headset links again. The pairing and the PIN are
+    /// kept either way. Also un-pauses ([`Self::set_streaming`]).
+    pub fn set_enabled(&self, on: bool) {
+        if on {
+            self.shared.set_streaming(true);
+        }
+        if let Err(e) = self.host.set_listening(&self.shared, on) {
+            (self.shared.log)(&format!("xr host: cannot listen: {e}"));
+        }
+        self.shared.wake();
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.host.listening()
+    }
+
+    /// The port headsets link to while on (None: off, or not bound yet).
+    pub fn port(&self) -> Option<u16> {
+        self.host.port()
+    }
+
+    /// The pause (the headset's left menu button, the panel's resume): paused, the headset
+    /// stays linked but the app draws no XR frames for it, nothing is encoded or sent (sound
+    /// neither), and the headset stops all of its stream work (it shows the room). On again: a
+    /// key picture first. The real off is [`Self::set_enabled`].
     pub fn set_streaming(&self, on: bool) {
         self.shared.set_streaming(on);
     }
 
+    /// A headset is linked and its frames flow (its poses come): the desktop's heavy views pause
+    /// for it. A linked headset that sends none (taken off, asleep) is idle.
+    pub fn frames_flowing(&self) -> bool {
+        self.shared.frames_flowing()
+    }
+
+    /// Not paused (see [`Self::set_streaming`]); true while switched off too.
     pub fn streaming(&self) -> bool {
         self.shared.streaming()
     }

@@ -729,6 +729,7 @@ pub(super) fn handles(cmd: &OsCmd) -> bool {
             | OsCmd::XrFrameEyes { .. }
             | OsCmd::XrPoseLead { .. }
             | OsCmd::XrRefreshRate { .. }
+            | OsCmd::XrHaptic { .. }
             | OsCmd::FileDialog { .. }
             | OsCmd::AppIcon { .. }
     )

@@ -250,6 +250,7 @@ fn take_pose(shared: &ServerShared, poses: &Mutex<VecDeque<(u64, Arrived)>>, seq
     if !shared.streaming() {
         return true;
     }
+    shared.pose_ns.store(makepad_hal::clock_ns(), Ordering::Release);
     let frame = masked.as_deref().unwrap_or(frame);
     {
         let mut poses = poses.lock().unwrap();

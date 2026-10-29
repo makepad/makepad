@@ -48,6 +48,9 @@ pub struct XrRenderEye {
 pub mod codecs {
     pub const H264: u32 = 1;
     pub const HEVC: u32 = 2;
+    /// Not a codec: the headset plays `XrServerMsg::Haptic` (a headset without it is never
+    /// sent one, so older headsets keep linking).
+    pub const HAPTICS: u32 = 1 << 16;
 }
 /// `Video::codec`.
 pub const CODEC_H264: u8 = 0;
@@ -207,6 +210,9 @@ pub enum XrServerMsg {
     /// at least `ahead` display frames past the headset's newest. Sent after the welcome and on
     /// every change.
     Headset { foveation: u8, eye_min_pct: u8, eye_max_pct: u8, multimodal: bool, occlusion: bool, ahead: u8 },
+    /// A short buzz on a controller (`hand` 0 left, 1 right; `amplitude` 0..1), the app's
+    /// `Cx::xr_haptic`. Only to a headset whose `Hello::codecs` has [`codecs::HAPTICS`].
+    Haptic { hand: u8, amplitude: f32, duration_us: u32 },
 }
 
 /// `Video::stages`: the desktop's durations of a picture (µs).
@@ -243,6 +249,7 @@ mod tag {
     pub const SEE_THROUGH: u8 = 110;
     pub const UNPAIRED: u8 = 111;
     pub const HEADSET: u8 = 112;
+    pub const HAPTIC: u8 = 113;
 }
 
 fn bad(ty: u8, side: &str) -> io::Error {
@@ -392,6 +399,11 @@ impl XrServerMsg {
                 o.u8(*foveation).u8(*eye_min_pct).u8(*eye_max_pct).u8(*multimodal as u8).u8(*occlusion as u8).u8(*ahead);
                 o.done()
             }
+            XrServerMsg::Haptic { hand, amplitude, duration_us } => {
+                let mut o = Out::new(HAPTIC);
+                o.u8(*hand).f32(*amplitude).u32(*duration_us);
+                o.done()
+            }
         }
     }
 
@@ -423,6 +435,7 @@ impl XrServerMsg {
             SEE_THROUGH => XrServerMsg::SeeThrough { on: r.u8()? != 0 },
             UNPAIRED => XrServerMsg::Unpaired,
             HEADSET => XrServerMsg::Headset { foveation: r.u8()?, eye_min_pct: r.u8()?, eye_max_pct: r.u8()?, multimodal: r.u8()? != 0, occlusion: r.u8()? != 0, ahead: r.u8()? },
+            HAPTIC => XrServerMsg::Haptic { hand: r.u8()?, amplitude: r.f32()?, duration_us: r.u32()? },
             _ => return Err(bad(ty, "server")),
         })
     }
@@ -762,6 +775,7 @@ mod tests {
             XrServerMsg::SeeThrough { on: true },
             XrServerMsg::Unpaired,
             XrServerMsg::Headset { foveation: 2, eye_min_pct: 70, eye_max_pct: 100, multimodal: true, occlusion: true, ahead: 4 },
+            XrServerMsg::Haptic { hand: 1, amplitude: 0.85, duration_us: 35_000 },
         ];
         for m in server {
             let mut inbox = Inbox::default();

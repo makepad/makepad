@@ -54,6 +54,10 @@ makepad-music-iter = { path = "../../libs/music_iter" }
 # and the installer of the downloads (the GM SoundFont, the datasets).
 makepad-midi-library = { path = "../../libs/midi_library" }
 makepad-model-install = { path = "../../libs/model_install" }
+# The hybrid patch library's archives: unpacked (zip / tar.gz) and hashed into a manifest.
+makepad-zip-file = { path = "../../libs/zip_file" }
+makepad-fast-inflate = { path = "../../libs/fast_inflate" }
+makepad-core-util = { path = "../../libs/core_util" }
 # The AI: the chat panel (the model the person picks) and the service its
 # tools ride on.
 makepad-app-aichat = { path = "../aichat", default-features = false, features = ["engine"] }

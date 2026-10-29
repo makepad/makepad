@@ -42,6 +42,7 @@ pub mod poly;
 pub mod recipe;
 pub mod reverb;
 pub mod spatial;
+pub mod tandem;
 pub mod svf;
 pub mod vehicle;
 pub mod wav;

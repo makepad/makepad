@@ -216,6 +216,7 @@ fn main() {
             XrServerMsg::Streaming { on } => println!("xr-probe: stream {}", if on { "on" } else { "off" }),
             XrServerMsg::SeeThrough { on } => println!("xr-probe: {}", if on { "mixed reality" } else { "VR" }),
             XrServerMsg::Headset { foveation, eye_min_pct, eye_max_pct, multimodal, occlusion, ahead } => println!("xr-probe: headset settings: foveation {foveation}, eyes {eye_min_pct}..{eye_max_pct}%, multimodal {multimodal}, occlusion {occlusion}, ahead {ahead}"),
+            XrServerMsg::Haptic { hand, amplitude, duration_us } => println!("xr-probe: haptic hand {hand} {amplitude:.2} for {duration_us} us"),
             XrServerMsg::Refused { reason } | XrServerMsg::Bye { reason } => break reason,
             XrServerMsg::Unpaired => {
                 if let Some(p) = pairing.as_mut() {

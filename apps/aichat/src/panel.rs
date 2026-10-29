@@ -17,7 +17,7 @@ use crate::bus::ServiceBus;
 use crate::gen::GenService;
 use crate::settings::AiSettings;
 #[cfg(feature = "engine")]
-use makepad_ai_services::engine::models::{build_model, fallback_choice, hub_generation, hub_row, provider_rows};
+use makepad_ai_services::engine::models::{build_model, fallback_choice, hub_generation, hub_rows, provider_rows};
 use makepad_ai_services::engine::NoModelWithReason;
 use makepad_ai_services::engine::{EngineCore, EngineEvent, ModelImage, ServiceRegistry};
 use makepad_ai_services::mcp::mcpb;
@@ -29,6 +29,7 @@ use makepad_ai_services::wire::{api_name, split_name, Risk, ToolDef};
 use makepad_widgets::makepad_platform::file_dialogs::{FileDialog, FileDialogAction};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use makepad_widgets::ai_slot::AiSlotRequests;
 use makepad_widgets::*;
 
@@ -37,6 +38,10 @@ pub const MAX_CHIPS: usize = 4;
 
 /// The picture picker's dialog id.
 const ATTACH_DIALOG: LiveId = live_id!(ai_chat_attach);
+/// The composer's picture chips, in order.
+const ATTACH_PICS: [LiveId; 4] = [live_id!(attach_pic0), live_id!(attach_pic1), live_id!(attach_pic2), live_id!(attach_pic3)];
+/// A sent line's picture slots.
+const USER_PICS: [LiveId; 4] = [live_id!(upic0), live_id!(upic1), live_id!(upic2), live_id!(upic3)];
 
 fn slot_id(slot: usize) -> LiveId {
     LiveId::from_str(&format!("f{slot}"))
@@ -104,6 +109,20 @@ script_mod! {
                 sdf.stroke(mix(self.ink, self.ink_hover, self.hover), 1.4)
                 return sdf.result
             }
+        }
+    }
+
+    // One picture waiting in the composer, with its own remove button.
+    let AttachPic = View{
+        visible: false
+        width: Fit
+        height: Fit
+        flow: Overlay
+        align: Align{x: 1.0 y: 0.0}
+        pic := Image{width: 48 height: 36 fit: ImageFit.Smallest}
+        Tip{
+            text: "Remove this picture"
+            pic_remove := CloseButtonSm{}
         }
     }
 
@@ -325,6 +344,19 @@ script_mod! {
                     height: Fit
                     padding: Inset{left: 10 right: 10 top: 7 bottom: 7}
                     draw_bg +: { color: theme.color_u_1 border_radius: 6.0 }
+                    flow: Down
+                    spacing: 6
+                    user_pics := View{
+                        visible: false
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 4
+                        upic0 := Image{visible: false width: 64 height: 48 fit: ImageFit.Smallest}
+                        upic1 := Image{visible: false width: 64 height: 48 fit: ImageFit.Smallest}
+                        upic2 := Image{visible: false width: 64 height: 48 fit: ImageFit.Smallest}
+                        upic3 := Image{visible: false width: 64 height: 48 fit: ImageFit.Smallest}
+                    }
                     user_text := Line{}
                 }
             }
@@ -432,6 +464,10 @@ script_mod! {
                         spacing: 8
                         margin: Inset{top: 6}
                         run_button := Button{ text: "Run" }
+                        Tip{
+                            text: "Run this tool without asking again until the chat is cleared"
+                            run_always := ButtonFlat{ text: "Always in this chat" }
+                        }
                         deny_button := ButtonFlat{ text: "Cancel" }
                     }
                 }
@@ -481,6 +517,10 @@ script_mod! {
                         spacing: 8
                         margin: Inset{top: 4}
                         req_run := Button{ text: "Make it" }
+                        Tip{
+                            text: "Run this tool without asking again until the chat is cleared"
+                            req_always := ButtonFlat{ text: "Always in this chat" }
+                        }
                         req_cancel := ButtonFlat{ text: "Cancel" }
                     }
                 }
@@ -580,6 +620,29 @@ script_mod! {
                 }
             }
 
+            // Tools the person allowed for this chat: they run without a card.
+            allowed_row := View{
+                visible: false
+                width: Fill
+                height: Fit
+                flow: Right
+                spacing: 6
+                padding: Inset{left: 4 right: 0 bottom: 2}
+                align: Align{y: 0.5}
+                allowed_label := Label{
+                    width: Fill
+                    text: ""
+                    draw_text +: {
+                        color: theme.color_text_meta
+                        text_style: theme.font_regular{font_size: 8.0}
+                    }
+                }
+                Tip{
+                    text: "Ask again before these run"
+                    allowed_clear := CloseButtonSm{}
+                }
+            }
+
             // Pictures that go with the next line.
             attach_row := View{
                 visible: false
@@ -589,7 +652,10 @@ script_mod! {
                 spacing: 8
                 padding: Inset{left: 4 right: 0 bottom: 2}
                 align: Align{y: 0.5}
-                attach_thumb := Image{width: 44 height: 32 fit: ImageFit.Smallest}
+                attach_pic0 := AttachPic{}
+                attach_pic1 := AttachPic{}
+                attach_pic2 := AttachPic{}
+                attach_pic3 := AttachPic{}
                 attach_label := Label{
                     width: Fill
                     text: ""
@@ -718,9 +784,23 @@ pub struct AiChatPanel {
     /// Dropped pictures being decoded on the task pool.
     #[rust]
     loading: Vec<TaskHandle<Result<Attachment, String>>>,
-    /// The attachment chip shows this many pictures.
+    /// The attachment chips show this many pictures.
     #[rust]
     attach_shown: Option<(usize, usize)>,
+    /// The clipboard read a paste in the composer asked for (a copied
+    /// picture is attached; text is the input's own paste).
+    #[rust]
+    paste_request: Option<u64>,
+    /// Pictures pasted so far (names them apart).
+    #[rust]
+    pasted: usize,
+    /// The small copies of the pictures each sent line carried, by entry
+    /// index, for the transcript.
+    #[rust]
+    sent_thumbs: HashMap<usize, Vec<Arc<[u8]>>>,
+    /// The entry whose pictures each transcript row last loaded.
+    #[rust]
+    pics_filled: HashMap<WidgetUid, usize>,
     /// Stage + ETA of the model's current load (None unless loading).
     #[rust]
     load_track: ProgressTracker,
@@ -770,6 +850,13 @@ pub struct AiChatPanel {
     /// focus set before the first draw lands on no area at all.
     #[rust]
     composer_focused: bool,
+    /// The host's key for keeping this conversation on disk ([`Self::keep_chat`]);
+    /// `None` keeps nothing.
+    #[rust]
+    chat_key: Option<String>,
+    /// The engine generation last written to the chat file.
+    #[rust]
+    chat_written: Option<u64>,
 }
 
 impl AiChatPanel {
@@ -834,6 +921,56 @@ impl AiChatPanel {
         cx.global::<crate::overlay::AiTranscript>().json = crate::overlay::transcript_json(state);
     }
 
+    /// Keep this conversation on disk under `key` (the host's product, `fab`):
+    /// it is written after every change once the turn settles, and comes
+    /// back when the app starts again (a crash, a live-patch relaunch) until
+    /// the person starts a new chat.
+    pub fn keep_chat(&mut self, key: &str) {
+        let key: String = key.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').take(64).collect();
+        if key.is_empty() || self.chat_key.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        self.chat_key = Some(key);
+        // An engine already up with nothing said yet takes the saved chat now.
+        let path = self.chat_path();
+        if let (Some(engine), Some(path)) = (self.engine.as_mut(), path) {
+            if engine.state().entries.is_empty() {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    let _ = engine.restore_chat(&text);
+                }
+            }
+        }
+    }
+
+    fn chat_path(&self) -> Option<std::path::PathBuf> {
+        let key = self.chat_key.as_ref()?;
+        AiSettings::path().and_then(|settings| settings.parent().map(|dir| dir.join("chats").join(format!("{key}.json"))))
+    }
+
+    /// Write the conversation when it moved and no turn is running. A temp
+    /// file renamed over the old one: a crash mid-write leaves the last good copy.
+    fn write_chat(&mut self) {
+        let Some(path) = self.chat_path() else { return };
+        let Some(engine) = self.engine.as_ref() else { return };
+        let state = engine.state();
+        if self.chat_written == Some(state.generation) || state.status.is_busy() || matches!(state.status, Status::Loading { .. }) {
+            return;
+        }
+        self.chat_written = Some(state.generation);
+        if state.entries.is_empty() {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+        let text = engine.saved_chat();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+
     fn settings(&mut self) -> &AiSettings {
         if self.settings.is_none() {
             self.settings = Some(AiSettings::load());
@@ -852,7 +989,7 @@ impl AiChatPanel {
             let host = std::env::var(PROVIDER_ENV).ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| self.provider.clone());
             if !host.trim().is_empty() {
                 settings.provider = ProviderChoice::from_slug(&host);
-                settings.local_only = settings.provider.is_local() || settings.provider.slug() == "none";
+                settings.local_only = !settings.provider.is_cloud();
             } else {
                 // The saved (or default) choice is not built into this app
                 // (Local without `localai`): start on the first provider
@@ -883,6 +1020,9 @@ impl AiChatPanel {
             // it, so provider facts go in through the core.
             self.provider_rows = rows.clone();
             core.set_provider_facts(settings.provider.clone(), rows, settings.local_only);
+            if let Some(text) = self.chat_path().and_then(|path| std::fs::read_to_string(path).ok()) {
+                let _ = core.restore_chat(&text);
+            }
             self.engine = Some(core);
             #[cfg(feature = "gen")]
             {
@@ -1050,9 +1190,11 @@ impl AiChatPanel {
             return;
         }
         let mut text = text;
+        let mut thumbs = Vec::new();
         if !self.attachments.is_empty() && !text.trim().starts_with('/') {
             let pictures = std::mem::take(&mut self.attachments);
             let names: Vec<String> = pictures.iter().map(|p| p.name.clone()).collect();
+            thumbs = pictures.iter().map(|p| p.thumb.clone().unwrap_or_else(|| p.png.clone())).collect();
             let images = pictures.into_iter().map(|p| ModelImage { label: format!("reference: {}", p.name), png: p.png }).collect();
             match self.ensure_engine().model_mut().attach_images(images) {
                 Ok(()) => {
@@ -1061,11 +1203,20 @@ impl AiChatPanel {
                     }
                     text.push_str(&format!("\n[attached: {}]", names.join(", ")));
                 }
-                Err(e) => self.note(cx, format!("the pictures were not sent: {e}")),
+                Err(e) => {
+                    thumbs.clear();
+                    self.note(cx, format!("the pictures were not sent: {e}"));
+                }
             }
             self.attach_shown = None;
         }
         self.ensure_engine().send(&text, now);
+        if !thumbs.is_empty() {
+            let entries = self.ensure_engine().state().entries.clone();
+            if let Some(at) = entries.iter().rposition(|entry| matches!(entry, Entry::User { .. })) {
+                self.sent_thumbs.insert(at, thumbs);
+            }
+        }
         let input = self.view.text_input(cx, ids!(input));
         input.set_text(cx, "");
         // The widget drops the keyboard on submit; a chat composer keeps
@@ -1202,7 +1353,7 @@ impl AiChatPanel {
             .set_id(ATTACH_DIALOG)
             .set_title("Attach a picture".to_string())
             .set_multiple(true)
-            .add_filter("Pictures".to_string(), vec!["png".into(), "jpg".into(), "jpeg".into(), "webp".into()]);
+            .add_filter("Pictures".to_string(), vec!["png".into(), "jpg".into(), "jpeg".into(), "webp".into(), "heic".into()]);
         cx.open_select_file_dialog(dialog);
     }
 }
@@ -1231,6 +1382,20 @@ impl Widget for AiChatPanel {
         // Esc in the composer: stop a running turn; with nothing running
         // and an empty composer, ask the host to hide the pane. An Esc
         // meant for the host (leaving a presentation, a menu) is not ours.
+        if let Event::KeyDown(ke) = event {
+            if ke.key_code == KeyCode::KeyV && ke.modifiers.is_primary() && cx.has_key_focus(self.view.text_input(cx, ids!(input)).area()) {
+                self.paste_request = Some(cx.read_clipboard());
+            }
+        }
+        if let Event::Clipboard(reply) = event {
+            if self.paste_request == Some(reply.request) {
+                self.paste_request = None;
+                self.pasted += 1;
+                if let Some(source) = Source::from_clipboard(&reply.content, self.pasted) {
+                    self.attach(cx, source);
+                }
+            }
+        }
         if let Event::KeyDown(ke) = event {
             let composing = cx.has_key_focus(self.view.text_input(cx, ids!(input)).area());
             if ke.key_code == KeyCode::Escape && composing {
@@ -1261,10 +1426,14 @@ impl Widget for AiChatPanel {
         #[cfg(feature = "engine")]
         if self.engine.is_some() && self.hub_seen != hub_generation() {
             self.hub_seen = hub_generation();
-            let row = hub_row();
-            if let Some(at) = self.provider_rows.iter().position(|r| r.choice.is_local()) {
-                if self.provider_rows[at] != row {
-                    self.provider_rows[at] = row;
+            let local_only = self.engine.as_ref().is_some_and(|e| e.state().local_only);
+            let rows = hub_rows(local_only);
+            // The hub's rows (the election's and one per other model) are
+            // one run in the menu: replaced together.
+            if let Some(at) = self.provider_rows.iter().position(|r| r.choice.is_hub()) {
+                let end = at + self.provider_rows[at..].iter().take_while(|r| r.choice.is_hub()).count();
+                if self.provider_rows[at..end] != rows[..] {
+                    self.provider_rows.splice(at..end, rows);
                     let engine = self.engine.as_mut().unwrap();
                     let (provider, local_only) = (engine.state().provider.clone(), engine.state().local_only);
                     engine.set_provider_facts(provider, self.provider_rows.clone(), local_only);
@@ -1296,6 +1465,7 @@ impl Widget for AiChatPanel {
             self.view.redraw(cx);
         }
         self.publish_transcript(cx);
+        self.write_chat();
         if busy {
             self.next_frame = cx.new_next_frame();
         }
@@ -1349,6 +1519,12 @@ impl Widget for AiChatPanel {
         let typed = !self.view.text_input(cx, ids!(input)).text().trim().is_empty() || !self.attachments.is_empty();
         self.view.widget(cx, ids!(send_button)).set_disabled(cx, !typed);
 
+        let allowed: Vec<String> = self.engine.as_ref().map(|engine| engine.allowed().map(str::to_string).collect()).unwrap_or_default();
+        self.view.view(cx, ids!(allowed_row)).set_visible(cx, !allowed.is_empty());
+        if !allowed.is_empty() {
+            self.view.label(cx, ids!(allowed_label)).set_text(cx, &format!("Runs without asking in this chat: {}", allowed.join(", ")));
+        }
+
         let shown = (self.attachments.len(), self.loading.len());
         if self.attach_shown != Some(shown) {
             self.attach_shown = Some(shown);
@@ -1358,8 +1534,16 @@ impl Widget for AiChatPanel {
                 names.push("reading…".into());
             }
             self.view.label(cx, ids!(attach_label)).set_text(cx, &names.join(", "));
-            if let Some(thumb) = self.attachments.last().and_then(|a| a.thumb.clone()) {
-                let _ = self.view.image(cx, ids!(attach_thumb)).load_png_from_data(cx, &thumb);
+            for (slot, id) in ATTACH_PICS.iter().enumerate() {
+                let chip = self.view.view(cx, &[*id]);
+                match self.attachments.get(slot) {
+                    Some(picture) => {
+                        chip.set_visible(cx, true);
+                        let thumb = picture.thumb.clone().unwrap_or_else(|| picture.png.clone());
+                        let _ = chip.image(cx, ids!(pic)).load_png_from_data(cx, &thumb);
+                    }
+                    None => chip.set_visible(cx, false),
+                }
             }
         }
 
@@ -1450,6 +1634,21 @@ impl Widget for AiChatPanel {
                     Entry::User { text } => {
                         let row = list.item(cx, index, id!(UserRow));
                         row.label(cx, ids!(user_text)).set_text(cx, text);
+                        let thumbs = self.sent_thumbs.get(&index);
+                        row.view(cx, ids!(user_pics)).set_visible(cx, thumbs.is_some());
+                        if self.pics_filled.get(&row.widget_uid()) != Some(&index) {
+                            self.pics_filled.insert(row.widget_uid(), index);
+                            for (slot, id) in USER_PICS.iter().enumerate() {
+                                let image = row.image(cx, &[*id]);
+                                match thumbs.and_then(|thumbs| thumbs.get(slot)) {
+                                    Some(png) => {
+                                        image.set_visible(cx, true);
+                                        let _ = image.load_png_from_data(cx, png);
+                                    }
+                                    None => image.set_visible(cx, false),
+                                }
+                            }
+                        }
                         row
                     }
                     Entry::Event(event) => {
@@ -1600,6 +1799,13 @@ impl AiChatPanel {
             }
             return true;
         }
+        if item.button(cx, ids!(req_always)).clicked(actions) {
+            let args = card.args(edits).to_json();
+            if self.ensure_engine().allow_for_chat(call_id, Some(args), now).is_ok() {
+                self.card_edits.remove(call_id);
+            }
+            return true;
+        }
         if item.button(cx, ids!(req_cancel)).clicked(actions) {
             let _ = self.ensure_engine().confirm_with(call_id, false, None, now);
             self.card_edits.remove(call_id);
@@ -1674,10 +1880,21 @@ impl WidgetMatchEvent for AiChatPanel {
             cx.widget_action(self.widget_uid(), AiChatPanelAction::SelectionCleared);
             self.view.redraw(cx);
         }
+        if self.view.button(cx, ids!(allowed_clear)).clicked(actions) {
+            self.ensure_engine().revoke(None);
+            self.view.redraw(cx);
+        }
         if self.view.button(cx, ids!(attach_clear)).clicked(actions) {
             self.attachments.clear();
             self.attach_shown = None;
             self.view.redraw(cx);
+        }
+        for (slot, id) in ATTACH_PICS.iter().enumerate() {
+            if self.view.view(cx, &[*id]).button(cx, ids!(pic_remove)).clicked(actions) && slot < self.attachments.len() {
+                self.attachments.remove(slot);
+                self.attach_shown = None;
+                self.view.redraw(cx);
+            }
         }
         if let Some(at) = self.view.drop_down(cx, ids!(provider_pick)).changed(actions) {
             if let Some(row) = self.provider_rows.get(at).cloned() {
@@ -1723,6 +1940,9 @@ impl WidgetMatchEvent for AiChatPanel {
                     self.view.redraw(cx);
                 } else if item.button(cx, ids!(run_button)).clicked(actions) {
                     self.ensure_engine().confirm(&call_id, true, now);
+                    self.view.redraw(cx);
+                } else if item.button(cx, ids!(run_always)).clicked(actions) {
+                    let _ = self.ensure_engine().allow_for_chat(&call_id, None, now);
                     self.view.redraw(cx);
                 } else if item.button(cx, ids!(deny_button)).clicked(actions) {
                     self.ensure_engine().confirm(&call_id, false, now);

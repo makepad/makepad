@@ -775,6 +775,7 @@ pub fn compile<E: Ext, B: Default>(slice: &OwnerSlice, generation: u64, incarnat
                     makepad_score_player::Inst::Ironfish { .. } => 1,
                     makepad_score_player::Inst::Shader { .. } => 2,
                     makepad_score_player::Inst::Morph { .. } => 8,
+                    makepad_score_player::Inst::Tandem { .. } => 9,
                     // A choir is made for its singers and style, and for a
                     // library singer that has (or has not yet) arrived.
                     makepad_score_player::Inst::Voice { .. } => {
@@ -1081,6 +1082,27 @@ fn loop_inst(node: &LiveNode) -> Result<makepad_score_player::Inst, PlanError> {
             let sample = |o: usize| names.get(o).filter(|n| !n.is_empty()).and_then(|n| crate::feed::samples::get(n)).map(|s| makepad_audio_synth::kit::osc::SampleBuf { data: s.left.clone(), rate: s.rate });
             let src = patch.sources([sample(0), sample(1), sample(2)]);
             Inst::Morph { key, patch: Arc::new(patch), src }
+        }
+        // Tandem: the library patch read and compiled here, off the audio
+        // thread, with the score's parameters set over it.
+        "tandem" => {
+            use makepad_audio_synth::tandem::{program::Program, LoadMode, Patch};
+            let path = text(node, "tandem_path").unwrap_or("");
+            let mut patch = if path.is_empty() {
+                Patch::init()
+            } else {
+                let bytes = std::fs::read(path).map_err(|e| PlanError::at(&node.id, Some("tandem_path"), format!("{path}: {e}")))?;
+                let stem = std::path::Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                Patch::from_fxp(&bytes, &stem, LoadMode::Patch).map_err(|e| PlanError::at(&node.id, Some("tandem_path"), e))?
+            };
+            for word in text(node, "tandem_set").unwrap_or("").split_whitespace() {
+                if let Some((k, v)) = word.split_once('=') {
+                    if let Ok(v) = v.parse::<f32>() {
+                        patch.set(k, v);
+                    }
+                }
+            }
+            Inst::Tandem { key, prog: Arc::new(Program::compile(&patch)) }
         }
         "shader" => {
             let (shader, params) = shader_of(node, makepad_score_player::shader::Kind::Instrument)?;

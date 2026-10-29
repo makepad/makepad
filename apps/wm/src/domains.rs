@@ -243,7 +243,7 @@ impl App {
                     client
                 };
                 if let Some(slot) = self.state_mut().clients.get_mut(&client) {
-                    slot.title = e.title.clone();
+                    slot.set_title(&e.title);
                     slot.ready = true;
                 }
                 self.with_domain_view(cx, client, |cx, v| v.child_window(cx, e));

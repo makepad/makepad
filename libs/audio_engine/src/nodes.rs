@@ -197,6 +197,8 @@ fn score_nodes() -> Vec<TypeDescriptor> {
             number("channel", 1.0, "A MIDI loop's channel (1-16)."),
             text("midi_port", "A MIDI loop's output (its name; empty: the first)."),
             text("morph", "Morph: its patch as text (key=value words, mod=src,dst,amount rows, fx=delay,reverb)."),
+            text("tandem_path", "Tandem: the library patch file it plays (empty: the init patch)."),
+            text("tandem_set", "Tandem: parameters set over the patch, `storage_name=value` words in raw units."),
             list("morph_src", "Morph: the samples its oscillators a, b, c read (registered sample names; empty: none)."),
             list("iron", "Ironfish: its settings, 0..1 each (-1 keeps the program's), in the score's order: cutoff resonance env attack decay sustain release sub noise glide crush delay chorus reverb output."),
             ParamDescriptor::control("amp", 0.8, 0.0, 4.0, "The loop's level; 1 is unity."),

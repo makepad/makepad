@@ -243,6 +243,7 @@ pub struct LibOpenXr {
     pub xrGetActionStateVector2f: TxrGetActionStateVector2f,
     pub xrGetActionStatePose: TxrGetActionStatePose,
     pub xrSyncActions: TxrSyncActions,
+    pub xrApplyHapticFeedback: TxrApplyHapticFeedback,
     pub xrResumeSimultaneousHandsAndControllersTrackingMETA:
         TxrResumeSimultaneousHandsAndControllersTrackingMETA,
     pub xrPauseSimultaneousHandsAndControllersTrackingMETA:
@@ -440,6 +441,7 @@ impl LibOpenXr {
             xrGetActionStateVector2f: get_proc_addr!(gipa, instance, TxrGetActionStateVector2f)?,
             xrGetActionStatePose: get_proc_addr!(gipa, instance, TxrGetActionStatePose)?,
             xrSyncActions: get_proc_addr!(gipa, instance, TxrSyncActions)?,
+            xrApplyHapticFeedback: get_proc_addr!(gipa, instance, TxrApplyHapticFeedback)?,
             xrResumeSimultaneousHandsAndControllersTrackingMETA: get_proc_addr!(
                 gipa,
                 instance,
@@ -885,6 +887,34 @@ pub type TxrGetActionStateBoolean = unsafe extern "C" fn(
     get_info: *const XrActionStateGetInfo,
     state: *mut XrActionStateBoolean,
 ) -> XrResult;
+
+pub type TxrApplyHapticFeedback = unsafe extern "C" fn(
+    session: XrSession,
+    haptic_action_info: *const XrHapticActionInfo,
+    haptic_feedback: *const XrHapticVibration,
+) -> XrResult;
+
+/// `XrHapticActionInfo`: which output action (and hand) a haptic plays on.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrHapticActionInfo {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub action: XrAction,
+    pub subaction_path: XrPath,
+}
+
+/// `XrHapticVibration`: a buzz of `duration` at `frequency` (Hz, 0: the runtime's) and
+/// `amplitude` (0..1).
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct XrHapticVibration {
+    pub ty: XrStructureType,
+    pub next: *const c_void,
+    pub duration: XrDuration,
+    pub frequency: f32,
+    pub amplitude: f32,
+}
 
 pub type TxrGetActionStateFloat = unsafe extern "C" fn(
     session: XrSession,

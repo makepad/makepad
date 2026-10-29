@@ -36,14 +36,23 @@ impl Status {
 pub enum ProviderChoice {
     /// The machine's own model through the hub election.
     Local,
+    /// One model an AI hub serves, by its hub id (`qwen3.5-4b`, or
+    /// `claude-cli`: the hub's own Claude Code): exactly that model, at the
+    /// best-ranked hub that serves it. Slug `hub:<id>`.
+    Hub(String),
     /// A cloud or CLI provider by its hub slug (`claude-cli`, `claude-api`, `openai`, …).
     Cloud(String),
 }
+
+/// The id a hub serves its own Claude Code under (the hub's
+/// `claude_cli::MODEL_ID`): a cloud model, whichever hub relays it.
+pub const HUB_CLAUDE_MODEL: &str = "claude-cli";
 
 impl ProviderChoice {
     pub fn slug(&self) -> String {
         match self {
             ProviderChoice::Local => "local".to_string(),
+            ProviderChoice::Hub(model) => format!("hub:{model}"),
             ProviderChoice::Cloud(s) => s.clone(),
         }
     }
@@ -51,12 +60,31 @@ impl ProviderChoice {
     pub fn from_slug(s: &str) -> ProviderChoice {
         match s.trim() {
             "" | "local" => ProviderChoice::Local,
-            other => ProviderChoice::Cloud(other.to_string()),
+            other => match other.strip_prefix("hub:").map(str::trim) {
+                Some("") => ProviderChoice::Local,
+                Some(model) => ProviderChoice::Hub(model.to_string()),
+                None => ProviderChoice::Cloud(other.to_string()),
+            },
         }
     }
 
     pub fn is_local(&self) -> bool {
         matches!(self, ProviderChoice::Local)
+    }
+
+    /// The AI hub answers: its election (`Local`) or one model it serves.
+    pub fn is_hub(&self) -> bool {
+        matches!(self, ProviderChoice::Local | ProviderChoice::Hub(_))
+    }
+
+    /// The model runs at a cloud vendor (what "local AI only" refuses):
+    /// every cloud row but "none", and the Claude a hub relays.
+    pub fn is_cloud(&self) -> bool {
+        match self {
+            ProviderChoice::Local => false,
+            ProviderChoice::Hub(model) => model == HUB_CLAUDE_MODEL,
+            ProviderChoice::Cloud(slug) => slug != "none",
+        }
     }
 }
 
@@ -326,5 +354,11 @@ mod tests {
         assert_eq!(ProviderChoice::from_slug("local"), ProviderChoice::Local);
         assert_eq!(ProviderChoice::from_slug(""), ProviderChoice::Local);
         assert_eq!(ProviderChoice::from_slug("claude-cli").slug(), "claude-cli");
+        assert_eq!(ProviderChoice::from_slug("hub:claude-cli"), ProviderChoice::Hub("claude-cli".into()));
+        assert_eq!(ProviderChoice::Hub("qwen3.5-4b".into()).slug(), "hub:qwen3.5-4b");
+        assert_eq!(ProviderChoice::from_slug("hub:"), ProviderChoice::Local);
+        assert!(ProviderChoice::Hub("claude-cli".into()).is_cloud() && ProviderChoice::Hub("claude-cli".into()).is_hub());
+        assert!(!ProviderChoice::Hub("qwen3.5-4b".into()).is_cloud());
+        assert!(!ProviderChoice::Cloud("none".into()).is_cloud() && ProviderChoice::Cloud("claude-cli".into()).is_cloud());
     }
 }

@@ -299,6 +299,9 @@ pub struct XrPack {
     /// The pictures are NV12 textures, one per tile, rendered into their planes (`super::nv12_planes`).
     #[rust]
     nv12: bool,
+    /// The app's controller buzzes of this frame (reused).
+    #[rust]
+    haptics: Vec<makepad_widgets::makepad_platform::event::xr::XrHapticPulse>,
 }
 
 
@@ -329,7 +332,7 @@ impl XrPack {
         self.counts.draws += 1;
         // while a headset streams the desktop windows paint for their own causes only, and
         // a window with the mirror from the headset's frames at the mirror's rate
-        let hold = shared.session_eye().is_some() && shared.streaming();
+        let hold = shared.frames_flowing();
         let source = cx.cx.global::<crate::mirror::XrMirrorSource>();
         source.color = Some(color.clone());
         source.live = shared.session_eye().is_some();
@@ -349,6 +352,14 @@ impl XrPack {
         cx.cx.xr_set_msaa(aa.msaa);
         // the headset integrates and sends its room field only while the app uses it
         shared.room_field_wanted.store(cx.cx.xr_room_field_wanted(), Ordering::Release);
+        // the app's controller buzzes go down the link (dropped without a headset that plays them)
+        cx.cx.xr_take_haptics(&mut self.haptics);
+        if !self.haptics.is_empty() && shared.haptics_ok.load(Ordering::Acquire) {
+            let mut q = shared.haptics.lock().unwrap();
+            if q.len() < 32 {
+                q.extend_from_slice(&self.haptics);
+            }
+        }
         // mixed reality or VR as the app asks, under the user's view
         if shared.app_see_through.swap(cx.cx.xr_see_through(), Ordering::AcqRel) != cx.cx.xr_see_through() {
             shared.apply_view();
@@ -572,10 +583,10 @@ impl XrPack {
     /// The server's wake: after a packed frame was submitted, the picture goes to the encoder
     /// with the frame's completion; the next pose is asked for once there is room.
     fn wake(&mut self, cx: &mut Cx) {
-        // the headset gone or its stream off: the desktop paints as always again
+        // the headset gone, its stream off or its frames stopped: the desktop paints as always again
         let live = self.shared().session_eye().is_some();
         cx.global::<crate::mirror::XrMirrorSource>().live &= live;
-        if self.holding && (self.shared().session_eye().is_none() || !self.shared().streaming()) {
+        if self.holding && !self.shared().frames_flowing() {
             self.holding = false;
             cx.xr_hold_windows(false, false);
         }

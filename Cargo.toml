@@ -36,6 +36,7 @@ workspace.members = [
     "libs/xr_core",
     "libs/xr_nav",
     "libs/xr_stream",
+    "libs/xr_ui",
     "libs/desk_link_panel",
     "libs/relax_api",
     "libs/relax_api/macro",
@@ -58,6 +59,7 @@ workspace.members = [
     "libs/code_language",
     "libs/search",
     "libs/lz4",
+    "libs/zstd_decode",
     "apps/route",
     "libs/flowgraph",
     # === Flow: the generation studio and graph workbench's libraries ===
@@ -94,6 +96,7 @@ workspace.members = [
     "libs/ai/livepipe",
     # Constructive solid geometry.
     "libs/csg/csg",
+    "libs/csg/csg_cad",
     "libs/csg/csg_boolean",
     "libs/csg/csg_exact",
     "libs/csg/csg_math",
@@ -486,6 +489,7 @@ ab_glyph_rasterizer = { path = "libs/ab_glyph_rasterizer", version = "0.1.8" }
 sdfer = { path = "libs/sdfer", version = "0.2.1" }
 pulldown-cmark = { path = "libs/pulldown-cmark", version = "0.12.2", default-features = false }
 makepad-fast-inflate = { path = "libs/fast_inflate", version = "0.1.0" }
+makepad-zstd-decode = { path = "libs/zstd_decode", version = "0.1.0" }
 makepad-zip-file = { path = "libs/zip_file", version = "1.0.0" }
 makepad-zune-png = { path = "libs/zune/zune-png", version = "0.5.2" }
 makepad-rust-tokenizer = { path = "libs/rust_tokenizer", version = "1.0.0" }

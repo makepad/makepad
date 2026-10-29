@@ -1034,6 +1034,13 @@ impl Renderer {
         let Some(mut draw) = self.pbr_draw.take() else {
             return;
         };
+        match &self.element_lookup {
+            Some((map, ctl)) => {
+                draw.skinned.draw_vars.set_texture(6, map);
+                draw.skinned.draw_vars.set_uniform(cx.cx, live_id!(elem_ctl), ctl);
+            }
+            None => draw.skinned.draw_vars.set_uniform(cx.cx, live_id!(elem_ctl), &[0.0, 0.0, 0.0, 0.0]),
+        }
         self.draw_models_inner(
             cx,
             ModelDraw::Pbr(&mut draw),

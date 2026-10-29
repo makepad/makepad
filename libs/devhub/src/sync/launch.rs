@@ -1,8 +1,15 @@
 //! Remote launch: the master starts an app under `makepad run` on this node, as a window the WM
 //! hosts (`visible`) or hidden and muted, and stops it by its JIT id. A launch is the WM's own
-//! (`AppLaunch::start`, Runner::Jit: `cargo run -p makepad-run --bin makepad -- run <package>` in
-//! the synced checkout, with the launcher's environment), so after a sync's prebuild it compiles
-//! nothing. `cargo run` execs the tool in its place: the pid it starts is the JIT's.
+//! (`AppLaunch::start`, Runner::Jit: `cargo run --profile host -p makepad-run --bin makepad --
+//! run <package>` in the synced checkout, with the registry's environment), so after a sync's
+//! prebuild it compiles nothing. `cargo run` execs the tool in its place: the pid it starts is
+//! the JIT's. It runs under a lane's lease, so it is that lane's TEST instance
+//! (`MAKEPAD_TEST_LANE`): badged in its caption, never the WM dock's app, off the LAN unless the
+//! launch says `lan`.
+//!
+//! `show <app>` is not a launch: it asks the node's WM for its dock app (launch-or-focus, the
+//! registry's one launch definition, no lease, env or args), what a lane does to show the user
+//! something it landed.
 //!
 //! Every launch is in the ledger (`~/.makepad/devhub/sync/launched/<pid>.json`, with the process
 //! start time); `stop` signals only a ledger pid whose start time still matches (never a pattern),
@@ -122,19 +129,6 @@ pub fn launched() -> Vec<u32> {
     out
 }
 
-/// `~/.makepad/wm/jit.env` `KEY=VALUE` lines (what the WM gives its JIT launches), as data.
-fn jit_env() -> Vec<(String, String)> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    std::fs::read_to_string(home.join(".makepad/wm/jit.env"))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| {
-            let (k, v) = l.trim().split_once('=')?;
-            (!k.starts_with('#') && !k.is_empty()).then(|| (k.trim().to_string(), v.trim().to_string()))
-        })
-        .collect()
-}
-
 /// An app by its registry name (`calculator`), its package (`makepad-app-calculator`) or its
 /// binary.
 pub fn find_app(name: &str) -> Option<&'static makepad_app_registry::AppEntry> {
@@ -151,17 +145,19 @@ pub fn start(conf: &SyncConf, s: &Spec, publish: &crate::local::Publish, machine
     let file = std::fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
     let file2 = file.try_clone().map_err(|e| e.to_string())?;
     let (visible, lan, env) = (s.visible, s.lan, s.env.clone());
+    let lane = s.lease.as_deref().map(|id| crate::lease::exec::lease_lane(id).unwrap_or_else(|| format!("lease-{id}")));
     let mut files = Some((file, file2));
     let (_launch, mut child) = AppLaunch::start(app, Runner::Jit, Some(conf.checkout.clone()), s.args.clone(), BuildPolicy::IfMissing, false, move |mut cmd, _kind| {
         if visible {
             // as the WM's spawn_jit: the window becomes the WM's tile through its socket
-            cmd.env("MAKEPAD_WM_CAPTION_CONTENT", "1").envs(jit_env());
+            cmd.env("MAKEPAD_WM_CAPTION_CONTENT", "1");
         } else {
             cmd.env("MAKEPAD_HIDE_WINDOWS", "1").env("SANDBOX_MUTE", "1");
         }
-        if lan {
-            cmd.env("MAKEPAD_LAN", "1");
+        if let Some(lane) = &lane {
+            cmd.env("MAKEPAD_TEST_LANE", lane);
         }
+        cmd.env("MAKEPAD_LAN", if lan { "1" } else { "0" });
         cmd.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         let (out, err) = files.take().ok_or("spawned twice")?;
         cmd.stdin(std::process::Stdio::null()).stdout(out).stderr(err);
@@ -279,6 +275,18 @@ pub fn service(conf: Arc<SyncConf>, publish: crate::local::Publish, machine: Str
                     Err(e) => err(out, &e),
                 }
             }
+            ["show", app] => {
+                if !guard(out) {
+                    return;
+                }
+                match show(app) {
+                    Ok(line) => {
+                        publish(hub_record(&machine, app, 0, "launch", Sev::Info, format!("launch: showed the dock's {app}"), String::new()));
+                        out.push(line);
+                    }
+                    Err(e) => err(out, &e),
+                }
+            }
             ["list"] => {
                 for pid in launched() {
                     if let Some((s, _, log)) = ledger(pid) {
@@ -295,9 +303,26 @@ pub fn service(conf: Arc<SyncConf>, publish: crate::local::Publish, machine: Str
                     out.push(format!("{{\"log\":{}}}", json_str(&proto::clean(l, 400))));
                 }
             }
-            _ => err(out, "launch [visible|hidden] [lan] [K=V ...] <app> [args...] | stop <pid> | relaunch <pid> | list | log <pid> [n]"),
+            _ => err(out, "launch [visible|hidden] [lan] [K=V ...] <app> [args...] | show <app> | stop <pid> | relaunch <pid> | list | log <pid> [n]"),
         }
     })
+}
+
+/// Asks this node's WM for its dock app `app` (launch-or-focus): the user's one instance of it,
+/// started the dock's way when it is not running (`makepad_hal::wm_socket::request_launch`).
+pub fn show(app: &str) -> Result<String, String> {
+    let entry = find_app(app).ok_or_else(|| format!("no app `{app}` in the registry"))?;
+    #[cfg(target_os = "linux")]
+    {
+        let path = makepad_app_registry::machine::wm_socket().ok_or("no WM runs on this node (no makepad-wm socket)")?;
+        makepad_app_registry::machine::request_launch(&path, entry.id)?;
+        Ok(format!("{{\"shown\":{}}}", json_str(entry.id)))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = entry;
+        Err("show: only a Linux node's WM has a dock to ask".into())
+    }
 }
 
 fn launch_reply(conf: &SyncConf, spec: &Spec, publish: &crate::local::Publish, machine: &str, out: &mut Vec<String>) {

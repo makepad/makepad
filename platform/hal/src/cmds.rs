@@ -405,4 +405,7 @@ hal_commands! {
     NativeLayerOp = 161, native_layer_op { id: obj, op: u32, arg: u64, data: rng };
     /// Releases the layer's content and its native resources.
     NativeLayerDestroy = 162, native_layer_destroy { id: obj };
+    /// A buzz on XR window `id`'s controller `hand` (0 left, 1 right): `amplitude` 0..1 for
+    /// `duration_us`. Android XR; elsewhere nothing.
+    XrHaptic = 163, xr_haptic { id: obj, hand: u32, amplitude: f32, duration_us: u32 };
 }

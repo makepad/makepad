@@ -1,5 +1,5 @@
 //! Where the score is: its arrangement once through (or a score of loops'
-//! longest cycle) with its tempo map, for the header's position as
+//! longest cycle) with its tempo map, for the caption's position as
 //! bar.beat and time.
 
 use makepad_score_live::render::{self, Timing};

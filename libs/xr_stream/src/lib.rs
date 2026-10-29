@@ -52,7 +52,7 @@ mod settings_types;
 pub use mirror::{DrawXrMirror, XrMirrorView};
 pub use panel::{XrCaptionButton, XrStreamSettings};
 #[cfg(not(target_arch = "wasm32"))]
-pub use server::{LiveHeadset, ServerStats, XrServer};
+pub use server::{launch_enabled, LiveHeadset, ServerStats, XrServer};
 pub use settings_types::{HeadsetSettings, StreamAa, StreamView, STREAM_AA_DEFAULT, STREAM_AA_MODES};
 /// The serving side's shaders and widgets: the server's pack, the mirror and the caption's
 /// `XrCaptionButton` (an app with the control registers them).
@@ -61,6 +61,7 @@ pub fn serve_script_mod(vm: &mut ScriptVm) -> ScriptValue {
     server::script_mod(vm);
     mirror::shader::script_mod(vm);
     mirror::script_mod(vm);
+    panel::shader::script_mod(vm);
     panel::script_mod(vm)
 }
 
@@ -469,6 +470,9 @@ struct Shared {
     /// The server's settings for this headset's own mechanisms (`XrServerMsg::Headset`; None
     /// until it sent them).
     headset: Option<HeadsetSettings>,
+    /// Controller buzzes from the server (`XrServerMsg::Haptic`), played on the UI thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    haptics: Vec<makepad_widgets::makepad_platform::event::xr::XrHapticPulse>,
 }
 
 /// The stats of one window (5 s).
@@ -699,7 +703,7 @@ impl XrStreamClient {
                 XrTarget::Pair { name, .. } => name.clone(),
                 XrTarget::Address { .. } => "headset".to_string(),
             };
-            let info = HeadsetInfo { name, instance: 0, eye, refresh_mhz: (refresh_hz * 1000.0) as u32, codecs: codecs::HEVC | codecs::H264 };
+            let info = HeadsetInfo { name, instance: 0, eye, refresh_mhz: (refresh_hz * 1000.0) as u32, codecs: codecs::HEVC | codecs::H264 | codecs::HAPTICS };
             let _ = std::thread::Builder::new().name("xr-stream".into()).spawn(move || worker(target, info, shared, signal, audio));
         }
         #[cfg(target_arch = "wasm32")]
@@ -832,6 +836,11 @@ impl XrStreamClient {
                         }
                     }
                     self.housekeeping(cx);
+                    // the server's controller buzzes, on this headset's controllers
+                    let haptics = std::mem::take(&mut self.shared.lock().unwrap().haptics);
+                    for h in &haptics {
+                        cx.xr_haptic(h.hand as usize, h.amplitude, h.seconds);
+                    }
 
                     // this display frame's picture: the oldest decoded one
                     let display_ns = cx.xr_frame_wire().map_or(0, |(t, _)| t);
@@ -2014,6 +2023,12 @@ fn worker(target: XrTarget, mut info: HeadsetInfo, shared: Arc<Mutex<Shared>>, s
                 XrServerMsg::SeeThrough { on } => {
                     shared.lock().unwrap().vr = !on;
                     signal.set();
+                }
+                XrServerMsg::Haptic { hand, amplitude, duration_us } => {
+                    let mut s = shared.lock().unwrap();
+                    if s.haptics.len() < 16 {
+                        s.haptics.push(makepad_widgets::makepad_platform::event::xr::XrHapticPulse { hand, amplitude, seconds: duration_us as f32 * 1e-6 });
+                    }
                 }
                 XrServerMsg::Headset { foveation, eye_min_pct, eye_max_pct, multimodal, occlusion, ahead } => {
                     shared.lock().unwrap().headset = Some(HeadsetSettings { foveation, eye_min_pct, eye_max_pct, multimodal, occlusion, ahead });

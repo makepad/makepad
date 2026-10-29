@@ -15,7 +15,15 @@ default = []
 instruments = ["dep:makepad-piano-model", "dep:makepad-drumkit", "dep:makepad-drumkit-phys", "dep:makepad-soundfont"]
 
 [dependencies]
+makepad-base64 = { path = "../base64" }
+makepad-zstd-decode = { path = "../zstd_decode" }
+# Formula modulators compile to AIR and run on its interpreter / native back end.
+makepad-script-compute = { path = "../../platform/script/compute" }
 makepad-piano-model = { path = "../piano_model", optional = true }
 makepad-drumkit = { path = "../drumkit", optional = true }
 makepad-drumkit-phys = { path = "../drumkit_phys", optional = true }
 makepad-soundfont = { path = "../soundfont", optional = true }
+
+[dev-dependencies]
+# The formula reference interpreter uses the same portable math the AIR builder lowers.
+makepad-csg-math = { path = "../csg/csg_math" }

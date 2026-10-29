@@ -91,6 +91,7 @@ impl AppDef {
             dir: &self.dir,
             bin: &self.bin,
             manifest: self.manifest.as_deref(),
+            profile: "release",
         }
     }
 
@@ -680,6 +681,10 @@ pub struct ClientSlot {
     /// like any app but has no tile and is in no layout, no dock and no alt-tab. Its one window
     /// is a tray dropdown (`dropdown.rs`) that shows as a flyout under its tray item.
     pub service: bool,
+    /// A lane's test instance (it came to the socket with `lane=`, devhub's lease runs): its
+    /// title says `TEST: lane <name>`, and it is never the dock's instance of its app (a dock
+    /// launch neither focuses it nor counts it as running).
+    pub test_lane: Option<String>,
 }
 
 impl ClientSlot {
@@ -714,6 +719,7 @@ impl ClientSlot {
             external: None,
             parent: None,
             service: false,
+            test_lane: None,
         }
     }
 
@@ -748,6 +754,19 @@ impl ClientSlot {
         // Never the keyboard's target: its dropdown takes pointer input only.
         slot.takes_focus = false;
         slot
+    }
+
+    /// The title the app gave its window; a test instance's always says whose test it is.
+    pub fn set_title(&mut self, title: &str) {
+        self.title = match &self.test_lane {
+            Some(lane) => format!("TEST: lane {lane} · {title}"),
+            None => title.to_string(),
+        };
+    }
+
+    /// The dock's own instance of its app: what a launch-or-focus finds and focuses.
+    pub fn is_dock_instance(&self) -> bool {
+        self.test_lane.is_none()
     }
 
     pub fn display_title(&self) -> &str {
@@ -884,6 +903,7 @@ fn client_slot(pool: &TaskPool, id: ClientId, app: &AppDef, child: Child, warm: 
         external: None,
         parent: None,
         service: false,
+        test_lane: None,
     }
 }
 
@@ -911,7 +931,13 @@ pub fn spawn_client(
     lines: Sender<ClientLine>,
 ) -> Result<ClientSlot, String> {
     let entry = makepad_app_registry::find(&app.id).ok_or_else(|| format!("unknown app: {}", app.id))?;
-    let extra = app.args.iter().chain(extra_args).cloned().collect();
+    let mut extra: Vec<String> = app.args.iter().chain(extra_args).cloned().collect();
+    // Under the JIT the app's own arguments follow `run <package> --`: the terminal's start
+    // folder is one of them (a native launch appends it to the command itself).
+    if let (Runner::Jit, Some(cwd)) = (runner, cwd) {
+        extra.push("--cwd".to_string());
+        extra.push(cwd.to_string_lossy().into_owned());
+    }
     let (launch, child) = AppLaunch::start(entry, runner, repo_root(), extra, policy, false, |cmd, kind| {
         spawn_for_client(pool, spawner, id, &app.bin, cwd, term_colors, warm, hub_port, runner, cmd, kind, lines.clone())
     })?;
@@ -941,7 +967,7 @@ fn spawn_for_client(
         return spawn_process(pool, spawner, id, client_log(id, true), cmd, bin, lines);
     }
     if runner == Runner::Jit {
-        return spawn_jit(pool, spawner, id, bin, cwd, cmd, kind, lines);
+        return spawn_jit(pool, spawner, id, bin, term_colors, cmd, lines);
     }
     // The app, or `cargo run` of it (cargo's progress on the tile, then the app): the
     // app's environment either way.
@@ -964,6 +990,17 @@ fn spawn_for_client(
             cmd.current_dir(cwd);
         }
     }
+    terminal_env(&mut cmd, term_colors);
+    // MAKEPAD_WIDGET_STYLE is inherited at spawn; makepad_style events
+    // deliver live changes to the WM's system stylesheet.
+    if warm {
+        cmd.env(WARM_ENV.0, WARM_ENV.1);
+    }
+    spawn_process(pool, spawner, id, client_log(id, false), cmd, bin, lines)
+}
+
+/// The terminal's colours and translucency, from the WM's theme.
+fn terminal_env(cmd: &mut Command, term_colors: Option<&str>) {
     if let Some(colors) = term_colors {
         cmd.env("MAKEPAD_TERMINAL_COLORS", colors);
         // Truly translucent terminals over the wallpaper (the user's
@@ -974,58 +1011,27 @@ fn spawn_for_client(
             .unwrap_or_else(|_| "0.78 0.70".to_string());
         cmd.env("MAKEPAD_TERMINAL_OPACITY", opacity);
     }
-    // MAKEPAD_WIDGET_STYLE is inherited at spawn; makepad_style events
-    // deliver live changes to the WM's system stylesheet.
-    if warm {
-        cmd.env(WARM_ENV.0, WARM_ENV.1);
-    }
-    spawn_process(pool, spawner, id, client_log(id, false), cmd, bin, lines)
 }
 
-/// `~/.makepad/wm/jit.env`: `KEY=VALUE` lines (`#` comments) every JIT-run app gets on top of
-/// the WM's environment (a node's `MAKEPAD_RUN_VERBOSE=1`, an on-disk `TMPDIR` for the session
-/// transcript, `MAKEPAD_REMOTE=1`), so how a machine debugs its JIT apps is a file, not a
-/// rebuilt WM.
-pub fn jit_env(text: &str) -> Vec<(String, String)> {
-    text.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .filter_map(|line| line.split_once('='))
-        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-        .filter(|(k, _)| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-        .collect()
-}
-
-/// A JIT run (`makepad run <package>`, or `cargo run` of the tool first). It is not a
-/// `--stdin-loop` child and gets no hub identity: on Linux its HAL asks the WM's socket for its
-/// window (`MAKEPAD_WM_SOCKET`, which passes), and the socket admits it as THIS client because
-/// its pid is the one recorded here (`adopt::expect`). `cargo run` execs the tool, so the pid
-/// cargo starts with is the tool's.
+/// A JIT run: `cargo run --profile host -p makepad-run --bin makepad -- run <package>` in the
+/// checkout, the registry's one launch of an app (its environment, this machine's jit.env and
+/// app settings included: `makepad_app_registry::machine`). It is not a `--stdin-loop` child and
+/// gets no hub identity: on Linux its HAL asks the WM's socket for its window
+/// (`MAKEPAD_WM_SOCKET`, which passes), and the socket admits it as THIS client because its pid
+/// is the one recorded here (`adopt::expect`). `cargo run` execs the tool, so the pid cargo
+/// starts with is the tool's. It stays in the checkout: cargo reads the workspace's config from
+/// its working directory (a terminal's start folder is an argument of the app's).
 fn spawn_jit(
     pool: &TaskPool,
     spawner: &ThreadSpawner,
     id: ClientId,
     bin: &str,
-    cwd: Option<&PathBuf>,
+    term_colors: Option<&str>,
     mut cmd: Command,
-    kind: LaunchKind,
     lines: Sender<ClientLine>,
 ) -> Result<Child, String> {
     cmd.env("MAKEPAD_WM_CAPTION_CONTENT", "1");
-    // A `cargo run` of the tool stays in the checkout (cargo's config is read from its working
-    // directory); the built tool may start elsewhere.
-    if let (Some(cwd), LaunchKind::App) = (cwd, kind) {
-        cmd.current_dir(cwd);
-    }
-    let settings = crate::theme::makepad_home().join("wm/jit.env");
-    if let Ok(text) = std::fs::read_to_string(&settings) {
-        for (key, value) in jit_env(&text) {
-            if key == "TMPDIR" {
-                let _ = std::fs::create_dir_all(&value);
-            }
-            cmd.env(key, value);
-        }
-    }
+    terminal_env(&mut cmd, term_colors);
     let child = spawn_process(pool, spawner, id, client_log(id, false), cmd, bin, lines)?;
     #[cfg(target_os = "linux")]
     crate::adopt::expect(child.id(), id);

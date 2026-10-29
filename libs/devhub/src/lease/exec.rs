@@ -436,6 +436,13 @@ impl Exec {
             ("MAKEPAD_HIDE_WINDOWS", "1".into()),
             ("SANDBOX_MUTE", "1".into()),
             ("MAKEPAD_LAN", "0".into()),
+            // every run is the lane's test instance: badged `TEST: lane <lane>` in its caption,
+            // never the WM dock's app, off the LAN (XR, printer, rooms) unless it asks
+            // (MAKEPAD_LAN=1 in its own command)
+            ("MAKEPAD_TEST_LANE", lane.clone()),
+            // what a run prints as its verdict names its own lease (a lane that reads a gate's
+            // NODEGATE-OK from a file shared with another lane's run must tell them apart)
+            ("DEVHUB_LEASE", id.clone()),
             ("CARGO_NET_OFFLINE", "true".into()),
         ];
         // the lease's own environment wins over what was asked
@@ -1109,6 +1116,11 @@ pub fn adopt(id: &str, pid: u32, log: PathBuf) -> Result<(), String> {
 }
 
 /// Whether lease `id` is live here and may launch.
+/// The lane lease `id` belongs to.
+pub fn lease_lane(id: &str) -> Option<String> {
+    EXEC.get().and_then(|x| x.leases.lock().unwrap().get(id).map(|l| l.lane.clone()))
+}
+
 pub fn lease_live(id: &str) -> bool {
     EXEC.get().is_some_and(|x| x.leases.lock().unwrap().get(id).is_some_and(|l| l.kind.writes()))
 }
@@ -1253,6 +1265,8 @@ mod tests {
         let r = x.handle("lease-run", &format!("lease-run L1 . {}", b64(ENV)));
         let (env, _) = log_until_exit(&x, "L1", field(&r[0], "n").and_then(|v| super::super::num(&v)).unwrap() as u32);
         assert!(env.contains("FOO=bar") && env.contains("SANDBOX_MUTE=1") && env.contains(&format!("TMPDIR={}", tmp.display())));
+        // every run knows its own lease and lane: its verdict lines say whose they are
+        assert!(env.contains("DEVHUB_LEASE=L1") && env.contains("MAKEPAD_TEST_LANE=gapx"), "{env}");
         let r = x.handle("lease-run", &format!("L1 . {}", b64(FAIL)));
         assert_eq!(log_until_exit(&x, "L1", field(&r[0], "n").and_then(|v| super::super::num(&v)).unwrap() as u32).1, 1);
         assert!(x.handle("lease-run", &format!("L1 ../x {}", b64(&["true"])))[0].contains("err"));

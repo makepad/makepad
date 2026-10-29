@@ -26,6 +26,11 @@ pub enum TriLocation {
     Inside,
     Outside,
     OnBoundary,
+    /// A face lying on the other mesh's surface and facing into it: two
+    /// solids touching face to face (a box standing on a plate, letters on
+    /// a face, parts side by side). Its interior side is outside the other
+    /// mesh, its exterior side inside.
+    Touching,
 }
 
 /// Work item for parallel classification.
@@ -48,6 +53,8 @@ struct ClassifyContext {
 /// - Non-coplanar boundary faces: only interior side is inside → Inside
 /// - Coplanar overlapping faces: both sides report inside → OnBoundary
 ///   (kept from mesh A only to avoid double-counting)
+/// - Faces on the other mesh's surface facing into it (solids touching face
+///   to face): only the exterior side inside → Touching
 /// - Faces outside the other mesh: neither side inside → Outside
 ///
 /// Uses an AABB tree for O(log n) ray casting and thread pool for parallelism.
@@ -109,6 +116,8 @@ fn classify_one(
             TriLocation::OnBoundary
         } else if interior_in {
             TriLocation::Inside
+        } else if exterior_in {
+            TriLocation::Touching
         } else {
             TriLocation::Outside
         }

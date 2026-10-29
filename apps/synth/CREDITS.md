@@ -25,12 +25,37 @@ score engine's example scores and sound palette).
   private enjoyment only (the collection's disclaimer is shown before install). Each tune keeps its composer,
   title and release.
 
+- **Surge XT patch library** (opt-in, two sets: the current content of upstream commit dab78c6, patch format
+  revision 31, and the 1.3.4 release's content, revision 25), github.com/surge-synthesizer/surge, licensed
+  GPL-3.0-or-later; about 360 third-party patches declare CC0 in their own metadata and are CC0. What Synth's
+  `Tandem{patch: …}` instrument plays. Only the data folders are unpacked (patches, wavetables, FX and modulator
+  presets, tuning library, factory impulse responses); never the skins, the "Waldorf" wavetables (no grant on
+  record) or the third-party impulse responses. Synth's engine that plays them is our own MIT code, written from a
+  behavioural description without the upstream source. Credits: the factory library by Claes Johanson (Vember Audio)
+  and the Surge Synth Team (EvilDragon, baconpaul, Fred Cormier, Arty, Macc, Taron, thynctank); third-party patch
+  folders, each credited to its author: A.Liv, Aleksey Zhehanov, Altenberg, Argitoth, Black-Sided Sun, Bluelight,
+  Cybersoda, Damon Armani, Dan Maurer, Databroth, Emu ("The Emu"), Exquis MPE (Intuitive Instruments), Giana
+  Brotherz (Sola), Inigo Kennedy, Jacky Ligon, John Valentine, Kinsey Dulcet, Kuniklo, Kyurumi, Landosonic,
+  LinnStrument MPE (Roger Linn, thoughtForm), Lopyt, Luna, Malfunction, Nick Moritz, Noisegeek, Psiome Send Sound,
+  Rare Earth (Leonard Bowman), Rozzer, Slowboat, Stefan Singer, TNMG (The Nerdy Music Guy), Vincent Zauhar, Vospi,
+  Xenofish, Zoozither (Polyslax), qb; wavetable folders: A.Liv, Art of Sound, Damon Armani, Emu, Emu VSCO, Layzer,
+  Ocean Swift Synthesis, Philippe Favre, Qonundrai, TNMG, Venus Theory.
+
 ## Downloaded on the person's own pick (Song library, chat tools)
 
 - **Zophar's Domain** (zophar.net): game music rips (NSF, SPC, GBS, VGM), one game at a time; the music is its
   publisher's copyright, kept with its credits for listening and learning, never published.
 - **The Mod Archive** (modarchive.org): MOD, S3M, XM and IT modules, one at a time; the composers keep their
   copyright unless a module carries a public-domain or Creative Commons licence.
+
+## Code in the synth engine (`libs/audio_synth`, MIT)
+
+- The twist oscillator's macro engines and the granular texture effect are Rust ports of Emilie Gillet's MIT code
+  (github.com/pichenettes/eurorack: the STM32 module code and stmlib; the texture effect's variant modes from
+  github.com/mqtthiqs/parasites, MIT), copyright Emilie Gillet, with each upstream file's MIT notice kept
+  at the top of the Rust file ported from it.
+- The small-effects host's 75 effects are Rust ports of Chris Johnson's Airwindows plugins
+  (github.com/airwindows/airwindows), MIT, "Copyright (c) 2018 Chris Johnson", the notice kept in each file.
 
 ## In the repository
 

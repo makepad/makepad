@@ -24,6 +24,10 @@ pub const WAIT_WARN_MS: u64 = 600_000;
 pub const DEFAULT_PRIO: i32 = 5;
 /// Running leases per lane and kind.
 pub const LANE_CAP: u32 = 2;
+/// A granted gate lease that runs nothing this long ends: an idle gate slot blocks landings.
+pub const GATE_IDLE_MS: u64 = 600_000;
+/// The lane whose gates are landings: first in line for the global gate cap.
+pub const LANDING_LANE: &str = "landgate";
 /// A node's hub is asked to reclaim disk at most this often.
 const RECLAIM_EVERY_MS: u64 = 300_000;
 /// Ended leases kept for late beats and the view.
@@ -37,7 +41,7 @@ pub fn global_cap(kind: Kind) -> Option<u32> {
         Kind::Long => Some(4),
         Kind::Screen => Some(8),
         Kind::Gpu => Some(4),
-        Kind::Gate => Some(2),
+        Kind::Gate => Some(4),
         Kind::Timed | Kind::Inspect => None,
     }
 }
@@ -180,6 +184,8 @@ pub struct Lease {
     pub start: String,
     /// what the node says it runs, its work dir and disk use (`lease-beat` info)
     pub info: String,
+    /// since when a granted gate lease runs nothing (`info`'s `running` empty)
+    idle_since: Option<u64>,
     seq: u64,
 }
 
@@ -519,6 +525,7 @@ impl Sched {
             warned: false,
             start: String::new(),
             info: String::new(),
+            idle_since: None,
             seq: self.seq,
         };
         if let Some(who) = self.blocked_of(&l.req) {
@@ -695,6 +702,7 @@ impl Sched {
             warned: false,
             start: v.get("start").and_then(|x| x.as_str()).unwrap_or("").to_string(),
             info: String::new(),
+            idle_since: None,
             seq: self.seq,
         };
         self.leases.push(l);
@@ -937,12 +945,31 @@ impl Sched {
                 self.end_at(i, "expired", Sev::Warn, "", now);
             }
         }
+        // a gate lease holds one of the few gate slots: one that runs nothing gives it back
+        let mut idle = Vec::new();
+        for l in self.leases.iter_mut().filter(|l| l.req.kind == Kind::Gate && l.state.live()) {
+            let running = makepad_strict_json::parse(l.info.as_bytes()).ok().and_then(|v| v.get("running").and_then(|r| r.as_str()).map(|r| !r.is_empty())).unwrap_or(false);
+            if running {
+                l.idle_since = None;
+                continue;
+            }
+            let since = *l.idle_since.get_or_insert(l.granted_ms.unwrap_or(now));
+            if now.saturating_sub(since) > GATE_IDLE_MS {
+                idle.push(l.id.clone());
+            }
+        }
+        for id in idle {
+            if let Some(i) = self.leases.iter().position(|l| l.id == id) {
+                self.end_at(i, "idle", Sev::Warn, &format!("nothing ran on this gate lease for {} min, so it gave its gate slot back (landings wait for gate slots); take a new gate lease when the gate is ready to run", GATE_IDLE_MS / 60_000), now);
+            }
+        }
         let mut order: Vec<usize> = (0..self.leases.len()).filter(|&i| self.leases[i].state == State::Queued).collect();
         order.sort_by_key(|&i| {
             let l = &self.leases[i];
             let aged = l.req.prio as i64 - (now.saturating_sub(l.asked_ms) / AGE_STEP_MS) as i64;
-            // never granted sorts before a grant at time 0
-            (aged, self.last_grant.get(&l.req.lane).map_or(0, |t| t + 1), l.asked_ms, l.seq)
+            // landings' gates first, then priority; never granted sorts before a grant at time 0
+            let landing = l.req.kind == Kind::Gate && l.req.lane == LANDING_LANE;
+            (!landing, aged, self.last_grant.get(&l.req.lane).map_or(0, |t| t + 1), l.asked_ms, l.seq)
         });
         let mut holds: HashMap<String, String> = HashMap::new();
         let mut deny = Vec::new();
@@ -1212,8 +1239,40 @@ mod tests {
     }
 
     #[test]
+    fn landing_gates_go_first_and_idle_gates_end() {
+        let big = caps(256, 1024.0, Role::Pool);
+        let nodes: Vec<(String, Caps)> = (0..6).map(|i| (format!("n{i}"), big.clone())).collect();
+        let refs: Vec<(&str, Caps)> = nodes.iter().map(|(n, c)| (n.as_str(), c.clone())).collect();
+        let mut s = sched(&refs);
+        // four lane gates take the global gate cap; a landing and a fifth lane gate wait
+        let lanes: Vec<String> = (0..4).map(|i| s.request(req(&format!("lane{i}"), Kind::Gate, None), 0)).collect();
+        s.tick(0);
+        for id in &lanes {
+            assert_eq!(state(&s, id).0, "starting");
+        }
+        let late = s.request(req("lane9", Kind::Gate, None), 1);
+        let land = s.request(req(LANDING_LANE, Kind::Gate, None), 2);
+        s.tick(2);
+        assert_eq!(state(&s, &land).0, "queued");
+        // the lane gates beat but run nothing: after the idle limit they end, and the landing
+        // goes first
+        for id in lanes.iter().chain([&late, &land]) {
+            s.beat(id, GATE_IDLE_MS + 5);
+        }
+        s.set_info(&lanes[0], r#"{"running":"bash land_gate.sh full"}"#);
+        s.tick(GATE_IDLE_MS + 5);
+        assert_eq!(state(&s, &lanes[0]).0, "starting", "a gate that runs something stays");
+        for id in &lanes[1..] {
+            assert_eq!(state(&s, id).0, "ended idle");
+        }
+        assert_eq!(state(&s, &land).0, "starting", "the landing takes a freed gate slot first");
+    }
+
+    #[test]
     fn deny_what_never_fits() {
         let mut s = sched(&[("a", caps(8, 32.0, Role::Pool)), ("wm", caps(32, 64.0, Role::UserWm))]);
+        // the user switched this WM's dev off (every node defaults on)
+        s.set_dev("wm", false, 0).unwrap();
         let g = s.request(req("x", Kind::Gate, Some("a")), 0); // 8 cores fits exactly
         let mut big = req("x", Kind::Build, None);
         big.needs = parse_needs("gpu=5090");

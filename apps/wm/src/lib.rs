@@ -1044,6 +1044,8 @@ impl App {
                     && !slot.is_preview
                     && !slot.service
                     && slot.closing.is_none()
+                    // A lane's test instance is not the dock's app: the dock starts its own.
+                    && slot.is_dock_instance()
                     && (clients::word_match(&slot.app, app_id) || clients::word_match(&slot.title, app_id))
             })
             .map(|(id, _)| *id)
@@ -1303,8 +1305,10 @@ impl App {
             return;
         };
         // Warming never compiles: an app that is not built, or whose
-        // binary is out of date, stays cold until the person opens it.
-        if !self.warm_pool.warmable(&app) {
+        // binary is out of date, stays cold until the person opens it. An app
+        // under the JIT (the desktop default) is never warmed: a standby JIT is a
+        // whole compiler session, and its open is the dock's one launch.
+        if !self.warm_pool.warmable(&app) || self.apps.runner(app_id) == makepad_app_registry::Runner::Jit {
             return;
         }
         let hub_port = self.state_mut().hub_port;
@@ -1359,8 +1363,11 @@ impl App {
             return;
         }
         let pool = &self.warm_pool;
+        let apps = &self.apps;
         let browser_replaced = wayland_host::menu_apps().iter().any(|(id, _)| id == "wl.chromium");
-        let built = |app: &str| !(browser_replaced && app == "browser") && crate::clients::find_app(app).is_some_and(|app| app.is_built() && !pool.known_stale(&app));
+        let built = |app: &str| !(browser_replaced && app == "browser")
+            && apps.runner(app) == makepad_app_registry::Runner::Native
+            && crate::clients::find_app(app).is_some_and(|app| app.is_built() && !pool.known_stale(&app));
         let Some(app) = self.warm_pool.next_missing(host::now(), built) else {
             return;
         };
@@ -1614,7 +1621,7 @@ impl App {
             }
             WmRequest::Title { title } => {
                 if let Some(slot) = self.state_mut().clients.get_mut(&client) {
-                    slot.title = title.clone();
+                    slot.set_title(title);
                 }
                 self.update_bar(cx);
             }
@@ -1758,12 +1765,24 @@ impl App {
             }
             return;
         }
+        // A launch-or-focus app that runs already takes the file itself: the dock's one
+        // instance comes up and shows it, no second one.
+        if !req.preview {
+            if let Some(app) = crate::clients::find_app(&req.app).filter(|app| app.policy == LaunchPolicy::OrFocus) {
+                if let Some(client) = self.running_client(&app.id) {
+                    self.activate_client(cx, client);
+                    self.send_wm_event(client, WmEvent::Open { path: req.path.to_string_lossy().to_string() });
+                    return;
+                }
+            }
+        }
         let hub_port = self.state_mut().hub_port;
         let id = self.next_id;
         self.next_id += 1;
         let lines = self.line_sender();
         let pool = cx.task_pool();
-        let slot = match preview::spawn_for_request(&pool, &cx.thread_spawner(), &req, id, hub_port, lines) {
+        let runner = self.apps.runner(&req.app);
+        let slot = match preview::spawn_for_request(&pool, &cx.thread_spawner(), &req, id, hub_port, runner, lines) {
             Ok(slot) => slot,
             Err(err) => {
                 log!("wm: open request failed: {}", err);
@@ -1910,7 +1929,7 @@ impl App {
         self.next_id += 1;
         let lines = self.line_sender();
         let pool = cx.task_pool();
-        let slot = match preview::spawn_for_request(&pool, &cx.thread_spawner(), &open, id, hub_port, lines) {
+        let slot = match preview::spawn_for_request(&pool, &cx.thread_spawner(), &open, id, hub_port, makepad_app_registry::Runner::Native, lines) {
             Ok(mut slot) => {
                 slot.is_preview = true;
                 slot.takes_focus = false;
@@ -3067,6 +3086,7 @@ impl App {
                     && !s.warm
                     && !s.pane
                     && s.closing.is_none()
+                    && s.is_dock_instance()
                     && state.screens.screen_of(**id).is_some_and(|i| i < state.screens.live_count())
             })
             .map(|(id, _)| *id)
@@ -3358,7 +3378,7 @@ impl App {
             op::MOVE => self.move_later_window(cx, client, tile, dvec2(window.x, window.y)),
             op::TITLE => {
                 if let Some(slot) = self.state_mut().clients.get_mut(&tile) {
-                    slot.title = window.title;
+                    slot.set_title(&window.title);
                 }
                 self.update_bar(cx);
                 self.redraw_all(cx);

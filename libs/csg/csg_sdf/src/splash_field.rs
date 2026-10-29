@@ -108,6 +108,12 @@ impl SdfSplashExpr {
         Ok(SdfSplashExpr { kernel, params, values })
     }
 
+    /// The compiled program's identity (its whole AIR, constants included): equal
+    /// keys sample equal fields.
+    pub fn key(&self) -> u64 {
+        self.kernel.program_key()
+    }
+
     /// Sets the uniform values, lane-flattened in declaration order.
     /// Re-sample after this for the parametric-model loop — no recompile.
     pub fn set_uniforms(&mut self, lanes: &[f32]) -> &mut Self {

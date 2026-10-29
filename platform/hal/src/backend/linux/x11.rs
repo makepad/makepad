@@ -1569,6 +1569,7 @@ impl Shell for App {
                 | OsCmd::XrFrameEyes { .. }
                 | OsCmd::XrPoseLead { .. }
                 | OsCmd::XrRefreshRate { .. }
+                | OsCmd::XrHaptic { .. }
                 | OsCmd::ClipboardActions { .. }
                 | OsCmd::ShareText { .. }
                 | OsCmd::MobileUi { .. }

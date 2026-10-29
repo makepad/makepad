@@ -496,6 +496,7 @@ fn command(sid: u32, cmd: OsCmd, taken: u64) {
         | OsCmd::XrFrameEyes { .. }
         | OsCmd::XrPoseLead { .. }
         | OsCmd::XrRefreshRate { .. }
+        | OsCmd::XrHaptic { .. }
         | OsCmd::SelectionSet { .. }
         | OsCmd::ShareText { .. }
         | OsCmd::DragReply { .. }

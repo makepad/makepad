@@ -112,6 +112,12 @@ Score{label: "Name" clock kit bass kick line pump verb a b arrange: [a b]}
   0.02 @mod]]` (amount in the knob's travel; an aux source scales it).
   `preset: @name` starts from a built-in; morph_params lists every
   parameter with its range and the presets. A note holds for its dur.
+  `Tandem`: the hybrid synth that plays the hybrid patch library (an
+  opt-in download): `Tandem{patch: "Leads/Name"}`, and any parameter set
+  over the patch by storage name in raw units (`a_filter1_cutoff: 12`,
+  `a_env1_release: -1`). tandem_patches finds patches; tandem_params
+  explains the parameters (pitches and cutoffs are notes vs A440, times
+  log2 seconds, levels amplitudes with gain v^3).
   `Shader`: an instrument written as an audio shader: `lib: "acid"` (the
   library: supersaw analog_poly acid pluck epiano modal_bell techno_kick)
   or `code: "…"` (its own, see the audio shader guide), mono (one voice,

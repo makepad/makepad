@@ -7,11 +7,13 @@ pub use makepad_widgets;
 
 use makepad_widgets::*;
 
+mod about;
 mod ai;
 mod audio;
 mod desk;
 mod library;
 mod paths;
+mod patch_library;
 mod resources;
 mod song_library;
 mod writer;
@@ -34,6 +36,20 @@ script_mod! {
                 window.title: "Makepad Synth"
                 window.inner_size: vec2(1400 900)
                 pass +: {clear_color: stage.bg}
+                // One bar: the window's controls where the platform keeps
+                // them, and the score's caption (`desk::SynthCaption`) in the
+                // rest. The stock title goes (the score's name is the title).
+                caption_bar +: {
+                    draw_bg.color: stage.bg
+                    caption_label +: {
+                        flow: Right spacing: 0 align: Align{x: 0.0 y: 0.5}
+                        label +: {visible: false}
+                        caption_icon +: {width: 0 height: 0 margin: 0}
+                        // the traffic lights' room where macOS draws them over the caption
+                        caption_window_gap := View{width: 72 height: 1}
+                        score_caption := mod.widgets.SynthCaption{}
+                    }
+                }
                 body +: {
                     padding: 0 margin: 0 spacing: 0
                     desk := mod.widgets.SynthDesk{}
@@ -81,6 +97,7 @@ impl MatchEvent for App {
         let ui = self.ui.clone();
         self.desk.handle_actions(cx, &ui, actions);
         self.resources.handle_actions(cx, &ui, actions);
+        about::handle_actions(cx, &ui, actions);
         let wants_resources = self.songs.handle_actions(cx, &ui, &mut self.desk, actions);
         if wants_resources || ui.button(cx, ids!(score_resources)).clicked(actions) || ui.button(cx, ids!(score_gm_install)).clicked(actions) {
             self.resources.open(cx, &ui);
@@ -104,6 +121,7 @@ impl AppMain for App {
         makepad_value_pickers::script_mod(vm);
         makepad_editor_panel::register(vm, desk::score_doc::score_doc(), &[makepad_synth_panel::isolate_mod]);
         resources::script_mod(vm);
+        about::script_mod(vm);
         song_library::script_mod(vm);
         desk::register(vm);
         self::script_mod(vm)

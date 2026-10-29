@@ -62,6 +62,21 @@ pub enum ZipMethod {
     Deflate,
 }
 
+/// A member's data deflated ahead of time (for example in parallel with
+/// other work), as [`ZipWriter::add`] would deflate it. Adding it with
+/// [`ZipWriter::add_packed`] writes exactly the bytes `add(name, data,
+/// ZipMethod::Deflate)` writes.
+pub struct Packed {
+    crc: u32,
+    deflated: Vec<u8>,
+}
+
+impl Packed {
+    pub fn new(data: &[u8]) -> Self {
+        Self { crc: crc32(data), deflated: compress_to_vec(data, 6) }
+    }
+}
+
 struct Entry {
     name: String,
     method: u16,
@@ -133,21 +148,31 @@ impl<W: Write> ZipWriter<W> {
         if data.len() > u32::MAX as usize {
             return Err(ZipWriteError::TooLarge);
         }
-        let crc = crc32(data);
+        match method {
+            ZipMethod::Store => self.member(name, data, crc32(data), None),
+            ZipMethod::Deflate => {
+                let p = Packed::new(data);
+                self.member(name, data, p.crc, Some(&p.deflated))
+            }
+        }
+    }
 
+    /// [`ZipWriter::add`] with `ZipMethod::Deflate`, for data deflated ahead
+    /// of time: `packed` must be `Packed::new(data)`.
+    pub fn add_packed(&mut self, name: &str, data: &[u8], packed: &Packed) -> Result<(), ZipWriteError> {
+        self.check_name(name)?;
+        if data.len() > u32::MAX as usize {
+            return Err(ZipWriteError::TooLarge);
+        }
+        self.member(name, data, packed.crc, Some(&packed.deflated))
+    }
+
+    fn member(&mut self, name: &str, data: &[u8], crc: u32, deflated: Option<&[u8]>) -> Result<(), ZipWriteError> {
         // Fall back to Store when deflate does not pay: a stored member is
         // cheaper to read back and never larger than the input.
-        let packed;
-        let (method_code, payload): (u16, &[u8]) = match method {
-            ZipMethod::Store => (COMPRESS_METHOD_UNCOMPRESSED, data),
-            ZipMethod::Deflate => {
-                packed = compress_to_vec(data, 6);
-                if packed.len() < data.len() {
-                    (COMPRESS_METHOD_DEFLATED, &packed)
-                } else {
-                    (COMPRESS_METHOD_UNCOMPRESSED, data)
-                }
-            }
+        let (method_code, payload): (u16, &[u8]) = match deflated {
+            Some(packed) if packed.len() < data.len() => (COMPRESS_METHOD_DEFLATED, packed),
+            _ => (COMPRESS_METHOD_UNCOMPRESSED, data),
         };
         if payload.len() > u32::MAX as usize || self.offset > u32::MAX as u64 {
             return Err(ZipWriteError::TooLarge);

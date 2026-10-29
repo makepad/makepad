@@ -12,7 +12,9 @@
 //! The rule:
 //! - `MAKEPAD_LAN=1`: on; `MAKEPAD_LAN=0`: off (a test machine sets it for every job);
 //! - otherwise a hidden instance (`MAKEPAD_HIDE_WINDOWS` set: tests, agent captures, harness runs)
-//!   is off, and a visible run is on.
+//!   and a lane's test instance (`MAKEPAD_TEST_LANE` set: devhub's lease runs, visible or not)
+//!   are off, and a visible run is on. So a lane's Fab or Sandbox never takes the headset link,
+//!   the printer or LAN rooms from the dock's app unless the lane asks (`MAKEPAD_LAN=1`).
 //!
 //! `MAKEPAD_NET_AUDIT=1` logs every decision (`[net-audit] lan allow-lan|refuse|pass <site> <target>`) and, from
 //! [`crate::socket_audit`], every socket the process holds.
@@ -26,19 +28,21 @@ pub fn allowed() -> bool {
     *ALLOWED.get_or_init(|| {
         let lan = std::env::var("MAKEPAD_LAN").ok();
         let hidden = std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some();
-        let on = decide(lan.as_deref(), hidden);
+        let test = std::env::var_os("MAKEPAD_TEST_LANE").is_some_and(|l| !l.is_empty());
+        let on = decide(lan.as_deref(), hidden || test);
         if !on {
             crate::socket_audit::start_if_enabled();
             eprintln!(
                 "lan: local network off ({}): no fleet discovery, LAN hosts or rooms; MAKEPAD_LAN=1 allows it",
-                if hidden { "hidden instance" } else { "MAKEPAD_LAN=0" }
+                if lan.as_deref().map(str::trim) == Some("0") { "MAKEPAD_LAN=0" } else if test { "a lane's test instance" } else { "hidden instance" }
             );
         }
         on
     })
 }
 
-/// The rule as a pure function: `MAKEPAD_LAN` (1 on, 0 off) wins, else hidden is off.
+/// The rule as a pure function: `MAKEPAD_LAN` (1 on, 0 off) wins, else a hidden or test
+/// instance (`hidden`) is off.
 pub fn decide(lan: Option<&str>, hidden: bool) -> bool {
     match lan.map(str::trim) {
         Some("1") => true,

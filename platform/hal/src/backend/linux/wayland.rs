@@ -888,6 +888,7 @@ impl State {
             | OsCmd::XrFrameEyes { .. }
             | OsCmd::XrPoseLead { .. }
             | OsCmd::XrRefreshRate { .. }
+            | OsCmd::XrHaptic { .. }
             | OsCmd::ClipboardActions { .. }
             | OsCmd::ShareText { .. }
             | OsCmd::MobileUi { .. }
