@@ -362,6 +362,10 @@ pub struct Image {
     #[redraw]
     #[live]
     pub draw_bg: DrawImage,
+    /// The area of whichever we drew last, `draw_bg` or the SVG.
+    #[redraw]
+    #[area]
+    area: Area,
     #[live]
     placeholder_width: u64,
     #[live]
@@ -1262,6 +1266,7 @@ impl Image {
         let svg_time = self.svg_time as f32;
         if let Some(draw_svg) = self.draw_svg.as_mut() {
             draw_svg.draw_walk_time(cx, walk, svg_time);
+            self.area = draw_svg.draw_super.draw_vars.area;
             let animating = draw_svg.has_animations;
             if animating {
                 // Keep ticking so SMIL/CSS-animated SVGs advance.
@@ -1270,6 +1275,7 @@ impl Image {
             return DrawStep::done();
         }
         self.draw_bg.draw_walk(cx, walk);
+        self.area = self.draw_bg.area();
 
         // Load the image this is loading or showing again if it's now drawn bigger
         // than it was ever loaded for, unless it already has (or is getting) enough pixels.
