@@ -21,17 +21,20 @@ use {
             fonts::Fonts,
             geom::{Point, Rect as TextRect, Size, Transform},
             layouter::{
-                BorrowedLayoutParams, LaidoutGlyph, LaidoutRow, LaidoutText, LayoutOptions, Style,
+                get_hyphen, BorrowedLayoutParams, LaidoutGlyph, LaidoutRow, LaidoutText,
+                LayoutOptions, Style,
             },
+            line_break::{FollowingContext, PrecedingContext},
             loader::{FontDefinition, FontFamilyDefinition},
             rasterizer::{AtlasKind, RasterizedGlyph},
+            shaper::ShapedText,
             slug_atlas::SlugGlyphCacheResult,
         },
         turtle::*,
         turtle::{Align, Walk},
     },
     std::{
-        cell::RefCell,
+        cell::{Cell, RefCell},
         collections::hash_map::DefaultHasher,
         hash::{Hash, Hasher},
         rc::Rc,
@@ -1300,6 +1303,9 @@ pub struct DrawText {
     pending_slug_flush_generation: u64,
     #[rust]
     slug_flush_defer_depth: u64,
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[rust]
+    slug_uniforms: Option<SlugUniforms>,
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[rust]
     slug_draw: Option<DrawTextSlug>,
@@ -1353,6 +1359,22 @@ pub struct DrawText {
     /// `LayoutOptions::flow_wrap_spacing_in_lpxs`); TextFlow sets it before each run.
     #[rust]
     pub flow_wrap_spacing_in_lpxs: Option<f32>,
+
+    /// See [`LayoutOptions::line_break_before`].
+    #[rust]
+    pub line_break_before: PrecedingContext,
+    /// See [`LayoutOptions::line_break_after`].
+    #[rust]
+    pub line_break_after: FollowingContext,
+    /// See [`LayoutOptions::trailing_glue_width_in_lpxs`].
+    #[rust]
+    pub trailing_glue_width_in_lpxs: f32,
+    /// See [`LayoutOptions::is_start_reserved`].
+    #[rust]
+    pub is_start_reserved: bool,
+    /// See [`LayoutOptions::following_room_in_lpxs`].
+    #[rust]
+    pub following_room_in_lpxs: f32,
 
     /// Per-row horizontal alignment applied by the text layouter when the
     /// text does not fill the full `max_width_in_lpxs`. `x: 0.0` = left,
@@ -1472,6 +1494,16 @@ struct DrawTextSlug {
     stem_darken: f32,
     #[live(0.125)]
     stem_darken_max: f32,
+}
+
+/// The slug matrix rows we last set, and where they and the viewport size go in our dyn uniforms.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+struct SlugUniforms {
+    /// The shader, pass and draw list state we computed them for.
+    key: (DrawShaderId, DrawPassId, u64, DrawListId, u64),
+    /// Each row's offset and length in our dyn uniforms, along with its values.
+    matrix_rows: [(usize, usize, [f32; 4]); 3],
+    viewport_px_range: (usize, usize),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1749,7 +1781,7 @@ impl DrawText {
                         has_slug_candidates = true;
                         all_slug_candidates_ready = false;
                     }
-                    SlugGlyphCacheResult::Unavailable => {}
+                    SlugGlyphCacheResult::Unavailable | SlugGlyphCacheResult::Empty => {}
                 }
             }
         }
@@ -2376,8 +2408,8 @@ impl DrawText {
     }
 
     /// Draws text within the current turtle flow, calling `f` for each laid-out row.
-    /// Returns `(row_count, is_truncated)`: the number of rows produced, and whether
-    /// the text was truncated (e.g., by `max_lines` / ellipsis).
+    /// Returns the laid out text, which also tells whether it was truncated (e.g., by
+    /// `max_lines` / ellipsis).
     ///
     /// When text wraps to multiple visual rows, each row is emitted as its own
     /// `FinishedWalk` with a single-row `outer_size.y`. Between rows,
@@ -2391,8 +2423,8 @@ impl DrawText {
         cx: &mut Cx2d,
         text_str: &str,
         mut f: impl FnMut(&mut Cx2d, Rect, f32),
-    ) -> (usize, bool) {
-        self.draw_walk_resumable_with_inner(cx, text_str, false, &mut f)
+    ) -> Rc<LaidoutText> {
+        self.draw_walk_resumable_with_inner(cx, text_str, None, false, &mut f)
     }
 
     /// Like [`Self::draw_walk_resumable_with`], but invokes the callback before
@@ -2402,41 +2434,73 @@ impl DrawText {
         cx: &mut Cx2d,
         text_str: &str,
         mut f: impl FnMut(&mut Cx2d, Rect, f32),
-    ) -> (usize, bool) {
-        self.draw_walk_resumable_with_inner(cx, text_str, true, &mut f)
+    ) -> Rc<LaidoutText> {
+        self.draw_walk_resumable_with_inner(cx, text_str, None, true, &mut f)
+    }
+
+    /// Like [`Self::draw_walk_resumable_with`], but draws `laidout_text` when [`Self::layout_resumable`]
+    /// laid out `text_str` already.
+    pub fn draw_laidout_resumable_with(
+        &mut self,
+        cx: &mut Cx2d,
+        text_str: &str,
+        laidout_text: Option<Rc<LaidoutText>>,
+        mut f: impl FnMut(&mut Cx2d, Rect, f32),
+    ) -> Rc<LaidoutText> {
+        self.draw_walk_resumable_with_inner(cx, text_str, laidout_text, false, &mut f)
+    }
+
+    /// Like [`Self::draw_walk_resumable_with_background`], but draws `laidout_text` when
+    /// [`Self::layout_resumable`] laid out `text_str` already.
+    pub fn draw_laidout_resumable_with_background(
+        &mut self,
+        cx: &mut Cx2d,
+        text_str: &str,
+        laidout_text: Option<Rc<LaidoutText>>,
+        mut f: impl FnMut(&mut Cx2d, Rect, f32),
+    ) -> Rc<LaidoutText> {
+        self.draw_walk_resumable_with_inner(cx, text_str, laidout_text, true, &mut f)
+    }
+
+    /// Lays out `text_str` where the turtle is, like [`Self::draw_walk_resumable_with`] does before drawing it.
+    pub fn layout_resumable(&self, cx: &mut Cx2d, text_str: &str) -> Rc<LaidoutText> {
+        // ── Layout parameters ──
+        let turtle_pos = cx.turtle().pos();
+        let turtle_rect = cx.turtle().inner_rect();
+        let first_row_indent_in_lpxs = turtle_pos.x as f32 - turtle_rect.pos.x as f32;
+        let row_height = self.resumable_first_row_min_spacing(cx);
+        let wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
+
+        // ── Text layout ──
+        self.layout(
+            cx,
+            first_row_indent_in_lpxs,
+            row_height,
+            Self::get_max_width_in_lpxs(turtle_rect.size.x),
+            wrap,
+            self.layout_align,
+            text_str,
+        )
+    }
+
+    /// Returns how wide [`Self::layout_resumable`] lets rows be in a turtle `inner_width` wide.
+    pub fn get_max_width_in_lpxs(inner_width: f64) -> Option<f32> {
+        (!inner_width.is_nan()).then_some(inner_width as f32)
     }
 
     fn draw_walk_resumable_with_inner(
         &mut self,
         cx: &mut Cx2d,
         text_str: &str,
+        laidout_text: Option<Rc<LaidoutText>>,
         callback_before_text: bool,
         f: &mut impl FnMut(&mut Cx2d, Rect, f32),
-    ) -> (usize, bool) {
-        // ── Layout parameters ──
+    ) -> Rc<LaidoutText> {
         let turtle_pos = cx.turtle().pos();
         let turtle_rect = cx.turtle().inner_rect();
         let origin_in_lpxs = Point::new(turtle_rect.pos.x as f32, turtle_pos.y as f32);
-        let first_row_indent_in_lpxs = turtle_pos.x as f32 - origin_in_lpxs.x;
-        let row_height = self.resumable_first_row_min_spacing(cx) as f64;
         let first_row_drop = self.first_row_anchor_drop(cx);
-        let max_width_in_lpxs = if !turtle_rect.size.x.is_nan() {
-            Some(turtle_rect.size.x as f32)
-        } else {
-            None
-        };
-        let wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
-
-        // ── Text layout ──
-        let text = self.layout(
-            cx,
-            first_row_indent_in_lpxs,
-            row_height as f32,
-            max_width_in_lpxs,
-            wrap,
-            self.layout_align,
-            text_str,
-        );
+        let text = laidout_text.unwrap_or_else(|| self.layout_resumable(cx, text_str));
 
         // ── Common computations ──
         let last_row = text.rows.last().unwrap();
@@ -2545,7 +2609,9 @@ impl DrawText {
                 } else {
                     let turtle = cx.turtle_mut();
                     turtle.allocate_height(row_h);
-                    turtle.allocate_width((row.width_in_lpxs * self.font_scale) as f64);
+                    turtle.allocate_width(
+                        (row.width_without_hanging_in_lpxs() * self.font_scale) as f64,
+                    );
                 }
 
                 // Set wrap spacing from this row's line-spacing metrics.
@@ -2564,7 +2630,10 @@ impl DrawText {
                 cx.emit_turtle_walk_with_role(
                     Rect {
                         pos: dvec2(row_origin.x as f64, row_top_y),
-                        size: dvec2((row.width_in_lpxs * self.font_scale) as f64, row_h),
+                        size: dvec2(
+                            (row.width_without_hanging_in_lpxs() * self.font_scale) as f64,
+                            row_h,
+                        ),
                     },
                     row_als,
                     Metrics::default(),
@@ -2715,7 +2784,7 @@ impl DrawText {
                     Rect {
                         pos: dvec2(origin_in_lpxs.x as f64, row_top_in_lpxs),
                         size: dvec2(
-                            (first_row.width_in_lpxs * self.font_scale) as f64,
+                            (first_row.width_without_hanging_in_lpxs() * self.font_scale) as f64,
                             run_drop + row_height(first_row),
                         ),
                     },
@@ -2753,7 +2822,7 @@ impl DrawText {
                     Rect {
                         pos: new_turtle_pos,
                         size: dvec2(
-                            (last_row.width_in_lpxs * self.font_scale) as f64,
+                            (last_row.width_without_hanging_in_lpxs() * self.font_scale) as f64,
                             row_height(last_row),
                         ),
                     },
@@ -2770,7 +2839,7 @@ impl DrawText {
             }
         }
 
-        (text.rows.len(), text.is_truncated)
+        text
     }
 
     /// The floor a resumable run passes to the layouter under Center or Baseline wrapping: how
@@ -2842,8 +2911,7 @@ impl DrawText {
         align: Align,
         text: &str,
     ) -> Rc<LaidoutText> {
-        self.text_style.font_family.ensure_fonts_loaded(cx);
-        let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+        let fonts = self.text_style.font_family.ensure_fonts_loaded(cx);
         let mut fonts = fonts.borrow_mut();
 
         let laidout = fonts.get_or_layout(BorrowedLayoutParams {
@@ -2867,19 +2935,17 @@ impl DrawText {
                     None
                 },
                 ellipsis: self.text_overflow == TextOverflow::Ellipsis,
+                line_break_before: self.line_break_before,
+                line_break_after: self.line_break_after,
+                trailing_glue_width_in_lpxs: self.trailing_glue_width_in_lpxs,
+                is_start_reserved: self.is_start_reserved,
+                following_room_in_lpxs: self.following_room_in_lpxs,
             },
         });
         drop(fonts);
-        let has_missing_glyph = laidout
-            .rows
-            .iter()
-            .flat_map(|row| &row.glyphs)
-            .any(|glyph| glyph.id == 0);
-        self.text_style.font_family.request_lazy_fonts_for_glyph_miss(
-            cx,
-            text,
-            has_missing_glyph,
-        );
+        if laidout.has_missing_glyph {
+            self.text_style.font_family.request_lazy_fonts_for_glyph_miss(cx, text);
+        }
         laidout
     }
 
@@ -3139,14 +3205,50 @@ impl DrawText {
             self.draw_vars.texture_slots[3] = Some(fonts.slug_curve_texture().clone());
             self.draw_vars.texture_slots[4] = Some(fonts.slug_band_texture().clone());
 
+            let Some(draw_shader_id) = self.draw_vars.draw_shader_id else {
+                return;
+            };
             let pass_id = cx.pass_stack.last().unwrap().pass_id;
             let draw_list_id = *cx.draw_list_stack.last().unwrap();
-            let pass_uniforms = cx.passes[pass_id].pass_uniforms.clone();
-            let view_transform = cx.draw_lists[draw_list_id]
-                .draw_list_uniforms
-                .view_transform;
-            let model_view = Mat4f::mul(&pass_uniforms.camera_view, &view_transform);
-            let slug_matrix = Mat4f::mul(&pass_uniforms.camera_projection, &model_view);
+            let key = (
+                draw_shader_id,
+                pass_id,
+                cx.passes[pass_id].pass_uniforms_gen,
+                draw_list_id,
+                cx.draw_lists[draw_list_id].uniforms_gen,
+            );
+            // The matrix only changes with the pass's camera and our draw list's transform,
+            // and both bump their generation when they change.
+            if self.slug_uniforms.as_ref().is_some_and(|slug_uniforms| slug_uniforms.key != key) {
+                self.slug_uniforms = None;
+            }
+            let slug_uniforms = self.slug_uniforms.get_or_insert_with(|| {
+                let pass_uniforms = &cx.passes[pass_id].pass_uniforms;
+                let view_transform = &cx.draw_lists[draw_list_id]
+                    .draw_list_uniforms
+                    .view_transform;
+                let model_view = Mat4f::mul(&pass_uniforms.camera_view, view_transform);
+                let slug_matrix = Mat4f::mul(&pass_uniforms.camera_projection, &model_view);
+                // Like set_uniform, we write nothing for a uniform the shader doesn't have.
+                let get_range = |uniform, len: usize| {
+                    self.draw_vars
+                        .uniform_range(cx.cx, uniform)
+                        .map_or((0, 0), |(offset, slots)| (offset, slots.min(len)))
+                };
+                let get_row = |uniform, row| {
+                    let (offset, len) = get_range(uniform, 4);
+                    (offset, len, mat4_row(&slug_matrix, row))
+                };
+                SlugUniforms {
+                    key,
+                    matrix_rows: [
+                        get_row(live_id!(slug_matrix_0), 0),
+                        get_row(live_id!(slug_matrix_1), 1),
+                        get_row(live_id!(slug_matrix_3), 3),
+                    ],
+                    viewport_px_range: get_range(live_id!(slug_viewport_px), 2),
+                }
+            });
             let viewport = cx.current_pass_size();
             let dpi_factor = cx.current_dpi_factor() as f32;
             let viewport_px = [
@@ -3154,14 +3256,11 @@ impl DrawText {
                 (viewport.y as f32 * dpi_factor).max(1.0),
             ];
 
-            self.draw_vars
-                .set_uniform(cx.cx, live_id!(slug_matrix_0), &mat4_row(&slug_matrix, 0));
-            self.draw_vars
-                .set_uniform(cx.cx, live_id!(slug_matrix_1), &mat4_row(&slug_matrix, 1));
-            self.draw_vars
-                .set_uniform(cx.cx, live_id!(slug_matrix_3), &mat4_row(&slug_matrix, 3));
-            self.draw_vars
-                .set_uniform(cx.cx, live_id!(slug_viewport_px), &viewport_px);
+            for (offset, len, row) in &slug_uniforms.matrix_rows {
+                self.draw_vars.dyn_uniforms[*offset..offset + len].copy_from_slice(&row[..*len]);
+            }
+            let (offset, len) = slug_uniforms.viewport_px_range;
+            self.draw_vars.dyn_uniforms[offset..offset + len].copy_from_slice(&viewport_px[..len]);
         }
     }
 
@@ -3219,11 +3318,13 @@ impl DrawText {
         row: &LaidoutRow,
         out_instances: &mut RecordingBuffer,
     ) {
+        let aa_pad_in_lpxs = (self.get_aa_pad_px(cx.cx) / cx.current_dpi_factor() as f32).max(0.0);
         for glyph in &row.glyphs {
             self.draw_glyph(
                 cx,
                 origin_in_lpxs + Size::from(glyph.origin_in_lpxs) * self.font_scale,
                 glyph,
+                aa_pad_in_lpxs,
                 out_instances,
             );
         }
@@ -3267,6 +3368,7 @@ impl DrawText {
                 SlugGlyphCacheResult::Deferred => {
                     cx.redraw_all();
                 }
+                SlugGlyphCacheResult::Empty => return None,
                 SlugGlyphCacheResult::Unavailable => {}
             }
         }
@@ -3282,6 +3384,7 @@ impl DrawText {
         cx: &mut Cx2d,
         origin_in_lpxs: Point<f32>,
         glyph: &LaidoutGlyph,
+        aa_pad_in_lpxs: f32,
         output: &mut RecordingBuffer,
     ) {
         use crate::text::geom::Point;
@@ -3293,11 +3396,11 @@ impl DrawText {
         match self.resolve_glyph(cx, glyph) {
             Some(ResolvedGlyph::Slug(slug_glyph)) => {
                 self.draw_slug_glyph(
-                    cx,
                     glyph_origin,
                     glyph.font_size_in_lpxs,
                     glyph.color,
                     slug_glyph,
+                    aa_pad_in_lpxs,
                     output,
                 );
             }
@@ -3315,11 +3418,11 @@ impl DrawText {
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     fn draw_slug_glyph(
         &mut self,
-        cx: &mut Cx2d,
         origin_in_lpxs: Point<f32>,
         font_size_in_lpxs: f32,
         color: Option<Color>,
         glyph: crate::text::slug_atlas::SlugGlyphInfo,
+        aa_pad_in_lpxs: f32,
         output: &mut RecordingBuffer,
     ) {
         let bounds_in_lpxs = TextRect::new(
@@ -3336,12 +3439,13 @@ impl DrawText {
             ),
         );
 
-        let pad = (self.get_aa_pad_px(cx.cx) / cx.current_dpi_factor() as f32).max(0.0);
-        self.rect_pos = vec2(bounds_in_lpxs.origin.x - pad, bounds_in_lpxs.origin.y - pad)
-            + vec2(0.0, self.temp_y_shift * font_size_in_lpxs);
+        self.rect_pos = vec2(
+            bounds_in_lpxs.origin.x - aa_pad_in_lpxs,
+            bounds_in_lpxs.origin.y - aa_pad_in_lpxs,
+        ) + vec2(0.0, self.temp_y_shift * font_size_in_lpxs);
         self.rect_size = vec2(
-            bounds_in_lpxs.size.width + pad * 2.0,
-            bounds_in_lpxs.size.height + pad * 2.0,
+            bounds_in_lpxs.size.width + aa_pad_in_lpxs * 2.0,
+            bounds_in_lpxs.size.height + aa_pad_in_lpxs * 2.0,
         );
         if let Some(color) = color {
             self.color = vec4(
@@ -3562,16 +3666,30 @@ pub struct FontMember {
     pub lazy: f32,
 }
 
-#[derive(Debug, Clone, Script, PartialEq)]
+#[derive(Debug, Clone, Script)]
 pub struct FontFamily {
     #[rust]
     id: LiveId,
     #[rust]
-    members: Vec<FontMemberDef>,
+    members: Rc<[FontMemberDef]>,
     #[rust]
-    diagnostic_role: String,
+    diagnostic_role: Rc<str>,
     #[rust]
-    diagnostic_set: String,
+    diagnostic_set: Rc<str>,
+    /// The family, fonts generation and resource generation we last found all our fonts loaded for,
+    /// shared by every clone.
+    #[rust]
+    loaded_fonts_generation: Rc<Cell<Option<(FontFamilyId, u64, u64)>>>,
+}
+
+// `loaded_fonts_generation` is only a cache, so it never makes two families differ.
+impl PartialEq for FontFamily {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.members == other.members
+            && self.diagnostic_role == other.diagnostic_role
+            && self.diagnostic_set == other.diagnostic_set
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -3600,7 +3718,7 @@ impl FontFamily {
         let mut expected_member_count = 0;
         let family_id = self.to_font_family_id();
 
-        for member in &self.members {
+        for member in self.members.iter() {
             if let Some(lazy) = member.lazy {
                 if !fonts.lazy_font_is_requested(family_id, lazy) {
                     continue;
@@ -3681,8 +3799,8 @@ impl FontFamily {
                 font_ids,
                 expected_member_count,
                 diagnostics: FontDiagnostics {
-                    role: self.diagnostic_role.clone(),
-                    set: self.diagnostic_set.clone(),
+                    role: self.diagnostic_role.to_string(),
+                    set: self.diagnostic_set.to_string(),
                     tried: self
                         .members
                         .iter()
@@ -3698,12 +3816,20 @@ impl FontFamily {
         );
     }
 
-    fn ensure_fonts_loaded(&self, cx: &mut Cx) {
+    /// Loads whatever fonts of ours aren't loaded yet, and returns the fonts they go in.
+    fn ensure_fonts_loaded(&self, cx: &mut Cx) -> Rc<RefCell<Fonts>> {
         CxDraw::lazy_construct_fonts(cx);
 
         let family_id = self.to_font_family_id();
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
-        fonts.borrow_mut().sync_unavailable_fonts(cx.script_resource_generation());
+        // The generations go up whenever a family changes, a lazy font gets asked for or a resource
+        // arrives, so we're still loaded if they haven't.
+        let generation = fonts.borrow().font_family_generation();
+        let resource_generation = cx.script_resource_generation();
+        if self.loaded_fonts_generation.get() == Some((family_id, generation, resource_generation)) {
+            return fonts;
+        }
+        fonts.borrow_mut().sync_unavailable_fonts(resource_generation);
         let expected_member_count = {
             let fonts_ref = fonts.borrow();
             self.members
@@ -3717,11 +3843,9 @@ impl FontFamily {
                 .count()
         };
 
-        {
-            let fonts_ref = fonts.borrow();
-            if fonts_ref.is_font_family_complete(family_id, expected_member_count) {
-                return;
-            }
+        if fonts.borrow().is_font_family_complete(family_id, expected_member_count) {
+            self.loaded_fonts_generation.set(Some((family_id, generation, resource_generation)));
+            return fonts;
         }
 
         let handles = {
@@ -3739,23 +3863,15 @@ impl FontFamily {
         for path in handles {
             cx.load_script_resource_by_path(path);
         }
-        {
-            let fonts_ref = fonts.borrow();
-            if fonts_ref.is_font_family_complete(family_id, expected_member_count) {
-                return;
-            }
+        if fonts.borrow().is_font_family_complete(family_id, expected_member_count) {
+            return fonts;
         }
 
-        let mut fonts_ref = fonts.borrow_mut();
-        self.update_font_definitions(cx, &mut fonts_ref);
+        self.update_font_definitions(cx, &mut fonts.borrow_mut());
+        fonts
     }
 
-    fn request_lazy_fonts_for_glyph_miss(
-        &self,
-        cx: &mut Cx,
-        text: &str,
-        has_missing_glyph: bool,
-    ) {
+    fn request_lazy_fonts_for_glyph_miss(&self, cx: &mut Cx, text: &str) {
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let family_id = self.to_font_family_id();
         let handles = {
@@ -3765,12 +3881,7 @@ impl FontFamily {
                 .filter_map(|member| {
                     let family = member.lazy?;
                     fonts_ref
-                        .take_lazy_font_request(
-                            family_id,
-                            family,
-                            text,
-                            has_missing_glyph,
-                        )
+                        .take_lazy_font_request(family_id, family, text)
                         .then_some(member.resource_path.as_str())
                 })
                 .collect::<Vec<_>>()
@@ -3819,7 +3930,7 @@ fn row_span_x_bounds_in_lpxs(
     } else {
         0.0
     };
-    let end_x_in_lpxs = row.width_in_lpxs;
+    let end_x_in_lpxs = row.width_without_hanging_in_lpxs();
     (start_x_in_lpxs, end_x_in_lpxs.max(start_x_in_lpxs))
 }
 
@@ -3830,6 +3941,20 @@ impl TextStyle {
 
     pub fn ensure_fonts_loaded(&self, cx: &mut Cx) {
         self.font_family.ensure_fonts_loaded(cx);
+    }
+
+    /// Returns the hyphen the layouter draws where a row wraps right after a soft hyphen.
+    pub fn get_hyphen(&self, cx: &mut Cx) -> &'static str {
+        let fonts = self.font_family.ensure_fonts_loaded(cx);
+        let font_family = fonts.borrow_mut().get_or_load_font_family(self.font_family_id());
+        get_hyphen(&font_family)
+    }
+
+    /// Shapes `text` like the layouter does, sharing its cache, without laying it out.
+    pub fn get_or_shape(&self, cx: &mut Cx, text: &str) -> Rc<ShapedText> {
+        let fonts = self.font_family.ensure_fonts_loaded(cx);
+        let font_family = fonts.borrow_mut().get_or_load_font_family(self.font_family_id());
+        font_family.get_or_shape(text.into())
     }
 }
 
@@ -3845,18 +3970,18 @@ impl ScriptHook for FontFamily {
             return false;
         };
 
-        self.members.clear();
-        let selected_set = vm.cx().font_set().as_str().to_string();
+        let mut members = Vec::new();
+        let selected_set = vm.cx().font_set().as_str().into();
         let map = vm.bx.heap.map_ref(obj);
         self.diagnostic_role = map
             .get(&id!(_font_role).into())
             .and_then(|entry| entry.value.as_id())
-            .and_then(|id| id.as_string(|name| name.map(str::to_owned)))
-            .unwrap_or_else(|| "custom".to_string());
+            .and_then(|id| id.as_string(|name| name.map(Rc::from)))
+            .unwrap_or_else(|| "custom".into());
         self.diagnostic_set = map
             .get(&id!(_font_set).into())
             .and_then(|entry| entry.value.as_id())
-            .and_then(|id| id.as_string(|name| name.map(str::to_owned)))
+            .and_then(|id| id.as_string(|name| name.map(Rc::from)))
             .unwrap_or(selected_set);
 
         let len = vm.bx.heap.vec_len(obj);
@@ -3870,7 +3995,7 @@ impl ScriptHook for FontFamily {
                     error!("Font resource is not registered in its owning script heap");
                     continue;
                 };
-                self.members.push(FontMemberDef {
+                members.push(FontMemberDef {
                     handle: handle_ref.as_handle(),
                     resource_path,
                     id: kv
@@ -3897,11 +4022,12 @@ impl ScriptHook for FontFamily {
         // resources and metrics. Identical families can safely share a cache
         // across isolates, while different ones can never alias by index.
         let mut hasher = DefaultHasher::new();
-        for member in &self.members {
+        for member in &members {
             font_member_font_id(member).hash(&mut hasher);
             (member.lazy.map(|v| v as u32)).hash(&mut hasher);
         }
         self.id = LiveId(hasher.finish());
+        self.members = members.into();
 
         // Don't eagerly register fonts here. Font registration is deferred
         // to ensure_fonts_loaded() which is called at draw time.
@@ -3914,13 +4040,14 @@ impl ScriptHook for FontFamily {
 
 #[cfg(test)]
 mod tests {
-    use super::{DrawText, TextOverflow};
+    use super::{DrawText, FontFamily, FontMemberDef, TextOverflow};
     use crate::{
         cx_2d::Cx2d,
         cx_draw::CxDraw,
-        makepad_platform::{dvec2, Cx, DrawEvent, Inset, ScriptNew},
+        makepad_platform::{dvec2, Cx, DrawEvent, Inset, LazyFontFamily, ScriptNew},
         turtle::{FitBound, Layout, Size, Walk},
     };
+    use std::rc::Rc;
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     use super::{register_draw_text_slug, DrawTextSlug};
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -3929,6 +4056,40 @@ mod tests {
     #[test]
     fn draw_text_size_stays_16_byte_aligned() {
         assert_eq!(std::mem::size_of::<DrawText>() % 16, 0);
+    }
+
+    #[test]
+    fn lazy_fonts_load_once_something_asks_for_them() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let resources =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../widgets/resources");
+        let get_member = |file: &str, lazy| FontMemberDef {
+            resource_path: resources.join(file).to_string_lossy().into_owned(),
+            id: file.into(),
+            lazy,
+            ..Default::default()
+        };
+        let family = FontFamily {
+            id: crate::makepad_platform::LiveId(0xFA17),
+            members: Rc::from([
+                get_member("IBMPlexSans-Text.ttf", None),
+                get_member("LXGWWenKaiRegular.ttf", Some(LazyFontFamily::Cjk)),
+            ]),
+            diagnostic_role: "custom".into(),
+            diagnostic_set: "test".into(),
+            loaded_fonts_generation: Default::default(),
+        };
+        let family_id = family.to_font_family_id();
+        // The second time, the family finds all its fonts loaded.
+        family.ensure_fonts_loaded(&mut cx);
+        let fonts = family.ensure_fonts_loaded(&mut cx);
+        assert_eq!(fonts.borrow_mut().get_or_load_font_family(family_id).fonts().len(), 1);
+        // LabelCache asks for a lazy font itself, and then loads the family's fonts.
+        let is_new_request =
+            fonts.borrow_mut().take_lazy_font_request(family_id, LazyFontFamily::Cjk, "\u{4E2D}");
+        assert!(is_new_request);
+        family.ensure_fonts_loaded(&mut cx);
+        assert_eq!(fonts.borrow_mut().get_or_load_font_family(family_id).fonts().len(), 2);
     }
 
     #[test]
