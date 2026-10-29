@@ -32,6 +32,9 @@ use std::time::{Duration, Instant};
 
 const USAGE: &str = "usage: desk-link-drive <host[:port]> <step> [, <step>]...\n  steps: info | shot PATH [X,Y,W,H] [/N] | move X Y | click X Y [left|right|middle] [double] | drag X1 Y1 X2 Y2 [button] | scroll N [X Y] | type TEXT | key COMBO | wait MS | wait-change [TIMEOUT_MS] [QUIET_MS]";
 
+/// How many already-queued messages `pump` still handles once its time is up (the rest wait for the next pump).
+const PUMP_DRAIN_MAX: usize = 64;
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(target) = args.first().filter(|a| !a.starts_with('-')) else {
@@ -324,8 +327,10 @@ impl Link {
                 Err(RecvTimeoutError::Disconnected) => return Err("the session ended".into()),
             }
             if Instant::now() >= until {
-                // what already came is handled too
-                while let Ok(msg) = self.inbox.try_recv() {
+                // what already came is handled too, but only a bounded batch: a 4K desktop's video can
+                // arrive faster than it decodes, and draining until the inbox is empty never ended
+                for _ in 0..PUMP_DRAIN_MAX {
+                    let Ok(msg) = self.inbox.try_recv() else { break };
                     self.handle(msg?)?;
                 }
                 return Ok(());

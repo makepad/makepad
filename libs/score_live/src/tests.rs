@@ -291,6 +291,29 @@ fn ironfish_plays_a_loop_on_its_beats_and_repeats() {
 }
 
 #[test]
+fn morph_plays_its_patch_and_reports_bad_fields() {
+    let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet lead = Morph{preset: @wide_saw a_table: @formant a_pos: 0.3 lfo1_sync: @n8 mods: [[@lfo1 @a_pos 0.4] [@env2, @f1_cutoff, -0.3, @m1]] fx: [@delay @reverb] lfo2_shape: @drawn lfo2_points: [[0 0 0] [0.5 1 0.3] [1 0 0]] b_on: true b_table: @user b_frames: [[1 0 0.5] [1 0.3]]}\nlet line = Loop{play: lead beats: 2 code: fn(i) { play(@a2, {dur: 0.5}) sleep(1) play(@c3, {dur: 0.5}) sleep(1) }}\nScore{clock lead line}\n";
+    let doc = model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let Some(model::InstKind::Morph { patch, .. }) = doc.insts.iter().find(|i| i.name == "lead").map(|i| &i.kind) else { panic!("not a Morph") };
+    assert!(patch.contains("a_table=formant") && patch.contains("mod=lfo1,a_pos,0.4") && patch.contains("fx=delay,reverb"), "{patch}");
+    let opts = RenderOpts { seconds: Some(2.0), ..RenderOpts::default() };
+    let a = render(src, &opts, &NoSamples).unwrap_or_else(|d| panic!("{d:?}"));
+    let peak = a.left.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    assert!(peak > 0.01, "Morph is silent (peak {peak})");
+    // Deterministic.
+    assert_eq!(a.left, render(src, &opts, &NoSamples).unwrap().left);
+    // A typo, a bad choice and a bad mod row each come back with the reason.
+    for (bad, says) in [("a_pos: 0.3", "a_poss: 0.3"), ("a_table: @formant", "a_table: @nope"), ("[@lfo1 @a_pos 0.4]", "[@lfo9 @a_pos 0.4]")] {
+        let errs = model::load(&src.replace(bad, says)).err().unwrap_or_else(|| panic!("{says} loaded"));
+        assert!(!errs.is_empty(), "{says}");
+    }
+    // The AI's tool lists the parameters.
+    let out = crate::tools::call("morph_params", &makepad_strict_json::parse(br#"{"groups": ["osc_a"]}"#).unwrap(), None).unwrap();
+    let params = out.get("params").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(params.contains("a_warp1") && !params.contains("b_pos"));
+}
+
+#[test]
 fn shader_instruments_and_effects_play_in_the_graph() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet bass = Shader{lib: \"acid\" cutoff: 600 mono: 1}\nlet keys = Shader{lib: \"epiano\"}\nlet line = Loop{play: bass beats: 2 code: fn(i) { play(@a1, {dur: 0.4}) sleep(0.5) play(@c2, {dur: 0.4}) sleep(1.5) }}\nlet chords = Loop{play: keys beats: 2 code: fn(i) { play(chord(@a3, @m7), {dur: 1.5}) sleep(2) }}\nlet space = ShaderFx{in: [chords] lib: \"echo\" wet: 0.4}\nScore{clock bass keys line chords space}\n";
     let started = std::time::Instant::now();

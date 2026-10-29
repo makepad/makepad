@@ -74,6 +74,9 @@ pub enum InstKind {
     /// Ironfish: a program and its settings (one per
     /// `presets::IRON_PARAMS`, NaN where the program's plays).
     Ironfish { program: usize, values: Vec<f32> },
+    /// Morph, the wavetable synth: its patch in text form (checked) and the
+    /// library samples its three oscillators read (`a_src` …).
+    Morph { patch: String, srcs: [Option<AssetRef>; 3] },
     /// An audio shader instrument; `mono` plays one voice, legato.
     Shader { shader: ShaderDef, mono: bool },
     /// Sung voices (`sing(...)`): a singer profile (a built-in name, or a
@@ -411,6 +414,7 @@ impl ScoreDoc {
         for inst in &self.insts {
             match &inst.kind {
                 InstKind::Sampler { src, .. } => out.push(src.clone()),
+                InstKind::Morph { srcs, .. } => out.extend(srcs.iter().flatten().cloned()),
                 InstKind::Drums { slots, .. } => out.extend(slots.iter().filter_map(|s| s.sample.clone())),
                 InstKind::Synth { .. } | InstKind::Ironfish { .. } | InstKind::Shader { .. } | InstKind::Voice { .. } | InstKind::Native { .. } | InstKind::Midi { .. } | InstKind::Input { .. } => {}
             }
@@ -526,6 +530,102 @@ impl Reader<'_> {
                     default
                 }
             },
+        }
+    }
+
+    /// A Morph: its fields as patch text, checked by the engine's own
+    /// parser (the reason comes back at the field it names).
+    fn morph(&mut self, node: &str, obj: &Obj) -> InstKind {
+        use makepad_audio_synth::morph::MorphPatch;
+        let word = |v: &V| -> Option<String> {
+            match v {
+                V::Num(n) => Some(format!("{n}")),
+                V::Bool(b) => Some(b.to_string()),
+                V::Str(s) | V::Id(s) => Some(s.trim_start_matches('@').to_string()),
+                _ => None,
+            }
+        };
+        let mut tokens: Vec<String> = Vec::new();
+        let mut srcs: [Option<AssetRef>; 3] = [None, None, None];
+        for (key, value) in &obj.fields {
+            let key = key.as_str();
+            match key {
+                "at" => {}
+                "a_src" | "b_src" | "c_src" => {
+                    let o = ["a_src", "b_src", "c_src"].iter().position(|k| *k == key).unwrap_or(0);
+                    srcs[o] = self.asset(node, key, Some(value));
+                }
+                "mods" => match value {
+                    V::Arr(rows) => {
+                        for row in rows {
+                            match row {
+                                V::Arr(items) => {
+                                    let words: Vec<String> = items.iter().filter_map(word).collect();
+                                    tokens.push(format!("mod={}", words.join(",")));
+                                }
+                                _ => self.err(node, Some(key), "`mods` is a list of rows: [[@lfo1 @a_pos 0.4] [@env2 @f1_cutoff 0.5]]"),
+                            }
+                        }
+                    }
+                    V::Nil => {}
+                    _ => self.err(node, Some(key), "`mods` is a list of rows: [[@lfo1 @a_pos 0.4] [@env2 @f1_cutoff 0.5]]"),
+                },
+                "fx" | "macro_names" => match value {
+                    V::Arr(items) => {
+                        let words: Vec<String> = items.iter().filter_map(word).map(|w| w.replace([',', ' '], "_")).collect();
+                        tokens.push(format!("{key}={}", words.join(",")));
+                    }
+                    _ => self.err(node, Some(key), format!("`{key}` is a list: [@delay @reverb]")),
+                },
+                k if k.ends_with("_points") => match value {
+                    V::Arr(points) => {
+                        let mut out = Vec::new();
+                        for p in points {
+                            match p {
+                                V::Arr(xyz) if xyz.len() >= 2 && xyz.iter().all(|v| v.num().is_some()) => {
+                                    out.push(xyz.iter().take(3).map(|v| format!("{}", v.num().unwrap_or(0.0))).collect::<Vec<_>>().join(":"));
+                                }
+                                _ => self.err(node, Some(key), format!("`{key}` is [[x y curve] ...], x and y 0..1")),
+                            }
+                        }
+                        tokens.push(format!("{key}={}", out.join(",")));
+                    }
+                    _ => self.err(node, Some(key), format!("`{key}` is [[x y curve] ...], x and y 0..1")),
+                },
+                k if k.ends_with("_frames") => {
+                    let frame = |v: &V| -> Option<String> {
+                        match v {
+                            V::Arr(amps) if amps.iter().all(|a| a.num().is_some()) => Some(amps.iter().map(|a| format!("{}", a.num().unwrap_or(0.0))).collect::<Vec<_>>().join(":")),
+                            _ => None,
+                        }
+                    };
+                    match value {
+                        // One frame, or a list of frames.
+                        V::Arr(items) if items.iter().all(|a| a.num().is_some()) => tokens.push(format!("{key}={}", frame(value).unwrap_or_default())),
+                        V::Arr(items) => match items.iter().map(frame).collect::<Option<Vec<_>>>() {
+                            Some(frames) => tokens.push(format!("{key}={}", frames.join("/"))),
+                            None => self.err(node, Some(key), format!("`{key}` is [[partial amplitudes] ...], one list a frame")),
+                        },
+                        _ => self.err(node, Some(key), format!("`{key}` is [[partial amplitudes] ...], one list a frame")),
+                    }
+                }
+                _ => match word(value) {
+                    Some(w) => tokens.push(format!("{key}={w}")),
+                    None if matches!(value, V::Nil) => {}
+                    None => self.err(node, Some(key), format!("`{key}` is a number, an @choice or true/false")),
+                },
+            }
+        }
+        // The preset first, so the fields after it override it.
+        tokens.sort_by_key(|t| !t.starts_with("preset="));
+        let text = tokens.join(" ");
+        match MorphPatch::parse(&text) {
+            Ok(patch) => InstKind::Morph { patch: patch.to_text(), srcs },
+            Err(why) => {
+                let at = obj.fields.iter().map(|(k, _)| k.as_str()).find(|k| why.contains(&format!("`{k}`")));
+                self.err(node, at, why);
+                InstKind::Morph { patch: String::new(), srcs }
+            }
         }
     }
 
@@ -896,6 +996,18 @@ pub const INSTRUMENT_FIELDS: [&str; 9] = ["kind", "preset", "src", "bank", "prog
 pub const IRON_FIELDS: [&str; 17] = [
     "program", "cutoff", "resonance", "env", "attack", "decay", "sustain", "release", "sub", "noise", "glide", "crush", "delay", "chorus", "reverb", "output", "at",
 ];
+/// Morph's fields besides its parameters (`morph_fields` has them all).
+pub const MORPH_EXTRA: [&str; 19] = [
+    "preset", "mods", "fx", "macro_names", "a_frames", "b_frames", "c_frames", "a_src", "b_src", "c_src", "lfo1_points", "lfo2_points", "lfo3_points",
+    "lfo4_points", "lfo5_points", "lfo6_points", "lfo7_points", "lfo8_points", "at",
+];
+
+/// Every field a Morph reads: its schema's parameters and [`MORPH_EXTRA`].
+pub fn morph_fields() -> Vec<&'static str> {
+    let schema = &makepad_audio_synth::morph::layout().schema;
+    MORPH_EXTRA.iter().copied().chain(schema.params.iter().map(|p| p.key.as_str())).collect()
+}
+
 pub const VOICE_FIELDS: [&str; 13] = ["engine", "profile", "choir", "parts", "vibrato", "vibrato_rate", "vibrato_delay", "portamento", "scoop", "breath", "drift", "jitter", "at"];
 pub const SECTION_FIELDS: [&str; 9] = ["bars", "loops", "next", "repeat", "bpm", "ramp", "tempo", "set", "at"];
 
@@ -983,6 +1095,7 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
             "Drums" => DRUMS_FIELDS.to_vec(),
             "Sampler" => SAMPLER_FIELDS.to_vec(),
             "Ironfish" => IRON_FIELDS.to_vec(),
+            "Morph" => morph_fields(),
             "Instrument" => INSTRUMENT_FIELDS.to_vec(),
             "Voice" => VOICE_FIELDS.to_vec(),
             "Loop" | "Stinger" => LOOP_FIELDS.to_vec(),
@@ -1099,6 +1212,10 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
                     Some(_) => r.num(n, obj, field, 0.5, 0.0, 1.0) as f32,
                 }).collect();
                 doc.insts.push(InstDef { name: name.clone(), kind: InstKind::Ironfish { program, values } });
+            }
+            "Morph" => {
+                let kind = r.morph(n, obj);
+                doc.insts.push(InstDef { name: name.clone(), kind });
             }
             "Sampler" => {
                 let src = r.asset(n, "src", obj.get("src")).unwrap_or(AssetRef { id: String::new(), rev: String::new() });
@@ -1486,7 +1603,7 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
     let fx_names: Vec<&str> = doc.fx.iter().map(|f| f.name.as_str()).collect();
     for l in &doc.loops {
         match &l.play {
-            Some(play) if !is(play, &["Synth", "Drums", "Sampler", "Ironfish", "Shader", "Voice", "Instrument"]) => r.err(&l.name, Some("play"), format!("`{play}` is not an instrument in Score{{…}}")),
+            Some(play) if !is(play, &["Synth", "Drums", "Sampler", "Ironfish", "Morph", "Shader", "Voice", "Instrument"]) => r.err(&l.name, Some("play"), format!("`{play}` is not an instrument in Score{{…}}")),
             None if l.hits.as_ref().is_none_or(|h| h.drum.is_none()) && l.code.is_some() => r.err(&l.name, Some("play"), "a loop names the instrument it plays: play: synth"),
             _ => {}
         }

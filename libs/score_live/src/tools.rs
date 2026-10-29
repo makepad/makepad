@@ -15,7 +15,7 @@ use crate::model::Diag;
 use crate::NoSamples;
 use makepad_strict_json::{self as json, Value};
 
-pub use makepad_score_tools::{find, ScoreToolDef, CHECK, GUIDE, INSTRUMENT_SEARCH, LISTEN, TOOLS};
+pub use makepad_score_tools::{find, ScoreToolDef, CHECK, GUIDE, INSTRUMENT_SEARCH, LISTEN, MORPH_PARAMS, TOOLS};
 
 /// The composer guide `score_guide` answers.
 pub fn guide() -> String {
@@ -32,6 +32,7 @@ pub fn call(name: &str, args: &Value, open: Option<&str>) -> Result<Value, Strin
         Some("score_check") => Ok(check(&source_of(args, open)?)),
         Some("score_listen") => listen_args(args, open).map(|(json, _)| json),
         Some("instrument_search") => Ok(instrument_search(args)),
+        Some("morph_params") => Ok(morph_params(args)),
         _ => Err(format!("no score tool `{name}`")),
     }
 }
@@ -94,6 +95,24 @@ pub fn listen_args(args: &Value, open: Option<&str>) -> Result<(Value, Option<He
         }
         Err(diags) => Ok((json::obj(vec![("ok", Value::Bool(false)), ("problems", problems(&diags, &source))]), None)),
     }
+}
+
+/// `morph_params`: Morph's schema as the AI reads it (some groups or all).
+pub fn morph_params(args: &Value) -> Value {
+    use makepad_audio_synth::{kit::matrix, morph};
+    let groups: Vec<String> = match args.get("groups") {
+        Some(Value::Arr(items)) => items.iter().filter_map(|g| g.as_str().map(str::to_string)).collect(),
+        _ => Vec::new(),
+    };
+    let wanted: Vec<&str> = groups.iter().map(String::as_str).collect();
+    let schema = &morph::layout().schema;
+    json::obj(vec![
+        ("structure", json::s(morph::STRUCTURE.to_string())),
+        ("params", json::s(schema.describe(&wanted))),
+        ("mods", json::s(matrix::ABOUT.to_string())),
+        ("presets", Value::Arr(morph::PRESETS.iter().map(|(n, about, _)| json::s(format!("{n}: {about}"))).collect())),
+        ("groups", Value::Arr(schema.groups.iter().map(|g| json::s(g.name.clone())).collect())),
+    ])
 }
 
 /// `instrument_search`: the palette's best matches for a description.

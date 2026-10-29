@@ -41,6 +41,21 @@ and written once at the release.
   click steps through the waves.
 - `SynthScope{node: "bass"}`: what the node sounds like now and its level
   (an instrument through the loops that play it, a loop, an effect).
+- Morph (the wavetable synth node) has its own pictures, each running the
+  synth's own code:
+  - `SynthTable{node: "lead" osc: "a"}`: oscillator a's frame as it plays
+    (table, position, both warps, spectral reshaping); drag sideways for
+    `a_pos`, a click steps `a_table`.
+  - `SynthLfo{node: "lead" lfo: 1}`: LFO 1's shape over a cycle (drawn
+    points show as dots); a click steps `lfo1_shape`, drag up/down `lfo1_var`.
+  - `SynthMods{node: "lead"}`: the mod rows (source > destination, amount
+    bar); drag a row sideways for its amount.
+  A Morph's knobs bind its parameters by key (`lead.a_pos`, `lead.f1_cutoff`,
+  `lead.lfo1_rate`, `lead.m1`); the score's `morph_params` lists them by
+  module (osc_a, filter1, env2, lfo1, macros, arp, fx_*). A good Morph tweak
+  module: SynthTable per active oscillator with its pos, warp amounts and
+  unison knobs; the filter with cutoff/res; env1; the LFOs that are routed
+  (SynthLfo + rate); SynthMods; the macros by their names.
 - `SynthKeys{node: "lead" octave: 3 octaves: 2}`: a keyboard that plays the
   instrument as it is now.
 

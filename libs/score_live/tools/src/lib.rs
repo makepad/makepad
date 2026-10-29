@@ -57,8 +57,17 @@ pub const INSTRUMENT_SEARCH: ScoreToolDef = ScoreToolDef {
     args_doc: r#"{"query": "thin bright 80s drum machine", "kind": "drums", "limit": 4}"#,
 };
 
+pub const MORPH_PARAMS: ScoreToolDef = ScoreToolDef {
+    name: "morph.params",
+    api_name: "morph_params",
+    description: "Morph, the wavetable synth node (`Morph{…}`): its parameters, one line each (`key range [log] =default [~ if a mod row may move it]: what it does`), grouped by module (osc_a osc_b osc_c sub noise filter1 filter2 filters env1-4 lfo1-8 macros voice arp fx_*), its mod sources and row syntax, and its presets. Ask for some groups (`osc_*` matches a prefix) to keep it short.",
+    input: r#"{"type": "object", "properties": {"groups": {"type": "array", "items": {"type": "string", "description": "a group, or a prefix with *"}, "description": "only these groups (default: all)"}}}"#,
+    output: r#"{"type": "object", "additionalProperties": true, "properties": {"structure": {"type": "string", "description": "how a Morph is written"}, "params": {"type": "string", "description": "one line a parameter, by group"}, "mods": {"type": "string", "description": "sources and row syntax"}, "presets": {"type": "array", "items": {"type": "string", "description": "name: what it is"}, "description": "the built-in patches"}, "groups": {"type": "array", "items": {"type": "string", "description": "a group name"}, "description": "every group"}}, "required": ["params"]}"#,
+    args_doc: r#"{"groups": ["osc_a", "lfo1"]}"#,
+};
+
 /// Every Score tool, in the order registries list them.
-pub const TOOLS: [ScoreToolDef; 4] = [GUIDE, CHECK, LISTEN, INSTRUMENT_SEARCH];
+pub const TOOLS: [ScoreToolDef; 5] = [GUIDE, CHECK, LISTEN, INSTRUMENT_SEARCH, MORPH_PARAMS];
 
 /// The Score tool named `name`, dotted or underscored.
 pub fn find(name: &str) -> Option<&'static ScoreToolDef> {

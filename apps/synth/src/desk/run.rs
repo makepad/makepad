@@ -341,7 +341,7 @@ impl Desk {
     pub fn tool(&mut self, cx: &mut Cx, ui: &WidgetRef, name: &str, args: &Json) -> Answer {
         let base = args.get("base_revision").and_then(Json::as_i64);
         match name {
-            "score_guide" | "score_check" | "instrument_search" => match tools::call(name, args, Some(&self.source)) {
+            "score_guide" | "score_check" | "instrument_search" | "morph_params" => match tools::call(name, args, Some(&self.source)) {
                 Ok(value) => ok(value),
                 Err(message) => refused(message),
             },

@@ -19,6 +19,12 @@ pub fn guide() -> String {
     }
     out.pop();
     out.push('\n');
+    out.push_str("- Morph presets (`Morph{preset: @name}`):");
+    for (name, about, _) in makepad_audio_synth::morph::PRESETS {
+        out.push_str(&format!(" {name} ({about}),"));
+    }
+    out.pop();
+    out.push('\n');
     out.push_str("- Drum kits (`Drums{kit: @name}`):");
     for k in &sounds.kits {
         out.push_str(&format!(" {} ({}),", k.name, k.about.split(':').next().unwrap_or("")));
@@ -90,6 +96,22 @@ Score{label: "Name" clock kit bass kick line pump verb a b arrange: [a b]}
   each 0..1 over its range: cutoff resonance env (filter envelope)
   attack decay sustain release sub noise glide crush delay chorus reverb
   output. A note holds for its dur (a quarter beat without one).
+  `Morph`: the wavetable synth (32 voices): three oscillators a b c,
+  each @wavetable (a_table: @basic @pwm @harmonic @formant @fm @sync
+  @organ @bell @vocal @digital @noisy @growl, or @user with a_frames:
+  [[partial amplitudes] ...]; a_pos morphs the frames), @granular,
+  @spectral (partials reshaped: a_shift a_stretch a_tilt a_odd a_formant)
+  or @sample (a_src: asset(id, rev)); two warps each (a_warp1: @sync
+  @bend @pwm @mirror @fm @fold @drive ... with a_warp1_amt), unison
+  (a_unison a_detune a_blend a_stack), a sub and a noise oscillator, two
+  filters (f1_type f1_cutoff f1_res ...), env1-4 (env1 the amp), lfo1-8
+  (shapes incl. @drawn @lorenz @rossler and 2D paths @circle @eight with
+  a y output lfo1y; lfo1_sync: @n8 ...), macros m1-m8, an arp (arp_on
+  arp_pattern arp_rate) and a rack `fx: [@delay @reverb]`. Modulation is
+  rows: `mods: [[@lfo1 @a_pos 0.4] [@env2 @f1_cutoff 0.5] [@lfo2 @pitch
+  0.02 @mod]]` (amount in the knob's travel; an aux source scales it).
+  `preset: @name` starts from a built-in; morph_params lists every
+  parameter with its range and the presets. A note holds for its dur.
   `Shader`: an instrument written as an audio shader: `lib: "acid"` (the
   library: supersaw analog_poly acid pluck epiano modal_bell techno_kick)
   or `code: "…"` (its own, see the audio shader guide), mono (one voice,
