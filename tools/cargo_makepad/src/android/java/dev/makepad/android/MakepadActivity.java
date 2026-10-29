@@ -1059,10 +1059,7 @@ public class MakepadActivity
     HashMap<Long, VideoPlayerRunnable> mVideoPlayerRunnables;
 
     // networking, make these static because of activity switching
-    static HandlerThread mWebSocketsThread;
-    static Handler mWebSocketsHandler;
     static HashMap<Long, MakepadWebSocket> mActiveWebsockets = new HashMap<>();
-    static HashMap<Long, MakepadWebSocketReader> mActiveWebsocketsReaders = new HashMap<>();
     static HashMap<Long, MakepadSocketStream> mActiveSocketStreams = new HashMap<>();
     private boolean mIsSwitchingActivity = false;
 
@@ -1263,12 +1260,6 @@ public class MakepadActivity
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
-        if (mWebSocketsThread == null || !mWebSocketsThread.isAlive()) {
-            mWebSocketsThread = new HandlerThread("WebSocketsThread");
-            mWebSocketsThread.start();
-            mWebSocketsHandler = new Handler(mWebSocketsThread.getLooper());
-        }
-
         // On API 30+, Theme.NoTitleBar.Fullscreen sets FLAG_FULLSCREEN which positions
         // the window below the status bar, conflicting with the modern WindowInsetsController.
         // Switch from the launch theme to the app theme and handle fullscreen programmatically.
@@ -1548,7 +1539,6 @@ public class MakepadActivity
         shutdownVideoPlaybackThread();
         if (!mIsSwitchingActivity && !isRecreating) {
             cleanupNetworkState();
-            shutdownWebSocketsThread();
             stopLocationUpdates();
         }
         super.onDestroy();
@@ -2265,7 +2255,6 @@ public class MakepadActivity
             }
         }
         mActiveWebsockets.clear();
-        mActiveWebsocketsReaders.clear();
 
         for (MakepadSocketStream socket : new ArrayList<>(mActiveSocketStreams.values())) {
             if (socket != null) {
@@ -2273,25 +2262,6 @@ public class MakepadActivity
             }
         }
         mActiveSocketStreams.clear();
-
-        if (mWebSocketsHandler != null) {
-            mWebSocketsHandler.removeCallbacksAndMessages(null);
-        }
-    }
-
-    private static void shutdownWebSocketsThread() {
-        if (mWebSocketsThread == null) {
-            mWebSocketsHandler = null;
-            return;
-        }
-        mWebSocketsThread.quitSafely();
-        try {
-            mWebSocketsThread.join();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        mWebSocketsThread = null;
-        mWebSocketsHandler = null;
     }
     
     // Configure keyboard settings before showing - called from Rust
@@ -2735,9 +2705,12 @@ public class MakepadActivity
         webSocket.connect();
 
         if (webSocket.isConnected()) {
-            MakepadWebSocketReader reader = new MakepadWebSocketReader(this, webSocket);
-            mWebSocketsHandler.post(reader);
-            mActiveWebsocketsReaders.put(id, reader);
+            // A thread per socket: a reader blocks until its socket closes,
+            // so readers sharing one thread left every socket but the first
+            // unread.
+            Thread reader = new Thread(new MakepadWebSocketReader(this, webSocket), "MakepadWebSocketReader-" + id);
+            reader.setDaemon(true);
+            reader.start();
         } else {
             Log.e("Makepad", "openWebSocket failed id=" + id + " url=" + url);
         }
@@ -2757,12 +2730,6 @@ public class MakepadActivity
         if (socket != null) {
             socket.closeSocketAndClearCallback();
         }
-        MakepadWebSocketReader reader = mActiveWebsocketsReaders.get(id);
-        if (reader != null) {
-            mWebSocketsHandler.removeCallbacks(reader);
-        }
-        
-        mActiveWebsocketsReaders.remove(id);
         mActiveWebsockets.remove(id);
     }
 
