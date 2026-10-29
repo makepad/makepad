@@ -33,9 +33,10 @@ pub(crate) fn alive(pid: u32) -> bool {
         extern "C" {
             fn kill(pid: i32, sig: i32) -> i32;
         }
-        // EPERM: the process exists but may not be signalled (Android: a run-as shell and the
-        // app it inspects are different SELinux domains): alive, not a stale file to remove
-        unsafe { kill(pid as i32, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1) }
+        // EPERM, or EACCES under SELinux (Android: a run-as shell and the app it inspects are
+        // different domains): the process exists but may not be signalled -- alive, not a stale
+        // discovery file to remove
+        unsafe { kill(pid as i32, 0) == 0 || matches!(std::io::Error::last_os_error().raw_os_error(), Some(1) | Some(13)) }
     }
     #[cfg(windows)]
     {
