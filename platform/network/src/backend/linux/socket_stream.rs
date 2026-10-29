@@ -58,6 +58,9 @@ unsafe extern "C" {
     pub(crate) fn SSL_shutdown(ssl: *mut SSL) -> c_int;
     pub(crate) fn SSL_ctrl(ssl: *mut SSL, cmd: c_int, larg: c_long, parg: *mut c_void) -> c_long;
 
+    fn SSL_get_peer_cert_chain(ssl: *const SSL) -> *const c_void;
+    fn OPENSSL_sk_num(stack: *const c_void) -> c_int;
+    fn OPENSSL_sk_value(stack: *const c_void, index: c_int) -> *mut c_void;
     pub(crate) fn SSL_get1_peer_certificate(ssl: *const SSL) -> *mut c_void;
     pub(crate) fn SSL_version(ssl: *const SSL) -> c_int;
     pub(crate) fn i2d_X509(x: *mut c_void, out: *mut *mut u8) -> c_int;
@@ -421,6 +424,35 @@ impl SocketStream {
                 stream.shutdown();
                 Err(err)
             }
+        }
+    }
+
+    pub fn connect_capture_chain(host: &str, port: &str) -> io::Result<(Self, Vec<Vec<u8>>)> {
+        let (mut socket, leaf) = Self::connect_capture(host, port)?;
+        let result = (|| {
+            let Self::Tls(stream) = &socket else { return Err(io_other("TLS stream required")); };
+            let mut chain = vec![leaf];
+            // Borrowed certificates belong to SSL; do not free them.
+            unsafe {
+                let stack = SSL_get_peer_cert_chain(stream.ssl);
+                if !stack.is_null() {
+                    for i in 0..OPENSSL_sk_num(stack) {
+                        let cert = OPENSSL_sk_value(stack, i);
+                        if cert.is_null() { return Err(io_other("invalid peer certificate")); }
+                        let len = i2d_X509(cert, ptr::null_mut());
+                        if len <= 0 { return Err(io_other("cannot encode peer certificate")); }
+                        let mut der = vec![0; len as usize];
+                        let mut out = der.as_mut_ptr();
+                        if i2d_X509(cert, &mut out) != len { return Err(io_other("cannot encode peer certificate")); }
+                        if !chain.contains(&der) { chain.push(der); }
+                    }
+                }
+            }
+            Ok(chain)
+        })();
+        match result {
+            Ok(chain) => Ok((socket, chain)),
+            Err(e) => { socket.shutdown(); Err(e) }
         }
     }
 

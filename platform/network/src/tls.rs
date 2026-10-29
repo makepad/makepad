@@ -1060,9 +1060,9 @@ mod server_tests {
             }
             outcomes
         });
-        let (mut client, seen) = crate::SocketStream::connect_capture("127.0.0.1", &port).unwrap();
-        assert_eq!(seen, certificate, "the captured DER is the server leaf certificate");
-        assert_eq!(fingerprint(&seen), pin, "the captured fingerprint is the server certificate's");
+        let (mut client, chain) = crate::SocketStream::connect_capture_chain("127.0.0.1", &port).unwrap();
+        assert_eq!(chain.first(), Some(&certificate), "chain capture returns the server leaf first");
+        assert_eq!(fingerprint(&chain[0]), pin, "the captured fingerprint is the server certificate's");
         client.write_all(b"hello").unwrap();
         let mut echo = [0u8; 5];
         client.read_exact(&mut echo).unwrap();

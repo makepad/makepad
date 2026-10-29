@@ -167,6 +167,7 @@ extern "system" {
 extern "system" {
     fn CertCreateCertificateContext(encoding: u32, der: *const u8, len: u32) -> *const c_void;
     fn CertFreeCertificateContext(cert: *const c_void) -> i32;
+    fn CertEnumCertificatesInStore(store: *mut c_void, previous: *const c_void) -> *const c_void;
     fn CertSetCertificateContextProperty(cert: *const c_void, prop: u32, flags: u32, data: *const c_void) -> i32;
 }
 
@@ -889,6 +890,33 @@ struct CertContext {
     encoded_len: u32,
     info: *mut c_void,
     store: *mut c_void,
+}
+
+impl ServerStream {
+    pub(crate) fn peer_chain_der(&mut self) -> io::Result<Vec<Vec<u8>>> {
+        let mut cert: *const c_void = null();
+        let status = unsafe { QueryContextAttributesW(&mut self.ctx, SECPKG_ATTR_REMOTE_CERT_CONTEXT, &mut cert as *mut _ as *mut c_void) };
+        if status != SEC_E_OK || cert.is_null() { return Err(status_error("server certificate", status)); }
+        let chain = unsafe {
+            let leaf = &*(cert as *const CertContext);
+            let mut chain = vec![std::slice::from_raw_parts(leaf.encoded, leaf.encoded_len as usize).to_vec()];
+            // The remote context's store holds the certificates sent by the
+            // peer. Enumeration releases each previous certificate context.
+            if !leaf.store.is_null() {
+                let mut next = null();
+                loop {
+                    next = CertEnumCertificatesInStore(leaf.store, next);
+                    if next.is_null() { break; }
+                    let c = &*(next as *const CertContext);
+                    let der = std::slice::from_raw_parts(c.encoded, c.encoded_len as usize).to_vec();
+                    if !chain.contains(&der) { chain.push(der); }
+                }
+            }
+            CertFreeCertificateContext(cert);
+            chain
+        };
+        Ok(chain)
+    }
 }
 
 /// Client handshake on Schannel without chain validation (self-signed
