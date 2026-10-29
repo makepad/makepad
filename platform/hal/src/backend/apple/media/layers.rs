@@ -701,7 +701,6 @@ pub fn frame(frame: Frame) -> Option<Presented> {
                 }
                 let () = msg_send![view, setFrame: ns_rect(in_parent(parent, surface.rect, dpi))];
                 let () = msg_send![view, setHidden: NO];
-                let () = msg_send![segment.layer.as_id(), setContentsScale: dpi as f64];
                 // AppKit positions a view's backing layer itself, in its parent's coordinates.
                 // UIKit's segment Metal layer is a sublayer and uses the view's local bounds.
                 #[cfg(not(target_os = "macos"))]
@@ -773,7 +772,9 @@ pub fn frame(frame: Frame) -> Option<Presented> {
                     let hidden: BOOL = if host == nil { YES } else { msg_send![host, isHidden] };
                     (trace_rect(host, parent), trace_rect(web, host), hidden == NO, trace_z(parent, host))
                 };
-                let _ = write!(line, "{}: rect={:?} clip={:?} host={host_rect:?} web={web_rect:?} vis={} z={z} occluders={:?}; ",
+                let host_layer = if host == nil { nil } else { unsafe { msg_send![host, layer] } };
+                let layer_z = trace_layer_z(parent, host_layer);
+                let _ = write!(line, "{}: rect={:?} clip={:?} host={host_rect:?} web={web_rect:?} vis={} z={z} layer_z={layer_z} occluders={:?}; ",
                     g.native.index, g.rect, g.clip, visible as u8, p.occluders);
             }
             line.push_str("] segs=[");
@@ -790,7 +791,31 @@ pub fn frame(frame: Frame) -> Option<Presented> {
                     let texture: ObjcId = msg_send![drawable.as_id(), texture];
                     (msg_send![texture, width], msg_send![texture, height])
                 };
-                let _ = write!(line, "{gap}: rect={rect:?} drawable={w}x{h} presented=1 z={z}; ");
+                let _ = write!(line, "{gap}: rect={rect:?} drawable={w}x{h} present_requested=1 z={z}; ");
+                if index != 0 {
+                    let segment = &tree.segments[&gap];
+                    unsafe {
+                        let view = segment.view.as_id();
+                        let layer = segment.layer.as_id();
+                        let actual: NSRect = msg_send![layer, frame];
+                        let bounds: NSRect = msg_send![layer, bounds];
+                        let backing: ObjcId = msg_send![view, layer];
+                        let superlayer: ObjcId = msg_send![layer, superlayer];
+                        let parent_layer: ObjcId = msg_send![parent, layer];
+                        let win: ObjcId = msg_send![view, window];
+                        let parent_win: ObjcId = msg_send![parent, window];
+                        let hidden: BOOL = msg_send![layer, isHidden];
+                        let drawable_size: CGSize = msg_send![layer, drawableSize];
+                        let scale: f64 = msg_send![layer, contentsScale];
+                        eprintln!("[native-layer] frame={number} surface={gap} view={:?} layer_frame={:?} layer_bounds={:?} backing={} attached={} window={} hidden={} layer_z={} scale={scale} drawable_size={:?}",
+                            trace_rect(view, parent),
+                            [actual.origin.x, actual.origin.y, actual.size.width, actual.size.height],
+                            [bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height],
+                            (backing == layer) as u8, (superlayer == parent_layer) as u8,
+                            (win != nil && win == parent_win) as u8, (hidden == YES) as u8,
+                            trace_layer_z(parent, backing), [drawable_size.width, drawable_size.height]);
+                    }
+                }
             }
             line.push(']');
             (line, scheduled)
@@ -798,7 +823,18 @@ pub fn frame(frame: Frame) -> Option<Presented> {
         if active || !tree.segments.is_empty() { layers.windows.insert((sid, window), tree); }
         trace
     });
-    for drawable in &drawables { unsafe { let () = msg_send![drawable.as_id(), present]; } }
+    for (index, drawable) in drawables.iter().enumerate() {
+        unsafe {
+            if trace_enabled() {
+                let gap = if index == 0 { 0 } else { surfaces[index - 1].gap };
+                let () = msg_send![drawable.as_id(), addPresentedHandler: &objc_block!(move |d: ObjcId| {
+                    let time: f64 = unsafe { msg_send![d, presentedTime] };
+                    eprintln!("[native-layer] shown win={sid}:{} frame={number} surface={gap} time={time}", window.index);
+                })];
+            }
+            let () = msg_send![drawable.as_id(), present];
+        }
+    }
     if !active {
         unsafe {
             let layer: ObjcId = msg_send![parent, layer];
@@ -829,6 +865,16 @@ fn trace_z(parent: ObjcId, view: ObjcId) -> i64 {
     unsafe {
         let children: ObjcId = msg_send![parent, subviews];
         let index: usize = msg_send![children, indexOfObjectIdenticalTo: view];
+        if index == usize::MAX || index == isize::MAX as usize { -1 } else { index as i64 }
+    }
+}
+fn trace_layer_z(parent: ObjcId, layer: ObjcId) -> i64 {
+    if layer == nil { return -1; }
+    unsafe {
+        let root: ObjcId = msg_send![parent, layer];
+        let children: ObjcId = msg_send![root, sublayers];
+        if children == nil { return -1; }
+        let index: usize = msg_send![children, indexOfObjectIdenticalTo: layer];
         if index == usize::MAX || index == isize::MAX as usize { -1 } else { index as i64 }
     }
 }

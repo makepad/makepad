@@ -98,7 +98,7 @@ script_mod! {
         }
 
         sandwich_tab := DockTab{
-            name: "Textured sandwich"
+            name: "Sandwich"
             template: @PermanentTab
             kind: @TabSandwich
         }

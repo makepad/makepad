@@ -120,8 +120,10 @@ impl AndroidVariant {
                 package="{url}"
                 android:versionCode="{version_code}"
                 android:versionName="{version_name}">
+                <!-- Native views need HWUI for draw-synchronized SurfaceControl transactions and outline clipping. -->
                 <application
                     android:label="{label}"{icon_attr}
+                    android:hardwareAccelerated="true"
                     android:theme="@style/MakepadAppTheme"
                     android:allowBackup="true"
                     android:supportsRtl="true"

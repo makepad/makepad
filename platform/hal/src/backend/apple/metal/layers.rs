@@ -144,8 +144,13 @@ impl Windows {
             for (gap, draws) in ranges.into_iter().enumerate().skip(1) {
                 let Some(rect) = bounds(draws, view, full) else { continue };
                 let surface = state.surfaces.entry(gap).or_insert_with(|| {
-                    let layer: ObjcId = unsafe { msg_send![class!(CAMetalLayer), new] };
-                    unsafe {
+                    // This worker has no run loop to commit implicit Core Animation transactions.
+                    // Publish the layer's configuration before acquiring its first drawable;
+                    // the main thread separately commits placement and presentation together.
+                    let layer = unsafe {
+                        let () = msg_send![class!(CATransaction), begin];
+                        let () = msg_send![class!(CATransaction), setDisableActions: YES];
+                        let layer: ObjcId = msg_send![class!(CAMetalLayer), new];
                         let () = msg_send![layer, setDevice: device];
                         let () = msg_send![layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
                         let () = msg_send![layer, setOpaque: NO];
@@ -153,7 +158,11 @@ impl Windows {
                         let () = msg_send![layer, setMaximumDrawableCount: 3u64];
                         let () = msg_send![layer, setAllowsNextDrawableTimeout: YES];
                         let () = msg_send![layer, setPresentsWithTransaction: YES];
-                    }
+                        let () = msg_send![layer, setContentsScale: frame.dpi as f64];
+                        let () = msg_send![layer, setDrawableSize: CGSize { width: rect[2] as f64, height: rect[3] as f64 }];
+                        let () = msg_send![class!(CATransaction), commit];
+                        layer
+                    };
                     Surface { layer: RcObjcId::from_owned(NonNull::new(layer).expect("CAMetalLayer")), hidden: None, depth: None, depth_size: [0; 2] }
                 });
                 surface.hidden = None;
@@ -165,7 +174,15 @@ impl Windows {
                 }
                 let drawable = unsafe {
                     let layer = surface.layer.as_id();
-                    let () = msg_send![layer, setDrawableSize: CGSize { width: rect[2] as f64, height: rect[3] as f64 }];
+                    let scale: f64 = msg_send![layer, contentsScale];
+                    let size: CGSize = msg_send![layer, drawableSize];
+                    if scale != frame.dpi as f64 || size.width != rect[2] as f64 || size.height != rect[3] as f64 {
+                        let () = msg_send![class!(CATransaction), begin];
+                        let () = msg_send![class!(CATransaction), setDisableActions: YES];
+                        let () = msg_send![layer, setContentsScale: frame.dpi as f64];
+                        let () = msg_send![layer, setDrawableSize: CGSize { width: rect[2] as f64, height: rect[3] as f64 }];
+                        let () = msg_send![class!(CATransaction), commit];
+                    }
                     let drawable: ObjcId = msg_send![layer, nextDrawable];
                     RcObjcId::from_unowned(NonNull::new(drawable)?)
                 };

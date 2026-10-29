@@ -14,10 +14,21 @@ extern "C" { fn android_get_device_api_level() -> i32; }
 #[link(name = "dl")]
 extern "C" { fn dlsym(handle: Pointer, name: *const c_char) -> Pointer; }
 extern "C" { fn poll(fds: *mut PollFd, count: usize, timeout: i32) -> i32; }
+extern "C" { fn __system_property_get(name: *const c_char, value: *mut c_char) -> i32; }
 #[repr(C)]
 struct PollFd { fd: i32, events: i16, revents: i16 }
 
 pub(crate) fn api_level() -> i32 { unsafe { android_get_device_api_level() } }
+
+// Match Java's Log.isLoggable gate; read once, so disabled tracing is just a cached branch.
+fn trace_enabled() -> bool {
+    static TRACE: OnceLock<bool> = OnceLock::new();
+    *TRACE.get_or_init(|| {
+        let mut value = [0u8; 92]; // Android PROP_VALUE_MAX, including the terminator.
+        let len = unsafe { __system_property_get(c"log.tag.MakepadLayers".as_ptr(), value.as_mut_ptr().cast()) };
+        len > 0 && matches!(&value[..len as usize], b"VERBOSE" | b"V")
+    })
+}
 
 /// Every post-minSdk symbol is resolved at runtime; API 26 never loads an unavailable symbol.
 struct Api {
@@ -109,6 +120,7 @@ pub(crate) struct Segment {
 }
 pub(crate) struct Frame {
     serial: u64,
+    pub number: u64,
     pub session: u32,
     pub layers: Vec<(Layer, Vec<[f32; 4]>)>,
     pub segments: Vec<Segment>,
@@ -119,7 +131,7 @@ pub(crate) struct Frame {
 impl Frame {
     pub fn new(session: u32, layers: Vec<(Layer, Vec<[f32; 4]>)>, composited: bool) -> Self {
         static SERIAL: AtomicU64 = AtomicU64::new(1);
-        Self { serial: SERIAL.fetch_add(1, Ordering::Relaxed), session, layers, segments: Vec::new(), composited, shown: None, fence: None }
+        Self { serial: SERIAL.fetch_add(1, Ordering::Relaxed), number: 0, session, layers, segments: Vec::new(), composited, shown: None, fence: None }
     }
     pub fn post(mut self, fence: Option<OwnedFd>) {
         static FIRST: std::sync::Once = std::sync::Once::new();
@@ -137,6 +149,7 @@ impl Frame {
         let count = if self.composited { 5 } else { 0 };
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let ticket = NEXT.fetch_add(1, Ordering::Relaxed);
+        if trace_enabled() { eprintln!("[hal-android-layer] post frame={} serial={serial} ticket={ticket} composited={} segments={} fence={}", self.number, self.composited, self.segments.len(), self.fence.is_some()); }
         lock(frames()).insert(ticket, self);
         let result = jhelp::activity(|env, activity| unsafe {
             let ji = ((**env).NewLongArray.unwrap())(env, ids.len() as i32);
@@ -156,9 +169,10 @@ fn frames() -> &'static Mutex<HashMap<u64, Frame>> {
     FRAMES.get_or_init(Default::default)
 }
 
-struct Completion { previous: Vec<(Arc<Control>, Arc<Slot>)>, shown: Option<Box<dyn FnOnce() + Send>> }
+struct Completion { serial: u64, previous: Vec<(Arc<Control>, Arc<Slot>)>, shown: Option<Box<dyn FnOnce() + Send>> }
 unsafe extern "C" fn completed(context: Pointer, stats: Pointer) {
     let mut completion = Box::from_raw(context.cast::<Completion>());
+    if trace_enabled() { eprintln!("[hal-android-layer] complete serial={}", completion.serial); }
     if let Some(api) = api() {
         for (control, slot) in &completion.previous {
             let fd = (api.release_fence)(stats, control.pointer as Pointer);
@@ -218,7 +232,8 @@ unsafe extern "system" fn commit(env: *mut JNIEnv, _: jclass, ticket: jlong, tra
     // Duplicate all acquire fences before mutating anything, so failure is retryable atomically.
     let fences: Result<Vec<_>, _> = frame.segments.iter().map(|_| frame.fence.as_ref().map(OwnedFd::try_clone).transpose()).collect();
     let Ok(fences) = fences else { lock(frames()).insert(ticket as u64, frame); if owned { (api.delete)(tx); } return 0; };
-    let mut completion = Box::new(Completion { previous: Vec::new(), shown: frame.shown.take() });
+    if trace_enabled() { eprintln!("[hal-android-layer] commit frame={} serial={} ticket={ticket} path={}", frame.number, frame.serial, if owned { "direct" } else { "java-draw" }); }
+    let mut completion = Box::new(Completion { serial: frame.serial, previous: Vec::new(), shown: frame.shown.take() });
     let mut fences = fences.into_iter();
     for (i, control) in controls.into_iter().enumerate() {
         let Some(control) = control else { continue; };
@@ -250,7 +265,7 @@ unsafe extern "system" fn release_surfaces(env: *mut JNIEnv, _: jclass, surfaces
     let Some(api) = api() else { return; };
     let Some(surfaces) = java_controls(env, surfaces) else { return; };
     let tx = (api.create)();
-    let mut completion = Box::new(Completion { previous: Vec::new(), shown: None });
+    let mut completion = Box::new(Completion { serial: 0, previous: Vec::new(), shown: None });
     for control in surfaces.into_iter().flatten() {
         (api.buffer)(tx, control.pointer as Pointer, std::ptr::null_mut(), -1);
         (api.visible)(tx, control.pointer as Pointer, 0);

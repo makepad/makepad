@@ -25,6 +25,9 @@ import java.util.HashMap;
 
 /** Geometry and hit regions are replaced together when a rendered frame is committed. */
 final class NativeLayerContainer extends FrameLayout {
+    // Enable before launch: adb shell setprop log.tag.MakepadLayers VERBOSE.
+    private static final boolean TRACE = android.util.Log.isLoggable("MakepadLayers", android.util.Log.VERBOSE);
+    private long drawSerial;
     private final MakepadSurface surface;
     private final HashMap<String, Page> pages = new HashMap<>();
     private final ArrayList<Page> order = new ArrayList<>();
@@ -105,6 +108,13 @@ final class NativeLayerContainer extends FrameLayout {
         setClipChildren(false);
         setClipToPadding(false);
         setLayoutParams(new FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+        if (TRACE) getViewTreeObserver().addOnPreDrawListener(() -> {
+            long draw = ++drawSerial, serial = lastSerial;
+            android.util.Log.v("MakepadLayers", "draw=" + draw + " serial=" + serial);
+            if (Build.VERSION.SDK_INT >= 29 && isHardwareAccelerated()) getViewTreeObserver().registerFrameCommitCallback(() ->
+                android.util.Log.v("MakepadLayers", "hwui-commit draw=" + draw + " serial=" + serial));
+            return true;
+        });
     }
 
     private static boolean inside(float x, float y, float[] r, int i) {
@@ -199,6 +209,9 @@ final class NativeLayerContainer extends FrameLayout {
 
     /** The NDK fills the Java transaction before geometry changes, then HWUI owns its apply. */
     void frame(long ticket, long serial, int session, long[] ids, float[] geometry, int segmentCount) {
+        if (TRACE) android.util.Log.v("MakepadLayers", "frame serial=" + serial + " ticket=" + ticket
+            + " api=" + Build.VERSION.SDK_INT + " segments=" + segmentCount + " hw=" + isHardwareAccelerated()
+            + " y=" + (geometry.length > 1 ? geometry[1] : 0));
         if (!loggedFrame) { loggedFrame = true; android.util.Log.i("MakepadLayers", "received frame: " + ids.length + " web views, " + segmentCount + " segments"); }
         if (closed || serial < lastSerial) { MakepadNative.discardNativeLayerFrame(ticket); return; }
         if (!isAttachedToWindow() || !surface.getHolder().getSurface().isValid()) {
@@ -249,6 +262,8 @@ final class NativeLayerContainer extends FrameLayout {
             postOnAnimation(() -> frame(ticket, serial, session, ids, geometry, segmentCount)); return;
         }
         lastSerial = serial;
+        if (TRACE) android.util.Log.v("MakepadLayers", "transaction serial=" + serial + " ticket=" + ticket
+            + " tx=" + (tx == null ? "direct" : Integer.toHexString(System.identityHashCode(tx))));
         ArrayList<Page> previous = new ArrayList<>(order);
         order.clear();
         for (Page page : previous) page.geometry = null;
@@ -267,6 +282,8 @@ final class NativeLayerContainer extends FrameLayout {
                 page.web.setTranslationX(base[0] - here[0] + g[0]); page.web.setTranslationY(base[1] - here[1] + g[1]);
                 page.web.setClipBounds(new Rect((int)Math.ceil(g[4]-g[0]), (int)Math.ceil(g[5]-g[1]), (int)Math.floor(g[4]+g[6]-g[0]), (int)Math.floor(g[5]+g[7]-g[1])));
                 float radius = Math.max(Math.max(g[8], g[9]), Math.max(g[10], g[11]));
+                if (TRACE) android.util.Log.v("MakepadLayers", "geometry serial=" + serial + " y=" + g[1]
+                    + " height=" + height + " radius=" + radius + " scrollY=" + page.web.getScrollY());
                 if (page.radius != radius) { page.radius = radius; page.web.invalidateOutline(); }
                 page.web.setAlpha(g[12]);
                 page.web.setVisibility((((int)g[13]) & 1) != 0 && g[6] > 0 && g[7] > 0 ? VISIBLE : INVISIBLE);
@@ -289,6 +306,8 @@ final class NativeLayerContainer extends FrameLayout {
         if (isAttachedToWindow() && getRootSurfaceControl() != null
                 && getRootSurfaceControl().applyTransactionOnDraw(pendingDrawTransaction)) {
             pendingDrawTransaction.close(); pendingDrawTransaction = null;
+            if (TRACE) android.util.Log.v("MakepadLayers", "apply-on-draw serial=" + lastSerial
+                + " nextDraw=" + (drawSerial + 1) + " hw=" + isHardwareAccelerated());
         } else if (!drawRetryPosted && !closed) {
             drawRetryPosted = true;
             postOnAnimation(() -> { drawRetryPosted = false; applyOnDraw(); });

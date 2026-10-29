@@ -502,6 +502,7 @@ impl Vulkan {
         self.compose = None;
         #[cfg(target_os = "android")]
         if let Some(mut frame) = native_frame.take() {
+            frame.number = packet.frame;
             let semaphore = if composited {
                 match super::share::sync::Semaphore::sync_file(self.dev.clone()) {
                     Ok(s) => Some(s),
