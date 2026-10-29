@@ -12,6 +12,8 @@ extern "C" {
     fn AAssetManager_open(manager: *mut c_void, name: *const c_char, mode: c_int) -> *mut c_void;
     fn AAsset_openFileDescriptor64(asset: *mut c_void, start: *mut i64, length: *mut i64) -> c_int;
     fn AAsset_close(asset: *mut c_void);
+    fn AAsset_getLength(asset: *mut c_void) -> i64;
+    fn AAsset_read(asset: *mut c_void, buf: *mut c_void, count: usize) -> c_int;
 }
 
 extern "C" {
@@ -29,6 +31,11 @@ const ARCHIVE_ASSET: &str = "makepad-run-src.pack";
 /// The package the APK runs and the compile's flags (cargo_makepad `android run-host` writes them
 /// into assets/makepad-run-host.conf: one `key=value` per line).
 const CONF_ASSET: &str = "makepad-run-host.conf";
+/// A compile cache recorded on a device of this build, shipped in the APK (cargo_makepad `build-host
+/// --cache-seed=<dir>`): the index lists one path per line relative to the relax home
+/// (`target/<run dir>/cache/<store>`), each stored as the asset `makepad-run-seed/<path>`.
+const SEED_INDEX_ASSET: &str = "makepad-run-seed/index.txt";
+const SEED_ASSET_DIR: &str = "makepad-run-seed";
 
 #[no_mangle]
 pub unsafe extern "system" fn JNI_OnLoad(vm: *mut sys::JavaVM, _: *mut c_void) -> sys::jint {
@@ -102,10 +109,6 @@ unsafe fn asset_text(manager: *mut c_void, name: &str) -> Result<String, String>
     if asset.is_null() {
         return Err(format!("the APK has no asset {name}"));
     }
-    extern "C" {
-        fn AAsset_getLength(asset: *mut c_void) -> i64;
-        fn AAsset_read(asset: *mut c_void, buf: *mut c_void, count: usize) -> c_int;
-    }
     let len = AAsset_getLength(asset) as usize;
     let mut buf = vec![0u8; len];
     let n = AAsset_read(asset, buf.as_mut_ptr() as *mut c_void, len);
@@ -114,6 +117,73 @@ unsafe fn asset_text(manager: *mut c_void, name: &str) -> Result<String, String>
         return Err(format!("cannot read asset {name}"));
     }
     String::from_utf8(buf).map_err(|_| format!("asset {name} is not UTF-8"))
+}
+
+/// Copies asset `name` to `dst` through a temporary sibling; bytes copied.
+unsafe fn asset_copy(manager: *mut c_void, name: &str, dst: &std::path::Path) -> Result<u64, String> {
+    let cname = CString::new(name).map_err(|e| e.to_string())?;
+    let asset = AAssetManager_open(manager, cname.as_ptr(), ASSET_MODE_UNKNOWN);
+    if asset.is_null() {
+        return Err(format!("the APK has no asset {name}"));
+    }
+    let r = (|| -> Result<u64, String> {
+        let dir = dst.parent().ok_or("no parent")?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let tmp = dst.with_file_name(format!(".seed-{}", dst.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?);
+        let mut buf = vec![0u8; 1 << 20];
+        let mut total = 0u64;
+        loop {
+            let n = AAsset_read(asset, buf.as_mut_ptr() as *mut c_void, buf.len());
+            if n < 0 {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(format!("cannot read asset {name}"));
+            }
+            if n == 0 {
+                break;
+            }
+            std::io::Write::write_all(&mut out, &buf[..n as usize]).map_err(|e| format!("{}: {e}", tmp.display()))?;
+            total += n as u64;
+        }
+        std::io::Write::flush(&mut out).map_err(|e| e.to_string())?;
+        drop(out);
+        std::fs::rename(&tmp, dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+        Ok(total)
+    })();
+    AAsset_close(asset);
+    r
+}
+
+/// Seeds the compile cache from the APK: once, when no run dir under the relax home holds a store
+/// yet (a fresh install, or a cleared cache), after freshen_cache (an older build's cache is gone
+/// by then). A seed of another build or CPU class is keyed away by its store names (codegen
+/// identity, arch, atomics) and costs only disk until the next prune.
+unsafe fn seed_cache(manager: *mut c_void, home: &std::path::Path) {
+    let Ok(index) = asset_text(manager, SEED_INDEX_ASSET) else { return };
+    let has_stores = std::fs::read_dir(home.join("target")).into_iter().flatten().flatten()
+        .any(|d| std::fs::read_dir(d.path().join("cache")).into_iter().flatten().flatten().any(|f| f.file_name().to_string_lossy().contains(".rcs")));
+    if has_stores {
+        return;
+    }
+    let t = std::time::Instant::now();
+    let (mut n, mut bytes, mut failed) = (0usize, 0u64, 0usize);
+    for rel in index.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if rel.starts_with('/') || rel.split('/').any(|c| c == "..") {
+            continue;
+        }
+        match asset_copy(manager, &format!("{SEED_ASSET_DIR}/{rel}"), &home.join(rel)) {
+            Ok(b) => {
+                n += 1;
+                bytes += b;
+            }
+            Err(e) => {
+                failed += 1;
+                logcat::log(&format!("cache seed: {rel}: {e}"));
+            }
+        }
+    }
+    logcat::log(&format!("compile cache seeded from the APK: {n} files, {} MB in {:.1} s{}", bytes >> 20, t.elapsed().as_secs_f64(), if failed > 0 { format!(", {failed} failed") } else { String::new() }));
+    boot::set_note("warm start \u{b7} seeded cache");
 }
 
 struct App {
@@ -305,6 +375,7 @@ fn boot_thread(
     let conf = parse_conf(&unsafe { asset_text(manager, CONF_ASSET)? })?;
     let (offset, len) = unsafe { asset_range(manager, ARCHIVE_ASSET)? };
     let other_pack = freshen_cache(&relax_home, offset, len);
+    seed_cache(manager, &relax_home);
     // devhub pushes live in the run's edits folder over the APK's source store; other packed
     // sources start from their own revs (the conf's)
     if other_pack {

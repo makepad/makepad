@@ -320,7 +320,7 @@ fn android_help() -> &'static str {
   cargo makepad android [options] build-aab <cargo args>\n\
   cargo makepad android keystore-create <path> [keytool options]\n\
   cargo makepad android [options] run <cargo args>\n\
-  cargo makepad android [options] build-host|run-host [--privileged] [--devhub-name=<name>] [--debuggable] [--desk-link=on|off] --app <package> [--font-set=Latin|International] [cargo flags]\n\
+  cargo makepad android [options] build-host|run-host [--privileged] [--devhub-name=<name>] [--debuggable] [--desk-link=on|off] [--cache-seed=<dir>] --app <package> [--font-set=Latin|International] [cargo flags]\n\
   cargo makepad android [options] adb <adb args>\n\
   cargo makepad android [options] adb-tcp [port]\n\
 \n\
@@ -553,6 +553,7 @@ fn parse_host_args(args: &[String]) -> Result<compile::HostOpts, String> {
     let mut devhub_name = None;
     let mut debuggable = false;
     let mut desk_link = None;
+    let mut cache_seed = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -577,6 +578,8 @@ fn parse_host_args(args: &[String]) -> Result<compile::HostOpts, String> {
             });
         } else if let Some(n) = a.strip_prefix("--devhub-name=") {
             devhub_name = Some(n.to_string());
+        } else if let Some(d) = a.strip_prefix("--cache-seed=") {
+            cache_seed = Some(std::path::PathBuf::from(d));
         } else if let Some(f) = a.strip_prefix("--font-set=") {
             font_set = f.to_string();
         } else if let Some(app) = apps.last_mut() {
@@ -592,7 +595,7 @@ fn parse_host_args(args: &[String]) -> Result<compile::HostOpts, String> {
     }
     // the Desk Link endpoint is on in a debuggable APK unless asked otherwise
     let desk_link = desk_link.unwrap_or(debuggable);
-    Ok(compile::HostOpts { apps, env, font_set, privileged, font_assets, devhub_name, debuggable, desk_link })
+    Ok(compile::HostOpts { apps, env, font_set, privileged, font_assets, devhub_name, debuggable, desk_link, cache_seed })
 }
 
 pub fn handle_android(mut args: &[String]) -> Result<(), String> {
