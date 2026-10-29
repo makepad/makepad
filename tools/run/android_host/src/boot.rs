@@ -86,8 +86,15 @@ pub fn memory_budget_mb() -> Option<u64> {
 /// this run's code and front images and the collected program reach the cache, and the next
 /// launch starts warm. The app keeps running; a later start of the activity resumes it.
 fn background_quit_write() {
-    crate::logcat::log("background: the compile cache's quit write starts (the next launch can be warm)");
+    crate::logcat::log("background: the compile cache's quit write starts, then the process exits so the exit write runs too (the next launch starts warm)");
     relax_compiler::run::quit_requested();
+    // The quit write alone keeps only what the busy compile tiers let it take (a few hundred
+    // entries); the exit write quiesces them and writes everything. Android restarts the
+    // process on the next launch, from the warm cache.
+    let _ = std::thread::Builder::new().name("background-exit".into()).spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        std::process::exit(0);
+    });
 }
 
 /// Compiles and runs the package main on this domain thread.
