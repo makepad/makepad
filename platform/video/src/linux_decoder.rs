@@ -33,7 +33,7 @@ unsafe impl Send for LinuxVideoFileDecoder {}
 
 /// Pull `key=(type)value` out of a caps string like
 /// `video/x-raw, format=(string)NV12, width=(int)256, ...`.
-fn caps_field<'a>(caps: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn caps_field<'a>(caps: &'a str, key: &str) -> Option<&'a str> {
     for part in caps.split(',') {
         let part = part.trim();
         let Some(rest) = part.strip_prefix(key) else { continue };

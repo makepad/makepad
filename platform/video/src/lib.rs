@@ -233,6 +233,8 @@ mod linux_encoder;
 #[cfg(target_os = "linux")]
 mod linux_decoder;
 #[cfg(target_os = "linux")]
+mod linux_stream_decoder;
+#[cfg(target_os = "linux")]
 use linux_decoder::LinuxVideoFileDecoder as OsVideoFileDecoder;
 #[cfg(target_os = "linux")]
 use linux_encoder::LinuxVideoFileEncoder as OsVideoFileEncoder;
