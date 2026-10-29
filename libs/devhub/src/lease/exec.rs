@@ -185,6 +185,20 @@ fn login() -> String {
 }
 
 /// A relative path that stays inside its root: no `..`, not absolute, not empty.
+/// Removes `rel`'s parent dirs under `work` that are empty, deepest first, stopping at the first
+/// one that is not (`remove_dir` fails on a non-empty dir, so a `target/` or any untracked content
+/// keeps its dirs) and never touching `work` itself.
+fn prune_empty_parents(work: &Path, rel: &str) {
+    let mut p = Path::new(rel);
+    while let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+        let full = work.join(parent);
+        if !std::fs::symlink_metadata(&full).is_ok_and(|m| m.is_dir()) || std::fs::remove_dir(&full).is_err() {
+            break;
+        }
+        p = parent;
+    }
+}
+
 fn inside(rel: &str) -> bool {
     let p = Path::new(rel);
     !rel.is_empty() && !p.is_absolute() && p.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
@@ -763,6 +777,8 @@ impl Exec {
             if std::fs::symlink_metadata(&p).is_ok_and(|m| !m.is_dir()) && std::fs::remove_file(&p).is_ok() {
                 pruned += 1;
             }
+            // the dirs that emptied go too (a stale empty `apps/x/src` matches cargo's member globs)
+            prune_empty_parents(&work, f);
         }
         if let Err(e) = std::fs::rename(&new, work.join(SHIP_LIST)) {
             return err(format!("{}: {e}", new.display()));
@@ -1258,6 +1274,18 @@ mod tests {
         std::fs::write(work.join(".devhub-files.new"), "a.txt\nout/r.txt\n../escape\n").unwrap();
         assert_eq!(x.handle("lease-prune", "L2"), vec![r#"{"pruned":1}"#.to_string()]);
         assert!(!work.join("b.txt").exists() && work.join("a.txt").exists() && work.join("local.txt").exists());
+        // a dir that empties goes (deep first); one holding untracked content stays
+        std::fs::create_dir_all(work.join("gone/deep/er")).unwrap();
+        std::fs::create_dir_all(work.join("kept/sub")).unwrap();
+        std::fs::write(work.join("gone/deep/er/f.rs"), "x").unwrap();
+        std::fs::write(work.join("kept/sub/g.rs"), "x").unwrap();
+        std::fs::write(work.join("kept/target.bin"), "x").unwrap();
+        std::fs::write(work.join(".devhub-files.new"), "a.txt\nout/r.txt\ngone/deep/er/f.rs\nkept/sub/g.rs\n").unwrap();
+        x.handle("lease-prune", "L2");
+        std::fs::write(work.join(".devhub-files.new"), "a.txt\nout/r.txt\n").unwrap();
+        assert_eq!(x.handle("lease-prune", "L2"), vec![r#"{"pruned":2}"#.to_string()]);
+        assert!(!work.join("gone").exists(), "emptied dirs are pruned up to the work dir");
+        assert!(!work.join("kept/sub").exists() && work.join("kept/target.bin").exists() && work.exists());
         // get: a folder lists with its own name first, `r` reads it back; a lease's tmp/ too
         let ls = x.handle("get-ls", "getx - src/out");
         assert_eq!(ls.len(), 2, "{ls:?}");
