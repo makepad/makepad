@@ -86,13 +86,19 @@ pub fn memory_budget_mb() -> Option<u64> {
 /// this run's code and front images and the collected program reach the cache, and the next
 /// launch starts warm. The app keeps running; a later start of the activity resumes it.
 fn background_quit_write() {
-    crate::logcat::log("background: the compile cache's quit write starts, then the process exits so the exit write runs too (the next launch starts warm)");
+    crate::logcat::log("background: stopping the background tiers, writing the compile cache, then exiting (the next launch starts warm)");
+    // The tiers keep the owner thread busy for minutes on a phone, and the exit's own drain of
+    // the deferred cache records stops at SPEC_STOP: stop the tiers, let the quit write encode
+    // and write everything (no time cap), then exit. Android restarts the process on the next
+    // launch, from the warm cache.
+    relax_compiler::jit::stop_background_tiers();
     relax_compiler::run::quit_requested();
-    // The quit write alone keeps only what the busy compile tiers let it take (a few hundred
-    // entries); the exit write quiesces them and writes everything. Android restarts the
-    // process on the next launch, from the warm cache.
     let _ = std::thread::Builder::new().name("background-exit".into()).spawn(|| {
-        std::thread::sleep(std::time::Duration::from_millis(2000));
+        let t = std::time::Instant::now();
+        while !relax_compiler::run::quit_write_done() && t.elapsed() < std::time::Duration::from_secs(900) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        crate::logcat::log(&format!("background: cache written in {:.1} s; exiting", t.elapsed().as_secs_f64()));
         std::process::exit(0);
     });
 }

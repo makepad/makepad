@@ -7823,7 +7823,7 @@ pub(crate) fn drain_records_bounded() {
                 wc::N[wc::DRAIN_WHY].store(why, Ordering::Relaxed);
                 if !up.is_null() { wc::N[wc::DRAIN_LEN].store(unsafe { (&*up).pending_cache_records.len() - (&*up).pending_cache_cursor } as u64, Ordering::Relaxed); }
             }
-            !SPEC_STOP.load(Ordering::SeqCst) && !up.is_null() && unsafe { (&mut *up).record_cache_batch(RECORD_BATCH) }
+            (!SPEC_STOP.load(Ordering::SeqCst) || DRAIN_ANYWAY.load(Ordering::SeqCst)) && !up.is_null() && unsafe { (&mut *up).record_cache_batch(RECORD_BATCH) }
         });
         if !more { break; }
     }
@@ -20330,6 +20330,23 @@ fn spec_worker(runtime: &crate::options::RuntimeOptions, options: &crate::option
 
 /// speculative workers stop taking work (exit summary, Unit drop)
 static SPEC_STOP: AtomicBool = AtomicBool::new(false);
+/// The deferred cache records are encoded although the speculative workers are stopped: a
+/// background cache write that stopped the tiers first (`stop_background_tiers`), and the exit
+/// after it. Without it, `begin_exit`'s SPEC_STOP ended every drain at once, and a process whose
+/// owner thread never had time to encode the records during the run (a phone's cold compile) kept
+/// none of its compiled code.
+pub static DRAIN_ANYWAY: AtomicBool = AtomicBool::new(false);
+
+/// Stops the background compilers (speculative workers, O2/O3 tiers) so the owner thread is free
+/// for a cache write while the app keeps running: an Android host about to be backgrounded, where
+/// the process is killed rather than exited and the write must finish first.
+pub fn stop_background_tiers() {
+    DRAIN_ANYWAY.store(true, Ordering::SeqCst);
+    SPEC_STOP.store(true, Ordering::SeqCst);
+    TIER_STOP.store(true, Ordering::SeqCst);
+    SPEC_WAKE.notify_all();
+    tier_wake_all();
+}
 /// background jobs that panicked outside their build's own recovery (lock released)
 pub static SPEC_PANICS: AtomicU64 = AtomicU64::new(0);
 

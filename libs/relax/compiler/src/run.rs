@@ -2933,6 +2933,13 @@ pub(crate) extern "C" fn relax_quit_started() {
     quit_mark();
 }
 
+/// The quit write finished (its thread wrote the entries, front images and the collected program):
+/// a host that exits the process after it (Android, backgrounded) waits for this.
+static QUIT_WRITE_DONE: AtomicBool = AtomicBool::new(false);
+pub fn quit_write_done() -> bool {
+    QUIT_WRITE_DONE.load(Ordering::SeqCst)
+}
+
 fn quit_mark() {
     static ONCE: AtomicBool = AtomicBool::new(false);
     jit::QUIT_SEEN.store(true, Ordering::Relaxed);
@@ -2960,6 +2967,7 @@ fn quit_mark() {
             crate::clock::ms_since_start(), r, COLLECTED_CURRENT.load(Ordering::Relaxed), t.elapsed().as_secs_f64() * 1e3);
         // MAKEPAD_RUN_CACHE_TRACE: written here too (the exit's write may never run)
         crate::cache::write_trace();
+        QUIT_WRITE_DONE.store(true, Ordering::SeqCst);
     });
     }
 }
