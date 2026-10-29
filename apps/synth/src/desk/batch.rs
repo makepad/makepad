@@ -9,7 +9,7 @@
 //! work out why and rewrite MUSIC-AGENTS.md's learned rules, which the next
 //! batch reads. Every batch, its ratings and the rule changes go to a log.
 
-use super::transport::DrawScrub;
+use super::tabs::DrawSeg;
 use makepad_music_iter::batch::{self, Batch, Learned, Run, State, ASPECTS};
 use makepad_music_iter::gen::{Request, TurnMonitor};
 use super::Desk;
@@ -64,9 +64,9 @@ pub struct MusicChips {
     walk: Walk,
     #[redraw]
     #[live]
-    draw_bg: DrawScrub,
+    draw_bg: DrawSeg,
     #[live]
-    draw_box: DrawScrub,
+    draw_box: DrawSeg,
     #[live]
     draw_text: DrawText,
     #[live]
@@ -195,7 +195,6 @@ impl Widget for MusicChips {
             self.height = height;
             cx.redraw_all();
         }
-        self.draw_bg.shape = 0.0;
         self.draw_bg.fill = Vec4f::from_u32(p.panel);
         self.draw_bg.edge = Vec4f::from_u32(p.panel);
         self.draw_bg.draw_abs(cx, rect);
@@ -214,7 +213,6 @@ impl Widget for MusicChips {
                 _ if self.hover == Some(i) => (p.control_hover, p.text_hi),
                 _ => (p.well, p.label),
             };
-            self.draw_box.shape = 0.0;
             self.draw_box.radius = 3.0;
             self.draw_box.fill = Vec4f::from_u32(fill);
             self.draw_box.edge = Vec4f::from_u32(if state == OFF { p.line } else { fill });
@@ -256,9 +254,9 @@ pub struct MusicSongs {
     walk: Walk,
     #[redraw]
     #[live]
-    draw_bg: DrawScrub,
+    draw_bg: DrawSeg,
     #[live]
-    draw_box: DrawScrub,
+    draw_box: DrawSeg,
     #[live]
     draw_text: DrawText,
     #[live]
@@ -334,7 +332,6 @@ impl Widget for MusicSongs {
         let p = makepad_look::palette::get(cx);
         let height = (self.rows.len() as f64 * ROW_H).max(ROW_H);
         let rect = cx.walk_turtle(Walk { height: Size::Fixed(height), ..walk });
-        self.draw_bg.shape = 0.0;
         self.draw_bg.fill = Vec4f::from_u32(p.panel);
         self.draw_bg.edge = Vec4f::from_u32(p.panel);
         self.draw_bg.draw_abs(cx, rect);
@@ -347,7 +344,6 @@ impl Widget for MusicSongs {
         for (i, row) in self.rows.iter().enumerate() {
             let r = Rect { pos: rect.pos + dvec2(0.0, i as f64 * ROW_H), size: dvec2(rect.size.x, ROW_H - 2.0) };
             if self.selected == Some(i) || self.hover == Some(i) {
-                self.draw_box.shape = 0.0;
                 self.draw_box.radius = 3.0;
                 self.draw_box.fill = Vec4f::from_u32(if self.selected == Some(i) { p.accent_wash } else { p.control_hover });
                 self.draw_box.edge = self.draw_box.fill;
@@ -355,7 +351,6 @@ impl Widget for MusicSongs {
             }
             // The playing row: an accent bar down its left edge.
             if self.playing == Some(i) {
-                self.draw_box.shape = 0.0;
                 self.draw_box.radius = 1.0;
                 self.draw_box.fill = Vec4f::from_u32(p.accent);
                 self.draw_box.edge = self.draw_box.fill;

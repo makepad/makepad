@@ -476,10 +476,7 @@ impl Desk {
 
     /// Fold the code down to what the panel edits, or unfold it.
     pub(super) fn focus_code(&mut self, cx: &mut Cx, ui: &WidgetRef) {
-        let keep = self.panel.focus.then(|| ScorePanel::focus_lines(&self.source));
-        if let Some(mut editor) = ui.widget(cx, ids!(score_code)).borrow_mut::<super::editor::ScoreEditor>() {
-            editor.fold_except(cx, keep.as_deref());
-        }
+        self.apply_folds(cx, ui);
         let on = self.panel.focus;
         super::lit(cx, ui, ids!(score_focus), on);
         let label = if on { "Unfold the code" } else { "Fold code to the panel" };

@@ -252,6 +252,27 @@ impl Slot {
         self.with_watch(|w| w.layout.audio_probes.get(&format!("{node}.audio")).map(|span| w.meters.scope(*span)))
     }
 
+    /// The playing player's generation and the scope span of each of
+    /// `nodes` (`<slot>/<name>`): resolved once per player, then read with
+    /// [`Slot::scope_read`] without allocating.
+    pub fn scope_spans(&self, nodes: &[String]) -> Option<(u64, Vec<Option<u16>>)> {
+        let playing = self.playing();
+        self.with_watch(|w| Some((playing, nodes.iter().map(|n| w.layout.audio_probes.get(&format!("{n}.audio")).copied()).collect())))
+    }
+
+    /// Span `span`'s last published pass into `out` (per bin: left min,
+    /// left max, right min, right max) while generation `generation`
+    /// plays; false once another plays (resolve the spans again).
+    pub fn scope_read(&self, generation: u64, span: u16, out: &mut [[f32; 4]]) -> bool {
+        if self.playing() != generation {
+            return false;
+        }
+        self.with_watch(|w| {
+            w.meters.scope_into(span, out);
+            Some(())
+        }).is_some()
+    }
+
     /// Hold the playing player's control `node.param` at `value` (until
     /// the next score plays); false when it has none.
     pub fn set_control(&self, node: &str, param: &str, value: f32) -> bool {

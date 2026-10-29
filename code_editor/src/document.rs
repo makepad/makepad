@@ -276,6 +276,53 @@ impl CodeDocument {
         self.update_after_edit(None, None, &[delete_edit, insert_edit]);
     }
 
+    /// As `replace_range`, but joined to the undo step of the edit before
+    /// it: the steps of one gesture (a knob dragged, a number scrubbed)
+    /// undo as one.
+    pub fn replace_range_joined(&self, start: Position, end: Position, new_text: Text) {
+        if self.is_read_only() { return; }
+        let mut history = self.0.history.borrow_mut();
+        let delete_edit = Edit {
+            change: Change::Delete(start, end - start),
+            drift: Drift::Before,
+        };
+        let insert_edit = Edit {
+            change: Change::Insert(start, new_text),
+            drift: Drift::Before,
+        };
+        history.apply_edit(delete_edit.clone());
+        history.apply_edit(insert_edit.clone());
+        drop(history);
+        self.update_after_edit(None, None, &[delete_edit, insert_edit]);
+    }
+
+    /// Replaces several ranges as one undo step, as given (no autoindent).
+    /// `ranges` are disjoint, in ascending order of their starts; an empty
+    /// range at another's start comes before it. For a host writing one
+    /// gesture's several value changes.
+    pub fn replace_ranges(&self, ranges: &[(Position, Position, Text)]) {
+        if self.is_read_only() || ranges.is_empty() { return; }
+        let mut history = self.0.history.borrow_mut();
+        history.force_new_group();
+        history.push_or_extend_group(
+            SessionId::default(),
+            EditKind::Other,
+            &SelectionSet::default(),
+        );
+        // Back to front: an edit never moves the ones still to apply.
+        let mut edits = Vec::with_capacity(ranges.len() * 2);
+        for (start, end, text) in ranges.iter().rev() {
+            let delete_edit = Edit { change: Change::Delete(*start, *end - *start), drift: Drift::Before };
+            let insert_edit = Edit { change: Change::Insert(*start, text.clone()), drift: Drift::Before };
+            history.apply_edit(delete_edit.clone());
+            history.apply_edit(insert_edit.clone());
+            edits.push(delete_edit);
+            edits.push(insert_edit);
+        }
+        drop(history);
+        self.update_after_edit(None, None, &edits);
+    }
+
     /// Highlight as the file at `path` (a rename that changed the
     /// extension): retokenizes in place, keeping the text, history, anchors
     /// and sessions.

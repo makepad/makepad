@@ -1,4 +1,4 @@
-//! The library pane under the editor panel: the scores (unsaved drafts
+//! The side panel's Library tab: the scores (unsaved drafts
 //! first, then the library's files) and the samples a score can play by
 //! name; and the document's files: Save, Save as, Open, Export to WAV,
 //! samples added from anywhere.
@@ -88,12 +88,22 @@ fn score_dialog(id: LiveId, title: &str) -> FileDialog {
 
 impl Desk {
     pub(super) fn handle_library_actions(&mut self, cx: &mut Cx, ui: &WidgetRef, actions: &Actions) {
-        for (id, lane) in [(ids!(lib_lane_scores), Lane::Scores), (ids!(lib_lane_samples), Lane::Samples)] {
-            if ui.button(cx, id).clicked(actions) {
-                self.lib.lane = lane;
-                self.lib.dirty = true;
-                ui.text_input(cx, ids!(lib_search)).set_empty_text(cx, if lane == Lane::Scores { "Search scores".into() } else { "Search samples".into() });
-                ui.button(cx, ids!(lib_add)).set_visible(cx, lane == Lane::Samples);
+        // The library's lanes: its scores, its samples, and the batch (songs
+        // written at once, with their ratings).
+        let lanes = ui.widget(cx, ids!(lib_lanes));
+        for action in actions.filter_widget_actions_cast::<super::tabs::TabsAction>(lanes.widget_uid()) {
+            if let super::tabs::TabsAction::Selected(index) = action {
+                let batch = index == 2;
+                ui.view(cx, ids!(lib_browse)).set_visible(cx, !batch);
+                ui.view(cx, ids!(score_batch)).set_visible(cx, batch);
+                if !batch {
+                    let lane = if index == 0 { Lane::Scores } else { Lane::Samples };
+                    self.lib.lane = lane;
+                    self.lib.dirty = true;
+                    ui.text_input(cx, ids!(lib_search)).set_empty_text(cx, if lane == Lane::Scores { "Search scores".into() } else { "Search samples".into() });
+                    ui.button(cx, ids!(lib_add)).set_visible(cx, lane == Lane::Samples);
+                }
+                ui.redraw(cx);
             }
         }
         if let Some(text) = ui.text_input(cx, ids!(lib_search)).changed(actions) {
@@ -182,7 +192,7 @@ impl Desk {
                     if let Some(Row::Sample { path }) = self.lib.rows.get(i) {
                         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                         let text = format!("asset({}, {})", makepad_editor_panel::fmt_text(&name), makepad_editor_panel::fmt_text(FILE_REV));
-                        let at = ui.widget(cx, ids!(score_code)).borrow::<super::editor::ScoreEditor>().and_then(|editor| editor.cursor_offset(cx));
+                        let at = ui.widget(cx, ids!(score_code)).borrow::<super::code::ScoreEditor>().and_then(|editor| editor.cursor_offset(cx));
                         match at {
                             Some(at) => self.splice(cx, ui, at, at, &text),
                             None => ui.label(cx, ids!(score_state)).set_text(cx, "click in the code where the sample goes, then double-click it"),

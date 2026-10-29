@@ -991,7 +991,9 @@ pub const SYNTH_FIELDS: [&str; 34] = ["at",
 ];
 pub const DRUMS_FIELDS: [&str; 6] = ["kit", "tune", "gain", "recipes", "samples", "at"];
 pub const SAMPLER_FIELDS: [&str; 5] = ["src", "root", "attack", "release", "at"];
-pub const LOOP_FIELDS: [&str; 24] = ["play", "beats", "amp", "pan", "mute", "solo", "sync", "hits", "note", "step", "code", "when", "follow", "dur", "quant", "notes", "sends", "swing", "humanize", "midi_in", "mute_voices", "solo_voices", "at", "label"];
+/// `label` and `color` (a palette name, `@amber`) are for the views: a
+/// track's name and colour; the player does not read them.
+pub const LOOP_FIELDS: [&str; 25] = ["play", "beats", "amp", "pan", "mute", "solo", "sync", "hits", "note", "step", "code", "when", "follow", "dur", "quant", "notes", "sends", "swing", "humanize", "midi_in", "mute_voices", "solo_voices", "at", "label", "color"];
 pub const INSTRUMENT_FIELDS: [&str; 9] = ["kind", "preset", "src", "bank", "program", "gain", "channel", "port", "at"];
 pub const IRON_FIELDS: [&str; 17] = [
     "program", "cutoff", "resonance", "env", "attack", "decay", "sustain", "release", "sub", "noise", "glide", "crush", "delay", "chorus", "reverb", "output", "at",

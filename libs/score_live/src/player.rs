@@ -334,6 +334,17 @@ impl Meters {
         self.probes.get(index as usize).map_or(0.0, |v| f32::from_bits(v.load(Ordering::Relaxed)))
     }
 
+    /// [`Meters::scope`] into `out` (up to [`SCOPE_BINS`] bins), without
+    /// allocating.
+    pub fn scope_into(&self, span: u16, out: &mut [[f32; 4]]) {
+        let base = span as usize * SCOPE_BINS * 4;
+        for (bin, slot) in out.iter_mut().take(SCOPE_BINS).enumerate() {
+            for (k, v) in slot.iter_mut().enumerate() {
+                *v = self.scopes.get(base + bin * 4 + k).map_or(0.0, |a| f32::from_bits(a.load(Ordering::Relaxed)));
+            }
+        }
+    }
+
     /// A stream's last published pass: per bin (left min, left max, right
     /// min, right max).
     pub fn scope(&self, span: u16) -> Vec<[f32; 4]> {
