@@ -15,6 +15,7 @@ use std::ffi::c_void;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::ptr::{null, null_mut};
+use std::sync::Arc;
 
 type SecurityStatus = i32;
 
@@ -283,8 +284,19 @@ const SEC_E_OK: i32 = 0;
 const SEC_I_CONTINUE_NEEDED: i32 = 0x0009_0312;
 const SEC_I_CONTEXT_EXPIRED: i32 = 0x0009_0317;
 const SEC_I_RENEGOTIATE: i32 = 0x0009_0321;
+/// The server asked for a client certificate (FTPS servers often do).
+const SEC_I_INCOMPLETE_CREDENTIALS: i32 = 0x0009_0320;
 const SEC_E_INCOMPLETE_MESSAGE: i32 = 0x8009_0318u32 as i32;
 const SECPKG_ATTR_STREAM_SIZES: u32 = 4;
+const SECPKG_ATTR_SESSION_INFO: u32 = 0x5d;
+const SSL_SESSION_RECONNECT: u32 = 1;
+
+#[repr(C)]
+struct SessionInfo {
+    flags: u32,
+    session_id_len: u32,
+    session_id: [u8; 32],
+}
 
 const X509_ASN_ENCODING: u32 = 0x1 | 0x10000;
 const CERT_KEY_PROV_INFO_PROP_ID: u32 = 2;
@@ -690,9 +702,9 @@ pub struct ServerStream {
     tcp: TcpStream,
     cred: SecHandle,
     ctx: SecHandle,
-    /// Client side (pinned connect): owns its credential handle and runs
-    /// post-handshake messages through InitializeSecurityContext.
-    client: Option<Vec<u16>>,
+    /// Client side (pinned connect): runs post-handshake messages through
+    /// InitializeSecurityContext.
+    client: Option<ClientSide>,
     sizes: StreamSizes,
     incoming: Vec<u8>,
     plain: Vec<u8>,
@@ -769,10 +781,10 @@ impl ServerStream {
         let mut attrs = 0u32;
         let st = unsafe {
             match &self.client {
-                Some(target) => InitializeSecurityContextW(
+                Some(client) => InitializeSecurityContextW(
                     &mut self.cred,
                     &mut self.ctx,
-                    target.as_ptr(),
+                    client.target.as_ptr(),
                     ISC_FLAGS,
                     0,
                     0,
@@ -820,11 +832,31 @@ impl Drop for ServerStream {
     fn drop(&mut self) {
         unsafe {
             DeleteSecurityContext(&mut self.ctx);
-            if self.client.is_some() {
-                FreeCredentialsHandle(&mut self.cred);
-            }
         }
     }
+}
+
+/// A client credential handle. Schannel caches client sessions per
+/// credential and target name, so connections that resume each other's
+/// session share one.
+struct ClientCred(SecHandle);
+
+impl Drop for ClientCred {
+    fn drop(&mut self) {
+        unsafe {
+            FreeCredentialsHandle(&mut self.0);
+        }
+    }
+}
+
+// The handle is only read after creation; SSPI handles are process-wide.
+unsafe impl Send for ClientCred {}
+unsafe impl Sync for ClientCred {}
+
+struct ClientSide {
+    target: Vec<u16>,
+    /// Freed when the last connection on it is dropped (after its context).
+    cred: Arc<ClientCred>,
 }
 
 fn client_credentials() -> io::Result<SecHandle> {
@@ -921,15 +953,23 @@ impl ServerStream {
 
 /// Client handshake on Schannel without chain validation (self-signed
 /// servers); returns the server leaf certificate DER with the stream.
-pub fn connect_capture(mut tcp: TcpStream, host: &str) -> io::Result<(ServerStream, Vec<u8>)> {
-    let cred = client_credentials()?;
+/// `resume`: an earlier client connection to the same host whose session
+/// this one resumes (its credential handle is shared).
+pub fn connect_capture(mut tcp: TcpStream, host: &str, resume: Option<&ServerStream>) -> io::Result<(ServerStream, Vec<u8>)> {
+    let cred = match resume {
+        Some(earlier) => match &earlier.client {
+            Some(client) => client.cred.clone(),
+            None => return Err(io::Error::new(io::ErrorKind::InvalidInput, "no client TLS session to resume")),
+        },
+        None => Arc::new(ClientCred(client_credentials()?)),
+    };
     let target = wide(host);
-    // The stream owns cred and ctx from here; its Drop frees them.
+    // The stream owns ctx (and a share of cred) from here; its Drop frees them.
     let mut stream = ServerStream {
         tcp: tcp.try_clone()?,
-        cred,
+        cred: cred.0,
         ctx: SecHandle::default(),
-        client: Some(target.clone()),
+        client: Some(ClientSide { target: target.clone(), cred }),
         sizes: StreamSizes::default(),
         incoming: Vec::new(),
         plain: Vec::new(),
@@ -941,6 +981,7 @@ pub fn connect_capture(mut tcp: TcpStream, host: &str) -> io::Result<(ServerStre
     let mut have_ctx = false;
     let mut buf = vec![0u8; 16 * 1024];
     let mut need_read = false;
+    let mut certificate_requests = 0;
     loop {
         if need_read {
             let n = tcp.read(&mut buf)?;
@@ -986,6 +1027,12 @@ pub fn connect_capture(mut tcp: TcpStream, host: &str) -> io::Result<(ServerStre
         }
         match st {
             SEC_E_INCOMPLETE_MESSAGE => need_read = true,
+            // We have no client certificate: calling again with the same
+            // input continues the handshake without one.
+            SEC_I_INCOMPLETE_CREDENTIALS if have_ctx && certificate_requests == 0 => {
+                certificate_requests += 1;
+                need_read = false;
+            }
             SEC_E_OK | SEC_I_CONTINUE_NEEDED => {
                 if have_ctx && in_bufs[1].kind == SECBUFFER_EXTRA && in_bufs[1].cb > 0 {
                     let keep = in_bufs[1].cb as usize;
@@ -1022,6 +1069,15 @@ pub fn connect_capture(mut tcp: TcpStream, host: &str) -> io::Result<(ServerStre
     let st = unsafe { QueryContextAttributesW(&mut stream.ctx, SECPKG_ATTR_STREAM_SIZES, &mut stream.sizes as *mut _ as *mut c_void) };
     if st != SEC_E_OK {
         return Err(status_error("QueryContextAttributes(STREAM_SIZES)", st));
+    }
+    if resume.is_some() {
+        let mut info = SessionInfo { flags: 0, session_id_len: 0, session_id: [0; 32] };
+        let st = unsafe { QueryContextAttributesW(&mut stream.ctx, SECPKG_ATTR_SESSION_INFO, &mut info as *mut _ as *mut c_void) };
+        if st != SEC_E_OK || info.flags & SSL_SESSION_RECONNECT == 0 {
+            // Seen with servers that lack the extended master secret
+            // (RFC 7627): Schannel does not resume their sessions.
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "the TLS session was not resumed (Schannel resumes no sessions without the extended master secret)"));
+        }
     }
     Ok((stream, der))
 }

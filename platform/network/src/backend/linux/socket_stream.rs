@@ -21,6 +21,10 @@ pub(crate) struct SSL {
 pub(crate) struct SSL_METHOD {
     _private: [u8; 0],
 }
+#[repr(C)]
+pub(crate) struct SSL_SESSION {
+    _private: [u8; 0],
+}
 
 const SSL_VERIFY_NONE: c_int = 0;
 const SSL_VERIFY_PEER: c_int = 1;
@@ -46,6 +50,11 @@ unsafe extern "C" {
     pub(crate) fn TLS_client_method() -> *const SSL_METHOD;
     pub(crate) fn SSL_CTX_new(method: *const SSL_METHOD) -> *mut SSL_CTX;
     pub(crate) fn SSL_CTX_free(ctx: *mut SSL_CTX);
+    pub(crate) fn SSL_CTX_up_ref(ctx: *mut SSL_CTX) -> c_int;
+    pub(crate) fn SSL_get1_session(ssl: *mut SSL) -> *mut SSL_SESSION;
+    pub(crate) fn SSL_set_session(ssl: *mut SSL, session: *mut SSL_SESSION) -> c_int;
+    pub(crate) fn SSL_SESSION_free(session: *mut SSL_SESSION);
+    pub(crate) fn SSL_session_reused(ssl: *const SSL) -> c_int;
     pub(crate) fn SSL_CTX_set_verify(ctx: *mut SSL_CTX, mode: c_int, verify_callback: *mut c_void);
     pub(crate) fn SSL_CTX_set_default_verify_paths(ctx: *mut SSL_CTX) -> c_int;
     pub(crate) fn SSL_new(ctx: *mut SSL_CTX) -> *mut SSL;
@@ -112,23 +121,14 @@ unsafe impl Send for OpenSslStream {}
 
 impl OpenSslStream {
     fn connect(tcp_stream: TcpStream, host: &str, verify_peer: bool) -> io::Result<Self> {
-        Self::connect_until(tcp_stream, host, verify_peer, None)
+        Self::connect_until(tcp_stream, host, verify_peer, None, None)
     }
 
-    /// `deadline`: give up the handshake then (a peer that never answers).
-    fn connect_until(
-        tcp_stream: TcpStream,
-        host: &str,
-        verify_peer: bool,
-        deadline: Option<std::time::Instant>,
-    ) -> io::Result<Self> {
-        init_openssl()?;
-
+    fn new_context(verify_peer: bool) -> io::Result<*mut SSL_CTX> {
         let method = unsafe { TLS_client_method() };
         if method.is_null() {
             return Err(io_other("TLS_client_method returned null"));
         }
-
         let ssl_ctx = unsafe { SSL_CTX_new(method) };
         if ssl_ctx.is_null() {
             return Err(io_other(format!(
@@ -136,7 +136,6 @@ impl OpenSslStream {
                 last_ssl_error()
             )));
         }
-
         if verify_peer {
             unsafe {
                 SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER, ptr::null_mut());
@@ -155,6 +154,32 @@ impl OpenSslStream {
                 SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_NONE, ptr::null_mut());
             }
         }
+        Ok(ssl_ctx)
+    }
+
+    /// `deadline`: give up the handshake then (a peer that never answers).
+    /// `resume`: an earlier connection whose context and TLS session this
+    /// one reuses (the session is offered for an abbreviated handshake).
+    fn connect_until(
+        tcp_stream: TcpStream,
+        host: &str,
+        verify_peer: bool,
+        deadline: Option<std::time::Instant>,
+        resume: Option<&OpenSslStream>,
+    ) -> io::Result<Self> {
+        init_openssl()?;
+
+        // A resuming connection shares the earlier one's context (and so its
+        // verify settings): the session belongs to it.
+        let ssl_ctx = match resume {
+            Some(earlier) => {
+                if unsafe { SSL_CTX_up_ref(earlier.ssl_ctx) } != 1 {
+                    return Err(io_other(format!("SSL_CTX_up_ref failed: {}", last_ssl_error())));
+                }
+                earlier.ssl_ctx
+            }
+            None => Self::new_context(verify_peer)?,
+        };
 
         let ssl = unsafe { SSL_new(ssl_ctx) };
         if ssl.is_null() {
@@ -162,6 +187,21 @@ impl OpenSslStream {
                 SSL_CTX_free(ssl_ctx);
             }
             return Err(io_other(format!("SSL_new failed: {}", last_ssl_error())));
+        }
+
+        if let Some(earlier) = resume {
+            let session = unsafe { SSL_get1_session(earlier.ssl) };
+            let set = !session.is_null() && unsafe { SSL_set_session(ssl, session) } == 1;
+            if !session.is_null() {
+                unsafe { SSL_SESSION_free(session) };
+            }
+            if !set {
+                unsafe {
+                    SSL_free(ssl);
+                    SSL_CTX_free(ssl_ctx);
+                }
+                return Err(io_other("the earlier TLS connection has no session to resume"));
+            }
         }
 
         let host_cstr =
@@ -406,15 +446,31 @@ impl SocketStream {
     /// TLS 1.2+ without CA validation (self-signed servers); returns the
     /// server leaf certificate DER for the caller's known-hosts record.
     pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, Vec<u8>)> {
+        Self::capture(host, port, None)
+    }
+
+    /// Like [`Self::connect_capture`], resuming the TLS session of `session_of`
+    /// (an earlier captured connection; FTPS data channels need this).
+    pub fn connect_capture_resuming(host: &str, port: &str, session_of: &Self) -> io::Result<(Self, Vec<u8>)> {
+        let SocketStream::Tls(earlier) = session_of else {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "no TLS session to resume"));
+        };
+        Self::capture(host, port, Some(earlier))
+    }
+
+    fn capture(host: &str, port: &str, resume: Option<&OpenSslStream>) -> io::Result<(Self, Vec<u8>)> {
         let tcp_stream = connect_lan(host, port)?;
         let _ = tcp_stream.set_nodelay(true);
         let _ = tcp_stream.set_read_timeout(Some(Duration::from_secs(5)));
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        let mut stream = OpenSslStream::connect_until(tcp_stream, host, false, Some(deadline))?;
+        let mut stream = OpenSslStream::connect_until(tcp_stream, host, false, Some(deadline), resume)?;
         let _ = stream.set_read_timeout(None);
         let result = (|| {
             if unsafe { SSL_version(stream.ssl) } < 0x0303 {
                 return Err(io_other("server negotiated a TLS version below 1.2"));
+            }
+            if resume.is_some() && unsafe { SSL_session_reused(stream.ssl) } != 1 {
+                return Err(io::Error::new(io::ErrorKind::Unsupported, "the server did not resume the TLS session"));
             }
             stream.peer_leaf_der()
         })();

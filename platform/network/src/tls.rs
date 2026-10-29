@@ -21,8 +21,14 @@
 //! [`KnownHosts`] (first contact, warns loudly on a change). TLS 1.2 is the
 //! floor everywhere;
 //! TLS 1.3 is used where both stacks have it (OpenSSL, Schannel on recent
-//! Windows). SecureTransport stops at TLS 1.2, with ECDHE-ECDSA AEAD suites
-//! only.
+//! Windows). SecureTransport stops at TLS 1.2, with ECDHE AEAD suites only
+//! (RSA or ECDSA certificates).
+//!
+//! [`crate::SocketStream::connect_capture_resuming`] opens a second
+//! connection that resumes an earlier one's TLS session (FTPS data
+//! channels need it). Schannel does not resume sessions of servers without
+//! the extended master secret (RFC 7627); that connection fails with
+//! `Unsupported` rather than going on unresumed.
 
 use std::fs;
 use std::io::{self, Read, Write};
