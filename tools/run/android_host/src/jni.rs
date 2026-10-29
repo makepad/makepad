@@ -375,7 +375,7 @@ fn boot_thread(
     let conf = parse_conf(&unsafe { asset_text(manager, CONF_ASSET)? })?;
     let (offset, len) = unsafe { asset_range(manager, ARCHIVE_ASSET)? };
     let other_pack = freshen_cache(&relax_home, offset, len);
-    seed_cache(manager, &relax_home);
+    unsafe { seed_cache(manager, &relax_home) };
     // devhub pushes live in the run's edits folder over the APK's source store; other packed
     // sources start from their own revs (the conf's)
     if other_pack {
