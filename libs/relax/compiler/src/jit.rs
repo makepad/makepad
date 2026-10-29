@@ -9802,6 +9802,7 @@ fn o2_thread(runtime: &crate::options::RuntimeOptions) {
                             job_sleep(TIER1_POLL);
                         }
                     }
+                    let _site = FrontSite::enter(if o1 { 2 } else if borrowed { 3 } else { 1 });
                     let b = take_prefronted(&front, (!o1).then_some(id), || live().and_then(|up| if o1 { o1v_begin(up, id) } else if borrowed { borrow_begin(up, id) } else { o2_begin(up, id) }.map(|w| (up, w))));
                     if b.is_none() {
                         if o1 { crate::cache::warm_count::add(crate::cache::warm_count::O1V_DROPPED, 1) } else { o2_take_dropped(live().unwrap_or(std::ptr::null_mut()), id) }
@@ -15331,6 +15332,7 @@ unsafe fn prebuild_callees(up: *mut Unit, relocs: &[relax_backend::rir::RelocAt]
                 (&*up).front.clone()
             });
             O2_TAKEN.fetch_add(1, Ordering::Relaxed);
+            let _site = FrontSite::enter(4);
             let Some(w) = take_prefronted(&front, Some(c), || o2_begin(up, c)).unwrap_or_else(|| { o2_take_dropped(up, c); None }) else { continue };
             let done = w.run();
             if let Ok(Ok((_, _, cc))) = &done.built {
@@ -16278,12 +16280,18 @@ impl Unit {
         if f.compiled || f.ran_before.load(Ordering::Relaxed) {
             return true;
         }
-        let Some(mut c) = self.cache.take() else { return false };
-        let r = c.has_stored_entry(self, id);
-        self.cache = Some(c);
+        let r = self.has_stored_entry(id);
         if r {
             self.fns[id as usize].ran_before.store(true, Ordering::Relaxed);
         }
+        r
+    }
+
+    /// Whether slot `id` has a stored code entry (its key names one in the cache).
+    pub(crate) fn has_stored_entry(&mut self, id: u32) -> bool {
+        let Some(mut c) = self.cache.take() else { return false };
+        let r = c.has_stored_entry(self, id);
+        self.cache = Some(c);
         r
     }
 
@@ -16502,6 +16510,7 @@ fn pgo_forget(u: &Unit) {
 /// for it (not a plain instance or closure, no RIR, already counted, PGO off, or it failed) -- its
 /// O3 build goes ahead now.
 unsafe fn counted_build(up: *mut Unit, id: u32, lukewarm: bool) -> bool {
+    let _site = FrontSite::enter(5);
     let session = crate::jit::unit_session(up);
     let options = &session.options;
     if !pgo_on(options) {
@@ -17378,6 +17387,7 @@ fn trace_tier1_phase(id: u32, phase: &str) {
 }
 
 pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
+    let _site = FrontSite::enter(7);
     let _census_context = (&*up).exec_context(relax_codegen::exec_census::active() && crate::exec_profile::is_call(up as usize, id));
 
     let _cost = relax_codegen::fncost::Record::new(id, 1, "O3");
@@ -21456,14 +21466,20 @@ thread_local! {
 /// lazy compile (O1 code stays deterministic for the cache). Nothing when the slot needs no build
 /// any more. False: the process is ending on another thread (the caller queues it again).
 unsafe fn spec_build(up: *mut Unit, id: u32) -> bool {
+    let _site = FrontSite::enter(6);
     SPEC_BACK_RAN.with(|b| b.set(false));
     let fresh = |up: *mut Unit| {
         let f = &(&*up).fns[id as usize];
         if f.building { SEED_RECURSIVE_SKIPPED.fetch_add(1, Ordering::Relaxed); }
         !SPEC_STOP.load(Ordering::SeqCst) && !(f.compiled || f.spec.is_some() || f.inflight || f.building || f.build_err.is_some())
     };
-    let Some(front) = owner::publish(|| fresh(up).then(|| (&*up).front.clone())) else { return true };
-    prefront_slot(&front, id);
+    // a slot with a stored code entry links it (split_begin looks the disk cache up first): its
+    // type check and lowering are not made ahead. One whose entry no longer links (a dependency
+    // was edited) needs its front in the take, which bails for it (take_prefronted).
+    let Some((front, stored)) = owner::publish(|| fresh(up).then(|| ((&*up).front.clone(), (&mut *up).has_stored_entry(id)))) else { return true };
+    if !stored {
+        prefront_slot(&front, id);
+    }
     let b = take_prefronted(&front, None, || {
         if !fresh(up) {
             return Begin::Done(Split::Spec);
@@ -21502,6 +21518,33 @@ unsafe fn refront_settled(up: *mut Unit, id: u32, needs: bool) -> (bool, std::sy
 /// inline depth
 const PREFRONT_ROUNDS: usize = 24;
 
+thread_local! {
+    /// (instrument) the background job whose fronts this thread runs (PREFRONT_SITE_NAMES)
+    static FRONT_SITE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+/// (instrument) fronts run off the owner by job: [count, cpu ns] per PREFRONT_SITE_NAMES
+pub static PREFRONT_SITE: [[AtomicU64; 2]; 8] = [const { [AtomicU64::new(0), AtomicU64::new(0)] }; 8];
+pub const PREFRONT_SITE_NAMES: [&str; 8] = ["other", "O2", "O1v", "borrow", "O2 base", "counted", "spec", "O3"];
+struct FrontSite(u8);
+impl FrontSite {
+    fn enter(k: u8) -> Self { FrontSite(FRONT_SITE.with(|s| s.replace(k))) }
+}
+impl Drop for FrontSite {
+    fn drop(&mut self) { let _ = FRONT_SITE.try_with(|s| s.set(self.0)); }
+}
+fn prefront_count(t0: u64) {
+    let ns = cpu_ns() - t0;
+    PREFRONTS[0].fetch_add(1, Ordering::Relaxed);
+    PREFRONTS[1].fetch_add(ns, Ordering::Relaxed);
+    let k = FRONT_SITE.try_with(|s| s.get()).unwrap_or(0) as usize;
+    PREFRONT_SITE[k][0].fetch_add(1, Ordering::Relaxed);
+    PREFRONT_SITE[k][1].fetch_add(ns, Ordering::Relaxed);
+}
+pub(crate) fn prefront_site_summary() -> String {
+    PREFRONT_SITE_NAMES.iter().enumerate().filter(|(k, _)| PREFRONT_SITE[*k][0].load(Ordering::Relaxed) > 0)
+        .map(|(k, n)| format!("{} {} ({:.0} ms)", n, PREFRONT_SITE[k][0].load(Ordering::Relaxed), PREFRONT_SITE[k][1].load(Ordering::Relaxed) as f64 / 1e6)).collect::<Vec<_>>().join(", ")
+}
+
 /// Type-checks and lowers slot `id` on this thread, off the owner (its build takes the RIR,
 /// take_lowered_ahead). False: nothing to take (not a plain instance, or lowering ahead refused
 /// it: a body that names constants, a trait shim, a provided crate's function).
@@ -21528,8 +21571,7 @@ fn prefront_slot(front: &FrontShared, id: u32) -> bool {
         PREFRONTS[2].fetch_add(cpu_ns() - t0, Ordering::Relaxed);
         lower_ahead(front, id, true)
     };
-    PREFRONTS[0].fetch_add(1, Ordering::Relaxed);
-    PREFRONTS[1].fetch_add(cpu_ns() - t0, Ordering::Relaxed);
+    prefront_count(t0);
     prefronted(id);
     let ok = front.lowered.lock().unwrap_or_else(|e| e.into_inner()).get(&id).is_some_and(|x| x.is_some());
     if !ok {
@@ -21630,8 +21672,7 @@ fn prefront_closure(front: &FrontShared, id: u32) -> bool {
             None
         }
     };
-    PREFRONTS[0].fetch_add(1, Ordering::Relaxed);
-    PREFRONTS[1].fetch_add(cpu_ns() - t0, Ordering::Relaxed);
+    prefront_count(t0);
     let ok = ready.is_some();
     {
         let mut pending = front.lowered.lock().unwrap_or_else(|e| e.into_inner());
@@ -22801,8 +22842,7 @@ fn prefront_twin(front: &FrontShared, twin: u32, base: u32) -> bool {
         let _preemptible = crate::preempt::Preemptible::on();
         lower_ahead_as(u, twin, base, d, &args, u.tcx.collect_epoch.load(Ordering::SeqCst), Some(twin))
     };
-    PREFRONTS[0].fetch_add(1, Ordering::Relaxed);
-    PREFRONTS[1].fetch_add(cpu_ns() - t0, Ordering::Relaxed);
+    prefront_count(t0);
     let why = ready.as_ref().err().copied();
     let ok = ready.is_ok();
     {

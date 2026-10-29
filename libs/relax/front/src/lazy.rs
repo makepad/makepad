@@ -25,7 +25,7 @@ pub struct FileIndex {
 
 /// A certified demand closure. Per-file index projections are retained beside
 /// their paths; a warm load decodes these rather than indexing again.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct DemandImage {
     pub graph: u128,
     pub fingerprint: u128,
@@ -326,7 +326,7 @@ impl Plan {
                 let (ci, scans, aliases, _) = &mut discovered[k];
                 let c = &crates[*ci];
                 let _crate_profile = crate::load_profile::span(profile, "rust-demand-outline-crate", &c.name);
-                let dependencies = dependency_crates[*ci].iter().map(|&d| identities[d]).collect::<Vec<_>>();
+                let dependencies = dependency_identities(&dependency_crates[*ci], &identities);
                 let reusable = saved.get(*ci).and_then(Option::as_ref)
                     .filter(|part| part.dependencies == dependencies);
                 if profile && reusable.is_none() && saved.get(*ci).and_then(Option::as_ref).is_some() {
@@ -956,6 +956,15 @@ impl Plan {
 
 /// The load-order prefix selected in full: every crate but the last (whose selection is the closure's
 /// result). Only a Rust-lazy plan selects at all.
+/// A part's dependency pin: the surface identities of the crates its namespace read, as a set
+/// (sorted), so a crate whose dependencies load in another relative order (a reordered load moves
+/// changed crates last) keeps its part.
+pub(super) fn dependency_identities(crates: &[usize], identities: &[u128]) -> Vec<u128> {
+    let mut v: Vec<u128> = crates.iter().map(|&d| identities[d]).collect();
+    v.sort_unstable();
+    v
+}
+
 fn eager_prefix(crates: &[PreCrate]) -> usize {
     if crates.first().is_some_and(|c| c.cfg.session.options.rs_lazy) { crates.len().saturating_sub(1) } else { 0 }
 }

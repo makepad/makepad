@@ -46,8 +46,8 @@ impl Codec for DemandPart {
         Some(Self { key: Codec::get(r)?, ..Self::default() })
     }
 }
-const PART_VERSION: u32 = 8;
-const PART_DOMAIN: &str = "demand-part-v8";
+const PART_VERSION: u32 = 9;
+const PART_DOMAIN: &str = "demand-part-v9";
 
 type Resolve<'a> = dyn FnMut(&str, u128) -> Option<&'static [u8]> + 'a;
 
@@ -197,7 +197,10 @@ impl DemandPart {
         Some(Self { key, inputs: Codec::get(&mut r)?, probes: Codec::get(&mut r)?,
             late_inputs: Codec::get(&mut r)?, ..Self::default() })
     }
-    pub fn read(key: u128, bytes: &[u8], images: &mut Resolve<'_>) -> Option<Self> {
+    /// The part of the crate at load position `ci`: a part is order-free (its files are its own
+    /// crate's, its dependencies a set of surface identities, its namespace spellings), so one
+    /// recorded at another position (a reordered load's base graph) reads as this crate's.
+    pub fn read(key: u128, bytes: &[u8], ci: usize, images: &mut Resolve<'_>) -> Option<Self> {
         if crate::crate_image::file_hash(PART_DOMAIN, bytes) != key { return None; }
         let mut r = Decode::new(bytes);
         if u32::get(&mut r)? != PART_VERSION { return None; }
@@ -234,6 +237,7 @@ impl DemandPart {
         let mut macro_records = Vec::new();
         part.macros = MacroPart::get_referenced(&mut r, &store, images, &mut definitions, &strings, &mut macro_records)?;
         part.files = Pack::unpack(&mut r, &strings)?;
+        for f in &mut part.files { f.ci = ci; }
         part.unindexed = Pack::unpack(&mut r, &strings)?;
         part.items = Pack::unpack(&mut r, &strings)?;
         part.eager = Pack::unpack(&mut r, &strings)?;
@@ -440,7 +444,7 @@ impl DemandImage {
         for (ci, part) in parts.iter_mut().enumerate() {
             if fresh[ci] {
                 part.namespace_id = crate::crate_image::file_hash("", &part.namespace);
-                part.dependencies = names.reference_crates(ci).into_iter().filter(|&d| d < ci).map(|d| identities[d]).collect();
+                part.dependencies = super::dependency_identities(&names.reference_crates(ci).into_iter().filter(|&d| d < ci).collect::<Vec<_>>(), &identities);
                 part.seal_identity();
             }
             identities.push(part.surface_id);

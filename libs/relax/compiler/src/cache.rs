@@ -5339,24 +5339,28 @@ impl crate::crate_image::CrateImages for FrontImages {
     }
     fn demand_parts(&self, crates: &[crate::preload::PreCrate], graph: u128) -> Option<crate::crate_image::DemandParts> {
         let recipe = crate::crate_image::GraphRecipe::new(crates);
-        // a reordered load (load_order): the base graph's parts of the crates it keeps in place
-        // (a crate's part covers it and the crates before it); the others are planned again
-        let (identity, graph, common) = match self.front_graph(recipe.identity) {
-            Some(_) => (recipe.identity, graph, crates.len()),
+        // a reordered load (load_order): the base graph's parts, each crate's taken at its position
+        // there (a part is order-free: DemandPart::read); the plan validates each one as usual
+        let (identity, graph, reordered) = match self.front_graph(recipe.identity) {
+            Some(_) => (recipe.identity, graph, false),
             None => {
                 let base = self.base.lock().unwrap();
                 let base = base.as_ref().filter(|b| b.set == recipe.set)?;
-                (base.identity, crate::preload::demand_recipe_identity(&base.pre), base.common)
+                (base.identity, crate::preload::demand_recipe_identity(&base.pre), true)
             }
         };
         let Some(saved) = self.front_graph(identity) else { return None; };
-        if saved.identity != identity || saved.crates.len() != crates.len()
-            || saved.crates.iter().map(|(key, _)| key).take(common).ne(recipe.crates.iter().take(common)) { return None; }
+        if saved.identity != identity || saved.crates.len() != crates.len() { return None; }
+        // this load's crate k is the stored graph's crate from[k]
+        let at: HashMap<&(String, String), usize> = saved.crates.iter().enumerate().map(|(j, (key, _))| (key, j)).collect();
+        let from: Vec<usize> = recipe.crates.iter().map(|key| at.get(key).copied()).collect::<Option<_>>()?;
+        if !reordered && from.iter().enumerate().any(|(k, &j)| k != j) { return None; }
         let Some(image) = saved.demand_image.clone().filter(|image| image.graph == graph && image.parts.len() == crates.len()) else { return None; };
         let path = front_graph_path(&self.dir, identity);
         let store = Store::open(&path)?;
         let profile = crates.first().is_some_and(|c| c.cfg.session.runtime.profile);
-        let keys = image.parts.iter().zip(crates).take(common).map(|(part, c)| {
+        let keys = from.iter().zip(crates).map(|(&j, c)| {
+            let part = &image.parts[j];
             let (kind, bytes) = store.get(part.key)?;
             if kind != KIND_DEMAND_PART { return None; }
             let part = crate::preload::DemandPart::read_header(part.key, bytes)?;
@@ -5381,10 +5385,13 @@ impl crate::crate_image::CrateImages for FrontImages {
             for (c, kind, name, _, content) in late { crate::sip::note_late_input(c, kind, name, content.as_deref()); }
             Some(part.key)
         }).collect::<Vec<_>>();
-        let valid = (0..crates.len()).map(|ci| keys.get(ci).is_some_and(Option::is_some)).collect::<Vec<_>>();
+        let valid = keys.iter().map(Option::is_some).collect::<Vec<_>>();
+        if profile && reordered {
+            eprintln!("rust-demand-parts: reordered load takes {} of {} stored parts ({} moved)", valid.iter().filter(|v| **v).count(), crates.len(), from.iter().enumerate().filter(|(k, j)| k != *j).count());
+        }
         // Stale parts are comparison evidence only, never reusable input. Keep
         // their old demand-out/export sets to validate an edited local selection.
-        let keys = image.parts.iter().enumerate().map(|(ci, p)| (ci < common).then_some(p.key)).collect::<Vec<_>>();
+        let keys = from.iter().map(|&j| Some(image.parts[j].key)).collect::<Vec<_>>();
         let path = front_graph_path(&self.dir, identity);
         let crates_profile = crates.first().is_some_and(|c| c.cfg.session.runtime.profile);
         let crate_names = crates.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
@@ -5392,21 +5399,21 @@ impl crate::crate_image::CrateImages for FrontImages {
         let last = crates.len().saturating_sub(1);
         // (a reordered load takes its new last crate in full: always sound, and nothing waits for
         // the closure, which records what it would defer for the next start)
-        let last_selected = common < crates.len() || image.files.iter().filter(|f| f.ci == last).all(|f| image.reached.contains(&(last, f.path.clone())));
+        let last_selected = reordered || image.files.iter().filter(|f| f.ci == last).all(|f| image.reached.contains(&(last, f.path.clone())));
         Some(crate::crate_image::DemandParts { valid, last_selected, load: std::sync::Arc::new(move || {
             let _profile = crate::load_profile::span(crates_profile, "rust-demand-parts", "load");
             let store = Store::open(&path);
             let chunk = keys.len().div_ceil(crate::preload::jobs().max(1)).max(1);
             crate::pool::scope(|scope| {
-                let handles = keys.chunks(chunk).zip(crate_names.chunks(chunk)).map(|(keys, names)| {
+                let handles = keys.chunks(chunk).zip(crate_names.chunks(chunk)).enumerate().map(|(n, (keys, names))| {
                     let store = &store;
                     let image_dir = &image_dir;
-                    scope.spawn(move || { keys.iter().zip(names).map(|(key, name)| {
+                    scope.spawn(move || { keys.iter().zip(names).enumerate().map(|(i, (key, name))| {
                         let key = (*key)?;
                         let (kind, bytes) = store.as_ref()?.get(key)?;
                         if kind != KIND_DEMAND_PART { return None; }
                         let mut images = demand::ReadImages::default();
-                        let part = crate::preload::DemandPart::read(key, bytes, &mut |name, key| images.get(image_dir, name, key));
+                        let part = crate::preload::DemandPart::read(key, bytes, n * chunk + i, &mut |name, key| images.get(image_dir, name, key));
                         if crates_profile && part.is_none() { eprintln!("rust-demand-part-invalid: {name} payload decode"); }
                         part.map(std::sync::Arc::new)
                     }).collect::<Vec<_>>() })
