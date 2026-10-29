@@ -199,7 +199,8 @@ impl AndroidWebSocket {
         }
     }
 
-    fn send_message(&mut self, message: WebSocketMessage) -> Result<(), ()> {
+    /// Takes the id, not `self`: `ws_send` calls it once `ws` is released.
+    fn send_message(java_socket_id: LiveId, message: WebSocketMessage) -> Result<(), ()> {
         let frame = match &message {
             WebSocketMessage::String(data) => {
                 let header = ServerWebSocketMessageHeader::from_len(
@@ -220,7 +221,7 @@ impl AndroidWebSocket {
             _ => return Err(()),
         };
         unsafe {
-            android_jni::to_java_websocket_send_message(self.java_socket_id, frame);
+            android_jni::to_java_websocket_send_message(java_socket_id, frame);
         }
         Ok(())
     }
@@ -231,13 +232,6 @@ impl AndroidSocket {
         match self {
             AndroidSocket::Plain(socket) => socket.close(),
             AndroidSocket::Platform(socket) => socket.close(),
-        }
-    }
-
-    fn send_message(&mut self, message: WebSocketMessage) -> Result<(), ()> {
-        match self {
-            AndroidSocket::Plain(socket) => socket.send_message(message),
-            AndroidSocket::Platform(socket) => socket.send_message(message),
         }
     }
 }
@@ -544,21 +538,30 @@ impl NetworkBackend for AndroidNetworkShimBackend {
     }
 
     fn ws_send(&self, socket_id: LiveId, message: WsSend) -> Result<(), NetworkError> {
-        let mut state = self
-            .ws
-            .lock()
-            .map_err(|_| NetworkError::backend("android shim websocket lock poisoned"))?;
-        let pending = state.by_public.get_mut(&socket_id).ok_or_else(|| {
-            NetworkError::backend(format!("android shim websocket {socket_id} not open"))
-        })?;
         let message = match message {
             WsSend::Binary(data) => WebSocketMessage::Binary(data),
             WsSend::Text(data) => WebSocketMessage::String(data),
         };
-        pending
-            .socket
-            .send_message(message)
-            .map_err(|_| NetworkError::backend("android shim websocket send failed"))
+        let sent = {
+            let mut state = self
+                .ws
+                .lock()
+                .map_err(|_| NetworkError::backend("android shim websocket lock poisoned"))?;
+            let pending = state.by_public.get_mut(&socket_id).ok_or_else(|| {
+                NetworkError::backend(format!("android shim websocket {socket_id} not open"))
+            })?;
+            match &mut pending.socket {
+                AndroidSocket::Plain(socket) => socket.send_message(message),
+                // Sent once `ws` is released: Java reports a failed write by
+                // calling `handle_ws_error` on this thread, which takes it.
+                AndroidSocket::Platform(socket) => {
+                    let java_socket_id = socket.java_socket_id;
+                    drop(state);
+                    AndroidWebSocket::send_message(java_socket_id, message)
+                }
+            }
+        };
+        sent.map_err(|_| NetworkError::backend("android shim websocket send failed"))
     }
 
     fn ws_close(&self, socket_id: LiveId) -> Result<(), NetworkError> {
