@@ -176,6 +176,8 @@ impl MenuPlace {
 /// The menu bus. Every control that raises a menu speaks exactly this.
 #[derive(Clone, Debug)]
 pub enum MenuAction {
+    /// Dismiss the menu belonging to this control through its ordinary close path.
+    Close { owner: LiveId },
     /// Raise a menu. `owner` is any id the requester picks, so it can tell
     /// its own menus apart when the pick comes back.
     Open {
@@ -1197,6 +1199,115 @@ impl MenuLayer {
 }
 
 impl Widget for MenuLayer {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        request: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionResult, Actions};
+        let Some(key) = cx.a11y.action_part_key(request.node) else {
+            return ActionResult::Unhandled;
+        };
+        let level = (key >> 32) as usize;
+        let index = (key as u32).wrapping_sub(1) as usize;
+        let Some(row) = self
+            .levels
+            .get(level)
+            .and_then(|level| level.rows.get(index))
+        else {
+            return ActionResult::Unsupported;
+        };
+        if !row.enabled {
+            return ActionResult::Disabled;
+        }
+        if row.section || row.separator {
+            return ActionResult::Unsupported;
+        }
+        match request.action {
+            Actions::PRESS | Actions::SELECT | Actions::EXPAND => {
+                self.activate(cx, level, index);
+            }
+            Actions::FOCUS | Actions::SCROLL_INTO_VIEW => {
+                self.levels[level].hi = Some(index);
+                self.levels[level].scroll_to(index);
+                cx.set_key_focus(self.area);
+                self.redraw_menus(cx);
+            }
+            _ => return ActionResult::Unhandled,
+        }
+        ActionResult::Handled
+    }
+
+    fn semantics_parts(&self, _cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        use a11y_tree::{Actions, Node, Role, States, Toggle};
+        for (depth, level) in self.levels.iter().enumerate() {
+            let parent = if depth > 0 {
+                level
+                    .from_row
+                    .map(|index| (((depth - 1) as u64) << 32) | (index as u64 + 1))
+            } else {
+                None
+            };
+            let mut y = level.rect.pos.y + MENU_PAD - level.scroll;
+            for (index, row) in level.rows.iter().enumerate() {
+                let height = row_height(row);
+                let bounds = makepad_platform::a11y::semantic_rect(Rect {
+                    pos: dvec2(level.rect.pos.x + MENU_PAD, y),
+                    size: dvec2(level.rect.size.x - 2.0 * MENU_PAD, height),
+                });
+                y += height;
+                let mut node = Node {
+                    role: if row.separator {
+                        Role::Separator
+                    } else if row.section {
+                        Role::StaticText
+                    } else {
+                        Role::MenuItem
+                    },
+                    name: row.label.clone(),
+                    bounds,
+                    pos_in_set: index as u32 + 1,
+                    set_size: level.rows.len() as u32,
+                    level: depth as u32 + 1,
+                    ..Default::default()
+                };
+                node.states.set(States::DISABLED, !row.enabled);
+                if !row.separator && !row.section {
+                    node.states.insert(States::FOCUSABLE);
+                    node.states.set(States::SELECTED, level.hi == Some(index));
+                    node.actions = Actions::PRESS
+                        | Actions::SELECT
+                        | Actions::FOCUS
+                        | Actions::SCROLL_INTO_VIEW;
+                }
+                if row.mark != MenuMark::None {
+                    node.toggle = Toggle::On;
+                }
+                if !row.submenu.is_empty() {
+                    node.states.insert(States::HAS_POPUP);
+                    node.states.set(
+                        States::EXPANDED,
+                        self.levels
+                            .get(depth + 1)
+                            .is_some_and(|next| next.from_row == Some(index)),
+                    );
+                    node.states
+                        .set(States::COLLAPSED, !node.states.contains(States::EXPANDED));
+                    node.actions.insert(Actions::EXPAND);
+                }
+                out.push((((depth as u64) << 32) | (index as u64 + 1), parent, node));
+            }
+        }
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Menu;
+        node.states.set(a11y_tree::States::HIDDEN, !self.is_open());
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, Layout::default());
         let origin = cx.turtle().rect().pos;
@@ -1396,6 +1507,7 @@ impl Widget for MenuLayer {
                     Some(MenuAction::OpenSet { owner, rows, anchor, place }) => {
                         set_request = Some((*owner, rows.clone(), *anchor, *place));
                     }
+                    Some(MenuAction::Close { owner }) if self.open.owner() == Some(*owner) => { self.close(cx); }
                     Some(MenuAction::Update { owner, rows }) => {
                         update = Some((*owner, rows.clone()));
                     }

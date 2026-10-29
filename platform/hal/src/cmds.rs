@@ -396,6 +396,8 @@ hal_commands! {
     /// `millihertz` (0: the runtime's default).
     XrRefreshRate = 157, xr_refresh_rate { id: obj, millihertz: u32 };
 
+    A11yUpdate = 158, a11y_update { id: obj, bytes: rng };
+    A11yActionDone = 159, a11y_action_done { req: u64, result: u32 };
     /// Creates native content (`native_layer::kind`). WEB: UTF-8 initial URL; CAMERA_PREVIEW:
     /// little-endian u64 input id followed by u64 format id. Placement comes from frame layers.
     NativeLayerCreate = 160, native_layer_create { id: obj, kind: u32, params: rng };

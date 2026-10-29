@@ -66,6 +66,7 @@ pub struct MpWaylandView {
     #[live]
     draw_fg: DrawForeign,
     #[rust]
+    #[area]
     area: Area,
     #[rust]
     client: Option<ClientId>,

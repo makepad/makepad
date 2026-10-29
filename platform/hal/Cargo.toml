@@ -9,6 +9,7 @@ homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [dependencies]
+makepad-a11y = { path = "../../libs/a11y", version = "0.1.0" }
 makepad-relax-api = { path = "../../libs/relax_api", version = "1.0.0" }
 makepad-key-code = { path = "../key_code", version = "0.1.0" }
 # The font service rasterises glyphs with the same tables and outlines the text layout shapes.
@@ -20,6 +21,8 @@ fxhash = { path = "../../libs/fxhash", version = "0.2.1" }
 makepad-vulkan = { path = "../../libs/vulkan", version = "0.1.0" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+makepad-dbus-wire = { path = "../../libs/dbus_wire", version = "0.1.0" }
+makepad-atspi = { path = "../../libs/atspi", version = "0.1.0" }
 makepad-zune-jpeg = { path = "../../libs/zune/zune-jpeg", version = "0.5.15" }
 makepad-math = { path = "../../libs/math", version = "1.0.0" }
 wayland-client = { path = "../../libs/linux/wayland-client" }
@@ -59,3 +62,8 @@ makepad-math = { path = "../../libs/math", version = "1.0.0" }
 # The D3D11 backend and the Win32 shell (Windows): generated Win32/COM bindings
 [target.'cfg(windows)'.dependencies]
 makepad-windows-sys = { path = "../../libs/windows/sys", version = "0.1.0" }
+
+# Real-bus Linux smoke rig; run by tools/a11y_rigs/linux_atspi.sh.
+[[test]]
+name = "linux_atspi"
+path = "../../tools/a11y_rigs/linux_atspi.rs"

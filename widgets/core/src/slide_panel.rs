@@ -73,6 +73,11 @@ pub enum SlidePanelAction {
 }
 
 impl Widget for SlidePanel {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         self.is_active_for_cancel() && self.cancel_children_impl(visit)
     }

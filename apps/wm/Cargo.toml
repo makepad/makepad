@@ -52,6 +52,7 @@ default = ["tweaker"]
 tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 
 [dependencies]
+makepad-remote = { path = "../../libs/remote" }
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["charts", "color", "data", "dates", "chat", "dock", "rich_text", "dropzone", "vector", "glass", "nav_menus", "command_palette"] }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-studio-protocol = { path = "../../platform/studio" }

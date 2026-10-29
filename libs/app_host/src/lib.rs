@@ -2,7 +2,7 @@
 //!
 //! - [`hub`]: the localhost websocket the children connect to.
 //! - [`hosted`]: [`HostedApp`], the protocol state with one child: swapchain,
-//!   bootstrap, presented frames, tick pacing, input forwarding, snapshots.
+//!   bootstrap, presented frames, tick pacing, input forwarding, semantic trees.
 //! - [`launch`]: the launch environment and process-group kill.
 //! - [`children`]: [`Children`], the lifecycle of a host's child apps: hub,
 //!   build/launch through the registry, beat, quit, message routing.
@@ -28,3 +28,6 @@ pub use hosted::{Clock, HostedApp, Presented, RunTarget};
 pub use hub::{send_to_app, AppHub, ClientId, HubEvent};
 pub use status::AppStatus;
 pub use makepad_app_registry::BuildPolicy;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod a11y;

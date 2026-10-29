@@ -486,6 +486,14 @@ impl Toaster {
 }
 
 impl Widget for Toaster {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Status;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value =
+            (|| -> Option<String> { Some(self.live.len().to_string()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, Layout::default());
         // The layer's own rect is the origin its overlay pass is shifted FROM,
@@ -646,10 +654,7 @@ impl Widget for Toaster {
         self.live.last().map(|l| l.toast.title.clone()).unwrap_or_default()
     }
 
-    /// How many toasts are on screen.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.live.len().to_string())
-    }
+
 }
 
 impl ToasterRef {

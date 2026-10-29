@@ -451,6 +451,14 @@ impl Lamp {
 }
 
 impl Widget for Lamp {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Status;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value =
+            (|| -> Option<String> { Some(format!("{:.2}", self.lit())) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         // A script can write any number here; one that is no number is out.
         self.lit = amount_of(self.lit);
@@ -519,9 +527,7 @@ impl Widget for Lamp {
         self.disabled
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format!("{:.2}", self.lit()))
-    }
+
 }
 
 impl LampRef {

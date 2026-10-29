@@ -7,15 +7,14 @@ wait_gpu
 wait_frame 2
 budget stale_ids == 0
 budget ledger_bytes <= 100000000
-click k_clear
-click k_1
-click k_2
-click k_add
-click k_3
-click k_eq
+click path=k_clear
+click path=k_1
+click path=k_2
+click path=k_add
+click path=k_3
+click path=k_eq
 wait_gpu
 wait_frame 2
-query widgets
-expect "display.result\tLabel\t1"
-expect "\t0:0\t15\n"
+query ui path=display.result
+expect_text path=display.result "15"
 snapshot calculator_15

@@ -141,7 +141,7 @@ pub fn file_main(path: &str, words: &[String]) -> i32 {
             if first_input_frame == 0 && inputs.is_empty() {
                 println!("note: the recording has no input: the replay only starts the program");
             }
-            println!("more: makepad inspect {} input status  makepad inspect {} events  makepad inspect {} rec save  makepad inspect {} dump", child.id(), child.id(), child.id(), child.id());
+            println!("more: makepad inspect {} input status  makepad inspect {} events  makepad inspect {} rec save  makepad inspect {} ui", child.id(), child.id(), child.id(), child.id());
             0
         }
         Err(e) => {

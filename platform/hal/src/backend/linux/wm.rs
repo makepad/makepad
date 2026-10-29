@@ -8,6 +8,7 @@
 //! shell events like any other shell's. A process that hosts other sessions (`makepad run`: the
 //! boot document and the app domains share one window) is one WM tile; lending is unchanged.
 
+pub(crate) mod a11y;
 pub mod native;
 
 use super::{io, lock, log_enabled, Key, Op, OsCmd, Protocol, Shared, Shell};
@@ -316,7 +317,7 @@ struct Win {
     /// Frames already on the GPU when that FrameReady went out: their completions come back
     /// first and are not its frame (they must not end the Tick before its frame is drawn).
     ahead: u32,
-    geom: Option<([f64; 4], f64)>,
+    geom: Option<([f64; 4], f64, Option<(f64, f64)>)>,
     /// A tray dropdown (`window_kind::DROPDOWN`): the WM shows it as a flyout under the tray's
     /// bar item, never as a tile.
     dropdown: bool,
@@ -332,7 +333,7 @@ pub(super) struct App {
     windows: HashMap<Key, Win>,
     /// Geometry the WM sent for a window this process has not made yet (it sizes the tile's
     /// first window at adoption): applied when the window is made.
-    early: HashMap<usize, ([f64; 4], f64)>,
+    early: HashMap<usize, ([f64; 4], f64, Option<(f64, f64)>)>,
     next_window: usize,
     /// A Tick is being answered: TickDone goes out with its frame (or at once without one).
     ticking: bool,
@@ -382,6 +383,7 @@ impl App {
             finished: Default::default(), in_flight: Default::default(), device: Default::default() });
         STATE.set(state.clone()).map_err(|_| "WM-hosted shell already connected")?;
         let hub = Hub::connect(admission.port, admission.client, &name, state.clone())?;
+        a11y::start(hub.clone());
         // Under the WM a makepad window draws its own caption (the WM draws title bars only for
         // foreign Wayland windows): the app's windows get client-side chrome as on a Wayland
         // compositor without server decorations. Its caption's drag query and its window
@@ -441,7 +443,7 @@ impl App {
         match images {
             Ok(images) => {
                 if log_enabled() { eprintln!("[hal-wm] window {} has {} shared images of {}x{}", swapchain.window_id, images.len(), swapchain.alloc_width, swapchain.alloc_height); }
-                let pixels = self.windows.get(&key).and_then(|w| w.geom).map_or([swapchain.alloc_width, swapchain.alloc_height], |(g, dpi)| pixels(g, dpi));
+                let pixels = self.windows.get(&key).and_then(|w| w.geom).map_or([swapchain.alloc_width, swapchain.alloc_height], |(g, dpi, _)| pixels(g, dpi));
                 lock(&self.state.rings).insert(key, Ring { window_id: swapchain.window_id, alloc: [swapchain.alloc_width, swapchain.alloc_height],
                     pixels, images, next: 0, starved: None });
                 // A frame asked for before there was anywhere to draw it.
@@ -455,7 +457,8 @@ impl App {
 
     fn push_geom(&self, key: Key) {
         let Some(w) = self.windows.get(&key) else { return };
-        let Some((g, dpi)) = w.geom else { return };
+        let Some((g, dpi, origin)) = w.geom else { return };
+        crate::a11y::set_screen_origin(crate::a11y::window_key(w.recipient.0, w.recipient.1.index), origin.map(|(x,y)| (x as f32,y as f32)));
         self.state.shared.push(w.recipient, |q, id| {
             q.display(id, dpi as f32, 60.0);
             q.geom(id, g[0], g[1], g[2], g[3], dpi as f32, window_state::RESTORE);
@@ -474,22 +477,27 @@ impl App {
     }
 
     fn message(&mut self, msg: StudioToApp) {
+        if a11y::request(&msg) { return; }
         if log_enabled() && !matches!(msg, StudioToApp::MouseMove(_)) {
             eprintln!("[hal-wm] host: {}", format!("{msg:?}").chars().take(160).collect::<String>());
         }
         match msg {
             StudioToApp::NativeApp(event) => self.native_message(event),
             StudioToApp::Swapchain(swapchain) => self.install(swapchain),
-            StudioToApp::WindowGeomChange { window_id, dpi_factor, left, top, width, height } => {
+            StudioToApp::WindowGeomChange { window_id, dpi_factor, left, top, width, height, screen_origin } => {
                 if ![left, top, width, height, dpi_factor].iter().all(|v| v.is_finite()) || dpi_factor <= 0.0 || width < 0.0 || height < 0.0 { return; }
                 let geom = [left, top, width, height];
                 let Some(key) = self.key_of(window_id) else {
-                    self.early.insert(window_id, (geom, dpi_factor));
+                    self.early.insert(window_id, (geom, dpi_factor, screen_origin));
                     return;
                 };
-                if let Some(w) = self.windows.get_mut(&key) { w.geom = Some((geom, dpi_factor)); }
+                let resized = self.windows.get(&key).and_then(|w| w.geom).is_none_or(|(old, dpi, _)| old != geom || dpi != dpi_factor);
+                if let Some(w) = self.windows.get_mut(&key) {
+                    w.geom = Some((geom, dpi_factor, screen_origin));
+                    crate::a11y::set_screen_origin(crate::a11y::window_key(w.recipient.0, w.recipient.1.index), screen_origin.map(|(x,y)| (x as f32,y as f32)));
+                }
                 if let Some(ring) = lock(&self.state.rings).get_mut(&key) { ring.pixels = pixels(geom, dpi_factor); }
-                self.push_geom(key);
+                if resized { self.push_geom(key); }
             }
             StudioToApp::Tick => {
                 self.asked_frame = false;
@@ -739,6 +747,7 @@ impl App {
     /// keeps running): it lets go of the old WM's shared images and waits for the next WM at
     /// the same socket. Nothing draws meanwhile; timers, signals and the app's work go on.
     fn detach(&mut self) {
+        a11y::detached();
         eprintln!("[hal-wm] the makepad WM went away; this process keeps its tray and waits for the next WM");
         self.detached_at = Some(std::time::Instant::now());
         lock(&self.state.rings).clear();
@@ -798,6 +807,7 @@ impl App {
             }
         };
         eprintln!("[hal-wm] the makepad WM at {} hosts this process again as client {} ({name})", path.display(), admission.client);
+        a11y::start(hub.clone());
         self.hub = hub;
         self.aux_path = hosted_ipc::aux_path(admission.port, &admission.client.to_string());
         self.detached_at = None;
@@ -832,6 +842,7 @@ impl Shell for App {
                     let dropdown = kind & 0xff == window_kind::DROPDOWN;
                     self.windows.insert((sid, id), Win { window_id, recipient: (sid, id), requested: false, awaiting: false, ahead: 0, geom, dropdown });
                     self.hub.send(vec![AppToStudio::CreateWindow { window_id, kind_id: if dropdown { window_kind::DROPDOWN as usize } else { 0 } }]);
+                    a11y::window(window_id, Some((sid, id)));
                     let focused = self.wm_focus.get(&window_id).copied().unwrap_or(true);
                     self.state.shared.push((sid, id), |q, id| q.focus(id, focused));
                     self.replay_wm_state((sid, id));
@@ -841,6 +852,7 @@ impl Shell for App {
                     let Some(key) = self.resolve((sid, id)) else { return };
                     let tile = self.tile_window() == Some(key);
                     if let Some(w) = self.windows.remove(&key) {
+                        a11y::window(w.window_id, None);
                         lock(&self.state.rings).remove(&key);
                         lock(&self.state.in_flight).remove(&key);
                         self.state.shared.push(w.recipient, |q, id| q.closed(id));
@@ -988,6 +1000,7 @@ impl Shell for App {
                 let key = (session::HOST, host);
                 if let Some(w) = self.windows.get_mut(&key) {
                     w.recipient = (session, alias);
+                    a11y::window(w.window_id, Some(w.recipient));
                     w.awaiting = false;
                     let focused = self.wm_focus.get(&w.window_id).copied().unwrap_or(true);
                     self.push_geom(key);
@@ -1045,6 +1058,7 @@ impl Shell for App {
     }
     fn shutdown(&mut self) {
         self.stopping = true;
+        a11y::stop();
         self.hub.close();
     }
     fn empty(&self) -> bool {

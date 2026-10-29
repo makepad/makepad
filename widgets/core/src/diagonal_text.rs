@@ -334,6 +334,12 @@ impl DiagonalLabel {
 }
 
 impl Widget for DiagonalLabel {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::StaticText;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn text(&self) -> String {
         self.text.clone()
     }

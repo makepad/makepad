@@ -90,7 +90,6 @@ mod imp {
     use makepad_studio_protocol::{
         KeyEvent, RemoteMouseDown, RemoteMouseMove,
         RemoteMouseUp, RemotePinch, RemoteScroll, ScreenshotRequest, StudioToApp, TextInputEvent,
-        WidgetSnapshot,
     };
     use std::collections::HashMap;
     use std::io::Write;
@@ -148,7 +147,6 @@ mod imp {
         match r.key {
             "status" => route_status(p),
             "gamepads" => reply_to_answer(ask(Cmd::Gamepads, ACTIVITY_WAIT_SECS)),
-            "focus" => reply_to_answer(ask(Cmd::Focus, 4)),
             "activity" => reply_to_answer(ask(Cmd::Activity, ACTIVITY_WAIT_SECS)),
             "mouse" => route_mouse(p, None),
             "click" => route_mouse(p, Some("click")),
@@ -158,33 +156,6 @@ mod imp {
             "trace" => route_trace(p),
             // read from the runtimes' ledgers, never through the UI thread: a stuck loop is what it shows
             "net" => Answer::Text(crate::makepad_network::ledger::report()),
-            "dump" => {
-                let paths = p.flag(&["paths"]);
-                match ask(move |tx| Cmd::Dump { paths, tx }, 4) {
-                    Reply::Text(text) => Answer::Text(text),
-                    other => reply_to_answer(other),
-                }
-            }
-            "snap" => {
-                let window = p.window();
-                let mut needle = p.get(&["q", "query"]).unwrap_or_default().to_string();
-                let mut path = p.get(&["path"]).map(str::to_string);
-                if let Some(query) = needle.strip_prefix("path:") {
-                    path = Some(query.to_string());
-                    needle.clear();
-                }
-                let all = p.flag(&["all"]);
-                reply_to_answer(ask(
-                    move |tx| Cmd::Snap {
-                        window,
-                        needle,
-                        path,
-                        all,
-                        tx,
-                    },
-                    4,
-                ))
-            }
             "step" => route_step(p),
             "settled" => reply_to_answer(ask(Cmd::Settled, 4)),
             "uicounts" => reply_to_answer(ask(Cmd::UiCounts, 4)),
@@ -611,17 +582,18 @@ mod imp {
     pub(crate) fn gpu_commands() -> Vec<crate::remote_schema::Command> {
         makepad_hal::inspect::COMMANDS
             .iter()
+            .chain(makepad_hal::a11y::COMMANDS.iter())
             .chain(makepad_hal::framecap::COMMANDS.iter())
             .chain(makepad_hal::gpu_prof::COMMANDS.iter())
             .map(|(words, args, answers)| crate::remote_schema::Command {
                 words,
                 args,
                 answers,
-                service: "inspect",
-                risk: crate::remote_schema::CmdRisk::Read,
-                params: "",
+                service: if words.starts_with("ui") { "ui" } else { "inspect" },
+                risk: if matches!(*words, "ui act" | "ui type") { crate::remote_schema::CmdRisk::Act } else { crate::remote_schema::CmdRisk::Read },
+                params: if words.starts_with("ui") { crate::remote_schema::UI_PARAMS } else { "" },
                 required: &[],
-                positional: &[],
+                positional: if *words == "ui act" { &["action"] } else { &[] },
             })
             .collect()
     }
@@ -819,7 +791,7 @@ mod imp {
             _ => {
                 // Relax dispatches GPU queries in its host; program code only serves UI commands.
                 #[cfg(not(relax))]
-                if makepad_hal::inspect::dispatch(req, out) {
+                if makepad_hal::a11y::dispatch(req, out) || makepad_hal::inspect::dispatch(req, out) {
                     return;
                 }
                 // the sampling profiler (inspect's `prof` / `why-slow`, same buckets and lines)
@@ -829,7 +801,7 @@ mod imp {
                     "why-slow" => return crate::prof_sampler::cmd_why_slow(req, out),
                     _ => {}
                 }
-                // a remote answer is not capped: a widget dump or a snapshot of every widget
+                // A semantic tree or an app query may contain every visible item.
                 out.limit = usize::MAX;
                 let mut words = vec![req.cmd.clone()];
                 words.extend(req.pos.iter().cloned());
@@ -1693,66 +1665,7 @@ mod imp {
         out
     }
 
-    /// Does an id path answer a `path:` query? Exactly, or as its trailing
-    /// whole segments: `new_note` and `main.new_note` both find
-    /// `main.new_note`; `note` does not.
-    fn path_matches(path: &str, query: &str) -> bool {
-        let query = query.trim_matches('.');
-        !query.is_empty()
-            && (path == query
-                || path
-                    .strip_suffix(query)
-                    .is_some_and(|head| head.ends_with('.')))
-    }
-
-    /// The widget rows `/snap` reports, each with its id path when the
-    /// widgets layer registered one (`Cx::widget_paths_callback`).
-    fn snapshot_rows(cx: &Cx) -> Vec<(WidgetSnapshot, Option<String>)> {
-        if let Some(callback) = cx.widget_paths_callback {
-            return callback(cx)
-                .into_iter()
-                .map(|(widget, path)| (widget, Some(path)))
-                .collect();
-        }
-        match cx.widget_snapshot_callback {
-            Some(callback) => callback(cx).into_iter().map(|widget| (widget, None)).collect(),
-            None => Vec::new(),
-        }
-    }
-
-    /// `/d?paths=1`: one visible widget per line, `path type x y w h` in
-    /// window-local points (an unnamed widget shows its id).
-    fn path_dump(cx: &Cx) -> String {
-        if cx.widget_paths_callback.is_none() {
-            return "no widget paths (this app's widgets layer registers none)\n".into();
-        }
-        let rows = snapshot_rows(cx);
-        let mut out = String::new();
-        for (widget, path) in rows {
-            if !widget.visible || widget.width <= 0 || widget.height <= 0 {
-                continue;
-            }
-            let origin = cx
-                .windows
-                .id_iter()
-                .find(|id| id.id() == widget.window_index && cx.windows[*id].is_created)
-                .map(|id| cx.windows[id].window_geom.position)
-                .unwrap_or_default();
-            let path = path.filter(|p| !p.is_empty()).unwrap_or_else(|| widget.id.clone());
-            out.push_str(&format!(
-                "{} {} {} {} {} {}\n",
-                path,
-                widget.widget_type,
-                num(widget.x as f64 - origin.x),
-                num(widget.y as f64 - origin.y),
-                widget.width,
-                widget.height
-            ));
-        }
-        out
-    }
-
-    /// Injected pointer input moves the synthetic cursor (when shown).
+    /// Keep the capture overlay's cursor in step with injected pointer input.
     fn note_cursor(window_id: WindowId, kind: MouseKind, pos: Vec2d, time: f64) {
         let down = match kind {
             MouseKind::Down => Some(true),
@@ -1871,34 +1784,6 @@ mod imp {
         let user_seq = cx.remote_activity.user_seq();
         let _origin = super::remote_input_scope(cx);
         match request.cmd {
-            Cmd::Focus(tx) => {
-                // The key focus as `snap` reports rects (window-local) plus the innermost widget
-                // whose rect holds it, and the window the platform last saw focused.
-                let area = cx.key_focus();
-                let key = if area.is_empty() { "null".to_string() } else {
-                    // area rects are window-local; snapshot rows have the window position folded in
-                    let rect = area.rect(cx);
-                    let window = cx.get_window_id_of(&area);
-                    let index = window.map(|id| id.id()).unwrap_or(0);
-                    let origin = window.map(|id| cx.windows[id].window_geom.position).unwrap_or_default();
-                    let center = rect.center();
-                    let path = snapshot_rows(cx).into_iter()
-                        .filter(|(w, _)| w.visible && w.window_index == index && w.width > 0 && w.height > 0)
-                        .filter(|(w, _)| {
-                            let (x, y) = (w.x as f64 - origin.x, w.y as f64 - origin.y);
-                            center.x >= x && center.y >= y && center.x <= x + w.width as f64 && center.y <= y + w.height as f64
-                        })
-                        .min_by_key(|(w, _)| w.width * w.height)
-                        .and_then(|(_, p)| p);
-                    format!("{{\"r\":[{},{},{},{}],\"w\":{index},\"p\":{}}}", num(rect.pos.x), num(rect.pos.y),
-                        num(rect.size.x), num(rect.size.y), path.map(|p| json_str(&p)).unwrap_or_else(|| "null".into()))
-                };
-                #[cfg(not(target_arch = "wasm32"))]
-                let window = cx.hal.focused.map(|w| w.id().to_string()).unwrap_or_else(|| "null".into());
-                #[cfg(target_arch = "wasm32")]
-                let window = "null";
-                let _ = tx.send(Reply::Text(format!("{{\"key\":{key},\"window\":{window}}}")));
-            }
             Cmd::Gamepads(tx) => {
                 use crate::game_input::CxGameInputApi;
                 use crate::makepad_micro_serde::SerJson;
@@ -2274,17 +2159,6 @@ mod imp {
                     }
                 });
             }
-            Cmd::Dump { paths, tx } => {
-                let dump = if paths {
-                    path_dump(cx)
-                } else {
-                    match cx.widget_tree_dump_callback {
-                        Some(callback) => callback(cx),
-                        None => String::new(),
-                    }
-                };
-                let _ = tx.send(Reply::Text(dump));
-            }
             Cmd::Step {
                 window,
                 frames,
@@ -2510,105 +2384,6 @@ mod imp {
                         index, shader
                     )));
                 }
-            }
-            Cmd::Snap {
-                window,
-                needle,
-                path,
-                all,
-                tx,
-            } => {
-                let widgets = snapshot_rows(cx);
-                // Widget rects arrive in desktop coordinates (window position
-                // already folded in). Remote input is window-local, so subtract
-                // it back out — an agent must be able to feed a rect straight
-                // into /click without doing arithmetic.
-                let origins: Vec<(usize, f64, f64)> = cx
-                    .windows
-                    .id_iter()
-                    .filter(|id| cx.windows[*id].is_created)
-                    .map(|id| {
-                        let pos = cx.windows[id].window_geom.position;
-                        (id.id(), pos.x, pos.y)
-                    })
-                    .collect();
-                let needle = needle.to_lowercase();
-                let mut out = String::from("{\"s\":[");
-                let mut first = true;
-                for (widget, widget_path) in &widgets {
-                    if !all && (!widget.visible || widget.width <= 0 || widget.height <= 0) {
-                        continue;
-                    }
-                    if let Some(query) = &path {
-                        if !widget_path.as_deref().is_some_and(|p| path_matches(p, query)) {
-                            continue;
-                        }
-                    }
-                    if let Some(want) = window {
-                        if widget.window_index != want {
-                            continue;
-                        }
-                    }
-                    if !needle.is_empty() {
-                        let hay = format!(
-                            "{} {} {}",
-                            widget.id,
-                            widget.widget_type,
-                            widget.text.clone().unwrap_or_default()
-                        )
-                        .to_lowercase();
-                        if !hay.contains(&needle) {
-                            continue;
-                        }
-                    }
-                    let (ox, oy) = origins
-                        .iter()
-                        .find(|(id, _, _)| *id == widget.window_index)
-                        .map(|(_, x, y)| (*x, *y))
-                        .unwrap_or((0.0, 0.0));
-                    if !first {
-                        out.push(',');
-                    }
-                    first = false;
-                    out.push_str(&format!(
-                        "{{\"i\":{},\"ty\":{},\"r\":[{},{},{},{}],\"w\":{}",
-                        json_str(&widget.id),
-                        json_str(&widget.widget_type),
-                        num(widget.x as f64 - ox),
-                        num(widget.y as f64 - oy),
-                        widget.width,
-                        widget.height,
-                        widget.window_index,
-                    ));
-                    out.push_str(&format!(
-                        ",\"window_id\":{},\"enabled\":{}",
-                        json_str(&widget.window_id),
-                        widget.enabled,
-                    ));
-                    if let Some(widget_path) = widget_path.as_ref().filter(|p| !p.is_empty()) {
-                        out.push_str(&format!(",\"p\":{}", json_str(widget_path)));
-                    }
-                    if let Some(text) = &widget.text {
-                        if !text.is_empty() {
-                            out.push_str(&format!(",\"t\":{}", json_str(text)));
-                        }
-                    }
-                    if let Some(value) = &widget.value {
-                        out.push_str(&format!(",\"val\":{}", json_str(value)));
-                    }
-                    if let Some(checked) = widget.checked {
-                        out.push_str(&format!(",\"c\":{}", if checked { 1 } else { 0 }));
-                    }
-                    if let Some(selected) = &widget.selected {
-                        out.push_str(&format!(",\"selected\":{}", json_str(selected)));
-                    }
-                    if !widget.visible {
-                        out.push_str(",\"v\":0");
-                    }
-                    out.push('}');
-                }
-                out.push_str("]}");
-                let _ = tx.send(Reply::Text(out));
             }
             Cmd::Close { window, ask, tx } => {
                 let window_id = match resolve_window(cx, window) {
@@ -3213,14 +2988,14 @@ mod imp {
 
         #[test]
         fn path_queries_match_whole_trailing_segments() {
-            assert!(path_matches("main.new_note", "main.new_note"));
-            assert!(path_matches("main.new_note", "new_note"));
-            assert!(path_matches("body.main.new_note", "main.new_note"));
-            assert!(path_matches("main.new_note", ".new_note"));
-            assert!(!path_matches("main.new_note", "note"));
-            assert!(!path_matches("main.new_note", "main"));
-            assert!(!path_matches("main.new_note", ""));
-            assert!(!path_matches("", "new_note"));
+            use makepad_a11y::{query::Query, Node};
+            let node = Node { path: "body.main.new_note".into(), ..Default::default() };
+            for q in ["path=main.new_note", "path=new_note", "path=body.main.new_note"] {
+                assert!(Query::parse(q).unwrap().matches(&node));
+            }
+            for q in ["path=note", "path=main", "path=other.new_note"] {
+                assert!(!Query::parse(q).unwrap().matches(&node));
+            }
         }
 
         /// A port name is the caller's own text and a direction suffix is

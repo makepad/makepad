@@ -226,6 +226,16 @@ pub struct ScriptHeap {
 
 #[relax_api]
 impl ScriptHeap {
+    /// Declare metadata accepted by a registered component without making it a
+    /// child in the object's ordered vector. The metadata has no Rust field. An op of the
+    /// provided crate: JIT'd widget registration calls it, never reads the heap's fields.
+    #[relax_api]
+    pub fn define_type_property(&mut self, object: ScriptObject, name: LiveId, ty: ScriptTypeId) {
+        let Some(index) = self.object_type_index(object) else { return };
+        let props = &mut self.type_check[index.0 as usize].props;
+        if !props.props.contains_key(&name) { props.insert(name, ty); }
+    }
+
     /// Whether `obj` names a live object of this heap.
     pub fn object_alive(&self, obj: ScriptObject) -> bool {
         let slots = self.object_slots();

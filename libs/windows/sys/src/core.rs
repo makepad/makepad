@@ -258,6 +258,10 @@ impl ObjectBuilder {
             iids,
         }));
     }
+    /// Returns an owned pointer to the first added interface. Adopt it with that
+    /// interface's `from_raw`; QueryInterface reaches all slots and their bases.
+    /// All slots share one lifetime. Only combine implementations that obey the
+    /// same apartment/threading contract; this builder does not marshal calls.
     pub fn finish(self) -> Result<*mut c_void, HRESULT> {
         if self.header.slots.is_empty() {
             return Err(HRESULT(-2147418113));
@@ -365,6 +369,122 @@ impl Drop for BSTR {
     fn drop(&mut self) {
         unsafe {
             crate::Win32::Foundation::SysFreeString(Some(self.0));
+        }
+    }
+}
+
+/// Owns a VARIANT and its string/interface resources. `into_raw` transfers them
+/// to a COM out parameter; `as_raw` only borrows them for a call.
+pub struct Variant(crate::Win32::System::Variant::VARIANT);
+impl Variant {
+    pub fn empty() -> Self {
+        Self(crate::Win32::System::Variant::VARIANT::default())
+    }
+    fn with_type(vt: crate::Win32::System::Variant::VARENUM) -> Self {
+        let mut value = Self::empty();
+        value.0.Anonymous.Anonymous.vt = vt;
+        value
+    }
+    pub fn from_i32(value: i32) -> Self {
+        let mut result = Self::with_type(crate::Win32::System::Variant::VT_I4);
+        result.0.Anonymous.Anonymous.Anonymous.lVal = value;
+        result
+    }
+    pub fn from_bool(value: bool) -> Self {
+        let mut result = Self::with_type(crate::Win32::System::Variant::VT_BOOL);
+        result.0.Anonymous.Anonymous.Anonymous.boolVal =
+            crate::Win32::Foundation::VARIANT_BOOL(if value { -1 } else { 0 });
+        result
+    }
+    pub fn from_f64(value: f64) -> Self {
+        let mut result = Self::with_type(crate::Win32::System::Variant::VT_R8);
+        result.0.Anonymous.Anonymous.Anonymous.dblVal = value;
+        result
+    }
+    pub fn from_bstr(value: &str) -> Result<Self, HRESULT> {
+        let string = BSTR::from_str(value)?;
+        let mut result = Self::with_type(crate::Win32::System::Variant::VT_BSTR);
+        result.0.Anonymous.Anonymous.Anonymous.bstrVal = string.0;
+        ::core::mem::forget(string);
+        Ok(result)
+    }
+    pub fn from_unknown(value: &IUnknown) -> Self {
+        let mut result = Self::with_type(crate::Win32::System::Variant::VT_UNKNOWN);
+        result.0.Anonymous.Anonymous.Anonymous.punkVal = value.clone().into_raw();
+        result
+    }
+    /// # Safety
+    /// `value` must be a valid owned VARIANT, with no other owner of its resources.
+    pub unsafe fn from_raw(value: crate::Win32::System::Variant::VARIANT) -> Self {
+        Self(value)
+    }
+    pub fn as_raw(&self) -> &crate::Win32::System::Variant::VARIANT {
+        &self.0
+    }
+    pub fn into_raw(self) -> crate::Win32::System::Variant::VARIANT {
+        let value = self.0;
+        ::core::mem::forget(self);
+        value
+    }
+}
+impl Drop for Variant {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = crate::Win32::System::Variant::VariantClear(&mut self.0);
+        }
+    }
+}
+
+/// Owns an unlocked SAFEARRAY. Constructors retain interface elements, and
+/// destruction releases them. `into_raw` transfers ownership to the recipient.
+pub struct SafeArray(::core::ptr::NonNull<crate::Win32::System::Com::SAFEARRAY>);
+impl SafeArray {
+    fn vector(vt: crate::Win32::System::Variant::VARENUM, len: usize) -> Result<Self, HRESULT> {
+        let len = u32::try_from(len).map_err(|_| crate::Win32::Foundation::E_INVALIDARG)?;
+        let raw = unsafe { crate::Win32::System::Ole::SafeArrayCreateVector(vt, 0, len) };
+        ::core::ptr::NonNull::new(raw).map(Self).ok_or(HRESULT(-2147024882))
+    }
+    pub fn from_i32s(values: &[i32]) -> Result<Self, HRESULT> {
+        let array = Self::vector(crate::Win32::System::Variant::VT_I4, values.len())?;
+        if !values.is_empty() {
+            unsafe {
+                let data = crate::Win32::System::Ole::SafeArrayAccessData(array.as_raw())?;
+                ::core::ptr::copy_nonoverlapping(values.as_ptr(), data.cast::<i32>(), values.len());
+                crate::Win32::System::Ole::SafeArrayUnaccessData(array.as_raw())?;
+            }
+        }
+        Ok(array)
+    }
+    pub fn from_unknowns(values: &[IUnknown]) -> Result<Self, HRESULT> {
+        let array = Self::vector(crate::Win32::System::Variant::VT_UNKNOWN, values.len())?;
+        for (index, value) in values.iter().enumerate() {
+            let index = i32::try_from(index).map_err(|_| crate::Win32::Foundation::E_INVALIDARG)?;
+            unsafe {
+                // For VT_UNKNOWN, pv is the interface pointer itself. The API
+                // retains it; it is not a pointer to an interface pointer.
+                crate::Win32::System::Ole::SafeArrayPutElement(array.as_raw(), &index, value.as_raw())?;
+            }
+        }
+        Ok(array)
+    }
+    /// # Safety
+    /// `raw` must be a valid, unlocked array whose ownership is transferred here.
+    pub unsafe fn from_raw(raw: *mut crate::Win32::System::Com::SAFEARRAY) -> Result<Self, HRESULT> {
+        ::core::ptr::NonNull::new(raw).map(Self).ok_or(crate::Win32::Foundation::E_POINTER)
+    }
+    pub fn as_raw(&self) -> *mut crate::Win32::System::Com::SAFEARRAY {
+        self.0.as_ptr()
+    }
+    pub fn into_raw(self) -> *mut crate::Win32::System::Com::SAFEARRAY {
+        let raw = self.as_raw();
+        ::core::mem::forget(self);
+        raw
+    }
+}
+impl Drop for SafeArray {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = crate::Win32::System::Ole::SafeArrayDestroy(self.as_raw());
         }
     }
 }

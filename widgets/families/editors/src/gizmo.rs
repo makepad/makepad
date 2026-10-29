@@ -743,6 +743,25 @@ impl WidgetNode for Gizmo3d {
 }
 
 impl Widget for Gizmo3d {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            let t = makepad_gizmo::mat_translation(&self.model);
+            let state = match (self.gizmo.active(), self.hover) {
+                (Some(h), _) => format!(" dragging {:?}", h),
+                (None, Some(h)) => format!(" hover {:?}", h),
+                (None, None) => String::new(),
+            };
+            Some(format!(
+                "{:?} {:?} at {:.3} {:.3} {:.3}{}",
+                self.mode, self.space, t.x, t.y, t.z, state
+            ))
+        })()
+        .unwrap_or_default();
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Event::KeyDown(ke) = event {
             if ke.key_code == KeyCode::Escape
@@ -851,18 +870,7 @@ impl Widget for Gizmo3d {
         DrawStep::done()
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        let t = makepad_gizmo::mat_translation(&self.model);
-        let state = match (self.gizmo.active(), self.hover) {
-            (Some(h), _) => format!(" dragging {:?}", h),
-            (None, Some(h)) => format!(" hover {:?}", h),
-            (None, None) => String::new(),
-        };
-        Some(format!(
-            "{:?} {:?} at {:.3} {:.3} {:.3}{}",
-            self.mode, self.space, t.x, t.y, t.z, state
-        ))
-    }
+
 }
 
 impl Gizmo3dRef {
@@ -1120,6 +1128,27 @@ impl WidgetNode for ViewCube {
 }
 
 impl Widget for ViewCube {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            let (_, _, back, _) = makepad_gizmo::frame_of_view(&self.view);
+            Some(format!(
+                "{:?} from {:.2} {:.2} {:.2}{}",
+                self.shape,
+                back.x,
+                back.y,
+                back.z,
+                match self.hover {
+                    Some(d) => format!(" hover {} {} {}", d.x, d.y, d.z),
+                    None => String::new(),
+                }
+            ))
+        })()
+        .unwrap_or_default();
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Some(ne) = self.next_frame.is_event(event) {
             if let Some(turn) = self.turn {
@@ -1244,20 +1273,7 @@ impl Widget for ViewCube {
         DrawStep::done()
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        let (_, _, back, _) = makepad_gizmo::frame_of_view(&self.view);
-        Some(format!(
-            "{:?} from {:.2} {:.2} {:.2}{}",
-            self.shape,
-            back.x,
-            back.y,
-            back.z,
-            match self.hover {
-                Some(d) => format!(" hover {} {} {}", d.x, d.y, d.z),
-                None => String::new(),
-            }
-        ))
-    }
+
 }
 
 impl ViewCubeRef {

@@ -28,15 +28,15 @@
 //! `DrawList2d::begin_overlay_reuse / begin_popup_overlay` gives every overlay draw list a depth
 //! floor. Without it the band paints over the card and over the backdrop.
 
-use makepad_test::{makepad_test, Selector, TestApp, WidgetSnapshot};
+use makepad_test::{makepad_test, Selector, TestApp, NodeMatch};
 use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
 use makepad_zune_png::PngDecoder;
 
 /// The one widget with this id that is actually drawn.
-fn drawn(app: &TestApp, id: &str) -> WidgetSnapshot {
-    app.widget_snapshot()
+fn drawn(app: &TestApp, id: &str) -> NodeMatch {
+    app.widget_snapshot().nodes()
         .into_iter()
-        .find(|w| w.id == id && w.width > 0 && w.height > 0)
+        .find(|w| w.path.rsplit('.').next() == Some(id )&& w.width() > 0 && w.height() > 0)
         .unwrap_or_else(|| panic!("{id} is not drawn"))
 }
 
@@ -49,29 +49,29 @@ fn assert_column_is_packed(app: &TestApp, column: &str, header: &str, body: &str
     let footer = drawn(app, footer);
 
     assert_eq!(
-        body.y,
-        header.y + header.height,
+        body.y(),
+        header.y() + header.height(),
         "{} starts at {} but its header ends at {}",
-        body.id,
-        body.y,
-        header.y + header.height,
+        body.path,
+        body.y(),
+        header.y() + header.height(),
     );
     assert_eq!(
-        footer.y,
-        body.y + body.height,
+        footer.y(),
+        body.y() + body.height(),
         "{} ends at {} but its footer starts at {} — the gap is height the \
          body was not given",
-        body.id,
-        body.y + body.height,
-        footer.y,
+        body.path,
+        body.y() + body.height(),
+        footer.y(),
     );
     assert_eq!(
-        footer.y + footer.height,
-        column.y + column.height,
+        footer.y() + footer.height(),
+        column.y() + column.height(),
         "{} ends at {} but its column ends at {}",
-        footer.id,
-        footer.y + footer.height,
-        column.y + column.height,
+        footer.path,
+        footer.y() + footer.height(),
+        column.y() + column.height(),
     );
 }
 
@@ -89,10 +89,10 @@ fn closed_modals_take_no_height_from_a_fill_sibling(app: TestApp) {
     let plain = drawn(&app, "plain_body");
     let modal = drawn(&app, "modal_body");
     assert_eq!(
-        plain.height, modal.height,
+        plain.height(), modal.height(),
         "the column carrying three modals gave its body {}pt where the same \
          column without them gave {}pt",
-        modal.height, plain.height,
+        modal.height(), plain.height(),
     );
 }
 
@@ -109,16 +109,16 @@ fn an_open_modal_takes_no_height_either(app: TestApp) {
     assert_column_is_packed(&app, "modal_column", "modal_header", "modal_body", "modal_footer");
     let open = drawn(&app, "modal_body");
     assert_eq!(
-        closed.height, open.height,
+        closed.height(), open.height(),
         "opening a modal moved the page under it: the body went from {}pt to {}pt",
-        closed.height, open.height,
+        closed.height(), open.height(),
     );
 
     // And the page comes back unchanged when it closes.
     app.locator(Selector::id("close_a")).click();
     app.locator(Selector::all().text_exact("DIALOG A")).wait_count(0);
     let reclosed = drawn(&app, "modal_body");
-    assert_eq!(closed.height, reclosed.height);
+    assert_eq!(closed.height(), reclosed.height());
 }
 
 /// The dim backdrop covers the whole window, not the slot a parent thought it
@@ -132,19 +132,19 @@ fn the_backdrop_covers_the_whole_window(app: TestApp) {
     let backdrop = drawn(&app, "bg_view");
     let column = drawn(&app, "modal_column");
     assert!(
-        backdrop.x <= 0 && backdrop.y <= 0,
+        backdrop.x() <= 0 && backdrop.y() <= 0,
         "backdrop starts at ({}, {}) instead of the window origin",
-        backdrop.x,
-        backdrop.y,
+        backdrop.x(),
+        backdrop.y(),
     );
     assert!(
-        backdrop.width > column.width && backdrop.height > column.height,
+        backdrop.width() > column.width() && backdrop.height() > column.height(),
         "backdrop is {}x{}, no bigger than the {}x{} column that holds the \
          modal — it was sized by the parent's slot",
-        backdrop.width,
-        backdrop.height,
-        column.width,
-        column.height,
+        backdrop.width(),
+        backdrop.height(),
+        column.width(),
+        column.height(),
     );
 }
 
@@ -166,7 +166,7 @@ struct Grab {
 
 impl Grab {
     fn take(app: &TestApp) -> Grab {
-        let window = drawn(app, "main_window");
+        let window = app.locator(Selector::role(makepad_test::Role::Window)).snapshot();
         let path = app.screenshot();
         let bytes = std::fs::read(&path)
             .unwrap_or_else(|err| panic!("cannot read grab {}: {err}", path.display()));
@@ -192,7 +192,7 @@ impl Grab {
             width,
             height,
             rgba,
-            scale: width as f64 / window.width.max(1) as f64,
+            scale: width as f64 / window.width().max(1) as f64,
         }
     }
 
@@ -213,10 +213,10 @@ fn near(a: [u8; 3], b: [u8; 3], tolerance: i32) -> bool {
 /// (which the dialog card covers) and both ends of it (which it cannot reach).
 fn band_probes(app: &TestApp) -> (i64, i64, i64, i64) {
     let band = drawn(app, "deep_band");
-    let y = band.y + band.height / 2;
-    let middle = band.x + band.width / 2;
-    let left = band.x + 12;
-    let right = band.x + band.width - 12;
+    let y = band.y() + band.height() / 2;
+    let middle = band.x() + band.width() / 2;
+    let left = band.x() + 12;
+    let right = band.x() + band.width() - 12;
     (left, middle, right, y)
 }
 

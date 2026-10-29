@@ -373,6 +373,11 @@ impl ConcedingRow {
 }
 
 impl Widget for ConcedingRow {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.collected {
             self.collect(cx.cx);

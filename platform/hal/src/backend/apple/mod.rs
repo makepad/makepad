@@ -5,6 +5,7 @@
 pub mod appkit;
 pub mod media;
 pub mod metal;
+mod objc_class;
 pub mod shell;
 #[cfg(any(target_os = "ios", target_os = "tvos"))]
 pub mod uikit;

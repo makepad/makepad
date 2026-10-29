@@ -1059,6 +1059,19 @@ impl ColorSwatch {
 }
 
 impl Widget for ColorSwatch {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            Some(format_color_hex(
+                [self.color.x, self.color.y, self.color.z, self.color.w],
+                true,
+            ))
+        })()
+        .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1117,12 +1130,7 @@ impl Widget for ColorSwatch {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format_color_hex(
-            [self.color.x, self.color.y, self.color.z, self.color.w],
-            true,
-        ))
-    }
+
 }
 
 impl ColorSwatchRef {
@@ -1241,6 +1249,18 @@ impl ColorWheel {
 }
 
 impl Widget for ColorWheel {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Slider;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE;
+        node.value = (|| -> Option<String> { Some(format!("hue {:.0}", self.hsva.h * 360.0)) })()
+            .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1322,9 +1342,7 @@ impl Widget for ColorWheel {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format!("hue {:.0}", self.hsva.h * 360.0))
-    }
+
 }
 
 impl ColorWheelRef {
@@ -1436,6 +1454,20 @@ impl ColorArea {
 }
 
 impl Widget for ColorArea {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            Some(format!(
+                "s {:.0} v {:.0}",
+                self.hsva.s * 100.0,
+                self.hsva.v * 100.0
+            ))
+        })()
+        .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1498,13 +1530,7 @@ impl Widget for ColorArea {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format!(
-            "s {:.0} v {:.0}",
-            self.hsva.s * 100.0,
-            self.hsva.v * 100.0
-        ))
-    }
+
 }
 
 impl ColorAreaRef {
@@ -1633,6 +1659,18 @@ impl ColorAlpha {
 }
 
 impl Widget for ColorAlpha {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Slider;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE;
+        node.value = (|| -> Option<String> { Some(format!("alpha {:.2}", self.hsva.a)) })()
+            .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1691,9 +1729,7 @@ impl Widget for ColorAlpha {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format!("alpha {:.2}", self.hsva.a))
-    }
+
 }
 
 impl ColorAlphaRef {
@@ -1812,6 +1848,18 @@ impl ColorHue {
 }
 
 impl Widget for ColorHue {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Slider;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE;
+        node.value = (|| -> Option<String> { Some(format!("hue {:.0}", self.hsva.h * 360.0)) })()
+            .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1866,9 +1914,7 @@ impl Widget for ColorHue {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format!("hue {:.0}", self.hsva.h * 360.0))
-    }
+
 }
 
 impl ColorHueRef {
@@ -2057,6 +2103,14 @@ impl PaletteStrip {
 }
 
 impl Widget for PaletteStrip {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::List;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> { Some(format!("{} colours", self.cells.len())) })()
+            .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -2130,9 +2184,7 @@ impl Widget for PaletteStrip {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format!("{} colours", self.cells.len()))
-    }
+
 }
 
 impl PaletteStripRef {
@@ -2591,6 +2643,14 @@ impl WidgetNode for ColorPicker {
 }
 
 impl Widget for ColorPicker {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> { Some(format_color_hex(self.hsva.to_rgba(), true)) })()
+            .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -2843,9 +2903,7 @@ impl Widget for ColorPicker {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format_color_hex(self.hsva.to_rgba(), true))
-    }
+
 }
 
 /// Whether two handles name the same drawn slot, whatever redraw they were
@@ -3096,6 +3154,18 @@ impl WidgetNode for ColorField {
 }
 
 impl Widget for ColorField {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::ComboBox;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::EXPAND;
+        node.states.insert(a11y_tree::States::HAS_POPUP);
+        node.value = (|| -> Option<String> { Some(self.formatted()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -3200,9 +3270,7 @@ impl Widget for ColorField {
         self.commit(cx, v);
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.formatted())
-    }
+
 }
 
 impl ColorFieldRef {

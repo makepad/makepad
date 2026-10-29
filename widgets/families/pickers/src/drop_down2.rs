@@ -1116,6 +1116,112 @@ impl WidgetNode for DropDown2 {
 }
 
 impl Widget for DropDown2 {
+    fn semantics_parts(&self, _cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        if !self.is_open() {
+            return;
+        }
+        let Some(geom) = self.geom else { return };
+        let list = geom.list_rect();
+        let clip = (list.pos, list.pos + list.size);
+        out.push((
+            0,
+            None,
+            a11y_tree::Node {
+                role: a11y_tree::Role::ListBox,
+                bounds: makepad_platform::a11y::semantic_rect(geom.popup_rect()),
+                ..Default::default()
+            },
+        ));
+        let first = ((geom.scroll - geom.pad) / geom.item_h).floor().max(0.0) as usize;
+        let last = ((geom.scroll + geom.list_h - geom.pad) / geom.item_h)
+            .ceil()
+            .max(0.0) as usize;
+        for (row, index) in ((0..self.labels.len()).map(|i| (i, i)))
+            .skip(first)
+            .take(last.saturating_sub(first))
+        {
+            let Some(label) = self.labels.get(index) else {
+                continue;
+            };
+            let rect = Rect {
+                pos: dvec2(
+                    list.pos.x,
+                    list.pos.y + geom.pad + row as f64 * geom.item_h - geom.scroll,
+                ),
+                size: dvec2(list.size.x, geom.item_h),
+            }
+            .clip(clip);
+            let mut states = a11y_tree::States::SELECTABLE;
+            states.set(a11y_tree::States::SELECTED, self.selected_item == index);
+            out.push((
+                index as u64 + 1,
+                Some(0),
+                a11y_tree::Node {
+                    role: a11y_tree::Role::ListItem,
+                    name: label.clone(),
+                    bounds: makepad_platform::a11y::semantic_rect(rect),
+                    states,
+                    actions: a11y_tree::Actions::PRESS,
+                    pos_in_set: row as u32 + 1,
+                    set_size: self.labels.len() as u32,
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        action: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionArg, ActionResult, Actions as A};
+        if self.disabled(cx) {
+            return ActionResult::Disabled;
+        }
+        if action.action == A::EXPAND {
+            self.set_active(cx);
+        } else if action.action == A::COLLAPSE {
+            self.set_closed(cx);
+        } else if action.action == A::SELECT {
+            let ActionArg::Text(label) = &action.arg else {
+                return ActionResult::Unsupported;
+            };
+            let Some(index) = self.labels.iter().position(|text| text == label) else {
+                return ActionResult::Unsupported;
+            };
+            self.emit_select(cx, index);
+        } else {
+            return ActionResult::Unhandled;
+        }
+        self.redraw(cx);
+        ActionResult::Handled
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::ComboBox;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::EXPAND;
+        node.states.insert(a11y_tree::States::HAS_POPUP);
+        node.value = self
+            .labels
+            .get(self.selected_item)
+            .cloned()
+            .unwrap_or_default();
+        node.states.set(a11y_tree::States::EXPANDED, self.is_open());
+        node.states
+            .set(a11y_tree::States::COLLAPSED, !(self.is_open()));
+        node.actions = a11y_tree::Actions::FOCUS
+            | a11y_tree::Actions::EXPAND
+            | a11y_tree::Actions::COLLAPSE
+            | a11y_tree::Actions::SELECT;
+    }
+
     fn text(&self) -> String {
         self.labels.get(self.selected_item).cloned().unwrap_or_default()
     }

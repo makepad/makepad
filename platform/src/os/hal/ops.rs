@@ -603,7 +603,19 @@ impl Cx {
                 CxOsOp::SaveFileDialog(settings) => self.hal_file_dialog(DialogKind::SaveFile, settings),
                 CxOsOp::SelectFolderDialog(settings) => self.hal_file_dialog(DialogKind::SelectFolder, settings),
                 CxOsOp::SaveFolderDialog(settings) => self.hal_file_dialog(DialogKind::SaveFolder, settings),
-                CxOsOp::AccessibilityUpdate(_) => self.hal.frames.gap("accessibility updates arrive in phase 5"),
+                CxOsOp::A11yUpdate { window, bytes } => {
+                    if self.a11y_host_consumers != 0 {
+                        Self::send_studio_message(crate::studio::AppToStudio::A11yUpdate { window: window.id(), bytes: bytes.clone() });
+                    }
+                    self.hal.frames.w.a11y_update(hal_window_id(window), &bytes);
+                    self.a11y.recycle_bytes(window, bytes);
+                }
+                CxOsOp::A11yActionDone { req, result } => {
+                    if self.a11y_host_consumers != 0 {
+                        Self::send_studio_message(crate::studio::AppToStudio::A11yActionDone { req, result });
+                    }
+                    self.hal.frames.w.a11y_action_done(req, result as u32);
+                }
                 CxOsOp::CheckPermission { permission, request_id } => self.hal_permission(makepad_hal::media::permission_op::CHECK, permission, request_id),
                 CxOsOp::RequestPermission { permission, request_id } => self.hal_permission(makepad_hal::media::permission_op::REQUEST, permission, request_id),
                 CxOsOp::StartLocationUpdates => self.hal_location(makepad_hal::media::location_op::START),

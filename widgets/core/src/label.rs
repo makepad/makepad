@@ -382,7 +382,7 @@ impl WidgetNode for Label {
         }
     }
     fn area(&self) -> Area {
-        self.draw_text.area()
+        self.area
     }
     fn walk(&mut self, _cx: &mut Cx) -> Walk {
         self.walk
@@ -447,6 +447,23 @@ impl WidgetNode for Label {
 }
 
 impl Widget for Label {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::StaticText;
+        makepad_platform::a11y::set_string(&mut node.name, self.text.as_ref());
+        let text = node.text.get_or_insert_with(Default::default);
+        makepad_platform::a11y::set_string(&mut text.content, self.text.as_ref());
+        text.selection = self.selection.map_or((0, 0), |(a, b)| (a as u32, b as u32));
+        if let Some((rect, layout)) = &self.laid {
+            crate::semantics::text_layout(
+                text,
+                layout,
+                rect.pos + self.shift(cx),
+                self.draw_text.font_scale,
+                false,
+            );
+        }
+    }
+
     /// A label reports the pointer at most (hover actions); it never takes
     /// a press, so a host's gestures (selecting, scrolling) pass over it.
     fn is_interactive(&self) -> bool {

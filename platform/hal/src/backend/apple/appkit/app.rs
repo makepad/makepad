@@ -650,6 +650,11 @@ impl App {
         self.find(sid, id).map(|w| w.view)
     }
 
+    pub(super) fn a11y_view(&self, key: u64) -> Option<ObjcId> {
+        self.windows.borrow().iter().find(|w| !w.retired.get()
+            && crate::a11y::window_key(w.sid.get(), w.id.get().index) == key).map(|w| w.view)
+    }
+
     fn find(&self, sid: u32, id: Id) -> Option<&'static Win> {
         self.windows.borrow().iter().copied().find(|w| !w.retired.get()
             && ((w.sid.get() == sid && w.id.get() == id) || (w.owner_sid == sid && w.owner_id == id)))

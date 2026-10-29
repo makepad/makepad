@@ -52,7 +52,7 @@ fn shielded(name: &str, call: impl FnOnce() + std::panic::UnwindSafe) {
 }
 
 /// The window behind a delegate or a view.
-fn win_of(this: &Object) -> &'static Win {
+pub(super) fn win_of(this: &Object) -> &'static Win {
     unsafe {
         let ptr: *mut c_void = *this.get_ivar("macos_window_ptr");
         &*(ptr as *const Win)
@@ -851,6 +851,7 @@ fn define_view_class() -> *const Class {
     }
 
     let mut decl = ClassDecl::new("HalView", class!(NSView)).unwrap();
+    super::a11y::add_view_methods(&mut decl);
     unsafe {
         decl.add_method(sel!(_opaqueRectForWindowMoveWhenInTitlebar), opaque_rect_for_window_move_when_in_titlebar as extern "C" fn(&Object, Sel) -> NSRect);
         decl.add_method(sel!(mouseDownCanMoveWindow), mouse_down_can_move_window as extern "C" fn(&Object, Sel) -> BOOL);

@@ -91,16 +91,8 @@ def inspect(pid, tmp, *q):
     return r.stdout + r.stderr
 
 def click(pid, tmp, widget):
-    for line in inspect(pid, tmp, "dump").splitlines():
-        f = line.split()
-        if len(f) >= 8 and f[2] == widget:
-            try:
-                x, y = float(f[4]) + float(f[6]) / 2, float(f[5]) + float(f[7]) / 2
-            except ValueError:
-                continue
-            inspect(pid, tmp, "click", "x=%d" % x, "y=%d" % y, "wait=1")
-            return True
-    return False
+    reply = inspect(pid, tmp, "ui", "act", "q=path=" + widget, "press", "wait=1")
+    return 'handled:' in reply or 'fallback:' in reply
 
 UI_LOCK = threading.Lock()
 
@@ -127,7 +119,7 @@ def run_ui_locked(slot, kind):
     def logtext():
         return open(logpath, errors="replace").read()
     def snap():
-        return inspect(p.pid, tmp, "snap", "all=1")
+        return inspect(p.pid, tmp, "ui")
     try:
         t = time.time()
         up = False

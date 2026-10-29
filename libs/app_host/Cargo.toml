@@ -3,7 +3,7 @@
 # The part of the window manager that is not window management: the
 # localhost websocket hub the children connect to, the swapchain / tick /
 # input protocol with one child (HostedApp), the child launch environment
-# and process-group kill, and the widget-snapshot round trip. The WM's tile
+# and process-group kill, and the semantic tree/action round trip. The WM's tile
 # widget and Stage's app layer are both thin owners of a HostedApp.
 
 [package]
@@ -23,3 +23,6 @@ makepad-studio-protocol = { path = "../../platform/studio" }
 makepad-network = { path = "../../platform/network" }
 makepad-error-log = { path = "../error_log" }
 makepad-app-registry = { path = "../app_registry" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+makepad-remote = { path = "../remote" }

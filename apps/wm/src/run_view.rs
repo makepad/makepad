@@ -153,6 +153,7 @@ pub struct MpRunView {
     #[live]
     no_fb_view: WidgetRef,
     #[rust]
+    #[area]
     area: Area,
     /// The protocol state with the child.
     #[rust(HostedApp::new(crate::host::CLOCK))]
@@ -589,6 +590,8 @@ impl Widget for MpRunView {
             self.redraw(cx);
         }
 
+        let origin = cx.get_current_window_id().map(|w| cx.windows[w].window_geom.position + rect.pos);
+        self.hosted.set_screen_origin(origin);
         self.hosted.painted();
         self.draw_app
             .draw_vars

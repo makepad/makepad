@@ -1277,6 +1277,32 @@ impl ShellBar {
 }
 
 impl Widget for ShellBar {
+    fn semantics(&self, _cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::Toolbar;
+        node.name = "Desktop bar".into();
+    }
+    fn semantics_parts(&self, _cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        if self.inert { return; }
+        for (seg, module, rect) in &self.hits {
+            let data = self.segments.get(*seg).map_or(&self.data, |s| &s.data);
+            let name = Self::tooltip_for(data, *module);
+            let name = if name.is_empty() { format!("{module:?}") } else { name };
+            out.push((LiveId::from_str(&format!("{seg}:{module:?}")).0, None, a11y_tree::Node {
+                role: a11y_tree::Role::Button, name,
+                bounds: makepad_platform::a11y::semantic_rect(*rect),
+                actions: a11y_tree::Actions::PRESS,
+                ..Default::default()
+            }));
+        }
+    }
+    fn handle_action(&mut self, cx: &mut Cx, action: &a11y_tree::ActionRequest, _scope: &mut Scope) -> a11y_tree::ActionResult {
+        if self.inert || action.action != a11y_tree::Actions::PRESS { return a11y_tree::ActionResult::Unhandled; }
+        let Some(key) = cx.a11y.action_part_key(action.node) else { return a11y_tree::ActionResult::Unhandled; };
+        let Some((seg,module,_)) = self.hits.iter().find(|(seg,module,_)| LiveId::from_str(&format!("{seg}:{module:?}")).0 == key) else { return a11y_tree::ActionResult::NoSuchNode; };
+        cx.widget_action(self.uid, press_action(*seg, *module, MouseButton::PRIMARY));
+        a11y_tree::ActionResult::Handled
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
         let r = cx.turtle().rect();

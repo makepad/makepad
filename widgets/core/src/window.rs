@@ -2951,6 +2951,14 @@ impl WindowRef {
 }
 
 impl Widget for Window {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::Window;
+        let window = &cx.windows[self.window.handle.window_id()];
+        let title = if self.window.title.is_empty() { &window.create_title } else { &self.window.title };
+        makepad_platform::a11y::set_string(&mut node.name, title);
+        node.bounds = a11y_tree::Rect { x: 0.0, y: 0.0, w: window.window_geom.inner_size.x as f32, h: window.window_geom.inner_size.y as f32 };
+    }
+
     fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         (self.has_focus || !self.focus_known) && self.cancel_children_impl(visit)
     }
@@ -3437,26 +3445,34 @@ impl Widget for Window {
         {
             return DrawStep::done();
         }
-        if self.draw_state.begin(cx, DrawState::Drawing) {
-            if self.begin(cx).is_not_redrawing() {
-                self.draw_state.end();
-                return DrawStep::done();
+        if cx.a11y.on {
+            cx.a11y.begin_window(window_id);
+            cx.a11y.window_draw_list(self.main_draw_list.id());
+        }
+        let result = (|| {
+            if self.draw_state.begin(cx, DrawState::Drawing) {
+                if self.begin(cx).is_not_redrawing() {
+                    self.draw_state.end();
+                    return DrawStep::done();
+                }
             }
-        }
 
-        if let Some(DrawState::Drawing) = self.draw_state.get() {
-            // Set on every entry, resumes included: the reserve is read off
-            // the panel's state as it is now, and it is the same answer for
-            // every step of one frame.
-            let band = crate::widget_hooks::WidgetHooks::tweaker(cx)
-                .map_or(0.0, |tweaker| (tweaker.docked_band_width)());
-            dock_body(&mut self.view, band);
-            self.view.draw_walk(cx, scope, walk)?;
-            self.draw_state.end();
-            self.end(cx);
-        }
+            if let Some(DrawState::Drawing) = self.draw_state.get() {
+                // Set on every entry, resumes included: the reserve is read off
+                // the panel's state as it is now, and it is the same answer for
+                // every step of one frame.
+                let band = crate::widget_hooks::WidgetHooks::tweaker(cx)
+                    .map_or(0.0, |tweaker| (tweaker.docked_band_width)());
+                dock_body(&mut self.view, band);
+                self.view.draw_walk(cx, scope, walk)?;
+                self.draw_state.end();
+                self.end(cx);
+            }
 
-        DrawStep::done()
+            DrawStep::done()
+        })();
+        if cx.a11y.on { cx.a11y.end_window(); }
+        result
     }
 }
 

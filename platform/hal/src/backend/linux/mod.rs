@@ -3,6 +3,7 @@
 //! Vulkan leases native handles until its presentation worker has retired their surfaces.
 
 mod input;
+pub(crate) mod atspi;
 pub mod media;
 pub(crate) mod io;
 mod wayland;
@@ -304,6 +305,18 @@ impl Shared {
                 }
                 if e.tag == crate::events::event_tag::Closed {
                     closed.push((recipient, e.window));
+                }
+                match e.decode(p) {
+                    Some(crate::HalEvent::Geom { window, x, y, .. }) => {
+                        let known = matches!(lock(&self.run).ready, Some(Ok(Protocol::X11 | Protocol::Direct)));
+                        if !matches!(lock(&self.run).ready, Some(Ok(Protocol::Wm))) {
+                        atspi::geometry(crate::a11y::window_key(recipient, window.index),
+                            (known && x.is_finite() && y.is_finite()).then_some((x as f32, y as f32)));
+                        }
+                    }
+                    Some(crate::HalEvent::Focus { window, focused }) =>
+                        atspi::focus(crate::a11y::window_key(recipient, window.index), focused),
+                    _ => (),
                 }
                 world.window_event(recipient, e, p);
             });

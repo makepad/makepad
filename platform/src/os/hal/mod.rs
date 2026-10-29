@@ -118,6 +118,8 @@ pub struct HalClient {
     /// memory `hal_pump` writes events into, kept between turns
     pub(crate) events: Option<EventStore>,
     pub(crate) frames: FrameBuilder,
+    pub(crate) a11y_host_waiters: Vec<(u64, makepad_hal::Id, u64)>,
+    pub(crate) a11y_present_waiters: Vec<(u32, makepad_hal::Id, u64)>,
     /// HAL clock (ns) at `init_cx_os`: `seconds_since_app_start` counts from it
     pub(crate) start_ns: u64,
     pub(crate) windows: HashMap<usize, HalWindow>,
@@ -209,6 +211,8 @@ impl Default for HalClient {
             info: None,
             events: None,
             frames: FrameBuilder::default(),
+            a11y_present_waiters: Vec::new(),
+            a11y_host_waiters: Vec::new(),
             start_ns: 0,
             windows: HashMap::new(),
             window_created: false,

@@ -673,6 +673,13 @@ impl Tour {
 }
 
 impl Widget for Tour {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Dialog;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states.set(a11y_tree::States::MODAL, true);
+    }
+
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,

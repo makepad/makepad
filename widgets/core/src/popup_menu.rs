@@ -436,8 +436,12 @@ pub struct PopupMenuItem {
     active: f32,
 }
 
-#[derive(Script)]
+#[derive(Script, Widget)]
 pub struct PopupMenu {
+    #[uid]
+    uid: WidgetUid,
+    #[rust]
+    semantic_token: Option<u32>,
     #[source]
     source: ScriptObjectRef,
 
@@ -447,6 +451,7 @@ pub struct PopupMenu {
     menu_item: ScriptValue,
 
     #[live]
+    #[redraw]
     draw_bg: DrawQuad,
     #[layout]
     layout: Layout,
@@ -621,6 +626,16 @@ impl PopupMenuItem {
 }
 
 impl Widget for PopupMenuItem {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::MenuItem;
+        makepad_platform::a11y::set_string(&mut node.name, &self.label);
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+    }
+
     fn disabled(&self, _cx: &Cx) -> bool {
         self.disabled
     }
@@ -635,6 +650,14 @@ impl Widget for PopupMenuItem {
         self.draw_item(cx, &label);
         self.label = label;
         DrawStep::done()
+    }
+}
+
+impl Widget for PopupMenu {
+    fn semantics(&self, _cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::Menu;
+        node.states.remove(a11y_tree::States::HIDDEN);
+        node.set_size = self.count as u32;
     }
 }
 
@@ -670,6 +693,8 @@ impl PopupMenu {
     }
 
     pub fn begin(&mut self, cx: &mut Cx2d) {
+        let list = cx.draw_list_stack.last().copied();
+        self.semantic_token = cx.a11y.on.then(|| cx.a11y.begin_node(self.uid.0, list));
         self.draw_list.begin_popup_overlay(cx);
 
         let size = cx.current_pass_size();
@@ -821,6 +846,12 @@ impl PopupMenu {
         self.menu_items.retain_visible();
         if let Some(init_select_item) = self.init_select_item.take() {
             self.select_item_state(cx, init_select_item);
+        }
+        if let Some(token) = self.semantic_token.take() {
+            let mut node = cx.a11y.take_node(token);
+            self.semantics(cx, &mut node);
+            crate::semantics::apply_overrides(self, None, cx, &mut node);
+            cx.a11y.end_node(token, node, self.draw_bg.area());
         }
     }
 

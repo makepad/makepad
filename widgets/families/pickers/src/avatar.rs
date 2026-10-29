@@ -586,6 +586,24 @@ impl Avatar {
 }
 
 impl Widget for Avatar {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            if self.picture.has_content() {
+                return Some("picture".to_string());
+            }
+            let letters = self.face_text();
+            Some(if letters.is_empty() {
+                "person".to_string()
+            } else {
+                letters
+            })
+        })()
+        .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -747,15 +765,7 @@ impl Widget for Avatar {
         self.disabled
     }
 
-    /// What is actually on the plate, so a test can tell the three rungs
-    /// apart without reading pixels.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        if self.picture.has_content() {
-            return Some("picture".to_string());
-        }
-        let letters = self.face_text();
-        Some(if letters.is_empty() { "person".to_string() } else { letters })
-    }
+
 }
 
 impl AvatarRef {
@@ -865,6 +875,13 @@ impl AvatarGroup {
 }
 
 impl Widget for AvatarGroup {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> { Some(self.hidden.to_string()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let (shown, hidden) = self.arrange(cx.cx.cx);
         self.hidden = hidden;
@@ -914,9 +931,7 @@ impl Widget for AvatarGroup {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.hidden.to_string())
-    }
+
 }
 
 impl AvatarGroupRef {

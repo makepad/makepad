@@ -3,7 +3,7 @@
 //! it makes, and a wing height against the cap's top, and a readout of the
 //! curve each edit settles on.
 //!
-//! The readout is a label with an id, so `/snap?q=curve` on the `--remote`
+//! The readout is a label with an id, so `ui find path=curve` on the `--remote`
 //! surface reads the last commit where no screenshot is available; each
 //! editor's own snapshot value is its anchors.
 use crate::makepad_widgets::*;

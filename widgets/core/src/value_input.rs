@@ -366,6 +366,50 @@ impl ValueInput {
 }
 
 impl Widget for ValueInput {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        request: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionArg, ActionResult, Actions};
+        let value = match (request.action, &request.arg) {
+            (Actions::SET_VALUE, ActionArg::Number(value)) => *value,
+            (Actions::INCREMENT, _) => self.value + self.step,
+            (Actions::DECREMENT, _) => self.value - self.step,
+            _ => return ActionResult::Unhandled,
+        };
+        if self.disabled(cx) {
+            return ActionResult::Disabled;
+        }
+        if !value.is_finite() {
+            return ActionResult::Unsupported;
+        }
+        self.commit(cx, self.widget_uid(), value);
+        self.ended(cx, self.widget_uid());
+        ActionResult::Handled
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::SpinButton;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS
+            | a11y_tree::Actions::SET_VALUE
+            | a11y_tree::Actions::INCREMENT
+            | a11y_tree::Actions::DECREMENT;
+        node.range = Some(a11y_tree::RangeValue {
+            min: self.min,
+            max: self.max,
+            now: self.value,
+            step: self.step,
+        });
+        node.value = (|| -> Option<String> { Some(self.format()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -417,10 +461,8 @@ impl Widget for ValueInput {
     }
 
     /// The number as the field shows it (precision and suffix), so
-    /// `/snap` reads what a person reads.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.format())
-    }
+    /// `ui find` reads what a person reads.
+
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         // Hidden: no hits, and the field inside takes no keys.

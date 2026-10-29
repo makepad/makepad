@@ -517,6 +517,12 @@ impl Transfer {
 }
 
 impl Widget for Transfer {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.fit();
         let search_h = if self.searchable { self.search_height } else { 0.0 };

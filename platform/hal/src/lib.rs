@@ -72,6 +72,7 @@ pub mod frame_tap;
 pub mod framecap;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod inspect;
+pub mod a11y;
 pub mod media;
 pub mod native_layer;
 pub mod profile;
@@ -398,6 +399,8 @@ impl Hal {
     }
 
     fn open_as(&self, req: &OpenReq, caps: Caps, trusted: bool, host_session: bool) -> HalInfo {
+        #[cfg(target_os = "linux")]
+        backend::linux::atspi::start();
         let refused = HalInfo { backend: backend_id::NONE, ..Default::default() };
         let mut guard = lock(&self.state);
         let st = &mut *guard;

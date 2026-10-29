@@ -62,8 +62,13 @@ is a quoted shell argument. There is no HTTP, no status code and no POST body.
 | `status [w=ID]` | App/PID and window geometry; omit `w` to list windows |
 | `grab [w=ID] [scale=0.5] [out=FILE]`, `gseq [n=8] [every_ms=50] [scale=0.5] [out=DIR]` | Capture the next presented frame, or N frames on request cadence (1-64, >=8 ms, <=60 s span); the app's `frames` service answers and the client writes the PNG files; prints JSON with `png` path(s) and per-frame `capture_ms`/`encode_ms` (`gseq.frames`); input `wait=1` remains a next-frame barrier |
 | `gq [scale=0.5]` | Grab windows, then quit; returns `png` paths and `quit:1` |
-| `snap [q=TEXT] [w=ID] [all=1]` | Widget ids/types/text and window-local rectangles |
-| `dump [paths=1]` | Indented widget tree (plain lines) |
+| `ui [q=QUERY] [depth=N] [node=ID] [w=]` | Semantic tree: role, name, value, states, bounds, actions |
+| `ui find [q=QUERY] [role=button] [name=Save] [nth=N] [w=]` | Matching nodes and count (nth is zero-based) |
+| `ui act node=ID\|q=QUERY ACTION [v=] [t=] [from= to=] [dx= dy=] [name=] [wait=1]` | Action result and resulting node; rejects missing, ambiguous, hidden or disabled targets |
+| `ui type node=ID\|q=QUERY t=TEXT [from= to=]` | Focus and replace the selection; default range is the caret/selection |
+| `ui wait q=QUERY [gone=1\|changed=1\|count=N] [timeout_ms=5000]` | Nodes and elapsed milliseconds once the condition holds |
+| `ui snap name=X` / `ui diff a=X [b=now\|Y]` | Save and compare semantic trees |
+| `ui speak [since=N] [node=ID]` / `ui lint` | Announcement stream or accessibility findings |
 | `mouse k=click x=X y=Y` | Mouse input; kinds also include move, down, up, scroll |
 | `click x=X y=Y` | Click alias |
 | `key k=press c=KeyA` | Key input; down/up are also supported |
@@ -88,15 +93,21 @@ machine (newest 64 per window kept). The command prints the JSON with the
 Metal/raw readbacks downsample before worker PNG encoding. There is no raw
 PNG-to-stdout mode.
 
-`snap` entries include `window_id` and `enabled`, plus `selected` when the
-widget exposes a selection, alongside the compact `i`/`ty`/`r`/`w` fields.
-When the app's widgets layer registers id paths (`Cx::widget_paths_callback`)
-each entry also carries `p`, the dotted id path from the window root (named
-widgets only, e.g. `main.new_note`), and `snap q=path:main.new_note` (or
-`snap path=main.new_note`) matches a path exactly or as a suffix of whole
-segments: `new_note` finds `main.new_note`, `note` does not (paths match
-case-sensitively; the plain `q=` search does not). `dump paths=1`
-lists every visible widget as `path type x y w h`.
+Every `ui` command reads the same semantic tree as accessibility and automation.
+Text is the default; `json=1` returns machine output. `ui` and `ui find` JSON contain
+`trees`, each with `window` (`session:index`), `root`, `focus`, `nodes`, and `wire`
+(the canonical TreeUpdate encoded as hexadecimal, for lossless typed clients).
+Node ids are hexadecimal strings. Nodes expose `role`, `name`, `value`, `text`,
+`states`, `actions`, `toggle`, `class`, `path` and `bounds: [x,y,w,h]`.
+
+Queries combine terms: `role=button name="Save as" state=enabled`, `text~=save`,
+`value=42`, `path=toolbar.save`, `id=1a2`. Path suffixes match whole segments.
+Escape quotes and backslashes inside quoted query values. `nth=0` picks the first
+match in tree order. `w=INDEX` selects a window; `w=SESSION:INDEX` disambiguates
+hosted sessions. Actions support `if_user_seq=` like raw input commands.
+`wait=1` waits for action completion and a subsequent frame of that window.
+Remote consumption expires after 60 seconds without `ui` activity. An outstanding
+`ui wait` keeps it active until the condition or timeout.
 
 Arguments are optional unless needed for the operation. Input commands
 accept `w=ID` to target a window and `wait=1` to answer after the next frame.
@@ -126,7 +137,7 @@ With `P` set to the pid your app printed:
 
 ```sh
 makepad-remote app $P help
-makepad-remote app $P snap q=press_demo
+makepad-remote app $P ui find q=path=press_demo
 ```
 
 Read the returned `r: [x, y, width, height]`, calculate its center, and feed
@@ -228,7 +239,7 @@ MAKEPAD_HIDE_WINDOWS=1 SANDBOX_MUTE=1 ./target/release/APP --remote \
 
 A typical run: launch as above, check `status`, `cursor show=1`,
 `cap start path=...`, `step frames=30`, then for each action locate the
-target with `snap q=path:...`, inject it, and `step` the frames it should
+target with `ui find q=path=...`, inject it, and `step` the frames it should
 take; `cap stop`; `quit`.
 
 ## GPU runs, hidden windows, and the headless backend

@@ -1605,6 +1605,11 @@ impl WidgetNode for View {
 }
 
 impl Widget for View {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn clips_content(&self) -> bool {
         self.scroll_bars_obj.is_some()
     }

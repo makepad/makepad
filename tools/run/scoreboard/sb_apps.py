@@ -60,12 +60,12 @@ class Remote:
         return self.ask(*(list(args) + tail))
 
     def entries(self, query=''):
-        args = ['snap'] + (['q=' + query] if query else [])
-        return [o for o in walk(self.ask(*args)) if 'i' in o and 'r' in o
-                and len(o['r']) == 4 and o['r'][2] > 0 and o['r'][3] > 0]
+        args = ['ui', 'find', 'json=1'] + (['q=' + query] if query else [])
+        return [o for o in walk(self.ask(*args)) if 'id' in o and 'bounds' in o
+                and len(o['bounds']) == 4 and o['bounds'][2] > 0 and o['bounds'][3] > 0]
 
     def find(self, ident, optional=False):
-        entries = [e for e in self.entries(ident) if e['i'] == ident]
+        entries = [e for e in self.entries('path=' + ident) if e['path'].split('.')[-1] == ident]
         if entries:
             return entries[0]
         if not optional:
@@ -83,14 +83,13 @@ class Remote:
         return self.until(lambda: self.find(ident, optional=True), ident)
 
     def click(self, entry, wait=True):
-        x, y, w, h = entry['r']
-        return self.input('click', 'x=%g' % (x + w / 2), 'y=%g' % (y + h / 2), wait=wait)
+        return self.input('ui', 'act', 'node=' + entry['id'], 'press', wait=wait)
 
     def key(self, code, *modifiers):
         return self.input('key', 'k=press', 'c=' + code, *modifiers)
 
     def text(self, ident):
-        return self.find(ident).get('t', '')
+        return self.find(ident).get('name', '')
 
     def unchanged_activity(self):
         before = self.seq
@@ -112,7 +111,7 @@ def calculator_setup(r):
     # One repeatable expression; every 40-click window contains five cycles.
     ids = ('k_1', 'k_2', 'k_add', 'k_3', 'k_mul', 'k_4', 'k_eq', 'k_clear')
     buttons = {ident: r.widget(ident) for ident in ids}
-    r.c.res['buttons'] = {ident: e['r'] for ident, e in buttons.items()}
+    r.c.res['buttons'] = {ident: e['bounds'] for ident, e in buttons.items()}
     return lambda i: r.click(buttons[ids[i % len(ids)]])
 
 
@@ -128,8 +127,8 @@ def code_setup(r):
     # FileEditor exposes its editable surface as CodeView (the inner
     # CodeEditor is not a widget). Its text arrives asynchronously after
     # status_path, so wait for the document before focusing and typing.
-    editor = r.until(lambda: next((e for e in r.entries('CodeView')
-                                  if e['i'] == 'code' and e['ty'] == 'CodeView' and e.get('t')), None),
+    editor = r.until(lambda: next((e for e in r.entries('class=CodeView')
+                                  if e['path'].split('.')[-1] == 'code' and e['class'] == 'CodeView' and e.get('name')), None),
                      'loaded CodeView')
     r.click(editor)
     r.key('Home', 'ctrl=1')
@@ -235,14 +234,14 @@ def stage_drive(c, name):
             raise RuntimeError('Story has no tab_cut')
         r.click(cut)
         card = r.widget('lib_list')
-        x, y, _, _ = card['r']
+        x, y, _, _ = card['bounds']
         # Concurrent clicks reproduce the library's double-click open gesture.
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             calls = [pool.submit(r.input, 'click', 'x=%g' % (x + 47), 'y=%g' % (y + 56), wait=False)
                      for _ in range(2)]
             for call in calls:
                 call.result()
-        r.until(lambda: (e := r.find('cut_play', True)) and e['r'][1] < 700, 'opened film transport')
+        r.until(lambda: (e := r.find('cut_play', True)) and e['bounds'][1] < 700, 'opened film transport')
         dismiss = r.find('cut_song_dismiss', True)
         if dismiss:
             r.click(dismiss)

@@ -594,6 +594,84 @@ impl RangeSlider {
 }
 
 impl Widget for RangeSlider {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        request: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionArg, ActionResult, Actions};
+        let end = cx.a11y.action_part_key(request.node) == Some(2);
+        let now = if end { self.end } else { self.start };
+        let value = match (request.action, &request.arg) {
+            (Actions::SET_VALUE, ActionArg::Number(value)) => *value,
+            (Actions::INCREMENT, _) => now + self.key_step(),
+            (Actions::DECREMENT, _) => now - self.key_step(),
+            _ => return ActionResult::Unhandled,
+        };
+        if self.disabled(cx) {
+            return ActionResult::Disabled;
+        }
+        if !value.is_finite() {
+            return ActionResult::Unsupported;
+        }
+        let mut range = self.range_of();
+        if end {
+            range.move_end(value);
+        } else {
+            range.move_start(value);
+        }
+        self.put(range);
+        self.slided(cx);
+        cx.widget_action(self.uid, RangeSliderAction::EndSlide(self.start, self.end));
+        self.draw_bg.redraw(cx);
+        ActionResult::Handled
+    }
+
+    fn semantics_parts(&self, cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        for (key, name, now) in [(1, "Start", self.start), (2, "End", self.end)] {
+            let mut node = a11y_tree::Node {
+                role: a11y_tree::Role::Slider,
+                name: name.into(),
+                bounds: makepad_platform::a11y::semantic_rect(self.area().rect(cx)),
+                range: Some(a11y_tree::RangeValue {
+                    min: if key == 2 {
+                        self.start + self.min_span
+                    } else {
+                        self.min
+                    },
+                    max: if key == 1 {
+                        self.end - self.min_span
+                    } else {
+                        self.max
+                    },
+                    now,
+                    step: self.step,
+                }),
+                states: a11y_tree::States::FOCUSABLE,
+                actions: a11y_tree::Actions::FOCUS
+                    | a11y_tree::Actions::SET_VALUE
+                    | a11y_tree::Actions::INCREMENT
+                    | a11y_tree::Actions::DECREMENT,
+                ..Default::default()
+            };
+            node.states
+                .set(a11y_tree::States::DISABLED, self.disabled(cx));
+            out.push((key, None, node));
+        }
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        node.value = self.readout();
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS;
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
     }

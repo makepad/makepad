@@ -482,7 +482,12 @@ impl Session {
             windows: Table::default(),
             timers: FastMap::default(),
             ledger: Ledger::default(),
-            events: EventQueue::new(),
+            events: {
+                let mut events = EventQueue::new();
+                let consumers = crate::a11y::consumers();
+                if consumers != 0 { events.a11y_state(1, consumers); }
+                events
+            },
             stats: Stats::default(),
             frame: 0,
             last_frame_done: 0,
@@ -531,7 +536,6 @@ impl Clock {
 /// All sessions.
 pub struct World {
     sessions: FastMap<u32, Session>,
-    next_session: u32,
     next_host_window: u32,
     pub clock: Clock,
     /// the domains (sessions started by `DomainStart`), kept after they exit
@@ -636,7 +640,6 @@ impl World {
         sessions.insert(HOST, Session::new(HOST, 0));
         World {
             sessions,
-            next_session: 1,
             next_host_window: 0,
             clock: Clock::default(),
             domains: BTreeMap::new(),
@@ -696,8 +699,11 @@ impl World {
 
     /// Opens a session and returns its id.
     pub fn open(&mut self, app_key: u64) -> u32 {
-        let id = self.next_session;
-        self.next_session += 1;
+        // Mirrors and action completions are process-wide, including for independent HALs.
+        // Reusing an id in another World lets its teardown erase a live session's requests.
+        static NEXT_SESSION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+        let id = NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(id != HOST, "session id space exhausted");
         let mut s = Session::new(id, app_key);
         s.device_generation = self.device_generation;
         self.sessions.insert(id, s);
@@ -767,6 +773,7 @@ impl World {
     /// under the same id.
     pub fn finish_close(&mut self, id: u32, how: CloseAs) -> bool {
         let Some(mut s) = self.sessions.remove(&id) else { return false };
+        crate::a11y::close_session(id);
         self.listeners.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
         // its fonts and its interest in glyphs end; the glyphs stay in the host's atlas
         if let Some(fonts) = self.fonts.as_mut() {
@@ -1242,6 +1249,7 @@ impl World {
         let s = self.sessions.get_mut(&session).ok_or(Miss::Stale)?;
         let parent = s.parent;
         let e = s.windows.remove(session, id)?;
+        crate::a11y::drop_window(session, id.index);
         if let Some(host) = e.val.alias_of {
             self.unlend(host);
         }

@@ -516,6 +516,16 @@ impl Backend for Metal {
 }
 
 impl Gpu for Metal {
+    #[cfg(target_os = "macos")]
+    fn a11y_notify(&mut self, window: u64, notifications: &[makepad_a11y::Notification]) {
+        super::appkit::a11y::notify(window, notifications);
+    }
+
+    #[cfg(any(target_os = "ios", target_os = "tvos"))]
+    fn a11y_notify(&mut self, window: u64, notifications: &[makepad_a11y::Notification]) {
+        super::uikit::a11y::notify(window, notifications);
+    }
+
     fn gpu_budget(&self) -> Option<(u64, u64)> {
         Some((self.info.working_set, self.dev.device_allocated()))
     }

@@ -106,6 +106,13 @@ fn unplaced_at_origin(mut geom: [f32; 4]) -> [f32; 4] {
 /// What the executor needs a device for. Every hook runs inside `hal_submit` with the state lock
 /// held, so it must not wait for the GPU. Borrowed slices are valid for the call only.
 pub trait Gpu {
+    /// Capture previous semantic values before applying an update. No OS calls under this lock.
+    fn a11y_prepare(&mut self, _window: u64, _update: &makepad_a11y::TreeUpdate) {}
+    /// Semantic changes for this backend's accessibility adapter.
+    fn a11y_notify(&mut self, _window: u64, _notifications: &[makepad_a11y::Notification]) {
+        #[cfg(target_os = "linux")]
+        super::linux::atspi::notify(_window, _notifications);
+    }
     /// Host-owned native layers may allocate texture aliases through the world.
     fn native_layer(&mut self, _world: &mut World, _sid: u32, _c: &HalCmd) -> bool { false }
     /// Native device totals when available; otherwise admission uses the session ledgers.
@@ -1505,6 +1512,26 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 s.events.readback(req, readback::STALE, [0; 4], &[]);
             }
         }
+        HalCmd::A11yUpdate { id, bytes } => {
+            if s.windows.get(sid, id).is_err() {
+                s.stale();
+            } else {
+                match makepad_a11y::wire::decode_update(bytes) {
+                    Ok(update) => {
+                        gpu.a11y_prepare(crate::a11y::window_key(sid, id.index), &update);
+                        let notifications = crate::a11y::apply_update(sid, id.index, update);
+                        gpu.a11y_notify(crate::a11y::window_key(sid, id.index), &notifications);
+                        #[cfg(target_os = "linux")]
+                        {
+                            let key = crate::a11y::window_key(sid, id.index);
+                            super::linux::wm::a11y::update(key, bytes);
+                        }
+                    }
+                    Err(error) => { eprintln!("{error}"); s.bad(); }
+                }
+            }
+        }
+        HalCmd::A11yActionDone { req, result } => crate::a11y::action_done(sid, req, result as u8),
         HalCmd::QueryReply { req, bytes } => s.replies.push((req, bytes.to_vec())),
         HalCmd::TraceMark { text } => {
             let t = s.string(text).unwrap_or("").to_string();

@@ -235,6 +235,7 @@ fn define_view() -> *const Class {
     }
     let mut decl = ClassDecl::new("HalView", class!(UIView)).unwrap();
     decl.add_ivar::<*mut c_void>("hal_win");
+    super::a11y::add_view_methods(&mut decl);
     unsafe {
         decl.add_method(sel!(hitTest:withEvent:), hit_test as extern "C" fn(&Object, Sel, NSPoint, ObjcId) -> ObjcId);
         decl.add_class_method(sel!(layerClass), layer_class as extern "C" fn(&Class, Sel) -> *const Class);

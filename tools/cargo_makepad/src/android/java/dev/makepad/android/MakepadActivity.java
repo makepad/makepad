@@ -348,6 +348,32 @@ class MakepadSurface
 {
     // IME InputConnection for handling composition text
     private MakepadInputConnection mInputConnection;
+    private final MakepadA11yProvider a11yProvider;
+
+    @Override
+    public android.view.accessibility.AccessibilityNodeProvider getAccessibilityNodeProvider() {
+        if (a11yProvider != null) a11yProvider.updateState();
+        return a11yProvider;
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        a11yProvider.attach();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        a11yProvider.detach();
+        super.onDetachedFromWindow();
+    }
+
+    @Override
+    public boolean dispatchHoverEvent(MotionEvent event) {
+        return a11yProvider.dispatchHoverEvent(event) || super.dispatchHoverEvent(event);
+    }
+
+    MakepadA11yProvider a11y() { return a11yProvider; }
 
     // Shared Editable buffer for IME - this is the source of truth for Java side
     private SpannableStringBuilder mEditable = new SpannableStringBuilder();
@@ -418,6 +444,7 @@ class MakepadSurface
 
     public MakepadSurface(Context context){
         super(context);
+        a11yProvider = new MakepadA11yProvider(this);
         getHolder().addCallback(this);
 
         setFocusable(true);
@@ -1038,6 +1065,38 @@ public class MakepadActivity
     private boolean mNativesDeferred = false;
 
     private MakepadSurface view;
+
+    // JNI notification worker calls this; the provider posts delivery to Android's UI thread.
+    public void a11yEvent(int id, int kind, int change, String text) {
+        runOnUiThread(() -> {
+            if (view != null) view.a11y().postEvent(id, kind, change, text);
+        });
+    }
+
+    public String a11ySelfCheck() {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return view == null ? "error: no Android surface" : view.a11y().selfCheck();
+        }
+        CompletableFuture<String> result = new CompletableFuture<>();
+        runOnUiThread(() -> {
+            try { result.complete(view == null ? "error: no Android surface" : view.a11y().selfCheck()); }
+            catch (Throwable error) { result.completeExceptionally(error); }
+        });
+        return result.join();
+    }
+
+    public long a11ySelfCheckAction(int id, int action) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return view == null ? 0 : view.a11y().selfCheckAction(id, action);
+        }
+        CompletableFuture<Long> result = new CompletableFuture<>();
+        runOnUiThread(() -> {
+            try { result.complete(view == null ? 0 : view.a11y().selfCheckAction(id, action)); }
+            catch (Throwable error) { result.completeExceptionally(error); }
+        });
+        return result.join();
+    }
+
     private NativeLayerContainer mNativeLayers;
 
     void nativeLayerSurfaceLost() { if (mNativeLayers != null) mNativeLayers.surfaceLost(); }

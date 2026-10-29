@@ -400,6 +400,7 @@ impl Tab {
                 .draw_walk(cx, Walk::fit(), Align::default(), name);
         }
         self.draw_bg.end(cx);
+        cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
     }
 
     /// A compact tab shows its icon alone.
@@ -553,6 +554,21 @@ impl Tab {
 }
 
 impl Widget for Tab {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Tab;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SELECT;
+        node.name.clone_from(&self.name);
+        node.states.set(
+            a11y_tree::States::SELECTED,
+            self.animator_in_state(cx, ids!(active.on)),
+        );
+    }
+
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
         // Driven by `TabBar::handle_event` through `handle_event_with`, which
         // needs the bar's action sink; nothing to do on the plain seam.

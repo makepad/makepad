@@ -102,21 +102,21 @@ is no hub or mount to configure.
 
 ## Selectors
 
-Selectors are snapshot-based. They match structured widget state instead of only relying on geometry query strings.
+Selectors build the shared semantic query grammar used by `ui find` and `ui wait`.
 
 Constructors:
 
 - `Selector::all()`
 - `Selector::id("widget_id")`
 - `Selector::widget_type("TextInput")`
-- `Selector::raw("text:hello")`
+- `Selector::raw("text~=hello")`
 
 Builder filters:
 
 - `.text_exact("...")`
 - `.text_contains("...")`
 - `.nth(index)`
-- `.window("panel_window")`
+- `.window("1")`
 - `.window_index(1)`
 - `.any_window()`
 
@@ -180,27 +180,14 @@ regular `TestApp` methods for snapshots, grabs, and logs.
 
 ## Structured Widget State
 
-Each snapshot record exposes:
+`widget_snapshot()` returns a typed `UiSnapshot` of semantic window trees. Each
+`NodeMatch` exposes its node ID, role, name, value, text metadata, states, actions,
+path, class and bounds, plus its session/window key. `visible()`, `enabled()` and
+`checked()` read that state. `ui json=1` carries readable fields and a canonical
+wire payload for lossless decoding; malformed payloads fail the read.
 
-- widget id
-- widget type
-- bounds
-- window id and window index
-- visible/enabled state
-- widget-specific state when available:
-  - `text`
-  - `value`
-  - `checked`
-  - `selected`
-
-Window names, enabled flags, and selections come from the actual widget
-snapshot. Missing required fields fail decoding instead of fabricating state.
-Optional state is absent when the widget does not expose it; empty labels may
-omit `text`, while an empty input `value` remains an empty string.
-
-Interactions require visible geometry. State reads prefer visible matches and
-can fall back to a uniquely matched clipped widget, such as a label below a
-scrolling page.
+Actions resolve exactly one enabled, non-hidden node. Raw pointer and key events
+remain available through `TestApp::forward` for input and hit-testing tests.
 
 ## Failure Artifacts
 
@@ -232,7 +219,7 @@ cargo test --release -p makepad-example-text-input --test ui -- --test-threads=1
 ## Standalone Transport and Ownership
 
 The runtime uses the app's documented [remote commands](../../docs/agents/app-remote.md)
-over its makepad-remote Unix socket: `status`, `snap`, `dump`, `grab`, `log`, and the
+over its makepad-remote Unix socket: `status`, `ui`, `ui find`, `ui act`, `ui type`, `ui wait`, `grab`, `log`, and the
 input commands (`click`, `mouse`, `key`, `text`). Images are written by the test client,
 never by the app. Input requests wait for a
 resulting frame. Rectangles are window-local layout points; do not apply DPI

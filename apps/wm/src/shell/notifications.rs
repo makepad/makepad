@@ -356,6 +356,40 @@ impl ShellNotifications {
 }
 
 impl Widget for ShellNotifications {
+    fn semantics(&self, _cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::Group;
+        node.name = "Notifications".into();
+    }
+    fn semantics_parts(&self, _cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        if self.inert { return; }
+        // draw_surface records one card per live entry, in the same order.
+        for ((id, rect, close), entry) in self.card_rects.iter().zip(&self.live) {
+            let critical = entry.note.urgency == Urgency::Critical;
+            out.push((id * 2, None, a11y_tree::Node {
+                role: if critical { a11y_tree::Role::Alert } else { a11y_tree::Role::Status },
+                name: entry.note.summary.clone(), description: entry.note.body.clone(),
+                live: if critical { a11y_tree::Live::Assertive } else { a11y_tree::Live::Polite },
+                bounds: makepad_platform::a11y::semantic_rect(*rect),
+                actions: a11y_tree::Actions::PRESS, ..Default::default()
+            }));
+            out.push((id * 2 + 1, Some(id * 2), a11y_tree::Node {
+                role: a11y_tree::Role::Button, name: format!("Dismiss {}", entry.note.summary),
+                bounds: makepad_platform::a11y::semantic_rect(*close),
+                actions: a11y_tree::Actions::PRESS, ..Default::default()
+            }));
+        }
+    }
+    fn handle_action(&mut self, cx: &mut Cx, action: &a11y_tree::ActionRequest, _scope: &mut Scope) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionResult as R, Actions as A};
+        if self.inert || action.action != A::PRESS { return R::Unhandled; }
+        let Some(key) = cx.a11y.action_part_key(action.node) else { return R::Unhandled; };
+        let id = key / 2;
+        if !self.live.iter().any(|e| e.note.id == id) { return R::NoSuchNode; }
+        cx.widget_action(self.uid, if key % 2 == 0 { ShellNotificationsAction::Activated(id) } else { ShellNotificationsAction::Dismissed(id) });
+        self.dismiss(cx, id);
+        R::Handled
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
         let screen = self.target.unwrap_or_else(|| cx.turtle().rect());

@@ -25,17 +25,18 @@ fn every_command_round_trips() {
     assert_eq!(expected.len(), CMD_TABLE.len());
     assert_eq!(w.cmds().len(), CMD_TABLE.len());
     // 57 core (including ClipRead, GpuBudget, WindowChrome, WindowCaption and WindowDpiOverride, with
-    // timer start/stop counted separately), 6 embedded, 4 domains, 9 media, 3 native layers, 3 fonts, 9 direct display/input
+    // timer start/stop counted separately), 6 embedded, 4 domains, 9 media, 3 native layers, 2 accessibility, 3 fonts, 9 direct display/input
     // (incl. DirectDisplayArrangement, DirectDisplayPacing, DirectTapToClick, DirectDisplayVirtual tag 153), 2 GL interop, 3 mobile system UI (MobileUi,
     // SelectionHandles, Haptic), 1 system back (BackUnhandled), 1 font touch (GlyphTouch, tag 150), 3 tray (TraySet,
-    // TrayRemove, WindowAtTray tag 154), 3 XR frame (XrFrameEyes 155, XrPoseLead 156, XrRefreshRate 157).
+    // TrayRemove, WindowAtTray tag 154), 3 XR frame (XrFrameEyes 155, XrPoseLead 156, XrRefreshRate 157),
+    // 2 accessibility (A11yUpdate 158, A11yActionDone 159).
     // The media section (tags 120-129, backend/apple/media) has its own budget.
     let media = CMD_TABLE.iter().filter(|t| (120..130).contains(&t.0)).count();
     let fonts = CMD_TABLE.iter().filter(|t| (130..133).contains(&t.0)).count();
     assert_eq!(media, 9);
     assert_eq!(fonts, 3);
     assert!(media <= 15, "the media section is budgeted at 15 commands, it has {media}");
-    assert_eq!(CMD_TABLE.len(), 57 + 6 + 4 + media + fonts + 9 + 2 + 4 + 1 + 3 + 3 + 3);
+    assert_eq!(CMD_TABLE.len(), 57 + 6 + 4 + media + fonts + 9 + 2 + 4 + 1 + 3 + 3 + 2 + 3);
     for ((cmd, want), (tag, name, _)) in w.cmds().iter().zip(&expected).zip(CMD_TABLE) {
         assert_eq!(cmd.tag, *tag, "{name}");
         let got = cmd.decode(w.arena()).unwrap_or_else(|| panic!("{name} does not decode"));
@@ -52,7 +53,7 @@ fn every_event_round_trips() {
     q.set_time(77);
     let expected = sample_events(&mut q);
     assert_eq!(expected.len(), EVENT_TABLE.len());
-    assert_eq!(EVENT_TABLE.len(), 99, "55 core (incl. Clipboard, GpuBudget, PayloadSize, MouseCancel, AppMessage, DeviceReset, GpuPressure, Redraw), 5 parent/child (85-89), 13 media, 4 font, 4 direct display/input 1 GL interop and 9 mobile (LongPress, ImeState, ImeAction, ImeResize, PhysicalKeyboard, SelectionHandle, TouchCancel, SafeArea, ImeAnimate) and 2 system back (BackGesture, BackPressed) and 2 tray (TrayMenu, TrayClick) and 2 XR (XrFrame, XrDepth) and 1 native layer events");
+    assert_eq!(EVENT_TABLE.len(), 101, "55 core (incl. Clipboard, GpuBudget, PayloadSize, MouseCancel, AppMessage, DeviceReset, GpuPressure, Redraw), 5 parent/child (85-89), 13 media, 4 font, 4 direct display/input 1 GL interop and 9 mobile (LongPress, ImeState, ImeAction, ImeResize, PhysicalKeyboard, SelectionHandle, TouchCancel, SafeArea, ImeAnimate) and 2 system back (BackGesture, BackPressed) and 2 tray (TrayMenu, TrayClick) and 2 XR (XrFrame, XrDepth) and 2 accessibility (A11yState, A11yAction) and 1 native layer events");
     assert_eq!(EVENT_TABLE.iter().filter(|t| (120..133).contains(&t.0)).count(), 13);
     assert_eq!(EVENT_TABLE.iter().filter(|t| (100..104).contains(&t.0)).count(), 4);
     let tags: std::collections::HashSet<u16> = EVENT_TABLE.iter().map(|t| t.0).collect();
@@ -248,7 +249,7 @@ fn headless_reports_native_layers_unsupported_and_keeps_last_frame_geometry() {
 fn a_texture_the_device_cannot_hold_is_reported_evicted() {
     let hal = Hal::new();
     let s = open(&hal, 0);
-    let mut store = EventStore::new(1, 128, 4096);
+    let mut store = EventStore::new(s, 128, 4096);
     let mut w = CmdWriter::new(s);
     w.texture_create(Id::new(1, 1), usage::SAMPLED | usage::RENDER_TARGET, format::BGRA8, 1200, 800, [1, 1], Attr::default());
     w.texture_create(Id::new(2, 1), usage::SAMPLED | usage::RENDER_TARGET, format::BGRA8, 40000, 800, [1, 1], Attr::default());

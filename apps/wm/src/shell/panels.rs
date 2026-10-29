@@ -2734,7 +2734,7 @@ impl Widget for ShellPanel {
         }
     }
 
-    /// What a remote snapshot (`/snap`) reads off the open flyout: the
+    /// What a remote semantic tree (`ui`) reads off the open flyout: the
     /// Wi-Fi dropdown's nonsecret state, so a proof can see its rows and
     /// prompt without a picture. A typed password is never part of it.
     #[cfg(target_os = "linux")]

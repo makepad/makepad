@@ -49,6 +49,7 @@
 
 mod caption;
 mod clip;
+mod a11y;
 mod conn;
 mod held;
 mod history;

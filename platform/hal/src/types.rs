@@ -352,8 +352,9 @@ impl OpenReq {
             Ok("offscreen") if cfg!(target_vendor = "apple") => (backend_id::METAL, open_flags::OFFSCREEN_WINDOWS),
             Ok("offscreen") if cfg!(target_os = "linux") => (backend_id::AUTO, open_flags::OFFSCREEN_WINDOWS),
             Ok("offscreen") if cfg!(windows) => (backend_id::D3D11, open_flags::OFFSCREEN_WINDOWS),
-            Ok("d3d11") if cfg!(windows) && !hidden => (backend_id::D3D11, window_flags),
-            Ok("d3d11") if cfg!(windows) => (backend_id::D3D11, window_flags | open_flags::OFFSCREEN_WINDOWS),
+            // An explicit native backend keeps OS windows for accessibility/automation.
+            // MAKEPAD_HIDE_WINDOWS hides the Win32 HWNDs; "offscreen" creates none.
+            Ok("d3d11") if cfg!(windows) => (backend_id::D3D11, window_flags),
             Ok("offscreen") => (backend_id::HEADLESS, 0),
             Ok("metal") => (backend_id::METAL, window_flags),
             Ok("gl") if cfg!(target_os = "linux") => (backend_id::GL, window_flags | if hidden { open_flags::OFFSCREEN_WINDOWS } else { 0 }),

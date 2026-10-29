@@ -45,6 +45,8 @@ pub enum Event {
     ///
     /// [`onCreate`]: https://developer.android.com/reference/android/app/Activity#onCreate(android.os.Bundle)
     Startup,
+    /// A semantic request addressed to one widget uid.
+    A11yAction(makepad_a11y::ActionRequest),
     /// The application is being shut down is about to close and be destroyed.
     ///
     /// * This event may not be sent at all, so you should not rely on it.
@@ -360,6 +362,7 @@ impl Event {
 
     pub fn name_from_u32(v: u32) -> &'static str {
         match v {
+            94 => "A11yAction",
             1 => "Startup",
             2 => "Shutdown",
             67 => "QuitRequested",
@@ -470,6 +473,7 @@ impl Event {
 
     pub fn to_u32(&self) -> u32 {
         match self {
+            Self::A11yAction(_) => 94,
             Self::Startup => 1,
             Self::Shutdown => 2,
             Self::QuitRequested(_) => 67,

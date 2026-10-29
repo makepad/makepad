@@ -1,15 +1,21 @@
 //! Hosts a counter child with `HostedApp` and checks the whole loop: a
-//! presented frame arrives, the widget snapshot names the label and the
-//! button (with the id path), a click forwarded at the button's snapshot
-//! rect reaches the child, and the label's text changes.
+//! presented frame arrives, the semantic tree names the label and the
+//! button (with the id path), a semantic press reaches the child, and the
+//! label's text changes.
 
 pub use makepad_widgets;
 
 use makepad_app_host::{launch, AppHub, Clock, HostedApp, HubEvent};
-use makepad_studio_protocol::{AppToStudio, MouseButton, WidgetSnapshot};
+use makepad_studio_protocol::{AppToStudio};
 use makepad_widgets::*;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::Sender;
+use std::sync::{mpsc::Sender, OnceLock};
+use makepad_platform::thread::{Lane, TaskHandle};
+
+static REMOTE_UI: OnceLock<makepad_app_host::a11y::RemoteUi> = OnceLock::new();
+fn dispatch_hosted(req: &makepad_remote::Req, out: &mut makepad_remote::Out) {
+    REMOTE_UI.get().unwrap().dispatch(req, out);
+}
 
 app_main!(App);
 
@@ -33,8 +39,8 @@ const TIMEOUT: f64 = 60.0;
 enum Phase {
     #[default]
     WaitFrame,
-    SnapBefore(u64),
-    SnapAfter(u64),
+    SnapBefore,
+    SnapAfter,
 }
 
 struct Probe {
@@ -45,7 +51,7 @@ struct Probe {
     timer: Timer,
     phase: Phase,
     started: f64,
-    button: Option<(f64, f64)>,
+    action: Option<TaskHandle<Result<(), String>>>,
     trace: bool,
     sent: usize,
     last_trace: f64,
@@ -61,14 +67,18 @@ pub struct App {
 
 fn finish(probe: &mut Probe, cx: &mut Cx, ok: bool, message: &str) -> ! {
     println!("{} {}", if ok { "PASS" } else { "FAIL" }, message);
-    let pool = cx.task_pool();
-    launch::kill_child_group(&mut probe.child, launch::GROUP_KILL_GRACE, &pool);
+    probe.hosted.send(vec![makepad_studio_protocol::StudioToApp::Kill]);
+    probe.flush();
+    let deadline = std::time::Instant::now() + launch::GROUP_KILL_GRACE;
+    while probe.child.try_wait().ok().flatten().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if probe.child.try_wait().ok().flatten().is_none() {
+        let pool = cx.task_pool();
+        launch::kill_child_group(&mut probe.child, launch::GROUP_KILL_GRACE, &pool);
+    }
     let _ = probe.child.wait();
     std::process::exit(if ok { 0 } else { 1 });
-}
-
-fn find<'a>(widgets: &'a [WidgetSnapshot], id: &str) -> Option<&'a WidgetSnapshot> {
-    widgets.iter().find(|w| w.id == id && w.visible && w.width > 0)
 }
 
 impl Probe {
@@ -79,7 +89,7 @@ impl Probe {
         let binary = std::env::var("APP_HOST_PROBE_CHILD")
             .unwrap_or_else(|_| "target/release/makepad-example-counter".to_string());
         let mut cmd = Command::new(binary);
-        cmd.arg("--stdin-loop")
+        cmd.arg("--stdin-loop").arg("--remote")
             .env("MAKEPAD_HIDE_WINDOWS", "1")
             .env("SANDBOX_MUTE", "1")
             .stdin(Stdio::null());
@@ -94,7 +104,7 @@ impl Probe {
             timer: cx.start_interval(0.02),
             phase: Phase::WaitFrame,
             started: Cx::monotonic_now(),
-            button: None,
+            action: None,
             trace: std::env::var_os("APP_HOST_PROBE_TRACE").is_some(),
             sent: 0,
             last_trace: 0.0,
@@ -136,59 +146,61 @@ impl Probe {
         if Cx::monotonic_now() - self.started > TIMEOUT {
             let phase = match self.phase {
                 Phase::WaitFrame => "no presented frame",
-                Phase::SnapBefore(_) => "no first snapshot",
-                Phase::SnapAfter(_) => "the label never changed",
+                Phase::SnapBefore => "no first snapshot",
+                Phase::SnapAfter => "the label never changed",
             };
             finish(self, cx, false, &format!("timeout: {phase}"));
         }
+        let remote = self.hosted.remote_ui();
         match self.phase {
             Phase::WaitFrame => {
                 if self.hosted.texture().is_some() {
-                    let id = self.hosted.snapshot();
-                    self.phase = Phase::SnapBefore(id);
+                    remote.enable(makepad_platform::a11y_tree::consumer::TEST);
+                    self.phase = Phase::SnapBefore;
                 }
             }
-            Phase::SnapBefore(id) => {
-                let Some(widgets) = self.hosted.take_snapshot(id) else { return };
-                let label = find(&widgets, "counter_label");
-                let button = find(&widgets, "increment_button");
-                let (Some(label), Some(button)) = (label, button) else {
-                    // The first answers can precede the first render.
-                    let id = self.hosted.snapshot();
-                    self.phase = Phase::SnapBefore(id);
-                    return;
+            Phase::SnapBefore => {
+                let trees = remote.trees();
+                let find = |path: &str| {
+                    let q = makepad_platform::a11y_tree::query::Query::parse(&format!("path={path}")).unwrap();
+                    trees.iter().flat_map(|(_,t)| q.find(t)).next().cloned()
                 };
-                println!(
-                    "frame ok; label {:?} path {:?}; button rect {},{} {}x{} path {:?}",
-                    label.text, label.path, button.x, button.y, button.width, button.height, button.path
-                );
-                if label.path.is_none() || button.path.is_none() {
-                    finish(self, cx, false, "named widgets report no id path");
+                let (Some(label), Some(button)) = (find("counter_label"),find("increment_button")) else { return };
+                println!("frame ok; label {:?} path {:?}; button {:?} path {:?}",label.name,label.path,button.bounds,button.path);
+                let _ = REMOTE_UI.set(remote);
+                let command = format!("ui act node={} press wait=1", button.id.short());
+                // Exercise the hosted command interpreter and its action/presentation replies.
+                // The UI continues pumping the child while the pool task waits.
+                match cx.task_pool().submit(Lane::Heavy, move || {
+                    let (bytes, truncated) = makepad_remote::cmd::answer(dispatch_hosted, &command);
+                    let reply = String::from_utf8_lossy(&bytes);
+                    println!("hosted {command}: {reply}");
+                    if truncated || reply.contains("\"err\"") || !reply.starts_with("handled:") {
+                        Err(reply.into_owned())
+                    } else { Ok(()) }
+                }) {
+                    Ok(task) => self.action = Some(task),
+                    Err(error) => { self.trace(&format!("action queue busy; retry next beat: {error:?}")); return; }
                 }
-                let at = dvec2(
-                    button.x as f64 + button.width as f64 * 0.5,
-                    button.y as f64 + button.height as f64 * 0.5,
-                );
-                self.button = Some((at.x, at.y));
-                let modifiers = KeyModifiers::default();
-                let time = Cx::time_now();
-                self.hosted.mouse_down(at, MouseButton::PRIMARY, time, &modifiers);
-                self.hosted.mouse_up(Some(at), MouseButton::PRIMARY, time, &modifiers, false);
-                let id = self.hosted.snapshot();
-                self.phase = Phase::SnapAfter(id);
+                self.phase = Phase::SnapAfter;
             }
-            Phase::SnapAfter(id) => {
-                let Some(widgets) = self.hosted.take_snapshot(id) else { return };
-                let text = find(&widgets, "counter_label").and_then(|w| w.text.clone());
-                if text.as_deref().is_some_and(|t| t.ends_with('1')) {
-                    finish(self, cx, true, &format!("click at {:?} changed the label to {:?}", self.button, text));
+            Phase::SnapAfter => {
+                if let Some(task) = &mut self.action {
+                    match task.try_take() {
+                        None => return,
+                        Some(Ok(Ok(()))) => self.action = None,
+                        Some(error) => finish(self, cx, false, &format!("hosted ui action failed: {error:?}")),
+                    }
                 }
-                let id = self.hosted.snapshot();
-                self.phase = Phase::SnapAfter(id);
+                let trees = remote.trees();
+                let q = makepad_platform::a11y_tree::query::Query::parse("path=counter_label").unwrap();
+                let text = trees.iter().flat_map(|(_,t)| q.find(t)).next().map(|n| n.name.clone());
+                if text.as_deref().is_some_and(|t| t.ends_with('1')) {
+                    finish(self, cx, true, &format!("semantic press changed the label to {:?}", text));
+                }
             }
         }
     }
-
     fn trace(&self, line: &str) {
         if self.trace {
             eprintln!("probe: {line}");

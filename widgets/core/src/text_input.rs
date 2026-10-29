@@ -2796,6 +2796,132 @@ impl TextInput {
 }
 
 impl Widget for TextInput {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        action: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionArg, ActionResult, Actions as A};
+        if self.disabled(cx) {
+            return ActionResult::Disabled;
+        }
+        let offset = |index: u32| {
+            self.password_cursor_to_cursor(Cursor {
+                index: index as usize,
+                prefer_next_row: false,
+            })
+            .index
+        };
+        if action.action == A::SET_TEXT_SELECTION {
+            let ActionArg::Range(a, b) = action.arg else {
+                return ActionResult::Unsupported;
+            };
+            let content = if self.is_password {
+                &self.password_text
+            } else {
+                &self.text
+            };
+            if !content.is_char_boundary(a as usize) || !content.is_char_boundary(b as usize) {
+                return ActionResult::Unsupported;
+            }
+            let (a, b) = (offset(a), offset(b));
+            self.set_selection(
+                cx,
+                Selection {
+                    anchor: Cursor {
+                        index: a,
+                        prefer_next_row: false,
+                    },
+                    cursor: Cursor {
+                        index: b,
+                        prefer_next_row: false,
+                    },
+                },
+            );
+            self.redraw(cx);
+            return ActionResult::Handled;
+        }
+        let result = if action.action == A::SET_VALUE {
+            let ActionArg::Text(text) = &action.arg else {
+                return ActionResult::Unsupported;
+            };
+            self.replace_range(cx, 0..self.text.len(), text, UndoGroup::New)
+        } else if action.action == A::REPLACE_TEXT {
+            let ActionArg::Replace(a, b, text) = &action.arg else {
+                return ActionResult::Unsupported;
+            };
+            let content = if self.is_password {
+                &self.password_text
+            } else {
+                &self.text
+            };
+            if a > b
+                || !content.is_char_boundary(*a as usize)
+                || !content.is_char_boundary(*b as usize)
+            {
+                return ActionResult::Unsupported;
+            }
+            let range = offset(*a)..offset(*b);
+            self.replace_range(cx, range, text, UndoGroup::New)
+        } else {
+            return ActionResult::Unhandled;
+        };
+        if result.is_ok() {
+            ActionResult::Handled
+        } else {
+            ActionResult::Unsupported
+        }
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = if self.is_password {
+            a11y_tree::Role::PasswordField
+        } else if self.is_multiline {
+            a11y_tree::Role::TextArea
+        } else {
+            a11y_tree::Role::TextField
+        };
+        let content = if self.is_password {
+            &self.password_text
+        } else {
+            &self.text
+        };
+        makepad_platform::a11y::set_string(&mut node.value, content);
+        makepad_platform::a11y::set_string(&mut node.placeholder, &self.empty_text);
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::EDITABLE, !self.is_read_only);
+        node.states
+            .set(a11y_tree::States::READ_ONLY, self.is_read_only);
+        node.states
+            .set(a11y_tree::States::PROTECTED, self.is_password);
+        node.states
+            .set(a11y_tree::States::MULTILINE, self.is_multiline);
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_TEXT_SELECTION;
+        if !self.is_read_only {
+            node.actions
+                .insert(a11y_tree::Actions::SET_VALUE | a11y_tree::Actions::REPLACE_TEXT);
+        }
+        let text = node.text.get_or_insert_with(Default::default);
+        makepad_platform::a11y::set_string(&mut text.content, content);
+        let selection = self.selection_to_password_selection(self.selection);
+        text.selection = (selection.anchor.index as u32, selection.cursor.index as u32);
+        text.lines.clear();
+        text.glyph_x.clear();
+        if let Some(layout) = &self.laidout_text {
+            crate::semantics::text_layout(
+                text,
+                layout,
+                self.text_area.rect(cx).pos,
+                self.draw_text.font_scale,
+                !self.is_read_only || cx.has_key_focus(self.area()),
+            );
+        }
+    }
+
     fn clips_content(&self) -> bool {
         true
     }
@@ -2840,9 +2966,7 @@ impl Widget for TextInput {
         self.text.clone()
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.text.clone())
-    }
+
 
     fn set_text(&mut self, cx: &mut Cx, text: &str) {
         self.text = self.filter_input(text, true);

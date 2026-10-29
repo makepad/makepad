@@ -4,7 +4,7 @@
 //! A story template lives under `mod.stories`. The canvas looks it up by name
 //! in the script heap, builds a widget from it the way a page flip builds a
 //! page, and inserts it into the widget tree under itself so the tree, the
-//! remote `/snap` route and every `ids!` lookup see it. A theme reload
+//! remote `ui` tree and every `ids!` lookup see it. A theme reload
 //! rebuilds every widget from its template, so the canvas drops its story on
 //! `LiveEdit` and instantiates it again on the next draw.
 //!

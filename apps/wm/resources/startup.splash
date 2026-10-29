@@ -30,7 +30,7 @@ View{
                 return sdf.result
             }
         }
-        startup_icon := AppIcon{name: "app" width: 64 height: 64}
+        startup_icon := AppIcon{a11y: {hidden: true} name: "app" width: 64 height: 64}
         placeholder := Label{
             text: "Starting…"
             draw_text +: {color: theme.color_text text_style: theme.font_bold{font_size: 14}}

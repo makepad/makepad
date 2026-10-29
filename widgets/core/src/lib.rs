@@ -30,6 +30,7 @@ pub mod theme_desktop_skeleton;
 pub mod theme_tokens;
 pub mod width_override;
 pub mod widget;
+pub mod semantics;
 pub mod widget_async;
 pub mod splash_host;
 pub mod splash_storage;
@@ -254,7 +255,7 @@ pub use crate::{
 
     view::*,
     widget::{
-        CreateAt, DrawStateWrap, DrawStep, DrawStepApi, OptionWidgetRefExt, SnapshotPart, Widget, WidgetAction,
+        CreateAt, DrawStateWrap, DrawStep, DrawStepApi, OptionWidgetRefExt, Widget, WidgetAction,
         WidgetActionCast, WidgetActionCxExt, WidgetActionOptionApi, WidgetActionTrait,
         WidgetActionsApi, WidgetFactory, WidgetNode, WidgetRef, WidgetRegister, WidgetRegistry,
         WidgetSet, WidgetSetIterator, WidgetUid,

@@ -6272,7 +6272,7 @@ fn readable_paths(cx: &Cx) -> Vec<(u64, String)> {
 }
 
 /// The app's rows without the inspectors: every inspector's subtree, in every
-/// window. A panel is in the widget tree so a remote /snap can drive its
+/// window. A panel is in the widget tree so a remote ui find can drive its
 /// fields, but a Tree tab that listed one would be listing itself — and every
 /// window carries an inspector of its own, so the one hosting this read is
 /// not the only panel in the tree. `flat_tree` is depth-first, so a subtree
@@ -8074,6 +8074,12 @@ pub struct TweakMaterialSwatch {
 }
 
 impl Widget for TweakMaterialSwatch {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
         let turtle_rect = cx.turtle().rect();
@@ -13336,7 +13342,7 @@ impl Tweaker {
             WidgetRef::script_from_value(vm, value)
         });
         // Make the sidebar part of the widget tree (under this tweaker):
-        // /snap lists its rows, so the same remote agent that watches the
+        // ui find lists its rows, so the same remote agent that watches the
         // session can drive the sidebar's fields too.
         cx.widget_tree_insert_child(self.uid, live_id!(sidebar), sidebar.clone());
         self.props_list_uid = sidebar
@@ -21905,7 +21911,7 @@ impl Tweaker {
 
     /// Put the selection's full path on the clipboard. The label shows a
     /// head-clipped version because the panel is narrow; what gets copied is
-    /// the whole id path — the same string `/tweak/apply` and `/snap` take,
+    /// the whole id path — the same string `/tweak/apply` and `ui find` take,
     /// so it is a reference anything can act on, not just read.
     fn copy_footer_path(&mut self, cx: &mut Cx) {
         let Some(sel) = session().lock().unwrap().pinned.clone() else { return };
@@ -22372,6 +22378,11 @@ impl Tweaker {
 }
 
 impl Widget for Tweaker {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         if !tweak_is_on() {
             return false;

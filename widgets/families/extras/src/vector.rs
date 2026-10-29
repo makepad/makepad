@@ -1584,6 +1584,12 @@ impl ScriptHook for Vector {
 }
 
 impl Widget for Vector {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if self.has_animations {
             if let Event::NextFrame(ne) = event {

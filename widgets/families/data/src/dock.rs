@@ -691,20 +691,6 @@ fn is_current_tab_bar(current_tab: Option<LiveId>, tabs: &[LiveId]) -> bool {
     current_tab.is_none_or(|tab| tabs.contains(&tab))
 }
 
-/// The dump types live in the core, which prints them without naming the
-/// dock ([`crate::widget_hooks::WidgetHooks::dock_dump`]).
-pub use crate::widget_hooks::{DockCompactDump, DockCompactTabInfo, DockCompactTabsInfo};
-
-/// Let the widget tree's dumps print a dock's tabs. Run by the family's
-/// registration.
-pub fn install_dock_hooks(cx: &mut Cx) {
-    crate::widget_hooks::WidgetHooks::of(cx).dock_dump = Some(dock_dump);
-}
-
-fn dock_dump(widget: &WidgetRef, cx: &Cx) -> Option<DockCompactDump> {
-    widget.borrow::<Dock>().map(|dock| dock.compact_dump(cx))
-}
-
 /// The share of a panel, along each of its edges, that splits it rather
 /// than joining it. A tenth on all four sides.
 const DROP_EDGE: f64 = 0.1;
@@ -922,69 +908,7 @@ impl Dock {
         id
     }
 
-    pub fn compact_dump(&self, cx: &Cx) -> DockCompactDump {
-        let mut tabs = Vec::new();
-        let mut tab_headers = Vec::new();
-        let mut tabs_ids = Vec::new();
-        tabs_ids.extend(self.tab_bars.keys().copied());
-        tabs_ids.sort_by_key(|id| id.0);
 
-        for tabs_id in tabs_ids {
-            let Some(DockItem::Tabs {
-                tabs: tab_ids,
-                selected,
-                ..
-            }) = self.dock_items.get(&tabs_id)
-            else {
-                continue;
-            };
-            let Some(tab_bar) = self.tab_bars.get(&tabs_id) else {
-                continue;
-            };
-
-            let bar_rect = tab_bar.tab_bar.bar_rect(cx);
-            tabs.push(DockCompactTabsInfo {
-                tabs_id,
-                selected_tab_id: tab_ids.get(*selected).copied(),
-                tab_count: tab_ids.len(),
-                rect: bar_rect,
-            });
-
-            for (index, tab_id) in tab_ids.iter().enumerate() {
-                let Some(tab_rect) = tab_bar.tab_bar.tab_rect(cx, *tab_id) else {
-                    continue;
-                };
-                // A tab bar with more tabs than room scrolls them sideways,
-                // and a tab past its edge is drawn clipped (or not at all).
-                // What is reported is the part a person could click: a tab
-                // half out of view has a rect whose centre is still ON it,
-                // not on whatever the neighbouring panel shows there, and a
-                // tab wholly out of view is not reported as present. Only the
-                // scroll axis is clipped: a tab's own height is its own, and
-                // the bar's box does not say where the label sits in it.
-                let tab_rect = tab_rect.clip((
-                    dvec2(bar_rect.pos.x, tab_rect.pos.y),
-                    dvec2(bar_rect.pos.x + bar_rect.size.x, tab_rect.pos.y + tab_rect.size.y),
-                ));
-                if tab_rect.size.x < 1.0 {
-                    continue;
-                }
-                let title = match self.dock_items.get(tab_id) {
-                    Some(DockItem::Tab { name, .. }) => name.clone(),
-                    _ => String::new(),
-                };
-                tab_headers.push(DockCompactTabInfo {
-                    tabs_id,
-                    tab_id: *tab_id,
-                    is_active: index == *selected,
-                    title,
-                    rect: tab_rect,
-                });
-            }
-        }
-
-        DockCompactDump { tabs, tab_headers }
-    }
 
     fn create_all_items(&mut self, cx: &mut Cx) {
         let mut items = Vec::new();
@@ -2600,6 +2524,32 @@ impl Dock {
 }
 
 impl Widget for Dock {
+    fn semantics_parts(&self, cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        for (id, (_, widget)) in self.items.iter() {
+            if !widget.area().is_valid(cx) {
+                continue;
+            }
+            if let Some(DockItem::Tab { name, .. }) = self.dock_items.get(id) {
+                out.push((
+                    id.0,
+                    None,
+                    a11y_tree::Node {
+                        id: a11y_tree::NodeId::widget(widget.widget_uid().0),
+                        role: a11y_tree::Role::TabPanel,
+                        name: name.clone(),
+                        ..Default::default()
+                    },
+                ));
+            }
+        }
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::TabList;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.handle_event_with_bodies(cx, event, scope, BodyDispatch::Existing)
     }

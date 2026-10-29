@@ -3,13 +3,14 @@
 //! Ported out of the window manager's tile widget (studio's
 //! DesktopRunView before it). The shared-GPU swapchain, the bootstrap
 //! messages, the presented frame, the `Tick`/`TickDone` pacing, the Linux
-//! aux channel, input forwarding and the widget-snapshot round trip live
+//! aux channel, input forwarding and semantic trees and actions live
 //! here; what a host draws or does with the frame does not. The owner
 //! (the WM's `MpRunView`, Stage's app layer) feeds the events it gets from
 //! the hub into the methods below, forwards `take_outgoing()` batches to
 //! the child's socket after every call, and reads the frame through
 //! `presented()` / `texture()`.
 
+#[cfg(target_os = "linux")]
 use std::collections::HashMap;
 
 use crate::hub::ClientId;
@@ -24,8 +25,7 @@ use makepad_platform::shared_framebuf::aux_chan::ExternalEndpointListener;
 use makepad_platform::*;
 use makepad_studio_protocol::{
     AppToStudio, MouseButton, PresentableDraw, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove,
-    PinchPhase, RemoteMouseUp, RemotePinch, RemoteScroll, ScrollPhase, StudioToApp, StudioToAppVec, WidgetSnapshot, WidgetSnapshotRequest,
-    WidgetSnapshotResponse,
+    PinchPhase, RemoteMouseUp, RemotePinch, RemoteScroll, ScrollPhase, StudioToApp, StudioToAppVec,
 };
 use makepad_error_log::log;
 
@@ -197,6 +197,7 @@ pub struct HostedApp {
     pending_move: Option<RemoteMouseMove>,
     last_rect: Rect,
     last_dpi_factor: f64,
+    screen_origin: Option<Vec2d>,
     bootstrap_pending: bool,
     bootstrap_tick_count: u32,
     swapchain: Option<HostSwapchain>,
@@ -223,9 +224,8 @@ pub struct HostedApp {
     live_resize: bool,
     /// Batches for the child, serialized, oldest first.
     outgoing: Vec<(ClientId, Vec<u8>)>,
-    next_snapshot_id: u64,
-    snapshots_pending: Vec<u64>,
-    snapshots_done: HashMap<u64, Vec<WidgetSnapshot>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    a11y: crate::a11y::RemoteUi,
 
     /// The child's GPU descriptor channel: one per child process, shared by the views of its
     /// windows (its first window's view makes it; a later window's view borrows it).
@@ -275,6 +275,7 @@ impl HostedApp {
             pending_move: None,
             last_rect: Rect::default(),
             last_dpi_factor: 0.0,
+            screen_origin: None,
             bootstrap_pending: false,
             bootstrap_tick_count: 0,
             swapchain: None,
@@ -289,9 +290,8 @@ impl HostedApp {
             target_size: None,
             live_resize: false,
             outgoing: Vec::new(),
-            next_snapshot_id: 1,
-            snapshots_pending: Vec::new(),
-            snapshots_done: HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            a11y: Default::default(),
             #[cfg(target_os = "linux")]
             outbox: None,
             #[cfg(target_os = "linux")]
@@ -339,6 +339,8 @@ impl HostedApp {
     /// as `StudioToAppVec` frames with the client they are for. The owner
     /// writes each to that client's socket after every call into this type.
     pub fn take_outgoing(&mut self) -> Vec<(ClientId, Vec<u8>)> {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.send(self.a11y.drain());
         std::mem::take(&mut self.outgoing)
     }
 
@@ -400,8 +402,27 @@ impl HostedApp {
         self.tick_wanted || self.pending_move.is_some()
     }
 
-    /// Place this window at `origin` in the child's window space (see
-    /// `window_origin`). Takes effect with the next geometry message.
+    /// The window's real desktop position, independent of pointer routing.
+    pub fn set_screen_origin(&mut self, origin: Option<Vec2d>) {
+        if self.screen_origin == origin { return; }
+        self.screen_origin = origin;
+        // A moving tile sends only placement. Re-exporting its swapchain here would
+        // turn a compositor animation into GPU handle churn in the hosted app.
+        if !self.bootstrap_pending {
+            if let Some(target) = self.current_target {
+                self.send(vec![StudioToApp::WindowGeomChange {
+                    window_id: target.window_id,
+                    screen_origin: origin.map(|p| (p.x, p.y)),
+                    dpi_factor: self.last_dpi_factor,
+                    left: self.window_origin.x, top: self.window_origin.y,
+                    width: self.last_rect.size.x, height: self.last_rect.size.y,
+                }]);
+            }
+        }
+    }
+
+    /// Place this window in the child's input space (see `window_origin`).
+    /// Takes effect with the next geometry message.
     pub fn set_window_origin(&mut self, origin: Vec2d) {
         if self.window_origin != origin {
             self.window_origin = origin;
@@ -736,9 +757,11 @@ impl HostedApp {
     /// Route one `AppToStudio` message of this child to the state it
     /// belongs to. True when it was one of the protocol's own: a presented
     /// frame, `TickDone`, `RequestAnimationFrame`, the pacing and pointer
-    /// capability announcements, a widget snapshot. Everything else (window
+    /// capability announcements, semantic updates. Everything else (window
     /// creation, cursor, clipboard, relays) is the owner's.
     pub fn on_app_message(&mut self, cx: &mut Cx, msg: &AppToStudio) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.a11y.apply(msg) { return true; }
         match msg {
             AppToStudio::DrawCompleteAndFlip(pd) => {
                 self.set_presentable_draw(cx, *pd);
@@ -749,7 +772,6 @@ impl HostedApp {
             }
             AppToStudio::RequestAnimationFrame => self.request_tick(cx),
             AppToStudio::WakeIn(secs) => self.wake_in(cx, *secs),
-            AppToStudio::WidgetSnapshot(response) => self.on_snapshot_response(response.clone()),
             AppToStudio::Custom(json) => {
                 if let Some(caps) = makepad_platform::ime::HostedPointerCaps::parse(json) {
                     self.set_pointer_caps(caps);
@@ -768,29 +790,10 @@ impl HostedApp {
         self.status.as_ref()
     }
 
-    // ---- widget snapshots ---------------------------------------------
-
-    /// Ask the child for its widget tree. The answer is collected by
-    /// `on_app_message`; poll `take_snapshot` with the id returned here.
-    pub fn snapshot(&mut self) -> u64 {
-        let request_id = self.next_snapshot_id;
-        self.next_snapshot_id += 1;
-        self.snapshots_pending.push(request_id);
-        self.send(vec![StudioToApp::WidgetSnapshot(WidgetSnapshotRequest { request_id })]);
-        request_id
-    }
-
-    fn on_snapshot_response(&mut self, response: WidgetSnapshotResponse) {
-        if let Some(at) = self.snapshots_pending.iter().position(|id| *id == response.request_id) {
-            self.snapshots_pending.remove(at);
-            self.snapshots_done.insert(response.request_id, response.widgets);
-        }
-    }
-
-    /// The answer to `snapshot`, once it arrived (taken: asked for once).
-    pub fn take_snapshot(&mut self, request_id: u64) -> Option<Vec<WidgetSnapshot>> {
-        self.snapshots_done.remove(&request_id)
-    }
+    /// Clone for a remote worker. The worker answers `ui`; the owner continues handling
+    /// messages and draining `take_outgoing` on signals, without waiting on the UI thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn remote_ui(&self) -> crate::a11y::RemoteUi { self.a11y.clone() }
 
     // ---- tick pacing ---------------------------------------------------
 
@@ -981,6 +984,8 @@ impl HostedApp {
         if self.current_target.map(|target| target.client) != target.map(|target| target.client) {
             self.status = None;
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.a11y.reset();
         self.current_target = target;
         self.tick_outstanding = None;
         self.late = false;
@@ -1161,6 +1166,7 @@ impl HostedApp {
         }
         let mut outbound = vec![StudioToApp::WindowGeomChange {
             window_id: target.window_id,
+            screen_origin: self.screen_origin.map(|p| (p.x, p.y)),
             dpi_factor: self.last_dpi_factor,
             left: self.window_origin.x,
             top: self.window_origin.y,

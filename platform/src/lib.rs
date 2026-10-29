@@ -31,6 +31,8 @@ mod cx_api;
 mod shared_bytes;
 
 pub mod action;
+pub mod a11y;
+pub use makepad_a11y as a11y_tree;
 pub mod game_input;
 pub mod frame_trace;
 pub mod frame_sources;
@@ -246,7 +248,7 @@ pub use {
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
         cx::{Cx, CxMemoryReport, CxRef, GpuBackend, LinuxWindowParams, OsType},
-        cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, HapticFeedback, OpenUrlInPlace, ScreenEdges},
+        cx_api::{ CxOsApi, CxOsOp, CxThreadPriority, HapticFeedback, OpenUrlInPlace, ScreenEdges},
         display_context::{DisplayContext, ScreenOrientation, SystemBarAppearance},
         font_policy::{
             extend_font_asset_manifest, font_asset_manifest_len, FontAsset, FontChain, FontPolicy,

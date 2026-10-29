@@ -1081,6 +1081,58 @@ impl TreeView {
 }
 
 impl Widget for TreeView {
+    fn semantics_parts(&self, _cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        for (index, (row, drawn)) in self.rows.iter().zip(&self.drawn).enumerate() {
+            let item = &self.model.nodes()[row.node];
+            let mut states = a11y_tree::States::FOCUSABLE | a11y_tree::States::SELECTABLE;
+            states.set(
+                a11y_tree::States::SELECTED,
+                self.selected.contains(&item.id),
+            );
+            states.set(
+                a11y_tree::States::EXPANDED,
+                row.has_children && row.expanded,
+            );
+            states.set(
+                a11y_tree::States::COLLAPSED,
+                row.has_children && !row.expanded,
+            );
+            out.push((
+                item.id.0,
+                None,
+                a11y_tree::Node {
+                    role: a11y_tree::Role::TreeItem,
+                    name: item.label.clone(),
+                    bounds: makepad_platform::a11y::semantic_rect(drawn.rect),
+                    states,
+                    level: row.depth as u32 + 1,
+                    pos_in_set: index as u32 + 1,
+                    set_size: self.rows.len() as u32,
+                    actions: a11y_tree::Actions::PRESS | a11y_tree::Actions::FOCUS,
+                    toggle: if self.checkable {
+                        if self.ticked.contains(&item.id) {
+                            a11y_tree::Toggle::On
+                        } else {
+                            a11y_tree::Toggle::Off
+                        }
+                    } else {
+                        a11y_tree::Toggle::None
+                    },
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Tree;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.set_size = self.model.nodes().len() as u32;
+        node.states
+            .set(a11y_tree::States::MULTISELECTABLE, self.multi_select);
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.seed();
         self.rows = visible_rows(&self.model, &self.open);

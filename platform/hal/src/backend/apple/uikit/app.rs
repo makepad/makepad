@@ -199,6 +199,7 @@ pub(super) fn did_finish_launching() {
         a.window.set(window);
         a.controller.set(controller);
         a.root.set(root);
+        super::a11y::init();
 
         #[cfg(target_os = "ios")]
         {
@@ -258,6 +259,12 @@ impl App {
 
     pub(super) fn window_view(&self, sid: u32, id: Id) -> Option<ObjcId> {
         self.find(sid, id).map(|w| w.view)
+    }
+
+    pub(super) fn a11y_view(&self, key: u64) -> Option<ObjcId> {
+        self.windows.borrow().iter().find(|w| !w.retired.get()
+            && crate::a11y::window_key(w.sid.get(), w.id.get().index) == key)
+            .map(|w| w.view)
     }
 
     pub(super) fn find(&self, sid: u32, id: Id) -> Option<&'static Win> {

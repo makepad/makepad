@@ -46,6 +46,7 @@ pub(crate) struct HostedClient {
 pub(crate) struct HostGeom {
     pub rect: [f64; 4],
     pub dpi: f64,
+    pub screen_origin: Option<(f64, f64)>,
 }
 
 /// The host may size a window before the app has made it (it learns the
@@ -348,7 +349,14 @@ impl Cx {
 
     /// The host's geometry for a window this app has made.
     fn hal_hosted_geom(&mut self, window: WindowId, geom: HostGeom) {
+        makepad_hal::a11y::set_screen_origin(
+            makepad_hal::a11y::window_key(self.hal.frames.w.session(), window.id() as u32),
+            geom.screen_origin.map(|(x,y)| (x as f32,y as f32)));
         let [left, top, width, height] = geom.rect;
+        let current = &self.windows[window].window_geom;
+        if current.position == dvec2(left, top) && current.inner_size == dvec2(width, height) && current.dpi_factor == geom.dpi {
+            return;
+        }
         self.hal.frames.w.window_hosted_geom(hal_window_id(window), [left as f32, top as f32, width as f32, height as f32], geom.dpi as f32);
         // Apply before the following pointer message in this batch; the HAL has no
         // separate OS geometry event to wait for and must not echo an older scale.
@@ -449,15 +457,23 @@ impl Cx {
             StudioToApp::Swapchain(swapchain) => self.hal_hosted_swapchain(swapchain),
             // The shared-image protocol presents through DrawCompleteAndFlip.
             StudioToApp::RunViewFrameRequest(_) => {},
-            StudioToApp::WindowGeomChange { window_id, dpi_factor, left, top, width, height } => {
+            StudioToApp::WindowGeomChange { window_id, dpi_factor, left, top, width, height, screen_origin } => {
                 if ![left, top, width, height, dpi_factor].iter().all(|v| v.is_finite())
                     || dpi_factor <= 0.0 || width < 0.0 || height < 0.0 { return false; }
-                let geom = HostGeom { rect: [left, top, width, height], dpi: dpi_factor };
+                let geom = HostGeom { rect: [left, top, width, height], dpi: dpi_factor, screen_origin };
                 let made = self.windows.id_iter().find(|w| w.id() == window_id && self.windows[*w].is_created);
                 match made {
                     Some(window) => self.hal_hosted_geom(window, geom),
                     // Not made yet: applied when it is (`hal_hosted_create_window`).
                     None => self.hal.hosted.as_mut().unwrap().early_geom.keep(window_id, geom),
+                }
+            }
+            StudioToApp::WindowFocus { window_id, focused } => {
+                makepad_hal::a11y::set_window_active(
+                    makepad_hal::a11y::window_key(self.hal.frames.w.session(), window_id as u32), focused);
+                let window = self.windows.id_iter().find(|w| w.id() == window_id);
+                if let Some(window) = window {
+                    self.dispatch_studio_msg(StudioToApp::WindowFocus { window_id, focused }, window, dvec2(0.0, 0.0));
                 }
             }
             StudioToApp::Tick => {
@@ -582,8 +598,8 @@ mod tests {
     #[test]
     fn a_size_sent_before_the_window_exists_is_applied_once_it_does() {
         let mut early = EarlyGeom::default();
-        let first = HostGeom { rect: [0.0, 0.0, 800.0, 600.0], dpi: 1.0 };
-        let newest = HostGeom { rect: [0.0, 0.0, 1280.0, 724.0], dpi: 2.0 };
+        let first = HostGeom { rect: [0.0, 0.0, 800.0, 600.0], dpi: 1.0, screen_origin: None };
+        let newest = HostGeom { rect: [0.0, 0.0, 1280.0, 724.0], dpi: 2.0, screen_origin: None };
         early.keep(3, first);
         early.keep(3, newest);
         early.keep(4, first);

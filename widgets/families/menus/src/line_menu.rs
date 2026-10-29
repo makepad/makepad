@@ -1747,6 +1747,21 @@ impl Drop for LineMenu {
 }
 
 impl Widget for LineMenu {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Menu;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.name = (|| -> Option<String> {
+            self.lit
+                .and_then(|i| self.defs.get(i))
+                .map(|s| s.label.clone())
+        })()
+        .unwrap_or_default();
+        node.value =
+            (|| -> Option<String> { Some(self.lit.map(|i| i.to_string()).unwrap_or_default()) })()
+                .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             self.draw_overlay(cx, &[], 0.0);
@@ -1878,53 +1893,77 @@ impl Widget for LineMenu {
         self.lit.and_then(|i| self.defs.get(i)).map(|s| s.label.clone()).unwrap_or_default()
     }
 
-    fn snapshot_selected(&self, _cx: &Cx) -> Option<String> {
-        self.lit.and_then(|i| self.defs.get(i)).map(|s| s.label.clone())
-    }
+
 
     /// The lit section's index, so a test can wait on a number.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.lit.map(|i| i.to_string()).unwrap_or_default())
-    }
+
 
     /// Each row where it can be pressed now, cut to what shows: an ancestor
     /// that clips the stack clips its rows, and the card, on an overlay, is
     /// cut only by the window. A row none of which shows is left out.
-    fn snapshot_parts(&self, cx: &Cx) -> Vec<SnapshotPart> {
-        let area = self.draw_bg.area();
-        // Not drawn this frame (another tab, a page swapped away): a stale
-        // area reads as a zero rect, and rows placed from it would send a
-        // test to press empty space by the window's corner.
-        if !area.is_valid(cx) {
-            return Vec::new();
-        }
-        let stack = area.rect(cx);
-        let pad = self.layout.padding;
-        let lit = self.lit_row_section();
-        let card = self.drawn_card.filter(|_| self.card_showing() && self.reveal.is_at(1.0));
-        let (x, w, shown) = match card {
-            Some(card) => (card.card.pos.x, card.card.size.x, self.overlay_bounds),
-            None => (stack.pos.x, stack.size.x, area.clipped_rect(cx)),
-        };
-        self.rows()
-            .into_iter()
-            .enumerate()
-            .filter_map(|(r, section)| {
-                let row = Rect {
-                    pos: dvec2(x, stack.pos.y + pad.top + r as f64 * self.row_height),
-                    size: dvec2(w, self.row_height),
-                };
-                let rect = row.clip((shown.pos, shown.pos + shown.size));
-                (rect.size.x > 0.0 && rect.size.y > 0.0).then(|| SnapshotPart {
-                    id: self.defs[section].id,
-                    widget_type: "LineMenuSection",
-                    rect,
-                    text: self.defs[section].label.clone(),
-                    selected: lit == Some(section),
-                    enabled: self.section_enabled(section),
+    fn semantics_parts(&self, cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        out.extend((|| {
+            let area = self.draw_bg.area();
+            // Not drawn this frame (another tab, a page swapped away): a stale
+            // area reads as a zero rect, and rows placed from it would send a
+            // test to press empty space by the window's corner.
+            if !area.is_valid(cx) {
+                return Vec::new();
+            }
+            let stack = area.rect(cx);
+            let pad = self.layout.padding;
+            let lit = self.lit_row_section();
+            let card = self
+                .drawn_card
+                .filter(|_| self.card_showing() && self.reveal.is_at(1.0));
+            let (x, w, shown) = match card {
+                Some(card) => (card.card.pos.x, card.card.size.x, self.overlay_bounds),
+                None => (stack.pos.x, stack.size.x, area.clipped_rect(cx)),
+            };
+            self.rows()
+                .into_iter()
+                .enumerate()
+                .filter_map(|(r, section)| {
+                    let row = Rect {
+                        pos: dvec2(x, stack.pos.y + pad.top + r as f64 * self.row_height),
+                        size: dvec2(w, self.row_height),
+                    };
+                    let rect = row.clip((shown.pos, shown.pos + shown.size));
+                    (rect.size.x > 0.0 && rect.size.y > 0.0).then(|| {
+                        (
+                            ((self.defs[section].id).0
+                                ^ LiveId::from_str("LineMenuSection").0.rotate_left(1)),
+                            None,
+                            a11y_tree::Node {
+                                role: a11y_tree::Role::MenuItem,
+                                class: ("LineMenuSection").to_string(),
+                                path: makepad_widgets_core::widget_tree::live_id_token(
+                                    self.defs[section].id,
+                                ),
+                                bounds: makepad_platform::a11y::semantic_rect(rect),
+                                name: self.defs[section].label.clone(),
+                                states: {
+                                    let mut states = a11y_tree::States::FOCUSABLE;
+                                    states.set(a11y_tree::States::SELECTED, lit == Some(section));
+                                    states.set(
+                                        a11y_tree::States::DISABLED,
+                                        !(self.section_enabled(section)),
+                                    );
+                                    states
+                                },
+                                toggle: if lit == Some(section) {
+                                    a11y_tree::Toggle::On
+                                } else {
+                                    a11y_tree::Toggle::Off
+                                },
+                                actions: a11y_tree::Actions::PRESS | a11y_tree::Actions::FOCUS,
+                                ..Default::default()
+                            },
+                        )
+                    })
                 })
-            })
-            .collect()
+                .collect()
+        })());
     }
 }
 
@@ -2735,7 +2774,7 @@ mod tests {
         let full = menu.draw_bg.area().rect(&cx);
         let shown = menu.draw_bg.area().clipped_rect(&cx);
         assert!(full.size.y > shown.size.y + 50.0, "the band clips the stack: {full:?} shown as {shown:?}");
-        let parts = menu.snapshot_parts(&cx);
+        let parts = semantic_parts(&*menu, &cx);
         let within = |r: Rect| {
             r.size.x > 0.0
                 && r.size.y > 0.0
@@ -2745,12 +2784,12 @@ mod tests {
                 && r.pos.y + r.size.y <= shown.pos.y + shown.size.y + 1e-9
         };
         for part in &parts {
-            assert!(within(part.rect), "{:?} is reported at {:?}, outside {shown:?}", part.text, part.rect);
+            assert!(within(node_rect(&part)), "{:?} is reported at {:?}, outside {shown:?}", part.name, node_rect(&part));
         }
         // Rows at 4..22, 22..40 and 40..58 meet the band's 50 points; the rest do not.
-        let names: Vec<&str> = parts.iter().map(|part| part.text.as_str()).collect();
+        let names: Vec<&str> = parts.iter().map(|part| part.name.as_str()).collect();
         assert_eq!(names, vec!["A", "B", "C"]);
-        assert_eq!(parts[2].rect.size.y, shown.pos.y + shown.size.y - parts[2].rect.pos.y, "the last row cut at the band's edge");
+        assert_eq!(node_rect(&parts[2]).size.y, shown.pos.y + shown.size.y - node_rect(&parts[2]).pos.y, "the last row cut at the band's edge");
         });
     }
 
@@ -2916,7 +2955,7 @@ mod tests {
             let longest = line_length(1, &menu.line_metrics(), menu.reveal.value(), true);
             assert!(longest <= menu.max_line(&menu.rows()), "the longest line mid-swing still fits the stack");
             assert!(
-                menu.snapshot_parts(&cx).iter().all(|part| part.rect.pos.x == stack.pos.x),
+                semantic_parts(&*menu, &cx).iter().all(|part| node_rect(&part).pos.x == stack.pos.x),
                 "rows still arriving are reported on the stack, not the card"
             );
             (menu.row_rects(), card)
@@ -2928,7 +2967,7 @@ mod tests {
         assert_eq!(menu.row_rects(), rows, "the rows are hit where they rest");
         assert_eq!(menu.drawn_card, Some(card), "and the card does not move with the swing");
         assert!(
-            menu.snapshot_parts(&cx).iter().all(|part| part.rect.pos.x == card.card.pos.x),
+            semantic_parts(&*menu, &cx).iter().all(|part| node_rect(&part).pos.x == card.card.pos.x),
             "settled, the rows are reported on the card"
         );
         });
@@ -2952,4 +2991,15 @@ mod tests {
         assert!(menu.reveal.is_at(0.0) && !menu.card_showing(), "and gone on the next");
         });
     }
+}
+
+#[cfg(test)]
+fn semantic_parts(widget: &dyn Widget, cx: &Cx) -> Vec<a11y_tree::Node> {
+    let mut parts = Vec::new();
+    widget.semantics_parts(cx, &mut parts);
+    parts.into_iter().map(|(_, _, node)| node).collect()
+}
+#[cfg(test)]
+fn node_rect(node: &a11y_tree::Node) -> Rect {
+    rect(node.bounds.x as f64, node.bounds.y as f64, node.bounds.w as f64, node.bounds.h as f64)
 }

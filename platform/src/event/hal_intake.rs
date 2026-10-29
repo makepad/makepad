@@ -579,6 +579,7 @@ impl Cx {
                 }
                 let user_closed = crate::remote::take_window_close_requested(window_id.id()) || self.windows[window_id].is_created;
                 let title = self.windows[window_id].create_title.clone();
+                self.a11y.close_window(window_id);
                 self.call_event_handler(&Event::WindowClosed(WindowClosedEvent { window_id }));
                 self.windows[window_id].is_created = false;
                 if user_closed {
@@ -859,6 +860,7 @@ impl Cx {
                     if closes { crate::gpu_frame_timer::finish_frame(group); }
                 }
                 let window_frame = self.hal.frames.frame_done(window, frame);
+                self.hal_a11y_presented();
                 // a draw item's backing is reusable once the frame that last read it is done
                 self.textures.1.serials.complete(frame);
                 let pool = self.task_pool();
@@ -982,6 +984,16 @@ impl Cx {
                     (K::SelectFolder | K::SaveFolder, false) => A::FolderSelected(paths.swap_remove(0)),
                 };
                 Cx::post_action(action);
+            }
+            HalEvent::A11yState { consumers, .. } => {
+                self.a11y_native_consumers = consumers;
+                if self.a11y.set_consumers(consumers | self.a11y_host_consumers) { self.redraw_all(); }
+            }
+            HalEvent::A11yAction { window, bytes } => {
+                match makepad_a11y::wire::decode_action(bytes) {
+                    Ok(action) => self.dispatch_a11y_action(window_id(window), action),
+                    Err(error) => crate::error!("{error}"),
+                }
             }
             HalEvent::Query { req, bytes } => self.hal_answer_query(req, bytes),
 

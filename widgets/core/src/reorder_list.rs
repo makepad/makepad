@@ -740,6 +740,12 @@ impl ReorderList {
 }
 
 impl Widget for ReorderList {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::List;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn clips_content(&self) -> bool {
         true
     }

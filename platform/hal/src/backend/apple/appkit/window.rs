@@ -278,7 +278,10 @@ impl Win {
             let () = msg_send![self.window, setAlphaValue: 0.0f64];
             let () = msg_send![self.window, setIgnoresMouseEvents: YES];
         }
-        if self.nonactivating_panel() || !focus_allowed() {
+        if windows_hidden() {
+            // Explicit Metal + MAKEPAD_HIDE_WINDOWS keeps real AppKit objects for native
+            // inspection, without ordering their windows onto the display.
+        } else if self.nonactivating_panel() || !focus_allowed() {
             // visible but unfocused: never key, the app never activates
             let () = msg_send![self.window, orderFront: nil];
         } else {
@@ -318,8 +321,12 @@ impl Win {
         let () = msg_send![self.window, setContentView: self.view];
         let () = msg_send![self.window, makeFirstResponder: self.view];
         // orderFront, then makeKey so the delegate gets resignKey on focus loss
-        let () = msg_send![self.window, orderFront: nil];
-        let () = msg_send![self.window, makeKeyWindow];
+        if !windows_hidden() {
+            let () = msg_send![self.window, orderFront: nil];
+            if focus_allowed() {
+                let () = msg_send![self.window, makeKeyWindow];
+            }
+        }
         self.add_tracking(size);
         let input_context: ObjcId = msg_send![self.view, inputContext];
         let () = msg_send![input_context, invalidateCharacterCoordinates];
@@ -379,8 +386,10 @@ impl Win {
 
     /// Moves input and window commands to the borrower without replacing AppKit objects.
     pub fn lend(&self, sid: u32, id: Id) {
+        let old_key = crate::a11y::window_key(self.sid.get(), self.id.get().index);
         self.sid.set(sid);
         self.id.set(id);
+        super::a11y::drop_window(old_key);
         self.want_frame.set(false);
         self.ime_active.set(false);
         self.dpi_override.set(None);
@@ -497,6 +506,7 @@ impl Win {
         if self.retired.replace(true) {
             return;
         }
+        super::a11y::drop_window(crate::a11y::window_key(self.sid.get(), self.id.get().index));
         Shared::global().unregister_layer(self.owner_sid, self.owner_id);
         app().window_gone(self);
         // retired windows send nothing: the one `Closed` is the last event of the window
@@ -512,6 +522,7 @@ impl Win {
         if self.retired.replace(true) {
             return;
         }
+        super::a11y::drop_window(crate::a11y::window_key(self.sid.get(), self.id.get().index));
         Shared::global().unregister_layer(self.owner_sid, self.owner_id);
         app().window_gone(self);
         unsafe {
@@ -973,6 +984,9 @@ impl Win {
                     return;
                 }
                 window_state::SHOW => {
+                    if windows_hidden() {
+                        return;
+                    }
                     // shown again (a tray app's panel): in front and, when this process may
                     // take the focus, the key window
                     if focus_allowed() {
@@ -1242,10 +1256,19 @@ fn event_is_press_motion(event: ObjcId) -> bool {
     DRAG_START_EVENTS.iter().any(|k| *k == kind)
 }
 
+/// Explicit native Metal runs can keep AppKit windows alive without showing them.
+fn windows_hidden() -> bool {
+    static HIDDEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HIDDEN.get_or_init(|| std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some())
+}
+
 /// Whether this process may activate itself or make a window key. An agent-driven or test
 /// instance (`MAKEPAD_NO_FOCUS`, the `NO_FOCUS` open flag the client sets for `--remote`) shows
 /// its windows but never takes the user's focus; `MAKEPAD_FOCUS` restores activation.
 pub fn focus_allowed() -> bool {
+    if windows_hidden() {
+        return false;
+    }
     static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ALLOWED.get_or_init(|| {
         if std::env::var_os("MAKEPAD_FOCUS").is_some() {

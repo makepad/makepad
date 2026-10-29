@@ -194,6 +194,47 @@ impl FoldButton {
 }
 
 impl Widget for FoldButton {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        request: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        let open = match request.action {
+            a11y_tree::Actions::EXPAND => true,
+            a11y_tree::Actions::COLLAPSE => false,
+            _ => return a11y_tree::ActionResult::Unhandled,
+        };
+        if open != self.is_open(cx) {
+            self.set_is_open(cx, open, Animate::Yes);
+            cx.widget_action_with_data(
+                &self.action_data,
+                self.widget_uid(),
+                if open {
+                    FoldButtonAction::Opening
+                } else {
+                    FoldButtonAction::Closing
+                },
+            );
+        }
+        a11y_tree::ActionResult::Handled
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::DisclosureButton;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::EXPAND;
+        node.states
+            .set(a11y_tree::States::EXPANDED, self.is_open(cx));
+        node.states
+            .set(a11y_tree::States::COLLAPSED, !self.is_open(cx));
+        node.actions.insert(a11y_tree::Actions::COLLAPSE);
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
         let res = self.animator_handle_event(cx, event);

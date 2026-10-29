@@ -180,22 +180,6 @@ pub trait CxOsApi {
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);*/
 }
 
-/// Type-erased accessibility tree update payload. PartialEq always returns
-/// false — accessibility updates are never deduplicated.
-pub struct AccessibilityUpdatePayload(pub Box<dyn std::any::Any + Send>);
-
-impl PartialEq for AccessibilityUpdatePayload {
-    fn eq(&self, _other: &Self) -> bool {
-        false
-    }
-}
-
-impl std::fmt::Debug for AccessibilityUpdatePayload {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "AccessibilityUpdatePayload(..)")
-    }
-}
-
 /// A set of screen edges, for [`Cx::defer_system_gestures`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ScreenEdges(u8);
@@ -380,7 +364,8 @@ pub enum CxOsOp {
         end: Vec2d,
     },
     HideSelectionHandles,
-    AccessibilityUpdate(AccessibilityUpdatePayload),
+    A11yUpdate { window: WindowId, bytes: Vec<u8> },
+    A11yActionDone { req: u64, result: u8 },
 
     CheckPermission {
         permission: crate::permission::Permission,
@@ -537,7 +522,8 @@ impl CxOsOp {
             Self::ShowSelectionHandles { .. } => "ShowSelectionHandles",
             Self::UpdateSelectionHandles { .. } => "UpdateSelectionHandles",
             Self::HideSelectionHandles => "HideSelectionHandles",
-            Self::AccessibilityUpdate(..) => "AccessibilityUpdate",
+            Self::A11yUpdate { .. } => "A11yUpdate",
+            Self::A11yActionDone { .. } => "A11yActionDone",
 
             Self::CheckPermission { .. } => "CheckPermission",
             Self::RequestPermission { .. } => "RequestPermission",
@@ -1818,17 +1804,6 @@ impl Cx {
         if self.script_data.std.host_io_only() { return; }
         self.platform_ops
             .push_back(CxOsOp::SetPrimarySelection(content.to_owned()));
-    }
-
-    /// Forward an accessibility tree update to the platform adapter.
-    ///
-    /// The `update` is a type-erased `accesskit::TreeUpdate`. Platform backends
-    /// downcast it when an accessibility adapter is active.
-    pub fn update_accessibility_tree(&mut self, update: Box<dyn std::any::Any + Send>) {
-        self.platform_ops
-            .push_back(CxOsOp::AccessibilityUpdate(AccessibilityUpdatePayload(
-                update,
-            )));
     }
 
     /// Show native selection handles at the given start and end positions (mobile).

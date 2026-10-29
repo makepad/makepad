@@ -738,6 +738,10 @@ impl Drop for Vulkan {
 }
 
 impl Gpu for Vulkan {
+    #[cfg(target_os = "android")]
+    fn a11y_notify(&mut self, window: u64, notifications: &[makepad_a11y::Notification]) {
+        super::android::a11y::notify(window, notifications);
+    }
     #[cfg(target_os = "linux")]
     fn native_layer(&mut self, world: &mut World, sid: u32, command: &crate::cmds::HalCmd) -> bool {
         let mut native = std::mem::take(&mut self.native_apps);

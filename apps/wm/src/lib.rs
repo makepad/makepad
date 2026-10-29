@@ -19,6 +19,8 @@ use makepad_widgets::makepad_platform::hosted_relay::HostRelayServer;
 use makepad_widgets::tween::{ClockPolicy, LagSmoothing, TweenClock};
 use makepad_widgets::*;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod a11y;
 mod ai_bus;
 mod apps;
 mod binds;
@@ -234,7 +236,7 @@ script_mod! {
                         snap_overlay := SnapOverlay{}
                         shell_panel := ShellPanel{}
                         shell_menu := ShellMenu{}
-                        shell_notes := ShellNotifications{}
+                        shell_notes := ShellNotifications{a11y: {label: "Notifications"}}
                         shell_osd := ShellOsd{}
                         shot_overlay := ShotOverlay{}
                         // Over everything: a client's file dialog (shell/file_picker.rs).
@@ -263,7 +265,7 @@ script_mod! {
                         }
                         desktop_controls := View{
                             width: Fill height: Fill
-                            shell_bar := ShellBar{width: Fill height: Fill}
+                            shell_bar := ShellBar{a11y: {label: "Desktop bar"} width: Fill height: Fill}
                         }
                         phone_controls := PhoneSurface{visible: false}
                     }
@@ -1397,6 +1399,7 @@ impl App {
             let shared = shared_swapchain_from_host_swapchain(&swapchain, cx);
             let mut msgs = vec![
                 StudioToApp::WindowGeomChange {
+                    screen_origin: None,
                     window_id,
                     dpi_factor: dpi,
                     left: 0.0,
@@ -2183,6 +2186,8 @@ impl App {
 
     fn remove_client(&mut self, cx: &mut Cx, client: ClientId) {
         self.native_app_owner_gone(client);
+        #[cfg(not(target_arch = "wasm32"))]
+        a11y::disconnected(client);
         // An app's later windows go with it; a later window going is forgotten here.
         for window in self.client_windows.forget(client) {
             self.remove_client(cx, window);
@@ -3208,6 +3213,8 @@ impl App {
                         .to_string_lossy()
                         .to_string();
                     if let Some(slot) = self.state_mut().clients.get_mut(&client) {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        a11y::connected(client, &slot.app, sender.clone());
                         slot.sender = Some(sender);
                         slot.socket = Some(socket);
                         if let Some(sender) = &slot.sender {
@@ -3243,6 +3250,8 @@ impl App {
                     if let Some(client) = client {
                         let mut adopted = false;
                         if let Some(slot) = self.state_mut().clients.get_mut(&client) {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            a11y::disconnected(client);
                             slot.sender = None;
                             slot.socket = None;
                             adopted = slot.external.is_some();
@@ -3399,6 +3408,8 @@ impl App {
     }
 
     fn on_app_msg(&mut self, cx: &mut Cx, client: ClientId, msg: AppToStudio) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if a11y::apply(client, &msg) { return; }
         match msg {
             AppToStudio::NativeApp(request) => self.native_app_request(cx, client, request),
             AppToStudio::CreateWindow { window_id, .. } => {
@@ -6122,6 +6133,8 @@ fn scan_theme_color(source: &str, key: &str) -> Option<Vec4f> {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         #[cfg(not(target_arch = "wasm32"))]
+        makepad_hal::a11y::register_ui_router(a11y::dispatch);
+        #[cfg(not(target_arch = "wasm32"))]
         { self.domains.enabled = cx.hal_can_host_domains(); }
         // The one bus owner of this process tree: hosted apps' tools are
         // served through the process registry (ai_bus.rs).
@@ -7142,6 +7155,8 @@ impl AppMain for App {
             }
         }
         if let Event::Signal = event {
+            #[cfg(not(target_arch = "wasm32"))]
+            a11y::flush();
             if SignalToUI::check_and_clear_ui_signal() && self.state.is_some() {
                 makepad_app_host::hosted::trace_host(host::wall_now(), "sig");
                 self.poll_backgrounds(cx);

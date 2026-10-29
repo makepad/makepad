@@ -329,6 +329,16 @@ impl WebView {
 }
 
 impl Widget for WebView {
+    fn semantics(&self, _cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::Document;
+        makepad_platform::a11y::set_string(&mut node.class, "WebView");
+        makepad_platform::a11y::set_string(
+            &mut node.name,
+            if self.state.title.is_empty() { self.url.as_ref() } else { &self.state.title },
+        );
+        node.states.set(a11y_tree::States::BUSY, self.state.loading);
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Event::Shutdown = event {
             self.close(cx);

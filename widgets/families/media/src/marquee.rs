@@ -188,6 +188,24 @@ impl Marquee {
 }
 
 impl Widget for Marquee {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Status;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            Some(format!(
+                "{} {:.1}",
+                if self.travelling() {
+                    "travelling"
+                } else {
+                    "held"
+                },
+                self.offset
+            ))
+        })()
+        .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         // Clipped, always: the whole point is that the copies run past both
         // edges and only the strip is seen.
@@ -288,15 +306,7 @@ impl Widget for Marquee {
         }
     }
 
-    /// What the strip is doing, so a test can prove it moves rather than
-    /// comparing two pictures of a moving thing.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format!(
-            "{} {:.1}",
-            if self.travelling() { "travelling" } else { "held" },
-            self.offset
-        ))
-    }
+
 }
 
 impl MarqueeRef {

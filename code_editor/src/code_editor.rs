@@ -1040,6 +1040,96 @@ impl CodeEditor {
 
     /// The lines drawn last frame (0-based, half-open); empty before the
     /// first draw.
+    pub fn semantics(&self, cx: &Cx, session: &CodeSession, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::TextArea;
+        node.states = a11y_tree::States::FOCUSABLE | a11y_tree::States::MULTILINE;
+        node.states
+            .set(a11y_tree::States::READ_ONLY, self.is_read_only());
+        node.states
+            .set(a11y_tree::States::EDITABLE, !self.is_read_only());
+        node.actions = a11y_tree::Actions::FOCUS;
+        let text = node.text.get_or_insert_with(Default::default);
+        let doc = session.document();
+        let document_text = doc.as_text();
+        let lines = document_text.as_lines();
+        let content = document_text.to_string();
+        makepad_platform::a11y::set_string(&mut text.content, &content);
+        let offset = |pos: Position| {
+            lines
+                .iter()
+                .take(pos.line_index)
+                .map(|line| line.len() + 1)
+                .sum::<usize>()
+                + pos.byte_index
+        };
+        if let Some(selection) = session.selections().first() {
+            text.selection = (
+                offset(selection.anchor) as u32,
+                offset(selection.cursor.position) as u32,
+            );
+        }
+        text.lines.clear();
+        text.glyph_x.clear();
+        let glyphs = !self.is_read_only() || cx.has_key_focus(self.area());
+        let layout = session.layout();
+        let mut byte_offset = 0;
+        for (index, content) in lines.iter().enumerate() {
+            if self.visible_lines().contains(&index) && layout.view_line_range().contains(&index) {
+                let line = layout.line(index);
+                let bytes = layout.line_byte_range(index);
+                let mut last_row = None;
+                for (byte, _) in content[bytes.clone()]
+                    .char_indices()
+                    .map(|(b, c)| (bytes.start + b, c))
+                    .chain(std::iter::once((bytes.end, '\0')))
+                {
+                    let (row, col) = line.logical_to_grid_position(byte, Affinity::After);
+                    let rect = self
+                        .grid_rect(line, row, col, 1)
+                        .translate(self.unscrolled_rect.pos);
+                    if last_row != Some(row) {
+                        if last_row.is_some() && glyphs {
+                            text.glyph_x.push(rect.pos.x as f32);
+                        }
+                        text.lines.push(a11y_tree::LineBox {
+                            start: (byte_offset + byte) as u32,
+                            rect: makepad_platform::a11y::semantic_rect(rect),
+                            baseline: (rect.pos.y + rect.size.y) as f32,
+                        });
+                        last_row = Some(row);
+                    }
+                    if let Some(last) = text.lines.last_mut() {
+                        last.rect.w = (rect.pos.x + rect.size.x) as f32 - last.rect.x;
+                    }
+                    if glyphs {
+                        text.glyph_x.push(rect.pos.x as f32);
+                    }
+                }
+                // The semantic line includes its terminating newline. It has no advance.
+                if glyphs && index + 1 < lines.len() {
+                    if let Some(x) = text.glyph_x.last().copied() {
+                        text.glyph_x.push(x);
+                    }
+                }
+            }
+            byte_offset += content.len() + 1;
+        }
+        // Bound the last visible line's byte range without claiming geometry for
+        // the rest of the document. The mirror falls back to empty bounds there.
+        if let Some(last) = text.lines.last() {
+            let end = text.content[last.start as usize..]
+                .find('\n')
+                .map(|i| last.start as usize + i + 1)
+                .unwrap_or(text.content.len());
+            if end < text.content.len() {
+                text.lines.push(a11y_tree::LineBox {
+                    start: end as u32,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
     pub fn visible_lines(&self) -> Range<usize> {
         if self.viewport_rect.size.y <= 0.0 {
             return 0..0;

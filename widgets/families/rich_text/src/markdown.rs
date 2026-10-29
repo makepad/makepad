@@ -292,6 +292,12 @@ pub struct Markdown {
 }
 
 impl Widget for Markdown {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Document;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn is_interactive(&self) -> bool {
         false
     }
@@ -924,6 +930,16 @@ impl WidgetMatchEvent for MarkdownLink {
 }
 
 impl Widget for MarkdownLink {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Link;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.link.handle_event(cx, event, scope);
         self.widget_match_event(cx, event, scope)

@@ -77,7 +77,7 @@ else
     check "status reports the window" "$STATUS" '"i":0'
 
     HELP=$(r help)
-    check "help lists the commands" "$HELP" '"cmd":"snap"'
+    check "help lists the commands" "$HELP" '"cmd":"ui find"'
 
     GRAB=$(r grab scale=0.5)
     PNG=$(echo "$GRAB" | sed -n 's/.*"png":"\([^"]*\)".*/\1/p')
@@ -87,28 +87,12 @@ else
         bad "grab did not produce a PNG: $GRAB"
     fi
 
-    # find a button by name, click its centre, watch the app's own label change
-    r snap q=buttons_tab >/tmp/remote-smoke-tab.json
-    TAB=$(python3 -c "
-import json
-w=json.load(open('/tmp/remote-smoke-tab.json'))['s'][0]['r']
-print(int(w[0]+w[2]/2), int(w[1]+w[3]/2))
-" 2>/dev/null)
-    if [ -n "$TAB" ]; then
-        r click x="${TAB% *}" y="${TAB#* }" wait=1 >/dev/null
-        BEFORE=$(r snap q=press_status)
-        BTN=$(r snap q=press_demo_button | python3 -c "
-import json,sys
-w=json.load(sys.stdin)['s'][0]['r']
-print(int(w[0]+w[2]/2), int(w[1]+w[3]/2))
-" 2>/dev/null)
-        r click x="${BTN% *}" y="${BTN#* }" wait=1 >/dev/null
-        AFTER=$(r snap q=press_status)
-        check "click before: label idle" "$BEFORE" "Last press: none"
-        check "click after: app state changed" "$AFTER" "Last press: Run on_press"
-    else
-        bad "snap q= found no buttons_tab"
-    fi
+    r ui act q=path=buttons_tab press wait=1 >/dev/null
+    BEFORE=$(r ui find q=path=press_status)
+    r ui act q=path=press_demo_button press wait=1 >/dev/null
+    AFTER=$(r ui find q=path=press_status)
+    check "press before: label idle" "$BEFORE" "Last press: none"
+    check "press after: app state changed" "$AFTER" "Last press: Run on_press"
 
     check "grab on a dead window 404s clearly" \
         "$(r grab w=9)" '"err":"no window 9"'
@@ -129,18 +113,13 @@ SOCK=$(launch makepad-example-text-input /tmp/remote-smoke-text.log)
 if [ -z "$SOCK" ]; then
     bad "no startup line"
 else
-    BOX=$(r snap q=input_singleline | python3 -c "
-import json,sys
-w=json.load(sys.stdin)['s'][0]['r']
-print(int(w[0]+w[2]/2), int(w[1]+w[3]/2))
-" 2>/dev/null)
-    r click x="${BOX% *}" y="${BOX#* }" wait=1 >/dev/null
+    r ui act q=path=input_singleline focus wait=1 >/dev/null
     r key t="hello remote" wait=1 >/dev/null
     check "key t= typed into the focused TextInput" \
-        "$(r snap q=input_singleline)" '"val":"hello remote"'
+        "$(r ui find json=1 q=path=input_singleline)" '"value":"hello remote"'
     r key k=press c=Backspace wait=1 >/dev/null
     check "key c=Backspace deleted a character" \
-        "$(r snap q=input_singleline)" '"val":"hello remot"'
+        "$(r ui find json=1 q=path=input_singleline)" '"value":"hello remot"'
     r gq >/dev/null
     sleep 2
 fi
@@ -168,16 +147,11 @@ else
     fi
 
     # type into window 1; window 0's label must react
-    BOX=$(r snap w=1 q=panel_input | python3 -c "
-import json,sys
-w=json.load(sys.stdin)['s'][0]['r']
-print(int(w[0]+w[2]/2), int(w[1]+w[3]/2))
-" 2>/dev/null)
-    r click w=1 x="${BOX% *}" y="${BOX#* }" wait=1 >/dev/null
+    r ui act w=1 q=path=panel_input focus wait=1 >/dev/null
     r key w=1 t="cross window" wait=1 >/dev/null
     r key w=1 k=press c=enter wait=1 >/dev/null
     check "input to window 1 updated window 0" \
-        "$(r snap w=0 q=status_label)" "Panel submitted"
+        "$(r ui find w=0 q=path=status_label)" "Panel submitted"
 
     r close w=1 >/dev/null
     sleep 1
@@ -212,12 +186,7 @@ for run in a b; do
     MP4=/tmp/remote-smoke-virtual-$run.mp4
     rm -f "$MP4"
     check "cap start" "$(r cap start path=$MP4 fps=60)" '"virtual_clock":1'
-    BOX=$(r snap q=input_singleline | python3 -c "
-import json,sys
-w=json.load(sys.stdin)['s'][0]['r']
-print(w[0]+w[2]/2, w[1]+w[3]/2)
-" 2>/dev/null)
-    r click x="${BOX% *}" y="${BOX#* }" >/dev/null
+    r ui act q=path=input_singleline focus wait=1 >/dev/null
     r key t=virtual >/dev/null
     check "step with a capture counts captured frames" "$(r step frames=90)" '"captured":90'
     check "settled answers" "$(r settled)" '"settled":'

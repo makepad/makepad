@@ -137,7 +137,9 @@ script_mod! {
                         Row { row_b2 := Text { draw_text +: { text_style: theme.font_bold{ font_size: 24 } } } }
                         Row { row_b3 := Text { draw_text +: { text_style: theme.font_bold{ font_size: 36 } } } }
                     }
-                    kept := mod.widgets.KeptRun {}
+                    kept := mod.widgets.KeptRun {
+                        a11y: {role: "group" label: "Retained text sample"}
+                    }
                     View {
                         width: Fill
                         height: 60
@@ -464,6 +466,7 @@ impl MatchEvent for App {
                 } else {
                     continue;
                 };
+                log!("atlas-stress: {text}");
                 self.ui.label(cx, ids!(churn_status)).set_text(cx, &text);
             }
         }

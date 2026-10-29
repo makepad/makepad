@@ -1575,6 +1575,54 @@ impl ScriptHook for Button {
 }
 
 impl Widget for Button {
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        action: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionResult, Actions as A};
+        if action.action != A::PRESS {
+            return ActionResult::Unhandled;
+        }
+        if !self.enabled || self.disabled(cx) || self.loading {
+            return ActionResult::Disabled;
+        }
+        let uid = self.widget_uid();
+        if self.grab_key_focus {
+            cx.set_key_focus(self.draw_bg.area());
+        }
+        cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_press.clone(), &[]);
+        if self.trigger_on_press {
+            cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_click.clone(), &[]);
+        }
+        cx.widget_action_with_data(
+            &self.action_data,
+            uid,
+            ButtonAction::Clicked(KeyModifiers::default()),
+        );
+        if !self.trigger_on_press {
+            cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_click.clone(), &[]);
+        }
+        if !self.text_to_copy.is_empty() {
+            self.copy_now(cx);
+        }
+        self.animator_play(cx, ids!(hover.off));
+        ActionResult::Handled
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::Button;
+        makepad_platform::a11y::set_string(&mut node.name, self.shown_label());
+        node.actions = a11y_tree::Actions::PRESS | a11y_tree::Actions::FOCUS;
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states.set(
+            a11y_tree::States::DISABLED,
+            !self.enabled || self.disabled(cx) || self.loading,
+        );
+        node.states.set(a11y_tree::States::BUSY, self.loading);
+    }
+
     /// Its text, laid out (hidden buttons draw nothing).
     fn scan(&mut self, cx: &mut Cx, _scan: &ScanEvent, _scope: &mut Scope) {
         self.draw_text.scan_text(cx, self.text.as_ref());

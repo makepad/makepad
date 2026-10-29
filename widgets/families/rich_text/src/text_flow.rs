@@ -1351,6 +1351,12 @@ impl WidgetNode for TextFlow {
 }
 
 impl Widget for TextFlow {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Document;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn is_interactive(&self) -> bool {
         false
     }
@@ -2967,6 +2973,16 @@ impl WidgetNode for TextFlowLink {
 }
 
 impl Widget for TextFlowLink {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Link;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
             if let Some(tf) = scope.data_mut().get_mut::<TextFlow>() {

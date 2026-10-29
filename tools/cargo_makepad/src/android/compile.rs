@@ -1263,6 +1263,7 @@ fn compile_java(
     let java_sources = vec![
         r_class_path.clone(),
         makepad_java_classes_dir.join("MakepadNative.java"),
+        makepad_java_classes_dir.join("MakepadA11yProvider.java"),
         makepad_java_classes_dir.join("MakepadActivity.java"),
         makepad_java_classes_dir.join("NativeLayerContainer.java"),
         makepad_java_classes_dir.join("MakepadInputConnection.java"),

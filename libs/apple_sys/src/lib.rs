@@ -7,6 +7,12 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_snake_case)]
 
+#[cfg(target_os = "macos")]
+pub mod accessibility;
+
+#[cfg(any(target_os = "ios", target_os = "tvos"))]
+pub mod ui_accessibility;
+
 pub const fn four_char_as_u32(s: &str) -> u32 {
     let b = s.as_bytes();
     ((b[0] as u32) << 24) | ((b[1] as u32) << 16) | ((b[2] as u32) << 8) | (b[3] as u32)

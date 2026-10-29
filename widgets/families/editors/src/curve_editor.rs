@@ -1341,6 +1341,26 @@ impl CurveEditor {
 }
 
 impl Widget for CurveEditor {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            let mut s = String::new();
+            for (i, a) in self.model.anchors.iter().enumerate() {
+                if i > 0 {
+                    s.push(' ');
+                }
+                let _ = write!(s, "[{:.3}, {:.3}, {}]", a[0], a[1], kind_name(a[2]));
+            }
+            if !self.model.sels.is_empty() {
+                let _ = write!(s, " selected {:?}", self.model.sels);
+            }
+            Some(s)
+        })()
+        .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.tools.is_none() {
             self.sync_tools(cx);
@@ -1408,19 +1428,7 @@ impl Widget for CurveEditor {
         }
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        let mut s = String::new();
-        for (i, a) in self.model.anchors.iter().enumerate() {
-            if i > 0 {
-                s.push(' ');
-            }
-            let _ = write!(s, "[{:.3}, {:.3}, {}]", a[0], a[1], kind_name(a[2]));
-        }
-        if !self.model.sels.is_empty() {
-            let _ = write!(s, " selected {:?}", self.model.sels);
-        }
-        Some(s)
-    }
+
 }
 
 impl CurveEditorRef {

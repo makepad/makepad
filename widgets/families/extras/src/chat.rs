@@ -875,6 +875,18 @@ impl ChatBubble {
 }
 
 impl Widget for ChatBubble {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::ListItem;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+        node.value =
+            (|| -> Option<String> { Some(self.group.name().to_string()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1143,11 +1155,7 @@ impl Widget for ChatBubble {
         }
     }
 
-    /// Where it sits in its run: the one thing about a bubble that is not
-    /// visible in its text and is worth waiting on from a test.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.group.name().to_string())
-    }
+
 }
 
 impl ChatBubbleRef {
@@ -1417,6 +1425,14 @@ impl ChatList {
 }
 
 impl Widget for ChatList {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::List;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value =
+            (|| -> Option<String> { Some(self.messages.len().to_string()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.seed(cx.cx.cx);
         self.draw_bg.begin(cx, walk, self.layout);
@@ -1479,9 +1495,7 @@ impl Widget for ChatList {
         format!("{} messages", self.messages.len())
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.messages.len().to_string())
-    }
+
 }
 
 impl ChatListRef {

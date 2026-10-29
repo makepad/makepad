@@ -411,6 +411,10 @@ pub struct FileTreeNode {
     /// What the tree parked for the next draw (see `FileTreeNodeDraw`).
     #[rust]
     pub pending_draw: Option<FileTreeNodeDraw>,
+    #[rust]
+    semantic_name: String,
+    #[rust]
+    semantic_level: u32,
     #[redraw]
     #[live]
     draw_bg: DrawBgQuad,
@@ -586,6 +590,10 @@ impl FileTreeNode {
         depth: usize,
         scale: f64,
     ) {
+        if cx.a11y.on {
+            makepad_platform::a11y::set_string(&mut self.semantic_name, name);
+            self.semantic_level = depth as u32 + 1;
+        }
         self.set_draw_state(is_even, scale);
 
         self.draw_bg.begin(
@@ -618,6 +626,10 @@ impl FileTreeNode {
         depth: usize,
         scale: f64,
     ) {
+        if cx.a11y.on {
+            makepad_platform::a11y::set_string(&mut self.semantic_name, name);
+            self.semantic_level = depth as u32 + 1;
+        }
         self.set_draw_state(is_even, scale);
 
         self.draw_bg.begin(
@@ -723,6 +735,27 @@ impl FileTreeNode {
 }
 
 impl Widget for FileTreeNode {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::TreeItem;
+        makepad_platform::a11y::set_string(&mut node.name, &self.semantic_name);
+        node.level = self.semantic_level;
+        node.states = a11y_tree::States::FOCUSABLE | a11y_tree::States::SELECTABLE;
+        node.states
+            .set(a11y_tree::States::SELECTED, self.active > 0.5);
+        node.states.set(
+            a11y_tree::States::EXPANDED,
+            self.is_folder && self.opened > 0.5,
+        );
+        node.states.set(
+            a11y_tree::States::COLLAPSED,
+            self.is_folder && self.opened <= 0.5,
+        );
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+    }
+
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
         // Driven by `FileTree::handle_event` through `handle_event_with`, which
         // needs the tree's node id and action sink; nothing to do on the plain
@@ -1132,6 +1165,12 @@ impl WidgetNode for FileTree {
 }
 
 impl Widget for FileTree {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Tree;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
 

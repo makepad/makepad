@@ -1,4 +1,5 @@
 import { WasmBridge } from "../makepad_wasm_bridge/wasm_bridge.js"
+import { MakepadA11y } from "./a11y.js"
 
 // The drawable has no pixel budget and no DPR ceiling of its own: the
 // canvas is the CSS size at the device's pixel ratio, bounded only by the
@@ -1268,10 +1269,15 @@ export class WasmWebBrowser extends WasmBridge {
         // @end xr
         this.update_window_info();
 
+        // Pages may opt out before startup with makepadA11yEnabled = false, or ?a11y=0.
+        this.a11y = new MakepadA11y(this, window.makepadA11yEnabled !== false
+            && new URLSearchParams(location.search).get("a11y") !== "0");
+
         const hardware_concurrency = Number.isFinite(navigator.hardwareConcurrency)
             ? Math.max(1, Math.floor(navigator.hardwareConcurrency))
             : 1;
         this.to_wasm.ToWasmInit({
+            a11y_enabled: this.a11y.enabled,
             gpu_info: this.gpu_info,
             cpu_cores: hardware_concurrency,
             wasm_memory_max_pages: this.wasm._memory_max_pages || 16384,
@@ -2080,6 +2086,20 @@ export class WasmWebBrowser extends WasmBridge {
     // @section text-input
     FromWasmShowTextIME(args) {
         this.update_text_area_pos(args);
+    }
+
+    FromWasmA11yUpdate(args) {
+        try {
+            const bytes = new Uint8Array(this.memory.buffer, args.bytes.ptr, args.bytes.len);
+            this.a11y.apply(args.window, this.msg_class.a11y.decodeUpdate(bytes));
+        } finally { this.free_data_u8(args.bytes); }
+    }
+
+    FromWasmA11yActionDone(args) {
+        // Automation can listen without an ever-growing pending-request table in the adapter.
+        window.dispatchEvent(new CustomEvent("makepad-a11y-action-done", {detail: {
+            req: (BigInt(args.req_hi) << 32n) | BigInt(args.req_lo), result: args.result,
+        }}));
     }
 
     FromWasmHideTextIME() {
@@ -4196,17 +4216,20 @@ export class WasmWebBrowser extends WasmBridge {
     // @end file-dialog
 
     bind_keyboard() {
+        if (this.a11y?.enabled) return;
         if (this.detect.is_mobile_safari || this.detect.is_android) { // mobile keyboards are unusable on a UI like this. Not happening.
             return
         }
 
         var ta = this.text_area = document.createElement('textarea')
+        ta.tabIndex = -1;
+        ta.setAttribute('aria-hidden', 'true');
         ta.className = "cx_webgl_textinput"
         ta.setAttribute('autocomplete', 'off')
         ta.setAttribute('autocorrect', 'off')
         ta.setAttribute('autocapitalize', 'off')
         ta.setAttribute('spellcheck', 'false')
-        var style = document.createElement('style')
+        var style = this.keyboard_style || (this.keyboard_style = document.createElement('style'))
 
         style.innerHTML = "\n"
             + "textarea.cx_webgl_textinput {\n"
@@ -4460,6 +4483,7 @@ export class WasmWebBrowser extends WasmBridge {
 
     // @section text-input
     update_text_area_pos(pos) {
+        if (this.a11y?.enabled) return; // Semantic inputs use their full node bounds.
         if (this.text_area && pos) {
             //this.text_area.style.left = (Math.round(pos.x) -2) + "px";
             //this.text_area.style.top = (Math.round(pos.y) + 4) + "px"
@@ -4470,6 +4494,10 @@ export class WasmWebBrowser extends WasmBridge {
     // @end text-input
 
     focus_keyboard_input() {
+        if (this.a11y?.enabled) {
+            this.a11y.focusKeyboard();
+            return;
+        }
         if (!this.text_area) return;
         this.text_area.focus();
     }

@@ -725,6 +725,21 @@ impl Chip {
 }
 
 impl Widget for Chip {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::ToggleButton;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::TOGGLE;
+        node.toggle = match (|| -> Option<bool> { self.selectable.then_some(self.selected) })() {
+            Some(true) => a11y_tree::Toggle::On,
+            Some(false) => a11y_tree::Toggle::Off,
+            None => a11y_tree::Toggle::None,
+        };
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -812,10 +827,7 @@ impl Widget for Chip {
         self.disabled
     }
 
-    /// A selectable chip answers the test tree the way a checkbox does.
-    fn snapshot_checked(&self, _cx: &Cx) -> Option<bool> {
-        self.selectable.then_some(self.selected)
-    }
+
 }
 
 impl ChipRef {
@@ -1010,6 +1022,12 @@ impl ChipGroup {
 }
 
 impl Widget for ChipGroup {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // Marked BEFORE the chips draw. Set after, the flag lands on widgets
         // that have already painted and the ring waits for a redraw that

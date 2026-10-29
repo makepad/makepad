@@ -1879,6 +1879,58 @@ fn finite_or(x: f64, d: f64) -> f64 {
 }
 
 impl Widget for Sequencer {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            let mut s = String::new();
+            let _ = write!(
+                s,
+                "t={:.3} dur={:.3} zoom={:.2} off={:.3} name_w={} ruler_h={} row_h={} sel=",
+                clean(self.playhead),
+                self.duration(),
+                self.view.zoom,
+                clean(self.view.offset),
+                self.name_width,
+                self.ruler_height,
+                self.row_height
+            );
+            match self.selected {
+                Some(id) => {
+                    let _ = write!(s, "{id}");
+                }
+                None => s.push('-'),
+            }
+            s.push_str(" rows=[");
+            let mut first = true;
+            walk_rows(&self.model.tracks, &self.open, |r| {
+                if !first {
+                    s.push_str(", ");
+                }
+                first = false;
+                let t = &self.model.tracks[r.track as usize];
+                s.push_str(&t.name);
+                match t.items.first() {
+                    Some(it) => {
+                        let _ = write!(s, "@{:.3}+{:.3}", clean(it.start), clean(it.duration));
+                    }
+                    None => s.push_str("@-"),
+                }
+            });
+            s.push_str("] labels=[");
+            for (i, l) in self.model.labels.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                let _ = write!(s, "{}@{:.3}", l.name, clean(l.time));
+            }
+            s.push(']');
+            Some(s)
+        })()
+        .unwrap_or_default();
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let hit = event.hits(cx, self.draw_bg.area());
         if matches!(hit, Hit::Nothing) {
@@ -2083,55 +2135,7 @@ impl Widget for Sequencer {
         DrawStep::done()
     }
 
-    /// For `/snap`: `t=1.234 dur=3.400 zoom=180.00 off=-0.050 name_w=160
-    /// ruler_h=26 row_h=22 sel=<id|-> rows=[name@start+duration, ..]
-    /// labels=[name@time, ..]` (every visible row's first item), enough to
-    /// compute where each bar is drawn.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        let mut s = String::new();
-        let _ = write!(
-            s,
-            "t={:.3} dur={:.3} zoom={:.2} off={:.3} name_w={} ruler_h={} row_h={} sel=",
-            clean(self.playhead),
-            self.duration(),
-            self.view.zoom,
-            clean(self.view.offset),
-            self.name_width,
-            self.ruler_height,
-            self.row_height
-        );
-        match self.selected {
-            Some(id) => {
-                let _ = write!(s, "{id}");
-            }
-            None => s.push('-'),
-        }
-        s.push_str(" rows=[");
-        let mut first = true;
-        walk_rows(&self.model.tracks, &self.open, |r| {
-            if !first {
-                s.push_str(", ");
-            }
-            first = false;
-            let t = &self.model.tracks[r.track as usize];
-            s.push_str(&t.name);
-            match t.items.first() {
-                Some(it) => {
-                    let _ = write!(s, "@{:.3}+{:.3}", clean(it.start), clean(it.duration));
-                }
-                None => s.push_str("@-"),
-            }
-        });
-        s.push_str("] labels=[");
-        for (i, l) in self.model.labels.iter().enumerate() {
-            if i > 0 {
-                s.push_str(", ");
-            }
-            let _ = write!(s, "{}@{:.3}", l.name, clean(l.time));
-        }
-        s.push(']');
-        Some(s)
-    }
+
 }
 
 impl SequencerRef {

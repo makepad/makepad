@@ -1,0 +1,21 @@
+# The AT-SPI2 interfaces tools/dbus_codegen generates (served by the adapter, or called by it and by the
+# loopback test client). Others in the inputs are left out to keep libs/atspi small.
+org.a11y.atspi.Accessible
+org.a11y.atspi.Action
+org.a11y.atspi.Application
+org.a11y.atspi.Cache
+org.a11y.atspi.Component
+org.a11y.atspi.Document
+org.a11y.atspi.EditableText
+org.a11y.atspi.Event.Focus
+org.a11y.atspi.Event.Object
+org.a11y.atspi.Event.Window
+org.a11y.atspi.Hyperlink
+org.a11y.atspi.Hypertext
+org.a11y.atspi.Image
+org.a11y.atspi.Selection
+org.a11y.atspi.Socket
+org.a11y.atspi.Table
+org.a11y.atspi.TableCell
+org.a11y.atspi.Text
+org.a11y.atspi.Value

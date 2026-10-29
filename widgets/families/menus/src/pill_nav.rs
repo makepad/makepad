@@ -2982,6 +2982,33 @@ fn menu_id() -> LiveId {
 }
 
 impl Widget for PillNav {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::TabList;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.name = (|| -> Option<String> {
+            self.current_index
+                .and_then(|i| self.defs.get(i))
+                .map(|item| item.label.clone())
+        })()
+        .unwrap_or_default();
+        node.value = (|| -> Option<String> {
+            let Some(panel) = self.panel_showing() else {
+                return Some(String::new());
+            };
+            if self.drawn_compact {
+                return Some(self.compact_word());
+            }
+            Some(
+                self.defs
+                    .get(panel.item)
+                    .map(|item| item.label.clone())
+                    .unwrap_or_default(),
+            )
+        })()
+        .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.ticker_reduced = tween_ticker_ref(cx).reduced_motion;
         if self.clock.is_held() {
@@ -3233,91 +3260,168 @@ impl Widget for PillNav {
         self.disabled
     }
 
-    fn snapshot_selected(&self, _cx: &Cx) -> Option<String> {
-        self.current_index.and_then(|i| self.defs.get(i)).map(|item| item.label.clone())
-    }
+
 
     /// The open item's label while a panel is open or opening, so a test
     /// can wait for it before pressing a row that is still growing.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        let Some(panel) = self.panel_showing() else {
-            return Some(String::new());
-        };
-        if self.drawn_compact {
-            return Some(self.compact_word());
-        }
-        Some(self.defs.get(panel.item).map(|item| item.label.clone()).unwrap_or_default())
-    }
 
-    fn snapshot_parts(&self, cx: &Cx) -> Vec<SnapshotPart> {
-        let area = self.draw_bar.area();
-        // Not drawn this frame (another tab, a page scrolled away): a stale
-        // area reads as a zero rect, and the cached item rects moved by it
-        // would send a test to press empty space by the window's corner.
-        if !area.is_valid(cx) {
-            return Vec::new();
-        }
-        let bar = area.rect(cx);
-        // The bar's items as they are on screen: an ancestor that clips the
-        // bar clips them. The panel is on an overlay, which nothing clips.
-        let shown = area.clipped_rect(cx);
-        let on_screen = |rect: Rect| rect.clip((shown.pos, shown.pos + shown.size));
-        let mut parts = Vec::new();
-        if self.drawn_compact {
-            parts.push(SnapshotPart {
-                id: menu_id(),
-                widget_type: "PillNavMenu",
-                rect: on_screen(self.pill_rect.translate(bar.pos)),
-                text: self.compact_word(),
-                selected: false,
-                enabled: !self.disabled,
-            });
-        } else {
-            for (i, item) in self.defs.iter().enumerate() {
-                let Some(rect) = self.item_rects.get(i) else {
-                    continue;
-                };
-                parts.push(SnapshotPart {
-                    id: item.id,
-                    widget_type: "PillNavItem",
-                    rect: on_screen(rect.translate(bar.pos)),
-                    text: item.label.clone(),
-                    selected: self.current_index == Some(i),
-                    enabled: item.enabled && !self.disabled,
-                });
+
+    fn semantics_parts(&self, cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        out.extend((|| {
+            let area = self.draw_bar.area();
+            // Not drawn this frame (another tab, a page scrolled away): a stale
+            // area reads as a zero rect, and the cached item rects moved by it
+            // would send a test to press empty space by the window's corner.
+            if !area.is_valid(cx) {
+                return Vec::new();
             }
-        }
-        // Rows only once the panel has settled: a test must not press a row
-        // that is still arriving.
-        let Some(panel) = self.panel_showing() else {
-            return parts;
-        };
-        if !panel.grow.is_at(1.0) || panel.fading.is_some() || panel.glide.progress() < 1.0 {
-            return parts;
-        }
-        if !self.drawn_compact {
-            if let Some(item) = self.defs.get(panel.item) {
-                parts.push(SnapshotPart {
-                    id: item.id,
-                    widget_type: "PillNavPanel",
-                    rect: self.panel_rect,
-                    text: item.label.clone(),
-                    selected: false,
-                    enabled: true,
-                });
+            let bar = area.rect(cx);
+            // The bar's items as they are on screen: an ancestor that clips the
+            // bar clips them. The panel is on an overlay, which nothing clips.
+            let shown = area.clipped_rect(cx);
+            let on_screen = |rect: Rect| rect.clip((shown.pos, shown.pos + shown.size));
+            let mut parts = Vec::new();
+            if self.drawn_compact {
+                parts.push((
+                    ((menu_id()).0 ^ LiveId::from_str("PillNavMenu").0.rotate_left(1)),
+                    None,
+                    a11y_tree::Node {
+                        role: a11y_tree::Role::MenuItem,
+                        class: ("PillNavMenu").to_string(),
+                        path: makepad_widgets_core::widget_tree::live_id_token(menu_id()),
+                        bounds: makepad_platform::a11y::semantic_rect(on_screen(
+                            self.pill_rect.translate(bar.pos),
+                        )),
+                        name: self.compact_word(),
+                        states: {
+                            let mut states = a11y_tree::States::FOCUSABLE;
+                            states.set(a11y_tree::States::SELECTED, false);
+                            states.set(a11y_tree::States::DISABLED, !(!self.disabled));
+                            states
+                        },
+                        toggle: if false {
+                            a11y_tree::Toggle::On
+                        } else {
+                            a11y_tree::Toggle::Off
+                        },
+                        actions: a11y_tree::Actions::PRESS | a11y_tree::Actions::FOCUS,
+                        ..Default::default()
+                    },
+                ));
+            } else {
+                for (i, item) in self.defs.iter().enumerate() {
+                    let Some(rect) = self.item_rects.get(i) else {
+                        continue;
+                    };
+                    parts.push((
+                        ((item.id).0 ^ LiveId::from_str("PillNavItem").0.rotate_left(1)),
+                        None,
+                        a11y_tree::Node {
+                            role: a11y_tree::Role::MenuItem,
+                            class: ("PillNavItem").to_string(),
+                            path: makepad_widgets_core::widget_tree::live_id_token(item.id),
+                            bounds: makepad_platform::a11y::semantic_rect(on_screen(
+                                rect.translate(bar.pos),
+                            )),
+                            name: item.label.clone(),
+                            states: {
+                                let mut states = a11y_tree::States::FOCUSABLE;
+                                states.set(
+                                    a11y_tree::States::SELECTED,
+                                    self.current_index == Some(i),
+                                );
+                                states.set(
+                                    a11y_tree::States::DISABLED,
+                                    !(item.enabled && !self.disabled),
+                                );
+                                states
+                            },
+                            toggle: if self.current_index == Some(i) {
+                                a11y_tree::Toggle::On
+                            } else {
+                                a11y_tree::Toggle::Off
+                            },
+                            actions: a11y_tree::Actions::PRESS | a11y_tree::Actions::FOCUS,
+                            ..Default::default()
+                        },
+                    ));
+                }
             }
-        }
-        for hit in &self.panel_hits {
-            if hit.rect.size.x <= 0.0 || hit.rect.size.y <= 0.0 {
-                continue;
-            }
-            let (id, widget_type, selected) = match hit.row {
-                CompactRow::Item(i) => (self.defs[i].id, "PillNavItem", self.current_index == Some(i)),
-                CompactRow::Link(i, j) => (self.defs[i].links[j].id, "PillNavLink", false),
+            // Rows only once the panel has settled: a test must not press a row
+            // that is still arriving.
+            let Some(panel) = self.panel_showing() else {
+                return parts;
             };
-            parts.push(SnapshotPart { id, widget_type, rect: hit.rect, text: hit.label.clone(), selected, enabled: hit.enabled });
-        }
-        parts
+            if !panel.grow.is_at(1.0) || panel.fading.is_some() || panel.glide.progress() < 1.0 {
+                return parts;
+            }
+            if !self.drawn_compact {
+                if let Some(item) = self.defs.get(panel.item) {
+                    parts.push((
+                        ((item.id).0 ^ LiveId::from_str("PillNavPanel").0.rotate_left(1)),
+                        None,
+                        a11y_tree::Node {
+                            role: a11y_tree::Role::TabPanel,
+                            class: ("PillNavPanel").to_string(),
+                            path: makepad_widgets_core::widget_tree::live_id_token(item.id),
+                            bounds: makepad_platform::a11y::semantic_rect(self.panel_rect),
+                            name: item.label.clone(),
+                            states: {
+                                let mut states = a11y_tree::States::FOCUSABLE;
+                                states.set(a11y_tree::States::SELECTED, false);
+                                states.set(a11y_tree::States::DISABLED, !(true));
+                                states
+                            },
+                            toggle: if false {
+                                a11y_tree::Toggle::On
+                            } else {
+                                a11y_tree::Toggle::Off
+                            },
+                            actions: a11y_tree::Actions::PRESS | a11y_tree::Actions::FOCUS,
+                            ..Default::default()
+                        },
+                    ));
+                }
+            }
+            for hit in &self.panel_hits {
+                if hit.rect.size.x <= 0.0 || hit.rect.size.y <= 0.0 {
+                    continue;
+                }
+                let (id, widget_type, selected) = match hit.row {
+                    CompactRow::Item(i) => (
+                        self.defs[i].id,
+                        "PillNavItem",
+                        self.current_index == Some(i),
+                    ),
+                    CompactRow::Link(i, j) => (self.defs[i].links[j].id, "PillNavLink", false),
+                };
+                parts.push((
+                    ((id).0 ^ LiveId::from_str(widget_type).0.rotate_left(1)),
+                    None,
+                    a11y_tree::Node {
+                        role: a11y_tree::Role::MenuItem,
+                        class: (widget_type).to_string(),
+                        path: makepad_widgets_core::widget_tree::live_id_token(id),
+                        bounds: makepad_platform::a11y::semantic_rect(hit.rect),
+                        name: hit.label.clone(),
+                        states: {
+                            let mut states = a11y_tree::States::FOCUSABLE;
+                            states.set(a11y_tree::States::SELECTED, selected);
+                            states.set(a11y_tree::States::DISABLED, !(hit.enabled));
+                            states
+                        },
+                        toggle: if selected {
+                            a11y_tree::Toggle::On
+                        } else {
+                            a11y_tree::Toggle::Off
+                        },
+                        actions: a11y_tree::Actions::PRESS | a11y_tree::Actions::FOCUS,
+                        ..Default::default()
+                    },
+                ));
+            }
+            parts
+        })());
     }
 }
 
@@ -4415,8 +4519,9 @@ mod tests {
         let nav = root.widget(&cx, ids!(nav));
         let (pill, bar) = {
             let inner = nav.borrow::<PillNav>().expect("nav is a pill nav");
-            let parts = inner.snapshot_parts(&cx);
-            let pill = parts.iter().find(|part| part.widget_type == "PillNavMenu").expect("the folded pill").rect.center();
+            let parts = semantic_parts(&*inner, &cx);
+            let pill = parts.iter().find(|part| part.class == "PillNavMenu").expect("the folded pill");
+            let pill = node_rect(pill).center();
             (pill, inner.draw_bar.area())
         };
         cx.set_key_focus(bar);
@@ -4557,10 +4662,10 @@ mod tests {
         screen.draw(&mut cx, &root);
         let nav = root.widget(&cx, ids!(nav));
         let inner = nav.borrow::<PillNav>().expect("nav is a pill nav");
-        let parts = inner.snapshot_parts(&cx);
-        let pill = parts.iter().find(|part| part.widget_type == "PillNavMenu").expect("the folded pill");
-        assert_eq!(pill.id, live_id!(menu));
-        assert_eq!(crate::widget_tree::live_id_token(pill.id), "menu");
+        let parts = semantic_parts(&*inner, &cx);
+        let pill = parts.iter().find(|part| part.class == "PillNavMenu").expect("the folded pill");
+        assert_eq!(pill.path, "menu");
+        assert_eq!(pill.class, "PillNavMenu");
         });
     }
 
@@ -4630,7 +4735,7 @@ mod tests {
             assert_eq!(bar.panel_rect, placed, "the placed rect does not swing");
             assert_eq!(bar.panel_hits.iter().map(|hit| hit.rect).collect::<Vec<_>>(), rows, "the rows are hit where they rest");
             assert!(
-                bar.snapshot_parts(&cx).iter().all(|part| part.widget_type != "PillNavLink"),
+                semantic_parts(&*bar, &cx).iter().all(|part| part.class != "PillNavLink"),
                 "rows still arriving are not reported"
             );
         }
@@ -4640,8 +4745,9 @@ mod tests {
         {
             let bar = nav.borrow::<PillNav>().unwrap();
             assert!(bar.panel.as_ref().unwrap().grow.is_at(1.0));
-            let links: Vec<Rect> = bar.snapshot_parts(&cx).iter().filter(|part| part.widget_type == "PillNavLink").map(|part| part.rect).collect();
-            assert_eq!(links, rows, "settled, the rows are reported where they were hit all along");
+            let links: Vec<_> = semantic_parts(&*bar, &cx).iter().filter(|part| part.class == "PillNavLink").map(|part| part.bounds).collect();
+            let expected: Vec<_> = rows.iter().map(|rect| makepad_platform::a11y::semantic_rect(*rect)).collect();
+            assert_eq!(links, expected, "settled, the rows are reported where they were hit all along (wire coordinates)");
         }
 
         let mut bar = nav.borrow_mut::<PillNav>().unwrap();
@@ -4756,4 +4862,15 @@ mod lock_tests {
         assert_eq!(cx.sweep_lock_area(), None, "the next page has the pointer");
         });
     }
+}
+
+#[cfg(test)]
+fn semantic_parts(widget: &dyn Widget, cx: &Cx) -> Vec<a11y_tree::Node> {
+    let mut parts = Vec::new();
+    widget.semantics_parts(cx, &mut parts);
+    parts.into_iter().map(|(_, _, node)| node).collect()
+}
+#[cfg(test)]
+fn node_rect(node: &a11y_tree::Node) -> Rect {
+    rect(node.bounds.x as f64, node.bounds.y as f64, node.bounds.w as f64, node.bounds.h as f64)
 }

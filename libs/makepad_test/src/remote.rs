@@ -8,7 +8,7 @@
 
 use crate::error::{TestError, TestResult};
 use makepad_micro_serde::{DeJson, JsonValue};
-use makepad_studio_protocol::{KeyCode, KeyModifiers, WidgetSnapshot};
+use makepad_studio_protocol::{KeyCode, KeyModifiers};
 use makepad_remote::conn::Event;
 use makepad_remote::Client;
 use std::path::{Path, PathBuf};
@@ -141,15 +141,19 @@ impl RemoteClient {
         parse_windows(&json)
     }
 
-    /// Every widget, including invisible ones; callers filter.
-    pub fn snapshot(&self) -> TestResult<Vec<WidgetSnapshot>> {
-        let json = self.get_json("snap", &[("all", "1")])?;
+    pub fn snapshot(&self) -> TestResult<UiSnapshot> {
+        let json = self.get_json("ui", &[("json", "1")])?;
         parse_snapshot(&json)
     }
-
-    pub fn dump(&self) -> TestResult<String> {
-        self.get_text("dump", &[])
+    pub fn find(&self, selector: &crate::Selector, extra: &str) -> TestResult<Vec<NodeMatch>> {
+        let q = format!("{} {extra}", selector.as_query());
+        makepad_a11y::query::Query::parse(&q).map_err(TestError::new)?;
+        let mut params = vec![("q",q.as_str()), ("json","1")];
+        if let Some(w) = selector.window_arg() { params.push(("w",w)); }
+        let json = self.get_json("ui find", &params)?;
+        parse_nodes(&json)
     }
+    pub fn dump(&self) -> TestResult<String> { self.get_text("ui", &[]) }
 
     /// Grab one window to a PNG on disk (written by this client) and return
     /// its absolute path.
@@ -382,13 +386,6 @@ fn json_str(value: Option<&JsonValue>) -> Option<String> {
     value.and_then(JsonValue::string).cloned()
 }
 
-fn json_bool(value: Option<&JsonValue>) -> Option<bool> {
-    match value? {
-        JsonValue::Bool(value) => Some(*value),
-        _ => None,
-    }
-}
-
 fn json_array(value: Option<&JsonValue>) -> Option<&Vec<JsonValue>> {
     match value? {
         JsonValue::Array(items) => Some(items),
@@ -417,46 +414,56 @@ pub fn parse_windows(json: &JsonValue) -> TestResult<Vec<WindowInfo>> {
     Ok(windows)
 }
 
-/// `/snap` rows carry window-local layout points and the widget's actual
-/// window identity and state. Missing required state is a protocol error.
-pub fn parse_snapshot(json: &JsonValue) -> TestResult<Vec<WidgetSnapshot>> {
-    let items = json_array(json.key("s"))
-        .ok_or_else(|| TestError::new(format!("snap reply carries no widget list: {json:?}")))?;
-    let mut widgets = Vec::with_capacity(items.len());
-    for item in items {
-        let id = json_str(item.key("i"));
-        let widget_type = json_str(item.key("ty"));
-        let rect = json_array(item.key("r"));
-        let window_id = json_str(item.key("window_id"));
-        let enabled = json_bool(item.key("enabled"));
-        let (Some(id), Some(widget_type), Some(rect), Some(window_id), Some(enabled)) =
-            (id, widget_type, rect, window_id, enabled)
-        else {
-            return Err(TestError::new(format!("malformed snapshot entry: {item:?}")));
-        };
-        if rect.len() != 4 {
-            return Err(TestError::new(format!("malformed snapshot rect: {item:?}")));
-        }
-        let coord = |index: usize| json_f64(rect.get(index)).unwrap_or(0.0).round() as i64;
-        widgets.push(WidgetSnapshot {
-            id,
-            widget_type,
-            window_id,
-            window_index: json_f64(item.key("w")).unwrap_or(0.0) as usize,
-            visible: json_f64(item.key("v")).map_or(true, |v| v != 0.0),
-            enabled,
-            x: coord(0),
-            y: coord(1),
-            width: coord(2),
-            height: coord(3),
-            text: json_str(item.key("t")),
-            value: json_str(item.key("val")),
-            checked: json_f64(item.key("c")).map(|c| c != 0.0),
-            selected: json_str(item.key("selected")),
-            path: json_str(item.key("p")),
-        });
+/// A semantic node and its owning window/session. No flattened widget-state schema.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodeMatch {
+    pub window: u64,
+    pub node: makepad_a11y::Node,
+}
+impl std::ops::Deref for NodeMatch {
+    type Target = makepad_a11y::Node;
+    fn deref(&self) -> &Self::Target { &self.node }
+}
+impl NodeMatch {
+    pub fn window_index(&self) -> usize { self.window as u32 as usize }
+    pub fn window_arg(&self) -> String { format!("{}:{}", self.window >> 32, self.window as u32) }
+    pub fn visible(&self) -> bool { !self.states.intersects(makepad_a11y::States::HIDDEN | makepad_a11y::States::OFFSCREEN) && !self.bounds.is_empty() }
+    pub fn enabled(&self) -> bool { !self.states.contains(makepad_a11y::States::DISABLED) }
+    pub fn checked(&self) -> Option<bool> { match self.toggle { makepad_a11y::Toggle::On => Some(true), makepad_a11y::Toggle::Off => Some(false), _ => None } }
+    pub fn x(&self) -> i64 { self.bounds.x.round() as i64 }
+    pub fn y(&self) -> i64 { self.bounds.y.round() as i64 }
+    pub fn width(&self) -> i64 { self.bounds.w.round() as i64 }
+    pub fn height(&self) -> i64 { self.bounds.h.round() as i64 }
+}
+#[derive(Clone, Debug, Default)]
+pub struct UiSnapshot { pub windows: Vec<(u64, makepad_a11y::mirror::Tree)> }
+impl UiSnapshot {
+    pub fn nodes(&self) -> Vec<NodeMatch> {
+        let mut nodes = Vec::new();
+        for (window,tree) in &self.windows { tree.walk(|node,_| nodes.push(NodeMatch { window: *window, node: node.clone() })); }
+        nodes
     }
-    Ok(widgets)
+}
+fn updates(json: &JsonValue) -> TestResult<Vec<(u64, makepad_a11y::TreeUpdate)>> {
+    let trees = json_array(json.key("trees")).ok_or_else(|| TestError::new("ui reply carries no trees"))?;
+    trees.iter().map(|tree| {
+        let key = json_str(tree.key("window")).ok_or_else(|| TestError::new("ui tree missing window"))?;
+        let (s,w) = key.split_once(':').ok_or_else(|| TestError::new("ui window wants session:index"))?;
+        let key = ((s.parse::<u32>().map_err(|_| TestError::new("invalid session"))? as u64) << 32) | w.parse::<u32>().map_err(|_| TestError::new("invalid window"))? as u64;
+        let hex = json_str(tree.key("wire")).ok_or_else(|| TestError::new("ui tree missing canonical wire payload"))?;
+        if !hex.is_ascii() || hex.len() % 2 != 0 { return Err(TestError::new("invalid semantic wire hex")); }
+        let bytes: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i+2],16).map_err(|_| TestError::new("invalid semantic wire hex"))).collect::<TestResult<_>>()?;
+        let update = makepad_a11y::wire::decode_update(&bytes).map_err(|e| TestError::new(e.to_string()))?;
+        Ok((key,update))
+    }).collect()
+}
+pub fn parse_nodes(json: &JsonValue) -> TestResult<Vec<NodeMatch>> {
+    Ok(updates(json)?.into_iter().flat_map(|(window,update)| update.nodes.into_iter().map(move |node| NodeMatch {window,node})).collect())
+}
+pub fn parse_snapshot(json: &JsonValue) -> TestResult<UiSnapshot> {
+    Ok(UiSnapshot { windows: updates(json)?.into_iter().map(|(k,u)| {
+        let mut tree = makepad_a11y::mirror::Tree::new(); tree.apply(u); (k,tree)
+    }).collect() })
 }
 
 pub fn parse_log(json: &JsonValue) -> TestResult<LogTail> {
@@ -514,41 +521,38 @@ mod tests {
         assert_eq!(key_code_name(KeyCode::Backspace), "Backspace");
     }
 
-    #[test]
-    fn snapshot_rows_become_widget_snapshots_with_window_names() {
-        let json = parse_json(
-            r#"{"s":[{"i":"window_widget","ty":"Window","r":[0,0,800,600],"w":0,"window_id":"main_window","enabled":true},
-                    {"i":"counter_label","ty":"Label","r":[10.5,20,100,30],"w":0,"window_id":"main_window","enabled":true,"t":"Count: 1"},
-                    {"i":"input","ty":"TextInput","r":[0,0,50,20],"w":0,"window_id":"main_window","enabled":false,"val":""},
-                    {"i":"hidden","ty":"View","r":[0,0,0,0],"w":0,"window_id":"main_window","enabled":true,"v":0},
-                    {"i":"toggle","ty":"CheckBox","r":[1,2,3,4],"w":1,"window_id":"panel_window","enabled":true,"c":1,"selected":"second"}]}"#,
-        )
-        .unwrap();
-        let widgets = parse_snapshot(&json).unwrap();
-        assert_eq!(widgets.len(), 5);
-        let label = &widgets[1];
-        assert_eq!(label.window_id, "main_window");
-        assert_eq!((label.x, label.y, label.width, label.height), (11, 20, 100, 30));
-        assert_eq!(label.text.as_deref(), Some("Count: 1"));
-        assert!(label.visible);
-        assert_eq!(widgets[2].value.as_deref(), Some(""));
-        assert!(!widgets[2].enabled);
-        assert!(!widgets[3].visible);
-        assert_eq!(widgets[4].checked, Some(true));
-        assert_eq!(widgets[4].window_index, 1);
-        assert_eq!(widgets[4].window_id, "panel_window");
-        assert_eq!(widgets[4].selected.as_deref(), Some("second"));
+    fn semantic_reply() -> String {
+        use makepad_a11y::*;
+        let root = Node { id: NodeId(1), role: Role::Window, path: "main_window".into(), children: vec![NodeId(2),NodeId(3),NodeId(4),NodeId(5)], ..Default::default() };
+        let label = Node { id: NodeId(2), role: Role::StaticText, name: "Count: 1".into(), bounds: Rect { x:10.5, y:20.0, w:100.0, h:30.0 }, ..Default::default() };
+        let input = Node { id: NodeId(3), role: Role::TextField, states: States::DISABLED, text: Some(TextInfo::default()), ..Default::default() };
+        let hidden = Node { id: NodeId(4), states: States::HIDDEN, ..Default::default() };
+        let toggle = Node { id: NodeId(5), role: Role::CheckBox, toggle: Toggle::On,  name: "Go".into(), ..Default::default() };
+        let update = TreeUpdate { full:true, root: root.id, nodes:vec![root,label,input,hidden,toggle], ..Default::default() };
+        let mut bytes = Vec::new(); wire::encode_update(&update, &mut bytes);
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        format!("{{\"trees\":[{{\"window\":\"7:0\",\"wire\":\"{hex}\"}}],\"count\":5}}")
     }
-
     #[test]
-    fn snapshots_reject_missing_or_fabricated_required_state() {
-        for row in [
-            r#"{"i":"button","ty":"Button","r":[0,0,10,10],"w":0,"window_id":"main"}"#,
-            r#"{"i":"button","ty":"Button","r":[0,0,10,10],"w":0,"enabled":true}"#,
-            r#"{"i":"button","ty":"Button","r":[0,0,10,10],"w":0,"window_id":"main","enabled":1}"#,
-        ] {
-            let json = parse_json(&format!("{{\"s\":[{row}]}}")).unwrap();
-            assert!(parse_snapshot(&json).is_err(), "accepted {row}");
+    fn semantic_wire_becomes_typed_tree_with_window_identity() {
+        let json = parse_json(&semantic_reply()).unwrap();
+        let snapshot = parse_snapshot(&json).unwrap();
+        let widgets = snapshot.nodes();
+        assert_eq!(widgets.len(),5);
+        assert_eq!(widgets[1].window,7 << 32);
+        assert_eq!((widgets[1].x(),widgets[1].y(),widgets[1].width(),widgets[1].height()),(11,20,100,30));
+        assert_eq!(widgets[1].name,"Count: 1");
+        assert!(widgets[1].visible());
+        assert_eq!(widgets[2].text.as_ref().unwrap().content, "");
+        assert!(!widgets[2].enabled());
+        assert!(!widgets[3].visible());
+        assert_eq!(widgets[4].checked(),Some(true));
+        assert_eq!(snapshot.windows[0].1.children(makepad_a11y::NodeId(1)).count(),4);
+    }
+    #[test]
+    fn snapshots_reject_missing_or_corrupt_canonical_data() {
+        for row in [r#"{}"#, r#"{"window":"7:0"}"#, r#"{"window":"bad","wire":"00"}"#, r#"{"window":"7:0","wire":"00"}"#, r#"{"window":"7:0","wire":"zz"}"#] {
+            assert!(parse_snapshot(&parse_json(&format!("{{\"trees\":[{row}]}}")).unwrap()).is_err(), "accepted {row}");
         }
     }
 
@@ -595,15 +599,11 @@ mod tests {
             "status",
             r#"{"app":"fake","pid":1,"w":[{"i":0,"t":"Fake [remote]","sz":[640,480],"px":[1280,960],"dpi":2,"pos":[0,0]}]}"#,
         );
-        server.route(
-            "snap",
-            r#"{"s":[{"i":"main_window","ty":"Window","r":[0,0,640,480],"w":0,"window_id":"main_window","enabled":true},{"i":"go","ty":"Button","r":[10,10,80,24],"w":0,"window_id":"main_window","enabled":false,"t":"Go","selected":"item"}]}"#,
-        );
+        server.route("ui", &semantic_reply());
         server.route("click", r#"{"ok":1,"f":12}"#);
         server.route("key", r#"{"ok":1,"f":13}"#);
         server.route("text", r#"{"ok":1,"f":14}"#);
         server.route("mouse", r#"{"ok":1}"#);
-        server.route("dump", "root View 0 0 640 480\n  go Button 10 10 80 24");
         server.route("log", r#"{"n":3,"pool":"","l":["a","Count: 1"]}"#);
         server.route("quit", r#"{"ok":1}"#);
 
@@ -612,11 +612,11 @@ mod tests {
         assert!(client.help().unwrap().contains("this sheet"));
         let windows = client.windows().unwrap();
         assert_eq!(windows[0].dpi, 2.0);
-        let widgets = client.snapshot().unwrap();
-        assert_eq!(widgets[1].window_id, "main_window");
-        assert_eq!(widgets[1].text.as_deref(), Some("Go"));
-        assert!(!widgets[1].enabled);
-        assert_eq!(widgets[1].selected.as_deref(), Some("item"));
+        let widgets = client.snapshot().unwrap().nodes();
+        assert_eq!(widgets[1].window, 7 << 32);
+        assert_eq!(widgets[1].name, "Count: 1");
+        assert!(!widgets[2].enabled());
+        assert_eq!(widgets[4].checked(), Some(true));
 
         client
             .mouse(&MouseInput::at(MouseKind::Click, Some(0), 50.0, 22.0))
@@ -642,7 +642,8 @@ mod tests {
                 ..MouseInput::at(MouseKind::Scroll, Some(1), 5.0, 6.0)
             })
             .unwrap();
-        assert_eq!(client.dump().unwrap(), "root View 0 0 640 480\n  go Button 10 10 80 24\n");
+        server.route("ui", "#1 window\n  #2 button \"Go\"");
+        assert_eq!(client.dump().unwrap(), "#1 window\n  #2 button \"Go\"\n");
 
         // Images never come from the app as files: this client writes the PNG.
         let png = client.grab(Some(0), 0.5).unwrap();
@@ -659,12 +660,12 @@ mod tests {
         let requests = server.requests();
         assert_eq!(requests[0], "help");
         assert_eq!(requests[1], "status");
-        assert_eq!(requests[2], "snap all=1");
+        assert_eq!(requests[2], "ui json=1");
         assert_eq!(requests[3], "click x=50 y=22 b=0 w=0 wait=1");
         assert_eq!(requests[4], "key k=press c=KeyA logo=1 w=0 wait=1");
         assert_eq!(requests[5], "text t=hello world wait=1");
         assert_eq!(requests[6], "mouse k=scroll x=5 y=6 b=0 dx=0 dy=-3.5 w=1");
-        assert_eq!(requests[7], "dump");
+        assert_eq!(requests[7], "ui");
         assert_eq!(requests[8], "frames window=0 scale=0.5 codec=png once=1");
         assert_eq!(requests[9], "ping");
         assert_eq!(requests[10], "log since=0");
@@ -683,8 +684,7 @@ mod tests {
     fn remote_errors_surface_as_test_errors() {
         let server = crate::fixture::FixtureServer::start();
         server.route("status", r#"{"err":"window 3 closed by user"}"#);
-        server.route("snap", r#"{"err":"timeout (app busy or not running its event loop)"}"#);
-        server.route("dump", "not json");
+        server.route("ui", r#"{"err":"timeout (app busy or not running its event loop)"}"#);
         server.disconnect("log");
         let client = RemoteClient::connect(server.socket()).unwrap();
 
@@ -692,8 +692,9 @@ mod tests {
         assert!(err.message().contains("closed by user"), "{}", err.message());
         let err = client.snapshot().unwrap_err();
         assert!(err.message().contains("app busy"), "{}", err.message());
+        server.route("ui", "not json");
         assert_eq!(client.dump().unwrap(), "not json\n");
-        let err = client.get_json("dump", &[]).unwrap_err();
+        let err = client.get_json("ui", &[]).unwrap_err();
         assert!(err.message().contains("bad JSON"), "{}", err.message());
         let err = client.get_json("nope", &[]).unwrap_err();
         assert!(err.message().contains("unknown command"), "{}", err.message());
@@ -701,6 +702,7 @@ mod tests {
         let err = client.log_since(0).unwrap_err();
         assert!(err.message().contains("without an answer"), "{}", err.message());
         // The link survives a command that was cut off.
+        server.route("ui", "not json");
         assert_eq!(client.dump().unwrap(), "not json\n");
 
         drop(server);

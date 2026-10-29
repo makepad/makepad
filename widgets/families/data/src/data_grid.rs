@@ -703,6 +703,8 @@ struct CellIter {
 
 #[derive(Script, WidgetRegister, WidgetRef, WidgetSet)]
 pub struct DataGrid {
+    #[rust]
+    semantic_cells: std::collections::HashMap<(usize, usize), String>,
     #[uid]
     uid: WidgetUid,
     #[source]
@@ -1630,6 +1632,7 @@ impl DataGrid {
     // ---------------------------------------------------------------
 
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
+        self.semantic_cells.clear();
         cx.begin_turtle(walk, self.layout);
         self.vp.widget_rect = cx.turtle().rect();
         // Before the viewport, which is laid out under the heading strip:
@@ -1729,6 +1732,7 @@ impl DataGrid {
     /// Fast path: one background quad + directly drawn text. Batches into two
     /// draw calls across all cells; no widget instantiation.
     pub fn cell_text_styled(&mut self, cx: &mut Cx2d, cell: &GridCell, text: &str, style: CellStyle) {
+        if cx.a11y.on { self.semantic_cells.insert((cell.row, cell.col), text.to_owned()); }
         let bg = style.bg.unwrap_or_else(|| self.default_cell_bg(cell.row));
         self.draw_cell.color = bg;
         self.draw_cell.draw_abs(cx, cell.rect);
@@ -3501,6 +3505,85 @@ impl WidgetNode for DataGrid {
 }
 
 impl Widget for DataGrid {
+    fn semantics_parts(&self, _cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        let clip = (
+            self.vp.data_rect.pos,
+            self.vp.data_rect.pos + self.vp.data_rect.size,
+        );
+        for row in self.vp.row0..self.vp.row1 {
+            let key = (row as u64) << 32;
+            if let Some(rect) = self.row_rect(row) {
+                out.push((
+                    key,
+                    None,
+                    a11y_tree::Node {
+                        role: a11y_tree::Role::Row,
+                        bounds: makepad_platform::a11y::semantic_rect(rect.clip(clip)),
+                        pos_in_set: row as u32 + 1,
+                        set_size: self.rows as u32,
+                        table: Some(a11y_tree::TableInfo {
+                            rows: self.rows as u32,
+                            cols: self.cols as u32,
+                            row: row as u32,
+                            row_span: 1,
+                            col_span: self.cols as u32,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ));
+                for &(col, _, _) in &self.vp.vis_cols {
+                    let rect = self.cell_rect(row, col).clip(clip);
+                    let mut states = a11y_tree::States::FOCUSABLE;
+                    states.set(
+                        a11y_tree::States::SELECTABLE,
+                        self.selection != GridSelectMode::Off,
+                    );
+                    states.set(
+                        a11y_tree::States::SELECTED,
+                        self.selected
+                            .is_some_and(|selection| selection.contains(row, col)),
+                    );
+                    out.push((
+                        key | (self.display_to_data(col) as u64 + 1),
+                        Some(key),
+                        a11y_tree::Node {
+                            role: a11y_tree::Role::Cell,
+                            states,
+                            actions: a11y_tree::Actions::PRESS | a11y_tree::Actions::FOCUS,
+                            name: self
+                                .semantic_cells
+                                .get(&(row, self.display_to_data(col)))
+                                .cloned()
+                                .unwrap_or_default(),
+                            bounds: makepad_platform::a11y::semantic_rect(rect),
+                            table: Some(a11y_tree::TableInfo {
+                                rows: self.rows as u32,
+                                cols: self.cols as u32,
+                                row: row as u32,
+                                col: col as u32,
+                                row_span: 1,
+                                col_span: 1,
+                            }),
+                            ..Default::default()
+                        },
+                    ));
+                }
+            }
+        }
+    }
+
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Grid;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.table = Some(a11y_tree::TableInfo {
+            rows: self.rows as u32,
+            cols: self.cols as u32,
+            ..Default::default()
+        });
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.uid;
 

@@ -582,6 +582,11 @@ impl Drop for Splash {
 }
 
 impl Widget for Splash {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.allow_net {
             if let Event::NetworkResponses(responses) = event {

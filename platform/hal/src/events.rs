@@ -338,6 +338,9 @@ hal_events! {
     /// one `XrDepth` header (`buffers::Wire`) then its D16 texels in the payload. Sent as the
     /// HAL reads them back (it never waits for one), at most one per display frame.
     XrDepth = 151, xr_depth { window: obj, display_ns: u64, depth: rng };
+
+    A11yState = 154, a11y_state { on: u32, consumers: u32 };
+    A11yAction = 155, a11y_action { window: obj, bytes: rng };
     TrayClick = 149, tray_click { tray: u64, x: f64, y: f64, w: f64, h: f64, screen: rect };
     /// Native content's state (`native_layer::state`); strings and packed data use `data`.
     NativeLayerState = 152, native_layer_state { id: obj, what: u32, a: u64, b: u64, data: rng };

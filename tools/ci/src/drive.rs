@@ -75,7 +75,7 @@ impl Runtime {
         }
         true
     }
-    /// One remote command: `argv` is its words and `k=v` arguments (`snap q=x`, `key k=down
+    /// One remote command: `argv` is its words and `k=v` arguments (`ui find q=path=x`, `key k=down
     /// c=KeyA wait=1`); the answer's lines come back joined by newlines.
     fn request(&mut self, i: usize, argv: &[String], mutate: bool) -> Result<String> {
         if argv.is_empty()
@@ -1025,7 +1025,7 @@ fn app_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
             if !allow(vm) {
                 return NIL;
             }
-            // one remote command, words and k=v arguments split on spaces (`snap q=x`)
+            // one remote command, words and k=v arguments split on spaces (`ui find q=path=x`)
             let r = str_arg(vm, args, id!(command)).and_then(|s| {
                 if rt(vm).validate {
                     Ok(json::s("{}"))
@@ -1039,7 +1039,7 @@ fn app_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
     );
     vm.add_method(
         obj,
-        id_lut!(snap),
+        id_lut!(ui),
         script_args!(query = NIL),
         move |vm, args| {
             if !allow(vm) {
@@ -1050,14 +1050,8 @@ fn app_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
                     Ok(Value::Arr(vec![]))
                 } else {
                     rt(vm)
-                        .request_json(index, &argv(&["snap", &format!("q={s}")]), false)
-                        .map(|v| {
-                            v.get("s")
-                                .or_else(|| v.get("entries"))
-                                .or_else(|| v.get("items"))
-                                .cloned()
-                                .unwrap_or(v)
-                        })
+                        .request_json(index, &argv(&["ui", "find", "json=1", &format!("q={s}")]), false)
+
                 }
             });
             result(vm, r)
@@ -1306,7 +1300,7 @@ mod tests {
         ] {
             assert!(applies_input(&argv(command)), "{command:?}");
         }
-        for command in [&["grab"][..], &["gseq", "n=8"], &["log", "n=10"], &["gq"], &["quit"], &["activity"], &["snap", "q=x"]] {
+        for command in [&["grab"][..], &["gseq", "n=8"], &["log", "n=10"], &["gq"], &["quit"], &["activity"], &["ui", "find", "q=path=x"]] {
             assert!(!applies_input(&argv(command)), "{command:?}");
         }
         assert_eq!(key_args("down", "KeyA", &["shift"]), ["key", "k=down", "c=KeyA", "shift=1", "wait=1"]);

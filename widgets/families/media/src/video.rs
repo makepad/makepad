@@ -755,6 +755,12 @@ pub enum VideoAction {
 }
 
 impl Widget for Video {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Canvas;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     /// Video plays through the web runtime's media element.
     fn scan(&mut self, _cx: &mut Cx, scan: &ScanEvent, _scope: &mut Scope) {
         scan.need_js_feature("video-playback");

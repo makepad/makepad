@@ -720,6 +720,14 @@ impl Spinner {
 }
 
 impl Widget for Spinner {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Progress;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value =
+            (|| -> Option<String> { Some(format!("{:.2}", self.alpha)) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -780,11 +788,7 @@ impl Widget for Spinner {
         self.disabled
     }
 
-    /// The mark's alpha with two decimals: "0.00" while the delay holds,
-    /// "1.00" once it is fully on screen, so a test can wait for either.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format!("{:.2}", self.alpha))
-    }
+
 }
 
 impl SpinnerRef {
@@ -971,6 +975,14 @@ impl StatusSpinner {
 }
 
 impl Widget for StatusSpinner {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Status;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value =
+            (|| -> Option<String> { Some(self.status.name().to_string()) })().unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1053,9 +1065,7 @@ impl Widget for StatusSpinner {
         self.disabled
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.status.name().to_string())
-    }
+
 }
 
 impl StatusSpinnerRef {
@@ -1206,6 +1216,24 @@ impl SavingIndicator {
 }
 
 impl Widget for SavingIndicator {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Status;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            Some(
+                match self.state {
+                    SavingState::Idle => "Idle",
+                    SavingState::Saving => "Saving",
+                    SavingState::Saved => "Saved",
+                    SavingState::Failed => "Failed",
+                }
+                .to_string(),
+            )
+        })()
+        .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.view.draw_walk(cx, scope, walk)
     }
@@ -1230,17 +1258,7 @@ impl Widget for SavingIndicator {
         self.label_text.clone()
     }
 
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(
-            match self.state {
-                SavingState::Idle => "Idle",
-                SavingState::Saving => "Saving",
-                SavingState::Saved => "Saved",
-                SavingState::Failed => "Failed",
-            }
-            .to_string(),
-        )
-    }
+
 }
 
 impl SavingIndicatorRef {
@@ -1452,6 +1470,23 @@ impl LoadingOverlay {
 }
 
 impl Widget for LoadingOverlay {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Progress;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            let state = if self.failed {
+                "failed"
+            } else if self.active {
+                "active"
+            } else {
+                "idle"
+            };
+            Some(format!("{} {:.2}", state, self.alpha))
+        })()
+        .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.active != self.applied_active {
             // A script apply flipped `active` behind the setter's back.
@@ -1552,19 +1587,7 @@ impl Widget for LoadingOverlay {
         }
     }
 
-    /// "active", "failed" or "idle" plus the scrim's alpha, so a test can
-    /// wait for the overlay to be up, to have given up, or to be gone,
-    /// rather than for a frame count.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        let state = if self.failed {
-            "failed"
-        } else if self.active {
-            "active"
-        } else {
-            "idle"
-        };
-        Some(format!("{} {:.2}", state, self.alpha))
-    }
+
 }
 
 impl LoadingOverlayRef {

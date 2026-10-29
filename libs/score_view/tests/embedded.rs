@@ -1,7 +1,7 @@
 //! The VJ regression in miniature: a clipped, page-sized score is followed by
 //! a textured sibling in the same pass, then resized and redrawn in-process.
 
-use makepad_test::{run_with_config, Selector, TestApp, TestConfig, WidgetSnapshot};
+use makepad_test::{run_with_config, Selector, TestApp, TestConfig, NodeMatch};
 use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
 use makepad_zune_png::PngDecoder;
 use std::path::{Path, PathBuf};
@@ -34,11 +34,11 @@ impl Image {
         Self { width, height, rgba }
     }
 
-    fn pixels_in<'a>(&'a self, rect: &WidgetSnapshot) -> impl Iterator<Item = &'a [u8]> {
-        let x0 = (rect.x + 2).max(0) as usize;
-        let y0 = (rect.y + 2).max(0) as usize;
-        let x1 = (rect.x + rect.width - 2).max(0) as usize;
-        let y1 = (rect.y + rect.height - 2).max(0) as usize;
+    fn pixels_in<'a>(&'a self, rect: &NodeMatch) -> impl Iterator<Item = &'a [u8]> {
+        let x0 = (rect.x() + 2).max(0) as usize;
+        let y0 = (rect.y() + 2).max(0) as usize;
+        let x1 = (rect.x() + rect.width() - 2).max(0) as usize;
+        let y1 = (rect.y() + rect.height() - 2).max(0) as usize;
         (y0..y1.min(self.height)).flat_map(move |y| {
             (x0..x1.min(self.width)).map(move |x| {
                 let offset = (y * self.width + x) * 4;
@@ -50,7 +50,7 @@ impl Image {
 
 fn assert_frame(app: &TestApp, expected_size: (i64, i64)) -> PathBuf {
     let score = app.locator(Selector::id("score_host")).wait_visible().snapshot();
-    assert_eq!((score.width, score.height), expected_size);
+    assert_eq!((score.width(), score.height()), expected_size);
     let sibling = app
         .locator(Selector::id("texture_host"))
         .wait_visible()
@@ -62,7 +62,7 @@ fn assert_frame(app: &TestApp, expected_size: (i64, i64)) -> PathBuf {
         .pixels_in(&sibling)
         .filter(|pixel| pixel[1] > 220 && pixel[0] < 24 && pixel[2] < 24)
         .count();
-    let sibling_pixels = (sibling.width * sibling.height) as usize;
+    let sibling_pixels = (sibling.width() * sibling.height()) as usize;
     assert!(
         green * 2 > sibling_pixels,
         "textured sibling after ScoreView was depth-occluded: {green}/{sibling_pixels} green pixels in {}",

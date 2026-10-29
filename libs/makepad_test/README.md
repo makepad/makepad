@@ -58,7 +58,7 @@ only if graceful shutdown fails. Existing user instances are never reused.
 
 - `#[makepad_test]` for current-package UI tests
 - `TestApp` for app-scoped input, waits, logs, screenshots, and low-level input forwarding
-- `Selector` for structured snapshot matching
+- `Selector` for semantic queries (role, name, text, state, path, nth)
 - `Locator` for strict single-widget interaction and assertions
 
 Structured selectors support:
@@ -110,7 +110,7 @@ Builds write `build-stderr.txt`. Launched sessions also write `app-stdout.txt`,
 - synchronous API only
 - the macro targets its current package; `run_with_config` can target another manifest/package
 - `forward` supports pointer, scroll, key, and text input; other legacy protocol messages return an error
-- widget snapshots require the current remote fields `window_id` and boolean `enabled`; optional `selected` is preserved
+- `widget_snapshot()` returns typed semantic trees decoded from `ui json=1`; locators read `ui find json=1` and act through `ui act` / `ui type`
 - milestone-1 repo suite is validated on macOS first
 - no visual diffing or trace viewer yet
 

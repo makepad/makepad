@@ -22,9 +22,8 @@ pub fn data_mod(vm: &mut ScriptVm) {
     crate::file_tree::script_mod(vm);
 }
 
-/// Registers the dock and lets the widget tree's dumps print its tabs.
+/// Registers the dock.
 pub fn dock_mod(vm: &mut ScriptVm) {
-    crate::dock::install_dock_hooks(vm.cx_mut());
     crate::dock::script_mod(vm);
 }
 

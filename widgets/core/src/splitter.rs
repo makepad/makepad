@@ -592,6 +592,23 @@ pub enum SplitterAction {
 }
 
 impl Widget for Splitter {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Splitter;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.range = Some(a11y_tree::RangeValue {
+            min: 0.0,
+            max: match self.axis {
+                SplitterAxis::Horizontal => self.rect.size.x,
+                SplitterAxis::Vertical => self.rect.size.y,
+            },
+            now: self.position(),
+            step: 1.0,
+        });
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.actions = a11y_tree::Actions::FOCUS;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
 

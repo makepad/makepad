@@ -100,6 +100,11 @@ impl Root {
 }
 
 impl Widget for Root {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Generic;
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         // Script tweens (`mod.tween`) step here, before any child: the VM is
         // free and no widget but this one is borrowed. Pushes and callbacks

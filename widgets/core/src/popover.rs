@@ -961,6 +961,13 @@ impl Popover {
 }
 
 impl Widget for Popover {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Dialog;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states.set(a11y_tree::States::MODAL, true);
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // The anchor, in layout, exactly as it would be without the wrapper.
         self.view.draw_walk(cx, scope, walk)?;
@@ -1371,6 +1378,13 @@ impl WidgetNode for ConfirmPopover {
 }
 
 impl Widget for ConfirmPopover {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Dialog;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states.set(a11y_tree::States::MODAL, true);
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.popover.handle_event(cx, event, scope);
         if let Event::Actions(actions) = event {

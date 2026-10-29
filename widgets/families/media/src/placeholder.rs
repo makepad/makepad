@@ -467,6 +467,19 @@ impl ContentPlaceholder {
 }
 
 impl Widget for ContentPlaceholder {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Progress;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value = (|| -> Option<String> {
+            Some(match self.shape {
+                PlaceholderShape::Lines => format!("lines {}", self.lines.max(1)),
+                shape => shape.name().to_string(),
+            })
+        })()
+        .unwrap_or_default();
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -520,13 +533,7 @@ impl Widget for ContentPlaceholder {
         self.disabled
     }
 
-    /// The shape, so a test can tell a circle from a stack of lines.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(match self.shape {
-            PlaceholderShape::Lines => format!("lines {}", self.lines.max(1)),
-            shape => shape.name().to_string(),
-        })
-    }
+
 }
 
 impl ContentPlaceholderRef {

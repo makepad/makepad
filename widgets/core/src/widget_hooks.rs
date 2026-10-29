@@ -1,7 +1,7 @@
 //! Where the optional widget families plug into the core.
 //!
 //! The core never names a family: a `Window` hosts the design overlay, the
-//! voice wave and the AI chat slot, and the widget tree dumps a dock's tabs,
+//! voice wave and the AI chat slot,
 //! but each of those lives in a family crate an app may leave out. A family
 //! installs its hooks on the `Cx` when it registers (the same way the tweaker
 //! fills `Cx::tweak_callback` and the aichat crate fills `Cx::ai_callback`);
@@ -17,7 +17,6 @@ use crate::{
     makepad_draw::*,
     makepad_micro_serde::*,
     view::View,
-    widget::WidgetRef,
 };
 
 /// Answers whether a family took an event before the window's own dispatch.
@@ -64,9 +63,6 @@ pub struct WidgetHooks {
     pub tweaker: Option<TweakerHooks>,
     pub ai: Option<AiHooks>,
     pub voice: Option<VoiceHooks>,
-    /// A dock's tabs and tab headers for the widget tree's dumps
-    /// (`makepad-widgets-data`); `None` for a widget that is not a dock.
-    pub dock_dump: Option<fn(&WidgetRef, &Cx) -> Option<DockCompactDump>>,
 }
 
 impl WidgetHooks {
@@ -90,12 +86,6 @@ impl WidgetHooks {
 
     pub fn voice(cx: &Cx) -> Option<VoiceHooks> {
         Self::get(cx).and_then(|hooks| hooks.voice)
-    }
-
-    /// The dock dump of `widget`, when the data family is there and the
-    /// widget is a dock.
-    pub fn dock_dump(cx: &Cx, widget: &WidgetRef) -> Option<DockCompactDump> {
-        (Self::get(cx)?.dock_dump?)(widget, cx)
     }
 
     /// Whether `type_id` is the design overlay's widget type.
@@ -127,30 +117,6 @@ pub struct WindowFamilies {
 /// guest's panel finds the same names the window's own scripts do.
 #[derive(Clone, Default)]
 pub struct IsolateFamilies(pub Vec<fn(&mut ScriptVm)>);
-
-/// A dock's layout, as the widget tree's dumps print it.
-#[derive(Clone, Debug, Default)]
-pub struct DockCompactDump {
-    pub tabs: Vec<DockCompactTabsInfo>,
-    pub tab_headers: Vec<DockCompactTabInfo>,
-}
-
-#[derive(Clone, Debug)]
-pub struct DockCompactTabsInfo {
-    pub tabs_id: LiveId,
-    pub selected_tab_id: Option<LiveId>,
-    pub tab_count: usize,
-    pub rect: Rect,
-}
-
-#[derive(Clone, Debug)]
-pub struct DockCompactTabInfo {
-    pub tabs_id: LiveId,
-    pub tab_id: LiveId,
-    pub is_active: bool,
-    pub title: String,
-    pub rect: Rect,
-}
 
 /// What the world asks of the slot, outside the widget tree: the bridge's
 /// `/ai?on=` and `/ai?say=`, the overlay's Escape. A `Cx` global; the

@@ -35,6 +35,12 @@ pub struct Svg {
 }
 
 impl Widget for Svg {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Image;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         // Its own frame only. Taking any frame that passed hid the missing
         // start below: the drawing moved once something else animated.

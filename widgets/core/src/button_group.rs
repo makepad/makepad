@@ -640,6 +640,12 @@ impl ButtonGroup {
 }
 
 impl Widget for ButtonGroup {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Group;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // Shaped on the way into the first draw, and again after a live
         // edit: the children only exist once the DSL has been applied, and
@@ -829,6 +835,23 @@ impl SegmentedControl {
 }
 
 impl Widget for SegmentedControl {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.states.set(a11y_tree::States::DISABLED, self.disabled);
+        node.role = a11y_tree::Role::TabList;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.value =
+            (|| -> Option<String> { Some(self.selected.to_string()) })().unwrap_or_default();
+        node.name = (|| -> Option<String> { Some(self.selected_text()) })().unwrap_or_default();
+        node.value = self.selected_text();
+        node.range = Some(a11y_tree::RangeValue {
+            min: 0.0,
+            max: self.options.len().saturating_sub(1) as f64,
+            now: self.selected as f64,
+            step: 1.0,
+        });
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
             return DrawStep::done();
@@ -1028,15 +1051,7 @@ impl Widget for SegmentedControl {
         self.disabled
     }
 
-    /// The index of the current answer, so a test can wait on the number
-    /// rather than on the word.
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.selected.to_string())
-    }
 
-    fn snapshot_selected(&self, _cx: &Cx) -> Option<String> {
-        Some(self.selected_text())
-    }
 }
 
 impl SegmentedControlRef {
@@ -1110,6 +1125,16 @@ impl SplitButton {
 }
 
 impl Widget for SplitButton {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Button;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let step = self.view.draw_walk(cx, scope, walk);
         if !step.is_done() {
@@ -1212,6 +1237,16 @@ impl MenuButton {
 }
 
 impl Widget for MenuButton {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        let _ = cx;
+        node.role = a11y_tree::Role::Button;
+        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS;
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.view.draw_walk(cx, scope, walk)
     }

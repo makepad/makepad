@@ -6,6 +6,19 @@ use crate::{
 // WebBrowser API
 
 #[derive(FromWasm)]
+pub struct FromWasmA11yUpdate {
+    pub window: u32,
+    pub bytes: WasmDataU8,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmA11yActionDone {
+    pub req_lo: u32,
+    pub req_hi: u32,
+    pub result: u32,
+}
+
+#[derive(FromWasm)]
 pub struct FromWasmStartTimer {
     pub repeats: bool,
     pub timer_id: f64,

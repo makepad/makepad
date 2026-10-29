@@ -348,9 +348,9 @@ pub enum AppToStudio {
     Screenshot(ScreenshotResponse),
     RunViewFrame(RunViewFrameData),
     RunViewKeyFocusRect(RunViewKeyFocusRect),
-    WidgetTreeDump(WidgetTreeDumpResponse),
-    WidgetQuery(WidgetQueryResponse),
-    WidgetSnapshot(WidgetSnapshotResponse),
+    A11yUpdate { window: usize, bytes: Vec<u8> },
+    A11yActionDone { req: u64, result: u8 },
+    A11yReadDone { req: u64, user_seq: u64 },
     TweakHits(TweakHitsResponse),
     BeforeStartup,
     CreateWindow {
@@ -416,63 +416,6 @@ pub struct RunViewKeyFocusRect {
 }
 
 #[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
-pub struct WidgetTreeDumpRequest {
-    pub request_id: u64,
-}
-
-#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
-pub struct WidgetTreeDumpResponse {
-    pub request_id: u64,
-    pub dump: String,
-}
-
-#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
-pub struct WidgetQueryRequest {
-    pub request_id: u64,
-    pub query: String,
-}
-
-#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
-pub struct WidgetQueryResponse {
-    pub request_id: u64,
-    pub query: String,
-    pub rects: Vec<String>,
-}
-
-#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone, PartialEq, Eq)]
-pub struct WidgetSnapshot {
-    pub id: String,
-    pub widget_type: String,
-    pub window_id: String,
-    pub window_index: usize,
-    pub visible: bool,
-    pub enabled: bool,
-    pub x: i64,
-    pub y: i64,
-    pub width: i64,
-    pub height: i64,
-    pub text: Option<String>,
-    pub value: Option<String>,
-    pub checked: Option<bool>,
-    pub selected: Option<String>,
-    /// The dotted id path `/snap` reports as `p` (`main.new_note`): the names
-    /// of the widget and its named ancestors below the window. None for an
-    /// unnamed widget.
-    pub path: Option<String>,
-}
-
-#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
-pub struct WidgetSnapshotRequest {
-    pub request_id: u64,
-}
-
-#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
-pub struct WidgetSnapshotResponse {
-    pub request_id: u64,
-    pub widgets: Vec<WidgetSnapshot>,
-}
-
-#[derive(Debug, Default, SerBin, DeBin, SerJson, DeJson, Clone)]
 pub struct TweakHitsResponse {
     pub window_id: usize,
     pub dpi_factor: f64,
@@ -498,9 +441,10 @@ pub struct ScreenshotRequest {
 pub enum StudioToApp {
     Screenshot(ScreenshotRequest),
     RunViewFrameRequest(RunViewFrameRequest),
-    WidgetTreeDump(WidgetTreeDumpRequest),
-    WidgetQuery(WidgetQueryRequest),
-    WidgetSnapshot(WidgetSnapshotRequest),
+    A11yAction { bytes: Vec<u8> },
+    A11yState { consumers: u32 },
+    A11yRead { req: u64, window: usize, present: bool },
+    A11yType { text: String },
     KeepAlive,
     LiveChange {
         file_name: String,
@@ -508,6 +452,8 @@ pub enum StudioToApp {
     },
     Swapchain(SharedSwapchain),
     WindowGeomChange {
+        /// Desktop origin, independent of the synthetic pointer-routing left/top.
+        screen_origin: Option<(f64, f64)>,
         dpi_factor: f64,
         window_id: usize,
         left: f64,
