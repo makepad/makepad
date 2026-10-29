@@ -62,6 +62,30 @@ const FS2: u8 = 29;
 /// x8: indirect result register of the C ABI; otherwise a scratch for atomics loops
 const X8: u8 = 8;
 
+/// Whether the CPU running the JIT'd code has ARMv8.1 LSE atomics (`cas`, `ldadd`, ...). Every
+/// Apple arm64 CPU does; Android and Linux ask the kernel (HWCAP_ATOMICS: Cortex-A53/A73 class
+/// cores have none). `MAKEPAD_RUN_NO_LSE=1` forces the ARMv8.0 exclusive-load/store loops (to test
+/// them on an LSE machine; the compile cache does not key on this, so test with an empty cache).
+pub fn lse_atomics() -> bool {
+    static LSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LSE.get_or_init(|| {
+        if std::env::var_os("MAKEPAD_RUN_NO_LSE").is_some_and(|v| !v.is_empty()) {
+            return false;
+        }
+        #[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "android")))]
+        {
+            extern "C" {
+                fn getauxval(t: u64) -> u64;
+            }
+            const AT_HWCAP: u64 = 16;
+            const HWCAP_ATOMICS: u64 = 1 << 8;
+            return unsafe { getauxval(AT_HWCAP) } & HWCAP_ATOMICS != 0;
+        }
+        #[allow(unreachable_code)]
+        true
+    })
+}
+
 const INT_ARGS: usize = 8;
 const FLT_ARGS: usize = 8;
 
@@ -2059,7 +2083,7 @@ impl<'a> Gen<'a> {
         }
     }
 
-    // ---- atomics (LSE: every Apple arm64 CPU has ARMv8.1 atomics)
+    // ---- atomics (LSE when the CPU has ARMv8.1 atomics, else exclusive-access loops: lse_atomics)
 
     fn atomic(&mut self, i: &Inst) {
         fn size_bits(m: Mem) -> (u32, u8, bool) {
@@ -2114,6 +2138,62 @@ impl<'a> Gen<'a> {
                 let rd0 = self.def_i(*d, S0);
                 // the old value goes to a register no operand uses
                 let rd = if rd0 == ra || rd0 == rv { S0 } else { rd0 };
+                if !lse_atomics() {
+                    // ARMv8.0 (no LSE): a load-acquire-exclusive / store-release-exclusive loop.
+                    // x8 = the old value, ip1 = the new one, rd = the store status (a temp before it).
+                    let top = self.a.pos();
+                    // ldaxr{b,h,,} x8, [ra]
+                    self.a.e(0x085F_FC00 | sz << 30 | (ra as u32) << 5 | X8 as u32);
+                    match op {
+                        RmwOp::Xchg => self.a.mov(IP1, rv),
+                        RmwOp::Add => self.a.rrr(0x8B00_0000, IP1, X8, rv),
+                        RmwOp::Sub => self.a.rrr(0xCB00_0000, IP1, X8, rv),
+                        RmwOp::And => self.a.rrr(0x8A00_0000, IP1, X8, rv),
+                        RmwOp::Or => self.a.rrr(0xAA00_0000, IP1, X8, rv),
+                        RmwOp::Xor => self.a.rrr(0xCA00_0000, IP1, X8, rv),
+                        RmwOp::Nand => {
+                            self.a.rrr(0x8A00_0000, IP1, X8, rv);
+                            self.a.rrr(0xAA20_0000, IP1, ZR, IP1);
+                        }
+                        RmwOp::Max | RmwOp::Min | RmwOp::UMax | RmwOp::UMin => {
+                            let signed = matches!(op, RmwOp::Max | RmwOp::Min);
+                            let keep_old = match op {
+                                RmwOp::Max => GT,
+                                RmwOp::Min => LT,
+                                RmwOp::UMax => HI,
+                                _ => LO,
+                            };
+                            if bits == 64 {
+                                self.a.cmp(X8, rv);
+                            } else if bits == 32 {
+                                // cmp w8, w(rv)
+                                self.a.e(0x6B00_001F | (rv as u32) << 16 | (X8 as u32) << 5);
+                            } else {
+                                // compare at the access width: the load zero-extended x8
+                                let lhs = if signed {
+                                    self.a.extend(IP1, X8, bits, true);
+                                    IP1
+                                } else {
+                                    X8
+                                };
+                                self.a.extend(rd, rv, bits, signed);
+                                self.a.cmp(lhs, rd);
+                            }
+                            self.a.csel(IP1, X8, rv, keep_old);
+                        }
+                    }
+                    // stlxr{b,h,,} w(rd), ip1, [ra]
+                    self.a.e(0x0800_FC00 | sz << 30 | (rd as u32) << 16 | (ra as u32) << 5 | IP1 as u32);
+                    let retry = self.a.cbnz(rd);
+                    self.a.patch(retry, top);
+                    if sg && bits < 64 {
+                        self.a.extend(rd0, X8, bits, true);
+                    } else {
+                        self.a.mov(rd0, X8);
+                    }
+                    self.fin_i(*d, rd0);
+                    return;
+                }
                 // LDADD family: size 111000 A R 1 Rs o3 opc 00 Rn Rt
                 let lse = |opc: u32, o3: u32, rs: u8| 0x3820_0000 | sz << 30 | ar | (rs as u32) << 16 | o3 << 15 | opc << 12 | (ra as u32) << 5;
                 match op {
@@ -2161,6 +2241,31 @@ impl<'a> Gen<'a> {
                 let ra = self.use_i(*a, IP0);
                 let re = self.use_i(*e, S0);
                 let rn = self.use_i(*n, S1);
+                if !lse_atomics() {
+                    // ARMv8.0: ldaxr / cmp / stlxr loop. x8 = the observed value; ip1 = the expected
+                    // value at the access width, then the store status.
+                    let top = self.a.pos();
+                    self.a.e(0x085F_FC00 | sz << 30 | (ra as u32) << 5 | X8 as u32);
+                    if bits < 64 {
+                        self.a.extend(IP1, re, bits, false);
+                        self.a.cmp(X8, IP1);
+                    } else {
+                        self.a.cmp(X8, re);
+                    }
+                    let miss = self.a.bcond(NE);
+                    self.a.e(0x0800_FC00 | sz << 30 | (IP1 as u32) << 16 | (ra as u32) << 5 | rn as u32);
+                    let retry = self.a.cbnz(IP1);
+                    self.a.patch(retry, top);
+                    let done = self.a.pos();
+                    self.a.patch(miss, done);
+                    let rd = self.def_i(*d, S0);
+                    self.a.mov(rd, X8);
+                    if sg && bits < 64 {
+                        self.a.extend(rd, rd, bits, true);
+                    }
+                    self.fin_i(*d, rd);
+                    return;
+                }
                 let a_bit = (acq(*ok) || acq(*fail)) as u32;
                 let r_bit = rel(*ok) as u32;
                 // cas: Rs = expected in, observed out
