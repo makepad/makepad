@@ -575,7 +575,8 @@ mod imp {
                     || lower == "no"
                 {
                     None
-                } else if v.parse::<u16>().is_ok() || v.contains(':') {
+                } else if v != "1" && (v.parse::<u16>().is_ok() || v.contains(':')) {
+                    // "1" means on, not port 1 (which needs root anyway).
                     Some(parse(&v))
                 } else {
                     Some(("127.0.0.1".to_string(), 0))
