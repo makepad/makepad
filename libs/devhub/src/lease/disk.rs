@@ -200,6 +200,12 @@ pub fn list(r: &Roots, live: &Live) -> Vec<Item> {
     let current = jit.iter().max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()).cloned();
     for p in jit {
         let cur = Some(&p) == current.as_ref();
+        // a running process of that cache holds its live lock (relax store.rs hold_build): never
+        // taken, whatever its step (an embedded node's own loader runs from one of these)
+        if !crate::jitcache::held_locks(&p).is_empty() {
+            add(Cat::JitCache, p, None, false, "in use: a running process holds its live lock");
+            continue;
+        }
         add(Cat::JitCache, p, Some(if cur { 5 } else { 2 }), false, if cur { "current JIT cache" } else { "" });
     }
     add(Cat::JitCache, r.run_home.join("cache"), None, false, "source stores: imports stay stored");
@@ -311,8 +317,12 @@ impl Guard {
         self.state.lock().unwrap().dirty = true;
     }
 
+    /// Free bytes on the work dir's filesystem. Unknown (no probe for this OS, or a failed
+    /// probe) reads as unlimited: a guard that cannot measure must not reclaim. (Android had no
+    /// probe; 0 read as "below the floor" and the running loader's own JIT cache was deleted
+    /// every 60 s, so no launch ever started warm.)
     pub fn free(&self) -> u64 {
-        caps::disk_space(&self.roots.work).map_or(0, |(f, _)| f)
+        caps::disk_space(&self.roots.work).map_or(u64::MAX, |(f, _)| f)
     }
 
     /// The cached listing, measured again when stale or changed (or `force`).

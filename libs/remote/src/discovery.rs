@@ -33,7 +33,9 @@ pub(crate) fn alive(pid: u32) -> bool {
         extern "C" {
             fn kill(pid: i32, sig: i32) -> i32;
         }
-        unsafe { kill(pid as i32, 0) == 0 }
+        // EPERM: the process exists but may not be signalled (Android: a run-as shell and the
+        // app it inspects are different SELinux domains): alive, not a stale file to remove
+        unsafe { kill(pid as i32, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1) }
     }
     #[cfg(windows)]
     {

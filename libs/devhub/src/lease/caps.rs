@@ -198,7 +198,8 @@ pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
     os::disk_space(&p)
 }
 
-#[cfg(target_os = "linux")]
+// Android: bionic shares the /proc files, statvfs layout and power-supply nodes
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod os {
     use super::*;
 
@@ -218,7 +219,7 @@ mod os {
             cpu_pct,
             gpu_busy: gpu.iter().map(|g| (g.util_pct, g.mem_used_gb)).collect(),
             arch: std::env::consts::ARCH.to_string(),
-            os: "linux".into(),
+            os: std::env::consts::OS.to_string(),
             cpu,
             cores: cores.max(1),
             load1: parse_loadavg(&read("/proc/loadavg")),
@@ -418,7 +419,7 @@ mod os {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
 mod os {
     use super::*;
 
