@@ -1050,16 +1050,6 @@ impl Image {
             return DrawStep::done();
         }
         walk = cx.resolve_walk(walk, ResolveAt::BeforeBegin);
-        let svg_time = self.svg_time as f32;
-        if let Some(draw_svg) = self.draw_svg.as_mut() {
-            draw_svg.draw_walk_time(cx, walk, svg_time);
-            let animating = draw_svg.has_animations;
-            if animating {
-                // Keep ticking so SMIL/CSS-animated SVGs advance.
-                self.next_frame = cx.new_next_frame();
-            }
-            return DrawStep::done();
-        }
         // alright we get a walk. depending on our aspect ratio
         // we change either nothing, or width or height
         let rect = cx.peek_walk_turtle(walk);
@@ -1088,7 +1078,9 @@ impl Image {
         let is_showing_loading_image = self.async_image_path.is_some()
             && self.texture.is_some()
             && self.texture_async_source == self.async_image_path;
-        let (width, height) = if let Some((w, h)) = self.async_image_size.filter(|_| !is_showing_loading_image) {
+        let (width, height) = if let Some(svg_size) = self.draw_svg.as_ref().and_then(|draw_svg| draw_svg.svg_size()) {
+            (svg_size.x, svg_size.y)
+        } else if let Some((w, h)) = self.async_image_size.filter(|_| !is_showing_loading_image) {
             // Still loading. Any texture present here is legitimate current content
             // (the occupant's own placeholder, or a previous load of this same
             // source; begin_async_load already cleared stale ones), so keep showing
@@ -1267,6 +1259,16 @@ impl Image {
             }
         }
 
+        let svg_time = self.svg_time as f32;
+        if let Some(draw_svg) = self.draw_svg.as_mut() {
+            draw_svg.draw_walk_time(cx, walk, svg_time);
+            let animating = draw_svg.has_animations;
+            if animating {
+                // Keep ticking so SMIL/CSS-animated SVGs advance.
+                self.next_frame = cx.new_next_frame();
+            }
+            return DrawStep::done();
+        }
         self.draw_bg.draw_walk(cx, walk);
 
         // Load the image this is loading or showing again if it's now drawn bigger
