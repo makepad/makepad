@@ -478,9 +478,9 @@ impl Sched {
         }
     }
 
-    /// The node's dev switch (the user's, else its role's default: off on user WMs and devices).
+    /// The node's dev switch (the user's, else on: every node, user WMs and devices included, defaults to dev on).
     pub fn dev(&self, name: &str) -> bool {
-        self.nodes.get(name).is_some_and(|n| n.dev.or_else(|| n.caps.as_ref().map(|c| !c.role().users())).unwrap_or(false))
+        self.nodes.get(name).is_some_and(|n| n.dev.unwrap_or(true))
     }
 
     /// The user switches a node; running leases are never ended (the node drains).
@@ -1280,9 +1280,11 @@ mod tests {
     }
 
     #[test]
-    fn user_wm_defaults_off_and_sticky_node_is_preferred() {
+    fn dev_defaults_on_and_sticky_node_is_preferred() {
         let mut s = sched(&[("a", caps(64, 256.0, Role::Pool)), ("b", caps(64, 256.0, Role::Pool)), ("wm", caps(64, 256.0, Role::UserWm))]);
-        assert!(!s.dev("wm") && s.dev("a"));
+        assert!(s.dev("wm") && s.dev("a"));
+        s.set_dev("wm", false, 0).unwrap();
+        assert!(!s.dev("wm"));
         let first = s.request(req("x", Kind::Build, None), 0);
         s.tick(0);
         let node = s.get(&first).unwrap().node.clone().unwrap();

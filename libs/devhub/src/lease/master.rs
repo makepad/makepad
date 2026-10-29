@@ -488,7 +488,16 @@ impl LeaseMaster {
             let now = self.now();
             match caps {
                 Some(c) => {
+                    let asked = c.dev_req;
                     let up = self.sched.lock().unwrap().set_caps(name, c, now);
+                    // a flip made on the node itself: the master takes it (saved, pushed; the push clears it there)
+                    if let Some(want) = asked {
+                        if self.sched.lock().unwrap().dev(name) != want {
+                            let _ = self.set_dev(name, want);
+                        } else {
+                            self.pushed.lock().unwrap().remove(name);
+                        }
+                    }
                     let on = self.sched.lock().unwrap().dev(name);
                     if up || self.pushed.lock().unwrap().get(name) != Some(&on) {
                         self.push_policy(name, on);

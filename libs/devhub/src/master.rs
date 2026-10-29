@@ -42,7 +42,7 @@ pub struct Master {
 }
 
 /// The master's node list, `~/.makepad/devhub/nodes.conf`: one line per node,
-/// `<name> addr=<ip[:port]> [dev=on|off]` (`#` comments). It is the master's seeds (the master
+/// `<name> addr=<ip[:port]> [dev=on|off]` (`#` comments; no `dev=` means on, for every node). It is the master's seeds (the master
 /// never listens for announcements: receiving LAN broadcasts would ask the macOS Local Network
 /// question) and the dev switch of each node (DESIGN.md §10.7).
 pub fn nodes_conf() -> PathBuf {

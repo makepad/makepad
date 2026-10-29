@@ -85,6 +85,7 @@ script_mod! {
 const TRAY: LiveId = live_id!(devhub_tray);
 const QUIT: LiveId = live_id!(quit_devhub);
 const SEEN: LiveId = live_id!(seen_all);
+const DEVSW: LiveId = live_id!(dev_switch);
 const OPEN: LiveId = live_id!(open_window);
 const LOGIN: LiveId = live_id!(open_at_login);
 const DROPDOWN: Vec2d = Vec2d { x: 620.0, y: 720.0 };
@@ -406,7 +407,7 @@ impl App {
 
     fn refresh(&mut self, cx: &mut Cx) {
         let (g, status) = self.status();
-        let key = format!("{g:?}|{status}|{:?}", self.login);
+        let key = format!("{g:?}|{status}|{:?}|{}", self.login, makepad_devhub::lease::exec::writes_allowed());
         if key != self.tray_key {
             self.tray_key = key;
             // the menu is the secondary click's; the primary click opens the dropdown (the
@@ -420,6 +421,10 @@ impl App {
                 if let Some(on) = self.login {
                     menu.push(TrayMenuItem::Item { id: LOGIN, label: "Open at login".into(), enabled: true, checked: Some(on) });
                 }
+            }
+            if matches!(self.core, Some(Core::Node(_))) {
+                // the node's own dev switch (the master keeps it; this asks it)
+                menu.push(TrayMenuItem::Item { id: DEVSW, label: "Dev: this machine takes work from the network".into(), enabled: true, checked: Some(makepad_devhub::lease::exec::writes_allowed()) });
             }
             menu.push(TrayMenuItem::item(QUIT, "Quit devhub"));
             cx.set_tray(TrayIcon { id: TRAY, image: TrayImage { width: glyph::SIZE, height: glyph::SIZE, alpha: glyph::alpha(g) }, tooltip: format!("devhub \u{b7} {status}"), menu, dropdown: true });
@@ -763,6 +768,10 @@ impl MatchEvent for App {
         for action in actions {
             match action.as_widget_action().map(|wa| wa.cast::<TasksAction>()) {
                 Some(TasksAction::Quit) => return self.quit_from_view(cx),
+                Some(TasksAction::ToggleDev) => {
+                    makepad_devhub::lease::exec::request_dev(!makepad_devhub::lease::exec::writes_allowed());
+                    self.refresh(cx);
+                }
                 Some(a @ (TasksAction::ClearJit | TasksAction::ClearJitConfirmed(_) | TasksAction::ClearJitCancel)) => {
                     if let Some(Core::Node(n)) = &self.core {
                         node_clear_jit(n, a);
@@ -802,6 +811,10 @@ impl AppMain for App {
                         Err(e) => log_line(&format!("devhub: open at login: {e}")),
                     }
                     self.login = installed::login();
+                    self.refresh(cx);
+                }
+                id if id == DEVSW => {
+                    makepad_devhub::lease::exec::request_dev(!makepad_devhub::lease::exec::writes_allowed());
                     self.refresh(cx);
                 }
                 id if id == SEEN => {

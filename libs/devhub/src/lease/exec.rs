@@ -164,6 +164,8 @@ pub struct Exec {
     opts: Opts,
     scopes: bool,
     dev: AtomicBool,
+    /// a flip asked for on this node itself, until the master's policy push answers it (0 none, 1 on, 2 off)
+    dev_req: std::sync::atomic::AtomicU8,
     leases: Mutex<BTreeMap<String, Lease>>,
     pub guard: Guard,
     /// lease id -> (when measured, MB in its work + target + tmp dirs): measured off the beat
@@ -239,7 +241,7 @@ impl Exec {
     pub fn new(machine: &str, conf: LeaseConf, state: PathBuf, opts: Opts, publish: Publish) -> Arc<Exec> {
         let guard = Guard::new(machine, Roots::of(&conf.work), conf.disk_floor_gb, conf.disk_warn_gb, conf.role.users(), publish.clone());
         let scopes = opts.scopes.unwrap_or_else(user_bus);
-        let x = Arc::new(Exec { machine: machine.to_string(), publish, dev: AtomicBool::new(!conf.role.users()), conf: std::sync::RwLock::new(conf), state, opts, scopes, leases: Mutex::new(BTreeMap::new()), guard, disk_use: Default::default() });
+        let x = Arc::new(Exec { machine: machine.to_string(), publish, dev: AtomicBool::new(true), dev_req: Default::default(), conf: std::sync::RwLock::new(conf), state, opts, scopes, leases: Mutex::new(BTreeMap::new()), guard, disk_use: Default::default() });
         let mut back = Vec::new();
         for e in std::fs::read_dir(&x.state).into_iter().flatten().flatten() {
             let p = e.path();
@@ -358,6 +360,7 @@ impl Exec {
                 let apply = if crate::sync::store::source_store().is_some() { "store" } else { "checkout" };
                 let mut c = caps::measure(&self.machine, &self.conf(), apply);
                 c.desk_link = crate::embed::desk_link_state();
+                c.dev_req = match self.dev_req.load(Ordering::Acquire) { 1 => Some(true), 2 => Some(false), _ => None };
                 vec![c.to_json()]
             }
             "disk" => match rest.strip_prefix("clean ") {
@@ -372,8 +375,14 @@ impl Exec {
 
     fn policy(&self, rest: &str) -> String {
         match rest {
-            "dev=on" => self.dev.store(true, Ordering::Release),
-            "dev=off" => self.dev.store(false, Ordering::Release),
+            "dev=on" => {
+                self.dev.store(true, Ordering::Release);
+                self.dev_req.store(0, Ordering::Release);
+            }
+            "dev=off" => {
+                self.dev.store(false, Ordering::Release);
+                self.dev_req.store(0, Ordering::Release);
+            }
             "" => {}
             _ => return err("usage: policy dev=on|off"),
         }
@@ -1070,6 +1079,16 @@ pub fn writes_allowed() -> bool {
     EXEC.get().is_some_and(|x| x.dev.load(Ordering::Acquire))
 }
 
+/// The user flips this node's dev switch on the node itself (tray / task view): shown at once,
+/// and asked of the master with the next caps answer, which saves it in nodes.conf and pushes
+/// the policy (the master stays the one place the switch is kept).
+pub fn request_dev(on: bool) {
+    if let Some(x) = EXEC.get() {
+        x.dev.store(on, Ordering::Release);
+        x.dev_req.store(if on { 1 } else { 2 }, Ordering::Release);
+    }
+}
+
 /// The leases live on this node now: (id, lane, kind), for its own status view.
 pub fn held() -> Vec<(String, String, &'static str)> {
     EXEC.get().map_or_else(Vec::new, |x| x.leases.lock().unwrap().values().map(|l| (l.id.clone(), l.lane.clone(), l.kind.as_str())).collect())
@@ -1329,6 +1348,11 @@ mod tests {
         assert!(events.lock().unwrap().iter().any(|l| l.contains("no beat from the master")));
         // dev off refuses write kinds, not inspect
         assert_eq!(x.handle("policy", "dev=off"), vec![r#"{"dev":"off"}"#.to_string()]);
+        // a flip made on the node is asked of the master with the caps answer; the master's policy push clears it
+        x.dev_req.store(1, Ordering::Release);
+        assert!(x.handle("caps", "caps")[0].contains("\"dev_req\":true"));
+        x.handle("policy", "dev=off");
+        assert!(x.handle("caps", "caps")[0].contains("\"dev_req\":null"));
         assert!(x.handle("lease-start", r#"{"id":"L8","lane":"a","kind":"build","rev":null}"#)[0].contains("dev off"));
         assert!(x.handle("lease-start", r#"{"id":"L9","lane":"a","kind":"inspect","rev":null}"#)[0].contains("\"ok\":1"));
         let _ = std::fs::remove_dir_all(&base);

@@ -57,6 +57,8 @@ pub struct CacheUi {
 #[derive(Clone, Debug, Default)]
 pub enum TasksAction {
     Quit,
+    /// the DEV pill: flip this node's dev switch
+    ToggleDev,
     /// size this machine's JIT cache, then ask
     ClearJit,
     /// the confirmation: (force)
@@ -231,6 +233,11 @@ pub struct DevhubTasks {
     pub head: Head,
     #[rust]
     quit: Rect,
+    /// the DEV pill (a button: the node's own dev switch)
+    #[rust]
+    dev_pill: Rect,
+    #[rust]
+    mouse: Vec2d,
     /// the footer's JIT cache buttons: clear (or confirm), cancel
     #[rust]
     clear: Rect,
@@ -319,8 +326,9 @@ impl DevhubTasks {
         let dev = if head.dev { "DEV ON" } else { "DEV OFF" };
         let dw = self.d.measure(cx, true, tok.font.caption, dev) + 16.0;
         let pill = rect(x + w - dw, y + 4.0, dw, 18.0);
-        self.d.bordered(cx, pill, alpha(if head.dev { p.ok } else { p.fg }, 0.12), alpha(if head.dev { p.ok } else { p.fg }, 0.35), alpha(if head.dev { p.ok } else { p.fg }, 0.35), 0.0, 1.0);
-        self.d.label(cx, pill, true, tok.font.caption, if head.dev { p.ok } else { p.secondary }, HAlign::Center, dev);
+        self.dev_pill = pill;
+        let dstate = if contains(pill, self.mouse) { CtrlState::Hover } else { CtrlState::Normal };
+        self.d.button(cx, pill, &tok, dstate, None, dev, tok.font.caption, if head.dev { p.ok } else { p.secondary }, true);
         y += 48.0 + extra;
         y = self.machine_wells(cx, &p, x, y, w, now, &board.machine) + 10.0;
         if !head.leases.is_empty() {
@@ -413,6 +421,7 @@ impl Widget for DevhubTasks {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         match event {
             Event::MouseMove(e) => {
+                self.mouse = e.abs;
                 let hot = contains(self.quit, e.abs);
                 let hot_clear = if contains(self.clear, e.abs) { 1 } else if contains(self.cancel, e.abs) { 2 } else { 0 };
                 if hot != self.hot || hot_clear != self.hot_clear {
@@ -422,6 +431,7 @@ impl Widget for DevhubTasks {
                 }
             }
             Event::MouseDown(e) if contains(self.quit, e.abs) => cx.widget_action(self.uid, TasksAction::Quit),
+            Event::MouseDown(e) if contains(self.dev_pill, e.abs) => cx.widget_action(self.uid, TasksAction::ToggleDev),
             Event::MouseDown(e) if contains(self.clear, e.abs) => {
                 let a = match &self.head.cache.ask {
                     Some((_, force)) => TasksAction::ClearJitConfirmed(*force),
