@@ -38,6 +38,9 @@ fn batch_interval() -> Option<std::time::Duration> {
 
 /// A frame request the HAL has not answered for this long is made again.
 const REREQUEST: std::time::Duration = std::time::Duration::from_millis(500);
+/// How long a window close on its way holds the drawing back for the HAL's answer
+/// (`HalClient::close_pending`); it normally comes within a millisecond or two.
+const CLOSE_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 /// One budget for all glyph waits and rebuilds of a frame, including newly revealed text.
 const GLYPH_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -275,8 +278,12 @@ impl Cx {
             // Terminated while hosted: the host's Ticks are not what the shutdown waits for
             // (the host may be gone, or hung), so the child runs its own timers until it quits.
             let quitting = hosted && termination_requested();
+            // a close on its way: wait for its answer (or the wait's end), not for the next beat
+            let close_wait = self.hal.close_pending.filter(|_| !hosted).map(|t| CLOSE_WAIT.saturating_sub(t.elapsed())).filter(|w| !w.is_zero());
             let timeout = if host_poll_due || signal_pending {
                 0
+            } else if let Some(wait) = close_wait {
+                wait.as_nanos() as u64
             } else if quitting {
                 self.hal.hosted.as_ref().and_then(|hosted| hosted.timers.next_due_in()).map_or(u64::MAX, |secs| (secs * 1e9) as u64)
             } else if hosted || self.hal.device_lost {
@@ -312,6 +319,14 @@ impl Cx {
                 self.call_event_handler(&Event::Shutdown);
                 self.hal_submit_batch();
                 break 'turns;
+            }
+            // A window close on its way (the app's close button asked the window system, or a
+            // close was accepted): it goes to the HAL now, and nothing is drawn until the HAL
+            // answers. A slow frame (seconds under load) never stands between a close and the
+            // window going.
+            if !hosted && self.hal.close_pending.is_some_and(|t| t.elapsed() < CLOSE_WAIT) {
+                self.hal_submit_batch();
+                continue 'turns;
             }
             if hosted {
                 // Startup and its CreateWindow ops precede any host input. A consumed batch

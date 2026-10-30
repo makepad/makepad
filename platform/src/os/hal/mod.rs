@@ -148,6 +148,10 @@ pub struct HalClient {
     pub(crate) ime_height: f64,
     /// a window announced a frame (`FrameReady`)
     pub(crate) beat: bool,
+    /// A window close is on its way (asked of the window system, or accepted and sent):
+    /// since when. Until the HAL answers, the loop sends at once and draws nothing, so a close
+    /// never waits behind a slow frame. Bounded by `CLOSE_WAIT` should no answer come.
+    pub(crate) close_pending: Option<std::time::Instant>,
     /// the XR window announced a frame: a hosted app draws it at once, not at its host's next
     /// Tick (a headset's frames are paced by the headset, not by the host's display)
     pub(crate) xr_beat: bool,
@@ -173,8 +177,8 @@ pub struct HalClient {
     /// the application icon went to the HAL
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub(crate) icon_sent: bool,
-    /// the `MidiInput` handles: each gets every message
-    pub(crate) midi_senders: Vec<crate::makepad_network::mpsc::Sender<(MidiPortId, MidiData)>>,
+    /// the `MidiInput` handles: each gets every message, with the HAL's time stamp (ns)
+    pub(crate) midi_senders: Vec<crate::makepad_network::mpsc::Sender<(MidiPortId, MidiData, u64)>>,
     /// the registered audio entries' state (input, output), by slot
     pub(crate) audio_ctx: [Vec<Option<media::AudioCtx>>; 2],
     /// entries the HAL has replaced: freed once the batch that replaced them is submitted
@@ -229,6 +233,7 @@ impl Default for HalClient {
             ime_visible: false,
             ime_height: 0.0,
             beat: false,
+            close_pending: None,
             xr_beat: false,
             profile_beat: 0,
             profile_input_ns: 0,
@@ -295,12 +300,28 @@ impl HalClient {
     }
 }
 
-/// MIDI messages from the HAL's input ports, for one `MidiInput` handle.
-pub struct OsMidiInput(crate::makepad_network::mpsc::Receiver<(MidiPortId, MidiData)>);
+/// MIDI messages from the HAL's input ports, for one `MidiInput` handle, with
+/// the time the HAL stamped each with when it arrived (its clock's ns).
+pub struct OsMidiInput(crate::makepad_network::mpsc::Receiver<(MidiPortId, MidiData, u64)>);
+
+/// Seconds since a HAL time stamp (0 for none; a stamp from another machine's clock
+/// that is ahead counts as now).
+fn age(time_ns: u64) -> f64 {
+    if time_ns == 0 {
+        return 0.0;
+    }
+    makepad_hal::clock_ns().saturating_sub(time_ns) as f64 / 1e9
+}
 
 impl OsMidiInput {
-    pub fn receive(&mut self) -> Option<(MidiPortId, MidiData)> {
-        self.0.try_recv().ok()
+    /// A message and how long ago it arrived (seconds).
+    pub fn receive_timed(&mut self) -> Option<(MidiPortId, MidiData, f64)> {
+        self.0.try_recv().ok().map(|(port, data, at)| (port, data, age(at)))
+    }
+
+    /// The next message, waiting up to `timeout` for one (a thread of its own).
+    pub fn wait(&mut self, timeout: std::time::Duration) -> Option<(MidiPortId, MidiData, f64)> {
+        self.0.recv_timeout(timeout).ok().map(|(port, data, at)| (port, data, age(at)))
     }
 }
 

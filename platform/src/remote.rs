@@ -2014,6 +2014,30 @@ mod imp {
                                 phase,
                             })
                         }
+                        Input::Touch {
+                            x,
+                            y,
+                            uid,
+                            state,
+                            is_cancel,
+                            mods,
+                            time: at,
+                        } => {
+                            // Through native points and back, like the mouse routes above.
+                            let native = cx.windows[window_id]
+                                .layout_vec2d_to_native_points(dvec2(x, y));
+                            let abs = cx.stdin_pointer_abs(native, dvec2(0.0, 0.0), window_id);
+                            cx.dispatch_remote_touch(
+                                window_id,
+                                abs,
+                                uid,
+                                state,
+                                is_cancel,
+                                mods.into_key_modifiers(),
+                                at.unwrap_or(time),
+                            );
+                            continue;
+                        }
                         Input::Pinch {
                             x,
                             y,

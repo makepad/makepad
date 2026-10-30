@@ -2360,6 +2360,18 @@ impl DataGrid {
         }
     }
 
+    fn apply_bar_scroll(&mut self, cx: &mut Cx, sx: Option<f64>, sy: Option<f64>) {
+        if sx.is_some() || sy.is_some() {
+            if let Some(sx) = sx {
+                self.scroll.x = sx;
+            }
+            if let Some(sy) = sy {
+                self.scroll.y = sy;
+            }
+            self.area.redraw(cx);
+        }
+    }
+
     fn draw_scroll_bars(&mut self, cx: &mut Cx2d) {
         let rect = self.vp.data_rect;
         // ScrollBar::draw_scroll_bar positions its quad with draw_rel against
@@ -3610,7 +3622,36 @@ impl Widget for DataGrid {
                 sy = Some(scroll_pos);
             }
         });
-        // Wheel / trackpad over the whole grid
+        self.apply_bar_scroll(cx, sx, sy);
+
+        // Forward to hosted cell widgets, except while a grid gesture owns the pointer
+        let suppress_children = !matches!(self.interact, Interact::None)
+            && matches!(
+                event,
+                Event::MouseDown(_) | Event::MouseMove(_) | Event::TouchUpdate(_)
+            );
+        if !suppress_children {
+            let container_axes = match event {
+                Event::Scroll(e) => {
+                    let [x, _] = self.scroll_bar_h.scroll_container_axes(cx, e, self.area);
+                    let [_, y] = self.scroll_bar_v.scroll_container_axes(cx, e, self.area);
+                    [x, y]
+                }
+                _ => [false; 2],
+            };
+            cx.begin_scroll_container(container_axes);
+            for (_item_id, item) in self.items.iter_mut() {
+                let item_uid = item.widget.widget_uid();
+                cx.group_widget_actions(uid, item_uid, |cx| {
+                    item.widget.handle_event(cx, event, scope)
+                });
+            }
+            cx.end_scroll_container(container_axes);
+        }
+
+        // Wheel / trackpad over the whole grid, after the cells so a scrollable cell takes it first
+        let mut sx = None;
+        let mut sy = None;
         self.scroll_bar_h
             .handle_scroll_event(cx, event, self.area, &mut |_cx, action| {
                 if let ScrollBarAction::Scroll { scroll_pos, .. } = action {
@@ -3623,30 +3664,7 @@ impl Widget for DataGrid {
                     sy = Some(scroll_pos);
                 }
             });
-        if sx.is_some() || sy.is_some() {
-            if let Some(sx) = sx {
-                self.scroll.x = sx;
-            }
-            if let Some(sy) = sy {
-                self.scroll.y = sy;
-            }
-            self.area.redraw(cx);
-        }
-
-        // Forward to hosted cell widgets, except while a grid gesture owns the pointer
-        let suppress_children = !matches!(self.interact, Interact::None)
-            && matches!(
-                event,
-                Event::MouseDown(_) | Event::MouseMove(_) | Event::TouchUpdate(_)
-            );
-        if !suppress_children {
-            for (_item_id, item) in self.items.iter_mut() {
-                let item_uid = item.widget.widget_uid();
-                cx.group_widget_actions(uid, item_uid, |cx| {
-                    item.widget.handle_event(cx, event, scope)
-                });
-            }
-        }
+        self.apply_bar_scroll(cx, sx, sy);
 
         // An edit the grid shrank out from under: the host hears the
         // cancel it was promised, and the keyboard comes back from an

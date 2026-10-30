@@ -421,6 +421,13 @@ impl Cx {
     }
 
     /// The media events of the HAL, as the events the widgets know.
+    /// A message from a MIDI input, stamped by the HAL when it arrived: to every
+    /// `MidiInput` (a player places it on its sample by the stamp).
+    pub(crate) fn hal_midi_data(&mut self, port: u64, data: u32, time_ns: u64) {
+        let message = (MidiPortId(LiveId(port)), MidiData::from(data), time_ns);
+        self.hal.midi_senders.retain(|s| s.send(message).is_ok());
+    }
+
     pub(crate) fn hal_media_event(&mut self, event: HalEvent<'_>) {
         match event {
             HalEvent::VideoPrepared { video, size, duration_ms, seekable, tracks } => {
@@ -629,10 +636,7 @@ impl Cx {
                 };
                 crate::screen_capture::deliver_capture_surface(Some(window.index as usize), surface);
             }
-            HalEvent::MidiData { port, data } => {
-                let message = (MidiPortId(LiveId(port)), MidiData::from(data));
-                self.hal.midi_senders.retain(|s| s.send(message).is_ok());
-            }
+            HalEvent::MidiData { .. } => {}
             #[cfg(target_os = "linux")]
             HalEvent::ScreenSurface { window, size: _, handle } => {
                 let lease = makepad_hal::backend::linux::media::capture_surface::take_lease(self.hal.frames.w.session(), handle);

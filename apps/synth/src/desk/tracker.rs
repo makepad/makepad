@@ -20,9 +20,9 @@
 //! F2 the channel's settings, F3 the orientation, F4 tracker ⇄ roll.
 
 use super::tracker_model::{self as tm, Channel, EvKind, Form, Src, TrackModel, View, FX_LANE};
+use makepad_edit_values::{Change, Edit, Splice};
 use makepad_score_live::instruments::Choice;
 use makepad_score_live::node::Slot;
-use makepad_score_live::source::Splice;
 use makepad_score_player::Meters;
 use makepad_widgets::badge::advance;
 use makepad_widgets::*;
@@ -137,7 +137,7 @@ pub enum TrackerAction {
     #[default]
     None,
     /// One gesture's change of the source (normalized splices).
-    Edit { splices: Vec<Splice>, status: String },
+    Edit { edit: Edit, status: String },
     /// Play from this song beat.
     Seek(f64),
     /// Loop this range of song beats (None: stop looping).
@@ -345,6 +345,9 @@ pub struct ScoreTracker {
     /// The source the model is of (what its splices are against).
     #[rust]
     source: String,
+    /// Each emitted tracker change is one completed gesture.
+    #[rust]
+    gestures: u64,
     /// Edits are possible (the source loads and is the model's).
     #[rust]
     editable: bool,
@@ -961,12 +964,16 @@ impl ScoreTracker {
         }
         // A value written as it already is changes nothing (no undo step).
         let src = &self.source;
-        let splices: Vec<Splice> = splices.into_iter().filter(|s| src.get(s.start..s.end) != Some(s.text.as_str())).collect();
+        let splices: Vec<Splice> = splices.into_iter().filter(|s| src.get(s.range.clone()) != Some(s.text.as_str())).collect();
         if splices.is_empty() {
             return;
         }
         match tm::normalize(splices) {
-            Ok(splices) => cx.widget_action(self.uid, TrackerAction::Edit { splices, status: status.to_string() }),
+            Ok(splices) => {
+                self.gestures += 1;
+                let edit = Edit { changes: splices.into_iter().map(Change::Splice).collect(), gesture: (4u64 << 40) + self.gestures, done: true };
+                cx.widget_action(self.uid, TrackerAction::Edit { edit, status: status.to_string() });
+            }
             Err(e) => self.status(cx, &e),
         }
     }
@@ -1012,7 +1019,7 @@ impl ScoreTracker {
             Form::Hits { step, .. } => {
                 let s = local / step;
                 if (s - s.round()).abs() > 1e-6 {
-                    self.status(cx, &format!("{}: no step on this row (its steps are {} beats)", c.label, makepad_score_live::source::fmt_num(*step, 3)));
+                    self.status(cx, &format!("{}: no step on this row (its steps are {} beats)", c.label, makepad_edit_values::number::fmt_num(*step, 3)));
                     return;
                 }
                 if let Some(sp) = tm::set_step(c, s.round() as usize, b'x') {
@@ -1256,14 +1263,14 @@ impl ScoreTracker {
                     for item in items {
                         let local = (start + item.beat).rem_euclid(len);
                         let text = match item.kind {
-                            EvKind::Program(p) => format!("[{} @program {p}]", makepad_score_live::source::fmt_num(local, 4)),
-                            EvKind::Pedal => format!("[{} @pedal {}]", makepad_score_live::source::fmt_num(local, 4), makepad_score_live::source::fmt_num(item.vel as f64, 2)),
+                            EvKind::Program(p) => format!("[{} @program {p}]", makepad_edit_values::number::fmt_num(local, 4)),
+                            EvKind::Pedal => format!("[{} @pedal {}]", makepad_edit_values::number::fmt_num(local, 4), makepad_edit_values::number::fmt_num(item.vel as f64, 2)),
                             _ => tm::entry_text(local, item.pitch, item.dur as f64, item.vel, c.drums),
                         };
                         match dels.iter().position(|(b, _)| (b - local).abs() < 1e-9) {
                             Some(k) => {
                                 let (_, e) = dels.remove(k);
-                                splices.push(Splice { start: e.start, end: e.end, text });
+                                splices.push(Splice { file: 0, range: e.start..e.end, text });
                             }
                             None => splices.extend(tm::insert_entry(c, 0, text, local)),
                         }
@@ -1372,9 +1379,9 @@ impl ScoreTracker {
                             k += 1;
                         }
                         let fields: Vec<String> = choice.fields.iter().map(|(k, v)| format!("{k}: {v}")).collect();
-                        let node = Splice { start: root.span.start, end: root.span.start, text: format!("let {name} = {}{{{}}}\n", choice.type_name, fields.join(" ")) };
+                        let node = Splice { file: 0, range: root.span.start..root.span.start, text: format!("let {name} = {}{{{}}}\n", choice.type_name, fields.join(" ")) };
                         let close = root.body.end - 1;
-                        let listed = Splice { start: close, end: close, text: format!(" {name}") };
+                        let listed = Splice { file: 0, range: close..close, text: format!(" {name}") };
                         match makepad_score_live::source::set_field(&src, &c.name, "play", &name) {
                             Ok(play) => self.emit(cx, vec![node, play, listed], &format!("{} plays {}", c.label, choice.label)),
                             Err(e) => self.status(cx, &e),
@@ -2485,7 +2492,7 @@ impl ScoreTracker {
 
     fn release_pop(&mut self, cx: &mut Cx, what: PopFader, value: f32) {
         let Some(ch) = self.popup.as_ref().and_then(|p| self.model.channel(&p.ch)) else { return };
-        let num = |v: f32| makepad_score_live::source::fmt_num(v as f64, 2);
+        let num = |v: f32| makepad_edit_values::number::fmt_num(v as f64, 2);
         match what {
             PopFader::Level => self.write_field(cx, ch, "amp", num(value), "level"),
             PopFader::Pan => self.write_field(cx, ch, "pan", num(value), "pan"),
@@ -2969,7 +2976,7 @@ impl ScoreTracker {
                 self.emit(cx, splices, if resize { "note resized" } else { "note moved" });
             }
             Drag::Fader { ch, field, value, .. } => {
-                let v = makepad_score_live::source::fmt_num(value as f64, 2);
+                let v = makepad_edit_values::number::fmt_num(value as f64, 2);
                 self.write_field(cx, ch, field, v, field);
             }
             Drag::Ruler { from, to } => {

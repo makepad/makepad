@@ -116,10 +116,10 @@ script_mod! {
 /// You don't have to specify all values, they each have a sensible default.
 #[derive(Clone, Copy, Debug)]
 pub struct CalloutTooltipOptions {
-    /// The color of the tooltip text. Defaults to pure white: #FFFFFF.
-    pub text_color: Vec4,
-    /// The background color of the tooltip. Defaults to dark gray: #424C54.
-    pub bg_color: Vec4,
+    /// The color of the tooltip text, or `None` to use the tooltip's own `text_color`.
+    pub text_color: Option<Vec4>,
+    /// The background color of the tooltip, or `None` to use the tooltip's own `bg_color`.
+    pub bg_color: Option<Vec4>,
     /// The position of the tooltip relative to the widget that it's related to.
     pub position: TooltipPosition,
     /// The height/length of the callout triangle that points to the related widget.
@@ -128,8 +128,8 @@ pub struct CalloutTooltipOptions {
 impl Default for CalloutTooltipOptions {
     fn default() -> Self {
         Self {
-            text_color: vec4(1.0, 1.0, 1.0, 1.0),
-            bg_color: vec4(0.26, 0.30, 0.333, 1.0),
+            text_color: None,
+            bg_color: None,
             position: TooltipPosition::default(),
             triangle_height: 7.5,
         }
@@ -151,6 +151,13 @@ pub struct CalloutTooltip {
     source: ScriptObjectRef,
     #[deref]
     tooltip: Tooltip,
+
+    /// The text color used when the shown options don't pick one. Defaults to white.
+    #[live(vec4(1.0, 1.0, 1.0, 1.0))]
+    text_color: Vec4f,
+    /// The background color used when the shown options don't pick one. Defaults to dark gray.
+    #[live(vec4(0.26, 0.30, 0.333, 1.0))]
+    bg_color: Vec4f,
 
     /// The shown text, kept so its unwrapped width can be measured on each draw.
     #[rust]
@@ -189,7 +196,7 @@ impl Widget for CalloutTooltip {
         if self.tooltip.anchor().is_some() {
             let label = self.tooltip.label(cx, ids!(content.tooltip_label));
             let text_width = label.borrow_mut().map_or(0.0, |mut label| {
-                label.draw_text.color = self.options.text_color;
+                label.draw_text.color = self.options.text_color.unwrap_or(self.text_color);
                 let scale = (label.draw_text.font_scale as f64).max(0.0001);
                 label.draw_text
                     .layout(cx, 0.0, 0.0, None, false, label.align, &self.text)
@@ -219,7 +226,7 @@ impl Widget for CalloutTooltip {
         let Some(mut content) = content.borrow_mut::<View>() else {
             return DrawStep::done();
         };
-        let bg = self.options.bg_color;
+        let bg = self.options.bg_color.unwrap_or(self.bg_color);
         let draw_bg = &mut content.draw_bg;
         draw_bg.set_instance_on_area(cx, id!(background_color), &[bg.x, bg.y, bg.z, bg.w]);
         draw_bg.set_instance_on_area(cx, id!(triangle_height), &[self.options.triangle_height as f32]);

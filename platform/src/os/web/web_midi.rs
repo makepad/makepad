@@ -18,11 +18,15 @@ pub struct OsMidiOutput {
 pub struct OsMidiInput(mpsc::Receiver<(MidiPortId, MidiData)>);
 
 impl OsMidiInput {
-    pub fn receive(&mut self) -> Option<(MidiPortId, MidiData)> {
-        if let Ok((port_id, data)) = self.0.try_recv() {
-            return Some((port_id, data));
-        }
-        None
+    /// A message and how long ago it arrived (the page hands them over as
+    /// they come: no older than this turn).
+    pub fn receive_timed(&mut self) -> Option<(MidiPortId, MidiData, f64)> {
+        self.0.try_recv().ok().map(|(port_id, data)| (port_id, data, 0.0))
+    }
+
+    /// The page's thread cannot wait: as [`Self::receive_timed`].
+    pub fn wait(&mut self, _timeout: std::time::Duration) -> Option<(MidiPortId, MidiData, f64)> {
+        self.receive_timed()
     }
 }
 impl OsMidiOutput {

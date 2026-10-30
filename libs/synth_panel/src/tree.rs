@@ -11,9 +11,9 @@
 //! here); "variations" opens the voice's timeline and melody variants (the
 //! panel's `SynthTrack`, drawn here). The same click again folds it.
 
-use crate::choices::{ChoiceList, Clicked};
+use crate::browser::Browser;
 use crate::host::{self as synth, Inline, Track};
-use makepad_value_pickers::panel::control::{fit_text, DrawPanelShape, R_CARD, R_CONTROL, R_GROUP};
+use makepad_value_pickers::panel::control::{fit_text, DrawPanelShape, R_CARD, R_CONTROL};
 use makepad_value_pickers::panel::host::{self, PanelValue};
 use makepad_widgets::*;
 
@@ -58,7 +58,8 @@ const HEAD: f64 = 26.0;
 const VOICE: f64 = 26.0;
 const INST: f64 = 22.0;
 /// The instrument switch's list: its search and nine rows.
-const LIST: f64 = crate::choices::ROW_H * 10.0;
+/// The instrument browser's height under a voice.
+const LIST: f64 = 400.0;
 /// The unfolded part's indent (under the instrument's name).
 const INDENT: f64 = 20.0;
 
@@ -100,8 +101,8 @@ pub struct ScoreTree {
     /// The instrument switch open under a voice: (voice, instrument).
     #[rust]
     open: Option<(String, String)>,
-    #[rust]
-    list: ChoiceList,
+    #[live]
+    browser: Browser,
     #[rust]
     drag: Option<Hot>,
     /// What was last brought into view (a voice unfolded, and how).
@@ -116,7 +117,7 @@ impl ScoreTree {
         if let Hot::Level(voice, field, x0, x1, lo, hi) = hot {
             let t = ((x - x0) / (x1 - x0).max(1.0)).clamp(0.0, 1.0);
             let v = lo + t * (hi - lo);
-            host::set(&format!("{voice}.{field}"), PanelValue::Code(makepad_value_pickers::panel::host::fmt_number(v, 2)));
+            host::set(&format!("{voice}.{field}"), PanelValue::Code(makepad_edit_values::number::fmt_num(v, 2)));
         }
     }
 
@@ -137,7 +138,8 @@ impl ScoreTree {
     }
 
     fn open_list(&mut self, cx: &mut Cx, voice: &str, inst: &str) {
-        self.list.load(inst);
+        self.browser.inline = true;
+        self.browser.open(inst);
         self.open = Some((voice.to_string(), inst.to_string()));
         cx.set_key_focus(self.draw_bg.area());
         synth::set_searching(true);
@@ -145,7 +147,7 @@ impl ScoreTree {
 
     fn close_list(&mut self) {
         if self.open.take().is_some() {
-            self.list.stop_preview();
+            self.browser.close();
         }
         synth::set_searching(false);
     }
@@ -177,37 +179,8 @@ impl ScoreTree {
         let hot_at = |abs: DVec2, hots: &[(Rect, Hot)]| hots.iter().find(|(r, _)| r.contains(abs)).map(|(_, h)| h.clone());
         match hit {
             Hit::FingerHoverIn(_) => cx.set_cursor(MouseCursor::Hand),
-            Hit::FingerHoverOver(fe) if self.open.is_some() => {
-                let (changed, wake) = self.list.hover_at(fe.abs);
-                if wake {
-                    self.next_frame = cx.new_next_frame();
-                }
-                if changed {
-                    self.redraw(cx);
-                }
-            }
-            Hit::FingerHoverOut(_) => {
-                self.list.stop_preview();
-                self.redraw(cx);
-            }
             Hit::KeyFocus(_) => synth::set_searching(self.open.is_some()),
             Hit::KeyFocusLost(_) => synth::set_searching(false),
-            Hit::TextInput(te) if self.open.is_some() => {
-                self.list.type_text(&te.input);
-                self.redraw(cx);
-            }
-            Hit::KeyDown(ke) if self.open.is_some() && ke.key_code == KeyCode::Backspace => {
-                self.list.backspace();
-                self.redraw(cx);
-            }
-            Hit::KeyDown(ke) if self.open.is_some() && ke.key_code == KeyCode::Escape => {
-                self.close_list();
-                self.redraw(cx);
-            }
-            Hit::FingerScroll(fe) if self.open.is_some() && self.list.contains(fe.abs) => {
-                self.list.scroll_by(fe.scroll.y);
-                self.redraw(cx);
-            }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 if let Some(hot @ Hot::Level(..)) = hot_at(fe.abs, &self.hots) {
                     self.set_level(&hot, fe.abs.x);
@@ -226,14 +199,6 @@ impl ScoreTree {
                     return;
                 }
                 if !(fe.is_over && fe.was_tap()) {
-                    return;
-                }
-                if self.open.is_some() && self.list.contains(fe.abs) {
-                    // A choice made: the switch closes, the tweaks stay.
-                    if self.list.click(fe.abs) == Clicked::Switched {
-                        self.close_list();
-                    }
-                    self.redraw(cx);
                     return;
                 }
                 let tracks = synth::tracks();
@@ -305,10 +270,31 @@ impl ScoreTree {
 impl Widget for ScoreTree {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if self.next_frame.is_event(event).is_some() {
-            if self.list.tick() {
+            if self.browser.tick() {
                 self.next_frame = cx.new_next_frame();
             }
             self.redraw(cx);
+        }
+        // The open browser has its own events (the keys while the tree
+        // has them).
+        if self.browser.is_open() {
+            let keys = matches!(event, Event::KeyDown(_) | Event::KeyUp(_) | Event::TextInput(_));
+            if !keys || cx.has_key_focus(self.draw_bg.area()) {
+                let out = self.browser.handle_event(cx, event);
+                if out.close {
+                    self.close_list();
+                }
+                if out.redraw {
+                    self.redraw(cx);
+                    self.next_frame = cx.new_next_frame();
+                }
+                if out.consumed {
+                    if matches!(event, Event::MouseDown(_)) {
+                        cx.set_key_focus(self.draw_bg.area());
+                    }
+                    return;
+                }
+            }
         }
         let hit = event.hits(cx, self.draw_bg.area());
         self.handle_hit(cx, hit);
@@ -475,8 +461,9 @@ impl Widget for ScoreTree {
             cx.begin_turtle(Walk::fill_fit(), Layout { padding: Inset { left: INDENT, right: 6.0, top: 2.0, bottom: 8.0 }, spacing: 6.0, ..Layout::flow_down() });
             if picking {
                 let list = cx.walk_turtle(row_walk(LIST));
-                self.draw_cell.edged_round(cx, list, color(p.well, 1.0), color(p.line_faint, 1.0), 1.0, R_GROUP);
-                self.list.draw(cx, list, &mut self.draw_cell, &mut self.draw_text, &mut self.draw_small);
+                if self.browser.draw(cx, list) {
+                    self.next_frame = cx.new_next_frame();
+                }
             }
             let variations = unfolded.as_ref().is_some_and(|(_, vars)| *vars);
             if self.draw_inline(cx, scope, t, variations) == 0 && !picking {

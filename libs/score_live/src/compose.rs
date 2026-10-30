@@ -410,10 +410,10 @@ impl Composer {
     }
 
     /// A MIDI message from the input at `beat` (the beat playing): keys
-    /// held and controllers for held() and cc(), params the Clock maps to
-    /// controllers (moving at once), and the notes of loops a keyboard
-    /// plays (`midi_in`), for their feeds now.
-    pub fn midi_in(&mut self, data: [u8; 3], beat: f64, out: &mut Vec<Event>) {
+    /// held and controllers for held() and cc(), and params the Clock maps
+    /// to controllers (moving at once). Loops that play a keyboard (`in:` a
+    /// `MidiIn`) take it on the audio thread, not here.
+    pub fn midi_in(&mut self, data: [u8; 3], beat: f64) {
         let (status, a, b) = (data[0] & 0xf0, data[1] & 127, data[2] & 127);
         let channel = data[0] & 15;
         let on = status == 0x90 && b > 0;
@@ -436,16 +436,6 @@ impl Composer {
                     self.set_tempo(t.from + (t.to - t.from) * value as f64, t.ramp);
                 }
             }
-            return;
-        } else {
-            return;
-        }
-        // A key's handle: unique per channel and note.
-        let handle = 0x8000_0000 | ((channel as u32) << 7) | a as u32;
-        for l in self.doc.loops.iter().filter(|l| l.midi_in.is_some_and(|c| c == 0 || c - 1 == channel)) {
-            let opts = makepad_score_player::NoteOpts { handle, ..Default::default() };
-            let (kind, vel, dur) = if on { (EventKind::Note, b as f32 / 127.0 * l.amp.max(0.0), 64.0) } else { (EventKind::Release, 0.0, 0.0) };
-            out.push(Event { beat, loop_key: key(&l.name), kind, note: a as f32, vel, pan: l.pan, dur, opts });
         }
     }
 
@@ -886,7 +876,7 @@ impl Composer {
             None if pattern_len > 0.0 => pattern_len,
             None => {
                 let plays_input = l.play.as_deref().and_then(|p| self.doc.inst(p)).is_some_and(|i| matches!(i.kind, InstKind::Input { .. }));
-                if error.is_none() && l.stinger.is_none() && l.midi_in.is_none() && !plays_input {
+                if error.is_none() && l.stinger.is_none() && l.input.is_none() && !plays_input {
                     error = Some(format!("{}:1:1: loop `{}` never sleeps: give it `beats:` or sleep() in its code", crate::vm::DOC_FILE, l.name));
                 }
                 bar

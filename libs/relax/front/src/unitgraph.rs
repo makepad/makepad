@@ -532,6 +532,14 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
     });
     if let Some(built) = native_built {
         let built = built?;
+        // every native package's script ran under cargo (cargo sets OUT_DIR for each package
+        // with a build script): one cargo did not build would compile without its outputs
+        for &k in &native_krates {
+            let (_, n, v) = &g.pkg[k];
+            if !built.scripts.iter().any(|o| o.krate == k || (g.pkg[o.krate].1 == *n && g.pkg[o.krate].2 == *v)) {
+                return Err(format!("--allow-c: cargo did not run the build script of `{n} {v}` (no build-script-executed message): its OUT_DIR and cfgs are unknown"));
+            }
+        }
         g.native = built.lib;
         for n in built.scripts {
             let also = g.build_scripts.iter().find(|b| b.krate == n.krate).map(|b| b.also.clone()).unwrap_or_default();

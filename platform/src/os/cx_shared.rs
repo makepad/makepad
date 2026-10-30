@@ -9,6 +9,7 @@ use {
             TimerEvent, TriggerEvent,
         },
         makepad_live_id::{live_id, LiveId},
+        makepad_math::Vec2Index,
         makepad_network::NetworkResponse,
     },
     makepad_studio_protocol::{
@@ -840,6 +841,58 @@ impl Cx {
     pub fn dispatch_hw_pin_release(&mut self) {
         if self.fingers.has_pinned_capture() {
             self.push_unique_platform_op(crate::cx_api::CxOsOp::PinMousePointer(false));
+        }
+    }
+
+    /// A remote touch at a layout point, delivered the way a touch screen's are.
+    /// `is_cancel` is a `Stop` the system took away, which goes out as `Event::FingerCancel`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn dispatch_remote_touch(
+        &mut self,
+        window_id: crate::window::WindowId,
+        abs: crate::makepad_math::DVec2,
+        uid: u64,
+        state: crate::event::TouchState,
+        is_cancel: bool,
+        modifiers: crate::event::KeyModifiers,
+        time: f64,
+    ) {
+        let touches = vec![crate::event::TouchPoint {
+            state,
+            abs,
+            time,
+            uid,
+            rotation_angle: 0.0,
+            force: 0.0,
+            radius: crate::makepad_math::dvec2(0.0, 0.0),
+            handled: Cell::new(Area::Empty),
+            sweep_lock: Cell::new(Area::Empty),
+        }];
+        if is_cancel {
+            // Like a platform's touch cancel: every capture ends without a release, then it retires.
+            let digit_id: crate::event::DigitId = crate::makepad_live_id::live_id_num!(touch, uid).into();
+            self.fingers.cancel_digit(digit_id);
+            self.call_event_handler(&Event::FingerCancel(crate::event::FingerCancelEvent {
+                window_id,
+                digit_id,
+                device: crate::event::DigitDevice::Touch { uid },
+                abs,
+                time,
+                modifiers,
+            }));
+            self.fingers.process_touch_update_end(&touches);
+            return;
+        }
+        self.fingers.process_touch_update_start(time, &touches);
+        let event = Event::TouchUpdate(crate::event::TouchUpdateEvent {
+            time,
+            window_id,
+            modifiers,
+            touches,
+        });
+        self.call_event_handler(&event);
+        if let Event::TouchUpdate(e) = event {
+            self.fingers.process_touch_update_end(&e.touches);
         }
     }
 
@@ -1682,7 +1735,39 @@ impl Cx {
         if let Event::PermissionResult(result) = event {
             self.handle_camera_permission_result(result);
         }
+        // A press ends the scroll gesture in progress, as it ends a wheel scroll in browsers.
+        let is_press = match event {
+            Event::MouseDown(_) => true,
+            Event::TouchUpdate(e) => e.touches.iter().any(|t| t.state == crate::event::TouchState::Start),
+            _ => false,
+        };
+        if is_press {
+            self.fingers.scroll_latch.reset();
+        }
+        // Moving the pointer off a wheel scroll's owner once the wheel rests ends that owner's scroll.
+        if let Event::MouseMove(e) = event {
+            if self.fingers.scroll_latch.is_wheel_resting(e.time) {
+                for axis in [Vec2Index::X, Vec2Index::Y] {
+                    let owner = self.fingers.scroll_latch.owner(axis);
+                    if !owner.is_empty() && !owner.clipped_rect(self).contains(e.abs) {
+                        self.fingers.scroll_latch.release(axis);
+                    }
+                }
+            }
+        }
+        if let Event::Scroll(e) = event {
+            // A sweep lock is checked as each owner handles the event instead, since an open modal
+            // holds one and lifts it only while its content handles events.
+            let are_owners_live = [Vec2Index::X, Vec2Index::Y].map(|axis| {
+                let owner = self.fingers.scroll_latch.owner(axis);
+                owner.is_valid(self) && self.is_scrolling_allowed_within(&owner)
+            });
+            self.fingers.scroll_latch.begin_event(e, are_owners_live);
+        }
         self.inner_call_event_handler(event);
+        if let Event::Scroll(e) = event {
+            self.fingers.scroll_latch.end_event(e);
+        }
         // Dispatch any synthetic geom changes queued during the original
         // handler (e.g. runtime dpi_override updates) before triggers and
         // actions, so layout-dependent reactions see the new geometry.
@@ -1767,9 +1852,11 @@ impl Cx {
         // The flag comes down whether the draw returned or unwound: a
         // platform that catches the panic and goes on must not have every
         // later `redraw` refused as "already drawing".
+        self.pass_load.draw_begin();
         let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.call_event_handler(&Event::Draw(draw_event))
         }));
+        self.pass_load.draw_end();
         self.in_draw_event = false;
         if let Err(payload) = drawn {
             std::panic::resume_unwind(payload);

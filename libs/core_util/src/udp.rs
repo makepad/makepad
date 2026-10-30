@@ -46,6 +46,7 @@ pub fn bind_reuse_udp(port: u16) -> std::io::Result<UdpSocket> {
             len: u32,
         ) -> i32;
         fn bind(fd: i32, addr: *const u8, len: u32) -> i32;
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
         fn close(fd: i32) -> i32;
     }
 
@@ -59,6 +60,13 @@ pub fn bind_reuse_udp(port: u16) -> std::io::Result<UdpSocket> {
             close(fd);
             e
         };
+        // close-on-exec: a child the process spawns (a lease's command) must not inherit the
+        // socket (std's own sockets are, this raw one was not)
+        const F_SETFD: i32 = 2;
+        const FD_CLOEXEC: i32 = 1;
+        if fcntl(fd, F_SETFD, FD_CLOEXEC) != 0 {
+            return Err(fail(fd));
+        }
         let one: i32 = 1;
         let one_ptr = &one as *const i32 as *const core::ffi::c_void;
         let one_len = std::mem::size_of::<i32>() as u32;
@@ -139,5 +147,23 @@ pub fn wait_readable(a: &UdpSocket, b: &UdpSocket) -> std::io::Result<(bool, boo
         if e.kind() != std::io::ErrorKind::Interrupted {
             return Err(e);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::io::AsRawFd;
+
+    extern "C" {
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+
+    #[test]
+    fn the_reuse_socket_is_close_on_exec() {
+        let s = bind_reuse_udp(0).unwrap();
+        const F_GETFD: i32 = 1;
+        let flags = unsafe { fcntl(s.as_raw_fd(), F_GETFD) };
+        assert!(flags >= 0 && flags & 1 == 1, "FD_CLOEXEC not set (flags {flags})");
     }
 }

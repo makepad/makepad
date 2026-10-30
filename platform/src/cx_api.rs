@@ -13,14 +13,14 @@ use {
         event::xr::XrAnchor,
         event::{
             video_playback::CameraPreviewMode, DigitId, DragItem, Event, NextFrame, QuitReason,
-            QuitRequestedEvent, Timer, Trigger, VideoSource,
+            QuitRequestedEvent, ScrollDirection, ScrollEvent, Timer, Trigger, VideoSource,
         },
         gpu_info::GpuInfo,
         ime::TextInputConfig,
         macos_menu::MacosMenu,
         makepad_futures::executor::Spawner,
         makepad_live_id::*,
-        makepad_math::{Rect, Vec2d},
+        makepad_math::{Rect, Vec2Index, Vec2d},
         makepad_network::HttpRequest,
         makepad_script::value::ScriptHandle,
         shared_bytes::SharedBytes,
@@ -1986,7 +1986,8 @@ impl Cx {
         let Some(scrollable_area) = self.fingers.blocked_scrolling_exception_area() else {
             return true;
         };
-        area.rect(self).is_inside_of(scrollable_area.rect(self))
+        // The visible part, so a scrollable partly scrolled out of the allowed area still counts.
+        area.clipped_rect(self).is_inside_of(scrollable_area.rect(self))
     }
 
     /// Blocks scrolling events/hits in the app *EXCEPT* for within the given `scrollable_area`.
@@ -2021,6 +2022,61 @@ impl Cx {
     /// blocked scrolling over it.
     pub fn unblock_scrolling_within_area(&mut self, scrollable_area: Area) {
         self.fingers.unblock_scrolling_within_area(scrollable_area);
+    }
+
+    /// Whether `area` owns this scroll along `axis`. Each gesture goes to the first candidate to ask (after
+    /// its children): one under the pointer that can move the gesture's way, or that contains its scrolls.
+    pub fn is_scroll_owner(&mut self, e: &ScrollEvent, area: Area, axis: Vec2Index, is_candidate: bool) -> bool {
+        if !self.is_scroll_area_unblocked(area) {
+            // An owner a popup now covers lets go, for whatever the pointer is over.
+            self.fingers.scroll_latch.release_if_owner(e, area, axis);
+            return false;
+        }
+        self.fingers.scroll_latch.is_owner(e, area, axis, is_candidate)
+    }
+
+    /// Whether `area` may scroll at all: not shut out by `block_scrolling_except_within`,
+    /// or by an open popup's sweep lock (which keeps what's drawn under the popup still).
+    pub fn is_scroll_area_unblocked(&mut self, area: Area) -> bool {
+        self.is_scrolling_allowed_within(&area) && !self.fingers.test_sweep_lock(area)
+    }
+
+    /// Call before passing a scroll event to your children, with whether you'd take a new scroll along x and y,
+    /// and `end_scroll_container` after: a child that can't move that way then leaves it to you.
+    pub fn begin_scroll_container(&mut self, axes: [bool; 2]) {
+        self.fingers.scroll_latch.begin_container(axes);
+    }
+
+    pub fn end_scroll_container(&mut self, axes: [bool; 2]) {
+        self.fingers.scroll_latch.end_container(axes);
+    }
+
+    /// Whether a scrollable passing the scroll event to its children could take it along `axis`.
+    pub fn is_inside_scroll_container(&self, axis: Vec2Index) -> bool {
+        self.fingers.scroll_latch.is_inside_container(axis)
+    }
+
+    /// The scrollable that owns the scroll gesture in progress along `axis`, if any.
+    pub fn scroll_owner(&self, axis: Vec2Index) -> Area {
+        self.fingers.scroll_latch.owner(axis)
+    }
+
+    /// Whether `area` owns `digit_id`'s drag along `axis`, taking it unless a nested
+    /// scrollable (which sees the press first) already did.
+    pub fn is_scroll_drag_owner(&mut self, digit_id: DigitId, axis: Vec2Index, area: Area) -> bool {
+        self.fingers.is_scroll_drag_owner(digit_id, axis, area)
+    }
+
+    /// Call on a drag scroller's press, even one it can't scroll, so a scroller around it can
+    /// join the drag along an axis it didn't take (see [`CxFingers::can_join_scroll_drag`]).
+    pub fn hold_scroll_drag(&mut self, digit_id: DigitId, area: Area) {
+        self.fingers.hold_scroll_drag(digit_id, area);
+    }
+
+    /// The way `digit_id`'s drag may go once it has traveled the tap distance, or `None` until then.
+    /// A drag that only one scroller takes is never held back.
+    pub fn lock_scroll_drag(&mut self, digit_id: DigitId, travel: Vec2d) -> Option<ScrollDirection> {
+        self.fingers.lock_scroll_drag(digit_id, travel)
     }
 
     #[track_caller]
@@ -2110,6 +2166,33 @@ impl Cx {
         let draw_list_id = area.draw_list_id()?;
         let draw_pass_id = self.draw_lists[draw_list_id].draw_pass_id?;
         self.get_pass_window_id(draw_pass_id)
+    }
+
+    /// Measure where the frame time goes: every pass's GPU time by what it draws for (the
+    /// headset's eyes, a desktop window, offscreen) and the draws' CPU time
+    /// ([`crate::pass_load`]); [`Cx::take_pass_load`] reads it.
+    pub fn set_pass_load_enabled(&mut self, on: bool) {
+        self.pass_load.set_enabled(on);
+    }
+
+    /// The load since the last take (all zero while off).
+    pub fn take_pass_load(&mut self) -> crate::pass_load::PassLoadSample {
+        self.pass_load.take()
+    }
+
+    /// What a pass draws for: the XR pass or a pass under it, a window's, or none.
+    pub fn pass_class(&self, draw_pass_id: DrawPassId) -> crate::pass_load::PassClass {
+        use crate::pass_load::PassClass;
+        let mut id = draw_pass_id;
+        for _ in 0..64 {
+            match self.passes[id].parent {
+                CxDrawPassParent::Xr => return PassClass::Eyes,
+                CxDrawPassParent::Window(_) => return PassClass::Desktop,
+                CxDrawPassParent::DrawPass(next) => id = next,
+                CxDrawPassParent::None => break,
+            }
+        }
+        PassClass::Offscreen
     }
 
     pub fn get_pass_window_id(&self, draw_pass_id: DrawPassId) -> Option<WindowId> {

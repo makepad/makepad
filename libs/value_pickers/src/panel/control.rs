@@ -20,10 +20,10 @@
 //! Only `hard_min`/`hard_max` clamp, where the value's domain demands it.
 //! Over a field: Backspace puts back the value the panel opened with,
 //! Minus negates, Ctrl/Cmd+C / V copy and paste, Ctrl+wheel steps, Enter
-//! types, I keys it; a right click is its menu ([`field`] is the arithmetic).
+//! types, I keys it; a right click is its menu ([`number`] is the arithmetic).
 
-use super::field;
-use super::host::{self, fmt_number, numbers_in, with_numbers, KeyButton, PanelValue};
+use super::host::{self, numbers_in, with_numbers, KeyButton, PanelValue};
+use makepad_edit_values::number::{self, fmt_num, number_with_unit};
 use makepad_widgets::badge::advance;
 use makepad_widgets::makepad_script::ScriptFnRef;
 use makepad_widgets::*;
@@ -736,7 +736,7 @@ impl PanelControl {
     }
 
     fn unit(&self) -> &str {
-        host::number_with_unit(&self.code).map(|(_, u)| u).map_or("", |u| match u.as_str() {
+        number_with_unit(&self.code).map(|(_, u)| u).map_or("", |u| match u.as_str() {
             "s" => "s",
             "ms" => "ms",
             "deg" => "deg",
@@ -759,7 +759,7 @@ impl PanelControl {
             _ if self.kind == PanelKind::Angle => (0.0, 360.0),
             _ if (0.0..=1.0).contains(&v) => (0.0, 1.0),
             _ if v < 0.0 => (-2.0 * v.abs(), 2.0 * v.abs()),
-            _ => (0.0, field::nice_ceil((2.0 * v).max(1.0))),
+            _ => (0.0, number::nice_ceil((2.0 * v).max(1.0))),
         }
     }
 
@@ -775,7 +775,7 @@ impl PanelControl {
         }
         let mut r = self.range();
         for &v in &self.numbers {
-            r = field::stretch(r, v);
+            r = number::stretch(r, v);
         }
         // Inside the hard limits.
         if let Some(lo) = self.hard_min {
@@ -805,18 +805,18 @@ impl PanelControl {
             return self.step;
         }
         let (lo, hi) = self.range();
-        field::increment(hi - lo, self.whole())
+        number::increment(hi - lo, self.whole())
     }
 
     fn decimals(&self) -> usize {
-        field::decimals_of(self.step())
+        number::decimals_of(self.step())
     }
 
     /// Decimals a value is shown with: its step's, or more when the code
     /// writes more (a typed 0.125 shows as 0.125).
     fn shown_decimals(&self) -> usize {
-        let code_decimals = self.code.split(|c: char| !(c.is_ascii_digit() || c == '.')).map(field::written_decimals).max().unwrap_or(0);
-        field::decimals_of(self.step()).max(code_decimals).min(6)
+        let code_decimals = self.code.split(|c: char| !(c.is_ascii_digit() || c == '.')).map(number::written_decimals).max().unwrap_or(0);
+        number::decimals_of(self.step()).max(code_decimals).min(6)
     }
 
     /// Whether the value is numbers (a field kind).
@@ -875,19 +875,19 @@ impl PanelControl {
         let whole = self.whole();
         let hard = self.hard();
         let values: Vec<f64> = values.into_iter().map(|v| {
-            let v = field::clamp_hard(v, hard);
+            let v = number::clamp_hard(v, hard);
             if whole { v.round() } else { v }
         }).collect();
         let decimals = if whole { 0 } else { decimals };
-        let template = if self.code.is_empty() { fmt_number(values.first().copied().unwrap_or(0.0), 4) } else { self.code.clone() };
-        let code = if numbers_in(&template).is_empty() { fmt_number(values.first().copied().unwrap_or(0.0), decimals) } else { with_numbers(&template, &values, decimals) };
+        let template = if self.code.is_empty() { fmt_num(values.first().copied().unwrap_or(0.0), 4) } else { self.code.clone() };
+        let code = if numbers_in(&template).is_empty() { fmt_num(values.first().copied().unwrap_or(0.0), decimals) } else { with_numbers(&template, &values, decimals) };
         self.emit(cx, code, done);
     }
 
     /// The value with its numbers moved to `values`, on the step.
     fn emit_numbers(&mut self, cx: &mut Cx, values: Vec<f64>, done: bool) {
         let step = self.step();
-        let values = values.into_iter().map(|v| field::snap(v, step)).collect();
+        let values = values.into_iter().map(|v| number::snap(v, step)).collect();
         let d = self.decimals();
         self.emit_values(cx, values, d, done);
     }
@@ -1007,14 +1007,14 @@ impl PanelControl {
             values.resize(pr.start.len(), 0.0);
         }
         let (lo, hi) = self.range();
-        let snap = if mods.control || mods.logo { field::snap_rung(hi - lo, mods.shift) } else { pr.quantum };
+        let snap = if mods.control || mods.logo { number::snap_rung(hi - lo, mods.shift) } else { pr.quantum };
         let hard = self.hard();
         for &c in &pr.comps {
             if c >= values.len() || c >= pr.anchor.len() {
                 continue;
             }
             let raw = pr.anchor[c] + delta;
-            let clamped = field::clamp_hard(raw, hard);
+            let clamped = number::clamp_hard(raw, hard);
             if clamped != raw {
                 // At a hard limit the drag measures from here: turning back
                 // moves the value at once.
@@ -1027,18 +1027,18 @@ impl PanelControl {
                 pr.anchor_at = at;
             }
             pr.raw[c] = clamped;
-            values[c] = field::snap(clamped, snap);
+            values[c] = number::snap(clamped, snap);
         }
-        let decimals = field::decimals_of(snap).max(if self.step > 0.0 { field::decimals_of(self.step) } else { 0 });
+        let decimals = number::decimals_of(snap).max(if self.step > 0.0 { number::decimals_of(self.step) } else { 0 });
         if !pr.members.is_empty() {
             // The others move by the same part of their own soft ranges.
             let frac = delta / (hi - lo).abs().max(1e-9);
             let ctrl = mods.control || mods.logo;
             for m in &mut pr.members {
-                let raw = field::clamp_hard(m.anchor + frac * m.span, m.hard);
+                let raw = number::clamp_hard(m.anchor + frac * m.span, m.hard);
                 m.raw = raw;
                 let q = if ctrl {
-                    field::snap_rung(m.span, mods.shift)
+                    number::snap_rung(m.span, mods.shift)
                 } else if m.step > 0.0 {
                     m.step
                 } else if m.whole {
@@ -1046,8 +1046,8 @@ impl PanelControl {
                 } else {
                     10f64.powf((pr.rate / (hi - lo).abs().max(1e-9) * m.span).max(1e-9).log10().floor())
                 };
-                let v = if m.whole { field::snap(raw, q).round() } else { field::snap(raw, q) };
-                let code = with_numbers(&m.code, &[v], if m.whole { 0 } else { field::decimals_of(q) });
+                let v = if m.whole { number::snap(raw, q).round() } else { number::snap(raw, q) };
+                let code = with_numbers(&m.code, &[v], if m.whole { 0 } else { number::decimals_of(q) });
                 host::set(&m.path, PanelValue::Code(code));
             }
         }
@@ -1114,8 +1114,8 @@ impl PanelControl {
         pr.rate = match (self.kind, pr.part) {
             (PanelKind::Knob, Part::Value(_)) => span / 160.0 * if pr.fine { 0.1 } else { 1.0 },
             (PanelKind::Fader, Part::Value(_)) => span / 108.0 * if pr.fine { 0.1 } else { 1.0 },
-            (PanelKind::Slider | PanelKind::Range, _) => field::drag_rate(span, width, true, pr.fine),
-            _ => field::drag_rate(span, width, false, pr.fine),
+            (PanelKind::Slider | PanelKind::Range, _) => number::drag_rate(span, width, true, pr.fine),
+            _ => number::drag_rate(span, width, false, pr.fine),
         };
         pr.quantum = if self.step > 0.0 {
             self.step
@@ -1180,7 +1180,7 @@ impl PanelControl {
         self.edit_error = None;
         let v = self.numbers.get(i).copied().unwrap_or(0.0);
         let unit = if self.field_count() == 1 { self.unit().to_string() } else { String::new() };
-        let text = format!("{}{unit}", fmt_number(v, 6));
+        let text = format!("{}{unit}", fmt_num(v, 6));
         self.input.set_text(cx, &text);
         self.draw_bg.redraw(cx);
     }
@@ -1191,7 +1191,7 @@ impl PanelControl {
         let Some(i) = self.editing else { return true };
         let current = self.numbers.get(i).copied().unwrap_or(0.0);
         let unit = self.unit().to_string();
-        match field::eval(text, current, &unit) {
+        match number::eval(text, current, &unit) {
             Ok(v) => {
                 let mut values = if self.numbers.is_empty() { vec![0.0] } else { self.numbers.clone() };
                 if i >= values.len() {
@@ -1283,8 +1283,8 @@ impl PanelControl {
             values.push(self.range().0);
         }
         let i = i.min(values.len() - 1);
-        values[i] = field::snap(values[i] + dir * step, step);
-        let d = field::decimals_of(step).max(self.shown_decimals());
+        values[i] = number::snap(values[i] + dir * step, step);
+        let d = number::decimals_of(step).max(self.shown_decimals());
         self.emit_values(cx, values, d, true);
     }
 
@@ -1331,7 +1331,7 @@ impl PanelControl {
                 } else {
                     let current = self.numbers.get(comp).copied().unwrap_or(0.0);
                     let unit = self.unit().to_string();
-                    if let Ok(v) = field::eval(&text, current, &unit).or_else(|_| nums.first().copied().ok_or(())) {
+                    if let Ok(v) = number::eval(&text, current, &unit).or_else(|_| nums.first().copied().ok_or(())) {
                         let mut values = if self.numbers.is_empty() { vec![0.0] } else { self.numbers.clone() };
                         let c = comp.min(values.len() - 1);
                         values[c] = v;
@@ -1536,7 +1536,7 @@ impl PanelControl {
         }
         let unit = if self.field_count() == 1 { self.unit().to_string() } else { String::new() };
         let deg = if self.kind == PanelKind::Angle && unit.is_empty() { "°" } else { "" };
-        let said = format!("{}{unit}{deg}", fmt_number(v, self.shown_decimals()));
+        let said = format!("{}{unit}{deg}", fmt_num(v, self.shown_decimals()));
         let vw = advance(&self.draw_value, cx, &said);
         // The value right, the label left (a short field: the value centred).
         let key_in = if keyed && i == 0 && !label.is_empty() { 14.0 } else { 0.0 };
@@ -1881,7 +1881,7 @@ impl Widget for PanelControl {
                 if pr.engaged || matches!((self.kind, pr.part), (PanelKind::Angle | PanelKind::Xy, Part::Value(_))) {
                     // The release writes the gesture's last value: one undo step.
                     let values = self.numbers.clone();
-                    let d = if pr.engaged { field::decimals_of(pr.quantum).max(self.shown_decimals()) } else { self.decimals() };
+                    let d = if pr.engaged { number::decimals_of(pr.quantum).max(self.shown_decimals()) } else { self.decimals() };
                     self.press = None;
                     self.emit_values(cx, values, d, true);
                     return;

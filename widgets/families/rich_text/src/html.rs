@@ -1,5 +1,14 @@
+mod following_text;
+use following_text::{
+    set_following_room_after_widget, set_line_break_after_run, set_line_break_after_widget, FollowingRoomCache,
+    TextAfterRunCache, TextAfterRunStyles, WidgetRuns,
+};
+pub(crate) use following_text::{FollowingRoomFinder, PendingFollowingRoom, PendingTextAfterRun};
+
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::{
     animator::{Animate, Animator, AnimatorImpl},
@@ -14,6 +23,9 @@ use crate::{
 };
 
 const BULLET: &str = "•";
+
+/// How much `<sub>` and `<sup>` scale the font size.
+const SUB_SUP_FONT_SIZE_SCALE: f64 = 0.7;
 
 /// The default text color of an [`HtmlLink`]: #0000EE, the classic browser link blue.
 pub const HTML_LINK_COLOR: Vec4f = vec4(0.0, 0.0, 238.0 / 255.0, 1.0);
@@ -216,7 +228,7 @@ pub struct Html {
     #[live]
     pub body: ArcStringMut,
     #[rust]
-    pub doc: HtmlDoc,
+    pub doc: Rc<HtmlDoc>,
 
     /// Markers used for unordered lists, indexed by the list's nesting level.
     /// The marker can be an arbitrary string, such as a bullet point or a custom icon.
@@ -256,6 +268,20 @@ pub struct Html {
     /// thousands of unclosed `<table>` tags would otherwise be quadratic.
     #[rust]
     table_columns_cache: HashMap<usize, usize>,
+
+    /// What follows each run in its line, which only changes with the document, our styles and fonts.
+    /// The key is the index of the node where the text after the run starts,
+    /// and the value is what we found there for the run drawn before it.
+    #[rust]
+    text_after_run_cache: Rc<RefCell<TextAfterRunCache>>,
+    /// The room that what follows each run and widget needs on the last line `max_lines` allows.
+    /// The key is the index of the node where what follows starts,
+    /// and the value is the room we found there for the run or widget drawn before it.
+    #[rust]
+    following_room_cache: Rc<RefCell<FollowingRoomCache>>,
+    /// The styles we filled both caches with.
+    #[rust]
+    text_after_run_styles: Option<TextAfterRunStyles>,
 
     /// The stack of currently-open `<details>` tags while traversing the
     /// document. Rebuilt on each draw.
@@ -308,12 +334,14 @@ impl ScriptHook for Html {
     ) {
         let mut errors = Some(Vec::new());
         let new_doc = parse_html(self.body.as_ref(), &mut errors, InternLiveId::No);
-        if new_doc != self.doc {
-            self.doc = new_doc;
+        if new_doc != *self.doc {
+            self.doc = Rc::new(new_doc);
             self.text_flow.clear_items();
             self.seen_details.clear();
             self.summary_area_cache.clear();
         }
+        // An apply can also change our templates, which decide what draws text.
+        self.clear_following_text_caches();
         if errors.as_ref().unwrap().len() > 0 {
             log!("HTML parser returned errors {:?}", errors)
         }
@@ -321,6 +349,11 @@ impl ScriptHook for Html {
 }
 
 impl Html {
+    fn clear_following_text_caches(&self) {
+        self.text_after_run_cache.borrow_mut().clear();
+        self.following_room_cache.borrow_mut().clear();
+    }
+
     /// Moves from inside a collapsed `<details>` to where its body ends: its
     /// own `</details>` when it has one, otherwise the close tag of the
     /// enclosing element that ended it, or the end of the document. The
@@ -345,6 +378,8 @@ impl Html {
     /// and its tracker would leak into everything drawn after it.
     fn close_summary(&mut self, cx: &mut Cx2d, owner: Option<usize>) -> bool {
         self.text_flow.bold.pop();
+        // The summary is a block of its own, so what follows it on its row breaks like a new paragraph.
+        self.text_flow.reset_line_breaking();
         let (start, end) = self.text_flow.areas_tracker.pop_tracker();
         if let Some(dl) = owner.and_then(|i| self.details_stack.get(i)) {
             // Compute the bounding rect from the laid-out glyph
@@ -422,11 +457,10 @@ impl Html {
     /// so its body is not drawn. That is its own `</details>` when it has
     /// one, so that handler pops the level; otherwise the enclosing close tag
     /// that ended it, where the level's `open_elements` entry pops it.
-    fn skip_collapsed_body(&self, node: &HtmlWalker) -> Option<usize> {
-        let open_index = self.details_stack.last()?.open_index;
-        let mut probe = node.at(open_index);
-        Self::skip_details_body(&mut probe, open_index);
-        Some(probe.index)
+    fn skip_collapsed_body(node: &HtmlWalker, details_open_index: usize) -> usize {
+        let mut probe = node.at(details_open_index);
+        Self::skip_details_body(&mut probe, details_open_index);
+        probe.index
     }
 
     /// Vertical spacing inserted before a `<details>` opens and after it
@@ -517,14 +551,6 @@ impl Html {
                 let fs = *tf.font_sizes.last().unwrap_or(&tf.font_size) as f64;
                 tf.new_line_collapsed_with_spacing(cx, fs * tf.paragraph_margin.top);
             }
-            some_id!(code) => {
-                tf.push_size_rel_scale(tf.fixed_font_size_scale);
-                tf.fixed.push();
-                // A code block already draws its own background, so its `<code>` doesn't get an inline box too.
-                if tf.code_block.value() == 0 {
-                    tf.inline_code.push();
-                }
-            }
             some_id!(pre) => {
                 tf.new_line_collapsed(cx);
                 tf.fixed.push();
@@ -541,28 +567,6 @@ impl Html {
                 tf.new_line_collapsed(cx);
                 tf.sep(cx);
                 tf.new_line_collapsed(cx);
-            }
-            some_id!(u) => tf.underline.push(),
-            some_id!(del) | some_id!(s) | some_id!(strike) => tf.strikethrough.push(),
-
-            some_id!(b) | some_id!(strong) => tf.bold.push(),
-            some_id!(i) | some_id!(em) => tf.italic.push(),
-
-            some_id!(sub) => {
-                tf.push_size_rel_scale(0.7);
-                // Shift the subscript baseline downward, relative to the
-                // subscript's own (smaller) font size. The value has to
-                // also cancel the natural upward drift that comes from a
-                // smaller font having a smaller ascender.
-                tf.y_shift_scales.push(0.55);
-            }
-            some_id!(sup) => {
-                tf.push_size_rel_scale(0.7);
-                // Shift the superscript baseline upward, relative to the
-                // superscript's own (smaller) font size. Smaller-than-the
-                // subscript shift because the smaller ascender already
-                // raises the baseline a bit on its own.
-                tf.y_shift_scales.push(-0.2);
             }
             some_id!(ul) => {
                 list_stack.push(ListLevel {
@@ -652,7 +656,37 @@ impl Html {
             some_id!(td) => {
                 tf.begin_table_cell(cx, cell_align_x(node));
             }
-            Some(x) => return Some(x),
+            Some(x) => match InlineStyleTag::from_tag(x) {
+                Some(InlineStyleTag::Bold) => tf.bold.push(),
+                Some(InlineStyleTag::Italic) => tf.italic.push(),
+                Some(InlineStyleTag::Code) => {
+                    tf.push_size_rel_scale(tf.fixed_font_size_scale);
+                    tf.fixed.push();
+                    // A code block already draws its own background, so its `<code>` doesn't get an inline box too.
+                    if tf.code_block.value() == 0 {
+                        tf.inline_code.push();
+                    }
+                }
+                Some(InlineStyleTag::Subscript) => {
+                    tf.push_size_rel_scale(SUB_SUP_FONT_SIZE_SCALE);
+                    // Shift the subscript baseline downward, relative to the
+                    // subscript's own (smaller) font size. The value has to
+                    // also cancel the natural upward drift that comes from a
+                    // smaller font having a smaller ascender.
+                    tf.y_shift_scales.push(0.55);
+                }
+                Some(InlineStyleTag::Superscript) => {
+                    tf.push_size_rel_scale(SUB_SUP_FONT_SIZE_SCALE);
+                    // Shift the superscript baseline upward, relative to the
+                    // superscript's own (smaller) font size. Smaller-than-the
+                    // subscript shift because the smaller ascender already
+                    // raises the baseline a bit on its own.
+                    tf.y_shift_scales.push(-0.2);
+                }
+                Some(InlineStyleTag::Underline) => tf.underline.push(),
+                Some(InlineStyleTag::Strikethrough) => tf.strikethrough.push(),
+                None => return Some(x),
+            },
             _ => (),
         }
         None
@@ -722,8 +756,6 @@ impl Html {
                     size.unwrap_or(0.0) as f64 * tf.heading_margin.bottom,
                 );
             }
-            some_id!(b) | some_id!(strong) => tf.bold.pop(),
-            some_id!(i) | some_id!(em) => tf.italic.pop(),
             some_id!(p) => {
                 let fs = *tf.font_sizes.last().unwrap_or(&tf.font_size) as f64;
                 tf.new_line_collapsed_with_spacing(cx, fs * tf.paragraph_margin.bottom);
@@ -731,31 +763,14 @@ impl Html {
             some_id!(blockquote) => {
                 tf.end_quote(cx);
             }
-            some_id!(code) => {
-                if tf.code_block.value() == 0 {
-                    tf.inline_code.pop();
-                }
-                tf.font_sizes.pop();
-                tf.fixed.pop();
-            }
             some_id!(pre) => {
                 tf.fixed.pop();
                 tf.end_code(cx);
-            }
-            some_id!(sub) => {
-                tf.font_sizes.pop();
-                tf.y_shift_scales.pop();
-            }
-            some_id!(sup) => {
-                tf.font_sizes.pop();
-                tf.y_shift_scales.pop();
             }
             some_id!(ul) | some_id!(ol) => {
                 list_stack.pop();
             }
             some_id!(li) => tf.end_list_item(cx),
-            some_id!(u) => tf.underline.pop(),
-            some_id!(del) | some_id!(s) | some_id!(strike) => tf.strikethrough.pop(),
             some_id!(table) => tf.end_table(cx),
             some_id!(thead) => {
                 tf.in_table_header = false;
@@ -769,17 +784,46 @@ impl Html {
                 tf.end_table_cell(cx);
             }
             some_id!(td) => tf.end_table_cell(cx),
-            _ => (),
+            _ => match InlineStyleTag::from_tag(close_lc) {
+                Some(InlineStyleTag::Bold) => tf.bold.pop(),
+                Some(InlineStyleTag::Italic) => tf.italic.pop(),
+                Some(InlineStyleTag::Code) => {
+                    if tf.code_block.value() == 0 {
+                        tf.inline_code.pop();
+                    }
+                    tf.font_sizes.pop();
+                    tf.fixed.pop();
+                }
+                Some(InlineStyleTag::Subscript | InlineStyleTag::Superscript) => {
+                    tf.font_sizes.pop();
+                    tf.y_shift_scales.pop();
+                }
+                Some(InlineStyleTag::Underline) => tf.underline.pop(),
+                Some(InlineStyleTag::Strikethrough) => tf.strikethrough.pop(),
+                None => (),
+            },
         }
         None
     }
 
-    pub fn handle_text_node(cx: &mut Cx2d, tf: &mut TextFlow, node: &mut HtmlWalker) -> bool {
+    fn handle_text_node(
+        cx: &mut Cx2d,
+        tf: &mut TextFlow,
+        node: &mut HtmlWalker,
+        doc: &HtmlDoc,
+        collapsed_details_end: Option<usize>,
+        text_after_run_cache: &RefCell<TextAfterRunCache>,
+    ) -> bool {
         if let Some(text) = node.text() {
             if tf.table_num_columns > 0 && node.text_is_all_ws() {
                 return false;
             }
+            // The parser puts an empty text before every tag, and nothing has to stay with it.
+            if !text.is_empty() && !tf.is_content_truncated() {
+                set_line_break_after_run(cx, tf, doc, node.index + 1, text, collapsed_details_end, text_after_run_cache);
+            }
             tf.draw_text(cx, text);
+            tf.clear_line_break_after();
             true
         } else {
             false
@@ -872,12 +916,11 @@ impl Widget for Html {
         }
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.text_flow.begin(cx, walk);
         // The walker borrows the document for the whole draw and the handlers
-        // below need `&mut self`, so the document lives in a local for the
-        // duration and goes back at the end.
-        let doc = std::mem::take(&mut self.doc);
+        // below need `&mut self`, so we hold our own reference to the document.
+        let doc = self.doc.clone();
         let mut node = doc.new_walker();
         self.details_stack.clear();
         self.summary_click_areas.clear();
@@ -887,6 +930,17 @@ impl Widget for Html {
         self.open_elements.clear();
         self.open_summaries.clear();
         self.table_columns_cache.clear();
+        // Our styles only change between draws, so checking them once here covers every run.
+        let text_after_run_styles = Some(TextAfterRunStyles::new(&self.text_flow));
+        if self.text_after_run_styles != text_after_run_styles {
+            self.text_after_run_styles = text_after_run_styles;
+            self.clear_following_text_caches();
+        }
+        let has_ellipsis_at_max_lines = self.text_flow.has_ellipsis_at_max_lines();
+        if has_ellipsis_at_max_lines {
+            let finder = FollowingRoomFinder::new(&doc, &self.text_after_run_cache, &self.following_room_cache);
+            self.text_flow.set_following_room_finder(finder);
+        }
         while !node.done() {
             // Every element the parser resolved to end here ends now, before
             // this node is handled: inside a `</summary>`, at the next `<li>`,
@@ -1016,13 +1070,16 @@ impl Widget for Html {
                                 if let Some(dl) = self.details_stack.last_mut() {
                                     dl.is_open = is_open;
                                 }
-                                fb.draw_walk_fold_button(cx, triangle_walk);
+                                // The fold button doesn't draw through draw_text, which skips what gets cut.
+                                if !self.text_flow.is_content_truncated() {
+                                    fb.draw_walk_fold_button(cx, triangle_walk);
+                                }
                             }
                             if needs_seed {
                                 self.seen_details.insert(details_id);
                             }
                             // The summary text after the triangle still trims its leading whitespace.
-                            self.text_flow.first_thing_on_a_line = true;
+                            self.text_flow.mark_as_line_start();
                         }
                     }
                     // Start tracking the glyph rects that get drawn for the
@@ -1031,9 +1088,12 @@ impl Widget for Html {
                     // click target in handle_event.
                     self.text_flow.areas_tracker.push_tracker();
                     self.text_flow.bold.push();
-                    self.open_summaries.push(OpenSummary {
-                        owner: self.details_stack.len().checked_sub(1),
-                    });
+                    let owner = self.details_stack.len().checked_sub(1);
+                    let collapsed_details_end = owner
+                        .and_then(|owner| self.details_stack.get(owner))
+                        .filter(|details| !details.is_open)
+                        .map(|details| Self::skip_collapsed_body(&node, details.open_index));
+                    self.open_summaries.push(OpenSummary { owner, collapsed_details_end });
                     // Likewise a `<summary>` with no `</summary>` of its own.
                     if node.close_index().is_none() {
                         self.open_elements.push(OpenElement {
@@ -1063,11 +1123,9 @@ impl Widget for Html {
                     if self.close_summary(cx, summary.owner) {
                         // The body lies ahead of the walker; a resume behind
                         // it would redraw what was already drawn.
-                        if let Some(resume) = self.skip_collapsed_body(&node) {
-                            if resume > node.index {
-                                node.index = resume;
-                                continue;
-                            }
+                        if let Some(resume) = summary.collapsed_details_end.filter(|&resume| resume > node.index) {
+                            node.index = resume;
+                            continue;
                         }
                     }
                     node.walk();
@@ -1085,6 +1143,11 @@ impl Widget for Html {
 
             // Regular tag/text handling for everything else.
             let open_lc = node.open_tag_lc();
+            let collapsed_details_end = if has_ellipsis_at_max_lines {
+                self.open_summaries.last().and_then(|summary| summary.collapsed_details_end)
+            } else {
+                None
+            };
             let tf = &mut self.text_flow;
             match Self::handle_open_tag(
                 cx,
@@ -1097,7 +1160,15 @@ impl Widget for Html {
                 &mut self.table_columns_cache,
             ) {
                 Some(_) => {
-                    node.index = handle_custom_widget(cx, scope, tf, &doc, &mut node);
+                    node.index = handle_custom_widget(
+                        cx,
+                        tf,
+                        &doc,
+                        &mut node,
+                        collapsed_details_end,
+                        &self.text_after_run_cache,
+                        &self.following_room_cache,
+                    );
                     continue;
                 }
                 None => {
@@ -1112,7 +1183,7 @@ impl Widget for Html {
                     }
                 }
             }
-            Self::handle_text_node(cx, &mut self.text_flow, &mut node);
+            Self::handle_text_node(cx, tf, &mut node, &doc, collapsed_details_end, &self.text_after_run_cache);
             node.walk();
         }
         // Close anything the document left open, so `<ul><li>item` hands a
@@ -1124,7 +1195,6 @@ impl Widget for Html {
         }
         self.details_stack.clear();
         self.text_flow.end(cx);
-        self.doc = doc;
         DrawStep::done()
     }
 
@@ -1146,11 +1216,12 @@ impl Widget for Html {
         // node attributes at creation, so stale items must be dropped when the
         // doc changes; when it is unchanged, keeping them preserves
         // user-toggled <details> state across re-populates.
-        if new_doc != self.doc {
-            self.doc = new_doc;
+        if new_doc != *self.doc {
+            self.doc = Rc::new(new_doc);
             self.text_flow.clear_items();
             self.seen_details.clear();
             self.summary_area_cache.clear();
+            self.clear_following_text_caches();
         }
         if errors.as_ref().unwrap().len() > 0 {
             log!("HTML parser returned errors {:?}", errors)
@@ -1166,10 +1237,12 @@ impl Widget for Html {
 /// caller must not walk into it.
 fn handle_custom_widget(
     cx: &mut Cx2d,
-    _scope: &mut Scope,
     tf: &mut TextFlow,
-    doc: &HtmlDoc,
+    doc: &Rc<HtmlDoc>,
     node: &mut HtmlWalker,
+    collapsed_details_end: Option<usize>,
+    text_after_run_cache: &Rc<RefCell<TextAfterRunCache>>,
+    following_room_cache: &RefCell<FollowingRoomCache>,
 ) -> usize {
     let open_index = node.index;
     let resume = node.end_index().unwrap_or(open_index + 1);
@@ -1192,7 +1265,7 @@ fn handle_custom_widget(
     // `id` attribute is deliberately not used: a document that repeats one
     // would bind two elements to a single cached widget — and one `href`.
     let id = LiveId(open_index as u64);
-    let mut scope_with_attrs = Scope::with_props_index(doc, open_index);
+    let mut scope_with_attrs = Scope::with_props_index(doc.as_ref(), open_index);
 
     // The label is every text run inside the element, up to wherever the
     // parser resolved its end — so `<li><a href=u>link</li>` keeps its
@@ -1211,11 +1284,19 @@ fn handle_custom_widget(
         if tf.is_content_truncated() {
             return resume;
         }
-        let start_pos = cx.turtle().pos();
+        // Images and other widgets without a label draw no runs.
+        if !label.is_empty() {
+            let widget_runs = WidgetRuns { open_index, close_index: content_end, node_index_after_widget: resume };
+            set_line_break_after_widget(cx, tf, doc, widget_runs, collapsed_details_end, text_after_run_cache);
+        }
         let mut draw_scope = Scope::with_data(tf);
         item.draw_all(cx, &mut draw_scope);
+        tf.clear_line_break_after();
         // An element that draws nothing (e.g., an empty <span>) shouldn't use up its container's start.
-        tf.end_inline_widget(cx.turtle().pos() != start_pos, block_start_state);
+        tf.end_inline_widget(cx, block_start_state);
+        if hold.is_some() && tf.is_atomic_inline_content_on_last_line(cx) {
+            set_following_room_after_widget(cx, tf, doc, resume, collapsed_details_end, following_room_cache);
+        }
         tf.end_inline_content(cx, hold);
     }
     resume
@@ -1535,6 +1616,8 @@ struct DetailsLevel {
 struct OpenSummary {
     /// Index into `details_stack` of the `<details>` it belongs to, if any.
     owner: Option<usize>,
+    /// Where Html goes on after the body of its `<details>`, when that's collapsed.
+    collapsed_details_end: Option<usize>,
 }
 
 /// An element the widget opened, and the node index at which it ends.
@@ -1731,6 +1814,33 @@ fn align_keyword_to_x(keyword: &str) -> Option<f64> {
         Some(1.0)
     } else {
         None
+    }
+}
+
+/// An inline tag that only changes how the text in it looks.
+#[derive(Clone, Copy)]
+enum InlineStyleTag {
+    Bold,
+    Italic,
+    Code,
+    Subscript,
+    Superscript,
+    Underline,
+    Strikethrough,
+}
+
+impl InlineStyleTag {
+    fn from_tag(lc: LiveId) -> Option<Self> {
+        match lc {
+            live_id!(b) | live_id!(strong) => Some(Self::Bold),
+            live_id!(i) | live_id!(em) => Some(Self::Italic),
+            live_id!(code) => Some(Self::Code),
+            live_id!(sub) => Some(Self::Subscript),
+            live_id!(sup) => Some(Self::Superscript),
+            live_id!(u) => Some(Self::Underline),
+            live_id!(del) | live_id!(s) | live_id!(strike) => Some(Self::Strikethrough),
+            _ => None,
+        }
     }
 }
 

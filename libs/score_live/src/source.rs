@@ -4,6 +4,8 @@
 //! bytes it is about; every comment, blank line and layout elsewhere stays.
 //! Editors, the graph view, the widgets and the AI all edit through these.
 
+use makepad_edit_values::{apply_splices, Splice};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tok {
     Ident,
@@ -342,22 +344,6 @@ pub fn offset_of(src: &str, line: usize, col: usize) -> usize {
     (at + col.max(1) - 1).min(src.len())
 }
 
-/// One text change.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Splice {
-    pub start: usize,
-    pub end: usize,
-    pub text: String,
-}
-
-pub fn apply(src: &str, splice: &Splice) -> String {
-    let mut out = String::with_capacity(src.len() + splice.text.len());
-    out.push_str(&src[..splice.start]);
-    out.push_str(&splice.text);
-    out.push_str(&src[splice.end..]);
-    out
-}
-
 fn find_ctor<'a>(outline: &'a Outline, node: &str) -> Result<&'a Ctor, String> {
     if node.is_empty() || node == "Score" {
         return outline.root.as_ref().ok_or_else(|| "the score has no final `Score{…}`".to_string());
@@ -382,7 +368,7 @@ pub fn set_field(src: &str, node: &str, key: &str, value: &str) -> Result<Splice
     let outline = outline(src);
     let ctor = find_ctor(&outline, node)?;
     if let Some(field) = ctor.field(key) {
-        return Ok(Splice { start: field.value.start, end: field.value.end, text: value.to_string() });
+        return Ok(Splice { file: 0, range: field.value.start..field.value.end, text: value.to_string() });
     }
     let close = ctor.body.end - 1;
     let body = &src[ctor.body.start..ctor.body.end];
@@ -390,12 +376,68 @@ pub fn set_field(src: &str, node: &str, key: &str, value: &str) -> Result<Splice
         // After the last field, on its own line, at the fields' indent.
         let last_end = ctor.fields.last().map_or(ctor.body.start + 1, |f| f.value.end);
         let indent = ctor.fields.last().map_or_else(|| format!("{}    ", indent_at(src, ctor.span.start)), |f| indent_at(src, f.key_span.start).to_string());
-        Ok(Splice { start: last_end, end: last_end, text: format!("\n{indent}{key}: {value}") })
+        Ok(Splice { file: 0, range: last_end..last_end, text: format!("\n{indent}{key}: {value}") })
     } else {
         let before = src[..close].trim_end_matches(' ').len();
         let lead = if src[ctor.body.start + 1..before].trim().is_empty() { "" } else { " " };
-        Ok(Splice { start: before, end: close, text: format!("{lead}{key}: {value}") })
+        Ok(Splice { file: 0, range: before..close, text: format!("{lead}{key}: {value}") })
     }
+}
+
+/// Set one entry of a map field (`gain: {kick: 0.8}`): an entry written
+/// there is replaced in place, a new one goes last in the map, and a node
+/// without the field gets `key: {entry: value}`.
+pub fn set_entry(src: &str, node: &str, key: &str, entry: &str, value: &str) -> Result<Splice, String> {
+    let outline = outline(src);
+    let ctor = find_ctor(&outline, node)?;
+    let Some(field) = ctor.field(key) else {
+        return set_field(src, node, key, &format!("{{{entry}: {value}}}"));
+    };
+    let text = field.value.text(src);
+    if !text.starts_with('{') || !text.ends_with('}') {
+        return Err(format!("`{node}.{key}` is not a map {{{entry}: …}}"));
+    }
+    // The map's own entries: `name:` at its first depth.
+    let bytes = text.as_bytes();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' | b'[' | b'(' => depth += 1,
+            b'}' | b']' | b')' => depth -= 1,
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            c if depth == 1 && (c.is_ascii_alphabetic() || c == b'_') && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_')) => {
+                let s = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let name = &text[s..i];
+                let rest = &text[i..];
+                let colon = rest.len() - rest.trim_start().len();
+                if rest.trim_start().starts_with(':') && name == entry {
+                    let v0 = i + colon + 1;
+                    let v0 = v0 + (text[v0..].len() - text[v0..].trim_start().len());
+                    let mut v1 = v0;
+                    while v1 < bytes.len() && !bytes[v1].is_ascii_whitespace() && bytes[v1] != b'}' && bytes[v1] != b',' {
+                        v1 += 1;
+                    }
+                    return Ok(Splice { file: 0, range: field.value.start + v0..field.value.start + v1, text: value.to_string() });
+                }
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let inner = text[1..text.len() - 1].trim_end();
+    let close = field.value.start + 1 + inner.len();
+    let lead = if inner.trim().is_empty() { "" } else { " " };
+    Ok(Splice { file: 0, range: close..field.value.end - 1, text: format!("{lead}{entry}: {value}") })
 }
 
 /// Remove a field and the space before it.
@@ -407,7 +449,7 @@ pub fn remove_field(src: &str, node: &str, key: &str) -> Result<Splice, String> 
     let start = if src[start..field.key_span.start].is_empty() { field.key_span.start } else { start };
     // Keep the line break if the field was alone on its line.
     let start = if src[..start].ends_with('\n') && src[field.value.end..].starts_with('\n') { start - 1 } else { start };
-    Ok(Splice { start, end: field.value.end, text: String::new() })
+    Ok(Splice { file: 0, range: start..field.value.end, text: String::new() })
 }
 
 /// Add `let name = text` before the final `Score{…}` and list the name in
@@ -422,7 +464,7 @@ pub fn insert_node(src: &str, name: &str, text: &str) -> Result<String, String> 
     }
     let root = outline.root.as_ref().ok_or("the score has no final `Score{…}`")?;
     // Into the root's member list first (it is later in the text).
-    let listed = add_member(src, root, name);
+    let listed = add_member(src, root, name)?;
     let at = src[..root.span.start].rfind('\n').map_or(0, |nl| nl + 1);
     let at = src[..at].trim_end().len();
     let at = if at == 0 { 0 } else { src[at..].find('\n').map_or(at, |nl| at + nl + 1) };
@@ -430,17 +472,17 @@ pub fn insert_node(src: &str, name: &str, text: &str) -> Result<String, String> 
     Ok(format!("{}{prefix}let {name} = {text}\n\n{}", &listed[..at], listed[at..].trim_start_matches('\n')))
 }
 
-fn add_member(src: &str, root: &Ctor, name: &str) -> String {
+fn add_member(src: &str, root: &Ctor, name: &str) -> Result<String, String> {
     let last_bare = root.fields.iter().rev().find(|field| field.bare);
     let splice = match last_bare {
-        Some(field) => Splice { start: field.value.end, end: field.value.end, text: format!(" {name}") },
+        Some(field) => Splice { file: 0, range: field.value.end..field.value.end, text: format!(" {name}") },
         None => {
             let close = root.body.end - 1;
             let before = src[..close].trim_end().len();
-            Splice { start: before, end: before, text: format!(" {name}") }
+            Splice { file: 0, range: before..before, text: format!(" {name}") }
         }
     };
-    apply(src, &splice)
+    apply_splices(src, 0, &[splice])
 }
 
 /// Remove a node, its root listing and every bare reference to it in other
@@ -477,7 +519,7 @@ pub fn remove_node(src: &str, name: &str) -> Result<String, String> {
     if src[end..].starts_with('\n') && (start == 0 || src[..start].ends_with("\n\n")) {
         end += 1;
     }
-    splices.push(Splice { start, end, text: String::new() });
+    splices.push(Splice { file: 0, range: start..end, text: String::new() });
     // Bare references in lists and the root.
     for token in &outline.tokens {
         if token.kind == Tok::Ident && &src[token.start..token.end] == name && (token.start < ctor.span.start || token.start >= ctor.span.end) {
@@ -486,16 +528,11 @@ pub fn remove_node(src: &str, name: &str) -> Result<String, String> {
             });
             if inside_list {
                 let s = src[..token.start].trim_end_matches(' ').len();
-                splices.push(Splice { start: s, end: token.end, text: String::new() });
+                splices.push(Splice { file: 0, range: s..token.end, text: String::new() });
             }
         }
     }
-    splices.sort_by_key(|s| std::cmp::Reverse(s.start));
-    let mut out = src.to_string();
-    for splice in &splices {
-        out = apply(&out, splice);
-    }
-    Ok(out)
+    apply_splices(src, 0, &splices)
 }
 
 /// The numeric literal token at `at`, if any (drag-to-scrub).
@@ -505,13 +542,6 @@ pub fn number_at(src: &str, at: usize) -> Option<Span> {
         let start = if src[..t.start].ends_with('-') && !src[..t.start - 1].trim_end().ends_with(|c: char| c.is_ascii_alphanumeric() || c == ')' || c == ']') { t.start - 1 } else { t.start };
         Span { start, end: t.end }
     })
-}
-
-/// Format a number the way a person would type it at this precision.
-pub fn fmt_num(value: f64, decimals: usize) -> String {
-    let s = format!("{value:.decimals$}");
-    let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s };
-    if s == "-0" { "0".into() } else { s }
 }
 
 #[cfg(test)]
@@ -535,13 +565,13 @@ mod tests {
 
     #[test]
     fn patches_touch_only_their_bytes() {
-        let s = apply(SRC, &set_field(SRC, "clock", "bpm", "128").unwrap());
+        let s = apply_splices(SRC, 0, &[set_field(SRC, "clock", "bpm", "128").unwrap()]).unwrap();
         assert_eq!(s, SRC.replace("bpm: 120", "bpm: 128"));
-        let s = apply(SRC, &set_field(SRC, "clock", "swing", "0.1").unwrap());
+        let s = apply_splices(SRC, 0, &[set_field(SRC, "clock", "swing", "0.1").unwrap()]).unwrap();
         assert!(s.contains("Clock{bpm: 120 sig: [4 4] swing: 0.1}"));
-        let s = apply(SRC, &set_field(SRC, "kick", "mute", "true").unwrap());
+        let s = apply_splices(SRC, 0, &[set_field(SRC, "kick", "mute", "true").unwrap()]).unwrap();
         assert!(s.contains("    code: fn(i) { hit(@kick) sleep(1) }\n    mute: true\n}"));
-        let s = apply(SRC, &remove_field(SRC, "clock", "sig").unwrap());
+        let s = apply_splices(SRC, 0, &[remove_field(SRC, "clock", "sig").unwrap()]).unwrap();
         assert!(s.contains("Clock{bpm: 120}"), "{s}");
         let s = insert_node(SRC, "hats", "Loop{play: kit hits: \"..x.\"}").unwrap();
         assert!(s.contains("let hats = Loop{play: kit hits: \"..x.\"}\n\nScore{"), "{s}");
@@ -560,8 +590,6 @@ mod tests {
         assert_eq!(number_at(SRC, at + 1).unwrap().text(SRC), "0.2");
         let (line, col) = line_col(SRC, at);
         assert_eq!(offset_of(SRC, line, col), at);
-        assert_eq!(fmt_num(0.30000001, 2), "0.3");
-        assert_eq!(fmt_num(-0.001, 1), "0");
     }
 }
 

@@ -1,7 +1,7 @@
 //! Editable rests, FK poses, constraints, weight tools and shape keys. Controls
 //! evaluate on the worker and bake into ordinary glTF animation channels.
 use makepad_csg_math::portable::PortableFloat;
-use crate::{document::State,mesh,transform::*,schema::*,service::*,json::{self,Value},canon::{Reader,Writer},
+use crate::{document::State,mesh,transform::*,schema::*,json::{self,Value},canon::{Reader,Writer},
     AnimationChannel,AnimationClip,AnimationPath,Keyframe,Skeleton,Error,Limits,Result,OperationResult};
 use std::collections::{BTreeMap,BTreeSet};
 
@@ -358,7 +358,7 @@ fn edit_weights(state:&mut State,object:&str,vertices:&[mesh::VertexId],edit:&We
     let updates=ids.iter().map(|id|(*id,rows.remove(id).unwrap())).collect::<Vec<_>>();state.objects.get_mut(object).unwrap().set_weights_bulk(&updates,ctx)?;Ok(ids)
 }
 
-#[path="rig_control_parse.rs"] mod parse;
+#[path="rig_control_ops.rs"] mod operations;
 #[path="rig_control_codec.rs"] mod codec;
 
 #[path="rig_control_mirror.rs"] mod mirror;

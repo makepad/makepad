@@ -3346,6 +3346,18 @@ impl App {
         self.redraw_all(cx);
     }
 
+    /// The app asked to keep the window `client` shows above its other windows (`on`), or
+    /// no longer: the layout keeps it over every ordinary window however they are raised.
+    pub(crate) fn set_client_topmost(&mut self, cx: &mut Cx, client: ClientId, on: bool) {
+        if !self.state_mut().clients.contains_key(&client) {
+            return;
+        }
+        if self.state_mut().layout_of_mut(client).set_topmost(client, on) {
+            log!("wm: client {client} {} on top", if on { "stays" } else { "no longer stays" });
+            self.redraw_all(cx);
+        }
+    }
+
     /// The app `client` closed one of its later windows, or asked something of it.
     fn later_window_op(&mut self, cx: &mut Cx, client: ClientId, window: makepad_platform::ime::HostedWindow) {
         use makepad_platform::ime::hosted_window_op as op;
@@ -3353,6 +3365,15 @@ impl App {
         if window.op == op::SIZE {
             let tile = self.client_windows.route(client, window.window_id);
             self.apply_requested_size(cx, tile, window.x, window.y);
+            return;
+        }
+        // Any window's keep-on-top request: the app's first window, or a later one with a tile.
+        if window.op == op::TOPMOST {
+            let tile = self.client_windows.route(client, window.window_id);
+            let first = self.state_mut().clients.get(&client).is_some_and(|slot| slot.window_id == window.window_id);
+            if tile != client || first {
+                self.set_client_topmost(cx, tile, window.x != 0.0);
+            }
             return;
         }
         if window.op == op::CLOSED {

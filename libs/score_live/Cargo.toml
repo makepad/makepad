@@ -9,6 +9,7 @@ description = "Scores: live-coded music as one Splash document that is a flow gr
 name = "makepad_score_live"
 
 [dependencies]
+makepad-edit-values = { path = "../edit_values" }
 makepad-score-player = { path = "../score_player" }
 makepad-audio-synth = { path = "../audio_synth" }
 makepad-script = { path = "../../platform/script" }

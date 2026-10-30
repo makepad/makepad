@@ -51,10 +51,11 @@ mod panel;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
 mod settings_types;
+pub mod verdict;
 pub use mirror::{DrawXrMirror, XrMirrorClock, XrMirrorView};
 pub use panel::{XrCaptionButton, XrStreamSettings};
 #[cfg(not(target_arch = "wasm32"))]
-pub use server::{launch_enabled, LiveHeadset, ServerStats, XrServer};
+pub use server::{launch_enabled, HostLoad, LiveHeadset, ServerStats, XrServer};
 pub use settings_types::{HeadsetSettings, StreamAa, StreamView, STREAM_AA_DEFAULT, STREAM_AA_MODES};
 /// The serving side's shaders and widgets: the server's pack, the mirror and the caption's
 /// `XrCaptionButton` (an app with the control registers them).

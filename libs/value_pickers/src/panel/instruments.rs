@@ -5,8 +5,9 @@
 //! of a drag set live and the release written once.
 
 use super::control::{fit_text, LABEL};
-use super::host::{self, fmt_number, numbers_in, with_numbers, Bound, BoundKind, PanelValue};
+use super::host::{self, numbers_in, with_numbers, Bound, BoundKind, PanelValue};
 use crate::color_picker::{format_code_color, parse_code_color, split_hdr, ColorPickAction, HdrColorPicker};
+use makepad_edit_values::number::{fmt_num, number_with_unit};
 use makepad_widgets::makepad_script::ScriptFnRef;
 use makepad_widgets::*;
 use std::collections::VecDeque;
@@ -332,7 +333,7 @@ impl Widget for PanelSteps {
             self.draw_cell.draw_abs(cx, Rect { pos: dvec2(area.pos.x + i as f64 * w + 1.0, area.pos.y + area.size.y - 2.0 - h), size: dvec2((w - 2.0).max(1.0), h.max(1.0)) });
         }
         self.draw_small.color = color(p.muted, 1.0);
-        self.draw_small.draw_abs(cx, dvec2(area.pos.x, area.pos.y + area.size.y + 2.0), &format!("{} steps · {}–{}", self.values.len(), fmt_number(lo, 2), fmt_number(hi, 2)));
+        self.draw_small.draw_abs(cx, dvec2(area.pos.x, area.pos.y + area.size.y + 2.0), &format!("{} steps · {}–{}", self.values.len(), fmt_num(lo, 2), fmt_num(hi, 2)));
         DrawStep::done()
     }
 }
@@ -487,7 +488,7 @@ impl Widget for PanelPoints {
         }
         self.draw_small.color = color(p.muted, 1.0);
         let said = match self.dragging.or(self.hot) {
-            Some(i) => format!("{} · {}, {}", i + 1, fmt_number(self.values[2 * i], 2), fmt_number(self.values[2 * i + 1], 2)),
+            Some(i) => format!("{} · {}, {}", i + 1, fmt_num(self.values[2 * i], 2), fmt_num(self.values[2 * i + 1], 2)),
             None => format!("{} points", pts.len()),
         };
         self.draw_small.draw_abs(cx, dvec2(area.pos.x + 4.0, area.pos.y + area.size.y - 14.0), &said);
@@ -568,7 +569,7 @@ pub struct PanelCurve {
 
 impl PanelCurve {
     fn write(&mut self, cx: &mut Cx) {
-        let n = |v: f64| fmt_number(v, 3);
+        let n = |v: f64| fmt_num(v, 3);
         self.code = if numbers_in(&self.code).len() >= 4 {
             with_numbers(&self.code, &self.c, 3)
         } else {
@@ -941,7 +942,7 @@ impl PanelMacro {
         for (path, from, to) in self.parsed() {
             let v = from + (to - from) * self.t;
             let Some(now) = host::read(&path).map(|v| v.code()) else { continue };
-            let code = if numbers_in(&now).is_empty() { fmt_number(v, 3) } else { with_numbers(&now, &[v], 3) };
+            let code = if numbers_in(&now).is_empty() { fmt_num(v, 3) } else { with_numbers(&now, &[v], 3) };
             host::set(&path, PanelValue::Code(code));
         }
         if host::bound(&self.on_change) {
@@ -1094,7 +1095,7 @@ impl Widget for PanelMeter {
         self.draw_cell.draw_abs(cx, Rect { pos: dvec2(bar.pos.x, bar.pos.y + bar.size.y - h), size: dvec2(bar.size.x, h) });
         self.draw_small.color = color(p.text_bright, 1.0);
         let said = match live {
-            Some(v) => fmt_number(v, 3),
+            Some(v) => fmt_num(v, 3),
             None => "—".to_string(),
         };
         self.draw_small.draw_abs(cx, dvec2(bar.pos.x + 10.0, rect.pos.y + 4.0), &said);
@@ -1205,7 +1206,7 @@ impl PanelEnvelope {
             if path.is_empty() {
                 continue;
             }
-            let code = if numbers_in(&self.codes[k]).is_empty() { fmt_number(self.adsr[k], 3) } else { with_numbers(&self.codes[k], &[self.adsr[k]], 3) };
+            let code = if numbers_in(&self.codes[k]).is_empty() { fmt_num(self.adsr[k], 3) } else { with_numbers(&self.codes[k], &[self.adsr[k]], 3) };
             if code != self.codes[k] {
                 self.codes[k] = code.clone();
                 host::set(&path, PanelValue::Code(code));
@@ -1240,7 +1241,7 @@ impl Widget for PanelEnvelope {
             self.seen = rev;
             for k in 0..4 {
                 if let Some(code) = host::read(self.paths()[k]).map(|v| v.code()) {
-                    self.adsr[k] = host::number_with_unit(&code).map(|(v, _)| v).unwrap_or(0.0);
+                    self.adsr[k] = number_with_unit(&code).map(|(v, _)| v).unwrap_or(0.0);
                     self.codes[k] = code;
                 }
             }
@@ -1290,7 +1291,7 @@ impl Widget for PanelEnvelope {
         }
         let [a, d, s, r] = self.adsr;
         self.draw_small.color = color(p.muted, 1.0);
-        self.draw_small.draw_abs(cx, dvec2(area.pos.x, area.pos.y + area.size.y + 3.0), &format!("A {}  D {}  S {}  R {}", fmt_number(a, 3), fmt_number(d, 3), fmt_number(s, 2), fmt_number(r, 3)));
+        self.draw_small.draw_abs(cx, dvec2(area.pos.x, area.pos.y + area.size.y + 3.0), &format!("A {}  D {}  S {}  R {}", fmt_num(a, 3), fmt_num(d, 3), fmt_num(s, 2), fmt_num(r, 3)));
         DrawStep::done()
     }
 }
@@ -1381,8 +1382,8 @@ impl PanelAnchor {
     }
 
     fn seconds(&self, t: f64) -> String {
-        let unit = host::number_with_unit(&self.code).map(|(_, u)| u).unwrap_or_default();
-        if unit == "ms" { format!("{}ms", fmt_number(t * 1000.0, 0)) } else { format!("{}{}", fmt_number(t, 3), if unit == "s" { "s" } else { "" }) }
+        let unit = number_with_unit(&self.code).map(|(_, u)| u).unwrap_or_default();
+        if unit == "ms" { format!("{}ms", fmt_num(t * 1000.0, 0)) } else { format!("{}{}", fmt_num(t, 3), if unit == "s" { "s" } else { "" }) }
     }
 }
 
@@ -1464,7 +1465,7 @@ impl Widget for PanelAnchor {
             }
         }
         // The value's time, and where a click would put it.
-        let at = live.or_else(|| host::number_with_unit(&self.code).map(|(v, u)| if u == "ms" { v / 1000.0 } else { v }));
+        let at = live.or_else(|| number_with_unit(&self.code).map(|(v, u)| if u == "ms" { v / 1000.0 } else { v }));
         if let Some(t) = at {
             let x = self.x_at(t);
             self.draw_cell.color = color(p.accent, 1.0);
@@ -1668,7 +1669,7 @@ impl Widget for PanelKeys {
         }
         self.draw_small.color = color(p.muted, 1.0);
         let said = match self.dragging {
-            Some(i) => format!("key {} · t {} · {}", i + 1, fmt_number(self.keys[i].0, 3), fmt_number(self.keys[i].1, 3)),
+            Some(i) => format!("key {} · t {} · {}", i + 1, fmt_num(self.keys[i].0, 3), fmt_num(self.keys[i].1, 3)),
             None => format!("{} keys", self.keys.len()),
         };
         self.draw_small.draw_abs(cx, dvec2(self.area.pos.x, self.area.pos.y + self.area.size.y + 2.0), &said);
@@ -1759,7 +1760,7 @@ impl PanelMod {
                 let rest = &inner[i + 1..];
                 let src = rest.split(|c: char| c == ',' || c.is_whitespace()).find(|w| w.starts_with('@')).unwrap_or("@lfo");
                 self.source = SOURCES.iter().position(|s| *s == &src[1..]).unwrap_or(1);
-                let field = |name: &str| rest.find(name).and_then(|k| rest[k + name.len()..].trim_start().strip_prefix(':')).and_then(|r| host::number_with_unit(r.split(|c: char| c.is_whitespace() || c == '}').find(|w| !w.is_empty()).unwrap_or(""))).map(|(v, _)| v);
+                let field = |name: &str| rest.find(name).and_then(|k| rest[k + name.len()..].trim_start().strip_prefix(':')).and_then(|r| number_with_unit(r.split(|c: char| c.is_whitespace() || c == '}').find(|w| !w.is_empty()).unwrap_or(""))).map(|(v, _)| v);
                 self.rate = field("rate").unwrap_or(1.0);
                 self.depth = field("depth").unwrap_or(0.0);
                 self.phase = field("phase").unwrap_or(0.0);
@@ -1783,8 +1784,8 @@ impl PanelMod {
         self.code = if self.source == 0 {
             self.base.clone()
         } else {
-            let phase = if self.phase != 0.0 { format!(" phase: {}", fmt_number(self.phase, 3)) } else { String::new() };
-            format!("modulate({}, @{}, {{rate: {} depth: {}{phase}}})", self.base, SOURCES[self.source], fmt_number(self.rate, 3), fmt_number(self.depth, 3))
+            let phase = if self.phase != 0.0 { format!(" phase: {}", fmt_num(self.phase, 3)) } else { String::new() };
+            format!("modulate({}, @{}, {{rate: {} depth: {}{phase}}})", self.base, SOURCES[self.source], fmt_num(self.rate, 3), fmt_num(self.depth, 3))
         };
         host::set(&self.path, PanelValue::Code(self.code.clone()));
     }
@@ -1871,7 +1872,7 @@ impl Widget for PanelMod {
         }
         if self.source != 0 {
             let y = rect.pos.y + 26.0;
-            for (k, (name, v, spot)) in [("rate", format!("{} Hz", fmt_number(self.rate, 2)), ModSpot::Rate), ("depth", format!("± {}", fmt_number(self.depth, 3)), ModSpot::Depth)].into_iter().enumerate() {
+            for (k, (name, v, spot)) in [("rate", format!("{} Hz", fmt_num(self.rate, 2)), ModSpot::Rate), ("depth", format!("± {}", fmt_num(self.depth, 3)), ModSpot::Depth)].into_iter().enumerate() {
                 let r = Rect { pos: dvec2(rect.pos.x + LABEL + k as f64 * 110.0, y), size: dvec2(104.0, 20.0) };
                 self.draw_cell.color = color(p.well, 1.0);
                 self.draw_cell.draw_abs(cx, r);

@@ -157,7 +157,7 @@ pub fn cmd_run(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
     }
     let host = MAIN_HOST.get().filter(|_| {
         !sess.runtime.boot_only && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none()
-            && !args.iter().take_while(|a| a.as_str() != "--").any(|a| matches!(a.as_str(), "--check" | "--watch" | "--entry" | "--exports" | "--harness"))
+            && !args.iter().take_while(|a| a.as_str() != "--").any(|a| matches!(a.as_str(), "--check" | "--watch" | "--entry" | "--exports" | "--harness" | "--plain-test"))
     }).filter(|_| hosted_program(sess, args));
     let code = if let Some(host) = host {
         HOSTED_RUN.store(true, Ordering::Release);
@@ -544,6 +544,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     let mut workspace_check = false;
     // `makepad test <package>` (lib.rs): the program is the package's test harness, not its main
     let mut harness = false;
+    let mut plain_test: Option<String> = None;
     let mut no_fail_fast = false;
     let mut cargo_flags = Vec::new();
     let mut i = 0;
@@ -573,6 +574,14 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
                 jit::COMPILE_ERRORS_FATAL.store(false, Ordering::Relaxed);
             }
             "--no-fail-fast" => no_fail_fast = true,
+            // `makepad test`'s run of one `harness = false` target (test_pkg.rs): cargo builds it
+            // with `--cfg test` but no `--test` and runs it as a plain program, its exit status
+            // the verdict; the value is the target's source path
+            "--plain-test" if i + 1 < args.len() => {
+                plain_test = Some(args[i + 1].clone());
+                i += 1;
+                HARNESS_RUN.store(true, Ordering::Release);
+            }
             // `makepad selftest --root-only`: the root crate's fns and what they reach
             "--root-only" => root_only = true,
             // `makepad selftest` (lib.rs): the check, then every fn compiled (check.rs)
@@ -671,7 +680,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     // the boot progress line (tui.rs): a terminal run of a program, with nothing asking for plain output
     unsafe { std::env::remove_var("MAKEPAD_RUN_PROGRESS") };
     // a test harness is a terminal program: no progress line, no inspect socket, no live session
-    let hosted = !entries.is_empty() || !export_names.is_empty() || harness;
+    let hosted = !entries.is_empty() || !export_names.is_empty() || harness || plain_test.is_some();
     // the `unused_macros` lints need the macro uses of the whole load
     if check { relax_types::macros::uses::record(true); relax_front::program::set_record_import_uses(true); }
     // Android: stderr is the embedder's pipe into logcat, line by line; the session-log tee in
@@ -686,7 +695,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     // A store run whose embedder writes pushed sources into its edits folder (the Android host's
     // devhub store applier) asks for a live session with MAKEPAD_RUN_STORE_LIVE=1.
     let store_live = std::env::var_os("MAKEPAD_RUN_STORE_LIVE").is_some_and(|v| v == "1") && crate::vfs::edits_enabled();
-    if !check && !harness && !no_live && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none() && !SILENT.load(Ordering::Relaxed)
+    if !check && !harness && plain_test.is_none() && !no_live && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none() && !SILENT.load(Ordering::Relaxed)
         && (store_live || !crate::vfs::is_virtual(&workspace_dir())) {
         driver_options.live = true;
     }
@@ -768,7 +777,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         cargo_flags.push(args[k].clone());
         k += 1;
     }
-    if harness && cargo_flags.iter().any(|f| f == "--bin" || f.starts_with("--bin=")) && !cargo_flags.iter().any(|f| f == "--bins") {
+    if (harness || plain_test.is_some()) && cargo_flags.iter().any(|f| f == "--bin" || f.starts_with("--bin=")) && !cargo_flags.iter().any(|f| f == "--bins") {
         cargo_flags.push("--bins".to_string());
     }
     if k < args.len() {
@@ -820,11 +829,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         crate::std_source::select(&workspace, std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/std")));
     }
     if std::env::var_os("MAKEPAD_RUN_STD").is_none() {
-        let mut d = std::env::current_exe().unwrap_or_default();
-        for _ in 0..3 {
-            d.pop();
-        }
-        let mut candidates = vec![format!("{}/libs/relax/compiler/std", workspace), format!("{}/src/libs/relax/compiler/std", d.display())];
+        // the build scripts' child runs inherit it (a CARGO_TARGET_DIR outside the checkout left
+        // them looking beside the target dir)
+        let mut candidates = crate::std_candidates(Some(workspace.as_str()));
         candidates.retain(|c| std::path::Path::new(c).join("std/lib.rs").exists());
         if let Some(c) = candidates.first() {
             std::env::set_var("MAKEPAD_RUN_STD", c);
@@ -1201,6 +1208,24 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         relax_types::lint::enable();
         prog.run_import_sim(&own);
     }
+    // `makepad test`: the crates under test are checked as `cargo test` compiles them before any
+    // test runs (test_subjects); marked before declaration collection, as a check marks its crates
+    let test_subjects: Vec<u32> = if (harness || plain_test.is_some()) && !check {
+        let mut v = vec![root];
+        v.extend(g.bins.iter().map(|&b| crate_of[b]).filter(|&k| k != u32::MAX && k != root));
+        v.sort_unstable();
+        v.dedup();
+        v
+    } else {
+        Vec::new()
+    };
+    if !test_subjects.is_empty() {
+        let mut own = vec![false; prog.crates.len()];
+        for &k in &test_subjects { prog.crates[k as usize].validate = true; own[k as usize] = true; }
+        prog.own_crates = own.clone();
+        relax_types::lint::enable();
+        prog.run_import_sim(&own);
+    }
     let mut tcx = collected_tcx.take().unwrap_or_else(crate::tcx::Tcx::new);
     // MAKEPAD_RUN_PERTURB: type ids shift (code must not depend on them; syms.rs reloc_sig)
     for i in 0..crate::syms::perturb(options) {
@@ -1343,6 +1368,21 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     }
     let main_def = if exports_mode || harness {
         None
+    } else if let Some(path) = &plain_test {
+        let canon = |p: &str| std::fs::canonicalize(p).map(|c| c.display().to_string()).unwrap_or_else(|_| p.to_string());
+        let want = canon(path);
+        let Some(ci) = (0..g.crates.len()).find(|&ci| crate_of[ci] != u32::MAX && canon(&g.crates[ci].src_path) == want) else {
+            // not in the graph: its `required-features` are off (cargo builds and runs nothing)
+            eprintln!("makepad-run: {path}: not built (its required features are off)");
+            return 0;
+        };
+        match find_main(&prog, crate_of[ci]) {
+            Some(d) => Some(d),
+            None => {
+                eprintln!("makepad-run: the `harness = false` target {path} has no `fn main` at its root");
+                return 101;
+            }
+        }
     } else {
         match find_main(&prog, root) {
             Some(d) => Some(d),
@@ -1422,6 +1462,20 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         return 1;
     }
     jit::set_program_args(prog_args.clone());
+    if !test_subjects.is_empty() {
+        let n = check_test_subjects(&mut u, root, &test_subjects, harness);
+        if n > 0 {
+            let names: Vec<String> = test_subjects.iter().map(|&k| u.prog.syms.str(u.prog.crates[k as usize].name).to_string()).collect();
+            eprintln!("error: could not compile {} (test) due to {} previous error{}: no test ran (rustc rejects this code; `makepad test` fails as `cargo test` does)",
+                names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", "), n, if n == 1 { "" } else { "s" });
+            std::mem::forget(u);
+            return 101;
+        }
+        // a `harness = false` target is a program: a compile error it reaches ends it (rustc rejects it)
+        if plain_test.is_some() {
+            jit::COMPILE_ERRORS_FATAL.store(true, Ordering::Relaxed);
+        }
+    }
     drop(mem_g);
     let mem_g = crate::memstat::tag(crate::memstat::Tag::CacheLoad);
     // Classify the disk cache before workers add newly compiled entries.
@@ -1868,6 +1922,24 @@ static MAIN_HOST: std::sync::OnceLock<MainHost> = std::sync::OnceLock::new();
 static HOSTED_RUN: AtomicBool = AtomicBool::new(false);
 /// `makepad run --harness` (`makepad test`): the program is a test harness.
 static HARNESS_RUN: AtomicBool = AtomicBool::new(false);
+
+/// `makepad test`: the crates under test (the lib or bins built cfg(test), the integration test
+/// targets) are type- and borrow-checked whole before any test runs, as `cargo test` compiles
+/// them first: an unresolved import or a type error anywhere in them fails the run, not only the
+/// test that reaches it (a test whose body did not compile used to fail alone at run time while
+/// the others passed). Prints the errors as `makepad check` does; returns their count.
+fn check_test_subjects(u: &mut Unit, root: u32, subjects: &[u32], harness: bool) -> usize {
+    u.tcx.check_coherence_of(&u.prog, Some(subjects));
+    let mut pre: Vec<String> = Vec::new();
+    let derive = crate::macro_reg::derive_failures();
+    for &k in subjects {
+        pre.extend(crate::check::own_errors(&u.prog, k, &u.prog.errors, "resolve"));
+        pre.extend(crate::check::own_errors(&u.prog, k, &u.tcx.errors, "typeck"));
+        pre.extend(crate::check::own_errors(&u.prog, k, &derive, "macro"));
+    }
+    unsafe { jit::load_skipped_of(&mut *u, subjects) };
+    crate::check::check_subjects(u, root, subjects, pre, harness)
+}
 static HAL_RUN: AtomicBool = AtomicBool::new(false);
 static APP_DOMAIN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 

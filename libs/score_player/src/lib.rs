@@ -8,6 +8,8 @@
 //! - [`presets`]: drum slots and GM drum notes, Ironfish programs, recipe text.
 //! - [`shader`]: Splash audio shaders as instruments and FX.
 //! - [`meters`]: what live displays read from whatever plays the graph.
+//! - [`stream`]: a keyboard's notes through a score's stream nodes (chord,
+//!   transpose, velocity, arp) into a loop's instrument.
 //!
 //! Nothing here allocates, locks or frees while rendering, except that a
 //! neural singer's loop takes a short lock to look for a phrase that has not
@@ -19,6 +21,7 @@ pub mod loop_engine;
 pub mod presets;
 pub mod shader;
 pub mod meters;
+pub mod stream;
 mod voice;
 
 pub use event::{Env, Event, EventKind, NoteOpts, ARP_STEPS, ENV_POINTS};

@@ -90,7 +90,7 @@ pub fn only(src: &str, doc: &ScoreDoc, keep: &[String]) -> Result<String, String
     let mut out = src.to_string();
     for l in &doc.loops {
         if !keep.contains(&l.name) && !l.mute {
-            out = source::apply(&out, &source::set_field(&out, &l.name, "mute", "true")?);
+            out = makepad_edit_values::apply_splices(&out, 0, &[source::set_field(&out, &l.name, "mute", "true")?])?;
         }
     }
     Ok(out)
@@ -134,7 +134,7 @@ pub fn render_song(src: &str, opts: &RenderOpts, with_stems: bool) -> Result<Son
             let mut dry = only(src, &doc, std::slice::from_ref(&name))?;
             for fx in doc.fx.iter().filter(|f| matches!(f.kind, FxKind::Reverb | FxKind::Delay)) {
                 if let Ok(s) = source::set_field(&dry, &fx.name, "mix", "0") {
-                    dry = source::apply(&dry, &s);
+                    dry = makepad_edit_values::apply_splices(&dry, 0, &[s])?;
                 }
             }
             let r = render_mix(&dry, &opts)?;

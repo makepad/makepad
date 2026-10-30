@@ -12,7 +12,6 @@
 //! palette editor and its generators).
 
 pub mod control;
-pub mod field;
 pub mod host;
 pub mod instruments;
 pub mod module;

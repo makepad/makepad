@@ -742,7 +742,9 @@ pub fn listing(files: &[File], reach: &dyn Fn(&ValueSite) -> Option<String>) -> 
     let mut labelled = std::collections::HashSet::new();
     let doc = doc();
     for site in doc.values(files).sites() {
-        if site.id.starts_with("editor_panel") {
+        // Only what is written (a value source may also list fields its
+        // document could add).
+        if site.id.starts_with("editor_panel") || site.span.is_none() {
             continue;
         }
         let tagged = site.label.starts_with("tagged");

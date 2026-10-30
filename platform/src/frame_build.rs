@@ -1350,7 +1350,10 @@ impl Cx {
                 self.fb_list(fb, pass_id, list_id, sploded, &mut zbias, step, serial);
             }
         } else if stereo {
-            // both eyes side by side: a pass per eye with that eye's camera, each clearing its half
+            // both eyes side by side: a pass per eye with that eye's camera. The left eye's pass
+            // clears (its colour as the pass says, its depth always) and the right eye's loads:
+            // a clear is the whole attachment's on Metal and D3D11 (the viewport does not bound
+            // it), so a right-eye clear wiped the left eye's picture and depth
             let base = self.passes[pass_id].pass_uniforms;
             let half = (tw / 2) as f32;
             for eye in 0..2 {
@@ -1358,7 +1361,10 @@ impl Cx {
                 let mut p = pass;
                 p.uniforms = Slice::of(uniforms.as_slice());
                 p.viewport = [half * eye as f32, 0.0, half, th as f32];
-                if !p.depth.is_none() { p.load[4] = load::CLEAR; }
+                if eye > 0 {
+                    p.load[..4].fill(load::LOAD);
+                }
+                if !p.depth.is_none() { p.load[4] = if eye == 0 { load::CLEAR } else { load::LOAD }; }
                 fb.w.pass(p);
                 let mut zbias = 0.0f32;
                 self.fb_list(fb, pass_id, list_id, sploded, &mut zbias, step, serial);
@@ -1409,6 +1415,10 @@ impl Cx {
             if let (Some(window), Some((index, _))) = (window, hosted_target) {
                 self.hal.hosted.as_mut().unwrap().submitted(window, index, serial, [tw as u32, th as u32]);
             }
+        }
+        if !picking && self.pass_load.enabled() {
+            let class = self.pass_class(pass_id);
+            self.pass_load.painted(serial, class);
         }
         if !picking && crate::gpu_frame_timer::enabled() {
             if let Some(window) = self.get_pass_window_id(pass_id) {

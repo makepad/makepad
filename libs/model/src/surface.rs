@@ -155,6 +155,11 @@ pub struct SurfaceLayer {
     pub mips: Vec<RgbaImage>,
 }
 impl SurfaceLayer {
+    /// A `width` x `height` layer of the channel's neutral value (what `surface_layer`
+    /// without colour or pixels makes).
+    pub fn blank(id: impl Into<String>, channel: SurfaceChannel, width: u32, height: u32, limits: &Limits) -> Result<Self> {
+        Ok(Self::new(id, RgbaImage::new(width, height, encode(channel, decode(channel, channel.neutral())), limits)?))
+    }
     pub fn new(id: impl Into<String>, image: RgbaImage) -> Self {
         Self {
             id: id.into(),
@@ -357,8 +362,8 @@ pub(crate) use codec::{
 };
 #[path = "surface_geometry.rs"]
 mod geometry;
-#[path = "surface_parse.rs"]
-mod parse;
+#[path = "surface_check.rs"]
+mod check;
 #[path = "surface_pattern.rs"]
 mod pattern_sampler;
 #[path = "surface_derive.rs"]

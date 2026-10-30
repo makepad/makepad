@@ -13,6 +13,7 @@
 
 use crate::data::*;
 use crate::*;
+use makepad_edit_values::number::fmt_like;
 use makepad_render_lines::{Blend, LineBatch, LineRenderer, LinePoint, LineStyle, LineView, PointBatch, PointStyle, Segment, Sprite, SpriteShape};
 
 /// The 3D popup's size, its header and its footer.

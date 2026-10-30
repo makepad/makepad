@@ -9,7 +9,6 @@ use super::code::ScoreEditor;
 use super::Desk;
 use crate::audio;
 use makepad_code_editor::code_view::CodeView;
-use makepad_score_live::source::Splice;
 use makepad_widgets::*;
 use std::sync::mpsc::Receiver;
 
@@ -23,7 +22,15 @@ pub struct TrackerDesk {
     wired: bool,
     /// The revision the settings' catalogue was handed over for.
     catalog: Option<u64>,
+    /// The model last handed over (MIDI channels' live notes go into it).
+    model: Option<tm::TrackModel>,
+    /// Per loop MIDI in plays: the notes it started (song beat, pitch,
+    /// velocity) and the stream's count when last read.
+    live: Vec<(String, u64, Vec<(f64, f32, f32)>)>,
 }
+
+/// The notes a live MIDI channel keeps.
+const LIVE_NOTES: usize = 1024;
 
 impl Desk {
     /// The tracker's turn: a model when the source changed, where the
@@ -62,16 +69,24 @@ impl Desk {
             if let Some(doc) = self.doc.as_ref().filter(|_| current) {
                 let mut model = tm::build(doc, &self.source);
                 model.set_played(&self.tracker.played.1);
+                // The channels MIDI in plays keep what they played.
+                let midi: Vec<String> = doc.loops.iter().filter(|l| l.input.is_some()).map(|l| l.name.clone()).collect();
+                self.tracker.live.retain(|(name, ..)| midi.contains(name));
+                for (name, _, notes) in &self.tracker.live {
+                    model.set_live_notes(name, notes);
+                }
                 if let Some(mut t) = widget.borrow_mut::<ScoreTracker>() {
                     t.set_source(&self.source);
-                    t.set_model(cx, model, true, "");
+                    t.set_model(cx, model.clone(), true, "");
                 }
+                self.tracker.model = Some(model);
                 self.tracker.built = built;
             } else if let Some(mut t) = widget.borrow_mut::<ScoreTracker>() {
                 t.set_editable(cx, false, "The code does not load: the tracker shows the last good version, read only");
                 self.tracker.built = built;
             }
         }
+        self.pump_live_midi(cx, &widget);
         let live = TrackerLive {
             playing: self.status.playing,
             beat: makepad_score_player::Meters::beat(&*self.engine.meters),
@@ -98,11 +113,54 @@ impl Desk {
         }
     }
 
+    /// The notes the MIDI-in channels started since the last turn, from
+    /// their streams (`makepad_audio_engine::feed::streams`), into the
+    /// model: the tracker shows them as they are played.
+    fn pump_live_midi(&mut self, cx: &mut Cx, widget: &WidgetRef) {
+        let Some(doc) = self.doc.as_ref() else { return };
+        let song_off = self.song_beat().map_or(0.0, |s| s - self.status.beat);
+        let mut changed = false;
+        for l in doc.loops.iter().filter(|l| l.input.is_some()) {
+            let view = makepad_audio_engine::feed::streams::view(&format!("{}/{}", audio::SLOT, l.name));
+            let snap = view.snapshot();
+            let at = match self.tracker.live.iter().position(|(n, ..)| *n == l.name) {
+                Some(at) => at,
+                None => {
+                    self.tracker.live.push((l.name.clone(), snap.started, Vec::new()));
+                    continue;
+                }
+            };
+            let (_, seen, notes) = &mut self.tracker.live[at];
+            let new = (snap.started.saturating_sub(*seen) as usize).min(snap.recent.len());
+            *seen = snap.started;
+            if new == 0 {
+                continue;
+            }
+            for (beat, note, vel) in &snap.recent[snap.recent.len() - new..] {
+                notes.push((beat + song_off, *note as f32, *vel as f32 / 127.0));
+            }
+            let keep = notes.len().saturating_sub(LIVE_NOTES);
+            notes.drain(..keep);
+            changed = true;
+        }
+        if !changed {
+            return;
+        }
+        if let Some(model) = self.tracker.model.as_mut() {
+            for (name, _, notes) in &self.tracker.live {
+                model.set_live_notes(name, notes);
+            }
+            if let Some(mut t) = widget.borrow_mut::<ScoreTracker>() {
+                t.set_model(cx, model.clone(), true, "");
+            }
+        }
+    }
+
     pub(super) fn handle_tracker_actions(&mut self, cx: &mut Cx, ui: &WidgetRef, actions: &Actions) {
         let tracker = ui.widget(cx, ids!(score_tracker));
         for action in actions.filter_widget_actions_cast::<TrackerAction>(tracker.widget_uid()) {
             match action {
-                TrackerAction::Edit { splices, status } => {
+                TrackerAction::Edit { edit, status } => {
                     // Typing not yet applied: the tracker's bytes are not the
                     // code's (unless the change was this view's own echo).
                     if self.typed {
@@ -116,8 +174,8 @@ impl Desk {
                         ui.label(cx, ids!(score_state)).set_text(cx, "The code is still applying: try again");
                         continue;
                     }
-                    self.write_splices(cx, ui, &splices);
                     ui.label(cx, ids!(score_state)).set_text(cx, &status);
+                    self.edit(cx, ui, edit);
                 }
                 TrackerAction::Seek(beat) => {
                     let quant = if self.status.playing { -1.0 } else { 0.0 };
@@ -158,35 +216,5 @@ impl Desk {
                 TrackerAction::None => {}
             }
         }
-    }
-
-    /// One gesture's splices (normalized, of the current source) into the
-    /// code view as one undo step, and into the source.
-    fn write_splices(&mut self, cx: &mut Cx, ui: &WidgetRef, splices: &[Splice]) {
-        let ok = splices.iter().all(|s| s.start <= s.end && s.end <= self.source.len() && self.source.is_char_boundary(s.start) && self.source.is_char_boundary(s.end));
-        if !ok || splices.is_empty() {
-            return;
-        }
-        let code = ui.widget(cx, ids!(score_code)).widget(cx, ids!(code));
-        if let Some(mut view) = code.borrow_mut::<CodeView>() {
-            if let Some(session) = view.session.as_mut() {
-                let src = &self.source;
-                let to_pos = |at: usize| {
-                    let before = &src[..at];
-                    let line = before.matches('\n').count();
-                    let col = at - before.rfind('\n').map_or(0, |nl| nl + 1);
-                    makepad_code_editor::text::Position { line_index: line, byte_index: col }
-                };
-                let ranges: Vec<_> = splices.iter().map(|s| (to_pos(s.start), to_pos(s.end), s.text.as_str().into())).collect();
-                session.document().replace_ranges(&ranges);
-                session.handle_changes();
-            }
-            view.redraw(cx);
-        }
-        self.source = tm::apply_all(&self.source, splices);
-        self.revision += 1;
-        self.code_shown = 0;
-        self.send();
-        self.frame = cx.new_next_frame();
     }
 }

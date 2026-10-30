@@ -99,6 +99,35 @@ pub struct SynthHost {
     /// A voice's melody variants, and what is done with them.
     pub variants: Box<dyn Fn(&str) -> Variants>,
     pub vary: Box<dyn Fn(&str, VaryAction)>,
+    /// What the instrument browser needs of the score.
+    pub browse: BrowseHost,
+}
+
+/// The instrument browser's side of the host.
+pub struct BrowseHost {
+    /// The key of what `node` is now (`instruments::current_key`).
+    pub current: Box<dyn Fn(&str) -> Option<String>>,
+    /// A node's constructor as written (`Synth{preset: @acid cutoff: 700}`).
+    pub ctor: Box<dyn Fn(&str) -> Option<String>>,
+    /// Write a node's constructor back (A/B, revert): one undo step.
+    pub set_ctor: Box<dyn Fn(&str, &str)>,
+    /// The score's own entries for the browser (its instruments, SoundFonts,
+    /// samples).
+    pub extras: Box<dyn Fn() -> Vec<makepad_score_live::browse::Entry>>,
+    /// The keys of the instruments the score plays now.
+    pub used: Box<dyn Fn() -> Vec<String>>,
+    /// Play one voice (`drum`) of a kit: the node as it is (`None`), or as
+    /// the choice would make it.
+    pub pad: Box<dyn Fn(&str, Option<&Choice>, &str)>,
+    /// A browser's own state kept across runs (favourites, recent).
+    pub remember: Box<dyn Fn(&str, &str)>,
+    pub recall: Box<dyn Fn(&str) -> Option<String>>,
+    /// Open `node`'s browser in its own window (none: the host has no
+    /// windows for it, and the browser offers none).
+    pub pop_out: Option<Box<dyn Fn(&str)>>,
+    /// Get an engine's downloadable library (the opt-in install, its
+    /// licence first).
+    pub get_library: Box<dyn Fn(&str)>,
 }
 
 thread_local! {
@@ -254,4 +283,53 @@ pub fn vary(node: &str, action: VaryAction) {
 
 pub fn generate(node: &str, gen: &str, choices: &[(String, String)], write: bool) {
     with(|h| (h.generate)(node, gen, choices, write));
+}
+
+pub fn current(node: &str) -> Option<String> {
+    with(|h| (h.browse.current)(node)).flatten()
+}
+
+pub fn ctor(node: &str) -> Option<String> {
+    with(|h| (h.browse.ctor)(node)).flatten()
+}
+
+pub fn set_ctor(node: &str, text: &str) {
+    with(|h| (h.browse.set_ctor)(node, text));
+}
+
+pub fn extras() -> Vec<makepad_score_live::browse::Entry> {
+    with(|h| (h.browse.extras)()).unwrap_or_default()
+}
+
+pub fn used() -> Vec<String> {
+    with(|h| (h.browse.used)()).unwrap_or_default()
+}
+
+pub fn pad(node: &str, choice: Option<&Choice>, drum: &str) {
+    with(|h| (h.browse.pad)(node, choice, drum));
+}
+
+pub fn remember(key: &str, value: &str) {
+    with(|h| (h.browse.remember)(key, value));
+}
+
+pub fn recall(key: &str) -> Option<String> {
+    with(|h| (h.browse.recall)(key)).flatten()
+}
+
+pub fn pop_out(node: &str) {
+    with(|h| {
+        if let Some(pop) = &h.browse.pop_out {
+            pop(node)
+        }
+    });
+}
+
+/// Whether the host opens browsers in windows of their own.
+pub fn can_pop_out() -> bool {
+    with(|h| h.browse.pop_out.is_some()).unwrap_or(false)
+}
+
+pub fn get_library(engine: &str) {
+    with(|h| (h.browse.get_library)(engine));
 }

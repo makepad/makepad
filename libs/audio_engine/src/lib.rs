@@ -7,12 +7,14 @@
 //!   [`schedule::Ext`]; a whole player inside a schedule (a score) comes
 //!   in through [`nested`].
 //! - [`run`] is one render pass over a schedule.
+//! - [`midi_stream`]: a `Loop` played from MIDI in, its messages on their samples.
 //!
 //! `makepad-stage-live-audio` is Stage's owner on top: the decks, the
 //! engine that mixes every live instance and the host runtime.
 
 pub mod clock;
 pub mod feed;
+pub mod midi_stream;
 pub mod nested;
 pub mod nodes;
 pub mod pads;

@@ -1,108 +1,14 @@
-//! Strict AI-facing commands. The host owns networking and worker scheduling;
-//! this registry has no locks, threads, UI handles or ambient global state.
-use crate::{json::{self, Value}, mesh, Document, Error, Head, Limits, Material, Operation, Result, Transaction};
-use std::collections::BTreeMap;
+//! Bounded inspection pages for worker-owned model documents.
+use crate::{json::{self, Value}, mesh, Document, Error, Head, Material, Result};
 
-pub const MAX_OPEN_DOCUMENTS: usize = 16;
-pub const MAX_INSPECTION_PAGE: usize = 128;
 /// Leaves room for the chat ToolOutcome wrapper inside its 16 KiB envelope.
 pub const MAX_REPLY_BYTES:usize = 12 * 1024;
 
-pub struct Engine { limits: Limits, documents: BTreeMap<String, Document> }
-impl Engine {
-    pub fn new(limits: Limits) -> Self { Self { limits, documents: BTreeMap::new() } }
-    pub fn document(&self, name: &str) -> Result<&Document> {
-        self.documents.get(name).ok_or_else(|| Error::MissingObject(name.into()))
-    }
-    /// Worker-owned binary resources enter through typed transactions, never
-    /// through base64 or pixel arrays in the language model's tool context.
-    pub fn apply_transaction(&mut self, document: &str, transaction: Transaction, cancelled: Option<&dyn Fn()->bool>) -> Result<Value> {
-        let doc = self.documents.get_mut(document).ok_or_else(||Error::MissingObject(document.into()))?;
-        let result = doc.apply(transaction, cancelled)?;
-        Ok(apply_reply(document, &result))
-    }
-    pub fn open(&mut self, name: &str, source: Option<&[u8]>, cancelled: Option<&dyn Fn()->bool>) -> Result<Value> {
-        self.open_with_joint_budget(name,source,None,cancelled)
-    }
-    /// Explicit per-document opt-in for larger bounded affine skin palettes.
-    /// Reopening an already-open name never changes that document's limits.
-    pub fn open_with_joint_budget(&mut self, name:&str, source:Option<&[u8]>, budget:Option<usize>, cancelled:Option<&dyn Fn()->bool>) -> Result<Value> {
-        if budget.is_some_and(|budget|!(1..=128).contains(&budget)){return Err(Error::Invalid("max_joints must be within 1..128"));}
-        if name.is_empty() || name.len()>self.limits.max_name_bytes || name.chars().any(char::is_control) { return Err(Error::Invalid("document name")); }
-        // Every successful reply must retain this exact document identifier.
-        if json::s(name).to_json().len()>MAX_REPLY_BYTES/8 {return Err(Error::Budget("document name in reply"));}
-        if cancelled.is_some_and(|f| f()) { return Err(mesh::MeshError::Cancelled.into()); }
-        let inserted = !self.documents.contains_key(name);
-        if !inserted {
-            if source.is_some() { return Err(Error::DuplicateObject(name.into())); }
-            if budget.is_some_and(|budget|budget!=self.documents[name].limits().max_joints){return Err(Error::Invalid("max_joints cannot change for an open document; close and reopen its source"));}
-        } else {
-            if self.documents.len()>=MAX_OPEN_DOCUMENTS { return Err(Error::Budget("open documents")); }
-            let mut limits=self.limits.clone();if let Some(budget)=budget{limits.max_joints=budget;}
-            let document = match source { Some(bytes)=>Document::from_bytes(bytes,limits,cancelled)?, None=>Document::new(limits)? };
-            self.documents.insert(name.into(),document);
-        }
-        let result=self.inspect(name,None,"overview",0,32,cancelled);
-        if result.is_err() && inserted { self.documents.remove(name); }
-        result
-    }
-    pub fn execute(&mut self, name: &str, args: &Value, cancelled: Option<&dyn Fn()->bool>) -> Result<Value> {
-        let document = text(args,"document")?;
-        if cancelled.is_some_and(|f| f()) { return Err(mesh::MeshError::Cancelled.into()); }
-        match name {
-            "model.apply" => {
-                fields(args,&["document","request_id","expected","operations","result_mode"])?;
-                let summary = match args.get("result_mode").and_then(Value::as_str) {
-                    None if args.get("result_mode").is_none() => false,
-                    Some("selections") => false, Some("summary") => true,
-                    _ => return Err(Error::Invalid("result_mode must be summary or selections")),
-                };
-                let expected = parse_head(need(args,"expected")?)?;
-                let operations = parse_operations_inner(need(args,"operations")?,self.document(document)?.limits(),cancelled)?;
-                let request_id = text(args,"request_id")?.to_owned();
-                let doc = self.documents.get_mut(document).ok_or_else(||Error::MissingObject(document.into()))?;
-                let result = doc.apply(Transaction {request_id,expected,operations},cancelled)?;
-                // Once committed, response construction cannot turn success into
-                // an error. The bounded base always retains both heads and replay.
-                Ok(if summary { json::obj(vec![("document",json::s(document)),("head",head_json(result.current)),
-                    ("committed",head_json(result.committed)),("replayed",Value::Bool(result.replayed)),("operations",num(result.results.len()))])
-                } else {apply_reply(document,&result)})
-            }
-            "model.inspect" => {
-                fields(args,&["document","object","domain","offset","limit"])?;
-                let object = args.get("object").map(|v|v.as_str().ok_or(Error::Invalid("object must be a string"))).transpose()?;
-                let domain = args.get("domain").map(|v|v.as_str().ok_or(Error::Invalid("inspection domain"))).transpose()?.unwrap_or("overview");
-                let offset = args.get("offset").map(integer).transpose()?.unwrap_or(0) as usize;
-                let limit = args.get("limit").map(integer).transpose()?.unwrap_or(32) as usize;
-                if !(1..=MAX_INSPECTION_PAGE).contains(&limit) { return Err(Error::Invalid("inspection limit must be 1..128")); }
-                self.inspect(document,object,domain,offset,limit,cancelled)
-            }
-            "model.history" => {
-                fields(args,&["document","expected","action"])?;
-                let expected=parse_head(need(args,"expected")?)?;
-                let doc=self.documents.get_mut(document).ok_or_else(||Error::MissingObject(document.into()))?;
-                let head=match text(args,"action")? {
-                    "undo"=>doc.undo(expected,cancelled)?, "redo"=>doc.redo(expected,cancelled)?,
-                    "checkpoint"=> { doc.checkpoint(expected)?; doc.head() },
-                    _=>return Err(Error::Invalid("history action must be undo, redo or checkpoint")),
-                };
-                let (cursor,total)=doc.history_position();
-                Ok(json::obj(vec![("head",head_json(head)),("cursor",num(cursor)),("total",num(total))]))
-            }
-            "model.close" => {
-                fields(args,&["document","expected"])?;
-                let expected=parse_head(need(args,"expected")?)?; let actual=self.document(document)?.head();
-                if expected!=actual { return Err(Error::StaleHead {expected,actual}); }
-                self.documents.remove(document);
-                Ok(json::obj(vec![("closed",json::s(document))]))
-            }
-            _=>Err(Error::Invalid("unknown editable model tool")),
-        }
-    }
-    fn inspect(&self, document:&str, object:Option<&str>, domain:&str, offset:usize, limit:usize,
-        cancelled:Option<&dyn Fn()->bool>)->Result<Value> {
-        let doc=self.document(document)?;
-        let mut ctx=mesh::Context::new(self.limits.mesh.clone(),cancelled);
+/// One page of `domain` of a document (the chat's `model.inspect`).
+pub fn inspect_document(doc:&Document, document:&str, object:Option<&str>, domain:&str, offset:usize, limit:usize,
+    cancelled:Option<&dyn Fn()->bool>)->Result<Value> {
+    {
+        let mut ctx=mesh::Context::new(doc.limits().mesh.clone(),cancelled);
         let mut response=json::obj(vec![("document",json::s(document)),("head",head_json(doc.head())),("domain",json::s(domain))]);
         if let Some((total,rows))=extended::inspect(doc,object,domain,offset,limit,&mut ctx)? {
             if let Some(object)=object { put(&mut response,"object",json::s(object)); }
@@ -352,46 +258,8 @@ fn clip_key_rows(doc:&Document,offset:usize,limit:usize,ctx:&mut mesh::Context<'
     }
     Ok(rows)
 }
-fn apply_reply(document:&str,result:&crate::Applied)->Value {
-    let face_total=result.results.iter().fold(0usize,|n,r|n.saturating_add(r.faces.len()));
-    let vertex_total=result.results.iter().fold(0usize,|n,r|n.saturating_add(r.vertices.len()));
-    let mut reply=json::obj(vec![("document",json::s(document)),("head",head_json(result.current)),
-        ("committed",head_json(result.committed)),("replayed",Value::Bool(result.replayed)),
-        ("results_total",num(result.results.len())),("results_returned",num(0)),("results_omitted",num(result.results.len())),
-        ("results_truncated",Value::Bool(!result.results.is_empty())),("selection_face_total",num(face_total)),
-        ("selection_vertex_total",num(vertex_total)),("selection_ids_returned",num(0)),
-        ("selection_ids_omitted",num(face_total.saturating_add(vertex_total))),
-        ("selection_lookup",json::s("inspect faces/vertices for surviving elements; results refer to committed head")),("results",Value::Arr(Vec::new()))]);
-    let mut selection_budget=256usize;let mut emitted=0usize;let mut ids_returned=0usize;
-    for (index,r) in result.results.iter().enumerate() {
-        let nf=r.faces.len().min(selection_budget);let nv=r.vertices.len().min(selection_budget-nf);
-        let row=json::obj(vec![("result_index",num(index)),("object",json::s(&r.object)),
-            ("metrics",Value::Obj(r.metrics.iter().map(|(name,value)|(name.clone(),num(*value))).collect())),
-            ("faces",ids(r.faces.iter().take(nf).map(|id|id.0))),("vertices",ids(r.vertices.iter().take(nv).map(|id|id.0))),
-            ("face_count",num(r.faces.len())),("vertex_count",num(r.vertices.len())),
-            ("selections_truncated",Value::Bool(nf<r.faces.len()||nv<r.vertices.len()))]);
-        let mut candidate=reply.clone();array_push(&mut candidate,"results",row);
-        put(&mut candidate,"results_returned",num(emitted+1));put(&mut candidate,"results_omitted",num(result.results.len()-emitted-1));
-        put(&mut candidate,"results_truncated",Value::Bool(emitted+1<result.results.len()));
-        put(&mut candidate,"selection_ids_returned",num(ids_returned+nf+nv));
-        put(&mut candidate,"selection_ids_omitted",num(face_total.saturating_add(vertex_total).saturating_sub(ids_returned+nf+nv)));
-        if candidate.to_json().len()>MAX_REPLY_BYTES {break;}
-        reply=candidate;emitted+=1;ids_returned+=nf+nv;selection_budget-=nf+nv;
-    }
-    debug_assert!(reply.to_json().len()<=MAX_REPLY_BYTES);
-    reply
-}
-pub fn head_json(head:Head)->Value {
+pub(crate) fn head_json(head:Head)->Value {
     json::obj(vec![("generation",id(head.generation)),("content",json::s(head.content.iter().map(|b|format!("{b:02x}")).collect::<String>()))])
-}
-pub fn parse_head(value:&Value)->Result<Head> {
-    fields(value,&["generation","content"])?;
-    let generation=stable_id(need(value,"generation")?)?;
-    let hex=text(value,"content")?;
-    if hex.len()!=64 || !hex.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b)) { return Err(Error::Invalid("head content must be 64 lowercase hex digits")); }
-    let mut content=[0;32];
-    for (i,byte) in content.iter_mut().enumerate() { *byte=u8::from_str_radix(&hex[i*2..i*2+2],16).map_err(|_|Error::Invalid("content hash"))?; }
-    Ok(Head {generation,content})
 }
 fn id(v:u64)->Value { json::s(v.to_string()) }
 fn element_json(element:mesh::ElementId)->Value {
@@ -404,250 +272,67 @@ fn element_json(element:mesh::ElementId)->Value {
 fn ids(v:impl IntoIterator<Item=u64>)->Value { Value::Arr(v.into_iter().map(id).collect()) }
 fn num(v:usize)->Value { Value::Int(v.min(i64::MAX as usize) as i64) }
 fn vector(v:&[f64])->Value { Value::Arr(v.iter().copied().map(Value::F64).collect()) }
-pub(crate) fn fields(value:&Value,allowed:&[&str])->Result<()> {
-    let Value::Obj(pairs)=value else { return Err(Error::Invalid("expected object")); };
-    for (i,(key,_)) in pairs.iter().enumerate() {
-        if !allowed.contains(&key.as_str()) || pairs[..i].iter().any(|(k,_)|k==key) { return Err(Error::Invalid("unknown or duplicate field")); }
-    }
-    Ok(())
-}
-pub(crate) fn need<'a>(v:&'a Value,key:&str)->Result<&'a Value> {
-    v.get(key).ok_or_else(|| Error::MissingField {
-        field:key.into(),
-        operation:v.get("op").and_then(Value::as_str).map(|name| name.chars().take(64).collect()),
-    })
-}
-pub(crate) fn text<'a>(v:&'a Value,key:&str)->Result<&'a str> { need(v,key)?.as_str().ok_or(Error::Invalid("expected string")) }
-pub(crate) fn integer(v:&Value)->Result<u32> { v.as_u64().and_then(|v|v.try_into().ok()).ok_or(Error::Invalid("expected u32 integer")) }
-pub(crate) fn stable_id(v:&Value)->Result<u64> {
-    let s=v.as_str().ok_or(Error::Invalid("stable IDs and generations must be decimal strings"))?;
-    if s.is_empty() || (s.len()>1&&s.starts_with('0')) || !s.bytes().all(|v|v.is_ascii_digit()) { return Err(Error::Invalid("noncanonical stable ID")); }
-    s.parse().map_err(|_|Error::Invalid("stable ID overflow"))
-}
-pub(crate) fn float(v:&Value)->Result<f64> {
-    match v { Value::F64(v) if v.is_finite()=>Ok(*v),Value::Int(v)=>Ok(*v as f64),_=>Err(Error::Invalid("expected finite number")) }
-}
-pub(crate) fn array<const N:usize>(v:&Value)->Result<[f64;N]> {
-    let values=v.as_arr().ok_or(Error::Invalid("expected numeric vector"))?;
-    if values.len()!=N { return Err(Error::Invalid("vector length")); }
-    let mut out=[0.0;N]; for (o,v) in out.iter_mut().zip(values) { *o=float(v)?; } Ok(out)
-}
-pub(crate) fn selections(v:&Value,max:usize)->Result<Vec<u64>> {
-    let values=v.as_arr().ok_or(Error::Invalid("expected ID array"))?;
-    if values.len()>max { return Err(Error::Budget("selection size")); }
-    values.iter().map(stable_id).collect()
-}
-
-pub fn parse_operations(value:&Value,limits:&Limits)->Result<Vec<Operation>> {
-    parse_operations_inner(value,limits,None)
-}
-fn parse_operations_inner(value:&Value,limits:&Limits,cancelled:Option<&dyn Fn()->bool>)->Result<Vec<Operation>> {
-    let values=value.as_arr().ok_or(Error::Invalid("operations must be an array"))?;
-    if values.is_empty() || values.len()>limits.max_operations { return Err(Error::Budget("operation count")); }
-    let mut budget=limits.max_transaction_bytes;
-    value_cost(value,&mut budget,0)?;
-    let mut generated=0usize; let mut out=Vec::new();
-    for value in values {
-        if cancelled.is_some_and(|f|f()) { return Err(mesh::MeshError::Cancelled.into()); }
-        let op=parse_operation(value,limits)?;
-        if let Operation::ImportMesh {source,..}=&op {
-            generated=generated.saturating_add(source.len());
-            if generated>limits.max_transaction_bytes { return Err(Error::Budget("generated transaction bytes")); }
-        }
-        out.push(op);
-    }
-    Ok(out)
-}
-fn value_cost(value:&Value,remaining:&mut usize,depth:usize)->Result<()> {
-    if depth>16 { return Err(Error::Invalid("operation nesting too deep")); }
-    let size=match value {Value::Str(s)=>s.len(),Value::Obj(v)=>v.iter().map(|(k,_)|k.len()).sum(),_=>16};
-    if size>*remaining { return Err(Error::Budget("transaction input bytes")); } *remaining-=size;
-    match value {
-        Value::Arr(values)=>for v in values {value_cost(v,remaining,depth+1)?;},
-        Value::Obj(values)=>for (_,v) in values {value_cost(v,remaining,depth+1)?;},_=>{}
-    }
-    Ok(())
-}
-fn parse_operation(v:&Value,limits:&Limits)->Result<Operation> {
-    if text(v,"op")? == "soft_body_unbind" {
-        fields(v,&["op"])?;
-        return Ok(Operation::SoftBodyUnbind);
-    }
-    if let Some(op)=crate::SoftBodyBind::parse(v,limits)? {return Ok(Operation::SoftBody(op));}
-    if let Some(op)=crate::SelectionOperation::parse(v,limits)? {return Ok(Operation::Selection(op));}
-    if let Some(op)=crate::ConstructionOperation::parse(v,limits)? {return Ok(Operation::Construction(op));}
-    if let Some(op)=crate::RigOperation::parse(v,limits)? {return Ok(Operation::Rig(op));}
-    if let Some(op)=crate::MeshEditingOperation::parse(v,limits)? {return Ok(Operation::MeshEditing(op));}
-    if let Some(op)=crate::SurfaceOperation::parse(v,limits)? {return Ok(Operation::Surface(op));}
-    if let Some(op)=crate::SceneOperation::parse(v,limits)? {return Ok(Operation::Scene(op));}
-    let op=text(v,"op")?;
-    match op {
-        "texture_solid"=> {
-            fields(v,&["op","material","width","height","color"])?;
-            return Ok(Operation::TextureSolid {material:integer(need(v,"material")?)?,width:integer(need(v,"width")?)?,height:integer(need(v,"height")?)?,color:rgb(need(v,"color")?)?});
-        }
-        "paint_texture"=> {
-            fields(v,&["op","material","center","radius","color"])?;
-            return Ok(Operation::PaintTexture {material:integer(need(v,"material")?)?,center:array(need(v,"center")?)?,radius:float(need(v,"radius")?)?,color:rgb(need(v,"color")?)?});
-        }
-        "skeleton"=> {
-            fields(v,&["op","joints"])?;
-            let joints=need(v,"joints")?.as_arr().ok_or(Error::Invalid("joints must be an array"))?;
-            if joints.len()>limits.max_joints { return Err(Error::Budget("joints")); }
-            let joints=joints.iter().map(|j| {
-                fields(j,&["name","parent","translation"])?;
-                let name=text(j,"name")?.to_owned();
-                if name.len()>limits.max_name_bytes { return Err(Error::Budget("joint name")); }
-                let parent=match need(j,"parent")? { Value::Null=>None,v=>Some(integer(v)?) };
-                Ok(crate::Joint {name,parent,translation:array(need(j,"translation")?)?})
-            }).collect::<Result<Vec<_>>>()?;
-            return Ok(Operation::SetSkeleton {skeleton:crate::Skeleton {joints}});
-        }
-        "clip"=> {
-            fields(v,&["op","name","channels"])?;
-            let name=text(v,"name")?.to_owned();
-            if name.len()>limits.max_name_bytes { return Err(Error::Budget("clip name")); }
-            let channels=need(v,"channels")?.as_arr().ok_or(Error::Invalid("clip channels"))?;
-            if channels.len()>limits.max_joints.saturating_mul(3) { return Err(Error::Budget("clip channels")); }
-            let mut key_count=0usize;
-            let channels=channels.iter().map(|c| {
-                fields(c,&["joint","path","keys"])?;
-                let path=match text(c,"path")? {
-                    "translation"=>crate::AnimationPath::Translation,"rotation"=>crate::AnimationPath::Rotation,
-                    "scale"=>crate::AnimationPath::Scale,_=>return Err(Error::Invalid("animation path")),
-                };
-                let keys=need(c,"keys")?.as_arr().ok_or(Error::Invalid("animation keys"))?;
-                key_count=key_count.saturating_add(keys.len());
-                if key_count>limits.max_keyframes { return Err(Error::Budget("keyframes")); }
-                let keys=keys.iter().map(|k| {
-                    fields(k,&["time","value"])?;
-                    Ok(crate::Keyframe {time:float(need(k,"time")?)?,value:array(need(k,"value")?)?})
-                }).collect::<Result<Vec<_>>>()?;
-                Ok(crate::AnimationChannel {joint:integer(need(c,"joint")?)?,path,keys})
-            }).collect::<Result<Vec<_>>>()?;
-            return Ok(Operation::SetClip {clip:crate::AnimationClip {name,channels}});
-        }
-        "delete_clip"=> { fields(v,&["op","name"])?; return Ok(Operation::DeleteClip {name:text(v,"name")?.to_owned()}); }
-        _=>{}
-    }
-    if op=="material" {
-        fields(v,&["op","material","color"])?;
-        return Ok(Operation::SetMaterial { material:integer(need(v,"material")?)?,value:Material {color:array(need(v,"color")?)?,base_color_png:Vec::new()} });
-    }
-    let object=text(v,"object")?.to_owned();
-    if object.len()>limits.max_name_bytes { return Err(Error::Budget("object name")); }
-    Ok(match op {
-        "cube"=> { fields(v,&["op","object","size"])?; Operation::Cube {object,size:array(need(v,"size")?)?} }
-        "plane"=> { fields(v,&["op","object","size"])?; Operation::Plane {object,size:array(need(v,"size")?)?} }
-        "sphere"=> {
-            fields(v,&["op","object","radius","segments","rings","smooth"])?;
-            let smooth=v.get("smooth").map(|v|v.as_bool().ok_or(Error::Invalid("smooth must be boolean"))).transpose()?.unwrap_or(true);
-            Operation::ImportMesh {object,source:crate::primitives::sphere(float(need(v,"radius")?)?,integer(need(v,"segments")?)?,integer(need(v,"rings")?)?,smooth,limits)?}
-        }
-        "cylinder"=> {
-            fields(v,&["op","object","radius","height","segments","smooth"])?;
-            let smooth=v.get("smooth").map(|v|v.as_bool().ok_or(Error::Invalid("smooth must be boolean"))).transpose()?.unwrap_or(true);
-            Operation::ImportMesh {object,source:crate::primitives::cylinder(float(need(v,"radius")?)?,float(need(v,"height")?)?,integer(need(v,"segments")?)?,smooth,limits)?}
-        }
-        "polygon_mesh"=> {
-            fields(v,&["op","object","positions","polygons"])?;
-            let positions=need(v,"positions")?.as_arr().ok_or(Error::Invalid("positions must be an array"))?;
-            let polygons=need(v,"polygons")?.as_arr().ok_or(Error::Invalid("polygons must be an array"))?;
-            if positions.len()>limits.mesh.max_vertices || polygons.len()>limits.mesh.max_faces { return Err(Error::Budget("polygon mesh size")); }
-            let positions=positions.iter().map(array).collect::<Result<Vec<[f64;3]>>>()?;
-            let mut corners=0usize;
-            let polygons=polygons.iter().map(|p| {
-                fields(p,&["vertices","uvs","material"])?;
-                let vertices=need(p,"vertices")?.as_arr().ok_or(Error::Invalid("polygon vertex indices"))?;
-                corners=corners.saturating_add(vertices.len());
-                if vertices.len()>limits.mesh.max_face_corners || corners>limits.mesh.max_corners { return Err(Error::Budget("polygon corners")); }
-                let vertices=vertices.iter().map(integer).collect::<Result<Vec<_>>>()?;
-                let uvs=match p.get("uvs") {
-                    None=>Vec::new(),Some(v)=> {
-                        let uvs=v.as_arr().ok_or(Error::Invalid("polygon UV array"))?;
-                        if uvs.len()!=vertices.len() { return Err(Error::Invalid("polygon UV count")); }
-                        uvs.iter().map(array).collect::<Result<Vec<[f64;2]>>>()?
-                    }
-                };
-                let material=p.get("material").map(integer).transpose()?.unwrap_or(0);
-                Ok(mesh::Polygon {vertices,uvs,material})
-            }).collect::<Result<Vec<_>>>()?;
-            let mut ctx=mesh::Context::new(limits.mesh.clone(),None);
-            Operation::ImportMesh {object,source:mesh::Mesh::from_polygons(&positions,&polygons,&mut ctx)?.to_bytes(&mut ctx)?}
-        }
-        "delete_object"=> { fields(v,&["op","object"])?; Operation::DeleteObject {object} }
-        "transform"=> {
-            fields(v,&["op","object","vertices","matrix"])?;
-            let vertices=selections(need(v,"vertices")?,limits.mesh.max_vertices)?.into_iter().map(mesh::VertexId).collect();
-            let rows=need(v,"matrix")?.as_arr().ok_or(Error::Invalid("matrix must contain four rows"))?;
-            if rows.len()!=4 { return Err(Error::Invalid("matrix must contain four rows")); }
-            Operation::Transform {object,vertices,matrix:[array(&rows[0])?,array(&rows[1])?,array(&rows[2])?,array(&rows[3])?]}
-        }
-        "extrude"=> { fields(v,&["op","object","face","offset"])?; Operation::Extrude {object,face:mesh::FaceId(stable_id(need(v,"face")?)?),offset:array(need(v,"offset")?)?} }
-        "delete_faces"=> { fields(v,&["op","object","faces"])?; Operation::DeleteFaces {object,faces:selections(need(v,"faces")?,limits.mesh.max_faces)?.into_iter().map(mesh::FaceId).collect()} }
-        "mirror"=> {
-            fields(v,&["op","object","axis","offset"])?; let axis=integer(need(v,"axis")?)?;
-            if axis>2 { return Err(Error::Invalid("mirror axis must be 0, 1 or 2")); }
-            Operation::Mirror {object,axis:axis as u8,offset:float(need(v,"offset")?)?}
-        }
-        "uv"=> { fields(v,&["op","object","corner","uv"])?; Operation::SetUv {object,corner:mesh::CornerId(stable_id(need(v,"corner")?)?),uv:array(need(v,"uv")?)?} }
-        "weights"=> {
-            fields(v,&["op","object","vertex","weights"])?;
-            let weights=need(v,"weights")?.as_arr().ok_or(Error::Invalid("weights must be an array"))?;
-            if weights.len()>limits.mesh.max_weights_per_vertex { return Err(Error::Budget("joint influences")); }
-            let weights=weights.iter().map(|w| { fields(w,&["joint","weight"])?; Ok(mesh::JointWeight {joint:integer(need(w,"joint")?)?,weight:float(need(w,"weight")?)?}) }).collect::<Result<Vec<_>>>()?;
-            Operation::SetWeights {object,vertex:mesh::VertexId(stable_id(need(v,"vertex")?)?),weights}
-        }
-        "assign_material"=> { fields(v,&["op","object","faces","material"])?; Operation::AssignMaterial {object,faces:selections(need(v,"faces")?,limits.mesh.max_faces)?.into_iter().map(mesh::FaceId).collect(),material:integer(need(v,"material")?)?} }
-        "inset"=> { fields(v,&["op","object","face","distance"])?; Operation::Inset {object,face:mesh::FaceId(stable_id(need(v,"face")?)?),distance:float(need(v,"distance")?)?} }
-        "weld"=> { fields(v,&["op","object","vertices","distance"])?; Operation::Weld {object,vertices:selections(need(v,"vertices")?,limits.mesh.max_vertices)?.into_iter().map(mesh::VertexId).collect(),distance:float(need(v,"distance")?)?} }
-        "edge_attributes"=> {
-            fields(v,&["op","object","vertices","seam","crease"])?;
-            let vertices=selections(need(v,"vertices")?,2)?;
-            if vertices.len()!=2 { return Err(Error::Invalid("edge needs two vertex IDs")); }
-            Operation::EdgeAttributes {object,edge:mesh::EdgeKey::new(mesh::VertexId(vertices[0]),mesh::VertexId(vertices[1])),attributes:mesh::EdgeAttributes {
-                seam:need(v,"seam")?.as_bool().ok_or(Error::Invalid("seam must be boolean"))?,crease:float(need(v,"crease")?)?,
-            }}
-        }
-        "corner_normal"=> {
-            fields(v,&["op","object","corner","normal"])?;
-            let normal=match need(v,"normal")? {Value::Null=>None,v=>Some(array(v)?)};
-            Operation::CornerNormal {object,corner:mesh::CornerId(stable_id(need(v,"corner")?)?),normal}
-        }
-        "auto_weights"=> {fields(v,&["op","object"])?; Operation::AutoWeights {object} }
-        "smooth"=> {
-            fields(v,&["op","object","vertices","iterations","factor","preserve_boundary"])?;
-            Operation::Smooth {object,vertices:selections(need(v,"vertices")?,limits.mesh.max_vertices)?.into_iter().map(mesh::VertexId).collect(),
-                iterations:integer(need(v,"iterations")?)?,factor:float(need(v,"factor")?)?,
-                preserve_boundary:need(v,"preserve_boundary")?.as_bool().ok_or(Error::Invalid("preserve_boundary must be boolean"))?}
-        }
-        "subdivide"=> {
-            fields(v,&["op","object","levels"])?;
-            Operation::Subdivide {object,levels:integer(need(v,"levels")?)?}
-        }
-        "project_uv"=> {
-            fields(v,&["op","object","faces","axis","scale","offset"])?;
-            let axis=integer(need(v,"axis")?)?;
-            if axis>2 { return Err(Error::Invalid("projection axis must be 0, 1 or 2")); }
-            Operation::ProjectUv {object,faces:selections(need(v,"faces")?,limits.mesh.max_faces)?.into_iter().map(mesh::FaceId).collect(),
-                axis:axis as u8,scale:array(need(v,"scale")?)?,offset:array(need(v,"offset")?)?}
-        }
-        "brush"=> {
-            fields(v,&["op","object","vertices","center","radius","delta","max_displacement"])?;
-            Operation::Brush {object,vertices:selections(need(v,"vertices")?,limits.mesh.max_vertices)?.into_iter().map(mesh::VertexId).collect(),
-                center:array(need(v,"center")?)?,radius:float(need(v,"radius")?)?,delta:array(need(v,"delta")?)?,
-                max_displacement:float(need(v,"max_displacement")?)?}
-        }
-        _=>return Err(Error::Invalid("unknown modeling operation")),
-    })
-}
-pub(crate) fn rgb(v:&Value)->Result<[u8;3]> {
-    let values=v.as_arr().ok_or(Error::Invalid("RGB color must be three bytes"))?;
-    if values.len()!=3 { return Err(Error::Invalid("RGB color must be three bytes")); }
-    let mut out=[0;3];
-    for (o,v) in out.iter_mut().zip(values) { *o=integer(v)?.try_into().map_err(|_|Error::Invalid("RGB byte exceeds 255"))?; }
-    Ok(out)
-}
-
 #[path="extended_inspect.rs"] mod extended;
 pub use extended::EXTENDED_INSPECTION_DOMAINS;
+
+#[cfg(test)]
+mod extended_inspect_tests {
+    use crate::{json::Value,*};
+    use std::collections::BTreeMap;
+    fn fixture()->Document{
+        let mut d=Document::new(Limits::default()).unwrap();let mut image=RgbaImage::new(32,32,[0;4],d.limits()).unwrap();for(i,p)in image.pixels.chunks_exact_mut(4).enumerate(){p.copy_from_slice(&[(i%255) as u8,(i/255) as u8,128,255]);}
+        d.apply(Transaction{request_id:"seed".into(),expected:d.head(),operations:vec![Operation::Cube{object:"body".into(),size:[1.;3]},Operation::Surface(SurfaceOperation::Layer{material:0,channel:SurfaceChannel::BaseColor,layer:SurfaceLayer::new("paint",image)}),Operation::SetSkeleton{skeleton:Skeleton{joints:vec![Joint{name:"root".into(),parent:None,translation:[0.;3]}]}},Operation::AutoWeights{object:"body".into()},Operation::SetClip{clip:AnimationClip{name:"clip".into(),channels:vec![AnimationChannel{joint:0,path:AnimationPath::Translation,keys:vec![Keyframe{time:0.,value:[0.;4]},Keyframe{time:1.,value:[0.,1.,0.,0.]}]}]}},Operation::Rig(RigOperation::Pose(Pose{name:"pose".into(),joints:BTreeMap::from([(0,Transform::default())])})),Operation::Rig(RigOperation::ClipOptions{name:"clip".into(),options:ClipOptions{events:vec![ClipEvent{time:0.5,name:"event".into(),payload:"\0".repeat(4096)}],..Default::default()}})]},None).unwrap();
+        let vertex=d.object("body").unwrap().vertices()[0].id;let face=d.object("body").unwrap().faces()[0].id;let ops=vec![Operation::Selection(SelectionOperation::Set{object:"body".into(),name:"chosen".into(),vertices:vec![vertex],faces:vec![face]})];d.apply(Transaction{request_id:"selection".into(),expected:d.head(),operations:ops},None).unwrap();d
+    }
+    fn reopen(d:&Document)->Document{Document::from_bytes(&d.to_bytes(None).unwrap(),d.limits().clone(),None).unwrap()}
+    fn inspect(d:&Document,domain:&str,offset:u32)->Value {
+        let object=if ["uv_islands","uv_island_faces","uv_pins","solid"].contains(&domain){Some("body")}else{None};
+        inspect_document(d,"doc",object,domain,offset as usize,128,None).unwrap()
+    }
+    #[test]fn every_extended_domain_obeys_shared_page_envelope_and_source_is_unchanged(){let d=reopen(&fixture());let before=d.to_bytes(None).unwrap();for domain in EXTENDED_INSPECTION_DOMAINS{let result=inspect(&d,domain,0);assert!(result.to_json().len()<=MAX_REPLY_BYTES,"{domain}");assert!(result.get("total").is_some());assert!(result.get("count").is_some());assert!(result.get("next_offset").is_some());}assert_eq!(d.to_bytes(None).unwrap(),before);let solid=inspect(&d,"solid",0);assert_eq!(solid.get("items").unwrap().as_arr().unwrap()[0].get("is_valid_solid").and_then(Value::as_bool),Some(true),"{}",solid.to_json());}
+    #[test]fn binary_pixels_and_escaped_event_payload_have_complete_advancing_pages(){let d=reopen(&fixture());let mut offset=0;let mut pixels=Vec::new();loop{let result=inspect(&d,"surface_pixels",offset);assert!(result.to_json().len()<=MAX_REPLY_BYTES);for row in result.get("items").unwrap().as_arr().unwrap(){pixels.extend(row.get("rgba").unwrap().as_arr().unwrap().iter().map(|v|v.as_u64().unwrap()as u8));}match result.get("next_offset").and_then(Value::as_u64){Some(next)=>{assert!(next>offset as u64);offset=next as u32;},None=>break}}assert_eq!(pixels,d.surface().materials[&0].channels[&SurfaceChannel::BaseColor][0].image.pixels);
+        let preview=inspect(&d,"clip_events",0);let row=&preview.get("items").unwrap().as_arr().unwrap()[0];assert_eq!(row.get("payload_omitted").and_then(Value::as_u64),Some(3584));let mut text=String::new();let mut offset=0;loop{let page=inspect(&d,"clip_event_payload",offset);assert!(page.to_json().len()<=MAX_REPLY_BYTES);for row in page.get("items").unwrap().as_arr().unwrap(){assert_eq!(row.get("byte_offset").and_then(Value::as_u64),Some(text.len()as u64));text.push_str(row.get("text").unwrap().as_str().unwrap());}match page.get("next_offset").and_then(Value::as_u64){Some(next)=>{assert!(next>offset as u64);offset=next as u32;},None=>break}}assert_eq!(text,"\0".repeat(4096));
+    }
+    #[test]fn selections_have_stable_ids_and_cancelled_global_checks_return_no_certificate(){let d=reopen(&fixture());let groups=inspect(&d,"selections",0);assert_eq!(groups.get("total").and_then(Value::as_u64),Some(1));let vertices=inspect(&d,"selection_vertices",0);assert!(vertices.get("items").unwrap().as_arr().unwrap()[0].get("vertex").unwrap().as_str().is_some());let before=d.to_bytes(None).unwrap();assert!(inspect_document(&d,"doc",Some("body"),"solid",0,32,Some(&||true)).is_err());assert_eq!(d.to_bytes(None).unwrap(),before);}
+
+    #[test]fn joint_inventory_reports_effective_rest_override(){
+        let mut d=fixture();
+        d.apply(Transaction{request_id:"rest".into(),expected:d.head(),operations:vec![
+            Operation::Rig(RigOperation::Rest{joint:0,transform:Transform{translation:[3.,4.,5.],rotation:[0.,0.,0.,1.],scale:[2.;3]}}),
+        ]},None).unwrap();
+
+        let d=reopen(&d);
+        let joints=inspect(&d,"joints",0);let row=&joints.get("items").unwrap().as_arr().unwrap()[0];
+        assert_eq!(row.get("translation").unwrap().to_json(),"[3.0,4.0,5.0]");
+        assert_eq!(row.get("scale").unwrap().to_json(),"[2.0,2.0,2.0]");
+    }
+
+    #[test]
+    fn vehicle_wheel_inventory_returns_bound_local_geometry_and_advances() {
+        let mut d=Document::new(Limits::default()).unwrap();
+        d.apply(Transaction{request_id:"wheel".into(),expected:d.head(),operations:vec![
+            Operation::Cube { object: "tire".into(), size: [0.2, 0.7, 0.7] },
+            Operation::Scene(SceneOperation::VehicleWheel {
+                object: "tire".into(),
+                wheel: VehicleWheel {
+                    connection: "wheel_front_left".into(),
+                    pivot: [0.0, 0.0, 0.0],
+                    radius: 0.35,
+                    width: 0.2,
+                    visual: None
+                }
+            }),
+        ]},None).unwrap();
+
+        let d=reopen(&d);
+        let page = inspect(&d, "vehicle_wheels", 0);
+        assert_eq!(page.get("count").and_then(Value::as_u64), Some(1));
+        let row = &page.get("items").unwrap().as_arr().unwrap()[0];
+        assert_eq!(row.get("connection").and_then(Value::as_str), Some("wheel_front_left"));
+        assert_eq!(row.get("object").and_then(Value::as_str), Some("tire"));
+        assert_eq!(row.get("radius"), Some(&Value::F64(0.35)));
+        assert_eq!(inspect(&d, "vehicle_wheels", 1).get("count").and_then(Value::as_u64), Some(0));
+        assert_eq!(inspect_document(&d,"doc",Some("tire"),"vehicle_wheels",0,32,None).unwrap().get("total").and_then(Value::as_u64),Some(1));
+        assert_eq!(inspect_document(&d,"doc",Some("missing"),"vehicle_wheels",0,32,None).unwrap().get("total").and_then(Value::as_u64),Some(0));
+    }
+}

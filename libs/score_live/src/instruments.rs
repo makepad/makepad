@@ -5,7 +5,8 @@
 //! (level, mono, the envelope between synths). One splice, one undo step.
 
 use crate::model::{AssetRef, InstKind, ScoreDoc};
-use crate::source::{self, Splice};
+use crate::source;
+use makepad_edit_values::Splice;
 use makepad_score_player::presets;
 
 /// The General MIDI families, eight programs each, as a picker names them.
@@ -290,7 +291,7 @@ pub fn switch(src: &str, node: &str, choice: &Choice) -> Result<Splice, String> 
             fields.push(format!("{}: {}", field.key, field.value.text(src)));
         }
     }
-    Ok(Splice { start, end: ctor.body.end, text: format!("{}{{{}}}", choice.type_name, fields.join(" ")) })
+    Ok(Splice { file: 0, range: start..ctor.body.end, text: format!("{}{{{}}}", choice.type_name, fields.join(" ")) })
 }
 
 #[cfg(test)]
@@ -303,12 +304,12 @@ mod tests {
     fn a_voice_switches_to_the_neural_singer_and_back() {
         let src = "use mod.score.*\nlet clock = Clock{bpm: 100}\nlet vox = Voice{profile: @alto vibrato: 0.2}\nlet line = Loop{play: vox beats: 2 code: fn(i) { sleep(sing([@e4 @g4], \"la la\", {dur: 1})) }}\nScore{clock vox line}\n";
         let cantor = Choice { group: "Neural singers", label: "Cantor".into(), detail: String::new(), type_name: "Voice", fields: vec![("engine".into(), "@neural".into())] };
-        let neural = source::apply(src, &switch(src, "vox", &cantor).unwrap());
+        let neural = makepad_edit_values::apply_splices(src, 0, &[switch(src, "vox", &cantor).unwrap()]).unwrap();
         assert!(neural.contains("let vox = Voice{engine: @neural vibrato: 0.2}"), "{neural}");
         assert_eq!(current_key(&neural, "vox"), Some("Voice:engine=@neural".into()));
         assert!(crate::model::ScoreDoc::load(&neural).is_ok());
         let alto = Choice { group: "Voices", label: "alto".into(), detail: String::new(), type_name: "Voice", fields: vec![("profile".into(), "@alto".into())] };
-        let back = source::apply(&neural, &switch(&neural, "vox", &alto).unwrap());
+        let back = makepad_edit_values::apply_splices(&neural, 0, &[switch(&neural, "vox", &alto).unwrap()]).unwrap();
         assert_eq!(back, src);
         assert_eq!(current_key(src, "vox"), Some("Voice:profile=@alto".into()));
     }
@@ -321,7 +322,7 @@ mod tests {
         let now = all.iter().find(|c| c.key() == key).unwrap();
         assert_eq!((now.group, now.label.as_str()), ("GM strings", "Orchestral Harp"));
         let guitar = all.iter().find(|c| c.label == "Nylon Guitar").unwrap();
-        let next = source::apply(src, &switch(src, "harp", guitar).unwrap());
+        let next = makepad_edit_values::apply_splices(src, 0, &[switch(src, "harp", guitar).unwrap()]).unwrap();
         assert!(next.contains("let harp = Instrument{kind: @soundfont program: 24}"), "{next}");
         assert_eq!(current_key(&next, "harp"), Some(guitar.key()));
     }
@@ -336,17 +337,17 @@ mod tests {
         assert_eq!(current_key(SRC, "bass"), Some("Synth:preset=@acid".into()));
         // To the piano: the loop and everything else stay byte for byte.
         let piano = all.iter().find(|c| c.group == "Piano").unwrap();
-        let next = source::apply(SRC, &switch(SRC, "bass", piano).unwrap());
+        let next = makepad_edit_values::apply_splices(SRC, 0, &[switch(SRC, "bass", piano).unwrap()]).unwrap();
         assert!(next.contains("let bass = Instrument{kind: @piano preset: \"Concert Grand\" at: {x: 10 y: 20}}"), "{next}");
         assert_eq!(next.replace(&next[next.find("Instrument{").unwrap()..next.find("}\nlet line").unwrap() + 1], "X"), SRC.replace(&SRC[SRC.find("Synth{").unwrap()..SRC.find("}\nlet line").unwrap() + 1], "X"));
         assert!(crate::model::ScoreDoc::load(&next).is_ok());
         // Synth to synth keeps the envelope, drops the old preset's filter.
         let pad = all.iter().find(|c| c.label == "warm pad").unwrap();
-        let next = source::apply(SRC, &switch(SRC, "bass", pad).unwrap());
+        let next = makepad_edit_values::apply_splices(SRC, 0, &[switch(SRC, "bass", pad).unwrap()]).unwrap();
         assert!(next.contains("Synth{preset: @warm_pad attack: 0.01 at: {x: 10 y: 20}}"), "{next}");
         // Every choice makes a score that loads (the SoundFonts need a file).
         for c in all.iter() {
-            let next = source::apply(SRC, &switch(SRC, "bass", c).unwrap());
+            let next = makepad_edit_values::apply_splices(SRC, 0, &[switch(SRC, "bass", c).unwrap()]).unwrap();
             if let Err(d) = crate::model::ScoreDoc::load(&next) {
                 panic!("{}: {d:?}\n{next}", c.label);
             }

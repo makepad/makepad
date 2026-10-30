@@ -24,7 +24,7 @@ pub struct ScoreToolDef {
 pub const GUIDE: ScoreToolDef = ScoreToolDef {
     name: "score.guide",
     api_name: "score_guide",
-    description: "How to write a score: the document (Clock, instruments, Loops with code, FX, Sections, Score{…}), the functions loop code calls, instrument presets and drum kits, genre templates, drum patterns and progressions, arrangement and mixing rules, how to fit a video or a game, and synth panels. Read it once before composing.",
+    description: "How to write a score: the document (Clock, instruments, Loops with code, FX, Sections, MIDI in from a keyboard through MidiIn, Arp, Chord, Transpose and Velocity nodes, Score{…}), the functions loop code calls, instrument presets and drum kits, genre templates, drum patterns and progressions, arrangement and mixing rules, how to fit a video or a game, and synth panels. Read it once before composing.",
     input: r#"{"type": "object", "properties": {}}"#,
     output: r#"{"type": "object", "additionalProperties": true, "properties": {"guide": {"type": "string", "description": "the composer guide"}}, "required": ["guide"]}"#,
     args_doc: r#"{}"#,
@@ -84,8 +84,17 @@ pub const TANDEM_PATCHES: ScoreToolDef = ScoreToolDef {
     args_doc: r#"{"query": "warm pad", "limit": 10}"#,
 };
 
+pub const PRESET_SEARCH: ScoreToolDef = ScoreToolDef {
+    name: "preset.search",
+    api_name: "preset_search",
+    description: "Search the preset index the instrument browser shows: every engine's presets (Synth patches, Morph wavetable patches, drum kits, General MIDI programs and kits, the piano, Ironfish, shader instruments, voices and any engine added later), each with its engine, category (bass lead pad keys pluck bell arp strings brass woodwind guitar organ vocal drums perc fx drone world sample), character tags (bright dark warm mono poly, eras, genres), pack and a line about it. Words match the name, tags, pack, category and line; `engine` and `category` narrow it; `similar_to` (a preset's code or name) finds the nearest by sound. Each answer is the node to write (`Synth{preset: @acid}`).",
+    input: r#"{"type": "object", "properties": {"query": {"type": "string", "description": "words: what it should be or sound like"}, "engine": {"type": "string", "description": "only this engine (Synth, Morph, Drums, GM, Piano, Ironfish, Shader, Voice, ...)"}, "category": {"type": "string", "description": "only this category"}, "similar_to": {"type": "string", "description": "a preset (its name or code): the presets nearest it"}, "limit": {"type": "integer", "minimum": 1, "maximum": 40, "description": "how many (default 12)"}}}"#,
+    output: r#"{"type": "object", "additionalProperties": true, "properties": {"results": {"type": "array", "items": {"type": "string", "description": "the node's code, [engine · category · pack], its name and what it is"}, "description": "in the index's order, or nearest first"}, "total": {"type": "integer", "description": "how many matched"}}, "required": ["results"]}"#,
+    args_doc: r#"{"query": "dark reese", "category": "bass", "limit": 6}"#,
+};
+
 /// Every Score tool, in the order registries list them.
-pub const TOOLS: [ScoreToolDef; 7] = [GUIDE, CHECK, LISTEN, INSTRUMENT_SEARCH, MORPH_PARAMS, TANDEM_PARAMS, TANDEM_PATCHES];
+pub const TOOLS: [ScoreToolDef; 8] = [GUIDE, CHECK, LISTEN, INSTRUMENT_SEARCH, MORPH_PARAMS, TANDEM_PARAMS, TANDEM_PATCHES, PRESET_SEARCH];
 
 /// The Score tool named `name`, dotted or underscored.
 pub fn find(name: &str) -> Option<&'static ScoreToolDef> {

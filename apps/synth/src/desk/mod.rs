@@ -22,6 +22,7 @@
 //! composer (`LiveScore`) on the engine's clock feeds the slot's player.
 
 mod batch;
+mod browsers;
 mod chat;
 pub mod code;
 mod lib_pane;
@@ -41,6 +42,7 @@ use code::folds::{self, Folds};
 use code::{LoopLive, Marks, ScoreEditor, ScoreEditorAction};
 use makepad_code_editor::code_view::{CodeView, CodeViewAction};
 use makepad_code_editor::{CodeDocument, CodeSession};
+use makepad_edit_values::{apply_splices, normalize_splices, Edit};
 use makepad_editor_panel::EditorPanelWidgetRefExt;
 use makepad_score_live::model::ScoreDoc;
 use makepad_score_live::{source, LiveConfig, LiveScore, Status};
@@ -240,6 +242,8 @@ script_mod! {
 }
 
 pub fn register(vm: &mut ScriptVm) {
+    // The instrument browser (the lens cards' and the pop-out windows').
+    makepad_synth_panel::browser::script_mod(vm);
     code::script_mod(vm);
     tabs::script_mod(vm);
     tracker::script_mod(vm);
@@ -296,6 +300,8 @@ pub struct Desk {
     timer: Timer,
     /// The desk's next turn (every frame while it plays).
     pub frame: NextFrame,
+    /// MIDI in's message count when last pumped.
+    midi_stamp: u64,
     /// A slow turn while nothing plays (the device's rate, the slot).
     idle: Timer,
     started: bool,
@@ -320,7 +326,7 @@ pub struct Desk {
     bpm_typed_at: f64,
     /// The open score as a document.
     pub document: Document,
-    /// The last splice gesture (a drag's steps are one undo group).
+    /// The last edit gesture (a drag's steps are one undo group).
     gesture: u64,
     /// The score's editor panel (`panel.rs`).
     pub panel: panel::ScorePanel,
@@ -340,9 +346,15 @@ pub struct Desk {
     audition: Option<(String, f64)>,
     auditioned: Option<String>,
     audition_rx: Option<std::sync::mpsc::Receiver<Audition>>,
-    /// The code view's instrument picker: the node and the choice under
-    /// its selection (auditioned like the panel's switch).
-    code_preview: Option<(String, makepad_score_live::instruments::Choice)>,
+    /// A kit's voice to play (a pad pressed on a lens or in the browser):
+    /// (the score with that kit, node, drum).
+    pub pad_audition: Option<(String, String, String)>,
+    /// The preset index's build was started.
+    index_asked: bool,
+    /// Instrument browsers popped out into their own windows.
+    browsers: browsers::BrowserWindows,
+    /// Something asked for the Resources page (a library to download).
+    pub open_resources: bool,
     /// Background work of the tools (listening, rendering, loading samples).
     pub jobs: run::Jobs,
     /// The library tab.
@@ -364,10 +376,10 @@ impl Default for Desk {
     fn default() -> Self {
         Desk {
             engine: Engine::default(), live: None, module: None, source: String::new(), revision: 0, sent: String::new(), variant_live: None, played: String::new(),
-            doc: None, status: Status::default(), typed: false, timer: Timer::default(), frame: NextFrame::default(), idle: Timer::default(),
+            doc: None, status: Status::default(), typed: false, timer: Timer::default(), frame: NextFrame::default(), midi_stamp: 0, idle: Timer::default(),
             started: false, code_shown: 0, loops_shown: Vec::new(), folds: Folds::default(), menu: false, arrangement: transport::Arrangement::default(), arranged: 0, looping: None,
             bpm_written: None, bpm_shown: None, bpm_typed_at: f64::NEG_INFINITY, document: Document::default(), gesture: 0, panel: panel::ScorePanel::default(), vary: vary::VaryDesk::default(),
-            vary_ai_made: None, batch: batch::BatchDesk::default(), tracker: Default::default(), preview_main: true, audition: None, auditioned: None, audition_rx: None, code_preview: None,
+            vary_ai_made: None, batch: batch::BatchDesk::default(), tracker: Default::default(), preview_main: true, audition: None, auditioned: None, audition_rx: None, pad_audition: None, index_asked: false, browsers: Default::default(), open_resources: false,
             jobs: run::Jobs::default(), lib: lib_pane::LibPane::default(), samples_asked: Default::default(), save_clean: None, gm_known: None,
             side_open: true, side: Side::Chat,
         }
@@ -600,29 +612,14 @@ impl Desk {
         let editor = ui.widget(cx, ids!(score_code));
         for action in actions.filter_widget_actions_cast::<ScoreEditorAction>(editor.widget_uid()) {
             match action {
-                ScoreEditorAction::Splice { start, end, text, gesture, done } => {
-                    // A drag's steps are one undo step; its lenses are made
-                    // again as it starts and when it ends.
-                    let continues = gesture == self.gesture;
-                    self.gesture = gesture;
-                    self.splice_joined(cx, ui, start, end, &text, continues);
-                    if done || !continues {
-                        self.code_shown = 0;
-                    }
-                }
-                ScoreEditorAction::Replace { start, end, text } => {
-                    // The editor's text as it is now, then the switch.
-                    let now = editor.borrow::<ScoreEditor>().map(|e| e.text(cx)).unwrap_or_else(|| self.source.clone());
-                    if end <= now.len() && start <= end && now.is_char_boundary(start) && now.is_char_boundary(end) {
-                        let next = source::apply(&now, &source::Splice { start, end, text });
-                        self.set_source(cx, ui, next);
-                    }
-                }
+                ScoreEditorAction::Edit(edit) => self.edit(cx, ui, edit),
                 ScoreEditorAction::Duplicate(node) => self.duplicate(cx, ui, &node),
                 ScoreEditorAction::Fold { node, code } => {
                     self.folds.toggle(&node, code);
                     self.folds_changed(cx, ui);
                 }
+                ScoreEditorAction::PopOut(node) => self.pop_browser(cx, ui, &node),
+                ScoreEditorAction::Pad { node, drum } => self.pad_audition = Some((self.source.clone(), node, drum)),
                 ScoreEditorAction::Status(text) => ui.label(cx, ids!(score_state)).set_text(cx, &text),
                 ScoreEditorAction::None => {}
             }
@@ -634,12 +631,14 @@ impl Desk {
     /// keeps its tempo, and the field shows it again.
     fn write_bpm(&mut self, cx: &mut Cx, ui: &WidgetRef, bpm: f64) {
         let now = cx.seconds_since_app_start();
-        let splice = clock_node(&self.source).and_then(|node| source::set_field(&self.source, &node, "bpm", &source::fmt_num(bpm, 1)).ok());
+        let splice = clock_node(&self.source).and_then(|node| source::set_field(&self.source, &node, "bpm", &makepad_edit_values::number::fmt_num(bpm, 1)).ok());
         match splice {
             Some(s) => {
                 let joined = now - self.bpm_typed_at < BPM_JOIN;
                 self.bpm_typed_at = now;
-                self.splice_joined(cx, ui, s.start, s.end, &s.text, joined);
+                // A step soon after the last joins its undo step.
+                let gesture = if joined { self.gesture } else { (4u64 << 40) + self.revision };
+                self.edit(cx, ui, Edit::splice(s.range, s.text, gesture, true));
             }
             // The field shows the score's tempo again on the next turn.
             None => self.bpm_shown = None,
@@ -654,12 +653,27 @@ impl Desk {
         self.frame = cx.new_next_frame();
     }
 
-    /// A splice from a gesture: a step of the same drag joins its undo step.
-    fn splice_joined(&mut self, cx: &mut Cx, ui: &WidgetRef, start: usize, end: usize, text: &str, joined: bool) {
-        if end > self.source.len() || start > end || !self.source.is_char_boundary(start) || !self.source.is_char_boundary(end) {
+    /// Apply one gesture step from the end of the source, joining its
+    /// ranges and later steps into the same undo group.
+    fn edit(&mut self, cx: &mut Cx, ui: &WidgetRef, edit: Edit) {
+        let splices = match normalize_splices(edit.splices().filter(|s| s.file == 0).cloned().collect()) {
+            Ok(splices) => splices,
+            Err(error) => {
+                ui.label(cx, ids!(score_state)).set_text(cx, &error);
+                return;
+            }
+        };
+        if splices.is_empty() {
             return;
         }
-        let next = source::apply(&self.source, &source::Splice { start, end, text: text.to_string() });
+        let next = match apply_splices(&self.source, 0, &splices) {
+            Ok(next) => next,
+            Err(error) => {
+                ui.label(cx, ids!(score_state)).set_text(cx, &error);
+                return;
+            }
+        };
+        let continues = edit.gesture == self.gesture;
         let code = ui.widget(cx, ids!(score_code)).widget(cx, ids!(code));
         if let Some(mut view) = code.borrow_mut::<CodeView>() {
             if let Some(session) = view.session.as_mut() {
@@ -669,27 +683,28 @@ impl Desk {
                     let col = at - before.rfind('\n').map_or(0, |nl| nl + 1);
                     makepad_code_editor::text::Position { line_index: line, byte_index: col }
                 };
-                // As given: typing's insert would autoindent the splice.
-                if joined {
-                    session.document().replace_range_joined(to_pos(start), to_pos(end), text.into());
-                } else {
-                    session.document().replace_range(to_pos(start), to_pos(end), text.into());
+                // As given: typing's insert would autoindent the changes.
+                for (i, splice) in splices.iter().enumerate() {
+                    let start = to_pos(splice.range.start);
+                    let end = to_pos(splice.range.end);
+                    if continues || i > 0 {
+                        session.document().replace_range_joined(start, end, splice.text.as_str().into());
+                    } else {
+                        session.document().replace_range(start, end, splice.text.as_str().into());
+                    }
                 }
                 session.handle_changes();
             }
             view.redraw(cx);
         }
         self.source = next;
+        self.gesture = edit.gesture;
         self.revision += 1;
+        if edit.done || !continues {
+            self.code_shown = 0;
+        }
         self.send();
         self.frame = cx.new_next_frame();
-    }
-
-    /// A splice (the panel's release, a library item), applied to the
-    /// editor's text in place (so the caret, scroll and undo stay the
-    /// editor's) and to the source, as its own undo step.
-    pub fn splice(&mut self, cx: &mut Cx, ui: &WidgetRef, start: usize, end: usize, text: &str) {
-        self.splice_joined(cx, ui, start, end, text, false);
     }
 
     /// The code view's marks: the problems at their lines, and the values
@@ -758,12 +773,20 @@ impl Desk {
             }).collect();
             editor.set_loops(cx, loops);
         }
-        self.code_preview = editor.picker_choice();
     }
 
     /// The desk's turn: status in, the code view refreshed, jobs polled.
     /// Cheap when nothing changed.
     pub fn pump(&mut self, cx: &mut Cx, ui: &WidgetRef) {
+        // The instrument browser's preset index, built once in the
+        // background (every engine's presets: no hitch when it opens).
+        if !self.index_asked {
+            self.index_asked = true;
+            match cx.task_pool().submit(Lane::Heavy, || makepad_score_live::browse::set_index(makepad_score_live::browse::build())) {
+                Ok(job) => job.detach(),
+                Err(error) => log!("preset index: {error:?}"),
+            }
+        }
         self.jobs.poll();
         if let Some(message) = self.jobs.finished_message() {
             ui.label(cx, ids!(score_state)).set_text(cx, &message);
@@ -790,8 +813,16 @@ impl Desk {
         self.pump_caption(cx, ui);
         self.pump_transport(cx, ui);
         self.pump_code(cx, ui);
+        self.pump_browsers(cx);
         self.pump_tracker(cx, ui);
-        if self.status.playing || self.engine.playing() || self.jobs.busy() {
+        // MIDI in moved: the cards' lights and step views repaint.
+        let stamp = makepad_audio_engine::feed::midi_in::stamp();
+        let midi = stamp != self.midi_stamp;
+        if midi {
+            self.midi_stamp = stamp;
+            ui.widget(cx, ids!(score_code)).redraw(cx);
+        }
+        if self.status.playing || self.engine.playing() || self.jobs.busy() || midi {
             self.frame = cx.new_next_frame();
         }
     }
@@ -1042,6 +1073,7 @@ impl Desk {
     }
 
     pub fn handle_event(&mut self, cx: &mut Cx, ui: &WidgetRef, event: &Event) {
+        self.browser_windows_event(cx, ui, event);
         match event {
             // ⌘S saves the score anywhere in the window.
             Event::KeyDown(ke) if ke.key_code == KeyCode::KeyS && (ke.modifiers.logo || ke.modifiers.control) && !ke.modifiers.shift => self.save_now(cx, ui),
@@ -1080,7 +1112,7 @@ impl Desk {
                 }
             }
         }
-        if self.frame.is_event(event).is_some() || self.idle.is_event(event).is_some() || self.batch.timer.is_event(event).is_some() {
+        if self.frame.is_event(event).is_some() || self.idle.is_event(event).is_some() || self.batch.timer.is_event(event).is_some() || matches!(event, Event::Signal) {
             self.pump(cx, ui);
         }
     }
@@ -1132,6 +1164,7 @@ impl Desk {
         }).collect();
         // A key: the node's own sound on that note (with what the panel holds).
         let key = self.panel.key.take().and_then(|(node, note)| audition::key(&self.source, &node, note).map(|choice| (node, choice)));
+        let key = key.or_else(|| self.pad_audition.take().and_then(|(source, node, drum)| audition::pad(&source, &node, &drum).map(|choice| (node, choice))));
         if let Some((node, choice)) = key {
             self.audition = None;
             self.panel.preview = None;
@@ -1144,7 +1177,7 @@ impl Desk {
             self.auditioned = Some("key".into());
         }
         // The panel's switch, else the code view's picker.
-        let (choice, node) = match self.panel.preview.clone().or_else(|| self.code_preview.clone()) {
+        let (choice, node) = match self.panel.preview.clone() {
             Some((node, choice)) => (Some(choice), Some(node)),
             None => (None, None),
         };

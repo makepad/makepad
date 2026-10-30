@@ -53,6 +53,7 @@ pub mod apply;
 pub mod array;
 pub mod array_heap;
 pub mod bounded;
+mod base64;
 pub mod function;
 pub mod gc;
 pub mod glyph_coverage;

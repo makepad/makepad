@@ -364,7 +364,7 @@ impl Widget for SynthDisplay {
             let kind = if spec.is_choice() {
                 BoundKind::Choice(spec.options.iter().map(|o| format!("@{o}")).collect())
             } else {
-                BoundKind::Numbers { lo: spec.min, hi: spec.max, step: if spec.taper == spec::Taper::Int { 1.0 } else { 0.0 } }
+                BoundKind::Numbers { lo: spec.min, hi: spec.max, step: if spec.taper == makepad_edit_values::Taper::Int { 1.0 } else { 0.0 } }
             };
             host::register(Bound { path: self.path(field), kind });
         }

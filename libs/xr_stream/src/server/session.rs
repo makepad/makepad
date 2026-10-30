@@ -171,7 +171,12 @@ impl Host {
             .map_err(|e| e.to_string())?;
         // the headset on a loop (debug): a session of this listener's, ended by the off switch
         if std::env::var("MAKEPAD_XR_REMOTE_SELFTEST").as_deref() == Ok("1") {
-            super::debug::selftest(shared_for_test, [1680, 1760], stop.clone());
+            // its eye size: `MAKEPAD_XR_REMOTE_SELFTEST_EYE=<w>x<h>` (a headset's: Quest 3 2016x2112)
+            let eye = std::env::var("MAKEPAD_XR_REMOTE_SELFTEST_EYE").ok().and_then(|v| {
+                let (w, h) = v.split_once('x')?;
+                Some([w.trim().parse().ok()?, h.trim().parse().ok()?])
+            });
+            super::debug::selftest(shared_for_test, eye.unwrap_or([1680, 1760]), stop.clone());
         }
         *listener = Some(Listener { stop });
         Ok(())
@@ -601,6 +606,7 @@ impl PumpStats {
                 render_ms: median_ms(render),
                 gpu_ms: median_ms(gpu),
                 encode_ms: median_ms(encode),
+                send_ms: median_ms(send),
                 trip_ms,
                 trip_base_ms: core.rate.base_ms(),
                 waited_per_s: held as f64 / secs,

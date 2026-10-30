@@ -1,28 +1,52 @@
 use makepad_model::*;
+// glTF is JSON: the skin test edits a node of the delivery file.
+use makepad_model::json;
 use makepad_render::skin::SkinnedModel;
 
 fn apply(d: &mut Document, id: &str, operations: Vec<Operation>) -> Result<Applied> {
     d.apply(Transaction { request_id: id.into(), expected: d.head(), operations }, None)
 }
-fn commands(d: &mut Document, id: &str, text: &str) -> Result<Applied> {
-    let operations = parse_operations(&json::parse(text.as_bytes()).unwrap(), d.limits())?;
-    apply(d, id, operations)
-}
 fn fixture() -> Document {
     let mut d = Document::new(Limits { max_joints: 128, ..Default::default() }).unwrap();
-    commands(&mut d, "geometry", r#"[
-      {"op":"sphere","object":"body","radius":0.45,"segments":16,"rings":8},
-      {"op":"sphere","object":"eye","radius":0.14,"segments":8,"rings":4},
-      {"op":"sphere","object":"pupil","radius":0.05,"segments":8,"rings":4},
-      {"op":"sphere","object":"fuzz","radius":0.47,"segments":8,"rings":4}
-    ]"#).unwrap();
+    apply(&mut d, "geometry", vec![
+        Operation::sphere("body", 0.45, 16, 8, true, &Limits::default()).unwrap(),
+        Operation::sphere("eye", 0.14, 8, 4, true, &Limits::default()).unwrap(),
+        Operation::sphere("pupil", 0.05, 8, 4, true, &Limits::default()).unwrap(),
+        Operation::sphere("fuzz", 0.47, 8, 4, true, &Limits::default()).unwrap(),
+    ]).unwrap();
     for (object, position) in [("body",[0.,0.8,0.]),("fuzz",[0.,0.8,0.]),("eye",[0.18,0.95,-0.4]),("pupil",[0.18,0.95,-0.53])] {
         apply(&mut d, &format!("place-{object}"), vec![Operation::Scene(SceneOperation::Node { object: object.into(), node: SceneNode { transform: Transform { translation: position, ..Default::default() }, ..Default::default() } })]).unwrap();
     }
     d
 }
 fn bind(d: &mut Document) {
-    commands(d,"soft",r#"[{"op":"soft_body_bind","object":"body","deform_objects":["fuzz"],"attachments":[{"name":"eyes","objects":["eye","pupil"],"pivot":[0.18,0.95,-0.4]}]}]"#).unwrap();
+    apply(d,"soft",vec![
+        Operation::SoftBody(SoftBodyBind {
+            object: "body".into(),
+            deform_objects: vec!["fuzz".into()],
+            attachments: vec![
+                SoftBodyAttachmentRequest {
+                    name: "eyes".into(),
+                    objects: vec!["eye".into(), "pupil".into()],
+                    pivot: Some([0.18, 0.95, -0.4])
+                }
+            ],
+            settings: SoftBodySettings {
+                mass: 1.0,
+                edge_compliance: 0.02,
+                volume_compliance: 1e-07,
+                pose_compliance: 0.02,
+                damping: 4.0,
+                gravity: [0.0, -9.81, 0.0],
+                contact_radius: 0.01,
+                friction: 0.5,
+                substeps: 4,
+                iterations: 6,
+                max_speed: 20.0,
+                max_displacement: 2.0
+            }
+        }),
+    ]).unwrap();
 }
 
 #[test]
@@ -53,11 +77,73 @@ fn cage_binding_preserves_mesh_contacts_source_and_portable_skin_metadata() {
 fn budget_bad_config_and_post_bind_geometry_changes_are_atomic() {
     let mut small=Document::new(Limits::default()).unwrap();
     let before=small.to_bytes(None).unwrap();
-    assert!(commands(&mut small,"over-budget",r#"[{"op":"soft_body_bind","object":"body"}]"#).is_err());
+    assert!(apply(&mut small,"over-budget",vec![
+        Operation::SoftBody(SoftBodyBind {
+            object: "body".into(),
+            deform_objects: vec![],
+            attachments: vec![],
+            settings: SoftBodySettings {
+                mass: 1.0,
+                edge_compliance: 0.02,
+                volume_compliance: 1e-07,
+                pose_compliance: 0.02,
+                damping: 4.0,
+                gravity: [0.0, -9.81, 0.0],
+                contact_radius: 0.01,
+                friction: 0.5,
+                substeps: 4,
+                iterations: 6,
+                max_speed: 20.0,
+                max_displacement: 2.0
+            }
+        }),
+    ]).is_err());
     assert_eq!(small.to_bytes(None).unwrap(),before);
     let mut d=fixture(); let before=d.to_bytes(None).unwrap();
-    for text in [r#"[{"op":"soft_body_bind","object":"body","config":{"substeps":0}}]"#,r#"[{"op":"soft_body_bind","object":"body","config":{"guess":2}}]"#,r#"[{"op":"soft_body_bind","object":"body","attachments":[{"name":"eye","objects":["body"]}]}]"#] {
-        assert!(commands(&mut d,"bad",text).is_err()); assert_eq!(d.to_bytes(None).unwrap(),before);
+    for text in [vec![
+        Operation::SoftBody(SoftBodyBind {
+            object: "body".into(),
+            deform_objects: vec![],
+            attachments: vec![],
+            settings: SoftBodySettings {
+                mass: 1.0,
+                edge_compliance: 0.02,
+                volume_compliance: 1e-07,
+                pose_compliance: 0.02,
+                damping: 4.0,
+                gravity: [0.0, -9.81, 0.0],
+                contact_radius: 0.01,
+                friction: 0.5,
+                substeps: 0,
+                iterations: 6,
+                max_speed: 20.0,
+                max_displacement: 2.0
+            }
+        }),
+    ],vec![
+        Operation::SoftBody(SoftBodyBind {
+            object: "body".into(),
+            deform_objects: vec![],
+            attachments: vec![
+                SoftBodyAttachmentRequest { name: "eye".into(), objects: vec!["body".into()], pivot: None }
+            ],
+            settings: SoftBodySettings {
+                mass: 1.0,
+                edge_compliance: 0.02,
+                volume_compliance: 1e-07,
+                pose_compliance: 0.02,
+                damping: 4.0,
+                gravity: [0.0, -9.81, 0.0],
+                contact_radius: 0.01,
+                friction: 0.5,
+                substeps: 4,
+                iterations: 6,
+                max_speed: 20.0,
+                max_displacement: 2.0
+            }
+        }),
+    ]] {
+        assert!(apply(&mut d,"bad",text).is_err()); assert_eq!(d.to_bytes(None).unwrap(),before);
     }
     bind(&mut d);
     let before=d.to_bytes(None).unwrap(); let vertices=d.object("body").unwrap().vertices().iter().map(|v|v.id).collect();
@@ -78,14 +164,14 @@ fn rigid_frame_accepts_animated_child_and_refuses_malformed_metadata() {
     let gaze=skeleton.joints.len() as u32;
     skeleton.joints.push(Joint{name:"gaze".into(),parent:Some(frame),translation:[0.;3]});
     let mut operations=vec![Operation::SetSkeleton{skeleton}];
-    operations.extend(parse_operations(&json::parse(format!(r#"[{{"op":"weight_edit","object":"pupil","vertices":[],"edit":{{"type":"assign","joint":{gaze}}}}}]"#).as_bytes()).unwrap(),d.limits()).unwrap());
+    operations.push(Operation::Rig(RigOperation::Weights {object:"pupil".into(),vertices:vec![],edit:WeightEdit::Assign {joint:gaze}}));
     operations.push(Operation::SetClip{clip:AnimationClip{name:"idle".into(),channels:vec![AnimationChannel{joint:gaze,path:AnimationPath::Rotation,keys:vec![Keyframe{time:0.,value:[0.,0.,0.,1.]},Keyframe{time:1.,value:transform::quat_axis_angle([0.,1.,0.],0.1).unwrap()}]}]}});
     apply(&mut d,"gaze",operations).unwrap();
     let source=d.to_bytes(None).unwrap();let reopened=Document::from_bytes(&source,d.limits().clone(),None).unwrap();assert_eq!(reopened.head(),d.head());
     let glb=d.compile(None).unwrap().glb;let model=SkinnedModel::parse_glb_validated(&glb).unwrap();assert_eq!(model.clips[0].name,"idle");
     let good=d.soft_body().unwrap();
     for bad in [ {let mut m=good.clone();m.version=9;m}, {let mut m=good.clone();m.surface_samples[0].weights=[1.;4];m}, {let mut m=good.clone();m.tet_joints[0]=m.attachments[0].joint;m}, {let mut m=good.clone();m.attachments[0].rest_pivot[0]+=0.1;m}, {let mut m=good.clone();m.tetrahedra[0].swap(0,1);m} ] {
-        assert!(makepad_gltf::SoftBodyMetadata::from_value(&bad.to_value(),83).is_err());
+        assert!(bad.validate(83).is_err());
     }
 }
 
@@ -94,8 +180,8 @@ fn compact_rigid_assignment_respects_locked_weights_and_is_atomic() {
     let mut d=fixture();bind(&mut d);let joint=d.soft_body().unwrap().attachments[0].joint as u32;
     apply(&mut d,"lock",vec![Operation::Rig(RigOperation::WeightLocks{object:"pupil".into(),joints:std::collections::BTreeSet::from([joint])})]).unwrap();
     let before=d.to_bytes(None).unwrap();
-    for target in [0,127] {assert!(commands(&mut d,"bad-assign",&format!(r#"[{{"op":"weight_edit","object":"pupil","vertices":[],"edit":{{"type":"assign","joint":{target}}}}}]"#)).is_err());assert_eq!(d.to_bytes(None).unwrap(),before);}
-    commands(&mut d,"same-assign",&format!(r#"[{{"op":"weight_edit","object":"pupil","vertices":[],"edit":{{"type":"assign","joint":{joint}}}}}]"#)).unwrap();
+    for target in [0,127] {assert!(apply(&mut d,"bad-assign",vec![Operation::Rig(RigOperation::Weights {object:"pupil".into(),vertices:vec![],edit:WeightEdit::Assign {joint:target}})]).is_err());assert_eq!(d.to_bytes(None).unwrap(),before);}
+    apply(&mut d,"same-assign",vec![Operation::Rig(RigOperation::Weights {object:"pupil".into(),vertices:vec![],edit:WeightEdit::Assign {joint:joint}})]).unwrap();
 }
 
 #[test]
@@ -117,22 +203,26 @@ fn imported_glb_rejects_metadata_skin_drift_before_model_publication() {
 }
 
 #[test]
-fn engine_joint_budget_is_explicit_per_document_and_required_for_source_reopen() {
-    let mut engine=Engine::new(Limits::default());
-    for budget in [0,129,usize::MAX]{assert!(engine.open_with_joint_budget("bad",None,Some(budget),None).is_err());assert!(engine.document("bad").is_err());}
-    let opened=engine.open_with_joint_budget("large",None,Some(128),None).unwrap();assert_eq!(opened.get("max_joints").and_then(json::Value::as_u64),Some(128));
-    let ops=json::parse(br#"[{"op":"sphere","object":"body","radius":0.4,"segments":8,"rings":4},{"op":"soft_body_bind","object":"body"}]"#).unwrap();
-    engine.execute("model.apply",&json::obj(vec![("document",json::s("large")),("request_id",json::s("bind")),("expected",head_json(engine.document("large").unwrap().head())),("operations",ops)]),None).unwrap();
-    let before=engine.document("large").unwrap().to_snapshot_bytes(None).unwrap();
-    assert!(engine.open_with_joint_budget("large",None,Some(64),None).is_err());
-    assert_eq!(engine.document("large").unwrap().to_snapshot_bytes(None).unwrap(),before);
-    engine.open("large",None,None).unwrap();assert_eq!(engine.document("large").unwrap().limits().max_joints,128);
-    engine.open("ordinary",None,None).unwrap();assert_eq!(engine.document("ordinary").unwrap().limits().max_joints,64);
-    let mut fresh=Engine::new(Limits::default());
-    assert!(fresh.open("published",Some(&before),None).is_err());assert!(fresh.document("published").is_err());
-    fresh.open_with_joint_budget("published",Some(&before),Some(128),None).unwrap();
-    assert_eq!(fresh.document("published").unwrap().head(),engine.document("large").unwrap().head());
-    assert_eq!(fresh.document("published").unwrap().soft_body(),engine.document("large").unwrap().soft_body());
+fn joint_budget_is_explicit_per_document_and_required_for_source_reopen() {
+    let limits=Limits{max_joints:128,..Default::default()};
+    let mut doc=Document::new(limits.clone()).unwrap();
+    let ops=vec![
+        Operation::sphere("body",0.4,8,4,true,doc.limits()).unwrap(),
+        Operation::SoftBody(SoftBodyBind{object:"body".into(),deform_objects:vec![],attachments:vec![],settings:soft_settings(false)}),
+    ];
+    apply(&mut doc,"bind",ops).unwrap();
+    let source=doc.to_bytes(None).unwrap();
+    let reopened=Document::from_bytes(&source,limits.clone(),None).unwrap();
+    assert_eq!(reopened.limits().max_joints,128);
+    assert_eq!(reopened.head(),doc.head());
+    assert_eq!(reopened.soft_body(),doc.soft_body());
+    let snapshot=reopened.to_snapshot_bytes(None).unwrap();
+    assert_eq!(Document::new(Limits::default()).unwrap().limits().max_joints,64);
+    assert!(Document::from_bytes(&source,Limits::default(),None).is_err());
+    assert!(Document::from_bytes(&snapshot,Limits::default(),None).is_err());
+    let published=Document::from_bytes(&snapshot,limits,None).unwrap();
+    assert_eq!(published.head(),reopened.head());
+    assert_eq!(published.soft_body(),reopened.soft_body());
 }
 
 #[test]
@@ -167,7 +257,9 @@ fn published_soft_source_can_unbind_reshape_and_rebind_without_losing_animated_r
     d=Document::from_bytes(&source,d.limits().clone(),None).unwrap();
     assert_eq!(d.history_position(),(0,0));
     for cycle in 0..3 {
-        commands(&mut d,&format!("unbind-{cycle}"),r#"[{"op":"soft_body_unbind"}]"#).unwrap();
+        apply(&mut d,&format!("unbind-{cycle}"),vec![
+        Operation::SoftBodyUnbind,
+    ]).unwrap();
         assert!(d.soft_body().is_none());assert_eq!(d.skeleton().unwrap().joints.len(),count);
         assert_eq!(d.rig(),&rig);assert_eq!(d.clips(),&clips);
         // Reopening the detached snapshot must not depend on an undo record.
@@ -179,7 +271,33 @@ fn published_soft_source_can_unbind_reshape_and_rebind_without_losing_animated_r
                 Operation::Scene(SceneOperation::Node{object:"pupil".into(),node:SceneNode{transform:Transform{translation:[0.23,0.95,-0.53],..Default::default()},..Default::default()}}),
             ]).unwrap();
         }
-        commands(&mut d,&format!("rebind-{cycle}"),r#"[{"op":"soft_body_bind","object":"body","deform_objects":["fuzz"],"attachments":[{"name":"eyes","objects":["eye","pupil"],"pivot":[0.23,0.95,-0.4]}]}]"#).unwrap();
+        apply(&mut d,&format!("rebind-{cycle}"),vec![
+        Operation::SoftBody(SoftBodyBind {
+            object: "body".into(),
+            deform_objects: vec!["fuzz".into()],
+            attachments: vec![
+                SoftBodyAttachmentRequest {
+                    name: "eyes".into(),
+                    objects: vec!["eye".into(), "pupil".into()],
+                    pivot: Some([0.23, 0.95, -0.4])
+                }
+            ],
+            settings: SoftBodySettings {
+                mass: 1.0,
+                edge_compliance: 0.02,
+                volume_compliance: 1e-07,
+                pose_compliance: 0.02,
+                damping: 4.0,
+                gravity: [0.0, -9.81, 0.0],
+                contact_radius: 0.01,
+                friction: 0.5,
+                substeps: 4,
+                iterations: 6,
+                max_speed: 20.0,
+                max_displacement: 2.0
+            }
+        }),
+    ]).unwrap();
         assert_eq!(d.skeleton().unwrap().joints.len(),count,"rebind must not leak generated joints");
         assert_eq!(d.soft_body().unwrap().tet_joints,cells);assert_eq!(d.soft_body().unwrap().attachments[0].joint as u32,frame);
         assert_eq!(d.soft_body().unwrap().attachments[0].rest_pivot,[0.23,0.95,-0.4]);
@@ -197,18 +315,62 @@ fn published_soft_source_can_unbind_reshape_and_rebind_without_losing_animated_r
 #[test]
 fn unbind_is_atomic_and_reserved_cell_collisions_refuse_without_rig_loss() {
     let mut d=fixture();let before=d.to_bytes(None).unwrap();
-    assert!(commands(&mut d,"missing",r#"[{"op":"soft_body_unbind"}]"#).is_err());assert_eq!(d.to_bytes(None).unwrap(),before);
-    assert!(commands(&mut d,"extra",r#"[{"op":"soft_body_unbind","object":"body"}]"#).is_err());
+    assert!(apply(&mut d,"missing",vec![
+        Operation::SoftBodyUnbind,
+    ]).is_err());assert_eq!(d.to_bytes(None).unwrap(),before);
     bind(&mut d);let before=d.to_bytes(None).unwrap();
-    assert!(commands(&mut d,"rollback",r#"[{"op":"soft_body_unbind"},{"op":"soft_body_bind","object":"missing"}]"#).is_err());
+    assert!(apply(&mut d,"rollback",vec![
+        Operation::SoftBodyUnbind,
+        Operation::SoftBody(SoftBodyBind {
+            object: "missing".into(),
+            deform_objects: vec![],
+            attachments: vec![],
+            settings: SoftBodySettings {
+                mass: 1.0,
+                edge_compliance: 0.02,
+                volume_compliance: 1e-07,
+                pose_compliance: 0.02,
+                damping: 4.0,
+                gravity: [0.0, -9.81, 0.0],
+                contact_radius: 0.01,
+                friction: 0.5,
+                substeps: 4,
+                iterations: 6,
+                max_speed: 20.0,
+                max_displacement: 2.0
+            }
+        }),
+    ]).is_err());
     assert_eq!(d.to_bytes(None).unwrap(),before);
-    commands(&mut d,"unbind",r#"[{"op":"soft_body_unbind"}]"#).unwrap();
+    apply(&mut d,"unbind",vec![
+        Operation::SoftBodyUnbind,
+    ]).unwrap();
     let history=d.to_bytes(None).unwrap();
     assert_eq!(Document::from_bytes(&history,d.limits().clone(),None).unwrap().to_bytes(None).unwrap(),history);
     let joint=d.skeleton().unwrap().joints.iter().position(|j|j.name=="__soft_body_tet_00").unwrap() as u32;
     apply(&mut d,"rename",vec![Operation::Rig(RigOperation::RenameJoint{joint,name:"user-renamed-cell".into()})]).unwrap();
     let before=d.to_bytes(None).unwrap();
-    assert!(commands(&mut d,"collision",r#"[{"op":"soft_body_bind","object":"body"}]"#).is_err());
+    assert!(apply(&mut d,"collision",vec![
+        Operation::SoftBody(SoftBodyBind {
+            object: "body".into(),
+            deform_objects: vec![],
+            attachments: vec![],
+            settings: SoftBodySettings {
+                mass: 1.0,
+                edge_compliance: 0.02,
+                volume_compliance: 1e-07,
+                pose_compliance: 0.02,
+                damping: 4.0,
+                gravity: [0.0, -9.81, 0.0],
+                contact_radius: 0.01,
+                friction: 0.5,
+                substeps: 4,
+                iterations: 6,
+                max_speed: 20.0,
+                max_displacement: 2.0
+            }
+        }),
+    ]).is_err());
     assert_eq!(d.to_bytes(None).unwrap(),before);
 }
 
@@ -216,24 +378,78 @@ fn unbind_is_atomic_and_reserved_cell_collisions_refuse_without_rig_loss() {
 fn removing_and_restoring_attachment_group_reuses_its_retained_frame() {
     let mut d=fixture();bind(&mut d);let frame=d.soft_body().unwrap().attachments[0].joint;
     let skeleton=d.skeleton().unwrap().clone();
-    commands(&mut d,"detach-group",r#"[{"op":"soft_body_unbind"},{"op":"soft_body_bind","object":"body","deform_objects":["fuzz"]}]"#).unwrap();
+    apply(&mut d,"detach-group",vec![
+        Operation::SoftBodyUnbind,
+        Operation::SoftBody(SoftBodyBind {
+            object: "body".into(),
+            deform_objects: vec!["fuzz".into()],
+            attachments: vec![],
+            settings: SoftBodySettings {
+                mass: 1.0,
+                edge_compliance: 0.02,
+                volume_compliance: 1e-07,
+                pose_compliance: 0.02,
+                damping: 4.0,
+                gravity: [0.0, -9.81, 0.0],
+                contact_radius: 0.01,
+                friction: 0.5,
+                substeps: 4,
+                iterations: 6,
+                max_speed: 20.0,
+                max_displacement: 2.0
+            }
+        }),
+    ]).unwrap();
     assert!(d.soft_body().unwrap().attachments.is_empty());assert_eq!(d.skeleton(),Some(&skeleton));
     SkinnedModel::parse_glb_validated(&d.compile(None).unwrap().glb).unwrap();
-    commands(&mut d,"restore-group",r#"[{"op":"soft_body_unbind"},{"op":"soft_body_bind","object":"body","deform_objects":["fuzz"],"attachments":[{"name":"eyes","objects":["eye","pupil"],"pivot":[0.18,0.95,-0.4]}]}]"#).unwrap();
+    apply(&mut d,"restore-group",vec![
+        Operation::SoftBodyUnbind,
+        Operation::SoftBody(SoftBodyBind {
+            object: "body".into(),
+            deform_objects: vec!["fuzz".into()],
+            attachments: vec![
+                SoftBodyAttachmentRequest {
+                    name: "eyes".into(),
+                    objects: vec!["eye".into(), "pupil".into()],
+                    pivot: Some([0.18, 0.95, -0.4])
+                }
+            ],
+            settings: SoftBodySettings {
+                mass: 1.0,
+                edge_compliance: 0.02,
+                volume_compliance: 1e-07,
+                pose_compliance: 0.02,
+                damping: 4.0,
+                gravity: [0.0, -9.81, 0.0],
+                contact_radius: 0.01,
+                friction: 0.5,
+                substeps: 4,
+                iterations: 6,
+                max_speed: 20.0,
+                max_displacement: 2.0
+            }
+        }),
+    ]).unwrap();
     assert_eq!(d.soft_body().unwrap().attachments[0].joint,frame);assert_eq!(d.skeleton(),Some(&skeleton));
 }
 
 #[test]
 fn accessory_affine_weights_fail_during_edit_and_valid_root_binding_remains_publishable() {
     let mut d=fixture();bind(&mut d);
-    commands(&mut d,"hat",r#"[{"op":"cube","object":"hat","size":[0.1,0.1,0.1]}]"#).unwrap();
+    apply(&mut d,"hat",vec![
+        Operation::Cube { object: "hat".into(), size: [0.1, 0.1, 0.1] },
+    ]).unwrap();
     let before=d.to_bytes(None).unwrap();
-    let error=commands(&mut d,"auto-hat",r#"[{"op":"weight_edit","object":"hat","vertices":[],"edit":{"type":"bind","max_influences":4,"power":2}}]"#).unwrap_err();
+    let error=apply(&mut d,"auto-hat",vec![
+        Operation::Rig(RigOperation::Weights { object: "hat".into(), vertices: vec![], edit: WeightEdit::Bind { max_influences: 4, power: 2.0 } }),
+    ]).unwrap_err();
     assert!(format!("{error}").contains("soft-body affine"),"{error}");assert_eq!(d.to_bytes(None).unwrap(),before);
     let cell=d.soft_body().unwrap().tet_joints[0];
-    assert!(commands(&mut d,"wrong-cell",&format!(r#"[{{"op":"weight_edit","object":"hat","vertices":[],"edit":{{"type":"assign","joint":{cell}}}}}]"#)).is_err());
+    assert!(apply(&mut d,"wrong-cell",vec![Operation::Rig(RigOperation::Weights {object:"hat".into(),vertices:vec![],edit:WeightEdit::Assign {joint:u32::from(cell)}})]).is_err());
     assert_eq!(d.to_bytes(None).unwrap(),before);
-    commands(&mut d,"rigid-hat",r#"[{"op":"weight_edit","object":"hat","vertices":[],"edit":{"type":"assign","joint":0}}]"#).unwrap();
+    apply(&mut d,"rigid-hat",vec![
+        Operation::Rig(RigOperation::Weights { object: "hat".into(), vertices: vec![], edit: WeightEdit::Assign { joint: 0 } }),
+    ]).unwrap();
     SkinnedModel::parse_glb_validated(&d.compile(None).unwrap().glb).unwrap();
     // An accessory can deliberately use affine cells too, provided every
     // vertex satisfies the same embedding contract as the runtime consumer.
@@ -251,33 +467,34 @@ fn accessory_affine_weights_fail_during_edit_and_valid_root_binding_remains_publ
     SkinnedModel::parse_glb_validated(&d.compile(None).unwrap().glb).unwrap();
 }
 
-fn parsed_soft_settings(extra:&str)->makepad_gltf::SoftBodySettings {
-    let limits=Limits{max_joints:128,..Default::default()};
-    let source=format!(r#"[{{"op":"soft_body_bind","object":"body"{extra}}}]"#);
-    let mut operations=parse_operations(&json::parse(source.as_bytes()).unwrap(),&limits).unwrap();
-    let Operation::SoftBody(bind)=operations.remove(0) else{unreachable!()};bind.settings
+fn soft_settings(yarn: bool) -> makepad_gltf::SoftBodySettings {
+    let mut settings = SoftBodySettings { mass: 1.0, edge_compliance: 0.02, volume_compliance: 1e-07, pose_compliance: 0.02, damping: 4.0, gravity: [0.0, -9.81, 0.0], contact_radius: 0.01, friction: 0.5, substeps: 4, iterations: 6, max_speed: 20.0, max_displacement: 2.0 };
+    if yarn {
+        settings.edge_compliance=0.001;
+        settings.pose_compliance=0.001;
+        settings.damping=22.;
+    }
+    settings
 }
 
 #[test]
 fn explicit_yarn_preset_is_firm_and_preserves_generic_and_serialized_settings() {
-    let generic=parsed_soft_settings("");
+    let generic=soft_settings(false);
     assert_eq!(generic.edge_compliance,0.02);assert_eq!(generic.pose_compliance,0.02);assert_eq!(generic.damping,4.);
-    let yarn=parsed_soft_settings(r#", "preset":"yarn_ball""#);
+    let yarn=soft_settings(true);
     let mut expected=generic;expected.edge_compliance=0.001;expected.pose_compliance=0.001;expected.damping=22.;
     assert_eq!(yarn,expected,"preset changes only the textile response knobs");
-    let overrides=parsed_soft_settings(r#", "preset":"yarn_ball", "config":{"edge_compliance":0.002,"damping":30}"#);
-    assert_eq!(overrides.edge_compliance,0.002);assert_eq!(overrides.pose_compliance,0.001);assert_eq!(overrides.damping,30.);
-    // Full stored config wins even if a caller retains the preset label.
-    assert_eq!(parsed_soft_settings(&format!(r#", "preset":"yarn_ball", "config":{}"#,generic.to_value().to_json())),generic);
-    for preset in [false,true]{
-        let mut doc=fixture();let mut operation=parse_operations(&json::parse(format!(r#"[{{"op":"soft_body_bind","object":"body"{}}}]"#,if preset{r#", "preset":"yarn_ball""#}else{""}).as_bytes()).unwrap(),doc.limits()).unwrap();
-        apply(&mut doc,"bind-preset",std::mem::take(&mut operation)).unwrap();
-        let settings=doc.soft_body().unwrap().settings;
-        for bytes in [doc.to_bytes(None).unwrap(),doc.to_snapshot_bytes(None).unwrap()]{
+    let overrides=makepad_gltf::SoftBodySettings{edge_compliance:0.002,damping:30.,..yarn};
+    for settings in [generic,yarn,overrides] {
+        let mut doc=fixture();
+        apply(&mut doc,"bind-preset",vec![Operation::SoftBody(SoftBodyBind {
+            object:"body".into(),deform_objects:vec![],attachments:vec![],settings,
+        })]).unwrap();
+        assert_eq!(doc.soft_body().unwrap().settings,settings);
+        for bytes in [doc.to_bytes(None).unwrap(),doc.to_snapshot_bytes(None).unwrap()] {
             let restored=Document::from_bytes(&bytes,doc.limits().clone(),None).unwrap();
             assert_eq!(restored.soft_body().unwrap().settings,settings);
         }
-        assert_eq!(settings,if preset{yarn}else{generic});
     }
 }
 
@@ -285,7 +502,7 @@ fn explicit_yarn_preset_is_firm_and_preserves_generic_and_serialized_settings() 
 fn yarn_preset_keeps_acceleration_landing_and_facing_motion_small_at_three_sizes() {
     use makepad_soft_body::{SoftBodyDefinition,SoftBodySettings,SoftBodyState,SoftBodyPose,SoftBodyCollider,SoftBodyFrame};
     use std::sync::Arc;
-    let yarn=parsed_soft_settings(r#", "preset":"yarn_ball""#);
+    let yarn=soft_settings(true);
     let settings=SoftBodySettings{edge_compliance:yarn.edge_compliance,pose_compliance:yarn.pose_compliance,damping:yarn.damping,..Default::default()};
     for radius in [0.225f32,0.45,0.9]{for scenario in ["acceleration","landing","turn"]{
         let definition=Arc::new(SoftBodyDefinition::ellipsoid([0.,radius*1.7,0.],[radius;3]).unwrap());

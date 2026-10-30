@@ -140,7 +140,7 @@ impl SynthGen {
             }
             ParamKind::Number { min, max, step } => {
                 let v = now.parse::<f64>().unwrap_or(*min) + by as f64 * step;
-                makepad_score_live::source::fmt_num(v.clamp(*min, *max), 3)
+                makepad_edit_values::number::fmt_num(v.clamp(*min, *max), 3)
             }
             ParamKind::Text => {
                 let i = PROGRESSIONS.iter().position(|p| *p == now).map_or(0, |i| i as i32 + by);
@@ -202,7 +202,7 @@ impl Widget for SynthGen {
                         // The whole range over 200 points.
                         let v = v0 + (fe.abs.x - x0) / 200.0 * (max - min);
                         let v = if *step > 0.0 { (v / step).round() * step } else { v };
-                        let text = makepad_score_live::source::fmt_num(v.clamp(*min, *max), 3);
+                        let text = makepad_edit_values::number::fmt_num(v.clamp(*min, *max), 3);
                         if text != self.values[row].1 {
                             self.values[row].1 = text;
                             self.changed(cx);

@@ -2,6 +2,10 @@
 # An app-only edit ships warm (JITCOLD2): after an edit of the app's own crate, a restart compiles
 # the edited fns and what depends on them, not the whole crate (and nothing below it).
 #   session cold : a fresh run home: launch hidden + muted to the first present and JIT idle, quit;
+#   session prime: the same launch again, not checked: the app's second start takes paths its first did not
+#                  (Sandbox reads back the asset store its first start filled: ~570 instances the cold
+#                  session never ran, ~400 of them first compiled in one frame -- the JIT spinner when the
+#                  node is busy); it records them, so the steps below measure the cache, not the app's first rerun;
 #   session warm : the same launch again, nothing edited (the baseline: every pack accepted);
 #   then one edit per step, each followed by the same launch on the same run home:
 #     body   : a statement into one fn body of the app crate
@@ -111,7 +115,10 @@ check() { # check <label> <session output>
 }
 prev=""
 cold=$(session cold)
+prime=$(session prime)
 out="[cold] $(echo "$cold" | tr '\n' ' ')"
+out="$out
+[prime, not checked] $(echo "$prime" | tr '\n' ' ')"
 s=$(session warm); check warm "$s"
 for step in $STEPS; do
     case $step in

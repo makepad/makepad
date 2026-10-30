@@ -81,6 +81,68 @@ pub(super) fn init(root: ObjcId) {
         let () = msg_send![center, addObserver: observer selector: sel!(physicalKeyboardChanged:) name: str_to_nsstring("GCKeyboardDidDisconnectNotification") object: nil];
     }
     t.physical_keyboard.set(physical_keyboard_connected());
+    unsafe { add_compat_input_fallbacks() };
+}
+
+/// iOS 27 can wrap the keyboard's predictive bar in a `UICompatibilityInputViewController` and
+/// then ask it things only the real bar implements (`assistantBarStyle`, ...), which throws an
+/// unrecognized selector exception when a text field takes focus. Give that class neutral answers
+/// for the ones it lacks, so UIKit takes its default path instead of crashing.
+unsafe fn add_compat_input_fallbacks() {
+    use makepad_objc_sys::declare::MethodImplementation;
+    extern "C" fn assistant_bar_style(this: &Object, _: Sel) -> i64 {
+        // Only a bar that lost its real controller gets here, so log once what UIKit wrapped.
+        static LOG_ONCE: std::sync::Once = std::sync::Once::new();
+        LOG_ONCE.call_once(|| unsafe {
+            let class_name = |obj: ObjcId| -> String {
+                if obj.is_null() {
+                    return "nil".to_string();
+                }
+                let class: ObjcId = msg_send![obj, class];
+                nsstring_to_string(NSStringFromClass(class))
+            };
+            let view: ObjcId = msg_send![this, viewIfLoaded];
+            let superview: ObjcId = if view.is_null() { nil } else { msg_send![view, superview] };
+            let children: ObjcId = msg_send![this, childViewControllers];
+            let child_count: u64 = msg_send![children, count];
+            let child_names: Vec<String> =
+                (0..child_count).map(|i| class_name(msg_send![children, objectAtIndex: i])).collect();
+            eprintln!(
+                "makepad-hal: UIKit asked a UICompatibilityInputViewController for its assistantBarStyle \
+                 (view: {}, superview: {}, children: [{}])",
+                class_name(view),
+                class_name(superview),
+                child_names.join(", "),
+            );
+        });
+        0
+    }
+    extern "C" fn is_input_assistant_item_empty(_: &Object, _: Sel) -> BOOL {
+        NO
+    }
+    extern "C" fn bar_frame(_: &Object, _: Sel) -> NSRect {
+        NSRect { origin: NSPoint { x: 0.0, y: 0.0 }, size: NSSize { width: 0.0, height: 0.0 } }
+    }
+    let class = makepad_objc_sys::runtime::objc_getClass(b"UICompatibilityInputViewController\0".as_ptr() as *const _) as ObjcId;
+    if class.is_null() {
+        return;
+    }
+    let fallbacks = [
+        (sel!(assistantBarStyle), (assistant_bar_style as extern "C" fn(&Object, Sel) -> i64).imp(), i64::encode()),
+        (
+            sel!(isInputAssistantItemEmpty),
+            (is_input_assistant_item_empty as extern "C" fn(&Object, Sel) -> BOOL).imp(),
+            BOOL::encode(),
+        ),
+        (sel!(barFrame), (bar_frame as extern "C" fn(&Object, Sel) -> NSRect).imp(), NSRect::encode()),
+    ];
+    for (selector, imp, return_type) in fallbacks {
+        let responds: BOOL = msg_send![class, instancesRespondToSelector: selector];
+        if responds != YES {
+            let types = format!("{}@:\0", return_type.as_str());
+            makepad_objc_sys::runtime::class_addMethod(class as *mut _, selector, imp, types.as_ptr() as *const _);
+        }
+    }
 }
 
 /// A fresh text view, invisible (the app draws the text and the caret), in `root`. Also made

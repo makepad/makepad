@@ -288,6 +288,10 @@ pub mod hosted_window_op {
     /// Child to host, for any of its windows (the first too): the inner size the app asked
     /// for (`window.inner_size`), `x` by `y` points. The host honours it within its desk.
     pub const SIZE: u8 = 8;
+    /// Child to host, for any of its windows (the first too): keep the window above the
+    /// host's other windows (`x` 1) or stop (`x` 0) (`WindowHandle::set_topmost`). Sent
+    /// after the window's creation, and again on it while the window is topmost.
+    pub const TOPMOST: u8 = 9;
 }
 
 /// A hosted app's windows after its first (an output window, a second view): the host
@@ -298,6 +302,7 @@ pub struct HostedWindow { pub window_id: usize, pub op: u8, pub x: f64, pub y: f
 struct HostedWindowEnvelope { makepad_hosted_window: HostedWindow }
 impl HostedWindow {
     pub fn new(window_id: usize, op: u8) -> Self { Self { window_id, op, x: 0.0, y: 0.0, title: String::new() } }
+    pub fn topmost(window_id: usize, on: bool) -> Self { Self { x: on as u8 as f64, ..Self::new(window_id, hosted_window_op::TOPMOST) } }
     pub fn title(window_id: usize, title: &str) -> Self { Self { title: title.to_string(), ..Self::new(window_id, hosted_window_op::TITLE) } }
     pub fn to_json(&self) -> String { HostedWindowEnvelope { makepad_hosted_window: self.clone() }.serialize_json() }
     pub fn parse(json: &str) -> Option<Self> {

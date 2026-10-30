@@ -36,7 +36,9 @@ pub enum Cmd {
     Tempo { bpm: f64, ramp: f64 },
     /// Send the tempo changes to another transport from now on.
     Transport(String),
-    /// A message from the MIDI input (see [`Composer::midi_in`]).
+    /// A message from the MIDI input for loop code and the Clock's
+    /// controllers (see [`Composer::midi_in`]); loops that play a keyboard
+    /// take it on the audio thread ([`makepad_audio_engine::feed::midi_in`]).
     Midi([u8; 3]),
     /// Play the arrangement from `beat` (song beats) at the next `quant`.
     Seek { beat: f64, quant: f64 },
@@ -457,17 +459,10 @@ impl Worker {
             Cmd::Midi(data) => {
                 // Played now: stamped with the beat playing, not ahead.
                 let beat = self.config.clock.now().map_or(0.0, |(beat, ..)| beat);
-                let mut events = Vec::new();
                 if let Some(composer) = &mut self.composer {
-                    composer.midi_in(data, beat, &mut events);
+                    composer.midi_in(data, beat);
                     for (fx, event) in composer.automation_out.drain(..) {
                         makepad_audio_engine::feed::automation_feed(&format!("{}/{fx}", self.config.instance)).send(event);
-                    }
-                }
-                for event in events {
-                    match self.feeds.get(&event.loop_key) {
-                        Some(feed) if feed.send(event) => {}
-                        _ => self.dropped += 1,
                     }
                 }
             }

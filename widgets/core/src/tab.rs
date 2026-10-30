@@ -1,5 +1,6 @@
 use crate::{
     animator::{Animate, Animator, AnimatorImpl},
+    event::DigitId,
     makepad_derive_widget::*,
     makepad_draw::*,
     tab_close_button::{TabCloseButton, TabCloseButtonAction},
@@ -340,6 +341,7 @@ pub enum TabAction {
     TouchDown {
         abs: Vec2d,
         time: f64,
+        digit_id: DigitId,
     },
     /// A touch finger moved on this tab without a long press (scroll the tab bar).
     TouchScroll {
@@ -536,6 +538,7 @@ impl Tab {
                             TabAction::TouchDown {
                                 abs: fde.abs,
                                 time: fde.time,
+                                digit_id: fde.digit_id,
                             },
                         );
                     }

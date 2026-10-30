@@ -12,6 +12,7 @@ mod ai;
 mod audio;
 mod desk;
 mod library;
+mod midi;
 mod paths;
 mod patch_library;
 mod resources;
@@ -77,6 +78,9 @@ pub struct App {
     /// (a muted, hidden instance renders and writes silence).
     #[rust]
     output_devices: Vec<AudioDeviceId>,
+    /// MIDI in: keyboards for the score's `MidiIn` loops and its composer.
+    #[rust]
+    midi: midi::Midi,
 }
 
 /// A hidden instance (tests, headless runs) makes no sound.
@@ -89,6 +93,10 @@ impl MatchEvent for App {
         let mut output = self.desk.engine.output();
         cx.audio_output(0, move |info, buffer| output.fill(info.sample_rate, buffer));
         self.desk.engine.set_muted(muted());
+        // A muted (hidden, test) instance opens no MIDI device.
+        if !muted() {
+            self.midi.start(cx);
+        }
         let ui = self.ui.clone();
         self.desk.start(cx, &ui);
     }
@@ -132,6 +140,10 @@ impl AppMain for App {
             self.output_devices = devices.default_output();
             cx.use_audio_outputs(&self.output_devices);
         }
+        if let Event::MidiPorts(ports) = event {
+            self.midi.handle_ports(cx, ports);
+        }
+        self.midi.pump(cx, self.desk.live.as_ref());
         self.match_event(cx, event);
         let ui = self.ui.clone();
         self.ai.handle_event(cx, &ui, &mut self.desk, event);
@@ -144,6 +156,9 @@ impl AppMain for App {
         }
         self.songs.handle_event(cx, &ui, &mut self.desk, event);
         self.desk.handle_event(cx, &ui, event);
+        if std::mem::take(&mut self.desk.open_resources) {
+            self.resources.open(cx, &ui);
+        }
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }

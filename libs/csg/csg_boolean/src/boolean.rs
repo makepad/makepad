@@ -290,10 +290,8 @@ pub fn mesh_boolean_in(
     let mut active = welded_active;
 
     // Slivers (a triangle thinner than the tolerance: a corner within it of
-    // the opposite edge) go, the triangles the weld collapsed with them. The
-    // hole a sliver leaves is a T-junction: its apex lies on the edge of the
-    // triangle across, and the repair below splits that edge there (the
-    // sliver's corners turn active through their open edges).
+    // its longest edge) go by flipping that edge with the triangle across, the
+    // triangles the weld collapsed with them: the mesh stays as closed as it was.
     remove_slivers(&mut result, finish.tolerance);
 
     // A boundary vertex from an earlier boolean becomes an ordinary source
@@ -340,15 +338,46 @@ fn mark_open_edge_endpoints(mesh: &TriMesh, active: &mut [bool]) {
     }
 }
 
-/// Coplanar corefinement can select the same tiny face through both source
-/// meshes. Once vertices are welded those are byte-identical index triples;
-/// retaining both makes their three edges non-manifold.
+/// Triangles on one vertex triple after the weld. Coplanar corefinement can select the same
+/// tiny face through both source meshes (same winding): one stays, two would make its edges
+/// non-manifold. A fold (the weld pressing two faces of opposite winding onto one triple)
+/// is no surface: the pair goes, so the edges around it stay paired. In general the net
+/// winding of a triple stays: none, or one triangle of the winding in excess.
 fn remove_duplicate_triangles(mesh: &mut TriMesh) {
-    let mut seen = makepad_csg_math::fast_hash::FastSet::default();
-    mesh.triangles.retain(|triangle| {
-        let mut key = *triangle;
+    use makepad_csg_math::fast_hash::FastMap;
+    // Per sorted triple: (net winding, the first triangle of each winding).
+    let mut net: FastMap<[u32; 3], (i32, Option<usize>, Option<usize>)> = FastMap::default();
+    let winding = |t: [u32; 3]| -> bool {
+        // Even rotation of the sorted triple: + ; odd: -.
+        let mut s = t;
+        s.sort_unstable();
+        let r = t.iter().position(|v| *v == s[0]).unwrap();
+        t[(r + 1) % 3] == s[1]
+    };
+    for (ti, t) in mesh.triangles.iter().enumerate() {
+        let mut key = *t;
         key.sort_unstable();
-        seen.insert(key)
+        let e = net.entry(key).or_insert((0, None, None));
+        if winding(*t) {
+            e.0 += 1;
+            e.1.get_or_insert(ti);
+        } else {
+            e.0 -= 1;
+            e.2.get_or_insert(ti);
+        }
+    }
+    let mut keep = vec![false; mesh.triangles.len()];
+    for (_, (n, plus, minus)) in net {
+        match n {
+            0 => {}
+            n if n > 0 => keep[plus.unwrap()] = true,
+            _ => keep[minus.unwrap()] = true,
+        }
+    }
+    let mut i = 0;
+    mesh.triangles.retain(|_| {
+        i += 1;
+        keep[i - 1]
     });
 }
 
@@ -464,7 +493,7 @@ fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64, active: &[bool], from: usi
     half.sort_unstable();
 
     // Per half-edge, the active vertices strictly inside it, ordered from
-    // its start, without its triangle's own apex.
+    // its start.
     let mut splits: Vec<(u32, Vec<u32>)> = Vec::new();
     let mut near: Vec<u32> = Vec::new();
     let mut i = 0;
@@ -521,10 +550,11 @@ fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64, active: &[bool], from: usi
             for &(_, h) in &half[i..j] {
                 let t = mesh.triangles[(h / 3) as usize];
                 let k = (h % 3) as usize;
-                let apex = t[(k + 2) % 3];
-                // Ordered from this half-edge's start.
+                // Ordered from this half-edge's start. Every half-edge of the edge splits at
+                // every vertex on it, its own triangle's apex included (that triangle is a
+                // sliver: its pieces collapse and go), so the edge's two sides stay paired.
                 let forward = t[k] == u;
-                let mut list: Vec<u32> = on.iter().map(|x| x.1).filter(|&w| w != apex).collect();
+                let mut list: Vec<u32> = on.iter().map(|x| x.1).collect();
                 if !forward {
                     list.reverse();
                 }
@@ -609,25 +639,69 @@ fn point_on_edge(p: Vec3d, a: Vec3d, b: Vec3d, tol: f64) -> bool {
     (p - proj).length() < tol
 }
 
-/// Remove degenerate/sliver triangles produced by floating-point imprecision.
-///
-/// Uses the minimum altitude criterion: `h_min = 2 * area / max_edge_length`.
-/// Slivers from cascaded boolean imprecision typically have altitudes ~1e-6
-/// (e.g., area=2e-5 with base=10), while real thin triangles from overlap
-/// regions have altitudes on the order of the overlap (e.g., ~0.01).
-/// A threshold of 1e-3 cleanly separates these.
-/// Drop the triangles with a repeated corner and those whose smallest
-/// altitude (twice the area over the longest edge) is under `tol`.
+/// Slivers: a corner within `tol` of its triangle's longest edge (cascaded booleans leave
+/// them at altitudes ~1e-6; real thin faces of overlap regions stand ~0.01 off). Each goes
+/// by flipping that longest edge with the triangle across it: the sliver's apex then splits
+/// the neighbour in two, closing in the same step the T-junction a deleted sliver would
+/// leave, so a closed mesh stays closed. A sliver with no single triangle across (an open
+/// or non-manifold edge) stays for the T-junction repair. Triangles with a repeated corner
+/// (an edge the weld collapsed) go first.
 fn remove_slivers(mesh: &mut TriMesh, tol: f64) {
-    let v = &mesh.vertices;
-    mesh.triangles.retain(|&[a, b, c]| {
-        if a == b || b == c || c == a {
-            return false;
+    use makepad_csg_math::fast_hash::FastMap;
+    let thin = |m: &TriMesh, t: [u32; 3]| -> Option<usize> {
+        let p = t.map(|i| m.vertices[i as usize]);
+        let len = [(p[1] - p[0]).length(), (p[2] - p[1]).length(), (p[0] - p[2]).length()];
+        let k = (0..3).max_by(|a, b| len[*a].total_cmp(&len[*b])).unwrap();
+        let area2 = (p[1] - p[0]).cross(p[2] - p[0]).length();
+        // Edge k runs from corner k to corner k + 1; its apex is corner k + 2.
+        (len[k] > 0.0 && area2 / len[k] < tol).then_some(k)
+    };
+    mesh.triangles.retain(|&[a, b, c]| a != b && b != c && c != a);
+    for _round in 0..8 {
+        let mut half: FastMap<(u32, u32), Vec<usize>> = FastMap::default();
+        for (ti, t) in mesh.triangles.iter().enumerate() {
+            for k in 0..3 {
+                half.entry((t[k], t[(k + 1) % 3])).or_default().push(ti);
+            }
         }
-        let (pa, pb, pc) = (v[a as usize], v[b as usize], v[c as usize]);
-        let longest = (pb - pa).length().max((pc - pb).length()).max((pa - pc).length());
-        longest > 0.0 && (pb - pa).cross(pc - pa).length() / longest >= tol
-    });
+        let mut done = vec![false; mesh.triangles.len()];
+        let mut drop = vec![false; mesh.triangles.len()];
+        let mut changed = false;
+        for ti in 0..mesh.triangles.len() {
+            if done[ti] {
+                continue;
+            }
+            let t = mesh.triangles[ti];
+            let Some(k) = thin(mesh, t) else { continue };
+            let (a, b, c) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
+            let Some(across) = half.get(&(b, a)).filter(|n| n.len() == 1).map(|n| n[0]) else { continue };
+            if across == ti || done[across] {
+                continue;
+            }
+            let n = mesh.triangles[across];
+            let Some(j) = (0..3).find(|&j| n[j] == b && n[(j + 1) % 3] == a) else { continue };
+            let d = n[(j + 2) % 3];
+            done[ti] = true;
+            done[across] = true;
+            changed = true;
+            if d == c {
+                // The two fold onto each other: both go.
+                drop[ti] = true;
+                drop[across] = true;
+            } else {
+                mesh.triangles[ti] = [a, d, c];
+                mesh.triangles[across] = [d, b, c];
+            }
+        }
+        if !changed {
+            break;
+        }
+        let mut i = 0;
+        mesh.triangles.retain(|_| {
+            i += 1;
+            !drop[i - 1]
+        });
+    }
 }
 
 /// Drop the triangles with a repeated corner (an edge the weld collapsed).
@@ -736,3 +810,4 @@ mod tests {
         );
     }
 }
+

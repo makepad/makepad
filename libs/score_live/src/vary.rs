@@ -51,7 +51,7 @@ impl Part {
             } else {
                 format!("@{}", theory::note_name(n.note))
             };
-            format!("[{} {note} {} {}]", source::fmt_num(n.beat, 3), source::fmt_num(n.dur as f64, 3), source::fmt_num(n.vel as f64, 2))
+            format!("[{} {note} {} {}]", makepad_edit_values::number::fmt_num(n.beat, 3), makepad_edit_values::number::fmt_num(n.dur as f64, 3), makepad_edit_values::number::fmt_num(n.vel as f64, 2))
         }).collect();
         format!("[{}]", items.join(" "))
     }
@@ -99,12 +99,12 @@ pub fn apply(src: &str, node: &str, part: &Part) -> Result<String, String> {
     let mut next = src.to_string();
     for key in ["code", "hits", "note", "step"] {
         if let Ok(splice) = source::remove_field(&next, node, key) {
-            next = source::apply(&next, &splice);
+            next = makepad_edit_values::apply_splices(&next, 0, &[splice])?;
         }
     }
-    for (key, value) in [("notes", part.text()), ("beats", source::fmt_num(part.beats, 3))] {
+    for (key, value) in [("notes", part.text()), ("beats", makepad_edit_values::number::fmt_num(part.beats, 3))] {
         let splice = source::set_field(&next, node, key, &value)?;
-        next = source::apply(&next, &splice);
+        next = makepad_edit_values::apply_splices(&next, 0, &[splice])?;
     }
     ScoreDoc::load(&next).map_err(|d| d.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "))?;
     Ok(next)
@@ -122,7 +122,7 @@ fn apply_code(src: &str, node: &str, part: &Part, param: &str, body: &str) -> Re
     }).collect();
     // Its own names (a body may use `phrase`, `k` or `n` for its own).
     let within = if part.repeats { String::new() } else { format!(" && vary_k < {cycles}") };
-    let cycle = source::fmt_num(part.cycle, 3);
+    let cycle = makepad_edit_values::number::fmt_num(part.cycle, 3);
     let own = if body.trim().is_empty() { format!("sleep({cycle} - beat())") } else { body.trim().to_string() };
     let code = format!(
         "fn({param}) {{\n        let vary_k = {param} - {first}\n        if vary_k >= 0{within} {{\n            let vary_cycles = [{phrase}]\n            for vary_n in vary_cycles[vary_k % {cycles}] {{\n                if vary_n[0] > beat() {{ sleep(vary_n[0] - beat()) }}\n                play(vary_n[1], {{dur: vary_n[2] amp: vary_n[3]}})\n            }}\n            sleep({cycle} - beat())\n        }} else {{\n            {own}\n        }}\n    }}",
@@ -132,12 +132,12 @@ fn apply_code(src: &str, node: &str, part: &Part, param: &str, body: &str) -> Re
     let mut next = src.to_string();
     for key in ["hits", "note", "step", "notes"] {
         if let Ok(splice) = source::remove_field(&next, node, key) {
-            next = source::apply(&next, &splice);
+            next = makepad_edit_values::apply_splices(&next, 0, &[splice])?;
         }
     }
     for (key, value) in [("code", code), ("beats", cycle.clone())] {
         let splice = source::set_field(&next, node, key, &value)?;
-        next = source::apply(&next, &splice);
+        next = makepad_edit_values::apply_splices(&next, 0, &[splice])?;
     }
     ScoreDoc::load(&next).map_err(|d| d.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "))?;
     if let Some(error) = crate::render::loop_error(&next, node) {

@@ -64,7 +64,8 @@ and written once at the release.
   choices, heard as they change, written with its Write button (one undo
   step). Generators (`gen`) and their choices:
   - `arp`: root (a note), chord (major minor m7 maj7 sus4 …), pattern (up
-    down updown downup random chord), rate (steps a beat: 1 2 3 4 6 8),
+    down updown downup converge diverge thumb pinky random, or reach: root,
+    fifth, third as a player reaches them), rate (steps a beat: 1 2 3 4 6 8),
     octaves 1-4, gate 0.1-1, swing 0-0.5, repeats (ratchets) 1-4, curve
     (velocity: flat rise fall accent swell random), beats, seed.
   - `chords`: root, scale (major minor dorian … blues), degrees ("1 5 6 4"),

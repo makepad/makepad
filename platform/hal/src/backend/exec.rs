@@ -724,6 +724,17 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             world.to_session(parent, |q| q.child_window_state(id, sid, state));
             return;
         }
+        // an embedded window has no window system to keep it on top: its parent stacks it
+        HalCmd::WindowTopmost { id, on } if world.session(sid)
+            .is_some_and(|s| s.windows.get(sid, id).is_ok_and(|w| w.val.embedded.is_some())) => {
+            let Some(s) = world.session_mut(sid) else { return };
+            let parent = s.parent;
+            let Ok(w) = s.windows.get_mut(sid, id) else { return };
+            if w.val.topmost == on { return; }
+            w.val.topmost = on;
+            world.to_session(parent, |q| q.child_topmost(id, sid, on));
+            return;
+        }
         HalCmd::WindowTitle { id, title } => {
             // a lent window's title is the host window's too: session 0 titles its caption by it
             let lent = world.session(sid).and_then(|s| {

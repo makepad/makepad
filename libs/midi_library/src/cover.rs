@@ -30,7 +30,7 @@ pub fn render(source: &str, target_lufs: f64) -> Result<Rendered, String> {
         if heard.lufs.is_finite() {
             let fitted = (gain * 10f64.powf((target_lufs - heard.lufs) / 20.0)).clamp(0.2, 4.0);
             if let Ok(splice) = makepad_score_live::source::set_field(&source, &limiter.name, "gain", &format!("{:.3}", fitted)) {
-                source = makepad_score_live::source::apply(&source, &splice);
+                source = makepad_edit_values::apply_splices(&source, 0, &[splice])?;
             }
         }
     }

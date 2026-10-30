@@ -7,6 +7,7 @@
 //! numbers that changed and keeps everything between them.
 
 use crate::Control;
+use makepad_edit_values::number::fmt_places;
 use std::ops::Range;
 
 /// A Splash literal as written: each part's bytes in the source.
@@ -625,24 +626,9 @@ pub fn places_of(step: f64) -> usize {
     }).unwrap_or(8)
 }
 
-/// `value` written at `places` decimals, without a negative zero.
-pub fn fmt_places(value: f64, places: usize) -> String {
-    let text = format!("{value:.places$}");
-    if text.starts_with("-0") && text.trim_start_matches(['-', '0', '.']).is_empty() { text[1..].to_string() } else { text }
-}
-
 /// `value` snapped to `step`, written at the step's places.
 pub fn fmt_snapped(value: f64, step: f64) -> String {
     fmt_places((value / step).round() * step, places_of(step))
-}
-
-/// A changed number as written: the places it was written with, at least
-/// enough to show a move across `span` (the view's width).
-pub fn fmt_like(value: f64, written: &str, span: f64) -> String {
-    let written_places = written.split('.').nth(1).map_or(0, |d| d.bytes().take_while(u8::is_ascii_digit).count());
-    let needed = if span <= 0.0 { 0 } else { (2.0 - span.log10().floor()).clamp(0.0, 6.0) as usize };
-    let places = written_places.max(needed.min(written_places.max(3)));
-    fmt_places(value, places)
 }
 
 pub fn len3(v: [f64; 3]) -> f64 {
@@ -736,14 +722,6 @@ mod tests {
         assert_eq!(t.cells[2].value, CellValue::Str("Q2".into()));
         assert_eq!(&src[t.cells[2].range.clone()], "\"Q2\"");
         assert_eq!((t.cells[3].row, t.cells[3].col), (1, 1));
-    }
-
-    #[test]
-    fn numbers_keep_their_written_precision() {
-        assert_eq!(fmt_like(1.23456, "1.50", 4.0), "1.23");
-        assert_eq!(fmt_like(2.0, "-2", 4.0), "2.00");
-        assert_eq!(fmt_like(2.0, "-2", 10.0), "2.0");
-        assert_eq!(fmt_like(2.26, "0", 40.0), "2.3");
     }
 
     #[test]

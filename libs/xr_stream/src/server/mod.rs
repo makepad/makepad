@@ -34,6 +34,7 @@ use crate::settings_types::{HeadsetSettings, StreamAa, StreamView, MIN_RENDER_SC
 use makepad_desk_link::xr::WorldBrick;
 use makepad_desk_link::xr_pair::ServerPairing;
 use makepad_widgets::*;
+use makepad_widgets::makepad_platform::pass_load::{PassClass, PassLoadSample};
 use pipeline::Live;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
@@ -69,11 +70,51 @@ pub struct ServerStats {
     pub render_ms: f64,
     pub gpu_ms: f64,
     pub encode_ms: f64,
+    /// The encoded picture to written to the socket (ms).
+    pub send_ms: f64,
     /// A tile's round trip to the headset (ms) and the idle link's.
     pub trip_ms: f64,
     pub trip_base_ms: f64,
     /// The app waited for the headset (too many pictures in flight), per second.
     pub waited_per_s: f64,
+}
+
+/// The app's load while a headset streams, per second over the last few seconds: the GPU time
+/// of its passes by what they draw for (the headset's eyes, the desktop's windows, passes under
+/// no window such as the stream's picture pack) and its draws' CPU time.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HostLoad {
+    pub eyes_gpu_ms_s: f64,
+    pub desktop_gpu_ms_s: f64,
+    pub other_gpu_ms_s: f64,
+    pub draw_ms_s: f64,
+    /// The backend reported the passes' GPU times (some backends report none).
+    pub timed: bool,
+}
+
+/// Seconds of host load kept.
+pub(crate) const HOST_LOAD_SECONDS: usize = 5;
+
+impl HostLoad {
+    fn of<'a>(samples: impl Iterator<Item = &'a PassLoadSample>) -> Option<HostLoad> {
+        let (mut secs, mut gpu, mut draw, mut timed, mut passes) = (0.0, [0.0f64; 3], 0.0, 0u32, 0u32);
+        for s in samples {
+            secs += s.secs;
+            for i in 0..3 {
+                gpu[i] += s.gpu_ms[i];
+            }
+            draw += s.draw_ms;
+            passes += s.passes.iter().sum::<u32>();
+            timed += s.passes.iter().sum::<u32>().saturating_sub(s.untimed);
+        }
+        (secs > 0.0).then(|| HostLoad {
+            eyes_gpu_ms_s: gpu[PassClass::Eyes as usize] / secs,
+            desktop_gpu_ms_s: gpu[PassClass::Desktop as usize] / secs,
+            other_gpu_ms_s: gpu[PassClass::Offscreen as usize] / secs,
+            draw_ms_s: draw / secs,
+            timed: passes > 0 && timed * 2 >= passes,
+        })
+    }
 }
 
 /// The headset linked now.
@@ -131,6 +172,9 @@ pub(crate) struct ServerShared {
     pub(crate) live_headset: Mutex<Option<LiveHeadset>>,
     pub(crate) server_line: Mutex<String>,
     pub(crate) server_stats: Mutex<ServerStats>,
+    /// The app's load while a headset streams, a sample a second, the last few
+    /// (`Cx::take_pass_load`, taken by the frame sink).
+    pub(crate) host_load: Mutex<VecDeque<PassLoadSample>>,
     pub(crate) app_line: Mutex<String>,
     /// Told when there is room again (a picture slot freed, or the headset decoded one), the
     /// stream switched, or a session ended: the sink's signal.
@@ -165,6 +209,7 @@ impl ServerShared {
             live_headset: Mutex::new(None),
             server_line: Mutex::new(String::new()),
             server_stats: Mutex::new(ServerStats::default()),
+            host_load: Mutex::new(VecDeque::new()),
             app_line: Mutex::new(String::new()),
             wake: Mutex::new(None),
         }
@@ -516,6 +561,11 @@ impl XrServer {
 
     pub fn stats(&self) -> ServerStats {
         *self.shared.server_stats.lock().unwrap()
+    }
+
+    /// The app's load over the last few seconds of streaming (None: not measured yet).
+    pub fn host_load(&self) -> Option<HostLoad> {
+        HostLoad::of(self.shared.host_load.lock().unwrap().iter())
     }
 
     /// The headset's last minute of per-second reports (`makepad_desk_link::xr::report` names

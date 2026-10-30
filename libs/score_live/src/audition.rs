@@ -37,7 +37,7 @@ pub fn phrase(choice: &Choice) -> Option<String> {
 pub fn in_place(source: &str, node: &str, choice: &Choice, song_beat: Option<f64>) -> Option<(String, Option<f64>)> {
     phrase(choice)?;
     let splice = crate::instruments::switch(source, node, choice).ok()?;
-    let mut next = crate::source::apply(source, &splice);
+    let mut next = makepad_edit_values::apply_splices(source, 0, &[splice]).ok()?;
     let doc = crate::model::ScoreDoc::load(&next).ok()?;
     let players: Vec<String> = doc.loops.iter().filter(|l| l.play.as_deref() == Some(node)).map(|l| l.name.clone()).collect();
     if players.is_empty() {
@@ -48,7 +48,7 @@ pub fn in_place(source: &str, node: &str, choice: &Choice, song_beat: Option<f64
     }
     for name in &players {
         if let Ok(splice) = crate::source::set_field(&next, name, "solo", "true") {
-            next = crate::source::apply(&next, &splice);
+            next = makepad_edit_values::apply_splices(&next, 0, &[splice]).ok()?;
         }
     }
     Some((next, first_beat(&doc, &players)))
@@ -97,6 +97,20 @@ pub fn key(source: &str, node: &str, note: f32) -> Option<String> {
     let drums = ctor.type_name == "Drums";
     let code = if drums { "hit(@kick) sleep(0.5) hit(@snare) sleep(0.5) hit(@hat) sleep(1)".to_string() } else { format!("play({note}, {{dur: 1.2}}) sleep(4)") };
     Some(format!("use mod.score.*\nlet clock = Clock{{bpm: 120}}\nlet {node} = {}{body}\nlet key = Loop{{play: {node} beats: 4 code: fn(i) {{ {code} }}}}\nScore{{clock {node} key}}\n", ctor.type_name))
+}
+
+/// A tiny score playing one voice (`drum`, a slot name like `kick`) of the
+/// kit `node` of `source` as it is: what a kit's pad plays. None when the
+/// node is not a kit of the score.
+pub fn pad(source: &str, node: &str, drum: &str) -> Option<String> {
+    let outline = crate::source::outline(source);
+    let ctor = outline.node(node)?;
+    let kit = ctor.type_name == "Drums" || (ctor.type_name == "Instrument" && ctor.field("kind").is_some_and(|f| f.value.text(source).trim() == "@drums"));
+    if !kit || makepad_score_player::presets::slot_of(drum).is_none() {
+        return None;
+    }
+    let body = ctor.body.text(source);
+    Some(format!("use mod.score.*\nlet clock = Clock{{bpm: 120}}\nlet {node} = {}{body}\nlet key = Loop{{play: {node} beats: 4 code: fn(i) {{ hit(@{drum}) sleep(4) }}}}\nScore{{clock {node} key}}\n", ctor.type_name))
 }
 
 /// Render a [`key`] score with the fields an editor holds: (left, right, rate).

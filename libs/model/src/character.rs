@@ -22,16 +22,12 @@ mod head;
 mod gear;
 #[path = "character_clips.rs"]
 pub mod clips;
-#[path = "character_presets.rs"]
-mod presets;
 #[path = "character_fps.rs"]
 mod fps;
 pub use fps::{build_fps_arms, FpsArms, Hold};
 
 use crate::character_mesh::*;
-use crate::json::{self, Value};
 use crate::{Error, Limits, Operation, Result};
-pub use presets::{character_preset_names, character_preset};
 
 /// Joint table: (name, parent). Parents precede children. The first 21
 /// names match the humanoid template, so template tools keep working.
@@ -119,88 +115,138 @@ pub struct CharacterSpec {
 
 fn srgb_to_linear(c: f64) -> f64 { let c = c.clamp(0., 1.); if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).ppowf(2.4) } }
 /// "#rrggbb" (sRGB) or a linear [r,g,b(,a)] array.
-pub(crate) fn color_value(v: &Value) -> Option<[f64; 3]> {
-    match v {
-        Value::Str(s) => {
-            let h = s.trim().trim_start_matches('#').trim_start_matches('x');
-            if h.len() < 6 { return None; }
-            let b = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok().map(|x| srgb_to_linear(x as f64 / 255.));
-            Some([b(0)?, b(2)?, b(4)?])
-        }
-        Value::Arr(a) if a.len() >= 3 => { let n = |i: usize| num(&a[i]); Some([n(0)?, n(1)?, n(2)?]) }
-        _ => None,
-    }
+pub fn hex_color(s: &str) -> Option<[f64; 3]> {
+    let h = s.trim().trim_start_matches('#').trim_start_matches('x');
+    if h.len() < 6 || !h.is_char_boundary(6) { return None; }
+    let b = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok().map(|x| srgb_to_linear(x as f64 / 255.));
+    Some([b(0)?, b(2)?, b(4)?])
 }
-pub(crate) fn num(v: &Value) -> Option<f64> { match v { Value::F64(f) => Some(*f), Value::Int(i) => Some(*i as f64), _ => None } }
-pub(crate) fn hex(s: &str) -> [f64; 3] { color_value(&json::s(s)).unwrap_or([0.5; 3]) }
-
-/// Deep-merge `over` onto `base` (objects merge key by key; anything else
-/// replaces), so a preset can be customised one field at a time.
-fn merge(base: &Value, over: &Value) -> Value {
-    match (base, over) {
-        (Value::Obj(b), Value::Obj(o)) => {
-            let mut out = b.clone();
-            for (k, v) in o {
-                match out.iter_mut().find(|(bk, _)| bk == k) { Some((_, bv)) => *bv = merge(bv, v), None => out.push((k.clone(), v.clone())) }
-            }
-            Value::Obj(out)
-        }
-        _ => over.clone(),
-    }
-}
-
-pub(crate) fn merge_pub(base: &Value, over: &Value) -> Value { merge(base, over) }
+pub(crate) fn hex(s: &str) -> [f64; 3] { hex_color(s).unwrap_or([0.5; 3]) }
 
 const TOP_KEYS: &[&str] = &["op", "name", "preset", "height", "heads", "stylize", "body", "skin", "face", "hair", "outfit", "colors", "clips", "hands", "facial_hair", "fighter", "material_base", "generator", "hold", "support", "support_radius", "grip_radius", "grip_front", "mesh"];
 const BODY_KEYS: &[&str] = &["fem", "shoulders", "chest", "waist", "hips", "belly", "muscle", "arms", "legs", "neck", "hands", "feet", "head_width", "jaw", "chin"];
 const FACE_KEYS: &[&str] = &["eye_color", "eye_size", "eye_spacing", "eye_tilt", "lids", "brows", "brow_angle", "brow_color", "nose", "nose_size", "mouth_width", "smile", "lip_color", "ears", "ear_size", "blush", "freckles"];
 const HAIR_KEYS: &[&str] = &["style", "color", "color2", "volume"];
 
+/// A tree of spec values a character spec is read from: the Splash objects a script
+/// passes (the model language implements it), or a preset.
+pub trait SpecTree: Clone {
+    fn get(&self, key: &str) -> Option<Self>;
+    /// The keys of an object (None: not an object).
+    fn keys(&self) -> Option<Vec<String>>;
+    fn items(&self) -> Option<Vec<Self>>;
+    fn num(&self) -> Option<f64>;
+    fn text(&self) -> Option<String>;
+    fn boolean(&self) -> Option<bool>;
+    /// A colour as linear RGB: "#rrggbb" text (sRGB) or a linear [r g b (a)] list.
+    fn color(&self) -> Option<[f64; 3]> {
+        if let Some(s) = self.text() { return hex_color(&s); }
+        let a = self.items()?;
+        if a.len() < 3 { return None; }
+        Some([a[0].num()?, a[1].num()?, a[2].num()?])
+    }
+}
+/// Spec layers, first wins: a spec over its preset over that preset's preset. Objects merge key
+/// by key; anything else the first layer that has it wins.
+#[derive(Clone)]
+struct Layers<T: SpecTree>(Vec<T>);
+impl<T: SpecTree> SpecTree for Layers<T> {
+    fn get(&self, key: &str) -> Option<Self> {
+        let found: Vec<T> = self.0.iter().filter_map(|l| l.get(key)).collect();
+        let first = found.first()?;
+        if first.keys().is_none() { return Some(Layers(vec![first.clone()])); }
+        Some(Layers(found.into_iter().take_while(|l| l.keys().is_some()).collect()))
+    }
+    fn keys(&self) -> Option<Vec<String>> {
+        let mut keys: Vec<String> = Vec::new();
+        for l in &self.0 { for k in l.keys()? { if !keys.contains(&k) { keys.push(k); } } }
+        Some(keys)
+    }
+    fn items(&self) -> Option<Vec<Self>> { self.0[0].items().map(|a| a.into_iter().map(|x| Layers(vec![x])).collect()) }
+    fn num(&self) -> Option<f64> { self.0[0].num() }
+    fn text(&self) -> Option<String> { self.0[0].text() }
+    fn boolean(&self) -> Option<bool> { self.0[0].boolean() }
+    fn color(&self) -> Option<[f64; 3]> { self.0[0].color() }
+}
+
+/// No spec at all: every field its default.
+#[derive(Clone)]
+struct NoSpec;
+impl SpecTree for NoSpec {
+    fn get(&self, _: &str) -> Option<Self> { None }
+    fn keys(&self) -> Option<Vec<String>> { Some(Vec::new()) }
+    fn items(&self) -> Option<Vec<Self>> { None }
+    fn num(&self) -> Option<f64> { None }
+    fn text(&self) -> Option<String> { None }
+    fn boolean(&self) -> Option<bool> { None }
+}
+
 impl CharacterSpec {
-    pub fn parse(v: &Value) -> std::result::Result<CharacterSpec, String> {
+    /// A spec from a preset name or a spec object (`preset` loads one through `presets`, the
+    /// object's own keys override it field by field). Unknown keys and values are warnings;
+    /// ranges clamp.
+    pub fn read<T: SpecTree>(v: &T, presets: &dyn Fn(&str) -> Option<T>) -> std::result::Result<CharacterSpec, String> {
+        let mut layers = Vec::new();
+        let mut next = match v.text() {
+            Some(name) => Some(name),
+            None => { layers.push(v.clone()); v.get("preset").and_then(|p| p.text()) }
+        };
+        if v.text().is_none() && v.keys().is_none() {
+            return Err("a character spec is a preset name or a spec object".into());
+        }
+        // Presets may build on presets.
+        while let Some(name) = next.take() {
+            if layers.len() > 8 { return Err(format!("character preset '{name}': presets nest too deep")); }
+            let preset = presets(&name).ok_or_else(|| format!("unknown character preset '{name}'"))?;
+            next = preset.get("preset").and_then(|p| p.text()).filter(|p| *p != name);
+            layers.push(preset);
+        }
+        Self::read_merged(&Layers(layers))
+    }
+    /// Every field its default (a spec object with no keys).
+    pub fn defaults() -> CharacterSpec {
+        Self::read_merged(&NoSpec).expect("the default spec")
+    }
+    fn read_merged<T: SpecTree>(v: &T) -> std::result::Result<CharacterSpec, String> {
         let mut warnings = Vec::new();
-        let preset_name = v.get("preset").and_then(Value::as_str);
-        let v = match preset_name {
-            Some(p) => { let base = character_preset(p).ok_or_else(|| format!("unknown character preset '{p}' (known: {})", character_preset_names().join(", ")))?; merge(&base, v) }
-            None => v.clone(),
+        let unknown = |obj: Option<&T>, keys: &[&str], what: &str, warnings: &mut Vec<String>| {
+            if let Some(p) = obj.and_then(|o| o.keys()) { for k in p { if !keys.contains(&k.as_str()) { warnings.push(format!("character: unknown {what} key '{k}' (known: {})", keys.join(", "))); } } }
         };
-        let unknown = |obj: Option<&Value>, keys: &[&str], what: &str, warnings: &mut Vec<String>| {
-            if let Some(Value::Obj(p)) = obj { for (k, _) in p { if !keys.contains(&k.as_str()) { warnings.push(format!("character: unknown {what} key '{k}' (known: {})", keys.join(", "))); } } }
-        };
-        unknown(Some(&v), TOP_KEYS, "top-level", &mut warnings);
+        unknown(Some(v), TOP_KEYS, "top-level", &mut warnings);
         let body = v.get("body"); let face = v.get("face"); let hair = v.get("hair"); let colors = v.get("colors");
+        let (body, face, hair, colors) = (body.as_ref(), face.as_ref(), hair.as_ref(), colors.as_ref());
         unknown(body, BODY_KEYS, "body", &mut warnings); unknown(face, FACE_KEYS, "face", &mut warnings);
-        if let Some(h) = hair { if h.as_str().is_none() { unknown(Some(h), HAIR_KEYS, "hair", &mut warnings); } }
-        let f = |o: Option<&Value>, k: &str, d: f64, lo: f64, hi: f64| o.and_then(|o| o.get(k)).and_then(num).unwrap_or(d).clamp(lo, hi);
-        let t = |o: Option<&Value>, k: &str, d: &str| o.and_then(|o| o.get(k)).and_then(Value::as_str).unwrap_or(d).to_string();
-        let c = |o: Option<&Value>, k: &str| o.and_then(|o| o.get(k)).and_then(color_value);
-        let stylize = f(Some(&v), "stylize", 0.25, 0., 1.);
-        let height = f(Some(&v), "height", 1.8, 0.4, 4.);
-        let heads = f(Some(&v), "heads", mix(7.2, 2.8, stylize), 2., 9.);
-        let skin = c(Some(&v), "skin").unwrap_or(hex("#e0ac8a"));
+        if let Some(h) = hair { if h.text().is_none() { unknown(Some(h), HAIR_KEYS, "hair", &mut warnings); } }
+        let f = |o: Option<&T>, k: &str, d: f64, lo: f64, hi: f64| o.and_then(|o| o.get(k)).and_then(|x| x.num()).unwrap_or(d).clamp(lo, hi);
+        let t = |o: Option<&T>, k: &str, d: &str| o.and_then(|o| o.get(k)).and_then(|x| x.text()).unwrap_or_else(|| d.to_string());
+        let c = |o: Option<&T>, k: &str| o.and_then(|o| o.get(k)).and_then(|x| x.color());
+        let stylize = f(Some(v), "stylize", 0.25, 0., 1.);
+        let height = f(Some(v), "height", 1.8, 0.4, 4.);
+        let heads = f(Some(v), "heads", mix(7.2, 2.8, stylize), 2., 9.);
+        let skin = c(Some(v), "skin").unwrap_or(hex("#e0ac8a"));
         let primary = c(colors, "primary").unwrap_or(hex("#3a5ba0"));
         let secondary = c(colors, "secondary").unwrap_or(hex("#2b2f38"));
         let accent = c(colors, "accent").unwrap_or(hex("#f2b233"));
         let (hair_style, hair_color, hair_color2, hair_volume) = match hair {
-            Some(Value::Str(s)) => (s.clone(), hex("#3b2618"), None, 1.),
+            Some(h) if h.text().is_some() => (h.text().unwrap(), hex("#3b2618"), None, 1.),
             Some(h) => (t(Some(h), "style", "short"), c(Some(h), "color").unwrap_or(hex("#3b2618")), c(Some(h), "color2"), f(Some(h), "volume", 1., 0.3, 3.)),
             None => ("short".into(), hex("#3b2618"), None, 1.),
         };
         let mut outfit = Vec::new();
-        if let Some(list) = v.get("outfit").and_then(Value::as_arr) {
+        if let Some(list) = v.get("outfit").and_then(|o| o.items()) {
             for (i, l) in list.iter().enumerate() {
-                let (kind, o) = match l { Value::Str(s) => (s.clone(), None), Value::Obj(_) => (t(Some(l), "kind", ""), Some(l)), _ => continue };
+                let (kind, o) = if let Some(s) = l.text() { (s, None) } else if l.keys().is_some() { (t(Some(l), "kind", ""), Some(l)) } else { continue };
                 if kind.is_empty() { warnings.push(format!("character: outfit[{i}] needs a kind")); continue; }
                 if !gear::LAYER_KINDS.contains(&kind.as_str()) { warnings.push(format!("character: outfit kind '{kind}' unknown (known: {})", gear::LAYER_KINDS.join(", "))); continue; }
                 let (dc, dc2) = gear::default_colors(&kind, primary, secondary, accent);
-                let tex = o.and_then(|o| o.get("material")).and_then(Value::as_str).and_then(|s| { let t = Tex::parse(s); if t.is_none() { warnings.push(format!("character: material '{s}' unknown")); } t });
-                outfit.push(Layer { color: c(o, "color").unwrap_or(dc), color2: c(o, "color2").unwrap_or(dc2), tex, style: t(o, "style", ""), open: o.and_then(|o| o.get("open")).and_then(Value::as_bool).unwrap_or(false), kind });
+                let tex = o.and_then(|o| o.get("material")).and_then(|m| m.text()).and_then(|s| { let t = Tex::parse(&s); if t.is_none() { warnings.push(format!("character: material '{s}' unknown")); } t });
+                outfit.push(Layer { color: c(o, "color").unwrap_or(dc), color2: c(o, "color2").unwrap_or(dc2), tex, style: t(o, "style", ""), open: o.and_then(|o| o.get("open")).and_then(|x| x.boolean()).unwrap_or(false), kind });
             }
         }
-        let clips = v.get("clips").and_then(|c| match c { Value::Arr(a) => Some(a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()), Value::Bool(false) => Some(Vec::new()), _ => None });
+        let clips = v.get("clips").and_then(|c| match c.items() { Some(a) => Some(a.iter().filter_map(|x| x.text()).collect()), None if c.boolean() == Some(false) => Some(Vec::new()), None => None });
         let fem = f(body, "fem", 0., 0., 1.);
         Ok(CharacterSpec {
-            name: t(Some(&v), "name", "character"), height, heads, stylize, fem,
+            name: t(Some(v), "name", "character"), height, heads, stylize, fem,
             shoulders: f(body, "shoulders", 1., 0.6, 1.6), chest: f(body, "chest", 1., 0.6, 1.6), waist: f(body, "waist", 1., 0.6, 1.8), hips: f(body, "hips", 1., 0.6, 1.6),
             belly: f(body, "belly", 1., 0.6, 2.2), muscle: f(body, "muscle", 1., 0.6, 1.8), arms: f(body, "arms", 1., 0.7, 1.4), legs: f(body, "legs", 1., 0.6, 1.4),
             neck: f(body, "neck", 1., 0.5, 1.8), hands: f(body, "hands", 1., 0.6, 1.8), feet: f(body, "feet", 1., 0.6, 1.8),
@@ -214,11 +260,11 @@ impl CharacterSpec {
             ears: t(face, "ears", "round"), ear_size: f(face, "ear_size", 1., 0.5, 2.),
             blush: f(face, "blush", 0.35, 0., 1.), freckles: f(face, "freckles", 0., 0., 1.),
             hair: hair_style, hair_color, hair_color2, hair_volume,
-            facial_hair: t(Some(&v), "facial_hair", "none"),
-            hand_style: t(Some(&v), "hands", if stylize > 0.6 { "mitten" } else { "fingers" }),
-            material_base: v.get("material_base").and_then(num).map_or(1, |b| b.clamp(1., 400.) as u32),
-            fighter: v.get("fighter").and_then(Value::as_bool).unwrap_or(false),
-            mesh: v.get("mesh").and_then(Value::as_bool).unwrap_or(true),
+            facial_hair: t(Some(v), "facial_hair", "none"),
+            hand_style: t(Some(v), "hands", if stylize > 0.6 { "mitten" } else { "fingers" }),
+            material_base: v.get("material_base").and_then(|x| x.num()).map_or(1, |b| b.clamp(1., 400.) as u32),
+            fighter: v.get("fighter").and_then(|x| x.boolean()).unwrap_or(false),
+            mesh: v.get("mesh").and_then(|x| x.boolean()).unwrap_or(true),
             outfit, primary, secondary, accent, clips, warnings,
         })
     }
@@ -247,55 +293,55 @@ impl Mats {
         if let Some(i) = self.list.iter().position(|m| *m == d) { return i as u32 + self.base; }
         self.list.push(d); self.list.len() as u32 - 1 + self.base
     }
-    pub(crate) fn ops(&self) -> Vec<Value> {
+    pub(crate) fn ops(&self, limits: &Limits) -> Result<Vec<Operation>> {
+        use crate::{PatternKind, SurfaceAlpha, SurfaceChannel, SurfaceDerivation, SurfaceLayer, SurfaceMaterial, SurfaceOperation, SurfacePattern};
         let mut out = Vec::new();
-        let arr = |v: &[f64]| Value::Arr(v.iter().map(|x| Value::F64(*x)).collect());
         for (i, m) in self.list.iter().enumerate() {
-            let id = Value::Int(i as i64 + self.base as i64);
-            out.push(json::obj(vec![("op", json::s("material")), ("material", id.clone()), ("color", arr(&m.color))]));
-            let (base, pattern): ([f64; 4], Option<(&str, [f64; 3], [f64; 3], [f64; 2], f64)>) = {
+            let id = i as u32 + self.base;
+            out.push(Operation::SetMaterial { material: id, value: crate::Material { color: m.color, base_color_png: Vec::new() } });
+            let (base, pattern): ([f64; 4], Option<(PatternKind, [f64; 3], [f64; 3], [f64; 2], f64)>) = {
                 let c = m.color; let dk = |k: f64| c.map(|v| v * k);
                 let c2 = m.color2;
                 let s = m.scale;
                 match m.tex {
-                    Tex::Skin => ([1.; 4], Some(("perlin", [(c[0] * 1.02).min(1.), c[1] * 0.86, c[2] * 0.82], c, [18. * s, 18. * s], 0.25))),
-                    Tex::Fabric => ([1.; 4], Some(("stripes", dk(0.95), c, [640. * s, 640. * s], 0.06))),
-                    Tex::Knit => ([1.; 4], Some(("yarn", dk(0.82), c, [48. * s, 48. * s], 0.5))),
+                    Tex::Skin => ([1.; 4], Some((PatternKind::Perlin, [(c[0] * 1.02).min(1.), c[1] * 0.86, c[2] * 0.82], c, [18. * s, 18. * s], 0.25))),
+                    Tex::Fabric => ([1.; 4], Some((PatternKind::Stripes, dk(0.95), c, [640. * s, 640. * s], 0.06))),
+                    Tex::Knit => ([1.; 4], Some((PatternKind::Yarn, dk(0.82), c, [48. * s, 48. * s], 0.5))),
                     // Twill in its own darker shade (a layer's colour2 is its trim, not the weave).
-                    Tex::Denim => ([1.; 4], Some(("stripes", dk(0.82), c, [700. * s, 700. * s], 0.08))),
-                    Tex::Leather => ([1.; 4], Some(("fbm", dk(0.72), c, [34. * s, 34. * s], 0.9))),
-                    Tex::Nylon => ([1.; 4], Some(("checker", dk(0.93), c, [420. * s, 420. * s], 0.12))),
-                    Tex::Rubber => ([1.; 4], Some(("noise", dk(0.85), c, [160. * s, 160. * s], 0.6))),
-                    Tex::Metal => ([1.; 4], Some(("fbm", dk(0.82), c, [10. * s, 10. * s], 0.25))),
-                    Tex::Plastic => ([1.; 4], Some(("fbm", dk(0.88), c, [24. * s, 24. * s], 0.35))),
-                    Tex::Camo => ([1.; 4], Some(("camo", c2.unwrap_or(dk(0.5)), c, [5. * s, 5. * s], 0.25))),
+                    Tex::Denim => ([1.; 4], Some((PatternKind::Stripes, dk(0.82), c, [700. * s, 700. * s], 0.08))),
+                    Tex::Leather => ([1.; 4], Some((PatternKind::Fbm, dk(0.72), c, [34. * s, 34. * s], 0.9))),
+                    Tex::Nylon => ([1.; 4], Some((PatternKind::Checker, dk(0.93), c, [420. * s, 420. * s], 0.12))),
+                    Tex::Rubber => ([1.; 4], Some((PatternKind::Noise, dk(0.85), c, [160. * s, 160. * s], 0.6))),
+                    Tex::Metal => ([1.; 4], Some((PatternKind::Fbm, dk(0.82), c, [10. * s, 10. * s], 0.25))),
+                    Tex::Plastic => ([1.; 4], Some((PatternKind::Fbm, dk(0.88), c, [24. * s, 24. * s], 0.35))),
+                    Tex::Camo => ([1.; 4], Some((PatternKind::Camo, c2.unwrap_or(dk(0.5)), c, [5. * s, 5. * s], 0.25))),
                     // Woven check (shemagh): a coarse two-colour grid.
-                    Tex::Check => ([1.; 4], Some(("checker", c2.unwrap_or(dk(0.6)), c, [180. * s, 180. * s], 0.04))),
-                    Tex::Hair => ([1.; 4], Some(("stripes", c2.unwrap_or(dk(0.8)), c, [140. * s, 1.], 0.3))),
+                    Tex::Check => ([1.; 4], Some((PatternKind::Checker, c2.unwrap_or(dk(0.6)), c, [180. * s, 180. * s], 0.04))),
+                    Tex::Hair => ([1.; 4], Some((PatternKind::Stripes, c2.unwrap_or(dk(0.8)), c, [140. * s, 1.], 0.3))),
                     _ => ([c[0], c[1], c[2], 1.], None),
                 }
             };
-            let mut surface = vec![("op", json::s("surface_material")), ("material", id.clone()), ("base_color", arr(&base)), ("metallic", Value::F64(m.metal)), ("roughness", Value::F64(m.rough)), ("alpha", json::s("opaque"))];
-            if m.emissive > 0. { surface.push(("emissive", arr(&m.color))); surface.push(("emissive_strength", Value::F64(m.emissive))); }
-            out.push(json::obj(surface));
+            let mut surface = SurfaceMaterial { base_color: base, metallic: m.metal, roughness: m.rough, alpha: SurfaceAlpha::Opaque, ..SurfaceMaterial::default() };
+            if m.emissive > 0. { surface.emissive = m.color; surface.emissive_strength = m.emissive; }
+            out.push(Operation::Surface(SurfaceOperation::Material { material: id, value: surface }));
             if let Some((kind, a, b, scale, bump)) = pattern {
-                let layer = |ch: &str, l: &str| vec![("op", json::s("surface_layer")), ("material", id.clone()), ("channel", json::s(ch)), ("layer", json::s(l))];
                 let size = if matches!(m.tex, Tex::Camo) { 256 } else { 128 };
-                let mut l = layer("base_color", "pattern"); l.push(("width", Value::Int(size))); l.push(("height", Value::Int(size)));
-                out.push(json::obj(l));
-                out.push(json::obj(vec![("op", json::s("surface_pattern")), ("material", id.clone()), ("channel", json::s("base_color")), ("layer", json::s("pattern")),
-                    ("pattern", json::obj(vec![("kind", json::s(kind)), ("color_a", arr(&[a[0], a[1], a[2], 1.])), ("color_b", arr(&[b[0], b[1], b[2], 1.])), ("scale", arr(&scale)), ("seed", json::s(((i * 7919) % 9973).to_string()))]))]));
-                out.push(json::obj(vec![("op", json::s("surface_mips")), ("material", id.clone()), ("channel", json::s("base_color")), ("layer", json::s("pattern"))]));
+                let base_color = SurfaceChannel::BaseColor;
+                out.push(Operation::Surface(SurfaceOperation::Layer { material: id, channel: base_color, layer: SurfaceLayer::blank("pattern", base_color, size, size, limits)? }));
+                let pattern = SurfacePattern { kind, color_a: [a[0], a[1], a[2], 1.], color_b: [b[0], b[1], b[2], 1.], scale, seed: ((i * 7919) % 9973) as u64 };
+                out.push(Operation::Surface(SurfaceOperation::Pattern { material: id, channel: base_color, layer: "pattern".into(), pattern }));
+                out.push(Operation::Surface(SurfaceOperation::Mips { material: id, channel: base_color, layer: "pattern".into() }));
                 // Skin gets only a whisper of relief from its mottle (pores and soft
                 // unevenness catch the light); a stronger derive reads as lumps.
                 let bump = if m.tex == Tex::Skin { 0.05 } else { bump };
                 if bump > 0. && matches!(m.tex, Tex::Skin | Tex::Fabric | Tex::Knit | Tex::Denim | Tex::Leather | Tex::Nylon | Tex::Plastic | Tex::Camo | Tex::Check) {
-                    out.push(json::obj(vec![("op", json::s("surface_derive")), ("material", id.clone()), ("source_channel", json::s("base_color")), ("channel", json::s("normal")), ("layer", json::s("bump")), ("strength", Value::F64(bump))]));
-                    out.push(json::obj(vec![("op", json::s("surface_mips")), ("material", id.clone()), ("channel", json::s("normal")), ("layer", json::s("bump"))]));
+                    let recipe = SurfaceDerivation { source_channel: base_color, source_layer: None, strength: bump, roughness_min: 0.2, roughness_max: 0.9, metallic: 0., wrap: true };
+                    out.push(Operation::Surface(SurfaceOperation::Derive { material: id, channel: SurfaceChannel::Normal, layer: "bump".into(), recipe }));
+                    out.push(Operation::Surface(SurfaceOperation::Mips { material: id, channel: SurfaceChannel::Normal, layer: "bump".into() }));
                 }
             }
         }
-        out
+        Ok(out)
     }
 }
 
@@ -311,20 +357,13 @@ pub(crate) struct Gen<'a> {
 /// Expanded operations for one `character` program op.
 pub struct CharacterBuild {
     pub operations: Vec<Operation>,
-    /// JSON operations applied after the meshes (materials, paint, sockets).
-    pub late: Vec<Value>,
-    pub early: Vec<Value>,
+    /// Operations applied after the meshes (paint, sockets).
+    pub late: Vec<Operation>,
+    /// Operations applied before the meshes (materials).
+    pub early: Vec<Operation>,
     pub warnings: Vec<String>,
     pub joints: Vec<(String, [f64; 3])>,
 }
-
-pub fn build_character(v: &Value, limits: &Limits) -> Result<CharacterBuild> {
-    let spec = CharacterSpec::parse(v).map_err(|_| Error::Invalid("character spec"))?;
-    build_from_spec(&spec, limits)
-}
-
-/// Readable parse errors for program failures.
-pub fn character_spec_error(v: &Value) -> Option<String> { CharacterSpec::parse(v).err() }
 
 pub fn build_from_spec(spec: &CharacterSpec, limits: &Limits) -> Result<CharacterBuild> {
     let b = body::Body::new(spec);
@@ -360,11 +399,10 @@ pub fn build_from_spec(spec: &CharacterSpec, limits: &Limits) -> Result<Characte
     for (name, joint, pos, rot) in &g.sockets {
         let rest = g.b.joints[*joint as usize];
         let local = crate::transform::sub(*pos, rest);
-        let arr = |v: &[f64]| Value::Arr(v.iter().map(|x| Value::F64(*x)).collect());
-        late.push(json::obj(vec![("op", json::s("socket")), ("name", json::s(name)), ("attachment", json::obj(vec![("joint", Value::Int(*joint as i64))])),
-            ("transform", json::obj(vec![("translation", arr(&local)), ("rotation", arr(rot))]))]));
+        let transform = crate::Transform { translation: local, rotation: *rot, scale: [1.; 3] };
+        late.push(Operation::Scene(crate::SceneOperation::Socket(crate::Socket { name: name.clone(), attachment: crate::Attachment::Joint(*joint), transform })));
     }
-    let early = g.mats.ops();
+    let early = g.mats.ops(limits)?;
     let joints = CHARACTER_JOINTS.iter().zip(&g.b.joints).map(|(j, p)| (j.0.to_string(), *p)).collect();
     Ok(CharacterBuild { operations, late, early, warnings: spec.warnings.clone(), joints })
 }
@@ -378,44 +416,53 @@ pub fn rest_joints(spec: &CharacterSpec) -> Vec<(String, [f64; 3])> {
 }
 
 #[cfg(test)]
+pub(crate) mod test_spec {
+    use super::*;
+    /// Specs written in tests (presets live with the model language, in Splash).
+    #[derive(Clone)]
+    pub(crate) enum S { O(Vec<(&'static str, S)>), N(f64), T(&'static str), B(bool), L(Vec<S>) }
+    impl SpecTree for S {
+        fn get(&self, key: &str) -> Option<Self> { match self { S::O(f) => f.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone()), _ => None } }
+        fn keys(&self) -> Option<Vec<String>> { match self { S::O(f) => Some(f.iter().map(|(k, _)| k.to_string()).collect()), _ => None } }
+        fn items(&self) -> Option<Vec<Self>> { match self { S::L(l) => Some(l.clone()), _ => None } }
+        fn num(&self) -> Option<f64> { match self { S::N(n) => Some(*n), _ => None } }
+        fn text(&self) -> Option<String> { match self { S::T(t) => Some(t.to_string()), _ => None } }
+        fn boolean(&self) -> Option<bool> { match self { S::B(b) => Some(*b), _ => None } }
+    }
+    pub(crate) fn spec(fields: Vec<(&'static str, S)>) -> CharacterSpec { CharacterSpec::read(&S::O(fields), &|_| None).unwrap() }
+    /// An armoured crew member (the generator's heaviest outfit).
+    pub(crate) fn armoured() -> CharacterSpec {
+        let layer = |kind: &'static str, color: &'static str, material: &'static str| S::O(vec![("kind", S::T(kind)), ("color", S::T(color)), ("material", S::T(material))]);
+        spec(vec![("name", S::T("armoured")), ("height", S::N(1.83)), ("stylize", S::N(0.05)), ("heads", S::N(7.2)),
+            ("body", S::O(vec![("shoulders", S::N(1.16)), ("chest", S::N(1.12)), ("muscle", S::N(1.18)), ("neck", S::N(1.3))])),
+            ("outfit", S::L(vec![layer("suit", "#2a3442", "nylon"), layer("armor", "#e8eef4", "glossy"), layer("gloves", "#1c232d", "nylon"), layer("boots", "#1c232d", "leather"),
+                S::O(vec![("kind", S::T("helmet")), ("style", S::T("visor")), ("color", S::T("#eef3f7"))])]))])
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::json::{self, Value};
 
-    fn program(preset: &str, op: &str, extra: Vec<(&str, Value)>) -> Vec<Value> {
-        let mut pairs = vec![("op", json::s(op)), ("preset", json::s(preset))];
-        pairs.extend(extra);
-        vec![json::obj(pairs)]
-    }
-    fn build(ops: &[Value]) -> crate::BuiltProgram {
+    use super::test_spec::*;
+    fn build(ops: &[crate::ProgramOp]) -> crate::BuiltProgram {
         let limits = Limits { max_joints: 128, ..Default::default() };
         crate::build_program(ops, limits, &mut |_| Err("no imports".into()), None).unwrap_or_else(|e| panic!("{}", e.message))
     }
 
-    /// Every preset builds, and first-person arms stay small. Build time is
-    /// cold-cache load time, so it is printed (run with --nocapture).
     #[test]
-    fn presets_build_and_arms_stay_small() {
-        for name in character_preset_names() {
-            let t = std::time::Instant::now();
-            let built = build(&program(name, "character", Vec::new()));
-            eprintln!("character {name}: {} ms, {} B", t.elapsed().as_millis(), built.compiled.glb.len());
-        }
-        for (preset, hold) in [("halcyon_warden", "rifle"), ("kestrel_striker", "pistol"), ("kestrel_striker", "one")] {
-            let t = std::time::Instant::now();
-            let bytes = build(&program(preset, "fps_arms", vec![("hold", json::s(hold))])).compiled.glb.len();
-            eprintln!("fps_arms {preset} {hold}: {} ms, {bytes} B", t.elapsed().as_millis());
-            assert!(bytes < 1_500_000, "arms {preset}/{hold}: {bytes} B");
+    fn arms_stay_small() {
+        for hold in ["rifle", "pistol", "one"] {
+            let arms = FpsArms::read(&S::O(vec![("hold", S::T(hold))])).unwrap();
+            let bytes = build(&[crate::ProgramOp::FpsArms(Box::new(armoured()), arms)]).compiled.glb.len();
+            assert!(bytes < 1_500_000, "arms {hold}: {bytes} B");
         }
     }
 
-    /// Locomotion clips never jump: consecutive keys of every arm joint stay
-    /// within a small angle, and walk/run/sprint agree in hemisphere at the
-    /// same phase so a speed blend never takes the long way round.
     #[test]
     fn locomotion_arm_keys_are_continuous() {
-        let spec = CharacterSpec::parse(&json::obj(vec![("preset", json::s("adult")), ("height", Value::F64(1.82)),
-            ("body", json::obj(vec![("muscle", Value::F64(1.15)), ("shoulders", Value::F64(1.1)), ("hands", Value::F64(1.05))]))])).unwrap();
+        let spec = spec(vec![("height", S::N(1.82)), ("stylize", S::N(0.2)),
+            ("body", S::O(vec![("muscle", S::N(1.15)), ("shoulders", S::N(1.1)), ("hands", S::N(1.05))]))]);
         let mut b = body::Body::new(&spec);
         head::place_face_joints(&spec, &mut b);
         let rig = clips::RigInfo::new(&b);
@@ -458,14 +505,13 @@ mod tests {
         let ang = |a: [f64; 4], b: [f64; 4]| { let d = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).abs().min(1.); 2. * d.pacos().to_degrees() };
         let legs: Vec<u32> = ["upper_leg_l", "lower_leg_l", "foot_l", "upper_leg_r", "lower_leg_r", "foot_r", "upper_arm_l", "lower_arm_l", "upper_arm_r", "lower_arm_r"].iter().map(|n| joint_index(n)).collect();
         let specs = [
-            json::obj(vec![("preset", json::s("halcyon_warden"))]),
-            json::obj(vec![("preset", json::s("hero_mia"))]),
-            json::obj(vec![("preset", json::s("chibi"))]),
-            json::obj(vec![("mesh", Value::Bool(false)), ("height", Value::F64(1.84)), ("heads", Value::F64(3.3)), ("stylize", Value::F64(0.3)), ("body", json::obj(vec![("legs", Value::F64(1.15))]))]),
+            armoured(),
+            spec(vec![("name", S::T("stylised")), ("height", S::N(1.15)), ("stylize", S::N(0.85)), ("heads", S::N(2.9)), ("body", S::O(vec![("hands", S::N(1.1)), ("feet", S::N(1.1))]))]),
+            spec(vec![("name", S::T("chibi")), ("height", S::N(1.0)), ("stylize", S::N(0.95)), ("heads", S::N(2.6))]),
+            spec(vec![("mesh", S::B(false)), ("height", S::N(1.84)), ("heads", S::N(3.3)), ("stylize", S::N(0.3)), ("body", S::O(vec![("legs", S::N(1.15))]))]),
         ];
         let mut bad = Vec::new();
-        for spec in &specs {
-            let spec = CharacterSpec::parse(spec).unwrap();
+        for spec in specs {
             let mut b = body::Body::new(&spec);
             head::place_face_joints(&spec, &mut b);
             let rig = clips::RigInfo::new(&b);
@@ -490,7 +536,7 @@ mod tests {
     /// right is forward × up.
     #[test]
     fn stance_feet_slide_against_the_travel() {
-        let spec = CharacterSpec::parse(&json::obj(vec![("preset", json::s("halcyon_warden"))])).unwrap();
+        let spec = armoured();
         let mut b = body::Body::new(&spec);
         head::place_face_joints(&spec, &mut b);
         let rig = clips::RigInfo::new(&b);
@@ -536,15 +582,55 @@ mod tests {
     /// when the model compiles (together ~3 s of a 4.5 s build).
     #[test]
     fn vertex_tints_are_one_op_covering_every_vertex() {
-        let spec = CharacterSpec::parse(&json::obj(vec![("preset", json::s("halcyon_warden"))])).unwrap();
+        let spec = armoured();
         let built = build_from_spec(&spec, &Limits { max_joints: 128, ..Default::default() }).unwrap();
-        let tints: Vec<&Value> = built.late.iter().filter(|o| o.get("op").and_then(Value::as_str).is_some_and(|k| k.starts_with("surface_vertex"))).collect();
+        use crate::{Operation, SurfaceOperation};
+        let tints: Vec<&SurfaceOperation> = built.late.iter().filter_map(|o| match o { Operation::Surface(s @ (SurfaceOperation::VertexColors { .. } | SurfaceOperation::VertexPaint { .. })) => Some(s), _ => None }).collect();
         assert_eq!(tints.len(), 1);
-        assert_eq!(tints[0].get("op").and_then(Value::as_str), Some("surface_vertex_colors"));
-        let Some(crate::Operation::ImportMesh { .. }) = built.operations.iter().find(|o| matches!(o, crate::Operation::ImportMesh { .. })) else { panic!("no mesh") };
-        let n = tints[0].get("vertices").and_then(Value::as_arr).map_or(0, |a| a.len());
-        let doc = build(&program("halcyon_warden", "character", vec![("clips", Value::Arr(Vec::new()))])).document;
+        let SurfaceOperation::VertexColors { vertices, .. } = tints[0] else { panic!("not one vertex-colours op") };
+        let Some(Operation::ImportMesh { .. }) = built.operations.iter().find(|o| matches!(o, Operation::ImportMesh { .. })) else { panic!("no mesh") };
+        let n = vertices.len();
+        let mut bare = armoured();
+        bare.clips = Some(Vec::new());
+        let doc = build(&[crate::ProgramOp::Character(Box::new(bare))]).document;
         let mesh_vertices: usize = doc.objects().map(|(_, m)| m.vertices().len()).sum();
         assert_eq!(n, mesh_vertices);
+    }
+}
+
+impl CharacterSpec {
+    /// The canonical encoding (program hashes). Warnings are not part of the spec.
+    pub(crate) fn write(&self, w: &mut crate::canon::Writer) -> Result<()> {
+        // Every field is written: a new field fails to compile here until it is.
+        let CharacterSpec { name: _, height: _, heads: _, stylize: _, fem: _, shoulders: _, chest: _, waist: _, hips: _, belly: _, muscle: _, arms: _, legs: _,
+            neck: _, hands: _, feet: _, head_width: _, jaw: _, chin: _, skin: _, eye_color: _, eye_size: _, eye_spacing: _, eye_tilt: _, lid: _, brow: _,
+            brow_angle: _, brow_color: _, nose: _, nose_size: _, mouth_width: _, smile: _, lip_color: _, ears: _, ear_size: _, blush: _, freckles: _, hair: _,
+            hair_color: _, hair_color2: _, hair_volume: _, facial_hair: _, hand_style: _, outfit: _, primary: _, secondary: _, accent: _, clips: _, fighter: _,
+            mesh: _, material_base: _, warnings: _ } = self;
+        let rgb = |w: &mut crate::canon::Writer, c: &[f64; 3]| -> Result<()> { for v in c { w.f64(*v)?; } Ok(()) };
+        let opt_rgb = |w: &mut crate::canon::Writer, c: &Option<[f64; 3]>| -> Result<()> { match c { None => w.u8(0), Some(c) => { w.u8(1)?; rgb(w, c) } } };
+        w.string(&self.name)?;
+        for v in [self.height, self.heads, self.stylize, self.fem, self.shoulders, self.chest, self.waist, self.hips, self.belly, self.muscle, self.arms, self.legs,
+            self.neck, self.hands, self.feet, self.head_width, self.jaw, self.chin] { w.f64(v)?; }
+        rgb(w, &self.skin)?;
+        rgb(w, &self.eye_color)?;
+        for v in [self.eye_size, self.eye_spacing, self.eye_tilt, self.lid, self.brow, self.brow_angle] { w.f64(v)?; }
+        opt_rgb(w, &self.brow_color)?;
+        w.string(&self.nose)?; w.f64(self.nose_size)?;
+        w.f64(self.mouth_width)?; w.f64(self.smile)?; opt_rgb(w, &self.lip_color)?;
+        w.string(&self.ears)?; w.f64(self.ear_size)?;
+        w.f64(self.blush)?; w.f64(self.freckles)?;
+        w.string(&self.hair)?; rgb(w, &self.hair_color)?; opt_rgb(w, &self.hair_color2)?; w.f64(self.hair_volume)?;
+        w.string(&self.facial_hair)?;
+        w.string(&self.hand_style)?;
+        w.count(self.outfit.len())?;
+        for l in &self.outfit {
+            w.string(&l.kind)?; rgb(w, &l.color)?; rgb(w, &l.color2)?;
+            match l.tex { None => w.u8(0)?, Some(t) => { w.u8(1)?; w.u8(t as u8)?; } }
+            w.string(&l.style)?; w.u8(l.open as u8)?;
+        }
+        rgb(w, &self.primary)?; rgb(w, &self.secondary)?; rgb(w, &self.accent)?;
+        match &self.clips { None => w.u8(0)?, Some(c) => { w.u8(1)?; w.count(c.len())?; for s in c { w.string(s)?; } } }
+        w.u8(self.fighter as u8)?; w.u8(self.mesh as u8)?; w.u32(self.material_base)
     }
 }

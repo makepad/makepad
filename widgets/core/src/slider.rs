@@ -3488,7 +3488,18 @@ impl Widget for Slider {
                 cx.set_cursor(MouseCursor::Grab);
             }
             Hit::FingerScroll(e) => {
-                if self.scroll_step > 0.0 && !self.animator_in_state(cx, ids!(disabled.on)) {
+                // A wheel-driven slider takes the whole gesture, so the page under it stays put.
+                let is_wheel_enabled =
+                    self.scroll_step > 0.0 && !self.animator_in_state(cx, ids!(disabled.on));
+                let is_owner = match event {
+                    Event::Scroll(se) => {
+                        let area = self.draw_bg.area();
+                        let is_owner_x = cx.is_scroll_owner(se, area, Vec2Index::X, is_wheel_enabled);
+                        cx.is_scroll_owner(se, area, Vec2Index::Y, is_wheel_enabled) || is_owner_x
+                    }
+                    _ => false,
+                };
+                if is_owner && is_wheel_enabled {
                     let delta = wheel_value_delta(e.scroll, &e.modifiers, self.scroll_step);
                     if delta != 0.0 && self.dragging.is_none() {
                         self.relative_value = (self.relative_value + delta).max(0.0).min(1.0);

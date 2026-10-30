@@ -198,3 +198,34 @@ pub fn nice_this_thread() {
     }
 }
 
+
+/// Raises the soft open-files limit to the hard one (macOS caps it at 10240), as hygiene: a hub
+/// holds a descriptor or two per link and per lease, and a 256 soft limit is a small ceiling.
+/// Returns the soft limit now.
+pub fn raise_fd_limit() -> u64 {
+    #[repr(C)]
+    struct RLimit {
+        cur: u64,
+        max: u64,
+    }
+    extern "C" {
+        fn getrlimit(resource: i32, rlim: *mut RLimit) -> i32;
+        fn setrlimit(resource: i32, rlim: *const RLimit) -> i32;
+    }
+    const RLIMIT_NOFILE: i32 = 8;
+    let mut r = RLimit { cur: 0, max: 0 };
+    if unsafe { getrlimit(RLIMIT_NOFILE, &mut r) } != 0 {
+        return 0;
+    }
+    #[cfg(target_os = "macos")]
+    let want = r.max.min(10240);
+    #[cfg(not(target_os = "macos"))]
+    let want = r.max;
+    if want > r.cur {
+        let n = RLimit { cur: want, max: r.max };
+        if unsafe { setrlimit(RLIMIT_NOFILE, &n) } == 0 {
+            return want;
+        }
+    }
+    r.cur
+}

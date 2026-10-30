@@ -89,6 +89,274 @@ pub struct ScrollEvent {
     pub phase: ScrollPhase,
 }
 
+impl ScrollEvent {
+    pub fn handled(&self, axis: Vec2Index) -> &Cell<bool> {
+        match axis {
+            Vec2Index::X => &self.handled_x,
+            Vec2Index::Y => &self.handled_y,
+        }
+    }
+}
+
+/// A 500 ms wheel transaction: phase-less wheel events form one scroll until they pause.
+pub const WHEEL_LATCH_TIMEOUT: f64 = 0.5;
+/// A wheel scroll lets go of an owner the pointer moves off once the wheel rested this long.
+pub const WHEEL_LATCH_MOVE_DELAY: f64 = 0.1;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum ScrollGesture {
+    #[default]
+    Idle,
+    Wheel,
+    /// Trackpad fingers are scrolling.
+    Fingers,
+    /// The fingers lifted; the OS momentum stream may follow.
+    Lifted,
+}
+
+/// Which way a scroll gesture may go, decided by the way it started out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScrollDirection {
+    /// It started out along this axis, so it only scrolls along it.
+    Along(Vec2Index),
+    /// It started out diagonally, so it scrolls both ways.
+    Free,
+}
+
+impl ScrollDirection {
+    /// The way a gesture that has traveled `travel` may go: along the axis whose compass point is nearest,
+    /// or both ways if a diagonal one is. `None` until it has traveled the tap distance.
+    pub fn from_travel(travel: Vec2d) -> Option<Self> {
+        let (x, y) = (travel.x.abs(), travel.y.abs());
+        if x.max(y) < TAP_COUNT_DISTANCE {
+            return None;
+        }
+        // tan(22.5°), halfway between an axis and a diagonal.
+        const AXIS_SLOPE: f64 = std::f64::consts::SQRT_2 - 1.0;
+        Some(if y <= x * AXIS_SLOPE {
+            Self::Along(Vec2Index::X)
+        } else if x <= y * AXIS_SLOPE {
+            Self::Along(Vec2Index::Y)
+        } else {
+            Self::Free
+        })
+    }
+
+    /// Whether a gesture going this way may scroll along `axis`.
+    pub fn allows(self, axis: Vec2Index) -> bool {
+        match self {
+            Self::Along(along) => along == axis,
+            Self::Free => true,
+        }
+    }
+}
+
+/// The scroll event being dispatched.
+#[derive(Clone, Copy, Debug)]
+struct ScrollDispatch {
+    time: f64,
+    /// Per axis, whether a scrollable may claim it: a new gesture, a lost owner, or a wheel axis nothing took.
+    are_claimable: [bool; 2],
+    /// Whether it's momentum left over from an earlier gesture, which nothing takes.
+    is_stray: bool,
+}
+
+/// The scrollable that owns the scroll gesture in progress, per axis: it takes every
+/// event of the gesture and no other scrollable moves from it (see [`Cx::is_scroll_owner`]).
+#[derive(Clone, Debug, Default)]
+pub struct CxScrollLatch {
+    gesture: ScrollGesture,
+    owners: [Area; 2],
+    dispatching: Option<ScrollDispatch>,
+    wheel_time: f64,
+    /// Per axis, how many scrollables that could take the event are passing it to their children.
+    containers: [u32; 2],
+    /// The way the gesture in progress may go, once it has traveled far enough to tell.
+    direction: Option<ScrollDirection>,
+    /// How far the gesture in progress traveled while its direction wasn't clear yet.
+    travel: Vec2d,
+    /// Whether the gesture in progress has moved yet. A trackpad's `Began` can carry no delta,
+    /// so its first movement picks the scrollables that take it.
+    has_moved: bool,
+}
+
+fn axis_slot(axis: Vec2Index) -> usize {
+    match axis {
+        Vec2Index::X => 0,
+        Vec2Index::Y => 1,
+    }
+}
+
+impl CxScrollLatch {
+    pub fn owner(&self, axis: Vec2Index) -> Area {
+        self.owners[axis_slot(axis)]
+    }
+
+    /// Ends the gesture, so the next scroll event starts a new one.
+    pub(crate) fn reset(&mut self) {
+        self.gesture = ScrollGesture::Idle;
+        self.owners = [Area::Empty; 2];
+    }
+
+    /// Called before `e` is dispatched. `are_owners_live`: whether each owner is drawn and unblocked.
+    pub(crate) fn begin_event(&mut self, e: &ScrollEvent, are_owners_live: [bool; 2]) {
+        let is_new = match e.phase {
+            ScrollPhase::Began => true,
+            ScrollPhase::Changed | ScrollPhase::Ended => self.gesture != ScrollGesture::Fingers,
+            ScrollPhase::None => {
+                self.gesture != ScrollGesture::Wheel || e.time - self.wheel_time > WHEEL_LATCH_TIMEOUT
+            }
+            ScrollPhase::Momentum | ScrollPhase::MomentumEnded | ScrollPhase::Touched => false,
+        };
+        // Momentum belongs only to the trackpad gesture it follows.
+        let is_momentum = matches!(e.phase, ScrollPhase::Momentum | ScrollPhase::MomentumEnded);
+        let is_stray = is_momentum && self.gesture != ScrollGesture::Lifted;
+        let mut are_claimable = [is_new; 2];
+        if is_new {
+            self.owners = [Area::Empty; 2];
+            self.gesture = match e.phase {
+                ScrollPhase::None => ScrollGesture::Wheel,
+                ScrollPhase::Ended => ScrollGesture::Lifted,
+                _ => ScrollGesture::Fingers,
+            };
+            // A wheel only turns along one axis at a time, so only a trackpad gesture keeps to the way it started.
+            self.direction = (e.phase == ScrollPhase::None).then_some(ScrollDirection::Free);
+            self.travel = Vec2d::default();
+            self.has_moved = false;
+        } else {
+            if e.phase == ScrollPhase::Ended {
+                self.gesture = ScrollGesture::Lifted;
+            }
+            let is_user_driven = matches!(e.phase, ScrollPhase::None | ScrollPhase::Changed);
+            for (slot, axis) in [Vec2Index::X, Vec2Index::Y].into_iter().enumerate() {
+                if self.owners[slot].is_empty() {
+                    // A wheel latches only what took it, and a gesture that hasn't moved took nothing,
+                    // so an axis nothing took goes to whatever can take it.
+                    are_claimable[slot] = e.phase == ScrollPhase::None || !self.has_moved;
+                    continue;
+                }
+                if is_user_driven && !are_owners_live[slot] {
+                    // A removed owner frees only its own axis, for whatever is under the pointer now.
+                    self.owners[slot] = Area::Empty;
+                    are_claimable[slot] = true;
+                } else if e.phase != ScrollPhase::Touched {
+                    // Taken already, also for widgets that only check these flags.
+                    e.handled(axis).set(true);
+                }
+            }
+        }
+        if e.phase == ScrollPhase::None {
+            self.wheel_time = e.time;
+        }
+        self.has_moved |= e.scroll != Vec2d::default();
+        if self.direction.is_none() {
+            self.travel += e.scroll;
+            self.direction = ScrollDirection::from_travel(self.travel);
+        }
+        self.containers = [0; 2];
+        self.dispatching = Some(ScrollDispatch { time: e.time, are_claimable, is_stray });
+    }
+
+    pub(crate) fn end_event(&mut self, e: &ScrollEvent) {
+        let is_stray = self.dispatching.is_some_and(|d| d.is_stray);
+        self.dispatching = None;
+        if e.phase == ScrollPhase::MomentumEnded && !is_stray {
+            self.reset();
+        }
+    }
+
+    /// Whether a wheel scroll is in progress and has rested long enough for a pointer move to end it.
+    pub(crate) fn is_wheel_resting(&self, time: f64) -> bool {
+        self.gesture == ScrollGesture::Wheel && time - self.wheel_time > WHEEL_LATCH_MOVE_DELAY
+    }
+
+    /// Lets go of the owner along `axis`, so the next wheel event can go to something else.
+    pub(crate) fn release(&mut self, axis: Vec2Index) {
+        self.owners[axis_slot(axis)] = Area::Empty;
+    }
+
+    /// Lets go of `area` if it owns `axis` but can't scroll now, so what the pointer is over can
+    /// take the rest of `e`'s dispatch. Momentum stays with its owner.
+    pub(crate) fn release_if_owner(&mut self, e: &ScrollEvent, area: Area, axis: Vec2Index) {
+        let slot = axis_slot(axis);
+        let is_user_driven = matches!(e.phase, ScrollPhase::None | ScrollPhase::Changed);
+        let Some(dispatch) = &mut self.dispatching else {
+            return;
+        };
+        if is_user_driven && dispatch.time == e.time && !area.is_empty() && self.owners[slot] == area {
+            self.owners[slot] = Area::Empty;
+            dispatch.are_claimable[slot] = true;
+            e.handled(axis).set(false);
+        }
+    }
+
+    /// See [`Cx::begin_scroll_container`].
+    pub(crate) fn begin_container(&mut self, axes: [bool; 2]) {
+        for slot in 0..2 {
+            self.containers[slot] += axes[slot] as u32;
+        }
+    }
+
+    pub(crate) fn end_container(&mut self, axes: [bool; 2]) {
+        for slot in 0..2 {
+            self.containers[slot] = self.containers[slot].saturating_sub(axes[slot] as u32);
+        }
+    }
+
+    pub(crate) fn is_inside_container(&self, axis: Vec2Index) -> bool {
+        self.containers[axis_slot(axis)] > 0
+    }
+
+    /// See [`Cx::is_scroll_owner`].
+    pub(crate) fn is_owner(&mut self, e: &ScrollEvent, area: Area, axis: Vec2Index, is_candidate: bool) -> bool {
+        let slot = axis_slot(axis);
+        let handled = e.handled(axis);
+        // A gesture two scrollers share keeps to the way it started out, like a drag does.
+        let is_shared = matches!(self.owners, [x, y] if !x.is_empty() && !y.is_empty() && x != y);
+        let is_locked_out = is_shared && self.direction.is_some_and(|direction| !direction.allows(axis));
+        let owner = &mut self.owners[slot];
+        match self.dispatching {
+            Some(dispatch) if dispatch.time == e.time => {
+                if dispatch.is_stray {
+                    return false;
+                }
+                if is_locked_out {
+                    handled.set(true);
+                    return false;
+                }
+                if !owner.is_empty() {
+                    return *owner == area;
+                }
+                // Mid-gesture, a trackpad axis nobody took once it moved stays unowned.
+                if !dispatch.are_claimable[slot] || !is_candidate || handled.get() || area.is_empty() {
+                    return false;
+                }
+                // A scroll that doesn't move claims nothing, since which way it goes decides who takes it.
+                if e.scroll == Vec2d::default() {
+                    return false;
+                }
+                *owner = area;
+            }
+            // An event dispatched by hand (e.g. in a test) has no gesture to follow.
+            _ => {
+                if e.phase == ScrollPhase::Touched || !is_candidate || handled.get() || area.is_empty() {
+                    return false;
+                }
+            }
+        }
+        handled.set(true);
+        true
+    }
+
+    pub(crate) fn update_area(&mut self, old_area: Area, new_area: Area) {
+        for owner in &mut self.owners {
+            if *owner == old_area {
+                *owner = new_area;
+            }
+        }
+    }
+}
+
 /// A trackpad pinch: macOS `magnifyWithEvent:` and Wayland's
 /// `zwp_pointer_gesture_pinch_v1` (X11 and Windows report none).
 ///
@@ -398,6 +666,15 @@ pub struct CxFingers {
     ///   last one's area.
     /// * While the stack is empty, scrolling is not blocked anywhere.
     scroll_blocks: Vec<Area>,
+    pub(crate) scroll_latch: CxScrollLatch,
+    /// The scrollable that took each drag-scrolled digit along each axis.
+    scroll_drag_claims: Vec<(DigitId, Vec2Index, Area)>,
+    /// The drag scrollers each digit pressed, whether or not they took an axis.
+    scroll_drag_holders: Vec<(DigitId, Area)>,
+    /// The way each drag that two scrollers share is going.
+    scroll_drag_locks: Vec<(DigitId, ScrollDirection)>,
+    /// The presses something outside a drag scroller already held when it got them, which it never joins.
+    presses_held_outside: Vec<(DigitId, Area)>,
 }
 
 impl CxFingers {
@@ -420,7 +697,8 @@ impl CxFingers {
         }
     }*/
 
-    pub(crate) fn find_digit_for_captured_area(&self, area: Area) -> Option<DigitId> {
+    /// The digit that `area` holds, if any.
+    pub fn find_digit_for_captured_area(&self, area: Area) -> Option<DigitId> {
         if let Some(digit) = self.captures.iter().find(|d| d.area == area) {
             return Some(digit.digit_id);
         }
@@ -457,6 +735,17 @@ impl CxFingers {
         for block in &mut self.scroll_blocks {
             if *block == old_area {
                 *block = new_area;
+            }
+        }
+        self.scroll_latch.update_area(old_area, new_area);
+        for (_, _, area) in &mut self.scroll_drag_claims {
+            if *area == old_area {
+                *area = new_area;
+            }
+        }
+        for (_, area) in self.scroll_drag_holders.iter_mut().chain(&mut self.presses_held_outside) {
+            if *area == old_area {
+                *area = new_area;
             }
         }
     }
@@ -593,6 +882,8 @@ impl CxFingers {
     /// Returns false when the gesture is not `area`'s to take: it holds no
     /// live capture of the finger, its capture was already cancelled, or
     /// another area owns the finger — a loser must stand down.
+    /// Two scrollers sharing a drag that started diagonally (see [`Self::lock_scroll_drag`])
+    /// each own their axis of it, so neither cancels the other.
     pub fn claim_gesture(&mut self, digit_id: DigitId, area: Area) -> bool {
         let Some(own) = self.captures.iter().position(|v| v.digit_id == digit_id && v.area == area) else {
             // No live capture: none, or already cancelled.
@@ -601,14 +892,28 @@ impl CxFingers {
         if self.captures[own].owner {
             return true;
         }
-        if self.captures.iter().any(|v| v.digit_id == digit_id && v.owner) {
+        let partner = match [Vec2Index::X, Vec2Index::Y].map(|axis| self.scroll_drag_owner(digit_id, axis)) {
+            [Some(x), Some(y)]
+                if x != y
+                    && (x == area || y == area)
+                    && self.scroll_drag_locks.contains(&(digit_id, ScrollDirection::Free)) =>
+            {
+                Some(if x == area { y } else { x })
+            }
+            _ => None,
+        };
+        if let Some(owner) = self.captures.iter().find(|v| v.digit_id == digit_id && v.owner) {
+            if Some(owner.area) == partner {
+                self.captures[own].owner = true;
+                return true;
+            }
             let lost = self.captures.remove(own);
             self.cancelled.push(CxDigitCapture { cancelled: true, ..lost });
             return false;
         }
         self.captures[own].owner = true;
         let before = self.cancelled.len();
-        self.move_to_cancelled(|v| v.digit_id == digit_id && !v.owner);
+        self.move_to_cancelled(|v| v.digit_id == digit_id && !v.owner && Some(v.area) != partner);
         if self.cancelled.len() > before {
             let abs = self.captures.iter().find(|v| v.digit_id == digit_id).map(|v| v.abs_start).unwrap_or_default();
             self.queue_cancel(digit_id, abs);
@@ -734,9 +1039,19 @@ impl CxFingers {
     /// Whether a widget claimed the drag of the touch with the given uid (see [`Cx::claim_finger_drag`])
     /// or already owns its gesture (see [`Cx::claim_finger_gesture`]), so a container shouldn't make it its own gesture.
     pub fn is_touch_drag_claimed(&self, uid: u64) -> bool {
-        let digit_id: DigitId = live_id_num!(touch, uid).into();
-        self.drag_claims.contains(&digit_id)
+        self.is_drag_claimed(live_id_num!(touch, uid).into())
+    }
+
+    /// Like [`Self::is_touch_drag_claimed`], for any digit (a mouse press too).
+    pub fn is_drag_claimed(&self, digit_id: DigitId) -> bool {
+        self.is_drag_claimed_by_widget(digit_id)
             || self.captures.iter().any(|v| v.digit_id == digit_id && v.owner)
+    }
+
+    /// Whether a widget claimed `digit_id`'s drag (see [`Cx::claim_finger_drag`]), not counting
+    /// a scroller that owns its gesture.
+    pub fn is_drag_claimed_by_widget(&self, digit_id: DigitId) -> bool {
+        self.drag_claims.contains(&digit_id)
     }
 
     pub fn any_areas_captured(&self) -> bool {
@@ -797,6 +1112,15 @@ impl CxFingers {
             .any(|c| !mine.iter().any(|m| same_owner(*m, c.area)))
     }
 
+    /// Like [`Self::is_mouse_held_outside`], for a drag scroller: another drag scroller holding
+    /// the press doesn't count, since nested scrollers split a drag by axis.
+    pub fn is_mouse_held_outside_scrollers(&self, mine: &[Area]) -> bool {
+        let digit_id: DigitId = live_id!(mouse).into();
+        self.mouse_captures().any(|c| {
+            !mine.iter().any(|m| same_owner(*m, c.area)) && !self.is_scroll_drag_holder(digit_id, c.area)
+        })
+    }
+
     pub(crate) fn release_digit(&mut self, digit_id: DigitId) {
         self.cancelled.retain(|v| v.digit_id != digit_id);
         self.taken_away.retain(|d| *d != digit_id);
@@ -808,6 +1132,85 @@ impl CxFingers {
             self.captures.remove(index);
         }
         self.drag_claims.retain(|id| *id != digit_id);
+        self.scroll_drag_claims.retain(|(id, ..)| *id != digit_id);
+        self.scroll_drag_holders.retain(|(id, _)| *id != digit_id);
+        self.scroll_drag_locks.retain(|(id, _)| *id != digit_id);
+        self.presses_held_outside.retain(|(id, _)| *id != digit_id);
+    }
+
+    /// Whether `area` owns `digit_id`'s drag along `axis`, taking it unless another
+    /// scrollable (a nested one, dispatched first) already did.
+    pub(crate) fn is_scroll_drag_owner(&mut self, digit_id: DigitId, axis: Vec2Index, area: Area) -> bool {
+        match self.scroll_drag_owner(digit_id, axis) {
+            Some(owner) => owner == area,
+            None => {
+                self.scroll_drag_claims.push((digit_id, axis, area));
+                true
+            }
+        }
+    }
+
+    /// The scrollable that took `digit_id`'s drag along `axis`, if any.
+    pub fn scroll_drag_owner(&self, digit_id: DigitId, axis: Vec2Index) -> Option<Area> {
+        self.scroll_drag_claims
+            .iter()
+            .find(|(id, a, _)| *id == digit_id && *a == axis)
+            .map(|(_, _, area)| *area)
+    }
+
+    /// See [`Cx::hold_scroll_drag`].
+    pub(crate) fn hold_scroll_drag(&mut self, digit_id: DigitId, area: Area) {
+        if !self.scroll_drag_holders.contains(&(digit_id, area)) {
+            self.scroll_drag_holders.push((digit_id, area));
+        }
+    }
+
+    /// Whether `area` is a drag scroller holding `digit_id`'s press, or took an axis of its drag.
+    fn is_scroll_drag_holder(&self, digit_id: DigitId, area: Area) -> bool {
+        self.scroll_drag_holders.contains(&(digit_id, area))
+            || self.scroll_drag_claims.iter().any(|(id, _, a)| *id == digit_id && *a == area)
+    }
+
+    /// Whether `area` can join the drag scrollers holding `digit_id`'s press, to drag it along `axis`:
+    /// only drag scrollers inside `area` hold it, none of them took `axis`, and no widget claimed the drag.
+    pub fn can_join_scroll_drag(&self, digit_id: DigitId, axis: Vec2Index, area: Area) -> bool {
+        let mut holders = self
+            .captures
+            .iter()
+            .filter(|capture| capture.digit_id == digit_id && capture.area != area)
+            .peekable();
+        holders.peek().is_some()
+            && !self.is_drag_claimed(digit_id)
+            && !self.presses_held_outside.contains(&(digit_id, area))
+            && self.scroll_drag_owner(digit_id, axis).is_none_or(|owner| owner == area)
+            && holders.all(|capture| self.is_scroll_drag_holder(digit_id, capture.area))
+    }
+
+    /// Marks `digit_id`'s press as already held by something outside `area` (like an overlay drawn
+    /// over it), so `area` never joins it. Call it before passing the press to what's inside `area`.
+    pub fn mark_press_as_held_outside(&mut self, digit_id: DigitId, area: Area) {
+        if !self.presses_held_outside.contains(&(digit_id, area)) {
+            self.presses_held_outside.push((digit_id, area));
+        }
+    }
+
+    /// Whether two scrollers took `digit_id`'s drag, one along each axis.
+    pub fn is_scroll_drag_shared(&self, digit_id: DigitId) -> bool {
+        let owners = [Vec2Index::X, Vec2Index::Y].map(|axis| self.scroll_drag_owner(digit_id, axis));
+        matches!(owners, [Some(x), Some(y)] if x != y)
+    }
+
+    /// See [`Cx::lock_scroll_drag`].
+    pub(crate) fn lock_scroll_drag(&mut self, digit_id: DigitId, travel: Vec2d) -> Option<ScrollDirection> {
+        if !self.is_scroll_drag_shared(digit_id) {
+            return Some(ScrollDirection::Free);
+        }
+        if let Some((_, direction)) = self.scroll_drag_locks.iter().find(|(id, _)| *id == digit_id) {
+            return Some(*direction);
+        }
+        let direction = ScrollDirection::from_travel(travel)?;
+        self.scroll_drag_locks.push((digit_id, direction));
+        Some(direction)
     }
 
     pub(crate) fn remove_hover(&mut self, digit_id: DigitId) {
@@ -2350,5 +2753,672 @@ mod lock_nest_tests {
         // Touch uids get reused, so a claim that outlived its touch would block the next one.
         fingers.release_digit(live_id_num!(touch, 3).into());
         assert!(!fingers.is_touch_drag_claimed(3));
+    }
+
+    use crate::{
+        area::RectArea,
+        draw_list::{CxRectArea, DrawList},
+    };
+
+    const INNER: usize = 0;
+    const OUTER: usize = 1;
+    /// Over the inner scrollable, which covers the top of the outer one.
+    const OVER_INNER: Vec2d = dvec2(50.0, 50.0);
+    const OVER_OUTER: Vec2d = dvec2(50.0, 300.0);
+
+    /// What one scroll event did: whether its y axis was handled before dispatch began,
+    /// and which scrollable took each axis.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Took {
+        was_handled: bool,
+        x: Option<usize>,
+        y: Option<usize>,
+    }
+
+    /// A scrollable nested in another. Scroll events reach them innermost first, the way
+    /// widgets dispatch them, with the outer one passing them on as a scroll container.
+    struct Nest {
+        cx: Cx,
+        draw_lists: [DrawList; 2],
+        areas: Rc<Cell<[Area; 2]>>,
+        /// Per scrollable, whether it can scroll along y.
+        are_scrollable: Rc<Cell<[bool; 2]>>,
+        /// Per scrollable, whether it can scroll along x.
+        are_scrollable_x: Rc<Cell<[bool; 2]>>,
+        /// Whether the inner one, like a list, takes scrolls it can't move on when nothing around it can.
+        is_inner_list: Rc<Cell<bool>>,
+        is_drawn: Rc<Cell<[bool; 2]>>,
+        took: Rc<RefCell<Vec<Took>>>,
+        time: f64,
+        /// How far each scroll event moves.
+        delta: Vec2d,
+    }
+
+    impl Nest {
+        fn new() -> Self {
+            Self::with_inner_rect(Rect { pos: dvec2(0.0, 0.0), size: dvec2(200.0, 100.0) })
+        }
+
+        /// The outer scrollable is 200 x 400 at the origin, and everything is clipped to its rect.
+        fn with_inner_rect(inner_rect: Rect) -> Self {
+            let areas = Rc::new(Cell::new([Area::Empty; 2]));
+            let are_scrollable = Rc::new(Cell::new([true; 2]));
+            let are_scrollable_x = Rc::new(Cell::new([false; 2]));
+            let is_inner_list = Rc::new(Cell::new(false));
+            let is_drawn = Rc::new(Cell::new([true; 2]));
+            let took = Rc::new(RefCell::new(Vec::new()));
+            let (shared_areas, scrollable_y, scrollable_x, is_list, drawn, log) = (
+                areas.clone(),
+                are_scrollable.clone(),
+                are_scrollable_x.clone(),
+                is_inner_list.clone(),
+                is_drawn.clone(),
+                took.clone(),
+            );
+            let mut cx = Cx::new(Box::new(move |cx, event| {
+                let Event::Scroll(e) = event else { return };
+                let was_handled = e.handled_y.get();
+                let areas = shared_areas.get();
+                let is_over = |cx: &Cx, i: usize| areas[i].clipped_rect(cx).contains(e.abs);
+                let scrollable_axes = |i: usize| [scrollable_x.get()[i], scrollable_y.get()[i]];
+                let mut took = [None; 2];
+                let mut take = |cx: &mut Cx, i: usize| {
+                    // A scrollable that isn't drawn gets no events.
+                    if !drawn.get()[i] {
+                        return;
+                    }
+                    for (slot, axis) in [Vec2Index::X, Vec2Index::Y].into_iter().enumerate() {
+                        // A list only scrolls along y here.
+                        let is_fallback = i == INNER && axis == Vec2Index::Y && is_list.get()
+                            && !cx.is_inside_scroll_container(axis);
+                        let is_candidate = is_over(cx, i) && (scrollable_axes(i)[slot] || is_fallback);
+                        if cx.is_scroll_owner(e, areas[i], axis, is_candidate) {
+                            assert!(took[slot].is_none(), "two scrollables took one scroll event");
+                            took[slot] = Some(i);
+                        }
+                    }
+                };
+                let outer_axes = scrollable_axes(OUTER).map(|is_scrollable| is_scrollable && is_over(cx, OUTER));
+                cx.begin_scroll_container(outer_axes);
+                take(cx, INNER);
+                cx.end_scroll_container(outer_axes);
+                take(cx, OUTER);
+                log.borrow_mut().push(Took { was_handled, x: took[0], y: took[1] });
+            }));
+            let draw_lists = [DrawList::new(&mut cx), DrawList::new(&mut cx)];
+            let outer_rect = Rect { pos: dvec2(0.0, 0.0), size: dvec2(200.0, 400.0) };
+            let mut new_areas = [Area::Empty; 2];
+            for (i, rect) in [inner_rect, outer_rect].into_iter().enumerate() {
+                let list = &mut cx.draw_lists[draw_lists[i].id()];
+                list.rect_areas.push(CxRectArea {
+                    rect,
+                    draw_clip: (outer_rect.pos, outer_rect.pos + outer_rect.size),
+                });
+                new_areas[i] = Area::Rect(RectArea {
+                    draw_list_id: draw_lists[i].id(),
+                    rect_id: 0,
+                    redraw_id: list.redraw_id,
+                });
+            }
+            areas.set(new_areas);
+            Self { cx, draw_lists, areas, are_scrollable, are_scrollable_x, is_inner_list, is_drawn, took, time: 1.0, delta: dvec2(10.0, 10.0) }
+        }
+
+        fn area(&self, i: usize) -> Area {
+            self.areas.get()[i]
+        }
+
+        /// Takes the inner scrollable out of the UI, leaving its area stale.
+        fn remove_inner(&mut self) {
+            self.cx.draw_lists[self.draw_lists[INNER].id()].redraw_id += 1;
+            self.is_drawn.set([false, true]);
+        }
+
+        /// Draws another scrollable where the inner one was, the way a list reuses the spot of a row it dropped.
+        fn replace_inner(&mut self) {
+            self.remove_inner();
+            let mut areas = self.areas.get();
+            if let Area::Rect(area) = &mut areas[INNER] {
+                area.redraw_id = self.cx.draw_lists[self.draw_lists[INNER].id()].redraw_id;
+            }
+            self.areas.set(areas);
+            self.is_drawn.set([true, true]);
+        }
+
+        fn event(&mut self, abs: Vec2d, phase: ScrollPhase, dt: f64) -> ScrollEvent {
+            self.time += dt;
+            ScrollEvent {
+                window_id: WindowId(0, 0),
+                scroll: self.delta,
+                abs,
+                modifiers: KeyModifiers::default(),
+                handled_x: Cell::new(false),
+                handled_y: Cell::new(false),
+                is_mouse: phase == ScrollPhase::None,
+                time: self.time,
+                phase,
+            }
+        }
+
+        /// Dispatches one scroll event 16 ms after the last and returns which scrollable took its y axis.
+        fn scroll(&mut self, abs: Vec2d, phase: ScrollPhase) -> Option<usize> {
+            self.scroll_after(abs, phase, 0.016)
+        }
+
+        fn scroll_after(&mut self, abs: Vec2d, phase: ScrollPhase, dt: f64) -> Option<usize> {
+            self.dispatch(abs, phase, dt).y
+        }
+
+        /// Like [`Self::scroll`], returning which scrollable took each axis (x, y).
+        fn scroll_xy(&mut self, abs: Vec2d, phase: ScrollPhase) -> (Option<usize>, Option<usize>) {
+            let took = self.dispatch(abs, phase, 0.016);
+            (took.x, took.y)
+        }
+
+        /// Like [`Self::scroll_xy`] over the inner scrollable, moving `delta`.
+        fn scroll_by(&mut self, phase: ScrollPhase, delta: Vec2d) -> (Option<usize>, Option<usize>) {
+            self.delta = delta;
+            self.scroll_xy(OVER_INNER, phase)
+        }
+
+        fn dispatch(&mut self, abs: Vec2d, phase: ScrollPhase, dt: f64) -> Took {
+            let e = self.event(abs, phase, dt);
+            self.cx.call_event_handler(&Event::Scroll(e));
+            *self.took.borrow().last().unwrap()
+        }
+
+        /// Moves the pointer to `abs`, `dt` seconds after the last event.
+        fn move_pointer(&mut self, abs: Vec2d, dt: f64) {
+            self.time += dt;
+            self.cx.call_event_handler(&Event::MouseMove(MouseMoveEvent {
+                abs,
+                lock_delta: dvec2(0.0, 0.0),
+                window_id: WindowId(0, 0),
+                modifiers: KeyModifiers::default(),
+                time: self.time,
+                handled: Cell::new(Area::Empty),
+            }));
+        }
+
+        fn press(&mut self) {
+            self.time += 0.016;
+            self.cx.call_event_handler(&Event::MouseDown(MouseDownEvent {
+                abs: OVER_INNER,
+                button: MouseButton::PRIMARY,
+                window_id: WindowId(0, 0),
+                modifiers: KeyModifiers::default(),
+                handled: Cell::new(Area::Empty),
+                time: self.time,
+            }));
+        }
+    }
+
+    #[test]
+    fn a_trackpad_gesture_stays_with_the_scrollable_it_began_on() {
+        let mut nest = Nest::new();
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Began), Some(INNER));
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Changed), Some(INNER));
+        // Neither the pointer leaving it nor running out of content hands the gesture on.
+        nest.are_scrollable.set([false, true]);
+        assert_eq!(nest.scroll(OVER_OUTER, ScrollPhase::Changed), Some(INNER));
+        assert_eq!(nest.scroll(OVER_OUTER, ScrollPhase::Ended), Some(INNER));
+        assert_eq!(nest.scroll(OVER_OUTER, ScrollPhase::Momentum), Some(INNER));
+        assert_eq!(nest.scroll(OVER_OUTER, ScrollPhase::MomentumEnded), Some(INNER));
+        // The next gesture is decided afresh.
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Began), Some(OUTER));
+        nest.are_scrollable.set([true, true]);
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Changed), Some(OUTER));
+    }
+
+    #[test]
+    fn a_gesture_without_a_began_phase_is_latched_from_its_first_event() {
+        // Wayland touchpads start with `Changed`.
+        let mut nest = Nest::new();
+        assert_eq!(nest.scroll(OVER_OUTER, ScrollPhase::Changed), Some(OUTER));
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Changed), Some(OUTER));
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Ended), Some(OUTER));
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Changed), Some(INNER));
+    }
+
+    #[test]
+    fn a_nested_scrollable_with_nothing_to_scroll_leaves_the_scroll_to_its_ancestor() {
+        let mut nest = Nest::new();
+        nest.are_scrollable.set([false, true]);
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::None), Some(OUTER));
+        assert_eq!(nest.scroll_after(OVER_INNER, ScrollPhase::Began, 1.0), Some(OUTER));
+        nest.are_scrollable.set([false, false]);
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Began), None);
+    }
+
+    #[test]
+    fn a_list_with_nothing_to_scroll_takes_the_scroll_when_nothing_around_it_can() {
+        // So it still rubber-bands, and counts the travel.
+        let mut nest = Nest::new();
+        nest.is_inner_list.set(true);
+        nest.are_scrollable.set([false, true]);
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::None), Some(OUTER));
+        nest.are_scrollable.set([false, false]);
+        assert_eq!(nest.scroll_after(OVER_INNER, ScrollPhase::None, 1.0), Some(INNER));
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Began), Some(INNER));
+        assert_eq!(nest.scroll(OVER_OUTER, ScrollPhase::Began), None);
+        // A container only counts while it passes the event to its children.
+        assert!(!nest.cx.is_inside_scroll_container(Vec2Index::Y));
+    }
+
+    #[test]
+    fn wheel_scrolls_stay_together_until_they_pause() {
+        let mut nest = Nest::new();
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::None), Some(INNER));
+        nest.are_scrollable.set([false, true]);
+        assert_eq!(nest.scroll_after(OVER_INNER, ScrollPhase::None, 0.4), Some(INNER));
+        // The hand drifting, even off the owner, doesn't hand the scroll on.
+        assert_eq!(nest.scroll(OVER_INNER + dvec2(0.0, 30.0), ScrollPhase::None), Some(INNER));
+        assert_eq!(nest.scroll(OVER_OUTER, ScrollPhase::None), Some(INNER));
+        // A pause longer than the timeout starts a new scroll.
+        let after_pause = WHEEL_LATCH_TIMEOUT + 0.1;
+        assert_eq!(nest.scroll_after(OVER_INNER, ScrollPhase::None, after_pause), Some(OUTER));
+    }
+
+    #[test]
+    fn a_wheel_scroll_nothing_took_goes_to_whatever_can_take_it() {
+        // Nothing under the pointer can scroll, so nothing is latched.
+        let mut nest = Nest::new();
+        nest.are_scrollable.set([true, false]);
+        assert_eq!(nest.scroll(OVER_OUTER, ScrollPhase::None), None);
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::None), Some(INNER));
+        assert_eq!(nest.scroll(OVER_OUTER, ScrollPhase::None), Some(INNER));
+    }
+
+    #[test]
+    fn moving_the_pointer_off_the_owner_once_the_wheel_rests_ends_its_scroll() {
+        let mut nest = Nest::new();
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::None), Some(INNER));
+        // Moves while the wheel turns, or within the owner, keep it.
+        nest.move_pointer(OVER_OUTER, 0.05);
+        assert_eq!(nest.scroll(OVER_OUTER, ScrollPhase::None), Some(INNER));
+        nest.move_pointer(OVER_INNER + dvec2(0.0, 30.0), WHEEL_LATCH_MOVE_DELAY + 0.05);
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::None), Some(INNER));
+        nest.move_pointer(OVER_OUTER, WHEEL_LATCH_MOVE_DELAY + 0.05);
+        assert_eq!(nest.scroll(OVER_OUTER, ScrollPhase::None), Some(OUTER));
+        // A trackpad gesture follows its fingers, not the pointer.
+        let mut nest = Nest::new();
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Began), Some(INNER));
+        nest.move_pointer(OVER_OUTER, WHEEL_LATCH_MOVE_DELAY + 0.05);
+        assert_eq!(nest.scroll(OVER_OUTER, ScrollPhase::Changed), Some(INNER));
+    }
+
+    #[test]
+    fn an_axis_nobody_took_when_the_gesture_began_stays_unowned() {
+        let mut nest = Nest::new();
+        nest.are_scrollable.set([false, false]);
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Began), None);
+        nest.are_scrollable.set([true, true]);
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Changed), None);
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Ended), None);
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Momentum), None);
+    }
+
+    #[test]
+    fn momentum_goes_only_to_the_trackpad_gesture_it_follows() {
+        let mut nest = Nest::new();
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Momentum), None);
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::None), Some(INNER));
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Momentum), None);
+        // An old stream still ending after the next gesture began reaches nothing.
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Began), Some(INNER));
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Momentum), None);
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::MomentumEnded), None);
+        nest.are_scrollable.set([false, true]);
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Changed), Some(INNER));
+    }
+
+    #[test]
+    fn a_press_ends_the_scroll_in_progress() {
+        let mut nest = Nest::new();
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::None), Some(INNER));
+        nest.are_scrollable.set([false, true]);
+        nest.press();
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::None), Some(OUTER));
+        // Momentum after a press (which caught the coast) moves nothing.
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Began), Some(OUTER));
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Ended), Some(OUTER));
+        nest.press();
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Momentum), None);
+    }
+
+    #[test]
+    fn a_touch_on_the_trackpad_reaches_the_owner_without_taking_anything() {
+        let mut nest = Nest::new();
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Began), Some(INNER));
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Ended), Some(INNER));
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Touched), Some(INNER));
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::MomentumEnded), Some(INNER));
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Touched), None);
+    }
+
+    #[test]
+    fn owned_axes_are_marked_handled_before_dispatch() {
+        let mut nest = Nest::new();
+        nest.scroll(OVER_INNER, ScrollPhase::Began);
+        nest.scroll(OVER_INNER, ScrollPhase::Changed);
+        nest.scroll(OVER_INNER, ScrollPhase::Touched);
+        let took: Vec<_> = nest.took.borrow().iter().map(|t| (t.was_handled, t.y)).collect();
+        assert_eq!(took[0], (false, Some(INNER)), "a new gesture is free to take");
+        assert_eq!(took[1], (true, Some(INNER)), "widgets that only check the flag leave it alone");
+        assert_eq!(took[2], (false, Some(INNER)), "every scrollable may stop on a touch");
+    }
+
+    #[test]
+    fn a_scroll_dispatched_by_hand_goes_to_the_first_scrollable_that_can_take_it() {
+        let mut nest = Nest::new();
+        let (inner, outer) = (nest.area(INNER), nest.area(OUTER));
+        let e = nest.event(OVER_INNER, ScrollPhase::Changed, 0.016);
+        assert!(nest.cx.is_scroll_owner(&e, inner, Vec2Index::Y, true));
+        assert!(!nest.cx.is_scroll_owner(&e, outer, Vec2Index::Y, true));
+        assert!(nest.cx.is_scroll_owner(&e, outer, Vec2Index::X, true));
+        let touched = nest.event(OVER_INNER, ScrollPhase::Touched, 0.016);
+        assert!(!nest.cx.is_scroll_owner(&touched, inner, Vec2Index::Y, true));
+    }
+
+    #[test]
+    fn a_removed_owner_gives_up_the_gesture_but_not_its_momentum() {
+        let mut nest = Nest::new();
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Began), Some(INNER));
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Ended), Some(INNER));
+        nest.remove_inner();
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Momentum), None);
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::MomentumEnded), None);
+        // Mid-gesture, the fingers move whatever is under them now.
+        let mut nest = Nest::new();
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Began), Some(INNER));
+        nest.remove_inner();
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Changed), Some(OUTER));
+    }
+
+    #[test]
+    fn a_removed_owner_frees_only_its_own_axis() {
+        // A strip that scrolls along x, in a list that scrolls along y.
+        for is_wheel in [false, true] {
+            let phase = if is_wheel { ScrollPhase::None } else { ScrollPhase::Changed };
+            let mut nest = Nest::new();
+            nest.are_scrollable_x.set([true, false]);
+            nest.are_scrollable.set([false, true]);
+            assert_eq!(nest.scroll_xy(OVER_INNER, phase), (Some(INNER), Some(OUTER)));
+            // The list drops the strip's row, and a scrollable along both axes takes its spot.
+            nest.replace_inner();
+            nest.are_scrollable_x.set([true, false]);
+            nest.are_scrollable.set([true, true]);
+            assert_eq!(nest.scroll_xy(OVER_INNER, phase), (Some(INNER), Some(OUTER)));
+            assert_eq!(nest.scroll_xy(OVER_INNER, phase), (Some(INNER), Some(OUTER)));
+        }
+    }
+
+    #[test]
+    fn an_open_popup_keeps_scrolls_from_everything_else() {
+        // The outer area stands in for a popup holding the sweep lock.
+        let mut nest = Nest::new();
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Began), Some(INNER));
+        nest.cx.fingers.sweep_lock(nest.area(OUTER));
+        // The owner it covers lets go, mid-gesture too.
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::Changed), Some(OUTER));
+        assert_eq!(nest.scroll_after(OVER_INNER, ScrollPhase::None, 1.0), Some(OUTER));
+        nest.cx.fingers.sweep_unlock(nest.area(OUTER));
+        assert_eq!(nest.scroll_after(OVER_INNER, ScrollPhase::None, 1.0), Some(INNER));
+    }
+
+    #[test]
+    fn scrolling_blocked_outside_an_area_still_reaches_a_partly_hidden_scrollable_inside_it() {
+        // The inner scrollable's top is scrolled out of the outer one, like a list in a modal.
+        let inner_rect = Rect { pos: dvec2(0.0, -50.0), size: dvec2(200.0, 150.0) };
+        let mut nest = Nest::with_inner_rect(inner_rect);
+        nest.cx.block_scrolling_except_within(nest.area(OUTER));
+        assert_eq!(nest.scroll(OVER_INNER, ScrollPhase::None), Some(INNER));
+        assert_eq!(nest.scroll_after(OVER_OUTER, ScrollPhase::None, 1.0), Some(OUTER));
+    }
+
+    #[test]
+    fn a_drag_scroll_belongs_to_the_scrollable_that_claimed_it_first() {
+        let nest = Nest::new();
+        let (inner, outer) = (nest.area(INNER), nest.area(OUTER));
+        let mut fingers = CxFingers::default();
+        let touch: DigitId = live_id_num!(touch, 1).into();
+        assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::X, inner));
+        assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::X, inner));
+        assert!(!fingers.is_scroll_drag_owner(touch, Vec2Index::X, outer));
+        // The other axis is free for the outer scrollable.
+        assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::Y, outer));
+        assert_eq!(fingers.scroll_drag_owner(touch, Vec2Index::Y), Some(outer));
+        fingers.release_digit(touch);
+        assert_eq!(fingers.scroll_drag_owner(touch, Vec2Index::X), None);
+        assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::X, outer));
+    }
+
+    /// Another area in the inner scrollable's draw list, like a button inside it.
+    fn button_in(area: Area) -> Area {
+        let Area::Rect(mut rect) = area else { unreachable!() };
+        rect.rect_id = 1;
+        Area::Rect(rect)
+    }
+
+    fn touch_event(state: TouchState, abs: Vec2d) -> Event {
+        Event::TouchUpdate(TouchUpdateEvent {
+            time: 1.0,
+            window_id: WindowId(0, 0),
+            modifiers: KeyModifiers::default(),
+            touches: vec![TouchPoint {
+                state,
+                abs,
+                time: 1.0,
+                uid: 1,
+                rotation_angle: 0.0,
+                force: 0.0,
+                radius: dvec2(0.0, 0.0),
+                handled: Cell::new(Area::Empty),
+                sweep_lock: Cell::new(Area::Empty),
+            }],
+        })
+    }
+
+    #[test]
+    fn a_scrollable_can_join_a_press_only_drag_scrollers_hold() {
+        let nest = Nest::new();
+        let (inner, outer) = (nest.area(INNER), nest.area(OUTER));
+        let mut fingers = CxFingers::default();
+        let touch: DigitId = live_id_num!(touch, 1).into();
+        assert!(!fingers.can_join_scroll_drag(touch, Vec2Index::Y, outer), "nothing holds it");
+        fingers.capture_digit(touch, inner, Area::Empty, 1.0, OVER_INNER);
+        assert!(!fingers.can_join_scroll_drag(touch, Vec2Index::Y, outer), "a plain widget holds it");
+        // A drag scroller with nothing to scroll leaves both axes to the scrollable around it.
+        fingers.hold_scroll_drag(touch, inner);
+        assert!(fingers.can_join_scroll_drag(touch, Vec2Index::X, outer));
+        assert!(fingers.can_join_scroll_drag(touch, Vec2Index::Y, outer));
+        assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::X, inner));
+        assert!(!fingers.can_join_scroll_drag(touch, Vec2Index::X, outer));
+        assert!(fingers.can_join_scroll_drag(touch, Vec2Index::Y, outer));
+        // A button holding it too keeps it from the outer one.
+        fingers.capture_digit(touch, button_in(inner), Area::Empty, 1.0, OVER_INNER);
+        assert!(!fingers.can_join_scroll_drag(touch, Vec2Index::Y, outer));
+        fingers.release_digit(touch);
+        fingers.capture_digit(touch, inner, Area::Empty, 1.0, OVER_INNER);
+        fingers.hold_scroll_drag(touch, inner);
+        fingers.claim_drag(touch);
+        assert!(!fingers.can_join_scroll_drag(touch, Vec2Index::Y, outer), "a widget claimed the drag");
+    }
+
+    #[test]
+    fn a_scrollable_can_join_a_press_held_by_one_that_took_the_other_axis_without_holding_it() {
+        // Like a list, which takes its axis without holding the press.
+        let nest = Nest::new();
+        let (inner, outer) = (nest.area(INNER), nest.area(OUTER));
+        let mut fingers = CxFingers::default();
+        let touch: DigitId = live_id_num!(touch, 1).into();
+        fingers.capture_digit(touch, inner, Area::Empty, 1.0, OVER_INNER);
+        assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::X, inner));
+        assert!(fingers.can_join_scroll_drag(touch, Vec2Index::Y, outer));
+        assert!(!fingers.can_join_scroll_drag(touch, Vec2Index::X, outer));
+    }
+
+    #[test]
+    fn a_scrollable_never_joins_a_press_something_outside_it_held_first() {
+        let nest = Nest::new();
+        let (inner, outer) = (nest.area(INNER), nest.area(OUTER));
+        let mut fingers = CxFingers::default();
+        let touch: DigitId = live_id_num!(touch, 1).into();
+        // The inner scroller is drawn over the outer one, not inside it, so the outer one sees the press last.
+        fingers.capture_digit(touch, inner, Area::Empty, 1.0, OVER_INNER);
+        fingers.hold_scroll_drag(touch, inner);
+        fingers.mark_press_as_held_outside(touch, outer);
+        assert!(!fingers.can_join_scroll_drag(touch, Vec2Index::Y, outer));
+        fingers.release_digit(touch);
+        fingers.capture_digit(touch, inner, Area::Empty, 1.0, OVER_INNER);
+        fingers.hold_scroll_drag(touch, inner);
+        assert!(fingers.can_join_scroll_drag(touch, Vec2Index::Y, outer), "the mark ends with its press");
+    }
+
+    #[test]
+    fn a_scrollable_that_joins_a_press_gets_its_moves_and_release() {
+        let mut nest = Nest::new();
+        let (inner, outer) = (nest.area(INNER), nest.area(OUTER));
+        let cx = &mut nest.cx;
+        let touch: DigitId = live_id_num!(touch, 1).into();
+        let start = touch_event(TouchState::Start, OVER_INNER);
+        assert!(matches!(start.hits(cx, inner), Hit::FingerDown(_)));
+        cx.fingers.hold_scroll_drag(touch, inner);
+        assert!(cx.fingers.is_scroll_drag_owner(touch, Vec2Index::X, inner));
+        assert!(matches!(start.hits(cx, outer), Hit::Nothing), "the inner one holds it");
+        assert!(cx.fingers.can_join_scroll_drag(touch, Vec2Index::Y, outer));
+        assert!(matches!(start.hits_with_capture_overload(cx, outer, true), Hit::FingerDown(_)));
+        // The outer's other bar gets the press without the overload.
+        assert!(matches!(start.hits(cx, outer), Hit::FingerDown(_)));
+        for state in [TouchState::Move, TouchState::Stop] {
+            let event = touch_event(state, OVER_INNER + dvec2(0.0, 20.0));
+            for area in [inner, outer] {
+                let hit = event.hits(cx, area);
+                match state {
+                    TouchState::Move => assert!(matches!(hit, Hit::FingerMove(_))),
+                    _ => assert!(matches!(hit, Hit::FingerUp(_))),
+                }
+            }
+            if let Event::TouchUpdate(e) = &event {
+                cx.fingers.process_touch_update_end(&e.touches);
+            }
+        }
+        assert!(!cx.fingers.any_areas_captured());
+        assert_eq!(cx.fingers.scroll_drag_owner(touch, Vec2Index::X), None);
+        assert!(!cx.fingers.can_join_scroll_drag(touch, Vec2Index::Y, outer));
+    }
+
+    #[test]
+    fn a_mouse_drag_that_a_scrollable_joins_moves_the_hover_to_it() {
+        let mut nest = Nest::new();
+        let (inner, outer) = (nest.area(INNER), nest.area(OUTER));
+        let cx = &mut nest.cx;
+        let mouse: DigitId = live_id!(mouse).into();
+        cx.fingers.mouse_down(MouseButton::PRIMARY, WindowId(0, 0));
+        let down = Event::MouseDown(MouseDownEvent {
+            abs: OVER_INNER,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(0, 0),
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 1.0,
+        });
+        assert!(matches!(down.hits(cx, inner), Hit::FingerDown(_)));
+        cx.fingers.hold_scroll_drag(mouse, inner);
+        assert!(cx.fingers.is_scroll_drag_owner(mouse, Vec2Index::X, inner));
+        assert!(matches!(down.hits(cx, outer), Hit::Nothing));
+        assert!(cx.fingers.can_join_scroll_drag(mouse, Vec2Index::Y, outer));
+        assert!(matches!(down.hits_with_capture_overload(cx, outer, true), Hit::FingerDown(_)));
+        let moved = Event::MouseMove(MouseMoveEvent {
+            abs: OVER_INNER + dvec2(0.0, 20.0),
+            lock_delta: dvec2(0.0, 0.0),
+            window_id: WindowId(0, 0),
+            modifiers: KeyModifiers::default(),
+            time: 1.1,
+            handled: Cell::new(Area::Empty),
+        });
+        assert!(matches!(moved.hits(cx, inner), Hit::FingerMove(_)));
+        assert!(matches!(moved.hits(cx, outer), Hit::FingerMove(_)));
+        cx.fingers.cycle_hover_area(mouse);
+        assert_eq!(cx.fingers.find_hover_area(mouse), outer, "the last area a move reached");
+        let up = Event::MouseUp(MouseUpEvent {
+            abs: OVER_INNER + dvec2(0.0, 20.0),
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(0, 0),
+            modifiers: KeyModifiers::default(),
+            time: 1.2,
+        });
+        assert!(matches!(up.hits(cx, inner), Hit::FingerUp(_)));
+        assert!(matches!(up.hits(cx, outer), Hit::FingerUp(_)));
+        cx.fingers.mouse_up(MouseButton::PRIMARY);
+        assert!(!cx.fingers.any_areas_captured());
+    }
+
+    #[test]
+    fn a_gesture_goes_along_the_axis_whose_compass_point_is_nearest() {
+        let direction = |x, y| ScrollDirection::from_travel(dvec2(x, y));
+        assert_eq!(direction(4.0, 3.0), None, "not the tap distance yet");
+        assert_eq!(direction(10.0, -4.0), Some(ScrollDirection::Along(Vec2Index::X)));
+        assert_eq!(direction(-4.0, 10.0), Some(ScrollDirection::Along(Vec2Index::Y)));
+        assert_eq!(direction(-10.0, 4.5), Some(ScrollDirection::Free));
+        assert_eq!(direction(10.0, 10.0), Some(ScrollDirection::Free));
+    }
+
+    #[test]
+    fn a_drag_two_scrollers_share_keeps_to_the_way_it_started() {
+        let nest = Nest::new();
+        let (inner, outer) = (nest.area(INNER), nest.area(OUTER));
+        let mut fingers = CxFingers::default();
+        let touch: DigitId = live_id_num!(touch, 1).into();
+        // Nobody shares it yet, so it moves from the first pixel.
+        assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::Y, outer));
+        assert_eq!(fingers.lock_scroll_drag(touch, dvec2(1.0, 1.0)), Some(ScrollDirection::Free));
+        assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::X, inner));
+        assert_eq!(fingers.lock_scroll_drag(touch, dvec2(3.0, 2.0)), None);
+        // Mostly sideways by the tap distance, so it stays sideways after it turns down.
+        assert_eq!(fingers.lock_scroll_drag(touch, dvec2(6.0, -2.0)), Some(ScrollDirection::Along(Vec2Index::X)));
+        assert_eq!(fingers.lock_scroll_drag(touch, dvec2(6.0, -80.0)), Some(ScrollDirection::Along(Vec2Index::X)));
+        fingers.release_digit(touch);
+        assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::X, inner));
+        assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::Y, outer));
+        assert_eq!(fingers.lock_scroll_drag(touch, dvec2(-4.0, 5.0)), Some(ScrollDirection::Free), "a diagonal start");
+        fingers.release_digit(touch);
+        // One scroller that goes both ways, like a map, pans freely.
+        assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::X, outer));
+        assert!(fingers.is_scroll_drag_owner(touch, Vec2Index::Y, outer));
+        assert_eq!(fingers.lock_scroll_drag(touch, dvec2(1.0, 7.0)), Some(ScrollDirection::Free));
+    }
+
+    #[test]
+    fn a_trackpad_gesture_keeps_to_the_way_it_started() {
+        let mut nest = Nest::new();
+        // Like code in a page: the inner one only scrolls sideways and the outer one only down.
+        nest.are_scrollable_x.set([true, false]);
+        nest.are_scrollable.set([false, true]);
+        assert_eq!(nest.scroll_by(ScrollPhase::Began, dvec2(3.0, 0.0)), (Some(INNER), Some(OUTER)));
+        // Mostly sideways by the tap distance, so turning down later moves nothing but the code.
+        assert_eq!(nest.scroll_by(ScrollPhase::Changed, dvec2(4.0, 1.0)), (Some(INNER), None));
+        assert_eq!(nest.scroll_by(ScrollPhase::Changed, dvec2(0.0, 20.0)), (Some(INNER), None));
+        assert_eq!(nest.scroll_by(ScrollPhase::Ended, dvec2(0.0, 0.0)), (Some(INNER), None));
+        assert_eq!(nest.scroll_by(ScrollPhase::Momentum, dvec2(1.0, 15.0)), (Some(INNER), None));
+        nest.scroll_by(ScrollPhase::MomentumEnded, dvec2(0.0, 0.0));
+        // A diagonal start scrolls both ways for the whole gesture.
+        assert_eq!(nest.scroll_by(ScrollPhase::Began, dvec2(4.0, 4.0)), (Some(INNER), Some(OUTER)));
+        assert_eq!(nest.scroll_by(ScrollPhase::Changed, dvec2(4.0, 4.0)), (Some(INNER), Some(OUTER)));
+        assert_eq!(nest.scroll_by(ScrollPhase::Changed, dvec2(0.0, 20.0)), (Some(INNER), Some(OUTER)));
+        assert_eq!(nest.scroll_by(ScrollPhase::Changed, dvec2(20.0, 0.0)), (Some(INNER), Some(OUTER)));
+        nest.scroll_by(ScrollPhase::Ended, dvec2(0.0, 0.0));
+
+        // Over something that only scrolls down, a mostly sideways start never holds that back.
+        nest.are_scrollable_x.set([false, false]);
+        assert_eq!(nest.scroll_by(ScrollPhase::Began, dvec2(8.0, 1.0)), (None, Some(OUTER)));
+        assert_eq!(nest.scroll_by(ScrollPhase::Changed, dvec2(0.0, 20.0)), (None, Some(OUTER)));
+        nest.scroll_by(ScrollPhase::Ended, dvec2(0.0, 0.0));
+
+        // One scroller that takes both ways, like a map, pans freely.
+        nest.are_scrollable_x.set([true, false]);
+        nest.are_scrollable.set([true, true]);
+        assert_eq!(nest.scroll_by(ScrollPhase::Began, dvec2(8.0, 0.0)), (Some(INNER), Some(INNER)));
+        assert_eq!(nest.scroll_by(ScrollPhase::Changed, dvec2(0.0, 20.0)), (Some(INNER), Some(INNER)));
     }
 }

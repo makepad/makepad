@@ -22,6 +22,8 @@ struct Built {
     tris: Vec<Vec<[u32; 3]>>,
     /// The original parts' fields (before the joints).
     originals: Vec<MeshField>,
+    /// Per final part: its mesh is closed.
+    watertight: Vec<bool>,
 }
 
 fn mesh_field(m: &makepad_csg_mesh::TriMesh) -> MeshField {
@@ -32,7 +34,7 @@ fn build(mut g: Graph, nodes: &[NodeId], names: &[&str], plan: &Plan) -> Built {
     let finals: Vec<NodeId> = plan.solids.iter().map(|s| s.lower(&mut g, nodes, 96).unwrap()).collect();
     let mut ev = Evaluator::new();
     ev.begin();
-    let mut b = Built { names: names.iter().map(|s| s.to_string()).collect(), verts: Vec::new(), tris: Vec::new(), originals: Vec::new() };
+    let mut b = Built { names: names.iter().map(|s| s.to_string()).collect(), verts: Vec::new(), tris: Vec::new(), originals: Vec::new(), watertight: Vec::new() };
     for n in nodes {
         b.originals.push(mesh_field(&ev.mesh(&g, *n, None).map_err(|e| e.message).unwrap()));
     }
@@ -40,6 +42,7 @@ fn build(mut g: Graph, nodes: &[NodeId], names: &[&str], plan: &Plan) -> Built {
         let m = ev.mesh(&g, f, None).map_err(|e| e.message).unwrap();
         let mf = mesh_field(&m);
         println!("  mesh {}: {} triangles, watertight {}", names[i], m.triangles.len(), mf.watertight);
+        b.watertight.push(mf.watertight);
         b.verts.push(m.vertices.iter().map(|p| [p.x, p.y, p.z]).collect());
         b.tris.push(m.triangles.clone());
     }
@@ -154,6 +157,8 @@ fn puppet_arm_ball_shoulder_hinge_elbow() {
         }
     }
     let built = build(g, &nodes, &["torso", "upper_arm", "forearm"], &plan);
+    // The torso's socket (a teardrop roof meeting the swept opening cone, tangent) closes.
+    assert_eq!(built.watertight, vec![true; 3]);
     let fs = fields(&built, &plan);
     let parts = finals(&built, &fs);
     let checks = check_joints(&plan, &parts, Geometry::Design, &|| false);

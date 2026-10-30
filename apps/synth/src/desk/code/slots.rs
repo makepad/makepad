@@ -7,6 +7,7 @@
 
 use super::{Hot, ScoreEditor, ScoreEditorAction};
 use crate::desk::tracker_model as tm;
+use makepad_edit_values::Edit;
 use makepad_look::palette::Palette;
 use makepad_widgets::*;
 
@@ -36,7 +37,7 @@ impl ScoreEditor {
     /// Split `node`'s pattern into `slots`.
     pub(super) fn set_slots(&mut self, cx: &mut Cx, node: &str, slots: usize, gesture: u64) {
         match tm::resample_hits(&self.source, node, slots) {
-            Ok(s) => self.splice(cx, s.start, s.end, s.text, gesture, true),
+            Ok(s) => self.edit(cx, Edit::splice(s.range, s.text, gesture, true)),
             Err(e) => cx.widget_action(self.widget_uid(), ScoreEditorAction::Status(e)),
         }
     }

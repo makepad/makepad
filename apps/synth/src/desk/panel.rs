@@ -19,6 +19,7 @@
 use super::score_doc::{self, ScoreCode};
 use super::Desk;
 use crate::audio::{self, SLOT};
+use makepad_edit_values::{apply_splices, Change, Edit};
 use makepad_editor_panel as panel;
 use makepad_music_iter::gen::TurnMonitor;
 use makepad_score_live::held::{self, Target};
@@ -48,6 +49,15 @@ enum Ask {
     Select(String),
     Generate(String, String, Vec<(String, String)>, bool),
     Vary(String, makepad_synth_panel::host::VaryAction),
+    /// The browser's A/B or revert: the node's constructor as it was.
+    SetCtor(String, String),
+    /// A kit's voice played from the browser: (node, the choice it would
+    /// be, the drum).
+    Pad(String, Option<Choice>, String),
+    /// A browser asked for its own window.
+    PopOut(String),
+    /// An engine's library to download: the Resources page.
+    GetLibrary(String),
 }
 
 /// The score as the synth widgets' host closures see it.
@@ -230,7 +240,7 @@ pub fn reach(doc: Option<&ScoreDoc>, entry: &panel::ValueSite) -> Option<String>
     let ty = source_type(doc, node)?;
     let range = makepad_synth_panel::spec::spec(&ty, field)
         .or_else(|| (ty == "Shader").then(|| makepad_synth_panel::spec::spec("Synth", field)).flatten())
-        .map(|s| if s.is_choice() { format!(" {}", s.options.iter().map(|o| format!("@{o}")).collect::<Vec<_>>().join(" ")) } else { format!(" {}..{}", source::fmt_num(s.min, 4), source::fmt_num(s.max, 4)) })
+        .map(|s| if s.is_choice() { format!(" {}", s.options.iter().map(|o| format!("@{o}")).collect::<Vec<_>>().join(" ")) } else { format!(" {}..{}", makepad_edit_values::number::fmt_num(s.min, 4), makepad_edit_values::number::fmt_num(s.max, 4)) })
         .unwrap_or_default();
     let how = if held::targets(doc, node, field).is_empty() { "on release" } else { "live" };
     Some(format!("{how}{range}"))
@@ -459,6 +469,8 @@ impl Desk {
         });
         let (s1, s2, s3, s4, s5, s6) = (shared.clone(), shared.clone(), shared.clone(), shared.clone(), shared.clone(), shared.clone());
         let (s7, s8, s9) = (shared.clone(), shared.clone(), shared.clone());
+        let (b1, b2, b3, b4, b5, b6) = (shared.clone(), shared.clone(), shared.clone(), shared.clone(), shared.clone(), shared.clone());
+        let (b7, b8) = (shared.clone(), shared.clone());
         let live: Arc<dyn makepad_synth_panel::live::LiveSource> = Arc::new(TelemetrySource {
             telemetry: self.engine.meters.clone(),
             loops_of: self.doc.as_ref().map(|doc| {
@@ -481,6 +493,36 @@ impl Desk {
             tracks: Box::new(move || s7.borrow().tracks.clone()),
             variants: Box::new(move |node| s8.borrow().variants.get(node).cloned().unwrap_or_default()),
             vary: Box::new(move |node, action| s9.borrow_mut().asks.push(Ask::Vary(node.to_string(), action))),
+            browse: synth::BrowseHost {
+                current: Box::new(move |node| makepad_score_live::instruments::current_key(&b1.borrow().source, node)),
+                ctor: Box::new(move |node| {
+                    let shared = b2.borrow();
+                    let outline = source::outline(&shared.source);
+                    let ctor = outline.node(node)?;
+                    let start = ctor.body.start.checked_sub(ctor.type_name.len())?;
+                    shared.source.get(start..ctor.body.end).map(str::to_string)
+                }),
+                set_ctor: Box::new(move |node, text| b3.borrow_mut().asks.push(Ask::SetCtor(node.to_string(), text.to_string()))),
+                extras: Box::new(move || {
+                    let shared = b4.borrow();
+                    makepad_score_live::browse::score_entries(shared.doc.as_ref(), &shared.available)
+                }),
+                used: Box::new(move || {
+                    let shared = b5.borrow();
+                    shared.doc.as_ref().map(|d| d.insts.iter().filter_map(|i| makepad_score_live::instruments::current_key(&shared.source, &i.name)).collect()).unwrap_or_default()
+                }),
+                pad: Box::new(move |node, choice, drum| b6.borrow_mut().asks.push(Ask::Pad(node.to_string(), choice.cloned(), drum.to_string()))),
+                remember: Box::new(|key, value| {
+                    let path = crate::paths::data_dir().join("prefs").join(key);
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    let _ = std::fs::write(path, value);
+                }),
+                recall: Box::new(|key| std::fs::read_to_string(crate::paths::data_dir().join("prefs").join(key)).ok()),
+                pop_out: Some(Box::new(move |node| b7.borrow_mut().asks.push(Ask::PopOut(node.to_string())))),
+                get_library: Box::new(move |engine| b8.borrow_mut().asks.push(Ask::GetLibrary(engine.to_string()))),
+            },
         });
     }
 
@@ -492,7 +534,7 @@ impl Desk {
         let missing = |path: &str, text: &str| -> Option<(usize, std::ops::Range<usize>, String)> {
             let (node, field) = held::node_field(path)?;
             let splice = source::set_field(&source, node, field, text).ok()?;
-            Some((0, splice.start..splice.end, splice.text))
+            Some((splice.file, splice.range, splice.text))
         };
         let splices = self.panel.runtime.take(&files, &missing);
         if splices.is_empty() {
@@ -541,23 +583,13 @@ impl Desk {
             return;
         }
         // The release (or a click): written once, back to front, one step.
-        let mut next = source.clone();
-        for splice in &written {
-            if splice.splice.range.end <= next.len() && next.is_char_boundary(splice.splice.range.start) && next.is_char_boundary(splice.splice.range.end) {
-                next.replace_range(splice.splice.range.clone(), &splice.splice.text);
-            }
-        }
         self.panel.held.clear();
         self.panel.stats.writes += 1;
         if !self.panel.holding.is_empty() {
             self.panel.release_at = Some(audio::slot().playing());
         }
-        if written.len() == 1 {
-            let s = &written[0];
-            self.splice(cx, ui, s.splice.range.start, s.splice.range.end, &s.splice.text);
-        } else {
-            self.set_source(cx, ui, next);
-        }
+        let edit = Edit { changes: written.into_iter().map(|s| Change::Splice(s.splice)).collect(), gesture: (3u64 << 40) + self.revision, done: true };
+        self.edit(cx, ui, edit);
         self.code_shown = 0;
     }
 
@@ -569,13 +601,38 @@ impl Desk {
                 Ask::Preview(node, choice) => self.panel.preview = choice.map(|c| (node, c)),
                 Ask::Switch(node, choice) => {
                     match makepad_score_live::instruments::switch(&self.source, &node, &choice) {
-                        Ok(splice) => self.splice(cx, ui, splice.start, splice.end, &splice.text),
+                        Ok(splice) => self.edit(cx, ui, Edit::splice(splice.range, splice.text, (3u64 << 40) + self.revision, true)),
                         Err(error) => self.panel.runtime.status = error,
                     }
                     self.panel.preview = None;
                 }
                 Ask::Key(node, note, down) => {
                     self.panel.key = down.then_some((node, note));
+                }
+                Ask::SetCtor(node, text) => {
+                    let outline = source::outline(&self.source);
+                    if let Some(ctor) = outline.node(&node) {
+                        if let Some(start) = ctor.body.start.checked_sub(ctor.type_name.len()) {
+                            let end = ctor.body.end;
+                            self.edit(cx, ui, Edit::splice(start..end, &text, (3u64 << 40) + self.revision, true));
+                        }
+                    }
+                    self.panel.preview = None;
+                }
+                Ask::PopOut(node) => self.pop_browser(cx, ui, &node),
+                Ask::GetLibrary(engine) => {
+                    log!("synth: the {engine} library asked for: Resources");
+                    self.open_resources = true;
+                }
+                Ask::Pad(node, choice, drum) => {
+                    // As the choice would make it: that kit in place.
+                    let source = match &choice {
+                        Some(c) => makepad_score_live::instruments::switch(&self.source, &node, c).and_then(|s| apply_splices(&self.source, 0, &[s])).ok(),
+                        None => Some(self.source.clone()),
+                    };
+                    if let Some(source) = source {
+                        self.pad_audition = Some((source, node, drum));
+                    }
                 }
                 Ask::Select(node) => {
                     // A voice: its part, for its timeline and variants.
@@ -634,7 +691,7 @@ impl Desk {
             return Ok(code);
         }
         // Heard alone: the loop soloed, from its start.
-        let solo = source::set_field(&next, node, "solo", "true").map(|s| source::apply(&next, &s)).unwrap_or(next);
+        let solo = source::set_field(&next, node, "solo", "true").and_then(|s| apply_splices(&next, 0, &[s])).unwrap_or(next);
         let bars = self.doc.as_ref().map_or(8.0, |d| d.beats_per_bar() * 2.0);
         let bpm = self.doc.as_ref().map_or(120.0, |d| d.clock.bpm.max(20.0));
         let seconds = (bars * 60.0 / bpm).min(8.0);

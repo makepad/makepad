@@ -10,6 +10,7 @@
 //! writes the release as one undo step, as it does for the panel program's
 //! own `scene.set`.
 
+use makepad_edit_values::number::{fmt_num, number_with_unit};
 use makepad_widgets::{Area, Cx, Cx2d, DVec2, Rect};
 use std::cell::{Cell, RefCell};
 
@@ -28,7 +29,7 @@ impl PanelValue {
     /// The value as code text.
     pub fn code(&self) -> String {
         match self {
-            Self::Number(v) => fmt_number(*v, 4),
+            Self::Number(v) => fmt_num(*v, 4),
             Self::Bool(b) => b.to_string(),
             Self::Code(c) => c.clone(),
         }
@@ -51,27 +52,6 @@ impl PanelValue {
             Self::Code(c) => numbers_in(c),
         }
     }
-}
-
-/// `v` written with at most `decimals` decimals and no trailing zeros.
-pub fn fmt_number(v: f64, decimals: usize) -> String {
-    let mut s = format!("{:.*}", decimals, v);
-    while s.contains('.') && (s.ends_with('0') || s.ends_with('.')) {
-        s.pop();
-    }
-    if s == "-0" { "0".into() } else { s }
-}
-
-/// A number written with a unit: `0.12s`, `120ms`, `90deg`, `0.3rad`, `12px`.
-pub fn number_with_unit(text: &str) -> Option<(f64, String)> {
-    let t = text.trim();
-    ["ms", "deg", "rad", "px", "s", ""].into_iter().find_map(|unit| {
-        let digits = t.strip_suffix(unit)?;
-        if !unit.is_empty() && !digits.ends_with(|c: char| c.is_ascii_digit() || c == '.') {
-            return None;
-        }
-        digits.parse::<f64>().ok().map(|v| (v, unit.to_string()))
-    })
 }
 
 /// The numbers written in a value (`vec2(0.5, -1)`, `[1, 2, 3]`), as they
@@ -119,7 +99,7 @@ pub fn with_numbers(text: &str, values: &[f64], decimals: usize) -> String {
             }
             if let Some(v) = values.get(k) {
                 out.push_str(&text[last..s]);
-                out.push_str(&fmt_number(*v, decimals));
+                out.push_str(&fmt_num(*v, decimals));
                 last = i;
             }
             k += 1;

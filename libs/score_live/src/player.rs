@@ -220,6 +220,15 @@ pub fn slice(doc: &ScoreDoc, name: &str, clocking: ClockMode) -> OwnerSlice {
     for l in &doc.loops {
         let mut fields = inst_fields(doc, l);
         fields.extend([("amp", num(l.amp as f64)), ("pan", num(l.pan as f64)), ("mute", num(l.mute as u8 as f64)), ("solo", num(l.solo as u8 as f64))]);
+        // A loop that plays a keyboard: its stream, run on the audio thread.
+        if let Some(Ok(stream)) = doc.resolve_stream(l) {
+            fields.extend([
+                ("stream", Literal::Arr(stream.def.encode().into_iter().map(num).collect())),
+                ("midi_device", text(&stream.device)),
+                ("midi_channel", num(stream.channel as f64)),
+                ("midi_latency", num(stream.latency as f64)),
+            ]);
+        }
         b.node("Loop", b.id(&l.name), &fields, &clocked);
         // fx() scopes: a copy of the loop playing the scope's notes into
         // its effect, the deepest first (an effect reads its inner ones).
@@ -447,7 +456,7 @@ impl Player {
     /// clock, events or automation in a feed, an open input).
     pub fn busy(&self) -> bool {
         self.schedule.states.iter().any(|state| match state {
-            NodeState::Loop(this) => this.playing || this.input.is_some() || this.feed.as_ref().is_some_and(|feed| !feed.is_empty()),
+            NodeState::Loop(this) => this.playing || this.input.is_some() || this.has_input() || this.stream.as_ref().is_some_and(|s| s.busy()),
             NodeState::Fx(this) => this.feed.as_ref().is_some_and(|feed| !feed.is_empty()),
             _ => false,
         })

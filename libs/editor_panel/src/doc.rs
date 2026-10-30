@@ -152,7 +152,7 @@ pub fn fmt_num(value: f64) -> String {
     if !value.is_finite() {
         return "0".into();
     }
-    makepad_value_pickers::panel::host::fmt_number((value * 10_000.0).round() / 10_000.0, 4)
+    makepad_edit_values::number::fmt_num((value * 10_000.0).round() / 10_000.0, 4)
 }
 
 /// Text as a string literal of the code.

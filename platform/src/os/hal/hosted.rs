@@ -316,6 +316,9 @@ impl Cx {
         if self.hal_hosted_extra_window(window) {
             Self::send_hosted_window(crate::ime::HostedWindow::title(window.id(), &self.windows[window].create_title));
         }
+        if self.windows[window].window_geom.is_topmost {
+            Self::send_hosted_window(crate::ime::HostedWindow::topmost(window.id(), true));
+        }
         let early = self.hal.hosted.as_mut().and_then(|hosted| hosted.early_geom.take(window.id()));
         if let Some(geom) = early {
             self.hal_hosted_geom(window, geom);

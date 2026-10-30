@@ -166,12 +166,34 @@ Score{label: "Name" clock kit bass kick line pump verb a b arrange: [a b]}
   not find it says so); src: asset(id, rev) plays a library SF2. gain.
 - MIDI: `Instrument{kind: @midi channel: 2 port: "IAC Bus 1"}` plays
   outboard gear or another app: its loops' notes go out as MIDI (program
-  changes, the pedal as CC 64; no port: every output). `Loop{play: keys
-  midi_in: true}` (or a channel) lets a MIDI keyboard play that loop's
-  instrument live; `held()` is the keys held (lowest first: `sleep(arp(
-  held(), @up, 0.25))` arpeggiates them) and `cc(74)` a controller's value
-  0..1 in loop code; `Clock{params: {cutoff: 0} midi: {cutoff: 74}}` lets a
-  controller move a param (and the FX settings that follow it) at once.
+  changes, the pedal as CC 64; no port: every output).
+- MIDI in (a keyboard plays the score live, on the audio thread, each key
+  on its sample): `let keys_in = MidiIn{device: "any" channel: 0}` (device:
+  part of an input's name, "any" every input; channel 1..16, 0 every one;
+  bend: the bend range in semitones, default 2; mpe: true for a channel per
+  key; latency: ms from a key's arrival to its sound, default 8). A loop
+  plays a stream: `let keys = Loop{play: piano in: keys_in}` (only the
+  stream: no hits, code or notes). Streams pass through stream nodes, each
+  `in:` the one before: `Arp{in: keys_in pattern: @updown rate: 1/16
+  octaves: 2 gate: 0.6 swing: 0.1 latch: true}` (patterns @up @down @updown
+  @downup @converge @diverge @thumb @pinky @played @random @chord; rate a
+  note value, 1/16 a sixteenth; repeats, chance, interval (semitones per
+  octave pass); steps on the clock's grid unless sync: false; latch keeps
+  the chord playing after the keys come up), `Chord{in: keys_in chord:
+  @minor7}` (or tones: [0 7 12]), `Transpose{in: keys_in semis: -12}`,
+  `Velocity{in: keys_in curve: @soft}` (@linear @soft @hard @fixed with
+  level, min, max). Many loops may play one stream (a bass an octave down
+  and a pad from the same keys). The sustain pedal holds keys (an arp's
+  too); pitch bend, the mod wheel, pressure and slide reach the instrument
+  (recipe synths and native instruments bend; Morph takes them all; an
+  `Instrument{kind: @midi}` sends them on). While the transport is stopped
+  the keys still play and an arp runs at the Clock's tempo. A render (and
+  score_listen) has no keyboard: those loops are silent there. In loop code
+  `held()` is the keys held (lowest first: `sleep(arp(held(), @up,
+  0.25))` writes an arpeggio of them into the loop) and `cc(74)` a
+  controller's value 0..1; `Clock{params: {cutoff: 0} midi: {cutoff: 74}}`
+  lets a controller move a param (and the FX settings that follow it) at
+  once.
   MIDI clock in and out is the host app's (in Stage its utility panel,
   where the score's tempo is the show's while BPM follows SYNTH).
 - Audio in: `let mic = Instrument{kind: @input gain: 1}` and

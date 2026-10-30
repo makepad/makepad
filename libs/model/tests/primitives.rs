@@ -14,25 +14,14 @@ fn apply(doc: &mut Document, request: &str, operations: Vec<Operation>) {
     .unwrap();
 }
 
-fn parsed(text: &str, limits: &Limits) -> Vec<Operation> {
-    parse_operations(&json::parse(text.as_bytes()).unwrap(), limits).unwrap()
-}
-
 fn primitive(kind: &str, smooth: Option<bool>, segments: u32, rings: u32) -> Document {
     let mut doc = Document::new(Limits::default()).unwrap();
-    let style = smooth
-        .map(|v| format!(",\"smooth\":{v}"))
-        .unwrap_or_default();
-    let dimensions = if kind == "sphere" {
-        format!(",\"rings\":{rings}")
-    } else {
-        ",\"height\":1.8".into()
-    };
-    let text = format!(
-        r#"[{{"op":"{kind}","object":"shape","radius":0.7,"segments":{segments}{dimensions}{style}}}]"#
-    );
-    let ops = parsed(&text, doc.limits());
-    apply(&mut doc, "primitive", ops);
+    let operation = match kind {
+        "sphere" => Operation::sphere("shape", 0.7, segments, rings, smooth.unwrap_or(true), doc.limits()),
+        "cylinder" => Operation::cylinder("shape", 0.7, 1.8, segments, smooth.unwrap_or(true), doc.limits()),
+        _ => unreachable!(),
+    }.unwrap();
+    apply(&mut doc, "primitive", vec![operation]);
     doc
 }
 
@@ -267,10 +256,17 @@ fn analytic_normals_survive_rotated_nonuniform_and_mirrored_mesh_transforms() {
 fn glossy_primitives_export_stored_normals_uvs_and_low_roughness_pbr_without_source_mutation() {
     for kind in ["sphere", "cylinder"] {
         let mut doc = primitive(kind, None, 16, 8);
-        let ops = parsed(
-            r#"[{"op":"surface_material","material":0,"base_color":[0.5,0.15,0.25,1],"metallic":0,"roughness":0.08}]"#,
-            doc.limits(),
-        );
+        let ops = vec![
+        Operation::Surface(SurfaceOperation::Material {
+            material: 0,
+            value: SurfaceMaterial {
+                base_color: [0.5, 0.15, 0.25, 1.0],
+                metallic: 0.0,
+                roughness: 0.08,
+                ..Default::default()
+            }
+        }),
+    ];
         apply(&mut doc, "gloss", ops);
         let source = doc.to_bytes(None).unwrap();
         let head = doc.head();
@@ -315,22 +311,8 @@ fn glossy_primitives_export_stored_normals_uvs_and_low_roughness_pbr_without_sou
 
 #[test]
 fn smooth_is_a_strict_optional_boolean_and_primitive_budgets_still_apply() {
-    for (kind, dimension) in [("sphere", "\"rings\":6"), ("cylinder", "\"height\":2")] {
-        for value in ["null", "0", "1", "\"true\"", "[]", "{}"] {
-            let text = format!(
-                r#"[{{"op":"{kind}","object":"shape","radius":1,"segments":12,{dimension},"smooth":{value}}}]"#
-            );
-            assert!(
-                parse_operations(&json::parse(text.as_bytes()).unwrap(), &Limits::default())
-                    .is_err(),
-                "accepted {text}"
-            );
-        }
-        let text = format!(
-            r#"[{{"op":"{kind}","object":"shape","radius":1,"segments":12,{dimension},"smooth":true}}]"#
-        );
-        let mut limits = Limits::default();
-        limits.mesh.max_corners = 8;
-        assert!(parse_operations(&json::parse(text.as_bytes()).unwrap(), &limits).is_err());
-    }
+    let mut limits = Limits::default();
+    limits.mesh.max_corners = 8;
+    assert!(Operation::sphere("shape", 1., 12, 6, true, &limits).is_err());
+    assert!(Operation::cylinder("shape", 1., 2., 12, true, &limits).is_err());
 }

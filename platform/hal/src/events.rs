@@ -239,6 +239,9 @@ hal_events! {
     ChildChrome = 86, child_chrome { window: obj, child: u32, own: bool };
     ChildDragAnswer = 87, child_drag_answer { window: obj, child: u32, request: u32, answer: u32 };
     ChildWindowState = 88, child_window_state { window: obj, child: u32, state: u32 };
+    /// A child's window asked to stay above the parent's other windows (`WindowTopmost`), or
+    /// no longer does. Sent again with every announcement of the window while it is on.
+    ChildTopmost = 90, child_topmost { window: obj, child: u32, on: bool };
 
     ChildMessage = 89, child_message { child: u32, message: rng };
 

@@ -271,11 +271,10 @@ mod os {
     const MAP_FAILED: *mut c_void = !0usize as *mut c_void;
 
     unsafe extern "C" {
+        // On 32-bit bionic and glibc, the plain `mmap` symbol takes a 32-bit
+        // `off_t`; `mmap64` takes 64 bits on every ABI (on 64-bit, it's an alias).
         #[cfg_attr(
-            all(
-                any(target_os = "linux", target_os = "android"),
-                target_pointer_width = "32"
-            ),
+            any(target_os = "android", all(target_os = "linux", target_env = "gnu")),
             link_name = "mmap64"
         )]
         fn mmap(

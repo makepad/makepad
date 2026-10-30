@@ -1329,14 +1329,14 @@ impl Widget for DropDown2 {
             }
             match event {
                 Event::Scroll(e) => {
-                    if !e.handled_y.get() {
-                        if self.geom.is_some_and(|g| g.popup_rect().contains(e.abs)) {
-                            self.set_arrow_dir(cx, None);
-                            self.apply_scroll(cx, self.scroll.unwrap_or(0.0) + e.scroll.y);
-                            self.set_hover_item(cx, None);
-                        }
-                        e.handled_y.set(true);
-                        e.handled_x.set(true);
+                    // The open list is modal: it takes every scroll gesture, so nothing else moves.
+                    cx.is_scroll_owner(e, area, Vec2Index::X, true);
+                    if cx.is_scroll_owner(e, area, Vec2Index::Y, true)
+                        && self.geom.is_some_and(|g| g.popup_rect().contains(e.abs))
+                    {
+                        self.set_arrow_dir(cx, None);
+                        self.apply_scroll(cx, self.scroll.unwrap_or(0.0) + e.scroll.y);
+                        self.set_hover_item(cx, None);
                     }
                     return;
                 }

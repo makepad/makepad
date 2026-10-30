@@ -55,16 +55,41 @@ unsafe impl Send for MidiInput {}
 
 impl MidiInput {
     pub fn receive(&mut self) -> Option<(MidiPortId, MidiData)> {
+        self.receive_timed().map(|(port, data, _)| (port, data))
+    }
+
+    /// A message with how long ago it arrived (seconds, by the time stamp the
+    /// platform gave it on arrival): a player subtracts it from its own clock
+    /// to place the message on its sample.
+    pub fn receive_timed(&mut self) -> Option<(MidiPortId, MidiData, f64)> {
         // Injected messages first, and before the device is touched at all,
         // so a run with no hardware still exercises everything downstream of
         // here. Inert — one relaxed load — until something arms it.
-        if let Some(injected) = crate::midi_inject::take_incoming() {
-            return Some(injected);
+        if let Some((port, data)) = crate::midi_inject::take_incoming() {
+            return Some((port, data, 0.0));
         }
         // A handle that was never given a backend yields nothing rather than
         // panicking. `MidiInput` derives Default, so one exists from the
         // moment a struct holding it is built until the app fills it in.
-        self.0.as_mut()?.receive()
+        self.0.as_mut()?.receive_timed()
+    }
+
+    /// The next message, waiting up to `timeout` for one: for a thread that
+    /// forwards MIDI to an audio engine as it arrives. Injected messages are
+    /// seen at the next wake; a handle without a backend waits the timeout.
+    pub fn wait(&mut self, timeout: std::time::Duration) -> Option<(MidiPortId, MidiData, f64)> {
+        if let Some((port, data)) = crate::midi_inject::take_incoming() {
+            return Some((port, data, 0.0));
+        }
+        match self.0.as_mut() {
+            Some(input) => input.wait(timeout),
+            None => {
+                #[cfg(not(target_arch = "wasm32"))]
+                std::thread::sleep(timeout);
+                let _ = timeout;
+                None
+            }
+        }
     }
 }
 

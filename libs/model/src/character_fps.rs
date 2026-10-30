@@ -28,11 +28,13 @@ pub enum Hold { Rifle, Long, Pistol, Blade, One }
 ///   wrap its front edge). Equal to the radius for a round handle.
 /// - `support` / `support_radius`: the support hand's wrap axis point and
 ///   radius (handguard, or the trigger hand for a pistol).
+#[derive(Clone, Debug, PartialEq)]
 pub struct FpsArms { pub hold: Hold, pub support: Option<[f64; 3]>, pub grip_radius: f64, pub grip_front: f64, pub support_radius: f64 }
 
 impl FpsArms {
-    pub fn parse(v: &Value) -> std::result::Result<FpsArms, String> {
-        let hold = match v.get("hold").and_then(Value::as_str).unwrap_or("rifle") {
+    pub fn read<T: SpecTree>(v: &T) -> std::result::Result<FpsArms, String> {
+        let hold = v.get("hold").and_then(|h| h.text()).unwrap_or_else(|| "rifle".into());
+        let hold = match hold.as_str() {
             "rifle" => Hold::Rifle,
             "long" | "sniper" => Hold::Long,
             "pistol" | "sidearm" => Hold::Pistol,
@@ -40,7 +42,7 @@ impl FpsArms {
             "one" | "grenade" => Hold::One,
             other => return Err(format!("fps_arms: hold '{other}' unknown (rifle, long, pistol, blade, one)")),
         };
-        let support = v.get("support").and_then(Value::as_arr).filter(|a| a.len() >= 3).and_then(|a| Some([num(&a[0])?, num(&a[1])?, num(&a[2])?]));
+        let support = v.get("support").and_then(|s| s.items()).filter(|a| a.len() >= 3).and_then(|a| Some([a[0].num()?, a[1].num()?, a[2].num()?]));
         // Class defaults: strike's AK/M4/AWP pistol grips (3 cm wide, 4.3 cm
         // deep), a service pistol's (2.9 x 5.7 cm), a knife handle (2.8 cm).
         let (gr, gf, sr) = match hold {
@@ -49,7 +51,7 @@ impl FpsArms {
             Hold::Blade => (0.0145, 0.0145, 0.0),
             Hold::One => (0.024, 0.024, 0.0),
         };
-        let f = |k: &str, d: f64| v.get(k).and_then(num).filter(|x| *x > 0.0 && *x < 0.2).unwrap_or(d);
+        let f = |k: &str, d: f64| v.get(k).and_then(|x| x.num()).filter(|x| *x > 0.0 && *x < 0.2).unwrap_or(d);
         Ok(FpsArms { hold, support, grip_radius: f("grip_radius", gr), grip_front: f("grip_front", gf), support_radius: f("support_radius", sr) })
     }
 }
@@ -317,10 +319,8 @@ pub fn build_fps_arms(spec: &CharacterSpec, arms: &FpsArms, limits: &Limits) -> 
     fps_detail(&mut g, &mut part, &frames, grip, sides);
     let (op, paint) = part.export_static(limits)?;
     let mut late = paint;
-    let arr = |v: &[f64]| Value::Arr(v.iter().map(|x| Value::F64(*x)).collect());
-    late.push(json::obj(vec![("op", json::s("socket")), ("name", json::s("grip")), ("attachment", json::obj(vec![("object", json::s("arms"))])),
-        ("transform", json::obj(vec![("translation", arr(&[0., 0., 0.]))]))]));
-    Ok(CharacterBuild { operations: vec![op], late, early: g.mats.ops(), warnings: spec.warnings.clone(), joints: Vec::new() })
+    late.push(Operation::Scene(crate::SceneOperation::Socket(crate::Socket { name: "grip".into(), attachment: crate::Attachment::Object("arms".into()), transform: crate::Transform::default() })));
+    Ok(CharacterBuild { operations: vec![op], late, early: g.mats.ops(limits)?, warnings: spec.warnings.clone(), joints: Vec::new() })
 }
 
 // ── first-person detail ───────────────────────────────────────────────────
@@ -502,11 +502,10 @@ mod grip_tests {
     /// (the fist closes on the handle, no floating fingers).
     #[test]
     fn hands_wrap_their_handles_without_gaps_or_cuts() {
-        for preset in ["halcyon_warden", "kestrel_striker"] {
+        use super::super::test_spec::*;
+        for spec in [armoured(), spec(vec![("height", S::N(1.8)), ("body", S::O(vec![("shoulders", S::N(1.2)), ("muscle", S::N(1.22))]))])] {
             for hold in ["blade", "pistol", "rifle", "long"] {
-                let v = json::parse(format!(r#"{{"preset":"{preset}","hold":"{hold}"}}"#).as_bytes()).unwrap();
-                let spec = CharacterSpec::parse(&v).unwrap();
-                let arms = FpsArms::parse(&v).unwrap();
+                let arms = FpsArms::read(&S::O(vec![("hold", S::T(hold))])).unwrap();
                 let b = body::Body::new(&spec);
                 let mut g = Gen { spec: &spec, b, mats: Mats { list: Vec::new(), base: spec.material_base }, parts: Vec::new(), sockets: Vec::new() };
                 body::build(&mut g);
@@ -554,16 +553,25 @@ mod grip_tests {
                     }
                     groups.insert(0, ("hand", cut, gap));
                     let line: Vec<String> = groups.iter().map(|(n, cut, gap)| format!("{n} cut {:.1} gap {:.1} mm", cut * 1000., gap * 1000.)).collect();
-                    println!("GRIP {preset} {hold} side {side} r {:.1} mm at z {:+.0} mm: {}", r * 1000., (point[2] - grip[2]) * 1000., line.join(" | "));
+                    println!("GRIP {} {hold} side {side} r {:.1} mm at z {:+.0} mm: {}", spec.name, r * 1000., (point[2] - grip[2]) * 1000., line.join(" | "));
                     for (n, cut, gap) in &groups {
-                        assert!(*cut < 0.004, "{preset} {hold} side {side}: {n} cuts {:.1} mm into the handle", cut * 1000.);
+                        assert!(*cut < 0.004, "{} {hold} side {side}: {n} cuts {:.1} mm into the handle", spec.name, cut * 1000.);
                         // A trigger finger rides the guard, off the grip.
                         if !(n.starts_with("index") && side == 1 && hold != "blade") {
-                            assert!(*gap < 0.004, "{preset} {hold} side {side}: {n} stays {:.1} mm off the handle", gap * 1000.);
+                            assert!(*gap < 0.004, "{} {hold} side {side}: {n} stays {:.1} mm off the handle", spec.name, gap * 1000.);
                         }
                     }
                 }
             }
         }
+    }
+}
+
+impl FpsArms {
+    /// The canonical encoding (program hashes).
+    pub(crate) fn write(&self, w: &mut crate::canon::Writer) -> Result<()> {
+        w.u8(self.hold as u8)?;
+        match self.support { None => w.u8(0)?, Some(s) => { w.u8(1)?; for v in s { w.f64(v)?; } } }
+        w.f64(self.grip_radius)?; w.f64(self.grip_front)?; w.f64(self.support_radius)
     }
 }

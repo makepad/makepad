@@ -79,6 +79,17 @@ struct Inner {
 #[derive(Clone)]
 pub struct Client(Arc<Inner>);
 
+/// The last handle of a client ends its connection: the connection's own threads hold it open
+/// otherwise, and a process that makes a client per request (the devhub master) leaked the
+/// descriptors of every one, on both ends, for good.
+impl Drop for Inner {
+    fn drop(&mut self) {
+        if let Ok(Some(c)) = self.conn.get_mut() {
+            c.close("client dropped");
+        }
+    }
+}
+
 fn link_id() -> String {
     format!("{}-{:x}", std::process::id(), crate::cmd::wall_ms())
 }

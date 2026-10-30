@@ -5399,6 +5399,10 @@ impl ScriptParser {
                         OpcodeArgs::from_u32(self.code_len() as u32 - fn_slot),
                     );
                 }
+                // `let xs = for .. { .. }` as the source's last statement: close its list.
+                State::EndForList => {
+                    self.push_code(Opcode::END_ARRAY.into(), last_index);
+                }
                 State::EmitLetDyn { index, name } => {
                     self.slot_note_let(name);
                     self.push_code(Opcode::LET_DYN.into(), index);
@@ -5725,6 +5729,10 @@ impl ScriptParser {
                         fn_slot as _,
                         OpcodeArgs::from_u32(self.code_len() as u32 - fn_slot),
                     );
+                }
+                // `let xs = for .. { .. }` as the source's last statement: close its list.
+                State::EndForList => {
+                    self.push_code(Opcode::END_ARRAY.into(), last_index);
                 }
                 State::EmitLetDyn { index, name } => {
                     self.slot_note_let(name);

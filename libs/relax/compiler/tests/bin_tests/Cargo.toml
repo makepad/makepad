@@ -9,3 +9,8 @@ edition = "2021"
 name = "nh"
 path = "src/bin/nh.rs"
 harness = false
+
+[[test]]
+name = "plain"
+path = "tests/plain.rs"
+harness = false

@@ -13,19 +13,30 @@
 /// - relative, when it starts with an operator: `+0.5`, `*2`, `/3`
 ///   (`-0.5` is a negative number, not a subtraction);
 /// - numbers may carry units, converted into the field's: `200ms` into
-///   seconds is 0.2, `1.5rad` into degrees 85.94; a unit of another kind
-///   (`90deg` into seconds) is an error.
+///   seconds is 0.2, `1.5rad` into degrees 85.94, `2k` is 2000, `2kHz`
+///   into hertz 2000, `80%` into a `frac` field 0.8, `-3dB` into a plain
+///   (linear gain) field 0.708; a unit of another kind (`90deg` into
+///   seconds) is an error.
 pub fn eval(text: &str, current: f64, unit: &str) -> Result<f64, String> {
     let t = text.trim();
     if t.is_empty() {
         return Err("empty".into());
     }
     let relative = t.starts_with('+') || t.starts_with('*') || t.starts_with('/');
-    let mut p = Parser { s: t.as_bytes(), i: 0, unit };
+    let mut p = Parser { s: t.as_bytes(), i: 0, unit, db: false };
     let v = if relative {
         let op = p.s[0];
         p.i = 1;
         let rhs = p.expr()?;
+        // `+3dB` on a linear gain: that many decibels louder.
+        if std::mem::take(&mut p.db) {
+            p.space();
+            if p.i < p.s.len() {
+                return Err(format!("unexpected `{}`", &t[p.i..]));
+            }
+            let gain = 10f64.powf(rhs / 20.0);
+            return Ok(if op == b'/' { current / gain } else { current * gain });
+        }
         match op {
             b'+' => current + rhs,
             b'*' => current * rhs,
@@ -43,20 +54,30 @@ pub fn eval(text: &str, current: f64, unit: &str) -> Result<f64, String> {
     if p.i < p.s.len() {
         return Err(format!("unexpected `{}`", &t[p.i..]));
     }
+    let v = if p.db { 10f64.powf(v / 20.0) } else { v };
     if !v.is_finite() {
         return Err("not a finite number".into());
     }
     Ok(v)
 }
 
-/// A unit's kind and its size in that kind's base (seconds, degrees).
+/// A unit's kind and its size in that kind's base (seconds, degrees,
+/// hertz, a ratio, cents). Case does not matter (`2kHz`, `-3dB`).
+/// A field's unit may also be `frac`: a ratio stored 0..1 (`80%` is 0.8).
 fn unit_of(u: &str) -> Option<(&'static str, f64)> {
-    Some(match u {
-        "s" => ("time", 1.0),
+    Some(match u.to_ascii_lowercase().as_str() {
+        "s" | "sec" => ("time", 1.0),
         "ms" => ("time", 0.001),
         "deg" | "°" => ("angle", 1.0),
         "rad" => ("angle", 180.0 / std::f64::consts::PI),
         "px" => ("length", 1.0),
+        "hz" => ("freq", 1.0),
+        "khz" => ("freq", 1000.0),
+        "%" => ("ratio", 0.01),
+        "frac" => ("ratio", 1.0),
+        "ct" | "cent" | "cents" => ("pitch", 1.0),
+        "st" | "semi" | "semis" => ("pitch", 100.0),
+        "db" => ("level", 1.0),
         _ => return None,
     })
 }
@@ -65,6 +86,9 @@ struct Parser<'a> {
     s: &'a [u8],
     i: usize,
     unit: &'a str,
+    /// Decibels were typed into a plain (linear gain) field: the result is
+    /// a level in dB, made a gain at the end (`-6dB` is 0.5).
+    db: bool,
 }
 
 impl Parser<'_> {
@@ -216,16 +240,25 @@ impl Parser<'_> {
         }
         let text = std::str::from_utf8(&self.s[s..self.i]).unwrap_or("");
         let v: f64 = text.parse().map_err(|_| format!("bad number `{text}`"))?;
-        // Its unit, written right after it (`0.2s`, `90deg`, `90°`).
+        // Its unit, written right after it (`0.2s`, `90deg`, `90°`, `80%`).
+        let mut v = v;
         let u0 = self.i;
         if self.s[self.i..].starts_with("°".as_bytes()) {
             self.i += "°".len();
+        } else if self.s.get(self.i) == Some(&b'%') && !self.s[self.i + 1..].iter().find(|c| !c.is_ascii_whitespace()).is_some_and(|c| c.is_ascii_digit() || *c == b'.' || *c == b'(') {
+            // A percent sign not followed by a number (`7 % 3` is modulo).
+            self.i += 1;
         } else {
             while self.i < self.s.len() && self.s[self.i].is_ascii_alphabetic() {
                 self.i += 1;
             }
         }
-        let u = std::str::from_utf8(&self.s[u0..self.i]).unwrap_or("");
+        let mut u = std::str::from_utf8(&self.s[u0..self.i]).unwrap_or("");
+        // A thousand: `2k` (and `2kHz` is the hertz of it).
+        if u == "k" || u == "K" {
+            v *= 1000.0;
+            u = "";
+        }
         if u.is_empty() {
             return Ok(v);
         }
@@ -234,8 +267,21 @@ impl Parser<'_> {
         };
         match unit_of(self.unit) {
             Some((want, base)) if want == kind => Ok(v * size / base),
-            Some(_) => Err(format!("`{u}` is not a {}", match self.unit { "s" | "ms" => "time", "deg" | "rad" => "angle", _ => "length" })),
-            // A plain number field takes the number in its kind's base.
+            Some(_) => Err(format!("`{u}` is not a {}", match unit_of(self.unit).map_or("", |(k, _)| k) {
+                "time" => "time",
+                "angle" => "angle",
+                "freq" => "frequency",
+                "ratio" => "ratio",
+                "pitch" => "pitch",
+                "level" => "level",
+                _ => "length",
+            })),
+            // A plain number field takes the number in its kind's base; a
+            // level in decibels is a linear gain there.
+            None if kind == "level" => {
+                self.db = true;
+                Ok(v)
+            }
             None => Ok(v * size),
         }
     }
@@ -368,6 +414,44 @@ pub fn clamp_hard(v: f64, hard: (Option<f64>, Option<f64>)) -> f64 {
     }
 }
 
+/// `value` written with at most `decimals` decimals, no trailing zeros
+/// and no negative zero.
+pub fn fmt_num(value: f64, decimals: usize) -> String {
+    let mut text = fmt_places(value, decimals);
+    if text.contains('.') {
+        let end = text.trim_end_matches('0').trim_end_matches('.').len();
+        text.truncate(end);
+    }
+    text
+}
+
+/// A number written with a unit: `0.12s`, `120ms`, `90deg`, `0.3rad`, `12px`.
+pub fn number_with_unit(text: &str) -> Option<(f64, String)> {
+    let t = text.trim();
+    ["ms", "deg", "rad", "px", "s", ""].into_iter().find_map(|unit| {
+        let digits = t.strip_suffix(unit)?;
+        if !unit.is_empty() && !digits.ends_with(|c: char| c.is_ascii_digit() || c == '.') {
+            return None;
+        }
+        digits.parse::<f64>().ok().map(|v| (v, unit.to_string()))
+    })
+}
+
+/// `value` written at `places` decimals, without a negative zero.
+pub fn fmt_places(value: f64, places: usize) -> String {
+    let text = format!("{value:.places$}");
+    if text.starts_with("-0") && text.trim_start_matches(['-', '0', '.']).is_empty() { text[1..].to_string() } else { text }
+}
+
+/// A changed number as written: the places it was written with, at least
+/// enough to show a move across `span` (the view's width).
+pub fn fmt_like(value: f64, written: &str, span: f64) -> String {
+    let written_places = written.split('.').nth(1).map_or(0, |d| d.bytes().take_while(u8::is_ascii_digit).count());
+    let needed = if span <= 0.0 { 0 } else { (2.0 - span.log10().floor()).clamp(0.0, 6.0) as usize };
+    let places = written_places.max(needed.min(written_places.max(3)));
+    fmt_places(value, places)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,5 +535,54 @@ mod tests {
         assert_eq!(clamp_hard(-1.0, (Some(0.0), None)), 0.0);
         assert_eq!(clamp_hard(5.0, (None, None)), 5.0);
         assert_eq!(clamp_hard(5.0, (None, Some(1.0))), 1.0);
+    }
+}
+
+#[cfg(test)]
+mod formatting_tests {
+    use super::*;
+
+    #[test]
+    fn numbers_trim_fractional_zeros() {
+        assert_eq!(fmt_num(0.30000001, 2), "0.3");
+        assert_eq!(fmt_num(-0.001, 1), "0");
+        assert_eq!(fmt_num(1.2300, 4), "1.23");
+        assert_eq!(fmt_num(12.3456, 3), "12.346");
+        assert_eq!(fmt_num(100.0, 4), "100");
+        assert_eq!(fmt_num(100.0, 0), "100");
+        assert_eq!(fmt_num(-10.0, 0), "-10");
+        assert_eq!(fmt_num(0.0, 4), "0");
+        assert_eq!(fmt_num(-0.0, 4), "0");
+        assert_eq!(fmt_num(-0.0, 0), "0");
+        assert_eq!(fmt_num(-0.001, 0), "0");
+        assert_eq!(fmt_num(-0.001, 3), "-0.001");
+    }
+
+    #[test]
+    fn numbers_keep_non_finite_spelling() {
+        for decimals in [0, 4] {
+            assert_eq!(fmt_num(f64::NAN, decimals), "NaN");
+            assert_eq!(fmt_num(f64::INFINITY, decimals), "inf");
+            assert_eq!(fmt_num(f64::NEG_INFINITY, decimals), "-inf");
+        }
+    }
+
+    #[test]
+    fn fixed_places_keep_zeros_without_a_negative_zero() {
+        assert_eq!(fmt_places(2.0, 3), "2.000");
+        assert_eq!(fmt_places(0.0, 2), "0.00");
+        assert_eq!(fmt_places(-0.0, 2), "0.00");
+        assert_eq!(fmt_places(-0.001, 2), "0.00");
+        assert_eq!(fmt_places(-0.001, 0), "0");
+        assert_eq!(fmt_places(-0.001, 3), "-0.001");
+        assert_eq!(fmt_places(-10.0, 2), "-10.00");
+    }
+
+    #[test]
+    fn numbers_keep_their_written_precision() {
+        assert_eq!(fmt_like(1.23456, "1.50", 4.0), "1.23");
+        assert_eq!(fmt_like(2.0, "-2", 4.0), "2.00");
+        assert_eq!(fmt_like(2.0, "-2", 10.0), "2.0");
+        assert_eq!(fmt_like(2.26, "0", 40.0), "2.3");
     }
 }

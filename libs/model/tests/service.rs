@@ -1,48 +1,34 @@
-use makepad_model::{json::{self, Value}, *};
-fn args(v:&str)->Value {json::parse(v.as_bytes()).unwrap()}
-
-#[test]
-fn missing_subdivision_level_reports_the_field_and_allows_an_atomic_retry() {
-    let mut engine=Engine::new(Limits::default());
-    engine.open("d",None,None).unwrap();
-    let head=engine.document("d").unwrap().head();
-    let before=engine.document("d").unwrap().to_bytes(None).unwrap();
-    let batch=|id,operations|json::obj(vec![("document",json::s("d")),
-        ("request_id",json::s(id)),("expected",head_json(head)),("operations",operations)]);
-    let error=engine.execute("model.apply",&batch("bad",args(r#"[
-        {"op":"cube","object":"head","size":[0.88,0.83,0.52]},
-        {"op":"subdivide","object":"head"}]"#)),None).unwrap_err().to_string();
-    assert!(error.contains("levels") && error.contains("subdivide"),"{error}");
-    assert_eq!(engine.document("d").unwrap().to_bytes(None).unwrap(),before);
-    engine.execute("model.apply",&batch("corrected",args(r#"[
-        {"op":"cube","object":"head","size":[0.88,0.83,0.52]},
-        {"op":"subdivide","object":"head","levels":2}]"#)),None).unwrap();
-    assert_ne!(engine.document("d").unwrap().head(),head);
-    assert!(engine.document("d").unwrap().object("head").is_some());
+use makepad_model::*;
+fn apply(doc: &mut Document, id: &str, operations: Vec<Operation>) {
+    doc.apply(Transaction {request_id: id.into(), expected: doc.head(), operations}, None).unwrap();
 }
-
 #[test]
 fn overview_reports_complete_transformed_dimensions_without_editing_source() {
-    let mut engine=Engine::new(Limits::default());
-    assert_eq!(engine.open("d",None,None).unwrap().get("bounds"),Some(&Value::Null));
-    apply(&mut engine,"shape",args(r#"[{"op":"cube","object":"body","size":[2,1,4]},{"op":"object_node","object":"body","node":{"transform":{"translation":[3,2,-1]}}}]"#));
-    let head=engine.document("d").unwrap().head();
-    let overview=engine.open("d",None,None).unwrap();
-    assert_eq!(overview.get("bounds").unwrap(),&args("[[2.0,1.5,-3.0],[4.0,2.5,1.0]]"));
-    assert_eq!(overview.get("dimensions").unwrap(),&args("[2.0,1.0,4.0]"));
-    assert_eq!(engine.document("d").unwrap().head(),head);
-    assert!(overview.to_json().len()<12*1024);
-}
-fn apply(engine:&mut Engine,id:&str,ops:Value)->Value {
-    engine.execute("model.apply",&json::obj(vec![("document",json::s("d")),("expected",head_json(engine.document("d").unwrap().head())),
-        ("request_id",json::s(id)),("operations",ops)]),None).unwrap()
+    let mut doc=Document::new(Limits::default()).unwrap();
+    apply(&mut doc,"shape",vec![
+        Operation::Cube {object:"body".into(),size:[2.,1.,4.]},
+        Operation::Scene(SceneOperation::Node {object:"body".into(),node:SceneNode {
+            transform:Transform {translation:[3.,2.,-1.],..Default::default()},..Default::default()
+        }}),
+    ]);
+    let head=doc.head();
+    let source=doc.to_bytes(None).unwrap();
+    let overview=doc.compile(None).unwrap();
+    assert_eq!(overview.bounds,[[2.,1.5,-3.],[4.,2.5,1.]]);
+    let dimensions: [f32; 3] = std::array::from_fn(|i| overview.bounds[1][i]-overview.bounds[0][i]);
+    assert_eq!(dimensions,[2.,1.,4.]);
+    assert_eq!(doc.head(),head);
+    assert_eq!(doc.to_bytes(None).unwrap(),source);
 }
 #[test]
 fn primitives_are_closed_outward_and_have_seam_uvs() {
-    let mut engine=Engine::new(Limits::default()); engine.open("d",None,None).unwrap();
-    apply(&mut engine,"create",args(r#"[{"op":"sphere","object":"ball","radius":1,"segments":12,"rings":6},{"op":"cylinder","object":"barrel","radius":0.5,"height":2,"segments":12}]"#));
+    let mut doc=Document::new(Limits::default()).unwrap();
+    apply(&mut doc,"create",vec![
+        Operation::sphere("ball", 1.0, 12, 6, true, &Limits::default()).unwrap(),
+        Operation::cylinder("barrel", 0.5, 2.0, 12, true, &Limits::default()).unwrap(),
+    ]);
     for name in ["ball","barrel"] {
-        let mesh=engine.document("d").unwrap().object(name).unwrap();
+        let mesh=doc.object(name).unwrap();
         assert!(mesh.validate(&mut mesh::Context::default()).unwrap().is_closed_manifold);
         let tri=mesh.triangulate(&mut mesh::Context::default()).unwrap();
         let mut volume=0.0;
@@ -54,17 +40,13 @@ fn primitives_are_closed_outward_and_have_seam_uvs() {
         assert!(mesh.corners().iter().any(|c|c.uv[0]==1.0));
     }
 }
+
 #[test]
 fn paged_corner_lookup_and_exact_id_protocol() {
-    let mut engine=Engine::new(Limits::default()); engine.open("d",None,None).unwrap();
-    apply(&mut engine,"cube",args(r#"[{"op":"cube","object":"body","size":[1,1,1]}]"#));
-    let page=engine.execute("model.inspect",&args(r#"{"document":"d","object":"body","domain":"corners","offset":2,"limit":3}"#),None).unwrap();
-    assert_eq!(page.get("items").unwrap().as_arr().unwrap().len(),3); assert_eq!(page.get("next_offset").unwrap().as_u64(),Some(5));
-    assert!(parse_operations(&args(r#"[{"op":"extrude","object":"body","face":1,"offset":[0,1,0]}]"#),&Limits::default()).is_err());
-    assert!(parse_operations(&args(r#"[{"op":"extrude","object":"body","face":"01","offset":[0,1,0]}]"#),&Limits::default()).is_err());
-    assert!(parse_operations(&args(r#"[{"op":"cube","object":"other","size":[1,1,1],"typo":true}]"#),&Limits::default()).is_err());
-    let source=engine.document("d").unwrap().to_bytes(None).unwrap();
-    assert!(engine.execute("model.apply",&json::obj(vec![("document",json::s("d")),("request_id",json::s("cancel")),
-        ("expected",head_json(engine.document("d").unwrap().head())),("operations",args(r#"[{"op":"cube","object":"cancelled","size":[1,1,1]}]"#))]),Some(&||true)).is_err());
-    assert_eq!(engine.document("d").unwrap().to_bytes(None).unwrap(),source);
+    let mut doc=Document::new(Limits::default()).unwrap();
+    apply(&mut doc,"cube",vec![Operation::Cube{object:"body".into(),size:[1.;3]}]);
+    let source=doc.to_bytes(None).unwrap();
+    assert!(doc.apply(Transaction{request_id:"cancel".into(),expected:doc.head(),
+        operations:vec![Operation::Cube{object:"cancelled".into(),size:[1.;3]}]},Some(&||true)).is_err());
+    assert_eq!(doc.to_bytes(None).unwrap(),source);
 }

@@ -96,7 +96,12 @@ unsafe extern "system" fn focus(_: *mut JNIEnv, _: jclass, on: jboolean) {
 }
 unsafe extern "system" fn params(env: *mut JNIEnv, _: jclass, cache: jstring, data: jstring, density: jfloat, emulator: jboolean, version: jstring, build: jstring, kernel: jstring, night: jboolean) {
     let params = AndroidParams { cache_path: reg::string(env, cache), data_path: reg::string(env, data), density: if density.is_finite() && density > 0. { density } else { 1. }, emulator: emulator != 0, android_version: reg::string(env, version), build_number: reg::string(env, build), kernel_version: reg::string(env, kernel), night_mode: night != 0, rotation: 0 };
-    lock(&Shared::global().state).params = params;
+    // sent again on every configuration change (a new density after a fold or a display
+    // change); the rotation comes on its own (onDisplayRotation), so keep the last one
+    let mut state = lock(&Shared::global().state);
+    let params = AndroidParams { rotation: state.params.rotation, ..params };
+    state.params = params;
+    drop(state);
     Shared::global().display();
 }
 unsafe extern "system" fn night_mode(_: *mut JNIEnv, _: jclass, night: jboolean) { lock(&Shared::global().state).params.night_mode = night != 0; }

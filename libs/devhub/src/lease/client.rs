@@ -14,11 +14,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--prio P] [--rev <branch>[@sha][,<commercial>[@sha]]]
+pub const HELP: &str = "  lease <kind> [--node N|--only N|--needs k=v,..] [--lane L] [--prio P] [--rev <branch>[@sha][,<commercial>[@sha]]]
         [--repo-dir D] [--watch-pid P] [-- cmd...]
                                           hold a lease (kinds: build test screen long timed gpu inspect gate;
                                           --needs gui=1: a test that opens windows, only nodes with screen slots);
-                                          with a cmd: run it there and exit with its code
+                                          with a cmd: run it there and exit with its code. --node N: N when it can
+                                          take it, else (after 2 min, or at once when N is held/busy/off) a node of
+                                          the same arch and os (the grant line names it); --only N: N or wait
+                                          (timed, screen and inspect leases always wait for the named node)
   run <lane> <kind> [--node N|--needs ..] -- cmd...   ship this worktree to the node, run the cmd under a lease
   get <lane> <rel> <local-dir> [--node N] [--lease L]
                                           copy results back from the lane's dir on its node (`src/..`: the tree
@@ -194,6 +197,10 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
                 break;
             }
             "--node" => req.node = Some(val(i)?.to_string()),
+            "--only" => {
+                req.node = Some(val(i)?.to_string());
+                req.only = true;
+            }
             "--needs" => req.needs = parse_needs(val(i)?),
             "--lane" => req.lane = val(i)?.to_string(),
             "--prio" => req.prio = val(i)?.parse().map_err(|_| "--prio takes a number")?,
@@ -457,7 +464,7 @@ fn ship(c: &Client, root: &Path, held: &Held) -> Result<(), String> {
     if held.work.is_empty() {
         return Err(format!("{}: no work dir to ship to", held.id));
     }
-    let mut files: Vec<String> = git(root, &["ls-files", "-co", "--exclude-standard"]).ok_or("git ls-files failed")?.lines().map(str::to_string).collect();
+    let mut files: Vec<String> = super::wt::git(Some(root), None, &["ls-files", "-co", "--exclude-standard"]).map(|s| s.trim().to_string()).map_err(|e| format!("git ls-files failed: {e}"))?.lines().map(str::to_string).collect();
     if root.join("apps/commercial/.git").exists() {
         if let Some(com) = git(&root.join("apps/commercial"), &["ls-files", "-co", "--exclude-standard"]) {
             files.extend(com.lines().map(|f| format!("apps/commercial/{f}")));

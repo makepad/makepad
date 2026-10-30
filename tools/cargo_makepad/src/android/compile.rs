@@ -1279,6 +1279,7 @@ fn compile_java(
         makepad_java_classes_dir.join("H264Encoder.java"),
         // makepad-network's P-256 and TLS server (fleet identity) over Java security, for every app
         makepad_java_classes_dir.join("FleetTls.java"),
+        makepad_java_classes_dir.join("MakepadFileProvider.java"),
         build_paths.java_file.clone(),
         build_paths.xr_file.clone(),
     ];
@@ -1577,8 +1578,7 @@ fn bundle_ndk_shared_deps(
     // The NDK sysroot lib directory for this target triple (base dir, NOT the
     // API-level subdirectory).  Files here that are real .so's (not linker
     // scripts / stubs) are NDK-provided and must be shipped inside the APK.
-    let clang_triple = android_target.clang();
-    let sysroot_lib_dir = ndk_prebuilt_root.join("sysroot/usr/lib").join(clang_triple);
+    let sysroot_lib_dir = ndk_prebuilt_root.join("sysroot/usr/lib").join(android_target.sys_dir());
 
     // Parse NEEDED entries from readelf output.  Each relevant line looks like:
     //   0x0000000000000001 (NEEDED) Shared library: [libc++_shared.so]
@@ -2308,8 +2308,7 @@ fn stage_ndk_shared_deps_for_so(
         readelf_path.to_str().unwrap(),
         &["-d", so_path.to_str().unwrap()],
     )?;
-    let clang_triple = android_target.clang();
-    let sysroot_lib_dir = ndk_prebuilt_root.join("sysroot/usr/lib").join(clang_triple);
+    let sysroot_lib_dir = ndk_prebuilt_root.join("sysroot/usr/lib").join(android_target.sys_dir());
     for line in output.lines() {
         if !line.contains("(NEEDED)") {
             continue;

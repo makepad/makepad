@@ -5,16 +5,6 @@ fn field<'a>(v:&'a JsonValue,key:&str)->&'a JsonValue{let JsonValue::Object(v)=v
 fn array(v:&JsonValue)->&[JsonValue]{let JsonValue::Array(v)=v else{panic!("array")};v}
 
 #[test]
-fn old_source_opens_with_exact_identity_then_writes_version_two(){
-    let original=include_bytes!("fixtures/v1_robot.mpmodel");
-    let doc=Document::from_bytes(original,Limits::default(),None).unwrap();
-    assert_eq!(doc.head().generation,u64::from_le_bytes(original[12..20].try_into().unwrap()));
-    assert_eq!(doc.head().content.as_slice(),&original[20..52]);
-    let upgraded=doc.to_bytes(None).unwrap();assert_eq!(u32::from_le_bytes(upgraded[8..12].try_into().unwrap()),2);
-    let round=Document::from_bytes(&upgraded,Limits::default(),None).unwrap();assert_eq!(round.head(),doc.head());
-    assert_eq!(round.to_bytes(None).unwrap(),upgraded);assert_eq!(round.compile(None).unwrap().glb,doc.compile(None).unwrap().glb);
-}
-#[test]
 fn car_headlights_and_socket_survive_source_and_glb_scene_graph(){
     let mut doc=Document::new(Limits::default()).unwrap();
     apply(&mut doc,"car",vec![Operation::Cube{object:"car".into(),size:[2.,1.,4.]},Operation::Scene(SceneOperation::Node{

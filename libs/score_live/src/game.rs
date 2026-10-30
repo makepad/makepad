@@ -233,15 +233,7 @@ impl GameMusic {
                 let _ = composer.goto_section(&section, now, quant);
             }
             Cmd::Tempo { bpm, ramp } => composer.set_tempo(bpm, ramp),
-            Cmd::Midi(data) => {
-                let mut events = Vec::new();
-                composer.midi_in(data, now, &mut events);
-                for event in events {
-                    if let Some((_, feed)) = inline.feeds.iter().find(|(key, _)| *key == event.loop_key) {
-                        let _ = feed.send(event);
-                    }
-                }
-            }
+            Cmd::Midi(data) => composer.midi_in(data, now),
             Cmd::Seek { beat, quant } => {
                 composer.seek(beat, now, quant);
             }

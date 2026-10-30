@@ -452,6 +452,7 @@ impl App {
             state.layout_mut().desktop.windows.retain(|w|retained.contains(&w.client));
             let area=LRect::new(0.0,36.0,size.x,(size.y-90.0).max(1.0));
             for client in state.layout().all_clients() {state.layout_mut().desktop.ensure(client,area);}
+            state.layout_mut().restack();
         }else if style.mobile() && previous!=style {
             let current=window.get_inner_size(cx);
             let size=phone_size(style);

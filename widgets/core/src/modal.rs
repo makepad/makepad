@@ -605,6 +605,16 @@ impl ModalRef {
         }
     }
 
+    /// If this modal is open, it takes back the Escape key and back gesture,
+    /// e.g., from a view beneath it that was shown after this modal was opened.
+    pub fn renew_cancel_scope(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.is_open {
+                inner.cancel_scope = Some(inner.begin_cancel_scope(cx));
+            }
+        }
+    }
+
     /// Returns `true` if this modal was dismissed by the given `actions`.
     pub fn dismissed(&self, actions: &Actions) -> bool {
         if let Some(inner) = self.borrow() {

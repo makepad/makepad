@@ -293,3 +293,8 @@ pub fn battery() -> Option<(u32, bool)> {
     }
     Some((s.BatteryLifePercent as u32, s.ACLineStatus == 1))
 }
+
+/// No descriptor limit to raise here.
+pub fn raise_fd_limit() -> u64 {
+    0
+}

@@ -110,6 +110,7 @@ pub mod memory_watchdog;
 pub mod perf_monitor;
 pub mod thread_counters;
 pub mod gpu_frame_timer;
+pub mod pass_load;
 pub mod gpu_admission;
 pub mod sploded;
 pub mod pick;

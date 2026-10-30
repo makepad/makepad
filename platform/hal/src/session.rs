@@ -218,6 +218,9 @@ pub struct WindowObj {
     pub state: u32,
     pub title: StrId,
     pub own_chrome: bool,
+    /// An embedded window's keep-on-top request (`WindowTopmost`): the parent keeps it above
+    /// its other windows. Kept so every announcement of the window repeats it.
+    pub topmost: bool,
     /// a host window an app may take over (session 0 only)
     pub adoptable: bool,
     /// An alias entry of an app: the complete host window id it stands for.
@@ -1167,10 +1170,11 @@ impl World {
         let (pw, ph) = (t.val.w, t.val.h);
         let title = s.string(w.val.title).unwrap_or("").to_string();
         let parent = s.parent;
-        let own_chrome = w.val.own_chrome;
+        let (own_chrome, topmost) = (w.val.own_chrome, w.val.topmost);
         self.to_session(parent, |q| {
             q.child_window(id, sid, em.alias, pw, ph, em.dpi, title.as_bytes());
             if own_chrome { q.child_chrome(id, sid, true); }
+            if topmost { q.child_topmost(id, sid, true); }
         });
     }
 

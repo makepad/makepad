@@ -45,6 +45,7 @@ pub struct Font {
     descender_in_ems: f32,
     line_gap_in_ems: f32,
     cap_height_in_ems: f32,
+    has_raster_image_tables: bool,
     cached_glyph_outlines: RefCell<FxHashMap<GlyphId, Option<Rc<GlyphOutline>>>>,
 }
 
@@ -66,6 +67,11 @@ impl Font {
                     cap_height_in_units(face) / units_per_em,
                 )
             });
+        // These are the tables `glyph_raster_image` looks in.
+        let has_raster_image_tables = face.with_ttf_parser_face(|face| {
+            let tables = face.tables();
+            tables.sbix.is_some() || tables.bdat.is_some() || tables.ebdt.is_some() || tables.cbdt.is_some()
+        });
         Self {
             id,
             face,
@@ -74,6 +80,7 @@ impl Font {
             descender_in_ems,
             line_gap_in_ems,
             cap_height_in_ems,
+            has_raster_image_tables,
             cached_glyph_outlines: RefCell::new(FxHashMap::default()),
         }
     }
@@ -206,6 +213,9 @@ impl Font {
         dpxs_per_em: f32,
         f: impl FnOnce(GlyphRasterImage<'_>) -> R,
     ) -> Option<R> {
+        if !self.has_raster_image_tables {
+            return None;
+        }
         self.with_ttf_parser_face(|face| {
             let glyph_id = ttf_parser::GlyphId(glyph_id);
             let image = face.glyph_raster_image(glyph_id, dpxs_per_em as u16)?;
@@ -215,6 +225,9 @@ impl Font {
     }
 
     pub fn has_glyph_raster_image(&self, glyph_id: GlyphId, dpxs_per_em: f32) -> bool {
+        if !self.has_raster_image_tables {
+            return false;
+        }
         self.with_ttf_parser_face(|face| {
             let glyph_id = ttf_parser::GlyphId(glyph_id);
             face.glyph_raster_image(glyph_id, dpxs_per_em as u16)

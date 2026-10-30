@@ -4,6 +4,7 @@
 
 use crate::data::*;
 use crate::*;
+use makepad_edit_values::number::fmt_like;
 
 pub(crate) const PAD_W: f64 = 248.0;
 pub(crate) const PAD_H: f64 = 284.0;

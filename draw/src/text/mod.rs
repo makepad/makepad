@@ -3,6 +3,8 @@ pub mod font;
 pub mod font_family;
 pub mod fonts;
 pub mod layouter;
+pub mod line_break;
+mod line_break_data;
 pub mod loader;
 #[cfg(target_arch = "wasm32")]
 pub mod rasterizer;

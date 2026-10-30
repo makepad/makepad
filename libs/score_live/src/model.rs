@@ -221,9 +221,48 @@ pub struct LoopDef {
     /// instrument (`scope_play`) into its effect (`scope_fx`), whose output
     /// goes where the loop goes.
     pub scopes: Vec<Vec<FxKind>>,
-    /// A MIDI keyboard plays its instrument live: the channel (1..16), 0
-    /// for any.
-    pub midi_in: Option<u8>,
+    /// The note stream it plays (`in: keys` or `in: arp`): a `MidiIn` or a
+    /// stream node fed from one. A loop with a stream plays only it.
+    pub input: Option<String>,
+}
+
+/// A note stream node: a keyboard (`MidiIn`) or what shapes what one plays
+/// (`Arp`, `Chord`, `Transpose`, `Velocity`), each fed from another
+/// (`in:`); loops play them (`Loop{play: lead in: arp}`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamNode {
+    pub name: String,
+    pub kind: StreamKind,
+    /// The stream node it takes (none for a `MidiIn`).
+    pub input: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum StreamKind {
+    /// MIDI in: the device (part of a port's name; "any" for every input),
+    /// the channel (1..16; 0 for every one), the bend range (semitones),
+    /// MPE (a channel per key) and the delay a message plays at (ms).
+    MidiIn { device: String, channel: u8, bend: f32, mpe: bool, latency: f32 },
+    Arp { settings: makepad_audio_synth::kit::arp::ArpSettings, latch: bool, sync: bool },
+    Chord { tones: Vec<i8> },
+    Transpose { semis: i8 },
+    Velocity { curve: makepad_score_player::stream::VelCurve, min: f32, max: f32 },
+}
+
+/// The stream node types.
+pub const STREAM_TYPES: [&str; 5] = ["MidiIn", "Arp", "Chord", "Transpose", "Velocity"];
+
+/// A loop's stream resolved: the `MidiIn` it starts from, the stages from
+/// there in order (as the player runs them), and the nodes on the way
+/// (the loop's input first).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedStream {
+    pub source: String,
+    pub device: String,
+    pub channel: u8,
+    pub latency: f32,
+    pub def: makepad_score_player::stream::StreamDef,
+    pub path: Vec<String>,
 }
 
 /// The graph node of loop `name`'s scope `k` (1-based) that plays its notes.
@@ -347,6 +386,8 @@ pub struct ScoreDoc {
     pub insts: Vec<InstDef>,
     pub loops: Vec<LoopDef>,
     pub fx: Vec<FxDef>,
+    /// Note streams: MIDI in and what shapes it.
+    pub streams: Vec<StreamNode>,
     pub sections: Vec<SectionDef>,
     pub arrange: Vec<String>,
     pub master: f32,
@@ -392,6 +433,53 @@ impl ScoreDoc {
 
     pub fn loop_def(&self, name: &str) -> Option<&LoopDef> {
         self.loops.iter().find(|l| l.name == name)
+    }
+
+    pub fn stream(&self, name: &str) -> Option<&StreamNode> {
+        self.streams.iter().find(|s| s.name == name)
+    }
+
+    /// The stream loop `l` plays, back to its `MidiIn`; an error says why
+    /// it does not resolve (a loop, a missing source, too many stages).
+    pub fn resolve_stream(&self, l: &LoopDef) -> Option<Result<ResolvedStream, String>> {
+        use makepad_score_player::stream::{StageDef, StreamDef, MAX_STAGES, MAX_TONES};
+        let start = l.input.as_deref()?;
+        let mut path: Vec<String> = Vec::new();
+        let mut at = start.to_string();
+        let mut stages: Vec<StageDef> = Vec::new();
+        loop {
+            if path.contains(&at) {
+                return Some(Err(format!("the stream goes round in a circle through `{at}`")));
+            }
+            let Some(node) = self.stream(&at) else { return Some(Err(format!("`{at}` is not a stream node (MidiIn, Arp, Chord, Transpose, Velocity)"))) };
+            path.push(at.clone());
+            match &node.kind {
+                StreamKind::MidiIn { device, channel, bend, mpe, latency } => {
+                    if stages.len() > MAX_STAGES {
+                        return Some(Err(format!("a stream passes at most {MAX_STAGES} nodes on its way")));
+                    }
+                    stages.reverse();
+                    let mut def = StreamDef { bend_range: *bend, mpe: *mpe, ..Default::default() };
+                    for (slot, stage) in def.stages.iter_mut().zip(stages) {
+                        *slot = Some(stage);
+                    }
+                    return Some(Ok(ResolvedStream { source: at, device: device.clone(), channel: *channel, latency: *latency, def, path }));
+                }
+                StreamKind::Arp { settings, latch, sync } => stages.push(StageDef::Arp { settings: *settings, latch: *latch, sync: *sync }),
+                StreamKind::Chord { tones } => {
+                    let mut t = [0i8; MAX_TONES];
+                    let tones: Vec<i8> = tones.iter().copied().filter(|t| *t != 0).take(MAX_TONES).collect();
+                    t[..tones.len()].copy_from_slice(&tones);
+                    stages.push(StageDef::Chord { tones: t, n: tones.len() as u8 });
+                }
+                StreamKind::Transpose { semis } => stages.push(StageDef::Transpose(*semis)),
+                StreamKind::Velocity { curve, min, max } => stages.push(StageDef::Velocity { curve: *curve, min: *min, max: *max }),
+            }
+            match &node.input {
+                Some(next) => at = next.clone(),
+                None => return Some(Err(format!("`{at}` takes a stream: in: keys (a MidiIn)"))),
+            }
+        }
     }
 
     pub fn beats_per_bar(&self) -> f64 {
@@ -630,6 +718,93 @@ impl Reader<'_> {
                 let at = obj.fields.iter().map(|(k, _)| k.as_str()).find(|k| why.contains(&format!("`{k}`")));
                 self.err(node, at, why);
                 InstKind::Morph { patch: String::new(), srcs }
+            }
+        }
+    }
+
+    /// A stream node's settings.
+    fn stream(&mut self, n: &str, ty: &str, obj: &Obj) -> StreamKind {
+        use makepad_audio_synth::kit::arp::{self, ArpSettings};
+        use makepad_score_player::stream::VelCurve;
+        let choice = |r: &mut Self, key: &str, names: &[&str], default: usize| -> usize {
+            match obj.get(key) {
+                None | Some(V::Nil) => default,
+                Some(v) => match v.text().and_then(|t| names.iter().position(|p| *p == t)) {
+                    Some(i) => i,
+                    None => {
+                        r.err(n, Some(key), format!("`{key}` is one of @{}", names.join(" @")));
+                        default
+                    }
+                },
+            }
+        };
+        match ty {
+            "MidiIn" => StreamKind::MidiIn {
+                device: match obj.get("device") {
+                    None | Some(V::Nil) => "any".to_string(),
+                    Some(v) => match v.text() {
+                        Some(t) => t.to_string(),
+                        None => {
+                            self.err(n, Some("device"), "`device` names an input: \"any\", or part of its name (\"Keystation\")");
+                            "any".to_string()
+                        }
+                    },
+                },
+                channel: self.num(n, obj, "channel", 0.0, 0.0, 16.0) as u8,
+                bend: self.num(n, obj, "bend", 2.0, 0.0, 48.0) as f32,
+                mpe: self.flag(n, obj, "mpe"),
+                latency: self.num(n, obj, "latency", 8.0, 0.0, 100.0) as f32,
+            },
+            "Arp" => {
+                let pattern = choice(self, "pattern", arp::PATTERNS, 0);
+                // `rate: 1/16` is a sixteenth note: a quarter of a beat.
+                let rate = self.num(n, obj, "rate", 1.0 / 16.0, 1.0 / 256.0, 4.0);
+                let settings = ArpSettings {
+                    pattern,
+                    step: rate * 4.0,
+                    octaves: self.num(n, obj, "octaves", 1.0, 1.0, 4.0) as usize,
+                    gate: self.num(n, obj, "gate", 0.6, 0.01, 1.0) as f32,
+                    swing: self.num(n, obj, "swing", 0.0, 0.0, 0.5) as f32,
+                    repeats: self.num(n, obj, "repeats", 1.0, 1.0, 4.0) as usize,
+                    chance: self.num(n, obj, "chance", 1.0, 0.0, 1.0) as f32,
+                    transpose: self.num(n, obj, "interval", 12.0, -24.0, 24.0) as i32,
+                };
+                let sync = !matches!(obj.get("sync"), Some(V::Bool(false)));
+                StreamKind::Arp { settings, latch: self.flag(n, obj, "latch"), sync }
+            }
+            "Chord" => {
+                let tones: Vec<i8> = match (obj.get("chord"), obj.get("tones")) {
+                    (Some(v), None) => match v.text().and_then(theory::chord_kind) {
+                        Some(kind) => kind.iter().map(|t| *t as i8).collect(),
+                        None => {
+                            self.err(n, Some("chord"), format!("`chord` is a chord kind: @{}", theory::CHORD_KINDS.join(" @")));
+                            vec![0, 4, 7]
+                        }
+                    },
+                    (None, Some(V::Arr(items))) => items.iter().filter_map(V::num).map(|t| t.clamp(-48.0, 48.0) as i8).collect(),
+                    (None, None) => {
+                        self.err(n, None, "a Chord names its `chord: @minor` or its `tones: [0 3 7]` (semitones from each key)");
+                        vec![0]
+                    }
+                    _ => {
+                        self.err(n, Some("tones"), "a Chord takes `chord: @minor` or `tones: [0 3 7]`, not both");
+                        vec![0]
+                    }
+                };
+                if tones.iter().filter(|t| **t != 0).count() > makepad_score_player::stream::MAX_TONES {
+                    self.err(n, None, format!("a Chord adds at most {} tones to a key", makepad_score_player::stream::MAX_TONES));
+                }
+                StreamKind::Chord { tones }
+            }
+            "Transpose" => StreamKind::Transpose { semis: self.num(n, obj, "semis", 0.0, -48.0, 48.0) as i8 },
+            _ => {
+                let curve = match choice(self, "curve", &VelCurve::NAMES, 0) {
+                    1 => VelCurve::Soft,
+                    2 => VelCurve::Hard,
+                    3 => VelCurve::Fixed(self.num(n, obj, "level", 0.8, 0.0, 1.0) as f32),
+                    _ => VelCurve::Linear,
+                };
+                StreamKind::Velocity { curve, min: self.num(n, obj, "min", 0.0, 0.0, 1.0) as f32, max: self.num(n, obj, "max", 1.0, 0.0, 1.0) as f32 }
             }
         }
     }
@@ -1040,7 +1215,12 @@ pub const DRUMS_FIELDS: [&str; 6] = ["kit", "tune", "gain", "recipes", "samples"
 pub const SAMPLER_FIELDS: [&str; 5] = ["src", "root", "attack", "release", "at"];
 /// `label` and `color` (a palette name, `@amber`) are for the views: a
 /// track's name and colour; the player does not read them.
-pub const LOOP_FIELDS: [&str; 25] = ["play", "beats", "amp", "pan", "mute", "solo", "sync", "hits", "note", "step", "code", "when", "follow", "dur", "quant", "notes", "sends", "swing", "humanize", "midi_in", "mute_voices", "solo_voices", "at", "label", "color"];
+pub const LOOP_FIELDS: [&str; 25] = ["play", "beats", "amp", "pan", "mute", "solo", "sync", "hits", "note", "step", "code", "when", "follow", "dur", "quant", "notes", "sends", "swing", "humanize", "in", "mute_voices", "solo_voices", "at", "label", "color"];
+pub const MIDI_IN_FIELDS: [&str; 6] = ["device", "channel", "bend", "mpe", "latency", "at"];
+pub const ARP_FIELDS: [&str; 12] = ["in", "pattern", "rate", "octaves", "gate", "swing", "repeats", "chance", "interval", "latch", "sync", "at"];
+pub const CHORD_FIELDS: [&str; 4] = ["in", "chord", "tones", "at"];
+pub const TRANSPOSE_FIELDS: [&str; 3] = ["in", "semis", "at"];
+pub const VELOCITY_FIELDS: [&str; 6] = ["in", "curve", "level", "min", "max", "at"];
 pub const INSTRUMENT_FIELDS: [&str; 9] = ["kind", "preset", "src", "bank", "program", "gain", "channel", "port", "at"];
 pub const IRON_FIELDS: [&str; 17] = [
     "program", "cutoff", "resonance", "env", "attack", "decay", "sustain", "release", "sub", "noise", "glide", "crush", "delay", "chorus", "reverb", "output", "at",
@@ -1111,6 +1291,7 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
         insts: Vec::new(),
         loops: Vec::new(),
         fx: Vec::new(),
+        streams: Vec::new(),
         sections: Vec::new(),
         arrange: Vec::new(),
         master: r.num("", root, "master", 1.0, 0.0, 2.0) as f32,
@@ -1156,6 +1337,11 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
             "Voice" => VOICE_FIELDS.to_vec(),
             "Loop" | "Stinger" => LOOP_FIELDS.to_vec(),
             "Section" => SECTION_FIELDS.to_vec(),
+            "MidiIn" => MIDI_IN_FIELDS.to_vec(),
+            "Arp" => ARP_FIELDS.to_vec(),
+            "Chord" => CHORD_FIELDS.to_vec(),
+            "Transpose" => TRANSPOSE_FIELDS.to_vec(),
+            "Velocity" => VELOCITY_FIELDS.to_vec(),
             other => match FxKind::parse(other) {
                 Some(kind) => kind.params().iter().map(|(p, ..)| *p).chain(["in", "key", "at", "b1", "b2", "b3", "b4"]).collect(),
                 None => Vec::new(),
@@ -1327,8 +1513,12 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
                     }
                 };
                 let plays_input = play.as_deref().and_then(|p| r.outline.node(p)).and_then(|c| c.field("kind")).is_some_and(|f| f.value.text(r.src).trim() == "@input");
-                if code.is_none() && hits.is_none() && obj.get("notes").is_none() && !plays_input && obj.get("midi_in").is_none_or(|v| matches!(v, V::Nil | V::Bool(false))) {
-                    r.err(n, None, "a loop plays `hits: \"x..x\"`, runs `code: fn(i) { … }`, plays `notes: [[beat note dur vel] …]` or a MIDI keyboard (`midi_in: true`)");
+                let input = r.refs(n, "in", obj.get("in")).into_iter().next();
+                if input.is_some() && (code.is_some() || hits.is_some() || obj.get("notes").is_some()) {
+                    r.err(n, Some("in"), "a loop plays its stream (`in:`) or its own notes (`hits`, `code`, `notes`), not both: make a second loop");
+                }
+                if code.is_none() && hits.is_none() && obj.get("notes").is_none() && !plays_input && input.is_none() {
+                    r.err(n, None, "a loop plays `hits: \"x..x\"`, runs `code: fn(i) { … }`, plays `notes: [[beat note dur vel] …]` or a stream (`in: keys`, a MidiIn or an Arp)");
                 }
                 let when = match obj.get("when") {
                     Some(V::Fn(index, _)) => Some(*index),
@@ -1443,16 +1633,19 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
                         }
                     },
                     scopes,
-                    midi_in: match obj.get("midi_in") {
-                        None | Some(V::Nil) | Some(V::Bool(false)) => None,
-                        Some(V::Bool(true)) => Some(0),
-                        Some(V::Num(c)) if (1.0..=16.0).contains(c) => Some(*c as u8),
-                        Some(_) => {
-                            r.err(n, Some("midi_in"), "`midi_in` is true (any channel) or a channel 1..16");
-                            None
-                        }
-                    },
+                    input,
                 });
+            }
+            "MidiIn" | "Arp" | "Chord" | "Transpose" | "Velocity" => {
+                let input = if ty == "MidiIn" { None } else {
+                    let input = r.refs(n, "in", obj.get("in")).into_iter().next();
+                    if input.is_none() {
+                        r.err(n, Some("in"), format!("a {ty} takes a stream: in: keys (a MidiIn, or another stream node)"));
+                    }
+                    input
+                };
+                let kind = r.stream(n, &ty, obj);
+                doc.streams.push(StreamNode { name: name.clone(), kind, input });
             }
             "Section" => {
                 let loops = r.refs(n, "loops", obj.get("loops"));
@@ -1666,6 +1859,12 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
             Some(play) if !is(play, &["Synth", "Drums", "Sampler", "Ironfish", "Morph", "Tandem", "Shader", "Voice", "Instrument"]) => r.err(&l.name, Some("play"), format!("`{play}` is not an instrument in Score{{…}}")),
             None if l.hits.as_ref().is_none_or(|h| h.drum.is_none()) && l.code.is_some() => r.err(&l.name, Some("play"), "a loop names the instrument it plays: play: synth"),
             _ => {}
+        }
+        if let Some(Err(why)) = doc.resolve_stream(l) {
+            r.err(&l.name, Some("in"), why);
+        }
+        if l.input.is_some() && l.play.is_none() {
+            r.err(&l.name, Some("play"), "a loop names the instrument its stream plays: play: synth");
         }
         if let Sync::Loop(other) = &l.sync {
             if !is(other, &["Loop"]) {

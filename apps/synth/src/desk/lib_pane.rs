@@ -6,6 +6,7 @@
 use super::batch::{MusicSongs, SongRow, SongsAction};
 use super::Desk;
 use crate::library::{self, Document, FILE_REV};
+use makepad_edit_values::Edit;
 use makepad_widgets::makepad_platform::file_dialogs::{FileDialog, FileDialogAction};
 use makepad_widgets::*;
 use std::path::PathBuf;
@@ -194,7 +195,7 @@ impl Desk {
                         let text = format!("asset({}, {})", makepad_editor_panel::fmt_text(&name), makepad_editor_panel::fmt_text(FILE_REV));
                         let at = ui.widget(cx, ids!(score_code)).borrow::<super::code::ScoreEditor>().and_then(|editor| editor.cursor_offset(cx));
                         match at {
-                            Some(at) => self.splice(cx, ui, at, at, &text),
+                            Some(at) => self.edit(cx, ui, Edit::splice(at..at, &text, (3u64 << 40) + self.revision, true)),
                             None => ui.label(cx, ids!(score_state)).set_text(cx, "click in the code where the sample goes, then double-click it"),
                         }
                     }

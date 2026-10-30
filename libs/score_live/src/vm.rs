@@ -17,9 +17,10 @@ const EVAL_LIMIT: usize = 4_000_000;
 pub const CYCLE_LIMIT: usize = 1_000_000;
 
 /// The node types a score is made of.
-pub const NODE_TYPES: [&str; 29] = [
+pub const NODE_TYPES: [&str; 34] = [
     "Clock", "Synth", "Drums", "Sampler", "Ironfish", "Morph", "Loop", "Stinger", "Section", "Lowpass", "Highpass", "Bandpass", "Filter", "Delay", "Reverb",
-    "Drive", "Crush", "Chorus", "Comp", "Duck", "Bus", "Limiter", "Eq", "Width", "Voice", "Shader", "ShaderFx", "Instrument", "Score",
+    "Drive", "Crush", "Chorus", "Comp", "Duck", "Bus", "Limiter", "Eq", "Width", "Voice", "Shader", "ShaderFx", "Instrument", "MidiIn", "Arp", "Chord",
+    "Transpose", "Velocity", "Score",
 ];
 
 const PRELUDE: &str = r#"
@@ -1296,34 +1297,46 @@ fn install_toolkit(vm: &mut ScriptVm, module: ScriptObject, ctx: Shared) {
         let rate = arg(vm, args, id!(rate)).as_number().unwrap_or(0.25).max(1.0 / 64.0);
         let octaves = arg(vm, args, id!(octaves)).as_number().unwrap_or(1.0).clamp(1.0, 4.0) as usize;
         let opts = opts_of(vm, arg(vm, args, id!(opts)));
-        let mut up: Vec<f32> = (0..octaves).flat_map(|o| notes.iter().map(move |n| n + 12.0 * o as f32)).collect();
-        up.sort_by(f32::total_cmp);
-        let mut order: Vec<f32> = match mode.as_str() {
-            "down" => up.iter().rev().copied().collect(),
-            "updown" => up.iter().copied().chain(up.iter().rev().skip(1).take(up.len().saturating_sub(2)).copied()).collect(),
-            "random" => {
-                let mut o = up.clone();
+        // The arp's own step order (the `Arp` node's and Morph's): the notes
+        // over the octaves, lowest first (as given for @played).
+        use makepad_audio_synth::kit::arp::{self as kit_arp, CHORD, PLAYED, RANDOM};
+        let Some(pattern) = kit_arp::pattern(&mode) else {
+            return raise(vm, format!("arp(): no pattern @{mode} (@{})", kit_arp::PATTERNS.join(" @")));
+        };
+        let mut base: Vec<f32> = (0..octaves).flat_map(|o| notes.iter().map(move |n| n + 12.0 * o as f32)).collect();
+        if pattern != PLAYED {
+            base.sort_by(f32::total_cmp);
+        }
+        let mut idx = vec![0u16; base.len() * 2 + 2];
+        let n = kit_arp::order(pattern, base.len(), &mut idx);
+        // A step is one note, or (@chord) every note at once.
+        let mut order: Vec<Vec<f32>> = match pattern {
+            CHORD => vec![base.clone()],
+            RANDOM => {
+                let mut o: Vec<Vec<f32>> = base.iter().map(|n| vec![*n]).collect();
                 for i in (1..o.len()).rev() {
                     let j = ((c.borrow_mut().rand() * (i + 1) as f64) as usize).min(i);
                     o.swap(i, j);
                 }
                 o
             }
-            _ => up.clone(),
+            _ => idx[..n].iter().map(|i| vec![base[*i as usize]]).collect(),
         };
-        if order.is_empty() {
+        if order.is_empty() || base.is_empty() {
             return 0.0.into();
         }
         let steps = match arg(vm, args, id!(steps)).as_number().unwrap_or(0.0) as usize { 0 => order.len(), n => n };
-        order = order.iter().copied().cycle().take(steps).collect();
+        order = order.iter().cloned().cycle().take(steps).collect();
         let mut ctx = c.borrow_mut();
         if !ctx.active {
             return NIL;
         }
         let (start, amp) = (ctx.cursor, opts.amp.unwrap_or(ctx.amp));
         let dur = opts.dur.unwrap_or((rate * 0.9) as f32);
-        for (i, note) in order.iter().enumerate() {
-            ctx.emits.push(Emit { beat: start + i as f64 * rate, what: EmitKind::Note(*note), vel: amp, pan: opts.pan, dur, opts: opts.note });
+        for (i, step) in order.iter().enumerate() {
+            for note in step {
+                ctx.emits.push(Emit { beat: start + i as f64 * rate, what: EmitKind::Note(*note), vel: amp, pan: opts.pan, dur, opts: opts.note });
+            }
         }
         (order.len() as f64 * rate).into()
     });
@@ -1388,9 +1401,9 @@ fn install_toolkit(vm: &mut ScriptVm, module: ScriptObject, ctx: Shared) {
     vm.add_method(module, id_lut!(log), script_args!(value = NIL), move |vm, args| {
         let value = arg(vm, args, id!(value));
         let text = if let Some(n) = value.as_number() {
-            crate::source::fmt_num(n, 3)
+            makepad_edit_values::number::fmt_num(n, 3)
         } else if value.as_array().is_some() {
-            let items: Vec<String> = elements(vm, value).into_iter().map(|v| v.as_number().map(|n| crate::source::fmt_num(n, 3)).or_else(|| text_of(vm, v)).unwrap_or_else(|| "?".into())).collect();
+            let items: Vec<String> = elements(vm, value).into_iter().map(|v| v.as_number().map(|n| makepad_edit_values::number::fmt_num(n, 3)).or_else(|| text_of(vm, v)).unwrap_or_else(|| "?".into())).collect();
             format!("[{}]", items.join(" "))
         } else {
             text_of(vm, value).unwrap_or_else(|| "nil".into())
@@ -1398,7 +1411,7 @@ fn install_toolkit(vm: &mut ScriptVm, module: ScriptObject, ctx: Shared) {
         let mut ctx = c.borrow_mut();
         if ctx.logs.len() < 64 {
             let beat = ctx.cursor;
-            ctx.logs.push(format!("{}: {text}", crate::source::fmt_num(beat, 2)));
+            ctx.logs.push(format!("{}: {text}", makepad_edit_values::number::fmt_num(beat, 2)));
         }
         NIL
     });

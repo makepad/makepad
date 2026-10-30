@@ -17,6 +17,9 @@
 //! its value is the state line), and the panel's own switch is the same control.
 
 use crate::auto::{Lever, XrAuto};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::verdict::{Evidence, Stage};
+use crate::verdict::{StageTime, VerdictFilter};
 use crate::settings_types::{StreamAa, StreamView, STREAM_AA_MODES};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::XrServer;
@@ -171,6 +174,18 @@ script_mod! {
         draw_text +: { text_style: theme.font_bold{font_size: 8.5} }
     }
 
+    mod.widgets.XrStageBarsBase = #(XrStageBars::register_widget(vm))
+    mod.widgets.XrStageBars = set_type_default() do mod.widgets.XrStageBarsBase {
+        width: Fill height: 0
+        color_ok: xr_live
+        color_near: xr_waiting
+        color_over: #xE5604D
+        color_track: theme.color_inset
+        color_budget: theme.color_text_meta
+        draw_text +: { color: theme.color_text_meta text_style: theme.font_regular{font_size: 7.5} }
+        draw_bar +: {}
+    }
+
     mod.widgets.XrStatsViewBase = #(XrStatsView::register_widget(vm))
     mod.widgets.XrStatsView = set_type_default() do mod.widgets.XrStatsViewBase {
         width: Fill height: 0
@@ -310,6 +325,8 @@ script_mod! {
                         diagnostics := View{
                             visible: false
                             width: Fill height: Fit flow: Down spacing: 8
+                            verdict := Label{ width: Fill padding: 0 text: "" draw_text +: { color: theme.color_text text_style: theme.font_bold{font_size: 9} } }
+                            hint := Label{ width: Fill padding: 0 text: "" draw_text +: { color: theme.color_text_meta text_style: theme.font_regular{font_size: 8} } }
                             tiles := View{
                                 width: Fill height: Fit flow: Right spacing: 6
                                 tile_fps := XrTile{ caption +: { text: "fps shown" } }
@@ -318,6 +335,7 @@ script_mod! {
                                 tile_encode := XrTile{ caption +: { text: "ms encode" } }
                                 tile_late := XrTile{ caption +: { text: "late, lost" } }
                             }
+                            stages := mod.widgets.XrStageBars{}
                             spark := mod.widgets.XrSparkline{}
                             spark_legend := Label{ text: "last minute: frames shown (green), motion to photon (amber)" draw_text +: { color: theme.color_text_meta text_style: theme.font_regular{font_size: 7.5} } }
                             raw_toggle := mod.widgets.XrDisclosure{ text: "RAW STATS" }
@@ -783,6 +801,143 @@ impl Widget for XrStatsView {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 }
 
+/// The stages of a picture as rows (ms per frame against the frame budget, a tick at the
+/// budget): the long pole stands out (green inside 80% of the budget, amber near it, red over).
+/// The stages run in parallel on different pictures: each has the whole budget, they do not add.
+#[derive(Script, ScriptHook, Widget)]
+pub struct XrStageBars {
+    #[uid]
+    uid: WidgetUid,
+    #[walk]
+    walk: Walk,
+    #[redraw]
+    #[live]
+    draw_bar: DrawColor,
+    #[live]
+    draw_text: DrawText,
+    #[live]
+    color_ok: Vec4f,
+    #[live]
+    color_near: Vec4f,
+    #[live]
+    color_over: Vec4f,
+    #[live]
+    color_track: Vec4f,
+    #[live]
+    color_budget: Vec4f,
+    #[rust]
+    bars: Vec<StageTime>,
+    #[rust]
+    budget_ms: f64,
+}
+
+/// A stage row's height, the names' column.
+const STAGE_ROW_H: f64 = 14.0;
+const STAGE_NAME_W: f64 = 84.0;
+const STAGE_VALUE_W: f64 = 48.0;
+
+impl XrStageBars {
+    fn set_bars(&mut self, cx: &mut Cx, bars: Vec<StageTime>, budget_ms: f64) {
+        if bars != self.bars || budget_ms != self.budget_ms {
+            self.bars = bars;
+            self.budget_ms = budget_ms;
+            self.draw_bar.redraw(cx);
+        }
+    }
+}
+
+impl Widget for XrStageBars {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let rows = self.bars.len();
+        let h = if rows == 0 { 0.0 } else { (rows + 1) as f64 * STAGE_ROW_H };
+        let rect = cx.walk_turtle(Walk { height: Size::Fixed(h), ..walk });
+        if rows == 0 {
+            return DrawStep::done();
+        }
+        let budget = self.budget_ms.max(0.1);
+        // the scale: the budget at two thirds of the track, or the longest stage
+        let longest = self.bars.iter().filter(|b| b.measured).map(|b| b.ms).fold(0.0, f64::max);
+        let scale = (budget * 1.5).max(longest * 1.05);
+        let x0 = rect.pos.x + STAGE_NAME_W;
+        let width = (rect.size.x - STAGE_NAME_W - STAGE_VALUE_W).max(20.0);
+        let budget_x = x0 + width * budget / scale;
+        self.draw_text.draw_abs(cx, dvec2(rect.pos.x, rect.pos.y), &format!("Per picture, ms (tick: the {budget:.1} ms frame budget)"));
+        for (i, b) in self.bars.iter().enumerate() {
+            let y = rect.pos.y + (i + 1) as f64 * STAGE_ROW_H;
+            self.draw_text.draw_abs(cx, dvec2(rect.pos.x, y + 1.0), b.name);
+            self.draw_bar.color = self.color_track;
+            self.draw_bar.draw_abs(cx, Rect { pos: dvec2(x0, y + 3.0), size: dvec2(width, 8.0) });
+            if b.measured {
+                self.draw_bar.color = if b.ms > budget { self.color_over } else if b.ms > budget * 0.8 { self.color_near } else { self.color_ok };
+                self.draw_bar.draw_abs(cx, Rect { pos: dvec2(x0, y + 3.0), size: dvec2((width * b.ms / scale).clamp(1.0, width), 8.0) });
+            }
+            self.draw_bar.color = self.color_budget;
+            self.draw_bar.draw_abs(cx, Rect { pos: dvec2(budget_x, y + 1.0), size: dvec2(1.0, 12.0) });
+            let value = if b.measured { format!("{:.1}", b.ms) } else { "-".to_string() };
+            self.draw_text.draw_abs(cx, dvec2(x0 + width + 6.0, y + 1.0), &value);
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+}
+
+/// Mbit/s for a tile: whole above 10, else a decimal or two (a still picture encodes to very
+/// little: 0.4 Mbit/s read "0").
+fn mbit_text(mbps: f64) -> String {
+    if mbps >= 10.0 {
+        format!("{mbps:.0}")
+    } else if mbps >= 1.0 {
+        format!("{mbps:.1}")
+    } else {
+        format!("{mbps:.2}")
+    }
+}
+
+/// This second's numbers for the verdict: the headset's last report, the server's last window,
+/// the app's load. None while no headset streams.
+#[cfg(not(target_arch = "wasm32"))]
+fn evidence(server: &XrServer) -> Option<Evidence> {
+    use makepad_desk_link::xr::report as r;
+    server.session_eye()?;
+    let last = server.headset_reports().pop()?;
+    let v = |i: usize| report_value(&last, i) as f64;
+    let mut e = Evidence {
+        display_hz: v(r::DISPLAY),
+        shown: v(r::SHOWN),
+        received: v(r::RECEIVED),
+        repeat_late: v(r::REPEAT_LATE),
+        repeat_server: v(r::REPEAT_SERVER),
+        repeat_cap: v(r::REPEAT_DROPPED),
+        repeat_nopose: v(r::REPEAT_NOPOSE),
+        net_ms: v(r::NET_MS),
+        decode_ms: v(r::DECODE_MS),
+        client_gpu_ms: v(r::CLIENT_GPU_MS),
+        ..Default::default()
+    };
+    let s = server.stats();
+    if s.window > 0 {
+        e.built_per_s = s.built_per_s;
+        e.render_ms = s.render_ms;
+        e.gpu_ms = s.gpu_ms;
+        e.encode_ms = s.encode_ms;
+        e.send_ms = s.send_ms;
+        e.trip_ms = s.trip_ms;
+        e.trip_base_ms = s.trip_base_ms;
+        e.sent_mbps = s.sent_mbps;
+        e.cap_mbps = s.cap_mbps;
+        e.waited_per_s = s.waited_per_s;
+    }
+    if let Some(h) = server.host_load() {
+        e.eyes_gpu_ms_s = h.eyes_gpu_ms_s;
+        e.desktop_gpu_ms_s = h.desktop_gpu_ms_s;
+        e.other_gpu_ms_s = h.other_gpu_ms_s;
+        e.draw_ms_s = h.draw_ms_s;
+        e.host_timed = h.timed;
+    }
+    Some(e)
+}
+
 /// Every number of the stream as text (the raw stats' lines).
 #[cfg(not(target_arch = "wasm32"))]
 fn raw_stats_text(server: &XrServer) -> String {
@@ -797,6 +952,10 @@ fn raw_stats_text(server: &XrServer) -> String {
         lines.push(format!("motion to photon {:.0} ms (net {:.1} decode {:.1} queue {:.1}) · lead {:.0} ms ({:.0} frames)", v(r::M2P_MS), v(r::NET_MS), v(r::DECODE_MS), v(r::WAIT_MS), v(r::LEAD_MS), v(r::AHEAD)));
         lines.push(format!("uplink {:.0} poses/s ±{:.2} ms · env depth age {:.0} ms · headset GPU {:.1} of {:.1} ms, eye buffers {:.0}%", v(r::UPLINK), v(r::UPLINK_SD_MS), v(r::ENV_AGE_MS), v(r::CLIENT_GPU_MS), 1000.0 / v(r::DISPLAY).max(1.0), v(r::EYE_SCALE_PCT)));
         lines.push(format!("{} · AA {}", server.server_line(), server.aa().name));
+        if let Some(h) = server.host_load() {
+            lines.push(format!("host app per s: GPU eyes {:.0} ms · desktop windows {:.0} ms · stream passes {:.0} ms{} · draws (CPU) {:.0} ms",
+                h.eyes_gpu_ms_s, h.desktop_gpu_ms_s, h.other_gpu_ms_s, if h.timed { "" } else { " (GPU times not reported)" }, h.draw_ms_s));
+        }
         lines.push(if v(r::AUDIO_RECEIVED) > 0.0 {
             format!("audio {:.0} ms (net {:.1} buffer {:.0}/{:.0} device {:.0}; pictures {:.0}) · lost {:.0} · underruns {:.0} · drift {:+.0} ppm",
                 v(r::AUDIO_MS), v(r::AUDIO_NET_MS), v(r::AUDIO_BUFFER_MS), v(r::AUDIO_TARGET_MS), v(r::AUDIO_DEVICE_MS), v(r::AUDIO_VIDEO_MS), v(r::AUDIO_LOST) + v(r::AUDIO_LATE), v(r::AUDIO_UNDERRUNS), v(r::AUDIO_DRIFT_PPM))
@@ -955,6 +1114,9 @@ pub struct XrCaptionButton {
     settings: Option<XrStreamSettings>,
     #[rust]
     auto: XrAuto,
+    /// What limits the stream, over the last seconds (`crate::verdict`).
+    #[rust]
+    verdict: VerdictFilter,
     /// The once-a-second tick: only while the stream is on or the panel is open (off and
     /// closed, nothing of the stream wakes the app).
     #[rust]
@@ -1055,7 +1217,12 @@ impl XrCaptionButton {
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(last) = XrServer::get(cx).and_then(|s| s.headset_reports().pop()) {
                     use makepad_desk_link::xr::report as r;
-                    return format!("Streaming · {:.0} fps · {:.0} ms", report_value(&last, r::SHOWN), report_value(&last, r::M2P_MS));
+                    let limit = match self.verdict.shown().map(|v| v.stage) {
+                        Some(Stage::None) => " · no bottleneck".to_string(),
+                        Some(Stage::Waiting) | Some(Stage::Unclear) | None => String::new(),
+                        Some(stage) => format!(" · limited by {}", stage.name()),
+                    };
+                    return format!("Streaming · {:.0} fps · {:.0} ms{limit}", report_value(&last, r::SHOWN), report_value(&last, r::M2P_MS));
                 }
                 let _ = cx;
                 "Streaming".to_string()
@@ -1305,7 +1472,7 @@ impl XrCaptionButton {
                     [
                         (ids!(tile_fps), format!("{:.0}/{:.0}", v(r::SHOWN), display)),
                         (ids!(tile_m2p), format!("{:.0}", v(r::M2P_MS))),
-                        (ids!(tile_rate), if stats.window > 0 { format!("{:.0}", stats.sent_mbps) } else { "-".to_string() }),
+                        (ids!(tile_rate), if stats.window > 0 { mbit_text(stats.sent_mbps) } else { "-".to_string() }),
                         (ids!(tile_encode), if stats.window > 0 { format!("{:.1}", stats.encode_ms) } else { "-".to_string() }),
                         (ids!(tile_late), format!("{late:.1}%")),
                     ]
@@ -1314,6 +1481,17 @@ impl XrCaptionButton {
             };
             for (tile, value) in tiles {
                 self.content(tile).child_by_path(ids!(value)).as_label().set_text(cx, &value);
+            }
+            let (line, hint) = match self.verdict.shown().filter(|_| live) {
+                Some(v) => (v.line(), if v.hint.is_empty() { String::new() } else { format!("Try: {}", v.hint) }),
+                None => (String::new(), String::new()),
+            };
+            self.content(ids!(verdict)).as_label().set_text(cx, &line);
+            self.content(ids!(hint)).as_label().set_text(cx, &hint);
+            let mean = self.verdict.mean();
+            let bars = if live && self.verdict.shown().is_some() { mean.stage_times() } else { Vec::new() };
+            if let Some(mut stages) = self.content(ids!(stages)).borrow_mut::<XrStageBars>() {
+                stages.set_bars(cx, bars, mean.budget_ms());
             }
             let points = reports.iter().map(|rep| (report_value(rep, r::SHOWN) / report_value(rep, r::DISPLAY).max(1.0), report_value(rep, r::M2P_MS) / 150.0)).collect();
             if let Some(mut spark) = self.content(ids!(spark)).borrow_mut::<XrSparkline>() {
@@ -1339,6 +1517,12 @@ impl XrCaptionButton {
             if changes != self.streaming_seen {
                 self.streaming_seen = changes;
                 makepad_widgets::log!("xr panel: the headset {} the stream", if server.streaming() { "resumed" } else { "paused" });
+            }
+            match evidence(&server) {
+                Some(e) => {
+                    self.verdict.push(e);
+                }
+                None => self.verdict.clear(),
             }
             if let (Some(signals), Some(s)) = (self.auto.signals(&server), self.settings.as_ref()) {
                 let s = s.clone();

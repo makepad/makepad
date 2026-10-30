@@ -8,9 +8,14 @@
 #   default packages: counter (the smallest app: platform + draw + widgets), calculator, clock (network + AI hub client),
 #   xr-stream (the XR stream: server natively, client per target), score-live (the Score composer: audio synth + score player)
 #   targets: CHECK_TARGETS, default every shipped one whose std is installed here (a missing one is reported, not failed)
+# From a lane worktree use check_platforms_all.sh: it runs the Apple targets on the mini and the rest on the Linux pool, in parallel.
 # Prints "PLATFORMS-OK <targets> (<s> s)" or "PLATFORMS-FAIL: <target: first error>..."; exit 0 / 1.
 set -u
 export PATH=$HOME/.cargo/bin:$PATH CARGO_INCREMENTAL=0
+# a Linux pool node checks the cross targets with its own toolchain (tools/run/fixture/install_xtool.sh), not the system rust
+if [ -x "$HOME/devhub/xtool/cargo/bin/rustc" ] && [ "$(uname -s)" = Linux ]; then
+  export RUSTUP_HOME=$HOME/devhub/xtool/rustup CARGO_HOME=$HOME/devhub/xtool/cargo PATH=$HOME/devhub/xtool/cargo/bin:$PATH
+fi
 pkgs=${*:-makepad-example-counter makepad-app-calculator makepad-app-clock makepad-xr-stream makepad-score-live}
 want=${CHECK_TARGETS:-aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-pc-windows-msvc wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios}
 log=$(mktemp -d "${TMPDIR:-/tmp}/checkplat.XXXXXX") || exit 2
@@ -21,6 +26,8 @@ for t in $want; do
   if [ -d "$sysroot/lib/rustlib/$t/lib" ]; then targets="$targets $t"; args="$args --target $t"; else missing="$missing $t"; fi
 done
 [ -n "$missing" ] && echo "not installed here (skipped):$missing"
+# targets asked for by name must be there: a node without them is a failed check, not a pass
+if [ -n "${CHECK_TARGETS:-}" ] && [ -n "$missing" ]; then echo "PLATFORMS-FAIL: targets not installed on this node:$missing (tools/run/fixture/install_xtool.sh)"; exit 1; fi
 pargs=""; for p in $pkgs; do pargs="$pargs -p $p"; done
 t0=$(date +%s)
 # -j: the mini has 10 cores and is also the arm64 bench box; the lease budget holds it to one build job

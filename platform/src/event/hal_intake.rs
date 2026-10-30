@@ -570,9 +570,14 @@ impl Cx {
                     // the user dismissed it: the app does not close its own window this way
                     self.windows[window_id].is_created = false;
                     self.hal.frames.w.window_close(window);
+                    self.hal.close_pending = Some(std::time::Instant::now());
+                } else {
+                    // kept: the app draws on
+                    self.hal.close_pending = None;
                 }
             }
             HalEvent::Closed { window } => {
+                self.hal.close_pending = None;
                 let window_id = window_id(window);
                 if !self.windows.is_valid(window_id) {
                     return true;
@@ -773,6 +778,11 @@ impl Cx {
                     child, window: LentId { index: window.index, gen: window.gen }, action: ChildWindowAction::DragAnswer { request, response },
                 }));
             }
+            HalEvent::ChildTopmost { window, child, on } => {
+                self.call_event_handler(&Event::ChildWindowAction(ChildWindowActionEvent {
+                    child, window: LentId { index: window.index, gen: window.gen }, action: ChildWindowAction::Topmost(on),
+                }));
+            }
             HalEvent::ChildWindowState { window, child, state } => {
                 self.call_event_handler(&Event::ChildWindowAction(ChildWindowActionEvent {
                     child, window: LentId { index: window.index, gen: window.gen }, action: ChildWindowAction::State(state),
@@ -861,6 +871,7 @@ impl Cx {
                 }
             }
             HalEvent::FrameDone { window, frame, gpu_ns, present_ns: _, gpu_start, gpu_end } => {
+                self.pass_load.done(frame, gpu_ns);
                 if let Some((group, name, closes)) = self.hal.frames.timings.remove(&frame) {
                     if gpu_ns > 0 {
                         crate::gpu_frame_timer::record_pass(group, &name, gpu_start, gpu_end);
@@ -1006,9 +1017,10 @@ impl Cx {
             HalEvent::Query { req, bytes } => self.hal_answer_query(req, bytes),
 
             // ---- media
-            e @ (HalEvent::VideoPrepared { .. } | HalEvent::VideoFrame { .. } | HalEvent::VideoStatus { .. } | HalEvent::VideoRanges { .. } | HalEvent::AudioDevices { .. } | HalEvent::MidiPorts { .. } | HalEvent::MidiData { .. } | HalEvent::GameDevices { .. } | HalEvent::GameInput { .. } | HalEvent::Location { .. } | HalEvent::Permission { .. }) => self.hal_media_event(e),
+            e @ (HalEvent::VideoPrepared { .. } | HalEvent::VideoFrame { .. } | HalEvent::VideoStatus { .. } | HalEvent::VideoRanges { .. } | HalEvent::AudioDevices { .. } | HalEvent::MidiPorts { .. } | HalEvent::GameDevices { .. } | HalEvent::GameInput { .. } | HalEvent::Location { .. } | HalEvent::Permission { .. }) => self.hal_media_event(e),
             e @ (HalEvent::VideoInputs { .. } | HalEvent::CameraFrame { .. }) => self.hal_camera_event(e),
             e @ HalEvent::ScreenSurface { .. } => self.hal_media_event(e),
+            HalEvent::MidiData { port, data } => self.hal_midi_data(port, data, time_ns),
         }
         true
     }

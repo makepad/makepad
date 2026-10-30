@@ -4,11 +4,12 @@ use {
         font::{Font, FontId, GlyphId},
         font_family::{FontFamily, FontFamilyId},
         geom::{Point, Rect, Size},
+        line_break::{find_first_line_break, find_line_breaks, FollowingContext, PrecedingContext},
         loader::{self, FontDefinition, FontFamilyDefinition, Loader},
         num::Zero,
         rasterizer::{self, RasterizedGlyph, Rasterizer},
         selection::{Cursor, CursorPosition, Selection},
-        shaper::{self, ShapedText},
+        shaper::{self, Direction, ShapedGlyph, ShapedText},
         substr::Substr,
     },
     fxhash::FxHashMap,
@@ -178,8 +179,8 @@ pub struct Layouter {
     /// (font, character) pairs already reported as missing.
     missing_reported: std::collections::HashSet<(FontId, char)>,
     missing_count: usize,
-    /// Moves when a family's faces change (a lazy CJK or emoji face arrives).
-    family_generation: u64,
+    /// Moves when a family's faces change (a lazy CJK or emoji face arrives or gets asked for).
+    pub(crate) font_family_generation: u64,
 }
 
 /// What a font laid out while recording ([`Layouter::record_glyphs`]):
@@ -284,16 +285,17 @@ impl Layouter {
             font_hashes: Default::default(),
             missing_reported: Default::default(),
             missing_count: 0,
-            family_generation: 0,
+            font_family_generation: 0,
         }
     }
 
     /// Moves whenever a font family's faces change, e.g. when a lazy CJK or
-    /// emoji face arrives on a glyph miss. A widget that keeps glyphs of its
-    /// own past a layout (a terminal's per-character cache) drops them when
-    /// it moves: the boxes it kept for the missing glyphs have real faces now.
-    pub fn family_generation(&self) -> u64 {
-        self.family_generation
+    /// emoji face arrives on a glyph miss or gets asked for. A widget that keeps
+    /// glyphs or text measurements of its own past a layout (a terminal's
+    /// per-character cache) compares it to tell when they're stale: the boxes it
+    /// kept for the missing glyphs have real faces now.
+    pub fn font_family_generation(&self) -> u64 {
+        self.font_family_generation
     }
 
     /// Starts (or stops) keeping every glyph that layouts return, cached
@@ -424,12 +426,13 @@ impl Layouter {
         id: FontFamilyId,
         definition: FontFamilyDefinition,
     ) {
+        // The layouts stay valid when the family didn't change.
         if self.loader.set_font_family_definition(id, definition) {
-            self.family_generation += 1;
+            self.font_family_generation += 1;
+            self.cached_results.clear();
+            self.cache_lru_order.clear();
+            self.cache_bytes = 0;
         }
-        self.cached_results.clear();
-        self.cache_lru_order.clear();
-        self.cache_bytes = 0;
     }
 
     pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
@@ -444,7 +447,7 @@ impl Layouter {
             self.loader.define_font(id, definition);
         }
         self.loader.add_system_fallback(id, bold);
-        self.family_generation += 1;
+        self.font_family_generation += 1;
         self.cached_results.clear();
         self.cache_lru_order.clear();
         self.cache_bytes = 0;
@@ -594,6 +597,11 @@ struct LayoutContext {
     current_row_end: usize,
     rows: Vec<LaidoutRow>,
     glyphs: Vec<LaidoutGlyph>,
+    has_break_at_start: bool,
+    is_glued_to_next_run: bool,
+    is_trailing_glue_reserved: bool,
+    // What we draw at the end of a row that wraps right after a soft hyphen.
+    hyphen: Option<Rc<ShapedText>>,
 }
 
 impl LayoutContext {
@@ -613,6 +621,10 @@ impl LayoutContext {
             current_row_end: 0,
             rows: Vec::new(),
             glyphs: Vec::new(),
+            has_break_at_start: false,
+            is_glued_to_next_run: false,
+            is_trailing_glue_reserved: false,
+            hyphen: None,
         }
     }
 
@@ -649,33 +661,59 @@ impl LayoutContext {
 
     fn layout_multiline(mut self) -> LaidoutText {
         let has_ellipsis_config = self.options.max_rows.is_some() || self.options.ellipsis;
+        if self.remaining_width_in_lpxs().is_some() && self.text.contains('\u{AD}') {
+            self.hyphen = Some(
+                self.font_family
+                    .get_or_shape(get_hyphen(&self.font_family).into()),
+            );
+        }
 
+        // Every hard line break ends a line, and we wrap each line at its soft breaks.
         let text = self.text.clone();
-        let mut line_break_len = 0;
-        for (line_index, (len, next_line_break_len)) in lines_and_breaks(&text).enumerate() {
-            if line_index != 0 {
-                // `max_rows` cut the previous line off mid-line: the row end is
-                // where layout stopped, not at the line break, so stepping over
-                // the "break" would land inside the next character.
+        let mut soft_breaks = Vec::new();
+        let mut has_break_at_end = false;
+        for line_break in find_line_breaks(
+            &text,
+            self.options.line_break_before,
+            self.options.line_break_after,
+        ) {
+            has_break_at_end = line_break.byte_index == text.len();
+            if line_break.byte_index == 0 {
+                self.has_break_at_start = true;
+            } else if line_break.is_forced {
                 if self.is_past_max_rows() {
                     break;
                 }
-                self.finish_current_row(true);
-                // finish_current_row steps over one byte; a `\r\n` has two.
-                self.current_row_start += line_break_len - 1;
-                self.current_row_end += line_break_len - 1;
+                self.layout_line(line_break.byte_index - line_break.newline_len, &soft_breaks);
+                soft_breaks.clear();
+                // A line that `max_rows` cut short doesn't get to end with its line break.
+                if self.is_past_max_rows() {
+                    break;
+                }
+                self.finish_current_row(RowEnd::ForcedBreak {
+                    newline_len: line_break.newline_len,
+                });
+            } else if line_break.byte_index < text.len() {
+                soft_breaks.push(line_break.byte_index);
             }
-            line_break_len = next_line_break_len;
-            if self.is_past_max_rows() {
-                break;
+        }
+        if !self.is_past_max_rows() {
+            let mut text_end = text.len();
+            if !has_break_at_end {
+                if text.ends_with('\r') {
+                    // This CR starts a CR LF that the next run ends, so we don't draw it.
+                    text_end -= 1;
+                } else {
+                    self.is_glued_to_next_run = true;
+                }
             }
-            self.layout(len);
+            self.layout_line(text_end, &soft_breaks);
         }
 
         if has_ellipsis_config {
             self.apply_ellipsis_truncation()
         } else {
-            self.finish_current_row(false);
+            self.finish_current_row(RowEnd::TextEnd);
             self.finish_with(false)
         }
     }
@@ -694,31 +732,93 @@ impl LayoutContext {
             .map_or(false, |max| self.rows.len() + 1 >= max)
     }
 
-    fn layout(&mut self, len: usize) {
+    fn layout_line(&mut self, line_end: usize, soft_breaks: &[usize]) {
         if self.remaining_width_in_lpxs().is_none() {
-            self.layout_directly(len);
+            self.layout_directly(line_end - self.current_row_end);
         } else {
-            self.layout_by_word(len);
+            self.layout_by_unit(line_end, soft_breaks);
         }
     }
 
-    fn layout_by_word(&mut self, len: usize) {
-        let mut fitter = Fitter::new(
-            self.span_text(len),
-            self.font_family.clone(),
-            self.style.font_size_in_lpxs(),
-            SegmentKind::Word,
-        );
+    /// Wraps the units of a line, which are the pieces of text between its break opportunities.
+    fn layout_by_unit(&mut self, line_end: usize, soft_breaks: &[usize]) {
+        let line_start = self.current_row_end;
+        if line_start == line_end {
+            return;
+        }
+        let font_size_in_lpxs = self.style.font_size_in_lpxs();
+        let hyphen_width_in_lpxs = self
+            .hyphen
+            .as_ref()
+            .map_or(0.0, |hyphen| hyphen.width_in_ems * font_size_in_lpxs);
+        let mut shaped_line = ShapedLine::new(self.text.substr(line_start..line_end));
+        let mut unit_start = line_start;
+        let units = soft_breaks
+            .iter()
+            .copied()
+            .chain([line_end])
+            .enumerate()
+            .map(|(index, unit_end)| {
+                let unit = self.text.substr(unit_start..unit_end);
+                unit_start = unit_end;
+                let glue_width_in_lpxs = if self.is_glued_to_next_run && unit_end == self.text.len()
+                {
+                    self.options.trailing_glue_width_in_lpxs.max(0.0)
+                } else {
+                    0.0
+                };
+                // Spaces with glue after them can't hang, so they count toward the unit's width.
+                let hanging_len = if glue_width_in_lpxs > 0.0 {
+                    0
+                } else {
+                    unit.len() - unit.trim_end_matches(is_hangable_white_space).len()
+                };
+                let is_soft_hyphen_break = unit_end < line_end && unit.ends_with('\u{AD}');
+                let next_unit_ends = soft_breaks
+                    .iter()
+                    .chain([&line_end])
+                    .skip(index + 1)
+                    .map(|&unit_end| unit_end - line_start);
+                let shaped_unit =
+                    shaped_line.get_or_shape_unit(&self.font_family, unit, next_unit_ends);
+                Segment {
+                    hyphen_width_in_lpxs: if is_soft_hyphen_break {
+                        hyphen_width_in_lpxs
+                    } else {
+                        0.0
+                    },
+                    glue_width_in_lpxs,
+                    ..Segment::new(&shaped_unit, font_size_in_lpxs, hanging_len)
+                }
+            })
+            .collect();
+        let mut fitter = Fitter {
+            text: self.text.substr(line_start..line_end),
+            shaped_line,
+            font_family: self.font_family.clone(),
+            font_size_in_lpxs,
+            segments: units,
+            next_segment_index: 0,
+        };
         while !fitter.is_empty() {
             if self.is_past_max_rows() {
                 break;
             }
             match fitter.fit(self.remaining_width_in_lpxs().unwrap()) {
-                Some(text) => self.append_text(&text),
+                Some(text) => self.append_fitted_text(&text),
                 None => {
-                    let next_word = &self.text[self.current_row_end..][..fitter.next_len()];
-                    if next_word.chars().all(|char| char.is_whitespace()) {
-                        self.layout_directly(fitter.pop());
+                    let unit = fitter.next_segment();
+                    if unit.hanging_len == unit.len {
+                        // Hanging white space never wraps, even on a row that's already full.
+                        self.layout_directly(fitter.pop().len);
+                    } else if self.current_row_end == 0
+                        && self.current_row_is_continuation()
+                        && !self.has_break_at_start
+                        && self.options.is_start_reserved
+                    {
+                        // The previous run kept room for this unit on its row.
+                        let text = self.font_family.get_or_shape(self.span_text(fitter.pop().len));
+                        self.append_fitted_text(&text);
                     } else if self.options.ellipsis
                         && self.current_row_is_last_allowed()
                         && !self.current_row_is_continuation()
@@ -735,33 +835,69 @@ impl LayoutContext {
                         // finishing the row truncates within bounds.
                         self.layout_by_grapheme(fitter.pop());
                     } else if self.current_row_is_empty() && !self.current_row_is_continuation() {
-                        self.layout_by_grapheme(fitter.pop());
+                        // A unit that starts a row stays whole if it fits with its hyphen, even if
+                        // its glue doesn't, and otherwise breaks between graphemes.
+                        let unit = fitter.pop();
+                        if unit.width_without_hanging_in_lpxs + unit.hyphen_width_in_lpxs
+                            <= self.remaining_width_in_lpxs().unwrap()
+                        {
+                            self.layout_directly(unit.len);
+                        } else {
+                            self.layout_by_grapheme(unit);
+                        }
                     } else {
-                        self.finish_current_row(false);
+                        self.finish_current_row(RowEnd::SoftWrap);
                     }
                 }
             }
         }
     }
 
-    fn layout_by_grapheme(&mut self, len: usize) {
-        let mut fitter = Fitter::new(
-            self.span_text(len),
-            self.font_family.clone(),
-            self.style.font_size_in_lpxs(),
-            SegmentKind::Grapheme,
-        );
+    fn layout_by_grapheme(&mut self, unit: Segment) {
+        let font_size_in_lpxs = self.style.font_size_in_lpxs();
+        let text = self.span_text(unit.len);
+        // The unit's hanging white space, hyphen and glue stay with its last grapheme.
+        let mut grapheme_start = 0;
+        let graphemes = text[..unit.len - unit.hanging_len]
+            .grapheme_indices(true)
+            .skip(1)
+            .map(|(grapheme_end, _)| grapheme_end)
+            .chain([unit.len])
+            .map(|grapheme_end| {
+                let grapheme = self
+                    .font_family
+                    .get_or_shape(text.substr(grapheme_start..grapheme_end));
+                grapheme_start = grapheme_end;
+                if grapheme_end == unit.len {
+                    Segment {
+                        hyphen_width_in_lpxs: unit.hyphen_width_in_lpxs,
+                        glue_width_in_lpxs: unit.glue_width_in_lpxs,
+                        ..Segment::new(&grapheme, font_size_in_lpxs, unit.hanging_len)
+                    }
+                } else {
+                    Segment::new(&grapheme, font_size_in_lpxs, 0)
+                }
+            })
+            .collect();
+        let mut fitter = Fitter {
+            text: text.clone(),
+            shaped_line: ShapedLine::new(text),
+            font_family: self.font_family.clone(),
+            font_size_in_lpxs,
+            segments: graphemes,
+            next_segment_index: 0,
+        };
         while !fitter.is_empty() {
             if self.is_past_max_rows() {
                 break;
             }
             match fitter.fit(self.remaining_width_in_lpxs().unwrap()) {
-                Some(text) => self.append_text(&text),
+                Some(text) => self.append_fitted_text(&text),
                 None => {
                     if self.current_row_is_empty() {
-                        self.layout_directly(fitter.pop());
+                        self.layout_directly(fitter.pop().len);
                     } else {
-                        self.finish_current_row(false);
+                        self.finish_current_row(RowEnd::EmergencyWrap);
                     }
                 }
             }
@@ -778,14 +914,30 @@ impl LayoutContext {
     }
 
     fn append_text(&mut self, text: &ShapedText) {
-        for shaped in &text.glyphs {
+        self.append_glyphs(&text.glyphs, self.current_row_len());
+        self.current_row_end += text.text.len();
+    }
+
+    /// Appends text we made room for.
+    ///
+    /// When it reaches the end of the text, we made room for the trailing glue after it too.
+    fn append_fitted_text(&mut self, text: &ShapedText) {
+        self.append_text(text);
+        if self.current_row_end == self.text.len() {
+            self.is_trailing_glue_reserved = true;
+        }
+    }
+
+    fn append_glyphs(&mut self, glyphs: &[ShapedGlyph], cluster_start: usize) {
+        for shaped in glyphs {
             let mut glyph = LaidoutGlyph {
                 origin_in_lpxs: Point::ZERO,
                 font: shaped.font.clone(),
                 font_size_in_lpxs: self.style.font_size_in_lpxs(),
                 color: self.style.color,
                 id: shaped.id,
-                cluster: self.current_row_len() + shaped.cluster,
+                cluster: cluster_start + shaped.cluster,
+                direction: shaped.direction,
                 advance_in_ems: shaped.advance_in_ems,
                 offset_in_ems: shaped.offset_in_ems,
             };
@@ -796,10 +948,17 @@ impl LayoutContext {
             self.current_point_in_lpxs.x += glyph.advance_in_lpxs();
             self.glyphs.push(glyph);
         }
-        self.current_row_end += text.text.len();
     }
 
-    fn finish_current_row(&mut self, newline: bool) {
+    fn finish_current_row(&mut self, row_end: RowEnd) {
+        if row_end == RowEnd::SoftWrap
+            && self.text[self.current_row_start..self.current_row_end].ends_with('\u{AD}')
+        {
+            if let Some(hyphen) = self.hyphen.clone() {
+                // The hyphen joins its soft hyphen's cluster, so carets see one char there.
+                self.append_glyphs(&hyphen.glyphs, self.current_row_len() - '\u{AD}'.len_utf8());
+            }
+        }
         let font = self.font_family.fonts().first();
         let font_size_in_lpxs = self.style.font_size_in_lpxs();
         let ascender_in_lpxs = font.map_or(0.0, |font| font.ascender_in_ems()) * font_size_in_lpxs;
@@ -812,13 +971,53 @@ impl LayoutContext {
             .text
             .substr(self.current_row_start..self.current_row_end);
         let width_in_lpxs = self.current_point_in_lpxs.x;
+        let is_followed_by_glue = row_end == RowEnd::TextEnd
+            && self.is_glued_to_next_run
+            && self.options.trailing_glue_width_in_lpxs > 0.0;
+        let hanging_width_in_lpxs = match self.remaining_width_in_lpxs() {
+            None => 0.0,
+            Some(_) if is_followed_by_glue => 0.0,
+            Some(remaining_width_in_lpxs) => {
+                // White space at the end of a wrapped row hangs past its edge. At a hard line
+                // break or the end of the text, only the part that doesn't fit hangs.
+                let hanging_start = text.trim_end_matches(is_hangable_white_space).len();
+                let trailing_white_space_width_in_lpxs: f32 = self
+                    .glyphs
+                    .iter()
+                    .filter(|glyph| glyph.cluster >= hanging_start)
+                    .map(|glyph| glyph.advance_in_lpxs())
+                    .sum();
+                let hanging_width_in_lpxs =
+                    if matches!(row_end, RowEnd::SoftWrap | RowEnd::EmergencyWrap) {
+                        trailing_white_space_width_in_lpxs
+                    } else {
+                        (-remaining_width_in_lpxs)
+                            .min(trailing_white_space_width_in_lpxs)
+                            .max(0.0)
+                    };
+                // A row can start past the edge, after the spaces that hang at the end of the
+                // previous run, and if nothing past the edge takes room, all of that hangs too.
+                let max_width_in_lpxs = width_in_lpxs + remaining_width_in_lpxs;
+                let has_overflowing_content = self.glyphs.iter().any(|glyph| {
+                    glyph.advance_in_lpxs() > 0.0
+                        && glyph.origin_in_lpxs.x + glyph.advance_in_lpxs() > max_width_in_lpxs
+                        && !text[glyph.cluster..].starts_with(is_hangable_white_space)
+                });
+                if has_overflowing_content {
+                    hanging_width_in_lpxs
+                } else {
+                    hanging_width_in_lpxs.max(-remaining_width_in_lpxs)
+                }
+            }
+        };
 
         let glyphs = mem::take(&mut self.glyphs);
         let mut row = LaidoutRow {
             origin_in_lpxs: Point::ZERO,
             text,
-            newline,
+            newline: matches!(row_end, RowEnd::ForcedBreak { .. }),
             width_in_lpxs,
+            hanging_width_in_lpxs,
             ascender_in_lpxs,
             descender_in_lpxs,
             line_gap_in_lpxs,
@@ -847,32 +1046,44 @@ impl LayoutContext {
                 natural_in_lpxs
             }
         });
-        let max_width_in_lpxs = self.options.max_width_in_lpxs.unwrap_or(row.width_in_lpxs);
-        let remaining_width_in_lpxs = max_width_in_lpxs - row.width_in_lpxs;
+        let max_width_in_lpxs = self
+            .options
+            .max_width_in_lpxs
+            .unwrap_or(row.width_without_hanging_in_lpxs());
+        let remaining_width_in_lpxs = max_width_in_lpxs - row.width_without_hanging_in_lpxs();
         row.origin_in_lpxs.x = self.options.align * remaining_width_in_lpxs;
         row.origin_in_lpxs.y = self.current_point_in_lpxs.y;
         self.current_row_start = self.current_row_end;
-        if newline {
-            self.current_row_start += 1;
-            self.current_row_end += 1;
+        if let RowEnd::ForcedBreak { newline_len } = row_end {
+            self.current_row_start += newline_len;
+            self.current_row_end += newline_len;
         }
         self.rows.push(row);
     }
 
     fn finish_with(self, is_truncated: bool) -> LaidoutText {
         let last_row = self.rows.last().unwrap();
+        let mut line_break_before_next_run = self.options.line_break_before;
+        line_break_before_next_run.append(&self.text);
+        // An empty text passes its reservation along.
+        let is_trailing_glue_reserved = self.is_glued_to_next_run
+            && (self.is_trailing_glue_reserved
+                || (self.text.is_empty() && self.options.is_start_reserved));
         LaidoutText {
             text: self.text,
             size_in_lpxs: Size::new(
                 self.rows
                     .iter()
-                    .map(|row| row.width_in_lpxs)
+                    .map(|row| row.width_without_hanging_in_lpxs())
                     .reduce(f32::max)
                     .unwrap_or(0.0),
                 last_row.origin_in_lpxs.y - last_row.descender_in_lpxs,
             ),
+            has_missing_glyph: self.rows.iter().flat_map(|row| &row.glyphs).any(|glyph| glyph.id == 0),
             rows: self.rows,
             is_truncated,
+            line_break_before_next_run,
+            is_trailing_glue_reserved,
         }
     }
 
@@ -886,8 +1097,14 @@ impl LayoutContext {
 
         // Detect whether all text was consumed during layout.
         // If not, text was truncated by the max_rows early-exit.
-        let all_text_consumed = self.current_row_end >= self.text.len()
-            || matches!(&self.text[self.current_row_end..], "\n" | "\r\n" | "\r");
+        // Only the text's final hard line break left over still counts as consumed.
+        let rest = &self.text[self.current_row_end..];
+        let all_text_consumed = find_first_line_break(
+            rest,
+            PrecedingContext::PARAGRAPH_START,
+            FollowingContext::END_OF_TEXT,
+        )
+        .is_none_or(|line_break| line_break.newline_len == rest.len());
 
         let max_rows = match self.options.max_rows {
             Some(max) if max > 0 => max,
@@ -922,6 +1139,11 @@ impl LayoutContext {
                 }
             }
         }
+
+        // What follows us gets cut when the last row we're allowed has no room for it.
+        let options = &self.options;
+        text_was_truncated |= options.ellipsis
+            && is_short_of_following_room(&self.rows, max_rows, options.max_width_in_lpxs, options.following_room_in_lpxs);
 
         if !text_was_truncated {
             return self.finish_with(false);
@@ -966,6 +1188,7 @@ impl LayoutContext {
             let removed = last_row.glyphs.pop().unwrap();
             last_row.width_in_lpxs -= removed.advance_in_lpxs();
         }
+        last_row.hanging_width_in_lpxs = 0.0;
 
         // Append ellipsis glyphs
         for glyph in &ellipsis_shaped.glyphs {
@@ -976,6 +1199,7 @@ impl LayoutContext {
                 color: self.style.color,
                 id: glyph.id,
                 cluster: last_row.text.len(), // beyond the text range
+                direction: glyph.direction,
                 advance_in_ems: glyph.advance_in_ems,
                 offset_in_ems: glyph.offset_in_ems,
             };
@@ -990,236 +1214,244 @@ impl LayoutContext {
         let has_pending_content =
             self.current_row_start != self.current_row_end || !self.glyphs.is_empty();
         if has_pending_content || self.rows.is_empty() {
-            self.finish_current_row(false);
+            self.finish_current_row(RowEnd::TextEnd);
         }
     }
 }
 
-/// Splits text into its lines as `(line length, line break length)` in bytes.
-/// A line ends at `\n`, `\r\n` or a lone `\r`; the break is not part of the
-/// line, so a `\r` never reaches the shaper (where it would draw as .notdef).
-/// The last line has a break length of 0.
-fn lines_and_breaks(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
-    let bytes = text.as_bytes();
-    let mut start = 0;
-    let mut done = false;
-    std::iter::from_fn(move || {
-        if done {
-            return None;
-        }
-        let Some(offset) = bytes[start..].iter().position(|&b| b == b'\n' || b == b'\r') else {
-            done = true;
-            return Some((bytes.len() - start, 0));
-        };
-        let end = start + offset;
-        let break_len = if bytes[end] == b'\r' && bytes.get(end + 1) == Some(&b'\n') {
-            2
-        } else {
-            1
-        };
-        start = end + break_len;
-        Some((offset, break_len))
-    })
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RowEnd {
+    /// A break opportunity, because the next unit doesn't fit.
+    SoftWrap,
+    /// A grapheme boundary inside a unit that's wider than a row.
+    EmergencyWrap,
+    ForcedBreak { newline_len: usize },
+    TextEnd,
 }
 
 #[derive(Debug)]
 struct Fitter {
     text: Substr,
+    shaped_line: ShapedLine,
     font_family: Rc<FontFamily>,
     font_size_in_lpxs: f32,
-    lens: Vec<usize>,
-    widths_in_lpxs: Vec<f32>,
+    segments: Vec<Segment>,
+    next_segment_index: usize,
 }
 
 impl Fitter {
-    fn new(
-        text: Substr,
-        font_family: Rc<FontFamily>,
-        font_size_in_lpxs: f32,
-        segment_kind: SegmentKind,
-    ) -> Self {
-        let mut lens: Vec<_> = match segment_kind {
-            SegmentKind::Word => text
-                .split_word_bounds()
-                .map(|segment| segment.len())
-                .collect(),
-            SegmentKind::Grapheme => text.graphemes(true).map(|segment| segment.len()).collect(),
-        };
-        if matches!(segment_kind, SegmentKind::Word) {
-            merge_segments_for_line_breaking(&text, &mut lens);
-        }
-        let widths_in_lpxs: Vec<_> = lens
-            .iter()
-            .copied()
-            .scan(0, |state, len| {
-                let start = *state;
-                let end = start + len;
-                let segment = font_family.get_or_shape(text.substr(start..end));
-                let width_in_lpxs = segment.width_in_ems * font_size_in_lpxs;
-                *state = end;
-                Some(width_in_lpxs)
-            })
-            .collect();
-        Self {
-            text,
-            font_family,
-            font_size_in_lpxs,
-            lens,
-            widths_in_lpxs,
-        }
-    }
-
     fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
 
-    fn next_len(&self) -> usize {
-        self.lens[0]
+    fn next_segment(&self) -> Segment {
+        self.segments[self.next_segment_index]
     }
 
+    /// Takes as many of the next segments as fit on a row, and returns them shaped.
     fn fit(&mut self, wrap_width_in_lpxs: f32) -> Option<Rc<ShapedText>> {
-        let mut min_count = 1;
-        let mut max_count = self.lens.len() + 1;
-        let mut best_count = None;
-        while min_count < max_count {
-            let mid_count = (min_count + max_count) / 2;
-            if self.can_fit(mid_count, wrap_width_in_lpxs) {
-                best_count = Some(mid_count);
-                min_count = mid_count + 1;
-            } else {
-                max_count = mid_count;
+        // We add up each segment's own width, since shaping longer candidates would always miss
+        // the shaper's cache. The sum leaves out the last one's hyphen and glue, so it only grows.
+        let segments = &self.segments[self.next_segment_index..];
+        let mut estimated_width_in_lpxs = 0.0;
+        let mut count = segments
+            .iter()
+            .take_while(|segment| {
+                let fits = estimated_width_in_lpxs + segment.width_without_hanging_in_lpxs
+                    <= wrap_width_in_lpxs;
+                estimated_width_in_lpxs += segment.width_in_lpxs;
+                fits
+            })
+            .count();
+        // The estimate misses the kerning between segments, so we shape the row to check it.
+        let mut len: usize = segments[..count].iter().map(|segment| segment.len).sum();
+        while count > 0 {
+            let last_segment = segments[count - 1];
+            let text = self
+                .shaped_line
+                .get_or_shape_row(&self.font_family, self.text.substr(0..len));
+            let width_in_lpxs = get_width_in_ems_before(&text, len - last_segment.hanging_len)
+                * self.font_size_in_lpxs
+                + last_segment.hyphen_width_in_lpxs
+                + last_segment.glue_width_in_lpxs;
+            if width_in_lpxs <= wrap_width_in_lpxs {
+                self.next_segment_index += count;
+                self.text = self.text.substr(len..);
+                return Some(text);
             }
-        }
-        if let Some(mut best_count) = best_count {
-            while best_count > 0 {
-                let best_len = self.lens[..best_count].iter().sum();
-                let best_text = self.font_family.get_or_shape(self.text.substr(0..best_len));
-                if best_text.width_in_ems * self.font_size_in_lpxs <= wrap_width_in_lpxs {
-                    self.lens.drain(..best_count);
-                    self.widths_in_lpxs.drain(..best_count);
-                    self.text = self.text.substr(best_len..);
-                    return Some(best_text);
-                }
-                best_count -= 1;
-            }
+            len -= last_segment.len;
+            count -= 1;
         }
         None
     }
 
-    fn can_fit(&self, count: usize, wrap_width_in_lpxs: f32) -> bool {
-        // Use the pre-computed per-segment widths to estimate whether `count`
-        // segments fit within the wrap width. This avoids calling get_or_shape()
-        // on progressively longer substrings during the binary search — those
-        // cumulative substrings are unique and always miss the shaper cache,
-        // making each call a full HarfBuzz shape operation.
-        //
-        // The final candidate is shaped and checked exactly in `fit()` before it
-        // is accepted, so this estimate can never allow an overflowing row.
-        let estimated_width_in_lpxs: f32 = self.widths_in_lpxs[..count].iter().sum();
-        estimated_width_in_lpxs <= wrap_width_in_lpxs
-    }
-
-    fn pop(&mut self) -> usize {
-        let len = self.lens.remove(0);
-        self.widths_in_lpxs.remove(0);
-        self.text = self.text.substr(len..);
-        len
+    fn pop(&mut self) -> Segment {
+        let segment = self.next_segment();
+        self.next_segment_index += 1;
+        self.text = self.text.substr(segment.len..);
+        segment
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-enum SegmentKind {
-    Word,
-    Grapheme,
-}
-
-/// Merges word-boundary segments to prevent line breaks at typographically
-/// incorrect positions, following standard line-breaking conventions
-/// (UAX#14 / CSS Text Module Level 3).
+/// A line's text, which we shape in stretches of consecutive units that aren't cached yet.
 ///
-/// Trailing/closing punctuation (`.` `,` `;` `)` etc.) is merged into the
-/// preceding segment so it won't wrap to a new line by itself. Opening
-/// punctuation (`(` `[` etc.) is merged into the following segment so it
-/// won't be stranded at the end of a line.
-fn merge_segments_for_line_breaking(text: &str, lens: &mut Vec<usize>) {
-    // Pass 1: Merge "no-break-before" segments (trailing/closing punctuation)
-    // into the preceding segment.
-    if lens.len() >= 2 {
-        let mut i = 1;
-        let mut byte_offset = lens[0];
-        while i < lens.len() {
-            let seg_end = byte_offset + lens[i];
-            let seg_text = &text[byte_offset..seg_end];
-            if seg_text.chars().all(is_no_break_before_char) {
-                lens[i - 1] += lens[i];
-                lens.remove(i);
-            } else {
-                i += 1;
-            }
-            byte_offset = seg_end;
+/// The units and rows inside a stretch then take their glyphs from it where that's exact, instead
+/// of each of them getting shaped too.
+#[derive(Debug)]
+struct ShapedLine {
+    text: Substr,
+    shaped_stretches: Vec<Rc<ShapedText>>,
+    // Where the last stretch we found ends, even if we didn't shape it whole.
+    stretch_end: usize,
+}
+
+impl ShapedLine {
+    fn new(text: Substr) -> Self {
+        Self {
+            text,
+            shaped_stretches: Vec::new(),
+            stretch_end: 0,
         }
     }
 
-    // Pass 2: Merge "no-break-after" segments (opening punctuation)
-    // into the following segment.
-    if lens.len() >= 2 {
-        let mut i = 0;
-        let mut byte_offset = 0;
-        while i + 1 < lens.len() {
-            let seg_end = byte_offset + lens[i];
-            let seg_text = &text[byte_offset..seg_end];
-            if seg_text.chars().all(is_no_break_after_char) {
-                lens[i + 1] = lens[i] + lens[i + 1];
-                lens.remove(i);
-            } else {
-                byte_offset = seg_end;
-                i += 1;
+    /// Returns a unit of the line shaped.
+    ///
+    /// A unit that isn't cached starts a stretch, which goes on through the units after it (ending
+    /// at `next_unit_ends`) until one is cached.
+    fn get_or_shape_unit(
+        &mut self,
+        font_family: &FontFamily,
+        unit: Substr,
+        next_unit_ends: impl Iterator<Item = usize>,
+    ) -> Rc<ShapedText> {
+        font_family.get_or_shape_with(unit, |shaper, params| {
+            let unit_start = params.text.start_in_parent() - self.text.start_in_parent();
+            if unit_start >= self.stretch_end {
+                let unit_end = unit_start + params.text.len();
+                let mut stretch_params = params.clone();
+                self.stretch_end = unit_end;
+                for next_unit_end in next_unit_ends {
+                    stretch_params.text = self.text.substr(self.stretch_end..next_unit_end);
+                    if shaper.is_cached(&stretch_params) {
+                        break;
+                    }
+                    self.stretch_end = next_unit_end;
+                }
+                if self.stretch_end > unit_end {
+                    stretch_params.text = self.text.substr(unit_start..self.stretch_end);
+                    if let Some(stretch) = shaper.shape_with_pieces(stretch_params) {
+                        self.shaped_stretches.push(Rc::new(stretch));
+                    }
+                }
             }
+            self.get_piece(&params.text)
+        })
+    }
+
+    /// Returns a row of the line shaped, from the stretch it's in if it isn't cached.
+    fn get_or_shape_row(&self, font_family: &FontFamily, row: Substr) -> Rc<ShapedText> {
+        font_family.get_or_shape_with(row, |_, params| self.get_piece(&params.text))
+    }
+
+    /// Returns `piece` shaped on its own, from the stretch we shaped whole that it's in.
+    fn get_piece(&self, piece: &Substr) -> Option<Rc<ShapedText>> {
+        let start = piece.start_in_parent();
+        let index = self
+            .shaped_stretches
+            .partition_point(|stretch| stretch.text.start_in_parent() <= start);
+        let stretch = self.shaped_stretches[..index].last()?;
+        if piece.end_in_parent() > stretch.text.end_in_parent() {
+            return None;
+        }
+        if piece.len() == stretch.text.len() {
+            return Some(stretch.clone());
+        }
+        stretch
+            .get_piece(piece, start - stretch.text.start_in_parent())
+            .map(Rc::new)
+    }
+}
+
+/// A piece of text that the fitter puts on a row whole, like a unit or a grapheme.
+#[derive(Clone, Copy, Debug)]
+struct Segment {
+    len: usize,
+    // How many bytes of white space at the end hang when a row ends with this segment.
+    hanging_len: usize,
+    width_in_lpxs: f32,
+    width_without_hanging_in_lpxs: f32,
+    // The hyphen a row gets when it ends with this segment right after a soft hyphen.
+    hyphen_width_in_lpxs: f32,
+    // What has to stay on the row right after this segment, which only the text's last unit has.
+    glue_width_in_lpxs: f32,
+}
+
+impl Segment {
+    fn new(shaped_text: &ShapedText, font_size_in_lpxs: f32, hanging_len: usize) -> Self {
+        let len = shaped_text.text.len();
+        Self {
+            len,
+            hanging_len,
+            width_in_lpxs: shaped_text.width_in_ems * font_size_in_lpxs,
+            width_without_hanging_in_lpxs: get_width_in_ems_before(shaped_text, len - hanging_len)
+                * font_size_in_lpxs,
+            hyphen_width_in_lpxs: 0.0,
+            glue_width_in_lpxs: 0.0,
         }
     }
 }
 
-/// Characters before which a line break should not occur (UAX#14 classes
-/// CL, CP, EX, IS and common typographic conventions).
-fn is_no_break_before_char(c: char) -> bool {
+/// Returns the advance width of the glyphs for the bytes of `text` before `byte_index`.
+fn get_width_in_ems_before(text: &ShapedText, byte_index: usize) -> f32 {
+    text.glyphs
+        .iter()
+        .filter(|glyph| glyph.cluster < byte_index)
+        .map(|glyph| glyph.advance_in_ems)
+        .sum()
+}
+
+/// Returns whether `c` is white space that hangs at the end of a row.
+///
+/// That's CSS Text's preserved spaces, tabs and other space separators, so `Zs` except U+00A0.
+pub fn is_hangable_white_space(c: char) -> bool {
     matches!(
         c,
-        // IS: Infix Numeric Separator
-        '.' | ',' | ':' | ';'
-        // EX: Exclamation / Interrogation
-        | '!' | '?'
-        // CP: Close Parenthesis, CL: Close Punctuation
-        | ')' | ']' | '}'
-        // CL: Closing quotation marks
-        | '\u{2019}' // '
-        | '\u{201D}' // \u{201d}
-        | '\u{203A}' // ›
-        | '\u{00BB}' // »
-        // Other common no-break-before characters
-        | '\u{2026}' // …
-        | '%'
-        | '\u{00B0}' // °
+        ' ' | '\t' | '\u{1680}' | '\u{2000}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
     )
 }
 
-/// Characters after which a line break should not occur (UAX#14 class OP).
-fn is_no_break_after_char(c: char) -> bool {
-    matches!(
-        c,
-        '(' | '[' | '{'
-        // Opening quotation marks
-        | '\u{2018}' // '
-        | '\u{201C}' // \u{201c}
-        | '\u{2039}' // ‹
-        | '\u{00AB}' // «
-    )
+/// Whether `rows` end on the last row `max_rows` allows, and it has less room than `following_room_in_lpxs`
+/// after it, so it ends with the ellipsis. See [`LayoutOptions::following_room_in_lpxs`].
+pub fn is_short_of_following_room(
+    rows: &[LaidoutRow],
+    max_rows: usize,
+    max_width_in_lpxs: Option<f32>,
+    following_room_in_lpxs: f32,
+) -> bool {
+    following_room_in_lpxs > 0.0
+        && rows.len() == max_rows
+        && rows.last().is_some_and(|row| row.width_in_lpxs + following_room_in_lpxs > max_width_in_lpxs.unwrap_or(f32::MAX))
+}
+
+/// Returns the hyphen we draw at the end of a row that wraps right after a soft hyphen.
+///
+/// Like browsers, we use U+2010 HYPHEN when the family's first font has it.
+pub(crate) fn get_hyphen(font_family: &FontFamily) -> &'static str {
+    let has_hyphen_glyph = font_family.fonts().first().is_some_and(|font| {
+        font.with_ttf_parser_face(|face| face.glyph_index('\u{2010}').is_some())
+    });
+    if has_hyphen_glyph {
+        "\u{2010}"
+    } else {
+        "-"
+    }
 }
 
 pub trait LayoutParams {
     fn to_owned(self) -> OwnedLayoutParams;
     fn text(&self) -> &str;
-    fn style(&self) -> Style;
-    fn options(&self) -> LayoutOptions;
+    fn style(&self) -> &Style;
+    fn options(&self) -> &LayoutOptions;
 }
 
 impl Eq for dyn LayoutParams + '_ {}
@@ -1272,12 +1504,12 @@ impl LayoutParams for OwnedLayoutParams {
         &self.text
     }
 
-    fn style(&self) -> Style {
-        self.style
+    fn style(&self) -> &Style {
+        &self.style
     }
 
-    fn options(&self) -> LayoutOptions {
-        self.options
+    fn options(&self) -> &LayoutOptions {
+        &self.options
     }
 }
 
@@ -1307,12 +1539,12 @@ impl<'a> LayoutParams for BorrowedLayoutParams<'a> {
         self.text
     }
 
-    fn style(&self) -> Style {
-        self.style
+    fn style(&self) -> &Style {
+        &self.style
     }
 
-    fn options(&self) -> LayoutOptions {
-        self.options
+    fn options(&self) -> &LayoutOptions {
+        &self.options
     }
 }
 
@@ -1383,6 +1615,22 @@ pub struct LayoutOptions {
     /// on a single non-wrapping line), an ellipsis character (U+2026 "…") is appended
     /// to the last visible row.
     pub ellipsis: bool,
+    /// What the line breaking rules see before the text, like the earlier runs on its line.
+    pub line_break_before: PrecedingContext,
+    /// What the line breaking rules see after the text, like the start of the next run.
+    pub line_break_after: FollowingContext,
+    /// The width of what has to stay on the row right after the text.
+    ///
+    /// That's the next run's text up to its first break opportunity, when the text's end isn't one.
+    pub trailing_glue_width_in_lpxs: f32,
+    /// Whether the previous run kept room on its last row for this text's first unit.
+    ///
+    /// That unit then stays on our first row even if it doesn't quite fit.
+    pub is_start_reserved: bool,
+    /// The room that what follows the text needs on the text's last row, or 0 when it needs none.
+    ///
+    /// When the last row `max_rows` allows doesn't have that room, it ends with the ellipsis.
+    pub following_room_in_lpxs: f32,
 }
 
 impl Default for LayoutOptions {
@@ -1397,6 +1645,11 @@ impl Default for LayoutOptions {
             flow_wrap_spacing_in_lpxs: None,
             max_rows: None,
             ellipsis: false,
+            line_break_before: PrecedingContext::PARAGRAPH_START,
+            line_break_after: FollowingContext::END_OF_TEXT,
+            trailing_glue_width_in_lpxs: 0.0,
+            is_start_reserved: false,
+            following_room_in_lpxs: 0.0,
         }
     }
 }
@@ -1408,17 +1661,10 @@ impl Hash for LayoutOptions {
     where
         H: Hasher,
     {
+        // Keys with the same text mostly differ in where it starts or how wide it gets, so we
+        // leave the other options to `eq` instead of hashing them on every lookup.
         self.first_row_indent_in_lpxs.to_bits().hash(hasher);
-        self.first_row_min_line_spacing_below_in_lpxs
-            .to_bits()
-            .hash(hasher);
         self.max_width_in_lpxs.map(f32::to_bits).hash(hasher);
-        self.wrap.hash(hasher);
-        self.align.to_bits().hash(hasher);
-        self.line_spacing_scale.to_bits().hash(hasher);
-        self.flow_wrap_spacing_in_lpxs.map(f32::to_bits).hash(hasher);
-        self.max_rows.hash(hasher);
-        self.ellipsis.hash(hasher);
     }
 }
 
@@ -1435,6 +1681,12 @@ impl PartialEq for LayoutOptions {
                 == other.flow_wrap_spacing_in_lpxs.map(f32::to_bits)
             && self.max_rows == other.max_rows
             && self.ellipsis == other.ellipsis
+            && self.line_break_before == other.line_break_before
+            && self.line_break_after == other.line_break_after
+            && self.trailing_glue_width_in_lpxs.to_bits()
+                == other.trailing_glue_width_in_lpxs.to_bits()
+            && self.is_start_reserved == other.is_start_reserved
+            && self.following_room_in_lpxs.to_bits() == other.following_room_in_lpxs.to_bits()
     }
 }
 
@@ -1443,8 +1695,16 @@ pub struct LaidoutText {
     pub text: Substr,
     pub size_in_lpxs: Size<f32>,
     pub rows: Vec<LaidoutRow>,
+    /// Whether some glyph is missing from all of the family's fonts.
+    pub has_missing_glyph: bool,
     /// True when the text was truncated (e.g., due to `max_rows` or ellipsis).
     pub is_truncated: bool,
+    /// The `line_break_before` for the next run on the same line, so ours with this text appended.
+    pub line_break_before_next_run: PrecedingContext,
+    /// Whether the trailing glue fit right after the text's last unit.
+    ///
+    /// The next run on the same row gets this as its `is_start_reserved`.
+    pub is_trailing_glue_reserved: bool,
 }
 
 impl LaidoutText {
@@ -1491,6 +1751,15 @@ impl LaidoutText {
                 return row_index;
             }
             if cursor.index == row.text.end_in_parent() && (row.newline || !cursor.prefer_next_row)
+            {
+                return row_index;
+            }
+            // An index inside a hard line break, like between its CR and LF, stays on its row.
+            if row.newline
+                && self
+                    .rows
+                    .get(row_index + 1)
+                    .is_some_and(|next_row| cursor.index < next_row.text.start_in_parent())
             {
                 return row_index;
             }
@@ -1541,60 +1810,57 @@ impl LaidoutText {
             x_in_lpxs: end_x_in_lpxs,
         } = self.cursor_to_position(selection.end());
         let mut selection_rects = Vec::new();
-        if start_row_index == end_row_index {
-            let row = &self.rows[start_row_index];
-            selection_rects.push(SelectionRect {
-                rect_in_lpxs: Rect::new(
-                    Point::new(start_x_in_lpxs, row.origin_in_lpxs.y - row.ascender_in_lpxs),
-                    Size::new(
-                        end_x_in_lpxs - start_x_in_lpxs,
-                        row.ascender_in_lpxs - row.descender_in_lpxs,
-                    ),
-                ),
-                ascender_in_lpxs: row.ascender_in_lpxs,
-            });
-        } else {
-            let start_row = &self.rows[start_row_index];
-            let end_row = &self.rows[end_row_index];
-            selection_rects.push(SelectionRect {
-                rect_in_lpxs: Rect::new(
-                    Point::new(
-                        start_x_in_lpxs,
-                        start_row.origin_in_lpxs.y - start_row.ascender_in_lpxs,
-                    ),
-                    Size::new(
-                        start_row.width_in_lpxs - start_x_in_lpxs,
-                        start_row.ascender_in_lpxs - start_row.descender_in_lpxs,
-                    ),
-                ),
-                ascender_in_lpxs: start_row.ascender_in_lpxs,
-            });
-            for row_index in start_row_index + 1..end_row_index {
-                let row = &self.rows[row_index];
+        for row_index in start_row_index..=end_row_index {
+            let row = &self.rows[row_index];
+            let mut push_span = |x_in_lpxs: f32, width_in_lpxs: f32| {
                 selection_rects.push(SelectionRect {
                     rect_in_lpxs: Rect::new(
-                        Point::new(
-                            row.origin_in_lpxs.x,
-                            row.origin_in_lpxs.y - row.ascender_in_lpxs,
-                        ),
-                        Size::new(
-                            row.width_in_lpxs,
-                            row.ascender_in_lpxs - row.descender_in_lpxs,
-                        ),
+                        Point::new(x_in_lpxs, row.origin_in_lpxs.y - row.ascender_in_lpxs),
+                        Size::new(width_in_lpxs, row.ascender_in_lpxs - row.descender_in_lpxs),
                     ),
                     ascender_in_lpxs: row.ascender_in_lpxs,
                 });
+            };
+            let is_start_row = row_index == start_row_index;
+            let is_end_row = row_index == end_row_index;
+            if !is_start_row && !is_end_row {
+                push_span(row.origin_in_lpxs.x, row.width_in_lpxs);
+                continue;
             }
-            selection_rects.push(SelectionRect {
-                rect_in_lpxs: Rect::new(
-                    Point::new(0.0, end_row.origin_in_lpxs.y - end_row.ascender_in_lpxs),
-                    Size::new(
-                        end_x_in_lpxs,
-                        end_row.ascender_in_lpxs - end_row.descender_in_lpxs,
-                    ),
-                ),
-                ascender_in_lpxs: end_row.ascender_in_lpxs,
-            });
+            let row_start = row.text.start_in_parent();
+            let (start, start_x_in_lpxs) = if is_start_row {
+                (selection.start().index - row_start, start_x_in_lpxs)
+            } else {
+                (0, 0.0)
+            };
+            let (end, end_x_in_lpxs) = if is_end_row {
+                (selection.end().index - row_start, end_x_in_lpxs)
+            } else {
+                (usize::MAX, row.width_in_lpxs)
+            };
+            if row.is_left_to_right() {
+                push_span(start_x_in_lpxs, end_x_in_lpxs - start_x_in_lpxs);
+                continue;
+            }
+            // RTL text, or text the row doesn't draw, can split what's selected on it into several
+            // spans.
+            let graphemes = row.get_visual_graphemes();
+            let mut has_spans = false;
+            let mut span_start_x_in_lpxs = None;
+            for stop in 0..=graphemes.len() {
+                let grapheme = graphemes.get(stop);
+                let x_in_lpxs = grapheme.map_or(row.width_in_lpxs, |grapheme| grapheme.x_in_lpxs);
+                if grapheme.is_some_and(|grapheme| start <= grapheme.start && grapheme.end <= end) {
+                    span_start_x_in_lpxs.get_or_insert(x_in_lpxs);
+                } else if let Some(span_start_x_in_lpxs) = span_start_x_in_lpxs.take() {
+                    push_span(span_start_x_in_lpxs, x_in_lpxs - span_start_x_in_lpxs);
+                    has_spans = true;
+                }
+            }
+            if !has_spans {
+                // A row with nothing selected still gets an empty span at the caret.
+                push_span(if is_start_row { start_x_in_lpxs } else { end_x_in_lpxs }, 0.0);
+            }
         }
         selection_rects
     }
@@ -1612,6 +1878,10 @@ pub struct LaidoutRow {
     pub text: Substr,
     pub newline: bool,
     pub width_in_lpxs: f32,
+    /// The width of the white space hanging at the end of the row.
+    ///
+    /// It's part of `width_in_lpxs`, but doesn't count for fit, alignment or the text's size.
+    pub hanging_width_in_lpxs: f32,
     pub ascender_in_lpxs: f32,
     pub descender_in_lpxs: f32,
     pub line_gap_in_lpxs: f32,
@@ -1625,6 +1895,11 @@ pub struct LaidoutRow {
 }
 
 impl LaidoutRow {
+    /// The row's width without the white space hanging at its end, so what it takes up.
+    pub fn width_without_hanging_in_lpxs(&self) -> f32 {
+        self.width_in_lpxs - self.hanging_width_in_lpxs
+    }
+
     /// The wrap gap below this row under the flow rule: the flow's spacing or this row's own,
     /// whichever is larger, as the flow itself would use. `None` under font-metric spacing.
     pub fn wrap_spacing_below_in_lpxs(&self) -> Option<f32> {
@@ -1646,8 +1921,81 @@ impl LaidoutRow {
     }
 
     pub fn x_in_lpxs_to_index(&self, x_in_lpxs: f32) -> usize {
+        let is_before_middle = |grapheme: &VisualGrapheme| {
+            x_in_lpxs < grapheme.x_in_lpxs + 0.5 * grapheme.width_in_lpxs
+        };
+        if self.is_left_to_right() {
+            return self
+                .find_visual_grapheme(None, |grapheme| {
+                    is_before_middle(&grapheme).then_some(grapheme.start)
+                })
+                .unwrap_or(self.text.len());
+        }
+        let graphemes = self.get_visual_graphemes();
+        let caret_indices = self.get_caret_indices(&graphemes);
+        let stop = graphemes.iter().position(is_before_middle).unwrap_or(graphemes.len());
+        caret_indices[stop]
+    }
+
+    pub fn index_to_x_in_lpxs(&self, index: usize) -> f32 {
+        if self.is_left_to_right() {
+            return self
+                .find_visual_grapheme(None, |grapheme| {
+                    (grapheme.start == index).then_some(grapheme.x_in_lpxs)
+                })
+                .unwrap_or(self.width_in_lpxs);
+        }
+        let graphemes = self.get_visual_graphemes();
+        let caret_indices = self.get_caret_indices(&graphemes);
+        caret_indices
+            .iter()
+            .position(|&caret_index| caret_index == index)
+            .and_then(|stop| graphemes.get(stop))
+            .map_or(self.width_in_lpxs, |grapheme| grapheme.x_in_lpxs)
+    }
+
+    /// Returns whether the row draws its text left to right from its first char, if it draws any.
+    ///
+    /// Each caret is then at the left edge of the grapheme after it, so they go up with the index.
+    fn is_left_to_right(&self) -> bool {
+        let mut previous_cluster = 0;
+        // The ellipsis has no text of its own, so a row of only that draws none.
+        self.glyphs
+            .first()
+            .is_none_or(|glyph| glyph.cluster == 0 || glyph.cluster == self.text.len())
+            && self.glyphs.iter().all(|glyph| {
+                let is_in_order =
+                    glyph.direction == Direction::Ltr && glyph.cluster >= previous_cluster;
+                previous_cluster = glyph.cluster;
+                is_in_order
+            })
+    }
+
+    /// Returns the row's graphemes from left to right.
+    fn get_visual_graphemes(&self) -> Vec<VisualGrapheme> {
+        // Clusters go down from left to right in RTL text.
+        let mut clusters: Vec<usize> = self.glyphs.iter().map(|glyph| glyph.cluster).collect();
+        clusters.sort_unstable();
+        let mut graphemes = Vec::with_capacity(self.glyphs.len());
+        self.find_visual_grapheme(Some(&clusters), |grapheme| {
+            graphemes.push(grapheme);
+            None::<()>
+        });
+        graphemes
+    }
+
+    /// Returns the first thing `f` finds in the row's graphemes, going from left to right.
+    ///
+    /// A cluster's text ends at the next larger cluster, which we find in `sorted_clusters` unless
+    /// the row is left to right. A ligature's width is split evenly between its graphemes.
+    fn find_visual_grapheme<T>(
+        &self,
+        sorted_clusters: Option<&[usize]>,
+        mut f: impl FnMut(VisualGrapheme) -> Option<T>,
+    ) -> Option<T> {
         use {super::slice::SliceExt, unicode_segmentation::UnicodeSegmentation};
 
+        let mut rtl_graphemes = Vec::new();
         let mut glyph_groups = self
             .glyphs
             .group_by(|glyph_0, glyph_1| glyph_0.cluster == glyph_1.cluster)
@@ -1656,60 +2004,152 @@ impl LaidoutRow {
             let start = glyph_group[0].cluster;
             let start_x_in_lpxs = glyph_group[0].origin_in_lpxs.x;
             let next_glyph_group = glyph_groups.peek();
-            let end = next_glyph_group.map_or(self.text.len(), |next_glyph_group| {
-                next_glyph_group[0].cluster
-            });
             let end_x_in_lpxs = next_glyph_group.map_or(self.width_in_lpxs, |next_glyph_group| {
                 next_glyph_group[0].origin_in_lpxs.x
             });
-            let width_in_lpxs = end_x_in_lpxs - start_x_in_lpxs;
-            let grapheme_count = self.text[start..end].graphemes(true).count();
-            let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
-            let mut current_x_in_lpxs = start_x_in_lpxs;
-            for (grapheme_start, _) in self.text[start..end].grapheme_indices(true) {
-                if x_in_lpxs < current_x_in_lpxs + 0.5 * grapheme_width_in_lpxs {
-                    return start + grapheme_start;
-                }
-                current_x_in_lpxs += grapheme_width_in_lpxs;
+            let end = match sorted_clusters {
+                Some(clusters) => clusters
+                    .get(clusters.partition_point(|&cluster| cluster <= start))
+                    .copied(),
+                None => next_glyph_group.map(|next_glyph_group| next_glyph_group[0].cluster),
+            };
+            let text = &self.text[start..end.unwrap_or(self.text.len())];
+            // The ellipsis has no text of its own.
+            if text.is_empty() {
+                continue;
+            }
+            let is_rtl = glyph_group[0].direction == Direction::Rtl;
+            // A cluster of one char is one grapheme, so we only segment longer ones.
+            let grapheme_count = if text.chars().nth(1).is_none() {
+                1
+            } else {
+                text.graphemes(true).count()
+            };
+            let grapheme_width_in_lpxs = (end_x_in_lpxs - start_x_in_lpxs) / grapheme_count as f32;
+            let mut x_in_lpxs = start_x_in_lpxs;
+            let mut visit = |grapheme_start: usize, grapheme: &str| {
+                let found = f(VisualGrapheme {
+                    start: start + grapheme_start,
+                    end: start + grapheme_start + grapheme.len(),
+                    x_in_lpxs,
+                    width_in_lpxs: grapheme_width_in_lpxs,
+                    is_rtl,
+                });
+                x_in_lpxs += grapheme_width_in_lpxs;
+                found
+            };
+            let found = if grapheme_count == 1 {
+                visit(0, text)
+            } else if is_rtl {
+                rtl_graphemes.clear();
+                rtl_graphemes.extend(text.grapheme_indices(true));
+                rtl_graphemes.iter().rev().find_map(|&(index, grapheme)| visit(index, grapheme))
+            } else {
+                text.grapheme_indices(true).find_map(|(index, grapheme)| visit(index, grapheme))
+            };
+            if found.is_some() {
+                return found;
             }
         }
-        self.text.len()
+        None
     }
 
-    pub fn index_to_x_in_lpxs(&self, index: usize) -> f32 {
-        use {super::slice::SliceExt, unicode_segmentation::UnicodeSegmentation};
-
-        let mut glyph_groups = self
-            .glyphs
-            .group_by(|glyph_0, glyph_1| glyph_0.cluster == glyph_1.cluster)
-            .peekable();
-        while let Some(glyph_group) = glyph_groups.next() {
-            let start = glyph_group[0].cluster;
-            let start_x_in_lpxs = glyph_group[0].origin_in_lpxs.x;
-            let end = glyph_groups
-                .peek()
-                .map_or(self.text.len(), |next_glyph_group| {
-                    next_glyph_group[0].cluster
-                });
-            let end_x_in_lpxs = glyph_groups
-                .peek()
-                .map_or(self.width_in_lpxs, |next_glyph_group| {
-                    next_glyph_group[0].origin_in_lpxs.x
-                });
-            let width_in_lpxs = end_x_in_lpxs - start_x_in_lpxs;
-            let grapheme_count = self.text[start..end].graphemes(true).count();
-            let grapheme_width_in_lpxs = width_in_lpxs / grapheme_count as f32;
-            let mut current_x_in_lpxs = start_x_in_lpxs;
-            for (grapheme_start, _) in self.text[start..end].grapheme_indices(true) {
-                let grapheme_start = start + grapheme_start;
-                if index == grapheme_start {
-                    return current_x_in_lpxs;
-                }
-                current_x_in_lpxs += grapheme_width_in_lpxs;
+    /// Returns the text index of the caret at each grapheme's left edge, then at the row's end.
+    ///
+    /// A caret goes at the leading edge of the grapheme after it or the trailing edge of the one
+    /// before it, which differ where the direction changes, so we give each caret its own edge.
+    fn get_caret_indices(&self, graphemes: &[VisualGrapheme]) -> Vec<usize> {
+        // Without RTL text, each caret is at the left edge of the grapheme after it.
+        if !graphemes.iter().any(|grapheme| grapheme.is_rtl) {
+            let starts = graphemes.iter().map(|grapheme| grapheme.start);
+            return starts.chain([self.text.len()]).collect();
+        }
+        let count = graphemes.len();
+        // The graphemes in text order, and where each one is in that order.
+        let mut order: Vec<usize> = (0..count).collect();
+        order.sort_by_key(|&grapheme_index| graphemes[grapheme_index].start);
+        let mut rank = vec![0; count];
+        for (position, &grapheme_index) in order.iter().enumerate() {
+            rank[grapheme_index] = position;
+        }
+        // Boundary `p` is before the `p`th grapheme in text order, and stop `k` is at the left
+        // edge of the `k`th grapheme from the left. After LTR text, we prefer its trailing edge.
+        let get_stops = |boundary: usize| {
+            let leading = order
+                .get(boundary)
+                .map(|&k| if graphemes[k].is_rtl { k + 1 } else { k });
+            let trailing = boundary.checked_sub(1).map(|p| {
+                let k = order[p];
+                if graphemes[k].is_rtl { k } else { k + 1 }
+            });
+            if boundary > 0 && !graphemes[order[boundary - 1]].is_rtl {
+                [trailing, leading]
+            } else {
+                [leading, trailing]
+            }
+        };
+        let get_boundaries = |stop: usize| {
+            [
+                stop.checked_sub(1)
+                    .map(|k| if graphemes[k].is_rtl { rank[k] } else { rank[k] + 1 }),
+                graphemes
+                    .get(stop)
+                    .map(|grapheme| if grapheme.is_rtl { rank[stop] + 1 } else { rank[stop] }),
+            ]
+        };
+        let mut stop_of_boundary = vec![None; count + 1];
+        let mut boundary_at_stop = vec![None; count + 1];
+        // The text's ends have just one edge each, so they go first.
+        for first_boundary in [0, count].into_iter().chain(1..count) {
+            let mut next_boundary = stop_of_boundary[first_boundary]
+                .is_none()
+                .then_some(first_boundary);
+            while let Some(boundary) = next_boundary {
+                let Some(stop) = get_stops(boundary)
+                    .into_iter()
+                    .flatten()
+                    .find(|&stop| boundary_at_stop[stop].is_none())
+                else {
+                    break;
+                };
+                stop_of_boundary[boundary] = Some(stop);
+                boundary_at_stop[stop] = Some(boundary);
+                // The other boundary that could go at this stop has to go at its other one.
+                next_boundary = get_boundaries(stop)
+                    .into_iter()
+                    .flatten()
+                    .find(|&other_boundary| stop_of_boundary[other_boundary].is_none());
             }
         }
-        self.width_in_lpxs
+        // RTL text drawn in pieces can leave a boundary without an edge of its own, so it gets a
+        // stop that's left.
+        let free_stops: Vec<usize> = (0..=count)
+            .filter(|&stop| boundary_at_stop[stop].is_none())
+            .collect();
+        let free_boundaries =
+            (0..=count).filter(|&boundary| stop_of_boundary[boundary].is_none());
+        for (stop, boundary) in free_stops.into_iter().zip(free_boundaries) {
+            boundary_at_stop[stop] = Some(boundary);
+        }
+        boundary_at_stop
+            .into_iter()
+            .map(|boundary| {
+                order
+                    .get(boundary.unwrap())
+                    .map_or(self.text.len(), |&k| graphemes[k].start)
+            })
+            .collect()
     }
+}
+
+/// A grapheme of a row, with where we draw it.
+#[derive(Clone, Copy, Debug)]
+struct VisualGrapheme {
+    start: usize,
+    end: usize,
+    x_in_lpxs: f32,
+    width_in_lpxs: f32,
+    is_rtl: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1720,6 +2160,7 @@ pub struct LaidoutGlyph {
     pub color: Option<Color>,
     pub id: GlyphId,
     pub cluster: usize,
+    pub direction: Direction,
     pub advance_in_ems: f32,
     pub offset_in_ems: f32,
 }
@@ -1753,81 +2194,10 @@ impl LaidoutGlyph {
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_segments_for_line_breaking, LaidoutText, LayoutOptions,
-        Layouter, OwnedLayoutParams, Settings, Size, Style, LAYOUT_CACHE_MAX_BYTES,
+        LaidoutText, LayoutOptions, Layouter, OwnedLayoutParams, Settings, Size, Style,
+        LAYOUT_CACHE_MAX_BYTES,
     };
     use std::rc::Rc;
-    use unicode_segmentation::UnicodeSegmentation;
-
-    /// Helper: split text by word bounds and return segment lengths,
-    /// then apply merging, then reconstruct the segment strings.
-    fn merged_segments(text: &str) -> Vec<String> {
-        let mut lens: Vec<usize> = text.split_word_bounds().map(|s| s.len()).collect();
-        merge_segments_for_line_breaking(text, &mut lens);
-        let mut result = Vec::new();
-        let mut offset = 0;
-        for len in &lens {
-            result.push(text[offset..offset + len].to_string());
-            offset += len;
-        }
-        result
-    }
-
-    #[test]
-    fn trailing_punctuation_merges_into_preceding_word() {
-        assert_eq!(merged_segments("Hello."), vec!["Hello."]);
-        assert_eq!(merged_segments("Hello,"), vec!["Hello,"]);
-        assert_eq!(merged_segments("Hello;"), vec!["Hello;"]);
-        assert_eq!(merged_segments("Hello!"), vec!["Hello!"]);
-        assert_eq!(merged_segments("Hello?"), vec!["Hello?"]);
-    }
-
-    #[test]
-    fn multiple_trailing_punctuation_marks_merge() {
-        assert_eq!(merged_segments("end.)"), vec!["end.)"]);
-        assert_eq!(merged_segments("end...)"), vec!["end...)"]);
-    }
-
-    #[test]
-    fn punctuation_between_words_merges_correctly() {
-        assert_eq!(
-            merged_segments("Hello, world."),
-            vec!["Hello,", " ", "world."]
-        );
-    }
-
-    #[test]
-    fn opening_punctuation_merges_into_following_word() {
-        assert_eq!(
-            merged_segments("say (hello) now"),
-            vec!["say", " ", "(hello)", " ", "now"]
-        );
-    }
-
-    #[test]
-    fn consecutive_trailing_punctuation_chains_merge() {
-        // ")" and ":" are both no-break-before, so they chain-merge
-        // into the preceding word.
-        assert_eq!(
-            merged_segments("(News Hello): world"),
-            vec!["(News", " ", "Hello):", " ", "world"]
-        );
-    }
-
-    #[test]
-    fn no_merge_for_plain_words() {
-        assert_eq!(merged_segments("hello world"), vec!["hello", " ", "world"]);
-    }
-
-    #[test]
-    fn single_word_no_change() {
-        assert_eq!(merged_segments("hello"), vec!["hello"]);
-    }
-
-    #[test]
-    fn empty_text() {
-        assert_eq!(merged_segments(""), Vec::<String>::new());
-    }
 
     fn cache_test_params(text: &str) -> OwnedLayoutParams {
         OwnedLayoutParams {
@@ -1848,7 +2218,10 @@ mod tests {
             text: text.into(),
             size_in_lpxs: Size::new(0.0, 0.0),
             rows: Vec::new(),
+            has_missing_glyph: false,
             is_truncated: false,
+            line_break_before_next_run: Default::default(),
+            is_trailing_glue_reserved: false,
         })
     }
 
@@ -2096,6 +2469,48 @@ mod tests {
             .all(|glyph| glyph.id != 0 && glyph.font.id() == fallback_id));
     }
 
+    #[test]
+    fn font_family_generation_goes_up_when_a_family_changes() {
+        let mut layouter = real_font_layouter();
+        let (latin_font, cjk_font): (FontId, FontId) = (0xE111_0001_u64.into(), 0xE111_0002_u64.into());
+        let get_definition = |font_ids: Vec<FontId>| FontFamilyDefinition {
+            expected_member_count: font_ids.len(),
+            font_ids,
+            diagnostics: Default::default(),
+        };
+        let generation = layouter.font_family_generation();
+        layouter.set_font_family_definition(LATIN_FAMILY.into(), get_definition(vec![latin_font]));
+        assert_eq!(layouter.font_family_generation(), generation);
+        // A fallback font arrives.
+        layouter.set_font_family_definition(LATIN_FAMILY.into(), get_definition(vec![latin_font, cjk_font]));
+        assert_eq!(layouter.font_family_generation(), generation + 1);
+        layout_text(&mut layouter, LATIN_FAMILY, "a\u{4E2D}", LayoutOptions::default());
+        layouter.set_font_family_definition(LATIN_FAMILY.into(), get_definition(vec![latin_font, cjk_font]));
+        assert_eq!(layouter.font_family_generation(), generation + 1);
+    }
+
+    #[test]
+    fn layouts_stay_cached_while_a_font_family_waits_for_a_font() {
+        let mut layouter = real_font_layouter();
+        let (latin_font, cjk_font): (FontId, FontId) = (0xE111_0001_u64.into(), 0xE111_0002_u64.into());
+        let get_definition = |font_ids: Vec<FontId>| FontFamilyDefinition {
+            font_ids,
+            expected_member_count: 2,
+            diagnostics: Default::default(),
+        };
+        // Until its fallback font arrives, every layout through the family sets it again.
+        let options = LayoutOptions::default();
+        layouter.set_font_family_definition(LATIN_FAMILY.into(), get_definition(vec![latin_font]));
+        let laidout = layout_text(&mut layouter, LATIN_FAMILY, "a\u{4E2D}", options);
+        layouter.set_font_family_definition(LATIN_FAMILY.into(), get_definition(vec![latin_font]));
+        let cached = layout_text(&mut layouter, LATIN_FAMILY, "a\u{4E2D}", options);
+        assert!(Rc::ptr_eq(&laidout, &cached));
+        let definition = get_definition(vec![latin_font, cjk_font]);
+        layouter.set_font_family_definition(LATIN_FAMILY.into(), definition);
+        let arrived = layout_text(&mut layouter, LATIN_FAMILY, "a\u{4E2D}", options);
+        assert_eq!(arrived.rows[0].glyphs[1].font.id(), cjk_font);
+    }
+
     fn real_font_layouter() -> Layouter {
         let mut layouter = Layouter::new(Settings::default());
         let resources =
@@ -2130,6 +2545,35 @@ mod tests {
         layouter
     }
 
+    fn get_test_style(family: u64) -> Style {
+        Style {
+            font_family_id: family.into(),
+            font_size_in_pts: 12.0,
+            color: None,
+        }
+    }
+
+    fn layout_text(
+        layouter: &mut Layouter,
+        family: u64,
+        text: &str,
+        options: LayoutOptions,
+    ) -> Rc<LaidoutText> {
+        layouter.get_or_layout(BorrowedLayoutParams {
+            text,
+            style: get_test_style(family),
+            options,
+        })
+    }
+
+    fn wrapping_options(max_width: f32) -> LayoutOptions {
+        LayoutOptions {
+            max_width_in_lpxs: Some(max_width),
+            wrap: true,
+            ..LayoutOptions::default()
+        }
+    }
+
     fn wrapped_layout(
         layouter: &mut Layouter,
         family: u64,
@@ -2138,21 +2582,16 @@ mod tests {
         max_rows: Option<usize>,
         ellipsis: bool,
     ) -> Rc<LaidoutText> {
-        layouter.get_or_layout(BorrowedLayoutParams {
+        layout_text(
+            layouter,
+            family,
             text,
-            style: super::Style {
-                font_family_id: family.into(),
-                font_size_in_pts: 12.0,
-                color: None,
-            },
-            options: LayoutOptions {
-                max_width_in_lpxs: Some(max_width),
-                wrap: true,
+            LayoutOptions {
                 max_rows,
                 ellipsis,
-                ..LayoutOptions::default()
+                ..wrapping_options(max_width)
             },
-        })
+        )
     }
 
     /// The appended ellipsis glyphs are stamped with `cluster == text.len()`,
@@ -2258,7 +2697,8 @@ mod tests {
     #[test]
     fn multiline_ellipsis_truncates_cjk_on_grapheme_boundaries() {
         let mut layouter = real_font_layouter();
-        // Unspaced CJK exercises the grapheme wrapping path end to end.
+        // Unspaced CJK can break between any two ideographs, and its last row still fills by
+        // grapheme for the ellipsis.
         let text = "这是一个很长的中文标题它会先换到第二行然后在第二行的结尾处出现省略号而不是被裁掉";
         let max_width = 140.0;
         let capped = wrapped_layout(&mut layouter, CJK_FAMILY, text, max_width, Some(2), true);
@@ -2301,12 +2741,1001 @@ mod tests {
     }
 
     #[test]
-    fn crlf_and_lone_cr_break_lines_like_lf() {
-        assert_eq!(
-            super::lines_and_breaks("a\r\nbc\rd\n\r\n").collect::<Vec<_>>(),
-            [(1, 2), (2, 1), (1, 1), (0, 2), (0, 0)]
-        );
+    fn last_allowed_row_without_the_following_room_ends_with_an_ellipsis() {
+        let mut layouter = real_font_layouter();
+        let text = "aaaa bbbb";
+        let max_width = layout_text(&mut layouter, LATIN_FAMILY, text, LayoutOptions::default()).size_in_lpxs.width + 10.0;
+        let mut layout_with_room = |max_rows, following_room_in_lpxs| {
+            let options = LayoutOptions {
+                max_rows: Some(max_rows),
+                ellipsis: true,
+                following_room_in_lpxs,
+                ..wrapping_options(max_width)
+            };
+            layout_text(&mut layouter, LATIN_FAMILY, text, options)
+        };
+        assert!(!layout_with_room(1, 5.0).is_truncated);
+        let cut = layout_with_room(1, 15.0);
+        assert!(cut.is_truncated && ends_with_ellipsis(&cut));
+        assert!(cut.rows[0].width_in_lpxs <= max_width);
+        // What follows a row before the last one can go on the next row.
+        assert!(!layout_with_room(2, 15.0).is_truncated);
+    }
 
+    // -----------------------------------------------------------------------
+    // Line breaking: rows wrap at the UAX #14 break opportunities that
+    // `line_break` finds, measured with the bundled fonts.
+    // -----------------------------------------------------------------------
+
+    use super::{
+        get_hyphen, is_hangable_white_space,
+        shaper::{self, Ems, ShapeParams, ShapedText, Shaper},
+        Cursor, Direction, FollowingContext, PrecedingContext, Rect, Selection, Substr,
+    };
+    use crate::text::line_break::{find_line_breaks, LineBreak};
+    use unicode_segmentation::UnicodeSegmentation;
+
+    const START: PrecedingContext = PrecedingContext::PARAGRAPH_START;
+    const END: FollowingContext = FollowingContext::END_OF_TEXT;
+
+    fn measure_width(layouter: &mut Layouter, family: u64, text: &str) -> f32 {
+        let style = get_test_style(family);
+        layouter
+            .get_or_load_font_family(style.font_family_id)
+            .get_or_shape(text.into())
+            .width_in_ems
+            * style.font_size_in_lpxs()
+    }
+
+    /// Measures the hyphen the layouter draws where a row breaks after a soft hyphen.
+    fn measure_hyphen_width(layouter: &mut Layouter, family: u64) -> f32 {
+        let hyphen = get_hyphen(&layouter.get_or_load_font_family(family.into()));
+        measure_width(layouter, family, hyphen)
+    }
+
+    /// Measures the text before `line_break` the way the layouter fits it at the end of a row.
+    ///
+    /// That leaves out hanging white space, and adds `hyphen_width` right after a soft hyphen.
+    fn measure_unit(
+        layouter: &mut Layouter,
+        family: u64,
+        text: &str,
+        line_break: LineBreak,
+        hyphen_width: f32,
+    ) -> f32 {
+        let unit = &text[..line_break.byte_index - line_break.newline_len];
+        let is_soft_hyphen_break = !line_break.is_forced
+            && line_break.byte_index < text.len()
+            && unit.ends_with('\u{AD}');
+        measure_width(layouter, family, unit.trim_end_matches(is_hangable_white_space))
+            + if is_soft_hyphen_break { hyphen_width } else { 0.0 }
+    }
+
+    /// Returns where each row after the first starts.
+    fn get_row_starts(text: &LaidoutText) -> Vec<usize> {
+        text.rows[1..]
+            .iter()
+            .map(|row| row.text.start_in_parent())
+            .collect()
+    }
+
+    fn get_row_texts(text: &LaidoutText) -> Vec<&str> {
+        text.rows.iter().map(|row| row.text.as_str()).collect()
+    }
+
+    /// Checks that no row starts at `indices`, at any width that wraps `text` between units.
+    ///
+    /// Returns every row start we saw.
+    fn check_no_row_starts_at(
+        layouter: &mut Layouter,
+        family: u64,
+        text: &str,
+        indices: &[usize],
+    ) -> Vec<usize> {
+        let full_width_in_lpxs = layout_text(layouter, family, text, LayoutOptions::default())
+            .size_in_lpxs
+            .width;
+        // The widest unit is the narrowest width that wraps the text between units.
+        let hyphen_width = measure_hyphen_width(layouter, family);
+        let mut unit_start = 0;
+        let mut widest_unit_width_in_lpxs = 0.0f32;
+        for line_break in find_line_breaks(text, START, END) {
+            let line_break_in_unit = LineBreak {
+                byte_index: line_break.byte_index - unit_start,
+                ..line_break
+            };
+            let width_in_lpxs = measure_unit(
+                layouter,
+                family,
+                &text[unit_start..],
+                line_break_in_unit,
+                hyphen_width,
+            );
+            widest_unit_width_in_lpxs = widest_unit_width_in_lpxs.max(width_in_lpxs);
+            unit_start = line_break.byte_index;
+        }
+        let mut max_width_in_lpxs = widest_unit_width_in_lpxs.ceil();
+        let mut seen_row_starts = Vec::new();
+        while max_width_in_lpxs < full_width_in_lpxs {
+            let laidout = layout_text(layouter, family, text, wrapping_options(max_width_in_lpxs));
+            for row_start in get_row_starts(&laidout) {
+                assert!(
+                    !indices.contains(&row_start),
+                    "{text:?} at {max_width_in_lpxs}: {:?}",
+                    get_row_texts(&laidout)
+                );
+                if !seen_row_starts.contains(&row_start) {
+                    seen_row_starts.push(row_start);
+                }
+            }
+            max_width_in_lpxs += 0.5;
+        }
+        assert!(!seen_row_starts.is_empty(), "{text:?} never wrapped");
+        seen_row_starts
+    }
+
+    #[test]
+    fn quotes_never_start_or_end_a_row() {
+        let mut layouter = real_font_layouter();
+        let text = "He said \"hello world\" to me";
+        let indices = [text.find('"').unwrap() + 1, text.rfind('"').unwrap()];
+        check_no_row_starts_at(&mut layouter, LATIN_FAMILY, text, &indices);
+        let text = "She wrote \u{201C}quite so\u{201D} back to them";
+        let indices = [
+            text.find('\u{201C}').unwrap() + '\u{201C}'.len_utf8(),
+            text.find('\u{201D}').unwrap(),
+        ];
+        check_no_row_starts_at(&mut layouter, LATIN_FAMILY, text, &indices);
+    }
+
+    #[test]
+    fn punctuation_after_a_space_stays_attached() {
+        let mut layouter = real_font_layouter();
+        for text in [
+            "Il a dit Bonjour ! et puis il est parti",
+            "Hello , world and some more words",
+            "Vraiment ? Oui ; bien s\u{FB}r : merci",
+        ] {
+            let indices: Vec<usize> = text
+                .char_indices()
+                .filter(|&(_, c)| matches!(c, '!' | '?' | ',' | ';' | ':'))
+                .map(|(index, _)| index)
+                .collect();
+            check_no_row_starts_at(&mut layouter, LATIN_FAMILY, text, &indices);
+        }
+    }
+
+    #[test]
+    fn urls_break_after_slashes() {
+        let mut layouter = real_font_layouter();
+        let url = "https://example.com/some/long/path?query=value";
+        let text = format!("see {url} for details");
+        let url_range = 4..4 + url.len();
+        let indices: Vec<usize> = (url_range.start + 1..url_range.end)
+            .filter(|&index| !text[..index].ends_with(['/', '?']))
+            .collect();
+        let row_starts = check_no_row_starts_at(&mut layouter, LATIN_FAMILY, &text, &indices);
+        assert!(row_starts
+            .iter()
+            .any(|&index| url_range.contains(&index) && text[..index].ends_with('/')));
+    }
+
+    #[test]
+    fn dates_and_flags_stay_whole() {
+        let mut layouter = real_font_layouter();
+        let text = "Due 2026-10-26 or 12/31/2026, see \u{1F1FA}\u{1F1F8}\u{1F1EC}\u{1F1E7}\u{1F1EB}\u{1F1F7} flags";
+        let mut indices = Vec::new();
+        for date in ["2026-10-26", "12/31/2026"] {
+            let start = text.find(date).unwrap();
+            indices.extend(start + 1..start + date.len());
+        }
+        // Each flag is two regional indicators of 4 bytes each.
+        let flags_start = text.find('\u{1F1FA}').unwrap();
+        indices.extend([flags_start + 4, flags_start + 12, flags_start + 20]);
+        check_no_row_starts_at(&mut layouter, LATIN_FAMILY, text, &indices);
+    }
+
+    #[test]
+    fn no_break_spaces_and_word_joiners_glue() {
+        let mut layouter = real_font_layouter();
+        let text = "Mr.\u{A0}Smith met Mrs.\u{A0}Jones and the no\u{2060}break crew";
+        let indices: Vec<usize> = text
+            .char_indices()
+            .filter(|&(_, c)| matches!(c, '\u{A0}' | '\u{2060}'))
+            .flat_map(|(index, c)| [index, index + c.len_utf8()])
+            .collect();
+        check_no_row_starts_at(&mut layouter, LATIN_FAMILY, text, &indices);
+    }
+
+    #[test]
+    fn cjk_rows_never_start_with_closing_punctuation_or_small_kana() {
+        let mut layouter = real_font_layouter();
+        let text = "\u{300C}今日は、とても良い天気ですね。\u{300D}と彼女は言った。ちょっとチャットしましょう、きゃっと笑った。";
+        let indices: Vec<usize> = text
+            .char_indices()
+            .filter_map(|(index, c)| match c {
+                '。' | '、' | '\u{300D}' | 'ゃ' | 'ょ' | 'っ' => Some(index),
+                '\u{300C}' => Some(index + c.len_utf8()),
+                _ => None,
+            })
+            .collect();
+        check_no_row_starts_at(&mut layouter, CJK_FAMILY, text, &indices);
+    }
+
+    #[test]
+    fn soft_hyphens_show_a_hyphen_that_counts_for_fit() {
+        let mut layouter = real_font_layouter();
+        let text = "a hyphen\u{AD}ation";
+        let soft_hyphen_index = text.find('\u{AD}').unwrap();
+        let hyphen_width = measure_hyphen_width(&mut layouter, LATIN_FAMILY);
+        let head_width = measure_width(&mut layouter, LATIN_FAMILY, "a hyphen\u{AD}");
+        assert!((head_width - measure_width(&mut layouter, LATIN_FAMILY, "a hyphen")).abs() < 0.01);
+
+        // With room for the hyphen, the row breaks after the soft hyphen and ends with a hyphen.
+        let max_width = head_width + hyphen_width + 0.5;
+        let laidout = layout_text(&mut layouter, LATIN_FAMILY, text, wrapping_options(max_width));
+        assert_eq!(get_row_texts(&laidout), ["a hyphen\u{AD}", "ation"]);
+        let row = &laidout.rows[0];
+        let hyphen = row.glyphs.last().unwrap();
+        assert_eq!(hyphen.cluster, soft_hyphen_index);
+        assert!((hyphen.advance_in_lpxs() - hyphen_width).abs() < 0.01);
+        assert!(row.width_in_lpxs <= max_width);
+        // The hyphen is part of its soft hyphen's cluster, so the caret after that goes after it.
+        let row_end = laidout.cursor_to_position(Cursor {
+            index: soft_hyphen_index + '\u{AD}'.len_utf8(),
+            prefer_next_row: false,
+        });
+        assert_eq!((row_end.row_index, row_end.x_in_lpxs), (0, row.width_in_lpxs));
+
+        // Without room for it, the unit moves to the next row.
+        let max_width = head_width + hyphen_width - 0.5;
+        let laidout = layout_text(&mut layouter, LATIN_FAMILY, text, wrapping_options(max_width));
+        assert_eq!(get_row_texts(&laidout)[0], "a ");
+
+        // A unit that starts its row but only fits without the hyphen breaks between graphemes,
+        // so the hyphen never overflows the row.
+        let max_width = measure_width(&mut layouter, LATIN_FAMILY, "hyphen") + 0.5 * hyphen_width;
+        let options = wrapping_options(max_width);
+        let laidout = layout_text(&mut layouter, LATIN_FAMILY, &text[2..], options);
+        assert_eq!(get_row_texts(&laidout), ["hyphen", "\u{AD}ation"]);
+        assert!(laidout.size_in_lpxs.width <= max_width);
+
+        // When the row doesn't break there, there's no hyphen.
+        let laidout = layout_text(&mut layouter, LATIN_FAMILY, text, wrapping_options(500.0));
+        assert_eq!(get_row_texts(&laidout), [text]);
+        let width = measure_width(&mut layouter, LATIN_FAMILY, text);
+        assert!((laidout.rows[0].width_in_lpxs - width).abs() < 0.01);
+    }
+
+    #[test]
+    fn hanging_spaces_dont_overflow_or_shift_rows() {
+        let mut layouter = real_font_layouter();
+        let hello_width = measure_width(&mut layouter, LATIN_FAMILY, "hello");
+        let max_width = hello_width + 20.0;
+        let spaces = " ".repeat(10);
+        assert!(measure_width(&mut layouter, LATIN_FAMILY, &spaces) > 20.0);
+        for align in [0.0, 0.5, 1.0] {
+            let options = LayoutOptions {
+                align,
+                ..wrapping_options(max_width)
+            };
+            // At a wrap the spaces hang past the edge, so they don't move the row's text or
+            // make the text any wider.
+            let text = format!("hello{spaces}world");
+            let laidout = layout_text(&mut layouter, LATIN_FAMILY, &text, options);
+            assert_eq!(get_row_texts(&laidout), [&text[..15], "world"]);
+            let row = &laidout.rows[0];
+            assert!(row.width_in_lpxs > max_width);
+            assert!((row.width_without_hanging_in_lpxs() - hello_width).abs() < 0.01);
+            assert!((row.origin_in_lpxs.x - align * (max_width - hello_width)).abs() < 0.01);
+            assert!(laidout.size_in_lpxs.width <= max_width);
+            // Zero-width text after them isn't white space, so it wraps like any other unit, and
+            // the spaces still hang.
+            let text = format!("hello{spaces}\u{AD}");
+            let laidout = layout_text(&mut layouter, LATIN_FAMILY, &text, options);
+            assert_eq!(get_row_texts(&laidout), [&text[..15], "\u{AD}"]);
+            let row = &laidout.rows[0];
+            assert!((row.origin_in_lpxs.x - align * (max_width - hello_width)).abs() < 0.01);
+            assert!(laidout.size_in_lpxs.width <= max_width);
+
+            // At a hard line break or the end of the text, only the part that overflows hangs.
+            for text in [format!("hello{spaces}\nworld"), format!("hello{spaces}")] {
+                let laidout = layout_text(&mut layouter, LATIN_FAMILY, &text, options);
+                let row = &laidout.rows[0];
+                assert!((row.width_without_hanging_in_lpxs() - max_width).abs() < 0.01);
+                assert!(row.origin_in_lpxs.x.abs() < 0.01);
+                assert!(laidout.size_in_lpxs.width <= max_width + 0.01);
+            }
+            let laidout = layout_text(&mut layouter, LATIN_FAMILY, "hello ", options);
+            let width = measure_width(&mut layouter, LATIN_FAMILY, "hello ");
+            assert_eq!(laidout.rows[0].hanging_width_in_lpxs, 0.0);
+            assert!((laidout.rows[0].origin_in_lpxs.x - align * (max_width - width)).abs() < 0.01);
+        }
+
+        // The next run starts past the edge after those spaces, and doesn't grow the text either.
+        let mut line_break_before = START;
+        line_break_before.append(&format!("hello{spaces}"));
+        let options = LayoutOptions {
+            first_row_indent_in_lpxs: max_width + 15.0,
+            line_break_before,
+            ..wrapping_options(max_width)
+        };
+        for text in ["world", "  world"] {
+            let laidout = layout_text(&mut layouter, LATIN_FAMILY, text, options);
+            assert_eq!(get_row_texts(&laidout), [&text[..text.len() - 5], "world"]);
+            assert!((laidout.rows[0].width_without_hanging_in_lpxs() - max_width).abs() < 0.01);
+            assert!(laidout.size_in_lpxs.width <= max_width + 0.01);
+        }
+        // Zero-width text that isn't white space wraps too, here at the start of the run.
+        let laidout = layout_text(&mut layouter, LATIN_FAMILY, "\u{200B}world", options);
+        assert_eq!(get_row_texts(&laidout), ["", "\u{200B}world"]);
+        assert!(laidout.size_in_lpxs.width <= max_width + 0.01);
+        // Unless the run before kept room for it, and then it stays past the edge but takes no room.
+        let reserved = LayoutOptions {
+            is_start_reserved: true,
+            ..options
+        };
+        for text in ["\u{200B}world", "  \u{200B}world"] {
+            let laidout = layout_text(&mut layouter, LATIN_FAMILY, text, reserved);
+            assert_eq!(get_row_texts(&laidout), [&text[..text.len() - 5], "world"]);
+            assert!(laidout.size_in_lpxs.width <= max_width + 0.01, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn hard_line_breaks_end_rows() {
+        let mut layouter = real_font_layouter();
+        for options in [LayoutOptions::default(), wrapping_options(500.0)] {
+            let text = "a\r\nb\rc\u{2028}d\u{85}e\u{B}f\u{C}g\u{2029}h\ni";
+            let laidout = layout_text(&mut layouter, LATIN_FAMILY, text, options);
+            assert_eq!(get_row_texts(&laidout), ["a", "b", "c", "d", "e", "f", "g", "h", "i"]);
+            let newlines: Vec<bool> = laidout.rows.iter().map(|row| row.newline).collect();
+            assert_eq!(newlines, [true, true, true, true, true, true, true, true, false]);
+            // A text that ends with a line break still ends with an empty row.
+            let laidout = layout_text(&mut layouter, LATIN_FAMILY, "one\ntwo\n", options);
+            assert_eq!(get_row_texts(&laidout), ["one", "two", ""]);
+            let newlines: Vec<bool> = laidout.rows.iter().map(|row| row.newline).collect();
+            assert_eq!(newlines, [true, true, false]);
+        }
+
+        // A CR at the end of a run whose LF starts the next run isn't drawn, and the LF ends
+        // the line.
+        let mut line_break_after = END;
+        line_break_after.prepend("\nnext");
+        let options = LayoutOptions {
+            line_break_after,
+            ..wrapping_options(500.0)
+        };
+        let laidout = layout_text(&mut layouter, LATIN_FAMILY, "end\r", options);
+        assert_eq!(get_row_texts(&laidout), ["end"]);
+        assert!(!laidout.rows[0].newline);
+        let options = LayoutOptions {
+            first_row_indent_in_lpxs: laidout.rows[0].width_in_lpxs,
+            line_break_before: laidout.line_break_before_next_run,
+            ..wrapping_options(500.0)
+        };
+        let laidout = layout_text(&mut layouter, LATIN_FAMILY, "\nnext", options);
+        assert_eq!(get_row_texts(&laidout), ["", "next"]);
+        assert!(laidout.rows[0].newline);
+
+        // A caret between a CR and its LF stays at the end of the row they end.
+        let laidout = layout_text(&mut layouter, LATIN_FAMILY, "ab\r\ncd", wrapping_options(500.0));
+        let position = laidout.cursor_to_position(Cursor {
+            index: 3,
+            prefer_next_row: false,
+        });
+        assert_eq!((position.row_index, position.x_in_lpxs), (0, laidout.rows[0].width_in_lpxs));
+    }
+
+    #[test]
+    fn over_long_words_break_between_graphemes() {
+        let mut layouter = real_font_layouter();
+        let text = "a Supercalifragilisticexpialidocious word";
+        let max_width = 60.0;
+        let laidout = layout_text(&mut layouter, LATIN_FAMILY, text, wrapping_options(max_width));
+        let row_texts = get_row_texts(&laidout);
+        // The long word starts a row of its own, and then breaks wherever a row is full.
+        assert_eq!(row_texts[0], "a ");
+        assert!(row_texts.len() > 4, "{row_texts:?}");
+        assert_eq!(row_texts.concat(), text);
+        for row in &laidout.rows {
+            assert!(row.width_without_hanging_in_lpxs() <= max_width, "{row_texts:?}");
+        }
+        let word_rows = &laidout.rows[1..laidout.rows.len() - 2];
+        for (row, next_row) in word_rows.iter().zip(&laidout.rows[2..]) {
+            let next_grapheme = next_row.text.graphemes(true).next().unwrap();
+            let full_row = format!("{}{next_grapheme}", row.text.as_str());
+            let full_row_width = measure_width(&mut layouter, LATIN_FAMILY, &full_row);
+            assert!(full_row_width > max_width, "{row_texts:?}");
+        }
+    }
+
+    #[test]
+    fn trailing_glue_and_reserved_starts_keep_runs_together() {
+        let mut layouter = real_font_layouter();
+        // A "!" in a run of its own still has to stay with the "Bonjour" before it.
+        let (text_0, text_1) = ("Il a dit Bonjour ", "!");
+        let mut line_break_after = END;
+        line_break_after.prepend(text_1);
+        let glue_width = measure_width(&mut layouter, LATIN_FAMILY, text_1);
+        let max_width = measure_width(&mut layouter, LATIN_FAMILY, "Il a dit Bonjour !") - 1.0;
+        let options = LayoutOptions {
+            line_break_after,
+            ..wrapping_options(max_width)
+        };
+        let glued = LayoutOptions {
+            trailing_glue_width_in_lpxs: glue_width,
+            ..options
+        };
+        let laidout = layout_text(&mut layouter, LATIN_FAMILY, text_0, glued);
+        assert_eq!(get_row_texts(&laidout), ["Il a dit ", "Bonjour "]);
+        assert!(laidout.is_trailing_glue_reserved);
+        let unglued = layout_text(&mut layouter, LATIN_FAMILY, text_0, options);
+        assert_eq!(get_row_texts(&unglued), [text_0]);
+        // A run that doesn't wrap never checks its glue, so it keeps no room for it.
+        let unwrapped = LayoutOptions {
+            wrap: false,
+            ..glued
+        };
+        let unwrapped = layout_text(&mut layouter, LATIN_FAMILY, text_0, unwrapped);
+        assert_eq!(get_row_texts(&unwrapped), [text_0]);
+        assert!(!unwrapped.is_trailing_glue_reserved);
+
+        // The run it reserved room for stays on that row, even if it measures a bit too wide.
+        let options = LayoutOptions {
+            first_row_indent_in_lpxs: max_width - glue_width + 0.5,
+            line_break_before: laidout.line_break_before_next_run,
+            ..wrapping_options(max_width)
+        };
+        let reserved = LayoutOptions {
+            is_start_reserved: true,
+            ..options
+        };
+        let laidout = layout_text(&mut layouter, LATIN_FAMILY, text_1, reserved);
+        assert_eq!(get_row_texts(&laidout), [text_1]);
+        // Without the reservation, it wraps at the start of the run.
+        let laidout = layout_text(&mut layouter, LATIN_FAMILY, text_1, options);
+        assert_eq!(get_row_texts(&laidout), ["", text_1]);
+
+        // A run that's all one reserved unit passes the reservation on to the next run.
+        let mut line_break_before = START;
+        line_break_before.append("ab");
+        let mut line_break_after = END;
+        line_break_after.prepend("cd ef");
+        let glue_width = measure_width(&mut layouter, LATIN_FAMILY, "cd");
+        let options = LayoutOptions {
+            first_row_indent_in_lpxs: max_width - 1.0,
+            line_break_before,
+            line_break_after,
+            trailing_glue_width_in_lpxs: glue_width,
+            is_start_reserved: true,
+            ..wrapping_options(max_width)
+        };
+        let laidout = layout_text(&mut layouter, LATIN_FAMILY, "xy", options);
+        assert_eq!(get_row_texts(&laidout), ["xy"]);
+        assert!(laidout.is_trailing_glue_reserved);
+    }
+
+    /// Lays out `text` as two runs split at `split`, like two styled runs on one line.
+    ///
+    /// Returns where each visual row after the first starts.
+    fn layout_as_two_runs(
+        layouter: &mut Layouter,
+        family: u64,
+        text: &str,
+        split: usize,
+        max_width: f32,
+    ) -> Vec<usize> {
+        let (text_0, text_1) = text.split_at(split);
+        let mut line_break_after = END;
+        line_break_after.prepend(text_1);
+        let mut line_break_before = START;
+        line_break_before.append(text_0);
+        // The glue is the second run's text up to its first break opportunity. After a soft
+        // hyphen, that needs room for the hyphen, or for the text up to the next one if narrower.
+        let hyphen_width = measure_hyphen_width(layouter, family);
+        let mut line_breaks = find_line_breaks(text_1, line_break_before, END);
+        let trailing_glue_width_in_lpxs = match line_breaks.next() {
+            Some(line_break) if line_break.byte_index > 0 => {
+                let rest_width = line_breaks.next().map_or(0.0, |next_line_break| {
+                    let next_line_break_in_rest = LineBreak {
+                        byte_index: next_line_break.byte_index - line_break.byte_index,
+                        ..next_line_break
+                    };
+                    let rest = &text_1[line_break.byte_index..];
+                    measure_unit(layouter, family, rest, next_line_break_in_rest, hyphen_width)
+                });
+                measure_unit(layouter, family, text_1, line_break, hyphen_width.min(rest_width))
+            }
+            _ => 0.0,
+        };
+        let options = LayoutOptions {
+            line_break_after,
+            trailing_glue_width_in_lpxs,
+            ..wrapping_options(max_width)
+        };
+        let laidout_0 = layout_text(layouter, family, text_0, options);
+        assert_eq!(laidout_0.line_break_before_next_run, line_break_before);
+        let options = LayoutOptions {
+            first_row_indent_in_lpxs: laidout_0.rows.last().unwrap().width_in_lpxs,
+            line_break_before: laidout_0.line_break_before_next_run,
+            is_start_reserved: laidout_0.is_trailing_glue_reserved,
+            ..wrapping_options(max_width)
+        };
+        let laidout_1 = layout_text(layouter, family, text_1, options);
+        let mut row_starts = get_row_starts(&laidout_0);
+        row_starts.extend(
+            get_row_starts(&laidout_1)
+                .into_iter()
+                .map(|row_start| split + row_start),
+        );
+        row_starts
+    }
+
+    #[test]
+    fn runs_split_before_a_soft_hyphen_wrap_like_the_whole_text() {
+        let mut layouter = real_font_layouter();
+        let head = "na\u{EF}ve dog \u{201C}we'l\u{AD}";
+        let split = head.len() - '\u{AD}'.len_utf8();
+        let head_width = measure_width(&mut layouter, LATIN_FAMILY, head);
+        let hyphen_width = measure_hyphen_width(&mut layouter, LATIN_FAMILY);
+        let l_width = measure_width(&mut layouter, LATIN_FAMILY, "l");
+        assert!(l_width < hyphen_width);
+        // The row has room for the unit that ends in the soft hyphen, but not for its hyphen.
+        // So the row keeps going past it with the narrow "l", but wraps before it with "lo".
+        for (text, max_width, first_row) in [
+            (
+                format!("{head}l we'll"),
+                head_width + 0.5 * (l_width + hyphen_width),
+                format!("{head}l "),
+            ),
+            (
+                format!("{head}lo we'll"),
+                head_width + 0.5 * hyphen_width,
+                "na\u{EF}ve dog ".to_string(),
+            ),
+        ] {
+            let options = wrapping_options(max_width);
+            let whole = layout_text(&mut layouter, LATIN_FAMILY, &text, options);
+            assert_eq!(get_row_texts(&whole)[0], first_row);
+            let row_starts =
+                layout_as_two_runs(&mut layouter, LATIN_FAMILY, &text, split, max_width);
+            assert_eq!(row_starts, get_row_starts(&whole), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn split_runs_wrap_like_the_whole_text() {
+        let mut layouter = real_font_layouter();
+        let mut matched_count = 0;
+        let mut noise_count = 0;
+        let mut too_wide_count = 0;
+        for (family, text) in [
+            (LATIN_FAMILY, "He said \"hello world\" to me, then left (quietly)."),
+            (LATIN_FAMILY, "Bonjour ! \u{C7}a va ? Oui , tr\u{E8}s bien ; merci."),
+            (LATIN_FAMILY, "see https://example.com/some/long/path?query=value&x=1 now"),
+            (LATIN_FAMILY, "On 2026-10-26 we paid $12.50 (or 50%) for 1,000.00 items."),
+            (LATIN_FAMILY, "Mr.\u{A0}Smith met no\u{2060}break and state-of-the-art folks."),
+            (LATIN_FAMILY, "a hyphen\u{AD}ation exam\u{AD}ple with soft\u{AD}hyphens\u{AD}everywhere"),
+            (LATIN_FAMILY, "spaces   between    words  and\ttabs\there"),
+            (LATIN_FAMILY, "lines\nwith\r\nhard\rbreaks\u{2028}of\u{85}every kind"),
+            (LATIN_FAMILY, "Supercalifragilisticexpialidocious is long, antidisestablishmentarianism too"),
+            (LATIN_FAMILY, "\u{AB}\u{202F}Bonjour\u{202F}\u{BB} dit-il, puis \u{AB} au revoir \u{BB}."),
+            (LATIN_FAMILY, "AVA WAW To Ty Yo kerning pairs AVAVAV WAWAWA fifl office"),
+            (LATIN_FAMILY, "flags \u{1F1FA}\u{1F1F8}\u{1F1EC}\u{1F1E7} and \u{1F44D}\u{1F3FD} plus \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} here"),
+            (CJK_FAMILY, "\u{300C}今日は、とても良い天気ですね。\u{300D}と彼女は言った。"),
+            (CJK_FAMILY, "ちょっとチャットしましょう、きゃっと言った。中文也可以，对吧？"),
+        ] {
+            let line_breaks: Vec<LineBreak> = find_line_breaks(text, START, END).collect();
+            let hyphen_width = measure_hyphen_width(&mut layouter, family);
+            // We try every few pixels, and the exact widths of the first line's prefixes, which
+            // leave a row no slack, so the smallest shaping difference can move a break.
+            let full_width = layout_text(&mut layouter, family, text, LayoutOptions::default())
+                .size_in_lpxs
+                .width;
+            let mut max_widths: Vec<f32> = (30..full_width as usize + 10)
+                .step_by(10)
+                .map(|max_width| max_width as f32)
+                .collect();
+            for &line_break in line_breaks.iter().take_while(|line_break| !line_break.is_forced) {
+                let width = measure_unit(&mut layouter, family, text, line_break, hyphen_width);
+                max_widths.extend([width - 0.01, width, width + 0.01]);
+            }
+            for max_width in max_widths {
+                let whole = layout_text(&mut layouter, family, text, wrapping_options(max_width));
+                let whole_row_starts = get_row_starts(&whole);
+                for (split, _) in text.grapheme_indices(true).skip(1) {
+                    // The run before can't know whether the next one wraps right at its start, so
+                    // it never draws the hyphen of a soft hyphen it ends with.
+                    if text[..split].ends_with('\u{AD}') {
+                        continue;
+                    }
+                    // A unit wider than a row breaks between graphemes, and each run can only do
+                    // that within itself.
+                    let unit_start = line_breaks
+                        .iter()
+                        .map(|line_break| line_break.byte_index)
+                        .take_while(|&index| index <= split)
+                        .last()
+                        .unwrap_or(0);
+                    let unit_break = *line_breaks
+                        .iter()
+                        .find(|line_break| line_break.byte_index > split)
+                        .unwrap();
+                    let unit_break_in_unit = LineBreak {
+                        byte_index: unit_break.byte_index - unit_start,
+                        ..unit_break
+                    };
+                    let unit_text = &text[unit_start..];
+                    let unit_width = measure_unit(
+                        &mut layouter,
+                        family,
+                        unit_text,
+                        unit_break_in_unit,
+                        hyphen_width,
+                    );
+                    if unit_start < split && unit_width > max_width {
+                        too_wide_count += 1;
+                        continue;
+                    }
+                    let row_starts =
+                        layout_as_two_runs(&mut layouter, family, text, split, max_width);
+                    if row_starts == whole_row_starts {
+                        matched_count += 1;
+                        continue;
+                    }
+                    // The fitter adds up units shaped one by one, and the runs shape apart at
+                    // `split`, so a break can only move by the kerning lost or gained there.
+                    let row_index = row_starts
+                        .iter()
+                        .zip(&whole_row_starts)
+                        .take_while(|(row_start, whole_row_start)| row_start == whole_row_start)
+                        .count();
+                    let row = &whole.rows[row_index];
+                    let row_start = row.text.start_in_parent();
+                    // The row could have grown by the next unit and its hyphen, or by the next
+                    // two units, which don't need that hyphen.
+                    let next_line_breaks: Vec<LineBreak> = line_breaks
+                        .iter()
+                        .copied()
+                        .filter(|line_break| line_break.byte_index > row.text.end_in_parent())
+                        .take(2)
+                        .collect();
+                    let window_end = next_line_breaks.last().map_or(text.len(), |line_break| {
+                        line_break.byte_index - line_break.newline_len
+                    });
+                    let next_unit_width = next_line_breaks
+                        .iter()
+                        .map(|&line_break| {
+                            let line_break_in_row = LineBreak {
+                                byte_index: line_break.byte_index - row_start,
+                                ..line_break
+                            };
+                            let text = &text[row_start..];
+                            measure_unit(&mut layouter, family, text, line_break_in_row, hyphen_width)
+                        })
+                        .reduce(f32::min)
+                        .unwrap_or(row.width_without_hanging_in_lpxs());
+                    let mut piece_ends = vec![row_start];
+                    piece_ends.extend(
+                        line_breaks
+                            .iter()
+                            .map(|line_break| line_break.byte_index)
+                            .filter(|&index| row_start < index && index < window_end),
+                    );
+                    piece_ends.push(window_end);
+                    if let Err(position) = piece_ends.binary_search(&split) {
+                        piece_ends.insert(position, split);
+                    }
+                    // We add up the kerning at each boundary on its own, so it can't cancel out.
+                    let mut shaping_noise = 0.0;
+                    for pieces in piece_ends.windows(3) {
+                        let (start, middle, end) = (pieces[0], pieces[1], pieces[2]);
+                        let kerning = measure_width(&mut layouter, family, &text[start..end])
+                            - measure_width(&mut layouter, family, &text[start..middle])
+                            - measure_width(&mut layouter, family, &text[middle..end]);
+                        shaping_noise += kerning.abs();
+                    }
+                    let margin = (row.width_without_hanging_in_lpxs() - max_width)
+                        .abs()
+                        .min((next_unit_width - max_width).abs());
+                    assert!(
+                        !row.newline
+                            && row_start < split
+                            && split < window_end
+                            && margin <= shaping_noise + 0.001,
+                        "{text:?} split at {split} at {max_width}: rows start at {row_starts:?}, \
+                         but at {whole_row_starts:?} unsplit"
+                    );
+                    noise_count += 1;
+                }
+            }
+        }
+        println!(
+            "Split runs: {matched_count} wrap like the whole text, {noise_count} differ by \
+             shaping noise, {too_wide_count} split a unit wider than a row"
+        );
+        assert!(matched_count > 0);
+    }
+
+    #[test]
+    fn carets_move_forward_and_round_trip() {
+        let mut layouter = real_font_layouter();
+        for (family, text, max_width) in [
+            (LATIN_FAMILY, "He said \"hello world\" to me, then left. Again and again.", 80.0),
+            (LATIN_FAMILY, "hello          world wraps after its hanging spaces", 70.0),
+            (LATIN_FAMILY, "one\r\ntwo\nthree\u{2028}four", 200.0),
+            (CJK_FAMILY, "今日は、とても良い天気ですね。", 60.0),
+        ] {
+            let laidout = layout_text(&mut layouter, family, text, wrapping_options(max_width));
+            for row in &laidout.rows {
+                let mut previous_x = f32::MIN;
+                let indices = row
+                    .text
+                    .grapheme_indices(true)
+                    .map(|(index, _)| index)
+                    .chain([row.text.len()]);
+                for index in indices {
+                    let x = row.index_to_x_in_lpxs(index);
+                    assert!(x >= previous_x, "{text:?} at {index} in {:?}", row.text);
+                    previous_x = x;
+                }
+            }
+            // Every char boundary maps to a caret and back, except inside a hard line break, where
+            // the caret stays at the end of the row it ends.
+            let indices = text.char_indices().map(|(index, _)| index).chain([text.len()]);
+            for index in indices {
+                for prefer_next_row in [false, true] {
+                    let cursor = Cursor {
+                        index,
+                        prefer_next_row,
+                    };
+                    let position = laidout.cursor_to_position(cursor);
+                    let row = &laidout.rows[position.row_index];
+                    assert!(row.text.start_in_parent() <= index, "{text:?} at {cursor:?}");
+                    let round_trip = laidout.position_to_cursor(position);
+                    let index = index.min(row.text.end_in_parent());
+                    assert_eq!(round_trip.index, index, "{text:?} at {cursor:?}");
+                }
+            }
+        }
+        // The caret after hanging spaces goes past the row's visible text, where its glyphs end.
+        let max_width = measure_width(&mut layouter, LATIN_FAMILY, "hello") + 20.0;
+        let laidout = layout_text(
+            &mut layouter,
+            LATIN_FAMILY,
+            "hello          world",
+            wrapping_options(max_width),
+        );
+        let row = &laidout.rows[0];
+        let position = laidout.cursor_to_position(Cursor {
+            index: row.text.len(),
+            prefer_next_row: false,
+        });
+        assert_eq!((position.row_index, position.x_in_lpxs), (0, row.width_in_lpxs));
+        assert!(position.x_in_lpxs > row.width_without_hanging_in_lpxs());
+    }
+
+    #[test]
+    fn carets_and_selections_follow_rtl_text() {
+        // Every glyph here is a grapheme, so we know each grapheme's text and edges.
+        struct Grapheme {
+            start: usize,
+            end: usize,
+            left: f32,
+            right: f32,
+            is_rtl: bool,
+        }
+
+        let mut layouter = real_font_layouter();
+        for (text, max_width) in [
+            ("שלום עולם hello עולם שלום world", 1000.0),
+            ("שלום עולם hello עולם שלום world", 60.0),
+            ("hello שלום", 1000.0),
+            ("abc שלו 123 def", 1000.0),
+            ("ש abc", 1000.0),
+            // HarfBuzz still draws the Hebrew right to left.
+            ("\u{202D}שלום\u{202C} abc", 1000.0),
+        ] {
+            let laidout = layout_text(&mut layouter, LATIN_FAMILY, text, wrapping_options(max_width));
+            let rows: Vec<_> = laidout
+                .rows
+                .iter()
+                .map(|row| {
+                    let graphemes: Vec<_> = row
+                        .glyphs
+                        .iter()
+                        .enumerate()
+                        .map(|(k, glyph)| Grapheme {
+                            start: glyph.cluster,
+                            end: glyph.cluster
+                                + row.text[glyph.cluster..].graphemes(true).next().unwrap().len(),
+                            left: glyph.origin_in_lpxs.x,
+                            right: row
+                                .glyphs
+                                .get(k + 1)
+                                .map_or(row.width_in_lpxs, |next| next.origin_in_lpxs.x),
+                            is_rtl: glyph.direction == Direction::Rtl,
+                        })
+                        .collect();
+                    (row, graphemes)
+                })
+                .collect();
+            for (row, graphemes) in &rows {
+                let carets: Vec<_> = row
+                    .text
+                    .grapheme_indices(true)
+                    .map(|(index, _)| index)
+                    .chain([row.text.len()])
+                    .map(|index| (index, row.index_to_x_in_lpxs(index)))
+                    .collect();
+                for &(index, x) in &carets {
+                    // A click goes back to the caret, unless a zero-width grapheme puts two there.
+                    if carets.iter().filter(|caret| caret.1 == x).count() == 1 {
+                        assert_eq!(row.x_in_lpxs_to_index(x), index, "{text:?} at {index}");
+                    }
+                    // The caret is at the leading edge of the grapheme after it or the trailing
+                    // edge of the one before it.
+                    let leading = graphemes
+                        .iter()
+                        .find(|grapheme| grapheme.start == index)
+                        .map(|grapheme| if grapheme.is_rtl { grapheme.right } else { grapheme.left });
+                    let trailing = graphemes
+                        .iter()
+                        .find(|grapheme| grapheme.end == index)
+                        .map(|grapheme| if grapheme.is_rtl { grapheme.left } else { grapheme.right });
+                    assert!(leading == Some(x) || trailing == Some(x), "{text:?} at {index}");
+                }
+                // Between two Hebrew letters, the caret is between their glyphs.
+                for pair in graphemes.windows(2) {
+                    if pair[0].is_rtl && pair[1].is_rtl && pair[1].end == pair[0].start {
+                        assert_eq!(row.index_to_x_in_lpxs(pair[0].start), pair[1].left, "{text:?}");
+                    }
+                }
+            }
+            // A selection covers what it selects and nothing else, however that's split up.
+            let indices: Vec<usize> = text
+                .grapheme_indices(true)
+                .map(|(index, _)| index)
+                .chain([text.len()])
+                .collect();
+            for (k, &start) in indices.iter().enumerate() {
+                for &end in &indices[k..] {
+                    let rects = laidout.selection_rects(Selection {
+                        anchor: Cursor { index: start, prefer_next_row: false },
+                        cursor: Cursor { index: end, prefer_next_row: false },
+                    });
+                    for (row, graphemes) in &rows {
+                        let row_start = row.text.start_in_parent();
+                        for grapheme in graphemes {
+                            // A zero-width grapheme, like the LRO, is at the edge of a span anyway.
+                            if grapheme.left == grapheme.right {
+                                continue;
+                            }
+                            let is_selected =
+                                start <= row_start + grapheme.start && row_start + grapheme.end <= end;
+                            let middle = 0.5 * (grapheme.left + grapheme.right);
+                            let is_covered = rects.iter().any(|rect| {
+                                let Rect { origin, size } = rect.rect_in_lpxs;
+                                (origin.y..=origin.y + size.height).contains(&row.origin_in_lpxs.y)
+                                    && (origin.x..=origin.x + size.width).contains(&middle)
+                            });
+                            assert_eq!(is_covered, is_selected, "{text:?} from {start} to {end}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selections_stay_inside_rows_an_ellipsis_cuts() {
+        let mut layouter = real_font_layouter();
+        // This draws as `100 ריחמ`, so an ellipsis at the right cuts off the start of the text.
+        let text = "מחיר 100";
+        let indices: Vec<usize> =
+            text.char_indices().map(|(index, _)| index).chain([text.len()]).collect();
+        let full_width = measure_width(&mut layouter, LATIN_FAMILY, text);
+        for max_width in (1..full_width.ceil() as usize).map(|max_width| max_width as f32) {
+            for options in [
+                LayoutOptions {
+                    max_width_in_lpxs: Some(max_width),
+                    ellipsis: true,
+                    ..LayoutOptions::default()
+                },
+                LayoutOptions {
+                    max_rows: Some(1),
+                    ellipsis: true,
+                    ..wrapping_options(max_width)
+                },
+            ] {
+                let laidout = layout_text(&mut layouter, LATIN_FAMILY, text, options);
+                for (k, &start) in indices.iter().enumerate() {
+                    for &end in &indices[k..] {
+                        let rects = laidout.selection_rects(Selection {
+                            anchor: Cursor { index: start, prefer_next_row: false },
+                            cursor: Cursor { index: end, prefer_next_row: false },
+                        });
+                        for rect in &rects {
+                            let width = rect.rect_in_lpxs.size.width;
+                            assert!(width >= 0.0, "at {max_width} from {start} to {end}");
+                        }
+                        // Selecting all of it covers all the text the row draws.
+                        if (start, end) == (0, text.len()) {
+                            let row = &laidout.rows[0];
+                            let text_glyphs =
+                                row.glyphs.iter().filter(|glyph| glyph.cluster < row.text.len());
+                            for glyph in text_glyphs {
+                                let middle = glyph.origin_in_lpxs.x + 0.5 * glyph.advance_in_lpxs();
+                                assert!(
+                                    rects.iter().any(|rect| {
+                                        let Rect { origin, size } = rect.rect_in_lpxs;
+                                        (origin.x..=origin.x + size.width).contains(&middle)
+                                    }),
+                                    "at {max_width}",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pieces_of_a_shaped_line_get_the_glyphs_they_get_on_their_own() {
+        let mut layouter = real_font_layouter();
+        let mut shaper = Shaper::new(shaper::Settings { cache_size: 0 });
+        let get_glyphs = |shaped_text: &ShapedText| {
+            shaped_text
+                .glyphs
+                .iter()
+                .map(|glyph| {
+                    let advance = glyph.advance_in_ems.to_bits();
+                    let offsets = (glyph.offset_in_ems.to_bits(), glyph.y_offset_in_ems.to_bits());
+                    (glyph.font.id(), glyph.id, glyph.cluster, glyph.direction, advance, offsets)
+                })
+                .collect::<Vec<_>>()
+        };
+        let (mut taken_count, mut shaped_count) = (0, 0);
+        for (family, text) in [
+            (LATIN_FAMILY, "AVATAR WAVE, To Ty: the office affluent fjord flies (off) 1234 finally."),
+            (LATIN_FAMILY, "Thanks, that worked! I'll try the new build tonight and report back."),
+            (CJK_FAMILY, "我们明天见（下午三点），请带上笔记本。日本語のテキストも"),
+        ] {
+            let font_family = layouter.get_or_load_font_family(family.into());
+            let get_params = |text: Substr| ShapeParams {
+                text,
+                fonts: font_family.fonts().into(),
+                direction: Direction::Ltr,
+                letter_spacing: Ems(0.0),
+                word_spacing: Ems(0.0),
+                features: Rc::new(Vec::new()),
+                diagnostics: Rc::new(font_family.diagnostics().clone()),
+            };
+            let line: Substr = text.into();
+            let shaped_line = shaper.shape_with_pieces(get_params(line.clone())).unwrap();
+            // Pieces start and end between any two graphemes, so some of them split kerned pairs.
+            let boundaries: Vec<usize> =
+                text.grapheme_indices(true).map(|(index, _)| index).chain([text.len()]).collect();
+            for (k, &start) in boundaries.iter().enumerate() {
+                for &end in &boundaries[k + 1..] {
+                    let piece = line.substr(start..end);
+                    let Some(taken) = shaped_line.get_piece(&piece, start) else {
+                        shaped_count += 1;
+                        continue;
+                    };
+                    let shaped = shaper.get_or_shape(get_params(piece.clone()));
+                    assert_eq!(get_glyphs(&taken), get_glyphs(&shaped), "{:?}", piece.as_str());
+                    taken_count += 1;
+                }
+            }
+        }
+        assert!(taken_count > 0 && shaped_count > 0);
+    }
+
+    #[test]
+    fn crlf_and_lone_cr_break_lines_like_lf() {
         let mut layouter = real_font_layouter();
         let rows = |text: &LaidoutText| -> Vec<(String, usize, bool, f32)> {
             text.rows

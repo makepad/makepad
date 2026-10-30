@@ -1,14 +1,14 @@
 //! `SynthPicker{node: "mono"}`: the instrument switch. It shows what the
 //! node is (a synth preset, an audio shader, a drum kit, a General MIDI
-//! program, the piano …) and opens the list of everything it could be
-//! instead, grouped and searchable (type while it is open). Resting on a row plays the node as
-//! that instrument in place (a short phrase of its own notes, on the cue
-//! or the main output as the desk routes previews); a click makes it so:
-//! the node is rewritten, keeping its name, so every loop that plays it
-//! keeps its notes; one undo step.
+//! program, the piano …) and opens the instrument browser under it
+//! ([`crate::browser`], the one every picker uses): every engine's
+//! presets by category, searchable; resting on a row plays the node as
+//! that instrument in place, a click makes it so (the node rewritten,
+//! keeping its name, so every loop that plays it keeps its notes; one undo
+//! step) and the browser stays open for the next.
 
 use crate::host as synth;
-use crate::choices::{ChoiceList, Clicked};
+use crate::browser::Browser;
 use makepad_value_pickers::panel::control::{DrawPanelShape, R_GROUP};
 use makepad_widgets::*;
 
@@ -19,7 +19,7 @@ script_mod! {
     mod.widgets.SynthPickerBase = #(SynthPicker::register_widget(vm))
     /** The instrument a node is, and what it could be instead (previewed, switched). */
     mod.widgets.SynthPicker = set_type_default() do mod.widgets.SynthPickerBase{
-        width: Fill height: Fit list_height: 360
+        width: Fill height: Fit list_height: 420
         draw_bg +: {color: #x00000000}
         draw_text +: {text_style: theme.font_regular{font_size: 8.5}}
         draw_bold +: {text_style: theme.font_bold{font_size: 8.5}}
@@ -60,8 +60,8 @@ pub struct SynthPicker {
     list_height: f64,
     #[rust]
     open: bool,
-    #[rust]
-    list: ChoiceList,
+    #[live]
+    browser: Browser,
     #[rust]
     head: Rect,
     #[rust]
@@ -70,59 +70,45 @@ pub struct SynthPicker {
 
 impl Widget for SynthPicker {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        if self.next_frame.is_event(event).is_some() && self.list.tick() {
+        if self.next_frame.is_event(event).is_some() && self.browser.tick() {
             self.next_frame = cx.new_next_frame();
         }
-        match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerHoverIn(_) => cx.set_cursor(MouseCursor::Hand),
-            Hit::FingerHoverOver(fe) => {
-                let (changed, wake) = self.list.hover_at(fe.abs);
-                if wake {
-                    self.next_frame = cx.new_next_frame();
-                }
-                if changed {
-                    self.redraw(cx);
-                }
-            }
-            Hit::FingerHoverOut(_) => {
-                self.list.stop_preview();
-                self.redraw(cx);
-            }
-            Hit::TextInput(te) if self.open => {
-                self.list.type_text(&te.input);
-                self.redraw(cx);
-            }
-            Hit::KeyDown(ke) if self.open && ke.key_code == KeyCode::Backspace => {
-                self.list.backspace();
-                self.redraw(cx);
-            }
-            Hit::KeyDown(ke) if self.open && ke.key_code == KeyCode::Escape => {
-                self.list.stop_preview();
-                self.open = false;
-                synth::set_searching(false);
-                self.redraw(cx);
-            }
-            Hit::KeyFocus(_) => synth::set_searching(self.open),
-            Hit::KeyFocusLost(_) => synth::set_searching(false),
-            Hit::FingerScroll(fe) if self.open => {
-                self.list.scroll_by(fe.scroll.y);
-                self.redraw(cx);
-            }
-            Hit::FingerUp(fe) if fe.is_over && fe.was_tap() => {
-                synth::select(&self.node);
-                if self.head.contains(fe.abs) {
-                    self.open = !self.open;
-                    if self.open {
-                        self.list.load(&self.node);
-                        cx.set_key_focus(self.draw_bg.area());
-                    } else {
-                        self.list.stop_preview();
-                    }
-                    synth::set_searching(self.open);
-                } else if self.list.click(fe.abs) == Clicked::Switched {
+        // The open browser has its own events (the keys while it has them).
+        if self.open {
+            let keys = matches!(event, Event::KeyDown(_) | Event::KeyUp(_) | Event::TextInput(_));
+            if !keys || cx.has_key_focus(self.draw_bg.area()) {
+                let out = self.browser.handle_event(cx, event);
+                if out.close {
                     self.open = false;
                     synth::set_searching(false);
                 }
+                if out.redraw {
+                    self.redraw(cx);
+                    self.next_frame = cx.new_next_frame();
+                }
+                if out.consumed {
+                    if matches!(event, Event::MouseDown(_)) {
+                        cx.set_key_focus(self.draw_bg.area());
+                    }
+                    return;
+                }
+            }
+        }
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerHoverIn(_) => cx.set_cursor(MouseCursor::Hand),
+            Hit::KeyFocus(_) => synth::set_searching(self.open),
+            Hit::KeyFocusLost(_) => synth::set_searching(false),
+            Hit::FingerUp(fe) if fe.is_over && fe.was_tap() && self.head.contains(fe.abs) => {
+                synth::select(&self.node);
+                self.open = !self.open;
+                if self.open {
+                    self.browser.inline = true;
+                    self.browser.open(&self.node);
+                    cx.set_key_focus(self.draw_bg.area());
+                } else {
+                    self.browser.close();
+                }
+                synth::set_searching(self.open);
                 self.redraw(cx);
             }
             _ => {}
@@ -130,9 +116,6 @@ impl Widget for SynthPicker {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        if !self.list.loaded() {
-            self.list.load(&self.node);
-        }
         let p = makepad_look::palette::get(cx);
         let height = if self.open { HEAD + self.list_height } else { HEAD };
         let rect = cx.walk_turtle(Walk { height: Size::Fixed(height), ..walk });
@@ -143,13 +126,16 @@ impl Widget for SynthPicker {
         let label = if self.label.is_empty() { "INSTRUMENT".to_string() } else { self.label.to_uppercase() };
         self.draw_small.color = color(p.secondary, 1.0);
         self.draw_small.draw_abs(cx, dvec2(rect.pos.x + 8.0, rect.pos.y + 9.0), &format!("{label}  {}", self.node));
-        let current = format!("{}  {}", self.list.current_label(), if self.open { "close" } else { "switch" });
+        let now = synth::current(&self.node).map(|k| k.split_once(':').map_or(k.clone(), |(t, f)| format!("{t} {}", f.split(',').filter_map(|x| x.split_once('=')).map(|(_, v)| v.trim_start_matches('@').trim_matches('"').replace('_', " ")).collect::<Vec<_>>().join(" ")))).unwrap_or_default();
+        let current = format!("{now}  {}", if self.open { "close" } else { "browse" });
         self.draw_bold.color = color(p.text_hi, 1.0);
         let w = makepad_widgets::badge::advance(&self.draw_bold, cx, &current);
         self.draw_bold.draw_abs(cx, dvec2(rect.pos.x + rect.size.x - 8.0 - w, rect.pos.y + 8.0), &current);
         if self.open {
             let list = Rect { pos: dvec2(rect.pos.x, rect.pos.y + HEAD), size: dvec2(rect.size.x, self.list_height) };
-            self.list.draw(cx, list, &mut self.draw_row, &mut self.draw_text, &mut self.draw_small);
+            if self.browser.draw(cx, list) {
+                self.next_frame = cx.new_next_frame();
+            }
         }
         DrawStep::done()
     }

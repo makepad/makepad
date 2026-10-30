@@ -5,15 +5,9 @@
 
 use makepad_score_player::FxKind;
 
-/// How a control's travel (0..1) maps onto a field.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Taper {
-    Linear,
-    /// Equal ratios for equal travel (frequencies, times). Needs `min > 0`.
-    Log,
-    /// Whole numbers.
-    Int,
-}
+/// How a control's travel (0..1) maps onto a field: Log is equal ratios
+/// for equal travel (frequencies, times; needs `min > 0`), Int whole numbers.
+use makepad_edit_values::Taper;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParamSpec {
@@ -52,6 +46,21 @@ pub enum Unit {
     /// A true/false field, written `true` or `false`.
     Bool,
     Ms,
+    /// A note value (an arp's step), written as a fraction (`1/16`),
+    /// stepping through [`NOTE_VALUES`].
+    Note,
+}
+
+/// The note values a [`Unit::Note`] steps through, slow to fast: whole,
+/// half, quarter, quarter triplet, eighth, eighth triplet, sixteenth, …
+pub const NOTE_VALUES: [(f64, &str); 11] = [
+    (1.0, "1/1"), (0.5, "1/2"), (0.25, "1/4"), (1.0 / 6.0, "1/6"), (0.125, "1/8"), (1.0 / 12.0, "1/12"), (0.0625, "1/16"), (1.0 / 24.0, "1/24"),
+    (1.0 / 32.0, "1/32"), (1.0 / 48.0, "1/48"), (1.0 / 64.0, "1/64"),
+];
+
+/// The note value nearest `value` (index into [`NOTE_VALUES`]).
+pub fn note_index(value: f64) -> usize {
+    (0..NOTE_VALUES.len()).min_by(|a, b| (NOTE_VALUES[*a].0.ln() - value.max(1e-6).ln()).abs().total_cmp(&(NOTE_VALUES[*b].0.ln() - value.max(1e-6).ln()).abs())).unwrap_or(6)
 }
 
 pub const WAVES: [&str; 6] = ["saw", "square", "pulse", "tri", "sine", "softsaw"];
@@ -59,6 +68,8 @@ pub const FILTERS: [&str; 5] = ["ladder", "lp", "bp", "hp", "notch"];
 pub const NOISES: [&str; 5] = ["white", "pink", "brown", "blue", "velvet"];
 pub const KITS: [&str; 5] = ["analog_80s", "analog_hybrid", "studio", "lofi", "chip"];
 pub const LFO_SHAPES: [&str; 5] = ["sine", "tri", "saw", "square", "random"];
+/// The chords a `Chord` stream node offers by name (the score's chord kinds).
+pub const CHORD_NAMES: [&str; 10] = ["major", "minor", "dim", "aug", "sus2", "sus4", "maj7", "m7", "dom7", "power"];
 
 impl ParamSpec {
     fn num(key: &str, label: &'static str, min: f64, max: f64, default: f64, taper: Taper, unit: Unit) -> ParamSpec {
@@ -99,6 +110,9 @@ impl ParamSpec {
 
     /// Travel 0..1 for a value.
     pub fn norm(&self, value: f64) -> f64 {
+        if self.unit == Unit::Note {
+            return note_index(value) as f64 / (NOTE_VALUES.len() - 1) as f64;
+        }
         if !value.is_finite() || self.max <= self.min {
             return 0.0;
         }
@@ -112,6 +126,9 @@ impl ParamSpec {
     /// The value at travel `t` (0..1).
     pub fn denorm(&self, t: f64) -> f64 {
         let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
+        if self.unit == Unit::Note {
+            return NOTE_VALUES[(t * (NOTE_VALUES.len() - 1) as f64).round() as usize].0;
+        }
         match self.taper {
             Taper::Log if self.min > 0.0 => self.min * (self.max / self.min).powf(t),
             Taper::Int => (self.min + t * (self.max - self.min)).round(),
@@ -127,6 +144,9 @@ impl ParamSpec {
         }
         if self.unit == Unit::Bool {
             return if value > 0.5 { "true" } else { "false" }.to_string();
+        }
+        if self.unit == Unit::Note {
+            return NOTE_VALUES[note_index(value)].1.to_string();
         }
         let value = value.clamp(self.min.min(self.max), self.max.max(self.min));
         let decimals = if self.taper == Taper::Int {
@@ -152,6 +172,46 @@ impl ParamSpec {
         if text == "-0" { "0".to_string() } else { text }
     }
 
+    /// A typed value (a knob's or a graph point's entry): a number or an
+    /// expression with units in the field's own terms (`700ms`, `1.2s`,
+    /// `2k`, `80%`, `-3dB`, `+2st`), relative to `current` when it starts
+    /// with an operator (`+0.1`, `*2`), clamped to the range. A percent
+    /// field reads a bare number above 1 as percent (`80` is 80%); a choice
+    /// takes one of its options by name.
+    pub fn parse(&self, text: &str, current: f64) -> Result<f64, String> {
+        let t = text.trim();
+        if self.is_choice() {
+            let name = t.trim_start_matches('@').to_ascii_lowercase();
+            if let Some(i) = self.options.iter().position(|o| o.to_ascii_lowercase() == name) {
+                return Ok(i as f64);
+            }
+        }
+        if self.unit == Unit::Bool {
+            match t.to_ascii_lowercase().as_str() {
+                "on" | "true" | "yes" | "1" => return Ok(1.0),
+                "off" | "false" | "no" | "0" => return Ok(0.0),
+                _ => {}
+            }
+        }
+        let unit = match self.unit {
+            Unit::Hz => "hz",
+            Unit::Secs => "s",
+            Unit::Ms => "ms",
+            Unit::Percent => "frac",
+            Unit::Db => "db",
+            Unit::Cents => "ct",
+            Unit::Semis => "st",
+            _ => "",
+        };
+        let mut v = makepad_edit_values::number::eval(t, current, unit)?;
+        let has_unit = t.chars().any(|c| c.is_ascii_alphabetic() || c == '%');
+        if self.unit == Unit::Percent && !has_unit && v.abs() > 1.0 {
+            v /= 100.0;
+        }
+        let v = v.clamp(self.min.min(self.max), self.max.max(self.min));
+        Ok(if self.taper == Taper::Int { v.round() } else { v })
+    }
+
     /// The value for a person: `812 Hz`, `3.5 ms`, `62%`.
     pub fn display(&self, value: f64) -> String {
         if self.is_choice() {
@@ -169,6 +229,7 @@ impl ParamSpec {
             Unit::Semis => format!("{value:.2} st"),
             Unit::Bool => if value > 0.5 { "ON" } else { "OFF" }.to_string(),
             Unit::Ms => format!("{value:.0} ms"),
+            Unit::Note => NOTE_VALUES[note_index(value)].1.to_string(),
             Unit::None if self.taper == Taper::Int => format!("{value:.0}"),
             Unit::None => format!("{value:.2}"),
         }
@@ -294,6 +355,42 @@ pub fn spec(ty: &str, key: &str) -> Option<ParamSpec> {
             "swing" => s("SWING", 0.0, 0.5, 0.0, Linear, Percent),
             _ => Option::None,
         },
+        // MIDI in and the stream nodes that shape what it plays.
+        "MidiIn" => match key {
+            "channel" => s("CHANNEL", 0.0, 16.0, 0.0, Int, None),
+            "bend" => s("BEND", 0.0, 24.0, 2.0, Int, Semis),
+            "latency" => s("LATENCY", 0.0, 50.0, 8.0, Linear, Ms),
+            "mpe" => s("MPE", 0.0, 1.0, 0.0, Int, Bool),
+            _ => Option::None,
+        },
+        "Arp" => match key {
+            "pattern" => Some(ParamSpec::choice(key, "PATTERN", makepad_audio_synth::kit::arp::PATTERNS)),
+            "rate" => s("RATE", 1.0 / 64.0, 1.0, 0.0625, Log, Note),
+            "octaves" => s("OCTAVES", 1.0, 4.0, 1.0, Int, None),
+            "gate" => s("GATE", 0.01, 1.0, 0.6, Linear, Percent),
+            "swing" => s("SWING", 0.0, 0.5, 0.0, Linear, Percent),
+            "repeats" => s("REPEATS", 1.0, 4.0, 1.0, Int, None),
+            "chance" => s("CHANCE", 0.0, 1.0, 1.0, Linear, Percent),
+            "interval" => s("INTERVAL", -24.0, 24.0, 12.0, Int, Semis),
+            "latch" => s("LATCH", 0.0, 1.0, 0.0, Int, Bool),
+            "sync" => s("SYNC", 0.0, 1.0, 1.0, Int, Bool),
+            _ => Option::None,
+        },
+        "Chord" => match key {
+            "chord" => Some(ParamSpec::choice(key, "CHORD", &crate::spec::CHORD_NAMES)),
+            _ => Option::None,
+        },
+        "Transpose" => match key {
+            "semis" => ParamSpec::num(key, "SEMIS", -24.0, 24.0, 0.0, Int, Semis).bipolar().into(),
+            _ => Option::None,
+        },
+        "Velocity" => match key {
+            "curve" => Some(ParamSpec::choice(key, "CURVE", &makepad_score_player::stream::VelCurve::NAMES)),
+            "level" => s("LEVEL", 0.0, 1.0, 0.8, Linear, Percent),
+            "min" => s("MIN", 0.0, 1.0, 0.0, Linear, Percent),
+            "max" => s("MAX", 0.0, 1.0, 1.0, Linear, Percent),
+            _ => Option::None,
+        },
         _ => {
             let kind = FxKind::parse(ty)?;
             let (_, default, min, max) = *kind.params().iter().find(|(name, ..)| *name == key)?;
@@ -361,6 +458,11 @@ pub fn keys(ty: &str) -> Vec<&'static str> {
         "Instrument" => vec!["preset", "gain", "bank", "program", "channel"],
         "Loop" => vec!["amp", "pan", "beats", "mute", "solo"],
         "Clock" => vec!["bpm", "swing"],
+        "MidiIn" => vec!["channel", "bend", "latency", "mpe"],
+        "Arp" => vec!["pattern", "rate", "octaves", "gate", "swing", "repeats", "chance", "interval", "latch", "sync"],
+        "Chord" => vec!["chord"],
+        "Transpose" => vec!["semis"],
+        "Velocity" => vec!["curve", "level", "min", "max"],
         _ => FxKind::parse(ty).map_or_else(Vec::new, |k| k.params().iter().map(|(name, ..)| *name).collect()),
     }
 }

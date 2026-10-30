@@ -17,6 +17,7 @@
 
 pub mod anchor;
 pub mod edit;
+pub mod number;
 pub mod site;
 
 pub use anchor::{Anchor, DragPointer, Grip};

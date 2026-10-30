@@ -1,6 +1,6 @@
 //! Editable object hierarchy and attachments. Punctual lights are real scene
 //! emitters; surface emissiveness is authored separately in the material domain.
-use crate::{canon::{Reader,Writer},document::State,json::{self,Value},mesh, schema::*,service::*,
+use crate::{canon::{Reader,Writer},document::State,json::{self,Value},mesh, schema::*,
     transform::*,Error,Limits,OperationResult,Result,MeshEditingOperation};
 use std::collections::{BTreeMap,BTreeSet};
 use std::sync::Arc;
@@ -67,7 +67,7 @@ pub enum SceneOperation {
 }
 impl SceneState {
     pub fn is_empty(&self)->bool {self==&Self::default()}
-    pub fn memory_bytes(&self)->usize {self.value().to_json().len().saturating_mul(3)}
+    pub fn memory_bytes(&self)->usize {let mut w=Writer::new(usize::MAX);if self.write(&mut w).is_err(){usize::MAX}else{w.bytes.len().saturating_mul(3)}}
     pub(crate) fn validate(&self,state:&State,limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<()> {
         if self.nodes.len()>limits.max_objects||self.emitters.len()>32||self.sockets.len()>128||self.lods.len()>limits.max_objects||self.colliders.len()>limits.max_objects||self.modifiers.len()>limits.max_objects||self.modifiers.values().map(Vec::len).sum::<usize>()>128 {
             return Err(Error::Budget("scene attachments"));
@@ -269,30 +269,138 @@ impl SceneState {
 #[cfg(test)]
 mod modifier_tests {
     use super::*;
-    use crate::{Document,Operation,Transaction};
-    fn apply(doc:&mut Document,id:&str,json:&str)->crate::Applied{let operations=parse_operations(&json::parse(json.as_bytes()).unwrap(),doc.limits()).unwrap();doc.apply(Transaction{request_id:id.into(),expected:doc.head(),operations},None).unwrap()}
+    use crate::{Document,Operation,Transaction,Action};
+    fn apply(doc:&mut Document,id:&str,operations:Vec<Operation>)->crate::Applied{doc.apply(Transaction{request_id:id.into(),expected:doc.head(),operations},None).unwrap()}
     fn maximum_x(mesh:&mesh::Mesh)->f64{mesh.vertices().iter().map(|v|v.position[0]).fold(f64::NEG_INFINITY,f64::max)}
     #[test]
     fn ordered_modifiers_preserve_base_roundtrip_and_bake_once(){
-        let mut doc=Document::new(Limits::default()).unwrap();apply(&mut doc,"cube",r#"[{"op":"cube","object":"body","size":[2,2,2]}]"#);
-        apply(&mut doc,"stack",r#"[{"op":"modifier","object":"body","name":"copies","operation":{"op":"array","count":2,"offset":[3,0,0]}},{"op":"modifier","object":"body","name":"scale","operation":{"op":"taper","vertices":[],"axis":1,"range":[-1,1],"scales":[2,2]}}]"#);
+        let mut doc=Document::new(Limits::default()).unwrap();apply(&mut doc,"cube",vec![
+        Operation::Cube { object: "body".into(), size: [2.0, 2.0, 2.0] },
+    ]);
+        apply(&mut doc,"stack",vec![
+        Operation::Scene(SceneOperation::Modifier {
+            object: "body".into(),
+            modifier: NamedModifier {
+                name: "copies".into(),
+                enabled: true,
+                operation: MeshEditingOperation {
+                    object: "body".into(),
+                    action: Action::Array { count: 2, offset: [3.0, 0.0, 0.0] }
+                }
+            }
+        }),
+        Operation::Scene(SceneOperation::Modifier {
+            object: "body".into(),
+            modifier: NamedModifier {
+                name: "scale".into(),
+                enabled: true,
+                operation: MeshEditingOperation {
+                    object: "body".into(),
+                    action: Action::Deform {
+                        vertices: vec![],
+                        deformation: mesh::Deformation::Taper { axis: 1, range: [-1.0, 1.0], scales: [2.0, 2.0] }
+                    }
+                }
+            }
+        }),
+    ]);
         assert_eq!(doc.object("body").unwrap().vertices().len(),8);let mut ctx=mesh::Context::default();let evaluated=doc.scene().local_mesh(&doc.state,"body",&mut ctx).unwrap();assert_eq!(evaluated.vertices().len(),16);assert_eq!(maximum_x(&evaluated),8.);
         let bytes=doc.to_bytes(None).unwrap();let restored=Document::from_bytes(&bytes,Limits::default(),None).unwrap();assert_eq!(restored.scene().local_mesh(&restored.state,"body",&mut ctx).unwrap(),evaluated);
-        apply(&mut doc,"order",r#"[{"op":"modifier_order","object":"body","names":["scale","copies"]}]"#);let evaluated=doc.scene().local_mesh(&doc.state,"body",&mut ctx).unwrap();assert_eq!(maximum_x(&evaluated),5.);
-        apply(&mut doc,"bake",r#"[{"op":"apply_modifiers","object":"body"}]"#);assert!(doc.scene().modifiers.is_empty());assert_eq!(doc.object("body").unwrap(),&evaluated);assert_eq!(doc.scene().local_mesh(&doc.state,"body",&mut ctx).unwrap(),evaluated);
+        apply(&mut doc,"order",vec![
+        Operation::Scene(SceneOperation::ModifierOrder { object: "body".into(), names: vec!["scale".into(), "copies".into()] }),
+    ]);let evaluated=doc.scene().local_mesh(&doc.state,"body",&mut ctx).unwrap();assert_eq!(maximum_x(&evaluated),5.);
+        apply(&mut doc,"bake",vec![
+        Operation::Scene(SceneOperation::ApplyModifiers { object: "body".into() }),
+    ]);assert!(doc.scene().modifiers.is_empty());assert_eq!(doc.object("body").unwrap(),&evaluated);assert_eq!(doc.scene().local_mesh(&doc.state,"body",&mut ctx).unwrap(),evaluated);
     }
     #[test]
     fn instance_cache_shares_evaluation_and_dependency_cycles_roll_back(){
-        let mut doc=Document::new(Limits::default()).unwrap();apply(&mut doc,"seed",r#"[{"op":"cube","object":"a","size":[2,2,2]},{"op":"instance","object":"b","source":"a"},{"op":"modifier","object":"a","name":"copies","operation":{"op":"array","count":2,"offset":[3,0,0]}}]"#);
+        let mut doc=Document::new(Limits::default()).unwrap();apply(&mut doc,"seed",vec![
+        Operation::Cube { object: "a".into(), size: [2.0, 2.0, 2.0] },
+        Operation::Scene(SceneOperation::Instance { object: "b".into(), source: "a".into(), transform: Transform::default() }),
+        Operation::Scene(SceneOperation::Modifier {
+            object: "a".into(),
+            modifier: NamedModifier {
+                name: "copies".into(),
+                enabled: true,
+                operation: MeshEditingOperation {
+                    object: "a".into(),
+                    action: Action::Array { count: 2, offset: [3.0, 0.0, 0.0] }
+                }
+            }
+        }),
+    ]);
         let cache=doc.scene().evaluated_meshes(&doc.state,&mut mesh::Context::default()).unwrap();assert!(Arc::ptr_eq(&cache["a"],&cache["b"]));assert_eq!(cache["b"].vertices().len(),16);
-        let before=doc.to_bytes(None).unwrap();let ops=parse_operations(&json::parse(br#"[{"op":"modifier","object":"a","name":"wrap","operation":{"op":"shrinkwrap","vertices":[],"reference":"b","max_distance":10,"offset":0}}]"#).unwrap(),doc.limits()).unwrap();
+        let before=doc.to_bytes(None).unwrap();let ops=vec![
+        Operation::Scene(SceneOperation::Modifier {
+            object: "a".into(),
+            modifier: NamedModifier {
+                name: "wrap".into(),
+                enabled: true,
+                operation: MeshEditingOperation {
+                    object: "a".into(),
+                    action: Action::Shrinkwrap {
+                        vertices: vec![],
+                        reference: "b".into(),
+                        max_distance: 10.0,
+                        offset: 0.0
+                    }
+                }
+            }
+        }),
+    ];
         assert!(doc.apply(Transaction{request_id:"cycle".into(),expected:doc.head(),operations:ops},None).is_err());assert_eq!(doc.to_bytes(None).unwrap(),before);
-        apply(&mut doc,"unique",r#"[{"op":"make_unique","object":"b"}]"#);assert_eq!(doc.object("b").unwrap().vertices().len(),16);assert!(doc.scene().nodes["b"].linked_to.is_none());
+        apply(&mut doc,"unique",vec![
+        Operation::Scene(SceneOperation::MakeUnique { object: "b".into() }),
+    ]);assert_eq!(doc.object("b").unwrap().vertices().len(),16);assert!(doc.scene().nodes["b"].linked_to.is_none());
     }
     #[test]
     fn shrinkwrap_modifier_projects_between_object_coordinate_spaces(){
         let mut doc=Document::new(Limits::default()).unwrap();
-        apply(&mut doc,"seed",r#"[{"op":"plane","object":"cage","size":[2,2]},{"op":"plane","object":"reference","size":[8,8]},{"op":"object_node","object":"cage","node":{"transform":{"translation":[0,3,0],"rotation":[0,0,0,1],"scale":[1,2,1]}}},{"op":"object_node","object":"reference","node":{"transform":{"translation":[0,1,0],"rotation":[0,0,0,1],"scale":[1,1,1]}}},{"op":"modifier","object":"cage","name":"wrap","operation":{"op":"shrinkwrap","vertices":[],"reference":"reference","max_distance":2,"offset":0}}]"#);
+        apply(&mut doc,"seed",vec![
+        Operation::Plane { object: "cage".into(), size: [2.0, 2.0] },
+        Operation::Plane { object: "reference".into(), size: [8.0, 8.0] },
+        Operation::Scene(SceneOperation::Node {
+            object: "cage".into(),
+            node: SceneNode {
+                parent: None,
+                linked_to: None,
+                transform: Transform {
+                    translation: [0.0, 3.0, 0.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0, 2.0, 1.0]
+                }
+            }
+        }),
+        Operation::Scene(SceneOperation::Node {
+            object: "reference".into(),
+            node: SceneNode {
+                parent: None,
+                linked_to: None,
+                transform: Transform {
+                    translation: [0.0, 1.0, 0.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0, 1.0, 1.0]
+                }
+            }
+        }),
+        Operation::Scene(SceneOperation::Modifier {
+            object: "cage".into(),
+            modifier: NamedModifier {
+                name: "wrap".into(),
+                enabled: true,
+                operation: MeshEditingOperation {
+                    object: "cage".into(),
+                    action: Action::Shrinkwrap {
+                        vertices: vec![],
+                        reference: "reference".into(),
+                        max_distance: 2.0,
+                        offset: 0.0
+                    }
+                }
+            }
+        }),
+    ]);
         let mesh=doc.scene().local_mesh(&doc.state,"cage",&mut mesh::Context::default()).unwrap();
         assert!(mesh.vertices().iter().all(|v|(v.position[1]+1.).abs()<1e-12));
         assert!(doc.object("cage").unwrap().vertices().iter().all(|v|v.position[1]==0.));
@@ -303,7 +411,9 @@ mod modifier_tests {
         let mut ctx=mesh::Context::default();let mut source=mesh::Mesh::cube([2.;3],&mut ctx).unwrap();source.recalculate_normals(false,0.,&mut ctx).unwrap();let face=source.faces()[0].id;let cs=source.face_corners(face).unwrap();let pin=cs[0].id;let edge=mesh::EdgeKey::new(cs[0].vertex,cs[1].vertex);
         source.pin_uv(&[pin],true,&mut ctx).unwrap();source.set_edge_attributes(edge,mesh::EdgeAttributes{seam:true,crease:0.5},&mut ctx).unwrap();
         let mut doc=Document::new(Limits::default()).unwrap();doc.apply(Transaction{request_id:"source".into(),expected:doc.head(),operations:vec![Operation::ImportMesh{object:"a".into(),source:source.to_bytes(&mut ctx).unwrap()}]},None).unwrap();
-        apply(&mut doc,"join",r#"[{"op":"join","object":"joined","sources":["a"]}]"#);let joined=doc.object("joined").unwrap();assert_eq!(joined.uv_pins().len(),1);assert_eq!(joined.edge_attributes().values().next().unwrap().attributes,mesh::EdgeAttributes{seam:true,crease:0.5});assert!(joined.corners().iter().all(|c|c.normal.is_some()));
+        apply(&mut doc,"join",vec![
+        Operation::Scene(SceneOperation::Join { object: "joined".into(), sources: vec!["a".into()] }),
+    ]);let joined=doc.object("joined").unwrap();assert_eq!(joined.uv_pins().len(),1);assert_eq!(joined.edge_attributes().values().next().unwrap().attributes,mesh::EdgeAttributes{seam:true,crease:0.5});assert!(joined.corners().iter().all(|c|c.normal.is_some()));
         let op=SceneOperation::Separate{object:"a".into(),name:"cap".into(),faces:vec![face]};doc.apply(Transaction{request_id:"separate".into(),expected:doc.head(),operations:vec![Operation::Scene(op)]},None).unwrap();
         let cap=doc.object("cap").unwrap();assert_eq!(cap.faces()[0].id,face);assert!(cap.uv_pins().contains(&pin));assert_eq!(cap.edge_attributes()[&edge].attributes,mesh::EdgeAttributes{seam:true,crease:0.5});assert!(cap.corners().iter().all(|c|c.normal.is_some()));assert_eq!(cap.vertices().len(),4);
         let bytes=doc.to_bytes(None).unwrap();assert_eq!(Document::from_bytes(&bytes,Limits::default(),None).unwrap().object("cap"),Some(cap));
@@ -317,60 +427,32 @@ fn cache_bytes(cache:&BTreeMap<String,Arc<mesh::Mesh>>)->usize{let mut seen=BTre
 
 fn attachment_value(a:&Attachment)->Value {match a {Attachment::Root=>Value::Null,
     Attachment::Object(n)=>json::obj(vec![("object",json::s(n))]),Attachment::Joint(j)=>json::obj(vec![("joint",Value::Int(*j as i64))])}}
-fn parse_attachment(v:&Value)->Result<Attachment>{if v.is_null(){return Ok(Attachment::Root);}fields(v,&["object","joint"])?;
-    match (v.get("object"),v.get("joint")){(Some(o),None)=>Ok(Attachment::Object(o.as_str().ok_or(Error::Invalid("attachment object"))?.into())),
-        (None,Some(j))=>Ok(Attachment::Joint(integer(j)?)),_=>Err(Error::Invalid("attachment requires exactly one target"))}}
-fn optional_name(v:Option<&Value>)->Result<Option<String>> {match v {None|Some(Value::Null)=>Ok(None),Some(Value::Str(s))=>Ok(Some(s.clone())),_=>Err(Error::Invalid("optional name"))}}
 fn node_value(n:&SceneNode)->Value {json::obj(vec![("parent",n.parent.as_ref().map(json::s).unwrap_or(Value::Null)),
     ("linked_to",n.linked_to.as_ref().map(json::s).unwrap_or(Value::Null)),("transform",transform_value(&n.transform))])}
-fn parse_node(v:&Value)->Result<SceneNode>{fields(v,&["parent","linked_to","transform"])?;Ok(SceneNode{parent:optional_name(v.get("parent"))?,
-    linked_to:optional_name(v.get("linked_to"))?,transform:v.get("transform").map(transform).transpose()?.unwrap_or_default()})}
 impl SceneOperation {
     pub fn object_name(&self)->Option<&str>{match self {Self::Node{object,..}|Self::Instance{object,..}|Self::Duplicate{object,..}
         |Self::MakeUnique{object}|Self::Join{object,..}|Self::Separate{object,..}|Self::Pivot{object,..}|Self::Snap{object,..}|Self::Dimensions{object,..}
         |Self::Lods{object,..}|Self::Collider{object,..}|Self::Modifier{object,..}|Self::RemoveModifier{object,..}|Self::ModifierOrder{object,..}|Self::ApplyModifiers{object}
         |Self::VehicleWheel{object,..}|Self::DeleteVehicleWheel{object}=>Some(object),_=>None}}
-    pub fn memory_bytes(&self)->usize {self.value().to_json().len().saturating_mul(3)}
-    pub fn parse(v:&Value,limits:&Limits)->Result<Option<Self>> {
-        let op=text(v,"op")?;
-        let value=match op {
-            "modifier"=>{fields(v,&["op","object","name","enabled","operation"])?;let object=text(v,"object")?.to_owned();let mut inner=need(v,"operation")?.clone();
-                let Value::Obj(fields)=&mut inner else{return Err(Error::Invalid("modifier operation must be an object"));};
-                if !fields.iter().any(|(key,_)|key=="object"){fields.push(("object".into(),json::s(&object)));}
-                let operation=MeshEditingOperation::parse(&inner,limits)?.ok_or(Error::Invalid("unsupported modifier operation"))?;
-                if operation.object_name()!=object||!operation.is_modifier_safe(){return Err(Error::Invalid("modifier requires its own object and no fixed element selections"));}
-                let enabled=v.get("enabled").map(|v|v.as_bool().ok_or(Error::Invalid("modifier enabled must be boolean"))).transpose()?.unwrap_or(true);
-                let modifier=NamedModifier{name:text(v,"name")?.into(),enabled,operation};name(&modifier.name,limits)?;Self::Modifier{object,modifier}}
-            "remove_modifier"=>{fields(v,&["op","object","name"])?;Self::RemoveModifier{object:text(v,"object")?.into(),name:text(v,"name")?.into()}}
-            "modifier_order"=>{fields(v,&["op","object","names"])?;Self::ModifierOrder{object:text(v,"object")?.into(),names:rows(need(v,"names")?,16)?.iter().map(|v|v.as_str().map(String::from).ok_or(Error::Invalid("modifier name"))).collect::<Result<_>>()?}}
-            "apply_modifiers"=>{fields(v,&["op","object"])?;Self::ApplyModifiers{object:text(v,"object")?.into()}}
-            "object_node"=>{fields(v,&["op","object","node"])?;Self::Node{object:text(v,"object")?.into(),node:parse_node(need(v,"node")?)?}}
-            "instance"=>{fields(v,&["op","object","source","transform"])?;Self::Instance{object:text(v,"object")?.into(),source:text(v,"source")?.into(),transform:v.get("transform").map(transform).transpose()?.unwrap_or_default()}}
-            "duplicate"=>{fields(v,&["op","object","source"])?;Self::Duplicate{object:text(v,"object")?.into(),source:text(v,"source")?.into()}}
-            "make_unique"=>{fields(v,&["op","object"])?;Self::MakeUnique{object:text(v,"object")?.into()}}
-            "join"=>{fields(v,&["op","object","sources"])?;Self::Join{object:text(v,"object")?.into(),sources:rows(need(v,"sources")?,limits.max_objects)?.iter().map(|v|v.as_str().map(String::from).ok_or(Error::Invalid("join source"))).collect::<Result<_>>()?}}
-            "separate"=>{fields(v,&["op","object","name","faces"])?;Self::Separate{object:text(v,"object")?.into(),name:text(v,"name")?.into(),faces:selections(need(v,"faces")?,limits.mesh.max_faces)?.into_iter().map(mesh::FaceId).collect()}}
-            "pivot"=>{fields(v,&["op","object","position"])?;Self::Pivot{object:text(v,"object")?.into(),position:array(need(v,"position")?)?}}
-            "snap"=>{fields(v,&["op","object","grid"])?;Self::Snap{object:text(v,"object")?.into(),grid:float(need(v,"grid")?)?}}
-            "dimensions"=>{fields(v,&["op","object","size"])?;Self::Dimensions{object:text(v,"object")?.into(),size:array(need(v,"size")?)?}}
-            "light"=>{
-                fields(v,&["op","name","attachment","transform","kind","color","intensity","range","inner","outer"])?;
-                let kind=match text(v,"kind")? {"point"=>{if v.get("inner").is_some()||v.get("outer").is_some(){return Err(Error::Invalid("point light has no cone"));}LightKind::Point},
-                    "spot"=>LightKind::Spot{inner:float(need(v,"inner")?)?,outer:float(need(v,"outer")?)?},_=>return Err(Error::Invalid("light kind must be point or spot"))};
-                Self::Light(LightEmitter{name:text(v,"name")?.into(),attachment:parse_attachment(need(v,"attachment")?)?,transform:v.get("transform").map(transform).transpose()?.unwrap_or_default(),
-                    kind,color:array(need(v,"color")?)?,intensity:float(need(v,"intensity")?)?,range:float(need(v,"range")?)?})
-            }
-            "delete_light"=>{fields(v,&["op","name"])?;Self::DeleteLight{name:text(v,"name")?.into()}}
-            "socket"=>{fields(v,&["op","name","attachment","transform"])?;Self::Socket(Socket{name:text(v,"name")?.into(),attachment:parse_attachment(need(v,"attachment")?)?,transform:transform(need(v,"transform")?)?})}
-            "delete_socket"=>{fields(v,&["op","name"])?;Self::DeleteSocket{name:text(v,"name")?.into()}}
-            "vehicle_wheel"=>{fields(v,&["op","object","connection","pivot","radius","width","visual"])?;Self::VehicleWheel{object:text(v,"object")?.into(),wheel:VehicleWheel{connection:text(v,"connection")?.into(),pivot:array(need(v,"pivot")?)?,radius:float(need(v,"radius")?)?,width:float(need(v,"width")?)?,visual:v.get("visual").map(parse_visual_wheel).transpose()?}}}
-            "delete_vehicle_wheel"=>{fields(v,&["op","object"])?;Self::DeleteVehicleWheel{object:text(v,"object")?.into()}}
-            "lods"=>{fields(v,&["op","object","levels"])?;Self::Lods{object:text(v,"object")?.into(),levels:rows(need(v,"levels")?,4)?.iter().map(|v|{
-                fields(v,&["target_faces","max_error","distance"])?;Ok(LodLevel{target_faces:integer(need(v,"target_faces")?)? as usize,max_error:float(need(v,"max_error")?)?,distance:float(need(v,"distance")?)?})}).collect::<Result<_>>()?}}
-            "collider"=>{fields(v,&["op","object","kind","source"])?;let proxy=match text(v,"kind")?{"box"=>CollisionProxy::Box,"sphere"=>CollisionProxy::Sphere,"hull"=>CollisionProxy::Hull,"capsule"=>CollisionProxy::Capsule,
-                "mesh"=>CollisionProxy::Mesh{object:text(v,"source")?.into()},_=>return Err(Error::Invalid("collider kind"))};Self::Collider{object:text(v,"object")?.into(),proxy}}
-            _=>return Ok(None),
-        };if let Some(object)=value.object_name(){name(object,limits)?;}Ok(Some(value))
+    pub fn memory_bytes(&self)->usize {let mut w=Writer::new(usize::MAX);if self.write(&mut w).is_err(){usize::MAX}else{w.bytes.len().saturating_mul(3)}}
+    pub fn check(&self,limits:&Limits)->Result<()> {
+        match self {
+            Self::Node{node,..}=>node.transform.validate()?,
+            Self::Instance{transform,..}=>transform.validate()?,
+            Self::Join{sources,..}=>check_count(sources.len(),limits.max_objects)?,
+            Self::Separate{faces,..}=>if faces.len()>limits.mesh.max_faces{return Err(Error::Budget("selection size"));},
+            Self::Snap{grid,..}=>finite(&[*grid])?,
+            Self::Pivot{position,..}=>finite(position)?,
+            Self::Dimensions{size,..}=>finite(size)?,
+            Self::Light(light)=>check_light(light)?,
+            Self::Socket(socket)=>socket.transform.validate()?,
+            Self::Lods{levels,..}=>check_lods(levels)?,
+            Self::Modifier{object,modifier}=>check_modifier(object,modifier,limits)?,
+            Self::ModifierOrder{names,..}=>check_count(names.len(),16)?,
+            Self::VehicleWheel{wheel,..}=>check_wheel(wheel)?,
+            _=>{}
+        }
+        if let Some(object)=self.object_name(){name(object,limits)?;}Ok(())
     }
     pub fn value(&self)->Value {
         let mut f=match self {
@@ -406,33 +488,258 @@ impl SceneOperation {
         json::obj(f)
     }
 }
-fn parse_visual_wheel(v:&Value)->Result<VisualWheelMotion>{
-    fields(v,&["steer_gain","steer_max","compression","droop"])?;
-    Ok(VisualWheelMotion{steer_gain:float(need(v,"steer_gain")?)?,steer_max:float(need(v,"steer_max")?)?,
-        compression:float(need(v,"compression")?)?,droop:float(need(v,"droop")?)?})
-}
 impl SceneState {
-    pub fn value(&self)->Value {Value::Arr(self.nodes.iter().map(|(object,node)|SceneOperation::Node{object:object.clone(),node:node.clone()}.value())
-        .chain(self.emitters.values().cloned().map(|l|SceneOperation::Light(l).value()))
-        .chain(self.sockets.values().cloned().map(|s|SceneOperation::Socket(s).value()))
-        .chain(self.wheels.iter().map(|(object,wheel)|SceneOperation::VehicleWheel{object:object.clone(),wheel:wheel.clone()}.value()))
-        .chain(self.lods.iter().map(|(object,levels)|SceneOperation::Lods{object:object.clone(),levels:levels.clone()}.value()))
-        .chain(self.colliders.iter().map(|(object,proxy)|SceneOperation::Collider{object:object.clone(),proxy:proxy.clone()}.value()))
-        .chain(self.modifiers.iter().flat_map(|(object,stack)|stack.iter().map(move |modifier|SceneOperation::Modifier{object:object.clone(),modifier:modifier.clone()}.value()))).collect())}
-    pub(crate) fn write(&self,w:&mut Writer)->Result<()> {write_value(w,self.value())}
+    pub fn check(&self,limits:&Limits)->Result<()> {
+        if self.nodes.len()>limits.max_objects||self.emitters.len()>32||self.sockets.len()>128||self.lods.len()>limits.max_objects||self.colliders.len()>limits.max_objects||self.modifiers.len()>limits.max_objects||self.modifiers.values().map(Vec::len).sum::<usize>()>128 {
+            return Err(Error::Budget("scene attachments"));
+        }
+        if self.wheels.len()>4+MAX_DRIVEN_PARTS{return Err(Error::Budget("driven part bindings"));}
+        for (object,node) in &self.nodes{name(object,limits)?;node.transform.validate()?;}
+        for light in self.emitters.values(){check_light(light)?;}
+        for socket in self.sockets.values(){socket.transform.validate()?;}
+        for (object,levels) in &self.lods{name(object,limits)?;check_lods(levels)?;}
+        for object in self.colliders.keys(){name(object,limits)?;}
+        for (object,stack) in &self.modifiers{
+            name(object,limits)?;if stack.is_empty()||stack.len()>16{return Err(Error::Budget("object modifier count"));}
+            let mut seen=BTreeSet::new();for m in stack{check_modifier(object,m,limits)?;if !seen.insert(&m.name){return Err(Error::Corrupt("duplicate scene entry"));}}
+        }
+        for (object,wheel) in &self.wheels{name(object,limits)?;check_wheel(wheel)?;}
+        Ok(())
+    }
+    pub(crate) fn write(&self,w:&mut Writer)->Result<()> {
+        write_map(w,&self.nodes,write_node)?;
+        write_map(w,&self.emitters,write_light)?;
+        write_map(w,&self.sockets,write_socket)?;
+        write_map(w,&self.lods,|w,levels|write_lods(w,levels))?;
+        write_map(w,&self.colliders,write_proxy)?;
+        write_map(w,&self.modifiers,|w,stack|{w.count(stack.len())?;for m in stack{write_modifier(w,m)?;}Ok(())})?;
+        write_map(w,&self.wheels,write_wheel)
+    }
     pub(crate) fn read(r:&mut Reader,limits:&Limits)->Result<Self>{
-        let value=read_value(r,limits)?;let mut state=Self::default();
-        for row in rows(&value,limits.max_objects.saturating_mul(3)+292)? {
-            let duplicate=match SceneOperation::parse(row,limits)?.ok_or(Error::Corrupt("scene operation"))? {
-                SceneOperation::Node{object,node}=>state.nodes.insert(object,node).is_some(),
-                SceneOperation::Light(l)=>state.emitters.insert(l.name.clone(),l).is_some(),
-                SceneOperation::Socket(s)=>state.sockets.insert(s.name.clone(),s).is_some(),
-                SceneOperation::VehicleWheel{object,wheel}=>state.wheels.insert(object,wheel).is_some(),
-                SceneOperation::Lods{object,levels}=>state.lods.insert(object,levels).is_some(),
-                SceneOperation::Collider{object,proxy}=>state.colliders.insert(object,proxy).is_some(),
-                SceneOperation::Modifier{object,modifier}=>{let stack=state.modifiers.entry(object).or_default();if stack.iter().any(|m|m.name==modifier.name){true}else{stack.push(modifier);false}},
-                _=>return Err(Error::Corrupt("non-state scene operation")),
-            };if duplicate{return Err(Error::Corrupt("duplicate scene entry"));}
-        }Ok(state)
+        let value=Self{
+            nodes:read_map(r,limits.max_objects,limits.max_name_bytes,|r|read_node(r,limits))?,
+            emitters:read_map(r,32,limits.max_source_bytes,|r|read_light(r,limits))?,
+            sockets:read_map(r,128,limits.max_source_bytes,|r|read_socket(r,limits))?,
+            lods:read_map(r,limits.max_objects,limits.max_name_bytes,read_lods)?,
+            colliders:read_map(r,limits.max_objects,limits.max_name_bytes,|r|read_proxy(r,limits))?,
+            modifiers:read_map(r,limits.max_objects,limits.max_name_bytes,|r|{let mut stack=Vec::new();for _ in 0..r.count(16)?{stack.push(read_modifier(r,limits)?);}Ok(stack)})?,
+            wheels:read_map(r,4+MAX_DRIVEN_PARTS,limits.max_name_bytes,|r|read_wheel(r,limits))?,
+        };value.check(limits)?;Ok(value)
+    }
+}
+
+fn finite(v:&[f64])->Result<()>{if v.iter().any(|v|!v.is_finite()){Err(Error::Invalid("expected finite number"))}else{Ok(())}}
+fn check_count(n:usize,max:usize)->Result<()>{if n>max{Err(Error::Budget("authoring array"))}else{Ok(())}}
+fn check_light(light:&LightEmitter)->Result<()>{
+    light.transform.validate()?;finite(&light.color)?;finite(&[light.intensity,light.range])?;
+    if let LightKind::Spot{inner,outer}=light.kind{finite(&[inner,outer])?;}Ok(())
+}
+fn check_lods(levels:&[LodLevel])->Result<()>{check_count(levels.len(),4)?;for l in levels{
+    if l.target_faces>u32::MAX as usize{return Err(Error::Invalid("expected u32 integer"));}finite(&[l.max_error,l.distance])?;
+}Ok(())}
+fn check_modifier(object:&str,m:&NamedModifier,limits:&Limits)->Result<()>{
+    m.operation.check(limits)?;
+    if m.operation.object_name()!=object||!m.operation.is_modifier_safe(){return Err(Error::Invalid("modifier requires its own object and no fixed element selections"));}
+    name(&m.name,limits)
+}
+fn check_wheel(wheel:&VehicleWheel)->Result<()>{finite(&wheel.pivot)?;finite(&[wheel.radius,wheel.width])?;
+    if let Some(v)=wheel.visual{finite(&[v.steer_gain,v.steer_max,v.compression,v.droop])?;}Ok(())}
+fn write_array(w:&mut Writer,a:&[f64])->Result<()>{for v in a{w.f64(*v)?;}Ok(())}
+fn read_array<const N:usize>(r:&mut Reader)->Result<[f64;N]>{let mut a=[0.;N];for v in &mut a{*v=r.f64()?;}Ok(a)}
+fn write_transform(w:&mut Writer,t:&Transform)->Result<()>{write_array(w,&t.translation)?;write_array(w,&t.rotation)?;write_array(w,&t.scale)}
+fn read_transform(r:&mut Reader)->Result<Transform>{Ok(Transform{translation:read_array(r)?,rotation:read_array(r)?,scale:read_array(r)?})}
+fn flag(r:&mut Reader)->Result<bool>{match r.u8()?{0=>Ok(false),1=>Ok(true),_=>Err(Error::Corrupt("scene boolean"))}}
+fn write_optional(w:&mut Writer,s:&Option<String>)->Result<()>{w.u8(s.is_some() as u8)?;if let Some(s)=s{w.string(s)?;}Ok(())}
+fn read_optional(r:&mut Reader,l:&Limits)->Result<Option<String>>{Ok(if flag(r)?{Some(r.string(l.max_source_bytes)?)}else{None})}
+fn write_node(w:&mut Writer,n:&SceneNode)->Result<()>{write_optional(w,&n.parent)?;write_optional(w,&n.linked_to)?;write_transform(w,&n.transform)}
+fn read_node(r:&mut Reader,l:&Limits)->Result<SceneNode>{Ok(SceneNode{parent:read_optional(r,l)?,linked_to:read_optional(r,l)?,transform:read_transform(r)?})}
+fn write_attachment(w:&mut Writer,a:&Attachment)->Result<()>{match a{
+    Attachment::Root=>w.u8(0),Attachment::Object(n)=>{w.u8(1)?;w.string(n)},Attachment::Joint(j)=>{w.u8(2)?;w.u32(*j)}
+}}
+fn read_attachment(r:&mut Reader,l:&Limits)->Result<Attachment>{Ok(match r.u8()?{
+    0=>Attachment::Root,1=>Attachment::Object(r.string(l.max_source_bytes)?),2=>Attachment::Joint(r.u32()?),_=>return Err(Error::Corrupt("scene attachment tag")),
+})}
+fn write_light(w:&mut Writer,l:&LightEmitter)->Result<()>{
+    w.string(&l.name)?;write_attachment(w,&l.attachment)?;write_transform(w,&l.transform)?;
+    match l.kind{LightKind::Point=>w.u8(0)?,LightKind::Spot{inner,outer}=>{w.u8(1)?;w.f64(inner)?;w.f64(outer)?;}}
+    write_array(w,&l.color)?;w.f64(l.intensity)?;w.f64(l.range)
+}
+fn read_light(r:&mut Reader,l:&Limits)->Result<LightEmitter>{Ok(LightEmitter{
+    name:r.string(l.max_source_bytes)?,attachment:read_attachment(r,l)?,transform:read_transform(r)?,
+    kind:match r.u8()?{0=>LightKind::Point,1=>LightKind::Spot{inner:r.f64()?,outer:r.f64()?},_=>return Err(Error::Corrupt("light kind tag"))},
+    color:read_array(r)?,intensity:r.f64()?,range:r.f64()?,
+})}
+fn write_socket(w:&mut Writer,s:&Socket)->Result<()>{w.string(&s.name)?;write_attachment(w,&s.attachment)?;write_transform(w,&s.transform)}
+fn read_socket(r:&mut Reader,l:&Limits)->Result<Socket>{Ok(Socket{name:r.string(l.max_source_bytes)?,attachment:read_attachment(r,l)?,transform:read_transform(r)?})}
+fn write_lods(w:&mut Writer,levels:&[LodLevel])->Result<()>{w.count(levels.len())?;for l in levels{w.count(l.target_faces)?;w.f64(l.max_error)?;w.f64(l.distance)?;}Ok(())}
+fn read_lods(r:&mut Reader)->Result<Vec<LodLevel>>{let mut levels=Vec::new();for _ in 0..r.count(4)?{levels.push(LodLevel{target_faces:r.u32()? as usize,max_error:r.f64()?,distance:r.f64()?});}Ok(levels)}
+fn write_proxy(w:&mut Writer,p:&CollisionProxy)->Result<()>{match p{
+    CollisionProxy::Box=>w.u8(0),CollisionProxy::Sphere=>w.u8(1),CollisionProxy::Mesh{object}=>{w.u8(2)?;w.string(object)},CollisionProxy::Hull=>w.u8(3),CollisionProxy::Capsule=>w.u8(4),
+}}
+fn read_proxy(r:&mut Reader,l:&Limits)->Result<CollisionProxy>{Ok(match r.u8()?{
+    0=>CollisionProxy::Box,1=>CollisionProxy::Sphere,2=>CollisionProxy::Mesh{object:r.string(l.max_source_bytes)?},3=>CollisionProxy::Hull,4=>CollisionProxy::Capsule,_=>return Err(Error::Corrupt("collision proxy tag")),
+})}
+fn write_modifier(w:&mut Writer,m:&NamedModifier)->Result<()>{w.string(&m.name)?;w.u8(m.enabled as u8)?;m.operation.write(w)}
+fn read_modifier(r:&mut Reader,l:&Limits)->Result<NamedModifier>{Ok(NamedModifier{name:r.string(l.max_name_bytes)?,enabled:flag(r)?,operation:MeshEditingOperation::read(r,l)?})}
+fn write_wheel(w:&mut Writer,v:&VehicleWheel)->Result<()>{
+    w.string(&v.connection)?;write_array(w,&v.pivot)?;w.f64(v.radius)?;w.f64(v.width)?;w.u8(v.visual.is_some() as u8)?;
+    if let Some(v)=v.visual{write_array(w,&[v.steer_gain,v.steer_max,v.compression,v.droop])?;}Ok(())
+}
+fn read_wheel(r:&mut Reader,l:&Limits)->Result<VehicleWheel>{Ok(VehicleWheel{
+    connection:r.string(l.max_source_bytes)?,pivot:read_array(r)?,radius:r.f64()?,width:r.f64()?,
+    visual:if flag(r)?{Some(VisualWheelMotion{steer_gain:r.f64()?,steer_max:r.f64()?,compression:r.f64()?,droop:r.f64()?})}else{None},
+})}
+fn write_map<T>(w:&mut Writer,map:&BTreeMap<String,T>,mut item:impl FnMut(&mut Writer,&T)->Result<()>)->Result<()>{
+    w.count(map.len())?;for (key,value) in map{w.string(key)?;item(w,value)?;}Ok(())
+}
+fn read_map<T>(r:&mut Reader,max:usize,max_name:usize,mut item:impl FnMut(&mut Reader)->Result<T>)->Result<BTreeMap<String,T>>{
+    let mut map=BTreeMap::new();for _ in 0..r.count(max)?{let key=r.string(max_name)?;
+        if map.last_key_value().is_some_and(|(last,_)|last>=&key){return Err(Error::Corrupt("scene map order"));}map.insert(key,item(r)?);
+    }Ok(map)
+}
+impl SceneOperation {
+    pub(crate) fn write(&self,w:&mut Writer)->Result<()> {
+        match self{
+            Self::Node{object,node}=>{w.u8(0)?;w.string(object)?;write_node(w,node)?;}
+            Self::Instance{object,source,transform}=>{w.u8(1)?;w.string(object)?;w.string(source)?;write_transform(w,transform)?;}
+            Self::Duplicate{object,source}=>{w.u8(2)?;w.string(object)?;w.string(source)?;}
+            Self::MakeUnique{object}=>{w.u8(3)?;w.string(object)?;}
+            Self::Join{object,sources}=>{w.u8(4)?;w.string(object)?;w.count(sources.len())?;for s in sources{w.string(s)?;}}
+            Self::Separate{object,name,faces}=>{w.u8(5)?;w.string(object)?;w.string(name)?;w.count(faces.len())?;for f in faces{w.u64(f.0)?;}}
+            Self::Snap{object,grid}=>{w.u8(6)?;w.string(object)?;w.f64(*grid)?;}
+            Self::Pivot{object,position}=>{w.u8(7)?;w.string(object)?;write_array(w,position)?;}
+            Self::Dimensions{object,size}=>{w.u8(8)?;w.string(object)?;write_array(w,size)?;}
+            Self::Light(light)=>{w.u8(9)?;write_light(w,light)?;}
+            Self::DeleteLight{name}=>{w.u8(10)?;w.string(name)?;}
+            Self::Socket(socket)=>{w.u8(11)?;write_socket(w,socket)?;}
+            Self::DeleteSocket{name}=>{w.u8(12)?;w.string(name)?;}
+            Self::Lods{object,levels}=>{w.u8(13)?;w.string(object)?;write_lods(w,levels)?;}
+            Self::Collider{object,proxy}=>{w.u8(14)?;w.string(object)?;write_proxy(w,proxy)?;}
+            Self::Modifier{object,modifier}=>{w.u8(15)?;w.string(object)?;write_modifier(w,modifier)?;}
+            Self::RemoveModifier{object,name}=>{w.u8(16)?;w.string(object)?;w.string(name)?;}
+            Self::ModifierOrder{object,names}=>{w.u8(17)?;w.string(object)?;w.count(names.len())?;for n in names{w.string(n)?;}}
+            Self::ApplyModifiers{object}=>{w.u8(18)?;w.string(object)?;}
+            Self::VehicleWheel{object,wheel}=>{w.u8(19)?;w.string(object)?;write_wheel(w,wheel)?;}
+            Self::DeleteVehicleWheel{object}=>{w.u8(20)?;w.string(object)?;}
+        }Ok(())
+    }
+    pub(crate) fn read(r:&mut Reader,l:&Limits)->Result<Self>{
+        let value=match r.u8()?{
+            0=>Self::Node{object:r.string(l.max_name_bytes)?,node:read_node(r,l)?},
+            1=>Self::Instance{object:r.string(l.max_name_bytes)?,source:r.string(l.max_source_bytes)?,transform:read_transform(r)?},
+            2=>Self::Duplicate{object:r.string(l.max_name_bytes)?,source:r.string(l.max_source_bytes)?},
+            3=>Self::MakeUnique{object:r.string(l.max_name_bytes)?},
+            4=>{let object=r.string(l.max_name_bytes)?;let mut sources=Vec::new();for _ in 0..r.count(l.max_objects)?{sources.push(r.string(l.max_source_bytes)?);}Self::Join{object,sources}}
+            5=>{let object=r.string(l.max_name_bytes)?;let name=r.string(l.max_source_bytes)?;let mut faces=Vec::new();for _ in 0..r.count(l.mesh.max_faces)?{faces.push(mesh::FaceId(r.u64()?));}Self::Separate{object,name,faces}}
+            6=>Self::Snap{object:r.string(l.max_name_bytes)?,grid:r.f64()?},
+            7=>Self::Pivot{object:r.string(l.max_name_bytes)?,position:read_array(r)?},
+            8=>Self::Dimensions{object:r.string(l.max_name_bytes)?,size:read_array(r)?},
+            9=>Self::Light(read_light(r,l)?),
+            10=>Self::DeleteLight{name:r.string(l.max_source_bytes)?},
+            11=>Self::Socket(read_socket(r,l)?),
+            12=>Self::DeleteSocket{name:r.string(l.max_source_bytes)?},
+            13=>Self::Lods{object:r.string(l.max_name_bytes)?,levels:read_lods(r)?},
+            14=>Self::Collider{object:r.string(l.max_name_bytes)?,proxy:read_proxy(r,l)?},
+            15=>Self::Modifier{object:r.string(l.max_name_bytes)?,modifier:read_modifier(r,l)?},
+            16=>Self::RemoveModifier{object:r.string(l.max_name_bytes)?,name:r.string(l.max_source_bytes)?},
+            17=>{let object=r.string(l.max_name_bytes)?;let mut names=Vec::new();for _ in 0..r.count(16)?{names.push(r.string(l.max_source_bytes)?);}Self::ModifierOrder{object,names}}
+            18=>Self::ApplyModifiers{object:r.string(l.max_name_bytes)?},
+            19=>Self::VehicleWheel{object:r.string(l.max_name_bytes)?,wheel:read_wheel(r,l)?},
+            20=>Self::DeleteVehicleWheel{object:r.string(l.max_name_bytes)?},
+            _=>return Err(Error::Corrupt("scene operation tag")),
+        };value.check(l)?;Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod typed_tests {
+    use super::*;
+    fn modifier()->NamedModifier{NamedModifier{name:"copies".into(),enabled:false,operation:MeshEditingOperation{
+        object:"body".into(),action:crate::mesh_editing::Action::Array{count:2,offset:[1.,0.,0.]},
+    }}}
+    fn light(kind:LightKind,attachment:Attachment)->LightEmitter{LightEmitter{
+        name:"lamp".into(),attachment,transform:Transform::default(),kind,color:[1.,0.5,0.25],intensity:2.,range:10.,
+    }}
+    fn wheel(visual:Option<VisualWheelMotion>)->VehicleWheel{VehicleWheel{connection:"wheel_front_left".into(),pivot:[1.,0.,0.],radius:0.5,width:0.2,visual}}
+    fn roundtrip(op:&SceneOperation,l:&Limits){
+        op.check(l).unwrap();let mut w=Writer::new(usize::MAX);op.write(&mut w).unwrap();
+        assert_eq!(op.memory_bytes(),w.bytes.len()*3);
+        let mut r=Reader::new(&w.bytes);let decoded=SceneOperation::read(&mut r,l).unwrap();r.end().unwrap();assert_eq!(&decoded,op);
+        let mut out=Writer::new(usize::MAX);decoded.write(&mut out).unwrap();assert_eq!(out.bytes,w.bytes);
+        for cut in [0,1,w.bytes.len()-1]{assert!(SceneOperation::read(&mut Reader::new(&w.bytes[..cut]),l).is_err());}
+    }
+    #[test]
+    fn literal_operations_cover_every_tag(){
+        let l=Limits::default();let m=modifier();let levels=vec![LodLevel{target_faces:20,max_error:0.1,distance:5.}];
+        let ops=vec![
+            SceneOperation::Node{object:"body".into(),node:SceneNode{parent:Some("root".into()),linked_to:Some("source".into()),transform:Transform::default()}},
+            SceneOperation::Instance{object:"body".into(),source:"source".into(),transform:Transform{translation:[1.,2.,3.],..Default::default()}},
+            SceneOperation::Duplicate{object:"body".into(),source:"source".into()},
+            SceneOperation::MakeUnique{object:"body".into()},
+            SceneOperation::Join{object:"body".into(),sources:vec!["b".into(),"a".into()]},
+            SceneOperation::Separate{object:"body".into(),name:"cap".into(),faces:vec![mesh::FaceId(u64::MAX),mesh::FaceId(1)]},
+            SceneOperation::Snap{object:"body".into(),grid:0.25},
+            SceneOperation::Pivot{object:"body".into(),position:[1.,2.,3.]},
+            SceneOperation::Dimensions{object:"body".into(),size:[2.,3.,4.]},
+            SceneOperation::Light(light(LightKind::Point,Attachment::Root)),
+            SceneOperation::DeleteLight{name:"lamp".into()},
+            SceneOperation::Socket(Socket{name:"mount".into(),attachment:Attachment::Joint(2),transform:Transform::default()}),
+            SceneOperation::DeleteSocket{name:"mount".into()},
+            SceneOperation::Lods{object:"body".into(),levels},
+            SceneOperation::Collider{object:"body".into(),proxy:CollisionProxy::Box},
+            SceneOperation::Modifier{object:"body".into(),modifier:m},
+            SceneOperation::RemoveModifier{object:"body".into(),name:"copies".into()},
+            SceneOperation::ModifierOrder{object:"body".into(),names:vec!["copies".into()]},
+            SceneOperation::ApplyModifiers{object:"body".into()},
+            SceneOperation::VehicleWheel{object:"body".into(),wheel:wheel(None)},
+            SceneOperation::DeleteVehicleWheel{object:"body".into()},
+        ];
+        for (tag,op) in ops.iter().enumerate(){roundtrip(op,&l);let mut w=Writer::new(usize::MAX);op.write(&mut w).unwrap();assert_eq!(w.bytes[0],tag as u8);}
+        for proxy in [CollisionProxy::Sphere,CollisionProxy::Mesh{object:"proxy".into()},CollisionProxy::Hull,CollisionProxy::Capsule]{roundtrip(&SceneOperation::Collider{object:"body".into(),proxy},&l);}
+        roundtrip(&SceneOperation::Node{object:"body".into(),node:SceneNode::default()},&l);
+        roundtrip(&SceneOperation::Light(light(LightKind::Spot{inner:0.1,outer:0.5},Attachment::Object("body".into()))),&l);
+        roundtrip(&SceneOperation::VehicleWheel{object:"body".into(),wheel:wheel(Some(VisualWheelMotion{steer_gain:1.,steer_max:0.5,compression:0.2,droop:0.1}))},&l);
+    }
+    #[test]
+    fn typed_checks_reject_bad_data(){
+        let l=Limits::default();
+        for op in [
+            SceneOperation::Instance{object:"body".into(),source:"source".into(),transform:Transform::default()},
+            SceneOperation::Node{object:"body".into(),node:SceneNode::default()},
+            SceneOperation::Snap{object:"body".into(),grid:-1.},
+        ] { roundtrip(&op, &l); }
+        for op in [
+            SceneOperation::Snap{object:String::new(),grid:1.},
+            SceneOperation::Pivot{object:"body".into(),position:[f64::NAN,0.,0.]},
+            SceneOperation::Node{object:"body".into(),node:SceneNode{transform:Transform{rotation:[0.;4],..Default::default()},..Default::default()}},
+            SceneOperation::Lods{object:"body".into(),levels:vec![LodLevel{target_faces:1,max_error:0.,distance:1.};5]},
+            SceneOperation::ModifierOrder{object:"body".into(),names:vec!["m".into();17]},
+            SceneOperation::Modifier{object:"other".into(),modifier:modifier()},
+        ]{assert!(op.check(&l).is_err());}
+        let tiny=Limits{max_objects:0,mesh:mesh::Limits{max_faces:0,..l.mesh.clone()},..l.clone()};
+        assert!(SceneOperation::Join{object:"body".into(),sources:vec!["source".into()]}.check(&tiny).is_err());
+        assert!(SceneOperation::Separate{object:"body".into(),name:"cap".into(),faces:vec![mesh::FaceId(1)]}.check(&tiny).is_err());
+        assert!(matches!(SceneOperation::read(&mut Reader::new(&[255]),&l),Err(Error::Corrupt(_))));
+        let mut w=Writer::new(64);w.u8(0).unwrap();w.string("body").unwrap();w.u8(2).unwrap();
+        assert!(matches!(SceneOperation::read(&mut Reader::new(&w.bytes),&l),Err(Error::Corrupt(_))));
+    }
+    #[test]
+    fn typed_state_preserves_maps_and_modifier_order(){
+        let l=Limits::default();let state=SceneState{
+            nodes:BTreeMap::from([("body".into(),SceneNode::default())]),
+            emitters:BTreeMap::from([("lamp".into(),light(LightKind::Spot{inner:0.1,outer:0.5},Attachment::Root))]),
+            sockets:BTreeMap::from([("mount".into(),Socket{name:"mount".into(),attachment:Attachment::Object("body".into()),transform:Transform::default()})]),
+            lods:BTreeMap::from([("body".into(),vec![LodLevel{target_faces:12,max_error:0.,distance:5.}])]),
+            colliders:BTreeMap::from([("body".into(),CollisionProxy::Hull)]),
+            modifiers:BTreeMap::from([("body".into(),vec![modifier(),NamedModifier{name:"second".into(),..modifier()}])]),
+            wheels:BTreeMap::from([("body".into(),wheel(None))]),
+        };
+        for state in [SceneState::default(),state]{
+            state.check(&l).unwrap();let mut w=Writer::new(usize::MAX);state.write(&mut w).unwrap();assert_eq!(state.memory_bytes(),w.bytes.len()*3);
+            let mut r=Reader::new(&w.bytes);assert_eq!(SceneState::read(&mut r,&l).unwrap(),state);r.end().unwrap();
+            assert!(SceneState::read(&mut Reader::new(&w.bytes[..w.bytes.len()-1]),&l).is_err());
+        }
+        let mut w=Writer::new(1024);w.count(2).unwrap();for _ in 0..2{w.string("body").unwrap();write_node(&mut w,&SceneNode::default()).unwrap();}
+        assert!(matches!(SceneState::read(&mut Reader::new(&w.bytes),&l),Err(Error::Corrupt(_))));
     }
 }

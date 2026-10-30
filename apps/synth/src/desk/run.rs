@@ -341,7 +341,7 @@ impl Desk {
     pub fn tool(&mut self, cx: &mut Cx, ui: &WidgetRef, name: &str, args: &Json) -> Answer {
         let base = args.get("base_revision").and_then(Json::as_i64);
         match name {
-            "score_guide" | "score_check" | "instrument_search" | "morph_params" | "tandem_params" | "tandem_patches" => match tools::call(name, args, Some(&self.source)) {
+            "score_guide" | "score_check" | "instrument_search" | "morph_params" | "tandem_params" | "tandem_patches" | "preset_search" => match tools::call(name, args, Some(&self.source)) {
                 Ok(value) => ok(value),
                 Err(message) => refused(message),
             },
@@ -370,13 +370,19 @@ impl Desk {
                 let template = args.get("template").and_then(Json::as_str).unwrap_or("blank");
                 let Some(mut next) = templates::template(template).map(str::to_string) else { return refused(format!("no template `{template}`")) };
                 if let Some(bpm) = f64_arg(args, "bpm") {
-                    if let Ok(s) = source::set_field(&next, "clock", "bpm", &source::fmt_num(bpm, 1)) {
-                        next = source::apply(&next, &s);
+                    if let Ok(s) = source::set_field(&next, "clock", "bpm", &makepad_edit_values::number::fmt_num(bpm, 1)) {
+                        next = match makepad_edit_values::apply_splices(&next, 0, &[s]) {
+                            Ok(next) => next,
+                            Err(error) => return refused(error),
+                        };
                     }
                 }
                 if let Some(label) = args.get("label").and_then(Json::as_str) {
                     if let Ok(s) = source::set_field(&next, "", "label", &makepad_editor_panel::fmt_text(label)) {
-                        next = source::apply(&next, &s);
+                        next = match makepad_edit_values::apply_splices(&next, 0, &[s]) {
+                            Ok(next) => next,
+                            Err(error) => return refused(error),
+                        };
                     }
                 }
                 let problems = check(&next);

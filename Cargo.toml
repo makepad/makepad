@@ -157,6 +157,7 @@ workspace.members = [
     "examples/datagrid",
     "examples/todo",
     "examples/portallist_hit",
+    "examples/scroll_containment",
     "examples/modal_footprint",
     "examples/vector",
     "examples/aichat",

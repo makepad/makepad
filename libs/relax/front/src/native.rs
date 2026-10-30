@@ -401,7 +401,7 @@ fn run_cargo_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<St
     }
     cmd.current_dir(workspace)
         .args(["check", "--release", "--message-format=json", "-p", package])
-        .args(flags.iter().map(|f| f.as_str()))
+        .args(cargo_selection(flags))
         .env("CARGO_TARGET_DIR", &target)
         .env("CARGO_INCREMENTAL", "0")
         .env("RUSTC_WRAPPER", exe)
@@ -423,17 +423,22 @@ fn run_cargo_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<St
         let tail: Vec<&str> = tail.into_iter().rev().collect();
         return Err(format!("--allow-c: cargo failed building the native dependencies ({}):\n{}", script_pkgs.join(", "), tail.join("\n")));
     }
-    // the feature cross-check, and the messages worth keeping
+    // the feature cross-check, and the messages worth keeping. A package can be built twice, for
+    // the host (build scripts, proc macros) and for the target, with features of their own
+    // (resolver 2): each of our scripts' feature sets must be one cargo built.
     let mut keep = String::new();
+    let mut cargo_sets: Vec<(String, String, Vec<String>)> = Vec::new();
     for line in stdout.lines() {
         let Ok(j) = crate::json::parse(line.as_bytes()) else { continue };
         let reason = j.get("reason").map(|r| r.str()).unwrap_or("");
         let (n, v) = id_name_version(j.get("package_id").map(|p| p.str()).unwrap_or(""));
-        let seed = seeds.iter().find(|&&s| {
+        let seeded = seeds.iter().any(|&s| {
             let p = &pkg[scripts_of[s].0];
             p.1 == n && p.2 == v
         });
-        let Some(&s) = seed else { continue };
+        if !seeded {
+            continue;
+        }
         match reason {
             "build-script-executed" => {
                 keep.push_str(line);
@@ -443,18 +448,51 @@ fn run_cargo_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<St
                 let is_lib = j.get("target").and_then(|t| t.get("kind")).is_some_and(|k| k.arr().iter().any(|x| x.str() == "lib" || x.str() == "rlib"));
                 if is_lib {
                     let mut cargo_feats: Vec<String> = j.get("features").map(|a| a.arr().iter().map(|x| x.str().to_string()).collect()).unwrap_or_default();
-                    let mut ours = scripts_of[s].1.clone();
                     cargo_feats.sort();
-                    ours.sort();
-                    if cargo_feats != ours {
-                        return Err(format!("--allow-c: cargo and Relax resolve `{} {}` with different features (cargo {:?}, relax {:?})", n, v, cargo_feats, ours));
-                    }
+                    cargo_sets.push((n.clone(), v.clone(), cargo_feats));
                 }
             }
             _ => {}
         }
     }
+    for &s in seeds {
+        let p = &pkg[scripts_of[s].0];
+        let built: Vec<&Vec<String>> = cargo_sets.iter().filter(|c| c.0 == p.1 && c.1 == p.2).map(|c| &c.2).collect();
+        if built.is_empty() {
+            continue;
+        }
+        let mut ours = scripts_of[s].1.clone();
+        ours.sort();
+        if !built.iter().any(|c| **c == ours) {
+            return Err(format!("--allow-c: cargo and Relax resolve `{} {}` with different features (cargo {:?}, relax {:?})", p.1, p.2, built, ours));
+        }
+    }
     Ok(keep)
+}
+
+/// The run's cargo flags as `cargo check` takes them. A test selection (`makepad test`: `--lib`,
+/// `--bins`, `--tests`, `--test <name>`) resolves with the package's dev-dependencies, as `cargo
+/// test` does (resolver 2 unifies their features when a target that needs them is built, cargo
+/// core/resolver/features.rs `HasDevUnits`); `cargo check --lib` would not, so it becomes `cargo
+/// check --tests`, which checks the test targets and resolves the same features.
+fn cargo_selection(flags: &[&String]) -> Vec<String> {
+    let test = flags.iter().any(|f| matches!(f.as_str(), "--lib" | "--bins" | "--tests" | "--test") || f.starts_with("--test="));
+    if !test {
+        return flags.iter().map(|f| f.to_string()).collect();
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < flags.len() {
+        match flags[i].as_str() {
+            "--lib" | "--bins" | "--tests" => {}
+            "--test" | "--bin" => i += 1,
+            f if f.starts_with("--test=") || f.starts_with("--bin=") => {}
+            f => out.push(f.to_string()),
+        }
+        i += 1;
+    }
+    out.push("--tests".to_string());
+    out
 }
 
 fn link(lib_path: &str, archives: &[String], search: &[String], fw_search: &[String], dylibs: &[String], frameworks: &[String]) -> Result<(), String> {
@@ -608,4 +646,18 @@ pub fn wrapper() -> Option<i32> {
         }
     }
     Some(0)
+}
+
+#[cfg(test)]
+#[test]
+fn test_selections_check_with_dev_dependencies() {
+    let s = |v: &[&str]| -> Vec<String> {
+        let owned: Vec<String> = v.iter().map(|x| x.to_string()).collect();
+        cargo_selection(&owned.iter().collect::<Vec<_>>())
+    };
+    assert_eq!(s(&["--features", "a"]), ["--features", "a"]);
+    assert_eq!(s(&["--bin", "x"]), ["--bin", "x"]);
+    assert_eq!(s(&["--lib", "--features", "a"]), ["--features", "a", "--tests"]);
+    assert_eq!(s(&["--bins", "--bin", "x"]), ["--tests"]);
+    assert_eq!(s(&["--test", "it", "--test=two", "--no-default-features"]), ["--no-default-features", "--tests"]);
 }

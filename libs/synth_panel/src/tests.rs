@@ -1,6 +1,7 @@
 //! The fields' tapers and how values are written, and the display maths.
 
-use crate::spec::{self, Taper};
+use crate::spec;
+use makepad_edit_values::Taper;
 
 #[test]
 fn tapers_and_source_text() {

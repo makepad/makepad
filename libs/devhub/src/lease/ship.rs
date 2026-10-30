@@ -134,7 +134,17 @@ pub fn put(work: &Path, rest: &str) -> Result<String, String> {
     if let Some(d) = dst.parent() {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(off == 0).open(&part).map_err(|e| format!("{}: {e}", part.display()))?;
+    let open = || std::fs::OpenOptions::new().write(true).create(true).truncate(off == 0).open(&part);
+    // a prune of the same lane dir (another ship's) may remove the dir that just emptied: make it again
+    let mut f = match open() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(d) = dst.parent() {
+                std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+            }
+            open().map_err(|e| format!("{}: {e}", part.display()))?
+        }
+        r => r.map_err(|e| format!("{}: {e}", part.display()))?,
+    };
     f.seek(SeekFrom::Start(off)).and_then(|_| f.write_all(&data)).map_err(|e| format!("{}: {e}", part.display()))?;
     if off + data.len() as u64 == size {
         let t = UNIX_EPOCH + std::time::Duration::from_micros(mtime);

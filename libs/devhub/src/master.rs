@@ -103,6 +103,7 @@ pub fn merge(seeds: &Hosts, heard: &[Heard], identity: &dyn Fn(&str) -> Option<S
 
 impl Master {
     pub fn start(name: &str, hitch_ms: f64, trust: Option<Arc<dyn Trust>>, on_record: OnRecord) -> Result<Arc<Master>, String> {
+        crate::os::raise_fd_limit();
         let inbox = Arc::new(Mutex::new(Inbox::open(proto::home().join("inbox.jsonl"))));
         let (ib, user) = (inbox.clone(), on_record);
         let recent: Arc<Mutex<std::collections::VecDeque<Record>>> = Arc::new(Mutex::new(std::collections::VecDeque::new()));

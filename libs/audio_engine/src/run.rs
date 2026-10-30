@@ -43,7 +43,7 @@ pub fn rests<X, Y, B>(schedule: &mut Schedule<X, Y, B>, ext: &dyn RunExt<X, Y>) 
         |snapshot| controls.moved_since(snapshot),
         || ops.iter().any(|op| match op {
             Op::Transport { state, .. } => matches!(&states[*state as usize], NodeState::Transport(this) if this.feed.as_ref().is_some_and(|feed| !feed.is_empty())),
-            Op::Loop { state, .. } => matches!(&states[*state as usize], NodeState::Loop(this) if this.feed.as_ref().is_some_and(|feed| !feed.is_empty())),
+            Op::Loop { state, .. } => matches!(&states[*state as usize], NodeState::Loop(this) if this.has_input()),
             Op::Pads { state, .. } => matches!(&states[*state as usize], NodeState::Pads(this) if this.feed.as_ref().is_some_and(|feed| !feed.is_empty())),
             Op::Fx { state, .. } => matches!(&states[*state as usize], NodeState::Fx(this) if this.feed.as_ref().is_some_and(|feed| !feed.is_empty())),
             // A source that started running (a clip loaded on a deck that
@@ -322,13 +322,24 @@ pub fn run<X, Y, B>(schedule: &mut Schedule<X, Y, B>, frames: usize, sink: &mut 
                     }
                 }
                 let chunk = clock.map(|clock| clocks[clock as usize]).unwrap_or_default();
-                if this.playing && !chunk.playing {
+                // A loop played from MIDI in plays on while the transport
+                // is stopped (on a free clock at its tempo).
+                if this.playing && !chunk.playing && this.stream.is_none() {
                     this.engine.release_all();
                 }
                 this.playing = chunk.playing;
+                let tempo = match this.stream.as_deref_mut() {
+                    Some(stream) => {
+                        let tempo = stream.tempo(&chunk, rate);
+                        stream.run(&mut this.engine, inst, &tempo, frames, rate, crate::clock::now());
+                        tempo
+                    }
+                    None if chunk.playing => chunk.tempo,
+                    None => makepad_score_player::Tempo::linear(chunk.start, 0.0),
+                };
                 let (_, span) = spans(arena, None, *out);
                 let (left, right) = span.split_at_mut(CHUNK);
-                this.engine.render(inst, &mut left[..frames], &mut right[..frames], rate, &if chunk.playing { chunk.tempo } else { makepad_score_player::Tempo::linear(chunk.start, 0.0) });
+                this.engine.render(inst, &mut left[..frames], &mut right[..frames], rate, &tempo);
                 let audible = controls.get(*mute) < 0.5 && (!any_solo || controls.get(*solo) >= 0.5);
                 if let (makepad_score_player::Inst::Input { gain, .. }, Some(input)) = (inst, &mut this.input) {
                     // The input as it comes (at the graph's rate only).

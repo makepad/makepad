@@ -13,6 +13,7 @@ name = "music_iter"
 path = "src/bin/music_iter.rs"
 
 [dependencies]
+makepad-edit-values = { path = "../edit_values" }
 # The one loudness meter.
 makepad-audio-dsp = { path = "../audio_dsp" }
 makepad-score-live = { path = "../score_live" }

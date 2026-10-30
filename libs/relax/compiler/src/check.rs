@@ -93,6 +93,24 @@ pub fn check_crate(u: &mut Unit, root: u32, errors: Vec<String>, root_only: bool
     check_crate_impl(u, root, &crates, errors, true, selftest).0
 }
 
+/// `makepad test`'s check of the crates under test before they run (run.rs check_test_subjects):
+/// the app check of `crates`, errors printed; the number of errors (borrow errors included).
+/// Quiet otherwise: no statistics and no warnings (the lints do not know that the harness uses
+/// the `#[test]` fns). `harness`: the root is built with `--test` (libtest's generated main
+/// replaces the crate's own, rustc_builtin_macros test_harness.rs), so it has no entry point to check.
+pub fn check_subjects(u: &mut Unit, root: u32, crates: &[u32], errors: Vec<String>, harness: bool) -> usize {
+    SUBJECTS.store(if harness { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+    let n = check_crate_impl(u, root, crates, errors, true, false).1.len();
+    SUBJECTS.store(0, std::sync::atomic::Ordering::Relaxed);
+    n
+}
+
+/// 0: a check; 1: `makepad test`'s check of a plain program; 2: of a libtest harness (check_subjects)
+static SUBJECTS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+fn subjects_mode() -> u8 {
+    SUBJECTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The deep check's diagnostics without printing a second stream into a watch response.
 pub fn collect_deep(u: &mut Unit, root: u32) -> Vec<crate::diag::Diagnostic> {
     check_crate_impl(u, root, &[root], Vec::new(), false, true).1
@@ -151,8 +169,9 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     errors.extend(relax_types::item_checks::duplicate_symbols(&u.prog, &own));
     errors.extend(relax_types::item_checks::global_allocators_and_lang_items(&u.prog, &own));
     errors.extend(relax_types::proc_macro_harness::check(&u.prog, &u.tcx, &own));
-    if u.prog.crates[root as usize].is_bin { errors.extend(relax_types::item_checks::entry_point(&u.prog, root)); }
-    if u.prog.crates[root as usize].is_bin { errors.extend(relax_types::item_checks::entry_symbol_conflict(&u.prog, &own, root)); }
+    let entry = u.prog.crates[root as usize].is_bin && subjects_mode() != 2;
+    if entry { errors.extend(relax_types::item_checks::entry_point(&u.prog, root)); }
+    if entry { errors.extend(relax_types::item_checks::entry_symbol_conflict(&u.prog, &own, root)); }
     errors.extend(relax_types::lint_levels::check(&u.prog, &own));
     relax_types::lint_pass::check_items(&u.prog, &u.tcx, &own);
     relax_types::lint_dead::reset();
@@ -194,7 +213,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         }) {
             errors.extend(e);
         }
-        if errors.is_empty() {
+        if errors.is_empty() && subjects_mode() != 2 {
             if let Some(main) = crate::run::find_main(&u.prog, root) {
                 if relax_types::wfcheck::obligations::is_entry_main(&u.prog, main) { errors.extend(relax_types::wfcheck::obligations::check_main(&u.prog, &u.tcx, main)); }
             }
@@ -534,9 +553,10 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     if crate::memstat::enabled() {
         crate::memstat::print("check", &crate::memreport::unit_sizes(unsafe { &*up }));
     }
+    let quiet = subjects_mode() != 0;
     if compile {
         eprintln!("makepad check: {} crates checked, {} fns compiled from {} seeds, {} failed builds; type/borrow check {:.1} s, compile {:.1} s", crates.len(), unsafe { (&(*up).fns).len() }, seeds.len(), n_failed, t_front.as_secs_f64(), t_compile.as_secs_f64());
-    } else {
+    } else if !quiet {
         eprintln!("makepad check: {} crates type- and borrow-checked in {:.1} s", crates.len(), t_front.as_secs_f64());
     }
     if analyses_ok { relax_types::lint_levels::finish(&u.prog); }
@@ -544,7 +564,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     errors.extend(lint_errors);
     lint_warnings.sort_by_cached_key(|e| error_position(e));
     lint_warnings.dedup();
-    if emit && !crate::diag::enabled() {
+    if emit && !quiet && !crate::diag::enabled() {
         for w in &lint_warnings { stderr_line!("{}", w); }
     }
     // rustc's order: by file, then position (a plain string sort put line 10 before line 3)
@@ -562,8 +582,10 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     }
     crate::borrowck::finish_check(unsafe { &(*up).prog });
     let borrow_count = console.finish();
+    if !quiet {
     eprintln!("makepad check: {} body owners of the checked crates, {} compiled in all, {} errors", n_own, unsafe { (*up).stats.compiled }, errors.len() + borrow_count);
-    {
+    }
+    if !quiet {
         let st = unsafe { &(*up).stats };
         eprintln!(
             "makepad check: cpu typeck {} ms, lower {} ms, opt {} ms, codegen {} ms; {} RIR insts, {} KB code",

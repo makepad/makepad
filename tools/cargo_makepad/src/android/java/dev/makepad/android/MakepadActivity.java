@@ -454,9 +454,20 @@ class MakepadSurface
         setOnKeyListener(this);
         setOnLongClickListener(this);
 
-        getViewTreeObserver().addOnGlobalLayoutListener(this);
-
         Selection.setSelection(mEditable, 0, 0);
+    }
+
+    // Only while attached, since a recreated activity can keep using this window.
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        getViewTreeObserver().addOnGlobalLayoutListener(this);
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        getViewTreeObserver().removeOnGlobalLayoutListener(this);
+        super.onDetachedFromWindow();
     }
 
     @Override
@@ -599,9 +610,7 @@ class MakepadSurface
     @Override
     public boolean onKey(View v, int keyCode, KeyEvent event) {
         // API 36 still passes the back key on to us after the activity's back callback got it as Back.
-        if (keyCode == KeyEvent.KEYCODE_BACK
-            && getContext() instanceof MakepadActivity
-            && ((MakepadActivity) getContext()).mBackGoesThroughCallback) {
+        if (keyCode == KeyEvent.KEYCODE_BACK && MakepadActivity.mBackGoesThroughCallback) {
             return true;
         }
         if (event.getAction() == KeyEvent.ACTION_DOWN && keyCode != 0) {
@@ -785,6 +794,19 @@ class MakepadSurface
         mInputConnection = new MakepadInputConnection(this, true);
 
         return mInputConnection;
+    }
+
+    void takeImeStateFrom(MakepadSurface previous) {
+        mEditable.replace(0, mEditable.length(), previous.mEditable.toString());
+        Selection.setSelection(mEditable,
+            Math.max(0, Selection.getSelectionStart(previous.mEditable)),
+            Math.max(0, Selection.getSelectionEnd(previous.mEditable)));
+        mInputMode = previous.mInputMode;
+        mAutocapitalize = previous.mAutocapitalize;
+        mAutocorrect = previous.mAutocorrect;
+        mReturnKeyType = previous.mReturnKeyType;
+        mIsMultiline = previous.mIsMultiline;
+        mIsSecure = previous.mIsSecure;
     }
 
     // Configure keyboard settings - called from Rust before showing keyboard
@@ -1139,12 +1161,11 @@ public class MakepadActivity
 
     // Desired system-bar (status/navigation bar) icon tint, set from Rust via
     // setSystemBarAppearance(). true = dark icons (for light app backgrounds).
-    private boolean mSystemBarDarkIcons = false;
+    private static boolean mSystemBarDarkIcons = false;
 
-    // File/folder dialogs (Storage Access Framework). Request codes we handed
-    // out and are still waiting on; anything else arriving in onActivityResult
-    // belongs to somebody else and must be left alone.
-    private final HashSet<Integer> mFileDialogRequests = new HashSet<>();
+    // File/folder dialog request codes we're still waiting on; any other onActivityResult
+    // isn't ours. Static, since the result can land on a recreated activity.
+    private static final HashSet<Integer> mFileDialogRequests = new HashSet<>();
 
     // clipboard actions (ActionMode for copy/paste/cut)
     private ActionMode mActionMode;
@@ -1182,7 +1203,7 @@ public class MakepadActivity
     private static final int BACK_EDGE_NONE = 2;
     private OnBackInvokedCallback mBackCallback;
     // Set by the callback's first call, since the system ignores it unless the manifest opts in.
-    boolean mBackGoesThroughCallback;
+    static boolean mBackGoesThroughCallback;
 
     static {
         System.loadLibrary("makepad");
@@ -1373,6 +1394,10 @@ public class MakepadActivity
 
         view = new MakepadSurface(this);
         view.setId(View.generateViewId());
+        Object previousView = getLastNonConfigurationInstance();
+        if (previousView instanceof MakepadSurface) {
+            view.takeImeStateFrom((MakepadSurface) previousView);
+        }
         // Put it inside a parent layout which can resize it using padding
         ResizingLayout layout = new ResizingLayout(this);
         FrameLayout surfaceContentLayout = new FrameLayout(this);
@@ -1445,7 +1470,7 @@ public class MakepadActivity
         mSelectionHandleOverlay.setVisibility(View.GONE);
         mRootLayout.addView(mSelectionHandleOverlay);
 
-        mSelectionHandleSizePx = Math.max(24, (int) (getResources().getDisplayMetrics().density * 24.0f));
+        mSelectionHandleSizePx = selectionHandleSizePx();
         mSelectionHandleStart = new SelectionHandleView(this, 0xFF4A90E2, mSelectionHandleSizePx);
         mSelectionHandleEnd = new SelectionHandleView(this, 0xFF4A90E2, mSelectionHandleSizePx);
         mSelectionHandleStart.setOnTouchListener(createSelectionHandleDragListener(SELECTION_HANDLE_START));
@@ -1462,6 +1487,15 @@ public class MakepadActivity
         applyEdgeToEdge();
         restoreWarmResumeSurfaceSnapshotIfAvailable();
         updateTaskDescription();
+        applySystemBarAppearance();
+        // An IME animation from a previous activity never ends in this one.
+        MakepadImeInsets.imeAnimationInProgress = false;
+
+        // Set up before attaching, since a running app calls into this activity right away.
+        mVideoPlaybackThread = new HandlerThread("VideoPlayerThread");
+        mVideoPlaybackThread.start(); // TODO: only start this if its needed.
+        mVideoPlaybackHandler = new Handler(mVideoPlaybackThread.getLooper());
+        mVideoPlayerRunnables = new HashMap<Long, VideoPlayerRunnable>();
 
         MakepadNative.activityOnCreate(this);
         registerPhysicalKeyboardListener();
@@ -1539,25 +1573,8 @@ public class MakepadActivity
                 OnBackInvokedDispatcher.PRIORITY_DEFAULT, mBackCallback);
         }
 
-        mVideoPlaybackThread = new HandlerThread("VideoPlayerThread");
-        mVideoPlaybackThread.start(); // TODO: only start this if its needed.
-        mVideoPlaybackHandler = new Handler(mVideoPlaybackThread.getLooper());
-        mVideoPlayerRunnables = new HashMap<Long, VideoPlayerRunnable>();
-
-
-
-        String cache_path = this.getCacheDir().getAbsolutePath();
-        String data_path = this.getFilesDir().getAbsolutePath();
-        float density = getResources().getDisplayMetrics().density;
-        boolean isEmulator = this.isEmulator();
-        String androidVersion = Build.VERSION.RELEASE;
-        String buildNumber = Build.DISPLAY;
         int sdkVersion = Build.VERSION.SDK_INT;
-        boolean nightMode = isNightMode(getResources().getConfiguration());
-
-        // Makepad ignores the kernel version, but the slot stays so the native
-        // signature doesn't change.
-        MakepadNative.onAndroidParams(cache_path, data_path, density, isEmulator, androidVersion, buildNumber, "", nightMode);
+        sendAndroidParams();
         sendDisplayRotation();
         // Landscape to reverse landscape (a half turn) changes no configuration,
         // so onConfigurationChanged never hears of it: the display listener does.
@@ -1622,6 +1639,9 @@ public class MakepadActivity
             super.onDestroy();
             return;
         }
+        // Android recreates the activity right away for a config change the manifest doesn't
+        // declare, and the running app moves over to the new one, so it must not shut down here.
+        boolean isRecreating = isChangingConfigurations();
         unregisterPhysicalKeyboardListener();
         if (mNativeLayers != null) { mNativeLayers.close(); mNativeLayers = null; }
         if (mBackCallback != null) {
@@ -1661,12 +1681,40 @@ public class MakepadActivity
         }
         cleanupVideoPlaybackState();
         shutdownVideoPlaybackThread();
-        if (!mIsSwitchingActivity) {
+        if (!mIsSwitchingActivity && !isRecreating) {
             cleanupNetworkState();
             shutdownWebSocketsThread();
+            stopLocationUpdates();
         }
         super.onDestroy();
-        MakepadNative.activityOnDestroy();
+        if (!isRecreating) {
+            MakepadNative.activityOnDestroy();
+        }
+    }
+
+    // Hands this surface to the activity Android recreates for a config change, so the
+    // new surface can take over its IME state.
+    @Override
+    public Object onRetainNonConfigurationInstance() {
+        return view;
+    }
+
+    private int selectionHandleSizePx() {
+        return Math.max(24, (int) (getResources().getDisplayMetrics().density * 24.0f));
+    }
+
+    private void sendAndroidParams() {
+        String cache_path = this.getCacheDir().getAbsolutePath();
+        String data_path = this.getFilesDir().getAbsolutePath();
+        float density = getResources().getDisplayMetrics().density;
+        boolean isEmulator = this.isEmulator();
+        String androidVersion = Build.VERSION.RELEASE;
+        String buildNumber = Build.DISPLAY;
+
+        // Makepad ignores the kernel version, but the slot stays so the native
+        // signature doesn't change.
+        boolean nightMode = isNightMode(getResources().getConfiguration());
+        MakepadNative.onAndroidParams(cache_path, data_path, density, isEmulator, androidVersion, buildNumber, "", nightMode);
     }
 
     @Override
@@ -2308,8 +2356,22 @@ public class MakepadActivity
         if (mNativesDeferred) {
             return;
         }
+        int handleSizePx = selectionHandleSizePx();
+        if (handleSizePx != mSelectionHandleSizePx && mSelectionHandleStart != null) {
+            mSelectionHandleSizePx = handleSizePx;
+            for (View handle : new View[] { mSelectionHandleStart, mSelectionHandleEnd }) {
+                ViewGroup.LayoutParams params = handle.getLayoutParams();
+                params.width = handleSizePx;
+                params.height = handleSizePx;
+                handle.setLayoutParams(params);
+            }
+        }
+        // A fold, a split screen or a new display size keeps this activity (the manifest
+        // declares those changes too); the params carry the new density.
+        sendAndroidParams();
         MakepadNative.onNightModeChanged(isNightMode(config));
         sendDisplayRotation();
+        reportPhysicalKeyboardIfChanged();
     }
 
     // The display's rotation (Surface.ROTATION_0..270 = 0..3): camera frames are
@@ -3127,11 +3189,21 @@ public class MakepadActivity
         }
     }
 
-    // location (Cx::start_location_updates)
-    private LocationManager mLocationManager;
-    private LocationListener mLocationListener;
+    // location (Cx::start_location_updates). Static, so a recreated activity can still stop it.
+    private static LocationManager mLocationManager;
+    private static LocationListener mLocationListener;
 
-    private void sendLocationUpdate(Location loc) {
+    private static class MakepadLocationListener implements LocationListener {
+        @Override
+        public void onLocationChanged(Location loc) {
+            sendLocationUpdate(loc);
+        }
+        @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
+        @Override public void onProviderEnabled(String provider) {}
+        @Override public void onProviderDisabled(String provider) {}
+    }
+
+    private static void sendLocationUpdate(Location loc) {
         MakepadNative.onLocationUpdate(
             loc.getLongitude(), loc.getLatitude(), loc.getAccuracy(),
             loc.hasAltitude(), loc.getAltitude(),
@@ -3146,20 +3218,12 @@ public class MakepadActivity
                 return; // already running
             }
             try {
-                mLocationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+                mLocationManager = (LocationManager) getApplicationContext().getSystemService(Context.LOCATION_SERVICE);
                 if (mLocationManager == null) {
                     MakepadNative.onLocationError(2, "no location service");
                     return;
                 }
-                LocationListener listener = new LocationListener() {
-                    @Override
-                    public void onLocationChanged(Location loc) {
-                        sendLocationUpdate(loc);
-                    }
-                    @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
-                    @Override public void onProviderEnabled(String provider) {}
-                    @Override public void onProviderDisabled(String provider) {}
-                };
+                LocationListener listener = new MakepadLocationListener();
                 boolean any = false;
                 if (mLocationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                     mLocationManager.requestLocationUpdates(
@@ -3445,6 +3509,10 @@ public class MakepadActivity
     }
 
     public void prepareVideoPlayback(long videoId, Object source, int externalTextureHandle, boolean autoplay, boolean shouldLoop) {
+        // A destroyed activity has already shut its video thread down.
+        if (mVideoPlaybackHandler == null) {
+            return;
+        }
         VideoPlayer VideoPlayer = new VideoPlayer(this, videoId);
         VideoPlayer.setSource(source);
         VideoPlayer.setExternalTextureHandle(externalTextureHandle);

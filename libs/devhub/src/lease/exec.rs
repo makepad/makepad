@@ -1194,6 +1194,30 @@ mod tests {
         panic!("run {n} of {id} did not exit");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn two_leases_logs_hold_only_their_own_output() {
+        let (x, base, _) = test_exec("iso", Opts::default());
+        for (id, lane) in [("L10", "lane-a"), ("L11", "lane-b")] {
+            let a = x.handle("lease-start", &format!(r#"{{"id":"{id}","lane":"{lane}","kind":"test","rev":null}}"#));
+            assert_eq!(field(&a[0], "ok").and_then(|v| super::super::num(&v)), Some(1.0), "{a:?}");
+        }
+        // interleaved runs on both leases: each log carries its lease's marker and never the other's
+        let mut runs = Vec::new();
+        for round in 0..3 {
+            for (id, who) in [("L10", "from-lane-a"), ("L11", "from-lane-b")] {
+                let r = x.handle("lease-run", &format!("{id} . {}", b64(&["/bin/echo", &format!("{who}-{round}")])));
+                runs.push((id, who, round, field(&r[0], "n").and_then(|v| super::super::num(&v)).expect(&r[0]) as u32));
+            }
+        }
+        for (id, who, round, n) in runs {
+            let (text, code) = log_until_exit(&x, id, n);
+            assert_eq!(code, 0);
+            assert_eq!(text.trim(), format!("{who}-{round}"), "{id} run {n}");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn base64_and_inspect_words() {
         assert_eq!(b64_decode(&b64(&["/bin/echo", "hi"])).unwrap(), b"/bin/echo\0hi");

@@ -222,11 +222,19 @@ fn parsed_controls_morph_topology_constraints_and_clip_options_roundtrip() {
             },
         ],
     );
-    let id = d.object("body").unwrap().vertices()[0].id.0;
-    let commands = format!(
-        r#"[{{"op":"rig_rest","joint":0,"transform":{{"rotation":[0,0,0,1]}}}},{{"op":"pose","name":"rest","joints":[]}},{{"op":"pose","name":"raised","joints":[{{"joint":0,"transform":{{"translation":[0,0.5,0]}}}}]}},{{"op":"bake_clip","name":"bounce","poses":[{{"time":0,"pose":"rest"}},{{"time":1,"pose":"raised"}}],"fps":4}},{{"op":"morph","name":"shape","object":"body","deltas":[{{"vertex":"{id}","delta":[0.1,0,0]}}]}},{{"op":"clip_options","name":"bounce","interpolation":"cubic","root_motion":true,"events":[{{"time":0.5,"name":"peak","payload":"hello"}}],"morph_keys":[{{"morph":"shape","keys":[{{"time":0,"weight":0}},{{"time":1,"weight":1}}]}}]}}]"#
-    );
-    let ops = parse_operations(&json::parse(commands.as_bytes()).unwrap(), d.limits()).unwrap();
+    let id = d.object("body").unwrap().vertices()[0].id;
+    let ops = vec![
+        Operation::Rig(RigOperation::Rest {joint:0,transform:Transform::default()}),
+        Operation::Rig(RigOperation::Pose(Pose {name:"rest".into(),joints:BTreeMap::new()})),
+        Operation::Rig(RigOperation::Pose(Pose {name:"raised".into(),joints:BTreeMap::from([(0,Transform {translation:[0.,0.5,0.],..Default::default()})])})),
+        Operation::Rig(RigOperation::BakeClip {name:"bounce".into(),poses:vec![(0.,"rest".into()),(1.,"raised".into())],fps:4.,solve_constraints:true}),
+        Operation::Rig(RigOperation::Morph {name:"shape".into(),object:"body".into(),deltas:BTreeMap::from([(id,[0.1,0.,0.])]),weight:0.}),
+        Operation::Rig(RigOperation::ClipOptions {name:"bounce".into(),options:ClipOptions {
+            interpolation:Interpolation::Cubic,root_motion:true,
+            events:vec![ClipEvent {time:0.5,name:"peak".into(),payload:"hello".into()}],
+            morph_keys:BTreeMap::from([("shape".into(),vec![MorphKey {time:0.,weight:0.},MorphKey {time:1.,weight:1.}])]),
+        }}),
+    ];
     apply(&mut d, "controls", ops);
     let source = d.to_bytes(None).unwrap();
     let reopened = Document::from_bytes(&source, Limits::default(), None).unwrap();
@@ -281,7 +289,7 @@ fn parsed_controls_morph_topology_constraints_and_clip_options_roundtrip() {
 #[test]
 fn mirrored_bones_preserve_existing_indices_weights_and_world_rest_symmetry(){
     let mut d=Document::new(Limits::default()).unwrap();let skel=Skeleton{joints:vec![Joint{name:"center".into(),parent:None,translation:[0.;3]},Joint{name:"left".into(),parent:Some(0),translation:[1.,0.,0.]},Joint{name:"left_tip".into(),parent:Some(1),translation:[0.,1.,0.]}]};apply(&mut d,"base",vec![Operation::Cube{object:"body".into(),size:[1.;3]},Operation::SetSkeleton{skeleton:skel},Operation::AutoWeights{object:"body".into()},Operation::Rig(RigOperation::Rest{joint:1,transform:Transform{translation:[1.,0.,0.],rotation:quat_axis_angle([0.,0.,1.],0.4).unwrap(),scale:[1.;3]}})]);let before_mesh=d.object("body").unwrap().clone();let before_skeleton=d.skeleton().unwrap().clone();let before_world=d.rig().global_rest(d.skeleton().unwrap()).unwrap();
-    let mirror=RigOperation::MirrorJoints{joints:vec![1,2],axis:0,names:BTreeMap::from([(1,"right".into()),(2,"right_tip".into())])};let json=mirror.value();assert_eq!(RigOperation::parse(&json,d.limits()).unwrap().unwrap(),mirror);apply(&mut d,"mirror",vec![Operation::Rig(mirror)]);let after=d.skeleton().unwrap();assert_eq!(&after.joints[..3],&before_skeleton.joints);assert_eq!(after.joints[3].parent,Some(0));assert_eq!(after.joints[4].parent,Some(3));assert_eq!(d.object("body").unwrap(),&before_mesh);
+    let mirror=RigOperation::MirrorJoints{joints:vec![1,2],axis:0,names:BTreeMap::from([(1,"right".into()),(2,"right_tip".into())])};mirror.check(d.limits()).unwrap();apply(&mut d,"mirror",vec![Operation::Rig(mirror)]);let after=d.skeleton().unwrap();assert_eq!(&after.joints[..3],&before_skeleton.joints);assert_eq!(after.joints[3].parent,Some(0));assert_eq!(after.joints[4].parent,Some(3));assert_eq!(d.object("body").unwrap(),&before_mesh);
     let world=d.rig().global_rest(after).unwrap();let mut f=IDENTITY_MATRIX;f[0][0]= -1.;for(a,b)in [(1,3),(2,4)]{let expected=matrix_mul(matrix_mul(f,before_world[a]),f);for i in 0..4{for j in 0..4{assert!((world[b][i][j]-expected[i][j]).abs()<1e-8);}}}let source=d.to_bytes(None).unwrap();assert_eq!(Document::from_bytes(&source,Limits::default(),None).unwrap().to_bytes(None).unwrap(),source);
     let bad=Transaction{request_id:"collision".into(),expected:d.head(),operations:vec![Operation::Rig(RigOperation::MirrorJoints{joints:vec![1],axis:0,names:BTreeMap::from([(1,"right".into())])})]};assert!(d.apply(bad,None).is_err());assert_eq!(d.to_bytes(None).unwrap(),source);
 }

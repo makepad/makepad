@@ -242,6 +242,8 @@ pub struct Detached {
     pub desk: Option<crate::desktop_layout::DesktopWindow>,
     pub client_fullscreen: bool,
     pub no_key_focus: bool,
+    /// The app asked to keep the window on top (`set_topmost`).
+    pub topmost: bool,
 }
 
 /// A tabbed group: one tile slot holding N clients with one visible.
@@ -335,6 +337,9 @@ pub struct WmLayout {
     /// The display has spacewarp edge zones: tiles, maximize and snaps use
     /// the centre band; the zones are for parked floats.
     zoned: bool,
+    /// Windows whose app asked to keep them on top (`set_topmost`): `restack` keeps them
+    /// above every other window of both stacks, in their own raise order.
+    topmost: Vec<ClientId>,
 }
 
 impl Default for WmLayout {
@@ -361,6 +366,7 @@ impl WmLayout {
             scratchpad_open: false,
             outer: None,
             zoned: false,
+            topmost: Vec::new(),
         }
     }
 
@@ -369,6 +375,31 @@ impl WmLayout {
     pub fn ensure_desktop(&mut self, client: ClientId, area: LRect) {
         let area = self.tile_area(self.active, area);
         self.desktop.ensure(client, area);
+        self.restack();
+    }
+
+    /// The app asked to keep `client` above its other windows (`on`), or no longer does.
+    /// True when that changed.
+    pub fn set_topmost(&mut self, client: ClientId, on: bool) -> bool {
+        if self.is_topmost(client) == on {
+            return false;
+        }
+        if on { self.topmost.push(client); } else { self.topmost.retain(|c| *c != client); }
+        self.restack();
+        true
+    }
+
+    pub fn is_topmost(&self, client: ClientId) -> bool {
+        self.topmost.contains(&client)
+    }
+
+    /// Put both stacks (desktop windows and floats, back to front) in their tiers, keeping
+    /// the order within each: ordinary windows, then the topmost ones, then tray dropdowns
+    /// (`add_flyout_float`), which stay above everything. Every push and raise ends here.
+    pub fn restack(&mut self) {
+        let topmost = &self.topmost;
+        self.desktop.windows.sort_by_key(|w| topmost.contains(&w.client));
+        self.floats.sort_by_key(|f| if f.pinned && f.no_key_focus { 2 } else { topmost.contains(&f.client) as u8 });
     }
 
     /// A layout for a real display: its tiles live in the centre band.
@@ -701,6 +732,7 @@ impl WmLayout {
 
     pub fn remove(&mut self, client: ClientId) {
         self.desktop.windows.retain(|w| w.client != client);
+        self.topmost.retain(|c| *c != client);
         self.focus_history.retain(|c| *c != client);
         self.tile_origin.retain(|(c, _)| *c != client);
         self.floats.retain(|f| f.client != client);
@@ -1295,6 +1327,7 @@ impl WmLayout {
             let entry = self.floats.remove(i);
             self.floats.push(entry);
         }
+        self.restack();
     }
 
     /// SUPER+T — `hl.dsp.window.float({ action = "toggle" })`.
@@ -1319,6 +1352,7 @@ impl WmLayout {
             no_key_focus: false,
             from_tree: false,
         });
+        self.restack();
         self.workspaces[ws].focus = Some(client);
     }
 
@@ -1336,6 +1370,7 @@ impl WmLayout {
             no_key_focus: true,
             from_tree: false,
         });
+        self.restack();
     }
 
     /// A tray dropdown (`dropdown.rs`): a float at `rect`, above every other window on every
@@ -1350,6 +1385,7 @@ impl WmLayout {
             no_key_focus: true,
             from_tree: false,
         });
+        self.restack();
     }
 
     /// False only for a Quick-Look panel (`add_preview_float`) or a tray dropdown.
@@ -1430,6 +1466,7 @@ impl WmLayout {
             no_key_focus: false,
             from_tree: false,
         });
+        self.restack();
         self.workspaces[ws].focus = Some(client);
     }
 
@@ -2268,6 +2305,7 @@ impl WmLayout {
             desk: self.desktop.get(client).cloned(),
             client_fullscreen: self.is_client_fullscreen(client),
             no_key_focus: entry.is_some_and(|f| f.no_key_focus),
+            topmost: self.is_topmost(client),
         };
         self.remove(client);
         Some(d)
@@ -2335,6 +2373,10 @@ impl WmLayout {
         if !d.no_key_focus {
             self.note_focus(c);
         }
+        if d.topmost && !self.topmost.contains(&c) {
+            self.topmost.push(c);
+        }
+        self.restack();
     }
 
     /// Every client wm knows about, on every workspace.
@@ -3577,6 +3619,7 @@ mod tests {
             desk: None,
             client_fullscreen: false,
             no_key_focus: false,
+            topmost: false,
         };
         l.adopt(4, fresh(7, None), (0.0, 0.0), AREA, 0.0);
         assert_eq!(l.clients_on(4), vec![7]);

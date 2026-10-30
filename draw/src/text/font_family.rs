@@ -49,6 +49,7 @@ pub struct FontFamily {
     id: FontFamilyId,
     shaper: Rc<RefCell<Shaper>>,
     fonts: Rc<[Rc<Font>]>,
+    features: Rc<Vec<(u32, u32)>>,
     diagnostics: Rc<FontDiagnostics>,
 }
 
@@ -63,6 +64,7 @@ impl FontFamily {
             id,
             shaper,
             fonts,
+            features: Rc::new(Vec::new()),
             diagnostics: Rc::new(diagnostics),
         }
     }
@@ -72,15 +74,30 @@ impl FontFamily {
     }
 
     pub fn get_or_shape(&self, text: Substr) -> Rc<ShapedText> {
-        self.shaper.borrow_mut().get_or_shape(ShapeParams {
+        self.shaper.borrow_mut().get_or_shape(self.get_shape_params(text))
+    }
+
+    /// Like [`Self::get_or_shape`], but `get_shaped_text` gets the first try at what isn't cached.
+    pub(crate) fn get_or_shape_with(
+        &self,
+        text: Substr,
+        get_shaped_text: impl FnOnce(&mut Shaper, &ShapeParams) -> Option<Rc<ShapedText>>,
+    ) -> Rc<ShapedText> {
+        self.shaper
+            .borrow_mut()
+            .get_or_shape_with(self.get_shape_params(text), get_shaped_text)
+    }
+
+    fn get_shape_params(&self, text: Substr) -> ShapeParams {
+        ShapeParams {
             text,
             fonts: self.fonts.clone(),
             direction: Direction::default(),
             letter_spacing: Ems(0.0),
             word_spacing: Ems(0.0),
-            features: Rc::new(Vec::new()),
+            features: self.features.clone(),
             diagnostics: self.diagnostics.clone(),
-        })
+        }
     }
 
     pub fn fonts(&self) -> &[Rc<Font>] {

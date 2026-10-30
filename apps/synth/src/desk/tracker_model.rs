@@ -18,8 +18,9 @@
 //! sections it rests in, so the cell at a song beat is the loop's step at
 //! that beat modulo its length: every repeat of a step is the same bytes.
 
+use makepad_edit_values::{apply_splices, normalize_splices, Splice};
 use makepad_score_live::model::{InstKind, ScoreDoc};
-use makepad_score_live::source::{self, Splice, Tok, Token};
+use makepad_score_live::source::{self, Tok, Token};
 use makepad_score_live::theory;
 use makepad_score_player::presets;
 use std::collections::HashMap;
@@ -28,6 +29,9 @@ use std::collections::HashMap;
 pub const MAX_LANES: u8 = 8;
 /// The effect column's lane.
 pub const FX_LANE: u8 = 255;
+/// Why a channel MIDI in plays is read only (it shows what the keys play, live).
+pub const LIVE_MIDI: &str = "plays MIDI in, live";
+
 /// The longest a read-only part is played through for its cells.
 pub const MAX_BEATS: f64 = 4096.0;
 
@@ -567,7 +571,12 @@ pub fn build(doc: &ScoreDoc, src: &str) -> TrackModel {
                 }
             }
         } else if l.hits.is_none() {
-            c.form = Form::Fixed(if l.midi_in.is_some() { "plays a MIDI keyboard" } else { "plays a live input" });
+            c.form = Form::Fixed(if l.input.is_some() { LIVE_MIDI } else { "plays a live input" });
+            if l.input.is_some() {
+                // What the keys play, as played (song beats): see `set_live_notes`.
+                c.absolute = true;
+                c.len = 0.0;
+            }
         }
         if c.len <= 0.0 {
             c.len = l.beats.unwrap_or(bar);
@@ -694,6 +703,19 @@ pub fn played_parts(source: &str) -> Played {
 
 impl TrackModel {
     /// The read-only parts' notes as played.
+    /// A channel MIDI in plays: the notes it played so far (song beats,
+    /// pitch, velocity 0..1, newest last), read only.
+    pub fn set_live_notes(&mut self, name: &str, notes: &[(f64, f32, f32)]) {
+        let (song_len, bar) = (self.song_len, self.bar);
+        let Some(c) = self.channels.iter_mut().find(|c| c.name == name && c.form == Form::Fixed(LIVE_MIDI)) else { return };
+        c.absolute = true;
+        c.len = song_len.max(bar).max(notes.last().map_or(0.0, |n| (n.0 / bar).floor() * bar + bar));
+        c.events = notes.iter().map(|&(beat, pitch, vel)| {
+            Ev { beat, pitch, dur: 0.0, vel, kind: EvKind::Note, lane: 0, src: Src::None, text: note_text(pitch), vel_text: vel_text(vel), opts: false }
+        }).collect();
+        finish(c);
+    }
+
     pub fn set_played(&mut self, played: &Played) {
         for c in &mut self.channels {
             if !matches!(c.form, Form::Fixed("plays its code")) {
@@ -714,36 +736,22 @@ impl TrackModel {
 
 /// Order splices for one change: disjoint, an insert at a deletion's start
 /// kept after it; inserts at one place merged in the order given.
-pub fn normalize(mut splices: Vec<Splice>) -> Result<Vec<Splice>, String> {
+pub fn normalize(splices: Vec<Splice>) -> Result<Vec<Splice>, String> {
     // Inserts at one place, merged (stable: in the order given).
     let mut merged: Vec<Splice> = Vec::with_capacity(splices.len());
-    for s in splices.drain(..) {
-        if s.start == s.end {
-            if let Some(m) = merged.iter_mut().find(|m| m.start == s.start && m.end == s.end) {
+    for s in splices {
+        if s.range.is_empty() {
+            if let Some(m) = merged.iter_mut().find(|m| m.file == s.file && m.range == s.range) {
                 m.text.push_str(&s.text);
                 continue;
             }
         }
         merged.push(s);
     }
-    // Ascending; at one start the insert first (it lands before what the
-    // deletion leaves).
-    merged.sort_by(|a, b| a.start.cmp(&b.start).then((a.end - a.start).cmp(&(b.end - b.start))));
-    for w in merged.windows(2) {
-        if w[0].end > w[1].start {
-            return Err("two edits of one change overlap".into());
-        }
-    }
+    let mut merged = normalize_splices(merged)?;
+    // The tracker works in source order; apply_splices handles application order.
+    merged.reverse();
     Ok(merged)
-}
-
-/// Apply normalized splices (back to front).
-pub fn apply_all(src: &str, splices: &[Splice]) -> String {
-    let mut out = src.to_string();
-    for s in splices.iter().rev() {
-        out.replace_range(s.start..s.end, &s.text);
-    }
-    out
 }
 
 /// `@c4`, or the drum's name on a drum part.
@@ -775,19 +783,19 @@ pub fn note_atom(pitch: f32, drums: bool) -> String {
 }
 
 fn num(v: f64) -> String {
-    source::fmt_num(v, 4)
+    makepad_edit_values::number::fmt_num(v, 4)
 }
 
 /// A new entry's text.
 pub fn entry_text(beat: f64, pitch: f32, dur: f64, vel: f32, drums: bool) -> String {
-    format!("[{} {} {} {}]", num(beat), note_atom(pitch, drums), num(dur), source::fmt_num(vel as f64, 2))
+    format!("[{} {} {} {}]", num(beat), note_atom(pitch, drums), num(dur), makepad_edit_values::number::fmt_num(vel as f64, 2))
 }
 
 /// Set a hits step's character.
 pub fn set_step(c: &Channel, step: usize, ch: u8) -> Option<Splice> {
     let Form::Hits { steps, chars, .. } = &c.form else { return None };
     let at = *steps.get(step)?;
-    (chars[step] != ch).then(|| Splice { start: at, end: at + 1, text: (ch as char).to_string() })
+    (chars[step] != ch).then(|| Splice { file: 0, range: at..at + 1, text: (ch as char).to_string() })
 }
 
 /// Insert a note into list `list` of a notes part, at its place by beat.
@@ -804,11 +812,11 @@ pub fn insert_entry(c: &Channel, list: usize, text: String, beat: f64) -> Option
     });
     let next = (0..l.entries.len()).find(|&i| beats[i] > beat + 1e-9);
     Some(match next {
-        Some(0) => Splice { start: l.entries[0].0, end: l.entries[0].0, text: format!("{text}{}", l.sep) },
-        Some(k) => Splice { start: l.entries[k - 1].1, end: l.entries[k - 1].1, text: format!("{}{text}", l.sep) },
+        Some(0) => Splice { file: 0, range: l.entries[0].0..l.entries[0].0, text: format!("{text}{}", l.sep) },
+        Some(k) => Splice { file: 0, range: l.entries[k - 1].1..l.entries[k - 1].1, text: format!("{}{text}", l.sep) },
         None => match l.entries.last() {
-            Some(last) => Splice { start: last.1, end: last.1, text: format!("{}{text}", l.sep) },
-            None => Splice { start: l.open, end: l.open, text },
+            Some(last) => Splice { file: 0, range: last.1..last.1, text: format!("{}{text}", l.sep) },
+            None => Splice { file: 0, range: l.open..l.open, text },
         },
     })
 }
@@ -821,12 +829,12 @@ pub fn delete_entry(src: &str, c: &Channel, e: &EntrySrc) -> Option<Splice> {
     let start = if e.index == 0 {
         // The first entry takes the space after it instead.
         let next = l.entries.get(1).map_or(e.end, |n| n.0);
-        return Some(Splice { start: e.start, end: if l.entries.len() > 1 { next } else { e.end }, text: String::new() });
+        return Some(Splice { file: 0, range: e.start..(if l.entries.len() > 1 { next } else { e.end }), text: String::new() });
     } else {
         before
     };
     let _ = src;
-    Some(Splice { start, end: e.end, text: String::new() })
+    Some(Splice { file: 0, range: start..e.end, text: String::new() })
 }
 
 /// Replace a value of an entry (dur, vel) that may not be written: the
@@ -836,27 +844,27 @@ pub fn set_entry_value(e: &EntrySrc, ev: &Ev, dur: Option<f64>, vel: Option<f32>
     match (e.dur, e.vel) {
         (Some(d), Some(v)) => {
             if let Some(dur) = dur {
-                out.push(Splice { start: d.0, end: d.1, text: num(dur) });
+                out.push(Splice { file: 0, range: d.0..d.1, text: num(dur) });
             }
             if let Some(vel) = vel {
-                out.push(Splice { start: v.0, end: v.1, text: source::fmt_num(vel as f64, 2) });
+                out.push(Splice { file: 0, range: v.0..v.1, text: makepad_edit_values::number::fmt_num(vel as f64, 2) });
             }
         }
         (Some(d), None) => {
             if let Some(dur) = dur {
-                out.push(Splice { start: d.0, end: d.1, text: num(dur) });
+                out.push(Splice { file: 0, range: d.0..d.1, text: num(dur) });
             }
             if let Some(vel) = vel {
-                out.push(Splice { start: d.1, end: d.1, text: format!(" {}", source::fmt_num(vel as f64, 2)) });
+                out.push(Splice { file: 0, range: d.1..d.1, text: format!(" {}", makepad_edit_values::number::fmt_num(vel as f64, 2)) });
             }
         }
         (None, _) => {
             let dur = dur.unwrap_or(ev.dur as f64);
             let text = match vel {
-                Some(vel) => format!(" {} {}", num(dur), source::fmt_num(vel as f64, 2)),
+                Some(vel) => format!(" {} {}", num(dur), makepad_edit_values::number::fmt_num(vel as f64, 2)),
                 None => format!(" {}", num(dur)),
             };
-            out.push(Splice { start: e.note.1, end: e.note.1, text });
+            out.push(Splice { file: 0, range: e.note.1..e.note.1, text });
         }
     }
     out
@@ -873,10 +881,10 @@ pub fn change_event(c: &Channel, ev: &Ev, beat: f64, pitch: f32, dur: f64, vel: 
         Src::Entry(e) => {
             let mut out = Vec::new();
             if (beat - ev.beat).abs() > 1e-9 {
-                out.push(Splice { start: e.beat.0, end: e.beat.1, text: num(beat.max(0.0)) });
+                out.push(Splice { file: 0, range: e.beat.0..e.beat.1, text: num(beat.max(0.0)) });
             }
             if matches!(ev.kind, EvKind::Note | EvKind::Hit) && (pitch - ev.pitch).abs() > 1e-3 {
-                out.push(Splice { start: e.note.0, end: e.note.1, text: note_atom(pitch, c.drums) });
+                out.push(Splice { file: 0, range: e.note.0..e.note.1, text: note_atom(pitch, c.drums) });
             }
             let dur_changed = (dur - ev.dur as f64).abs() > 1e-6;
             let vel_changed = (vel - ev.vel).abs() > 1e-3;
@@ -895,7 +903,7 @@ pub fn sends_text(sends: &[(String, f32)], fx: &str, amount: f32) -> String {
     if amount > 0.001 {
         out.push((fx.to_string(), amount));
     }
-    let parts: Vec<String> = out.iter().map(|(n, a)| format!("{n}: {}", source::fmt_num(*a as f64, 2))).collect();
+    let parts: Vec<String> = out.iter().map(|(n, a)| format!("{n}: {}", makepad_edit_values::number::fmt_num(*a as f64, 2))).collect();
     format!("{{{}}}", parts.join(" "))
 }
 
@@ -943,7 +951,7 @@ pub fn resample_hits(src: &str, name: &str, slots: usize) -> Result<Splice, Stri
     let len = n as f64 * h.step;
     let step = len / slots as f64;
     if step < 1.0 / 64.0 - 1e-9 {
-        return Err(format!("{slots} slots over {} beats is finer than 1/64 beat", source::fmt_num(len, 3)));
+        return Err(format!("{slots} slots over {} beats is finer than 1/64 beat", makepad_edit_values::number::fmt_num(len, 3)));
     }
     let mut out = vec![b'.'; slots];
     for (i, c) in h.chars.iter().enumerate() {
@@ -952,7 +960,7 @@ pub fn resample_hits(src: &str, name: &str, slots: usize) -> Result<Splice, Stri
         }
         let j = i as f64 * h.step / step;
         if (j - j.round()).abs() > 1e-6 {
-            return Err(format!("a hit at beat {} falls between {slots} slots: clear it first or pick a finer split", source::fmt_num(i as f64 * h.step, 3)));
+            return Err(format!("a hit at beat {} falls between {slots} slots: clear it first or pick a finer split", makepad_edit_values::number::fmt_num(i as f64 * h.step, 3)));
         }
         out[j.round() as usize] = *c;
     }
@@ -969,18 +977,18 @@ pub fn resample_hits(src: &str, name: &str, slots: usize) -> Result<Splice, Stri
         text.push(*c as char);
     }
     text.push('"');
-    let step_text = source::fmt_num(step, 6);
-    let mut splices = vec![Splice { start: h.hits.0, end: h.hits.1, text }];
+    let step_text = makepad_edit_values::number::fmt_num(step, 6);
+    let mut splices = vec![Splice { file: 0, range: h.hits.0..h.hits.1, text }];
     match h.step_at {
-        Some(at) => splices.push(Splice { start: at.0, end: at.1, text: step_text }),
-        None if (step - 0.25).abs() > 1e-12 => splices.push(Splice { start: h.hits.1, end: h.hits.1, text: format!(" step: {step_text}") }),
+        Some(at) => splices.push(Splice { file: 0, range: at.0..at.1, text: step_text }),
+        None if (step - 0.25).abs() > 1e-12 => splices.push(Splice { file: 0, range: h.hits.1..h.hits.1, text: format!(" step: {step_text}") }),
         None => {}
     }
     let splices = normalize(splices)?;
     // One splice from the first change to the last (the bytes between kept).
-    let (a, b) = (splices[0].start, splices[splices.len() - 1].end);
-    let changed = apply_all(&src[a..b], &splices.iter().map(|s| Splice { start: s.start - a, end: s.end - a, text: s.text.clone() }).collect::<Vec<_>>());
-    Ok(Splice { start: a, end: b, text: changed })
+    let (a, b) = (splices[0].range.start, splices[splices.len() - 1].range.end);
+    let changed = apply_splices(&src[a..b], 0, &splices.iter().map(|s| Splice { file: 0, range: s.range.start - a..s.range.end - a, text: s.text.clone() }).collect::<Vec<_>>())?;
+    Ok(Splice { file: 0, range: a..b, text: changed })
 }
 
 #[cfg(test)]
@@ -995,7 +1003,7 @@ mod tests {
     }
 
     fn edit(src: &str, splices: Vec<Splice>) -> String {
-        apply_all(src, &normalize(splices).unwrap())
+        apply_splices(src, 0, &normalize(splices).unwrap()).unwrap()
     }
 
     #[test]
@@ -1060,7 +1068,7 @@ mod tests {
     fn tracker_sends_and_fields() {
         assert_eq!(sends_text(&[("room".into(), 0.3)], "echo", 0.25), "{room: 0.3 echo: 0.25}");
         assert_eq!(sends_text(&[("room".into(), 0.3)], "room", 0.0), "{}");
-        let s = apply_all(SRC, &[source::set_field(SRC, "kick", "amp", "0.6").unwrap()]);
+        let s = apply_splices(SRC, 0, &[source::set_field(SRC, "kick", "amp", "0.6").unwrap()]).unwrap();
         assert!(s.contains("note: @kick amp: 0.6}"), "{s}");
     }
 
@@ -1074,14 +1082,14 @@ mod tests {
         };
         loads(src);
         // Finer: 16 to 32, the step halves.
-        let s = apply_all(src, &[resample_hits(src, "kick", 32).unwrap()]);
+        let s = apply_splices(src, 0, &[resample_hits(src, "kick", 32).unwrap()]).unwrap();
         assert!(s.contains("hits: \"x.......x.......x.......x.......\" step: 0.125 note: @kick"), "{s}");
         loads(&s);
         // And back: 32 to 16, the written step goes back to 0.25.
-        let back = apply_all(&s, &[resample_hits(&s, "kick", 16).unwrap()]);
+        let back = apply_splices(&s, 0, &[resample_hits(&s, "kick", 16).unwrap()]).unwrap();
         assert!(back.contains("hits: \"x...x...x...x...\" step: 0.25 note: @kick"), "{back}");
         // Triplets: 16 to 12, the beats stay on the beat.
-        let t = apply_all(src, &[resample_hits(src, "kick", 12).unwrap()]);
+        let t = apply_splices(src, 0, &[resample_hits(src, "kick", 12).unwrap()]).unwrap();
         assert!(t.contains("hits: \"x..x..x..x..\" step: 0.3333"), "{t}");
         loads(&t);
         // Coarser refused when a hit falls between: an off-beat at 0.25.
@@ -1089,12 +1097,12 @@ mod tests {
         let e = resample_hits(&off, "kick", 8).unwrap_err();
         assert!(e.contains("falls between"), "{e}");
         // Coarser allowed when every hit lands: 16 to 8.
-        let c = apply_all(src, &[resample_hits(src, "kick", 8).unwrap()]);
+        let c = apply_splices(src, 0, &[resample_hits(src, "kick", 8).unwrap()]).unwrap();
         assert!(c.contains("hits: \"x.x.x.x.\" step: 0.5"), "{c}");
         loads(&c);
         // Groups kept: a separator per beat.
         let g = src.replace("x...x...x...x...", "x... x... x... x...");
-        let gs = apply_all(&g, &[resample_hits(&g, "kick", 32).unwrap()]);
+        let gs = apply_splices(&g, 0, &[resample_hits(&g, "kick", 32).unwrap()]).unwrap();
         assert!(gs.contains("hits: \"x....... x....... x....... x.......\""), "{gs}");
     }
 }

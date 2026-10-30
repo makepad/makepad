@@ -1,17 +1,30 @@
 use crate::makepad_draw::text::{
+    font_family::FontFamilyId,
     geom::Point as TextPoint,
-    layouter::{LaidoutText, SelectionRect},
+    layouter::{is_hangable_white_space, is_short_of_following_room, LaidoutRow, LaidoutText, SelectionRect},
+    line_break::{find_first_line_break, FollowingContext, PrecedingContext},
     selection::{Cursor, Selection},
+    shaper::ShapedText,
 };
 use crate::text_input::{mark_band_rect, DrawTextMark, TextMark, TextMarkKind, TextMarkSet};
 use crate::{
-    animator::*, makepad_derive_widget::*, makepad_draw::shader::draw_text::TextOverflow,
-    makepad_draw::turtle::RowAlign, makepad_draw::*, widget::*, widget_tree::CxWidgetExt,
+    animator::*, html::{FollowingRoomFinder, PendingFollowingRoom, PendingTextAfterRun}, makepad_derive_widget::*,
+    makepad_draw::shader::draw_text::TextOverflow, makepad_draw::turtle::{RowAlign, RowAlignRole}, makepad_draw::*,
+    widget::*, widget_tree::CxWidgetExt,
 };
-use std::rc::Rc;
+use std::{cell::Cell, rc::Rc};
 use unicode_segmentation::UnicodeSegmentation;
 
 const LPXS_PER_PT: f32 = 96.0 / 72.0;
+
+/// Returns `text` without the `'\n'` and `'\r'` at its end, which we drop from every run.
+pub(crate) fn trim_trailing_line_breaks(text: &str) -> &str {
+    let mut end = text.len();
+    while end > 0 && matches!(text.as_bytes()[end - 1], b'\n' | b'\r') {
+        end -= 1;
+    }
+    &text[..end]
+}
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -306,6 +319,37 @@ impl StackCounter {
     }
     pub fn value(&self) -> usize {
         self.0
+    }
+}
+
+/// Which of TextFlow's five text styles a run is drawn with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TextStyleSlot {
+    Normal,
+    Bold,
+    Italic,
+    BoldItalic,
+    Fixed,
+}
+
+/// The style a run of text gets from TextFlow's style stacks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RunStyle {
+    pub is_bold: bool,
+    pub is_italic: bool,
+    pub is_fixed: bool,
+    pub font_size: f32,
+}
+
+impl RunStyle {
+    fn get_text_style_slot(&self) -> TextStyleSlot {
+        match (self.is_fixed, self.is_bold, self.is_italic) {
+            (true, _, _) => TextStyleSlot::Fixed,
+            (false, true, true) => TextStyleSlot::BoldItalic,
+            (false, true, false) => TextStyleSlot::Bold,
+            (false, false, true) => TextStyleSlot::Italic,
+            (false, false, false) => TextStyleSlot::Normal,
+        }
     }
 }
 
@@ -792,12 +836,61 @@ pub struct TextFlow {
     /// the last allowed line stays open to runs that continue it.
     #[rust]
     content_truncated: bool,
+    /// How many of the blocks we skipped after the content got cut haven't ended yet.
+    #[rust]
+    skipped_block_depth: usize,
     /// Turtle y position where the most recent text run ended, identifying the
     /// visual line that run last occupied. A later run landing on a different
     /// row means something other than a text run opened that row. NaN until
     /// the first run of a draw pass.
     #[rust]
     last_row_y: f64,
+    /// What the line breaking rules see before the next run, if it continues the current line.
+    #[rust]
+    pub line_break_before: PrecedingContext,
+    /// Whether the last run kept room on its row for the next run's first unit.
+    #[rust]
+    is_start_reserved: bool,
+    /// Whether that room includes the margin and padding of the code box the unit starts.
+    #[rust]
+    is_start_reserved_for_inline_code: bool,
+    #[rust]
+    line_break_after: FollowingContext,
+    #[rust]
+    trailing_glue_width_in_lpxs: f32,
+    #[rust]
+    is_trailing_glue_in_inline_code: bool,
+    /// The room that what follows the inline content we hold needs on its row.
+    #[rust]
+    following_room_in_lpxs: f32,
+    /// What Html needs to find what follows a widget's runs, which it does at the first one.
+    #[rust]
+    pending_text_after_run: Option<PendingTextAfterRun>,
+    /// What Html gives us to find the room that what follows our runs needs, for the draw it's doing.
+    #[rust]
+    following_room_finder: Option<FollowingRoomFinder>,
+    /// Where what follows our next runs starts, which we find the room for once one ends on the last line.
+    #[rust]
+    pending_following_room: Option<PendingFollowingRoom>,
+    /// The ellipsis width in each of our five text styles, with the font family and generation we measured it in.
+    #[rust]
+    ellipsis_widths_in_ems: Cell<[Option<(FontFamilyId, u64, f32)>; 5]>,
+    #[rust]
+    inline_content_start_pos: DVec2,
+    #[rust]
+    was_text_drawn_in_inline_content: bool,
+    #[rust]
+    is_holding_inline_content: bool,
+    /// Whether we turned wrapping off for the inline content we hold, which its runs turn back on.
+    #[rust]
+    is_wrap_off_for_inline_content: bool,
+    /// Where the first run that ran past its row's edge in the inline content we hold starts,
+    /// less the white space the run before it ends with.
+    #[rust]
+    overrun_start_x: Option<f64>,
+    /// Where the last run ended and how it was laid out, while `max_lines` is set.
+    #[rust]
+    last_run_end: Option<(DVec2, Rc<LaidoutText>)>,
 
     #[rust]
     pub areas_tracker: RectAreasTracker,
@@ -847,6 +940,9 @@ pub struct TextFlow {
     pub table_row_is_header: bool,
     #[rust]
     table_is_first_row: bool,
+    /// The row each table we're in has open, whose cells all start on its first line.
+    #[rust]
+    open_table_rows: SmallVec<[Option<TableRowLines>; 2]>,
     #[live]
     pub inline_code_padding: Inset,
     #[live]
@@ -1030,34 +1126,38 @@ impl TextFlow {
         self.content_truncated
     }
 
-    /// Prepares the turtle for inline content that TextFlow does not lay out
-    /// itself, returning state that [`Self::end_inline_content`] needs.
+    /// Prepares the turtle for inline content we don't lay out ourselves. Pair it with [`Self::end_inline_content`].
     ///
-    /// Such content is walked as one atomic unit, so a turtle with wrapping on
-    /// relocates it whole onto a fresh row when it does not fit. On the last
-    /// line `max_lines` allows there is no row to relocate it to, and its size
-    /// is not knowable until it has been drawn, so wrapping is switched off for
-    /// the duration of its walk: it stays on the last allowed line. A tracked
-    /// clip brackets the draw so that, when the content overruns the line,
-    /// `end_inline_content` can cut it at the line's right edge and end the
-    /// flow with an ellipsis instead of letting it run past the container.
-    /// Returns `None` (and does nothing) while the line budget still has room.
-    /// Pair every call with [`Self::end_inline_content`].
+    /// Content starting on the last allowed line gets a clip so we can hide it, and with Ellipsis so does content
+    /// that could wrap onto it. On the last line we turn wrapping off too, so it can't move to a row we don't have.
     pub fn begin_inline_content(&mut self, cx: &mut Cx2d) -> Option<InlineContentHold> {
         let is_budget_spent = self.max_lines > 0 && self.lines_drawn >= self.max_lines;
         // A new line past the budget can't hold anything, e.g., right after a list or quote ends.
-        if is_budget_spent && self.collapse_block_margins && Self::is_at_row_start(cx) {
+        if is_budget_spent && self.collapse_block_margins && self.is_at_new_line_start(cx) {
             self.content_truncated = true;
             return None;
         }
         self.flush_block_margin(cx);
-        if !is_budget_spent {
+        self.inline_content_start_pos = cx.turtle().pos();
+        self.was_text_drawn_in_inline_content = false;
+        if self.max_lines == 0 {
             return None;
         }
-        let restore_wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
-        if restore_wrap {
+        // The row the content starts on costs a line too when nothing charged it yet, like a list item's marker row.
+        let lines_drawn = self.lines_drawn + self.is_on_new_row(cx) as usize;
+        // Content that can wrap onto the last line gets the clip too, so we can hide it there.
+        let can_reach_last_line = self.text_overflow == TextOverflow::Ellipsis && lines_drawn + 1 >= self.max_lines;
+        if lines_drawn < self.max_lines && !can_reach_last_line {
+            return None;
+        }
+        let is_wrap_off =
+            lines_drawn >= self.max_lines && matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
+        if is_wrap_off {
             cx.turtle_mut().set_flow_wrap(false);
         }
+        self.is_holding_inline_content = true;
+        self.is_wrap_off_for_inline_content = is_wrap_off;
+        self.overrun_start_x = None;
         // A covering rect, so the clip is a no-op unless the content overruns
         // and end_inline_content shrinks it.
         let clip_index = cx.push_clip_rect_tracked(Rect {
@@ -1065,15 +1165,68 @@ impl TextFlow {
             size: dvec2(2e7, 2e7),
         });
         Some(InlineContentHold {
-            restore_wrap,
             clip_index,
-            start_x: cx.turtle().pos().x,
+            start_x: self.inline_content_start_pos.x,
         })
     }
 
     /// Whether the turtle is at the left edge of its row, so the next thing drawn opens a new visual line.
     fn is_at_row_start(cx: &Cx2d) -> bool {
         cx.turtle().pos().x - cx.turtle().inner_rect().pos.x <= 0.5
+    }
+
+    /// Whether the turtle is past the right edge of its row, after content that didn't fit there.
+    fn is_past_row_end(cx: &Cx2d) -> bool {
+        cx.turtle().pos().x > Self::get_row_end(cx) + 0.5
+    }
+
+    /// Returns where the turtle's rows end on the right, which is NaN when they have no width.
+    fn get_row_end(cx: &Cx2d) -> f64 {
+        let inner = cx.turtle().inner_rect();
+        inner.pos.x + inner.size.x
+    }
+
+    /// Whether the turtle is on another row than the one the last item we charged ended on.
+    fn is_on_new_row(&self, cx: &Cx2d) -> bool {
+        self.last_row_y.is_nan() || (cx.turtle().pos().y - self.last_row_y).abs() > 0.5
+    }
+
+    /// Whether the turtle is at the start of a row we haven't charged, so the next thing drawn opens a new line.
+    fn is_at_new_line_start(&self, cx: &Cx2d) -> bool {
+        Self::is_at_row_start(cx) && self.is_on_new_row(cx)
+    }
+
+    /// Whether the inline content since [`Self::begin_inline_content`] drew no runs and ends on the last line
+    /// `max_lines` allows, so what follows it decides if it ends with the ellipsis.
+    pub(crate) fn is_atomic_inline_content_on_last_line(&self, cx: &Cx2d) -> bool {
+        !self.was_text_drawn_in_inline_content
+            && self.has_ellipsis_at_max_lines()
+            && self.lines_drawn + self.has_left_uncharged_row(cx) as usize + self.is_on_new_row(cx) as usize
+                == self.max_lines
+    }
+
+    /// Whether the inline content since [`Self::begin_inline_content`] drew no runs and wrapped off the row
+    /// it started on, which nothing charged yet, like a list item's marker row.
+    fn has_left_uncharged_row(&self, cx: &Cx2d) -> bool {
+        let start_y = self.inline_content_start_pos.y;
+        !self.was_text_drawn_in_inline_content
+            && (self.last_row_y.is_nan() || (start_y - self.last_row_y).abs() > 0.5)
+            && (cx.turtle().pos().y - start_y).abs() > 0.5
+    }
+
+    /// Returns how wide the white space is that the last run ends with, when it ended at `pos`.
+    fn get_white_space_width_before(&self, pos: DVec2) -> f64 {
+        self.last_run_end.as_ref().filter(|(end, _)| *end == pos).map_or(0.0, |(_, run)| {
+            let last_row = run.rows.last().unwrap();
+            let white_space_start = last_row.text.trim_end_matches(is_hangable_white_space).len();
+            let white_space_width_in_lpxs: f32 = last_row
+                .glyphs
+                .iter()
+                .filter(|glyph| glyph.cluster >= white_space_start)
+                .map(|glyph| glyph.advance_in_lpxs())
+                .sum();
+            (white_space_width_in_lpxs * self.draw_text.font_scale) as f64
+        })
     }
 
     /// The block-start state that `end_inline_widget` puts back if a widget draws nothing.
@@ -1083,83 +1236,107 @@ impl TextFlow {
 
     /// Counts a drawn inline widget as content on its line. If it drew nothing, the block
     /// start (and pending margin) that `begin_inline_content` used up are put back.
-    pub(crate) fn end_inline_widget(&mut self, drew_something: bool, block_start_state: (bool, f64)) {
+    pub(crate) fn end_inline_widget(&mut self, cx: &Cx2d, block_start_state: (bool, f64)) {
         if !self.collapse_block_margins {
             return;
         }
-        if drew_something {
+        if cx.turtle().pos() != self.inline_content_start_pos {
             self.first_thing_on_a_line = false;
         } else if block_start_state.0 {
             (self.is_at_block_start, self.pending_block_margin) = block_start_state;
         }
     }
 
-    /// Completes an inline-content draw begun with
-    /// [`Self::begin_inline_content`] and charges the content to the line
-    /// budget.
+    /// Ends inline content begun with [`Self::begin_inline_content`] and charges it to the line budget.
     ///
-    /// When the content was held on the last allowed line and overran it, the
-    /// content is hidden entirely, an ellipsis is drawn where it began, and
-    /// the flow is truncated — the same visual contract text truncation has,
-    /// which drops whole glyphs rather than slicing one open.
+    /// When held content overruns the last allowed line, or leaves no room there for what follows, we end the
+    /// flow with an ellipsis and hide the content past it. `TextOverflow::Clip` hides it without an ellipsis.
     pub fn end_inline_content(&mut self, cx: &mut Cx2d, hold: Option<InlineContentHold>) {
+        if !self.was_text_drawn_in_inline_content {
+            // The room the run before kept was for runs, so it's gone after content that draws none.
+            self.is_start_reserved = false;
+            // Content that moved the turtle without drawing text through us, like a pill or an
+            // image, is atomic: a line can break on either side of it.
+            if cx.turtle().pos() != self.inline_content_start_pos {
+                self.line_break_before = PrecedingContext::AFTER_ATOMIC_INLINE;
+            }
+        }
+        if self.max_lines > 0 && self.has_left_uncharged_row(cx) {
+            self.lines_drawn += 1;
+        }
         let Some(hold) = hold else {
             self.track_inline_content(cx);
             return;
         };
-        cx.pop_clip_rect();
+        self.is_holding_inline_content = false;
+        let was_wrap_off = std::mem::take(&mut self.is_wrap_off_for_inline_content);
+        let following_room = (std::mem::take(&mut self.following_room_in_lpxs) * self.draw_text.font_scale) as f64;
+        // The turtle can end past the edge after text that fits, like after a hanging space, so runs tell us.
+        let overrun_start_x = if self.was_text_drawn_in_inline_content {
+            self.overrun_start_x.take()
+        } else {
+            Self::is_past_row_end(cx)
+                .then(|| hold.start_x - self.get_white_space_width_before(self.inline_content_start_pos))
+        };
+        let overran = overrun_start_x.is_some();
+        self.charge_inline_content(cx, overran);
 
-        let turtle = cx.turtle();
-        let pos = turtle.pos();
-        let inner = turtle.inner_rect();
+        let pos = cx.turtle().pos();
+        let inner = cx.turtle().inner_rect();
         let right = inner.pos.x + inner.size.x;
-        let overran = !inner.size.x.is_nan() && pos.x > right + 0.5;
-
-        if overran {
-            // The ellipsis is measured with the normal text style at the
-            // current font size, matching what draw_text will use to render it.
-            let font_size = *self.font_sizes.last().unwrap_or(&self.font_size);
-            self.draw_text.text_style = self.text_style_normal.clone();
-            self.draw_text.text_style.font_size = font_size;
-            self.draw_text.max_lines = 0;
-            self.draw_text.text_overflow = TextOverflow::Clip;
-            let laid = self
-                .draw_text
-                .layout(cx, 0.0, 0.0, None, false, Align::default(), "…");
-            let ellipsis_width = (laid.size_in_lpxs.width * self.draw_text.font_scale) as f64;
-
-            // The whole widget is hidden rather than sliced mid-glyph: text
-            // truncation drops entire glyphs before appending the ellipsis,
-            // and an atomic inline widget is one glyph in that sense. The
-            // ellipsis lands where the widget began, pulled left when even
-            // that spot cannot fit it.
+        let is_on_one_row = (pos.y - self.inline_content_start_pos.y).abs() <= 0.5;
+        // Text that wrapped onto this row already ended with its own ellipsis where it could.
+        let can_hide = is_on_one_row || !self.was_text_drawn_in_inline_content;
+        let is_cut_after = following_room > 0.0 && pos.x + following_room > right;
+        let has_ellipsis = self.text_overflow == TextOverflow::Ellipsis;
+        let ellipsis_x = if self.lines_drawn == self.max_lines && can_hide && (overran || is_cut_after) {
+            let ellipsis_width = if has_ellipsis {
+                (self.measure_ellipsis_in_lpxs(cx, self.get_run_style()) * self.draw_text.font_scale) as f64
+            } else {
+                0.0
+            };
+            // The ellipsis goes right after the content if it fits there, and otherwise where the content starts,
+            // or where the run that overran starts, less the white space before it that would hang at a wrap.
+            let ellipsis_x = if !overran && pos.x + ellipsis_width <= right {
+                pos.x
+            } else if !is_on_one_row {
+                inner.pos.x
+            } else {
+                overrun_start_x.unwrap_or(hold.start_x)
+            };
+            // Like text truncation, we hide whole glyphs rather than slicing one, so we hide a widget whole
+            // or from the run in it that overran. When even that spot can't fit the ellipsis, we pull it left.
+            Some(ellipsis_x.min(right - ellipsis_width).max(inner.pos.x))
+        } else {
+            None
+        };
+        match ellipsis_x {
+            Some(ellipsis_x) if ellipsis_x < pos.x => {
+                cx.update_clip_rect_at(
+                    hold.clip_index,
+                    Rect {
+                        pos: dvec2(-1e7, -1e7),
+                        size: dvec2(ellipsis_x + 1e7, 2e7),
+                    },
+                );
+                cx.pop_clip_rect();
+            }
+            _ => cx.remove_clip_rect_at(hold.clip_index),
+        }
+        if let Some(ellipsis_x) = ellipsis_x {
             let row_y = pos.y;
-            let boundary = hold
-                .start_x
-                .min(right - ellipsis_width)
-                .max(inner.pos.x);
-            cx.update_clip_rect_at(
-                hold.clip_index,
-                Rect {
-                    pos: dvec2(-1e7, -1e7),
-                    size: dvec2(boundary + 1e7, 2e7),
-                },
-            );
-
-            // The ellipsis is drawn at the cut while wrapping is still off, so
-            // it cannot open a row the budget has no line for.
-            cx.turtle_mut().move_to(dvec2(boundary, row_y));
-            self.draw_text(cx, "…");
-            if hold.restore_wrap {
-                cx.turtle_mut().set_flow_wrap(true);
+            if has_ellipsis {
+                // The ellipsis fits on this row, so it can't open a row the budget has no line for.
+                cx.turtle_mut().move_to(dvec2(ellipsis_x, row_y));
+                // A run in the content may have cut it already, which would skip our ellipsis.
+                self.content_truncated = false;
+                self.draw_text(cx, "…");
             }
             self.content_truncated = true;
             self.last_row_y = row_y;
-        } else {
-            if hold.restore_wrap {
-                cx.turtle_mut().set_flow_wrap(true);
-            }
-            self.track_inline_content(cx);
+        }
+        if was_wrap_off {
+            cx.turtle_mut().set_flow_wrap(true);
         }
     }
 
@@ -1180,18 +1357,20 @@ impl TextFlow {
         if self.max_lines == 0 {
             return;
         }
-        let turtle = cx.turtle();
-        let pos = turtle.pos();
-        let inner = turtle.inner_rect();
-        if self.last_row_y.is_nan() || (pos.y - self.last_row_y).abs() > 0.5 {
-            self.lines_drawn += 1;
-        }
-        self.last_row_y = pos.y;
         // Content held on the last allowed line runs past the right edge when
         // it did not fit. Nothing after it can be placed without opening a row
         // the budget cannot pay for, so the flow ends here.
-        let overran_row = !inner.size.x.is_nan() && pos.x > inner.pos.x + inner.size.x + 0.5;
-        if self.lines_drawn > self.max_lines || overran_row {
+        self.charge_inline_content(cx, Self::is_past_row_end(cx));
+    }
+
+    /// Charges the row the turtle is on to the `max_lines` budget, and cuts the content that follows
+    /// when that's past the budget, or when the content `has_overrun` the last line.
+    fn charge_inline_content(&mut self, cx: &Cx2d, has_overrun: bool) {
+        if self.is_on_new_row(cx) {
+            self.lines_drawn += 1;
+        }
+        self.last_row_y = cx.turtle().pos().y;
+        if self.lines_drawn > self.max_lines || (has_overrun && self.lines_drawn == self.max_lines) {
             self.content_truncated = true;
         }
     }
@@ -1497,7 +1676,13 @@ impl TextFlow {
         self.clear_stacks();
         self.lines_drawn = 0;
         self.content_truncated = false;
+        self.skipped_block_depth = 0;
         self.last_row_y = f64::NAN;
+        self.last_run_end = None;
+        self.is_holding_inline_content = false;
+        self.is_wrap_off_for_inline_content = false;
+        self.overrun_start_x = None;
+        self.following_room_finder = None;
         if self.tracks_text() {
             self.selection_tracker.clear();
             self.widget_text_entries.clear();
@@ -1528,15 +1713,79 @@ impl TextFlow {
         self.y_shift_scales.clear();
         self.font_colors.clear();
         self.area_stack.clear();
-        self.first_thing_on_a_line = true;
+        self.mark_as_line_start();
+        self.clear_line_break_after();
         self.table_num_columns = 0;
         self.in_table_header = false;
         self.table_row_cell_rects.clear();
         self.table_row_is_header = false;
         self.table_is_first_row = false;
+        self.open_table_rows.clear();
         self.cell_text_align_x = 0.0;
         self.pending_block_margin = 0.0;
         self.is_at_block_start = true;
+    }
+
+    /// Marks whatever is drawn next as the first thing on its line.
+    pub(crate) fn mark_as_line_start(&mut self) {
+        self.first_thing_on_a_line = true;
+        self.reset_line_breaking();
+    }
+
+    /// Makes line breaking start over at whatever is drawn next, as if it began a paragraph.
+    pub(crate) fn reset_line_breaking(&mut self) {
+        self.line_break_before = PrecedingContext::PARAGRAPH_START;
+        self.is_start_reserved = false;
+    }
+
+    /// Sets what follows the runs drawn from now on in their line, until [`Self::clear_line_break_after`].
+    ///
+    /// That lets those runs break like the rest of their paragraph.
+    /// Pass `is_trailing_glue_in_inline_code` when the glue's width includes the code box it starts in.
+    pub fn set_line_break_after(
+        &mut self,
+        line_break_after: FollowingContext,
+        trailing_glue_width_in_lpxs: f32,
+        is_trailing_glue_in_inline_code: bool,
+    ) {
+        self.line_break_after = line_break_after;
+        self.trailing_glue_width_in_lpxs = trailing_glue_width_in_lpxs;
+        self.is_trailing_glue_in_inline_code = is_trailing_glue_in_inline_code;
+    }
+
+    /// Like [`Self::set_line_break_after`], but `pending` finds what follows only when we lay out a run.
+    pub(crate) fn set_line_break_after_lazily(&mut self, pending: PendingTextAfterRun) {
+        self.pending_text_after_run = Some(pending);
+    }
+
+    /// Sets the room that what follows the inline content we hold needs on its row.
+    ///
+    /// On the last line `max_lines` allows, it ends with the ellipsis when it leaves less room than that.
+    pub(crate) fn set_following_room(&mut self, following_room_in_lpxs: f32) {
+        self.following_room_in_lpxs = following_room_in_lpxs;
+    }
+
+    /// Sets what finds the room that what follows our runs needs, until the next draw begins.
+    pub(crate) fn set_following_room_finder(&mut self, finder: FollowingRoomFinder) {
+        self.following_room_finder = Some(finder);
+    }
+
+    /// Like [`Self::set_following_room`], but for our next runs, and we find the room only for a run
+    /// that ends on the last line `max_lines` allows.
+    pub(crate) fn set_following_room_lazily(&mut self, pending: PendingFollowingRoom) {
+        self.pending_following_room = Some(pending);
+    }
+
+    /// Whether the last line `max_lines` allows ends with an ellipsis when content gets cut.
+    pub(crate) fn has_ellipsis_at_max_lines(&self) -> bool {
+        self.max_lines > 0 && self.text_overflow == TextOverflow::Ellipsis
+    }
+
+    /// Goes back to laying out runs as if nothing followed them.
+    pub fn clear_line_break_after(&mut self) {
+        self.pending_text_after_run = None;
+        self.pending_following_room = None;
+        self.set_line_break_after(FollowingContext::END_OF_TEXT, 0.0, false);
     }
 
     pub fn push_size_rel_scale(&mut self, scale: f64) {
@@ -1544,37 +1793,48 @@ impl TextFlow {
             .push(self.font_sizes.last().unwrap_or(&self.font_size) * (scale as f32));
     }
 
+    fn get_text_style(&self, slot: TextStyleSlot) -> &TextStyle {
+        match slot {
+            TextStyleSlot::Normal => &self.text_style_normal,
+            TextStyleSlot::Bold => &self.text_style_bold,
+            TextStyleSlot::Italic => &self.text_style_italic,
+            TextStyleSlot::BoldItalic => &self.text_style_bold_italic,
+            TextStyleSlot::Fixed => &self.text_style_fixed,
+        }
+    }
+
+    /// Returns the text style that runs in `slot` are drawn with, and our DrawText.
+    ///
+    /// We borrow both at once so a probe can swap the style into the DrawText instead of cloning it.
+    fn get_text_style_and_draw_text(&mut self, slot: TextStyleSlot) -> (&mut TextStyle, &mut DrawText) {
+        let text_style = match slot {
+            TextStyleSlot::Normal => &mut self.text_style_normal,
+            TextStyleSlot::Bold => &mut self.text_style_bold,
+            TextStyleSlot::Italic => &mut self.text_style_italic,
+            TextStyleSlot::BoldItalic => &mut self.text_style_bold_italic,
+            TextStyleSlot::Fixed => &mut self.text_style_fixed,
+        };
+        (text_style, &mut self.draw_text)
+    }
+
     /// (Ascender, descender) in ems (descender positive) of one of the five
-    /// run styles, probed once via a tiny layout call and cached. Slots:
-    /// 0 normal, 1 bold, 2 italic, 3 bold-italic, 4 fixed.
-    fn style_metrics_em(&mut self, cx: &mut Cx2d, slot: usize) -> (f32, f32) {
-        if let Some(v) = self.style_metrics_em[slot] {
+    /// run styles, probed once via a tiny layout call and cached.
+    fn style_metrics_em(&mut self, cx: &mut Cx2d, slot: TextStyleSlot) -> (f32, f32) {
+        if let Some(v) = self.style_metrics_em[slot as usize] {
             return v;
         }
-        let style = match slot {
-            1 => self.text_style_bold.clone(),
-            2 => self.text_style_italic.clone(),
-            3 => self.text_style_bold_italic.clone(),
-            4 => self.text_style_fixed.clone(),
-            _ => self.text_style_normal.clone(),
-        };
         const PROBE_PT: f32 = 100.0;
-        let saved = self.draw_text.text_style.clone();
-        self.draw_text.text_style = style;
-        self.draw_text.text_style.font_size = PROBE_PT;
         let (asc_lpxs, desc_lpxs) = self
-            .draw_text
-            .layout(cx, 0.0, 0.0, None, false, Align::default(), "Ag")
+            .layout_probe(cx, slot, PROBE_PT, "Ag")
             .rows
             .first()
             .map(|row| (row.ascender_in_lpxs, -row.descender_in_lpxs))
             .unwrap_or((PROBE_PT * LPXS_PER_PT * 0.9, PROBE_PT * LPXS_PER_PT * 0.3));
-        self.draw_text.text_style = saved;
         let em = (
             asc_lpxs / (PROBE_PT * LPXS_PER_PT),
             desc_lpxs / (PROBE_PT * LPXS_PER_PT),
         );
-        self.style_metrics_em[slot] = Some(em);
+        self.style_metrics_em[slot as usize] = Some(em);
         em
     }
 
@@ -1590,16 +1850,91 @@ impl TextFlow {
         }
     }
 
+    /// Returns the height and baseline of a line of text in the current line's style.
+    fn get_line_height_and_baseline_in_lpxs(&mut self, cx: &mut Cx2d) -> (f32, f32) {
+        let line_size = self.line_font_size();
+        let (line_asc, line_desc) = self.style_metrics_em(cx, TextStyleSlot::Normal);
+        ((line_asc + line_desc) * line_size * LPXS_PER_PT, line_asc * line_size * LPXS_PER_PT)
+    }
+
     /// Lays out a probe in the current line's own style (the normal style at the
     /// line's size), so an inline widget can read the metrics it has to line up with.
     pub fn line_probe(&mut self, cx: &mut Cx2d) -> Rc<LaidoutText> {
         let line_size = self.line_font_size();
-        std::mem::swap(&mut self.draw_text.text_style, &mut self.text_style_normal);
-        let normal_size = std::mem::replace(&mut self.draw_text.text_style.font_size, line_size);
-        let probe = self.draw_text.layout(cx, 0.0, 0.0, None, false, Align::default(), "Ag");
-        self.draw_text.text_style.font_size = normal_size;
-        std::mem::swap(&mut self.draw_text.text_style, &mut self.text_style_normal);
+        self.layout_probe(cx, TextStyleSlot::Normal, line_size, "Ag")
+    }
+
+    /// Returns the style our style stacks give the next run.
+    fn get_run_style(&self) -> RunStyle {
+        RunStyle {
+            is_bold: self.bold.value() > 0,
+            is_italic: self.italic.value() > 0,
+            is_fixed: self.fixed.value() > 0,
+            font_size: *self.font_sizes.last().unwrap_or(&self.font_size),
+        }
+    }
+
+    /// Measures `text` the way a run in `style` draws it, without wrapping.
+    pub(crate) fn measure_text_in_lpxs(&mut self, cx: &mut Cx2d, text: &str, style: RunStyle) -> f32 {
+        self.draw_text.max_lines = 0;
+        self.draw_text.text_overflow = TextOverflow::Clip;
+        self.layout_probe(cx, style.get_text_style_slot(), style.font_size, text).size_in_lpxs.width
+    }
+
+    /// Shapes `text` the way a run in `style` draws it, and returns it with the run's font size in lpxs.
+    pub(crate) fn shape_text(&self, cx: &mut Cx2d, text: &str, style: RunStyle) -> (Rc<ShapedText>, f32) {
+        let shaped_text = self.get_text_style(style.get_text_style_slot()).get_or_shape(cx, text);
+        (shaped_text, style.font_size * LPXS_PER_PT)
+    }
+
+    /// Measures the ellipsis that a run in `style` ends with when it gets cut.
+    pub(crate) fn measure_ellipsis_in_lpxs(&self, cx: &mut Cx2d, style: RunStyle) -> f32 {
+        let slot = style.get_text_style_slot();
+        let text_style = self.get_text_style(slot);
+        let font_family_id = text_style.font_family_id();
+        // We read this before measuring, since measuring can load a fallback font and change it.
+        let font_family_generation = cx.fonts.borrow().font_family_generation();
+        let mut ellipsis_widths_in_ems = self.ellipsis_widths_in_ems.get();
+        let width_in_ems = match ellipsis_widths_in_ems[slot as usize] {
+            Some((measured_font_family_id, measured_generation, width_in_ems))
+                if (measured_font_family_id, measured_generation) == (font_family_id, font_family_generation) =>
+            {
+                width_in_ems
+            }
+            _ => {
+                let width_in_ems = text_style.get_or_shape(cx, "…").width_in_ems;
+                // A font that's still on its way would change the width, so we measure again until it's here.
+                if !cx.fonts.borrow().is_font_family_loading(font_family_id) {
+                    ellipsis_widths_in_ems[slot as usize] = Some((font_family_id, font_family_generation, width_in_ems));
+                    self.ellipsis_widths_in_ems.set(ellipsis_widths_in_ems);
+                }
+                width_in_ems
+            }
+        };
+        width_in_ems * (style.font_size * LPXS_PER_PT)
+    }
+
+    /// Lays out `text` without wrapping, in the style of `slot` at `font_size`.
+    fn layout_probe(
+        &mut self,
+        cx: &mut Cx2d,
+        slot: TextStyleSlot,
+        font_size: f32,
+        text: &str,
+    ) -> Rc<LaidoutText> {
+        let (text_style, draw_text) = self.get_text_style_and_draw_text(slot);
+        std::mem::swap(&mut draw_text.text_style, text_style);
+        let orig_font_size = std::mem::replace(&mut draw_text.text_style.font_size, font_size);
+        let probe = draw_text.layout(cx, 0.0, 0.0, None, false, Align::default(), text);
+        draw_text.text_style.font_size = orig_font_size;
+        std::mem::swap(&mut draw_text.text_style, text_style);
         probe
+    }
+
+    /// Measures the hyphen a run in `style` draws where a row wraps after a soft hyphen.
+    pub(crate) fn measure_hyphen_in_lpxs(&mut self, cx: &mut Cx2d, style: RunStyle) -> f32 {
+        let hyphen = self.get_text_style(style.get_text_style_slot()).get_hyphen(cx);
+        self.measure_text_in_lpxs(cx, hyphen, style)
     }
 
     pub fn push_size_abs_scale(&mut self, scale: f64) {
@@ -1883,16 +2218,22 @@ impl TextFlow {
     }
 
     pub fn begin_code(&mut self, cx: &mut Cx2d) {
+        if self.skip_block_if_cut() {
+            return;
+        }
         self.draw_block.block_type = FlowBlockType::Code;
         let walk = self.begin_block_box(cx, self.code_walk);
         self.draw_block.begin(cx, walk, self.code_layout);
         self.area_stack.push(self.draw_block.draw_vars.area);
         self.code_block.push();
-        self.first_thing_on_a_line = true;
+        self.mark_as_line_start();
         self.is_at_block_start = true;
     }
 
     pub fn end_code(&mut self, cx: &mut Cx2d) {
+        if self.skip_end_of_skipped_block() {
+            return;
+        }
         // Tolerate unbalanced HTML: a stray close tag with no matching `begin_code`
         // (untrusted input, e.g. a chat message containing `</pre>`) must not panic
         // here or unbalance the turtle stack by ending a block that never began.
@@ -1931,7 +2272,7 @@ impl TextFlow {
     /// Ends a block: whatever comes next starts below it, after its bottom margin.
     fn end_block_margin(&mut self, cx: &mut Cx2d, bottom: f64) {
         cx.turtle_new_line();
-        self.first_thing_on_a_line = true;
+        self.mark_as_line_start();
         self.is_at_block_start = false;
         self.pending_block_margin = self.pending_block_margin.max(bottom);
     }
@@ -1947,7 +2288,7 @@ impl TextFlow {
         let is_after_marker = self.is_at_block_start && !self.first_thing_on_a_line;
         if is_after_marker && !matches!(cx.turtle().flow(), Flow::Right { row_align: RowAlign::Baseline, .. }) {
             cx.turtle_new_line();
-            self.first_thing_on_a_line = true;
+            self.mark_as_line_start();
             if self.tracks_text() {
                 self.selection_tracker.push_newline();
             }
@@ -1968,7 +2309,27 @@ impl TextFlow {
         self.end_block_margin(cx, walk.margin.bottom);
     }
 
+    /// Skips a block that starts after the content got cut, so it draws nothing, and returns whether we skipped it.
+    fn skip_block_if_cut(&mut self) -> bool {
+        if self.content_truncated {
+            self.skipped_block_depth += 1;
+        }
+        self.content_truncated
+    }
+
+    /// Returns whether the block that ends now is one we skipped, so we skip its end too.
+    fn skip_end_of_skipped_block(&mut self) -> bool {
+        if self.skipped_block_depth == 0 {
+            return false;
+        }
+        self.skipped_block_depth -= 1;
+        true
+    }
+
     pub fn begin_list_item(&mut self, cx: &mut Cx2d, dot: &str, pad: f64) {
+        if self.skip_block_if_cut() {
+            return;
+        }
         let fs = *self.font_sizes.last().unwrap_or(&self.font_size);
         let font_based_padding = fs as f64 * pad;
 
@@ -2000,6 +2361,10 @@ impl TextFlow {
         let lines_before_marker = self.lines_drawn;
         self.draw_text(cx, dot);
         if !self.content_truncated {
+            // Widgets only charge a row they see as new, so the row the marker charged has to look new to them too.
+            if self.lines_drawn > lines_before_marker {
+                self.last_row_y = f64::NAN;
+            }
             self.lines_drawn = lines_before_marker;
         }
         TextFlow::walk_margin(cx, self.list_item_marker_pad);
@@ -2013,11 +2378,16 @@ impl TextFlow {
         // so a push here would leak an entry per list item and let a stray close tag
         // (unbalanced HTML) pop the wrong block's area in `end_code`/`end_quote`.
         self.is_at_block_start = true;
+        // The item's content breaks as a line of its own, so the marker isn't before it.
+        self.reset_line_breaking();
     }
 
     pub fn end_list_item(&mut self, cx: &mut Cx2d) {
+        if self.skip_end_of_skipped_block() {
+            return;
+        }
         cx.end_turtle();
-        self.first_thing_on_a_line = true;
+        self.mark_as_line_start();
         if self.collapse_block_margins {
             // No box here either, so the last child's bottom margin collapses with the item's own.
             self.end_block_margin(cx, self.list_item_walk.margin.bottom + self.list_item_layout.padding.bottom);
@@ -2034,7 +2404,7 @@ impl TextFlow {
             return;
         }
         cx.turtle_new_line();
-        self.first_thing_on_a_line = true;
+        self.mark_as_line_start();
         if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
@@ -2044,10 +2414,13 @@ impl TextFlow {
     /// gap matches the line spacing of the most recently drawn text.
     /// This is intended for `<br>` tags in HTML rendering.
     pub fn new_line_with_wrap_spacing(&mut self, cx: &mut Cx2d) {
+        if self.content_truncated {
+            return;
+        }
         self.flush_block_margin(cx);
         let spacing = cx.turtle().wrap_spacing();
         cx.turtle_new_line_with_spacing(spacing);
-        self.first_thing_on_a_line = true;
+        self.mark_as_line_start();
         if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
@@ -2060,13 +2433,16 @@ impl TextFlow {
             return;
         }
         cx.turtle_new_line_with_spacing(spacing);
-        self.first_thing_on_a_line = true;
+        self.mark_as_line_start();
         if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
     }
 
     pub fn sep(&mut self, cx: &mut Cx2d) {
+        if self.content_truncated {
+            return;
+        }
         self.draw_block.block_type = FlowBlockType::Sep;
         let walk = self.begin_block_box(cx, self.sep_walk);
         self.draw_block.draw_walk(cx, walk);
@@ -2074,16 +2450,22 @@ impl TextFlow {
     }
 
     pub fn begin_quote(&mut self, cx: &mut Cx2d) {
+        if self.skip_block_if_cut() {
+            return;
+        }
         self.draw_block.block_type = FlowBlockType::Quote;
         let walk = self.begin_block_box(cx, self.quote_walk);
         self.draw_block
             .begin(cx, walk, self.quote_layout);
         self.area_stack.push(self.draw_block.draw_vars.area);
-        self.first_thing_on_a_line = true;
+        self.mark_as_line_start();
         self.is_at_block_start = true;
     }
 
     pub fn end_quote(&mut self, cx: &mut Cx2d) {
+        if self.skip_end_of_skipped_block() {
+            return;
+        }
         // Tolerate unbalanced HTML (see `end_code`): never panic on a stray close tag.
         let Some(area) = self.area_stack.pop() else {
             return;
@@ -2097,13 +2479,25 @@ impl TextFlow {
     }
 
     pub fn begin_table(&mut self, cx: &mut Cx2d, num_columns: usize) {
+        if self.skip_block_if_cut() {
+            return;
+        }
         self.table_num_columns = num_columns;
         self.table_is_first_row = true;
+        if self.max_lines > 0 {
+            self.open_table_rows.push(None);
+        }
         let walk = self.begin_block_box(cx, self.table_walk);
         cx.begin_turtle(walk, self.table_layout);
     }
 
     pub fn end_table(&mut self, cx: &mut Cx2d) {
+        if self.skip_end_of_skipped_block() {
+            return;
+        }
+        if self.max_lines > 0 {
+            self.open_table_rows.pop();
+        }
         cx.end_turtle();
         self.table_num_columns = 0;
         self.in_table_header = false;
@@ -2115,8 +2509,26 @@ impl TextFlow {
 
     pub fn begin_table_header_row(&mut self, cx: &mut Cx2d) {
         self.in_table_header = true;
-        self.table_row_is_header = true;
+        self.begin_any_table_row(cx, true);
+    }
+
+    pub fn begin_table_row(&mut self, cx: &mut Cx2d) {
+        self.begin_any_table_row(cx, false);
+    }
+
+    fn begin_any_table_row(&mut self, cx: &mut Cx2d, is_header: bool) {
+        if self.skip_block_if_cut() {
+            return;
+        }
+        self.table_row_is_header = is_header;
         self.table_row_cell_rects.clear();
+        if let Some(row) = self.open_table_rows.last_mut() {
+            *row = Some(TableRowLines { start_lines_drawn: self.lines_drawn, max_lines_drawn: self.lines_drawn });
+        }
+        if !is_header {
+            cx.begin_turtle(self.table_row_walk, self.table_row_layout);
+            return;
+        }
         // The header's ground goes down BEFORE its cells, not after them.
         // Drawn after, it covered its own text wherever the theme's highlight
         // is opaque -- which is every style sheet the library ships. Only the
@@ -2133,13 +2545,13 @@ impl TextFlow {
         self.draw_block.table_border_color = border;
     }
 
-    pub fn begin_table_row(&mut self, cx: &mut Cx2d) {
-        self.table_row_is_header = false;
-        self.table_row_cell_rects.clear();
-        cx.begin_turtle(self.table_row_walk, self.table_row_layout);
-    }
-
     pub fn end_table_row(&mut self, cx: &mut Cx2d) {
+        if self.skip_end_of_skipped_block() {
+            return;
+        }
+        if let Some(row) = self.open_table_rows.last_mut().and_then(Option::take) {
+            self.lines_drawn = row.max_lines_drawn;
+        }
         let row_rect = cx.turtle().rect();
         if self.table_row_is_header {
             self.draw_block.end(cx);
@@ -2209,6 +2621,11 @@ impl TextFlow {
     /// 1.0 = right. For wrapped multi-row content, the whole content block is
     /// shifted by the same amount (not aligned per-row).
     pub fn begin_table_cell(&mut self, cx: &mut Cx2d, align_x: f64) {
+        // Every cell of a row we draw draws its box, so the row keeps its shape after a cut.
+        let is_in_drawn_row = self.skipped_block_depth == 0 && matches!(self.open_table_rows.last(), Some(Some(_)));
+        if !is_in_drawn_row && self.skip_block_if_cut() {
+            return;
+        }
         let cell_width = if self.table_num_columns > 0 {
             cx.turtle().inner_width() / self.table_num_columns as f64
         } else {
@@ -2225,14 +2642,24 @@ impl TextFlow {
         let mut layout = self.table_cell_layout;
         layout.align.x = align_x;
         cx.begin_turtle(walk, layout);
-        self.first_thing_on_a_line = true;
+        if let Some(Some(row)) = self.open_table_rows.last() {
+            self.lines_drawn = row.start_lines_drawn;
+            self.last_row_y = f64::NAN;
+        }
+        self.mark_as_line_start();
         self.cell_text_align_x = align_x;
         self.is_at_block_start = true;
     }
 
     pub fn end_table_cell(&mut self, cx: &mut Cx2d) {
+        if self.skip_end_of_skipped_block() {
+            return;
+        }
         let cell_rect = cx.end_turtle();
         self.table_row_cell_rects.push(cell_rect);
+        if let Some(Some(row)) = self.open_table_rows.last_mut() {
+            row.max_lines_drawn = row.max_lines_drawn.max(self.lines_drawn);
+        }
         self.cell_text_align_x = 0.0;
         // Drop any trailing block margin inside the cell; the cell itself counts as content.
         self.pending_block_margin = 0.0;
@@ -2402,6 +2829,11 @@ impl TextFlow {
         self.items.as_mut().unwrap().clear();
     }
 
+    /// Returns whether we can draw items from the template with this id.
+    pub(crate) fn has_template(&self, template: LiveId) -> bool {
+        self.templates.contains_key(&template)
+    }
+
     pub fn item_with_scope(
         &mut self,
         cx: &mut Cx,
@@ -2442,45 +2874,55 @@ impl TextFlow {
                 return;
             }
 
-            if (text == " " || text == "") && self.first_thing_on_a_line {
-                return;
-            }
             let is_at_line_start = self.first_thing_on_a_line || (self.collapse_block_margins && self.is_at_block_start);
-            let text = if !is_at_line_start {
-                text.trim_end_matches("\n")
+            let text = trim_trailing_line_breaks(if !is_at_line_start {
+                text
             } else if self.collapse_block_margins {
                 // Only html whitespace collapses, so `&nbsp;` and full-width spaces stay as content.
-                text.trim_start_matches(crate::makepad_html::is_html_whitespace).trim_end_matches("\n")
+                text.trim_start_matches(crate::makepad_html::is_html_whitespace)
             } else {
-                text.trim_start().trim_end_matches("\n")
-            };
-            // Whitespace that starts a line or follows a list item's marker isn't content.
-            if self.collapse_block_margins && is_at_line_start && text.is_empty() {
+                text.trim_start()
+            });
+            // Whitespace that starts a line or follows a list item's marker isn't content,
+            // and neither is a run that was empty or only a line break.
+            if text.is_empty() {
+                // An empty run past the line's start still makes a line of widgets as tall as text.
+                if !is_at_line_start {
+                    let (height_in_lpxs, baseline_in_lpxs) = self.get_line_height_and_baseline_in_lpxs(cx);
+                    let font_scale = self.draw_text.font_scale as f64;
+                    let height = height_in_lpxs as f64 * font_scale;
+                    let align_list_start = cx.align_list_len();
+                    let pos = cx.turtle().pos();
+                    let turtle = cx.turtle_mut();
+                    turtle.allocate_height(height);
+                    turtle.set_wrap_spacing((baseline_in_lpxs * (self.text_style_normal.line_spacing - 1.0)) as f64);
+                    cx.emit_turtle_walk_with_role(
+                        Rect { pos, size: dvec2(0.0, height) },
+                        align_list_start,
+                        Metrics::default(),
+                        Some(height),
+                        Some(baseline_in_lpxs as f64 * font_scale),
+                        RowAlignRole::Shiftable,
+                    );
+                }
                 return;
             }
             // A run that would start a new line past the budget is dropped before its margin applies.
-            if self.collapse_block_margins && self.max_lines > 0 && self.lines_drawn >= self.max_lines && Self::is_at_row_start(cx) {
+            if self.collapse_block_margins && self.max_lines > 0 && self.lines_drawn >= self.max_lines && self.is_at_new_line_start(cx) {
                 self.content_truncated = true;
                 return;
+            }
+            if let Some(pending) = self.pending_text_after_run.take() {
+                pending.resolve(cx, self);
             }
             self.flush_block_margin(cx);
 
             // Select the appropriate text style based on bold/italic/fixed state
-            let (text_style, style_slot) = if self.fixed.value() > 0 {
-                (self.text_style_fixed.clone(), 4usize)
-            } else if self.bold.value() > 0 {
-                if self.italic.value() > 0 {
-                    (self.text_style_bold_italic.clone(), 3)
-                } else {
-                    (self.text_style_bold.clone(), 1)
-                }
-            } else if self.italic.value() > 0 {
-                (self.text_style_italic.clone(), 2)
-            } else {
-                (self.text_style_normal.clone(), 0)
-            };
+            let style = self.get_run_style();
+            let style_slot = style.get_text_style_slot();
+            let text_style = self.get_text_style(style_slot).clone();
 
-            let run_size = *self.font_sizes.last().unwrap_or(&self.font_size);
+            let run_size = style.font_size;
             let y_shift_scale = self.y_shift_scales.last().copied().unwrap_or(0.0);
             let line_size = self.line_font_size();
 
@@ -2490,9 +2932,9 @@ impl TextFlow {
             // above the prose. Shift = (line ascender − run ascender), in
             // multiples of the run's own font size (temp_y_shift units).
             // Probe BEFORE the run style is applied (the probe clobbers it).
-            let baseline_shift = if style_slot == 4 && run_size > 0.0 {
-                let (line_asc, _) = self.style_metrics_em(cx, 0);
-                let (run_asc, _) = self.style_metrics_em(cx, 4);
+            let baseline_shift = if style_slot == TextStyleSlot::Fixed && run_size > 0.0 {
+                let (line_asc, _) = self.style_metrics_em(cx, TextStyleSlot::Normal);
+                let (run_asc, _) = self.style_metrics_em(cx, TextStyleSlot::Fixed);
                 (line_asc * line_size - run_asc * run_size) / run_size
             } else {
                 0.0
@@ -2501,10 +2943,9 @@ impl TextFlow {
             // RowAlign::Center centers each walk by its own height, which would undo
             // baseline_shift for shorter runs; hand every run the line's height (and its
             // baseline, for RowAlign::Baseline) so they all get the same shift.
-            let (line_asc, line_desc) = self.style_metrics_em(cx, 0);
-            self.draw_text.align_row_height =
-                Some((line_asc + line_desc) * line_size * LPXS_PER_PT);
-            self.draw_text.align_row_baseline = Some(line_asc * line_size * LPXS_PER_PT);
+            let (line_height_in_lpxs, line_baseline_in_lpxs) = self.get_line_height_and_baseline_in_lpxs(cx);
+            self.draw_text.align_row_height = Some(line_height_in_lpxs);
+            self.draw_text.align_row_baseline = Some(line_baseline_in_lpxs);
             // Our runs' rows wrap at the flow's pitch, not the font's line gap. Read once here
             // so the selection capture, the wrap probes and the draw share one layout.
             self.draw_text.flow_wrap_spacing_in_lpxs = Some(
@@ -2515,19 +2956,18 @@ impl TextFlow {
             let top_drop = text_style.top_drop;
             self.draw_text.text_style = text_style;
             let font_size = self.font_sizes.last().unwrap_or(&self.font_size);
-            let font_color = self.font_colors.last().unwrap_or(&self.font_color);
+            let font_color = *self.font_colors.last().unwrap_or(&self.font_color);
             self.draw_text.text_style.font_size = *font_size as _;
-            self.draw_text.color = *font_color;
+            self.draw_text.color = font_color;
             self.draw_text.temp_y_shift = top_drop + y_shift_scale + baseline_shift;
             self.draw_text.layout_align = Align {
                 x: self.cell_text_align_x,
                 y: 0.0,
             };
 
-            // Widget-level max_lines: compute how many layouter rows this run
-            // is allowed. A "continuation" run starts mid-line (turtle x > left
-            // edge), so its first row shares the current visual line.
-            let mut is_continuation = self.max_lines > 0 && !Self::is_at_row_start(cx);
+            // Widget-level max_lines: compute how many layouter rows this run is allowed. A "continuation"
+            // run starts mid-line or on a row something already charged, so its first row shares that line.
+            let mut is_continuation = self.max_lines > 0 && !self.is_at_new_line_start(cx);
 
             // A continuation run joins a visual line that something else
             // already opened. When the opener was not a text run — an inline
@@ -2536,11 +2976,8 @@ impl TextFlow {
             // charge it here. Rows are identified by the turtle's y position:
             // a continuation landing on the row the previous run ended on is
             // already paid for, any other row is not.
-            if is_continuation {
-                let row_y = cx.turtle().pos().y;
-                if self.last_row_y.is_nan() || (row_y - self.last_row_y).abs() > 0.5 {
-                    self.lines_drawn += 1;
-                }
+            if is_continuation && self.is_on_new_row(cx) {
+                self.lines_drawn += 1;
             }
 
             // Visual lines the widget may still start. Meaningless when
@@ -2558,51 +2995,43 @@ impl TextFlow {
                 let run_max_rows = remaining_new_lines + if is_continuation { 1 } else { 0 };
                 self.draw_text.max_lines = run_max_rows;
                 self.draw_text.text_overflow = self.text_overflow;
+                // The content we hold on the last line keeps our wrapping off, but a run cuts itself at the edge.
+                if self.is_wrap_off_for_inline_content {
+                    cx.turtle_mut().set_flow_wrap(true);
+                }
             } else {
                 self.draw_text.max_lines = 0;
                 self.draw_text.text_overflow = TextOverflow::Clip;
             };
 
-            // Asked before `draw_text` is borrowed out of `self` below.
-            let tracks_text = self.tracks_text();
+            // A code box's right margin sits between its text and the text glued to it.
+            self.draw_text.trailing_glue_width_in_lpxs = self.add_code_margin_end(self.trailing_glue_width_in_lpxs);
             let dt = &mut self.draw_text;
-
-            // Capture LaidoutText when something needs to turn a byte range
-            // back into rects: a selection, or a marked span.
-            if tracks_text {
-                let turtle_pos = cx.turtle().pos();
-                let turtle_rect = cx.turtle().inner_rect();
-                let origin = dvec2(turtle_rect.pos.x, turtle_pos.y);
-                let first_row_indent = (turtle_pos.x - turtle_rect.pos.x) as f32;
-                // Must match the value the draw pass hands to the layouter, or
-                // the captured selection layout diverges from the drawn glyphs
-                // and pays for a second layout-cache entry.
-                let row_height = dt.resumable_first_row_min_spacing(cx);
-                let max_width = if !turtle_rect.size.x.is_nan() {
-                    Some(turtle_rect.size.x as f32)
-                } else {
-                    None
-                };
-                let wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
-
-                let laidout_text = dt.layout(
-                    cx,
-                    first_row_indent,
-                    row_height,
-                    max_width,
-                    wrap,
-                    dt.layout_align,
-                    text,
-                );
-
-                self.selection_tracker
-                    .push_text(laidout_text, origin, dt.font_scale, text);
-            }
+            dt.line_break_before = self.line_break_before;
+            dt.line_break_after = self.line_break_after;
+            // Room kept for text outside a code box has none for the box's margin and padding.
+            dt.is_start_reserved = self.is_start_reserved
+                && (self.inline_code.value() == 0 || self.is_start_reserved_for_inline_code);
 
             let areas_tracker = &mut self.areas_tracker;
-            let (run_rows, run_truncated) = if self.inline_code.value() > 0 {
+            // The selection gets the draw's own layout, so this is where that layout starts.
+            let mut layout_origin = dvec2(cx.turtle().inner_rect().pos.x, cx.turtle().pos().y);
+            // While we hold inline content, where the run starts and the edge it's laid out against.
+            let mut held_run_bounds = self.is_holding_inline_content.then(|| (cx.turtle().pos(), Self::get_row_end(cx)));
+            let laidout_text = if self.inline_code.value() > 0 {
                 let db = &mut self.draw_block;
                 db.block_type = FlowBlockType::InlineCode;
+                let row_y = cx.turtle().pos().y;
+                let wrap_enabled =
+                    matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
+                // A forced wrap starts a new visual line, so it is only
+                // permissible while the widget-level `max_lines` budget still
+                // has a line to give. Without this guard the wrap smuggles in
+                // an extra line that the budget never accounted for.
+                let may_force_wrap = self.max_lines == 0 || remaining_new_lines > 0;
+                // The box's left margin is invisible, so at the end of a row it hangs
+                // like white space instead of wrapping, and only the box itself moves on.
+                cx.turtle_mut().set_flow_wrap(false);
                 if !self.first_thing_on_a_line {
                     let rect = TextFlow::walk_margin(cx, self.inline_code_margin.left);
                     areas_tracker.track_rect(cx, rect);
@@ -2639,13 +3068,7 @@ impl TextFlow {
                 } else {
                     None
                 };
-                let wrap_enabled =
-                    matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
-                // A forced wrap starts a new visual line, so it is only
-                // permissible while the widget-level `max_lines` budget still
-                // has a line to give. Without this guard the wrap smuggles in
-                // an extra line that the budget never accounted for.
-                let may_force_wrap = self.max_lines == 0 || remaining_new_lines > 0;
+                let mut needs_wrap = false;
                 if wrap_enabled && !self.first_thing_on_a_line && may_force_wrap {
                     if let Some(max_width) = max_width {
                         // The eventual layout will start at cursor + pad_l
@@ -2676,24 +3099,39 @@ impl TextFlow {
                             layout_align,
                             text,
                         );
-                        let row0_empty = measured
-                            .rows
-                            .first()
-                            .map(|r| r.glyphs.is_empty())
-                            .unwrap_or(false);
+                        // A first row with only white space strands an empty box too.
+                        let is_blank = |row: &LaidoutRow| row.text.chars().all(is_hangable_white_space);
+                        let row0_empty = measured.rows.first().is_some_and(is_blank);
                         let has_more_rows = measured.rows.len() > 1;
-                        // Also measure on a fresh line (indent=0) to see if
-                        // the text would fit on a single row by itself.
-                        let fresh = dt.layout(
-                            cx,
-                            0.0,
-                            row_offset,
-                            Some(max_width),
-                            true,
-                            layout_align,
-                            text,
-                        );
-                        let fits_on_fresh_line = fresh.rows.len() == 1;
+                        // Also measure on a fresh line (indent=0) to see if wrapping first gives
+                        // row 0 some text, or, with a break opportunity before it, fits it on one row.
+                        let fresh = if has_more_rows
+                            && (row0_empty
+                                || find_first_line_break(text, dt.line_break_before, dt.line_break_after)
+                                    .is_some_and(|line_break| line_break.byte_index == 0))
+                        {
+                            let orig_line_break_before = std::mem::replace(
+                                &mut dt.line_break_before,
+                                PrecedingContext::PARAGRAPH_START,
+                            );
+                            let was_start_reserved = std::mem::replace(&mut dt.is_start_reserved, false);
+                            let fresh = dt.layout(
+                                cx,
+                                0.0,
+                                row_offset,
+                                Some(max_width),
+                                true,
+                                layout_align,
+                                text,
+                            );
+                            dt.line_break_before = orig_line_break_before;
+                            dt.is_start_reserved = was_start_reserved;
+                            Some(fresh)
+                        } else {
+                            None
+                        };
+                        let fits_on_fresh_line = !row0_empty && fresh.as_ref().is_some_and(|fresh| fresh.rows.len() == 1);
+                        let has_text_on_fresh_line = fresh.is_some_and(|fresh| !is_blank(&fresh.rows[0]));
                         dt.max_lines = clamped_max_lines;
                         dt.text_overflow = clamped_overflow;
                         // Wrap to a new line if EITHER:
@@ -2710,42 +3148,22 @@ impl TextFlow {
                         //       parent-heavy contexts (PortalList recycling,
                         //       many concurrent draws) so wrapped row glyphs
                         //       can fail to paint at all.
-                        let needs_wrap =
-                            (row0_empty && has_more_rows) || (has_more_rows && fits_on_fresh_line);
-                        if needs_wrap {
-                            // Match the spacing the layouter would have
-                            // used had it wrapped naturally — otherwise
-                            // the forced new line sits tight against the
-                            // previous row while naturally-wrapped lines
-                            // get the configured `wrap_spacing` gap.
-                            let ws = cx.turtle().wrap_spacing();
-                            // Restore the un-inflated left padding around
-                            // the new-line call. `turtle_new_line_with_spacing`
-                            // positions the cursor at `origin.x + padding.left`,
-                            // and we already added `pad_l` to padding.left
-                            // above. Without this, the cursor lands at
-                            // `parent_left + pad_l`, then the `walk_margin(pad_l)`
-                            // below adds another `pad_l` — leaving the box's
-                            // left edge floating `pad_l` px in from the
-                            // parent's content edge instead of flush against it.
-                            cx.turtle_mut().set_padding_left(old_padding_left);
-                            cx.turtle_new_line_with_spacing(ws);
-                            cx.turtle_mut().set_padding_left(old_padding_left + pad_l);
-
-                            // Past this wrap the run begins at the left edge, so
-                            // its first row starts a new visual line instead of
-                            // sharing the previous one. Both the budget handed to
-                            // the layouter and the post-draw line accounting
-                            // are derived from `is_continuation`, so it must be
-                            // corrected here or this run draws one line more
-                            // than `max_lines` allows and reports one line
-                            // fewer than it drew.
-                            is_continuation = false;
-                            if self.max_lines > 0 {
-                                dt.max_lines = remaining_new_lines;
-                            }
-                        }
+                        needs_wrap = (row0_empty && has_text_on_fresh_line) || fits_on_fresh_line;
                     }
+                }
+
+                // Without our extra left padding, a wrap here starts the box flush with the
+                // parent's edge. The padding walk only wraps while `max_lines` has a line to give.
+                cx.turtle_mut().set_padding_left(old_padding_left);
+                cx.turtle_mut().set_flow_wrap(wrap_enabled && may_force_wrap);
+                if needs_wrap {
+                    // Match the spacing the layouter would have
+                    // used had it wrapped naturally — otherwise
+                    // the forced new line sits tight against the
+                    // previous row while naturally-wrapped lines
+                    // get the configured `wrap_spacing` gap.
+                    let ws = cx.turtle().wrap_spacing();
+                    cx.turtle_new_line_with_spacing(ws);
                 }
 
                 // Walk the box's left padding so the actual text glyphs
@@ -2754,14 +3172,34 @@ impl TextFlow {
                 // flush with the box's rounded left edge).
                 let pad_l_rect = TextFlow::walk_margin(cx, pad_l);
                 areas_tracker.track_rect(cx, pad_l_rect);
+                cx.turtle_mut().set_padding_left(old_padding_left + pad_l);
+                cx.turtle_mut().set_flow_wrap(wrap_enabled);
+
+                // After a wrap before the text, ours or a walk's, the run starts a line.
+                if cx.turtle().pos().y != row_y {
+                    dt.line_break_before = PrecedingContext::PARAGRAPH_START;
+                    dt.is_start_reserved = false;
+                    // Both the budget handed to the layouter and the post-draw line
+                    // accounting come from `is_continuation`, so it has to follow the wrap.
+                    is_continuation = false;
+                    if self.max_lines > 0 {
+                        dt.max_lines = remaining_new_lines;
+                    }
+                }
+                layout_origin = dvec2(cx.turtle().inner_rect().pos.x, cx.turtle().pos().y);
 
                 let code_pad_h = (self.inline_code_padding.top
                     + self.inline_code_padding.bottom
                     + self.inline_code_margin.top
                     + self.inline_code_margin.bottom) as f64;
+                if let Some((_, row_end)) = &mut held_run_bounds {
+                    *row_end = Self::get_row_end(cx);
+                }
                 // An underlined run (a hovered link) in code keeps its line.
-                let underline = (self.underline.value() > 0).then_some(*font_color);
-                let result = dt.draw_walk_resumable_with_background(cx, text, |cx, mut rect, _| {
+                let underline = (self.underline.value() > 0).then_some(font_color);
+                let laidout_text = self.pending_following_room.and_then(|pending| self.lay_out_run(cx, text, pending));
+                let (dt, db, areas_tracker) = (&mut self.draw_text, &mut self.draw_block, &mut self.areas_tracker);
+                let result = dt.draw_laidout_resumable_with_background(cx, text, laidout_text, |cx, mut rect, _| {
                     let text_rect = rect;
                     rect.pos -= self.inline_code_padding.left_top();
                     rect.size += self.inline_code_padding.size();
@@ -2782,6 +3220,9 @@ impl TextFlow {
                 // inflated padding we used for layout.
                 cx.turtle_mut().set_padding_left(old_padding_left);
                 cx.turtle_mut().set_padding_right(old_padding_right);
+                // The box's right side stays on its text's row, so at the row's end
+                // it hangs like trailing white space instead of wrapping.
+                cx.turtle_mut().set_flow_wrap(false);
 
                 // Walk the box's right padding so the cursor advances past
                 // the visible right edge of the box.
@@ -2795,37 +3236,71 @@ impl TextFlow {
                 cx.turtle_mut().allocate_height(code_pad_h);
                 let rect = TextFlow::walk_margin(cx, self.inline_code_margin.right);
                 areas_tracker.track_rect(cx, rect);
+                cx.turtle_mut().set_flow_wrap(wrap_enabled);
                 result
-            } else if self.strikethrough.value() > 0 {
-                let db = &mut self.draw_block;
-                db.line_color = *font_color;
-                db.block_type = FlowBlockType::Strikethrough;
-                dt.draw_walk_resumable_with(cx, text, |cx, rect, _| {
-                    db.draw_abs(cx, rect);
-                    areas_tracker.track_rect(cx, rect);
-                })
-            } else if self.underline.value() > 0 {
-                let db = &mut self.draw_block;
-                db.line_color = *font_color;
-                db.block_type = FlowBlockType::Underline;
-                dt.draw_walk_resumable_with(cx, text, |cx, rect, _| {
-                    db.draw_abs(cx, rect);
-                    areas_tracker.track_rect(cx, rect);
-                })
             } else {
-                dt.draw_walk_resumable_with(cx, text, |cx, rect, _| {
-                    areas_tracker.track_rect(cx, rect);
-                })
+                let laidout_text = self.pending_following_room.and_then(|pending| self.lay_out_run(cx, text, pending));
+                let (dt, db, areas_tracker) = (&mut self.draw_text, &mut self.draw_block, &mut self.areas_tracker);
+                if self.strikethrough.value() > 0 {
+                    db.line_color = font_color;
+                    db.block_type = FlowBlockType::Strikethrough;
+                    dt.draw_laidout_resumable_with(cx, text, laidout_text, |cx, rect, _| {
+                        db.draw_abs(cx, rect);
+                        areas_tracker.track_rect(cx, rect);
+                    })
+                } else if self.underline.value() > 0 {
+                    db.line_color = font_color;
+                    db.block_type = FlowBlockType::Underline;
+                    dt.draw_laidout_resumable_with(cx, text, laidout_text, |cx, rect, _| {
+                        db.draw_abs(cx, rect);
+                        areas_tracker.track_rect(cx, rect);
+                    })
+                } else {
+                    dt.draw_laidout_resumable_with(cx, text, laidout_text, |cx, rect, _| {
+                        areas_tracker.track_rect(cx, rect);
+                    })
+                }
             };
+            if let Some((run_start, row_end)) = held_run_bounds.filter(|_| self.overrun_start_x.is_none()) {
+                let last_row = laidout_text.rows.last().unwrap();
+                let end_in_lpxs = last_row.origin_in_lpxs.x + last_row.width_without_hanging_in_lpxs();
+                let run_end = layout_origin.x + (end_in_lpxs * self.draw_text.font_scale) as f64;
+                // Clip cuts a run without an ellipsis, so a box with nothing that fits in it would show alone.
+                let is_cut_to_nothing = laidout_text.is_truncated
+                    && last_row.glyphs.iter().all(|glyph| last_row.text[glyph.cluster..].starts_with(char::is_whitespace));
+                if run_end > row_end + 0.5 || is_cut_to_nothing {
+                    self.overrun_start_x = Some(run_start.x - self.get_white_space_width_before(run_start));
+                }
+            }
+
+            if self.tracks_text() {
+                self.selection_tracker
+                    .push_text(laidout_text.clone(), layout_origin, self.draw_text.font_scale, text);
+            }
+            self.line_break_before = laidout_text.line_break_before_next_run;
+            self.is_start_reserved = laidout_text.is_trailing_glue_reserved;
+            self.is_start_reserved_for_inline_code = self.is_trailing_glue_in_inline_code;
+            self.was_text_drawn_in_inline_content = true;
+            // Probes between runs, like `line_probe`, keep laying out with the defaults.
+            let dt = &mut self.draw_text;
+            dt.line_break_before = PrecedingContext::PARAGRAPH_START;
+            dt.line_break_after = FollowingContext::END_OF_TEXT;
+            dt.trailing_glue_width_in_lpxs = 0.0;
+            dt.is_start_reserved = false;
 
             // Update widget-level line tracking.
             if self.max_lines > 0 {
-                let new_lines = run_rows.saturating_sub(if is_continuation { 1 } else { 0 });
+                if self.is_wrap_off_for_inline_content {
+                    cx.turtle_mut().set_flow_wrap(false);
+                }
+                let new_lines = laidout_text.rows.len().saturating_sub(if is_continuation { 1 } else { 0 });
                 self.lines_drawn += new_lines;
                 // If this run was truncated (ellipsis was appended), stop here.
-                if run_truncated {
+                if laidout_text.is_truncated {
                     self.content_truncated = true;
                 }
+                // What follows a run in a code box comes after the box's padding, not after the run's white space.
+                self.last_run_end = (self.inline_code.value() == 0).then(|| (cx.turtle().pos(), laidout_text.clone()));
             }
 
             // Remember the row this run ended on, so the next run can tell
@@ -2834,6 +3309,42 @@ impl TextFlow {
             self.last_row_y = cx.turtle().pos().y;
         }
         self.first_thing_on_a_line = false;
+    }
+
+    /// Lays out a run of `text` where the turtle is, since what follows it at `pending` may need room on its last row.
+    fn lay_out_run(&mut self, cx: &mut Cx2d, text: &str, mut pending: PendingFollowingRoom) -> Option<Rc<LaidoutText>> {
+        let finder = self.following_room_finder.as_ref()?;
+        finder.begin_run(&mut pending, text);
+        self.pending_following_room = Some(pending);
+        let max_lines = self.draw_text.max_lines;
+        let mut laidout_text = self.draw_text.layout_resumable(cx, text);
+        // Only a run that ends on the last line `max_lines` allows can leave too little room after it.
+        if laidout_text.rows.len() != max_lines || laidout_text.is_truncated {
+            return Some(laidout_text);
+        }
+        let cached_room = finder.get_cached_room(cx, self, &pending);
+        let following_room_in_lpxs = cached_room.unwrap_or_else(|| finder.find_room(cx, self, &pending, text));
+        let following_room_in_lpxs = self.add_code_margin_end(following_room_in_lpxs);
+        let max_width_in_lpxs = DrawText::get_max_width_in_lpxs(cx.turtle().inner_rect().size.x);
+        let is_cut = is_short_of_following_room(&laidout_text.rows, max_lines, max_width_in_lpxs, following_room_in_lpxs);
+        let is_font_changed =
+            cached_room.is_none() && cx.fonts.borrow().font_family_generation() != pending.font_family_generation;
+        // The room only changes the layout when it cuts the run, or after a font came that changes how the run looks.
+        if following_room_in_lpxs > 0.0 && (is_cut || is_font_changed) {
+            self.draw_text.following_room_in_lpxs = following_room_in_lpxs;
+            laidout_text = self.draw_text.layout_resumable(cx, text);
+            self.draw_text.following_room_in_lpxs = 0.0;
+        }
+        Some(laidout_text)
+    }
+
+    /// Adds the right margin of the code box we're in to `width_in_lpxs`, the room a run needs after it.
+    fn add_code_margin_end(&self, width_in_lpxs: f32) -> f32 {
+        if self.inline_code.value() > 0 && width_in_lpxs > 0.0 {
+            width_in_lpxs + (self.inline_code_margin.right / self.draw_text.font_scale.max(0.0001) as f64) as f32
+        } else {
+            width_in_lpxs
+        }
     }
 
     pub fn walk_margin(cx: &mut Cx2d, margin: f64) -> Rect {
@@ -2860,16 +3371,19 @@ impl TextFlow {
     }
 }
 
-/// State carried from [`TextFlow::begin_inline_content`] to
-/// [`TextFlow::end_inline_content`] while an inline child widget is held on
-/// the last allowed line: whether wrapping must be restored, and the align
-/// list index of the tracked clip bracketing the widget's draw.
+/// What [`TextFlow::end_inline_content`] needs to hide inline content held on or near the last allowed line.
 pub struct InlineContentHold {
-    restore_wrap: bool,
+    /// The align list index of the tracked clip around the content's draw.
     clip_index: usize,
-    /// Turtle x position where the widget's walk begins; the ellipsis replaces
-    /// the widget at this position when the widget overruns the line.
+    /// The turtle x where the content's walk begins, so we can hide the content from there.
     start_x: f64,
+}
+
+/// How many lines were drawn before a table row, and up to the end of its tallest cell so far.
+#[derive(Clone, Copy)]
+struct TableRowLines {
+    start_lines_drawn: usize,
+    max_lines_drawn: usize,
 }
 
 /// Actions emitted by TextFlow for cross-boundary selection in PortalList
@@ -3140,7 +3654,899 @@ mod table_structure_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::floor_char_boundary;
+    use super::*;
+    use crate::{
+        fold_button::FoldButton,
+        html::Html,
+        makepad_draw::{cx_draw::CxDraw, text::line_break::find_line_breaks},
+        makepad_platform::script::res::CxScriptResourceData,
+    };
+
+    script_mod! {
+        use mod.prelude.widgets_internal.*
+        use mod.widgets.*
+
+        mod.widgets.HighlightSpan = #(HighlightSpan::register_widget(vm)) {}
+    }
+
+    /// Draws its text through TextFlow in a code box, like a span with a background color.
+    ///
+    /// With a `reason`, it draws that in italics first, as a chat app draws a hidden spoiler.
+    #[derive(Script, ScriptHook, Widget)]
+    pub struct HighlightSpan {
+        #[uid]
+        uid: WidgetUid,
+        #[source]
+        source: ScriptObjectRef,
+        #[redraw]
+        #[area]
+        area: Area,
+        #[walk]
+        walk: Walk,
+        #[layout]
+        layout: Layout,
+        #[live]
+        text: ArcStringMut,
+        #[live]
+        reason: ArcStringMut,
+    }
+
+    impl Widget for HighlightSpan {
+        fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+
+        fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
+            let Some(tf) = scope.data.get_mut::<TextFlow>() else {
+                return DrawStep::done();
+            };
+            if !self.reason.as_ref().is_empty() {
+                tf.italic.push();
+                tf.draw_text(cx, self.reason.as_ref());
+                tf.italic.pop();
+            }
+            tf.inline_code.push();
+            tf.draw_text(cx, self.text.as_ref());
+            tf.inline_code.pop();
+            DrawStep::done()
+        }
+
+        fn text(&self) -> String {
+            self.text.as_ref().to_string()
+        }
+
+        fn set_text(&mut self, _cx: &mut Cx, v: &str) {
+            self.text.as_mut_empty().push_str(v);
+        }
+    }
+
+    /// Draws an Html widget without a window.
+    struct HtmlDrawer {
+        cx: Cx,
+        html: Html,
+        pass: DrawPass,
+        draw_list: DrawList2d,
+    }
+
+    /// A run of text we drew, with the layout the selection got from the draw.
+    struct DrawnRun {
+        text: String,
+        text_start: usize,
+        origin: DVec2,
+        font_scale: f32,
+        laidout_text: Rc<LaidoutText>,
+    }
+
+    impl DrawnRun {
+        /// Returns the x that's `x_in_lpxs` into row `index`.
+        fn get_x(&self, index: usize, x_in_lpxs: f32) -> f64 {
+            let row = &self.laidout_text.rows[index];
+            self.origin.x + ((row.origin_in_lpxs.x + x_in_lpxs) * self.font_scale) as f64
+        }
+
+        /// Returns where the text of row `index` starts and where its visible part ends.
+        fn get_row_x_bounds(&self, index: usize) -> (f64, f64) {
+            let row = &self.laidout_text.rows[index];
+            let start_in_lpxs = row.glyphs.first().map_or(row.width_in_lpxs, |glyph| glyph.origin_in_lpxs.x);
+            (self.get_x(index, start_in_lpxs), self.get_x(index, row.width_without_hanging_in_lpxs()))
+        }
+
+        /// Returns where the last glyph of row `index` that isn't white space ends.
+        fn get_ink_end_x(&self, index: usize) -> f64 {
+            let row = &self.laidout_text.rows[index];
+            let end_in_lpxs = row
+                .glyphs
+                .iter()
+                .filter(|glyph| !row.text[glyph.cluster..].starts_with(char::is_whitespace))
+                .map(|glyph| glyph.origin_in_lpxs.x + glyph.advance_in_lpxs())
+                .fold(0.0, f32::max);
+            self.get_x(index, end_in_lpxs)
+        }
+    }
+
+    impl HtmlDrawer {
+        fn new() -> Self {
+            Self::with_font_set(FontSet::target_default())
+        }
+
+        /// Like `new`, but draws with the fonts of `font_set`.
+        fn with_font_set(font_set: FontSet) -> Self {
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            cx.set_font_set(font_set);
+            cx.with_vm(crate::script_mod);
+            cx.with_vm(script_mod);
+            let html = cx.with_vm(|vm| {
+                let value = vm.eval(script! {
+                    use mod.prelude.widgets.*
+                    Html{
+                        padding: 0
+                        selectable: true
+                        img := View{width: 24 height: 10}
+                        pill := View{width: 40 height: 10}
+                        wide := View{width: 400 height: 10}
+                        mark := mod.widgets.HighlightSpan{}
+                        spoiler := mod.widgets.HighlightSpan{reason: " [Spoiler]  "}
+                    }
+                });
+                Html::script_from_value(vm, value)
+            });
+            let pass = DrawPass::new(&mut cx);
+            let draw_list = DrawList2d::new(&mut cx);
+            Self { cx, html, pass, draw_list }
+        }
+
+        /// Draws `body` `width` wide, and returns its runs of text.
+        fn draw(&mut self, body: &str, width: f64) -> Vec<DrawnRun> {
+            self.html.set_text(&mut self.cx, body);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut self.cx, &event);
+            let mut cx = Cx2d::new(&mut draw);
+            cx.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx);
+            cx.begin_root_turtle(dvec2(width, 1000.0), Layout::flow_down());
+            let walk = Walk { width: Size::Fixed(width), height: Size::fit(), ..Walk::default() };
+            let _ = self.html.draw_walk(&mut cx, &mut Scope::empty(), walk);
+            cx.end_pass_sized_turtle();
+            self.draw_list.end(&mut cx);
+            cx.end_pass(&self.pass);
+            let tracker = &self.html.text_flow.selection_tracker;
+            tracker
+                .segments
+                .iter()
+                .filter_map(|segment| match segment {
+                    SelectionSegment::Text { laidout_text, origin, font_scale, text_start } => Some(DrawnRun {
+                        text: laidout_text.text.as_str().to_string(),
+                        text_start: *text_start,
+                        origin: *origin,
+                        font_scale: *font_scale,
+                        laidout_text: laidout_text.clone(),
+                    }),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Draws `body` `width` wide, and returns its text and where its rows after the first start.
+        fn get_row_starts(&mut self, body: &str, width: f64) -> (String, Vec<usize>) {
+            let row_starts = self
+                .draw(body, width)
+                .iter()
+                .flat_map(|run| {
+                    run.laidout_text.rows[1..]
+                        .iter()
+                        .map(move |row| run.text_start + row.text.start_in_parent())
+                })
+                .collect();
+            (self.html.text_flow.selection_tracker.text.clone(), row_starts)
+        }
+
+        /// Draws `body` `width` wide, and checks that no run's rows end past `right`.
+        ///
+        /// Only the runs that `is_checked` picks count.
+        fn check_rows_end_before(&mut self, body: &str, width: f64, right: f64, is_checked: impl Fn(&str) -> bool) {
+            for run in self.draw(body, width).iter().filter(|run| is_checked(&run.text)) {
+                for row in 0..run.laidout_text.rows.len() {
+                    let end = run.get_row_x_bounds(row).1;
+                    assert!(end <= right + 0.01, "{body:?} at {width}: {:?} ends at {end}", run.text);
+                }
+            }
+        }
+
+        /// Draws `body` on one row, and returns the x where `text` ends in the first run that starts with it.
+        fn get_x_after(&mut self, body: &str, text: &str) -> f64 {
+            let runs = self.draw(body, 1000.0);
+            let run = runs.iter().find(|run| run.text.starts_with(text)).unwrap();
+            run.get_x(0, run.laidout_text.rows[0].index_to_x_in_lpxs(text.len()))
+        }
+
+        /// Draws `body` `width` wide, and returns each run's text with how many glyphs each of its rows shows.
+        ///
+        /// That includes an ellipsis, and whether we cut what came after.
+        fn get_shown_glyph_counts(&mut self, body: &str, width: f64) -> (Vec<(String, Vec<usize>)>, bool) {
+            let runs = self.draw(body, width);
+            let glyph_counts = runs
+                .iter()
+                .map(|run| (run.text.clone(), run.laidout_text.rows.iter().map(|row| row.glyphs.len()).collect()))
+                .collect();
+            (glyph_counts, self.html.text_flow.is_content_truncated())
+        }
+
+        /// Opens or closes every `<details>` we drew, like a click on its summary does.
+        fn set_details_open(&mut self, is_open: bool) {
+            for (widget, _) in self.html.text_flow.items.as_ref().unwrap().values() {
+                if let Some(mut fold_button) = widget.borrow_mut::<FoldButton>() {
+                    fold_button.set_is_open(&mut self.cx, is_open, Animate::No);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn styled_runs_wrap_like_one_text() {
+        let mut drawer = HtmlDrawer::new();
+        // The tags only underline or strike through their text, so it keeps its width.
+        for (body, plain) in [
+            (
+                "Hello foo<u>bar</u>. Then <u>(</u>quux) and \"<a href='x'>a link</a>\" here, ok.",
+                "Hello foobar. Then (quux) and \"a link\" here, ok.",
+            ),
+            (
+                "See (<a href='x'>https://example.com/some/path</a>) or <del>this</del>, maybe<u>!</u>",
+                "See (https://example.com/some/path) or this, maybe!",
+            ),
+            (
+                "<u>un</u>believable <u>Note</u>: x, y and <del>z</del>. foo <u>bar</u> baz",
+                "unbelievable Note: x, y and z. foo bar baz",
+            ),
+            (
+                "a hyphen<u>\u{AD}ation exam</u>\u{AD}ple with <del>soft\u{AD}hy</del>phens",
+                "a hyphen\u{AD}ation exam\u{AD}ple with soft\u{AD}hyphens",
+            ),
+            (
+                "<p>one <u>two</u>.</p><p>(<u>three</u>) four</p>fi<u>ve</u><br>(<del>six</del>)\
+                 <ul><li><u>se</u>ven, <u><del>ei</del>ght</u>!</li></ul>",
+                "<p>one two.</p><p>(three) four</p>five<br>(six)<ul><li>seven, eight!</li></ul>",
+            ),
+        ] {
+            let mut compared_width_count = 0;
+            for width in (40..400).step_by(5).map(f64::from) {
+                let (text, plain_row_starts) = drawer.get_row_starts(plain, width);
+                // Kerning across runs shifts things a little, so we skip widths where that matters.
+                if drawer.get_row_starts(plain, width - 1.0).1 != plain_row_starts
+                    || drawer.get_row_starts(plain, width + 1.0).1 != plain_row_starts
+                {
+                    continue;
+                }
+                // A unit wider than a row breaks between graphemes, which runs do one by one.
+                let line_breaks: Vec<usize> = find_line_breaks(
+                    &text,
+                    PrecedingContext::PARAGRAPH_START,
+                    FollowingContext::END_OF_TEXT,
+                )
+                .map(|line_break| line_break.byte_index)
+                .collect();
+                if !plain_row_starts.iter().all(|row_start| line_breaks.contains(row_start)) {
+                    continue;
+                }
+                assert_eq!(drawer.get_row_starts(body, width), (text, plain_row_starts), "{body:?} at {width}");
+                compared_width_count += 1;
+            }
+            assert!(compared_width_count > 0, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn rows_keep_inline_code_padding_and_soft_hyphens_inside() {
+        let mut drawer = HtmlDrawer::new();
+        let pad_r = drawer.html.text_flow.inline_code_padding.right;
+        // The text before each code box has to keep room for all of it, and the
+        // text before the link for the hyphen after `yy`.
+        for (body, code) in [
+            ("some words foo<code>bar</code> qux", "bar"),
+            ("some words (<code>bar baz</code>)", "bar baz"),
+            ("a b c d e f<code>gh</code>", "gh"),
+            ("aaaa bbbb x<a href='x'>yy<b>\u{AD}</b>zzzzzzzz</a>", ""),
+        ] {
+            for width in (110..300).map(|width| f64::from(width) / 2.0) {
+                for run in drawer.draw(body, width) {
+                    let right = if run.text == code { width - pad_r } else { width };
+                    for row in 0..run.laidout_text.rows.len() {
+                        let end = run.get_row_x_bounds(row).1;
+                        assert!(end <= right + 0.01, "{body:?} at {width}: {:?} ends at {end}", run.text);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn code_boxes_that_wrap_start_at_the_edge() {
+        let mut drawer = HtmlDrawer::new();
+        let pad_l = drawer.html.text_flow.inline_code_padding.left;
+        // The first box wraps after its own left margin, the second after its left padding.
+        for (body, code) in [("see the <code>foo</code> call", "foo"), ("<b>world;3.5<code> \"</code>!$words</b>", " \"")] {
+            let mut moved_count = 0;
+            for width in (80..400).map(|width| f64::from(width) / 2.0) {
+                let runs = drawer.draw(body, width);
+                let index = runs.iter().position(|run| run.text == code).unwrap();
+                let (before, run) = (&runs[index - 1], &runs[index]);
+                if before.laidout_text.rows.len() == 1 && run.origin.y > before.origin.y {
+                    assert!((run.get_row_x_bounds(0).0 - pad_l).abs() < 0.01, "{body:?} at {width}");
+                    moved_count += 1;
+                }
+            }
+            assert!(moved_count > 0, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn text_after_a_code_box_goes_on_in_its_row() {
+        let mut drawer = HtmlDrawer::new();
+        // Even when the box ends right at the edge, so the space after it hangs there.
+        for body in ["some words foo<code>bar</code> qux", "see the <code>foo</code> call"] {
+            for width in (80..400).map(|width| f64::from(width) / 2.0) {
+                let runs = drawer.draw(body, width);
+                let index = runs.iter().position(|run| run.text.starts_with(' ')).unwrap();
+                let (code, after) = (&runs[index - 1], &runs[index]);
+                if code.laidout_text.rows.len() == 1 {
+                    assert!((after.origin.y - code.origin.y).abs() < 0.01, "{body:?} at {width}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selection_gets_the_drawn_layout_of_code() {
+        let mut drawer = HtmlDrawer::new();
+        let body = "some words foo<code>bar</code> qux and <code>more code here</code>, ok";
+        for width in (30..120).map(f64::from) {
+            for run in drawer.draw(body, width) {
+                // We draw a code run on a fresh row rather than leave its first row empty.
+                if run.text == "more code here" {
+                    assert!(!run.laidout_text.rows[0].glyphs.is_empty(), "at {width}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_runs_draw_nothing() {
+        let mut drawer = HtmlDrawer::new();
+        let margin_l = drawer.html.text_flow.inline_code_margin.left;
+        let pad_l = drawer.html.text_flow.inline_code_padding.left;
+        // The parser puts an empty text before the `<b>`, which is inside the code.
+        let runs = drawer.draw("see <code><b>x</b>y</code> z", 300.0);
+        assert!(runs.iter().all(|run| !run.text.is_empty()));
+        let (see, x) = (&runs[0], &runs[1]);
+        let pen_x = see.get_x(0, see.laidout_text.rows[0].width_in_lpxs);
+        assert!((x.get_row_x_bounds(0).0 - pen_x - (margin_l + pad_l)).abs() < 0.01);
+    }
+
+    #[test]
+    fn text_before_an_image_breaks_before_it() {
+        let mut drawer = HtmlDrawer::new();
+        for width in (40..200).map(f64::from) {
+            let rows_alone = drawer.get_row_starts("aaaa bbbb", width).1;
+            let runs = drawer.draw("aaaa bbbb<img>cccccccccccc dd", width);
+            let rows_before_image: Vec<usize> =
+                runs[0].laidout_text.rows[1..].iter().map(|row| row.text.start_in_parent()).collect();
+            assert_eq!(rows_before_image, rows_alone, "at {width}");
+        }
+    }
+
+    #[test]
+    fn text_after_a_summary_breaks_like_a_new_paragraph() {
+        let mut drawer = HtmlDrawer::new();
+        // After a number, `,` would go on with it.
+        let runs = drawer.draw("<details open><summary>1</summary>,</details>", 300.0);
+        let comma = runs.iter().find(|run| run.text == ",").unwrap();
+        let mut line_break_before_next_run = PrecedingContext::PARAGRAPH_START;
+        line_break_before_next_run.append(",");
+        assert_eq!(comma.laidout_text.line_break_before_next_run, line_break_before_next_run);
+        let mut after_number = PrecedingContext::PARAGRAPH_START;
+        after_number.append("1,");
+        assert_ne!(after_number, line_break_before_next_run);
+    }
+
+    #[test]
+    fn lookahead_follows_a_new_document() {
+        let mut drawer = HtmlDrawer::new();
+        let mut fresh_drawer = HtmlDrawer::new();
+        // The two texts are just as long and have their nodes in the same places.
+        let (old_body, new_body) = ("aaaa<b>bbbbbbbbbbbb</b>c", "aaaa<b>b</b>cccccccccccc");
+        for width in (40..150).map(f64::from) {
+            drawer.get_row_starts(old_body, width);
+            assert_eq!(
+                drawer.get_row_starts(new_body, width),
+                fresh_drawer.get_row_starts(new_body, width),
+                "at {width}",
+            );
+        }
+    }
+
+    /// Text whose `(` has to stay with the `中` after it, which is narrower as a missing glyph.
+    const CJK_IN_BRACKETS: &str = "aaaa bbbb (<b>\u{4E2D}\u{6587}</b>) cc";
+
+    #[test]
+    fn lookahead_measures_again_once_a_fallback_font_arrives() {
+        // With the Latin font set, the CJK fonts only load once some text needs them.
+        let mut drawer = HtmlDrawer::with_font_set(FontSet::Latin);
+        let mut fresh_drawer = HtmlDrawer::with_font_set(FontSet::Latin);
+        let width = fresh_drawer.get_x_after(CJK_IN_BRACKETS, "\u{4E2D}") - 0.5;
+        // We load the fonts of these styles first, so the CJK font is the only one that arrives next.
+        drawer.draw("aaaa <b>bbbb</b> cc", width);
+        // It arrives while we measure what follows `(`, so the first draw keeps too little room for it.
+        let row_starts_without_font = drawer.get_row_starts(CJK_IN_BRACKETS, width);
+        assert_ne!(drawer.get_row_starts(CJK_IN_BRACKETS, width), row_starts_without_font);
+        for width in [width].into_iter().chain((60..300).step_by(5).map(f64::from)) {
+            fresh_drawer.draw("x", width);
+            assert_eq!(
+                drawer.get_row_starts(CJK_IN_BRACKETS, width),
+                fresh_drawer.get_row_starts(CJK_IN_BRACKETS, width),
+                "at {width}",
+            );
+        }
+    }
+
+    #[test]
+    fn lookahead_measures_again_once_a_downloaded_font_arrives() {
+        let mut drawer = HtmlDrawer::new();
+        let mut fresh_drawer = HtmlDrawer::new();
+        // Bold text asks for this CJK font after a glyph miss, and its file isn't there.
+        for HtmlDrawer { cx, html, .. } in [&mut drawer, &mut fresh_drawer] {
+            script_apply_eval!(cx, html, {
+                text_style_bold +: {
+                    font_family: mod.text.FontFamily{
+                        latin := mod.text.FontMember{res: mod.res.crate_resource("makepad_widgets:resources/IBMPlexSans-SemiBold.ttf")}
+                        cjk := mod.text.FontMember{res: mod.res.crate_resource("makepad_widgets:resources/downloading/LXGWWenKaiBold.ttf") lazy: 1}
+                    }
+                }
+            });
+        }
+        // On the web its data comes over HTTP like this, so it shows up between two frames.
+        let font_data = Rc::new(std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/LXGWWenKaiBold.ttf")).unwrap());
+        let set_font_data = |cx: &Cx, data: CxScriptResourceData| {
+            for resource in cx.script_data.resources.resources.borrow_mut().iter_mut() {
+                if resource.abs_path.ends_with("/downloading/LXGWWenKaiBold.ttf") {
+                    resource.data = data.clone();
+                }
+            }
+            cx.script_data.resources.bump_generation();
+        };
+        set_font_data(&fresh_drawer.cx, CxScriptResourceData::Loaded(font_data.clone()));
+        let width = fresh_drawer.get_x_after(CJK_IN_BRACKETS, "\u{4E2D}") - 0.5;
+        // The first draw asks for the font, and the ones after it lay out without it until it arrives.
+        set_font_data(&drawer.cx, CxScriptResourceData::Loading);
+        drawer.draw(CJK_IN_BRACKETS, width);
+        let row_starts_without_font = drawer.get_row_starts(CJK_IN_BRACKETS, width);
+        set_font_data(&drawer.cx, CxScriptResourceData::Loaded(font_data.clone()));
+        fresh_drawer.draw("x", width);
+        let row_starts = drawer.get_row_starts(CJK_IN_BRACKETS, width);
+        assert_ne!(row_starts, row_starts_without_font);
+        assert_eq!(row_starts, fresh_drawer.get_row_starts(CJK_IN_BRACKETS, width));
+    }
+
+    #[test]
+    fn lookahead_measures_again_when_styles_change() {
+        let body = "some words foo<b>barbazquux</b>, then (<code>code()</code>) and \"<a href='x'>a link</a>\" here";
+        let mut drawer = HtmlDrawer::new();
+        let mut fresh_drawer = HtmlDrawer::new();
+        // Code boxes with wide left sides, so the room they keep in lpxs changes a lot with the font scale.
+        for tf in [&mut drawer.html.text_flow, &mut fresh_drawer.html.text_flow] {
+            tf.inline_code_margin.left = 10.0;
+            tf.inline_code_padding.left = 10.0;
+        }
+        let font_size = drawer.html.text_flow.font_size;
+        // These change without an apply, which would clear what the lookahead found.
+        let set_style = |drawer: &mut HtmlDrawer, (font_size, font_scale): (f32, f32)| {
+            drawer.html.text_flow.font_size = font_size;
+            drawer.html.text_flow.draw_text.font_scale = font_scale;
+        };
+        for width in (80..400).step_by(7).map(f64::from) {
+            for style in [(font_size * 1.3, 1.0), (font_size, 1.5)] {
+                set_style(&mut drawer, (font_size, 1.0));
+                drawer.get_row_starts(body, width);
+                set_style(&mut drawer, style);
+                set_style(&mut fresh_drawer, style);
+                fresh_drawer.draw("x", width);
+                assert_eq!(drawer.get_row_starts(body, width), fresh_drawer.get_row_starts(body, width), "{style:?} at {width}");
+            }
+        }
+        set_style(&mut drawer, (font_size, 1.0));
+        set_style(&mut fresh_drawer, (font_size, 1.0));
+        // An apply can change any style, like the font of bold text.
+        drawer.get_row_starts(body, 200.0);
+        for HtmlDrawer { cx, html, .. } in [&mut drawer, &mut fresh_drawer] {
+            script_apply_eval!(cx, html, { text_style_bold +: { font_family: mod.theme.font_italic.font_family } });
+        }
+        let tf = &drawer.html.text_flow;
+        assert_eq!(tf.text_style_bold.font_family_id(), tf.text_style_italic.font_family_id());
+        for width in (80..400).step_by(7).map(f64::from) {
+            fresh_drawer.draw("x", width);
+            assert_eq!(drawer.get_row_starts(body, width), fresh_drawer.get_row_starts(body, width), "at {width}");
+        }
+    }
+
+    #[test]
+    fn lookahead_measures_again_when_code_boxes_or_fonts_change() {
+        let body = "aaaa (<code>x</code>) bbbb (<b>cc</b>) dd<code>ee</code>ff gg";
+        let mut drawer = HtmlDrawer::new();
+        let mut fresh_drawer = HtmlDrawer::new();
+        let tf = &drawer.html.text_flow;
+        let (code_margin, bold, fixed) = (tf.inline_code_margin, tf.text_style_bold.clone(), tf.text_style_fixed.clone());
+        let wide_code_margin = Inset { left: 9.0, right: 6.0, ..code_margin };
+        // Each of these changes one thing from the one before. We set them without an apply,
+        // which would clear what the lookahead found.
+        let styles = [(wide_code_margin, &bold), (code_margin, &bold), (code_margin, &fixed), (code_margin, &bold)];
+        for width in (60..300).step_by(3).map(f64::from) {
+            for (code_margin, text_style_bold) in styles {
+                drawer.get_row_starts(body, width);
+                for tf in [&mut drawer.html.text_flow, &mut fresh_drawer.html.text_flow] {
+                    tf.inline_code_margin = code_margin;
+                    tf.text_style_bold = text_style_bold.clone();
+                }
+                fresh_drawer.draw("x", width);
+                assert_eq!(drawer.get_row_starts(body, width), fresh_drawer.get_row_starts(body, width), "at {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn lookahead_follows_width_changes() {
+        let mut drawer = HtmlDrawer::new();
+        let mut fresh_drawer = HtmlDrawer::new();
+        // Code boxes move to a new row at some widths, so what's before the runs after them changes.
+        let body = "aaaaaaaaaaaa<code>\u{201C}</code> <b>word</b> x<code>abc</code>(y) and \"<a href='x'>a link</a>\" here";
+        for width in (40..300).chain((40..300).rev()).map(f64::from) {
+            fresh_drawer.draw("x", width);
+            assert_eq!(drawer.get_row_starts(body, width), fresh_drawer.get_row_starts(body, width), "at {width}");
+        }
+    }
+
+    #[test]
+    fn last_line_gets_truncated_after_a_link() {
+        let mut drawer = HtmlDrawer::new();
+        let (body, plain) = ("aaaa bbbb <a href='x'>cccc</a>dddddd", "aaaa bbbb ccccdddddd");
+        let full_width = drawer.draw(plain, 1000.0)[0].get_row_x_bounds(0).1;
+        drawer.html.text_flow.max_lines = 1;
+        drawer.html.text_flow.text_overflow = TextOverflow::Ellipsis;
+        // The link is drawn without wrapping on the last line, so what comes after it has to wrap.
+        for width in (60..200).map(f64::from).filter(|width| (width - full_width).abs() > 1.0) {
+            drawer.draw(body, width);
+            assert_eq!(drawer.html.text_flow.is_content_truncated(), width < full_width, "at {width}");
+        }
+    }
+
+    /// Returns whether a run ends with the ellipsis, whether it's the layouter's or a widget's.
+    fn ends_with_ellipsis(run: &DrawnRun) -> bool {
+        let last_row = run.laidout_text.rows.last().unwrap();
+        run.text == "\u{2026}" || last_row.glyphs.last().is_some_and(|glyph| glyph.cluster == last_row.text.len())
+    }
+
+    #[test]
+    fn the_last_line_ends_with_an_ellipsis_inside_its_edge() {
+        let mut drawer = HtmlDrawer::new();
+        drawer.html.text_flow.text_overflow = TextOverflow::Ellipsis;
+        for body in [
+            "aaaa bbbb <b>cccc</b> dddd",
+            "aaaa bbbb <code>cccc</code> dddd",
+            "aaaa bbbb <a href='x'>cccc</a> dddd",
+            "aaaa bbbb <mark>cccc</mark> dddd",
+            "aaaa <img> bbbb <img> cccc",
+        ] {
+            for max_lines in [1, 2] {
+                drawer.html.text_flow.max_lines = max_lines;
+                for width in (30..160).map(f64::from) {
+                    drawer.check_rows_end_before(body, width, width, |_| true);
+                    let runs = drawer.draw(body, width);
+                    let is_truncated = drawer.html.text_flow.is_content_truncated();
+                    assert_eq!(runs.last().is_some_and(ends_with_ellipsis), is_truncated, "{body:?} at {width}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lines_cut_after_a_block_or_break_end_with_an_ellipsis() {
+        let mut drawer = HtmlDrawer::new();
+        drawer.html.text_flow.max_lines = 1;
+        drawer.html.text_flow.text_overflow = TextOverflow::Ellipsis;
+        for (body, is_cut) in [
+            ("<p>aaaa</p><p>bbbb</p>", true),
+            ("aaaa<br>bbbb", true),
+            ("<ul><li>aaaa</li><li>bbbb</li></ul>", true),
+            ("aaaa<blockquote>bbbb</blockquote>", true),
+            // These show up below the line even without text.
+            ("aaaa<hr>", true),
+            ("aaaa<blockquote></blockquote>", true),
+            ("aaaa<table><tr><td></td></tr></table>", true),
+            ("aaaa<br>", false),
+            ("<p>aaaa</p><p></p>", false),
+            ("aaaa<a href='x'></a>", false),
+        ] {
+            let runs = drawer.draw(body, 300.0);
+            assert_eq!(runs.last().is_some_and(ends_with_ellipsis), is_cut, "{body:?}");
+            assert_eq!(drawer.html.text_flow.is_content_truncated(), is_cut, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn a_collapsed_summary_is_only_cut_by_what_follows_its_details() {
+        let mut drawer = HtmlDrawer::new();
+        drawer.html.text_flow.max_lines = 1;
+        drawer.html.text_flow.text_overflow = TextOverflow::Ellipsis;
+        // The long body would leave no room after the image or the link if it went on in the summary's row.
+        let long_body = "cccccccccccccccccccccccccccccccccccccccccccccccccc";
+        for (body, is_cut) in [
+            (format!("<details><summary>aaaa <img></summary>{long_body}</details>"), false),
+            (format!("<details><summary>aaaa <a href='x'>bbbb</a></summary>{long_body}</details>"), false),
+            ("<details><summary>aaaa <img></summary>cccc</details>dddd".to_string(), true),
+            ("<details><summary>aaaa <a href='x'>bbbb</a></summary>cccc</details>dddd".to_string(), true),
+        ] {
+            drawer.draw(&body, 300.0);
+            assert_eq!(drawer.html.text_flow.is_content_truncated(), is_cut, "{body:?}");
+            // Once it's open, its body goes on in the summary's row, and gets cut.
+            drawer.set_details_open(true);
+            drawer.draw(&body, 300.0);
+            assert!(drawer.html.text_flow.is_content_truncated(), "{body:?} when open");
+            drawer.set_details_open(false);
+            drawer.draw(&body, 300.0);
+            assert_eq!(drawer.html.text_flow.is_content_truncated(), is_cut, "{body:?} when closed again");
+        }
+    }
+
+    #[test]
+    fn tables_keep_to_the_line_budget() {
+        let mut drawer = HtmlDrawer::new();
+        drawer.html.text_flow.text_overflow = TextOverflow::Ellipsis;
+        for (body, max_lines, shown) in [
+            // A nested table after the cut is skipped whole.
+            ("aaaa<table><tr><td><table><tr><td>x</td></tr></table></td><td>y</td></tr></table>", 1, ["aaaa"].as_slice()),
+            // Cells without a row stack up, like rows.
+            ("<table><td>aaaa</td><td>bbbb</td></table>", 1, ["aaaa"].as_slice()),
+            // A table in a cell doesn't make the row forget its taller first cell.
+            (
+                "<table><tr><td>aaaa<br>bbbb</td><td><table><tr><td>x</td></tr></table></td></tr></table>cccc",
+                2,
+                ["aaaa", "bbbb", "x"].as_slice(),
+            ),
+        ] {
+            drawer.html.text_flow.max_lines = max_lines;
+            let runs = drawer.draw(body, 300.0);
+            let texts: Vec<&str> = runs.iter().map(|run| run.text.as_str()).collect();
+            assert_eq!(texts, shown, "{body:?}");
+            assert!(drawer.html.text_flow.is_content_truncated(), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn lookahead_follows_max_lines_and_text_overflow() {
+        let body = "aaaa bbbb <b>cccc</b> dddd <img> eeee <a href='x'>ffff gggg</a> hhhh<br>iiii";
+        let mut drawer = HtmlDrawer::new();
+        let mut fresh_drawer = HtmlDrawer::new();
+        // These change without an apply, like when a preview expands and collapses again.
+        let limits = [
+            (0, TextOverflow::Ellipsis),
+            (1, TextOverflow::Ellipsis),
+            (2, TextOverflow::Clip),
+            (2, TextOverflow::Ellipsis),
+            (0, TextOverflow::Clip),
+            (1, TextOverflow::Ellipsis),
+        ];
+        for width in (60..300).step_by(7).map(f64::from) {
+            for (max_lines, text_overflow) in limits {
+                for tf in [&mut drawer.html.text_flow, &mut fresh_drawer.html.text_flow] {
+                    tf.max_lines = max_lines;
+                    tf.text_overflow = text_overflow;
+                }
+                fresh_drawer.draw("x", width);
+                assert_eq!(
+                    drawer.get_shown_glyph_counts(body, width),
+                    fresh_drawer.get_shown_glyph_counts(body, width),
+                    "{max_lines} lines, {text_overflow:?}, at {width}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn finding_the_room_after_a_run_takes_time_linear_in_what_follows() {
+        let mut drawer = HtmlDrawer::new();
+        drawer.html.text_flow.max_lines = 1;
+        // `aaaa` has no room for the long word's first letter and the ellipsis, so only the room after it reads the word.
+        let mut get_room_time = |length: usize| {
+            (0..3)
+                .map(|round| {
+                    let body = format!("aaaa <b>{length}{round}{}</b>", "x".repeat(length));
+                    // Clip needs no room, so this draw only shapes the word, which the layouter does either way.
+                    drawer.html.text_flow.text_overflow = TextOverflow::Clip;
+                    drawer.draw(&body, 30.0);
+                    drawer.html.text_flow.text_overflow = TextOverflow::Ellipsis;
+                    let start_time = Cx::monotonic_now();
+                    drawer.draw(&body, 30.0);
+                    let room_time = Cx::monotonic_now() - start_time;
+                    assert!(drawer.html.text_flow.is_content_truncated());
+                    room_time
+                })
+                .fold(f64::INFINITY, f64::min)
+        };
+        let (short_time, long_time) = (get_room_time(1000), get_room_time(16000));
+        // Sixteen times the text takes about sixteen times as long, where a quadratic search takes about 256 times.
+        assert!(long_time < short_time * 48.0, "{short_time} s for 1000 chars, but {long_time} s for 16000");
+    }
+
+    #[test]
+    fn only_the_last_run_of_a_widget_ends_with_what_follows_it() {
+        let mut drawer = HtmlDrawer::new();
+        drawer.html.text_flow.max_lines = 1;
+        drawer.html.text_flow.text_overflow = TextOverflow::Ellipsis;
+        let runs = drawer.draw("the answer is <spoiler>42</spoiler><br>next line", 300.0);
+        let texts: Vec<&str> = runs.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(texts, ["the answer is ", " [Spoiler]  ", "42"]);
+        assert!(!ends_with_ellipsis(&runs[1]) && ends_with_ellipsis(&runs[2]));
+        // A spoiler that doesn't fit after its reason is hidden from there, so the reason stays.
+        let mut hidden_count = 0;
+        for width in (60..300).map(f64::from) {
+            let runs = drawer.draw("the answer is <spoiler>42</spoiler>", width);
+            let Some(reason) = runs.iter().find(|run| run.text == " [Spoiler]  ") else {
+                continue;
+            };
+            if let Some(ellipsis) = runs.iter().find(|run| run.text == "\u{2026}") {
+                assert!(ellipsis.get_row_x_bounds(0).0 >= reason.get_ink_end_x(0) - 0.5, "at {width}");
+                hidden_count += 1;
+            }
+        }
+        assert!(hidden_count > 0);
+    }
+
+    #[test]
+    fn clip_cuts_widgets_without_an_ellipsis() {
+        let mut drawer = HtmlDrawer::new();
+        drawer.html.text_flow.text_overflow = TextOverflow::Clip;
+        for body in [
+            "aaaa bbbb <pill></pill> cccc",
+            "aaaa bbbb <a href='x'>cccc dddd</a> eeee",
+            "aaaa bbbb <mark>cccc dddd</mark> eeee",
+            "aaaa <spoiler>42</spoiler> bbbb",
+        ] {
+            for max_lines in [1, 2] {
+                drawer.html.text_flow.max_lines = max_lines;
+                for width in (30..200).map(f64::from) {
+                    let runs = drawer.draw(body, width);
+                    assert!(!runs.iter().any(ends_with_ellipsis), "{body:?} at {width}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn list_items_that_start_with_a_widget_take_their_lines() {
+        let mut drawer = HtmlDrawer::new();
+        drawer.html.text_flow.max_lines = 1;
+        drawer.html.text_flow.text_overflow = TextOverflow::Ellipsis;
+        let runs = drawer.draw("<ul><li><img> aaaa</li><li><img> bbbb</li></ul>", 300.0);
+        assert!(!runs.iter().any(|run| run.text.contains("bbbb")));
+        assert!(drawer.html.text_flow.is_content_truncated());
+        // A widget too wide for the marker's row can only go below it while there are lines left for both.
+        for max_lines in [1, 2] {
+            drawer.html.text_flow.max_lines = max_lines;
+            let runs = drawer.draw("<ul><li><wide></wide> aaaa</li><li>bbbb</li></ul>", 300.0);
+            let mut row_tops: Vec<f64> = runs.iter().map(|run| run.origin.y).collect();
+            row_tops.dedup_by(|top, other_top| (*top - *other_top).abs() < 1.0);
+            assert_eq!(row_tops.len(), max_lines, "{max_lines} lines");
+            assert!(!runs.iter().any(|run| run.text.contains("bbbb")), "{max_lines} lines");
+        }
+    }
+
+    #[test]
+    fn what_gets_cut_adds_no_height() {
+        let mut drawer = HtmlDrawer::new();
+        drawer.html.text_flow.text_overflow = TextOverflow::Ellipsis;
+        let mut get_height = |body: &str, max_lines| {
+            drawer.html.text_flow.max_lines = max_lines;
+            drawer.draw(body, 300.0);
+            drawer.html.text_flow.area.rect(&drawer.cx).size.y
+        };
+        for (body, max_lines, shown) in [
+            ("aaaa<br>bbbb<br>cccc<br>dddd", 1, "aaaa"),
+            ("aaaa<br>bbbb<br>cccc<br>dddd", 2, "aaaa<br>bbbb"),
+            ("aaaa<ul><li>bbbb</li><li>cccc</li><li>dddd</li></ul>", 1, "aaaa"),
+            ("<ul><li>aaaa</li><li>bbbb</li><li>cccc</li></ul>", 1, "<ul><li>aaaa</li></ul>"),
+        ] {
+            let (height, shown_height) = (get_height(body, max_lines), get_height(shown, 0));
+            assert!((height - shown_height).abs() < 0.01, "{body:?}: {height} vs {shown_height}");
+        }
+    }
+
+    #[test]
+    fn empty_widgets_keep_room_for_the_ellipsis_before_them() {
+        let mut drawer = HtmlDrawer::new();
+        drawer.html.text_flow.max_lines = 1;
+        drawer.html.text_flow.text_overflow = TextOverflow::Ellipsis;
+        // The pill draws with no text in it, so the text before it keeps room for the ellipsis in its place.
+        for width in (60..200).map(f64::from) {
+            let runs = drawer.draw("aaaa bbbb cccc<pill></pill>", width);
+            let Some(ellipsis) = runs.iter().find(|run| run.text == "\u{2026}") else {
+                continue;
+            };
+            for run in runs.iter().filter(|run| run.text != "\u{2026}") {
+                assert!(ellipsis.get_row_x_bounds(0).0 >= run.get_ink_end_x(0) - 0.5, "at {width}");
+            }
+        }
+        // And the line it's on comes after the cut.
+        drawer.draw("aaaa<br><pill></pill>", 300.0);
+        assert!(drawer.html.text_flow.is_content_truncated());
+    }
+
+    #[test]
+    fn empty_elements_keep_no_room_for_the_text_after_them() {
+        let mut drawer = HtmlDrawer::new();
+        // Nothing can break around the word joiners, so the empty links stay glued to the text.
+        for body in ["xx yy aaaa\u{2060}<a href='x'></a>bbbbbb cc", "xx yy 1\u{2060}<a href='x'></a>000000 cc"] {
+            for width in (60..200).map(f64::from) {
+                drawer.check_rows_end_before(body, width, width, |_| true);
+            }
+        }
+    }
+
+    #[test]
+    fn zero_width_text_takes_no_room_past_the_edge() {
+        let mut drawer = HtmlDrawer::new();
+        // A code box's margin can end past the edge, and so does the zero width space after it.
+        for width in (120..400).map(|width| f64::from(width) / 2.0) {
+            drawer.check_rows_end_before("aaaa <code>cccc</code>\u{200B}dd ee", width, width, |_| true);
+        }
+    }
+
+    #[test]
+    fn lines_with_only_widgets_are_as_tall_as_text() {
+        let mut drawer = HtmlDrawer::new();
+        let mut get_height = |body: &str| {
+            drawer.draw(body, 300.0);
+            drawer.html.text_flow.area.rect(&drawer.cx).size.y
+        };
+        // The zero width spaces give these lines the height of a line of text.
+        for (body, body_with_text) in [
+            ("<img>", "<img>\u{200B}"),
+            ("<p><img></p>", "<p><img>\u{200B}</p>"),
+            ("aaa<br><img><br>bbb", "aaa<br><img>\u{200B}<br>bbb"),
+        ] {
+            let (height, height_with_text) = (get_height(body), get_height(body_with_text));
+            assert!((height - height_with_text).abs() < 0.01, "{body:?}: {height} vs {height_with_text}");
+        }
+    }
+
+    #[test]
+    fn code_boxes_dont_start_with_only_white_space() {
+        let mut drawer = HtmlDrawer::new();
+        let pad_l = drawer.html.text_flow.inline_code_padding.left;
+        // Nothing can break before these code runs, and their first unit is the white space.
+        for (body, code) in [("aaaa bbbb<code> cc</code> dd", " cc"), ("word<code>  spaced</code> after", "  spaced")] {
+            let mut moved_count = 0;
+            for width in (70..250).map(f64::from) {
+                let runs = drawer.draw(body, width);
+                let run = runs.iter().find(|run| run.text == code).unwrap();
+                assert!(!run.laidout_text.rows[0].text.chars().all(is_hangable_white_space), "{body:?} at {width}");
+                if (run.get_row_x_bounds(0).0 - pad_l).abs() < 0.01 {
+                    moved_count += 1;
+                }
+            }
+            assert!(moved_count > 0, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn highlighted_text_keeps_its_box_inside() {
+        let mut drawer = HtmlDrawer::new();
+        let pad_r = drawer.html.text_flow.inline_code_padding.right;
+        // Html can't know that a `mark` draws a box, so the text before it keeps room for its text only.
+        for (body, highlighted) in [
+            ("foo<mark>barbazquux</mark> qux and more words here", ["barbazquux"].as_slice()),
+            ("word<mark>joined</mark> word another<mark>(paren)</mark>.", ["joined", "(paren)"].as_slice()),
+        ] {
+            for width in (100..300).map(f64::from) {
+                drawer.check_rows_end_before(body, width, width - pad_r, |text| highlighted.contains(&text));
+            }
+        }
+    }
 
     #[test]
     fn a_mark_landing_inside_a_character_is_floored_to_its_start() {

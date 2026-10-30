@@ -93,7 +93,7 @@ The kernel includes bounded bevel, creased subdivision, UV unwrap/pack/relax,
 loop editing, bridge/fill, region extrusion, deformers, sculpt and decimation.
 Rig evaluation and rendering live in their respective engine crates; general
 concave polygon inset remains an explicit refusal. See
-[the modeling operation contract](../model/MESH_API.md) for supported domains.
+[the typed modeling operations](../model/src/mesh_editing.rs) for supported domains.
 
 `Context` applies caller-selected element, byte and work limits. Cancellation
 uses an optional caller callback and does not start or wait for threads.

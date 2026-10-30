@@ -272,6 +272,7 @@ impl Cx {
                     if self.windows[w].is_created {
                         self.windows[w].is_created = false;
                         self.hal.frames.w.window_close(hal_window_id(w));
+                        self.hal.close_pending = Some(std::time::Instant::now());
                     }
                 }
                 CxOsOp::MinimizeWindow(w) if self.hal_hosted_extra_window(w) => Self::send_hosted_window(crate::ime::HostedWindow::new(w.id(), crate::ime::hosted_window_op::MINIMIZE)),
@@ -298,6 +299,7 @@ impl Cx {
                     if self.windows[w].is_created {
                         self.windows[w].is_created = false;
                         self.hal.frames.w.window_close(hal_window_id(w));
+                        self.hal.close_pending = Some(std::time::Instant::now());
                     }
                 }
                 CxOsOp::RequestCloseWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::CLOSE),
@@ -305,6 +307,7 @@ impl Cx {
                 CxOsOp::RequestCloseWindow(w) => {
                     if self.windows[w].is_created {
                         self.hal.frames.w.window_state(hal_window_id(w), window_state::CLOSE);
+                        self.hal.close_pending = Some(std::time::Instant::now());
                     }
                 }
                 CxOsOp::MinimizeWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::MINIMIZE),
@@ -328,6 +331,7 @@ impl Cx {
                     if self.hal.window_ready(window_id) {
                         self.windows[window_id].is_created = false;
                         self.hal.frames.w.window_close(hal_window_id(window_id));
+                        self.hal.close_pending = Some(std::time::Instant::now());
                         break;
                     }
                 }
@@ -367,6 +371,14 @@ impl Cx {
                     };
                     let [_, top, _, height] = native(caption);
                     self.hal.frames.w.window_caption(hal_window_id(w), top, height, native(buttons), dark);
+                }
+                // A hosted app's windows are stacked by its host: it is told by window id once
+                // the window exists there (`hal_hosted_create_window` repeats a request made before).
+                CxOsOp::SetTopmost(w, on) if self.hal.hosted.is_some() => {
+                    self.windows[w].window_geom.is_topmost = on;
+                    if self.windows[w].is_created {
+                        Self::send_hosted_window(crate::ime::HostedWindow::topmost(w.id(), on));
+                    }
                 }
                 CxOsOp::SetTopmost(w, on) => self.hal.frames.w.window_topmost(hal_window_id(w), on),
                 CxOsOp::SetChromelessWhenMaximized(w, on) => self.hal.frames.w.chromeless_when_max(hal_window_id(w), on),

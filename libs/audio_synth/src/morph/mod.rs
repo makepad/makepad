@@ -19,7 +19,7 @@ mod patch;
 
 pub use patch::{MorphPatch, MorphSources};
 
-use crate::kit::arp::{self, Arp, ArpEvent, ArpIx};
+use crate::kit::arp::{self, Arp, ArpEvent, ArpIx, ArpSettings};
 use crate::kit::env::{bend, Env, EnvBlock, EnvIx};
 use crate::kit::filter::{self, Filter, FilterBlock, FilterIx};
 use crate::kit::fx::{self, FxIx, Rack};
@@ -221,7 +221,7 @@ pub struct Morph {
     lfo: [Lfo; 8],
     rack: Box<Rack>,
     arp: Arp,
-    arp_events: [ArpEvent; 64],
+    arp_events: [(f64, ArpEvent); 64],
     arp_was_on: bool,
     /// Beats a second (the tempo), the beat and time clocks.
     bps: f32,
@@ -256,7 +256,7 @@ impl Morph {
             lfo: std::array::from_fn(|i| Lfo::new(1000 + i as u32)),
             rack,
             arp: Arp::new(),
-            arp_events: [ArpEvent::Off(0); 64],
+            arp_events: [(0.0, ArpEvent::Off(0)); 64],
             arp_was_on: false,
             bps: 2.0,
             beats: 0.0,
@@ -542,9 +542,9 @@ impl Morph {
         // The arp plays the held notes.
         let arp_on = base[ix.arp.on] > 0.5;
         if arp_on {
-            let n = self.arp.advance(base, &ix.arp, self.bps * dt, &mut self.arp_events);
+            let n = self.arp.advance(&ArpSettings::from_values(base, &ix.arp), (self.bps * dt) as f64, &mut self.arp_events);
             for k in 0..n {
-                match self.arp_events[k] {
+                match self.arp_events[k].1 {
                     ArpEvent::On(note, vel) => self.voice_on(note, vel),
                     ArpEvent::Off(note) => self.voice_off(note, 64),
                 }

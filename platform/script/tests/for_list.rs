@@ -25,6 +25,9 @@ fn a_for_value_is_a_list() {
     assert_eq!(numbers("let xs = for i in 0..3 { i * 2 }\nxs"), vec![0.0, 2.0, 4.0]);
     assert_eq!(numbers("fn f(n) { return for i in 0..n { let k = i + 1\n k * k } }\nf(3)"), vec![1.0, 4.0, 9.0]);
     assert_eq!(numbers("let xs = []\nfor i in 0..3 { xs.push(i) }\nxs"), vec![0.0, 1.0, 2.0]);
+    // As the source's last statement.
+    let (_, errs, _) = eval("let xs = for i in 0..3 { i * 2 }\n");
+    assert!(errs.is_empty(), "{errs:?}");
     // As a call's argument, also of objects made from a prototype.
     assert_eq!(numbers("fn f(a, b) { return b }\nf(0, for i in 0..3 { i * 2 })"), vec![0.0, 2.0, 4.0]);
     assert_eq!(numbers("let P = {k: 0}\nfn f(a, b) { return for o in b { o.k } }\nf(0, for i in 0..3 { P{k: i} })"), vec![0.0, 1.0, 2.0]);

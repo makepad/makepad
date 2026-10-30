@@ -232,6 +232,9 @@ pub struct Cx {
     /// whoever queued the change (the design overlay rolls its edit back on
     /// them); they are logged as well.
     pub(crate) live_edit_errors: Vec<String>,
+    /// How many whole-tree reload walks (`Event::LiveEdit` or `Event::ScriptReapply`) have run,
+    /// so a widget kept outside the tree can tell whether it missed one.
+    pub reload_generation: u64,
 
     /// Which `Apply` variant the pending `Event::LiveEdit` should re-apply
     /// the freshly re-run `script_mod` value with. A file-change hot reload
@@ -272,6 +275,8 @@ pub struct Cx {
     /// the draw buffers in place (the tweaker's theme pulse) and must
     /// re-apply after widgets rewrite them.
     pub post_draw_hook: Option<Box<dyn FnMut(&mut Cx)>>,
+    /// GPU and draw time by what the passes draw for (`Cx::set_pass_load_enabled`).
+    pub(crate) pass_load: crate::pass_load::PassLoad,
     /// The collect run's driver (`MAKEPAD_RUN=collect-web`, see
     /// [`crate::collect`]); `None` in a normal run.
     pub(crate) collect: Option<Box<crate::collect::Collector>>,
@@ -1060,6 +1065,7 @@ impl Cx {
             hosted_hidden: false,
 
             post_draw_hook: None,
+            pass_load: Default::default(),
             collect: None,
             screenshot_requests: Default::default(),
             window_snapshots: Vec::new(),
@@ -1108,6 +1114,7 @@ impl Cx {
             display_context: Default::default(),
             pending_script_reapply: false,
             pending_style_reload: false,
+            reload_generation: 0,
             pending_live_edit_request: false,
             live_edit_errors: Vec::new(),
             live_edit_apply: Apply::Reload,

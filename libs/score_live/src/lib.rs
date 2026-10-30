@@ -22,6 +22,7 @@
 
 pub mod assist;
 pub mod audition;
+pub mod browse;
 pub mod build;
 pub mod compose;
 pub mod game;
@@ -50,6 +51,9 @@ pub mod vm;
 
 /// The MIDI the live score's MIDI loops send (the host puts it on its outputs).
 pub use makepad_audio_engine::feed::midi_out;
+/// MIDI in: the host pushes its inputs' messages here, for the loops a
+/// `MidiIn` stream plays (on the audio thread, each on its sample).
+pub use makepad_audio_engine::feed::midi_in;
 /// Live audio in: the host pushes the input device's frames here.
 pub use makepad_audio_engine::feed::audio_in;
 /// An instrument's settings held live (an editor's control under a hand).

@@ -37,7 +37,7 @@ const MAX_TRIANGLES: usize = 4_000_000;
 pub struct Evaluator {
     pub tolerance: Tolerance,
     /// Field and shell cells are multiplied by this (a live drag's coarse
-    /// preview: 2 meshes an eighth of the samples).
+    /// preview: 2 meshes an eighth of the samples; below 1 is finer, for export).
     pub draft: f64,
     /// The finest default field cell.
     pub finest_cell: f64,
@@ -155,6 +155,12 @@ impl Evaluator {
         self.built += 1;
         self.cache.insert((node.key, draft), (m.clone(), self.round));
         Ok(m)
+    }
+
+    /// The draft as a cell scale: above 1 coarser (live editing), below 1 finer (export);
+    /// anything not a positive finite number is 1.
+    fn draft_scale(&self) -> f64 {
+        if self.draft.is_finite() && self.draft > 0.0 { self.draft } else { 1.0 }
     }
 
     /// Whether the node's mesh depends on the draft (a field or a shell below it).
@@ -311,7 +317,7 @@ impl Evaluator {
                 }
                 Ok(if *keep { cad::union(source, &m) } else { m })
             }
-            Op::Shell { thickness, open, cell, .. } => shell(&inputs[0], *thickness, *open, cell.map(|c| c * self.draft.max(1.0)), self.draft.max(1.0)),
+            Op::Shell { thickness, open, cell, .. } => shell(&inputs[0], *thickness, *open, cell.map(|c| c * self.draft_scale()), self.draft_scale()),
             Op::Boolean { mode, .. } => {
                 let mut out = (*inputs[0]).clone();
                 for other in &inputs[1..] {
@@ -351,7 +357,7 @@ impl Evaluator {
                 if !(max.x > min.x && max.y > min.y && max.z > min.z) {
                     return Err("an SDF's bounds need min below max on every axis".into());
                 }
-                let cell = cell.unwrap_or_else(|| makepad_csg_sdf::default_cell(min, max, self.finest_cell)) * self.draft.max(1.0);
+                let cell = cell.unwrap_or_else(|| makepad_csg_sdf::default_cell(min, max, self.finest_cell)) * self.draft_scale();
                 nonempty(makepad_csg_sdf::mesh_field(shape.field(), min, max, cell), "shape (nothing inside its surface)")
             }
             Op::Mesh { mesh } => Ok((**mesh).clone()),

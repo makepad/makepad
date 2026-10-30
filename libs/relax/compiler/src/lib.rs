@@ -16,11 +16,14 @@ macro_rules! eprintln {
     ($($t:tt)*) => { stderr_line!($($t)*) };
 }
 /// One stderr line that never panics; for modules whose own `eprintln!` gates on diag::enabled.
+/// The line (newline included) is formatted first and written in one call: stderr is
+/// unbuffered, and a `write_fmt` there is one write per piece, so another thread's stdout line
+/// (a test's `... FAILED`) landed inside a multi-line `report:` message in a shared log.
 #[cfg(not(test))]
 #[allow(unused_macros)]
 macro_rules! stderr_line {
     () => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_all(b"\n"); }};
-    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_fmt(format_args!("{}\n", format_args!($($t)+))); }};
+    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_all(::std::fmt::format(format_args!("{}\n", format_args!($($t)+))).as_bytes()); }};
 }
 #[cfg(test)]
 macro_rules! stderr_line {
@@ -768,25 +771,38 @@ fn census_report(crates: &[crates::CrateUnit], per: &[census::Census], total: &c
 
 pub mod std_source;
 
-/// std sources: $MAKEPAD_RUN_STD, else <repo>/libs/relax/compiler/std next to the binary's target dir
+/// std sources: $MAKEPAD_RUN_STD, else <repo>/libs/relax/compiler/std next to the binary's
+/// target dir (<worktree>/<target>/release/makepad; node 165's layout keeps the sources under
+/// <dir>/src), else the source tree this binary was built from (a CARGO_TARGET_DIR outside the
+/// checkout). None found: the build tree's path, and a hint to set MAKEPAD_RUN_STD, said once.
 pub fn std_dir() -> String {
-    match std::env::var("MAKEPAD_RUN_STD") {
-        Ok(d) => d,
-        Err(_) => {
-            let mut d = std::env::current_exe().unwrap_or_default();
-            for _ in 0..3 {
-                d.pop();
-            }
-            // <worktree>/<cargo target dir>/release/makepad -> <worktree>/libs/relax/compiler/std; node 165's
-            // layout keeps the sources under <dir>/src
-            let direct = format!("{}/libs/relax/compiler/std", d.display());
-            if std::path::Path::new(&direct).join("core/lib.rs").exists() {
-                direct
-            } else {
-                format!("{}/src/libs/relax/compiler/std", d.display())
-            }
-        }
+    if let Ok(d) = std::env::var("MAKEPAD_RUN_STD") {
+        return d;
     }
+    let candidates = std_candidates(None);
+    if let Some(c) = candidates.iter().find(|c| std::path::Path::new(c).join("core/lib.rs").exists()) {
+        return c.clone();
+    }
+    static HINT: std::sync::Once = std::sync::Once::new();
+    HINT.call_once(|| eprintln!("makepad-run: no std sources found (looked in {}): set MAKEPAD_RUN_STD=<makepad checkout>/libs/relax/compiler/std", candidates.join(", ")));
+    concat!(env!("CARGO_MANIFEST_DIR"), "/std").to_string()
+}
+
+/// Where std's sources may be, in order: the workspace's own (when it is a makepad checkout),
+/// beside the binary's target dir, under <dir>/src, and the tree the binary was built from.
+pub fn std_candidates(workspace: Option<&str>) -> Vec<String> {
+    let mut d = std::env::current_exe().unwrap_or_default();
+    for _ in 0..3 {
+        d.pop();
+    }
+    let mut v: Vec<String> = Vec::new();
+    if let Some(w) = workspace {
+        v.push(format!("{}/libs/relax/compiler/std", w));
+    }
+    v.push(format!("{}/libs/relax/compiler/std", d.display()));
+    v.push(format!("{}/src/libs/relax/compiler/std", d.display()));
+    v.push(concat!(env!("CARGO_MANIFEST_DIR"), "/std").to_string());
+    v
 }
 
 /// Loads core, alloc (when present) and std; returns core and the dependency list user crates

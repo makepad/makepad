@@ -14,7 +14,6 @@ pub enum Error {
     Mesh(mesh::MeshError),
     Budget(&'static str),
     Invalid(&'static str),
-    MissingField { field: String, operation: Option<String> },
     Corrupt(&'static str),
     MissingObject(String),
     DuplicateObject(String),
@@ -140,6 +139,8 @@ impl Receipt {
         self.id.len()+128+self.results.iter().map(|r|r.object.len()+128+(r.faces.len()+r.vertices.len())*16+r.metrics.iter().map(|(k,_)|k.len()+96).sum::<usize>()).sum::<usize>()
     }
 }
+/// The model source format: 3 = typed canonical operations in the log and scene state.
+const SOURCE_VERSION: u32 = 3;
 const MAX_RECEIPT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_IDENTITIES: usize = 65_536;
 /// Serialized size and work of the checkpoint section of a version 2 source.
@@ -337,6 +338,9 @@ impl Document {
         check_name(&tx.request_id, &self.limits)?;
         if tx.operations.is_empty() {
             return Err(Error::Invalid("empty transaction"));
+        }
+        for op in &tx.operations {
+            op.check(&self.limits)?;
         }
         // The fingerprint encoding is released before admission; it is not
         // resident while the transaction executes.
@@ -599,10 +603,10 @@ impl Document {
     /// checkpoint, so clients never replay floating-point modeling operations.
     /// Local undo history remains intact; identity receipts and Head persist.
     pub fn to_snapshot_bytes(&self, cancelled: Option<&dyn Fn() -> bool>) -> Result<Vec<u8>> {
-        self.encode_parts(&mut mesh::Context::new(self.limits.mesh.clone(), cancelled), 2, true)
+        self.encode_parts(&mut mesh::Context::new(self.limits.mesh.clone(), cancelled), SOURCE_VERSION, true)
     }
     fn encode(&self, ctx: &mut mesh::Context) -> Result<Vec<u8>> {
-        self.encode_version(ctx, 2)
+        self.encode_version(ctx, SOURCE_VERSION)
     }
     fn encode_version(&self, ctx: &mut mesh::Context, version:u32) -> Result<Vec<u8>> {
         self.encode_parts(ctx, version, false)
@@ -653,7 +657,7 @@ impl Document {
             return Err(Error::Corrupt("unsupported model source version"));
         }
         let version = r.u32()?;
-        if !(1..=2).contains(&version) { return Err(Error::Corrupt("unsupported model source version")); }
+        if version != SOURCE_VERSION { return Err(Error::Corrupt("unsupported model source version")); }
         let head = read_head(&mut r)?;
         let checkpoint = read_state(&mut r, &limits, &mut ctx, version)?;
         if checkpoint.memory_bytes().saturating_mul(3) > ctx.limits.max_bytes {
@@ -1616,15 +1620,23 @@ fn write_ops(w: &mut Writer, ops: &[Operation], limits: &Limits) -> Result<()> {
     }
     w.count(ops.len())?;
     for op in ops {
+        op.write(w)?;
+    }
+    Ok(())
+}
+impl Operation {
+    /// The canonical encoding: the document log, transaction fingerprints, program hashes.
+    pub(crate) fn write(&self, w: &mut Writer) -> Result<()> {
+        let op = self;
         match op {
             Operation::SoftBodyUnbind => { w.u8(33)?; }
-            Operation::SoftBody(op) => { w.u8(32)?; crate::schema::write_value(w,op.value())?; }
-            Operation::Selection(op) => { w.u8(31)?; crate::schema::write_value(w, op.value())?; }
-            Operation::Construction(op) => { w.u8(30)?; crate::schema::write_value(w, op.value())?; }
-            Operation::Rig(op) => { w.u8(29)?; crate::schema::write_value(w, op.value())?; }
-            Operation::MeshEditing(op) => { w.u8(28)?; crate::schema::write_value(w, op.value())?; }
+            Operation::SoftBody(op) => { w.u8(32)?; op.write(w)?; }
+            Operation::Selection(op) => { w.u8(31)?; op.write(w)?; }
+            Operation::Construction(op) => { w.u8(30)?; op.write(w)?; }
+            Operation::Rig(op) => { w.u8(29)?; op.write(w)?; }
+            Operation::MeshEditing(op) => { w.u8(28)?; op.write(w)?; }
             Operation::Surface(op) => { w.u8(27)?; crate::surface::write_surface_operation(w, op)?; }
-            Operation::Scene(op) => { w.u8(26)?; crate::schema::write_value(w, op.value())?; }
+            Operation::Scene(op) => { w.u8(26)?; op.write(w)?; }
             Operation::Cube { object, size } => {
                 w.u8(0)?;
                 w.string(object)?;
@@ -1894,29 +1906,34 @@ fn write_ops(w: &mut Writer, ops: &[Operation], limits: &Limits) -> Result<()> {
                 w.f64(*max_displacement)?;
             }
         }
+        Ok(())
     }
-    Ok(())
 }
 fn read_ops(r: &mut Reader, limits: &Limits) -> Result<Vec<Operation>> {
     let mut ops = Vec::new();
     for _ in 0..r.count(limits.max_operations)? {
+        ops.push(Operation::read(r, limits)?);
+    }
+    Ok(ops)
+}
+impl Operation {
+    /// Decode one operation of the canonical encoding (`write`).
+    pub(crate) fn read(r: &mut Reader, limits: &Limits) -> Result<Self> {
         let tag = r.u8()?;
         if tag == 11 {
             let material = r.u32()?;
             let value = read_material(r, limits)?;
-            ops.push(Operation::SetMaterial { material, value });
-            continue;
+            return Ok(Operation::SetMaterial { material, value });
         }
         let global = match tag {
             33 => Some(Operation::SoftBodyUnbind),
-            32 => Some(Operation::SoftBody(crate::SoftBodyBind::parse(&crate::schema::read_value(r,limits)?,limits)?.ok_or(Error::Corrupt("soft-body operation"))?)),
-            31 => Some(Operation::Selection(crate::SelectionOperation::parse(&crate::schema::read_value(r,limits)?,limits)?.ok_or(Error::Corrupt("selection operation"))?)),
-            30 => Some(Operation::Construction(crate::ConstructionOperation::parse(&crate::schema::read_value(r,limits)?,limits)?.ok_or(Error::Corrupt("construction operation"))?)),
-            29 => Some(Operation::Rig(crate::RigOperation::parse(&crate::schema::read_value(r,limits)?,limits)?.ok_or(Error::Corrupt("rig operation"))?)),
-            28 => Some(Operation::MeshEditing(crate::MeshEditingOperation::parse(&crate::schema::read_value(r,limits)?,limits)?.ok_or(Error::Corrupt("mesh editing operation"))?)),
+            32 => Some(Operation::SoftBody(crate::SoftBodyBind::read(r,limits)?)),
+            31 => Some(Operation::Selection(crate::SelectionOperation::read(r,limits)?)),
+            30 => Some(Operation::Construction(crate::ConstructionOperation::read(r,limits)?)),
+            29 => Some(Operation::Rig(crate::RigOperation::read(r,limits)?)),
+            28 => Some(Operation::MeshEditing(crate::MeshEditingOperation::read(r,limits)?)),
             27 => Some(Operation::Surface(crate::surface::read_surface_operation(r, limits)?)),
-            26 => Some(Operation::Scene(crate::SceneOperation::parse(&crate::schema::read_value(r, limits)?, limits)?
-                .ok_or(Error::Corrupt("scene operation"))?)),
+            26 => Some(Operation::Scene(crate::SceneOperation::read(r,limits)?)),
             16 => Some(Operation::TextureSolid {
                 material: r.u32()?,
                 width: r.u32()?,
@@ -1941,8 +1958,7 @@ fn read_ops(r: &mut Reader, limits: &Limits) -> Result<Vec<Operation>> {
             _ => None,
         };
         if let Some(op) = global {
-            ops.push(op);
-            continue;
+            return Ok(op);
         }
         let object = r.string(limits.max_name_bytes)?;
         let op = match tag {
@@ -2123,9 +2139,8 @@ fn read_ops(r: &mut Reader, limits: &Limits) -> Result<Vec<Operation>> {
             }
             _ => return Err(Error::Corrupt("unknown operation")),
         };
-        ops.push(op);
+        Ok(op)
     }
-    Ok(ops)
 }
 
 #[cfg(test)]

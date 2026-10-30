@@ -81,7 +81,7 @@ impl Part {
     pub fn is_empty(&self) -> bool { self.polys.is_empty() }
     /// Several parts as one editable object; each part keeps its own
     /// crease rule for normals.
-    pub fn export_merged(name: &str, parts: &[Part], limits: &crate::Limits) -> Result<(Operation, Vec<crate::json::Value>)> {
+    pub fn export_merged(name: &str, parts: &[Part], limits: &crate::Limits) -> Result<(Operation, Vec<Operation>)> {
         let mut all = Part::new(name);
         let mut normals: Vec<[f64; 3]> = Vec::new();
         for p in parts.iter().filter(|p| !p.is_empty()) {
@@ -111,9 +111,9 @@ impl Part {
         out
     }
     /// An unskinned object (every vertex unbound).
-    pub fn export_static(&self, limits: &crate::Limits) -> Result<(Operation, Vec<crate::json::Value>)> { self.export_with(None, limits) }
+    pub fn export_static(&self, limits: &crate::Limits) -> Result<(Operation, Vec<Operation>)> { self.export_with(None, limits) }
     /// The editable mesh plus the vertex-paint ops that carry `colors`.
-    fn export_with(&self, normals: Option<Vec<[f64; 3]>>, limits: &crate::Limits) -> Result<(Operation, Vec<crate::json::Value>)> {
+    fn export_with(&self, normals: Option<Vec<[f64; 3]>>, limits: &crate::Limits) -> Result<(Operation, Vec<Operation>)> {
         if self.polys.is_empty() { return Err(Error::Invalid("character part has no faces")); }
         // Only referenced vertices are exported; unreferenced ones would
         // be loose points in the editable mesh.
@@ -134,11 +134,11 @@ impl Part {
         // search at compile (seconds for a character).
         let (mut vids, mut cols) = (Vec::new(), Vec::new());
         for (i, c) in colors.iter().enumerate() {
-            vids.push(crate::json::s(ids[i].to_string()));
-            cols.push(crate::json::Value::Arr(c.iter().map(|v| crate::json::Value::F64(v.clamp(0., 1.))).collect()));
+            vids.push(mesh::VertexId(ids[i]));
+            cols.push(c.map(|v| v.clamp(0., 1.)));
         }
         let paint = if vids.is_empty() { Vec::new() } else {
-            vec![crate::json::obj(vec![("op", crate::json::s("surface_vertex_colors")), ("object", crate::json::s(&self.name)), ("vertices", crate::json::Value::Arr(vids)), ("colors", crate::json::Value::Arr(cols))])]
+            vec![Operation::Surface(crate::SurfaceOperation::VertexColors { object: self.name.clone(), vertices: vids, colors: cols })]
         };
         Ok((Operation::ImportMesh { object: self.name.clone(), source: m.to_bytes(&mut ctx)? }, paint))
     }

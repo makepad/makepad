@@ -1,15 +1,18 @@
 //! The score as a graph: nodes, ports and wires for the Graph view, and the
 //! wiring gestures written back into the source. The graph is the document
 //! read another way: instruments feed loops (`play:`), loops and FX feed FX
-//! (`in: [...]`, `key:`), and whatever nothing consumes feeds the master.
+//! (`in: [...]`, `key:`), note streams (MIDI in through Arp, Chord,
+//! Transpose, Velocity) feed each other and loops (`in: keys`), and
+//! whatever nothing consumes feeds the master.
 
 use crate::model::ScoreDoc;
-use crate::source::{self, Splice};
+use crate::source;
+use makepad_edit_values::Splice;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct GPort {
     pub name: String,
-    /// `inst`, `audio` or `clock`: what may connect to what.
+    /// `inst`, `audio`, `notes` or `clock`: what may connect to what.
     pub kind: &'static str,
     pub many: bool,
 }
@@ -18,7 +21,7 @@ pub struct GPort {
 pub struct GNode {
     pub id: String,
     pub type_name: String,
-    /// `clock`, `inst`, `loop`, `fx`, `section`, `master`.
+    /// `clock`, `inst`, `stream`, `loop`, `fx`, `section`, `master`.
     pub role: &'static str,
     pub inputs: Vec<GPort>,
     pub outputs: Vec<GPort>,
@@ -56,8 +59,10 @@ pub fn project(doc: &ScoreDoc) -> ScoreGraph {
         let (role, inputs, outputs) = match ty.as_str() {
             "Clock" => ("clock", vec![], vec![port("clock", "clock", false)]),
             "Synth" | "Drums" | "Sampler" | "Ironfish" | "Morph" | "Shader" | "Voice" | "Instrument" => ("inst", vec![], vec![port("inst", "inst", false)]),
-            "Loop" | "Stinger" => ("loop", vec![port("play", "inst", false)], vec![port("audio", "audio", false)]),
+            "Loop" | "Stinger" => ("loop", vec![port("play", "inst", false), port("in", "notes", false)], vec![port("audio", "audio", false)]),
             "Section" => ("section", vec![], vec![]),
+            "MidiIn" => ("stream", vec![], vec![port("notes", "notes", false)]),
+            t if crate::model::STREAM_TYPES.contains(&t) => ("stream", vec![port("in", "notes", false)], vec![port("notes", "notes", false)]),
             _ => {
                 let duck = ty == "Duck" || ty == "Sidechain";
                 let mut inputs = vec![port("in", "audio", true)];
@@ -72,6 +77,14 @@ pub fn project(doc: &ScoreDoc) -> ScoreGraph {
     for l in &doc.loops {
         if let Some(play) = &l.play {
             graph.edges.push(GEdge { from: play.clone(), from_port: "inst".into(), to: l.name.clone(), to_port: "play".into(), key: None });
+        }
+        if let Some(input) = &l.input {
+            graph.edges.push(GEdge { from: input.clone(), from_port: "notes".into(), to: l.name.clone(), to_port: "in".into(), key: None });
+        }
+    }
+    for s in &doc.streams {
+        if let Some(input) = &s.input {
+            graph.edges.push(GEdge { from: input.clone(), from_port: "notes".into(), to: s.name.clone(), to_port: "in".into(), key: None });
         }
     }
     for fx in &doc.fx {
@@ -130,8 +143,11 @@ fn list_text(names: &[String]) -> String {
 pub fn connect(src: &str, from: &str, to: &str, to_port: &str) -> Result<String, String> {
     let outline = source::outline(src);
     let node = outline.node(to).ok_or_else(|| format!("no node `{to}`"))?;
+    // A loop's or a stream node's `in` takes one stream.
+    let one = matches!(node.type_name.as_str(), "Loop" | "Stinger") || crate::model::STREAM_TYPES.contains(&node.type_name.as_str());
     let splice: Splice = match to_port {
         "play" | "key" => source::set_field(src, to, to_port, from)?,
+        "in" if one => source::set_field(src, to, "in", from)?,
         "in" => {
             let mut names = node.field("in").map_or_else(Vec::new, |f| names_in(f.value.text(src)));
             if names.iter().any(|n| n == from) {
@@ -142,15 +158,17 @@ pub fn connect(src: &str, from: &str, to: &str, to_port: &str) -> Result<String,
         }
         other => return Err(format!("`{to}` has no input `{other}`")),
     };
-    Ok(source::apply(src, &splice))
+    makepad_edit_values::apply_splices(src, 0, &[splice])
 }
 
 /// Remove a wire: the entry `key` of an ordered input, or the one input.
 pub fn disconnect(src: &str, to: &str, to_port: &str, key: Option<u64>) -> Result<String, String> {
     let outline = source::outline(src);
     let node = outline.node(to).ok_or_else(|| format!("no node `{to}`"))?;
+    let one = matches!(node.type_name.as_str(), "Loop" | "Stinger") || crate::model::STREAM_TYPES.contains(&node.type_name.as_str());
     let splice = match to_port {
         "play" | "key" => source::remove_field(src, to, to_port)?,
+        "in" if one => source::remove_field(src, to, "in")?,
         "in" => {
             let mut names = node.field("in").map_or_else(Vec::new, |f| names_in(f.value.text(src)));
             let index = key.map(|k| k as usize).unwrap_or(names.len().saturating_sub(1));
@@ -162,7 +180,7 @@ pub fn disconnect(src: &str, to: &str, to_port: &str, key: Option<u64>) -> Resul
         }
         other => return Err(format!("`{to}` has no input `{other}`")),
     };
-    Ok(source::apply(src, &splice))
+    makepad_edit_values::apply_splices(src, 0, &[splice])
 }
 
 #[cfg(test)]

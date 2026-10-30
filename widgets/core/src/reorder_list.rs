@@ -430,10 +430,11 @@ impl ReorderList {
             }
             // A live drag is modal for the list: a wheel scroll would slide
             // the rows away under the pointer, and so would a page around the
-            // list scrolling by it, so the wheel is spent here.
-            if drag.active && matches!(event, Event::Scroll(_)) {
-                event.set_scroll_handled(Vec2Index::X);
-                event.set_scroll_handled(Vec2Index::Y);
+            // list scrolling by it, so the list takes the wheel itself.
+            if let (true, Event::Scroll(e)) = (drag.active, event) {
+                let area = self.list.area();
+                cx.is_scroll_owner(e, area, Vec2Index::X, true);
+                cx.is_scroll_owner(e, area, Vec2Index::Y, true);
                 return true;
             }
             let mut drag = drag;

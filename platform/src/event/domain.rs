@@ -88,6 +88,8 @@ pub enum ChildWindowAction {
     DragAnswer { request: u32, response: super::WindowDragQueryResponse },
     /// The HAL's window_state value; the parent owns the layout policy.
     State(u32),
+    /// The window asks to stay above the parent's other windows (`WindowHandle::set_topmost`).
+    Topmost(bool),
 }
 
 #[derive(Clone, Debug)]

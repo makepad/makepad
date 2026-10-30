@@ -1,28 +1,46 @@
 //! What each node's lens shows, made once per change of the score (never
-//! per frame): its kind, its knobs and the block it heads. Knobs come from
-//! the field tables the panels and the AI share (`makepad_synth_panel::spec`):
-//! a node type's numeric fields in the table's order, those written in the
-//! source first, so a new component's lens follows its table with no code
-//! here; a field no table knows gets a knob around its value.
+//! per frame). Every card is the same frame (a title column, a body, the
+//! tools); the body is what the node is, laid out like a hardware panel:
+//!
+//! - an instrument is a row of modules in signal-flow order, each a titled
+//!   group with its picture and its own knobs: a Synth's oscillator,
+//!   filter (its curve), envelope (its ADSR), modulation and output; an
+//!   engine with a parameter schema (Morph, and any engine that declares
+//!   one) gets the same from its schema's groups, so a new engine's lens
+//!   needs no code here; a drum kit is a pad per voice;
+//! - a clock is its tempo, signature, swing and the beats of the bar;
+//! - a loop is its steps or its roll, its level and pan;
+//! - an effect is a picture of what it does, and its knobs.
+//!
+//! Knobs come from the field tables the panels and the AI share
+//! (`makepad_synth_panel::spec`). Their order is fixed per module (the
+//! table's, or the module's own: attack, decay, sustain, release), never the
+//! order the source happens to write them in.
 
 use super::folds::Folds;
 use makepad_look::palette::Palette;
-use makepad_score_live::model::{InstKind, ScoreDoc};
+use makepad_score_live::model::{InstKind, ScoreDoc, StreamKind};
 use makepad_score_live::source::{self, Outline};
 use makepad_score_player::FxKind;
-use makepad_synth_panel::spec::{self, ParamSpec, Taper, Unit};
+use makepad_edit_values::Taper;
+use makepad_synth_panel::spec::{self, ParamSpec, Unit};
 
-/// Rows of editor space a lens takes.
-pub const LENS_ROWS: f64 = 3.0;
-/// Knobs a lens offers at most (fewer when it is narrow).
+/// Rows of editor space a lens takes (every kind the same height).
+pub const LENS_ROWS: f64 = 4.0;
+/// Knobs a generic module offers at most.
 pub const MAX_KNOBS: usize = 6;
 
 /// A knob on a lens: the field it writes, its table entry, its value now.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Knob {
     pub field: String,
+    /// A map field's entry (a drum's `gain: {kick: 0.8}`): the knob writes
+    /// `field: {entry: value}`.
+    pub entry: Option<String>,
     pub spec: ParamSpec,
     pub value: f64,
+    /// What it does, in plain words (its tooltip).
+    pub tip: String,
 }
 
 impl Knob {
@@ -32,13 +50,16 @@ impl Knob {
 
     /// Its short label: the table's, else the field's name.
     pub fn label(&self) -> String {
-        let label = if self.spec.label.is_empty() { self.field.to_uppercase() } else { self.spec.label.to_string() };
-        label.chars().take(7).collect()
+        let label = if self.spec.label.is_empty() { self.field.to_uppercase() } else { self.spec.label.to_uppercase() };
+        label.chars().take(8).collect()
     }
 
     /// The value as a person reads it, kept short for under a knob.
     pub fn readout(&self) -> String {
         let v = self.value;
+        if self.spec.is_choice() {
+            return self.spec.options.get(v.round().max(0.0) as usize).map_or(String::new(), |o| o.chars().take(7).collect());
+        }
         match self.spec.unit {
             Unit::Hz if v >= 1000.0 => format!("{:.1}k", v / 1000.0),
             Unit::Hz => format!("{v:.0}"),
@@ -48,10 +69,18 @@ impl Knob {
             Unit::Percent => format!("{:.0}%", v * 100.0),
             Unit::Db => format!("{v:+.1}"),
             Unit::Cents => format!("{v:+.0}c"),
+            Unit::Semis => format!("{v:+.1}st"),
+            Unit::Bool => if v > 0.5 { "on" } else { "off" }.to_string(),
+            Unit::Note => self.spec.display(v),
             _ if self.spec.taper == Taper::Int => format!("{v:.0}"),
             _ if v.abs() >= 100.0 => format!("{v:.0}"),
             _ => format!("{v:.2}"),
         }
+    }
+
+    /// The value written as the source takes it.
+    pub fn text_of(&self, value: f64) -> String {
+        self.spec.source_text(value)
     }
 }
 
@@ -63,16 +92,75 @@ pub struct Pattern {
     pub at: usize,
 }
 
-/// What a lens draws besides its knobs.
+/// A module's picture, and which of its knobs (indices into the module's
+/// knobs) its handles move.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Graph {
+    None,
+    /// The envelope: the attack point moves the attack time; the decay
+    /// point the decay time and the sustain level; the release point the
+    /// release time.
+    Env { attack: usize, decay: usize, sustain: usize, release: usize },
+    /// The filter's response: its handle moves the cutoff (across) and the
+    /// resonance (up), the wheel the drive. `mode` 0 off, 1 lowpass, 2
+    /// highpass, 3 bandpass; `q_unit` the resonance is a Q (else 0..1).
+    Filter { cutoff: usize, res: Option<usize>, drive: Option<usize>, mode: u8, q_unit: bool },
+    /// An oscillator's wave: 0 sine, 1 triangle, 2 saw, 3 square, 4 pulse,
+    /// 5 noise, 6 FM, 7 string, 8 a wavetable (`pos` the knob of where in it).
+    Wave { shape: u8, pos: Option<usize> },
+    /// An LFO's shape (as its options name it) at its rate.
+    Lfo { shape: String, rate: Option<usize> },
+}
+
+/// One module of an instrument: a titled group, its picture, its knobs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Module {
+    pub title: String,
+    /// What it is, for its tooltip.
+    pub tip: String,
+    pub graph: Graph,
+    pub knobs: Vec<Knob>,
+    /// How much it matters when the card is narrow (0 kept last).
+    pub rank: u8,
+}
+
+/// A drum kit's voice: a pad.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pad {
+    pub name: &'static str,
+    pub slot: usize,
+    /// The kit has a sound there.
+    pub filled: bool,
+    pub level: Knob,
+    pub tune: Knob,
+}
+
+/// What a lens draws besides its frame.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LensKind {
-    Clock { bpm: f64, beats_per_bar: f64 },
+    Clock { tempo: Knob, sig: (u32, u32), beats_per_bar: f64, tempo_follows: bool },
     Loop { key: u64, mute: bool, solo: bool, beats: Option<f64>, pattern: Option<Pattern>, plays: Option<String> },
-    /// A synth: its first layer's envelope and filter.
-    Synth { label: String, adsr: [f32; 4], cutoff: f32, res: f32, filter: u8 },
-    /// Any other instrument (a new component too): what it is now.
-    Inst { label: String },
+    /// An instrument: what it is (its picker), its modules in signal-flow
+    /// order, and a kit's pads.
+    Inst { label: String, engine: String, modules: Vec<Module>, pads: Vec<Pad> },
     Fx { key: u64, kind: String },
+    /// MIDI in, or a stream node shaping what it plays.
+    Stream { card: StreamCard },
+}
+
+/// What a stream node's card shows besides its knobs. `views` are the
+/// loop nodes (`<slot>/<loop>`) its stream reaches, whose live state
+/// (`makepad_audio_engine::feed::streams`) the card reads as it paints.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StreamCard {
+    /// A keyboard: its device (a picker over the inputs) and channel, an
+    /// activity light and the last notes it played.
+    MidiIn { device: String, channel: u8 },
+    /// An arpeggiator: its pattern (a picker) and the steps it plays (the
+    /// held chord's, else the pattern on a C major triad).
+    Arp { pattern: usize, preview: Vec<u8>, views: Vec<String> },
+    /// A chord, a transpose or a velocity curve: what it does in words.
+    Shape { label: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -83,6 +171,8 @@ pub struct Lens {
     pub line: usize,
     pub last: usize,
     pub kind: LensKind,
+    /// Knobs outside modules (a clock's swing, a loop's level and pan, an
+    /// effect's settings).
     pub knobs: Vec<Knob>,
     /// Its block's code is folded (its first line and the lens show).
     pub code_folded: bool,
@@ -109,71 +199,470 @@ pub fn hue_of(p: &Palette, ty: &str, index: usize) -> u32 {
     }
 }
 
-fn instrument_label(doc: &ScoreDoc, name: &str, ty: &str) -> String {
+fn instrument_label(doc: &ScoreDoc, source: &str, outline: &Outline, name: &str, ty: &str) -> String {
+    let preset = || outline.node(name).and_then(|n| n.field("preset")).map(|f| f.value.text(source).trim_start_matches('@').trim_matches('"').replace('_', " "));
     match doc.inst(name).map(|i| &i.kind) {
-        Some(InstKind::Drums { kit, .. }) => format!("kit {kit}"),
-        Some(InstKind::Ironfish { program, .. }) => format!("ironfish {}", makepad_score_player::presets::IRON_PROGRAMS.get(*program).copied().unwrap_or("init")),
-        Some(InstKind::Shader { shader, .. }) => format!("shader {}", shader.lib.clone().unwrap_or_else(|| "(own code)".into())),
-        Some(InstKind::Voice { profile, singers, .. }) => {
-            if *singers > 1 {
+        Some(InstKind::Synth { .. }) => preset().unwrap_or_else(|| "own synth".into()),
+        Some(InstKind::Morph { .. }) => preset().unwrap_or_else(|| "init".into()),
+        Some(InstKind::Drums { kit, .. }) => kit.replace('_', " "),
+        Some(InstKind::Ironfish { program, .. }) => makepad_score_player::presets::IRON_PROGRAMS.get(*program).copied().unwrap_or("init").to_string(),
+        Some(InstKind::Shader { shader, .. }) => shader.lib.clone().unwrap_or_else(|| "own code".into()).replace('_', " "),
+        Some(InstKind::Voice { profile, singers, neural, .. }) => {
+            if *neural {
+                "neural singer".into()
+            } else if *singers > 1 {
                 format!("{profile} choir of {singers}")
             } else {
-                format!("voice {profile}")
+                profile.clone()
             }
         }
-        Some(InstKind::Sampler { src, .. }) => format!("sample {}", src.id.chars().take(14).collect::<String>()),
-        Some(InstKind::Native { native, preset, program, .. }) => match native.as_str() {
-            "piano" => format!("piano {}", preset.clone().unwrap_or_else(|| "concert grand".into())),
+        Some(InstKind::Sampler { src, .. }) => src.id.chars().take(14).collect::<String>(),
+        Some(InstKind::Native { native, preset, program, bank, .. }) => match native.as_str() {
+            "piano" => preset.clone().unwrap_or_else(|| "concert grand".into()).to_lowercase(),
             "drums" => "acoustic kit".into(),
-            _ => format!("{} {}", program, makepad_score_live::instruments::GM_PROGRAMS.get(*program as usize).copied().unwrap_or("")),
+            _ if *bank == 128 => format!("GM kit {program}"),
+            _ => makepad_score_live::instruments::GM_PROGRAMS.get(*program as usize).copied().unwrap_or("").to_lowercase(),
         },
         Some(InstKind::Input { .. }) => "audio input".into(),
-        Some(InstKind::Midi { channel, port }) => format!("midi {port} ch {channel}"),
+        Some(InstKind::Midi { channel, port }) => if port.is_empty() { format!("MIDI ch {channel}") } else { format!("{port} ch {channel}") },
         _ => ty.to_lowercase(),
     }
 }
 
-/// A field's value as written (a number, or `true`/`false`).
-fn written(source: &str, outline: &Outline, node: &str, field: &str) -> Option<f64> {
+/// The engine an instrument plays on, as the picker's chip names it.
+fn engine_label(doc: &ScoreDoc, name: &str, ty: &str) -> String {
+    match doc.inst(name).map(|i| &i.kind) {
+        Some(InstKind::Native { native, bank, .. }) => match native.as_str() {
+            "piano" => "Piano".into(),
+            "drums" => "Drums".into(),
+            _ if *bank == 128 => "GM kit".into(),
+            _ => "GM".into(),
+        },
+        Some(InstKind::Input { .. }) => "Input".into(),
+        Some(InstKind::Midi { .. }) => "MIDI".into(),
+        _ => ty.to_string(),
+    }
+}
+
+/// A field's value as written (a number, or `true`/`false`, or `@option`
+/// of a choice).
+fn written(source: &str, outline: &Outline, node: &str, field: &str, spec: Option<&ParamSpec>) -> Option<f64> {
     let text = outline.node(node)?.field(field)?.value.text(source).trim();
     match text {
         "true" => Some(1.0),
         "false" => Some(0.0),
+        t if t.starts_with('@') => spec.and_then(|s| s.options.iter().position(|o| o == &t[1..])).map(|i| i as f64),
         t => t.parse::<f64>().ok(),
     }
 }
 
-/// The knobs of a node of type `ty`: the table's numeric fields, written
-/// ones first, then the rest in the table's order, `MAX_KNOBS` at most;
-/// fields the table does not know but the source writes get a knob too.
-/// `known` reads a field's value from the loaded score when it is not
-/// written (a synth's preset, an effect's defaults).
-fn knobs(source: &str, outline: &Outline, node: &str, ty: &str, skip: &[&str], known: &dyn Fn(&str) -> Option<f64>) -> Vec<Knob> {
+/// A plain-words line for a knob: what it does, by its name.
+fn tip_of(ty: &str, field: &str, spec: &ParamSpec) -> String {
+    let suffix = field.rsplit_once('_').map_or(field, |(_, s)| s);
+    let plain = match suffix {
+        "attack" => "how fast the sound starts",
+        "decay" => "how fast it falls to the sustain level",
+        "sustain" => "the level held while the note is down",
+        "release" => "how long it fades after the note ends",
+        "hold" => "how long it stays at the top before the decay",
+        "cutoff" => "where the filter starts to cut",
+        "res" | "q" => "the peak at the cutoff (resonance)",
+        "drive" => "how hard the sound is pushed into saturation",
+        "detune" => "how far the voices are pulled apart, in cents",
+        "gain" | "level" | "volume" => "its output level",
+        "amp" => "the loop's level",
+        "pan" => "where it sits, left to right",
+        "swing" => "how late the off-beat sixteenths fall",
+        "bpm" => "the tempo, in beats a minute",
+        "mix" => "how much of the effect is heard",
+        "unison" => "how many voices play each note",
+        "pos" => "where in the wavetable it reads",
+        "rate" => "how fast it moves",
+        "glide" => "how long a note slides to the next",
+        _ => "",
+    };
+    let label = if spec.label.is_empty() { field.to_string() } else { spec.label.to_lowercase() };
+    if !plain.is_empty() {
+        return format!("{label}: {plain}");
+    }
+    if !spec.about.is_empty() {
+        return format!("{label}: {}", spec.about);
+    }
+    match makepad_score_live::assist::field_doc(ty, field) {
+        Some(doc) => format!("{label}: {doc}"),
+        None => label,
+    }
+}
+
+/// One knob for `field` of a node of type `ty`: its value as written,
+/// else as the loaded score plays it (`known`), else the table's default.
+fn knob(source: &str, outline: &Outline, node: &str, ty: &str, field: &str, known: &dyn Fn(&str) -> Option<f64>) -> Knob {
+    let table = spec::spec(ty, field);
+    let value = written(source, outline, node, field, table.as_ref());
+    let spec = table.unwrap_or_else(|| ParamSpec::generic(field, value.or_else(|| known(field))));
+    let v = value.or_else(|| known(field)).unwrap_or(spec.default);
+    Knob { field: field.to_string(), entry: None, tip: tip_of(ty, field, &spec), spec, value: v }
+}
+
+/// The knobs of a node of type `ty` that are not in modules: the table's
+/// numeric fields in the table's order, the written ones and those in
+/// `always` (`MAX_KNOBS` at most); fields the table does not know but the
+/// source writes get a knob too, after them.
+fn loose_knobs(source: &str, outline: &Outline, node: &str, ty: &str, skip: &[&str], always: &[&str], known: &dyn Fn(&str) -> Option<f64>) -> Vec<Knob> {
     let numeric = |s: &ParamSpec| !s.is_choice() && s.unit != Unit::Bool;
     let mut keys: Vec<String> = spec::keys(ty).into_iter().filter(|k| !skip.contains(k)).map(str::to_string).collect();
-    // Fields the source writes that the table does not list.
     if let Some(ctor) = outline.node(node) {
         for f in &ctor.fields {
-            if !keys.contains(&f.key) && !skip.contains(&f.key.as_str()) && written(source, outline, node, &f.key).is_some() && f.key != "play" && f.key != "at" {
+            if !keys.contains(&f.key) && !skip.contains(&f.key.as_str()) && written(source, outline, node, &f.key, None).is_some() && f.key != "play" && f.key != "at" {
                 keys.push(f.key.clone());
             }
         }
     }
-    let mut made: Vec<(bool, Knob)> = keys
-        .into_iter()
-        .filter_map(|key| {
-            let value = written(source, outline, node, &key);
-            let spec = spec::spec_or_generic(ty, &key, value.or_else(|| known(&key)));
-            if !numeric(&spec) {
-                return None;
+    let wanted = |key: &str| always.contains(&key) || outline.node(node).and_then(|n| n.field(key)).is_some();
+    let mut made: Vec<Knob> = keys.iter().filter(|k| wanted(k)).map(|k| knob(source, outline, node, ty, k, known)).filter(|k| numeric(&k.spec)).collect();
+    // Room left: the table's other fields, in its order.
+    if made.len() < MAX_KNOBS.min(always.len().max(1)) {
+        for k in keys.iter().filter(|k| !wanted(k)) {
+            if made.len() >= MAX_KNOBS.min(always.len().max(1)) {
+                break;
             }
-            let v = value.or_else(|| known(&key)).unwrap_or(spec.default);
-            Some((value.is_some(), Knob { field: key, spec, value: v }))
+            let k = knob(source, outline, node, ty, k, known);
+            if numeric(&k.spec) {
+                made.push(k);
+            }
+        }
+    }
+    made.truncate(MAX_KNOBS);
+    made
+}
+
+/// A Synth's modules, in signal-flow order, each with its own fixed knobs.
+fn synth_modules(source: &str, outline: &Outline, node: &str, layer: &makepad_audio_synth::recipe::Layer) -> Vec<Module> {
+    use makepad_audio_synth::dsp::{FilterMode, Wave};
+    use makepad_audio_synth::recipe::Source;
+    let l = *layer;
+    let known = move |k: &str| -> Option<f64> {
+        Some(match k {
+            "cutoff" => l.cutoff,
+            "res" | "q" => l.q,
+            "drive" => l.drive,
+            "attack" => l.attack,
+            "decay" => l.decay,
+            "sustain" => l.sustain,
+            "release" => l.release,
+            "hold" => l.hold.max(0.0),
+            "detune" => l.detune_cents,
+            // The node's level over its preset's (the recipe's own is apart).
+            "gain" | "volume" => 1.0,
+            "vib" | "vibrato" => l.vib_hz,
+            "vib_depth" => l.vib_depth,
+            "fm" | "ratio" => match l.source {
+                Source::Fm { ratio, .. } => ratio,
+                _ => return None,
+            },
+            "index" => l.fm_index,
+            "pluck" => match l.source {
+                Source::Pluck { damping } => damping,
+                _ => return None,
+            },
+            "width" | "pw" => l.width,
+            "cutoff_to" if l.cutoff_to.is_finite() => l.cutoff_to,
+            _ => return None,
+        } as f64)
+    };
+    let k = |field: &str| knob(source, outline, node, "Synth", field, &known);
+    let has = |field: &str| outline.node(node).and_then(|n| n.field(field)).is_some();
+    let wave = |w: Wave| match w {
+        Wave::Sine => 0,
+        Wave::Triangle => 1,
+        Wave::Saw | Wave::SoftSaw => 2,
+        Wave::Square => 3,
+        Wave::Pulse => 4,
+    };
+    let (shape, osc_title) = match l.source {
+        Source::Osc(w) => (wave(w), "OSC"),
+        Source::Noise(_) => (5, "NOISE"),
+        Source::Fm { .. } => (6, "FM"),
+        Source::Pluck { .. } => (7, "STRING"),
+        Source::None => (2, "OSC"),
+    };
+    let mut osc_knobs = vec![k("detune")];
+    match l.source {
+        Source::Fm { .. } => {
+            osc_knobs.push(k("fm"));
+            osc_knobs.push(k("index"));
+        }
+        Source::Pluck { .. } => osc_knobs.push(k("pluck")),
+        Source::Osc(Wave::Pulse) => osc_knobs.push(k("width")),
+        _ => {}
+    }
+    let mut modules = vec![Module {
+        title: osc_title.into(),
+        tip: "the oscillator: the wave the sound starts from (a click on the wave picks the next one)".into(),
+        graph: Graph::Wave { shape, pos: None },
+        knobs: osc_knobs,
+        rank: 2,
+    }];
+    let mode = match l.filter {
+        FilterMode::Off => 0,
+        FilterMode::Highpass => 2,
+        FilterMode::Bandpass => 3,
+        _ => 1,
+    };
+    modules.push(Module {
+        title: match mode {
+            2 => "FILTER HP",
+            3 => "FILTER BP",
+            0 => "FILTER OFF",
+            _ => "FILTER LP",
+        }
+        .into(),
+        tip: "the filter: drag the handle across for the cutoff, up for the resonance; the wheel over it sets the drive".into(),
+        graph: Graph::Filter { cutoff: 0, res: Some(1), drive: Some(2), mode, q_unit: true },
+        knobs: vec![k("cutoff"), k("res"), k("drive")],
+        rank: 4,
+    });
+    modules.push(Module {
+        title: "AMP ENV".into(),
+        tip: "the amp envelope: drag its points (attack; decay and sustain; release)".into(),
+        graph: Graph::Env { attack: 0, decay: 1, sustain: 2, release: 3 },
+        knobs: vec![k("attack"), k("decay"), k("sustain"), k("release")],
+        rank: 5,
+    });
+    // Modulation: only what this synth uses or the source writes.
+    let mut mods = Vec::new();
+    if has("vib") || has("vibrato") || has("vib_depth") || l.vib_depth > 0.0 {
+        mods.push(k("vib"));
+        mods.push(k("vib_depth"));
+    }
+    if has("cutoff_to") || has("sweep") {
+        mods.push(k("cutoff_to"));
+        mods.push(k("sweep"));
+    }
+    if !mods.is_empty() {
+        modules.push(Module { title: "MOD".into(), tip: "modulation: vibrato and the filter's sweep".into(), graph: Graph::None, knobs: mods, rank: 1 });
+    }
+    modules.push(Module { title: "OUT".into(), tip: "the output level".into(), graph: Graph::None, knobs: vec![k("gain")], rank: 3 });
+    modules
+}
+
+/// What a schema group is, from its name (`osc_a`, `filter1`, `env2`,
+/// `lfo3`, `fx_delay`): its title, its picture kind and the knob suffixes
+/// it shows first, in their fixed order.
+fn group_shape(group: &str) -> (String, &'static str, &'static [&'static str]) {
+    let num = |prefix: &str| group.strip_prefix(prefix).map(|n| n.trim_start_matches('_').to_uppercase());
+    if let Some(n) = num("osc") {
+        return (format!("OSC {n}"), "osc", &["pos", "level", "unison", "detune", "semi", "warp1_amt"]);
+    }
+    if let Some(n) = num("filter") {
+        return (format!("FILTER {n}"), "filter", &["cutoff", "res", "drive", "key"]);
+    }
+    if let Some(n) = num("env") {
+        let title = if n == "1" { "AMP ENV".to_string() } else { format!("ENV {n}") };
+        return (title, "env", &["attack", "decay", "sustain", "release"]);
+    }
+    if let Some(n) = num("lfo") {
+        return (format!("LFO {n}"), "lfo", &["rate", "phase", "var"]);
+    }
+    if let Some(name) = group.strip_prefix("fx_") {
+        return (name.to_uppercase(), "fx", &["mix", "time", "feedback", "decay", "size"]);
+    }
+    match group {
+        "voice" => ("OUT".into(), "out", &["level", "glide"]),
+        "sub" => ("SUB".into(), "", &["level", "oct"]),
+        "noise" => ("NOISE".into(), "", &["level"]),
+        g => (g.to_uppercase(), "", &[]),
+    }
+}
+
+/// The modules of an engine with a parameter schema (Morph, and any engine
+/// that declares one), from its groups: the groups that sound (switched
+/// on, set away from their defaults, or the first oscillator, filter and
+/// amp envelope), in the schema's order, which is the signal's.
+fn schema_modules(source: &str, outline: &Outline, node: &str, ty: &str, value: &dyn Fn(&str) -> Option<f64>) -> Vec<Module> {
+    let groups = spec::groups(ty);
+    let mut out: Vec<Module> = Vec::new();
+    let numeric = |s: &ParamSpec| !s.is_choice() && s.unit != Unit::Bool;
+    for (group, about, keys) in &groups {
+        let (title, kind, first) = group_shape(group);
+        let suffix = |key: &str| -> String { key.split_once('_').map_or(key.to_string(), |(_, s)| s.to_string()) };
+        let key_of = |s: &str| keys.iter().find(|k| suffix(k) == s).map(|k| k.to_string());
+        let on = key_of("on").map(|k| value(&k).or_else(|| spec::spec(ty, &k).map(|s| s.default)).unwrap_or(1.0) > 0.5);
+        let away = keys.iter().any(|k| {
+            let s = spec::spec(ty, k);
+            outline.node(node).and_then(|n| n.field(k)).is_some() || matches!((value(k), s), (Some(v), Some(s)) if (v - s.default).abs() > 1e-6)
+        });
+        let primary = matches!(*group, "osc_a" | "filter1" | "env1" | "voice");
+        let shown = match on {
+            Some(on) => on && (primary || away || kind != "osc"),
+            None => primary || away,
+        };
+        if !shown || (kind == "" && !away) {
+            continue;
+        }
+        // The module's knobs: its main ones in their order, then what is
+        // set away from the default, in the schema's order.
+        let make = |key: &str| knob(source, outline, node, ty, key, value);
+        let mut chosen: Vec<String> = first.iter().filter_map(|s| key_of(s)).collect();
+        let cap = match kind {
+            "env" => 4,
+            "filter" => 3,
+            _ => 4,
+        };
+        for k in keys.iter() {
+            if chosen.len() >= cap {
+                break;
+            }
+            if chosen.iter().any(|c| c == k) {
+                continue;
+            }
+            let s = spec::spec(ty, k);
+            let set = outline.node(node).and_then(|n| n.field(k)).is_some() || matches!((value(k), &s), (Some(v), Some(s)) if (v - s.default).abs() > 1e-6);
+            if set && s.as_ref().is_some_and(numeric) {
+                chosen.push(k.to_string());
+            }
+        }
+        // Fixed order: the module's own, then the schema's.
+        let rank_of = |k: &str| first.iter().position(|s| suffix(k) == *s).unwrap_or(first.len() + keys.iter().position(|x| *x == k).unwrap_or(0));
+        chosen.sort_by_key(|k| rank_of(k));
+        let knobs: Vec<Knob> = chosen.iter().map(|k| make(k)).filter(|k| numeric(&k.spec)).take(cap.max(1)).collect();
+        if knobs.is_empty() {
+            continue;
+        }
+        let at = |s: &str| knobs.iter().position(|k| suffix(&k.field) == s);
+        let graph = match kind {
+            "env" => match (at("attack"), at("decay"), at("sustain"), at("release")) {
+                (Some(attack), Some(decay), Some(sustain), Some(release)) => Graph::Env { attack, decay, sustain, release },
+                _ => Graph::None,
+            },
+            "filter" => match at("cutoff") {
+                Some(cutoff) => {
+                    let mode = key_of("type").and_then(|k| {
+                        let s = spec::spec(ty, &k)?;
+                        let v = value(&k).unwrap_or(s.default);
+                        s.options.get(v.round().max(0.0) as usize).cloned()
+                    });
+                    let mode = match mode.as_deref() {
+                        Some(m) if m.starts_with("hp") => 2,
+                        Some(m) if m.starts_with("bp") || m == "peak" || m == "notch" => 3,
+                        _ => 1,
+                    };
+                    Graph::Filter { cutoff, res: at("res"), drive: at("drive"), mode, q_unit: false }
+                }
+                None => Graph::None,
+            },
+            "osc" => Graph::Wave { shape: 8, pos: at("pos") },
+            "lfo" => {
+                let shape = key_of("shape").and_then(|k| {
+                    let s = spec::spec(ty, &k)?;
+                    let v = value(&k).unwrap_or(s.default);
+                    s.options.get(v.round().max(0.0) as usize).cloned()
+                });
+                Graph::Lfo { shape: shape.unwrap_or_else(|| "sine".into()), rate: at("rate") }
+            }
+            _ => Graph::None,
+        };
+        // What stays when the card is narrow: the amp envelope, the first
+        // oscillator and filter, then the output, then the rest.
+        let rank = match kind {
+            "env" if *group == "env1" => 5,
+            "filter" if *group == "filter1" => 4,
+            "osc" if *group == "osc_a" => 4,
+            "out" => 3,
+            "osc" | "filter" => 2,
+            _ => 1,
+        };
+        out.push(Module { title, tip: about.to_string(), graph, knobs, rank });
+    }
+    out
+}
+
+/// A kit's pads: every voice slot, its level and tune (`gain: {kick: …}`,
+/// `tune: {kick: …}`).
+fn pads(slots: &[makepad_score_live::model::SlotDef]) -> Vec<Pad> {
+    use makepad_score_player::presets::DRUM_SLOTS;
+    DRUM_SLOTS
+        .iter()
+        .enumerate()
+        .map(|(slot, name)| {
+            let def = slots.get(slot);
+            let level = ParamSpec { label: "LEVEL", min: 0.0, max: 2.0, default: 1.0, ..ParamSpec::generic("gain", Some(1.0)) };
+            let tune = ParamSpec { label: "TUNE", min: -12.0, max: 12.0, default: 0.0, unit: Unit::Semis, bipolar: true, ..ParamSpec::generic("tune", Some(0.0)) };
+            Pad {
+                name,
+                slot,
+                filled: def.is_some_and(|d| d.recipe.is_some() || d.sample.is_some()),
+                level: Knob { field: "gain".into(), entry: Some(name.to_string()), value: def.map_or(1.0, |d| d.gain as f64), spec: level, tip: format!("the {} level", name.replace('_', " ")) },
+                tune: Knob { field: "tune".into(), entry: Some(name.to_string()), value: def.map_or(0.0, |d| d.tune as f64), spec: tune, tip: format!("the {} tuning, in semitones", name.replace('_', " ")) },
+            }
         })
-        .collect();
-    // Written first, the table's order kept within each.
-    made.sort_by_key(|(written, _)| !*written);
-    made.into_iter().take(MAX_KNOBS).map(|(_, k)| k).collect()
+        .collect()
+}
+
+/// A Morph patch's values by key (the loaded score's, preset included).
+fn morph_values(patch: &str) -> Option<Vec<f32>> {
+    makepad_audio_synth::morph::MorphPatch::parse(patch).ok().map(|p| p.values)
+}
+
+/// The slot whose loops the cards' live state is read from.
+fn view_of(name: &str) -> String {
+    format!("{}/{name}", crate::audio::SLOT)
+}
+
+/// A stream node's card, and its fields' values as loaded.
+fn stream_card(doc: &ScoreDoc, name: &str, kind: &StreamKind) -> (StreamCard, Box<dyn Fn(&str) -> Option<f64>>) {
+    // The loops this node's stream reaches.
+    let views: Vec<String> = doc.loops.iter().filter(|l| matches!(doc.resolve_stream(l), Some(Ok(r)) if r.path.iter().any(|n| n == name))).map(|l| view_of(&l.name)).collect();
+    match kind.clone() {
+        StreamKind::MidiIn { device, channel, bend, latency, .. } => (
+            StreamCard::MidiIn { device, channel },
+            Box::new(move |k: &str| match k {
+                "channel" => Some(channel as f64),
+                "bend" => Some(bend as f64),
+                "latency" => Some(latency as f64),
+                _ => None,
+            }),
+        ),
+        StreamKind::Arp { settings, .. } => {
+            // The pattern on a C major triad, over its octaves.
+            let mut base: Vec<u8> = (0..settings.octaves.max(1)).flat_map(|o| [60u8, 64, 67].map(|n| (n as i32 + o as i32 * settings.transpose).clamp(0, 127) as u8)).collect();
+            if settings.pattern != makepad_audio_synth::kit::arp::PLAYED {
+                base.sort_unstable();
+            }
+            let mut idx = [0u16; 64];
+            let n = makepad_audio_synth::kit::arp::order(settings.pattern, base.len(), &mut idx);
+            let preview = idx[..n].iter().map(|i| base[*i as usize]).collect();
+            (
+                StreamCard::Arp { pattern: settings.pattern, preview, views },
+                Box::new(move |k: &str| match k {
+                    "rate" => Some(settings.step / 4.0),
+                    "octaves" => Some(settings.octaves as f64),
+                    "gate" => Some(settings.gate as f64),
+                    "swing" => Some(settings.swing as f64),
+                    "repeats" => Some(settings.repeats as f64),
+                    "chance" => Some(settings.chance as f64),
+                    "interval" => Some(settings.transpose as f64),
+                    _ => None,
+                }),
+            )
+        }
+        StreamKind::Chord { tones } => {
+            let label = format!("+ {}", tones.iter().filter(|t| **t != 0).map(|t| t.to_string()).collect::<Vec<_>>().join(" "));
+            (StreamCard::Shape { label }, Box::new(|_: &str| None))
+        }
+        StreamKind::Transpose { semis } => (StreamCard::Shape { label: format!("{semis:+} semitones") }, Box::new(move |k: &str| (k == "semis").then_some(semis as f64))),
+        StreamKind::Velocity { curve, min, max } => {
+            let label = match curve {
+                makepad_score_player::stream::VelCurve::Fixed(level) => format!("every key at {:.0}%", level * 100.0),
+                c => format!("{} {:.0}..{:.0}%", match c { makepad_score_player::stream::VelCurve::Soft => "soft", makepad_score_player::stream::VelCurve::Hard => "hard", _ => "linear" }, min * 100.0, max * 100.0),
+            };
+            (StreamCard::Shape { label }, Box::new(move |k: &str| match k {
+                "min" => Some(min as f64),
+                "max" => Some(max as f64),
+                _ => None,
+            }))
+        }
+    }
 }
 
 /// The lenses for `doc`, whose source is `source` (outline `outline`).
@@ -201,7 +690,9 @@ pub fn build(doc: &ScoreDoc, source: &str, outline: &Outline, folds: &Folds, p: 
                     "swing" => Some(clock.swing),
                     _ => None,
                 };
-                (LensKind::Clock { bpm: clock.bpm, beats_per_bar: doc.beats_per_bar() }, knobs(source, outline, name, "Clock", &["seed", "sig"], &known), hue_of(p, "Clock", 0))
+                let tempo = knob(source, outline, name, "Clock", "bpm", &known);
+                let kind = LensKind::Clock { tempo, sig: clock.sig, beats_per_bar: doc.beats_per_bar(), tempo_follows: clock.tempo.is_some() };
+                (kind, vec![knob(source, outline, name, "Clock", "swing", &known)], hue_of(p, "Clock", 0))
             }
             "Loop" | "Stinger" => {
                 let Some(l) = doc.loop_def(name) else { continue };
@@ -218,7 +709,13 @@ pub fn build(doc: &ScoreDoc, source: &str, outline: &Outline, folds: &Folds, p: 
                     _ => None,
                 };
                 let kind = LensKind::Loop { key: makepad_score_live::key(name), mute: l.mute, solo: l.solo, beats: l.beats, pattern, plays: l.play.clone() };
-                (kind, knobs(source, outline, name, "Loop", &["beats", "mute", "solo", "hits", "code", "swing", "dur"], &known), hue)
+                let knobs = vec![knob(source, outline, name, "Loop", "amp", &known), knob(source, outline, name, "Loop", "pan", &known)];
+                (kind, knobs, hue)
+            }
+            other if makepad_score_live::model::STREAM_TYPES.contains(&other) => {
+                let Some(node) = doc.stream(name) else { continue };
+                let (card, known) = stream_card(doc, name, &node.kind);
+                (LensKind::Stream { card }, loose_knobs(source, outline, name, other, &["in"], &spec::keys(other), &*known), hue_of(p, "Clock", 0))
             }
             other => {
                 let hue = inst_hue.iter().find(|(n, _)| n == name).map(|(_, h)| *h);
@@ -228,41 +725,39 @@ pub fn build(doc: &ScoreDoc, source: &str, outline: &Outline, folds: &Folds, p: 
                         let i = kind.params().iter().position(|(param, ..)| *param == k)?;
                         fx.as_ref().map(|f| f.params[i] as f64)
                     };
-                    (LensKind::Fx { key: makepad_score_live::key(name), kind: kind.name().to_string() }, knobs(source, outline, name, other, &["in", "side"], &known), hue_of(p, other, 0))
+                    let all: Vec<&str> = kind.params().iter().map(|(n, ..)| *n).collect();
+                    let knobs = loose_knobs(source, outline, name, other, &["in", "side"], &all, &known);
+                    (LensKind::Fx { key: makepad_score_live::key(name), kind: kind.name().to_string() }, knobs, hue_of(p, other, 0))
                 } else if let Some(hue) = hue {
-                    match doc.inst(name).map(|i| &i.kind) {
+                    let label = instrument_label(doc, source, outline, name, other);
+                    let engine = engine_label(doc, name, other);
+                    let (modules, pads) = match doc.inst(name).map(|i| &i.kind) {
                         Some(InstKind::Synth { recipe, .. }) => {
                             let layer = recipe.layers().first().copied().unwrap_or_default();
-                            let filter = match layer.filter {
-                                makepad_audio_synth::dsp::FilterMode::Off => 0,
-                                makepad_audio_synth::dsp::FilterMode::Highpass => 2,
-                                makepad_audio_synth::dsp::FilterMode::Bandpass => 3,
-                                _ => 1,
+                            (synth_modules(source, outline, name, &layer), Vec::new())
+                        }
+                        Some(InstKind::Drums { slots, .. }) => (Vec::new(), pads(slots)),
+                        Some(InstKind::Morph { patch, .. }) => {
+                            let values = morph_values(patch);
+                            let schema = &makepad_audio_synth::morph::layout().schema;
+                            let value = move |k: &str| -> Option<f64> {
+                                let i = schema.params.iter().position(|p| p.key == k)?;
+                                values.as_ref().and_then(|v| v.get(i)).map(|v| *v as f64)
                             };
-                            let label = ctor.field("preset").map(|f| f.value.text(source).trim_start_matches('@').to_string()).unwrap_or_else(|| "synth".into());
-                            let known = move |k: &str| {
-                                Some(match k {
-                                    "cutoff" => layer.cutoff,
-                                    "res" | "q" => layer.q,
-                                    "drive" => layer.drive,
-                                    "attack" => layer.attack,
-                                    "decay" => layer.decay,
-                                    "sustain" => layer.sustain,
-                                    "release" => layer.release,
-                                    "hold" => layer.hold,
-                                    "detune" => layer.detune_cents,
-                                    "gain" | "volume" => layer.gain,
-                                    _ => return None,
-                                } as f64)
-                            };
-                            let kind = LensKind::Synth { label, adsr: [layer.attack, layer.decay, layer.sustain, layer.release], cutoff: layer.cutoff, res: layer.q, filter };
-                            (kind, knobs(source, outline, name, "Synth", &[], &known), hue)
+                            (schema_modules(source, outline, name, other, &value), Vec::new())
+                        }
+                        _ if !spec::groups(other).is_empty() => {
+                            let none = |_: &str| None;
+                            (schema_modules(source, outline, name, other, &none), Vec::new())
                         }
                         _ => {
-                            let known = |_: &str| None;
-                            (LensKind::Inst { label: instrument_label(doc, name, other) }, knobs(source, outline, name, other, &[], &known), hue)
+                            let none = |_: &str| None;
+                            let knobs = loose_knobs(source, outline, name, other, &[], &[], &none);
+                            let modules = if knobs.is_empty() { Vec::new() } else { vec![Module { title: "SOUND".into(), tip: String::new(), graph: Graph::None, knobs, rank: 3 }] };
+                            (modules, Vec::new())
                         }
-                    }
+                    };
+                    (LensKind::Inst { label, engine, modules, pads }, Vec::new(), hue)
                 } else {
                     continue;
                 }
@@ -292,23 +787,54 @@ mod tests {
         for lens in &lenses.lenses {
             assert!(lens.knobs.len() <= MAX_KNOBS);
             assert!(lens.line <= lens.last, "{}", lens.node);
-            for knob in &lens.knobs {
+            let modules = match &lens.kind {
+                LensKind::Inst { modules, .. } => modules.clone(),
+                _ => Vec::new(),
+            };
+            for knob in lens.knobs.iter().chain(modules.iter().flat_map(|m| m.knobs.iter())) {
                 assert!(knob.value.is_finite(), "{}.{}", lens.node, knob.field);
             }
         }
         let clock = lenses.lenses.iter().find(|l| matches!(l.kind, LensKind::Clock { .. })).unwrap();
-        assert!(clock.knobs.iter().any(|k| k.field == "bpm"));
+        assert!(matches!(&clock.kind, LensKind::Clock { tempo, .. } if tempo.field == "bpm"));
     }
 
     #[test]
-    fn a_written_field_comes_first() {
-        let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @acid release: 0.4}\nlet l = Loop{play: s hits: \"x...\"}\nScore{clock s l}\n";
+    fn midi_in_and_arp_cards_come_from_their_tables() {
+        let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @pluck}\nlet keys = MidiIn{device: \"Keystation\" channel: 2}\nlet arp = Arp{in: keys pattern: @updown rate: 1/16 octaves: 2}\nlet l = Loop{play: s in: arp}\nScore{clock s keys arp l}\n";
+        let doc = ScoreDoc::load(src).expect("loads");
+        let outline = source::outline(src);
+        let lenses = build(&doc, src, &outline, &Folds::default(), &Palette::HOUSE);
+        let keys = lenses.lenses.iter().find(|l| l.node == "keys").expect("the MidiIn's lens");
+        assert_eq!(keys.kind, LensKind::Stream { card: StreamCard::MidiIn { device: "Keystation".into(), channel: 2 } });
+        assert_eq!(keys.knobs[0].field, "channel");
+        let arp = lenses.lenses.iter().find(|l| l.node == "arp").expect("the Arp's lens");
+        let LensKind::Stream { card: StreamCard::Arp { pattern, preview, views } } = &arp.kind else { panic!("{:?}", arp.kind) };
+        assert_eq!((*pattern, preview.as_slice()), (2, &[60u8, 64, 67, 72, 76, 79, 76, 72, 67, 64][..]));
+        assert_eq!(views, &[format!("{}/l", crate::audio::SLOT)]);
+        let rate = arp.knobs.iter().find(|k| k.field == "rate").expect("a rate knob");
+        assert_eq!((rate.readout(), rate.spec.source_text(rate.spec.denorm(rate.norm()))), ("1/16".to_string(), "1/16".to_string()));
+    }
+
+    #[test]
+    fn a_synth_is_modules_in_signal_order_with_fixed_knobs() {
+        let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @acid release: 0.4 cutoff: 900}\nlet l = Loop{play: s hits: \"x...\"}\nScore{clock s l}\n";
         let doc = ScoreDoc::load(src).expect("loads");
         let outline = source::outline(src);
         let lenses = build(&doc, src, &outline, &Folds::default(), &Palette::HOUSE);
         let synth = lenses.lenses.iter().find(|l| l.node == "s").expect("the synth's lens");
-        assert_eq!(synth.knobs[0].field, "release");
-        assert!((synth.knobs[0].value - 0.4).abs() < 1e-9);
+        let LensKind::Inst { modules, label, .. } = &synth.kind else { panic!("{:?}", synth.kind) };
+        assert_eq!(label, "acid");
+        let titles: Vec<&str> = modules.iter().map(|m| m.title.as_str()).collect();
+        let at = |t: &str| titles.iter().position(|x| x.starts_with(t)).unwrap_or_else(|| panic!("no {t} in {titles:?}"));
+        assert!(at("OSC") < at("FILTER") && at("FILTER") < at("AMP ENV") && at("AMP ENV") < at("OUT"), "{titles:?}");
+        let env = &modules[at("AMP ENV")];
+        let fields: Vec<&str> = env.knobs.iter().map(|k| k.field.as_str()).collect();
+        assert_eq!(fields, ["attack", "decay", "sustain", "release"], "the order is the module's, not the source's");
+        assert!((env.knobs[3].value - 0.4).abs() < 1e-9);
+        let filter = &modules[at("FILTER")];
+        assert_eq!(filter.knobs[0].field, "cutoff");
+        assert!((filter.knobs[0].value - 900.0).abs() < 1e-9);
         let lp = lenses.lenses.iter().find(|l| l.node == "l").expect("the loop's lens");
         assert_eq!(lp.hue, synth.hue, "a loop wears its instrument's colour");
         match &lp.kind {

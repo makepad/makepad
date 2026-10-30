@@ -905,7 +905,7 @@ impl Widget for StackNavigation {
                 let Some(candidate) = self.swipe_back_candidate.take() else { break 'touch };
                 let [touch] = e.touches.as_slice() else { break 'touch };
                 if touch.uid != candidate.uid
-                    || cx.fingers.is_touch_drag_claimed(touch.uid)
+                    || is_swipe_taken(cx, touch.uid)
                     || cx.sweep_lock_area().is_some()
                 {
                     break 'touch;
@@ -1066,7 +1066,7 @@ impl WidgetMatchEvent for StackNavigation {
                 if !cx.widget_tree().widget(widget_action.widget_uid).is_empty() {
                     match widget_action.cast() {
                         StackNavigationAction::Push(view_id) => {
-                            self.push_view(view_id, cx);
+                            self.push_view(view_id, cx, Animate::Yes);
                         }
                         StackNavigationAction::Pop
                             if self.view_id_for_widget_uid(cx, widget_action.widget_uid).is_some() =>
@@ -1305,25 +1305,37 @@ impl StackNavigation {
         }
     }
 
-    fn push_view(&mut self, view_id: LiveId, cx: &mut Cx) {
+    fn push_view(&mut self, view_id: LiveId, cx: &mut Cx, animate: Animate) {
         if self.transition.is_some() || self.current_view == Some(view_id) {
             return;
         }
 
         let outgoing = self.current_view;
-        self.transition = Some(StackNavigationTransition::Push {
-            incoming: view_id,
-            outgoing,
-        });
-
         let stack_view_ref = self.stack_view_ref(cx, view_id);
         stack_view_ref.set_parent_navigation_uid(self.widget_uid());
-        stack_view_ref.show(cx);
-
-        cx.widget_action(
-            stack_view_ref.widget_uid(),
-            StackNavigationTransitionAction::ShowBegin,
-        );
+        match animate {
+            Animate::Yes => {
+                self.transition = Some(StackNavigationTransition::Push {
+                    incoming: view_id,
+                    outgoing,
+                });
+                stack_view_ref.show(cx);
+                cx.widget_action(
+                    stack_view_ref.widget_uid(),
+                    StackNavigationTransitionAction::ShowBegin,
+                );
+            }
+            Animate::No => {
+                // The new view may have never been drawn, so its redraw alone wouldn't
+                // redraw anything. Thus, we redraw the view it's replacing first.
+                self.redraw(cx);
+                self.current_view = Some(view_id);
+                stack_view_ref.show_at_rest(cx);
+                if let Some(outgoing) = outgoing {
+                    self.release_view(cx, outgoing);
+                }
+            }
+        }
 
         self.redraw(cx);
     }
@@ -1334,7 +1346,7 @@ impl StackNavigation {
         }
         let Some(outgoing) = self.current_view else {
             if let Some(view_id) = view_id {
-                self.push_view(view_id, cx);
+                self.push_view(view_id, cx, Animate::Yes);
             }
             return;
         };
@@ -1624,7 +1636,15 @@ impl StackNavigationRef {
     /// ```
     pub fn push(&self, cx: &mut Cx, view_id: LiveId) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.push_view(view_id, cx);
+            inner.push_view(view_id, cx, Animate::Yes);
+        }
+    }
+
+    /// Like [`Self::push()`], but shows the view right away instead of sliding it in,
+    /// e.g., to restore a screen that was already being shown in another layout.
+    pub fn push_without_animation(&self, cx: &mut Cx, view_id: LiveId) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.push_view(view_id, cx, Animate::No);
         }
     }
 
@@ -1846,6 +1866,13 @@ impl StackNavigationRef {
     pub fn show_stack_view_by_id(&self, view_id: LiveId, cx: &mut Cx) {
         self.push(cx, view_id);
     }
+}
+
+/// Whether a widget in the view keeps this touch's drag: one that gives it its own meaning,
+/// or a scroller that took its horizontal drag.
+fn is_swipe_taken(cx: &Cx, uid: u64) -> bool {
+    cx.fingers.is_touch_drag_claimed(uid)
+        || cx.fingers.scroll_drag_owner(live_id_num!(touch, uid).into(), Vec2Index::X).is_some()
 }
 
 /// Cancels `touch` for every widget that captured it and returns the `FingerCancel` that tells them,

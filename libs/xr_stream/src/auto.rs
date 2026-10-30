@@ -70,6 +70,8 @@ pub struct Signals {
     pub trip_base_ms: f64,
     pub sent_mbps: f64,
     pub rate_mbps: f64,
+    /// The server held a frame for the headset (too many pictures in flight), per second.
+    pub waited_per_s: f64,
 }
 
 impl Signals {
@@ -77,9 +79,17 @@ impl Signals {
         1000.0 / self.display_hz.max(1.0)
     }
 
+    /// The headset holds the server back: it waited for room (pictures in flight to the headset's
+    /// decode) with its GPU inside the frame. Frames it did not build then are the headset's
+    /// (its decode or the link), not the server's: its levers would not help. (A session at
+    /// MSAA 4x lost its AA, then was told to drop to 72 fps, with the GPU at 4.9 of 15.3 ms.)
+    fn held_by_headset(&self) -> bool {
+        self.waited_per_s > self.display_hz * 0.1 && self.gpu_ms <= self.budget_ms() * 0.8
+    }
+
     /// The server cannot build every frame (its GPU or its pacing).
     fn server_short(&self) -> bool {
-        self.repeat_server > 1.0 || self.built_per_s < self.display_hz * 0.95 || self.gpu_ms > self.budget_ms() * 0.8
+        self.gpu_ms > self.budget_ms() * 0.8 || (!self.held_by_headset() && (self.repeat_server > 1.0 || self.built_per_s < self.display_hz * 0.95))
     }
 
     /// The link carries less than asked or queues.
@@ -149,6 +159,9 @@ impl XrAuto {
             return false;
         }
         self.suggestion.clear();
+        if s.held_by_headset() {
+            self.suggestion = format!("the headset holds the stream back ({:.0} waits/s, GPU {:.1} of {:.1} ms): lower Bandwidth or Frame rate", s.waited_per_s, s.gpu_ms, budget);
+        }
         if s.link_short() {
             if auto(Lever::Bitrate) && self.values.kbps > AUTO_BITRATES_KBPS[0] {
                 let i = AUTO_BITRATES_KBPS.iter().position(|k| *k >= self.values.kbps).unwrap_or(AUTO_BITRATES_KBPS.len() - 1);
@@ -219,6 +232,7 @@ impl XrAuto {
             trip_base_ms: server.trip_base_ms,
             sent_mbps: server.sent_mbps,
             rate_mbps: server.rate_mbps,
+            waited_per_s: server.waited_per_s,
         })
     }
 }
@@ -228,7 +242,7 @@ mod tests {
     use super::*;
 
     fn healthy() -> Signals {
-        Signals { display_hz: 90.0, shown: 90.0, repeat_late: 0.0, repeat_server: 0.0, repeat_dropped: 0.0, built_per_s: 90.0, gpu_ms: 3.0, render_ms: 4.0, trip_ms: 6.0, trip_base_ms: 5.0, sent_mbps: 79.0, rate_mbps: 80.0 }
+        Signals { display_hz: 90.0, shown: 90.0, repeat_late: 0.0, repeat_server: 0.0, repeat_dropped: 0.0, built_per_s: 90.0, gpu_ms: 3.0, render_ms: 4.0, trip_ms: 6.0, trip_base_ms: 5.0, sent_mbps: 79.0, rate_mbps: 80.0, waited_per_s: 0.0 }
     }
 
     #[test]
@@ -271,5 +285,25 @@ mod tests {
         let mut b = XrAuto::default();
         assert!(!b.step(&short, |_| false, Instant::now()));
         assert!(!b.suggestion.is_empty());
+    }
+
+    #[test]
+    fn frames_held_for_the_headset_move_no_server_lever() {
+        // the recorded case: 72 Hz, 69 built, unsent repeats, the server waited for the headset
+        let mut a = XrAuto::default();
+        let mut held = healthy();
+        held.display_hz = 72.0;
+        held.built_per_s = 66.0;
+        held.repeat_server = 4.0;
+        held.waited_per_s = 18.0;
+        held.gpu_ms = 4.9;
+        assert!(!a.step(&held, |l| l != Lever::Bitrate, Instant::now()));
+        assert_eq!(a.values.aa, AutoValues::default().aa);
+        assert_eq!(a.values.render_scale_pct, 100);
+        assert!(a.suggestion.contains("headset"));
+        // the GPU over its share of the frame is the server's, waits or not
+        held.gpu_ms = 12.5;
+        assert!(a.step(&held, |_| true, Instant::now()));
+        assert_ne!(a.values.aa, AutoValues::default().aa);
     }
 }

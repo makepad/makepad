@@ -646,3 +646,38 @@ fn a_request_past_its_timeout_is_closed_and_the_connection_goes_on() {
     client.set_timeout(None);
     assert_eq!(client.cmd("slow").unwrap().next().unwrap().unwrap(), "{\"late\":1}");
 }
+
+/// The fds this process holds now (Linux).
+#[cfg(target_os = "linux")]
+fn open_fds() -> usize {
+    std::fs::read_dir("/proc/self/fd").map(|d| d.count()).unwrap_or(0)
+}
+
+/// The master's control socket serves thousands of short requests (a lease client's beat, the
+/// CLI): every connection's descriptors must go when the client does.
+#[cfg(target_os = "linux")]
+#[test]
+fn served_connections_release_their_descriptors() {
+    let (_, _) = shared();
+    let sock = crate::carrier::unix::paths(std::process::id()).0;
+    let round = |n: usize| {
+        for _ in 0..n {
+            let c = Client::new(Target::Unix(sock.clone()), "fd-test");
+            let mut lines = c.cmd("ping").unwrap();
+            assert!(lines.next().unwrap().unwrap().starts_with("{\"pong\":1"));
+            drop(lines);
+            drop(c);
+        }
+    };
+    round(50); // thread and allocator warm-up
+    std::thread::sleep(Duration::from_millis(500));
+    let before = open_fds();
+    round(3000);
+    // the server side closes on the peer's EOF, on its own threads
+    let t = std::time::Instant::now();
+    while open_fds() > before + 8 && t.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let after = open_fds();
+    assert!(after <= before + 8, "fds before {before}, after 3000 requests {after}");
+}

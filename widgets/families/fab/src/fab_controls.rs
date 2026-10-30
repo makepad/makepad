@@ -2258,15 +2258,15 @@ impl Widget for FabValueInput {
         // in a popover with nothing behind it to scroll, and the wheel over
         // a row is how a hand asks for one unit.
         if let Event::Scroll(e) = event {
-            if e.modifiers.control || e.modifiers.logo || self.track {
-                if !e.handled_y.get()
-                    && e.scroll.y.abs() > f64::EPSILON
-                    && self.draw_bg.area().rect(cx).contains(e.abs)
-                {
-                    let direction = if e.scroll.y < 0.0 { 1.0 } else { -1.0 };
-                    self.step_once(cx, uid, direction, e.modifiers.shift);
-                    e.handled_y.set(true);
-                }
+            let is_nudge = e.modifiers.control || e.modifiers.logo || self.track;
+            let area = self.draw_bg.area();
+            let is_over = area.clipped_rect(cx).contains(e.abs);
+            if cx.is_scroll_owner(e, area, Vec2Index::Y, is_nudge && is_over)
+                && is_nudge
+                && e.scroll.y.abs() > f64::EPSILON
+            {
+                let direction = if e.scroll.y < 0.0 { 1.0 } else { -1.0 };
+                self.step_once(cx, uid, direction, e.modifiers.shift);
             }
         }
 

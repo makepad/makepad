@@ -9,7 +9,7 @@
 //! `root` when the skin has several roots), vertex weights and every
 //! animation as an editable clip. Static meshes parented under a joint node
 //! are bound rigidly to that joint, so props on a rig follow it.
-use crate::{json::{self, Value}, mesh, transform::*, AnimationChannel, AnimationClip, AnimationPath, Error, Joint, Keyframe, Limits, Material, Operation, Result, Skeleton};
+use crate::{mesh, transform::*, AnimationChannel, AnimationClip, AnimationPath, Error, Joint, Keyframe, Limits, Material, Operation, Result, RigOperation, Skeleton, SurfaceAlpha, SurfaceMaterial, SurfaceOperation};
 use makepad_gltf::{decode_mesh_primitive, load_gltf_from_bytes, load_image_bytes, GltfNode, JsonValue, LoadedGltf};
 use std::collections::{BTreeMap, HashMap};
 
@@ -301,9 +301,9 @@ pub fn import_glb(glb: &[u8], prefix: &str, material_base: u32, root: Matrix4, l
         operations.push(Operation::SetSkeleton { skeleton: r.skeleton.clone() });
         for (j, rest) in r.rests.iter().enumerate() {
             let (t, q, s) = decompose(*rest);
-            let v = json::obj(vec![("op", json::s("rig_rest")), ("joint", Value::Int(j as i64)), ("transform", json::obj(vec![
-                ("translation", Value::Arr(t.iter().map(|x| Value::F64(*x)).collect())), ("rotation", Value::Arr(q.iter().map(|x| Value::F64(*x)).collect())), ("scale", Value::Arr(s.iter().map(|x| Value::F64(*x)).collect()))]))]);
-            if let Some(op) = crate::RigOperation::parse(&v, limits)? { operations.push(Operation::Rig(op)); }
+            let op = RigOperation::Rest { joint: j as u32, transform: Transform { translation: t, rotation: q, scale: s } };
+            op.check(limits)?;
+            operations.push(Operation::Rig(op));
         }
         joint_names = r.skeleton.joints.iter().map(|j| j.name.clone()).collect();
     }
@@ -316,13 +316,17 @@ pub fn import_glb(glb: &[u8], prefix: &str, material_base: u32, root: Matrix4, l
             .and_then(|image| load_image_bytes(&loaded, image).ok()).filter(|b| b.starts_with(b"\x89PNG"));
         operations.push(Operation::SetMaterial { material: *ordinal, value: Material { color: [factor[0], factor[1], factor[2]], base_color_png: png.unwrap_or_default() } });
         let emissive = gm.and_then(|m| m.emissive_factor).unwrap_or([0.; 3]).map(|v| v as f64);
-        let alpha = match gm.and_then(|m| m.alpha_mode.as_deref()) { Some("BLEND") => "blend", Some("MASK") => "mask", _ => "opaque" };
-        let surface = json::obj(vec![("op", json::s("surface_material")), ("material", Value::Int(*ordinal as i64)),
-            ("base_color", Value::Arr(factor.iter().map(|v| Value::F64(v.clamp(0., 1.))).collect())),
-            ("metallic", Value::F64(pbr.and_then(|p| p.metallic_factor).unwrap_or(0.) as f64)), ("roughness", Value::F64(pbr.and_then(|p| p.roughness_factor).unwrap_or(0.8) as f64)),
-            ("emissive", Value::Arr(emissive.iter().map(|v| Value::F64(v.clamp(0., 1.))).collect())), ("alpha", json::s(alpha)),
-            ("double_sided", Value::Bool(gm.and_then(|m| m.double_sided).unwrap_or(false)))]);
-        if let Some(op) = crate::SurfaceOperation::parse(&surface, limits)? { operations.push(Operation::Surface(op)); }
+        let alpha = match gm.and_then(|m| m.alpha_mode.as_deref()) { Some("BLEND") => SurfaceAlpha::Blend, Some("MASK") => SurfaceAlpha::Mask, _ => SurfaceAlpha::Opaque };
+        let op = SurfaceOperation::Material { material: *ordinal, value: SurfaceMaterial {
+            base_color: factor.map(|v| v.clamp(0., 1.)),
+            metallic: pbr.and_then(|p| p.metallic_factor).unwrap_or(0.) as f64,
+            roughness: pbr.and_then(|p| p.roughness_factor).unwrap_or(0.8) as f64,
+            emissive: emissive.map(|v| v.clamp(0., 1.)), alpha,
+            double_sided: gm.and_then(|m| m.double_sided).unwrap_or(false),
+            ..Default::default()
+        } };
+        op.check(limits)?;
+        operations.push(Operation::Surface(op));
     }
     operations.extend(meshes);
     if let Some(r) = &rig {

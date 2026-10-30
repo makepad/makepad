@@ -126,9 +126,9 @@ fn widget_edits_are_source_preserving_and_reload() {
     // Scrub the tempo, mute a loop, toggle a pattern step: every other byte
     // stays and the result loads.
     let splice = source::set_field(TECHNO, "clock", "bpm", "128").unwrap();
-    let s = source::apply(TECHNO, &splice);
+    let s = makepad_edit_values::apply_splices(TECHNO, 0, &[splice]).unwrap();
     assert_eq!(s, TECHNO.replacen("bpm: 126", "bpm: 128", 1));
-    let s = source::apply(&s, &source::set_field(&s, "hats", "mute", "true").unwrap());
+    let s = makepad_edit_values::apply_splices(&s, 0, &[source::set_field(&s, "hats", "mute", "true").unwrap()]).unwrap();
     let outline = source::outline(&s);
     let hits = outline.node("kick").unwrap().field("hits").unwrap().value;
     // The pattern's third step: character 2 inside the quotes.
@@ -1042,21 +1042,23 @@ fn custom_envelopes_shape_a_notes_level_and_cutoff() {
 
 #[test]
 fn midi_keys_play_loops_move_params_and_reach_loop_code_and_outboard_gear() {
-    let src = "use mod.score.*\nlet clock = Clock{bpm: 120 params: {bright: 0} midi: {bright: 74}}\nlet s = Synth{preset: @pluck}\nlet gear = Instrument{kind: @midi channel: 2 port: \"IAC Bus 1\"}\nlet keys = Loop{play: s midi_in: true}\nlet arp = Loop{play: gear beats: 1 code: fn(i) { log(held()) log(cc(74)) sleep(arp(held(), @up, 0.25)) }}\nlet sweep = Lowpass{in: [keys] cutoff: {param: @bright from: 200 to: 8000}}\nScore{clock s gear keys arp sweep}\n";
+    let src = "use mod.score.*\nlet clock = Clock{bpm: 120 params: {bright: 0} midi: {bright: 74}}\nlet s = Synth{preset: @pluck}\nlet gear = Instrument{kind: @midi channel: 2 port: \"IAC Bus 1\"}\nlet keys_in = MidiIn{device: \"any\" channel: 1}\nlet keys = Loop{play: s in: keys_in}\nlet arp = Loop{play: gear beats: 1 code: fn(i) { log(held()) log(cc(74)) sleep(arp(held(), @up, 0.25)) }}\nlet sweep = Lowpass{in: [keys] cutoff: {param: @bright from: 200 to: 8000}}\nScore{clock s gear keys_in keys arp sweep}\n";
     let doc = model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
-    assert_eq!(doc.loops[0].midi_in, Some(0));
+    assert_eq!(doc.loops[0].input.as_deref(), Some("keys_in"));
     assert_eq!(doc.clock.midi, vec![("bright".to_string(), 74)]);
     let g = graph(&doc);
     assert_eq!((g.param("arp", "inst"), g.param("arp", "channel"), g.param("arp", "midi_port")), (Literal::Str("midi".into()), Literal::Num(2.0), Literal::Str("IAC Bus 1".into())));
+    // The keyboard loop plays its stream on the audio thread: device and
+    // channel filters, no stages.
+    assert_eq!((g.param("keys", "midi_device"), g.param("keys", "midi_channel")), (Literal::Str("any".into()), Literal::Num(1.0)));
+    assert!(matches!(g.param("keys", "stream"), Literal::Arr(words) if words.len() == 2));
+    assert!(matches!(g.param("arp", "stream"), Literal::Arr(words) if words.is_empty()));
     let mut composer = Composer::new(model::load(src).unwrap());
     composer.automation_out.clear();
-    // Keys: played on the keyboard loop at once, held for the loop code.
-    let mut now = Vec::new();
-    composer.midi_in([0x90, 60, 100], 3.0, &mut now);
-    composer.midi_in([0x90, 64, 127], 3.0, &mut now);
-    composer.midi_in([0xb0, 74, 127], 3.0, &mut now);
-    assert_eq!(now.iter().map(|e| (e.beat, e.loop_key, e.kind, e.note)).collect::<Vec<_>>(), [(3.0, key("keys"), EventKind::Note, 60.0), (3.0, key("keys"), EventKind::Note, 64.0)]);
-    assert!(now[0].opts.handle != 0 && now[0].opts.handle != now[1].opts.handle);
+    // Keys: held for the loop code; the controller moves the param.
+    composer.midi_in([0x90, 60, 100], 3.0);
+    composer.midi_in([0x90, 64, 127], 3.0);
+    composer.midi_in([0xb0, 74, 127], 3.0);
     // The controller moved the param and the filter following it, now.
     assert_eq!(composer.params, [("bright".to_string(), 1.0)]);
     assert_eq!(composer.automation_out.iter().map(|(fx, e)| (fx.as_str(), e.beat, e.value)).collect::<Vec<_>>(), [("sweep", 3.0, 8000.0)]);
@@ -1066,10 +1068,8 @@ fn midi_keys_play_loops_move_params_and_reach_loop_code_and_outboard_gear() {
     let logs = &composer.loops.iter().find(|l| l.name == "arp").unwrap().last_logs;
     assert_eq!(logs.iter().map(|l| l.split(": ").nth(1).unwrap().to_string()).collect::<Vec<_>>(), ["[60 64]", "1"]);
     assert_eq!(events.iter().filter(|e| e.loop_key == key("arp")).map(|e| (e.beat, e.note)).collect::<Vec<_>>(), [(0.0, 60.0), (0.25, 64.0)]);
-    // A key let go ends its note.
-    let mut off = Vec::new();
-    composer.midi_in([0x80, 60, 0], 4.0, &mut off);
-    assert_eq!((off[0].kind, off[0].opts.handle), (EventKind::Release, now[0].opts.handle));
+    assert!(events.iter().all(|e| e.loop_key != key("keys")), "the composer plays nothing on a keyboard loop");
+    composer.midi_in([0x80, 60, 0], 4.0);
     assert_eq!(composer.held.len(), 1);
     // Only a live score's MIDI loops reach the outputs.
     use makepad_audio_engine::feed::midi_out;
@@ -1429,4 +1429,117 @@ fn a_score_node_in_a_root_flow_plays_as_the_player_does() {
     let tail = b.len() - CHUNK;
     assert!(b[tail..].iter().any(|x| x.abs() > 1e-4), "the swap keeps the music playing");
     makepad_audio_engine::feed::forget_instance("own_score");
+}
+
+/// A player that plays live (it takes MIDI in), under a name of its own.
+fn live_instance(doc: &model::ScoreDoc) -> crate::player::Player {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let name = format!("live_test_{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    makepad_audio_engine::feed::midi_out::set_live(&name, true);
+    crate::player::prepare(doc, 48_000.0, &name, crate::player::ClockMode::Own, None, 1).unwrap()
+}
+
+/// The MIDI input ports the tests play on (one list for every test: the
+/// port list is the process's).
+fn test_ports() {
+    makepad_audio_engine::feed::midi_in::set_ports(vec![(7, "Test Keys MIDI 1".into()), (8, "Other".into()), (9, "Pedal Keys".into())]);
+}
+
+/// Where notes start in `out` (frames after at least `gap` frames under
+/// `floor`), and each one's pitch from its zero crossings (Hz).
+fn note_onsets(out: &[f32], floor: f32, gap: usize) -> Vec<(usize, f32)> {
+    let mut found = Vec::new();
+    let mut quiet = gap;
+    let mut i = 0;
+    while i < out.len() {
+        if out[i].abs() > floor && quiet >= gap {
+            let end = (i + 2_900).min(out.len());
+            let w = &out[i + 240..end];
+            let crossings = w.windows(2).filter(|p| (p[0] < 0.0) != (p[1] < 0.0)).count() as f32;
+            found.push((i, crossings / 2.0 / (w.len() as f32 / 48_000.0)));
+            quiet = 0;
+            i += 240;
+            continue;
+        }
+        quiet = if out[i].abs() > floor { 0 } else { quiet + 1 };
+        i += 1;
+    }
+    found
+}
+
+#[test]
+fn midi_keys_through_an_arp_play_the_pattern_on_the_clock() {
+    use makepad_audio_engine::feed::midi_in::{self, MidiMsg};
+    // 120 bpm: a sixteenth is an eighth of a second, 6000 frames.
+    let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet tone = Synth{osc: @sine attack: 0.001 decay: 0.1 sustain: 1 release: 0.002 cutoff: 16000}\nlet keys_in = MidiIn{device: \"Test Keys\" channel: 1 latency: 0}\nlet up = Transpose{in: keys_in semis: 12}\nlet arp = Arp{in: up pattern: @updown rate: 1/16 octaves: 1 gate: 0.5}\nlet lead = Loop{play: tone in: arp}\nScore{clock tone keys_in up arp lead}\n";
+    let loaded = model::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let stream = loaded.doc.resolve_stream(&loaded.doc.loops[0]).unwrap().unwrap();
+    assert_eq!(stream.path, ["arp", "up", "keys_in"]);
+    let mut instance = live_instance(&loaded.doc);
+    test_ports();
+    // A chord (c3 e3 g3, an octave up through Transpose) on the next pass's
+    // first frame; another device's and another channel's keys are not taken.
+    for data in [[0x90, 48, 100], [0x90, 52, 100], [0x90, 55, 100], [0x91, 50, 100]] {
+        midi_in::push(MidiMsg { at: f64::NEG_INFINITY, port: 7, data });
+    }
+    midi_in::push(MidiMsg { at: f64::NEG_INFINITY, port: 8, data: [0x90, 70, 100] });
+    let mut out = Vec::new();
+    for pass in 0..(6 * 6000 / CHUNK + 1) {
+        if pass == 5 * 6000 / CHUNK {
+            // Let go before the sixth step: up-down c e g e c, then silence.
+            for data in [[0x80, 48, 0], [0x80, 52, 0], [0x80, 55, 0]] {
+                midi_in::push(MidiMsg { at: f64::NEG_INFINITY, port: 7, data });
+            }
+        }
+        run(&mut instance.schedule, CHUNK, &mut |_, a, _| out.extend_from_slice(&a[..CHUNK]), &mut NoExt);
+    }
+    let notes = note_onsets(&out, 1e-6, 1_000);
+    assert_eq!(notes.len(), 5, "{notes:?}");
+    let first = notes[0].0;
+    for (k, (at, hz)) in notes.iter().enumerate() {
+        // Each step on its sixteenth, to the sample.
+        assert_eq!(*at - first, k * 6000, "step {k} at {at}: {notes:?}");
+        let want = [261.63, 329.63, 392.0, 329.63, 261.63][k];
+        assert!((hz - want).abs() < want * 0.03, "step {k}: {hz} Hz, want {want}");
+    }
+    // The gate: each note sounds half its step.
+    let (on, off) = (peak(&out[first + 1_000..first + 2_900]), peak(&out[first + 4_500..first + 5_900]));
+    assert!(on > 0.05 && off < 1e-3, "on {on} off {off} first {first}");
+    // Pass 0 rendered with the keys on its first frame.
+    assert!(first < 256, "{first}");
+    makepad_audio_engine::feed::forget_instance(&instance.name);
+}
+
+#[test]
+fn a_keyboard_plays_its_loop_while_the_transport_is_stopped_and_the_pedal_holds() {
+    use makepad_audio_engine::feed::midi_in::{self, MidiMsg};
+    let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet tone = Synth{osc: @sine attack: 0.001 decay: 0.1 sustain: 1 release: 0.002 cutoff: 16000}\nlet keys_in = MidiIn{device: \"Pedal Keys\" latency: 0}\nlet keys = Loop{play: tone in: keys_in}\nScore{clock tone keys_in keys}\n";
+    let loaded = model::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let mut instance = live_instance(&loaded.doc);
+    // A render (not live) takes no keys.
+    let mut render = instantiate(&loaded.doc, 48_000.0).unwrap();
+    // The transport stopped: the key still sounds.
+    let playing = instance.layout.controls.get(&format!("{}.playing", crate::player::transport(&instance.name))).map(|(index, _)| *index).expect("the transport's playing control");
+    instance.schedule.controls.set_manual(playing, 0.0);
+    test_ports();
+    let pass = |instance: &mut crate::player::Player, msgs: &[[u8; 3]]| {
+        for data in msgs {
+            midi_in::push(MidiMsg { at: f64::NEG_INFINITY, port: 9, data: *data });
+        }
+        let mut out = Vec::new();
+        for _ in 0..40 {
+            run(&mut instance.schedule, CHUNK, &mut |_, a, _| out.extend_from_slice(&a[..CHUNK]), &mut NoExt);
+        }
+        out
+    };
+    let held = pass(&mut instance, &[[0xb0, 64, 127], [0x90, 69, 100], [0x80, 69, 0]]);
+    let mut quiet = Vec::new();
+    for _ in 0..40 {
+        run(&mut render.schedule, CHUNK, &mut |_, a, _| quiet.extend_from_slice(&a[..CHUNK]), &mut NoExt);
+    }
+    assert!(peak(&quiet) < 1e-6, "a render plays no keyboard");
+    assert!(peak(&held[5_000..]) > 0.05, "the pedal holds the key let go");
+    let up = pass(&mut instance, &[[0xb0, 64, 0]]);
+    assert!(peak(&up[2_000..]) < 1e-3, "the pedal up lets it go");
+    makepad_audio_engine::feed::forget_instance(&instance.name);
 }

@@ -122,11 +122,23 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// What a failed `rev-parse` of a branch means: `git: <spawn error>` is git not starting, anything else
+/// is git saying the branch is not there.
+fn branch_error(repo: &Path, branch: &str, e: &str) -> String {
+    if e.starts_with("git: ") {
+        format!("{}: {e}", repo.display())
+    } else {
+        format!("{}: no branch {branch}", repo.display())
+    }
+}
+
 pub(super) fn branch_sha(repo: &Path, branch: &str) -> Result<String, String> {
     if !valid_branch(branch) {
         return Err(format!("`{branch}` is not a branch name"));
     }
-    git(repo, &["rev-parse", "-q", "--verify", &format!("refs/heads/{branch}^{{commit}}")]).map_err(|_| format!("{}: no branch {branch}", repo.display()))
+    // only a git that ran and said no means "no such branch"; a git that could not start (EMFILE: too
+    // many open files, ENOMEM, a missing binary) is reported as that, never as a missing branch
+    git(repo, &["rev-parse", "-q", "--verify", &format!("refs/heads/{branch}^{{commit}}")]).map_err(|e| branch_error(repo, branch, &e))
 }
 
 /// One repo to push: where it is, the branch, its commit.
@@ -887,5 +899,27 @@ mod tests {
         assert!(super::node_has(shipped, "makepad").is_empty());
         assert_eq!(super::jit_id("217/sandbox#4412"), Some(("217".to_string(), 4412)));
         assert_eq!(super::jit_id("100/981"), Some(("100".to_string(), 981)));
+    }
+
+    #[test]
+    fn a_git_that_cannot_start_is_not_a_missing_branch() {
+        let repo = std::path::Path::new("/r");
+        assert_eq!(super::branch_error(repo, "work", "git: Too many open files (os error 24)"), "/r: git: Too many open files (os error 24)");
+        assert_eq!(super::branch_error(repo, "work", "git rev-parse: "), "/r: no branch work");
+        // a real repo without the branch still says so
+        let d = std::env::temp_dir().join(format!("devhub-branch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(std::process::Command::new("git").arg("-C").arg(&d).args(["init", "-q"]).status().unwrap().success());
+        let e = super::branch_sha(&d, "nope").unwrap_err();
+        assert!(e.ends_with("no branch nope"), "{e}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_fd_limit_is_raised_to_the_hard_limit() {
+        let now = crate::os::raise_fd_limit();
+        assert!(now >= 256, "soft limit {now}");
     }
 }

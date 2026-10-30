@@ -15,7 +15,7 @@ use crate::model::Diag;
 use crate::NoSamples;
 use makepad_strict_json::{self as json, Value};
 
-pub use makepad_score_tools::{find, ScoreToolDef, CHECK, GUIDE, INSTRUMENT_SEARCH, LISTEN, MORPH_PARAMS, TOOLS};
+pub use makepad_score_tools::{find, ScoreToolDef, CHECK, GUIDE, INSTRUMENT_SEARCH, LISTEN, MORPH_PARAMS, PRESET_SEARCH, TOOLS};
 
 /// The composer guide `score_guide` answers.
 pub fn guide() -> String {
@@ -35,6 +35,7 @@ pub fn call(name: &str, args: &Value, open: Option<&str>) -> Result<Value, Strin
         Some("morph_params") => Ok(morph_params(args)),
         Some("tandem_params") => Ok(tandem_params(args)),
         Some("tandem_patches") => Ok(tandem_patches(args)),
+        Some("preset_search") => Ok(preset_search(args)),
         _ => Err(format!("no score tool `{name}`")),
     }
 }
@@ -181,6 +182,34 @@ pub fn tandem_patches(args: &Value) -> Value {
     json::obj(vec![("installed", Value::Bool(true)), ("patches", Value::Arr(list))])
 }
 
+/// `preset_search`: the browser's preset index, searched as it searches.
+pub fn preset_search(args: &Value) -> Value {
+    let index = crate::browse::index_or_build();
+    let text = |key: &str| args.get(key).and_then(Value::as_str).map(str::to_string);
+    let limit = match args.get("limit") {
+        Some(Value::Int(n)) => (*n).clamp(1, 40) as usize,
+        Some(Value::F64(n)) => n.clamp(1.0, 40.0) as usize,
+        _ => 12,
+    };
+    let facets = crate::browse::Facets { engine: text("engine"), category: text("category").map(|c| c.to_lowercase()), ..Default::default() };
+    let found: Vec<usize> = match text("similar_to") {
+        Some(like) => {
+            let like = like.to_lowercase();
+            let of = index.entries.iter().position(|e| e.choice.label.to_lowercase() == like || e.choice.fields.iter().any(|(_, v)| v.trim_start_matches('@').trim_matches('"').to_lowercase() == like.trim_start_matches('@')));
+            match of {
+                Some(of) => index.similar(of, limit * 4).into_iter().filter(|i| crate::browse::search_in(std::slice::from_ref(&index.entries[*i]), &text("query").unwrap_or_default(), &facets).len() == 1).collect(),
+                None => Vec::new(),
+            }
+        }
+        None => index.search(&text("query").unwrap_or_default(), &facets),
+    };
+    let entries: Vec<(usize, &crate::browse::Entry)> = found.iter().map(|i| (*i, &index.entries[*i])).collect();
+    json::obj(vec![
+        ("results", Value::Arr(crate::browse::describe(&entries, limit).into_iter().map(json::s).collect())),
+        ("total", Value::Int(found.len() as i64)),
+    ])
+}
+
 /// `instrument_search`: the palette's best matches for a description.
 pub fn instrument_search(args: &Value) -> Value {
     let query = args.get("query").and_then(Value::as_str).unwrap_or("");
@@ -309,7 +338,7 @@ pub fn heard_json(heard: &Heard) -> Value {
         ("balance", texts(&heard.balance)),
         ("onsets_per_bar", texts(&heard.onsets)),
         ("notes", Value::Obj(heard.notes.iter().map(|(loop_name, notes)| {
-            (loop_name.clone(), json::s(notes.iter().take(64).map(|(beat, name, vel)| format!("{}:{name}@{vel}", crate::source::fmt_num(*beat, 2))).collect::<Vec<_>>().join(" ")))
+            (loop_name.clone(), json::s(notes.iter().take(64).map(|(beat, name, vel)| format!("{}:{name}@{vel}", makepad_edit_values::number::fmt_num(*beat, 2))).collect::<Vec<_>>().join(" ")))
         }).collect())),
         ("per_bar", Value::Arr(heard.per_bar.iter().map(|(rms, bright)| json::obj(vec![("rms_db", num(*rms as f64)), ("bright_hz", num(*bright as f64))])).collect())),
         ("warnings", texts(&heard.warnings)),

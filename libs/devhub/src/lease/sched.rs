@@ -8,6 +8,12 @@
 //! the oldest last grant), then request time. A lease waits (never refused) for a global or lane
 //! cap, a node's slots, budget, disk floor, pressure, dev switch or a timed hold; it is denied
 //! only when no node could ever take it.
+//!
+//! Placement: the least-loaded fitting node (free slots, load against cores, free RAM, GPU use),
+//! with a bonus for the lane's warm node (its target). `--node N` on a build, test, long, gate or
+//! gpu lease is a preference: N when it can take it; when N cannot for [`PIN_GRACE_MS`] (at once
+//! when N is held for a timed lease, busy, off or down) a twin (same arch and os) takes it.
+//! `--only N`, timed, screen and inspect leases run on N or wait for it.
 
 use super::{Caps, Cost, Kind, Role};
 use crate::proto::{hub_record, Record, Sev};
@@ -22,6 +28,18 @@ pub const AGE_STEP_MS: u64 = 600_000;
 /// A wait this long becomes a warn (once).
 pub const WAIT_WARN_MS: u64 = 600_000;
 pub const DEFAULT_PRIO: i32 = 5;
+/// A soft-pinned lease (`--node N`) waits this long for N before a twin node may take it.
+pub const PIN_GRACE_MS: u64 = 120_000;
+/// A node over this load per core, or under this share of free RAM, takes no new leases.
+pub const BUSY_LOAD_PER_CORE: f64 = 1.25;
+pub const BUSY_RAM_FREE: f64 = 0.15;
+/// The same on a laptop (a node with a battery: the user's mbpro): stricter, it is someone's machine.
+pub const LAPTOP_BUSY_LOAD_PER_CORE: f64 = 0.75;
+pub const LAPTOP_BUSY_RAM_FREE: f64 = 0.25;
+/// Placement score bonus of the lane's warm node (its target there: no cold build) and of the
+/// lane's last node.
+const WARM_BONUS: f64 = 1.5;
+const STICKY_BONUS: f64 = 0.5;
 /// Running leases per lane and kind.
 pub const LANE_CAP: u32 = 2;
 /// A granted gate lease that runs nothing this long ends: an idle gate slot blocks landings.
@@ -71,8 +89,11 @@ fn buildish(kind: Kind) -> bool {
 pub struct Req {
     pub lane: String,
     pub kind: Kind,
-    /// exactly this node
+    /// this node: a preference for build/test/long/gate/gpu leases (a twin may take it, see
+    /// [`PIN_GRACE_MS`]), exactly this node for the other kinds or with `only`
     pub node: Option<String>,
+    /// `--only N`: exactly `node`, never a twin
+    pub only: bool,
     /// `arch os gpu ram disk cores display role` requirements
     pub needs: Vec<(String, String)>,
     pub prio: i32,
@@ -90,17 +111,18 @@ pub struct Req {
 
 impl Req {
     pub fn new(lane: &str, kind: Kind) -> Req {
-        Req { lane: lane.to_string(), kind, node: None, needs: Vec::new(), prio: DEFAULT_PRIO, rev: None, repo_dir: None, jit: None, holder: None, agent: None }
+        Req { lane: lane.to_string(), kind, node: None, only: false, needs: Vec::new(), prio: DEFAULT_PRIO, rev: None, repo_dir: None, jit: None, holder: None, agent: None }
     }
 
     pub fn to_json(&self) -> String {
         let opt = |o: &Option<String>| o.as_deref().map_or("null".to_string(), json_str);
         let needs: Vec<String> = self.needs.iter().map(|(k, v)| format!("{}:{}", json_str(k), json_str(v))).collect();
         format!(
-            "{{\"lane\":{},\"kind\":\"{}\",\"node\":{},\"needs\":{{{}}},\"prio\":{},\"rev\":{},\"repo_dir\":{},\"jit\":{},\"holder\":{},\"agent\":{}}}",
+            "{{\"lane\":{},\"kind\":\"{}\",\"node\":{},\"only\":{},\"needs\":{{{}}},\"prio\":{},\"rev\":{},\"repo_dir\":{},\"jit\":{},\"holder\":{},\"agent\":{}}}",
             json_str(&self.lane),
             self.kind.as_str(),
             opt(&self.node),
+            self.only as u8,
             needs.join(","),
             self.prio,
             opt(&self.rev),
@@ -118,6 +140,7 @@ impl Req {
         let kind = s("kind").and_then(|k| Kind::parse(&k)).ok_or("unknown lease kind")?;
         let mut r = Req::new(&lane, kind);
         r.node = s("node");
+        r.only = r.node.is_some() && v.get("only").and_then(super::num).is_some_and(|x| x != 0.0);
         r.prio = v.get("prio").and_then(super::num).map_or(DEFAULT_PRIO, |p| p as i32);
         r.rev = s("rev");
         r.repo_dir = s("repo_dir");
@@ -418,6 +441,17 @@ fn dur(ms: u64) -> String {
 /// `32`, `32G`, `32GB` as a number.
 fn gb(v: &str) -> Option<f64> {
     v.trim().trim_end_matches(['B', 'b']).trim_end_matches(['G', 'g']).parse().ok()
+}
+
+/// Over the load or RAM threshold: the node takes no new leases ([`BUSY_LOAD_PER_CORE`], [`BUSY_RAM_FREE`]).
+fn overloaded(c: &Caps) -> bool {
+    let (load, ram) = if c.battery.is_some() { (LAPTOP_BUSY_LOAD_PER_CORE, LAPTOP_BUSY_RAM_FREE) } else { (BUSY_LOAD_PER_CORE, BUSY_RAM_FREE) };
+    c.load1 > c.cores as f64 * load || (c.ram_gb > 0.0 && c.ram_avail_gb < c.ram_gb * ram)
+}
+
+/// May a twin node take this `--node N` lease? (Not `--only`, timed, screen or inspect leases.)
+fn soft_pin(r: &Req) -> bool {
+    r.node.is_some() && !r.only && matches!(r.kind, Kind::Build | Kind::Test | Kind::Long | Kind::Gate | Kind::Gpu)
 }
 
 /// Does the node meet one `--needs` requirement?
@@ -857,7 +891,7 @@ impl Sched {
                 return Err((format!("timed: waiting for {} leases to end", running.len()), false));
             }
         } else {
-            let busy = c.load1 > c.cores as f64 * 1.5 || (c.ram_gb > 0.0 && c.ram_avail_gb < c.ram_gb * 0.1);
+            let busy = overloaded(c);
             if busy {
                 return Err(("node busy".into(), false));
             }
@@ -887,7 +921,19 @@ impl Sched {
         }
         let cores: f64 = running.iter().map(|r| r.cost.cores).sum::<f64>() + cost.cores;
         let ram: f64 = running.iter().map(|r| r.cost.ram_gb).sum::<f64>() + cost.ram_gb;
-        Ok((1.0 - cores / c.cores.max(1) as f64) + (c.ram_avail_gb.min(c.ram_gb - ram).max(0.0) / c.ram_gb.max(1.0)))
+        let s = slots(c, k).max(1) as f64;
+        let used = running.iter().filter(|r| r.req.kind == k).count() as f64;
+        // the measured load counts what runs outside leases too (the user's apps, the mini's CI)
+        let load = (c.load1 / c.cores.max(1) as f64).min(2.0);
+        let gpu = if cost.gpus > 0 { 1.0 - c.gpu_busy.iter().map(|g| g.0).fold(100.0, f64::min) / 100.0 } else { 0.0 };
+        Ok((1.0 - cores / c.cores.max(1) as f64) + (c.ram_avail_gb.min(c.ram_gb - ram).max(0.0) / c.ram_gb.max(1.0)) + (1.0 - load) + 0.5 * (1.0 - (used + 1.0) / s) + gpu)
+    }
+
+    /// Will a lease named to `name` wait long there: held for a timed lease, an exclusive lease
+    /// running, overloaded, off or down?
+    fn long_wait(&self, name: &str, id: &str, holds: &HashMap<String, String>) -> bool {
+        let n = &self.nodes[name];
+        !n.up || !self.dev(name) || holds.get(name).is_some_and(|h| h != id) || self.live_on_node(name, id).any(|r| r.cost.whole) || n.caps.as_ref().is_some_and(overloaded)
     }
 
     fn place(&self, l: &Lease, holds: &HashMap<String, String>) -> Place {
@@ -907,7 +953,19 @@ impl Sched {
         }
         let names: Vec<&String> = match &l.req.node {
             Some(n) => match self.nodes.get_key_value(n) {
-                Some((k, _)) => vec![k],
+                Some((k, st)) => {
+                    let mut v = vec![k];
+                    // a soft pin: a twin (same arch and os) may take it once N kept it waiting
+                    // past the grace, or at once when N is held, busy, off or down
+                    if soft_pin(&l.req) && (self.clock.saturating_sub(l.asked_ms) >= PIN_GRACE_MS || self.long_wait(k, &l.id, holds)) {
+                        if let Some(nc) = &st.caps {
+                            let twin = |c: &Caps| c.arch == nc.arch && c.os.eq_ignore_ascii_case(&nc.os);
+                            let free = |m: &String| self.excluded.get(&(l.req.lane.clone(), m.clone())).is_none_or(|until| *until <= self.clock);
+                            v.extend(self.nodes.iter().filter(|(m, o)| *m != k && o.caps.as_ref().is_some_and(twin) && free(m)).map(|(m, _)| m));
+                        }
+                    }
+                    v
+                }
                 None => return Place::Deny(format!("no node {n}")),
             },
             None => {
@@ -947,7 +1005,10 @@ impl Sched {
         for (name, cost) in &fit {
             match self.now_fits(name, l, cost, holds) {
                 Ok(score) => {
-                    let score = if sticky == Some(*name) { f64::MAX } else { score };
+                    // the named node when it can take it; else the lane's warm node unless it is much busier
+                    let named = l.req.node.as_deref() == Some(name.as_str());
+                    let warm = self.warm.contains(&(l.req.lane.clone(), (*name).clone()));
+                    let score = score + if named { 100.0 } else { 0.0 } + if warm { WARM_BONUS } else { 0.0 } + if sticky == Some(*name) { STICKY_BONUS } else { 0.0 };
                     if best.as_ref().is_none_or(|b| score > b.2) {
                         best = Some((name, *cost, score));
                     }
@@ -961,7 +1022,8 @@ impl Sched {
         // a timed lease holds one node: the named one, the sticky one, else the least busy
         let hold = (k == Kind::Timed).then(|| {
             let mut c: Vec<&String> = fit.iter().map(|(n, _)| *n).collect();
-            c.sort_by_key(|n| (sticky != Some(*n), self.live_on_node(n, &l.id).count()));
+            // an idle node first (it starts now), the lane's own node among equals
+            c.sort_by_key(|n| (self.live_on_node(n, &l.id).count(), sticky != Some(*n)));
             c[0].clone()
         });
         let first = why.iter().find(|w| Some(&w.0) == hold.as_ref()).or_else(|| why.iter().find(|w| Some(&w.0) == sticky)).unwrap_or(&why[0]);
@@ -1027,7 +1089,8 @@ impl Sched {
                         self.warm.insert((lane, node.clone()));
                     }
                     let l = self.leases[i].clone();
-                    self.event(Sev::Info, format!("{} granted to {} after {}", l.tag(), l.req.lane, dur(now.saturating_sub(l.asked_ms))), Some(&l));
+                    let moved = l.req.node.as_deref().filter(|n| *n != node).map_or(String::new(), |n| format!(" (on twin {node}: {n} was busy)"));
+                    self.event(Sev::Info, format!("{} granted to {} after {}{moved}", l.tag(), l.req.lane, dur(now.saturating_sub(l.asked_ms))), Some(&l));
                     self.out.push(Action::Grant { id, node });
                 }
                 Place::Wait(reason, hold, reclaim) => {
@@ -1331,7 +1394,11 @@ mod tests {
         let mut big = req("x", Kind::Build, None);
         big.needs = parse_needs("gpu=5090");
         let big = s.request(big, 0);
-        let user = s.request(req("y", Kind::Build, Some("wm")), 0);
+        let mut user = req("y", Kind::Build, Some("wm"));
+        user.only = true;
+        let user = s.request(user, 0);
+        // a soft pin to the switched-off WM waits for a twin instead (a is full with the gate)
+        let soft = s.request(req("z", Kind::Build, Some("wm")), 0);
         let insp = {
             let mut r = req("y", Kind::Inspect, Some("wm"));
             r.jit = Some("sandbox".into());
@@ -1342,12 +1409,14 @@ mod tests {
         assert_eq!(state(&s, &big).0, "ended denied");
         assert_eq!(state(&s, &user).0, "ended denied");
         assert!(s.recent_ended(5).iter().any(|l| l.id == user));
+        assert_eq!(state(&s, &soft).0, "queued");
         // inspect is always allowed on a user WM
         assert_eq!(state(&s, &insp).0, "starting");
         // the user switches it on: writes go
         s.set_dev("wm", true, 1).unwrap();
         let w = s.request(req("y", Kind::Build, Some("wm")), 1);
-        assert_eq!(grants(&s.tick(1)), vec![w]);
+        assert_eq!(grants(&s.tick(1)), vec![soft.clone(), w]);
+        assert_eq!(node_of(&s, &soft).as_deref(), Some("wm"), "its own node, once it takes leases");
     }
 
     #[test]
@@ -1469,5 +1538,163 @@ mod tests {
         let next = t.request(req("lane-a", Kind::Test, Some("217")), 100);
         assert_ne!(next, id, "ids continue after the restored ones");
         assert_eq!(t.live_on("217"), vec![id]);
+    }
+
+    fn node_of(s: &Sched, id: &str) -> Option<String> {
+        s.get(id).unwrap().node.clone()
+    }
+
+    /// `--node a` with a's test slots full: it waits for a during the grace (its warm tree is
+    /// there), then a twin (same arch and os) takes it; never a node of another arch; `--only a`
+    /// keeps waiting.
+    #[test]
+    fn soft_pin_waits_for_its_node_then_takes_a_twin() {
+        let mut mac = caps(16, 64.0, Role::Pool);
+        mac.arch = "aarch64".into();
+        mac.os = "macos".into();
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool)), ("b", caps(16, 64.0, Role::Pool)), ("m", mac)]);
+        let mut fill = Vec::new();
+        for lane in ["f1", "f2"] {
+            let mut r = req(lane, Kind::Test, Some("a"));
+            r.only = true;
+            fill.push(s.request(r, 0));
+        }
+        s.tick(0);
+        assert!(fill.iter().all(|f| node_of(&s, f).as_deref() == Some("a")));
+        let x = s.request(req("x", Kind::Test, Some("a")), 1);
+        let mut y = req("y", Kind::Test, Some("a"));
+        y.only = true;
+        let y = s.request(y, 1);
+        s.tick(2);
+        assert_eq!(state(&s, &x).0, "queued", "inside the grace it waits for its node");
+        let t = PIN_GRACE_MS + 2;
+        beat_all(&mut s, t);
+        s.tick(t);
+        assert_eq!(node_of(&s, &x).as_deref(), Some("b"), "past the grace a twin takes it");
+        assert_eq!(state(&s, &y).0, "queued", "--only waits for its node");
+        // a slot on a frees: the --only lease takes it
+        s.release(&fill[0], "released", t + 1);
+        beat_all(&mut s, t + 2);
+        s.tick(t + 2);
+        assert_eq!(node_of(&s, &y).as_deref(), Some("a"));
+    }
+
+    /// A timed lease waiting for a holds a: a build named to a goes to a twin at once, a test
+    /// named `--only a` waits; the timed lease itself waits only for a's running lease.
+    #[test]
+    fn a_timed_hold_blocks_only_leases_that_need_that_node() {
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool)), ("b", caps(16, 64.0, Role::Pool))]);
+        let mut r = req("run", Kind::Test, Some("a"));
+        r.only = true;
+        let running = s.request(r, 0);
+        s.tick(0);
+        let timed = s.request(req("bench", Kind::Timed, Some("a")), 1);
+        let build = s.request(req("lane", Kind::Build, Some("a")), 2);
+        let mut o = req("strict", Kind::Test, Some("a"));
+        o.only = true;
+        let strict = s.request(o, 3);
+        s.tick(3);
+        assert!(state(&s, &timed).1.contains("waiting for 1 leases"), "{:?}", state(&s, &timed));
+        assert_eq!(node_of(&s, &build).as_deref(), Some("b"), "a held node sends a soft pin to its twin at once");
+        assert!(state(&s, &strict).1.contains("hold for timed"), "{:?}", state(&s, &strict));
+        s.release(&running, "released", 4);
+        beat_all(&mut s, 5);
+        s.tick(5);
+        assert_eq!(node_of(&s, &timed).as_deref(), Some("a"));
+    }
+
+    /// A waiting timed lease holds an idle node (it starts now), not its lane's busy one.
+    #[test]
+    fn a_timed_lease_holds_an_idle_node_over_its_busy_sticky_one() {
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool)), ("b", caps(16, 64.0, Role::Pool))]);
+        let first = s.request(req("bench", Kind::Build, Some("a")), 0);
+        s.tick(0);
+        s.release(&first, "released", 1);
+        let mut r = req("other", Kind::Test, Some("a"));
+        r.only = true;
+        s.request(r, 2);
+        s.tick(2);
+        let timed = s.request(req("bench", Kind::Timed, None), 3);
+        s.tick(3);
+        assert_eq!(node_of(&s, &timed).as_deref(), Some("b"));
+    }
+
+    /// The least-loaded node wins by measured load (work outside leases counts); an overloaded
+    /// node takes nothing new, even the lane's warm one.
+    #[test]
+    fn least_loaded_node_wins_and_overloaded_nodes_take_nothing() {
+        let mut busy = caps(16, 64.0, Role::Pool);
+        busy.load1 = 12.0;
+        let mut s = sched(&[("a", busy), ("b", caps(16, 64.0, Role::Pool))]);
+        let x = s.request(req("x", Kind::Build, None), 0);
+        s.tick(0);
+        assert_eq!(node_of(&s, &x).as_deref(), Some("b"));
+        s.release(&x, "released", 1);
+        // x is warm on b: a little load on b keeps it there
+        let mut b = caps(16, 64.0, Role::Pool);
+        b.load1 = 4.0;
+        s.set_caps("b", b.clone(), 2);
+        let mut a = caps(16, 64.0, Role::Pool);
+        a.load1 = 0.0;
+        s.set_caps("a", a, 2);
+        let again = s.request(req("x", Kind::Build, None), 3);
+        s.tick(3);
+        assert_eq!(node_of(&s, &again).as_deref(), Some("b"), "the warm node unless it is much busier");
+        s.release(&again, "released", 4);
+        // b over the load threshold, a over the RAM threshold: nothing starts
+        b.load1 = 16.0 * BUSY_LOAD_PER_CORE + 1.0;
+        s.set_caps("b", b, 5);
+        let mut a = caps(16, 64.0, Role::Pool);
+        a.ram_avail_gb = 64.0 * BUSY_RAM_FREE - 1.0;
+        s.set_caps("a", a, 5);
+        let third = s.request(req("x", Kind::Build, None), 6);
+        s.tick(6);
+        assert_eq!(state(&s, &third).0, "queued");
+        assert!(state(&s, &third).1.contains("node busy"), "{:?}", state(&s, &third));
+        // a recovers: the waiting lease goes there (a waiting lease moves to whichever node frees)
+        s.set_caps("a", caps(16, 64.0, Role::Pool), 7);
+        beat_all(&mut s, 8);
+        s.tick(8);
+        assert_eq!(node_of(&s, &third).as_deref(), Some("a"));
+    }
+
+    /// Two Macs (mini, laptop) both meet `--needs arch=arm64,os=macos`: the laptop takes work only
+    /// under its stricter limits, so a lease goes to the busy-ish mini rather than a loaded laptop.
+    #[test]
+    fn a_laptop_takes_work_only_under_its_stricter_limits() {
+        let mac = |load: f64, battery: bool| {
+            let mut c = caps(10, 16.0, Role::Pool);
+            c.arch = "aarch64".into();
+            c.os = "macos".into();
+            c.load1 = load;
+            c.battery = battery.then_some((80, true));
+            c
+        };
+        // laptop at load 8 / 10 cores: over 0.75, a server would still take it (under 1.25)
+        let mut s = sched(&[("mbpro", mac(8.0, true)), ("mini", mac(11.0, false))]);
+        let mut r = req("landplat", Kind::Build, None);
+        r.needs = parse_needs("arch=arm64,os=macos");
+        let x = s.request(r.clone(), 0);
+        s.tick(0);
+        assert_eq!(node_of(&s, &x).as_deref(), Some("mini"));
+        s.release(&x, "released", 1);
+        // the laptop idle, the mini loaded: the laptop
+        s.set_caps("mbpro", mac(1.0, true), 2);
+        s.set_caps("mini", mac(13.0, false), 2);
+        let y = s.request(r, 3);
+        s.tick(3);
+        assert_eq!(node_of(&s, &y).as_deref(), Some("mbpro"));
+        let mut low = mac(1.0, true);
+        low.ram_avail_gb = 16.0 * LAPTOP_BUSY_RAM_FREE - 0.5;
+        assert!(overloaded(&low) && !overloaded(&mac(7.0, true)) && overloaded(&mac(8.0, true)) && !overloaded(&mac(12.0, false)));
+    }
+
+    #[test]
+    fn only_round_trips_and_needs_a_node() {
+        let mut r = req("x", Kind::Test, Some("101"));
+        r.only = true;
+        assert_eq!(Req::parse(&r.to_json()).unwrap(), r);
+        assert!(!Req::parse("{\"lane\":\"x\",\"kind\":\"test\",\"only\":1}").unwrap().only);
+        assert!(soft_pin(&req("x", Kind::Build, Some("a"))) && !soft_pin(&r) && !soft_pin(&req("x", Kind::Timed, Some("a"))) && !soft_pin(&req("x", Kind::Screen, Some("a"))));
     }
 }

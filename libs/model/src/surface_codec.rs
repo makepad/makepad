@@ -500,7 +500,7 @@ pub(crate) fn write_surface_operation(w: &mut Writer, op: &SurfaceOperation) -> 
 }
 pub(crate) fn read_surface_operation(r: &mut Reader<'_>, l: &Limits) -> Result<SurfaceOperation> {
     use SurfaceOperation::*;
-    Ok(match r.u8()? {
+    let value = match r.u8()? {
         0 => Material {
             material: r.u32()?,
             value: material_read(r, l)?,
@@ -648,7 +648,9 @@ pub(crate) fn read_surface_operation(r: &mut Reader<'_>, l: &Limits) -> Result<S
             VertexColors { object, vertices, colors }
         }
         _ => return Err(Error::Corrupt("surface operation tag")),
-    })
+    };
+    value.check(l)?;
+    Ok(value)
 }
 
 #[cfg(test)]

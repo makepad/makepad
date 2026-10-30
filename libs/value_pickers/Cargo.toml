@@ -14,5 +14,6 @@ description = "Colour picker and the panel kit of a document's editor panel"
 name = "makepad_value_pickers"
 
 [dependencies]
+makepad-edit-values = { path = "../edit_values" }
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["color"] }
 makepad-look = { path = "../look" }

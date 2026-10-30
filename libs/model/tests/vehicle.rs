@@ -2,19 +2,43 @@ use makepad_model::*;
 use makepad_render::{StaticModel,renderer::ModelInstance,asset_lights::parse_asset_lights};
 
 fn apply(doc:&mut Document,id:&str,operations:Vec<Operation>){doc.apply(Transaction{request_id:id.into(),expected:doc.head(),operations},None).unwrap();}
-fn parsed(doc:&Document,source:&str)->Vec<Operation>{parse_operations(&json::parse(source.as_bytes()).unwrap(),doc.limits()).unwrap()}
 fn vehicle()->Document {
     let mut d=Document::new(Limits::default()).unwrap();
-    let ops=parsed(&d,r#"[{"op":"cube","object":"body","size":[1.8,0.8,4]},
-        {"op":"object_node","object":"body","node":{"transform":{"translation":[4,1,-2]}}},
-        {"op":"texture_solid","material":0,"width":4,"height":4,"color":[100,40,20]},
-        {"op":"light","name":"headlight","attachment":{"object":"body"},"transform":{"translation":[0.6,0.1,2.01],"rotation":[0,1,0,0]},"kind":"spot","inner":0.1,"outer":0.4,"color":[1,0.9,0.7],"intensity":500,"range":30}]"#);
+    let ops=vec![
+        Operation::Cube { object: "body".into(), size: [1.8, 0.8, 4.0] },
+        Operation::Scene(SceneOperation::Node {
+            object: "body".into(),
+            node: SceneNode {
+                parent: None,
+                linked_to: None,
+                transform: Transform {
+                    translation: [4.0, 1.0, -2.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0, 1.0, 1.0]
+                }
+            }
+        }),
+        Operation::TextureSolid { material: 0, width: 4, height: 4, color: [100, 40, 20] },
+        Operation::Scene(SceneOperation::Light(LightEmitter {
+            name: "headlight".into(),
+            attachment: Attachment::Object("body".into()),
+            transform: Transform {
+                translation: [0.6, 0.1, 2.01],
+                rotation: [0.0, 1.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0]
+            },
+            kind: LightKind::Spot { inner: 0.1, outer: 0.4 },
+            color: [1.0, 0.9, 0.7],
+            intensity: 500.0,
+            range: 30.0
+        })),
+    ];
     apply(&mut d,"body",ops);
     for (i,connection) in VEHICLE_WHEEL_CONNECTIONS.iter().enumerate(){
         let object=format!("tire_{i}");let x=if i%2==0{0.95}else{-0.95};let z=if i<2{1.3}else{-1.3};
         // Preserve this historical source fixture's faceted cylinders even
         // when the default for newly generated primitives changes.
-        let ops=parsed(&d,&format!(r#"[{{"op":"cylinder","object":"{object}","radius":0.35,"height":0.24,"segments":12,"smooth":false}}]"#));
+        let ops=vec![Operation::cylinder(&object, 0.35, 0.24, 12, false, d.limits()).unwrap()];
         apply(&mut d,&format!("wheel_geometry_{i}"),ops);
         let vertices=d.object(&object).unwrap().vertices().iter().map(|v|v.id).collect();
         let ops=vec![Operation::Transform{object:object.clone(),vertices,matrix:[[0.,-1.,0.,0.],[1.,0.,0.,0.],[0.,0.,1.,0.],[0.,0.,0.,1.]]},
@@ -29,10 +53,11 @@ fn vehicle()->Document {
 fn textured_editable_vehicle_roundtrips_into_four_driven_wheels(){
     let doc=vehicle();let source=doc.to_bytes(None).unwrap();
     // Omitting visual-wheel metadata must preserve canonical source identity.
-    // Re-recorded when primitive generation stopped calling the platform
+    // Re-recorded for source format 3 (typed operations in the log), and earlier when
+    // primitive generation stopped calling the platform
     // libm (`primitives::turn`): the old value was the Mac's bits, and this
     // same document hashed differently on Linux.
-    assert_eq!(doc.head().content,[210,237,161,242,12,222,100,145,162,109,242,111,24,84,212,235,232,225,143,156,132,161,139,214,2,207,19,180,9,190,120,112]);
+    assert_eq!(doc.head().content,[120,224,58,224,213,44,6,215,206,215,241,115,109,141,124,234,37,44,248,172,183,132,221,88,25,76,132,129,125,167,126,103]);
     let restored=Document::from_bytes(&source,Limits::default(),None).unwrap();
     assert_eq!(restored.head(),doc.head());assert_eq!(restored.scene().wheels,doc.scene().wheels);
     let product=restored.compile(None).unwrap();assert_eq!(product.glb,doc.compile(None).unwrap().glb);
@@ -70,15 +95,74 @@ fn authored_headlight_tracks_the_car_body_and_faces_its_driving_direction(){
 fn invalid_or_incomplete_vehicle_bindings_refuse_without_mutating_source(){
     let mut doc=vehicle();let original=doc.to_bytes(None).unwrap();
     for source in [
-        r#"[{"op":"vehicle_wheel","object":"tire_0","connection":"wheel_rear_right","pivot":[0,0,0],"radius":0.35,"width":0.24}]"#,
+        vec![
+        Operation::Scene(SceneOperation::VehicleWheel {
+            object: "tire_0".into(),
+            wheel: VehicleWheel {
+                connection: "wheel_rear_right".into(),
+                pivot: [0.0, 0.0, 0.0],
+                radius: 0.35,
+                width: 0.24,
+                visual: None
+            }
+        }),
+    ],
         // Any other connection name is a generic driven part (a flap, a
         // gear leg); an unknown name in the `wheel_` family is a typo.
-        r#"[{"op":"vehicle_wheel","object":"tire_0","connection":"wheel_bogus","pivot":[0,0,0],"radius":0.35,"width":0.24}]"#,
-        r#"[{"op":"vehicle_wheel","object":"tire_0","connection":"wheel_front_left","pivot":[0,0,0],"radius":0,"width":0.24}]"#,
-        r#"[{"op":"vehicle_wheel","object":"tire_0","connection":"wheel_front_left","pivot":[0,0,0],"radius":1e-200,"width":0.24}]"#,
-        r#"[{"op":"object_node","object":"tire_0","node":{"parent":"body","transform":{"scale":[1,2,1]}}}]"#,
-    ]{let operations=parsed(&doc,source);assert!(doc.apply(Transaction{request_id:"invalid".into(),expected:doc.head(),operations},None).is_err());assert_eq!(doc.to_bytes(None).unwrap(),original);}
-    let ops=parsed(&doc,r#"[{"op":"delete_vehicle_wheel","object":"tire_3"}]"#);apply(&mut doc,"incomplete",ops);
+        vec![
+        Operation::Scene(SceneOperation::VehicleWheel {
+            object: "tire_0".into(),
+            wheel: VehicleWheel {
+                connection: "wheel_bogus".into(),
+                pivot: [0.0, 0.0, 0.0],
+                radius: 0.35,
+                width: 0.24,
+                visual: None
+            }
+        }),
+    ],
+        vec![
+        Operation::Scene(SceneOperation::VehicleWheel {
+            object: "tire_0".into(),
+            wheel: VehicleWheel {
+                connection: "wheel_front_left".into(),
+                pivot: [0.0, 0.0, 0.0],
+                radius: 0.0,
+                width: 0.24,
+                visual: None
+            }
+        }),
+    ],
+        vec![
+        Operation::Scene(SceneOperation::VehicleWheel {
+            object: "tire_0".into(),
+            wheel: VehicleWheel {
+                connection: "wheel_front_left".into(),
+                pivot: [0.0, 0.0, 0.0],
+                radius: 1e-200,
+                width: 0.24,
+                visual: None
+            }
+        }),
+    ],
+        vec![
+        Operation::Scene(SceneOperation::Node {
+            object: "tire_0".into(),
+            node: SceneNode {
+                parent: Some("body".into()),
+                linked_to: None,
+                transform: Transform {
+                    translation: [0.0, 0.0, 0.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0, 2.0, 1.0]
+                }
+            }
+        }),
+    ],
+    ]{let operations=source;assert!(doc.apply(Transaction{request_id:"invalid".into(),expected:doc.head(),operations},None).is_err());assert_eq!(doc.to_bytes(None).unwrap(),original);}
+    let ops=vec![
+        Operation::Scene(SceneOperation::DeleteVehicleWheel { object: "tire_3".into() }),
+    ];apply(&mut doc,"incomplete",ops);
     assert!(doc.compile(None).is_err());doc.undo(doc.head(),None).unwrap();assert!(doc.compile(None).is_ok());
     let mut generic=Document::new(Limits::default()).unwrap();apply(&mut generic,"ordinary",vec![Operation::Cube{object:"ordinary".into(),size:[1.;3]}]);assert!(generic.compile(None).is_ok());
 }
@@ -133,28 +217,26 @@ fn visual_wheel_limits_roundtrip_without_changing_physical_connections(){
     }).collect();
     apply(&mut doc,"restore_legacy_motion",operations);
     assert_eq!(doc.head().content,legacy_head.content);
-    assert!(!doc.scene().value().to_json().contains("visual"));
+    assert!(doc.scene().wheels.values().all(|wheel|wheel.visual.is_none()));
 }
 
 #[test]
 fn invalid_visual_wheel_limits_refuse_atomically(){
     let mut doc=vehicle();let source=doc.to_bytes(None).unwrap();
     for visual in [
-        "null", "{}",
-        r#"{"steer_gain":0.55,"steer_max":0.32,"compression":0.08}"#,
-        r#"{"steer_gain":1.01,"steer_max":0.32,"compression":0.08,"droop":0.10}"#,
-        r#"{"steer_gain":-0.01,"steer_max":0.32,"compression":0.08,"droop":0.10}"#,
-        r#"{"steer_gain":0.55,"steer_max":1.21,"compression":0.08,"droop":0.10}"#,
-        r#"{"steer_gain":0.55,"steer_max":-0.01,"compression":0.08,"droop":0.10}"#,
-        r#"{"steer_gain":0.55,"steer_max":0.32,"compression":-0.01,"droop":0.10}"#,
-        r#"{"steer_gain":0.55,"steer_max":0.32,"compression":5.01,"droop":0.10}"#,
-        r#"{"steer_gain":0.55,"steer_max":0.32,"compression":0.08,"droop":5.01}"#,
-        r#"{"steer_gain":0.55,"steer_max":0.32,"compression":0.08,"droop":0.10,"typo":1}"#,
-    ]{
-        let request=format!(r#"[{{"op":"vehicle_wheel","object":"tire_0","connection":"wheel_front_left","pivot":[0,0,0],"radius":0.35,"width":0.24,"visual":{visual}}}]"#);
-        let result=parse_operations(&json::parse(request.as_bytes()).unwrap(),doc.limits())
-            .and_then(|operations|doc.apply(Transaction{request_id:"invalid_visual".into(),expected:doc.head(),operations},None).map(|_|()));
-        assert!(result.is_err(),"accepted {visual}");
+        VisualWheelMotion { steer_gain: 1.01, steer_max: 0.32, compression: 0.08, droop: 0.1 },
+        VisualWheelMotion { steer_gain: -0.01, steer_max: 0.32, compression: 0.08, droop: 0.1 },
+        VisualWheelMotion { steer_gain: 0.55, steer_max: 1.21, compression: 0.08, droop: 0.1 },
+        VisualWheelMotion { steer_gain: 0.55, steer_max: -0.01, compression: 0.08, droop: 0.1 },
+        VisualWheelMotion { steer_gain: 0.55, steer_max: 0.32, compression: -0.01, droop: 0.1 },
+        VisualWheelMotion { steer_gain: 0.55, steer_max: 0.32, compression: 5.01, droop: 0.1 },
+        VisualWheelMotion { steer_gain: 0.55, steer_max: 0.32, compression: 0.08, droop: 5.01 },
+    ] {
+        let mut wheel=doc.scene().wheels["tire_0"].clone();
+        wheel.visual=Some(visual);
+        let result=doc.apply(Transaction{request_id:"invalid_visual".into(),expected:doc.head(),
+            operations:vec![Operation::Scene(SceneOperation::VehicleWheel{object:"tire_0".into(),wheel})]},None);
+        assert!(result.is_err(),"accepted {visual:?}");
         assert_eq!(doc.to_bytes(None).unwrap(),source);
     }
 }

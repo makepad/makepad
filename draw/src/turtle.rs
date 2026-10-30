@@ -1090,6 +1090,67 @@ mod tests {
     }
 
     #[test]
+    fn unused_bound_reads_what_is_left_of_a_fit_parents_max() {
+        with_turtle(dvec2(300.0, 300.0), Layout::flow_down(), |cx| {
+            let fit_max = |max| Size::Fit { min: None, max: Some(max) };
+            cx.begin_turtle(Walk { height: fit_max(FitBound::Abs(100.0)), ..Walk::fill() }, Layout::flow_down());
+            cx.walk_turtle(Walk::fixed(10.0, 30.0));
+            cx.begin_turtle(
+                Walk { height: fit_max(FitBound::Rel { base: Base::Unused, factor: 1.0 }), ..Walk::fill() },
+                Layout::flow_down(),
+            );
+            assert_eq!(cx.current_turtle_max_height(), Some(70.0));
+            cx.walk_turtle(Walk::fixed(10.0, 500.0));
+            assert_eq!(cx.end_turtle().size.y, 70.0);
+            assert_eq!(cx.end_turtle().size.y, 100.0);
+        });
+    }
+
+    #[test]
+    fn the_visible_range_intersects_the_clips_up_to_the_first_sized_turtle() {
+        with_turtle(dvec2(300.0, 600.0), Layout::flow_down(), |cx| {
+            // A page 200 tall scrolled 50 down, holding a view 120 down it that grows to at most 100.
+            cx.begin_turtle(
+                Walk { height: Size::Fixed(200.0), ..Walk::fill() },
+                Layout::flow_down().with_scroll(dvec2(0.0, 50.0)),
+            );
+            cx.walk_turtle(Walk::fixed(10.0, 120.0));
+            cx.begin_turtle(
+                Walk { height: Size::Fit { min: None, max: Some(FitBound::Abs(100.0)) }, ..Walk::fill() },
+                Layout::flow_down(),
+            );
+            cx.begin_turtle(Walk { height: Size::fit(), ..Walk::fill() }, Layout::flow_down());
+            assert_eq!(cx.turtle_visible_y_range(), (70.0, 170.0));
+        });
+    }
+
+    #[test]
+    fn the_visible_range_stops_at_turtles_that_can_still_move_what_they_hold() {
+        with_turtle(dvec2(300.0, 300.0), Layout::flow_down(), |cx| {
+            // A clipped view 100 tall, like a list's viewport.
+            cx.begin_turtle(Walk::fixed(300.0, 100.0), Layout::flow_down());
+            assert_eq!(cx.turtle_visible_y_range(), (0.0, 100.0));
+
+            // An item placed on its own, which its list can still move after drawing it.
+            cx.begin_turtle(Walk { abs_pos: Some(dvec2(0.0, 0.0)), ..Walk::fit() }, Layout::flow_down());
+            assert_eq!(cx.turtle_visible_y_range(), (0.0, f64::INFINITY));
+            cx.end_turtle();
+
+            // A growing row that centers what it holds once it knows its height.
+            cx.begin_turtle(Walk::fit(), Layout::flow_right().with_align_y(0.5));
+            cx.begin_turtle(Walk::fit(), Layout::flow_down());
+            assert_eq!(cx.turtle_visible_y_range(), (0.0, f64::INFINITY));
+        });
+        with_turtle(dvec2(300.0, 300.0), Layout::flow_down(), |cx| {
+            cx.begin_turtle(Walk::fixed(300.0, 100.0), Layout::flow_down());
+            // A growing column that centers what it holds once it knows its height.
+            cx.begin_turtle(Walk::fit(), Layout::flow_down().with_align_y(0.5));
+            cx.begin_turtle(Walk::fit(), Layout::flow_down());
+            assert_eq!(cx.turtle_visible_y_range(), (0.0, f64::INFINITY));
+        });
+    }
+
+    #[test]
     fn current_turtle_bounds_combine_legacy_and_walk_limits() {
         with_turtle(dvec2(300.0, 300.0), Layout::default(), |cx| {
             cx.begin_turtle(
@@ -2592,6 +2653,8 @@ pub enum Base {
     Cqh,
     #[live(LiveId(0))]
     Named(LiveId),
+    /// What the parent hasn't used yet of its size, or of its max while it's still growing.
+    /// This doesn't take off the parent's bottom padding, or the spacing before the next walk.
     Unused,
     /// The width available on the enclosing line for inline content,
     /// accounting for the enclosing widget's own leading geometry and
@@ -4181,6 +4244,41 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             .max
     }
 
+    /// The top and bottom (absolute y) of what the clips around the current turtle can show.
+    /// A turtle that's still growing clips at its max, or not at all if it has none.
+    pub fn turtle_visible_y_range(&self) -> (f64, f64) {
+        let (mut top, mut bottom) = (f64::NEG_INFINITY, f64::INFINITY);
+        for (index, turtle) in self.turtles.iter().enumerate().rev() {
+            // A growing turtle that lines its children up on y when it ends can still move us,
+            // so neither its clip nor the ones around it say what's visible yet.
+            let can_move_children_y = match turtle.flow() {
+                Flow::Down => turtle.align().y != 0.0 || turtle.layout.distribute != Distribute::Start,
+                Flow::Overlay => turtle.align().y != 0.0,
+                Flow::Right { row_align, wrap } => wrap || row_align != RowAlign::Top || turtle.align().y != 0.0,
+            };
+            if turtle.height().is_nan() && can_move_children_y {
+                break;
+            }
+            if let AlignEntry::BeginClip(clip_min, clip_max) = &self.align_list[turtle.align_start] {
+                if !clip_min.y.is_nan() {
+                    top = top.max(clip_min.y);
+                    let max = self.content_bounds_for_turtle(&turtle.walk, Axis::Height, index).max;
+                    bottom = bottom.min(match max {
+                        _ if clip_max.y.is_finite() => clip_max.y,
+                        Some(max) => clip_min.y + max,
+                        None => f64::INFINITY,
+                    });
+                }
+            }
+            // A turtle whose height is known already bounds everything inside it, and one placed on
+            // its own (like a list item) can be moved after it's drawn, so the clips around it don't count.
+            if turtle.height().is_finite() || turtle.walk.abs_pos.is_some() {
+                break;
+            }
+        }
+        (top, bottom)
+    }
+
     fn content_bounds_for_turtle(
         &self,
         walk: &Walk,
@@ -4288,6 +4386,16 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                     };
                     if value.is_finite() {
                         return Some(value);
+                    }
+                    // A Fit turtle can still grow up to its max, so what's left of that max is unused.
+                    if base == Base::Unused {
+                        if let Some(max) = self.content_bounds_for_turtle(&turtle.walk, axis, index).max {
+                            let used = match axis {
+                                Axis::Width => turtle.used_width(),
+                                Axis::Height => turtle.used_height(),
+                            };
+                            return Some((max - used).max(0.0));
+                        }
                     }
                     let Some(next) = index.checked_sub(1) else {
                         return None;
@@ -4765,20 +4873,14 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                                 .total_resolved_delta_to(walk.deferred_before_count),
                         )
                     };
-                    let rank = distribution_rank(
-                        &self.finished_walks[turtle_walks_start..walks_end],
-                        flow_index,
-                    );
-                    let distributed = if in_flow {
-                        group.map_or(0.0, |group| group.offset(distribute, rank))
-                    } else {
-                        0.0
-                    };
                     let main = delta
                         + if use_start {
                             start_dx
-                        } else if role == RowAlignRole::Shiftable {
-                            distributed
+                        } else if in_flow && role == RowAlignRole::Shiftable {
+                            group.map_or(0.0, |group| {
+                                let walks = &self.finished_walks[turtle_walks_start..walks_end];
+                                group.offset(distribute, distribution_rank(walks, flow_index))
+                            })
                         } else {
                             0.0
                         };
@@ -4830,14 +4932,13 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                                 walk.align_role,
                             )
                         };
-                        let rank = distribution_rank(
-                            &self.finished_walks[row_start..row_end],
-                            flow_index,
-                        );
                         let dx = if use_start {
                             start_dx
                         } else if in_flow && role == RowAlignRole::Shiftable {
-                            group.map_or(0.0, |group| group.offset(distribute, rank))
+                            group.map_or(0.0, |group| {
+                                let walks = &self.finished_walks[row_start..row_end];
+                                group.offset(distribute, distribution_rank(walks, flow_index))
+                            })
                         } else {
                             0.0
                         };
@@ -4892,20 +4993,14 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                                 .total_resolved_delta_to(walk.deferred_before_count),
                         )
                     };
-                    let rank = distribution_rank(
-                        &self.finished_walks[turtle_walks_start..walks_end],
-                        flow_index,
-                    );
-                    let distributed = if in_flow {
-                        group.map_or(0.0, |group| group.offset(distribute, rank))
-                    } else {
-                        0.0
-                    };
                     let main = delta
                         + if use_start {
                             start_dy
-                        } else if role == RowAlignRole::Shiftable {
-                            distributed
+                        } else if in_flow && role == RowAlignRole::Shiftable {
+                            group.map_or(0.0, |group| {
+                                let walks = &self.finished_walks[turtle_walks_start..walks_end];
+                                group.offset(distribute, distribution_rank(walks, flow_index))
+                            })
                         } else {
                             0.0
                         };
@@ -5096,6 +5191,12 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             *clip_min = rect.pos;
             *clip_max = rect.pos + rect.size;
         }
+    }
+
+    /// Removes a clip rect from [`Self::push_clip_rect_tracked`] instead of popping it, so it clips nothing.
+    pub fn remove_clip_rect_at(&mut self, index: usize) {
+        debug_assert!(matches!(self.align_list[index], AlignEntry::BeginClip(..)));
+        self.align_list[index] = AlignEntry::Unset;
     }
 
     // Returns the end of the align list of the finished walk with the given index.

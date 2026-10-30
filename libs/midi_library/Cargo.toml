@@ -17,6 +17,7 @@ name = "midi-text"
 path = "src/bin/midi_text.rs"
 
 [dependencies]
+makepad-edit-values = { path = "../edit_values" }
 # The one loudness meter.
 makepad-audio-dsp = { path = "../audio_dsp" }
 makepad-midi-file = { path = "../midi_file" }

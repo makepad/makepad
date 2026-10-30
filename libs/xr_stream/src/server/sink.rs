@@ -290,6 +290,9 @@ pub struct XrPack {
     server: Option<XrServer>,
     #[rust]
     counts: Counts,
+    /// When the host load's current sample began (None: not measuring).
+    #[rust]
+    load_at: Option<Instant>,
     /// `MAKEPAD_XR_REMOTE_TEST=1` (read once): the stereo test pattern over every picture.
     #[rust]
     test: bool,
@@ -336,7 +339,8 @@ impl XrPack {
             source.eye = eye;
         }
         self.counts.desktop_now = cx.cx.window_paints();
-        self.counts.window();
+        self.host_load(cx.cx, &shared);
+        self.counts.window(&shared);
         // the stream's AA and render scale: the XR pass renders multisampled, at the supersample
         // times the render scale of the encoded eye size (from this frame on)
         let server = self.server.clone().unwrap();
@@ -578,6 +582,10 @@ impl XrPack {
     fn wake(&mut self, cx: &mut Cx) {
         // a headset linked or gone: the desktop's mirrors show it (or that none streams)
         let live = self.shared().frames_flowing();
+        if !live && self.load_at.take().is_some() {
+            cx.set_pass_load_enabled(false);
+            self.shared().host_load.lock().unwrap().clear();
+        }
         let source = cx.global::<crate::mirror::XrMirrorSource>();
         if source.live != live {
             source.live = live;
@@ -596,6 +604,37 @@ impl XrPack {
             makepad_widgets::makepad_platform::makepad_hal::xr_remote::hal_xr_remote_drawn();
         } else if self.owed {
             self.counts.waited += 1;
+        }
+    }
+
+    /// The app's load by what its passes draw for (`Cx::take_pass_load`), a sample a second
+    /// to the server while a headset's frames flow (measured only then).
+    fn host_load(&mut self, cx: &mut Cx, shared: &ServerShared) {
+        let flowing = shared.frames_flowing();
+        cx.set_pass_load_enabled(flowing);
+        if !flowing {
+            if self.load_at.take().is_some() {
+                shared.host_load.lock().unwrap().clear();
+            }
+            return;
+        }
+        let now = Instant::now();
+        match self.load_at {
+            None => {
+                // the first sample starts here
+                cx.take_pass_load();
+                self.load_at = Some(now);
+            }
+            Some(at) if now - at >= std::time::Duration::from_secs(1) => {
+                let sample = cx.take_pass_load();
+                self.load_at = Some(now);
+                let mut q = shared.host_load.lock().unwrap();
+                if q.len() >= super::HOST_LOAD_SECONDS {
+                    q.pop_front();
+                }
+                q.push_back(sample);
+            }
+            Some(_) => {}
         }
     }
 
@@ -688,7 +727,7 @@ struct Counts {
 }
 
 impl Counts {
-    fn window(&mut self) {
+    fn window(&mut self, shared: &ServerShared) {
         let at = *self.at.get_or_insert_with(Instant::now);
         let secs = at.elapsed().as_secs_f64();
         if secs < 5.0 {
@@ -697,7 +736,13 @@ impl Counts {
         let r = |n: u32| n as f64 / secs;
         let skipped: Vec<String> = self.skipped.iter().map(|(why, n)| format!("{n} {why}")).collect();
         let painted = self.desktop_now - self.desktop_at.min(self.desktop_now);
-        log!("xr serve: draws {:.0}/s · new XR frames {:.0}/s · packed {:.0}/s · handed {:.0}/s · poses asked {:.0}/s · waited for room {} · not streamed (empty) {} · desktop painted {:.1}/s", r(self.draws), r(self.frames), r(self.packed), r(self.handed), r(self.asked), self.waited, if skipped.is_empty() { "0".to_string() } else { skipped.join(", ") }, painted as f64 / secs);
+        // the host's frame by what its passes draw for, per frame packed (the last seconds)
+        let per = r(self.packed).max(1.0);
+        let load = match super::HostLoad::of(shared.host_load.lock().unwrap().iter()) {
+            Some(l) => format!(" · per frame: draw {:.1} ms, GPU eyes {:.1} desktop {:.1} other {:.1} ms{}", l.draw_ms_s / per, l.eyes_gpu_ms_s / per, l.desktop_gpu_ms_s / per, l.other_gpu_ms_s / per, if l.timed { "" } else { " (untimed)" }),
+            None => String::new(),
+        };
+        log!("xr serve: draws {:.0}/s · new XR frames {:.0}/s · packed {:.0}/s · handed {:.0}/s · poses asked {:.0}/s · waited for room {} · not streamed (empty) {} · desktop painted {:.1}/s{load}", r(self.draws), r(self.frames), r(self.packed), r(self.handed), r(self.asked), self.waited, if skipped.is_empty() { "0".to_string() } else { skipped.join(", ") }, painted as f64 / secs);
         // the app's audio (what the headset hears) stops for good when its callback panics
         {
             use makepad_widgets::makepad_platform::audio_output_fence as fence;

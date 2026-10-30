@@ -18,7 +18,7 @@
 //! - [`host`]: what the desk gives them (types, live sound, choices).
 //! - [`spec`]: each field's range, taper and unit; [`dsp`]: the curves.
 
-pub mod choices;
+pub mod browser;
 pub mod displays;
 pub mod dsp;
 pub mod generators;
@@ -41,6 +41,7 @@ pub const CATALOGUE: &str = include_str!("catalogue.md");
 /// Register the widgets (the screen shader first).
 pub fn script_mod(vm: &mut makepad_widgets::ScriptVm) {
     shaders::script_mod(vm);
+    browser::script_mod(vm);
     displays::script_mod(vm);
     keys::script_mod(vm);
     morph::script_mod(vm);

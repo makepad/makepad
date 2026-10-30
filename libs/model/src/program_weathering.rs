@@ -4,7 +4,7 @@
 //! what makes hard-surface shapes read at game distance. One colour
 //! operation per object.
 use makepad_csg_math::portable::PortableFloat;
-use crate::{json::{self, Value}, transform::*, Document};
+use crate::{transform::*, Document, Operation, SurfaceOperation};
 use std::collections::BTreeMap;
 
 struct Bvh { tris: Vec<[[f64; 3]; 3]>, nodes: Vec<([f64; 3], [f64; 3], usize, usize, Option<(usize, usize)>)>, order: Vec<usize> }
@@ -62,7 +62,7 @@ impl Bvh {
 }
 
 /// Vertex-paint operations for every (listed) object of `doc`.
-pub(crate) fn weathering_ops(doc: &Document, objects: Option<&[String]>, ao: f64, distance: f64, edges: f64, samples: usize) -> Vec<Value> {
+pub(crate) fn weathering_ops(doc: &Document, objects: Option<&[String]>, ao: f64, distance: f64, edges: f64, samples: usize) -> Vec<Operation> {
     let mut tris = Vec::new();
     let mut per_object: Vec<(String, Vec<(crate::mesh::VertexId, [f64; 3])>, BTreeMap<crate::mesh::VertexId, Vec<crate::mesh::VertexId>>, BTreeMap<crate::mesh::VertexId, [f64; 3]>)> = Vec::new();
     for (name, mesh) in doc.objects() {
@@ -111,13 +111,13 @@ pub(crate) fn weathering_ops(doc: &Document, objects: Option<&[String]>, ao: f64
             let wear = (convex * 4.).clamp(0., 1.);
             let value = ((1. - ao * occlusion.ppowf(1.3)) * (1. - edges * 0.14 * (1. - wear))).clamp(0.15, 1.);
             if value >= 0.995 { continue; }
-            ids.push(json::s(id.0.to_string()));
+            ids.push(*id);
             // Multiply any authored vertex tint (faces, lips, iris shading).
             let base = doc.surface().vertex_colors.get(&(name.clone(), *id)).copied().unwrap_or([1.; 4]);
-            colors.push(Value::Arr(vec![Value::F64(base[0] * value), Value::F64(base[1] * value), Value::F64(base[2] * value), Value::F64(base[3])]));
+            colors.push([base[0] * value, base[1] * value, base[2] * value, base[3]]);
         }
         if !ids.is_empty() {
-            ops.push(json::obj(vec![("op", json::s("surface_vertex_colors")), ("object", json::s(&name)), ("vertices", Value::Arr(ids)), ("colors", Value::Arr(colors))]));
+            ops.push(Operation::Surface(SurfaceOperation::VertexColors { object: name, vertices: ids, colors }));
         }
     }
     ops

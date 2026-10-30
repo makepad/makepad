@@ -6,9 +6,10 @@
 //! own `let editor_panel = fn() { … }` among them). A score writes no
 //! colours and no keyed values: those parts of the trait say so.
 
-use makepad_edit_values::{Splice, Value, ValueKind, ValueSite, ValueSource};
+use makepad_edit_values::{Value, ValueKind, ValueSite, ValueSource};
 use makepad_editor_panel::{self as panel, File, PanelDoc};
 use makepad_score_live::source::{self, Outline, Tok};
+use makepad_synth_panel::values::ScoreValues;
 use std::any::Any;
 use std::ops::Range;
 
@@ -73,140 +74,6 @@ fn own<'a>(files: &[File<'a>]) -> Option<(usize, &'a str, &'a ScoreCode)> {
     files.iter().enumerate().find(|(_, f)| f.name.is_empty()).or_else(|| files.iter().enumerate().next()).map(|(i, f)| (i, f.text, code_of(f.code)))
 }
 
-/// What a value is, as written.
-fn kind_of(text: &str) -> ValueKind {
-    let t = text.trim();
-    let toks = source::lex(t);
-    let single = toks.len() == 1 || (toks.len() == 2 && &t[toks[0].start..toks[0].end] == "-" && toks[1].kind == Tok::Num);
-    let last = toks.last();
-    match (single, last.map(|l| l.kind)) {
-        _ if t == "true" || t == "false" => ValueKind::Bool,
-        _ if t.starts_with('#') => ValueKind::Colour,
-        _ if t.starts_with('[') => ValueKind::List,
-        _ if t.starts_with('{') || (toks.len() >= 2 && toks[0].kind == Tok::Ident && &t[toks[1].start..toks[1].end] == "{") && t.ends_with('}') => ValueKind::Record,
-        (true, Some(Tok::Num)) => {
-            let unit = t.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-');
-            match unit {
-                "" => ValueKind::Number,
-                "s" | "ms" => ValueKind::Time,
-                "deg" | "rad" => ValueKind::Angle,
-                "px" => ValueKind::Length,
-                _ => ValueKind::Code,
-            }
-        }
-        (true, Some(Tok::Id)) => ValueKind::Choice,
-        (true, Some(Tok::Str)) => ValueKind::Text,
-        (true, Some(Tok::Ident)) => ValueKind::Function,
-        _ => ValueKind::Code,
-    }
-}
-
-/// The fields of a record value (`{a: 1 b: @x}` or `Type{…}`) at `range`:
-/// (key, value range).
-fn record_fields(text: &str, range: Range<usize>) -> Vec<(String, Range<usize>)> {
-    let body = &text[range.clone()];
-    let toks = source::lex(body);
-    let Some(open) = toks.iter().position(|t| &body[t.start..t.end] == "{") else { return Vec::new() };
-    let mut out = Vec::new();
-    let mut depth = 0i32;
-    let mut i = open;
-    while i < toks.len() {
-        let t = toks[i];
-        let word = &body[t.start..t.end];
-        match word {
-            "{" | "(" | "[" => depth += 1,
-            "}" | ")" | "]" => depth -= 1,
-            _ => {}
-        }
-        if depth == 1 && t.kind == Tok::Ident && toks.get(i + 1).is_some_and(|c| &body[c.start..c.end] == ":") {
-            // The value: up to the next field at this depth, or the close.
-            let first = i + 2;
-            let mut j = first;
-            let mut d = 0i32;
-            while j < toks.len() {
-                let w = &body[toks[j].start..toks[j].end];
-                match w {
-                    "{" | "(" | "[" => d += 1,
-                    "}" | ")" | "]" => {
-                        if d == 0 {
-                            break;
-                        }
-                        d -= 1;
-                    }
-                    _ => {}
-                }
-                if d == 0 && j > first && toks[j].kind == Tok::Ident && toks.get(j + 1).is_some_and(|c| &body[c.start..c.end] == ":") {
-                    break;
-                }
-                j += 1;
-            }
-            if let (Some(a), Some(b)) = (toks.get(first), toks[..j].iter().rev().find(|t| t.kind != Tok::Comment)) {
-                if b.end > a.start {
-                    out.push((word.to_string(), range.start + a.start..range.start + b.end));
-                }
-            }
-            i = j;
-            continue;
-        }
-        i += 1;
-    }
-    out
-}
-
-/// The node a path's first name is (`""` and `Score`: the final `Score{}`).
-fn node_of<'a>(code: &'a ScoreCode, name: &str) -> Option<&'a source::Ctor> {
-    if name.is_empty() || name == "Score" {
-        code.outline.root.as_ref()
-    } else {
-        code.outline.node(name)
-    }
-}
-
-/// Every bindable path of a score: (path, value range).
-fn paths(text: &str, code: &ScoreCode) -> Vec<(String, Range<usize>)> {
-    let mut out = Vec::new();
-    for ctor in code.outline.nodes.iter() {
-        for field in ctor.fields.iter().filter(|f| !f.bare) {
-            let path = format!("{}.{}", ctor.name, field.key);
-            let range = field.value.start..field.value.end;
-            if kind_of(&text[range.clone()]) == ValueKind::Record {
-                for (key, sub) in record_fields(text, range.clone()) {
-                    out.push((format!("{path}.{key}"), sub));
-                }
-            }
-            out.push((path, range));
-        }
-    }
-    out
-}
-
-/// The place `path` names, without nearest names.
-fn site_exact(files: &[File], path: &str) -> Result<ValueSite, String> {
-    let (file, text, code) = own(files).ok_or("no score")?;
-    let mut parts = path.split('.');
-    let node_name = parts.next().unwrap_or("");
-    let ctor = node_of(code, node_name).ok_or_else(|| format!("no node `{node_name}`"))?;
-    let field_name = parts.next().ok_or_else(|| format!("`{path}` names a node, not a value: `{node_name}.<field>`"))?;
-    let field = ctor.field(field_name).ok_or_else(|| format!("`{node_name}` writes no `{field_name}`"))?;
-    let mut range = field.value.start..field.value.end;
-    for key in parts {
-        range = record_fields(text, range).into_iter().find(|(k, _)| k == key).map(|(_, r)| r).ok_or_else(|| format!("no `{key}` in `{path}`"))?;
-    }
-    let value = text[range.clone()].to_string();
-    Ok(site_of(path, file, range, value))
-}
-
-/// A path's site: its kind and value read from the literal.
-fn site_of(path: &str, file: usize, range: Range<usize>, text: String) -> ValueSite {
-    let kind = kind_of(&text);
-    let value = match kind {
-        k if k.is_numeric() => text.trim().trim_end_matches(|c: char| c.is_ascii_alphabetic()).parse::<f64>().map_or_else(|_| Value::Code(text.clone()), Value::Num),
-        ValueKind::Bool => Value::Bool(text.trim() == "true"),
-        _ => Value::Code(text.clone()),
-    };
-    ValueSite { id: path.to_string(), kind, span: Some((file, range)), text, value, ..Default::default() }
-}
-
 /// A number as written, keeping the unit of the literal it replaces.
 fn number_like(site: &ValueSite, n: f64) -> String {
     let unit = site.text.trim().trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-');
@@ -215,46 +82,6 @@ fn number_like(site: &ValueSite, n: f64) -> String {
 
 /// The score document kind: install it with `makepad_editor_panel::register`.
 pub struct ScoreDocKind;
-
-/// A score's values over the files given (the score itself among them).
-pub struct ScoreDocValues<'a> {
-    files: &'a [File<'a>],
-}
-
-impl ValueSource for ScoreDocValues<'_> {
-    fn sites(&self) -> Vec<ValueSite> {
-        let Some((file, text, code)) = own(self.files) else { return Vec::new() };
-        paths(text, code).into_iter().map(|(path, range)| site_of(&path, file, range.clone(), text[range].to_string())).collect()
-    }
-
-    fn resolve(&self, id: &str) -> Result<ValueSite, String> {
-        site_exact(self.files, id)
-    }
-
-    /// The value written in the form of the literal there, checked to read back.
-    fn write(&self, id: &str, value: &Value) -> Result<Vec<Splice>, String> {
-        let site = site_exact(self.files, id)?;
-        let literal = ScoreDocKind.form(&site, value)?;
-        let (file, text, _) = own(self.files).ok_or("no score")?;
-        let range = site.range();
-        // Read back: the score with it written names the same value there.
-        let next = format!("{}{}{}", &text[..range.start], literal, &text[range.end..]);
-        let code = ScoreCode::of(&next);
-        let back = site_exact(&[File { name: "", text: &next, code: &code }], id)?;
-        if back.text.trim() != literal.trim() {
-            return Err(format!("`{id}` does not read back as {literal} (it reads {})", back.text));
-        }
-        Ok(vec![Splice { file, range, text: literal }])
-    }
-
-    /// The paths of the node a path names (else the nodes).
-    fn nearest(&self, id: &str) -> Vec<String> {
-        let Some((_, text, code)) = own(self.files) else { return Vec::new() };
-        let node = id.split('.').next().unwrap_or("");
-        let near: Vec<String> = paths(text, code).into_iter().map(|(p, _)| p).filter(|p| p.split('.').next() == Some(node)).take(12).collect();
-        if near.is_empty() { code.outline.nodes.iter().map(|c| c.name.clone()).collect() } else { near }
-    }
-}
 
 impl PanelDoc for ScoreDocKind {
     fn outline(&self, text: &str) -> Box<dyn Any> {
@@ -276,29 +103,15 @@ impl PanelDoc for ScoreDocKind {
 
     /// A name slot (`bass.play`): the other nodes of the same type.
     fn fns_like(&self, files: &[File], path: &str) -> Vec<String> {
-        let Ok(site) = site_exact(files, path) else { return Vec::new() };
-        let Some((_, _, code)) = own(files) else { return Vec::new() };
+        let Some((file, text, code)) = own(files) else { return Vec::new() };
+        let Ok(site) = ScoreValues::in_file(text, file).resolve(path) else { return Vec::new() };
         let Some(ty) = code.outline.node(site.text.trim()).map(|c| c.type_name.clone()) else { return Vec::new() };
         code.outline.nodes.iter().filter(|c| c.type_name == ty).map(|c| c.name.clone()).collect()
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     fn values<'a>(&'a self, files: &'a [File<'a>]) -> Box<dyn ValueSource + 'a> {
-        Box::new(ScoreDocValues { files })
+        let (file, text) = own(files).map_or((0, ""), |(file, text, _)| (file, text));
+        Box::new(ScoreValues::in_file(text, file))
     }
 
     fn literal_token(&self, text: &str, range: &Range<usize>) -> Option<Range<usize>> {
@@ -336,8 +149,7 @@ pub fn score_doc() -> std::rc::Rc<dyn PanelDoc> {
 
 /// Every path of a score a panel can bind (as the panel kit lists them).
 pub fn resolve(source: &str, path: &str) -> Result<ValueSite, String> {
-    let code = ScoreCode::of(source);
-    site_exact(&[File { name: "", text: source, code: &code }], path)
+    ScoreValues::new(source).resolve(path)
 }
 
 #[cfg(test)]
@@ -357,11 +169,16 @@ mod tests {
         let doc = ScoreDocKind;
         let values = doc.values(&f);
         let cutoff = values.resolve("lead.cutoff").unwrap();
-        assert_eq!((cutoff.text.as_str(), cutoff.kind, cutoff.value.clone()), ("1200", ValueKind::Number, Value::Num(1200.0)));
+        assert_eq!((cutoff.text.as_str(), cutoff.kind, cutoff.value.clone()), ("1200", ValueKind::Frequency, Value::Num(1200.0)));
         assert_eq!(values.resolve("lead.preset").unwrap().kind, ValueKind::Choice);
+        assert_eq!(values.resolve("lead.preset").unwrap().value, Value::Code("@pluck".into()));
+        assert_eq!(values.resolve("lead.env").unwrap().kind, ValueKind::Record);
+        assert_eq!(values.resolve("lead.env.release").unwrap().kind, ValueKind::Number);
         assert_eq!(values.resolve("lead.env.release").unwrap().text, "0.4");
         assert_eq!(values.resolve("a.play").unwrap().kind, ValueKind::Function);
-        assert!(values.resolve("lead.res").is_err());
+        assert_eq!(values.resolve("a.code").unwrap().kind, ValueKind::Code);
+        assert!(values.resolve("lead.res").unwrap().span.is_none());
+        assert!(values.resolve("lead.missing").is_err());
         assert!(values.nearest("lead.res").contains(&"lead.cutoff".to_string()));
         assert_eq!(doc.fns_like(&f, "a.play"), vec!["lead".to_string()]);
         let listed: Vec<String> = values.sites().into_iter().map(|e| e.id).collect();
@@ -371,10 +188,11 @@ mod tests {
     #[test]
     fn writes_keep_the_form_and_read_back() {
         let code = ScoreCode::of(SCORE);
-        let f = files(SCORE, &code);
+        let f = [File { name: "shared", text: SCORE, code: &code }, File { name: "", text: SCORE, code: &code }];
         let doc = ScoreDocKind;
         let values = doc.values(&f);
         let w = values.write("lead.cutoff", &Value::Num(800.0)).unwrap();
+        assert_eq!(w[0].file, 1);
         assert_eq!(w[0].text, "800");
         assert_eq!(&SCORE[w[0].range.clone()], "1200");
         assert_eq!(values.write("lead.preset", &Value::Text("saw".into())).unwrap()[0].text, "@saw");

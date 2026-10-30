@@ -21,6 +21,10 @@ pub enum AndroidVariant {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AndroidConfig;
 
+/// makepad draws everything itself, so it takes every config change in place instead of
+/// letting Android recreate the activity. `grammaticalGender` would need compile SDK 34.
+const ACTIVITY_CONFIG_CHANGES: &str = "orientation|screenSize|smallestScreenSize|screenLayout|density|keyboard|keyboardHidden|navigation|touchscreen|uiMode|colorMode|locale|layoutDirection|fontScale|fontWeightAdjustment|mcc|mnc";
+
 /// All values needed to render an `AndroidManifest.xml`. Constructed by
 /// `compile::resolve_manifest_args` from CLI flags + Cargo.toml metadata +
 /// build-time decisions (e.g. `debuggable=false` for AAB builds).
@@ -137,7 +141,7 @@ impl AndroidVariant {
                     <meta-data android:name="android.max_aspect" android:value="3.0" />{vr_meta}
                     <activity
                     android:name=".{class_name}"
-                    android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+                    android:configChanges="{ACTIVITY_CONFIG_CHANGES}"
                     android:exported="true"
                     android:launchMode="singleTask"
                     android:windowSoftInputMode="adjustNothing|stateUnchanged"
@@ -223,7 +227,10 @@ impl AndroidTarget {
         }
         return Ok(out);
     }
-    fn _sys_dir(&self) -> &'static str {
+    /// The triple the NDK sysroot uses for this ABI's library directory
+    /// (`sysroot/usr/lib/<sys_dir>`). It differs from [`Self::clang`] on armv7,
+    /// whose clang wrappers are `armv7a-linux-androideabi<api>-clang`.
+    fn sys_dir(&self) -> &'static str {
         match self {
             Self::aarch64 => "aarch64-linux-android",
             Self::x86_64 => "x86_64-linux-android",
@@ -872,7 +879,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AndroidVariant, ManifestArgs};
+    use super::{AndroidTarget, AndroidVariant, ManifestArgs};
 
     fn test_args<'a>(label: &'a str, url: &'a str) -> ManifestArgs<'a> {
         ManifestArgs {
@@ -895,6 +902,25 @@ mod tests {
         assert!(xml.contains("android:theme=\"@style/MakepadAppTheme\""));
         assert!(xml.contains("android:theme=\"@style/MakepadLaunchTheme\""));
         assert!(xml.contains("android:launchMode=\"singleTask\""));
+    }
+
+    #[test]
+    fn activities_take_fold_and_split_screen_changes_in_place() {
+        for variant in [AndroidVariant::Default, AndroidVariant::Quest] {
+            let xml = variant.manifest_xml(&test_args("App", "dev.makepad.app"));
+            let declarations: Vec<&str> = xml
+                .split("android:configChanges=\"")
+                .skip(1)
+                .map(|rest| rest.split('"').next().unwrap())
+                .collect();
+            assert!(!declarations.is_empty(), "no configChanges in: {xml}");
+            for declared in declarations {
+                let declared: Vec<&str> = declared.split('|').collect();
+                for change in ["orientation", "screenSize", "smallestScreenSize", "screenLayout", "density"] {
+                    assert!(declared.contains(&change), "{change} missing from {declared:?}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -945,5 +971,22 @@ mod tests {
             xml.contains("tools:targetApi=\"35\""),
             "tools:targetApi should match targetSdkVersion: {xml}"
         );
+    }
+
+    #[test]
+    fn armv7_ndk_sysroot_dir_is_not_the_clang_prefix() {
+        assert_eq!(AndroidTarget::armv7.clang(), "armv7a-linux-androideabi");
+        assert_eq!(AndroidTarget::armv7.sys_dir(), "arm-linux-androideabi");
+        for target in [AndroidTarget::aarch64, AndroidTarget::x86_64, AndroidTarget::i686] {
+            assert_eq!(target.sys_dir(), target.clang());
+        }
+    }
+
+    #[test]
+    fn manifests_opt_into_predictive_back() {
+        for variant in [AndroidVariant::Default, AndroidVariant::Quest] {
+            let xml = variant.manifest_xml(&test_args("App", "dev.makepad.app"));
+            assert!(xml.contains("android:enableOnBackInvokedCallback=\"true\""));
+        }
     }
 }

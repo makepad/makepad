@@ -6,26 +6,9 @@
 use super::*;
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct Decal { pub target: String, pub center: [f64; 3], pub normal: [f64; 3], pub up: [f64; 3], pub size: [f64; 2], pub depth: f64, pub offset: f64 }
+pub struct Decal { pub target: String, pub center: [f64; 3], pub normal: [f64; 3], pub up: [f64; 3], pub size: [f64; 2], pub depth: f64, pub offset: f64 }
 
 impl Decal {
-    pub(super) fn parse(v: &Value) -> Result<Self> {
-        fields(v, &["op", "object", "target", "center", "normal", "up", "size", "depth", "offset", "material"])?;
-        let size: [f64; 2] = array(need(v, "size")?)?;
-        let normal = unit(array(need(v, "normal")?)?)?;
-        let up = v.get("up").map(array).transpose()?.unwrap_or([0., 1., 0.]);
-        let depth = v.get("depth").map(crate::service::float).transpose()?.unwrap_or(size[0].max(size[1]) * 0.5);
-        let offset = v.get("offset").map(crate::service::float).transpose()?.unwrap_or(0.0015);
-        if size.iter().any(|s| !(s.is_finite() && *s > 0.)) || !(depth.is_finite() && depth > 0.) || !(offset.is_finite() && offset >= 0. && offset < 0.1) {
-            return Err(Error::Invalid("decal size/depth/offset"));
-        }
-        Ok(Decal { target: text(v, "target")?.into(), center: array(need(v, "center")?)?, normal, up, size, depth, offset })
-    }
-    pub(super) fn value(&self) -> Vec<(&'static str, Value)> {
-        let v3 = |p: [f64; 3]| Value::Arr(p.iter().copied().map(Value::F64).collect());
-        vec![("target", json::s(&self.target)), ("center", v3(self.center)), ("normal", v3(self.normal)), ("up", v3(self.up)),
-            ("size", Value::Arr(vec![Value::F64(self.size[0]), Value::F64(self.size[1])])), ("depth", Value::F64(self.depth)), ("offset", Value::F64(self.offset))]
-    }
     pub(super) fn generate(&self, target: &Mesh, material: u32, ctx: &mut Context<'_>) -> Result<Mesh> {
         let n = self.normal;
         let right = unit(cross(self.up, n)).or_else(|_| unit(cross([1., 0., 0.], n)))?;
@@ -81,5 +64,30 @@ impl Decal {
         let values: Vec<_> = mesh.corners().iter().map(|c| (c.id, Some(normals[index[&c.vertex]]))).collect();
         mesh.set_corner_normals_bulk(&values, ctx)?;
         Ok(mesh)
+    }
+}
+
+pub(super) fn write_decal(w:&mut Writer,value:&Decal)->Result<()>{w.string(&value.target)?;for item in &value.center{w.f64(*item)?;}for item in &value.normal{w.f64(*item)?;}for item in &value.up{w.f64(*item)?;}for item in &value.size{w.f64(*item)?;}w.f64(value.depth)?;w.f64(value.offset)?;Ok(())}
+pub(super) fn read_decal(r:&mut Reader,limits:&Limits)->Result<Decal>{let _=limits;Ok(Decal{target:r.string(limits.max_transaction_bytes)?,center:[r.f64()?,r.f64()?,r.f64()?],normal:[r.f64()?,r.f64()?,r.f64()?],up:[r.f64()?,r.f64()?,r.f64()?],size:[r.f64()?,r.f64()?],depth:r.f64()?,offset:r.f64()?})}
+
+impl Decal {
+    pub fn check(&self,limits:&Limits)->Result<()>{
+        // The target is resolved by execution.
+        if self.target.len()>limits.max_transaction_bytes{return Err(Error::Budget("transaction input bytes"));}
+        finite(self.center)?;finite(self.normal)?;finite(self.up)?;finite(self.size)?;finite([self.depth,self.offset])?;
+        unit(self.normal)?;
+        if (length(self.normal)-1.).abs()>1e-12{return Err(Error::Invalid("degenerate construction direction"));}
+        if self.size.iter().any(|s|*s<=0.)||self.depth<=0.||self.offset<0.||self.offset>=0.1{return Err(Error::Invalid("decal size/depth/offset"));}Ok(())
+    }
+}
+
+#[cfg(test)]
+mod typed_tests {
+    use super::*;
+    #[test]
+    fn decal_normalization_and_binary_roundtrip(){
+        let limits=Limits::default();let literal=Decal{target:"target".into(),center:[0.;3],normal:[0.,0.,1.],up:[0.,1.,0.],size:[1.;2],depth:0.5,offset:0.0015};
+        literal.check(&limits).unwrap();let mut w=Writer::new(1024);write_decal(&mut w,&literal).unwrap();let mut r=Reader::new(&w.bytes);assert_eq!(read_decal(&mut r,&limits).unwrap(),literal);r.end().unwrap();
+        let mut bad=literal.clone();bad.normal=[0.,0.,8.];assert!(bad.check(&limits).is_err());bad=literal.clone();bad.offset=0.1;assert!(bad.check(&limits).is_err());bad=literal;bad.center[0]=f64::NAN;assert!(bad.check(&limits).is_err());
     }
 }

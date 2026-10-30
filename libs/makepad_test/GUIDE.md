@@ -145,7 +145,13 @@ Available interaction helpers:
 - `press_key`
 - `press_key_with_modifiers`
 - `scroll`
-- `drag_by`
+- `drag_by`, `drag_by_and_hold` (rests before letting go, so it doesn't fling)
+- `touch_drag_by`, `touch_drag_by_and_hold`
+- `touch_drag_through_and_hold(&[(dx, dy), ..])`, through each offset from the start in turn
+
+`TestApp::scroll_at(x, y, dx, dy, phase)` scrolls at a window point. Pass `None`
+for a mouse wheel, or a trackpad gesture phase (`Some("began")`, `"changed"`,
+`"ended"`, `"momentum"`, `"momentum_ended"`, `"touched"`) to replay a gesture.
 
 Available waits and assertions:
 

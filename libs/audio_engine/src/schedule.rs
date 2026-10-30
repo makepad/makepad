@@ -222,6 +222,12 @@ pub fn migrate_state<X>(old: &mut NodeState<X>, new: &mut NodeState<X>) {
             // The held settings go on the new revision's instrument afresh.
             std::mem::swap(&mut fresh.live, &mut kept.live);
             kept.live_seen = None;
+            // MIDI in: the new revision's stream and ring, the keys held
+            // and the arps' chords carried on.
+            std::mem::swap(&mut fresh.stream, &mut kept.stream);
+            if let (Some(new), Some(old)) = (kept.stream.as_deref_mut(), fresh.stream.as_deref_mut()) {
+                new.take_state(old);
+            }
             if fresh.inst_class != kept.inst_class {
                 // Another instrument: the new engine plays from here, with
                 // the feed, gains and the events already waiting.
@@ -282,7 +288,12 @@ pub struct TransportState {
 impl LoopState {
     /// The loop's clock is not running it (a stopped transport).
     pub fn playing_clear(&self) -> bool {
-        !self.playing
+        !self.playing && !self.stream.as_ref().is_some_and(|s| s.busy())
+    }
+
+    /// Something waits to be played: events from the composer, or MIDI in.
+    pub fn has_input(&self) -> bool {
+        self.feed.as_ref().is_some_and(|feed| !feed.is_empty()) || self.stream.as_ref().is_some_and(|s| s.has_input())
     }
 }
 
@@ -305,6 +316,8 @@ pub struct LoopState {
     /// them last set on the engine (none yet: set on the first pass).
     pub live: Option<Arc<crate::feed::LiveParams>>,
     pub live_seen: Option<u32>,
+    /// Played from MIDI in: its ring and note stream.
+    pub stream: Option<Box<crate::midi_stream::StreamRun>>,
 }
 
 /// Voices a `Pads` node sounds at once; past it the oldest gives way.
@@ -815,7 +828,26 @@ pub fn compile<E: Ext, B: Default>(slice: &OwnerSlice, generation: u64, incarnat
                 let input = matches!(inst, makepad_score_player::Inst::Input { .. }).then(crate::feed::audio_in::fresh);
                 // A recipe synth's or a shader's settings can be held live.
                 let live = matches!(inst, makepad_score_player::Inst::Synth { .. } | makepad_score_player::Inst::Shader { .. }).then(|| crate::feed::live_params(&node.id));
-                states.push(NodeState::Loop(Box::new(LoopState { engine, feed, gain_l: 0.0, gain_r: 0.0, peak: 0.0, playing: false, inst_class, midi_live, input, live, live_seen: None })));
+                // Played from MIDI in: a ring of the device's messages.
+                let stream = match node.param("stream") {
+                    Some(Literal::Arr(words)) => {
+                        let words: Vec<f64> = words.iter().map(|w| match w {
+                            Literal::Num(x) => *x,
+                            _ => 0.0,
+                        }).collect();
+                        makepad_score_player::stream::StreamDef::decode(&words).map(|def| {
+                            let device = text(node, "midi_device").unwrap_or("");
+                            let channel = number(node, "midi_channel").unwrap_or(0.0).clamp(0.0, 16.0) as u8;
+                            let latency = number(node, "midi_latency").unwrap_or(8.0) / 1000.0;
+                            // Only a graph that plays live takes the keys
+                            // (the live score's; never a render or a preview).
+                            let midi = crate::feed::midi_out::is_live(&node.id).then(|| crate::feed::midi_in::fresh(&node.id, device, channel));
+                            Box::new(crate::midi_stream::StreamRun::new(def, midi, latency, Some(crate::feed::streams::view(&node.id))))
+                        })
+                    }
+                    _ => None,
+                };
+                states.push(NodeState::Loop(Box::new(LoopState { engine, feed, gain_l: 0.0, gain_r: 0.0, peak: 0.0, playing: false, inst_class, midi_live, input, live, live_seen: None, stream })));
                 ops.push(Op::Loop { state, clock, out, amp, pan, mute, solo, probe, inst });
             }
             "Pads" => {

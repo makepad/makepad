@@ -796,7 +796,7 @@ impl MpTerm {
         // So does a font family taking a face it lacked (a lazy CJK or emoji
         // face arriving): the missing-glyph boxes cached before are stale.
         let epoch = cx.fonts.borrow().rasterizer().borrow().epoch();
-        let families = cx.fonts.borrow().family_generation();
+        let families = cx.fonts.borrow().font_family_generation();
         let key = (
             font_size.to_bits(),
             cx.current_dpi_factor().to_bits(),

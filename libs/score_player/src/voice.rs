@@ -64,6 +64,8 @@ pub(crate) struct Voice {
     /// frames it has played.
     pub moves: Option<NoteOpts>,
     pub age_frames: f32,
+    /// A keyboard's pitch bend on it, as a ratio (1: none).
+    pub bend: f32,
 }
 
 /// A voice moving to new values over `frames` frames: pitch as a ratio of
@@ -107,7 +109,7 @@ impl Voice {
             active: false, note: 0.0, off_beat: f64::INFINITY, released: true, gain: 0.0, vel: 1.0, pan_l: 0.0, pan_r: 0.0, serial: 0,
             slot: u8::MAX, src: Src::Recipe, recipe: RecipeVoice::new(&Recipe::default(), 1.0, None, false, 1),
             handle: 0, pitch: 1.0, glide: None, env: Env::default(), cutoff_env: Env::default(), env_beats: 0.0, beats_per_frame: 0.0,
-            moves: None, age_frames: 0.0,
+            moves: None, age_frames: 0.0, bend: 1.0,
         }
     }
 
@@ -251,10 +253,10 @@ impl Voice {
         let n = l.len();
         let scratch = &mut scratch[..n];
         scratch.fill(0.0);
-        let pitch = self.pitch as f64;
+        let pitch = (self.pitch * self.bend) as f64;
         match &mut self.src {
             Src::Recipe => {
-                self.recipe.render(scratch, rate, self.pitch);
+                self.recipe.render(scratch, rate, self.pitch * self.bend);
                 if self.recipe.finished() {
                     self.active = false;
                 }

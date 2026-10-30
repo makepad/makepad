@@ -60,7 +60,9 @@ pub struct Generator {
     pub params: &'static [Param],
 }
 
-const ARP_PATTERNS: [&str; 6] = ["up", "down", "updown", "downup", "random", "chord"];
+/// The arp's own patterns (`makepad_audio_synth::kit::arp`) that step one
+/// note at a time, and `reach`: chord tones in the order a player reaches.
+const ARP_PATTERNS: [&str; 10] = ["up", "down", "updown", "downup", "converge", "diverge", "thumb", "pinky", "random", "reach"];
 const RATES: [&str; 6] = ["1", "2", "3", "4", "6", "8"];
 const VOICINGS: [&str; 4] = ["close", "open", "drop2", "spread"];
 const RHYTHMS: [&str; 4] = ["whole", "half", "stabs", "pulse"];
@@ -222,7 +224,7 @@ impl Rng {
 }
 
 fn num_text(v: f64) -> String {
-    source::fmt_num(v, 3)
+    makepad_edit_values::number::fmt_num(v, 3)
 }
 
 /// The velocity at step `i` of `n` under a curve.
@@ -265,9 +267,6 @@ pub fn generate(src: &str, node: &str, name: &str, given: &[(String, String)]) -
             }
             let mut rng = Rng::new(args.num("seed"));
             let order: Vec<f32> = match args.text("pattern").as_str() {
-                "down" => tones.iter().rev().copied().collect(),
-                "updown" => tones.iter().copied().chain(tones.iter().rev().skip(1).take(tones.len().saturating_sub(2)).copied()).collect(),
-                "downup" => tones.iter().rev().copied().chain(tones.iter().skip(1).take(tones.len().saturating_sub(2)).copied()).collect(),
                 "random" => {
                     let mut t = tones.clone();
                     for i in (1..t.len()).rev() {
@@ -277,12 +276,18 @@ pub fn generate(src: &str, node: &str, name: &str, given: &[(String, String)]) -
                     t
                 }
                 // Chord tones in the order a player reaches: root, fifth, third, the rest.
-                "chord" => {
+                "reach" => {
                     let mut t = tones.clone();
                     t.sort_by_key(|n| (((n - root).rem_euclid(12.0) as i32) * 7 % 12, (*n * 10.0) as i32));
                     t
                 }
-                _ => tones.clone(),
+                // The arp's own step order.
+                name => {
+                    let pattern = makepad_audio_synth::kit::arp::pattern(name).unwrap_or(0);
+                    let mut idx = vec![0u16; tones.len() * 2 + 2];
+                    let n = makepad_audio_synth::kit::arp::order(pattern, tones.len(), &mut idx);
+                    idx[..n].iter().map(|i| tones[*i as usize]).collect()
+                }
             };
             let rate = args.num("rate").max(1.0);
             let repeats = args.num("repeats").max(1.0) as usize;
@@ -559,7 +564,7 @@ pub fn apply(src: &str, node: &str, edits: &[FieldEdit]) -> Result<String, Strin
                 Err(_) => continue,
             },
         };
-        next = source::apply(&next, &splice);
+        next = makepad_edit_values::apply_splices(&next, 0, &[splice])?;
     }
     ScoreDoc::load(&next).map_err(|d| d.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "))?;
     Ok(next)

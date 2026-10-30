@@ -312,6 +312,9 @@ pub struct LoopEngine {
     /// A recipe synth's patch with the settings an editor holds live (its
     /// next notes play it), or none: the authored patch.
     live_recipe: Option<Recipe>,
+    /// A keyboard's pitch bend per MIDI channel, as a ratio: the recipe
+    /// voices' notes on it play bent (see [`LoopEngine::control`]).
+    bend: [f32; 16],
 }
 
 /// Messages a MIDI loop sends in one chunk.
@@ -387,6 +390,7 @@ impl LoopEngine {
             nmidi: 0,
             midi_channel: 0,
             live_recipe: None,
+            bend: [1.0; 16],
         }
     }
 
@@ -638,6 +642,84 @@ impl LoopEngine {
         self.pending.copy_within(taken..self.npending, 0);
         self.npending -= taken;
         beat1
+    }
+
+    /// A keyboard's controller on channel `ch` (0..15), at once: pitch bend
+    /// (-1..1, `bend_range` semitones at full travel), the mod wheel,
+    /// pressure (the channel's, or a key's), slide. With `mpe` a channel's
+    /// bend, pressure and slide move only the notes on it. Each instrument
+    /// takes what it has: recipe voices and native instruments bend, Morph
+    /// takes all of them (its own bend range), a MIDI loop sends them on;
+    /// the rest ignore them. No allocation.
+    pub fn control(&mut self, inst: &Inst, ch: u8, ctl: crate::stream::Ctl, value: f32, bend_range: f32, mpe: bool) {
+        use crate::stream::{handle_channel, Ctl};
+        let ch = ch & 15;
+        let on_channel = |handle: u32| !mpe || handle_channel(handle) == Some(ch);
+        match ctl {
+            Ctl::Bend => {
+                let semis = value.clamp(-1.0, 1.0) * bend_range;
+                let ratio = 2f32.powf(semis / 12.0);
+                if mpe {
+                    self.bend[ch as usize] = ratio;
+                } else {
+                    self.bend = [ratio; 16];
+                }
+                for voice in self.voices.iter_mut().filter(|v| v.active && on_channel(v.handle)) {
+                    voice.bend = ratio;
+                }
+                if let Some(morph) = &mut self.morph {
+                    morph.set_bend(value);
+                }
+                for (_, native) in self.natives.iter_mut() {
+                    native.control(Control::PitchBend, semis);
+                }
+                if let Some(iron) = &mut self.iron {
+                    NativeInstrument::control(&mut **iron, Control::PitchBend, semis);
+                }
+                if matches!(inst, Inst::Midi { .. }) {
+                    let v = ((value.clamp(-1.0, 1.0) * 8192.0 + 8192.0).round() as i32).clamp(0, 16383) as u16;
+                    self.send_midi(0, [0xe0 | self.midi_channel, (v & 127) as u8, (v >> 7) as u8]);
+                }
+            }
+            Ctl::Mod => {
+                if let Some(morph) = &mut self.morph {
+                    morph.set_mod_wheel(value);
+                }
+                for (_, native) in self.natives.iter_mut() {
+                    native.control(Control::Modulation, value);
+                }
+                if matches!(inst, Inst::Midi { .. }) {
+                    self.send_midi(0, [0xb0 | self.midi_channel, 1, (value.clamp(0.0, 1.0) * 127.0).round() as u8]);
+                }
+            }
+            Ctl::Pressure | Ctl::Slide | Ctl::KeyPressure(_) | Ctl::KeySlide(_) => {
+                if let Some(morph) = &mut self.morph {
+                    match ctl {
+                        Ctl::KeyPressure(note) => morph.set_expression(note, Some(value), None),
+                        Ctl::KeySlide(note) => morph.set_expression(note, None, Some(value)),
+                        Ctl::Pressure => morph.set_aftertouch(value),
+                        // Slide on the whole channel: every note playing.
+                        _ => {
+                            for (off, note) in self.iron_offs.iter() {
+                                if off.is_finite() {
+                                    morph.set_expression(*note, None, Some(value));
+                                }
+                            }
+                        }
+                    }
+                }
+                if matches!(inst, Inst::Midi { .. }) {
+                    let v = (value.clamp(0.0, 1.0) * 127.0).round() as u8;
+                    let bytes = match ctl {
+                        Ctl::Pressure => [0xd0 | self.midi_channel, v, 0],
+                        Ctl::KeyPressure(note) => [0xa0 | self.midi_channel, note & 127, v],
+                        _ => [0xb0 | self.midi_channel, 74, v],
+                    };
+                    self.send_midi(0, bytes);
+                }
+            }
+            Ctl::Sustain | Ctl::AllOff => {}
+        }
     }
 
     /// The MIDI a MIDI loop's last chunk sent, as (frame, bytes), in order.
@@ -1373,7 +1455,9 @@ impl LoopEngine {
             }
             _ => return,
         };
+        let ch = crate::stream::handle_channel(event.opts.handle).unwrap_or(0) as usize;
         let voice = &mut self.voices[slot];
+        voice.bend = self.bend[ch];
         voice.off_beat = off_beat;
         voice.gain = event.vel;
         voice.vel = event.vel;

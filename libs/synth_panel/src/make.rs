@@ -4,9 +4,9 @@
 //! and each instrument's tweaks written by writers at once, an instrument's
 //! live paths (with its effects') to one writer.
 
+use makepad_edit_values::number::fmt_num;
 use makepad_editor_panel::make;
 use makepad_score_live::model::ScoreDoc;
-use makepad_score_live::source::fmt_num;
 
 /// The panel's fixed widgets, before the instruments' tweaks.
 pub const HEAD: [&str; 2] = ["ScoreTree{}", "SynthTrack{}"];

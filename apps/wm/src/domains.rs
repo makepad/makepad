@@ -269,6 +269,7 @@ impl App {
                 match &e.action {
                     // Every makepad window draws its own chrome (own_chrome.rs): nothing to hear.
                     ChildWindowAction::OwnChrome(_) => {}
+                    ChildWindowAction::Topmost(on) => self.set_client_topmost(cx, client, *on),
                     ChildWindowAction::DragAnswer { request, response } => {
                         let start = self.desk(cx).borrow_mut::<WmDesk>().and_then(|mut desk|
                             desk.with_domain_view(cx, client, |cx, v| v.take_caption_press(cx, *request, *response)).flatten());

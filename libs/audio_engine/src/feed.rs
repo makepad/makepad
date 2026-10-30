@@ -263,6 +263,9 @@ pub fn forget_instance(name: &str) {
     registry.fxs.retain(|key, _| !key.starts_with(&prefix));
     registry.live.retain(|key, _| !key.starts_with(&prefix));
     registry.pads.retain(|key, _| !key.starts_with(&prefix));
+    drop(registry);
+    midi_in::forget_instance(name);
+    streams::forget_instance(name);
 }
 
 /// How many feeds exist (loops, tempos): what a leak test watches.
@@ -395,8 +398,10 @@ pub mod midi_out {
         LIVE.get_or_init(Default::default)
     }
 
-    /// Whether the graph instantiated as `instance` plays to the outputs
-    /// (the live score does; offline renders and previews do not).
+    /// Whether the graph instantiated as `instance` plays live: its MIDI
+    /// loops to the outputs and its `MidiIn` loops from the inputs
+    /// ([`super::midi_in`]). The live score does; offline renders and
+    /// previews do not (set before the graph is prepared).
     pub fn set_live(instance: &str, on: bool) {
         let mut live = live().lock().unwrap_or_else(|e| e.into_inner());
         live.retain(|name| name != instance);
@@ -451,6 +456,277 @@ pub mod midi_out {
             }
         }
         out.sort_by(|a, b| a.at.total_cmp(&b.at));
+    }
+}
+
+/// MIDI in: what keyboards and controllers play, for the loops a score's
+/// `MidiIn` streams feed. The host hands every message from its inputs to
+/// [`midi_in::push`] with when it arrived (seconds on [`crate::clock`]);
+/// each loop fed by a `MidiIn` has its own ring, filled with the messages
+/// its device and channel take, which its node reads on the audio thread
+/// and plays on their sample (a fixed short delay keeps their spacing).
+/// The host also names the ports ([`midi_in::set_ports`]: a device plugged
+/// in later is matched by name as soon as it is listed) and reads what came
+/// in for its displays ([`midi_in::activity`]).
+pub mod midi_in {
+    use makepad_flow::live::spsc::{ring, Consumer, Producer};
+    use std::sync::{Mutex, OnceLock};
+
+    /// Messages a loop may have waiting.
+    pub const CAPACITY: usize = 1024;
+    /// Messages the activity log keeps.
+    pub const LOG: usize = 64;
+
+    /// One message: when it arrived (seconds on the engine's clock; minus
+    /// infinity plays it at the start of the next pass), the port it came
+    /// in on and its bytes.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct MidiMsg {
+        pub at: f64,
+        pub port: u64,
+        pub data: [u8; 3],
+    }
+
+    struct Sub {
+        node: String,
+        /// The device it takes: "" or "any" for every input, else part of
+        /// a port's name (any case).
+        device: String,
+        /// The channel it takes (1..16), 0 for every one.
+        channel: u8,
+        producer: Producer<MidiMsg>,
+    }
+
+    #[derive(Default)]
+    struct Hub {
+        subs: Vec<Sub>,
+        /// The input ports: (id, name).
+        ports: Vec<(u64, String)>,
+        log: std::collections::VecDeque<MidiMsg>,
+        dropped: u64,
+    }
+
+    fn hub() -> std::sync::MutexGuard<'static, Hub> {
+        static HUB: OnceLock<Mutex<Hub>> = OnceLock::new();
+        HUB.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether a port named `name` is a device `device` names.
+    pub fn matches(device: &str, name: &str) -> bool {
+        let device = device.trim();
+        device.is_empty() || device.eq_ignore_ascii_case("any") || name.to_ascii_lowercase().contains(&device.to_ascii_lowercase())
+    }
+
+    /// A new ring for the loop node `node` (a qualified id), taking the
+    /// messages of `device` on `channel` (0: all); it replaces the node's
+    /// last one. Off the audio thread (a graph being prepared).
+    pub fn fresh(node: &str, device: &str, channel: u8) -> Consumer<MidiMsg> {
+        let (producer, consumer) = ring(CAPACITY);
+        let mut hub = hub();
+        hub.subs.retain(|s| s.node != node);
+        hub.subs.push(Sub { node: node.to_string(), device: device.to_string(), channel, producer });
+        consumer
+    }
+
+    /// The input ports as the host lists them (id, name); a hot-plugged
+    /// device is in the next list.
+    pub fn set_ports(ports: Vec<(u64, String)>) {
+        hub().ports = ports;
+    }
+
+    /// The input ports' names.
+    pub fn ports() -> Vec<String> {
+        hub().ports.iter().map(|(_, n)| n.clone()).collect()
+    }
+
+    /// The name of port `id` ("" when it is not listed).
+    pub fn port_name(id: u64) -> String {
+        hub().ports.iter().find(|(p, _)| *p == id).map(|(_, n)| n.clone()).unwrap_or_default()
+    }
+
+    static STAMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// How many messages came in so far (a display redraws when it moves).
+    pub fn stamp() -> u64 {
+        STAMP.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A message from an input (the host's thread; never the audio thread).
+    pub fn push(msg: MidiMsg) {
+        STAMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut hub = hub();
+        let hub = &mut *hub;
+        let name = hub.ports.iter().find(|(p, _)| *p == msg.port).map(|(_, n)| n.as_str()).unwrap_or("");
+        let channel = msg.data[0] & 15;
+        let system = msg.data[0] >= 0xf0;
+        for sub in hub.subs.iter_mut() {
+            if system || !matches(&sub.device, name) || (sub.channel != 0 && sub.channel - 1 != channel) {
+                continue;
+            }
+            if sub.producer.push(msg).is_err() {
+                hub.dropped += 1;
+            }
+        }
+        if !system {
+            if hub.log.len() >= LOG {
+                hub.log.pop_front();
+            }
+            hub.log.push_back(msg);
+        }
+    }
+
+    /// Messages dropped because a loop's ring was full.
+    pub fn dropped() -> u64 {
+        hub().dropped
+    }
+
+    /// What a `MidiIn` of `device` on `channel` (0: all) took lately: when
+    /// its last message came (seconds on the engine's clock; minus infinity
+    /// for never), the keys down now by what came in (lowest first), and
+    /// its last note-ons (note, velocity), newest last.
+    pub fn activity(device: &str, channel: u8) -> Activity {
+        let hub = hub();
+        let mut out = Activity { last: f64::NEG_INFINITY, down: Vec::new(), recent: Vec::new() };
+        let mut down = [false; 128];
+        for m in hub.log.iter() {
+            let name = hub.ports.iter().find(|(p, _)| *p == m.port).map(|(_, n)| n.as_str()).unwrap_or("");
+            if !matches(device, name) || (channel != 0 && channel - 1 != m.data[0] & 15) {
+                continue;
+            }
+            out.last = out.last.max(m.at);
+            let (status, note, vel) = (m.data[0] & 0xf0, m.data[1] as usize & 127, m.data[2]);
+            if status == 0x90 && vel > 0 {
+                down[note] = true;
+                out.recent.push((note as u8, vel));
+            } else if status == 0x80 || status == 0x90 {
+                down[note] = false;
+            }
+        }
+        let keep = out.recent.len().saturating_sub(8);
+        out.recent.drain(..keep);
+        out.down = (0..128u8).filter(|n| down[*n as usize]).collect();
+        out
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct Activity {
+        pub last: f64,
+        pub down: Vec<u8>,
+        pub recent: Vec<(u8, u8)>,
+    }
+
+    /// Forget the rings of the graph instantiated as `name`.
+    pub fn forget_instance(name: &str) {
+        let prefix = format!("{name}/");
+        hub().subs.retain(|s| !s.node.starts_with(&prefix));
+    }
+}
+
+/// What a loop's note stream plays, as its node publishes it from the
+/// audio thread for displays (a lens's lights and step view, a tracker's
+/// live channel): the keys held, the notes sounding, the arp's pattern as
+/// built and its step, the last notes started. Atomics only: the audio
+/// thread stores, a display loads.
+pub mod streams {
+    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering::Relaxed};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    /// Steps of an arp's pattern a view shows.
+    pub const STEPS: usize = 64;
+
+    pub struct StreamView {
+        held: [AtomicU64; 2],
+        sounding: [AtomicU64; 2],
+        steps: [AtomicU8; STEPS],
+        nsteps: AtomicU32,
+        step: AtomicU32,
+        recent: [AtomicU32; 8],
+        recent_beats: [AtomicU64; 8],
+        nrecent: AtomicU32,
+        started: AtomicU64,
+    }
+
+    impl Default for StreamView {
+        fn default() -> Self {
+            StreamView {
+                held: Default::default(), sounding: Default::default(), steps: std::array::from_fn(|_| AtomicU8::new(0)), nsteps: AtomicU32::new(0),
+                step: AtomicU32::new(0), recent: Default::default(), recent_beats: Default::default(), nrecent: AtomicU32::new(0), started: AtomicU64::new(0),
+            }
+        }
+    }
+
+    /// One snapshot of a stream.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct Snapshot {
+        pub held: Vec<u8>,
+        pub sounding: Vec<u8>,
+        pub steps: Vec<u8>,
+        pub step: usize,
+        /// The last notes started (beat, note, velocity), newest last.
+        pub recent: Vec<(f64, u8, u8)>,
+        /// Notes started so far (a display sees one start by its change).
+        pub started: u64,
+    }
+
+    fn notes(set: &[AtomicU64; 2]) -> Vec<u8> {
+        let words = [set[0].load(Relaxed), set[1].load(Relaxed)];
+        (0..128u8).filter(|n| words[(*n >> 6) as usize] & (1 << (n & 63)) != 0).collect()
+    }
+
+    impl StreamView {
+        /// From the audio thread. No allocation.
+        pub fn store(&self, held: [u64; 2], sounding: [u64; 2], steps: Option<(&[u8], usize)>, recent: &[(f64, u8, u8)], started: u64) {
+            for i in 0..2 {
+                self.held[i].store(held[i], Relaxed);
+                self.sounding[i].store(sounding[i], Relaxed);
+            }
+            let (list, step) = steps.unwrap_or((&[], 0));
+            let n = list.len().min(STEPS);
+            for (slot, note) in self.steps.iter().zip(&list[..n]) {
+                slot.store(*note, Relaxed);
+            }
+            self.nsteps.store(n as u32, Relaxed);
+            self.step.store(step as u32, Relaxed);
+            let r = recent.len().min(8);
+            for (k, (beat, note, vel)) in recent[recent.len() - r..].iter().enumerate() {
+                self.recent[k].store((*note as u32) << 8 | *vel as u32, Relaxed);
+                self.recent_beats[k].store(beat.to_bits(), Relaxed);
+            }
+            self.nrecent.store(r as u32, Relaxed);
+            self.started.store(started, Relaxed);
+        }
+
+        pub fn snapshot(&self) -> Snapshot {
+            let n = (self.nsteps.load(Relaxed) as usize).min(STEPS);
+            let r = (self.nrecent.load(Relaxed) as usize).min(8);
+            Snapshot {
+                held: notes(&self.held),
+                sounding: notes(&self.sounding),
+                steps: self.steps[..n].iter().map(|s| s.load(Relaxed)).collect(),
+                step: self.step.load(Relaxed) as usize,
+                recent: (0..r).map(|k| {
+                    let v = self.recent[k].load(Relaxed);
+                    (f64::from_bits(self.recent_beats[k].load(Relaxed)), (v >> 8) as u8, v as u8)
+                }).collect(),
+                started: self.started.load(Relaxed),
+            }
+        }
+    }
+
+    fn table() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, Arc<StreamView>>> {
+        static TABLE: OnceLock<Mutex<std::collections::HashMap<String, Arc<StreamView>>>> = OnceLock::new();
+        TABLE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The view of loop node `node` (a qualified id; made on first use).
+    /// Never called on the audio thread.
+    pub fn view(node: &str) -> Arc<StreamView> {
+        table().entry(node.to_string()).or_default().clone()
+    }
+
+    pub fn forget_instance(name: &str) {
+        let prefix = format!("{name}/");
+        table().retain(|k, _| !k.starts_with(&prefix));
     }
 }
 
