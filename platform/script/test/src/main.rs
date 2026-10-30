@@ -523,6 +523,12 @@ pub fn main() {
         assert(a.to_string() == "1234")
         assert("hi".to_chars().to_string() == "hi")
 
+        // base64 to and from U8 byte arrays; invalid input decodes to nil
+        assert("aGk=".decode_base64().to_string() == "hi")
+        assert("aGk".decode_base64().to_string() == "hi")
+        assert("hi".to_bytes().to_base64() == "aGk=")
+        assert("aG=k".decode_base64() == nil)
+
         // test json
         let x = {x:1 y:[1 2 3]};
         let y = x.to_json();

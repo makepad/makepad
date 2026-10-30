@@ -1,3 +1,4 @@
+use crate::base64;
 use crate::heap::*;
 use crate::makepad_live_id::*;
 use crate::native::*;
@@ -491,6 +492,33 @@ impl ScriptStringData {
                 script_err_unexpected!(
                     vm.bx.threads.cur_ref().trap,
                     "url_encode called on non-string value"
+                )
+            },
+        );
+
+        // str.decode_base64() -> U8 byte array, or nil if not valid base64 (standard alphabet,
+        // padding optional, ASCII whitespace skipped, i.e. WHATWG forgiving-base64 like JS atob)
+        native.add_type_method(
+            heap,
+            ScriptValueType::REDUX_STRING,
+            id!(decode_base64),
+            script_args_def!(),
+            |vm, args| {
+                let sself = script_value!(vm, args.self);
+                if let Some(v) = vm.bx.heap.string_mut_self_with(sself, |heap, sself| {
+                    let Some(len) = base64::decoded_len(sself) else {
+                        return NIL;
+                    };
+                    heap.new_array_u8_with_preflight(len, "decoding base64", |out| {
+                        base64::decode_into(sself, out);
+                    })
+                    .into()
+                }) {
+                    return v;
+                }
+                script_err_unexpected!(
+                    vm.bx.threads.cur_ref().trap,
+                    "decode_base64 called on non-string value"
                 )
             },
         );
