@@ -2203,6 +2203,13 @@ impl Cx {
         self.new_next_frames.contains(&next_frame)
     }
 
+    /// Keeps the display at its fastest refresh rate for about another second. Input already does this,
+    /// so it's for content that keeps moving on its own, like a fling. Only Android needs it so far.
+    pub fn boost_frame_rate(&mut self) {
+        #[cfg(target_os = "android")]
+        self.os.boost_frame_rate();
+    }
+
     pub fn send_trigger(&mut self, area: Area, trigger: Trigger) {
         if let Some(triggers) = self.triggers.get_mut(&area) {
             triggers.push(trigger);
