@@ -1047,6 +1047,15 @@ pub fn prepare_edit(path: &str, keep: bool) -> io::Result<std::path::PathBuf> {
     Ok(disk)
 }
 
+/// The edits ledger's stamp (modified time, length); None without an edits folder or ledger.
+/// Every edit of a mounted store's file rewrites the ledger (`save_records`): a watcher whose
+/// last look saw this stamp knows no virtual file changed since, without a stat per file.
+pub fn edits_ledger_stamp() -> Option<(std::time::SystemTime, u64)> {
+    let dir = EDITS.read().unwrap().clone()?;
+    let m = std::fs::metadata(dir.join(".makepad-run-edits")).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
+
 /// The disk path of `path` in the edits folder when it is an edited file or folder there
 /// (removing or renaming an edited file).
 pub fn edited_disk_path(path: &str) -> Option<std::path::PathBuf> {
