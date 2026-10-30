@@ -10,15 +10,17 @@
 # Before the fix every crate that could reach HAL had its code keyed by HAL's whole-source identity
 # (cache/items.rs apply_bound), so this edit recompiled nearly the whole program cold.
 # Run from the workspace root after the loader is built. PACKAGE (default Calculator standalone; a
-# `makepad run` argument list with ',' for spaces), WAIT (seconds, default 300), TARGET (default
-# target/release), BUILD (default: cargo build --release -p makepad-run --bin makepad; give the
+# `makepad run` argument list with ',' for spaces), WAIT (seconds, default 300), the JIT runs through `cargo
+# run --profile host`, BUILD (default: cargo build --profile host -p makepad-run --bin makepad; give the
 # same -p set as the build that made the binary, or cargo rebuilds for other features).
 # Prints "warm_after_hal: OK ..." or "warm_after_hal: FAIL ..."; exit 1 on failure.
-T=${TARGET:-target/release}
-B=$(cd "$(dirname "$T/makepad")" && pwd)/makepad
+ROOT=$(pwd)
+# the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
+J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
+B=$J
 PACKAGE=${PACKAGE:-makepad-app-calculator,--no-default-features,--features,standalone}
 WAIT=${WAIT:-300}
-BUILD=${BUILD:-cargo build --release -p makepad-run --bin makepad}
+BUILD=${BUILD:-cargo build --profile host -p makepad-run --bin makepad}
 F=platform/hal/src/lib.rs
 grep -q '^    pub fn backend_inits(&self) -> u32 {$' "$F" || { echo "warm_after_hal: FAIL: $F has no Hal::backend_inits to edit"; exit 1; }
 dir=$(mktemp -d "${TMPDIR:-/tmp}/warm_after_hal.XXXXXX") || exit 1
@@ -37,7 +39,7 @@ session() { # session <label>: one launch to idle and quit; prints its first-fra
     label=$1
     MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 TMPDIR="$dir/t" \
         MAKEPAD_HOME="$dir/home" MAKEPAD_RUN_HOME="$dir/run" MAKEPAD_RUN_CACHE_DIR="$dir/run/cache" MAKEPAD_RUN_TARGET_DIR="$dir/run/target" \
-        MAKEPAD_RUN_VERBOSE=1 "$B" run --report-to "$dir/report.$label" $(echo "$PACKAGE" | tr ',' ' ') > "$dir/log.$label" 2>&1 &
+        MAKEPAD_RUN_VERBOSE=1 $B run --report-to "$dir/report.$label" $(echo "$PACKAGE" | tr ',' ' ') > "$dir/log.$label" 2>&1 &
     pid=$!
     i=0
     while [ $i -lt $((WAIT * 5)) ] && kill -0 $pid 2>/dev/null && ! grep -qx present "$dir/report.$label" 2>/dev/null; do
@@ -45,7 +47,7 @@ session() { # session <label>: one launch to idle and quit; prints its first-fra
     done
     idle=0; i=0; last=""
     while [ $idle -lt 3 ] && [ $i -lt $WAIT ] && kill -0 $pid 2>/dev/null; do
-        last=$(TMPDIR="$dir/t" "$B" inspect $pid jit ms=1000 2>&1)
+        last=$(TMPDIR="$dir/t" $B inspect $pid jit ms=1000 2>&1)
         if echo "$last" | grep -q '^idle'; then idle=$((idle + 1)); else idle=0; fi
         i=$((i + 1))
     done

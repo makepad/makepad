@@ -641,11 +641,24 @@ impl Inbox {
     }
 }
 
-/// Writes one encoded message whole (retrying a write that timed out part way: a TLS stream
-/// resumes its record).
+/// Writes one encoded message whole and flushes it: a write or flush that the socket's send
+/// timeout cut short (the peer reads slower than we send: its buffer and ours are full) waits for
+/// the socket to drain and goes on; a TLS stream resumes its record. Only a peer that reads
+/// nothing for about 5 s (at the senders' 5 ms write timeout) or a broken connection fails it:
+/// back-pressure is the stream's own business (it builds no more pictures than the headset
+/// takes), never the session's end. (SecureTransport's flush said WouldBlock while its record
+/// was still queued, and the session ended on it.)
 pub fn write_all(w: &mut dyn Write, bytes: &[u8]) -> io::Result<()> {
     let mut done = 0;
-    let mut stalls = 0;
+    let mut stalls = 0u32;
+    let stalled = |stalls: &mut u32| -> io::Result<()> {
+        *stalls += 1;
+        if *stalls > 1_000 {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "the peer stopped reading"));
+        }
+        Ok(())
+    };
+    let retry = |e: &io::Error| matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted);
     while done < bytes.len() {
         match w.write(&bytes[done..]) {
             Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "connection closed")),
@@ -653,17 +666,17 @@ pub fn write_all(w: &mut dyn Write, bytes: &[u8]) -> io::Result<()> {
                 done += n;
                 stalls = 0;
             }
-            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => {
-                stalls += 1;
-                // the peer has read nothing for about 5 s at the senders' 5 ms write timeout
-                if stalls > 1_000 {
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, "the peer stopped reading"));
-                }
-            }
+            Err(e) if retry(&e) => stalled(&mut stalls)?,
             Err(e) => return Err(e),
         }
     }
-    w.flush()
+    loop {
+        match w.flush() {
+            Ok(()) => return Ok(()),
+            Err(e) if retry(&e) => stalled(&mut stalls)?,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 #[cfg(test)]

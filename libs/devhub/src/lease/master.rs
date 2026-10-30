@@ -426,6 +426,10 @@ impl LeaseMaster {
                 }
             }
         }
+        // the node's lease-end answered (its tree is back on the shared commits): it is free again
+        if let Some(node) = node {
+            self.sched.lock().unwrap().cleaned(node, id);
+        }
         self.save_live();
         if let Some(l) = l {
             let path = self.home.join("leases.jsonl");
@@ -435,6 +439,7 @@ impl LeaseMaster {
             }
         }
         self.cleaned_up(id, summary);
+        self.pump();
     }
 
     /// Copies a recovery bundle off the node and fetches it into the lane's repo as

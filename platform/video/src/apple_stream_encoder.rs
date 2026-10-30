@@ -116,6 +116,28 @@ unsafe fn set_bool_property(session: VTCompressionSessionRef, key: CFStringRef, 
     VTSessionSetProperty(session as *mut c_void, key, v as *const c_void);
 }
 
+/// The fast mode's bound on bursts: at most twice the rate over any four display periods (the
+/// standard rate control averages over a longer window than a live view's link buffers).
+unsafe fn set_data_rate_limit(session: VTCompressionSessionRef, kbps: u32, fps: u32) {
+    let seconds: f64 = 4.0 / fps.max(1) as f64;
+    let bytes: i64 = (kbps as f64 * 1000.0 / 8.0 * 2.0 * seconds) as i64;
+    let b = CFNumberCreate(std::ptr::null(), kCFNumberSInt64Type, &bytes as *const i64 as *const c_void);
+    let s = CFNumberCreate(std::ptr::null(), kCFNumberFloat64Type, &seconds as *const f64 as *const c_void);
+    if !b.is_null() && !s.is_null() {
+        let values = [b as *const c_void, s as *const c_void];
+        let array = CFArrayCreate(std::ptr::null(), values.as_ptr(), 2, &kCFTypeArrayCallBacks as *const u8 as *const c_void);
+        if !array.is_null() {
+            VTSessionSetProperty(session as *mut c_void, kVTCompressionPropertyKey_DataRateLimits, array as *const c_void);
+            CFRelease(array as *const c_void);
+        }
+    }
+    for n in [b, s] {
+        if !n.is_null() {
+            CFRelease(n as *const c_void);
+        }
+    }
+}
+
 unsafe fn set_i32_property(session: VTCompressionSessionRef, key: CFStringRef, value: i32) {
     let num = CFNumberCreate(std::ptr::null(), kCFNumberSInt32Type, &value as *const i32 as *const c_void);
     if !num.is_null() {
@@ -134,13 +156,15 @@ pub struct AppleStreamEncoder {
     hevc: bool,
     bitrate_kbps: u32,
     fps: u32,
+    /// The fastest encode (see `new`): its burst limit follows the rate.
+    fast: bool,
     /// Packed NV12 surfaces into the encoder's NV12 buffers (made on the first one).
     intake: Option<TextureIntake>,
     timings: EncodeTimings,
 }
 
 impl AppleStreamEncoder {
-    fn new(options: &VideoStreamEncoderOptions) -> Result<Self, VideoFileError> {
+    fn new(options: &VideoStreamEncoderOptions, tuning: StreamTuning) -> Result<Self, VideoFileError> {
         let codec_type = match options.codec {
             StreamVideoCodec::H264 => kCMVideoCodecType_H264,
             StreamVideoCodec::Hevc => kCMVideoCodecType_HEVC,
@@ -148,8 +172,13 @@ impl AppleStreamEncoder {
         let shared = Box::new(Mutex::new(EncoderShared { packets: Vec::new(), hevc: options.codec == StreamVideoCodec::Hevc }));
         let refcon = shared.as_ref() as *const Mutex<EncoderShared> as *mut c_void;
         let mut session: VTCompressionSessionRef = std::ptr::null_mut();
-        // the low-latency mode of the encoder (macOS 11.3+) for a live view
-        let spec: CFDictionaryRef = if options.low_latency {
+        // a live view (`low_latency`): its best pictures per bit (`sharp`) in the encoder's
+        // low-latency mode (macOS 11.3+: a short rate-control window); its fastest encode in the
+        // standard mode (the low-latency one took 16.6 ms for a 2016x3168 HEVC picture on an M4,
+        // the standard one 9.2 ms; it refuses `PrioritizeEncodingSpeedOverQuality`), its bursts
+        // bounded by `DataRateLimits` instead
+        let fast = options.low_latency && !tuning.sharp;
+        let spec: CFDictionaryRef = if options.low_latency && !fast {
             let keys = [unsafe { kVTVideoEncoderSpecification_EnableLowLatencyRateControl } as *const c_void];
             let values = [unsafe { kCFBooleanTrue } as *const c_void];
             unsafe { CFDictionaryCreate(std::ptr::null(), keys.as_ptr(), values.as_ptr(), 1, std::ptr::null(), std::ptr::null()) }
@@ -187,6 +216,13 @@ impl AppleStreamEncoder {
                 (options.bitrate_kbps as i64 * 1000).min(i32::MAX as i64) as i32,
             );
             set_i32_property(session, kVTCompressionPropertyKey_ExpectedFrameRate, options.fps as i32);
+            // the fastest encode: speed over quality (macOS 12+), never slowed down to save power
+            // (a picture is due every display period)
+            if fast {
+                set_bool_property(session, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, true);
+                set_bool_property(session, kVTCompressionPropertyKey_MaximizePowerEfficiency, false);
+                set_data_rate_limit(session, options.bitrate_kbps, options.fps);
+            }
             // The VUI says BT.709 (primaries, transfer, matrix) and the 420v source limited range, as
             // the Linux and Windows hosts write it: viewers show exactly what the stream says.
             let (p, t, m, _) = crate::VideoColor::BT709.h273();
@@ -226,6 +262,7 @@ impl AppleStreamEncoder {
             hevc: options.codec == StreamVideoCodec::Hevc,
             bitrate_kbps: options.bitrate_kbps,
             fps: options.fps,
+            fast,
             intake: None,
             timings: EncodeTimings::default(),
         })
@@ -343,15 +380,18 @@ impl StreamEncoderOs for AppleStreamEncoder {
         EncoderCaps { engines: 2, tiles: true, full_chroma: false, hevc: true }
     }
 
-    fn open(options: &VideoStreamEncoderOptions, _tile: StreamTile, _tuning: StreamTuning) -> Result<Self, VideoFileError> {
-        Self::new(options)
+    fn open(options: &VideoStreamEncoderOptions, _tile: StreamTile, tuning: StreamTuning) -> Result<Self, VideoFileError> {
+        Self::new(options, tuning)
     }
 
     fn encode_nv12(&mut self, nv12: &[u8], pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {
-        unsafe {
-            let pixel_buffer = self.make_pixel_buffer(nv12)?;
-            self.encode_pixel_buffer(pixel_buffer, pts_100ns)
-        }
+        let us = |a: std::time::Instant, b: std::time::Instant| (b - a).as_micros().min(u32::MAX as u128) as u32;
+        let t0 = std::time::Instant::now();
+        let pixel_buffer = unsafe { self.make_pixel_buffer(nv12)? };
+        let t1 = std::time::Instant::now();
+        let out = unsafe { self.encode_pixel_buffer(pixel_buffer, pts_100ns) };
+        self.timings = EncodeTimings { copy_us: us(t0, t1), convert_us: 0, encode_us: us(t1, std::time::Instant::now()) };
+        out
     }
 
     /// An IOSurface: a BGRA or NV12 one as it lies in GPU memory; a packed NV12 one copied on the
@@ -394,7 +434,12 @@ impl StreamEncoderOs for AppleStreamEncoder {
 
     fn set_bitrate_kbps(&mut self, kbps: u32) {
         self.bitrate_kbps = kbps;
-        unsafe { set_i32_property(self.session, kVTCompressionPropertyKey_AverageBitRate, (kbps as i64 * 1000).min(i32::MAX as i64) as i32) };
+        unsafe {
+            set_i32_property(self.session, kVTCompressionPropertyKey_AverageBitRate, (kbps as i64 * 1000).min(i32::MAX as i64) as i32);
+            if self.fast {
+                set_data_rate_limit(self.session, kbps, self.fps);
+            }
+        }
     }
 
     fn timings(&self) -> EncodeTimings {
@@ -402,7 +447,7 @@ impl StreamEncoderOs for AppleStreamEncoder {
     }
 
     fn description(&self) -> String {
-        format!("{} {}x{} {} fps {} kbit/s (VideoToolbox)", if self.hevc { "H.265" } else { "H.264" }, self.width, self.height, self.fps, self.bitrate_kbps)
+        format!("{} {}{}x{} {} fps {} kbit/s (VideoToolbox)", if self.hevc { "H.265" } else { "H.264" }, if self.fast { "fast " } else { "" }, self.width, self.height, self.fps, self.bitrate_kbps)
     }
 }
 

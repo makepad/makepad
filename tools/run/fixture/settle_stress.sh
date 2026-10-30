@@ -12,17 +12,16 @@
 # counted fn must keep counting, and rm + count again must work. Then a clean quit (exit status 0).
 # The output may hold no fault, panic, abort or POISONED line; job-arena survivors are reported (they
 # cost memory, not safety) and fail the run only with STRICT_JOBS=1.
-# Run from the workspace root after `cargo build --release -p makepad-run` and `-p makepad-remote`.
+# Run from the workspace root (the JIT and makepad-remote run through `cargo run --profile host`).
 # PACKAGES (default "makepad-app-calculator"), PERIOD (ms, default 300), AFTER (seconds of stress after
-# the first settle, default 8), WAIT (seconds to wait for the first frame / settle, default 90), TARGET
-# (default target/release). A run passes only with at least one settle rebuild (NEED_REBUILD=0: off).
+# the first settle, default 8), WAIT (seconds to wait for the first frame / settle, default 90), the JIT runs
+# through `cargo run --profile host`. A run passes only with at least one settle rebuild (NEED_REBUILD=0: off).
 # Logs stay in a scratch directory under TMPDIR (removed on success unless KEEP=1).
-T=${TARGET:-target/release}
+ROOT=$(pwd)
+# the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
+J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
+JR="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-remote --bin makepad-remote --"
 PACKAGES=${PACKAGES:-makepad-app-calculator}
-if [ ! -x "$T/makepad-remote" ]; then
-    echo "settle_stress: FAIL: $T/makepad-remote is missing (cargo build --release -p makepad-remote): the probes cannot be driven"
-    exit 2
-fi
 PERIOD=${PERIOD:-300}
 AFTER=${AFTER:-8}
 WAIT=${WAIT:-90}
@@ -40,15 +39,15 @@ for pkg in $PACKAGES; do
     MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$td" \
         MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" MAKEPAD_WINDOW=1280x800@1 MAKEPAD_RUN_VERBOSE=1 \
         MAKEPAD_RUN_SETTLE_STRESS="$PERIOD" MAKEPAD_RUN_ZAP=1 MAKEPAD_RUN_JOB_CHECK=1 \
-        "$T/makepad" run "$pkg" > "$d/run.log" 2>&1 &
+        $J run "$pkg" > "$d/run.log" 2>&1 &
     pid=$!
     : > "$d/fixture.log"
-    ask() { TMPDIR="$td" "$T/makepad" inspect $pid "$@" as=json >> "$d/probes.log" 2>&1; }
-    drive() { for r in 1 2 3; do TMPDIR="$td" "$T/makepad-remote" app $pid $DRIVE > /dev/null 2>&1; done; }
-    hits() { TMPDIR="$td" "$T/makepad" inspect $pid probes as=json 2>/dev/null | grep -o '"hits":[0-9]*' | head -1 | cut -d: -f2; }
+    ask() { TMPDIR="$td" $J inspect $pid "$@" as=json >> "$d/probes.log" 2>&1; }
+    drive() { for r in 1 2 3; do TMPDIR="$td" $JR app $pid $DRIVE > /dev/null 2>&1; done; }
+    hits() { TMPDIR="$td" $J inspect $pid probes as=json 2>/dev/null | grep -o '"hits":[0-9]*' | head -1 | cut -d: -f2; }
     settles() { grep -ac "makepad-run mem: settle at" "$d/run.log"; }
     n=0
-    until TMPDIR="$td" "$T/makepad" inspect $pid ping > /dev/null 2>&1 && grep -q "first frame at" "$d/run.log"; do
+    until TMPDIR="$td" $J inspect $pid ping > /dev/null 2>&1 && grep -q "first frame at" "$d/run.log"; do
         n=$((n + 1)); [ $n -ge $((WAIT * 5)) ] && break
         kill -0 $pid 2>/dev/null || break
         sleep 0.2
@@ -76,7 +75,7 @@ for pkg in $PACKAGES; do
         done
         i=0
         while [ $i -lt 3 ]; do drive; sleep 1; i=$((i + 1)); done
-        TMPDIR="$td" "$T/makepad" inspect $pid memory > "$d/memory.log" 2>&1
+        TMPDIR="$td" $J inspect $pid memory > "$d/memory.log" 2>&1
         h1=$(hits)
         ask rm all
         ask count "$PROBE"

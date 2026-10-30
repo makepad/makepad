@@ -6,17 +6,19 @@
 #   unqualified and as `crate::vector::FONT` (the probe is a child module of the hooked fn's);
 # - `eval` in a module's scope, the read-only refusal, `static` with its target allocation;
 # - a parked panic: `eval` in the panic's scope by default, `locals`, then the panic resumes.
-# Run from the workspace root after `cargo build --release -p makepad-run`. TARGET (default
-# target/release). Prints one PASS/FAIL line per check and a last line `inspect_probe: N/M passed`.
-T=${TARGET:-target/release}
+# Run from the workspace root (the JIT runs through `cargo run --profile host`). the JIT runs through `cargo
+# run --profile host`. Prints one PASS/FAIL line per check and a last line `inspect_probe: N/M passed`.
+ROOT=$(pwd)
+# the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
+J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
 dir=$(mktemp -d "${TMPDIR:-/tmp}/inspect_probe.XXXXXX") || exit 1
 mkdir -p "$dir/home" "$dir/t"
 MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MAKEPAD_HOME="$dir/home" TMPDIR="$dir/t" \
     MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_RUN_CACHE_DIR="$dir/cache" MAKEPAD_RUN_PANIC_PARK=600 \
     PROBE_TRIGGER="$dir/trigger" PROBE_SECS=300 \
-    "$T/makepad" run relax-provided-fixture --bin relax-inspect-probe > "$dir/run.log" 2>&1 &
+    $J run relax-provided-fixture --bin relax-inspect-probe > "$dir/run.log" 2>&1 &
 pid=$!
-ask() { TMPDIR="$dir/t" "$T/makepad" inspect $pid "$@" as=json 2>&1; }
+ask() { TMPDIR="$dir/t" $J inspect $pid "$@" as=json 2>&1; }
 n=0
 until ask ping > /dev/null 2>&1; do
     n=$((n + 1)); [ $n -ge 600 ] && break

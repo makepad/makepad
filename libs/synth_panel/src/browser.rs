@@ -109,7 +109,12 @@ enum Hit {
     Similar(usize),
     Pad(usize, Name),
     Audition(usize),
+    /// A library's Download: its licence shown to accept.
     Library(String),
+    /// The licence accepted: the download starts.
+    LibraryAccept(String),
+    LibraryCancel,
+    LibraryStop(String),
 }
 
 /// The preset index once built (a type of its own for the derive).
@@ -213,6 +218,19 @@ pub struct Browser {
     /// a person: typing a search lifts it.
     #[rust]
     auto_engine: bool,
+    /// The index's generation it holds (a newer one: refresh).
+    #[rust]
+    index_gen: u64,
+    /// The engines' downloadable libraries, as of the last refresh.
+    #[rust]
+    libraries: Vec<browse::Library>,
+    /// The library whose licence is shown to accept before its download.
+    #[rust]
+    licence_for: Option<String>,
+    /// The library cards drawn (their rect and what they say), for the
+    /// semantic tree.
+    #[rust]
+    cards: Vec<(Rect, String)>,
 }
 
 impl Browser {
@@ -269,7 +287,9 @@ impl Browser {
 
     /// The score changed: what the node is now, the score's own entries.
     pub fn refresh(&mut self) {
+        self.index_gen = browse::generation();
         self.index = browse::index();
+        self.libraries = browse::libraries();
         self.extra = synth::extras();
         self.current = synth::current(&self.node);
         self.used = synth::used();
@@ -488,6 +508,10 @@ impl Browser {
 
     /// Resting on a row for a moment auditions it; true while it waits.
     pub fn tick(&mut self) -> bool {
+        if self.index_gen != browse::generation() && browse::index().is_some() {
+            self.refresh();
+            return false;
+        }
         if self.index.is_none() {
             if browse::index().is_some() {
                 self.refresh();
@@ -641,7 +665,13 @@ impl Browser {
                             synth::pad(&self.node, if current { None } else { Some(&e.choice) }, drum);
                         }
                     }
-                    Some(Hit::Library(engine)) => synth::get_library(&engine),
+                    Some(Hit::Library(engine)) => self.licence_for = Some(engine),
+                    Some(Hit::LibraryAccept(engine)) => {
+                        self.licence_for = None;
+                        synth::get_library(&engine);
+                    }
+                    Some(Hit::LibraryCancel) => self.licence_for = None,
+                    Some(Hit::LibraryStop(engine)) => synth::stop_library(&engine),
                     Some(Hit::Audition(i)) => {
                         if let Some(e) = self.entry(i).cloned() {
                             synth::preview(&self.node, Some(&e.choice));
@@ -691,6 +721,30 @@ impl Browser {
         out
     }
 
+    /// The library cards and their buttons as semantic parts of the widget
+    /// that draws the browser (keys 1 and up: the holder's own parts use
+    /// other keys).
+    pub fn semantics_parts(&self, out: &mut Vec<(u64, Option<u64>, makepad_widgets::makepad_platform::a11y_tree::Node)>) {
+        use makepad_widgets::makepad_platform::{a11y::semantic_rect, a11y_tree};
+        if !self.open {
+            return;
+        }
+        const BASE: u64 = 0x6272_6f77_7365_0000;
+        for (i, (rect, text)) in self.cards.iter().enumerate() {
+            out.push((BASE + i as u64, None, a11y_tree::Node { role: a11y_tree::Role::StaticText, class: "BrowserLibrary".into(), bounds: semantic_rect(*rect), name: text.clone(), ..Default::default() }));
+        }
+        for (i, (rect, hit)) in self.hits.iter().enumerate() {
+            let name = match hit {
+                Hit::Library(_) => "Download",
+                Hit::LibraryAccept(_) => "Accept licence and download",
+                Hit::LibraryCancel => "Cancel",
+                Hit::LibraryStop(_) => "Stop",
+                _ => continue,
+            };
+            out.push((BASE + 0x100 + i as u64, None, a11y_tree::Node { role: a11y_tree::Role::Button, class: "BrowserLibraryButton".into(), bounds: semantic_rect(*rect), name: name.into(), ..Default::default() }));
+        }
+    }
+
     /// Where an anchored browser goes for an anchor at `at` within `clip`.
     pub fn place(at: DVec2, clip: Rect) -> Rect {
         let w = (clip.size.x - 16.0).clamp(420.0, 900.0);
@@ -731,13 +785,15 @@ impl Browser {
         if !self.open {
             return false;
         }
-        if self.index.is_none() && browse::index().is_some() {
+        if self.index_gen != browse::generation() && browse::index().is_some() {
+            // A newer index (the first, or a library installed since).
             self.refresh();
         }
         self.rebuild();
         let p = makepad_look::palette::get(cx);
         self.rect = rect;
         self.hits.clear();
+        self.cards.clear();
         if !self.popped && !self.inline {
             // A shadow, then the panel.
             self.draw_shape.fill_round(cx, Rect { pos: rect.pos + dvec2(0.0, 3.0), size: rect.size }, color(0, 0.35), R_GROUP + 2.0);
@@ -813,7 +869,7 @@ impl Browser {
         if left_w > 0.0 {
             self.draw_left(cx, &p, left);
         }
-        let waiting = self.draw_mid(cx, &p, mid);
+        let waiting = self.draw_mid(cx, &p, mid, left_w == 0.0);
         if show_right {
             self.draw_right(cx, &p, right);
         }
@@ -845,6 +901,8 @@ impl Browser {
             }
             this.hit(rr, hit);
         };
+        // A library not installed yet, plainly, before anything else.
+        y = self.draw_libraries(cx, p, x, y, w);
         let sources: [(&str, Source, usize); 3] = [
             ("★ Favourites", Source::Favourites, self.favourites.len()),
             ("Recent", Source::Recent, self.recent.len()),
@@ -896,21 +954,6 @@ impl Browser {
                 y += SIDE_ROW;
             }
         }
-        // Libraries to download (their licence named before anything is
-        // installed).
-        let wanted: Vec<browse::Library> = browse::libraries().into_iter().filter(|l| !l.installed).collect();
-        if !wanted.is_empty() {
-            y += 8.0;
-            self.draw_caps.color = color(p.muted, 1.0);
-            self.draw_caps.draw_abs(cx, dvec2(x + 4.0, y), "LIBRARIES");
-            y += 14.0;
-            for lib in wanted {
-                let label = format!("Get {} ({})", lib.title, lib.licence);
-                let (label, _) = makepad_value_pickers::panel::control::fit_text(&self.draw_text, cx, &label, w - 8.0);
-                row(self, cx, y, &label, None, false, Hit::Library(lib.engine.clone()));
-                y += SIDE_ROW;
-            }
-        }
         // As far as it scrolls: its end at the bottom.
         let content = y - y0 + 8.0;
         self.left_scroll = self.left_scroll.min((content - r.size.y).max(0.0));
@@ -919,7 +962,18 @@ impl Browser {
 
     /// The list: the tag chips, then a row per entry in view. True while
     /// a rested row waits to be heard.
-    fn draw_mid(&mut self, cx: &mut Cx2d, p: &makepad_look::palette::Palette, r: Rect) -> bool {
+    fn draw_mid(&mut self, cx: &mut Cx2d, p: &makepad_look::palette::Palette, r: Rect, cards: bool) -> bool {
+        if let Some(engine) = self.licence_for.clone() {
+            self.draw_licence(cx, p, r, &engine);
+            return false;
+        }
+        // No left column (a narrow panel): the libraries to get on top.
+        let r = if cards {
+            let y = self.draw_libraries(cx, p, r.pos.x + 10.0, r.pos.y + 8.0, r.size.x - 20.0);
+            Rect { pos: dvec2(r.pos.x, y), size: dvec2(r.size.x, (r.pos.y + r.size.y - y).max(0.0)) }
+        } else {
+            r
+        };
         let x0 = r.pos.x + 10.0;
         // The character tags that narrow what shows.
         let mut x = x0;
@@ -1106,6 +1160,99 @@ impl Browser {
         cx.end_turtle();
     }
 
+    /// The libraries not installed: a card each (what, its size and
+    /// licence, Download; while it installs, where it stands and Stop).
+    /// Returns where the next row goes.
+    fn draw_libraries(&mut self, cx: &mut Cx2d, p: &makepad_look::palette::Palette, x: f64, mut y: f64, w: f64) -> f64 {
+        if !synth::installs_libraries() {
+            return y;
+        }
+        // Until each is installed, asked again as drawn (an install that
+        // just ended shows at once; a few file checks).
+        if self.libraries.iter().any(|l| !l.installed) {
+            self.libraries = browse::libraries();
+        }
+        for lib in self.libraries.clone() {
+            let status = synth::library_status(&lib.engine);
+            if lib.installed && status.is_none() {
+                continue;
+            }
+            let busy = status.as_ref().is_some_and(|s| s.busy);
+            let title = wrap(&self.draw_text, cx, &format!("{} not installed", lib.title), w - 12.0);
+            let size = wrap(&self.draw_small, cx, &format!("{:.0} MB · {}", lib.bytes as f64 / 1_000_000.0, lib.licence), w - 12.0);
+            let note: Vec<String> = status.as_ref().filter(|s| !s.text.is_empty()).map(|s| wrap(&self.draw_small, cx, &s.text, w - 12.0).into_iter().take(3).collect()).unwrap_or_default();
+            let h = 6.0 + 13.0 + title.len() as f64 * 13.0 + size.len() as f64 * 12.0 + 4.0 + if note.is_empty() { 0.0 } else { note.len() as f64 * 12.0 + 4.0 } + 28.0;
+            let card = Rect { pos: dvec2(x - 2.0, y), size: dvec2(w + 4.0, h) };
+            self.draw_shape.edged_round(cx, card, color(p.accent_wash, 0.6), color(p.accent, 0.6), 1.0, R_CONTROL);
+            let said = [title.join(" "), size.join(" "), note.join(" ")].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" · ");
+            self.cards.push((card, said));
+            y += 6.0;
+            self.draw_caps.color = color(p.muted, 1.0);
+            self.draw_caps.draw_abs(cx, dvec2(x + 6.0, y), &lib.title.to_uppercase());
+            y += 13.0;
+            self.draw_text.color = color(p.text_bright, 1.0);
+            for line in title {
+                self.draw_text.draw_abs(cx, dvec2(x + 6.0, y), &line);
+                y += 13.0;
+            }
+            self.draw_small.color = color(p.secondary, 1.0);
+            for line in size {
+                self.draw_small.draw_abs(cx, dvec2(x + 6.0, y + 1.0), &line);
+                y += 12.0;
+            }
+            y += 4.0;
+            if !note.is_empty() {
+                self.draw_small.color = color(if busy { p.info } else { p.amber }, 1.0);
+                for line in note {
+                    self.draw_small.draw_abs(cx, dvec2(x + 6.0, y), &line);
+                    y += 12.0;
+                }
+                y += 4.0;
+            }
+            if status.as_ref().is_some_and(|s| s.stoppable) {
+                self.button(cx, p, dvec2(x + 6.0, y), "Stop", false, true, Hit::LibraryStop(lib.engine.clone()));
+            } else if busy {
+                self.draw_small.color = color(p.muted, 1.0);
+                self.draw_small.draw_abs(cx, dvec2(x + 6.0, y + 4.0), "it fills in here when done");
+            } else {
+                let on = self.licence_for.as_deref() == Some(lib.engine.as_str());
+                self.button(cx, p, dvec2(x + 6.0, y), "Download", on, true, Hit::Library(lib.engine.clone()));
+            }
+            y += 28.0 + 8.0;
+        }
+        y
+    }
+
+    /// A library's licence before its download: what it is, its size, what
+    /// the licence means, and Accept (the download starts) or Cancel.
+    fn draw_licence(&mut self, cx: &mut Cx2d, p: &makepad_look::palette::Palette, r: Rect, engine: &str) {
+        let Some(lib) = self.libraries.iter().find(|l| l.engine == engine).cloned() else {
+            self.licence_for = None;
+            return;
+        };
+        cx.begin_turtle(Walk::abs_rect(r), Layout::default().with_clip(true, true));
+        let x = r.pos.x + 14.0;
+        let w = r.size.x - 28.0;
+        let mut y = r.pos.y + 12.0;
+        self.draw_title.color = color(p.text_bright, 1.0);
+        self.draw_title.draw_abs(cx, dvec2(x, y), &format!("Download the {}", lib.title.to_lowercase()));
+        y += 20.0;
+        self.draw_small.color = color(p.secondary, 1.0);
+        self.draw_small.draw_abs(cx, dvec2(x, y), &format!("{} · {:.0} MB · licence {}", engine_name(&lib.engine), lib.bytes as f64 / 1_000_000.0, lib.licence));
+        y += 18.0;
+        self.draw_text.color = color(p.text, 1.0);
+        let lines = wrap(&self.draw_text, cx, &lib.notice, w);
+        let room = ((r.pos.y + r.size.y - y - 40.0) / 13.0).max(1.0) as usize;
+        for line in lines.into_iter().take(room) {
+            self.draw_text.draw_abs(cx, dvec2(x, y), &line);
+            y += 13.0;
+        }
+        y += 10.0;
+        let a = self.button(cx, p, dvec2(x, y), "Accept licence and download", true, true, Hit::LibraryAccept(lib.engine.clone()));
+        self.button(cx, p, dvec2(a.pos.x + a.size.x + 6.0, y), "Cancel", false, true, Hit::LibraryCancel);
+        cx.end_turtle();
+    }
+
     /// An entry's small picture in `r`.
     fn draw_thumb(&mut self, cx: &mut Cx2d, p: &makepad_look::palette::Palette, e: &Entry, r: Rect) {
         let ink = color(p.info, 0.95);
@@ -1244,6 +1391,10 @@ impl InstrumentBrowser {
 }
 
 impl Widget for InstrumentBrowser {
+    fn semantics_parts(&self, _cx: &Cx, out: &mut Vec<(u64, Option<u64>, makepad_widgets::makepad_platform::a11y_tree::Node)>) {
+        self.browser.semantics_parts(out);
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if self.next_frame.is_event(event).is_some() {
             if self.browser.tick() {

@@ -17,12 +17,15 @@ use std::time::{Duration, Instant};
 pub const HELP: &str = "  lease <kind> [--node N|--only N|--needs k=v,..] [--lane L] [--prio P] [--rev <branch>[@sha][,<commercial>[@sha]]]
         [--repo-dir D] [--watch-pid P] [-- cmd...]
                                           hold a lease (kinds: build test screen long timed gpu inspect gate;
-                                          --needs gui=1: a test that opens windows, only nodes with screen slots);
+                                          --needs gui=1: a test that opens windows, only nodes that take screen leases);
                                           with a cmd: run it there and exit with its code. --node N: N when it can
                                           take it, else (after 2 min, or at once when N is held/busy/off) a node of
                                           the same arch and os (the grant line names it); --only N: N or wait
                                           (timed, screen and inspect leases always wait for the named node)
-  run <lane> <kind> [--node N|--needs ..] -- cmd...   ship this worktree to the node, run the cmd under a lease
+  run <lane> <kind> [--node N|--needs ..] -- cmd...   a lease at this worktree's HEAD (the node's one tree moves
+                                          there), its uncommitted changes shipped on top, the cmd run there;
+                                          run the JIT as `cargo run --profile host -p makepad-run --bin
+                                          makepad -- <args>` (the node's one JIT; a ~0.2 s no-op when warm)
   get <lane> <rel> <local-dir> [--node N] [--lease L]
                                           copy results back from the lane's dir on its node (`src/..`: the tree
                                           `run` ships, `target/..`: its target; with --lease: that live lease's
@@ -36,7 +39,7 @@ pub const HELP: &str = "  lease <kind> [--node N|--only N|--needs k=v,..] [--lan
   queue | leases [--all]                  live and waiting leases, positions and reasons
   nodes                                   capabilities, dev switch and leases per node
   node <n> dev on|off                     the node's dev switch (the user's decision)
-  node <n> [role pool|suite|bench|user-wm|device] [set slots.build=3 disk_floor_gb=40 ...]
+  node <n> [role pool|suite|bench|user-wm|device] [set slots.screen=0 disk_floor_gb=40 ...]
                                           the node's role and budgets (its lease.conf, kept on the node)
   disk <node> [--dry-run]                 the node's disk categories and reclaim
   desk <node> [on|off]                    the Desk Link endpoint of a JIT host (its own render, app input)
@@ -456,41 +459,79 @@ fn shell_quote(v: &str) -> String {
     }
 }
 
-/// Ships the worktree (tracked + untracked-not-ignored files that exist, + apps/commercial, +
-/// DEVHUB_ALSO) to the lease's work dir over the devhub link ([`super::ship`]: a file goes when
-/// its size, mtime or executable bit differ there), with its file list; the node then prunes the
-/// files the previous ship had and this one has not (deleted on the lane's side).
+/// A branch name the node's store takes as a ref label.
+fn valid_label(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 128 && !s.starts_with(['-', '/', '.']) && !s.ends_with(['/', '.']) && !s.contains("..") && !s.contains("//") && !s.ends_with(".lock") && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/'))
+}
+
+/// The worktree's revision for `run`: its HEAD (+ the nested commercial's), as a pinned `--rev`
+/// (`<branch>@<sha>[,<branch>@<sha>]`; a detached HEAD is labelled `run-<lane>`).
+fn head_rev(root: &Path, lane: &str) -> Result<String, String> {
+    let side = |dir: &Path| -> Result<String, String> {
+        let sha = git(dir, &["rev-parse", "HEAD"]).ok_or_else(|| format!("{}: no HEAD", dir.display()))?;
+        let branch = git(dir, &["symbolic-ref", "-q", "--short", "HEAD"]).filter(|b| valid_label(b)).unwrap_or_else(|| format!("run-{lane}"));
+        Ok(format!("{branch}@{sha}"))
+    };
+    let mut spec = side(root)?;
+    if root.join("apps/commercial/.git").exists() {
+        spec = format!("{spec},{}", side(&root.join("apps/commercial"))?);
+    }
+    super::pin_revs(root, &spec)
+}
+
+/// What the worktree holds on top of its HEAD: (files to ship, tracked files deleted), as paths
+/// from the root (commercial ones under `apps/commercial/`). Untracked files that are not ignored
+/// count; ignored ones (target, local) do not.
+fn overlay(root: &Path) -> Result<(Vec<String>, Vec<String>), String> {
+    let (mut ship, mut deleted) = (Vec::new(), Vec::new());
+    let mut side = |dir: &Path, prefix: &str| -> Result<(), String> {
+        let out = super::wt::git(Some(dir), None, &["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--ignore-submodules=all"])?;
+        for e in out.split('\0').filter(|e| e.len() > 3) {
+            let (xy, path) = e.split_at(3);
+            let path = format!("{prefix}{path}");
+            if prefix.is_empty() && path.starts_with("apps/commercial/") {
+                continue;
+            }
+            if xy.contains('D') {
+                deleted.push(path);
+            } else if std::fs::symlink_metadata(root.join(&path)).is_ok_and(|m| !m.is_dir()) {
+                ship.push(path);
+            }
+        }
+        Ok(())
+    };
+    side(root, "")?;
+    if root.join("apps/commercial/.git").exists() {
+        side(&root.join("apps/commercial"), "apps/commercial/")?;
+    }
+    ship.sort();
+    ship.dedup();
+    deleted.sort();
+    deleted.dedup();
+    Ok((ship, deleted))
+}
+
+/// Ships what the worktree holds on top of its HEAD (+ DEVHUB_ALSO) into the lease's tree, which
+/// the node moved to that HEAD already ([`super::ship`]: a file goes when its size, mtime or
+/// executable bit differ there); then `ship-done` names every shipped and deleted path, so the
+/// node removes the deleted ones now and undoes all of them when the lease ends.
 fn ship(c: &Client, root: &Path, held: &Held) -> Result<(), String> {
     if held.work.is_empty() {
         return Err(format!("{}: no work dir to ship to", held.id));
     }
-    let mut files: Vec<String> = super::wt::git(Some(root), None, &["ls-files", "-co", "--exclude-standard"]).map(|s| s.trim().to_string()).map_err(|e| format!("git ls-files failed: {e}"))?.lines().map(str::to_string).collect();
-    if root.join("apps/commercial/.git").exists() {
-        if let Some(com) = git(&root.join("apps/commercial"), &["ls-files", "-co", "--exclude-standard"]) {
-            files.extend(com.lines().map(|f| format!("apps/commercial/{f}")));
-        }
-    }
-    // only what is there: deleted-but-unstaged files, dangling links and gitlinks are not shipped
-    files.retain(|f| {
-        let p = root.join(f);
-        p.exists() && std::fs::symlink_metadata(&p).is_ok_and(|m| !m.is_dir())
-    });
-    files.sort();
-    files.dedup();
-    let mut all = files.clone();
+    let (mut files, deleted) = overlay(root)?;
     for p in std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace() {
         if !root.join(p).exists() {
             return Err(format!("DEVHUB_ALSO path missing: {p}"));
         }
-        // shipped, never in the prune list: two runs with different DEVHUB_ALSO keep each other's files
-        all.push(p.to_string());
+        files.push(p.to_string());
     }
     let mut entries = Vec::new();
-    for f in &all {
+    for f in &files {
         super::ship::entries(root, f, &mut entries)?;
     }
     let t = Instant::now();
-    // the lease is beaten while the tree goes (a first ship of a whole tree takes a while)
+    // the lease is beaten while the files go
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (bc, bd, bid) = (c.clone(), done.clone(), held.id.clone());
     let beater = std::thread::spawn(move || {
@@ -504,24 +545,23 @@ fn ship(c: &Client, root: &Path, held: &Held) -> Result<(), String> {
             }
         }
     });
-    let sent = super::ship::send(c, &held.node, &held.id, root, &entries, &format!("{}\n", files.join("\n")));
+    let sent = if entries.is_empty() { Ok(super::ship::Shipped::default()) } else { super::ship::send(c, &held.node, &held.id, root, &entries) };
     done.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = beater.join();
     let sent = sent?;
-    if sent.sent > 0 {
-        eprintln!("{} {}: shipped {} of {} files ({} KB) in {:.1} s", held.id, held.node, sent.sent, sent.files, sent.bytes >> 10, t.elapsed().as_secs_f64());
-    }
-    let v = node_one(c, &held.node, "lease-prune", &format!("lease-prune {}", held.id))?;
-    let n = n(&v, "pruned");
-    if n > 0.0 {
-        eprintln!("{} {}: {n} file(s) deleted on the lane's side removed", held.id, held.node);
-    }
+    let paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
+    let list = |v: &[String]| v.iter().map(|p| makepad_remote::json_str(p)).collect::<Vec<_>>().join(",");
+    let body = format!("{{\"shipped\":[{}],\"deleted\":[{}]}}", list(&paths), list(&deleted));
+    node_one(c, &held.node, "ship-done", &format!("ship-done {} {}", held.id, makepad_network::digest::base64_encode(body.as_bytes())))?;
+    eprintln!("{} {}: tree at the worktree's HEAD; shipped {} changed file(s) ({} KB, {} sent) and {} deletion(s) on top in {:.1} s", held.id, held.node, paths.len(), sent.bytes >> 10, sent.sent, deleted.len(), t.elapsed().as_secs_f64());
     Ok(())
 }
 
-/// `run <lane> <kind> … -- cmd`: lease, ship, run, release.
+/// `run <lane> <kind> … -- cmd`: a lease at the worktree's HEAD (the node moves its one tree
+/// there), the worktree's uncommitted changes shipped on top, the cmd run, the lease released (the
+/// node undoes the shipped changes and puts its tree back on the shared commits).
 fn run(lane: &str, kind: &str, rest: &[&str]) -> i32 {
-    let o = match parse(kind, Some(lane), rest) {
+    let mut o = match parse(kind, Some(lane), rest) {
         Ok(o) if !o.cmd.is_empty() => o,
         Ok(_) => {
             eprintln!("makepad devhub run <lane> <kind> [--node N|--needs ..] -- cmd...");
@@ -537,6 +577,16 @@ fn run(lane: &str, kind: &str, rest: &[&str]) -> i32 {
         return 2;
     };
     let rel = git(&cwd(), &["rev-parse", "--show-prefix"]).filter(|p| !p.is_empty()).unwrap_or_else(|| ".".into());
+    match head_rev(&root, lane) {
+        Ok(rev) => {
+            o.req.rev = Some(rev);
+            o.req.repo_dir = Some(root.to_string_lossy().into_owned());
+        }
+        Err(e) => {
+            eprintln!("makepad devhub run: {e}");
+            return 2;
+        }
+    }
     let c = match master() {
         Ok(c) => c,
         Err(e) => return fail(e),
@@ -545,7 +595,6 @@ fn run(lane: &str, kind: &str, rest: &[&str]) -> i32 {
         Ok(h) => h,
         Err(code) => return code,
     };
-    eprintln!("{} {}@{}: shipping {}", held.id, o.req.kind.as_str(), held.node, root.display());
     if let Err(e) = ship(&c, &root, &held) {
         release(&c, &held.id, None);
         return fail(e);

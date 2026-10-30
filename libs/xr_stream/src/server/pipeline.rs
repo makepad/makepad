@@ -4,7 +4,7 @@
 //! `makepad_desk_link::{tiles, rate}`), the flow that bounds what is in flight.
 
 use super::debug::{dump_picture, tune, Tune};
-use super::foveation::{foveation, foveation_peak};
+use super::foveation::fovea_setting;
 use super::ServerShared;
 use makepad_desk_link::rate::{effort, LinkTrip, RateControl, Second};
 use makepad_desk_link::tiles::{TileDone, TileEncoders, TileSink, TileSpec, TileWork};
@@ -286,11 +286,17 @@ pub(crate) struct Core {
     pub(crate) ending: Arc<AtomicBool>,
     /// The display rate the session's encoders are made for (Hz).
     pub(crate) fps: u32,
+    /// The eye size the app renders at, and how its columns are foveated into the picture.
+    pub(crate) eye: [u32; 2],
+    pub(crate) fovea: Fovea,
 }
 
 /// The session the app's pictures go to.
 pub(crate) struct Live {
     pub(crate) eye: [u32; 2],
+    /// The picture's foveation and the eye column's encoded size (`Fovea::encoded`).
+    pub(crate) fovea: Fovea,
+    pub(crate) encoded: [u32; 2],
     pub(crate) tx: SyncSender<Picture>,
     pub(crate) flow: Arc<Flow>,
     pub(crate) tiles: u32,
@@ -300,7 +306,9 @@ pub(crate) struct Live {
 impl Core {
     pub(crate) fn start(shared: Arc<ServerShared>, eye: [u32; 2], fps: u32, codec: StreamVideoCodec) -> Result<Core, String> {
         let log = shared.log.clone();
-        let size = picture_size(eye);
+        let fovea = fovea_setting();
+        let encoded = fovea.encoded(eye);
+        let size = picture_size(encoded);
         let rate = Arc::new(Rate::new(shared.clone()));
         let kbps = rate.current();
         // a stream per eye on its own engine when the GPU has two
@@ -383,7 +391,7 @@ impl Core {
             std::thread::Builder::new()
                 .name("xr-host-pictures".into())
                 .spawn(move || {
-                    let (mut pts, mut foveated) = (0i64, false);
+                    let mut pts = 0i64;
                     while !ending.load(Ordering::Acquire) {
                         let Ok(p) = rx.recv_timeout(Duration::from_millis(100)) else { continue };
                         let pose = {
@@ -400,18 +408,6 @@ impl Core {
                             Some(a) => (a.seq, a.eyes, p.built_at.saturating_duration_since(a.at).as_micros() as u32),
                             None => (0, [XrRenderEye::default(); 2], 0),
                         };
-                        // each eye's foveation, once its field of view is known (its first picture)
-                        if !foveated && eyes.iter().all(|e| e.fov != [0.0; 4]) {
-                            foveated = true;
-                            if let Some(peak) = foveation_peak() {
-                                for t in 0..encoders.len() {
-                                    let Some(grid) = encoders.qp_grid(t) else { continue };
-                                    let (_, tile_size) = encoders.tile(t);
-                                    encoders.set_qp_map(t, foveation(grid, tile_size, eyes[t].fov, peak));
-                                    log(&format!("xr host: eye {t}: foveated encode ({}x{} QP regions of {}x{} px, +{peak} QP at the edge)", grid.cols, grid.rows, grid.texel[0], grid.texel[1]));
-                                }
-                            }
-                        }
                         if let Some(dir) = &dump {
                             dump_picture(dir, &p, size, &log);
                         }
@@ -430,9 +426,12 @@ impl Core {
                 })
                 .map_err(|e| e.to_string())?;
         }
-        *shared.live.lock().unwrap() = Some(Live { eye, tx, flow: flow.clone(), tiles, limit: in_flight_limit() });
+        if !fovea.is_off() {
+            log(&format!("xr host: foveated encode: eyes of {}x{} as {}x{} ({:.0}% of the pixels)", eye[0], eye[1], encoded[0], encoded[1], (encoded[0] * encoded[1]) as f64 * 100.0 / (eye[0] * eye[1]).max(1) as f64));
+        }
+        *shared.live.lock().unwrap() = Some(Live { eye, fovea, encoded, tx, flow: flow.clone(), tiles, limit: in_flight_limit() });
         shared.wake();
-        Ok(Core { shared, size, tiles, codec: codec_byte, description, flow, rate, out, keyframe, poses, ending, fps })
+        Ok(Core { shared, size, tiles, codec: codec_byte, description, flow, rate, out, keyframe, poses, ending, fps, eye, fovea })
     }
 
     /// A pose from the headset: to the app's XR window, and kept to match its picture.
@@ -467,9 +466,9 @@ pub(crate) fn render_eyes(frame: &[u8]) -> [XrRenderEye; 2] {
     f.eyes.map(|e| XrRenderEye { orientation: e.pose.orientation, position: e.pose.position, fov: e.fov })
 }
 
-/// The picture for eyes of `eye` pixels: both eye columns side by side, each its colour over a
-/// band half its height (coverage and inverse depth at half resolution; `crate::xr`).
-pub fn picture_size(eye: [u32; 2]) -> [u32; 2] {
-    [eye[0] * 2, eye[1] * 3 / 2]
+/// The picture for eye columns of `encoded` pixels (`Fovea::encoded`): both side by side, each its
+/// colour over a band half its height (coverage and inverse depth at half resolution; `crate::xr`).
+pub fn picture_size(encoded: [u32; 2]) -> [u32; 2] {
+    [encoded[0] * 2, encoded[1] * 3 / 2]
 }
 

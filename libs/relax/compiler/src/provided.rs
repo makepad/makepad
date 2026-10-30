@@ -60,6 +60,9 @@ pub struct ProvidedCrate {
     /// plain types by def path: rustc's (size, align, field offsets), checked against Relax's at
     /// unit creation
     pub layouts: HashMap<String, (u64, u64, &'static [u64])>,
+    /// statics marked `#[relax_api(per_side)]`, by def path: JIT code keeps its own instance
+    /// (lower.rs check_provided_static)
+    pub per_side: std::collections::HashSet<String>,
     pub last_panic: LastPanicFn,
     /// the source identity rustc built it from (srchash.rs; the loader's build.rs): what
     /// check_sources compares the program's copy of the crate with
@@ -73,7 +76,7 @@ pub struct ProvidedCrate {
 
 impl Clone for ProvidedCrate {
     fn clone(&self) -> Self {
-        ProvidedCrate { name: self.name.clone(), shims: self.shims.clone(), types: self.types.clone(), layouts: self.layouts.clone(), last_panic: self.last_panic, source: self.source, binding: self.binding, manifest: self.manifest }
+        ProvidedCrate { name: self.name.clone(), shims: self.shims.clone(), types: self.types.clone(), layouts: self.layouts.clone(), per_side: self.per_side.clone(), last_panic: self.last_panic, source: self.source, binding: self.binding, manifest: self.manifest }
     }
 }
 
@@ -91,13 +94,14 @@ pub fn register(
     shims: HashMap<String, Shim>,
     types: HashMap<String, (u64, u64, Option<DropFn>, &'static [u64])>,
     layouts: HashMap<String, (u64, u64, &'static [u64])>,
+    per_side: std::collections::HashSet<String>,
     last_panic: LastPanicFn,
     source: u64,
     manifest: &'static [u8],
 ) {
     let name = name.replace('-', "_");
-    let binding = binding_identity(&name, &shims, &types, &layouts);
-    REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).push(ProvidedCrate { name, shims, types, layouts, last_panic, source, binding, manifest });
+    let binding = binding_identity(&name, &shims, &types, &layouts, &per_side);
+    REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).push(ProvidedCrate { name, shims, types, layouts, per_side, last_panic, source, binding, manifest });
 }
 
 /// The identity of what JIT code depends on in a provided crate beyond its source text (which
@@ -113,6 +117,7 @@ fn binding_identity(
     shims: &HashMap<String, Shim>,
     types: &HashMap<String, (u64, u64, Option<DropFn>, &'static [u64])>,
     layouts: &HashMap<String, (u64, u64, &'static [u64])>,
+    per_side: &std::collections::HashSet<String>,
 ) -> u64 {
     let mut h = crate::sip::Sip128::new();
     h.str("provided-binding");
@@ -149,6 +154,12 @@ fn binding_identity(
         h.u64(*align);
         h.u32(offsets.len() as u32);
         for x in offsets.iter() { h.u64(*x); }
+    }
+    let mut keys: Vec<&String> = per_side.iter().collect();
+    keys.sort_unstable();
+    h.u32(keys.len() as u32);
+    for k in keys {
+        h.str(k);
     }
     h.finish128() as u64
 }

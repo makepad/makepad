@@ -58,3 +58,8 @@ required-features = ["server"]
 name = "server_input"
 path = "tests/server_input.rs"
 required-features = ["server"]
+
+[[test]]
+name = "slow_reader"
+path = "tests/slow_reader.rs"
+required-features = ["server"]

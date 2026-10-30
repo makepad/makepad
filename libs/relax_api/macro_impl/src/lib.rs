@@ -13,7 +13,8 @@ pub fn relax_api_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         Some("impl") => expand_impl(&toks, &args),
         Some("fn") => expand_fn(&toks, &args),
         Some("struct") | Some("enum") => expand_type(&toks, &args),
-        _ => Err("#[relax_api] goes on a fn, an impl block, a struct or an enum".to_string()),
+        Some("static") => expand_static(&toks, &args),
+        _ => Err("#[relax_api] goes on a fn, an impl block, a struct, an enum or a static".to_string()),
     };
     match res {
         Ok((item, extra)) => {
@@ -61,6 +62,7 @@ fn item_kind(toks: &[TokenTree]) -> Option<&'static str> {
                 "fn" => return Some("fn"),
                 "struct" => return Some("struct"),
                 "enum" => return Some("enum"),
+                "static" => return Some("static"),
                 _ => i += 1,
             },
             // pub(crate), extern "C" ..
@@ -622,6 +624,35 @@ fn expand_impl(toks: &[TokenTree], args: &[String]) -> Result<(TokenStream, Stri
     out.push(TokenTree::Group(ng));
     out.extend(toks[body_at + 1..].iter().cloned());
     Ok((out.into_iter().collect(), extra))
+}
+
+/// `#[relax_api(per_side)] static NAME: T = ..;`: an entry naming the static (its key the def
+/// path), so Relax gives JIT code its own instance instead of refusing the read.
+fn expand_static(toks: &[TokenTree], args: &[String]) -> Result<(TokenStream, String), String> {
+    let mut i = skip_attrs(toks, 0);
+    while !is_ident(toks.get(i), "static") {
+        i += 1;
+    }
+    i += 1;
+    if is_ident(toks.get(i), "mut") {
+        return Err("a `static mut` is not marked: use a static with interior mutability".to_string());
+    }
+    let name = match toks.get(i) {
+        Some(TokenTree::Ident(id)) => id.to_string(),
+        _ => return Err("a static without a name".to_string()),
+    };
+    if !args.iter().any(|a| a == "per_side") || args.len() != 1 {
+        return Err(format!("`{name}`: a static is marked #[relax_api(per_side)] (each side keeps its own instance)"));
+    }
+    let id = fnv(&format!("static {name}"));
+    let key = format!("{{ fn k() -> &'static str {{ concat!(module_path!(), \"::{name}\") }} k }}");
+    let none = "{ fn s() -> &'static str { \"\" } s }";
+    let extra = format!(
+        "{CFG} {SECTION} #[doc(hidden)] #[allow(non_upper_case_globals)] static __relax_api_s{id:016x}: ::makepad_relax_api::Entry = ::makepad_relax_api::Entry {{
+  kind: ::makepad_relax_api::PER_SIDE, module: module_path!(), key: {key}, sig: {none},
+  shim: None, slots: &[], size: 0, align: 0, offsets: &[], drop: None }};"
+    );
+    Ok((toks.iter().cloned().collect(), extra))
 }
 
 fn expand_type(toks: &[TokenTree], args: &[String]) -> Result<(TokenStream, String), String> {

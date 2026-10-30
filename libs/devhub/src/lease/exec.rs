@@ -2,9 +2,9 @@
 //! `policy`, `caps`, `disk`, `recover-get` / `recover-del` on the node's master endpoint
 //! (LEASE.SPEC.md "Wire").
 //!
-//! - A lease gets a workspace: with a rev, a detached worktree of the node's git store at
-//!   `<work>/wt/<lane>-<id>` (+ `apps/commercial`) and a target per tip `<work>/target/<sha12>`
-//!   (the lane's previous one renamed when free: warm); without, `<work>/lane/<lane>/src` and
+//! - A lease gets a workspace: with a rev, the node's ONE tree ([`super::tree`]: its synced
+//!   checkout, moved in place to the pinned commits) and its one target `<tree>/target` (one JIT
+//!   binary and one JIT cache per node); without, `<work>/lane/<lane>/src` and
 //!   `<work>/target/lane-<lane>`. Its scratch is `<work>/tmp/<id>` (TMPDIR, run logs).
 //! - A run is the argv as given (no shell), in its own session (setsid), under
 //!   `systemd-run --user --scope` when the user bus exists, `nice -n 10`, optionally pinned
@@ -12,15 +12,15 @@
 //!   (`~/.makepad/devhub/leases/<id>.json`), so a restarted hub still ends what it started.
 //! - End (release, master expiry, or 60 s without `lease-beat`: the node's own watchdog): TERM the
 //!   recorded process groups whose leader's start time still matches, 10 s grace, KILL, stop the
-//!   scopes; a survivor is a `lease_leak`. Worktrees with dirty files or commits no store ref
-//!   holds are committed (`WIP devhub recovery <id>`) and bundled to `<work>/recovered/` first;
-//!   never `git stash`. Nothing ends for running long.
+//!   scopes; a survivor is a `lease_leak`. The last lease on the tree that leaves changes in it:
+//!   they are committed (`WIP devhub recovery <id>`), bundled to `<work>/recovered/` and the tree
+//!   goes back to the pin; never `git stash`. The tree itself stays (warm). Nothing ends for
+//!   running long.
 //! - An inspect lease's end removes its breakpoints (`rm G<n>`) and probes (`probe rm P<n>`),
 //!   lets parked hits go (`continue all`) and resumes a pause (`resume`), over the JIT's socket.
 
 use super::caps::{self, LeaseConf};
 use super::disk::{self, Guard, Live, Roots};
-use super::wt::{dirty, git, unique_commits};
 use super::Kind;
 use crate::local::Publish;
 use crate::os;
@@ -34,19 +34,19 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 /// The services this module adds to the node's master endpoint.
-pub const WORDS: &[&str] = &["lease-start", "lease-run", "lease-log", "lease-end", "lease-beat", "lease-prune", "ship-have", "ship-put", "ship-link", "get-ls", "get-read", "policy", "lease-conf", "caps", "disk", "recover-get", "recover-del"];
+pub const WORDS: &[&str] = &["lease-start", "lease-run", "lease-log", "lease-end", "lease-beat", "ship-have", "ship-put", "ship-link", "ship-done", "get-ls", "get-read", "policy", "lease-conf", "caps", "disk", "recover-get", "recover-del"];
 
 const LOG_CHUNK: usize = 64 << 10;
 const RECOVER_CHUNK: usize = 256 << 10;
 /// `get-read` chunk and `get-ls` limit (results, not trees: big artifacts stay on the node)
 const GET_CHUNK: usize = 256 << 10;
 const GET_MAX_FILES: usize = 20_000;
-/// what `devhub run` ships with the tree: the list of shipped files (the next ship prunes the rest)
-const SHIP_LIST: &str = ".devhub-files";
 
-/// Timing knobs (tests shorten them).
+/// Timing knobs (tests shorten them) and the node's tree.
 #[derive(Clone, Debug)]
 pub struct Opts {
+    /// the node's one tree ([`super::tree::root`]); None: no rev leases (tests, JIT hosts)
+    pub tree: Option<PathBuf>,
     /// no `lease-beat` for this long: the node ends the lease itself
     pub no_beat: Duration,
     /// how often the watchdog looks
@@ -59,7 +59,7 @@ pub struct Opts {
 
 impl Default for Opts {
     fn default() -> Opts {
-        Opts { no_beat: Duration::from_secs(60), tick: Duration::from_secs(5), grace: Duration::from_secs(10), scopes: None }
+        Opts { tree: None, no_beat: Duration::from_secs(60), tick: Duration::from_secs(5), grace: Duration::from_secs(10), scopes: None }
     }
 }
 
@@ -77,12 +77,6 @@ struct Run {
     hold: os::Hold,
 }
 
-struct Ws {
-    path: PathBuf,
-    store: PathBuf,
-    repo: String,
-}
-
 struct Lease {
     id: String,
     lane: String,
@@ -91,8 +85,10 @@ struct Lease {
     target: PathBuf,
     tmp: PathBuf,
     env: Vec<(String, String)>,
-    /// makepad first, then the nested commercial one
-    ws: Vec<Ws>,
+    /// the commits it holds the node's tree at (`<makepad>[,<commercial>]`, [`super::tree::Pin`])
+    pin: Option<String>,
+    /// what `devhub run` shipped (and deleted) on top of the pin: undone at the end
+    overlay: Vec<String>,
     runs: Vec<Arc<Run>>,
     beat: Instant,
 }
@@ -111,14 +107,13 @@ impl Lease {
     }
 
     fn ledger(&self) -> String {
-        let ws: Vec<String> = self.ws.iter().map(|w| format!("{{\"path\":{},\"store\":{},\"repo\":{}}}", json_str(&w.path.to_string_lossy()), json_str(&w.store.to_string_lossy()), json_str(&w.repo))).collect();
         let runs: Vec<String> = self
             .runs
             .iter()
             .map(|r| format!("{{\"n\":{},\"pid\":{},\"start\":{},\"unit\":{},\"log\":{}}}", r.n, r.pid, r.start, r.unit.as_deref().map_or("null".into(), json_str), json_str(&r.log.to_string_lossy())))
             .collect();
         let a = self.answer();
-        format!("{{\"id\":{},\"lane\":{},\"kind\":\"{}\",\"ws\":[{}],\"runs\":[{}],{}", json_str(&self.id), json_str(&self.lane), self.kind.as_str(), ws.join(","), runs.join(","), &a[1..])
+        format!("{{\"id\":{},\"lane\":{},\"kind\":\"{}\",\"pin\":{},\"overlay\":[{}],\"runs\":[{}],{}", json_str(&self.id), json_str(&self.lane), self.kind.as_str(), self.pin.as_deref().map_or("null".into(), json_str), self.overlay.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","), runs.join(","), &a[1..])
     }
 
     fn from_ledger(text: &str) -> Option<Lease> {
@@ -131,9 +126,6 @@ impl Lease {
                 env.push((k.to_string(), x.as_str()?.to_string()));
             }
         }
-        let ws = v.get("ws").and_then(|x| x.as_arr()).map_or_else(Vec::new, |a| {
-            a.iter().filter_map(|w| Some(Ws { path: s(w, "path")?.into(), store: s(w, "store")?.into(), repo: s(w, "repo")? })).collect()
-        });
         let runs = v.get("runs").and_then(|x| x.as_arr()).map_or_else(Vec::new, |a| {
             a.iter()
                 .filter_map(|r| Some(Arc::new(Run { n: n(r, "n") as u32, pid: n(r, "pid") as u32, start: n(r, "start"), unit: s(r, "unit"), log: s(r, "log")?.into(), exit: Mutex::new(None), ours: false, hold: os::Hold::none() })))
@@ -147,7 +139,8 @@ impl Lease {
             target: s(&v, "target")?.into(),
             tmp: s(&v, "tmp")?.into(),
             env,
-            ws,
+            pin: s(&v, "pin"),
+            overlay: v.get("overlay").and_then(|x| x.as_arr()).map_or_else(Vec::new, |a| a.iter().filter_map(|p| p.as_str().map(str::to_string)).collect()),
             runs,
             beat: Instant::now(),
         })
@@ -248,6 +241,10 @@ impl Exec {
             if p.extension().is_some_and(|e| e == "json") {
                 if let Some(l) = std::fs::read_to_string(&p).ok().and_then(|t| Lease::from_ledger(&t)) {
                     back.push(l.id.clone());
+                    #[cfg(feature = "checkout")]
+                    if let Some(pin) = l.pin.as_deref().and_then(super::Pin::parse) {
+                        super::tree::hold(&l.id, &pin);
+                    }
                     x.leases.lock().unwrap().insert(l.id.clone(), l);
                 }
             }
@@ -262,6 +259,15 @@ impl Exec {
         }
         if !back.is_empty() {
             x.emit("lease", Sev::Info, format!("lease: hub on {} took back {} lease(s) from its ledger: {}", x.machine, back.len(), back.join(" ")));
+        }
+        // a tree no lease holds sits on the shared commits (a hub that died mid-lease left it elsewhere)
+        #[cfg(feature = "checkout")]
+        if let Some(root) = &x.opts.tree {
+            match super::tree::restore_if_free(root) {
+                Ok(Some(to)) => x.emit("ws", Sev::Warn, format!("ws_restore: {}: no lease held the tree, back at the shared {to}", x.machine)),
+                Ok(None) => {}
+                Err(e) => x.emit("ws", Sev::Err, format!("ws_restore: {}: the tree stays off the shared commits: {e}", x.machine)),
+            }
         }
         let w = Arc::downgrade(&x);
         let tick = x.opts.tick;
@@ -311,7 +317,18 @@ impl Exec {
             self.emit("lease", Sev::Info, format!("lease: {} lease.conf set {}", self.machine, what.join(" ")));
         }
         let apply = if crate::sync::store::source_store().is_some() { "store" } else { "checkout" };
-        caps::measure(&self.machine, &self.conf(), apply).to_json()
+        let mut c = caps::measure(&self.machine, &self.conf(), apply);
+        c.tree = self.tree_key();
+        c.to_json()
+    }
+
+    /// The commits the node's tree holds (`caps`'s `tree`; empty: no tree, or unknown).
+    fn tree_key(&self) -> String {
+        #[cfg(feature = "checkout")]
+        if let Some(root) = &self.opts.tree {
+            return super::tree::current(root).map_or(String::new(), |p| p.key());
+        }
+        String::new()
     }
 
     fn emit(&self, kind: &str, sev: Sev, line: String) {
@@ -350,7 +367,7 @@ impl Exec {
             "lease-log" => vec![self.log(rest)],
             "lease-end" => vec![self.end_cmd(rest)],
             "lease-beat" => vec![self.beat(rest)],
-            "lease-prune" => vec![self.prune(rest)],
+            "ship-done" => vec![self.ship_done(rest)],
             "ship-have" | "ship-put" | "ship-link" => vec![self.ship(word, rest)],
             "get-ls" => self.get_ls(rest),
             "get-read" => vec![self.get_read(rest)],
@@ -361,6 +378,7 @@ impl Exec {
                 let mut c = caps::measure(&self.machine, &self.conf(), apply);
                 c.desk_link = crate::embed::desk_link_state();
                 c.dev_req = match self.dev_req.load(Ordering::Acquire) { 1 => Some(true), 2 => Some(false), _ => None };
+                c.tree = self.tree_key();
                 vec![c.to_json()]
             }
             "disk" => match rest.strip_prefix("clean ") {
@@ -405,6 +423,10 @@ impl Exec {
         }
         let rev = v.get("rev").filter(|r| r.get("makepad").is_some());
         let rev_of = |k: &str| rev.and_then(|r| r.get(k)).and_then(|x| x.as_str()).map(str::to_string);
+        // the tree is the node's own (its WM runs from it): only a write lease on a dev-on node moves it
+        if rev.is_some() && !kind.writes() {
+            return err(format!("lease-start: an {} lease never moves the node's tree (no rev)", kind.as_str()));
+        }
         let mut env: Vec<(String, String)> = Vec::new();
         if let Some(makepad_strict_json::Value::Obj(o)) = v.get("env") {
             for (k, x) in o {
@@ -417,12 +439,12 @@ impl Exec {
         let conf = self.conf();
         let w = &conf.work;
         let tmp = w.join("tmp").join(&id);
-        let (work, target, ws) = match rev_of("makepad") {
-            Some(sha) => match self.workspace(&id, &lane, &sha, rev_of("commercial").as_deref()) {
+        let (work, target, pin, what) = match rev_of("makepad") {
+            Some(sha) => match self.take_tree(&id, &sha, rev_of("commercial").as_deref()) {
                 Ok(x) => x,
                 Err(e) => return err(format!("lease-start {id}: {e}")),
             },
-            None => (w.join("lane").join(&lane).join("src"), w.join("target").join(format!("lane-{lane}")), Vec::new()),
+            None => (w.join("lane").join(&lane).join("src"), w.join("target").join(format!("lane-{lane}")), None, "lane dir".to_string()),
         };
         for d in [&tmp, &work, &target] {
             if let Err(e) = std::fs::create_dir_all(d) {
@@ -448,13 +470,9 @@ impl Exec {
         // the lease's own environment wins over what was asked
         env.retain(|(k, _)| !law.iter().any(|(l, _)| l == k));
         env.extend(law.iter().map(|(k, v)| (k.to_string(), v.clone())));
-        let l = Lease { id: id.clone(), lane: lane.clone(), kind, work: work.clone(), target, tmp, env, ws, runs: Vec::new(), beat: Instant::now() };
+        let l = Lease { id: id.clone(), lane: lane.clone(), kind, work: work.clone(), target, tmp, env, pin, overlay: Vec::new(), runs: Vec::new(), beat: Instant::now() };
         let a = l.answer();
         self.save(&l);
-        let what = match rev_of("makepad") {
-            Some(sha) => format!("worktree at {}", &sha[..12.min(sha.len())]),
-            None => "lane dir".into(),
-        };
         if kind == Kind::Timed {
             let _ = std::fs::create_dir_all(self.quiet());
             let _ = std::fs::write(self.quiet().join(format!("{id}.cmd")), format!("timed lease {id} of {lane}\n"));
@@ -465,44 +483,25 @@ impl Exec {
         a
     }
 
-    /// A rev lease's worktree(s) from the store and its target per tip.
-    fn workspace(&self, id: &str, lane: &str, sha: &str, commercial: Option<&str>) -> Result<(PathBuf, PathBuf, Vec<Ws>), String> {
-        let hex = |s: &str| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit());
-        if !hex(sha) || commercial.is_some_and(|c| !hex(c)) {
-            return Err("rev: a 40-hex commit".into());
-        }
-        let (store, cstore) = stores()?;
-        let conf = self.conf();
-        let w = &conf.work;
-        let path = w.join("wt").join(format!("{lane}-{id}"));
-        std::fs::create_dir_all(w.join("wt")).map_err(|e| e.to_string())?;
-        git(None, Some(&store), &["worktree", "add", "--detach", "-q", &path.to_string_lossy(), sha])?;
-        let mut ws = vec![Ws { path: path.clone(), store, repo: "makepad".into() }];
-        if let Some(c) = commercial {
-            let cp = path.join("apps/commercial");
-            if let Err(e) = git(None, Some(&cstore), &["worktree", "add", "--detach", "-q", &cp.to_string_lossy(), c]) {
-                let _ = git(None, Some(&ws[0].store), &["worktree", "remove", "--force", &path.to_string_lossy()]);
-                return Err(e);
-            }
-            ws.push(Ws { path: cp, store: cstore, repo: "commercial".into() });
-        }
-        let tip = &sha[..12];
-        let targets = w.join("target");
-        let target = targets.join(tip);
-        if !target.exists() {
-            let last = targets.join(format!("lane-{lane}.last"));
-            let prev = std::fs::read_to_string(&last).ok().map(|s| s.trim().to_string()).filter(|s| valid_name(s) && s != tip);
-            let in_use = |p: &Path| self.leases.lock().unwrap().values().any(|l| l.target == p);
-            if let Some(prev) = prev.map(|p| targets.join(p)).filter(|p| p.is_dir() && !in_use(p)) {
-                let _ = std::fs::rename(&prev, &target);
-            }
-            let _ = std::fs::create_dir_all(&targets);
-            let tmp = targets.join(format!("lane-{lane}.last.new"));
-            if std::fs::write(&tmp, tip).is_ok() {
-                let _ = std::fs::rename(&tmp, &last);
-            }
-        }
-        Ok((path, target, ws))
+    /// A rev lease takes the node's one tree at its commits (moved in place; refused while
+    /// other commits hold it): (work, target, pin, what for the event).
+    #[cfg(feature = "checkout")]
+    fn take_tree(&self, id: &str, sha: &str, commercial: Option<&str>) -> Result<(PathBuf, PathBuf, Option<String>, String), String> {
+        let pin = super::Pin::parse(&match commercial {
+            Some(c) => format!("{sha},{c}"),
+            None => sha.to_string(),
+        })
+        .ok_or("rev: a 40-hex commit")?;
+        let root = self.opts.tree.as_ref().ok_or("this node runs no tree for rev leases")?;
+        let t = super::tree::take(id, &pin, root)?;
+        let moved: Vec<String> = t.moved.iter().map(|(r, n)| format!("{r} {n} files")).collect();
+        let what = format!("tree at {} ({})", &sha[..12], if t.moved.iter().all(|(_, n)| *n == 0) { "there already".to_string() } else { format!("moved: {}", moved.join(", ")) });
+        Ok((t.root.clone(), t.root.join("target"), Some(pin.key()), what))
+    }
+
+    #[cfg(not(feature = "checkout"))]
+    fn take_tree(&self, _id: &str, _sha: &str, _commercial: Option<&str>) -> Result<(PathBuf, PathBuf, Option<String>, String), String> {
+        Err("this host has no git stores: leases with a rev need a desktop node".into())
     }
 
     fn run(&self, rest: &str) -> String {
@@ -668,46 +667,8 @@ impl Exec {
             freed += disk::dir_size(&l.tmp).0;
             let _ = std::fs::remove_dir_all(&l.tmp);
         }
-        let mut recovered = Vec::new();
-        let mut kept = false;
-        // nested (commercial) first: it lives inside the makepad worktree
-        for ws in l.ws.iter().rev() {
-            if !ws.path.exists() {
-                let _ = git(None, Some(&ws.store), &["worktree", "prune"]);
-                continue;
-            }
-            let except = (ws.repo == "makepad").then_some("apps/commercial");
-            let tag = if ws.repo == "makepad" { format!("{}-{}", l.lane, l.id) } else { format!("{}-{}-{}", l.lane, l.id, ws.repo) };
-            match recover_worktree(&ws.path, except, &l.id, &self.conf().work.join("recovered"), &tag) {
-                Ok(Some(b)) => {
-                    self.emit("ws", Sev::Warn, format!("ws_recovered: {} {} on {} had unsaved work in {}: bundled to {}", l.id, l.lane, self.machine, ws.repo, b.display()));
-                    recovered.push(b);
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    kept = true;
-                    self.emit("ws", Sev::Err, format!("ws_unrecoverable: {} {} on {}: {} worktree kept at {}: {e}", l.id, l.lane, self.machine, ws.repo, ws.path.display()));
-                    continue;
-                }
-            }
-            let size = disk::dir_size(&ws.path).0;
-            match git(None, Some(&ws.store), &["worktree", "remove", "--force", &ws.path.to_string_lossy()]) {
-                Ok(_) => freed += size,
-                Err(e) => {
-                    kept = true;
-                    self.emit("ws", Sev::Err, format!("ws_cleanup: {} on {}: {e}", ws.path.display(), self.machine));
-                }
-            }
-            let _ = git(None, Some(&ws.store), &["worktree", "prune"]);
-        }
-        if !kept {
-            let _ = std::fs::remove_file(self.state.join(format!("{}.json", l.id)));
-        } else {
-            // the worktree stays and so does its ledger entry, without the processes
-            let rest = Lease { runs: Vec::new(), beat: Instant::now(), ..l };
-            self.save(&rest);
-            return self.ended_line(&rest.id, &killed, freed, &recovered, &leak);
-        }
+        let recovered = self.release_tree(&l);
+        let _ = std::fs::remove_file(self.state.join(format!("{}.json", l.id)));
         self.guard.touch();
         let mb = freed >> 20;
         self.emit("ws", Sev::Info, format!("ws_cleanup: {} {} on {} freed {mb} MB", l.id, l.lane, self.machine));
@@ -717,6 +678,39 @@ impl Exec {
             self.emit("lease", Sev::Err, format!("lease_leak: {} {} on {}: pid(s) {:?} survived KILL", l.id, l.lane, self.machine, leak));
         }
         self.ended_line(&l.id, &killed, freed, &recovered, &leak)
+    }
+
+    /// The lease lets go of the node's tree (the last one bundles what it left there): the bundles.
+    #[cfg(feature = "checkout")]
+    fn release_tree(&self, l: &Lease) -> Vec<PathBuf> {
+        let (Some(pin), Some(root)) = (&l.pin, &self.opts.tree) else { return Vec::new() };
+        let work = self.conf().work;
+        if !l.overlay.is_empty() {
+            match super::Pin::parse(pin).ok_or_else(|| format!("bad pin {pin}")).and_then(|p| super::tree::undo_overlay(root, &p, &l.overlay)) {
+                Ok(n) => self.emit("ws", Sev::Info, format!("ws_overlay: {} {} on {}: {n} shipped file(s) undone", l.id, l.lane, self.machine)),
+                Err(e) => self.emit("ws", Sev::Err, format!("ws_overlay: {} {} on {}: undoing the shipped files failed: {e}", l.id, l.lane, self.machine)),
+            }
+        }
+        match super::tree::release(&l.id, root, &work.join("recovered"), &format!("{}-{}", l.lane, l.id)) {
+            Ok(r) => {
+                for b in &r.bundles {
+                    self.emit("ws", Sev::Warn, format!("ws_recovered: {} {} on {} left changes in the tree: bundled to {}", l.id, l.lane, self.machine, b.display()));
+                }
+                if let Some(to) = &r.restored {
+                    self.emit("ws", Sev::Info, format!("ws_restore: {} {} on {}: the tree is back at the shared {to}", l.id, l.lane, self.machine));
+                }
+                r.bundles
+            }
+            Err(e) => {
+                self.emit("ws", Sev::Err, format!("ws_unrecoverable: {} {} on {}: the tree keeps its changes: {e}", l.id, l.lane, self.machine));
+                Vec::new()
+            }
+        }
+    }
+
+    #[cfg(not(feature = "checkout"))]
+    fn release_tree(&self, _l: &Lease) -> Vec<PathBuf> {
+        Vec::new()
     }
 
     fn ended_line(&self, id: &str, killed: &[u32], freed: u64, recovered: &[PathBuf], leak: &[u32]) -> String {
@@ -774,32 +768,37 @@ impl Exec {
         format!("{{\"data\":\"{}\",\"off\":{end},\"eof\":{}}}", makepad_network::digest::base64_encode(&buf), end >= len)
     }
 
-    /// `lease-prune <id>`: `devhub run` shipped the tree with its file list (`.devhub-files.new`);
-    /// files the previous list had and this one does not (deleted on the lane's side) go.
-    fn prune(&self, id: &str) -> String {
-        let work = match self.leases.lock().unwrap().get(id) {
-            Some(l) => l.work.clone(),
-            None => return err(format!("no lease {id} on {}", self.machine)),
-        };
-        let new = work.join(format!("{SHIP_LIST}.new"));
-        let Ok(now) = std::fs::read_to_string(&new) else { return err(format!("{}: no file list shipped", new.display())) };
-        let keep: std::collections::HashSet<&str> = now.lines().collect();
-        let mut pruned = 0;
-        for f in std::fs::read_to_string(work.join(SHIP_LIST)).unwrap_or_default().lines() {
-            if keep.contains(f) || !inside(f) {
-                continue;
-            }
-            let p = work.join(f);
+    /// `ship-done <id> <b64 {"shipped":[..],"deleted":[..]}>`: `devhub run` shipped its worktree's
+    /// changes on top of the lease's pin; the deleted files go now, and every path is undone at
+    /// the lease's end.
+    fn ship_done(&self, rest: &str) -> String {
+        let (id, b64) = rest.split_once(' ').unwrap_or((rest, ""));
+        let Some(v) = b64_decode(b64.trim()).and_then(|b| makepad_strict_json::parse(&b).ok()) else { return err("ship-done: not base64 JSON") };
+        let list = |k: &str| v.get(k).and_then(|x| x.as_arr()).map_or_else(Vec::new, |a| a.iter().filter_map(|p| p.as_str().map(str::to_string)).collect::<Vec<_>>());
+        let (shipped, deleted) = (list("shipped"), list("deleted"));
+        if let Some(bad) = shipped.iter().chain(&deleted).find(|p| !inside(p)) {
+            return err(format!("ship-done: {bad} is not a path inside the tree"));
+        }
+        let mut leases = self.leases.lock().unwrap();
+        let Some(l) = leases.get_mut(id) else { return err(format!("no lease {id} on {}", self.machine)) };
+        if l.pin.is_none() {
+            return err(format!("{id} holds no tree: ship-done is for a lease at a revision"));
+        }
+        let mut removed = 0;
+        for f in &deleted {
+            let p = l.work.join(f);
             if std::fs::symlink_metadata(&p).is_ok_and(|m| !m.is_dir()) && std::fs::remove_file(&p).is_ok() {
-                pruned += 1;
+                removed += 1;
+                prune_empty_parents(&l.work, f);
             }
-            // the dirs that emptied go too (a stale empty `apps/x/src` matches cargo's member globs)
-            prune_empty_parents(&work, f);
         }
-        if let Err(e) = std::fs::rename(&new, work.join(SHIP_LIST)) {
-            return err(format!("{}: {e}", new.display()));
+        for p in shipped.into_iter().chain(deleted) {
+            if !l.overlay.contains(&p) {
+                l.overlay.push(p);
+            }
         }
-        format!("{{\"pruned\":{pruned}}}")
+        self.save(l);
+        format!("{{\"overlay\":{},\"deleted\":{removed}}}", l.overlay.len())
     }
 
     /// `ship-have|ship-put|ship-link <id> ...`: `devhub run` ships its tree into the lease's
@@ -833,6 +832,15 @@ impl Exec {
                 (Some(r), _) => (l.target.clone(), "target/", r),
                 (_, Some(r)) => (l.tmp.clone(), "tmp/", r),
                 _ => (l.work.clone(), "", rel.to_string()),
+            });
+        }
+        // no live lease: the node's tree (a lane's results that outlive its lease are in the
+        // shared target); a node without one: the lane's dir
+        if let Some(t) = &self.opts.tree {
+            return Ok(match (under("target"), under("src")) {
+                (Some(r), _) => (t.join("target"), "target/", r),
+                (_, Some(r)) => (t.clone(), "src/", r),
+                _ => return Err("without --lease: `src/..` (the node's tree) or `target/..` (its target)".into()),
             });
         }
         let w = self.conf().work;
@@ -927,20 +935,6 @@ impl Exec {
     }
 }
 
-#[cfg(feature = "checkout")]
-fn stores() -> Result<(PathBuf, PathBuf), String> {
-    let s = crate::sync::store_dir("makepad");
-    if !s.join("HEAD").exists() {
-        return Err(format!("no git store at {} (sync push first)", s.display()));
-    }
-    Ok((s, crate::sync::store_dir("commercial")))
-}
-
-#[cfg(not(feature = "checkout"))]
-fn stores() -> Result<(PathBuf, PathBuf), String> {
-    Err("this host has no git stores: leases with a rev need a desktop node".into())
-}
-
 fn watchdog(w: Weak<Exec>, tick: Duration) {
     loop {
         std::thread::sleep(tick);
@@ -956,41 +950,6 @@ fn disk_loop(w: Weak<Exec>) {
         let Some(x) = w.upgrade() else { return };
         x.guard.check(&|| x.live());
     }
-}
-
-/// Should a worktree be bundled back before it goes: uncommitted changes, or commits only it has.
-pub fn needs_recovery(dirty: bool, unique: bool) -> bool {
-    dirty || unique
-}
-
-/// Commits a dirty worktree as `WIP devhub recovery <id>` and bundles HEAD (minus what the
-/// store's refs hold) to `<out>/<tag>.bundle`; None when there was nothing to save.
-pub fn recover_worktree(path: &Path, except: Option<&str>, id: &str, out: &Path, tag: &str) -> Result<Option<PathBuf>, String> {
-    let d = dirty(path, except);
-    if !needs_recovery(d, unique_commits(path)) {
-        return Ok(None);
-    }
-    if d {
-        let ex = except.map(|e| format!(":(exclude){e}"));
-        let mut add = vec!["add", "-A", "--", "."];
-        if let Some(e) = &ex {
-            add.push(e);
-        }
-        git(Some(path), None, &add)?;
-        git(Some(path), None, &["-c", "user.name=devhub", "-c", "user.email=devhub@localhost", "commit", "-q", "--no-verify", "-m", &format!("WIP devhub recovery {id}")])?;
-    }
-    std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
-    let bundle = out.join(format!("{tag}.bundle"));
-    let refs = git(Some(path), None, &["for-each-ref", "--format=%(objectname)"]).unwrap_or_default();
-    let b = bundle.to_string_lossy().into_owned();
-    let mut args = vec!["bundle", "create", "-q", &b, "HEAD"];
-    let shas: Vec<&str> = refs.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
-    if !shas.is_empty() {
-        args.push("--not");
-        args.extend(shas);
-    }
-    git(Some(path), None, &args)?;
-    Ok(Some(bundle))
 }
 
 /// TERM the runs' groups, `grace`, KILL, stop their scopes: (stopped leaders, survivors).
@@ -1126,7 +1085,12 @@ pub fn lease_live(id: &str) -> bool {
 }
 
 pub fn register(ep: &Endpoint, ctx: &crate::sync::NodeCtx) -> Arc<Exec> {
-    let x = Exec::new(&ctx.machine, LeaseConf::load(), crate::proto::home().join("leases"), Opts::default(), ctx.publish.clone());
+    let conf = LeaseConf::load();
+    #[cfg(feature = "checkout")]
+    let opts = Opts { tree: Some(super::tree::root(&conf.work)), ..Opts::default() };
+    #[cfg(not(feature = "checkout"))]
+    let opts = Opts::default();
+    let x = Exec::new(&ctx.machine, conf, crate::proto::home().join("leases"), opts, ctx.publish.clone());
     let _ = EXEC.set(x.clone());
     for &word in WORDS {
         let e = x.clone();
@@ -1228,46 +1192,6 @@ mod tests {
         assert!(inspect_commands(&[], &[], false).is_empty());
     }
 
-    /// The recovery decision on a real worktree of a bare store: clean = nothing, dirty and
-    /// unique commits = a bundle that holds the work.
-    #[test]
-    fn recovery_bundles_unsaved_work_only() {
-        assert!(!needs_recovery(false, false) && needs_recovery(true, false) && needs_recovery(false, true));
-        let base = std::env::temp_dir().join(format!("devhub-recover-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let src = base.join("src");
-        std::fs::create_dir_all(&src).unwrap();
-        let g = |d: &Path, a: &[&str]| git(Some(d), None, a).unwrap();
-        g(&src, &["init", "-q", "-b", "work"]);
-        std::fs::write(src.join("a"), "a").unwrap();
-        g(&src, &["add", "-A"]);
-        g(&src, &["-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "-q", "-m", "a"]);
-        let store = base.join("store.git");
-        g(&base, &["clone", "-q", "--bare", &src.to_string_lossy(), &store.to_string_lossy()]);
-        let sha = g(&src, &["rev-parse", "HEAD"]).trim().to_string();
-        let out = base.join("recovered");
-        let mk = |name: &str| {
-            let p = base.join(name);
-            git(None, Some(&store), &["worktree", "add", "--detach", "-q", &p.to_string_lossy(), &sha]).unwrap();
-            p
-        };
-        let clean = mk("clean");
-        assert_eq!(recover_worktree(&clean, None, "L1", &out, "x-L1").unwrap(), None);
-        let dirty_wt = mk("dirty");
-        std::fs::write(dirty_wt.join("b"), "b").unwrap();
-        let b = recover_worktree(&dirty_wt, None, "L2", &out, "x-L2").unwrap().unwrap();
-        assert!(g(&dirty_wt, &["log", "-1", "--format=%s"]).contains("WIP devhub recovery L2"));
-        // the bundle fetches into the lane's repo (it has the base) and holds the file
-        g(&src, &["fetch", "-q", &b.to_string_lossy(), "HEAD:refs/heads/devhub/recovered/x-L2"]);
-        assert_eq!(g(&src, &["show", "devhub/recovered/x-L2:b"]), "b");
-        let ahead = mk("ahead");
-        std::fs::write(ahead.join("c"), "c").unwrap();
-        g(&ahead, &["add", "-A"]);
-        g(&ahead, &["-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "-q", "-m", "c"]);
-        assert!(recover_worktree(&ahead, None, "L3", &out, "x-L3").unwrap().is_some());
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
     #[test]
     fn round_trip_run_log_end() {
         let (x, base, events) = test_exec("rt", Opts { grace: Duration::from_secs(10), ..Opts::default() });
@@ -1314,35 +1238,19 @@ mod tests {
     }
 
     #[test]
-    fn ship_prune_get_and_quiet_marks() {
+    fn get_and_quiet_marks() {
         let (x, base, _) = test_exec("get", Opts::default());
         let a = x.handle("lease-start", r#"{"id":"L2","lane":"getx","kind":"timed","rev":null}"#);
         assert!(field(&a[0], "user").and_then(|u| u.as_str().map(|u| !u.is_empty())).unwrap_or(false), "{a:?}");
         let work = PathBuf::from(field(&a[0], "work").unwrap().as_str().unwrap());
         let tmp = PathBuf::from(field(&a[0], "tmp").unwrap().as_str().unwrap());
         assert!(base.join("quiet/L2.cmd").exists(), "a timed lease marks the machine quiet");
-        // two ships: the second list drops b.txt, which goes; files never listed stay
         std::fs::create_dir_all(work.join("out/deep")).unwrap();
-        for f in ["a.txt", "b.txt", "out/r.txt", "out/deep/s.bin", "local.txt"] {
+        for f in ["a.txt", "out/r.txt", "out/deep/s.bin"] {
             std::fs::write(work.join(f), f).unwrap();
         }
-        std::fs::write(work.join(".devhub-files.new"), "a.txt\nb.txt\nout/r.txt\n").unwrap();
-        assert_eq!(x.handle("lease-prune", "L2"), vec![r#"{"pruned":0}"#.to_string()]);
-        std::fs::write(work.join(".devhub-files.new"), "a.txt\nout/r.txt\n../escape\n").unwrap();
-        assert_eq!(x.handle("lease-prune", "L2"), vec![r#"{"pruned":1}"#.to_string()]);
-        assert!(!work.join("b.txt").exists() && work.join("a.txt").exists() && work.join("local.txt").exists());
-        // a dir that empties goes (deep first); one holding untracked content stays
-        std::fs::create_dir_all(work.join("gone/deep/er")).unwrap();
-        std::fs::create_dir_all(work.join("kept/sub")).unwrap();
-        std::fs::write(work.join("gone/deep/er/f.rs"), "x").unwrap();
-        std::fs::write(work.join("kept/sub/g.rs"), "x").unwrap();
-        std::fs::write(work.join("kept/target.bin"), "x").unwrap();
-        std::fs::write(work.join(".devhub-files.new"), "a.txt\nout/r.txt\ngone/deep/er/f.rs\nkept/sub/g.rs\n").unwrap();
-        x.handle("lease-prune", "L2");
-        std::fs::write(work.join(".devhub-files.new"), "a.txt\nout/r.txt\n").unwrap();
-        assert_eq!(x.handle("lease-prune", "L2"), vec![r#"{"pruned":2}"#.to_string()]);
-        assert!(!work.join("gone").exists(), "emptied dirs are pruned up to the work dir");
-        assert!(!work.join("kept/sub").exists() && work.join("kept/target.bin").exists() && work.exists());
+        // ship-done is for a lease at a revision (the node's tree)
+        assert!(x.handle("ship-done", &format!("L2 {}", makepad_network::digest::base64_encode(br#"{"shipped":["a.txt"],"deleted":[]}"#)))[0].contains("holds no tree"));
         // get: a folder lists with its own name first, `r` reads it back; a lease's tmp/ too
         let ls = x.handle("get-ls", "getx - src/out");
         assert_eq!(ls.len(), 2, "{ls:?}");
@@ -1363,9 +1271,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A rev lease runs in the node's tree at its pin, `devhub run`'s shipped changes sit on top,
+    /// and its end (released, or the watchdog's) leaves the tree on the shared commits with
+    /// nothing of the lane in it; the warm target stays.
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn a_rev_lease_leaves_the_box_on_the_shared_commits() {
+        let _env = crate::sync::git::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("devhub-exec-box-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (src, root) = (base.join("src"), base.join("makepad"));
+        std::fs::create_dir_all(&src).unwrap();
+        let g = |args: &[&str]| crate::sync::git::run(Some(&src), None, &[], &[&["-c", "user.name=t", "-c", "user.email=t@t"], args].concat()).unwrap();
+        g(&["init", "-q", "-b", "work"]);
+        std::fs::write(src.join(".gitignore"), "/target/\n").unwrap();
+        std::fs::write(src.join("a.rs"), "landed").unwrap();
+        g(&["add", "."]);
+        g(&["commit", "-q", "-m", "landed"]);
+        let landed = g(&["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(src.join("a.rs"), "lane").unwrap();
+        g(&["commit", "-q", "-am", "lane"]);
+        let lane = g(&["rev-parse", "HEAD"]).trim().to_string();
+        std::env::set_var("MAKEPAD_DEVHUB_GIT", base.join("stores"));
+        let store = crate::sync::git::Store::open("makepad").unwrap();
+        let bundle = base.join("b.bundle");
+        g(&["bundle", "create", "-q", &bundle.to_string_lossy(), "refs/heads/work"]);
+        store.fetch_bundle(&bundle, "work").unwrap();
+        store.move_checkout(&root, None, &landed).unwrap();
+        store.set_ref(crate::sync::git::SYNCED_REF, &landed).unwrap();
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join("target/warm"), "x").unwrap();
+        let (x, _, _) = test_exec("tree", Opts { tree: Some(root.clone()), ..Opts::default() });
+
+        for (id, how) in [("R1", "released"), ("R2", "expired")] {
+            let a = x.handle("lease-start", &format!(r#"{{"id":"{id}","lane":"lanex","kind":"test","rev":{{"makepad":"{lane}","commercial":null}}}}"#));
+            assert_eq!(field(&a[0], "work").and_then(|w| w.as_str().map(PathBuf::from)), Some(root.clone()), "{a:?}");
+            assert!(a[0].contains(&format!("\"CARGO_TARGET_DIR\":{}", json_str(&root.join("target").to_string_lossy()))));
+            assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "lane");
+            // `devhub run` shipped a new file on top
+            std::fs::write(root.join("new.rs"), "from the lane's worktree").unwrap();
+            let d = x.handle("ship-done", &format!("{id} {}", makepad_network::digest::base64_encode(br#"{"shipped":["new.rs"],"deleted":[]}"#)));
+            assert!(d[0].contains("\"overlay\":1"), "{d:?}");
+            assert!(x.handle("caps", "caps")[0].contains(&format!("\"tree\":\"{lane}\"")));
+            x.handle("lease-end", &format!("{id} {how}"));
+            // no box stays on a lane rev after its lease ends
+            assert_eq!(super::super::tree::current(&root).map(|p| p.makepad), Some(landed.clone()), "{id}");
+            assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "landed");
+            assert!(!root.join("new.rs").exists() && root.join("target/warm").exists());
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn watchdog_ends_a_lease_without_beats() {
-        let (x, base, events) = test_exec("wd", Opts { no_beat: Duration::from_millis(600), tick: Duration::from_millis(100), grace: Duration::from_secs(10), scopes: None });
+        let (x, base, events) = test_exec("wd", Opts { no_beat: Duration::from_millis(600), tick: Duration::from_millis(100), grace: Duration::from_secs(10), ..Opts::default() });
         let a = x.handle("lease-start", r#"{"id":"L7","lane":"lost","kind":"long","rev":null}"#);
         assert!(a[0].contains("\"ok\":1"));
         let r = x.handle("lease-run", &format!("L7 . {}", b64(SLEEP)));

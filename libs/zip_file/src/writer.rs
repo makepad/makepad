@@ -75,6 +75,13 @@ impl Packed {
     pub fn new(data: &[u8]) -> Self {
         Self { crc: crc32(data), deflated: compress_to_vec(data, 6) }
     }
+
+    /// A member deflated elsewhere (for example in parts, in parallel:
+    /// `makepad_fast_inflate::deflate::compress_part_to_vec`): `crc` is the
+    /// CRC-32 of the data, `deflated` its raw deflate stream.
+    pub fn from_deflated(crc: u32, deflated: Vec<u8>) -> Self {
+        Self { crc, deflated }
+    }
 }
 
 struct Entry {

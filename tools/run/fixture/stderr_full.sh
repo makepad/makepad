@@ -5,17 +5,19 @@
 # relax-stderr-flood then writes LINES lines (~100 bytes each) with its own eprintln!. Passes when
 # the run exits 0, prints "flood done" and the terminal (this script's stderr capture) received
 # every line. Linux and macOS. Run from the workspace root after
-# `cargo build --release -p makepad-run`. TARGET (default target/release), LINES (default 40000),
+# (the JIT runs through `cargo run --profile host`). the JIT runs through `cargo run --profile host`, LINES (default 40000),
 # FILE_KB (default 1024: the transcript fails after ~1 MB, the flood is ~4 MB).
 set -u
-T=${TARGET:-target/release}
+ROOT=$(pwd)
+# the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
+J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
 LINES=${LINES:-40000}
 FILE_KB=${FILE_KB:-1024}
 dir=$(mktemp -d "${TMPDIR:-/tmp}/stderr_full.XXXXXX") || exit 1
 mkdir -p "$dir/tmp" "$dir/home"
 # a warm-up run without the limit, so the JIT cache (bigger than FILE_KB) is written before the
 # limit applies; the limited run then only has the transcript to fail
-TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/home" "$T/makepad" run --quiet relax-provided-fixture --bin relax-stderr-flood -- 10 \
+TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/home" $J run --quiet relax-provided-fixture --bin relax-stderr-flood -- 10 \
     > "$dir/warm.out" 2> "$dir/warm.err"
 # the "terminal" is a fifo whose reader starts outside the limit (a capture file under it would fail too)
 mkfifo "$dir/err.fifo" "$dir/out.fifo"
@@ -26,7 +28,7 @@ out_pid=$!
 (
     trap '' XFSZ
     ulimit -f "$FILE_KB"
-    TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/home" "$T/makepad" run --quiet relax-provided-fixture --bin relax-stderr-flood -- "$LINES" \
+    TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/home" $J run --quiet relax-provided-fixture --bin relax-stderr-flood -- "$LINES" \
         > "$dir/out.fifo" 2> "$dir/err.fifo"
     echo $? > "$dir/rc"
 )
@@ -37,7 +39,7 @@ done_line=$(grep -c "^flood done $LINES" "$dir/run.out")
 echo "stderr_full: rc=$rc, terminal got $got of $LINES lines, stdout done=$done_line (logs $dir)"
 grep -E 'panicked|failed printing|session log' "$dir/run.err" | head -5
 # case 2 (no limit): a panic's message reaches the terminal and the kept transcript, in order
-TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/home" "$T/makepad" run --quiet relax-provided-fixture --bin relax-stderr-flood -- 1000 panic \
+TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/home" $J run --quiet relax-provided-fixture --bin relax-stderr-flood -- 1000 panic \
     > "$dir/panic.out" 2> "$dir/panic.err"
 prc=$?
 kept=$(sed -n 's/^makepad-run: session log kept at //p' "$dir/panic.err" | tail -1)

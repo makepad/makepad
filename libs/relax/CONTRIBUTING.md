@@ -10,7 +10,14 @@ Use release builds only. Debug builds are too slow to test with.
 
 ```sh
 cargo build --release -p relax-runner --bin relax   # target/release/relax, the dev/test runner
-cargo build --release -p makepad-run                # target/release/makepad, the app runner (needed by diff_fast)
+```
+
+The app runner (the JIT) always runs through cargo, never from a binary path: cargo rebuilds it
+when its sources changed and is a ~0.2 s no-op otherwise. It is the host profile the WM's apps run,
+so a node has one JIT and one JIT cache:
+
+```sh
+cargo run --profile host -p makepad-run --bin makepad -- <args>
 ```
 
 `relax` provides no crates of its own: everything a program uses is compiled from source,

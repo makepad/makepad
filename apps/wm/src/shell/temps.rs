@@ -157,7 +157,7 @@ pub fn short_device(device: &str) -> String {
 
 /// Where a sensor's warning starts: the part's critical point less a margin when it reports a
 /// sane one, else the usual limit for its kind (CPU 95 °C, GPU core 88 °C, GPU hotspot and memory
-/// 100 °C, NVMe 70 °C). `slowdown` is a GPU's own throttle point (NVML).
+/// 100 °C, NVMe 75 °C). `slowdown` is a GPU's own throttle point (NVML).
 pub fn limit_for(kind: Kind, crit: Option<f32>, max: Option<f32>, slowdown: Option<f32>) -> Option<f32> {
     let sane = |v: Option<f32>| v.filter(|v| *v > 40.0 && *v < 150.0);
     let (crit, max, slowdown) = (sane(crit), sane(max), sane(slowdown));
@@ -166,8 +166,8 @@ pub fn limit_for(kind: Kind, crit: Option<f32>, max: Option<f32>, slowdown: Opti
         Kind::GpuCore => slowdown.map(|s| s - 3.0).or(crit.map(|c| c - 5.0)).unwrap_or(88.0).min(92.0),
         Kind::GpuHotspot => crit.map_or(103.0, |c| c - 5.0),
         Kind::GpuMemory => slowdown.map(|s| s - 3.0).or(crit.map(|c| c - 5.0)).unwrap_or(100.0),
-        // NVMe drives throttle near their "max"; 70 °C unless the drive says lower.
-        Kind::Nvme => max.map_or(70.0, |m| (m - 5.0).min(70.0)),
+        // NVMe drives throttle near their "max"; 75 °C unless the drive says lower.
+        Kind::Nvme => max.map_or(75.0, |m| (m - 5.0).min(75.0)),
         Kind::Disk => crit.or(max).map_or(60.0, |c| (c - 5.0).min(60.0)),
         Kind::Dimm => crit.map_or(80.0, |c| c - 5.0),
         Kind::Other => return crit.or(max).map(|c| c - 5.0),
@@ -413,24 +413,27 @@ impl Temps {
         Badge { heat, level, tooltip }
     }
 
-    /// The ring that covers `t0..t1`: the 1 Hz hour when it reaches back far enough (or there is
-    /// nothing coarser yet), else the 30 s day.
-    pub fn ring_for(&self, t0: f64, t1: f64) -> &Ring {
+    /// The recorded samples of `t0..t1` as index ranges into the two rings: the 30 s peaks for
+    /// time older than the 1 Hz hour, then the 1 Hz samples (so every range draws the same
+    /// history). `pad` takes samples either side so a line reaches the edges.
+    fn parts(&self, t0: f64, t1: f64, pad: usize) -> [(&Ring, usize, usize); 2] {
         let fine_from = self.fine.first_time().unwrap_or(f64::MAX);
-        if t1 - t0 <= FINE_CAP as f64 + 1.0 && (fine_from <= t0 + 2.0 || self.fine.times.len() < FINE_CAP || self.coarse.times.is_empty()) {
-            &self.fine
-        } else {
-            &self.coarse
-        }
+        let c = &self.coarse;
+        let c_end = c.index_at(fine_from);
+        let ca = c.index_at(t0).saturating_sub(pad);
+        let cb = (c.index_at(t1 + 0.001) + pad).min(c_end);
+        let f = &self.fine;
+        let fa = f.index_at(t0).saturating_sub(pad);
+        let fb = (f.index_at(t1 + 0.001) + pad).min(f.times.len());
+        [(c, ca, cb.max(ca)), (f, fa, fb.max(fa))]
     }
 
     /// The sensor's lowest and highest reading in `t0..t1`.
     pub fn min_max(&self, i: usize, t0: f64, t1: f64) -> (f32, f32) {
-        let ring = self.ring_for(t0, t1);
-        let (a, b) = (ring.index_at(t0), ring.index_at(t1 + 0.001));
         let mut lo = f32::NAN;
         let mut hi = f32::NAN;
-        if let Some(col) = ring.cols.get(i) {
+        for (ring, a, b) in self.parts(t0, t1, 0) {
+            let Some(col) = ring.cols.get(i) else { continue };
             for v in col.range(a..b) {
                 if v.is_nan() {
                     continue;
@@ -443,8 +446,8 @@ impl Temps {
     }
 
     /// The reading nearest `t` (within a ring step), for the hover readout.
-    pub fn value_at(&self, i: usize, t: f64, t0: f64, t1: f64) -> f32 {
-        let ring = self.ring_for(t0, t1);
+    pub fn value_at(&self, i: usize, t: f64) -> f32 {
+        let ring = if self.fine.first_time().is_some_and(|f| t >= f) { &self.fine } else { &self.coarse };
         let k = ring.index_at(t);
         let pick = [k.checked_sub(1), Some(k)].into_iter().flatten().filter(|k| *k < ring.times.len()).min_by(|a, b| (ring.times[*a] - t).abs().total_cmp(&(ring.times[*b] - t).abs()));
         match pick {
@@ -456,28 +459,26 @@ impl Temps {
     /// The sensor's samples in `t0..t1`, at most about one per `px` s: the peak of each column
     /// (a long view of an hour of 1 Hz samples draws a few hundred segments, not thousands).
     pub fn series(&self, i: usize, t0: f64, t1: f64, px: f64) -> Vec<(f64, f32)> {
-        let ring = self.ring_for(t0, t1);
-        let Some(col) = ring.cols.get(i) else { return Vec::new() };
-        // one sample either side, so the line reaches the edges
-        let a = ring.index_at(t0).saturating_sub(1);
-        let b = (ring.index_at(t1) + 1).min(ring.times.len());
-        let mut out: Vec<(f64, f32)> = Vec::with_capacity(((t1 - t0) / px.max(0.001)).min((b - a) as f64) as usize + 2);
+        let mut out: Vec<(f64, f32)> = Vec::new();
         let mut bucket: Option<(f64, f64, f32)> = None; // (column start, last t, peak)
-        for k in a..b {
-            let (t, v) = (ring.times[k], col[k]);
-            if v.is_nan() {
-                if let Some((_, bt, bv)) = bucket.take() { out.push((bt, bv)); }
-                out.push((t, f32::NAN));
-                continue;
-            }
-            match &mut bucket {
-                Some((start, bt, bv)) if t - *start < px => {
-                    *bt = t;
-                    if v > *bv { *bv = v; }
-                }
-                _ => {
+        for (ring, a, b) in self.parts(t0, t1, 1) {
+            let Some(col) = ring.cols.get(i) else { continue };
+            for k in a..b {
+                let (t, v) = (ring.times[k], col[k]);
+                if v.is_nan() {
                     if let Some((_, bt, bv)) = bucket.take() { out.push((bt, bv)); }
-                    bucket = Some((t, t, v));
+                    out.push((t, f32::NAN));
+                    continue;
+                }
+                match &mut bucket {
+                    Some((start, bt, bv)) if t - *start < px => {
+                        *bt = t;
+                        if v > *bv { *bv = v; }
+                    }
+                    _ => {
+                        if let Some((_, bt, bv)) = bucket.take() { out.push((bt, bv)); }
+                        bucket = Some((t, t, v));
+                    }
                 }
             }
         }
@@ -485,9 +486,10 @@ impl Temps {
         out
     }
 
-    /// The ring step at `t0..t1`: how far apart samples may be and still be joined.
-    pub fn gap_for(&self, t0: f64, t1: f64) -> f64 {
-        if std::ptr::eq(self.ring_for(t0, t1), &self.coarse) { COARSE_STEP * 2.5 } else { 3.5 }
+    /// How far apart samples may be and still be joined: the peaks' step when the view reaches
+    /// back past the 1 Hz hour, else a little over a second.
+    pub fn gap_for(&self, t0: f64) -> f64 {
+        if self.fine.first_time().is_some_and(|f| t0 >= f) { 3.5 } else { COARSE_STEP * 2.5 }
     }
 
     /// The text the WM's remote snapshot reads off the open panel.
@@ -979,7 +981,7 @@ mod tests {
         assert_eq!(limit_for(Kind::GpuCore, None, None, Some(-2.0)), Some(88.0));
         assert_eq!(limit_for(Kind::GpuHotspot, None, None, None), Some(103.0));
         assert_eq!(limit_for(Kind::GpuHotspot, Some(110.0), None, None), Some(105.0));
-        assert_eq!(limit_for(Kind::Nvme, Some(94.85), Some(89.85), None), Some(70.0));
+        assert_eq!(limit_for(Kind::Nvme, Some(94.85), Some(89.85), None), Some(75.0));
         assert_eq!(limit_for(Kind::Nvme, None, Some(70.0), None), Some(65.0));
         assert_eq!(limit_for(Kind::Dimm, Some(85.0), Some(55.0), None), Some(80.0));
         assert_eq!(limit_for(Kind::Other, None, None, None), None);
@@ -1062,14 +1064,33 @@ mod tests {
         assert_eq!(t.coarse.times.len(), 4000 / 30);
         // every bucket holding a spike keeps it
         assert!(t.coarse.cols[0].iter().filter(|v| **v == 90.0).count() >= 39);
-        // ten minutes from the fine ring, a day from the coarse one
-        assert!(std::ptr::eq(t.ring_for(3399.0, 3999.0), &t.fine));
-        assert!(std::ptr::eq(t.ring_for(0.0, 3999.0), &t.coarse));
+        // one history: peaks before the fine hour, 1 Hz samples after, no overlap or hole
+        let all = t.series(0, 0.0, 3999.0, 0.001);
+        assert!(all.windows(2).all(|w| w[0].0 < w[1].0));
+        assert_eq!(all.last().unwrap().0, 3999.0);
+        assert_eq!(all.iter().filter(|p| p.0 >= 400.0).count(), FINE_CAP);
+        assert!(all.iter().filter(|p| p.0 < 400.0).all(|p| p.0 % 30.0 == 29.0));
+        assert_eq!(t.gap_for(0.0), COARSE_STEP * 2.5);
+        assert_eq!(t.gap_for(3399.0), 3.5);
         assert_eq!(t.min_max(0, 3399.0, 3999.0), (50.0, 90.0));
         // a long view draws one point per column, keeping the peaks
         let pts = t.series(0, 3399.0, 3999.0, 10.0);
         assert!(pts.len() <= 62, "{}", pts.len());
         assert!(pts.iter().any(|p| p.1 == 90.0));
+    }
+
+    #[test]
+    fn a_long_range_shows_the_recent_samples_at_once() {
+        let s = Arc::new(vec![sensor("Tctl", Kind::CpuPackage, None)]);
+        let mut t = Temps::default();
+        for k in 0..100 {
+            t.push(frame(k as f64, if k == 0 { Some(s.clone()) } else { None }, &[40.0 + k as f32]));
+        }
+        // a day view straight after start draws the 100 fine samples, not an empty trace
+        let pts = t.series(0, -86300.0, 99.0, 0.001);
+        assert_eq!(pts.len(), 100);
+        assert_eq!(t.min_max(0, -86300.0, 99.0), (40.0, 139.0));
+        assert_eq!(t.value_at(0, 50.0), 90.0);
     }
 
     #[test]

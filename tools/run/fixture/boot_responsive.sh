@@ -6,7 +6,7 @@
 # window pump may take and no frame of the loading screen may lag more than MAX_MS (default 50);
 # nor may the main thread (MAKEPAD_HAL_MAIN_LAG, the window system's thread) stay away that long.
 # WINDOWED=1 runs in a real window (Linux: under a private headless weston, WAYLAND_DISPLAY set).
-# Run from the workspace root after `cargo build --release -p makepad-run`; PACKAGE defaults to
+# Run from the workspace root (the JIT runs through `cargo run --profile host`); PACKAGE defaults to
 # makepad-example-counter.
 max=${MAX_MS:-50}
 dir=$(mktemp -d)
@@ -15,7 +15,7 @@ printf 'wait_frame 1\n' > $dir/quit.hal
 hidden=(MAKEPAD_HAL_BACKEND=offscreen MAKEPAD_HIDE_WINDOWS=1)
 [ -n "$WINDOWED" ] && hidden=()
 out=$(env $hidden SANDBOX_MUTE=1 MAKEPAD_RUN_CACHE_DIR=$dir/cache MAKEPAD_RUN_BOOT_PROBE=1 MAKEPAD_HAL_MAIN_LAG=1 \
-    MAKEPAD_HAL_SCRIPT=$dir/quit.hal perl -e 'alarm 420; exec @ARGV' target/release/makepad run ${PACKAGE:-makepad-example-counter} 2>&1)
+    MAKEPAD_HAL_SCRIPT=$dir/quit.hal perl -e 'alarm 420; exec @ARGV' cargo run --profile host -q -p makepad-run --bin makepad -- run ${PACKAGE:-makepad-example-counter} 2>&1)
 line=$(echo "$out" | grep "makepad-run boot-probe:" | tail -1)
 main=$(echo "$out" | grep "makepad-hal: main-lag" | tail -1)
 echo "$line"

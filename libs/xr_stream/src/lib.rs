@@ -69,7 +69,7 @@ pub fn serve_script_mod(vm: &mut ScriptVm) -> ScriptValue {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-use makepad_desk_link::xr::{link::{HeadsetInfo, XrLink}, codecs, VideoHead, XrClientMsg, XrRenderEye, XrServerMsg, CODEC_HEVC};
+use makepad_desk_link::xr::{link::{HeadsetInfo, XrLink}, codecs, Fovea, VideoHead, XrClientMsg, XrRenderEye, XrServerMsg, CODEC_HEVC};
 #[cfg(not(target_arch = "wasm32"))]
 use makepad_widgets::makepad_platform::video_file::{StreamVideoCodec, VideoStreamDecoder};
 use std::collections::VecDeque;
@@ -94,12 +94,38 @@ script_mod! {
     mod.draw.DrawXrBandDepth = mod.std.set_type_default() do #(DrawXrBandDepth::script_shader(vm)){
         ..mod.draw.DrawQuad
         video: texture_video()
-        // this eye's column of the picture (origin, size) and the picture's buffer size
+        // this eye's column of the picture (origin, size) and the picture's buffer size; the
+        // column's foveation (the eye's axes `[a, b, ea, total]` x and y, their ramp and edge
+        // density): the target is the eye's own (half resolution), the column foveated
         src: uniform(vec4(0.0, 0.0, 1.0, 1.0))
         nv12_size: uniform(vec2(1.0, 1.0))
+        fx: uniform(vec4(0.0, 1.0, 0.0, 1.0))
+        fy: uniform(vec4(0.0, 1.0, 0.0, 1.0))
+        fk: uniform(vec4(0.0, 1.0, 0.0, 1.0))
+        // The eye's point `u` (0..1, one axis) in the foveated column (0..1): `f` the eye's axis
+        // `[a, b, ea, total]`, `r` / `d` its ramp and edge density (`makepad_desk_link::xr::Fovea`)
+        squeeze: fn(t: float, r: float, d: float) -> float {
+            if t <= r {
+                return t - (1.0 - d) * t * t / (2.0 * max(r, 0.000001))
+            }
+            return r * (1.0 + d) * 0.5 + d * (t - r)
+        }
+        to_enc: fn(u: float, f: vec4, r: float, d: float) -> float {
+            if u < f.x {
+                return (f.z - self.squeeze(f.x - u, r, d)) / f.w
+            }
+            if u <= f.y {
+                return (f.z + u - f.x) / f.w
+            }
+            return (f.z + (f.y - f.x) + self.squeeze(u - f.y, r, d)) / f.w
+        }
+        // the eye's point `g` (0..1) in its foveated column (0..1)
+        fovea: fn(g: vec2) -> vec2 {
+            return vec2(self.to_enc(g.x, self.fx, self.fk.x, self.fk.y), self.to_enc(g.y, self.fy, self.fk.z, self.fk.w))
+        }
         pixel: fn() {
             let ch = floor(self.src.w * 2.0 / 3.0 + 0.5)
-            let vap = vec2(self.src.x, ch) + self.pos * vec2(self.src.z * 0.5, ch * 0.5)
+            let vap = vec2(self.src.x, ch) + self.fovea(self.pos) * vec2(self.src.z * 0.5, ch * 0.5)
             let vd = self.video.sample_video((floor(vap + vec2(self.src.z * 0.5, 0.0)) + vec2(0.5, 0.5)) / self.nv12_size).y
             let va = self.video.sample_video((floor(vap) + vec2(0.5, 0.5)) / self.nv12_size).y
             // .x the inverse depth, .y the coverage
@@ -133,6 +159,33 @@ script_mod! {
         // infinite), `env_size` its image's size
         eye: uniform(0.0)
         video_mode: uniform(0.0)
+        // the eye's column is foveated (as `DrawXrBandDepth`'s): the colour is read where the
+        // warp put the eye's point
+        fx: uniform(vec4(0.0, 1.0, 0.0, 1.0))
+        fy: uniform(vec4(0.0, 1.0, 0.0, 1.0))
+        fk: uniform(vec4(0.0, 1.0, 0.0, 1.0))
+        // The eye's point `u` (0..1, one axis) in the foveated column (0..1): `f` the eye's axis
+        // `[a, b, ea, total]`, `r` / `d` its ramp and edge density (`makepad_desk_link::xr::Fovea`)
+        squeeze: fn(t: float, r: float, d: float) -> float {
+            if t <= r {
+                return t - (1.0 - d) * t * t / (2.0 * max(r, 0.000001))
+            }
+            return r * (1.0 + d) * 0.5 + d * (t - r)
+        }
+        to_enc: fn(u: float, f: vec4, r: float, d: float) -> float {
+            if u < f.x {
+                return (f.z - self.squeeze(f.x - u, r, d)) / f.w
+            }
+            if u <= f.y {
+                return (f.z + u - f.x) / f.w
+            }
+            return (f.z + (f.y - f.x) + self.squeeze(u - f.y, r, d)) / f.w
+        }
+        // the eye's point `g` (0..1) in its foveated column (0..1)
+        fovea: fn(g: vec2) -> vec2 {
+            return vec2(self.to_enc(g.x, self.fx, self.fk.x, self.fk.y), self.to_enc(g.y, self.fy, self.fk.z, self.fk.w))
+        }
+
         occlude: uniform(0.0)
         depth_near: uniform(0.0)
         opaque: uniform(0.0)
@@ -351,7 +404,7 @@ script_mod! {
             }
             if self.opaque > 3.5 && self.opaque < 4.5 && self.video_mode > 0.5 {
                 // (debug `opaque` 4: the colour alone, no coverage or depth samples: their cost)
-                let c4 = self.video.sample_video((self.src.xy + uv * vec2(self.src.z, ch)) / self.nv12_size)
+                let c4 = self.video.sample_video((self.src.xy + self.fovea(uv) * vec2(self.src.z, ch)) / self.nv12_size)
                 return vec4(self.nv12_color(vec3(c4.y, c4.z, c4.x) * 255.0), 1.0)
             }
             if self.video_mode > 0.5 {
@@ -371,7 +424,7 @@ script_mod! {
                 let vs = self.nv12_size
                 // (inside this eye's colour: the filter never reaches the other eye's column or
                 // the band below)
-                let cp = clamp(uv * vec2(self.src.z, ch), vec2(1.0, 1.0), vec2(self.src.z, ch) - vec2(1.0, 1.0))
+                let cp = clamp(self.fovea(uv) * vec2(self.src.z, ch), vec2(1.0, 1.0), vec2(self.src.z, ch) - vec2(1.0, 1.0))
                 let c = self.video.sample_video((self.src.xy + cp) / vs)
                 let rgb = self.nv12_color(vec3(c.y, c.z, c.x) * 255.0)
                 let keep = 1.0 - self.occlusion(uv, mix(0.0, z, step(z, 49.0)))
@@ -385,12 +438,13 @@ script_mod! {
                 }
                 return vec4(rgb * keep, ca * keep)
             }
-            let s = self.src.xy + self.pos * vec2(self.src.z, ch) - vec2(0.5, 0.5)
+            let fp = self.fovea(self.pos)
+            let s = self.src.xy + fp * vec2(self.src.z, ch) - vec2(0.5, 0.5)
             let f = s - floor(s)
             let p = floor(s)
             let top = mix(self.nv12_rgb(p), self.nv12_rgb(p + vec2(1.0, 0.0)), f.x)
             let bottom = mix(self.nv12_rgb(p + vec2(0.0, 1.0)), self.nv12_rgb(p + vec2(1.0, 1.0)), f.x)
-            let ap = vec2(self.src.x, ch) + self.pos * vec2(self.src.z * 0.5, ch * 0.5)
+            let ap = vec2(self.src.x, ch) + fp * vec2(self.src.z * 0.5, ch * 0.5)
             let a = max(clamp(self.nv12_bytes(floor(ap)).x / 255.0, 0.0, 1.0), self.opaque)
             let dvb = self.nv12_bytes(floor(ap + vec2(self.src.z * 0.5, 0.0))).x / 255.0
             let keep = 1.0 - self.occlusion(self.pos, mix(0.0, self.depth_near / max(dvb, 0.0001), step(0.004, dvb)))
@@ -441,6 +495,10 @@ struct Shared {
     /// The stream's tiles (1: both eyes in one picture; 2: a picture per eye) and a tile's size.
     tiles: u8,
     tile_size: [u32; 2],
+    /// The eye size the pictures were rendered at and how its columns are foveated (`Welcome`).
+    eye: [u32; 2],
+    #[cfg(not(target_arch = "wasm32"))]
+    fovea: Fovea,
     /// Video messages received, tiles decoded (the stats' rates).
     received: u32,
     decoded: u32,
@@ -1562,14 +1620,17 @@ impl XrStreamClient {
             if self.shown[0].is_none() {
                 return;
             }
-            let tile_size = self.shared.lock().unwrap().tile_size;
+            let (tile_size, eye, fovea) = {
+                let s = self.shared.lock().unwrap();
+                (s.tile_size, s.eye, s.fovea)
+            };
             let tiled = self.shown[1].is_some();
             let ew = if tiled { tile_size[0] } else { tile_size[0] / 2 };
-            let ch = (tile_size[1] as f32 * 2.0 / 3.0).round() as u32;
-            // (one texel per band texel: the band is the colour's half resolution both ways, its
-            // coverage left and its depth right; at half the band's rows the coverage was a
-            // quarter of the colour's: a dark rim along horizontal edges)
-            let band_size = ((ew / 2) * 2, (tile_size[1].saturating_sub(ch)).max(1));
+            // (the eye's own half resolution: the band is the foveated colour's half resolution
+            // both ways, its coverage left and its depth right, unwarped here; at half the
+            // band's rows the coverage was a quarter of the colour's: a dark rim along
+            // horizontal edges)
+            let band_size = ((eye[0] / 2).max(1) * 2, (eye[1] / 2).max(1));
             let rt = self.band_rt.get_or_insert_with(|| RenderTarget::new(cx.cx, "xr_stream_band_depth"));
             rt.ensure(cx.cx, band_size, RenderTargetFormat::Bgra8);
             rt.begin(cx, vec4(0.0, 0.0, 0.0, 1.0));
@@ -1580,6 +1641,10 @@ impl XrStreamClient {
                 let src = [if tiled { 0.0 } else { (e as u32 * ew) as f32 }, 0.0, ew as f32, tile_size[1] as f32];
                 band.draw_vars.set_uniform(cx.cx, live_id!(src), &src);
                 band.draw_vars.set_uniform(cx.cx, live_id!(nv12_size), &[shown.size[0] as f32, shown.size[1] as f32]);
+                let [fx, fy] = fovea.axes(shown.head.eyes[e].fov);
+                band.draw_vars.set_uniform(cx.cx, live_id!(fx), &fx.shape());
+                band.draw_vars.set_uniform(cx.cx, live_id!(fy), &fy.shape());
+                band.draw_vars.set_uniform(cx.cx, live_id!(fk), &[fx.ramp, fx.edge, fy.ramp, fy.edge]);
                 band.new_draw_call(cx);
                 let half = band_size.0 as f64 / 2.0;
                 band.draw_abs(cx, Rect { pos: dvec2(e as f64 * half, 0.0), size: dvec2(half, band_size.1 as f64) });
@@ -1595,7 +1660,10 @@ impl XrStreamClient {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let Some(first) = self.shown[0].as_ref() else { return };
-            let tile_size = self.shared.lock().unwrap().tile_size;
+            let (tile_size, fovea) = {
+                let s = self.shared.lock().unwrap();
+                (s.tile_size, s.fovea)
+            };
             // this frame's eyes (the warp's target)
             let wire = cx.cx.xr_frame_wire();
             let view = wire.as_ref().and_then(|(_, w)| makepad_widgets::makepad_platform::makepad_hal::buffers::read_items::<makepad_widgets::makepad_platform::makepad_hal::XrFrame>(w, 1).next());
@@ -1650,8 +1718,12 @@ impl XrStreamClient {
                 // picture's, per pixel
                 let r = &shown.head.eyes[e];
                 let tan = |f: [f32; 4]| f.map(f32::tan);
+                let [fx, fy] = fovea.axes(r.fov);
                 let mut uniforms: Vec<(LiveId, Vec<f32>)> = vec![
                     (live_id!(eye), vec![e as f32]),
+                    (live_id!(fx), fx.shape().to_vec()),
+                    (live_id!(fy), fy.shape().to_vec()),
+                    (live_id!(fk), vec![fx.ramp, fx.edge, fy.ramp, fy.edge]),
                     (live_id!(video_mode), vec![video_mode]),
                     (live_id!(render_rot), r.orientation.to_vec()),
                     (live_id!(render_pos), vec![r.position[0], r.position[1], r.position[2], 1.0]),
@@ -1956,7 +2028,7 @@ fn worker(target: XrTarget, mut info: HeadsetInfo, shared: Arc<Mutex<Shared>>, s
             }
             let Some(msg) = link.recv_timeout(Duration::from_millis(5)) else { continue };
             match msg {
-                XrServerMsg::Welcome { server, instance, session, size, codec, tiles: n, encoder, .. } => {
+                XrServerMsg::Welcome { server, instance, session, size, codec, tiles: n, encoder, eye, fovea, .. } => {
                     shared.lock().unwrap().pin = None;
                     log!("xr stream: linked to server instance {instance:016x}, session {session:016x}");
                     let codec = if codec == CODEC_HEVC { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
@@ -1970,6 +2042,8 @@ fn worker(target: XrTarget, mut info: HeadsetInfo, shared: Arc<Mutex<Shared>>, s
                         s.link = Some(link.clone());
                         s.tiles = n;
                         s.tile_size = tile_size;
+                        s.eye = eye;
+                        s.fovea = fovea;
                         s.latest = [VecDeque::new(), VecDeque::new()];
                     }
                     for tile in 0..n as usize {

@@ -6,11 +6,13 @@
 # it twice (the slot stays lazy and compiles, and fails, again; no slot is left in flight), the internal
 # compiler error is printed with the fn and the owner's payload each time,
 # and exits 0. A run without the variable prints the value. Run from the workspace root after
-# `cargo build --release -p makepad-run`. TARGET (default target/release).
-T=${TARGET:-${CARGO_TARGET_DIR:-target}/release}
+# (the JIT runs through `cargo run --profile host`). the JIT runs through `cargo run --profile host`.
+ROOT=$(pwd)
+# the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
+J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
 dir=$(mktemp -d "${TMPDIR:-/tmp}/compile_panic.XXXXXX") || exit 1
 mkdir -p "$dir/home" "$dir/tmp"
-run() { TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/home" MAKEPAD_RUN_CACHE=off perl -e 'alarm 600; exec @ARGV' "$T/makepad" run --quiet --ahead=minimal relax-provided-fixture --bin relax-compile-panic; }
+run() { TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/home" MAKEPAD_RUN_CACHE=off perl -e 'alarm 600; exec @ARGV' $J run --quiet --ahead=minimal relax-provided-fixture --bin relax-compile-panic; }
 plain=$(run 2>&1); plain_rc=$?
 forced=$(MAKEPAD_RUN_TEST_COMPILE_PANIC=compile_panic_target run 2>&1); forced_rc=$?
 fail=""

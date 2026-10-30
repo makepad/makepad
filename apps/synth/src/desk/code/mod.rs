@@ -859,6 +859,11 @@ impl ScoreEditor {
 }
 
 impl Widget for ScoreEditor {
+    /// The anchored instrument browser's library card and buttons.
+    fn semantics_parts(&self, _cx: &Cx, out: &mut Vec<(u64, Option<u64>, makepad_widgets::makepad_platform::a11y_tree::Node)>) {
+        self.browser.semantics_parts(out);
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.tick.is_event(event).is_some() {
             self.view.redraw(cx);

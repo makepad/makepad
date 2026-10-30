@@ -429,10 +429,21 @@ fn sdf_ellipsoid(p, radii) {
 // The half space below the plane through `d * n` with normal `n`.
 fn sdf_plane(p, n, d) { dot(p, n) - d }
 // A gyroid sheet of period `period` and wall `wall`.
+// A gyroid sheet `wall` thick: the gyroid function over its gradient (g / |grad g|, the
+// distance to the sheet near it, so the wall is `wall` everywhere and its faces are offsets
+// of the minimal surface: no low points to start a print in mid air). On the sheet
+// |grad g| / k is 1.41..1.73; away from it the gradient may vanish, so it counts at least 1.
 fn sdf_gyroid(p, period, wall) {
     let k = TAU / period
-    let g = sin(p.x * k) * cos(p.y * k) + sin(p.y * k) * cos(p.z * k) + sin(p.z * k) * cos(p.x * k)
-    abs(g) / k - wall * 0.5
+    let sx = sin(p.x * k)
+    let cx = cos(p.x * k)
+    let sy = sin(p.y * k)
+    let cy = cos(p.y * k)
+    let sz = sin(p.z * k)
+    let cz = cos(p.z * k)
+    let g = sx * cy + sy * cz + sz * cx
+    let n = length(vec3(cx * cy - sz * sx, cy * cz - sx * sy, cz * cx - sy * sz))
+    abs(g) / (k * max(n, 1.0)) - wall * 0.5
 }
 
 fn sdf_union(a, b) { min(a, b) }

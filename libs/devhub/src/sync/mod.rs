@@ -39,13 +39,15 @@ mod cli;
 mod conf;
 pub mod files;
 #[cfg(feature = "checkout")]
-mod git;
+pub(crate) mod git;
 #[cfg(feature = "checkout")]
 mod jits;
 #[cfg(feature = "checkout")]
+pub mod lanes;
+#[cfg(feature = "checkout")]
 mod launch;
 #[cfg(feature = "checkout")]
-mod serve;
+pub(crate) mod serve;
 mod sign;
 pub mod store;
 
@@ -87,6 +89,27 @@ pub fn store_dir(repo: &str) -> std::path::PathBuf {
 pub fn register_peer(_ep: &Endpoint, _ctx: &std::sync::Arc<NodeCtx>) {}
 
 pub fn register_control(_ep: &Endpoint, _hub: &makepad_remote::hub::Hub) {}
+
+/// A control service as a call: (line, out).
+pub type FlowServe = std::sync::Arc<dyn Fn(&str, &mut Vec<String>) + Send + Sync>;
+
+/// The master's lane merge bot ([`lanes`]): its `lanes` control service and its loop. The service
+/// as a call for the panel (None without checkout support).
+pub fn register_lanes(ep: &Endpoint, machine: &str, publish: crate::local::Publish) -> Option<FlowServe> {
+    #[cfg(feature = "checkout")]
+    {
+        let l = lanes::Lanes::new(machine, crate::proto::home(), publish);
+        let l2 = l.clone();
+        ep.register("lanes", 1, makepad_remote::lines::service("lanes", std::sync::Arc::new(move |line, out| l2.serve(line, out))));
+        l.start();
+        Some(std::sync::Arc::new(move |line: &str, out: &mut Vec<String>| l.serve(line, out)))
+    }
+    #[cfg(not(feature = "checkout"))]
+    {
+        let _ = (ep, machine, publish);
+        None
+    }
+}
 
 /// Starts the master's watcher when this hub has checkout support.
 pub fn start_autosync(sock: std::path::PathBuf) {

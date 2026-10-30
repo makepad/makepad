@@ -18,6 +18,11 @@
 //! (shift: an octave), ⌘L loops the selection, ⌘Z/⌘⇧Z undo and redo,
 //! alt-←/→ the previous/next section, ⌘ or ctrl-scroll the rows per beat;
 //! F2 the channel's settings, F3 the orientation, F4 tracker ⇄ roll.
+//! The ruler moves the playhead, playing or stopped (a drag scrubs);
+//! shift-drag on it loops a range, and a loop's edges drag there.
+//! The pointer: a note drags in time (snapped to the step's rows) and,
+//! in a roll, in pitch; its end resizes it; pressed inside the selection
+//! (or with shift) the selection's notes move with it, one undo step.
 
 use super::tracker_model::{self as tm, Channel, EvKind, Form, Src, TrackModel, View, FX_LANE};
 use makepad_edit_values::{Change, Edit, Splice};
@@ -231,9 +236,16 @@ enum Tool {
 #[derive(Clone, Debug)]
 enum Drag {
     Select { anchor: (i64, usize) },
-    Note { ch: usize, ev: usize, at: Vec2d, now: Vec2d, resize: bool },
+    /// Notes under a hand: the one pressed (in `ch`) first, then the rest
+    /// of the selection that moves with it.
+    Note { ch: usize, at: Vec2d, now: Vec2d, resize: bool, group: Vec<Member> },
     Fader { ch: usize, field: &'static str, value: f32, from: Vec2d, base: f32 },
+    /// Shift-drag on the ruler: a range to loop.
     Ruler { from: f64, to: f64 },
+    /// The ruler pressed or dragged: the playhead follows (song beat).
+    Scrub { beat: f64 },
+    /// A loop edge on the ruler dragged (`end`: its end, else its start).
+    LoopEdge { end: bool, range: (f64, f64) },
     PopFader { what: PopFader, value: f32 },
 }
 
@@ -553,6 +565,8 @@ impl ScoreTracker {
 
     pub fn set_live(&mut self, cx: &mut Cx, live: TrackerLive) {
         let was = self.live.playing;
+        // Stopped, a seek or a loop changed still shows at once.
+        let moved = live.song_off != self.live.song_off || live.looping != self.live.looping;
         self.live = live;
         let now = Cx::time_now();
         if (live.beat - self.raw.0).abs() > 1e-9 || live.playing != was {
@@ -561,7 +575,7 @@ impl ScoreTracker {
             let err = live.beat - predicted;
             self.base = if !live.playing || !was || err.abs() > 0.5 { (live.beat, now) } else { (predicted + err * 0.15, now) };
         }
-        if live.playing || was {
+        if live.playing || was || moved {
             self.redraw(cx);
         }
     }
@@ -688,6 +702,37 @@ impl ScoreTracker {
     fn at(&self, abs: Vec2d) -> (f64, f64) {
         let d = abs - self.grid.pos;
         if self.vertical() { (d.y + self.scroll_t, d.x + self.scroll_c) } else { (d.x + self.scroll_t, d.y + self.scroll_c) }
+    }
+
+    /// The song beat of the ruler's row under `abs` (its start).
+    fn ruler_beat(&self, abs: Vec2d) -> Option<f64> {
+        let (t, _) = self.at(abs);
+        self.content_beat((t / self.row_px()).floor() as i64)
+    }
+
+    /// The loop range shown (as drawn: a cycle shows none), with a ruler
+    /// drag's change in it.
+    fn loop_shown(&self) -> Option<(f64, f64)> {
+        if self.model.cycle {
+            return None;
+        }
+        match self.drag {
+            Some(Drag::LoopEdge { range, .. }) => Some(range),
+            _ => self.live.looping,
+        }
+    }
+
+    /// A loop edge on the ruler within a few pixels of `abs`: whether it is
+    /// the end, and the range.
+    fn loop_edge_at(&self, abs: Vec2d) -> Option<(bool, (f64, f64))> {
+        let (lo, hi) = self.loop_shown()?;
+        let (t, _) = self.at(abs);
+        let px_beat = self.row_px() * self.lpb as f64;
+        let (dl, dh) = ((t - lo * px_beat).abs(), (t - hi * px_beat).abs());
+        if dl.min(dh) > 5.0 {
+            return None;
+        }
+        Some((dh <= dl, (lo, hi)))
     }
 
     fn head_rect(&self, i: usize) -> Rect {
@@ -869,7 +914,10 @@ impl ScoreTracker {
         let row_px = self.row_px();
         let view = self.view_t();
         let px_beat = row_px * self.lpb as f64;
-        if let (true, Some(song), true) = (self.live.playing, self.song, self.follow) {
+        // The view holds still under a hand on the ruler (it would run off
+        // following a playhead that follows the hand).
+        let on_ruler = matches!(self.drag, Some(Drag::Scrub { .. } | Drag::LoopEdge { .. } | Drag::Ruler { .. }));
+        if let (true, Some(song), true, false) = (self.live.playing, self.song, self.follow, on_ruler) {
             let play_t = (song + self.unfold) * px_beat;
             if self.vertical() {
                 self.scroll_t = play_t - view * 0.5;
@@ -1803,12 +1851,13 @@ impl ScoreTracker {
                 }
             }
         }
-        // A note dragged: where it lands.
-        if let Some(Drag::Note { ch, ev, at, now, resize }) = self.drag.clone() {
-            if let Some(d) = self.dragged(ch, ev, at, now, resize) {
-                let g = self.geo[ch];
-                let c = &self.model.channels[ch];
-                let e = &c.events[ev];
+        // Notes dragged: where they land.
+        if let Some(Drag::Note { ch, at, now, resize, group }) = self.drag.clone() {
+            let (d, dp) = self.drag_delta(ch, at, now, resize);
+            for m in group {
+                let Some(d) = self.dragged(m, d, dp, resize) else { continue };
+                let (Some(g), Some(c)) = (self.geo.get(m.ch).copied(), self.model.channels.get(m.ch)) else { continue };
+                let e = &c.events[m.ev];
                 let (ca, cb) = if g.view == View::Roll {
                     let pc = self.pitch_c(c, &g, d.pitch);
                     (pc, pc + g.key)
@@ -1821,7 +1870,7 @@ impl ScoreTracker {
             }
         }
         // The loop range and the playhead.
-        if let Some((lo, hi)) = self.live.looping.filter(|_| !self.model.cycle) {
+        if let Some((lo, hi)) = self.loop_shown() {
             for b in [lo, hi] {
                 let t = b * px_beat;
                 let r = self.tc(t - 1.0, t + 1.0, 0.0, total_c);
@@ -2220,6 +2269,15 @@ impl MaxWith for Vec4f {
     }
 }
 
+/// A note a drag carries: its channel, event and start on the time axis
+/// (content px) when pressed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Member {
+    ch: usize,
+    ev: usize,
+    t0: f64,
+}
+
 /// A note under a drag: where it lands.
 struct Dragged {
     beat: f64,
@@ -2230,27 +2288,85 @@ struct Dragged {
 }
 
 impl ScoreTracker {
-    fn dragged(&self, ch: usize, ev: usize, at: Vec2d, now: Vec2d, resize: bool) -> Option<Dragged> {
-        let c = self.model.channels.get(ch)?;
-        let e = c.events.get(ev)?;
-        let g = self.geo.get(ch)?;
+    /// A drag's move: song beats (snapped to the step's rows, a resize to
+    /// rows) and, in a roll, semitones.
+    fn drag_delta(&self, ch: usize, at: Vec2d, now: Vec2d, resize: bool) -> (f64, f32) {
         let row_px = self.row_px();
-        let rb = self.rb();
-        let px_beat = row_px * self.lpb as f64;
         let (ta, ca) = self.at(at);
         let (tn, cn) = self.at(now);
-        let rows = ((tn - ta) / row_px).round();
-        let d = rows * rb;
-        // The event's start where it was pressed (its row's repeat).
-        let press_row = (ta / row_px).floor() as i64;
-        let local = self.local_of(ch, press_row)?;
-        let t0 = press_row as f64 * row_px + (e.beat - local) * px_beat;
+        let unit = if resize { 1.0 } else { self.step.max(1) as f64 };
+        let rows = ((tn - ta) / row_px / unit).round() * unit;
+        let dp = match (self.geo.get(ch), self.model.channels.get(ch)) {
+            (Some(g), Some(c)) if g.view == View::Roll && !resize => self.pitch_at(c, g, cn) - self.pitch_at(c, g, ca),
+            _ => 0.0,
+        };
+        (rows * self.rb(), dp)
+    }
+
+    /// Where a dragged note lands for a move of `d` beats and `dp` semitones.
+    fn dragged(&self, m: Member, d: f64, dp: f32, resize: bool) -> Option<Dragged> {
+        let c = self.model.channels.get(m.ch)?;
+        let e = c.events.get(m.ev)?;
+        let rb = self.rb();
+        let px_beat = self.row_px() * self.lpb as f64;
         if resize {
-            return Some(Dragged { beat: e.beat, pitch: e.pitch, dur: (e.dur as f64 + d).max(rb * 0.25), t: t0 });
+            return Some(Dragged { beat: e.beat, pitch: e.pitch, dur: (e.dur as f64 + d).max(rb * 0.25), t: m.t0 });
         }
-        let pitch = if g.view == View::Roll { (e.pitch + self.pitch_at(c, g, cn) - self.pitch_at(c, g, ca)).clamp(0.0, 127.0) } else { e.pitch };
+        let pitch = if matches!(c.form, Form::Notes { .. }) && matches!(e.kind, EvKind::Note | EvKind::Hit) { (e.pitch + dp).clamp(0.0, 127.0) } else { e.pitch };
         let len = if c.absolute { f64::MAX } else { c.len.max(rb) };
-        Some(Dragged { beat: (e.beat + d).rem_euclid(len), pitch, dur: e.dur as f64, t: t0 + d * px_beat })
+        Some(Dragged { beat: (e.beat + d).rem_euclid(len), pitch, dur: e.dur as f64, t: m.t0 + d * px_beat })
+    }
+
+    /// Where event `ev` of `ch` starts on the time axis (content px), seen
+    /// from content row `row` (its repeat there).
+    fn note_t0(&self, ch: usize, ev: usize, row: i64) -> Option<f64> {
+        let e = self.model.channels.get(ch)?.events.get(ev)?;
+        let local = self.local_of(ch, row)?;
+        Some(row as f64 * self.row_px() + (e.beat - local) * self.row_px() * self.lpb as f64)
+    }
+
+    /// The notes a press on `ev` drags: that one, or (pressed inside the
+    /// selection, or with shift, which extends the selection to it) every
+    /// note starting in the selection's rows on its writable channels.
+    fn drag_group(&mut self, ch: usize, ev: usize, at: Vec2d, shift: bool) -> Vec<Member> {
+        let row_px = self.row_px();
+        let press_row = (self.at(at).0 / row_px).floor() as i64;
+        let Some(t0) = self.note_t0(ch, ev, press_row) else { return Vec::new() };
+        let me = Member { ch, ev, t0 };
+        let start_row = (t0 / row_px + 1e-6).floor() as i64;
+        let Some(home) = self.home_row(start_row) else { return vec![me] };
+        let inside = self.sel.is_some_and(|s| home >= s.r0 && home <= s.r1 && ch >= s.c0 && ch <= s.c1);
+        if !inside && !shift {
+            self.sel = None;
+            return vec![me];
+        }
+        let s = match self.sel {
+            Some(s) if inside => s,
+            Some(s) => Sel { r0: s.r0.min(home), r1: s.r1.max(home), c0: s.c0.min(ch), c1: s.c1.max(ch) },
+            None => Sel { r0: home, r1: home, c0: ch, c1: ch },
+        };
+        self.sel = Some(s);
+        // The selection's rows are the timeline's; the view shows them
+        // `shift` rows on (a cycle repeating).
+        let shift_px = (start_row - home) as f64 * row_px;
+        let mut out = vec![me];
+        for c in s.c0..=s.c1.min(self.model.channels.len().saturating_sub(1)) {
+            if !self.model.channels[c].form.editable() {
+                continue;
+            }
+            for r in s.r0..=s.r1 {
+                for i in self.events_at(c, r, None) {
+                    let e = &self.model.channels[c].events[i];
+                    if !matches!(e.kind, EvKind::Note | EvKind::Hit) || e.lane == FX_LANE || out.iter().any(|m| m.ch == c && m.ev == i) {
+                        continue;
+                    }
+                    if let Some(t0) = self.note_t0(c, i, r) {
+                        out.push(Member { ch: c, ev: i, t0: t0 + shift_px });
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// The note under the pointer in a roll or a horizontal lane, and
@@ -2832,10 +2948,20 @@ impl ScoreTracker {
             return;
         }
         if self.ruler.contains(abs) {
-            let (t, _) = self.at(abs);
-            let row = (t / self.row_px()).floor() as i64;
-            let beat = self.content_beat(row).unwrap_or(0.0);
-            self.drag = Some(Drag::Ruler { from: beat, to: beat });
+            // A loop edge under the pointer moves; shift-drag marks a range
+            // to loop; otherwise the playhead goes where pressed and
+            // follows the drag, playing or stopped.
+            if let Some((end, range)) = self.loop_edge_at(abs) {
+                self.drag = Some(Drag::LoopEdge { end, range });
+                return;
+            }
+            let beat = self.ruler_beat(abs).unwrap_or(0.0);
+            if fe.modifiers.shift {
+                self.drag = Some(Drag::Ruler { from: beat, to: beat });
+            } else {
+                self.drag = Some(Drag::Scrub { beat });
+                cx.widget_action(self.uid, TrackerAction::Seek(beat));
+            }
             return;
         }
         if !self.grid.contains(abs) {
@@ -2867,7 +2993,10 @@ impl ScoreTracker {
                     }
                 }
                 Some((ev, resize)) => {
-                    self.drag = Some(Drag::Note { ch, ev, at: abs, now: abs, resize });
+                    let group = self.drag_group(ch, ev, abs, fe.modifiers.shift);
+                    if !group.is_empty() {
+                        self.drag = Some(Drag::Note { ch, at: abs, now: abs, resize, group });
+                    }
                 }
                 None if view == View::Roll && !secondary && fe.tap_count <= 1 => {
                     // Draw a note (the chord) where pressed.
@@ -2896,6 +3025,14 @@ impl ScoreTracker {
                 // The velocity field is its two digits; the rest of the lane is the note.
                 self.cursor.field = (within > self.cw * 4.0 && within < self.cw * 6.5 + 4.0) as u8;
             }
+            // A note in the pressed cell: a drag moves it (with the
+            // selection when it is in it); elsewhere a drag selects.
+            let lane = self.cursor.lane;
+            let on_note = if secondary || lane == FX_LANE || !self.model.channels[ch].form.editable() {
+                None
+            } else {
+                self.events_at(ch, home, Some(lane)).into_iter().find(|&i| matches!(self.model.channels[ch].events[i].kind, EvKind::Note | EvKind::Hit))
+            };
             if !fe.modifiers.shift && !secondary && self.cursor.lane != FX_LANE && self.adds_here(ch, home, fe.tap_count) {
                 self.cursor.field = 0;
                 let pitch = self.pointer_pitch();
@@ -2904,7 +3041,11 @@ impl ScoreTracker {
             if fe.modifiers.shift {
                 let anchor = self.sel.map_or((home, ch), |s| (s.r0, s.c0));
                 self.sel = Some(Sel { r0: anchor.0.min(home), r1: anchor.0.max(home), c0: anchor.1.min(ch), c1: anchor.1.max(ch) });
-            } else {
+            }
+            let group = on_note.map(|ev| self.drag_group(ch, ev, abs, false)).unwrap_or_default();
+            if !group.is_empty() {
+                self.drag = Some(Drag::Note { ch, at: abs, now: abs, resize: false, group });
+            } else if !fe.modifiers.shift {
                 self.sel = None;
                 self.drag = Some(Drag::Select { anchor: (home, ch) });
             }
@@ -2925,7 +3066,11 @@ impl ScoreTracker {
                     self.cursor.ch = ch;
                 }
             }
-            Drag::Note { ch, ev, at, resize, .. } => self.drag = Some(Drag::Note { ch, ev, at, now: abs, resize }),
+            Drag::Note { .. } => {
+                if let Some(Drag::Note { now, .. }) = &mut self.drag {
+                    *now = abs;
+                }
+            }
             Drag::Fader { ch, field, from, base, .. } => {
                 use std::fmt::Write;
                 let (lo, hi) = if field == "amp" { (0.0f32, 2.0f32) } else { (-1.0, 1.0) };
@@ -2938,10 +3083,25 @@ impl ScoreTracker {
                 self.drag = Some(Drag::Fader { ch, field, value: v, from, base });
             }
             Drag::Ruler { from, .. } => {
-                let (t, _) = self.at(abs);
-                let row = (t / self.row_px()).floor() as i64;
-                let to = self.content_beat(row).unwrap_or(from);
+                let to = self.ruler_beat(abs).unwrap_or(from);
                 self.drag = Some(Drag::Ruler { from, to });
+            }
+            Drag::Scrub { beat } => {
+                if let Some(to) = self.ruler_beat(abs).filter(|to| (to - beat).abs() > self.rb() * 0.5) {
+                    self.drag = Some(Drag::Scrub { beat: to });
+                    cx.widget_action(self.uid, TrackerAction::Seek(to));
+                }
+            }
+            Drag::LoopEdge { end, range } => {
+                // Edges sit on row boundaries; a loop keeps at least a row.
+                let (t, _) = self.at(abs);
+                let rb = self.rb();
+                let b = ((t / self.row_px()).round() * rb).max(0.0);
+                let next = if end { (range.0, b.max(range.0 + rb)) } else { (b.min(range.1 - rb), range.1) };
+                if next != range {
+                    self.drag = Some(Drag::LoopEdge { end, range: next });
+                    cx.widget_action(self.uid, TrackerAction::Loop(Some(next)));
+                }
             }
             Drag::PopFader { what, .. } => {
                 let key = match &what {
@@ -2962,23 +3122,53 @@ impl ScoreTracker {
         let Some(drag) = self.drag.take() else { return };
         match drag {
             Drag::Select { .. } => {}
-            Drag::Note { ch, ev, at, now, resize } => {
-                if (now - at).length() < 3.0 {
+            Drag::Note { ch, at, now, resize, group } => {
+                // A press without a move changes nothing.
+                if (now - at).length() < 3.0 || !self.writable(cx, ch) {
                     return;
                 }
-                if !self.writable(cx, ch) {
+                let (d, dp) = self.drag_delta(ch, at, now, resize);
+                if d.abs() < 1e-9 && dp.abs() < 1e-3 {
                     return;
                 }
-                let Some(d) = self.dragged(ch, ev, at, now, resize) else { return };
-                let c = &self.model.channels[ch];
-                let e = &c.events[ev];
-                let splices = tm::change_event(c, e, d.beat, d.pitch, d.dur, e.vel);
-                self.emit(cx, splices, if resize { "note resized" } else { "note moved" });
+                // Every note's new place, per channel, as one change.
+                let mut per: Vec<(usize, Vec<tm::Move>)> = Vec::new();
+                for m in &group {
+                    let Some(to) = self.dragged(*m, d, dp, resize) else { continue };
+                    let mv = tm::Move { ev: m.ev, beat: to.beat, pitch: to.pitch, dur: to.dur };
+                    match per.iter_mut().find(|(c, _)| *c == m.ch) {
+                        Some((_, list)) => list.push(mv),
+                        None => per.push((m.ch, vec![mv])),
+                    }
+                }
+                let splices: Vec<Splice> = per.iter().flat_map(|(c, moves)| tm::move_events(&self.model.channels[*c], moves)).collect();
+                let status = match (resize, group.len() > 1) {
+                    (true, false) => "note resized",
+                    (true, true) => "notes resized",
+                    (false, false) => "note moved",
+                    (false, true) => "notes moved",
+                };
+                self.emit(cx, splices, status);
+                // The selection follows what moved.
+                if !resize {
+                    let rows = (d * self.lpb as f64).round() as i64;
+                    let n = self.rows().max(1);
+                    self.cursor.row = (self.cursor.row + rows).rem_euclid(n);
+                    self.cursor.pitch = (self.cursor.pitch + dp).clamp(0.0, 127.0);
+                    if let Some(s) = &mut self.sel {
+                        if s.r0 + rows >= 0 && s.r1 + rows < n {
+                            s.r0 += rows;
+                            s.r1 += rows;
+                        }
+                    }
+                }
             }
             Drag::Fader { ch, field, value, .. } => {
                 let v = makepad_edit_values::number::fmt_num(value as f64, 2);
                 self.write_field(cx, ch, field, v, field);
             }
+            Drag::Scrub { .. } => {}
+            Drag::LoopEdge { range, .. } => cx.widget_action(self.uid, TrackerAction::Loop(Some(range))),
             Drag::Ruler { from, to } => {
                 if (to - from).abs() < self.rb() * 0.5 {
                     cx.widget_action(self.uid, TrackerAction::Seek(from));
@@ -3011,6 +3201,14 @@ impl Widget for ScoreTracker {
                 }
             }
         }
+        // Where the playhead is (the ruler's label there) and the loop.
+        if let Some(song) = self.song {
+            let label = self.labels.get((song * self.lpb as f64).floor().max(0.0) as usize).map_or("", String::as_str);
+            let _ = write!(node.value, "; playhead {label} (beat {song:.2})");
+        }
+        if let Some((lo, hi)) = self.loop_shown() {
+            let _ = write!(node.value, "; loop {lo:.2} to {hi:.2}");
+        }
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
@@ -3027,7 +3225,9 @@ impl Widget for ScoreTracker {
                         self.preview(cx, item);
                     }
                 }
-                let cursor = if self.head_hit(fe.abs).is_some_and(|(_, h)| matches!(h, HeadHit::Level | HeadHit::Pan)) {
+                let cursor = if self.ruler.contains(fe.abs) && self.loop_edge_at(fe.abs).is_some() {
+                    if self.vertical() { MouseCursor::NsResize } else { MouseCursor::EwResize }
+                } else if self.head_hit(fe.abs).is_some_and(|(_, h)| matches!(h, HeadHit::Level | HeadHit::Pan)) {
                     MouseCursor::EwResize
                 } else if self.tools.iter().any(|(_, r)| r.contains(fe.abs)) || self.head_hit(fe.abs).is_some() || self.popup.is_some() {
                     MouseCursor::Hand
@@ -3111,6 +3311,11 @@ impl Widget for ScoreTracker {
             return DrawStep::done();
         }
         self.pump_live();
+        if let Some(Drag::Scrub { beat }) = self.drag {
+            // Under the hand at once (the clock's report follows).
+            self.song = Some(beat);
+            self.unfold = 0.0;
+        }
         self.scroll_frame(cx);
         self.clamp_scroll();
         self.draw_grid(cx, &p);

@@ -10,12 +10,14 @@
 #                     max N ms, all N ms, spinner N`). Its first compiles on program threads (code the
 #                     first session never ran) are reported, not failed: they must only be cheap.
 # Sandbox with a Play: local/agent_state/relax-campaign/warmzero-tools/wz.py (same rule, real Play click).
-# Run from the workspace root after `cargo build --release -p makepad-run`.
+# Run from the workspace root (the JIT runs through `cargo run --profile host`).
 # PACKAGES (default "makepad-app-calculator"; each word is a `makepad run` argument list with ',' for
-# spaces), WAIT (seconds to the first present / to idle, default 300), TARGET (default target/release).
+# spaces), WAIT (seconds to the first present / to idle, default 300), the JIT runs through `cargo run --profile host`.
 # Prints "warm_zero: OK ..." or "warm_zero: FAIL ..." per package; exit 1 on any failure.
-T=${TARGET:-target/release}
-B=$(cd "$(dirname "$T/makepad")" && pwd)/makepad
+ROOT=$(pwd)
+# the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
+J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
+B=$J
 PACKAGES=${PACKAGES:-makepad-app-calculator,--no-default-features,--features,standalone}
 WAIT=${WAIT:-300}
 dir=$(mktemp -d "${TMPDIR:-/tmp}/warm_zero.XXXXXX") || exit 1
@@ -26,7 +28,7 @@ session() { # session <dir> <run home> <label> <args...>: one launch to idle and
     rm -f "$d/report.$label"
     MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 TMPDIR="$d/t" \
         MAKEPAD_HOME="$d/home" MAKEPAD_RUN_HOME="$rh" MAKEPAD_RUN_CACHE_DIR="$rh/cache" MAKEPAD_RUN_TARGET_DIR="$rh/target" \
-        MAKEPAD_RUN_VERBOSE=1 "$B" run --report-to "$d/report.$label" "$@" > "$d/log.$label" 2>&1 &
+        MAKEPAD_RUN_VERBOSE=1 $B run --report-to "$d/report.$label" "$@" > "$d/log.$label" 2>&1 &
     pid=$!
     i=0
     while [ $i -lt $((WAIT * 5)) ] && kill -0 $pid 2>/dev/null && ! grep -qx present "$d/report.$label" 2>/dev/null; do
@@ -34,7 +36,7 @@ session() { # session <dir> <run home> <label> <args...>: one launch to idle and
     done
     idle=0; i=0; last=""
     while [ $idle -lt 3 ] && [ $i -lt $WAIT ] && kill -0 $pid 2>/dev/null; do
-        last=$(TMPDIR="$d/t" "$B" inspect $pid jit ms=1000 2>&1)
+        last=$(TMPDIR="$d/t" $B inspect $pid jit ms=1000 2>&1)
         if echo "$last" | grep -q '^idle'; then idle=$((idle + 1)); else idle=0; fi
         i=$((i + 1))
     done

@@ -10,13 +10,16 @@
 #               app is asked to quit right after its first frame, while a cold start is still
 #               bringing things up; it must exit by itself (a run still alive 120 s after its
 #               first frame is reported hung, then stopped)
-# Run from the workspace root after `cargo build --release -p makepad-run -p makepad-remote`.
+# Run from the workspace root (the JIT and makepad-remote run through `cargo run --profile host`).
 # PACKAGES (default makepad-app-calculator), OFFSETS (swap, default "0.5 2 5"), BOOT (default
-# "0.5 2 4"), CLICKS (the pages case's clicks; no pages case without), TARGET (default
-# target/release). Logs stay in a scratch directory under TMPDIR. The first case of a package
+# "0.5 2 4"), CLICKS (the pages case's clicks; no pages case without), the JIT runs through `cargo
+# run --profile host`. Logs stay in a scratch directory under TMPDIR. The first case of a package
 # compiles cold (a fresh cache).
-T=${TARGET:-target/release}
-R=$T/makepad-remote
+ROOT=$(pwd)
+# the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
+J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
+JR="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-remote --bin makepad-remote --"
+R=$JR
 dir=$(mktemp -d "${TMPDIR:-/tmp}/quit_clean.XXXXXX") || exit 1
 fails=0
 cases=0
@@ -30,7 +33,7 @@ run_case() {
         printf 'wait_frame 1\n' > "$d/quit.hal"
         MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_HOME="$d/home" \
             MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" MAKEPAD_WINDOW=1280x800@1 \
-            MAKEPAD_HAL_SCRIPT="$d/quit.hal" "$T/makepad" run "$pkg" > "$d/run.log" 2>&1 &
+            MAKEPAD_HAL_SCRIPT="$d/quit.hal" $J run "$pkg" > "$d/run.log" 2>&1 &
         pid=$!
         n=0
         until grep -q "first frame at" "$d/run.log"; do
@@ -56,11 +59,11 @@ run_case() {
     fi
     MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_HOME="$d/home" \
         MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_RUN_CACHE_DIR="$dir/cache-$pkg" MAKEPAD_WINDOW=1280x800@1 \
-        "$T/makepad" run "$pkg" > "$d/run.log" 2>&1 &
+        $J run "$pkg" > "$d/run.log" 2>&1 &
     pid=$!
     if [ "$when" != start ]; then
         n=0
-        until "$R" app $pid grab out="$d/g.png" > "$d/remote.log" 2>&1 && [ -s "$d/g.png" ]; do
+        until $R app $pid grab out="$d/g.png" > "$d/remote.log" 2>&1 && [ -s "$d/g.png" ]; do
             n=$((n + 1)); [ $n -ge 1200 ] && break
             kill -0 $pid 2>/dev/null || break
             sleep 0.5
@@ -80,12 +83,12 @@ run_case() {
         while [ -n "$rest" ]; do
             c=${rest%%;*}
             [ "$c" = "$rest" ] && rest="" || rest=${rest#*;}
-            "$R" app $pid click x=${c%,*} y=${c#*,} wait=1 >> "$d/remote.log" 2>&1
+            $R app $pid click x=${c%,*} y=${c#*,} wait=1 >> "$d/remote.log" 2>&1
             sleep 0.7
         done
     fi
     if [ "$name" = remote-quit ]; then
-        "$R" app $pid quit >> "$d/remote.log" 2>&1
+        $R app $pid quit >> "$d/remote.log" 2>&1
     else
         kill -TERM $pid
     fi

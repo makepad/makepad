@@ -39,6 +39,9 @@ pub struct Master {
     pub leases: Arc<crate::lease::master::LeaseMaster>,
     /// the last records of every machine, info included (the panel's recent events)
     pub recent: Arc<Mutex<std::collections::VecDeque<Record>>>,
+    /// the lane merge bot's and the pre-warm's control lines (`lanes list`, `prewarm`): None
+    /// without checkout support
+    pub flow: Option<crate::sync::FlowServe>,
 }
 
 /// The master's node list, `~/.makepad/devhub/nodes.conf`: one line per node,
@@ -183,6 +186,12 @@ impl Master {
             s.emit(&r.to_json());
             o(&r);
         }));
+        // the landing train: `land` (DESIGN: devhub land), its records on the same feed
+        let (s, o) = (sink.clone(), on_record.clone());
+        crate::land::register(&ep, name, Arc::new(move |r: Record| {
+            s.emit(&r.to_json());
+            o(&r);
+        }));
         // `jitcache plan|clear`: this Mac's JIT caches (a node's through `route <node> jitcache`)
         let (s, o, me) = (sink.clone(), on_record.clone(), name.to_string());
         ep.register(
@@ -198,9 +207,14 @@ impl Master {
                 }),
             ),
         );
+        let (s, o) = (sink.clone(), on_record.clone());
+        let flow = crate::sync::register_lanes(&ep, name, Arc::new(move |r: Record| {
+            s.emit(&r.to_json());
+            o(&r);
+        }));
         crate::node::listen_control(&ep)?;
         *slot.lock().unwrap() = Some((sink.clone(), on_record.clone()));
-        let m = Arc::new(Master { name: name.to_string(), local, hub, sink, followed: Mutex::new(HashSet::new()), heard, on_record, inbox, leases, recent });
+        let m = Arc::new(Master { name: name.to_string(), local, hub, sink, followed: Mutex::new(HashSet::new()), heard, on_record, inbox, leases, recent, flow });
         let m2 = m.clone();
         let _ = std::thread::Builder::new().name("devhub-master".into()).spawn(move || m2.follow_loop());
         let m3 = m.clone();

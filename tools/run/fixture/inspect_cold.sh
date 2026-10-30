@@ -14,17 +14,19 @@
 #     <dir>/r<round>/stall; STALL_GDB=1 adds gdb's native stacks where a debugger is allowed).
 # CLIENTS=0 is the control (no requests). VERBOSE=1 prints the answers by kind and the stall capture;
 # PROFILE=1 the CPU's top functions 5 s into the start.
-# Run from the workspace root after `cargo build --release -p makepad-run`. ROUNDS (default 3), WAIT (300),
-# REQ_MAX (40), UI_MAX (2000), STALL (12), TARGET (target/release), KEEP=1 keeps the logs.
+# Run from the workspace root (the JIT runs through `cargo run --profile host`). ROUNDS (default 3), WAIT (300),
+# REQ_MAX (40), UI_MAX (2000), STALL (12), the JIT runs through `cargo run --profile host`, KEEP=1 keeps the logs.
 # Prints one line per round and "inspect_cold: OK ..." or "inspect_cold: FAIL ..."; exit 1 on a failure.
-T=${TARGET:-target/release}
-B=$(cd "$(dirname "$T/makepad")" && pwd)/makepad
+ROOT=$(pwd)
+# the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
+J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
+B=$J
 CLIENTS=${CLIENTS:-3}; PACE=${PACE:-0}; HOLD=${HOLD:-10}; ROUNDS=${ROUNDS:-3}; WAIT=${WAIT:-300}; REQ_MAX=${REQ_MAX:-40}; UI_MAX=${UI_MAX:-2000}; STALL=${STALL:-12}
 dir=$(mktemp -d "${TMPDIR:-/tmp}/inspect_cold.XXXXXX") || exit 1
 fails=0
 now_ms() { date +%s%3N; }
 # ask <args...>: one inspect request (prints its answer)
-ask() { TMPDIR="$dir/t" "$B" inspect $pid "$@" 2>&1; }
+ask() { TMPDIR="$dir/t" $B inspect $pid "$@" 2>&1; }
 # client <k>: inspect requests in a loop until $d/stop exists; one line per request: <cmd> <ms> <first answer line>
 client() {
   k=$1; i=0
@@ -63,7 +65,7 @@ for round in $(seq 1 $ROUNDS); do
   d=$dir/r$round; mkdir -p "$d/home" "$d/t"
   MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 TMPDIR="$d/t" \
     MAKEPAD_HOME="$d/home" MAKEPAD_RUN_HOME="$d/run" MAKEPAD_RUN_CACHE_DIR="$d/run/cache" MAKEPAD_RUN_TARGET_DIR="$d/run/target" \
-    "$B" run --report-to "$d/report" makepad-app-calculator --no-default-features --features standalone > "$d/log" 2>&1 &
+    $B run --report-to "$d/report" makepad-app-calculator --no-default-features --features standalone > "$d/log" 2>&1 &
   pid=$!
   start_s=$(date +%s); t_start=$(now_ms)
   # inspect answers from early in the start (the JIT's inspect thread), long before the present

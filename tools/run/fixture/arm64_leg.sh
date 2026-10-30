@@ -29,8 +29,8 @@ fail=""
 [ "$rc" != 0 ] && [ -z "$fail" ] && [ -z "$(sed -n 's/^test \(.*\) \.\.\. FAILED$/\1/p' "$log/test")" ] && fail="$fail cargo-rc-$rc"
 grep -E '^test .* FAILED$' "$log/test" | head -20
 if [ "${1:-}" = --diff-fast ]; then
-  if cargo build --release -j 8 -p makepad-run --bin makepad > "$log/build" 2>&1; then
-    TARGET=$T/release DIFF_PKG_TARGET=$T DIFF_CACHE=${ARM64_DIFF_CACHE:-$HOME/devhub/cache/diff_fast} DIFF_TIERS="o1 base o3 counted" \
+  if cargo build --profile host -j 8 -p makepad-run --bin makepad > "$log/build" 2>&1; then
+    DIFF_PKG_TARGET=$T DIFF_CACHE=${ARM64_DIFF_CACHE:-$HOME/devhub/cache/diff_fast} DIFF_TIERS="o1 base o3 counted" \
       tools/run/fixture/diff_fast.sh > "$log/diff" 2>&1
     tail -20 "$log/diff"
     d=$(grep '^diff: ' "$log/diff" | tail -1)

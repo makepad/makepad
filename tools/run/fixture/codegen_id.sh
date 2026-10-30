@@ -15,28 +15,32 @@
 # (3 idle `inspect jit` looks in a row), `inspect cache`, quit (SIGTERM).
 # PACKAGE (default "makepad-app-calculator,--no-default-features,--features,standalone"), WAIT (default 300).
 # Prints "codegen_id: OK ..." or "codegen_id: FAIL ..."; exit 1 on failure.
-T=${CARGO_TARGET_DIR:-$PWD/target}/release
-B=$T/makepad
+ROOT=$(pwd)
+# the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
+J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
+B=$J
+# the built binary itself, only to show that it changed
+BIN=${CARGO_TARGET_DIR:-$PWD/target}/host/makepad
 PACKAGE=${PACKAGE:-makepad-app-calculator,--no-default-features,--features,standalone}
 WAIT=${WAIT:-300}
 DEVHUB=libs/devhub/src/cli.rs
 PASS=libs/relax/codegen/src/version.rs
 dir=$(mktemp -d "${TMPDIR:-/tmp}/codegen_id.XXXXXX") || exit 1
 cp "$DEVHUB" "$dir/devhub.orig"; cp "$PASS" "$dir/pass.orig"
-build() { CARGO_INCREMENTAL=0 cargo build --release -p makepad-run --bin makepad -j8 > "$dir/build.log" 2>&1 || { tail -20 "$dir/build.log"; echo "codegen_id: FAIL build"; exit 1; }; }
+build() { CARGO_INCREMENTAL=0 cargo build --profile host -p makepad-run --bin makepad -j8 > "$dir/build.log" 2>&1 || { tail -20 "$dir/build.log"; echo "codegen_id: FAIL build"; exit 1; }; }
 restore() {
     cmp -s "$dir/devhub.orig" "$DEVHUB" || cp "$dir/devhub.orig" "$DEVHUB"
     cmp -s "$dir/pass.orig" "$PASS" || { cp "$dir/pass.orig" "$PASS"; build; }
 }
 trap restore EXIT
-id() { MAKEPAD_RUN_CACHE_FP=1 MAKEPAD_RUN_VERBOSE=1 "$B" check makepad-app-calculator 2>&1 | sed -n 's/.*codegen id \([0-9a-f]*\).*/\1/p' | head -1; }
+id() { MAKEPAD_RUN_CACHE_FP=1 MAKEPAD_RUN_VERBOSE=1 $B check makepad-app-calculator 2>&1 | sed -n 's/.*codegen id \([0-9a-f]*\).*/\1/p' | head -1; }
 args=$(echo "$PACKAGE" | tr ',' ' ')
 mkdir -p "$dir/home" "$dir/t"
 session() { # session <label>: one launch to idle and quit; prints its `jit` session line and its `cache` line
     label=$1
     MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 TMPDIR="$dir/t" MAKEPAD_RUN_WARM_STRICT=1 \
         MAKEPAD_HOME="$dir/home" MAKEPAD_RUN_HOME="$dir/run" MAKEPAD_RUN_CACHE_DIR="$dir/run/cache" MAKEPAD_RUN_TARGET_DIR="$dir/run/target" \
-        MAKEPAD_RUN_VERBOSE=1 "$B" run --report-to "$dir/report.$label" $args > "$dir/log.$label" 2>&1 &
+        MAKEPAD_RUN_VERBOSE=1 $B run --report-to "$dir/report.$label" $args > "$dir/log.$label" 2>&1 &
     pid=$!
     i=0
     while [ $i -lt $((WAIT * 5)) ] && kill -0 $pid 2>/dev/null && ! grep -qx present "$dir/report.$label" 2>/dev/null; do
@@ -44,11 +48,11 @@ session() { # session <label>: one launch to idle and quit; prints its `jit` ses
     done
     idle=0; i=0; last=""
     while [ $idle -lt 3 ] && [ $i -lt $WAIT ] && kill -0 $pid 2>/dev/null; do
-        last=$(TMPDIR="$dir/t" "$B" inspect $pid jit ms=1000 2>&1)
+        last=$(TMPDIR="$dir/t" $B inspect $pid jit ms=1000 2>&1)
         if echo "$last" | grep -q '^idle'; then idle=$((idle + 1)); else idle=0; fi
         i=$((i + 1))
     done
-    cache=$(TMPDIR="$dir/t" "$B" inspect $pid cache 2>&1 | grep '^warm cache:')
+    cache=$(TMPDIR="$dir/t" $B inspect $pid cache 2>&1 | grep '^warm cache:')
     kill -TERM $pid 2>/dev/null
     wait $pid
     grep -qx present "$dir/report.$label" 2>/dev/null && echo "present" || echo "NOT PRESENT"
@@ -63,14 +67,14 @@ ledger() { sed -n 's/.*recorded under another key \([0-9.k]*\), recorded but gon
 first() { sed -n 's/.*session: compiled \([0-9]*\) first.*/\1/p'; }
 fail=""
 build
-b0=$(sha256sum "$B" | cut -c1-16); id0=$(id)
+b0=$(sha256sum "$BIN" | cut -c1-16); id0=$(id)
 cold=$(session cold); warm=$(session warm)
 echo "baseline: codegen id $id0, binary $b0"; echo "  cold: $cold" | tr '\n' ' '; echo; echo "  warm: $warm" | tr '\n' ' '; echo
 # 2. outside the code generator
 sed 's/this machine.s JITs only/this machine'"'"'s JITs only (codegen_id fixture)/' "$dir/devhub.orig" > "$DEVHUB"
 cmp -s "$dir/devhub.orig" "$DEVHUB" && fail="$fail devhub-edit-not-applied"
 build
-b1=$(sha256sum "$B" | cut -c1-16); id1=$(id)
+b1=$(sha256sum "$BIN" | cut -c1-16); id1=$(id)
 [ "$b1" != "$b0" ] || fail="$fail devhub-edit-left-the-binary-unchanged"
 [ -n "$id1" ] && [ "$id1" = "$id0" ] || fail="$fail codegen-id-changed-by-devhub($id0->$id1)"
 dev=$(session after-devhub)

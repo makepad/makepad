@@ -8,8 +8,8 @@
 # guards (libs/relax/compiler/src/guards.rs) on with small thresholds so every guard, guard failure and relink path runs; DIFF_GUARDS=0 turns them off).
 # stdout lines `D ...`, the exit status and a checksum of them must equal the native run's.
 # Prints `diff: N/N equal`, or per failing program a minimal diff, and exits 1.
-# Usage (workspace root, after `cargo build --release -p makepad-run`): tools/run/fixture/diff_fast.sh
-# Env: TARGET (default target/release), DIFF_CACHE (native binaries; default $TMPDIR/diff_fast_cache),
+# Usage (workspace root, (the JIT runs through `cargo run --profile host`)): tools/run/fixture/diff_fast.sh
+# Env: the JIT runs through `cargo run --profile host`, DIFF_CACHE (native binaries; default $TMPDIR/diff_fast_cache),
 # DIFF_PROGRAMS ("floats tls": only those), DIFF_SLEEP_MS (O3 round gap, default 250), DIFF_JOBS (default 4).
 # Each makepad run gets a fresh home/cache dir, hidden and muted, and deleted afterwards.
 # Package programs (library-backed, e.g. box3d): every package dir in DIFF_PKG_DIRS (default
@@ -19,10 +19,9 @@
 # its D lines and exit status must match. They show as `<package>~<program>`. DIFF_PKG_DIRS=none skips them.
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
-T=${TARGET:-$root/target/release}
-case $T in /*) ;; *) T=$PWD/$T ;; esac
-M=$T/makepad
-[ -x "$M" ] || { echo "diff: no $M (cargo build --release -p makepad-run)"; exit 2; }
+# the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
+J="cargo run --profile host -q --manifest-path $root/Cargo.toml -p makepad-run --bin makepad --"
+M=$J
 # the std tree of the checkout being tested: a makepad binary whose target dir is outside its tree otherwise
 # looks for <target>/../src/libs/relax/compiler/std and every run exits 1 with no output
 export MAKEPAD_RUN_STD=${MAKEPAD_RUN_STD:-$root/libs/relax/compiler/std}
@@ -71,7 +70,7 @@ job() {
         env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms $verify \
             MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
             MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" \
-            nice -n 10 "$M" test "$src" > "$out.raw" 2> "$out.err"
+            nice -n 10 $M test "$src" > "$out.raw" 2> "$out.err"
         echo $? > "$out.rc"
         rm -r "$d" ;;
     esac
@@ -94,7 +93,7 @@ pkgjob() {
         (cd "$root" && env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms $verify MAKEPAD_HAL_BACKEND=headless \
             MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
             MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" \
-            nice -n 10 "$M" run --quiet "$pkg" -- "$prog") > "$out.raw" 2> "$out.err"
+            nice -n 10 $M run --quiet "$pkg" -- "$prog") > "$out.raw" 2> "$out.err"
         echo $? > "$out.rc"
         rm -r "$d" ;;
     esac

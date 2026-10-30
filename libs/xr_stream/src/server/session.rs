@@ -281,7 +281,7 @@ impl Session {
         };
         let server_instance = self.pairing.lock().unwrap().instance;
         *self.shared.live_headset.lock().unwrap() = Some(LiveHeadset { instance, name: name.to_string(), session });
-        let welcome = XrServerMsg::Welcome { version: XR_VERSION, server: self.server.clone(), instance: server_instance, session, size: core.size, codec: core.codec, tiles: core.tiles as u8, encoder: core.description.clone() };
+        let welcome = XrServerMsg::Welcome { version: XR_VERSION, server: self.server.clone(), instance: server_instance, session, size: core.size, codec: core.codec, tiles: core.tiles as u8, encoder: core.description.clone(), eye: core.eye, fovea: core.fovea };
         write_all(stream, &welcome.encode()).map_err(|e| format!("write: {e}"))?;
         // the poses come as datagrams: a socket of the session's own, a key for it
         let uplink = Uplink::open(self.peer.ip(), &core)?;

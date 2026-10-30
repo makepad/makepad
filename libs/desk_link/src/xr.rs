@@ -18,22 +18,159 @@
 //! `Video` per tile (the pose's sequence number, the eyes the picture was rendered with, the
 //! server-side stage durations, one Annex-B access unit), `Pong`, `Bye`, `Note`.
 //!
-//! The picture: per eye a column `eye_w` wide and `eye_h * 3/2` tall: the eye's colour
-//! (premultiplied on black) on top; below it a band `eye_h / 2` tall whose left half is the eye's
-//! coverage (alpha) and right half its inverse depth (`1 / z` scaled, see [`DEPTH_NEAR_M`]; 0 =
-//! nothing drawn), both at half resolution in the luma, neutral chroma. Left eye's column first.
+//! The picture: per eye a column `w` wide and `h * 3/2` tall, `[w, h]` the eye's encoded size
+//! ([`Fovea::encoded`]): the eye's colour (premultiplied on black) on top; below it a band `h / 2`
+//! tall whose left half is the eye's coverage (alpha) and right half its inverse depth (`1 / z`
+//! scaled, see [`DEPTH_NEAR_M`]; 0 = nothing drawn), both at half resolution in the luma, neutral
+//! chroma. Left eye's column first. The column is foveated ([`Fovea`]): full resolution around
+//! the eye's optical axis, fewer pixels towards the view's edges (the lens blurs them), the same
+//! warp for the colour and the band; the headset samples it back at the eye's own pixels.
 //! With two tiles each eye's column is a stream of its own (one encoder each, the GPU's two
 //! encode engines); with one tile both columns side by side are one stream.
 
 use crate::{In, Out};
 use std::io;
 
-pub const XR_VERSION: u16 = 7;
+pub const XR_VERSION: u16 = 8;
 /// The band's depth: luma `v` (1..255) is `z = DEPTH_NEAR_M * 255 / v` metres (inverse depth,
 /// finest near the eye); 0 = no depth (nothing drawn there). 10 cm: things held up to the face
 /// keep their depth (at 25 cm everything nearer read as 25 cm, and the room's occlusion hid
 /// what was held in front of a hand); a step is ~4 cm at 1 m, ~16 cm at 2 m.
 pub const DEPTH_NEAR_M: f32 = 0.1;
+
+/// The foveated encoding of an eye's column: per axis (x, y) a centre `center` of the eye's view
+/// (a fraction of its pixels, placed on the eye's optical axis) at full resolution, then the
+/// pixel density falls linearly over `ramp` (a fraction of the eye) to `edge` and stays there to
+/// the view's edge. Separable: a pixel of the encoded column is an axis-aligned cell of the
+/// eye's. The headset and the desktop derive each eye's warp from the fov the picture was
+/// rendered with ([`Fovea::axes`]); [`Fovea::OFF`] is the identity.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fovea {
+    pub center: [f32; 2],
+    pub ramp: [f32; 2],
+    pub edge: [f32; 2],
+}
+
+/// One axis of an eye's foveation (fractions of the eye's view, 0..1): the full-resolution
+/// centre `a..b`, the ramp and edge density, the encoded length of the part before the centre
+/// (`ea`) and of the whole axis (`total`; the encoded axis is `total` of the eye's, scaled to fill
+/// the encoded column). The shaders keep the same four values per axis as `[a, b, ea, total]`
+/// and `[ramp, edge]`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FoveaAxis {
+    pub a: f32,
+    pub b: f32,
+    pub ramp: f32,
+    pub edge: f32,
+    pub ea: f32,
+    pub total: f32,
+}
+
+impl Default for Fovea {
+    fn default() -> Self {
+        Fovea::OFF
+    }
+}
+
+impl Fovea {
+    /// The stream's foveation: the centre 45% x 40% of the view at full resolution, a density
+    /// ramp over 8% of it, the edges at a fifth (x) and a sixth (y): about 36% of the eye's pixels
+    /// (an eye of 2016x2112: 1280x1216). Like a reference streamer's defaults that hold 90 Hz on
+    /// a Quest (45% x 40% centre, edges at a quarter and a fifth), with a continuous density.
+    pub const DEFAULT: Fovea = Fovea { center: [0.45, 0.4], ramp: [0.08, 0.08], edge: [0.2, 0.16] };
+    /// No foveation: the encoded column is the eye's.
+    pub const OFF: Fovea = Fovea { center: [1.0, 1.0], ramp: [0.0, 0.0], edge: [1.0, 1.0] };
+
+    pub fn is_off(&self) -> bool {
+        self.center[0] >= 1.0 && self.center[1] >= 1.0
+    }
+
+    /// The encoded size of an eye of `eye` pixels: the axes' length with the centre in the
+    /// middle, in whole 32-pixel blocks (the codec's), never more than the eye.
+    pub fn encoded(&self, eye: [u32; 2]) -> [u32; 2] {
+        if self.is_off() {
+            return eye;
+        }
+        let axis = |i: usize| {
+            let t = FoveaAxis::new(0.5, self.center[i], self.ramp[i], self.edge[i]).total;
+            let n = (eye[i] as f32 * t / 32.0).ceil() as u32 * 32;
+            n.min(eye[i] & !3).max(32)
+        };
+        [axis(0), axis(1)]
+    }
+
+    /// An eye's axes (x, y) for its fov (tangents' angles: left, right, up, down): the centre on
+    /// the optical axis, as near it as the view allows.
+    pub fn axes(&self, fov: [f32; 4]) -> [FoveaAxis; 2] {
+        let [l, r, u, d] = fov.map(f32::tan);
+        // where the optical axis is in the eye's picture (0..1; y down); a symmetric view without one
+        let ax = if r - l > 1e-6 { -l / (r - l) } else { 0.5 };
+        let ay = if u - d > 1e-6 { u / (u - d) } else { 0.5 };
+        [FoveaAxis::new(ax.clamp(0.0, 1.0), self.center[0], self.ramp[0], self.edge[0]), FoveaAxis::new(ay.clamp(0.0, 1.0), self.center[1], self.ramp[1], self.edge[1])]
+    }
+}
+
+impl FoveaAxis {
+    fn new(axis: f32, center: f32, ramp: f32, edge: f32) -> FoveaAxis {
+        let center = center.clamp(0.0, 1.0);
+        let a = (axis - center * 0.5).clamp(0.0, 1.0 - center);
+        let mut f = FoveaAxis { a, b: a + center, ramp: ramp.max(0.0), edge: edge.clamp(0.01, 1.0), ea: 0.0, total: 1.0 };
+        f.ea = f.squeeze(a);
+        f.total = f.ea + center + f.squeeze(1.0 - f.b);
+        f
+    }
+
+    /// The encoded length of `t` of the eye outwards from the centre's edge.
+    fn squeeze(&self, t: f32) -> f32 {
+        let (r, d) = (self.ramp, self.edge);
+        if t <= r {
+            t - (1.0 - d) * t * t / (2.0 * r.max(1e-6))
+        } else {
+            r * (1.0 + d) * 0.5 + d * (t - r)
+        }
+    }
+
+    /// The eye's length outwards from the centre's edge of `e` encoded.
+    fn unsqueeze(&self, e: f32) -> f32 {
+        let (r, d) = (self.ramp, self.edge);
+        let er = r * (1.0 + d) * 0.5;
+        if e <= er {
+            let k = (1.0 - d) / (2.0 * r.max(1e-6));
+            if k < 1e-6 { e } else { (1.0 - (1.0 - 4.0 * k * e).max(0.0).sqrt()) / (2.0 * k) }
+        } else {
+            r + (e - er) / d
+        }
+    }
+
+    /// The eye's point `u` (0..1) in the encoded axis (0..1).
+    pub fn to_encoded(&self, u: f32) -> f32 {
+        let e = if u < self.a {
+            self.ea - self.squeeze(self.a - u)
+        } else if u <= self.b {
+            self.ea + u - self.a
+        } else {
+            self.ea + (self.b - self.a) + self.squeeze(u - self.b)
+        };
+        e / self.total
+    }
+
+    /// The encoded axis' point `v` (0..1) in the eye (0..1).
+    pub fn to_eye(&self, v: f32) -> f32 {
+        let e = v * self.total;
+        if e < self.ea {
+            self.a - self.unsqueeze(self.ea - e)
+        } else if e <= self.ea + (self.b - self.a) {
+            self.a + e - self.ea
+        } else {
+            self.b + self.unsqueeze(e - self.ea - (self.b - self.a))
+        }
+    }
+
+    /// The shaders' form: `[a, b, ea, total]`.
+    pub fn shape(&self) -> [f32; 4] {
+        [self.a, self.b, self.ea, self.total]
+    }
+}
 
 /// One eye a picture was rendered with: orientation (x, y, z, w), position (m) in the headset's
 /// tracking space, fov tangents' angles (left, right, up, down; radians, left and down negative).
@@ -172,8 +309,9 @@ pub struct WorldBrick {
 pub enum XrServerMsg {
     /// `size`: the whole picture (both eye columns); `tiles`: 1 (one stream) or 2 (a stream per eye).
     /// `instance`: the server's instance id (the headset keeps the pair by it); `session`: this
-    /// link's id.
-    Welcome { version: u16, server: String, instance: u64, session: u64, size: [u32; 2], codec: u8, tiles: u8, encoder: String },
+    /// link's id. `eye`: the eye size the pictures are rendered at, `fovea`: how its columns are
+    /// foveated into `size`.
+    Welcome { version: u16, server: String, instance: u64, session: u64, size: [u32; 2], codec: u8, tiles: u8, encoder: String, eye: [u32; 2], fovea: Fovea },
     Refused { reason: String },
     /// Tile `tile` of the picture of pose `seq` (predicted for the headset's `display_ns`),
     /// rendered with `eyes`; `focus_m`: the depth (m) of what the view centres on, for
@@ -340,9 +478,12 @@ impl XrServerMsg {
     pub fn encode(&self) -> Vec<u8> {
         use tag::*;
         match self {
-            XrServerMsg::Welcome { version, server, instance, session, size, codec, tiles, encoder } => {
+            XrServerMsg::Welcome { version, server, instance, session, size, codec, tiles, encoder, eye, fovea } => {
                 let mut o = Out::new(WELCOME);
-                o.u16(*version).str(server).u64(*instance).u64(*session).u32(size[0]).u32(size[1]).u8(*codec).u8(*tiles).str(encoder);
+                o.u16(*version).str(server).u64(*instance).u64(*session).u32(size[0]).u32(size[1]).u8(*codec).u8(*tiles).str(encoder).u32(eye[0]).u32(eye[1]);
+                for v in fovea.center.iter().chain(fovea.ramp.iter()).chain(fovea.edge.iter()) {
+                    o.f32(*v);
+                }
                 o.done()
             }
             XrServerMsg::Refused { reason } => {
@@ -411,7 +552,18 @@ impl XrServerMsg {
         use tag::*;
         let mut r = In { b: payload };
         Ok(match ty {
-            WELCOME => XrServerMsg::Welcome { version: r.u16()?, server: r.str()?, instance: r.u64()?, session: r.u64()?, size: [r.u32()?, r.u32()?], codec: r.u8()?, tiles: r.u8()?, encoder: r.str()? },
+            WELCOME => XrServerMsg::Welcome {
+                version: r.u16()?,
+                server: r.str()?,
+                instance: r.u64()?,
+                session: r.u64()?,
+                size: [r.u32()?, r.u32()?],
+                codec: r.u8()?,
+                tiles: r.u8()?,
+                encoder: r.str()?,
+                eye: [r.u32()?, r.u32()?],
+                fovea: Fovea { center: [r.f32()?, r.f32()?], ramp: [r.f32()?, r.f32()?], edge: [r.f32()?, r.f32()?] },
+            },
             REFUSED => XrServerMsg::Refused { reason: r.str()? },
             VIDEO => {
                 let (seq, tile, key, display_ns) = (r.u64()?, r.u8()?, r.bool()?, r.u64()?);
@@ -735,6 +887,35 @@ mod tests {
     }
 
     #[test]
+    fn the_foveation_round_trips_and_keeps_the_centre_whole() {
+        let f = Fovea::DEFAULT;
+        // a Quest 3 eye: 36% of its pixels
+        assert_eq!(f.encoded([2016, 2112]), [1280, 1216]);
+        assert_eq!(Fovea::OFF.encoded([2016, 2112]), [2016, 2112]);
+        for fov in [[-0.785f32, 0.785, 0.785, -0.785], [-0.94, 0.72, 0.84, -0.96], [-0.72, 0.94, 0.84, -0.96]] {
+            for axis in f.axes(fov) {
+                assert!(axis.a >= 0.0 && axis.b <= 1.0 && (axis.b - axis.a - 0.4).abs() < 0.051);
+                assert!((axis.to_encoded(0.0)).abs() < 1e-5 && (axis.to_encoded(1.0) - 1.0).abs() < 1e-5);
+                let mut last = -1.0;
+                for i in 0..=1000 {
+                    let u = i as f32 / 1000.0;
+                    let v = axis.to_encoded(u);
+                    assert!(v > last, "monotonic");
+                    last = v;
+                    assert!((axis.to_eye(v) - u).abs() < 2e-4, "round trip at {u}: {}", axis.to_eye(v));
+                }
+                // the centre: one encoded pixel per eye pixel (scaled to fill the column)
+                let mid = (axis.a + axis.b) * 0.5;
+                let slope = (axis.to_encoded(mid + 0.01) - axis.to_encoded(mid - 0.01)) / 0.02;
+                assert!((slope * axis.total - 1.0).abs() < 1e-3);
+            }
+        }
+        for axis in Fovea::OFF.axes([-0.9, 0.8, 0.85, -0.9]) {
+            assert!((axis.to_encoded(0.3) - 0.3).abs() < 1e-6 && (axis.to_eye(0.7) - 0.7).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn xr_messages_round_trip() {
         let client = [
             XrClientMsg::Hello { version: XR_VERSION, name: "quest".into(), authorization: "MKID x".into(), instance: 42, eye: [1680, 1760], refresh_mhz: 72_000, codecs: codecs::HEVC },
@@ -752,7 +933,7 @@ mod tests {
             assert_eq!(XrClientMsg::decode(ty, &p).unwrap(), m);
         }
         let server = [
-            XrServerMsg::Welcome { version: XR_VERSION, server: "166".into(), instance: 7, session: 9, size: [3360, 2640], codec: CODEC_HEVC, tiles: 2, encoder: "nvidia".into() },
+            XrServerMsg::Welcome { version: XR_VERSION, server: "166".into(), instance: 7, session: 9, size: [2560, 1824], codec: CODEC_HEVC, tiles: 2, encoder: "nvidia".into(), eye: [2016, 2112], fovea: Fovea::DEFAULT },
             XrServerMsg::Refused { reason: "busy".into() },
             XrServerMsg::Video {
                 seq: 9,

@@ -27,18 +27,30 @@ pub(crate) fn expect(pid: u32, client: ClientId) {
     expected.push((pid, client));
 }
 
-/// The client a launch made for `pid`, once.
+/// The client a launch made for `pid`. Kept as long as the client's tile lives: a JIT app that
+/// restarts by exec (same pid, a new image) and asks again gets its own client back, so its
+/// window stays the tile it was (position, size, focus) and only its content refreshes.
 fn expected_client(pid: u32) -> Option<ClientId> {
-    let mut expected = EXPECTED.lock().unwrap_or_else(|e| e.into_inner());
-    let at = expected.iter().position(|(p, _)| *p == pid)?;
-    Some(expected.remove(at).1)
+    let expected = EXPECTED.lock().unwrap_or_else(|e| e.into_inner());
+    expected.iter().find(|(p, _)| *p == pid).map(|(_, c)| *c)
+}
+
+/// The pid that asked for `client`'s window (a launch's process that came to the socket).
+pub(crate) fn pid_of(client: ClientId) -> Option<u32> {
+    EXPECTED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(_, c)| *c == client).map(|(p, _)| *p)
+}
+
+/// The client is gone: its launch's pid no longer names it.
+pub(crate) fn forget(client: ClientId) {
+    EXPECTED.lock().unwrap_or_else(|e| e.into_inner()).retain(|(_, c)| *c != client);
 }
 
 pub(crate) struct Adopted {
     pub client: ClientId,
     pub pid: u32,
     pub crate_name: String,
-    /// The WM launched it (`expect`): its slot and tile exist already.
+    /// Its slot and tile exist already: the WM launched it (`expect`), or it is a restarted
+    /// image of a process that had this client.
     pub launched: bool,
     /// A lane's test instance (`lane=` on the socket).
     pub test_lane: Option<String>,
@@ -76,9 +88,12 @@ impl Adoptions {
             for stream in socket.listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let served = WmSocket::serve(stream, makepad_studio_protocol::WIRE, |request| {
+                    // the pid's client when it has one (a launch, or this process's earlier image):
+                    // its tile exists; else a new client, which the pid names from now on
                     let launched = expected_client(request.pid);
                     let client = launched.unwrap_or_else(|| {
                         next += 1;
+                        expect(request.pid, next - 1);
                         next - 1
                     });
                     tx.send(Adopted { client, pid: request.pid, crate_name: request.crate_name.clone(), launched: launched.is_some(), test_lane: request.test_lane.clone() })
@@ -123,7 +138,10 @@ impl App {
         }
         for Adopted { client, pid, crate_name, launched, test_lane } in adopted {
             if launched {
-                log!("wm: {crate_name} (pid {pid}), launched as client {client}, asked for its window");
+                // the first time, or a restarted image of the same process (exec) asking again:
+                // the same client, so the same tile
+                let again = self.state_mut().clients.get(&client).is_some_and(|s| s.ready);
+                log!("wm: {crate_name} (pid {pid}), launched as client {client}, asked for its window{}", if again { " again (a restart in place: the same tile)" } else { "" });
                 continue;
             }
             // The same process asking again (a detached app reattaching after its hub connect

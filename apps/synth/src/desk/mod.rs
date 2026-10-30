@@ -353,8 +353,11 @@ pub struct Desk {
     index_asked: bool,
     /// Instrument browsers popped out into their own windows.
     browsers: browsers::BrowserWindows,
-    /// Something asked for the Resources page (a library to download).
-    pub open_resources: bool,
+    /// A browser asked for an engine's library (its licence accepted
+    /// there): its download starts.
+    pub library_ask: Option<String>,
+    /// The preset index's generation last drawn with.
+    index_seen: u64,
     /// Background work of the tools (listening, rendering, loading samples).
     pub jobs: run::Jobs,
     /// The library tab.
@@ -379,7 +382,7 @@ impl Default for Desk {
             doc: None, status: Status::default(), typed: false, timer: Timer::default(), frame: NextFrame::default(), midi_stamp: 0, idle: Timer::default(),
             started: false, code_shown: 0, loops_shown: Vec::new(), folds: Folds::default(), menu: false, arrangement: transport::Arrangement::default(), arranged: 0, looping: None,
             bpm_written: None, bpm_shown: None, bpm_typed_at: f64::NEG_INFINITY, document: Document::default(), gesture: 0, panel: panel::ScorePanel::default(), vary: vary::VaryDesk::default(),
-            vary_ai_made: None, batch: batch::BatchDesk::default(), tracker: Default::default(), preview_main: true, audition: None, auditioned: None, audition_rx: None, pad_audition: None, index_asked: false, browsers: Default::default(), open_resources: false,
+            vary_ai_made: None, batch: batch::BatchDesk::default(), tracker: Default::default(), preview_main: true, audition: None, auditioned: None, audition_rx: None, pad_audition: None, index_asked: false, browsers: Default::default(), library_ask: None, index_seen: 0,
             jobs: run::Jobs::default(), lib: lib_pane::LibPane::default(), samples_asked: Default::default(), save_clean: None, gm_known: None,
             side_open: true, side: Side::Chat,
         }
@@ -787,6 +790,13 @@ impl Desk {
                 Err(error) => log!("preset index: {error:?}"),
             }
         }
+        // A newer index (the first, or a library installed): the browsers
+        // draw with it.
+        let index = makepad_score_live::browse::generation();
+        if index != self.index_seen {
+            self.index_seen = index;
+            cx.redraw_all();
+        }
         self.jobs.poll();
         if let Some(message) = self.jobs.finished_message() {
             ui.label(cx, ids!(score_state)).set_text(cx, &message);
@@ -933,6 +943,16 @@ impl Desk {
         self.sent.clear();
         self.played.clear();
         self.live = Some(LiveScore::new_on(LiveConfig { instance: audio::SLOT.into(), lookahead: LOOKAHEAD, clock: self.engine.clock() }, audio::TRANSPORT));
+    }
+
+    /// Resources unpacked or removed the patch library: the preset index
+    /// built again (the browsers fill in), and the score played again so
+    /// its Tandem patches are found.
+    pub fn patches_changed(&mut self) {
+        self.index_asked = false;
+        if let (Some(live), false) = (&self.live, self.played.is_empty()) {
+            live.set_source(self.played.clone());
+        }
     }
 
     /// Resources installed or removed the GM SoundFont: asked again.

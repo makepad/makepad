@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Select the quick gate from both pinned diffs; run on a leased node only.
 
-Checks are restricted to GATE_PACKAGES plus Calculator. Presents are restricted
-to affected apps with a supported hidden JIT launch (Calculator is check-only
-when it is just the smoke dependency). No size caps or unrelated Stage fallback.
+Every gate checks and presents the SMOKE apps (the commercial apps + Calculator,
+user 2026-10-30), regardless of the diff, in SMOKE order (Stage first: the most
+shared code; each later app reuses what the earlier ones stored in the box's one
+JIT cache). The other GATE_PACKAGES are checked when the diff reaches them.
 """
 import json
 import os
@@ -11,21 +12,19 @@ from pathlib import Path
 import subprocess
 import sys
 
-GATE_PACKAGES = (
-    "makepad-example-counter", "makepad-app-calculator", "makepad-platform",
-    "makepad-draw", "makepad-widgets", "makepad-app-wm-all", "makepad-stage",
-    "makepad-fab", "makepad-app-synth", "makepad-sandbox",
-)
+# the smoke set, in run order: checked and presented on every gate
+SMOKE = ("makepad-stage", "makepad-scope", "makepad-sandbox", "makepad-fab", "makepad-app-synth", "makepad-app-calculator")
+# checked too when the diff reaches them
+GATE_PACKAGES = SMOKE + ("makepad-example-counter", "makepad-platform", "makepad-draw", "makepad-widgets")
 CALC = "makepad-app-calculator"
 # Explicit launch recipes: being a Cargo binary alone does not imply a present.
 PRESENT_ARGS = {
-    "makepad-example-counter": [],
-    CALC: ["--no-default-features", "--features", "standalone"],
-    "makepad-app-wm-all": [],
     "makepad-stage": [],
+    "makepad-scope": [],
+    "makepad-sandbox": [],
     "makepad-fab": [],
     "makepad-app-synth": [],
-    "makepad-sandbox": [],
+    CALC: ["--no-default-features", "--features", "standalone"],
 }
 
 
@@ -100,9 +99,10 @@ def main():
     if any(p in ("Cargo.toml", "Cargo.lock", ".cargo/config", ".cargo/config.toml") for p in files):
         affected.update(packages)
     by_name = {p["name"]: d for d, p in packages.items()}
-    if CALC not in by_name:
-        raise RuntimeError("Calculator smoke package is missing from metadata")
-    selected = {name for name in GATE_PACKAGES if by_name.get(name) in affected}
+    missing = [name for name in SMOKE if name not in by_name]
+    if missing:
+        raise RuntimeError("smoke packages missing from metadata: " + " ".join(missing))
+    selected = {name for name in GATE_PACKAGES if by_name.get(name) in affected} | set(SMOKE)
 
     def where(name):
         # Launch from the actual package directory; works for nested workspaces.
@@ -110,10 +110,10 @@ def main():
 
     print(f"why files {len(files)}; changed: {' '.join(sorted(packages[d]['name'] for d in touched)) or '-'}; affected gate packages: {' '.join(sorted(selected)) or '-'}")
     for name in GATE_PACKAGES:
-        if name in selected or name == CALC:
+        if name in selected:
             print(f"check {name} {where(name)}")
-    for name in GATE_PACKAGES:
-        if name in selected and name in PRESENT_ARGS:
+    for name in SMOKE:
+        if name in PRESENT_ARGS:
             print(" ".join(["present", name, where(name), *PRESENT_ARGS[name]]))
 
 

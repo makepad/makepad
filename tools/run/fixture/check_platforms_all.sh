@@ -7,7 +7,7 @@
 #   Each leg is its own lease AND its own lane dir (<lane>-<leg>): two ships into one dir would race on the same files; DEVHUB_LANE / DEVHUB_AGENT as usual.
 set -u
 lane=${DEVHUB_LANE:-$(basename "$PWD")}
-M=${MAKEPAD_BIN:-$([ -x /Users/admin/makepad/target/host/makepad ] && echo /Users/admin/makepad/target/host/makepad || echo makepad)}
+M=${MAKEPAD_BIN:-cargo run --profile host -q --manifest-path /Users/admin/makepad/Cargo.toml -p makepad-run --bin makepad --}
 log=$(mktemp -d "${TMPDIR:-/tmp}/platall.XXXXXX") || exit 2
 trap 'rm -rf -- "$log"' EXIT
 t0=$(date +%s)

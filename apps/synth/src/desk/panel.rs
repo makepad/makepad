@@ -56,7 +56,8 @@ enum Ask {
     Pad(String, Option<Choice>, String),
     /// A browser asked for its own window.
     PopOut(String),
-    /// An engine's library to download: the Resources page.
+    /// An engine's library to download (its licence accepted in the
+    /// browser).
     GetLibrary(String),
 }
 
@@ -477,6 +478,8 @@ impl Desk {
                 doc.insts.iter().map(|i| (i.name.clone(), doc.loops.iter().filter(|l| l.play.as_deref() == Some(i.name.as_str())).map(|l| l.name.clone()).collect())).collect()
             }).unwrap_or_default(),
         });
+        // Synth installs the engines' libraries (Resources).
+        synth::set_installs_libraries(true);
         synth::install(synth::SynthHost {
             type_of: Box::new(move |node| s1.borrow().doc.as_ref().and_then(|d| source_type(d, node))),
             live: Some(live),
@@ -620,10 +623,7 @@ impl Desk {
                     self.panel.preview = None;
                 }
                 Ask::PopOut(node) => self.pop_browser(cx, ui, &node),
-                Ask::GetLibrary(engine) => {
-                    log!("synth: the {engine} library asked for: Resources");
-                    self.open_resources = true;
-                }
+                Ask::GetLibrary(engine) => self.library_ask = Some(engine),
                 Ask::Pad(node, choice, drum) => {
                     // As the choice would make it: that kit in place.
                     let source = match &choice {

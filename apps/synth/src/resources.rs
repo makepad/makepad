@@ -15,6 +15,7 @@ use makepad_midi_library::chip::hvsc;
 use makepad_midi_library::{dataset, index};
 use makepad_model_install::{self as models, InstallHandle, InstallMsg, Installable};
 use makepad_score_live::tandem_library;
+use makepad_synth_panel::host::LibraryStatus;
 use makepad_widgets::*;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 
@@ -188,6 +189,8 @@ pub struct Resources {
     changed: bool,
     /// The song library's catalogue was built since the last look.
     catalogued: bool,
+    /// A patch library was unpacked or removed since the last look.
+    patches_changed: bool,
     timer: Timer,
 }
 
@@ -200,6 +203,52 @@ impl Resources {
     /// The song library's catalogue was (re)built since the last call.
     pub fn take_catalogued(&mut self) -> bool {
         std::mem::take(&mut self.catalogued)
+    }
+
+    /// A patch library was unpacked or removed since the last call.
+    pub fn take_patches_changed(&mut self) -> bool {
+        std::mem::take(&mut self.patches_changed)
+    }
+
+    /// A browser's Download of an engine's library, its licence accepted
+    /// there: the patch library's install starts (or, downloaded but not
+    /// unpacked, its unpack), with its progress and Stop in the browser
+    /// and on this page.
+    pub fn get_library(&mut self, cx: &mut Cx, ui: &WidgetRef, engine: &str) {
+        if engine != "Tandem" || self.job.is_some() {
+            return;
+        }
+        self.probe(PATCHES);
+        self.progress = None;
+        self.rows[PATCHES].note = String::new();
+        if !installed(PATCHES) {
+            let missing = files(PATCHES).into_iter().filter(|model| !models::installed(model)).collect();
+            self.job = Some((PATCHES, Job::Install(models::start_install(missing, Some(models::unix_now())))));
+        } else if !tandem_library::unpacked(patch_set(PATCHES)) {
+            self.job = Some((PATCHES, start_patches(PATCHES)));
+        } else {
+            return;
+        }
+        self.run(cx);
+        self.sync(cx, ui);
+    }
+
+    /// Where the patch library's install stands, for the browsers: a job
+    /// on it, or (idle and not installed) why the last one ended.
+    fn library_status(&self) -> Option<LibraryStatus> {
+        let Some((_, job)) = self.job.as_ref().filter(|(r, _)| matches!(*r, PATCHES | PATCHES_OLD)) else {
+            let note = &self.rows[PATCHES].note;
+            let text = if note.starts_with("stopped") { "stopped: Download resumes where it left off".to_string() } else { note.clone() };
+            return (!note.is_empty() && tandem_library::active().is_none()).then_some(LibraryStatus { text, busy: false, stoppable: false });
+        };
+        let (text, stoppable) = match (job, self.progress) {
+            (Job::Install(_), Some((done, total))) => (format!("downloading {}% ({} of {})", done * 100 / total.max(1), megabytes(done), megabytes(total)), true),
+            (Job::Install(_), None) => ("starting the download…".to_string(), true),
+            (Job::Patches(_), Some((done, total))) => (format!("downloaded · unpacking {done}/{total} files"), false),
+            (Job::Patches(_), None) => ("downloaded · unpacking…".to_string(), false),
+            _ => ("checking the files…".to_string(), false),
+        };
+        Some(LibraryStatus { text, busy: true, stoppable })
     }
 
     pub fn open(&mut self, cx: &mut Cx, ui: &WidgetRef) {
@@ -302,6 +351,9 @@ impl Resources {
                 if matches!(row, MIDI | SID) {
                     self.catalogued = true;
                 }
+                if matches!(row, PATCHES | PATCHES_OLD) {
+                    self.patches_changed = true;
+                }
                 self.probe(row);
                 self.sync(cx, ui);
             }
@@ -335,6 +387,10 @@ impl Resources {
     }
 
     fn pump(&mut self, cx: &mut Cx, ui: &WidgetRef) {
+        // A browser's Stop of the patch library's download.
+        if makepad_synth_panel::host::take_library_stop().is_some_and(|e| e == "Tandem") && matches!(self.job, Some((PATCHES | PATCHES_OLD, _))) {
+            self.stop();
+        }
         let mut finished = None;
         if let Some((row, job)) = &self.job {
             let row = *row;
@@ -384,12 +440,16 @@ impl Resources {
         if let Some((row, note)) = finished {
             let was_install = matches!(self.job, Some((_, Job::Install(_))));
             let built = matches!(self.job, Some((_, Job::Index(_) | Job::Unpack(_) | Job::Patches(_))));
+            let was_patches = matches!(self.job, Some((_, Job::Patches(_))));
             self.rows[row].note = note;
             self.job = None;
             self.progress = None;
             self.probe(row);
             if built {
                 self.catalogued = true;
+            }
+            if matches!(row, PATCHES | PATCHES_OLD) && was_patches {
+                self.patches_changed = true;
             }
             // The song library (or its extras) installed: catalogue it; the
             // SID collection: unpack it.
@@ -497,6 +557,10 @@ impl Resources {
             if state.licence {
                 ui.label(cx, ids!((id).licence_text)).set_text(cx, &licence);
             }
+        }
+        // The browsers show the same, and draw again when it changes.
+        if makepad_synth_panel::host::set_library_status("Tandem", self.library_status()) {
+            cx.redraw_all();
         }
         ui.redraw(cx);
     }

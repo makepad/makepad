@@ -766,7 +766,9 @@ fn round50_initializer_reload_policy() {
     let runs = u.stats.ctfe_code;
     let (candidate, expected) = match case.as_str() {
         "literal" => (source.replace("= 3;", "= 2 + 2;"), crate::reload::Rung::Patch),
-        "static" => (source.replace("[5, 6]", "[7, 8]"), crate::reload::Rung::Patch),
+        // a placed static holds the value its old initializer made (it runs once): the restart
+        // rung (5917e451a0, live: initializer edits take effect or restart in place)
+        "static" => (source.replace("[5, 6]", "[7, 8]"), crate::reload::Rung::Restart),
         "static_unused" => (source.replace("UNUSED: u32 = compute();", "UNUSED: u32 = compute() + 1;"), crate::reload::Rung::Patch),
         "nonfoldable" => (source.replace("= 3;", "= compute();"), crate::reload::Rung::Restart),
         "body" => (source.replace("unsafe {", "let _x = 1u32; unsafe {"), crate::reload::Rung::Patch),

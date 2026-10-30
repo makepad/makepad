@@ -897,6 +897,49 @@ pub fn change_event(c: &Channel, ev: &Ev, beat: f64, pitch: f32, dur: f64, vel: 
     }
 }
 
+/// One event moved or resized: its index in the channel and where it goes
+/// (loop-local beat, pitch, dur).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Move {
+    pub ev: usize,
+    pub beat: f64,
+    pub pitch: f32,
+    pub dur: f64,
+}
+
+/// The splices that move several events of one channel at once (a drag of
+/// a selection): a note entry gets its values rewritten; a hit leaves its
+/// step and lands on the step nearest its new beat, keeping its character
+/// (a hit landing where another one moved away from wins over the rest).
+pub fn move_events(c: &Channel, moves: &[Move]) -> Vec<Splice> {
+    let mut out = Vec::new();
+    let mut cleared: Vec<usize> = Vec::new();
+    let mut landed: Vec<(usize, u8)> = Vec::new();
+    for m in moves {
+        let Some(ev) = c.events.get(m.ev) else { continue };
+        match (ev.src, &c.form) {
+            (Src::Entry(_), _) => out.extend(change_event(c, ev, m.beat, m.pitch, m.dur, ev.vel)),
+            (Src::Step(i), Form::Hits { chars, step, .. }) if i < chars.len() && *step > 0.0 => {
+                let to = ((m.beat / step).round() as i64).rem_euclid(chars.len() as i64) as usize;
+                if to != i {
+                    cleared.push(i);
+                    landed.retain(|(k, _)| *k != to);
+                    landed.push((to, chars[i]));
+                }
+            }
+            _ => {}
+        }
+    }
+    // A step a hit moved away from is cleared unless another lands there.
+    for k in cleared.into_iter().filter(|k| !landed.iter().any(|(x, _)| x == k)) {
+        out.extend(set_step(c, k, b'.'));
+    }
+    for (k, ch) in landed {
+        out.extend(set_step(c, k, ch));
+    }
+    out
+}
+
 /// `sends: {room: 0.3}` with one send set (0 removes it).
 pub fn sends_text(sends: &[(String, f32)], fx: &str, amount: f32) -> String {
     let mut out: Vec<(String, f32)> = sends.iter().filter(|(n, _)| n != fx).cloned().collect();
@@ -1061,6 +1104,27 @@ mod tests {
         let s = edit(SRC, vec![i]);
         assert!(s.contains("    [1 @d5 1 0.5]\n    [2 @e5 1 0.5]\n]"), "{s}");
         // Every edit still loads.
+        makepad_score_live::model::load(&s).unwrap();
+    }
+
+    #[test]
+    fn tracker_drag_moves_several_events_in_one_change() {
+        let m = model();
+        // Two notes of the line a beat later, the first a tone up and longer.
+        let line = &m.channels[m.channel("line").unwrap()];
+        let moves = [Move { ev: 0, beat: 1.0, pitch: 62.0, dur: 2.0 }, Move { ev: 2, beat: 3.0, pitch: line.events[2].pitch, dur: 0.5 }];
+        let s = edit(SRC, move_events(line, &moves));
+        assert!(s.contains("notes: [[1 @d4 2 0.5] [1 @e4] [3 @g4 0.5 0.7]]"), "{s}");
+        // Hits: the first kick a step later, the open hit two steps back
+        // onto the second kick's step (it takes that step).
+        let kick = &m.channels[m.channel("kick").unwrap()];
+        let moves = [Move { ev: 0, beat: 0.25, pitch: 36.0, dur: 0.25 }, Move { ev: 2, beat: 1.0, pitch: 36.0, dur: 0.25 }];
+        let s = edit(SRC, move_events(kick, &moves));
+        assert!(s.contains("hits: \".x..|o...\""), "{s}");
+        // Swapping two hits keeps both.
+        let moves = [Move { ev: 0, beat: 1.0, pitch: 36.0, dur: 0.25 }, Move { ev: 1, beat: 0.0, pitch: 36.0, dur: 0.25 }];
+        let s = edit(SRC, move_events(kick, &moves));
+        assert!(s.contains("hits: \"x...|x.o.\""), "{s}");
         makepad_score_live::model::load(&s).unwrap();
     }
 

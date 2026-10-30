@@ -125,3 +125,28 @@ fn const_generic_block_items() {
     assert_eq!(rotator.num_skip(), 2);
     assert_eq!(rotator.num_skip(), 0);
 }
+
+fn ask(f: &mut dyn FnMut(&str) -> bool) -> Result<u32, ()> {
+    if f("x") { Ok(1) } else { Err(()) }
+}
+
+// A block with items in a `let` condition's scrutinee, a match guard or a range end is an
+// anonymous module too (rustc_ast walk_expr): its `use Trait as _` puts the trait in scope.
+// Relax missed them: `makepad check relax-compiler` failed on lib.rs's println! in
+// `if let Err(e) = hub::ask(&client, .., &mut |l| { println!(..); true })` (E0599 write_fmt).
+#[test]
+fn let_scrutinee_guard_and_range_block_items() {
+    let mut out: Vec<u8> = Vec::new();
+    if let Ok(n) = ask(&mut |l| { use std::io::Write as _; out.write_all(l.as_bytes()).is_ok() }) {
+        assert_eq!(n, 1);
+    }
+    while let Err(_) = ask(&mut |_| { use std::fmt::Write as _; let mut s = String::new(); write!(s, "y").is_err() }) {
+        break;
+    }
+    let v = match out.len() {
+        n if { use std::io::Write as _; let mut w: Vec<u8> = Vec::new(); w.write_all(b"ab").is_ok() && n == 1 } => 7,
+        _ => 0,
+    };
+    let r = 0..{ use std::io::Write as _; let mut w: Vec<u8> = Vec::new(); w.write_all(b"abc").unwrap(); w.len() };
+    assert_eq!((out, v, r.len()), (b"x".to_vec(), 7, 3));
+}

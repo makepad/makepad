@@ -132,6 +132,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("relax-kernel-store-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("MAKEPAD_RUN_CACHE_DIR", &dir);
+        std::env::remove_var("MAKEPAD_RUN_CACHE");
+        std::env::remove_var("MAKEPAD_RUN_KERNEL_CACHE");
+        // the loader sets the kernel compiler's identity (tools/run); the store is off without it
+        set_kernel_compiler(0x5eed);
         std::fs::create_dir_all(dir.join("cache")).unwrap();
         for k in 1..=20u128 {
             put(k, vec![k as u8; 1000 + k as usize]);

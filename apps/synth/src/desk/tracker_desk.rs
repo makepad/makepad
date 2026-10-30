@@ -177,10 +177,9 @@ impl Desk {
                     ui.label(cx, ids!(score_state)).set_text(cx, &status);
                     self.edit(cx, ui, edit);
                 }
-                TrackerAction::Seek(beat) => {
-                    let quant = if self.status.playing { -1.0 } else { 0.0 };
-                    self.seek(beat, quant);
-                }
+                // The ruler moves the playhead at once, playing or stopped
+                // (a drag scrubs).
+                TrackerAction::Seek(beat) => self.seek(beat, 0.0),
                 TrackerAction::Loop(range) => {
                     self.looping = range;
                     self.set_loop(range);

@@ -300,35 +300,132 @@ impl remote::Backend for Native {
     }
 }
 
-/// Optional host routing, called on the consumer worker before the local mirrors.
+/// Reply bytes written back across the C boundary: `ctx` is the caller's reply, the bytes are
+/// whole lines the callee's `Out` formed and bounded.
+#[cfg(not(target_arch = "wasm32"))]
+pub type UiWrite = extern "C" fn(ctx: *mut u8, bytes: *const u8, len: usize);
+
+/// Optional host routing, called on the consumer worker before the local mirrors: the request
+/// in its wire form (`Req::to_wire`), the bytes its reply may still take, and where the reply's
+/// lines go; returns [`UI_ANSWERED`] | [`UI_TRUNCATED`]. A C entry, so a router that `makepad run`
+/// JIT-compiles (the WM's) is called by the HAL's own code: make one with [`serve_ui_route`].
 /// The callback must release its own registry locks before waiting or dispatching.
 #[cfg(not(target_arch = "wasm32"))]
-pub type UiRouter = fn(&makepad_remote::Req, &mut makepad_remote::Out) -> bool;
+pub type UiRouter = extern "C" fn(req: *const u8, len: usize, limit: usize, ctx: *mut u8, write: UiWrite) -> u32;
+#[cfg(not(target_arch = "wasm32"))]
+pub const UI_ANSWERED: u32 = 1;
+#[cfg(not(target_arch = "wasm32"))]
+pub const UI_TRUNCATED: u32 = 2;
+
 #[cfg(not(target_arch = "wasm32"))]
 static UI_ROUTERS: Mutex<Vec<UiRouter>> = Mutex::new(Vec::new());
+
+/// Adds a host router (once per entry). An op: the routers live with the HAL's code.
 #[cfg(not(target_arch = "wasm32"))]
+#[makepad_relax_api::relax_api]
 pub fn register_ui_router(router: UiRouter) {
     let mut routers = lock(&UI_ROUTERS);
-    if !routers.iter().any(|existing| std::ptr::fn_addr_eq(*existing, router)) {
+    if !routers.iter().any(|existing| *existing as usize == router as usize) {
         routers.push(router);
     }
+}
+
+/// Writes to the reply `ctx` points at (an `Out` of the side that made this entry).
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" fn relay_to_out(ctx: *mut u8, bytes: *const u8, len: usize) {
+    let out = unsafe { &mut *(ctx as *mut makepad_remote::Out) };
+    out.relay(unsafe { std::slice::from_raw_parts(bytes, len) });
+}
+
+/// Lines written to a reply across the C boundary.
+#[cfg(not(target_arch = "wasm32"))]
+struct UiWriter {
+    ctx: *mut u8,
+    write: UiWrite,
+}
+#[cfg(not(target_arch = "wasm32"))]
+impl std::io::Write for UiWriter {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        (self.write)(self.ctx, b.as_ptr(), b.len());
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Runs `route` (a router of the caller's side) on a request that came across the C boundary, the
+/// body of a [`UiRouter`] entry:
+/// `extern "C" fn r(q: *const u8, n: usize, l: usize, c: *mut u8, w: UiWrite) -> u32 { unsafe { serve_ui_route(dispatch, q, n, l, c, w) } }`.
+///
+/// # Safety
+/// The arguments are what the HAL passes a [`UiRouter`].
+#[cfg(not(target_arch = "wasm32"))]
+pub unsafe fn serve_ui_route(route: fn(&makepad_remote::Req, &mut makepad_remote::Out) -> bool, req: *const u8, len: usize, limit: usize, ctx: *mut u8, write: UiWrite) -> u32 {
+    let Some(req) = makepad_remote::Req::from_wire(unsafe { std::slice::from_raw_parts(req, len) }) else { return 0 };
+    let mut w = UiWriter { ctx, write };
+    let mut out = makepad_remote::Out::new(&mut w, limit);
+    let answered = route(&req, &mut out);
+    answered as u32 * UI_ANSWERED | out.truncated as u32 * UI_TRUNCATED
+}
+
+/// `ui` requests: the host routers, then the local mirrors (`local`: the local mirrors only). An
+/// op: routers, mirrors and snapshots live with the HAL's code; the request crosses in its wire
+/// form and the reply comes back through `write`.
+#[cfg(not(target_arch = "wasm32"))]
+#[makepad_relax_api::relax_api]
+pub fn dispatch_ui(local: bool, req: *const u8, len: usize, limit: usize, ctx: *mut u8, write: UiWrite) -> u32 {
+    let Some(req) = makepad_remote::Req::from_wire(unsafe { std::slice::from_raw_parts(req, len) }) else { return 0 };
+    let mut w = UiWriter { ctx, write };
+    let mut out = makepad_remote::Out::new(&mut w, limit);
+    let answered = if local { dispatch_mirrors(&req, &mut out) } else { dispatch_routed(&req, &mut out) };
+    answered as u32 * UI_ANSWERED | out.truncated as u32 * UI_TRUNCATED
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn dispatch_routed(req: &makepad_remote::Req, out: &mut makepad_remote::Out) -> bool {
+    let routers = lock(&UI_ROUTERS).clone();
+    if !routers.is_empty() {
+        let wire = req.to_wire();
+        for route in routers {
+            let r = route(wire.as_ptr(), wire.len(), out.remaining(), out as *mut makepad_remote::Out as *mut u8, relay_to_out);
+            out.truncated |= r & UI_TRUNCATED != 0;
+            if r & UI_ANSWERED != 0 {
+                return true;
+            }
+        }
+    }
+    if req.get("app").is_some() || req.get("machine").is_some() {
+        out.err("this endpoint has no matching semantic host route");
+        return true;
+    }
+    dispatch_mirrors(req, out)
+}
+
+/// Calls [`dispatch_ui`] for a request and reply of this side.
+#[cfg(not(target_arch = "wasm32"))]
+fn dispatch_across(local: bool, req: &makepad_remote::Req, out: &mut makepad_remote::Out) -> bool {
+    let wire = req.to_wire();
+    let r = dispatch_ui(local, wire.as_ptr(), wire.len(), out.remaining(), out as *mut makepad_remote::Out as *mut u8, relay_to_out);
+    out.truncated |= r & UI_TRUNCATED != 0;
+    r & UI_ANSWERED != 0
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn dispatch(req: &makepad_remote::Req, out: &mut makepad_remote::Out) -> bool {
     if req.cmd != "ui" { return false; }
-    let routers = lock(&UI_ROUTERS).clone();
-    if routers.into_iter().any(|route| route(req, out)) { return true; }
-    if req.get("app").is_some() || req.get("machine").is_some() {
-        out.err("this endpoint has no matching semantic host route");
-        return true;
-    }
-    dispatch_local(req, out)
+    dispatch_across(false, req, out)
 }
 
 /// Local HAL sessions only; hosts use this to include their own shell without routing again.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn dispatch_local(req: &makepad_remote::Req, out: &mut makepad_remote::Out) -> bool {
+    if req.cmd != "ui" { return false; }
+    dispatch_across(true, req, out)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn dispatch_mirrors(req: &makepad_remote::Req, out: &mut makepad_remote::Out) -> bool {
     if req.cmd != "ui" { return false; }
     static SNAPSHOTS: OnceLock<remote::Snapshots> = OnceLock::new();
     remote::dispatch(req, out, &Native, SNAPSHOTS.get_or_init(Default::default));

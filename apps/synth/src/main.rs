@@ -156,8 +156,11 @@ impl AppMain for App {
         }
         self.songs.handle_event(cx, &ui, &mut self.desk, event);
         self.desk.handle_event(cx, &ui, event);
-        if std::mem::take(&mut self.desk.open_resources) {
-            self.resources.open(cx, &ui);
+        if let Some(engine) = self.desk.library_ask.take() {
+            self.resources.get_library(cx, &ui, &engine);
+        }
+        if self.resources.take_patches_changed() {
+            self.desk.patches_changed();
         }
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }

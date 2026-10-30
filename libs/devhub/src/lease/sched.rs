@@ -4,18 +4,23 @@
 //! [`Action`]s; [`Sched::tick`] places what can start and hands them all to the master, which
 //! talks to the nodes and publishes the events.
 //!
-//! Order: priority (lower first; aged by one per 10 min waiting), then fair share (the lane with
-//! the oldest last grant), then request time. A lease waits (never refused) for a global or lane
-//! cap, a node's slots, budget, disk floor, pressure, dev switch or a timed hold; it is denied
-//! only when no node could ever take it.
+//! One box per lease: a lease that writes (every kind but `inspect`) gets the whole node, its one
+//! tree, all its cores and its GPU; a node runs one such lease at a time. A node's `slots.<kind>`
+//! only say which kinds it takes at all (0: never; e.g. screen leases need a display).
 //!
-//! Placement: the least-loaded fitting node (free slots, load against cores, free RAM, GPU use),
-//! with a bonus for the lane's warm node (its target). `--node N` on a build, test, long, gate or
+//! Order: priority (lower first; aged by one per 10 min waiting), then fair share (the lane with
+//! the oldest last grant), then request time. A lease waits (never refused) for a free node, the
+//! lane cap, the disk floor, pressure, the dev switch or a timed hold; it is denied only when no
+//! node could ever take it.
+//!
+//! Placement: the least-loaded free node (load against cores, free RAM, GPU use), with a bonus
+//! for a node whose tree already holds a rev lease's commits (no checkout move: its target and JIT
+//! warm for them), the lane's warm node (its target) and its last node. `--node N` on a build, test, long, gate or
 //! gpu lease is a preference: N when it can take it; when N cannot for [`PIN_GRACE_MS`] (at once
 //! when N is held for a timed lease, busy, off or down) a twin (same arch and os) takes it.
 //! `--only N`, timed, screen and inspect leases run on N or wait for it.
 
-use super::{Caps, Cost, Kind, Role};
+use super::{Caps, Cost, Kind, Pin, Role};
 use crate::proto::{hub_record, Record, Sev};
 use makepad_remote::json_str;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -33,13 +38,12 @@ pub const PIN_GRACE_MS: u64 = 120_000;
 /// A node over this load per core, or under this share of free RAM, takes no new leases.
 pub const BUSY_LOAD_PER_CORE: f64 = 1.25;
 pub const BUSY_RAM_FREE: f64 = 0.15;
-/// The same on a laptop (a node with a battery: the user's mbpro): stricter, it is someone's machine.
-pub const LAPTOP_BUSY_LOAD_PER_CORE: f64 = 0.75;
-pub const LAPTOP_BUSY_RAM_FREE: f64 = 0.25;
 /// Placement score bonus of the lane's warm node (its target there: no cold build) and of the
 /// lane's last node.
 const WARM_BONUS: f64 = 1.5;
 const STICKY_BONUS: f64 = 0.5;
+/// Placement score bonus of a node whose tree already holds the lease's commits.
+const TREE_BONUS: f64 = 2.0;
 /// Running leases per lane and kind.
 pub const LANE_CAP: u32 = 2;
 /// A granted gate lease that runs nothing this long ends: an idle gate slot blocks landings.
@@ -51,31 +55,17 @@ const RECLAIM_EVERY_MS: u64 = 300_000;
 /// Ended leases kept for late beats and the view.
 const KEEP_ENDED: usize = 200;
 
-/// Fleet-wide running leases per kind (`inspect` and `timed` have none).
-pub fn global_cap(kind: Kind) -> Option<u32> {
-    match kind {
-        Kind::Test => Some(8),
-        Kind::Build => Some(6),
-        Kind::Long => Some(4),
-        Kind::Screen => Some(8),
-        Kind::Gpu => Some(4),
-        Kind::Gate => Some(4),
-        Kind::Timed | Kind::Inspect => None,
-    }
-}
-
-/// A node's slots for `kind`: its lease.conf, else the defaults (build 2, test 2, screen 3,
-/// long 2, gate 1, gpu = its GPUs, timed 1).
+/// Whether a node takes `kind` at all (> 0): its lease.conf `slots.<kind>`, else the defaults
+/// (gpu: when it has one; every other kind: yes). One lease runs on a node at a time whatever the
+/// number says.
 pub fn slots(c: &Caps, kind: Kind) -> u32 {
     if !c.slots.is_empty() {
         return c.slots(kind);
     }
     match kind {
-        Kind::Build | Kind::Test | Kind::Long => 2,
-        Kind::Screen => 3,
-        Kind::Gate | Kind::Timed => 1,
-        Kind::Gpu => c.gpus.len() as u32,
+        Kind::Gpu => c.gpus.len().min(1) as u32,
         Kind::Inspect => u32::MAX,
+        _ => 1,
     }
 }
 
@@ -288,7 +278,6 @@ pub enum Action {
 struct NodeSt {
     addr: String,
     caps: Option<Caps>,
-    caps_ms: u64,
     up: bool,
     /// the user's switch (nodes.conf); unset = by role
     dev: Option<bool>,
@@ -409,6 +398,9 @@ pub struct Sched {
     warm: HashSet<(String, String)>,
     /// node -> the timed lease holding it (last tick)
     holds: HashMap<String, String>,
+    /// node -> the ended lease whose cleanup (its tree back on the shared commits) has not
+    /// answered yet: the node is not free until [`Sched::cleaned`]
+    restoring: HashMap<String, String>,
     out: Vec<Action>,
     pub lane_cap: u32,
     /// lanes and agents the user evicted: no new leases until unblocked
@@ -445,8 +437,7 @@ fn gb(v: &str) -> Option<f64> {
 
 /// Over the load or RAM threshold: the node takes no new leases ([`BUSY_LOAD_PER_CORE`], [`BUSY_RAM_FREE`]).
 fn overloaded(c: &Caps) -> bool {
-    let (load, ram) = if c.battery.is_some() { (LAPTOP_BUSY_LOAD_PER_CORE, LAPTOP_BUSY_RAM_FREE) } else { (BUSY_LOAD_PER_CORE, BUSY_RAM_FREE) };
-    c.load1 > c.cores as f64 * load || (c.ram_gb > 0.0 && c.ram_avail_gb < c.ram_gb * ram)
+    c.load1 > c.cores as f64 * BUSY_LOAD_PER_CORE || (c.ram_gb > 0.0 && c.ram_avail_gb < c.ram_gb * BUSY_RAM_FREE)
 }
 
 /// May a twin node take this `--node N` lease? (Not `--only`, timed, screen or inspect leases.)
@@ -495,6 +486,7 @@ impl Sched {
             clock: 0,
             warm: HashSet::new(),
             holds: HashMap::new(),
+            restoring: HashMap::new(),
             out: Vec::new(),
             lane_cap: LANE_CAP,
             blocked: Vec::new(),
@@ -516,11 +508,10 @@ impl Sched {
     }
 
     /// Fresh caps from the node's hub; true when the node was down (push it its policy).
-    pub fn set_caps(&mut self, name: &str, caps: Caps, now: u64) -> bool {
+    pub fn set_caps(&mut self, name: &str, caps: Caps, _now: u64) -> bool {
         let n = self.nodes.entry(name.to_string()).or_default();
         let was = n.up;
         n.caps = Some(caps);
-        n.caps_ms = now;
         n.up = true;
         !was
     }
@@ -623,6 +614,9 @@ impl Sched {
             (_, None) => format!("{} for {} left the queue ({how}{})", l.tag(), l.req.lane, if why.is_empty() { String::new() } else { format!(": {why}") }),
         };
         self.event(sev, line, Some(&l));
+        if let Some(n) = node.as_ref().filter(|_| l.req.kind != Kind::Inspect) {
+            self.restoring.insert(n.clone(), l.id.clone());
+        }
         self.out.push(Action::End { id: l.id.clone(), node, how: how.to_string() });
         self.ended.push_back(l);
         while self.ended.len() > KEEP_ENDED {
@@ -770,6 +764,14 @@ impl Sched {
         Some(id)
     }
 
+    /// The node answered the end of lease `id` (its tree is back on the shared commits, or the
+    /// cleanup failed and said so): the node is free again.
+    pub fn cleaned(&mut self, node: &str, id: &str) {
+        if self.restoring.get(node).is_some_and(|r| r == id) {
+            self.restoring.remove(node);
+        }
+    }
+
     /// The node could not set it up: the lease ends (`failed`, warn).
     pub fn failed(&mut self, id: &str, err: &str, now: u64) {
         if let Some(i) = self.leases.iter().position(|l| l.id == id) {
@@ -879,72 +881,41 @@ impl Sched {
         if !self.dev(name) {
             return Err(("node off".into(), false));
         }
-        let running: Vec<&Lease> = self.live_on_node(name, &l.id).filter(|r| r.req.kind != Kind::Inspect).collect();
-        if let Some(t) = running.iter().find(|r| r.cost.whole) {
-            return Err((format!("timed {} running", t.id), false));
-        }
+        // one box per lease: the node is free or it is not
         if let Some(h) = holds.get(name).filter(|h| **h != l.id) {
             return Err((if k == Kind::Timed { format!("behind timed {h}") } else { format!("hold for timed {h}") }, false));
         }
-        if k == Kind::Timed {
-            if !running.is_empty() {
-                return Err((format!("timed: waiting for {} leases to end", running.len()), false));
-            }
-        } else {
-            let busy = overloaded(c);
-            if busy {
-                return Err(("node busy".into(), false));
-            }
-            let used = running.iter().filter(|r| r.req.kind == k).count() as u32;
-            let s = slots(c, k);
-            if used >= s {
-                return Err((format!("node slots {} {used}/{s}", k.as_str()), false));
-            }
-            let cores: f64 = running.iter().map(|r| r.cost.cores).sum();
-            if cores + cost.cores > c.cores as f64 {
-                return Err((format!("node budget: cores {:.0}+{:.0} > {}", cores, cost.cores, c.cores), false));
-            }
-            let ram: f64 = running.iter().map(|r| r.cost.ram_gb).sum();
-            if ram + cost.ram_gb > c.ram_gb * 0.9 {
-                return Err((format!("node budget: RAM {:.0}+{:.0} > {:.0} GB", ram, cost.ram_gb, c.ram_gb * 0.9), false));
-            }
-            let gpus: u32 = running.iter().map(|r| r.cost.gpus).sum();
-            if gpus + cost.gpus > c.gpus.len() as u32 {
-                return Err((format!("GPUs {gpus}/{} in use", c.gpus.len()), false));
-            }
+        if let Some(r) = self.restoring.get(name) {
+            return Err((format!("restoring its tree after {r}"), false));
+        }
+        if let Some(r) = self.live_on_node(name, &l.id).find(|r| r.req.kind != Kind::Inspect) {
+            return Err((format!("held by {} ({} of {})", r.id, r.req.kind.as_str(), r.req.lane), false));
+        }
+        if k != Kind::Timed && overloaded(c) {
+            return Err(("node busy".into(), false));
         }
         // what leases granted since the last measurement will still write
-        let pending: f64 = running.iter().filter(|r| r.granted_ms.unwrap_or(0) >= n.caps_ms).map(|r| r.cost.disk_gb).sum();
-        let free = c.disk_free_gb - pending;
+        let free = c.disk_free_gb;
         if free - cost.disk_gb < c.disk_floor_gb {
             return Err((format!("disk floor: {free:.0} GB free, needs {:.0}, floor {:.0}", cost.disk_gb, c.disk_floor_gb), true));
         }
-        let cores: f64 = running.iter().map(|r| r.cost.cores).sum::<f64>() + cost.cores;
-        let ram: f64 = running.iter().map(|r| r.cost.ram_gb).sum::<f64>() + cost.ram_gb;
-        let s = slots(c, k).max(1) as f64;
-        let used = running.iter().filter(|r| r.req.kind == k).count() as f64;
-        // the measured load counts what runs outside leases too (the user's apps, the mini's CI)
+        // the least-loaded free node: the measured load counts what runs outside leases (the
+        // node's WM and apps, the mini's CI)
         let load = (c.load1 / c.cores.max(1) as f64).min(2.0);
         let gpu = if cost.gpus > 0 { 1.0 - c.gpu_busy.iter().map(|g| g.0).fold(100.0, f64::min) / 100.0 } else { 0.0 };
-        Ok((1.0 - cores / c.cores.max(1) as f64) + (c.ram_avail_gb.min(c.ram_gb - ram).max(0.0) / c.ram_gb.max(1.0)) + (1.0 - load) + 0.5 * (1.0 - (used + 1.0) / s) + gpu)
+        Ok((c.ram_avail_gb / c.ram_gb.max(1.0)) + (1.0 - load) + gpu)
     }
 
     /// Will a lease named to `name` wait long there: held for a timed lease, an exclusive lease
     /// running, overloaded, off or down?
     fn long_wait(&self, name: &str, id: &str, holds: &HashMap<String, String>) -> bool {
         let n = &self.nodes[name];
-        !n.up || !self.dev(name) || holds.get(name).is_some_and(|h| h != id) || self.live_on_node(name, id).any(|r| r.cost.whole) || n.caps.as_ref().is_some_and(overloaded)
+        !n.up || !self.dev(name) || holds.get(name).is_some_and(|h| h != id) || self.restoring.contains_key(name) || self.live_on_node(name, id).any(|r| r.req.kind != Kind::Inspect) || n.caps.as_ref().is_some_and(overloaded)
     }
 
     fn place(&self, l: &Lease, holds: &HashMap<String, String>) -> Place {
         let k = l.req.kind;
         let live = |f: &dyn Fn(&Lease) -> bool| self.leases.iter().filter(|x| x.state.live() && f(x)).count() as u32;
-        if let Some(cap) = global_cap(k) {
-            let n = live(&|x| x.req.kind == k);
-            if n >= cap {
-                return Place::Wait(format!("global cap {n}/{cap}"), None, None);
-            }
-        }
         if k != Kind::Inspect {
             let n = live(&|x| x.req.kind == k && x.req.lane == l.req.lane);
             if n >= self.lane_cap {
@@ -1000,6 +971,7 @@ impl Sched {
             };
         }
         let sticky = self.sticky.get(&l.req.lane);
+        let pin = l.req.rev.as_deref().and_then(Pin::of_rev);
         let mut best: Option<(&String, Cost, f64)> = None;
         let mut why: Vec<(String, String, bool)> = Vec::new();
         for (name, cost) in &fit {
@@ -1008,7 +980,8 @@ impl Sched {
                     // the named node when it can take it; else the lane's warm node unless it is much busier
                     let named = l.req.node.as_deref() == Some(name.as_str());
                     let warm = self.warm.contains(&(l.req.lane.clone(), (*name).clone()));
-                    let score = score + if named { 100.0 } else { 0.0 } + if warm { WARM_BONUS } else { 0.0 } + if sticky == Some(*name) { STICKY_BONUS } else { 0.0 };
+                    let at_pin = pin.as_ref().is_some_and(|p| self.nodes[*name].caps.as_ref().and_then(|c| Pin::parse(&c.tree)).is_some_and(|t| t.fits(p)));
+                    let score = score + if named { 100.0 } else { 0.0 } + if warm { WARM_BONUS } else { 0.0 } + if sticky == Some(*name) { STICKY_BONUS } else { 0.0 } + if at_pin { TREE_BONUS } else { 0.0 };
                     if best.as_ref().is_none_or(|b| score > b.2) {
                         best = Some((name, *cost, score));
                     }
@@ -1199,6 +1172,15 @@ mod tests {
         a.iter().filter_map(|a| if let Action::Grant { id, .. } = a { Some(id.clone()) } else { None }).collect()
     }
 
+    /// A release and the node's cleanup answer (the master's `end` calls [`Sched::cleaned`]).
+    fn release_clean(s: &mut Sched, id: &str, now: u64) {
+        let node = s.get(id).and_then(|l| l.node.clone());
+        s.release(id, "released", now);
+        if let Some(n) = node {
+            s.cleaned(&n, id);
+        }
+    }
+
     fn beat_all(s: &mut Sched, now: u64) {
         let ids: Vec<String> = s.leases.iter().map(|l| l.id.clone()).collect();
         for id in ids {
@@ -1206,22 +1188,73 @@ mod tests {
         }
     }
 
+    /// One box per lease: a node runs one lease at a time; the rest wait (never refused) and take
+    /// the next node that frees. Up to one lease per node runs fleet-wide.
     #[test]
-    fn global_cap_waits_never_refuses() {
-        let big = caps(256, 1024.0, Role::Pool);
-        let mut c = big.clone();
-        c.slots = vec![(Kind::Test, 20)];
-        let mut s = sched(&[("a", c)]);
-        let ids: Vec<String> = (0..10).map(|i| s.request(req(&format!("lane{i}"), Kind::Test, None), 0)).collect();
+    fn one_lease_per_node_the_rest_wait() {
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool)), ("b", caps(16, 64.0, Role::Pool)), ("c", caps(16, 64.0, Role::Pool))]);
+        let ids: Vec<String> = (0..5).map(|i| s.request(req(&format!("lane{i}"), [Kind::Test, Kind::Build, Kind::Gate, Kind::Long, Kind::Screen][i], None), 0)).collect();
         let a = s.tick(0);
-        assert_eq!(grants(&a).len(), 8);
-        assert_eq!(state(&s, &ids[8]), ("queued".into(), "global cap 8/8".into()));
-        assert_eq!(s.get(&ids[9]).unwrap().pos, 2);
-        s.release(&ids[0], "released", 1000);
+        assert_eq!(grants(&a).len(), 3);
+        let mut nodes: Vec<String> = ids[..3].iter().map(|i| node_of(&s, i).unwrap()).collect();
+        nodes.sort();
+        assert_eq!(nodes, vec!["a", "b", "c"], "one lease per node");
+        assert_eq!(state(&s, &ids[3]).0, "queued");
+        assert!(state(&s, &ids[3]).1.contains("held by"), "{:?}", state(&s, &ids[3]));
+        assert_eq!(s.get(&ids[4]).unwrap().pos, 1, "the only waiting screen lease");
+        let freed = node_of(&s, &ids[1]).unwrap();
+        release_clean(&mut s, &ids[1], 1000);
+        beat_all(&mut s, 1000);
         let a = s.tick(1000);
-        assert_eq!(grants(&a), vec![ids[8].clone()]);
+        assert_eq!(grants(&a), vec![ids[3].clone()]);
+        assert_eq!(node_of(&s, &ids[3]), Some(freed));
+        // inspect leases do not hold a node
+        let mut r = req("look", Kind::Inspect, Some("a"));
+        r.jit = Some("sandbox".into());
+        let i = s.request(r, 1001);
+        s.tick(1001);
+        assert_eq!(state(&s, &i).0, "starting");
     }
 
+    /// An ended lease's node is not free until its cleanup answered (the tree is back on the
+    /// shared commits): no lease starts on a box still on the last lane's commits.
+    #[test]
+    fn a_box_is_free_only_after_its_tree_is_restored() {
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool))]);
+        let x = s.request(req("x", Kind::Test, None), 0);
+        s.tick(0);
+        let y = s.request(req("y", Kind::Test, None), 1);
+        s.release(&x, "released", 2);
+        beat_all(&mut s, 2);
+        assert!(grants(&s.tick(2)).is_empty());
+        assert_eq!(state(&s, &y).1, format!("restoring its tree after {x}"));
+        s.cleaned("a", &x);
+        assert_eq!(grants(&s.tick(3)), vec![y]);
+    }
+
+    /// A rev lease prefers a free node whose tree already holds its commits (no checkout move:
+    /// its target and JIT are warm for them), over a less loaded one.
+    #[test]
+    fn a_rev_lease_prefers_a_node_already_at_its_commits() {
+        let (sha, other) = ("a".repeat(40), "b".repeat(40));
+        let mut at = caps(16, 64.0, Role::Pool);
+        at.load1 = 3.0;
+        at.tree = format!("{sha},{}", "c".repeat(40));
+        let mut off = caps(16, 64.0, Role::Pool);
+        off.tree = format!("{other},{}", "c".repeat(40));
+        let mut s = sched(&[("at", at), ("off", off)]);
+        let mut r = req("x", Kind::Test, None);
+        r.rev = Some(format!("rc-x@{sha},main@{}", "c".repeat(40)));
+        let x = s.request(r.clone(), 0);
+        s.tick(0);
+        assert_eq!(node_of(&s, &x).as_deref(), Some("at"));
+        // the node at its commits is held: the other free node takes it (it moves its tree)
+        let mut r2 = r.clone();
+        r2.lane = "y".into();
+        let y = s.request(r2, 1);
+        s.tick(1);
+        assert_eq!(node_of(&s, &y).as_deref(), Some("off"));
+    }
     #[test]
     fn a_windows_node_takes_only_leases_that_ask_for_it() {
         let mut w = caps(64, 256.0, Role::Pool);
@@ -1237,10 +1270,11 @@ mod tests {
         let mut by_os = req("lane2", Kind::Build, None);
         by_os.needs = vec![("os".into(), "windows".into())];
         let by_os = s.request(by_os, 1);
-        let a = s.tick(1);
-        assert!(grants(&a).contains(&named) && grants(&a).contains(&by_os), "{a:?}");
+        assert_eq!(grants(&s.tick(1)), vec![named.clone()]);
+        release_clean(&mut s, &named, 2);
+        beat_all(&mut s, 2);
+        assert_eq!(grants(&s.tick(2)), vec![by_os]);
     }
-
     #[test]
     fn lane_cap_queues_with_a_warning() {
         let mut s = sched(&[("a", caps(64, 256.0, Role::Pool)), ("b", caps(64, 256.0, Role::Pool))]);
@@ -1269,7 +1303,7 @@ mod tests {
         s.tick(20);
         assert_eq!(s.get(&b1).unwrap().pos, 1);
         assert_eq!(s.get(&a2).unwrap().pos, 2);
-        s.release(&a1, "released", 30);
+        release_clean(&mut s, &a1, 30);
         let a = s.tick(30);
         assert_eq!(grants(&a), vec![b1]);
     }
@@ -1297,7 +1331,7 @@ mod tests {
         beat_all(&mut s, t + 1);
         let a = s.tick(t + 1);
         assert!(!a.iter().any(|a| matches!(a, Action::Event(r) if r.sev == Sev::Warn)));
-        s.release(&first, "released", t + 2);
+        release_clean(&mut s, &first, t + 2);
         assert_eq!(grants(&s.tick(t + 2)), vec![hi]);
     }
 
@@ -1309,18 +1343,16 @@ mod tests {
         let t = s.request(req("bench", Kind::Timed, Some("a")), 1);
         let late = s.request(req("y", Kind::Test, Some("a")), 2);
         s.tick(2);
-        assert_eq!(state(&s, &t), ("queued".into(), "timed: waiting for 1 leases to end".into()));
-        assert_eq!(state(&s, &late).1, format!("hold for timed {t}"));
+        assert_eq!(state(&s, &t), ("queued".into(), format!("held by {b} (build of x)")));
         assert_eq!(s.node_view()[0].hold.as_deref(), Some(t.as_str()));
-        s.release(&b, "released", 3);
-        assert_eq!(grants(&s.tick(3)), vec![t.clone()]);
+        release_clean(&mut s, &b, 3);
+        assert_eq!(grants(&s.tick(3)), vec![t.clone()], "the timed lease goes before the later test");
         beat_all(&mut s, 4);
         s.tick(4);
-        assert_eq!(state(&s, &late).1, format!("timed {t} running"));
-        s.release(&t, "released", 5);
+        assert_eq!(state(&s, &late).1, format!("held by {t} (timed of bench)"));
+        release_clean(&mut s, &t, 5);
         assert_eq!(grants(&s.tick(5)), vec![late]);
     }
-
     #[test]
     fn disk_floor_waits_and_asks_to_reclaim() {
         let mut c = caps(64, 256.0, Role::Pool);
@@ -1339,12 +1371,9 @@ mod tests {
 
     #[test]
     fn landing_gates_go_first_and_idle_gates_end() {
-        let big = caps(256, 1024.0, Role::Pool);
-        let nodes: Vec<(String, Caps)> = (0..6).map(|i| (format!("n{i}"), big.clone())).collect();
-        let refs: Vec<(&str, Caps)> = nodes.iter().map(|(n, c)| (n.as_str(), c.clone())).collect();
-        let mut s = sched(&refs);
-        // four lane gates take the global gate cap; a landing and a fifth lane gate wait
-        let lanes: Vec<String> = (0..4).map(|i| s.request(req(&format!("lane{i}"), Kind::Gate, None), 0)).collect();
+        let mut s = sched(&[("n0", caps(16, 64.0, Role::Pool)), ("n1", caps(16, 64.0, Role::Pool))]);
+        // two lane gates take both boxes; a later lane gate and a landing wait
+        let lanes: Vec<String> = (0..2).map(|i| s.request(req(&format!("lane{i}"), Kind::Gate, None), 0)).collect();
         s.tick(0);
         for id in &lanes {
             assert_eq!(state(&s, id).0, "starting");
@@ -1353,20 +1382,22 @@ mod tests {
         let land = s.request(req(LANDING_LANE, Kind::Gate, None), 2);
         s.tick(2);
         assert_eq!(state(&s, &land).0, "queued");
-        // the lane gates beat but run nothing: after the idle limit they end, and the landing
-        // goes first
+        // the gates beat but one runs nothing: after the idle limit it ends, and the landing
+        // takes its box first
         for id in lanes.iter().chain([&late, &land]) {
             s.beat(id, GATE_IDLE_MS + 5);
         }
         s.set_info(&lanes[0], r#"{"running":"bash land_gate.sh full"}"#);
         s.tick(GATE_IDLE_MS + 5);
         assert_eq!(state(&s, &lanes[0]).0, "starting", "a gate that runs something stays");
-        for id in &lanes[1..] {
-            assert_eq!(state(&s, id).0, "ended idle");
-        }
-        assert_eq!(state(&s, &land).0, "starting", "the landing takes a freed gate slot first");
+        assert_eq!(state(&s, &lanes[1]).0, "ended idle");
+        let freed = s.get(&lanes[1]).unwrap().node.clone().unwrap();
+        s.cleaned(&freed, &lanes[1]);
+        beat_all(&mut s, GATE_IDLE_MS + 6);
+        s.tick(GATE_IDLE_MS + 6);
+        assert_eq!(state(&s, &land).0, "starting", "the landing takes the freed box first");
+        assert_eq!(state(&s, &late).0, "queued");
     }
-
     /// `--needs gui`: a test lease that opens windows goes only to nodes that present (screen
     /// slots above 0); 106 at slots.screen=0 takes none, plain test leases still go there.
     #[test]
@@ -1412,11 +1443,12 @@ mod tests {
         assert_eq!(state(&s, &soft).0, "queued");
         // inspect is always allowed on a user WM
         assert_eq!(state(&s, &insp).0, "starting");
-        // the user switches it on: writes go
+        // the user switches it on: writes go, one at a time
         s.set_dev("wm", true, 1).unwrap();
         let w = s.request(req("y", Kind::Build, Some("wm")), 1);
-        assert_eq!(grants(&s.tick(1)), vec![soft.clone(), w]);
+        assert_eq!(grants(&s.tick(1)), vec![soft.clone()]);
         assert_eq!(node_of(&s, &soft).as_deref(), Some("wm"), "its own node, once it takes leases");
+        assert_eq!(state(&s, &w).0, "queued");
     }
 
     #[test]
@@ -1433,6 +1465,11 @@ mod tests {
         let a = s.tick(30_001);
         assert!(a.iter().any(|a| matches!(a, Action::End { id, node: Some(n), how } if *id == b && n == "a" && how == "expired")));
         assert!(a.iter().any(|a| matches!(a, Action::Event(r) if r.sev == Sev::Warn && r.line.contains("expired"))));
+        // the box frees once the node answered the expired lease's cleanup
+        assert_eq!(state(&s, &q).0, "queued");
+        s.cleaned("a", &b);
+        s.beat(&q, 30_001);
+        s.tick(30_002);
         assert_eq!(state(&s, &q).0, "starting");
         // a holder pid that is gone ends its lease at once
         s.leases.iter_mut().find(|l| l.id == q).unwrap().req.holder = Some(4242);
@@ -1457,8 +1494,9 @@ mod tests {
         // a pool node switched off: waits, not denied
         assert_eq!(state(&s, &w), ("queued".into(), "node off".into()));
         s.set_dev("a", true, 3).unwrap();
+        release_clean(&mut s, &b, 3);
+        beat_all(&mut s, 3);
         assert_eq!(grants(&s.tick(3)), vec![w]);
-        let _ = b;
     }
 
     #[test]
@@ -1471,7 +1509,7 @@ mod tests {
         s.tick(0);
         let node = s.get(&first).unwrap().node.clone().unwrap();
         assert_ne!(node, "wm");
-        s.release(&first, "released", 1);
+        release_clean(&mut s, &first, 1);
         let again = s.request(req("x", Kind::Build, None), 2);
         s.tick(2);
         let l = s.get(&again).unwrap();
@@ -1481,35 +1519,35 @@ mod tests {
 
     #[test]
     fn cancel_ends_one_lease_and_keeps_the_lane_off_that_node() {
-        let mut s = sched(&[("a", caps(64, 256.0, Role::Pool)), ("b", caps(64, 256.0, Role::Pool))]);
+        let mut s = sched(&[("a", caps(64, 256.0, Role::Pool)), ("b", caps(64, 256.0, Role::Pool)), ("c", caps(64, 256.0, Role::Pool))]);
         let x = s.request(req("lane-x", Kind::Build, Some("a")), 0);
-        let y = s.request(req("lane-y", Kind::Build, Some("a")), 0);
+        let y = s.request(req("lane-y", Kind::Build, Some("b")), 0);
         s.tick(1);
         assert_eq!(s.get(&x).unwrap().node.as_deref(), Some("a"));
-        assert_eq!(s.get(&y).unwrap().node.as_deref(), Some("a"));
-        // cancel x: y keeps running on the same node
+        assert_eq!(s.get(&y).unwrap().node.as_deref(), Some("b"));
+        // cancel x: y keeps running
         assert!(s.cancel(&x, 10));
         let acts = s.tick(11);
         assert!(acts.iter().any(|a| matches!(a, Action::End { id, how, .. } if *id == x && how == "cancelled")), "{acts:?}");
         assert!(!acts.iter().any(|a| matches!(a, Action::End { id, .. } if *id == y)));
         assert!(s.get(&y).unwrap().state.live());
         assert!(!s.cancel(&x, 12), "already ended");
-        // lane-x asks again with no node: it is placed, but not on a
+        s.cleaned("a", &x);
+        // lane-x asks again with no node: it is placed, but not on a (free) nor b (held)
         let again = s.request(req("lane-x", Kind::Build, None), 20);
         s.tick(21);
-        assert_eq!(s.get(&again).unwrap().node.as_deref(), Some("b"));
+        assert_eq!(s.get(&again).unwrap().node.as_deref(), Some("c"));
         // naming the node overrides the exclusion
         let named = s.request(req("lane-x", Kind::Build, Some("a")), 22);
         s.tick(23);
         assert_eq!(s.get(&named).unwrap().node.as_deref(), Some("a"));
         // the exclusion lapses
-        s.release(&again, "released", 30);
-        s.release(&named, "released", 30);
+        release_clean(&mut s, &again, 30);
+        release_clean(&mut s, &named, 30);
         let later = s.request(req("lane-x", Kind::Build, None), CANCEL_EXCLUDE_MS + 100);
         s.tick(CANCEL_EXCLUDE_MS + 101);
         assert!(s.get(&later).unwrap().state.live());
     }
-
     #[test]
     fn requests_round_trip() {
         let mut r = req("gapx", Kind::Build, Some("217"));
@@ -1544,41 +1582,31 @@ mod tests {
         s.get(id).unwrap().node.clone()
     }
 
-    /// `--node a` with a's test slots full: it waits for a during the grace (its warm tree is
-    /// there), then a twin (same arch and os) takes it; never a node of another arch; `--only a`
-    /// keeps waiting.
     #[test]
     fn soft_pin_waits_for_its_node_then_takes_a_twin() {
         let mut mac = caps(16, 64.0, Role::Pool);
         mac.arch = "aarch64".into();
         mac.os = "macos".into();
         let mut s = sched(&[("a", caps(16, 64.0, Role::Pool)), ("b", caps(16, 64.0, Role::Pool)), ("m", mac)]);
-        let mut fill = Vec::new();
-        for lane in ["f1", "f2"] {
-            let mut r = req(lane, Kind::Test, Some("a"));
-            r.only = true;
-            fill.push(s.request(r, 0));
-        }
+        let mut r = req("f1", Kind::Test, Some("a"));
+        r.only = true;
+        let fill = s.request(r, 0);
         s.tick(0);
-        assert!(fill.iter().all(|f| node_of(&s, f).as_deref() == Some("a")));
+        assert_eq!(node_of(&s, &fill).as_deref(), Some("a"));
+        // a soft pin to a held node goes to a twin at once; within the grace a node that is merely
+        // slow to come up keeps it waiting
         let x = s.request(req("x", Kind::Test, Some("a")), 1);
         let mut y = req("y", Kind::Test, Some("a"));
         y.only = true;
         let y = s.request(y, 1);
         s.tick(2);
-        assert_eq!(state(&s, &x).0, "queued", "inside the grace it waits for its node");
-        let t = PIN_GRACE_MS + 2;
-        beat_all(&mut s, t);
-        s.tick(t);
-        assert_eq!(node_of(&s, &x).as_deref(), Some("b"), "past the grace a twin takes it");
+        assert_eq!(node_of(&s, &x).as_deref(), Some("b"), "a held node sends a soft pin to its twin");
         assert_eq!(state(&s, &y).0, "queued", "--only waits for its node");
-        // a slot on a frees: the --only lease takes it
-        s.release(&fill[0], "released", t + 1);
-        beat_all(&mut s, t + 2);
-        s.tick(t + 2);
+        release_clean(&mut s, &fill, 3);
+        beat_all(&mut s, 4);
+        s.tick(4);
         assert_eq!(node_of(&s, &y).as_deref(), Some("a"));
     }
-
     /// A timed lease waiting for a holds a: a build named to a goes to a twin at once, a test
     /// named `--only a` waits; the timed lease itself waits only for a's running lease.
     #[test]
@@ -1594,10 +1622,10 @@ mod tests {
         o.only = true;
         let strict = s.request(o, 3);
         s.tick(3);
-        assert!(state(&s, &timed).1.contains("waiting for 1 leases"), "{:?}", state(&s, &timed));
+        assert!(state(&s, &timed).1.contains(&format!("held by {running}")), "{:?}", state(&s, &timed));
         assert_eq!(node_of(&s, &build).as_deref(), Some("b"), "a held node sends a soft pin to its twin at once");
         assert!(state(&s, &strict).1.contains("hold for timed"), "{:?}", state(&s, &strict));
-        s.release(&running, "released", 4);
+        release_clean(&mut s, &running, 4);
         beat_all(&mut s, 5);
         s.tick(5);
         assert_eq!(node_of(&s, &timed).as_deref(), Some("a"));
@@ -1609,7 +1637,7 @@ mod tests {
         let mut s = sched(&[("a", caps(16, 64.0, Role::Pool)), ("b", caps(16, 64.0, Role::Pool))]);
         let first = s.request(req("bench", Kind::Build, Some("a")), 0);
         s.tick(0);
-        s.release(&first, "released", 1);
+        release_clean(&mut s, &first, 1);
         let mut r = req("other", Kind::Test, Some("a"));
         r.only = true;
         s.request(r, 2);
@@ -1629,7 +1657,7 @@ mod tests {
         let x = s.request(req("x", Kind::Build, None), 0);
         s.tick(0);
         assert_eq!(node_of(&s, &x).as_deref(), Some("b"));
-        s.release(&x, "released", 1);
+        release_clean(&mut s, &x, 1);
         // x is warm on b: a little load on b keeps it there
         let mut b = caps(16, 64.0, Role::Pool);
         b.load1 = 4.0;
@@ -1640,7 +1668,7 @@ mod tests {
         let again = s.request(req("x", Kind::Build, None), 3);
         s.tick(3);
         assert_eq!(node_of(&s, &again).as_deref(), Some("b"), "the warm node unless it is much busier");
-        s.release(&again, "released", 4);
+        release_clean(&mut s, &again, 4);
         // b over the load threshold, a over the RAM threshold: nothing starts
         b.load1 = 16.0 * BUSY_LOAD_PER_CORE + 1.0;
         s.set_caps("b", b, 5);
@@ -1656,37 +1684,6 @@ mod tests {
         beat_all(&mut s, 8);
         s.tick(8);
         assert_eq!(node_of(&s, &third).as_deref(), Some("a"));
-    }
-
-    /// Two Macs (mini, laptop) both meet `--needs arch=arm64,os=macos`: the laptop takes work only
-    /// under its stricter limits, so a lease goes to the busy-ish mini rather than a loaded laptop.
-    #[test]
-    fn a_laptop_takes_work_only_under_its_stricter_limits() {
-        let mac = |load: f64, battery: bool| {
-            let mut c = caps(10, 16.0, Role::Pool);
-            c.arch = "aarch64".into();
-            c.os = "macos".into();
-            c.load1 = load;
-            c.battery = battery.then_some((80, true));
-            c
-        };
-        // laptop at load 8 / 10 cores: over 0.75, a server would still take it (under 1.25)
-        let mut s = sched(&[("mbpro", mac(8.0, true)), ("mini", mac(11.0, false))]);
-        let mut r = req("landplat", Kind::Build, None);
-        r.needs = parse_needs("arch=arm64,os=macos");
-        let x = s.request(r.clone(), 0);
-        s.tick(0);
-        assert_eq!(node_of(&s, &x).as_deref(), Some("mini"));
-        s.release(&x, "released", 1);
-        // the laptop idle, the mini loaded: the laptop
-        s.set_caps("mbpro", mac(1.0, true), 2);
-        s.set_caps("mini", mac(13.0, false), 2);
-        let y = s.request(r, 3);
-        s.tick(3);
-        assert_eq!(node_of(&s, &y).as_deref(), Some("mbpro"));
-        let mut low = mac(1.0, true);
-        low.ram_avail_gb = 16.0 * LAPTOP_BUSY_RAM_FREE - 0.5;
-        assert!(overloaded(&low) && !overloaded(&mac(7.0, true)) && overloaded(&mac(8.0, true)) && !overloaded(&mac(12.0, false)));
     }
 
     #[test]

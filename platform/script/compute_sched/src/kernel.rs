@@ -95,6 +95,7 @@ pub struct RunStats {
     pub reduced: Vec<f32>,
     /// The ops it counted (see [`makepad_script_compute::work`]): the same on every machine.
     pub work: u64,
+    /// Wall time of the run; 0 for runs under [`TIMED_MIN`] elements.
     pub nanos: u64,
 }
 
@@ -107,6 +108,10 @@ impl RunStats {
     pub fn work(&self) -> u64 { self.work }
     pub fn nanos(&self) -> u64 { self.nanos }
 }
+
+/// Runs of fewer elements are not timed ([`RunStats::nanos`] is 0): the
+/// kernel's speed estimate ignores them too.
+pub const TIMED_MIN: usize = 256;
 
 /// Elapsed time of a run (wasm32 has no clock in std: 0 there, and the
 /// host times its calls itself).
@@ -433,7 +438,10 @@ impl<'a> Call<'a> {
     }
 
     fn run_on(&mut self, count: usize, interp: bool, exec: &dyn crate::sched::Executor, threads: usize) -> Result<RunStats, KernelError> {
-        let t0 = Clock::now();
+        // Small runs (a sampler's point) are not timed: two clock reads cost
+        // more than their elements, and the speed estimate skips them anyway.
+        let timed = count >= TIMED_MIN;
+        let t0 = timed.then(Clock::now);
         self.ctx[K_COUNT as usize] = count as u32;
         let buffers = self.buffers()?;
         let split = splits(self.kernel, threads, count);
@@ -441,11 +449,13 @@ impl<'a> Call<'a> {
         let mode = if interp { Mode::Interp } else { self.native_mode(count) };
         let cells: Vec<ChunkCell> = (0..count.div_ceil(CHUNK)).map(|_| ChunkCell::default()).collect();
         let t = split_threads(self.kernel, threads, count, mode);
-        let t1 = Clock::now();
+        let t1 = timed.then(Clock::now);
         let (overflowed, host_error, reduced, work) = run_chunks(self.kernel, &self.ctx, &buffers, count, mode, &self.cancel, &cells, exec, t, self.work_limit)?;
-        self.kernel.observe(count, t, t1.nanos(), mode);
+        if let Some(t1) = t1 {
+            self.kernel.observe(count, t, t1.nanos(), mode);
+        }
         let lanes = self.kernel.reduce_parts().1;
-        Ok(RunStats { elements: count, overflowed, host_error, reduced: reduced[..lanes].to_vec(), work, nanos: t0.nanos() })
+        Ok(RunStats { elements: count, overflowed, host_error, reduced: reduced[..lanes].to_vec(), work, nanos: t0.map_or(0, |t| t.nanos()) })
     }
 
     /// Runs `count` elements split across up to `threads` workers of the

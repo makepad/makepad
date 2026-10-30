@@ -575,13 +575,22 @@ impl<'a> Lcx<'a> {
     }
 
     /// A provided crate's static lives in the loader; Relax's copy of it would be a second one.
-    /// Plain immutable data (trusted, no interior mutability) may be read from the copy.
+    /// Plain immutable data (trusted, no interior mutability) may be read from the copy, and a
+    /// static the crate marks `#[relax_api(per_side)]` (a memo of values each side makes and reads
+    /// itself) is JIT code's own instance. Any other is rustc's one copy, laid out by rustc's std:
+    /// JIT code cannot read it with Relax's layouts.
     fn check_provided_static(&mut self, d: DefId, t: TyId) {
         let krate = self.u.prog.def(d).krate;
-        if self.u.provided.iter().any(|(k, _)| *k == krate) && !crate::provided::trusted(&self.u.prog, &self.u.tcx, krate, t, 0) {
-            let name = self.u.prog.def_path(d);
-            self.provided_err(krate, format!("static `{}` is read from JIT-compiled code, but it lives in a provided crate (built by rustc into the loader), where its one copy is: call a fn of the crate instead", name));
+        let Some((_, p)) = self.u.provided.iter().find(|(k, _)| *k == krate) else { return };
+        if crate::provided::trusted(&self.u.prog, &self.u.tcx, krate, t, 0) {
+            return;
         }
+        let name = self.u.prog.def_path(d);
+        if p.per_side.contains(&crate::provided::norm(&name)) {
+            return;
+        }
+        let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
+        self.provided_err(krate, format!("static `{}` is read from JIT-compiled code, but it lives in a provided crate (built by rustc into the loader), where its one copy is laid out by rustc's std (`{}` is not the same bytes on both sides): call a fn of the crate that is an op (#[relax_api]), or mark the static #[relax_api(per_side)] when each side may keep its own instance (a cache of values only that side makes)", name, ts));
     }
 
     /// A type only JIT-compiled code makes: no bound fn's signature reaches it

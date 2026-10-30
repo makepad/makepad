@@ -95,7 +95,7 @@ fn crossing_t(a: f64, b: f64) -> f64 {
 }
 
 /// The distances at `points`, in parallel chunks.
-fn sample(field: &Arc<dyn Sdf3 + Send + Sync>, points: Vec<Vec3d>) -> Vec<f64> {
+pub(crate) fn sample(field: &Arc<dyn Sdf3 + Send + Sync>, points: Vec<Vec3d>) -> Vec<f64> {
     if points.is_empty() {
         return Vec::new();
     }
@@ -190,7 +190,9 @@ fn surface_cell(field: &dyn Sdf3, pos: [Vec3d; 8], v: [f64; 8]) -> SurfaceCell {
 /// when the box would need more than [`MAX_CELLS`] along a side). The grid has
 /// two cells of margin round the box. Triangles are wound outwards; the result
 /// is closed and edge-manifold.
-pub fn mesh_surface(field: Arc<dyn Sdf3 + Send + Sync>, min: Vec3d, max: Vec3d, cell: f64) -> TriMesh {
+/// `lipschitz`: the field's bound ([`crate::lipschitz`]; 1 for a distance): the culling
+/// divides the value by it, so a field steeper than a distance keeps its surface bricks.
+pub fn mesh_surface(field: Arc<dyn Sdf3 + Send + Sync>, min: Vec3d, max: Vec3d, cell: f64, lipschitz: f64) -> TriMesh {
     let size = max - min;
     let extent = size.x.max(size.y).max(size.z).max(1e-9);
     let cell = cell.max(extent / (MAX_CELLS - 4) as f64).max(1e-9);
@@ -226,7 +228,7 @@ pub fn mesh_surface(field: Arc<dyn Sdf3 + Send + Sync>, min: Vec3d, max: Vec3d, 
         let mut next = Vec::new();
         for ((lo, hi), d) in blocks.into_iter().zip(d) {
             let half = ((0..3).map(|k| (((hi[k] - lo[k]) * BRICK) as f64 * cell).powi(2)).sum::<f64>()).sqrt() * 0.5;
-            if d.abs() > CULL * half + cell {
+            if d.abs() > (CULL * half + cell) * lipschitz.max(1.0) {
                 continue;
             }
             if (0..3).all(|k| hi[k] - lo[k] == 1) {
@@ -438,7 +440,7 @@ mod tests {
     }
 
     fn mesh(n: SdfNode, scale: f64, lo: f64, hi: f64, cell: f64) -> TriMesh {
-        mesh_surface(Arc::new(Node(n, scale)), Vec3d::new(lo, lo, lo), Vec3d::new(hi, hi, hi), cell)
+        mesh_surface(Arc::new(Node(n, scale)), Vec3d::new(lo, lo, lo), Vec3d::new(hi, hi, hi), cell, 1.0)
     }
 
     fn at(p: [f64; 3], of: SdfNode) -> SdfNode {

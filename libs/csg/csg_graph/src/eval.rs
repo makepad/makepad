@@ -358,7 +358,7 @@ impl Evaluator {
                     return Err("an SDF's bounds need min below max on every axis".into());
                 }
                 let cell = cell.unwrap_or_else(|| makepad_csg_sdf::default_cell(min, max, self.finest_cell)) * self.draft_scale();
-                nonempty(makepad_csg_sdf::mesh_field(shape.field(), min, max, cell), "shape (nothing inside its surface)")
+                nonempty(makepad_csg_sdf::mesh_field(shape.field(), min, max, cell, shape.lipschitz()), "shape (nothing inside its surface)")
             }
             Op::Mesh { mesh } => Ok((**mesh).clone()),
         }

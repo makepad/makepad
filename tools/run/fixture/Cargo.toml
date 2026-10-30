@@ -30,6 +30,12 @@ path = "src/main.rs"
 name = "relax-provided-fixture-guard"
 path = "src/guard.rs"
 
+# statics of the lib reached from JIT-compiled code: a per-side one works, rustc's one copy is
+# refused (provided_static.sh)
+[[bin]]
+name = "relax-provided-static"
+path = "src/provided_static.rs"
+
 # panic unwinding through frames with drop guards (driven by compiler/tests/unwind_modes.py)
 [[bin]]
 name = "relax-unwind-probe"

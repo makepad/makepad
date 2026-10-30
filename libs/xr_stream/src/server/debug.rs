@@ -8,7 +8,7 @@ use super::{Log, ServerShared};
 use makepad_desk_link::xr::*;
 use makepad_widgets::makepad_platform::makepad_hal::{self, xr_remote as hal};
 use makepad_widgets::makepad_platform::video_file::{StreamVideoCodec, VideoStreamEncoder};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -119,7 +119,7 @@ pub(crate) fn dump_picture(_dir: &std::ffi::OsStr, _p: &Picture, _size: [u32; 2]
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn dump_picture(dir: &std::ffi::OsStr, p: &Picture, size: [u32; 2], log: &Log) {
-    static N: AtomicU32 = AtomicU32::new(0);
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     if N.fetch_add(1, Ordering::AcqRel) != 300 {
         return;
     }

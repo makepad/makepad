@@ -3,7 +3,8 @@
 //!
 //! - [`node_bounds`]: a box holding the node's solid (`f <= 0`), smooth
 //!   blends included (a blend of width `k` reaches `k / 4` beyond the hard
-//!   result); `None` for a node without bounds (a kernel, a gyroid);
+//!   result); `None` for a node without bounds (a gyroid, a kernel with no
+//!   declared box);
 //! - [`cull`]: the node reduced to what can matter inside a region (a layer
 //!   slab, a brick), with the same sign and zero set there;
 //! - [`changed`]: where an edit can change the surface, from the old and the
@@ -48,6 +49,23 @@ pub fn blend_reach(blend: f64) -> f64 {
     blend.max(0.0) * 0.25
 }
 
+/// How far an operand of a smooth fold of `n` operands can reach the
+/// result: the fold is left to right (`smin(smin(a, b), c)`, not
+/// associative), so an operand changes the blend of its neighbours, and that
+/// change carries on down the fold. Operand `j` moves the result `v` at a
+/// point only where its own value is under `v + 1.25·blend·(n - j + 1)`
+/// (each later step passes on a value at most `1.25·blend` above its result,
+/// each step sags at most `blend / 4`): beyond this reach of a region, an
+/// operand changes no value in it under the region's own margin. A hard
+/// fold (`blend` 0) reaches nothing.
+pub fn fold_reach(blend: f64, n: usize) -> f64 {
+    if blend <= 0.0 {
+        0.0
+    } else {
+        1.25 * blend * (n + 1) as f64
+    }
+}
+
 fn rot(deg: P3) -> [[f64; 3]; 3] {
     let (sx, cx) = deg[0].to_radians().sin_cos();
     let (sy, cy) = deg[1].to_radians().sin_cos();
@@ -86,16 +104,22 @@ pub fn node_bounds(n: &SdfNode) -> Option<Bounds> {
         SdfNode::Torus { radius, tube } => around([radius + tube, *tube, radius + tube]),
         SdfNode::Capsule { a, b, radius } => grow(union((*a, *a), (*b, *b)), *radius),
         SdfNode::Ellipsoid { radii } => around(*radii),
-        SdfNode::Gyroid { .. } | SdfNode::Kernel(_) => return None,
+        SdfNode::Kernel(k) => return k.bounds,
+        SdfNode::Gyroid { .. } => return None,
         SdfNode::Mesh(m) => (m.min.map(|x| x as f64), m.max.map(|x| x as f64)),
         SdfNode::Combine { op, blend, of } => {
             let b = match op {
-                SdfOp::Union => of.iter().map(node_bounds).try_fold(None, |acc: Option<Bounds>, b| b.map(|b| Some(acc.map_or(b, |a| union(a, b)))))?.expect("a combine has operands"),
-                // Inside the first operand; an intersection inside any bounded one.
+                // Each of the n - 1 smooth steps sags at most a blend reach.
+                SdfOp::Union => {
+                    let b = of.iter().map(node_bounds).try_fold(None, |acc: Option<Bounds>, b| b.map(|b| Some(acc.map_or(b, |a| union(a, b)))))?.expect("a combine has operands");
+                    grow(b, blend_reach(*blend) * of.len().saturating_sub(1) as f64)
+                }
+                // Inside the first operand; an intersection inside any bounded
+                // one (a smooth max never lies below the hard one).
                 SdfOp::Difference => node_bounds(&of[0])?,
                 SdfOp::Intersection => of.iter().filter_map(node_bounds).reduce(|a, b| (std::array::from_fn(|i| a.0[i].max(b.0[i])), std::array::from_fn(|i| a.1[i].min(b.1[i]))))?,
             };
-            grow(b, blend_reach(*blend))
+            b
         }
         SdfNode::Shell { thickness, of } => grow(node_bounds(of)?, *thickness),
         SdfNode::Round { radius, of } => grow(node_bounds(of)?, *radius),
@@ -141,18 +165,19 @@ fn reaches(n: &SdfNode, region: &Bounds) -> bool {
     node_bounds(n).map_or(true, |b| overlaps(&b, region))
 }
 
-/// The node reduced to what can matter inside `region`: union operands whose
-/// solid misses the region grown by the blend width, and difference cutters
-/// that miss it, are dropped. Inside the region the result has the same sign
-/// everywhere and the same zero set (values away from the surface may
-/// differ). `None`: no solid reaches the region.
+/// The node reduced to what can matter inside `region`: union operands and
+/// difference cutters whose solid misses the region grown by the fold's
+/// reach ([`fold_reach`]) are dropped. Inside the region the result has the
+/// same sign everywhere and the same zero set; at a point `m` deep inside
+/// it, the same value wherever that is under `m` in size (values further
+/// from the surface may differ). `None`: no solid reaches the region.
 pub fn cull(n: &SdfNode, region: &Bounds) -> Option<SdfNode> {
     if !reaches(n, region) {
         return None;
     }
     Some(match n {
         SdfNode::Combine { op, blend, of } => {
-            let near = grow(*region, blend.max(0.0));
+            let near = grow(*region, fold_reach(*blend, of.len()));
             match op {
                 SdfOp::Union => {
                     let kept: Vec<SdfNode> = of.iter().filter_map(|c| cull(c, &near)).collect();
@@ -163,7 +188,7 @@ pub fn cull(n: &SdfNode, region: &Bounds) -> Option<SdfNode> {
                     }
                 }
                 SdfOp::Difference => {
-                    let mut kept = vec![cull(&of[0], region)?];
+                    let mut kept = vec![cull(&of[0], &near)?];
                     kept.extend(of[1..].iter().filter_map(|c| cull(c, &near)));
                     if kept.len() == 1 {
                         kept.pop().unwrap()
@@ -213,7 +238,7 @@ pub fn same(a: &SdfNode, b: &SdfNode) -> bool {
         (Shell { thickness: t1, of: x }, Shell { thickness: t2, of: y }) => t1 == t2 && same(x, y),
         (Round { radius: r1, of: x }, Round { radius: r2, of: y }) => r1 == r2 && same(x, y),
         (Transform { at: a1, rotate: r1, scale: s1, of: x }, Transform { at: a2, rotate: r2, scale: s2, of: y }) => a1 == a2 && r1 == r2 && s1 == s2 && same(x, y),
-        (Kernel(x), Kernel(y)) => x.key == y.key,
+        (Kernel(x), Kernel(y)) => x.key == y.key && x.bounds == y.bounds,
         (Mesh(x), Mesh(y)) => x.key() == y.key(),
         (Material { slot: s1, within: w1, of: x }, Material { slot: s2, within: w2, of: y }) => {
             s1 == s2 && same(x, y) && match (w1, w2) { (None, None) => true, (Some(a), Some(b)) => same(a, b), _ => false }
@@ -245,7 +270,7 @@ pub fn changed(old: &SdfNode, new: &SdfNode) -> Option<Bounds> {
             let mut out: Option<Bounds> = None;
             for (a, b) in ca.iter().zip(cb) {
                 if let Some(c) = changed(a, b) {
-                    let c = grow(c, ba.max(0.0));
+                    let c = grow(c, fold_reach(*ba, ca.len()));
                     out = Some(out.map_or(c, |o| union(o, c)));
                 }
             }
@@ -338,6 +363,33 @@ mod tests {
         }
     }
 
+    /// A smooth fold of three: dropping the first operand changes the blend
+    /// of the other two far beyond the blend width. Culled to thin slabs, the
+    /// values `m` deep inside each slab are exact wherever they are under `m`.
+    #[test]
+    fn culled_smooth_fold_keeps_the_values() {
+        let n = SdfNode::Combine {
+            op: SdfOp::Union,
+            blend: 2.0,
+            of: vec![
+                at([0.0, 2.5, 0.0], SdfNode::Box { size: [40.0, 5.0, 20.0], radius: 0.0 }),
+                at([0.0, 20.0, -8.0], SdfNode::Box { size: [40.0, 40.0, 4.0], radius: 0.0 }),
+                at([0.0, 12.0, -4.0], SdfNode::Box { size: [4.0, 16.0, 4.0], radius: 0.0 }),
+            ],
+        };
+        let m = 1.5;
+        for y in [6.0, 8.0, 8.8, 10.0, 14.0, 30.0] {
+            let slab = ([-25.0, y - m, -15.0], [25.0, y + m, 15.0]);
+            let c = cull(&n, &slab).unwrap();
+            for p in grid(&([-22.0, y, -12.0], [22.0, y, 12.0]), 60) {
+                let d = distance(&n, p);
+                if d.abs() < m {
+                    assert_eq!(distance(&c, p), d, "slab {y}: {p:?}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn changed_region_holds_the_change() {
         let (a, b) = (vase(4.0), vase(5.0));
@@ -359,7 +411,7 @@ mod tests {
         let b = node_bounds(&n).unwrap();
         let shape = crate::shape::SdfShape { root: n, min: b.0, max: b.1, materials: Vec::new() };
         for cell in [0.3, 0.6, 1.2, 2.4] {
-            let m = crate::field_mesh::mesh_field(shape.field(), Vec3d::new(b.0[0], b.0[1], b.0[2]), Vec3d::new(b.1[0], b.1[1], b.1[2]), cell);
+            let m = crate::field_mesh::mesh_field(shape.field(), Vec3d::new(b.0[0], b.0[1], b.0[2]), Vec3d::new(b.1[0], b.1[1], b.1[2]), cell, shape.lipschitz());
             let mut net = std::collections::HashMap::new();
             for t in &m.triangles {
                 for i in 0..3 {

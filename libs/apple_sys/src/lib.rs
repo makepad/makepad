@@ -740,6 +740,12 @@ extern "C" {
     pub static kVTProfileLevel_H264_High_AutoLevel: CFStringRef;
     pub static kVTProfileLevel_HEVC_Main_AutoLevel: CFStringRef;
     pub static kVTCompressionPropertyKey_Quality: CFStringRef;
+    /// macOS 12+: a CFBoolean: the encoder spends less time per picture at some cost in quality.
+    pub static kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality: CFStringRef;
+    /// macOS 10.14+: a CFBoolean: the encoder saves power (and runs slower) where it can.
+    pub static kVTCompressionPropertyKey_MaximizePowerEfficiency: CFStringRef;
+    /// A CFArray of byte count, seconds pairs: hard limits on the stream's rate over those windows.
+    pub static kVTCompressionPropertyKey_DataRateLimits: CFStringRef;
     /// The dictionary of codec atoms hung off a format description, keyed by
     /// atom name (`hvcC` for HEVC).
     pub static kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: CFStringRef;
@@ -1451,6 +1457,7 @@ pub type CFTypeID = usize;
 
 pub const kCFNumberSInt32Type: i32 = 3;
 pub const kCFNumberSInt64Type: i32 = 4;
+pub const kCFNumberFloat64Type: i32 = 6;
 
 // CORE AUDIO
 
@@ -2099,6 +2106,8 @@ extern "C" {
 
     pub fn CFRelease(cf: *const c_void);
     pub fn CFRetain(cf: *const c_void) -> *const c_void;
+    /// The `CFArrayCallBacks` that retain and release CF values (an opaque struct here).
+    pub static kCFTypeArrayCallBacks: u8;
     pub fn CFArrayCreate(
         allocator: CFAllocatorRef,
         values: *const *const c_void,

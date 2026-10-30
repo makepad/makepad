@@ -68,6 +68,21 @@ pub type Gone = Arc<dyn Fn() -> bool + Send + Sync>;
 const LIMIT: usize = 16 << 10;
 
 impl<'a> Out<'a> {
+    /// A reply written to `w`, at most `limit` bytes of `line`s (a reply relayed across a C
+    /// boundary: the other side's `Out` writes through it).
+    pub fn new(w: &'a mut dyn Write, limit: usize) -> Out<'a> {
+        Out { w, bytes: 0, limit, truncated: false, ok: true, gone: None }
+    }
+    /// Bytes of `line`s still allowed before the limit.
+    pub fn remaining(&self) -> usize {
+        self.limit.saturating_sub(self.bytes)
+    }
+    /// Reply bytes another `Out` already formed and bounded (its lines with their newlines),
+    /// counted against this reply's limit.
+    pub fn relay(&mut self, b: &[u8]) {
+        self.bytes += b.len();
+        self.ok &= self.w.write_all(b).is_ok();
+    }
     pub fn line(&mut self, s: &str) {
         if self.bytes + s.len() > self.limit {
             self.truncated = true;
@@ -142,6 +157,52 @@ impl Req {
     }
     pub fn num(&self, k: &str, d: u64) -> u64 {
         self.get(k).and_then(|v| v.parse().ok()).unwrap_or(d)
+    }
+    /// The request as exact bytes (`<len>:<text>` per string: cmd, the count of positionals and
+    /// each, the count of pairs and each key and value): what crosses a C boundary to code laid out
+    /// by another std, which rebuilds it with [`Req::from_wire`].
+    pub fn to_wire(&self) -> Vec<u8> {
+        fn put(o: &mut Vec<u8>, s: &str) {
+            o.extend_from_slice(s.len().to_string().as_bytes());
+            o.push(b':');
+            o.extend_from_slice(s.as_bytes());
+        }
+        let mut o = Vec::new();
+        put(&mut o, &self.cmd);
+        put(&mut o, &self.pos.len().to_string());
+        for p in &self.pos {
+            put(&mut o, p);
+        }
+        put(&mut o, &self.kv.len().to_string());
+        for (k, v) in &self.kv {
+            put(&mut o, k);
+            put(&mut o, v);
+        }
+        o
+    }
+    /// The request [`Req::to_wire`] wrote; None for malformed bytes.
+    pub fn from_wire(b: &[u8]) -> Option<Req> {
+        fn get(b: &[u8], i: &mut usize) -> Option<String> {
+            let colon = *i + b.get(*i..)?.iter().position(|c| *c == b':')?;
+            let n: usize = std::str::from_utf8(&b[*i..colon]).ok()?.parse().ok()?;
+            let text = std::str::from_utf8(b.get(colon + 1..colon + 1 + n)?).ok()?.to_string();
+            *i = colon + 1 + n;
+            Some(text)
+        }
+        let mut i = 0;
+        let cmd = get(b, &mut i)?;
+        let np: usize = get(b, &mut i)?.parse().ok()?;
+        let mut pos = Vec::new();
+        for _ in 0..np {
+            pos.push(get(b, &mut i)?);
+        }
+        let nkv: usize = get(b, &mut i)?.parse().ok()?;
+        let mut kv = Vec::new();
+        for _ in 0..nkv {
+            let k = get(b, &mut i)?;
+            kv.push((k, get(b, &mut i)?));
+        }
+        (i == b.len()).then_some(Req { cmd, pos, kv })
     }
 }
 

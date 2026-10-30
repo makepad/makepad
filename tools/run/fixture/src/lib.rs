@@ -443,3 +443,35 @@ pub fn asm_inc(v: u64) -> u64 {
 pub fn asm_twice(v: u64) -> u64 {
     asm_inc(asm_inc(v))
 }
+
+// ---- statics reached from JIT-compiled code (provided_static.sh)
+
+/// Each side keeps its own memo (a per-side cache of values that side computes): JIT code that
+/// compiles `memo_square` from source gets its own instance.
+#[relax_api(per_side)]
+static MEMO: std::sync::Mutex<std::collections::BTreeMap<u64, u64>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Not an op: JIT code compiles it from source and reaches the per-side MEMO.
+pub fn memo_square(x: u64) -> u64 {
+    if let Some(v) = MEMO.lock().unwrap().get(&x) {
+        return *v;
+    }
+    let v = x * x;
+    MEMO.lock().unwrap().insert(x, v);
+    v
+}
+
+/// Entries in this side's memo.
+pub fn memo_len() -> usize {
+    MEMO.lock().unwrap().len()
+}
+
+/// rustc's one copy (not marked): JIT code reaching it is refused with a clear error.
+static SHARED_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Not an op: compiled from source by JIT callers, which cannot read rustc's SHARED_LOG.
+pub fn shared_log(line: &str) -> usize {
+    let mut l = SHARED_LOG.lock().unwrap();
+    l.push(line.to_string());
+    l.len()
+}

@@ -8,13 +8,14 @@
 //!   the order, `git bundle verify`) and fetched into the repo's store; nothing in it runs.
 //! - `launch` (lines): remote launch ([`super::launch`]).
 //!
-//! An apply moves the synced checkout by fast-forward only, then prebuilds, then restarts what the
-//! order asks. Every stage is a `sync` record on the node's stream (pushed, checkout, patched,
+//! An apply moves the node's one tree (the synced checkout, which leases also move to their pinned
+//! commits: [`crate::lease::tree`]) forward from the last commit a sync moved it to, never while a
+//! lease holds it, then prebuilds, then restarts what the order asks. Every stage is a `sync` record on the node's stream (pushed, checkout, patched,
 //! built, restarted, refused), so the master's inbox and `devhub stream` show it.
 
 use super::build;
 use super::conf::{Build, SyncConf};
-use super::git::{self, Store, CHECKOUT_REF};
+use super::git::{self, Store, CHECKOUT_REF, SYNCED_REF};
 use super::jits;
 use super::sign::{self, Order, Seen};
 use super::NodeCtx;
@@ -158,10 +159,12 @@ impl Sync {
             }
             let dir = self.conf.repo_dir(repo).unwrap();
             let from = self.current(&store, repo);
+            // forward from what the last sync applied (a lease may have moved the tree to any commit since)
+            let synced = store.rev(SYNCED_REF).or_else(|| from.clone());
             match &from {
                 Some(f) if !store.has(f) => return self.refuse(out, format!("sync: apply refused: the {repo} checkout is at {}, which this node's store does not hold (push a branch that contains it)", short(f))),
-                Some(f) if f != to && !store.is_ancestor(f, to) => {
-                    return self.refuse(out, format!("sync: apply refused: {repo} {} -> {} is not a fast-forward", short(f), short(to)));
+                _ if synced.as_deref().is_some_and(|s| s != to && store.has(s) && !store.is_ancestor(s, to)) => {
+                    return self.refuse(out, format!("sync: apply refused: {repo} {} -> {} is not a fast-forward", short(synced.as_deref().unwrap_or("")), short(to)));
                 }
                 None if dir.read_dir().is_ok_and(|mut d| d.next().is_some()) && !(repo == "makepad" && only_commercial(&dir)) => {
                     return self.refuse(out, format!("sync: apply refused: {} holds files but no known commit (no FLEET-REVISION.txt)", dir.display()));
@@ -210,11 +213,18 @@ impl Sync {
             ticker = Some((pid, t));
         }
 
+        // the tree is the leases' too: it moves only while none holds it (the order is refused, the
+        // next round tries again)
+        let tree = match crate::lease::tree::free() {
+            Ok(t) => t,
+            Err(e) => return self.refuse(out, format!("sync: apply refused: {e}")),
+        };
         let mut moved_lines = Vec::new();
         let mut revs: (Option<String>, Option<String>) = (None, None);
         for (repo, store, from, to) in &plan {
             let dir = self.conf.repo_dir(repo).unwrap();
-            match store.move_checkout(&dir, from.as_deref(), to) {
+            let r = store.move_checkout(&dir, from.as_deref(), to).and_then(|m| store.set_ref(SYNCED_REF, to).map(|_| m));
+            match r {
                 Ok(m) => {
                     let line = format!("sync: {repo} {} -> {} ({} files){}", from.as_deref().map_or("(new)", short), short(to), m.files.len(), if session_line.is_empty() { String::new() } else { format!(", {session_line}") });
                     let detail = format!("{{\"repo\":{},\"from\":{},\"to\":{},\"files\":[{}]}}", json_str(repo), from.as_deref().map_or("null".into(), json_str), json_str(to), m.files.iter().take(64).map(|f| json_str(f)).collect::<Vec<_>>().join(","));
@@ -234,6 +244,7 @@ impl Sync {
         if let Some(mp) = &mp {
             git::write_fleet_revision(&self.conf.checkout, mp, cm.as_deref());
         }
+        drop(tree);
         out.extend(moved_lines);
 
         // what the JITs' live patchers did with it: a coordinated patch answers with it (the
@@ -494,7 +505,7 @@ fn restart_blockers() -> Vec<String> {
 
 /// A makepad checkout dir that holds only the nested commercial checkout (a fresh tree whose
 /// commercial side came first).
-fn only_commercial(dir: &std::path::Path) -> bool {
+pub(crate) fn only_commercial(dir: &std::path::Path) -> bool {
     dir.read_dir().is_ok_and(|d| d.flatten().all(|e| e.file_name() == "apps")) && dir.join("apps").read_dir().is_ok_and(|d| d.flatten().all(|e| e.file_name() == "commercial"))
 }
 

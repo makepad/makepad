@@ -207,7 +207,7 @@ pub fn catalog(doc: Option<&ScoreDoc>, available: &Available) -> Vec<Choice> {
 }
 
 /// The node types that are instruments.
-pub const INSTRUMENT_TYPES: [&str; 8] = ["Synth", "Drums", "Sampler", "Ironfish", "Morph", "Shader", "Voice", "Instrument"];
+pub const INSTRUMENT_TYPES: [&str; 9] = ["Synth", "Drums", "Sampler", "Ironfish", "Morph", "Tandem", "Shader", "Voice", "Instrument"];
 
 /// The key of the choice `node` is now, if it is one of them.
 pub fn current_key(src: &str, node: &str) -> Option<String> {
@@ -220,6 +220,7 @@ pub fn current_key(src: &str, node: &str) -> Option<String> {
         "Drums" => vec![("kit".into(), value("kit")?)],
         "Ironfish" => vec![("program".into(), value("program")?)],
         "Morph" => vec![("preset".into(), value("preset")?)],
+        "Tandem" => vec![("patch".into(), value("patch")?)],
         "Voice" if value("engine").as_deref() == Some("@neural") => vec![("engine".into(), "@neural".into())],
         "Voice" => vec![("profile".into(), value("profile")?)],
         "Sampler" => vec![("src".into(), value("src")?)],

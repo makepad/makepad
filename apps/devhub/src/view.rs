@@ -175,6 +175,8 @@ pub struct ViewState {
     pub leases: Vec<LeaseRow>,
     pub events: Vec<EventRow>,
     pub blocked: Vec<String>,
+    /// the master's lane merge bot: (sev, line) per lane branch
+    pub lanes: Vec<(String, String)>,
     pub confirm: Option<Confirm>,
     /// the inspect leases the user holds from the panel: (machine, pid) -> lease id
     pub user_leases: Vec<((String, u32), String)>,
@@ -671,9 +673,29 @@ impl DevhubView {
                     self.small_button(cx, row, 0.0, 62.0, Hit::Evict(li), "Evict AI");
                 }
                 rest = self.draw_blocked(cx, rest, &st);
+                rest = self.draw_flow(cx, rest, "Lane branches (kept merged with work / main)", &st.lanes);
             }
         }
         self.content_h = rest.pos.y + pad + self.scroll - window.pos.y;
+    }
+
+    /// A read-only section: one dotted line per row.
+    fn draw_flow(&mut self, cx: &mut Cx2d, mut rest: Rect, title: &str, rows: &[(String, String)]) -> Rect {
+        if rows.is_empty() {
+            return rest;
+        }
+        let tok = self.tokens;
+        let fg = tok.popups.text;
+        let (row, r2) = cut_top(rest, 26.0);
+        rest = r2;
+        self.d.section_header(cx, row, &tok, fg, title);
+        for (sev, line) in rows.iter().take(300) {
+            let (row, r2) = cut_top(rest, 22.0);
+            rest = r2;
+            self.d.solid(cx, rect(row.pos.x + 6.0, row.pos.y + 8.0, 6.0, 6.0), sev_color(sev));
+            self.d.label_elided(cx, rect(row.pos.x + 18.0, row.pos.y, row.size.x - 18.0, row.size.y), false, tok.font.caption, fg, HAlign::Left, line);
+        }
+        rest
     }
 
     fn draw_blocked(&mut self, cx: &mut Cx2d, mut rest: Rect, st: &ViewState) -> Rect {

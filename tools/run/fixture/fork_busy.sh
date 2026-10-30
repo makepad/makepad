@@ -6,9 +6,11 @@
 # 8+ min in the child, 2026-10-24). Each round is a fresh `makepad run relax-provided-fixture --bin
 # relax-fork-busy` (200 forks, 50 of them with closures nothing ran before); a child stuck between
 # fork and exec makes the program print "never reached exec" (and `makepad inspect why-hung` names
-# the child's wait). Run from the workspace root after `cargo build --release -p makepad-run`.
-# ROUNDS (default 10), TARGET (default target/release), AHEAD (default: the binary's).
-T=${TARGET:-${CARGO_TARGET_DIR:-target}/release}
+# the child's wait). Run from the workspace root (the JIT runs through `cargo run --profile host`).
+# ROUNDS (default 10), the JIT runs through `cargo run --profile host`, AHEAD (default: the binary's).
+ROOT=$(pwd)
+# the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
+J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
 ROUNDS=${ROUNDS:-10}
 dir=$(mktemp -d "${TMPDIR:-/tmp}/fork_busy.XXXXXX") || exit 1
 export MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_RUN_CACHE_DIR="$dir/cache" MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1
@@ -17,7 +19,7 @@ fails=0
 i=0
 while [ $i -lt "$ROUNDS" ]; do
     i=$((i + 1))
-    "$T/makepad" run relax-provided-fixture --bin relax-fork-busy > "$dir/round$i.log" 2>&1
+    $J run relax-provided-fixture --bin relax-fork-busy > "$dir/round$i.log" 2>&1
     st=$?
     if [ $st -ne 0 ] || ! grep -q "^| forks that reached exec: 200 of 200" "$dir/round$i.log"; then
         fails=$((fails + 1))

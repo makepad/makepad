@@ -173,6 +173,7 @@ fn provided() {
         let mut shims = HashMap::new();
         let mut types = HashMap::new();
         let mut layouts = HashMap::new();
+        let mut per_side = std::collections::HashSet::new();
         for e in makepad_relax_api::entries() {
             if e.module.split("::").next() != Some(krate) {
                 continue;
@@ -192,10 +193,13 @@ fn provided() {
                 makepad_relax_api::PLAIN => {
                     layouts.insert(relax_compiler::provided::norm((e.key)()), (e.size, e.align, e.offsets));
                 }
+                makepad_relax_api::PER_SIDE => {
+                    per_side.insert(relax_compiler::provided::norm((e.key)()));
+                }
                 _ => {}
             }
         }
-        relax_compiler::provided::register(krate, shims, types, layouts, makepad_relax_api::last_panic, src(krate), source_manifest(krate));
+        relax_compiler::provided::register(krate, shims, types, layouts, per_side, makepad_relax_api::last_panic, src(krate), source_manifest(krate));
     }
 
     // Splash VM registry -> makepad inspect (vm list, script error events)

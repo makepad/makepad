@@ -1,7 +1,7 @@
 //! This machine's capabilities and health: hardware from the OS (Linux `/proc` + `/sys` +
 //! `nvidia-smi`; macOS `sysctl` + `statfs`), policy from `~/.makepad/devhub/lease.conf`.
 //!
-//! `lease.conf` is `key = value` lines: `role = pool|suite|bench|user-wm|device`, `slots.<kind> = n`,
+//! `lease.conf` is `key = value` lines: `role = pool|suite|bench|user-wm|device`, `slots.<kind> = 0|1` (whether it takes the kind; one lease runs at a time),
 //! `disk_floor_gb`, `disk_warn_gb`, `timed = on|off`, `spec = <text>`, `work = <dir>` (default
 //! `~/devhub`), and CPU pinning for leases (`cpus.shared = 8-15,24-31`, `cpus.timed = 0-7,16-23`).
 
@@ -78,7 +78,8 @@ impl LeaseConf {
     /// Slots per kind: the conf's, else build 2, test 2, screen 3, long 2, gate 1, gpu = #GPUs,
     /// timed 1 (0 with `timed = off`). `inspect` is not counted.
     pub fn slots(&self, gpus: u32) -> Vec<(Kind, u32)> {
-        let defaults = [(Kind::Build, 2), (Kind::Test, 2), (Kind::Screen, 3), (Kind::Long, 2), (Kind::Gate, 1), (Kind::Gpu, gpus), (Kind::Timed, self.timed as u32)];
+        // one box per lease: a slot only says the node takes the kind (0: never)
+        let defaults = [(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, gpus.min(1)), (Kind::Timed, self.timed as u32)];
         defaults.iter().map(|(k, d)| (*k, self.slots.iter().find(|(x, _)| x == k).map_or(*d, |(_, n)| *n))).collect()
     }
 }
@@ -462,7 +463,7 @@ mod tests {
         let d = LeaseConf::parse("", home);
         assert_eq!((d.role, d.disk_floor_gb, d.disk_warn_gb, d.timed), (Role::Pool, 25.0, 50.0, true));
         assert_eq!(d.work, PathBuf::from("/home/arch/devhub"));
-        assert_eq!(d.slots(1), vec![(Kind::Build, 2), (Kind::Test, 2), (Kind::Screen, 3), (Kind::Long, 2), (Kind::Gate, 1), (Kind::Gpu, 1), (Kind::Timed, 1)]);
+        assert_eq!(d.slots(2), vec![(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, 1), (Kind::Timed, 1)]);
         let c = LeaseConf::parse("# the 166 conf\nrole = user-wm\nslots.build = 1\nslots.nope = 4\nslots.test=6\ndisk_floor_gb = 40\ntimed = off\nspec = 7800X3D+4090  # comment\nwork = ~/scratch/dh\ncpus.shared = 8-15,24-31\ncpus.timed = rm -rf\n", home);
         assert_eq!(c.role, Role::UserWm);
         assert_eq!(c.disk_floor_gb, 40.0);

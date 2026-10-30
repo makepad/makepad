@@ -482,6 +482,11 @@ impl App {
             .collect();
         let mut blocked = Vec::new();
         m.master.leases.serve("blocked", "", &mut blocked);
+        if let Some(flow) = &m.master.flow {
+            let mut out = Vec::new();
+            flow("lanes list", &mut out);
+            self.state.lanes = makepad_devhub::sync::lanes::rows(&out).into_iter().map(|(sev, line, _)| (sev.to_string(), line)).collect();
+        }
         self.state.blocked = blocked.iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()?.get("blocked")?.as_str().map(str::to_string)).collect();
         // the user's own inspect leases stay alive while the panel runs
         for (_, id) in self.state.user_leases.clone() {

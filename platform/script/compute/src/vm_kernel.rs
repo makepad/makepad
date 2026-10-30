@@ -236,7 +236,9 @@ impl KernelProgram {
     }
 }
 
-/// The kernels compiled in this process, by [`KernelProgram::key`].
+/// The kernels compiled in this process, by [`KernelProgram::key`]. Each side keeps its own
+/// (`per_side`): JIT-compiled callers cache the kernels they build, rustc's code its own.
+#[makepad_relax_api::relax_api(per_side)]
 static COMPILED: std::sync::Mutex<std::collections::BTreeMap<u64, KernelRef>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// A constant a kernel can hold, from a document value.

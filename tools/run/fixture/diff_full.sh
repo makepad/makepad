@@ -10,16 +10,15 @@
 #            and under `makepad run` (O3 forced on with call threshold 1); the state dumps (`ui` after each
 #            checkpoint: display, tape, widget tree with rects and text) must be identical.
 # Usage: tools/run/fixture/diff_full.sh [corpus|replay]      (default both; replay-only on a machine without rustc deps)
-# Env: TARGET (target/release), DIFF_CORPUS (dir of *.rs tests, default libs/relax/compiler/tests), DIFF_CACHE, DIFF_JOBS (default 8), DIFF_NATIVE_CALC (prebuilt native calculator;
-#      else cargo build --release -p makepad-app-calculator -j4 runs first), DIFF_FULL_ANYWAY=1 (allow a non-Linux host).
+# Env: the JIT runs through `cargo run --profile host`, DIFF_CORPUS (dir of *.rs tests, default libs/relax/compiler/tests), DIFF_CACHE, DIFF_JOBS (default 8), DIFF_NATIVE_CALC (prebuilt native calculator;
+#      else cargo build --profile host -p makepad-app-calculator -j4 runs first), DIFF_FULL_ANYWAY=1 (allow a non-Linux host).
 # Output (replay alone: `full: replay equal|DIFFERS`): `full: corpus E/N equal (A allowed, S skipped), replay equal|DIFFERS`; the diffs follow; exit 1 on any difference.
 if [ "$(uname)" != Linux ] && [ -z "$DIFF_FULL_ANYWAY" ]; then echo "full: node 165 (Linux) only; DIFF_FULL_ANYWAY=1 overrides"; exit 2; fi
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
-T=${TARGET:-$root/target/release}
-case $T in /*) ;; *) T=$PWD/$T ;; esac
-M=$T/makepad
-[ -x "$M" ] || { echo "full: no $M (cargo build --release -p makepad-run)"; exit 2; }
+# the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
+J="cargo run --profile host -q --manifest-path $root/Cargo.toml -p makepad-run --bin makepad --"
+M=$J
 cache=${DIFF_CACHE:-${TMPDIR:-/tmp}/diff_full_cache}
 mkdir -p "$cache"
 what=${1:-all}
@@ -46,7 +45,7 @@ if [ "$1" = "--corpus-job" ]; then
         if [ $k = base ]; then tier="MAKEPAD_RUN_O3=0"; else tier="MAKEPAD_RUN_O3=1"; fi
         ( cd "$(dirname "$src")" && env $tier MAKEPAD_RUN_O3_CALLS=1 MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
             MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" MAKEPAD_RUN_STD="$root/libs/relax/compiler/std" \
-            nice -n 10 $TO "$M" test "$src" 2>/dev/null | sed -E "$norm" | sort > "$work/$n.$k" )
+            nice -n 10 $TO $M test "$src" 2>/dev/null | sed -E "$norm" | sort > "$work/$n.$k" )
     done
     rm -r "$d"
     exit 0
@@ -73,13 +72,12 @@ $(diff "$work/$n.native" "$work/$n.$k" | head -6 | cut -c1-200)"
     rm -r "$work"
 fi
 if [ $what = all ] || [ $what = replay ]; then
-    nat=${DIFF_NATIVE_CALC:-$T/makepad-app-calculator}
-    # always built from this checkout (a no-op when current): a stale native binary shows up as widget-tree noise
-    [ -n "$DIFF_NATIVE_CALC" ] || (cd "$root" && CARGO_INCREMENTAL=0 nice -n 10 cargo build --release -p makepad-app-calculator -j4 > /dev/null 2>&1)
+    # the native side through cargo too (built from this checkout: a stale native binary shows up as widget-tree noise)
+    nat=${DIFF_NATIVE_CALC:-cargo run --profile host -q --manifest-path $root/Cargo.toml -p makepad-app-calculator --}
     out=$(mktemp -d /tmp/dfr.XXXXXX)
     for side in native jit; do
         d=$out/$side; mkdir -p "$d/home" "$d/tmp"
-        if [ $side = native ]; then cmd="$nat"; set -- "$nat"; else set -- "$M" run makepad-app-calculator; fi
+        if [ $side = native ]; then cmd="$nat"; set -- $nat; else set -- $M run makepad-app-calculator; fi
         MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
             MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" MAKEPAD_WINDOW=1280x800@1 MAKEPAD_RUN_O3=1 MAKEPAD_RUN_O3_CALLS=1 \
             nice -n 10 "$@" > "$d/log" 2>&1 &
@@ -88,26 +86,26 @@ if [ $what = all ] || [ $what = replay ]; then
         # `inspect settled` answers (exit 0) whether or not the app has settled: wait for
         # "settled":true with the window's widget tree in place (a cold JIT start draws its first
         # frame seconds after the remote socket answers; clicks before it hit nothing)
-        until TMPDIR="$d/tmp" "$M" inspect $pid settled 2>/dev/null | grep -q '"settled":true' \
-            && TMPDIR="$d/tmp" "$M" inspect $pid ui 2>/dev/null | grep -q ' window '; do
+        until TMPDIR="$d/tmp" $M inspect $pid settled 2>/dev/null | grep -q '"settled":true' \
+            && TMPDIR="$d/tmp" $M inspect $pid ui 2>/dev/null | grep -q ' window '; do
             n=$((n + 1)); [ $n -ge 600 ] && break
             kill -0 $pid 2>/dev/null || break
             sleep 0.2
         done
-        TMPDIR="$d/tmp" "$M" inspect $pid ui > "$d/tree0" 2>&1
+        TMPDIR="$d/tmp" $M inspect $pid ui > "$d/tree0" 2>&1
         : > "$d/state"
         while read -r verb arg; do
             case $verb in
             '#'*|'') ;;
-            step) TMPDIR="$d/tmp" "$M" inspect $pid step frames=$arg wait_loads=1 > /dev/null 2>&1 ;;
-            text) TMPDIR="$d/tmp" "$M" inspect $pid key t="$arg" wait=1 > /dev/null 2>&1 ;;
+            step) TMPDIR="$d/tmp" $M inspect $pid step frames=$arg wait_loads=1 > /dev/null 2>&1 ;;
+            text) TMPDIR="$d/tmp" $M inspect $pid key t="$arg" wait=1 > /dev/null 2>&1 ;;
             click)
-                TMPDIR="$d/tmp" "$M" inspect $pid ui act q="$arg" press wait=1 > /dev/null 2>&1 ;;
+                TMPDIR="$d/tmp" $M inspect $pid ui act q="$arg" press wait=1 > /dev/null 2>&1 ;;
             # Semantic tree order is stable; process-local node IDs are not.
-            ui) echo "-- ui" >> "$d/state"; TMPDIR="$d/tmp" "$M" inspect $pid ui 2>&1 | sed -E 's/#[0-9a-f]+/#NODE/g' >> "$d/state" ;;
+            ui) echo "-- ui" >> "$d/state"; TMPDIR="$d/tmp" $M inspect $pid ui 2>&1 | sed -E 's/#[0-9a-f]+/#NODE/g' >> "$d/state" ;;
             esac
         done < "$here/replay/calculator.txt"
-        TMPDIR="$d/tmp" "$M" inspect $pid quit > /dev/null 2>&1
+        TMPDIR="$d/tmp" $M inspect $pid quit > /dev/null 2>&1
         sleep 1; kill $pid 2>/dev/null; wait $pid 2>/dev/null
     done
     if [ -s "$out/native/state" ] && cmp -s "$out/native/state" "$out/jit/state"; then replay=equal

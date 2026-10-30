@@ -376,7 +376,7 @@ impl ShellPanel {
 
         // the traces: thin, the alarmed one heavier, a soft fill only when alone
         let px_s = (t1 - t0) / plot.size.x.max(1.0);
-        let gap = temps.gap_for(t0, t1);
+        let gap = temps.gap_for(t0);
         let alone = well.traces.len() == 1;
         let with_device = !one_device;
         for (k, i) in well.traces.iter().enumerate() {
@@ -390,7 +390,7 @@ impl ShellPanel {
             let hx = span.x(plot, t).round();
             self.d.solid(cx, rect(hx, plot.pos.y, 1.0, plot.size.y), alpha(fg, 0.35));
             for (k, i) in well.traces.iter().enumerate() {
-                let v = temps.value_at(*i, t, t0, t1);
+                let v = temps.value_at(*i, t);
                 if !v.is_nan() {
                     let vy = span.y(plot, v);
                     self.d.solid(cx, rect(hx - 2.5, vy - 2.5, 5.0, 5.0), series_color(k, dark));
@@ -409,7 +409,7 @@ impl ShellPanel {
             let n = well.cores.len() as f64;
             let cw = ((strip.size.x - label_w) / n).floor();
             for (k, i) in well.cores.iter().enumerate() {
-                let v = match hover { Some(t) => temps.value_at(*i, t, t0, t1), None => temps.now.get(*i).copied().unwrap_or(f32::NAN) };
+                let v = match hover { Some(t) => temps.value_at(*i, t), None => temps.now.get(*i).copied().unwrap_or(f32::NAN) };
                 let lim = sensors[*i].limit.unwrap_or(95.0);
                 let heat = ((v - 30.0) / (lim - 30.0)).clamp(0.0, 1.0);
                 let cell = rect(strip.pos.x + label_w + k as f64 * cw, strip.pos.y, cw - 2.0, strip.size.y);
@@ -451,7 +451,7 @@ impl ShellPanel {
             let name_w = col_w - 18.0 - vw * 3.0 - 4.0;
             let name = if hot { format!("{} \u{2014} too hot", s.name(with_device)) } else { s.name(with_device) };
             self.d.label_elided(cx, rect(rr.pos.x + 18.0, rr.pos.y, name_w, rr.size.y), hot, tok.font.body_small, if hot { err } else { secondary }, HAlign::Left, &name);
-            let v = match hover { Some(t) => temps.value_at(*i, t, t0, t1), None => temps.now.get(*i).copied().unwrap_or(f32::NAN) };
+            let v = match hover { Some(t) => temps.value_at(*i, t), None => temps.now.get(*i).copied().unwrap_or(f32::NAN) };
             let (mn, mx) = temps.min_max(*i, t0, t1);
             let vals = [(v, true), (mn, false), (mx, false)];
             for (j, (val, strong)) in vals.iter().enumerate() {

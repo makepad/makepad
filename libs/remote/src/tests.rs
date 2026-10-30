@@ -681,3 +681,14 @@ fn served_connections_release_their_descriptors() {
     let after = open_fds();
     assert!(after <= before + 8, "fds before {before}, after 3000 requests {after}");
 }
+
+#[test]
+fn req_wire_round_trip() {
+    use crate::cmd::Req;
+    let r = Req { cmd: "ui".into(), pos: vec!["find".into(), "".into()], kv: vec![("app".into(), "a:b 1".into()), ("cmd".into(), "x".into()), ("e".into(), "".into())] };
+    let w = r.to_wire();
+    let b = Req::from_wire(&w).unwrap();
+    assert_eq!((b.cmd.as_str(), b.pos.clone(), b.kv.clone()), (r.cmd.as_str(), r.pos.clone(), r.kv.clone()));
+    assert!(Req::from_wire(&w[..w.len() - 1]).is_none());
+    assert!(Req::from_wire(b"2:ui").is_none());
+}

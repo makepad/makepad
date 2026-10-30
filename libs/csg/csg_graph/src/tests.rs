@@ -102,7 +102,7 @@ fn a_field_meshes_inside_its_bounds() {
         }
     }
     let mut g = Graph::new();
-    let shape = SdfShape { root: SdfNode::Kernel(SdfKernel { key: 1, field: Arc::new(Ball) }), min: [-11.0; 3], max: [11.0; 3], materials: Vec::new() };
+    let shape = SdfShape { root: SdfNode::Kernel(SdfKernel { key: 1, field: Arc::new(Ball), bounds: None }), min: [-11.0; 3], max: [11.0; 3], materials: Vec::new() };
     let f = g.push(Op::Field { shape, cell: Some(1.0) }).unwrap();
     let mut e = Evaluator::new();
     let m = e.mesh(&g, f, None).unwrap();

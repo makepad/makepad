@@ -357,18 +357,6 @@ class MakepadSurface
     }
 
     @Override
-    protected void onAttachedToWindow() {
-        super.onAttachedToWindow();
-        a11yProvider.attach();
-    }
-
-    @Override
-    protected void onDetachedFromWindow() {
-        a11yProvider.detach();
-        super.onDetachedFromWindow();
-    }
-
-    @Override
     public boolean dispatchHoverEvent(MotionEvent event) {
         return a11yProvider.dispatchHoverEvent(event) || super.dispatchHoverEvent(event);
     }
@@ -457,15 +445,18 @@ class MakepadSurface
         Selection.setSelection(mEditable, 0, 0);
     }
 
-    // Only while attached, since a recreated activity can keep using this window.
+    // The layout listener only while attached, since a recreated activity can keep using this
+    // window; the accessibility provider likewise.
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
         getViewTreeObserver().addOnGlobalLayoutListener(this);
+        a11yProvider.attach();
     }
 
     @Override
     protected void onDetachedFromWindow() {
+        a11yProvider.detach();
         getViewTreeObserver().removeOnGlobalLayoutListener(this);
         super.onDetachedFromWindow();
     }

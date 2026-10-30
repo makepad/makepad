@@ -19,13 +19,14 @@ pub fn default_cell(min: Vec3d, max: Vec3d, finest: f64) -> f64 {
 }
 
 /// Mesh `field` inside `min..max` with cubic cells of `cell`: closed,
-/// edge-manifold, wound outwards.
-pub fn mesh_field(field: Arc<dyn Sdf3 + Send + Sync>, min: Vec3d, max: Vec3d, cell: f64) -> TriMesh {
-    mesh_surface(field, min, max, cell)
+/// edge-manifold, wound outwards. `lipschitz`: the field's bound (1 for a
+/// distance, [`crate::SdfShape::lipschitz`] for a shape with kernels).
+pub fn mesh_field(field: Arc<dyn Sdf3 + Send + Sync>, min: Vec3d, max: Vec3d, cell: f64, lipschitz: f64) -> TriMesh {
+    mesh_surface(field, min, max, cell, lipschitz)
 }
 
 /// Mesh `sdf` inside `min..max` with `2^depth` cells along the box's largest side.
 pub fn sdf_to_mesh(sdf: impl Sdf3 + Send + Sync + 'static, min: Vec3d, max: Vec3d, depth: usize) -> TriMesh {
     let cell = extent(min, max) / (1u64 << depth.min(20)) as f64;
-    mesh_surface(Arc::new(sdf), min, max, cell)
+    mesh_surface(Arc::new(sdf), min, max, cell, 1.0)
 }

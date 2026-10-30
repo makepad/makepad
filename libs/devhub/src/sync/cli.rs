@@ -23,6 +23,9 @@ pub const HELP: &str = "  sync words (the master; nodes by hub name, `all` = eve
                                                 push branches (default work + commercial main) as signed
                                                 bundles, fast-forward the node's checkout, prebuild,
                                                 restart; --session: every listed JIT patches at one tick
+  lanes [--json]                                the open lane branches the master keeps merged with work/main:
+                                                branch, worktree, tip, last merge result, conflicts
+  hold <branch> [why...] | unhold <branch>      keep the master's merge bot off a lane branch (held)
   rebuild <node,...|all> [wm|apps]              push work + commercial main, prebuild, restart the WM (wm), our
                                                 launches (apps) or what the build replaced (default)
   wm-restart <node>                             restart the node's WM (and AI Hub) through its service
@@ -690,6 +693,9 @@ fn jit_id(s: &str) -> Option<(String, u32)> {
 
 pub fn main(args: &[&str]) -> Option<i32> {
     let verb = *args.first()?;
+    if let Some(code) = super::lanes::cli(args) {
+        return Some(code);
+    }
     if !matches!(verb, "sync" | "autosync" | "launch" | "show" | "open" | "stop" | "launched" | "launch-log" | "wm-restart" | "rebuild" | "restart") {
         return None;
     }

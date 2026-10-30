@@ -125,9 +125,19 @@ pub struct BrowseHost {
     /// Open `node`'s browser in its own window (none: the host has no
     /// windows for it, and the browser offers none).
     pub pop_out: Option<Box<dyn Fn(&str)>>,
-    /// Get an engine's downloadable library (the opt-in install, its
-    /// licence first).
+    /// Get an engine's downloadable library (the person accepted its
+    /// licence in the browser): the install starts.
     pub get_library: Box<dyn Fn(&str)>,
+}
+
+/// Where a library's install stands, as the host reports it: a line
+/// (`downloading 12% …`, a failure), whether it is running, and whether
+/// Stop stops it (a download does; unpacking runs to its end).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LibraryStatus {
+    pub text: String,
+    pub busy: bool,
+    pub stoppable: bool,
 }
 
 thread_local! {
@@ -146,6 +156,62 @@ thread_local! {
     static DRAWING_INLINE: Cell<bool> = const { Cell::new(false) };
     /// An instrument search has the keys (a space types, it does not play).
     static SEARCHING: Cell<bool> = const { Cell::new(false) };
+    /// The libraries' installs as the host last reported them, by engine.
+    static LIBRARIES: RefCell<Vec<(String, LibraryStatus)>> = const { RefCell::new(Vec::new()) };
+    /// A browser's Stop of a library's download, for the host to take.
+    static LIBRARY_STOP: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The host installs libraries (the browsers offer their download).
+    static INSTALLS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The host installs engines' libraries: the browsers offer the download
+/// of one not installed (a host that does not shows none).
+pub fn set_installs_libraries(on: bool) {
+    INSTALLS.with(|i| i.set(on));
+}
+
+pub fn installs_libraries() -> bool {
+    INSTALLS.with(|i| i.get())
+}
+
+/// A browser's Stop of `engine`'s download (the host takes it).
+pub fn stop_library(engine: &str) {
+    LIBRARY_STOP.with(|s| *s.borrow_mut() = Some(engine.to_string()));
+}
+
+/// The Stop asked for since the last call, if any.
+pub fn take_library_stop() -> Option<String> {
+    LIBRARY_STOP.with(|s| s.borrow_mut().take())
+}
+
+/// The host reports where an engine's library install stands (None: idle,
+/// nothing to say); true when that changed (the browsers draw again).
+pub fn set_library_status(engine: &str, status: Option<LibraryStatus>) -> bool {
+    LIBRARIES.with(|list| {
+        let mut list = list.borrow_mut();
+        let at = list.iter().position(|(e, _)| e == engine);
+        match (at, status) {
+            (Some(i), Some(s)) if list[i].1 == s => false,
+            (Some(i), Some(s)) => {
+                list[i].1 = s;
+                true
+            }
+            (Some(i), None) => {
+                list.remove(i);
+                true
+            }
+            (None, Some(s)) => {
+                list.push((engine.to_string(), s));
+                true
+            }
+            (None, None) => false,
+        }
+    })
+}
+
+/// Where an engine's library install stands.
+pub fn library_status(engine: &str) -> Option<LibraryStatus> {
+    LIBRARIES.with(|list| list.borrow().iter().find(|(e, _)| e == engine).map(|(_, s)| s.clone()))
 }
 
 /// What the voice tree unfolds under a voice: its melody variants, or the
@@ -333,3 +399,4 @@ pub fn can_pop_out() -> bool {
 pub fn get_library(engine: &str) {
     with(|h| (h.browse.get_library)(engine));
 }
+

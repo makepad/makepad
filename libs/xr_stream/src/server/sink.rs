@@ -6,8 +6,10 @@
 //! window pass   the app's own UI, and a mirror (the left eye, letterboxed) on its own clock
 //! picture       w/4 x 9h/4 shared BGRA8, NV12 packed (draw_nv12_pack): per eye column its colour
 //!  (no parent,  (luma rows 0..h, chroma rows), below it a band h/2 tall: coverage (left half)
-//!   paints      and inverse depth (right half) at half resolution in the luma, neutral chroma
-//!   after XR)
+//!   paints      and inverse depth (right half) at half resolution in the luma, neutral chroma;
+//!   after XR)   `w x h` the eyes' encoded (foveated) columns
+//! foveation     each eye's colour and inverse depth warped into its encoded column (fewer pixels
+//!               towards the view's edges, `makepad_desk_link::xr::Fovea`), painted before the pack
 //! XR pass       both eyes side by side into the app's colour + depth textures (paints first)
 //! ```
 //!
@@ -20,7 +22,7 @@
 
 use super::pipeline::Picture;
 use super::{ServerShared, XrServer};
-use makepad_desk_link::xr::DEPTH_NEAR_M;
+use makepad_desk_link::xr::{Fovea, DEPTH_NEAR_M};
 use makepad_widgets::makepad_draw::render_target::{Nv12Target, RenderTarget, RenderTargetFormat};
 use makepad_widgets::makepad_draw::shader::draw_fxaa::DrawFxaa;
 use makepad_widgets::makepad_draw::shader::draw_nv12_pack::{DrawNv12Chroma, DrawNv12Luma};
@@ -37,10 +39,93 @@ script_mod! {
     use mod.shader.*
     use mod.draw
 
+    // The eye's colour and depth foveated (`makepad_desk_link::xr::Fovea`) into its encoded
+    // column (one draw per eye, `rect` the column): each output pixel samples the eye where the
+    // warp puts it, its footprint there filtered with four taps (one eye pixel in the centre, up
+    // to several towards the edges). `mode` 0: the colour (premultiplied, alpha the coverage);
+    // 1: the inverse depth byte of the band (`DEPTH_NEAR_M / z`; 0 nothing drawn) in every
+    // channel, the nearest of the footprint's. `fx`/`fy`: the eye's axes `[a, b, ea, total]`,
+    // `fk`: their ramp and edge density (x, x, y, y); `column`: the eye's columns in the XR
+    // pass's images (x0, width, height; px).
+    mod.draw.DrawXrFoveate = mod.std.set_type_default() do #(DrawXrFoveate::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        image: texture_2d(float)
+        depth_tex: texture_2d(float)
+        extent: uniform(vec2(1.0, 1.0))
+        column: uniform(vec4(0.0, 1.0, 1.0, 0.0))
+        fx: uniform(vec4(0.0, 1.0, 0.0, 1.0))
+        fy: uniform(vec4(0.0, 1.0, 0.0, 1.0))
+        fk: uniform(vec4(0.0, 1.0, 0.0, 1.0))
+        clip: uniform(vec4(1.0, 1.0, 1.0, 1.0))
+        mode: uniform(0.0)
+        unsqueeze: fn(e: float, r: float, d: float) -> float {
+            let er = r * (1.0 + d) * 0.5
+            if e <= er {
+                let k = (1.0 - d) / (2.0 * max(r, 0.000001))
+                if k < 0.000001 {
+                    return e
+                }
+                return (1.0 - sqrt(max(1.0 - 4.0 * k * e, 0.0))) / (2.0 * k)
+            }
+            return r + (e - er) / d
+        }
+        // the encoded axis' point `v` (0..1) in the eye (0..1)
+        to_eye: fn(v: float, f: vec4, r: float, d: float) -> float {
+            let e = v * f.w
+            if e < f.z {
+                return f.x - self.unsqueeze(f.z - e, r, d)
+            }
+            if e <= f.z + f.y - f.x {
+                return f.x + e - f.z
+            }
+            return f.y + self.unsqueeze(e - f.z - (f.y - f.x), r, d)
+        }
+        eye_at: fn(t: vec2) -> vec2 {
+            return vec2(self.to_eye(t.x, self.fx, self.fk.x, self.fk.y), self.to_eye(t.y, self.fy, self.fk.z, self.fk.w))
+        }
+        // the band's inverse depth of the depth texel at `q` (px)
+        inv_depth: fn(q: vec2) -> float {
+            let c = clamp(floor(q), vec2(self.column.x, 0.0), vec2(self.column.x + self.column.y - 1.0, self.column.z - 1.0)) + vec2(0.5, 0.5)
+            let d = self.depth_tex.sample(c / self.extent).x
+            if d >= 0.999999 {
+                return 0.0
+            }
+            // the eye projection's depth back to metres: -z = 2fn / ((f + n) - d (f - n))
+            let z = self.clip.x / (self.clip.y - d * self.clip.z)
+            return clamp(self.clip.w / max(z, 0.0001), 0.0, 1.0)
+        }
+        pixel: fn() {
+            let o = self.rect_size
+            let t = self.pos
+            let u = self.eye_at(t)
+            // the pixel's footprint in the eye's image (px): where its edges land
+            let lo = self.eye_at(t - vec2(0.5, 0.5) / o)
+            let hi = self.eye_at(t + vec2(0.5, 0.5) / o)
+            let size = vec2(self.column.y, self.column.z)
+            let fp = max((hi - lo) * size, vec2(1.0, 1.0))
+            let q = vec2(self.column.x, 0.0) + u * size
+            let dq = fp * 0.25
+            if self.mode > 0.5 {
+                let v = max(max(self.inv_depth(q + vec2(-dq.x, -dq.y)), self.inv_depth(q + vec2(dq.x, -dq.y))),
+                    max(self.inv_depth(q + vec2(-dq.x, dq.y)), self.inv_depth(q + vec2(dq.x, dq.y))))
+                return vec4(v, v, v, v)
+            }
+            // (inside this eye's column: the filter never reaches the other eye)
+            let lo_q = vec2(self.column.x + 0.5, 0.5)
+            let hi_q = vec2(self.column.x + self.column.y - 0.5, self.column.z - 0.5)
+            let inv = vec2(1.0 / self.extent.x, 1.0 / self.extent.y)
+            if fp.x * fp.y <= 1.0 {
+                return self.image.sample(clamp(q, lo_q, hi_q) * inv)
+            }
+            return (self.image.sample(clamp(q + vec2(-dq.x, -dq.y), lo_q, hi_q) * inv) + self.image.sample(clamp(q + vec2(dq.x, -dq.y), lo_q, hi_q) * inv)
+                + self.image.sample(clamp(q + vec2(-dq.x, dq.y), lo_q, hi_q) * inv) + self.image.sample(clamp(q + vec2(dq.x, dq.y), lo_q, hi_q) * inv)) * 0.25
+        }
+    }
+
     // The band under the eye columns, four luma bytes per texel (memory order B G R A): per eye
     // column, its coverage in the left half and its inverse depth in the right half, both at half
-    // resolution (a 2x2 block: coverage averaged, depth its nearest). `neutral` 1: every byte 128
-    // (the band's chroma).
+    // resolution of the foveated column (`DrawXrFoveate`'s images: a 2x2 block's coverage
+    // averaged, its depth the nearest). `neutral` 1: every byte 128 (the band's chroma).
     mod.draw.DrawXrBand = mod.std.set_type_default() do #(DrawXrBand::script_shader(vm)){
         ..mod.draw.DrawQuad
         image: texture_2d(float)
@@ -53,31 +138,16 @@ script_mod! {
             let xe = x - e * ew
             let half = ew * 0.5
             let inv = vec2(1.0 / self.extent.x, 1.0 / self.extent.y)
-            // eye pixels to the colour's (a supersampled pass: `scale` of them per eye pixel)
-            let s = self.scale
             if xe < half {
-                // the 2x2 block's centre: one bilinear tap averages it (supersampled: four taps
-                // over its footprint)
-                let c = vec2(e * ew + xe * 2.0 + 1.0, r * 2.0 + 1.0) * s
-                if s.x * s.y <= 1.0 {
-                    return self.image.sample(c * inv).w
-                }
-                let d = s * 0.5
-                return (self.image.sample((c + vec2(-d.x, -d.y)) * inv).w + self.image.sample((c + vec2(d.x, -d.y)) * inv).w
-                    + self.image.sample((c + vec2(-d.x, d.y)) * inv).w + self.image.sample((c + vec2(d.x, d.y)) * inv).w) * 0.25
+                // the 2x2 block's centre: one bilinear tap averages it
+                return self.image.sample(vec2(e * ew + xe * 2.0 + 1.0, r * 2.0 + 1.0) * inv).w
             }
-            let p = vec2(e * ew + (xe - half) * 2.0 + 0.5, r * 2.0 + 0.5) * s
+            let p = vec2(e * ew + (xe - half) * 2.0 + 0.5, r * 2.0 + 0.5)
             let d0 = self.depth_tex.sample(p * inv).x
-            let d1 = self.depth_tex.sample((p + vec2(s.x, 0.0)) * inv).x
-            let d2 = self.depth_tex.sample((p + vec2(0.0, s.y)) * inv).x
-            let d3 = self.depth_tex.sample((p + s) * inv).x
-            let d = min(min(d0, d1), min(d2, d3))
-            if d >= 0.999999 {
-                return 0.0
-            }
-            // the eye projection's depth back to metres: -z = 2fn / ((f + n) - d (f - n))
-            let z = self.clip.x / (self.clip.y - d * self.clip.z)
-            return clamp(self.clip.w / max(z, 0.0001), 0.0, 1.0)
+            let d1 = self.depth_tex.sample((p + vec2(1.0, 0.0)) * inv).x
+            let d2 = self.depth_tex.sample((p + vec2(0.0, 1.0)) * inv).x
+            let d3 = self.depth_tex.sample((p + vec2(1.0, 1.0)) * inv).x
+            return max(max(d0, d1), max(d2, d3))
         }
         pixel: fn() {
             if self.neutral > 0.5 {
@@ -172,6 +242,7 @@ script_mod! {
         draw_luma +: {}
         draw_chroma +: {}
         draw_fxaa +: {}
+        draw_foveate +: {}
         draw_band +: {}
     }
 }
@@ -181,18 +252,12 @@ script_mod! {
 pub struct DrawXrBand {
     #[deref]
     pub draw_super: DrawQuad,
-    /// The side-by-side colour/depth size (px).
+    /// The foveated columns' size (both eyes side by side, px).
     #[live]
     pub extent: Vec2f,
-    /// x: one eye's width (px).
+    /// x: one eye's encoded column width (px).
     #[live]
     pub eye: Vec2f,
-    /// The colour/depth pixels per eye pixel (a supersampled XR pass; 1: none).
-    #[live]
-    pub scale: Vec2f,
-    /// The eye projection's depth terms: 2fn, f + n, f - n, and the band's near depth (m).
-    #[live]
-    pub clip: Vec4f,
     #[live]
     pub neutral: f32,
     /// Bytes per output texel: 4 (a BGRA8 texture holding the luma bytes) or 1 (an NV12
@@ -201,6 +266,14 @@ pub struct DrawXrBand {
     pub lanes: f32,
     #[live]
     pub origin: f32,
+}
+
+/// One eye's colour or depth into its foveated column (see its shader).
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawXrFoveate {
+    #[deref]
+    pub draw_super: DrawQuad,
 }
 
 /// The stereo test pattern (see its shader).
@@ -269,6 +342,11 @@ pub struct XrPack {
     draw_fxaa: DrawFxaa,
     #[rust]
     fxaa: Option<RenderTarget>,
+    /// The eyes foveated into their encoded columns (`foveated`: colour, inverse depth).
+    #[live]
+    draw_foveate: DrawXrFoveate,
+    #[rust]
+    foveated: Option<[RenderTarget; 2]>,
     #[live]
     draw_band: DrawXrBand,
     #[rust]
@@ -380,7 +458,8 @@ impl XrPack {
             return;
         };
         self.next = (slot + 1) % SLOTS;
-        let (ew, eh) = (eye[0], eye[1]);
+        // the picture: each eye's encoded column (foveated), its colour over its band
+        let (fovea, [ew, eh]) = shared.session_fovea().unwrap_or((Fovea::OFF, eye));
         let (w, h) = (ew * 2, eh * 3 / 2);
         let s = &mut self.slots[slot];
         if !self.nv12 && s.target.ensure(cx.cx, (w / 4, h + h / 2), RenderTargetFormat::SharedBgra8) {
@@ -390,11 +469,10 @@ impl XrPack {
         // the colour and depth as the XR pass rendered them: `ss` of their pixels per eye
         // pixel (a supersampled pass; the same rounding as the pass's size)
         let ss = cx.cx.xr_supersample() as f64;
-        let (sw, sh) = ((ew as f64 * ss).round() as u32, (eh as f64 * ss).round() as u32);
-        let scale = vec2(sw as f32 / ew as f32, sh as f32 / eh as f32);
+        let (sw, sh) = ((eye[0] as f64 * ss).round() as u32, (eye[1] as f64 * ss).round() as u32);
         let extent = vec2((2 * sw) as f32, sh as f32);
         // FXAA (a mode with it): the eyes anti-aliased into a target of their size, each eye
-        // on its own; the pack reads that (it paints after the XR pass, before the pack)
+        // on its own; the foveation reads that (it paints after the XR pass, before the pack)
         let fxaa = if aa.fxaa {
             let target = self.fxaa.get_or_insert_with(|| RenderTarget::new(cx.cx, "xr_stream_fxaa"));
             target.ensure(cx.cx, (2 * sw, sh), RenderTargetFormat::Bgra8);
@@ -411,8 +489,40 @@ impl XrPack {
             None
         };
         let color = fxaa.as_ref().unwrap_or(color);
+        // the eyes into their encoded columns, warped by the frame's own fields of view (the
+        // headset unwarps by the ones the picture's head carries: the same)
+        let fovs = match cx.cx.xr_frame_wire().and_then(|(_, w)| makepad_widgets::makepad_platform::makepad_hal::buffers::read_items::<makepad_widgets::makepad_platform::makepad_hal::XrFrame>(&w, 1).next()) {
+            Some(f) => [f.eyes[0].fov, f.eyes[1].fov],
+            None => [[-0.785, 0.785, 0.785, -0.785]; 2],
+        };
+        let [fov_color, fov_depth] = self.foveated.get_or_insert_with(|| [RenderTarget::new(cx.cx, "xr_stream_foveated"), RenderTarget::new(cx.cx, "xr_stream_foveated_depth")]);
+        let (n, f) = (EYE_NEAR, EYE_FAR);
+        for (mode, target) in [(0.0f32, &mut *fov_color), (1.0, &mut *fov_depth)] {
+            target.ensure(cx.cx, (2 * ew, eh), RenderTargetFormat::Bgra8);
+            target.begin(cx, vec4(0.0, 0.0, 0.0, 0.0));
+            for e in 0..2 {
+                let [fx, fy] = fovea.axes(fovs[e]);
+                let d = &mut self.draw_foveate;
+                d.draw_vars.set_texture(0, color);
+                d.draw_vars.set_texture(1, depth);
+                let set = |d: &mut DrawXrFoveate, cx: &mut Cx2d, id: LiveId, v: &[f32]| d.draw_vars.set_uniform(cx.cx, id, v);
+                set(d, cx, live_id!(extent), &[extent.x, extent.y]);
+                set(d, cx, live_id!(column), &[(e as u32 * sw) as f32, sw as f32, sh as f32, 0.0]);
+                set(d, cx, live_id!(fx), &fx.shape());
+                set(d, cx, live_id!(fy), &fy.shape());
+                set(d, cx, live_id!(fk), &[fx.ramp, fx.edge, fy.ramp, fy.edge]);
+                set(d, cx, live_id!(clip), &[2.0 * f * n, f + n, f - n, DEPTH_NEAR_M]);
+                set(d, cx, live_id!(mode), &[mode]);
+                d.new_draw_call(cx);
+                d.draw_abs(cx, Rect { pos: dvec2((e as u32 * ew) as f64, 0.0), size: dvec2(ew as f64, eh as f64) });
+            }
+            target.end(cx);
+        }
+        let (fov_color, fov_depth) = (fov_color.texture.clone(), fov_depth.texture.clone());
+        let fextent = vec2((2 * ew) as f32, eh as f32);
         if self.nv12 {
-            self.pack_planes(cx, slot, color, depth, [ew, eh], scale, extent, aa.fxaa);
+            self.pack_planes(cx, slot, &fov_color, &fov_depth, [ew, eh], fextent);
+            self.chain_foveation(cx, slot, aa.fxaa);
             self.slots[slot].busy.store(true, Ordering::Release);
             self.counts.packed += 1;
             self.packed = Some(Packed { slot, display_ns, built_at: Instant::now() });
@@ -424,25 +534,22 @@ impl XrPack {
         let s = &mut self.slots[slot];
         s.target.begin(cx, vec4(0.0, 0.0, 0.0, 0.0));
         // the colour's luma (rows 0..eh) and chroma (rows h..h + eh/2)
-        self.draw_luma.draw_vars.set_texture(0, color);
-        self.draw_luma.source = vec4(0.0, 0.0, extent.x, extent.y);
-        self.draw_luma.extent = extent;
-        self.draw_luma.scale = scale;
+        self.draw_luma.draw_vars.set_texture(0, &fov_color);
+        self.draw_luma.source = vec4(0.0, 0.0, fextent.x, fextent.y);
+        self.draw_luma.extent = fextent;
+        self.draw_luma.scale = vec2(1.0, 1.0);
         self.draw_luma.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2((w / 4) as f64, eh as f64) });
-        self.draw_chroma.draw_vars.set_texture(0, color);
-        self.draw_chroma.source = vec4(0.0, 0.0, extent.x, extent.y);
-        self.draw_chroma.extent = extent;
-        self.draw_chroma.scale = scale;
+        self.draw_chroma.draw_vars.set_texture(0, &fov_color);
+        self.draw_chroma.source = vec4(0.0, 0.0, fextent.x, fextent.y);
+        self.draw_chroma.extent = fextent;
+        self.draw_chroma.scale = vec2(1.0, 1.0);
         self.draw_chroma.full = 0.0;
         self.draw_chroma.draw_abs(cx, Rect { pos: dvec2(0.0, h as f64), size: dvec2((w / 4) as f64, (eh / 2) as f64) });
         // the band's luma (rows eh..h) and its neutral chroma (rows h + eh/2 .. h + h/2)
-        self.draw_band.draw_vars.set_texture(0, color);
-        self.draw_band.draw_vars.set_texture(1, depth);
-        self.draw_band.extent = extent;
+        self.draw_band.draw_vars.set_texture(0, &fov_color);
+        self.draw_band.draw_vars.set_texture(1, &fov_depth);
+        self.draw_band.extent = fextent;
         self.draw_band.eye = vec2(ew as f32, eh as f32);
-        self.draw_band.scale = scale;
-        let (n, f) = (EYE_NEAR, EYE_FAR);
-        self.draw_band.clip = vec4(2.0 * f * n, f + n, f - n, DEPTH_NEAR_M);
         self.draw_band.neutral = 0.0;
         self.draw_band.lanes = 4.0;
         self.draw_band.origin = 0.0;
@@ -450,16 +557,15 @@ impl XrPack {
         self.draw_band.new_draw_call(cx);
         self.draw_band.neutral = 1.0;
         self.draw_band.draw_abs(cx, Rect { pos: dvec2(0.0, (h + eh / 2) as f64), size: dvec2((w / 4) as f64, (h / 2 - eh / 2) as f64) });
-        // MAKEPAD_XR_REMOTE_TEST=1: the stereo test pattern over it all
+        // MAKEPAD_XR_REMOTE_TEST=1: the stereo test pattern over it all (in the encoded
+        // columns: its optical axes where the foveation puts them, its grid warped)
         if self.test {
-            let axis = |e: &makepad_widgets::makepad_platform::makepad_hal::XrEye| {
-                let [l, r, u, d] = e.fov.map(f32::tan);
-                vec2(-l / (r - l), u / (u - d))
+            let axis = |fov: [f32; 4]| {
+                let [l, r, u, d] = fov.map(f32::tan);
+                let [fx, fy] = fovea.axes(fov);
+                vec2(fx.to_encoded(-l / (r - l)), fy.to_encoded(u / (u - d)))
             };
-            let (al, ar) = match cx.cx.xr_frame_wire().and_then(|(_, w)| makepad_widgets::makepad_platform::makepad_hal::buffers::read_items::<makepad_widgets::makepad_platform::makepad_hal::XrFrame>(&w, 1).next()) {
-                Some(f) => (axis(&f.eyes[0]), axis(&f.eyes[1])),
-                None => (vec2(0.5, 0.5), vec2(0.5, 0.5)),
-            };
+            let (al, ar) = (axis(fovs[0]), axis(fovs[1]));
             self.draw_test.eye = vec2(ew as f32, eh as f32);
             self.draw_test.axis = vec4(al.x, al.y, ar.x, ar.y);
             for (mode, y, rows) in [(0.0, 0, eh), (1.0, h, eh / 2), (2.0, eh, h - eh)] {
@@ -471,11 +577,9 @@ impl XrPack {
         s.target.end(cx);
         // no parent: it paints after the XR pass (which paints first) and is held by no window
         s.target.pass.detach(cx.cx);
-        // the FXAA pass paints before the pack that samples it
-        if let (true, Some(t)) = (aa.fxaa, self.fxaa.as_ref()) {
-            t.pass.set_pass_parent(cx.cx, s.target.pass.draw_pass_id());
-        }
-        s.busy.store(true, Ordering::Release);
+        let first = s.target.pass.draw_pass_id();
+        self.chain_foveation_to(cx, first, aa.fxaa);
+        self.slots[slot].busy.store(true, Ordering::Release);
         self.counts.packed += 1;
         self.packed = Some(Packed { slot, display_ns, built_at: Instant::now() });
         if let Some(signal) = &self.signal {
@@ -483,13 +587,31 @@ impl XrPack {
         }
     }
 
-    /// The picture of `color` / `depth` (eyes `eye` px, the passes' `scale` and `extent`) into
-    /// the slot's NV12 textures, a tile (eye column) each: per tile a luma pass (the colour's
-    /// luma rows, then the band's coverage and inverse depth) and a chroma pass (the colour's
-    /// U V, then the band's neutral chroma). The passes paint in a chain after the XR pass (and
-    /// the FXAA pass that `fxaa` drew).
-    #[allow(clippy::too_many_arguments)]
-    fn pack_planes(&mut self, cx: &mut Cx2d, slot: usize, color: &Texture, depth: &Texture, eye: [u32; 2], scale: Vec2f, extent: Vec2f, fxaa: bool) {
+    /// The passes before the pack (it samples them), in paint order: FXAA (a mode with it,
+    /// sampled by the foveation), the foveated colour, the foveated depth, then `pack`, the
+    /// pack's first pass.
+    fn chain_foveation_to(&mut self, cx: &mut Cx2d, pack: DrawPassId, fxaa: bool) {
+        let Some([color, depth]) = self.foveated.as_ref() else { return };
+        depth.pass.set_pass_parent(cx.cx, pack);
+        color.pass.set_pass_parent(cx.cx, depth.pass.draw_pass_id());
+        if let (true, Some(t)) = (fxaa, self.fxaa.as_ref()) {
+            t.pass.set_pass_parent(cx.cx, color.pass.draw_pass_id());
+        }
+    }
+
+    /// [`Self::chain_foveation_to`] the slot's planes (`pack_planes` chained them).
+    fn chain_foveation(&mut self, cx: &mut Cx2d, slot: usize, fxaa: bool) {
+        if let Some(first) = self.slots[slot].planes.first().map(|(p, _)| p.luma.draw_pass_id()) {
+            self.chain_foveation_to(cx, first, fxaa);
+        }
+    }
+
+    /// The foveated picture (`color` / `depth`: both eyes' encoded columns, `extent` px; eyes
+    /// `eye` px encoded) into the slot's NV12 textures, a tile (eye column) each: per tile a luma
+    /// pass (the colour's luma rows, then the band's coverage and inverse depth) and a chroma
+    /// pass (the colour's U V, then the band's neutral chroma). The passes paint in a chain
+    /// after the foveation's (`chain_foveation`).
+    fn pack_planes(&mut self, cx: &mut Cx2d, slot: usize, color: &Texture, depth: &Texture, eye: [u32; 2], extent: Vec2f) {
         let [ew, eh] = eye;
         let h = eh * 3 / 2;
         let tiles = self.shared().session_tiles().max(1);
@@ -504,24 +626,21 @@ impl XrPack {
                 *handle = None;
             }
         }
-        let (n, f) = (EYE_NEAR, EYE_FAR);
         let mut chain: Vec<DrawPassId> = Vec::new();
         for t in 0..tiles as usize {
             let x0 = (t as u32 * tw) as f32;
             // luma: the colour's (rows 0..eh), the band's (rows eh..h)
             self.slots[slot].planes[t].0.begin_luma(cx, 0.0);
             self.draw_luma.draw_vars.set_texture(0, color);
-            self.draw_luma.source = vec4(x0 * scale.x, 0.0, tw as f32 * scale.x, extent.y);
+            self.draw_luma.source = vec4(x0, 0.0, tw as f32, extent.y);
             self.draw_luma.extent = extent;
-            self.draw_luma.scale = scale;
+            self.draw_luma.scale = vec2(1.0, 1.0);
             self.draw_luma.lanes = 1.0;
             self.draw_luma.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2(tw as f64, eh as f64) });
             self.draw_band.draw_vars.set_texture(0, color);
             self.draw_band.draw_vars.set_texture(1, depth);
             self.draw_band.extent = extent;
             self.draw_band.eye = vec2(ew as f32, eh as f32);
-            self.draw_band.scale = scale;
-            self.draw_band.clip = vec4(2.0 * f * n, f + n, f - n, DEPTH_NEAR_M);
             self.draw_band.neutral = 0.0;
             self.draw_band.lanes = 1.0;
             self.draw_band.origin = x0;
@@ -530,9 +649,9 @@ impl XrPack {
             // chroma: the colour's (rows 0..eh/2), the band's neutral (the rest)
             self.slots[slot].planes[t].0.begin_chroma(cx, vec2(0.50196, 0.50196));
             self.draw_chroma.draw_vars.set_texture(0, color);
-            self.draw_chroma.source = vec4(x0 * scale.x, 0.0, tw as f32 * scale.x, extent.y);
+            self.draw_chroma.source = vec4(x0, 0.0, tw as f32, extent.y);
             self.draw_chroma.extent = extent;
-            self.draw_chroma.scale = scale;
+            self.draw_chroma.scale = vec2(1.0, 1.0);
             self.draw_chroma.full = 0.0;
             self.draw_chroma.lanes = 1.0;
             self.draw_chroma.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2((tw / 2) as f64, (eh / 2) as f64) });
@@ -541,17 +660,14 @@ impl XrPack {
             chain.push(p.luma.draw_pass_id());
             chain.push(p.chroma.draw_pass_id());
         }
-        // one chain painted after the XR pass: FXAA (it samples nothing of these), then each
-        // plane; the last one has no parent (held by no window)
+        // one chain painted after the foveation: each plane; the last one has no parent (held
+        // by no window)
         let planes = &self.slots[slot].planes;
         for (k, pass) in planes.iter().flat_map(|(p, _)| [&p.luma, &p.chroma]).enumerate() {
             match chain.get(k + 1) {
                 Some(next) => pass.set_pass_parent(cx.cx, *next),
                 None => pass.detach(cx.cx),
             }
-        }
-        if let (true, Some(t), Some(first)) = (fxaa, self.fxaa.as_ref(), chain.first()) {
-            t.pass.set_pass_parent(cx.cx, *first);
         }
     }
 

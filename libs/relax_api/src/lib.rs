@@ -13,6 +13,10 @@
 //!   when Relax lays it out the same and every field is the same bytes on both sides (plain data,
 //!   `String`/`Vec`/`Option<String>` while the two stds agree, other such handles), JIT code builds it
 //!   and reads its fields itself; otherwise its fields never cross.
+//! - `#[relax_api(per_side)]` on a static: each side keeps its own instance (a memo of values
+//!   only that side's code makes and reads, laid out by that side's std). Without it, JIT code
+//!   that reaches a provided crate's static of a type not the same bytes on both sides is refused:
+//!   rustc's one copy cannot be read with Relax's layouts.
 //!
 //! In a normal build the attribute leaves the item as it is. With the crate's `host-shims`
 //! feature (only the `makepad` loader build enables it) it also emits, next to the item, an extern "C"
@@ -29,6 +33,8 @@ pub type DropFn = unsafe extern "C" fn(*mut u8);
 pub const OP: u32 = 1;
 pub const HANDLE: u32 = 2;
 pub const PLAIN: u32 = 3;
+/// a static each side keeps its own instance of (`#[relax_api(per_side)]`)
+pub const PER_SIDE: u32 = 4;
 
 /// One marked item, as the attribute lays it down in the `relax_api` link section.
 #[repr(C)]

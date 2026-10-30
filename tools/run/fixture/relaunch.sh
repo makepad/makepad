@@ -9,12 +9,14 @@
 #   fallback   MAKEPAD_RUN_DOMAIN_JOIN_MS=1 MAKEPAD_RUN_RELAUNCH_GRACE_MS=0: the previous run still
 #              owns the domain, so the process starts again (same pid: exec) and presents again
 # Every case requires the process alive after each relaunch and no "still owns" refusal that left
-# the app dead, no crash or fault line. Run from the workspace root after `cargo build --release
-# -p makepad-run --bin makepad`. TARGET (default target/release), PACKAGE (default
+# the app dead, no crash or fault line. Run from the workspace root (the JIT runs
+# through `cargo run --profile host`). the JIT runs through `cargo run --profile host`, PACKAGE (default
 # makepad-app-calculator), WAIT (s for the cold first frame, default 200). Prints
 # "relaunch: OK ..." or "relaunch: FAIL ...".
-T=${TARGET:-target/release}
-B=$T/makepad
+ROOT=$(pwd)
+# the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
+J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
+B=$J
 pkg=${PACKAGE:-makepad-app-calculator}
 n=${RELAUNCHES:-5}
 dir=$(mktemp -d "${TMPDIR:-/tmp}/relaunch.XXXXXX") || exit 1
@@ -29,7 +31,7 @@ run_case() {
     d=$dir/$name
     mkdir -p "$d/home"
     env "$@" MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_HOME="$d/home" \
-        MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_WINDOW=1280x800@1 "$B" run "$pkg" > "$d/run.log" 2>&1 &
+        MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_WINDOW=1280x800@1 $B run "$pkg" > "$d/run.log" 2>&1 &
     pid=$!
     i=0
     until grep -aq "first frame at" "$d/run.log"; do
@@ -47,7 +49,7 @@ run_case() {
         k=$((k + 1))
         frames=$(count "first frame at" "$d/run.log")
         inplace=$(count "relaunch: .* to first frame" "$d/run.log")
-        answer=$("$B" inspect $pid session relaunch 2>&1 | tr '\n' ' ')
+        answer=$($B inspect $pid session relaunch 2>&1 | tr '\n' ' ')
         i=0
         while [ $i -lt 240 ]; do
             kill -0 $pid 2>/dev/null || break
@@ -63,7 +65,7 @@ run_case() {
         ok=$((ok + 1))
         # each relaunch must be done before the next asks (inspect answers again after an exec)
         i=0
-        until "$B" inspect $pid session > /dev/null 2>&1; do i=$((i + 1)); [ $i -ge 60 ] && break; sleep 0.5; done
+        until $B inspect $pid session > /dev/null 2>&1; do i=$((i + 1)); [ $i -ge 60 ] && break; sleep 0.5; done
         sleep 1
     done
     now_inplace=$(count "relaunch: .* to first frame" "$d/run.log")

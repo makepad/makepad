@@ -3,9 +3,10 @@
 //! entry with its engine, category, character tags, pack, a short line, a
 //! small picture and a cheap feature vector ("similar to this").
 //!
-//! Built once, off the UI thread ([`build`], kept by [`set_index`]): the
+//! Built off the UI thread ([`build`], kept by [`set_index`]): the
 //! engines' built-in libraries (synth patches, kits, Morph, General MIDI,
-//! the piano, Ironfish, shader instruments, voices). What a score adds
+//! the piano, Ironfish, shader instruments, voices) and the patch library
+//! once it is installed (built again then). What a score adds
 //! (its own instruments, its SoundFonts and samples) is a handful of
 //! entries made when the browser opens ([`score_entries`]). Search is a
 //! scan of prepared lowercase text: thousands of entries in well under a
@@ -16,7 +17,8 @@
 
 use crate::instruments::{Available, Choice};
 use crate::model::ScoreDoc;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 /// The categories, in the order a browser lists them.
 pub const CATEGORIES: [&str; 20] = [
@@ -140,37 +142,96 @@ pub struct Library {
     pub title: String,
     /// The licence by name.
     pub licence: String,
+    /// What installing means under that licence, shown before the download.
+    pub notice: String,
+    /// The download's size.
+    pub bytes: u64,
     pub installed: bool,
 }
 
-/// The downloadable libraries of the engines (none of the built-in engines
-/// has one; an engine with a library adds it here).
+/// The downloadable libraries of the engines: Tandem's hybrid patch
+/// library (installed once its current or older set is unpacked).
 pub fn libraries() -> Vec<Library> {
-    Vec::new()
+    let set = &crate::tandem_library::CURRENT;
+    let text = crate::tandem_library::LICENSE_TEXT;
+    // The licence part (the credits are on Resources), said for this button.
+    let notice = text.split("\n\n").next().unwrap_or(text).replace("until you press Install", "until you accept below");
+    vec![Library {
+        engine: "Tandem".into(),
+        title: "Patch library".into(),
+        licence: "GPL-3.0-or-later".into(),
+        notice,
+        bytes: set.bytes,
+        installed: crate::tandem_library::active().is_some(),
+    }]
 }
 
-static INDEX: OnceLock<Index> = OnceLock::new();
+/// The index kept by [`set_index`] and how often it was replaced. A newer
+/// index replaces the last (a library installed while the app runs); the
+/// one it replaces stays alive, since browsers may still hold it.
+static INDEX: Mutex<Option<&'static Index>> = Mutex::new(None);
+static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// The index, once built.
 pub fn index() -> Option<&'static Index> {
-    INDEX.get()
+    *INDEX.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Keep the index [`build`] made (the first one wins).
+/// Counts the indexes kept: a browser holding an older one refreshes.
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::Acquire)
+}
+
+/// Keep the index [`build`] made (replacing the last one).
 pub fn set_index(index: Index) {
-    let _ = INDEX.set(index);
+    let index: &'static Index = Box::leak(Box::new(index));
+    *INDEX.lock().unwrap_or_else(|e| e.into_inner()) = Some(index);
+    GENERATION.fetch_add(1, Ordering::AcqRel);
 }
 
-/// The index of the built-in libraries, built where it is called (a
-/// background job: it evaluates the sound library once).
+/// The index of the built-in libraries and the installed patch library,
+/// built where it is called (a background job: it evaluates the sound
+/// library once and lists the patch folders).
 pub fn build() -> Index {
     let all = crate::instruments::catalog(None, &Available::default());
-    Index { entries: all.into_iter().map(entry_of).collect() }
+    let mut entries: Vec<Entry> = all.into_iter().map(entry_of).collect();
+    entries.extend(tandem_entries());
+    Index { entries }
 }
 
 /// The index for tools and tests that cannot wait for a background build.
 pub fn index_or_build() -> &'static Index {
-    INDEX.get_or_init(build)
+    if let Some(index) = index() {
+        return index;
+    }
+    set_index(build());
+    index().expect("the index was just kept")
+}
+
+/// The installed patch library's patches (none until it is unpacked): a
+/// `Tandem{patch: "Category/Name"}` each, its category from its folder's
+/// words, its pack the factory set or the third-party author's folder.
+fn tandem_entries() -> Vec<Entry> {
+    let mut out = Vec::new();
+    for c in crate::tandem_library::categories() {
+        let pack = if c.group == 0 { "Factory".to_string() } else { c.name.split('/').next().unwrap_or("Third party").to_string() };
+        for patch in &c.patches {
+            let name = if c.name.is_empty() { patch.name.clone() } else { format!("{}/{}", c.name, patch.name) };
+            let cat = category_of(&format!("{} {}", c.name, patch.name));
+            let choice = Choice {
+                group: "Tandem patches",
+                label: patch.name.clone(),
+                detail: format!("library patch {name}"),
+                type_name: "Tandem",
+                fields: vec![("patch".to_string(), format!("{name:?}"))],
+            };
+            let tags = words(&c.name.replace('/', " "));
+            let i = CATEGORIES.iter().position(|x| *x == cat).unwrap_or(0) as f32 / CATEGORIES.len() as f32;
+            let about = format!("{} · {}", c.name.replace('/', " · "), patch.name);
+            out.push(Entry::new(choice, "Tandem", cat, tags, &pack, about, Thumb::Mark, [0.5, 0.5, 0.5, 0.5, 0.5, i]));
+        }
+    }
+    out
 }
 
 /// What a score adds to the index: its own instruments and the SoundFonts,

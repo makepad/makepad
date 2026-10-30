@@ -463,7 +463,8 @@ mod tests {
         assert_eq!(probe(&path, wire ^ 1), Probe::Mismatch(wire));
         assert_eq!(adopt(&path, wire, 42, "makepad-app-amp"), Ok(Admission { port: 8766, client: 1 << 32 }));
         let adopted = server.join().unwrap();
-        assert_eq!(adopted, vec![AdoptRequest { pid: 42, crate_name: "makepad-app-amp".into(), test_lane: None }]);
+        // `adopt` says this process's test lane (MAKEPAD_TEST_LANE: a devhub lease sets it), whatever it is
+        assert_eq!(adopted, vec![AdoptRequest { pid: 42, crate_name: "makepad-app-amp".into(), test_lane: test_lane() }]);
         // the socket file went with its WM: absent; a stale file nobody listens on: dead
         assert_eq!(probe(&path, wire), Probe::Absent);
         let stale = UnixListener::bind(&path).unwrap();

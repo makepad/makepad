@@ -18,7 +18,7 @@ pub fn register(name: &str, tx: Sender<ClientMsg>) -> Arc<Endpoint> {
         tabs.retain(|(_, endpoint)| endpoint.strong_count() != 0);
         tabs.push((name.into(), Arc::downgrade(&endpoint)));
     }
-    makepad_widgets::makepad_platform::makepad_hal::a11y::register_ui_router(dispatch);
+    makepad_widgets::makepad_platform::makepad_hal::a11y::register_ui_router(ui_router);
     endpoint
 }
 impl Endpoint {
@@ -59,6 +59,10 @@ impl Endpoint {
         state.pending.remove(&req);
         result
     }
+}
+/// Desk Link's host route as the HAL calls it (a C entry: the HAL's code is rustc's under `makepad run`).
+extern "C" fn ui_router(req: *const u8, len: usize, limit: usize, ctx: *mut u8, write: makepad_widgets::makepad_platform::makepad_hal::a11y::UiWrite) -> u32 {
+    unsafe { makepad_widgets::makepad_platform::makepad_hal::a11y::serve_ui_route(dispatch, req, len, limit, ctx, write) }
 }
 fn dispatch(req: &Req, out: &mut Out) -> bool {
     let Some(machine) = req.get("machine") else { return false; };

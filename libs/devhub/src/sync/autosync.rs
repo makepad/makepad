@@ -1,9 +1,10 @@
 //! The master follows work and commercial main so dock apps receive landed changes without
-//! a manual push. Each round attempts one node, passing over gate and landing leases until
-//! they end. The node still refuses older trees and owns its build and safe restart.
-//! Settings are reread from autosync.conf; autosync.state keeps the last successful revisions
-//! across master restarts. Repeated skips are reported once, to the master's stderr.
-
+//! a manual push, and moves a node's one tree back to them after a lease moved it elsewhere.
+//! Each round attempts one node, passing over nodes that hold a lease until it ends (one box per
+//! lease: the node refuses a sync while a lease holds its tree). The node still refuses older
+//! trees and owns its build and safe restart. Settings are reread from autosync.conf;
+//! autosync.state keeps the last successful revisions across master restarts. Repeated skips are
+//! reported once, to the master's stderr.
 use super::cli::{ask_local, branch_sha, fleet_nodes, push_and_apply};
 use super::git::valid_sha;
 use crate::proto;
@@ -17,11 +18,17 @@ pub struct AutoConf {
     pub repo: PathBuf,
     pub interval_s: u64,
     pub nodes: Option<Vec<String>>,
+    /// the lane merge bot ([`super::lanes`]): `lanes = on|off`
+    pub lanes: bool,
+    /// where lane worktrees live (`lanes_root`, default `~/wt.noindex`)
+    pub lanes_root: PathBuf,
+    /// pre-warm idle dev-on nodes after an apply (`prewarm = on|off`)
+    pub prewarm: bool,
 }
 
 impl AutoConf {
     pub fn parse(text: &str, default_repo: &Path) -> Self {
-        let mut c = Self { enabled: true, repo: default_repo.to_path_buf(), interval_s: 30, nodes: None };
+        let mut c = Self { enabled: true, repo: default_repo.to_path_buf(), interval_s: 30, nodes: None, lanes: true, lanes_root: crate::os::home_dir().join("wt.noindex"), prewarm: true };
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("").trim();
             let Some((k, v)) = line.split_once('=') else { continue };
@@ -31,6 +38,11 @@ impl AutoConf {
                 "enabled" if v == "off" => c.enabled = false,
                 "repo" if !v.is_empty() => c.repo = PathBuf::from(v),
                 "interval" => c.interval_s = v.parse().ok().filter(|s| *s > 0).unwrap_or(c.interval_s),
+                "lanes" if v == "on" => c.lanes = true,
+                "lanes" if v == "off" => c.lanes = false,
+                "lanes_root" if !v.is_empty() => c.lanes_root = PathBuf::from(v),
+                "prewarm" if v == "on" => c.prewarm = true,
+                "prewarm" if v == "off" => c.prewarm = false,
                 "nodes" => c.nodes = Some(v.split(',').map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).collect()),
                 _ => {}
             }
@@ -92,9 +104,18 @@ pub fn start(control_socket: PathBuf) {
                 }
                 // Rotate after every attempt, including a refusal or an unreachable node.
                 let first = last_node.as_ref().and_then(|last| nodes.iter().position(|n| n == last)).map_or(0, |i| (i + 1) % nodes.len());
+                // what each node's one tree holds now (a lease moves it to its own commits)
+                let mut trees = BTreeMap::<String, String>::new();
+                for line in ask_local(&c, "nodes", "nodes").unwrap_or_default() {
+                    let Ok(v) = makepad_strict_json::parse(line.as_bytes()) else { continue };
+                    if let (Some(n), Some(t)) = (v.get("node").and_then(|x| x.as_str()), v.get("caps").and_then(|c| c.get("tree")).and_then(|x| x.as_str())) {
+                        trees.insert(n.to_string(), t.to_string());
+                    }
+                }
                 for i in 0..nodes.len() {
                     let node = &nodes[(first + i) % nodes.len()];
-                    if applied.get(node) == Some(&shas) {
+                    let moved_off = trees.get(node).is_some_and(|t| !t.is_empty() && *t != format!("{},{}", shas.0, shas.1));
+                    if applied.get(node) == Some(&shas) && !moved_off {
                         continue;
                     }
                     let mut held = None;
@@ -111,9 +132,9 @@ pub fn start(control_socket: PathBuf) {
                         let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
                         let running = v.get("info").and_then(|i| i.get("running")).and_then(|x| x.as_str()).unwrap_or("");
                         let (kind, lane) = (field("kind"), field("lane"));
-                        // a landing's gate: a gate lease, a landing lane, or a lease that runs the land gate
-                        if field("node") == *node && (kind == "gate" || lane.starts_with("land") || running.contains("land_gate")) {
-                            held = Some(format!("skip: {kind} lease held by {lane}"));
+                        // one box per lease: a node runs its lease on its tree undisturbed
+                        if field("node") == *node && kind != "inspect" {
+                            held = Some(format!("skip: {kind} lease held by {lane}{}", if running.is_empty() { String::new() } else { format!(" ({running})") }));
                         }
                     }
                     if let Some(why) = held {

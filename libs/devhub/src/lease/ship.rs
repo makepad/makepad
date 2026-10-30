@@ -5,9 +5,9 @@
 //! `ship-have`; the node answers which entries it does not hold as they are (a regular file of
 //! that size and mtime, and on Unix that executable bit). The client sends each miss in chunks to
 //! `ship-put` (written to `<path>.devhub-part`, renamed into place with the source's mtime and
-//! mode after its last byte), and symlinks to `ship-link` (Unix nodes). The file list then goes
-//! as `.devhub-files.new`, and `lease-prune` removes what the previous ship had and this one has
-//! not. Up to [`WINDOW`] requests are in flight on one routed channel per service.
+//! mode after its last byte), and symlinks to `ship-link` (Unix nodes); then `ship-done` names
+//! what was shipped and deleted (the node undoes it at the lease's end). Up to [`WINDOW`] requests
+//! are in flight on one routed channel per service.
 
 use makepad_remote::conn::Event;
 use makepad_remote::link::Client;
@@ -267,9 +267,8 @@ pub struct Shipped {
     pub bytes: u64,
 }
 
-/// Ships `entries` from `root` into lease `id`'s work dir on `node`, then `list` (the prune list)
-/// as `.devhub-files.new`.
-pub fn send(c: &Client, node: &str, id: &str, root: &Path, entries: &[Entry], list: &str) -> Result<Shipped, String> {
+/// Ships `entries` from `root` into lease `id`'s work dir on `node`.
+pub fn send(c: &Client, node: &str, id: &str, root: &Path, entries: &[Entry]) -> Result<Shipped, String> {
     let mut have = Pipe::open(c, node, "ship-have").map_err(|e| format!("{e} (a node hub from before the link ship has no ship-have: update its devhub)"))?;
     let mut need: Vec<usize> = Vec::new();
     let mut base = 0usize;
@@ -308,8 +307,6 @@ pub fn send(c: &Client, node: &str, id: &str, root: &Path, entries: &[Entry], li
         out.sent += 1;
         out.bytes += bytes.len() as u64;
     }
-    let now = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_micros() as u64);
-    put_bytes(&mut put, id, ".devhub-files.new", list.as_bytes(), now, false, &mut ok)?;
     put.drain(&mut ok)?;
     if !links.is_empty() {
         let mut lp = Pipe::open(c, node, "ship-link")?;

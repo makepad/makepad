@@ -12,6 +12,8 @@ pub mod exec;
 pub mod master;
 pub mod sched;
 pub mod ship;
+#[cfg(feature = "checkout")]
+pub mod tree;
 pub mod wt;
 
 use makepad_remote::json_str;
@@ -61,20 +63,20 @@ impl Kind {
     }
 }
 
-/// What a lease costs a node: cores, RAM and disk in GB, GPUs; `whole` = the whole node.
+/// What a lease needs of a node (it gets the whole node: one box per lease): cores, RAM and disk
+/// in GB, GPUs. A node that has less never takes it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cost {
     pub cores: f64,
     pub ram_gb: f64,
     pub disk_gb: f64,
     pub gpus: u32,
-    pub whole: bool,
 }
 
 impl Cost {
     /// The kind's default (DESIGN.md §10.8); `warm` = the lane already has a target on the node.
     pub fn default_for(kind: Kind, warm: bool) -> Cost {
-        let c = |cores, ram_gb, disk_gb, gpus| Cost { cores, ram_gb, disk_gb, gpus, whole: false };
+        let c = |cores, ram_gb, disk_gb, gpus| Cost { cores, ram_gb, disk_gb, gpus };
         match kind {
             Kind::Build => c(8.0, 12.0, if warm { 2.0 } else { 20.0 }, 0),
             Kind::Gate => c(8.0, 12.0, if warm { 2.0 } else { 20.0 }, 0),
@@ -83,7 +85,7 @@ impl Cost {
             Kind::Long => c(4.0, 8.0, 5.0, 0),
             Kind::Gpu => c(2.0, 4.0, 1.0, 1),
             Kind::Inspect => c(0.0, 0.0, 0.0, 0),
-            Kind::Timed => Cost { cores: 0.0, ram_gb: 0.0, disk_gb: 2.0, gpus: 0, whole: true },
+            Kind::Timed => c(0.0, 0.0, 2.0, 0),
         }
     }
 }
@@ -156,6 +158,9 @@ pub struct Caps {
     /// A dev switch flip made on the node itself (its tray / task view), not yet taken by the
     /// master: the master adopts it (saves, pushes), and the push clears it here.
     pub dev_req: Option<bool>,
+    /// the commits the node's one tree holds (`<makepad sha>[,<commercial sha>]`, [`tree::Pin`];
+    /// empty: unknown): the scheduler prefers a node already there for a lease of those commits
+    pub tree: String,
 }
 
 impl Caps {
@@ -179,7 +184,7 @@ impl Caps {
             .collect();
         let slots: Vec<String> = self.slots.iter().map(|(k, n)| format!("\"{}\":{n}", k.as_str())).collect();
         format!(
-            "{{\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{}}}",
+            "{{\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{}}}",
             json_str(&self.node),
             json_str(&self.arch),
             json_str(&self.os),
@@ -203,6 +208,7 @@ impl Caps {
             json_str(&self.apply),
             self.desk_link.as_ref().map_or("null".to_string(), |d| d.to_json()),
             match self.dev_req { Some(true) => "true", Some(false) => "false", None => "null" },
+            json_str(&self.tree),
         )
     }
 
@@ -231,6 +237,7 @@ impl Caps {
             apply: s("apply"),
             desk_link: v.get("desk_link").and_then(crate::embed::DeskLinkState::parse),
             dev_req: v.get("dev_req").and_then(|x| x.as_bool()),
+            tree: s("tree"),
             ..Default::default()
         };
         if let Some(a) = v.get("gpus").and_then(|x| x.as_arr()) {
@@ -270,6 +277,58 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         return Some(code);
     }
     client::cli(args)
+}
+
+/// The commits a lease runs at: makepad, and commercial when it named one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pin {
+    pub makepad: String,
+    pub commercial: Option<String>,
+}
+
+impl Pin {
+    /// Two leases can share the tree: the same makepad commit, and the same commercial one when
+    /// both name one (a lease without commercial takes the tree's as it is).
+    pub fn fits(&self, other: &Pin) -> bool {
+        self.makepad == other.makepad && (self.commercial.is_none() || other.commercial.is_none() || self.commercial == other.commercial)
+    }
+
+    /// `<makepad sha>[,<commercial sha>]` (the ledger's and caps' form).
+    pub fn key(&self) -> String {
+        match &self.commercial {
+            Some(c) => format!("{},{c}", self.makepad),
+            None => self.makepad.clone(),
+        }
+    }
+
+    pub fn parse(key: &str) -> Option<Pin> {
+        let mut it = key.split(',');
+        let makepad = it.next().filter(|s| hex40(s))?.to_string();
+        let commercial = match it.next() {
+            Some(c) if hex40(c) => Some(c.to_string()),
+            Some(_) => return None,
+            None => None,
+        };
+        Some(Pin { makepad, commercial })
+    }
+
+    /// The commits of a pinned `--rev` (`branch@sha[,branch@sha]`, [`pin_revs`]).
+    pub fn of_rev(spec: &str) -> Option<Pin> {
+        let (mk, com) = parse_pinned(spec).ok()?;
+        Some(Pin { makepad: mk.sha, commercial: com.map(|c| c.sha) })
+    }
+
+    pub fn short(&self) -> String {
+        let s = |x: &str| x[..10.min(x.len())].to_string();
+        match &self.commercial {
+            Some(c) => format!("{},{}", s(&self.makepad), s(c)),
+            None => s(&self.makepad),
+        }
+    }
+}
+
+fn hex40(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 /// One side of a lease's `--rev`: the branch and the commit it named when the lease was ordered.
@@ -365,6 +424,7 @@ mod tests {
             apply: "checkout".into(),
             desk_link: Some(crate::embed::DeskLinkState { on: true, port: 8790, note: "listens on 10.0.0.201:8790".into() }),
             dev_req: Some(true),
+            tree: format!("{},{}", "a".repeat(40), "c".repeat(40)),
         };
         assert_eq!(Caps::parse(&c.to_json()), Some(c.clone()));
         let none = Caps { desk_link: None, ..c };

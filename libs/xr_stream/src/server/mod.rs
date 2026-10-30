@@ -267,6 +267,11 @@ impl ServerShared {
         self.live.lock().unwrap().as_ref().map(|l| l.eye)
     }
 
+    /// The session's foveation and its eye columns' encoded size.
+    pub(crate) fn session_fovea(&self) -> Option<(makepad_desk_link::xr::Fovea, [u32; 2])> {
+        self.live.lock().unwrap().as_ref().map(|l| (l.fovea, l.encoded))
+    }
+
     /// Whether the app may build the next frame: a headset streams and fewer than its limit of
     /// pictures are in flight to it.
     pub(crate) fn room(&self) -> bool {

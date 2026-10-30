@@ -23571,20 +23571,99 @@ pub(crate) unsafe fn preserve_closure_bodies(up: *mut Unit, files: &[u32]) -> Re
     }).collect();
     owners.sort_unstable();
     owners.dedup();
-    for (parent, file) in owners {
-        ensure_parent_body(up, parent, file, 0)?;
+    let n_slotted = owners.len();
+    let mut done: std::collections::HashSet<(u32, u32)> = owners.iter().copied().collect();
+    let mut seen_tys: std::collections::HashSet<TyId> = Default::default();
+    let mut i = 0;
+    while i < owners.len() {
+        let (parent, file) = owners[i];
+        i += 1;
+        // owners found through a type (below) are preserved as well as they can be: one that cannot
+        // be checked again leaves only its closures unbuildable, never the edit refused
+        match ensure_parent_body(up, parent, file, 0) {
+            Ok(()) => {}
+            Err(e) if i <= n_slotted => return Err(e),
+            Err(_) => continue,
+        }
         let u = &mut *up;
-        let body = u.body_of(parent, file).unwrap().clone();
+        let Some(body) = u.body_of(parent, file).cloned() else { continue };
         // Freeze shared identity tables before their definitions are replaced.
         // Old closures must never normalize an old alias against the new source.
-        if std::sync::Arc::ptr_eq(&body, &u.tcx.typeck(&u.prog, body.def)) {
+        let body = if std::sync::Arc::ptr_eq(&body, &u.tcx.typeck(&u.prog, body.def)) {
             let state = crate::tcx::EvalState::new();
             let cx = crate::tcx::EvalCx::new(&u.prog, &u.tcx, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), &state);
-            let frozen = crate::typeck::instantiate_body(&cx, &u.prog, &u.tcx, body.def, &body.args);
-            u.put_body(parent, std::sync::Arc::new(frozen));
+            let frozen = std::sync::Arc::new(crate::typeck::instantiate_body(&cx, &u.prog, &u.tcx, body.def, &body.args));
+            u.put_body(parent, frozen.clone());
+            frozen
+        } else {
+            body
+        };
+        // The environments this version gives its closures, recorded now while it is current: a
+        // closure of it may be laid out first after the edit, also when no body of this version
+        // was lowered in this run (code from the disk cache, or an owner that never ran).
+        let storages: Vec<(u32, crate::layout::ClosureStorage)> = body.min_captures.keys()
+            .filter(|ce| *ce & crate::tcx::ASYNC_FN_BODY == 0)
+            .map(|&ce| (ce, crate::layout::ClosureStorage::for_codegen(&u.prog, &u.tcx, &body, ce)))
+            .collect();
+        u.lay.note_closure_storages(&u.prog, &u.tcx, &body, storages.iter().map(|(ce, s)| (*ce, s)));
+        // Closures of OTHER owners of the replaced version this body names (an `impl Fn` a callee
+        // returns, a closure in a generic argument): their owners are preserved the same way, so an
+        // old closure that first runs after the edit lays them out and builds them from that version.
+        let env = crate::tcx::TypingEnv::fully_monomorphized(&u.prog);
+        let mut found = Vec::new();
+        let tys = body.expr_ty.iter().chain(body.pat_ty.iter()).copied().chain(body.locals.iter().map(|l| l.ty));
+        for t in tys {
+            if u.tcx.tys.flags(t).intersects(crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_INFER | crate::types::TypeFlags::HAS_ERROR | crate::types::TypeFlags::HAS_BOUND_VARS) {
+                continue;
+            }
+            let t = u.tcx.normalize_erasing_regions(&u.prog, env, t);
+            closures_named(&u.tcx, t, files, &mut seen_tys, &mut found);
+        }
+        for (file, d, args) in found {
+            let owner = u.fn_id(FnKey::Inst(d, args));
+            if done.insert((owner, file)) {
+                owners.push((owner, file));
+            }
         }
     }
     Ok(())
+}
+
+/// The owners (file, def, args) of the closure types of `files` that type `t` names (closure
+/// environments, generic arguments, pointees: whatever a layout of `t` may need).
+fn closures_named(tcx: &Tcx, t: TyId, files: &[u32], seen: &mut std::collections::HashSet<TyId>, out: &mut Vec<(u32, DefId, Vec<TyId>)>) {
+    if !seen.insert(t) {
+        return;
+    }
+    let all = |v: crate::types::TyList, seen: &mut std::collections::HashSet<TyId>, out: &mut Vec<_>| {
+        for x in tcx.tys.list(v).iter().copied() {
+            closures_named(tcx, x, files, seen, out);
+        }
+    };
+    match tcx.tys.kind(t).clone() {
+        TyKind::Closure(file, _, crate::types::ClosureArgs { parent_args, tupled_upvars_ty, .. }) => {
+            if files.contains(&file) {
+                if let TyKind::FnDef(d, args, _) = tcx.tys.kind(parent_args).clone() {
+                    out.push((file, d, tcx.tys.list(args).to_vec()));
+                }
+            }
+            closures_named(tcx, tupled_upvars_ty, files, seen, out);
+            closures_named(tcx, parent_args, files, seen, out);
+        }
+        TyKind::Tuple(v) | TyKind::Adt(_, v, _) | TyKind::FnDef(_, v, _) => all(v, seen, out),
+        TyKind::Array(e, _) | TyKind::Slice(e) | TyKind::Ref(_, e, _) | TyKind::Ptr(_, e) => closures_named(tcx, e, files, seen, out),
+        TyKind::FnPtr(ps, r, _, _) => {
+            all(ps, seen, out);
+            closures_named(tcx, r, files, seen, out);
+        }
+        TyKind::Dyn(_, v, bs, ..) => {
+            all(v, seen, out);
+            for b in tcx.tys.list(bs).iter() {
+                closures_named(tcx, b.1, files, seen, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The type-checked body closures of slot `id` are lowered from (a fn whose code came from the

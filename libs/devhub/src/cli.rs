@@ -23,7 +23,15 @@ const HELP: &str = "makepad devhub (or observe): the local devhub (start it with
                                           the JIT cache (makepad run's compiled code): what a clear frees, or
                                           clear it (the next start is cold; --dir: that one cache); refused
                                           while JITs run on it unless --force (they keep running)
-  serve [--node <conf>]                   run a hub here without its app (master, or a node with that conf)";
+  serve [--node <conf>]                   run a hub here without its app (master, or a node with that conf)
+  land [<branch|-> [<commercial worktree> <commercial branch>]]
+                                          hand in for landing (no args: this worktree's branch and its nested
+                                          commercial branch); each pending hand-in is quick-gated on its own node
+                                          on the current tips, the passing ones land in queue order
+  land status [all|<branch>] [--json]     per hand-in: queued / gating on <node> / passed / failed + error lines /
+                                          conflict + files / waiting / landed <shas>
+  land wait <branch>                      until it lands, fails or conflicts; prints its status (exit 0 landed)
+  land hold <branch> [reason] | unhold <branch> | retry <branch> | drop <branch>";
 
 pub(crate) fn control() -> Result<Client, String> {
     let c = Client::new(Target::Unix(proto::control_socket()), "observe");
@@ -238,6 +246,7 @@ pub fn main(args: &[String]) -> i32 {
         }
     };
     match a.as_slice() {
+        ["land", rest @ ..] => land(&c, rest),
         ["ls", rest @ ..] => ls(&c, rest.first().copied()),
         ["stream", rest @ ..] => stream(&c, rest.contains(&"--json"), rest.contains(&"--all")),
         ["inspect", target, cmd @ ..] if !cmd.is_empty() => inspect(&c, target, &args[2..]),
@@ -478,4 +487,130 @@ fn cache(args: &[&str]) -> i32 {
         }
     }
     code
+}
+
+/// `land …`: the master's landing train ([`crate::land`]).
+fn land(c: &Client, a: &[&str]) -> i32 {
+    let show = |lines: &[String], full: bool, json: bool| {
+        let now = proto::wall_ms();
+        for l in lines {
+            if json {
+                println!("{l}");
+                continue;
+            }
+            let Some(e) = crate::land::Entry::parse(l) else {
+                println!("{l}");
+                continue;
+            };
+            let age = now.saturating_sub(e.changed_ms) / 1000;
+            let age = if age >= 3600 { format!("{}h", age / 3600) } else if age >= 60 { format!("{}m", age / 60) } else { format!("{age}s") };
+            let mut line = format!("#{} {} {}", e.id, e.label(), e.state.as_str());
+            if !e.node.is_empty() && matches!(e.state, crate::land::St::Gating | crate::land::St::Passed | crate::land::St::Failed) {
+                line += &format!(" on {}", e.node);
+            }
+            if !e.landed.is_empty() {
+                line += &format!(" {}", e.landed);
+            }
+            if !e.held.is_empty() {
+                line += &format!(" HELD: {}", e.held);
+            }
+            println!("{line} {age}");
+            let n = if full { usize::MAX } else { 12 };
+            for d in e.detail.iter().take(n) {
+                println!("  | {d}");
+            }
+            if e.detail.len() > n {
+                println!("  | … {} more (land status {})", e.detail.len() - n, e.label());
+            }
+        }
+    };
+    let ask_land = |line: &str| -> Result<Vec<String>, i32> {
+        match ask(c, None, "land", line) {
+            Ok(l) => match l.iter().find_map(|x| makepad_strict_json::parse(x.as_bytes()).ok().and_then(|v| v.get("err").and_then(|e| e.as_str()).map(str::to_string))) {
+                Some(e) => {
+                    eprintln!("makepad devhub land: {e}");
+                    Err(1)
+                }
+                None => Ok(l),
+            },
+            Err(e) => {
+                eprintln!("makepad devhub land: {e} (an older master without the train? restart devhub)");
+                Err(2)
+            }
+        }
+    };
+    match a {
+        ["status", rest @ ..] => {
+            let json = rest.contains(&"--json");
+            let which: Vec<&str> = rest.iter().copied().filter(|x| *x != "--json").collect();
+            match ask_land(&format!("status {}", which.join(" "))) {
+                Ok(l) => {
+                    if l.is_empty() {
+                        println!("nothing queued");
+                    }
+                    show(&l, !which.is_empty() && which[0] != "all", json);
+                    0
+                }
+                Err(code) => code,
+            }
+        }
+        ["wait", b] => loop {
+            match ask_land(&format!("status {b}")) {
+                Ok(l) => {
+                    let Some(e) = l.last().and_then(|x| crate::land::Entry::parse(x)) else {
+                        eprintln!("makepad devhub land: no entry {b}");
+                        return 1;
+                    };
+                    if matches!(e.state, crate::land::St::Landed | crate::land::St::Failed | crate::land::St::Conflict) {
+                        show(&l[l.len() - 1..], true, false);
+                        return if e.state == crate::land::St::Landed { 0 } else { 1 };
+                    }
+                }
+                Err(code) => return code,
+            }
+            std::thread::sleep(Duration::from_secs(5));
+        },
+        [verb @ ("hold" | "unhold" | "retry" | "drop" | "import"), rest @ ..] => match ask_land(&format!("{verb} {}", rest.join(" "))) {
+            Ok(_) => {
+                println!("{verb} {}: ok", rest.join(" "));
+                0
+            }
+            Err(code) => code,
+        },
+        _ => {
+            // a hand-in: given, or this worktree's branch (+ its nested commercial branch when it is on one)
+            let args: Vec<String> = if a.is_empty() {
+                let g = |dir: &str, args: &[&str]| std::process::Command::new("git").arg("-C").arg(dir).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+                let Some(top) = g(".", &["rev-parse", "--show-toplevel"]) else {
+                    eprintln!("makepad devhub land: run it in a lane worktree, or name the branch");
+                    return 2;
+                };
+                let b = g(&top, &["branch", "--show-current"]).unwrap_or_default();
+                let cdir = format!("{top}/apps/commercial");
+                let cb = g(&cdir, &["branch", "--show-current"]).unwrap_or_default();
+                let mut v = vec![if b.is_empty() || b == "work" { "-".to_string() } else { b }];
+                if !cb.is_empty() && cb != "main" {
+                    v.extend([cdir, cb]);
+                }
+                if v.len() == 1 && v[0] == "-" {
+                    eprintln!("makepad devhub land: this worktree is on no lane branch");
+                    return 2;
+                }
+                v
+            } else {
+                a.iter().map(|x| x.to_string()).collect()
+            };
+            let agent = std::env::var("DEVHUB_AGENT").ok().filter(|x| crate::trust::valid_name(x)).map(|x| format!(" agent={x}")).unwrap_or_default();
+            match ask_land(&format!("add {}{agent}", args.join(" "))) {
+                Ok(l) => {
+                    let v = l.first().and_then(|x| makepad_strict_json::parse(x.as_bytes()).ok());
+                    let n = |k: &str| v.as_ref().and_then(|v| v.get(k)).and_then(|x| x.as_u64()).unwrap_or(0);
+                    let key = if args[0] == "-" { args.last().unwrap() } else { &args[0] };
+                    println!("queued #{} {} ({} open; `makepad devhub land wait {key}`)", n("id"), args.join(" "), n("pos"));
+                    0
+                }
+                Err(code) => code,
+            }
+        }
+    }
 }

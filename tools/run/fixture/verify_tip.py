@@ -130,6 +130,12 @@ class Verifier:
             ("platforms", "build", "arch=arm64,os=macos", "PLATFORMS", ["bash", "tools/run/fixture/check_platforms.sh"]),
             ("arm64", "timed", "arch=arm64,os=macos", "ARM64", ["bash", "tools/run/fixture/arm64_leg.sh", "--diff-fast"]),
         )
+        # the diff leg diffs only when the JIT, platform or the diff programs changed since the last verified tip
+        # (--nightly: always all); fuzz rotates its 500-program window with the tip (land_gate.sh)
+        good = [p for p in read_pairs(self.verified) if p != pair]
+        scope = ["env", f"DIFF_SCOPE={'all' if self.args.nightly or not good else 'affected'}"]
+        if good:
+            scope += [f"VERIFY_BASE={good[-1][0]}", f"VERIFY_CBASE={good[-1][1]}"]
         log(f"VERIFY pair {' '.join(pair)} logs={directory}")
         results = []
         with ExitStack() as stack:
@@ -137,9 +143,10 @@ class Verifier:
             for name, kind, needs, marker, command in legs:
                 output = stack.enter_context((directory / f"{name}.log").open("w"))
                 # Check the pair again on the node before any gate command.
-                guarded = ["bash", "-c", 'test "$(git rev-parse HEAD)" = "$1" && test "$(git -C apps/commercial rev-parse HEAD)" = "$2" || exit 2; shift 2; exec nice -n 10 env CARGO_INCREMENTAL=0 "$@"', "verify-tip", *pair, *command]
+                guarded = ["bash", "-c", 'test "$(git rev-parse HEAD)" = "$1" && test "$(git -C apps/commercial rev-parse HEAD)" = "$2" || exit 2; shift 2; exec nice -n 10 env CARGO_INCREMENTAL=0 "$@"', "verify-tip", *pair, *scope, *command]
                 child = subprocess.Popen(
-                    [str(self.args.devhub), "devhub", "lease", kind, "--needs", needs,
+                    # the lowest priority: landings and lanes go first
+                    [str(self.args.devhub), "devhub", "lease", kind, "--needs", needs, "--prio", "9",
                      "--lane", f"{self.args.lane}-{name}", "--rev", rev, "--", *guarded],
                     cwd=self.repo, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
                 )
@@ -264,6 +271,7 @@ def main():
     parser.add_argument("--lane", default="landverify")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--pair", nargs=2, metavar=("WORK_SHA", "COMMERCIAL_SHA"))
+    parser.add_argument("--nightly", action="store_true", help="diff every program (else only when the JIT, platform or diff programs changed since the last verified tip)")
     parser.add_argument("--dry", action="store_true", help="run real gates, do not write verified/failure ledgers")
     args = parser.parse_args()
     if args.pair and not args.once:

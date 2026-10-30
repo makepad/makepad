@@ -10,9 +10,11 @@
 # pipeline (MAKEPAD_RUN_O3=0), and warm (a second run linking the first run's cached O3 code).
 # Also a breakpoint in `sink` (called from outer's O3 code): `locals break=K1` shows outer's `p`
 # and `n` in the frame above; and a paused thread (`pause`, `locals thread=main`).
-# Run from the workspace root after `cargo build --release -p makepad-run`. TARGET (default
-# target/release). Prints one PASS/FAIL line per check and a last line `inspect_locals: N/M passed`.
-T=${TARGET:-target/release}
+# Run from the workspace root (the JIT runs through `cargo run --profile host`). the JIT runs through `cargo
+# run --profile host`. Prints one PASS/FAIL line per check and a last line `inspect_locals: N/M passed`.
+ROOT=$(pwd)
+# the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
+J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
 dir=$(mktemp -d "${TMPDIR:-/tmp}/inspect_locals.XXXXXX") || exit 1
 mkdir -p "$dir/home" "$dir/t"
 pass=0; total=0
@@ -27,7 +29,7 @@ start() {
     env MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MAKEPAD_HOME="$dir/home" TMPDIR="$dir/t" \
         MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_RUN_CACHE_DIR="$dir/$c" MAKEPAD_RUN_PANIC_PARK=600 \
         PROBE_TRIGGER="$dir/trigger" PROBE_SECS=$secs "$@" \
-        "$T/makepad" run relax-provided-fixture --bin relax-inspect-locals > "$dir/run-$c.log" 2>&1 &
+        $J run relax-provided-fixture --bin relax-inspect-locals > "$dir/run-$c.log" 2>&1 &
     pid=$!
     n=0
     until ask ping > /dev/null 2>&1; do
@@ -36,7 +38,7 @@ start() {
         sleep 0.2
     done
 }
-ask() { TMPDIR="$dir/t" "$T/makepad" inspect $pid "$@" as=json 2>&1; }
+ask() { TMPDIR="$dir/t" $J inspect $pid "$@" as=json 2>&1; }
 panic_locals() {
     touch "$dir/trigger"
     n=0

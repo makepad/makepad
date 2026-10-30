@@ -5222,7 +5222,27 @@ pub fn blocks_in_expr(ast: &Ast, e: ExprId, out: &mut Vec<BlockId>) {
         ExprKind::Match(x, arms) => {
             blocks_in_expr(ast, *x, out);
             for a in ast.list(*arms) {
+                if let Some(g) = a.guard {
+                    blocks_in_expr(ast, g, out);
+                }
                 blocks_in_expr(ast, a.body, out);
+            }
+        }
+        // rustc_ast/src/visit.rs walk_expr visits a `let` condition's scrutinee (`if let Err(_) =
+        // f(&mut |l| { use io::Write as _; .. })`: that block's anonymous module), a range's
+        // ends, `yield`'s and `box`'s operands
+        ExprKind::Let(_, x) | ExprKind::Box(x) => blocks_in_expr(ast, *x, out),
+        ExprKind::Range(a, b, _) => {
+            if let Some(a) = a.get() {
+                blocks_in_expr(ast, a, out);
+            }
+            if let Some(b) = b.get() {
+                blocks_in_expr(ast, b, out);
+            }
+        }
+        ExprKind::Yield(x) => {
+            if let Some(x) = x.get() {
+                blocks_in_expr(ast, x, out)
             }
         }
         ExprKind::Closure(row) => {

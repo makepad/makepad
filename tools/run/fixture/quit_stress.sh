@@ -5,9 +5,9 @@
 # point of a frame each time), sends SIGTERM and requires exit status 0 and no crash or fault line
 # in the output. The driver's exit handlers (NVIDIA's EGL teardown) used to run while a HAL Vulkan
 # worker was still inside vkQueueSubmit, a SIGSEGV in libnvidia-eglcore at the quit.
-# Run from the workspace root after `cargo build --release -p makepad-run -p makepad-remote`, on a
+# Run from the workspace root (the JIT and makepad-remote run through `cargo run --profile host`), on a
 # Linux node with a GPU (or any host with a HAL GPU backend).
-# PACKAGE (default makepad-sandbox), ROUNDS (default 20), TARGET (default target/release). The
+# PACKAGE (default makepad-sandbox), ROUNDS (default 20), the JIT runs through `cargo run --profile host`. The
 # first launch compiles cold and warms the cache; the rounds start warm. WESTON=1 (Linux): the app
 # draws into a real Wayland window -- swapchain acquires and presents on the HAL's queue worker --
 # of a headless weston this script starts on a socket of its own and stops at the end; otherwise
@@ -17,8 +17,11 @@
 # them on the submit worker: the quit that raced the driver. Everything lives in a scratch
 # directory under TMPDIR: removed when all quits pass, else only the logs stay (caches go). PIN=<cpu list> (Linux) runs the app on those CPUs only (taskset): its threads and
 # the driver's crowd each other, so work is still in flight at the signal as on a loaded machine.
-T=${TARGET:-target/release}
-R=$T/makepad-remote
+ROOT=$(pwd)
+# the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
+J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
+JR="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-remote --bin makepad-remote --"
+R=$JR
 PKG=${PACKAGE:-makepad-sandbox}
 ROUNDS=${ROUNDS:-20}
 dir=$(mktemp -d "${TMPDIR:-/tmp}/quit_stress.XXXXXX") || exit 1
@@ -48,10 +51,10 @@ one_round() {
     [ "${SHADER_CACHE:-cold}" = warm ] || export __GL_SHADER_DISK_CACHE_PATH="$d/shaders" __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1
     MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_HOME="$d/home" \
         MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_RUN_CACHE_DIR="$dir/cache" MAKEPAD_WINDOW=1280x800@1 \
-        ${PIN:+taskset -c "$PIN"} "$T/makepad" run "$PKG" > "$d/run.log" 2>&1 &
+        ${PIN:+taskset -c "$PIN"} $J run "$PKG" > "$d/run.log" 2>&1 &
     pid=$!
     n=0
-    until "$R" app $pid grab out="$d/g.png" > "$d/remote.log" 2>&1 && [ -s "$d/g.png" ]; do
+    until $R app $pid grab out="$d/g.png" > "$d/remote.log" 2>&1 && [ -s "$d/g.png" ]; do
         n=$((n + 1)); [ $n -ge 1200 ] && break
         kill -0 $pid 2>/dev/null || break
         sleep 0.5

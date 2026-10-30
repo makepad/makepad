@@ -27,6 +27,9 @@ pub struct SdfKernel {
     /// The program's identity (its whole IR, constants included).
     pub key: u64,
     pub field: Arc<dyn Sdf3 + Send + Sync>,
+    /// The box the program declares its solid in (the kernel's own frame);
+    /// `None`: unbounded (never culled).
+    pub bounds: Option<crate::bounds::Bounds>,
 }
 
 impl std::fmt::Debug for SdfKernel {
@@ -346,6 +349,11 @@ impl Out {
             SdfNode::Kernel(k) => {
                 self.u8(11);
                 self.u64(k.key);
+                // The declared box decides culling: part of the identity.
+                if let Some((lo, hi)) = k.bounds {
+                    self.p3(lo);
+                    self.p3(hi);
+                }
             }
             SdfNode::Mesh(m) => {
                 self.u8(12);
@@ -590,6 +598,14 @@ fn smin(a: f64, b: f64, k: f64) -> f64 {
         return a.min(b);
     }
     let h = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
+    // Outside the blend the nearer operand exactly (`b + (a - b)` rounds):
+    // a far operand, or one culled away, leaves the value bit for bit.
+    if h >= 1.0 {
+        return a;
+    }
+    if h <= 0.0 {
+        return b;
+    }
     b + (a - b) * h - k * h * (1.0 - h)
 }
 

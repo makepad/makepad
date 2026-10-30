@@ -87,6 +87,8 @@ mod headset_imu;
 mod linux_controls;
 #[cfg(target_os = "linux")]
 mod adopt;
+#[cfg(not(target_arch = "wasm32"))]
+mod tiles_query;
 #[cfg(target_os = "linux")]
 mod sdbus;
 #[cfg(target_os = "linux")]
@@ -1055,7 +1057,33 @@ impl App {
         existing.first().copied()
     }
 
+    /// A dock click on a service the WM already runs (devhub, the AI Hub: a client with a tray
+    /// and no tile, perhaps kept from an earlier WM): its window is its tray's dropdown, which
+    /// it is asked to open. Without one it says so in a toast instead of a tile that waits for
+    /// a window that never comes. False: no such service runs (it is started as usual).
+    fn show_running_service(&mut self, cx: &mut Cx, app_id: &str) -> bool {
+        let client = self.state_mut().clients.iter().find(|(_, s)| s.service && s.app == app_id && s.closing.is_none()).map(|(id, _)| *id);
+        let Some(client) = client else { return false };
+        let label = makepad_app_registry::find(app_id).map_or(app_id.to_string(), |e| e.label.to_string());
+        match self.trays.first_dropdown_of(client) {
+            Some(index) => {
+                log!("wm: {label} already runs as this node's service (client {client}): opening its tray window");
+                let seg = self.active_bar_segment();
+                self.tray_press(cx, seg, index);
+            }
+            None => {
+                log!("wm: {label} already runs as this node's service (client {client}) and offers no window to open");
+                let pid = self.state_mut().clients.get(&client).and_then(|s| s.external);
+                self.notify(cx, &format!("{label} is running"), &format!("{label} runs as this node's service{} and has no window to open here: use its tray icon", pid.map_or(String::new(), |p| format!(" (pid {p})"))));
+            }
+        }
+        true
+    }
+
     fn launch_app(&mut self, cx: &mut Cx, app_id: &str) {
+        if (app_id == clients::HUB_SERVICE_APP || app_id == clients::DEVHUB_SERVICE_APP) && self.show_running_service(cx, app_id) {
+            return;
+        }
         // The node's AI Hub is a service the WM supervises (hub_app): the launcher starts it
         // again after its Quit, through the same `cargo run`, and never as a window.
         if app_id == clients::HUB_SERVICE_APP {
@@ -2213,6 +2241,8 @@ impl App {
         }
         #[cfg(not(target_arch = "wasm32"))]
         self.forget_domain(client);
+        #[cfg(target_os = "linux")]
+        adopt::forget(client);
         log!("wm: removing client {}", client);
         self.relay.forget_client(cx, client);
         if self.trays.client_gone(client) {
@@ -2460,6 +2490,14 @@ impl App {
             // connected its hub (a reattach whose connect failed), so no socket closes for it.
             if slot.external.is_some_and(|pid| !makepad_app_host::launch::process_alive(pid)) {
                 log!("wm: {} (client {}, pid {}) is gone; removing its tile", slot.app, id, slot.external.unwrap_or(0));
+                dead.push(*id);
+                continue;
+            }
+            // A launch whose process came to the socket and is gone, its socket closed: the
+            // tile goes even when the launcher it ran under lives on.
+            #[cfg(target_os = "linux")]
+            if slot.socket.is_none() && slot.ready && slot.parent.is_none() && adopt::pid_of(*id).is_some_and(|pid| !makepad_app_host::launch::process_alive(pid)) {
+                log!("wm: {} (client {}, pid {}) is gone and its socket closed; removing its tile", slot.app, id, adopt::pid_of(*id).unwrap_or(0));
                 dead.push(*id);
                 continue;
             }
@@ -3277,8 +3315,11 @@ impl App {
                             adopted = slot.external.is_some();
                         }
                         // An app that came by itself has no process here to reap: its
-                        // socket closing is its end.
-                        if adopted {
+                        // socket closing is its end, unless its process lives on (a restart
+                        // by exec: its next image asks again with the same pid and gets this
+                        // client and tile back; `reap_exited` drops it if the pid ends).
+                        let pid = self.state_mut().clients.get(&client).and_then(|s| s.external);
+                        if adopted && !pid.is_some_and(makepad_app_host::launch::process_alive) {
                             self.remove_client(cx, client);
                             self.update_bar(cx);
                         }
@@ -3305,7 +3346,14 @@ impl App {
     /// The app `client` made another window (`window_id`): a window of its own on the desk,
     /// a tile showing that window, with the app's sender and no process of its own.
     fn open_later_window(&mut self, cx: &mut Cx, client: ClientId, window_id: usize) {
-        if self.client_windows.route(client, window_id) != client || self.is_warm(client) || self.ai_bus.is_pane(client) {
+        let known = self.client_windows.route(client, window_id);
+        if known != client {
+            // announced again by a restarted image: the same tile takes its new frames
+            log!("wm: client {client} announced window {window_id} again (restarted in place): its tile {known} stays");
+            self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| d.with_run_view(cx, known, |cx, v| v.app_ready(cx, known, window_id)));
+            return;
+        }
+        if self.is_warm(client) || self.ai_bus.is_pane(client) {
             return;
         }
         let id = self.next_id;
@@ -3457,7 +3505,14 @@ impl App {
                 // A multi-window app (the VJ: console + output window)
                 // announces every window; the tile hosts the FIRST — the
                 // app's main UI — never a later output/aux window.
-                let first = self
+                // The tile's window announced again: a restarted image of the same process (an
+                // exec into a rebuilt makepad) came back as the same client. It is the same
+                // window: the tile stays where it is, its content refreshes.
+                let again = self.state_mut().clients.get(&client).is_some_and(|slot| slot.ready && slot.window_id == window_id && slot.parent.is_none());
+                if again {
+                    log!("wm: client {client} announced its window {window_id} again (restarted in place): the same tile");
+                }
+                let first = again || self
                     .state_mut()
                     .clients
                     .get_mut(&client)
@@ -3492,6 +3547,10 @@ impl App {
                     // A home tile's client hears which face to show before
                     // its first frame (mobile_app.rs).
                     self.replay_tile_face(cx, client);
+                    // a restarted image starts with none of what the WM told the previous one
+                    if again {
+                        self.resend_screens_event(client);
+                    }
                 }
             }
             AppToStudio::DrawCompleteAndFlip(pd) => {
@@ -6174,7 +6233,9 @@ fn scan_theme_color(source: &str, key: &str) -> Option<Vec4f> {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         #[cfg(not(target_arch = "wasm32"))]
-        makepad_hal::a11y::register_ui_router(a11y::dispatch);
+        makepad_hal::a11y::register_ui_router(a11y::ui_router);
+        #[cfg(not(target_arch = "wasm32"))]
+        tiles_query::register();
         #[cfg(not(target_arch = "wasm32"))]
         { self.domains.enabled = cx.hal_can_host_domains(); }
         // The one bus owner of this process tree: hosted apps' tools are
@@ -7173,6 +7234,8 @@ impl AppMain for App {
                     }
                 }
                 self.reap_exited(cx);
+                #[cfg(not(target_arch = "wasm32"))]
+                self.tiles_list();
                 self.history_poke(cx);
                 self.poll_backgrounds(cx);
                 self.drain_client_lines(cx);
@@ -7202,6 +7265,8 @@ impl AppMain for App {
                 makepad_app_host::hosted::trace_host(host::wall_now(), "sig");
                 self.poll_backgrounds(cx);
                 self.drain_hub(cx);
+                #[cfg(not(target_arch = "wasm32"))]
+                self.tiles_remove_pass(cx);
                 self.drain_client_lines(cx);
                 self.drain_wifi(cx);
                 #[cfg(target_os = "linux")]

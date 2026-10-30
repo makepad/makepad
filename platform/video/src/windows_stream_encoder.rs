@@ -250,7 +250,7 @@ fn hardware_hevc() -> bool {
 impl HardwareMft {
     /// The first hardware encoder of the stream's codec that takes NV12, set up for a live view, or None
     /// (no hardware encoder, or it refused the setup: `Err` says why).
-    unsafe fn open(options: &VideoStreamEncoderOptions) -> Result<Option<HardwareMft>, VideoFileError> {
+    unsafe fn open(options: &VideoStreamEncoderOptions, fast: bool) -> Result<Option<HardwareMft>, VideoFileError> {
         let input = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_NV12 };
         let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: subtype(options.codec) };
         let mut activates: *mut *mut std::ffi::c_void = std::ptr::null_mut();
@@ -274,7 +274,7 @@ impl HardwareMft {
         let mut refused = Vec::new();
         for activate in &list {
             let name = read_friendly_name(activate.as_IMFAttributes()).unwrap_or_else(|| "hardware H.264 encoder".into());
-            match Self::open_one(activate, name.clone(), options) {
+            match Self::open_one(activate, name.clone(), options, fast) {
                 Ok(hw) => return Ok(Some(hw)),
                 Err(e) => {
                     let _ = activate.ShutdownObject();
@@ -285,7 +285,7 @@ impl HardwareMft {
         Err(VideoFileError::new(refused.join("; ")))
     }
 
-    unsafe fn open_one(activate: &IMFActivate, name: String, options: &VideoStreamEncoderOptions) -> Result<HardwareMft, VideoFileError> {
+    unsafe fn open_one(activate: &IMFActivate, name: String, options: &VideoStreamEncoderOptions, fast: bool) -> Result<HardwareMft, VideoFileError> {
         use windows::Win32::Graphics::Direct3D11::ID3D11Multithread;
         let transform = IMFTransform::from_raw(activate.ActivateObject(&IMFTransform::IID).map_err(|e| hr_err("IMFActivate::ActivateObject", e))?)
             .map_err(|e| hr_err("IMFTransform", e))?;
@@ -321,6 +321,10 @@ impl HardwareMft {
         // a peak of twice the mean: a desktop's changes come in bursts (a scroll, a window)
         codec(&CODECAPI_AVENC_COMMON_MAX_BITRATE, options.bitrate_kbps.saturating_mul(2000), "max bitrate");
         codec(&CODECAPI_AVEncMPVDefaultBPictureCount, 0, "no B frames");
+        // the fastest encode (a picture due every display period): speed over quality
+        if fast {
+            codec(&CODECAPI_AVENC_COMMON_QUALITY_VS_SPEED, 0, "speed over quality");
+        }
         if options.keyint > 0 {
             codec(&CODECAPI_AVEncMPVGOPSize, options.keyint, "GOP size");
         }
@@ -435,6 +439,9 @@ const NAL_TYPE_AUD: u8 = 9;
 /// codecapi.h `CODECAPI_AVEncCommonMaxBitRate` (VT_UI4, bit/s): not in the generated bindings'
 /// metadata roots yet (tools/winbind/apis.txt; regenerating needs the .winmd inputs).
 const CODECAPI_AVENC_COMMON_MAX_BITRATE: windows::core::GUID = windows::core::GUID { data1: 0x9651eae4, data2: 0x39b9, data3: 0x4ebf, data4: [0x85, 0xef, 0xd7, 0xf4, 0x44, 0xec, 0x74, 0x65] };
+/// codecapi.h `CODECAPI_AVEncCommonQualityVsSpeed` (VT_UI4, 0 fastest .. 100 best): not in the
+/// generated bindings either.
+const CODECAPI_AVENC_COMMON_QUALITY_VS_SPEED: windows::core::GUID = windows::core::GUID { data1: 0x98332df8, data2: 0x03cd, data3: 0x476b, data4: [0x89, 0xfa, 0x3f, 0x9e, 0x44, 0x2d, 0xec, 0x9f] };
 
 fn in_band_headers(headers: &mut Vec<u8>, data: Vec<u8>, hevc: bool) -> (Vec<u8>, bool) {
     let nals = annex_b::split_annex_b(&data);
@@ -541,9 +548,10 @@ pub struct WindowsStreamEncoder {
 }
 
 impl WindowsStreamEncoder {
-    fn new(options: &VideoStreamEncoderOptions) -> Result<Self, VideoFileError> {
+    /// `fast`: the encoder's fastest encode (a live view's `StreamTuning::sharp` off).
+    fn new(options: &VideoStreamEncoderOptions, fast: bool) -> Result<Self, VideoFileError> {
         ensure_media_foundation()?;
-        let (hardware, hardware_note) = match unsafe { HardwareMft::open(options) } {
+        let (hardware, hardware_note) = match unsafe { HardwareMft::open(options, fast) } {
             Ok(Some(hw)) => (Some(hw), String::new()),
             Ok(None) => (None, format!("no hardware {:?} encoder MFT takes NV12 here", options.codec)),
             Err(e) => (None, format!("the hardware encoder refused the setup: {e:?}")),
@@ -738,8 +746,8 @@ impl StreamEncoderOs for WindowsStreamEncoder {
         EncoderCaps { engines: 2, tiles: true, full_chroma: false, hevc: hardware_hevc() }
     }
 
-    fn open(options: &VideoStreamEncoderOptions, _tile: StreamTile, _tuning: StreamTuning) -> Result<Self, VideoFileError> {
-        Self::new(options)
+    fn open(options: &VideoStreamEncoderOptions, _tile: StreamTile, tuning: StreamTuning) -> Result<Self, VideoFileError> {
+        Self::new(options, options.low_latency && !tuning.sharp)
     }
 
     fn encode_nv12(&mut self, nv12: &[u8], pts_100ns: i64) -> Result<Vec<EncodedPacket>, VideoFileError> {

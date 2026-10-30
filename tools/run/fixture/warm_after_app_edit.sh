@@ -21,13 +21,15 @@
 # Run from the workspace root after the loader is built. PACKAGE (default makepad-sandbox; a
 # `makepad run` argument list with ',' for spaces), APPDIR (the app's source dir, default
 # apps/commercial/sandbox/src), BODY / ITEM / SPLASH (file:line-pattern of the three edits), WAIT
-# (seconds, default 400), TARGET (default $CARGO_TARGET_DIR/release or target/release), STEPS (default "body item splash";
+# (seconds, default 400), the JIT runs through `cargo run --profile host`, STEPS (default "body item splash";
 # another step name <s> takes its edits from STEP_<s>: ';;'-separated <after|before|replace|append>|<file>|<exact line>|<new line>).
 # OUT: where its run dir goes (default $TMPDIR); KEEP=1 keeps it; TRACE=1 writes each session's
 # cache lookups (MAKEPAD_RUN_CACHE_TRACE) there.
 # Prints "warm_after_app_edit: OK ..." or "warm_after_app_edit: FAIL ..."; exit 1 on failure.
-T=${TARGET:-${CARGO_TARGET_DIR:-target}/release}
-B=$(cd "$(dirname "$T/makepad")" && pwd)/makepad
+ROOT=$(pwd)
+# the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
+J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
+B=$J
 PACKAGE=${PACKAGE:-makepad-sandbox}
 APPDIR=${APPDIR:-apps/commercial/sandbox/src}
 WAIT=${WAIT:-400}
@@ -59,7 +61,7 @@ session() { # session <label>: one launch to idle and quit; prints its first-fra
     env MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 TMPDIR="$dir/t" \
         MAKEPAD_HOME="$dir/home" SANDBOX_HOME="$dir/home" MAKEPAD_RUN_HOME="$dir/run" MAKEPAD_RUN_CACHE_DIR="$dir/run/cache" \
         MAKEPAD_RUN_TARGET_DIR="$dir/run/target" MAKEPAD_RUN_CACHE_IFACE="$dir/iface.$label" $trace \
-        MAKEPAD_RUN_VERBOSE=1 "$B" run --report-to "$dir/report.$label" $(echo "$PACKAGE" | tr ',' ' ') > "$dir/log.$label" 2>&1 &
+        MAKEPAD_RUN_VERBOSE=1 $B run --report-to "$dir/report.$label" $(echo "$PACKAGE" | tr ',' ' ') > "$dir/log.$label" 2>&1 &
     pid=$!
     i=0
     while [ $i -lt $((WAIT * 5)) ] && kill -0 $pid 2>/dev/null && ! grep -qx present "$dir/report.$label" 2>/dev/null; do
@@ -67,7 +69,7 @@ session() { # session <label>: one launch to idle and quit; prints its first-fra
     done
     idle=0; i=0; last=""
     while [ $idle -lt 3 ] && [ $i -lt $WAIT ] && kill -0 $pid 2>/dev/null; do
-        last=$(TMPDIR="$dir/t" "$B" inspect $pid jit ms=1000 2>&1)
+        last=$(TMPDIR="$dir/t" $B inspect $pid jit ms=1000 2>&1)
         if echo "$last" | grep -q '^idle'; then idle=$((idle + 1)); else idle=0; fi
         i=$((i + 1))
     done
