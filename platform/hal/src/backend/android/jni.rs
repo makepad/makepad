@@ -80,6 +80,7 @@ unsafe extern "system" fn pause(_: *mut JNIEnv, _: jclass) {
 unsafe extern "system" fn stop(_: *mut JNIEnv, _: jclass) {
     if !super::xr::active() { lock(&Shared::global().state).active = false; }
     emit_lifecycle(lifecycle::BACKGROUND);
+    crate::background_hook();
 }
 unsafe extern "system" fn destroy(env: *mut JNIEnv, _: jclass) {
     lock(&Shared::global().state).active = false;

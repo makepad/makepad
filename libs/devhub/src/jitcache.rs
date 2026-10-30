@@ -188,7 +188,7 @@ pub fn caches() -> Vec<(PathBuf, Kind)> {
 }
 
 /// The live locks of `dir` that a running process holds.
-fn held_locks(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn held_locks(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for e in std::fs::read_dir(dir.join("cache").join("live")).into_iter().flatten().flatten() {
         let p = e.path();
