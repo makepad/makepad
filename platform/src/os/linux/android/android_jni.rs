@@ -122,6 +122,9 @@ pub enum FromJavaMessage {
         ack: SurfaceAck,
     },
     RenderLoop,
+    /// Sent by `wake_ui_event_loop`, so a background thread's signal is handled right away,
+    /// while drawing waits for the next `RenderLoop` tick.
+    Wake,
     LongClick {
         abs: Vec2d,
         pointer_id: u64,

@@ -437,6 +437,9 @@ impl Cx {
                         self.os.last_ime_config = None;
                     }
                 }
+                Ok(FromJavaMessage::Wake) => {
+                    self.handle_other_events();
+                }
                 Ok(message) => {
                     self.handle_message(message);
                     // Dispatch platform ops immediately after non-RenderLoop messages.
@@ -624,6 +627,8 @@ impl Cx {
             FromJavaMessage::RenderLoop => {
                 // This should not happen here, as it's handled in the main loop
             }
+            // A `Wake` that came in during a `RenderLoop` is covered by its `handle_other_events`.
+            FromJavaMessage::Wake => {}
             FromJavaMessage::BackPressed => {
                 self.call_event_handler(&Event::BackPressed {
                     handled: Cell::new(false),
