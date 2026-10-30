@@ -483,6 +483,8 @@ pub struct XlibApp {
     pub window_map: HashMap<c_ulong, *mut XlibWindow>,
 
     pub timers: SelectTimers,
+    /// The longest the next select may block, in seconds; `None` waits for an event or a wakeup.
+    pub ui_wait_limit: Option<f64>,
 
     pub last_click_time: f64,
     pub last_click_pos: (i32, i32),
@@ -569,6 +571,7 @@ impl XlibApp {
                 last_click_pos: (0, 0),
                 window_map: HashMap::new(),
                 timers: SelectTimers::new(),
+                ui_wait_limit: None,
                 event_flow: EventFlow::Poll,
                 //free_timers: Vec::new(),
                 current_cursor: MouseCursor::Default,
@@ -1291,7 +1294,15 @@ impl XlibApp {
                                 time: Some(time),
                             }));
                         }
-                        self.timers.select(self.display_fd);
+                        // A timer handler may have asked for a redraw, so paint right away.
+                        // XPending also flushes our requests and catches events Xlib
+                        // already read off the socket, which select can't see.
+                        if timer_ids.is_empty() && x11_sys::XPending(self.display) == 0 {
+                            self.timers.select_fds_capped(
+                                std::iter::once(self.display_fd),
+                                self.ui_wait_limit,
+                            );
+                        }
                         self.event_flow = EventFlow::Poll;
                     }
                     EventFlow::Poll => {

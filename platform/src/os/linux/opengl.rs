@@ -4616,6 +4616,12 @@ impl Cx {
         self.poll_texture_lifetimes_for(true);
     }
 
+    pub(crate) fn has_pending_gl_resource_retirements(&self) -> bool {
+        self.draw_lists.has_pending_instance_retirements()
+            || self.publications.accounting().pending_retirement != 0
+            || !self.textures.1.retired.is_empty()
+    }
+
     /// Does a render's retirement work on a beat where nothing rendered, so it
     /// finishes at rest without repainting the window.
     pub(crate) fn maintain_instance_retirements(&mut self) {
@@ -4623,10 +4629,7 @@ impl Cx {
         if self.os.vulkan_active() {
             return;
         }
-        if !self.draw_lists.has_pending_instance_retirements()
-            && self.publications.accounting().pending_retirement == 0
-            && self.textures.1.retired.is_empty()
-        {
+        if !self.has_pending_gl_resource_retirements() {
             return;
         }
         // An EGL without surfaceless contexts fails this bind, so we let the poll's

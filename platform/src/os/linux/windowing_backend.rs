@@ -1,15 +1,29 @@
 use super::super::shared_framebuf::PollTimers;
 use super::gstreamer_sys::LibGStreamer;
 use super::linux_media::CxLinuxMedia;
-use super::linux_video_player::LinuxVideoPlayer;
+use super::linux_video_playback::{has_pending_gstreamer_teardowns, poll_pending_gstreamer_teardowns};
+use super::linux_video_player::{
+    collect_linux_audio_player_events, collect_linux_video_player_events, LinuxVideoPlayer,
+};
 
-use crate::{cx::Cx, makepad_live_id::LiveId, opengl_cx::OpenglCx, CxOsApi, OpenUrlInPlace};
-use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant};
+use crate::{
+    cx::Cx, event::Event, makepad_live_id::LiveId, opengl_cx::OpenglCx, thread::SignalToUI,
+    CxOsApi, OpenUrlInPlace,
+};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 // Import OpenglCx from x11 for the unified type
 
 /// Scroll distance in logical pixels for one wheel detent, roughly three lines of
 /// text, matching the common Windows and GTK defaults.
 pub const PIXELS_PER_WHEEL_DETENT: f64 = 60.0;
+
+/// How often `Cx::handle_ui_tick` does its work while there's any to do, in seconds.
+pub(crate) const UI_TICK_INTERVAL: f64 = 0.008;
 
 fn env_var_is_nonempty(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|value| !value.is_empty())
@@ -215,6 +229,10 @@ pub struct CxOs {
     pub(crate) gpu_backend: Option<crate::cx::GpuBackend>,
     pub(crate) video_players: HashMap<LiveId, LinuxVideoPlayer>,
     pub(crate) gstreamer: Option<LibGStreamer>,
+    /// When `Cx::handle_ui_tick` may next do its work.
+    pub(crate) next_ui_tick: Option<Instant>,
+    /// Whether `Cx::handle_ui_tick` last skipped its work because it wasn't due yet.
+    pub(crate) ui_tick_deferred: bool,
 }
 
 impl CxOs {
@@ -243,5 +261,101 @@ impl CxOs {
         } else {
             panic!("No OpenGL context available");
         }
+    }
+}
+
+impl Cx {
+    /// Drains the work other threads queue for the UI thread and polls the media players.
+    ///
+    /// That's the signal flags, posted actions, network events, the control channel,
+    /// video players, GStreamer teardowns and pending live edits. Every paint calls this,
+    /// but the work runs at most every `UI_TICK_INTERVAL` on average, so a flood of
+    /// signals still gets batched; `ui_wait_limit` wakes the loop for a skipped run.
+    pub(crate) fn handle_ui_tick(&mut self, backend: &str) {
+        let now = Instant::now();
+        if self.os.next_ui_tick.is_some_and(|due| now < due) {
+            self.os.ui_tick_deferred = true;
+            return;
+        }
+        // Keep the cadence of a repeating timer (so 144 Hz frames don't halve it),
+        // but don't try to catch up after sleeping.
+        let interval = Duration::from_secs_f64(UI_TICK_INTERVAL);
+        self.os.next_ui_tick = Some(match self.os.next_ui_tick {
+            Some(due) if now < due + interval => due + interval,
+            _ => now + interval,
+        });
+        self.os.ui_tick_deferred = false;
+
+        let internal_signal = SignalToUI::check_and_clear_internal_signal();
+        let ui_signal = SignalToUI::check_and_clear_ui_signal();
+        if internal_signal || ui_signal {
+            self.handle_termination_signal();
+            self.handle_media_signals();
+            self.handle_script_signals();
+        }
+        if ui_signal {
+            self.call_event_handler(&Event::Signal);
+        }
+        if SignalToUI::check_and_clear_action_signal() {
+            self.handle_action_receiver();
+        }
+        self.poll_control_channel();
+        self.handle_actions();
+        self.handle_networking_events();
+
+        // Always sweep pending GStreamer teardowns so the last closed
+        // player still finishes NULL without waiting for a new prepare.
+        if self.os.video_players.is_empty() {
+            poll_pending_gstreamer_teardowns();
+        } else if let Some(opengl_cx) = self.os.opengl_cx.as_ref() {
+            opengl_cx.make_current();
+            let mut players = std::mem::take(&mut self.os.video_players);
+            let mut video_events = Vec::new();
+            for player in players.values_mut() {
+                video_events.extend(collect_linux_video_player_events(
+                    player,
+                    &opengl_cx.libgl,
+                    &mut self.textures,
+                    Some(opengl_cx),
+                ));
+            }
+            self.os.video_players = players;
+            for event in video_events {
+                self.call_event_handler(&event);
+            }
+        } else {
+            // Vulkan: no video texture import yet, audio-only events.
+            let mut players = std::mem::take(&mut self.os.video_players);
+            for player in players.values_mut() {
+                for event in collect_linux_audio_player_events(player) {
+                    self.call_event_handler(&event);
+                }
+            }
+            self.os.video_players = players;
+        }
+
+        self.run_live_edit_if_needed(backend);
+    }
+
+    /// Returns how long the event loop may sleep before the next tick is due, in seconds.
+    ///
+    /// `None` means nothing needs polling, so only an event or a wakeup can bring work.
+    pub(crate) fn ui_wait_limit(&self) -> Option<f64> {
+        // None of these wake the loop by themselves: video players and GPU fences
+        // get polled, `--remote` has deadlines and frame waiters, and queued ops
+        // only get applied at the start of the next pass.
+        let needs_tick = self.os.ui_tick_deferred
+            || !self.platform_ops.is_empty()
+            || !self.os.video_players.is_empty()
+            || has_pending_gstreamer_teardowns()
+            || crate::remote::needs_ticks()
+            || self.pending_script_reapply
+            || self.pending_live_edit_request
+            || (!self.os.vulkan_active() && self.has_pending_gl_resource_retirements());
+        needs_tick.then(|| {
+            self.os.next_ui_tick.map_or(0.0, |due| {
+                due.saturating_duration_since(Instant::now()).as_secs_f64()
+            })
+        })
     }
 }

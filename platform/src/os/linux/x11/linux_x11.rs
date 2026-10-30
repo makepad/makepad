@@ -1,11 +1,8 @@
 use {
     self::super::super::{
         egl_sys,
-        linux_video_playback::{poll_pending_gstreamer_teardowns, GStreamerVideoPlayer},
-        linux_video_player::{
-            collect_linux_video_player_events, prepare_desktop_linux_video, LinuxPrepareResult,
-            LinuxVideoPlayer,
-        },
+        linux_video_playback::GStreamerVideoPlayer,
+        linux_video_player::{prepare_desktop_linux_video, LinuxPrepareResult, LinuxVideoPlayer},
         opengl_cx::OpenglCx,
         v4l2_camera_player::V4l2CameraPlayer,
         x11::x11_sys,
@@ -28,7 +25,6 @@ use {
         makepad_math::{dvec2, Rect},
         os::cx_native::EventFlow,
         texture::TextureFormat,
-        thread::SignalToUI,
         CxWindowPool,
     },
     std::cell::RefCell,
@@ -94,7 +90,6 @@ impl X11Cx {
 
         cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
-        get_xlib_app_global().start_timer(0, 0.008, true);
         get_xlib_app_global().event_loop();
     }
 
@@ -180,6 +175,7 @@ impl X11Cx {
             XlibEvent::Paint => {
                 {
                     let mut cx = self.cx.borrow_mut();
+                    cx.handle_ui_tick("linux-x11");
                     let time_now = xlib_app.time_now();
                     if cx.new_next_frames.len() != 0 {
                         cx.call_next_frame_event(time_now);
@@ -321,59 +317,8 @@ impl X11Cx {
             }
             XlibEvent::Timer(e) => {
                 let mut cx = self.cx.borrow_mut();
-                if e.timer_id == 0 {
-                    let internal_signal = SignalToUI::check_and_clear_internal_signal();
-                    let ui_signal = SignalToUI::check_and_clear_ui_signal();
-                    if internal_signal || ui_signal {
-                        cx.handle_termination_signal();
-                        cx.handle_media_signals();
-                        cx.handle_script_signals();
-                    }
-                    if ui_signal {
-                        cx.call_event_handler(&Event::Signal);
-                    }
-                    if SignalToUI::check_and_clear_action_signal() {
-                        cx.handle_action_receiver();
-                    }
-                    cx.poll_control_channel();
-                    cx.handle_actions();
-                    cx.handle_networking_events();
-
-                    // Poll video players on the timer tick (every ~8ms).
-                    // Always sweep pending GStreamer teardowns so the last closed
-                    // player still finishes NULL without waiting for a new prepare.
-                    if cx.os.video_players.is_empty() {
-                        poll_pending_gstreamer_teardowns();
-                    } else {
-                        cx.os.opengl_cx.as_ref().unwrap().make_current();
-                        let gl: *const super::super::super::gl_sys::LibGl =
-                            &cx.os.opengl_cx.as_ref().unwrap().libgl;
-                        let egl = cx
-                            .os
-                            .opengl_cx
-                            .as_ref()
-                            .map(|cx| cx as *const super::super::opengl_cx::OpenglCx);
-                        let mut players = std::mem::take(&mut cx.os.video_players);
-                        let mut video_events = Vec::new();
-                        for (_video_id, player) in players.iter_mut() {
-                            let opengl_cx = egl.map(|ptr| unsafe { &*ptr });
-                            video_events.extend(collect_linux_video_player_events(
-                                player,
-                                unsafe { &*gl },
-                                &mut cx.textures,
-                                opengl_cx,
-                            ));
-                        }
-                        cx.os.video_players = players;
-                        for event in video_events {
-                            cx.call_event_handler(&event);
-                        }
-                    }
-                } else {
-                    cx.handle_script_timer(&e);
-                    cx.call_event_handler(&Event::Timer(e))
-                }
-
+                cx.handle_script_timer(&e);
+                cx.call_event_handler(&Event::Timer(e));
                 cx.run_live_edit_if_needed("linux-x11");
                 let has_platform_ops = !cx.platform_ops.is_empty();
                 drop(cx);
@@ -405,6 +350,7 @@ impl X11Cx {
         }
 
         let cx = self.cx.borrow();
+        xlib_app.ui_wait_limit = cx.ui_wait_limit();
         if cx.any_passes_dirty()
             || cx.need_redrawing()
             || cx.new_next_frames.len() != 0
@@ -419,8 +365,8 @@ impl X11Cx {
 
     pub(crate) fn handle_repaint(&mut self, opengl_windows: &mut Vec<OpenglWindow>) {
         {
-            // Paint is emitted on every idle poll/timer tick. If no pass is dirty there is
-            // nothing to draw, so skip the eglMakeCurrent + full pass-list scan below.
+            // Paint follows every wake, so most have nothing to draw. If no pass is dirty,
+            // skip the eglMakeCurrent + full pass-list scan below.
             // Time-animated passes don't turn dirty until compute_pass_repaint_order,
             // so demo_time_repaint must keep us rendering.
             let mut cx = self.cx.borrow_mut();

@@ -2303,6 +2303,11 @@ impl WaylandState {
         self.pending_paste_text_input.take()
     }
 
+    /// Returns whether a paste is still waiting on the other app's data.
+    pub(crate) fn has_pending_clipboard_read(&self) -> bool {
+        self.pending_clipboard_read.is_some()
+    }
+
     pub(crate) fn pump_pending_clipboard_read(&mut self) {
         let mut pending = match self.pending_clipboard_read.take() {
             Some(pending) => pending,
@@ -2347,10 +2352,17 @@ impl WaylandState {
                 continue;
             }
 
-            if pending.bytes.is_empty() {
-                self.pending_clipboard_read = Some(pending);
-            } else {
+            // A pipe that closed (or broke) with nothing in it has nothing to paste, so
+            // only keep waiting while the other app just hasn't written anything yet.
+            if !pending.bytes.is_empty() {
                 self.dispatch_paste_bytes(pending.bytes);
+            } else if count < 0
+                && matches!(
+                    std::io::Error::last_os_error().kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                )
+            {
+                self.pending_clipboard_read = Some(pending);
             }
             return;
         }
