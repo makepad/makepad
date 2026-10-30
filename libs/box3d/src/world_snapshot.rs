@@ -57,7 +57,7 @@ use crate::types::{
 pub const SNAP_MAGIC: u32 = 0x33534E42;
 // 2: free contact slots carry only their generation; the pair set writes
 // its occupied slots only.
-pub const SNAP_VERSION: u32 = 2;
+pub const SNAP_VERSION: u32 = 3;
 
 pub const SNAP_FLAG_VALIDATION: u32 = 0x1;
 pub const SNAP_FLAG_DOUBLE_PRECISION: u32 = 0x2;
@@ -1078,6 +1078,10 @@ fn ser_joint_sim(buf: &mut RecBuffer, s: &JointSim) {
     buf.w_f32(s.force_threshold);
     buf.w_f32(s.torque_threshold);
     buf.w_bool(s.fixed_rotation);
+    buf.w_f32(s.friction.coefficient);
+    buf.w_f32(s.friction.radius);
+    buf.w_f32(s.friction.torque);
+    buf.w_vec3(s.friction_impulse);
     ser_joint_union(buf, &s.joint);
 }
 
@@ -1101,6 +1105,8 @@ fn des_joint_sim(r: &mut RecCursor) -> JointSim {
     let force_threshold = r.r_f32();
     let torque_threshold = r.r_f32();
     let fixed_rotation = r.r_bool();
+    let friction = crate::types::JointFriction { coefficient: r.r_f32(), radius: r.r_f32(), torque: r.r_f32() };
+    let friction_impulse = r.r_vec3();
     let joint = des_joint_union(r);
 
     JointSim {
@@ -1120,6 +1126,8 @@ fn des_joint_sim(r: &mut RecCursor) -> JointSim {
         force_threshold,
         torque_threshold,
         fixed_rotation,
+        friction,
+        friction_impulse,
         joint,
     }
 }

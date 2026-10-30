@@ -1478,6 +1478,17 @@ impl ScriptCode {
         if let Some(text) = found { out.push(&text); true } else { false }
     }
 
+    pub(crate) fn ip_body_text_native(&self, ip: ScriptIp, out: &mut crate::vm_api::ScriptTextOut, at: &mut crate::vm_api::ScriptLineCol) -> bool {
+        let bodies = self.bodies.borrow();
+        let Some(body) = bodies.get(ip.body as usize) else { return false };
+        at.line = match &body.source {
+            ScriptSource::Mod(script_mod) => script_mod.line as u32,
+            _ => 0,
+        };
+        out.push(body.code_text());
+        true
+    }
+
     /// True when `ip` is in the body of an adopted fn ([`ScriptVm::adopt_fn`]).
     pub fn ip_is_adopted(&self, ip: ScriptIp) -> bool {
         self.bodies.borrow().get(ip.body as usize).is_some_and(|b| !b.real_file.is_empty())

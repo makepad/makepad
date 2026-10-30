@@ -572,6 +572,18 @@ impl ScriptVm<'_> {
         }
     }
 
+    /// The whole source text of the body holding `ip` and the file line its first line is
+    /// (so `ip_to_loc(ip).line - that` is the 0-based line in the text).
+    #[inline(always)]
+    pub fn body_text(&self, ip: ScriptIp) -> Option<(u32, String)> {
+        let mut text = String::new();
+        let mut sink = ScriptQuerySink::new();
+        let mut out = ScriptTextOut::new(&mut text);
+        sink.text0(&mut out);
+        let answer = self.bx.code_ref().query(QUERY_BODY_TEXT, &mut sink, |req| req.ip = ip);
+        answer.found.then(|| (answer.at.line, text))
+    }
+
     /// See [`Self::fn_text_into`] (`source` false).
     #[inline(always)]
     pub fn fn_text(&self, ip: ScriptIp) -> Option<(ScriptLoc, String)> {

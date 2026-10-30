@@ -7,11 +7,14 @@
 //! - [`mech`]: involute spur gears, ISO metric threads, hole tools.
 //! - [`text`]: text from a font's glyph outlines.
 //! - [`edges`]: a mesh's sharp edges, and fillets / chamfers on them.
+//! - [`constrain`]: the 2D sketch constraint solver (dimensions and
+//!   geometric constraints).
 //!
 //! All results are closed, outward-facing meshes in millimetres; sketches
 //! lie in the XY plane and extrude along +Z.
 
 pub mod bool3;
+pub mod constrain;
 pub mod edges;
 pub mod measure;
 pub mod mech;

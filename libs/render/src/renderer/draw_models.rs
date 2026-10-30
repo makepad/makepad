@@ -522,6 +522,16 @@ impl Renderer {
                 // same `loaded` that picks the geometry and binds `morph_map`.
                 // The per-instance weights stay on the instance stream.
                 draw.base().draw_vars.set_uniform(cx.cx,live_id!(morph_ctl),&[0.0,0.0,0.0,0.0]);
+                // The host's element lookup, bound by name in whatever shader (lane, variant) this item draws
+                // through: a slot-index bind into a shader whose slot 6 is another map reads garbage.
+                if let Some((map, ctl)) = &self.element_lookup {
+                    if let Some(shader) = draw.base().draw_vars.draw_shader_id {
+                        if let Some(slot) = cx.draw_shaders[shader.index].mapping.textures.iter().position(|t| t.id == live_id!(elem_map)) {
+                            draw.base().draw_vars.set_texture(slot, map);
+                            draw.base().draw_vars.set_uniform(cx.cx, live_id!(elem_ctl), ctl);
+                        }
+                    }
+                }
                 if let Some(morph)=&loaded.morph{
                     let target=match lane{WorldModelLane::Placed=>ModelTarget::Instance(i),WorldModelLane::Attachment=>ModelTarget::Attachment(i)};
                     let weights=self.model_anim_state.morph_weights(&target,&inst.model,&morph.source);

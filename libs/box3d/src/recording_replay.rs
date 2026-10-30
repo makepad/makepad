@@ -901,6 +901,9 @@ impl<'a> RecCursor<'a> {
         base.constraint_damping_ratio = self.r_f32();
         base.draw_scale = self.r_f32();
         base.collide_connected = self.r_bool();
+        base.friction.coefficient = self.r_f32();
+        base.friction.radius = self.r_f32();
+        base.friction.torque = self.r_f32();
     }
 
     pub fn r_paralleljointdef(&mut self) -> ParallelJointDef {
@@ -1345,7 +1348,7 @@ fn rec_op_from_u8(v: u8) -> Option<RecOp> {
         WheelJointEnableSteeringLimit, WheelJointSetSteeringLimits, WheelJointSetTargetSteeringAngle,
         QueryOverlapAABB, QueryOverlapShape, QueryCastRay, QueryCastShape, QueryCastRayClosest,
         QueryCastMover, QueryCollideMover, QueryTag,
-        StateHash, RecordingBounds,
+        StateHash, RecordingBounds, JointSetFriction,
     )
 }
 
@@ -2108,6 +2111,15 @@ fn dispatch_one(
             let id = remap_joint_id(world, r.r_jointid());
             if r.ok {
                 crate::joint::joint_wake_bodies(world, id);
+            }
+        }
+        RecOp::JointSetFriction => {
+            let id = remap_joint_id(world, r.r_jointid());
+            let coefficient = r.r_f32();
+            let radius = r.r_f32();
+            let torque = r.r_f32();
+            if r.ok {
+                crate::joint::joint_set_friction(world, id, crate::types::JointFriction { coefficient, radius, torque });
             }
         }
         RecOp::JointSetConstraintTuning => {

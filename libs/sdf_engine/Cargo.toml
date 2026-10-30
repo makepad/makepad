@@ -1,0 +1,11 @@
+[package]
+name = "makepad-sdf-engine"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Realtime SDF engine: shapes lowered to GPU programs, sparse brick volumes baked by draw passes, a bit-exact CPU twin"
+
+[dependencies]
+makepad-draw = { path = "../../draw", version = "2.0.0" }
+makepad-csg-math = { path = "../csg/csg_math" }
+makepad-csg-sdf = { path = "../csg/csg_sdf" }

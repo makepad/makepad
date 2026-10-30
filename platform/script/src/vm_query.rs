@@ -39,6 +39,9 @@ pub const QUERY_BODY_SCOPES: u32 = 18;
 pub const QUERY_INJECTED_GLOBAL: u32 = 19;
 /// `index`: the body; `value` is its initial scope and `flag` whether that is a GC root.
 pub const QUERY_BODY_INITIAL_SCOPE: u32 = 20;
+/// `ip`: the whole source text of the body holding it (text0); `at.line` is the line its
+/// first line has in the file (what [`QUERY_IP_TO_LOC`] lines count from).
+pub const QUERY_BODY_TEXT: u32 = 21;
 
 /// The channels a query writes on.
 pub const CH_TEXT0: u32 = 0;
@@ -350,6 +353,7 @@ impl ScriptCode {
             }
             QUERY_FIELD_LOC => self.field_loc_native(req.ip, req.id, &mut text0, &mut req.at),
             QUERY_IP_LINE_TEXT => self.ip_line_text_native(req.ip, &mut text0),
+            QUERY_BODY_TEXT => self.ip_body_text_native(req.ip, &mut text0, &mut req.at),
             QUERY_BODY_MODULE => {
                 let bodies = self.bodies.borrow();
                 match bodies.get(req.index).map(|b| &b.source) {

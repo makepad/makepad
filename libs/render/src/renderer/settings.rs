@@ -431,8 +431,8 @@ impl Renderer {
     }
 
     /// The per-element lookup the static draw takes (`elem_map`, slot 6, and
-    /// `elem_ctl` = (width, height, 0, enable)), applied to the PBR lane too
-    /// so hidden and offset elements agree across lanes. `None` turns it off.
+    /// `elem_ctl` = (width, height, texels per element: 1 or 4, enable)), applied to the PBR lane too
+    /// so hidden, offset and moved elements agree across lanes. `None` turns it off.
     pub fn set_element_lookup(&mut self, lookup: Option<(Texture, [f32; 4])>) {
         self.element_lookup = lookup;
     }

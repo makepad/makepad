@@ -544,8 +544,37 @@ pub struct JointDef {
     /// Set this flag to true if the attached bodies should collide.
     pub collide_connected: bool,
 
+    /// Dry friction in the joint's free rotation or translation (revolute, spherical and
+    /// prismatic joints). Zero by default.
+    pub friction: JointFriction,
+
     /// Used internally to detect a valid definition. DO NOT SET.
     pub internal_value: i32,
+}
+
+/// Load-dependent dry friction of a joint (port extension, not in the C library).
+///
+/// The friction resisting the joint's free motion is limited to
+/// `torque + coefficient * radius * |reaction force|` for revolute and spherical joints
+/// (a pin or ball of `radius` pressed by the joint's reaction force), and to
+/// `torque + coefficient * |reaction force|` for prismatic joints (`torque` is then a
+/// force). The reaction force is the joint's point (or perpendicular) constraint force,
+/// so a joint carrying more load sticks harder.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct JointFriction {
+    /// Coefficient of friction, non-dimensional.
+    pub coefficient: f32,
+    /// Bearing radius (pin or ball), length units. Unused by prismatic joints.
+    pub radius: f32,
+    /// Constant friction torque (force for prismatic joints) independent of load:
+    /// preload, stiction.
+    pub torque: f32,
+}
+
+impl JointFriction {
+    pub fn is_enabled(&self) -> bool {
+        self.coefficient > 0.0 || self.torque > 0.0
+    }
 }
 
 /// Distance joint definition.

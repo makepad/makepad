@@ -146,11 +146,14 @@ script_mod! {
         //
         // When it is ON, the `ao_uv` lane is NOT an atlas coordinate but a
         // 32-bit element index (unorm16x2, lo in xy / hi in zw), and
-        // `elem_map` holds one RGBA texel per element:
-        //   r = visible (< 0.5 collapses the vertex to the model origin, so
-        //       the whole triangle is zero-area and rasterises nothing)
-        //   gba = a model-space offset added to the vertex (exploded views)
-        // `elem_ctl` = (map width, map height, unused, enable).
+        // `elem_map` holds `elem_ctl.z` RGBA texels per element (1 when 0):
+        //   texel 0: r = visible (< 0.5 collapses the vertex to the model
+        //       origin, so the whole triangle is zero-area and rasterises
+        //       nothing); gba = a model-space offset added to the vertex
+        //   texels 1..3 (stride 4 only): the rows of a model-space rotation
+        //       applied before the offset (rigid moves: a live mechanism),
+        //       and to the normal
+        // `elem_ctl` = (map width, map height, texels per element, enable).
         // The host writes both with `DrawVars::set_texture(6, ..)` /
         // `set_uniform(live_id!(elem_ctl), ..)` on its own draw struct.
         elem_map: texture_2d(float)
@@ -310,6 +313,12 @@ script_mod! {
         // lanes carry a unit normal that would otherwise cost three floats.
         // sign is inlined rather than shared: the builtin sign() returns 0 at
         // 0, which would collapse the fold on an axis-aligned normal.
+        elem_texel: fn(i: float) -> vec4f {
+            let ew = max(self.elem_ctl.x, 1.0)
+            let eh = max(self.elem_ctl.y, 1.0)
+            return self.elem_map.sample_nearest(vec2((modf(i, ew) + 0.5) / ew, (floor(i / ew) + 0.5) / eh), 0.0)
+        }
+
         oct_decode: fn(e: vec2f) -> vec3f {
             let nz = 1.0 - abs(e.x) - abs(e.y)
             let t = max(0.0 - nz, 0.0)
@@ -370,18 +379,25 @@ script_mod! {
             )
             // The CAD lookup reads the same lane as an element index. See
             // the `elem_map` declaration above; off unless the host enabled it.
+            var er0 = vec3(1.0, 0.0, 0.0)
+            var er1 = vec3(0.0, 1.0, 0.0)
+            var er2 = vec3(0.0, 0.0, 1.0)
             if self.elem_ctl.w > 0.5 {
-                let ew = max(self.elem_ctl.x, 1.0)
-                let eh = max(self.elem_ctl.y, 1.0)
                 let lo = (ao_uv_b.x + ao_uv_b.y * 256.0) * 255.0
                 let hi = (ao_uv_b.z + ao_uv_b.w * 256.0) * 255.0
                 let ei = floor(lo + hi * 65536.0 + 0.5)
-                let ex = (modf(ei, ew) + 0.5) / ew
-                let ey = (floor(ei / ew) + 0.5) / eh
-                let f = self.elem_map.sample_nearest(vec2(ex, ey), 0.0)
+                let stride = max(self.elem_ctl.z, 1.0)
+                let base = ei * stride
+                let f = self.elem_texel(base)
                 if f.x < 0.5 {
                     pos = vec3(0.0, 0.0, 0.0)
                 } else {
+                    if stride > 3.5 {
+                        er0 = self.elem_texel(base + 1.0).xyz
+                        er1 = self.elem_texel(base + 2.0).xyz
+                        er2 = self.elem_texel(base + 3.0).xyz
+                        pos = vec3(dot(er0, pos), dot(er1, pos), dot(er2, pos))
+                    }
                     pos = pos + f.yzw
                 }
                 chart_uv = vec2(0.0, 0.0)
@@ -393,6 +409,7 @@ script_mod! {
             self.v_lm_uv = self.lm_rect.xy + self.v_ao_uv * self.lm_rect.zw
             var normal_in = self.oct_decode(unpack2f16(self.geom.nrm))
             if self.morph_ctl.w>0.5{normal_in=normalize(normal_in+self.morph_delta(self.geom.ao_uv,1.0))}
+            normal_in = vec3(dot(er0, normal_in), dot(er1, normal_in), dot(er2, normal_in))
             // The material `vertex` hook (render-material): identity here.
             pos = self.mat_vertex(pos, normal_in, unpack2f16(self.geom.uv))
             self.v_fur_root = vec3(self.geom.px, self.geom.py, self.geom.pz)

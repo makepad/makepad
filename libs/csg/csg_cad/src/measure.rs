@@ -7,6 +7,266 @@ use makepad_csg_math::{dvec3, Vec3d};
 use makepad_csg_mesh::mesh::TriMesh;
 use std::collections::HashMap;
 
+/// A fitted circle; lengths use the input coordinates' units. `rms` is the
+/// root mean square distance to the circle, including out-of-plane error.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Circle3 {
+    pub center: [f64; 3],
+    pub normal: [f64; 3],
+    pub radius: f64,
+    pub rms: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlaneGap {
+    pub distance: f64,
+    /// Unoriented angle between planes, in [0, 90] degrees.
+    pub angle_deg: f64,
+    pub parallel: bool,
+}
+
+fn xyz(p: [f64; 3]) -> Vec3d {
+    dvec3(p[0], p[1], p[2])
+}
+
+fn array(p: Vec3d) -> [f64; 3] {
+    [p.x, p.y, p.z]
+}
+
+/// Polyline length. Repeat the first point at the end for a closed chain.
+pub fn edge_length(points: &[[f64; 3]]) -> f64 {
+    points.windows(2).map(|w| xyz(w[0]).distance(xyz(w[1]))).sum()
+}
+
+/// Angle between directions in degrees; an undefined direction yields NaN.
+pub fn angle_between(a_dir: [f64; 3], b_dir: [f64; 3]) -> f64 {
+    let (a, b) = (xyz(a_dir), xyz(b_dir));
+    let len = a.length() * b.length();
+    if len == 0.0 { return f64::NAN; }
+    (a.dot(b) / len).clamp(-1.0, 1.0).acos().to_degrees()
+}
+
+/// Parallel (including opposed) normals within 0.5 degrees give the gap
+/// along `na`. Otherwise distance is between the picked points.
+pub fn plane_distance(pa: [f64; 3], na: [f64; 3], pb: [f64; 3], nb: [f64; 3]) -> PlaneGap {
+    let angle = angle_between(na, nb);
+    let angle_deg = if angle > 90.0 { 180.0 - angle } else { angle };
+    let parallel = angle_deg <= 0.5;
+    let delta = xyz(pb) - xyz(pa);
+    let distance = if parallel { delta.dot(xyz(na).normalize()).abs() } else { delta.length() };
+    PlaneGap { distance, angle_deg, parallel }
+}
+
+fn solve3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> Option<[f64; 3]> {
+    let scale = a.iter().flatten().fold(0.0f64, |s, v| s.max(v.abs()));
+    for k in 0..3 {
+        let pivot = (k..3).max_by(|&i, &j| a[i][k].abs().total_cmp(&a[j][k].abs()))?;
+        if a[pivot][k].abs() <= scale * 1e-14 { return None; }
+        a.swap(k, pivot);
+        b.swap(k, pivot);
+        for i in k + 1..3 {
+            let f = a[i][k] / a[k][k];
+            for j in k..3 { a[i][j] -= f * a[k][j]; }
+            b[i] -= f * b[k];
+        }
+    }
+    let mut x = [0.0; 3];
+    for i in (0..3).rev() {
+        x[i] = (b[i] - (i + 1..3).map(|j| a[i][j] * x[j]).sum::<f64>()) / a[i][i];
+    }
+    x.iter().all(|v| v.is_finite()).then_some(x)
+}
+
+/// Least-squares plane (smallest covariance eigenvector), Kasa circle in
+/// that plane, then geometric Gauss-Newton refinement. Collinear or invalid
+/// inputs have no circle. Centering and scaling keep small parts well conditioned.
+pub fn fit_circle3(points: &[[f64; 3]]) -> Option<Circle3> {
+    if points.len() < 3 || points.iter().flatten().any(|v| !v.is_finite()) { return None; }
+    let origin = xyz(points[0]);
+    let mean = points.iter().fold(dvec3(0.0, 0.0, 0.0), |s, p| s + (xyz(*p) - origin)) / points.len() as f64;
+    let center = origin + mean;
+    let scale = points.iter().map(|p| (xyz(*p) - center).length()).fold(0.0f64, f64::max);
+    if scale == 0.0 || !scale.is_finite() { return None; }
+    let ps: Vec<Vec3d> = points.iter().map(|p| (xyz(*p) - center) / scale).collect();
+    let mut cov = [[0.0; 3]; 3];
+    for p in &ps {
+        let p = array(*p);
+        for i in 0..3 { for j in 0..3 { cov[i][j] += p[i] * p[j]; } }
+    }
+    let mut axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    // Jacobi rotations diagonalise a symmetric 3x3 covariance matrix.
+    for _ in 0..32 {
+        let (i, j) = [(0, 1), (0, 2), (1, 2)].into_iter()
+            .max_by(|&(a, b), &(c, d)| cov[a][b].abs().total_cmp(&cov[c][d].abs()))?;
+        if cov[i][j].abs() <= 1e-15 * (cov[0][0] + cov[1][1] + cov[2][2]) { break; }
+        let theta = 0.5 * (2.0 * cov[i][j]).atan2(cov[j][j] - cov[i][i]);
+        let (s, c) = theta.sin_cos();
+        let (ai, aj, off) = (cov[i][i], cov[j][j], cov[i][j]);
+        cov[i][i] = c * c * ai - 2.0 * s * c * off + s * s * aj;
+        cov[j][j] = s * s * ai + 2.0 * s * c * off + c * c * aj;
+        cov[i][j] = 0.0;
+        cov[j][i] = 0.0;
+        for k in 0..3 {
+            if k != i && k != j {
+                let (a, b) = (cov[k][i], cov[k][j]);
+                cov[k][i] = c * a - s * b;
+                cov[i][k] = cov[k][i];
+                cov[k][j] = s * a + c * b;
+                cov[j][k] = cov[k][j];
+            }
+            let (a, b) = (axes[k][i], axes[k][j]);
+            axes[k][i] = c * a - s * b;
+            axes[k][j] = s * a + c * b;
+        }
+    }
+    let mut order = [0, 1, 2];
+    order.sort_by(|&i, &j| cov[i][i].total_cmp(&cov[j][j]));
+    if cov[order[1]][order[1]] <= cov[order[2]][order[2]] * 1e-12 { return None; }
+    let axis = |i: usize| dvec3(axes[0][i], axes[1][i], axes[2][i]).normalize();
+    let n = axis(order[0]);
+    let u = axis(order[2]);
+    let v = n.cross(u).normalize();
+    let xy: Vec<[f64; 2]> = ps.iter().map(|p| [p.dot(u), p.dot(v)]).collect();
+    let mut a = [[0.0; 3]; 3];
+    let mut b = [0.0; 3];
+    for &[x, y] in &xy {
+        let row = [2.0 * x, 2.0 * y, 1.0];
+        for i in 0..3 {
+            b[i] += row[i] * (x * x + y * y);
+            for j in 0..3 { a[i][j] += row[i] * row[j]; }
+        }
+    }
+    let [mut cx, mut cy, k] = solve3(a, b)?;
+    let mut radius = (k + cx * cx + cy * cy).sqrt();
+    let error = |cx: f64, cy: f64, r: f64| xy.iter().map(|p| ((p[0] - cx).hypot(p[1] - cy) - r).powi(2)).sum::<f64>();
+    for _ in 0..8 {
+        let mut a = [[0.0; 3]; 3];
+        let mut b = [0.0; 3];
+        for &[x, y] in &xy {
+            let d = (cx - x).hypot(cy - y);
+            if d <= f64::EPSILON { continue; }
+            let row = [(cx - x) / d, (cy - y) / d, -1.0];
+            for i in 0..3 {
+                b[i] -= row[i] * (d - radius);
+                for j in 0..3 { a[i][j] += row[i] * row[j]; }
+            }
+        }
+        let Some(step) = solve3(a, b) else { break };
+        let old_error = error(cx, cy, radius);
+        let mut f = 1.0;
+        for _ in 0..8 {
+            if radius + f * step[2] > 0.0 && error(cx + f * step[0], cy + f * step[1], radius + f * step[2]) <= old_error { break; }
+            f *= 0.5;
+        }
+        if radius + f * step[2] <= 0.0 || error(cx + f * step[0], cy + f * step[1], radius + f * step[2]) > old_error { break; }
+        cx += f * step[0];
+        cy += f * step[1];
+        radius += f * step[2];
+        if step.iter().all(|s| (f * s).abs() < 1e-14) { break; }
+    }
+    if !radius.is_finite() || radius <= 0.0 { return None; }
+    let rms = ((error(cx, cy, radius) + ps.iter().map(|p| p.dot(n).powi(2)).sum::<f64>()) / ps.len() as f64).sqrt() * scale;
+    Some(Circle3 { center: array(center + (u * cx + v * cy) * scale), normal: array(n), radius: radius * scale, rms })
+}
+
+/// Closest point on an open polyline (repeat the first point to close it).
+pub fn closest_on_chain(points: &[[f64; 3]], at: [f64; 3]) -> Option<[f64; 3]> {
+    let at = xyz(at);
+    points.windows(2).map(|w| {
+        let (a, b) = (xyz(w[0]), xyz(w[1]));
+        let d = b - a;
+        let t = if d.length_sq() > 0.0 { ((at - a).dot(d) / d.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+        a + d * t
+    }).min_by(|a, b| a.distance(at).total_cmp(&b.distance(at))).map(array)
+}
+
+/// Nearest feature chain, using the solid edge walk in both directions.
+/// Positions use millimetres, matching `feature_edges`' welding tolerance.
+/// The closing segment is explicit. No mesh types cross this API boundary.
+pub fn feature_edge_chain(positions: &[[f64; 3]], indices: &[u32], at: [f64; 3]) -> Option<Vec<[f64; 3]>> {
+    if indices.len() % 3 != 0 || indices.iter().any(|&i| i as usize >= positions.len()) { return None; }
+    let mesh = TriMesh {
+        vertices: positions.iter().map(|p| xyz(*p)).collect(),
+        triangles: indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect(),
+    };
+    crate::feature_edges(&mesh, 20.0).into_iter().map(|edge| {
+        let mut points: Vec<_> = edge.points.into_iter().map(array).collect();
+        if edge.closed && !points.is_empty() { points.push(points[0]); }
+        points
+    }).filter_map(|points| {
+        let p = closest_on_chain(&points, at)?;
+        Some((xyz(p).distance(xyz(at)), points))
+    }).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, points)| points)
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+
+    #[test]
+    fn tilted_circle_36_points() {
+        let center = dvec3(12.0, -4.0, 25.0);
+        let u = dvec3(0.8, 0.6, 0.0);
+        let v = dvec3(-0.36, 0.48, 0.8);
+        let points: Vec<_> = (0..36).map(|i| {
+            let t = std::f64::consts::TAU * i as f64 / 36.0;
+            array(center + (u * t.cos() + v * t.sin()) * 7.5)
+        }).collect();
+        let c = fit_circle3(&points).unwrap();
+        assert!((c.radius - 7.5).abs() < 1e-9, "{c:?}");
+        assert!(xyz(c.center).distance(center) < 1e-9);
+        assert!(xyz(c.normal).dot(u.cross(v)).abs() > 1.0 - 1e-12);
+        assert!(c.rms < 1e-9);
+    }
+
+    #[test]
+    fn noisy_three_points_and_degenerate_inputs() {
+        let c = fit_circle3(&[[1.001, 0.002, 0.001], [0.001, 0.999, -0.002], [-0.998, -0.001, 0.002]]).unwrap();
+        assert!((c.radius - 1.0).abs() < 0.01, "{c:?}");
+        assert!(c.rms < 1e-10);
+        assert!(fit_circle3(&[[0.0; 3], [1.0; 3]]).is_none());
+        assert!(fit_circle3(&[[0.0; 3], [1.0; 3], [2.0; 3]]).is_none());
+        assert!(fit_circle3(&[[1.0; 3]; 3]).is_none());
+        assert!(fit_circle3(&[[f64::NAN; 3]; 3]).is_none());
+    }
+
+    #[test]
+    fn circle_rms_includes_nonplanarity() {
+        let points: Vec<_> = (0..36).map(|i| {
+            let t = std::f64::consts::TAU * i as f64 / 36.0;
+            [7.5 * t.cos(), 7.5 * t.sin(), if i % 2 == 0 { 0.01 } else { -0.01 }]
+        }).collect();
+        let c = fit_circle3(&points).unwrap();
+        assert!((c.radius - 7.5).abs() < 1e-9);
+        assert!((c.rms - 0.01).abs() < 1e-9);
+    }
+
+    #[test]
+    fn opposite_box_faces_are_20_mm_apart() {
+        let gap = plane_distance([0.0; 3], [-2.0, 0.0, 0.0], [20.0, 3.0, 4.0], [1.0, 0.0, 0.0]);
+        assert!(gap.parallel);
+        assert_eq!(gap.distance, 20.0);
+        assert_eq!(gap.angle_deg, 0.0);
+    }
+
+    #[test]
+    fn faces_at_30_degrees_report_angle_and_point_distance() {
+        let t = 30f64.to_radians();
+        let gap = plane_distance([0.0; 3], [1.0, 0.0, 0.0], [3.0, 4.0, 0.0], [t.cos(), t.sin(), 0.0]);
+        assert!(!gap.parallel);
+        assert!((gap.angle_deg - 30.0).abs() < 1e-12);
+        assert_eq!(gap.distance, 5.0);
+        assert!((angle_between([2.0, 0.0, 0.0], [0.0, 3.0, 0.0]) - 90.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn edge_length_sums_the_chain() {
+        assert_eq!(edge_length(&[]), 0.0);
+        assert_eq!(edge_length(&[[0.0; 3]]), 0.0);
+        assert_eq!(edge_length(&[[0.0; 3], [3.0, 0.0, 0.0], [3.0, 4.0, 0.0]]), 7.0);
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Aabb {
     lo: Vec3d,
