@@ -159,10 +159,12 @@ unsafe fn asset_copy(manager: *mut c_void, name: &str, dst: &std::path::Path) ->
 /// by then). A seed of another build or CPU class is keyed away by its store names (codegen
 /// identity, arch, atomics) and costs only disk until the next prune.
 unsafe fn seed_cache(manager: *mut c_void, home: &std::path::Path) {
+    // a seed put on disk (an installer's or the app's own download) comes first
+    if let Some(files) = home.parent() {
+        if seed_from_dir(&files.join("makepad-run-seed"), home) { return; }
+    }
     let Ok(index) = asset_text(manager, SEED_INDEX_ASSET) else { return };
-    let has_stores = std::fs::read_dir(home.join("target")).into_iter().flatten().flatten()
-        .any(|d| std::fs::read_dir(d.path().join("cache")).into_iter().flatten().flatten().any(|f| f.file_name().to_string_lossy().contains(".rcs")));
-    if has_stores {
+    if has_stores(home) {
         return;
     }
     let t = std::time::Instant::now();
@@ -184,6 +186,42 @@ unsafe fn seed_cache(manager: *mut c_void, home: &std::path::Path) {
     }
     logcat::log(&format!("compile cache seeded from the APK: {n} files, {} MB in {:.1} s{}", bytes >> 20, t.elapsed().as_secs_f64(), if failed > 0 { format!(", {failed} failed") } else { String::new() }));
     boot::set_note("warm start \u{b7} seeded cache");
+}
+
+/// Whether a run dir under the relax home holds a store already (then no seed is laid down).
+fn has_stores(home: &std::path::Path) -> bool {
+    std::fs::read_dir(home.join("target")).into_iter().flatten().flatten()
+        .any(|d| std::fs::read_dir(d.path().join("cache")).into_iter().flatten().flatten().any(|f| f.file_name().to_string_lossy().contains(".rcs")))
+}
+
+/// A seed an installer or the app's own download put on disk (`<files>/makepad-run-seed/`: an
+/// `index.txt` and the stores it lists, the APK seed's layout), so a phone gets its warm first
+/// launch from a download sized to it instead of from the APK. The files are moved into the relax
+/// home (a rename: the same filesystem) and the folder is removed; the same first-launch rule as
+/// the APK's seed: only when no store exists yet.
+fn seed_from_dir(seed: &std::path::Path, home: &std::path::Path) -> bool {
+    let Ok(index) = std::fs::read_to_string(seed.join("index.txt")) else { return false };
+    if has_stores(home) {
+        let _ = std::fs::remove_dir_all(seed);
+        return false;
+    }
+    let t = std::time::Instant::now();
+    let (mut n, mut failed) = (0usize, 0usize);
+    for rel in index.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if rel.starts_with('/') || rel.split('/').any(|c| c == "..") {
+            continue;
+        }
+        let dst = home.join(rel);
+        if let Some(d) = dst.parent() { let _ = std::fs::create_dir_all(d); }
+        match std::fs::rename(seed.join(rel), &dst) {
+            Ok(()) => n += 1,
+            Err(e) => { failed += 1; logcat::log(&format!("cache seed (disk): {rel}: {e}")); }
+        }
+    }
+    let _ = std::fs::remove_dir_all(seed);
+    logcat::log(&format!("compile cache seeded from {}: {n} files in {:.1} s{}", seed.display(), t.elapsed().as_secs_f64(), if failed > 0 { format!(", {failed} failed") } else { String::new() }));
+    if n > 0 { boot::set_note("warm start \u{b7} seeded cache"); }
+    n > 0
 }
 
 struct App {
