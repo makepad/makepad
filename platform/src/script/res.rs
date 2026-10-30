@@ -305,6 +305,13 @@ fn web_resource_base_path(pathname: &str) -> String {
     base_path.trim_start_matches('/').to_string()
 }
 
+/// The handle this heap already holds for a crate resource, if any.
+fn registered_crate_resource(vm: &mut ScriptVm, crate_part: &str, file_path: &str) -> Option<ScriptValue> {
+    let (abs_path, _, _) = resolve_crate_resource_paths(vm, crate_part, file_path)?;
+    let heap_key = vm.bx.heap.heap_key();
+    vm.host.cx_mut().script_data.resources.get_handle_by_abs_path(heap_key, &abs_path).map(Into::into)
+}
+
 fn register_crate_resource_parts(
     vm: &mut ScriptVm,
     res_type: ScriptHandleType,
@@ -1095,11 +1102,12 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(crate_resource),
         script_args_def!(path = NIL),
         move |vm, args| {
-            if vm.host.cx_mut().script_data.std.host_io_only() {
-                return script_err_io!(vm.trap(), "external resources require a host request");
-            }
+            let host_io_only = vm.host.cx_mut().script_data.std.host_io_only();
             let path = script_value!(vm, args.path);
             if !path.is_string_like() {
+                if host_io_only {
+                    return script_err_io!(vm.trap(), "external resources require a host request");
+                }
                 return script_err_type_mismatch!(vm.trap(), "invalid res arg type");
             }
 
@@ -1107,8 +1115,18 @@ pub fn script_mod(vm: &mut ScriptVm) {
 
             if let Some(path_string) = path_string {
                 if let Some((crate_part, file_path)) = parse_crate_path(&path_string) {
+                    // A restricted heap only gets back what its trusted boot already
+                    // loaded, e.g., when a restyle registers its widgets again.
+                    if host_io_only {
+                        return registered_crate_resource(vm, crate_part, file_path).unwrap_or_else(|| {
+                            script_err_io!(vm.trap(), "external resources require a host request")
+                        });
+                    }
                     return register_crate_resource_parts(vm, res_type, crate_part, file_path);
                 }
+            }
+            if host_io_only {
+                return script_err_io!(vm.trap(), "external resources require a host request");
             }
 
             script_err_type_mismatch!(vm.trap(), "invalid res arg type")

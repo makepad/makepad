@@ -4,7 +4,8 @@ use crate::{
     view::View,
     widget::*,
     widget_async::{
-        CxSplashVmExt, SplashVmId, MAIN_SPLASH_VM_ID, WIDGET_SCRIPT_INSTRUCTION_LIMIT,
+        splash_theme, splash_theme_generation, splash_theme_script, CxSplashVmExt, SplashTheme,
+        SplashThemeScript, SplashVmId, MAIN_SPLASH_VM_ID, WIDGET_SCRIPT_INSTRUCTION_LIMIT,
     },
     widget_tree::CxWidgetExt,
 };
@@ -90,6 +91,20 @@ pub struct Splash {
     /// `!vm.is_reload()`-guarded application state survives a style reload.
     #[rust]
     body_modules: Vec<LiveId>,
+    /// The stock theme this isolate is pinned to; None follows the host's.
+    #[rust]
+    theme: Option<SplashTheme>,
+    #[rust]
+    styled: StyledTheme,
+}
+
+/// What an isolate was last styled with, and the host-theme generation it last checked.
+#[derive(Clone, Default)]
+struct StyledTheme {
+    theme: SplashTheme,
+    script: Option<std::rc::Rc<SplashThemeScript>>,
+    pin: Option<SplashTheme>,
+    generation: u64,
 }
 
 impl ScriptHook for Splash {
@@ -142,6 +157,66 @@ impl Splash {
         }
     }
 
+    /// Pins this Splash's isolate to one of makepad's stock themes, without
+    /// the host's [`SplashThemeScript`](crate::SplashThemeScript), e.g., for
+    /// an app written before the host had a theme of its own. `None` follows
+    /// the host's theme again. A running isolate restyles on its next draw.
+    pub fn set_theme(&mut self, cx: &mut Cx, theme: Option<SplashTheme>) {
+        if self.theme != theme {
+            self.theme = theme;
+            self.view.redraw(cx);
+        }
+    }
+
+    /// The theme and host script this isolate should be styled with. A pinned
+    /// theme takes none of the host's script.
+    fn wanted_style(&self) -> (SplashTheme, Option<std::rc::Rc<SplashThemeScript>>) {
+        match self.theme {
+            Some(theme) => (theme, None),
+            None => (splash_theme(), splash_theme_script()),
+        }
+    }
+
+    fn current_style(&self) -> StyledTheme {
+        let (theme, script) = self.wanted_style();
+        StyledTheme { theme, script, pin: self.theme, generation: splash_theme_generation() }
+    }
+
+    /// Whether the theme moved off what the isolate was styled with. A switch
+    /// away and back again doesn't count.
+    fn needs_restyle(&mut self) -> bool {
+        let generation = splash_theme_generation();
+        if self.styled.generation == generation && self.styled.pin == self.theme {
+            return false;
+        }
+        self.styled.generation = generation;
+        self.styled.pin = self.theme;
+        let (theme, script) = self.wanted_style();
+        theme != self.styled.theme || script.as_deref() != self.styled.script.as_deref()
+    }
+
+    /// Restyles a running isolate onto the theme it should now have, then runs
+    /// the body again on it, as a stylesheet change does. That run starts the
+    /// app over, so the timers and pending host requests of the previous run
+    /// are dropped first rather than left to write over the new one.
+    fn restyle_theme(&mut self, cx: &mut Cx) {
+        self.styled = self.current_style();
+        let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+        stop_script_timers(cx, &isolate_timer_ids(cx, heap_key));
+        self.startup_timers.clear();
+        crate::splash_host::forget_callbacks(heap_key);
+
+        let (theme, script) = (self.styled.theme, self.styled.script.clone());
+        let host_io_only = self.host_io_only;
+        let vm_id = self.vm_id;
+        crate::widget_async::contain_isolate_panic("theme restyle", || {
+            cx.with_script_vm_id_trusted(vm_id, |vm| {
+                crate::widget_async::restyle_isolate(vm, theme, script.as_deref(), host_io_only);
+            });
+        });
+        self.eval_styled_body(cx, true);
+    }
+
     /// The body's identity within its isolate, carried in `ScriptMod`'s
     /// `module_path`.
     ///
@@ -177,7 +252,8 @@ impl Splash {
 
         if self.vm_id == MAIN_SPLASH_VM_ID {
             self.host_io_only |= cx.script_data.std.host_io_only();
-            self.vm_id = cx.alloc_splash_vm_with_io(self.allow_net, self.host_io_only);
+            self.styled = self.current_style();
+            self.vm_id = cx.alloc_splash_vm_with_theme(self.allow_net, self.host_io_only, self.theme);
         }
         // (Re)bind this isolate's storage jail and host-bridge identity.
         // Keyed by heap so the script can neither read nor retarget them.
@@ -212,6 +288,7 @@ impl Splash {
 
         let vm_id = self.vm_id;
         let sheet=if self.host_io_only {None} else {self.stylesheet.clone()};
+        let (theme, script) = (self.styled.theme, self.styled.script.clone());
         self.style_pending=false;
         // A style reapply runs the body's top-level statements again: only the
         // body defines the widget tree, and that tree has to be rebuilt on the
@@ -237,7 +314,7 @@ impl Splash {
                     if crate::desktop_style::current(vm).as_ref()!=Some(&sheet) {
                         crate::desktop_style::install(vm,sheet);
                         // Keep the isolate's existing prelude/resource handles and jail.
-                        vm.with_reload(|vm| {crate::widgets_mod(vm);crate::desktop_style::apply_widgets(vm);});
+                        crate::widget_async::restyle_isolate(vm, theme, script.as_deref(), false);
                     }
                 }
                 // Everything on `mod` that is not the body's own; whatever the run
@@ -596,6 +673,9 @@ impl Widget for Splash {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        if self.vm_id != MAIN_SPLASH_VM_ID && self.needs_restyle() {
+            self.restyle_theme(cx);
+        }
         if self.style_pending && self.vm_id!=MAIN_SPLASH_VM_ID && !self.host_io_only {self.eval_styled_body(cx,true);}
         //let tree = self.view.widget_tree();
         //cx.with_vm(|vm| {
@@ -820,6 +900,13 @@ impl SplashRef {
     pub fn set_text(&self, cx: &mut Cx, v: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_text(cx, v);
+        }
+    }
+
+    /// See [`Splash::set_theme`].
+    pub fn set_theme(&self, cx: &mut Cx, theme: Option<SplashTheme>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_theme(cx, theme);
         }
     }
 
@@ -1052,5 +1139,190 @@ mod host_io_validation_tests {
         let jail = LAST_VALIDATION_JAIL.with_borrow_mut(Option::take).expect("validation had a jail");
         assert!(!jail.exists(), "validation left its jail behind");
         assert!(crate::splash_host::take_splash_host_requests().is_empty(), "validation leaked a host request");
+    }
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::*;
+    use crate::splash_host::{splash_host_respond, take_splash_host_requests, SplashRespondOutcome};
+    use crate::widget_async::{set_splash_theme, set_splash_theme_script, SplashThemeScript};
+
+    fn host_script(title: &str) -> SplashThemeScript {
+        SplashThemeScript {
+            theme: format!("mod.theme.test_title = {title}"),
+            widgets: String::new(),
+        }
+    }
+
+    fn new_splash(cx: &mut Cx) -> Splash {
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = vm.eval(makepad_script::script! {use mod.widgets.* Splash{}});
+            Splash::script_from_value(vm, value)
+        })
+    }
+
+    fn module_value(cx: &mut Cx, splash: &Splash, module: LiveId, key: LiveId) -> ScriptValue {
+        cx.with_script_vm_id(splash.vm_id, |vm| {
+            let module = vm.module(module);
+            vm.bx.heap.value(module, key.into(), NoTrap)
+        })
+    }
+
+    /// The isolate's `theme.test_title`, once its theme proves intact.
+    fn theme_token(cx: &mut Cx, splash: &Splash) -> Option<u32> {
+        assert!(module_value(cx, splash, id!(theme), id!(beveling)).as_f64().is_some(), "the host script lost the theme's own values");
+        module_value(cx, splash, id!(theme), id!(test_title)).as_color()
+    }
+
+    /// The token as the body's own functions see it.
+    fn seen_token(cx: &mut Cx, splash: &mut Splash) -> Option<u32> {
+        assert!(splash.call_script_fn(cx, id!(record), &[]));
+        module_value(cx, splash, id!(state), id!(seen)).as_color()
+    }
+
+    fn is_on_theme(cx: &mut Cx, splash: &Splash, theme: LiveId) -> bool {
+        cx.with_script_vm_id(splash.vm_id, |vm| {
+            let themes = vm.module(id!(themes));
+            vm.bx.heap.value(themes, theme.into(), NoTrap).as_object() == Some(vm.module(id!(theme)))
+        })
+    }
+
+    fn timers(cx: &Cx, heap: usize) -> usize {
+        cx.script_data.timers.timers.iter().filter(|t| t.callback.heap_key() == heap).count()
+    }
+
+    /// Restyles an isolate the host's change left stale, returning the script errors that raised.
+    fn restyle(cx: &mut Cx, splash: &mut Splash) -> Vec<String> {
+        assert!(splash.needs_restyle(), "the host's change must restyle the isolate");
+        cx.with_script_vm_id_trusted(splash.vm_id, |vm| vm.bx.captured_errors = Some(Vec::new()));
+        splash.restyle_theme(cx);
+        cx.with_script_vm_id_trusted(splash.vm_id, |vm| {
+            let mut errors = vm.bx.captured_errors.take().unwrap_or_default();
+            errors.extend(vm.take_errors().iter().map(|error| format!("{error:?}")));
+            // Every eval of a body raises this as the parser auto-closes the prefix's
+            // open `View{`; outside a capture, Splash silences it.
+            errors.retain(|error| !error.contains("pop_stack_value on empty stack"));
+            errors
+        })
+    }
+
+    const BODY: &str = "mod.state = {seen: nil, count: 0}\n\
+        fn record() { mod.state.seen = theme.test_title; }\n\
+        fn bump() { mod.state.count += 1 }\n\
+        field := TextInput{text: \"original\"}\n\
+        label := Label{text: \"x\" draw_text +: {color: theme.test_title}}";
+
+    #[test]
+    fn running_isolate_restyles_to_a_new_host_script() {
+        set_splash_theme_script(host_script("#x112233"));
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut splash = new_splash(&mut cx);
+        splash.set_text(&mut cx, BODY);
+        assert_eq!(theme_token(&mut cx, &splash), Some(0x112233ff));
+        assert_eq!(seen_token(&mut cx, &mut splash), Some(0x112233ff));
+        assert!(!splash.needs_restyle());
+
+        assert!(splash.call_script_fn(&mut cx, id!(bump), &[]));
+        let field = splash.view.children.iter().find(|(id, _)| *id == id!(field)).unwrap().1.clone();
+        let uid = field.widget_uid();
+        field.clone().set_text(&mut cx, "edited");
+
+        set_splash_theme_script(host_script("#x445566"));
+        assert_eq!(restyle(&mut cx, &mut splash), Vec::<String>::new());
+        assert!(!splash.needs_restyle());
+        assert_eq!(theme_token(&mut cx, &splash), Some(0x445566ff));
+        assert_eq!(seen_token(&mut cx, &mut splash), Some(0x445566ff), "the body must run again on the new theme");
+        assert_eq!(module_value(&mut cx, &splash, id!(state), id!(count)).as_f64(), Some(1.0), "`mod.state` must survive");
+        let field = splash.view.children.iter().find(|(id, _)| *id == id!(field)).unwrap().1.clone();
+        assert_eq!(field.widget_uid(), uid);
+        assert_eq!(field.text(), "edited");
+        splash.stop(&mut cx);
+    }
+
+    #[test]
+    fn switching_away_and_back_restyles_nothing() {
+        set_splash_theme(SplashTheme::Light);
+        set_splash_theme_script(host_script("#x112233"));
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut splash = new_splash(&mut cx);
+        splash.set_text(&mut cx, BODY);
+
+        set_splash_theme(SplashTheme::Dark);
+        set_splash_theme(SplashTheme::Light);
+        set_splash_theme_script(host_script("#x445566"));
+        set_splash_theme_script(host_script("#x112233"));
+        assert!(!splash.needs_restyle(), "the same theme and script as before need no restyle");
+
+        set_splash_theme(SplashTheme::Dark);
+        assert_eq!(restyle(&mut cx, &mut splash), Vec::<String>::new());
+        assert!(is_on_theme(&mut cx, &splash, id!(dark)));
+        splash.stop(&mut cx);
+    }
+
+    #[test]
+    fn restyle_drops_the_previous_runs_timers_and_requests() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut splash = new_splash(&mut cx);
+        splash.set_host_tag(&mut cx, Some("restyle-test".into()));
+        splash.set_text(
+            &mut cx,
+            "fn later() { mod.std.start_timeout(60.0, || {}) }\n\
+             host.request(\"test.boot\", {}, fn(r) {})\n\
+             label := Label{text: \"x\"}",
+        );
+        let heap = splash.isolate_heap_key(&mut cx).unwrap();
+        assert!(splash.call_script_fn(&mut cx, id!(later), &[]));
+        assert_eq!(timers(&cx, heap), 1);
+        let boot: Vec<_> = take_splash_host_requests().into_iter().filter(|r| r.heap_key == heap).collect();
+        assert_eq!(boot.len(), 1);
+
+        set_splash_theme_script(host_script("#x010203"));
+        assert_eq!(restyle(&mut cx, &mut splash), Vec::<String>::new());
+        assert_eq!(timers(&cx, heap), 0, "a handler's timer from the last run must not outlive it");
+        assert!(matches!(
+            splash_host_respond(&mut cx, heap, boot[0].req_id, Ok("null")),
+            SplashRespondOutcome::NoCallback
+        ), "the last run's pending request must not call back into the new one");
+        let rerun: Vec<_> = take_splash_host_requests().into_iter().filter(|r| r.heap_key == heap).collect();
+        assert_eq!(rerun.len(), 1, "the body's boot request is made again");
+        splash.stop(&mut cx);
+    }
+
+    #[test]
+    fn pinned_isolate_keeps_its_stock_theme() {
+        set_splash_theme_script(host_script("#x112233"));
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut splash = new_splash(&mut cx);
+        splash.set_theme(&mut cx, Some(SplashTheme::Light));
+        splash.set_text(&mut cx, "label := Label{text: \"x\"}");
+        assert_eq!(theme_token(&mut cx, &splash), None, "a pinned isolate gets no host script");
+        assert!(is_on_theme(&mut cx, &splash, id!(light)));
+
+        set_splash_theme_script(host_script("#x445566"));
+        assert!(!splash.needs_restyle(), "the host's changes leave a pinned isolate alone");
+
+        splash.set_theme(&mut cx, None);
+        assert_eq!(restyle(&mut cx, &mut splash), Vec::<String>::new());
+        assert!(is_on_theme(&mut cx, &splash, id!(dark)), "unpinned, it takes the host's theme");
+        assert_eq!(theme_token(&mut cx, &splash), Some(0x445566ff));
+        splash.stop(&mut cx);
+    }
+
+    #[test]
+    fn restricted_isolate_restyles_too() {
+        set_splash_theme_script(host_script("#x112233"));
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut splash = new_splash(&mut cx);
+        splash.set_host_io_only(true);
+        splash.set_text(&mut cx, BODY);
+        assert_eq!(seen_token(&mut cx, &mut splash), Some(0x112233ff));
+
+        set_splash_theme_script(host_script("#x445566"));
+        // Registering the widgets again needs the resources the trusted boot loaded.
+        assert_eq!(restyle(&mut cx, &mut splash), Vec::<String>::new());
+        assert_eq!(seen_token(&mut cx, &mut splash), Some(0x445566ff));
+        splash.stop(&mut cx);
     }
 }

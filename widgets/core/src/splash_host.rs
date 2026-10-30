@@ -116,6 +116,12 @@ pub(crate) fn set_prompts_for_heap(heap_key: usize, may_prompt: bool) {
     });
 }
 
+/// Forgets the callbacks of every request this isolate is still waiting on,
+/// so their answers go nowhere, as a dead isolate's do.
+pub(crate) fn forget_callbacks(heap_key: usize) {
+    BRIDGE.with(|b| b.borrow_mut().callbacks.retain(|(heap, _), _| *heap != heap_key));
+}
+
 /// Drops all bridge state for reclaimed isolates (called from the isolate GC).
 pub(crate) fn gc_bridge(dead_heaps: &[usize]) {
     BRIDGE.with(|b| {
