@@ -219,6 +219,7 @@ pub struct DrawList2d {
     // draw info per UI element
     pub(crate) draw_list: DrawList,
     pub(crate) dirty_check_rect: Rect,
+    pub(crate) dirty_check_clip: (Vec2d, Vec2d),
     overlay_active: bool,
 }
 
@@ -282,6 +283,7 @@ impl DrawList2d {
         let draw_list = DrawList::new(cx);
         Self {
             dirty_check_rect: Default::default(),
+            dirty_check_clip: Default::default(),
             draw_list,
             overlay_active: false,
         }
