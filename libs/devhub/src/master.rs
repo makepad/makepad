@@ -216,6 +216,7 @@ impl Master {
                 })
                 .collect()
         }));
+        crate::sync::start_autosync(proto::control_socket());
         Ok(m)
     }
 

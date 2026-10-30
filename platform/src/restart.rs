@@ -361,10 +361,36 @@ static UNSAVED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 /// for a new version then waits and asks the person (the caption's "new version ready").
 pub fn set_unsaved(key: &str, what: Option<&str>) {
     let mut unsaved = UNSAVED.lock().unwrap();
+    let before = unsaved.len();
     unsaved.retain(|(k, _)| k != key);
+    let changed = before != unsaved.len() || what.is_some();
     if let Some(what) = what {
         unsaved.push((key.to_string(), what.to_string()));
     }
+    if changed {
+        publish_unsaved(&unsaved);
+    }
+}
+
+/// The process's unsaved work for the machine (Unix): `$XDG_RUNTIME_DIR/makepad-unsaved/<pid>`,
+/// one line per piece of work, gone when nothing is unsaved. What restarts a whole session
+/// (devhub's WM restart: `makepad_app_registry::machine::unsaved_work`) reads it and waits.
+fn publish_unsaved(unsaved: &[(String, String)]) {
+    #[cfg(unix)]
+    {
+        let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) else { return };
+        let dir = std::path::PathBuf::from(dir).join("makepad-unsaved");
+        let file = dir.join(std::process::id().to_string());
+        if unsaved.is_empty() {
+            let _ = std::fs::remove_file(&file);
+            return;
+        }
+        let text: String = unsaved.iter().map(|(_, what)| format!("{}\n", what.replace('\n', " "))).collect();
+        let tmp = dir.join(format!("{}.new", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&tmp, text)).and_then(|_| std::fs::rename(&tmp, &file));
+    }
+    #[cfg(not(unix))]
+    let _ = unsaved;
 }
 
 /// The registered unsaved work, as a reason (None: nothing unsaved).

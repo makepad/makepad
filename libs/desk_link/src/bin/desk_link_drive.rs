@@ -19,9 +19,19 @@
 //! - `key COMBO`: `ctrl+s`, `enter`, `tab`, `win+r`, `alt+f4`, `ctrl+shift+e`, `esc`
 //! - `wait MS`
 //! - `wait-change [TIMEOUT_MS] [QUIET_MS]`: from the current picture, until it changes and then
-//!   stays still QUIET_MS (default 10000, 600); prints where it changed
+//!   stays still QUIET_MS (default 10000, 600); prints where it changed. `changed at` counts from
+//!   the step's start, after it took a picture (100 ms). After input it also prints `first change
+//!   N ms after the press`: from sending the first press (button or key down, scroll notch; with
+//!   none, the first input) since the last wait-change to the first picture composed here that
+//!   differs from the one before that input, timed as it was composed (the frame and box named)
+//! - `record DIR MS`: the video as it comes for MS, not decoded here (no picture is kept while it
+//!   runs; the next `shot`/`wait-change` starts from a new key frame): per stream from its first
+//!   key frame `DIR/stream-S.h264` (or `.hevc`, an Annex-B elementary stream another tool can
+//!   decode frame by frame) and `DIR/packets.txt` (one line per packet in that file: ms, stream,
+//!   frame, x0, y0, codec, key, bytes, and the desktop clock's built_ns, encoded_ns, sent_ns).
+//!   A stream that changes codec while recording ends at the change.
 //!
-//! Example: `desk-link-drive 10.0.0.123 click 812 440 , wait-change , shot /tmp/a.png`
+//! Example: `desk-link-drive 10.0.0.105 click 812 440 , wait-change , shot /tmp/a.png`
 
 use makepad_desk_link::{self as proto, ClientMsg, Inbox, ServerMsg};
 use makepad_key_code::{KeyCode, KEYCODE_VARIANTS};
@@ -30,7 +40,7 @@ use std::io::Read;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-const USAGE: &str = "usage: desk-link-drive <host[:port]> <step> [, <step>]...\n  steps: info | shot PATH [X,Y,W,H] [/N] | move X Y | click X Y [left|right|middle] [double] | drag X1 Y1 X2 Y2 [button] | scroll N [X Y] | type TEXT | key COMBO | wait MS | wait-change [TIMEOUT_MS] [QUIET_MS]";
+const USAGE: &str = "usage: desk-link-drive <host[:port]> <step> [, <step>]...\n  steps: info | shot PATH [X,Y,W,H] [/N] | move X Y | click X Y [left|right|middle] [double] | drag X1 Y1 X2 Y2 [button] | scroll N [X Y] | type TEXT | key COMBO | wait MS | wait-change [TIMEOUT_MS] [QUIET_MS] | record DIR MS";
 
 /// How many already-queued messages `pump` still handles once its time is up (the rest wait for the next pump).
 const PUMP_DRAIN_MAX: usize = 64;
@@ -96,6 +106,7 @@ enum Step {
     Key { combo: Vec<KeyCode>, text: String },
     Wait { ms: u64 },
     WaitChange { timeout: u64, quiet: u64 },
+    Record { dir: String, ms: u64 },
 }
 
 fn num<T: std::str::FromStr>(args: &[String], i: usize, what: &str) -> Result<T, String> {
@@ -155,6 +166,7 @@ impl Step {
             Step::Key { .. } => "key",
             Step::Wait { .. } => "wait",
             Step::WaitChange { .. } => "wait-change",
+            Step::Record { .. } => "record",
         }
     }
 
@@ -222,6 +234,7 @@ impl Step {
                 timeout: if a.len() > 1 { num(a, 1, "TIMEOUT_MS")? } else { 10_000 },
                 quiet: if a.len() > 2 { num(a, 2, "QUIET_MS")? } else { 600 },
             },
+            "record" => Step::Record { dir: a.get(1).ok_or("record needs a DIR")?.clone(), ms: num(a, 2, "MS")? },
             other => return Err(format!("unknown step '{other}'")),
         })
     }
@@ -244,6 +257,7 @@ struct Link {
     inbox: Receiver<Result<ServerMsg, String>>,
     thread: Option<std::thread::JoinHandle<()>>,
     server: String,
+    host_status: String,
     welcome: Option<(Vec<proto::ScreenInfo>, u32, [u32; 2], bool, String)>,
     cursor: Option<(u16, u16)>,
     /// The encoder streams a picture is cut into (`Rate`).
@@ -258,6 +272,58 @@ struct Link {
     paused: bool,
     /// The picture before the first input step since the last `wait-change` (its baseline).
     before: Option<Vec<u8>>,
+    /// When the input since the last `wait-change` was sent: its first press (true), else its
+    /// first input (false).
+    input_at: Option<(Instant, bool)>,
+    /// The first picture composed after `input_at` that differs from `before`: how long after the
+    /// input, its frame, where.
+    first_change: Option<(Duration, u32, [u32; 4])>,
+    /// While a `record` step runs: where the packets go.
+    record: Option<Recording>,
+}
+
+/// A `record` step's files: per stream its elementary stream (opened at its first key frame,
+/// with the codec it holds), and the packet list.
+struct Recording {
+    dir: std::path::PathBuf,
+    streams: Vec<Option<(u8, std::fs::File)>>,
+    list: std::io::BufWriter<std::fs::File>,
+    start: Instant,
+    packets: u64,
+    keys: u64,
+    /// Packets not recorded because their stream changed codec.
+    other_codec: u64,
+}
+
+impl Recording {
+    #[allow(clippy::too_many_arguments)]
+    fn packet(&mut self, key: bool, data: &[u8], s: usize, frame: u32, x0: u32, y0: u32, codec: u8, ns: [u64; 3]) -> Result<(), String> {
+        use std::io::Write;
+        if self.streams.len() <= s {
+            self.streams.resize_with(s + 1, || None);
+        }
+        if self.streams[s].is_none() {
+            if !key {
+                return Ok(());
+            }
+            let ext = if codec == proto::pref::HEVC { "hevc" } else { "h264" };
+            let path = self.dir.join(format!("stream-{s}.{ext}"));
+            self.streams[s] = Some((codec, std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?));
+        }
+        let (held, file) = self.streams[s].as_mut().unwrap();
+        if *held != codec {
+            // the file is one codec's bitstream: the new codec's packets would not decode in it
+            self.other_codec += 1;
+            return Ok(());
+        }
+        file.write_all(data).map_err(|e| format!("record: {e}"))?;
+        let ms = self.start.elapsed().as_secs_f64() * 1000.0;
+        let [built, encoded, sent] = ns;
+        writeln!(self.list, "{ms:.1} {s} {frame} {x0} {y0} {codec} {} {} {built} {encoded} {sent}", key as u8, data.len()).map_err(|e| format!("record: {e}"))?;
+        self.packets += 1;
+        self.keys += key as u64;
+        Ok(())
+    }
 }
 
 impl Link {
@@ -279,6 +345,7 @@ impl Link {
             inbox,
             thread: Some(thread),
             server: peer.name,
+            host_status: String::new(),
             welcome: None,
             cursor: None,
             streams: 0,
@@ -289,6 +356,9 @@ impl Link {
             frame: 0,
             paused: true,
             before: None,
+            input_at: None,
+            first_change: None,
+            record: None,
         };
         let until = Instant::now() + Duration::from_secs(10);
         while link.welcome.is_none() {
@@ -353,10 +423,20 @@ impl Link {
                 }
                 self.restart_video();
             }
-            ServerMsg::Rate { streams, .. } => self.streams = streams.max(1) as usize,
+            ServerMsg::Rate { streams, fps, why, .. } => {
+                self.streams = streams.max(1) as usize;
+                let status = if fps == 0 { why } else { String::new() };
+                if status != self.host_status && !status.is_empty() {
+                    eprintln!("desktop: {status}");
+                }
+                self.host_status = status;
+            }
             ServerMsg::Cursor { x, y, .. } => self.cursor = Some((x, y)),
-            ServerMsg::Video { key, data, stream, frame, x0, y0, codec, .. } => {
-                if !self.paused {
+            ServerMsg::Video { key, data, stream, frame, x0, y0, codec, built_ns, encoded_ns, sent_ns, .. } => {
+                if let Some(r) = self.record.as_mut() {
+                    // as it came: no decoding, so no backlog and no key frames asked for a decoder
+                    r.packet(key, &data, stream as usize, frame, x0, y0, codec, [built_ns, encoded_ns, sent_ns])?;
+                } else if !self.paused {
                     self.video(key, &data, stream as usize, frame, x0, y0, codec)?;
                 }
             }
@@ -419,6 +499,13 @@ impl Link {
         if self.decoders.len() >= n && self.decoders[..n].iter().all(|d| d.as_ref().is_some_and(|d| d.fresh)) {
             self.composed += 1;
             self.frame = frame;
+            // after input: the first picture that differs from the one before it, timed as composed
+            if let (Some((sent, _)), None, Some(base)) = (self.input_at, self.first_change, self.before.as_ref()) {
+                let now = Instant::now();
+                if let Some(b) = diff_box(base, &self.canvas, self.size[0]) {
+                    self.first_change = Some((now.duration_since(sent), frame, b));
+                }
+            }
         }
         Ok(())
     }
@@ -426,12 +513,7 @@ impl Link {
     /// Video on (it stays on for the rest of the session: the picture is kept current), until
     /// a whole picture is composed, and what follows within `settle`.
     fn picture(&mut self, settle: Duration) -> Result<(), String> {
-        if self.paused {
-            self.paused = false;
-            self.composed = 0;
-            self.restart_video();
-            self.send(ClientMsg::Resume)?;
-        }
+        self.video_on()?;
         let start = Instant::now();
         let mut said = false;
         while self.composed == 0 {
@@ -449,6 +531,16 @@ impl Link {
         self.pump(settle)
     }
 
+    fn video_on(&mut self) -> Result<(), String> {
+        if self.paused {
+            self.paused = false;
+            self.composed = 0;
+            self.restart_video();
+            self.send(ClientMsg::Resume)?;
+        }
+        Ok(())
+    }
+
     /// A stream pixel on the wire's 0..=65535.
     fn wire(&self, x: u32, y: u32) -> Result<(u16, u16), String> {
         let [w, h] = self.stream_size();
@@ -459,18 +551,34 @@ impl Link {
         Ok((f(x, w), f(y, h)))
     }
 
+    /// Input is being sent now: a press is the input's time (a change seen after an earlier move
+    /// was that move's, e.g. a hover, and is forgotten), else the first input is.
+    fn note_input(&mut self, press: bool) {
+        match self.input_at {
+            Some((_, true)) => {}
+            Some((_, false)) if !press => {}
+            _ => {
+                self.input_at = Some((Instant::now(), press));
+                self.first_change = None;
+            }
+        }
+    }
+
     fn pointer(&mut self, x: u32, y: u32) -> Result<(), String> {
         let (x, y) = self.wire(x, y)?;
+        self.note_input(false);
         self.send(ClientMsg::Pointer { x, y })?;
         self.pump(Duration::from_millis(30))
     }
 
     fn button(&mut self, down: bool, button: u8) -> Result<(), String> {
+        self.note_input(down);
         self.send(ClientMsg::Button { down, button })?;
         self.pump(Duration::from_millis(40))
     }
 
     fn key(&mut self, down: bool, k: KeyCode) -> Result<(), String> {
+        self.note_input(down);
         self.send(ClientMsg::Key { down, keycode: k.to_index(), mods: 0 })?;
         self.pump(Duration::from_millis(12))
     }
@@ -489,7 +597,7 @@ impl Link {
     }
 
     fn run(&mut self, step: &Step) -> Result<String, String> {
-        let input = !matches!(step, Step::Info | Step::Shot { .. } | Step::Wait { .. } | Step::WaitChange { .. });
+        let input = !matches!(step, Step::Info | Step::Shot { .. } | Step::Wait { .. } | Step::WaitChange { .. } | Step::Record { .. });
         if input && self.before.is_none() && !self.paused && self.composed > 0 {
             self.before = Some(self.canvas.clone());
         }
@@ -498,14 +606,15 @@ impl Link {
                 let (screens, screen, stream, input, note) = self.welcome.clone().unwrap();
                 let list: Vec<String> = screens.iter().enumerate().map(|(i, s)| format!("{i}:{}x{}@{},{}", s.width, s.height, s.x, s.y)).collect();
                 Ok(format!(
-                    "info {} stream {}x{} screen {screen} of [{}] input {}{} cursor {}",
+                    "info {} stream {}x{} screen {screen} of [{}] input {}{} cursor {}{}",
                     self.server,
                     stream[0],
                     stream[1],
                     list.join(" "),
                     if input { "ok" } else { "off" },
                     if input { String::new() } else { format!(" ({note})") },
-                    self.cursor_px()
+                    self.cursor_px(),
+                    if self.host_status.is_empty() { String::new() } else { format!("; {}", self.host_status) }
                 ))
             }
             Step::Shot { path, crop, scale } => {
@@ -581,6 +690,7 @@ impl Link {
                     self.pointer(*x, *y)?;
                 }
                 for _ in 0..notches.unsigned_abs() {
+                    self.note_input(true);
                     self.send(ClientMsg::Scroll { dx: 0, dy: 120 * notches.signum() })?;
                     self.pump(Duration::from_millis(30))?;
                 }
@@ -617,7 +727,9 @@ impl Link {
             Step::WaitChange { timeout, quiet } => {
                 let start = Instant::now();
                 // from the picture before this session's input since the last wait, else now
-                let before = self.before.take();
+                // (kept in `before` while this step runs: pictures composed meanwhile are compared too)
+                let before = self.before.clone();
+                let had_base = before.is_some();
                 self.picture(Duration::from_millis(100))?;
                 let base = before.unwrap_or_else(|| self.canvas.clone());
                 let mut last = self.canvas.clone();
@@ -657,7 +769,36 @@ impl Link {
                         };
                     }
                 };
-                Ok(result)
+                let first = match (self.input_at.take(), self.first_change.take()) {
+                    (Some((_, press)), Some((after, f, [x, y, w, h]))) => format!(
+                        "; first change {:.1} ms after the {} (frame {f}, box {x},{y},{w},{h})",
+                        after.as_secs_f64() * 1000.0,
+                        if press { "press" } else { "input" }
+                    ),
+                    (Some(_), None) if had_base => "; no changed picture after the input".to_string(),
+                    _ => String::new(),
+                };
+                self.before = None;
+                Ok(format!("{result}{first}"))
+            }
+            Step::Record { dir, ms } => {
+                // undecoded: it does not wait for a picture this machine can decode
+                std::fs::create_dir_all(dir).map_err(|e| format!("{dir}: {e}"))?;
+                let path = std::path::Path::new(dir).join("packets.txt");
+                let list = std::io::BufWriter::new(std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?);
+                self.record = Some(Recording { dir: dir.into(), streams: Vec::new(), list, start: Instant::now(), packets: 0, keys: 0, other_codec: 0 });
+                self.video_on()?;
+                self.send(ClientMsg::RequestKeyframe)?;
+                self.pump(Duration::from_millis(*ms))?;
+                let mut r = self.record.take().unwrap();
+                std::io::Write::flush(&mut r.list).map_err(|e| format!("record: {e}"))?;
+                // the picture missed what was recorded: decode again from a new key frame
+                self.restart_video();
+                self.composed = 0;
+                self.send(ClientMsg::RequestKeyframe)?;
+                let streams = r.streams.iter().filter(|f| f.is_some()).count();
+                let other = if r.other_codec > 0 { format!(", {} packets after a codec change not recorded", r.other_codec) } else { String::new() };
+                Ok(format!("record {dir} {} packets ({} key) in {ms} ms, {streams} streams{other}", r.packets, r.keys))
             }
         }
     }

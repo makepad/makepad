@@ -336,7 +336,7 @@ impl Sync {
         out
     }
 
-    fn restart_or_refuse(&self, why: &str, out: &mut Vec<String>) {
+    fn restart_or_refuse(self: &Arc<Self>, why: &str, out: &mut Vec<String>) {
         match self.wm_restart(why) {
             Ok(l) => out.push(l),
             Err(e) => self.refuse(out, format!("sync: WM restart refused: {e}")),
@@ -347,10 +347,51 @@ impl Sync {
         proto::home().join("sync").join("wm-restart.pending")
     }
 
+    /// Restarts the WM when nothing is lost by it, else as soon as nothing is: a WM restart ends
+    /// every app window on the node, so it waits while an app has unsaved work
+    /// (`makepad_app_registry::machine::unsaved_work`, what apps publish) and while a gate lease
+    /// runs here (a landing's gate must not see its node go away). The wait is reported once; one
+    /// waiter per node, which restarts the moment the node is clear.
+    fn wm_restart(self: &Arc<Self>, why: &str) -> Result<String, String> {
+        let blockers = restart_blockers();
+        if blockers.is_empty() {
+            return self.restart_wm_now(why);
+        }
+        if !crate::lease::exec::writes_allowed() {
+            return Err(format!("{} is not available for dev: WM restarts need its dev switch on", self.ctx.machine));
+        }
+        let list = blockers.join("; ");
+        if WM_RESTART_WAITING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return Ok(format!("{{\"wm_restart\":\"waiting\",\"for\":{}}}", json_str(&list)));
+        }
+        self.event(Sev::Warn, format!("sync: the WM restart ({why}) waits for: {list}"), String::new());
+        let me = self.clone();
+        let why = why.to_string();
+        let spawned = std::thread::Builder::new().name("devhub-wm-restart-wait".into()).spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(30));
+                if restart_blockers().is_empty() {
+                    break;
+                }
+            }
+            let _busy = me.busy.lock().unwrap();
+            if let Err(e) = me.restart_wm_now(&format!("{why}, after the wait")) {
+                me.event(Sev::Err, format!("sync: WM restart refused: {e}"), String::new());
+            }
+            WM_RESTART_WAITING.store(false, std::sync::atomic::Ordering::Release);
+        });
+        if let Err(e) = spawned {
+            WM_RESTART_WAITING.store(false, std::sync::atomic::Ordering::Release);
+            return Err(format!("cannot wait for the restart: {e}"));
+        }
+        Ok(format!("{{\"wm_restart\":\"waiting\",\"for\":{}}}", json_str(&list)))
+    }
+
     /// Restarts the WM (and with it the AI Hub it starts) through its systemd service, with the
-    /// sudoers rule's exact command (no password prompt). A hub the WM supervises ends with it;
-    /// the marker lets the next one report the restart.
-    fn wm_restart(&self, why: &str) -> Result<String, String> {
+    /// sudoers rule's exact command (no password prompt). The services the WM supervises (this
+    /// hub, the AI Hub) run in scopes of their own and outlive it; the marker lets a hub that
+    /// does restart report it.
+    fn restart_wm_now(&self, why: &str) -> Result<String, String> {
         if !crate::lease::exec::writes_allowed() {
             return Err(format!("{} is not available for dev: WM restarts need its dev switch on", self.ctx.machine));
         }
@@ -358,12 +399,12 @@ impl Sync {
         let _ = std::fs::create_dir_all(proto::home().join("sync"));
         let _ = std::fs::write(Self::marker(), format!("{} {why}\n", proto::wall_ms()));
         self.event(Sev::Info, format!("sync: restarting the WM ({svc}): {why}"), String::new());
-        let st = std::process::Command::new("sudo").args(["-n", "/usr/bin/systemctl", "restart", &svc]).stdin(std::process::Stdio::null()).output().map_err(|e| format!("sudo: {e}"))?;
+        let st = makepad_remote::group::command("sudo").args(["-n", "/usr/bin/systemctl", "restart", &svc]).stdin(std::process::Stdio::null()).output().map_err(|e| format!("sudo: {e}"))?;
         if !st.status.success() {
             let _ = std::fs::remove_file(Self::marker());
             return Err(format!("sudo -n systemctl restart {svc}: {}", proto::clean(String::from_utf8_lossy(&st.stderr).trim(), 300)));
         }
-        let active = std::process::Command::new("systemctl").args(["is-active", &svc]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+        let active = makepad_remote::group::command("systemctl").args(["is-active", &svc]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
         let _ = std::fs::remove_file(Self::marker());
         let line = format!("sync: WM restarted ({svc} {active})");
         self.event(if active == "active" { Sev::Info } else { Sev::Err }, line, String::new());
@@ -430,6 +471,22 @@ impl Sync {
         self.event(Sev::Info, format!("sync: pushed {repo} {branch} {} ({:.1} MB) by {}", short(&sha), size as f64 / 1048576.0, o.signer), String::new());
         Ok(format!("{{\"fetched\":{},\"repo\":{},\"branch\":{},\"bytes\":{size}}}", json_str(&sha), json_str(&repo), json_str(&branch)))
     }
+}
+
+/// A WM restart is waiting on this node (`Sync::wm_restart`).
+static WM_RESTART_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What a WM restart would cost now: the gate leases on this node (landings) and the unsaved
+/// work of its apps. Empty: it may restart.
+fn restart_blockers() -> Vec<String> {
+    let mut why: Vec<String> = crate::lease::exec::held()
+        .into_iter()
+        .filter(|(_, lane, kind)| *kind == "gate" || lane.starts_with("land"))
+        .map(|(id, lane, kind)| format!("{kind} lease {id} of {lane}"))
+        .collect();
+    #[cfg(unix)]
+    why.extend(makepad_app_registry::machine::unsaved_work().into_iter().map(|(pid, app, what)| format!("unsaved work in {app} (pid {pid}): {what}")));
+    why
 }
 
 /// A makepad checkout dir that holds only the nested commercial checkout (a fresh tree whose

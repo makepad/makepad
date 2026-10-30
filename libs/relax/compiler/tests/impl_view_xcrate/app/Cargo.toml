@@ -1,0 +1,8 @@
+[package]
+name = "ivx-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+[dependencies]
+ivx-bytes = { path = "../bytes" }
+ivx-cipher = { path = "../cipher" }

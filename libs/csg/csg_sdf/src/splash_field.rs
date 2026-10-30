@@ -3,8 +3,8 @@
 //!
 //! The document's function — `fn(p) { return length(p) - 1.0 }`, or
 //! `fn(x, y, z) { .. }` — is compiled as a per-element kernel that reads one
-//! point and writes one distance, so the dual-contouring mesher
-//! (`sdf_to_mesh`, `SdfGrid3`) can sample it like any built-in field. The
+//! point and writes one distance, so the mesher (`sdf_to_mesh`,
+//! `mesh_field`) can sample it like any built-in field. The
 //! kernel runs as native code where the host has a backend (ARM64) and on
 //! the compiler's reference interpreter elsewhere; both give the same bits.
 //!
@@ -25,8 +25,8 @@
 //! with the current values and re-mesh on every knob change — the compile
 //! happens once.
 //!
-//! When compiling fails the function is outside the kernel language; the
-//! caller samples it through the owning Splash VM with `sdf_to_mesh_ref`.
+//! When compiling fails the function is outside the kernel language and
+//! cannot be meshed as a field.
 
 use makepad_script_compute_sched::kernel::KernelExt;
 use crate::sdf::Sdf3;
@@ -140,6 +140,15 @@ impl SdfSplashExpr {
 }
 
 impl Sdf3 for SdfSplashExpr {
+    fn distance_many(&self, ps: &[Vec3d], out: &mut [f64]) {
+        let xyz: Vec<f32> = ps.iter().flat_map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect();
+        let mut d = vec![0f32; ps.len()];
+        self.distance_batch(&xyz, &mut d);
+        for (o, x) in out.iter_mut().zip(d) {
+            *o = x as f64;
+        }
+    }
+
     fn distance(&self, p: Vec3d) -> f64 {
         let mut out = [0f32; 1];
         self.distance_batch(&[p.x as f32, p.y as f32, p.z as f32], &mut out);

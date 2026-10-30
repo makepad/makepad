@@ -2758,6 +2758,7 @@ fn finish_run(why: &'static str, code: Option<i32>) {
     // exit worker while it waits for it
     EXIT_CALLER_HOLDS.store(crate::owner::is_owner(), Ordering::SeqCst);
     jit::begin_exit();
+    jit::solver_work_report_at_exit();
     // a JIT thread that panicked during the run is said once more at its end (inspect threads has the rows)
     if let Some(l) = crate::lifeline::summary() {
         eprintln!("makepad-run: {}", l);

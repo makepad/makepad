@@ -66,11 +66,17 @@ pub trait Desktop {
     fn grants(&mut self) -> String {
         String::new()
     }
+    /// A capture/session status for viewers, empty when ready. Called on connection
+    /// and with the five-second status refresh, never per video frame.
+    fn watch_note(&mut self, _preparing: bool) -> String {
+        String::new()
+    }
     /// Makes the screens capturable for a viewer who wants to watch, where that needs a step
     /// first (Windows: a session shown over Remote Desktop moves to the console). `Err`: why
-    /// it cannot be watched now.
-    fn prepare_watch(&mut self) -> Result<(), String> {
-        Ok(())
+    /// it cannot be watched now. `Ok(true)` invalidates an existing capture (e.g.
+    /// after a session move). Called on every viewer connection, including paused ones.
+    fn prepare_watch(&mut self) -> Result<bool, String> {
+        Ok(false)
     }
     /// The codec this host encodes: H.264 everywhere today; a host may offer H.265 (streamed
     /// while every viewer decodes it, H.264 otherwise).
@@ -393,6 +399,7 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
     let mut screens = desktop.screens();
     let mut screens_at = Instant::now();
     let mut grants_at = Instant::now();
+    let mut watch_note = desktop.watch_note(false);
     let mut capturing: Option<(usize, u32)> = None;
     let mut encoder: Option<(VideoStreamEncoder, [u32; 2], u32, StreamVideoCodec)> = None;
     // pictures the encoder took and gave nothing back for (it drops what it cannot do)
@@ -468,6 +475,11 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
             grants_at = Instant::now();
             status.set(None, Some(desktop.grants()));
             ctl.update(|r| r.grants = status.grants.clone());
+            let note = desktop.watch_note(false);
+            if note != watch_note {
+                watch_note = note;
+                viewers.iter_mut().for_each(|v| v.told_rate = false);
+            }
         }
         if screens_at.elapsed() >= Duration::from_secs(1) {
             screens_at = Instant::now();
@@ -477,6 +489,33 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
         for m in server.rx.try_iter() {
             match m {
                 ToUi::Opened { session, peer, client, name, screen: wanted, paused, caps, out, feed } => {
+                    // The connection has already been authenticated. Report preparation before
+                    // waiting for the desktop; even a paused/info-only viewer checks its setup.
+                    let preparing = desktop.watch_note(true);
+                    if !preparing.is_empty() {
+                        status.set(None, Some(preparing.clone()));
+                        ctl.update(|r| r.grants = status.grants.clone());
+                        let _ = out.send(Out::Msg(ServerMsg::Rate { fps: 0, kbps: settings.kbps, limit: proto::limit::CAP, full_chroma: false, codec: wire_codec(codec), preset: proto::pref::FAST, streams: 1, why: preparing }.encode()));
+                    }
+                    match desktop.prepare_watch() {
+                        Ok(true) => {
+                            desktop.stop_capture();
+                            capturing = None;
+                            pending = None;
+                            shown = None;
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            status.set(None, Some(e.clone()));
+                            ctl.update(|r| r.grants = status.grants.clone());
+                            let _ = out.send(Out::Close(format!("the desktop cannot prepare its screen: {e}")));
+                            continue;
+                        }
+                    }
+                    status.set(None, Some(desktop.grants()));
+                    ctl.update(|r| r.grants = status.grants.clone());
+                    watch_note = desktop.watch_note(false);
+                    viewers.iter_mut().for_each(|v| v.told_rate = false);
                     screens = desktop.screens();
                     if viewers.is_empty() && wanted >= 0 && (wanted as usize) < screens.len() {
                         screen = wanted as usize;
@@ -578,14 +617,14 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
             v.told_rate = true;
             // a plain desktop's rate does not adapt: its setting, or by picture size (kbps 0)
             let limit = if settings.kbps > 0 { proto::limit::FIXED } else { proto::limit::CAP };
-            let _ = v.out.send(Out::Msg(ServerMsg::Rate { fps: fps as u16, kbps: settings.kbps, limit, full_chroma: false, codec: wire_codec(codec), preset: proto::pref::FAST, streams: 1, why: String::new() }.encode()));
+            let _ = v.out.send(Out::Msg(ServerMsg::Rate { fps: if watch_note.is_empty() { fps as u16 } else { 0 }, kbps: settings.kbps, limit, full_chroma: false, codec: wire_codec(codec), preset: proto::pref::FAST, streams: 1, why: watch_note.clone() }.encode()));
         }
         // the capture follows the viewers: on while one watches, on the screen they watch, at the stream's rate
         watching = viewers.iter().any(|v| !v.feed.paused.load(Ordering::Acquire));
         match (watching, capturing) {
             (true, c) if c != Some((screen, fps)) => {
                 pending = None;
-                match desktop.prepare_watch().and_then(|()| desktop.capture(screen, fps, frame_tx.clone())) {
+                match desktop.prepare_watch().and_then(|_| desktop.capture(screen, fps, frame_tx.clone())) {
                     Ok(()) => {
                         // frames of the capture before are dropped: they are in its format
                         while frame_rx.try_recv().is_ok() {}

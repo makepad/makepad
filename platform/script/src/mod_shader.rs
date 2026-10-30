@@ -47,6 +47,17 @@ pub const SHADER_IO_FRAGMENT_OUTPUT_MAX: ShaderIoType =
 pub const SHADER_IO_WORKGROUP: ShaderIoType = ShaderIoType(31);
 /// A compute-only type descriptor, never an IO global.
 pub const SHADER_COOPERATIVE_MATRIX: ShaderIoType = ShaderIoType(32);
+/// `shader.fragment_depth(@any|@greater|@less)`: the fragment's depth output
+/// (one id per conservative mode, in `FRAG_DEPTH_*` order).
+pub const SHADER_IO_FRAGMENT_DEPTH_ANY: ShaderIoType = ShaderIoType(33);
+pub const SHADER_IO_FRAGMENT_DEPTH_GREATER: ShaderIoType = ShaderIoType(34);
+pub const SHADER_IO_FRAGMENT_DEPTH_LESS: ShaderIoType = ShaderIoType(35);
+
+/// The depth mode of a fragment depth io type (`FRAG_DEPTH_*`), if it is one.
+pub fn fragment_depth_mode(io_type: ShaderIoType) -> Option<u8> {
+    (io_type.0 >= SHADER_IO_FRAGMENT_DEPTH_ANY.0 && io_type.0 <= SHADER_IO_FRAGMENT_DEPTH_LESS.0)
+        .then(|| (io_type.0 - SHADER_IO_FRAGMENT_DEPTH_ANY.0) as u8)
+}
 
 pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
     let shader = heap.new_module(id!(shader));
@@ -365,6 +376,31 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
             vm.bx
                 .heap
                 .set_shader_io(obj, ShaderIoType(SHADER_IO_FRAGMENT_OUTPUT_0.0 + index));
+            obj.into()
+        },
+    );
+
+    // `depth: fragment_depth(@any)`: assigning `self.depth = z` in `fragment`
+    // replaces the rasterised depth with z (window-space, 0..1, the value
+    // `depth_of(world)` gives). `@greater` / `@less` promise z only moves
+    // that way from the rasterised depth (conservative depth: early depth
+    // tests stay on; a march from the front faces of its bounds writes
+    // `@greater`).
+    native.add_method(
+        heap,
+        shader,
+        id_lut!(fragment_depth),
+        script_args!(mode = NIL),
+        |vm, args| {
+            let mode = script_value!(vm, args.mode);
+            let io = match mode.as_id() {
+                Some(m) if m == id!(greater) => SHADER_IO_FRAGMENT_DEPTH_GREATER,
+                Some(m) if m == id!(less) => SHADER_IO_FRAGMENT_DEPTH_LESS,
+                _ => SHADER_IO_FRAGMENT_DEPTH_ANY,
+            };
+            let f32_ty = vm.bx.heap.pod_type_ref(vm.bx.code.builtins.pod.pod_f32).object;
+            let obj = vm.bx.heap.new_with_proto(f32_ty.into());
+            vm.bx.heap.set_shader_io(obj, io);
             obj.into()
         },
     );

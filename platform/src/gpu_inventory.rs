@@ -134,6 +134,8 @@ fn format_name(format: &TextureFormat) -> &'static str {
         TextureFormat::RenderRf32 { .. } => "RenderRf32",
         TextureFormat::RenderRGf16 { .. } => "RenderRGf16",
         TextureFormat::RenderRu32 { .. } => "RenderRu32",
+        TextureFormat::RenderRf16 { .. } => "RenderRf16",
+        TextureFormat::RenderRu8 { .. } => "RenderRu8",
         TextureFormat::SharedBGRAu8 { .. } => "SharedBGRAu8",
         TextureFormat::SharedNv12 { .. } => "SharedNv12",
         TextureFormat::VideoYuvPlane => "VideoYuvPlane",
@@ -161,8 +163,8 @@ fn texel_size(format: &TextureFormat) -> u64 {
         | TextureFormat::DepthD32Sampled { .. } => 4,
         TextureFormat::VecMipRGBAf32 { .. } | TextureFormat::VecRGBAf32 { .. } | TextureFormat::RenderRGBAf32 { .. } => 16,
         TextureFormat::RenderRGBAf16 { .. } => 8,
-        TextureFormat::VecRu8 { .. } => 1,
-        TextureFormat::VecRGu8 { .. } => 2,
+        TextureFormat::VecRu8 { .. } | TextureFormat::RenderRu8 { .. } => 1,
+        TextureFormat::VecRGu8 { .. } | TextureFormat::RenderRf16 { .. } => 2,
         _ => 0,
     }
 }

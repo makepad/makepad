@@ -15,6 +15,10 @@
 
 use std::path::PathBuf;
 
+/// What devhub's sync writes into a machine's synced checkout after it moved the files (the
+/// commits it holds): the mark of a checkout only landed work reaches.
+pub const FLEET_REVISION: &str = "FLEET-REVISION.txt";
+
 /// `MAKEPAD_HOME`, else `~/.makepad` (`%USERPROFILE%\.makepad`). An empty `MAKEPAD_HOME` counts
 /// as unset.
 pub fn makepad_home() -> PathBuf {
@@ -125,6 +129,35 @@ pub fn request_launch(path: &std::path::Path, id: &str) -> Result<(), String> {
         "makepad-wm launched" => Ok(()),
         other => Err(other.strip_prefix("makepad-wm refused ").map_or_else(|| format!("unexpected answer {other:?}"), str::to_string)),
     }
+}
+
+/// Unsaved work of the apps running on this machine (Unix), as `(pid, app, what)`: what each
+/// app's platform publishes in `$XDG_RUNTIME_DIR/makepad-unsaved/<pid>`
+/// (`makepad_platform::restart::set_unsaved`), for live processes only. A whole-session restart
+/// (the WM's) waits while this is not empty.
+#[cfg(unix)]
+pub fn unsaved_work() -> Vec<(u32, String, String)> {
+    let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(PathBuf::from(dir).join("makepad-unsaved")) else { return Vec::new() };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+        let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else { continue };
+        let app = cmdline.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned())
+            .find(|a| find_app_name(a).is_some()).and_then(|a| find_app_name(&a)).unwrap_or_else(|| format!("pid {pid}"));
+        for what in std::fs::read_to_string(entry.path()).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()) {
+            out.push((pid, app.clone(), what.trim().to_string()));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The registry label of a package or binary named by a command-line word (a path's file name).
+#[cfg(unix)]
+fn find_app_name(word: &str) -> Option<String> {
+    let name = word.rsplit('/').next().unwrap_or(word);
+    crate::apps().iter().find(|a| a.package == name || a.bin == name).map(|a| a.label.to_string())
 }
 
 #[cfg(test)]

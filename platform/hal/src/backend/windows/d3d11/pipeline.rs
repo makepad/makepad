@@ -55,7 +55,7 @@ impl PipeSrc {
         self.code == o.code
             && self.bindings == o.bindings
             && self.layout == o.layout
-            && (self.desc.blend, self.desc.instance_stride, self.desc.outputs) == (o.desc.blend, o.desc.instance_stride, o.desc.outputs)
+            && (self.desc.blend, self.desc.flags, self.desc.instance_stride, self.desc.outputs) == (o.desc.blend, o.desc.flags, o.desc.instance_stride, o.desc.outputs)
     }
     /// The program map's key (collisions are told apart by `same_program`).
     pub fn hash_key(&self) -> u64 {
@@ -64,7 +64,7 @@ impl PipeSrc {
         self.code.hash(&mut h);
         self.bindings.hash(&mut h);
         self.layout.hash(&mut h);
-        (self.desc.blend, self.desc.instance_stride, self.desc.outputs).hash(&mut h);
+        (self.desc.blend, self.desc.flags, self.desc.instance_stride, self.desc.outputs).hash(&mut h);
         h.finish()
     }
 }
@@ -189,9 +189,12 @@ fn publish(path: &std::path::Path, bytes: &[u8]) {
 
 /// One stage through FXC. Optimisation is skipped: FXC's optimiser makes UI shaders take
 /// seconds; the gain at run time is small (the old backend's measured choice).
-fn compile_stage(target: &str, entry: &str, hlsl: &str) -> Result<Vec<u8>, String> {
+/// `precise`: a precise-math pipeline (`pipeline_flags::PRECISE`) also compiles with IEEE
+/// strictness (its source marks its float locals `precise`, so no op fuses into a mad).
+fn compile_stage(target: &str, entry: &str, hlsl: &str, precise: bool) -> Result<Vec<u8>, String> {
     const SKIP_OPTIMIZATION: u32 = 1 << 2;
     const BACKWARDS_COMPATIBILITY: u32 = 1 << 12;
+    const IEEE_STRICTNESS: u32 = 1 << 13;
     let target = format!("{target}\0");
     let entry = format!("{entry}\0");
     unsafe {
@@ -205,7 +208,7 @@ fn compile_stage(target: &str, entry: &str, hlsl: &str) -> Result<Vec<u8>, Strin
             None,
             Some(PCSTR(entry.as_ptr())),
             PCSTR(target.as_ptr()),
-            SKIP_OPTIMIZATION | BACKWARDS_COMPATIBILITY,
+            SKIP_OPTIMIZATION | BACKWARDS_COMPATIBILITY | if precise { IEEE_STRICTNESS } else { 0 },
             0,
             &mut blob,
             Some(&mut errors),
@@ -220,7 +223,7 @@ fn compile_stage(target: &str, entry: &str, hlsl: &str) -> Result<Vec<u8>, Strin
     }
 }
 
-fn stage_bytes(key: u64, suffix: &str, target: &str, entry: &str, hlsl: &str) -> Result<Vec<u8>, String> {
+fn stage_bytes(key: u64, suffix: &str, target: &str, entry: &str, hlsl: &str, precise: bool) -> Result<Vec<u8>, String> {
     if let Some(dir) = cache_dir() {
         let path = dir.join(format!("{key:016x}{suffix}.dxbc"));
         if let Ok(bytes) = std::fs::read(&path) {
@@ -228,11 +231,11 @@ fn stage_bytes(key: u64, suffix: &str, target: &str, entry: &str, hlsl: &str) ->
                 return Ok(bytes);
             }
         }
-        let bytes = compile_stage(target, entry, hlsl)?;
+        let bytes = compile_stage(target, entry, hlsl, precise)?;
         publish(&path, &bytes);
         return Ok(bytes);
     }
-    compile_stage(target, entry, hlsl)
+    compile_stage(target, entry, hlsl, precise)
 }
 
 /// Line-numbered source for a compile error.
@@ -246,13 +249,15 @@ const E_OUTOFMEMORY: makepad_windows_sys::core::HRESULT = makepad_windows_sys::c
 /// Compiles and creates a pipeline (any thread: no immediate-context work).
 pub fn build(dev: &Device, code: &HlslPipeline, desc: PipelineDesc, bindings: Vec<u32>, vertex_layout: Vec<u32>, name: &str) -> Result<Arc<Program>, String> {
     let hlsl = &code.source;
-    let key = cache_key(hlsl);
+    let precise = desc.flags & pipeline_flags::PRECISE != 0;
+    // the compile flags are part of the bytecode: a precise build never shares a cache entry
+    let key = cache_key(hlsl) ^ if precise { 0x9e37_79b9_7f4a_7c15 } else { 0 };
     // `MAKEPAD_HLSL_DUMP=<dir>`: every pipeline's source, by its cache key (compile diagnosis)
     if let Some(dir) = std::env::var_os("MAKEPAD_HLSL_DUMP") {
         let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{key:016x}.hlsl")), hlsl);
     }
-    let mut vs_bytes = stage_bytes(key, "_vs", "vs_5_0", "vertex_main", hlsl).map_err(|e| format!("vertex shader `{name}`:\n{e}\n{}", numbered(hlsl)))?;
-    let mut ps_bytes = stage_bytes(key, "_ps", "ps_5_0", "pixel_main", hlsl).map_err(|e| format!("pixel shader `{name}`:\n{e}\n{}", numbered(hlsl)))?;
+    let mut vs_bytes = stage_bytes(key, "_vs", "vs_5_0", "vertex_main", hlsl, precise).map_err(|e| format!("vertex shader `{name}`:\n{e}\n{}", numbered(hlsl)))?;
+    let mut ps_bytes = stage_bytes(key, "_ps", "ps_5_0", "pixel_main", hlsl, precise).map_err(|e| format!("pixel shader `{name}`:\n{e}\n{}", numbered(hlsl)))?;
     let create = |vs_bytes: &[u8], ps_bytes: &[u8]| unsafe {
         let (mut vs, mut ps) = (None, None);
         dev.device.CreateVertexShader(vs_bytes, None, Some(&mut vs)).and_then(|_| dev.device.CreatePixelShader(ps_bytes, None, Some(&mut ps))).map(|_| (vs, ps))
@@ -270,8 +275,8 @@ pub fn build(dev: &Device, code: &HlslPipeline, desc: PipelineDesc, bindings: Ve
                     let _ = std::fs::remove_file(dir.join(format!("{key:016x}{suffix}.dxbc")));
                 }
             }
-            vs_bytes = compile_stage("vs_5_0", "vertex_main", hlsl).map_err(|e| format!("vertex shader `{name}`:\n{e}\n{}", numbered(hlsl)))?;
-            ps_bytes = compile_stage("ps_5_0", "pixel_main", hlsl).map_err(|e| format!("pixel shader `{name}`:\n{e}\n{}", numbered(hlsl)))?;
+            vs_bytes = compile_stage("vs_5_0", "vertex_main", hlsl, precise).map_err(|e| format!("vertex shader `{name}`:\n{e}\n{}", numbered(hlsl)))?;
+            ps_bytes = compile_stage("ps_5_0", "pixel_main", hlsl, precise).map_err(|e| format!("pixel shader `{name}`:\n{e}\n{}", numbered(hlsl)))?;
             create(&vs_bytes, &ps_bytes).map_err(|e| hr("CreateVertexShader/CreatePixelShader of freshly compiled bytecode", e))?
         }
     };

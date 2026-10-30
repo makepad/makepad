@@ -12,7 +12,6 @@ use makepad_remote::link::Client;
 use makepad_strict_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--prio P] [--rev <branch|sha>[,<commercial>]]
@@ -88,7 +87,7 @@ fn master() -> Result<Client, String> {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let o = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
+    let o = makepad_remote::group::command("git").arg("-C").arg(dir).args(args).output().ok()?;
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
@@ -732,7 +731,7 @@ fn landed(c: &Client, lane: &str) -> i32 {
         }
     }
     if let Some(p) = path {
-        match Command::new("git").arg("-C").arg(&repo).args(["worktree", "remove", &p]).status() {
+        match makepad_remote::group::command("git").arg("-C").arg(&repo).args(["worktree", "remove", &p]).status() {
             Ok(st) if st.success() => println!("worktree {p}: removed"),
             _ => {
                 println!("worktree {p}: kept (git refused: local changes or nested checkouts)");
@@ -740,7 +739,7 @@ fn landed(c: &Client, lane: &str) -> i32 {
             }
         }
     }
-    if Command::new("git").arg("-C").arg(&repo).args(["branch", "-d", &branch]).status().is_ok_and(|s| s.success()) {
+    if makepad_remote::group::command("git").arg("-C").arg(&repo).args(["branch", "-d", &branch]).status().is_ok_and(|s| s.success()) {
         println!("branch {branch}: deleted");
     } else {
         code = 1;

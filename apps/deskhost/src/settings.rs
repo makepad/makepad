@@ -44,11 +44,26 @@ pub fn home() -> PathBuf {
 }
 
 pub fn host_name() -> String {
-    std::env::var("COMPUTERNAME")
-        .ok()
-        .or_else(|| std::process::Command::new("hostname").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()))
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| "desk host".into())
+    #[cfg(windows)]
+    let name = {
+        use makepad_windows_sys::core::PWSTR;
+        use makepad_windows_sys::session::Win32::System::SystemInformation::{ComputerNameDnsHostname, GetComputerNameExW};
+        unsafe {
+            let mut size = 0;
+            let _ = GetComputerNameExW(ComputerNameDnsHostname, None, &mut size);
+            if size == 0 {
+                None
+            } else {
+                let mut buffer = vec![0u16; size as usize];
+                GetComputerNameExW(ComputerNameDnsHostname, Some(PWSTR(buffer.as_mut_ptr())), &mut size)
+                    .ok().map(|()| String::from_utf16_lossy(&buffer[..size as usize]))
+            }
+        }
+    };
+    #[cfg(not(windows))]
+    let name = std::env::var("COMPUTERNAME").ok()
+        .or_else(|| std::process::Command::new("hostname").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()));
+    name.filter(|h| !h.is_empty()).unwrap_or_else(|| "desk host".into())
 }
 
 impl Settings {

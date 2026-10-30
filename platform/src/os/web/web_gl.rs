@@ -981,6 +981,8 @@ impl Cx {
                 TextureFormat::RenderRf32 { .. } => 1,
                 TextureFormat::RenderRGBAf32 { .. } => 2,
                 TextureFormat::RenderRGBAf16 { .. } => 3,
+                TextureFormat::RenderRf16 { .. } => 4,
+                TextureFormat::RenderRu8 { .. } => 5,
                 _ => 0,
             };
             match color_texture.clear_color {

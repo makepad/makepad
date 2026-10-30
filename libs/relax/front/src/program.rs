@@ -432,6 +432,9 @@ pub struct CrateInfo {
     relaxed: std::sync::OnceLock<Vec<String>>,
     /// the crate's `#![feature(..)]` declarations, read on first use (the check's gates)
     features: std::sync::OnceLock<crate::features::Features>,
+    /// the crates whose impls this crate's solver sees (`Program::crate_sees`), a bitset over crate
+    /// indices, built on first use: deps are fixed at load and name only earlier crates
+    impl_view: std::sync::OnceLock<Box<[u64]>>,
     /// the crate's root source file (for its manifest)
     root_path: String,
     pub context: std::sync::Arc<crate::source_context::Context>,
@@ -1245,7 +1248,7 @@ impl Program {
         let root_mod = self.new_module(root_def, None, None, krate, 0);
         self.defs[root_def.0 as usize].sub = root_mod;
         self.defs[root_def.0 as usize].scope = root_mod;
-        self.crates.push(CrateInfo { name: cname, root_mod, edition, recursion_limit: 128, deps, cfg, proc_macro: false, is_bin: false, validate: false, relaxed: Default::default(), features: Default::default(), root_path: root.to_string(), context: crate::source_context::Context::new(root, self.sources.clone(), &self.session) });
+        self.crates.push(CrateInfo { name: cname, root_mod, edition, recursion_limit: 128, deps, cfg, proc_macro: false, is_bin: false, validate: false, relaxed: Default::default(), features: Default::default(), impl_view: Default::default(), root_path: root.to_string(), context: crate::source_context::Context::new(root, self.sources.clone(), &self.session) });
         let kname = self.syms.str(cname).to_string();
         let akey = (kname.clone(), root.to_string());
         if !self.ahead.contains_key(&akey) {
@@ -4253,6 +4256,33 @@ impl Program {
             out.push(self.record_error(im.file, pos, "resolve", format!("E0432: unresolved import `{}`", p.join("::"))));
         }
         out
+    }
+
+    /// Whether the impls of crate `krate` take part in trait solving for code of crate `view`.
+    /// rustc_middle trait_def.rs trait_impls_of_provider: a crate's session sees the impls of
+    /// `tcx.crates(())`, the crates its dependency graph loaded, plus its own; a crate elsewhere in
+    /// the program is not loaded there. (A JIT program holds every crate of the build, so a crate
+    /// not depending on winnow must not see winnow's `impl AsRef<Bytes> for [u8]`: with it,
+    /// `[u8]: AsRef<?T>` turns ambiguous in chacha20.) The std family is always loaded.
+    pub fn crate_sees(&self, view: u32, krate: u32) -> bool {
+        if view == krate { return true; }
+        let Some(info) = self.crates.get(view as usize) else { return true };
+        let bits = info.impl_view.get_or_init(|| {
+            let n = self.crates.len();
+            let mut bits = vec![0u64; n.div_ceil(64)];
+            let mut todo = vec![view as usize];
+            for (c, k) in self.crates.iter().enumerate() {
+                if matches!(crate::crates::base_crate_name(self.syms.str(k.name)), "core" | "alloc" | "std") { todo.push(c); }
+            }
+            while let Some(c) = todo.pop() {
+                if c >= n || bits[c / 64] & (1 << (c % 64)) != 0 { continue; }
+                bits[c / 64] |= 1 << (c % 64);
+                for &(_, d) in &self.crates[c].deps { todo.push(d as usize); }
+            }
+            bits.into_boxed_slice()
+        });
+        let k = krate as usize;
+        k / 64 < bits.len() && bits[k / 64] & (1 << (k % 64)) != 0
     }
 
     /// `extern crate alloc;` is written at the root of `krate`.

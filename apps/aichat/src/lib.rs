@@ -86,6 +86,16 @@ fn ai_callback(cx: &mut Cx, op: &str, args: &[(String, String)]) -> Result<Strin
             cx.redraw_all();
             Ok("{\"ok\":1}".into())
         }
+        "confirm" => {
+            let how = arg(args, &["confirm", "how"]).unwrap_or("run").trim().to_string();
+            if !matches!(how.as_str(), "run" | "always" | "cancel") {
+                return Err("need confirm=run|always|cancel".into());
+            }
+            cx.global::<AiSlotRequests>().confirm.push(how);
+            cx.new_next_frame();
+            cx.redraw_all();
+            Ok("{\"ok\":1}".into())
+        }
         "transcript" => {
             let json = cx.global::<AiTranscript>().json.clone();
             if json.is_empty() {
@@ -94,6 +104,6 @@ fn ai_callback(cx: &mut Cx, op: &str, args: &[(String, String)]) -> Result<Strin
                 Ok(json)
             }
         }
-        other => Err(format!("no ai op `{other}`; there are toggle, say, transcript")),
+        other => Err(format!("no ai op `{other}`; there are toggle, say, confirm, transcript")),
     }
 }

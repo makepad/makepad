@@ -57,6 +57,7 @@ pub fn gles_draw_sources(output: &mut ShaderOutput, types: &impl crate::shader_t
 
 fn draw_sources(output: &mut ShaderOutput, types: &impl crate::shader_types::ShaderTypes, complete: bool, pick: bool) -> GlslDrawSources {
     let mut ir = output.ir.clone();
+    crate::shader_ir_precise::lower_precise(&mut ir, true);
     let info = build_gl_entries(output, &mut ir, types);
     let mut io_tys = Vec::new();
     for io in &output.io {
@@ -140,7 +141,10 @@ fn draw_sources(output: &mut ShaderOutput, types: &impl crate::shader_types::Sha
     private_globals(&cx, &ir, false, &mut fragment);
     let entry = ir.functions[fragment_main as usize].entry.clone().unwrap();
     for io in &entry.inputs {
-        writeln!(fragment, "in {};", cx.decl(io.ty, &io.name)).ok();
+        // gl_FragCoord (the depth output's default) is built in
+        if let IrIoBinding::Location(_) = io.binding {
+            writeln!(fragment, "in {};", cx.decl(io.ty, &io.name)).ok();
+        }
     }
     for io in &entry.outputs {
         if let IrIoBinding::Location(l) = io.binding {
@@ -331,7 +335,7 @@ fn private_globals(cx: &TextCx, ir: &IrModule, vertex: bool, out: &mut String) {
         let keep = match glob.kind {
             IrGlobalKind::Io(IrIo::Geometry) => vertex,
             IrGlobalKind::Io(IrIo::DynInstance) | IrGlobalKind::Io(IrIo::RustInstance) | IrGlobalKind::Io(IrIo::Varying) => true,
-            IrGlobalKind::Io(IrIo::FragmentOutput(_)) => !vertex,
+            IrGlobalKind::Io(IrIo::FragmentOutput(_) | IrIo::FragmentDepth) => !vertex,
             _ => false,
         };
         if keep {

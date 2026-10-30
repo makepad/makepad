@@ -37,7 +37,7 @@ pub fn nvidia_smi() -> Option<&'static str> {
 }
 
 fn smi(args: &[&str]) -> Option<String> {
-    let o = std::process::Command::new(nvidia_smi()?).args(args).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+    let o = makepad_remote::group::command(nvidia_smi()?).args(args).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
@@ -157,7 +157,7 @@ fn sample() -> (f64, Vec<ProcRow>) {
 fn sample() -> (f64, Vec<ProcRow>) {
     // macOS (and the rest): `ps` gives a decaying CPU average per process; the machine's use is
     // their sum over the cores
-    let out = std::process::Command::new("/bin/ps").args(["-Ao", "pid=,pcpu=,rss=,comm="]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output();
+    let out = makepad_remote::group::command("/bin/ps").args(["-Ao", "pid=,pcpu=,rss=,comm="]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output();
     let text = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
     let rows: Vec<ProcRow> = text
         .lines()

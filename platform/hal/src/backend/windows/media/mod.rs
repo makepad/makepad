@@ -22,6 +22,7 @@ mod camera;
 mod game_input;
 mod midi;
 mod video;
+pub(crate) mod web_view_runtime;
 
 pub use video::can_play_type;
 

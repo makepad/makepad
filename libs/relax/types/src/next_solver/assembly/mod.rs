@@ -188,6 +188,7 @@ impl EvalCtxt<'_, '_> {
         then: impl FnOnce(&mut EvalCtxt<'_, '_>) -> QueryResultOrRerunNonErased) -> Result<Option<Candidate>, NoSolutionOrRerunNonErased> {
         let tcx = self.delegate.tcx; let tr = goal.trait_ref(self);
         let d = self.solver.prog.def(imp);
+        if let Some(view) = self.delegate.impl_view { if !self.solver.prog.crate_sees(view, d.krate) { return Ok(None); } }
         let negative = { let ast = &self.solver.prog.files[d.file as usize].ast; ast.as_impl(&ast.item(d.item).kind).is_some_and(|i| i.negative) };
         let wanted_negative = matches!(goal, GoalKind::Trait(TraitClause { polarity: ClausePolarity::Negative, .. }));
         if negative != wanted_negative { return Ok(None); }

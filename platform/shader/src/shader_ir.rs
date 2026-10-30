@@ -145,6 +145,9 @@ pub enum IrIo {
     UniformBuffer,
     Varying,
     FragmentOutput(u8),
+    /// The fragment depth output (one f32 global; the entry writes it to the
+    /// FragDepth builtin).
+    FragmentDepth,
     Texture(TextureType),
     /// A compute kernel's device buffer (`shader.buffer` / `buffer_rw`): a
     /// runtime-sized array reached by its device address (writable when
@@ -600,6 +603,10 @@ pub enum IrBuiltinIo {
     ViewIndex,
     FrontFacing,
     FragDepth,
+    /// FragDepth with the promise depth >= the rasterised depth (conservative).
+    FragDepthGreater,
+    /// FragDepth with the promise depth <= the rasterised depth (conservative).
+    FragDepthLess,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -696,6 +703,11 @@ pub struct IrModule {
     pub functions: Vec<IrFunction>,
     /// A compute kernel's workgroup size (x, y, z).
     pub workgroup: [u32; 3],
+    /// `precise_math: true`: float arithmetic keeps its written order and
+    /// rounding (no fma contraction, no reassociation, IEEE division and
+    /// sqrt where the backend offers them), so a kernel can match a CPU
+    /// reference bit for bit.
+    pub precise: bool,
 }
 
 pub const TY_VOID: TyId = 0;
@@ -723,6 +735,7 @@ impl IrModule {
             globals: Vec::new(),
             functions: Vec::new(),
             workgroup: [1, 1, 1],
+            precise: false,
         };
         m.ty(IrTy::Void);
         m.ty(IrTy::Scalar(IrScalar::Bool));

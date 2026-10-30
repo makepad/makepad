@@ -401,6 +401,10 @@ pub fn to_rgba8(fmt: u32, px: &[u8]) -> Vec<u8> {
         format::R8 => px.iter().for_each(|v| out.extend_from_slice(&[*v, *v, *v, 255])),
         format::RG8 => px.chunks_exact(2).for_each(|p| out.extend_from_slice(&[p[0], p[1], 0, 255])),
         format::RGBA16F => px.chunks_exact(8).for_each(|p| out.extend_from_slice(&[q(half(u16s(p, 0))), q(half(u16s(p, 1))), q(half(u16s(p, 2))), q(half(u16s(p, 3)))])),
+        format::R16F => px.chunks_exact(2).for_each(|p| {
+            let v = q(half(u16s(p, 0)));
+            out.extend_from_slice(&[v, v, v, 255])
+        }),
         format::RG16F => px.chunks_exact(4).for_each(|p| out.extend_from_slice(&[q(half(u16s(p, 0))), q(half(u16s(p, 1))), 0, 255])),
         format::RGBA32F => px.chunks_exact(16).for_each(|p| out.extend_from_slice(&[q(f32s(p, 0)), q(f32s(p, 1)), q(f32s(p, 2)), q(f32s(p, 3))])),
         format::R32F => px.chunks_exact(4).for_each(|p| {

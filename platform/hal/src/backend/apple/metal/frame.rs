@@ -85,6 +85,7 @@ fn format_name(f: MTLPixelFormat) -> (&'static str, u64) {
         MTLPixelFormat::RGBA32Float => ("rgba32f", 16),
         MTLPixelFormat::R32Float => ("r32f", 4),
         MTLPixelFormat::RG16Float => ("rg16f", 4),
+        MTLPixelFormat::R16Float => ("r16f", 2),
         MTLPixelFormat::R32Uint => ("r32u", 4),
         MTLPixelFormat::Depth32Float => ("d32f", 4),
         _ => ("?", 4),

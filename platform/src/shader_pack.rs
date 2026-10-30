@@ -104,6 +104,7 @@ fn mapping_difference(a: &crate::draw_shader::CxDrawShaderMapping, b: &crate::dr
         same("varying_total_slots", a.varying_total_slots, b.varying_total_slots)?;
         same("color_format", a.color_format, b.color_format)?;
         same("blend_op", a.blend_op, b.blend_op)?;
+        same("precise_math", a.precise_math, b.precise_math)?;
         same("fragment_outputs", a.fragment_outputs, b.fragment_outputs)?;
         same("reflection.instance", same_reflection(&a.reflection.instance, &b.reflection.instance), true)?;
         same("reflection.vertex", same_reflection(&a.reflection.vertex, &b.reflection.vertex), true)?;

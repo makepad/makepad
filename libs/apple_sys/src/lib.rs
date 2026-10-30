@@ -1197,6 +1197,7 @@ pub struct MTLClearColor {
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum MTLPixelFormat {
     R8Unorm = 10,
+    R16Float = 25,
     RG8Unorm = 30,
     R32Uint = 53,
     R32Float = 55,

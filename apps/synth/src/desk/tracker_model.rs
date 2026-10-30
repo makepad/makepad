@@ -899,6 +899,90 @@ pub fn sends_text(sends: &[(String, f32)], fx: &str, amount: f32) -> String {
     format!("{{{}}}", parts.join(" "))
 }
 
+/// The slot counts a hit pattern can be split into: straight and triplet.
+pub const SLOTS: [usize; 6] = [8, 12, 16, 24, 32, 64];
+
+/// A loop's hit pattern: its slots, and the bytes of `hits:` and `step:`.
+pub struct HitsAt {
+    pub chars: Vec<u8>,
+    pub step: f64,
+    /// The `hits:` value's span (quotes included) and `step:`'s, if written.
+    pub hits: (usize, usize),
+    pub step_at: Option<(usize, usize)>,
+    pub grouped: Option<char>,
+}
+
+pub fn hits_at(src: &str, name: &str) -> Result<HitsAt, String> {
+    let outline = source::outline(src);
+    let ctor = outline.node(name).ok_or_else(|| format!("no loop `{name}`"))?;
+    let f = ctor.field("hits").ok_or_else(|| format!("`{name}` has no hits pattern"))?;
+    let text = f.value.text(src);
+    if !(text.len() >= 2 && text.starts_with('"') && text.ends_with('"') && !text[1..text.len() - 1].contains('"')) {
+        return Err(format!("`{name}`'s hits are an expression: change it in the code"));
+    }
+    let inner = &text[1..text.len() - 1];
+    let chars: Vec<u8> = inner.bytes().filter(|b| !b.is_ascii_whitespace() && *b != b'|').collect();
+    let grouped = if inner.contains('|') { Some('|') } else if inner.contains(' ') { Some(' ') } else { None };
+    let (step, step_at) = match ctor.field("step") {
+        Some(sf) => (sf.value.text(src).trim().parse::<f64>().map_err(|_| format!("`{name}`'s step is an expression: change it in the code"))?, Some((sf.value.start, sf.value.end))),
+        None => (0.25, None),
+    };
+    Ok(HitsAt { chars, step, hits: (f.value.start, f.value.end), step_at, grouped })
+}
+
+/// Split loop `name`'s hit pattern into `slots` over the same length: every
+/// hit keeps its time (`x...` in 16 is `x.......` in 32). Refused when a hit
+/// would fall between the new slots. One splice (one undo step) for the
+/// pattern and its `step:`.
+pub fn resample_hits(src: &str, name: &str, slots: usize) -> Result<Splice, String> {
+    let h = hits_at(src, name)?;
+    let n = h.chars.len().max(1);
+    if slots == n {
+        return Err(format!("`{name}` has {n} slots already"));
+    }
+    let len = n as f64 * h.step;
+    let step = len / slots as f64;
+    if step < 1.0 / 64.0 - 1e-9 {
+        return Err(format!("{slots} slots over {} beats is finer than 1/64 beat", source::fmt_num(len, 3)));
+    }
+    let mut out = vec![b'.'; slots];
+    for (i, c) in h.chars.iter().enumerate() {
+        if matches!(c, b'.' | b'-' | b'_') {
+            continue;
+        }
+        let j = i as f64 * h.step / step;
+        if (j - j.round()).abs() > 1e-6 {
+            return Err(format!("a hit at beat {} falls between {slots} slots: clear it first or pick a finer split", source::fmt_num(i as f64 * h.step, 3)));
+        }
+        out[j.round() as usize] = *c;
+    }
+    // Grouped as it was: a group per beat when a beat is whole slots.
+    let per_beat = slots as f64 / len.max(1e-9);
+    let mut text = String::with_capacity(slots * 2 + 2);
+    text.push('"');
+    for (k, c) in out.iter().enumerate() {
+        if let Some(sep) = h.grouped {
+            if k > 0 && (per_beat - per_beat.round()).abs() < 1e-9 && per_beat >= 2.0 && k % per_beat.round() as usize == 0 {
+                text.push(sep);
+            }
+        }
+        text.push(*c as char);
+    }
+    text.push('"');
+    let step_text = source::fmt_num(step, 6);
+    let mut splices = vec![Splice { start: h.hits.0, end: h.hits.1, text }];
+    match h.step_at {
+        Some(at) => splices.push(Splice { start: at.0, end: at.1, text: step_text }),
+        None if (step - 0.25).abs() > 1e-12 => splices.push(Splice { start: h.hits.1, end: h.hits.1, text: format!(" step: {step_text}") }),
+        None => {}
+    }
+    let splices = normalize(splices)?;
+    // One splice from the first change to the last (the bytes between kept).
+    let (a, b) = (splices[0].start, splices[splices.len() - 1].end);
+    let changed = apply_all(&src[a..b], &splices.iter().map(|s| Splice { start: s.start - a, end: s.end - a, text: s.text.clone() }).collect::<Vec<_>>());
+    Ok(Splice { start: a, end: b, text: changed })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -978,5 +1062,39 @@ mod tests {
         assert_eq!(sends_text(&[("room".into(), 0.3)], "room", 0.0), "{}");
         let s = apply_all(SRC, &[source::set_field(SRC, "kick", "amp", "0.6").unwrap()]);
         assert!(s.contains("note: @kick amp: 0.6}"), "{s}");
+    }
+
+    #[test]
+    fn tracker_hits_split_keeps_every_hit_in_time() {
+        let src = "use mod.score.*\nlet clock = Clock{bpm: 120 sig: [4 4]}\nlet kit = Drums{kit: @analog_hybrid}\nlet kick = Loop{play: kit hits: \"x...x...x...x...\" note: @kick}\nScore{clock kit kick}\n";
+        let loads = |s: &str| {
+            if let Err(d) = makepad_score_live::model::load(s) {
+                panic!("does not load: {d:?}\n{s}");
+            }
+        };
+        loads(src);
+        // Finer: 16 to 32, the step halves.
+        let s = apply_all(src, &[resample_hits(src, "kick", 32).unwrap()]);
+        assert!(s.contains("hits: \"x.......x.......x.......x.......\" step: 0.125 note: @kick"), "{s}");
+        loads(&s);
+        // And back: 32 to 16, the written step goes back to 0.25.
+        let back = apply_all(&s, &[resample_hits(&s, "kick", 16).unwrap()]);
+        assert!(back.contains("hits: \"x...x...x...x...\" step: 0.25 note: @kick"), "{back}");
+        // Triplets: 16 to 12, the beats stay on the beat.
+        let t = apply_all(src, &[resample_hits(src, "kick", 12).unwrap()]);
+        assert!(t.contains("hits: \"x..x..x..x..\" step: 0.3333"), "{t}");
+        loads(&t);
+        // Coarser refused when a hit falls between: an off-beat at 0.25.
+        let off = src.replace("x...x...", "xx..x...");
+        let e = resample_hits(&off, "kick", 8).unwrap_err();
+        assert!(e.contains("falls between"), "{e}");
+        // Coarser allowed when every hit lands: 16 to 8.
+        let c = apply_all(src, &[resample_hits(src, "kick", 8).unwrap()]);
+        assert!(c.contains("hits: \"x.x.x.x.\" step: 0.5"), "{c}");
+        loads(&c);
+        // Groups kept: a separator per beat.
+        let g = src.replace("x...x...x...x...", "x... x... x... x...");
+        let gs = apply_all(&g, &[resample_hits(&g, "kick", 32).unwrap()]);
+        assert!(gs.contains("hits: \"x....... x....... x....... x.......\""), "{gs}");
     }
 }

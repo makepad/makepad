@@ -41,6 +41,7 @@ pub fn hlsl_draw_pick_source(output: &ShaderOutput, types: &impl crate::shader_t
 
 pub fn hlsl_draw(output: &ShaderOutput, types: &impl crate::shader_types::ShaderTypes, pick: bool) -> (String, HlslDrawInfo) {
     let mut ir = output.ir.clone();
+    crate::shader_ir_precise::lower_precise(&mut ir, true);
     let info = build_hlsl_entries(output, &mut ir, types);
     let mut io_tys = Vec::new();
     for io in &output.io {
@@ -95,6 +96,13 @@ pub fn hlsl_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shader
         for (name, l) in &fragment_outputs {
             writeln!(f, "    float4 {} : SV_TARGET{};", name, l).ok();
         }
+        // A written depth stays: the id resolves occlusion like the colour pass.
+        let depth_out = ir.functions[fragment_main as usize].entry.as_ref().unwrap().outputs.iter()
+            .find(|io| matches!(io.binding, IrIoBinding::Builtin(IrBuiltinIo::FragDepth | IrBuiltinIo::FragDepthGreater | IrBuiltinIo::FragDepthLess)))
+            .map(|io| (io.name.clone(), semantic(io.binding, true)));
+        if let Some((name, sem)) = &depth_out {
+            writeln!(f, "    float {} : {};", name, sem).ok();
+        }
         f.push_str("};\n");
         let first = ir.functions[fragment_main as usize].entry.as_ref().unwrap().outputs.iter().find(|io| matches!(io.binding, IrIoBinding::Location(_)));
         let cover = match first {
@@ -107,6 +115,9 @@ pub fn hlsl_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shader
         f.push_str("    float4 pc = float4(float(pid & 255u), float((pid >> 8) & 255u), float((pid >> 16) & 255u), 255.0) / 255.0;\n    PickOut o;\n");
         for (name, _) in &fragment_outputs {
             writeln!(f, "    o.{} = pc;", name).ok();
+        }
+        if let Some((name, _)) = &depth_out {
+            writeln!(f, "    o.{0} = c.{0};", name).ok();
         }
         f.push_str("    return o;\n}\n");
         let pixel = pixel
@@ -201,7 +212,7 @@ pub fn hlsl_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shader
         }
         let name = cx.global_name(g as GlobalId);
         match glob.kind {
-            IrGlobalKind::Io(IrIo::Geometry | IrIo::DynInstance | IrIo::RustInstance | IrIo::Varying | IrIo::FragmentOutput(_))
+            IrGlobalKind::Io(IrIo::Geometry | IrIo::DynInstance | IrIo::RustInstance | IrIo::Varying | IrIo::FragmentOutput(_) | IrIo::FragmentDepth)
             | IrGlobalKind::VertexPosition
             | IrGlobalKind::InstanceIndex => {
                 writeln!(out, "static {};", cx.decl(glob.ty, &name)).ok();
@@ -255,6 +266,8 @@ fn semantic(b: IrIoBinding, fragment_output: bool) -> String {
             IrBuiltinIo::ViewIndex => "SV_ViewID",
             IrBuiltinIo::FrontFacing => "SV_IsFrontFace",
             IrBuiltinIo::FragDepth => "SV_Depth",
+            IrBuiltinIo::FragDepthGreater => "SV_DepthGreaterEqual",
+            IrBuiltinIo::FragDepthLess => "SV_DepthLessEqual",
         }
         .to_string(),
         IrIoBinding::Location(l) => {

@@ -476,7 +476,9 @@ pub mod format {
     pub const BC7: u32 = 11;
     pub const BC5: u32 = 12;
     pub const ASTC4X4: u32 = 13;
-    pub const COUNT: u32 = 14;
+    /// one-channel half-float render target / data texture (filterable)
+    pub const R16F: u32 = 14;
+    pub const COUNT: u32 = 15;
     /// RGBA8 with sRGB encoding on write (the shader outputs linear colour): a render target
     /// of the Android XR projection chains only (`hal_xr_linear_frames`), outside the texture
     /// formats every backend lists (`COUNT`); Vulkan alone maps it.
@@ -493,7 +495,7 @@ pub mod format {
             RGBA8 | BGRA8 | DEPTH32F | DEPTH24_STENCIL8 | R32F | RG16F | R32UINT | RGBA8_SRGB => 4,
             // 16 bytes per 4x4 texels; NV12: its luma plane's (the chroma adds half: `level_bytes`)
             R8 | BC7 | BC5 | ASTC4X4 | NV12 => 1,
-            RG8 => 2,
+            RG8 | R16F => 2,
             RGBA16F => 8,
             RGBA32F => 16,
             _ => 0,
@@ -514,6 +516,7 @@ pub mod format {
             DEPTH24_STENCIL8 => "Depth24Stencil8",
             R32F => "R32F",
             RG16F => "Rg16F",
+            R16F => "R16F",
             R32UINT => "R32Uint",
             BC7 => "Bc7",
             BC5 => "Bc5",
@@ -1297,7 +1300,8 @@ pub struct PipelineDesc {
     pub vertex_layout: Range,
     pub color_formats: [u32; 4],
     pub blend: u32,
-    pub depth: u32,
+    /// `pipeline_flags` bits
+    pub flags: u32,
     /// Cx draw_shader index (stable per session; names collide), its debug name and its script
     /// source location (file:line:col)
     pub shader: u32,
@@ -1308,6 +1312,14 @@ pub struct PipelineDesc {
     pub varyings: u32,
     /// bit `i` set when the fragment stage writes colour output `i`
     pub outputs: u32,
+}
+
+/// `PipelineDesc::flags` bits.
+pub mod pipeline_flags {
+    /// precise math (`precise_math: true`): the backend compiles the program without fast
+    /// math (no fma contraction or reassociation, IEEE division and sqrt where it can), so a
+    /// data pass can match a CPU reference bit for bit
+    pub const PRECISE: u32 = 1;
 }
 
 /// `PipelineDesc::blend` bits.

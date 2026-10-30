@@ -565,15 +565,27 @@ fn swept_tool(chain: &EdgeChain, op: EdgeOp, tol: &Tolerance) -> Result<(TriMesh
     Ok((m, add_all.unwrap_or(false)))
 }
 
+/// The most edges one fillet or chamfer rounds: each edge is a tool joined by a
+/// boolean, so a selector that picks a tessellated surface's every crease would
+/// run for minutes.
+pub const MAX_EDGES: usize = 96;
+
 /// Fillet or chamfer these edges of `mesh`: every tool is built first, then
-/// cut and added with the booleans (cuts first, then the fills).
-pub fn apply_edges(mesh: &TriMesh, chains: &[&EdgeChain], op: EdgeOp, tol: &Tolerance) -> Result<TriMesh, String> {
+/// cut and added with the booleans (cuts first, then the fills). `cancelled` is
+/// asked between tools.
+pub fn apply_edges(mesh: &TriMesh, chains: &[&EdgeChain], op: EdgeOp, tol: &Tolerance, cancelled: Option<&dyn Fn() -> bool>) -> Result<TriMesh, String> {
     if chains.is_empty() {
         return Err("no edges were selected".into());
+    }
+    if chains.len() > MAX_EDGES {
+        return Err(format!("the selector picks {} edges (at most {MAX_EDGES}): narrow it, e.g. {{top: true}} or {{dir: @y convex: true}}", chains.len()));
     }
     let mut cut: Option<TriMesh> = None;
     let mut fill: Option<TriMesh> = None;
     for (i, c) in chains.iter().enumerate() {
+        if cancelled.is_some_and(|c| c()) {
+            return Err("cancelled".into());
+        }
         let (tool, add) = edge_tool(c, op, tol).map_err(|e| format!("edge {i} ({} at {:.1}, {:.1}, {:.1}): {e}", c.kind_name(), c.midpoint().x, c.midpoint().y, c.midpoint().z))?;
         let slot = if add { &mut fill } else { &mut cut };
         *slot = Some(match slot.take() {

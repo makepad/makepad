@@ -28,6 +28,7 @@ pub struct WgslDrawShaderSource {
 
 pub fn draw_wgsl(output: &ShaderOutput, types: &impl ShaderTypes, xr: bool) -> Result<(String, IrDrawInfo), String> {
     let mut ir = output.ir.clone();
+    crate::shader_ir_precise::lower_precise(&mut ir, true);
     let info = build_draw_entries(output, &mut ir, types, xr);
     let (Some(v), Some(f)) = (ir.function_by_name("vertex_main"), ir.function_by_name("fragment_main")) else {
         return Err("draw shader has no entry points".to_string());
@@ -42,7 +43,7 @@ fn builtin_name(b: IrBuiltinIo) -> &'static str {
         IrBuiltinIo::InstanceIndex => "instance_index",
         IrBuiltinIo::ViewIndex => "view_index",
         IrBuiltinIo::FrontFacing => "front_facing",
-        IrBuiltinIo::FragDepth => "frag_depth",
+        IrBuiltinIo::FragDepth | IrBuiltinIo::FragDepthGreater | IrBuiltinIo::FragDepthLess => "frag_depth",
     }
 }
 

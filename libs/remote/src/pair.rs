@@ -42,16 +42,16 @@ pub fn pair(name: &str, hub: &str, delivery: Delivery) -> io::Result<String> {
             let local = std::env::temp_dir().join(format!("makepad-remote-{name}.key"));
             makepad_network::tls::write_private(&local, key_text.as_bytes())?;
             let remote = format!("/data/local/tmp/makepad-remote-{name}.key");
-            let push = run(Command::new("adb").arg("push").arg(&local).arg(&remote));
+            let push = run(crate::group::command("adb").arg("push").arg(&local).arg(&remote));
             let _ = std::fs::remove_file(&local);
             push?;
             let port = hub.rsplit(':').next().unwrap_or("7907");
-            run(Command::new("adb").args(["reverse", &format!("tcp:{port}"), &format!("tcp:{port}")]))?;
+            run(crate::group::command("adb").args(["reverse", &format!("tcp:{port}"), &format!("tcp:{port}")]))?;
             Ok(dial_with(name, &format!("127.0.0.1:{port}"), &remote, &fp))
         }
         Delivery::Ssh(target) => {
             let file = format!("~/.config/makepad/remote/{name}.key");
-            let mut child = Command::new("ssh")
+            let mut child = crate::group::command("ssh")
                 .args(["-o", "BatchMode=yes", &target, &format!("mkdir -p ~/.config/makepad/remote && umask 077 && cat > {file}")])
                 .stdin(Stdio::piped())
                 .spawn()?;

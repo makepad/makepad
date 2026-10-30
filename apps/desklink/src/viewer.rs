@@ -519,9 +519,10 @@ impl App {
             v.last_stats = Some((frame, (v.latency.decode * 1000.0) as u32, (v.latency.present * 1000.0) as u32));
             v.shown += 1;
         }
+        let host_note = stream_rate.as_ref().filter(|r| stream_fps == Some(0) && !r.why.is_empty()).map(|r| r.why.clone());
         view.note = match &state {
-            State::Connected => None,
-            State::Connecting => Some(format!("connecting to {host}:{port} …")),
+            State::Connected => host_note.clone(),
+            State::Connecting => host_note.or_else(|| Some(format!("connecting to {host}:{port} …"))),
             State::Reconnecting => Some("reconnecting …".to_string()),
             State::Offline(why) => Some(why.clone()),
         };

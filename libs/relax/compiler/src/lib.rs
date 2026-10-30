@@ -940,12 +940,24 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
     let runtime = &sess.runtime;
     let options = &sess.options;
     let root = &args[0];
-    let filter = if args.len() > 1 { args[1].clone() } else { String::new() };
-    // the test program's argv is its own (the harness binary and its filter), not Relax's
-    let mut pa = vec![root.clone().into_bytes()];
-    if !filter.is_empty() {
-        pa.push(filter.clone().into_bytes());
+    // libtest's argv after the file: `--` and flags (`--nocapture`, `--test-threads N`, `--exact`)
+    // are not filters; the first other word is (libtest's `cargo test -- --nocapture` shape)
+    let mut filter = String::new();
+    let mut exact = false;
+    let mut rest = args[1..].iter();
+    while let Some(a) = rest.next() {
+        match a.as_str() {
+            "--" => {}
+            "--exact" => exact = true,
+            "--test-threads" | "--skip" | "--format" | "--color" | "-Z" | "--logfile" => { rest.next(); }
+            f if f.starts_with('-') => {}
+            f if filter.is_empty() => filter = f.to_string(),
+            _ => {}
+        }
     }
+    // the test program's argv is its own (the harness binary and its arguments), not Relax's
+    let mut pa = vec![root.clone().into_bytes()];
+    pa.extend(args[1..].iter().filter(|a| a.as_str() != "--").map(|a| a.clone().into_bytes()));
     jit::set_program_args(pa);
     let t0 = Instant::now();
     let (prog, core, krate) = match load_with_std(sess, root, "test_crate", true) {
@@ -997,7 +1009,7 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
     for (ri, d) in runs.into_iter().enumerate() {
         let last_round = ri + tests.len() >= total_runs;
         let name = u.prog.def_path(d);
-        if !filter.is_empty() && !name.contains(&filter) {
+        if !filter.is_empty() && !(if exact { name == filter || name.strip_prefix("test_crate::") == Some(filter.as_str()) } else { name.contains(&filter) }) {
             continue;
         }
         // speculative workers compile concurrently: unit access under the lock

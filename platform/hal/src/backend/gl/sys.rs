@@ -225,6 +225,7 @@ pub const RG8: GLenum = 0x822B;
 pub const RGBA8: GLenum = 0x8058;
 pub const R32F: GLenum = 0x822E;
 pub const RG16F: GLenum = 0x822F;
+pub const R16F: GLenum = 0x822D;
 pub const RGBA16F: GLenum = 0x881A;
 pub const RGBA32F: GLenum = 0x8814;
 pub const R32UI: GLenum = 0x8236;

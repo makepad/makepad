@@ -525,6 +525,23 @@ impl DrawPass {
 
     /// Drain completed command-buffer durations without blocking for work
     /// that is still in flight.
+    /// Whether the GPU has drawn this pass whole from a recording made at or after `repaint`
+    /// (`Cx::repaint_id` read right after recording it): every pipeline was ready, nothing it
+    /// sampled was unfinished, the frame completed on the GPU and the backend left no draw out.
+    /// What an incremental producer (a bake into a kept atlas) waits for before it records
+    /// the next step; until then it keeps the pass attached without recording it again, and
+    /// the same recording is painted when the pipelines are ready.
+    pub fn painted_whole_since(&self, cx: &Cx, repaint: u64) -> bool {
+        let p = &cx.passes[self.draw_pass_id()];
+        !cx.draw_shaders_pending()
+            && !p.paint_dirty
+            && !p.incomplete
+            && p.painted_serial >= repaint
+            && p.painted_frame != 0
+            && cx.textures.1.serials.completed.load(std::sync::atomic::Ordering::Acquire) >= p.painted_frame
+            && !cx.frames_partial(p.painted_frame, p.painted_frame)
+    }
+
     pub fn take_gpu_times_ms(&self, cx: &Cx) -> Vec<f64> {
         cx.passes[self.draw_pass_id()]
             .gpu_time_query
@@ -722,6 +739,11 @@ pub struct CxDrawPass {
     /// for one, or it was drawn from such a picture. A pass that samples it
     /// is not painted whole either; its next whole paint clears it.
     pub(crate) incomplete: bool,
+    /// The frame serial of the paint that last moved `painted_serial`, and its value before
+    /// that paint: a frame the backend completes with draws left out (`FramePartial`: a
+    /// pipeline variant for this target layout still compiling) takes the paint back.
+    pub(crate) painted_frame: u64,
+    pub(crate) painted_before: u64,
     /// Kept attached although its attaching list was recorded again without
     /// it: a drawing recorded it, the frame was drawn again before it painted
     /// whole, and the later drawing did not record it again (`Cx::frame_drawn_again`).
@@ -829,6 +851,8 @@ impl Default for CxDrawPass {
             time_owed: false,
             painted_serial: 0,
             incomplete: false,
+            painted_frame: 0,
+            painted_before: 0,
             kept_recording: false,
             pass_rect: None,
             #[cfg(target_arch = "wasm32")]

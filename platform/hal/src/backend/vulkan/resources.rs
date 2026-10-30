@@ -21,6 +21,7 @@ pub fn vk_format(f: u32) -> Option<vk::Format> {
         format::DEPTH24_STENCIL8 => vk::Format::D24_UNORM_S8_UINT,
         format::R32F => vk::Format::R32_SFLOAT,
         format::RG16F => vk::Format::R16G16_SFLOAT,
+        format::R16F => vk::Format::R16_SFLOAT,
         format::R32UINT => vk::Format::R32_UINT,
         format::BC7 => vk::Format::BC7_UNORM_BLOCK,
         format::BC5 => vk::Format::BC5_UNORM_BLOCK,

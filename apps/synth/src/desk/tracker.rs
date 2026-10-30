@@ -40,6 +40,33 @@ script_mod! {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
             let w = self.rect_size.x
             let h = self.rect_size.y
+            if self.shape > 2.5 {
+                // A knob (as the lenses draw them): its track, the value's
+                // arc from 7 o'clock round to 5 (from the top for a
+                // bipolar one), a pointer, and the meter as an outer ring.
+                let c = vec2(w * 0.5, h * 0.5)
+                let r = min(w, h) * 0.5 - 2.0
+                let a0 = 0.75 * 3.1415926
+                let span = 1.5 * 3.1415926
+                if self.meter > 0.002 {
+                    sdf.arc_round_caps(c.x, c.y, r + 0.8, a0, a0 + span * min(self.meter, 1.0), 1.3)
+                    sdf.fill(self.edge)
+                }
+                sdf.circle(c.x, c.y, r - 4.5)
+                sdf.fill(self.body)
+                sdf.arc_round_caps(c.x, c.y, r - 1.5, a0, a0 + span, 2.4)
+                sdf.fill(self.body * vec4(1.6, 1.6, 1.6, 1.0))
+                let from = mix(0.0, 0.5, self.bipolar)
+                let lo = min(from, self.value)
+                let hi = max(from, self.value)
+                sdf.arc_round_caps(c.x, c.y, r - 1.5, a0 + span * lo, a0 + span * max(hi, lo + 0.001), 2.4)
+                sdf.fill(self.fill)
+                let a = a0 + span * self.value
+                sdf.move_to(c.x + cos(a) * (r * 0.15), c.y + sin(a) * (r * 0.15))
+                sdf.line_to(c.x + cos(a) * (r - 6.0), c.y + sin(a) * (r - 6.0))
+                sdf.stroke(vec4(0.95, 0.95, 0.95, 1.0), 1.6)
+                return sdf.result
+            }
             if self.shape > 1.5 {
                 // A triangle pointing along time (the playhead's mark).
                 sdf.move_to(0.5, 0.5)
@@ -90,9 +117,19 @@ pub struct DrawTrackBlock {
     pub stroke: f32,
     #[live]
     pub radius: f32,
-    /// 0 a box, 1 a note, 2 a triangle.
+    /// 0 a box, 1 a note, 2 a triangle, 3 a knob.
     #[live]
     pub shape: f32,
+    /// A knob's body colour, value (0..1), meter (0..1) and whether it
+    /// turns both ways from the top (pan).
+    #[live]
+    pub body: Vec4f,
+    #[live]
+    pub value: f32,
+    #[live]
+    pub meter: f32,
+    #[live]
+    pub bipolar: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -195,7 +232,7 @@ enum Tool {
 enum Drag {
     Select { anchor: (i64, usize) },
     Note { ch: usize, ev: usize, at: Vec2d, now: Vec2d, resize: bool },
-    Fader { ch: usize, field: &'static str, value: f32 },
+    Fader { ch: usize, field: &'static str, value: f32, from: Vec2d, base: f32 },
     Ruler { from: f64, to: f64 },
     PopFader { what: PopFader, value: f32 },
 }
@@ -234,6 +271,8 @@ enum PopHit {
     Send(String),
     View(Option<View>),
     Color(Option<&'static str>),
+    /// Split the hit pattern into this many slots.
+    Slots(usize),
     Close,
 }
 
@@ -258,18 +297,21 @@ const COLORS: [&str; 8] = ["red", "amber", "green", "teal", "blue", "violet", "p
 
 const TOOLBAR: f64 = 26.0;
 const HEAD_V: f64 = 104.0;
-const HEAD_H: f64 = 236.0;
+const HEAD_H: f64 = 264.0;
 const RULER_V: f64 = 44.0;
 const RULER_H: f64 = 18.0;
 const ROW_V: f64 = 15.0;
 const ROW_H: f64 = 12.0;
 const WAVE: f64 = 9.0;
 const LANE_H: f64 = 16.0;
-const MIN_COL: f64 = 112.0;
+const MIN_COL: f64 = 124.0;
 const MIN_ROLL: f64 = 168.0;
-const MIN_TRACK: f64 = 58.0;
+const MIN_TRACK: f64 = 62.0;
 const POP_W: f64 = 300.0;
 const SCOPE_W: usize = 48;
+/// A header knob's size, and how far a drag turns it end to end.
+const KNOB: f64 = 24.0;
+const KNOB_DRAG: f64 = 150.0;
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct ScoreTracker {
@@ -391,6 +433,15 @@ pub struct ScoreTracker {
     hist_at: Vec<i64>,
     #[rust]
     labels: Vec<String>,
+    /// Each channel's level and pan as read under its knobs, and the one
+    /// under a drag.
+    #[rust]
+    readouts: Vec<[String; 2]>,
+    #[rust]
+    drag_text: String,
+    /// The settings' channel's slot count, as read.
+    #[rust]
+    slots_text: String,
     #[rust]
     texts: [String; 6],
     #[rust]
@@ -415,6 +466,14 @@ fn rgba(value: u32, alpha: f32) -> Vec4f {
     let mut c = Vec4f::from_u32(value);
     c.w *= alpha;
     c
+}
+
+fn level_text(amp: f32) -> String {
+    format!("{:.0}%", amp * 100.0)
+}
+
+fn pan_text(pan: f32) -> String {
+    format!("{pan:.2}")
 }
 
 /// The two piano rows: a key's semitone from the octave's C.
@@ -464,6 +523,7 @@ impl ScoreTracker {
                 self.reset_hist();
             }
             self.rebuild_labels();
+            self.readouts = self.model.channels.iter().map(|c| [level_text(c.amp), pan_text(c.pan)]).collect();
             let n = self.model.channels.len();
             self.cursor.ch = self.cursor.ch.min(n.saturating_sub(1));
             self.cursor.row = self.cursor.row.clamp(0, self.rows().saturating_sub(1).max(0));
@@ -938,7 +998,7 @@ impl ScoreTracker {
 
     /// A note entered at the cursor (with the roll's chord): on a hit
     /// part a hit, on a note list the note at that row replaced or new.
-    fn enter_note(&mut self, cx: &mut Cx, pitch: f32) {
+    fn enter_note(&mut self, cx: &mut Cx, pitch: f32, from_key: bool) {
         let ch = self.cursor.ch;
         if ch >= self.model.channels.len() || !self.writable(cx, ch) {
             return;
@@ -997,7 +1057,28 @@ impl ScoreTracker {
         }
         self.emit(cx, splices, "note written");
         self.cursor.pitch = pitch;
-        self.advance(1);
+        // The keys step on; a pointer stays where it pressed.
+        if from_key {
+            self.advance(1);
+        }
+    }
+
+    /// A press on an empty cell adds there: one click on a hit pattern
+    /// (a step sequencer), a double click on a note part.
+    fn adds_here(&self, ch: usize, row: i64, taps: u32) -> bool {
+        let c = &self.model.channels[ch];
+        let lane = if self.view_of(c) == View::Roll { None } else { Some(self.cursor.lane) };
+        let empty = self.events_at(ch, row, lane).is_empty();
+        empty && match c.form {
+            Form::Hits { .. } => taps <= 1,
+            Form::Notes { .. } => taps >= 2,
+            Form::Fixed(_) => false,
+        }
+    }
+
+    /// The pitch a pointer adds: the last one entered, else the octave's C.
+    fn pointer_pitch(&self) -> f32 {
+        if self.cursor.pitch >= 1.0 { self.cursor.pitch } else { ((self.octave + 1) * 12) as f32 }
     }
 
     fn advance(&mut self, rows: i64) {
@@ -1141,38 +1222,57 @@ impl ScoreTracker {
             if ch >= self.model.channels.len() || !self.model.channels[ch].form.editable() {
                 continue;
             }
-            // What is there goes; the clip's notes come in.
-            for i in self.events_between(ch, r0, r0 + rows) {
-                splices.extend(self.delete_splice(ch, i));
-            }
+            // What is there goes; the clip's notes come in. A hit pattern
+            // gets its final character per step; a note list replaces an
+            // entry in place where a pasted note lands on its beat.
             let c = &self.model.channels[ch];
             let Some(start) = self.local_of(ch, r0) else { continue };
+            let gone = self.events_between(ch, r0, r0 + rows);
             let mut items: Vec<&ClipItem> = self.clip.iter().filter(|i| i.ch_off == off).collect();
             items.sort_by(|a, b| a.beat.total_cmp(&b.beat));
-            for item in items {
-                let local = (start + item.beat).rem_euclid(c.len.max(self.rb()));
-                match &c.form {
-                    Form::Hits { step, .. } => {
-                        let s = local / step;
-                        if (s - s.round()).abs() < 1e-6 {
-                            if let Some(sp) = tm::set_step(c, s.round() as usize, tm::hit_char(item.vel)) {
-                                splices.retain(|x: &Splice| x.start != sp.start);
-                                splices.push(sp);
-                            }
+            let len = c.len.max(self.rb());
+            match &c.form {
+                Form::Hits { step, chars, .. } => {
+                    let mut want: Vec<(usize, u8)> = gone.iter().filter_map(|&i| match c.events[i].src {
+                        Src::Step(s) => Some((s, b'.')),
+                        _ => None,
+                    }).collect();
+                    for item in items {
+                        let s = (start + item.beat).rem_euclid(len) / step;
+                        if (s - s.round()).abs() < 1e-6 && (s.round() as usize) < chars.len() {
+                            want.retain(|(k, _)| *k != s.round() as usize);
+                            want.push((s.round() as usize, tm::hit_char(item.vel)));
                         }
                     }
-                    Form::Notes { .. } => {
+                    for (k, ch_byte) in want {
+                        splices.extend(tm::set_step(c, k, ch_byte));
+                    }
+                }
+                Form::Notes { .. } => {
+                    let mut dels: Vec<(f64, tm::EntrySrc)> = gone.iter().filter_map(|&i| match c.events[i].src {
+                        Src::Entry(e) => Some((c.events[i].beat, e)),
+                        _ => None,
+                    }).collect();
+                    for item in items {
+                        let local = (start + item.beat).rem_euclid(len);
                         let text = match item.kind {
                             EvKind::Program(p) => format!("[{} @program {p}]", makepad_score_live::source::fmt_num(local, 4)),
                             EvKind::Pedal => format!("[{} @pedal {}]", makepad_score_live::source::fmt_num(local, 4), makepad_score_live::source::fmt_num(item.vel as f64, 2)),
                             _ => tm::entry_text(local, item.pitch, item.dur as f64, item.vel, c.drums),
                         };
-                        if let Some(sp) = tm::insert_entry(c, 0, text, local) {
-                            splices.push(sp);
+                        match dels.iter().position(|(b, _)| (b - local).abs() < 1e-9) {
+                            Some(k) => {
+                                let (_, e) = dels.remove(k);
+                                splices.push(Splice { start: e.start, end: e.end, text });
+                            }
+                            None => splices.extend(tm::insert_entry(c, 0, text, local)),
                         }
                     }
-                    Form::Fixed(_) => {}
+                    for (_, e) in dels {
+                        splices.extend(tm::delete_entry("", c, &e));
+                    }
                 }
+                Form::Fixed(_) => {}
             }
         }
         self.emit(cx, splices, "pasted");
@@ -1332,6 +1432,19 @@ fn block(d: &mut DrawTrackBlock, cx: &mut Cx2d, r: Rect, shape: f32, f: Vec4f, e
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn knob(d: &mut DrawTrackBlock, cx: &mut Cx2d, r: Rect, value: f32, meter: f32, bipolar: bool, fill: Vec4f, ring: Vec4f, body: Vec4f) {
+    d.shape = 3.0;
+    d.value = value;
+    d.meter = meter;
+    d.bipolar = bipolar as u8 as f32;
+    d.fill = fill;
+    d.edge = ring;
+    d.body = body;
+    d.draw_abs(cx, r);
+    d.meter = 0.0;
+}
+
 fn put(d: &mut DrawText, cx: &mut Cx2d, pos: Vec2d, s: &str, c: Vec4f) {
     if !s.is_empty() {
         d.color = c;
@@ -1356,8 +1469,11 @@ struct HeadRects {
     solo: Rect,
     view: Rect,
     tag: Vec2d,
+    /// The knobs, and where their name and value read.
     level: Rect,
     pan: Rect,
+    level_text: Vec2d,
+    pan_text: Vec2d,
     wave: Rect,
 }
 
@@ -1373,9 +1489,11 @@ fn head_rects(r: Rect, vertical: bool) -> HeadRects {
             solo: rr(x + 27.0, y + 35.0, 17.0, 15.0),
             view: rr(x + 47.0, y + 35.0, 30.0, 15.0),
             tag: dvec2(x + 81.0, y + 37.0),
-            level: rr(x + 7.0, y + 55.0, w - 14.0, 8.0),
-            pan: rr(x + 7.0, y + 67.0, w - 14.0, 6.0),
-            wave: rr(x + 5.0, y + 77.0, w - 10.0, h - 80.0),
+            wave: rr(x + 5.0, y + 53.0, w - 10.0, 20.0),
+            level: rr(x + 6.0, y + 76.0, KNOB, KNOB),
+            pan: rr(x + 6.0 + (w - 12.0) * 0.5, y + 76.0, KNOB, KNOB),
+            level_text: dvec2(x + 6.0 + KNOB + 3.0, y + 78.0),
+            pan_text: dvec2(x + 6.0 + (w - 12.0) * 0.5 + KNOB + 3.0, y + 78.0),
         }
     } else {
         let right = x + 140.0;
@@ -1387,9 +1505,11 @@ fn head_rects(r: Rect, vertical: bool) -> HeadRects {
             solo: rr(x + 28.0, y + 35.0, 17.0, 15.0),
             view: rr(x + 48.0, y + 35.0, 30.0, 15.0),
             tag: dvec2(x + 82.0, y + 37.0),
-            level: rr(right, y + h - 24.0, w - 148.0, 8.0),
-            pan: rr(right, y + h - 12.0, w - 148.0, 6.0),
-            wave: rr(right, y + 4.0, w - 148.0, (h - 32.0).max(8.0)),
+            wave: rr(right, y + 4.0, w - 148.0, (h - KNOB - 10.0).max(8.0)),
+            level: rr(right, y + h - KNOB - 3.0, KNOB, KNOB),
+            pan: rr(right + (w - 148.0) * 0.5, y + h - KNOB - 3.0, KNOB, KNOB),
+            level_text: dvec2(right + KNOB + 3.0, y + h - KNOB - 1.0),
+            pan_text: dvec2(right + (w - 148.0) * 0.5 + KNOB + 3.0, y + h - KNOB - 1.0),
         }
     }
 }
@@ -1805,29 +1925,31 @@ impl ScoreTracker {
             if h.tag.x + cw * 4.0 < r.pos.x + r.size.x {
                 put(&mut self.draw_text, cx, h.tag, tag, rgba(if c.form.editable() { p.muted } else { p.amber }, 1.0));
             }
-            // Level: the fader (0..2) with the meter in it.
-            block(&mut self.draw_block, cx, h.level, 0.0, rgba(p.well, 1.0), rgba(p.line, 1.0), 1.0, 2.0);
+            // Level and pan: knobs as the lenses have them, the meter a ring
+            // round the level, each named with its value.
             let amp = match &self.drag {
-                Some(Drag::Fader { ch: d, field: "amp", value }) if *d == ch => *value,
+                Some(Drag::Fader { ch: d, field: "amp", value, .. }) if *d == ch => *value,
                 _ => c.amp,
             };
-            let lw = (h.level.size.x - 2.0) * (amp as f64 / 2.0).clamp(0.0, 1.0);
-            fill(&mut self.draw_rect, cx, Rect { pos: h.level.pos + dvec2(1.0, 1.0), size: dvec2(lw, h.level.size.y - 2.0) }, rgba(col, 0.45));
-            let peak = meters.as_ref().and_then(|m| m.level(c.key)).map_or(0.0, |l| l.0);
-            let mw = (h.level.size.x - 2.0) * (peak as f64).clamp(0.0, 1.0);
-            fill(&mut self.draw_rect, cx, Rect { pos: h.level.pos + dvec2(1.0, h.level.size.y * 0.5), size: dvec2(mw, h.level.size.y * 0.5 - 1.0) }, rgba(if peak > 0.99 { p.danger } else { p.text_hi }, 0.8));
-            let unity = h.level.pos.x + 1.0 + (h.level.size.x - 2.0) * 0.5;
-            fill(&mut self.draw_rect, cx, Rect { pos: dvec2(unity, h.level.pos.y), size: dvec2(1.0, h.level.size.y) }, rgba(p.line, 1.0));
-            // Pan: a mark either side of the centre.
-            block(&mut self.draw_block, cx, h.pan, 0.0, rgba(p.well, 1.0), rgba(p.line, 1.0), 1.0, 2.0);
             let pan = match &self.drag {
-                Some(Drag::Fader { ch: d, field: "pan", value }) if *d == ch => *value,
+                Some(Drag::Fader { ch: d, field: "pan", value, .. }) if *d == ch => *value,
                 _ => c.pan,
             };
-            let mid = h.pan.pos.x + h.pan.size.x * 0.5;
-            let at = mid + (h.pan.size.x * 0.5 - 2.0) * pan.clamp(-1.0, 1.0) as f64;
-            fill(&mut self.draw_rect, cx, Rect { pos: dvec2(mid.min(at), h.pan.pos.y + 1.0), size: dvec2((at - mid).abs().max(1.0), h.pan.size.y - 2.0) }, rgba(col, 0.6));
-            fill(&mut self.draw_rect, cx, Rect { pos: dvec2(at - 1.0, h.pan.pos.y), size: dvec2(2.0, h.pan.size.y) }, rgba(p.text_hi, 1.0));
+            let peak = meters.as_ref().and_then(|m| m.level(c.key)).map_or(0.0, |l| l.0);
+            let ring = rgba(if peak > 0.99 { p.danger } else { p.text_hi }, 0.85);
+            knob(&mut self.draw_block, cx, h.level, (amp / 2.0).clamp(0.0, 1.0), if c.mute { 0.0 } else { peak }, false, rgba(col, 1.0), ring, rgba(p.well, 1.0));
+            knob(&mut self.draw_block, cx, h.pan, ((pan + 1.0) / 2.0).clamp(0.0, 1.0), 0.0, true, rgba(col, 1.0), ring, rgba(p.well, 1.0));
+            put(&mut self.draw_text, cx, h.level_text, "LEVEL", rgba(p.secondary, 1.0));
+            put(&mut self.draw_text, cx, h.pan_text, "PAN", rgba(p.secondary, 1.0));
+            let dragged = matches!(&self.drag, Some(Drag::Fader { ch: d, .. }) if *d == ch);
+            let (lv, pv) = match (self.readouts.get(ch), dragged, &self.drag) {
+                (_, true, Some(Drag::Fader { field: "amp", .. })) => (self.drag_text.as_str(), self.readouts.get(ch).map_or("", |r| r[1].as_str())),
+                (_, true, Some(Drag::Fader { field: "pan", .. })) => (self.readouts.get(ch).map_or("", |r| r[0].as_str()), self.drag_text.as_str()),
+                (Some(r), _, _) => (r[0].as_str(), r[1].as_str()),
+                _ => ("", ""),
+            };
+            put(&mut self.draw_cell, cx, h.level_text + dvec2(0.0, 10.0), lv, rgba(p.text, 1.0));
+            put(&mut self.draw_cell, cx, h.pan_text + dvec2(0.0, 10.0), pv, rgba(p.text, 1.0));
             // The waveform: live while it plays (min/max per column of the
             // audio thread's last pass), else what it played here (the
             // envelope recorded at the cursor's bar).
@@ -1938,6 +2060,11 @@ impl ScoreTracker {
     fn draw_popup(&mut self, cx: &mut Cx2d, p: &makepad_look::palette::Palette) {
         let Some(mut pop) = self.popup.take() else { return };
         let Some(ch) = self.model.channel(&pop.ch) else { return };
+        if let Form::Hits { chars, .. } = &self.model.channels[ch].form {
+            use std::fmt::Write;
+            self.slots_text.clear();
+            let _ = write!(self.slots_text, "{} slots", chars.len());
+        }
         let c = &self.model.channels[ch];
         // Beside its header, in the widget.
         let head = self.head_rect(ch);
@@ -2023,6 +2150,25 @@ impl ScoreTracker {
             yy += 16.0;
         }
         yy += 6.0;
+        // A hit pattern's slots: fewer or more over the same length.
+        if let Form::Hits { chars, .. } = &c.form {
+            let n = chars.len();
+            put(&mut self.pop_text, cx, dvec2(x0, yy + 2.0), "SLOTS", rgba(p.secondary, 1.0));
+            let fewer = tm::SLOTS.iter().rev().find(|s| **s < n).copied();
+            let more = tm::SLOTS.iter().find(|s| **s > n).copied();
+            let mut bx = x0 + 70.0;
+            for (label, to) in [("÷", fewer), ("×", more)] {
+                let br = Rect { pos: dvec2(bx, yy), size: dvec2(24.0, 18.0) };
+                block(&mut self.pop_block, cx, br, 0.0, rgba(p.control, if to.is_some() { 1.0 } else { 0.4 }), rgba(p.line, 1.0), 1.0, 2.0);
+                put(&mut self.pop_text, cx, br.pos + dvec2(8.0, 2.0), label, rgba(p.text, 1.0));
+                if let Some(to) = to {
+                    pop.hits.push((PopHit::Slots(to), br));
+                }
+                bx += 28.0;
+            }
+            put(&mut self.pop_text, cx, dvec2(bx + 4.0, yy + 2.0), &self.slots_text, rgba(p.text, 1.0));
+            yy += 26.0;
+        }
         // The view and the colour.
         put(&mut self.pop_text, cx, dvec2(x0, yy + 2.0), "VIEW", rgba(p.secondary, 1.0));
         let chosen = self.views.get(&c.name).copied();
@@ -2304,6 +2450,13 @@ impl ScoreTracker {
                     }
                 }
                 self.geo_dirty = true;
+            }
+            PopHit::Slots(slots) => {
+                let name = self.model.channels[ch].name.clone();
+                match tm::resample_hits(&self.source, &name, slots) {
+                    Ok(sp) => self.emit(cx, vec![sp], "slots"),
+                    Err(e) => self.status(cx, &e),
+                }
             }
             PopHit::Color(c) => match c {
                 Some(c) => self.write_field(cx, ch, "color", format!("@{c}"), "colour"),
@@ -2594,8 +2747,10 @@ impl ScoreTracker {
                 if on_vel {
                     if let Some(d) = digit(code) {
                         self.enter_vel(cx, d);
+                        return;
                     }
-                    return;
+                    // A note key on the velocity field enters the note.
+                    self.cursor.field = 0;
                 }
                 if matches!(code, KeyCode::Key1 | KeyCode::Backtick) {
                     self.note_off(cx);
@@ -2604,7 +2759,7 @@ impl ScoreTracker {
                 if let Some(k) = piano(code) {
                     if !ke.is_repeat {
                         let pitch = ((self.octave + 1) * 12 + k).clamp(0, 127) as f32;
-                        self.enter_note(cx, pitch);
+                        self.enter_note(cx, pitch, true);
                     }
                 }
                 return;
@@ -2657,15 +2812,13 @@ impl ScoreTracker {
                     self.views.insert(name, next);
                     self.geo_dirty = true;
                 }
-                HeadHit::Level => {
-                    let value = Self::fader_value(h.level, abs) * 2.0;
-                    cx.widget_action(self.uid, TrackerAction::Hold { channel: name, field: "amp", value });
-                    self.drag = Some(Drag::Fader { ch, field: "amp", value });
-                }
-                HeadHit::Pan => {
-                    let value = Self::fader_value(h.pan, abs) * 2.0 - 1.0;
-                    cx.widget_action(self.uid, TrackerAction::Hold { channel: name, field: "pan", value });
-                    self.drag = Some(Drag::Fader { ch, field: "pan", value });
+                HeadHit::Level | HeadHit::Pan => {
+                    // A knob turns with a vertical drag from where it is.
+                    let _ = h;
+                    let (field, value) = if hit == HeadHit::Level { ("amp", self.model.channels[ch].amp) } else { ("pan", self.model.channels[ch].pan) };
+                    self.drag_text.clear();
+                    self.drag_text.push_str(&self.readouts.get(ch).map_or(String::new(), |r| r[(field == "pan") as usize].clone()));
+                    self.drag = Some(Drag::Fader { ch, field, value, from: abs, base: value });
                 }
                 HeadHit::Name => cx.widget_action(self.uid, TrackerAction::Voice(name)),
             }
@@ -2711,11 +2864,12 @@ impl ScoreTracker {
                 }
                 None if view == View::Roll && !secondary && fe.tap_count <= 1 => {
                     // Draw a note (the chord) where pressed.
-                    let step = self.step;
                     let pitch = self.cursor.pitch;
-                    self.enter_note(cx, pitch);
-                    self.cursor.row = home;
-                    self.step = step;
+                    self.enter_note(cx, pitch, false);
+                }
+                None if view == View::Tracker && !secondary && self.adds_here(ch, home, fe.tap_count) => {
+                    let pitch = self.pointer_pitch();
+                    self.enter_note(cx, pitch, false);
                 }
                 None => {
                     self.sel = None;
@@ -2732,7 +2886,13 @@ impl ScoreTracker {
                 let lane = lane_or_fx.clamp(0.0, lanes - 1.0);
                 self.cursor.lane = lane as u8;
                 let within = c - g.c0 - WAVE - lane * g.lane;
-                self.cursor.field = (within > self.cw * 3.6) as u8;
+                // The velocity field is its two digits; the rest of the lane is the note.
+                self.cursor.field = (within > self.cw * 4.0 && within < self.cw * 6.5 + 4.0) as u8;
+            }
+            if !fe.modifiers.shift && !secondary && self.cursor.lane != FX_LANE && self.adds_here(ch, home, fe.tap_count) {
+                self.cursor.field = 0;
+                let pitch = self.pointer_pitch();
+                self.enter_note(cx, pitch, false);
             }
             if fe.modifiers.shift {
                 let anchor = self.sel.map_or((home, ch), |s| (s.r0, s.c0));
@@ -2759,12 +2919,16 @@ impl ScoreTracker {
                 }
             }
             Drag::Note { ch, ev, at, resize, .. } => self.drag = Some(Drag::Note { ch, ev, at, now: abs, resize }),
-            Drag::Fader { ch, field, .. } => {
-                let h = head_rects(self.head_rect(ch), self.vertical());
-                let v = if field == "amp" { Self::fader_value(h.level, abs) * 2.0 } else { Self::fader_value(h.pan, abs) * 2.0 - 1.0 };
+            Drag::Fader { ch, field, from, base, .. } => {
+                use std::fmt::Write;
+                let (lo, hi) = if field == "amp" { (0.0f32, 2.0f32) } else { (-1.0, 1.0) };
+                let v = (base - ((abs.y - from.y) / KNOB_DRAG) as f32 * (hi - lo)).clamp(lo, hi);
+                let v = (v * 100.0).round() / 100.0;
+                self.drag_text.clear();
+                let _ = if field == "amp" { write!(self.drag_text, "{:.0}%", v * 100.0) } else { write!(self.drag_text, "{v:.2}") };
                 let name = self.model.channels[ch].name.clone();
                 cx.widget_action(self.uid, TrackerAction::Hold { channel: name, field, value: v });
-                self.drag = Some(Drag::Fader { ch, field, value: v });
+                self.drag = Some(Drag::Fader { ch, field, value: v, from, base });
             }
             Drag::Ruler { from, .. } => {
                 let (t, _) = self.at(abs);
@@ -2804,7 +2968,7 @@ impl ScoreTracker {
                 let splices = tm::change_event(c, e, d.beat, d.pitch, d.dur, e.vel);
                 self.emit(cx, splices, if resize { "note resized" } else { "note moved" });
             }
-            Drag::Fader { ch, field, value } => {
+            Drag::Fader { ch, field, value, .. } => {
                 let v = makepad_score_live::source::fmt_num(value as f64, 2);
                 self.write_field(cx, ch, field, v, field);
             }
@@ -2822,6 +2986,26 @@ impl ScoreTracker {
 }
 
 impl Widget for ScoreTracker {
+    /// A grid: its name, and where the cursor is (channel, row, the cell).
+    fn semantics(&self, _cx: &Cx, node: &mut makepad_widgets::makepad_platform::a11y_tree::Node) {
+        use std::fmt::Write;
+        node.role = makepad_widgets::makepad_platform::a11y_tree::Role::Grid;
+        node.states = makepad_widgets::makepad_platform::a11y_tree::States::FOCUSABLE;
+        node.name.clear();
+        node.name.push_str("Tracker");
+        node.value.clear();
+        if let Some(c) = self.model.channels.get(self.cursor.ch) {
+            let row = self.labels.get(self.cursor.row.max(0) as usize).map_or("", String::as_str);
+            let _ = write!(node.value, "{} row {row}", c.label);
+            if let Some(song) = self.content_beat(self.cursor.row) {
+                let l = c.local(song);
+                if let Some(e) = c.range(l, l + self.rb()).map(|i| &c.events[i]).find(|e| e.lane == self.cursor.lane) {
+                    let _ = write!(node.value, ": {} {}", e.text, e.vel_text);
+                }
+            }
+        }
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if self.tick.is_event(event).is_some() {
             self.redraw(cx);

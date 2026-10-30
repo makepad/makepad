@@ -93,6 +93,7 @@ pub fn dxgi(format: u32) -> Option<Fmt> {
         format::RGBA32F => plain(DXGI_FORMAT_R32G32B32A32_FLOAT),
         format::R32F => plain(DXGI_FORMAT_R32_FLOAT),
         format::RG16F => plain(DXGI_FORMAT_R16G16_FLOAT),
+        format::R16F => plain(DXGI_FORMAT_R16_FLOAT),
         format::R32UINT => plain(DXGI_FORMAT_R32_UINT),
         format::BC7 => plain(DXGI_FORMAT_BC7_UNORM),
         format::BC5 => plain(DXGI_FORMAT_BC5_UNORM),

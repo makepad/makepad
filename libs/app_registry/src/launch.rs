@@ -247,6 +247,12 @@ impl AppLaunch {
         // adds its own after this.
         if !self.building || self.run {
             command.envs(crate::machine::launch_env(self.app.id, self.runner == Runner::Jit));
+            // A checkout devhub syncs (its `FLEET-REVISION.txt`): the JIT applies changes to it
+            // only after a sync of landed work, never what a lane or an edit writes there
+            // (relax's `DockGate`).
+            if let (Runner::Jit, Some(revision)) = (self.runner, self.root.as_ref().map(|r| r.join(crate::machine::FLEET_REVISION)).filter(|r| r.is_file())) {
+                command.env("MAKEPAD_RUN_DOCK_REVISION", revision);
+            }
         }
         if let Some(root) = &self.root {
             command.current_dir(root);
@@ -431,6 +437,30 @@ mod tests {
         let (native, _) = started("terminal", Runner::Native, &root);
         assert!(native.iter().any(|a| a == "--stdin-loop"), "{native:?}");
         assert!(native.iter().any(|a| a == "makepad-app-terminal"));
+    }
+
+    /// A JIT launch from a checkout devhub syncs (it holds `FLEET-REVISION.txt`) carries the dock
+    /// gate (`MAKEPAD_RUN_DOCK_REVISION`: only a sync of landed work changes that app's code); a
+    /// launch from any other tree (a lane's) does not.
+    #[test]
+    fn a_launch_from_the_synced_checkout_is_gated_on_its_revision() {
+        let real = crate::checkout_at_or_above(Path::new(env!("CARGO_MANIFEST_DIR"))).expect("tests run in a checkout");
+        let dock = std::env::temp_dir().join(format!("app-registry-dock-{}", std::process::id()));
+        std::fs::create_dir_all(dock.join("tools/run")).unwrap();
+        std::fs::copy(real.join("tools/run/Cargo.toml"), dock.join("tools/run/Cargo.toml")).unwrap();
+        let gate = |root: &Path| {
+            let mut env = None;
+            let entry = crate::find("calculator").unwrap();
+            let _ = AppLaunch::start(entry, Runner::Jit, Some(root.to_path_buf()), Vec::new(), BuildPolicy::IfMissing, false, |cmd, _| {
+                env = cmd.get_envs().find(|(k, _)| *k == "MAKEPAD_RUN_DOCK_REVISION").and_then(|(_, v)| v.map(|v| v.to_os_string()));
+                Err("captured".into())
+            });
+            env
+        };
+        assert_eq!(gate(&dock), None, "no revision file: not a synced checkout");
+        std::fs::write(dock.join(crate::machine::FLEET_REVISION), "makepad aaaa\n").unwrap();
+        assert_eq!(gate(&dock), Some(dock.join(crate::machine::FLEET_REVISION).into_os_string()));
+        let _ = std::fs::remove_dir_all(&dock);
     }
 
     /// A deploy's prebuild is the launch's own cargo command with `build` for `run` and the same

@@ -159,6 +159,28 @@ impl Types {
     }
 
     pub fn flags(&self, t: TyId) -> TypeFlags { TypeFlags(self.fl(t)) }
+    /// rustc_type_ir visit.rs `is_global`: no HAS_FREE_LOCAL_NAMES (type/const params,
+    /// inference variables, placeholders, erased regions and free regions other than `'static`:
+    /// early/late params, region variables). Late-bound params have no flag of their own here
+    /// (they share HAS_FREE_REGIONS with `'static`), so a type with free regions is walked.
+    pub fn is_global(&self, t: TyId) -> bool {
+        let local = TypeFlags::HAS_TY_INFER.0 | TypeFlags::HAS_NON_REGION_INFER.0 | TypeFlags::HAS_TY_PARAM.0 | TypeFlags::HAS_PLACEHOLDER.0
+            | TypeFlags::HAS_RE_PARAM.0 | TypeFlags::HAS_RE_INFER.0 | TypeFlags::HAS_RE_ERASED.0;
+        let f = self.fl(t);
+        if f & local != 0 { return false; }
+        if f & TypeFlags::HAS_FREE_REGIONS.0 == 0 { return true; }
+        struct LateParam(bool);
+        impl crate::types::fold::TypeFolder for LateParam {
+            fn fold_flags(&self) -> Option<TypeFlags> { Some(TypeFlags::HAS_FREE_REGIONS) }
+            fn fold_region(&mut self, tys: &Types, r: RegionId, _depth: DebruijnIndex) -> RegionId {
+                self.0 |= matches!(tys.region_kind(r), RegionKind::ReLateParam(..));
+                r
+            }
+        }
+        let mut v = LateParam(false);
+        crate::types::fold::TypeFolder::fold_ty(&mut v, self, t, 0);
+        !v.0
+    }
 
     /// One past the greatest escaping de Bruijn index, or zero when all bound
     /// variables are captured internally. Even an empty FnPtr/dyn binder counts.

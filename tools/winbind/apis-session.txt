@@ -1,0 +1,17 @@
+# Additive desktop session, computer name and Task Scheduler bindings.
+Windows.Win32.System.RemoteDesktop.ProcessIdToSessionId
+Windows.Win32.System.RemoteDesktop.WTSGetActiveConsoleSessionId
+Windows.Win32.System.RemoteDesktop.WTSQuerySessionInformationW
+Windows.Win32.System.RemoteDesktop.WTSFreeMemory
+Windows.Win32.System.RemoteDesktop.WTSConnectState
+Windows.Win32.System.RemoteDesktop.WTSActive
+Windows.Win32.System.RemoteDesktop.WTSDisconnected
+Windows.Win32.System.SystemInformation.GetComputerNameExW
+Windows.Win32.System.SystemInformation.ComputerNameDnsHostname
+Windows.Win32.System.TaskScheduler.TaskScheduler
+Windows.Win32.System.TaskScheduler.ITaskService
+Windows.Win32.System.Threading.DETACHED_PROCESS
+Windows.Win32.System.Threading.CREATE_BREAKAWAY_FROM_JOB
+Windows.Win32.Foundation.ERROR_FILE_NOT_FOUND
+Windows.Win32.Foundation.ERROR_PATH_NOT_FOUND
+Windows.Win32.Foundation.RPC_E_CHANGED_MODE

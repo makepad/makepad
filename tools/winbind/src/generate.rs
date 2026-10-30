@@ -1,4 +1,5 @@
 mod winrt;
+mod additive;
 use crate::metadata::{self, fail, File, Method, Param, Sig};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -18,6 +19,10 @@ struct Generator {
     callbacks: BTreeSet<String>,
     thread_safe_callbacks: BTreeSet<String>,
     nullable: BTreeSet<String>,
+    /// functions resolved at run time (an export newer than the oldest supported system)
+    dynamic: BTreeSet<String>,
+    module: Option<String>,
+    existing: BTreeSet<String>,
 }
 fn short(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
@@ -68,11 +73,20 @@ fn write(text: &str) {
         .expect("write stdout");
 }
 impl Generator {
+    fn path(&self, name: &str) -> String {
+        let original = path(name);
+        if let Some(module) = &self.module {
+            if !original.starts_with("crate::core::") && !self.existing.contains(name) {
+                return original.replacen("crate::", &format!("crate::{module}::"), 1);
+            }
+        }
+        original
+    }
     fn load(dir: &str) -> Self {
         let mut paths = Vec::new();
         for e in std::fs::read_dir(dir).expect("read metadata dir") {
             let p = e.expect("metadata entry").path();
-            if p.extension().and_then(|v| v.to_str()) == Some("winmd") {
+            if matches!(p.extension().and_then(|v| v.to_str()), Some("winmd" | "tlb")) {
                 paths.push(p);
             }
         }
@@ -85,6 +99,9 @@ impl Generator {
             callbacks: BTreeSet::new(),
             thread_safe_callbacks: BTreeSet::new(),
             nullable: BTreeSet::new(),
+            dynamic: BTreeSet::new(),
+            module: None,
+            existing: BTreeSet::new(),
         };
         for p in paths {
             g.files.push(File::read(p.to_str().expect("metadata path")));
@@ -126,7 +143,7 @@ impl Generator {
                         );
                     }
                 } else if name.starts_with("Windows.") {
-                    if name.starts_with("Windows.Win32.")
+                    if (name.starts_with("Windows.Win32.") || f.path.ends_with(".tlb"))
                         && f.type_name(f.row(2, id)[3]) == "System.Enum"
                     {
                         for field in f.range(2, id, 4, 4) {
@@ -195,7 +212,8 @@ impl Generator {
         )
     }
     fn require(&mut self, name: &str) {
-        if name.is_empty() || name.starts_with("System.") || self.selected.contains(name) {
+        if name.is_empty() || name.starts_with("System.") || self.selected.contains(name)
+            || self.existing.contains(name) {
             return;
         }
         let item = *self
@@ -219,6 +237,10 @@ impl Generator {
             }
             for id in f.range(2, item.id, 4, 4) {
                 sig_deps(&f.field_sig(id), &mut deps);
+                if (f.path.ends_with(".tlb") || self.module.is_some()) && f.type_name(f.row(2, item.id)[3]) == "System.Enum"
+                    && f.string(f.row(4, id)[1]) != "value__" {
+                    deps.push(format!("{}.{}", namespace(name), f.string(f.row(4, id)[1])));
+                }
             }
             if self.iface(name) || self.delegate(name) {
                 for id in f.range(2, item.id, 5, 6) {
@@ -280,7 +302,7 @@ impl Generator {
                 } else if is_const && s.name == "Windows.Win32.Foundation.PSTR" {
                     String::from("crate::core::PCSTR")
                 } else {
-                    path(&s.name)
+                    self.path(&s.name)
                 }
             }
             20 => {
@@ -308,13 +330,18 @@ impl Generator {
         let f = &self.files[item.file];
         let n = ident(short(name));
         let mut out = String::new();
-        if item.table == 6 {
+        if item.table == 6 && self.dynamic.contains(name) {
+            self.emit_dynamic(item, &n, &mut out);
+        } else if item.table == 6 {
             self.emit_function(item, &n, &mut out);
         } else if item.table == 4 {
             self.emit_constant(item, &n, &mut out);
         } else if self.iface(name) {
             self.emit_interface(item, &n, &mut out);
-            if self.callbacks.contains(name) {
+            let methods = f.range(2, item.id, 5, 6);
+            let library_callback = f.path.ends_with(".tlb") && methods.len() == 1
+                && f.method(methods.start).name == "Invoke";
+            if self.callbacks.contains(name) || library_callback {
                 self.emit_callback(item, &n, &mut out);
             }
         } else if self.delegate(name) {
@@ -354,6 +381,8 @@ impl Generator {
                     }
                 }
                 self.emit_scalar(&n, &repr, true, &mut out);
+            } else if f.attribute(2, item.id, "AliasAttribute").is_some() {
+                out.push_str(&format!("pub type {n} = {};\n", self.abi(&f.field_sig(row[4]), false)));
             } else if f.attribute(2, item.id, "NativeTypedefAttribute").is_some()
                 || f.attribute(2, item.id, "InvalidHandleValueAttribute")
                     .is_some()
@@ -475,9 +504,9 @@ impl Generator {
                 out.push_str("pub const ");
                 out.push_str(n);
                 out.push_str(": ");
-                out.push_str(&path(&sig.name));
+                out.push_str(&self.path(&sig.name));
                 out.push_str(" = ");
-                out.push_str(&path(&sig.name));
+                out.push_str(&self.path(&sig.name));
                 out.push_str(" { fmtid: crate::core::GUID { data1: ");
                 out.push_str(&parts[0]);
                 out.push_str(", data2: ");
@@ -564,6 +593,37 @@ impl Generator {
         out.push_str(" = ");
         out.push_str(&literal);
         out.push_str(";\n");
+    }
+    /// A function the caller loads itself: its pointer type and where it lives, no import.
+    fn emit_dynamic(&self, item: Item, n: &str, out: &mut String) {
+        let f = &self.files[item.file];
+        let m = f.method(item.id);
+        let mut module = String::new();
+        let mut entry = String::new();
+        for r in &f.tables[28] {
+            if metadata::decode(8, r[1]) == (6, item.id) {
+                module = f.string(f.row(26, r[3])[0]).to_string();
+                entry = f.string(r[2]).to_string();
+            }
+        }
+        if module.is_empty() {
+            fail(&(String::from("missing import library: ") + n));
+        }
+        out.push_str("pub type ");
+        out.push_str(n);
+        out.push_str(" = unsafe extern \"system\" fn(");
+        self.params_abi(f, &m, out, false);
+        out.push_str(") -> ");
+        out.push_str(&self.return_abi(&m.ret));
+        out.push_str(";\n/// The library and NUL-terminated export name of [`");
+        out.push_str(n);
+        out.push_str("`].\npub const ");
+        out.push_str(n);
+        out.push_str("_EXPORT: (&str, &str) = (");
+        out.push_str(&rust_string(&module));
+        out.push_str(", ");
+        out.push_str(&rust_string(&(entry + "\0")));
+        out.push_str(");\n");
     }
     fn emit_function(&self, item: Item, n: &str, out: &mut String) {
         let f = &self.files[item.file];
@@ -736,7 +796,7 @@ impl Generator {
                 args.push_str(&pn);
                 args.push_str(" as i32)");
             } else if let Some(enumeration) = self.associated_enum(f, p) {
-                sig.push_str(&path(&enumeration));
+                sig.push_str(&self.path(&enumeration));
                 args.push_str(&pn);
                 args.push_str(".0 as _");
             } else if p.sig.kind == 15
@@ -785,7 +845,7 @@ impl Generator {
                 let element = &p.sig.args[0];
                 if self.iface(&element.name) {
                     sig.push_str("Option<");
-                    sig.push_str(&path(&element.name));
+                    sig.push_str(&self.path(&element.name));
                     sig.push('>');
                 } else if element.kind == 1 {
                     sig.push_str("u8");
@@ -815,14 +875,14 @@ impl Generator {
                         .contains(&(f.type_name(item.owner << 2) + "." + &m.name + "." + &p.name))
                 {
                     sig.push_str("Option<&");
-                    sig.push_str(&path(&p.sig.name));
+                    sig.push_str(&self.path(&p.sig.name));
                     sig.push('>');
                     args.push_str("match ");
                     args.push_str(&pn);
                     args.push_str(" { Some(v) => v.as_raw(), None => ::core::ptr::null_mut() }");
                 } else {
                     sig.push('&');
-                    sig.push_str(&path(&p.sig.name));
+                    sig.push_str(&self.path(&p.sig.name));
                     args.push_str(&pn);
                     args.push_str(".as_raw()");
                 }
@@ -832,7 +892,7 @@ impl Generator {
                     "*const Option<"
                 } else {
                     "*mut Option<"
-                }) + &path(&p.sig.args[0].name)
+                }) + &self.path(&p.sig.args[0].name)
                     + ">";
                 if p.flags & 16 != 0 {
                     sig.push_str("Option<");
@@ -885,9 +945,9 @@ impl Generator {
             let s = &m.params[i].sig.args[0];
             if self.iface(&s.name) {
                 if self.nullable_param(item, m, &m.params[i]) {
-                    String::from("Option<") + &path(&s.name) + ">"
+                    String::from("Option<") + &self.path(&s.name) + ">"
                 } else {
-                    path(&s.name)
+                    self.path(&s.name)
                 }
             } else {
                 self.abi(s, false)
@@ -934,7 +994,7 @@ impl Generator {
                     if self.nullable_param(item, m, &m.params[i]) {
                         out.push_str("if result__.is_null() { return Ok(None); }\n");
                     }
-                    out.push_str(&path(&s.name));
+                    out.push_str(&self.path(&s.name));
                     out.push_str("::from_raw(result__)");
                     if self.nullable_param(item, m, &m.params[i]) {
                         out.push_str(".map(Some)");
@@ -959,7 +1019,7 @@ impl Generator {
             for id in f.range(2, item.id, 5, 6) {
                 let m = f.method(id);
                 out.push_str("pub ");
-                out.push_str(&ident(&m.name));
+                out.push_str(&self.method_name(item, id));
                 out.push_str(": unsafe extern \"system\" fn(");
                 self.params_abi(f, &m, out, true);
                 out.push_str(") -> ");
@@ -982,13 +1042,13 @@ impl Generator {
         out.push_str("_Vtbl {\n");
         if !base.is_empty() {
             out.push_str("pub base__: ");
-            out.push_str(&path(&base));
+            out.push_str(&self.path(&base));
             out.push_str("_Vtbl,\n");
         }
         for id in f.range(2, item.id, 5, 6) {
             let m = f.method(id);
             out.push_str("pub ");
-            out.push_str(&ident(&m.name));
+            out.push_str(&self.method_name(item, id));
             out.push_str(": unsafe extern \"system\" fn(");
             self.params_abi(f, &m, out, true);
             out.push_str(") -> ");
@@ -1011,9 +1071,9 @@ impl Generator {
             out.push_str("pub fn as_");
             out.push_str(&ident(short(&chain)));
             out.push_str("(&self) -> &");
-            out.push_str(&path(&chain));
+            out.push_str(&self.path(&chain));
             out.push_str(" { unsafe { &*(self as *const Self as *const ");
-            out.push_str(&path(&chain));
+            out.push_str(&self.path(&chain));
             out.push_str(") } }\n");
             let bi = self.index[&chain];
             chain = self.files[bi.file].base(bi.id);
@@ -1026,11 +1086,12 @@ impl Generator {
             let cf = &self.files[ci.file];
             for id in cf.range(2, ci.id, 5, 6) {
                 let m = cf.method(id);
-                if !seen.insert(m.name.clone()) {
+                let name = self.method_name(ci, id);
+                if !seen.insert(name.clone()) {
                     continue;
                 }
-                let call = String::from("(") + &access + &ident(&m.name) + ")";
-                self.wrapper(ci, &m, &ident(&m.name), &call, true, out);
+                let call = String::from("(") + &access + &name + ")";
+                self.wrapper(ci, &m, &name, &call, true, out);
             }
             let cb = cf.base(ci.id);
             current = if cb.is_empty() {
@@ -1059,6 +1120,16 @@ impl Generator {
             out.push_str(n);
             out.push_str(" {}\n");
         }
+    }
+
+    // Metadata keeps overloaded native names and their vtable order. Rust needs unique
+    // field/method names: the second overload is Name2, the third Name3, and so on.
+    fn method_name(&self, item: Item, id: u32) -> String {
+        let f = &self.files[item.file];
+        let name = f.string(f.row(6, id)[3]);
+        let first = f.range(2, item.owner, 5, 6).start;
+        let index = (first..=id).filter(|mid| f.string(f.row(6, *mid)[3]) == name).count();
+        if index == 1 { ident(name) } else { format!("{}{index}", ident(name)) }
     }
 }
 fn sig_deps(s: &Sig, deps: &mut Vec<String>) {
@@ -1118,18 +1189,30 @@ pub fn inventory(mut args: std::env::Args) {
     }
     write(&out);
 }
-pub fn run(mut args: std::env::Args) {
+pub fn run(mut args: std::env::Args, additive: bool) {
     let dir = args.next().expect("metadata directory");
     let list = args.next().expect("API list");
     let dest = args.next().expect("output file");
     let mut g = Generator::load(&dir);
+    if additive {
+        g.module = Some(args.next().expect("output module name"));
+        g.existing = additive::items(&args.next().expect("existing main bindings"));
+    }
     let text = std::fs::read_to_string(list).expect("read API list");
+    let mut function_pointers = Vec::new();
     for line in text.trim_start_matches('\u{feff}').lines() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
             continue;
         }
-        if let Some(name) = line.strip_prefix("implement ") {
+        if let Some(signature) = line.strip_prefix("fnptr ") {
+            let words: Vec<&str> = signature.split_whitespace().collect();
+            if words.len() < 2 { fail("fnptr requires a qualified name and return type"); }
+            for ty in &words[1..] {
+                if !["bool", "u32", "PCWSTR"].contains(ty) { g.require(ty); }
+            }
+            function_pointers.push(words);
+        } else if let Some(name) = line.strip_prefix("implement ") {
             let (name, thread_safe) = if let Some((name, bounds)) = name.split_once(':') {
                 assert_eq!(bounds.trim(), "Send + Sync", "unsupported callback bounds");
                 (name.trim(), true)
@@ -1139,6 +1222,9 @@ pub fn run(mut args: std::env::Args) {
             g.require_callback(name, thread_safe);
         } else if let Some(pattern) = line.strip_prefix("constants ") {
             g.require_constants(pattern);
+        } else if let Some(name) = line.strip_prefix("dynamic ") {
+            g.dynamic.insert(name.to_string());
+            g.require(name);
         } else if let Some(name) = line.strip_prefix("nullable ") {
             g.nullable.insert(name.to_string());
         } else if line.starts_with("winrt ") {
@@ -1154,7 +1240,21 @@ pub fn run(mut args: std::env::Args) {
     for name in selected {
         g.emit(&name);
     }
-    let mut out=String::from("// Generated by tools/winbind — do not edit.\n// Regenerate (Windows): tools\\winbind\\target\\release\\makepad-winbind.exe generate libs/windows/metadata tools/winbind/apis.txt libs/windows/sys/src/lib.rs\n#![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]\n#![cfg(windows)]\npub mod core;\n");
+    for words in function_pointers {
+        let ty = |name: &str| match name {
+            "bool" | "u32" => name.to_string(),
+            "PCWSTR" => String::from("crate::core::PCWSTR"),
+            _ => g.abi(&Sig { kind: 17, name: name.into(), args: Vec::new(), len: 0 }, false),
+        };
+        let declaration = format!("pub type {} = unsafe extern \"system\" fn({}) -> {};\n",
+            ident(short(words[0])), words[2..].iter().map(|name| ty(name)).collect::<Vec<_>>().join(","), ty(words[1]));
+        g.output.entry(namespace(words[0]).into()).or_default().push_str(&declaration);
+    }
+    let mut out = if additive {
+        String::from("// Generated by tools/winbind — do not edit.\n// Inputs and generation command: libs/windows/metadata/provenance.txt\n")
+    } else {
+        String::from("// Generated by tools/winbind — do not edit.\n// Regenerate (Windows): tools\\winbind\\target\\release\\makepad-winbind.exe generate libs/windows/metadata tools/winbind/apis.txt libs/windows/sys/src/lib.rs\n#![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]\n#![cfg(windows)]\npub mod core;\n")
+    };
     let mut open: Vec<String> = Vec::new();
     for (namespace, body) in &g.output {
         let mut parts = Vec::new();
@@ -1185,17 +1285,21 @@ pub fn run(mut args: std::env::Args) {
         out.push_str("}\n");
         open.pop();
     }
-    out.push_str(&winrt::run(&g, &text));
+    if !additive {
+        out.push_str(&winrt::run(&g, &text));
+    }
     let destination = std::path::Path::new(&dest);
     std::fs::create_dir_all(destination.parent().expect("destination directory"))
         .expect("create destination");
     std::fs::write(destination, &out).expect("write bindings");
-    let runtime = std::fs::read_to_string("tools/winbind/core.rs").expect("read runtime support");
-    std::fs::write(
-        destination.with_file_name("core.rs"),
-        String::from("// Generated by tools/winbind — do not edit.\n") + &runtime,
-    )
-    .expect("write runtime support");
+    if !additive {
+        let runtime = std::fs::read_to_string("tools/winbind/core.rs").expect("read runtime support");
+        std::fs::write(
+            destination.with_file_name("core.rs"),
+            String::from("// Generated by tools/winbind — do not edit.\n") + &runtime,
+        )
+        .expect("write runtime support");
+    }
     write(
         &(g.selected.len().to_string()
             + " metadata items, "
@@ -1250,7 +1354,7 @@ impl Generator {
         if base.is_empty() {
             fail("implemented interface must derive from IUnknown");
         }
-        let mut initializer = path(&name) + "_Vtbl { base__: "
+        let mut initializer = self.path(&name) + "_Vtbl { base__: "
             + &self.callback_vtable(self.index[&base], n, out, thunks, method_count)
             + ",\n";
         for id in f.range(2, item.id, 5, 6) {
@@ -1268,9 +1372,9 @@ impl Generator {
                 let s = &m.params[i].sig.args[0];
                 output = if self.iface(&s.name) {
                     if self.nullable_param(item, &m, &m.params[i]) {
-                        String::from("Option<") + &path(&s.name) + ">"
+                        String::from("Option<") + &self.path(&s.name) + ">"
                     } else {
-                        path(&s.name)
+                        self.path(&s.name)
                     }
                 } else {
                     self.abi(s, false)
@@ -1295,7 +1399,7 @@ impl Generator {
                 }
                 if self.iface(&p.sig.name) {
                     out.push_str("Option<&");
-                    out.push_str(&path(&p.sig.name));
+                    out.push_str(&self.path(&p.sig.name));
                     out.push('>');
                     prep.push_str("let ");
                     prep.push_str(&pn);
@@ -1304,7 +1408,7 @@ impl Generator {
                     prep.push_str(
                         ".is_null() { None } else { Some(::core::mem::ManuallyDrop::new(",
                     );
-                    prep.push_str(&path(&p.sig.name));
+                    prep.push_str(&self.path(&p.sig.name));
                     prep.push_str("::from_raw(");
                     prep.push_str(&pn);
                     prep.push_str(").expect(\"non-null callback interface\"))) };\n");
@@ -1360,12 +1464,12 @@ impl Generator {
             thunks.push_str(&callargs);
             thunks.push(')');
             if result {
-                thunks.push_str(" { Ok(value) => { ");
+                thunks.push_str(" { Ok(value__) => { ");
                 if let Some(i) = retval {
                     let s = &m.params[i].sig.args[0];
                     thunks.push('*');
                     thunks.push_str(&ident(&m.params[i].name));
-                    thunks.push_str(" = value");
+                    thunks.push_str(" = value__");
                     if self.iface(&s.name) {
                         if self.nullable_param(item, &m, &m.params[i]) {
                             thunks.push_str(".map_or(::core::ptr::null_mut(), |v| v.into_raw())");
@@ -1375,7 +1479,7 @@ impl Generator {
                     }
                     thunks.push(';');
                 } else {
-                    thunks.push_str("let _ = value;");
+                    thunks.push_str("let _ = value__;");
                 }
                 thunks.push_str(" crate::core::HRESULT(0) }, Err(error) => error }\n");
             }
@@ -1421,7 +1525,7 @@ impl Generator {
         out.push_str("Impl>) -> Self { let iids = vec![");
         let mut current = self.files[item.file].type_name(item.id << 2);
         while !current.is_empty() && short(&current) != "IUnknown" {
-            out.push_str(&path(&current));
+            out.push_str(&self.path(&current));
             out.push_str("::IID,");
             let ci = self.index[&current];
             current = self.files[ci.file].base(ci.id);

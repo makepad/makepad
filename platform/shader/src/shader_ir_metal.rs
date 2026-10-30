@@ -27,6 +27,7 @@ pub fn metal_draw_source(output: &ShaderOutput, types: &impl crate::shader_types
 
 pub fn metal_draw(output: &ShaderOutput, types: &impl crate::shader_types::ShaderTypes, pick: bool) -> (String, MetalDrawInfo) {
     let mut ir = output.ir.clone();
+    crate::shader_ir_precise::lower_precise(&mut ir, false);
     let info = build_metal_entries(output, &mut ir, types);
     let mut io_tys = Vec::new();
     for io in &output.io {
@@ -67,6 +68,10 @@ pub fn metal_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shade
     }
 
     let mut out = String::new();
+    // precise math: no fp contraction here; the HAL compiles the pipeline without fast math
+    if ir.precise {
+        out.push_str("#pragma clang fp contract(off)\n");
+    }
     out.push_str("#include <metal_stdlib>\nusing namespace metal;\n");
     let mut done = vec![false; ir.structs.len()];
     for s in 0..ir.structs.len() {
@@ -129,7 +134,7 @@ pub fn metal_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shade
         }
         let name = cx.plain_global_name(g as GlobalId);
         match glob.kind {
-            IrGlobalKind::Io(IrIo::Geometry | IrIo::DynInstance | IrIo::RustInstance | IrIo::Varying | IrIo::FragmentOutput(_))
+            IrGlobalKind::Io(IrIo::Geometry | IrIo::DynInstance | IrIo::RustInstance | IrIo::Varying | IrIo::FragmentOutput(_) | IrIo::FragmentDepth)
             | IrGlobalKind::VertexPosition
             | IrGlobalKind::InstanceIndex => {
                 writeln!(out, "    {};", cx.decl(glob.ty, &name)).ok();
@@ -201,7 +206,7 @@ pub fn metal_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shade
             }
             // The invocation's state starts zeroed: a varying a vertex
             // function writes on some paths only passes 0 on the others.
-            IrGlobalKind::Io(IrIo::Geometry | IrIo::DynInstance | IrIo::RustInstance | IrIo::Varying | IrIo::FragmentOutput(_))
+            IrGlobalKind::Io(IrIo::Geometry | IrIo::DynInstance | IrIo::RustInstance | IrIo::Varying | IrIo::FragmentOutput(_) | IrIo::FragmentDepth)
             | IrGlobalKind::VertexPosition
             | IrGlobalKind::InstanceIndex => {
                 writeln!(fill, "    _mp.{} = {{}};", cx.plain_global_name(g as GlobalId)).ok();
@@ -236,9 +241,17 @@ pub fn metal_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shade
     let ff = &ir.functions[fragment_main as usize];
     let fe = ff.entry.as_ref().unwrap();
     out.push_str("struct FragmentOut {\n");
+    let mut depth_out = None;
     for io in &fe.outputs {
-        if let IrIoBinding::Location(l) = io.binding {
-            writeln!(out, "    {} [[color({})]];", cx.decl(io.ty, &io.name), l).ok();
+        match io.binding {
+            IrIoBinding::Location(l) => {
+                writeln!(out, "    {} [[color({})]];", cx.decl(io.ty, &io.name), l).ok();
+            }
+            IrIoBinding::Builtin(bi @ (IrBuiltinIo::FragDepth | IrBuiltinIo::FragDepthGreater | IrBuiltinIo::FragDepthLess)) => {
+                writeln!(out, "    float {} {};", io.name, metal_depth_attribute(bi)).ok();
+                depth_out = Some((io.name.clone(), bi));
+            }
+            _ => {}
         }
     }
     out.push_str("};\n");
@@ -249,6 +262,11 @@ pub fn metal_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shade
             if let IrIoBinding::Location(l) = io.binding {
                 writeln!(out, "    float4 {} [[color({})]];", io.name, l).ok();
             }
+        }
+        // The id target keeps the written depth: picking resolves occlusion
+        // against raster geometry exactly like the colour pass.
+        if let Some((name, bi)) = &depth_out {
+            writeln!(out, "    float {} {};", name, metal_depth_attribute(*bi)).ok();
         }
         out.push_str("};\n");
     }
@@ -302,10 +320,22 @@ pub fn metal_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shade
                 writeln!(f, "    o.{} = pc;", io.name).ok();
             }
         }
+        if let Some((name, _)) = &depth_out {
+            writeln!(f, "    o.{0} = c.{0};", name).ok();
+        }
         writeln!(f, "    return o;\n}}").ok();
         out.insert_str(at, &f);
     }
     (out, info)
+}
+
+/// The attribute of a fragment depth output (conservative where promised).
+fn metal_depth_attribute(bi: IrBuiltinIo) -> &'static str {
+    match bi {
+        IrBuiltinIo::FragDepthGreater => "[[depth(greater)]]",
+        IrBuiltinIo::FragDepthLess => "[[depth(less)]]",
+        _ => "[[depth(any)]]",
+    }
 }
 
 fn struct_def(cx: &TextCx, s: u32, done: &mut Vec<bool>, out: &mut String) {

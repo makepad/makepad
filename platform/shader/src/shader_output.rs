@@ -119,7 +119,17 @@ pub enum ShaderIoKind {
     ScopeUniform,
     /// A compute kernel's workgroup-shared array.
     Workgroup,
+    /// The fragment stage's depth output (`fragment_depth(@any|@greater|@less)`):
+    /// window-space depth in 0..1 replacing the rasterised one. The mode is
+    /// one of the `FRAG_DEPTH_*` constants; `greater`/`less` promise the
+    /// written depth only moves that way from the rasterised depth
+    /// (conservative depth), so early depth testing stays on.
+    FragmentDepth(u8),
 }
+
+pub const FRAG_DEPTH_ANY: u8 = 0;
+pub const FRAG_DEPTH_GREATER: u8 = 1;
+pub const FRAG_DEPTH_LESS: u8 = 2;
 
 #[relax_api(plain)]
 #[derive(Clone, Debug)]
@@ -403,7 +413,7 @@ impl ShaderOutput {
 }
 #[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ShaderIoKindTag { StorageBuffer, UniformBuffer, Sampler, Texture, Varying, VertexBuffer, VertexPosition, FragmentOutput, RustInstance, Uniform, DynInstance, ScopeUniform, Workgroup }
+pub enum ShaderIoKindTag { StorageBuffer, UniformBuffer, Sampler, Texture, Varying, VertexBuffer, VertexPosition, FragmentOutput, RustInstance, Uniform, DynInstance, ScopeUniform, Workgroup, FragmentDepth }
 impl ShaderIoKind {
     pub fn kind(&self) -> ShaderIoKindTag {
         match self {
@@ -420,12 +430,14 @@ impl ShaderIoKind {
             Self::DynInstance => ShaderIoKindTag::DynInstance,
             Self::ScopeUniform => ShaderIoKindTag::ScopeUniform,
             Self::Workgroup => ShaderIoKindTag::Workgroup,
+            Self::FragmentDepth(_) => ShaderIoKindTag::FragmentDepth,
         }
     }
 }
 impl ShaderIoKind {
     pub fn as_texture(&self) -> Option<TextureType> { if let Self::Texture(v) = self { Some(*v) } else { None } }
     pub fn fragment_output(&self) -> Option<u8> { if let Self::FragmentOutput(v) = self { Some(*v) } else { None } }
+    pub fn fragment_depth(&self) -> Option<u8> { if let Self::FragmentDepth(v) = self { Some(*v) } else { None } }
 }
 impl UniformBufferBindings {
     pub fn bindings(&self) -> &[(LiveId, usize)] { &self.bindings }
@@ -474,6 +486,7 @@ impl std::fmt::Debug for ShaderIoKind {
             VertexPosition => f.write_str("VertexPosition"), RustInstance => f.write_str("RustInstance"), Uniform => f.write_str("Uniform"),
             DynInstance => f.write_str("DynInstance"), ScopeUniform => f.write_str("ScopeUniform"),
             Workgroup => f.write_str("Workgroup"),
+            FragmentDepth => f.debug_tuple("FragmentDepth").field(&self.fragment_depth().unwrap()).finish(),
         }
     }
 }
@@ -495,6 +508,7 @@ pub fn global_kind_of(kind: &ShaderIoKind) -> Option<IrGlobalKind> {
         ShaderIoKind::UniformBuffer => IrGlobalKind::Io(IrIo::UniformBuffer),
         ShaderIoKind::Varying => IrGlobalKind::Io(IrIo::Varying),
         ShaderIoKind::FragmentOutput(i) => IrGlobalKind::Io(IrIo::FragmentOutput(*i)),
+        ShaderIoKind::FragmentDepth(_) => IrGlobalKind::Io(IrIo::FragmentDepth),
         ShaderIoKind::Texture(t) => IrGlobalKind::Io(IrIo::Texture(*t)),
         ShaderIoKind::VertexPosition => IrGlobalKind::VertexPosition,
         ShaderIoKind::StorageBuffer(flags) => IrGlobalKind::Io(IrIo::Storage(flags.is_write())),

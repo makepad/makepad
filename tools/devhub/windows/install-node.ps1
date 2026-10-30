@@ -1,6 +1,6 @@
-# The devhub NODE on a Windows box (win123), as its desktop user: the devhub tray in the
+# The devhub NODE on a Windows box (node 105, 10.0.0.105), as its desktop user: the devhub tray in the
 # notification area, started at logon. Never the master (that is the user's Mac).
-#   powershell -ep bypass -f tools\devhub\windows\install-node.ps1 [-Name win123] [-Checkout <dir>] [-Start] [-Enable]
+#   powershell -ep bypass -f tools\devhub\windows\install-node.ps1 [-Name 105] [-Checkout <dir>] [-Start] [-Enable]
 # 1. writes %USERPROFILE%\.makepad\devhub\node.conf when there is none (name, host, port 8797,
 #    discovery = off: the master dials the node from its nodes.conf) and sync.conf (the synced
 #    checkout; no WM to build or restart);
@@ -14,7 +14,7 @@
 # -Start starts the task now; -Enable turns a node the tray's Quit switched off back on.
 # The node proves itself with the machine's fleet identity (%USERPROFILE%\.makepad\fleet,
 # tools/fleet-identity.md); without one it serves this machine's JITs locally only.
-# Role and budgets are the master's: `makepad devhub node win123 role pool` (kept in lease.conf here).
+# Role and budgets are the master's: `makepad devhub node 105 role pool` (kept in lease.conf here).
 # Undo: Unregister-ScheduledTask -TaskName "Makepad devhub node" -Confirm:$false;
 #       Remove-NetFirewallRule -DisplayName "Makepad devhub node"; the pid in .makepad\devhub\node.pid ends the hub.
 param(

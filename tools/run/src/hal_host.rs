@@ -62,19 +62,57 @@ impl DomainHost for Host {
         relax_compiler::inspect::events::release_domain(domain);
         let how = if mode == domain_stop::KILL { domain::Stop::Kill } else { domain::Stop::Quit };
         if let Err(e) = domain::stop(domain, how) { eprintln!("makepad-run domain: {domain}: {e}"); }
+        // A stop that timed out (`Leaked`: its threads still alive) waits once more, 5 s
+        // (`MAKEPAD_RUN_RELAUNCH_GRACE_MS`), for threads that end late. The HAL makes a relaunched
+        // domain's session again only after this returns: a late thread of the old run must never
+        // find the new run's session under its id (it took that session's events as its own and
+        // never ended).
+        if matches!(domain::state(domain), Some(DomainState::Leaked { .. })) {
+            let grace = std::env::var("MAKEPAD_RUN_RELAUNCH_GRACE_MS").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(5000);
+            domain::wait_thread_done(domain, Duration::from_millis(grace));
+        }
         report_stop(domain);
     }
 
-    // The HAL stopped the old run (`stop(QUIT)` returned) and freed its session: start again.
+    // The HAL stopped the old run (`stop(QUIT)` returned, including its wait for late threads)
+    // and freed its session: start again. Threads that ended late hand the domain over and the
+    // app relaunches in place. A run that still owns its domain, or a start that fails, never
+    // leaves the app dead: the process starts again (same command line, the app's state carried
+    // over), or, where it cannot (a window manager's child, no exec), the domain ends crashed
+    // with the reason.
     fn relaunch(&self, launch: DomainLaunch) -> Result<(), String> {
         let id = launch.domain;
-        crate::hal_run::restarting(id);
-        let result = self.launch(launch);
-        if let Err(e) = &result {
-            eprintln!("makepad-run domain: {id}: {e}");
-            crate::hal_run::observe(id, &DomainState::Crashed(e.clone()));
+        if let Some(held) = domain::still_owned(id) {
+            return self.relaunch_failed(id, format!("domain {id} still owns its previous run ({held})"));
         }
-        result
+        crate::hal_run::restarting(id);
+        match self.launch(launch) {
+            Ok(()) => Ok(()),
+            Err(e) => self.relaunch_failed(id, e),
+        }
+    }
+}
+
+impl Host {
+    fn relaunch_failed(&self, id: u32, why: String) -> Result<(), String> {
+        // the run window shows what follows (its relaunch began; the stop is over)
+        crate::hal_run::restarting(id);
+        if relax_compiler::run::app_domain() == Some(id) {
+            eprintln!("makepad-run domain: {id}: the relaunch in place failed: {why}; restarting the process instead (same command line, the app's state carried over)");
+            match relax_compiler::reload::restart_process(&why) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    let message = format!("relaunch failed: {why}; the process restart failed too: {e}; restart the app");
+                    eprintln!("makepad-run domain: {id}: {message}");
+                    crate::hal_run::observe(id, &DomainState::Crashed(message.clone()));
+                    return Err(message);
+                }
+            }
+        }
+        let message = format!("relaunch failed: {why}; start the app again");
+        eprintln!("makepad-run domain: {id}: {message}");
+        crate::hal_run::observe(id, &DomainState::Crashed(message.clone()));
+        Err(message)
     }
 }
 

@@ -21,7 +21,7 @@ use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::SystemInformation::{GetTickCount64, GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows::Win32::System::Threading::{
-    GetProcessTimes, GetSystemTimes, OpenProcess, OpenThread, QueryFullProcessImageNameW, ResumeThread, BELOW_NORMAL_PRIORITY_CLASS, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_SUSPENDED, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+    GetProcessTimes, GetSystemTimes, OpenProcess, OpenThread, QueryFullProcessImageNameW, ResumeThread, BELOW_NORMAL_PRIORITY_CLASS, CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
     PROCESS_TERMINATE, THREAD_SUSPEND_RESUME,
 };
 
@@ -111,8 +111,7 @@ fn resume(pid: u32) -> std::io::Result<()> {
 
 /// Starts a lease run in a job of its own (see the module doc).
 pub fn lease_spawn(cmd: &mut Command) -> std::io::Result<(Child, Hold)> {
-    use std::os::windows::process::CommandExt;
-    cmd.creation_flags(CREATE_SUSPENDED.0 | BELOW_NORMAL_PRIORITY_CLASS.0 | CREATE_NO_WINDOW.0 | CREATE_NEW_PROCESS_GROUP.0);
+    windows::process::no_window(cmd, CREATE_SUSPENDED.0 | BELOW_NORMAL_PRIORITY_CLASS.0 | CREATE_NEW_PROCESS_GROUP.0);
     let mut child = cmd.spawn()?;
     let pid = child.id();
     let job = Job::new().and_then(|j| j.assign(pid).map(|_| j)).and_then(|j| resume(pid).map(|_| j));
@@ -161,9 +160,8 @@ pub fn signal_group(pid: u32, _hard: bool, hold: &Hold) {
 
 /// `program` at BELOW_NORMAL priority (background builds), without a console window.
 pub fn niced(program: &std::ffi::OsStr) -> Command {
-    use std::os::windows::process::CommandExt;
     let mut cmd = Command::new(program);
-    cmd.creation_flags(BELOW_NORMAL_PRIORITY_CLASS.0 | CREATE_NO_WINDOW.0);
+    windows::process::no_window(&mut cmd, BELOW_NORMAL_PRIORITY_CLASS.0);
     cmd
 }
 

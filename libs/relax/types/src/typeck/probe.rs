@@ -32,7 +32,8 @@ struct CandidateStep {
 /// Later derefs must not constrain an earlier receiver (method-probe-no-guessing).
 fn method_autoderef_steps(fcx: &Fcx<'_>, receiver: TyId) -> (Vec<CandidateStep>, Vec<GenericArg>, bool) {
     let (goal, original) = method_response::canonicalize_method_autoderef_goal(&fcx.infcx, fcx.param_env.clone(), receiver);
-    let infcx = crate::infer::InferCtxt::new(fcx.tcx, fcx.infcx.typing_mode.get(), fcx.infcx.recursion_limit);
+    let mut infcx = crate::infer::InferCtxt::new(fcx.tcx, fcx.infcx.typing_mode.get(), fcx.infcx.recursion_limit);
+    infcx.impl_view = fcx.infcx.impl_view;
     let (goal, values) = method_response::instantiate_method_autoderef_goal(&infcx, &goal);
     for (key, ty) in goal.predefined_opaques_in_body { infcx.inner.borrow_mut().opaque_types().register(key, crate::infer::opaque_types::ProvisionalHiddenType::new(ty)); }
     let previous = infcx.inner.borrow_mut().opaque_types().num_entries();

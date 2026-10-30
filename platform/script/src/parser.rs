@@ -233,6 +233,8 @@ enum State {
 
     EndBare,
     EndBareSquare,
+    /// Closes the list a `for` in value position collects into.
+    EndForList,
     EndProto,
     EndProtoInherit,
     EndScopeInherit,
@@ -1300,6 +1302,7 @@ impl ScriptParser {
                 | State::EndFieldInherit
                 | State::EndIndexInherit => return true,
                 State::EndBareSquare
+                | State::EndForList
                 | State::EndCall { .. }
                 | State::EndFnBlock { .. }
                 | State::EndFnExpr { .. } => return false,
@@ -3678,6 +3681,11 @@ impl ScriptParser {
                 self.push_code(Opcode::CONTINUE.into(), index);
                 return 0;
             }
+            State::EndForList => {
+                self.push_code(Opcode::END_ARRAY.into(), self.index);
+                self.state.push(State::EndExpr);
+                return 0;
+            }
             State::EndBareSquare => {
                 self.push_code(Opcode::END_ARRAY.into(), self.index);
                 self.state.push(State::EndExpr);
@@ -4412,6 +4420,16 @@ impl ScriptParser {
                     return 1;
                 }
                 if id == id!(for) {
+                    // A `for` in value position (`let bolts = for i in 0..4 { .. }`) is the
+                    // list of its body's values, as `[for ..]` is.
+                    // Call arguments are statements popped into the call: a `for` that starts one
+                    // is a value too (`m.instance(post, for x in xs { .. })`).
+                    let statement = matches!(self.state.last(), Some(State::EndStmt { .. }));
+                    let call_arg = statement && matches!(self.state.iter().rev().nth(1), Some(State::EndCall { .. }));
+                    if !statement || call_arg {
+                        self.push_code(Opcode::BEGIN_ARRAY.into(), self.index);
+                        self.state.push(State::EndForList);
+                    }
                     self.state.push(State::ForIdent {
                         idents: 0,
                         index: self.index,
@@ -5301,6 +5319,15 @@ impl ScriptParser {
                 }
                 State::EmitUnary { what_op, index } => {
                     self.push_code(State::operator_to_unary(what_op), index);
+                }
+                // `use mod.x.*` as the source's last statement: the import, not a field read.
+                State::Use { index } => {
+                    if let Some((Opcode::FIELD, _)) = self.opcodes.last().and_then(|c| c.as_opcode()) {
+                        self.pop_code();
+                        self.slot_disqualify_body();
+                        self.push_code(Opcode::USE.into(), index);
+                    }
+                    let_closed = true;
                 }
                 // `a.b = v` / `a[i] = v` as the source's last statement.
                 State::EmitFieldAssign { what_op, index } => {

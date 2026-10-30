@@ -58,7 +58,10 @@ pub struct QueryInput { pub goal: Goal, pub predefined_opaques_in_body: Vec<(Opa
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 // Program contains several crates; coherence_crate identifies the local crate
 // that rustc_next_trait_solver/src/coherence.rs obtains from its single-crate Tcx.
-pub struct CanonicalQueryInput { pub canonical: Canonical<QueryInput>, pub typing_mode: TypingModeEqWrapper, pub coherence_crate: Option<u32> }
+// impl_view: the crate whose impl set applies (InferCtxt::impl_view). Only a goal with type or
+// const inference variables keeps it: with concrete or placeholder heads at most one impl of the
+// whole program can match (orphan rules), so those answers stay shared by every crate.
+pub struct CanonicalQueryInput { pub canonical: Canonical<QueryInput>, pub typing_mode: TypingModeEqWrapper, pub coherence_crate: Option<u32>, pub impl_view: Option<u32> }
 #[derive(Clone, Copy)]
 pub enum CanonicalizeMode {
     Input { in_param_env: bool },
@@ -313,9 +316,10 @@ pub fn canonicalize_goal(infcx: &InferCtxt<'_>, goal: &Goal, opaque_types: &[(Op
         for &arg in &*key.args { args.push(super::fold::fold_arg(tys, arg, &mut c, 0)); }
         predefined_opaques_in_body.push((OpaqueTypeKey { def_id: key.def_id, args: args.into() }, c.fold_ty(tys, *ty, 0)));
     }
+    let impl_view = infcx.impl_view.filter(|_| goal.predicate.flags(tys) & TypeFlags::HAS_NON_REGION_INFER.bits() != 0);
     let value = QueryInput { goal: Goal { param_env, predicate }, predefined_opaques_in_body };
     let (max_universe, originals, var_kinds) = c.finalize();
-    (originals, CanonicalQueryInput { canonical: Canonical { value, max_universe, var_kinds }, typing_mode: TypingModeEqWrapper(typing_mode), coherence_crate: infcx.coherence_crate })
+    (originals, CanonicalQueryInput { canonical: Canonical { value, max_universe, var_kinds }, typing_mode: TypingModeEqWrapper(typing_mode), coherence_crate: infcx.coherence_crate, impl_view })
 }
 
 #[cfg(test)]

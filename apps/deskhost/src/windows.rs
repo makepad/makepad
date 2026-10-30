@@ -111,14 +111,7 @@ pub struct WinDesktop {
     captured: Option<usize>,
 }
 
-/// The session is shown over Remote Desktop (or is disconnected from it), not on the console.
-fn remote_session() -> bool {
-    // SM_REMOTESESSION
-    unsafe { GetSystemMetrics(SYSTEM_METRICS_INDEX(0x1000)) != 0 }
-}
-
-/// The scheduled task that moves this user's session to the console (setup.ps1).
-const CONSOLE_TASK: &str = "Makepad Desk Host console";
+mod session;
 
 impl WinDesktop {
     pub fn new() -> WinDesktop {
@@ -126,6 +119,7 @@ impl WinDesktop {
         unsafe {
             let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         }
+        log(&session::status(false));
         let mut cursors = Vec::new();
         for (id, shape) in [
             (IDC_ARROW, "Default"),
@@ -197,7 +191,7 @@ fn capture_loop(adapter: IDXGIAdapter1, output: IDXGIOutput, frames: Sender<Fram
                         dup = Some(d);
                     }
                     Err(e) => {
-                        let why = if remote_session() { "the session is on Remote Desktop".to_string() } else { format!("{e:?}") };
+                        let why = format!("{e:?}; capture will retry (see session status)");
                         if why != said {
                             log(&format!("capture: waits for the screen ({why})"));
                             said = why;
@@ -283,30 +277,17 @@ impl Desktop for WinDesktop {
             .collect()
     }
 
-    /// A session not on the console moves there (the task `Makepad Desk Host console`), and the
-    /// host waits for it (10 s at most).
-    fn prepare_watch(&mut self) -> Result<(), String> {
-        if !remote_session() {
-            return Ok(());
-        }
-        log("the session is on Remote Desktop (or disconnected): moving it to the console for the viewer");
-        let ran = std::process::Command::new("schtasks.exe").args(["/run", "/tn", CONSOLE_TASK]).output();
-        match ran {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => return Err(format!("this session is on Remote Desktop, and the task '{CONSOLE_TASK}' that moves it to the console did not run ({}): run setup.ps1 again", String::from_utf8_lossy(&o.stderr).trim())),
-            Err(e) => return Err(format!("this session is on Remote Desktop, and schtasks.exe did not start: {e}")),
-        }
-        let since = std::time::Instant::now();
-        while remote_session() {
-            if since.elapsed() > std::time::Duration::from_secs(10) {
-                return Err("this session is on Remote Desktop and did not move to the console (10 s)".into());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        // the console's outputs come up after the session moved
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        log("the session is on the console");
-        Ok(())
+    fn grants(&mut self) -> String {
+        session::status(false)
+    }
+
+    fn watch_note(&mut self, preparing: bool) -> String {
+        let note = session::status(preparing);
+        if note == "the session is on the console" { String::new() } else { note }
+    }
+
+    fn prepare_watch(&mut self) -> Result<bool, String> {
+        session::prepare()
     }
 
     fn capture(&mut self, index: usize, _fps: u32, frames: Sender<Frame>) -> Result<(), String> {

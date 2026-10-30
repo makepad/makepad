@@ -6123,6 +6123,7 @@ impl Format {
     pub const R16G16_SINT: Self = Self(82 as i32);
     pub const R16G16_SNORM: Self = Self(78 as i32);
     pub const R16G16_UINT: Self = Self(81 as i32);
+    pub const R16_SFLOAT: Self = Self(76 as i32);
     pub const R16G16_UNORM: Self = Self(77 as i32);
     pub const R32G32B32A32_SFLOAT: Self = Self(109 as i32);
     pub const R32G32B32A32_SINT: Self = Self(108 as i32);

@@ -21,6 +21,7 @@ pub fn mtl_format(f: u32) -> Option<MTLPixelFormat> {
         format::DEPTH32F | format::DEPTH24_STENCIL8 => MTLPixelFormat::Depth32Float,
         format::R32F => MTLPixelFormat::R32Float,
         format::RG16F => MTLPixelFormat::RG16Float,
+        format::R16F => MTLPixelFormat::R16Float,
         format::R32UINT => MTLPixelFormat::R32Uint,
         format::BC7 => MTLPixelFormat::BC7_RGBAUnorm,
         format::BC5 => MTLPixelFormat::BC5_RGUnorm,

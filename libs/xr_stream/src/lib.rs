@@ -14,7 +14,9 @@
 //! convert and encode, the round trip to decoded, the decode, and the render pose's age at the
 //! display time of the frame that shows it.
 
-use makepad_widgets::makepad_draw::render_target::{RenderTarget, RenderTargetFormat};
+use makepad_widgets::makepad_draw::render_target::RenderTarget;
+#[cfg(not(target_arch = "wasm32"))]
+use makepad_widgets::makepad_draw::render_target::RenderTargetFormat;
 use makepad_widgets::makepad_draw::shader::draw_nv12::DrawNv12;
 use makepad_widgets::*;
 /// Where a headset's stream comes from: a server at an address (a debug switch), or the server
@@ -796,7 +798,11 @@ impl XrStreamClient {
     /// Nothing to show: the stream is off or no server is linked (no XR frames are drawn).
     pub fn idle(&self) -> bool {
         let s = self.shared.lock().unwrap();
-        s.stream_off || s.link.is_none()
+        #[cfg(not(target_arch = "wasm32"))]
+        return s.stream_off || s.link.is_none();
+        // (no link on the web)
+        #[cfg(target_arch = "wasm32")]
+        true
     }
 
     /// The display rate (Hz) the link runs at: the app asks its display for it.
@@ -815,6 +821,8 @@ impl XrStreamClient {
     /// Feed it the app's events: each XR frame's pose goes upstream; a decoded picture is
     /// uploaded (true: redraw the XR pass).
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        let _ = &cx;
         match event {
             Event::XrUpdate(_) => {
                 self.window.display_frames += 1;
@@ -1054,6 +1062,7 @@ impl XrStreamClient {
     fn take_picture(&mut self, cx: &mut Cx, display_ns: u64) -> bool {
         // (debug `freeze`: the last picture keeps showing with its own eyes: the headset's
         // reprojection alone keeps it in place)
+        #[cfg(not(target_arch = "wasm32"))]
         if self.freeze && self.shown[0].is_some() {
             return false;
         }
@@ -1295,7 +1304,7 @@ impl XrStreamClient {
             }
         }
         rows.push('\n');
-        self.trace = Some(Trace { until: Instant::now() + Duration::from_secs_f64(secs), path, rows, started_ns: makepad_widgets::makepad_platform::makepad_hal::clock_ns() });
+        self.trace = Some(Trace { until: Instant::now() + Duration::from_secs_f64(secs), path, rows, started_ns: clock_now_ns() });
     }
 
     /// One trace row: this display frame, its head and eye 0 (the view: located at its display
@@ -1413,11 +1422,16 @@ impl XrStreamClient {
 
     /// This display frame's code becomes `code` when that is worse (odd, late, skip, repeat,
     /// new; none yet: anything).
+    #[cfg(not(target_arch = "wasm32"))]
     fn mark_frame(&mut self, code: u8) {
         use makepad_desk_link::xr::report as r;
         let rank = |c: u8| match c { r::FRAME_BLANK => 6, r::FRAME_ODD => 5, r::FRAME_LATE => 4, r::FRAME_SKIP => 3, r::FRAME_REPEAT => 2, r::FRAME_NEW => 1, _ => 0 };
         if rank(code) > rank(self.frame_code) { self.frame_code = code; }
     }
+
+    /// (no frame codes on the web: no headset reports them)
+    #[cfg(target_arch = "wasm32")]
+    fn mark_frame(&mut self, _code: u8) {}
 
     /// Every second: the window's numbers to the server (its stats panel); logged every 5th.
     fn stats_window(&mut self) {
@@ -2313,4 +2327,12 @@ mod tests {
             }
         }
     }
+}
+
+/// The HAL's clock (ns) where there is one; the web has none here (0).
+fn clock_now_ns() -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    return makepad_widgets::makepad_platform::makepad_hal::clock_ns();
+    #[cfg(target_arch = "wasm32")]
+    0
 }

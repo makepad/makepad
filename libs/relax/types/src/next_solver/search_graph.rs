@@ -128,6 +128,7 @@ impl<'a> SolverDelegate<'a> {
         let _g = cache.intern.lock().unwrap_or_else(|e| e.into_inner());
         crate::solver_work::count(crate::solver_work::SOLVER_MAP_LOCKS);
         if let Some(id) = cache.input_ids.get(h, is) { return id; }
+        crate::solver_work::count(crate::solver_work::NEW_INPUTS);
         let id = cache.inputs.push(input) as u32;
         crate::solver_work::count(crate::solver_work::SOLVER_MAP_LOCKS);
         cache.input_ids.insert(h, id); id
@@ -148,7 +149,7 @@ impl<'a> SolverDelegate<'a> {
     }
     // Entries are immutable and live for the borrowed Tcx, including across nested evaluations.
     pub fn result(&self, id: u32) -> &'a (QueryResult, AccessedOpaques) { crate::solver_work::count(crate::solver_work::RESULT_READS); &self.tcx.queries.solver.results[id as usize] }
-    fn query_input(&self, id: u32) -> &'a CanonicalQueryInput { &self.tcx.queries.solver.inputs[id as usize] }
+    pub(crate) fn query_input(&self, id: u32) -> &'a CanonicalQueryInput { &self.tcx.queries.solver.inputs[id as usize] }
     fn unconstrained(&mut self, input: u32, certainty: Certainty) -> u32 {
         let input = self.query_input(input);
         let response = response_no_constraints_raw(&self.tcx.tys, input.canonical.max_universe,
@@ -194,6 +195,7 @@ impl SolverDelegate<'_> {
     }
     fn compute(&mut self, graph: &mut SearchGraph, input: u32, inspect: &mut super::inspect::ProofTreeBuilder) -> u32 {
         let input = self.query_input(input);
+        if crate::solver_work::enabled() { goal_hist_note(self.prog, self.tcx, &input.canonical.value.goal.predicate, HIST_COMPUTED, 1); }
         // Append-only publication preserves this cache only when no existing impl set
         // changes. Entries with deferred misses (including nested hits) are evicted.
         // rustc search_graph.rs compute_goal: nested goals recurse once per level
@@ -221,3 +223,46 @@ impl SolverDelegate<'_> {
 
 #[cfg(test)]
 pub(crate) use graph::CANDIDATE_PAIRS;
+
+/// MAKEPAD_RUN_SOLVER_WORK_TRACE histograms, printed at the first present (goal_hist_report):
+/// computed goals by kind+trait and by kind+trait+self type (which 0), root goals weighted by the
+/// goals their evaluation visited (1), the cycle heads of goals left out of the global cache (2),
+/// the head index of those (3).
+pub const HIST_COMPUTED: usize = 0;
+pub const HIST_ROOT: usize = 1;
+pub const HIST_HEAD: usize = 2;
+pub const HIST_HEAD_DEPTH: usize = 3;
+static GOAL_HIST: std::sync::Mutex<Option<[std::collections::HashMap<String, u64>; 6]>> = std::sync::Mutex::new(None);
+pub(crate) fn goal_label(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, p: &super::Predicate) -> (String, String) {
+    use super::{PredicateKind, ClauseKind, AliasTerm};
+    let ty = |t| { let mut s = crate::typeck::ty_to_string(false, prog, tcx, t); if s.len() > 160 { let mut i = 160; while !s.is_char_boundary(i) { i -= 1; } s.truncate(i); s.push_str(".."); } s };
+    match &p.kind {
+        PredicateKind::Clause(ClauseKind::Trait(t)) => {
+            let h = format!("trait {}", prog.def_path(t.trait_ref.def_id));
+            let s = match t.trait_ref.args.first() { Some(crate::consts::GenericArg::Type(s)) => ty(*s), _ => String::new() };
+            (h.clone(), format!("{} for {}", h, s))
+        }
+        PredicateKind::NormalizesTo(n) => match &n.alias { AliasTerm::Ty(t) => { let s = ty(*t); (format!("normalizes-to {}", s.split('<').next().unwrap_or("")), format!("normalizes-to {}", s)) } _ => ("normalizes-to const".into(), "normalizes-to const".into()) },
+        PredicateKind::Clause(ClauseKind::Projection(pc)) => match &pc.projection_term { AliasTerm::Ty(t) => ("projection".into(), format!("projection {}", ty(*t))), _ => ("projection".into(), "projection const".into()) },
+        k => { let s = format!("{:?}", k); let h: String = s.chars().take(60).collect(); (h.clone(), h) }
+    }
+}
+pub(crate) fn goal_hist_note(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, p: &super::Predicate, which: usize, weight: u64) {
+    let (head, full) = goal_label(prog, tcx, p);
+    goal_hist_add(which, head, full, weight);
+}
+pub(crate) fn goal_hist_add(which: usize, head: String, full: String, weight: u64) {
+    let mut g = GOAL_HIST.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(Default::default);
+    if which == HIST_COMPUTED { *m[0].entry(head).or_default() += weight; *m[4].entry(full).or_default() += weight; }
+    else { *m[which].entry(full).or_default() += weight; }
+}
+pub fn goal_hist_report() {
+    let g = GOAL_HIST.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(m) = g.as_ref() else { return };
+    for (name, i, n) in [("computed-head", 0usize, 30usize), ("computed-full", 4, 30), ("root-weighted", 1, 30), ("cycle-head", 2, 30), ("cycle-head-index", 3, 12), ("rerun", 5, 40)] {
+        let mut v: Vec<_> = m[i].iter().collect(); v.sort_by(|x, y| y.1.cmp(x.1));
+        eprintln!("makepad-run goal-hist {}: {} distinct, {} total", name, v.len(), v.iter().map(|x| *x.1).sum::<u64>());
+        for (k, c) in v.into_iter().take(n) { eprintln!("makepad-run goal-hist {} {:>9} {}", name, c, k); }
+    }
+}

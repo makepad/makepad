@@ -3480,6 +3480,52 @@ pub extern "C" fn __relax_live_edit_enabled() -> bool {
     })
 }
 
+/// A WM dock app's watcher gate. A dock app runs from a machine's synced checkout of landed work
+/// (`MAKEPAD_RUN_DOCK_REVISION` names its `FLEET-REVISION.txt`, which only devhub's sync writes,
+/// after it moved the files): a change of its sources is applied (patched, or the app restarts
+/// with its state) only in the watch round that follows a new revision. Anything else that
+/// writes into that tree -- a lane's build or checkout there, a hand edit -- never reaches the
+/// running app: it keeps the synced code and the change waits for the next sync.
+pub(crate) struct DockGate {
+    revision: std::path::PathBuf,
+    applied: String,
+    warned: bool,
+}
+
+impl DockGate {
+    pub(crate) fn from_env() -> Option<DockGate> {
+        Some(DockGate::new(std::path::PathBuf::from(std::env::var_os("MAKEPAD_RUN_DOCK_REVISION").filter(|p| !p.is_empty())?)))
+    }
+
+    /// The gate of a checkout whose revision file is `revision`, open for what it says now.
+    pub(crate) fn new(revision: std::path::PathBuf) -> DockGate {
+        let applied = std::fs::read_to_string(&revision).unwrap_or_default();
+        DockGate { revision, applied, warned: false }
+    }
+
+    /// The checkout's revision moved since the last applied one (taken now): this round applies.
+    pub(crate) fn synced(&mut self) -> bool {
+        let now = std::fs::read_to_string(&self.revision).unwrap_or_default();
+        if now.is_empty() || now == self.applied {
+            return false;
+        }
+        self.applied = now;
+        self.warned = false;
+        true
+    }
+
+    /// Files changed outside a sync: reported once per revision, not applied.
+    pub(crate) fn held<'a>(&mut self, paths: impl Iterator<Item = &'a str>) {
+        if std::mem::replace(&mut self.warned, true) {
+            return;
+        }
+        let paths: Vec<&str> = paths.take(3).collect();
+        let message = format!("dock app: {} changed outside a devhub sync of landed work; not applied: the app keeps running the synced code", paths.join(", "));
+        eprintln!("makepad live: {message}");
+        live_log(&format!("{{\"event\":\"dock_held\",\"message\":{}}}", json_str(&message)));
+    }
+}
+
 /// The program's wake for its event loop (std::relax::on_patch): called from the watcher
 /// thread after a patch is installed, off the unit, so an idle app polls the new
 /// generation at once instead of at its next idle tick.
@@ -3797,6 +3843,15 @@ fn restart_in_place(why: String) -> Result<&'static str, String> {
         return Ok("domain relaunch");
     }
     exec_restart(None).map(|_| "process restart")
+}
+
+/// A hosted app's relaunch in place could not happen (its previous run did not hand its domain
+/// over): the process starts again instead, same binary and command line, with the state the app
+/// left for the relaunch (std::relax::restart_now) when it left one. Returns only on failure.
+pub fn restart_process(why: &str) -> Result<(), String> {
+    let state = DOMAIN_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()).take();
+    *RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = format!("the relaunch in place failed: {why}");
+    exec_restart(state.as_deref().map(str::as_bytes))
 }
 
 /// The process starts again: the loader binary with the same command line, `state` handed to the
@@ -4349,6 +4404,8 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
     // installed patches whose landing is checked once LANDING has passed: (when, patch group, the edit)
     let mut landing: Vec<(Instant, u32, String)> = Vec::new();
     let mut tick: u32 = 0;
+    // a WM dock app: only a devhub sync of landed work may change its code (`DockGate`)
+    let mut dock = DockGate::from_env();
     let mut startup_scan = true;
     let mut restart_required = false;
     let mut revision = 0;
@@ -4490,7 +4547,9 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         if t_ev.elapsed().as_millis() > 20 && std::env::var_os("MAKEPAD_RUN_LIVE_TRACE").is_some() { eprintln!("makepad live: events drain took {:.1} ms", t_ev.elapsed().as_secs_f64() * 1e3); }
         let lost = events.is_some() && notifications.is_none();
         if lost { events = watch_events::Watch::new(files.iter().map(|f| f.0.as_str())); }
-        let all = lost || rewatched || (events.is_none() && tick % 20 == 0);
+        // a sync moved the dock app's checkout: every file is compared with what runs
+        let synced = dock.as_mut().is_some_and(DockGate::synced);
+        let all = lost || rewatched || synced || (events.is_none() && tick % 20 == 0);
         let t_round = std::time::Instant::now();
         let mut changed: Vec<usize> = Vec::new();
         let mut scanned = 0;
@@ -4519,6 +4578,13 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             eprintln!("makepad live: one watch round: {} files in {:.2} ms; hot set {} files", files.len(), t_round.elapsed().as_secs_f64() * 1e3, hot.len());
         }
         if changed.is_empty() {
+            continue;
+        }
+        if let Some(gate) = dock.as_mut().filter(|_| !synced) {
+            // changed by something other than the sync (a lane's build or checkout in this tree,
+            // a hand edit): held, the app keeps running the synced code; the next sync applies
+            // whatever the files say then
+            gate.held(changed.iter().map(|&k| files[k].0.as_str()));
             continue;
         }
         let seen = std::time::Instant::now();
@@ -5147,5 +5213,33 @@ mod refusal_tests {
         // a new reason of the retry is kept after the first ones
         let other = "/c/other.rs:3:1: E0425: cannot find value `y`".to_string();
         assert_eq!(refusal_lines(vec![e0308.clone()], vec![other.clone()]), vec![e0308, other]);
+    }
+}
+
+#[cfg(test)]
+mod dock_gate_tests {
+    use super::DockGate;
+
+    /// A dock app's code changes only with a sync: edits in its tree (a lane's build or checkout
+    /// there) are held, and the round after the sync wrote a new revision applies.
+    #[test]
+    fn only_a_sync_opens_the_dock_gate() {
+        let dir = std::env::temp_dir().join(format!("relax-dock-gate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rev = dir.join("FLEET-REVISION.txt");
+        std::fs::write(&rev, "makepad aaaa\nsynced 1 (devhub sync)\n").unwrap();
+        let mut gate = DockGate::new(rev.clone());
+        // files changed, no new revision: a lane's write into the tree
+        assert!(!gate.synced(), "a change without a sync is held");
+        gate.held(["apps/fab/src/main.rs"].into_iter());
+        assert!(!gate.synced());
+        // the sync moved the files, then wrote the revision: this round applies, once
+        std::fs::write(&rev, "makepad bbbb\nsynced 2 (devhub sync)\n").unwrap();
+        assert!(gate.synced(), "the round after a sync applies");
+        assert!(!gate.synced(), "and the next one holds again");
+        // a revision file that went missing never opens the gate
+        std::fs::remove_file(&rev).unwrap();
+        assert!(!gate.synced());
+        let _ = std::fs::remove_dir(&dir);
     }
 }

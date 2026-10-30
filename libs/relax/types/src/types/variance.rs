@@ -142,18 +142,41 @@ struct Declaration<'a> {
 }
 
 fn infer(tcx: &Tcx) -> HashMap<DefId, Vec<V>> {
-    let mut decls = HashMap::default();
-    for (&d, sig) in tcx.ctor_sigs.iter() {
+    let mut values = HashMap::default();
+    solve(tcx, &mut values, None);
+    values
+}
+
+/// The variances of declarations `added` to a program whose variances are inferred (`values`):
+/// a loaded module is new and private, no existing declaration names its items, so the existing
+/// values stand and only the added declarations iterate (against them) to their fixpoint. (A
+/// whole-program `infer` per inspect `eval` / `static` kept a cold start from its present.)
+pub(crate) fn infer_added(tcx: &Tcx, values: &mut HashMap<DefId, Vec<V>>, added: &[DefId]) {
+    solve(tcx, values, Some(added));
+}
+
+/// Infers the declarations `only` names (None: every ADT and constructor) into `values`, which
+/// holds the converged variances of every other declaration they can name.
+fn solve(tcx: &Tcx, values: &mut HashMap<DefId, Vec<V>>, only: Option<&[DefId]>) {
+    fn ctor_decl(sig: &crate::tcx::FnSigT) -> Declaration<'_> {
         let mut types: Vec<_> = sig.params.iter().map(|&t| (t, V::Contra)).collect();
         types.push((sig.ret, V::Co));
-        decls.insert(d, Declaration { indices: &sig.generic_indices, types, function: true });
+        Declaration { indices: &sig.generic_indices, types, function: true }
+    }
+    fn adt_decl(adt: &crate::tcx::AdtT) -> Declaration<'_> {
+        let types = adt.variants.iter().flat_map(|v| v.fields.iter().map(|f| (f.ty, V::Co))).collect();
+        Declaration { indices: &adt.generic_indices, types, function: false }
+    }
+    let mut decls = HashMap::default();
+    match only {
+        None => for (&d, sig) in tcx.ctor_sigs.iter() { decls.insert(d, ctor_decl(sig)); },
+        Some(defs) => for &d in defs { if let Some(sig) = tcx.ctor_sigs.get(&d) { decls.insert(d, ctor_decl(sig)); } },
     }
     // A tuple struct shares its DefId with its constructor: ADT variance wins.
-    for (&d, adt) in &tcx.adts {
-        let types = adt.variants.iter().flat_map(|v| v.fields.iter().map(|f| (f.ty, V::Co))).collect();
-        decls.insert(d, Declaration { indices: &adt.generic_indices, types, function: false });
+    match only {
+        None => for (&d, adt) in &tcx.adts { decls.insert(d, adt_decl(adt)); },
+        Some(defs) => for &d in defs { if let Some(adt) = tcx.adts.get(&d) { decls.insert(d, adt_decl(adt)); } },
     }
-    let mut values = HashMap::default();
     for (&d, decl) in &decls {
         let mut vs = vec![V::Bi; decl.indices.len()];
         if let Some(&i) = decl.indices.types_consts.first() {
@@ -168,14 +191,14 @@ fn infer(tcx: &Tcx) -> HashMap<DefId, Vec<V>> {
     let mut ids: Vec<_> = decls.keys().copied().collect();
     ids.sort_by_key(|d| d.0);
     for &d in &ids {
-        let (_, deps) = evaluate(tcx, &values, &decls[&d]);
+        let (_, deps) = evaluate(tcx, values, &decls[&d]);
         for dep in deps { users.entry(dep).or_default().push(d); }
     }
     let mut queue: VecDeque<_> = ids.iter().copied().collect();
     let mut queued: HashSet<_> = ids.into_iter().collect();
     while let Some(d) = queue.pop_front() {
         queued.remove(&d);
-        let (uses, _) = evaluate(tcx, &values, &decls[&d]);
+        let (uses, _) = evaluate(tcx, values, &decls[&d]);
         let vs = values.get_mut(&d).unwrap();
         let mut changed = false;
         for (old, use_) in vs.iter_mut().zip(uses) {
@@ -191,14 +214,13 @@ fn infer(tcx: &Tcx) -> HashMap<DefId, Vec<V>> {
     }
     // Like rustc's create_map: consts are invariant, as are unused function
     // parameters. Unused ADT parameters retain genuine bivariance.
-    for (d, vs) in &mut values {
-        let decl = &decls[d];
+    for (d, decl) in &decls {
+        let vs = values.get_mut(d).unwrap();
         for &i in &decl.indices.consts { vs[i as usize] = V::Inv; }
         if decl.function {
             for v in vs { if *v == V::Bi { *v = V::Inv; } }
         }
     }
-    values
 }
 
 fn evaluate(tcx: &Tcx, values: &HashMap<DefId, Vec<V>>, decl: &Declaration<'_>) -> (Vec<V>, HashSet<DefId>) {

@@ -5,12 +5,13 @@
 # `makepad devhub lease build --node mini230 --lane landplat --rev <branch>,<commercial> -- bash
 # tools/run/fixture/check_platforms.sh`). Any lane before hand-in, from its worktree:
 # `makepad devhub run <lane> build --node mini230 -- bash tools/run/fixture/check_platforms.sh`.
-#   default packages: counter (the smallest app: platform + draw + widgets), calculator, clock (network + AI hub client)
+#   default packages: counter (the smallest app: platform + draw + widgets), calculator, clock (network + AI hub client),
+#   xr-stream (the XR stream: server natively, client per target)
 #   targets: CHECK_TARGETS, default every shipped one whose std is installed here (a missing one is reported, not failed)
 # Prints "PLATFORMS-OK <targets> (<s> s)" or "PLATFORMS-FAIL: <target: first error>..."; exit 0 / 1.
 set -u
 export PATH=$HOME/.cargo/bin:$PATH CARGO_INCREMENTAL=0
-pkgs=${*:-makepad-example-counter makepad-app-calculator makepad-app-clock}
+pkgs=${*:-makepad-example-counter makepad-app-calculator makepad-app-clock makepad-xr-stream}
 want=${CHECK_TARGETS:-aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-pc-windows-msvc wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios}
 log=$(mktemp -d "${TMPDIR:-/tmp}/checkplat.XXXXXX") || exit 2
 trap 'rm -rf -- "$log"' EXIT

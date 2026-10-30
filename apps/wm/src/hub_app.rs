@@ -241,6 +241,7 @@ fn build_service<C: ServiceConf>(app: Supervised<C>) -> std::process::ExitCode {
         app.conf.features(),
         set.join(" ")
     );
+    crate::host::no_console_window(&mut cmd);
     match cmd.status() {
         Ok(status) if status.success() => std::process::ExitCode::SUCCESS,
         Ok(status) => {
@@ -357,6 +358,9 @@ pub struct Supervised<C: ServiceConf> {
     adopt_by: Option<f64>,
     /// Hubs an earlier WM generation left on this port, being stopped: pid, SIGKILL time.
     rivals: Vec<(u32, f64)>,
+    /// The kept devhub runs another program, but leases run under it: it is replaced once its
+    /// leases are done (a replacement would end them: a landing's gate lost its node, 10-29).
+    replace_when_idle: bool,
 }
 
 impl<C: ServiceConf> Supervised<C> {
@@ -378,6 +382,7 @@ impl<C: ServiceConf> Supervised<C> {
             socket_wait: None,
             adopt_by: None,
             rivals: Vec::new(),
+            replace_when_idle: false,
         }
     }
 
@@ -449,13 +454,28 @@ impl<C: ServiceConf> Supervised<C> {
             self.stop_rivals(now);
             return true;
         }
+        if std::ptr::eq(self.kind, &DEVHUB) && !live_leases().is_empty() {
+            makepad_widgets::log!("wm: {label}: pid {pid} runs another program, but leases run under it ({}): kept until they are done, then replaced", live_leases().join(", "));
+            self.running = Some(Running::Adopted(pid));
+            self.restart_at = None;
+            self.started_at = now;
+            self.adopt_by = Some(now + ADOPT_WAIT_S);
+            self.replace_when_idle = true;
+            return true;
+        }
         makepad_widgets::log!("wm: {label}: pid {pid} runs another program or other settings; replacing it");
+        self.replace(pid, now);
+        true
+    }
+
+    /// Stops the kept app `pid` (SIGTERM, SIGKILL after the grace) and starts this WM's own once
+    /// it is gone.
+    fn replace(&mut self, pid: u32, now: f64) {
         #[cfg(unix)]
         makepad_app_host::launch::signal_group(pid, false);
         self.kill_at = Some(now + STOP_GRACE.as_secs_f64());
         self.running = Some(Running::Adopted(pid));
         self.restart_pending = true;
-        true
     }
 
     fn spawn(&mut self, now: f64) {
@@ -617,6 +637,18 @@ impl<C: ServiceConf> Supervised<C> {
         if !self.rivals.is_empty() {
             self.stop_rivals(now);
         }
+        if self.replace_when_idle && self.kill_at.is_none() {
+            if let Some(Running::Adopted(pid)) = self.running {
+                if live_leases().is_empty() {
+                    makepad_widgets::log!("wm: {label}: the leases of pid {pid} are done; replacing it with this WM's program");
+                    self.replace_when_idle = false;
+                    self.adopt_by = None;
+                    self.replace(pid, now);
+                }
+            } else {
+                self.replace_when_idle = false;
+            }
+        }
         if let (Some(Running::Adopted(pid)), Some(at)) = (&self.running, self.kill_at) {
             if now >= at && app_alive(self.kind, *pid) {
                 makepad_widgets::log!("wm: {label}: pid {pid} outlived its stop; SIGKILL");
@@ -720,6 +752,17 @@ impl<C: ServiceConf> Supervised<C> {
             makepad_app_host::launch::kill_child_group(child, STOP_GRACE, pool);
         }
     }
+}
+
+/// The leases the node's devhub runs now (`~/.makepad/devhub/leases/<id>.json`, one per live
+/// lease, removed at its end).
+fn live_leases() -> Vec<String> {
+    let dir = crate::theme::makepad_home().join("devhub").join("leases");
+    let mut ids: Vec<String> = std::fs::read_dir(dir)
+        .map(|d| d.flatten().filter_map(|e| e.file_name().to_str()?.strip_suffix(".json").map(str::to_string)).collect())
+        .unwrap_or_default();
+    ids.sort();
+    ids
 }
 
 /// How long a kept app has to come to the new WM's socket.

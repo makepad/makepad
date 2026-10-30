@@ -457,6 +457,26 @@ impl SearchGraph {
         lower_available_depth: LowerAvailableDepth,
         inspect: &mut crate::next_solver::inspect::ProofTreeBuilder,
     ) -> u32 {
+        // MAKEPAD_RUN_SOLVER_WORK_TRACE: each root goal with the goals its evaluation visited
+        if self.stack.is_empty() && crate::solver_work::enabled() {
+            crate::solver_work::count(crate::solver_work::ROOT_GOALS);
+            let g0 = crate::solver_work::get(crate::solver_work::SEARCH_GOALS);
+            let r = self.evaluate_goal_inner(delegate, input, step, lower_available_depth, inspect);
+            let n = crate::solver_work::get(crate::solver_work::SEARCH_GOALS) - g0;
+            super::goal_hist_note(delegate.prog, delegate.tcx, &delegate.query_input(input).canonical.value.goal.predicate, super::HIST_ROOT, n);
+            return r;
+        }
+        self.evaluate_goal_inner(delegate, input, step, lower_available_depth, inspect)
+    }
+
+    fn evaluate_goal_inner(
+        &mut self,
+        delegate: &mut SolverDelegate<'_>,
+        input: u32,
+        step: PathKind,
+        lower_available_depth: LowerAvailableDepth,
+        inspect: &mut crate::next_solver::inspect::ProofTreeBuilder,
+    ) -> u32 {
         crate::solver_work::count(crate::solver_work::SEARCH_GOALS);
         crate::preempt::point();
         let available_depth = match self.stack.last() {
@@ -473,9 +493,9 @@ impl SearchGraph {
             }
             Some(parent) => parent.available_depth - 1,
         };
-        if let Some(result) = self.lookup_provisional_cache(input, step, available_depth) { return result; }
+        if let Some(result) = self.lookup_provisional_cache(input, step, available_depth) { crate::solver_work::count(crate::solver_work::PROVISIONAL_HITS); return result; }
         if inspect.is_noop() {
-            if let Some(result) = self.lookup_global_cache(delegate, input, step, available_depth) { return result; }
+            if let Some(result) = self.lookup_global_cache(delegate, input, step, available_depth) { crate::solver_work::count(crate::solver_work::GLOBAL_HITS); return result; }
         }
         if let Some(result) = self.check_cycle_on_stack(delegate, input, step, available_depth) {
             return result;
@@ -530,6 +550,12 @@ impl SearchGraph {
             }
             }
         } else {
+            crate::solver_work::count(crate::solver_work::CYCLE_RESULTS);
+            if crate::solver_work::enabled() {
+                let h = evaluation.heads.lowest().unwrap();
+                super::goal_hist_note(delegate.prog, delegate.tcx, &delegate.query_input(self.stack[h].input).canonical.value.goal.predicate, super::HIST_HEAD, 1);
+                super::goal_hist_add(super::HIST_HEAD_DEPTH, String::new(), format!("head at stack index {} (stack {})", h, self.stack.len().min(4)), 1);
+            }
             let path_from_head =
                 Self::cycle_path_kind(&self.stack, step, evaluation.heads.highest().unwrap());
             self.provisional_cache
@@ -774,6 +800,13 @@ impl SearchGraph {
                 return EvaluationResult::finalize(entry, encountered_overflow, result);
             }
             iteration += 1;
+            crate::solver_work::count(crate::solver_work::RERUNS);
+            if crate::solver_work::enabled() {
+                let kind = match &delegate.result(result).0 { Ok(r) => { let ec = &r.value.external_constraints; let rc: String = format!("{:?}", ec.region_constraints).chars().take(160).collect(); format!("{:?} id={} rc={} op={} ng={} vars={:?}", r.value.certainty, crate::next_solver::response_values_are_identity(&delegate.tcx.tys, r, false), rc, ec.opaque_types.len(), ec.normalization_nested_goals.len(), r.var_kinds.len()) } Err(_) => "NoSolution".to_string() };
+                let prev = entry.provisional_result.map_or("initial".to_string(), |p| if p == result { "same".into() } else { "changed".into() });
+                let (_, l) = super::goal_label(delegate.prog, delegate.tcx, &delegate.query_input(input).canonical.value.goal.predicate);
+                super::goal_hist_add(5, String::new(), format!("{} -> {} usages {:?}: {}", prev, kind, usages.0, l), 1);
+            }
             if iteration >= self.config.fixpoint_step_limit {
                 let result = delegate.fixpoint_overflow_result(input);
                 let kind = delegate.is_ambiguous_result(result).expect("fixpoint overflow must be ambiguous");

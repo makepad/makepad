@@ -985,12 +985,18 @@ impl Tcx {
         let cx_state = crate::tcx::EvalState::new();
         let cx = &EvalCx::new(prog, self, TypingEnv::fully_monomorphized(&prog), &cx_state);
         let lang_items = self.lang_items.items.clone();
+        // the program's inferred variances: no existing declaration names a loaded item
+        let variances = self.variances.take();
         let r = self.collect_added_inner(cx, prog, defs, false, true, Some(visible));
         let keep_solver = self.additions_preserve_solver(prog, defs);
         if self.lang_items.items != lang_items {
             self.publish_declaration_inputs(None);
         } else {
             self.publish_declaration_inputs_with_solver(Some(visible), keep_solver);
+            if let Some(mut values) = variances {
+                crate::types::variance::infer_added(self, &mut values, defs);
+                self.variances = std::sync::OnceLock::from(values);
+            }
         }
         r
     }
@@ -1184,7 +1190,10 @@ impl Tcx {
         for v in self.impls_by_key.values_mut() {
             v.retain(|d| !impls.contains(d));
         }
+        // impls are no input of declaration variance: the inferred variances stay
+        let variances = self.variances.take();
         self.publish_collected();
+        if let Some(values) = variances { self.variances = std::sync::OnceLock::from(values); }
     }
 
     /// rustc_hir_analysis/src/check/mod.rs:124; rustc_middle/src/ty/util.rs:376.

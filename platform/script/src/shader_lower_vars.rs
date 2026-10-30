@@ -22,6 +22,9 @@ pub(crate) fn io_kind_for(mode: ShaderMode, io_type: ShaderIoType) -> Result<Sha
     if io_type.0 >= SHADER_IO_FRAGMENT_OUTPUT_0.0 && io_type.0 <= SHADER_IO_FRAGMENT_OUTPUT_MAX.0 {
         return Ok(ShaderIoKind::FragmentOutput((io_type.0 - SHADER_IO_FRAGMENT_OUTPUT_0.0) as u8));
     }
+    if let Some(m) = fragment_depth_mode(io_type) {
+        return Ok(ShaderIoKind::FragmentDepth(m));
+    }
     if let Some(t) = texture_type_of(io_type) {
         return Ok(ShaderIoKind::Texture(t));
     }
@@ -61,6 +64,7 @@ fn kinds_match(a: &ShaderIoKind, b: &ShaderIoKind) -> bool {
         (VertexBuffer, VertexBuffer) => true,
         (VertexPosition, VertexPosition) => true,
         (FragmentOutput(ai), FragmentOutput(bi)) => ai == bi,
+        (FragmentDepth(a), FragmentDepth(b)) => a == b,
         (RustInstance, RustInstance) => true,
         (Uniform, Uniform) => true,
         (DynInstance, DynInstance) => true,
@@ -313,6 +317,7 @@ impl IrFnCompiler {
                             SHADER_IO_VARYING => output.mode == ShaderMode::Vertex,
                             SHADER_IO_VERTEX_POSITION => output.mode == ShaderMode::Vertex,
                             t if t.0 >= SHADER_IO_FRAGMENT_OUTPUT_0.0 && t.0 <= SHADER_IO_FRAGMENT_OUTPUT_MAX.0 => output.mode == ShaderMode::Fragment,
+                            t if fragment_depth_mode(t).is_some() => output.mode == ShaderMode::Fragment,
                             _ => false,
                         };
                         if !allowed {

@@ -811,6 +811,14 @@ pub enum DrawShaderColorFormat {
     /// Blending disabled — simulation/data passes write whole texels.
     /// Declared as `color_format: @Rgba32F`.
     Rgba32F,
+    /// Single-channel 16-bit float (pairs with `TextureFormat::RenderRf16`):
+    /// a filterable data copy. Blending disabled. Declared as
+    /// `color_format: @Rf16`.
+    Rf16,
+    /// Single-channel 8-bit unorm (pairs with `TextureFormat::RenderRu8`):
+    /// small per-texel data such as slot ids written as `id / 255`.
+    /// Blending disabled. Declared as `color_format: @Ru8`.
+    Ru8,
 }
 
 /// How a blending pipeline combines a fragment with the target. Declared in
@@ -945,6 +953,9 @@ pub struct CxDrawShaderMapping {
     pub color_format: DrawShaderColorFormat,
     /// The blend operation of this shader's blending pipelines.
     pub blend_op: DrawShaderBlendOp,
+    /// `precise_math: true`: the pipeline is compiled without fast math and
+    /// its float ops are never contracted (bit-exact data passes).
+    pub precise_math: bool,
     /// Bit `i` set when the shader declares `fragment_output(i, …)`. In a
     /// pass with several color attachments (MRT) an attachment the shader
     /// does not write keeps its contents: its write mask is off.
@@ -1163,9 +1174,12 @@ impl CxDrawShaderMapping {
             Some(id) if id == id!(Rf32) => DrawShaderColorFormat::Rf32,
             Some(id) if id == id!(Rgba16F) => DrawShaderColorFormat::Rgba16F,
             Some(id) if id == id!(Rgba32F) => DrawShaderColorFormat::Rgba32F,
+            Some(id) if id == id!(Rf16) => DrawShaderColorFormat::Rf16,
+            Some(id) if id == id!(Ru8) => DrawShaderColorFormat::Ru8,
             Some(id) if id == id!(Bgra8NoBlend) => DrawShaderColorFormat::Bgra8NoBlend,
             _ => DrawShaderColorFormat::Bgra8Unorm,
         };
+        let precise_math = heap.value(source.as_object(), id!(precise_math).into(), NoTrap).as_bool() == Some(true);
         let blend_op = match heap.value(source.as_object(), id!(blend_op).into(), NoTrap).as_id() {
             Some(id) if id == id!(Max) => DrawShaderBlendOp::Max,
             _ => DrawShaderBlendOp::Over,
@@ -1501,6 +1515,7 @@ impl CxDrawShaderMapping {
             varying_total_slots: 0,
             color_format,
             blend_op,
+            precise_math,
             fragment_outputs,
             reflection: crate::draw_shader_layout::DrawShaderReflection::from_desc(desc),
             source_loc,

@@ -45,5 +45,6 @@ pub fn compile_draw_shader_ir_with(vm: &mut ScriptVm, io_self: ScriptObject, opt
     }
     output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
     output.ir.refresh_struct_names(&vm.bx.heap);
+    output.ir.precise = vm.bx.heap.value(io_self, id!(precise_math).into(), NoTrap).as_bool() == Some(true);
     output
 }

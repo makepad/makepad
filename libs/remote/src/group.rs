@@ -3,11 +3,27 @@
 //! reused pid has a different start).
 //!
 //! - Unix: `process_group(0)`; the group is signalled with `kill(-pid)` (TERM, then KILL).
-//! - Windows: `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` (no console flashes up for a console
+//! - Windows: `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` (no console flashes up for a console
 //!   program); there is no TERM, so both ends stop the process and its descendants (Toolhelp
 //!   snapshot, pid + start time checked before each stop).
 
 use std::process::Command;
+
+/// A child command suitable for a GUI/background caller: Windows console programs
+/// run without a console window. Other platforms keep std's default behavior.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    no_console_window(&mut command);
+    command
+}
+
+/// Sets CREATE_NO_WINDOW on Windows. Call before configuring any additional flags.
+pub fn no_console_window(command: &mut Command) {
+    #[cfg(windows)]
+    windows::process::no_window(command, 0);
+    #[cfg(not(windows))]
+    let _ = command;
+}
 
 /// Starts `cmd` in a group of its own, away from this process's console / terminal.
 pub fn detach(cmd: &mut Command) {
@@ -52,11 +68,11 @@ mod imp {
     use std::process::Command;
     use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
     use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
-    use windows::Win32::System::Threading::{GetExitCodeProcess, GetProcessTimes, OpenProcess, TerminateProcess, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE};
+    use windows::Win32::System::Threading::{GetExitCodeProcess, GetProcessTimes, OpenProcess, TerminateProcess, CREATE_NEW_PROCESS_GROUP, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE};
 
     pub fn detach(cmd: &mut Command) {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP.0 | CREATE_NO_WINDOW.0);
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP.0 | windows::session::Win32::System::Threading::DETACHED_PROCESS.0);
     }
 
     fn ft(t: &FILETIME) -> u64 {

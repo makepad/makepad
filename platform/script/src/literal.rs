@@ -887,6 +887,10 @@ fn pieces(src: &str) -> Vec<Piece<'_>> {
             while j < b.len() && ident(b[j]) {
                 j += 1;
             }
+            // `90°`: the degree sign is a unit of its own.
+            if j == digits_end && src[j..].starts_with('°') {
+                j += '°'.len_utf8();
+            }
             let suffix = &src[digits_end..j];
             let Ok(v) = src[i..digits_end].parse::<f64>() else {
                 i = j;

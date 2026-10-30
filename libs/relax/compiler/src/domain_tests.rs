@@ -182,17 +182,22 @@ fn teardown_fixture_cycles_and_leaked_thread() {
         ..Default::default()
     })
     .is_err());
-    // Release only for test-process hygiene. A timeout's retained memory stays retained even
-    // after the thread subsequently ends; it must never be reclaimed by a delayed callback.
+    assert!(still_owned(domain).is_some_and(|why| why.contains("1 threads still alive: fixture-worker")));
+    // A timeout's retained memory stays retained even after the thread subsequently ends; it
+    // must never be reclaimed by a delayed callback. The ended run hands its id over (a
+    // relaunch): the new run gets a block of its own, the retired one stays mapped.
     flags[1].store(1, Ordering::SeqCst);
     wait(|| info(domain).unwrap().threads == 0);
+    assert!(wait_thread_done(domain, Duration::ZERO));
+    assert_eq!(still_owned(domain), None);
     assert!(blocks().contains(&base));
     assert_eq!(freed_by_teardown(), freed);
-    {
-        let mut ds = domains();
-        ds.iter_mut().find(|d| d.info.id == domain).unwrap().info.state = DomainState::Stopped;
-    }
-    teardown(domain);
+    assert_eq!(prepare(&AppSpec { id: Some(domain), ..Default::default() }), Ok(domain));
+    let fresh = info(domain).unwrap();
+    assert_eq!((fresh.base, fresh.threads), (0, 0));
+    assert!(matches!(fresh.state, DomainState::Compiling(_)));
+    assert!(blocks().contains(&base));
+    assert_eq!(freed_by_teardown(), freed);
     domains().retain(|d| d.info.id != domain);
     drop(u);
     std::fs::remove_dir_all(root).unwrap();

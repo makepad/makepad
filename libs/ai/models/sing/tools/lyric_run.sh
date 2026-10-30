@@ -13,7 +13,7 @@ B=./makepad/target/release
 mkdir -p $L/inbox $L/out prep/lyrics $L/eval runs/lyric
 log() { echo "$(date +%FT%T) $*" >> $L/run.log; }
 stopped() { test -f $L/STOP; }
-NODES=${NODES:-"http://10.0.0.123:8123 http://10.0.0.100:8123"}
+NODES=${NODES:-"http://10.0.0.105:8123 http://10.0.0.100:8123"}
 MIN_CLEAN=${MIN_CLEAN:-3600}
 
 log "run start, nodes: $NODES"

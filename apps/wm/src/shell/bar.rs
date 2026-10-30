@@ -313,6 +313,7 @@ fn run(cmd: &str, args: &[&str]) -> Option<String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let mut command = std::process::Command::new(cmd);
+        crate::host::no_console_window(&mut command);
         makepad_app_registry::child_env::scrub(&mut command);
         let out = command.args(args).output().ok()?;
         if !out.status.success() {

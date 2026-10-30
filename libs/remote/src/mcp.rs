@@ -134,11 +134,7 @@ impl Adapter {
                 let (program, args) = self.opts.launch.split_first().ok_or("empty --launch")?;
                 let mut cmd = std::process::Command::new(program);
                 cmd.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::CommandExt;
-                    cmd.process_group(0);
-                }
+                crate::group::detach(&mut cmd);
                 let child = cmd.spawn().map_err(|e| format!("cannot start {program}: {e}"))?;
                 let pid = child.id().to_string();
                 let end = Instant::now() + LAUNCH_WAIT;

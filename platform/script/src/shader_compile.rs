@@ -347,6 +347,9 @@ pub fn shader_functions_hash(
             hash = hash.id_append(v);
         }
     }
+    if heap.value(obj, id!(precise_math).into(), crate::trap::NoTrap).as_bool() == Some(true) {
+        hash = hash.id_append(id!(precise_math));
+    }
     let mut current = Some(obj);
     while let Some(obj) = current {
         for entry in heap.map_entries(obj) {

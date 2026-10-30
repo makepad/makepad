@@ -9,7 +9,7 @@ seed, model, node, group, takes). Standard library only. One job at a time;
 respects the node's admission (a refused or paused node is retried later,
 never forced) and keeps the job lease alive while it runs.
 
-    song_producer.py --node http://10.0.0.123:8123 --inbox DIR [--takes 2] [--batch 4] [--model ace-step-1.5-xl]
+    song_producer.py --node http://10.0.0.105:8123 --inbox DIR [--takes 2] [--batch 4] [--model ace-step-1.5-xl]
 """
 import argparse
 import array

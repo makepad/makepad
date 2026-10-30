@@ -251,15 +251,29 @@ pub(super) fn create(dev: &Device, sid: u32, id: Id, incarnation: Arc<crate::fon
     let source = source.to_owned();
     let device = RcObjcId::from_unowned(NonNull::new(dev.device).expect("device"));
     let job = state.clone();
-    dev.compile(Box::new(move || compile(device, source, job)));
+    let precise = desc.flags & pipeline_flags::PRECISE != 0;
+    dev.compile(Box::new(move || compile(device, source, job, precise)));
     state
 }
 
-/// The options every pipeline's MSL is compiled with.
-fn compile_options() -> RcObjcId {
+/// The options a pipeline's MSL is compiled with: fast math, or for a precise-math pipeline
+/// (`pipeline_flags::PRECISE`) none (IEEE division and sqrt; the source also turns fp
+/// contraction off), with the safe math mode and precise fp32 functions where the OS has them.
+fn compile_options(precise: bool) -> RcObjcId {
     let options = RcObjcId::from_owned(NonNull::new(unsafe { msg_send![class!(MTLCompileOptions), new] }).expect("options"));
     unsafe {
-        let _: () = msg_send![options.as_id(), setFastMathEnabled: YES];
+        let _: () = msg_send![options.as_id(), setFastMathEnabled: if precise { NO } else { YES }];
+        if precise {
+            // MTLMathModeSafe = 0, MTLMathFloatingPointFunctionsPrecise = 1 (macOS 15 / iOS 18)
+            let mode: BOOL = msg_send![options.as_id(), respondsToSelector: sel!(setMathMode:)];
+            if mode == YES {
+                let _: () = msg_send![options.as_id(), setMathMode: 0i64];
+            }
+            let functions: BOOL = msg_send![options.as_id(), respondsToSelector: sel!(setMathFloatingPointFunctions:)];
+            if functions == YES {
+                let _: () = msg_send![options.as_id(), setMathFloatingPointFunctions: 1i64];
+            }
+        }
     }
     options
 }
@@ -274,7 +288,7 @@ pub fn compile_msl(source: &str) -> Result<(), String> {
     let Some(device) = NonNull::new(device).map(RcObjcId::from_owned) else {
         return Err("no Metal device".into());
     };
-    let options = compile_options();
+    let options = compile_options(source.contains(PRECISE_PRAGMA));
     let pool: ObjcId = unsafe { msg_send![class!(NSAutoreleasePool), new] };
     let mut error: ObjcId = nil;
     let library: ObjcId = unsafe { msg_send![device.as_id(), newLibraryWithSource: str_to_nsstring(source) options: options.as_id() error: &mut error] };
@@ -294,8 +308,11 @@ pub fn compile_msl(source: &str) -> Result<(), String> {
     result
 }
 
-fn compile(device: RcObjcId, source: String, ready: Arc<PipeState>) {
-    let options = compile_options();
+/// The line a precise-math MSL source starts with (`shader_ir_metal`).
+const PRECISE_PRAGMA: &str = "#pragma clang fp contract(off)";
+
+fn compile(device: RcObjcId, source: String, ready: Arc<PipeState>, precise: bool) {
+    let options = compile_options(precise);
     let callback_device = device.clone();
     let callback_source = source.clone();
     let completion = objc_block!(move |library: ObjcId, error: ObjcId| {

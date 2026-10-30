@@ -7,7 +7,11 @@ fn main() {
     let _ = args.next();
     let command = args.next().unwrap_or_default();
     if command == "generate" {
-        generate::run(args);
+        generate::run(args, false);
+        return;
+    }
+    if command == "generate-module" {
+        generate::run(args, true);
         return;
     }
     if command == "inventory" {

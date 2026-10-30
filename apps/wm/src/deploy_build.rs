@@ -64,6 +64,7 @@ pub fn build_launched(args: &[String]) -> ExitCode {
             cmd.get_program().to_string_lossy(),
             cmd.get_args().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ")
         );
+        crate::host::no_console_window(&mut cmd);
         match cmd.status() {
             Ok(status) if status.success() => {}
             Ok(status) => {

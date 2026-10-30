@@ -3063,7 +3063,7 @@ export class WasmWebGL extends WasmWebBrowser {
       }
     }
     const has_r32f_target = args.color_targets.some(
-      (target) => target && target.format >= 1 && target.format <= 3,
+      (target) => target && target.format >= 1 && target.format <= 4,
     );
     if (has_r32f_target && !this.ext_color_buffer_float) {
       this.reject_render_target(
@@ -3151,23 +3151,29 @@ export class WasmWebGL extends WasmWebBrowser {
         gl_tex._requested_height = args.height;
         gl_tex._format = tgt.format;
         gl_tex._depth = false;
-        if (tgt.format >= 1 && tgt.format <= 3) {
-          // R32F data target (TextureFormat::RenderRf32). Color-renderable
-          // only with EXT_color_buffer_float; NEAREST because float
-          // filtering is a separate extension and consumers sample_nearest.
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        if (tgt.format >= 1 && tgt.format <= 5) {
+          // Data targets: 1 R32F (RenderRf32), 2 RGBA32F, 3 RGBA16F,
+          // 4 R16F (RenderRf16), 5 R8 (RenderRu8). Float targets are
+          // color-renderable only with EXT_color_buffer_float; 32-bit float
+          // filtering is a separate extension, so those stay NEAREST, while
+          // R16F and R8 filter natively in WebGL2.
+          const filter = tgt.format >= 4 ? gl.LINEAR : gl.NEAREST;
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          const internal = [0, gl.R32F, gl.RGBA32F, gl.RGBA16F, gl.R16F, gl.R8][tgt.format];
+          const upload = tgt.format === 1 || tgt.format >= 4 ? gl.RED : gl.RGBA;
+          const type = tgt.format === 5 ? gl.UNSIGNED_BYTE : (tgt.format === 3 || tgt.format === 4 ? gl.HALF_FLOAT : gl.FLOAT);
           gl.texImage2D(
             gl.TEXTURE_2D,
             0,
-            tgt.format === 1 ? gl.R32F : (tgt.format === 2 ? gl.RGBA32F : gl.RGBA16F),
+            internal,
             gl_tex._width,
             gl_tex._height,
             0,
-            tgt.format === 1 ? gl.RED : gl.RGBA,
-            tgt.format === 3 ? gl.HALF_FLOAT : gl.FLOAT,
+            upload,
+            type,
             null,
           );
         } else {

@@ -280,6 +280,10 @@ impl Lexer<'_> {
         let mut cur: Vec<Tok> = Vec::new();
         let mut line = 1u32;
         let mut in_block_comment = false;
+        // a line comment runs to the newline across operand pieces: zeroize's
+        // `asm!("# {}", in(reg) ptr)` substitutes the operand inside the comment (LLVM sees the
+        // template after substitution, so the operand is commented out too)
+        let mut in_line_comment = false;
         let comment = self.line_comment();
         let sep = self.separator();
         let flush = |cur: &mut Vec<Tok>, stmts: &mut Vec<Stmt>, line: u32| {
@@ -290,7 +294,7 @@ impl Lexer<'_> {
         for p in pieces {
             let text = match p {
                 Piece::Op(k, m) => {
-                    if in_block_comment {
+                    if in_block_comment || in_line_comment {
                         continue;
                     }
                     match &self.args[*k as usize] {
@@ -305,6 +309,10 @@ impl Lexer<'_> {
             let mut i = 0;
             while i < text.len() {
                 let c = text[i];
+                if in_line_comment {
+                    if c != b'\n' { i += 1; continue; }
+                    in_line_comment = false;
+                }
                 if in_block_comment {
                     if text[i..].starts_with(b"*/") {
                         in_block_comment = false;
@@ -334,9 +342,7 @@ impl Lexer<'_> {
                     continue;
                 }
                 if text[i..].starts_with(comment) || text[i..].starts_with(b"//") {
-                    while i < text.len() && text[i] != b'\n' {
-                        i += 1;
-                    }
+                    in_line_comment = true;
                     continue;
                 }
                 if c == b' ' || c == b'\t' || c == b'\r' {

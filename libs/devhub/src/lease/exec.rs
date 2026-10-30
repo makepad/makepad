@@ -1007,7 +1007,7 @@ fn stop_runs(runs: &[Arc<Run>], grace: Duration) -> (Vec<u32>, Vec<u32>) {
         os::signal_group(r.pid, true, &r.hold);
     }
     for u in runs.iter().filter_map(|r| r.unit.as_ref()) {
-        let _ = std::process::Command::new("systemctl").args(["--user", "stop", &format!("{u}.scope")]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+        let _ = makepad_remote::group::command("systemctl").args(["--user", "stop", &format!("{u}.scope")]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
     }
     let t = Instant::now();
     while t.elapsed() < Duration::from_secs(2) && alive.iter().any(|r| os::group_alive(r.pid, r.start, &r.hold)) {

@@ -1209,6 +1209,9 @@ pub struct App {
     cleared_instances: HashSet<String>,
     #[rust]
     unsaved: bool,
+    /// What `unsaved` last told the platform (`restart::set_unsaved`): a session restart waits.
+    #[rust]
+    unsaved_published: bool,
     #[rust]
     pending_source_edit: Option<(String, String, std::time::Instant)>,
     #[rust]
@@ -7485,6 +7488,11 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if self.unsaved != self.unsaved_published {
+            self.unsaved_published = self.unsaved;
+            let what = self.selected.clone().unwrap_or_else(|| "the open flow".to_string());
+            makepad_widgets::makepad_platform::restart::set_unsaved("flow", self.unsaved.then_some(what.as_str()));
+        }
         if matches!(event, Event::LiveEdit | Event::ScriptReapply) {
             appearance::sync(cx);
             self.update_connection(cx);

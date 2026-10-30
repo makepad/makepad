@@ -376,3 +376,84 @@ fn smin(a, b, k) {
     let h = saturate(0.5 + 0.5 * (b - a) / k)
     mix(b, a, h) - k * h * (1.0 - h)
 }
+
+// ---- Signed distance fields ----------------------------------------------------
+// Distances to shapes centred on the origin (Y up), negative inside, and the
+// operators that combine them; a field kernel is a fn(p) returning one of these.
+// Sizes are full sizes (a box's `size`, a cylinder's `height`).
+
+fn sdf_sphere(p, r) { length(p) - r }
+fn sdf_box(p, size) {
+    let qx = abs(p.x) - size.x * 0.5
+    let qy = abs(p.y) - size.y * 0.5
+    let qz = abs(p.z) - size.z * 0.5
+    length(vec3(max(qx, 0.0), max(qy, 0.0), max(qz, 0.0))) + min(max(qx, max(qy, qz)), 0.0)
+}
+// A box with every edge rounded by `r`, inside `size`.
+fn sdf_round_box(p, size, r) { sdf_box(p, size - vec3(2.0 * r, 2.0 * r, 2.0 * r)) - r }
+// Along Y, `h` high.
+fn sdf_cylinder(p, r, h) {
+    let dx = length(vec2(p.x, p.z)) - r
+    let dy = abs(p.y) - h * 0.5
+    length(vec2(max(dx, 0.0), max(dy, 0.0))) + min(max(dx, dy), 0.0)
+}
+// Along Y, `h` high, radius `r1` at the bottom and `r2` at the top.
+fn sdf_cone(p, r1, r2, h) {
+    let hh = h * 0.5
+    let qx = length(vec2(p.x, p.z))
+    let qy = p.y
+    let k2x = r2 - r1
+    let k2y = 2.0 * hh
+    let cax = qx - min(qx, if qy < 0.0 { r1 } else { r2 })
+    let cay = abs(qy) - hh
+    let t = saturate(((r2 - qx) * k2x + (hh - qy) * k2y) / (k2x * k2x + k2y * k2y))
+    let cbx = qx - r2 + k2x * t
+    let cby = qy - hh + k2y * t
+    let s = if cbx < 0.0 && cay < 0.0 { -1.0 } else { 1.0 }
+    s * sqrt(min(cax * cax + cay * cay, cbx * cbx + cby * cby))
+}
+// In the XZ plane: ring radius `r`, tube radius `t`.
+fn sdf_torus(p, r, t) { length(vec2(length(vec2(p.x, p.z)) - r, p.y)) - t }
+// Round the segment a..b by `r`.
+fn sdf_capsule(p, a, b, r) {
+    let pa = p - a
+    let ba = b - a
+    let h = saturate(dot(pa, ba) / dot(ba, ba))
+    length(pa - ba * h) - r
+}
+fn sdf_ellipsoid(p, radii) {
+    let k0 = length(vec3(p.x / radii.x, p.y / radii.y, p.z / radii.z))
+    let k1 = length(vec3(p.x / (radii.x * radii.x), p.y / (radii.y * radii.y), p.z / (radii.z * radii.z)))
+    k0 * (k0 - 1.0) / max(k1, 1e-30)
+}
+// The half space below the plane through `d * n` with normal `n`.
+fn sdf_plane(p, n, d) { dot(p, n) - d }
+// A gyroid sheet of period `period` and wall `wall`.
+fn sdf_gyroid(p, period, wall) {
+    let k = TAU / period
+    let g = sin(p.x * k) * cos(p.y * k) + sin(p.y * k) * cos(p.z * k) + sin(p.z * k) * cos(p.x * k)
+    abs(g) / k - wall * 0.5
+}
+
+fn sdf_union(a, b) { min(a, b) }
+fn sdf_difference(a, b) { max(a, -b) }
+fn sdf_intersection(a, b) { max(a, b) }
+// Blends of width `k` (smin above).
+fn smooth_union(a, b, k) { smin(a, b, k) }
+fn smooth_difference(a, b, k) { -smin(-a, b, k) }
+fn smooth_intersection(a, b, k) { -smin(-a, -b, k) }
+// A skin `t` thick on each side of the surface (a hollow wall 2t thick).
+fn sdf_shell(d, t) { abs(d) - t }
+// The surface grown outward by `r`.
+fn sdf_round(d, r) { d - r }
+// Twist about Y: `rate` radians per unit of height (apply to p before a shape).
+fn twist_y(p, rate) {
+    let a = p.y * rate
+    let c = cos(a)
+    let s = sin(a)
+    vec3(c * p.x - s * p.z, p.y, s * p.x + c * p.z)
+}
+// Repeat space every `cell` along each axis (apply to p before a shape).
+fn repeat3(p, cell) {
+    vec3(p.x - cell.x * round(p.x / cell.x), p.y - cell.y * round(p.y / cell.y), p.z - cell.z * round(p.z / cell.z))
+}

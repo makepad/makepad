@@ -28,7 +28,7 @@ use crate::{
     uniform_buffer::UniformBufferId,
 };
 use makepad_hal::{
-    format, pass_load as load, pipeline_binding as binding, pipeline_blend, usage, Attr, CmdWriter, Draw, FrameMeta, HalInfo, Id, Inst, Pass, PipelineDesc, Slice, StrId,
+    format, pass_load as load, pipeline_binding as binding, pipeline_blend, pipeline_flags, usage, Attr, CmdWriter, Draw, FrameMeta, HalInfo, Id, Inst, Pass, PipelineDesc, Slice, StrId,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -516,6 +516,7 @@ pub(crate) fn hal_format(pixel: &TexturePixel) -> Option<u32> {
         TexturePixel::RGu8 => format::RG8,
         TexturePixel::Rf32 => format::R32F,
         TexturePixel::RGf16 => format::RG16F,
+        TexturePixel::Rf16 => format::R16F,
         TexturePixel::Ru32 => format::R32UINT,
         TexturePixel::D32 => format::DEPTH32F,
         TexturePixel::Bc7 => format::BC7,
@@ -532,6 +533,8 @@ fn pipeline_color_format(f: DrawShaderColorFormat) -> u32 {
         DrawShaderColorFormat::Rf32 => format::R32F,
         DrawShaderColorFormat::Rgba16F => format::RGBA16F,
         DrawShaderColorFormat::Rgba32F => format::RGBA32F,
+        DrawShaderColorFormat::Rf16 => format::R16F,
+        DrawShaderColorFormat::Ru8 => format::R8,
     }
 }
 
@@ -966,6 +969,7 @@ impl Cx {
                 mapping.hal_pick_code.hash(&mut h);
                 (mapping.color_format as u32).hash(&mut h);
                 (mapping.blend_op == DrawShaderBlendOp::Max).hash(&mut h);
+                mapping.precise_math.hash(&mut h);
                 h.finish()
             };
             let shared = {
@@ -975,6 +979,7 @@ impl Cx {
                         let o = &self.draw_shaders[fb.pipes[*p].first_shader].mapping;
                         o.code == mapping.code && o.pick_code == mapping.pick_code && o.hal_code == mapping.hal_code
                             && o.hal_pick_code == mapping.hal_pick_code && o.color_format == mapping.color_format && o.blend_op == mapping.blend_op
+                            && o.precise_math == mapping.precise_math
                     })
                 })
             };
@@ -1012,8 +1017,8 @@ impl Cx {
             let desc = PipelineDesc {
                 color_formats: [pipeline_color_format(mapping.color_format), 0, 0, 0],
                 blend: (if mapping.blend_op == DrawShaderBlendOp::Max { pipeline_blend::MAX } else { 0 })
-                    | (if mapping.color_format == DrawShaderColorFormat::Bgra8NoBlend { pipeline_blend::RAW } else { 0 }),
-                depth: 0,
+                    | (if matches!(mapping.color_format, DrawShaderColorFormat::Bgra8NoBlend | DrawShaderColorFormat::Rf16 | DrawShaderColorFormat::Ru8) { pipeline_blend::RAW } else { 0 }),
+                flags: if mapping.precise_math { pipeline_flags::PRECISE } else { 0 },
                 outputs: mapping.fragment_outputs as u32,
                 shader: index as u32,
                 name,
@@ -1425,7 +1430,12 @@ impl Cx {
             // (a host, a history pass) waits on. A picture still to paint costs nothing: the
             // last one its producer painted is sampled, a frame older, as before.
             let whole = fb.pass_whole;
+            let before = self.passes[pass_id].painted_serial;
             self.passes[pass_id].painted(whole, self.repaint_id);
+            if whole {
+                self.passes[pass_id].painted_frame = serial;
+                self.passes[pass_id].painted_before = before;
+            }
         }
         Some(serial)
     }

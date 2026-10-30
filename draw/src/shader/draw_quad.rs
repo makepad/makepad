@@ -65,6 +65,15 @@ script_mod! {
         pixel: fn(){
             #0000
         }
+
+        // The window-space depth (0..1) the rasteriser gives a world point
+        // under this pass's camera, on every backend: what a shader that
+        // declares `fragment_depth(..)` writes so its surface and raster
+        // geometry occlude each other per pixel (per eye in XR).
+        depth_of: fn(world: vec4) -> f32 {
+            let clip = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+            return clip.z / clip.w
+        }
     }
 
     // A quad placed by a 2D affine map per instance: `affine_m` (a b c d) and

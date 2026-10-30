@@ -57,6 +57,9 @@ pub struct InferCtxt<'a> {
     pub(crate) diagnostic_checkpoint: diagnostics::DiagnosticCheckpoint,
     tainted: Cell<bool>,
     pub(crate) coherence_crate: Option<u32>,
+    /// The crate whose code is solved (`Program::crate_sees`): impls of crates outside its
+    /// dependency graph are not candidates. None = every crate (codegen of concrete types).
+    pub impl_view: Option<u32>,
     pub inner: RefCell<InferCtxtInner>,
     universe: Cell<UniverseIndex>,
     pub(crate) lexical_region_resolutions: RefCell<Option<lexical_region_resolve::LexicalRegionResolutions>>,
@@ -69,6 +72,12 @@ impl<'a> InferCtxt<'a> {
     pub fn tainted_by_errors(&self) -> bool { self.tainted.get() || self.errors.tainted_with_errors() }
     pub fn set_tainted_by_errors(&self) { self.tainted.set(true); }
     pub fn register_ty_outlives(&self, ty: TyId, region: RegionId) {
+        // rustc_infer outlives/obligations.rs register_type_outlives_constraint: a global type
+        // (no params, inference variables, placeholders or non-'static free regions) has no
+        // component lifetime checking cares about. Registering it anyway put a `T: 'static`
+        // into the response of every auto-trait goal of matrix-sdk's cyclic Client/Room graph,
+        // so no cycle head reached its fixpoint on the first pass (Robrix: 61k reruns, 16M goals).
+        if self.tcx.tys.is_global(ty) { return; }
         let mut inner = self.inner.borrow_mut();
         inner.region_obligations.push((ty, region, self.origin_span.get()));
         inner.undo_log.push(snapshot::undo_log::UndoLog::PushRegionObligation);
@@ -85,13 +94,14 @@ impl<'a> InferCtxt<'a> {
         std::mem::take(&mut inner.hir_typeck_potentially_region_dependent_goals)
     }
     pub fn new(tcx: &'a Tcx, typing_mode: TypingMode, recursion_limit: crate::tcx::RecursionLimit) -> Self {
-        Self { tcx, typing_mode: Cell::new(typing_mode), recursion_limit, skip_leak_check: false, cause: Default::default(), in_hir_typeck: false, origin_span: Cell::new(0), errors: tcx.dcx.into_taintable(), diagnostic_checkpoint: tcx.dcx.checkpoint(), tainted: Cell::new(false), coherence_crate: None, inner: RefCell::new(InferCtxtInner { region_constraint_storage: Some(Default::default()), ..Default::default() }), lexical_region_resolutions: RefCell::new(None), universe: Cell::new(UniverseIndex::ROOT), canonicalizer_state: RefCell::new(Default::default()) }
+        Self { tcx, typing_mode: Cell::new(typing_mode), recursion_limit, skip_leak_check: false, cause: Default::default(), in_hir_typeck: false, origin_span: Cell::new(0), errors: tcx.dcx.into_taintable(), diagnostic_checkpoint: tcx.dcx.checkpoint(), tainted: Cell::new(false), coherence_crate: None, impl_view: None, inner: RefCell::new(InferCtxtInner { region_constraint_storage: Some(Default::default()), ..Default::default() }), lexical_region_resolutions: RefCell::new(None), universe: Cell::new(UniverseIndex::ROOT), canonicalizer_state: RefCell::new(Default::default()) }
     }
     pub fn for_item(tcx: &'a Tcx, prog: &crate::program::Program, typing_mode: TypingMode, def: crate::program::DefId) -> Self {
         let mut infcx = Self::new(tcx, typing_mode, crate::tcx::RecursionLimit::for_item(prog, def));
         if def != crate::program::NO_DEF {
             let d = prog.def(def);
             infcx.cause = crate::next_solver::fulfill::ObligationCause { span: prog.files[d.file as usize].ast.item(d.item).lo, body_id: def };
+            infcx.impl_view = Some(d.krate);
         }
         infcx
     }

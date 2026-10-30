@@ -144,7 +144,8 @@ impl AiChatOverlay {
     /// The lines the bridge asked to say, into the panel.
     fn adopt_requests(&mut self, cx: &mut Cx) {
         let says = std::mem::take(&mut cx.global::<AiSlotRequests>().say);
-        if says.is_empty() {
+        let answers = std::mem::take(&mut cx.global::<AiSlotRequests>().confirm);
+        if says.is_empty() && answers.is_empty() {
             return;
         }
         let panel = self.view.widget(cx, ids!(panel));
@@ -153,6 +154,9 @@ impl AiChatOverlay {
         };
         for text in says {
             panel.say(cx, text);
+        }
+        for how in answers {
+            panel.answer_cards(cx, &how);
         }
     }
 }

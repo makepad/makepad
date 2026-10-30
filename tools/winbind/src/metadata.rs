@@ -1,5 +1,6 @@
 //! ECMA-335 Partition II reader. All indexes are checked against their table/heaps.
 use std::collections::BTreeMap;
+mod type_library;
 
 // Column tags: 2/4 fixed width, 0x70 strings, 0x71 GUID, 0x72 blob,
 // 0x100 + table, 0x200 + coded-index kind (II.24.2.6).
@@ -127,6 +128,9 @@ fn rva(data: &[u8], pe: usize, address: u32) -> usize {
 impl File {
     pub fn read(path: &str) -> Self {
         let data = std::fs::read(path).expect("read metadata file");
+        if data.starts_with(b"MSFT") {
+            return type_library::read(path, &data);
+        }
         if &data[0..2] != b"MZ" {
             fail("metadata is not a PE file");
         }

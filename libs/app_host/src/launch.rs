@@ -404,7 +404,7 @@ mod tests {
         use makepad_platform::windows::Win32::System::JobObjects::*;
         use makepad_platform::windows::Win32::System::Threading::GetExitCodeProcess;
         use std::os::windows::io::AsRawHandle;
-        let child = Command::new("cmd").args(["/c", "ping -n 30 127.0.0.1 > nul"]).spawn().expect("spawn cmd");
+        let child = makepad_remote::group::command("ping.exe").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().expect("spawn ping");
         unsafe {
             let job = CreateJobObjectW(None, None).expect("job");
             let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
@@ -428,7 +428,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_hosted_child_joins_the_hosts_job() {
-        let mut child = Command::new("cmd").args(["/c", "exit 0"]).spawn().expect("spawn cmd");
+        let mut child = makepad_remote::group::command("cmd.exe").args(["/c", "exit", "0"]).spawn().expect("spawn cmd");
         assert!(host_job().is_some());
         exit_with_parent(&child);
         let _ = child.wait();

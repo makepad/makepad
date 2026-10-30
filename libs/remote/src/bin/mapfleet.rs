@@ -29,7 +29,6 @@ use makepad_network::tunnel::*;
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -100,7 +99,7 @@ struct Shared {
 }
 
 fn local_fingerprint() -> Option<String> {
-    let output = Command::new("./target/release/mpbake-run")
+    let output = makepad_remote::group::command("./target/release/mpbake-run")
         .args([FINGERPRINT_FIXTURE, "unused", "--fingerprint"])
         .output()
         .ok()?;
@@ -461,7 +460,7 @@ fn slice_cell(shared: &Shared, config: &Config, index: usize, bbox: &str) -> io:
     // "slice complete" signal and must never match a half-written file.
     let base_tmp = base.with_extension("mbtiles.tmp");
     let _ = std::fs::remove_file(&base_tmp);
-    let output = Command::new("./target/release/mptiles-run")
+    let output = makepad_remote::group::command("./target/release/mptiles-run")
         .arg("pbf-base")
         .arg(&config.pbf)
         .arg(&base_tmp)
@@ -527,7 +526,7 @@ fn local_worker(shared: &Shared, config: &Config) {
         // the weaver and the resume ledger both trust its existence.
         let baked_tmp = baked.with_extension("mbtiles.local-tmp");
         let _ = std::fs::remove_file(&baked_tmp);
-        let mut cmd = Command::new("./target/release/mpbake-run");
+        let mut cmd = makepad_remote::group::command("./target/release/mpbake-run");
         cmd.arg(&base).arg(&baked_tmp).args(bake_args(config));
         if intersects_nl(&bbox) {
             cmd.args(["--bridge-dz", BRIDGE_DZ]);
@@ -871,7 +870,7 @@ fn weave(shared: &Shared, config: &Config) {
     let next_dir = config.mkmap.with_extension("mkmap.next");
     let prev_dir = config.mkmap.with_extension("mkmap.prev");
     let _ = std::fs::remove_dir_all(&next_dir);
-    let mut cmd = Command::new("./target/release/mptiles-run");
+    let mut cmd = makepad_remote::group::command("./target/release/mptiles-run");
     cmd.arg("transmux");
     for path in &baked {
         cmd.arg(path);

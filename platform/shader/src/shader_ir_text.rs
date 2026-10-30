@@ -304,6 +304,7 @@ impl<'a> TextCx<'a> {
                 IrIo::UniformBuffer => format!("unibuf_{}", n),
                 IrIo::Varying => format!("var_{}", n),
                 IrIo::FragmentOutput(i) => format!("frag_fb{}", i),
+                IrIo::FragmentDepth => "frag_depth_out".to_string(),
                 IrIo::Texture(_) => format!("tex_{}", n),
                 // Compute kernels print only to SPIR-V.
                 IrIo::Storage(_) | IrIo::Workgroup => format!("kernel_{}", n),
@@ -1501,7 +1502,13 @@ impl<'a> TextCx<'a> {
                 Self::pad(out, indent);
                 let missing = *init == NO_EXPR || matches!(f.exprs[*init as usize].kind, ExprKind::Error);
                 if glsl {
-                    let decl = self.decl(local.ty, &name);
+                    let mut decl = self.decl(local.ty, &name);
+                    // precise math in HLSL: a `precise` value's ops never fuse or reassociate
+                    if self.hlsl() && self.m.precise
+                        && (matches!(self.m.get(local.ty), IrTy::Mat(..)) || matches!(self.m.get(local.ty), IrTy::Scalar(s) | IrTy::Vec(_, s) if s.is_float()))
+                    {
+                        decl.insert_str(0, "precise ");
+                    }
                     if missing {
                         let z = if self.hlsl() {
                             self.hlsl_zero_init(local.ty)

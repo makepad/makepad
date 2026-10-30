@@ -823,10 +823,7 @@ fn spawn_process(
     #[cfg(unix)]
     launch::own_process_group(&mut command);
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
+    makepad_platform::windows::process::no_window(&mut command, 0);
     if building {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
     } else {

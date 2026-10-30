@@ -207,7 +207,12 @@ impl ShaderOutput {
                 if let Some(io_type) = vm.bx.heap.as_shader_io(value_obj) {
                     if let Some(field_id) = key.as_id() {
                         // Skip if already exists (derived class overrides)
-                        if self.compiled.io.iter().any(|io| io.name == field_id) {
+                        if let Some(existing) = self.compiled.io.iter_mut().find(|io| io.name == field_id) {
+                            // A derived shader re-declaring its depth output picks
+                            // another conservative mode (the prototype came first).
+                            if let (Some(m), ShaderIoKind::FragmentDepth(_)) = (fragment_depth_mode(io_type), &existing.kind) {
+                                existing.kind = ShaderIoKind::FragmentDepth(m);
+                            }
                             continue;
                         }
                         
@@ -260,6 +265,22 @@ impl ShaderOutput {
                                 }
                             }
                             
+                            // The fragment depth output (one per shader)
+                            io_type if fragment_depth_mode(io_type).is_some() => {
+                                let mode = fragment_depth_mode(io_type).unwrap();
+                                let already_exists = self.compiled.io.iter().any(|io| matches!(io.kind, ShaderIoKind::FragmentDepth(_)));
+                                if !already_exists {
+                                    if let Some(pod_ty) = pod_ty {
+                                        self.compiled.io.push(ShaderIo {
+                                            kind: ShaderIoKind::FragmentDepth(mode),
+                                            name: field_id,
+                                            ty: pod_ty.into(),
+                                            buffer_index: None, instance_lane: None,
+                                        });
+                                    }
+                                }
+                            }
+
                             // Textures
                             SHADER_IO_TEXTURE_1D => self.compiled.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture1d), name: field_id, ty: ScriptPodType::VOID.into(), buffer_index: None, instance_lane: None }),
                             SHADER_IO_TEXTURE_1D_ARRAY => self.compiled.io.push(ShaderIo { kind: ShaderIoKind::Texture(TextureType::Texture1dArray), name: field_id, ty: ScriptPodType::VOID.into(), buffer_index: None, instance_lane: None }),

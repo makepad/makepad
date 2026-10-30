@@ -48,16 +48,10 @@ pub const fn processes_available() -> bool {
 /// windowed program with no console of its own, so every console program
 /// it starts (cargo, an app linked as a console program, curl) would
 /// otherwise get a console window of its own. Children talk to the WM over
-/// pipes and the hub, never a console; with this flag each console child
-/// gets a console that has no window, which its own children (rustc under
-/// cargo) share.
+/// pipes and the hub, never a console; this flag suppresses console allocation for the child.
 pub fn no_console_window(command: &mut std::process::Command) {
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+    makepad_platform::windows::process::no_window(command, 0);
     #[cfg(not(windows))]
     let _ = command;
 }

@@ -513,7 +513,14 @@ impl<'a> Parser<'a> {
             if self.at >= close_token {
                 break;
             }
-            args.push(self.expr(true)?);
+            // `name: value`: a named argument (the VM binds it by name).
+            if let Some((name, name_span, op, after)) = self.field_key(self.at).filter(|k| k.2 == ":") {
+                self.at = after;
+                let value = self.expr(true)?;
+                args.push(Node { span: name_span.start..value.span.end, kind: Kind::Entry { name, name_span, op, value: Box::new(value) } });
+            } else {
+                args.push(self.expr(true)?);
+            }
             if self.at > close_token {
                 return self.error("an argument runs past its closing `)`");
             }

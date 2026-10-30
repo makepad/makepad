@@ -117,7 +117,7 @@ fn desc_w(w: &mut W, d: &PipelineDesc) {
     w.range(d.bindings);
     w.range(d.vertex_layout);
     d.color_formats.into_iter().for_each(|f| w.u32(f));
-    for v in [d.blend, d.depth, d.shader, d.name, d.source, d.instance_stride, d.varyings, d.outputs] {
+    for v in [d.blend, d.flags, d.shader, d.name, d.source, d.instance_stride, d.varyings, d.outputs] {
         w.u32(v);
     }
 }
@@ -129,7 +129,7 @@ fn desc_r(r: &mut R) -> Res<PipelineDesc> {
         vertex_layout: r.range()?,
         color_formats: [r.u32()?, r.u32()?, r.u32()?, r.u32()?],
         blend: r.u32()?,
-        depth: r.u32()?,
+        flags: r.u32()?,
         shader: r.u32()?,
         name: r.u32()?,
         source: r.u32()?,

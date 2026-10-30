@@ -9,6 +9,13 @@ use makepad_csg_math::Vec3d;
 pub trait Sdf3 {
     fn distance(&self, p: Vec3d) -> f64;
 
+    /// The distances at many points (a field that runs as a kernel answers them in one call).
+    fn distance_many(&self, ps: &[Vec3d], out: &mut [f64]) {
+        for (p, o) in ps.iter().zip(out.iter_mut()) {
+            *o = self.distance(*p);
+        }
+    }
+
     /// Surface normal via central finite differences.
     fn normal(&self, p: Vec3d) -> Vec3d {
         const H: f64 = 1e-4;
@@ -27,6 +34,9 @@ impl<T: Sdf3 + ?Sized> Sdf3 for &T {
     fn distance(&self, p: Vec3d) -> f64 {
         (**self).distance(p)
     }
+    fn distance_many(&self, ps: &[Vec3d], out: &mut [f64]) {
+        (**self).distance_many(ps, out)
+    }
     fn normal(&self, p: Vec3d) -> Vec3d {
         (**self).normal(p)
     }
@@ -36,6 +46,9 @@ impl Sdf3 for Box<dyn Sdf3> {
     fn distance(&self, p: Vec3d) -> f64 {
         (**self).distance(p)
     }
+    fn distance_many(&self, ps: &[Vec3d], out: &mut [f64]) {
+        (**self).distance_many(ps, out)
+    }
     fn normal(&self, p: Vec3d) -> Vec3d {
         (**self).normal(p)
     }
@@ -44,6 +57,9 @@ impl Sdf3 for Box<dyn Sdf3> {
 impl Sdf3 for Box<dyn Sdf3 + Send + Sync> {
     fn distance(&self, p: Vec3d) -> f64 {
         (**self).distance(p)
+    }
+    fn distance_many(&self, ps: &[Vec3d], out: &mut [f64]) {
+        (**self).distance_many(ps, out)
     }
     fn normal(&self, p: Vec3d) -> Vec3d {
         (**self).normal(p)

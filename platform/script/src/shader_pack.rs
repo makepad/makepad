@@ -55,7 +55,7 @@ use makepad_live_id::*;
 use std::collections::{HashMap, HashSet};
 /// Bumped whenever the key's recipe or the pack's layout changes; a pack of
 /// another version is refused.
-const SHADER_PACK_VERSION: u32 = 2;
+const SHADER_PACK_VERSION: u32 = 3;
 const SHADER_PACK_MAGIC: &[u8; 4] = b"MPSP";
 
 /// One draw shader of a pack: its GLSL ES 3.0 code and reflection.
@@ -110,6 +110,8 @@ pub enum PackIoKind {
     Uniform,
     DynInstance,
     ScopeUniform,
+    /// The fragment depth output and its conservative mode (`FRAG_DEPTH_*`).
+    FragmentDepth(u8),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -517,6 +519,7 @@ fn shader_key_walk<'a>(bx: &'a ScriptVmBase, io_self: ScriptObject, const_table:
         w.h.id(key);
         w.h.id(heap.value(io_self, key.into(), NoTrap).as_id().unwrap_or(LiveId(0)));
     }
+    w.h.u8((heap.value(io_self, id!(precise_math).into(), NoTrap).as_bool() == Some(true)) as u8);
     let mut cur = Some(io_self);
     while let Some(obj) = cur {
         w.h.u8(K_PROTO);
@@ -581,6 +584,7 @@ impl ShaderPackEntry {
                     PackIoKind::Uniform => ShaderIoKind::uniform(),
                     PackIoKind::DynInstance => ShaderIoKind::dyn_instance(),
                     PackIoKind::ScopeUniform => ShaderIoKind::scope_uniform(),
+                    PackIoKind::FragmentDepth(m) => ShaderIoKind::FragmentDepth(m),
                 };
                 // A custom uniform buffer keeps the heap's pod type: the one
                 // its marker on the shader object names.
@@ -772,6 +776,7 @@ pub(crate) fn pack_entry_from_desc(
             crate::shader_output::ShaderIoKindTag::Uniform => PackIoKind::Uniform,
             crate::shader_output::ShaderIoKindTag::DynInstance => PackIoKind::DynInstance,
             crate::shader_output::ShaderIoKindTag::ScopeUniform => PackIoKind::ScopeUniform,
+            crate::shader_output::ShaderIoKindTag::FragmentDepth => PackIoKind::FragmentDepth(d.kind.fragment_depth().unwrap()),
             crate::shader_output::ShaderIoKindTag::Workgroup => return Err(format!("io `{}` is a compute kernel's workgroup array; draw packs have none", d.name)),
         };
         io.push(PackIo {
@@ -1086,6 +1091,10 @@ impl PackWriter {
                 PackIoKind::Uniform => self.u8(9),
                 PackIoKind::DynInstance => self.u8(10),
                 PackIoKind::ScopeUniform => self.u8(11),
+                PackIoKind::FragmentDepth(m) => {
+                    self.u8(12);
+                    self.u8(m);
+                }
             }
             self.u64(io.name);
             self.u32(io.ty);
@@ -1290,6 +1299,7 @@ impl<'a> PackReader<'a> {
                 9 => PackIoKind::Uniform,
                 10 => PackIoKind::DynInstance,
                 11 => PackIoKind::ScopeUniform,
+                12 => PackIoKind::FragmentDepth(self.u8()?),
                 _ => return Err("a shader pack holds an unknown io kind".into()),
             };
             io.push(PackIo {

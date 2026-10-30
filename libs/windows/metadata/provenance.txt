@@ -17,3 +17,51 @@ d8c071caaf83d619898dc579218fb933037182c884c4c3816fcba8e2413cb990  Windows.Founda
 6a45b97e1316ff584345773c65eec3a7212ba58c587842f8da13bf5b18a07bb3  Windows.Security.winmd
 21f4e900ef68c7d40ce64af23277adcb8297b2e77514bcfd848fc81fa163b345  Windows.Storage.winmd
 0c0e5f11543fd654f9fad44c1952494bf407d6b067d93c2e5eef4fcf5d42edde  Windows.Win32.winmd
+
+Additive composition and system web view generation (M4a):
+The main lib.rs/core.rs output is not regenerated. Its existing public types are
+referenced through their existing crate paths; missing types are emitted only in
+composition.rs or system_web_view.rs. No WinRT metadata inputs are used.
+
+Win32Metadata package SHA-256 (same pinned package URL/version above):
+758efe32666596b8596c58a8c46631da23757a914713b4e88403bbfa5110cb38  microsoft.windows.sdk.win32metadata.71.0.26-preview.nupkg
+The Windows.Win32.winmd SHA-256 was verified against the phase-2 value above.
+
+System web view SDK: Microsoft.Web.WebView2 1.0.4258.31
+Source: https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.4258.31/microsoft.web.webview2.1.0.4258.31.nupkg
+Package SHA-256:
+56f7f4b8bf9aee4b8efefbbdd4f67d5f74ebd1b100ed0806da71bf76af481aa9  microsoft.web.webview2.1.0.4258.31.nupkg
+Generation input SHA-256:
+32764847a1385abf32c45fc7cf4c2f7ab5ac1fd33d395ff30343dd4a86c86a81  WebView2.tlb
+Reference/ABI-review input SHA-256 (not required by the generator or normal builds):
+57b35d4b63c25f656d04559c5692e1d9a622d77ad25fb556406c348a496d0e24  WebView2.idl
+dff1e3181ec7ec203a34ef6efa966590e0ef0ba1a5c3fe3b69da6508c2f8a02e  build/native/include/WebView2.h
+73566559e49911301b9c34db59b547343c81ab06ac6428a39ec0204956b37118  build/native/include/WebView2EnvironmentOptions.h
+3426dcc55fdfb8b5e7ac623cf33b4ccf283fbf68a0c5a65bddfdb4d749a8abee  build/native/x64/WebView2Loader.dll
+The SDK loader was inspected only to verify the private runtime export ABI. It is
+not executed, linked, or distributed. The fnptr root records that ABI explicitly;
+all COM interfaces and implementations are generated from the type library.
+License SHA-256 (copied verbatim as LICENSE.system_web_view_sdk):
+0af8f1b807512aae39c2ac1aa4d0cae65cabecb6fd554b8439a5162a0d6eca55  LICENSE.txt
+
+Reproduction: make an input directory containing only the verified
+Windows.Win32.winmd and WebView2.tlb above. Replace <input-dir> below with its path.
+Run from the repository root; use the already installed Rust toolchain. The
+generator has its own workspace and no external crate dependencies. On Windows,
+append .exe to the generator executable. No SDK is needed for normal builds.
+cargo build --release --manifest-path tools/winbind/Cargo.toml
+tools/winbind/target/release/makepad-winbind generate-module <input-dir> tools/winbind/apis-composition.txt libs/windows/sys/src/composition.rs composition libs/windows/sys/src/lib.rs
+tools/winbind/target/release/makepad-winbind generate-module <input-dir> tools/winbind/apis-web-view.txt libs/windows/sys/src/system_web_view.rs system_web_view libs/windows/sys/src/lib.rs
+When CARGO_TARGET_DIR is set (e.g. a devhub lease), the executable is instead
+<CARGO_TARGET_DIR>/release/makepad-winbind. Add only the two pub mod declarations
+to the existing main lib.rs; do not regenerate it or its core.rs support file.
+
+Additive session / Task Scheduler generation (M4d):
+Uses only the same verified Windows.Win32.winmd (SHA-256 above); no WinRT
+metadata or new SDK is required. Existing main lib.rs/core.rs are retained,
+following the additive composition path, since the original WinRT inputs are
+not available here. API roots are in apis.txt and the additive subset in
+apis-session.txt. Run from the root with the repository's release-built tool:
+<CARGO_TARGET_DIR>/release/makepad-winbind generate-module <input-dir> tools/winbind/apis-session.txt libs/windows/sys/src/session.rs session libs/windows/sys/src/lib.rs
+The main lib.rs exports session and process; process.rs is handwritten std
+Command configuration using generated constants, with no FFI or vtables.

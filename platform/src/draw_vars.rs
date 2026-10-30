@@ -1416,6 +1416,9 @@ impl DrawVars {
                 hash = hash.id_append(v);
             }
         }
+        if heap.value(obj, id!(precise_math).into(), NoTrap).as_bool() == Some(true) {
+            hash = hash.id_append(id!(precise_math));
+        }
         hash
     }
 

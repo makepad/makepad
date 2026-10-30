@@ -8,14 +8,14 @@
 //! why. Every git call has fixed arguments (never a shell), hooks off.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// The user's checkout: where `wt` works unless `--repo` names another.
 pub const DEFAULT_REPO: &str = "/Users/admin/makepad";
 
 /// Runs `git <args>` in `cwd` (or with `git_dir` as the repository); stdout on success.
 pub fn git(cwd: Option<&Path>, git_dir: Option<&Path>, args: &[&str]) -> Result<String, String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = makepad_remote::group::command("git");
     cmd.arg("-c").arg("core.hooksPath=/dev/null").arg("-c").arg("advice.detachedHead=false");
     if let Some(g) = git_dir {
         cmd.arg("--git-dir").arg(g);
@@ -70,7 +70,7 @@ pub fn live_cwds() -> Vec<(u32, PathBuf)> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let o = Command::new("lsof").args(["-a", "-d", "cwd", "-Fn"]).stdin(Stdio::null()).stderr(Stdio::null()).output();
+        let o = makepad_remote::group::command("lsof").args(["-a", "-d", "cwd", "-Fn"]).stdin(Stdio::null()).stderr(Stdio::null()).output();
         o.map_or_else(|_| Vec::new(), |o| parse_lsof(&String::from_utf8_lossy(&o.stdout)))
     }
 }
@@ -402,7 +402,7 @@ mod tests {
         std::fs::write(root.join("dirty/new.txt"), "x").unwrap();
         // a process working in a worktree keeps it (Unix: its cwd is seen; Windows: an open cwd
         // cannot be removed)
-        let mut child = if cfg!(windows) { Command::new("cmd").args(["/c", "ping -n 30 127.0.0.1 >nul"]).current_dir(root.join("busy")).spawn().unwrap() } else { Command::new("sleep").arg("30").current_dir(root.join("busy")).spawn().unwrap() };
+        let mut child = if cfg!(windows) { makepad_remote::group::command("ping.exe").args(["-n", "30", "127.0.0.1"]).stdout(Stdio::null()).current_dir(root.join("busy")).spawn().unwrap() } else { makepad_remote::group::command("sleep").arg("30").current_dir(root.join("busy")).spawn().unwrap() };
         let list = infos(&repo).unwrap();
         assert_eq!(list.len(), 4);
         let r = prune(&repo).unwrap();

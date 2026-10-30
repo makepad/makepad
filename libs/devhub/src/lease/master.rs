@@ -439,7 +439,7 @@ impl LeaseMaster {
         let Some(dir) = &l.req.repo_dir else {
             return self.event(Sev::Warn, format!("{} of {}: recovered work saved as {}", l.tag(), l.req.lane, dst.display()));
         };
-        let ok = std::process::Command::new("git")
+        let ok = makepad_remote::group::command("git")
             .arg("-C")
             .arg(dir)
             .arg("fetch")

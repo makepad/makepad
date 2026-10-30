@@ -1040,6 +1040,9 @@ impl World {
             ns.dpi = dpi;
             ns.attached = false;
             self.sessions.insert(id, ns);
+            // the ended session's one quit went to the run that is gone (a stop that timed out
+            // crashed it): the new run under this id must never hear it
+            self.ended.retain(|e| *e != id);
             self.report_domain(id, domain_state::COMPILING, 0, 0.0, "relaunch");
         }
         self.launch_of(id)

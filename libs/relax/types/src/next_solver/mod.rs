@@ -128,7 +128,7 @@ pub mod eval_ctxt;
 mod goals;
 pub type QueryResult = Result<canonical::Canonical<Response>, NoSolution>;
 
-fn response_values_are_identity(tys: &crate::types::Types, response: &canonical::Canonical<Response>, ignore_regions: bool) -> bool {
+pub(crate) fn response_values_are_identity(tys: &crate::types::Types, response: &canonical::Canonical<Response>, ignore_regions: bool) -> bool {
     for (index, value) in response.value.var_values.iter().enumerate() {
         let identity = match value {
             GenericArg::Lifetime(r) => ignore_regions || matches!(tys.region_kind(*r), crate::types::RegionKind::ReBound(0, var) if var.0 == index as u32),

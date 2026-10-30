@@ -7,6 +7,7 @@ pub mod shader_backend;
 pub mod uniform_packing;
 pub mod shader_ir;
 pub mod shader_ir_draw;
+pub mod shader_ir_precise;
 pub mod shader_ir_glsl;
 pub mod shader_ir_hlsl;
 pub mod shader_ir_metal;

@@ -76,6 +76,8 @@ fn main() {
         println!("{}: listen {:?}, fleet identity in {}", settings::host_name(), settings.listen_addr(), makepad_network::fleet::id::dir().display());
         #[cfg(target_os = "macos")]
         println!("{}", desktop.permissions(false));
+        #[cfg(target_os = "windows")]
+        println!("{}", desktop.grants());
         return;
     }
     // macOS's own grant prompts, only when the user asks for them (the agent never does)
@@ -121,7 +123,7 @@ fn capture_test(desktop: &mut dyn Desktop, secs: u64, busy: bool) {
         }
     };
     let (tx, rx) = std::sync::mpsc::channel::<Frame>();
-    if let Err(e) = desktop.prepare_watch().and_then(|()| desktop.capture(0, 120, tx)) {
+    if let Err(e) = desktop.prepare_watch().and_then(|_| desktop.capture(0, 120, tx)) {
         return say(format!("capture-test: {e}"));
     }
     let mut enc: Option<VideoStreamEncoder> = None;

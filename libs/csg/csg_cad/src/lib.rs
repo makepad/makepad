@@ -20,7 +20,8 @@ pub mod sketch;
 pub mod solids;
 pub mod text;
 
-pub use bool3::{difference, intersection, union};
+pub use bool3::{boolean_in, difference, intersection, union};
+pub use makepad_csg_boolean::{BoolOp, MeshAccel};
 pub use edges::{apply_edges, edge_tool, feature_edges, EdgeChain, EdgeOp, EdgeShape};
 pub use mech::{hole_tool, iso_coarse_pitch, Gear, Hole, Thread};
 pub use region::{regions_from_loops, Loop, Region, P2};

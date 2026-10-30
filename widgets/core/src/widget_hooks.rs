@@ -127,6 +127,9 @@ pub struct AiSlotRequests {
     pub open: Option<bool>,
     /// Lines to send as if typed, in order; taken by the overlay.
     pub say: Vec<String>,
+    /// Answers for the chat's parked cards, as if clicked: `run`, `always`
+    /// (run, and allow that tool for the rest of the chat) or `cancel`.
+    pub confirm: Vec<String>,
     /// The slot's state as it last reported it, for whoever asks.
     pub is_open: bool,
     /// The standalone window whose F10 pane most recently received input.

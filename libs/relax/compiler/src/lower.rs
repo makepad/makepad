@@ -1174,6 +1174,11 @@ impl<'a> Lcx<'a> {
     /// `arg`: a call's by-value argument copy (`Slot::arg`); `ret`: a call's result buffer
     /// (`Slot::ret`).
     fn new_slot_flagged(&mut self, t: TyId, arg: bool, ret: bool) -> VReg {
+        self.new_slot_flagged_at(t, arg, ret).0
+    }
+
+    /// `new_slot_flagged` with the slot's index.
+    fn new_slot_flagged_at(&mut self, t: TyId, arg: bool, ret: bool) -> (VReg, u32) {
         let l = self.layout(t);
         let s = self.f.slot(l.size, l.align);
         let sl = &mut self.f.slots[s as usize];
@@ -1182,7 +1187,7 @@ impl<'a> Lcx<'a> {
         sl.ret = ret;
         let d = self.f.vreg(Cls::I);
         self.emit(Inst::SlotAddr(d, s));
-        d
+        (d, s)
     }
 
     // ------------------------------------------------------------ values and places
@@ -9932,15 +9937,19 @@ impl<'a> Lcx<'a> {
         let mut abi_args = Vec::new();
         let mut rets = Vec::new();
         let mut sret = None;
+        // the slot the result is read from (sret: the pointer the call gets; in a coroutine
+        // a vreg of its own, see below)
+        let mut sret_place = None;
         let c_agg_ret = match &csig {
             Some(s) => Some(s.ret.is_some()),
             None => None,
         };
         match &rl.leaves {
             _ if c_agg_ret == Some(true) => {
-                let a = self.new_slot_for(ret);
-                abi_args.push(a);
-                sret = Some(a);
+                let (a, arg) = self.call_result_slot(ret);
+                abi_args.push(arg);
+                sret = Some(arg);
+                sret_place = Some(a);
             }
             Some(l) if c_agg_ret == Some(false) || ret_fits(l) => {
                 for lf in l {
@@ -9948,12 +9957,13 @@ impl<'a> Lcx<'a> {
                 }
             }
             _ => {
-                let a = match arena_result {
-                    Some(a) => a,
-                    None => self.new_slot_flagged(ret, false, true),
+                let (a, arg) = match arena_result {
+                    Some(a) => (a, a),
+                    None => self.call_result_slot(ret),
                 };
-                abi_args.push(a);
-                sret = Some(a);
+                abi_args.push(arg);
+                sret = Some(arg);
+                sret_place = Some(a);
             }
         }
         for (v, t) in args.into_iter() {
@@ -9978,6 +9988,11 @@ impl<'a> Lcx<'a> {
         if let (Some(a), Some(c)) = (sret, self.coro.as_mut()) {
             c.call_private.insert(a);
             c.call_sret.insert(a);
+            // the place stays the call's own memory for the points-to analysis (as when it was
+            // the same vreg), but a call it is passed to later does not write it whole
+            if let Some(p) = sret_place {
+                c.call_private.insert(p);
+            }
         }
         if let (Some(_), Callee::Fn(id)) = (sret, &callee) {
             if !self.f.sret_callees.contains(id) {
@@ -10038,9 +10053,26 @@ impl<'a> Lcx<'a> {
             self.store_val(host, 0, ret, Val::M(a, 0));
             return Val::M(host, 0);
         }
-        match sret {
+        match sret_place.or(sret) {
             Some(a) => Val::M(a, 0),
             None => Val::L(rets),
+        }
+    }
+
+    /// A call's result buffer: (the slot's place, the pointer the call gets). In a coroutine
+    /// the call gets a vreg of its own: the suspension analysis takes the call as writing the
+    /// slot whole through it (call_sret), while the place goes on as the slot's address -- a
+    /// `for` loop's iterator is its IntoIter call's result slot, and `next(&mut iter)` through
+    /// the same vreg was taken for another whole write, so the iterator was not saved across an
+    /// await in the loop body (tokio JoinHandles awaited in a loop: a null task pointer).
+    fn call_result_slot(&mut self, ret: TyId) -> (VReg, VReg) {
+        let (a, s) = self.new_slot_flagged_at(ret, false, true);
+        if self.coro.is_some() {
+            let arg = self.f.vreg(Cls::I);
+            self.emit(Inst::SlotAddr(arg, s));
+            (a, arg)
+        } else {
+            (a, a)
         }
     }
 
@@ -13793,6 +13825,8 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u
         }
         seen
     };
+    // MAKEPAD_RUN_CORO_TRACE=2: why each slot is saved at each point (3: slots of 1 MB and more)
+    let coro_why = match std::env::var("MAKEPAD_RUN_CORO_TRACE").as_deref() { Ok("2") => 2, Ok("3") => 3, _ => 0 };
     for (k, &(pend, resume, cancel)) in c.suspends.iter().enumerate() {
         let mut vs = Vec::new();
         let mut sv = vec![0u64; wd];
@@ -13835,6 +13869,11 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u
             let read_after = (exposed[resume as usize * wd + s / 64] | exposed[cancel as usize * wd + s / 64]) & (1 << (s % 64)) != 0;
             if (escaped && touched_before) || (written_before && read_after) {
                 sv[s / 64] |= 1 << (s % 64);
+            }
+            if (coro_why == 2 || (coro_why == 3 && f.slots[s].size >= 1 << 20)) && (touched_before || written_before) {
+                eprintln!("coro {:?} point {} slot {} size {}: written_before {} touched_before {} escaped {} read_after {} (written in {:?}, touched in {:?}; pend b{} resume b{} cancel b{}; gen in {:?} kill in {:?}; seen from resume: {:?})", c.ct, k, s, f.slots[s].size, written_before, touched_before, escaped, read_after, written[s], touched[s], pend, resume, cancel,
+                    (0..nb).filter(|b| sgen[b * wd + s / 64] & (1 << (s % 64)) != 0).collect::<Vec<_>>(), (0..nb).filter(|b| skill[b * wd + s / 64] & (1 << (s % 64)) != 0).collect::<Vec<_>>(), (0..nb).filter(|b| seen_k[*b]).collect::<Vec<_>>());
+                if f.slots[s].size >= 1 << 20 || coro_why == 2 { for &bi in written[s].iter().chain(touched[s].iter()).take(6) { eprintln!("  b{}: {:?} -> {:?}", bi, f.blocks[bi as usize].insts.iter().filter(|i| format!("{:?}", i).contains("Call") || format!("{:?}", i).contains("SlotAddr")).take(12).collect::<Vec<_>>(), f.blocks[bi as usize].term); } }
             }
         }
         let mut grow = true;

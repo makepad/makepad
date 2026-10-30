@@ -745,8 +745,8 @@ pub enum Stop {
 /// The HAL already delivered quit (or freed the session). Never terminate a thread: retain
 /// everything on timeout, because a late callback can still use its statics and leaked boxes.
 pub fn stop(id: DomainId, how: Stop) -> Result<(), String> {
-    let ms = std::env::var("MAKEPAD_RUN_DOMAIN_JOIN_MS").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(5000);
-    stop_for(id, std::time::Duration::from_millis(if how == Stop::Kill { ms / 5 } else { ms }))
+    let t = join_timeout();
+    stop_for(id, if how == Stop::Kill { t / 5 } else { t })
 }
 
 /// Close admission to app callbacks before the host cancels its producers and joins threads.
@@ -1107,10 +1107,17 @@ pub fn prepare(spec: &AppSpec) -> Result<DomainId, Vec<String>> {
         // a relaunch starts the app again under its id: the ended run's record and block go
         if let Some(k) = d.iter().position(|x| x.info.id == id) {
             let old = &d[k];
-            if id == 0 || old.compiling || old.reclaiming || !old.threads.is_empty() || old.info.base != 0 || matches!(old.info.state, DomainState::Leaked { .. }) {
-                return Err(vec![format!("domain {id} still owns its previous run")]);
+            // A run whose stop timed out (Leaked) hands over once its last thread has ended. Its
+            // block and heap stay retained for the process (a late native callback may still use
+            // them, see `stop`): the record is retired, never torn down.
+            let leaked = matches!(old.info.state, DomainState::Leaked { .. });
+            if id == 0 || old.compiling || old.reclaiming || !old.threads.is_empty() || old.info.base != 0 && !leaked {
+                return Err(vec![format!("domain {id} still owns its previous run ({})", owner_of(old))]);
             }
-            d.remove(k);
+            let old = d.remove(k);
+            if leaked {
+                std::mem::forget(old);
+            }
         }
         d.push(Domain {
             info: DomainInfo { id, package: spec.package.clone(), parent: spec.parent, state: DomainState::Compiling("package graph".into()), base: 0, crates: 0, reused: 0, loaded: 0, new_crates: Vec::new(), resolve_ms: 0.0, load_ms: 0.0, spawn_ms: 0.0, first_frame_ms: None, threads: 0, thread_names: Vec::new(), arena_in_use: 0, arena_committed: 0, arena_detail: (0, 0, 0), static_committed: 0 },
@@ -1122,6 +1129,32 @@ pub fn prepare(spec: &AppSpec) -> Result<DomainId, Vec<String>> {
         id
     };
     Ok(id)
+}
+
+/// What a domain's previous run still holds, for the refusal to start it again.
+fn owner_of(d: &Domain) -> String {
+    let mut held = Vec::new();
+    if d.compiling { held.push("its loader is still compiling".to_string()); }
+    if d.reclaiming { held.push("its teardown is still running".to_string()); }
+    if !d.threads.is_empty() {
+        let names = d.threads.iter().take(8).map(|t| t.1.as_str()).collect::<Vec<_>>().join(", ");
+        held.push(format!("{} threads still alive: {names}", d.threads.len()));
+    }
+    if held.is_empty() && d.info.base != 0 { held.push(format!("its memory is not reclaimed yet ({:?})", d.info.state)); }
+    held.join("; ")
+}
+
+/// How long a stop waits for the domain's threads (`MAKEPAD_RUN_DOMAIN_JOIN_MS`, default 5 s).
+pub fn join_timeout() -> std::time::Duration {
+    std::time::Duration::from_millis(std::env::var("MAKEPAD_RUN_DOMAIN_JOIN_MS").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(5000))
+}
+
+/// Why `id`'s previous run cannot hand over to a new one yet (None: it can, or there is none).
+pub fn still_owned(id: DomainId) -> Option<String> {
+    let d = domains();
+    let old = d.iter().find(|x| x.info.id == id)?;
+    let leaked = matches!(old.info.state, DomainState::Leaked { .. });
+    (old.compiling || old.reclaiming || !old.threads.is_empty() || old.info.base != 0 && !leaked).then(|| owner_of(old))
 }
 
 pub fn loading_failed(id: DomainId, message: &str) {

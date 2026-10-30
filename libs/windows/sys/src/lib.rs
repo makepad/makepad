@@ -3,6 +3,10 @@
 #![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
 #![cfg(windows)]
 pub mod core;
+pub mod process;
+pub mod session;
+pub mod composition;
+pub mod system_web_view;
 pub mod Win32 {
 pub mod Devices {
 pub mod FunctionDiscovery {

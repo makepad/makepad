@@ -1,5 +1,5 @@
 //! Code sync, remote launch and WM restart: lane DEVHUB2 owns everything under `src/sync/`
-//! (DESIGN.md §11 has the file ownership). The backbone calls exactly these four hooks; nothing
+//! (DESIGN.md §11 has the file ownership). The backbone calls these hooks; nothing
 //! else in the crate needs to change for sync to grow.
 //!
 //! - [`register_master`]: services on a node's MASTER endpoint (the master only): `sync`
@@ -10,6 +10,7 @@
 //! - [`register_control`]: services on the master's control socket. The CLI reaches nodes through
 //!   the hub's `route` (signing orders itself with the master's key), so nothing is added.
 //! - [`cli`]: `makepad devhub sync|launch|stop|launched|launch-log|wm-restart …`.
+//! - [`start_autosync`]: the master's watcher of work and commercial main, one node per round.
 //!
 //! How it fits together (replacing local/deploy.sh and fleetmp/*):
 //! 1. `makepad devhub sync push <nodes>`: the master bundles `work` (+ commercial `main`, or any
@@ -28,6 +29,8 @@
 //! 6. Coordinated patch: `--session <node>/<pid>,…` waits on every node until its JIT reaches the
 //!    same session tick, then moves the files there.
 
+#[cfg(feature = "checkout")]
+mod autosync;
 #[cfg(feature = "checkout")]
 mod build;
 #[cfg(feature = "checkout")]
@@ -84,6 +87,14 @@ pub fn store_dir(repo: &str) -> std::path::PathBuf {
 pub fn register_peer(_ep: &Endpoint, _ctx: &std::sync::Arc<NodeCtx>) {}
 
 pub fn register_control(_ep: &Endpoint, _hub: &makepad_remote::hub::Hub) {}
+
+/// Starts the master's watcher when this hub has checkout support.
+pub fn start_autosync(sock: std::path::PathBuf) {
+    #[cfg(feature = "checkout")]
+    autosync::start(sock);
+    #[cfg(not(feature = "checkout"))]
+    let _ = sock;
+}
 
 /// The log of a running launch of this node (None: not one of its launches).
 pub fn launch_log(pid: u32) -> Option<std::path::PathBuf> {

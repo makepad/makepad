@@ -105,9 +105,7 @@ mod process_group {
     }
 
     pub fn configure_command(cmd: &mut Command) {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        windows::process::no_window(cmd, 0);
     }
 }
 
@@ -661,7 +659,7 @@ fn handle_session(ctx: &Ctx, conn: Conn, key: &Psk, peer: SocketAddr) -> io::Res
                     }
                     Ok(AdminAction::Run(argv)) => {
                         audit("admin", &name);
-                        let out = Command::new(argv[0]).args(&argv[1..]).current_dir(&ctx.cwd).output();
+                        let out = makepad_remote::group::command(argv[0]).args(&argv[1..]).current_dir(&ctx.cwd).output();
                         match out {
                             Ok(out) => {
                                 let mut text = String::from_utf8_lossy(&out.stdout).to_string();
@@ -732,16 +730,16 @@ fn run_foreground(ctx: &Ctx, conn: &Conn, run_args: Vec<String>, is_shell: bool,
     let mut cmd = if is_shell {
         let line = run_args.join(" ");
         #[cfg(unix)]
-        let mut c = Command::new("sh");
+        let mut c = makepad_remote::group::command("sh");
         #[cfg(unix)]
         c.arg("-c").arg(&line);
         #[cfg(windows)]
-        let mut c = Command::new("cmd");
+        let mut c = makepad_remote::group::command("cmd");
         #[cfg(windows)]
         c.arg("/C").arg(&line);
         c
     } else {
-        let mut c = Command::new("cargo");
+        let mut c = makepad_remote::group::command("cargo");
         c.args(&run_args);
         c
     };
@@ -902,13 +900,13 @@ fn spawn_detached(cwd: &Path, command: &str) -> io::Result<(u32, PathBuf)> {
         let log_err = log.try_clone()?;
         #[cfg(unix)]
         let mut c = {
-            let mut c = Command::new("sh");
+            let mut c = makepad_remote::group::command("sh");
             c.arg("-c").arg(command);
             c
         };
         #[cfg(windows)]
         let mut c = {
-            let mut c = Command::new("powershell");
+            let mut c = makepad_remote::group::command("powershell");
             c.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command]);
             c
         };
@@ -919,7 +917,7 @@ fn spawn_detached(cwd: &Path, command: &str) -> io::Result<(u32, PathBuf)> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000 | 0x0000_0200 | 0x0100_0000);
+        cmd.creation_flags(windows::session::Win32::System::Threading::DETACHED_PROCESS.0 | windows::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP.0 | windows::session::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB.0);
     }
     #[cfg(unix)]
     {
@@ -942,7 +940,7 @@ fn spawn_detached(cwd: &Path, command: &str) -> io::Result<(u32, PathBuf)> {
             use std::os::windows::process::CommandExt;
             let log = fs::OpenOptions::new().append(true).open(&log_path)?;
             let mut retry = build(log)?;
-            retry.creation_flags(0x0800_0000 | 0x0000_0200);
+            retry.creation_flags(windows::session::Win32::System::Threading::DETACHED_PROCESS.0 | windows::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP.0);
             retry
                 .spawn()
                 .map_err(|e2| io::Error::new(e2.kind(), format!("spawn retry without breakaway: {e2} (first: {first})")))?
@@ -964,12 +962,12 @@ fn restart_self() -> io::Result<()> {
         std::process::exit(0);
     }
     let exe = env::current_exe()?;
-    let mut cmd = Command::new(exe);
+    let mut cmd = makepad_remote::group::command(exe);
     cmd.args(env::args_os().skip(1)).stdin(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000 | 0x0000_0200 | 0x0100_0000);
+        cmd.creation_flags(windows::session::Win32::System::Threading::DETACHED_PROCESS.0 | windows::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP.0 | windows::session::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB.0);
     }
     #[cfg(unix)]
     {

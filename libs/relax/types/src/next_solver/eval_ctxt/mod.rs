@@ -96,6 +96,7 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
     pub(super) fn enter_canonical(solver: &mut SolverDelegate<'tcx>, graph: &mut SearchGraph, input: &CanonicalQueryInput, proof_tree: &mut super::inspect::ProofTreeBuilder) -> (QueryResult, AccessedOpaques) {
         let mut infcx = InferCtxt::new(solver.tcx, input.typing_mode.0, solver.limit);
         infcx.coherence_crate = input.coherence_crate;
+        infcx.impl_view = input.impl_view;
 
         infcx.cause = solver.cause;
         let values = instantiate_canonical_vars(&infcx, input.canonical.max_universe, &input.canonical.var_kinds);

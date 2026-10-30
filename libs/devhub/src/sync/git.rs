@@ -8,7 +8,7 @@
 //! /dev/null), so nothing that arrives in a bundle ever runs.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// The ref that names the commit the checkout holds (the store's index of it matches it).
 pub const CHECKOUT_REF: &str = "refs/devhub/checkout";
@@ -43,7 +43,7 @@ pub fn stores_dir() -> PathBuf {
 
 /// Runs `git <args>` in `dir` (or with the store as GIT_DIR); stdout on success.
 pub fn run(dir: Option<&Path>, git_dir: Option<&Path>, env: &[(&str, &Path)], args: &[&str]) -> Result<String, String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = makepad_remote::group::command("git");
     cmd.arg("-c").arg("core.hooksPath=/dev/null").arg("-c").arg("advice.detachedHead=false");
     if let Some(g) = git_dir {
         cmd.arg("--git-dir").arg(g);

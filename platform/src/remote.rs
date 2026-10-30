@@ -199,6 +199,8 @@ mod imp {
             "ai" => route_ai(
                 if p.get(&["say"]).is_some() {
                     "say"
+                } else if p.get(&["confirm"]).is_some() {
+                    "confirm"
                 } else {
                     "toggle"
                 },

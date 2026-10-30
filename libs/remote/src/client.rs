@@ -3,7 +3,6 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
-use std::process::Command;
 
 use makepad_network::tls::{from_hex, to_hex};
 use makepad_network::tunnel::*;
@@ -108,7 +107,7 @@ fn get_changed_files() -> io::Result<Vec<(String, bool)>> {
         (&["diff", "--name-only", "--cached"][..], true),
         (&["ls-files", "--others", "--exclude-standard"][..], false),
     ] {
-        let output = Command::new("git").args(args).output()?;
+        let output = makepad_remote::group::command("git").args(args).output()?;
         if output.status.success() {
             for line in String::from_utf8_lossy(&output.stdout).lines() {
                 let line = line.trim();

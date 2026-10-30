@@ -11,11 +11,12 @@ use makepad_remote::link::{Client, Target};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 pub const HELP: &str = "  sync words (the master; nodes by hub name, `all` = every node):
   sync status [node...]                         each node's synced checkout, store refs, last apply
+  autosync status   what the master's auto-sync last did per node (~/.makepad/devhub/autosync.state)
   sync push <node,...|all> [--makepad <branch>] [--commercial <branch>|--no-commercial]
             [--repo <dir>] [--build on|off] [--restart none|auto|wm|apps]
             [--session <node>/<pid>[:<arg>],... --tick '<inspect cmd, {} = arg>' [--lead <ticks>]]
@@ -73,6 +74,10 @@ fn nodes(c: &Client, spec: &str) -> Result<Vec<String>, String> {
     if spec != "all" {
         return Ok(spec.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect());
     }
+    fleet_nodes(c)
+}
+
+pub(super) fn fleet_nodes(c: &Client) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     for h in ask_local(c, "hosts", "hosts")? {
         let Ok(v) = makepad_strict_json::parse(h.as_bytes()) else { continue };
@@ -85,7 +90,7 @@ fn nodes(c: &Client, spec: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-fn ask_local(c: &Client, service: &str, line: &str) -> Result<Vec<String>, String> {
+pub(super) fn ask_local(c: &Client, service: &str, line: &str) -> Result<Vec<String>, String> {
     let ch = c.open(service, "").map_err(|e| e.to_string())?;
     ch.send(line.as_bytes().to_vec()).map_err(|e| e.to_string())?;
     let mut got = Vec::new();
@@ -109,7 +114,7 @@ fn ask_local(c: &Client, service: &str, line: &str) -> Result<Vec<String>, Strin
 // ---------------------------------------------------------------- git, read-only, in the user's repo
 
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git").arg("-C").arg(repo).args(args).stdin(Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
+    let out = makepad_remote::group::command("git").arg("-C").arg(repo).args(args).stdin(Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
@@ -117,7 +122,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-fn branch_sha(repo: &Path, branch: &str) -> Result<String, String> {
+pub(super) fn branch_sha(repo: &Path, branch: &str) -> Result<String, String> {
     if !valid_branch(branch) {
         return Err(format!("`{branch}` is not a branch name"));
     }
@@ -231,16 +236,16 @@ fn send_bundle(c: &Client, node: &str, p: &Push, path: &Path, hash: &str, size: 
     }
 }
 
-/// Makes sure `node` holds every push's commit; prints what moved. `Ok(true)`: a device's store
+/// Makes sure `node` holds every push's commit; reports what moved. `Ok(true)`: a device's store
 /// took the files and its JIT patched already (no apply step follows).
-fn push_to(c: &Client, node: &str, pushes: &[Push], bundles: &Bundles) -> Result<bool, String> {
+fn push_to(c: &Client, node: &str, pushes: &[Push], bundles: &Bundles, out: &mut dyn FnMut(&str, &str)) -> Result<bool, String> {
     let status = ask(c, node, "sync", "status")?.into_iter().next().ok_or("no status")?;
     if is_err(&status) {
         return Err(status);
     }
     if status.contains("\"apply\":\"store\"") {
         for p in pushes {
-            push_files(c, node, &status, p)?;
+            push_files(c, node, &status, p, out)?;
         }
         return Ok(true);
     }
@@ -249,26 +254,26 @@ fn push_to(c: &Client, node: &str, pushes: &[Push], bundles: &Bundles) -> Result
         // bases this repo knows; a node that holds the commit (or a descendant) needs no bundle
         let bases: Vec<String> = has.iter().filter(|b| git(&p.dir, &["cat-file", "-e", &format!("{b}^{{commit}}")]).is_ok()).cloned().collect();
         if bases.iter().any(|b| *b == p.sha || git(&p.dir, &["merge-base", "--is-ancestor", &p.sha, b]).is_ok()) {
-            println!("{node} {} {} {}: already there", p.repo, p.branch, &p.sha[..10]);
+            out(node, &format!("{} {} {}: already there", p.repo, p.branch, &p.sha[..10]));
             continue;
         }
         let (path, hash, size) = bundles.get(p, &bases)?;
         let t = std::time::Instant::now();
         let r = send_bundle(c, node, p, &path, &hash, size)?;
-        println!("{node} {} {} {}: pushed {:.1} MB in {:.1} s {r}", p.repo, p.branch, &p.sha[..10], size as f64 / 1048576.0, t.elapsed().as_secs_f64());
+        out(node, &format!("{} {} {}: pushed {:.1} MB in {:.1} s {r}", p.repo, p.branch, &p.sha[..10], size as f64 / 1048576.0, t.elapsed().as_secs_f64()));
     }
     Ok(false)
 }
 
 /// A device's store: the files that differ from its rev (all files under its prefixes on a first
 /// push), read from git here, sent as a file tree over `sync-files`.
-fn push_files(c: &Client, node: &str, status: &str, p: &Push) -> Result<(), String> {
+fn push_files(c: &Client, node: &str, status: &str, p: &Push, out: &mut dyn FnMut(&str, &str)) -> Result<(), String> {
     let v = makepad_strict_json::parse(status.as_bytes()).map_err(|_| "a bad status")?;
     let r = v.get("repos").and_then(|r| r.get(p.repo));
     let from = r.and_then(|r| r.get("checkout")).and_then(|c| c.as_str()).map(str::to_string);
     let prefixes: Vec<String> = r.and_then(|r| r.get("prefixes")).and_then(|a| a.as_arr()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
     if from.as_deref() == Some(p.sha.as_str()) {
-        println!("{node} {} {} {}: already there", p.repo, p.branch, &p.sha[..10]);
+        out(node, &format!("{} {} {}: already there", p.repo, p.branch, &p.sha[..10]));
         return Ok(());
     }
     let changes = tree_changes(&p.dir, from.as_deref(), &p.sha, &prefixes)?;
@@ -286,7 +291,7 @@ fn push_files(c: &Client, node: &str, status: &str, p: &Push) -> Result<(), Stri
             Some(makepad_remote::Event::Data(d)) => {
                 let text = String::from_utf8_lossy(&d).into_owned();
                 if let Some(l) = text.lines().find(|l| !l.starts_with("{\"end\":") && !l.is_empty()) {
-                    println!("{node} {} {} {}: {} files -> store {l}", p.repo, p.branch, &p.sha[..10], changes.len());
+                    out(node, &format!("{} {} {}: {} files -> store {l}", p.repo, p.branch, &p.sha[..10], changes.len()));
                     return if is_err(l) { Err(l.to_string()) } else { Ok(()) };
                 }
             }
@@ -310,7 +315,7 @@ pub(super) fn tree_changes(repo: &Path, from: Option<&str>, to: &str, prefixes: 
     };
     args.push("--".into());
     args.extend(prefixes.iter().cloned());
-    let out = Command::new("git").arg("-C").arg(repo).args(&args).stdin(Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
+    let out = makepad_remote::group::command("git").arg("-C").arg(repo).args(&args).stdin(Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
     if !out.status.success() {
         return Err(format!("git {}: {}", args[0], proto::clean(String::from_utf8_lossy(&out.stderr).trim(), 300)));
     }
@@ -326,7 +331,7 @@ pub(super) fn tree_changes(repo: &Path, from: Option<&str>, to: &str, prefixes: 
         wanted.extend(fields.into_iter().map(|p| (p, false)));
     }
     // the contents of every written file through one `cat-file --batch`
-    let mut child = Command::new("git").arg("-C").arg(repo).args(["cat-file", "--batch"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("git: {e}"))?;
+    let mut child = makepad_remote::group::command("git").arg("-C").arg(repo).args(["cat-file", "--batch"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("git: {e}"))?;
     let mut input = String::new();
     for (path, deleted) in &wanted {
         if !deleted {
@@ -376,13 +381,88 @@ pub fn ensure_rev(control: &Client, node: &str, repo: &str, dir: &Path, branch: 
     };
     let p = Push { repo, dir: dir.to_path_buf(), branch: branch.to_string(), sha: branch_sha(dir, branch)? };
     let bundles = Bundles::default();
-    let r = push_to(control, node, std::slice::from_ref(&p), &bundles);
+    let r = push_to(control, node, std::slice::from_ref(&p), &bundles, &mut |n, l| println!("{n} {l}"));
     bundles.remove_all();
     r.map(|_| p.sha)
 }
 
 fn flag<'a>(args: &'a [&'a str], name: &str) -> Option<&'a str> {
     args.iter().position(|a| *a == name).and_then(|i| args.get(i + 1).copied())
+}
+
+/// Pushes and applies without a session. An empty node names a run-wide progress line.
+/// Worker output reaches `out` on the calling thread, so the CLI still shows live progress.
+pub(super) fn push_and_apply(c: &Client, repo: &Path, makepad_branch: &str, commercial: Option<&str>, nodes: &[String], build: &str, restart: &str, out: &mut dyn FnMut(&str, &str)) -> i32 {
+    let mut pushes = Vec::new();
+    for (name, dir, branch) in [("makepad", repo.to_path_buf(), Some(makepad_branch)), ("commercial", repo.join("apps/commercial"), commercial)] {
+        let Some(branch) = branch else { continue };
+        match branch_sha(&dir, branch) {
+            Ok(sha) => pushes.push(Push { repo: name, dir, branch: branch.to_string(), sha }),
+            Err(e) => {
+                for n in nodes {
+                    out(n, &format!("{{\"err\":{}}}", makepad_remote::json_str(&e)));
+                }
+                return 2;
+            }
+        }
+    }
+    let revs: String = pushes.iter().map(|p| format!(" {}={}", p.repo, p.sha)).collect();
+    for p in &pushes {
+        out("", &format!("pushing {} {} {}", p.repo, p.branch, &p.sha[..10]));
+    }
+    let bundles = Bundles::default();
+    // 1. bundles to every node, in parallel (the watcher passes just one node)
+    let results = std::thread::scope(|s| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let hs: Vec<_> = nodes.iter().map(|n| {
+            let (pushes, bundles) = (&pushes, &bundles);
+            let tx = tx.clone();
+            (n, s.spawn(move || push_to(c, n, pushes, bundles, &mut |n, l| { let _ = tx.send((n.to_string(), l.to_string())); })))
+        }).collect();
+        drop(tx);
+        for (n, l) in rx {
+            out(&n, &l);
+        }
+        hs.into_iter().map(|(n, h)| (n, h.join().unwrap_or_else(|_| Err("panicked".into())))).collect::<Vec<_>>()
+    });
+    bundles.remove_all();
+    let mut code = 0;
+    let mut ready = Vec::new();
+    for (n, r) in results {
+        match r {
+            Ok(false) => ready.push(n),
+            Ok(true) => {}
+            Err(e) => {
+                out(n, &format!("{{\"err\":{}}}", makepad_remote::json_str(&e)));
+                code = 1;
+            }
+        }
+    }
+    // 2. apply, keeping the node's fast-forward check and restart policy
+    let words = format!("apply{revs} build={build} restart={restart}");
+    let answers = std::thread::scope(|s| {
+        let hs: Vec<_> = ready.into_iter().map(|n| {
+            let words = &words;
+            (n, s.spawn(move || {
+                let order = sign::sign(words)?;
+                ask(c, n, "sync", &format!("apply {order}"))
+            }))
+        }).collect();
+        hs.into_iter().map(|(n, h)| (n, h.join().unwrap_or_else(|_| Err("panicked".into())))).collect::<Vec<_>>()
+    });
+    for (n, r) in answers {
+        match r {
+            Ok(lines) => for l in lines {
+                code |= is_err(&l) as i32;
+                out(n, &l);
+            },
+            Err(e) => {
+                out(n, &format!("{{\"err\":{}}}", makepad_remote::json_str(&e)));
+                code = 1;
+            }
+        }
+    }
+    code
 }
 
 fn sync_push(c: &Client, args: &[&str]) -> i32 {
@@ -435,9 +515,16 @@ fn sync_push(c: &Client, args: &[&str]) -> i32 {
         eprintln!("{HELP}");
         return 2;
     }
+    let mut out = |n: &str, l: &str| {
+        if n.is_empty() { println!("{l}"); } else { println!("{n} {l}"); }
+    };
+    let Some(session) = flag(args, "--session") else {
+        let commercial = (!args.contains(&"--no-commercial")).then(|| flag(args, "--commercial").unwrap_or("main"));
+        return push_and_apply(c, &repo, flag(args, "--makepad").unwrap_or("work"), commercial, &nodes, build, restart, &mut out);
+    };
     let revs: String = pushes.iter().map(|p| format!(" {}={}", p.repo, p.sha)).collect();
     for p in &pushes {
-        println!("pushing {} {} {}", p.repo, p.branch, &p.sha[..10]);
+        out("", &format!("pushing {} {} {}", p.repo, p.branch, &p.sha[..10]));
     }
     let bundles = Arc::new(Bundles::default());
     let pushes = Arc::new(pushes);
@@ -446,7 +533,7 @@ fn sync_push(c: &Client, args: &[&str]) -> i32 {
         let hs: Vec<_> = nodes.iter().map(|n| {
             let (pushes, bundles, n2) = (pushes.clone(), bundles.clone(), n.clone());
             let c = c.clone();
-            (n.clone(), s.spawn(move || push_to(&c, &n2, &pushes, &bundles)))
+            (n.clone(), s.spawn(move || push_to(&c, &n2, &pushes, &bundles, &mut |n, l| out(n, l))))
         }).collect();
         hs.into_iter().map(|(n, h)| (n, h.join().unwrap_or_else(|_| Err("panicked".into())))).collect()
     });
@@ -458,58 +545,49 @@ fn sync_push(c: &Client, args: &[&str]) -> i32 {
             Ok(false) => Some(n),
             Ok(true) => None,
             Err(e) => {
-                println!("{n} {{\"err\":{}}}", makepad_remote::json_str(&e));
+                out(&n, &format!("{{\"err\":{}}}", makepad_remote::json_str(&e)));
                 code = 1;
                 None
             }
         })
         .collect();
-    // 2. apply: now, or at one session tick
+    // 2. apply at one session tick
     // `<node>/<pid>[:<arg>]`: `{}` in the tick command is the JIT's own arg (its probe id)
-    let session = flag(args, "--session").map(|s| {
-        s.split(',')
-            .filter_map(|j| {
-                let (j, arg) = j.split_once(':').map_or((j, ""), |(a, b)| (a, b));
-                let (n, p) = j.split_once('/')?;
-                Some((n.to_string(), p.split('#').last()?.parse::<u32>().ok()?, arg.to_string()))
-            })
-            .collect::<Vec<_>>()
-    });
-    let orders: Vec<(String, String)> = match session {
-        None => ready.iter().map(|n| (n.clone(), format!("apply{revs} build={build} restart={restart}"))).collect(),
-        Some(jits) => {
-            let Some(tick_cmd) = flag(args, "--tick") else {
-                eprintln!("makepad devhub sync: --session needs --tick '<inspect command that answers the tick>'");
-                return 2;
-            };
-            let lead: u64 = flag(args, "--lead").and_then(|l| l.parse().ok()).unwrap_or(180);
-            let hexcmd = |arg: &str| sign::hex(tick_cmd.replace("{}", arg).as_bytes());
-            let mut ticks = Vec::new();
-            for (n, pid, arg) in &jits {
-                match ask(c, n, "sync", &format!("tick {pid} {}", hexcmd(arg))).map(|l| l.into_iter().next().unwrap_or_default()) {
-                    Ok(l) if !is_err(&l) => match super::jits::tick_of(&l) {
-                        Some(t) => ticks.push(t),
-                        None => {
-                            println!("{n} {l}");
-                            return 1;
-                        }
-                    },
-                    Ok(l) => {
-                        println!("{n} {l}");
-                        return 1;
-                    }
-                    Err(e) => {
-                        println!("{n} {{\"err\":{}}}", makepad_remote::json_str(&e));
-                        return 1;
-                    }
-                }
-            }
-            let at = ticks.iter().max().copied().unwrap_or(0) + lead;
-            let id = format!("s{}", proto::wall_ms() % 1_000_000_000);
-            println!("session {id}: ticks {ticks:?}: every JIT patches at tick {at}");
-            jits.iter().filter(|(n, _, _)| ready.contains(n)).map(|(n, pid, arg)| (n.clone(), format!("apply{revs} build={build} restart={restart} session={id} at={at} jit={pid} tickcmd={}", hexcmd(arg)))).collect()
-        }
+    let jits: Vec<_> = session.split(',').filter_map(|j| {
+        let (j, arg) = j.split_once(':').map_or((j, ""), |(a, b)| (a, b));
+        let (n, p) = j.split_once('/')?;
+        Some((n.to_string(), p.split('#').last()?.parse::<u32>().ok()?, arg.to_string()))
+    }).collect();
+    let Some(tick_cmd) = flag(args, "--tick") else {
+        eprintln!("makepad devhub sync: --session needs --tick '<inspect command that answers the tick>'");
+        return 2;
     };
+    let lead: u64 = flag(args, "--lead").and_then(|l| l.parse().ok()).unwrap_or(180);
+    let hexcmd = |arg: &str| sign::hex(tick_cmd.replace("{}", arg).as_bytes());
+    let mut ticks = Vec::new();
+    for (n, pid, arg) in &jits {
+        match ask(c, n, "sync", &format!("tick {pid} {}", hexcmd(arg))).map(|l| l.into_iter().next().unwrap_or_default()) {
+            Ok(l) if !is_err(&l) => match super::jits::tick_of(&l) {
+                Some(t) => ticks.push(t),
+                None => {
+                    out(n, &l);
+                    return 1;
+                }
+            },
+            Ok(l) => {
+                out(n, &l);
+                return 1;
+            }
+            Err(e) => {
+                out(n, &format!("{{\"err\":{}}}", makepad_remote::json_str(&e)));
+                return 1;
+            }
+        }
+    }
+    let at = ticks.iter().max().copied().unwrap_or(0) + lead;
+    let id = format!("s{}", proto::wall_ms() % 1_000_000_000);
+    out("", &format!("session {id}: ticks {ticks:?}: every JIT patches at tick {at}"));
+    let orders: Vec<(String, String)> = jits.iter().filter(|(n, _, _)| ready.contains(n)).map(|(n, pid, arg)| (n.clone(), format!("apply{revs} build={build} restart={restart} session={id} at={at} jit={pid} tickcmd={}", hexcmd(arg)))).collect();
     let answers: Vec<(String, Result<Vec<String>, String>)> = std::thread::scope(|s| {
         let hs: Vec<_> = orders.iter().map(|(n, words)| {
             let c = c.clone();
@@ -522,9 +600,12 @@ fn sync_push(c: &Client, args: &[&str]) -> i32 {
     });
     for (n, r) in answers {
         match r {
-            Ok(lines) => code |= print_lines(&n, &lines),
+            Ok(lines) => for l in lines {
+                code |= is_err(&l) as i32;
+                out(&n, &l);
+            },
             Err(e) => {
-                println!("{n} {{\"err\":{}}}", makepad_remote::json_str(&e));
+                out(&n, &format!("{{\"err\":{}}}", makepad_remote::json_str(&e)));
                 code = 1;
             }
         }
@@ -585,12 +666,20 @@ fn jit_id(s: &str) -> Option<(String, u32)> {
 
 pub fn main(args: &[&str]) -> Option<i32> {
     let verb = *args.first()?;
-    if !matches!(verb, "sync" | "launch" | "show" | "open" | "stop" | "launched" | "launch-log" | "wm-restart" | "rebuild" | "restart") {
+    if !matches!(verb, "sync" | "autosync" | "launch" | "show" | "open" | "stop" | "launched" | "launch-log" | "wm-restart" | "rebuild" | "restart") {
         return None;
     }
     if args.len() < 2 || matches!(args[1], "-h" | "--help" | "help") {
         println!("{HELP}");
         return Some(if args.len() < 2 { 2 } else { 0 });
+    }
+    // Last successful applies remain readable when the master is stopped.
+    if let ("autosync", ["status"]) = (verb, &args[1..]) {
+        return Some(match std::fs::read_to_string(proto::home().join("autosync.state")) {
+            Ok(text) => { print!("{text}"); 0 }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => { println!("no auto-sync state yet"); 0 }
+            Err(e) => { eprintln!("makepad devhub autosync: {e}"); 1 }
+        });
     }
     // the dock's app on this machine, from its own shell: no hub, no master
     if let ("open", [app]) = (verb, &args[1..]) {

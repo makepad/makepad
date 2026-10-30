@@ -82,6 +82,8 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-example-bugfix"}
     RunStudioRelease{name: "makepad-example-move-after-draw"}
     RunStudioRelease{name: "makepad-example-render-to-texture"}
+    RunStudioRelease{name: "makepad-example-depth-mix"}
+    RunStudioRelease{name: "makepad-example-sdf-atlas"}
     RunStudioRelease{name: "makepad-example-raytrace"}
     RunStudioRelease{name: "makepad-example-audio-playback-decode-probe"}
     RunStudioRelease{name: "makepad-studio"}

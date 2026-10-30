@@ -61,9 +61,14 @@ pub(super) fn apply(output: &ShaderOutput, ir: &mut IrModule, info: &mut IrDrawI
     let function = std::mem::replace(&mut ir.functions[fragment as usize], IrFunction::new(String::new(), TY_VOID));
     let mut b = Bld { f: function, m: ir };
     // The original color assignments are evaluated for coverage but replaced at the outputs.
+    // A written depth (a builtin output) stays: the id resolves occlusion like the colour pass.
+    let is_location = |e: &Option<IrEntry>, k: u32| matches!(e.as_ref().unwrap().outputs[k as usize].binding, IrIoBinding::Location(_));
     let mut first_color = None;
+    let mut kept_depth = Vec::new();
     b.f.body.retain(|stmt| match stmt {
         Stmt::Assign(place, value) if matches!(b.f.exprs[*place as usize].kind, ExprKind::EntryOut(_)) => {
+            let ExprKind::EntryOut(k) = b.f.exprs[*place as usize].kind else { unreachable!() };
+            if !is_location(&b.f.entry, k) { kept_depth.push(stmt.clone()); return false; }
             if first_color.is_none() { first_color = Some(*value); } false
         }
         Stmt::Return(_) => false,
@@ -89,9 +94,11 @@ pub(super) fn apply(output: &ShaderOutput, ir: &mut IrModule, info: &mut IrDrawI
     lanes.push(b.f32(1.0)); let color = b.e(ExprKind::Construct(lanes), vec4);
     let outputs = b.f.entry.as_ref().unwrap().outputs.len();
     for i in 0..outputs {
+        if !is_location(&b.f.entry, i as u32) { continue; }
         b.f.entry.as_mut().unwrap().outputs[i].ty = vec4;
         let dst = b.e(ExprKind::EntryOut(i as u32), vec4); b.assign(dst, color);
     }
+    b.f.body.extend(kept_depth);
     b.f.body.push(Stmt::Return(NO_EXPR));
     let function = b.f; ir.functions[fragment as usize] = function;
     Ok(())

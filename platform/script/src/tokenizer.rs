@@ -275,14 +275,15 @@ pub struct ScriptTokenPos {
     /// every token but an unterminated string.
     start: u32,
     end: u32,
-    /// The unit a number literal was written in (`0.12s`, `120ms`, `90deg`): its
-    /// value is already in seconds or radians; the unit says what it is.
+    /// The unit a number literal was written in (`0.12s`, `120ms`, `90deg`, `150mm`):
+    /// its value is already in the base unit; the unit says what it is.
     pub unit: Option<ScriptUnit>,
 }
 
 /// The unit suffix of a number literal: what a value means (an editor picks its
 /// control by it). The token's value is in the base unit: seconds for time,
-/// radians for angles, virtual pixels for lengths.
+/// radians for angles (`deg` and `°` are degrees), virtual pixels for screen
+/// lengths, metres for physical lengths (`m`, `cm`, `mm`).
 #[relax_api(plain)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ScriptUnit {
@@ -296,6 +297,12 @@ pub enum ScriptUnit {
     Radians,
     /// `12px`: virtual (DPI-scaled) pixels, the base unit of lengths and positions.
     Pixels,
+    /// `2m`: metres, the base unit of physical lengths (models).
+    Metres,
+    /// `5cm`: centimetres, the value in metres.
+    Centimetres,
+    /// `150mm`: millimetres, the value in metres.
+    Millimetres,
 }
 
 impl ScriptUnit {
@@ -303,17 +310,21 @@ impl ScriptUnit {
         match suffix {
             "s" => Some(Self::Seconds),
             "ms" => Some(Self::Millis),
-            "deg" => Some(Self::Degrees),
+            "deg" | "°" => Some(Self::Degrees),
             "rad" => Some(Self::Radians),
             "px" => Some(Self::Pixels),
+            "m" => Some(Self::Metres),
+            "cm" => Some(Self::Centimetres),
+            "mm" => Some(Self::Millimetres),
             _ => None,
         }
     }
     /// The value of `v` written in this unit, in the base unit.
     pub fn to_base(self, v: f64) -> f64 {
         match self {
-            Self::Seconds | Self::Radians | Self::Pixels => v,
-            Self::Millis => v / 1000.0,
+            Self::Seconds | Self::Radians | Self::Pixels | Self::Metres => v,
+            Self::Millis | Self::Millimetres => v / 1000.0,
+            Self::Centimetres => v / 100.0,
             Self::Degrees => v * std::f64::consts::PI / 180.0,
         }
     }
@@ -1449,7 +1460,7 @@ impl ScriptTokenizer {
                     }
                 }
                 State::Number => {
-                    if self.unit_start.is_some() && c.is_alphabetic() {
+                    if self.unit_start.is_some() && c.is_alphabetic() && !self.temp.ends_with('°') {
                         self.temp.push(c);
                     } else if c.is_numeric() {
                         self.temp.push(c);
@@ -1508,8 +1519,8 @@ impl ScriptTokenizer {
                         // Moving to Whitespace here left `temp` stale and let a
                         // later separator reach emit_separator and panic.
                         continue;
-                    } else if c.is_alphabetic() && !self.temp.contains(['x', 'X']) {
-                        // a unit suffix (`0.12s`, `120ms`, `90deg`)
+                    } else if (c.is_alphabetic() || c == '°') && self.unit_start.is_none() && !self.temp.contains(['x', 'X']) {
+                        // a unit suffix (`0.12s`, `120ms`, `90deg`, `90°`, `150mm`)
                         self.unit_start = Some(self.temp.len());
                         self.temp.push(c);
                     } else if c == '$' || c.is_alphabetic() {

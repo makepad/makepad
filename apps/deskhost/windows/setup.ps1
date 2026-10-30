@@ -31,7 +31,6 @@ if (-not $admin) {
     exit
 }
 $task = "Makepad Desk Host"
-$consoleTask = "Makepad Desk Host console"
 $dir = Join-Path $ForProfile "AppData\Local\Makepad\DeskHost"
 $installed = Join-Path $dir "makepad-app-deskhost.exe"
 Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue | Stop-ScheduledTask -ErrorAction SilentlyContinue
@@ -72,25 +71,10 @@ if (-not $SettingsOnly) {
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-
-    # 4. the console task: SYSTEM moves the host's session to the console; only this user (and
-    #    administrators) may run it
-    $sid = (New-Object Security.Principal.NTAccount($ForUser)).Translate([Security.Principal.SecurityIdentifier]).Value
-    $svc = New-Object -ComObject Schedule.Service
-    $svc.Connect()
-    $def = $svc.NewTask(0)
-    $def.RegistrationInfo.Description = "Moves the Desk Host user's session to the console so a Desk Link viewer can watch it (desktop duplication needs the console)."
-    $def.Settings.AllowDemandStart = $true
-    $def.Settings.DisallowStartIfOnBatteries = $false
-    $def.Settings.StopIfGoingOnBatteries = $false
-    $def.Settings.ExecutionTimeLimit = "PT1M"
-    $def.Settings.MultipleInstances = 2  # ignore a second request while one runs
-    $act = $def.Actions.Create(0)
-    $act.Path = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-    $act.Arguments = "-NoProfile -NonInteractive -Command `"`$p = Get-Process -Name makepad-app-deskhost -ErrorAction Stop | Where-Object { `$_.Path -eq '$installed' } | Select-Object -First 1; & `$env:SystemRoot\System32\tscon.exe `$p.SessionId /dest:console`""
-    $sddl = "D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;$sid)"
-    $svc.GetFolder("\").RegisterTaskDefinition($consoleTask, $def, 6, "SYSTEM", $null, 5, $sddl) | Out-Null
 }
+
+# 4. Repair the console task on every setup/redeploy, including -SettingsOnly.
+& "$PSScriptRoot\register-console-task.ps1" -ForUser $ForUser
 
 # 5. inbound TCP from the viewers only (any network profile: the rule names the peers; an OS
 #    firewall in front of the host's own admin-only check)

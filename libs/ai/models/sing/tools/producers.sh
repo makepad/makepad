@@ -6,7 +6,7 @@
 #   start: NODES="http://a:8123 http://b:8123@http://a:8123" setsid nohup ~/nv1/producers.sh > ~/nv1/lyric/producers.out 2>&1 < /dev/null &
 #   stop:  touch ~/nv1/lyric/STOP
 cd ~/nv1
-NODES=${NODES:-"http://10.0.0.123:8123 http://10.0.0.100:8123"}
+NODES=${NODES:-"http://10.0.0.105:8123 http://10.0.0.100:8123"}
 MODEL=${MODEL:-minimax-music3-q4}
 INBOX=${INBOX:-lyric/inbox}
 TAKES=${TAKES:-2}

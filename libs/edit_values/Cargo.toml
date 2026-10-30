@@ -1,0 +1,15 @@
+# The one editable-values layer: what a value in a document is (kind, unit,
+# range, step, where it is written, the handle it has), how a document lists
+# and writes its values, and the one edit and undo-per-gesture contract every
+# control, panel, inline code control and spatial handle uses.
+[package]
+name = "makepad-edit-values"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Editable value sites, the edit/undo-per-gesture contract and spatial handle math shared by Makepad's panels, inline code controls and 3D/XR handles"
+
+[lib]
+name = "makepad_edit_values"
+
+[dependencies]

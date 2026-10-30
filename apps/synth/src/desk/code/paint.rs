@@ -67,7 +67,7 @@ impl ScoreEditor {
     }
 
     /// A small labelled button, lit in `color` while on; its rect.
-    fn chip(&mut self, cx: &mut Cx2d, p: &Palette, at: DVec2, text: &str, on: bool, color: u32) -> Rect {
+    pub(super) fn chip(&mut self, cx: &mut Cx2d, p: &Palette, at: DVec2, text: &str, on: bool, color: u32) -> Rect {
         let w = advance(&self.draw_label, cx, text) + 10.0;
         let rect = Rect { pos: at, size: dvec2(w.max(17.0), 16.0) };
         let (fill, edge, ink) = if on { (rgba(color), rgba(color), rgba(p.on_accent)) } else { (rgba(p.control), rgba(p.line), rgba(p.label)) };
@@ -307,6 +307,7 @@ impl ScoreEditor {
         let phase = live.as_ref().filter(|l| l.len > 0.0 && playing).map(|l| ((beat - l.start) / l.len).rem_euclid(1.0));
         if let Some(pattern) = pattern {
             let n = pattern.text.chars().filter(|c| !c.is_whitespace() && *c != '|').count().max(1);
+            let strip = self.paint_slots(cx, p, &lens.node, n, strip);
             let w = (strip.size.x - 4.0) / n as f64;
             let lit_step = phase.map(|ph| (ph * n as f64).floor() as usize);
             let mut i = 0;

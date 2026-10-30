@@ -24,6 +24,7 @@ pub fn serve_own(endpoint: &Endpoint) -> io::Result<()> {
 /// Starts `command` with piped stdin/stdout (stderr is inherited) and runs the carrier over them.
 /// Shutting the carrier down kills the child.
 pub fn spawn(command: &mut Command) -> io::Result<Carrier> {
+    crate::group::no_console_window(command);
     let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn()?;
     let stdin = child.stdin.take().ok_or_else(|| io::Error::other("no child stdin"))?;
     let stdout = child.stdout.take().ok_or_else(|| io::Error::other("no child stdout"))?;

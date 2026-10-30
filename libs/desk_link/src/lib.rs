@@ -225,7 +225,9 @@ pub enum ServerMsg {
     Stream { screen: u32, stream: [u32; 2] },
     /// The pictures a second the desktop streams at now (its own display's refresh, the
     /// watching viewers' and its settings' cap, whichever is lowest); sent after the Welcome and
-    /// on every change. A still desktop sends fewer. `kbps`: the stream's rate now (all its
+    /// on every change. It can also precede Welcome with fps=0 and a preparation
+    /// status in `why` while the desktop gets its screen ready. At fps=0 a nonempty
+    /// `why` is a status notice to show over the picture. A still desktop sends fewer. `kbps`: the stream's rate now (all its
     /// tiles, the encoder's average target), `limit` what holds it there ([`limit`]),
     /// `full_chroma` whether it is 4:4:4 now.
     /// `codec` ([`pref`]), `preset` (SHARP / FAST), `streams` (the encoder streams a picture

@@ -1108,6 +1108,28 @@ impl AiChatPanel {
         }
     }
 
+    /// Answer every parked card as if clicked (the bridge's `/ai?confirm=`):
+    /// `run`, `always` (run, and allow the tool for the rest of the chat) or
+    /// `cancel`.
+    pub fn answer_cards(&mut self, cx: &mut Cx, how: &str) {
+        let now = Self::now(cx);
+        let parked: Vec<String> = self.ensure_engine().state().entries.iter().filter_map(|e| match e {
+            Entry::Tool(t) if matches!(t.status, ToolStatus::Confirm) => Some(t.call_id.clone()),
+            _ => None,
+        }).collect();
+        for call_id in parked {
+            let engine = self.ensure_engine();
+            match how {
+                "always" => {
+                    let _ = engine.allow_for_chat(&call_id, None, now);
+                }
+                "cancel" => engine.confirm(&call_id, false, now),
+                _ => engine.confirm(&call_id, true, now),
+            }
+        }
+        self.view.redraw(cx);
+    }
+
     /// Switch the model; the conversation restarts.
     pub fn set_provider(&mut self, cx: &mut Cx, slug: &str) {
         let choice = ProviderChoice::from_slug(slug);

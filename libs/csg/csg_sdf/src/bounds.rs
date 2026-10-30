@@ -12,7 +12,7 @@
 //! Every analytic node is 1-Lipschitz (the ellipsoid: a bound), so these hold
 //! for the field the slicer samples.
 
-use crate::shape::{SdfNode, SdfOp, P3};
+use crate::shape::{SdfDeform, SdfNode, SdfOp, P3};
 
 /// An axis-aligned box `(min, max)`.
 pub type Bounds = (P3, P3);
@@ -87,6 +87,7 @@ pub fn node_bounds(n: &SdfNode) -> Option<Bounds> {
         SdfNode::Capsule { a, b, radius } => grow(union((*a, *a), (*b, *b)), *radius),
         SdfNode::Ellipsoid { radii } => around(*radii),
         SdfNode::Gyroid { .. } | SdfNode::Kernel(_) => return None,
+        SdfNode::Mesh(m) => (m.min.map(|x| x as f64), m.max.map(|x| x as f64)),
         SdfNode::Combine { op, blend, of } => {
             let b = match op {
                 SdfOp::Union => of.iter().map(node_bounds).try_fold(None, |acc: Option<Bounds>, b| b.map(|b| Some(acc.map_or(b, |a| union(a, b)))))?.expect("a combine has operands"),
@@ -99,7 +100,41 @@ pub fn node_bounds(n: &SdfNode) -> Option<Bounds> {
         SdfNode::Shell { thickness, of } => grow(node_bounds(of)?, *thickness),
         SdfNode::Round { radius, of } => grow(node_bounds(of)?, *radius),
         SdfNode::Transform { at, rotate, scale, of } => map_bounds(&node_bounds(of)?, out_of(*at, *rotate, *scale)),
+        SdfNode::Material { of, .. } | SdfNode::Bone { of, .. } | SdfNode::Id { of, .. } => node_bounds(of)?,
+        SdfNode::Instance { places, of } => {
+            let b = node_bounds(of)?;
+            places.iter().map(|pl| map_bounds(&b, |q| pl.out_of(q))).reduce(union)?
+        }
+        SdfNode::Deform { deform, of, .. } => deform_bounds(deform, &node_bounds(of)?),
     })
+}
+
+/// A box holding a warped node whose own box is `b`.
+pub fn deform_bounds(deform: &SdfDeform, b: &Bounds) -> Bounds {
+    let ext = |i: usize| b.0[i].abs().max(b.1[i].abs());
+    match *deform {
+        // Turns keep the distance from the axis.
+        SdfDeform::Twist { .. } => {
+            let r = ext(0).hypot(ext(2));
+            ([-r, b.0[1], -r], [r, b.1[1], r])
+        }
+        SdfDeform::Bend { .. } => {
+            let r = ext(0).hypot(ext(1));
+            ([-r, -r, b.0[2]], [r, r, b.1[2]])
+        }
+        SdfDeform::Taper { rate } => {
+            let s = (1.0 + rate * b.0[1]).abs().max((1.0 + rate * b.1[1]).abs());
+            ([-ext(0) * s, b.0[1], -ext(2) * s], [ext(0) * s, b.1[1], ext(2) * s])
+        }
+        SdfDeform::Mirror { axis } => {
+            let a = axis.min(2) as usize;
+            let e = b.1[a].max(0.0);
+            let (mut lo, mut hi) = *b;
+            lo[a] = -e;
+            hi[a] = e;
+            (lo, hi)
+        }
+    }
 }
 
 fn reaches(n: &SdfNode, region: &Bounds) -> bool {
@@ -146,6 +181,19 @@ pub fn cull(n: &SdfNode, region: &Bounds) -> Option<SdfNode> {
             let inner = map_bounds(region, into(*at, *rotate, *scale));
             SdfNode::Transform { at: *at, rotate: *rotate, scale: *scale, of: Box::new(cull(of, &inner)?) }
         }
+        SdfNode::Material { slot, of } => SdfNode::Material { slot: *slot, of: Box::new(cull(of, region)?) },
+        SdfNode::Id { id, of } => SdfNode::Id { id: *id, of: Box::new(cull(of, region)?) },
+        SdfNode::Bone { id, rest, of } => SdfNode::Bone { id: *id, rest: *rest, of: Box::new(cull(of, region)?) },
+        // The copies that reach the region; `of` stays whole (one key for every copy).
+        SdfNode::Instance { places, of } => {
+            let b = node_bounds(of);
+            let kept: Vec<_> = places.iter().filter(|pl| b.map_or(true, |b| overlaps(&map_bounds(&b, |q| pl.out_of(q)), region))).copied().collect();
+            if kept.is_empty() {
+                return None;
+            }
+            SdfNode::Instance { places: kept, of: of.clone() }
+        }
+        // A warp's preimage of a box is no box: kept whole.
         leaf => leaf.clone(),
     })
 }
@@ -166,6 +214,12 @@ pub fn same(a: &SdfNode, b: &SdfNode) -> bool {
         (Round { radius: r1, of: x }, Round { radius: r2, of: y }) => r1 == r2 && same(x, y),
         (Transform { at: a1, rotate: r1, scale: s1, of: x }, Transform { at: a2, rotate: r2, scale: s2, of: y }) => a1 == a2 && r1 == r2 && s1 == s2 && same(x, y),
         (Kernel(x), Kernel(y)) => x.key == y.key,
+        (Mesh(x), Mesh(y)) => x.key() == y.key(),
+        (Material { slot: s1, of: x }, Material { slot: s2, of: y }) => s1 == s2 && same(x, y),
+        (Id { id: i1, of: x }, Id { id: i2, of: y }) => i1 == i2 && same(x, y),
+        (Bone { id: i1, rest: r1, of: x }, Bone { id: i2, rest: r2, of: y }) => i1 == i2 && r1 == r2 && same(x, y),
+        (Instance { places: p1, of: x }, Instance { places: p2, of: y }) => p1 == p2 && same(x, y),
+        (Deform { deform: d1, lipschitz: l1, of: x }, Deform { deform: d2, lipschitz: l2, of: y }) => d1 == d2 && l1 == l2 && same(x, y),
         _ => false,
     }
 }
@@ -199,6 +253,15 @@ pub fn changed(old: &SdfNode, new: &SdfNode) -> Option<Bounds> {
         (SdfNode::Round { radius: ra, of: a }, SdfNode::Round { radius: rb, of: b }) if ra == rb => grow(changed(a, b)?, *ra),
         (SdfNode::Transform { at: aa, rotate: ra, scale: sa, of: a }, SdfNode::Transform { at: ab, rotate: rb, scale: sb, of: b }) if aa == ab && ra == rb && sa == sb => {
             map_bounds(&changed(a, b)?, out_of(*aa, *ra, *sa))
+        }
+        // A slot change is a material change on the same surface.
+        (SdfNode::Material { of: a, .. }, SdfNode::Material { of: b, .. }) | (SdfNode::Id { of: a, .. }, SdfNode::Id { of: b, .. }) => changed(a, b).unwrap_or_else(whole),
+        (SdfNode::Bone { id: ia, rest: ra, of: a }, SdfNode::Bone { id: ib, rest: rb, of: b }) if ia == ib && ra == rb => changed(a, b)?,
+        (SdfNode::Instance { places: pa, of: a }, SdfNode::Instance { places: pb, of: b }) if same(a, b) => {
+            // Only the moved, added or removed copies.
+            let ob = node_bounds(a).unwrap_or(everywhere);
+            let moved = |x: &[crate::shape::SdfPlace], y: &[crate::shape::SdfPlace]| x.iter().filter(|p| !y.contains(p)).map(|pl| map_bounds(&ob, |q| pl.out_of(q))).collect::<Vec<_>>();
+            moved(pa, pb).into_iter().chain(moved(pb, pa)).reduce(union)?
         }
         _ => whole(),
     })
@@ -292,7 +355,7 @@ mod tests {
     fn meshes_closed() {
         let n = vase(4.0);
         let b = node_bounds(&n).unwrap();
-        let shape = crate::shape::SdfShape { root: n, min: b.0, max: b.1 };
+        let shape = crate::shape::SdfShape { root: n, min: b.0, max: b.1, materials: Vec::new() };
         for cell in [0.3, 0.6, 1.2, 2.4] {
             let m = crate::field_mesh::mesh_field(shape.field(), Vec3d::new(b.0[0], b.0[1], b.0[2]), Vec3d::new(b.1[0], b.1[1], b.1[2]), cell);
             let mut net = std::collections::HashMap::new();

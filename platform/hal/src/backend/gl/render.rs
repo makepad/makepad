@@ -97,7 +97,7 @@ impl ReadFormat {
     pub fn of(t: &TexObj) -> Result<Self, String> {
         let (format, ty, texel) = match t.desc.format {
             format::RGBA8 | format::BGRA8 | format::R8 | format::RG8 => (sys::RGBA, sys::UNSIGNED_BYTE, 4),
-            format::RGBA16F | format::RGBA32F | format::R32F | format::RG16F => (sys::RGBA, sys::FLOAT, 16),
+            format::RGBA16F | format::RGBA32F | format::R32F | format::RG16F | format::R16F => (sys::RGBA, sys::FLOAT, 16),
             format::R32UINT => (sys::RGBA_INTEGER, sys::UNSIGNED_INT, 16),
             f if format::is_depth(f) => return Err("GLES cannot read depth texels back".into()),
             _ => return Err("GLES cannot read compressed texels back".into()),
@@ -119,6 +119,7 @@ impl ReadFormat {
             format::RGBA32F => (readback::NATIVE, read.to_vec()),
             format::R32F | format::R32UINT => (readback::NATIVE, texels.flat_map(|p| [p[0], p[1], p[2], p[3]]).collect()),
             format::RGBA16F => (readback::NATIVE, texels.flat_map(|p| (0..4).flat_map(move |c| half(&p[c * 4..c * 4 + 4]))).collect()),
+            format::R16F => (readback::NATIVE, texels.flat_map(|p| half(&p[0..4])).collect()),
             _ => (readback::NATIVE, texels.flat_map(|p| (0..2).flat_map(move |c| half(&p[c * 4..c * 4 + 4]))).collect()),
         }
     }
@@ -228,7 +229,7 @@ impl Renderer {
         let ext = gl.extensions();
         let has = |name: &str| ext.iter().any(|e| e == name);
         let mut formats = [format::RGBA8, format::BGRA8, format::R8, format::RG8, format::RGBA16F, format::RGBA32F,
-            format::DEPTH32F, format::DEPTH24_STENCIL8, format::R32F, format::RG16F, format::R32UINT].iter().fold(0u64, |b, f| b | 1 << f);
+            format::DEPTH32F, format::DEPTH24_STENCIL8, format::R32F, format::RG16F, format::R16F, format::R32UINT].iter().fold(0u64, |b, f| b | 1 << f);
         if has("GL_EXT_texture_compression_bptc") { formats |= 1 << format::BC7; }
         if has("GL_EXT_texture_compression_rgtc") { formats |= 1 << format::BC5; }
         if has("GL_KHR_texture_compression_astc_ldr") { formats |= 1 << format::ASTC4X4; }
@@ -708,6 +709,7 @@ pub(super) fn gl_format(f: u32) -> (GLenum, GLenum, GLenum) {
         format::DEPTH24_STENCIL8 => (sys::DEPTH24_STENCIL8, sys::DEPTH_STENCIL, sys::UNSIGNED_INT_24_8),
         format::R32F => (sys::R32F, sys::RED, sys::FLOAT),
         format::RG16F => (sys::RG16F, sys::RG, sys::HALF_FLOAT),
+        format::R16F => (sys::R16F, sys::RED, sys::HALF_FLOAT),
         format::R32UINT => (sys::R32UI, sys::RED_INTEGER, sys::UNSIGNED_INT),
         format::BC7 => (sys::COMPRESSED_RGBA_BPTC_UNORM, sys::COMPRESSED_RGBA_BPTC_UNORM, 0),
         format::BC5 => (sys::COMPRESSED_RED_GREEN_RGTC2, sys::COMPRESSED_RED_GREEN_RGTC2, 0),

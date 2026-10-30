@@ -30,6 +30,7 @@ pub mod folds;
 pub mod lens;
 mod paint;
 mod popups;
+mod slots;
 
 use lens::{Knob, Lens, Lenses, LENS_ROWS};
 use makepad_code_editor::code_view::CodeView;
@@ -201,6 +202,8 @@ pub enum ScoreEditorAction {
     Duplicate(String),
     /// Toggle one block's fold: its code, or its lens.
     Fold { node: String, code: bool },
+    /// Something the person should read (a refused change).
+    Status(String),
 }
 
 /// A control on a lens, where it was drawn.
@@ -210,6 +213,8 @@ enum Hot {
     Toggle { node: String, field: &'static str, on: bool },
     Beats { node: String, beats: f64, up: bool },
     Step { at: usize, on: bool },
+    /// Split a hit pattern into this many slots (`slots.rs`).
+    Slots { node: String, slots: usize },
     Duplicate { node: String },
     Pick { node: String },
     Fold { node: String, code: bool },
@@ -460,6 +465,7 @@ impl ScoreEditor {
                 self.set_field(cx, &node, "beats", &source::fmt_num(next.min(256.0), 3), id, true);
             }
             Hot::Step { at, on } => self.splice(cx, at, at + 1, if on { ".".into() } else { "x".into() }, id, true),
+            Hot::Slots { node, slots } => self.set_slots(cx, &node, slots, id),
             Hot::Duplicate { node } => cx.widget_action(self.widget_uid(), ScoreEditorAction::Duplicate(node)),
             Hot::Fold { node, code } => cx.widget_action(self.widget_uid(), ScoreEditorAction::Fold { node, code }),
             Hot::Pick { node } => self.open_picker(cx, &node, abs + dvec2(0.0, 12.0)),

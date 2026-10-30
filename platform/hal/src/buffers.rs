@@ -219,7 +219,7 @@ impl Wire for PipelineDesc {
         for f in self.color_formats {
             w32(out, f);
         }
-        for v in [self.blend, self.depth, self.shader, self.name, self.source, self.instance_stride, self.varyings, self.outputs] {
+        for v in [self.blend, self.flags, self.shader, self.name, self.source, self.instance_stride, self.varyings, self.outputs] {
             w32(out, v);
         }
     }
@@ -231,7 +231,7 @@ impl Wire for PipelineDesc {
             vertex_layout: rg(16),
             color_formats: [r32(b, 24), r32(b, 28), r32(b, 32), r32(b, 36)],
             blend: r32(b, 40),
-            depth: r32(b, 44),
+            flags: r32(b, 44),
             shader: r32(b, 48),
             name: r32(b, 52),
             source: r32(b, 56),

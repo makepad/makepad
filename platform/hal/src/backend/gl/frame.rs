@@ -389,7 +389,7 @@ impl GlBackend {
             if !written(*i) { continue; }
             draw_buffers |= 1 << i;
             blendable |= match c.desc.format {
-                format::BGRA8 | format::RGBA8 | format::RGBA16F | format::RG16F | format::R8 | format::RG8 => true,
+                format::BGRA8 | format::RGBA8 | format::RGBA16F | format::RG16F | format::R16F | format::R8 | format::RG8 => true,
                 format::RGBA32F | format::R32F => self.caps.float_blend,
                 _ => false,
             };

@@ -348,6 +348,7 @@ value VkFormat G8_B8R8_2PLANE_420_UNORM
 value VkFormat G8_B8_R8_3PLANE_420_UNORM
 value VkFormat R16G16B16A16_SFLOAT
 value VkFormat R16G16_SFLOAT
+value VkFormat R16_SFLOAT
 value VkFormat R16G16_SINT
 value VkFormat R16G16_SNORM
 value VkFormat R16G16_UINT

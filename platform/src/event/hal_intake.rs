@@ -851,6 +851,14 @@ impl Cx {
                     partial.pop_front();
                 }
                 partial.push_back(frame);
+                // a paint the backend left draws out of was not whole after all
+                for id in self.passes.id_iter().collect::<Vec<_>>() {
+                    let pass = &mut self.passes[id];
+                    if pass.painted_frame == frame {
+                        pass.painted_serial = pass.painted_before;
+                        pass.incomplete = true;
+                    }
+                }
             }
             HalEvent::FrameDone { window, frame, gpu_ns, present_ns: _, gpu_start, gpu_end } => {
                 if let Some((group, name, closes)) = self.hal.frames.timings.remove(&frame) {

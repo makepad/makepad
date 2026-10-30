@@ -12772,10 +12772,19 @@ unsafe fn build_rir_lowered_as(up: *mut Unit, id: u32) -> Result<relax_backend::
         }
     }
     let u = &mut *up;
+    let goals0 = crate::solver_work::get(crate::solver_work::SEARCH_GOALS);
     let (func, closures) = lower_checked_body(u, id, &key, &body)?;
     let u = &mut *up;
     u.stats.typeck_ns += (t1 - t0).saturating_sub(n1 - n0);
-    u.stats.lower_ns += (cpu_ns() - t1).saturating_sub(nested_build_ns() - n1);
+    let lower_ns = (cpu_ns() - t1).saturating_sub(nested_build_ns() - n1);
+    u.stats.lower_ns += lower_ns;
+    {
+        static SLOW: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let lim = *SLOW.get_or_init(|| std::env::var("MAKEPAD_RUN_SLOW_TYPECK_US").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
+        if lim > 0 && lower_ns / 1000 >= lim {
+            eprintln!("slow lower {} us ({} solver goals, nested included): {}", lower_ns / 1000, crate::solver_work::get(crate::solver_work::SEARCH_GOALS) - goals0, u.fns[id as usize].name);
+        }
+    }
     // closures are lowered from their parent's body (looked up by the parent slot)
     if closures {
         u.put_body(id, body);
@@ -18942,6 +18951,14 @@ fn defer_startup_root(up: *mut Unit, id: u32, depth: u8) -> bool {
 /// Whether the program has presented its first frame (the boot screen goes away then).
 pub fn first_present_seen() -> bool { FIRST_PRESENT.load(Ordering::Acquire) }
 
+/// MAKEPAD_RUN_SOLVER_WORK_TRACE in a run that never presents a frame: the counts at its end.
+pub(crate) fn solver_work_report_at_exit() {
+    if !FIRST_PRESENT.load(Ordering::Acquire) {
+        crate::solver_work::report();
+        relax_types::next_solver::search_graph::goal_hist_report();
+    }
+}
+
 /// Notify the loader that the application or its embedder presented a frame.
 pub extern "C" fn relax_first_present() {
     crate::jit::host_boundary("relax_first_present", move || {
@@ -18956,6 +18973,7 @@ pub extern "C" fn relax_first_present() {
             for i in 0..8 { AHEAD_AT_PRESENT[i].store(AHEAD_STATS[i].load(Ordering::Relaxed), Ordering::Relaxed); }
             owner::pure_mark_present();
             crate::solver_work::report();
+            relax_types::next_solver::search_graph::goal_hist_report();
             relax_codegen::exec_census::first_present();
             crate::tcx::Tcx::report_declaration_counters();
             if profile_path().is_some() { crate::exec_profile::first_present(); }

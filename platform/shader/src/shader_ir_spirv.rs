@@ -53,6 +53,7 @@ pub fn ir_to_spirv(m: &IrModule, entry: FuncId, xr: bool) -> Result<Vec<u32>, St
         interface: Vec::new(),
         stage,
         xr,
+        precise: m.precise,
         uses_view_index: false,
         f: FnCx::default(),
     };
@@ -93,6 +94,24 @@ pub fn ir_to_spirv(m: &IrModule, entry: FuncId, xr: bool) -> Result<Vec<u32>, St
         IrStage::Fragment => {
             g.b.entry_point(EXEC_MODEL_FRAGMENT, entry_id, &name, &interface);
             g.b.execution_mode(entry_id, EXEC_MODE_ORIGIN_UPPER_LEFT);
+            // Writing FragDepth needs DepthReplacing; the conservative
+            // variants add DepthGreater / DepthLess (early tests stay on).
+            if let Some(e) = m.functions[entry as usize].entry.as_ref() {
+                for io in &e.outputs {
+                    let mode = match io.binding {
+                        IrIoBinding::Builtin(IrBuiltinIo::FragDepth) => Some(None),
+                        IrIoBinding::Builtin(IrBuiltinIo::FragDepthGreater) => Some(Some(EXEC_MODE_DEPTH_GREATER)),
+                        IrIoBinding::Builtin(IrBuiltinIo::FragDepthLess) => Some(Some(EXEC_MODE_DEPTH_LESS)),
+                        _ => None,
+                    };
+                    if let Some(extra) = mode {
+                        g.b.execution_mode(entry_id, EXEC_MODE_DEPTH_REPLACING);
+                        if let Some(x) = extra {
+                            g.b.execution_mode(entry_id, x);
+                        }
+                    }
+                }
+            }
         }
         IrStage::Compute => {
             g.b.entry_point(EXEC_MODEL_GL_COMPUTE, entry_id, &name, &interface);
@@ -138,6 +157,8 @@ struct Gen<'a> {
     interface: Vec<u32>,
     stage: IrStage,
     xr: bool,
+    /// `IrModule::precise`: float arithmetic results carry NoContraction.
+    precise: bool,
     uses_view_index: bool,
     f: FnCx,
     /// A compute kernel's push-constant block (buffer addresses, params).
@@ -317,6 +338,12 @@ impl<'a> Gen<'a> {
         words.push(id);
         words.extend_from_slice(args);
         spv_inst(&mut self.f.body, op, &words);
+        // precise math: no float op may fuse with its neighbours (a*b+c stays two roundings)
+        if self.precise && matches!(op, OP_F_NEGATE | OP_F_ADD | OP_F_SUB | OP_F_MUL | OP_F_DIV | OP_F_REM | OP_VECTOR_TIMES_SCALAR
+            | OP_MATRIX_TIMES_SCALAR | OP_VECTOR_TIMES_MATRIX | OP_MATRIX_TIMES_VECTOR | OP_MATRIX_TIMES_MATRIX | OP_OUTER_PRODUCT | OP_DOT)
+        {
+            self.b.decorate(id, DECO_NO_CONTRACTION, &[]);
+        }
         id
     }
 
@@ -692,7 +719,7 @@ impl<'a> Gen<'a> {
                         BUILTIN_VIEW_INDEX
                     }
                     IrBuiltinIo::FrontFacing => BUILTIN_FRONT_FACING,
-                    IrBuiltinIo::FragDepth => BUILTIN_FRAG_DEPTH,
+                    IrBuiltinIo::FragDepth | IrBuiltinIo::FragDepthGreater | IrBuiltinIo::FragDepthLess => BUILTIN_FRAG_DEPTH,
                 };
                 self.b.decorate(var, DECO_BUILT_IN, &[builtin]);
                 // naga back/spv/writer.rs `write_varying`: every integer

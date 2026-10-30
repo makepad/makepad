@@ -2,7 +2,7 @@
 use std::sync::{OnceLock, atomic::{AtomicU64, Ordering}};
 
 static ENABLED: OnceLock<bool> = OnceLock::new();
-static COUNTS: [AtomicU64; 24] = [const { AtomicU64::new(0) }; 24];
+static COUNTS: [AtomicU64; 30] = [const { AtomicU64::new(0) }; 30];
 pub const NORMALIZE: usize = 0;
 pub const NORMALIZE_SKIPPED: usize = 1;
 pub const IMPL_GOALS: usize = 2;
@@ -28,6 +28,17 @@ pub const SOLVER_INTERN_LOCKS: usize = 20;
 pub const SOLVER_MAP_LOCKS: usize = 21;
 pub const ENV_CACHE_LOCKS: usize = 22;
 pub const SEARCH_GOALS: usize = 23;
+/// search-graph goals answered by the global cache / the provisional cache
+pub const GLOBAL_HITS: usize = 24;
+pub const PROVISIONAL_HITS: usize = 25;
+/// canonical inputs interned for the first time
+pub const NEW_INPUTS: usize = 26;
+/// computed goals whose result depended on a cycle head (not globally cached)
+pub const CYCLE_RESULTS: usize = 27;
+/// goals evaluated with an empty search stack
+pub const ROOT_GOALS: usize = 28;
+/// cycle heads evaluated again (fixpoint iterations)
+pub const RERUNS: usize = 29;
 
 #[inline]
 pub fn count(kind: usize) { add(kind, 1); }
@@ -41,8 +52,14 @@ pub fn add(kind: usize, amount: u64) {
 
 pub fn report() {
     if !*ENABLED.get_or_init(|| std::env::var_os("MAKEPAD_RUN_SOLVER_WORK_TRACE").is_some()) { return; }
-    let names = ["normalize", "normalize_skipped", "impl_goals", "impl_probes", "impl_rejected", "recursion_scans", "env_interns", "env_hashes", "env_hash_clauses", "env_resolve_clauses", "env_canon_clauses", "canon_goals", "canon_env_skipped", "canon_pred_skipped", "canon_ty_skipped", "result_reads", "result_clones", "anon_tasks", "anon_locks", "solver_global_locks", "solver_intern_locks", "solver_map_locks", "env_cache_locks", "search_goals"];
+    let names = ["normalize", "normalize_skipped", "impl_goals", "impl_probes", "impl_rejected", "recursion_scans", "env_interns", "env_hashes", "env_hash_clauses", "env_resolve_clauses", "env_canon_clauses", "canon_goals", "canon_env_skipped", "canon_pred_skipped", "canon_ty_skipped", "result_reads", "result_clones", "anon_tasks", "anon_locks", "solver_global_locks", "solver_intern_locks", "solver_map_locks", "env_cache_locks", "search_goals", "global_hits", "provisional_hits", "new_inputs", "cycle_results", "root_goals", "reruns"];
     for (name, count) in names.iter().zip(&COUNTS) {
         eprintln!("makepad-run solver-work: {name}={}", count.load(Ordering::Relaxed));
     }
 }
+
+/// A counter's value (0 unless MAKEPAD_RUN_SOLVER_WORK_TRACE counts).
+pub fn get(i: usize) -> u64 { COUNTS[i].load(Ordering::Relaxed) }
+
+/// Whether the counts are on (MAKEPAD_RUN_SOLVER_WORK_TRACE).
+pub fn enabled() -> bool { *ENABLED.get_or_init(|| std::env::var_os("MAKEPAD_RUN_SOLVER_WORK_TRACE").is_some()) }

@@ -623,6 +623,7 @@ impl Desk {
                     self.folds.toggle(&node, code);
                     self.folds_changed(cx, ui);
                 }
+                ScoreEditorAction::Status(text) => ui.label(cx, ids!(score_state)).set_text(cx, &text),
                 ScoreEditorAction::None => {}
             }
         }
