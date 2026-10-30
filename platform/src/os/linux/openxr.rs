@@ -44,7 +44,7 @@ impl Cx {
         if self.os.openxr.session.is_some() {
             loop {
                 match from_java_rx.try_recv() {
-                    Ok(FromJavaMessage::RenderLoop) => {} // ignore this one
+                    Ok(FromJavaMessage::RenderLoop(_)) => {} // ignore this one
                     Ok(message) => {
                         self.handle_message(message);
                     }
