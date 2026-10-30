@@ -13,14 +13,12 @@ use crate::makepad_live_id::*;
 use crate::makepad_math::{dvec2, Rect};
 use crate::opengl_cx::OpenglCx;
 use crate::os::linux::gstreamer_sys::LibGStreamer;
-use crate::os::linux::linux_video_playback::{
-    poll_pending_gstreamer_teardowns, GStreamerVideoPlayer,
-};
+use crate::os::linux::linux_video_playback::GStreamerVideoPlayer;
 use crate::os::linux::linux_video_player::{
-    collect_linux_video_player_events, prepare_desktop_linux_video, LinuxPrepareResult,
-    LinuxVideoPlayer,
+    prepare_desktop_linux_video, LinuxPrepareResult, LinuxVideoPlayer,
 };
 use crate::os::linux::v4l2_camera_player::V4l2CameraPlayer;
+use crate::os::linux::windowing_backend::UI_TICK_INTERVAL;
 use crate::wayland::wayland_app::WaylandApp;
 use crate::wayland::xkb_sys;
 use crate::x11::xlib_event::XlibEvent;
@@ -38,7 +36,7 @@ use crate::{
     gpu_info::GpuPerformance,
     texture::TextureFormat,
     Area, Cx, CxDrawPassParent, CxOsOp, CxWindowPool, Event, KeyModifiers, MouseButton,
-    MouseMoveEvent, MouseUpEvent, SignalToUI, WaylandDecorationPreference, WindowClosedEvent,
+    MouseMoveEvent, MouseUpEvent, WaylandDecorationPreference, WindowClosedEvent,
     WindowGeomChangeEvent,
 };
 use wayland_client::protocol::{wl_keyboard, wl_pointer};
@@ -218,7 +216,6 @@ impl WaylandCx {
         cx.borrow_mut().call_event_handler(&Event::Startup);
         cx.borrow_mut().redraw_all();
 
-        app.start_timer(0, 0.008, true);
         app.event_loop();
         // WSI must release its surfaces while their wl_surface and display are alive.
         #[cfg(use_vulkan)]
@@ -237,6 +234,12 @@ impl WaylandCx {
                 was_paste: true,
                 ..Default::default()
             }));
+        }
+        // Every pass ends with a paint, so that's where queued work gets picked up.
+        // Do it before draining ops, since its handlers can queue some (even Quit)
+        // and the frame gate below can return before the paint's own drain.
+        if matches!(event, XlibEvent::Paint) {
+            self.cx.borrow_mut().handle_ui_tick("linux-wayland");
         }
         if let EventFlow::Exit = self.handle_platform_ops(state) {
             let mut cx = self.cx.borrow_mut();
@@ -376,9 +379,10 @@ impl WaylandCx {
                 if self.frame_pacing && state.all_windows_frame_callback_pending() {
                     // Bounded: a compositor that withholds callbacks (an occluded
                     // or minimised window) must not freeze the app's clocks. Past
-                    // the bound, next-frame and draw events run again at the
-                    // timer's cadence (presents stay gated per window in
-                    // handle_repaint) and a pending grab is always served.
+                    // the bound, next-frame and draw events run again every
+                    // UI_TICK_INTERVAL, since app_event_callback keeps waking the loop
+                    // while they're pending (presents stay gated per window in
+                    // handle_repaint), and a pending grab is always served.
                     let since = *state.frame_gate_since.get_or_insert_with(std::time::Instant::now);
                     let grab_pending = self.cx.borrow().screenshot_requests.len() > 0;
                     if since.elapsed() < FRAME_GATE_STALL_LIMIT && !grab_pending {
@@ -589,70 +593,8 @@ impl WaylandCx {
             }
             XlibEvent::Timer(e) => {
                 let mut cx = self.cx.borrow_mut();
-                if e.timer_id == 0 {
-                    let internal_signal = SignalToUI::check_and_clear_internal_signal();
-                    let ui_signal = SignalToUI::check_and_clear_ui_signal();
-                    if internal_signal || ui_signal {
-                        cx.handle_termination_signal();
-                        cx.handle_media_signals();
-                        cx.handle_script_signals();
-                    }
-                    if ui_signal {
-                        cx.call_event_handler(&Event::Signal);
-                    }
-                    if SignalToUI::check_and_clear_action_signal() {
-                        cx.handle_action_receiver();
-                    }
-                    cx.poll_control_channel();
-                    cx.handle_actions();
-                    cx.handle_networking_events();
-
-                    // Poll video players on the timer tick (every ~8ms).
-                    // Always sweep pending GStreamer teardowns so the last closed
-                    // player still finishes NULL without waiting for a new prepare.
-                    if cx.os.video_players.is_empty() {
-                        poll_pending_gstreamer_teardowns();
-                    } else {
-                        if cx.os.opengl_cx.is_some() {
-                        cx.os.opengl_cx.as_ref().unwrap().make_current();
-                        let gl: *const crate::os::linux::gl_sys::LibGl =
-                            &cx.os.opengl_cx.as_ref().unwrap().libgl;
-                        let egl = cx
-                            .os
-                            .opengl_cx
-                            .as_ref()
-                            .map(|cx| cx as *const super::super::opengl_cx::OpenglCx);
-                        let mut players = std::mem::take(&mut cx.os.video_players);
-                        let mut video_events = Vec::new();
-                        for (_video_id, player) in players.iter_mut() {
-                            let opengl_cx = egl.map(|ptr| unsafe { &*ptr });
-                            video_events.extend(collect_linux_video_player_events(
-                                player,
-                                unsafe { &*gl },
-                                &mut cx.textures,
-                                opengl_cx,
-                            ));
-                        }
-                        cx.os.video_players = players;
-                        for event in video_events {
-                            cx.call_event_handler(&event);
-                        }
-                        } else {
-                            // Vulkan: no video texture import yet, audio-only events.
-                            let mut players = std::mem::take(&mut cx.os.video_players);
-                            for player in players.values_mut() {
-                                for event in crate::os::linux::linux_video_player::collect_linux_audio_player_events(player) {
-                                    cx.call_event_handler(&event);
-                                }
-                            }
-                            cx.os.video_players = players;
-                        }
-                    }
-                } else {
-                    cx.handle_script_timer(&e);
-                    cx.call_event_handler(&Event::Timer(e))
-                }
-
+                cx.handle_script_timer(&e);
+                cx.call_event_handler(&Event::Timer(e));
                 cx.run_live_edit_if_needed("linux-wayland");
                 let has_platform_ops = !cx.platform_ops.is_empty();
                 drop(cx);
@@ -700,6 +642,26 @@ impl WaylandCx {
         if let EventFlow::Exit = event_flow {
             wayland_app.terminate_event_loop();
         }
+        let cx = self.cx.borrow();
+        let state = &wayland_app.state;
+        // Waiting with work left means waiting on frame callbacks, which the compositor
+        // can hold back (e.g. for a minimised window). So keep checking at the tick's pace
+        // if the app's clocks are held up or a window that could present has a dirty pass,
+        // and while a paste is still coming in. A dirty pass that's just waiting on its own
+        // window's callback needs nothing.
+        let clocks_waiting = cx.need_redrawing()
+            || !cx.new_next_frames.is_empty()
+            || !cx.screenshot_requests.is_empty()
+            || cx.demo_time_repaint;
+        let can_present = cx.any_passes_dirty() && !state.all_windows_frame_callback_pending();
+        let limit = cx.ui_wait_limit();
+        wayland_app.ui_wait_limit = if matches!(event_flow, EventFlow::Wait)
+            && (clocks_waiting || can_present || state.has_pending_clipboard_read())
+        {
+            Some(limit.map_or(UI_TICK_INTERVAL, |limit| limit.min(UI_TICK_INTERVAL)))
+        } else {
+            limit
+        };
         event_flow
     }
 

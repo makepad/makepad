@@ -590,7 +590,7 @@ impl LinuxVideoPlayer {
     }
 }
 
-/// Shared X11/Wayland timer-tick poll for one desktop Linux video player.
+/// Polls one desktop Linux video player for new frames and playback events.
 pub fn collect_linux_video_player_events(
     player: &mut LinuxVideoPlayer,
     gl: &LibGl,

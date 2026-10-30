@@ -2,6 +2,9 @@ use std::{collections::VecDeque, mem, os::raw::c_int, ptr, sync::OnceLock, time:
 
 use self::super::libc_sys;
 
+/// How often `select_fds_capped` wakes up when one of its fds couldn't be watched, in seconds.
+const MISSING_FD_POLL_INTERVAL: f64 = 0.008;
+
 fn ui_wake_pipe() -> [c_int; 2] {
     static PIPE: OnceLock<[c_int; 2]> = OnceLock::new();
     *PIPE.get_or_init(|| unsafe {
@@ -63,6 +66,7 @@ impl SelectTimers {
     /// still presenting, while input and the wake pipe interrupt it as usual.
     pub fn select_fds_capped(&mut self, input_fds: impl IntoIterator<Item = c_int>, max_timeout: Option<f64>) {
         let mut max_fd = -1;
+        let mut missing_fd = false;
         let mut fds = mem::MaybeUninit::uninit();
         unsafe {
             libc_sys::FD_ZERO(fds.as_mut_ptr());
@@ -75,13 +79,25 @@ impl SelectTimers {
                 if fd >= 0 && fd < libc_sys::FD_SETSIZE as c_int {
                     libc_sys::FD_SET(fd, fds.as_mut_ptr());
                     max_fd = max_fd.max(fd);
+                } else if fd >= 0 {
+                    missing_fd = true;
                 }
             }
             let wake_fd = ui_wake_pipe()[0];
-            if wake_fd >= 0 {
+            if wake_fd >= 0 && wake_fd < libc_sys::FD_SETSIZE as c_int {
                 libc_sys::FD_SET(wake_fd, fds.as_mut_ptr());
+                max_fd = max_fd.max(wake_fd);
+            } else {
+                missing_fd = true;
             }
         }
+        // Nothing can wake us for an fd that didn't fit in the set (or a missing wake
+        // pipe), so poll for it at least every 8 ms instead.
+        let max_timeout = if missing_fd {
+            Some(max_timeout.map_or(MISSING_FD_POLL_INTERVAL, |t| t.min(MISSING_FD_POLL_INTERVAL)))
+        } else {
+            max_timeout
+        };
         //libc_sys::FD_SET(self.signal_fds[0], fds.as_mut_ptr());
         // If there are any timers, we set the timeout for select to the `delta_timeout`
         // of the first timer that should be fired. Otherwise, we set the timeout to
@@ -104,9 +120,8 @@ impl SelectTimers {
                 }
             });
         let _nfds = unsafe {
-            let wake_fd = ui_wake_pipe()[0];
             libc_sys::select(
-                max_fd.max(wake_fd) + 1,
+                max_fd + 1,
                 fds.as_mut_ptr(),
                 ptr::null_mut(),
                 ptr::null_mut(),
