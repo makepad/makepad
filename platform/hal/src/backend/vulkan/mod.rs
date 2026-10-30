@@ -87,6 +87,10 @@ pub struct Vulkan {
     draw_bins: Vec<(u32, makepad_vulkan::vk::DescriptorType, makepad_vulkan::vk::DescriptorBufferInfo)>,
     draw_images: Vec<(u32, makepad_vulkan::vk::DescriptorType, makepad_vulkan::vk::DescriptorImageInfo)>,
     passes: FastMap<PassKey, Arc<RenderPass>>,
+    /// Framebuffers kept across frames by (render pass, attachment views, size): on the Adreno
+    /// driver vkCreateFramebuffer is a kernel round trip (GPU memory), and one made and
+    /// destroyed per pass per frame took 14 % of a swipe frame's CPU (`frame::encode_pass`).
+    fbs: FastMap<frame::FbKey, frame::Fb>,
     /// The multisampled images of MSAA passes, by the attachment they resolve into (its raw
     /// image) and sample count; dropped with that attachment (`frame::msaa_image`).
     msaa: FastMap<(u64, u8), (std::sync::Weak<resources::Image>, Arc<resources::Image>)>,
@@ -210,7 +214,7 @@ impl Vulkan {
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
         Ok(Self { #[cfg(target_os = "linux")] native_apps: Default::default(), #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: FastMap::default(), buf: FastMap::default(), pipe: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
             #[cfg(target_os = "android")] native_layers: Default::default(),
-            passes: FastMap::default(), msaa: FastMap::default(), win: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), retained_stale: Default::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
+            passes: FastMap::default(), fbs: FastMap::default(), msaa: FastMap::default(), win: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), retained_stale: Default::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
             fallback: FastMap::default(), windows: surface::Windows::new(source), sharing,
             #[cfg(target_os = "linux")] foreign_support,
             batch: None, spares: Default::default(), mailbox: Mailbox::new(sessions),
@@ -579,6 +583,7 @@ impl Backend for Vulkan {
     /// stop in dependency order -- compiles; the queue (its submits, presents and retirements,
     /// which hand completions on); the completions (fence waits, frees) -- each joined.
     fn before_exit(&mut self) {
+        self.dev.save_pipeline_cache();
         self.flush();
         if let Some(queue) = self.queue.as_ref() { self.windows.clear(queue); }
         self.compiler.stop();
@@ -685,6 +690,7 @@ impl exec::DeviceReset for Vulkan {
         for b in self.badged.values_mut() { *b = Default::default(); }
         self.scanout_images.clear();
         self.fallback.clear();
+        for (_, f) in self.fbs.drain() { unsafe { self.dev.raw.destroy_framebuffer(f.raw, None) }; }
         self.passes.clear();
         self.pick_ids.clear();
         self.pick_pending.clear();
@@ -731,6 +737,7 @@ impl exec::DeviceReset for Vulkan {
 impl Drop for Vulkan {
     fn drop(&mut self) {
         self.flush();
+        for (_, f) in self.fbs.drain() { unsafe { self.dev.raw.destroy_framebuffer(f.raw, None) }; }
         self.windows.clear(self.queue.as_ref().unwrap());
         // Queue jobs retain the completion worker; both drain after the HAL lets them go.
         self.queue.take();
@@ -896,6 +903,11 @@ impl Gpu for Vulkan {
         if self.pipe.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) { return self.pipe.remove(&(sid, id.index)).is_some_and(|p| !p.announced); } false
     }
     fn frame(&mut self, s: &mut Session, sid: u32, target: Id, kind: u32, packet: u32, view: &CmdView, now: u64) -> Option<exec::SubmittedFrame> {
+        // pipelines were made and none for two seconds: the cache goes to its file (compile worker)
+        if self.dev.pipelines_made.load(std::sync::atomic::Ordering::Relaxed) > 0 && now.saturating_sub(self.dev.pipeline_made_ns.load(std::sync::atomic::Ordering::Relaxed)) > 2_000_000_000 {
+            let dev = self.dev.clone();
+            self.compiler.push(move || dev.save_pipeline_cache());
+        }
         #[cfg(target_os = "android")]
         if kind & !target::FLAGS == target::WINDOW && kind & (target::PICK | target::BADGES | target::REPLAY) == 0 {
             self.media.native_frame(s, target, packet, view);

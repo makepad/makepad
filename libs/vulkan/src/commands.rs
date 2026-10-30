@@ -55,6 +55,7 @@ pub type PfnCreateImage = unsafe extern "system" fn(Device, *const ImageCreateIn
 pub type PfnCreateImageView = unsafe extern "system" fn(Device, *const ImageViewCreateInfo, *const AllocationCallbacks, *mut ImageView) -> Result;
 pub type PfnCreateInstance = unsafe extern "system" fn(*const InstanceCreateInfo, *const AllocationCallbacks, *mut Instance) -> Result;
 pub type PfnCreatePipelineCache = unsafe extern "system" fn(Device, *const PipelineCacheCreateInfo, *const AllocationCallbacks, *mut PipelineCache) -> Result;
+pub type PfnGetPipelineCacheData = unsafe extern "system" fn(Device, PipelineCache, *mut usize, *mut core::ffi::c_void) -> Result;
 pub type PfnCreatePipelineLayout = unsafe extern "system" fn(Device, *const PipelineLayoutCreateInfo, *const AllocationCallbacks, *mut PipelineLayout) -> Result;
 pub type PfnCreateQueryPool = unsafe extern "system" fn(Device, *const QueryPoolCreateInfo, *const AllocationCallbacks, *mut QueryPool) -> Result;
 pub type PfnCreateRenderPass = unsafe extern "system" fn(Device, *const RenderPassCreateInfo, *const AllocationCallbacks, *mut RenderPass) -> Result;
@@ -322,6 +323,7 @@ pub struct DeviceTable {
     pub create_image: Option<PfnCreateImage>,
     pub create_image_view: Option<PfnCreateImageView>,
     pub create_pipeline_cache: Option<PfnCreatePipelineCache>,
+    pub get_pipeline_cache_data: Option<PfnGetPipelineCacheData>,
     pub create_pipeline_layout: Option<PfnCreatePipelineLayout>,
     pub create_query_pool: Option<PfnCreateQueryPool>,
     pub create_render_pass: Option<PfnCreateRenderPass>,
@@ -443,6 +445,7 @@ impl DeviceTable { pub unsafe fn load(handle: Device, get: PfnGetDeviceProcAddr)
         create_image: core::mem::transmute::<PfnVoidFunction, Option<PfnCreateImage>>(lookup(c"vkCreateImage")),
         create_image_view: core::mem::transmute::<PfnVoidFunction, Option<PfnCreateImageView>>(lookup(c"vkCreateImageView")),
         create_pipeline_cache: core::mem::transmute::<PfnVoidFunction, Option<PfnCreatePipelineCache>>(lookup(c"vkCreatePipelineCache")),
+        get_pipeline_cache_data: core::mem::transmute::<PfnVoidFunction, Option<PfnGetPipelineCacheData>>(lookup(c"vkGetPipelineCacheData")),
         create_pipeline_layout: core::mem::transmute::<PfnVoidFunction, Option<PfnCreatePipelineLayout>>(lookup(c"vkCreatePipelineLayout")),
         create_query_pool: core::mem::transmute::<PfnVoidFunction, Option<PfnCreateQueryPool>>(lookup(c"vkCreateQueryPool")),
         create_render_pass: core::mem::transmute::<PfnVoidFunction, Option<PfnCreateRenderPass>>(lookup(c"vkCreateRenderPass")),
@@ -966,6 +969,22 @@ impl crate::Device {
         let mut value: PipelineCache = PipelineCache::default();
         call(self.handle, create_info, allocator.map_or(core::ptr::null(), |v| v as *const AllocationCallbacks), &mut value).result()?;
         Ok(value)
+    }
+}
+impl crate::Device {
+    #[inline]
+    pub unsafe fn get_pipeline_cache_data(&self, pipeline_cache: PipelineCache) -> std::result::Result<Vec<u8>, Result> {
+        let call = self.table.get_pipeline_cache_data.expect("vkGetPipelineCacheData is unavailable");
+        loop {
+            let mut size: usize = 0;
+            call(self.handle, pipeline_cache, &mut size, core::ptr::null_mut()).result()?;
+            let mut data: Vec<u8> = vec![0; size];
+            let code = call(self.handle, pipeline_cache, &mut size, data.as_mut_ptr() as *mut core::ffi::c_void);
+            if code == Result::INCOMPLETE { continue; }
+            code.result()?;
+            data.truncate(size);
+            return Ok(data);
+        }
     }
 }
 impl crate::Device {

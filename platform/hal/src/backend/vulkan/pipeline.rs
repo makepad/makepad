@@ -474,8 +474,12 @@ fn create_variant(program: Arc<Program>, pass: &RenderPass, flags: u32) -> Resul
     let info = vk::GraphicsPipelineCreateInfo::default().stages(&stages).vertex_input_state(&vertex).input_assembly_state(&assembly)
         .viewport_state(&viewport).rasterization_state(&raster).multisample_state(&samples).depth_stencil_state(&depth)
         .color_blend_state(&blend).dynamic_state(&dynamic).layout(program.layout).render_pass(pass.raw).subpass(0);
-    let raw = match unsafe { dev.raw.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) } {
-        Ok(p) => p[0],
+    let raw = match unsafe { dev.raw.create_graphics_pipelines(dev.pipeline_cache, &[info], None) } {
+        Ok(p) => {
+            dev.pipelines_made.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            dev.pipeline_made_ns.store(crate::clock_ns(), std::sync::atomic::Ordering::Relaxed);
+            p[0]
+        }
         Err((partial, e)) => { for p in partial { unsafe { dev.raw.destroy_pipeline(p, None); } } return Err(error(e)); }
     };
     Ok(Arc::new(Pipeline { program, raw }))

@@ -5,7 +5,8 @@ use super::super::log_enabled;
 use makepad_vulkan::{vk, Entry};
 use std::collections::{HashSet, VecDeque};
 use std::ffi::CStr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -60,6 +61,14 @@ pub struct Device {
     /// 1: none but single sampling): the framebuffer colour and depth counts, up to 8, when the
     /// device resolves depth (VK_KHR_create_renderpass2 + VK_KHR_depth_stencil_resolve).
     pub msaa: u32,
+    /// The device's pipeline cache, primed from its file of the last run (the driver checks the
+    /// header: another device's or driver's data is ignored), so a relaunch does not compile
+    /// every pipeline variant from SPIR-V again (`save_pipeline_cache` writes it back).
+    pub pipeline_cache: vk::PipelineCache,
+    pipeline_cache_file: Option<PathBuf>,
+    /// Pipelines made since the cache was last saved, and when the last one was (clock_ns).
+    pub pipelines_made: AtomicU32,
+    pub pipeline_made_ns: AtomicU64,
     /// The queue of the GPU's hardware video encoder (VK_KHR_video_encode_queue + H.264), when
     /// it has one: `video_encode::Stream` submits there. Its own lock: video submits never wait
     /// for the graphics queue's.
@@ -449,6 +458,7 @@ impl Device {
         let video_encode = video_family.map(|f| VideoQueue { family: f as u32, queue: unsafe { raw.get_device_queue(f as u32, 0) }, timestamp_bits: video_timestamp_bits,
             more: (1..video_count).map(|i| (unsafe { raw.get_device_queue(f as u32, i) }, Mutex::new(()))).collect(), lock: Mutex::new(()), h265, qp_map: has_qp_map });
         if let Some(v) = &video_encode { if log_enabled() { eprintln!("[hal-vulkan] hardware video encode queue family={}", v.family); } }
+        let (pipeline_cache, pipeline_cache_file) = open_pipeline_cache(&raw, &properties);
         Ok(Some(Arc::new(Self {
             queue: unsafe { raw.get_device_queue(family as u32, 0) }, queue_lock: Mutex::new(()), raw, instance: instance.clone(),
             physical, family: family as u32, properties, memory, features, formats,
@@ -456,6 +466,7 @@ impl Device {
             video_encode,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: has_ycbcr, video_samplers: Mutex::new(Default::default()),
+            pipeline_cache, pipeline_cache_file, pipelines_made: AtomicU32::new(0), pipeline_made_ns: AtomicU64::new(0),
         })))
     }
 
@@ -607,12 +618,14 @@ impl Device {
         let raw = unsafe { instance.create_device(physical, &create, None) }.map_err(error)?;
         let memory = unsafe { instance.get_physical_device_memory_properties(physical) };
         let formats = std::array::from_fn(|f| unsafe { instance.get_physical_device_format_properties(physical, super::resources::vk_format(f as u32).unwrap()) });
+        let (pipeline_cache, pipeline_cache_file) = open_pipeline_cache(&raw, &properties);
         Ok(Arc::new(Self { instance: instance.clone(), queue: unsafe { raw.get_device_queue(family as u32, 0) },
             raw, physical, queue_lock: Mutex::new(()), family: family as u32, properties, memory, features, formats,
             // a display peer only scans out: the GPU profiler times the rendering device
             timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, multiview: false, fdm: false, msaa: 1, life: owner.life.clone(), video_encode: None,
             allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
-            ycbcr: false, video_samplers: Mutex::new(Default::default()) }))
+            ycbcr: false, video_samplers: Mutex::new(Default::default()),
+            pipeline_cache, pipeline_cache_file, pipelines_made: AtomicU32::new(0), pipeline_made_ns: AtomicU64::new(0) }))
     }
 }
 
@@ -625,7 +638,66 @@ impl Drop for Device {
                 self.raw.destroy_sampler(v.sampler, None);
                 if v.conversion != vk::SamplerYcbcrConversion::null() { self.raw.destroy_sampler_ycbcr_conversion(v.conversion, None); }
             }
+            if self.pipeline_cache != vk::PipelineCache::null() { self.raw.destroy_pipeline_cache(self.pipeline_cache, None); }
             self.raw.destroy_device(None);
+        }
+    }
+}
+
+/// The pipeline cache file of this device and driver, under the app's cache directory
+/// (MAKEPAD_HAL_CACHE_DIR; Android: TMPDIR, the app's cache dir; Apple: Library/Caches; else
+/// XDG_CACHE_HOME, LOCALAPPDATA or ~/.cache). None: pipelines are not kept across runs.
+fn pipeline_cache_file(properties: &vk::PhysicalDeviceProperties) -> Option<PathBuf> {
+    let dir = if let Some(d) = std::env::var_os("MAKEPAD_HAL_CACHE_DIR") { PathBuf::from(d) }
+        else if cfg!(target_os = "android") { PathBuf::from(std::env::var_os("TMPDIR")?) }
+        else if cfg!(target_vendor = "apple") { PathBuf::from(apple_cache_dir()?) }
+        else if let Some(d) = std::env::var_os("XDG_CACHE_HOME") { PathBuf::from(d) }
+        else if let Some(d) = std::env::var_os("LOCALAPPDATA") { PathBuf::from(d) }
+        else { PathBuf::from(std::env::var_os("HOME")?).join(".cache") };
+    Some(dir.join("makepad-hal").join(format!("pipelines-{:x}-{:x}-{:x}.bin", properties.vendor_id, properties.device_id, properties.driver_version)))
+}
+#[cfg(target_vendor = "apple")]
+fn apple_cache_dir() -> Option<String> { crate::app_cache_dir() }
+#[cfg(not(target_vendor = "apple"))]
+fn apple_cache_dir() -> Option<String> { None }
+
+/// The device's pipeline cache, primed from its file when there is one. On a Snapdragon 685
+/// the WM phone's warm start spent seconds of its HAL thread in vkCreateGraphicsPipelines
+/// (every variant compiled from SPIR-V, every launch) before this.
+fn open_pipeline_cache(raw: &makepad_vulkan::Device, properties: &vk::PhysicalDeviceProperties) -> (vk::PipelineCache, Option<PathBuf>) {
+    let file = pipeline_cache_file(properties);
+    let data = file.as_ref().and_then(|f| std::fs::read(f).ok()).unwrap_or_default();
+    let mut info = vk::PipelineCacheCreateInfo::default();
+    if !data.is_empty() { info.initial_data_size = data.len(); info.p_initial_data = data.as_ptr() as *const std::ffi::c_void; }
+    let made = unsafe { raw.create_pipeline_cache(&info, None) }
+        .or_else(|_| unsafe { raw.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None) });
+    match made {
+        Ok(cache) => {
+            if log_enabled() { eprintln!("[hal-vulkan] pipeline cache: {} bytes from {}", data.len(), file.as_ref().map_or("nowhere".into(), |f| f.display().to_string())); }
+            (cache, file)
+        }
+        Err(e) => { eprintln!("[hal-vulkan] pipeline cache: {e:?}; pipelines are compiled every run"); (vk::PipelineCache::null(), None) }
+    }
+}
+
+impl Device {
+    /// Writes the pipeline cache when pipelines were made since it was last saved (the file is
+    /// replaced whole, through a rename). Called from the compile worker and at exit.
+    pub fn save_pipeline_cache(&self) {
+        if self.pipeline_cache == vk::PipelineCache::null() { return; }
+        let Some(file) = &self.pipeline_cache_file else { return };
+        if self.pipelines_made.swap(0, Ordering::AcqRel) == 0 { return; }
+        let data = match unsafe { self.raw.get_pipeline_cache_data(self.pipeline_cache) } {
+            Ok(d) => d,
+            Err(e) => { eprintln!("[hal-vulkan] pipeline cache data: {e:?}"); return; }
+        };
+        let tmp = file.with_extension("tmp");
+        let written = file.parent().map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|_| std::fs::write(&tmp, &data))
+            .and_then(|_| std::fs::rename(&tmp, file));
+        match written {
+            Ok(()) => if log_enabled() { eprintln!("[hal-vulkan] pipeline cache saved: {} bytes", data.len()); },
+            Err(e) => eprintln!("[hal-vulkan] pipeline cache {}: {e}", file.display()),
         }
     }
 }
