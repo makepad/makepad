@@ -4587,7 +4587,7 @@ fn front_store_name_with(parse_options: u128, name: &str, fp: u128) -> String {
     let mut h = Sip128::new();
     h.str("store");
     h.u128(crate::codegen_id::id());
-    h.str(&format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS));
+    h.str(&crate::codegen_id::target_tag());
     h.u128(fp);
     // parser policy changes the trees (and their ids) under the same sources
     h.u8(crate::parser::lazy_auto() as u8);
@@ -4600,7 +4600,7 @@ fn code_store_name(options: &crate::options::Options, name: &str, iface: u128) -
     let mut h = Sip128::new();
     h.str("code-store");
     h.u128(crate::codegen_id::id());
-    h.str(&format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS));
+    h.str(&crate::codegen_id::target_tag());
     h.u128(iface);
     h.u8(crate::parser::lazy_auto() as u8);
     h.u128(crate::crate_image::parse_options(options));
@@ -4620,7 +4620,7 @@ fn front_graph_key(identity: u128) -> u128 {
     let mut h = Sip128::new();
     h.str("front-graph");
     h.u128(crate::codegen_id::id());
-    h.str(std::env::consts::ARCH); h.str(std::env::consts::OS);
+    h.str(&crate::codegen_id::target_tag());
     h.u128(identity);
     h.finish128()
 }
@@ -4628,7 +4628,7 @@ fn front_order_key(set: u128) -> u128 {
     let mut h = Sip128::new();
     h.str("front-order");
     h.u128(crate::codegen_id::id());
-    h.str(std::env::consts::ARCH); h.str(std::env::consts::OS);
+    h.str(&crate::codegen_id::target_tag());
     h.u128(set);
     h.finish128()
 }

@@ -54,7 +54,7 @@ fn path() -> PathBuf {
     h.str("kernel-store");
     h.u128(crate::codegen_id::id());
     h.u64(*KERNEL_COMPILER.get().expect("kernel compiler identity"));
-    h.str(&format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS));
+    h.str(&crate::codegen_id::target_tag());
     h.u32(FORMAT);
     crate::dirs::relax_dir().join("cache").join(format!("kernels-{:016x}.rcs", h.finish128() as u64))
 }
