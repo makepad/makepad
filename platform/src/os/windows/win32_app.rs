@@ -7,7 +7,8 @@ use {
         os::{
             cx_native::EventFlow,
             windows::{
-                dataobject::DragItemWindows, dropsource::*, win32_event::Win32Event,
+                dataobject::DragItemWindows, dropsource::*,
+                win32_appearance::AppearanceFunctions, win32_event::Win32Event,
                 win32_window::Win32Window,
             },
         },
@@ -290,6 +291,8 @@ pub struct Win32App {
     pub was_signal_poll: bool,
     pub event_flow: EventFlow,
     pub dpi_functions: DpiFunctions,
+    /// `None` until the app first sets a native appearance.
+    pub appearance_functions: Option<AppearanceFunctions>,
     pub current_cursor: Option<MouseCursor>,
     /// The cursor WM_SETCURSOR re-applies over the client area.
     pub requested_cursor: MouseCursor,
@@ -444,6 +447,7 @@ impl Win32App {
             all_windows: Vec::new(),
             timers: Vec::new(),
             dpi_functions: DpiFunctions::new(),
+            appearance_functions: None,
             current_cursor: None,
             requested_cursor: MouseCursor::Default,
             requested_hcursor: Self::load_cursor(MouseCursor::Default),

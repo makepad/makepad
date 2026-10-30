@@ -9,6 +9,7 @@ use {
     },
     crate::{
         cx::Cx,
+        display_context::NativeAppearance,
         event::*,
         makepad_math::Vec2d,
         opengl_cx::OpenglCx,
@@ -350,6 +351,7 @@ impl OpenglWindow {
         title: &str,
         app_id: &str,
         is_fullscreen: bool,
+        native_appearance: NativeAppearance,
     ) -> OpenglWindow {
         // Checked "downcast" of the EGL platform display to a X11 display.
         assert_eq!(opengl_cx.egl_platform, egl_sys::EGL_PLATFORM_X11_EXT);
@@ -399,6 +401,7 @@ impl OpenglWindow {
             is_fullscreen,
             visual_info,
             custom_window_chrome,
+            native_appearance,
         );
 
         let egl_surface = unsafe {

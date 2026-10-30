@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="MakepadAppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar" />
+    <!-- Follows the night mode, unless MakepadActivity.setNativeAppearance() picks one of the two below. -->
+    <style name="MakepadAppTheme" parent="@style/MakepadLightTheme" />
+    <style name="MakepadLightTheme" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+    <style name="MakepadDarkTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar" />
 
     <style name="MakepadLaunchTheme" parent="@style/MakepadAppTheme">
         <item name="android:windowBackground">@drawable/makepad_launch_background</item>

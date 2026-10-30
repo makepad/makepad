@@ -6,6 +6,7 @@ use {
     crate::{
         area::Area,
         cx::AndroidParams,
+        display_context::NativeAppearance,
         event::{
             BackGestureEdge, BackGestureState, SelectionHandleKind, SelectionHandlePhase,
             TouchPoint, TouchState, VideoSource,
@@ -1599,6 +1600,31 @@ pub unsafe fn to_java_set_system_bar_appearance(env: *mut jni_sys::JNIEnv, dark_
         "setSystemBarAppearance",
         "(Z)V",
         dark_icons as i32
+    );
+}
+
+pub unsafe fn to_java_set_native_appearance(env: *mut jni_sys::JNIEnv, appearance: NativeAppearance) {
+    let appearance = match appearance {
+        NativeAppearance::System => 0,
+        NativeAppearance::Light => 1,
+        NativeAppearance::Dark => 2,
+    };
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "setNativeAppearance",
+        "(I)V",
+        appearance as jni_sys::jint
+    );
+}
+
+pub unsafe fn to_java_set_app_background_color(env: *mut jni_sys::JNIEnv, argb: u32) {
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "setAppBackgroundColor",
+        "(I)V",
+        argb as jni_sys::jint
     );
 }
 

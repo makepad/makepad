@@ -2,6 +2,7 @@ package dev.makepad.android;
 
 import android.app.Activity;
 import android.app.ActivityManager;
+import android.app.UiModeManager;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
@@ -10,6 +11,7 @@ import android.content.ClipboardManager;
 import android.content.ComponentCallbacks2;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.Manifest;
@@ -18,6 +20,7 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.Rect;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.hardware.input.InputManager;
@@ -961,9 +964,6 @@ class ResizingLayout
 
     public ResizingLayout(Context context){
         super(context);
-        // Keep a stable non-black fallback behind the SurfaceView for task snapshots
-        // and system transition frames that cannot capture the separate surface layer.
-        setBackgroundResource(R.drawable.makepad_launch_background);
         setOnApplyWindowInsetsListener(this);
 
         // The IME animation API (API 30+) gives us an authoritative per-frame
@@ -1041,7 +1041,16 @@ public class MakepadActivity
     private static final String LOG_TAG = "Makepad";
     private static final long SURFACE_COVER_FADE_OUT_MS = 100;
     private static final long WARM_RESUME_SNAPSHOT_MAX_AGE_MS = 10000;
-    private static final int TASK_DESCRIPTION_BACKGROUND_COLOR = 0xFFF5F7FA;
+    // The values Rust sends to setNativeAppearance(). UNSET means the app never set one.
+    private static final int NATIVE_APPEARANCE_UNSET = -1;
+    private static final int NATIVE_APPEARANCE_SYSTEM = 0;
+    private static final int NATIVE_APPEARANCE_LIGHT = 1;
+    private static final int NATIVE_APPEARANCE_DARK = 2;
+    // We save these in the same prefs file Rust uses, so the next cold start can use them before Rust runs.
+    private static final String PREFS_NAME = "makepad";
+    private static final String PREF_NATIVE_APPEARANCE = "native_appearance";
+    private static final String PREF_APP_BACKGROUND_COLOR = "app_background_color";
+    private static final String PREF_SYSTEM_BAR_DARK_ICONS = "system_bar_dark_icons";
     private static Bitmap sWarmResumeSurfaceSnapshot;
     private static long sWarmResumeSurfaceSnapshotUptimeMs;
     private static int sWarmResumeSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
@@ -1070,6 +1079,10 @@ public class MakepadActivity
     // setSystemBarAppearance(). true = dark icons (for light app backgrounds).
     private static boolean mSystemBarDarkIcons = false;
 
+    // Set from Rust via setNativeAppearance() and setAppBackgroundColor().
+    private int mNativeAppearance = NATIVE_APPEARANCE_UNSET;
+    private int mAppBackgroundColor;
+
     // File/folder dialog request codes we're still waiting on; any other onActivityResult
     // isn't ours. Static, since the result can land on a recreated activity.
     private static final HashSet<Integer> mFileDialogRequests = new HashSet<>();
@@ -1082,6 +1095,7 @@ public class MakepadActivity
 
     // native camera preview overlays
     private FrameLayout mRootLayout;
+    private FrameLayout mSurfaceContentLayout;
     private FrameLayout mSurfaceCoverOverlay;
     private ImageView mSurfaceSnapshotBackdrop;
     private ImageView mSurfaceSnapshotOverlay;
@@ -1091,6 +1105,7 @@ public class MakepadActivity
     private int mLatestSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
     private boolean mSurfaceSnapshotCopyInFlight = false;
     private boolean mSurfaceRecoveryOverlayVisible = false;
+    private boolean mIsCoverWaitingForFirstFrame = false;
 
     // selection handles overlay
     private static final int SELECTION_HANDLE_START = 0;
@@ -1269,13 +1284,15 @@ public class MakepadActivity
             mWebSocketsHandler = new Handler(mWebSocketsThread.getLooper());
         }
 
-        // On API 30+, Theme.NoTitleBar.Fullscreen sets FLAG_FULLSCREEN which positions
-        // the window below the status bar, conflicting with the modern WindowInsetsController.
-        // Switch from the launch theme to the app theme and handle fullscreen programmatically.
-        if (Build.VERSION.SDK_INT >= 30) {
-            setTheme(R.style.MakepadAppTheme);
-        }
-        
+        // Until Rust draws, we show the colors and theme that the app used last time.
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        mNativeAppearance = prefs.getInt(PREF_NATIVE_APPEARANCE, NATIVE_APPEARANCE_UNSET);
+        mAppBackgroundColor = prefs.getInt(PREF_APP_BACKGROUND_COLOR, getColor(R.color.makepad_launch_background_light));
+        mSystemBarDarkIcons = prefs.getBoolean(PREF_SYSTEM_BAR_DARK_ICONS, mSystemBarDarkIcons);
+
+        // Switch from the launch theme to the app theme.
+        setTheme(getAppThemeResId());
+
         super.onCreate(savedInstanceState);
         
         this.requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -1295,31 +1312,29 @@ public class MakepadActivity
         }
         // Put it inside a parent layout which can resize it using padding
         ResizingLayout layout = new ResizingLayout(this);
-        FrameLayout surfaceContentLayout = new FrameLayout(this);
-        surfaceContentLayout.setLayoutParams(new LinearLayout.LayoutParams(
+        mSurfaceContentLayout = new FrameLayout(this);
+        mSurfaceContentLayout.setLayoutParams(new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ));
-        surfaceContentLayout.setBackgroundResource(R.drawable.makepad_launch_background);
 
         mSurfaceSnapshotBackdrop = new ImageView(this);
         mSurfaceSnapshotBackdrop.setLayoutParams(new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ));
-        mSurfaceSnapshotBackdrop.setBackgroundResource(R.drawable.makepad_launch_background);
         mSurfaceSnapshotBackdrop.setScaleType(ImageView.ScaleType.FIT_CENTER);
         mSurfaceSnapshotBackdrop.setClickable(false);
         mSurfaceSnapshotBackdrop.setFocusable(false);
         mSurfaceSnapshotBackdrop.setVisibility(View.GONE);
-        surfaceContentLayout.addView(mSurfaceSnapshotBackdrop);
+        mSurfaceContentLayout.addView(mSurfaceSnapshotBackdrop);
 
         view.setLayoutParams(new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ));
-        surfaceContentLayout.addView(view);
-        layout.addView(surfaceContentLayout);
+        mSurfaceContentLayout.addView(view);
+        layout.addView(mSurfaceContentLayout);
 
         mRootLayout = new FrameLayout(this);
         mRootLayout.addView(layout);
@@ -1329,11 +1344,12 @@ public class MakepadActivity
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ));
-        mSurfaceCoverOverlay.setBackgroundResource(R.drawable.makepad_launch_background);
         mSurfaceCoverOverlay.setClickable(false);
         mSurfaceCoverOverlay.setFocusable(false);
         mSurfaceCoverOverlay.setAlpha(1.0f);
-        mSurfaceCoverOverlay.setVisibility(View.GONE);
+        // A new SurfaceView is black until Rust's first frame, so we stay covered until then.
+        mSurfaceCoverOverlay.setVisibility(View.VISIBLE);
+        mIsCoverWaitingForFirstFrame = true;
         mRootLayout.addView(mSurfaceCoverOverlay);
 
         mSurfaceSnapshotOverlay = new ImageView(this);
@@ -1341,7 +1357,6 @@ public class MakepadActivity
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ));
-        mSurfaceSnapshotOverlay.setBackgroundResource(R.drawable.makepad_launch_background);
         mSurfaceSnapshotOverlay.setScaleType(ImageView.ScaleType.FIT_CENTER);
         mSurfaceSnapshotOverlay.setClickable(false);
         mSurfaceSnapshotOverlay.setFocusable(false);
@@ -1372,7 +1387,7 @@ public class MakepadActivity
 
         setContentView(mRootLayout);
         restoreWarmResumeSurfaceSnapshotIfAvailable();
-        updateTaskDescription();
+        applyAppBackgroundColor();
         applySystemBarAppearance();
         // An IME animation from a previous activity never ends in this one.
         MakepadImeInsets.imeAnimationInProgress = false;
@@ -1836,9 +1851,88 @@ public class MakepadActivity
                 @Override
                 public void run() {
                     mSystemBarDarkIcons = darkIcons;
+                    getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                        .putBoolean(PREF_SYSTEM_BAR_DARK_ICONS, darkIcons)
+                        .apply();
                     applySystemBarAppearance();
                 }
             });
+    }
+
+    // Makes the views Android draws for us, like the copy/paste toolbar and the splash screen,
+    // look light or dark. Takes one of the NATIVE_APPEARANCE_* values.
+    public void setNativeAppearance(final int appearance) {
+        runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    mNativeAppearance = appearance;
+                    getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                        .putInt(PREF_NATIVE_APPEARANCE, appearance)
+                        .apply();
+                    setTheme(getAppThemeResId());
+                    // Applying a theme also resets the task description to the theme's colors.
+                    updateTaskDescription();
+                    // Android keeps this app's night mode, so even the splash screen of a later launch
+                    // uses our light or dark resources.
+                    if (Build.VERSION.SDK_INT >= 31) {
+                        int nightMode = appearance == NATIVE_APPEARANCE_DARK ? UiModeManager.MODE_NIGHT_YES
+                            : appearance == NATIVE_APPEARANCE_LIGHT ? UiModeManager.MODE_NIGHT_NO
+                            : UiModeManager.MODE_NIGHT_AUTO;
+                        ((UiModeManager) getSystemService(Context.UI_MODE_SERVICE)).setApplicationNightMode(nightMode);
+                    }
+                }
+            });
+    }
+
+    // Sets the color Android shows in place of our surface before it draws, like while resuming.
+    public void setAppBackgroundColor(final int color) {
+        runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    if (mAppBackgroundColor == color) {
+                        return;
+                    }
+                    mAppBackgroundColor = color;
+                    getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                        .putInt(PREF_APP_BACKGROUND_COLOR, color)
+                        .apply();
+                    applyAppBackgroundColor();
+                }
+            });
+    }
+
+    // Before API 31 there's no per-app night mode, so we pick the light or dark theme ourselves.
+    private int getAppThemeResId() {
+        switch (mNativeAppearance) {
+            case NATIVE_APPEARANCE_LIGHT: return R.style.MakepadLightTheme;
+            case NATIVE_APPEARANCE_DARK: return R.style.MakepadDarkTheme;
+            default: return R.style.MakepadAppTheme;
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void applyAppBackgroundColor() {
+        Window window = getWindow();
+        if (window == null) {
+            return;
+        }
+        window.setBackgroundDrawable(new ColorDrawable(mAppBackgroundColor));
+        // Before Android 15, the app doesn't draw under the system bars, so we color them too.
+        if (Build.VERSION.SDK_INT < 35) {
+            window.setStatusBarColor(mAppBackgroundColor);
+            window.setNavigationBarColor(mAppBackgroundColor);
+        }
+        // Keep a stable non-black fallback behind the SurfaceView for task snapshots
+        // and system transition frames that cannot capture the separate surface layer.
+        View[] backgroundViews = {
+            mSurfaceContentLayout, mSurfaceSnapshotBackdrop, mSurfaceCoverOverlay, mSurfaceSnapshotOverlay,
+        };
+        for (View backgroundView : backgroundViews) {
+            if (backgroundView != null) {
+                backgroundView.setBackgroundColor(mAppBackgroundColor);
+            }
+        }
+        updateTaskDescription();
     }
 
     // Applies the currently desired system-bar icon tint (mSystemBarDarkIcons)
@@ -1977,22 +2071,22 @@ public class MakepadActivity
                 taskDescription = new ActivityManager.TaskDescription.Builder()
                     .setLabel(label)
                     .setIcon(iconResId)
-                    .setPrimaryColor(TASK_DESCRIPTION_BACKGROUND_COLOR)
-                    .setBackgroundColor(TASK_DESCRIPTION_BACKGROUND_COLOR)
+                    .setPrimaryColor(mAppBackgroundColor)
+                    .setBackgroundColor(mAppBackgroundColor)
                     .build();
             }
             else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 taskDescription = new ActivityManager.TaskDescription(
                     label,
                     iconResId,
-                    TASK_DESCRIPTION_BACKGROUND_COLOR
+                    mAppBackgroundColor
                 );
             }
             else {
                 taskDescription = new ActivityManager.TaskDescription(
                     label,
                     createTaskDescriptionIconBitmap(),
-                    TASK_DESCRIPTION_BACKGROUND_COLOR
+                    mAppBackgroundColor
                 );
             }
             setTaskDescription(taskDescription);
@@ -2021,6 +2115,8 @@ public class MakepadActivity
         if (mSurfaceSnapshotOverlay == null || mSurfaceCoverOverlay == null) {
             return false;
         }
+        mSurfaceCoverOverlay.animate().cancel();
+        mSurfaceSnapshotOverlay.animate().cancel();
 
         if (hasCurrentOrientationRecoverySnapshot()) {
             mSurfaceSnapshotOverlay.setImageBitmap(mLatestSurfaceSnapshot);
@@ -2041,6 +2137,7 @@ public class MakepadActivity
         if (mSurfaceCoverOverlay == null || mSurfaceSnapshotOverlay == null) {
             return;
         }
+        mIsCoverWaitingForFirstFrame = false;
 
         boolean wasRecoveryOverlayVisible = mSurfaceRecoveryOverlayVisible;
         if (visible && !hasRecoverySnapshotAvailable()) {
@@ -2152,15 +2249,24 @@ public class MakepadActivity
 
     public void requestSurfaceSnapshotRefresh() {
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            refreshSurfaceSnapshotCache();
+            handleSurfaceSnapshotRefreshRequest();
             return;
         }
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                refreshSurfaceSnapshotCache();
+                handleSurfaceSnapshotRefreshRequest();
             }
         });
+    }
+
+    private void handleSurfaceSnapshotRefreshRequest() {
+        // Rust asks for this right after its first frame, even in versions that don't
+        // hide the cover from onCreate themselves, so that's when it can go.
+        if (mIsCoverWaitingForFirstFrame) {
+            applySurfaceCoverVisibility(false);
+        }
+        refreshSurfaceSnapshotCache();
     }
 
     @SuppressWarnings("deprecation")

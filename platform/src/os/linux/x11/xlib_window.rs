@@ -1,9 +1,9 @@
 use {
     self::super::{x11_sys, xlib_app::*, xlib_event::XlibEvent},
     crate::{
-        area::Area, cursor::MouseCursor, event::*,
+        area::Area, cursor::MouseCursor, display_context::NativeAppearance, event::*,
         makepad_math::{dvec2, Rect, Vec2d},
-        os::linux::x11::x11_screen::x11_screens,
+        os::linux::{kde_color_scheme::find_kde_color_scheme, x11::x11_screen::x11_screens},
         screen::{fit_window_rect_to_screens, sanitize_resize},
         window::WindowId,
     },
@@ -101,6 +101,7 @@ impl XlibWindow {
         is_fullscreen: bool,
         visual_info: x11_sys::XVisualInfo,
         custom_window_chrome: bool,
+        native_appearance: NativeAppearance,
     ) {
         self.is_popup = false;
         self.popup_parent = None;
@@ -252,6 +253,8 @@ impl XlibWindow {
 
             // Set window icon via _NET_WM_ICON
             Self::set_x11_icon(display, window);
+
+            Self::set_x11_native_appearance(display, window, native_appearance);
 
             // Reinforce the requested position before mapping. Calling XMoveWindow before
             // XMapWindow ensures the coordinates are root-relative (the window's parent is
@@ -407,6 +410,58 @@ impl XlibWindow {
             data.as_ptr() as *const u8,
             data.len() as i32,
         );
+    }
+
+    /// Sets the properties that WMs use to draw a light or dark title bar:
+    /// `_GTK_THEME_VARIANT` (Muffin, Metacity, Mutter 43 and older) and KWin's color scheme.
+    pub(crate) unsafe fn set_x11_native_appearance(
+        display: *mut x11_sys::Display,
+        window: c_ulong,
+        appearance: NativeAppearance,
+    ) {
+        let atoms = &get_xlib_app_global().atoms;
+        // Like GTK, we use an empty variant for light.
+        let variant = match appearance {
+            NativeAppearance::System => None,
+            NativeAppearance::Light => Some(""),
+            NativeAppearance::Dark => Some("dark"),
+        };
+        match variant {
+            Some(variant) => {
+                x11_sys::XChangeProperty(
+                    display,
+                    window,
+                    atoms.gtk_theme_variant,
+                    atoms.utf8_string,
+                    8,
+                    x11_sys::PropModeReplace as i32,
+                    variant.as_ptr(),
+                    variant.len() as i32,
+                );
+            }
+            None => {
+                x11_sys::XDeleteProperty(display, window, atoms.gtk_theme_variant);
+            }
+        }
+        // KWin only reads this as a STRING.
+        match find_kde_color_scheme(appearance) {
+            Some(path) => {
+                let path = path.as_bytes();
+                x11_sys::XChangeProperty(
+                    display,
+                    window,
+                    atoms.kde_net_wm_color_scheme,
+                    atoms.string,
+                    8,
+                    x11_sys::PropModeReplace as i32,
+                    path.as_ptr(),
+                    path.len() as i32,
+                );
+            }
+            None => {
+                x11_sys::XDeleteProperty(display, window, atoms.kde_net_wm_color_scheme);
+            }
+        }
     }
 
     fn restore_or_maximize(&self, add_remove: c_long) {
