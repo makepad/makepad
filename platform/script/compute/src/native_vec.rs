@@ -62,10 +62,14 @@ pub fn host_lanes() -> u32 {
     host().0
 }
 
+/// The host rule's result, once per process (`per_side`): a pure function of the CPU and the
+/// environment, so JIT-compiled callers keep their own copy and rustc's code its own.
+#[makepad_relax_api::relax_api(per_side)]
+static HOST_LANES: std::sync::OnceLock<(u32, bool)> = std::sync::OnceLock::new();
+
 /// (this host's lanes, whether MAKEPAD_KERNEL_LANES set them)
 fn host() -> (u32, bool) {
-    static L: std::sync::OnceLock<(u32, bool)> = std::sync::OnceLock::new();
-    *L.get_or_init(|| match std::env::var("MAKEPAD_KERNEL_LANES").ok().as_deref() {
+    *HOST_LANES.get_or_init(|| match std::env::var("MAKEPAD_KERNEL_LANES").ok().as_deref() {
         Some("4") => (4, true),
         Some("8") => (8, true),
         _ => (if cfg!(target_arch = "x86_64") { 8 } else { 4 }, false),

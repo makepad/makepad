@@ -47,6 +47,8 @@ struct Inner {
 pub struct Monitor {
     inner: Arc<Mutex<Inner>>,
     watcher: Option<FileSystemWatcher>,
+    /// what it watches: a tree outside them is re-baselined on every ask
+    roots: Vec<PathBuf>,
     /// why the OS monitor is not running (every ask then re-baselines)
     pub error: Option<String>,
 }
@@ -124,7 +126,8 @@ impl Monitor {
     pub fn start(roots: &[PathBuf]) -> Arc<Monitor> {
         let inner = Arc::new(Mutex::new(Inner::default()));
         let i2 = inner.clone();
-        let roots: Vec<WatchRoot> = roots.iter().filter(|r| r.is_dir()).map(|r| WatchRoot { mount: "lanes".into(), path: r.canonicalize().unwrap_or_else(|_| r.clone()) }).collect();
+        let dirs: Vec<PathBuf> = roots.iter().filter(|r| r.is_dir()).map(|r| r.canonicalize().unwrap_or_else(|_| r.clone())).collect();
+        let roots: Vec<WatchRoot> = dirs.iter().map(|d| WatchRoot { mount: "lanes".into(), path: d.clone() }).collect();
         let config = WatcherConfig { exclude: ExcludePolicy::default().dir_name("local").dir_name("node_modules"), startup_rescan: false, ..WatcherConfig::default() };
         let started = FileSystemWatcher::start_with_journal(roots, config, move |e: &FileSystemEvent| {
             on_event(&i2, e);
@@ -134,7 +137,7 @@ impl Monitor {
             Ok((w, _)) => (Some(w), None),
             Err(e) => (None, Some(e)),
         };
-        Arc::new(Monitor { inner, watcher, error })
+        Arc::new(Monitor { inner, watcher, roots: dirs, error })
     }
 
     pub fn watching(&self) -> bool {
@@ -166,7 +169,8 @@ impl Monitor {
         let fresh = {
             let mut g = self.inner.lock().unwrap();
             let t = g.trees.entry(root.clone()).or_default();
-            if t.head != head || t.stale || self.watcher.is_none() {
+            let watched = self.watcher.is_some() && self.roots.iter().any(|r| root.starts_with(r));
+            if t.head != head || t.stale || !watched {
                 let last_ms = t.last_ms;
                 *t = Tree { head: head.clone(), last_ms, ..Default::default() };
                 true

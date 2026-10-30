@@ -330,9 +330,36 @@ mod os {
         String::from_utf8_lossy(&buf[..len]).trim_end_matches('\0').to_string()
     }
 
+    extern "C" {
+        fn mach_host_self() -> u32;
+        fn host_statistics(host: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+    }
+
+    /// (busy, total) CPU ticks of all cores: `host_statistics(HOST_CPU_LOAD_INFO)` (user, system,
+    /// idle, nice), the macOS twin of `/proc/stat`'s `cpu` line.
+    fn cpu_ticks() -> Option<(u64, u64)> {
+        let mut t = [0u32; 4];
+        let mut count = 4u32;
+        // HOST_CPU_LOAD_INFO = 3, HOST_CPU_LOAD_INFO_COUNT = 4 (natural_t words)
+        if unsafe { host_statistics(mach_host_self(), 3, t.as_mut_ptr() as *mut i32, &mut count) } != 0 {
+            return None;
+        }
+        let busy = t[0] as u64 + t[1] as u64 + t[3] as u64;
+        Some((busy, busy + t[2] as u64))
+    }
+
     pub fn hardware() -> Caps {
         let m = crate::procinfo::machine();
+        // CPU use since the previous measure (the master asks every 10 s): what decides "busy", not
+        // the 1-minute load average, which stays high for a minute after a lease's build ended
+        static LAST: std::sync::Mutex<Option<(u64, u64)>> = std::sync::Mutex::new(None);
+        let now = cpu_ticks();
+        let cpu_pct = match (LAST.lock().unwrap().replace(now.unwrap_or((0, 0))), now) {
+            (Some(a), Some(b)) if b.1 > a.1 => Some(crate::top::cpu_pct(a, b)),
+            _ => None,
+        };
         Caps {
+            cpu_pct,
             arch: std::env::consts::ARCH.to_string(),
             os: "macos".into(),
             cpu: sysctl_str("machdep.cpu.brand_string"),
@@ -434,6 +461,16 @@ mod os {
 
 #[cfg(test)]
 mod tests {
+
+    /// macOS measures CPU use like Linux (two samples of all cores' ticks): the busy check uses it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_measures_cpu_use() {
+        let _ = os::hardware();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let p = os::hardware().cpu_pct.expect("a second measure has the CPU use");
+        assert!((0.0..=100.0).contains(&p), "{p}");
+    }
     use super::*;
 
     #[test]

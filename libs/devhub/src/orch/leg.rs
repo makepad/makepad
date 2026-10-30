@@ -29,6 +29,48 @@ pub struct Spec {
     pub node: Option<String>,
 }
 
+/// Background work (verify legs, allapps) asks at this priority or lower; it never runs ahead of
+/// lanes and landings: it asks no lease while one of theirs waits, withdraws a queued request
+/// when one starts waiting, holds at most N-2 of the N dev boxes, and a running background lease
+/// is preempted when lane work has waited ~30 s ([`super::preempt`]).
+pub const BACKGROUND_PRIO: i32 = 9;
+
+/// Background leases the master ended for waiting lane work: their legs ask again.
+static PREEMPTED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub fn mark_preempted(id: &str) {
+    let mut p = PREEMPTED.lock().unwrap();
+    if p.len() > 64 {
+        p.clear();
+    }
+    p.push(id.to_string());
+}
+
+/// Whether the master preempted lease `id` (and forgets it).
+pub fn was_preempted(id: &str) -> bool {
+    let mut p = PREEMPTED.lock().unwrap();
+    match p.iter().position(|x| x == id) {
+        Some(i) => {
+            p.remove(i);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Why background work must not ask (or keep asking) for a box now; `mine`: its queued request.
+pub fn background_block(lm: &crate::lease::master::LeaseMaster, mine: Option<&str>) -> Option<String> {
+    use crate::lease::sched::State;
+    let view = lm.view();
+    let other = |id: &str| mine != Some(id);
+    if let Some(l) = view.iter().find(|l| l.state == State::Queued && l.req.prio < BACKGROUND_PRIO && other(&l.id)) {
+        return Some(format!("lane work waits ({} of {})", l.id, l.req.lane));
+    }
+    let n = lm.nodes().iter().filter(|n| n.up && n.dev && !n.role().users()).count();
+    let running = view.iter().filter(|l| matches!(l.state, State::Granted | State::Starting) && l.req.prio >= BACKGROUND_PRIO && other(&l.id)).count();
+    (running + 1 > n.saturating_sub(2)).then(|| format!("background holds {running} of {n} boxes (at most N-2)"))
+}
+
 /// A granted lease this process holds; released on drop.
 pub struct Held {
     pub id: String,
@@ -67,27 +109,55 @@ impl Held {
         req.rev = Some(crate::lease::pin_revs(std::path::Path::new(&spec.repo_dir), &spec.rev)?);
         req.holder = Some(std::process::id());
         req.agent = Some(spec.agent.clone());
-        let mut v = first(ask(&ctl, None, "lease", &req.to_json()), "lease")?;
-        let id = s(&v, "id");
+        let background = spec.prio >= BACKGROUND_PRIO;
+        let lm = super::leases();
         let mut last = String::new();
-        loop {
-            match s(&v, "state").as_str() {
-                "granted" => return Ok(Held { id, node: s(&v, "node"), ctl, released: false }),
-                "queued" | "starting" => {
-                    let line = format!("{} {} {}", id, s(&v, "state"), s(&v, "reason"));
+        'ask: loop {
+            // background work asks only while no lane work waits and it holds under N-2 boxes
+            if let (true, Some(lm)) = (background, &lm) {
+                while let Some(why) = background_block(lm, None) {
+                    let line = format!("held back: {why}");
                     if line != last {
                         on_wait(&line);
                         last = line;
                     }
+                    if stop() {
+                        return Err("given up".into());
+                    }
+                    std::thread::sleep(BEAT);
                 }
-                _ => return Err(format!("{id} {}: {}", s(&v, "how"), s(&v, "reason"))),
             }
-            std::thread::sleep(BEAT);
-            if stop() {
-                let _ = ask(&ctl, None, "release", &id);
-                return Err(format!("{id}: given up"));
+            let mut v = first(ask(&ctl, None, "lease", &req.to_json()), "lease")?;
+            let id = s(&v, "id");
+            // fast at first (a free box grants at once), then at the beat
+            let mut wait = Duration::from_millis(25);
+            loop {
+                match s(&v, "state").as_str() {
+                    "granted" => return Ok(Held { id, node: s(&v, "node"), ctl, released: false }),
+                    "queued" | "starting" => {
+                        let line = format!("{} {} {}", id, s(&v, "state"), s(&v, "reason"));
+                        if line != last {
+                            on_wait(&line);
+                            last = line;
+                        }
+                    }
+                    _ => return Err(format!("{id} {}: {}", s(&v, "how"), s(&v, "reason"))),
+                }
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(BEAT);
+                if stop() {
+                    let _ = ask(&ctl, None, "release", &id);
+                    return Err(format!("{id}: given up"));
+                }
+                // lane work started waiting: a queued background request steps back
+                if let (true, Some(lm), "queued") = (background, &lm, s(&v, "state").as_str()) {
+                    if background_block(lm, Some(&id)).is_some() {
+                        let _ = ask(&ctl, None, "release", &id);
+                        continue 'ask;
+                    }
+                }
+                v = first(ask(&ctl, None, "beat", &id), "beat")?;
             }
-            v = first(ask(&ctl, None, "beat", &id), "beat")?;
         }
     }
 
@@ -101,19 +171,25 @@ impl Held {
         let v = self.node_call("lease-run", &format!("lease-run {} . {b64}", self.id))?;
         let n = v.get("n").and_then(crate::lease::num).map_or(1, |x| x as u64);
         let (mut off, mut beat, mut failing) = (0u64, Instant::now(), None::<Instant>);
+        // the log is asked for fast while it is quiet at first, then every 0.5 s
+        let mut quiet = Duration::from_millis(20);
         loop {
             match self.node_call("lease-log", &format!("lease-log {} {n} {off}", self.id)) {
                 Ok(v) => {
                     failing = None;
                     let data = crate::lease::master::b64_decode(&s(&v, "data")).ok_or("lease-log: bad data")?;
                     let _ = log.write_all(&data);
+                    if !data.is_empty() {
+                        quiet = Duration::from_millis(20);
+                    }
                     off = v.get("off").and_then(crate::lease::num).map_or(off + data.len() as u64, |x| x as u64);
                     if data.is_empty() {
                         if let Some(code) = v.get("exit").filter(|e| !e.is_null()).and_then(crate::lease::num) {
                             let _ = log.flush();
                             return Ok(code as i32);
                         }
-                        std::thread::sleep(Duration::from_millis(500));
+                        std::thread::sleep(quiet);
+                        quiet = (quiet * 2).min(Duration::from_millis(500));
                     }
                 }
                 Err(e) => {
@@ -140,6 +216,11 @@ impl Held {
         let argv: Vec<String> = argv.iter().map(|a| a.to_string()).collect();
         let code = self.run(&argv, &mut buf)?;
         Ok((code, String::from_utf8_lossy(&buf).trim().to_string()))
+    }
+
+    /// The master's control client this lease is held through (node calls go through it).
+    pub fn client(&self) -> &Client {
+        &self.ctl
     }
 
     pub fn release(mut self, exit: Option<i32>) {

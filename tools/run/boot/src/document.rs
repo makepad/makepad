@@ -372,12 +372,13 @@ impl Program {
             hints.push(self.hints[&id!(errors)].clone());
         }
         if let Some(panic) = &state.parked {
+            let main = panic.thread == "main";
             hints.extend(
                 panic
                     .choices
                     .iter()
                     .enumerate()
-                    .map(|(i, choice)| format!("{} {choice}", i + 1)),
+                    .map(|(i, choice)| format!("{} {}", i + 1, crate::layout::choice_text(choice, main, panic.keeps_state).0)),
             );
         }
         hints.push(self.hints[&id!(scroll)].clone());

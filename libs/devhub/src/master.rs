@@ -42,6 +42,13 @@ pub struct Master {
     /// the lane merge bot's and the pre-warm's control lines (`lanes list`, `prewarm`): None
     /// without checkout support
     pub flow: Option<crate::sync::FlowServe>,
+    /// the landing train (`land`): its queue and its pause
+    pub land: Arc<crate::land::Train>,
+}
+
+/// The running master's pid (`~/.makepad/devhub/master.pid`): what a switch-over stops it by.
+pub fn pid_file() -> PathBuf {
+    proto::home().join("master.pid")
 }
 
 /// The master's node list, `~/.makepad/devhub/nodes.conf`: one line per node,
@@ -106,6 +113,11 @@ pub fn merge(seeds: &Hosts, heard: &[Heard], identity: &dyn Fn(&str) -> Option<S
 
 impl Master {
     pub fn start(name: &str, hitch_ms: f64, trust: Option<Arc<dyn Trust>>, on_record: OnRecord) -> Result<Arc<Master>, String> {
+        // a second master stops before it starts anything (its landing train, its jobs): one
+        // already serves the control socket
+        if Client::new(Target::Unix(proto::control_socket()), "probe").conn().is_ok() {
+            return Err(format!("a devhub already serves {}", proto::control_socket().display()));
+        }
         crate::os::raise_fd_limit();
         let inbox = Arc::new(Mutex::new(Inbox::open(proto::home().join("inbox.jsonl"))));
         let (ib, user) = (inbox.clone(), on_record);
@@ -114,6 +126,8 @@ impl Master {
         let board = Arc::new(crate::sync::prewarm::Board::new(proto::home()));
         let pw = board.clone();
         let on_record: OnRecord = Arc::new(move |r| {
+            #[cfg(feature = "checkout")]
+            crate::orch::on_record(r);
             pw.see(&r);
             ib.lock().unwrap().add(r.clone());
             {
@@ -200,7 +214,7 @@ impl Master {
         }
         // the landing train: `land` (DESIGN: devhub land), its records on the same feed
         let (s, o) = (sink.clone(), on_record.clone());
-        crate::land::register(&ep, name, Arc::new(move |r: Record| {
+        let land = crate::land::register(&ep, name, Arc::new(move |r: Record| {
             s.emit(&r.to_json());
             o(&r);
         }));
@@ -227,8 +241,9 @@ impl Master {
             o(&r);
         }));
         crate::node::listen_control(&ep)?;
+        let _ = std::fs::write(pid_file(), format!("{}\n", std::process::id()));
         *slot.lock().unwrap() = Some((sink.clone(), on_record.clone()));
-        let m = Arc::new(Master { name: name.to_string(), local, hub, sink, followed: Mutex::new(HashSet::new()), heard, on_record, inbox, leases, recent, flow });
+        let m = Arc::new(Master { name: name.to_string(), local, hub, sink, followed: Mutex::new(HashSet::new()), heard, on_record, inbox, leases, recent, flow, land });
         let m2 = m.clone();
         let _ = std::thread::Builder::new().name("devhub-master".into()).spawn(move || m2.follow_loop());
         let m3 = m.clone();

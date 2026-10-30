@@ -6,9 +6,14 @@
 # and back with update-index --refresh + read-tree -m -u (what lease-start and the restore run). The tree ends where
 # it started.
 n=${1:-30}
+if [ "$n" = payload ]; then  # a lease's typical scratch: copies of the tree's source into its TMPDIR (left for the teardown)
+  for i in 1 2 3; do cp -R libs "${TMPDIR:?run it under a lease}/payload$i"; done
+  echo "payload: $(find "$TMPDIR" -type f | wc -l | tr -d ' ') files, $(du -sk "$TMPDIR" | cut -f1) KB in $TMPDIR; job done at $(date +%T)"
+  exit 0
+fi
 TIMEFORMAT='%R'
 t() { local label=$1; shift; local s; s=$( { time "$@" > /dev/null 2>&1; } 2>&1 ); printf '  %-46s %6s s\n' "$label" "$s"; }
-echo "node $(hostname) $(uname -sm); tree $PWD"
+echo "node $(uname -nsm); tree $PWD"
 for d in . apps/commercial; do
   [ -e "$d/.git" ] || continue
   head=$(git -C "$d" rev-parse HEAD)

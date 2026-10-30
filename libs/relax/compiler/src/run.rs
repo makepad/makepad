@@ -884,9 +884,20 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         pre.push(crate::preload::PreCrate { name: c.name.clone(), root: c.src_path.clone(), edition: c.edition, cfg: cfgs[ci].clone(), deps,  proc_macro: c.proc_macro, image_deps, image_dep_names });
     }
     let front_images = crate::cache::FrontImages::open(options);
+    // `makepad check` of an app (not a watch or warm session, a selftest or a workspace check):
+    // the crates it checks load again, every crate before them comes from the collected image
+    // as a run's does -- their resolution and expansion record what the check's lints read
+    // (import and macro uses). The others parse every crate.
+    let check_restore = check && !watch && !root_only && !selftest && !workspace_check && session.is_none();
+    if check_restore {
+        let mut roots: Vec<String> = crate::reload::gandalf_app_roots(&units, &crate::unitgraph::manifest_dir_of(&g.crates[g.root].src_path));
+        roots.extend(g.bins.iter().chain(std::iter::once(&g.root)).map(|&b| crate::vfs::normalize_path(&g.crates[b].src_path)));
+        let checked: Vec<(String, String)> = pre.iter().filter(|c| roots.contains(&crate::vfs::normalize_path(&c.root))).map(|c| (c.name.clone(), c.root.clone())).collect();
+        if let Some(images) = front_images.as_ref() { images.reload_crates(checked); }
+    }
     // the load order the stored image was recorded in, with the changed crates and their
     // dependents last (FrontImages::load_order): the restore keeps every crate before them
-    let order = match front_images.as_ref().filter(|_| !check).and_then(|images| images.load_order(&pre, std_count)) {
+    let order = match front_images.as_ref().filter(|_| !check || check_restore).and_then(|images| images.load_order(&pre, std_count)) {
         Some(perm) => match crate::preload::reorder(&pre, &perm) {
             Some(reordered) => {
                 let order: Vec<usize> = perm[std_count..].iter().map(|&k| order[k - std_count]).collect();
@@ -920,7 +931,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     let mut verification_graph = None;
     let mut collected_tcx = None;
     let mut collected_definitions = None;
-    let restored = if check { None } else {
+    let restored = if check && !check_restore { None } else {
         front_images.as_ref().and_then(|images| warm_front(images, sess, &pre))
     };
     let restored = if verify_collected {
@@ -939,6 +950,11 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     // relaunch built the world for the suffix's derives and waited 10 s for every std file.
     if restored_crates != 0 { crate::program::share_std_end(); }
     let collected_restored = restored_crates == pre.len();
+    // a check whose image did not hold every crate before the checked ones records it again
+    if check_restore {
+        let reloaded = front_images.as_ref().map_or(0, |images| pre.iter().filter(|c| images.reloads(&c.name, &c.root)).count());
+        CHECK_RECORDS_COLLECTED.store(restored_crates + reloaded < pre.len(), Ordering::Relaxed);
+    }
     // a load that parses crates expands their macros: the proc-macro world starts building on
     // its own thread now. A warm restore of the whole program expands nothing: no world (the
     // first live edit that expands builds it).
@@ -3082,7 +3098,8 @@ fn record_check_front(u: &mut Unit, options: &crate::options::Options) {
     // sooner than a run's first present, so it waits for that write here (else the process
     // exited under it, no graph certificate was ever recorded, and every check validated each
     // crate image again -- or re-parsed, when a selection could not be proven without it)
-    if u.prog.front_restored.iter().all(|r| *r) {
+    let collected = CHECK_RECORDS_COLLECTED.load(Ordering::Relaxed);
+    if u.prog.front_restored.iter().all(|r| *r) && !collected {
         let r = crate::cache::Cache::flush_front_graphs();
         verbose!("makepad check: front graph {:?}", r.err());
         return;
@@ -3100,8 +3117,19 @@ fn record_check_front(u: &mut Unit, options: &crate::options::Options) {
         None => Ok(()),
     };
     let graph = crate::cache::Cache::flush_front_graphs();
-    verbose!("makepad check: {} front images written ({:?}, graph {:?}) in {:.0} ms", n, written.err(), graph.err(), t.elapsed().as_secs_f64() * 1e3);
+    verbose!("makepad check: {} front images written ({:?}, graph {:?}) in {:.0} ms", n, written.as_ref().err(), graph.as_ref().err(), t.elapsed().as_secs_f64() * 1e3);
+    // the collected program (resolved and collected), after its graph: the next check restores
+    // every crate before the checked ones from it (cmd_run_inner check_restore)
+    if collected && written.is_ok() && graph.is_ok() {
+        let t = Instant::now();
+        let r = c.record_collected(&u.prog, &u.tcx);
+        verbose!("makepad check: collected program recorded ({:?}) in {:.0} ms", r.is_some(), t.elapsed().as_secs_f64() * 1e3);
+    }
 }
+
+/// `makepad check`: this load parsed or collected a crate before the checked ones (the collected
+/// image did not hold it): the check records the collected program for the next (record_check_front).
+static CHECK_RECORDS_COLLECTED: AtomicBool = AtomicBool::new(false);
 
 /// References to the images of the program's files (and their parts) that their crate stores
 /// do not have yet (front.rs: each image was written when its file or part was published);

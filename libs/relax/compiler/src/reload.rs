@@ -3531,6 +3531,20 @@ pub extern "C" fn __relax_patched_files(since: u64, buf: *mut u8, cap: usize) ->
     })
 }
 
+/// Whether the program restarts with its state when asked (std::relax::restart_supported).
+pub fn restart_keeps_state() -> bool {
+    RESTART_SUPPORTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Asks the program to restart with its state at its safe point (the paused view's "Restart app
+/// (keep state)" for a panic parked on another thread than the UI's). Err when it cannot.
+pub fn restart_with_state(why: String) -> Result<(), String> {
+    if !restart_keeps_state() {
+        return Err("the app does not restart with its state (std::relax::restart_supported)".into());
+    }
+    restart_in_place(why).map(|_| ())
+}
+
 pub extern "C" fn __relax_restart_supported() {
     crate::jit::host_boundary("__relax_restart_supported", move || {
         RESTART_SUPPORTED.store(true, std::sync::atomic::Ordering::SeqCst);

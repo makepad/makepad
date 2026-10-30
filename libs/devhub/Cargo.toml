@@ -10,6 +10,7 @@ description = "devhub: observes every JIT on the LAN (events, explorer, full rem
 makepad-network = { path = "../../platform/network" }
 makepad-remote = { workspace = true }
 makepad-strict-json = { workspace = true }
+makepad-toml-parser = { path = "../toml_parser" }
 makepad-core-util = { path = "../core_util" }
 # sync: launches and prebuilds use the WM's own launch commands and environment
 makepad-app-registry = { path = "../app_registry", optional = true }

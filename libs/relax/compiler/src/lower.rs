@@ -586,11 +586,27 @@ impl<'a> Lcx<'a> {
             return;
         }
         let name = self.u.prog.def_path(d);
-        if p.per_side.contains(&crate::provided::norm(&name)) {
+        if p.per_side.contains(&crate::provided::norm(&name)) || self.thread_local_storage(d, t) {
             return;
         }
         let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
         self.provided_err(krate, format!("static `{}` is read from JIT-compiled code, but it lives in a provided crate (built by rustc into the loader), where its one copy is laid out by rustc's std (`{}` is not the same bytes on both sides): call a fn of the crate that is an op (#[relax_api]), or mark the static #[relax_api(per_side)] when each side may keep its own instance (a cache of values only that side makes)", name, ts));
+    }
+
+    /// Static `d` (of type `t`) is a thread-local's storage: a `#[thread_local]` static, or the
+    /// runtime key `thread_local!` keeps for a value with drop glue or a lazy initialiser (a
+    /// `std::thread::LazyKey` static). Each side has its own per-thread storage by construction
+    /// (rustc's lives in its TLS, laid out by its std; Relax's in the JIT's), so JIT code compiled
+    /// from a provided crate's source keeps its own: a thread-local is never shared across the
+    /// boundary, whatever its type (native_vec::LANES on Fab's model thread, 10-30).
+    fn thread_local_storage(&self, d: DefId, t: TyId) -> bool {
+        let prog = &self.u.prog;
+        let def = prog.def(d);
+        let ast = &prog.files[def.file as usize].ast;
+        if crate::lang_items::has_attr(prog, def.file, ast.list(ast.item(def.item).attrs), "thread_local") {
+            return true;
+        }
+        matches!(self.u.tcx.tys.kind(t), TyKind::Adt(a, _, _) if matches!(prog.def_path(*a).as_str(), "std::thread::local::LazyKey" | "std::thread::LazyKey"))
     }
 
     /// A type only JIT-compiled code makes: no bound fn's signature reaches it

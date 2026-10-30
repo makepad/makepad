@@ -1,7 +1,7 @@
-//! The CLI words of the master's jobs: `lane`, `lanes`, `verify`, `after`, `state`, `watch`.
+//! The CLI words of the master's jobs: `job`, `lane`, `lanes`, `verify`, `after`, `allapps`, `push`, `state`, `watch`.
 //! Answer first, terse and stable; `--json` gives the state as the master keeps it.
 //!
-//! Exit codes: 0 ok, 1 the command failed, 2 usage or no master.
+//! Exit codes: 0 ok, 1 the command failed (or a push was refused), 2 usage or no master.
 
 use crate::cli::{ask, control, has};
 use crate::proto::{Record, Sev};
@@ -11,7 +11,21 @@ use makepad_strict_json::Value;
 use std::io::Write;
 use std::time::Duration;
 
-pub const HELP: &str = "  lane new <name> [--from work] [--no-commercial]
+pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N] [--prio P] [--lane L] [--after J1,J2] [--rev R] -- cmd...
+                                          an async job (prefer it to holding a lease): returns its id at once; it runs
+                                          at this worktree's snapshot (HEAD + its uncommitted files, as they are now;
+                                          --rev: those commits alone) on the first free box that fits, and the box is
+                                          released when the command ends
+  job submit [common flags] --batch <file|->   one job per line (`[flags] -- cmd`, --after @1 = line 1's job):
+                                          a whole plan in one call
+  job wait <id..> [--any] | job result <id> [--tail] | job list [--all]
+                                          block until they end (or pause on a panic); the result: exit, duration,
+                                          latency, error lines, log tail
+  job cancel <id..> | job rerun <id>     cancel; run again exactly (same snapshot and command)
+  job inspect <id> <cmd..> | job resume <id> <P1> retry|restart|unwind | job release <id>
+                                          a job paused on a parked panic keeps its box: look, resume or let go
+                                          (10 min with no action release it)
+  lane new <name> [--from work] [--no-commercial]
                                           a lane worktree: <lanes root>/<name> on rc-<name> from work, with
                                           apps/commercial on rc-<name> from main; prints its path. Lanes never run
                                           git worktree themselves; the master removes a landed lane (30 min idle)
@@ -30,17 +44,21 @@ pub const HELP: &str = "  lane new <name> [--from work] [--no-commercial]
                                           words: launch mac <package> (the Mac: the master's own launch) or any
                                           devhub command (launch <node> .., verify kick, ...)
   after [--all] [--json] | after cancel <id>   the waiters
+  allapps [kick|on|off] [--json]          makepad check of every app/example/WM package, hourly when idle
+  push [--sha <work sha>] [-m <message>] [--parent <sha>]... [--dry]
+                                          the collapsed push of the newest (or that) verified tip to origin/work;
+                                          refuses an unverified tip and credential-like text in the delta
   state [verify|allapps|after|pushes]     the master's workflow state as JSON
   watch [kind,..] [--once] [--match <text>] [--sev err|warn] [--json]
                                           block on events of those kinds (verify after allapps push land lanes
                                           lease ...); --once: exit 0 after the first that matches";
 
-const WORDS: [&str; 6] = ["lane", "lanes", "verify", "after", "state", "watch"];
+const WORDS: [&str; 9] = ["job", "lane", "lanes", "verify", "after", "allapps", "push", "state", "watch"];
 
 fn master() -> Result<Client, String> {
     let c = control()?;
     if !has(&c, "verify") {
-        return Err("the devhub here is not the master, or an older one without verify/after".into());
+        return Err("the devhub here is not the master, or an older one without verify/after/allapps/push".into());
     }
     Ok(c)
 }
@@ -122,8 +140,17 @@ pub fn main(args: &[&str]) -> Option<i32> {
             }
         }
         "after" => after(&c, &words, json),
+        "allapps" => {
+            let line = format!("allapps {}", words.join(" "));
+            match words.first() {
+                None | Some(&"status") => done(one(&c, "allapps", &line), json, &super::allapps::render),
+                _ => done(one(&c, "allapps", &line), json, &flat),
+            }
+        }
         "lane" => lane(&c, &words, json),
+        "job" => job(&c, &words, json),
         "lanes" => lanes(&c, json),
+        "push" => push(&c, &words, json),
         "state" => match one(&c, "state", &format!("state {}", words.first().unwrap_or(&""))) {
             Ok(v) => {
                 println!("{}", v.to_json());
@@ -137,6 +164,259 @@ pub fn main(args: &[&str]) -> Option<i32> {
         "watch" => watch(&c, &words, json),
         _ => 2,
     })
+}
+
+/// The worktree around the current dir (a nested `apps/commercial` counts as its parent's).
+fn tree() -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let top = cwd.ancestors().find(|a| a.join(".git").exists())?.to_path_buf();
+    if top.ends_with("apps/commercial") {
+        if let Some(up) = top.parent().and_then(|p| p.parent()).filter(|p| p.join(".git").exists()) {
+            return Some(up.to_path_buf());
+        }
+    }
+    Some(top)
+}
+
+/// Words of a batch line (`"..."` and `'...'` keep their spaces).
+pub fn words_of(line: &str) -> Vec<String> {
+    let (mut out, mut cur, mut quote, mut any) = (Vec::new(), String::new(), None::<char>, false);
+    for ch in line.chars() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => cur.push(c),
+            (None, '"' | '\'') => {
+                quote = Some(ch);
+                any = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if any || !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+                any = false;
+            }
+            (None, c) => cur.push(c),
+        }
+    }
+    if any || !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// One job's request from its flags and command; `base` holds the common flags.
+fn job_req(words: &[String], base: &[(String, String)]) -> Result<String, String> {
+    let mut f: Vec<(String, String)> = base.to_vec();
+    let mut i = 0;
+    let mut cmd: Vec<String> = Vec::new();
+    while i < words.len() {
+        let w = words[i].as_str();
+        if w == "--" {
+            cmd = words[i + 1..].to_vec();
+            break;
+        }
+        match (w, words.get(i + 1)) {
+            ("--kind" | "--needs" | "--node" | "--prio" | "--lane" | "--after", Some(v)) => {
+                f.retain(|(k, _)| k != &w[2..]);
+                f.push((w[2..].to_string(), v.clone()));
+                i += 2;
+            }
+            _ if !w.starts_with("--") => {
+                cmd = words[i..].to_vec();
+                break;
+            }
+            _ => return Err(format!("unknown flag `{w}`")),
+        }
+    }
+    if cmd.is_empty() {
+        return Err("no command (`-- cmd...`)".into());
+    }
+    let get = |k: &str| f.iter().rev().find(|(x, _)| x == k).map(|(_, v)| v.clone());
+    let lane = get("lane").or_else(|| std::env::var("DEVHUB_LANE").ok().filter(|l| !l.is_empty())).or_else(|| tree().and_then(|t| t.file_name().map(|n| n.to_string_lossy().to_lowercase()))).unwrap_or_default();
+    let after: Vec<String> = get("after").map(|a| a.split(',').filter(|x| !x.is_empty()).map(|x| json_str(x)).collect()).unwrap_or_default();
+    let prio = match get("prio") {
+        Some(p) => p.parse::<i32>().map_err(|_| "--prio takes a number")?.to_string(),
+        None => crate::lease::sched::DEFAULT_PRIO.to_string(),
+    };
+    Ok(format!(
+        "{{\"kind\":{},\"needs\":{},\"node\":{},\"prio\":{prio},\"lane\":{},\"agent\":{},\"cmd\":[{}],\"after\":[{}]}}",
+        json_str(&get("kind").unwrap_or_else(|| "test".into())),
+        json_str(&get("needs").unwrap_or_default()),
+        json_str(&get("node").unwrap_or_default()),
+        json_str(&lane),
+        json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()),
+        cmd.iter().map(|x| json_str(x)).collect::<Vec<_>>().join(","),
+        after.join(",")
+    ))
+}
+
+fn jobs_of(v: &Value) -> Vec<crate::state::Job> {
+    v.as_arr().unwrap_or(&[]).iter().map(crate::state::job_from).collect()
+}
+
+fn job(c: &Client, words: &[&str], json: bool) -> i32 {
+    let usage = || {
+        eprintln!("makepad devhub job submit [flags] -- cmd | submit [flags] --batch <file|-> | wait <id..> [--any] | result <id> [--tail] | list [--all] | cancel <id..> | rerun <id> | inspect <id> <cmd..> | resume <id> <P> <how> | release <id>");
+        2
+    };
+    match words {
+        ["submit", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let Some(tree) = tree() else {
+                eprintln!("makepad devhub job submit: run it inside a worktree");
+                return 2;
+            };
+            // common flags (and --rev, --batch) before the command
+            let (mut common, mut rev, mut batch, mut i) = (Vec::new(), String::new(), None::<String>, 0);
+            while i < rest.len() && rest[i] != "--" {
+                match (rest[i].as_str(), rest.get(i + 1)) {
+                    ("--rev", Some(v)) => rev = v.clone(),
+                    ("--batch", Some(v)) => batch = Some(v.clone()),
+                    (k @ ("--kind" | "--needs" | "--node" | "--prio" | "--lane" | "--after"), Some(v)) => common.push((k[2..].to_string(), v.clone())),
+                    _ => break,
+                }
+                i += 2;
+            }
+            let reqs: Result<Vec<String>, String> = match &batch {
+                Some(src) => {
+                    let text = if src == "-" {
+                        let mut s = String::new();
+                        let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut s);
+                        s
+                    } else {
+                        match std::fs::read_to_string(src) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("makepad devhub job submit: {src}: {e}");
+                                return 2;
+                            }
+                        }
+                    };
+                    text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).enumerate().map(|(n, l)| job_req(&words_of(l), &common).map_err(|e| format!("line {}: {e}", n + 1))).collect()
+                }
+                None => job_req(&rest[i..], &common).map(|r| vec![r]),
+            };
+            let reqs = match reqs {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("makepad devhub job submit: {e}");
+                    return 2;
+                }
+            };
+            let line = format!("job submit {{\"tree\":{},\"rev\":{},\"batch\":{},\"jobs\":[{}]}}", json_str(&tree.to_string_lossy()), json_str(&rev), batch.is_some(), reqs.join(","));
+            done(one(c, "job", &line), json, &|v| {
+                let ids: Vec<&str> = v.get("jobs").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|x| x.as_str()).collect();
+                let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let snap = if s("snap").is_empty() { "commits only".to_string() } else { format!("{} files={}", s("snap"), v.get("files").and_then(|x| x.as_u64()).unwrap_or(0)) };
+                format!("{} queued{} rev={} {snap}\n", ids.join(" "), if s("batch").is_empty() { String::new() } else { format!(" ({})", s("batch")) }, s("rev").split(',').map(|p| { let (b, h) = p.split_once('@').unwrap_or((p, "")); format!("{b}@{}", super::short(h)) }).collect::<Vec<_>>().join(","))
+            })
+        }
+        ["wait", rest @ ..] if !rest.is_empty() => {
+            let any = rest.contains(&"--any");
+            let ids: Vec<&str> = rest.iter().copied().filter(|a| *a != "--any").collect();
+            // follow the stream first, so no change between the ask and the follow is missed
+            let mut feed = c.watch();
+            loop {
+                let list = match one(c, "job", &format!("job get {}", ids.join(" "))) {
+                    Ok(v) => jobs_of(&v),
+                    Err(e) => {
+                        eprintln!("makepad devhub job wait: {e}");
+                        return 1;
+                    }
+                };
+                if let Some(u) = list.iter().find(|j| j.state == "unknown") {
+                    eprintln!("makepad devhub job wait: no job {}", u.id);
+                    return 2;
+                }
+                let settled = |j: &crate::state::Job| j.done() || j.state == "paused";
+                let ready = if any { list.iter().any(settled) } else { list.iter().all(settled) };
+                if ready {
+                    let shown: Vec<&crate::state::Job> = if any { list.iter().filter(|j| settled(j)).collect() } else { list.iter().collect() };
+                    for j in &shown {
+                        if json {
+                            println!("{}", crate::state::job_value(j).to_json());
+                        } else {
+                            print!("{}", super::job::render(j, false));
+                        }
+                    }
+                    return if shown.iter().all(|j| j.state == "ok") { 0 } else { 1 };
+                }
+                // until a job event (or 30 s)
+                let t = std::time::Instant::now();
+                while t.elapsed() < Duration::from_secs(30) {
+                    match feed.next(Duration::from_secs(5), 30) {
+                        Ok(Some((_, l))) => {
+                            if Record::parse(&String::from_utf8_lossy(&l)).is_some_and(|r| r.kind == "job") {
+                                break;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("makepad devhub job wait: {e}");
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+        ["result", id, rest @ ..] => match one(c, "job", &format!("job get {id}")) {
+            Ok(v) => match jobs_of(&v).into_iter().next().filter(|j| j.state != "unknown") {
+                Some(j) => {
+                    if json {
+                        println!("{}", crate::state::job_value(&j).to_json());
+                    } else {
+                        print!("{}", super::job::render(&j, rest.contains(&"--tail")));
+                    }
+                    if j.state == "ok" { 0 } else { 1 }
+                }
+                None => {
+                    eprintln!("makepad devhub job result: no job {id}");
+                    2
+                }
+            },
+            Err(e) => {
+                eprintln!("makepad devhub job result: {e}");
+                1
+            }
+        },
+        ["list", rest @ ..] => done(one(c, "job", if rest.contains(&"--all") { "job list all" } else { "job list" }), json, &|v| {
+            let list = jobs_of(v);
+            if list.is_empty() {
+                return "no open jobs\n".into();
+            }
+            list.iter().map(|j| format!("{}\n", super::job::render(j, false).lines().next().unwrap_or(""))).collect()
+        }),
+        [verb @ ("cancel" | "release"), ids @ ..] if !ids.is_empty() => done(one(c, "job", &format!("job {verb} {}", ids.join(" "))), json, &|v| v.as_arr().unwrap_or(&[]).iter().map(flat).collect()),
+        ["rerun", id] => done(one(c, "job", &format!("job rerun {id}")), json, &flat),
+        ["resume", id, p, how] => done(one(c, "job", &format!("job resume {id} {p} {how}")), json, &flat),
+        ["inspect", id, cmd @ ..] if !cmd.is_empty() => done(one(c, "job", &format!("job inspect {id} {}", cmd.join(" "))), json, &|v| v.get("lines").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().map(|l| format!("{}\n", l.as_str().unwrap_or(""))).collect()),
+        _ => usage(),
+    }
+}
+
+fn push(c: &Client, words: &[&str], json: bool) -> i32 {
+    let (mut sha, mut msg, mut parents, mut dry) = (None, None, Vec::new(), false);
+    let mut i = 0;
+    while i < words.len() {
+        match (words[i], words.get(i + 1)) {
+            ("--sha", Some(v)) => sha = Some(v.to_string()),
+            ("-m" | "--message", Some(v)) => msg = Some(v.to_string()),
+            ("--parent", Some(v)) => parents.push(v.to_string()),
+            ("--dry", _) => {
+                dry = true;
+                i += 1;
+                continue;
+            }
+            _ => {
+                eprintln!("makepad devhub push [--sha <work sha>] [-m <message>] [--parent <sha>]... [--dry]");
+                return 2;
+            }
+        }
+        i += 2;
+    }
+    let opt = |o: &Option<String>| o.as_deref().map_or("null".into(), json_str);
+    let req = format!("{{\"sha\":{},\"message\":{},\"parents\":[{}],\"dry\":{dry}}}", opt(&sha), opt(&msg), parents.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","));
+    done(one(c, "push", &format!("push {req}")), json, &flat)
 }
 
 fn lane(c: &Client, words: &[&str], json: bool) -> i32 {
@@ -301,5 +581,28 @@ fn watch(c: &Client, words: &[&str], json: bool) -> i32 {
                 return 1;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_lines_become_job_requests() {
+        assert_eq!(words_of(r#"--after @1 -- cargo test -p "a b" 'x y' z"#), vec!["--after", "@1", "--", "cargo", "test", "-p", "a b", "x y", "z"]);
+        assert_eq!(words_of("  "), Vec::<String>::new());
+        let base = vec![("kind".to_string(), "build".to_string()), ("lane".to_string(), "l1".to_string())];
+        let r = job_req(&words_of("--kind test --after @1,J4 -- cargo test -p x"), &base).unwrap();
+        let v = makepad_strict_json::parse(r.as_bytes()).unwrap();
+        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        assert_eq!((s("kind"), s("lane")), ("test".to_string(), "l1".to_string()));
+        assert_eq!(v.get("after").unwrap().to_json(), "[\"@1\",\"J4\"]");
+        assert_eq!(v.get("cmd").unwrap().to_json(), "[\"cargo\",\"test\",\"-p\",\"x\"]");
+        // a line without flags is all command
+        let r = job_req(&words_of("bash tools/run/fixture/x.sh"), &base).unwrap();
+        assert!(r.contains("\"cmd\":[\"bash\",\"tools/run/fixture/x.sh\"]") && r.contains("\"kind\":\"build\""), "{r}");
+        assert!(job_req(&words_of("--bogus 1 -- x"), &base).is_err());
+        assert!(job_req(&words_of("--kind test"), &base).is_err());
     }
 }

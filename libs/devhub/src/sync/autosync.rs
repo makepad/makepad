@@ -103,13 +103,20 @@ impl AutoConf {
     }
 }
 
+/// The pre-warm skips a node whose 1-minute load is over this per core (the pre-warm is optional
+/// background work; leases never look at load).
+const PREWARM_LOAD_PER_CORE: f64 = 1.25;
+/// ...or whose available RAM is under this fraction of its total.
+const PREWARM_RAM_FREE: f64 = 0.15;
+
 /// A `nodes` line of a node that should pre-warm after its apply: up, dev on, no lease, not
-/// draining, under its load limits.
+/// draining, under the pre-warm's load limits.
 pub fn prewarm_suits(v: &makepad_strict_json::Value) -> bool {
     let b = |k: &str| v.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
     let leases = v.get("leases").and_then(|x| x.as_u64()).unwrap_or(1);
     let caps = v.get("caps").filter(|c| !matches!(c, makepad_strict_json::Value::Null)).and_then(|c| crate::lease::Caps::parse(&c.to_json())).filter(|c| c.cores > 0);
-    b("up") && b("dev") && !b("draining") && leases == 0 && caps.is_some_and(|c| !crate::lease::sched::overloaded(&c))
+    let loaded = |c: &crate::lease::Caps| c.load1 > c.cores as f64 * PREWARM_LOAD_PER_CORE || (c.ram_gb > 0.0 && c.ram_avail_gb < c.ram_gb * PREWARM_RAM_FREE);
+    b("up") && b("dev") && !b("draining") && leases == 0 && caps.is_some_and(|c| !loaded(&c))
 }
 
 pub fn start(control_socket: PathBuf) {

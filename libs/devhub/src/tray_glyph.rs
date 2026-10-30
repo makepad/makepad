@@ -2,12 +2,14 @@
 //! a monochrome alpha mask (it follows a light or dark bar): the app icon's mark
 //! (apps/devhub/resources/icon.svg, tray.svg), a hub with five machines linked around it.
 //! Quiet: a solid hub. Attention (new inbox entries): a bigger hub and the right machine grown
-//! into a badge. Off (no network identity): a hollow hub.
+//! into a badge (on the master: a failed landing or verify). Busy (leases, gates or a verify
+//! run): the hub as an open ring, a spinner's arc. Off (no network identity): a hollow hub.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Glyph {
     Quiet,
     Attention,
+    Busy,
     Off,
 }
 
@@ -41,13 +43,23 @@ pub fn alpha(glyph: Glyph) -> Vec<u8> {
                 Glyph::Quiet => cover(r - 5.2),
                 Glyph::Attention => cover(r - 6.0),
                 Glyph::Off => cover((r - 4.6).abs() - 0.9),
+                // a thick ring with its top-right quarter open
+                Glyph::Busy => {
+                    let open = p.0 > cx && p.1 < cy;
+                    if open { 0.0 } else { cover((r - 4.4).abs() - 1.4) }
+                }
             };
             // the machines and their links into the hub
             for (i, &node) in nodes.iter().enumerate() {
                 let badge = glyph == Glyph::Attention && i == 1;
                 let radius = if badge { 4.6 } else { 3.0 };
                 v = v.max(cover(((p.0 - node.0).powi(2) + (p.1 - node.1).powi(2)).sqrt() - radius));
-                if glyph != Glyph::Off || r > 5.6 {
+                let inner = match glyph {
+                    Glyph::Off => 5.6,
+                    Glyph::Busy => 6.0,
+                    _ => 0.0,
+                };
+                if r > inner {
                     v = v.max(cover(segment(p, node, (cx, cy)) - 0.9));
                 }
             }
@@ -62,12 +74,14 @@ mod tests {
     #[test]
     fn glyphs_are_distinct_full_size_masks() {
         use super::*;
-        let all = [Glyph::Quiet, Glyph::Attention, Glyph::Off].map(alpha);
+        let all = [Glyph::Quiet, Glyph::Attention, Glyph::Off, Glyph::Busy].map(alpha);
         for g in &all {
             assert_eq!(g.len(), (SIZE * SIZE) as usize);
             assert_eq!(g[0], 0);
         }
         assert_ne!(all[0], all[1]);
         assert_ne!(all[0], all[2]);
+        assert_ne!(all[3], all[0]);
+        assert_ne!(all[3], all[2]);
     }
 }

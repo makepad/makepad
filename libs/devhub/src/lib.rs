@@ -33,6 +33,7 @@ pub mod sync;
 pub mod cluster;
 pub mod trust;
 pub mod tray_glyph;
+pub mod glance;
 pub mod explorer;
 pub mod top;
 pub mod lease;

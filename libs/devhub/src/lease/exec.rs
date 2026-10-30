@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 /// The services this module adds to the node's master endpoint.
-pub const WORDS: &[&str] = &["lease-start", "lease-run", "lease-log", "lease-end", "lease-beat", "ship-have", "ship-put", "ship-link", "ship-done", "get-ls", "get-read", "policy", "lease-conf", "caps", "disk", "recover-get", "recover-del"];
+pub const WORDS: &[&str] = &["lease-start", "lease-run", "lease-log", "lease-end", "lease-beat", "ship-have", "ship-put", "ship-link", "ship-done", "lease-owns", "get-ls", "get-read", "policy", "lease-conf", "caps", "disk", "recover-get", "recover-del"];
 
 const LOG_CHUNK: usize = 64 << 10;
 const RECOVER_CHUNK: usize = 256 << 10;
@@ -394,6 +394,7 @@ impl Exec {
             "lease-end" => vec![self.end_cmd(rest)],
             "lease-beat" => vec![self.beat(rest)],
             "ship-done" => vec![self.ship_done(rest)],
+            "lease-owns" => vec![self.owns(rest)],
             "ship-have" | "ship-put" | "ship-link" => vec![self.ship(word, rest)],
             "get-ls" => self.get_ls(rest),
             "get-read" => vec![self.get_read(rest)],
@@ -595,6 +596,17 @@ impl Exec {
             *run.exit.lock().unwrap() = Some(code);
         });
         format!("{{\"run\":{pid},\"n\":{n}}}")
+    }
+
+    /// `lease-owns <id> <pid>`: whether the process is one of the lease's runs (a JIT a job
+    /// started: the master pauses that job on its parked panic).
+    fn owns(&self, rest: &str) -> String {
+        let w: Vec<&str> = rest.split_whitespace().collect();
+        let (Some(id), Some(Ok(pid))) = (w.first(), w.get(1).map(|p| p.parse::<u32>())) else { return err("usage: lease-owns <id> <pid>") };
+        let leases = self.leases.lock().unwrap();
+        let Some(l) = leases.get(*id) else { return err(format!("no lease {id} on {}", self.machine)) };
+        let owns = l.runs.iter().any(|r| r.pid == pid || os::in_group(pid, r.pid, &r.hold));
+        format!("{{\"owns\":{owns}}}")
     }
 
     fn log(&self, rest: &str) -> String {

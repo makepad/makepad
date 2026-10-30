@@ -52,9 +52,22 @@ pub(crate) struct Flow {
     pub(crate) skipped: AtomicU64,
     /// The app asked for room and the headset had too many pictures in flight (this window).
     pub(crate) held: AtomicU64,
+    /// Eye pictures the encoders finished (an access unit, a drop or an error; with the
+    /// pictures that never reached them): what waits for an encoder (`backlog`).
+    pub(crate) encoded_tiles: AtomicU64,
+    /// Eye pictures the encoder dropped (it gave no access unit: VideoToolbox's real-time mode
+    /// under load), this window: the headset never gets that picture whole.
+    pub(crate) dropped: AtomicU64,
 }
 
 impl Flow {
+    /// Pictures built and not yet encoded (both eyes): one encoding and at most one more
+    /// waiting keeps the encoders busy; more only waits (a slow encoder queued pictures 53 ms
+    /// before their encode on an M4: each one that much further from its pose).
+    pub(crate) fn backlog(&self, tiles: u32) -> u64 {
+        self.built_total.load(Ordering::Acquire).saturating_sub(self.encoded_tiles.load(Ordering::Acquire) / tiles.max(1) as u64)
+    }
+
     pub(crate) fn in_flight(&self, tiles: u32) -> u64 {
         let done = self.decoded_tiles.load(Ordering::Acquire) / tiles.max(1) as u64 + self.lost.load(Ordering::Acquire);
         self.built_total.load(Ordering::Acquire).saturating_sub(done)
@@ -337,15 +350,26 @@ impl Core {
             let (out_tx, keyframe, flow, log, shared) = (Mutex::new(out_tx.clone()), keyframe.clone(), flow.clone(), log.clone(), shared.clone());
             Arc::new(move |d: TileDone<XrTile>| {
                 let t = d.tile;
+                flow.encoded_tiles.fetch_add(1, Ordering::AcqRel);
                 let packets = match d.packets {
                     Ok(p) => p,
                     Err(e) => {
                         log(&format!("xr host: eye {t}: encode: {e}"));
                         flow.lost.fetch_add(1, Ordering::AcqRel);
                         keyframe[t].store(true, Ordering::Release);
+                        shared.wake();
                         return;
                     }
                 };
+                // the encoder dropped the picture (no access unit): nothing goes out, and the
+                // flow counts the eye as taken (the headset never reports it: without this each
+                // dropped eye held half a picture in flight for good and the app built ever less)
+                if packets.is_empty() {
+                    flow.dropped.fetch_add(1, Ordering::AcqRel);
+                    flow.decoded_tiles.fetch_add(1, Ordering::AcqRel);
+                    shared.wake();
+                    return;
+                }
                 // from the build: the wait for the frame's GPU work, the column's copy, its encode
                 let encode = Duration::from_micros(d.encode_us as u64);
                 let mut head = d.tag.head;

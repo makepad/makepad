@@ -1,6 +1,6 @@
 //! `devhub verify`: the rolling full verifier (was tools/run/fixture/verify_tip.py and
 //! verified-tips.txt). The master verifies the newest landed work + main pair, one run at a time,
-//! at the lowest lease priority; its four legs run on four boxes at once:
+//! at the lowest lease priority; its legs ([`legs`]) run on their own boxes at once:
 //! - `full-a`, `full-b`: the two halves of land_gate.sh `full`, timed leases on two x64 pool nodes;
 //! - `platforms`: check_platforms.sh on an arm64 Mac (a missing SDK is incomplete, not a pass);
 //! - `arm64`: arm64_leg.sh `--diff-fast`, a timed lease on an arm64 Mac.
@@ -30,16 +30,43 @@ pub enum Verdict {
     Incomplete,
 }
 
-/// The legs: name, lease kind, needs, verdict marker, the command (from the tree's root).
-const LEGS: [(&str, Kind, &str, &str, &[&str]); 4] = [
-    ("full-a", Kind::Timed, "arch=x64,os=linux,role=pool", "NODEGATE", &["bash", "tools/run/fixture/land_gate.sh", "full-a"]),
-    ("full-b", Kind::Timed, "arch=x64,os=linux,role=pool", "NODEGATE", &["bash", "tools/run/fixture/land_gate.sh", "full-b"]),
-    ("platforms", Kind::Build, "arch=arm64,os=macos", "PLATFORMS", &["bash", "tools/run/fixture/check_platforms.sh"]),
-    ("arm64", Kind::Timed, "arch=arm64,os=macos", "ARM64", &["bash", "tools/run/fixture/arm64_leg.sh", "--diff-fast"]),
-];
+/// One leg of a verify run: its own lease on its own box.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LegDef {
+    pub name: String,
+    pub kind: Kind,
+    /// `arch=x64,os=linux,role=pool`
+    pub needs: String,
+    /// its verdict lines: `<marker>-OK` / `<marker>-FAIL`
+    pub marker: String,
+    /// the command, from the tree's root (the run's env words go before it)
+    pub argv: Vec<String>,
+    /// a preferred node
+    pub node: Option<String>,
+}
+
+impl LegDef {
+    pub fn new(name: &str, kind: Kind, needs: &str, marker: &str, argv: &[&str]) -> LegDef {
+        LegDef { name: name.into(), kind, needs: needs.into(), marker: marker.into(), argv: argv.iter().map(|a| a.to_string()).collect(), node: None }
+    }
+}
+
+/// The legs of a run (`_full`: the nightly run that diffs every program; legs that differ by it,
+/// such as orch/ci.rs's platform legs, read it).
+pub fn legs(_full: bool) -> Vec<LegDef> {
+    vec![
+        LegDef::new("full-a", Kind::Test, "arch=x64,os=linux,role=pool", "NODEGATE", &["bash", "tools/run/fixture/land_gate.sh", "full-a"]),
+        LegDef::new("full-b", Kind::Test, "arch=x64,os=linux,role=pool", "NODEGATE", &["bash", "tools/run/fixture/land_gate.sh", "full-b"]),
+        LegDef::new("platforms", Kind::Build, "arch=arm64,os=macos", "PLATFORMS", &["bash", "tools/run/fixture/check_platforms.sh"]),
+        LegDef::new("arm64", Kind::Test, "arch=arm64,os=macos", "ARM64", &["bash", "tools/run/fixture/arm64_leg.sh", "--diff-fast"]),
+    ]
+}
+
+/// How many error lines a leg keeps.
+const LEG_ERRORS: usize = 20;
 
 /// The lowest lease priority: landings and lanes go first.
-pub const PRIO: i32 = 9;
+pub const PRIO: i32 = super::leg::BACKGROUND_PRIO;
 /// The fuzzer's fixed-seed programs per run.
 pub const FUZZ: u32 = 500;
 /// Every program is diffed this often (the nightly full diff).
@@ -164,7 +191,7 @@ impl Verifier {
             match verdict {
                 Verdict::Ok => {
                     self.record_good(&pair, full, ask.dry);
-                    self.ctx.store.event("verify", Sev::Info, format!("verify OK {} 4/4 legs (diff {})", pair.short(), if full { "all" } else { "affected" }), None);
+                    self.ctx.store.event("verify", Sev::Info, format!("verify OK {} {n}/{n} legs (diff {})", pair.short(), if full { "all" } else { "affected" }, n = self::legs(full).len()), None);
                 }
                 Verdict::Fail => {
                     let (blame, unresolved) = if ask.dry { (None, "dry run: not bisected".to_string()) } else { self.bisect(&pair) };
@@ -210,7 +237,7 @@ impl Verifier {
         });
     }
 
-    /// The four legs of `pair` at once, each on its own box; the run is state while it goes.
+    /// The legs of `pair` at once, each on its own box; the run is state while it goes.
     fn gate(&self, pair: &Pair, full: bool, dry: bool, purpose: &str) -> (Verdict, Vec<Leg>) {
         let id = stamp(wall_ms());
         let dir = self.ctx.logs("verify").join(&id);
@@ -222,18 +249,19 @@ impl Verifier {
             env.push(format!("VERIFY_BASE={}", b.work));
             env.push(format!("VERIFY_CBASE={}", b.main));
         }
-        let legs: Vec<Leg> = LEGS.iter().map(|(name, ..)| Leg { name: name.to_string(), state: "wait".into(), log: dir.join(format!("{name}.log")).to_string_lossy().into_owned(), ..Default::default() }).collect();
+        let defs = legs(full);
+        let legs: Vec<Leg> = defs.iter().map(|d| &d.name).map(|name| Leg { name: name.to_string(), state: "wait".into(), log: dir.join(format!("{name}.log")).to_string_lossy().into_owned(), ..Default::default() }).collect();
         let run = Run { id: id.clone(), pair: pair.clone(), started_ms: wall_ms(), diff: if full { "all" } else { "affected" }.into(), dry, purpose: purpose.into(), legs: legs.clone() };
         self.ctx.store.update(|d| d.verify.run = Some(run));
         self.ctx.store.event("verify", Sev::Info, format!("verify {purpose} {} started (run {id}, diff {})", pair.short(), if full { "all" } else { "affected" }), None);
         let results: Arc<Mutex<Vec<Verdict>>> = Arc::new(Mutex::new(Vec::new()));
         let mut threads = Vec::new();
-        for (name, kind, needs, marker, cmd) in LEGS {
+        for def in defs.iter().cloned() {
             let (ctx, pair, results, env) = (self.ctx.clone(), pair.clone(), results.clone(), env.clone());
-            let log = dir.join(format!("{name}.log"));
+            let log = dir.join(format!("{}.log", def.name));
             threads.push(std::thread::spawn(move || {
-                let spec = Spec { lane: format!("verify-{name}"), agent: "devhub-verify".into(), kind, needs: needs.into(), prio: PRIO, rev: pair.rev(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: None };
-                let v = run_leg(&ctx, &spec, &pair, name, marker, &env, cmd, &log);
+                let spec = Spec { lane: format!("verify-{}", def.name), agent: "devhub-verify".into(), kind: def.kind, needs: def.needs.clone(), prio: PRIO, rev: pair.rev(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: def.node.clone() };
+                let v = run_leg(&ctx, &spec, &pair, &def, &env, &log);
                 results.lock().unwrap().push(v);
             }));
         }
@@ -243,14 +271,14 @@ impl Verifier {
         let results = results.lock().unwrap().clone();
         let legs = self.ctx.store.update(|d| d.verify.run.take()).map(|r| r.legs).unwrap_or_default();
         let ok = results.iter().filter(|v| **v == Verdict::Ok).count();
-        let verdict = if results.len() < LEGS.len() || results.contains(&Verdict::Incomplete) {
+        let verdict = if results.len() < defs.len() || results.contains(&Verdict::Incomplete) {
             Verdict::Incomplete
         } else if results.contains(&Verdict::Fail) {
             Verdict::Fail
         } else {
             Verdict::Ok
         };
-        let _ = std::fs::write(dir.join("pair"), format!("{} {} {ok}/{}\n", pair.work, pair.main, LEGS.len()));
+        let _ = std::fs::write(dir.join("pair"), format!("{} {} {ok}/{}\n", pair.work, pair.main, defs.len()));
         (verdict, legs)
     }
 
@@ -311,8 +339,8 @@ impl Verifier {
 }
 
 /// One leg: lease, check the tree is at the pair, run, verdict; its state as it goes.
-#[allow(clippy::too_many_arguments)]
-fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, name: &str, marker: &str, env: &[String], cmd: &[&str], log: &Path) -> Verdict {
+fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[String], log: &Path) -> Verdict {
+    let (name, marker) = (def.name.as_str(), def.marker.as_str());
     let set = |state: &str, lease: &str, node: &str, summary: &str| {
         ctx.store.update(|d| {
             if let Some(l) = d.verify.run.as_mut().and_then(|r| r.legs.iter_mut().find(|l| l.name == name)) {
@@ -325,42 +353,51 @@ fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, name: &str, marker: &str, env: &
             }
         })
     };
-    let mut file = match std::fs::File::create(log) {
-        Ok(f) => f,
-        Err(e) => {
-            set("incomplete", "", "", &format!("{}: {e}", log.display()));
-            return Verdict::Incomplete;
+    // a background leg: preempted by lane work, it asks again (a fresh log)
+    let (r, exit) = loop {
+        let mut file = match std::fs::File::create(log) {
+            Ok(f) => f,
+            Err(e) => {
+                set("incomplete", "", "", &format!("{}: {e}", log.display()));
+                return Verdict::Incomplete;
+            }
+        };
+        let held = match Held::acquire(spec, &mut |l| set("wait", "", "", l), &|| false) {
+            Ok(h) => h,
+            Err(e) => {
+                set("incomplete", "", "", &e);
+                return Verdict::Incomplete;
+            }
+        };
+        set("run", &held.id, &held.node, "");
+        ctx.store.event("verify", Sev::Info, format!("verify leg {name} of {} on {} ({})", pair.short(), held.node, held.id), None);
+        // the tree must hold the pair before any gate command
+        let at = held.output(&["git", "rev-parse", "HEAD"]).and_then(|(_, w)| held.output(&["git", "-C", "apps/commercial", "rev-parse", "HEAD"]).map(|(_, c)| (w, c)));
+        match at {
+            Ok((w, c)) if w == pair.work && c == pair.main => {}
+            Ok((w, c)) => {
+                let why = format!("the lease's tree is at {},{} not {}", super::short(&w), super::short(&c), pair.short());
+                held.release(None);
+                set("incomplete", "", "", &why);
+                return Verdict::Incomplete;
+            }
+            Err(e) => {
+                held.release(None);
+                set("incomplete", "", "", &e);
+                return Verdict::Incomplete;
+            }
         }
+        let argv: Vec<String> = env.iter().cloned().chain(def.argv.iter().cloned()).collect();
+        let id = held.id.clone();
+        let r = held.run(&argv, &mut file);
+        let exit = r.as_ref().ok().copied();
+        held.release(exit);
+        if r.is_err() && super::leg::was_preempted(&id) {
+            set("wait", "", "", "preempted by lane work; asks again");
+            continue;
+        }
+        break (r, exit);
     };
-    let held = match Held::acquire(spec, &mut |l| set("wait", "", "", l), &|| false) {
-        Ok(h) => h,
-        Err(e) => {
-            set("incomplete", "", "", &e);
-            return Verdict::Incomplete;
-        }
-    };
-    set("run", &held.id, &held.node, "");
-    ctx.store.event("verify", Sev::Info, format!("verify leg {name} of {} on {} ({})", pair.short(), held.node, held.id), None);
-    // the tree must hold the pair before any gate command
-    let at = held.output(&["git", "rev-parse", "HEAD"]).and_then(|(_, w)| held.output(&["git", "-C", "apps/commercial", "rev-parse", "HEAD"]).map(|(_, c)| (w, c)));
-    match at {
-        Ok((w, c)) if w == pair.work && c == pair.main => {}
-        Ok((w, c)) => {
-            let why = format!("the lease's tree is at {},{} not {}", super::short(&w), super::short(&c), pair.short());
-            held.release(None);
-            set("incomplete", "", "", &why);
-            return Verdict::Incomplete;
-        }
-        Err(e) => {
-            held.release(None);
-            set("incomplete", "", "", &e);
-            return Verdict::Incomplete;
-        }
-    }
-    let argv: Vec<String> = env.iter().cloned().chain(cmd.iter().map(|c| c.to_string())).collect();
-    let r = held.run(&argv, &mut file);
-    let exit = r.as_ref().ok().copied();
-    held.release(exit);
     let text = std::fs::read_to_string(log).unwrap_or_default();
     let (v, mut summary) = leg_verdict(name, marker, &text, exit);
     if let Err(e) = r {
@@ -372,6 +409,14 @@ fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, name: &str, marker: &str, env: &
         Verdict::Incomplete => "incomplete",
     };
     set(state, "", "", &summary);
+    if v != Verdict::Ok {
+        let errors: Vec<String> = crate::land::failure_lines(&text).into_iter().take(LEG_ERRORS).collect();
+        ctx.store.update(|d| {
+            if let Some(l) = d.verify.run.as_mut().and_then(|r| r.legs.iter_mut().find(|l| l.name == name)) {
+                l.errors = errors;
+            }
+        });
+    }
     ctx.store.event("verify", if v == Verdict::Fail { Sev::Warn } else { Sev::Info }, format!("verify leg {name} {} {}: {summary}", state.to_uppercase(), pair.short()), None);
     v
 }

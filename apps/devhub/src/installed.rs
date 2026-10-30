@@ -1,49 +1,51 @@
-//! devhub installed as a macOS menu-bar app (`tools/devhub/install-mac.sh` makes
-//! `~/Applications/devhub.app`, LSUIElement): "Open at login" in the tray menu (a per-user
-//! LaunchAgent `nl.makepad.devhub`, offered only when running from the bundle: a `cargo run`
-//! copy has no stable executable to name) and the pid record the installer stops the installed
-//! copy by (`~/.makepad/devhub/app.pid`, `MAKEPAD_HOME` honoured).
-//!
-//! The bundle's own icon (Info.plist CFBundleIconFile) is what macOS shows; devhub sends no
-//! runtime app icon of its own (the platform skips its default one for a bundle that names an icon).
+//! devhub on the Mac: "Open at login" in the tray menu makes the per-user LaunchAgent
+//! `nl.makepad.devhub`, which starts the Dock wrapper (`~/Applications/devhub.app`, made by
+//! local/dock-launchers.sh: `cargo build` of the JIT host, then `makepad run makepad-app-devhub`,
+//! so the master always runs the current code) at login, and again whenever it exits with an error
+//! (a crash, a failed build; Quit exits cleanly and stays quit). It is offered only when that
+//! wrapper exists. The running master's pid is `~/.makepad/devhub/master.pid` (`MAKEPAD_HOME`
+//! honoured), whatever runs it.
 
-use makepad_devhub::proto;
-use makepad_shell_kit::tray_app::{bundle_exe, AppPid, LoginItem};
+use makepad_shell_kit::tray_app::LoginItem;
+use std::path::PathBuf;
 
 const LABEL: &str = "nl.makepad.devhub";
+/// launchd waits this long before it starts a crashed master again, seconds
+const THROTTLE_S: u32 = 30;
 
-fn item() -> Option<LoginItem> {
-    Some(LoginItem { label: LABEL, program: bundle_exe()?, extra: String::new() })
+/// The Dock wrapper's executable: what the login item starts.
+fn wrapper() -> Option<PathBuf> {
+    let exe = PathBuf::from(std::env::var_os("HOME").filter(|h| !h.is_empty())?).join("Applications/devhub.app/Contents/MacOS/devhub");
+    (cfg!(target_os = "macos") && exe.is_file()).then_some(exe)
 }
 
-/// None: not offered (not an installed bundle). Some(on): the menu item's check.
+fn item() -> Option<LoginItem> {
+    Some(item_for(wrapper()?))
+}
+
+fn item_for(program: PathBuf) -> LoginItem {
+    LoginItem {
+        label: LABEL,
+        program,
+        extra: format!("    <key>KeepAlive</key>\n    <dict>\n        <key>SuccessfulExit</key>\n        <false/>\n    </dict>\n    <key>ThrottleInterval</key>\n    <integer>{THROTTLE_S}</integer>\n"),
+    }
+}
+
+/// None: not offered (no Dock wrapper). Some(on): the menu item's check.
 pub fn login() -> Option<bool> {
     item().map(|i| i.is_on())
 }
 
 pub fn set_login(on: bool) -> Result<(), String> {
-    item().ok_or("not running from an installed bundle")?.set(on)
-}
-
-fn pid() -> AppPid {
-    AppPid(proto::home().join("app.pid"))
-}
-
-/// Records this process while it runs from a bundle.
-pub fn write_pid() {
-    pid().write()
-}
-
-pub fn clear_pid() {
-    pid().clear()
+    item().ok_or("no Dock wrapper ~/Applications/devhub.app (local/dock-launchers.sh makes it)")?.set(on)
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn only_an_installed_bundle_offers_open_at_login() {
-        // the test binary runs from target/, not from an .app
-        assert_eq!(super::login(), None);
-        assert!(super::set_login(true).is_err());
+    fn the_login_item_starts_the_dock_wrapper_and_restarts_it_after_a_crash() {
+        let text = super::item_for("/Users/u/Applications/devhub.app/Contents/MacOS/devhub".into()).plist_text();
+        assert!(text.contains("devhub.app/Contents/MacOS/devhub</string>"));
+        assert!(text.contains("<key>SuccessfulExit</key>\n        <false/>"));
     }
 }

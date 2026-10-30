@@ -35,9 +35,6 @@ pub const WAIT_WARN_MS: u64 = 600_000;
 pub const DEFAULT_PRIO: i32 = 5;
 /// A soft-pinned lease (`--node N`) waits this long for N before a twin node may take it.
 pub const PIN_GRACE_MS: u64 = 120_000;
-/// A node over this load per core, or under this share of free RAM, takes no new leases.
-pub const BUSY_LOAD_PER_CORE: f64 = 1.25;
-pub const BUSY_RAM_FREE: f64 = 0.15;
 /// Placement score bonus of the lane's warm node (its target there: no cold build) and of the
 /// lane's last node.
 const WARM_BONUS: f64 = 1.5;
@@ -485,10 +482,6 @@ fn gb(v: &str) -> Option<f64> {
     v.trim().trim_end_matches(['B', 'b']).trim_end_matches(['G', 'g']).parse().ok()
 }
 
-/// Over the load or RAM threshold: the node takes no new leases ([`BUSY_LOAD_PER_CORE`], [`BUSY_RAM_FREE`]).
-pub fn overloaded(c: &Caps) -> bool {
-    c.load1 > c.cores as f64 * BUSY_LOAD_PER_CORE || (c.ram_gb > 0.0 && c.ram_avail_gb < c.ram_gb * BUSY_RAM_FREE)
-}
 
 /// May a twin node take this `--node N` lease? (Not `--only`, timed, screen or inspect leases.)
 fn soft_pin(r: &Req) -> bool {
@@ -981,26 +974,23 @@ impl Sched {
         if let Some(r) = self.live_on_node(name, &l.id).find(|r| r.req.kind != Kind::Inspect) {
             return Err((format!("held by {} ({} of {})", r.id, r.req.kind.as_str(), r.req.lane), false));
         }
-        if k != Kind::Timed && overloaded(c) {
-            return Err(("node busy".into(), false));
-        }
         // what leases granted since the last measurement will still write
         let free = c.disk_free_gb;
         if free - cost.disk_gb < c.disk_floor_gb {
             return Err((format!("disk floor: {free:.0} GB free, needs {:.0}, floor {:.0}", cost.disk_gb, c.disk_floor_gb), true));
         }
-        // the least-loaded free node: the measured load counts what runs outside leases (the
-        // node's WM and apps, the mini's CI)
-        let load = (c.load1 / c.cores.max(1) as f64).min(2.0);
-        let gpu = if cost.gpus > 0 { 1.0 - c.gpu_busy.iter().map(|g| g.0).fold(100.0, f64::min) / 100.0 } else { 0.0 };
-        Ok((c.ram_avail_gb / c.ram_gb.max(1.0)) + (1.0 - load) + gpu)
+        // devhub is the controller: a box is free when it has no lease (dev on, not draining or restoring);
+        // what else runs there is not observed. Among free boxes the bonuses decide (named, warm, at the
+        // lease's commits); a tie goes to the box idle longest (devhub's own record, up to 0.1)
+        let idle = n.released_ms.map_or(3_600_000, |r| self.clock.saturating_sub(r).min(3_600_000));
+        Ok(idle as f64 / 36_000_000.0)
     }
 
     /// Will a lease named to `name` wait long there: held for a timed lease, an exclusive lease
-    /// running, overloaded, off or down?
+    /// running, off or down?
     fn long_wait(&self, name: &str, id: &str, holds: &HashMap<String, String>) -> bool {
         let n = &self.nodes[name];
-        !n.up || !self.dev(name) || holds.get(name).is_some_and(|h| h != id) || self.restoring.contains_key(name) || self.live_on_node(name, id).any(|r| r.req.kind != Kind::Inspect) || n.caps.as_ref().is_some_and(overloaded)
+        !n.up || !self.dev(name) || holds.get(name).is_some_and(|h| h != id) || self.restoring.contains_key(name) || self.live_on_node(name, id).any(|r| r.req.kind != Kind::Inspect)
     }
 
     fn place(&self, l: &Lease, holds: &HashMap<String, String>) -> Place {
@@ -1744,43 +1734,30 @@ mod tests {
         assert_eq!(node_of(&s, &timed).as_deref(), Some("b"));
     }
 
-    /// The least-loaded node wins by measured load (work outside leases counts); an overloaded
-    /// node takes nothing new, even the lane's warm one.
+    /// devhub is the controller: a box with no lease is free whatever its load or RAM (what runs
+    /// outside devhub is not observed); the lane's warm box wins over an idle one; between equal free
+    /// boxes the one idle longest takes it.
     #[test]
-    fn least_loaded_node_wins_and_overloaded_nodes_take_nothing() {
-        let mut busy = caps(16, 64.0, Role::Pool);
-        busy.load1 = 12.0;
-        let mut s = sched(&[("a", busy), ("b", caps(16, 64.0, Role::Pool))]);
+    fn load_and_ram_never_refuse_or_rank_a_free_box() {
+        let mut hot = caps(16, 64.0, Role::Pool);
+        hot.load1 = 50.0;
+        hot.cpu_pct = Some(100.0);
+        hot.ram_avail_gb = 0.5;
+        let mut s = sched(&[("a", hot.clone())]);
         let x = s.request(req("x", Kind::Build, None), 0);
         s.tick(0);
-        assert_eq!(node_of(&s, &x).as_deref(), Some("b"));
+        assert_eq!(node_of(&s, &x).as_deref(), Some("a"), "{:?}", state(&s, &x));
         release_clean(&mut s, &x, 1);
-        // x is warm on b: a little load on b keeps it there
-        let mut b = caps(16, 64.0, Role::Pool);
-        b.load1 = 4.0;
-        s.set_caps("b", b.clone(), 2);
-        let mut a = caps(16, 64.0, Role::Pool);
-        a.load1 = 0.0;
-        s.set_caps("a", a, 2);
+        // the lane's warm box, though it is the hot one
+        s.set_caps("b", caps(16, 64.0, Role::Pool), 2);
         let again = s.request(req("x", Kind::Build, None), 3);
         s.tick(3);
-        assert_eq!(node_of(&s, &again).as_deref(), Some("b"), "the warm node unless it is much busier");
+        assert_eq!(node_of(&s, &again).as_deref(), Some("a"));
         release_clean(&mut s, &again, 4);
-        // b over the load threshold, a over the RAM threshold: nothing starts
-        b.load1 = 16.0 * BUSY_LOAD_PER_CORE + 1.0;
-        s.set_caps("b", b, 5);
-        let mut a = caps(16, 64.0, Role::Pool);
-        a.ram_avail_gb = 64.0 * BUSY_RAM_FREE - 1.0;
-        s.set_caps("a", a, 5);
-        let third = s.request(req("x", Kind::Build, None), 6);
-        s.tick(6);
-        assert_eq!(state(&s, &third).0, "queued");
-        assert!(state(&s, &third).1.contains("node busy"), "{:?}", state(&s, &third));
-        // a recovers: the waiting lease goes there (a waiting lease moves to whichever node frees)
-        s.set_caps("a", caps(16, 64.0, Role::Pool), 7);
-        beat_all(&mut s, 8);
-        s.tick(8);
-        assert_eq!(node_of(&s, &third).as_deref(), Some("a"));
+        // a new lane: b never ran a lease (idle longest) wins over a, released just now
+        let y = s.request(req("y", Kind::Build, None), 5);
+        s.tick(5);
+        assert_eq!(node_of(&s, &y).as_deref(), Some("b"));
     }
 
     #[test]

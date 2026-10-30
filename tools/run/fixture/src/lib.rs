@@ -475,3 +475,24 @@ pub fn shared_log(line: &str) -> usize {
     l.push(line.to_string());
     l.len()
 }
+
+thread_local! {
+    /// A `const` thread-local without drop glue (a `#[thread_local]` static under Relax).
+    static TLS_COUNT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// A lazily made one with drop glue (a runtime key under Relax).
+    static TLS_LIST: std::cell::RefCell<Vec<u64>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// Not an op: JIT code compiles it from source and reaches both thread-locals (each side keeps
+/// its own per-thread storage).
+pub fn tls_bump(v: u64) -> (u32, usize) {
+    let n = TLS_COUNT.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    });
+    let len = TLS_LIST.with(|l| {
+        l.borrow_mut().push(v);
+        l.borrow().len()
+    });
+    (n, len)
+}

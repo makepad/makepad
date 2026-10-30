@@ -10,7 +10,9 @@
 //! Every transition is a `land` record on the master's feed (`devhub stream`), so lanes subscribe instead of polling.
 //!
 //! Control service `land`: `add <branch|-> [<commercial worktree> <commercial branch>] [agent=<a>]`, `status [all|<branch>]`,
-//! `hold <branch> [reason]`, `unhold <branch>`, `retry <branch>`, `drop <branch>`, `import <landq> <failed> <held>`.
+//! `hold <branch> [reason]`, `unhold <branch>`, `retry <branch>`, `drop <branch>`, `import <landq> <failed> <held>`,
+//! `pause [reason]` / `resume` (the whole train: no new round starts while paused; a round under way finishes; kept in
+//! `land.paused` across restarts), `paused` (`{"paused":"<reason>"}`, empty when running).
 
 use crate::proto::{hub_record, Record, Sev};
 use makepad_strict_json::{obj, Value};
@@ -220,6 +222,19 @@ pub struct Train {
     publish: Publish,
     st: Mutex<Vec<Entry>>,
     clock: fn() -> u64,
+    /// why the train is paused (empty: it runs)
+    paused: Mutex<String>,
+}
+
+/// The open entries by state, for a glance (the menu bar).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    /// queued, passed or waiting for the next round
+    pub queued: usize,
+    pub gating: usize,
+    /// failed or conflicting, not landed since
+    pub failed: usize,
+    pub held: usize,
 }
 
 impl Train {
@@ -229,6 +244,47 @@ impl Train {
     fn load(&self) {
         let text = std::fs::read_to_string(self.path()).unwrap_or_default();
         *self.st.lock().unwrap() = text.lines().filter_map(Entry::parse).collect();
+        *self.paused.lock().unwrap() = std::fs::read_to_string(self.home.join("land.paused")).map(|t| t.trim().to_string()).unwrap_or_default();
+    }
+
+    /// Why the train is paused; None while it runs.
+    pub fn paused(&self) -> Option<String> {
+        Some(self.paused.lock().unwrap().clone()).filter(|p| !p.is_empty())
+    }
+
+    /// Pauses the train (`Some(reason)`) or resumes it (`None`); kept across master restarts.
+    pub fn set_paused(&self, reason: Option<&str>) {
+        let path = self.home.join("land.paused");
+        let reason = reason.map(|r| if r.trim().is_empty() { "paused" } else { r.trim() });
+        let was = std::mem::replace(&mut *self.paused.lock().unwrap(), reason.unwrap_or("").to_string());
+        match reason {
+            Some(r) => {
+                let _ = std::fs::write(&path, format!("{r}\n"));
+            }
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        if was.is_empty() != reason.is_none() {
+            self.event(Sev::Info, reason.map_or("land resumed".into(), |r| format!("land paused ({r})")), &[]);
+        }
+    }
+
+    /// The open entries by state.
+    pub fn counts(&self) -> Counts {
+        let mut c = Counts::default();
+        for e in self.st.lock().unwrap().iter().filter(|e| e.state != St::Landed) {
+            if !e.held.is_empty() {
+                c.held += 1;
+            }
+            match e.state {
+                St::Gating => c.gating += 1,
+                St::Failed | St::Conflict => c.failed += 1,
+                _ if e.held.is_empty() => c.queued += 1,
+                _ => {}
+            }
+        }
+        c
     }
     fn save(&self, list: &[Entry]) {
         let text: String = list.iter().map(|e| e.to_json() + "\n").collect();
@@ -300,11 +356,20 @@ impl Train {
                 self.event(Sev::Info, format!("land {verb} {b}"), &[]);
                 out.push(format!("{{\"ok\":1,\"{verb}\":{}}}", makepad_remote::json_str(b)));
             }
+            ["pause", reason @ ..] => {
+                self.set_paused(Some(&reason.join(" ")));
+                out.push(format!("{{\"paused\":{}}}", makepad_remote::json_str(&self.paused().unwrap_or_default())));
+            }
+            ["resume"] => {
+                self.set_paused(None);
+                out.push("{\"paused\":\"\"}".into());
+            }
+            ["paused"] => out.push(format!("{{\"paused\":{}}}", makepad_remote::json_str(&self.paused().unwrap_or_default()))),
             ["import", landq, failed, held] => match self.import(Path::new(landq), Path::new(failed), Path::new(held)) {
                 Ok(n) => out.push(format!("{{\"ok\":1,\"imported\":{n}}}")),
                 Err(e) => err(out, &e),
             },
-            _ => err(out, "land add <branch|-> [<commercial worktree> <commercial branch>] | status [all|<branch>] | hold <b> [reason] | unhold <b> | retry <b> | drop <b> | import <landq> <failed> <held>"),
+            _ => err(out, "land add <branch|-> [<commercial worktree> <commercial branch>] | status [all|<branch>] | hold <b> [reason] | unhold <b> | retry <b> | drop <b> | import <landq> <failed> <held> | pause [reason] | resume | paused"),
         }
     }
 
@@ -607,7 +672,7 @@ impl Train {
             self.save(&list);
         }
         loop {
-            if !self.round() {
+            if self.paused().is_some() || !self.round() {
                 std::thread::sleep(IDLE);
             }
         }
@@ -624,6 +689,7 @@ pub fn register(ep: &makepad_remote::Endpoint, machine: &str, publish: Publish) 
         publish,
         st: Mutex::new(Vec::new()),
         clock: crate::proto::wall_ms,
+        paused: Mutex::new(String::new()),
     });
     t.load();
     let t2 = t.clone();
@@ -691,6 +757,7 @@ mod tests {
             publish: Arc::new(move |r: Record| events.lock().unwrap().push(r.line.clone())),
             st: Mutex::new(Vec::new()),
             clock: crate::proto::wall_ms,
+            paused: Mutex::new(String::new()),
         })
     }
 
@@ -769,8 +836,17 @@ mod tests {
         let t2 = train(&home, &r, &exe, events.clone());
         t2.load();
         assert_eq!(t2.st.lock().unwrap().len(), 4);
+        assert_eq!(t.counts(), Counts { queued: 0, gating: 0, failed: 1, held: 1 });
+        // a pause holds the train across a restart; resume lets it run again
+        assert_eq!(ask("pause user review"), vec!["{\"paused\":\"user review\"}".to_string()]);
+        let t3 = train(&home, &r, &exe, events.clone());
+        t3.load();
+        assert_eq!(t3.paused().as_deref(), Some("user review"));
+        assert_eq!(ask("resume"), vec!["{\"paused\":\"\"}".to_string()]);
+        assert_eq!(t.paused(), None);
+        assert!(!home.join("land.paused").exists());
         let ev = events.lock().unwrap().join("\n");
-        for want in ["land queued rc-x", "land gating rc-x on n1", "land passed rc-x on n1", "land landed rc-y+rc-y", "land conflict rc-z"] {
+        for want in ["land queued rc-x", "land gating rc-x on n1", "land passed rc-x on n1", "land landed rc-y+rc-y", "land conflict rc-z", "land paused (user review)", "land resumed"] {
             assert!(ev.contains(want), "no `{want}` in\n{ev}");
         }
         assert!(ask("drop rc-z")[0].contains("ok"));

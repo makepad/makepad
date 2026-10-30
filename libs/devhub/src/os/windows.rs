@@ -141,6 +141,12 @@ pub fn same(pid: u32, start: u64) -> bool {
 
 /// Whether the run still has a live process: its job's count, else (taken back from the
 /// ledger) the recorded process or a descendant of it.
+/// Whether `pid` is one of the run's processes: only the leader is known here (the job object
+/// does not list its members through these bindings).
+pub fn in_group(pid: u32, leader: u32, _hold: &Hold) -> bool {
+    pid == leader
+}
+
 pub fn group_alive(pid: u32, start: u64, hold: &Hold) -> bool {
     match &hold.0 {
         Some(j) => j.active() > 0,

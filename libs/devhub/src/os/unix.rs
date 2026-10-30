@@ -148,6 +148,11 @@ fn proc_stat(_pid: u32) -> Option<Stat> {
     None
 }
 
+/// Whether `pid` is in the process group led by `leader` (a lease run is its own session).
+pub fn in_group(pid: u32, leader: u32, _hold: &Hold) -> bool {
+    proc_stat(pid).is_some_and(|s| s.pgrp == leader && !s.zombie)
+}
+
 /// The recorded leader still is the process we started (not gone, not a reused pid).
 pub fn same(pid: u32, start: u64) -> bool {
     proc_stat(pid).is_some_and(|s| !s.zombie && s.start == start)

@@ -4915,8 +4915,22 @@ pub struct FrontImages {
     pending_plan: relax_session::sync::Mutex<Option<(u128, std::sync::Arc<crate::preload::DemandPlan>)>>,
     /// writes the images of the files this run parses (None: a read-only cache)
     sink: Option<std::sync::Arc<FrontSink>>,
+    /// crates (name, root) a collected restore never keeps: `makepad check`'s checked crates,
+    /// which load again so their resolution and expansion record what the lints read (import
+    /// and macro uses); the restore keeps every crate before them
+    reload: relax_session::sync::Mutex<Vec<(String, String)>>,
 }
 impl FrontImages {
+    /// See `reload`.
+    pub fn reload_crates(&self, crates: Vec<(String, String)>) {
+        *self.reload.lock().unwrap() = crates;
+    }
+    pub(crate) fn reloads(&self, name: &str, root: &str) -> bool {
+        self.reload.lock().unwrap().iter().any(|(n, r)| n == name && r == root)
+    }
+    pub(crate) fn reloading(&self) -> bool {
+        !self.reload.lock().unwrap().is_empty()
+    }
     /// Graph `identity` as its store holds it: the begun load's read when it is that graph.
     pub(crate) fn front_graph(&self, identity: u128) -> Option<std::sync::Arc<crate::crate_image::GraphImage>> {
         if let Some(g) = self.graph_read.lock().unwrap().as_ref().filter(|g| g.identity == identity) { return Some(g.clone()); }

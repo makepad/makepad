@@ -591,6 +591,10 @@ impl PumpStats {
             log(&format!("xr host: room field {} bricks ({:.1} KB/s) from the headset", self.bricks, self.brick_bytes as f64 / secs / 1000.0));
         }
         let held = core.flow.held.swap(0, Ordering::AcqRel);
+        let dropped = core.flow.dropped.swap(0, Ordering::AcqRel);
+        if dropped > 0 {
+            log(&format!("xr host: the encoder dropped {dropped} eye pictures ({:.1}/s): those pictures never reach the headset whole", dropped as f64 / secs));
+        }
         let trip_ms = median_ms(&mut self.trip_us);
         let trip_min_ms = self.trip_us.first().map_or(0.0, |v| *v as f64 / 1000.0);
         log(&format!("xr host: link trip {trip_ms:.1} ms (min {trip_min_ms:.1}, base {:.1}); the app waited for the headset {:.0}/s", core.rate.base_ms(), held as f64 / secs));

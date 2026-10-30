@@ -35,7 +35,13 @@ pub enum Want {
     WarmUp { done: u64, queued: u64 },
     /// ready: the arc closes, the sharp app comes in, the galaxy goes
     Ready,
+    /// the run's view over a paused app (a parked panic, a halted patch): the app's last frame
+    /// dimmed under the view, in the app's own window
+    Paused,
 }
+
+/// The paused app's darkening under the run's view.
+pub const PAUSE_DIM: f32 = 0.8;
 
 /// What one frame of the layer draws.
 #[derive(Clone, Copy, Debug)]
@@ -103,6 +109,11 @@ impl Layer {
         self.want
     }
 
+    /// The layer carries the run's view over a paused app (not the boot field).
+    pub fn paused(&self) -> bool {
+        self.on && self.want == Some(Want::Paused)
+    }
+
     /// The run's wish for this turn. A new boot starts the sequence again.
     pub fn set(&mut self, want: Option<Want>) {
         match want {
@@ -121,6 +132,7 @@ impl Layer {
             Some(Want::Ready) => {
                 self.ready_at.get_or_insert_with(Instant::now);
             }
+            Some(Want::Paused) => {}
         }
         if self.want.as_ref().map(std::mem::discriminant) != want.as_ref().map(std::mem::discriminant) {
             self.done = false;
@@ -147,7 +159,7 @@ impl Layer {
             done: false,
         };
         match self.want {
-            None | Some(Want::Boot) => {}
+            None | Some(Want::Boot) | Some(Want::Paused) => {}
             Some(Want::WarmUp { .. }) | Some(Want::Ready) => {
                 // the blurred app replaces the deep field behind the galaxy
                 if let Some(t) = since(self.warm_at) {

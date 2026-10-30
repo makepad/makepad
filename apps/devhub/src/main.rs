@@ -1,9 +1,13 @@
 //! devhub, one app: a **node** when the WM names its conf (`MAKEPAD_DEVHUB_NODE_CONF`, the way it
 //! starts the AI Hub), the **master** otherwise.
 //!
-//! - Master (the user's Mac): a menu-bar icon; a click opens the panel under it (the inbox and the
-//!   explorer: machines → JITs → inspect views). It listens on nothing but its control socket and
-//!   dials the nodes with the Mac's fleet identity.
+//! - Master (the user's Mac): a menu-bar icon whose glyph says idle, busy or needs a look; a click
+//!   opens its menu: the fleet at a glance (nodes up, leases, the land queue, the newest verify,
+//!   lanes, the last events) and Open devhub (the panel: the inbox and the explorer, machines → JITs
+//!   → inspect views), Pause landing, Run verify now. It listens on nothing but its control socket
+//!   and dials the nodes with the Mac's fleet identity. On the Mac it runs from the Dock wrapper
+//!   (`makepad run makepad-app-devhub`, the current code under the JIT); "Open at login" makes the
+//!   per-user LaunchAgent that starts that wrapper at login and again after a crash.
 //! - Node (a Linux WM): a tray icon in the WM's bar with a status menu; it serves this machine's
 //!   JITs to the master. Quit writes `enabled = off` into its conf, so the WM leaves it off until
 //!   the person starts it from the launcher.
@@ -26,6 +30,7 @@ mod taskview;
 mod view;
 
 use makepad_devhub::explorer::{self, Snapshot};
+use makepad_devhub::glance::Glance;
 use makepad_devhub::master::Master;
 use makepad_devhub::node::{Node, NodeConf, NODE_CONF_ENV};
 use makepad_devhub::trust::{FleetTrust, Trust};
@@ -55,17 +60,6 @@ script_mod! {
                     hub_view := mod.widgets.DevhubView{}
                 }
             }
-            dropdown_window := Window{
-                create_on_start: false
-                show_caption_bar: false
-                chrome: WindowChrome.None
-                window.title: "devhub"
-                window.dropdown: true
-                window.inner_size: vec2(620, 720)
-                body +: {
-                    drop_view := mod.widgets.DevhubView{card: true}
-                }
-            }
             // a node's tray dropdown: the task-manager view of this machine's JITs
             node_window := Window{
                 create_on_start: false
@@ -88,9 +82,14 @@ const SEEN: LiveId = live_id!(seen_all);
 const DEVSW: LiveId = live_id!(dev_switch);
 const OPEN: LiveId = live_id!(open_window);
 const LOGIN: LiveId = live_id!(open_at_login);
+const PAUSE: LiveId = live_id!(pause_landing);
+const VERIFY: LiveId = live_id!(verify_now);
+/// the master's menu: status line `i` is item `LINE_BASE + i` (not chosen: they are disabled)
+const LINE_BASE: u64 = 0x6c69_6e00_0000;
+/// how often the fleet identity is looked for again (a file read and a key parse)
+const FLEET_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 /// the master's tray menu: node `i`'s dev switch is item `DEV_BASE + i`
 const DEV_BASE: u64 = 0x6465_7600_0000;
-const DROPDOWN: Vec2d = Vec2d { x: 620.0, y: 720.0 };
 const NODE_DROPDOWN_W: f64 = 560.0;
 /// the live view's redraw rate while it shows
 const LIVE_HZ: f64 = 30.0;
@@ -380,11 +379,7 @@ pub struct App {
     #[rust]
     state: ViewState,
     #[rust]
-    open: bool,
-    #[rust]
     window_shown: bool,
-    #[rust]
-    dismissed: Option<std::time::Instant>,
     #[rust]
     tray_key: String,
     /// the node names behind the tray menu's dev switches, in menu order
@@ -393,17 +388,31 @@ pub struct App {
     /// "Open at login": None = not offered (not an installed bundle)
     #[rust]
     login: Option<bool>,
+    /// whether the fleet identity is here, and when that was looked at
+    #[rust]
+    fleet: Option<(std::time::Instant, bool)>,
 }
 
 impl App {
-    fn status(&self) -> (glyph::Glyph, String) {
+    /// The master at a glance (the fleet identity looked for at most every `FLEET_EVERY`).
+    fn glance(&mut self) -> Option<Glance> {
+        let Some(Core::Master(m)) = &self.core else { return None };
+        let fleet = match self.fleet {
+            Some((at, on)) if at.elapsed() < FLEET_EVERY => on,
+            _ => {
+                let on = makepad_devhub::trust::FleetTrust::load(&m.master.name).is_ok();
+                self.fleet = Some((std::time::Instant::now(), on));
+                on
+            }
+        };
+        Some(Glance::collect(&m.master, fleet))
+    }
+
+    fn status(&self, glance: Option<&Glance>) -> (glyph::Glyph, String) {
         match &self.core {
             Some(Core::Master(m)) => {
-                let unseen = m.master.inbox.lock().unwrap().unseen();
-                let net = makepad_devhub::trust::FleetTrust::load(&m.master.name).is_ok();
-                let g = if !net { glyph::Glyph::Off } else if unseen > 0 { glyph::Glyph::Attention } else { glyph::Glyph::Quiet };
-                let nodes = m.master.hosts().hosts.len();
-                (g, format!("master {} \u{b7} {nodes} nodes \u{b7} {unseen} new{}", m.master.name, if net { "" } else { " \u{b7} no fleet identity" }))
+                let g = glance.cloned().unwrap_or_default();
+                (g.glyph(), format!("master {} \u{b7} {} \u{b7} {}", m.master.name, g.word(), g.lines().first().cloned().unwrap_or_default()))
             }
             Some(Core::Node(n)) => (if n.node.addr.is_some() { glyph::Glyph::Quiet } else { glyph::Glyph::Off }, format!("node {} \u{b7} {} JITs \u{b7} {}", n.node.conf.name, n.jit_count(), n.lan())),
             None => (glyph::Glyph::Off, "off".into()),
@@ -411,20 +420,35 @@ impl App {
     }
 
     fn refresh(&mut self, cx: &mut Cx) {
-        let (g, status) = self.status();
+        let glance = self.glance();
+        let (g, status) = self.status(glance.as_ref());
         let nodes: Vec<(String, bool)> = match &self.core {
             Some(Core::Master(m)) => m.master.leases.nodes().into_iter().map(|n| (n.name, n.dev)).collect(),
             _ => Vec::new(),
         };
-        let key = format!("{g:?}|{status}|{:?}|{nodes:?}|{}", self.login, makepad_devhub::lease::exec::writes_allowed());
+        let key = format!("{g:?}|{status}|{glance:?}|{:?}|{nodes:?}|{}", self.login, makepad_devhub::lease::exec::writes_allowed());
         if key != self.tray_key {
             self.tray_key = key;
-            // the menu is the secondary click's; the primary click opens the dropdown (the
-            // master's panel, a node's task view)
-            let mut menu = vec![TrayMenuItem::Item { id: live_id!(status), label: status.clone(), enabled: false, checked: None }, TrayMenuItem::Line];
-            if matches!(self.core, Some(Core::Master(_))) {
-                menu.push(TrayMenuItem::item(OPEN, "Open panel"));
-                menu.push(TrayMenuItem::item(SEEN, "Mark all read"));
+            let text = |i: usize, label: String| TrayMenuItem::Item { id: LiveId(LINE_BASE + i as u64), label, enabled: false, checked: None };
+            let mut menu = Vec::new();
+            if let Some(gl) = &glance {
+                // the master's menu is the click's: the fleet at a glance, then its actions
+                let lines = gl.lines();
+                let n = lines.len();
+                menu.extend(lines.into_iter().enumerate().map(|(i, l)| text(i, l)));
+                menu.push(TrayMenuItem::Line);
+                if !gl.events.is_empty() {
+                    menu.extend(gl.events.iter().enumerate().map(|(i, e)| text(n + i, e.clone())));
+                    menu.push(TrayMenuItem::Line);
+                }
+                menu.push(TrayMenuItem::item(OPEN, "Open devhub"));
+                menu.push(TrayMenuItem::check(PAUSE, "Pause landing", gl.land_paused.is_some()));
+                if gl.verify != makepad_devhub::glance::Verify::None {
+                    menu.push(TrayMenuItem::item(VERIFY, "Run verify now"));
+                }
+                if gl.unseen > 0 {
+                    menu.push(TrayMenuItem::item(SEEN, "Mark all read"));
+                }
                 if !nodes.is_empty() {
                     menu.push(TrayMenuItem::Line);
                     self.dev_nodes = nodes.iter().map(|(n, _)| n.clone()).collect();
@@ -438,11 +462,14 @@ impl App {
                 }
             }
             if matches!(self.core, Some(Core::Node(_))) {
+                // a node's menu is the secondary click's; the primary click opens its task view
+                menu.push(TrayMenuItem::Item { id: live_id!(status), label: status.clone(), enabled: false, checked: None });
+                menu.push(TrayMenuItem::Line);
                 // the node's own dev switch (the master keeps it; this asks it)
                 menu.push(TrayMenuItem::Item { id: DEVSW, label: "Dev: this machine takes work from the network".into(), enabled: true, checked: Some(makepad_devhub::lease::exec::writes_allowed()) });
             }
             menu.push(TrayMenuItem::item(QUIT, "Quit devhub"));
-            cx.set_tray(TrayIcon { id: TRAY, image: TrayImage { width: glyph::SIZE, height: glyph::SIZE, alpha: glyph::alpha(g) }, tooltip: format!("devhub \u{b7} {status}"), menu, dropdown: true });
+            cx.set_tray(TrayIcon { id: TRAY, image: TrayImage { width: glyph::SIZE, height: glyph::SIZE, alpha: glyph::alpha(g) }, tooltip: format!("devhub \u{b7} {status}"), menu, dropdown: glance.is_none() });
         }
         if let Some(Core::Node(n)) = &self.core {
             if self.node_drop.is_open() {
@@ -455,7 +482,7 @@ impl App {
             return;
         }
         let Some(Core::Master(m)) = &self.core else { return };
-        if !(self.open || self.window_shown) {
+        if !self.window_shown {
             return;
         }
         let entries = m.master.inbox.lock().unwrap().entries.clone();
@@ -505,7 +532,7 @@ impl App {
         }
         self.state.status = status;
         let st = self.state.clone();
-        for id in [ids!(drop_view), ids!(hub_view)] {
+        for id in [ids!(hub_view)] {
             if let Some(mut v) = self.ui.widget(cx, id).borrow_mut::<DevhubView>() {
                 v.set_state(cx, st.clone());
             }
@@ -514,7 +541,7 @@ impl App {
 
     fn set_looking(&self) {
         if let Some(Core::Master(m)) = &self.core {
-            m.looking.store(self.open || self.window_shown, Ordering::Relaxed);
+            m.looking.store(self.window_shown, Ordering::Relaxed);
         }
     }
 
@@ -523,7 +550,7 @@ impl App {
     fn live_shown(&self) -> bool {
         match &self.core {
             Some(Core::Node(_)) => self.node_drop.is_open(),
-            Some(Core::Master(_)) => (self.open || self.window_shown) && self.state.selected.is_some(),
+            Some(Core::Master(_)) => self.window_shown && self.state.selected.is_some(),
             None => false,
         }
     }
@@ -533,7 +560,7 @@ impl App {
         let on = self.live_shown();
         if on && self.sampler.is_none() {
             let sampler = Sampler::start();
-            for id in [ids!(tasks), ids!(drop_view), ids!(hub_view)] {
+            for id in [ids!(tasks), ids!(hub_view)] {
                 if let Some(mut v) = self.ui.widget(cx, id).borrow_mut::<DevhubTasks>() {
                     v.board = Some(sampler.board.clone());
                 }
@@ -568,7 +595,7 @@ impl App {
     }
 
     fn redraw_live(&mut self, cx: &mut Cx) {
-        for id in [ids!(tasks), ids!(drop_view), ids!(hub_view)] {
+        for id in [ids!(tasks), ids!(hub_view)] {
             self.ui.widget(cx, id).redraw(cx);
         }
     }
@@ -582,7 +609,9 @@ impl App {
         }
         let _ = std::fs::remove_file(proto::control_socket());
         let _ = std::fs::remove_file(proto::home().join("node.pid"));
-        installed::clear_pid();
+        if matches!(self.core, Some(Core::Master(_))) {
+            let _ = std::fs::remove_file(makepad_devhub::master::pid_file());
+        }
         cx.remove_tray(TRAY);
         cx.quit();
     }
@@ -752,7 +781,6 @@ impl MatchEvent for App {
             cx.quit();
             return;
         }
-        installed::write_pid();
         if matches!(self.core, Some(Core::Node(_))) {
             // what stops this node by pid (a Windows logon task's hub, a test by hand)
             let _ = std::fs::write(proto::home().join("node.pid"), format!("{}\n", std::process::id()));
@@ -859,6 +887,22 @@ impl AppMain for App {
                     makepad_devhub::lease::exec::request_dev(!makepad_devhub::lease::exec::writes_allowed());
                     self.refresh(cx);
                 }
+                id if id == PAUSE => {
+                    if let Some(Core::Master(m)) = &self.core {
+                        let resume = m.master.land.paused().is_some();
+                        m.master.land.set_paused(if resume { None } else { Some("from the menu bar") });
+                    }
+                    self.refresh(cx);
+                }
+                id if id == VERIFY => {
+                    // the newest landed pair, queued for the verifier (it says so on the feed)
+                    if let Some(ctx) = makepad_devhub::orch::ctx() {
+                        if let Err(e) = makepad_devhub::orch::verify::serve(ctx, "verify kick") {
+                            log_line(&format!("devhub: verify kick: {e}"));
+                        }
+                    }
+                    self.refresh(cx);
+                }
                 id if id == SEEN => {
                     self.act(DevhubAction::SeenAll);
                     self.refresh(cx);
@@ -872,40 +916,6 @@ impl AppMain for App {
                 }
                 _ => {}
             },
-            Event::TrayClick(e) if e.tray == TRAY && matches!(self.core, Some(Core::Master(_))) => {
-                if !cx.has_tray_dropdown() {
-                    self.window_shown = true;
-                    self.set_looking();
-                    self.ui.window(cx, ids!(main_window)).show(cx);
-                } else if self.open {
-                    self.open = false;
-                    self.ui.window(cx, ids!(dropdown_window)).set_visible(cx, false);
-                } else if self.dismissed.take().is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(350)) {
-                    // the click that closed it
-                } else {
-                    self.open = true;
-                    self.ui.window(cx, ids!(dropdown_window)).show_at_tray(cx, TRAY, DROPDOWN);
-                }
-                self.set_looking();
-                self.refresh(cx);
-                self.sync_live(cx);
-            }
-            Event::PopupDismissed(e) if Some(e.window_id) == self.ui.window(cx, ids!(dropdown_window)).window_id() => {
-                if self.open {
-                    self.dismissed = Some(std::time::Instant::now());
-                    self.open = false;
-                    self.ui.window(cx, ids!(dropdown_window)).set_visible(cx, false);
-                    self.set_looking();
-                    self.sync_live(cx);
-                }
-            }
-            Event::KeyDown(k) if k.key_code == KeyCode::Escape && self.open => {
-                self.open = false;
-                self.ui.window(cx, ids!(dropdown_window)).set_visible(cx, false);
-                self.set_looking();
-                self.sync_live(cx);
-            }
-            Event::Shutdown => installed::clear_pid(),
             Event::WindowCloseRequested(e) if cx.has_tray() => {
                 e.accept_close.set(false);
                 self.ui.window(cx, ids!(main_window)).set_visible(cx, false);

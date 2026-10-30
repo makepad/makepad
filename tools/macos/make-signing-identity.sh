@@ -100,5 +100,5 @@ fi
 
 echo
 echo "done: \"$NAME\" (SHA-1 $SHA1) is ready."
-echo "reinstall the apps once (bash tools/aihub/install-mac.sh, tools/desklink/install-mac.sh, tools/devhub/install-mac.sh);"
+echo "reinstall the apps once (bash tools/aihub/install-mac.sh, tools/desklink/install-mac.sh; devhub: local/dock-launchers.sh);"
 echo "macOS asks its privacy questions once more for each, and never again after later reinstalls."

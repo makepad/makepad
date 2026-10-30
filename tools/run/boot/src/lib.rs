@@ -984,7 +984,7 @@ impl Boot {
         if renderer.active.is_none() {
             return;
         }
-        if renderer.layer.on {
+        if renderer.layer.on && !renderer.layer.paused() {
             self.present_field();
             return;
         }
@@ -1010,7 +1010,10 @@ impl Boot {
             );
             renderer.dirty = false;
         }
-        let rect = (self.state.mode == Mode::Overlay).then_some(renderer.layout.panel);
+        // a backend with window layers shows the view over the app's dimmed last frame (the
+        // layer); else as the opaque panel the HAL composes over it
+        let paused_layer = renderer.layer.paused();
+        let rect = (self.state.mode == Mode::Overlay && !paused_layer).then_some(renderer.layout.panel);
         self.set_overlay(rect);
         let renderer = self.renderer.as_mut().unwrap();
         let program = renderer.active.as_ref().unwrap();
@@ -1151,13 +1154,34 @@ impl Boot {
             ..Default::default()
         });
         let scissor = frame.map(|v| v * dpi);
-        program.pipes[FIELD].draw_buffer(
-            &mut writer,
-            field::INSTANCES,
-            field.count,
-            &uniforms[FIELD],
-            scissor,
-        );
+        // the paused app under the view: its last frame, dimmed (the HAL copied it into APP at
+        // this frame's start); the field stays away
+        let mut kept: Vec<Vec<f32>> = Vec::new();
+        let app_pipe = program.layer.map(|i| &program.pipes[i]).filter(|_| paused_layer);
+        if let Some(pipe) = app_pipe {
+            let mut app_uniforms = Vec::new();
+            pipe.uniforms.write(&[(id!(viewport), &viewport), (id!(dpi), &[dpi])], &mut app_uniforms);
+            let mut app_data = Vec::new();
+            pipe.instances.write(
+                &[
+                    (id!(rect), &[0.0, 0.0, viewport[0], viewport[1]]),
+                    (id!(opacity), &[1.0]),
+                    (id!(dim), &[layer::PAUSE_DIM]),
+                ],
+                &mut app_data,
+            );
+            pipe.draw(&mut writer, &app_data, &app_uniforms, renderer.layer.texture(layer::APP), scissor);
+            kept.push(app_data);
+            kept.push(app_uniforms);
+        } else {
+            program.pipes[FIELD].draw_buffer(
+                &mut writer,
+                field::INSTANCES,
+                field.count,
+                &uniforms[FIELD],
+                scissor,
+            );
+        }
         for i in [ERROR_BAND, ICON, GLYPH] {
             if i == ICON && !program.icon {
                 continue;
@@ -1241,7 +1265,9 @@ impl Boot {
     /// The run's wish for the window layer this turn, and the app's presented frames so far (a
     /// new one is blurred again). `None` takes the layer away at once.
     pub fn layer(&mut self, want: Option<LayerWant>, app_frames: u64) {
-        let want = want.filter(|_| self.layers() && self.overlay.is_none());
+        // the paused view replaces a panel (the HAL keeps one overlay per window); the boot
+        // field's layer never does
+        let want = want.filter(|w| self.layers() && (self.overlay.is_none() || *w == LayerWant::Paused));
         let size = [
             (self.geometry[2] * self.dpi).round().max(1.0) as u32,
             (self.geometry[3] * self.dpi).round().max(1.0) as u32,
@@ -1250,9 +1276,23 @@ impl Boot {
         let Some(renderer) = &mut self.renderer else {
             return;
         };
+        let paused = want == Some(LayerWant::Paused);
+        if paused && (renderer.layer.app_frames != app_frames || !renderer.layer.paused()) {
+            // a new app frame under the paused view (a worker stopped, the UI still draws), or
+            // the view just came on: drawn again
+            renderer.redraw = true;
+        }
+        if paused != renderer.layer.paused() {
+            renderer.dirty = true;
+        }
         renderer.layer.set(want);
         renderer.layer.app_frames = app_frames;
         let mut writer = CmdWriter::new(HOST);
+        if paused {
+            // the layer takes the panel's place without a removal in between
+            self.overlay = None;
+        }
+        let Some(renderer) = &mut self.renderer else { return };
         match want {
             None if renderer.layer.on => {
                 writer.window_overlay(window, false, [0.0; 4], Id::NONE);
@@ -1279,6 +1319,15 @@ impl Boot {
             }
             _ => return,
         }
+        Hal::global().submit(&writer.buf());
+    }
+
+    /// The window in front (the view over the app came on): the window system orders it above
+    /// the process's other windows.
+    pub fn raise(&mut self) {
+        let Some(window) = self.window else { return };
+        let mut writer = CmdWriter::new(HOST);
+        writer.window_state(window, window_state::SHOW);
         Hal::global().submit(&writer.buf());
     }
 

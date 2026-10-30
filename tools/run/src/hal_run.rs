@@ -848,6 +848,19 @@ fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Doc
                 panic,
                 choice,
                 value,
+            } if choice == "restart-state" => {
+                let _ = value;
+                // the parked thread stays parked; the app restarts with its state at its safe
+                // point (its UI thread is free) and the old run's parked threads go with it
+                if let Err(e) = relax_compiler::reload::restart_with_state(format!("a restart after the panic {panic}")) {
+                    post(Update::Message(e));
+                }
+                panic_changed();
+            }
+            Work::Resume {
+                panic,
+                choice,
+                value,
             } => {
                 // Reuse inspect's validation and its domain-restart / restartable-fn logic.
                 let (reply, _) = makepad_remote::cmd::answer(
@@ -874,7 +887,7 @@ fn parked(domain: u32) -> Option<Option<ParkedPanic>> {
         };
         let Some(id) = json.get("id") else { continue };
         let id = id.str().to_string();
-        let choices = json
+        let offered: Vec<String> = json
             .get("more")
             .map(|j| j.arr())
             .unwrap_or(&[])
@@ -886,15 +899,27 @@ fn parked(domain: u32) -> Option<Option<ParkedPanic>> {
                     .flatten()
             })
             .collect();
+        let thread = json.get("thread").map_or("", |j| j.str()).to_string();
         return Some(Some(ParkedPanic {
             id,
             message: json.get("message").map_or("", |j| j.str()).into(),
             location: json.get("location").map_or("", |j| j.str()).into(),
-            choices,
+            choices: view_choices(&offered, thread == "main"),
+            keeps_state: thread != "main" && relax_compiler::reload::restart_keeps_state(),
+            thread,
             stale: json.get("kind").is_some_and(|k| k.str() == "stale access"),
         }));
     }
     Some(None)
+}
+
+/// The choices the paused view offers, first the one it leads with. A retry reruns the frame
+/// that panicked; on another thread than the UI's the work it belonged to (a job, a pool task)
+/// is not waiting for it, so a worker's panic leads with a restart and the unwind (the thread's
+/// own catch boundary runs the app's failure path) and offers no retry.
+fn view_choices(offered: &[String], main: bool) -> Vec<String> {
+    let order: &[&str] = if main { &["retry", "restart", "panic", "return", "stop"] } else { &["restart", "panic", "return", "stop"] };
+    order.iter().filter(|c| offered.iter().any(|o| o == *c)).map(|c| c.to_string()).collect()
 }
 
 impl Work {
@@ -1319,15 +1344,34 @@ fn pump(
                 "the inspect view (session view open)"
             }
         });
+        // what the paused view offers (the choices in its order) and how it is drawn: over the
+        // app's dimmed last frame in its own window (a window layer) or as the opaque panel
+        let paused = data.parked.as_ref().map_or(String::new(), |p| {
+            let choices: Vec<String> = p.choices.iter().map(|c| format!("\"{c}\"")).collect();
+            format!(
+                ",\"thread\":{},\"choices\":[{}],\"keeps_state\":{}",
+                makepad_remote::json_str(&p.thread),
+                choices.join(","),
+                p.keeps_state
+            )
+        });
+        let drawn = if !overlay { "null" } else if host.layers() { "\"layer\"" } else { "\"panel\"" };
         let shown = format!(
-            "\"over_app\":{},\"why\":{},\"dismissed\":{},\"pid\":{}",
+            "\"over_app\":{},\"why\":{},\"dismissed\":{},\"drawn\":{}{},\"pid\":{}",
             overlay,
             why.map_or("null".to_string(), |w| format!("\"{w}\"")),
             overlay_dismissed,
+            drawn,
+            paused,
             std::process::id()
         );
         if view_shown.as_deref() != Some(shown.as_str()) {
             let was_over = view_shown.as_deref().is_some_and(|v| v.starts_with("\"over_app\":true"));
+            if why.is_some() && !was_over {
+                // in front of the app's other windows (a window left over from a restart in place
+                // stood over it on macOS: the view was seen only once that window closed)
+                host.raise();
+            }
             match why {
                 Some(why) => eprintln!(
                     "makepad-run: the run's view is over the app: {why}; Esc or `makepad inspect {} session view dismiss` dismisses it",
@@ -1393,6 +1437,9 @@ fn pump(
             Stage::Lift => Some(LayerWant::Ready),
             Stage::Running => None,
         };
+        // the view over a paused app: in the app's own window, over its dimmed last frame, where
+        // the backend composes window layers (else the opaque panel `overlay` asks for)
+        let want = if overlay && host.layers() { Some(LayerWant::Paused) } else { want };
         host.layer(want, app_frames);
         // the JIT ring while the app runs: the JIT's work in flight, a UI block, what the program
         // is stopped on (while it is)
@@ -1683,11 +1730,12 @@ fn pump(
                                 return_entry = Some((panic.id.clone(), String::new()));
                                 host.input(Some(String::new()));
                             } else {
+                                let choice = if choice == "restart" && panic.keeps_state { "restart-state".to_string() } else { choice.clone() };
                                 enqueue(
                                     &mut work_pending,
                                     Work::Resume {
                                         panic: panic.id.clone(),
-                                        choice: choice.clone(),
+                                        choice,
                                         value: String::new(),
                                     },
                                 );

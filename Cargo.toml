@@ -302,6 +302,7 @@ workspace.members = [
     "libs/relax/session",
     "libs/relax/types",
     "tools/run/fixture",
+    "tools/run/fixture/park_view",
     "libs/relax/lex",
     "libs/system_speech",
     # Relax run-time benchmark: real-world workloads (rustc --release vs makepad run)

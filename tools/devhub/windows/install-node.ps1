@@ -4,8 +4,10 @@
 # 1. writes %USERPROFILE%\.makepad\devhub\node.conf when there is none (name, host, port 8797,
 #    discovery = off: the master dials the node from its nodes.conf) and sync.conf (the synced
 #    checkout; no WM to build or restart);
-# 2. writes node-start.cmd next to them: `cargo run --release -p makepad-app-devhub` in the checkout,
-#    so the hub that runs is always the checkout's (no installed copy goes stale); its log is node.log;
+# 2. writes node-start.cmd next to them: `cargo run --release -p makepad-app-devhub` in the node's one tree
+#    (-Tree; default %USERPROFILE%\devhub\tree when it exists, the tree the leases run in, else the checkout),
+#    in a loop: every exit (a clean one too: a restart for new code) starts the tree's current code again;
+#    its log is node.log;
 # 3. registers the per-user task "Makepad devhub node" (at logon, restarted when it fails) that runs
 #    node-start.cmd under a headless console: no console window, and nothing the hub starts (git,
 #    cargo, lease runs) opens one either;
@@ -20,6 +22,7 @@
 param(
     [string]$Name = "",
     [string]$Checkout = "$env:USERPROFILE\makepad",
+    [string]$Tree = "",
     [string]$HostAddr = "",
     [int]$Port = 8797,
     [switch]$Start,
@@ -36,6 +39,10 @@ $log = Join-Path $dir "node.log"
 $target = Join-Path $env:USERPROFILE "devhub\target\hub"
 $exe = Join-Path $target "release\makepad-app-devhub.exe"
 if (-not (Test-Path (Join-Path $Checkout "apps\devhub\Cargo.toml"))) { throw "no makepad checkout at $Checkout" }
+if (-not $Tree) {
+    $t = Join-Path $env:USERPROFILE "devhub\tree"
+    $Tree = if (Test-Path (Join-Path $t "apps\devhub\Cargo.toml")) { $t } else { $Checkout }
+}
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 
 # 1. the node's settings (kept when they exist)
@@ -62,13 +69,17 @@ if (-not (Test-Path $sync)) {
 # 2. the start script
 Set-Content -Path $startCmd -Encoding ascii -Value @(
     "@echo off",
-    "rem devhub node at logon (tools/devhub/windows/install-node.ps1): cargo run, so the hub is always the checkout's",
-    "cd /d `"$Checkout`"",
+    "rem devhub node at logon (tools/devhub/windows/install-node.ps1): cargo run in the node's tree, restarted on every exit",
+    "cd /d `"$Tree`"",
     "set CARGO_TARGET_DIR=$target",
     "set CARGO_INCREMENTAL=0",
     "set CARGO_NET_OFFLINE=true",
-    "echo ---- %DATE% %TIME% devhub node start >> `"$log`"",
-    "cargo run --release -p makepad-app-devhub >> `"$log`" 2>&1"
+    ":again",
+    "echo ---- %DATE% %TIME% devhub node start in $Tree >> `"$log`"",
+    "cargo run --release -p makepad-app-devhub >> `"$log`" 2>&1",
+    "rem 5 s between restarts (timeout needs a console input; the task's console is headless)",
+    "ping -n 6 127.0.0.1 > nul",
+    "goto again"
 )
 
 # 3. the at-logon task in this user's session (the tray lives there)

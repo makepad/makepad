@@ -55,6 +55,25 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
+/// What a paused view's choice (a resume of the parked panic) is called and what it does, said
+/// plainly: (button, what happens). `main`: the UI thread stopped; `keeps_state`: a restart hands
+/// the app's own state to the new run (it supports restarts with state and its UI thread is free).
+pub(crate) fn choice_text(choice: &str, main: bool, keeps_state: bool) -> (&'static str, &'static str) {
+    match choice {
+        "retry" => ("Retry", "runs the call that panicked again; what it did before the panic may happen twice"),
+        "restart" if keeps_state => ("Restart app (keep state)", "relaunches the app in this window with the state it saves for restarts"),
+        "restart" => ("Restart app", "relaunches the app in this window; what it holds only in memory is lost"),
+        "panic" if main => ("Let it panic", "the panic goes on as without the JIT: the event handler unwinds and the app redraws"),
+        "panic" => ("Unwind the thread", "the panic goes on to this thread's catch boundary, so the app's own failure path runs (a job ends as failed)"),
+        "return" => ("Return a value", "the stopped function returns a value you type"),
+        "stop" => ("Stop", "ends the app"),
+        _ => ("Resume", ""),
+    }
+}
+
+/// The Esc choice of the view over the app.
+pub(crate) const DISMISS_TEXT: (&str, &str) = ("Dismiss", "hides this view; a paused thread stays paused until you choose");
+
 impl Renderer {
     fn label(&mut self, value: &str, style: Line, rect: [f32; 4], fixed: bool) -> TextLine {
         let run = self.text.shape(value, style.size, rect[2], style.height);
@@ -103,7 +122,6 @@ impl Renderer {
         let halted_label = program.label(id!(halted));
         let root_label = program.label(id!(root_cause));
         let follow_label = program.label(id!(follow_on));
-        let resume_label = program.label(id!(tap_resume));
         let input_label = program.label(id!(input_label));
         let has_icon = self.icon_aspect.is_some() && program.icon;
         let overlay = state.mode == Mode::Overlay;
@@ -180,7 +198,9 @@ impl Renderer {
         let errors = state.diagnostics.len();
         let groups = groups::groups(&state.diagnostics);
         let headline = if let Some(panic) = &state.parked {
-            format!("Panicked at {}", short_path(&panic.location))
+            let what = if panic.stale { "stale code ran" } else { panic.message.lines().next().unwrap_or("") };
+            let what: String = what.chars().take(160).collect();
+            format!("Paused: {what}")
         } else if errors > 0 {
             plural(errors, "error", "errors")
         } else {
@@ -194,8 +214,15 @@ impl Renderer {
         let rows = line.run.rows.min(2);
         y += rows as f32 * headline_style.height;
         layout.fixed_text.push(line);
-        let sub = if state.parked.is_some() {
-            String::new()
+        let sub = if let Some(panic) = &state.parked {
+            let mut parts = Vec::new();
+            if !panic.location.is_empty() {
+                parts.push(format!("in {}", short_path(&panic.location)));
+            }
+            if !panic.thread.is_empty() {
+                parts.push(format!("thread {}", panic.thread));
+            }
+            parts.join(" · ")
         } else if errors > 0 {
             let roots: usize = groups.iter().filter(|g| g.root).map(|g| g.members.len()).sum();
             let mut files: Vec<&str> = state.diagnostics.iter().map(|d| d.file.as_str()).filter(|f| !f.is_empty()).collect();
@@ -402,17 +429,6 @@ impl Renderer {
             y += self.flow(&mut layout, "PANIC", s, text_x, y, text_w) + 3.0;
             y += self.flow(&mut layout, &panic.location, location_style, text_x, y, text_w) + location_style.gap;
             y += self.flow(&mut layout, &panic.message, panic_style, text_x, y, text_w) + panic_style.gap;
-            if !env.touch && !panic.choices.is_empty() {
-                let choices: Vec<String> = panic
-                    .choices
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| format!("{}  {}", i + 1, c.to_uppercase()))
-                    .collect();
-                let s = style(status_style, 10.0, error_style.color);
-                let text = format!("{}   {}", resume_label.to_uppercase(), choices.join("     "));
-                y += 4.0 + self.flow(&mut layout, &text, s, text_x, y + 4.0, text_w);
-            }
             y += pad - 2.0;
             let index = state.diagnostics.len();
             layout.cards.push(Card {
@@ -423,16 +439,38 @@ impl Renderer {
                 fixed: false,
             });
             y += 8.0;
-            if env.touch && self.input.is_none() {
-                for (i, choice) in panic.choices.iter().enumerate() {
-                    let label = format!("{resume_label} · {choice}").to_uppercase();
-                    let height = sizes.action_height;
-                    let mut line = self.label(&label, button_style, [list_x, y, list_w, 0.0], false);
-                    line.position[1] = y + (height - line.run.rows as f32 * button_style.height) * 0.5;
-                    layout.text.push(line);
+            // the choices, each a button that says what it does (keys 1..9; Esc dismisses)
+            if self.input.is_none() {
+                let main = panic.thread == "main";
+                let mut rows: Vec<(Action, String, &str)> = panic
+                    .choices
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let (name, what) = choice_text(c, main, panic.keeps_state);
+                        let key = if env.touch { String::new() } else { format!("{}  ", i + 1) };
+                        (Action::Resume(i), format!("{key}{}", name.to_uppercase()), what)
+                    })
+                    .collect();
+                if overlay {
+                    let key = if env.touch { "" } else { "ESC  " };
+                    rows.push((Action::Dismiss, format!("{key}{}", DISMISS_TEXT.0.to_uppercase()), DISMISS_TEXT.1));
+                }
+                let what_style = style(location_style, 11.0, SOFT);
+                for (action, name, what) in rows {
+                    let name_w = (list_w * 0.32).clamp(120.0, 240.0).min(list_w);
+                    let mut label = self.label(&name, button_style, [list_x, y, name_w, 0.0], false);
+                    let note = self.label(what, what_style, [list_x + name_w + 12.0, y, (list_w - name_w - 16.0).max(1.0), 0.0], false);
+                    let text_h = (label.run.rows as f32 * button_style.height).max(note.run.rows as f32 * what_style.height);
+                    let height = sizes.action_height.max(text_h + 12.0);
+                    label.position[1] = y + (height - label.run.rows as f32 * button_style.height) * 0.5;
+                    let mut note = note;
+                    note.position[1] = y + (height - note.run.rows as f32 * what_style.height) * 0.5;
+                    layout.text.push(label);
+                    layout.text.push(note);
                     layout.cards.push(Card {
                         rect: [list_x, y, list_w, height],
-                        action: Action::Resume(i),
+                        action,
                         accent: 3.0,
                         members: 0..0,
                         fixed: false,

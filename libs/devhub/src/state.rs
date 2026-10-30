@@ -141,6 +141,8 @@ pub struct Leg {
     pub node: String,
     /// the leg's verdict line (or why there is none)
     pub summary: String,
+    /// the first error lines of its log
+    pub errors: Vec<String>,
     /// its log on the master
     pub log: String,
 }
@@ -270,6 +272,162 @@ pub struct Pushed {
     pub files: u32,
 }
 
+// ---- ci ----
+
+/// The CI shards of verify (`devhub ci`, [`crate::orch::ci`]): what each shard took last (for
+/// balancing the boxes), the run in progress and the finished runs.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Ci {
+    /// seconds per shard id (a moving average of its finished runs), for balancing
+    pub timings: Vec<(String, f64)>,
+    pub run: Option<CiRun>,
+    /// finished runs, oldest first
+    pub runs: Vec<CiRun>,
+    /// runs started: rotates which OS each app's smoke script runs on
+    pub rotation: u64,
+}
+
+impl Ci {
+    pub fn timing(&self, id: &str) -> Option<f64> {
+        self.timings.iter().find(|(k, _)| k == id).map(|(_, s)| *s)
+    }
+
+    /// Folds a measured time into the shard's average (new runs weigh half).
+    pub fn measured(&mut self, id: &str, secs: f64) {
+        match self.timings.iter_mut().find(|(k, _)| k == id) {
+            Some((_, s)) => *s = (*s + secs) / 2.0,
+            None => self.timings.push((id.to_string(), secs)),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct CiRun {
+    pub id: String,
+    pub pair: Pair,
+    /// a CLI run: no verify ledger is written
+    pub dry: bool,
+    pub started_ms: u64,
+    pub ended_ms: u64,
+    /// `running`, `ok`, `fail`, `incomplete`
+    pub verdict: String,
+    pub shards: Vec<CiShard>,
+    /// the box that finished last and its shards in order: the run's critical path
+    pub critical: String,
+    /// per box: `<node> <busy s> s, <n> shards`
+    pub boxes: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct CiShard {
+    /// `check:<target>`, `jit:<group>`, `test:<pkg>:<target>`, `slice:<app>`, `smoke:<script dir>`
+    pub id: String,
+    /// `wait`, `run`, `ok`, `fail`, `incomplete`
+    pub state: String,
+    pub node: String,
+    pub lease: String,
+    pub secs: f64,
+    /// what decided it (its failing step and why, or the steps' count)
+    pub summary: String,
+    /// its first error lines
+    pub errors: Vec<String>,
+    /// its log on the master
+    pub log: String,
+}
+
+impl CiShard {
+    /// The shard as a verify leg (the legs a failure keeps).
+    pub fn leg(&self) -> Leg {
+        Leg { name: self.id.clone(), state: self.state.clone(), lease: self.lease.clone(), node: self.node.clone(), summary: self.summary.clone(), errors: self.errors.clone(), log: self.log.clone() }
+    }
+}
+
+fn ci_shard_value(c: &CiShard) -> Value {
+    obj(vec![
+        ("id", s(&c.id)),
+        ("state", s(&c.state)),
+        ("node", s(&c.node)),
+        ("lease", s(&c.lease)),
+        ("secs", Value::F64(c.secs)),
+        ("summary", s(&c.summary)),
+        ("errors", strs(&c.errors)),
+        ("log", s(&c.log)),
+    ])
+}
+
+fn ci_shard_from(v: &Value) -> CiShard {
+    let o = Some(v);
+    CiShard {
+        id: text(o, "id"),
+        state: text(o, "state"),
+        node: text(o, "node"),
+        lease: text(o, "lease"),
+        secs: v.get("secs").and_then(f64_of).unwrap_or(0.0),
+        summary: text(o, "summary"),
+        errors: strs_from(o, "errors"),
+        log: text(o, "log"),
+    }
+}
+
+fn ci_run_value(r: &CiRun) -> Value {
+    obj(vec![
+        ("id", s(&r.id)),
+        ("pair", r.pair.to_value()),
+        ("dry", Value::Bool(r.dry)),
+        ("started_ms", int(r.started_ms)),
+        ("ended_ms", int(r.ended_ms)),
+        ("verdict", s(&r.verdict)),
+        ("shards", Value::Arr(r.shards.iter().map(ci_shard_value).collect())),
+        ("critical", s(&r.critical)),
+        ("boxes", strs(&r.boxes)),
+    ])
+}
+
+fn ci_run_from(v: &Value) -> CiRun {
+    let o = Some(v);
+    CiRun {
+        id: text(o, "id"),
+        pair: Pair::from_value(v.get("pair")),
+        dry: flag(o, "dry", false),
+        started_ms: uint(o, "started_ms"),
+        ended_ms: uint(o, "ended_ms"),
+        verdict: text(o, "verdict"),
+        shards: arr(o, "shards").iter().map(ci_shard_from).collect(),
+        critical: text(o, "critical"),
+        boxes: strs_from(o, "boxes"),
+    }
+}
+
+fn ci_value(c: &Ci) -> Value {
+    obj(vec![
+        ("timings", Value::Obj(c.timings.iter().map(|(k, v)| (k.clone(), Value::F64(*v))).collect())),
+        ("run", c.run.as_ref().map_or(Value::Null, ci_run_value)),
+        ("runs", Value::Arr(c.runs.iter().map(ci_run_value).collect())),
+        ("rotation", int(c.rotation)),
+    ])
+}
+
+fn ci_from(v: Option<&Value>) -> Ci {
+    let timings = match v.and_then(|v| v.get("timings")) {
+        Some(Value::Obj(f)) => f.iter().filter_map(|(k, x)| f64_of(x).map(|s| (k.clone(), s))).collect(),
+        _ => Vec::new(),
+    };
+    Ci {
+        timings,
+        run: v.and_then(|x| x.get("run")).filter(|r| !r.is_null()).map(ci_run_from),
+        runs: arr(v, "runs").iter().map(ci_run_from).collect(),
+        rotation: uint(v, "rotation"),
+    }
+}
+
+fn f64_of(v: &Value) -> Option<f64> {
+    match v {
+        Value::F64(f) => Some(*f),
+        Value::Int(i) => Some(*i as f64),
+        _ => None,
+    }
+}
+
 // ---- lanes ----
 
 /// A lane worktree the master controls (`devhub lane new`, or adopted).
@@ -314,9 +472,16 @@ pub struct Job {
     /// a preferred node, or empty
     pub node_pref: String,
     pub prio: i32,
-    /// the pinned `--rev` (`branch@sha[,branch@sha]`)
+    /// the pinned `--rev` (`branch@sha[,branch@sha]`): the snapshot's base commits
     pub rev: String,
     pub repo_dir: String,
+    /// the snapshot of the worktree's uncommitted files (`S<n>`, its files and manifest in
+    /// `~/.makepad/devhub/jobs/snap/S<n>`), shipped on top of `rev`; empty: the commits alone
+    pub snap: String,
+    /// files shipped and deleted on top of `rev`
+    pub snap_files: u32,
+    /// placements so far (a box lost under it places it again)
+    pub attempts: u32,
     pub cmd: Vec<String>,
     /// jobs that must end ok first
     pub after: Vec<String>,
@@ -325,6 +490,10 @@ pub struct Job {
     /// `lost` (the master restarted under it)
     pub state: String,
     pub submitted_ms: u64,
+    /// the box granted, the snapshot shipped, the first output byte seen (latency of a job)
+    pub granted_ms: u64,
+    pub shipped_ms: u64,
+    pub first_out_ms: u64,
     pub started_ms: u64,
     pub ended_ms: u64,
     pub lease: String,
@@ -369,11 +538,14 @@ pub struct Doc {
     /// the id number of the next waiter (`A<n>`)
     pub after_next: u64,
     pub pushes: Vec<Pushed>,
+    pub ci: Ci,
     pub lanes: Vec<LaneRec>,
     pub jobs: Vec<Job>,
     /// the id numbers of the next job (`J<n>`) and batch (`B<n>`)
     pub jobs_next: u64,
     pub batches_next: u64,
+    /// the id number of the next job snapshot (`S<n>`)
+    pub snaps_next: u64,
 }
 
 impl Doc {
@@ -404,10 +576,12 @@ impl Doc {
             ("after", Value::Arr(self.after.iter().map(waiter_value).collect())),
             ("after_next", int(self.after_next)),
             ("pushes", Value::Arr(self.pushes.iter().map(pushed_value).collect())),
+            ("ci", ci_value(&self.ci)),
             ("lanes", Value::Arr(self.lanes.iter().map(lane_value).collect())),
             ("jobs", Value::Arr(self.jobs.iter().map(job_value).collect())),
             ("jobs_next", int(self.jobs_next)),
             ("batches_next", int(self.batches_next)),
+            ("snaps_next", int(self.snaps_next)),
         ])
     }
 
@@ -432,6 +606,7 @@ impl Doc {
             after: arr(Some(v), "after").iter().map(waiter_from).collect(),
             after_next: uint(Some(v), "after_next"),
             pushes: arr(Some(v), "pushes").iter().map(|p| Pushed { pair: Pair::from_value(p.get("pair")), commit: text(Some(p), "commit"), origin_was: text(Some(p), "origin_was"), at_ms: uint(Some(p), "at_ms"), files: uint(Some(p), "files") as u32 }).collect(),
+            ci: ci_from(v.get("ci")),
             lanes: arr(Some(v), "lanes").iter().map(|l| {
                 let o = Some(l);
                 LaneRec { name: text(o, "name"), path: text(o, "path"), branch: text(o, "branch"), cbranch: text(o, "cbranch"), created_ms: uint(o, "created_ms"), adopted: flag(o, "adopted", false), state: text(o, "state"), landed_ms: uint(o, "landed_ms"), keep: flag(o, "keep", false), ended_ms: uint(o, "ended_ms"), note: text(o, "note") }
@@ -439,6 +614,7 @@ impl Doc {
             jobs: arr(Some(v), "jobs").iter().map(job_from).collect(),
             jobs_next: uint(Some(v), "jobs_next"),
             batches_next: uint(Some(v), "batches_next"),
+            snaps_next: uint(Some(v), "snaps_next"),
         }
     }
 
@@ -465,6 +641,7 @@ impl Doc {
         cut(&mut self.verify.verified);
         cut(&mut self.verify.failures);
         cut(&mut self.pushes);
+        cut(&mut self.ci.runs);
         let ended = self.lanes.iter().filter(|l| l.state != "live").count();
         if ended > KEEP {
             let mut drop = ended - KEEP;
@@ -534,12 +711,12 @@ fn tip_value(t: &Tip) -> Value {
 }
 
 fn leg_value(l: &Leg) -> Value {
-    obj(vec![("name", s(&l.name)), ("state", s(&l.state)), ("lease", s(&l.lease)), ("node", s(&l.node)), ("summary", s(&l.summary)), ("log", s(&l.log))])
+    obj(vec![("name", s(&l.name)), ("state", s(&l.state)), ("lease", s(&l.lease)), ("node", s(&l.node)), ("summary", s(&l.summary)), ("errors", strs(&l.errors)), ("log", s(&l.log))])
 }
 
 fn leg_from(v: &Value) -> Leg {
     let v = Some(v);
-    Leg { name: text(v, "name"), state: text(v, "state"), lease: text(v, "lease"), node: text(v, "node"), summary: text(v, "summary"), log: text(v, "log") }
+    Leg { name: text(v, "name"), state: text(v, "state"), lease: text(v, "lease"), node: text(v, "node"), summary: text(v, "summary"), errors: strs_from(v, "errors"), log: text(v, "log") }
 }
 
 fn failure_value(f: &Failure) -> Value {
@@ -662,6 +839,12 @@ pub fn job_value(j: &Job) -> Value {
         ("prio", Value::Int(j.prio as i64)),
         ("rev", s(&j.rev)),
         ("repo_dir", s(&j.repo_dir)),
+        ("snap", s(&j.snap)),
+        ("snap_files", int(j.snap_files as u64)),
+        ("attempts", int(j.attempts as u64)),
+        ("granted_ms", int(j.granted_ms)),
+        ("shipped_ms", int(j.shipped_ms)),
+        ("first_out_ms", int(j.first_out_ms)),
         ("cmd", strs(&j.cmd)),
         ("after", strs(&j.after)),
         ("state", s(&j.state)),
@@ -694,6 +877,12 @@ pub fn job_from(v: &Value) -> Job {
         prio: v.get("prio").and_then(|x| x.as_i64()).unwrap_or(5) as i32,
         rev: text(o, "rev"),
         repo_dir: text(o, "repo_dir"),
+        snap: text(o, "snap"),
+        snap_files: uint(o, "snap_files") as u32,
+        attempts: uint(o, "attempts") as u32,
+        granted_ms: uint(o, "granted_ms"),
+        shipped_ms: uint(o, "shipped_ms"),
+        first_out_ms: uint(o, "first_out_ms"),
         cmd: strs_from(o, "cmd"),
         after: strs_from(o, "after"),
         state: text(o, "state"),
@@ -787,8 +976,9 @@ mod tests {
 
     #[test]
     fn doc_round_trip() {
-        let leg = Leg { name: "full-a".into(), state: "fail".into(), lease: "L9".into(), node: "107".into(), summary: "NODEGATE-FAIL: fuzz".into(), log: "/x/full-a.log".into() };
+        let leg = Leg { name: "full-a".into(), state: "fail".into(), lease: "L9".into(), node: "107".into(), summary: "NODEGATE-FAIL: fuzz".into(), errors: vec!["fuzz: seed 7 disagrees".into()], log: "/x/full-a.log".into() };
         let doc = Doc {
+            ci: Default::default(),
             verify: Verify {
                 on: false,
                 verified: vec![Tip { pair: pair('a'), at_ms: 5, diff: "all".into() }],
@@ -815,18 +1005,31 @@ mod tests {
             after_next: 5,
             pushes: vec![Pushed { pair: pair('a'), commit: "1".repeat(40), origin_was: "2".repeat(40), at_ms: 4, files: 12 }],
             jobs: vec![
-                Job { id: "J1".into(), batch: "B1".into(), lane: "l".into(), kind: "test".into(), prio: 5, cmd: vec!["cargo".into(), "test".into()], after: vec!["J0".into()], state: "paused".into(), exit: None, panic: Some(JobPanic { id: "P1".into(), pid: 9, message: "index".into(), thread: "main".into(), location: "a.rs:1".into(), at_ms: 3 }), ..Default::default() },
+                Job { id: "J1".into(), batch: "B1".into(), lane: "l".into(), kind: "test".into(), prio: 5, cmd: vec!["cargo".into(), "test".into()], after: vec!["J0".into()], state: "paused".into(), snap: "S2".into(), snap_files: 3, attempts: 1, granted_ms: 5, shipped_ms: 6, first_out_ms: 7, exit: None, panic: Some(JobPanic { id: "P1".into(), pid: 9, message: "index".into(), thread: "main".into(), location: "a.rs:1".into(), at_ms: 3 }), ..Default::default() },
                 Job { id: "J2".into(), state: "failed".into(), exit: Some(101), errors: vec!["error[E1]".into()], tail: vec!["x".into()], prio: 9, ..Default::default() },
             ],
             lanes: vec![LaneRec { name: "x".into(), path: "/w/x".into(), branch: "rc-x".into(), cbranch: "rc-x".into(), created_ms: 1, adopted: true, state: "live".into(), landed_ms: 4, keep: true, ended_ms: 0, note: "n".into() }],
             jobs_next: 2,
             batches_next: 1,
+            snaps_next: 3,
         };
         let text = doc.to_value().to_json();
         assert_eq!(Doc::parse(&text), Some(doc.clone()));
         assert!(doc.section(Some("verify")).unwrap().starts_with("{\"on\":false"));
         assert_eq!(Doc::parse("{}"), Some(Doc::default()));
         assert!(Doc::default().verify.on && Doc::default().allapps.on);
+    }
+
+    #[test]
+    fn ci_round_trip_and_timings_average() {
+        let shard = CiShard { id: "smoke:apps/calc".into(), state: "fail".into(), node: "106".into(), lease: "L2".into(), secs: 12.5, summary: "exit 1".into(), errors: vec!["error: x".into()], log: "/l".into() };
+        let run = CiRun { id: "R1".into(), pair: pair('a'), dry: true, started_ms: 1, ended_ms: 2, verdict: "fail".into(), shards: vec![shard], critical: "106 ends at 12 s".into(), boxes: vec!["106 12 s busy, 1 shards".into()] };
+        let mut ci = Ci { timings: vec![("jit:01".into(), 40.0)], run: Some(run.clone()), runs: vec![run], rotation: 3 };
+        ci.measured("jit:01", 20.0);
+        ci.measured("test:x:lib", 5.0);
+        assert_eq!((ci.timing("jit:01"), ci.timing("test:x:lib"), ci.timing("nope")), (Some(30.0), Some(5.0), None));
+        let doc = Doc { ci, ..Default::default() };
+        assert_eq!(Doc::parse(&doc.to_value().to_json()), Some(doc));
     }
 
     #[test]

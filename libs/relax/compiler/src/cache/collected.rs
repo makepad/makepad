@@ -89,6 +89,7 @@ impl FrontImages {
                 Some(store) => &**store,
                 None => { reopened = Store::open(&self.dir.join(front_store_name(&c.cfg.session.options, &c.name, *fp))).ok_or("store")?; &reopened }
             };
+            if self.reloads(&c.name, &c.root) { return Err("reloaded (a checked crate)"); }
             let (kind, bytes) = store.get(front_crate_key(&c.name, &c.root)).ok_or("record")?;
             if kind != KIND_FRONT_CRATE { return Err("record"); }
             // (its head: the inputs and the selection, not its tables and file images)
@@ -205,7 +206,7 @@ impl FrontImages {
         if !order.iter().copied().take(std_count).eq(0..std_count) { return None; }
         let base = crate::preload::reorder(pre, &order)?;
         self.begin_load(&base);
-        if self.certificate.lock().unwrap().is_some() { return Some(order); }
+        if self.certificate.lock().unwrap().is_some() && !self.reloading() { return Some(order); }
         let graph = self.graph_read.lock().unwrap().clone()?;
         let records = self.prefix_records(&graph, &base, None)?;
         let mut dirty: Vec<bool> = records.iter().map(Result::is_err).collect();
@@ -269,7 +270,8 @@ impl FrontImages {
         let mut plan = None;
         // the prefix whose contexts' prescans the plan worker releases once it is done
         let release_after: Arc<relax_session::sync::Mutex<Option<usize>>> = Arc::default();
-        let (graph, mut prefix) = match cert.as_ref() {
+        // (crates to load again: the prefix before them, as for an edit)
+        let (graph, mut prefix) = match cert.as_ref().filter(|_| !self.reloading()) {
             Some(graph) => (graph, pre.len()),
             None => {
                 let (graph, b) = self.graph_for(pre)?;

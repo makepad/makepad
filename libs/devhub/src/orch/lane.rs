@@ -304,7 +304,7 @@ fn drop_lane(ctx: &Ctx, name: &str) -> Result<String, String> {
     if !live.is_empty() {
         return Err(format!("process(es) {live:?} run inside {}: stop them first", path.display()));
     }
-    let dir = crate::proto::home().join("dropped");
+    let dir = ctx.home.join("dropped");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let stamp = super::stamp(wall_ms());
     let mut kept = Vec::new();
@@ -495,7 +495,7 @@ mod tests {
         let home = base.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let leases = Arc::new(LeaseMaster::new("mac", home.clone(), Arc::new(|_: &str, _: &str, _: &str| Err("no nodes".to_string())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
-        let ctx = Ctx { store: Store::open(&home, "mac", Arc::new(|_| {})), leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[base.join("wt.noindex")]), repo: mk.clone() };
+        let ctx = Ctx { store: Store::open(&home, "mac", Arc::new(|_| {})), leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[base.join("wt.noindex")]), repo: mk.clone(), home: home.clone() };
         let r = serve(&ctx, "lane new {\"name\":\"x\",\"from\":\"work\",\"commercial\":true}").unwrap();
         let lane = base.join("wt.noindex/x");
         assert!(r.contains("rc-x") && lane.join("a.txt").exists() && lane.join("apps/commercial/a.txt").exists(), "{r}");
@@ -536,7 +536,7 @@ mod tests {
         let r = serve(&ctx, "lane drop y").unwrap();
         assert!(r.contains("1 makepad commit(s)") && !r.contains("commercial commit"), "{r}");
         assert!(!y.exists() && g(&mk, &["branch", "--list", "rc-y"]).is_empty());
-        let bundle = std::fs::read_dir(crate::proto::home().join("dropped")).unwrap().flatten().map(|e| e.path()).find(|p| p.to_string_lossy().contains("y-makepad-")).unwrap();
+        let bundle = std::fs::read_dir(ctx.home.join("dropped")).unwrap().flatten().map(|e| e.path()).find(|p| p.to_string_lossy().contains("y-makepad-")).unwrap();
         assert!(g(&mk, &["bundle", "list-heads", &bundle.to_string_lossy()]).contains("refs/heads/rc-y"));
         let _ = std::fs::remove_file(&bundle);
         drop(ctx);

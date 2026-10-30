@@ -32,8 +32,14 @@ pub struct ParkedPanic {
     pub id: String,
     pub message: String,
     pub location: String,
-    /// Exactly the choices advertised by inspect's panic event.
+    /// the thread that stopped (`main` for the UI thread)
+    pub thread: String,
+    /// The choices the run's view offers, in its order (a subset of those inspect's panic event
+    /// advertises: a retry only on the main thread, where the frame it reruns is the UI's).
     pub choices: Vec<String>,
+    /// a restart hands the app's own state to the new run (it supports restarts with state and
+    /// the stopped thread is not its UI thread, which must reach its safe point)
+    pub keeps_state: bool,
     /// a stale access (code the JIT invalidated was run), not a panic
     pub stale: bool,
 }

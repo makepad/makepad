@@ -31,7 +31,8 @@ const HELP: &str = "makepad devhub (or observe): the local devhub (start it with
   land status [all|<branch>] [--json]     per hand-in: queued / gating on <node> / passed / failed + error lines /
                                           conflict + files / waiting / landed <shas>
   land wait <branch>                      until it lands, fails or conflicts; prints its status (exit 0 landed)
-  land hold <branch> [reason] | unhold <branch> | retry <branch> | drop <branch>";
+  land hold <branch> [reason] | unhold <branch> | retry <branch> | drop <branch>
+  land pause [reason] | resume | paused  the whole train: no new round while paused (the menu bar's Pause landing)";
 
 pub(crate) fn control() -> Result<Client, String> {
     let c = Client::new(Target::Unix(proto::control_socket()), "observe");
@@ -224,9 +225,9 @@ pub fn main(args: &[String]) -> i32 {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     if matches!(a.first().copied(), None | Some("-h") | Some("--help") | Some("help")) {
         #[cfg(feature = "checkout")]
-        let orch = crate::orch::cli::HELP;
+        let orch = format!("{}\n{}", crate::orch::cli::HELP, crate::orch::ci::HELP);
         #[cfg(not(feature = "checkout"))]
-        let orch = "";
+        let orch = String::new();
         println!("{HELP}\n{}\n{}\n{orch}", crate::lease::client::HELP, crate::sync::help());
         return if a.is_empty() { 2 } else { 0 };
     }
@@ -236,6 +237,10 @@ pub fn main(args: &[String]) -> i32 {
     // the master's jobs first: `lanes` (the lane view) is theirs, `lanes now` the merge bot's
     #[cfg(feature = "checkout")]
     if let Some(code) = crate::orch::cli::main(&a) {
+        return code;
+    }
+    #[cfg(feature = "checkout")]
+    if let Some(code) = crate::orch::ci::cli(&a) {
         return code;
     }
     if let Some(code) = crate::sync::cli(&a) {
@@ -578,6 +583,14 @@ fn land(c: &Client, a: &[&str]) -> i32 {
                 Err(code) => return code,
             }
             std::thread::sleep(Duration::from_secs(5));
+        },
+        [verb @ ("pause" | "resume" | "paused"), rest @ ..] => match ask_land(&format!("{verb} {}", rest.join(" "))) {
+            Ok(l) => {
+                let why = l.first().and_then(|x| makepad_strict_json::parse(x.as_bytes()).ok()).and_then(|v| v.get("paused").and_then(|p| p.as_str()).map(str::to_string)).unwrap_or_default();
+                println!("{}", if why.is_empty() { "landing runs".to_string() } else { format!("landing paused: {why}") });
+                0
+            }
+            Err(code) => code,
         },
         [verb @ ("hold" | "unhold" | "retry" | "drop" | "import"), rest @ ..] => match ask_land(&format!("{verb} {}", rest.join(" "))) {
             Ok(_) => {

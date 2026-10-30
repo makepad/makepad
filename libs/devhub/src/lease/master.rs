@@ -27,6 +27,9 @@ pub type Hosts = Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>;
 
 pub const SERVICES: [&str; 12] = ["lease", "beat", "release", "cancel", "leases", "nodes", "node-dev", "linspect", "evict", "unblock", "override", "blocked"];
 const NODE_BEAT_MS: u64 = 5_000;
+/// How long a commit sent to a node's store counts as there without asking again.
+#[cfg(feature = "checkout")]
+const ENSURED_FOR: std::time::Duration = std::time::Duration::from_secs(600);
 const CAPS_MS: u64 = 10_000;
 
 /// What an inspect lease left on a JIT (undone on the node at `lease-end`).
@@ -414,8 +417,11 @@ impl LeaseMaster {
                     "lost" => "expired",
                     _ => "released",
                 };
-                // a lease already waiting for this box: the tree goes straight to it (no restore first)
-                let handoff = l.req.kind != Kind::Inspect && self.sched.lock().unwrap().waiting_for(node);
+                // a lease already waiting for this box: the tree goes straight to it (no restore first);
+                // a lease at a revision leaves the tree there for the handoff grace too, so the next
+                // lease of those commits (an agent's next job) starts without moving it
+                let waiting = l.req.kind != Kind::Inspect && self.sched.lock().unwrap().waiting_for(node);
+                let handoff = waiting || (l.req.kind != Kind::Inspect && l.req.rev.is_some());
                 let mut parts = Vec::new();
                 if let Some(m) = marks {
                     let list = |v: &[String]| v.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(",");
@@ -447,7 +453,7 @@ impl LeaseMaster {
                         if let Some(path) = v.get("recovered").and_then(|r| r.as_str()) {
                             self.fetch_recovered(node, path, l);
                         }
-                        if handoff {
+                        if waiting {
                             self.event(Sev::Info, format!("{} of {}: {node} handed straight to the next lease (teardown {:.1} s)", l.tag(), l.req.lane, teardown as f64 / 1000.0));
                         }
                     }
@@ -841,7 +847,24 @@ pub fn register(ep: &makepad_remote::Endpoint, machine: &str, publish: Publish) 
         Ok(out)
     });
     #[cfg(feature = "checkout")]
-    let rev: Option<EnsureRev> = Some(Arc::new(move |node: &str, repo: &str, dir: &Path, pin: &super::RevPin| crate::sync::ensure_rev(&client(), node, repo, dir, &pin.branch, &pin.sha)));
+    // a commit a node's store got from this master is not sent again for a while (a lease's
+    // bundle round trip is most of its setup on a warm box)
+    #[cfg(feature = "checkout")]
+    let ensured: Arc<Mutex<HashMap<(String, String), std::time::Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+    #[cfg(feature = "checkout")]
+    let rev: Option<EnsureRev> = Some(Arc::new(move |node: &str, repo: &str, dir: &Path, pin: &super::RevPin| {
+        let key = (node.to_string(), pin.sha.clone());
+        if ensured.lock().unwrap().get(&key).is_some_and(|t| t.elapsed() < ENSURED_FOR) {
+            return Ok(pin.sha.clone());
+        }
+        let r = crate::sync::ensure_rev(&client(), node, repo, dir, &pin.branch, &pin.sha);
+        if r.is_ok() {
+            let mut e = ensured.lock().unwrap();
+            e.retain(|_, t| t.elapsed() < ENSURED_FOR);
+            e.insert(key, std::time::Instant::now());
+        }
+        r
+    }));
     #[cfg(not(feature = "checkout"))]
     let rev: Option<EnsureRev> = None;
     let lm = Arc::new(LeaseMaster::new(machine, proto::home(), ask, publish, Arc::new(proto::wall_ms), rev, false));

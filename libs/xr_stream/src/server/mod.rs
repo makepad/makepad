@@ -272,16 +272,17 @@ impl ServerShared {
         self.live.lock().unwrap().as_ref().map(|l| (l.fovea, l.encoded))
     }
 
-    /// Whether the app may build the next frame: a headset streams and fewer than its limit of
-    /// pictures are in flight to it.
+    /// Whether the app may build the next frame: a headset streams, fewer than its limit of
+    /// pictures are in flight to it, and no picture already waits for an encoder (the next pose
+    /// is taken when its picture can be encoded soon: a pose never ages in a queue).
     pub(crate) fn room(&self) -> bool {
         let live = self.live.lock().unwrap();
         let Some(l) = live.as_ref() else { return false };
-        let room = l.flow.in_flight(l.tiles) < l.limit;
-        if !room {
+        if l.flow.in_flight(l.tiles) >= l.limit {
             l.flow.held.fetch_add(1, Ordering::AcqRel);
+            return false;
         }
-        room
+        l.flow.backlog(l.tiles) < 2
     }
 
     /// A picture for the headset; false when no headset streams (it is dropped, and with it
@@ -296,6 +297,7 @@ impl ServerShared {
             Err(_) => {
                 // the picture thread is behind (cannot be with the app's slots): out of flight
                 l.flow.lost.fetch_add(1, Ordering::AcqRel);
+                l.flow.encoded_tiles.fetch_add(l.tiles as u64, Ordering::AcqRel);
                 false
             }
         }
