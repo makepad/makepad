@@ -86,6 +86,20 @@ pub fn memory_budget_mb() -> Option<u64> {
 /// this run's code and front images and the collected program reach the cache, and the next
 /// launch starts warm. The app keeps running; a later start of the activity resumes it.
 fn background_quit_write() {
+    // A stop before the first frame (the keyguard, a screen timeout during a 40-100 s first launch,
+    // a Home trip): the boot goes on and the tiers keep running. Stopping them here left them
+    // stopped for the life of the process (the loader's quit flag is never cleared) with the exit
+    // thread waiting for a quit write that could not complete, and the next launch no warmer;
+    // the first stop after a frame writes and exits as before.
+    if !relax_compiler::jit::first_present_seen() {
+        crate::logcat::log("background: the activity stopped before the first frame; the boot goes on (the cache is written at the first stop after a frame)");
+        return;
+    }
+    // (a second stop while the write runs: the first already ends the process)
+    static WRITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if WRITING.swap(true, Ordering::AcqRel) {
+        return;
+    }
     crate::logcat::log("background: stopping the background tiers, writing the compile cache, then exiting (the next launch starts warm)");
     // The tiers keep the owner thread busy for minutes on a phone, and the exit's own drain of
     // the deferred cache records stops at SPEC_STOP: stop the tiers, let the quit write encode
