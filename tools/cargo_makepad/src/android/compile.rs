@@ -3008,6 +3008,12 @@ pub struct HostOpts {
     /// the host's Desk Link endpoint starts switched on (`--desk-link=on|off`; on in a debuggable
     /// APK): the host conf's `desk_link=`, switched later by devhub or `files/deskhost.conf`
     pub desk_link: bool,
+    /// a compile cache to ship in the APK (`--cache-seed=<dir>`): a copy of a device's relax home
+    /// of this very build (`adb pull` of `files/makepad-run`: `target/<run dir>/cache/<stores>`),
+    /// laid down by the host at the first start, so the first launch is a warm one (the loader
+    /// keys stores by codegen identity, arch and atomics class: a seed of another build or CPU
+    /// class is ignored)
+    pub cache_seed: Option<PathBuf>,
 }
 
 /// `rev=<repo> <sha>` for the host conf: each repo's HEAD, the base the device's devhub store
@@ -3035,6 +3041,8 @@ fn host_store_revs(cwd: &Path) -> Vec<String> {
 const HOST_ARCHIVE_ASSET: &str = "assets/makepad-run-src.pack";
 /// The host's configuration asset (jni.rs CONF_ASSET).
 const HOST_CONF_ASSET: &str = "assets/makepad-run-host.conf";
+/// The cache seed's assets: `index.txt` (one relax-home-relative path per line) and the files.
+const HOST_SEED_ASSET_DIR: &str = "assets/makepad-run-seed";
 
 fn host_font_manifest(font_set: &str, extra: &[String]) -> Result<FontAssetManifest, String> {
     let cwd = std::env::current_dir().unwrap();
@@ -3054,9 +3062,37 @@ fn host_font_manifest(font_set: &str, extra: &[String]) -> Result<FontAssetManif
     FontAssetManifest::parse(&text)
 }
 
+/// The files of a cache seed folder: (path relative to the relax home with `/` separators, file),
+/// store files only (no live locks, no temporaries).
+fn cache_seed_files(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+        for e in fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let e = e.map_err(|e| e.to_string())?;
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if p.is_dir() {
+                if name != "live" {
+                    walk(root, &p, out)?;
+                }
+            } else if !name.starts_with('.') {
+                let rel = p.strip_prefix(root).map_err(|e| e.to_string())?.to_string_lossy().replace('\\', "/");
+                out.push((rel, p));
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out)?;
+    out.sort();
+    if !out.iter().any(|(r, _)| r.contains("/cache/")) {
+        return Err(format!("{}: no `target/<run dir>/cache/` stores in the cache seed", dir.display()));
+    }
+    Ok(out)
+}
+
 /// Re-zips `unaligned` into `out` with the source archive (stored: AAsset hands the host a file
-/// descriptor range only for an uncompressed entry) and the configuration added.
-fn add_host_payload(unaligned: &Path, out: &Path, archive: &Path, conf: &str) -> Result<(), String> {
+/// descriptor range only for an uncompressed entry), the configuration and the cache seed added.
+fn add_host_payload(unaligned: &Path, out: &Path, archive: &Path, conf: &str, seed: &[(String, PathBuf)]) -> Result<(), String> {
     let mut zin = File::open(unaligned).map_err(|e| format!("{}: {e}", unaligned.display()))?;
     let dir = zip_read_central_directory(&mut zin).map_err(|e| format!("{}: {e:?}", unaligned.display()))?;
     let file = File::create(out).map_err(|e| format!("{}: {e}", out.display()))?;
@@ -3073,6 +3109,17 @@ fn add_host_payload(unaligned: &Path, out: &Path, archive: &Path, conf: &str) ->
     zout.add(HOST_ARCHIVE_ASSET, &bytes, ZipMethod::Store).map_err(|e| format!("{HOST_ARCHIVE_ASSET}: {e}"))?;
     println!("  source archive: {:.1} MB (stored)", bytes.len() as f64 / 1e6);
     zout.add(HOST_CONF_ASSET, conf.as_bytes(), ZipMethod::Deflate).map_err(|e| format!("{HOST_CONF_ASSET}: {e}"))?;
+    if !seed.is_empty() {
+        let index: String = seed.iter().map(|(r, _)| format!("{r}\n")).collect();
+        zout.add(&format!("{HOST_SEED_ASSET_DIR}/index.txt"), index.as_bytes(), ZipMethod::Deflate).map_err(|e| format!("cache seed index: {e}"))?;
+        let mut total = 0usize;
+        for (rel, path) in seed {
+            let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            total += bytes.len();
+            zout.add(&format!("{HOST_SEED_ASSET_DIR}/{rel}"), &bytes, ZipMethod::Deflate).map_err(|e| format!("{rel}: {e}"))?;
+        }
+        println!("  cache seed: {} files, {:.1} MB (deflated)", seed.len(), total as f64 / 1e6);
+    }
     zout.finish().map_err(|e| format!("{}: {e}", out.display()))?;
     Ok(())
 }
@@ -3231,8 +3278,12 @@ pub fn build_host(
     for rev in host_store_revs(&cwd) {
         conf.push_str(&rev);
     }
+    let seed = match &host.cache_seed {
+        Some(dir) => cache_seed_files(dir)?,
+        None => Vec::new(),
+    };
     let with_payload = build_paths.dst_unaligned_apk.with_extension("host.apk");
-    add_host_payload(&build_paths.dst_unaligned_apk, &with_payload, &archive, &conf)?;
+    add_host_payload(&build_paths.dst_unaligned_apk, &with_payload, &archive, &conf, &seed)?;
     zipalign_apk(sdk_dir, urls, &with_payload, &build_paths.dst_apk)?;
     sign_apk_debug(sdk_dir, urls, &build_paths.dst_apk)?;
     let apk_size = fs::metadata(&build_paths.dst_apk).map(|m| m.len()).unwrap_or(0);
