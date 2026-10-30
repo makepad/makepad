@@ -18,6 +18,7 @@ use super::conf::{Build, SyncConf};
 use super::git::{self, Store, CHECKOUT_REF, SYNCED_REF};
 use super::jits;
 use super::sign::{self, Order, Seen};
+use super::toast::{self, News, Outcome};
 use super::NodeCtx;
 use crate::proto::{self, hub_record, Sev};
 use makepad_network::digest::Sha256;
@@ -87,7 +88,7 @@ impl Sync {
             repos.push(format!("{}:{{\"checkout\":{},\"held\":{held},\"refs\":[{}]}}", json_str(repo), cur.map_or("null".into(), |c| json_str(&c)), refs.join(",")));
         }
         out.push(format!(
-            "{{\"machine\":{},\"checkout\":{},\"build\":\"{}\",\"wm_service\":{},\"dev\":{},\"busy\":{},\"repos\":{{{}}},\"last\":{}}}",
+            "{{\"machine\":{},\"checkout\":{},\"build\":\"{}\",\"wm_service\":{},\"dev\":{},\"busy\":{},\"prewarm\":{},\"repos\":{{{}}},\"last\":{}}}",
             json_str(&self.ctx.machine),
             json_str(&self.conf.checkout.display().to_string()),
             match self.conf.build {
@@ -98,6 +99,7 @@ impl Sync {
             self.conf.wm_service.as_deref().map_or("null".into(), json_str),
             crate::lease::exec::writes_allowed(),
             self.busy.try_lock().is_err(),
+            super::prewarm::running(),
             repos.join(","),
             self.last.lock().unwrap()
         ));
@@ -213,8 +215,19 @@ impl Sync {
             ticker = Some((pid, t));
         }
 
+        // what this sync brings, for the toasts of the apps it reaches (commercial first: the
+        // apps' own changes)
+        let mut news = News { subjects: Vec::new(), landed_ms: o.get("landed").and_then(|t| t.parse().ok()) };
+        for repo in ["commercial", "makepad"] {
+            if let Some((_, store, Some(from), to)) = plan.iter().find(|p| p.0 == repo) {
+                news.subjects.extend(store.subjects(from, to, 200));
+            }
+        }
+
         // the tree is the leases' too: it moves only while none holds it (the order is refused, the
         // next round tries again)
+        // a running pre-warm is for the commits the tree leaves now
+        super::prewarm::cancel("a newer sync");
         let tree = match crate::lease::tree::free() {
             Ok(t) => t,
             Err(e) => return self.refuse(out, format!("sync: apply refused: {e}")),
@@ -250,11 +263,11 @@ impl Sync {
         // what the JITs' live patchers did with it: a coordinated patch answers with it (the
         // master reads the ticks), otherwise the records follow on the stream
         if ticker.is_some() {
-            out.extend(self.follow_patches(watched, ticker, &session));
+            out.extend(self.follow_patches(watched, ticker, &session, None));
         } else if !watched.is_empty() {
             let me = self.clone();
             let _ = std::thread::Builder::new().name("devhub-sync-patches".into()).spawn(move || {
-                me.follow_patches(watched, None, "");
+                me.follow_patches(watched, None, "", Some(&news));
             });
         }
 
@@ -262,10 +275,12 @@ impl Sync {
         let wm_bin = self.conf.checkout.join("target/release/makepad-app-wm");
         let wm_before = build::mtime(&wm_bin);
         let mut built_line = "null".to_string();
+        let mut built_ok = true;
         if o.get("build") != Some("off") && self.conf.build != Build::Off {
             self.event(Sev::Info, format!("sync: building ({:?})", self.conf.build).to_lowercase(), String::new());
             let b = build::prebuild(&self.conf);
             let n = b.compiled.len();
+            built_ok = b.ok;
             if b.ok {
                 self.event(Sev::Info, format!("sync: built in {:.0} s: {n} crates compiled", b.secs), format!("{{\"compiled\":[{}],\"log\":{}}}", b.compiled.iter().take(200).map(|c| json_str(c)).collect::<Vec<_>>().join(","), json_str(&b.log.display().to_string())));
             } else {
@@ -307,42 +322,140 @@ impl Sync {
         );
         *self.last.lock().unwrap() = summary.clone();
         out.push(summary);
+        // pre-warm (asked by the master for an idle dev-on node): the JIT built and its cache warm
+        // for the smoke apps, in the background, preempted by the next lease
+        if o.get("prewarm") == Some("on") {
+            let why_not = if !crate::lease::exec::writes_allowed() {
+                Some("dev off")
+            } else if !crate::lease::exec::held().is_empty() {
+                Some("a lease holds the node")
+            } else if !built_ok {
+                Some("the prebuild failed")
+            } else {
+                None
+            };
+            let at = format!("{}/{}", mp.as_deref().map_or("-", short), cm.as_deref().map_or("-", short));
+            match why_not {
+                None => super::prewarm::start(self.conf.checkout.clone(), at, self.ctx.publish.clone(), self.ctx.machine.clone()),
+                Some(w) => (self.ctx.publish)(hub_record(&self.ctx.machine, "", 0, "prewarm", Sev::Info, format!("prewarm: skipped at {at}: {w}"), String::new())),
+            }
+        }
     }
 
     /// Follows each watched JIT's live-edit records for the edit this apply caused, up to 60 s
-    /// (a coordinated patch also reads the session tick the edit landed at).
-    fn follow_patches(&self, watched: Vec<(jits::Jit, PathBuf, u64)>, ticker: Option<(u32, jits::Ticker)>, session: &str) -> Vec<String> {
+    /// (a coordinated patch also reads the session tick the edit landed at). With `news` (an
+    /// ordinary sync), an edit that needs a restart is followed on to its end (the restarted run
+    /// on screen, the app postponing it, makepad rebuilding itself first), and each app's outcome
+    /// is shown to the person as a toast in the WM ([`toast`]).
+    fn follow_patches(&self, watched: Vec<(jits::Jit, PathBuf, u64)>, ticker: Option<(u32, jits::Ticker)>, session: &str, news: Option<&News>) -> Vec<String> {
+        struct Follow {
+            jit: jits::Jit,
+            log: PathBuf,
+            at: u64,
+            /// an edit needs a restart: what follows it is awaited until then
+            restarting: Option<Instant>,
+            /// patched: shown as applied once the app still runs a moment later (a patch that
+            /// takes the app down must not be reported as applied)
+            settling: Option<Instant>,
+        }
         let mut out = Vec::new();
         let end = Instant::now() + Duration::from_secs(60);
-        let mut pending = watched;
-        while !pending.is_empty() && Instant::now() < end {
+        let mut pending: Vec<Follow> = watched.into_iter().map(|(jit, log, at)| Follow { jit, log, at, restarting: None, settling: None }).collect();
+        let shown = |j: &jits::Jit, outcome: Outcome| {
+            let Some(news) = news else { return };
+            match toast::post(&j.app, j.pid, news, &outcome) {
+                Ok((text, after)) => {
+                    let timing = after.map_or(String::new(), |ms| format!(" {:.1} s after the landing", ms as f64 / 1000.0));
+                    self.jit_event(Sev::Info, &j.app, j.pid, format!("sync: shown{timing}: {text}"), String::new());
+                }
+                Err(e) => self.jit_event(Sev::Warn, &j.app, j.pid, format!("sync: no toast for {}#{}: {e}", j.app, j.pid), String::new()),
+            }
+        };
+        while !pending.is_empty() {
             let mut still = Vec::new();
-            for (j, log, from) in pending {
-                let (edits, _) = jits::edits_since(&log, from);
-                match edits.into_iter().rfind(|e| e.rung != "unchanged") {
-                    Some(e) => {
+            for mut f in pending {
+                let (edits, at) = jits::edits_since(&f.log, f.at);
+                f.at = at;
+                // settling: only whether the app lives on decides
+                let edits = if f.settling.is_some() { Vec::new() } else { edits };
+                let mut done = false;
+                for e in edits {
+                    let j = &f.jit;
+                    let outcome = match (e.rung.as_str(), f.restarting.is_some()) {
+                        ("unchanged", _) => continue,
+                        ("patch" | "partial", false) => Some(Outcome::Live),
+                        ("restart", false) if e.raw.contains("\"restart_required\":true") => Some(Outcome::NeedsRestart(e.reasons.clone())),
+                        ("restart", false) => None,
+                        ("refuse" | "incomplete", false) => Some(Outcome::NotApplied(e.reasons.clone())),
+                        ("rebuild_started", _) => {
+                            // makepad rebuilds itself first (minutes): the toast says so now
+                            shown(j, Outcome::Rebuilding);
+                            f.restarting = Some(Instant::now() + Duration::from_secs(900));
+                            continue;
+                        }
+                        ("rebuild_failed", _) => Some(Outcome::NotApplied(e.reasons.clone())),
+                        ("restart_postponed", _) => Some(Outcome::Postponed(e.reasons.clone())),
+                        ("restart_offered", _) => Some(Outcome::Offered(e.reasons.clone())),
+                        ("restart_present", _) => Some(Outcome::Restarted),
+                        _ => continue,
+                    };
+                    if f.restarting.is_none() && matches!(e.rung.as_str(), "patch" | "partial" | "restart" | "refuse" | "incomplete") {
                         let tick = ticker.as_ref().filter(|(p, _)| *p == j.pid).and_then(|(_, t)| t.read().ok());
                         let at = tick.map_or(String::new(), |t| format!(" at session {session} tick {t}"));
                         let (sev, what) = match e.rung.as_str() {
                             "patch" | "partial" => (Sev::Info, format!("patched {} fns in {:.0} ms", e.fns, e.ms)),
                             "restart" => (Sev::Warn, format!("needs a restart: {}", e.reasons)),
-                            "refuse" => (Sev::Warn, format!("refused the edit: {}", e.reasons)),
-                            other => (Sev::Info, format!("{other} ({} files)", e.files)),
+                            _ => (Sev::Warn, format!("refused the edit: {}", e.reasons)),
                         };
                         self.jit_event(sev, &j.app, j.pid, format!("sync: {}#{} {what}{at}", j.app, j.pid), e.raw.clone());
                         out.push(format!("{{\"jit\":{},\"pid\":{},\"rung\":{},\"fns\":{},\"ms\":{},\"tick\":{}}}", json_str(&j.app), j.pid, json_str(&e.rung), e.fns, e.ms, tick.map_or("null".into(), |t| t.to_string())));
                     }
-                    None if makepad_remote::relay::proc_start(j.pid).is_none() => {}
-                    None => still.push((j, log, from)),
+                    match outcome {
+                        Some(Outcome::Live) if news.is_some() => {
+                            f.settling = Some(Instant::now() + Duration::from_secs(3));
+                            break;
+                        }
+                        Some(o) => {
+                            shown(j, o);
+                            done = true;
+                            break;
+                        }
+                        // a restart in place follows (the app's next safe point)
+                        None if news.is_some() => f.restarting = Some(Instant::now() + Duration::from_secs(60)),
+                        None => {
+                            done = true;
+                            break;
+                        }
+                    }
+                }
+                if done {
+                    continue;
+                }
+                if makepad_remote::relay::proc_start(f.jit.pid).is_none() {
+                    if f.settling.is_some() || f.restarting.is_some() {
+                        shown(&f.jit, Outcome::NotApplied("the app closed while taking the change (a JIT error: see its log); open it again from the dock".into()));
+                    }
+                    continue;
+                }
+                if f.settling.is_some_and(|t| Instant::now() > t) {
+                    shown(&f.jit, Outcome::Live);
+                    continue;
+                }
+                if f.settling.is_some() {
+                    still.push(f);
+                    continue;
+                }
+                match f.restarting {
+                    Some(t) if Instant::now() > t => shown(&f.jit, Outcome::NeedsRestart("it did not restart by itself".into())),
+                    None if Instant::now() > end => out.push(format!("{{\"jit\":{},\"pid\":{},\"rung\":\"none\"}}", json_str(&f.jit.app), f.jit.pid)),
+                    _ => still.push(f),
                 }
             }
             pending = still;
             if !pending.is_empty() {
-                std::thread::sleep(Duration::from_millis(5));
+                // a session's tick is read promptly; a toast within a frame or two is soon enough
+                std::thread::sleep(Duration::from_millis(if ticker.is_some() { 5 } else { 20 }));
             }
-        }
-        for (j, _, _) in pending {
-            out.push(format!("{{\"jit\":{},\"pid\":{},\"rung\":\"none\"}}", json_str(&j.app), j.pid));
         }
         out
     }
@@ -493,14 +606,10 @@ static WM_RESTART_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::At
 /// What a WM restart would cost now: the gate leases on this node (landings) and the unsaved
 /// work of its apps. Empty: it may restart.
 fn restart_blockers() -> Vec<String> {
-    let mut why: Vec<String> = crate::lease::exec::held()
-        .into_iter()
-        .filter(|(_, lane, kind)| *kind == "gate" || lane.starts_with("land"))
-        .map(|(id, lane, kind)| format!("{kind} lease {id} of {lane}"))
-        .collect();
+    let why = crate::lease::exec::held().into_iter().filter(|(_, lane, kind)| *kind == "gate" || lane.starts_with("land")).map(|(id, lane, kind)| format!("{kind} lease {id} of {lane}"));
     #[cfg(unix)]
-    why.extend(makepad_app_registry::machine::unsaved_work().into_iter().map(|(pid, app, what)| format!("unsaved work in {app} (pid {pid}): {what}")));
-    why
+    let why = why.chain(makepad_app_registry::machine::unsaved_work().into_iter().map(|(pid, app, what)| format!("unsaved work in {app} (pid {pid}): {what}")));
+    why.collect()
 }
 
 /// A makepad checkout dir that holds only the nested commercial checkout (a fresh tree whose

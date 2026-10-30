@@ -80,7 +80,8 @@ pub fn log_len(path: &Path) -> u64 {
 }
 
 /// What one live edit did: the `edit` record's rung, files, fns and total ms (or a restart
-/// requirement).
+/// requirement), or what followed one (rung `restart_present`, `restart_postponed`,
+/// `rebuild_started`, `rebuild_failed`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Edit {
     pub rung: String,
@@ -112,7 +113,22 @@ pub fn edits_since(path: &Path, from: u64) -> (Vec<Edit>, u64) {
             out.push(Edit { rung: "restart".into(), files: 0, fns: 0, ms: 0.0, reasons: crate::proto::clean(&msg, 200), raw: crate::proto::clean(line, 2000) });
             continue;
         }
-        if v.get("event").and_then(|e| e.as_str()) != Some("edit") {
+        let text = |k: &str| crate::proto::clean(v.get(k).and_then(|m| m.as_str()).unwrap_or(""), 200);
+        // what follows an edit that needs a restart: the restarted run on screen, the app
+        // postponing it (unsaved work), makepad rebuilding itself first
+        let follow = match v.get("event").and_then(|e| e.as_str()) {
+            Some("edit") => None,
+            // the restarted run on screen, or its kept/lost report (logged once its widgets settle)
+            Some("restart_present" | "restart_report") => Some(("restart_present", String::new())),
+            Some("restart_postponed") => Some(("restart_postponed", text("why"))),
+            // a dock app's restart waits for the person (the toast's Restart)
+            Some("restart_offered") => Some(("restart_offered", text("why"))),
+            Some("host_rebuild") if v.get("started").and_then(|x| x.as_bool()) == Some(true) => Some(("rebuild_started", text("why"))),
+            Some("host_rebuild") if v.get("ok").and_then(|x| x.as_bool()) == Some(false) => Some(("rebuild_failed", text("message"))),
+            _ => continue,
+        };
+        if let Some((rung, reasons)) = follow {
+            out.push(Edit { rung: rung.into(), files: 0, fns: 0, ms: num("ms"), reasons, raw: crate::proto::clean(line, 2000) });
             continue;
         }
         let ms = v.get("ms").map_or(0.0, |m| match m.get("total") {

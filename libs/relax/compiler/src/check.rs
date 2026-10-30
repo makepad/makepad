@@ -111,6 +111,41 @@ fn subjects_mode() -> u8 {
     SUBJECTS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// `makepad test`'s up-front check: per body owner of `fns`, whether its clean verdict is stored
+/// (skip it), and the verdict keys of the others (recorded clean when the whole check is). Empty
+/// when no verdict can be reused: not a test check, no cache, or a cross-body lint that can fail
+/// the check (lint_levels::raised, a command-line level).
+fn stored_verdicts(u: &Unit, fns: &[(crate::borrowck::body::CheckedBody, bool)]) -> (Vec<bool>, Vec<u128>) {
+    let mut skip = vec![false; fns.len()];
+    let mut keys = Vec::new();
+    let Some(cell) = u.cache.as_ref() else { return (skip, keys) };
+    if subjects_mode() == 0 || relax_types::lint_levels::raised() || relax_types::lint::cmdline_set() {
+        return (skip, keys);
+    }
+    let c = unsafe { &mut *cell.get() };
+    let mut inputs: std::collections::HashMap<u32, Option<u128>> = std::collections::HashMap::new();
+    for (i, (owner, _)) in fns.iter().enumerate() {
+        let d = owner.owner;
+        let krate = u.prog.def(d).krate;
+        // (an opaque type alias is defined by the bodies that use it: one body's verdict rests on
+        // another's text there)
+        let Some(ci) = *inputs.entry(krate).or_insert_with(|| {
+            let f = u.prog.crates[krate as usize].features(&u.prog);
+            if f.has("type_alias_impl_trait") || f.has("impl_trait_in_assoc_type") { None } else { c.check_crate_inputs(u, krate, subjects_mode()) }
+        }) else { continue };
+        let Some(k) = c.check_body_key(u, ci, d) else { continue };
+        if matches!(c.borrowck_stored(k), Some(crate::borrowck::lazy::StoredVerdict::Clean)) {
+            skip[i] = true;
+        } else {
+            keys.push(k);
+        }
+    }
+    if u.prog.session.options.verbose {
+        stderr_line!("makepad test: {} of {} bodies' clean verdicts reused, {} checked", skip.iter().filter(|&&s| s).count(), fns.len(), fns.len() - skip.iter().filter(|&&s| s).count());
+    }
+    (skip, keys)
+}
+
 /// The deep check's diagnostics without printing a second stream into a watch response.
 pub fn collect_deep(u: &mut Unit, root: u32) -> Vec<crate::diag::Diagnostic> {
     check_crate_impl(u, root, &[root], Vec::new(), false, true).1
@@ -269,6 +304,11 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         fns.push((owner, generic || in_trait || impossible || provided));
     }
     let n_own = fns.len();
+    // `makepad test`: a body whose clean verdict is stored under its inputs (cache.rs
+    // check_body_key: the crate's text outside the fn bodies, its dependencies, the body's own
+    // text) is not checked again. Not when a lint whose verdict rests on every body can be an
+    // error (lint_levels::raised): those need every body walked.
+    let (skip, verdict_keys) = stored_verdicts(u, &fns);
     let t_owners = t_check.elapsed();
     if std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some() {
         stderr_line!("makepad check: owners breakdown: rsim {:.2} s, sigs {:.2} s, item_checks {:.2} s, wfcheck {:.2} s", d_rsim.as_secs_f64(), d_sigs.as_secs_f64(), d_items.as_secs_f64(), d_wf.as_secs_f64());
@@ -405,7 +445,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     let mut outcomes: Vec<(usize, Outcome)> = Vec::new();
     {
         let results = relax_session::sync::Mutex::new(Vec::with_capacity(fns.len()));
-        let (fns, next, results, check_one) = (&fns, &next, &results, &check_one);
+        let (fns, next, results, check_one, skip) = (&fns, &next, &results, &check_one, &skip);
         std::thread::scope(|sc| {
             for w in 0..jobs {
                 std::thread::Builder::new().name(format!("run-check-ty-{}", w)).stack_size(256 << 20).spawn_scoped(sc, move || { let _z = crate::zone_alloc::compiler_thread();
@@ -413,6 +453,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
                     loop {
                         let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some((owner, generic)) = fns.get(i) else { break };
+                        if skip[i] { continue; }
                         local.push((i, check_one(owner, *generic)));
                         // return the allocator's free pages as the check goes (Stage held 4.6 GB)
                         if i % 20_000 == 19_999 { crate::memstat::trim(); }
@@ -582,6 +623,14 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     }
     crate::borrowck::finish_check(unsafe { &(*up).prog });
     let borrow_count = console.finish();
+    // a clean check: every body it checked is clean (lints included: they are the check's, not
+    // the body's, so only a check with no error at all says so of each)
+    if errors.is_empty() && borrow_count == 0 && !verdict_keys.is_empty() {
+        if let Some(c) = unsafe { (*up).cache.as_ref() } {
+            let c = unsafe { &mut *c.get() };
+            for &k in &verdict_keys { c.record_borrowck(k, crate::borrowck::lazy::StoredVerdict::Clean); }
+        }
+    }
     if !quiet {
     eprintln!("makepad check: {} body owners of the checked crates, {} compiled in all, {} errors", n_own, unsafe { (*up).stats.compiled }, errors.len() + borrow_count);
     }

@@ -18,6 +18,10 @@
 //! - or, instead of the hello, client `makepad-wm launch <app id>`; server `makepad-wm launched`
 //!   or `makepad-wm refused <reason>`: the WM opens its dock app (launch-or-focus), what devhub's
 //!   `show` and a shell ask for (`makepad_app_registry::machine::request_launch`).
+//! - or client `makepad-wm notify <title>\t<body>[\t<action>]`; server `makepad-wm notified` or
+//!   `makepad-wm refused <reason>`: a toast in the WM's notification stack (devhub's "app
+//!   updated" after a sync, `makepad_app_registry::machine::request_notify`); `<action>` is what
+//!   clicking it does (`relaunch=<pid>`).
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -311,11 +315,13 @@ impl WmSocket {
     /// Serve one connection: the wire check, then (when the client asks) `admit`, which makes
     /// the window slot and answers the hub port and client id.
     /// `launch`: a `makepad-wm launch <id>` request (the WM opens its dock app `id`).
+    /// `notify`: a `makepad-wm notify <title>\t<body>[\t<action>]` request (a toast).
     pub fn serve(
         stream: UnixStream,
         wire: u64,
         admit: impl FnOnce(&AdoptRequest) -> Result<Admission, String>,
         launch: impl FnOnce(&str) -> Result<(), String>,
+        notify: impl FnOnce(&str, &str, Option<&str>) -> Result<(), String>,
     ) -> io::Result<Option<AdoptRequest>> {
         stream.set_read_timeout(Some(LINE_TIMEOUT))?;
         stream.set_write_timeout(Some(LINE_TIMEOUT))?;
@@ -335,6 +341,16 @@ impl WmSocket {
                     Ok(()) => format!("{GREETING} launched\n"),
                     Err(why) => format!("{GREETING} refused {}\n", why.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>()),
                 }
+            };
+            (&stream).write_all(answer.as_bytes())?;
+            return Ok(None);
+        }
+        if let Some(text) = line.strip_prefix(GREETING).and_then(|r| r.strip_prefix(" notify ")) {
+            let mut parts = text.splitn(3, '\t');
+            let (title, body, action) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().map(str::trim).filter(|a| !a.is_empty()));
+            let answer = match notify(title.trim(), body.trim(), action) {
+                Ok(()) => format!("{GREETING} notified\n"),
+                Err(why) => format!("{GREETING} refused {}\n", why.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>()),
             };
             (&stream).write_all(answer.as_bytes())?;
             return Ok(None);
@@ -454,7 +470,7 @@ mod tests {
                 let got = WmSocket::serve(stream, wire, |req| {
                     assert_eq!(req.crate_name, "makepad-app-amp");
                     Ok(Admission { port: 8766, client: 1 << 32 })
-                }, |_| Err("no launches here".into())).unwrap();
+                }, |_| Err("no launches here".into()), |_, _, _| Err("no toasts here".into())).unwrap();
                 adopted.extend(got);
             }
             adopted
@@ -491,7 +507,7 @@ mod tests {
         assert_eq!(paths, vec![stale.clone(), socket_path(&dir, 0)]);
         let server = thread::spawn(move || {
             let (stream, _) = live.listener.accept().unwrap();
-            WmSocket::serve(stream, wire, |_| Ok(Admission { port: 1, client: 2 }), |_| Ok(())).unwrap();
+            WmSocket::serve(stream, wire, |_| Ok(Admission { port: 1, client: 2 }), |_| Ok(()), |_, _, _| Ok(())).unwrap();
         });
         let found = paths.iter().find_map(|p| adopt(p, wire, 9, "devhub").ok());
         assert_eq!(found, Some(Admission { port: 1, client: 2 }));

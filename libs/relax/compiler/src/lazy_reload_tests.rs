@@ -790,11 +790,11 @@ fn app_scope_live_layout_edits() {
         // removes this helper too; its old body must not be checked against the new names.
         + "\nfn obsolete_style() { let _entry = obsolete_style as fn(); }\n";
     let patch = unsafe { reload::apply(up, vec![Edit { file: u.prog.def(state).file, path: path.to_string_lossy().into_owned(), src: after.into_bytes() }]) };
-    if matches!(case.as_str(), "framework" | "embedded" | "generic_embedded" | "bound_template_embedded") {
+    // A struct outside the app scope keeps its layout fixed: restart. One embedded by value in a
+    // framework type (`Holder`, like the platform's `Option<App>`) patches: its first layout stays.
+    if case == "framework" {
         assert_eq!(patch.rung, Rung::Restart, "{:?}", patch.lines);
-        let reason = if case == "framework" { "in the app scope" } else { "embedded by value" };
-        assert!(patch.lines.iter().any(|l| l.contains(reason) && l.contains("restart the app")), "{:?}", patch.lines);
-        if case != "framework" { assert!(patch.lines.iter().any(|l| l.contains("framework::Holder") && l.contains("outside the app scope"))); }
+        assert!(patch.lines.iter().any(|l| l.contains("in the app scope") && l.contains("restart the app")), "{:?}", patch.lines);
         call(value, old_value.as_mut_ptr() as u64);
     } else {
         assert_eq!(patch.rung, Rung::Patch, "{:?}", patch.lines);

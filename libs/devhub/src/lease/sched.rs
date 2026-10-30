@@ -200,6 +200,12 @@ pub struct Lease {
     /// since when a granted gate lease runs nothing (`info`'s `running` empty)
     idle_since: Option<u64>,
     seq: u64,
+    /// latency (ms): from the previous lease's release on its node to this grant, when it waited for
+    /// that box; its setup (`lease-start`, the revisions shipped inside it); its teardown (`lease-end`)
+    pub wait_ms: Option<u64>,
+    pub setup_ms: Option<u64>,
+    pub ship_ms: Option<u64>,
+    pub teardown_ms: Option<u64>,
 }
 
 impl Lease {
@@ -248,7 +254,7 @@ impl Lease {
         };
         let ms = |o: Option<u64>| o.map_or("null".to_string(), |v| v.to_string());
         format!(
-            "{{\"id\":{},\"lane\":{},\"kind\":\"{}\",\"node\":{},\"asked_ms\":{},\"granted_ms\":{},\"ended_ms\":{},\"how\":{},\"req\":{}}}",
+            "{{\"id\":{},\"lane\":{},\"kind\":\"{}\",\"node\":{},\"asked_ms\":{},\"granted_ms\":{},\"ended_ms\":{},\"how\":{},\"wait_ms\":{},\"setup_ms\":{},\"ship_ms\":{},\"teardown_ms\":{},\"req\":{}}}",
             json_str(&self.id),
             json_str(&self.req.lane),
             self.req.kind.as_str(),
@@ -257,6 +263,10 @@ impl Lease {
             ms(self.granted_ms),
             ms(self.ended_ms),
             json_str(how),
+            ms(self.wait_ms),
+            ms(self.setup_ms),
+            ms(self.ship_ms),
+            ms(self.teardown_ms),
             self.req.to_json()
         )
     }
@@ -282,6 +292,43 @@ struct NodeSt {
     /// the user's switch (nodes.conf); unset = by role
     dev: Option<bool>,
     reclaim_ms: Option<u64>,
+    /// when its last lease was released (a waiting lease's handoff starts there)
+    released_ms: Option<u64>,
+    lat: Lat,
+}
+
+/// A node's recent lease latencies (ms), newest last: release -> next grant of a waiting lease,
+/// setup, the job, teardown.
+#[derive(Clone, Debug, Default)]
+pub struct Lat {
+    pub handoff: VecDeque<u64>,
+    pub setup: VecDeque<u64>,
+    pub job: VecDeque<u64>,
+    pub teardown: VecDeque<u64>,
+}
+
+impl Lat {
+    const KEEP: usize = 20;
+    fn push(q: &mut VecDeque<u64>, v: u64) {
+        q.push_back(v);
+        while q.len() > Self::KEEP {
+            q.pop_front();
+        }
+    }
+    fn median(q: &VecDeque<u64>) -> Option<u64> {
+        let mut v: Vec<u64> = q.iter().copied().collect();
+        v.sort_unstable();
+        v.get(v.len() / 2).copied()
+    }
+    /// `handoff 0.4 s, setup 3.1 s, job 2m10s, teardown 1.2 s (medians of 12)`; empty with no samples.
+    pub fn line(&self) -> String {
+        let f = |name: &str, q: &VecDeque<u64>| Self::median(q).map(|m| format!("{name} {}", if m >= 60_000 { dur(m) } else { format!("{:.1} s", m as f64 / 1000.0) }));
+        let parts: Vec<String> = [f("handoff", &self.handoff), f("setup", &self.setup), f("job", &self.job), f("teardown", &self.teardown)].into_iter().flatten().collect();
+        if parts.is_empty() {
+            return String::new();
+        }
+        format!("{} (medians of {})", parts.join(", "), self.setup.len().max(self.teardown.len()))
+    }
 }
 
 /// One node as the explorer and `nodes` show it.
@@ -300,6 +347,8 @@ pub struct NodeView {
     pub draining: bool,
     /// a timed lease holds the node
     pub hold: Option<String>,
+    /// its lease latencies ([`Lat::line`])
+    pub latency: String,
 }
 
 impl NodeView {
@@ -352,7 +401,7 @@ impl NodeView {
 
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"node\":{},\"addr\":{},\"up\":{},\"dev\":{},\"dev_set\":{},\"role\":\"{}\",\"leases\":{},\"waiting\":{},\"draining\":{},\"hold\":{},\"state\":{},\"caps_line\":{},\"caps\":{}}}",
+            "{{\"node\":{},\"addr\":{},\"up\":{},\"dev\":{},\"dev_set\":{},\"role\":\"{}\",\"leases\":{},\"waiting\":{},\"draining\":{},\"hold\":{},\"state\":{},\"latency\":{},\"caps_line\":{},\"caps\":{}}}",
             json_str(&self.name),
             json_str(&self.addr),
             self.up,
@@ -364,6 +413,7 @@ impl NodeView {
             self.draining,
             self.hold.as_deref().map_or("null".to_string(), json_str),
             json_str(&self.state_word()),
+            json_str(&self.latency),
             json_str(&self.caps_line()),
             self.caps.as_ref().map_or("null".to_string(), |c| c.to_json())
         )
@@ -436,7 +486,7 @@ fn gb(v: &str) -> Option<f64> {
 }
 
 /// Over the load or RAM threshold: the node takes no new leases ([`BUSY_LOAD_PER_CORE`], [`BUSY_RAM_FREE`]).
-fn overloaded(c: &Caps) -> bool {
+pub fn overloaded(c: &Caps) -> bool {
     c.load1 > c.cores as f64 * BUSY_LOAD_PER_CORE || (c.ram_gb > 0.0 && c.ram_avail_gb < c.ram_gb * BUSY_RAM_FREE)
 }
 
@@ -564,6 +614,10 @@ impl Sched {
             start: String::new(),
             info: String::new(),
             idle_since: None,
+            wait_ms: None,
+            setup_ms: None,
+            ship_ms: None,
+            teardown_ms: None,
             seq: self.seq,
         };
         if let Some(who) = self.blocked_of(&l.req) {
@@ -616,6 +670,12 @@ impl Sched {
         self.event(sev, line, Some(&l));
         if let Some(n) = node.as_ref().filter(|_| l.req.kind != Kind::Inspect) {
             self.restoring.insert(n.clone(), l.id.clone());
+            if let Some(st) = self.nodes.get_mut(n) {
+                st.released_ms = Some(now);
+                if let Some(g) = l.granted_ms {
+                    Lat::push(&mut st.lat.job, now.saturating_sub(g).saturating_sub(l.setup_ms.unwrap_or(0)));
+                }
+            }
         }
         self.out.push(Action::End { id: l.id.clone(), node, how: how.to_string() });
         self.ended.push_back(l);
@@ -758,18 +818,47 @@ impl Sched {
             start: v.get("start").and_then(|x| x.as_str()).unwrap_or("").to_string(),
             info: String::new(),
             idle_since: None,
+            wait_ms: None,
+            setup_ms: None,
+            ship_ms: None,
+            teardown_ms: None,
             seq: self.seq,
         };
         self.leases.push(l);
         Some(id)
     }
 
-    /// The node answered the end of lease `id` (its tree is back on the shared commits, or the
-    /// cleanup failed and said so): the node is free again.
-    pub fn cleaned(&mut self, node: &str, id: &str) {
+    /// The node answered the end of lease `id` (its tree is back on the shared commits, handed to
+    /// the next lease, or the cleanup failed and said so) after `teardown_ms`: the node is free again.
+    pub fn cleaned(&mut self, node: &str, id: &str, teardown_ms: u64) {
         if self.restoring.get(node).is_some_and(|r| r == id) {
             self.restoring.remove(node);
         }
+        if let Some(l) = self.ended.iter_mut().rev().find(|l| l.id == id) {
+            l.teardown_ms = Some(teardown_ms);
+        }
+        if let Some(n) = self.nodes.get_mut(node) {
+            Lat::push(&mut n.lat.teardown, teardown_ms);
+        }
+    }
+
+    /// The node set lease `id` up in `setup_ms` (its revisions shipped in `ship_ms` of them).
+    pub fn set_up(&mut self, id: &str, setup_ms: u64, ship_ms: u64) {
+        let Some(l) = self.leases.iter_mut().find(|l| l.id == id) else { return };
+        l.setup_ms = Some(setup_ms);
+        l.ship_ms = Some(ship_ms);
+        if let Some(n) = l.node.clone().and_then(|n| self.nodes.get_mut(&n)) {
+            Lat::push(&mut n.lat.setup, setup_ms);
+        }
+    }
+
+    /// Does a waiting lease want this box (named to it, or able to run there)? Then a lease ending on
+    /// it hands the tree straight on instead of restoring it first.
+    pub fn waiting_for(&self, node: &str) -> bool {
+        let Some(c) = self.nodes.get(node).and_then(|n| n.caps.as_ref()) else { return false };
+        self.leases.iter().filter(|l| l.state == State::Queued && l.req.kind != Kind::Inspect).any(|l| {
+            l.req.node.as_deref().is_none_or(|n| n == node) && self.never(node, c, l, &Cost::default_for(l.req.kind, false)).is_ok()
+        })
     }
 
     /// The node could not set it up: the lease ends (`failed`, warn).
@@ -822,6 +911,7 @@ impl Sched {
                     waiting,
                     draining: !dev && leases > 0,
                     hold: self.holds.get(name).cloned(),
+                    latency: n.lat.line(),
                 }
             })
             .collect()
@@ -1055,6 +1145,13 @@ impl Sched {
                     l.granted_ms = Some(now);
                     l.reason.clear();
                     l.pos = 0;
+                    let released = self.nodes.get(&node).and_then(|n| n.released_ms);
+                    if let Some(r) = released.filter(|r| l.asked_ms <= *r && l.req.kind != Kind::Inspect) {
+                        l.wait_ms = Some(now.saturating_sub(r));
+                        if let Some(n) = self.nodes.get_mut(&node) {
+                            Lat::push(&mut n.lat.handoff, now.saturating_sub(r));
+                        }
+                    }
                     let (lane, kind, id) = (l.req.lane.clone(), l.req.kind, l.id.clone());
                     self.last_grant.insert(lane.clone(), now);
                     if buildish(kind) {
@@ -1177,7 +1274,7 @@ mod tests {
         let node = s.get(id).and_then(|l| l.node.clone());
         s.release(id, "released", now);
         if let Some(n) = node {
-            s.cleaned(&n, id);
+            s.cleaned(&n, id, 0);
         }
     }
 
@@ -1228,7 +1325,7 @@ mod tests {
         beat_all(&mut s, 2);
         assert!(grants(&s.tick(2)).is_empty());
         assert_eq!(state(&s, &y).1, format!("restoring its tree after {x}"));
-        s.cleaned("a", &x);
+        s.cleaned("a", &x, 0);
         assert_eq!(grants(&s.tick(3)), vec![y]);
     }
 
@@ -1392,7 +1489,7 @@ mod tests {
         assert_eq!(state(&s, &lanes[0]).0, "starting", "a gate that runs something stays");
         assert_eq!(state(&s, &lanes[1]).0, "ended idle");
         let freed = s.get(&lanes[1]).unwrap().node.clone().unwrap();
-        s.cleaned(&freed, &lanes[1]);
+        s.cleaned(&freed, &lanes[1], 0);
         beat_all(&mut s, GATE_IDLE_MS + 6);
         s.tick(GATE_IDLE_MS + 6);
         assert_eq!(state(&s, &land).0, "starting", "the landing takes the freed box first");
@@ -1467,7 +1564,7 @@ mod tests {
         assert!(a.iter().any(|a| matches!(a, Action::Event(r) if r.sev == Sev::Warn && r.line.contains("expired"))));
         // the box frees once the node answered the expired lease's cleanup
         assert_eq!(state(&s, &q).0, "queued");
-        s.cleaned("a", &b);
+        s.cleaned("a", &b, 0);
         s.beat(&q, 30_001);
         s.tick(30_002);
         assert_eq!(state(&s, &q).0, "starting");
@@ -1532,7 +1629,7 @@ mod tests {
         assert!(!acts.iter().any(|a| matches!(a, Action::End { id, .. } if *id == y)));
         assert!(s.get(&y).unwrap().state.live());
         assert!(!s.cancel(&x, 12), "already ended");
-        s.cleaned("a", &x);
+        s.cleaned("a", &x, 0);
         // lane-x asks again with no node: it is placed, but not on a (free) nor b (held)
         let again = s.request(req("lane-x", Kind::Build, None), 20);
         s.tick(21);

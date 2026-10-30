@@ -202,6 +202,28 @@ impl Cx {
         self.hal.xr.as_ref().map_or(1.0, |xr| xr.supersample)
     }
 
+    /// `Cx::xr_pass_eyes`: the eye cameras of `hal_xr_eye_uniforms` and the eye size the XR
+    /// pass's target gets in `frame_build` (an offscreen pass supersampled, eyes side by side).
+    pub(crate) fn hal_xr_pass_eyes(&self) -> Option<([(Mat4f, Mat4f); 2], crate::makepad_math::DVec2)> {
+        let xr = self.hal.xr.as_ref()?;
+        let frame = xr.frame?;
+        let eye = |i| {
+            let (view, projection) = eye_matrices(&frame, i);
+            (Mat4f::mul(&view, &xr.scene_to_room), projection)
+        };
+        if !self.windows.is_valid(xr.window) {
+            return None;
+        }
+        let inner = self.windows[xr.window].window_geom.inner_size;
+        if inner.x <= 0.0 {
+            return None;
+        }
+        let offscreen = self.hal_info_flags() & makepad_hal::info_flags::XR_OFFSCREEN != 0;
+        let s = if offscreen { xr.supersample as f64 } else { 1.0 };
+        let half = if offscreen { (inner.x * 0.5 * s).round() } else { (inner.x / 2.0).floor() };
+        Some(([eye(0), eye(1)], crate::makepad_math::dvec2(half, (inner.y * s).round())))
+    }
+
     /// `Cx::xr_set_pose_lead`.
     pub(crate) fn hal_xr_pose_lead(&mut self, lead_ns: u64) {
         let Some(xr) = self.hal.xr.as_ref() else { return };

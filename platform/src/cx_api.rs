@@ -1264,6 +1264,16 @@ impl Cx {
     }
 
     /// The offscreen XR passes' pixels per eye pixel (1 without supersampling).
+    /// The eyes an XR pass draws its next frame with, as its pass uniforms carry them (the
+    /// scene-to-room transform applied: `[(view, projection); 2]`), and each eye's pixel size
+    /// in the XR pass's target: what a renderer marching its own stereo target matches.
+    pub fn xr_pass_eyes(&self) -> Option<([(crate::makepad_math::Mat4f, crate::makepad_math::Mat4f); 2], crate::makepad_math::DVec2)> {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal_xr_pass_eyes() }
+        #[cfg(target_arch = "wasm32")]
+        { None }
+    }
+
     pub fn xr_supersample(&self) -> f32 {
         #[cfg(not(target_arch = "wasm32"))]
         { self.hal_xr_supersample_now() }

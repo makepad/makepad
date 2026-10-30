@@ -131,6 +131,42 @@ pub fn request_launch(path: &std::path::Path, id: &str) -> Result<(), String> {
     }
 }
 
+/// Asks the WM at `path` for a toast (`makepad-wm notify <title>\t<body>[\t<action>]`): the WM
+/// draws it in its notification stack, no OS popup. `action`: what clicking it does
+/// (`relaunch=<pid>`: that JIT's `session relaunch`, an offered restart). Ok once the WM took it.
+#[cfg(unix)]
+pub fn request_notify(path: &std::path::Path, title: &str, body: &str, action: Option<&str>) -> Result<(), String> {
+    use std::io::{BufRead, Write};
+    let flat = |s: &str| -> String { s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().trim().to_string() };
+    // the WM reads one line of at most 512 bytes
+    let cut = |s: String, max: usize| -> String {
+        if s.len() <= max {
+            return s;
+        }
+        let mut end = max.saturating_sub(3);
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
+    };
+    let title = cut(flat(title), 96);
+    let action = action.map(flat).unwrap_or_default();
+    let body = cut(flat(body), 470usize.saturating_sub(title.len() + action.len()));
+    if title.is_empty() {
+        return Err("a toast needs a title".into());
+    }
+    let stream = std::os::unix::net::UnixStream::connect(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+    let action = if action.is_empty() { String::new() } else { format!("\t{action}") };
+    (&stream).write_all(format!("makepad-wm notify {title}\t{body}{action}\n").as_bytes()).map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    std::io::BufReader::new(&stream).read_line(&mut line).map_err(|e| format!("the WM did not answer: {e}"))?;
+    match line.trim() {
+        "makepad-wm notified" => Ok(()),
+        other => Err(other.strip_prefix("makepad-wm refused ").map_or_else(|| format!("unexpected answer {other:?}"), str::to_string)),
+    }
+}
+
 /// Unsaved work of the apps running on this machine (Unix), as `(pid, app, what)`: what each
 /// app's platform publishes in `$XDG_RUNTIME_DIR/makepad-unsaved/<pid>`
 /// (`makepad_platform::restart::set_unsaved`), for live processes only. A whole-session restart

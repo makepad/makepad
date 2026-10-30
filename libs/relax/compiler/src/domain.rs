@@ -172,7 +172,7 @@ pub const BLOCK_SIZE: usize = crate::jit::UNIT_RW_SIZE as usize;
 /// program's, `call_jit` / `set_runtime_unit`; a process can hold other units: the macro world's,
 /// test units). 0 before any unit ran code.
 pub fn default_base() -> u64 {
-    let u = unsafe { crate::jit::UNIT };
+    let u = crate::jit::cur_unit();
     if u.is_null() { 0 } else { unsafe { (&*u).syms.dom0() } }
 }
 

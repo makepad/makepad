@@ -69,6 +69,7 @@ fn is_group(n: &str) -> bool {
 pub fn check(prog: &Program, own: &[bool]) -> Vec<String> {
     if !lint::enabled() { return Vec::new(); }
     EXPECTATIONS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    RAISED.store(false, std::sync::atomic::Ordering::Relaxed);
     let mut errors = Vec::new();
     // module files' inner attributes
     let mut seen_files: Vec<u32> = Vec::new();
@@ -244,6 +245,24 @@ const CRATE_LEVEL_ONLY: &[&str] = &["ill_formed_attribute_input", "unused_crate_
     "text_direction_codepoint_in_literal", "rust_2024_guarded_string_incompatible_syntax", "non_ascii_idents", "uncommon_codepoints",
     "confusable_idents", "mixed_script_confusables"];
 
+/// Whether the last `check` met a level attribute that can make a lint whose verdict rests on
+/// every body of the crate an error (`deny` / `forbid` of `cross_body`) or that expects one
+/// (`expect`): a check that reuses stored verdicts of unchanged bodies (check.rs) cannot answer
+/// those without walking every body.
+static RAISED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// See `RAISED`.
+pub fn raised() -> bool {
+    RAISED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A lint (or group: any could hold one) whose verdict rests on every body of the crate: what the
+/// bodies use (dead_code, unused imports and macros, redundant imports) or whether an `expect`
+/// was met.
+fn cross_body(n: &str) -> bool {
+    n == "warnings" || n.starts_with("unused") || n.starts_with("dead_code") || n == "redundant_imports" || is_group(n)
+}
+
 fn check_list(prog: &Program, def: DefId, before: &[Attr], list: &[Attr], file: u32, errors: &mut Vec<String>) {
     check_list_at(prog, def, before, list, file, errors, false)
 }
@@ -252,6 +271,9 @@ fn check_list_at(prog: &Program, def: DefId, before: &[Attr], list: &[Attr], fil
     for (ai, a) in list.iter().enumerate() {
         malformed(prog, file, a, errors);
         let Some(la) = lint::parse_level_attr(prog, file, a) else { continue };
+        if la.expect || (matches!(la.level, Level::Deny | Level::Forbid) && la.names.iter().any(|(n, _)| cross_body(lint::current_name(n)))) {
+            RAISED.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         // the attributes in force when this one is read
         let mut inner: Vec<Attr> = before.to_vec();
         inner.extend_from_slice(&list[..ai]);

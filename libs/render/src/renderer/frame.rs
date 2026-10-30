@@ -97,7 +97,14 @@ impl Renderer {
     /// lands in it (then the next draw's). Without an environment it is
     /// `resolve_sun`'s, aimed by a world's own Sun.
     pub fn frame_sun_dir(&self, world: &World) -> Vec3f {
-        crate::world_lights::apply_world_sun(world, self.lane_rig(world, self.frame_start_sun(world))).dir
+        self.frame_sun(world).dir
+    }
+
+    /// The whole final rig of [`Self::frame_sun_dir`] (direction, colour,
+    /// hemisphere): for a host pass that shades next to the renderer's own
+    /// (a ray-marched surface) under the same light.
+    pub fn frame_sun(&self, world: &World) -> SunLight {
+        crate::world_lights::apply_world_sun(world, self.lane_rig(world, self.frame_start_sun(world)))
     }
 
     /// The frame's rig in its lane (HDR: `to_hdr` and the analytic fill

@@ -61,6 +61,8 @@ pub(crate) struct Adoptions {
     rx: Receiver<Adopted>,
     /// `makepad-wm launch <id>` requests (devhub's `show`, a shell): the dock's launch-or-focus.
     launches: Receiver<String>,
+    /// `makepad-wm notify <title>\t<body>` requests (devhub's "app updated" after a sync): toasts.
+    toasts: Receiver<(String, String, Option<u32>)>,
 }
 
 impl Adoptions {
@@ -83,6 +85,7 @@ impl Adoptions {
         host::set_child_env(wm_socket::SOCKET_ENV, path.as_os_str());
         let (tx, rx) = channel();
         let (launch_tx, launches) = channel();
+        let (toast_tx, toasts) = channel();
         let worker = cx.thread_spawner().spawn_worker(ThreadOptions { name: Some("wm-socket".into()), ..Default::default() }, move || {
             let mut next = FIRST_ADOPTED_CLIENT;
             for stream in socket.listener.incoming() {
@@ -107,6 +110,12 @@ impl Adoptions {
                     launch_tx.send(app.to_string()).map_err(|_| "the WM is shutting down".to_string())?;
                     SignalToUI::set_ui_signal();
                     Ok(())
+                }, |title, body, action| {
+                    // `relaunch=<pid>`: the toast offers that JIT's restart
+                    let relaunch = action.and_then(|a| a.strip_prefix("relaunch=")).and_then(|p| p.parse::<u32>().ok());
+                    toast_tx.send((title.to_string(), body.to_string(), relaunch)).map_err(|_| "the WM is shutting down".to_string())?;
+                    SignalToUI::set_ui_signal();
+                    Ok(())
                 });
                 if let Err(e) = served {
                     log!("wm: socket: {e}");
@@ -121,7 +130,7 @@ impl Adoptions {
             }
         }
         log!("wm: published {} for apps started in this session", path.display());
-        Some(Adoptions { path, rx, launches })
+        Some(Adoptions { path, rx, launches, toasts })
     }
 }
 
@@ -132,6 +141,11 @@ impl App {
         let Some(adoptions) = self.adoptions.as_ref() else { return };
         let adopted: Vec<Adopted> = adoptions.rx.try_iter().collect();
         let launches: Vec<String> = adoptions.launches.try_iter().collect();
+        let toasts: Vec<(String, String, Option<u32>)> = adoptions.toasts.try_iter().collect();
+        for (title, body, relaunch) in toasts {
+            log!("wm: socket toast: {title}: {body}{}", relaunch.map_or(String::new(), |p| format!(" [click: restart pid {p}]")));
+            self.notify_with(cx, &title, &body, relaunch);
+        }
         for app in launches {
             log!("wm: socket asks for the dock's {app}");
             self.launch_app(cx, &app);

@@ -691,6 +691,10 @@ pub struct App {
     osd_screen: usize,
     #[rust]
     notes_screen: usize,
+    /// Toasts that offer a JIT app's restart (devhub after a sync): clicking one is that JIT's
+    /// `session relaunch` (toast id, its pid).
+    #[rust]
+    toast_relaunch: Vec<(u64, u32)>,
     /// The Wi-Fi dropdown's iwd link (Linux, shell/wifi_linux.rs): started
     /// when the dropdown first opens, alive for the session, dropped at
     /// shutdown.
@@ -1659,9 +1663,9 @@ impl App {
                 }
             }
             WmRequest::Notify { title, body } => {
-                // The notifications surface is the shell-UI lane's; until
-                // it lands the notification is at least not lost.
                 log!("wm: notify from client {}: {} — {}", client, title, body);
+                let (title, body) = (title.clone(), body.clone());
+                self.notify(cx, &title, &body);
             }
             WmRequest::Close => self.request_close(cx, client),
             WmRequest::SetFloating { floating } => {
@@ -4464,17 +4468,55 @@ impl App {
     /// The in-process notification API — `WmRequest::Notify{title, body}`
     /// lands here.
     pub fn notify(&mut self, cx: &mut Cx, title: &str, body: &str) {
+        self.notify_with(cx, title, body, None);
+    }
+
+    /// A toast; `relaunch`: it offers that JIT's restart (it stays until clicked or dismissed,
+    /// and its click is the JIT's `session relaunch`).
+    pub fn notify_with(&mut self, cx: &mut Cx, title: &str, body: &str, relaunch: Option<u32>) {
         if let Some(state) = self.state.as_ref() {
             self.notes_screen = state.screens.active;
         }
         let notes = self.ui.widget(cx, ids!(shell_notes));
+        let mut posted = None;
         {
             let mut borrowed = notes.borrow_mut::<shell::notifications::ShellNotifications>();
             if let Some(n) = borrowed.as_mut() {
-                n.notify(cx, title, body);
+                posted = Some(match relaunch {
+                    Some(_) => n.post(cx, shell::notifications::Notification {
+                        id: 0,
+                        app: "wm".into(),
+                        summary: title.to_string(),
+                        body: body.to_string(),
+                        icon: Some(shell::ui::Ico::Bell),
+                        urgency: shell::notifications::Urgency::Critical,
+                        requested: 0.0,
+                    }),
+                    None => n.notify(cx, title, body),
+                });
             }
         }
+        if let (Some(id), Some(pid)) = (posted, relaunch) {
+            self.toast_relaunch.push((id, pid));
+        }
         self.redraw_all(cx);
+    }
+
+    /// A restart toast was clicked: that JIT applies its waiting restart in place (the app may
+    /// still postpone it for unsaved work: its caption then offers it).
+    fn relaunch_jit(pid: u32) {
+        let _ = std::thread::Builder::new().name("wm-relaunch".into()).spawn(move || {
+            match makepad_remote::link::Client::connect(&pid.to_string()) {
+                Ok(c) => {
+                    c.set_timeout(Some(std::time::Duration::from_secs(10)));
+                    match c.cmd("session relaunch") {
+                        Ok(lines) => for l in lines.flatten() { log!("wm: restart of pid {pid}: {l}"); },
+                        Err(e) => log!("wm: restart of pid {pid}: {e}"),
+                    }
+                }
+                Err(e) => log!("wm: restart of pid {pid}: cannot reach its JIT: {e}"),
+            }
+        });
     }
 
     /// Show the volume OSD (the wheel over the audio module, and the
@@ -6535,6 +6577,17 @@ impl MatchEvent for App {
             let Some(wa) = action.as_widget_action() else {
                 continue;
             };
+            match wa.cast::<shell::notifications::ShellNotificationsAction>() {
+                shell::notifications::ShellNotificationsAction::Activated(id) => {
+                    if let Some(at) = self.toast_relaunch.iter().position(|t| t.0 == id) {
+                        let (_, pid) = self.toast_relaunch.remove(at);
+                        log!("wm: restart toast clicked: pid {pid} restarts in place");
+                        Self::relaunch_jit(pid);
+                    }
+                }
+                shell::notifications::ShellNotificationsAction::Dismissed(id) => self.toast_relaunch.retain(|t| t.0 != id),
+                shell::notifications::ShellNotificationsAction::None => {}
+            }
             // The shell surfaces: the bar's presses and wheel, the menu's
             // activations, the flyouts' controls.
             match wa.cast::<ShellBarAction>() {

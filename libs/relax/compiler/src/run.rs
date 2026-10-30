@@ -1462,20 +1462,6 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         return 1;
     }
     jit::set_program_args(prog_args.clone());
-    if !test_subjects.is_empty() {
-        let n = check_test_subjects(&mut u, root, &test_subjects, harness);
-        if n > 0 {
-            let names: Vec<String> = test_subjects.iter().map(|&k| u.prog.syms.str(u.prog.crates[k as usize].name).to_string()).collect();
-            eprintln!("error: could not compile {} (test) due to {} previous error{}: no test ran (rustc rejects this code; `makepad test` fails as `cargo test` does)",
-                names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", "), n, if n == 1 { "" } else { "s" });
-            std::mem::forget(u);
-            return 101;
-        }
-        // a `harness = false` target is a program: a compile error it reaches ends it (rustc rejects it)
-        if plain_test.is_some() {
-            jit::COMPILE_ERRORS_FATAL.store(true, Ordering::Relaxed);
-        }
-    }
     drop(mem_g);
     let mem_g = crate::memstat::tag(crate::memstat::Tag::CacheLoad);
     // Classify the disk cache before workers add newly compiled entries.
@@ -1516,6 +1502,23 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     }
     phase("image", t);
     drop(mem_g);
+    if !test_subjects.is_empty() {
+        let t_check = Instant::now();
+        // after the cache is open: a body whose stored verdict is clean is not checked again
+        let n = check_test_subjects(&mut u, root, &test_subjects, harness);
+        phase("test check", t_check);
+        if n > 0 {
+            let names: Vec<String> = test_subjects.iter().map(|&k| u.prog.syms.str(u.prog.crates[k as usize].name).to_string()).collect();
+            eprintln!("error: could not compile {} (test) due to {} previous error{}: no test ran (rustc rejects this code; `makepad test` fails as `cargo test` does)",
+                names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", "), n, if n == 1 { "" } else { "s" });
+            std::mem::forget(u);
+            return 101;
+        }
+        // a `harness = false` target is a program: a compile error it reaches ends it (rustc rejects it)
+        if plain_test.is_some() {
+            jit::COMPILE_ERRORS_FATAL.store(true, Ordering::Relaxed);
+        }
+    }
     // after the cache is open: a validated warm start with the program's clean verdict stored skips the check
     jit::start_background_coherence(&u);
     *STARTUP_PATH.lock().unwrap() = crate::zone_alloc::kept_with(|| format!("{}/startup/{}.startup", target_dir, package));

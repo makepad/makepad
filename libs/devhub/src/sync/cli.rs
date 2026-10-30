@@ -17,8 +17,10 @@ use std::sync::{Arc, Mutex};
 pub const HELP: &str = "  sync words (the master; nodes by hub name, `all` = every node):
   sync status [node...]                         each node's synced checkout, store refs, last apply
   autosync status   what the master's auto-sync last did per node (~/.makepad/devhub/autosync.state)
+  sync now          a landing happened: auto-sync reaches every node now (the user's WM node first),
+                    not at its next tick; the landing scripts' hook. Returns at once
   sync push <node,...|all> [--makepad <branch>] [--commercial <branch>|--no-commercial]
-            [--repo <dir>] [--build on|off] [--restart none|auto|wm|apps]
+            [--repo <dir>] [--build on|off] [--restart none|auto|wm|apps] [--prewarm]
             [--session <node>/<pid>[:<arg>],... --tick '<inspect cmd, {} = arg>' [--lead <ticks>]]
                                                 push branches (default work + commercial main) as signed
                                                 bundles, fast-forward the node's checkout, prebuild,
@@ -26,6 +28,10 @@ pub const HELP: &str = "  sync words (the master; nodes by hub name, `all` = eve
   lanes [--json]                                the open lane branches the master keeps merged with work/main:
                                                 branch, worktree, tip, last merge result, conflicts
   hold <branch> [why...] | unhold <branch>      keep the master's merge bot off a lane branch (held)
+  prewarm                                       per node, the last pre-warm after a landing (JIT built, cache
+                                                warm for the smoke apps; a lease preempts it)
+  prewarm run [--cancel-after <s>]              the pre-warm of this tree, here, in the foreground (a dry run;
+                                                --cancel-after: preempted then, the way a lease does)
   rebuild <node,...|all> [wm|apps]              push work + commercial main, prebuild, restart the WM (wm), our
                                                 launches (apps) or what the build replaced (default)
   wm-restart <node>                             restart the node's WM (and AI Hub) through its service
@@ -419,7 +425,8 @@ fn flag<'a>(args: &'a [&'a str], name: &str) -> Option<&'a str> {
 
 /// Pushes and applies without a session. An empty node names a run-wide progress line.
 /// Worker output reaches `out` on the calling thread, so the CLI still shows live progress.
-pub(super) fn push_and_apply(c: &Client, repo: &Path, makepad_branch: &str, commercial: Option<&str>, nodes: &[String], build: &str, restart: &str, out: &mut dyn FnMut(&str, &str)) -> i32 {
+/// `extra`: more order words for the node (` landed=<ms>`: the landing this push follows).
+pub(super) fn push_and_apply(c: &Client, repo: &Path, makepad_branch: &str, commercial: Option<&str>, nodes: &[String], build: &str, restart: &str, prewarm: bool, extra: &str, out: &mut dyn FnMut(&str, &str)) -> i32 {
     let mut pushes = Vec::new();
     for (name, dir, branch) in [("makepad", repo.to_path_buf(), Some(makepad_branch)), ("commercial", repo.join("apps/commercial"), commercial)] {
         let Some(branch) = branch else { continue };
@@ -466,7 +473,7 @@ pub(super) fn push_and_apply(c: &Client, repo: &Path, makepad_branch: &str, comm
         }
     }
     // 2. apply, keeping the node's fast-forward check and restart policy
-    let words = format!("apply{revs} build={build} restart={restart}");
+    let words = format!("apply{revs} build={build} restart={restart}{}{extra}", if prewarm { " prewarm=on" } else { "" });
     let answers = std::thread::scope(|s| {
         let hs: Vec<_> = ready.into_iter().map(|n| {
             let words = &words;
@@ -547,7 +554,7 @@ fn sync_push(c: &Client, args: &[&str]) -> i32 {
     };
     let Some(session) = flag(args, "--session") else {
         let commercial = (!args.contains(&"--no-commercial")).then(|| flag(args, "--commercial").unwrap_or("main"));
-        return push_and_apply(c, &repo, flag(args, "--makepad").unwrap_or("work"), commercial, &nodes, build, restart, &mut out);
+        return push_and_apply(c, &repo, flag(args, "--makepad").unwrap_or("work"), commercial, &nodes, build, restart, args.contains(&"--prewarm"), "", &mut out);
     };
     let revs: String = pushes.iter().map(|p| format!(" {}={}", p.repo, p.sha)).collect();
     for p in &pushes {
@@ -747,6 +754,13 @@ pub fn main(args: &[&str]) -> Option<i32> {
             }
         }
         ("sync", ["push", rest @ ..]) => sync_push(&c, rest),
+        ("sync", ["now"]) => match ask_local(&c, "autosync", &format!("now {}", proto::wall_ms())) {
+            Ok(lines) => print_lines("master", &lines),
+            Err(e) => {
+                eprintln!("makepad devhub sync now: {e}");
+                2
+            }
+        },
         ("wm-restart", [node]) => match sign::sign("wm-restart") {
             Ok(order) => out(node, ask(&c, node, "sync", &format!("wm-restart {order}"))),
             Err(e) => {

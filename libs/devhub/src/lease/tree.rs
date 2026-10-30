@@ -101,6 +101,10 @@ fn to_shared(root: &Path) -> Result<Option<String>, String> {
     Ok(moved.then(|| to.short()))
 }
 
+/// How long a tree handed to a waiting lease ([`release`] with `handoff`) waits for it before it
+/// goes back to the shared commits after all.
+pub const HANDOFF_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// A hub starting with no lease on the tree: a tree left off the shared commits goes back.
 pub fn restore_if_free(root: &Path) -> Result<Option<String>, String> {
     let h = lock();
@@ -232,7 +236,7 @@ pub struct Released {
 /// Lease `id` lets go of the tree. When it was the last holder: edits it left in tracked files
 /// are bundled to `out` (`<tag>.bundle`, `<tag>-commercial.bundle`), then the tree goes back to
 /// the shared commits, all before this returns (before the node counts as free).
-pub fn release(id: &str, root: &Path, out: &Path, tag: &str) -> Result<Released, String> {
+pub fn release(id: &str, root: &Path, out: &Path, tag: &str, handoff: bool) -> Result<Released, String> {
     let mut h = lock();
     let Some(pin) = h.0.remove(id) else { return Ok(Released::default()) };
     if !h.0.is_empty() {
@@ -249,7 +253,8 @@ pub fn release(id: &str, root: &Path, out: &Path, tag: &str) -> Result<Released,
             bundles.push(store.recover_tree(&dir, at, id, out, &t)?);
         }
     }
-    let restored = to_shared(root)?;
+    // handed over: the next lease moves the tree from these commits (its own diff only)
+    let restored = if handoff { None } else { to_shared(root)? };
     Ok(Released { bundles, restored })
 }
 
@@ -322,9 +327,9 @@ mod tests {
         // the first one leaves: nothing changes for the second; the second leaves the tree warm
         std::fs::write(root.join("b.rs"), "edited by L2").unwrap();
         std::fs::write(root.join("scratch.txt"), "left by L2").unwrap();
-        assert!(release("L1", &root, &base.join("rec"), "x-L1").unwrap().bundles.is_empty());
+        assert!(release("L1", &root, &base.join("rec"), "x-L1", false).unwrap().bundles.is_empty());
         assert_eq!(std::fs::read_to_string(root.join("b.rs")).unwrap(), "edited by L2", "a holder is still on the tree");
-        let b = release("L2", &root, &base.join("rec"), "x-L2").unwrap();
+        let b = release("L2", &root, &base.join("rec"), "x-L2", false).unwrap();
         assert_eq!((b.bundles.len(), b.restored), (1, None), "at the shared commits already");
         assert_eq!(std::fs::read_to_string(root.join("b.rs")).unwrap(), "1");
         assert!(root.join("scratch.txt").exists() && root.join("target/release/makepad").exists());
@@ -336,7 +341,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "1");
         assert_eq!(std::fs::metadata(root.join("b.rs")).unwrap().modified().unwrap(), b_time);
         // its end puts the tree back on the shared commits in the same step: no box stays on a lane rev
-        let r = release("L3", &root, &base.join("rec"), "x-L3").unwrap();
+        let r = release("L3", &root, &base.join("rec"), "x-L3", false).unwrap();
         assert!(r.bundles.is_empty() && r.restored.is_some());
         assert_eq!(current(&root), Some(at(&two)));
         assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "2");
@@ -347,7 +352,7 @@ mod tests {
         hold("L4", &at(&one));
         assert!(take("L5", &at(&two), &root).is_err());
         assert_eq!(restore_if_free(&root).unwrap(), None, "a held tree is the lease's");
-        assert!(release("L4", &root, &base.join("rec"), "x-L4").unwrap().restored.is_some());
+        assert!(release("L4", &root, &base.join("rec"), "x-L4", false).unwrap().restored.is_some());
         assert_eq!(current(&root), Some(at(&two)));
         // a hub that died mid-lease with no ledger left the tree on a lane rev: the new hub puts it back
         store.move_checkout(&root, Some(&two), &one).unwrap();
@@ -365,7 +370,7 @@ mod tests {
         assert_eq!(undo_overlay(&root, &at(&one), &shipped).unwrap(), 3);
         assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "1");
         assert!(root.join("b.rs").exists() && !root.join("newcrate").exists(), "the new dir goes with its file");
-        let r = release("L6", &root, &base.join("rec"), "x-L6").unwrap();
+        let r = release("L6", &root, &base.join("rec"), "x-L6", false).unwrap();
         assert!(r.bundles.is_empty(), "nothing of the overlay is left to bundle");
         assert_eq!(current(&root), Some(at(&two)));
         assert!(root.join("target/release/makepad").exists());

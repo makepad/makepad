@@ -524,6 +524,8 @@ pub struct ScriptCode {
     pub script_mod_overrides: Rc<RefCell<HashMap<ScriptModKey, String>>>,
     /// Shader fns compiled in a namespace ([`ScriptVm::set_shader_fn_namespace`]).
     pub(crate) shader_fn_namespaces: RefCell<HashMap<ScriptObject, Rc<ShaderFnNamespace>>>,
+    /// Shader fns whose bodies a host builds as IR ([`ScriptVm::set_shader_ir_fn`]).
+    pub(crate) shader_ir_fns: RefCell<HashMap<ScriptObject, Rc<dyn crate::shader_compile::ShaderIrFn>>>,
 }
 
 /// How a shader fn reads its `self` when several fns share one shader under
@@ -3078,6 +3080,22 @@ impl<'a> ScriptVm<'a> {
         if self.bx.vm_body(&mut req) { req.value.as_object() } else { None }
     }
 
+    /// Gives shader fn `f` a body the host builds as IR (`None` takes it
+    /// away): a shader that calls `f` compiles the host's body instead of
+    /// the script's, and the body's key is part of the shader's identity.
+    /// The script fn still names the fn and its parameters.
+    pub fn set_shader_ir_fn(&mut self, f: ScriptObject, body: Option<Rc<dyn crate::shader_compile::ShaderIrFn>>) {
+        let mut map = self.bx.code.shader_ir_fns.borrow_mut();
+        match body {
+            Some(b) => {
+                map.insert(f, b);
+            }
+            None => {
+                map.remove(&f);
+            }
+        }
+    }
+
     /// Compile shader fn `f` in a namespace (see [`ShaderFnNamespace`]):
     /// `renames` (`self.<from>` read as `self.<to>`) and an optional input.
     /// Empty renames and no input compile it as written again.
@@ -3613,6 +3631,7 @@ impl ScriptVmBase {
                 crate_manifests: Default::default(),
                 script_mod_overrides: Default::default(),
                 shader_fn_namespaces: Default::default(),
+                shader_ir_fns: Default::default(),
             },
             threads: ScriptThreads::new(),
             heap: heap,

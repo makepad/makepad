@@ -414,6 +414,22 @@ impl IrFnCompiler {
             argi += 1;
         }
 
+        // A body the host builds as IR (a compiled kernel): the script fn
+        // only named it and its parameters.
+        let ext = vm.bx.code.shader_ir_fns.borrow().get(&fnobj).cloned();
+        if let Some(ext) = ext {
+            c.f.ret = output.compiled.ir.scalar_ty(IrScalar::F32);
+            c.f.ret_pod = builtins.pod_f32.into();
+            if let Err(e) = ext.build(&mut output.compiled.ir, &mut c.f) {
+                output.push_error(format!("shader function {:?}: {}", name, e));
+                script_err_shader!(trap, "host shader body failed: {}", e);
+                return (builtins.pod_void, None);
+            }
+            finish_function(&mut c.f);
+            output.compiled.last_call_cost = c.f.cost;
+            output.compiled.ir.functions.push(c.f);
+            return (builtins.pod_f32, Some((output.compiled.ir.functions.len() - 1) as FuncId));
+        }
         let Some(ScriptFnPtr::Script(fnip)) = vm.bx.heap.as_fn(fnobj) else {
             output.push_error(format!("shader function {:?} is not a script function", name));
             return (builtins.pod_void, None);

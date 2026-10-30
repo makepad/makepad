@@ -19,7 +19,9 @@ pub(super) enum Event {
     #[cfg(target_os = "linux")]
     Capture { window: Id, surface: Arc<crate::backend::linux::media::capture_surface::Surface> },
     Presented { target: Id, frame: u64 },
-    Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64 },
+    /// `gpu_span`: the frame's first and last timestamps in seconds of the device's clock (the
+    /// frame timer orders a frame's passes by it).
+    Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, gpu_span: [f64; 2] },
     Readback { req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
     Pick { req: u32, ids: Vec<u32> },
     Shared { id: Id, handle: u64 },
@@ -709,7 +711,14 @@ impl Batch {
             && unsafe { self.dev.raw.get_query_pool_results(self.query.0, 0, &mut times, vk::QueryResultFlags::TYPE_64) }.is_ok();
         let bits = self.dev.timestamp_bits;
         let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
-        let gpu_ns = if timed { ((times[1].wrapping_sub(times[0]) & mask) as f64 * self.dev.properties.limits.timestamp_period as f64) as u64 } else { 0 };
+        let period = self.dev.properties.limits.timestamp_period as f64;
+        let gpu_ns = if timed { ((times[1].wrapping_sub(times[0]) & mask) as f64 * period) as u64 } else { 0 };
+        let gpu_span = if timed {
+            let start = (times[0] & mask) as f64 * period * 1e-9;
+            [start, start + gpu_ns as f64 * 1e-9]
+        } else {
+            [0.0; 2]
+        };
         // Events are delivered only after every Vulkan object this batch kept alive is destroyed:
         // whoever observes an event (a test, a process about to exit) then cannot race the driver
         // calls of this worker, whose ICD exit handlers run concurrently with exit().
@@ -731,7 +740,7 @@ impl Batch {
                     // all the same, never presented: its app paints again (a dropped frame) or
                     // after DeviceReset (a lost device)
                     token.incarnation.done(frame);
-                    push(token, Event::Frame { target, kind, frame, window: window && !failed, gpu_ns });
+                    push(token, Event::Frame { target, kind, frame, window: window && !failed, gpu_ns, gpu_span });
                 }
                 Ticket::Copy { token, req, rect } => push(token, Event::Readback {
                     req, rect, status: if failed { readback::FAILED } else { readback::OK }, pixels: Vec::new(),

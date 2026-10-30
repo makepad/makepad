@@ -26,7 +26,9 @@ pub struct Token {
 }
 
 pub enum Event {
-    Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64 },
+    /// `gpu_span`: the frame's first and last timestamps in seconds of the GPU's clock (one
+    /// clock for every frame of the device: the frame timer orders passes by it).
+    Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, gpu_span: [f64; 2] },
     Readback { req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
     Pick { req: u32, ids: Vec<u32> },
 }
@@ -92,9 +94,10 @@ impl Timers {
     }
 }
 
-/// The GPU nanoseconds between a frame's two timestamps (0 when unknown or disjoint). The frame
-/// is complete, so the data is there: read without flushing.
-fn gpu_ns(dev: &Device, t: &Timer) -> u64 {
+/// The GPU nanoseconds between a frame's two timestamps and their span in seconds of the GPU's
+/// clock ((0, [0, 0]) when unknown or disjoint). The frame is complete, so the data is there:
+/// read without flushing.
+fn gpu_ns(dev: &Device, t: &Timer) -> (u64, [f64; 2]) {
     unsafe {
         let get = |q: &ID3D11Query, data: *mut std::ffi::c_void, size: usize| {
             (dev.ctx.vtable().GetData)(dev.ctx.as_raw(), q.as_raw(), data, size as u32, D3D11_ASYNC_GETDATA_DONOTFLUSH.0 as u32).0 == 0
@@ -102,12 +105,13 @@ fn gpu_ns(dev: &Device, t: &Timer) -> u64 {
         let mut dj = D3D11_QUERY_DATA_TIMESTAMP_DISJOINT::default();
         let (mut b, mut e) = (0u64, 0u64);
         if !get(&t.disjoint, &mut dj as *mut _ as *mut _, std::mem::size_of_val(&dj)) || dj.Disjoint.as_bool() || dj.Frequency == 0 {
-            return 0;
+            return (0, [0.0; 2]);
         }
         if !get(&t.begin, &mut b as *mut _ as *mut _, 8) || !get(&t.end, &mut e as *mut _ as *mut _, 8) || e < b {
-            return 0;
+            return (0, [0.0; 2]);
         }
-        ((e - b) as u128 * 1_000_000_000 / dj.Frequency as u128) as u64
+        let f = dj.Frequency as f64;
+        (((e - b) as u128 * 1_000_000_000 / dj.Frequency as u128) as u64, [b as f64 / f, e as f64 / f])
     }
 }
 
@@ -284,17 +288,17 @@ fn complete(dev: &Device, mut batch: Batch, lost: bool, mailbox: &Mailbox, timer
         match ticket {
             Ticket::Frame { token, target, kind, frame, window, timer } => {
                 token.incarnation.done(frame);
-                let gpu_ns = match timer {
+                let (gpu_ns, gpu_span) = match timer {
                     Some(t) => {
-                        let ns = if lost { 0 } else { gpu_ns(dev, &t) };
+                        let ns = if lost { (0, [0.0; 2]) } else { gpu_ns(dev, &t) };
                         timers.give(t);
                         ns
                     }
-                    None => 0,
+                    None => (0, [0.0; 2]),
                 };
                 // a frame of a lost device still finishes (nothing reached the glass): the app's
                 // frame accounting closes, the reset that follows makes it paint again
-                out.push((token, Event::Frame { target, kind, frame, window: window && !lost, gpu_ns }));
+                out.push((token, Event::Frame { target, kind, frame, window: window && !lost, gpu_ns, gpu_span }));
             }
             Ticket::Copy { token, req, rect } => {
                 out.push((token, Event::Readback { req, rect, status: if lost { readback::FAILED } else { readback::OK }, pixels: Vec::new() }));

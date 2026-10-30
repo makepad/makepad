@@ -486,6 +486,9 @@ impl App {
             let mut out = Vec::new();
             flow("lanes list", &mut out);
             self.state.lanes = makepad_devhub::sync::lanes::rows(&out).into_iter().map(|(sev, line, _)| (sev.to_string(), line)).collect();
+            out.clear();
+            flow("prewarm", &mut out);
+            self.state.prewarm = makepad_devhub::sync::prewarm::rows(&out);
         }
         self.state.blocked = blocked.iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()?.get("blocked")?.as_str().map(str::to_string)).collect();
         // the user's own inspect leases stay alive while the panel runs

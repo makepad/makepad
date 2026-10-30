@@ -301,6 +301,9 @@ pub(crate) struct NameRow {
     closure: [u64; 2],
 }
 
+/// No crate / file (Deps::files, crate maps).
+const NONE: u32 = u32::MAX;
+
 /// One crate as the graph was built from it (Deps::crates, by crate index): what its rows depend on
 /// besides the crates it can see (whose rows say the same of them), and where its own lists are.
 #[repr(C)]
@@ -308,7 +311,8 @@ pub(crate) struct NameRow {
 pub(crate) struct CrateRow {
     /// its name and root file (crate_ident)
     ident: [u64; 2],
-    /// its graph files: their numbers, paths and item counts (the rows name items by file and item)
+    /// its graph files: their places among its own, paths and item counts (the rows name items by
+    /// file and item; a build over the graph renumbers a clean crate's files by their places)
     files: [u64; 2],
     /// its interface fingerprint: its files' text outside the holes (what its nodes are made of:
     /// pieces and their names; also what its coarse nodes are keyed by). Not its fingerprint: an
@@ -349,6 +353,10 @@ pub(crate) struct Deps {
     /// name is not quiet
     macros: Rows<u64>,
     crates: Rows<CrateRow>,
+    /// per boot file (by its number when the graph was built): its crate's index then, or NONE
+    /// (not in the graph). A build over this graph finds a clean crate's files by their place
+    /// among its crate's (CrateRow::files) -- a load order that moved crates or files keeps them
+    files: Rows<u32>,
     /// the crates' own lists (CrateRow ranges): always closures as two words each, names as one
     lists: Rows<u64>,
     /// the component ids in use are below this
@@ -369,7 +377,7 @@ pub(crate) struct Deps {
 }
 
 const DEPS_MAGIC: &[u8; 4] = b"DEP2";
-const DEPS_VERSION: u32 = 3;
+const DEPS_VERSION: u32 = 4;
 
 fn bit(set: &[u64], c: u32) -> bool { set.get(c as usize / 64).is_some_and(|w| w >> (c % 64) & 1 == 1) }
 
@@ -834,11 +842,15 @@ impl Deps {
     /// own lists and always hash).
     fn crate_inputs(prog: &Program, iface: &[u128], atomic: &[bool]) -> Vec<CrateRow> {
         let mut files: Vec<Sip128> = (0..prog.crates.len()).map(|_| { let mut h = Sip128::new(); h.str("deps-crate-files"); h }).collect();
+        let mut place = vec![0u32; prog.crates.len()];
         for f in 0..prog.boot_files.min(prog.files.len()) {
             if prog.front_macro_fragments.contains(&f) { continue; }
             let Some(&c) = prog.file_crate.get(f) else { continue };
             let Some(h) = files.get_mut(c as usize) else { continue };
-            h.u32(f as u32);
+            // its place among its crate's files, not its number: the numbers move with the load
+            // order (an edited crate restored after the kept ones), the places with the crate only
+            h.u32(place[c as usize]);
+            place[c as usize] += 1;
             h.str(prog.file_paths.get(f).map_or("", |p| p.as_str()));
             h.u32(prog.files[f].ast.items.len() as u32);
         }
@@ -854,14 +866,29 @@ impl Deps {
         }).collect()
     }
 
+    /// Per boot file: its crate, NONE for one not in the graph (Deps::files).
+    fn file_crates(prog: &Program) -> Vec<u32> {
+        (0..prog.boot_files.min(prog.files.len()))
+            .map(|f| if prog.front_macro_fragments.contains(&f) { NONE } else { prog.file_crate.get(f).copied().unwrap_or(NONE) })
+            .collect()
+    }
+
+    /// Per crate of this program: its index in `prev` (NONE: it had none), by identity -- a load
+    /// order that changed (an edited crate restored after the kept ones) moves the indices.
+    fn prev_crates(prev: &Deps, inputs: &[CrateRow]) -> Vec<u32> {
+        let by: HashMap<[u64; 2], u32> = prev.crates.rows().iter().enumerate().map(|(i, r)| (r.ident, i as u32)).collect();
+        inputs.iter().map(|r| by.get(&r.ident).copied().unwrap_or(NONE)).collect()
+    }
+
     /// Per crate: whether its rows in `prev` stand for this program's -- its inputs and those of every
     /// crate it can see are as `prev` was built from (a graph's rows of a crate depend only on them).
     fn clean_with(prev: Option<&Deps>, inputs: &[CrateRow], universe: &[Vec<u64>]) -> Vec<bool> {
         let n = inputs.len();
         let Some(prev) = prev else { return vec![false; n] };
         let rows = prev.crates.rows();
+        let at = Self::prev_crates(prev, inputs);
         let same = |a: &CrateRow, b: &CrateRow| (a.ident, a.files, a.iface, a.atomic) == (b.ident, b.files, b.iface, b.atomic);
-        let own: Vec<bool> = (0..n).map(|c| rows.get(c).is_some_and(|r| same(r, &inputs[c]))).collect();
+        let own: Vec<bool> = (0..n).map(|c| rows.get(at[c] as usize).is_some_and(|r| same(r, &inputs[c]))).collect();
         (0..n).map(|c| (0..n).all(|d| !bit(&universe[c], d as u32) || own[d])).collect()
     }
 
@@ -887,6 +914,26 @@ impl Deps {
         let mut crates = Self::crate_inputs(prog, iface, &atomic);
         let clean = Self::clean_with(prev, &crates, &universe);
         let prev = prev.filter(|_| clean.iter().any(|&c| c));
+        let file_crate = Self::file_crates(prog);
+        // `prev`'s numbering to this program's: crates by identity (`at`: ours to its; `cur`: its
+        // to ours, clean crates only), a clean crate's files by their places among its own
+        let at: Vec<u32> = prev.map_or_else(|| vec![NONE; n_crates], |p| Self::prev_crates(p, &crates));
+        let mut cur: Vec<u32> = vec![NONE; prev.map_or(0, |p| p.crates.rows().len())];
+        for c in (0..n_crates).filter(|&c| clean[c]) { cur[at[c] as usize] = c as u32; }
+        let file_now: Vec<u32> = match prev {
+            None => Vec::new(),
+            Some(p) => {
+                let mut ours: Vec<Vec<u32>> = vec![Vec::new(); n_crates];
+                for (f, &c) in file_crate.iter().enumerate() { if c != NONE && clean[c as usize] { ours[c as usize].push(f as u32); } }
+                let mut place = vec![0usize; cur.len()];
+                p.files.rows().iter().map(|&pc| {
+                    if pc == NONE || pc as usize >= cur.len() { return NONE; }
+                    let k = place[pc as usize];
+                    place[pc as usize] += 1;
+                    match cur[pc as usize] { NONE => NONE, c => ours[c as usize].get(k).copied().unwrap_or(NONE) }
+                }).collect()
+            }
+        };
         // the files walked: boot files of the crates in the graph that are not clean
         let files: Vec<usize> = (0..prog.boot_files.min(prog.files.len()))
             .filter(|&f| !prog.front_macro_fragments.contains(&f))
@@ -975,8 +1022,8 @@ impl Deps {
             let (rows, lists) = (prev.crates.rows(), prev.lists.rows());
             let list = |at: [u32; 2]| &lists[at[0] as usize..(at[0] + at[1]) as usize];
             for c in (0..n_crates).filter(|&c| clean[c]) {
-                own_aliases[c] = list(rows[c].aliases_at).to_vec();
-                own_macros[c] = list(rows[c].macros_at).to_vec();
+                own_aliases[c] = list(rows[at[c] as usize].aliases_at).to_vec();
+                own_macros[c] = list(rows[at[c] as usize].macros_at).to_vec();
             }
         }
         for v in own_aliases.iter_mut().chain(own_macros.iter_mut()) { v.sort_unstable(); v.dedup(); }
@@ -1043,7 +1090,7 @@ impl Deps {
         let chunk = n_items.div_ceil(threads).max(1);
         let parts: Vec<(Vec<u32>, Vec<u32>)> = std::thread::scope(|s| {
             let hs: Vec<_> = (0..threads).map(|t| {
-                let (raws, coarse, universe, node_crate, name_nodes, header_node, clean) = (&raws, &coarse, &universe, &node_crate, &name_nodes, &header_node, &clean);
+                let (raws, coarse, universe, node_crate, name_nodes, header_node, clean, cur) = (&raws, &coarse, &universe, &node_crate, &name_nodes, &header_node, &clean, &cur);
                 s.spawn(move || {
                     let (lo, hi) = ((t * chunk).min(n_items), ((t + 1) * chunk).min(n_items));
                     let mut lens = Vec::with_capacity(hi - lo);
@@ -1059,7 +1106,8 @@ impl Deps {
                                 if !prev_names.is_empty() {
                                     let at = prev_names.partition_point(|r| r.name < *nm);
                                     for (k, r) in prev_names[at..].iter().enumerate().take_while(|(_, r)| r.name == *nm) {
-                                        if bit(uni, r.krate) && clean[r.krate as usize] { tgt.push(LEAF | (at + k) as u32); }
+                                        let c = cur.get(r.krate as usize).copied().unwrap_or(NONE);
+                                        if c != NONE && bit(uni, c) && clean[c as usize] { tgt.push(LEAF | (at + k) as u32); }
                                     }
                                 }
                             }
@@ -1213,8 +1261,8 @@ impl Deps {
         if let Some(prev) = prev {
             let (rows, lists) = (prev.crates.rows(), prev.lists.rows());
             for c in (0..n_crates).filter(|&c| clean[c]) {
-                let at = rows[c].always_at;
-                always_of[c] = lists[at[0] as usize..(at[0] + at[1]) as usize].chunks(2).map(|w| u2([w[0], w[1]])).collect();
+                let r = rows[at[c] as usize].always_at;
+                always_of[c] = lists[r[0] as usize..(r[0] + r[1]) as usize].chunks(2).map(|w| u2([w[0], w[1]])).collect();
             }
         }
         for v in always_of.iter_mut() { v.sort_unstable(); }
@@ -1224,7 +1272,7 @@ impl Deps {
         by_ident.sort_unstable_by_key(|&k| crates[k].ident);
         for c in 0..n_crates {
             crates[c].always = match prev {
-                Some(prev) if clean[c] => prev.crates.rows()[c].always,
+                Some(prev) if clean[c] => prev.crates.rows()[at[c] as usize].always,
                 _ => {
                     let mut h = Sip128::new();
                     h.str("dep-always-v2");
@@ -1272,12 +1320,13 @@ impl Deps {
         // the rows: the clean crates' from `prev`, the walked ones' new (their components numbered
         // after every id `prev` uses)
         let base = prev.map_or(0, |p| p.comp_end);
-        let clean_file = |f: u32| prog.file_crate.get(f as usize).is_some_and(|&c| clean[c as usize]);
-        let mut nodes: Vec<NodeRow> = prev.map_or(&[][..], |p| p.nodes.rows()).iter().filter(|r| clean_file(r.file)).copied().collect();
+        // (a clean crate's rows in this program's numbering)
+        let mut nodes: Vec<NodeRow> = prev.map_or(&[][..], |p| p.nodes.rows()).iter()
+            .filter_map(|r| Some(NodeRow { file: file_now.get(r.file as usize).copied().filter(|&f| f != NONE)?, ..*r })).collect();
         let taken = nodes.len();
         nodes.extend(node_of.iter().map(|(&(file, item), &id)| NodeRow { file, item, closure: h2(closure[id as usize]) }));
         nodes.sort_unstable_by_key(|r| (r.file, r.item));
-        let mut names: Vec<NameRow> = prev_names.iter().filter(|r| clean.get(r.krate as usize).copied().unwrap_or(false)).copied().collect();
+        let mut names: Vec<NameRow> = prev_names.iter().filter_map(|r| Some(NameRow { krate: cur.get(r.krate as usize).copied().filter(|&c| c != NONE)?, ..*r })).collect();
         names.extend(nn_name.iter().enumerate().map(|(i, &(name, krate))| {
             let nn = n_items + i;
             NameRow { name, krate, comp: base + comp[nn], closure: h2(closure[nn]) }
@@ -1287,7 +1336,7 @@ impl Deps {
         macros.sort_unstable();
         let phases = [t_files, t_edges, t_scc, t0.elapsed()].map(|d| d.as_secs_f64() * 1e3);
         Some(Deps { valid, nodes_n: nodes.len(), walked: nodes.len() - taken, nodes: Rows::Owned(nodes), names: Rows::Owned(names), macros: Rows::Owned(macros),
-            crates: Rows::Owned(crates), lists: Rows::Owned(lists), comp_end: base + comps.len() as u32, universe, atomic, _store: None,
+            crates: Rows::Owned(crates), files: Rows::Owned(file_crate), lists: Rows::Owned(lists), comp_end: base + comps.len() as u32, universe, atomic, _store: None,
             edges, coarse: ncoarse, phases })
     }
 
@@ -1299,7 +1348,9 @@ impl Deps {
         p.extend_from_slice(&DEPS_VERSION.to_le_bytes());
         p.extend_from_slice(&self.valid.to_le_bytes());
         p.extend_from_slice(&self.comp_end.to_le_bytes());
-        for n in [crates.len(), lists.len(), macros.len(), nodes.len(), names.len()] { p.extend_from_slice(&(n as u32).to_le_bytes()); }
+        let files = self.files.rows();
+        for n in [crates.len(), lists.len(), macros.len(), nodes.len(), names.len(), files.len()] { p.extend_from_slice(&(n as u32).to_le_bytes()); }
+        p.extend_from_slice(&0u32.to_le_bytes());
         for r in crates {
             for w in [r.ident, r.files, r.iface, r.always] { for x in w { p.extend_from_slice(&x.to_le_bytes()); } }
             for w in [r.always_at, r.aliases_at, r.macros_at] { for x in w { p.extend_from_slice(&x.to_le_bytes()); } }
@@ -1320,6 +1371,7 @@ impl Deps {
             p.extend_from_slice(&r.closure[0].to_le_bytes());
             p.extend_from_slice(&r.closure[1].to_le_bytes());
         }
+        for f in files { p.extend_from_slice(&f.to_le_bytes()); }
         p
     }
 
@@ -1327,18 +1379,19 @@ impl Deps {
     /// program (`Deps::valid` says whether it was built from it). None: another format, a size that
     /// does not match, or a misaligned payload.
     pub(crate) fn read(prog: &Program, ncr: usize, p: &'static [u8], store: std::sync::Arc<crate::store::Store>) -> Option<Deps> {
-        const HEAD: usize = 48;
+        const HEAD: usize = 56;
         if cfg!(target_endian = "big") || p.len() < HEAD || &p[0..4] != DEPS_MAGIC || u32::from_le_bytes(p[4..8].try_into().ok()?) != DEPS_VERSION { return None; }
         let valid = u128::from_le_bytes(p[8..24].try_into().ok()?);
         let word = |at: usize| u32::from_le_bytes(p[at..at + 4].try_into().unwrap());
         let comp_end = word(24);
-        let (nc, nl, nm, nn, nx) = (word(28) as usize, word(32) as usize, word(36) as usize, word(40) as usize, word(44) as usize);
+        let (nc, nl, nm, nn, nx, nf) = (word(28) as usize, word(32) as usize, word(36) as usize, word(40) as usize, word(44) as usize, word(48) as usize);
         let c0 = HEAD;
         let l0 = c0 + nc * std::mem::size_of::<CrateRow>();
         let m0 = l0 + nl * 8;
         let n0 = m0 + nm * 8;
         let x0 = n0 + nn * 24;
-        if std::mem::size_of::<CrateRow>() != 96 || p.len() != x0 + nx * 32 || p.as_ptr() as usize % 8 != 0 { return None; }
+        let f0 = x0 + nx * 32;
+        if std::mem::size_of::<CrateRow>() != 96 || p.len() != f0 + nf * 4 || p.as_ptr() as usize % 8 != 0 { return None; }
         // SAFETY: the payload stays mapped while `store` lives (held below); the tables are
         // 8-byte aligned (checked), plain integers, and their lengths match the payload's size
         let crates: &'static [CrateRow] = unsafe { std::slice::from_raw_parts(p.as_ptr().add(c0) as *const CrateRow, nc) };
@@ -1346,9 +1399,10 @@ impl Deps {
         let macros: &'static [u64] = unsafe { std::slice::from_raw_parts(p.as_ptr().add(m0) as *const u64, nm) };
         let nodes: &'static [NodeRow] = unsafe { std::slice::from_raw_parts(p.as_ptr().add(n0) as *const NodeRow, nn) };
         let names: &'static [NameRow] = unsafe { std::slice::from_raw_parts(p.as_ptr().add(x0) as *const NameRow, nx) };
+        let files: &'static [u32] = unsafe { std::slice::from_raw_parts(p.as_ptr().add(f0) as *const u32, nf) };
         // every list range in bounds (a build over this graph slices them)
         if crates.iter().any(|r| [r.always_at, r.aliases_at, r.macros_at].iter().any(|at| at[0] as usize + at[1] as usize > nl) || r.always_at[1] % 2 != 0) { return None; }
-        Some(Deps { valid, nodes: Rows::Mapped(nodes), names: Rows::Mapped(names), macros: Rows::Mapped(macros), crates: Rows::Mapped(crates),
+        Some(Deps { valid, nodes: Rows::Mapped(nodes), names: Rows::Mapped(names), macros: Rows::Mapped(macros), crates: Rows::Mapped(crates), files: Rows::Mapped(files),
             lists: Rows::Mapped(lists), comp_end, universe: universes(prog), atomic: atomic_crates(prog, ncr), _store: Some(store),
             nodes_n: nn, walked: 0, edges: 0, coarse: 0, phases: [0.0; 4] })
     }

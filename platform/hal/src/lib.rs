@@ -50,6 +50,10 @@ pub mod hosted_ipc;
 /// The native-layer bridge used by process-hosted Cx; the WM HAL shell uses it directly.
 #[cfg(target_os = "linux")]
 pub use backend::linux::wm::native as hosted_native;
+/// The WM connection kept across an exec of a WM-hosted process (a restart into a rebuilt
+/// makepad): the next image resumes on it as the same client and window.
+#[cfg(target_os = "linux")]
+pub use backend::linux::wm::{prepare_exec as wm_prepare_exec, undo_exec as wm_undo_exec};
 pub mod cmds;
 pub mod codec;
 pub mod events;

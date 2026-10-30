@@ -625,10 +625,21 @@ fn respan(e: &mut Expr, span: Span) {
 /// objects are constants too (else numbers are floats and only numbers,
 /// colours and vectors are).
 pub(crate) fn kernel_program(vm: &ScriptVm, k: &VmKernel, whole_values: bool) -> Result<KernelProgram, ShaderError> {
+    kernel_program_lifting(vm, k, whole_values, None)
+}
+
+/// [`kernel_program`], with the document's plain numbers the fns reach
+/// (at most `lift.1`) made parameters instead of constants when `lift` is
+/// given: each one a `param(0)` of its own name, its value recorded in
+/// `lift.0` in declaration order. A host that sets them per call compiles
+/// one program for every value they take.
+pub(crate) fn kernel_program_lifting(vm: &ScriptVm, k: &VmKernel, whole_values: bool, mut lift: Option<(&mut Vec<(String, f32)>, usize)>) -> Result<KernelProgram, ShaderError> {
     let fn_tokens = |f: ScriptObject| vm.heap().fn_script_ip(f).and_then(|ip| vm.fn_tokens_placed(ip));
     let mut items = Vec::new();
-    if k.math == MathMode::Portable {
-        items.push(let_item("math", None, ident("portable")));
+    match k.math {
+        MathMode::Portable => items.push(let_item("math", None, ident("portable"))),
+        MathMode::Exact32 => items.push(let_item("math", None, ident("exact32"))),
+        MathMode::Fast => {}
     }
     for m in &k.uses {
         items.push(Item::Use { path: m.clone(), glob: true, alias: None, span: NOWHERE });
@@ -703,6 +714,15 @@ pub(crate) fn kernel_program(vm: &ScriptVm, k: &VmKernel, whole_values: bool) ->
             if called {
                 continue;
             }
+            if let Some((lifted, max)) = lift.as_mut() {
+                if let (Some(x), true) = (value.as_number().filter(|x| x.is_finite()), lifted.len() < *max) {
+                    known.insert(id.clone());
+                    constants.push(id.clone());
+                    lifted.push((id.clone(), x as f32));
+                    consts.push(decl_item(&Decl::Param { name: id.clone(), default: 0.0, range: None })?);
+                    continue;
+                }
+            }
             let value = if whole_values { value_expr(vm, value, 0) } else { constant(vm, value).map(const_expr) };
             if let Some(mut e) = value {
                 respan(&mut e, span);
@@ -718,6 +738,25 @@ pub(crate) fn kernel_program(vm: &ScriptVm, k: &VmKernel, whole_values: bool) ->
     // A free name that is a compiled-in fn is not free.
     free.retain(|n| !emitted.contains(n));
     Ok(KernelProgram { items: consts, end: base, places, error, free, constants })
+}
+
+/// [`compile`] with the document's plain numbers the kernel reaches made
+/// parameters (at most `max`; see [`kernel_program_lifting`]): the kernel
+/// and each lifted name with the value the document gave it, in parameter
+/// order after the declared ones. Every value of those numbers is the same
+/// program, compiled once. A kernel the lifted numbers do not compile (a
+/// loop bound must be a constant) compiles with them as constants.
+pub fn compile_lifted(vm: &ScriptVm, k: &VmKernel, backend: Backend, max: usize) -> Result<(KernelRef, Vec<(String, f32)>), Vec<ShaderError>> {
+    let mut lifted = Vec::new();
+    let program = kernel_program_lifting(vm, k, false, Some((&mut lifted, max))).map_err(|e| vec![e])?;
+    match program.compile(&[], backend, &[]) {
+        Ok(kernel) => Ok((kernel, lifted)),
+        Err(_) if !lifted.is_empty() => {
+            let program = kernel_program(vm, k, false).map_err(|e| vec![e])?;
+            program.compile(&[], backend, &[]).map(|kernel| (kernel, Vec::new()))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Compiles a kernel made from Splash values (see the module docs). The
@@ -967,7 +1006,8 @@ pub fn from_object(vm: &ScriptVm, obj: ScriptObject) -> Result<VmKernel, String>
             math = match vm.heap().string_with(v, |_, s| s.to_string()).as_deref() {
                 Some("portable") => MathMode::Portable,
                 Some("fast") => MathMode::Fast,
-                _ => return Err("math: \"portable\" or \"fast\"".into()),
+                Some("exact32") => MathMode::Exact32,
+                _ => return Err("math: \"portable\", \"exact32\" or \"fast\"".into()),
             };
             continue;
         }

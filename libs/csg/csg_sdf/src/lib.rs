@@ -21,5 +21,5 @@ pub use combinators::*;
 pub use field_mesh::{default_cell, mesh_field, sdf_to_mesh};
 pub use primitives::*;
 pub use sdf::Sdf3;
-pub use shape::{distance, distance_many, distance_slot, part_id, quat_from_degrees, quat_rotate, SdfDeform, SdfKernel, SdfMaterial, SdfNode, SdfOp, SdfPlace, SdfShape, SdfSplat};
-pub use splash_field::{SdfSplashExpr, SplashPoint};
+pub use shape::{distance, distance_id, distance_many, distance_slot, part_id, quat_from_degrees, quat_rotate, SdfDeform, SdfKernel, SdfMaterial, SdfNode, SdfOp, SdfPlace, SdfShape, SdfSplat};
+pub use splash_field::{SdfSplashExpr, SplashPoint, MAX_LIFTED};

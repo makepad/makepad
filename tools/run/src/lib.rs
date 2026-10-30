@@ -211,6 +211,9 @@ fn provided() {
         relax_compiler::inspect::register_host_inspect(name, script_query);
     }
     relax_compiler::inspect::register_host_commands(makepad_script::inspect_query::COMMANDS);
+    // a restart into a rebuilt makepad keeps the WM connection: the app keeps its window
+    #[cfg(target_os = "linux")]
+    relax_compiler::reload::set_before_exec(makepad_hal::wm_prepare_exec, makepad_hal::wm_undo_exec);
     relax_compiler::run::set_main_host(relax_compiler::run::MainHost {
         domain_zero: cfg!(target_os = "android"),
         run: hal_run::run,

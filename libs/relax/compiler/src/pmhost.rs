@@ -241,9 +241,10 @@ fn world_inner(sess: &std::sync::Arc<crate::Session>, prewarm: bool) -> Option<s
         std::sync::Arc::new(build_world(sess))
     };
     tl_set_once(1, crate::clock::ms_since_start());
-    // the runtime's unit is the final world's from now on, set on the owner (no owner-path macro
-    // call is in flight there): a stage world's call left its unit behind, and a boot expansion
-    // running off the owner (`call`) restores what it found -- that must be this world
+    // the runtime's unit is the final world's until the program's runs, set on the owner (no
+    // owner-path macro call is in flight there): a stage world's call left its unit behind. A
+    // world built while the program runs (an expansion of a lazily parsed body) leaves the
+    // program's in place (jit.rs adopt_runtime_unit)
     if let Ok(world) = w.as_ref() {
         let wu = world.u as usize;
         crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::set_runtime_unit(wu as *mut crate::jit::Unit) });
@@ -594,6 +595,8 @@ fn build_world_inner(sess: &std::sync::Arc<crate::Session>, units: &[crate::macr
         })
         .ok_or("std proc_macro has no __relax::bridge")?;
     let mut u = crate::jit::Unit::new(prog, tcx, core);
+    // an auxiliary unit: never the runtime's in place of the program's (jit.rs adopt_runtime_unit)
+    u.aux = true;
     // The whole macro world is freed after load. Its callers still need inline/closure
     // inputs throughout that job; per-install eviction does not reduce settled memory.
     u.keep_compile_state = true;

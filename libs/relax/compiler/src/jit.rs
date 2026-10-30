@@ -320,6 +320,9 @@ pub struct Unit {
     /// Short-lived jobs reuse their compile inputs until the entire unit is released.
     /// Reclaiming individual bodies there only adds rebuild work to the load path.
     pub keep_compile_state: bool,
+    /// An auxiliary unit (the proc-macro world): never the runtime's unit while a program's is
+    /// (`adopt_runtime_unit`).
+    pub aux: bool,
     /// which slot's code holds a pc, and how its frames unwind (a leaf lock: panics, unwinding
     /// and faults read it on their own thread, without a unit call)
     pub code: std::sync::RwLock<CodeTables>,
@@ -1008,8 +1011,8 @@ unsafe fn raw_name(l: &mut RawLine, a: u64, sp: u64) {
         l.put(b"null");
         return;
     }
-    if !UNIT.is_null() {
-        let u = &*UNIT;
+    if !cur_unit().is_null() {
+        let u = &*cur_unit();
         if in_jit_code(a) {
             let Ok(t) = u.code.try_read() else {
                 l.put(b"JIT code (code tables busy)");
@@ -1218,9 +1221,37 @@ pub const PROVENANCE: &str = match option_env!("MAKEPAD_RUN_PROVENANCE") {
 
 // ------------------------------------------------------------ global runtime state
 
-/// The unit reached by the lazy-compile entry and the runtime: set by `call_jit` and
-/// kept afterwards, so threads that JIT code started keep reaching it.
+/// The runtime's default unit: the program's (`call_jit` into it, `set_runtime_unit`), or the
+/// macro world's before the program runs. A thread that is not inside a `call_jit` (one native
+/// code started, one JIT code spawned before its entry) reaches it; read through `cur_unit`.
+/// An auxiliary unit (the proc-macro world) never replaces the program's here: the global used
+/// to follow every `call_jit_in`, so a macro expansion while the program ran (a lazily parsed
+/// body after an edit) pointed the other threads' lazy stubs at the macro world -- `makepad
+/// test`'s parallel tests compiled their slots in the wrong unit (AppendVec index out of bounds).
 pub(crate) static mut UNIT: *mut Unit = std::ptr::null_mut();
+
+thread_local! {
+    /// The unit whose code this thread runs (`call_jit_in` sets it for the call): its lazy stubs,
+    /// panics and faults belong to that unit, whatever other threads run.
+    static CUR_UNIT: std::cell::Cell<*mut Unit> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+/// The unit the calling thread's JIT code belongs to: the one its innermost `call_jit_in`
+/// entered, else the runtime's (`UNIT`). Thread-local, so another thread's call into another
+/// unit never changes it (at thread exit, when the slot is gone: the runtime's).
+#[inline]
+pub(crate) fn cur_unit() -> *mut Unit {
+    let t = CUR_UNIT.try_with(|c| c.get()).unwrap_or(std::ptr::null_mut());
+    if t.is_null() { unsafe { UNIT } } else { t }
+}
+
+/// Makes `u` the runtime's unit unless that would put an auxiliary unit (the macro world) in
+/// place of a program's.
+unsafe fn adopt_runtime_unit(u: *mut Unit) {
+    if UNIT.is_null() || !(*u).aux || (*UNIT).aux {
+        UNIT = u;
+    }
+}
 /// Tokens identify calls, never a process-wide arm/disarm generation.
 static WATCHDOG_ID: AtomicU64 = AtomicU64::new(1);
 struct WatchdogCall {
@@ -1669,8 +1700,8 @@ pub(crate) fn fork_child() {
         q.clear();
     }
     unsafe {
-        if !UNIT.is_null() {
-            for f in (&mut *UNIT).fns.iter_mut() {
+        if !cur_unit().is_null() {
+            for f in (&mut *cur_unit()).fns.iter_mut() {
                 f.inflight = false;
             }
         }
@@ -1698,7 +1729,7 @@ const FORK_PRECOMPILE_MAX: usize = 4096;
 pub(crate) extern "C" fn relax_precompile(addr: u64) -> u64 {
     crate::jit::host_boundary("relax_precompile", move || {
         let _keep = os::proc::KeepLastError::new();
-        let up = unsafe { UNIT };
+        let up = cur_unit();
         if up.is_null() || addr == 0 || crate::forkexec::exec_child() {
             return 0;
         }
@@ -1717,7 +1748,7 @@ pub(crate) extern "C" fn relax_precompile(addr: u64) -> u64 {
 /// `relax_precompile` from slot `root`.
 #[cfg(unix)]
 pub(crate) fn precompile_from(root: u32) -> u64 {
-    let up = unsafe { UNIT };
+    let up = cur_unit();
     if up.is_null() {
         return 0;
     }
@@ -1955,7 +1986,7 @@ pub fn poisoned_note() -> Option<String> {
 /// the fault is contained (the caller resumes at the recovery point) and the process is marked
 /// poisoned.
 pub(crate) unsafe fn fault_policy(label: &str, info: &PanicInfo, guard_depth: u32, const_eval_depth: u32) -> bool {
-    let u = &*UNIT;
+    let u = &*cur_unit();
     let tname = os::thread::name(os::thread::current());
     let at = owner::call(owner::Class::Job, || info.frames.first().and_then(|f| u.pc_to_src(*f)).map(|(id, loc)| format!("{} ({})", u.fns[id as usize].name, loc)).unwrap_or_else(|| { let pc = info.frames.first().copied().unwrap_or(0); match crate::inspect::symbols::host_symbol(pc) { Some((name, image, 0)) => format!("{:#x} (host {}, {})", pc, name, image), Some((name, image, off)) => format!("{:#x} (host {}+{:#x}, {})", pc, name, off, image), None => format!("{:#x}", pc) } }));
     // a fault while a constant is evaluated in a check (a null or dangling dereference, a stack
@@ -2001,7 +2032,8 @@ unsafe fn fatal_report(f: &os::fault::Fault) -> ! {
     let kind = if is_stack_fault(f.addr, f.sp) { "stack overflow" } else { "fault" };
     let info = PanicInfo { kind: kind.to_string(), message: format!("{} at {:#x}", f.label(), f.addr), site: u64::MAX, frames, fault_addr: f.addr, location: String::new() };
     crate::inspect::flightrec::fault_dump(&format!("{} {}", kind, info.message));
-    let r = owner::call(owner::Class::Job, || (&*UNIT).report(&info));
+    let unit_here = cur_unit() as usize; // the calling thread's unit (the closure runs on the owner)
+    let r = owner::call(owner::Class::Job, || (&*(unit_here as *mut Unit)).report(&info));
     eprintln!("makepad: fault on a thread without a recovery point, aborting\n  report: {}", r);
     std::process::abort()
 }
@@ -2310,11 +2342,12 @@ pub(crate) fn stale_frames(pc: u64, raw: &[u64]) -> Vec<u64> {
 /// A stale access's crash report (stale.rs; off the faulting thread: the owner is asked with a
 /// deadline, since the faulting thread may be the owner itself).
 pub(crate) fn stale_report(message: &str, frames: &[u64], addr: u64) -> String {
-    if unsafe { UNIT.is_null() } {
+    if cur_unit().is_null() {
         return String::from("{}");
     }
     let info = PanicInfo { kind: "stale access".to_string(), message: message.to_string(), site: u64::MAX, frames: frames.to_vec(), fault_addr: addr, location: String::new() };
-    owner::call_within(owner::Class::Job, 2000, || unsafe { (&*UNIT).report(&info) }).unwrap_or_else(|| format!("{{\"message\":\"(the owner did not answer: raw frames {:x?})\"}}", frames))
+    let unit_here = cur_unit() as usize; // the calling thread's unit (the closure runs on the owner)
+    owner::call_within(owner::Class::Job, 2000, || unsafe { (&*(unit_here as *mut Unit)).report(&info) }).unwrap_or_else(|| format!("{{\"message\":\"(the owner did not answer: raw frames {:x?})\"}}", frames))
 }
 
 /// A stale access into invalidated code (stale.rs, invalid.rs): how the thread got there and who
@@ -2324,10 +2357,10 @@ pub(crate) fn stale_report(message: &str, frames: &[u64], addr: u64) -> String {
 /// [sp] and [sp - 8] at the fault (x86-64), `lr`: the link register (arm64). Second: the return
 /// address into the caller when the thread was entering the code (a frame the walk misses).
 pub(crate) fn stale_code_how(pc: u64, sp_top: u64, sp_below: u64, lr: u64) -> (String, Option<u64>) {
-    if unsafe { UNIT.is_null() } {
+    if cur_unit().is_null() {
         return ("(no unit)".to_string(), None);
     }
-    let up = unsafe { UNIT } as usize;
+    let up = cur_unit() as usize;
     owner::call_within(owner::Class::Job, 2000, move || unsafe { stale_how_in(&*(up as *const Unit), pc, sp_top, sp_below, lr) })
         .unwrap_or_else(|| (format!("(the owner did not answer: pc {:#x}, [sp] {:#x}, [sp-8] {:#x}, lr {:#x})", pc, sp_top, sp_below, lr), None))
 }
@@ -2449,10 +2482,10 @@ unsafe fn stale_how_in(u: &Unit, pc: u64, sp_top: u64, sp_below: u64, lr: u64) -
 
 fn frames_from_raw(pc: u64, pc_is_ret: bool, raw: &[u64]) -> Vec<u64> {
     let mut frames = vec![pc.wrapping_sub(pc_is_ret as u64)];
-    if unsafe { UNIT.is_null() } {
+    if cur_unit().is_null() {
         return frames;
     }
-    let u = unsafe { &*UNIT };
+    let u = unsafe { &*cur_unit() };
     // a stop inside C code (a libc abort/trap): its frames (frame pointers are kept on both
     // targets) are skipped up to the JIT code that called it
     let mut in_c = u.find_fn(frames[0]).is_none();
@@ -2485,7 +2518,8 @@ fn raise_with(kind: &str, message: String, site: u64, fault: u64, rbp: u64, ret:
         // start routine, a C callback -- aborts with "panic in a function that cannot
         // unwind": core/src/panicking.rs panic_cannot_unwind, mir_transform
         // abort_unwinding_calls.rs). The message goes first, then the report.
-        let r = owner::call(owner::Class::Job, || unsafe { (&*UNIT).report(&info) });
+        let unit_here = cur_unit() as usize; // the calling thread's unit (the closure runs on the owner)
+        let r = owner::call(owner::Class::Job, || unsafe { (&*(unit_here as *mut Unit)).report(&info) });
         eprintln!("makepad: {} on a thread without a recovery point: {}\n  panic in a function that cannot unwind, aborting\n  report: {}", kind, info.message, r);
         std::process::abort();
     }
@@ -2506,7 +2540,7 @@ fn raise_with(kind: &str, message: String, site: u64, fault: u64, rbp: u64, ret:
     CLEANING.with(|c| c.set(0));
     UNWINDING.with(|c| c.set(false));
     unsafe {
-        let leave: rt_fn_ty!(fn(*mut u64, u64) -> !) = std::mem::transmute((&*UNIT).leave as usize);
+        let leave: rt_fn_ty!(fn(*mut u64, u64) -> !) = std::mem::transmute((&*cur_unit()).leave as usize);
         leave(ctx_ptr(), 1)
     }
 }
@@ -2640,7 +2674,7 @@ pub(crate) fn in_const_eval() -> bool {
 
 /// A constant's evaluation inside a `makepad check`: its failures are diagnostics.
 pub(crate) fn in_checked_const_eval() -> bool {
-    in_const_eval() && unsafe { !UNIT.is_null() && (&*UNIT).prog.session.options.const_fuel }
+    in_const_eval() && unsafe { !cur_unit().is_null() && (&*cur_unit()).prog.session.options.const_fuel }
 }
 
 /// Ends the run of the calling thread's `call_jit_in` with the panic recorded for it already
@@ -2650,7 +2684,7 @@ pub(crate) fn leave_pending_panic() -> ! {
     CLEANING.with(|c| c.set(0));
     UNWINDING.with(|c| c.set(false));
     unsafe {
-        let leave: rt_fn_ty!(fn(*mut u64, u64) -> !) = std::mem::transmute((&*UNIT).leave as usize);
+        let leave: rt_fn_ty!(fn(*mut u64, u64) -> !) = std::mem::transmute((&*cur_unit()).leave as usize);
         leave(ctx_ptr(), 1)
     }
 }
@@ -2670,7 +2704,7 @@ pub(crate) fn leave_thread(kind: &str, message: String) -> ! {
     CLEANING.with(|c| c.set(0));
     UNWINDING.with(|c| c.set(false));
     unsafe {
-        let leave: rt_fn_ty!(fn(*mut u64, u64) -> !) = std::mem::transmute((&*UNIT).leave as usize);
+        let leave: rt_fn_ty!(fn(*mut u64, u64) -> !) = std::mem::transmute((&*cur_unit()).leave as usize);
         leave(ctx_ptr(), 1)
     }
 }
@@ -2684,7 +2718,7 @@ rt_fn! {
 fn rt_panic_site(site: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, regs: *const u64, _a7: u64) {
     let mut msg = fmt_take_top();
     if msg.is_empty() {
-        let u = unsafe { &*UNIT };
+        let u = unsafe { &*cur_unit() };
         let sites = u.sites.lock().unwrap_or_else(|e| e.into_inner());
         if (site as usize) < sites.len() {
             msg = sites[site as usize].msg.clone();
@@ -2784,7 +2818,8 @@ fn raise_unwinding(kind: &str, message: String, site: u64, regs: *const u64) -> 
         let frames = collect_frames(rbp, ret, true);
         let location = PANIC_LOC.with(|l| std::mem::take(&mut *l.borrow_mut()));
         let info = PanicInfo { kind: kind.to_string(), message, site, frames, fault_addr: 0, location };
-        let r = owner::call(owner::Class::Job, || unsafe { (&*UNIT).report(&info) });
+        let unit_here = cur_unit() as usize; // the calling thread's unit (the closure runs on the owner)
+        let r = owner::call(owner::Class::Job, || unsafe { (&*(unit_here as *mut Unit)).report(&info) });
         eprintln!("makepad: panic in a destructor during cleanup: {}\n  thread caused non-unwinding panic. aborting.\n  report: {}", info.message, r);
         std::process::abort();
     }
@@ -2808,7 +2843,7 @@ fn rt_resume_unwind(_a0: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, 
 unsafe fn unwind_walk(regs: *const u64) -> ! {
     let mut r = [0u64; REG_WORDS];
     std::ptr::copy_nonoverlapping(regs, r.as_mut_ptr(), REG_WORDS);
-    let u = &*UNIT;
+    let u = &*cur_unit();
     let tables = u.code.read().unwrap_or_else(|e| e.into_inner());
     let mut target: Option<(u64, u64, u64)> = None;
     for _ in 0..100_000 {
@@ -2868,7 +2903,7 @@ unsafe fn unwind_walk(regs: *const u64) -> ! {
         None => {
             CLEANING.with(|c| c.set(0));
             UNWINDING.with(|c| c.set(false));
-            let leave: rt_fn_ty!(fn(*mut u64, u64) -> !) = std::mem::transmute((&*UNIT).leave as usize);
+            let leave: rt_fn_ty!(fn(*mut u64, u64) -> !) = std::mem::transmute((&*cur_unit()).leave as usize);
             leave(ctx_ptr(), 1)
         }
     }
@@ -2986,7 +3021,7 @@ fn fatal_compile_error(p: &PanicInfo, report: &str) {
 rt_fn! {
 pub(crate) fn rt_thread_run(entry: u64, arg: u64) -> u64 {
     ensure_altstack();
-    let u = unsafe { UNIT };
+    let u = cur_unit();
     // runs on the calling thread, in the domain it is in
     match unsafe { call_jit_in(u, crate::domain::current(), entry, arg) } {
         Ok(_) => 0,
@@ -3008,7 +3043,7 @@ rt_fn! {
 /// std's hook; the report adds where it happened.
 pub(crate) fn rt_catch_panic(f: u64, data: u64) -> u64 {
     ensure_altstack();
-    let u = unsafe { UNIT };
+    let u = cur_unit();
     match unsafe { call_jit_nested(u, f, data) } {
         Ok(_) => 0,
         Err(p) => {
@@ -3037,8 +3072,10 @@ fn rt_compile(slot: u64) -> u64 {
     // a destructor of the program's thread-locals, first called at thread exit: this thread's
     // compiler thread-locals are gone, so the whole build runs on the owner (only the request
     // touches this thread's state, through try_with)
+    // the unit whose stub called: this thread's (another thread may be in another unit's code)
+    let up = cur_unit() as usize;
     if in_thread_exit() && !owner::is_owner() {
-        return owner::call(owner::Class::Program, || unsafe { compile_slot(UNIT, slot as u32) });
+        return owner::call(owner::Class::Program, || unsafe { compile_slot(up as *mut Unit, slot as u32) });
     }
     let _frame = crate::inspect::timeline::CompileMark::begin();
     // a compile that fails with a native panic must not unwind into the JIT frames that called
@@ -3048,9 +3085,9 @@ fn rt_compile(slot: u64) -> u64 {
     let mut cancelled = 0u32;
     loop {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            let _exec_call = profile_path().map(|_| crate::exec_profile::call(UNIT as usize, slot as u32));
-            if profile_path().is_some() { (&*UNIT).exec_event(slot as u32, "call"); }
-            compile_slot(UNIT, slot as u32)
+            let _exec_call = profile_path().map(|_| crate::exec_profile::call(up, slot as u32));
+            if profile_path().is_some() { (&*(up as *mut Unit)).exec_event(slot as u32, "call"); }
+            compile_slot(up as *mut Unit, slot as u32)
         }));
         match r {
             Ok(a) => return a,
@@ -3072,8 +3109,9 @@ const COMPILE_CANCEL_RETRIES: u32 = 1000;
 #[inline(never)]
 fn compile_failed_stub(slot: u32, p: &(dyn std::any::Any + Send)) -> u64 {
     let text = payload_text(p);
+    let up = cur_unit() as usize;
     owner::call(owner::Class::Program, || unsafe {
-        let u = &mut *UNIT;
+        let u = &mut *(up as *mut Unit);
         let name = if (slot as usize) < u.fns.len() { u.fns[slot as usize].name.to_string() } else { format!("slot {}", slot) };
         let message = format!("internal compiler error compiling `{}` (slot {}) on its first call: {}", name, slot, text);
         eprintln!("makepad-run: {}", message);
@@ -3115,8 +3153,8 @@ rt_fn! {
 #[cfg(target_os = "macos")]
 pub(crate) fn unit_areas() -> Option<[u64; 5]> {
     unsafe {
-        if UNIT.is_null() { return None; }
-        let u = &*UNIT;
+        if cur_unit().is_null() { return None; }
+        let u = &*cur_unit();
         Some([u.exec_base, u.ro_base, u.rw_end - UNIT_RW_SIZE, u.syms.dom0(), u.rw_end + (crate::syms::SYM_CAP * 8) as u64])
     }
 }
@@ -3124,17 +3162,17 @@ pub(crate) fn unit_areas() -> Option<[u64; 5]> {
 /// Is `pc` in the unit's code memory (functions, stubs, glue)? Lock-free: the bounds are fixed
 /// once the unit exists (os::fault's Windows handler asks before anything else).
 pub(crate) fn in_jit_code(pc: u64) -> bool {
-    unsafe { !UNIT.is_null() && pc >= (*UNIT).exec_base && pc - (*UNIT).exec_base < (*UNIT).exec_size }
+    unsafe { !cur_unit().is_null() && pc >= (*cur_unit()).exec_base && pc - (*cur_unit()).exec_base < (*cur_unit()).exec_size }
 }
 
 /// The name of slot `id` (None: no unit or no such slot; the flight recorder, no lock: names are
 /// kept data of an append-only table).
 pub(crate) fn slot_name(id: u32) -> Option<String> {
     unsafe {
-        if UNIT.is_null() {
+        if cur_unit().is_null() {
             return None;
         }
-        let u = &*UNIT;
+        let u = &*cur_unit();
         ((id as usize) < u.fns.len()).then(|| u.fns[id as usize].name.to_string())
     }
 }
@@ -3143,8 +3181,8 @@ pub(crate) fn slot_name(id: u32) -> Option<String> {
 /// report, forkexec.rs).
 pub(crate) fn with_slot_name(id: u32, f: &mut dyn FnMut(&[u8])) {
     unsafe {
-        if !UNIT.is_null() && (id as usize) < (&*UNIT).fns.len() {
-            f((&*UNIT).fns[id as usize].name.as_bytes());
+        if !cur_unit().is_null() && (id as usize) < (&*cur_unit()).fns.len() {
+            f((&*cur_unit()).fns[id as usize].name.as_bytes());
         }
     }
 }
@@ -3152,10 +3190,10 @@ pub(crate) fn with_slot_name(id: u32, f: &mut dyn FnMut(&[u8])) {
 /// The name of the function whose code holds `pc` ("-" when none; diagnostics, no lock).
 pub(crate) fn fn_name_at(pc: u64) -> String {
     unsafe {
-        if UNIT.is_null() {
+        if cur_unit().is_null() {
             return "-".to_string();
         }
-        let u = &*UNIT;
+        let u = &*cur_unit();
         u.find_fn(pc).map(|id| u.fns[id as usize].name.to_string()).unwrap_or("-".to_string())
     }
 }
@@ -3193,7 +3231,7 @@ unsafe fn on_fault_locked(f: &os::fault::Fault, hooks: &os::fault::Hooks) -> os:
     let (pc, fault) = (f.pc, f.addr);
     if f.kind == Kind::Watchdog {
         // hang watchdog: only act when JIT code is running and not inside the compiler
-        if UNIT.is_null() || *ctx_ptr() == 0 || !in_jit_code(pc) {
+        if cur_unit().is_null() || *ctx_ptr() == 0 || !in_jit_code(pc) {
             return Action::Ignore;
         }
         // An enclosing timeout is already moving through inner guard cleanups. A
@@ -3226,11 +3264,11 @@ unsafe fn on_fault_locked(f: &os::fault::Fault, hooks: &os::fault::Hooks) -> os:
             return Action::Ignore;
         }
         record_fault(f, 3);
-        return Action::Resume { pc: (*UNIT).leave, a0: ctx_ptr() as u64, a1: 3 };
+        return Action::Resume { pc: (*cur_unit()).leave, a0: ctx_ptr() as u64, a1: 3 };
     }
     let jit = in_jit_code(pc);
-    let has_unit = !UNIT.is_null();
-    let at_leave = has_unit && (pc == (*UNIT).leave || (fault == pc && matches!(f.kind, Kind::Segv | Kind::Bus) && jit));
+    let has_unit = !cur_unit().is_null();
+    let at_leave = has_unit && (pc == (*cur_unit()).leave || (fault == pc && matches!(f.kind, Kind::Segv | Kind::Bus) && jit));
     let has_ctx = *ctx_ptr() != 0;
     let safe = FAULT_SAFE.try_with(|c| c.get()).unwrap_or(0) > 0;
     // (leaf_of_jit reads the stack: only asked when it decides)
@@ -3263,7 +3301,7 @@ unsafe fn on_fault_locked(f: &os::fault::Fault, hooks: &os::fault::Hooks) -> os:
             (hooks.debug)();
             record_fault(f, 2);
             // resume at `leave(ctx, 2)`; the recovery point reports it (materialize_fault)
-            Action::Resume { pc: (*UNIT).leave, a0: ctx_ptr() as u64, a1: 2 }
+            Action::Resume { pc: (*cur_unit()).leave, a0: ctx_ptr() as u64, a1: 2 }
         }
     }
 }
@@ -3389,7 +3427,7 @@ unsafe fn materialize_fault() {
     ensure_altstack();
     // Fatal runs need a direct report before symbolication or any owner call can fail.
     let f = os::fault::Fault { kind: rec.kind, sig: rec.sig, pc: rec.pc, sp: rec.sp, fp: rec.fp, addr: rec.addr, lr: 0 };
-    if rec.pending != 3 && rec.guard_depth == 0 && !(rec.const_eval_depth > 0 && (&*UNIT).prog.session.options.const_fuel)
+    if rec.pending != 3 && rec.guard_depth == 0 && !(rec.const_eval_depth > 0 && (&*cur_unit()).prog.session.options.const_fuel)
         && FAULTS_FATAL.load(Ordering::Relaxed) && !crate::domain::in_app_domain() {
         raw_fault_line(&f, "fatal fault in program code: the process ends", &rec.raw[..rec.n.min(16)], !in_jit_code(rec.pc));
         raw_report_frames(&f, &rec.raw[..rec.n], !in_jit_code(rec.pc));
@@ -3849,6 +3887,7 @@ impl Unit {
             },
             retired: false,
             keep_compile_state: false,
+            aux: false,
             code: Default::default(),
             cold_users: HashMap::new(),
             body_users: HashMap::new(),
@@ -7046,7 +7085,7 @@ impl Unit {
 /// host handed out (an exported function called from a thread of the host's, not through
 /// `call_jit`) compiles its lazy stubs against it.
 pub unsafe fn set_runtime_unit(u: *mut Unit) {
-    UNIT = u;
+    adopt_runtime_unit(u);
 }
 
 /// Android: the address of a C-ABI function as a value is a stub in the host library
@@ -7090,7 +7129,7 @@ unsafe fn call_jit_nested(u: *mut Unit, entry: u64, arg: u64) -> Result<u64, Pan
         if crate::domain::current() != here {
             crate::domain::enter(here);
         }
-        UNIT = u;
+        let _ = CUR_UNIT.try_with(|c| c.set(u));
     }
     if sampled {
         sampler_leave();
@@ -7103,12 +7142,13 @@ unsafe fn call_jit_nested(u: *mut Unit, entry: u64, arg: u64) -> Result<u64, Pan
 pub unsafe fn call_jit_in(u: *mut Unit, domain: u64, entry: u64, arg: u64) -> Result<u64, PanicInfo> {
     // JIT code and the runtime helpers it calls allocate in the program's heap (zone_alloc.rs)
     let _kept = crate::zone_alloc::kept();
-    // the runtime's unit for this call; the previous one comes back after it (a proc-macro call
-    // into the macro world's unit must not leave the program's lazy stubs pointing there)
+    // the calling thread's unit for this call; the previous one comes back after it (a proc-macro
+    // call into the macro world's unit must not leave this thread's lazy stubs pointing there,
+    // and never another thread's: CUR_UNIT is the thread's own)
     owner::pure_note(owner::PURE_BG_JIT);
     owner::forbid_in_publish("jit", u32::MAX);
-    let prev = UNIT;
-    UNIT = u;
+    let prev = CUR_UNIT.try_with(|c| c.replace(u)).unwrap_or(std::ptr::null_mut());
+    adopt_runtime_unit(u);
     let sampled = (&*u).tier1.is_some();
     if sampled {
         sampler_enter((&*u).exec_base, (&*u).exec_size);
@@ -7130,9 +7170,7 @@ pub unsafe fn call_jit_in(u: *mut Unit, domain: u64, entry: u64, arg: u64) -> Re
     if sampled {
         sampler_leave();
     }
-    if !prev.is_null() {
-        UNIT = prev;
-    }
+    let _ = CUR_UNIT.try_with(|c| c.set(prev));
     r
 }
 
@@ -10368,7 +10406,7 @@ pub(crate) fn frame_leave(f: Frame) -> bool {
     // builds a panic left open (backstop: their bookkeeping normally closes them)
     for id in BUILD_STACK.with(|s| std::mem::take(&mut *s.borrow_mut())) {
         let up = IDS_UNIT.load(Ordering::Acquire);
-        let unit = unsafe { UNIT };
+        let unit = cur_unit();
         for u in [unit, up] {
             if !u.is_null() && (id as usize) < unsafe { (&*u).fns.len() } {
                 unsafe { (&mut *u).fns[id as usize].building = false };
@@ -14230,7 +14268,7 @@ fn sampler_thread() {
         if (profiling || exporting) && !selfs.is_empty() && !TIER_STOP.load(Ordering::SeqCst) {
             owner::publish(|| {
                 let _k = crate::zone_alloc::kept();
-                let up = unsafe { UNIT };
+                let up = cur_unit();
                 if !up.is_null() {
                     let u = unsafe { &*up };
                     if exporting {
@@ -20985,7 +21023,7 @@ pub extern "C" fn __relax_guard_leave(token: u64) {
                 site: u64::MAX, frames: Vec::new(), fault_addr: 0, location: String::new(),
             }));
             unsafe {
-                let leave: rt_fn_ty!(fn(*mut u64, u64) -> !) = std::mem::transmute((&*UNIT).leave as usize);
+                let leave: rt_fn_ty!(fn(*mut u64, u64) -> !) = std::mem::transmute((&*cur_unit()).leave as usize);
                 leave(ctx_ptr(), 3)
             }
         }
@@ -20994,7 +21032,7 @@ pub extern "C" fn __relax_guard_leave(token: u64) {
 
 /// The unit the program runs in (run-time module loading, modules.rs).
 pub fn current_unit() -> *mut Unit {
-    unsafe { UNIT }
+    cur_unit()
 }
 
 /// The program's own symbol lookups (dlsym; Windows: GetProcAddress) go through the loader, which
@@ -24397,7 +24435,7 @@ fn with_rt<R>(f: impl FnOnce(&mut RealTime) -> R) -> R {
 /// The ticket (0: nothing to wait for) is done when __relax_realtime_ready says so.
 extern "C" fn __relax_realtime(root: usize, data: usize, meta: usize, wake: usize) -> u64 {
     crate::jit::host_boundary("__relax_realtime", move || {
-        let up = unsafe { UNIT };
+        let up = cur_unit();
         if up.is_null() || !realtime_on() {
             return 0;
         }
@@ -25023,7 +25061,7 @@ pub(crate) fn const_drain() {
     if want.is_empty() {
         return;
     }
-    let up = unsafe { UNIT };
+    let up = cur_unit();
     if up.is_null() {
         return;
     }
@@ -25075,7 +25113,7 @@ pub(crate) fn realtime_drain() {
     if !RT_ANY.load(Ordering::Acquire) {
         return;
     }
-    let up = unsafe { UNIT };
+    let up = cur_unit();
     if up.is_null() {
         return;
     }

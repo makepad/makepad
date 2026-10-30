@@ -9,9 +9,9 @@
 //! the compiler's reference interpreter elsewhere; both give the same bits.
 //!
 //! Precision contract: points are rounded to f32, the function runs with
-//! the kernel compiler's f32 semantics in portable math (fdlibm kernels,
-//! unfused arithmetic: the same bits as host Rust f32 code), and the
-//! distance is that f32 result.
+//! the kernel compiler's f32 semantics in `exact32` math (f32 polynomials,
+//! unfused arithmetic: only IEEE f32 operations, so the SDF engine's GPU
+//! bake computes the same bits), and the distance is that f32 result.
 //!
 //! Wiring a surface verb (which owns the VM and the fn value):
 //!
@@ -53,12 +53,31 @@ pub enum SplashPoint {
 /// follow the point parameters; they are set with
 /// [`SdfSplashExpr::set_uniforms`] and can change between samplings
 /// without recompiling.
+///
+/// The document's numbers the function reads from its scope (`height` in
+/// `let height = 70mm`, then `fn(p) { .. height * 0.3 .. }`) are lifted:
+/// kernel parameters set from the values the document gave them, not
+/// constants in the program, so a document evaluated again with another
+/// height is the same compiled kernel ([`SdfSplashExpr::structure_key`])
+/// with other parameter values ([`SdfSplashExpr::params`]).
+#[derive(Clone)]
 pub struct SdfSplashExpr {
     kernel: KernelRef,
     /// Kernel param names, one per uniform lane, in declaration order.
     params: Vec<String>,
     values: Vec<f32>,
+    /// The lifted numbers' values, by kernel parameter index (the uniforms'
+    /// slots hold their current values).
+    lifted: Vec<f32>,
+    /// Per uniform lane, its kernel parameter index.
+    slots: Vec<usize>,
+    /// The program's key (hashing it walks the whole program: once).
+    structure: u64,
 }
+
+/// The most document numbers a field lifts to parameters (the rest stay
+/// constants): what the GPU route passes per call.
+pub const MAX_LIFTED: usize = 16;
 
 impl SdfSplashExpr {
     /// Compiles `f` (a script fn) as a field. `uniforms` holds the lane
@@ -99,19 +118,52 @@ impl SdfSplashExpr {
             decls,
             entry: Entry::Element,
             entry_fn,
-            math: MathMode::Portable,
+            math: MathMode::Exact32,
             uses: Vec::new(),
             bind: vec![("sdf_field".into(), f)],
         };
-        let kernel = vm_kernel::compile(vm, &k, &[], Backend::Native, &[])?;
+        let (kernel, lifted_named) = vm_kernel::compile_lifted(vm, &k, Backend::Native, MAX_LIFTED)?;
+        let mut lifted = vec![0.0; kernel.param_count()];
+        for (name, v) in &lifted_named {
+            if let Some(i) = kernel.param_index(name) {
+                lifted[i] = *v;
+            }
+        }
+        let slots = params.iter().map(|n| kernel.param_index(n).expect("a declared uniform is a kernel parameter")).collect();
         let values = vec![0.0; params.len()];
-        Ok(SdfSplashExpr { kernel, params, values })
+        let structure = kernel.program_key();
+        Ok(SdfSplashExpr { kernel, params, values, lifted, slots, structure })
     }
 
-    /// The compiled program's identity (its whole AIR, constants included): equal
+    /// The compiled program's identity (its whole AIR; lifted numbers are
+    /// parameters, not part of it): equal keys are the same compiled code.
+    pub fn structure_key(&self) -> u64 {
+        self.structure
+    }
+
+    /// The field's identity: the program and its parameter values. Equal
     /// keys sample equal fields.
     pub fn key(&self) -> u64 {
-        self.kernel.program_key()
+        let mut h = self.structure_key() ^ 0x9e37_79b9_7f4a_7c15;
+        for v in self.params() {
+            h = (h ^ v.to_bits() as u64).wrapping_mul(0x100_0000_01b3);
+        }
+        h
+    }
+
+    /// Every kernel parameter's value now, by parameter index (what one
+    /// call reads).
+    pub fn params(&self) -> Vec<f32> {
+        let mut p = self.lifted.clone();
+        for (slot, v) in self.slots.iter().zip(&self.values) {
+            p[*slot] = *v;
+        }
+        p
+    }
+
+    /// The compiled kernel (its program and parameter table).
+    pub fn kernel(&self) -> &KernelRef {
+        &self.kernel
     }
 
     /// Sets the uniform values, lane-flattened in declaration order.
@@ -127,11 +179,17 @@ impl SdfSplashExpr {
     /// fast path for samplers that have their points in an array — the
     /// point loop runs inside the kernel.
     pub fn distance_batch(&self, xyz: &[f32], out: &mut [f32]) {
+        self.distance_batch_with(&self.params(), xyz, out)
+    }
+
+    /// [`SdfSplashExpr::distance_batch`] with every parameter given (by
+    /// parameter index, as [`SdfSplashExpr::params`] lists them).
+    pub fn distance_batch_with(&self, params: &[f32], xyz: &[f32], out: &mut [f32]) {
         assert!(xyz.len() == out.len() * 3);
         let count = out.len();
         let mut call = self.kernel.call();
-        for (name, v) in self.params.iter().zip(&self.values) {
-            call.set_param(name, *v);
+        for (k, v) in params.iter().enumerate().take(self.kernel.param_count()) {
+            call.set_param(self.kernel.param_view(k).name, *v);
         }
         call.input("sdf_points", xyz).expect("the field's point input");
         call.output("sdf_dist", out).expect("the field's distance output");

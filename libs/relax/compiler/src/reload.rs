@@ -1345,10 +1345,13 @@ fn layout_edit(u: &Unit, d: DefId, fresh: &crate::tcx::AdtT, running_discriminan
         return Err(format!("struct `{}` keeps its first layout in a live session only when it is in the app scope, has named fields, Rust's repr and no Copy impl -- restart the app", name));
     }
     trace_sub("layout_edit_live_editable");
-    if let Some(outer) = outside_value_embedding(u, d) {
-        return Err(format!("struct `{}` is embedded by value in `{}` outside the app scope -- restart the app", name, crate::typeck::type_name(&u.prog, &u.tcx, outer)));
-    }
-    trace_sub("layout_edit_embedding");
+    // An outer type that holds the struct by value (`Option<App>` of the platform, anywhere) keeps
+    // working: the struct keeps its first layout (size, alignment, the running fields' offsets and
+    // its niche; added fields go to the extension block), the outer types' drop glue reaches the
+    // rebuilt glue through its slot or the inlined-into closure, and every crate that sees the
+    // edit is checked for users of a removed field. What it cannot take is a niche that goes dead:
+    // removed and retyped fields leave their slot unwritten in values built after the edit, so the
+    // one holding the niche an outer enum reads its tag from must stay (below).
     if fresh.n_generics != old.n_generics || fresh.variants.len() != 1 {
         return Err(format!("struct `{}`: its generics changed -- restart the app", name));
     }
@@ -1387,10 +1390,14 @@ fn layout_edit(u: &Unit, d: DefId, fresh: &crate::tcx::AdtT, running_discriminan
             placed[j] = Some(k);
         }
     }
-    // removed: a dead slot, when nothing needs dropping in it
+    // removed: a dead slot, when nothing needs dropping in it and it holds no niche
+    let niche = niche_fields(u, d);
     for k in 0..n_old {
         if taken[k] || dead(u.prog.syms.str(fields[k].name)) {
             continue;
+        }
+        if niche.contains(&k) {
+            return Err(format!("struct `{}`: field `{}` was removed or retyped, and it holds the niche an outer type (e.g. `Option<{}>`) may keep its tag in; values built after the edit leave it unset -- restart the app", name, u.prog.syms.str(fields[k].name), name));
         }
         // a dead slot that owns memory is dropped with the values built before the edit (their ext
         // word's flag bit is clear; lower.rs ext_drop_fn); values built after it leave it unset.
@@ -1551,97 +1558,35 @@ fn adt_ext_field(a: &crate::tcx::AdtT, k: usize) -> bool {
     a.ext_from != u32::MAX && k as u32 >= a.ext_from
 }
 
-/// Inspect concrete instances, substituting actual field types rather than treating type
-/// arguments as storage (Box<T>, references and PhantomData<T> do not embed T by value).
-fn outside_value_embedding(u: &Unit, edited: DefId) -> Option<TyId> {
+/// The fields of struct `d` (running slot order) that hold the niche of one of its compiled
+/// instances: an outer enum (`Option<T>`) may keep its tag there.
+fn niche_fields(u: &Unit, d: DefId) -> Vec<usize> {
     use crate::types::TyKind;
-    let app: Vec<bool> = (0..u.prog.crates.len()).map(|c| crate::borrowck::event::app_crate(&u.prog, c as u32)).collect();
-    fn embeds(u: &Unit, t: TyId, edited: DefId, seen: &mut std::collections::HashSet<TyId>) -> bool {
-        if !seen.insert(t) { return false; }
-        match u.tcx.tys.kind(t) {
-            TyKind::Adt(d, args, _) => *d == edited || u.tcx.adts.get(d).is_some_and(|a|
-                a.variants.iter().enumerate().any(|(vi, v)| v.fields.iter().enumerate().any(|(fi, _)| {
-                    let field = u.tcx.field_ty(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), *d, vi as u32, fi as u32, u.tcx.tys.list(*args));
-                    embeds(u, field, edited, seen)
-                }))),
-            TyKind::Tuple(ts) => u.tcx.tys.list(*ts).iter().any(|t| embeds(u, *t, edited, seen)),
-            TyKind::Array(t, n) => n.try_to_target_usize(&u.tcx.tys) != Some(0) && embeds(u, *t, edited, seen),
-            _ => false,
-        }
-    }
-    // A type can embed `edited` only if it names `edited` or an ADT whose declared fields could
-    // hold it (`holders`), directly or through its type arguments: a declared field type names
-    // only items its crate can see -- `edited` only in the crates that can see `edited`'s crate --
-    // and anything else reaches the field through a substituted argument; like embeds(), only
-    // arrays and tuples carry a value further, and an alias may normalize to a holder. An ADT
-    // of another crate whose declared fields
-    // project (`T::Out`) may also reach it through an impl for an argument, so an instance of
-    // one naming any type of the seeing crates counts too. Skipping every other type leaves the
-    // answer unchanged (lead decision 52 R1: after a scoped publication, embeds() normalized
-    // ~40k unrelated instances' fields again, ~0.5 s per field-list edit).
-    struct Holders { adts: Vec<DefId>, projecting: std::collections::HashSet<DefId>, seeing: Vec<u32> }
-    fn may_hold(u: &Unit, t: TyId, h: &Holders, depth: u32) -> bool {
-        use crate::types::TyKind::*;
-        if depth > 16 { return true; }
-        match u.tcx.tys.kind(t) {
-            Adt(d, args, _) => h.adts.contains(d) || (h.projecting.contains(d) && ty_in_crates(u, t, &h.seeing, 0))
-                || u.tcx.tys.list(*args).iter().any(|a| may_hold(u, *a, h, depth + 1)),
-            // (as embeds(): by value through arrays and tuples only)
-            Array(x, _) => may_hold(u, *x, h, depth + 1),
-            Tuple(v) => u.tcx.tys.list(*v).iter().any(|a| may_hold(u, *a, h, depth + 1)),
-            // an alias normalizes through an impl of its trait's crate or of a crate of a type
-            // in its arguments (orphan rules), to a type made of those crates' items and parts
-            // of its arguments: a holder only if a seeing crate is among them or an argument
-            // may hold one
-            Alias(_, a) => h.seeing.contains(&u.prog.def(a.kind.def_id()).krate)
-                || u.tcx.tys.list(a.args).iter().any(|x| ty_in_crates(u, *x, &h.seeing, 0) || may_hold(u, *x, h, depth + 1)),
-            _ => false,
-        }
-    }
-    fn projects(u: &Unit, t: TyId, depth: u32) -> bool {
-        use crate::types::TyKind::*;
-        if depth > 16 { return true; }
-        match u.tcx.tys.kind(t) {
-            Alias(..) | Closure(..) | Dyn(..) => true,
-            Adt(_, args, _) => u.tcx.tys.list(*args).iter().any(|a| projects(u, *a, depth + 1)),
-            Ref(_, x, _) | Ptr(_, x) | Slice(x) | Array(x, _) => projects(u, *x, depth + 1),
-            Tuple(v) => u.tcx.tys.list(*v).iter().any(|a| projects(u, *a, depth + 1)),
-            _ => false,
-        }
-    }
-    let seeing = crates_seeing_edit(&u.prog, [u.prog.def(edited).file].into_iter());
-    let sees = |d: &DefId| seeing.get(u.prog.def(*d).krate as usize).copied().unwrap_or(true);
-    let mut h = Holders { adts: vec![edited], projecting: Default::default(), seeing: (0..seeing.len() as u32).filter(|&k| seeing[k as usize]).collect() };
-    for (d, a) in u.tcx.adts.iter() {
-        if !sees(d) && a.variants.iter().any(|v| v.fields.iter().any(|f| projects(u, f.ty, 0))) { h.projecting.insert(*d); }
-    }
-    loop {
-        let mut grew = false;
-        for (d, a) in u.tcx.adts.iter() {
-            if h.adts.contains(d) || !sees(d) { continue; }
-            if a.variants.iter().any(|v| v.fields.iter().any(|f| may_hold(u, f.ty, &h, 0))) {
-                h.adts.push(*d);
-                grew = true;
-            }
-        }
-        if !grew { break; }
-    }
-    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
     for i in 0..u.tcx.tys.len() {
         let t = TyId(i as u32);
-        if let TyKind::Adt(d, _, _) = u.tcx.tys.kind(t) {
-            if !app[u.prog.def(*d).krate as usize] && u.tcx.tys.is_concrete(t)
-                && may_hold(u, t, &h, 0)
-                // The interner also holds binder payloads, not running instances.
-                // Nightly rustc_middle/src/ty/instance.rs:519-524 rejects escaping
-                // bound vars; erase_regions.rs:65-72 deliberately preserves them.
-                && !u.tcx.tys.has_escaping_bound_vars(t)
-                && embeds(u, t, edited, &mut seen) {
-                return Some(t);
+        let TyKind::Adt(dd, args, _) = u.tcx.tys.kind(t) else { continue };
+        if *dd != d || !u.tcx.tys.is_concrete(t) || u.tcx.tys.has_escaping_bound_vars(t) {
+            continue;
+        }
+        let args = *args;
+        let (fields, niche) = {
+            let l = u.layout_of(t);
+            (l.fields.clone(), l.niche.as_ref().map(|n| (n.off, n.bytes)))
+        };
+        let Some((n_off, n_bytes)) = niche else { continue };
+        for (k, off) in fields.into_iter().enumerate() {
+            if off == u32::MAX || out.contains(&k) {
+                continue;
+            }
+            let ft = u.tcx.field_ty(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), d, 0, k as u32, u.tcx.tys.list(args));
+            let size = u.layout_of(ft).size;
+            if off < n_off + n_bytes && n_off < off + size {
+                out.push(k);
             }
         }
     }
-    None
+    out
 }
 
 /// Use the same formatter as lower.rs's `type_name` intrinsic. Generic structs publish
@@ -3514,11 +3459,22 @@ impl DockGate {
         true
     }
 
-    /// Files changed outside a sync: reported once per revision, not applied.
+    /// Files changed outside a sync: reported once per revision, not applied. A sync writes
+    /// the files first and its revision last, so files seen before their revision are given
+    /// that long to be a sync's (the next watch round applies them).
     pub(crate) fn held<'a>(&mut self, paths: impl Iterator<Item = &'a str>) {
-        if std::mem::replace(&mut self.warned, true) {
+        if self.warned {
             return;
         }
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < until {
+            let now = std::fs::read_to_string(&self.revision).unwrap_or_default();
+            if !now.is_empty() && now != self.applied {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        self.warned = true;
         let paths: Vec<&str> = paths.take(3).collect();
         let message = format!("dock app: {} changed outside a devhub sync of landed work; not applied: the app keeps running the synced code", paths.join(", "));
         eprintln!("makepad live: {message}");
@@ -3781,6 +3737,10 @@ pub(crate) fn settle_verdicts(up: *mut Unit, pending: &mut Vec<PendingPatch>, un
 /// (restart_in_place). Only where that is impossible does it wait for `session relaunch`.
 fn restart_for_edit(what: &str, lines: &[String]) {
     let why = format!("{}: {}", what, lines.first().cloned().unwrap_or_default());
+    if dock_app() {
+        // a dock app restarts when the person says so (the WM's toast, or `session relaunch`)
+        return offer_restart(&why);
+    }
     match restart_in_place(why.clone()) {
         Ok(how) => eprintln!("makepad live: {what}: restarting in place to apply it ({how}); reasons below"),
         Err(e) => {
@@ -3833,6 +3793,7 @@ fn running_old_code(u: &Unit, gen: u32) -> Option<String> {
 /// rebuilt. Returns how, or why it cannot.
 fn restart_in_place(why: String) -> Result<&'static str, String> {
     *RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = why;
+    RESTART_CONFIRMED.store(true, std::sync::atomic::Ordering::SeqCst);
     if RESTART_SUPPORTED.load(std::sync::atomic::Ordering::SeqCst) {
         RESTART_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
         wake_program();
@@ -3852,6 +3813,36 @@ pub fn restart_process(why: &str) -> Result<(), String> {
     let state = DOMAIN_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()).take();
     *RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = format!("the relaunch in place failed: {why}");
     exec_restart(state.as_deref().map(str::as_bytes))
+}
+
+/// What the host keeps across an exec of this process (the HAL's WM connection: the new image
+/// resumes on it, so the WM keeps the app's window): `prepare`, right before exec, readies what
+/// it hands over (no CLOEXEC) and returns the environment that names it to the new image;
+/// `undo`, when the exec failed, takes it back so this process goes on with it.
+type Handover = (fn() -> Vec<(String, String)>, fn());
+static BEFORE_EXEC: std::sync::Mutex<Option<Handover>> = std::sync::Mutex::new(None);
+
+/// The host's handover at an exec ([`BEFORE_EXEC`]); set once by the runner.
+pub fn set_before_exec(prepare: fn() -> Vec<(String, String)>, undo: fn()) {
+    *BEFORE_EXEC.lock().unwrap_or_else(|e| e.into_inner()) = Some((prepare, undo));
+}
+
+/// Readies the host's handover for `cmd`, which execs next (its environment is added).
+pub(crate) fn hand_over(cmd: &mut std::process::Command) {
+    let f = *BEFORE_EXEC.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((prepare, _)) = f {
+        for (k, v) in prepare() {
+            cmd.env(k, v);
+        }
+    }
+}
+
+/// The exec after [`hand_over`] failed: the host takes its handover back.
+pub(crate) fn hand_back() {
+    let f = *BEFORE_EXEC.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, undo)) = f {
+        undo();
+    }
 }
 
 /// The process starts again: the loader binary with the same command line, `state` handed to the
@@ -3880,7 +3871,10 @@ fn exec_restart(state: Option<&[u8]>) -> Result<(), String> {
         crate::tui::exit_code(0);
         crate::tui::finish(false);
         eprintln!("makepad live: restarting ({})", RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()));
-        Err(format!("restart failed: {}", cmd.exec()))
+        hand_over(&mut cmd);
+        let e = cmd.exec();
+        hand_back();
+        Err(format!("restart failed: {e}"))
     }
     #[cfg(not(unix))]
     {
@@ -3888,6 +3882,25 @@ fn exec_restart(state: Option<&[u8]>) -> Result<(), String> {
         Err("this platform cannot start the process again in place".into())
     }
 }
+
+/// A WM dock app (`MAKEPAD_RUN_DOCK_REVISION`): its changes come from devhub syncs of landed
+/// work, and a restart they need is offered to the person (the WM's toast says "restart to
+/// apply", and its Restart is `session relaunch`), never done unasked.
+pub(crate) fn dock_app() -> bool {
+    std::env::var_os("MAKEPAD_RUN_DOCK_REVISION").is_some_and(|p| !p.is_empty())
+}
+
+/// A restart is ready for a dock app: noted for `session relaunch`, and in the live log for the
+/// toast (devhub follows it).
+pub(crate) fn offer_restart(why: &str) {
+    note_restart_pending(why);
+    eprintln!("makepad live: {why}: a restart applies it; offered (the WM's toast, or `makepad inspect <app> session relaunch`); the app keeps running meanwhile");
+    live_log(&format!("{{\"event\":\"restart_offered\",\"pid\":{},\"why\":{}}}", std::process::id(), json_str(why)));
+}
+
+/// A restart the person asked for (`session relaunch`, a restart toast's click): a dock app's
+/// waiting rebuilt makepad may take it (`host::restart_now`).
+pub(crate) static RESTART_CONFIRMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Edits waiting for a relaunch (`session` in inspect lists them).
 static RESTART_PENDING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
@@ -3905,6 +3918,7 @@ fn note_restart_pending(why: &str) {
 /// `session relaunch`: applies the edits waiting for a restart (restart_in_place). Returns how.
 pub fn relaunch_pending() -> Result<&'static str, String> {
     let why = RESTART_PENDING.lock().unwrap_or_else(|e| e.into_inner()).join("; ");
+    eprintln!("makepad live: session relaunch: {}", if why.is_empty() { "nothing waits" } else { why.as_str() });
     restart_in_place(if why.is_empty() { "session relaunch".into() } else { why })
 }
 
@@ -4271,9 +4285,9 @@ pub extern "C" fn __relax_live_stream(p: *const u8, n: usize, t: *const u8, len:
     crate::jit::host_boundary("__relax_live_stream", move || {
         if p.is_null() || t.is_null() { return 3; }
         unsafe {
-            if jit::UNIT.is_null() { return 3; }
+            if jit::cur_unit().is_null() { return 3; }
             let Ok(path) = std::str::from_utf8(std::slice::from_raw_parts(p, n)) else { return 3; };
-            let o = apply_stream(jit::UNIT, path, std::slice::from_raw_parts(t, len).to_vec());
+            let o = apply_stream(jit::cur_unit(), path, std::slice::from_raw_parts(t, len).to_vec());
             match o.rung {
                 Rung::Patch if o.changed == 0 && o.lines.iter().any(|l| l.starts_with("incomplete:")) => 1,
                 Rung::Patch => 0,
@@ -4631,10 +4645,36 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 break;
             }
         }
-        let reason = inputs.restart_reason(changed.iter().map(|&k| files[k].0.as_str())).or_else(|| {
+        if synced {
+            // A devhub sync of landed work: one whole tree, so no part of it is a half-done
+            // checkout. What makepad itself is built from (provided crates, std, the Cargo graph,
+            // build scripts) goes to a rebuild of makepad, which restarts only if the binary
+            // changed; sources of crates the program has not loaded are read when it loads them;
+            // the program's own sources patch as any save does.
+            let (host_side, rest): (Vec<usize>, Vec<usize>) = changed.iter().partition(|&&k| inputs.process_input(&files[k].0));
+            if !host_side.is_empty() {
+                let short = |p: &str| -> String { let v: Vec<&str> = p.rsplit('/').take(2).collect(); v.into_iter().rev().collect::<Vec<_>>().join("/") };
+                let names: Vec<String> = host_side.iter().take(3).map(|&k| short(&files[k].0)).collect();
+                let why = format!("{} makepad input(s) changed ({}{}): {}", host_side.len(), names.join(", "), if host_side.len() > 3 { ", ..." } else { "" },
+                    inputs.restart_reason(host_side.iter().map(|&k| files[k].0.as_str())).unwrap_or("its sources changed"));
+                if let Err(e) = host::request(why.clone(), inputs.process_paths()) {
+                    let message = format!("{why}; cannot rebuild makepad here ({e}); the app goes on with the makepad it runs");
+                    eprintln!("makepad live: {message}");
+                    live_log(&format!("{{\"event\":\"host_rebuild\",\"ok\":false,\"message\":{}}}", json_str(&message)));
+                }
+                for &k in &host_side { files[k].2 = stamp(&files[k].0); stalled.remove(&k); }
+            }
+            let (unloaded, rest): (Vec<usize>, Vec<usize>) = rest.into_iter().partition(|&k| files[k].1 == u32::MAX && !crate::native_macros::owns_path(&files[k].0));
+            for &k in &unloaded { files[k].2 = stamp(&files[k].0); stalled.remove(&k); }
+            changed = rest;
+            if changed.is_empty() {
+                continue;
+            }
+        }
+        let reason = if synced { None } else { inputs.restart_reason(changed.iter().map(|&k| files[k].0.as_str())).or_else(|| {
             changed.iter().any(|&k| files[k].1 == u32::MAX && !crate::native_macros::owns_path(&files[k].0))
                 .then_some("sources outside the loaded program changed")
-        });
+        }) };
         if let Some(reason) = reason {
             // a change the running process cannot take: makepad rebuilds itself in the background
             // and restarts into the new binary; the app keeps running (and patching) meanwhile

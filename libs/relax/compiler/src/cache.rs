@@ -61,6 +61,9 @@ const KIND_BORROWCK: u32 = 4;
 pub const BORROWCK_VERSION: u32 = 2;
 /// the coherence check's own version: bump when its rules change
 const COHERENCE_VERSION: u32 = 2;
+/// `makepad test`'s up-front body check (check_body_key): bump when what a body's verdict rests
+/// on changes
+const CHECK_BODY_VERSION: u32 = 1;
 
 /// Immutable driver view for Gandalf's generic owner discovery. No Unit/cache
 /// callbacks under the front read lock, and no need to construct an instance key
@@ -2560,6 +2563,61 @@ impl Cache {
             if *f { h.str(prog.file_paths.get(i).map_or("", |p| p.as_str())); }
         }
         Some(h.finish128())
+    }
+
+    /// `makepad test`'s up-front check (check.rs check_subjects): what every body verdict of subject
+    /// crate `c` rests on besides the body's own text -- the Relax build and options (cfg), the
+    /// check's mode, the crate as rustc is invoked on it (name, root, edition, cfg with
+    /// cfg(test) and features, its context: env and the macros' outside inputs), its dependencies
+    /// whole (their fingerprints, which cover theirs), and its own text outside the fn bodies
+    /// that are holes (items.rs), every file of it: the check loaded the ones the boot skipped,
+    /// so this is not the boot-only interface fingerprint. None: a file without a digest.
+    pub fn check_crate_inputs(&mut self, u: &Unit, c: u32, mode: u8) -> Option<u128> {
+        let prog = &u.prog;
+        let ci = prog.crates.get(c as usize)?;
+        let mut h = Sip128::new();
+        h.str("check-crate");
+        h.u32(CHECK_BODY_VERSION);
+        h.u128(self.cfg);
+        h.u8(mode);
+        h.u128(crate::crate_image::fingerprint_head(prog.syms.str(ci.name), ci.root_path(), ci.edition, ci.proc_macro, &ci.cfg.set).finish128());
+        h.u128(ci.context.fingerprint());
+        let mut deps: Vec<u128> = Vec::new();
+        for &(_, d) in &ci.deps {
+            if d != c { deps.push(*self.fps.get(d as usize)?); }
+        }
+        deps.sort_unstable();
+        deps.dedup();
+        h.u32(deps.len() as u32);
+        for d in deps { h.u128(d); }
+        for f in 0..prog.files.len() {
+            if prog.file_crate.get(f) != Some(&c) || prog.front_macro_fragments.contains(&f) { continue; }
+            let dg = self.digest_of(u, f)?;
+            h.str(prog.file_paths.get(f).map_or("", |p| p.as_str()));
+            h.u128(dg.iface);
+        }
+        Some(h.finish128())
+    }
+
+    /// The key of body owner `d`'s verdict in `makepad test`'s up-front check: its crate's inputs
+    /// (`check_crate_inputs`), its identity, and its body's text when the body is a hole (else
+    /// the body is in the crate's text outside the holes, in the inputs already). A clean
+    /// verdict under it is a borrowck-kind entry (record_borrowck), in its crate's store.
+    pub fn check_body_key(&mut self, u: &Unit, inputs: u128, d: DefId) -> Option<u128> {
+        let def = u.prog.def(d);
+        let (file, item, krate) = (def.file, def.item, def.krate);
+        let dg = self.digest_of(u, file as usize)?;
+        let mut h = Sip128::new();
+        h.str("check-body");
+        h.u128(inputs);
+        h.u128(self.def_key(u, d));
+        match items::body_hash(&u.prog.files[file as usize], &dg, item) {
+            Some(b) => { h.u8(1); h.u128(b); }
+            None => h.u8(0),
+        }
+        let k = h.finish128();
+        self.key_crate.insert(k, krate);
+        Some(k)
     }
 
     /// The verdict stored for this key (on disk, or recorded by this run).

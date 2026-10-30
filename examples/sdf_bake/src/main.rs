@@ -21,9 +21,9 @@ pub use makepad_widgets;
 
 use makepad_csg_math::Vec3d;
 use makepad_sdf_engine::bake::{copy_rect, slot_rect, Baker, DrawSdfBake, DrawSdfCopy, COPY_W};
-use makepad_sdf_engine::makepad_csg_sdf::{distance_slot, part_id, quat_from_degrees, SdfDeform, SdfNode, SdfOp, SdfPlace};
-use makepad_sdf_engine::march::{draw_object, material_texture, override_texture, DrawSdfMarch, MarchView};
-use makepad_sdf_engine::program::lower;
+use makepad_sdf_engine::makepad_csg_sdf::{distance_slot, part_id, quat_from_degrees, SdfDeform, SdfKernel, SdfNode, SdfOp, SdfPlace, SdfSplashExpr, SplashPoint};
+use makepad_sdf_engine::march::{coarse_object, draw_object, set_finish, Finish, material_texture, override_texture, shade_object, DrawSdfCoarse, DrawSdfMarch, DrawSdfShade, MarchLight, MarchOut, MarchView, COARSE_CLEAR};
+use makepad_sdf_engine::program::lower_with;
 use makepad_sdf_engine::twin;
 use makepad_sdf_engine::volume::{Brick, Volume, ATLAS_W, BS};
 use makepad_widgets::makepad_platform::makepad_hal::gpu_prof;
@@ -40,10 +40,31 @@ const FOV_Y: f32 = 40.0;
 /// The bench's march target (4K).
 const BW: usize = 3840;
 const BH: usize = 2160;
+/// The stereo bench's eye (a Quest 3's) and the eyes' separation (scene mm).
+const XW: usize = 1680;
+const XH: usize = 1760;
+const IPD: f32 = 3.0;
+
+/// The right eye of `view`: the camera moved `IPD` along its x.
+fn right_eye(view: Mat4f) -> Mat4f {
+    let mut t = Mat4f::identity();
+    t.v[12] = -IPD;
+    Mat4f::mul(&t, &view)
+}
 
 fn march_camera(scene: &str) -> (Mat4f, Mat4f) {
-    let eye = if scene == "bracket" { vec3f(40.0, 45.0, 70.0) } else { vec3f(-30.0, 25.0, 80.0) };
-    let view = Mat4f::look_at(eye, vec3f(0.0, 2.0, 0.0), vec3f(0.0, 1.0, 0.0));
+    let eye = match scene {
+        "bracket" => vec3f(40.0, 45.0, 70.0),
+        "vase" => vec3f(-50.0, 70.0, 110.0),
+        "lattice" => vec3f(-30.0, 40.0, 50.0),
+        _ => vec3f(-30.0, 25.0, 80.0),
+    };
+    let target = match scene {
+        "vase" => vec3f(0.0, 36.0, 0.0),
+        "lattice" => vec3f(0.0, 12.0, 0.0),
+        _ => vec3f(0.0, 2.0, 0.0),
+    };
+    let view = Mat4f::look_at(eye, target, vec3f(0.0, 1.0, 0.0));
     let proj = Mat4f::perspective(FOV_Y, MW as f32 / MH as f32, 1.0, 1000.0);
     (view, proj)
 }
@@ -64,6 +85,38 @@ script_mod! {
             return vec4(0.5 + v * 0.5, 0.5 - v * 0.5, 0.5, 1.0)
         }
     }
+
+    // Fab's bud vase as a Splash distance fn (mm): its numbers are read
+    // from the enclosing scope, so the kernel compiler lifts them to
+    // parameters and both heights are one compiled program.
+    let vase_of = fn(vase_height) {
+        let vase_belly = 21.0
+        let vase_neck = 9.5
+        let vase_wall = 1.6
+        let vase_blend = 9.0
+        return fn(p) {
+            let belly = sdf_ellipsoid(p - vec3(0, vase_height * 0.34, 0), vec3(vase_belly, vase_height * 0.36, vase_belly))
+            let neck = sdf_cylinder(p - vec3(0, vase_height * 0.74, 0), vase_neck, vase_height * 0.42)
+            let lip = sdf_torus(p - vec3(0, vase_height * 0.94, 0), vase_neck + 1.2, 1.8)
+            let body = smooth_union(smooth_union(belly, neck, vase_blend), lip, vase_blend)
+            let foot = sdf_box(p - vec3(0, -7, 0), vec3(4 * vase_belly, 20, 4 * vase_belly))
+            let hollow = sdf_shell(sdf_difference(body, foot), vase_wall)
+            let mouth = sdf_cylinder(p - vec3(0, vase_height + 4, 0), vase_neck - vase_wall * 0.5, 20)
+            return sdf_difference(hollow, mouth)
+        }
+    }
+    // the demo's lattice cube: a gyroid sheet in a cube (sin and cos)
+    let lattice_of = fn(lattice_period) {
+        let lattice_size = 24.0
+        return fn(p) {
+            let cube = sdf_box(p - vec3(0, lattice_size / 2, 0), vec3(lattice_size, lattice_size, lattice_size))
+            return sdf_intersection(sdf_gyroid(p, lattice_period, 0.6), cube)
+        }
+    }
+    mod.draw.sdfbake_lattice_a = lattice_of(8.0)
+    mod.draw.sdfbake_lattice_b = lattice_of(9.5)
+    mod.draw.sdfbake_vase_a = vase_of(70.0)
+    mod.draw.sdfbake_vase_b = vase_of(74.0)
 
     mod.widgets.SdfBakeView = set_type_default() do #(SdfBakeView::register_widget(vm)){
         width: Fill
@@ -123,11 +176,13 @@ fn bracket(hole_x: f64, rib_blend: f64) -> SdfNode {
     SdfNode::Id { id: part_id("bracket"), of: Box::new(comb(SdfOp::Difference, 0.8, vec![solid, holes, slot, bore])) }
 }
 
-/// Every warp, the curved primitives, nested materials, a shell and an
+/// Every warp, the curved primitives, nested materials, a painted region, a shell and an
 /// intersection: the organic case. `blend` changes the body's blend (the
 /// edit).
 fn organic(blend: f64) -> SdfNode {
-    let body = comb(
+    // a painted patch: slot 7 only inside the region, the body's distance unchanged
+    let patch = |of: SdfNode| SdfNode::Material { slot: 7, within: Some(Box::new(at([9.0, 4.0, 0.0], [0.0, 0.0, 0.0], SdfNode::Sphere { radius: 5.0 }))), of: Box::new(of) };
+    let body = patch(comb(
         SdfOp::Union,
         blend,
         vec![
@@ -135,7 +190,7 @@ fn organic(blend: f64) -> SdfNode {
             at([0.0, 10.0, 0.0], [0.0, 0.0, 0.0], SdfNode::Sphere { radius: 6.0 }),
             SdfNode::Capsule { a: [-14.0, -4.0, 0.0], b: [-4.0, 2.0, 3.0], radius: 2.5 },
         ],
-    );
+    ));
     let twist = at([24.0, 0.0, 0.0], [0.0, 0.0, 0.0], SdfNode::deform(SdfDeform::Twist { rate: 0.12 }, SdfNode::Box { size: [6.0, 20.0, 4.0], radius: 0.5 }));
     let bend = at([0.0, -14.0, 0.0], [0.0, 0.0, 0.0], SdfNode::deform(SdfDeform::Bend { rate: 0.04 }, SdfNode::Box { size: [26.0, 3.0, 3.0], radius: 0.3 }));
     let taper = at([-24.0, 0.0, 0.0], [10.0, 0.0, 0.0], SdfNode::deform(SdfDeform::Taper { rate: -0.03 }, SdfNode::Cylinder { radius: 4.0, top_radius: 4.0, height: 18.0 }));
@@ -160,11 +215,48 @@ struct Scene {
     after: SdfNode,
 }
 
-fn scenes() -> Vec<Scene> {
-    vec![
+/// A kernel at two parameter values (one program, two parameter sets).
+fn kernel_scene(cx: &mut Cx, name: &str, a: LiveId, b: LiveId, bounds: ([f64; 3], [f64; 3])) -> Option<(SdfNode, SdfNode)> {
+    cx.with_vm(|vm| {
+        let draw = vm.heap().module(id!(draw));
+        let mut k = Vec::new();
+        for name in [a, b] {
+            let f = vm.value(draw, name).as_object()?;
+            match SdfSplashExpr::compile(vm, f, SplashPoint::Vec3, &[]) {
+                Ok(e) => k.push(e),
+                Err(e) => {
+                    println!("SDFBAKE-FAIL vase kernel: {e:?}");
+                    return None;
+                }
+            }
+        }
+        let (b, a) = (k.pop()?, k.pop()?);
+        println!(
+            "SDFBAKE scene={name} kernel structure {:016x}/{:016x} params {:?} -> {:?} cost {}",
+            a.structure_key(), b.structure_key(), a.params(), b.params(), a.kernel().cost
+        );
+        if a.structure_key() != b.structure_key() {
+            println!("SDFBAKE-FAIL {name}: two values compiled two programs (lifting)");
+        }
+        let node = |e| SdfNode::Id { id: part_id(name), of: Box::new(SdfNode::Kernel(SdfKernel::splash(e, Some(bounds)))) };
+        Some((node(a), node(b)))
+    })
+}
+
+fn scenes(cx: &mut Cx) -> Vec<Scene> {
+    let mut v = vec![
         Scene { name: "bracket", before: bracket(-20.0, 2.0), after: bracket(-18.5, 2.0) },
         Scene { name: "organic", before: organic(3.0), after: organic(4.0) },
-    ]
+    ];
+    match kernel_scene(cx, "vase", id!(sdfbake_vase_a), id!(sdfbake_vase_b), ([-34.0, -1.0, -34.0], [34.0, 80.0, 34.0])) {
+        Some((before, after)) => v.push(Scene { name: "vase", before, after }),
+        None => println!("SDFBAKE-FAIL vase scene"),
+    }
+    match kernel_scene(cx, "lattice", id!(sdfbake_lattice_a), id!(sdfbake_lattice_b), ([-13.0, -1.0, -13.0], [13.0, 25.0, 13.0])) {
+        Some((before, after)) => v.push(Scene { name: "lattice", before, after }),
+        None => println!("SDFBAKE-FAIL lattice scene"),
+    }
+    v
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +266,7 @@ fn scenes() -> Vec<Scene> {
 /// The twin of the whole program against csg_sdf (f64) on the samples within
 /// the band: the distance to 1e-3 mm, the slot exactly (away from ties).
 fn check_lowering(name: &str, n: &SdfNode, vol: &Volume) -> bool {
-    let p = match lower(n) {
+    let p = match lower_with(n, &vol.kernels, vol.kernel_scale) {
         Ok(p) => p,
         Err(e) => {
             println!("SDFBAKE scene={name} lowering error {e:?}");
@@ -190,13 +282,14 @@ fn check_lowering(name: &str, n: &SdfNode, vol: &Volume) -> bool {
         for k in (0..512).step_by(7) {
             let g = [bc[0] * BS + k % 8, bc[1] * BS + (k / 8) % 8, bc[2] * BS + k / 64];
             let q = g.map(|v| v as f32 * CELL);
-            let (d32, s32) = twin::eval(&p.texels, q);
+            let (d32, s32) = twin::eval_with(&p.texels, q, &vol.kernels);
             let (d64, s64) = distance_slot(n, Vec3d::new(q[0] as f64, q[1] as f64, q[2] as f64));
-            if d64.abs() >= BAND as f64 {
+            if d64.abs() * vol.kernel_scale as f64 >= BAND as f64 {
                 continue;
             }
             checked += 1;
-            let err = (d32 as f64 - d64).abs();
+            // a kernel volume's field is scaled to a 1-Lipschitz bound
+            let err = (d32 as f64 / vol.kernel_scale as f64 - d64).abs();
             max_err = max_err.max(err);
             if err > 1e-3 {
                 bad_d += 1;
@@ -421,6 +514,97 @@ fn check_copy(vol: &Volume, cpu: &std::collections::BTreeMap<[i32; 3], (Vec<f32>
     (dd, ds, first)
 }
 
+/// The march's (t, slot) per pixel of one eye (`w` x `h` at column `x0` of
+/// a readback `stride` pixels wide) against a CPU sphere trace of the whole
+/// lowered program (the twin, exact): (checked, hits, mask_bad, depth_bad,
+/// max hit distance).
+#[allow(clippy::too_many_arguments)]
+fn check_eye(sc: &Scene, vol: &Volume, view: Mat4f, proj: Mat4f, w: usize, h: usize, px: &[u8], stride: usize, x0: usize) -> (usize, usize, usize, usize, f32) {
+    let prog = lower_with(&sc.before, &vol.kernels, vol.kernel_scale).unwrap();
+    let cpu = cpu_bake(vol);
+    let ivp = Mat4f::mul(&proj, &view).invert();
+    let pix_angle = 2.0 * (FOV_Y.to_radians() * 0.5).tan() / h as f32;
+    let gpu_t = |x: usize, y: usize| { let i = (y * stride + x0 + x) * 16; f32::from_le_bytes([px[i], px[i + 1], px[i + 2], px[i + 3]]) };
+    let mut cpu_hit = vec![None; w * h];
+    let mut rays = vec![([0f32; 3], [0f32; 3]); w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let ndc = [(x as f32 + 0.5) / w as f32 * 2.0 - 1.0, 1.0 - (y as f32 + 0.5) / h as f32 * 2.0];
+            let a = ivp.transform_vec4(vec4(ndc[0], ndc[1], 0.0, 1.0));
+            let b = ivp.transform_vec4(vec4(ndc[0], ndc[1], 1.0, 1.0));
+            let ro = [a.x / a.w, a.y / a.w, a.z / a.w];
+            let far = [b.x / b.w, b.y / b.w, b.z / b.w];
+            let d = [far[0] - ro[0], far[1] - ro[1], far[2] - ro[2]];
+            let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            let rd = d.map(|v| v / l);
+            rays[y * w + x] = (ro, rd);
+            let mut t = 0.0f32;
+            for _ in 0..600 {
+                let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+                let (dist, _) = twin::eval_with(&prog.texels, p, &vol.kernels);
+                // the same cone stopping test as the march (a pixel's footprint)
+                if dist < (CELL * 0.02).max(t * pix_angle) {
+                    cpu_hit[y * w + x] = Some(t);
+                    break;
+                }
+                t += dist.max(0.01);
+                if t > 400.0 {
+                    break;
+                }
+            }
+        }
+    }
+    // pixels whose 3x3 neighbourhood agrees on hit/miss (silhouette pixels may differ)
+    let (mut checked, mut mask_bad, mut depth_bad, mut hits, mut max_dt) = (0usize, 0usize, 0usize, 0usize, 0f32);
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let c = cpu_hit[y * w + x].is_some();
+            let interior = (0..9).all(|k| cpu_hit[(y + k / 3 - 1) * w + x + k % 3 - 1].is_some() == c);
+            if !interior {
+                continue;
+            }
+            checked += 1;
+            let gt = gpu_t(x, y);
+            let g = gt >= 0.0;
+            if g != c {
+                if mask_bad < 3 {
+                    let (ro, rd) = rays[y * w + x];
+                    println!("  mask px ({x},{y}) gpu_hit={g} gpu_t={gt} cpu_t={:?}", cpu_hit[y * w + x]);
+                    trace_march(vol, &cpu, ro, rd, pix_angle);
+                }
+                mask_bad += 1;
+                continue;
+            }
+            if cpu_hit[y * w + x].is_some() {
+                // the GPU's hit lies on the surface within its stopping cone
+                hits += 1;
+                let (ro, rd) = rays[y * w + x];
+                let p = [ro[0] + rd[0] * gt, ro[1] + rd[1] * gt, ro[2] + rd[2] * gt];
+                let (dist, _) = twin::eval_with(&prog.texels, p, &vol.kernels);
+                let eps = (CELL * 0.02).max(gt * pix_angle);
+                max_dt = max_dt.max(dist.abs());
+                if dist > 2.0 * eps + 0.01 || dist < -(eps + 0.05) {
+                    if depth_bad < 2 {
+                        println!("  bad px ({x},{y}) t={gt} dist={dist} eps={eps} cpu_t={:?}", cpu_hit[y * w + x]);
+                        trace_march(vol, &cpu, ro, rd, pix_angle);
+                    }
+                    depth_bad += 1;
+                }
+            }
+        }
+    }
+    if std::env::var_os("SDFBAKE_ASCII").is_some() {
+        for (x, y) in [(160, 120), (100, 120), (200, 100), (160, 150)] {
+            println!("px ({x},{y}) gpu t={} cpu t={:?} gpu_slot={}", gpu_t(x, y), cpu_hit[y * w + x], { let i = (y * stride + x0 + x) * 16 + 4; f32::from_le_bytes([px[i], px[i + 1], px[i + 2], px[i + 3]]) });
+        }
+        for y in (0..h).step_by(12) {
+            let row: String = (0..w).step_by(6).map(|x| match (gpu_t(x, y) >= 0.0, cpu_hit[y * w + x].is_some()) { (true, true) => '#', (true, false) => 'G', (false, true) => 'C', _ => '.' }).collect();
+            println!("{row}");
+        }
+    }
+    (checked, hits, mask_bad, depth_bad, max_dt)
+}
+
 // ---------------------------------------------------------------------------
 // The view: bakes each scene, then its edit, reads the atlases back.
 // ---------------------------------------------------------------------------
@@ -436,9 +620,15 @@ enum Step {
     /// its readback against a CPU ray cast of the exact program.
     March,
     MarchWait(u64),
-    /// `--bench`: the march re-recorded every frame at 4K, timed.
+    /// `--bench`: the march re-recorded every frame at 4K, timed; phase 3:
+    /// both eyes of a stereo pair in one pass at a headset's eye size.
     MarchBench(u32),
     MarchRead,
+    /// Both eyes in one side-by-side pass: the left eye (the march's camera)
+    /// must equal the march bit for bit, the right one the CPU ray cast.
+    Stereo,
+    StereoWait(u64),
+    StereoRead,
     /// The edit: re-build the changed blocks, re-bake.
     Edit,
     Done,
@@ -467,6 +657,22 @@ pub struct SdfBakeView {
     march_pass: Option<(DrawPass, DrawList, Texture, Texture, (usize, usize))>,
     #[rust]
     march_ms: Vec<f64>,
+    /// The bench's shade pass (the march's G-buffer shaded into BGRA8).
+    #[live]
+    shade: DrawSdfShade,
+    #[rust]
+    shade_pass: Option<(DrawPass, DrawList, Texture, Texture)>,
+    #[rust]
+    shade_ms: Vec<f64>,
+    #[rust]
+    bench_frames: u32,
+    /// The bench's coarse pass (half resolution).
+    #[live]
+    coarse: DrawSdfCoarse,
+    #[rust]
+    coarse_pass: Option<(DrawPass, DrawList, Texture, Texture, (usize, usize))>,
+    #[rust]
+    coarse_ms: Vec<f64>,
     #[rust]
     materials: Option<Texture>,
     #[rust]
@@ -499,6 +705,9 @@ pub struct SdfBakeView {
     prof_from: u64,
     #[rust]
     gpu_ms: Vec<f64>,
+    /// The (mono) march's readback, for the stereo check's left eye.
+    #[rust]
+    mono_px: Option<Arc<[u8]>>,
 }
 
 impl SdfBakeView {
@@ -506,7 +715,7 @@ impl SdfBakeView {
         match self.step {
             Step::Build => {
                 if self.scenes.is_empty() {
-                    self.scenes = scenes();
+                    self.scenes = scenes(cx.cx.cx);
                 }
                 let sc = &self.scenes[self.scene];
                 let bounds = Volume::bounds_of(&sc.before).expect("bounded scene");
@@ -515,8 +724,8 @@ impl SdfBakeView {
                 let mut vol = Volume::new(bounds, CELL, BAND);
                 let st = vol.build(&sc.before, None).expect("lowers");
                 println!(
-                    "SDFBAKE scene={} build {:.1} ms: {} blocks ({} skipped), {} bricks tested, {} baked, {} programs, gpu-unfit {}",
-                    sc.name, st.ms, st.blocks, st.blocks_skipped, st.bricks_tested, st.bricks_baked, st.programs, vol.cpu_only.len()
+                    "SDFBAKE scene={} build {:.1} ms: {} blocks ({} skipped), {} bricks tested, {} baked, {} programs, gpu-unfit {}, kernel scale {}",
+                    sc.name, st.ms, st.blocks, st.blocks_skipped, st.bricks_tested, st.bricks_baked, st.programs, vol.cpu_only.len(), vol.kernel_scale
                 );
                 if !check_lowering(sc.name, &sc.before, &vol) {
                     self.fails.push(format!("{}-lowering", sc.name));
@@ -535,7 +744,16 @@ impl SdfBakeView {
                 let sc = &self.scenes[self.scene];
                 let vol = self.vol.as_mut().unwrap();
                 let st = vol.edit(&sc.before, &sc.after).expect("lowers").expect("fits");
-                println!("SDFBAKE scene={} edit {:.1} ms: {} blocks re-built, {} bricks baked", sc.name, st.ms, st.blocks, st.bricks_baked);
+                println!("SDFBAKE scene={} edit {:.1} ms (scale {:.1}, blocks {:.1}, apply {:.1}): {} blocks re-built, {} bricks baked", sc.name, st.ms, st.scale_ms, st.blocks_ms, st.apply_ms, st.blocks, st.bricks_baked);
+                if bench() {
+                    // Fab's cell for a part this size (192 cells across): the edit at that scale
+                    let b = Volume::bounds_of(&sc.before).expect("bounded scene");
+                    let fine = ((b.1[0] - b.0[0]).max(b.1[1] - b.0[1]).max(b.1[2] - b.0[2]) / 192.0).max(0.08) as f32;
+                    let mut v = Volume::new((b.0.map(|v| v - 4.0), b.1.map(|v| v + 4.0)), fine, fine * 4.0);
+                    let full = v.build(&sc.before, None).expect("lowers");
+                    let st = v.edit(&sc.before, &sc.after).expect("lowers").expect("fits");
+                    println!("SDFBAKE-BENCH scene={} at cell {fine:.3}: build {:.1} ms ({} baked), edit {:.1} ms (scale {:.1}, blocks {:.1}, apply {:.1}): {} blocks, {} bricks baked", sc.name, full.ms, full.bricks_baked, st.ms, st.scale_ms, st.blocks_ms, st.apply_ms, st.blocks, st.bricks_baked);
+                }
                 self.baker.as_mut().unwrap().sync(cx.cx.cx, vol);
                 self.edited = true;
                 self.step = Step::Bake;
@@ -545,19 +763,41 @@ impl SdfBakeView {
                 self.record_march(cx);
                 self.step = Step::MarchWait(cx.cx.repaint_id());
             }
-            Step::MarchBench(n) => {
+            Step::Stereo => {
                 self.record_march(cx);
-                self.step = if n >= 90 {
-                    let mut v = std::mem::take(&mut self.march_ms);
-                    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                    let med = v.get(v.len() / 2).copied().unwrap_or(0.0);
-                    println!("SDFBAKE-BENCH scene={} march {}x{} gpu_ms median={med:.3} (n={})", self.scenes[self.scene].name, BW, BH, v.len());
-                    Step::Edit
-                } else {
-                    Step::MarchBench(n + 1)
+                self.step = Step::StereoWait(cx.cx.repaint_id());
+            }
+            Step::MarchBench(phase) => {
+                // phases: 0 the full march, 1 coarse + march, 2 + shade; each
+                // runs until 40 timed frames (a new pipeline compiles first)
+                self.record_march(cx);
+                self.bench_frames += 1;
+                let samples = match phase {
+                    0 => self.march_ms.len(),
+                    1 | 3 => self.march_ms.len().min(self.coarse_ms.len()),
+                    _ => self.shade_ms.len(),
+                };
+                if samples >= 40 || self.bench_frames >= 600 {
+                    self.bench_frames = 0;
+                    let med = |v: &mut Vec<f64>| {
+                        let mut v = std::mem::take(v);
+                        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        (v.get(v.len() / 2).copied().unwrap_or(0.0), v.len())
+                    };
+                    let name = self.scenes[self.scene].name;
+                    let (m, k) = med(&mut self.march_ms);
+                    let (c, ck) = med(&mut self.coarse_ms);
+                    let (sh, sk) = med(&mut self.shade_ms);
+                    match phase {
+                        0 => println!("SDFBAKE-BENCH scene={name} march (full) {BW}x{BH} gpu_ms median={m:.3} (n={k})"),
+                        1 => println!("SDFBAKE-BENCH scene={name} march (from half-res coarse) {BW}x{BH} gpu_ms median={m:.3} (n={k}) + coarse median={c:.3} (n={ck})"),
+                        2 => println!("SDFBAKE-BENCH scene={name} shade (pbr+ao+shadow from the g-buffer) {BW}x{BH} gpu_ms median={sh:.3} (n={sk})"),
+                        _ => println!("SDFBAKE-BENCH scene={name} stereo march (both eyes, one pass, {} steps) 2x{XW}x{XH} gpu_ms median={m:.3} (n={k}) + coarse median={c:.3} (n={ck})", makepad_sdf_engine::march::XR_STEPS),
+                    }
+                    self.step = if phase >= 3 { Step::Edit } else { Step::MarchBench(phase + 1) };
                 }
             }
-            Step::MarchWait(serial) => {
+            Step::MarchWait(serial) | Step::StereoWait(serial) => {
                 let (pass, ..) = self.march_pass.as_ref().unwrap();
                 cx.make_child_pass(pass);
                 if pass.painted_whole_since(cx.cx, serial) {
@@ -568,10 +808,10 @@ impl SdfBakeView {
                         println!("SDFBAKE-FAIL march readback request: {e:?}");
                         std::process::exit(1);
                     }
-                    self.step = Step::MarchRead;
+                    self.step = if matches!(self.step, Step::StereoWait(_)) { Step::StereoRead } else { Step::MarchRead };
                 }
             }
-            Step::MarchRead => {
+            Step::MarchRead | Step::StereoRead => {
                 let (pass, ..) = self.march_pass.as_ref().unwrap();
                 cx.make_child_pass(pass);
             }
@@ -646,6 +886,8 @@ impl SdfBakeView {
             CELL,
             BAND,
         );
+        // the kernel scale only grows steeper while a volume lives: the full build starts at the dirty one's
+        fresh.kernel_scale = self.vol.as_ref().map_or(1.0, |v| v.kernel_scale);
         fresh.build(&sc.after, None).expect("lowers");
         let (fd, fs, fonly, ffirst) = compare(&cpu, &cpu_bake(&fresh));
         println!("SDFBAKE scene={} dirty-vs-full bricks={} dist_differing={fd} slot_differing={fs} unmatched={fonly}{ffirst}", sc.name, cpu.len());
@@ -656,7 +898,10 @@ impl SdfBakeView {
     }
 
     fn record_march(&mut self, cx: &mut Cx2d) {
-        let (w, h) = if matches!(self.step, Step::MarchBench(_)) { (BW, BH) } else { (MW, MH) };
+        let stereo_bench = matches!(self.step, Step::MarchBench(3));
+        let stereo = stereo_bench || matches!(self.step, Step::Stereo | Step::StereoWait(_) | Step::StereoRead);
+        let (ew, eh) = if stereo_bench { (XW, XH) } else if matches!(self.step, Step::MarchBench(_)) { (BW, BH) } else { (MW, MH) };
+        let (w, h) = if stereo { (2 * ew, eh) } else { (ew, eh) };
         let size = dvec2(w as f64, h as f64);
         if self.march_pass.as_ref().is_some_and(|m| m.4 != (w, h)) {
             self.march_pass = None;
@@ -673,8 +918,24 @@ impl SdfBakeView {
             self.materials = Some(material_texture(c, &[]));
             self.overrides = Some(override_texture(c, &[]));
         }
-        let (view, proj) = march_camera(&self.scenes[self.scene].name);
-        let mv = MarchView { view, proj, size, fov_y: FOV_Y.to_radians() };
+        let (view, mut proj) = march_camera(&self.scenes[self.scene].name);
+        if stereo_bench {
+            proj = Mat4f::perspective(90.0, XW as f32 / XH as f32, 1.0, 1000.0);
+        }
+        let mv = MarchView::new(view, proj, size, FOV_Y.to_radians());
+        // the stereo pair (the check: the full step budget and the march's
+        // own field of view, so the left eye is the march bit for bit)
+        let eye_size = dvec2(ew as f64, eh as f64);
+        let eyes = |scale: f64| {
+            [view, right_eye(view)].into_iter().enumerate().map(|(e, v)| {
+                let mut m = MarchView::eye(v, proj, eye_size, e, scale);
+                if !stereo_bench {
+                    m.steps = 256;
+                    m.fov_y = FOV_Y.to_radians();
+                }
+                m
+            }).collect::<Vec<_>>()
+        };
         let (pass, list, color, depth, _) = self.march_pass.as_mut().unwrap();
         pass.set_size(cx, size);
         pass.clear_color_textures(cx.cx);
@@ -682,15 +943,103 @@ impl SdfBakeView {
         pass.set_depth_texture(cx, depth, DrawPassClearDepth::ClearWith(1.0));
         pass.set_camera(cx.cx, view, proj);
         pass.set_keep_camera_matrix(cx.cx, true);
-        cx.make_child_pass(pass);
+        // the check and the bench's second half start the march from a
+        // half-resolution coarse pass (its child: the march samples it); the
+        // bench's second half writes a G-buffer, and a shade pass (the
+        // march's parent) shades that into BGRA8
+        let shaded = matches!(self.step, Step::MarchBench(2));
+        let use_coarse = !matches!(self.step, Step::MarchBench(0));
+        if shaded {
+            if self.shade_pass.is_none() {
+                let c = &mut *cx.cx.cx;
+                self.shade_pass = Some((
+                    DrawPass::new_with_name(c, "sdf_shade"),
+                    DrawList::new(c),
+                    Texture::new_with_format(c, TextureFormat::RenderBGRAu8 { size: TextureSize::Fixed { width: w, height: h }, initial: true }),
+                    Texture::new_with_format(c, TextureFormat::DepthD32 { size: TextureSize::Fixed { width: w, height: h }, initial: true }),
+                ));
+            }
+            let sp = &self.shade_pass.as_ref().unwrap().0;
+            cx.make_child_pass(sp);
+            pass.set_pass_parent(cx.cx, sp.draw_pass_id());
+        } else {
+            cx.make_child_pass(pass);
+        }
+        if use_coarse {
+            let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+            if self.coarse_pass.as_ref().is_some_and(|c| c.4 != (cw, ch)) {
+                self.coarse_pass = None;
+            }
+            if self.coarse_pass.is_none() {
+                let c = &mut *cx.cx.cx;
+                self.coarse_pass = Some((
+                    DrawPass::new_with_name(c, "sdf_coarse"),
+                    DrawList::new(c),
+                    Texture::new_with_format(c, TextureFormat::RenderRGBAf32 { size: TextureSize::Fixed { width: cw, height: ch }, initial: true }),
+                    Texture::new_with_format(c, TextureFormat::DepthD32 { size: TextureSize::Fixed { width: cw, height: ch }, initial: true }),
+                    (cw, ch),
+                ));
+            }
+            let march_id = pass.draw_pass_id();
+            let (cp, clist, ccolor, cdepth, _) = self.coarse_pass.as_mut().unwrap();
+            let csize = dvec2(cw as f64, ch as f64);
+            cp.set_pass_parent(cx.cx, march_id);
+            cp.set_size(cx, csize);
+            cp.clear_color_textures(cx.cx);
+            cp.set_color_texture(cx, ccolor, DrawPassClearColor::ClearWith(vec4(COARSE_CLEAR, COARSE_CLEAR, 0.0, 0.0)));
+            cp.set_depth_texture(cx, cdepth, DrawPassClearDepth::ClearWith(1.0));
+            cp.set_camera(cx.cx, view, proj);
+            cp.set_keep_camera_matrix(cx.cx, true);
+            cx.begin_pass(cp, Some(1.0));
+            clist.begin_always(cx);
+            cx.begin_root_turtle(csize, Layout::flow_overlay());
+            if stereo {
+                for cmv in eyes(0.5) {
+                    coarse_object(cx, &mut self.coarse, cmv.rect(), &cmv, Mat4f::identity(), self.vol.as_ref().unwrap(), self.baker.as_ref().unwrap());
+                }
+            } else {
+                let cmv = MarchView::new(view, proj, csize, FOV_Y.to_radians());
+                coarse_object(cx, &mut self.coarse, Rect { pos: dvec2(0.0, 0.0), size: csize }, &cmv, Mat4f::identity(), self.vol.as_ref().unwrap(), self.baker.as_ref().unwrap());
+            }
+            cx.end_pass_sized_turtle();
+            clist.end(cx);
+            cx.end_pass(cp);
+        }
         cx.begin_pass(pass, Some(1.0));
         list.begin_always(cx);
         cx.begin_root_turtle(size, Layout::flow_overlay());
         let full = Rect { pos: dvec2(0.0, 0.0), size };
-        draw_object(cx, &mut self.march, full, &mv, Mat4f::identity(), self.vol.as_ref().unwrap(), self.baker.as_ref().unwrap(), self.materials.as_ref().unwrap(), self.overrides.as_ref().unwrap(), true);
+        let out = if shaded { MarchOut::GBuffer { id: 1.0 } } else { MarchOut::Debug };
+        let coarse = if use_coarse { self.coarse_pass.as_ref().map(|c| c.2.clone()) } else { None };
+        if stereo {
+            for ev in eyes(1.0) {
+                draw_object(cx, &mut self.march, ev.rect(), &ev, Mat4f::identity(), self.vol.as_ref().unwrap(), self.baker.as_mut().unwrap(), out, &[], coarse.as_ref(), true);
+            }
+        } else {
+            draw_object(cx, &mut self.march, full, &mv, Mat4f::identity(), self.vol.as_ref().unwrap(), self.baker.as_mut().unwrap(), out, &[], coarse.as_ref(), true);
+        }
         cx.end_pass_sized_turtle();
         list.end(cx);
         cx.end_pass(pass);
+        if shaded {
+            let gbuf = color.clone();
+            let (sp, slist, scolor, sdepth) = self.shade_pass.as_mut().unwrap();
+            sp.set_size(cx, size);
+            sp.clear_color_textures(cx.cx);
+            sp.set_color_texture(cx, scolor, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 1.0)));
+            sp.set_depth_texture(cx, sdepth, DrawPassClearDepth::ClearWith(1.0));
+            sp.set_camera(cx.cx, view, proj);
+            sp.set_keep_camera_matrix(cx.cx, true);
+            cx.begin_pass(sp, Some(1.0));
+            slist.begin_always(cx);
+            cx.begin_root_turtle(size, Layout::flow_overlay());
+            // the shade bench includes the predicted surface finish (knurl)
+            set_finish(cx.cx, &mut self.shade, Some(&Finish { pattern: 2, amplitude: 0.3, scale: 2.0, layer_height: 0.2, centre: [0.0, 0.0], repeats: 24.0, plate_from_world: Mat4f::identity() }));
+            shade_object(cx, &mut self.shade, full, &mv, Mat4f::identity(), self.vol.as_ref().unwrap(), self.baker.as_ref().unwrap(), self.materials.as_ref().unwrap(), self.overrides.as_ref().unwrap(), &gbuf, 1.0, &MarchLight::default(), 0.0);
+            cx.end_pass_sized_turtle();
+            slist.end(cx);
+            cx.end_pass(sp);
+        }
     }
 
     /// The march's (t, slot) per pixel against a CPU sphere trace of the
@@ -709,93 +1058,48 @@ impl SdfBakeView {
             self.step = Step::Edit;
             return;
         };
-        let prog = lower(&sc.before).unwrap();
         let vol = self.vol.as_ref().unwrap();
-        let cpu = cpu_bake(vol);
         let (view, proj) = march_camera(&sc.name);
-        let ivp = Mat4f::mul(&proj, &view).invert();
-        let pix_angle = 2.0 * (FOV_Y.to_radians() * 0.5).tan() / MH as f32;
-        let gpu_t = |x: usize, y: usize| f32::from_le_bytes([px[(y * w + x) * 16], px[(y * w + x) * 16 + 1], px[(y * w + x) * 16 + 2], px[(y * w + x) * 16 + 3]]);
-        let mut cpu_hit = vec![None; w * h];
-        let mut rays = vec![([0f32; 3], [0f32; 3]); w * h];
-        for y in 0..h {
-            for x in 0..w {
-                let ndc = [(x as f32 + 0.5) / w as f32 * 2.0 - 1.0, 1.0 - (y as f32 + 0.5) / h as f32 * 2.0];
-                let a = ivp.transform_vec4(vec4(ndc[0], ndc[1], 0.0, 1.0));
-                let b = ivp.transform_vec4(vec4(ndc[0], ndc[1], 1.0, 1.0));
-                let ro = [a.x / a.w, a.y / a.w, a.z / a.w];
-                let far = [b.x / b.w, b.y / b.w, b.z / b.w];
-                let d = [far[0] - ro[0], far[1] - ro[1], far[2] - ro[2]];
-                let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                let rd = d.map(|v| v / l);
-                rays[y * w + x] = (ro, rd);
-                let mut t = 0.0f32;
-                for _ in 0..600 {
-                    let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
-                    let (dist, _) = twin::eval(&prog.texels, p);
-                    // the same cone stopping test as the march (a pixel's footprint)
-                    if dist < (CELL * 0.02).max(t * pix_angle) {
-                        cpu_hit[y * w + x] = Some(t);
-                        break;
-                    }
-                    t += dist.max(0.01);
-                    if t > 400.0 {
-                        break;
-                    }
-                }
-            }
-        }
-        // pixels whose 3x3 neighbourhood agrees on hit/miss (silhouette pixels may differ)
-        let (mut checked, mut mask_bad, mut depth_bad, mut hits, mut max_dt) = (0usize, 0usize, 0usize, 0usize, 0f32);
-        for y in 1..h - 1 {
-            for x in 1..w - 1 {
-                let c = cpu_hit[y * w + x].is_some();
-                let interior = (0..9).all(|k| cpu_hit[(y + k / 3 - 1) * w + x + k % 3 - 1].is_some() == c);
-                if !interior {
-                    continue;
-                }
-                checked += 1;
-                let gt = gpu_t(x, y);
-                let g = gt >= 0.0;
-                if g != c {
-                    if mask_bad < 3 {
-                        let (ro, rd) = rays[y * w + x];
-                        println!("  mask px ({x},{y}) gpu_hit={g} gpu_t={gt} cpu_t={:?}", cpu_hit[y * w + x]);
-                        trace_march(vol, &cpu, ro, rd, pix_angle);
-                    }
-                    mask_bad += 1;
-                    continue;
-                }
-                if cpu_hit[y * w + x].is_some() {
-                    // the GPU's hit lies on the surface within its stopping cone
-                    hits += 1;
-                    let (ro, rd) = rays[y * w + x];
-                    let p = [ro[0] + rd[0] * gt, ro[1] + rd[1] * gt, ro[2] + rd[2] * gt];
-                    let (dist, _) = twin::eval(&prog.texels, p);
-                    let eps = (CELL * 0.02).max(gt * pix_angle);
-                    max_dt = max_dt.max(dist.abs());
-                    if dist > 2.0 * eps + 0.01 || dist < -(eps + 0.05) {
-                        if depth_bad < 2 {
-                            println!("  bad px ({x},{y}) t={gt} dist={dist} eps={eps} cpu_t={:?}", cpu_hit[y * w + x]);
-                            trace_march(vol, &cpu, ro, rd, pix_angle);
-                        }
-                        depth_bad += 1;
-                    }
-                }
-            }
-        }
-        if std::env::var_os("SDFBAKE_ASCII").is_some() {
-            for (x, y) in [(160, 120), (100, 120), (200, 100), (160, 150)] {
-                println!("px ({x},{y}) gpu t={} cpu t={:?} gpu_slot={}", gpu_t(x, y), cpu_hit[y * w + x], f32::from_le_bytes([px[(y * w + x) * 16 + 4], px[(y * w + x) * 16 + 5], px[(y * w + x) * 16 + 6], px[(y * w + x) * 16 + 7]]));
-            }
-            for y in (0..h).step_by(12) {
-                let row: String = (0..w).step_by(6).map(|x| match (gpu_t(x, y) >= 0.0, cpu_hit[y * w + x].is_some()) { (true, true) => '#', (true, false) => 'G', (false, true) => 'C', _ => '.' }).collect();
-                println!("{row}");
-            }
-        }
+        let (checked, hits, mask_bad, depth_bad, max_dt) = check_eye(sc, vol, view, proj, w, h, &px, w, 0);
         println!("SDFBAKE scene={} march {w}x{h} checked={checked} hits={hits} mask_bad={mask_bad} depth_bad={depth_bad} max_hit_dist={max_dt:.4}mm", sc.name);
         if hits == 0 || mask_bad * 1000 > checked || depth_bad * 1000 > hits.max(1) {
             self.fails.push(format!("{}-march", sc.name));
+        }
+        self.mono_px = Some(px);
+        self.step = Step::Stereo;
+    }
+
+    /// The stereo pass: its left half against the march (bit for bit), its
+    /// right half against the CPU ray cast of the right eye.
+    fn check_stereo(&mut self) {
+        let got = {
+            let r = self.readbacks.lock().unwrap();
+            if r.is_empty() {
+                return;
+            }
+            r.clone()
+        };
+        let sc = &self.scenes[self.scene];
+        let (Some((_, Ok((w, h, px)))), Some(mono)) = (got.first().cloned(), self.mono_px.take()) else {
+            self.fails.push(format!("{}-stereo-readback", sc.name));
+            self.step = Step::Edit;
+            return;
+        };
+        let ew = w / 2;
+        let mut left_bad = 0usize;
+        for y in 0..h {
+            for x in 0..ew {
+                if px[(y * w + x) * 16..(y * w + x) * 16 + 16] != mono[(y * ew + x) * 16..(y * ew + x) * 16 + 16] {
+                    left_bad += 1;
+                }
+            }
+        }
+        let vol = self.vol.as_ref().unwrap();
+        let (view, proj) = march_camera(&sc.name);
+        let (checked, hits, mask_bad, depth_bad, max_dt) = check_eye(sc, vol, right_eye(view), proj, ew, h, &px, w, ew);
+        println!("SDFBAKE scene={} stereo 2x{ew}x{h} left-vs-march differing={left_bad} right checked={checked} hits={hits} mask_bad={mask_bad} depth_bad={depth_bad} max_hit_dist={max_dt:.4}mm", sc.name);
+        if left_bad != 0 || hits == 0 || mask_bad * 1000 > checked || depth_bad * 1000 > hits.max(1) {
+            self.fails.push(format!("{}-stereo", sc.name));
         }
         self.step = if bench() { Step::MarchBench(0) } else { Step::Edit };
     }
@@ -815,6 +1119,12 @@ impl SdfBakeView {
                     }
                     if rec.s(p.name) == "sdf_march" && p.end > p.start && matches!(self.step, Step::MarchBench(_)) {
                         self.march_ms.push((p.end - p.start) as f64 / 1.0e6);
+                    }
+                    if rec.s(p.name) == "sdf_coarse" && p.end > p.start && matches!(self.step, Step::MarchBench(_)) {
+                        self.coarse_ms.push((p.end - p.start) as f64 / 1.0e6);
+                    }
+                    if rec.s(p.name) == "sdf_shade" && p.end > p.start && matches!(self.step, Step::MarchBench(_)) {
+                        self.shade_ms.push((p.end - p.start) as f64 / 1.0e6);
                     }
                 }
             }
@@ -839,6 +1149,9 @@ impl Widget for SdfBakeView {
                 }
                 if self.step == Step::MarchRead {
                     self.check_march();
+                }
+                if self.step == Step::StereoRead {
+                    self.check_stereo();
                 }
                 if bench() {
                     self.take_prof();

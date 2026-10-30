@@ -109,6 +109,21 @@ impl Store {
         self.git(&["merge-base", "--is-ancestor", a, b]).is_ok()
     }
 
+    /// The subjects of the commits `from..to` brought (merges left out: a landing's merge says
+    /// nothing a person reads), newest first, at most `max`.
+    pub fn subjects(&self, from: &str, to: &str, max: usize) -> Vec<String> {
+        if !valid_sha(from) || !valid_sha(to) {
+            return Vec::new();
+        }
+        self.git(&["log", "--no-merges", "--format=%s", &format!("-n{max}"), &format!("{from}..{to}")])
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
     /// `refs/devhub/*` with their commits: what the master can use as bundle bases.
     pub fn refs(&self) -> Vec<(String, String)> {
         self.git(&["for-each-ref", "--format=%(objectname) %(refname)", "refs/devhub/"])

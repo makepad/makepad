@@ -278,7 +278,7 @@ impl Vulkan {
                     #[cfg(target_os = "linux")]
                     if let Some(shell) = self.shell { shell.presented(self.window_key(sid, target)); }
                 }
-                Event::Frame { target, kind, frame, window, gpu_ns } => {
+                Event::Frame { target, kind, frame, window, gpu_ns, gpu_span } => {
                     if let Some(s) = world.session_mut(sid) {
                         s.stats.frames += 1;
                         if gpu_ns > 0 { s.stats.gpu_frames += 1; s.stats.gpu_ns_total += gpu_ns; s.stats.gpu_ns_max = s.stats.gpu_ns_max.max(gpu_ns); }
@@ -289,7 +289,7 @@ impl Vulkan {
                         #[cfg(target_os = "linux")]
                         if let Some(shell) = self.shell { shell.presented(self.window_key(sid, target)); }
                     }
-                    world.frame_done(sid, target, kind, frame, gpu_ns, done.time, [0.0; 2]);
+                    world.frame_done(sid, target, kind, frame, gpu_ns, done.time, gpu_span);
                 }
                 Event::Readback { req, status, rect, pixels } => world.to_session(sid, |q| q.readback(req, status, rect, &pixels)),
                 Event::Pick { req, ids } => world.to_session(sid, |q| q.pick_result(req, &ids.into_iter().flat_map(u32::to_le_bytes).collect::<Vec<_>>())),

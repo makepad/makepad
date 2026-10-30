@@ -111,7 +111,10 @@ impl Master {
         let (ib, user) = (inbox.clone(), on_record);
         let recent: Arc<Mutex<std::collections::VecDeque<Record>>> = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let rc = recent.clone();
+        let board = Arc::new(crate::sync::prewarm::Board::new(proto::home()));
+        let pw = board.clone();
         let on_record: OnRecord = Arc::new(move |r| {
+            pw.see(&r);
             ib.lock().unwrap().add(r.clone());
             {
                 let mut q = rc.lock().unwrap();
@@ -186,6 +189,15 @@ impl Master {
             s.emit(&r.to_json());
             o(&r);
         }));
+        // the workflow jobs (verify, after, allapps, push) and their state
+        #[cfg(feature = "checkout")]
+        {
+            let (s, o) = (sink.clone(), on_record.clone());
+            crate::orch::start(&ep, name, leases.clone(), Arc::new(move |r: Record| {
+                s.emit(&r.to_json());
+                o(&r);
+            }));
+        }
         // the landing train: `land` (DESIGN: devhub land), its records on the same feed
         let (s, o) = (sink.clone(), on_record.clone());
         crate::land::register(&ep, name, Arc::new(move |r: Record| {
@@ -208,7 +220,9 @@ impl Master {
             ),
         );
         let (s, o) = (sink.clone(), on_record.clone());
-        let flow = crate::sync::register_lanes(&ep, name, Arc::new(move |r: Record| {
+        let b2 = board.clone();
+        ep.register("prewarm", 1, makepad_remote::lines::service("prewarm", Arc::new(move |_, out| b2.serve(out))));
+        let flow = crate::sync::register_flow(&ep, name, board, Arc::new(move |r: Record| {
             s.emit(&r.to_json());
             o(&r);
         }));

@@ -350,17 +350,28 @@ impl LeaseMaster {
     /// `lease-start` on the node (after making its revisions present there).
     fn grant(self: &Arc<Self>, id: &str, node: &str) {
         let Some(l) = self.sched.lock().unwrap().get(id).cloned() else { return };
-        let r = self.start_on(&l, node);
+        let t0 = std::time::Instant::now();
+        let mut ship = 0u64;
+        let r = self.start_on(&l, node, &mut ship);
+        let setup = t0.elapsed().as_millis() as u64;
         let now = self.now();
         match r {
-            Ok(answer) => self.sched.lock().unwrap().started(id, &answer),
+            Ok(answer) => {
+                let mut s = self.sched.lock().unwrap();
+                s.started(id, &answer);
+                s.set_up(id, setup, ship);
+                let wait = s.get(id).and_then(|l| l.wait_ms);
+                drop(s);
+                let secs = |ms: u64| format!("{:.1} s", ms as f64 / 1000.0);
+                self.event(Sev::Info, format!("lease_latency: {} of {} on {node}: {}setup {} (ship {})", l.tag(), l.req.lane, wait.map_or(String::new(), |w| format!("release->grant {}, ", secs(w))), secs(setup), secs(ship)));
+            }
             Err(e) => self.sched.lock().unwrap().failed(id, &e, now),
         }
         self.save_live();
         self.pump();
     }
 
-    fn start_on(&self, l: &Lease, node: &str) -> Result<String, String> {
+    fn start_on(&self, l: &Lease, node: &str, ship_ms: &mut u64) -> Result<String, String> {
         let rev = match &l.req.rev {
             None => "null".to_string(),
             Some(spec) => {
@@ -368,11 +379,13 @@ impl LeaseMaster {
                 let (mk, com) = super::parse_pinned(spec)?;
                 let dir = PathBuf::from(l.req.repo_dir.clone().unwrap_or_else(|| ".".into()));
                 let f = self.ensure_rev.as_ref().ok_or("this master cannot ship revisions (built without checkout)")?;
+                let t = std::time::Instant::now();
                 let mk = f(node, "makepad", &dir, &mk)?;
                 let com = match com {
                     Some(c) => json_str(&f(node, "commercial", &dir.join("apps/commercial"), &c)?),
                     None => "null".into(),
                 };
+                *ship_ms = t.elapsed().as_millis() as u64;
                 format!("{{\"makepad\":{},\"commercial\":{com}}}", json_str(&mk))
             }
         };
@@ -392,6 +405,7 @@ impl LeaseMaster {
         let marks = self.marks.lock().unwrap().remove(id);
         self.holders.lock().unwrap().retain(|_, v| v != id);
         let mut summary = "{\"cleanup\":\"nothing to clean\"}".to_string();
+        let (mut teardown, mut freed_early) = (0u64, false);
         if let (Some(node), Some(l)) = (node, l.as_ref()) {
             // an inspect lease that changed nothing has nothing to undo
             if l.req.kind != Kind::Inspect || marks.is_some() {
@@ -400,12 +414,27 @@ impl LeaseMaster {
                     "lost" => "expired",
                     _ => "released",
                 };
-                let payload = marks.map_or(String::new(), |m| {
+                // a lease already waiting for this box: the tree goes straight to it (no restore first)
+                let handoff = l.req.kind != Kind::Inspect && self.sched.lock().unwrap().waiting_for(node);
+                let mut parts = Vec::new();
+                if let Some(m) = marks {
                     let list = |v: &[String]| v.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(",");
                     let pid = m.jit.parse::<u32>().map_or("null".to_string(), |p| p.to_string());
-                    format!(" {{\"inspect\":{{\"pid\":{pid},\"jit\":{},\"breaks\":[{}],\"probes\":[{}],\"paused\":{}}}}}", json_str(&m.jit), list(&m.breaks), list(&m.probes), m.paused)
-                });
-                match self.ask1(node, "lease-end", &format!("lease-end {id} {wire_how}{payload}")) {
+                    parts.push(format!("\"inspect\":{{\"pid\":{pid},\"jit\":{},\"breaks\":[{}],\"probes\":[{}],\"paused\":{}}}", json_str(&m.jit), list(&m.breaks), list(&m.probes), m.paused));
+                }
+                if handoff {
+                    parts.push("\"handoff\":true".into());
+                }
+                let payload = if parts.is_empty() { String::new() } else { format!(" {{{}}}", parts.join(",")) };
+                let t0 = std::time::Instant::now();
+                let answer = self.ask1(node, "lease-end", &format!("lease-end {id} {wire_how}{payload}"));
+                teardown = t0.elapsed().as_millis() as u64;
+                // the box is free the moment its lease-end answers: grant what waits for it now, the
+                // bookkeeping (recovered work, ledger) after
+                self.sched.lock().unwrap().cleaned(node, id, teardown);
+                freed_early = true;
+                self.pump();
+                match answer {
                     Ok(v) => {
                         let leak = strs(v.get("leak"));
                         let killed = strs(v.get("killed"));
@@ -418,6 +447,9 @@ impl LeaseMaster {
                         if let Some(path) = v.get("recovered").and_then(|r| r.as_str()) {
                             self.fetch_recovered(node, path, l);
                         }
+                        if handoff {
+                            self.event(Sev::Info, format!("{} of {}: {node} handed straight to the next lease (teardown {:.1} s)", l.tag(), l.req.lane, teardown as f64 / 1000.0));
+                        }
                     }
                     Err(e) => {
                         self.event(Sev::Warn, format!("{} of {}: cleanup on {node} failed: {e}", l.tag(), l.req.lane));
@@ -426,11 +458,13 @@ impl LeaseMaster {
                 }
             }
         }
-        // the node's lease-end answered (its tree is back on the shared commits): it is free again
-        if let Some(node) = node {
-            self.sched.lock().unwrap().cleaned(node, id);
+        // a lease with nothing to tear down: its node is free now
+        if let (Some(node), false) = (node, freed_early) {
+            self.sched.lock().unwrap().cleaned(node, id, teardown);
         }
         self.save_live();
+        // the ledger line carries the latencies the scheduler recorded
+        let l = self.sched.lock().unwrap().get(id).cloned().or(l);
         if let Some(l) = l {
             let path = self.home.join("leases.jsonl");
             let _ = std::fs::create_dir_all(&self.home);
@@ -836,6 +870,7 @@ mod tests {
             waiting: 0,
             draining: false,
             hold: None,
+            latency: String::new(),
         };
         let nodes = [view("quest", "10.0.0.201:8788", true, Some((true, 8790))), view("phone", "10.0.0.50", true, Some((true, 0))), view("off", "10.0.0.51", true, Some((false, 8790))), view("gone", "10.0.0.52", false, Some((true, 8790))), view("217", "10.0.0.217", true, None)];
         assert_eq!(desk_links(&nodes), "quest 10.0.0.201:8790\n");
@@ -945,6 +980,34 @@ mod tests {
         node2.known.lock().unwrap().clear();
         m2.beat_nodes();
         assert!(serve(&m2, "beat", "L3").contains("\"how\":\"lost\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lease waiting for the box gets it the moment the running one's lease-end answers: the
+    /// node is told to hand the tree straight on (no restore first), and the box's latency line
+    /// and the ledger carry release -> grant, setup and teardown.
+    #[test]
+    fn a_waiting_lease_gets_the_box_straight_from_the_release() {
+        let dir = std::env::temp_dir().join(format!("devhub-lease-handoff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (m, node, clock, recs) = master(&dir);
+        m.refresh(&[("217".to_string(), "10.0.0.217".to_string())]);
+        assert!(serve(&m, "lease", &Req::new("a", Kind::Build).to_json()).contains("\"state\":\"granted\""));
+        let b = serve(&m, "lease", &Req::new("b", Kind::Test).to_json());
+        assert!(b.contains("\"state\":\"queued\""), "one lease per box: {b}");
+        clock.store(5_000, Ordering::SeqCst);
+        serve(&m, "release", "L1 released exit=0");
+        assert!(node.calls.lock().unwrap().iter().any(|c| c.1 == "lease-end" && c.2 == "lease-end L1 released {\"handoff\":true}"), "{:?}", node.calls.lock().unwrap());
+        assert!(serve(&m, "beat", "L2").contains("\"state\":\"granted\""), "granted in the same step as the release");
+        // the last lease on the box: nothing waits, so its tree is restored as before
+        serve(&m, "release", "L2 released exit=0");
+        assert!(node.calls.lock().unwrap().iter().any(|c| c.2 == "lease-end L2 released"));
+        let nodes = serve(&m, "nodes", "");
+        assert!(nodes.contains("handoff 0.0 s") && nodes.contains("setup ") && nodes.contains("teardown "), "{nodes}");
+        let ledger = std::fs::read_to_string(dir.join("leases.jsonl")).unwrap();
+        assert!(ledger.contains("\"id\":\"L2\"") && ledger.contains("\"wait_ms\":0") && ledger.contains("\"setup_ms\":"), "{ledger}");
+        assert!(recs.lock().unwrap().iter().any(|r| r.line.contains("lease_latency: L2 test@217 of b on 217: release->grant 0.0 s")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

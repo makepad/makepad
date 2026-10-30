@@ -744,6 +744,11 @@ fn nodes(c: &Client) -> i32 {
             for l in lines {
                 let Some(v) = json(&l) else { continue };
                 println!("{:<8} {:<8} {}  [{}; {} leases, {} waiting]", s(&v, "node"), s(&v, "role"), s(&v, "caps_line"), s(&v, "state"), n(&v, "leases"), n(&v, "waiting"));
+                // the box's lease latencies (release -> grant of a waiting lease, setup, job, teardown)
+                let lat = s(&v, "latency");
+                if !lat.is_empty() {
+                    println!("{:<8} {:<8} {lat}", "", "");
+                }
             }
             0
         }

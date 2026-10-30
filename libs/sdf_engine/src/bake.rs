@@ -139,6 +139,24 @@ script_mod! {
             return abs(gv) / a - b
         }
 
+        // A KERNEL op at program texel `at` (kernel slot `slot`): the plain
+        // shaders have none (a volume with kernels bakes with a variant,
+        // `kernel::KernelBake`, whose kernel_at is kernel_at_fetch and whose
+        // kernel_call the host builds from the kernels' compiled programs).
+        kernel_at: fn(at: f32, slot: f32, x: f32, y: f32, z: f32) -> f32 {
+            return 1000000000.0
+        }
+        kernel_at_fetch: fn(at: f32, slot: f32, x: f32, y: f32, z: f32) -> f32 {
+            let a = self.fetch(at + 1.0)
+            let b = self.fetch(at + 2.0)
+            let c = self.fetch(at + 3.0)
+            let d = self.fetch(at + 4.0)
+            return self.kernel_call(slot, vec3(x, y, z), a, b, c, d)
+        }
+        kernel_call: fn(slot: f32, p: vec3, a: vec4, b: vec4, c: vec4, d: vec4) -> f32 {
+            return 1000000000.0
+        }
+
         eval_program: fn(base: f32, x: f32, y: f32, z: f32) -> vec2 {
             var px = x
             var py = y
@@ -250,8 +268,28 @@ script_mod! {
                     ms[mn] = h.y
                     mn = mn + 1i
                     pc = pc + 1.0
-                } else {
+                } else if code < 9.5 {
                     mn = mn - 1i
+                    pc = pc + 1.0
+                } else if code < 10.5 {
+                    // MAT_WITHIN: the region's distance is on top
+                    vn = vn - 1i
+                    if vs[vn] > 0.0 {
+                        if mn > 0i { ms[mn] = ms[mn - 1i] } else { ms[mn] = 0.0 }
+                    } else {
+                        ms[mn] = h.y
+                    }
+                    mn = mn + 1i
+                    pc = pc + 1.0
+                } else if code < 11.5 {
+                    // KERNEL: slot h.y, h.z parameter texels
+                    vs[vn] = self.kernel_at(base + pc, h.y, px, py, pz)
+                    if mn > 0i { ss[vn] = ms[mn - 1i] } else { ss[vn] = 0.0 }
+                    vn = vn + 1i
+                    pc = pc + 1.0 + h.z
+                } else {
+                    // SCALE
+                    vs[vn - 1i] = vs[vn - 1i] * h.y
                     pc = pc + 1.0
                 }
             }
@@ -408,6 +446,18 @@ pub struct Baker {
     pub baked: usize,
     /// The passes' current recording draws nothing.
     recorded_empty: bool,
+    /// The pass that samples the atlases (the march's): the bake runs under
+    /// it, so a frame's march reads that frame's bricks. `None`: under the
+    /// pass being drawn.
+    pub parent: Option<DrawPassId>,
+    /// The bake variant with the volume's kernels compiled in.
+    kernels: Option<crate::kernel::KernelBake>,
+    /// The caps a frame's bake keeps (kernel work per frame).
+    pub limits: crate::budget::Budget,
+    /// The costliest GPU kernel's worst-case ops per sample (0: none).
+    kernel_cost: u64,
+    /// Bricks recorded since the host last took the count ([`Baker::take_recorded`]).
+    recorded: usize,
 }
 
 impl Baker {
@@ -432,15 +482,31 @@ impl Baker {
             prog_at: Vec::new(),
             queue: Vec::new(),
             inflight: None,
-            budget: 8192,
+            budget: crate::budget::Budget::for_platform().start_bricks_per_frame,
             baked: 0,
             recorded_empty: false,
+            parent: None,
+            kernels: None,
+            limits: crate::budget::Budget::for_platform(),
+            kernel_cost: 0,
+            recorded: 0,
         }
     }
 
     /// Uploads the volume's programs and queues its dirty bricks; grows the
     /// atlases (and re-queues every baked brick) when its slots outgrow them.
     pub fn sync(&mut self, cx: &mut Cx, vol: &mut Volume) {
+        // the volume's kernels: a variant of the bake shader that runs them
+        // (a new program compiles while the bricks already baked keep drawing)
+        if self.kernels.as_ref().is_some_and(|k| !k.serves(&vol.kernels)) {
+            if let Some(k) = self.kernels.take() {
+                k.release(cx);
+            }
+        }
+        if self.kernels.is_none() && !vol.kernels.is_empty() {
+            self.kernels = crate::kernel::KernelBake::new(cx, &vol.kernels);
+        }
+        self.kernel_cost = vol.kernels.iter().filter_map(|k| k.gpu.as_ref().map(|g| g.cost)).max().unwrap_or(0);
         // programs: one texture, rebuilt when the volume has new ones
         if self.prog_at.len() != vol.programs.len() {
             let mut data: Vec<f32> = Vec::new();
@@ -527,10 +593,60 @@ impl Baker {
     /// the next one: its bricks into the truth atlases, then (a parent pass,
     /// painted after) the render copies of those bricks and their neighbours.
     /// The caller samples `copy` (or `atlas`), so the passes are painted.
+    fn attach(&self, cx: &mut Cx2d) {
+        match self.parent {
+            Some(p) => self.copy_pass.set_pass_parent(cx.cx, p),
+            None => cx.make_child_pass(&self.copy_pass),
+        }
+    }
+
     pub fn draw(&mut self, cx: &mut Cx2d, vol: &Volume, bake: &mut DrawSdfBake, copy: &mut DrawSdfCopy) {
+        match self.kernels.take() {
+            Some(mut k) => {
+                self.draw_with(cx, vol, &mut k.draw, copy);
+                self.kernels = Some(k);
+            }
+            None => self.draw_with(cx, vol, bake, copy),
+        }
+    }
+
+    /// The march to draw this baker's volume with: `base`, or its variant
+    /// with the volume's kernels compiled in (exact near the surface).
+    pub fn march<'a>(&'a mut self, cx: &mut Cx, base: &'a mut crate::march::DrawSdfMarch) -> &'a mut crate::march::DrawSdfMarch {
+        match self.kernels.as_mut() {
+            Some(k) => match k.march(cx, base) {
+                Some(m) => m,
+                None => base,
+            },
+            None => base,
+        }
+    }
+
+    /// Bricks recorded since the last call (for a [`crate::budget::GpuMeter`]).
+    pub fn take_recorded(&mut self) -> usize {
+        std::mem::take(&mut self.recorded)
+    }
+
+    /// Texture bytes the baker holds now.
+    pub fn vram_bytes(&self) -> u64 {
+        let atlas = ATLAS_W as u64 * self.rows as u64 * 5;
+        let copy = COPY_W as u64 * self.copy_rows as u64 * 3;
+        let index = INDEX_W as u64 * self.index_rows as u64 * 16;
+        let prog = PROG_W as u64 * self.prog_rows as u64 * 16;
+        atlas + copy + index + prog
+    }
+
+    /// Releases the kernel variant's shader hook (the baker is going away).
+    pub fn release(&mut self, cx: &mut Cx) {
+        if let Some(k) = self.kernels.take() {
+            k.release(cx);
+        }
+    }
+
+    fn draw_with(&mut self, cx: &mut Cx2d, vol: &Volume, bake: &mut DrawSdfBake, copy: &mut DrawSdfCopy) {
         let copy_id = self.copy_pass.draw_pass_id();
         if let Some((serial, batch)) = &self.inflight {
-            cx.make_child_pass(&self.copy_pass);
+            self.attach(cx);
             self.pass.set_pass_parent(cx.cx, copy_id);
             if !(self.pass.painted_whole_since(cx.cx, *serial) && self.copy_pass.painted_whole_since(cx.cx, *serial)) {
                 return;
@@ -538,7 +654,8 @@ impl Baker {
             self.baked += batch.len();
             self.inflight = None;
         }
-        let n = self.queue.len().min(self.budget);
+        // the steered budget, within the kernel work a frame may run
+        let n = self.queue.len().min(self.budget).min(self.limits.bricks_for_kernels(self.kernel_cost));
         let batch: Vec<usize> = self.queue.drain(..n).collect();
         let mut copies: BTreeSet<usize> = std::mem::take(&mut self.copy_queue);
         for &i in &batch {
@@ -549,7 +666,7 @@ impl Baker {
         // (recorded once after the last batch), so repaints write nothing and
         // whatever samples the atlases does not repaint every frame.
         if batch.is_empty() && copies.is_empty() && self.recorded_empty {
-            cx.make_child_pass(&self.copy_pass);
+            self.attach(cx);
             self.pass.set_pass_parent(cx.cx, copy_id);
             return;
         }
@@ -593,7 +710,7 @@ impl Baker {
         self.copy_pass.set_color_texture(cx, &self.copy, DrawPassClearColor::InitWith(vec4(vol.band, 0.0, 0.0, 1.0)));
         self.copy_pass.add_color_texture(cx, &self.copy_slots, DrawPassClearColor::InitWith(vec4(0.0, 0.0, 0.0, 0.0)));
         self.copy_pass.clear_depth_texture(cx.cx);
-        cx.make_child_pass(&self.copy_pass);
+        self.attach(cx);
         cx.begin_pass(&self.copy_pass, Some(1.0));
         self.copy_pass.set_size(cx, size);
         self.copy_pass.set_dpi_factor(cx, 1.0);
@@ -620,6 +737,7 @@ impl Baker {
         cx.end_pass_sized_turtle();
         self.copy_list.end(cx);
         cx.end_pass(&self.copy_pass);
+        self.recorded += batch.len();
         if !batch.is_empty() || !copies.is_empty() {
             self.inflight = Some((cx.cx.repaint_id(), batch));
         }

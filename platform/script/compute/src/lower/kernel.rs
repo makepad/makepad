@@ -159,6 +159,12 @@ pub enum MathMode {
     /// `makepad_csg_math::portable`, and f32 arithmetic unfused, as in host
     /// Rust; NaN results are stored as one canonical quiet NaN.
     Portable,
+    /// The f32 polynomials of `Fast`, unfused: only IEEE f32 operations,
+    /// each rounded once (no f64, no fused multiply-add), so a GPU shader
+    /// with precise math computes the same bits (the SDF engine bakes a
+    /// distance kernel on the GPU and checks it against this one); NaN
+    /// results are stored as one canonical quiet NaN.
+    Exact32,
 }
 
 /// The one NaN a portable kernel stores.
@@ -577,7 +583,8 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout], liv
                 math = match &value.kind {
                     ExprKind::Ident(m) if m == "portable" => MathMode::Portable,
                     ExprKind::Ident(m) if m == "fast" => MathMode::Fast,
-                    _ => return err(*span, "`let math = portable` (f32 math through f64, bit-exact with the modelling libraries) or `let math = fast`"),
+                    ExprKind::Ident(m) if m == "exact32" => MathMode::Exact32,
+                    _ => return err(*span, "`let math = portable` (f32 math through f64, bit-exact with the modelling libraries), `let math = exact32` (f32 math unfused, bit-exact with precise GPU shaders) or `let math = fast`"),
                 };
                 continue;
             }
@@ -693,7 +700,7 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout], liv
     program.body = l.b.blocks.into_iter().next().unwrap();
     program.frame_words = l.frame_words;
     program.funcs = l.funcs_out.into_iter().map(|(g, _)| g).collect();
-    if math == MathMode::Portable {
+    if math != MathMode::Fast {
         canonical_nan_stores(&mut program.body, &mut program.vals);
         for g in &mut program.funcs {
             canonical_nan_stores(&mut g.body, &mut g.vals);

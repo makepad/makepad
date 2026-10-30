@@ -9,3 +9,4 @@ description = "Realtime SDF engine: shapes lowered to GPU programs, sparse brick
 makepad-draw = { path = "../../draw", version = "2.0.0" }
 makepad-csg-math = { path = "../csg/csg_math" }
 makepad-csg-sdf = { path = "../csg/csg_sdf" }
+makepad-script-compute = { path = "../../platform/script/compute", version = "1.0.0", features = ["vm"] }

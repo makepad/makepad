@@ -13,12 +13,14 @@ makepad-strict-json = { workspace = true }
 makepad-core-util = { path = "../core_util" }
 # sync: launches and prebuilds use the WM's own launch commands and environment
 makepad-app-registry = { path = "../app_registry", optional = true }
+# the worktree monitor (dirty sets without scans): FSEvents / inotify / ReadDirectoryChangesW
+makepad-filesystem-watcher = { path = "../filesystem_watcher", optional = true }
 
 [features]
 # the checkout applier (desktop nodes: git, prebuild, launches, the master CLI); a JIT host with no
 # checkout (tools/run/android_host) builds without it and installs its source store instead
 default = ["checkout"]
-checkout = ["dep:makepad-app-registry"]
+checkout = ["dep:makepad-app-registry", "dep:makepad-filesystem-watcher"]
 
 [target.'cfg(windows)'.dependencies.windows]
 package = "makepad-windows-sys"

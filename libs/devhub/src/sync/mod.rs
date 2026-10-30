@@ -7,8 +7,9 @@
 //! - [`register_peer`]: services on a node's PEER endpoint (other hubs). Coordinated patches are
 //!   driven by the master (it reads every session JIT's tick and names the tick to patch at), so
 //!   hubs need nothing from each other yet.
-//! - [`register_control`]: services on the master's control socket. The CLI reaches nodes through
-//!   the hub's `route` (signing orders itself with the master's key), so nothing is added.
+//! - [`register_control`]: services on the master's control socket: `autosync` (`now <landed ms>`:
+//!   a landing kicks the watcher). The CLI reaches nodes through the hub's `route` (signing orders
+//!   itself with the master's key).
 //! - [`cli`]: `makepad devhub sync|launch|stop|launched|launch-log|wm-restart …`.
 //! - [`start_autosync`]: the master's watcher of work and commercial main, one node per round.
 //!
@@ -46,10 +47,13 @@ mod jits;
 pub mod lanes;
 #[cfg(feature = "checkout")]
 mod launch;
+pub mod prewarm;
 #[cfg(feature = "checkout")]
 pub(crate) mod serve;
 mod sign;
 pub mod store;
+#[cfg(feature = "checkout")]
+mod toast;
 
 use makepad_remote::Endpoint;
 
@@ -88,26 +92,54 @@ pub fn store_dir(repo: &str) -> std::path::PathBuf {
 
 pub fn register_peer(_ep: &Endpoint, _ctx: &std::sync::Arc<NodeCtx>) {}
 
-pub fn register_control(_ep: &Endpoint, _hub: &makepad_remote::hub::Hub) {}
+pub fn register_control(ep: &Endpoint, _hub: &makepad_remote::hub::Hub) {
+    #[cfg(feature = "checkout")]
+    ep.register(
+        "autosync",
+        1,
+        makepad_remote::lines::service(
+            "autosync",
+            std::sync::Arc::new(|line, out| match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+                ["now", ms] if ms.parse::<u64>().is_ok() => {
+                    autosync::kick(ms.parse().unwrap_or(0));
+                    out.push(format!("{{\"kicked\":true,\"landed_ms\":{ms}}}"));
+                }
+                _ => out.push(format!("{{\"err\":{}}}", makepad_remote::json_str("autosync now <landed wall ms>"))),
+            }),
+        ),
+    );
+    #[cfg(not(feature = "checkout"))]
+    let _ = ep;
+}
 
 /// A control service as a call: (line, out).
 pub type FlowServe = std::sync::Arc<dyn Fn(&str, &mut Vec<String>) + Send + Sync>;
 
-/// The master's lane merge bot ([`lanes`]): its `lanes` control service and its loop. The service
-/// as a call for the panel (None without checkout support).
-pub fn register_lanes(ep: &Endpoint, machine: &str, publish: crate::local::Publish) -> Option<FlowServe> {
+/// The master's lane merge bot ([`lanes`]): its `lanes` control service and its loop. Both
+/// `lanes …` and `prewarm` ([`prewarm::Board`]) as one call for the panel.
+pub fn register_flow(ep: &Endpoint, machine: &str, board: std::sync::Arc<prewarm::Board>, publish: crate::local::Publish) -> Option<FlowServe> {
     #[cfg(feature = "checkout")]
     {
         let l = lanes::Lanes::new(machine, crate::proto::home(), publish);
         let l2 = l.clone();
         ep.register("lanes", 1, makepad_remote::lines::service("lanes", std::sync::Arc::new(move |line, out| l2.serve(line, out))));
         l.start();
-        Some(std::sync::Arc::new(move |line: &str, out: &mut Vec<String>| l.serve(line, out)))
+        Some(std::sync::Arc::new(move |line: &str, out: &mut Vec<String>| {
+            if line.trim() == "prewarm" {
+                board.serve(out)
+            } else {
+                l.serve(line, out)
+            }
+        }))
     }
     #[cfg(not(feature = "checkout"))]
     {
         let _ = (ep, machine, publish);
-        None
+        Some(std::sync::Arc::new(move |line: &str, out: &mut Vec<String>| {
+            if line.trim() == "prewarm" {
+                board.serve(out)
+            }
+        }))
     }
 }
 

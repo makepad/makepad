@@ -165,6 +165,26 @@ pub struct Exec {
     disk_use: Arc<Mutex<std::collections::HashMap<String, (Instant, u64)>>>,
 }
 
+/// What a lease run inherits from the hub's environment: the system's basics (paths, user,
+/// locale, toolchain homes, the user bus `systemd-run --user` needs, Windows' system vars). The
+/// WM session's (`MAKEPAD_WM_*`, the display) only for a screen lease: the kind that shows
+/// windows opts in; every other run must not reach the node's live WM.
+pub fn base_env(kind: Kind, vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
+    const KEEP: &[&str] = &[
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TERM", "TZ", "CARGO_HOME", "RUSTUP_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+        // platform SDKs (check_platforms, Android and Apple builds)
+        "ANDROID_HOME", "ANDROID_SDK_ROOT", "ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "JAVA_HOME", "DEVELOPER_DIR", "SDKROOT",
+        // Windows
+        "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "USERPROFILE", "USERNAME", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES", "COMSPEC", "PATHEXT", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS", "SYSTEMDRIVE", "HOMEDRIVE", "HOMEPATH",
+    ];
+    const SCREEN: &[&str] = &["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP"];
+    vars.filter(|(k, _)| {
+        let up = k.to_ascii_uppercase();
+        KEEP.contains(&up.as_str()) || up.starts_with("LC_") || (kind == Kind::Screen && (SCREEN.contains(&up.as_str()) || up.starts_with("MAKEPAD_WM_")))
+    })
+    .collect()
+}
+
 /// Lease ids, lanes, env keys: what a path, a unit name and a line can hold.
 fn valid_name(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && !s.starts_with(['-', '.']) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.') && !s.contains("..")
@@ -335,6 +355,12 @@ impl Exec {
         (self.publish)(hub_record(&self.machine, "", 0, kind, sev, line, String::new()));
     }
 
+    /// [`Exec::emit`] for a background thread.
+    fn emitter(&self) -> impl Fn(&str, Sev, String) + Send + 'static {
+        let (publish, machine) = (self.publish.clone(), self.machine.clone());
+        move |kind: &str, sev: Sev, line: String| publish(hub_record(&machine, "", 0, kind, sev, line, String::new()))
+    }
+
     fn save(&self, l: &Lease) {
         let _ = std::fs::create_dir_all(&self.state);
         let p = self.state.join(format!("{}.json", l.id));
@@ -421,6 +447,12 @@ impl Exec {
         if kind.writes() && !self.dev.load(Ordering::Acquire) {
             return err(format!("dev off: {} takes no {} leases", self.machine, kind.as_str()));
         }
+        // a real lease preempts the background pre-warm at once (its processes are gone before
+        // the lease takes the tree, its JIT cache consistent)
+        #[cfg(feature = "checkout")]
+        if kind.writes() {
+            crate::sync::prewarm::cancel(&format!("lease {id} ({lane})"));
+        }
         let rev = v.get("rev").filter(|r| r.get("makepad").is_some());
         let rev_of = |k: &str| rev.and_then(|r| r.get(k)).and_then(|x| x.as_str()).map(str::to_string);
         // the tree is the node's own (its WM runs from it): only a write lease on a dev-on node moves it
@@ -465,6 +497,8 @@ impl Exec {
             // what a run prints as its verdict names its own lease (a lane that reads a gate's
             // NODEGATE-OK from a file shared with another lane's run must tell them apart)
             ("DEVHUB_LEASE", id.clone()),
+            // one JIT session per lease: its many check/test/present calls share one JIT setup
+            ("MAKEPAD_JIT_SESSION", id.clone()),
             ("CARGO_NET_OFFLINE", "true".into()),
         ];
         // the lease's own environment wins over what was asked
@@ -538,6 +572,12 @@ impl Exec {
         };
         let mut cmd = std::process::Command::new(&full[0]);
         cmd.args(&full[1..]).current_dir(l.work.join(rel)).stdin(std::process::Stdio::null()).stdout(out).stderr(err_out);
+        // a clean base, never the hub's whole environment (on a WM node that is the WM session's:
+        // a run would talk to the live WM); then the lease's own
+        cmd.env_clear();
+        for (k, v) in base_env(l.kind, std::env::vars()) {
+            cmd.env(k, v);
+        }
         for (k, v) in &l.env {
             cmd.env(k, v);
         }
@@ -640,8 +680,11 @@ impl Exec {
             return err("usage: lease-end <id> released|expired|holder-dead|denied [inspect json]");
         }
         let mut inspect = String::new();
+        let mut handoff = false;
         if !extra.is_empty() {
             let Ok(v) = makepad_strict_json::parse(extra.as_bytes()) else { return err("lease-end: the inspect part is not JSON") };
+            // a lease waits for this box: the tree stays where it is for it (no restore first)
+            handoff = v.get("handoff").and_then(|x| x.as_bool()).unwrap_or(false);
             if let Some(i) = v.get("inspect") {
                 let list = |k: &str| i.get(k).and_then(|x| x.as_arr()).map_or_else(Vec::new, |a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>());
                 let pid = i.get("pid").and_then(super::num).unwrap_or(0.0) as u32;
@@ -654,26 +697,31 @@ impl Exec {
         let Some(l) = l else {
             return format!("{{\"ended\":{},\"killed\":[],\"freed_mb\":0,\"recovered\":null,\"leak\":[],\"unknown\":true{inspect}}}", json_str(id));
         };
-        let e = self.end(l, how);
+        let e = self.end(l, how, handoff);
         format!("{}{inspect}}}", &e[..e.len() - 1])
     }
 
     /// Ends a lease taken out of the table: processes, scratch, workspace; the answer line.
-    fn end(&self, l: Lease, how: &str) -> String {
+    fn end(&self, l: Lease, how: &str, handoff: bool) -> String {
+        // what the next lease needs first: the processes stopped, the tree let go; the rest (its scratch
+        // dir measured and removed, the disk guard) after the answer, in the background
         let (killed, leak) = stop_runs(&l.runs, self.opts.grace);
         let _ = std::fs::remove_file(self.quiet().join(format!("{}.cmd", l.id)));
-        let mut freed = 0u64;
-        if l.tmp.exists() {
-            freed += disk::dir_size(&l.tmp).0;
-            let _ = std::fs::remove_dir_all(&l.tmp);
-        }
-        let recovered = self.release_tree(&l);
+        let recovered = self.release_tree(&l, handoff);
         let _ = std::fs::remove_file(self.state.join(format!("{}.json", l.id)));
-        self.guard.touch();
-        let mb = freed >> 20;
-        self.emit("ws", Sev::Info, format!("ws_cleanup: {} {} on {} freed {mb} MB", l.id, l.lane, self.machine));
         let sev = if how == "released" { Sev::Info } else { Sev::Warn };
-        self.emit("lease", sev, format!("lease: {} {} of {} ended on {} ({how}): {} process group(s) stopped, {mb} MB freed", l.id, l.kind.as_str(), l.lane, self.machine, killed.len()));
+        self.emit("lease", sev, format!("lease: {} {} of {} ended on {} ({how}): {} process group(s) stopped{}", l.id, l.kind.as_str(), l.lane, self.machine, killed.len(), if handoff { ", tree handed to the next lease" } else { "" }));
+        self.guard.touch();
+        let (tmp, emit, tag) = (l.tmp.clone(), self.emitter(), format!("{} {} on {}", l.id, l.lane, self.machine));
+        let _ = std::thread::Builder::new().name("devhub-lease-cleanup".into()).spawn(move || {
+            let mut freed = 0u64;
+            if tmp.exists() {
+                freed += disk::dir_size(&tmp).0;
+                let _ = std::fs::remove_dir_all(&tmp);
+            }
+            emit("ws", Sev::Info, format!("ws_cleanup: {tag} freed {} MB", freed >> 20));
+        });
+        let freed = 0u64;
         if !leak.is_empty() {
             self.emit("lease", Sev::Err, format!("lease_leak: {} {} on {}: pid(s) {:?} survived KILL", l.id, l.lane, self.machine, leak));
         }
@@ -682,7 +730,7 @@ impl Exec {
 
     /// The lease lets go of the node's tree (the last one bundles what it left there): the bundles.
     #[cfg(feature = "checkout")]
-    fn release_tree(&self, l: &Lease) -> Vec<PathBuf> {
+    fn release_tree(&self, l: &Lease, handoff: bool) -> Vec<PathBuf> {
         let (Some(pin), Some(root)) = (&l.pin, &self.opts.tree) else { return Vec::new() };
         let work = self.conf().work;
         if !l.overlay.is_empty() {
@@ -691,7 +739,17 @@ impl Exec {
                 Err(e) => self.emit("ws", Sev::Err, format!("ws_overlay: {} {} on {}: undoing the shipped files failed: {e}", l.id, l.lane, self.machine)),
             }
         }
-        match super::tree::release(&l.id, root, &work.join("recovered"), &format!("{}-{}", l.lane, l.id)) {
+        if handoff {
+            // the next lease moves the tree from here; when none takes it after all, it goes back
+            let (root, emit, machine) = (root.clone(), self.emitter(), self.machine.clone());
+            let _ = std::thread::Builder::new().name("devhub-tree-handoff".into()).spawn(move || {
+                std::thread::sleep(super::tree::HANDOFF_GRACE);
+                if let Ok(Some(to)) = super::tree::restore_if_free(&root) {
+                    emit("ws", Sev::Info, format!("ws_restore: {machine}: no lease took the handed-over tree, back at the shared {to}"));
+                }
+            });
+        }
+        match super::tree::release(&l.id, root, &work.join("recovered"), &format!("{}-{}", l.lane, l.id), handoff) {
             Ok(r) => {
                 for b in &r.bundles {
                     self.emit("ws", Sev::Warn, format!("ws_recovered: {} {} on {} left changes in the tree: bundled to {}", l.id, l.lane, self.machine, b.display()));
@@ -709,7 +767,7 @@ impl Exec {
     }
 
     #[cfg(not(feature = "checkout"))]
-    fn release_tree(&self, _l: &Lease) -> Vec<PathBuf> {
+    fn release_tree(&self, _l: &Lease, _handoff: bool) -> Vec<PathBuf> {
         Vec::new()
     }
 
@@ -735,7 +793,7 @@ impl Exec {
         };
         for l in stale {
             self.emit("lease", Sev::Warn, format!("lease: {} {} of {} ended by {} itself: no beat from the master for {} s", l.id, l.kind.as_str(), l.lane, self.machine, self.opts.no_beat.as_secs()));
-            self.end(l, "expired");
+            self.end(l, "expired", false);
         }
     }
 
@@ -1193,6 +1251,15 @@ mod tests {
     }
 
     #[test]
+    fn runs_get_a_clean_env_and_only_screen_leases_the_wm() {
+        let hub = vec![("PATH".to_string(), "/bin".to_string()), ("HOME".into(), "/h".into()), ("LC_ALL".into(), "C".into()), ("MAKEPAD_WM_ROOT".into(), "/wm".into()), ("MAKEPAD_WM_SOCKET".into(), "/s".into()), ("DISPLAY".into(), ":0".into()), ("CARGO_TARGET_DIR".into(), "/wm/target".into()), ("RUSTFLAGS".into(), "-g".into())];
+        let keys = |kind| base_env(kind, hub.clone().into_iter()).into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+        assert_eq!(keys(Kind::Test), vec!["PATH", "HOME", "LC_ALL"]);
+        assert_eq!(keys(Kind::Build), vec!["PATH", "HOME", "LC_ALL"]);
+        assert_eq!(keys(Kind::Screen), vec!["PATH", "HOME", "LC_ALL", "MAKEPAD_WM_ROOT", "MAKEPAD_WM_SOCKET", "DISPLAY"]);
+    }
+
+    #[test]
     fn round_trip_run_log_end() {
         let (x, base, events) = test_exec("rt", Opts { grace: Duration::from_secs(10), ..Opts::default() });
         let a = x.handle("lease-start", r#"{"id":"L1","lane":"gapx","kind":"test","rev":null,"env":{"FOO":"bar","CARGO_INCREMENTAL":"1"}}"#);
@@ -1214,7 +1281,9 @@ mod tests {
         let (env, _) = log_until_exit(&x, "L1", field(&r[0], "n").and_then(|v| super::super::num(&v)).unwrap() as u32);
         assert!(env.contains("FOO=bar") && env.contains("SANDBOX_MUTE=1") && env.contains(&format!("TMPDIR={}", tmp.display())));
         // every run knows its own lease and lane: its verdict lines say whose they are
-        assert!(env.contains("DEVHUB_LEASE=L1") && env.contains("MAKEPAD_TEST_LANE=gapx"), "{env}");
+        assert!(env.contains("DEVHUB_LEASE=L1") && env.contains("MAKEPAD_TEST_LANE=gapx") && env.contains("MAKEPAD_JIT_SESSION=L1"), "{env}");
+        // nothing of the hub's own environment beyond the basics
+        assert!(env.lines().all(|l| !l.starts_with("CARGO_PKG_") && !l.starts_with("RUST_TEST_")), "{env}");
         let r = x.handle("lease-run", &format!("L1 . {}", b64(FAIL)));
         assert_eq!(log_until_exit(&x, "L1", field(&r[0], "n").and_then(|v| super::super::num(&v)).unwrap() as u32).1, 1);
         assert!(x.handle("lease-run", &format!("L1 ../x {}", b64(&["true"])))[0].contains("err"));

@@ -12,7 +12,9 @@
 //!   child's frame and XFORM_POP restores it and scales the distance back;
 //!   DEFORM_PUSH / DEFORM_POP warp it and divide by the warp's Lipschitz bound;
 //! - Shell and Round act on the top value; MAT_PUSH / MAT_POP set the slot of
-//!   the leaves inside (the innermost wins);
+//!   the leaves inside (the innermost wins); a Material with a `within`
+//!   region runs the region's program first and MAT_WITHIN pops its value:
+//!   the slot applies where it is <= 0, elsewhere the inherited one stays;
 //! - Instance becomes a sharp union of its copies (each one an XFORM bracket
 //!   around the same subprogram); Bone and Id leave the field as it is.
 //!
@@ -20,6 +22,7 @@
 //! compute from is the same bits. A program starts with one header texel
 //! (texel count, value-stack depth, point-stack depth, 0).
 
+use crate::kernel::KernelSlot;
 use makepad_csg_sdf::{SdfDeform, SdfNode, SdfOp, SdfPlace};
 
 /// Op codes (the header texel's `x`).
@@ -34,6 +37,14 @@ pub mod op {
     pub const ROUND: f32 = 7.0;
     pub const MAT_PUSH: f32 = 8.0;
     pub const MAT_POP: f32 = 9.0;
+    pub const MAT_WITHIN: f32 = 10.0;
+    /// A compiled Splash kernel: (op, slot in the volume's kernel table,
+    /// parameter texels, parameter count), then its parameters, four per
+    /// texel. It pushes its distance like a primitive.
+    pub const KERNEL: f32 = 11.0;
+    /// The top value times `y`: a kernel's distance brought to a 1-Lipschitz
+    /// bound (the volume's estimate of its steepest gradient).
+    pub const SCALE: f32 = 12.0;
 }
 
 /// Primitive kinds (a PRIM's header `y`). A PRIM is 3 texels: header
@@ -73,6 +84,8 @@ pub struct Program {
     /// The deepest value stack and point stack it needs.
     pub value_depth: usize,
     pub point_depth: usize,
+    /// Every kernel it calls has a GPU route.
+    pub gpu_kernels: bool,
 }
 
 /// The value stack and point stack every interpreter (shader and twin)
@@ -84,11 +97,15 @@ pub const MAX_POINT_DEPTH: usize = 8;
 impl Program {
     /// Whether the GPU interpreter can run it.
     pub fn fits_gpu(&self) -> bool {
-        self.value_depth <= MAX_VALUE_DEPTH && self.point_depth <= MAX_POINT_DEPTH
+        self.value_depth <= MAX_VALUE_DEPTH && self.point_depth <= MAX_POINT_DEPTH && self.gpu_kernels
     }
 }
 
-struct Lower {
+struct Lower<'a> {
+    kernels: &'a [KernelSlot],
+    /// Multiplies every kernel's distance (1 / its Lipschitz bound).
+    kernel_scale: f32,
+    gpu_kernels: bool,
     out: Vec<[f32; 4]>,
     vdepth: usize,
     vmax: usize,
@@ -132,7 +149,7 @@ fn rot_quat(q: [f64; 4]) -> [[f64; 3]; 3] {
     ]
 }
 
-impl Lower {
+impl Lower<'_> {
     fn push_value(&mut self) {
         self.vdepth += 1;
         self.vmax = self.vmax.max(self.vdepth);
@@ -200,8 +217,15 @@ impl Lower {
                 self.out.push([op::ROUND, f(*radius), 0.0, 0.0]);
             }
             SdfNode::Transform { at, rotate, scale, of } => self.xform(affine_into(rot_deg(*rotate), *at, *scale), *scale, |s| s.node(of))?,
-            SdfNode::Material { slot, of, .. } => {
-                self.out.push([op::MAT_PUSH, *slot as f32, 0.0, 0.0]);
+            SdfNode::Material { slot, within, of } => {
+                match within {
+                    Some(w) => {
+                        self.node(w)?;
+                        self.out.push([op::MAT_WITHIN, *slot as f32, 0.0, 0.0]);
+                        self.vdepth -= 1;
+                    }
+                    None => self.out.push([op::MAT_PUSH, *slot as f32, 0.0, 0.0]),
+                }
                 self.node(of)?;
                 self.out.push([op::MAT_POP, 0.0, 0.0, 0.0]);
             }
@@ -229,18 +253,43 @@ impl Lower {
                 self.pdepth -= 1;
                 self.out.push([op::DEFORM_POP, f(*lipschitz), 0.0, 0.0]);
             }
-            SdfNode::Kernel(_) => return Err(LowerError::Unsupported("a compiled Splash kernel")),
+            SdfNode::Kernel(k) => {
+                let Some(slot) = self.kernels.iter().position(|s| s.matches(k)) else {
+                    return Err(LowerError::Unsupported("a kernel missing from the volume's kernel table"));
+                };
+                let params = k.splash.as_ref().map(|s| s.params()).unwrap_or_default();
+                let texels = params.len().div_ceil(4);
+                self.out.push([op::KERNEL, slot as f32, texels as f32, params.len() as f32]);
+                for c in params.chunks(4) {
+                    let mut t = [0.0f32; 4];
+                    t[..c.len()].copy_from_slice(c);
+                    self.out.push(t);
+                }
+                self.gpu_kernels &= self.kernels[slot].gpu.is_some();
+                self.push_value();
+                if self.kernel_scale != 1.0 {
+                    self.out.push([op::SCALE, self.kernel_scale, 0.0, 0.0]);
+                }
+            }
             SdfNode::Mesh(_) => return Err(LowerError::Unsupported("a mesh field")),
         }
         Ok(())
     }
 }
 
-/// Lowers a node (usually one already culled to a brick's region).
+/// Lowers a node (usually one already culled to a brick's region) that
+/// calls no kernel.
 pub fn lower(n: &SdfNode) -> Result<Program, LowerError> {
-    let mut l = Lower { out: vec![[0.0; 4]], vdepth: 0, vmax: 0, pdepth: 0, pmax: 0 };
+    lower_with(n, &[], 1.0)
+}
+
+/// Lowers a node whose kernels are in `kernels` (a volume's table: a
+/// kernel's slot there is its index), each kernel's distance multiplied by
+/// `kernel_scale`.
+pub fn lower_with(n: &SdfNode, kernels: &[KernelSlot], kernel_scale: f32) -> Result<Program, LowerError> {
+    let mut l = Lower { kernels, kernel_scale, gpu_kernels: true, out: vec![[0.0; 4]], vdepth: 0, vmax: 0, pdepth: 0, pmax: 0 };
     l.node(n)?;
     let len = l.out.len();
     l.out[0] = [len as f32, l.vmax as f32, l.pmax as f32, 0.0];
-    Ok(Program { texels: l.out, value_depth: l.vmax, point_depth: l.pmax })
+    Ok(Program { texels: l.out, value_depth: l.vmax, point_depth: l.pmax, gpu_kernels: l.gpu_kernels })
 }

@@ -30,8 +30,26 @@ pub(crate) fn loader() -> Option<PathBuf> {
     static LOADER: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     LOADER.get_or_init(|| {
         let _k = crate::zone_alloc::kept();
-        std::env::var_os("MAKEPAD_RUN_LOADER").map(PathBuf::from).or_else(|| std::env::current_exe().ok())
+        let p = std::env::var_os("MAKEPAD_RUN_LOADER").map(PathBuf::from).or_else(|| std::env::current_exe().ok());
+        // what this process runs: a rebuild that leaves the same file changed nothing it runs
+        let _ = LOADED.set(p.as_deref().and_then(identity));
+        p
     }).clone()
+}
+
+/// The loader file this process started from (`identity`), taken with its path.
+static LOADED: std::sync::OnceLock<Option<(u64, u64, std::time::SystemTime)>> = std::sync::OnceLock::new();
+
+/// A file's identity: device, inode, modification time (cargo writes a new binary as a new file).
+fn identity(p: &Path) -> Option<(u64, u64, std::time::SystemTime)> {
+    let m = std::fs::metadata(p).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((m.dev(), m.ino(), m.modified().ok()?))
+    }
+    #[cfg(not(unix))]
+    Some((0, m.len(), m.modified().ok()?))
 }
 
 /// The cargo target directory the loader was built into (cargo keeps `.rustc_info.json` at its
@@ -116,6 +134,10 @@ struct Handover {
 }
 
 static HANDOVER: Mutex<Option<Handover>> = Mutex::new(None);
+
+/// The person asked for the restart, and its binary had to be built again first (sources changed
+/// before it): the restart follows the build without asking again.
+static RESTART_AFTER_BUILD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The ring's view: the phase and how long it has lasted.
 pub fn status() -> (Phase, std::time::Duration) {
@@ -211,6 +233,17 @@ fn build_loop() {
             Err(e) => return fail(format!("the rebuilt makepad does not start: {e}; the app runs the previous code")),
         }
         let secs = t0.elapsed().as_secs_f64();
+        // the same binary as this process runs: the change did not reach makepad (a no-op
+        // build), so there is nothing to restart into
+        if LOADED.get().copied().flatten().is_some_and(|id| identity(&loader).is_some_and(|now| now == id)) {
+            eprintln!("makepad live: {why}: makepad is unchanged (built in {secs:.0} s); no restart");
+            super::live_log(&format!("{{\"event\":\"host_rebuild\",\"ok\":true,\"s\":{secs:.1},\"unchanged\":true}}"));
+            let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            if st.again { drop(st); continue; }
+            st.phase = Phase::Idle;
+            st.since = Some(Instant::now());
+            return;
+        }
         super::live_log(&format!("{{\"event\":\"host_rebuild\",\"ok\":true,\"s\":{secs:.1}}}"));
         {
             let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -220,6 +253,16 @@ fn build_loop() {
         }
         *HANDOVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Handover { loader, stamps: before });
         let reason = format!("makepad was rebuilt ({why})");
+        let asked = RESTART_AFTER_BUILD.swap(false, std::sync::atomic::Ordering::SeqCst);
+        if asked {
+            super::RESTART_CONFIRMED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        if super::dock_app() && !asked {
+            // a dock app restarts into it when the person says so (`session relaunch`)
+            *super::RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = reason.clone();
+            super::offer_restart(&reason);
+            return;
+        }
         if super::RESTART_SUPPORTED.load(std::sync::atomic::Ordering::SeqCst) {
             eprintln!("makepad live: makepad rebuilt in {secs:.0} s; restarting into it at the app's next safe point, with its state");
             *super::RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = reason;
@@ -244,6 +287,12 @@ fn take() -> Option<Handover> {
 /// restarts as before), or the restart did not happen (said why; the app keeps running).
 pub(super) fn restart_now(state: &[u8]) -> bool {
     match take() {
+        Some(h) if super::dock_app() && !super::RESTART_CONFIRMED.swap(false, std::sync::atomic::Ordering::SeqCst) => {
+            // a dock app's restart into a rebuilt makepad waits for the person (`session relaunch`)
+            *HANDOVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(h);
+            eprintln!("makepad live: the app reached a restart point; the rebuilt makepad waits for `session relaunch` (dock app)");
+            false
+        }
         Some(h) => { restart(h, Some(state)); true }
         None => false,
     }
@@ -259,6 +308,8 @@ fn restart(h: Handover, state: Option<&[u8]>) {
     };
     if stamps(&paths) != h.stamps {
         STATE.lock().unwrap_or_else(|e| e.into_inner()).phase = Phase::Idle;
+        // asked for (a dock app restarts only so): restart once the binary is current
+        RESTART_AFTER_BUILD.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Err(e) = request(format!("{why} (and changed again before the restart)"), paths) { fail(e); }
         return;
     }
@@ -289,7 +340,9 @@ fn restart(h: Handover, state: Option<&[u8]>) {
         crate::tui::exit_code(0);
         crate::tui::finish(false);
         eprintln!("makepad live: restarting: {reason}");
+        super::hand_over(&mut cmd);
         let e = cmd.exec();
+        super::hand_back();
         fail(format!("restart into the rebuilt makepad failed: {e}; the app runs the previous code"));
     }
     #[cfg(not(unix))]

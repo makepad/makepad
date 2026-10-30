@@ -120,6 +120,11 @@ impl Inputs {
 
     /// Native bindings and the compile unit's std are shared by every domain. A fresh app
     /// domain cannot replace them; keep the current app and report the host restart instead.
+    /// An input of makepad's own process (not a program source a patch can take).
+    pub(super) fn process_input(&self, path: &str) -> bool {
+        matches!(self.paths.get(path).map(|x| &x.1), Some(Kind::Provided | Kind::Std | Kind::Runner | Kind::Manifest | Kind::Build))
+    }
+
     pub(super) fn host_restart_required<'a>(&self, paths: impl Iterator<Item = &'a str>) -> bool {
         paths.into_iter().any(|path| matches!(self.paths.get(path).map(|x| &x.1), Some(Kind::Provided | Kind::Std | Kind::Runner)))
     }

@@ -223,11 +223,20 @@ fn reply(c: &Client, id: &str, status: &str, msg: &str) -> i32 {
 pub fn main(args: &[String]) -> i32 {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     if matches!(a.first().copied(), None | Some("-h") | Some("--help") | Some("help")) {
-        println!("{HELP}\n{}\n{}", crate::lease::client::HELP, crate::sync::help());
+        #[cfg(feature = "checkout")]
+        let orch = crate::orch::cli::HELP;
+        #[cfg(not(feature = "checkout"))]
+        let orch = "";
+        println!("{HELP}\n{}\n{}\n{orch}", crate::lease::client::HELP, crate::sync::help());
         return if a.is_empty() { 2 } else { 0 };
     }
     if a.first() == Some(&"serve") {
         return serve(&a[1..]);
+    }
+    // the master's jobs first: `lanes` (the lane view) is theirs, `lanes now` the merge bot's
+    #[cfg(feature = "checkout")]
+    if let Some(code) = crate::orch::cli::main(&a) {
+        return code;
     }
     if let Some(code) = crate::sync::cli(&a) {
         return code;

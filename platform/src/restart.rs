@@ -433,6 +433,9 @@ pub fn try_restart(app: &mut dyn crate::app_main::AppMain, cx: &mut Cx) {
                 crate::log!("restart postponed ({}): {}", reason(), why);
             }
             if postponed().as_deref() != Some(why.as_str()) {
+                // the live session log: what follows the edit (devhub's "restart to apply" toast)
+                #[cfg(relax)]
+                std::relax::live_log(&format!("{{\"event\":\"restart_postponed\",\"pid\":{},\"why\":\"{}\"}}", std::process::id(), why.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ")));
                 set_postponed(Some(why));
                 cx.redraw_all();
             }

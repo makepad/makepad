@@ -13,6 +13,18 @@ use crate::{
 };
 use makepad_live_id::*;
 
+/// A shader fn whose body the host builds as IR ([`ScriptVm::set_shader_ir_fn`]):
+/// code the host has as data (a compiled kernel's program), never as source
+/// text. The script fn gives the name and the parameters; the body returns f32.
+pub trait ShaderIrFn {
+    /// The body's identity: shaders with equal keys compile equal bodies.
+    fn key(&self) -> u64;
+    /// Builds `f`'s body (its params are set from the script fn's
+    /// signature, its result type is f32). Helper functions it calls go
+    /// into `ir` first.
+    fn build(&self, ir: &mut makepad_shader::shader_ir::IrModule, f: &mut makepad_shader::shader_ir::IrFunction) -> Result<(), String>;
+}
+
 /// Platform policy; all compiler work executes on the owning side.
 #[relax_api(plain)]
 #[repr(C)]
@@ -360,6 +372,9 @@ pub fn shader_functions_hash(
                     }
                     if let Some(ip) = fn_ptr.script_ip() {
                         hash = hash.bytes_append(&code.fn_content_key(ip).to_le_bytes());
+                    }
+                    if let Some(ext) = code.shader_ir_fns.borrow().get(&fn_obj) {
+                        hash = hash.bytes_append(&ext.key().to_le_bytes());
                     }
                 }
             }

@@ -517,6 +517,25 @@ pub fn render(lines: &[String]) -> String {
     out
 }
 
+/// `devhub prewarm`: the master's last pre-warm record per node.
+fn prewarm_cli() -> i32 {
+    let lines = match crate::cli::control().and_then(|c| super::cli::ask_local(&c, "prewarm", "prewarm")) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("makepad devhub prewarm: {e}");
+            return 2;
+        }
+    };
+    let rows = super::prewarm::rows(&lines);
+    if rows.is_empty() {
+        println!("no pre-warm yet (it runs on idle dev-on nodes after a landing)");
+    }
+    for (_, line) in rows {
+        println!("{line}");
+    }
+    0
+}
+
 /// `lanes [--json]`, `hold <branch> [why...]`, `unhold <branch>`: None for other words.
 pub fn cli(args: &[&str]) -> Option<i32> {
     let line = match args {
@@ -525,6 +544,26 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         ["hold", b, why @ ..] => format!("hold {b} {}", why.join(" ")),
         ["unhold", b] => format!("unhold {b}"),
         ["held"] => "held".to_string(),
+        ["prewarm"] => return Some(prewarm_cli()),
+        ["prewarm", "run", rest @ ..] => {
+            let cancel_after = match rest {
+                [] => None,
+                ["--cancel-after", s] => match s.parse() {
+                    Ok(s) => Some(s),
+                    Err(_) => return Some(2),
+                },
+                _ => {
+                    eprintln!("makepad devhub prewarm run [--cancel-after <s>]");
+                    return Some(2);
+                }
+            };
+            let root = std::env::current_dir().unwrap_or_default();
+            if !root.join("Cargo.toml").is_file() {
+                eprintln!("makepad devhub prewarm run: run it at a tree's root (its Cargo.toml)");
+                return Some(2);
+            }
+            return Some(super::prewarm::foreground(root, cancel_after));
+        }
         ["lanes" | "hold" | "unhold" | "held", ..] => {
             eprintln!("makepad devhub lanes [--json] | lanes now | hold <branch> [why...] | unhold <branch> | held");
             return Some(2);

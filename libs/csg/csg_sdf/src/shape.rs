@@ -27,9 +27,20 @@ pub struct SdfKernel {
     /// The program's identity (its whole IR, constants included).
     pub key: u64,
     pub field: Arc<dyn Sdf3 + Send + Sync>,
-    /// The box the program declares its solid in (the kernel's own frame);
-    /// `None`: unbounded (never culled).
+    /// The Splash program behind `field`, when it is one: what a GPU
+    /// route compiles (its structure) and feeds (its parameters).
+    pub splash: Option<Arc<crate::SdfSplashExpr>>,
+    /// A box holding the solid in the kernel's own frame (the document's
+    /// declared bounds); `None`: unbounded.
     pub bounds: Option<crate::bounds::Bounds>,
+}
+
+impl SdfKernel {
+    /// A Splash field as a kernel node, its solid inside `bounds`.
+    pub fn splash(field: crate::SdfSplashExpr, bounds: Option<crate::bounds::Bounds>) -> SdfKernel {
+        let field = Arc::new(field);
+        SdfKernel { key: field.key(), field: field.clone(), splash: Some(field), bounds }
+    }
 }
 
 impl std::fmt::Debug for SdfKernel {
@@ -526,6 +537,74 @@ pub fn distance_slot(n: &SdfNode, p: Vec3d) -> (f64, u8) {
     slot_in(n, p, 0)
 }
 
+/// The distance of one node at `p` and the innermost [`SdfNode::Id`] whose
+/// subtree makes the surface there (`None` outside every Id): what a pick
+/// at a surface point names. As [`distance_slot`], except that a difference
+/// names the cutting operand where its surface wins (clicking a hole picks
+/// the hole).
+pub fn distance_id(n: &SdfNode, p: Vec3d) -> (f64, Option<u32>) {
+    id_in(n, p, None)
+}
+
+fn id_in(n: &SdfNode, p: Vec3d, inherit: Option<u32>) -> (f64, Option<u32>) {
+    match n {
+        SdfNode::Id { id, of } => id_in(of, p, Some(*id)),
+        SdfNode::Combine { op, blend, of } => {
+            let (mut d, mut id) = id_in(&of[0], p, inherit);
+            for c in &of[1..] {
+                let (e, i) = id_in(c, p, inherit);
+                match op {
+                    SdfOp::Union => {
+                        if e < d {
+                            id = i;
+                        }
+                        d = smin(d, e, *blend);
+                    }
+                    SdfOp::Intersection => {
+                        if e > d {
+                            id = i;
+                        }
+                        d = -smin(-d, -e, *blend);
+                    }
+                    SdfOp::Difference => {
+                        if -e > d {
+                            id = i;
+                        }
+                        d = -smin(-d, e, *blend);
+                    }
+                }
+            }
+            (d, id)
+        }
+        SdfNode::Shell { thickness, of } => {
+            let (d, i) = id_in(of, p, inherit);
+            (d.abs() - thickness, i)
+        }
+        SdfNode::Round { radius, of } => {
+            let (d, i) = id_in(of, p, inherit);
+            (d - radius, i)
+        }
+        SdfNode::Transform { at, rotate, scale, of } => {
+            let (d, i) = id_in(of, transform_into(*at, *rotate, *scale, p), inherit);
+            (d * scale, i)
+        }
+        SdfNode::Instance { places, of } => places.iter().fold((f64::INFINITY, inherit), |acc, pl| {
+            let (d, i) = id_in(of, v3(pl.into([p.x, p.y, p.z])), inherit);
+            if d * pl.scale < acc.0 {
+                (d * pl.scale, i)
+            } else {
+                acc
+            }
+        }),
+        SdfNode::Deform { deform, lipschitz, of } => {
+            let (d, i) = id_in(of, deform.warp(p), inherit);
+            (d / lipschitz, i)
+        }
+        SdfNode::Material { of, .. } | SdfNode::Bone { of, .. } => id_in(of, p, inherit),
+        leaf => (distance(leaf, p), inherit),
+    }
+}
+
 fn slot_in(n: &SdfNode, p: Vec3d, inherit: u8) -> (f64, u8) {
     match n {
         SdfNode::Material { slot, within, of } => {
@@ -782,6 +861,16 @@ mod tests {
         assert_eq!(distance_slot(&ball(1.0, [0.0; 3]), at(0.0)).1, 0);
         // The distance is the plain one.
         assert_eq!(distance_slot(&u, at(2.0)).0, distance(&u, at(2.0)));
+    }
+
+    #[test]
+    fn ids_name_the_surface_there() {
+        let body = SdfNode::Id { id: 1, of: Box::new(ball(5.0, [0.0; 3])) };
+        let hole = SdfNode::Id { id: 2, of: Box::new(ball(2.0, [5.0, 0.0, 0.0])) };
+        let n = SdfNode::Combine { op: SdfOp::Difference, blend: 0.0, of: vec![body, hole] };
+        assert_eq!(distance_id(&n, Vec3d::new(-5.0, 0.0, 0.0)).1, Some(1));
+        assert_eq!(distance_id(&n, Vec3d::new(3.0, 0.0, 0.0)).1, Some(2), "the hole's own surface");
+        assert_eq!(distance_id(&ball(1.0, [0.0; 3]), Vec3d::new(1.0, 0.0, 0.0)).1, None);
     }
 
     #[test]

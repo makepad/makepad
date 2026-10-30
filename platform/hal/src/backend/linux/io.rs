@@ -41,6 +41,18 @@ extern "C" {
     fn pipe2(fds: *mut i32, flags: i32) -> i32;
 }
 
+/// Sets or clears FD_CLOEXEC: a descriptor kept open across an exec is handed to the new image.
+pub fn close_on_exec(fd: i32, on: bool) -> io::Result<()> {
+    // F_GETFD 1, F_SETFD 2, FD_CLOEXEC 1
+    let flags = unsafe { fcntl(fd, 1) };
+    let next = if on { flags | 1 } else { flags & !1 };
+    if flags < 0 || unsafe { fcntl(fd, 2, next) } < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 pub fn nonblocking(fd: i32) -> io::Result<()> {
     let flags = unsafe { fcntl(fd, 3) };
     if flags < 0 || unsafe { fcntl(fd, 4, flags | 0o4000) } < 0 {

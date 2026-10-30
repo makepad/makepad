@@ -177,6 +177,8 @@ pub struct ViewState {
     pub blocked: Vec<String>,
     /// the master's lane merge bot: (sev, line) per lane branch
     pub lanes: Vec<(String, String)>,
+    /// the pre-warm per node: (sev, line)
+    pub prewarm: Vec<(String, String)>,
     pub confirm: Option<Confirm>,
     /// the inspect leases the user holds from the panel: (machine, pid) -> lease id
     pub user_leases: Vec<((String, u32), String)>,
@@ -674,6 +676,7 @@ impl DevhubView {
                 }
                 rest = self.draw_blocked(cx, rest, &st);
                 rest = self.draw_flow(cx, rest, "Lane branches (kept merged with work / main)", &st.lanes);
+                rest = self.draw_flow(cx, rest, "Pre-warm (idle boxes after a landing)", &st.prewarm);
             }
         }
         self.content_h = rest.pos.y + pad + self.scroll - window.pos.y;

@@ -313,6 +313,11 @@ pub fn fulfilled_expectations() -> Vec<AttrKey> {
 /// The lint levels of the command line, from `MAKEPAD_RUN_LINT_FLAGS` (rustc's `-A/-W/-D/-F`
 /// flags, e.g. `-A unused -D warnings`), in order. The UI test harness passes `-A unused`, as
 /// rustc's compiletest does.
+/// Whether the command line sets any lint level (MAKEPAD_RUN_LINT_FLAGS).
+pub fn cmdline_set() -> bool {
+    !cmdline_levels().is_empty()
+}
+
 fn cmdline_levels() -> &'static [(Level, String)] {
     static FLAGS: std::sync::OnceLock<Vec<(Level, String)>> = std::sync::OnceLock::new();
     FLAGS.get_or_init(|| {

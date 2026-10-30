@@ -201,6 +201,58 @@ struct Hub {
     stream: Mutex<TcpStream>,
     /// A send failed (the WM went away): said once.
     broken: AtomicBool,
+    /// An exec hands this connection to the next image: the reader stops at a frame boundary
+    /// (`paused`), and no frame is written any more (`frozen`), so the stream stays whole.
+    pause: AtomicBool,
+    paused: AtomicBool,
+    frozen: AtomicBool,
+}
+
+/// The connection an exec hands over (`prepare_exec`): the hub, its port and this client's id.
+static HANDOVER: Mutex<Option<(Arc<Hub>, u16, u64)>> = Mutex::new(None);
+/// The variable that names the handed-over connection to the next image: `<fd> <port> <client>`.
+const RESUME_ENV: &str = "MAKEPAD_WM_RESUME";
+
+/// Before an exec of this process (a restart into a rebuilt makepad): the WM connection stays
+/// open for the next image, which resumes on it as the same client, so the WM keeps the app's
+/// tile and window (no close, no reopen: its content refreshes). The reader stops at a frame
+/// boundary and writes stop, so neither side sees half a frame. Empty: nothing to hand over
+/// (not WM-hosted, or the reader did not stop in time); the new image then asks the WM socket
+/// again with the same pid and gets its client back.
+pub fn prepare_exec() -> Vec<(String, String)> {
+    use std::os::fd::AsRawFd;
+    let Some((hub, port, client)) = lock(&HANDOVER).clone() else { return Vec::new() };
+    if hub.broken.load(Ordering::Acquire) {
+        return Vec::new();
+    }
+    hub.pause.store(true, Ordering::Release);
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while !hub.paused.load(Ordering::Acquire) && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    if !hub.paused.load(Ordering::Acquire) {
+        hub.pause.store(false, Ordering::Release);
+        return Vec::new();
+    }
+    // a frame being written ends first; none starts after
+    let stream = lock(&hub.stream);
+    hub.frozen.store(true, Ordering::Release);
+    let fd = stream.as_raw_fd();
+    if io::close_on_exec(fd, false).is_err() {
+        hub.frozen.store(false, Ordering::Release);
+        hub.pause.store(false, Ordering::Release);
+        return Vec::new();
+    }
+    vec![(RESUME_ENV.to_string(), format!("{fd} {port} {client}"))]
+}
+
+/// The exec after `prepare_exec` failed: this process goes on with its connection.
+pub fn undo_exec() {
+    use std::os::fd::AsRawFd;
+    let Some((hub, ..)) = lock(&HANDOVER).clone() else { return };
+    let _ = io::close_on_exec(lock(&hub.stream).as_raw_fd(), true);
+    hub.frozen.store(false, Ordering::Release);
+    hub.pause.store(false, Ordering::Release);
 }
 
 impl Hub {
@@ -222,8 +274,37 @@ impl Hub {
         if !head.starts_with(b"HTTP/1.1 101") {
             return Err(format!("the WM's hub refused this client: {}", String::from_utf8_lossy(&head).lines().next().unwrap_or("")));
         }
+        let hub = Self::start(stream, state)?;
+        *lock(&HANDOVER) = Some((hub.clone(), port, client));
+        Ok(hub)
+    }
+
+    /// The connection an earlier image of this process handed over (`prepare_exec`): the same
+    /// client of the same WM, past its handshake.
+    fn resume(state: Arc<State>) -> Option<(Arc<Hub>, u16, u64)> {
+        use std::os::fd::FromRawFd;
+        let text = std::env::var(RESUME_ENV).ok()?;
+        // not for this process's children
+        std::env::remove_var(RESUME_ENV);
+        let mut w = text.split_whitespace().map(|x| x.parse::<u64>().ok());
+        let (Some(Some(fd)), Some(Some(port)), Some(Some(client))) = (w.next(), w.next(), w.next()) else { return None };
+        let fd = i32::try_from(fd).ok()?;
+        // the descriptor must still be a connected socket (else: ask the WM socket)
+        let stream = unsafe { TcpStream::from_raw_fd(fd) };
+        if stream.peer_addr().is_err() {
+            std::mem::forget(stream);
+            return None;
+        }
+        let _ = io::close_on_exec(fd, true);
+        let port = u16::try_from(port).ok()?;
+        let hub = Self::start(stream, state).ok()?;
+        *lock(&HANDOVER) = Some((hub.clone(), port, client));
+        Some((hub, port, client))
+    }
+
+    fn start(stream: TcpStream, state: Arc<State>) -> Result<Arc<Hub>, String> {
         let reader = stream.try_clone().map_err(|e| e.to_string())?;
-        let hub = Arc::new(Hub { stream: Mutex::new(stream), broken: AtomicBool::new(false) });
+        let hub = Arc::new(Hub { stream: Mutex::new(stream), broken: AtomicBool::new(false), pause: AtomicBool::new(false), paused: AtomicBool::new(false), frozen: AtomicBool::new(false) });
         let pong = hub.clone();
         std::thread::Builder::new().name("wm-hub-reader".into()).spawn(move || {
             read_frames(reader, &pong, &state);
@@ -245,7 +326,12 @@ impl Hub {
         let mask = (crate::clock_ns() as u32).to_le_bytes();
         out.extend_from_slice(&mask);
         out.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i & 3]));
-        lock(&self.stream).write_all(&out)
+        let mut stream = lock(&self.stream);
+        // handed to the next image: nothing more from this one
+        if self.frozen.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        stream.write_all(&out)
     }
 
     fn send(&self, msgs: Vec<AppToStudio>) {
@@ -265,7 +351,26 @@ impl Hub {
 
 fn read_frames(mut stream: TcpStream, hub: &Hub, state: &State) {
     let mut message = Vec::new();
+    // between frames the reader looks up now and then: an exec may want the stream whole
+    let idle = Some(std::time::Duration::from_millis(50));
+    let _ = stream.set_read_timeout(idle);
     loop {
+        if hub.pause.load(Ordering::Acquire) && message.is_empty() {
+            hub.paused.store(true, Ordering::Release);
+            while hub.pause.load(Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            hub.paused.store(false, Ordering::Release);
+        }
+        let mut first = [0u8; 1];
+        match stream.peek(&mut first) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => continue,
+            Err(_) => return,
+        }
+        // a frame has begun: read it whole
+        let _ = stream.set_read_timeout(None);
         let mut head = [0u8; 2];
         if stream.read_exact(&mut head).is_err() { return; }
         let (fin, opcode, masked) = (head[0] & 0x80 != 0, head[0] & 0x0f, head[1] & 0x80 != 0);
@@ -286,7 +391,7 @@ fn read_frames(mut stream: TcpStream, hub: &Hub, state: &State) {
             0xA => {}
             0x0 | 0x1 | 0x2 => {
                 message.extend_from_slice(&payload);
-                if !fin { continue; }
+                if !fin { let _ = stream.set_read_timeout(idle); continue; }
                 let data = std::mem::take(&mut message);
                 let msgs = match StudioToAppVec::decode_bin(&data) {
                     Ok((batch, errors)) => {
@@ -295,7 +400,7 @@ fn read_frames(mut stream: TcpStream, hub: &Hub, state: &State) {
                     }
                     Err(_) => match makepad_micro_serde::DeBin::deserialize_bin(&data) {
                         Ok(msg) => vec![msg],
-                        Err(e) => { eprintln!("[hal-wm] undecodable host message: {e:?}"); continue; }
+                        Err(e) => { eprintln!("[hal-wm] undecodable host message: {e:?}"); let _ = stream.set_read_timeout(idle); continue; }
                     },
                 };
                 lock(&state.inbox).extend(msgs);
@@ -303,6 +408,7 @@ fn read_frames(mut stream: TcpStream, hub: &Hub, state: &State) {
             }
             _ => {}
         }
+        let _ = stream.set_read_timeout(idle);
     }
 }
 
@@ -377,19 +483,32 @@ impl App {
     pub(super) fn connect(shared: &'static Shared) -> Result<Self, String> {
         let path = wm_socket::discovery_path().ok_or("no WM socket path (XDG_RUNTIME_DIR unset)")?;
         let name = wm_socket::client_name();
-        let admission = wm_socket::adopt(&path, WIRE, std::process::id(), &name)
-            .map_err(|probe| format!("the makepad WM at {} did not adopt this process: {probe:?}", path.display()))?;
         let state = Arc::new(State { shared, inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false), rings: Default::default(),
             finished: Default::default(), in_flight: Default::default(), device: Default::default() });
         STATE.set(state.clone()).map_err(|_| "WM-hosted shell already connected")?;
-        let hub = Hub::connect(admission.port, admission.client, &name, state.clone())?;
+        // a restart of this process (exec) handed its WM connection over: the same client, tile
+        // and window, without asking the socket
+        let resumed = Hub::resume(state.clone());
+        let (hub, admission) = match resumed.clone() {
+            Some((hub, port, client)) => {
+                eprintln!("[hal-wm] resumed the WM connection of this process's previous image as client {client} ({name})");
+                (hub, wm_socket::Admission { port, client })
+            }
+            None => {
+                let admission = wm_socket::adopt(&path, WIRE, std::process::id(), &name)
+                    .map_err(|probe| format!("the makepad WM at {} did not adopt this process: {probe:?}", path.display()))?;
+                (Hub::connect(admission.port, admission.client, &name, state.clone())?, admission)
+            }
+        };
         a11y::start(hub.clone());
         // Under the WM a makepad window draws its own caption (the WM draws title bars only for
         // foreign Wayland windows): the app's windows get client-side chrome as on a Wayland
         // compositor without server decorations. Its caption's drag query and its window
         // buttons go to the WM through this shell (`HostedDragQuery`, `HostedWindowOp`).
         shared.client_chrome.store(true, Ordering::Release);
-        eprintln!("[hal-wm] the makepad WM at {} hosts this process as client {} ({name})", path.display(), admission.client);
+        if resumed.is_none() {
+            eprintln!("[hal-wm] the makepad WM at {} hosts this process as client {} ({name})", path.display(), admission.client);
+        }
         Ok(Self { state, hub, aux_path: hosted_ipc::aux_path(admission.port, &admission.client.to_string()), aux: None,
             pending: Vec::new(), windows: HashMap::new(), early: HashMap::new(), next_window: 0, ticking: false, asked_frame: false, hidden: false,
             clip_reads: HashMap::new(), next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(), trays: HashMap::new(),

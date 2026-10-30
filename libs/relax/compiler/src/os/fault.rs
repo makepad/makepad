@@ -457,7 +457,7 @@ mod imp {
 mod imp {
     use super::unix::{kind, SIGBUS, SIGFPE, SIGILL, SIGSEGV, SIGTRAP};
     use super::{Action, Fault, Hooks};
-    use crate::jit::{collect_frames, PanicInfo, UNIT};
+    use crate::jit::{collect_frames, cur_unit, PanicInfo};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// SIGUSR1 (Darwin numbering): the hang watchdog's signal
@@ -517,7 +517,7 @@ mod imp {
         let reg = |off: usize| -> *mut u64 { mc.add(off) as *mut u64 };
         let (pc, fp) = (*reg(SS_PC), *reg(SS_FP));
         let tname = crate::os::thread::name(crate::os::thread::current());
-        if UNIT.is_null() {
+        if cur_unit().is_null() {
             eprintln!("makepad: SIGABRT on thread '{}' (no JIT unit)", tname);
             return;
         }
@@ -525,7 +525,8 @@ mod imp {
         let info = PanicInfo { kind: "abort".to_string(), message: format!("SIGABRT (abort() called) on thread '{}'", tname), site: u64::MAX, frames, fault_addr: 0, location: String::new() };
         // the report is a unit call: none when the compiler is busy (this very thread may be
         // the one aborting inside it)
-        match crate::owner::call_within(crate::owner::Class::Job, 0, || (&*UNIT).report(&info)) {
+        let unit_here = cur_unit() as usize; // the calling thread's unit (the closure runs on the owner)
+        match crate::owner::call_within(crate::owner::Class::Job, 0, || (&*(unit_here as *mut crate::jit::Unit)).report(&info)) {
             Some(r) => eprintln!("makepad: abort on thread '{}'\n  report: {}", tname, r),
             None => eprintln!("makepad: SIGABRT on thread '{}' while the compiler is busy", tname),
         }
@@ -537,7 +538,7 @@ mod imp {
         let mc = *(uc.add(UC_MCONTEXT) as *const *mut u8);
         let reg = |off: usize| -> u64 { *(mc.add(off) as *const u64) };
         let (pc, lr, fp) = (reg(SS_PC), reg(SS + 240), reg(SS_FP));
-        if !UNIT.is_null() {
+        if !cur_unit().is_null() {
             let nm = crate::jit::fn_name_at;
             eprintln!("makepad-run watch: stuck thread {:#x} at pc {:#x} ({}) lr {:#x} ({}) fp {:#x}; on_signal at {:#x}", crate::os::thread::current(), pc, nm(pc), lr, nm(lr), fp, on_signal as *const () as usize);
             let mut f = fp;
@@ -560,10 +561,10 @@ mod imp {
         }
         let mc = *(uc.add(UC_MCONTEXT) as *const *mut u8);
         let reg = |off: usize| -> *mut u64 { mc.add(off) as *mut u64 };
-        if UNIT.is_null() {
+        if cur_unit().is_null() {
             return;
         }
-        let u = &*UNIT;
+        let u = &*cur_unit();
         let (pc, fp) = (*reg(SS_PC), *reg(SS_FP));
         let lr = *reg(SS + 240);
         let x16 = *reg(SS + 16 * 8);
