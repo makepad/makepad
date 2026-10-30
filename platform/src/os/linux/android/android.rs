@@ -88,9 +88,9 @@ use {
     std::collections::HashMap,
     std::ffi::CString,
     std::rc::Rc,
-    std::sync::mpsc,
+    std::sync::mpsc::{self, RecvTimeoutError},
     //std::os::raw::{c_void},
-    std::time::Instant,
+    std::time::{Duration, Instant},
 };
 
 const ANDROID_XR_BUFFER_SCALE_MIN: f32 = 0.75;
@@ -329,15 +329,51 @@ impl Cx {
         self.start_network_live_file_watcher();
 
         while !self.os.quit {
+            #[cfg(not(use_vulkan))]
+            let has_pending_gl_retirements = self.has_pending_gl_resource_retirements();
+            #[cfg(use_vulkan)]
+            let has_pending_gl_retirements = false;
+            // Drawing only happens on ticks with a live surface, and a new surface asks for its own redraw.
+            let is_draw_pending = self.os.has_drawable_surface()
+                && (self.os.needs_first_draw
+                    || self.any_passes_dirty()
+                    || self.need_redrawing()
+                    || !self.new_next_frames.is_empty()
+                    || self.demo_time_repaint
+                    || has_pending_gl_retirements);
+            let now = Cx::monotonic_now();
+            let next_timer_wait = self.os.timers.timers.values()
+                .map(|timer| timer.time_until_due(now))
+                .reduce(f64::min);
+            // The rest of a tick's work runs with or without a surface.
+            // Overdue timers fire once per tick, so a timer that never catches up can't starve messages.
+            let is_render_loop_wanted = is_draw_pending
+                || self.os.in_xr_mode
+                || self.os.pending_ime_hide
+                || !self.platform_ops.is_empty()
+                || self.pending_script_reapply
+                || self.pending_live_edit_request
+                || !self.os.video_surfaces.is_empty()
+                || !self.os.camera_players.is_empty()
+                || !self.os.software_video_players.is_empty()
+                || next_timer_wait.is_some_and(|wait| wait <= 0.0);
+            android_jni::set_render_loop_wanted(is_render_loop_wanted);
+
             if self.os.in_xr_mode {
                 if self.openxr_render_loop(&from_java_rx) {
                     continue;
                 };
             }
 
-            // Wait for the next message, blocking until one is received.
+            // Wait for the next message, or while ticks are paused, for the next due timer.
             // This ensures we're in sync with the Android Choreographer when we receive a RenderLoop message.
-            match from_java_rx.recv() {
+            let message = match next_timer_wait {
+                Some(wait) if !is_render_loop_wanted => from_java_rx.recv_timeout(
+                    Duration::try_from_secs_f64(wait).unwrap_or(Duration::MAX)
+                ),
+                _ => from_java_rx.recv().map_err(RecvTimeoutError::from),
+            };
+            match message {
                 Ok(FromJavaMessage::RenderLoop) => {
                     let render_loop_started = std::time::Instant::now();
                     // Drain all pending messages, coalescing consecutive touch-move
@@ -405,8 +441,8 @@ impl Cx {
                         // The event side of a frame: the drained Java messages
                         // (touches coalesced), the timers/signals and the live
                         // edit gate, before any drawing. Only for a vsync that
-                        // draws (the same test `handle_drawing` makes): at rest
-                        // the loop wakes 120 times a second and paints nothing.
+                        // draws (the same test `handle_drawing` makes), since a
+                        // tick can still have work but nothing to paint.
                         if self.any_passes_dirty()
                             || self.need_redrawing()
                             || !self.new_next_frames.is_empty()
@@ -437,7 +473,7 @@ impl Cx {
                         self.os.last_ime_config = None;
                     }
                 }
-                Ok(FromJavaMessage::Wake) => {
+                Ok(FromJavaMessage::Wake) | Err(RecvTimeoutError::Timeout) => {
                     self.handle_other_events();
                 }
                 Ok(message) => {

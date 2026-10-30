@@ -583,24 +583,23 @@ unsafe fn create_native_window_with_env(
     ndk_sys::ANativeWindow_fromSurface(env, surface)
 }
 
+// The render thread posts vsync callbacks too, so the Choreographer is shared across threads.
 #[cfg(not(no_android_choreographer))]
-static mut CHOREOGRAPHER: *mut ndk_sys::AChoreographer = std::ptr::null_mut();
+static CHOREOGRAPHER: std::sync::atomic::AtomicPtr<ndk_sys::AChoreographer> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 #[cfg(not(no_android_choreographer))]
-static mut CHOREOGRAPHER_POST_CALLBACK_FN: Option<
-    unsafe extern "C" fn(
-        *mut ndk_sys::AChoreographer,
-        Option<
-            unsafe extern "C" fn(
-                *mut ndk_sys::AChoreographerFrameCallbackData,
-                *mut std::ffi::c_void,
-            ),
-        >,
-        *mut std::ffi::c_void,
-    ) -> i32,
-> = None;
+static CHOREOGRAPHER_POST_CALLBACK_FN: std::sync::OnceLock<ndk_sys::AChoreographerPostCallbackFn> =
+    std::sync::OnceLock::new();
 
 static IS_RENDER_LOOP_RUNNING: AtomicBool = AtomicBool::new(false);
+
+#[cfg(not(no_android_choreographer))]
+static IS_RENDER_LOOP_WANTED: AtomicBool = AtomicBool::new(true);
+
+/// Set from when a vsync callback gets posted until it runs, so there's never more than one waiting.
+#[cfg(not(no_android_choreographer))]
+static IS_VSYNC_CALLBACK_POSTED: AtomicBool = AtomicBool::new(false);
 
 /// Initializes the render loop which used the Android Choreographer when available to ensure proper vsync.
 /// If `no_android_choreographer` is present (e.g. OHOS with non-compatiblity), we fallback to a simple loop with frame pacing.
@@ -627,7 +626,7 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_initChoreographe
     #[cfg(not(no_android_choreographer))]
     {
         // Otherwise use the actual Choreographer.
-        CHOREOGRAPHER = ndk_sys::AChoreographer_getInstance();
+        CHOREOGRAPHER.store(ndk_sys::AChoreographer_getInstance(), Ordering::Release);
         // AChoreographer_postFrameCallback64 (API 29) and
         // AChoreographer_postVsyncCallback (API 33) must be resolved via dlsym,
         // never declared as `extern "C"` — see the note in ndk_sys.rs. On API
@@ -644,10 +643,12 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_initChoreographe
                 };
                 let frame_callback_64: Option<ndk_sys::AChoreographerPostCallbackFn> =
                     lib.get_symbol("AChoreographer_postFrameCallback64").ok();
-                CHOREOGRAPHER_POST_CALLBACK_FN = vsync.or(frame_callback_64);
+                if let Some(post_callback) = vsync.or(frame_callback_64) {
+                    let _ = CHOREOGRAPHER_POST_CALLBACK_FN.set(post_callback);
+                }
             }
         }
-        match CHOREOGRAPHER_POST_CALLBACK_FN {
+        match CHOREOGRAPHER_POST_CALLBACK_FN.get() {
             Some(_) => post_vsync_callback(),
             None => init_simple_render_loop(device_refresh_rate),
         }
@@ -660,18 +661,43 @@ unsafe extern "C" fn vsync_callback(
     _user_data: *mut std::ffi::c_void,
 ) {
     send_from_java_message(FromJavaMessage::RenderLoop);
-    post_vsync_callback();
+    IS_VSYNC_CALLBACK_POSTED.store(false, Ordering::SeqCst);
+    if IS_RENDER_LOOP_WANTED.load(Ordering::SeqCst) {
+        post_vsync_callback();
+    }
 }
 
+/// Posts the vsync callback, unless one is already waiting to run.
+///
+/// Any thread can call this, since the Choreographer hands posts from other threads to its own looper.
 #[cfg(not(no_android_choreographer))]
 pub unsafe fn post_vsync_callback() {
-    if let Some(post_callback) = CHOREOGRAPHER_POST_CALLBACK_FN {
-        if !CHOREOGRAPHER.is_null() && from_java_messages_already_set() {
-            post_callback(CHOREOGRAPHER, Some(vsync_callback), std::ptr::null_mut());
-            return;
+    let choreographer = CHOREOGRAPHER.load(Ordering::Acquire);
+    let Some(post_callback) = CHOREOGRAPHER_POST_CALLBACK_FN.get() else { return };
+    if choreographer.is_null() || IS_VSYNC_CALLBACK_POSTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if from_java_messages_already_set() {
+        post_callback(choreographer, Some(vsync_callback), std::ptr::null_mut());
+    } else {
+        IS_VSYNC_CALLBACK_POSTED.store(false, Ordering::SeqCst);
+        IS_RENDER_LOOP_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Tells the vsync callback whether the render thread needs more ticks.
+///
+/// Once ticks aren't wanted, the callback stops posting itself, and wanting them again posts it right away.
+/// Without a Choreographer, the fallback loop ticks regardless.
+#[cfg_attr(no_android_choreographer, allow(unused_variables))]
+pub fn set_render_loop_wanted(is_wanted: bool) {
+    #[cfg(not(no_android_choreographer))]
+    {
+        IS_RENDER_LOOP_WANTED.store(is_wanted, Ordering::SeqCst);
+        if is_wanted {
+            unsafe { post_vsync_callback() };
         }
     }
-    IS_RENDER_LOOP_RUNNING.store(false, Ordering::SeqCst);
 }
 
 /// Fallback render loop used when the Android Choreographer isn't available
