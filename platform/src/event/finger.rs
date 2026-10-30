@@ -714,6 +714,7 @@ pub struct CxFingers {
     scroll_drag_locks: Vec<(DigitId, ScrollDirection)>,
     /// The presses something outside a drag scroller already held when it got them, which it never joins.
     presses_held_outside: Vec<(DigitId, Area)>,
+    is_mouse_drag_scrolling_disabled: bool,
 }
 
 impl CxFingers {
@@ -1175,6 +1176,16 @@ impl CxFingers {
         self.scroll_drag_holders.retain(|(id, _)| *id != digit_id);
         self.scroll_drag_locks.retain(|(id, _)| *id != digit_id);
         self.presses_held_outside.retain(|(id, _)| *id != digit_id);
+    }
+
+    /// See [`Cx::set_mouse_drag_scrolling`].
+    pub(crate) fn set_mouse_drag_scrolling(&mut self, is_enabled: bool) {
+        self.is_mouse_drag_scrolling_disabled = !is_enabled;
+    }
+
+    /// Whether a mouse press can start a drag scroll, see [`Cx::set_mouse_drag_scrolling`].
+    pub fn can_mouse_drag_scroll(&self) -> bool {
+        !self.is_mouse_drag_scrolling_disabled
     }
 
     /// Whether `area` owns `digit_id`'s drag along `axis`, taking it unless another
