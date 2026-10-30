@@ -318,6 +318,16 @@ fn boot_thread(
     for (k, v) in &conf.env {
         std::env::set_var(k, v);
     }
+    // A phone with the memory for it compiles ahead at full width (`--ahead=aot-max`: a background
+    // pass over everything reachable from what ran, on every worker) unless the conf or the
+    // environment says otherwise. With the default level an app's domain loaded 11-17 s after the
+    // WM's first frame on a Snapdragon 685 and the WM's main thread waited behind it that long;
+    // with aot-max 3-6 s once the cache has seen a few runs, the cold first frame 56 s instead of
+    // 100 s. The pass costs memory (1.5 GB resident during a cold run, +0.2 GB warm), so a phone
+    // under 6 GB keeps the default level.
+    if std::env::var_os("MAKEPAD_RUN_AHEAD").is_none() && boot::total_memory_mb().is_some_and(|mb| mb >= 6 * 1024) {
+        std::env::set_var("MAKEPAD_RUN_AHEAD", "aot-max");
+    }
     let chosen = if app.is_empty() {
         conf.apps.first().map(|a| App { package: a.package.clone(), cargo_flags: a.cargo_flags.clone() })
     } else {

@@ -74,6 +74,13 @@ pub fn status() -> Status {
 
 /// The compile-memory budget for this device (MAKEPAD_RUN_MEM_BUDGET_MB): the smaller of a quarter of the
 /// physical RAM and 60% of what is available, at least 256 MB (/proc/meminfo).
+/// The device's RAM (MemTotal), for the choices that depend on its class.
+pub fn total_memory_mb() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb: u64 = text.lines().find(|l| l.starts_with("MemTotal:"))?.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1024)
+}
+
 pub fn memory_budget_mb() -> Option<u64> {
     let text = std::fs::read_to_string("/proc/meminfo").ok()?;
     let kb = |key: &str| -> Option<u64> { text.lines().find(|l| l.starts_with(key))?.split_whitespace().nth(1)?.parse().ok() };
