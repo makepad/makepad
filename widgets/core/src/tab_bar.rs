@@ -359,6 +359,9 @@ impl Widget for TabBar {
                     cx.widget_action(uid, TabBarAction::ShouldTabStartDrag(*tab_id));
                 }
                 TabAction::ShouldTabStopDrag => {}
+                TabAction::WasClicked { device } => {
+                    cx.widget_action(uid, TabBarAction::TabWasClicked { tab_id: *tab_id, device });
+                }
                 TabAction::TouchDown { abs, time, digit_id } => {
                     // An overflowing strip takes the horizontal drag, so nothing around it moves too.
                     let is_overflowing = self.scroll_bars.get_scroll_view_total().x
@@ -747,6 +750,7 @@ impl TabBar {
 #[derive(Clone, Debug, Default)]
 pub enum TabBarAction {
     TabWasPressed(LiveId),
+    TabWasClicked { tab_id: LiveId, device: DigitDevice },
     ShouldTabStartDrag(LiveId),
     TabCloseWasPressed(LiveId),
     #[default]
