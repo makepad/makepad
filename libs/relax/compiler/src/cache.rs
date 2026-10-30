@@ -4570,7 +4570,7 @@ fn front_order_key(set: u128) -> u128 {
     let mut h = Sip128::new();
     h.str("front-order");
     h.u128(crate::codegen_id::id());
-    h.str(std::env::consts::ARCH); h.str(std::env::consts::OS);
+    h.str(&crate::codegen_id::target_tag());
     h.u128(set);
     h.finish128()
 }
