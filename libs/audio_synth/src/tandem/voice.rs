@@ -13,6 +13,7 @@ use crate::kit::flt::{FilterUnit, TiltNoise};
 use crate::kit::formula::VoiceInputs;
 use crate::kit::mods::{Adsr, Lfo, ModCtx};
 use super::formula::FormulaBank;
+use crate::kit::tuning::Tuning;
 use crate::kit::oscs::{Osc, OscBlock};
 use crate::kit::shaper::Shaper;
 
@@ -39,6 +40,9 @@ pub struct VoiceCtx<'a> {
     pub character: u8,
     pub mpe: bool,
     pub audio_in: Option<(&'a [f32; 64], &'a [f32; 64])>,
+    /// A tuning that retunes every pitch (oscillator notes, cutoffs whose
+    /// extend flag says "follow the tuning").
+    pub retune_all: Option<&'a Tuning>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -66,6 +70,8 @@ pub struct Voice {
     pub porta_phase: f32,
     pub k_src: f32,
     pub pkey: f32,
+    /// The (tuned) note of `key`: what the glide heads for.
+    pub note: f32,
     pub last_gliss: i32,
     pub mpe_bend: f32,
     pub mpe_pressure: f32,
@@ -91,7 +97,7 @@ pub struct Voice {
     tilt: TiltNoise,
     rng: Rng,
     started: bool,
-    /// Formula instances of the voice LFOs (keys into the scene's bank).
+    /// Formula instances of the voice LFOs (keys into the engine's bank).
     fk: [Option<usize>; 6],
 }
 
@@ -110,6 +116,9 @@ struct Lines {
 /// What a note start brings.
 pub struct NoteStart {
     pub key: i32,
+    /// The note the key plays (the key in standard tuning; its tuned
+    /// note number when a tuning retunes the keys).
+    pub note: f32,
     pub channel: u8,
     pub velocity: f32,
     pub age: u64,
@@ -138,6 +147,7 @@ impl Voice {
             porta_phase: 1.0,
             k_src: 60.0,
             pkey: 60.0,
+            note: 60.0,
             last_gliss: 60,
             mpe_bend: 0.0,
             mpe_pressure: 0.0,
@@ -216,16 +226,17 @@ impl Voice {
         self.rand = n.rand;
         self.alt = n.alt;
         match n.glide_from {
-            Some(k) if (k - n.key as f32).abs() > 1e-6 => {
+            Some(k) if (k - n.note).abs() > 1e-6 => {
                 self.k_src = k;
                 self.porta_phase = 0.0;
             }
             _ => {
-                self.k_src = n.key as f32;
+                self.k_src = n.note;
                 self.porta_phase = 1.0;
             }
         }
-        self.pkey = if self.porta_phase < 1.0 { self.k_src } else { n.key as f32 };
+        self.note = n.note;
+        self.pkey = if self.porta_phase < 1.0 { self.k_src } else { n.note };
         self.last_gliss = self.pkey.round() as i32;
         let s = cx.scene;
         // The first copy: scene values + voice routes without LFO sources (they have not run yet).
@@ -242,13 +253,13 @@ impl Voice {
         for l in 0..6 {
             let lp = super::convert::lfo(cx.prog, s, l, &self.eff[..]);
             self.lfos[l].attack(&lp, &cx.mod_ctx, &cx.prog.stepseq[s][l], &cx.prog.msegs[s][l]);
-            if bank.of_lfo[l].is_some() {
+            if bank.of_lfo[s][l].is_some() {
                 if self.fk[l].is_none() {
-                    self.fk[l] = bank.acquire(l);
+                    self.fk[l] = bank.acquire(s, l);
                 }
                 if let Some(k) = self.fk[l] {
                     let inp = super::formula::inputs(cx.prog, l, &self.eff[..], &self.lfos[l], &cx.mod_ctx, self.macros(cx), Some(self.voice_inputs()));
-                    bank.start(l, k, &inp);
+                    bank.start(s, l, k, &inp);
                 }
             }
         }
@@ -304,13 +315,14 @@ impl Voice {
     }
 
     /// Legato re-pitch (single-trigger modes): glide from where it is.
-    pub fn legato(&mut self, key: i32, velocity: f32, glide: bool) {
+    pub fn legato(&mut self, key: i32, note: f32, velocity: f32, glide: bool) {
         self.k_src = self.pkey;
         self.key = key;
+        self.note = note;
         self.velocity = velocity;
         self.porta_phase = if glide { 0.0 } else { 1.0 };
         if !glide {
-            self.pkey = key as f32;
+            self.pkey = note;
         }
         self.gate = true;
         self.release_age = 0;
@@ -337,10 +349,10 @@ impl Voice {
     }
 
     /// Give the voice's formula instances back (its end).
-    pub fn release_formulas(&mut self, bank: &mut FormulaBank) {
+    pub fn release_formulas(&mut self, scene: usize, bank: &mut FormulaBank) {
         for l in 0..6 {
             if let Some(k) = self.fk[l].take() {
-                bank.release(l, k);
+                bank.release(scene, l, k);
             }
         }
     }
@@ -419,7 +431,10 @@ impl Voice {
             } else {
                 n += x;
             }
-            n
+            match cx.retune_all {
+                Some(t) => t.retune(n),
+                None => n,
+            }
         })
     }
 
@@ -466,7 +481,7 @@ impl Voice {
                 self.lfos[l].process_block(&lp, &cx.mod_ctx, &prog.stepseq[s][l], &prog.msegs[s][l]);
                 if let Some(k) = self.fk[l] {
                     let inp = super::formula::inputs(prog, l, &self.eff[..], &self.lfos[l], &cx.mod_ctx, self.macros(cx), Some(self.voice_inputs()));
-                    bank.process(l, k, &inp, lp.magnitude, lp.unipolar, &mut self.lfos[l]);
+                    bank.process(s, l, k, &inp, lp.magnitude, lp.unipolar, &mut self.lfos[l]);
                 }
             }
         }
@@ -616,8 +631,17 @@ impl Voice {
         // 8. Filter block controls.
         let fenv = feg;
         let kt = self.voice_pitch(cx, &e) - e[sc::KTRKROOT];
-        let cut1 = e[sc::F1_CUTOFF] + e[sc::F1_KEYTRACK] * kt + e[sc::F1_ENVMOD] * fenv;
+        let mut cut1 = e[sc::F1_CUTOFF] + e[sc::F1_KEYTRACK] * kt + e[sc::F1_ENVMOD] * fenv;
         let mut cut2 = e[sc::F2_CUTOFF] + e[sc::F2_KEYTRACK] * kt + e[sc::F2_ENVMOD] * fenv;
+        // "Apply tuning" (cutoff extend): the cutoff note (vs A440) through the scale.
+        if let Some(t) = cx.retune_all {
+            if prog.scene_value(s, sc::F1_CUTOFF).extend {
+                cut1 = t.retune(cut1 + 69.0) - 69.0;
+            }
+            if prog.scene_value(s, sc::F2_CUTOFF).extend {
+                cut2 = t.retune(cut2 + 69.0) - 69.0;
+            }
+        }
         if e[sc::F2_IS_OFFSET] > 0.5 {
             cut2 += cut1;
         }
@@ -830,7 +854,7 @@ impl Voice {
 
     fn portamento(&mut self, cx: &VoiceCtx) {
         let s = cx.scene;
-        let k = self.key as f32;
+        let k = self.note;
         let p = self.eff[sc::PORTAMENTO];
         let opts = cx.prog.porta[s];
         if self.porta_phase < 1.0 && p > -8.0 {

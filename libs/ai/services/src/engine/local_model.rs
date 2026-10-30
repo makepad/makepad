@@ -176,6 +176,13 @@ fn set_hub_find(find: HubFind) {
     }
 }
 
+/// The app is shutting down: a running hub probe ends at its next poll, none starts again, and
+/// the fleet beacon listener ends (under `makepad run` the app's domain waits for its threads).
+pub fn stop_hub_find() {
+    makepad_ai_hub::hub_chat::stop_fleet_probes();
+    makepad_ai_hub::discovery::stop_listener();
+}
+
 /// The current discovery answer. The first call (and one per [`HUB_RESCAN`]
 /// while nothing is found) starts a probe on its own thread: the same
 /// discovery the chat election runs, which loads no model and sends no

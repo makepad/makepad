@@ -88,6 +88,8 @@ const SEEN: LiveId = live_id!(seen_all);
 const DEVSW: LiveId = live_id!(dev_switch);
 const OPEN: LiveId = live_id!(open_window);
 const LOGIN: LiveId = live_id!(open_at_login);
+/// the master's tray menu: node `i`'s dev switch is item `DEV_BASE + i`
+const DEV_BASE: u64 = 0x6465_7600_0000;
 const DROPDOWN: Vec2d = Vec2d { x: 620.0, y: 720.0 };
 const NODE_DROPDOWN_W: f64 = 560.0;
 /// the live view's redraw rate while it shows
@@ -385,6 +387,9 @@ pub struct App {
     dismissed: Option<std::time::Instant>,
     #[rust]
     tray_key: String,
+    /// the node names behind the tray menu's dev switches, in menu order
+    #[rust]
+    dev_nodes: Vec<String>,
     /// "Open at login": None = not offered (not an installed bundle)
     #[rust]
     login: Option<bool>,
@@ -407,16 +412,26 @@ impl App {
 
     fn refresh(&mut self, cx: &mut Cx) {
         let (g, status) = self.status();
-        let key = format!("{g:?}|{status}|{:?}|{}", self.login, makepad_devhub::lease::exec::writes_allowed());
+        let nodes: Vec<(String, bool)> = match &self.core {
+            Some(Core::Master(m)) => m.master.leases.nodes().into_iter().map(|n| (n.name, n.dev)).collect(),
+            _ => Vec::new(),
+        };
+        let key = format!("{g:?}|{status}|{:?}|{nodes:?}|{}", self.login, makepad_devhub::lease::exec::writes_allowed());
         if key != self.tray_key {
             self.tray_key = key;
             // the menu is the secondary click's; the primary click opens the dropdown (the
             // master's panel, a node's task view)
             let mut menu = vec![TrayMenuItem::Item { id: live_id!(status), label: status.clone(), enabled: false, checked: None }, TrayMenuItem::Line];
             if matches!(self.core, Some(Core::Master(_))) {
+                menu.push(TrayMenuItem::item(OPEN, "Open panel"));
                 menu.push(TrayMenuItem::item(SEEN, "Mark all read"));
-                if !cx.desktop_has_tray_dropdown() {
-                    menu.push(TrayMenuItem::item(OPEN, "Open in window"));
+                if !nodes.is_empty() {
+                    menu.push(TrayMenuItem::Line);
+                    self.dev_nodes = nodes.iter().map(|(n, _)| n.clone()).collect();
+                    for (i, (name, dev)) in nodes.iter().enumerate() {
+                        menu.push(TrayMenuItem::check(LiveId(DEV_BASE + i as u64), format!("Dev on {name}"), *dev));
+                    }
+                    menu.push(TrayMenuItem::Line);
                 }
                 if let Some(on) = self.login {
                     menu.push(TrayMenuItem::Item { id: LOGIN, label: "Open at login".into(), enabled: true, checked: Some(on) });
@@ -675,6 +690,10 @@ impl App {
                             lm.serve("release", id, &mut out);
                             format!("{id} released")
                         }
+                        Confirm::Cancel(id) => {
+                            lm.serve("cancel", id, &mut out);
+                            format!("{id} cancelled by user")
+                        }
                         Confirm::Evict(who) => {
                             lm.serve("evict", who, &mut out);
                             format!("{who} evicted and blocked")
@@ -785,6 +804,11 @@ impl MatchEvent for App {
 }
 
 impl AppMain for App {
+    /// the master lives in the menu bar: no Dock icon until its panel window opens
+    fn menu_bar_app() -> bool {
+        true
+    }
+
     fn outlives_window_manager() -> bool {
         true
     }
@@ -811,6 +835,16 @@ impl AppMain for App {
                         Err(e) => log_line(&format!("devhub: open at login: {e}")),
                     }
                     self.login = installed::login();
+                    self.refresh(cx);
+                }
+                id if id.0 >= DEV_BASE && id.0 < DEV_BASE + 4096 => {
+                    let i = (id.0 - DEV_BASE) as usize;
+                    if let (Some(Core::Master(m)), Some(name)) = (&self.core, self.dev_nodes.get(i)) {
+                        let on = !m.master.leases.nodes().iter().any(|n| &n.name == name && n.dev);
+                        if let Err(e) = m.master.leases.set_dev(name, on) {
+                            log_line(&format!("devhub: dev {name}: {e}"));
+                        }
+                    }
                     self.refresh(cx);
                 }
                 id if id == DEVSW => {

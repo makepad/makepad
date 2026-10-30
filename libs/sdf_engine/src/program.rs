@@ -200,7 +200,7 @@ impl Lower {
                 self.out.push([op::ROUND, f(*radius), 0.0, 0.0]);
             }
             SdfNode::Transform { at, rotate, scale, of } => self.xform(affine_into(rot_deg(*rotate), *at, *scale), *scale, |s| s.node(of))?,
-            SdfNode::Material { slot, of } => {
+            SdfNode::Material { slot, of, .. } => {
                 self.out.push([op::MAT_PUSH, *slot as f32, 0.0, 0.0]);
                 self.node(of)?;
                 self.out.push([op::MAT_POP, 0.0, 0.0, 0.0]);

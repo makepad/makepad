@@ -165,8 +165,14 @@ pub struct Cx {
     pub(crate) new_next_frames: HashSet<NextFrame>,
     /// Frame requests made so far (`Cx::frame_requests`).
     pub(crate) frame_requests: u64,
-    /// The desktop windows while a remote headset streams (`Cx::xr_hold_windows`).
-    pub(crate) xr_window_hold: crate::draw_pass::XrWindowHold,
+    /// An `Event::XrUpdate` is being handled: what is redrawn now is drawn for a remote
+    /// headset's frame, and paints no window (`Cx::compute_pass_repaint_order`).
+    pub(crate) in_xr_update: bool,
+    /// Something other than a remote headset's frame redrew since the windows last painted (or
+    /// a grab waits for them): with an offscreen XR display the windows paint only then.
+    pub(crate) window_redrawn: bool,
+    /// Repaints that painted a window, since the start (`Cx::window_paints`).
+    pub(crate) window_paints: u64,
     /// A child its host says nothing shows of (`HostedVisible`: a hosted process over its
     /// socket, a HAL domain as an app message from its parent): next-frame callbacks and draws
     /// wait until it is shown again (`hosted_frames_held`).
@@ -1048,7 +1054,9 @@ impl Cx {
             studio_http: "".to_string(),
             new_next_frames: Default::default(),
             frame_requests: 0,
-            xr_window_hold: Default::default(),
+            in_xr_update: false,
+            window_redrawn: false,
+            window_paints: 0,
             hosted_hidden: false,
 
             post_draw_hook: None,

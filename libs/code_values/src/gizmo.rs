@@ -535,7 +535,7 @@ impl CodeValues {
         let set = |this: &mut Self, st: SpaceState| this.popup = Some(Popup::Space { site, rect, space: Box::new(st) });
         match event {
             Event::MouseDown(e) if !rect.contains(e.abs) => {
-                self.close(&mut r.edits);
+                self.close(&mut r);
                 r.consumed = true;
                 r.redraw = true;
             }
@@ -580,7 +580,7 @@ impl CodeValues {
                     let span = k[0].0.start..k[2].0.end;
                     let id = self.next_gesture();
                     let text = self.source[span.clone()].to_string();
-                    r.edits.push(ValueEdit::Focus(span.start));
+                    r.focus = Some(span.start);
                     self.gesture = Some(Gesture { id, span, last: text.clone(), original: text, scrub: None });
                 }
                 st.drag = Some(SpaceDrag { mode, key, from: e.abs, start: start_v, written, hit0: cam.on_plane(e.abs, start_v), s0, orbit0: st.orbit,
@@ -626,7 +626,7 @@ impl CodeValues {
                         st.orbit.pitch = (d.orbit0.pitch + delta.y * 0.01).clamp(-1.45, 1.45);
                     } else {
                         let cam0 = Cam::new(&st.orbit, view);
-                        self.space_move(&mut r.edits, &cam0, &d, e.abs, e.modifiers.shift, false, snap_step);
+                        self.space_move(&mut r, &cam0, &d, e.abs, e.modifiers.shift, false, snap_step);
                     }
                     set(self, st);
                     r.redraw = true;
@@ -647,7 +647,7 @@ impl CodeValues {
                 r.consumed = true;
                 if let Some(d) = st.drag.take() {
                     if !matches!(d.mode, DragMode::Orbit | DragMode::AxisPending) {
-                        self.space_move(&mut r.edits, &cam, &d, e.abs, e.modifiers.shift, true, snap_step);
+                        self.space_move(&mut r, &cam, &d, e.abs, e.modifiers.shift, true, snap_step);
                     }
                     self.gesture = None;
                     set(self, st);
@@ -664,9 +664,9 @@ impl CodeValues {
             Event::KeyDown(k) if k.key_code == KeyCode::Escape || k.key_code == KeyCode::ReturnKey => {
                 if st.drag.is_some() && k.key_code == KeyCode::Escape {
                     // Back to where the drag began, and closed.
-                    self.revert(&mut r.edits);
+                    self.revert(&mut r);
                 } else {
-                    self.close(&mut r.edits);
+                    self.close(&mut r);
                 }
                 r.consumed = true;
                 r.redraw = true;
@@ -682,7 +682,7 @@ impl CodeValues {
 
     /// A drag step: the key's new value, written (only its changed numbers;
     /// what is between them kept).
-    fn space_move(&mut self, edits: &mut Vec<ValueEdit>, cam: &Cam, d: &SpaceDrag, abs: DVec2, shift: bool, done: bool, step: f64) {
+    fn space_move(&mut self, r: &mut CodeValuesResponse, cam: &Cam, d: &SpaceDrag, abs: DVec2, shift: bool, done: bool, step: f64) {
         if d.written.len() != 3 {
             return;
         }
@@ -742,7 +742,7 @@ impl CodeValues {
             self.gesture = None;
             return;
         }
-        self.write(edits, out, done);
+        self.write(r, out, done);
     }
 }
 

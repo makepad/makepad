@@ -1,13 +1,4 @@
-//! How soon an edit to a neural voice's line is heard, and how fast the
-//! voice renders, on this machine: `neural_latency [edits]`.
-//!
-//! A score whose loop sings one line on the neural voice (`engine: @neural`)
-//! plays in real time through the same path a game or Stage plays a score
-//! (a live composer thread ahead of a clock, the audio graph rendered in
-//! device-sized passes, here paced by the wall clock and sent to no device).
-//! Every few seconds the line's melody moves between E4 and C5 and its words
-//! change; the output's pitch tells when the edited line is first heard. The
-//! installed voice sings (`sung::neural::model_path`).
+//! The native tool (see main.rs).
 
 use makepad_audio_synth::Instrument;
 use makepad_score_live::game::{music, Clocking};
@@ -44,7 +35,7 @@ fn pitch(x: &[f32]) -> Option<f32> {
     (best.0 > 0.5 * energy).then(|| RATE / best.1 as f32)
 }
 
-fn main() {
+pub fn run() {
     let edits: usize = std::env::args().skip(1).find_map(|v| v.parse().ok()).unwrap_or(4);
     let path = neural::model_path();
     let t = Instant::now();

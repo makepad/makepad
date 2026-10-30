@@ -8,7 +8,7 @@ use crate::edit::Splice;
 pub type SiteId = String;
 
 /// What a value measures; it picks the control and how a typed entry parses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum ValueKind {
     #[default]
     Number,
@@ -33,6 +33,12 @@ pub enum ValueKind {
     Text,
     Font,
     Media,
+    /// A name of a function (a slot: another of the same parameters fits).
+    Function,
+    /// A record of fields.
+    Record,
+    /// A list of values.
+    List,
     /// Code: shown, edited as text only.
     Code,
 }
@@ -69,6 +75,9 @@ impl ValueKind {
             ValueKind::Text => "text",
             ValueKind::Font => "font",
             ValueKind::Media => "media",
+            ValueKind::Function => "function",
+            ValueKind::Record => "record",
+            ValueKind::List => "list",
             ValueKind::Code => "code",
         }
     }
@@ -77,7 +86,7 @@ impl ValueKind {
     }
 }
 
-const ALL_KINDS: [ValueKind; 20] = [
+const ALL_KINDS: [ValueKind; 23] = [
     ValueKind::Number,
     ValueKind::Length,
     ValueKind::Radius,
@@ -97,6 +106,9 @@ const ALL_KINDS: [ValueKind; 20] = [
     ValueKind::Text,
     ValueKind::Font,
     ValueKind::Media,
+    ValueKind::Function,
+    ValueKind::Record,
+    ValueKind::List,
     ValueKind::Code,
 ];
 
@@ -195,6 +207,8 @@ pub struct ValueSite {
     pub choices: Vec<String>,
     pub default: Option<Value>,
     pub value: Value,
+    /// The value as written in the source (empty when not written).
+    pub text: String,
     /// Tuned rarely (mesh detail, segments): listed last.
     pub detail: bool,
     /// Worked out from other values: shown, not edited.
@@ -208,6 +222,21 @@ pub struct ValueSite {
     pub anchor: Option<Anchor>,
     /// Other ids this value shapes or belongs to (objects, nodes), for highlighting.
     pub shapes: Vec<String>,
+}
+
+impl ValueSite {
+    /// The file it is written in (0 when not written).
+    pub fn file(&self) -> usize {
+        self.span.as_ref().map_or(0, |s| s.0)
+    }
+    /// Its bytes there (empty when not written).
+    pub fn range(&self) -> std::ops::Range<usize> {
+        self.span.as_ref().map_or(0..0, |s| s.1.clone())
+    }
+    /// Whether its kind is a number with a unit or none.
+    pub fn is_numeric(&self) -> bool {
+        self.kind.is_numeric()
+    }
 }
 
 /// A document's editable values.

@@ -1,8 +1,8 @@
-//! Formula LFOs in a Tandem scene: one runner per distinct script the
-//! scene's LFOs use (its globals, tables, random generator and error state
-//! belong to the text, so every instance of it shares the runner), an
-//! instance per LFO slot that plays it, and the block inputs the scripts
-//! read.
+//! Formula LFOs in a Tandem engine: one runner per distinct script the
+//! program's LFOs use, over both scenes (a script's globals, tables, random
+//! generator and error state belong to its text, so every instance of it,
+//! in either scene, shares the runner), an instance per LFO slot that plays
+//! it, and the block inputs the scripts read.
 
 use super::catalog::{sc, N_LFO};
 use super::program::Program;
@@ -15,58 +15,50 @@ const VOICES: usize = super::scene::MAX_VOICES;
 #[derive(Default)]
 pub struct FormulaBank {
     pub runners: Vec<Runner>,
-    /// LFO slot (0..5 voice, 6..11 scene) -> its runner.
-    pub of_lfo: [Option<usize>; N_LFO],
+    /// Scene, LFO slot (0..5 voice, 6..11 scene) -> its runner.
+    pub of_lfo: [[Option<usize>; N_LFO]; 2],
 }
 
 impl FormulaBank {
-    /// The runners scene `s` of `prog` needs (allocates: when a program is
-    /// installed, never per note).
-    pub fn for_scene(prog: &Program, s: usize) -> FormulaBank {
+    /// The runners `prog` needs (allocates: when a program is installed,
+    /// never per note). The program already holds each distinct text once.
+    pub fn for_program(prog: &Program) -> FormulaBank {
         let mut bank = FormulaBank::default();
-        let mut texts: Vec<usize> = Vec::new();
-        for l in 0..N_LFO {
-            if let Some(fi) = prog.formula_of[s][l] {
-                let r = match texts.iter().position(|t| *t == fi as usize) {
-                    Some(r) => r,
-                    None => {
-                        texts.push(fi as usize);
-                        texts.len() - 1
-                    }
-                };
-                bank.of_lfo[l] = Some(r);
+        for s in 0..2 {
+            for l in 0..N_LFO {
+                bank.of_lfo[s][l] = prog.formula_of[s][l].map(|fi| fi as usize);
             }
         }
-        for (r, fi) in texts.iter().enumerate() {
-            let voice_slots = (0..6).filter(|l| bank.of_lfo[*l] == Some(r)).count();
-            let scene_slots = (6..N_LFO).filter(|l| bank.of_lfo[*l] == Some(r)).count();
-            bank.runners.push(Runner::new(prog.formulas[*fi].clone(), VOICES * voice_slots + scene_slots));
+        for (fi, f) in prog.formulas.iter().enumerate() {
+            let slots = |range: std::ops::Range<usize>| (0..2).map(|s| range.clone().filter(|l| bank.of_lfo[s][*l] == Some(fi)).count()).sum::<usize>();
+            bank.runners.push(Runner::new(f.clone(), VOICES * slots(0..6) + slots(6..N_LFO)));
         }
         bank
     }
 
-    pub fn acquire(&mut self, lfo: usize) -> Option<usize> {
-        let r = self.of_lfo[lfo]?;
+    pub fn acquire(&mut self, s: usize, lfo: usize) -> Option<usize> {
+        let r = self.of_lfo[s][lfo]?;
         self.runners[r].acquire()
     }
 
-    pub fn release(&mut self, lfo: usize, k: usize) {
-        if let Some(r) = self.of_lfo[lfo] {
+    pub fn release(&mut self, s: usize, lfo: usize, k: usize) {
+        if let Some(r) = self.of_lfo[s][lfo] {
             self.runners[r].release(k);
         }
     }
 
-    /// Start instance `k` of LFO `lfo` (its attack).
-    pub fn start(&mut self, lfo: usize, k: usize, inputs: &FormulaInputs) {
-        if let Some(r) = self.of_lfo[lfo] {
+    /// Start instance `k` of scene `s`'s LFO `lfo` (its attack).
+    pub fn start(&mut self, s: usize, lfo: usize, k: usize, inputs: &FormulaInputs) {
+        if let Some(r) = self.of_lfo[s][lfo] {
             self.runners[r].start(k, inputs);
         }
     }
 
     /// One block of instance `k`: its 16 sources and retrigger requests into
     /// the LFO (after its `process_block`).
-    pub fn process(&mut self, lfo: usize, k: usize, inputs: &FormulaInputs, magnitude: f32, unipolar: bool, out: &mut Lfo) {
-        let Some(r) = self.of_lfo[lfo] else { return };
+    #[allow(clippy::too_many_arguments)]
+    pub fn process(&mut self, s: usize, lfo: usize, k: usize, inputs: &FormulaInputs, magnitude: f32, unipolar: bool, out: &mut Lfo) {
+        let Some(r) = self.of_lfo[s][lfo] else { return };
         let o = self.runners[r].process(k, inputs);
         let eg = out.env_level();
         let a = magnitude.clamp(-3.0, 3.0);
@@ -75,9 +67,9 @@ impl FormulaBank {
         out.set_formula_outputs(&v, o.retrigger_aeg, o.retrigger_feg);
     }
 
-    /// A run-time stop of LFO `lfo`'s script (shown on the modulator).
-    pub fn error(&self, lfo: usize) -> Option<String> {
-        let r = self.of_lfo[lfo]?;
+    /// A run-time stop of scene `s`'s LFO `lfo` script (shown on the modulator).
+    pub fn error(&self, s: usize, lfo: usize) -> Option<String> {
+        let r = self.of_lfo[s][lfo]?;
         self.runners[r].error().map(|e| format!("formula stopped (line {}): {}", e.line, e.message))
     }
 }
@@ -108,5 +100,38 @@ pub fn inputs(prog: &Program, l: usize, eff: &[f32], lfo: &Lfo, ctx: &ModCtx, ma
         macros,
         voice,
         ..FormulaInputs::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tandem::Patch;
+
+    /// One script in both scenes: one runner, and its process globals are shared across the scenes.
+    #[test]
+    fn one_runner_per_script_across_scenes() {
+        let text = "function process(state)\n    if count == nil then count = 0 end\n    count = count + 1\n    state.output = count / 100\n    return state\nend\n";
+        let mut p = Patch::init();
+        for s in ["a", "b"] {
+            p.set(&format!("{s}_lfo6_shape"), 9.0);
+        }
+        p.formulae[0][6] = Some(text.to_string());
+        p.formulae[1][6] = Some(text.to_string());
+        let prog = Program::compile(&p);
+        assert!(prog.problems.is_empty(), "{:?}", prog.problems);
+        let mut bank = FormulaBank::for_program(&prog);
+        assert_eq!(bank.runners.len(), 1);
+        assert_eq!(bank.of_lfo[0][6], bank.of_lfo[1][6]);
+        let (ka, kb) = (bank.acquire(0, 6).unwrap(), bank.acquire(1, 6).unwrap());
+        assert_ne!(ka, kb);
+        let inp = FormulaInputs { samplerate: 48000.0, block_size: 32.0, ..FormulaInputs::default() };
+        bank.start(0, 6, ka, &inp);
+        bank.start(1, 6, kb, &inp);
+        let r = bank.of_lfo[0][6].unwrap();
+        assert!((bank.runners[r].process(ka, &inp).outputs[0] - 0.01).abs() < 1e-6);
+        // Scene B's instance sees the count scene A's left.
+        let o = bank.runners[r].process(kb, &inp);
+        assert!((o.outputs[0] - 0.02).abs() < 1e-6, "{:?}", o.outputs);
     }
 }

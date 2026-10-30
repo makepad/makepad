@@ -281,8 +281,6 @@ impl CodeValues {
             } else {
                 let at = match axis {
                     DataAxis::Time { per_second, start } if per_second > 0.0 => format!("{}s", fmt_axis(start + k as f64 / per_second)),
-                    DataAxis::Letters => format!("letter {k}"),
-                    DataAxis::Words => format!("word {k}"),
                     _ => format!("[{k}]"),
                 };
                 format!("{at}   {}", &self.source[items[k].0.clone()])
@@ -350,7 +348,7 @@ impl CodeValues {
                     };
                     let id = self.next_gesture();
                     let written = self.source[span.clone()].to_string();
-                    r.edits.push(ValueEdit::Focus(span.start));
+                    r.focus = Some(span.start);
                     self.gesture = Some(Gesture { id, span, last: written.clone(), original: written, scrub: None });
                     let p = map.point(&items, k);
                     let grab = if pairs || (p.y - e.abs.y).abs() < 12.0 { p - e.abs } else { dvec2(0.0, 0.0) };
@@ -362,7 +360,7 @@ impl CodeValues {
             }
             Event::MouseMove(e) => {
                 if let Some(d) = &drag {
-                    self.drag_point(&mut r.edits, d, e.abs, e.modifiers.shift, false);
+                    self.drag_point(&mut r, d, e.abs, e.modifiers.shift, false);
                     r.redraw = true;
                 } else {
                     let over = point_at(e.abs);
@@ -378,7 +376,7 @@ impl CodeValues {
             }
             Event::MouseUp(e) => {
                 if let Some(d) = &drag {
-                    self.drag_point(&mut r.edits, d, e.abs, e.modifiers.shift, true);
+                    self.drag_point(&mut r, d, e.abs, e.modifiers.shift, true);
                     self.popup = Some(Popup::Plot { site, rect, hover, drag: None, pairs });
                     r.redraw = true;
                 }
@@ -386,7 +384,7 @@ impl CodeValues {
             }
             Event::KeyDown(k) if k.key_code == KeyCode::Escape || k.key_code == KeyCode::ReturnKey => {
                 if drag.is_some() {
-                    self.revert(&mut r.edits);
+                    self.revert(&mut r);
                 }
                 self.popup = None;
                 self.gesture = None;
@@ -404,7 +402,7 @@ impl CodeValues {
 
     /// The dragged point follows the pointer: a value its height, a pair
     /// both. Shift: round values (a tenth of the plot's span).
-    pub(crate) fn drag_point(&mut self, edits: &mut Vec<ValueEdit>, drag: &PlotDrag, abs: DVec2, snap: bool, done: bool) {
+    pub(crate) fn drag_point(&mut self, out: &mut CodeValuesResponse, drag: &PlotDrag, abs: DVec2, snap: bool, done: bool) {
         let (x, y) = drag.map.from_screen(abs + drag.grab);
         let m = drag.map;
         let fmt = |v: f64, written: &str, span: f64| if snap { fmt_snapped(v, nice_step(span)) } else { fmt_item(v, written, span) };
@@ -418,7 +416,7 @@ impl CodeValues {
             self.gesture = None;
             return;
         }
-        self.write(edits, text, done);
+        self.write(out, text, done);
     }
 }
 

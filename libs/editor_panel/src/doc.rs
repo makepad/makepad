@@ -1,16 +1,18 @@
 //! The document a panel edits, as the panel sees it: files of Splash code,
-//! named paths into them, and the few things the panel asks of the code it
-//! edits (where a `let` is, which colours it writes, how a value is written
-//! back in the form of the literal there, a keyed value's key at the
-//! playhead). A host installs one [`EditorDoc`] ([`crate::register`]); the
-//! panel keeps the gestures, the held values and the splices, the document
-//! kind keeps what its code means.
+//! its values ([`ValueSource`]: named paths into the files, resolved again
+//! on every read and written back as exact splices), and the few things a
+//! panel asks of the code beyond its values ([`PanelDoc`]: where a `let`
+//! is, which colours it writes, a keyed value's key at the playhead). A
+//! host installs one [`PanelDoc`] ([`crate::register`]); the panel keeps
+//! the gestures, the held values and the splices, the document kind keeps
+//! what its code means.
 //!
 //! An outline of a file (what the host's document kind makes of its text:
 //! regions, functions) and the table of several documents ([`crate::set_docs`])
 //! are the document kind's own: the panel holds them as `dyn Any` and hands
-//! them back to the [`EditorDoc`].
+//! them back to the [`PanelDoc`].
 
+pub use makepad_edit_values::{Value, ValueKind, ValueSite, ValueSource};
 use std::any::Any;
 use std::ops::Range;
 
@@ -23,102 +25,15 @@ pub struct File<'a> {
     pub code: &'a dyn Any,
 }
 
-/// What a value is, as written.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    Number,
-    /// A number with a time unit (`0.12s`, `120ms`).
-    Time,
-    /// A number with an angle unit (`90deg`, `1.2rad`).
-    Angle,
-    /// A number in virtual pixels (`12px`).
-    Length,
-    Colour,
-    Font,
-    Text,
-    Ease,
-    /// `@name`.
-    Choice,
-    Bool,
-    /// A name of a function (a slot: another of the same parameters fits).
-    Function,
-    Record,
-    List,
-    /// Anything else: code (a call, arithmetic), replaced as code.
-    Expression,
-}
-
-impl Kind {
-    pub fn name(self) -> &'static str {
-        match self {
-            Kind::Number => "number",
-            Kind::Time => "time",
-            Kind::Angle => "angle",
-            Kind::Length => "length",
-            Kind::Colour => "colour",
-            Kind::Font => "font",
-            Kind::Text => "text",
-            Kind::Ease => "ease",
-            Kind::Choice => "choice",
-            Kind::Bool => "bool",
-            Kind::Function => "function",
-            Kind::Record => "record",
-            Kind::List => "list",
-            Kind::Expression => "expression",
-        }
-    }
-}
-
-/// Where a path's value is written.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Site {
-    /// Index into the files given.
-    pub file: usize,
-    pub range: Range<usize>,
-    pub kind: Kind,
-    pub text: String,
-}
-
 /// One place a path reaches, and how a set moves it: a number set by `d`
 /// from where the gesture began moves this one by `scale * d`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Bound {
-    pub site: Site,
+    pub site: ValueSite,
     pub scale: f64,
     /// The member of a set this place belongs to (several places of one
     /// member move together).
     pub member: String,
-}
-
-/// A bindable path of a document.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Entry {
-    pub path: String,
-    pub kind: Kind,
-    pub value: String,
-    pub label: Option<String>,
-}
-
-/// A path of a set of documents worth binding.
-#[derive(Clone, Debug, PartialEq)]
-pub struct DocEntry {
-    pub path: String,
-    pub kind: Kind,
-    pub value: String,
-    pub label: Option<String>,
-    /// How many places it reaches.
-    pub reach: usize,
-}
-
-/// A value to write.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Value {
-    Number(f64),
-    Text(String),
-    Bool(bool),
-    /// Code as written (a name for a function slot, `@choice`, an
-    /// expression).
-    Code(String),
 }
 
 /// A colour a file writes, and every place it is written.
@@ -130,8 +45,11 @@ pub struct Swatch {
     pub sites: Vec<Range<usize>>,
 }
 
-/// What the panel asks of the document it edits.
-pub trait EditorDoc {
+/// A document kind as the panels edit it: its values over the files given
+/// ([`PanelDoc::values`]), and what a panel asks of its code beyond them.
+/// Everything but the values and the outline has a default for a document
+/// that has no such thing (one file, no colours, no keys, no sets).
+pub trait PanelDoc {
     // ------------------------------------------------ the code's outline
 
     /// The outline of a text (what [`File::code`] holds for it).
@@ -140,64 +58,93 @@ pub trait EditorDoc {
     fn let_region(&self, text: &str, code: &dyn Any, name: &str) -> Option<Range<usize>>;
     /// The top-level `let` whose whole value is the literal at `site` (a
     /// `/**tag*/` before it allowed): its name.
-    fn let_of_literal(&self, text: &str, code: &dyn Any, site: &Range<usize>) -> Option<String>;
+    fn let_of_literal(&self, _text: &str, _code: &dyn Any, _site: &Range<usize>) -> Option<String> {
+        None
+    }
     /// The functions that could stand where the function a path names is:
     /// the same parameters, in the document or a module it imports.
-    fn fns_like(&self, files: &[File], path: &str) -> Vec<String>;
+    fn fns_like(&self, _files: &[File], _path: &str) -> Vec<String> {
+        Vec::new()
+    }
 
-    // ------------------------------------------------ paths
+    // ------------------------------------------------ values
 
-    /// The place a path names in one document, or why none (naming the
-    /// nearest paths that exist).
-    fn resolve(&self, files: &[File], path: &str) -> Result<Site, String>;
-    /// [`resolve`](Self::resolve) without the nearest paths looked for.
-    fn resolve_exact(&self, files: &[File], path: &str) -> Result<Site, String>;
+    /// The values of `files` (ids are the paths a panel binds; a site's
+    /// span names its file by index into `files`).
+    fn values<'a>(&'a self, files: &'a [File<'a>]) -> Box<dyn ValueSource + 'a>;
     /// Every place a path reaches over several documents (`table`: the
     /// document kind's own, given to [`crate::set_docs`]).
-    fn resolve_in(&self, files: &[File], table: &dyn Any, path: &str) -> Result<Vec<Bound>, String>;
-    /// Every path of a document worth binding.
-    fn list(&self, files: &[File]) -> Vec<Entry>;
-    /// Every path of several documents worth binding.
-    fn list_in(&self, files: &[File], table: &dyn Any) -> Vec<DocEntry>;
+    fn resolve_in(&self, _files: &[File], _table: &dyn Any, path: &str) -> Result<Vec<Bound>, String> {
+        Err(format!("`{path}`: this document kind has no sets of documents"))
+    }
+    /// Every value of several documents worth binding, with how many places
+    /// each reaches.
+    fn list_in(&self, _files: &[File], _table: &dyn Any) -> Vec<(ValueSite, usize)> {
+        Vec::new()
+    }
     /// Where a value set at `path`, moved from `from` to `to`, is written
     /// (a clip's time on the nearest beat), anything else as given.
-    fn snap(&self, table: &dyn Any, path: &str, from: f64, to: f64) -> f64;
+    fn snap(&self, _table: &dyn Any, _path: &str, _from: f64, to: f64) -> f64 {
+        to
+    }
     /// Whether a value set at `path` lands on a grid ([`snap`](Self::snap)).
-    fn snaps(&self, path: &str) -> bool;
+    fn snaps(&self, _path: &str) -> bool {
+        false
+    }
+    /// Where a write of `value` at `path` would go and what it writes (the
+    /// site's bytes and the literal), without the write's read-back check.
+    fn place(&self, files: &[File], path: &str, value: &Value) -> Result<(Range<usize>, String), String> {
+        let splices = self.values(files).write(path, value)?;
+        splices.into_iter().next().map(|s| (s.range, s.text)).ok_or_else(|| format!("`{path}`: nothing to write"))
+    }
+    /// The one literal token a range holds (a `-` before a number with it).
+    fn literal_token(&self, _text: &str, range: &Range<usize>) -> Option<Range<usize>> {
+        Some(range.clone())
+    }
+    /// The value as code in the form of the literal at `site`.
+    fn form(&self, site: &ValueSite, value: &Value) -> Result<String, String> {
+        match value {
+            Value::Num(n) => Ok(fmt_num(*n)),
+            Value::Bool(b) => Ok(b.to_string()),
+            Value::Text(t) => Ok(fmt_text(t)),
+            Value::Code(c) => Ok(c.clone()),
+            _ => Err(format!("`{}` cannot take that value", site.id)),
+        }
+    }
 
     // ------------------------------------------------ colours
 
     /// The colours a text writes.
-    fn palette(&self, text: &str) -> Vec<Swatch>;
+    fn palette(&self, _text: &str) -> Vec<Swatch> {
+        Vec::new()
+    }
     /// Each colour literal of a text, where and what.
-    fn palette_sites(&self, text: &str) -> Vec<(Range<usize>, [f64; 4])>;
+    fn palette_sites(&self, _text: &str) -> Vec<(Range<usize>, [f64; 4])> {
+        Vec::new()
+    }
     /// The text with colours moved at every place each is written (old, new).
-    fn recolour(&self, text: &str, map: &[([f64; 4], [f64; 4])]) -> String;
+    fn recolour(&self, text: &str, _map: &[([f64; 4], [f64; 4])]) -> String {
+        text.to_string()
+    }
     /// [`recolour`](Self::recolour) at sites read earlier (the text as a
     /// gesture began).
-    fn recolour_at(&self, text: &str, sites: &[(Range<usize>, [f64; 4])], map: &[([f64; 4], [f64; 4])]) -> String;
+    fn recolour_at(&self, text: &str, _sites: &[(Range<usize>, [f64; 4])], _map: &[([f64; 4], [f64; 4])]) -> String {
+        text.to_string()
+    }
 
     // ------------------------------------------------ keyed values
 
     /// A keyed value (`keys(…)`) at `range`, sampled at time `at`; `None`
     /// when its keys do not read.
-    fn keys_sample(&self, text: &str, range: Range<usize>, at: f64) -> Option<f64>;
+    fn keys_sample(&self, _text: &str, _range: Range<usize>, _at: f64) -> Option<f64> {
+        None
+    }
     /// A number set on a keyed value at `range`: that key's value (a key
     /// within `half` of `at`), or a new key at `at`; as the bytes to replace
     /// and what they become. `None` when its keys do not read.
-    fn keys_set(&self, text: &str, range: Range<usize>, at: f64, half: f64, value: f64) -> Option<(Range<usize>, String)>;
-
-    // ------------------------------------------------ writing a value
-
-    /// Where a write of `value` at `path` would go and what it writes (the
-    /// site's file bytes and the literal), without the read-back check.
-    fn place(&self, files: &[File], path: &str, value: &Value) -> Result<(Range<usize>, String), String>;
-    /// The write of `value` at `path`, checked to read back as written.
-    fn write(&self, files: &[File], path: &str, value: &Value) -> Result<(Range<usize>, String), String>;
-    /// The one literal token a range holds (a `-` before a number with it).
-    fn literal_token(&self, text: &str, range: &Range<usize>) -> Option<Range<usize>>;
-    /// The value as code in the form of the literal at `site`.
-    fn form(&self, site: &Site, value: &Value) -> Result<String, String>;
+    fn keys_set(&self, _text: &str, _range: Range<usize>, _at: f64, _half: f64, _value: f64) -> Option<(Range<usize>, String)> {
+        None
+    }
 }
 
 /// A number as the editor writes it: at most four decimals, none trailing.

@@ -418,7 +418,22 @@ pub(crate) fn resolve_package(
             // script's own child run never builds them again
             let triple = crate::cfg::CfgSet::host(sess, &[]).triple();
             let native_request = (options.allow_c && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none()).then(|| crate::native::Request { workspace, package, cargo_flags, relax_dir: target_dir, triple });
-            let scripts = unitgraph::run_build_scripts(sess, &mut g, target_dir, native_request.as_ref(), check_only);
+            // a cold `--allow-c` boot: while cargo still compiles the C code, the proc-macro world
+            // (built from the other crates' outputs) starts beside it, unless a macro crate needs
+            // a native package's output
+            // (its core/alloc/std: parsed by the world itself until cargo is done -- the program's
+            // std load, which it otherwise takes them from, starts after the build scripts)
+            let early_world = |g: &unitgraph::Graph, native: &[usize], cfgs: &[Vec<String>], env: &[Vec<(String, String)>]| -> Option<Box<dyn std::any::Any>> {
+                let names: Vec<&str> = native.iter().map(|&k| g.crates[k].name.as_str()).collect();
+                if crate::macro_reg::macro_closure_reaches(&names) { return None; }
+                crate::macro_reg::set_build_outputs(sess, &g.crates, cfgs, env);
+                let alone = crate::program::WorldWait::begin();
+                crate::macro_reg::prewarm(sess).ok()?;
+                verbose!("makepad-run: proc-macro world started beside the native build");
+                Some(Box::new(alone))
+            };
+            let hook: Option<&unitgraph::ScriptsDone<'_>> = (boot && !check_only).then_some(&early_world);
+            let scripts = unitgraph::run_build_scripts(sess, &mut g, target_dir, native_request.as_ref(), check_only, hook);
             let scripts_ms = t_scripts.elapsed().as_secs_f64() * 1e3;
             let t_wait = Instant::now();
             (sources.map(|h| h.join().expect("provided source check")), scripts, scripts_ms, t_wait.elapsed().as_secs_f64() * 1e3)

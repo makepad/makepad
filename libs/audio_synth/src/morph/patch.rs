@@ -8,6 +8,7 @@ use crate::kit::matrix::{Matrix, ModRow, MAX_ROWS};
 use crate::kit::osc::{OscSource, SampleBuf};
 use crate::kit::schema::{num, Curve};
 use crate::kit::table::{self, Table, MAX_FRAMES};
+use crate::kit::tuning::{self, KeyMap, Scale, Tuning};
 use crate::kit::{fx, lfo};
 use std::sync::Arc;
 
@@ -21,17 +22,20 @@ pub struct MorphPatch {
     /// Partial lists per frame for oscillators whose table is `user`.
     pub frames: [Vec<Vec<f32>>; 3],
     pub macro_names: Vec<String>,
+    /// A scale of its own (degrees in cents, the last the period) over the
+    /// `tuning` choice; empty = the choice.
+    pub scale: Vec<f64>,
 }
 
 impl Default for MorphPatch {
     fn default() -> Self {
-        MorphPatch { values: layout().schema.defaults(), matrix: Matrix::default(), points: Default::default(), fx: Vec::new(), frames: Default::default(), macro_names: Vec::new() }
+        MorphPatch { values: layout().schema.defaults(), matrix: Matrix::default(), points: Default::default(), fx: Vec::new(), frames: Default::default(), macro_names: Vec::new(), scale: Vec::new() }
     }
 }
 
 impl PartialEq for MorphPatch {
     fn eq(&self, other: &Self) -> bool {
-        self.values == other.values && self.matrix.rows == other.matrix.rows && self.points == other.points && self.fx == other.fx && self.frames == other.frames && self.macro_names == other.macro_names
+        self.values == other.values && self.matrix.rows == other.matrix.rows && self.points == other.points && self.fx == other.fx && self.frames == other.frames && self.macro_names == other.macro_names && self.scale == other.scale
     }
 }
 
@@ -79,12 +83,23 @@ impl MorphPatch {
                 self.fx.clear();
                 for w in words(value) {
                     let w = w.trim_start_matches('@');
-                    let kind = fx::KINDS.iter().position(|k| *k == w).ok_or_else(|| format!("`{w}` is not an effect ({})", fx::KINDS.join(" ")))?;
-                    if self.fx.contains(&(kind as u8)) {
+                    let kind = fx::kind(w).ok_or_else(|| format!("`{w}` is not an effect ({})", fx::kind_names()))?;
+                    if self.fx.contains(&kind) {
                         return Err(format!("`{w}` is in the rack twice (each effect once)"));
                     }
-                    self.fx.push(kind as u8);
+                    self.fx.push(kind);
                 }
+                return Ok(());
+            }
+            "tuning_scale" => {
+                // Degrees as cents (`386.3`) or ratios (`5/4`), the last the period.
+                let mut text = format!("scale\n{}\n", words(value).len());
+                for w in words(value) {
+                    text.push_str(w);
+                    text.push('\n');
+                }
+                // Kept to a millionth of a cent so the text form round-trips.
+                self.scale = crate::kit::tuning::Scale::parse(&text).map_err(|e| format!("`tuning_scale`: {e}"))?.cents.iter().map(|c| (c * 1e6).round() / 1e6).collect();
                 return Ok(());
             }
             "macro_names" => {
@@ -161,7 +176,7 @@ impl MorphPatch {
             }
         }
         if !self.fx.is_empty() {
-            out.push(format!("fx={}", self.fx.iter().map(|k| fx::KINDS[*k as usize]).collect::<Vec<_>>().join(",")));
+            out.push(format!("fx={}", self.fx.iter().map(|k| fx::KINDS[*k as usize].0).collect::<Vec<_>>().join(",")));
         }
         for (o, frames) in self.frames.iter().enumerate() {
             if !frames.is_empty() {
@@ -172,12 +187,31 @@ impl MorphPatch {
         if !self.macro_names.is_empty() {
             out.push(format!("macro_names={}", self.macro_names.join(",")));
         }
+        if !self.scale.is_empty() {
+            out.push(format!("tuning_scale={}", self.scale.iter().map(|c| format!("{c:.6}")).collect::<Vec<_>>().join(",")));
+        }
         out.join(" ")
     }
 
     /// What the oscillators read: each one's table (built-in, its own
     /// frames, or cut from its sample) and its sample. Builds tables: call
     /// it off the audio thread.
+    /// The patch's tuning (None: standard): its own scale, else the
+    /// library's `tuning`, with degree 0 on `tuning_root` and A4 at 440 Hz.
+    pub fn tuning(&self) -> Option<Arc<Tuning>> {
+        let ix = &layout().ix;
+        let root = self.values[ix.tuning_root].round() as i32;
+        let lib = tuning::library();
+        let (name, scale) = if !self.scale.is_empty() {
+            ("custom", Scale { description: "custom".into(), cents: self.scale.clone() })
+        } else {
+            let (name, _, t) = &lib[(self.values[ix.tuning].round().max(0.0) as usize).min(lib.len() - 1)];
+            (*name, t.scale.clone())
+        };
+        let t = Tuning::new(name, scale, KeyMap { middle: root, ..KeyMap::default() });
+        (!t.is_standard()).then(|| Arc::new(t))
+    }
+
     pub fn sources(&self, samples: [Option<SampleBuf>; 3]) -> Arc<MorphSources> {
         let ix = &layout().ix;
         let mut osc: Vec<OscSource> = Vec::with_capacity(3);
@@ -196,11 +230,13 @@ impl MorphPatch {
         }
         let mut it = osc.into_iter();
         let (a, b, c) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
-        Arc::new(MorphSources { osc: [a, b, c] })
+        Arc::new(MorphSources { osc: [a, b, c], tuning: self.tuning() })
     }
 }
 
-/// The oscillators' tables and samples for a patch.
+/// The oscillators' tables and samples for a patch, and its tuning.
 pub struct MorphSources {
     pub osc: [OscSource; 3],
+    /// None: standard tuning.
+    pub tuning: Option<Arc<Tuning>>,
 }

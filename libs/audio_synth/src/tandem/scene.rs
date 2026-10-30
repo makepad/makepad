@@ -6,6 +6,7 @@
 use super::catalog::{sc, N_SCENE};
 use super::program::{Program, N_SOURCES};
 use super::formula::FormulaBank;
+use crate::kit::tuning::Tuning;
 use super::voice::{apply_routes_with, NoteStart, Sources, VState, Voice, VoiceCtx};
 use crate::dsp::Rng;
 use crate::kit::core::{calc_omega, Biquad, HalfBand, BLOCK, BLOCK_OS};
@@ -37,8 +38,7 @@ pub struct Scene {
     pub sources: Sources,
     /// Scene LFOs' 16 outputs (formula sources past index 2).
     pub slfo16: [[f32; 16]; 6],
-    formulas: FormulaBank,
-    /// Formula instances of the scene LFOs.
+    /// Formula instances of the scene LFOs (in the engine's bank).
     slfo_k: [Option<usize>; 6],
     pub ctl: [ControllerSmoother; 6],
     held: Vec<Held>,
@@ -74,6 +74,10 @@ pub struct SceneCtx<'a> {
     pub macros: &'a [f32; 8],
     pub polylimit: usize,
     pub audio_in_os: Option<(&'a [f32; BLOCK_OS], &'a [f32; BLOCK_OS])>,
+    /// The active tuning (None: standard) and whether it retunes every
+    /// pitch (else only the keys' notes).
+    pub tuning: Option<&'a Tuning>,
+    pub retune_all: bool,
 }
 
 impl Scene {
@@ -86,7 +90,6 @@ impl Scene {
             lfos: (0..6).map(|l| Lfo::new(0xabc0_0000 ^ ((index as u32) << 8) ^ l as u32, true)).collect(),
             sources: [[0.0; 3]; N_SOURCES],
             slfo16: [[0.0; 16]; 6],
-            formulas: FormulaBank::default(),
             slfo_k: [None; 6],
             ctl: Default::default(),
             held: Vec::with_capacity(128),
@@ -113,9 +116,11 @@ impl Scene {
         }
     }
 
-    pub fn set_program(&mut self, prog: &Program) {
-        self.formulas = FormulaBank::for_scene(prog, self.index);
-        self.slfo_k = std::array::from_fn(|l| self.formulas.acquire(6 + l));
+    /// A new program; `bank` is the engine's new formula bank (the old
+    /// one's instances are forgotten).
+    pub fn set_program(&mut self, prog: &Program, bank: &mut FormulaBank) {
+        let s = self.index;
+        self.slfo_k = std::array::from_fn(|l| bank.acquire(s, 6 + l));
         for (i, v) in self.voices.iter_mut().enumerate() {
             v.drop_formulas();
             v.set_program(prog, self.index, 0x77 ^ i as u32, self.fs);
@@ -162,6 +167,17 @@ impl Scene {
             character: cx.character,
             mpe,
             audio_in: cx.audio_in_os,
+            retune_all: cx.tuning.filter(|_| cx.retune_all),
+        }
+    }
+
+    /// The note key `key` plays: itself, its tuned note number when the
+    /// tuning retunes the keys, None when the tuning leaves it unmapped.
+    fn note_of(cx: &SceneCtx, key: i32) -> Option<f32> {
+        match cx.tuning {
+            Some(t) if cx.retune_all => t.key_hz(key).map(|_| key as f32),
+            Some(t) => t.key_note(key),
+            None => Some(key as f32),
         }
     }
 
@@ -181,7 +197,7 @@ impl Scene {
     }
 
     /// Steal before allocating (ARCHITECTURE 3.2).
-    fn make_room(&mut self, polylimit: usize) {
+    fn make_room(&mut self, polylimit: usize, bank: &mut FormulaBank) {
         loop {
             let n = self.voices.iter().filter(|v| v.active() && !v.fast_release).count();
             if n + 1 <= polylimit {
@@ -210,7 +226,7 @@ impl Scene {
             fast.sort_unstable();
             for (_, i) in fast.into_iter().take(count - polylimit - 3) {
                 self.voices[i].kill();
-                self.voices[i].release_formulas(&mut self.formulas);
+                self.voices[i].release_formulas(self.index, bank);
             }
         }
     }
@@ -230,7 +246,9 @@ impl Scene {
         }
     }
 
-    pub fn note_on(&mut self, cx: &SceneCtx, channel: u8, key: i32, velocity: f32, priority: i32, mono_env: i32, repeat_key: i32) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn note_on(&mut self, cx: &SceneCtx, bank: &mut FormulaBank, channel: u8, key: i32, velocity: f32, priority: i32, mono_env: i32, repeat_key: i32) {
+        let Some(note) = Self::note_of(cx, key) else { return };
         self.order += 1;
         let order = self.order;
         self.held.retain(|h| !(h.key == key && h.channel == channel));
@@ -248,7 +266,7 @@ impl Scene {
                 if let Some(k) = self.slfo_k[l] {
                     let macros: [f32; 8] = std::array::from_fn(|m| self.sources[7 + m][0]);
                     let inp = super::formula::inputs(cx.prog, li, &scene_eff, &self.lfos[l], &cx.mod_ctx, macros, None);
-                    self.formulas.start(li, k, &inp);
+                    bank.start(self.index, li, k, &inp);
                 }
             }
         }
@@ -260,16 +278,16 @@ impl Scene {
             0 => {
                 if repeat_key == 1 {
                     if let Some(i) = self.voices.iter().position(|v| v.active() && v.key == key && v.channel == channel) {
-                        let n = NoteStart { key, channel, velocity, age: order, glide_from: porta_on.then_some(self.last_key), rand, alt, from_current: true };
-                        self.start_voice(cx, i, &n, &scene_eff, &src);
-                        self.last_key = key as f32;
+                        let n = NoteStart { key, note, channel, velocity, age: order, glide_from: porta_on.then_some(self.last_key), rand, alt, from_current: true };
+                        self.start_voice(cx, bank, i, &n, &scene_eff, &src);
+                        self.last_key = note;
                         return;
                     }
                 }
-                self.make_room(cx.polylimit);
+                self.make_room(cx.polylimit, bank);
                 if let Some(i) = self.free_voice() {
-                    let n = NoteStart { key, channel, velocity, age: order, glide_from: porta_on.then_some(self.last_key), rand, alt, from_current: false };
-                    self.start_voice(cx, i, &n, &scene_eff, &src);
+                    let n = NoteStart { key, note, channel, velocity, age: order, glide_from: porta_on.then_some(self.last_key), rand, alt, from_current: false };
+                    self.start_voice(cx, bank, i, &n, &scene_eff, &src);
                 }
             }
             _ => {
@@ -288,9 +306,9 @@ impl Scene {
                 if single {
                     if let Some(i) = self.voices.iter().position(|v| v.active() && v.gate && !v.fast_release) {
                         let glide = porta_on && (mode == 2 || legato_held);
-                        self.voices[i].legato(key, velocity, glide);
+                        self.voices[i].legato(key, note, velocity, glide);
                         self.voices[i].channel = channel;
-                        self.last_key = key as f32;
+                        self.last_key = note;
                         return;
                     }
                 }
@@ -303,19 +321,20 @@ impl Scene {
                 }
                 let idx = reclaim.or_else(|| self.free_voice());
                 if let Some(i) = idx {
-                    let n = NoteStart { key, channel, velocity, age: order, glide_from, rand, alt, from_current: reclaim.is_some() };
-                    self.start_voice(cx, i, &n, &scene_eff, &src);
+                    let n = NoteStart { key, note, channel, velocity, age: order, glide_from, rand, alt, from_current: reclaim.is_some() };
+                    self.start_voice(cx, bank, i, &n, &scene_eff, &src);
                 }
             }
         }
-        self.last_key = key as f32;
+        self.last_key = note;
     }
 
-    fn start_voice(&mut self, cx: &SceneCtx, i: usize, n: &NoteStart, scene_eff: &[f32; N_SCENE], src: &Sources) {
+    #[allow(clippy::too_many_arguments)]
+    fn start_voice(&mut self, cx: &SceneCtx, bank: &mut FormulaBank, i: usize, n: &NoteStart, scene_eff: &[f32; N_SCENE], src: &Sources) {
         let lfo16 = self.slfo16;
         let vc = Self::voice_ctx(self.index, self.mpe, self.bend_semis(cx.prog), cx, scene_eff, src, &lfo16);
         let v = &mut self.voices[i];
-        v.start(n, &vc, &mut self.formulas);
+        v.start(n, &vc, bank);
         if self.mpe {
             v.mpe_bend = self.chan_bend[n.channel as usize & 15] * self.mpe_bend_range;
             v.mpe_pressure = self.chan_pressure[n.channel as usize & 15];
@@ -323,7 +342,7 @@ impl Scene {
         }
     }
 
-    pub fn note_off(&mut self, cx: &SceneCtx, channel: u8, key: i32, rel_vel: f32, priority: i32) {
+    pub fn note_off(&mut self, cx: &SceneCtx, bank: &mut FormulaBank, channel: u8, key: i32, rel_vel: f32, priority: i32) {
         self.held.retain(|h| !(h.key == key && h.channel == channel));
         self.update_keys();
         self.order += 1;
@@ -344,10 +363,11 @@ impl Scene {
                 .copied()
                 .unwrap();
                 let velocity = self.voices[vi].velocity;
+                let next_note = Self::note_of(cx, next.key).unwrap_or(next.key as f32);
                 if mode == 2 || mode == 4 {
                     let porta_on = self.eff[sc::PORTAMENTO] > -8.0;
-                    self.voices[vi].legato(next.key, velocity, porta_on);
-                    self.last_key = next.key as f32;
+                    self.voices[vi].legato(next.key, next_note, velocity, porta_on);
+                    self.last_key = next_note;
                 } else {
                     // Multi-trigger: a new voice for the held key.
                     let (rand, alt) = self.draw_random();
@@ -358,10 +378,10 @@ impl Scene {
                         v.uber_release(order);
                     }
                     if let Some(i) = self.free_voice() {
-                        let n = NoteStart { key: next.key, channel: next.channel, velocity, age: order, glide_from: porta_on.then_some(self.last_key), rand, alt, from_current: false };
-                        self.start_voice(cx, i, &n, &scene_eff, &src);
+                        let n = NoteStart { key: next.key, note: next_note, channel: next.channel, velocity, age: order, glide_from: porta_on.then_some(self.last_key), rand, alt, from_current: false };
+                        self.start_voice(cx, bank, i, &n, &scene_eff, &src);
                     }
-                    self.last_key = next.key as f32;
+                    self.last_key = next_note;
                 }
                 return;
             }
@@ -412,16 +432,16 @@ impl Scene {
         }
     }
 
-    pub fn all_sound_off(&mut self) {
+    pub fn all_sound_off(&mut self, bank: &mut FormulaBank) {
         self.held.clear();
         for v in &mut self.voices {
             v.kill();
-            v.release_formulas(&mut self.formulas);
+            v.release_formulas(self.index, bank);
         }
     }
 
     /// Scene sources + the scene copy + scene LFOs (step 1 of the block order).
-    pub fn begin_block(&mut self, cx: &SceneCtx) {
+    pub fn begin_block(&mut self, cx: &SceneCtx, bank: &mut FormulaBank) {
         let s = self.index;
         for c in &mut self.ctl {
             c.process(cx.fs);
@@ -450,7 +470,7 @@ impl Scene {
             self.lfos[l].process_block(&lp, &cx.mod_ctx, &cx.prog.stepseq[s][li], &cx.prog.msegs[s][li]);
             if let Some(k) = self.slfo_k[l] {
                 let inp = super::formula::inputs(cx.prog, li, &eff, &self.lfos[l], &cx.mod_ctx, macros, None);
-                self.formulas.process(li, k, &inp, lp.magnitude, lp.unipolar, &mut self.lfos[l]);
+                bank.process(s, li, k, &inp, lp.magnitude, lp.unipolar, &mut self.lfos[l]);
             }
             self.sources[23 + l] = self.lfos[l].outputs();
             self.slfo16[l] = *self.lfos[l].formula_outputs();
@@ -458,7 +478,7 @@ impl Scene {
     }
 
     /// The voices into the 2x bus, then clip, decimate, low cut, clip.
-    pub fn render(&mut self, cx: &SceneCtx, hardclip: i32) {
+    pub fn render(&mut self, cx: &SceneCtx, bank: &mut FormulaBank, hardclip: i32) {
         self.bus_l = [0.0; BLOCK_OS];
         self.bus_r = [0.0; BLOCK_OS];
         let scene_eff = *self.eff;
@@ -480,11 +500,11 @@ impl Scene {
                 v.mpe_timbre = self.chan_timbre[ch];
             }
             v.poly_at = self.poly_at[v.channel as usize & 15][v.key.clamp(0, 127) as usize];
-            if v.process(&vc, &mut self.formulas, &mut bl, &mut br) {
+            if v.process(&vc, bank, &mut bl, &mut br) {
                 active += 1;
             } else {
                 v.state = VState::Free;
-                v.release_formulas(&mut self.formulas);
+                v.release_formulas(self.index, bank);
             }
         }
         self.active_voices = active;
@@ -492,8 +512,8 @@ impl Scene {
         self.bus_r = br;
         if self.polymode() == 5 && active == 0 {
             // Latch keeps a voice alive.
-            let fake = SceneCtx { prog: cx.prog, fs: cx.fs, mod_ctx: cx.mod_ctx, character: cx.character, macros: cx.macros, polylimit: cx.polylimit, audio_in_os: None };
-            self.note_on(&fake, 0, 60, 100.0 / 127.0, 1, 0, 0);
+            let fake = SceneCtx { prog: cx.prog, fs: cx.fs, mod_ctx: cx.mod_ctx, character: cx.character, macros: cx.macros, polylimit: cx.polylimit, audio_in_os: None, tuning: cx.tuning, retune_all: cx.retune_all };
+            self.note_on(&fake, bank, 0, 60, 100.0 / 127.0, 1, 0, 0);
         }
         let clip = |x: &mut [f32], mode: i32| match mode {
             1 => x.iter_mut().for_each(|s| *s = s.clamp(-8.0, 8.0)),

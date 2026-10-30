@@ -73,29 +73,54 @@ mod inner {
 
     use super::{inherited_cancel, run_with_inherited_cancel, serial_execution};
 
+    struct Jobs {
+        queue: VecDeque<Job>,
+        /// [`shutdown`] ran: the workers end once the queue is empty, new work runs on the caller.
+        stopped: bool,
+    }
+
     struct Queue {
-        jobs: Mutex<VecDeque<Job>>,
+        jobs: Mutex<Jobs>,
         ready: Condvar,
     }
 
     impl Queue {
-        fn push(&self, job: Job) {
-            self.jobs.lock().unwrap().push_back(job);
+        /// Queues `job`; hands it back when the pool has shut down.
+        fn push(&self, job: Job) -> Result<(), Job> {
+            let mut jobs = self.jobs.lock().unwrap();
+            if jobs.stopped {
+                return Err(job);
+            }
+            jobs.queue.push_back(job);
             self.ready.notify_one();
+            Ok(())
         }
 
         fn try_pop(&self) -> Option<Job> {
-            self.jobs.lock().unwrap().pop_front()
+            self.jobs.lock().unwrap().queue.pop_front()
         }
 
-        fn pop(&self) -> Job {
+        /// The next job; `None` once the pool shut down and the queue is drained.
+        fn pop(&self) -> Option<Job> {
             let mut jobs = self.jobs.lock().unwrap();
             loop {
-                if let Some(job) = jobs.pop_front() {
-                    return job;
+                if let Some(job) = jobs.queue.pop_front() {
+                    return Some(job);
+                }
+                if jobs.stopped {
+                    return None;
                 }
                 jobs = self.ready.wait(jobs).unwrap();
             }
+        }
+
+        fn stop(&self) {
+            self.jobs.lock().unwrap().stopped = true;
+            self.ready.notify_all();
+        }
+
+        fn stopped(&self) -> bool {
+            self.jobs.lock().unwrap().stopped
         }
     }
 
@@ -107,15 +132,17 @@ mod inner {
     impl Pool {
         fn new(size: usize) -> Pool {
             let queue = Arc::new(Queue {
-                jobs: Mutex::new(VecDeque::new()),
+                jobs: Mutex::new(Jobs { queue: VecDeque::new(), stopped: false }),
                 ready: Condvar::new(),
             });
             for index in 0..size {
                 let queue = queue.clone();
                 thread::Builder::new()
                     .name(format!("makepad-csg-{index}"))
-                    .spawn(move || loop {
-                        queue.pop()();
+                    .spawn(move || {
+                        while let Some(job) = queue.pop() {
+                            job();
+                        }
                     })
                     .expect("spawn CSG worker");
             }
@@ -124,7 +151,9 @@ mod inner {
 
         fn submit(&self, f: impl FnOnce() + Send + 'static) {
             let cancel = inherited_cancel();
-            self.queue.push(Box::new(move || run_with_inherited_cancel(cancel, f)));
+            if let Err(job) = self.queue.push(Box::new(move || run_with_inherited_cancel(cancel, f))) {
+                job();
+            }
         }
 
         fn help_one(&self) -> bool {
@@ -147,13 +176,26 @@ mod inner {
         })
     }
 
+    /// Ends the pool's workers once the queued work is done (the app is shutting down: under
+    /// `makepad run` its domain waits for every thread it started). Later work runs on the caller.
+    pub fn shutdown() {
+        if let Some(pool) = POOL.get() {
+            pool.queue.stop();
+        }
+    }
+
+    /// No pool to hand work to: serial, or the pool shut down.
+    fn inline() -> bool {
+        serial_execution() || POOL.get().is_some_and(|p| p.queue.stopped())
+    }
+
     pub fn thread_count() -> usize {
-        if serial_execution() { 1 } else { get_pool().size }
+        if inline() { 1 } else { get_pool().size }
     }
 
     /// Queue one top-level task on the shared pool.
     pub fn spawn(f: impl FnOnce() + Send + 'static) {
-        if serial_execution() { f() } else { get_pool().submit(f); }
+        if inline() { f() } else { get_pool().submit(f); }
     }
 
     fn receive_helping<R>(rx: mpsc::Receiver<R>) -> R {
@@ -178,7 +220,7 @@ mod inner {
         FA: FnOnce() -> A + Send + 'static,
         FB: FnOnce() -> B + Send + 'static,
     {
-        if serial_execution() || get_pool().size < 2 {
+        if inline() || get_pool().size < 2 {
             return (fa(), fb());
         }
         let (tx_a, rx_a) = mpsc::channel();
@@ -206,7 +248,7 @@ mod inner {
         R: Send + 'static,
         F: FnOnce() -> R + Send + 'static,
     {
-        if serial_execution() || get_pool().size < 2 || tasks.len() < 2 {
+        if inline() || get_pool().size < 2 || tasks.len() < 2 {
             return tasks.into_iter().map(|f| f()).collect();
         }
         let mut receivers = Vec::with_capacity(tasks.len());
@@ -253,6 +295,7 @@ mod inner {
 
 #[cfg(not(feature = "threads"))]
 mod inner {
+    pub fn shutdown() {}
     pub fn thread_count() -> usize { 1 }
     pub fn spawn(f: impl FnOnce() + Send + 'static) { f() }
     pub fn parallel_do2<A, B, FA, FB>(fa: FA, fb: FB) -> (A, B)
@@ -266,7 +309,7 @@ mod inner {
 }
 
 pub use inner::{
-    parallel_do2, parallel_do8, parallel_for, parallel_map, spawn, thread_count,
+    parallel_do2, parallel_do8, parallel_for, parallel_map, shutdown, spawn, thread_count,
 };
 
 #[cfg(test)]

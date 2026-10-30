@@ -47,6 +47,7 @@ pub mod matrix;
 pub mod osc;
 pub mod schema;
 pub mod table;
+pub mod tuning;
 
 /// tanh by a rational fit (within 0.3% for |x| < 3, saturating beyond).
 #[inline]

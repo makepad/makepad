@@ -181,7 +181,7 @@ pub fn cull(n: &SdfNode, region: &Bounds) -> Option<SdfNode> {
             let inner = map_bounds(region, into(*at, *rotate, *scale));
             SdfNode::Transform { at: *at, rotate: *rotate, scale: *scale, of: Box::new(cull(of, &inner)?) }
         }
-        SdfNode::Material { slot, of } => SdfNode::Material { slot: *slot, of: Box::new(cull(of, region)?) },
+        SdfNode::Material { slot, within, of } => SdfNode::Material { slot: *slot, within: within.clone(), of: Box::new(cull(of, region)?) },
         SdfNode::Id { id, of } => SdfNode::Id { id: *id, of: Box::new(cull(of, region)?) },
         SdfNode::Bone { id, rest, of } => SdfNode::Bone { id: *id, rest: *rest, of: Box::new(cull(of, region)?) },
         // The copies that reach the region; `of` stays whole (one key for every copy).
@@ -215,7 +215,9 @@ pub fn same(a: &SdfNode, b: &SdfNode) -> bool {
         (Transform { at: a1, rotate: r1, scale: s1, of: x }, Transform { at: a2, rotate: r2, scale: s2, of: y }) => a1 == a2 && r1 == r2 && s1 == s2 && same(x, y),
         (Kernel(x), Kernel(y)) => x.key == y.key,
         (Mesh(x), Mesh(y)) => x.key() == y.key(),
-        (Material { slot: s1, of: x }, Material { slot: s2, of: y }) => s1 == s2 && same(x, y),
+        (Material { slot: s1, within: w1, of: x }, Material { slot: s2, within: w2, of: y }) => {
+            s1 == s2 && same(x, y) && match (w1, w2) { (None, None) => true, (Some(a), Some(b)) => same(a, b), _ => false }
+        }
         (Id { id: i1, of: x }, Id { id: i2, of: y }) => i1 == i2 && same(x, y),
         (Bone { id: i1, rest: r1, of: x }, Bone { id: i2, rest: r2, of: y }) => i1 == i2 && r1 == r2 && same(x, y),
         (Instance { places: p1, of: x }, Instance { places: p2, of: y }) => p1 == p2 && same(x, y),

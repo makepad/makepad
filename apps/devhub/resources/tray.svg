@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
+  <!-- devhub tray template glyph (Quiet state), black on transparent: the monochrome mask
+       libs/devhub/src/tray_glyph.rs draws from geometry (keep the numbers in step). The OS
+       tints it for a light or dark bar. tools/devhub/icon-preview.sh renders previews from it. -->
+  <g stroke="#000" stroke-width="1.8" stroke-linecap="round" fill="none"><path d="M18 19 L18.00 6.50"/><path d="M18 19 L29.89 15.14"/><path d="M18 19 L25.35 29.11"/><path d="M18 19 L10.65 29.11"/><path d="M18 19 L6.11 15.14"/></g>
+  <g fill="#000"><circle cx="18.00" cy="6.50" r="3"/><circle cx="29.89" cy="15.14" r="3"/><circle cx="25.35" cy="29.11" r="3"/><circle cx="10.65" cy="29.11" r="3"/><circle cx="6.11" cy="15.14" r="3"/></g>
+  <circle cx="18" cy="19" r="5.2" fill="#000"/>
+</svg>

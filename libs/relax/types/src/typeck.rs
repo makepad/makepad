@@ -621,13 +621,19 @@ pub(crate) fn check_fn(prog: &Program, tcx: &Tcx, def: DefId) -> Body {
     static ST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let st = *ST.get_or_init(|| std::env::var("MAKEPAD_RUN_TYSTATS").is_ok());
     let t0 = if st { relax_backend::cpu_ns() } else { 0 };
+    thread_local! { static NEST: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+    let child0 = if st { NEST.with(|c| c.get()) } else { 0 };
     let _warm = relax_codegen::warm::enabled().then(|| relax_codegen::warm::Scope::body(def.0, &args.iter().map(|t| t.0).collect::<Vec<_>>(), crate::clock::TYS_ORIGIN.with(|o| o.get()) == "gandalf", || {
         let args: Vec<_> = args.iter().map(|t| ty_to_string(false, prog, tcx, *t)).collect();
         if args.is_empty() { prog.def_path(def) } else { format!("{}<{}>", prog.def_path(def), args.join(", ")) }
     }));
     let b = check_fn_body(&cx, prog, tcx, def, &args);
     if st {
-        eprintln!("TYS\t{}\t{}\t{}\t{}\t{}\t{:?}\t{}", def.0, args.len(), relax_backend::cpu_ns() - t0, b.expr_ty.len(), prog.def_path(def), args.iter().map(|a| a.0).collect::<Vec<u32>>(), crate::clock::TYS_ORIGIN.with(|o| o.get()));
+        let incl = relax_backend::cpu_ns() - t0;
+        let excl = incl.saturating_sub(NEST.with(|c| c.get()) - child0);
+        NEST.with(|c| c.set(child0 + incl));
+        eprintln!("TYS\t{}\t{}\t{}\t{}\t{}\t{:?}\t{}\t{}\t{}\t{:.0}", def.0, args.len(), incl, b.expr_ty.len(), prog.def_path(def), args.iter().map(|a| a.0).collect::<Vec<u32>>(), crate::clock::TYS_ORIGIN.with(|o| o.get()),
+            excl, std::thread::current().name().unwrap_or("?"), crate::clock::ms_since_start());
     }
     b
 }

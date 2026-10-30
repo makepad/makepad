@@ -10,6 +10,8 @@ use super::program::Program;
 use super::scene::{Scene, SceneCtx, CTL_AT, CTL_BREATH, CTL_EXPR, CTL_MW, CTL_PB, CTL_SUS};
 use crate::kit::core::{amp_to_linear, db_to_linear, BlockLine, SlotValue, BLOCK, BLOCK_OS};
 use crate::kit::fxs::{ringout_blocks, Fx, FxCtx};
+use super::formula::FormulaBank;
+use crate::kit::tuning::Tuning;
 use crate::kit::mods::ModCtx;
 use std::sync::Arc;
 
@@ -29,6 +31,13 @@ pub struct Tandem {
     scenes: [Scene; 2],
     fx: Vec<Fx>,
     ringout: [i32; N_FX],
+    /// The formula runners: one per distinct script, shared by both scenes.
+    formulas: FormulaBank,
+    /// The user's tuning (None: standard).
+    tuning: Option<Arc<Tuning>>,
+    /// Play a patch's own embedded tuning when it has one ("override the
+    /// tuning on patch load").
+    patch_tuning: bool,
     global_eff: Vec<f32>,
     send_lines: [[BlockLine; 4]; 2],
     return_lines: [BlockLine; 4],
@@ -58,6 +67,9 @@ impl Tandem {
             scenes: [Scene::new(0, fs), Scene::new(1, fs)],
             fx: (0..N_FX).map(|_| Fx::new(0, fs)).collect(),
             ringout: [0; N_FX],
+            formulas: FormulaBank::default(),
+            tuning: None,
+            patch_tuning: false,
             global_eff: vec![0.0; N_GLOBAL],
             send_lines: Default::default(),
             return_lines: Default::default(),
@@ -130,14 +142,32 @@ impl Tandem {
             self.fx[s].prepare(&p, self.fs, prog.fx_user[s].as_ref());
             self.ringout[s] = 0;
         }
+        self.formulas = FormulaBank::for_program(&prog);
         for sc_ in &mut self.scenes {
-            sc_.set_program(&prog);
+            sc_.set_program(&prog, &mut self.formulas);
         }
         for m in 0..8 {
             self.macros[m] = prog.macros[m].0;
         }
         self.global_eff.iter_mut().zip(prog.global_base()).for_each(|(e, b)| *e = b);
         self.prog = prog;
+    }
+
+    /// The tuning the keys play (None: standard 12-TET). How it applies
+    /// follows the patch's tuning mode: retune the keys' notes (the
+    /// default) or every pitch.
+    pub fn set_tuning(&mut self, tuning: Option<Arc<Tuning>>) {
+        self.tuning = tuning;
+    }
+
+    /// Whether a patch's embedded tuning replaces the user's while it plays.
+    pub fn set_patch_tuning(&mut self, on: bool) {
+        self.patch_tuning = on;
+    }
+
+    /// The tuning playing now.
+    pub fn tuning(&self) -> Option<&Arc<Tuning>> {
+        active_arc(&self.tuning, &self.prog, self.patch_tuning)
     }
 
     pub fn set_tempo(&mut self, bpm: f64) {
@@ -205,8 +235,8 @@ impl Tandem {
                 continue;
             }
             let np = &prog.nonparam;
-            let cx = SceneCtx { prog, fs: self.fs, mod_ctx, character, macros: &self.macros, polylimit, audio_in_os: None };
-            self.scenes[s].note_on(&cx, channel, key as i32, velocity as f32 / 127.0, np.mono_priority[s], np.mono_envelope[s], np.repeated_key[s]);
+            let cx = SceneCtx { prog, fs: self.fs, mod_ctx, character, macros: &self.macros, polylimit, audio_in_os: None, tuning: active_tuning(&self.tuning, prog, self.patch_tuning), retune_all: prog.nonparam.tuning_mode == 0 };
+            self.scenes[s].note_on(&cx, &mut self.formulas, channel, key as i32, velocity as f32 / 127.0, np.mono_priority[s], np.mono_envelope[s], np.repeated_key[s]);
         }
     }
 
@@ -215,8 +245,8 @@ impl Tandem {
         let (mod_ctx, character, polylimit) = self.ctx_parts();
         let prog = &self.prog;
         for s in 0..2 {
-            let cx = SceneCtx { prog, fs: self.fs, mod_ctx, character, macros: &self.macros, polylimit, audio_in_os: None };
-            self.scenes[s].note_off(&cx, channel, key as i32, velocity as f32 / 127.0, prog.nonparam.mono_priority[s]);
+            let cx = SceneCtx { prog, fs: self.fs, mod_ctx, character, macros: &self.macros, polylimit, audio_in_os: None, tuning: active_tuning(&self.tuning, prog, self.patch_tuning), retune_all: prog.nonparam.tuning_mode == 0 };
+            self.scenes[s].note_off(&cx, &mut self.formulas, channel, key as i32, velocity as f32 / 127.0, prog.nonparam.mono_priority[s]);
         }
     }
 
@@ -268,7 +298,7 @@ impl Tandem {
                     let t = if value > 64 { (value as f32 - 64.0) / 63.0 } else { (value as f32 - 64.0) / 64.0 };
                     s.chan_timbre[channel as usize & 15] = t;
                 }
-                120 => s.all_sound_off(),
+                120 => s.all_sound_off(&mut self.formulas),
                 123 => s.all_notes_off(),
                 _ => {}
             }
@@ -373,8 +403,8 @@ impl Tandem {
         };
         let ain = (&self.audio_in_os[0], &self.audio_in_os[1]);
         for s in 0..2 {
-            let cx = SceneCtx { prog, fs: self.fs, mod_ctx, character, macros: &self.macros, polylimit, audio_in_os: Some(ain) };
-            self.scenes[s].begin_block(&cx);
+            let cx = SceneCtx { prog, fs: self.fs, mod_ctx, character, macros: &self.macros, polylimit, audio_in_os: Some(ain), tuning: active_tuning(&self.tuning, prog, self.patch_tuning), retune_all: prog.nonparam.tuning_mode == 0 };
+            self.scenes[s].begin_block(&cx, &mut self.formulas);
         }
         // Global list (scene LFOs are this block's).
         for (e, b) in self.global_eff.iter_mut().zip(prog.global_base()) {
@@ -395,8 +425,8 @@ impl Tandem {
                 self.scenes[s].out_r = [0.0; BLOCK];
                 continue;
             }
-            let cx = SceneCtx { prog, fs: self.fs, mod_ctx, character, macros: &self.macros, polylimit, audio_in_os: Some(ain) };
-            self.scenes[s].render(&cx, np.hardclip_scene[s]);
+            let cx = SceneCtx { prog, fs: self.fs, mod_ctx, character, macros: &self.macros, polylimit, audio_in_os: Some(ain), tuning: active_tuning(&self.tuning, prog, self.patch_tuning), retune_all: prog.nonparam.tuning_mode == 0 };
+            self.scenes[s].render(&cx, &mut self.formulas, np.hardclip_scene[s]);
         }
         let bypass = self.prog.values[gl::FX_BYPASS].i();
         let mut al = self.scenes[0].out_l;
@@ -498,4 +528,16 @@ impl Tandem {
             false
         }
     }
+}
+
+fn active_arc<'a>(user: &'a Option<Arc<Tuning>>, prog: &'a Program, patch: bool) -> Option<&'a Arc<Tuning>> {
+    match (&prog.tuning, patch) {
+        (Some(t), true) => Some(t),
+        _ => user.as_ref(),
+    }
+}
+
+/// The tuning the scenes play: the patch's own when allowed, else the user's.
+fn active_tuning<'a>(user: &'a Option<Arc<Tuning>>, prog: &'a Program, patch: bool) -> Option<&'a Tuning> {
+    active_arc(user, prog, patch).map(|t| &**t)
 }

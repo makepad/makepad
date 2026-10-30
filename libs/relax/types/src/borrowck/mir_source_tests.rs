@@ -166,6 +166,25 @@ fn a_struct_with_a_reference_field_implies_its_inferred_outlives() {
 }
 
 #[test]
+fn a_cycle_of_structs_implies_the_outlives_its_members_need() {
+    // B's `T: 'a` comes only through the cycle B -> A -> &'a T (inferred_outlives_of solved per component);
+    // the generated chain of 24 mutually recursive enums keeps the component large
+    let mut chain = String::new();
+    for i in 0..24 {
+        chain.push_str(&format!("pub enum E{i}<'a, T> {{ Leaf(&'a T), Next(Box<E{}<'a, T>>), Back(Vec<E{}<'a, T>>) }}\n", (i + 1) % 24, (i + 23) % 24));
+    }
+    let (errors, unchecked) = borrowck_source(&format!("
+        pub struct A<'a, T> {{ r: &'a T, b: Option<Box<B<'a, T>>> }}
+        pub struct B<'a, T> {{ a: Vec<A<'a, T>> }}
+        fn need<'a, T: 'a>() {{}}
+        pub fn g<'a, T>(_b: B<'a, T>) {{ need::<'a, T>(); }}
+        {chain}
+        pub fn h<'a, T>(_e: E7<'a, T>) {{ need::<'a, T>(); }}"));
+    assert!(unchecked.is_empty(), "{unchecked:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
 fn promoted_constants_are_checked_with_their_own_locations() {
     // `&[..]` and `&5` are promoted: their statements are numbered in the promoted body, not the parent.
     let (errors, unchecked) = borrowck_source("

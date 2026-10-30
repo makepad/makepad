@@ -63,6 +63,8 @@ pub struct Ix {
     pub rand_detune: usize,
     pub rand_cutoff: usize,
     pub rand_env: usize,
+    pub tuning: usize,
+    pub tuning_root: usize,
     pub arp: ArpIx,
     pub fx: FxIx,
 }
@@ -103,6 +105,8 @@ fn build() -> Layout {
     let rand_pan = b.num("rand_pan".into(), "rand pan", 0.0, 1.0, 0.0, Percent, "each note a random pan");
     let rand_detune = b.num("rand_detune".into(), "rand detune", 0.0, 50.0, 0.0, Cents, "each note a random detune (analog drift)");
     let rand_cutoff = b.num("rand_cutoff".into(), "rand cutoff", 0.0, 1.0, 0.0, Percent, "each note moves the filters a random amount");
+    let tuning = b.choice("tuning".into(), "tuning", tuning_names(), 0, "the scale the keys play (12tet standard; edoN equal steps; just pythagorean meantone harmonics bohlen_pierce); tuning_scale: a scale of its own");
+    let tuning_root = b.int("tuning_root".into(), "tuning root", 0.0, 127.0, 60.0, "the key that plays the scale's first degree (A4 stays 440 Hz)");
     let rand_env = b.num("rand_env".into(), "rand env", 0.0, 1.0, 0.0, Percent, "each note scales the envelope times a random amount");
     let arp = arp::declare(&mut b);
     let fx = fx::declare(&mut b);
@@ -110,9 +114,15 @@ fn build() -> Layout {
         schema: b.finish(),
         ix: Ix {
             osc, sub, noise, filter, filter_route, env, lfo, macros, poly, mono, legato, glide, glide_mode, glide_scaled, glide_curve, bend_range,
-            pitch, velocity, level, rand_pan, rand_detune, rand_cutoff, rand_env, arp, fx,
+            pitch, velocity, level, rand_pan, rand_detune, rand_cutoff, rand_env, tuning, tuning_root, arp, fx,
         },
     }
+}
+
+/// The tuning library's names (the `tuning` choice).
+fn tuning_names() -> &'static [&'static str] {
+    static N: OnceLock<Vec<&'static str>> = OnceLock::new();
+    N.get_or_init(|| crate::kit::tuning::library().iter().map(|(n, ..)| *n).collect())
 }
 
 /// Morph's schema and parameter places (built on first use).
@@ -122,20 +132,20 @@ pub fn layout() -> &'static Layout {
 }
 
 /// What a score writes besides the parameters, for the AI.
-pub const STRUCTURE: &str = "Morph{preset: @name, any parameter by key, mods: [[@src @dst amount ...] ...], fx: [@delay @reverb ...] (the rack in order, each effect once), lfo1_points: [[x y curve] ...] (lfo shape @drawn), a_frames: [[partial amplitudes] ...] (table @user: one list a frame, partial 1 first), a_src: asset(id, rev) (modes @sample and @granular, table @import), macro_names: [\"bright\" ...]}. ~ marks what a mod row may move.";
+pub const STRUCTURE: &str = "Morph{preset: @name, any parameter by key, mods: [[@src @dst amount ...] ...], fx: [@delay @reverb ...] (the rack in order, each effect once; an effect's parameters are its group fx_<kind>), lfo1_points: [[x y curve] ...] (lfo shape @drawn), a_frames: [[partial amplitudes] ...] (table @user: one list a frame, partial 1 first), a_src: asset(id, rev) (modes @sample and @granular, table @import), macro_names: [\"bright\" ...]}. ~ marks what a mod row may move.";
 
 /// The built-in patches: (name, what it is, patch text). Our own sounds.
 pub const PRESETS: &[(&str, &str, &str)] = &[
     ("init", "one plain wavetable voice", ""),
     ("wide_saw", "a stacked, detuned saw lead/pad", "a_pos=0.66 a_unison=7 a_detune=22 f1_cutoff=7000 env1_release=0.4 fx=reverb reverb_mix=0.18"),
     ("reese", "two detuned saws an octave apart, a slow ladder sweep: a bass", "a_pos=0.66 a_unison=4 a_detune=14 b_on=true b_pos=0.66 b_oct=-1 b_unison=2 b_detune=9 sub_on=true sub_level=0.4 f1_type=ladder f1_cutoff=420 f1_res=0.35 lfo1_mode=free lfo1_rate=0.25 mod=lfo1,f1_cutoff,0.18 env1_release=0.12"),
-    ("vowel_pad", "a formant table walked by a smooth random LFO", "a_table=formant a_unison=3 a_detune=10 lfo1_shape=smooth lfo1_rate=0.3 mod=lfo1,a_pos,0.5 env1_attack=0.9 env1_release=2.2 f1_cutoff=5000 fx=reverb reverb_mix=0.4 reverb_decay=5"),
+    ("vowel_pad", "a formant table walked by a smooth random LFO", "a_table=formant a_unison=3 a_detune=10 lfo1_shape=smooth lfo1_rate=0.3 mod=lfo1,a_pos,0.5 env1_attack=0.9 env1_release=2.2 f1_cutoff=5000 fx=reverb reverb_mix=0.4 reverb_decay_time=2.32"),
     ("grain_cloud", "a granular cloud over the vocal table", "a_mode=granular a_table=vocal a_grain=140 a_density=45 a_spray=0.35 a_grain_pitch=0.15 a_scan=0.04 a_unison=3 a_detune=12 env1_attack=1.2 env1_release=3 f1_cutoff=6000 fx=delay,reverb delay_mix=0.2 reverb_mix=0.35"),
     ("glass_bell", "spectral bell: stretched partials whose top closes", "a_mode=spectral a_table=bell a_stretch=0.06 a_tilt=-2 env1_attack=0.002 env1_decay=2.8 env1_sustain=0 env1_release=2.2 env2_decay=1.6 mod=env2,a_cut_hi,0.7 a_cut_hi=24 f1_on=false fx=reverb reverb_mix=0.3"),
     ("wobble", "a growl table and the filter moved on eighths", "a_table=growl a_unison=2 a_detune=8 sub_on=true f1_type=lp24 f1_cutoff=900 f1_res=0.4 lfo1_sync=n8 lfo1_mode=free mod=lfo1,a_pos,0.6 mod=lfo1,f1_cutoff,0.35 mono=true glide=0.03"),
-    ("chaos_drone", "a noisy table steered by a Lorenz attractor", "a_table=noisy a_unison=4 a_detune=18 lfo1_shape=lorenz lfo1_rate=0.4 mod=lfo1,a_pos,0.5 mod=lfo1y,f1_cutoff,0.3 f1_type=lp24 f1_cutoff=1800 env1_attack=2 env1_release=4 fx=reverb reverb_mix=0.45 reverb_decay=8"),
+    ("chaos_drone", "a noisy table steered by a Lorenz attractor", "a_table=noisy a_unison=4 a_detune=18 lfo1_shape=lorenz lfo1_rate=0.4 mod=lfo1,a_pos,0.5 mod=lfo1y,f1_cutoff,0.3 f1_type=lp24 f1_cutoff=1800 env1_attack=2 env1_release=4 fx=reverb reverb_mix=0.45 reverb_decay_time=3"),
     ("pluck", "a bright harmonic pluck", "a_table=harmonic a_pos=0.85 env1_decay=0.45 env1_sustain=0 env1_release=0.3 f1_type=lp12 f1_cutoff=700 env2_decay=0.25 mod=env2,f1_cutoff,0.55 fx=delay delay_mix=0.18"),
-    ("arp_keys", "a pulse arpeggio over the held chord", "arp_on=true arp_pattern=updown arp_rate=n16 arp_octaves=2 a_table=pwm a_pos=0.35 env1_decay=0.22 env1_sustain=0.15 env1_release=0.12 f1_cutoff=3200 fx=delay delay_time=0.75 delay_mix=0.25"),
+    ("arp_keys", "a pulse arpeggio over the held chord", "arp_on=true arp_pattern=updown arp_rate=n16 arp_octaves=2 a_table=pwm a_pos=0.35 env1_decay=0.22 env1_sustain=0.15 env1_release=0.12 f1_cutoff=3200 fx=delay delay_left=-1.415 delay_right=-1.415 delay_mix=0.25"),
     ("fm_metal", "a fifth-up oscillator frequency-modulating the first, closing", "b_on=true b_semi=19 b_level=0 a_warp1=fm a_warp1_amt=0.35 a_warp_src=b env2_decay=0.9 mod=env2,a_warp1_amt,0.5 env1_decay=1.4 env1_sustain=0.2 f1_on=false"),
     ("sync_lead", "a hard-sync lead, the sync swept by an envelope", "a_warp1=sync a_warp1_amt=0.2 env2_decay=0.6 mod=env2,a_warp1_amt,0.5 a_unison=2 a_detune=6 mono=true legato=true glide=0.07 f1_cutoff=6000 fx=delay delay_mix=0.15"),
     ("orbit_pad", "two tables moved by one circular path (x and y)", "a_table=organ b_on=true b_table=vocal b_level=0.6 lfo1_shape=circle lfo1_rate=0.15 mod=lfo1,a_pos,0.5 mod=lfo1y,b_pos,0.5 env1_attack=0.7 env1_release=2.5 fx=reverb reverb_mix=0.4"),
@@ -236,13 +246,15 @@ impl Morph {
     pub fn new(rate: f32, patch: Arc<MorphPatch>, src: Arc<MorphSources>) -> Morph {
         let n = layout().schema.params.len();
         let voices: Box<[Voice]> = (0..MAX_VOICES).map(|i| Voice::new(i as u32 + 1, n)).collect();
+        let mut rack = Box::new(Rack::new(rate));
+        rack.set_chain(&patch.fx, &patch.values[..], &layout().ix.fx);
         Morph {
             rate,
             patch,
             src,
             voices,
             lfo: std::array::from_fn(|i| Lfo::new(1000 + i as u32)),
-            rack: Box::new(Rack::new(rate)),
+            rack,
             arp: Arp::new(),
             arp_events: [ArpEvent::Off(0); 64],
             arp_was_on: false,
@@ -276,6 +288,7 @@ impl Morph {
     /// A new patch (and its sources) from the next block; sounding voices
     /// carry on with it.
     pub fn set_patch(&mut self, patch: Arc<MorphPatch>, src: Arc<MorphSources>) {
+        self.rack.set_chain(&patch.fx, &patch.values[..], &layout().ix.fx);
         self.patch = patch;
         self.src = src;
         let base = &self.patch.values;
@@ -370,7 +383,14 @@ impl Morph {
         let glides = glide_time > 0.001 && self.last_pitch >= 0.0 && (base[ix.glide_mode] < 0.5 || overlapping);
         self.serial = self.serial.wrapping_add(1);
         self.alt = -self.alt;
-        let target = note as f32;
+        // The tuned note the key plays; an unmapped key is silent.
+        let target = match &self.src.tuning {
+            Some(t) => match t.key_note(note as i32) {
+                Some(n) => n,
+                None => return,
+            },
+            None => note as f32,
+        };
         if mono {
             if let Some(v) = self.voices.iter_mut().find(|v| v.active) {
                 if glides {

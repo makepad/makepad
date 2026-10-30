@@ -325,6 +325,14 @@ fn read_at(f: &std::fs::File, buf: &mut [u8], mut at: u64) -> io::Result<()> {
     Ok(())
 }
 
+/// No positioned read on this target (wasm): seek the shared cursor, then read.
+#[cfg(not(any(unix, windows)))]
+fn read_at(mut f: &std::fs::File, buf: &mut [u8], at: u64) -> io::Result<()> {
+    use std::io::Seek;
+    f.seek(io::SeekFrom::Start(at))?;
+    f.read_exact(buf)
+}
+
 impl Store {
     /// Index every `.mksdat` shard in `dirs` (reads only the item headers).
     pub fn open(dirs: &[String]) -> io::Result<Store> {

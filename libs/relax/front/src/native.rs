@@ -16,6 +16,14 @@
 //! The cargo step and the link are cached under `<relax dir>/native/<key>/`: the key covers the
 //! cargo flags, Cargo.lock, the native packages (versions, features, sources), the C compiler and
 //! the target. A run with an unchanged key starts no cargo.
+//!
+//! Two tiers, as for the Rust code: the first build compiles the C at opt-level 0 (a cold start
+//! waits for it; Robrix's sqlite3.c alone is 28 s at -O3 with gcc and 3 s at -O0). Then cargo
+//! builds it again with the release opt-level on a background thread (2 jobs, its own cargo
+//! target) and the optimized archives replace the library for the starts after it. The scripts'
+//! outputs (cfgs, env, OUT_DIR) stay the first build's, so the Relax compile of these crates and
+//! its cache do not change with the tier; an optimized build whose scripts say anything else
+//! than the first one's is not taken. `<key>/fast` marks a library of the first tier.
 
 use crate::unitgraph::{BuildScript, Graph};
 use std::process::{Command, Stdio};
@@ -201,17 +209,53 @@ pub fn build(g: &Graph, seeds: &[usize], req: &Request) -> Result<Built, String>
     let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
     let lib_path = format!("{}/libnative.{}", dir, ext);
 
+    let fast_mark = format!("{}/fast", dir);
     let messages = match std::fs::read_to_string(&messages_path) {
         Ok(m) if std::fs::metadata(&lib_path).is_ok() || !m.contains("\"linked_libs\"") => m,
         _ => {
-            let m = run_cargo(g, req, &exe, &flags, &script_pkgs, &lib_pkgs, seeds)?;
+            let m = run_cargo(g, req, &exe, &flags, &script_pkgs, &lib_pkgs, seeds, Tier::Fast)?;
             std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir, e))?;
+            std::fs::write(&fast_mark, b"").map_err(|e| format!("{}: {}", fast_mark, e))?;
             std::fs::write(&messages_path, &m).map_err(|e| format!("{}: {}", messages_path, e))?;
             // a stale library of an earlier link under this key is not trusted
             let _ = std::fs::remove_file(&lib_path);
             m
         }
     };
+    let out = outputs(g, seeds, &messages)?;
+    if out.archives.is_empty() && out.dylibs.is_empty() && out.frameworks.is_empty() {
+        return Ok(Built { scripts: out.scripts, lib: None });
+    }
+    if !std::path::Path::new(&lib_path).is_file() {
+        link(&lib_path, &out.archives, &out.search, &out.fw_search, &out.dylibs, &out.frameworks)?;
+    }
+    if std::path::Path::new(&fast_mark).is_file() {
+        optimize_later(g, req, exe, &flags, script_pkgs, lib_pkgs, seeds, &out, lib_path.clone(), fast_mark);
+    }
+    Ok(Built { scripts: out.scripts, lib: Some(NativeLib { path: lib_path, statics: out.statics, crates: names }) })
+}
+
+/// What cargo's messages say the native scripts produced.
+struct Outputs {
+    scripts: Vec<ScriptOut>,
+    statics: Vec<String>,
+    archives: Vec<String>,
+    search: Vec<String>,
+    fw_search: Vec<String>,
+    dylibs: Vec<String>,
+    frameworks: Vec<String>,
+}
+
+/// (crate, features) of each build script of the graph: what the native steps read of it
+fn script_table(g: &Graph) -> Vec<(usize, Vec<String>)> {
+    g.build_scripts.iter().map(|b| (b.krate, b.features.clone())).collect()
+}
+
+fn outputs(g: &Graph, seeds: &[usize], messages: &str) -> Result<Outputs, String> {
+    outputs_with(&g.pkg, &script_table(g), seeds, messages)
+}
+
+fn outputs_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<String>)], seeds: &[usize], messages: &str) -> Result<Outputs, String> {
 
     // ---- what cargo's scripts produced
     let mut scripts = Vec::new();
@@ -225,11 +269,11 @@ pub fn build(g: &Graph, seeds: &[usize], req: &Request) -> Result<Built, String>
         let j = crate::json::parse(line.as_bytes()).map_err(|e| format!("cargo message: {e}"))?;
         let (n, v) = id_name_version(j.get("package_id").map(|p| p.str()).unwrap_or(""));
         let Some(&s) = seeds.iter().find(|&&s| {
-            let p = pk(&g.build_scripts[s]);
+            let p = &pkg[scripts_of[s].0];
             p.1 == n && p.2 == v
         }) else { continue };
         let strs = |k: &str| -> Vec<String> { j.get(k).map(|a| a.arr().iter().map(|x| x.str().to_string()).collect()).unwrap_or_default() };
-        let mut out = ScriptOut { krate: g.build_scripts[s].krate, cfgs: strs("cfgs"), env: Vec::new(), out_dir: j.get("out_dir").map(|o| o.str().to_string()).unwrap_or_default(), system: Vec::new() };
+        let mut out = ScriptOut { krate: scripts_of[s].0, cfgs: strs("cfgs"), env: Vec::new(), out_dir: j.get("out_dir").map(|o| o.str().to_string()).unwrap_or_default(), system: Vec::new() };
         if let Some(e) = j.get("env") {
             for kv in e.arr() {
                 if let [k, v] = kv.arr() {
@@ -275,21 +319,88 @@ pub fn build(g: &Graph, seeds: &[usize], req: &Request) -> Result<Built, String>
             None => return Err(format!("--allow-c: a native build script links static library `{}`, but {} is in none of its search paths ({})", name, file, search.join(", "))),
         }
     }
-    if archives.is_empty() && dylibs.is_empty() && frameworks.is_empty() {
-        return Ok(Built { scripts, lib: None });
-    }
-    if !std::path::Path::new(&lib_path).is_file() {
-        link(&lib_path, &archives, &search, &fw_search, &dylibs, &frameworks)?;
-    }
-    Ok(Built { scripts, lib: Some(NativeLib { path: lib_path, statics, crates: names }) })
+    Ok(Outputs { scripts, statics, archives, search, fw_search, dylibs, frameworks })
 }
 
-fn run_cargo(g: &Graph, req: &Request, exe: &std::path::Path, flags: &[&String], script_pkgs: &[String], lib_pkgs: &[String], seeds: &[usize]) -> Result<String, String> {
-    let target = format!("{}/native/cargo-target", req.relax_dir);
-    eprintln!("makepad run: --allow-c: building native dependencies with cargo (cached afterwards): {}", script_pkgs.iter().take(8).cloned().collect::<Vec<_>>().join(", "));
+#[derive(Clone, Copy, PartialEq)]
+enum Tier {
+    /// opt-level 0: what a start waits for
+    Fast,
+    /// the release opt-level, built in the background for later starts
+    Optimized,
+}
+
+/// The optimized tier of a first-tier library (module doc), on a background thread: cargo with
+/// the release opt-level in its own target, then, when its scripts said what the first tier's
+/// did, its archives linked over `lib_path` (the running process keeps the library it loaded).
+/// Once per process; a process that ends first leaves it to the next start (cargo resumes).
+#[allow(clippy::too_many_arguments)]
+fn optimize_later(g: &Graph, req: &Request, exe: std::path::PathBuf, flags: &[&String], script_pkgs: Vec<String>, lib_pkgs: Vec<String>, seeds: &[usize], fast: &Outputs, lib_path: String, fast_mark: String) {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    // what the thread needs, owned: the graph's script and package tables and the request
+    let pkg: Vec<(String, String, String)> = g.pkg.clone();
+    let scripts = script_table(g);
+    let seeds = seeds.to_vec();
+    let flags: Vec<String> = flags.iter().map(|f| f.to_string()).collect();
+    let (workspace, package, relax_dir) = (req.workspace.to_string(), req.package.to_string(), req.relax_dir.to_string());
+    let said = |o: &Outputs| -> Vec<(usize, Vec<String>, Vec<(String, String)>)> {
+        let mut v: Vec<_> = o.scripts.iter().map(|s| (s.krate, s.cfgs.clone(), s.env.clone())).collect();
+        v.sort();
+        v
+    };
+    let want = said(fast);
+    let _ = std::thread::Builder::new().name("run-native-opt".into()).spawn(move || {
+        let _z = crate::zone_alloc::compiler_thread();
+        let flag_refs: Vec<&String> = flags.iter().collect();
+        let m = match run_cargo_with(&pkg, &scripts, &workspace, &package, &relax_dir, &exe, &flag_refs, &script_pkgs, &lib_pkgs, &seeds, Tier::Optimized) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("makepad-run: --allow-c: the optimized native build failed (the opt-level 0 library stays): {}", e.lines().next().unwrap_or(""));
+                return;
+            }
+        };
+        let o = match outputs_with(&pkg, &scripts, &seeds, &m) {
+            Ok(o) => o,
+            Err(e) => { eprintln!("makepad-run: --allow-c: the optimized native build: {}", e); return; }
+        };
+        if said(&o) != want {
+            eprintln!("makepad-run: --allow-c: the optimized native build's scripts said other cfgs or env than the first build's: its library is not taken");
+            return;
+        }
+        let tmp = format!("{}.opt{}", lib_path, std::process::id());
+        if link(&tmp, &o.archives, &o.search, &o.fw_search, &o.dylibs, &o.frameworks).is_ok() && std::fs::rename(&tmp, &lib_path).is_ok() {
+            let _ = std::fs::remove_file(&fast_mark);
+            
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_cargo(g: &Graph, req: &Request, exe: &std::path::Path, flags: &[&String], script_pkgs: &[String], lib_pkgs: &[String], seeds: &[usize], tier: Tier) -> Result<String, String> {
+    run_cargo_with(&g.pkg, &script_table(g), req.workspace, req.package, req.relax_dir, exe, flags, script_pkgs, lib_pkgs, seeds, tier)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_cargo_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<String>)], workspace: &str, package: &str, relax_dir: &str, exe: &std::path::Path,
+    flags: &[&String], script_pkgs: &[String], lib_pkgs: &[String], seeds: &[usize], tier: Tier) -> Result<String, String> {
+    let target = match tier { Tier::Fast => format!("{}/native/cargo-target", relax_dir), Tier::Optimized => format!("{}/native/cargo-target-opt", relax_dir) };
+    if tier == Tier::Fast {
+        eprintln!("makepad run: --allow-c: building native dependencies with cargo (opt-level 0 now, optimized in the background; cached afterwards): {}", script_pkgs.iter().take(8).cloned().collect::<Vec<_>>().join(", "));
+    }
     let mut cmd = Command::new("cargo");
-    cmd.current_dir(req.workspace)
-        .args(["check", "--release", "--message-format=json", "-p", req.package])
+    match tier {
+        // the scripts see OPT_LEVEL=0 (cc and cmake compile the C unoptimized)
+        Tier::Fast => { cmd.env("CARGO_PROFILE_RELEASE_OPT_LEVEL", "0"); }
+        // beside the program: two jobs
+        Tier::Optimized => { cmd.env("CARGO_BUILD_JOBS", "2"); }
+    }
+    cmd.current_dir(workspace)
+        .args(["check", "--release", "--message-format=json", "-p", package])
         .args(flags.iter().map(|f| f.as_str()))
         .env("CARGO_TARGET_DIR", &target)
         .env("CARGO_INCREMENTAL", "0")
@@ -303,7 +414,7 @@ fn run_cargo(g: &Graph, req: &Request, exe: &std::path::Path, flags: &[&String],
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let out = cmd.output().map_err(|e| format!("--allow-c needs cargo on PATH to build the native dependencies ({}): {e}", req.package))?;
+    let out = cmd.output().map_err(|e| format!("--allow-c needs cargo on PATH to build the native dependencies ({}): {e}", package))?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     if !out.status.success() {
         // cargo's own messages; a native script's failure is in `compiler-message`s and stderr
@@ -319,7 +430,7 @@ fn run_cargo(g: &Graph, req: &Request, exe: &std::path::Path, flags: &[&String],
         let reason = j.get("reason").map(|r| r.str()).unwrap_or("");
         let (n, v) = id_name_version(j.get("package_id").map(|p| p.str()).unwrap_or(""));
         let seed = seeds.iter().find(|&&s| {
-            let p = &g.pkg[g.build_scripts[s].krate];
+            let p = &pkg[scripts_of[s].0];
             p.1 == n && p.2 == v
         });
         let Some(&s) = seed else { continue };
@@ -332,7 +443,7 @@ fn run_cargo(g: &Graph, req: &Request, exe: &std::path::Path, flags: &[&String],
                 let is_lib = j.get("target").and_then(|t| t.get("kind")).is_some_and(|k| k.arr().iter().any(|x| x.str() == "lib" || x.str() == "rlib"));
                 if is_lib {
                     let mut cargo_feats: Vec<String> = j.get("features").map(|a| a.arr().iter().map(|x| x.str().to_string()).collect()).unwrap_or_default();
-                    let mut ours = g.build_scripts[s].features.clone();
+                    let mut ours = scripts_of[s].1.clone();
                     cargo_feats.sort();
                     ours.sort();
                     if cargo_feats != ours {

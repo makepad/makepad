@@ -18,3 +18,5 @@ makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-strict-json = { path = "../strict_json" }
 # The panel widgets' library and the host they read and write through.
 makepad-value-pickers = { path = "../value_pickers" }
+# Value sites (the auto panel is made from them).
+makepad-edit-values = { path = "../edit_values" }

@@ -437,8 +437,14 @@ pub static TO_REMOVE: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 /// `check_only` (`relax check`): a script that compiles C is not run without `--allow-c` (rustc's
 /// check never links native code): its crate gets an empty answer (OUT_DIR, no cfgs), said once.
-pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, target_dir: &str, native: Option<&crate::native::Request>, check_only: bool) -> Result<(), String> {
-    let results: Mutex<Vec<(Vec<usize>, Result<String, String>, String)>> = Mutex::new(Vec::new());
+pub type ScriptsDone<'a> = dyn Fn(&Graph, &[usize], &[Vec<String>], &[Vec<(String, String)>]) -> Option<Box<dyn std::any::Any>> + Sync + 'a;
+
+/// `scripts_done`: called once the scripts Relax runs have finished while cargo is still building
+/// the native packages (a cold `--allow-c` start: the C compile takes tens of seconds), with the
+/// crates' cfgs and env so far (the native packages' outputs missing). The boot starts the
+/// proc-macro world from it, beside the C compile. What it returns is kept until cargo is done.
+pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, target_dir: &str, native: Option<&crate::native::Request>, check_only: bool,
+    scripts_done: Option<&ScriptsDone<'_>>) -> Result<(), String> {
     // the packages whose scripts compile or link C (native.rs): built by cargo with `--allow-c`,
     // an error naming the flag without it; Relax runs the other scripts
     let mut native_seeds: Vec<usize> = Vec::new();
@@ -472,8 +478,60 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
             native_seeds.push(i);
         }
     }
-    if let (Some(req), false) = (native, native_seeds.is_empty()) {
-        let built = crate::native::build(g, &native_seeds, req)?;
+    let native_krates: Vec<usize> = native_seeds.iter().map(|&i| g.build_scripts[i].krate).collect();
+    // makepad-platform's script is answered by makepad run itself (`platform_answer`, no process);
+    // in no-codegen mode (the platforms that run no generated code, iOS) no other script runs: any
+    // other crate with a build script is an error.
+    if sess.options.no_codegen {
+        for bs in &g.build_scripts {
+            let (_, pname, _) = &g.pkg[bs.krate];
+            if pname != "makepad-platform" {
+                return Err(format!("build scripts are not supported in no-codegen mode: {} ({})", pname, bs.src_path));
+            }
+        }
+    }
+    // cargo builds the native packages (C compiles, a cold build's longest step) while Relax runs
+    // the other scripts: they share nothing (each script's output is its own crate's)
+    let gr: &Graph = g;
+    let (native_built, results) = std::thread::scope(|scope| {
+        let native_job = match (native, native_seeds.is_empty()) {
+            (Some(req), false) => Some(scope.spawn(|| {
+                let _z = crate::zone_alloc::compiler_thread();
+                crate::native::build(gr, &native_seeds, req)
+            })),
+            _ => None,
+        };
+        // with the hook: the scripts of the proc-macro world's crates first (the hook starts the
+        // world from their outputs), the others beside the world's build
+        let world: Vec<bool> = match (&native_job, scripts_done) {
+            (Some(_), Some(_)) => {
+                let names = crate::macro_reg::macro_closure_names();
+                gr.crates.iter().map(|c| names.contains(&c.name)).collect()
+            }
+            _ => Vec::new(),
+        };
+        let mut results = relax_scripts(sess, gr, target_dir, &native_krates, &check_skipped, &|k| world.is_empty() || world[k]);
+        let mut _kept = None;
+        if let (Some(job), Some(done)) = (&native_job, scripts_done) {
+            if !job.is_finished() {
+                let (mut cfgs, mut env, mut libs) = (gr.cfgs.clone(), gr.env.clone(), gr.link_libs.clone());
+                let mut ok = true;
+                for (krates, r, out_dir) in &results {
+                    let Ok(stdout) = r else { ok = false; break };
+                    for &k in krates {
+                        if script_output_into(&mut cfgs, &mut env, &mut libs, &gr.pkg, k, stdout, out_dir.clone(), check_only).is_err() { ok = false; }
+                    }
+                }
+                if ok { _kept = done(gr, &native_krates, &cfgs, &env); }
+            }
+        }
+        if !world.is_empty() {
+            results.extend(relax_scripts(sess, gr, target_dir, &native_krates, &check_skipped, &|k| !world[k]));
+        }
+        (native_job.map(|j| j.join().unwrap_or_else(|_| Err("--allow-c: the native build panicked".to_string()))), results)
+    });
+    if let Some(built) = native_built {
+        let built = built?;
         g.native = built.lib;
         for n in built.scripts {
             let also = g.build_scripts.iter().find(|b| b.krate == n.krate).map(|b| b.also.clone()).unwrap_or_default();
@@ -489,21 +547,16 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
             }
         }
     }
-    let native_krates: Vec<usize> = native_seeds.iter().map(|&i| g.build_scripts[i].krate).collect();
-    // makepad-platform's script is answered by makepad run itself (`platform_answer`, no process);
-    // in no-codegen mode (the platforms that run no generated code, iOS) no other script runs: any
-    // other crate with a build script is an error.
-    if sess.options.no_codegen {
-        for bs in &g.build_scripts {
-            let (_, pname, _) = &g.pkg[bs.krate];
-            if pname != "makepad-platform" {
-                return Err(format!("build scripts are not supported in no-codegen mode: {} ({})", pname, bs.src_path));
-            }
-        }
-    }
+    apply_script_results(g, results, check_only)
+}
+
+/// The scripts Relax runs itself (every one but the native packages' and a check's skipped
+/// ones), on the pool: (crates, stdout or error, OUT_DIR) per script.
+fn relax_scripts(sess: &std::sync::Arc<crate::Session>, g: &Graph, target_dir: &str, native_krates: &[usize], check_skipped: &[usize], only: &(dyn Fn(usize) -> bool + Sync)) -> Vec<(Vec<usize>, Result<String, String>, String)> {
+    let results: Mutex<Vec<(Vec<usize>, Result<String, String>, String)>> = Mutex::new(Vec::new());
     crate::pool::scope(|s| {
         for bs in &g.build_scripts {
-            if native_krates.contains(&bs.krate) {
+            if native_krates.contains(&bs.krate) || !only(bs.krate) {
                 continue;
             }
             if check_skipped.contains(&bs.krate) {
@@ -551,7 +604,7 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
             });
         }
     });
-    apply_script_results(g, results.into_inner().unwrap(), check_only)
+    results.into_inner().unwrap()
 }
 
 /// The scripts' `cargo:` lines into the graph: cfgs, link libraries, env (OUT_DIR included).
@@ -574,14 +627,20 @@ fn apply_script_results(g: &mut Graph, results: Vec<(Vec<usize>, Result<String, 
 
 /// One crate's share of a script's output (`stdout`, its OUT_DIR).
 fn apply_script_output(g: &mut Graph, k: usize, stdout: &str, out_dir: String, check_only: bool) -> Result<(), String> {
-    g.env[k].push(("OUT_DIR".to_string(), out_dir));
+    script_output_into(&mut g.cfgs, &mut g.env, &mut g.link_libs, &g.pkg, k, stdout, out_dir, check_only)
+}
+
+/// apply_script_output into these tables (the graph's, or copies of them).
+fn script_output_into(cfgs: &mut [Vec<String>], env: &mut [Vec<(String, String)>], link_libs: &mut Vec<(String, bool)>, pkg: &[(String, String, String)],
+    k: usize, stdout: &str, out_dir: String, check_only: bool) -> Result<(), String> {
+    env[k].push(("OUT_DIR".to_string(), out_dir));
     for line in stdout.lines() {
         let rest = match line.strip_prefix("cargo::").or_else(|| line.strip_prefix("cargo:")) {
             Some(r) => r,
             None => continue,
         };
         if let Some(c) = rest.strip_prefix("rustc-cfg=") {
-            g.cfgs[k].push(c.to_string());
+            cfgs[k].push(c.to_string());
         } else if let Some(l) = rest.strip_prefix("rustc-link-lib=") {
             // [kind=]name[:rename]
             let (kind, name) = match l.find('=') {
@@ -595,15 +654,15 @@ fn apply_script_output(g: &mut Graph, k: usize, stdout: &str, out_dir: String, c
                 continue;
             }
             if kind == "static" {
-                return Err(format!("`{}`'s build script links the static library `{}` (native code): it {}", g.pkg[k].1, name, relax_session::options::C_GATE));
+                return Err(format!("`{}`'s build script links the static library `{}` (native code): it {}", pkg[k].1, name, relax_session::options::C_GATE));
             }
             let fw = kind == "framework";
-            if !g.link_libs.contains(&(name.clone(), fw)) {
-                g.link_libs.push((name, fw));
+            if !link_libs.contains(&(name.clone(), fw)) {
+                link_libs.push((name, fw));
             }
         } else if let Some(e) = rest.strip_prefix("rustc-env=") {
             if let Some(i) = e.find('=') {
-                g.env[k].push((e[..i].to_string(), e[i + 1..].to_string()));
+                env[k].push((e[..i].to_string(), e[i + 1..].to_string()));
             }
         }
     }

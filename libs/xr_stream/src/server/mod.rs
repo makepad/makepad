@@ -448,6 +448,11 @@ impl XrServer {
         self.shared.mirror.store(on, Ordering::Release);
     }
 
+    /// The desktop's mirror switch (`set_mirror`).
+    pub fn mirror(&self) -> bool {
+        self.shared.mirror.load(Ordering::Acquire)
+    }
+
     /// The headset's settings (a streaming headset is told at once).
     pub fn set_headset_settings(&self, settings: HeadsetSettings) {
         *self.shared.headset_settings.lock().unwrap() = settings;

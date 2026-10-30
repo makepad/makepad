@@ -25,6 +25,7 @@ pub mod generators;
 pub mod host;
 pub mod keys;
 pub mod live;
+pub mod make;
 pub mod morph;
 pub mod picker;
 pub mod shaders;
@@ -32,6 +33,7 @@ pub mod spec;
 pub mod track;
 pub mod tree;
 pub mod tweaks;
+pub mod values;
 
 /// The widgets as a score's agent is told them.
 pub const CATALOGUE: &str = include_str!("catalogue.md");

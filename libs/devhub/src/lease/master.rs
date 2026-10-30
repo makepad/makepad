@@ -21,11 +21,11 @@ pub type Ask = Arc<dyn Fn(&str, &str, &str) -> Result<Vec<String>, String> + Sen
 pub type Publish = Arc<dyn Fn(Record) + Send + Sync>;
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 /// `(node, repo, repo dir, branch)` -> that commit, present in the node's store.
-pub type EnsureRev = Arc<dyn Fn(&str, &str, &Path, &str) -> Result<String, String> + Send + Sync>;
+pub type EnsureRev = Arc<dyn Fn(&str, &str, &Path, &super::RevPin) -> Result<String, String> + Send + Sync>;
 /// The nodes the master dials: (name, address).
 pub type Hosts = Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>;
 
-pub const SERVICES: [&str; 11] = ["lease", "beat", "release", "leases", "nodes", "node-dev", "linspect", "evict", "unblock", "override", "blocked"];
+pub const SERVICES: [&str; 12] = ["lease", "beat", "release", "cancel", "leases", "nodes", "node-dev", "linspect", "evict", "unblock", "override", "blocked"];
 const NODE_BEAT_MS: u64 = 5_000;
 const CAPS_MS: u64 = 10_000;
 
@@ -56,6 +56,32 @@ pub struct LeaseMaster {
     /// how each ended lease's cleanup went (`release` waits for it and says so)
     cleanups: Mutex<HashMap<String, String>>,
     cleaned: std::sync::Condvar,
+}
+
+/// A lane's node dirs (`lane/<lane>/src`, its target) hold the tree of ONE Mac worktree: a lease
+/// without a revision ships into them. `~/.makepad/devhub/lanes.conf` (`<lane> <worktree>` lines)
+/// binds a lane to the worktree that first shipped under its name; a lease for the same lane from
+/// another worktree is refused (two worktrees alternating in one node dir left it stale and gates
+/// ran old files). A binding whose worktree is gone (removed after landing) passes to the next.
+fn bind_lane(home: &Path, req: &Req) -> Result<(), String> {
+    let (None, Some(dir), false) = (&req.rev, &req.repo_dir, req.kind == super::Kind::Inspect) else { return Ok(()) };
+    let path = home.join("lanes.conf");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut lines: Vec<(String, String)> = text.lines().filter_map(|l| l.split_once(' ').map(|(a, b)| (a.to_string(), b.trim().to_string()))).collect();
+    match lines.iter_mut().find(|(lane, _)| *lane == req.lane) {
+        Some((_, bound)) if bound == dir => return Ok(()),
+        Some((_, bound)) if Path::new(bound.as_str()).exists() => {
+            return Err(format!(
+                "lane {} already ships from {bound}; this worktree ({dir}) needs its own lane name (two worktrees in one node lane dir leave it stale), or remove the other worktree first",
+                req.lane
+            ));
+        }
+        Some((_, bound)) => *bound = dir.clone(),
+        None => lines.push((req.lane.clone(), dir.clone())),
+    }
+    let out: String = lines.iter().map(|(l, d)| format!("{l} {d}\n")).collect();
+    let tmp = home.join("lanes.conf.new");
+    std::fs::create_dir_all(home).and_then(|_| std::fs::write(&tmp, out)).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn err(e: &str) -> String {
@@ -338,12 +364,13 @@ impl LeaseMaster {
         let rev = match &l.req.rev {
             None => "null".to_string(),
             Some(spec) => {
-                let (mk, com) = spec.split_once(',').map_or((spec.as_str(), None), |(a, b)| (a, Some(b)));
+                // the commits the CLI pinned at order time, never what the branches name now
+                let (mk, com) = super::parse_pinned(spec)?;
                 let dir = PathBuf::from(l.req.repo_dir.clone().unwrap_or_else(|| ".".into()));
                 let f = self.ensure_rev.as_ref().ok_or("this master cannot ship revisions (built without checkout)")?;
-                let mk = f(node, "makepad", &dir, mk)?;
+                let mk = f(node, "makepad", &dir, &mk)?;
                 let com = match com {
-                    Some(b) => json_str(&f(node, "commercial", &dir.join("apps/commercial"), b)?),
+                    Some(c) => json_str(&f(node, "commercial", &dir.join("apps/commercial"), &c)?),
                     None => "null".into(),
                 };
                 format!("{{\"makepad\":{},\"commercial\":{com}}}", json_str(&mk))
@@ -587,7 +614,7 @@ impl LeaseMaster {
         let now = self.now();
         let line = line.strip_prefix(service).filter(|r| r.is_empty() || r.starts_with(' ')).map_or(line, str::trim_start);
         match service {
-            "lease" => match Req::parse(line) {
+            "lease" => match Req::parse(line).and_then(|req| bind_lane(&self.home, &req).map(|_| req)) {
                 Ok(req) => {
                     let id = self.sched.lock().unwrap().request(req, now);
                     self.pump();
@@ -599,11 +626,13 @@ impl LeaseMaster {
                 Some(l) => out.push(l),
                 None => out.push(err(&format!("no lease {}", line.trim()))),
             },
-            "release" => {
+            "release" | "cancel" => {
                 let mut w = line.split_whitespace();
                 let id = w.next().unwrap_or("");
                 let how = w.next().filter(|h| !h.starts_with("exit=")).unwrap_or("released");
-                if self.sched.lock().unwrap().release(id, how, now) {
+                // `cancel`: the user's end of one lease; the lane is kept off that node for a while
+                let ended = if service == "cancel" { self.sched.lock().unwrap().cancel(id, now) } else { self.sched.lock().unwrap().release(id, how, now) };
+                if ended {
                     self.pump();
                     // the answer says how the node cleaned up (it waits for the node, not forever)
                     let cleanup = self.cleanup_of(id, Duration::from_secs(30)).unwrap_or_else(|| "{\"cleanup\":\"still running\"}".into());
@@ -773,7 +802,7 @@ pub fn register(ep: &makepad_remote::Endpoint, machine: &str, publish: Publish) 
         Ok(out)
     });
     #[cfg(feature = "checkout")]
-    let rev: Option<EnsureRev> = Some(Arc::new(move |node: &str, repo: &str, dir: &Path, branch: &str| crate::sync::ensure_rev(&client(), node, repo, dir, branch)));
+    let rev: Option<EnsureRev> = Some(Arc::new(move |node: &str, repo: &str, dir: &Path, pin: &super::RevPin| crate::sync::ensure_rev(&client(), node, repo, dir, &pin.branch, &pin.sha)));
     #[cfg(not(feature = "checkout"))]
     let rev: Option<EnsureRev> = None;
     let lm = Arc::new(LeaseMaster::new(machine, proto::home(), ask, publish, Arc::new(proto::wall_ms), rev, false));
@@ -887,14 +916,30 @@ mod tests {
         let ledger = std::fs::read_to_string(dir.join("leases.jsonl")).unwrap();
         assert!(ledger.contains("\"id\":\"L1\"") && ledger.contains("\"how\":\"released\""));
         assert!(recs.lock().unwrap().iter().any(|r| r.kind == "lease" && r.line.starts_with("L1 build@217 granted to gapx")));
+        // a master restart mid-lease: the new master takes the granted lease back from
+        // leases.live, its holder re-attaches by id, the node keeps running it, and the gate's
+        // verdict is released as usual
+        let mid = serve(&m, "lease", &Req::new("gate", Kind::Gate).to_json());
+        assert!(mid.contains("\"state\":\"granted\""), "{mid}");
+        let gid = mid.split("\"id\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+        drop(m);
+        let (m1, node1, ..) = master(&dir);
+        node1.known.lock().unwrap().push(gid.clone());
+        m1.refresh(&hosts);
+        assert!(serve(&m1, "beat", &gid).contains("\"state\":\"granted\""), "the lease outlived the restart");
+        m1.beat_nodes();
+        assert!(serve(&m1, "beat", &gid).contains("\"state\":\"granted\""), "the node still runs it");
+        let r = serve(&m1, "release", &format!("{gid} released exit=0"));
+        assert!(r.contains("\"how\":\"released\""), "{r}");
+        drop(m1);
         // a new master continues the numbering
         let (m2, node2, ..) = master(&dir);
         m2.refresh(&hosts);
-        assert!(serve(&m2, "lease", &Req::new("gapx", Kind::Test).to_json()).contains("\"id\":\"L2\""));
+        assert!(serve(&m2, "lease", &Req::new("gapx", Kind::Test).to_json()).contains("\"id\":\"L3\""));
         // the node forgot a lease (restarted): lost, warn
         node2.known.lock().unwrap().clear();
         m2.beat_nodes();
-        assert!(serve(&m2, "beat", "L2").contains("\"how\":\"lost\""));
+        assert!(serve(&m2, "beat", "L3").contains("\"how\":\"lost\""));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -935,5 +980,38 @@ mod tests {
     fn base64_decodes() {
         let s = makepad_network::digest::base64_encode(b"devhub lease\0x");
         assert_eq!(b64_decode(&s).unwrap(), b"devhub lease\0x");
+    }
+}
+
+#[cfg(test)]
+mod lane_binding_tests {
+    use super::*;
+
+    /// A lane ships from one worktree: a second worktree under the same name is refused with a
+    /// clear error, the first may go on, and a removed worktree's name passes to the next.
+    #[test]
+    fn a_second_worktree_under_one_lane_name_is_refused() {
+        let base = std::env::temp_dir().join(format!("devhub-lanes-{}", std::process::id()));
+        let (home, a, b) = (base.join("home"), base.join("wt-a"), base.join("wt-b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let req = |dir: &Path| {
+            let mut r = Req::new("fablang", super::super::Kind::Gate);
+            r.repo_dir = Some(dir.to_string_lossy().into_owned());
+            r
+        };
+        assert!(bind_lane(&home, &req(&a)).is_ok());
+        assert!(bind_lane(&home, &req(&a)).is_ok(), "the bound worktree goes on");
+        let e = bind_lane(&home, &req(&b)).unwrap_err();
+        assert!(e.contains("already ships from") && e.contains("own lane name"), "{e}");
+        // a lease with a revision ships nothing into the lane dir: never refused
+        let mut rev = req(&b);
+        rev.rev = Some("rc-x,main".into());
+        assert!(bind_lane(&home, &rev).is_ok());
+        // the first worktree is removed (landed): the name passes on
+        std::fs::remove_dir_all(&a).unwrap();
+        assert!(bind_lane(&home, &req(&b)).is_ok());
+        assert!(std::fs::read_to_string(home.join("lanes.conf")).unwrap().contains(&b.to_string_lossy().into_owned()));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -48,6 +48,8 @@ pub struct Program {
     pub fx_user: Vec<Option<FxUserData>>,
     pub modwheel: [f32; 2],
     pub name: String,
+    /// The patch's embedded tuning (scale + keyboard map), decoded.
+    pub tuning: Option<Arc<crate::kit::tuning::Tuning>>,
 }
 
 impl Program {
@@ -143,6 +145,20 @@ impl Program {
             }
         }
         let _ = gl::FX;
+        let tuning = p.tuning.as_ref().and_then(|t| {
+            let text = |b64: &str| makepad_base64::base64_decode(b64.as_bytes()).ok().map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            let scl = text(&t.scl_b64);
+            if scl.trim().is_empty() {
+                return None;
+            }
+            match crate::kit::tuning::Tuning::from_text(&t.mapping_name, &scl, &text(&t.kbm_b64)) {
+                Ok(t) => Some(Arc::new(t)),
+                Err(e) => {
+                    problems.push(format!("the patch's tuning cannot load: {e}"));
+                    None
+                }
+            }
+        });
         Program {
             values: p.values.clone(),
             scene_routes,
@@ -165,6 +181,7 @@ impl Program {
             fx_user,
             modwheel: p.modwheel,
             name: p.name.clone(),
+            tuning,
         }
     }
 }

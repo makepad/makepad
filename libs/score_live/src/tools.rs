@@ -106,8 +106,13 @@ pub fn morph_params(args: &Value) -> Value {
         Some(Value::Arr(items)) => items.iter().filter_map(|g| g.as_str().map(str::to_string)).collect(),
         _ => Vec::new(),
     };
-    let wanted: Vec<&str> = groups.iter().map(String::as_str).collect();
     let schema = &morph::layout().schema;
+    // Without groups: everything but the rack's effects (~30 groups; asked for by name, `fx_*` for all).
+    let wanted: Vec<&str> = if groups.is_empty() {
+        schema.groups.iter().map(|g| g.name.as_str()).filter(|g| !g.starts_with("fx_")).collect()
+    } else {
+        groups.iter().map(String::as_str).collect()
+    };
     json::obj(vec![
         ("structure", json::s(morph::STRUCTURE.to_string())),
         ("params", json::s(schema.describe(&wanted))),

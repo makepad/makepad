@@ -13309,8 +13309,80 @@ fn rt_divrem128(mode: u64, alo: u64, ahi: u64, blo: u64, bhi: u64) -> WideRet {
 /// State word (rustc's discriminant): 0 unresumed, 1 returned, 2 poisoned (running: a panic
 /// leaves it), 3 + k suspended at point k. A poll with a null context (the coroutine dropped)
 /// runs the drops of its suspension point.
+/// MAKEPAD_RUN_CORO_VERIFY=1: every suspension point's live vregs (the per-vreg walks of
+/// coroutine_transform) are checked against the dense block x vreg dataflow they replace.
+fn coro_verify() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("MAKEPAD_RUN_CORO_VERIFY").is_ok_and(|v| v == "1"))
+}
+
+/// The dense backward liveness from one suspension point (its view `seen` / `known`): panics
+/// when a vreg's liveness at `resume` or `cancel` differs from `live_rc`.
+#[allow(clippy::too_many_arguments)]
+fn dense_live_check(f: &Func, c: &Coro, nv: usize, seen: &[bool], known: &[Option<bool>], resume: u32, cancel: u32, live_rc: &[u64]) {
+    use relax_backend::regalloc::{term_uses, uses_defs};
+    let nb = f.blocks.len();
+    let words = (nv + 63) / 64;
+    let (mut us, mut ds) = (Vec::new(), Vec::new());
+    let mut gen = vec![0u64; nb * words];
+    let mut kill = vec![0u64; nb * words];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        let g = bi * words;
+        for i in &b.insts {
+            uses_defs(i, &mut us, &mut ds);
+            for u in &us {
+                let x = u.0 as usize;
+                if kill[g + x / 64] & (1 << (x % 64)) == 0 { gen[g + x / 64] |= 1 << (x % 64); }
+            }
+            for d in &ds {
+                let x = d.0 as usize;
+                kill[g + x / 64] |= 1 << (x % 64);
+            }
+        }
+        term_uses(&b.term, &mut us);
+        for u in &us {
+            let x = u.0 as usize;
+            if kill[g + x / 64] & (1 << (x % 64)) == 0 { gen[g + x / 64] |= 1 << (x % 64); }
+        }
+    }
+    let mut live_in = vec![0u64; nb * words];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for bi in (0..nb).rev() {
+            if !seen[bi] { continue; }
+            let mut out = vec![0u64; words];
+            let mut succs: Vec<u32> = match (known[bi], &f.blocks[bi].term) {
+                (Some(t), Term::Branch(_, y, n)) => vec![if t { *y } else { *n }],
+                (_, t) => t.succs().into_iter().collect(),
+            };
+            for &(pend, resume, cancel) in &c.suspends {
+                if pend as usize == bi { succs.push(resume); succs.push(cancel); }
+            }
+            for t in succs {
+                for w in 0..words { out[w] |= live_in[t as usize * words + w]; }
+            }
+            for w in 0..words {
+                let v = gen[bi * words + w] | (out[w] & !kill[bi * words + w]);
+                if v != live_in[bi * words + w] { live_in[bi * words + w] = v; changed = true; }
+            }
+        }
+    }
+    for v in 0..nv {
+        let lv = |b: u32| live_in[b as usize * words + v / 64] & (1 << (v % 64)) != 0;
+        let dense = lv(resume) || lv(cancel);
+        let walked = live_rc[v / 64] & (1 << (v % 64)) != 0;
+        assert_eq!(dense, walked, "coroutine liveness of v{} at resume {} / cancel {}: dense {} walked {}", v, resume, cancel, dense, walked);
+    }
+}
+
 fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u32, u64), String> {
     use relax_backend::regalloc::{term_uses, uses_defs};
+    // MAKEPAD_RUN_TRACE=coro: the transform's sizes and phase times (coro-transform line)
+    let tr = std::env::var("MAKEPAD_RUN_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "coro"));
+    let t_start = std::time::Instant::now();
+    let mut t_ph: Vec<(&str, f64)> = Vec::new();
+    let mut mark = |name: &'static str| if tr { t_ph.push((name, t_start.elapsed().as_secs_f64() * 1e3)); };
     // drop flags whose value is known where they are tested (a value moved out before a
     // suspension point: rustc's maybe-initialized analysis) -- the dead drop would keep the
     // value's slot saved across it
@@ -13602,79 +13674,116 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u
             }
         }
     }
-    // vreg liveness (backward, to a fixpoint)
-    let words = (nv + 63) / 64;
-    let mut gen = vec![0u64; nb * words];
-    let mut kill = vec![0u64; nb * words];
+    mark("points-to");
+    // vreg liveness, per vreg: from the blocks where it is used before any definition of it in
+    // the block (gen), back through predecessors that do not define it (kill). Each vreg's bit
+    // of the backward dataflow is independent of the others', so a walk per vreg is that
+    // dataflow's answer for it, at the cost of its live range rather than blocks x vregs
+    // (a 9555-expression async fn: 88k blocks x 78k vregs per suspension point).
+    let mut gen_in: Vec<Vec<u32>> = vec![Vec::new(); nv];
+    let mut defs_in: Vec<Vec<u32>> = vec![Vec::new(); nv];
     let mut used_in: Vec<Vec<u32>> = vec![Vec::new(); nv];
-    for (bi, b) in f.blocks.iter().enumerate() {
-        let g = bi * words;
-        for i in &b.insts {
-            uses_defs(i, &mut us, &mut ds);
+    {
+        // the block that last defined each vreg (u32::MAX: none yet)
+        let mut def_mark = vec![u32::MAX; nv];
+        for (bi, b) in f.blocks.iter().enumerate() {
+            let bi = bi as u32;
+            let mut use_v = |x: usize, def_mark: &[u32]| {
+                if used_in[x].last() != Some(&bi) {
+                    used_in[x].push(bi);
+                }
+                if def_mark[x] != bi && gen_in[x].last() != Some(&bi) {
+                    gen_in[x].push(bi);
+                }
+            };
+            for i in &b.insts {
+                uses_defs(i, &mut us, &mut ds);
+                for u in &us {
+                    use_v(u.0 as usize, &def_mark);
+                }
+                for d in &ds {
+                    let x = d.0 as usize;
+                    def_mark[x] = bi;
+                    if defs_in[x].last() != Some(&bi) {
+                        defs_in[x].push(bi);
+                    }
+                }
+            }
+            term_uses(&b.term, &mut us);
             for u in &us {
-                if used_in[u.0 as usize].last() != Some(&(bi as u32)) {
-                    used_in[u.0 as usize].push(bi as u32);
-                }
-                let x = u.0 as usize;
-                if kill[g + x / 64] & (1 << (x % 64)) == 0 {
-                    gen[g + x / 64] |= 1 << (x % 64);
-                }
-            }
-            for d in &ds {
-                let x = d.0 as usize;
-                kill[g + x / 64] |= 1 << (x % 64);
-            }
-        }
-        term_uses(&b.term, &mut us);
-        for u in &us {
-            if used_in[u.0 as usize].last() != Some(&(bi as u32)) {
-                used_in[u.0 as usize].push(bi as u32);
-            }
-            let x = u.0 as usize;
-            if kill[g + x / 64] & (1 << (x % 64)) == 0 {
-                gen[g + x / 64] |= 1 << (x % 64);
+                use_v(u.0 as usize, &def_mark);
             }
         }
     }
-    // liveness on the paths from a suspension point, with the flag branches its state decides
-    // taken one way (rustc: a moved-out value is not live across it); a suspension point's
-    // Pending return continues at its resume and cancel blocks
-    let live_from = |seen: &[bool], known: &[Option<bool>]| -> Vec<u64> {
-        let mut live_in = vec![0u64; nb * words];
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for bi in (0..nb).rev() {
-                if !seen[bi] {
-                    continue;
-                }
-                let mut out = vec![0u64; words];
-                let mut succs: Vec<u32> = match (known[bi], &f.blocks[bi].term) {
-                    (Some(t), Term::Branch(_, y, n)) => vec![if t { *y } else { *n }],
-                    (_, t) => t.succs().into_iter().collect(),
-                };
-                for &(pend, resume, cancel) in &c.suspends {
-                    if pend as usize == bi {
-                        succs.push(resume);
-                        succs.push(cancel);
-                    }
-                }
-                for t in succs {
-                    for w in 0..words {
-                        out[w] |= live_in[t as usize * words + w];
-                    }
-                }
-                for w in 0..words {
-                    let v = gen[bi * words + w] | (out[w] & !kill[bi * words + w]);
-                    if v != live_in[bi * words + w] {
-                        live_in[bi * words + w] = v;
-                        changed = true;
-                    }
-                }
+    // the edges liveness flows back along: the terminators' and each suspension point's Pending
+    // return to its resume and cancel blocks
+    let mut susp_to: Vec<Vec<u32>> = vec![Vec::new(); nb];
+    for &(pend, resume, cancel) in &c.suspends {
+        susp_to[pend as usize].push(resume);
+        susp_to[pend as usize].push(cancel);
+    }
+    let mut lpreds: Vec<Vec<u32>> = vec![Vec::new(); nb];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for t in b.term.succs().into_iter().chain(susp_to[bi].iter().copied()) {
+            if lpreds[t as usize].last() != Some(&(bi as u32)) {
+                lpreds[t as usize].push(bi as u32);
             }
         }
-        live_in
+    }
+    let branch_of: Vec<Option<(u32, u32)>> = f.blocks.iter().map(|b| match b.term { Term::Branch(_, y, n) => Some((y, n)), _ => None }).collect();
+    let mut walk_mark = vec![0u32; nb];
+    let mut walk_epoch = 0u32;
+    let mut walk_stack: Vec<u32> = Vec::new();
+    // the blocks where `v` is live on entry, given to `hit`; with a suspension point's view
+    // (`seen`: the blocks reached from its resume, `known`: the branches its flag state decides),
+    // as the dataflow from that point computes it: unseen blocks hold nothing live
+    let mut live_walk = |v: usize, seen: Option<&[bool]>, known: Option<&[Option<bool>]>, hit: &mut dyn FnMut(u32)| {
+        walk_epoch += 1;
+        let epoch = walk_epoch;
+        walk_stack.clear();
+        for &b in &gen_in[v] {
+            if seen.map_or(true, |s| s[b as usize]) && walk_mark[b as usize] != epoch {
+                walk_mark[b as usize] = epoch;
+                walk_stack.push(b);
+            }
+        }
+        while let Some(b) = walk_stack.pop() {
+            hit(b);
+            for &p in &lpreds[b as usize] {
+                let pu = p as usize;
+                if walk_mark[pu] == epoch || seen.is_some_and(|s| !s[pu]) {
+                    continue;
+                }
+                if let (Some(t), Some((y, n))) = (known.and_then(|k| k[pu]), branch_of[pu]) {
+                    if (if t { y } else { n }) != b && !susp_to[pu].contains(&b) {
+                        continue;
+                    }
+                }
+                if defs_in[v].contains(&p) {
+                    continue;
+                }
+                walk_mark[pu] = epoch;
+                walk_stack.push(p);
+            }
+        }
     };
+    // which vregs can be live at each suspension point's resume or cancel block: live there
+    // with every branch open and every block seen (a point's own view only removes paths)
+    let mut rc_points: Vec<Vec<usize>> = vec![Vec::new(); nb];
+    for (k, &(_, resume, cancel)) in c.suspends.iter().enumerate() {
+        rc_points[resume as usize].push(k);
+        if cancel != resume {
+            rc_points[cancel as usize].push(k);
+        }
+    }
+    let mut cands: Vec<Vec<usize>> = vec![Vec::new(); c.suspends.len()];
+    for v in 0..nv {
+        live_walk(v, None, None, &mut |b| for &k in &rc_points[b as usize] {
+            if cands[k].last() != Some(&v) {
+                cands[k].push(v);
+            }
+        });
+    }
     let mut preds: Vec<Vec<u32>> = vec![Vec::new(); nb];
     for (bi, b) in f.blocks.iter().enumerate() {
         for t in b.term.succs() {
@@ -13825,6 +13934,7 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u
         }
         seen
     };
+    mark("gen/kill");
     // MAKEPAD_RUN_CORO_TRACE=2: why each slot is saved at each point (3: slots of 1 MB and more)
     let coro_why = match std::env::var("MAKEPAD_RUN_CORO_TRACE").as_deref() { Ok("2") => 2, Ok("3") => 3, _ => 0 };
     for (k, &(pend, resume, cancel)) in c.suspends.iter().enumerate() {
@@ -13833,11 +13943,21 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u
         let mut own_addr = vec![false; ns];
         let st: Option<Vec<i64>> = if seen_g[pend as usize] && cp.nt > 0 { Some(inn_g[pend as usize * cp.nt..(pend as usize + 1) * cp.nt].to_vec()) } else { None };
         let (seen_k, known_k, _) = cp.run(f, c, &[(resume, st.as_deref()), (cancel, st.as_deref())]);
-        let live_in = live_from(&seen_k, &known_k);
+        // the vregs live at its resume or cancel block in this point's view
+        let mut live_rc = vec![0u64; (nv + 63) / 64];
+        for &v in &cands[k] {
+            let mut live = false;
+            live_walk(v, Some(&seen_k), Some(&known_k), &mut |b| live |= b == resume || b == cancel);
+            if live {
+                live_rc[v / 64] |= 1 << (v % 64);
+            }
+        }
+        if coro_verify() {
+            dense_live_check(f, c, nv, &seen_k, &known_k, resume, cancel, &live_rc);
+        }
         let exposed = exposed_from(&seen_k, &known_k);
         let mut consts = Vec::new();
         for v in 0..nv {
-            let lv = |b: u32| live_in[b as usize * words + v / 64] & (1 << (v % 64)) != 0;
             let known_val = match (&st, cp.idx[v]) {
                 (Some(st), x) if x != usize::MAX && st[x] != CF_ANY && st[x] != CF_UNSEEN => Some(st[x]),
                 _ => None,
@@ -13848,7 +13968,7 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u
                 }
                 continue;
             }
-            if (lv(resume) || lv(cancel)) && !is_param(v) {
+            if live_rc[v / 64] & (1 << (v % 64)) != 0 && !is_param(v) {
                 vs.push(VReg(v as u32));
                 match slot_defs[v] {
                     Some(s) if !other_def[v] => own_addr[s as usize] = true,
@@ -13888,6 +14008,11 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u
         }
         live_at.push(vs);
         const_at.push(consts);
+    }
+    mark("per-suspension");
+    if tr {
+        eprintln!("coro-transform\tblocks {} vregs {} slots {} suspends {} insts {}\t{}", nb, nv, ns, c.suspends.len(), f.blocks.iter().map(|b| b.insts.len()).sum::<usize>(),
+            t_ph.iter().map(|(n, t)| format!("{} {:.0}", n, t)).collect::<Vec<_>>().join(", "));
     }
     // an awaited future is used only between its creation and its drop, around its own
     // suspension point; its poll's result is dead at it

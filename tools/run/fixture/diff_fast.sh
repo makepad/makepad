@@ -111,7 +111,11 @@ for dir in $pkgdirs; do
     [ -f "$dir/Cargo.toml" ] || continue
     pkg=$(sed -n 's/^name = "\(.*\)"$/\1/p' "$dir/Cargo.toml" | head -1)
     if ! (cd "$root" && CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=$pkgtarget nice -n 10 cargo build --release -q -p "$pkg" --bin "$pkg" -j "${DIFF_CARGO_JOBS:-6}") > "$work/$pkg.build" 2>&1; then
-        pkgfail="$pkgfail$pkg: native build failed: $(grep -m3 '^error' "$work/$pkg.build")
+        # loud, never a smaller count: a package that does not build drops all its programs (the 10-30 "48/51" gates
+        # on 104/106 were relax-commercial-tests failing to build against a skewed makepad/commercial pair, its 3 error
+        # lines counted as programs and the reason cut off by the gate's tail -1)
+        pkgfail="${pkgfail}HARNESS ERROR: package $pkg ($dir) did not build natively, none of its programs ran:
+$(grep -E -m8 -A3 '^error' "$work/$pkg.build" | cut -c1-240)
 "; continue
     fi
     for prog in $("$pkgtarget/release/$pkg" --list); do pkgprogs="$pkgprogs $pkg~$prog"; done
@@ -139,7 +143,7 @@ $(diff "$work/$p.native.d" "$work/$p.$k.d" | head -8 | cut -c1-240)"
     done
 }
 ok=0; n=0; bad=$pkgfail; kfail=0; kfixed=; harness=
-[ -n "$pkgfail" ] && n=$(printf '%s' "$pkgfail" | grep -c .)
+[ -n "$pkgfail" ] && harness=1
 for p in $progs $pkgprogs; do
     n=$((n + 1)); check "$p"
     if [ -z "$fail" ]; then ok=$((ok + 1)); else bad="$bad$fail
@@ -163,6 +167,7 @@ for k in $difftiers; do
     tiers="$tiers $k $t/$tn"
 done
 echo "diff tiers:$tiers"
+echo "diff programs: $(echo $progs | wc -w | tr -d ' ') files, $(echo $pkgprogs | wc -w | tr -d ' ') package ($(for dir in $pkgdirs; do [ -f "$dir/Cargo.toml" ] && printf '%s ' "${dir#$root/}"; done))"
 rm -r "$work"
 [ -n "$harness" ] && { printf '%s' "$bad"; echo "diff: HARNESS ERROR (makepad runs failed without output; see above)"; exit 2; }
 if [ $ok = $n ]; then echo "diff: $ok/$n equal (known failing: $kfail)"; exit 0; fi

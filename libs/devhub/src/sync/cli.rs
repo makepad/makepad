@@ -177,18 +177,26 @@ impl Bundles {
 }
 
 fn make_bundle(p: &Push, bases: &[String]) -> Result<(PathBuf, String, u64), String> {
-    let path = std::env::temp_dir().join(format!("devhub-push-{}-{}-{}.bundle", std::process::id(), p.repo, &p.sha[..12]));
-    let mut path = path;
-    let mut n = 0;
-    while path.exists() {
-        n += 1;
-        path = std::env::temp_dir().join(format!("devhub-push-{}-{}-{}-{n}.bundle", std::process::id(), p.repo, &p.sha[..12]));
-    }
-    let target = format!("refs/heads/{}", p.branch);
-    let mut args: Vec<String> = vec!["bundle".into(), "create".into(), "-q".into(), path.to_string_lossy().into_owned(), target];
-    args.extend(bases.iter().map(|b| format!("^{b}")));
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    git(&p.dir, &refs)?;
+    // unique per call: parallel node pushes with different bases make bundles of one commit at once
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("devhub-push-{}-{n}-{}-{}.bundle", std::process::id(), p.repo, &p.sha[..12]));
+    // the bundle names `refs/heads/<branch>` at exactly `p.sha`, even when the branch has moved
+    // since (another landing): it is made in a scratch bare repo that borrows the user repo's
+    // objects (alternates), so nothing is written to the user's repo and no ref is read twice
+    let scratch = path.with_extension("git");
+    let made = (|| {
+        let common = git(&p.dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+        git(&p.dir, &["init", "-q", "--bare", &scratch.to_string_lossy()])?;
+        std::fs::write(scratch.join("objects/info/alternates"), format!("{common}/objects\n")).map_err(|e| format!("{}: {e}", scratch.display()))?;
+        git(&scratch, &["update-ref", &format!("refs/heads/{}", p.branch), &p.sha])?;
+        let mut args: Vec<String> = vec!["bundle".into(), "create".into(), "-q".into(), path.to_string_lossy().into_owned(), format!("refs/heads/{}", p.branch)];
+        args.extend(bases.iter().map(|b| format!("^{b}")));
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        git(&scratch, &refs).map(|_| ())
+    })();
+    let _ = std::fs::remove_dir_all(&scratch);
+    made?;
     let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
     let mut h = makepad_network::digest::Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
@@ -369,17 +377,21 @@ pub(super) fn tree_changes(repo: &Path, from: Option<&str>, to: &str, prefixes: 
     Ok(changes)
 }
 
-/// For leases (DESIGN §11): makes sure `node`'s store holds `branch` of the repo at `dir`
-/// (`repo` = makepad | commercial), pushing a signed bundle when it does not; moves no checkout.
-/// Returns the commit. The lease then makes its worktree from the node's store
+/// For leases (DESIGN §11): makes sure `node`'s store holds commit `sha` (pinned from `branch`
+/// when the lease was ordered) of the repo at `dir` (`repo` = makepad | commercial), pushing a
+/// signed bundle when it does not; moves no checkout. Returns the commit. The lease then makes its worktree from the node's store
 /// ([`super::store_dir`]).
-pub fn ensure_rev(control: &Client, node: &str, repo: &str, dir: &Path, branch: &str) -> Result<String, String> {
+pub fn ensure_rev(control: &Client, node: &str, repo: &str, dir: &Path, branch: &str, sha: &str) -> Result<String, String> {
     let repo: &'static str = match repo {
         "makepad" => "makepad",
         "commercial" => "commercial",
         _ => return Err(format!("no repo `{repo}`")),
     };
-    let p = Push { repo, dir: dir.to_path_buf(), branch: branch.to_string(), sha: branch_sha(dir, branch)? };
+    if !valid_branch(branch) || !valid_sha(sha) {
+        return Err(format!("`{branch}@{sha}` is not branch@sha"));
+    }
+    git(dir, &["cat-file", "-e", &format!("{sha}^{{commit}}")]).map_err(|_| format!("{}: no commit {sha}", dir.display()))?;
+    let p = Push { repo, dir: dir.to_path_buf(), branch: branch.to_string(), sha: sha.to_string() };
     let bundles = Bundles::default();
     let r = push_to(control, node, std::slice::from_ref(&p), &bundles, &mut |n, l| println!("{n} {l}"));
     bundles.remove_all();
@@ -803,6 +815,66 @@ mod tests {
         let next = super::tree_changes(&d, Some(&one), &two, &pre).unwrap();
         assert_eq!(next, vec![("apps/game/a.rs".to_string(), Some(b"a2".to_vec())), ("apps/game/b.rs".to_string(), None)]);
         assert!(super::tree_changes(&d, Some(&two), &one, &pre).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The gate race: a lease pins `rc-x@<sha>` at order time, then another landing moves `rc-x`
+    /// before the master bundles it. The bundle still holds exactly the pinned commit (the node's
+    /// check "the bundle's rc-x is .., the order names .." passes), on the user repo nothing is
+    /// written, and the pin itself comes from the CLI's rev parsing.
+    #[test]
+    fn a_moved_branch_ships_the_pinned_commit() {
+        let d = std::env::temp_dir().join(format!("devhub-sync-pin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("apps/commercial")).unwrap();
+        let g = |dir: &std::path::Path, args: &[&str]| super::git(dir, &[&["-c", "user.name=t", "-c", "user.email=t@t"], args].concat()).unwrap();
+        let c = d.join("apps/commercial");
+        for r in [&d, &c] {
+            g(r, &["init", "-q", "-b", "main"]);
+            std::fs::write(r.join("f"), "1").unwrap();
+            g(r, &["add", "f"]);
+            g(r, &["commit", "-q", "-m", "1"]);
+        }
+        g(&d, &["branch", "rc-x"]);
+        let spec = crate::lease::pin_revs(&d, "rc-x,main").unwrap();
+        let (mk, com) = crate::lease::parse_pinned(&spec).unwrap();
+        assert_eq!((mk.branch.as_str(), mk.sha.as_str()), ("rc-x", g(&d, &["rev-parse", "rc-x"]).as_str()));
+        assert_eq!(com.unwrap().sha, g(&c, &["rev-parse", "main"]));
+        // an explicit short pin expands; a bare name is not accepted past the CLI
+        assert_eq!(crate::lease::pin_revs(&d, &format!("rc-x@{}", &mk.sha[..10])).unwrap(), format!("rc-x@{}", mk.sha));
+        assert!(crate::lease::parse_pinned("rc-x,main").is_err());
+        assert!(crate::lease::pin_revs(&d, "no-such").is_err());
+        // another landing moves rc-x
+        g(&d, &["checkout", "-q", "rc-x"]);
+        std::fs::write(d.join("f"), "2").unwrap();
+        g(&d, &["commit", "-q", "-am", "2"]);
+        let moved = g(&d, &["rev-parse", "rc-x"]);
+        assert_ne!(moved, mk.sha);
+        let refs_before = g(&d, &["for-each-ref"]);
+        let p = super::Push { repo: "makepad", dir: d.clone(), branch: "rc-x".into(), sha: mk.sha.clone() };
+        let (bundle, _, _) = super::make_bundle(&p, &[]).unwrap();
+        let heads = g(&d, &["bundle", "list-heads", &bundle.to_string_lossy()]);
+        assert_eq!(heads, format!("{} refs/heads/rc-x", mk.sha));
+        assert_eq!(g(&d, &["for-each-ref"]), refs_before);
+        // an incremental bundle against a base the node has
+        let p2 = super::Push { sha: moved.clone(), ..p };
+        let (inc, _, _) = super::make_bundle(&p2, std::slice::from_ref(&mk.sha)).unwrap();
+        assert_eq!(g(&d, &["bundle", "list-heads", &inc.to_string_lossy()]), format!("{moved} refs/heads/rc-x"));
+        // two gate leases ordered at once for this commit bundle it at the same moment (FABIO: they
+        // collided on git's `<bundle>.lock`, one never started): every call gets its own path
+        let made: Vec<_> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..8).map(|_| s.spawn(|| super::make_bundle(&super::Push { repo: "makepad", dir: d.clone(), branch: "rc-x".into(), sha: mk.sha.clone() }, &[]))).collect();
+            hs.into_iter().map(|h| h.join().unwrap().unwrap()).collect()
+        });
+        let mut paths: Vec<_> = made.iter().map(|(p, _, _)| p.clone()).collect();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(paths.len(), 8);
+        for p in &paths {
+            let _ = std::fs::remove_file(p);
+        }
+        let _ = std::fs::remove_file(&bundle);
+        let _ = std::fs::remove_file(&inc);
         let _ = std::fs::remove_dir_all(&d);
     }
 

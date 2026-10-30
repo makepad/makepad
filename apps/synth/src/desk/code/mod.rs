@@ -37,7 +37,7 @@ use makepad_code_editor::code_view::CodeView;
 use makepad_code_editor::inlays::BlockInlay;
 use makepad_code_editor::text::Position;
 use makepad_code_editor::widgets::BlockWidget;
-use makepad_code_values::{CodeValues, ValueEdit};
+use makepad_code_values::CodeValues;
 use makepad_score_live::source;
 use makepad_score_player::Meters;
 use makepad_widgets::*;
@@ -335,8 +335,9 @@ impl ScoreEditor {
     /// reserved again only when their lines moved.
     pub fn set_lenses(&mut self, cx: &mut Cx, source: &str, lenses: Lenses) {
         if self.source != source {
-            // The code's own controls: every number scrubs.
-            self.values.set_sites(source, Vec::new());
+            // The code's own controls: every spec'd field typed (its range,
+            // unit and choices), and every number scrubs.
+            self.values.set_sites(source, &makepad_synth_panel::values::sites(source));
             self.source = source.to_string();
         }
         let lines: Vec<usize> = lenses.lenses.iter().map(|lens| lens.line + 1).collect();
@@ -615,8 +616,8 @@ impl Widget for ScoreEditor {
                 None => Default::default(),
             };
             for edit in r.edits {
-                if let ValueEdit::Splice { start, end, text, gesture, done } = edit {
-                    self.splice(cx, start, end, text, SCRUB_GESTURES + gesture, done);
+                for s in edit.splices() {
+                    self.splice(cx, s.range.start, s.range.end, s.text.clone(), SCRUB_GESTURES + edit.gesture, edit.done);
                 }
             }
             if r.redraw {

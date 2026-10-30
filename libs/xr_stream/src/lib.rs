@@ -51,7 +51,7 @@ mod panel;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
 mod settings_types;
-pub use mirror::{DrawXrMirror, XrMirrorView};
+pub use mirror::{DrawXrMirror, XrMirrorClock, XrMirrorView};
 pub use panel::{XrCaptionButton, XrStreamSettings};
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::{launch_enabled, LiveHeadset, ServerStats, XrServer};

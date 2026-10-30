@@ -71,11 +71,11 @@ pub fn register_master(ep: &Endpoint, ctx: &std::sync::Arc<NodeCtx>) {
     serve::Sync::new(ctx.clone(), SyncConf::load()).register(ep);
 }
 
-/// Leases: have `branch` of `repo` (makepad | commercial, from the local repo at `dir`) in
+/// Leases: have commit `sha` (pinned from `branch`) of `repo` (makepad | commercial, from the local repo at `dir`) in
 /// `node`'s store; returns its commit (`control`: the master's control socket client).
 #[cfg(feature = "checkout")]
-pub fn ensure_rev(control: &makepad_remote::Client, node: &str, repo: &str, dir: &std::path::Path, branch: &str) -> Result<String, String> {
-    cli::ensure_rev(control, node, repo, dir, branch)
+pub fn ensure_rev(control: &makepad_remote::Client, node: &str, repo: &str, dir: &std::path::Path, branch: &str, sha: &str) -> Result<String, String> {
+    cli::ensure_rev(control, node, repo, dir, branch, sha)
 }
 
 /// The node's bare store of `repo` (`~/devhub/git/<repo>.git`): where lease worktrees come from.

@@ -14,7 +14,7 @@ use makepad_box3d::body::*;
 use makepad_box3d::hull::create_hull;
 use makepad_box3d::id::{BodyId, JointId};
 use makepad_box3d::joint::*;
-use makepad_box3d::math_functions::{make_quat_from_axis_angle, vec3, Matrix3, Quat, Transform, Vec3, WorldTransform};
+use makepad_box3d::math_functions::{make_quat_from_axis_angle, to_pos, to_vec3, vec3, Matrix3, Quat, Transform, Vec3, WorldTransform};
 use makepad_box3d::physics_world::*;
 use makepad_box3d::revolute_joint::*;
 use makepad_box3d::shape::{create_hull_shape, shape_get_body};
@@ -215,7 +215,7 @@ impl MechWorld {
         for (i, b) in asm.bodies.iter().enumerate() {
             let mut bd = default_body_def();
             bd.body_type = BodyType::Dynamic;
-            bd.position = vf(b.mass.com);
+            bd.position = to_pos(vf(b.mass.com));
             bd.enable_sleep = false;
             let id = create_body(&mut world, &bd);
             let mut sd = default_shape_def();
@@ -297,7 +297,7 @@ impl MechWorld {
         let floor_id = floor.map(|level| {
             let g = norm(gravity);
             let mut bd = default_body_def();
-            bd.position = vf(scale(g, -level + 5.0));
+            bd.position = to_pos(vf(scale(g, -level + 5.0)));
             bd.rotation = quat_z_to(scale(g, -1.0));
             let id = create_body(&mut world, &bd);
             let mut sd = default_shape_def();
@@ -324,7 +324,7 @@ impl MechWorld {
             .iter()
             .map(|b| {
                 let t = body_get_transform(&self.world, *b);
-                Pose { com: pf(t.p), rot: [t.q.v.x as f64, t.q.v.y as f64, t.q.v.z as f64, t.q.s as f64] }
+                Pose { com: pf(to_vec3(t.p)), rot: [t.q.v.x as f64, t.q.v.y as f64, t.q.v.z as f64, t.q.s as f64] }
             })
             .collect()
     }
@@ -348,7 +348,7 @@ impl MechWorld {
     /// Move the held ground (anchors): a translation and a turn about `axis` through the origin.
     pub fn move_ground(&mut self, at: P3, axis: P3, ang: f64, dt: f64) {
         let q = make_quat_from_axis_angle(vf(norm(axis)), ang as f32);
-        body_set_target_transform(&mut self.world, self.ground, WorldTransform { p: vf(at), q }, dt as f32, true);
+        body_set_target_transform(&mut self.world, self.ground, WorldTransform { p: to_pos(vf(at)), q }, dt as f32, true);
         self.ground_pose = (at, ang);
     }
 
@@ -357,10 +357,10 @@ impl MechWorld {
         self.release();
         let mut bd = default_body_def();
         bd.body_type = BodyType::Kinematic;
-        bd.position = vf(point);
+        bd.position = to_pos(vf(point));
         let target = create_body(&mut self.world, &bd);
         let b = self.bodies[body];
-        let local_b = body_get_local_point(&self.world, b, vf(point));
+        let local_b = body_get_local_point(&self.world, b, to_pos(vf(point)));
         let mass = body_get_mass(&self.world, b) as f64;
         let mut d = default_motor_joint_def();
         d.base.body_id_a = target;
@@ -381,7 +381,7 @@ impl MechWorld {
     /// Move the grab target (model point); the part follows through the spring.
     pub fn drag(&mut self, point: P3, dt: f64) {
         if let Some(g) = &self.grab {
-            body_set_target_transform(&mut self.world, g.target, WorldTransform { p: vf(point), q: Quat::IDENTITY }, dt as f32, true);
+            body_set_target_transform(&mut self.world, g.target, WorldTransform { p: to_pos(vf(point)), q: Quat::IDENTITY }, dt as f32, true);
         }
     }
 
@@ -687,7 +687,7 @@ pub fn simulate(asm: &Assembly, opts: &SimOptions, cancelled: &dyn Fn() -> bool)
     let mut w = MechWorld::new(&held, gravity, floor);
     if let Scenario::Pose(angles) = &opts.scenario {
         for (i, (c, r)) in pose_bodies(asm, angles).into_iter().enumerate() {
-            body_set_transform(&mut w.world, w.bodies[i], vf(c), mat_to_quat(&r));
+            body_set_transform(&mut w.world, w.bodies[i], to_pos(vf(c)), mat_to_quat(&r));
         }
     }
     let dt = 1.0 / opts.hz.max(60.0);

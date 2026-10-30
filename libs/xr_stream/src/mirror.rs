@@ -1,9 +1,9 @@
 //! The desktop's view of what a remote headset sees: [`XrMirrorView`], a widget an app places
 //! where it likes (a dock tab beside its other panels), or [`DrawXrMirror::draw_headset`] in an
 //! app's own view (Sandbox draws it in its game view while a headset streams). It shows the left
-//! eye of the app's XR pass. A window showing it repaints from the headset's frames a few times
-//! a second (the user's mirror switch on), else only with the window's own UI
-//! (`Cx::xr_hold_windows`); a window without it never repaints for the headset.
+//! eye of the app's XR pass, repainted on its own clock ([`XrMirrorClock`], a few times a second)
+//! while it is shown, a headset streams and the user's mirror switch is on. Nothing else on the
+//! desktop renders for the headset: a mirror that is not shown mirrors nothing.
 
 use makepad_widgets::*;
 
@@ -52,14 +52,57 @@ script_mod! {
 }
 
 /// The app's XR pass as the desktop mirrors it: its side-by-side colour and the streamed eye
-/// size, set by the server's pack each XR frame (None: no headset streams); `drawn`: a mirror
-/// was drawn since.
+/// size, set by the server's pack each XR frame; `live`: a headset's frames flow; `mirror`: the
+/// user's mirror switch.
 #[derive(Default)]
 pub(crate) struct XrMirrorSource {
     pub(crate) color: Option<Texture>,
     pub(crate) eye: [u32; 2],
     pub(crate) live: bool,
-    pub(crate) drawn: bool,
+    pub(crate) mirror: bool,
+}
+
+/// A desktop mirror's own clock: it repaints at [`XrMirrorClock::RATE_HZ`] on a timer (never on
+/// the headset's frames), only while it is shown (drawn lately), a headset streams and the
+/// user's mirror switch is on. A widget drawing a mirror calls [`Self::drawn`] from its draw
+/// and redraws when [`Self::tick`] says so.
+#[derive(Default)]
+pub struct XrMirrorClock {
+    timer: Timer,
+    drawn_at: f64,
+}
+
+impl XrMirrorClock {
+    /// The mirror's repaints a second.
+    pub const RATE_HZ: f64 = 8.0;
+
+    fn wanted(cx: &mut Cx) -> bool {
+        let s = cx.global::<XrMirrorSource>();
+        s.live && s.mirror
+    }
+
+    /// The mirror was drawn (shown) now: its clock runs while it is wanted.
+    pub fn drawn(&mut self, cx: &mut Cx) {
+        self.drawn_at = cx.seconds_since_app_start();
+        if self.timer.is_empty() && Self::wanted(cx) {
+            self.timer = cx.start_interval(1.0 / Self::RATE_HZ);
+        }
+    }
+
+    /// Whether the mirror should redraw for this event (its clock's tick while it is shown and
+    /// wanted; otherwise the clock stops).
+    pub fn tick(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        if self.timer.is_event(event).is_none() {
+            return false;
+        }
+        let shown = cx.seconds_since_app_start() - self.drawn_at < 3.0 / Self::RATE_HZ;
+        if shown && Self::wanted(cx) {
+            return true;
+        }
+        cx.stop_timer(self.timer);
+        self.timer = Timer::empty();
+        false
+    }
 }
 
 /// `rect`'s largest part of the eye's shape, centred.
@@ -78,8 +121,7 @@ impl DrawXrMirror {
     /// streams.
     pub fn draw_headset(&mut self, cx: &mut Cx2d, rect: Rect) -> bool {
         let source = cx.cx.global::<XrMirrorSource>();
-        let Some(color) = source.color.clone().filter(|_| source.live) else { return false };
-        source.drawn = true;
+        let Some(color) = source.color.clone().filter(|_| source.live && source.mirror) else { return false };
         let eye = if source.eye == [0, 0] { [1680, 1760] } else { source.eye };
         self.draw_vars.set_texture(0, &color);
         self.draw_abs(cx, fit(rect, eye));
@@ -101,6 +143,8 @@ pub struct XrMirrorView {
     draw_mirror: DrawXrMirror,
     #[live]
     draw_text: DrawText,
+    #[rust]
+    clock: XrMirrorClock,
 }
 
 impl Widget for XrMirrorView {
@@ -108,14 +152,15 @@ impl Widget for XrMirrorView {
         let rect = cx.walk_turtle(walk);
         self.draw_bg.draw_abs(cx, rect);
         if !self.draw_mirror.draw_headset(cx, rect) {
-            self.draw_text.draw_abs(cx, rect.pos + dvec2(16.0, 16.0), "No headset is streaming");
+            self.draw_text.draw_abs(cx, rect.pos + dvec2(16.0, 16.0), "No headset is streaming (or the mirror is off)");
         }
+        self.clock.drawn(cx.cx);
         DrawStep::done()
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        // the headset's frames (at the mirror's rate on the desktop)
-        if let Event::XrUpdate(_) = event {
+        // the headset's view, on the mirror's own clock while shown
+        if self.clock.tick(cx, event) {
             self.draw_bg.redraw(cx);
         }
     }

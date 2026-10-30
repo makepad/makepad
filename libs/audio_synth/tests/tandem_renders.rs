@@ -339,3 +339,30 @@ fn formula_lfo_moves_pitch() {
     let f = pitch(&l[9600..], 500.0, 800.0);
     assert!(cents(f, 440.0 * (7.0f32 / 12.0).exp2()).abs() < 3.0, "{f} Hz");
 }
+
+/// A tuning retunes the keys: in 19 equal steps key 61 sounds one 19th of an octave above
+/// middle C (degree 0 on key 60, A4 = 440 Hz); "retune everything" moves the oscillator pitch the
+/// same way; an unmapped key stays silent.
+#[test]
+fn tunings_retune_the_keys() {
+    use makepad_audio_synth::kit::tuning::{by_name, Tuning};
+    let e19 = by_name("edo19").unwrap();
+    let want = e19.key_hz(61).unwrap() as f32;
+    for mode in [1.0f32, 0.0] {
+        let mut p = init(1.0);
+        p.nonparam.tuning_mode = mode as i32;
+        let mut t = engine(&p);
+        t.set_tuning(Some(e19.clone()));
+        t.note_on(0, 61, 127);
+        let (l, _) = render(&mut t, 0.5, 32);
+        let f = pitch(&l[4800..], want * 0.8, want * 1.25);
+        assert!(cents(f, want).abs() < 3.0, "mode {mode}: {f} Hz vs {want}");
+    }
+    let scl = "gaps\n2\n600.0\n1200.0\n";
+    let kbm = "2\n0\n127\n60\n69\n440.0\n2\n0\nx\n";
+    let mut t = engine(&init(1.0));
+    t.set_tuning(Some(std::sync::Arc::new(Tuning::from_text("gaps", scl, kbm).unwrap())));
+    t.note_on(0, 61, 127);
+    let (l, _) = render(&mut t, 0.2, 32);
+    assert!(rms(&l) < 1e-6, "unmapped key 61 is silent");
+}

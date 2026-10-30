@@ -108,7 +108,10 @@ fn suite_against_reference_renders() {
     let mut suite = std::fs::read_to_string(refs.join("suite.txt")).expect("suite.txt");
     // Stage-isolation variants: `./variants/<name>.fxp` is a library patch with the edits of
     // variants.txt (`name | source | element=value,...`), applied here.
-    if let Ok(iso) = std::fs::read_to_string(refs.join("suite-iso.txt")) {
+    let mut isos: Vec<PathBuf> = std::fs::read_dir(&refs).map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect()).unwrap_or_default();
+    isos.retain(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("suite-iso") && n.ends_with(".txt")));
+    isos.sort();
+    for iso in isos.iter().filter_map(|p| std::fs::read_to_string(p).ok()) {
         suite.push('\n');
         suite.push_str(&iso);
     }
@@ -122,7 +125,7 @@ fn suite_against_reference_renders() {
         })
         .collect();
     let mut failures = Vec::new();
-    eprintln!("{:<22} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>7} {:>7} {:>7}", "render", "rms", "ref", "peak", "ref", "zc_hz", "ref", "end", "ref", "env_l1");
+    eprintln!("{:<22} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>7} {:>7} {:>7} {:>8} {:>8} {:>7}", "render", "rms", "ref", "peak", "ref", "zc_hz", "ref", "end", "ref", "env_l1", "rms_r", "ref_r", "l1_r");
     for line in suite.lines().filter(|l| !l.trim_start().starts_with('#') && l.contains('|')) {
         let f: Vec<&str> = line.split('|').map(str::trim).collect();
         if f.len() < 4 {
@@ -149,8 +152,22 @@ fn suite_against_reference_renders() {
                 }
             }
         }
+        // The renders loaded the reference's installed copy of tutorial 07, whose script spells
+        // `enumerator = 5` (a typo: that clock stays 1/4); the pinned library spells it right.
+        if name.starts_with("formula-07") || name.starts_with("f07-") {
+            for f in patch.formulae.iter_mut().flatten().flatten() {
+                *f = f.replace("numerator = 5", "enumerator = 5");
+            }
+        }
         let mut t = Tandem::new(RATE);
         t.load(&patch);
+        t.set_tempo(120.0);
+        // The renders run the host for a 1 s preroll before the first event and drop it (effect
+        // LFOs, smoothers and free-running modulators are mid-flight at t = 0): so do we.
+        let (mut pl, mut pr) = ([0.0f32; 32], [0.0f32; 32]);
+        for _ in 0..(RATE as usize / 32) {
+            t.render(&mut pl, &mut pr);
+        }
         let n = (secs * RATE) as usize;
         let mut l = vec![0.0f32; n];
         let mut r = vec![0.0f32; n];
@@ -169,16 +186,30 @@ fn suite_against_reference_renders() {
             t.render(&mut l[at..end], &mut r[at..end]);
             at = end;
         }
+        // Debug aid: TANDEM_REF_DUMP=<dir> writes each render as interleaved little-endian f32.
+        if let Some(dir) = std::env::var_os("TANDEM_REF_DUMP") {
+            let bytes: Vec<u8> = l.iter().zip(&r).flat_map(|(a, b)| [a.to_le_bytes(), b.to_le_bytes()]).flatten().collect();
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(PathBuf::from(dir).join(format!("{name}.f32")), bytes);
+        }
         let s = stats(&l);
         // The reference's left channel.
         let ch0 = &json[json.find("\"channels\"").unwrap_or(0)..];
         let (rrms, rpeak, rzc, rlast) = (json_num(ch0, "rms_dbfs").unwrap_or(-999.0), json_num(ch0, "peak_dbfs").unwrap_or(-999.0), json_num(ch0, "zero_cross_hz_loudest_1s").unwrap_or(0.0), json_num(ch0, "last_above_-60dB_s"));
+        // The right channel too (stereo effects, Wide): ours and the reference's second channel.
+        let sr_ = stats(&r);
+        // Channel 1 starts after channel 0's envelope (its last field).
+        let ch1 = ch0.find("\"rms_10ms_db\"").map(|i| &ch0[i + 13..]).unwrap_or("");
+        let rrms_r = json_num(ch1, "rms_dbfs").unwrap_or(-999.0);
+        let renv_r = json_env(ch1);
+        let kr = renv_r.len().min(sr_.env.len());
+        let l1_r = (0..kr).filter(|i| renv_r[*i] > -80.0 || sr_.env[*i] > -80.0).map(|i| (renv_r[i].max(-80.0) - sr_.env[i].max(-80.0)).abs()).sum::<f64>() / kr.max(1) as f64;
         let renv = json_env(ch0);
         let k = renv.len().min(s.env.len());
         let l1 = (0..k).filter(|i| renv[*i] > -80.0 || s.env[*i] > -80.0).map(|i| (renv[i].max(-80.0) - s.env[i].max(-80.0)).abs()).sum::<f64>() / k.max(1) as f64;
         eprintln!(
-            "{:<22} {:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>8.1} {:>8.1} {:>7.3} {:>7.3} {:>7.2}",
-            name, s.rms_db, rrms, s.peak_db, rpeak, s.zc_hz, rzc, s.last.unwrap_or(-1.0), rlast.unwrap_or(-1.0), l1
+            "{:<22} {:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>8.1} {:>8.1} {:>7.3} {:>7.3} {:>7.2} {:>8.2} {:>8.2} {:>7.2}",
+            name, s.rms_db, rrms, s.peak_db, rpeak, s.zc_hz, rzc, s.last.unwrap_or(-1.0), rlast.unwrap_or(-1.0), l1, sr_.rms_db, rrms_r, l1_r
         );
         let _ = s.first;
         let isolation = variant.is_some();

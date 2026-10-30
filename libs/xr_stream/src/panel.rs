@@ -343,6 +343,8 @@ pub const STREAM_FPS: [u32; 4] = [72, 80, 90, 120];
 const STREAM_RENDER_SCALES: [u32; 4] = [100, 90, 80, 70];
 /// The views offered, in the view dropdown's order.
 const STREAM_VIEWS: [StreamView; 3] = [StreamView::App, StreamView::Mixed, StreamView::Vr];
+/// The state dot's pulse steps a second.
+const PULSE_HZ: f64 = 8.0;
 /// The panel's widest (narrower when the window is).
 const PANEL_WIDTH: f64 = 392.0;
 
@@ -957,11 +959,10 @@ pub struct XrCaptionButton {
     /// closed, nothing of the stream wakes the app).
     #[rust]
     timer: Timer,
-    /// The state dot's pulse while streaming and open.
+    /// The state dot's pulse while streaming and open: a few steps a second on its own timer (the
+    /// desktop never renders at the headset's rate for it).
     #[rust]
-    next_frame: NextFrame,
-    #[rust]
-    pulsing: bool,
+    pulse_timer: Timer,
     /// The PIN's field shows (in place of its chip).
     #[rust]
     editing_pin: bool,
@@ -1393,16 +1394,16 @@ impl Widget for XrCaptionButton {
         if self.timer.is_event(event).is_some() {
             self.tick(cx);
         }
-        if let Some(ne) = self.next_frame.is_event(event) {
+        if self.pulse_timer.is_event(event).is_some() {
             if self.open() && self.state == XrLinkState::Live {
                 // a soft pulse every 1.6 s
-                let pulse = ((ne.time / 1.6).fract()) as f32;
+                let pulse = ((cx.seconds_since_app_start() / 1.6).fract()) as f32;
                 if let Some(mut dot) = self.content(ids!(dot)).borrow_mut::<XrStateDot>() {
                     dot.set(cx, XrLinkState::Live, pulse);
                 }
-                self.next_frame = cx.new_next_frame();
             } else {
-                self.pulsing = false;
+                cx.stop_timer(self.pulse_timer);
+                self.pulse_timer = Timer::empty();
             }
         }
         let actions = cx.capture_actions(|cx| self.popover.handle_event(cx, event, scope));
@@ -1414,9 +1415,8 @@ impl Widget for XrCaptionButton {
             self.arm_timer(cx);
         }
         self.settings_actions(cx, &actions);
-        if self.open() && self.state == XrLinkState::Live && !self.pulsing {
-            self.pulsing = true;
-            self.next_frame = cx.new_next_frame();
+        if self.open() && self.state == XrLinkState::Live && self.pulse_timer.is_empty() {
+            self.pulse_timer = cx.start_interval(1.0 / PULSE_HZ);
         }
     }
 

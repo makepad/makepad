@@ -293,8 +293,8 @@ pub fn send(c: &Client, node: &str, id: &str, root: &Path, entries: &[Entry], li
             links.push((e.path.clone(), t.clone()));
             continue;
         }
-        let bytes = std::fs::read(root.join(&e.path)).map_err(|err| format!("{}: {err}", e.path))?;
-        put_bytes(&mut put, id, &e.path, &bytes, e.mtime_us, e.exec, &mut ok)?;
+        let (bytes, mtime_us, exec) = read_stable(&root.join(&e.path)).map_err(|err| format!("{}: {err}", e.path))?;
+        put_bytes(&mut put, id, &e.path, &bytes, mtime_us, exec, &mut ok)?;
         out.sent += 1;
         out.bytes += bytes.len() as u64;
     }
@@ -312,6 +312,26 @@ pub fn send(c: &Client, node: &str, id: &str, root: &Path, entries: &[Entry], li
     Ok(out)
 }
 
+/// A file's bytes with the mtime they were written at. The manifest's stat is older than the read
+/// when the file is saved while the tree ships: the new text under the old mtime looked unchanged
+/// to the node's cargo (it compares mtimes) until the file was touched again. So the stat is taken
+/// around the read, again until both agree; a file that keeps changing goes with the mtime from
+/// before its read (older than its text: the next ship sends it again).
+pub(crate) fn read_stable(path: &Path) -> std::io::Result<(Vec<u8>, u64, bool)> {
+    let mut tries = 0;
+    loop {
+        let before = std::fs::metadata(path)?;
+        let bytes = std::fs::read(path)?;
+        let after = std::fs::metadata(path)?;
+        let (t0, t1) = (mtime_us(&before), mtime_us(&after));
+        if (t0 == t1 && after.len() == bytes.len() as u64) || tries >= 4 {
+            return Ok((bytes, if t0 == t1 { t1 } else { t0 }, is_exec(&after)));
+        }
+        tries += 1;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 fn put_bytes(p: &mut Pipe, id: &str, path: &str, bytes: &[u8], mtime_us: u64, exec: bool, ok: &mut dyn FnMut(&str, &[String]) -> Result<(), String>) -> Result<(), String> {
     let pb = b64(path.as_bytes());
     let size = bytes.len();
@@ -323,6 +343,32 @@ fn put_bytes(p: &mut Pipe, id: &str, path: &str, bytes: &[u8], mtime_us: u64, ex
         if off >= size {
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    use super::*;
+
+    /// A file saved after the manifest listed it ships with the mtime of the text that goes, not
+    /// the manifest's older one (else the node's cargo keeps its old build of it).
+    #[test]
+    fn a_file_saved_while_shipping_goes_with_its_new_mtime() {
+        let dir = std::env::temp_dir().join(format!("devhub-ship-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.rs");
+        std::fs::write(&f, "fn a() {}").unwrap();
+        std::fs::File::options().write(true).open(&f).unwrap().set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1_000_000)).unwrap();
+        let mut listed = Vec::new();
+        entries(&dir, "a.rs", &mut listed).unwrap();
+        // saved after the listing: new text, a later mtime
+        std::fs::write(&f, "fn a() { 1; }").unwrap();
+        std::fs::File::options().write(true).open(&f).unwrap().set_modified(UNIX_EPOCH + std::time::Duration::from_secs(2_000_000)).unwrap();
+        let (bytes, mtime, _) = read_stable(&f).unwrap();
+        assert_eq!(bytes, b"fn a() { 1; }");
+        assert_eq!(mtime, 2_000_000_000_000, "the text's own mtime");
+        assert_ne!(mtime, listed[0].mtime_us, "not the listing's");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

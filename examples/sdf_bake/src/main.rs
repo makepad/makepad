@@ -99,7 +99,7 @@ fn at(at: [f64; 3], rotate: [f64; 3], of: SdfNode) -> SdfNode {
     SdfNode::Transform { at, rotate, scale: 1.0, of: Box::new(of) }
 }
 fn mat(slot: u8, of: SdfNode) -> SdfNode {
-    SdfNode::Material { slot, of: Box::new(of) }
+    SdfNode::Material { slot, within: None, of: Box::new(of) }
 }
 fn comb(op: SdfOp, blend: f64, of: Vec<SdfNode>) -> SdfNode {
     SdfNode::Combine { op, blend, of }

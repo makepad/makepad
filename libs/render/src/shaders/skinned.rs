@@ -385,7 +385,9 @@ script_mod! {
             if self.elem_ctl.w > 0.5 {
                 let lo = (ao_uv_b.x + ao_uv_b.y * 256.0) * 255.0
                 let hi = (ao_uv_b.z + ao_uv_b.w * 256.0) * 255.0
-                let ei = floor(lo + hi * 65536.0 + 0.5)
+                // The lane's low 20 bits are the element; the top 12 a host's render priority
+                // (Fab's coplanar part rank), which must not move the index.
+                let ei = floor(lo + modf(floor(hi + 0.5), 16.0) * 65536.0 + 0.5)
                 let stride = max(self.elem_ctl.z, 1.0)
                 let base = ei * stride
                 let f = self.elem_texel(base)

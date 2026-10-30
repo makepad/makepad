@@ -375,7 +375,7 @@ impl Patch {
         }
         if i >= gl::FX && i < N_GLOBAL && (i - gl::FX) % gl::FX_STRIDE == 0 {
             let slot = (i - gl::FX) / gl::FX_STRIDE;
-            let d = super::snapshots::fx(v.round().clamp(0.0, 31.0) as u8, matches!(slot, 4 | 5 | 12 | 13));
+            let d = crate::kit::fxs::init_values(v.round().clamp(0.0, 31.0) as u8, matches!(slot, 4 | 5 | 12 | 13));
             self.values[i + 1..i + 13].copy_from_slice(&d);
         }
         true

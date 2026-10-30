@@ -135,7 +135,7 @@ pub(crate) fn tabs(rect: Rect) -> [Rect; 2] {
 }
 
 /// The grid of the value `s` in `source`, the rows from `top` in view.
-pub(crate) fn grid_model(caches: &mut Caches, source: &str, s: &ValueSite, plot: Option<bool>, top: usize) -> Option<GridModel> {
+pub(crate) fn grid_model(caches: &mut Caches, source: &str, s: &Site, plot: Option<bool>, top: usize) -> Option<GridModel> {
     match &s.control {
         Control::Data { .. } => {
             let items = caches.list_items(source, s.range.start);
@@ -338,7 +338,7 @@ impl CodeValues {
 
     /// Commit what is typed: `false` when it is not a value of the cell's
     /// kind (the cell stays open).
-    fn grid_commit(&mut self, edits: &mut Vec<ValueEdit>, model: &GridModel, edit: &CellEdit) -> bool {
+    fn grid_commit(&mut self, out: &mut CodeValuesResponse, model: &GridModel, edit: &CellEdit) -> bool {
         let Some(cell) = model.cell(edit.at).cloned() else { return true };
         let written = self.source[cell.range.clone()].to_string();
         let text = match &cell.value {
@@ -360,8 +360,8 @@ impl CodeValues {
         if text != written {
             let id = self.next_gesture();
             self.gesture = Some(Gesture { id, span: cell.range.clone(), last: written.clone(), original: written, scrub: None });
-            edits.push(ValueEdit::Focus(cell.range.start));
-            self.write(edits, text, true);
+            out.focus = Some(cell.range.start);
+            self.write(out, text, true);
         }
         true
     }
@@ -387,7 +387,7 @@ impl CodeValues {
         match event {
             Event::MouseDown(e) if !rect.contains(e.abs) => {
                 if let Some(edit) = st.edit.take() {
-                    self.grid_commit(&mut r.edits, &model, &edit);
+                    self.grid_commit(&mut r, &model, &edit);
                 }
                 self.popup = None;
                 self.gesture = None;
@@ -400,7 +400,7 @@ impl CodeValues {
                 if let Some(pairs) = st.plot {
                     if tabs(rect)[0].contains(e.abs) {
                         if let Some(edit) = st.edit.take() {
-                            self.grid_commit(&mut r.edits, &model, &edit);
+                            self.grid_commit(&mut r, &model, &edit);
                         }
                         let h = if pairs { PLOT_H * 1.6 } else { PLOT_H };
                         self.popup = Some(Popup::Plot { site, rect: Rect { pos: rect.pos, size: dvec2(PLOT_W, h) }, hover: None, drag: None, pairs });
@@ -413,7 +413,7 @@ impl CodeValues {
                     if at == Some(edit.at) {
                         return r;
                     }
-                    if !self.grid_commit(&mut r.edits, &model, &edit) {
+                    if !self.grid_commit(&mut r, &model, &edit) {
                         st.refused = true;
                         set(self, st);
                         self.pop_list.redraw(cx);
@@ -447,13 +447,13 @@ impl CodeValues {
                             p.moved = true;
                             let written = self.source[cell.range.clone()].to_string();
                             let id = self.next_gesture();
-                            r.edits.push(ValueEdit::Focus(cell.range.start));
+                            r.focus = Some(cell.range.start);
                             self.gesture = Some(Gesture { id, span: cell.range.clone(), last: written.clone(), original: written, scrub: None });
                         }
                     }
                     if p.moved {
                         let steps = travel / 2.0 * if e.modifiers.shift { 0.1 } else { 1.0 };
-                        self.write(&mut r.edits, scrubbed(p.base, p.decimals, steps), false);
+                        self.write(&mut r, scrubbed(p.base, p.decimals, steps), false);
                         cx.set_cursor(MouseCursor::EwResize);
                     }
                     st.press = Some(p);
@@ -477,7 +477,7 @@ impl CodeValues {
                     if p.moved {
                         let travel = (e.abs.x - p.from.x) + (p.from.y - e.abs.y);
                         let steps = travel / 2.0 * if e.modifiers.shift { 0.1 } else { 1.0 };
-                        self.write(&mut r.edits, scrubbed(p.base, p.decimals, steps), true);
+                        self.write(&mut r, scrubbed(p.base, p.decimals, steps), true);
                         self.gesture = None;
                     } else {
                         // A click: type into it.
@@ -517,7 +517,7 @@ impl CodeValues {
                 let Some(mut edit) = st.edit.clone() else {
                     if k.key_code == KeyCode::Escape && st.press.as_ref().is_some_and(|p| p.moved) {
                         // Mid-scrub: back to the number as it was, and closed.
-                        self.revert(&mut r.edits);
+                        self.revert(&mut r);
                     } else if matches!(k.key_code, KeyCode::Escape | KeyCode::ReturnKey) {
                         self.popup = None;
                         self.gesture = None;
@@ -541,7 +541,7 @@ impl CodeValues {
                         st.refused = false;
                     }
                     KeyCode::ReturnKey | KeyCode::Tab | KeyCode::ArrowUp | KeyCode::ArrowDown => {
-                        if !self.grid_commit(&mut r.edits, &model, &edit) {
+                        if !self.grid_commit(&mut r, &model, &edit) {
                             st.refused = true;
                             set(self, st);
                             self.pop_list.redraw(cx);
@@ -591,7 +591,7 @@ mod tests {
 
     fn model(src: &str, control: Control, plot: Option<bool>, top: usize) -> GridModel {
         // The model as a popup reads it, without a window.
-        let site = ValueSite { range: 0..src.len(), control, binds: Vec::new() };
+        let site = Site { range: 0..src.len(), control, limits: Default::default() };
         grid_model(&mut Caches::default(), src, &site, plot, top).unwrap()
     }
 

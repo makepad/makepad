@@ -62,7 +62,7 @@ fn same_notes(a: &Part, b: &Part) -> bool {
 fn ask_variant(tx: &std::sync::mpsc::Sender<(usize, Result<String, String>)>, k: usize, text: String, cancel: Arc<AtomicBool>, monitor: TurnMonitor) {
     let tx = tx.clone();
     std::thread::spawn(move || {
-        let _ = tx.send((k, super::panel::write_with(VARY_SYSTEM, text, &cancel, &monitor, None)));
+        let _ = tx.send((k, super::panel::write_with(VARY_SYSTEM, text, &cancel, &monitor, &mut |_| {})));
     });
 }
 

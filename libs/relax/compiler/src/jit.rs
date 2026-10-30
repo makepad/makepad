@@ -4884,6 +4884,7 @@ impl Unit {
         }
         self.coro_busy.lock().unwrap_or_else(|e| e.into_inner()).push(ct);
         let up = self as *mut Unit;
+        let _ct = CoroTrace::enter(self, id);
         let mut r = unsafe { build_rir_lowered(up, id) };
         // the body asked for the layout of its own future (a temporary that moves into a box): it
         // was lowered with the state so far, the frame is known now, so lower it again. A saved
@@ -12011,6 +12012,30 @@ const EXPORT_DEST_SLOT: u32 = 8;
 fn verify_pass(func: &relax_backend::rir::Func, pass: &str) {
     if let Err(e) = func.verify_after(pass) {
         panic!("makepad: {}\n{}", e, func.dump());
+    }
+}
+
+/// MAKEPAD_RUN_TRACE=coro: one line per coroutine frame built (coro_frame), at its end: nesting depth,
+/// the poll fn's name, inclusive and exclusive CPU ms (exclusive = less the frames built inside it).
+struct CoroTrace { t0: u64, child0: u64, depth: usize, name: String }
+thread_local! { static CORO_TRACE: std::cell::Cell<(usize, u64)> = const { std::cell::Cell::new((0, 0)) }; }
+impl CoroTrace {
+    fn enter(u: &Unit, id: u32) -> Option<CoroTrace> {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var("MAKEPAD_RUN_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "coro"))) { return None; }
+        let (depth, child) = CORO_TRACE.with(|c| c.get());
+        CORO_TRACE.with(|c| c.set((depth + 1, child)));
+        let parent = match &u.fns[id as usize].key { FnKey::Closure(_, _, p) => u.fns[*p as usize].name.to_string(), _ => String::new() };
+        Some(CoroTrace { t0: relax_backend::cpu_ns(), child0: child, depth, name: format!("{} in {}", u.fns[id as usize].name, parent) })
+    }
+}
+impl Drop for CoroTrace {
+    fn drop(&mut self) {
+        let incl = relax_backend::cpu_ns() - self.t0;
+        let (_, child) = CORO_TRACE.with(|c| c.get());
+        let excl = incl.saturating_sub(child - self.child0);
+        CORO_TRACE.with(|c| c.set((self.depth, self.child0 + incl)));
+        eprintln!("coro-trace\t{}\t{:.1}\t{:.1}\t{:.0}\t{}", self.depth, incl as f64 / 1e6, excl as f64 / 1e6, crate::clock::ms_since_start(), self.name);
     }
 }
 

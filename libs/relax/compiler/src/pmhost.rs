@@ -241,6 +241,13 @@ fn world_inner(sess: &std::sync::Arc<crate::Session>, prewarm: bool) -> Option<s
         std::sync::Arc::new(build_world(sess))
     };
     tl_set_once(1, crate::clock::ms_since_start());
+    // the runtime's unit is the final world's from now on, set on the owner (no owner-path macro
+    // call is in flight there): a stage world's call left its unit behind, and a boot expansion
+    // running off the owner (`call`) restores what it found -- that must be this world
+    if let Ok(world) = w.as_ref() {
+        let wu = world.u as usize;
+        crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::set_runtime_unit(wu as *mut crate::jit::Unit) });
+    }
     *WORLD.lock().unwrap_or_else(|e| e.into_inner()) = Some(w.clone());
     tl_add(4, 1.0);
     tl_add(5, t.elapsed().as_secs_f64() * 1e3);
@@ -727,8 +734,15 @@ fn call(sess: &std::sync::Arc<crate::Session>, entry: &Entry, attr: Option<&Toke
     // the runtime's process-wide UNIT and TLS machinery. Preserve the original reload
     // serialization for this step. Cached script expansions never enter the host.
     let call_krate = crate::macro_reg::current_call_krate();
+    // While the program's crates load (no program unit yet: no program code runs) and the call is
+    // into the final world, the expansion runs on the asking thread: the runtime's unit is that
+    // world's for every such call at once, and its lazy compiles are owner requests as any thread's.
+    // Expansions of a parse workers' pool then run side by side instead of one at a time on the
+    // owner. Later ones (hot reload, a lazy body parsed while the program runs, a stage world's
+    // macro while the world is built) keep the owner's serialization.
+    let off_owner = crate::run::running_unit().is_null() && wa.as_ref().zip(world_now()).is_some_and(|(a, b)| std::sync::Arc::ptr_eq(a, &b));
     let wait = crate::load_profile::span(sess.runtime.profile, "wait-macro-unit", &entry.fname);
-    crate::owner::call(crate::owner::Class::Program, || -> Result<TokenStream, String> {
+    let body = || -> Result<TokenStream, String> {
     drop(wait);
     let _krate = crate::macro_reg::with_call_krate(&call_krate);
     let _held = crate::load_profile::span(sess.runtime.profile, "macro-unit-held", &entry.fname);
@@ -814,7 +828,8 @@ fn call(sess: &std::sync::Arc<crate::Session>, entry: &Entry, attr: Option<&Toke
     });
     PH[2].fetch_add(tz.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     Ok(ts)
-    })
+    };
+    if off_owner { body() } else { crate::owner::call(crate::owner::Class::Program, body) }
 }
 
 

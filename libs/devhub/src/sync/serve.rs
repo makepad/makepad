@@ -435,7 +435,10 @@ impl Sync {
         }
         let dir = proto::home().join("sync").join("incoming");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let file = dir.join(format!("{hash}.bundle"));
+        // one file per push: two leases shipping the same commit at once send the same bundle (same
+        // hash), and must neither truncate nor delete each other's copy
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let file = dir.join(format!("{hash}-{}-{}.bundle", std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         let r = (|| {
             let mut f = std::fs::File::create(&file).map_err(|e| format!("{}: {e}", file.display()))?;
             let mut h = Sha256::new();

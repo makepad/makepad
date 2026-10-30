@@ -242,6 +242,44 @@ fn warps_change_the_wave() {
     }
 }
 
+/// The rack runs the shared effects family: every kind plays a note through without blowing up,
+/// a delay's echo outlives the dry note, and the rack order is the patch's.
+#[test]
+fn the_rack_plays_the_shared_effects() {
+    use makepad_audio_synth::kit::fx::KINDS;
+    for (kind, _) in KINDS {
+        let mut m = engine(&format!("a_pos=0.5 env1_release=0.05 fx={kind}"), [None, None, None]);
+        let (l, r) = render(&mut m, &[60], 0.3, 1.0);
+        assert!(l.iter().chain(&r).all(|v| v.is_finite() && v.abs() < 8.0), "{kind}");
+    }
+    let tail = |text: &str| {
+        let mut m = engine(text, [None, None, None]);
+        let (l, r) = render(&mut m, &[60], 0.2, 1.2);
+        rms(&mono(&l, &r)[(0.45 * RATE) as usize..])
+    };
+    let dry = tail("env1_release=0.02");
+    let wet = tail("env1_release=0.02 fx=delay delay_left=-2 delay_right=-2 delay_feedback=0.6 delay_mix=0.5");
+    assert!(dry < 1e-4 && wet > 1e-3, "dry {dry} wet {wet}");
+    let p = MorphPatch::parse("fx=reverb,delay,chorus").unwrap();
+    assert_eq!(p.to_text().split(' ').find(|w| w.starts_with("fx=")), Some("fx=reverb,delay,chorus"));
+}
+
+/// The `tuning` choice and a scale of its own retune the keys.
+#[test]
+fn morph_plays_in_tune() {
+    let e19 = makepad_audio_synth::kit::tuning::by_name("edo19").unwrap();
+    let want = e19.key_hz(62).unwrap() as f32;
+    let mut m = engine("a_pos=0 tuning=edo19 f1_on=false", [None, None, None]);
+    let (l, r) = render(&mut m, &[62], 1.0, 0.5);
+    let x = mono(&l, &r);
+    assert!(tone(&x[4800..], want) > 4.0 * tone(&x[4800..], 293.66), "key 62 sounds two 19ths up");
+    let p = MorphPatch::parse("tuning_scale=5/4,3/2,2/1").unwrap();
+    assert_eq!(p, MorphPatch::parse(&p.to_text()).unwrap());
+    let t = p.tuning().unwrap();
+    assert!((t.key_hz(61).unwrap() / t.key_hz(60).unwrap() - 1.25).abs() < 1e-9);
+    assert!(MorphPatch::parse("tuning_scale=0/3").is_err());
+}
+
 #[test]
 fn bad_patches_are_refused_with_the_reason() {
     assert!(MorphPatch::parse("a_tabel=basic").unwrap_err().contains("a_tabel"));
@@ -267,7 +305,7 @@ fn the_text_form_round_trips() {
 fn the_schema_describes_itself_for_the_ai() {
     let schema = &layout().schema;
     let text = schema.describe(&[]);
-    for key in ["a_pos", "a_warp1", "f1_cutoff", "env4_release", "lfo8_shape", "m8", "arp_pattern", "delay_time", "glide"] {
+    for key in ["a_pos", "a_warp1", "f1_cutoff", "env4_release", "lfo8_shape", "m8", "arp_pattern", "delay_left", "glide"] {
         assert!(text.contains(&format!("  {key} ")), "{key} missing");
     }
     assert!(text.contains("f1_cutoff 20..20000 Hz log =4000 ~"), "{}", text.lines().find(|l| l.contains("f1_cutoff")).unwrap_or(""));

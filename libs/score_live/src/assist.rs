@@ -105,7 +105,7 @@ pub fn field_doc(ty: &str, field: &str) -> Option<&'static str> {
         ("Ironfish", _) => "0..1 over Ironfish's own range; unset keeps the program's",
         ("Morph", "preset") => "a Morph preset by name (instrument_search lists them)",
         ("Morph", "mods") => "[[@src @dst amount] ...]: mod rows (morph_params mods)",
-        ("Morph", "fx") => "[@delay @reverb @comp @utility]: the rack, in order",
+        ("Morph", "fx") => "[@delay @reverb @chorus @distortion ...]: the rack, in order (each effect's parameters: morph_params groups [\"fx_<kind>\"])",
         ("Morph", _) => "a Morph parameter (morph_params lists them with ranges)",
         ("Tandem", "patch") => "a library patch: \"Category/Name\" (tandem_patches finds them)",
         ("Tandem", _) => "a Tandem parameter by storage name, raw units (tandem_params lists them)",

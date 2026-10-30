@@ -36,6 +36,14 @@ impl Edit {
     pub fn set(id: impl Into<SiteId>, value: Value, gesture: u64, done: bool) -> Edit {
         Edit { changes: vec![Change::Set { id: id.into(), value }], gesture, done }
     }
+    /// Replace `range` of file 0 with `text`.
+    pub fn splice(range: std::ops::Range<usize>, text: impl Into<String>, gesture: u64, done: bool) -> Edit {
+        Edit { changes: vec![Change::Splice(Splice { file: 0, range, text: text.into() })], gesture, done }
+    }
+    /// The edit's byte changes.
+    pub fn splices(&self) -> impl Iterator<Item = &Splice> {
+        self.changes.iter().filter_map(|c| if let Change::Splice(s) = c { Some(s) } else { None })
+    }
 }
 
 /// A document host taking edits.

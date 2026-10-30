@@ -157,6 +157,42 @@ mod os {
         fn mach_timebase_info(info: *mut Timebase) -> i32;
         fn sysctlbyname(name: *const u8, oldp: *mut core::ffi::c_void, oldlenp: *mut usize, newp: *mut core::ffi::c_void, newlen: usize) -> i32;
         fn getloadavg(loads: *mut f64, n: i32) -> i32;
+        fn mach_host_self() -> u32;
+        fn host_statistics64(host: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+    }
+
+    /// `vm_statistics64` (mach/vm_statistics.h), the fields the measure reads; 38 `integer_t`s.
+    #[repr(C, align(8))]
+    #[derive(Default)]
+    #[allow(dead_code)] // the C layout: every field is there so the kernel's writes land in place
+    pub(super) struct VmStats64 {
+        free_count: u32,
+        active_count: u32,
+        inactive_count: u32,
+        wire_count: u32,
+        counters: [u64; 9],
+        purgeable_count: u32,
+        speculative_count: u32,
+        counters2: [u64; 4],
+        compressor_page_count: u32,
+        throttled_count: u32,
+        external_page_count: u32,
+        internal_page_count: u32,
+        total_uncompressed_pages_in_compressor: u64,
+    }
+
+    const HOST_VM_INFO64: i32 = 4;
+
+    /// Available pages: free + inactive (clean file cache the kernel reclaims first) + speculative
+    /// + purgeable. Counting only free (+ speculative, purgeable) read a Mac whose RAM is file cache
+    /// and compressed memory as full ("ram 15.7/16 GB used", every mini lease "node busy" 10-30).
+    fn available_pages() -> Option<u64> {
+        let mut v = VmStats64::default();
+        let mut count = (std::mem::size_of::<VmStats64>() / 4) as u32;
+        if unsafe { host_statistics64(mach_host_self(), HOST_VM_INFO64, &mut v as *mut _ as *mut i32, &mut count) } != 0 {
+            return None;
+        }
+        Some(v.free_count as u64 + v.inactive_count as u64 + v.speculative_count as u64 + v.purgeable_count as u64)
     }
 
     const PROC_PIDTASKINFO: i32 = 4;
@@ -189,11 +225,9 @@ mod os {
         let mut load = [0f64; 3];
         unsafe { getloadavg(load.as_mut_ptr(), 3) };
         let total = sysctl_u64("hw.memsize") >> 20;
-        // free + speculative + purgeable pages: memory the kernel hands out without paging (a 0 here
-        // made the lease scheduler see a Mac as full and queue every lease as "node busy")
+        // memory the kernel hands out without paging anything in use ([`available_pages`])
         let page = sysctl_u64("hw.pagesize").max(4096);
-        let pages = sysctl_u64("vm.page_free_count") + sysctl_u64("vm.page_speculative_count") + sysctl_u64("vm.page_purgeable_count");
-        let avail = (pages * page) >> 20;
+        let avail = (available_pages().unwrap_or(0) * page >> 20).min(total);
         Machine { os: "macos", load1: load[0], mem_total_mb: total, mem_avail_mb: avail, uptime_s: 0, cpus: std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1), battery: None }
     }
 }
@@ -270,5 +304,17 @@ mod tests {
             assert!(p.rss_bytes > 0 && p.threads >= 1);
         }
         assert!(super::alive(std::process::id()));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    /// `vm_statistics64` is 38 `integer_t`s (HOST_VM_INFO64_COUNT), and the measure reads a sane
+    /// share of the RAM: some memory is always free or cache, never more than the machine has.
+    #[test]
+    fn available_memory_is_free_plus_cache() {
+        assert_eq!(std::mem::size_of::<super::os::VmStats64>(), 38 * 4);
+        let m = super::machine();
+        assert!(m.mem_avail_mb > 0 && m.mem_avail_mb <= m.mem_total_mb, "{} of {} MB", m.mem_avail_mb, m.mem_total_mb);
     }
 }

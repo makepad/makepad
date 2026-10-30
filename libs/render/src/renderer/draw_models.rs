@@ -1044,12 +1044,15 @@ impl Renderer {
         let Some(mut draw) = self.pbr_draw.take() else {
             return;
         };
-        match &self.element_lookup {
-            Some((map, ctl)) => {
-                draw.skinned.draw_vars.set_texture(6, map);
+        // Bound by name: a fixed slot index lands on another map when the shader's texture list
+        // changes (slot 6 is `ssao_map`: the lookup shaded the PBR lane and its rows moved parts).
+        let elem_slot = draw.skinned.draw_vars.draw_shader_id.and_then(|shader| cx.draw_shaders[shader.index].mapping.textures.iter().position(|t| t.id == live_id!(elem_map)));
+        match (&self.element_lookup, elem_slot) {
+            (Some((map, ctl)), Some(slot)) => {
+                draw.skinned.draw_vars.set_texture(slot, map);
                 draw.skinned.draw_vars.set_uniform(cx.cx, live_id!(elem_ctl), ctl);
             }
-            None => draw.skinned.draw_vars.set_uniform(cx.cx, live_id!(elem_ctl), &[0.0, 0.0, 0.0, 0.0]),
+            _ => draw.skinned.draw_vars.set_uniform(cx.cx, live_id!(elem_ctl), &[0.0, 0.0, 0.0, 0.0]),
         }
         self.draw_models_inner(
             cx,

@@ -119,6 +119,10 @@ impl Store {
     /// Checks a bundle and fetches its branch into `refs/devhub/pushed/<branch>`; returns the
     /// commit it holds.
     pub fn fetch_bundle(&self, bundle: &Path, branch: &str) -> Result<String, String> {
+        // one fetch at a time: two leases shipping different pins of one branch at once must each
+        // read back their own commit (and not fail on the ref's lock)
+        static FETCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one = FETCH.lock().unwrap_or_else(|e| e.into_inner());
         let b = bundle.to_string_lossy();
         self.git(&["bundle", "verify", "-q", &b])?;
         let dst = format!("{PUSHED}{branch}");

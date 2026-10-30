@@ -3,7 +3,7 @@
 //! desktop's mirror is fed:
 //!
 //! ```text
-//! window pass   the mirror (the left eye, letterboxed) and the app's own UI
+//! window pass   the app's own UI, and a mirror (the left eye, letterboxed) on its own clock
 //! picture       w/4 x 9h/4 shared BGRA8, NV12 packed (draw_nv12_pack): per eye column its colour
 //!  (no parent,  (luma rows 0..h, chroma rows), below it a band h/2 tall: coverage (left half)
 //!   paints      and inverse depth (right half) at half resolution in the luma, neutral chroma
@@ -290,9 +290,6 @@ pub struct XrPack {
     server: Option<XrServer>,
     #[rust]
     counts: Counts,
-    /// The desktop windows are held for the headset (`Cx::xr_hold_windows`).
-    #[rust]
-    holding: bool,
     /// `MAKEPAD_XR_REMOTE_TEST=1` (read once): the stereo test pattern over every picture.
     #[rust]
     test: bool,
@@ -330,19 +327,15 @@ impl XrPack {
         }
         let shared = self.shared().clone();
         self.counts.draws += 1;
-        // while a headset streams the desktop windows paint for their own causes only, and
-        // a window with the mirror from the headset's frames at the mirror's rate
-        let hold = shared.frames_flowing();
+        // the desktop's mirrors read the XR pass (on their own clock, `XrMirrorClock`); the
+        // desktop renders nothing for the headset's frames (the platform paints no window for them)
         let source = cx.cx.global::<crate::mirror::XrMirrorSource>();
         source.color = Some(color.clone());
-        source.live = shared.session_eye().is_some();
+        source.mirror = shared.mirror.load(Ordering::Acquire);
         if let Some(eye) = shared.session_eye() {
             source.eye = eye;
         }
-        let mirror = std::mem::take(&mut source.drawn) && shared.mirror.load(Ordering::Acquire);
-        cx.cx.xr_hold_windows(hold, mirror);
-        self.holding = hold;
-        self.counts.desktop_now = cx.cx.xr_window_counts();
+        self.counts.desktop_now = cx.cx.window_paints();
         self.counts.window();
         // the stream's AA and render scale: the XR pass renders multisampled, at the supersample
         // times the render scale of the encoded eye size (from this frame on)
@@ -583,12 +576,12 @@ impl XrPack {
     /// The server's wake: after a packed frame was submitted, the picture goes to the encoder
     /// with the frame's completion; the next pose is asked for once there is room.
     fn wake(&mut self, cx: &mut Cx) {
-        // the headset gone, its stream off or its frames stopped: the desktop paints as always again
-        let live = self.shared().session_eye().is_some();
-        cx.global::<crate::mirror::XrMirrorSource>().live &= live;
-        if self.holding && !self.shared().frames_flowing() {
-            self.holding = false;
-            cx.xr_hold_windows(false, false);
+        // a headset linked or gone: the desktop's mirrors show it (or that none streams)
+        let live = self.shared().frames_flowing();
+        let source = cx.global::<crate::mirror::XrMirrorSource>();
+        if source.live != live {
+            source.live = live;
+            cx.redraw_all();
         }
         if !self.signal.as_ref().is_some_and(|s| s.check_and_clear()) {
             return;
@@ -689,10 +682,9 @@ struct Counts {
     waited: u32,
     /// Frames the app drew without content (`skip_frame`), by reason.
     skipped: Vec<(&'static str, u32)>,
-    /// The desktop windows' repaints painted and held (`Cx::xr_window_counts`): at the window's
-    /// start and now.
-    desktop_at: (u64, u64),
-    desktop_now: (u64, u64),
+    /// The desktop's window paints (`Cx::window_paints`): at the window's start and now.
+    desktop_at: u64,
+    desktop_now: u64,
 }
 
 impl Counts {
@@ -704,8 +696,8 @@ impl Counts {
         }
         let r = |n: u32| n as f64 / secs;
         let skipped: Vec<String> = self.skipped.iter().map(|(why, n)| format!("{n} {why}")).collect();
-        let (painted, held) = (self.desktop_now.0 - self.desktop_at.0.min(self.desktop_now.0), self.desktop_now.1 - self.desktop_at.1.min(self.desktop_now.1));
-        log!("xr serve: draws {:.0}/s · new XR frames {:.0}/s · packed {:.0}/s · handed {:.0}/s · poses asked {:.0}/s · waited for room {} · not streamed (empty) {} · desktop painted {:.1}/s, held {:.0}/s", r(self.draws), r(self.frames), r(self.packed), r(self.handed), r(self.asked), self.waited, if skipped.is_empty() { "0".to_string() } else { skipped.join(", ") }, painted as f64 / secs, held as f64 / secs);
+        let painted = self.desktop_now - self.desktop_at.min(self.desktop_now);
+        log!("xr serve: draws {:.0}/s · new XR frames {:.0}/s · packed {:.0}/s · handed {:.0}/s · poses asked {:.0}/s · waited for room {} · not streamed (empty) {} · desktop painted {:.1}/s", r(self.draws), r(self.frames), r(self.packed), r(self.handed), r(self.asked), self.waited, if skipped.is_empty() { "0".to_string() } else { skipped.join(", ") }, painted as f64 / secs);
         // the app's audio (what the headset hears) stops for good when its callback panics
         {
             use makepad_widgets::makepad_platform::audio_output_fence as fence;

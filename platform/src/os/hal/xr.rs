@@ -257,12 +257,12 @@ impl Cx {
         });
         xr.last = state.clone();
         // the XR pass draws with the new eyes
-        // (what is redrawn from here is the headset's: `XrWindowHold`)
-        let in_xr = std::mem::replace(&mut self.xr_window_hold.in_xr, true);
+        // (what is redrawn from here is for the headset's frame: it paints no window)
+        let in_xr = std::mem::replace(&mut self.in_xr_update, true);
         let passes: Vec<_> = self.passes.id_iter().filter(|p| matches!(self.passes[*p].parent, CxDrawPassParent::Xr)).collect();
         for pass in passes { self.redraw_pass_and_child_passes(pass); }
         self.call_event_handler(&Event::XrUpdate(XrUpdateEvent { state, last }));
-        self.xr_window_hold.in_xr = in_xr;
+        self.in_xr_update = in_xr;
     }
 
     /// An `XrDepth`: the headset's environment depth. A header alone announces a newly

@@ -10,19 +10,21 @@
 //! - every **number** scrubs where it is written: alt-drag on it, up or right
 //!   (a step per point at its own precision; shift for finer).
 //!
-//! The host says what each value is ([`ValueSite`]: its bytes and its
-//! [`Control`]); the controls reserve their columns in the text
+//! The host says what each value is: its document's
+//! [`makepad_edit_values::ValueSite`]s (kind, unit, range, choices and where
+//! it is written); the control is picked from the kind and the literal as
+//! written. The controls reserve their columns in the text
 //! ([`CodeDocument::set_inline_inlays`]: the code moves aside, nothing is
-//! drawn over it) and answer with [`ValueEdit`]s: `Splice`s that replace
-//! exactly the value's bytes, one gesture id per gesture (the host merges a
-//! gesture's splices into one undo step) with `done` on its last.
+//! drawn over it) and answer with [`Edit`]s whose splices replace exactly
+//! the value's bytes, one gesture id per gesture (the host folds a
+//! gesture's edits into one undo step) with `done` on its last.
 //!
 //! The host is a widget that wraps a `CodeView` (Motion's Source view, the
 //! Score editor): it holds a [`CodeValues`], gives it every event first
 //! ([`CodeValues::handle_event`]), lays it out before the view draws
 //! ([`CodeValues::sync`]) and draws it after ([`CodeValues::draw`]).
 
-pub mod data;
+mod data;
 mod cache;
 mod chips;
 mod gizmo;
@@ -30,8 +32,8 @@ mod grid;
 mod pad;
 mod plot;
 
-pub use data::{control_of_literal, list_sites, lit_at, CellValue, Lit, ListSite, Table};
-pub use plot::fmt_range;
+use data::{control_of_literal, lit_at};
+pub use makepad_edit_values::{Change, Edit, Splice, ValueKind, ValueSite};
 
 use cache::Caches;
 use chips::Summary;
@@ -129,9 +131,10 @@ script_mod! {
     }
 }
 
-/// What a value is, for its control.
+/// The control a value shows: picked from its site's kind and its literal
+/// as written (the payloads are read from the source).
 #[derive(Clone, Debug, PartialEq)]
-pub enum Control {
+pub(crate) enum Control {
     /// A colour, 0..1 RGBA: a swatch before it, a colour wheel.
     Color([f32; 4]),
     /// An ease, as its curve sampled over 0..1: a curve before it; the
@@ -171,16 +174,12 @@ pub enum Control {
 
 /// What a number list's index means (the plot's x axis).
 #[derive(Clone, Debug, PartialEq, Default)]
-pub enum DataAxis {
+pub(crate) enum DataAxis {
     /// Item 0, 1, 2…
     #[default]
     Index,
     /// Samples over time: item `k` is at `start + k / per_second` seconds.
     Time { per_second: f64, start: f64 },
-    /// One item per letter of a text.
-    Letters,
-    /// One item per word of a text.
-    Words,
 }
 
 impl DataAxis {
@@ -189,8 +188,6 @@ impl DataAxis {
         match self {
             DataAxis::Index => "index",
             DataAxis::Time { .. } => "seconds",
-            DataAxis::Letters => "letter",
-            DataAxis::Words => "word",
         }
     }
 }
@@ -198,38 +195,19 @@ impl DataAxis {
 /// One entry of a menu: what it says, the source text it writes, and a
 /// curve to draw beside it (eases).
 #[derive(Clone, Debug, PartialEq)]
-pub struct Choice {
+pub(crate) struct Choice {
     pub label: String,
     pub text: String,
     pub curve: Option<Vec<f32>>,
 }
 
-/// A value the host knows: its bytes in the source and its control.
+/// A value placed in the source: its bytes, its control and the limits a
+/// typed site gives it.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ValueSite {
+pub(crate) struct Site {
     pub range: Range<usize>,
     pub control: Control,
-    /// What the value may be bound to instead (an input, a signal): a
-    /// secondary click on its control offers them.
-    pub binds: Vec<Choice>,
-}
-
-/// What a control did to the source.
-#[derive(Clone, Debug, PartialEq)]
-pub enum ValueEdit {
-    /// Replace `start..end` with `text`; `gesture` groups one gesture's
-    /// splices (one undo step), `done` marks its last.
-    Splice { start: usize, end: usize, text: String, gesture: u64, done: bool },
-    /// A value was picked (its control pressed or a menu opened): the host
-    /// may select it in its other views. The source byte it starts at.
-    Focus(usize),
-}
-
-#[derive(Clone, Debug, Default)]
-pub enum CodeValuesAction {
-    Edits(Vec<ValueEdit>),
-    #[default]
-    None,
+    pub limits: makepad_edit_values::Range,
 }
 
 /// What [`CodeValues::handle_event`] did.
@@ -238,7 +216,11 @@ pub struct CodeValuesResponse {
     /// The event was the controls' (the editor must not see it).
     pub consumed: bool,
     pub redraw: bool,
-    pub edits: Vec<ValueEdit>,
+    /// Splices of file 0 (the source the sites came from).
+    pub edits: Vec<Edit>,
+    /// A value was picked (its control pressed or a menu opened): the host
+    /// may select it in its other views. The source byte it starts at.
+    pub focus: Option<usize>,
 }
 
 #[derive(Script, ScriptHook)]
@@ -317,7 +299,7 @@ enum Popup {
     Wheel { site: usize, rect: Rect, alpha: f32, item: Option<usize> },
     /// `armed`: the press that opened it is over (its release chooses
     /// nothing; a later press or a drag away from it does).
-    Menu { site: usize, rect: Rect, hover: Option<usize>, top: usize, armed: bool, from: DVec2, binds: bool },
+    Menu { site: usize, rect: Rect, hover: Option<usize>, top: usize, armed: bool, from: DVec2 },
     Words { site: usize, rect: Rect, focus: bool },
     /// A list's items as a plot: the point under the pointer, the one
     /// being dragged, and whether items pair up as x, y points.
@@ -426,7 +408,7 @@ pub struct CodeValues {
     #[rust]
     source: String,
     #[rust]
-    sites: Vec<ValueSite>,
+    sites: Vec<Site>,
     /// The inlays as last set, the document and text they were set on (a
     /// new document, or text edited since, is laid out again).
     #[rust]
@@ -501,6 +483,83 @@ pub struct CodeValues {
     /// A key whose press a popup took: its release is taken too.
     #[rust]
     swallow_up: Option<KeyCode>,
+}
+
+/// A typed site's control where it is written in `source` (file 0): from
+/// its kind, and from its literal for points, lists and tables.
+fn place(source: &str, site: &ValueSite) -> Option<Site> {
+    let (file, range) = site.span.clone()?;
+    if file != 0 {
+        return None;
+    }
+    let text = source.get(range.clone())?;
+    let key = data::key_before(source, range.start);
+    let control = match site.kind {
+        ValueKind::Colour => match lit_at(text, 0)? {
+            data::Lit::Color { rgba, .. } => Control::Color(rgba),
+            _ => control_of_literal(text, &key)?,
+        },
+        ValueKind::Ease => Control::Ease { curve: ease_curve(text), choices: ease_choices(site, text) },
+        ValueKind::Choice => Control::Choice { choices: site.choices.iter().map(|c| choice(text, c)).collect() },
+        ValueKind::Bool => Control::Choice { choices: ["false", "true"].iter().map(|c| choice(text, c)).collect() },
+        ValueKind::Text => match lit_at(text, 0)? {
+            data::Lit::Str { text, .. } => Control::Words { text },
+            _ => return None,
+        },
+        // A list of a time's samples: `step` seconds apart.
+        ValueKind::Time if site.step > 0.0 => match control_of_literal(text, &key) {
+            Some(Control::Data { values, pairs, name, .. }) => Control::Data { values, pairs, name, axis: DataAxis::Time { per_second: 1.0 / site.step, start: 0.0 } },
+            other => other.unwrap_or(Control::Number),
+        },
+        kind if kind.is_numeric() => control_of_literal(text, &key).unwrap_or(Control::Number),
+        _ => control_of_literal(text, &key)?,
+    };
+    Some(Site { range, control, limits: site.range })
+}
+
+/// A menu entry written the way the value is written now (`@saw`, `"saw"` or `saw`).
+fn choice(current: &str, label: &str) -> Choice {
+    let current = current.trim();
+    let bare = label.trim_start_matches('@');
+    let text = if current.starts_with('@') {
+        format!("@{bare}")
+    } else if current.starts_with('"') {
+        quote(bare)
+    } else {
+        bare.to_string()
+    };
+    Choice { label: bare.to_string(), text, curve: None }
+}
+
+/// An ease's curve over 0..1 (linear for one that is not a name).
+fn ease_curve(written: &str) -> Vec<f32> {
+    let ease = makepad_tween::named::Ease::from_id(written.trim().trim_start_matches('@')).unwrap_or_default();
+    (0..=24).map(|i| ease.apply(i as f64 / 24.0, 1.0) as f32).collect()
+}
+
+/// The eases a site offers (every named ease when it names none), each with its curve.
+fn ease_choices(site: &ValueSite, written: &str) -> Vec<Choice> {
+    let names = if site.choices.is_empty() { makepad_tween::named::Ease::ids() } else { site.choices.clone() };
+    names
+        .iter()
+        .map(|name| {
+            let mut c = choice(written, name);
+            if !c.text.starts_with('@') && !c.text.starts_with('"') {
+                c.text = format!("@{}", c.label);
+            }
+            c.curve = Some(ease_curve(&c.text));
+            c
+        })
+        .collect()
+}
+
+/// `text` (a number scrubbed at `at`) within the hard limits of the typed
+/// site written there, at the precision written.
+fn within(sites: &[Site], at: usize, text: String, decimals: usize) -> String {
+    let Some(site) = sites.iter().find(|s| s.range.start == at && s.control == Control::Number) else { return text };
+    let Ok(value) = text.parse::<f64>() else { return text };
+    let clamped = site.limits.clamp(value);
+    if clamped == value { text } else { format!("{clamped:.decimals$}") }
 }
 
 /// A Splash string literal for `text`.
@@ -637,7 +696,12 @@ pub fn scrubbed(base: f64, decimals: usize, steps: f64) -> String {
 impl CodeValues {
     /// The values of `source` the host knows. Call when the source or what
     /// the host knows of it changes; [`Self::sync`] lays the controls out.
-    pub fn set_sites(&mut self, source: &str, mut sites: Vec<ValueSite>) {
+    ///
+    /// `sites`: the document's typed sites (their spans in file 0); the ones
+    /// written in `source` get a control picked from their kind and literal.
+    /// Every number scrubs, typed or not.
+    pub fn set_sites(&mut self, source: &str, typed: &[ValueSite]) {
+        let mut sites: Vec<Site> = typed.iter().filter_map(|site| place(source, site)).collect();
         sites.sort_by_key(|site| (site.range.start, site.range.end));
         sites.dedup_by(|a, b| a.range == b.range);
         sites.retain(|site| site.range.end <= source.len() && source.is_char_boundary(site.range.start) && source.is_char_boundary(site.range.end));
@@ -721,7 +785,7 @@ impl CodeValues {
     }
 
     /// The rect a site's control occupies on screen.
-    fn control_rect(&self, view: &CodeView, origin: DVec2, site: &ValueSite, column: f64, line_h: f64) -> Option<Rect> {
+    fn control_rect(&self, view: &CodeView, origin: DVec2, site: &Site, column: f64, line_h: f64) -> Option<Rect> {
         let session = view.session.as_ref()?;
         let (cols, before) = placement(&site.control)?;
         let at = if before { site.range.start } else { site.range.end };
@@ -935,9 +999,6 @@ impl CodeValues {
     }
 
     fn menu_choices(&self, site: usize) -> Vec<Choice> {
-        if let Some(Popup::Menu { binds: true, .. }) = &self.popup {
-            return self.sites.get(site).map(|s| s.binds.clone()).unwrap_or_default();
-        }
         match self.sites.get(site).map(|s| &s.control) {
             Some(Control::Ease { choices, .. } | Control::Choice { choices }) => choices.clone(),
             _ => Vec::new(),
@@ -1037,13 +1098,13 @@ impl CodeValues {
     }
 
     /// A step of the gesture on the value at `span`: its new text.
-    fn write(&mut self, edits: &mut Vec<ValueEdit>, text: String, done: bool) {
+    fn write(&mut self, out: &mut CodeValuesResponse, text: String, done: bool) {
         let Some(gesture) = self.gesture.as_mut() else { return };
         if text == gesture.last && !done {
             return;
         }
         let (start, end) = (gesture.span.start, gesture.span.end);
-        edits.push(ValueEdit::Splice { start, end, text: text.clone(), gesture: gesture.id, done });
+        out.edits.push(Edit { changes: vec![Change::Splice(Splice { file: 0, range: start..end, text: text.clone() })], gesture: gesture.id, done });
         // The model's copy follows at once, so the next step of a drag finds
         // the value where it now is.
         if end <= self.source.len() {
@@ -1069,9 +1130,9 @@ impl CodeValues {
         }
     }
 
-    fn open(&mut self, cx: &mut Cx, index: usize, rect: Rect, press: DVec2, edits: &mut Vec<ValueEdit>) {
+    fn open(&mut self, cx: &mut Cx, index: usize, rect: Rect, press: DVec2, out: &mut CodeValuesResponse) {
         let Some(site) = self.sites.get(index).cloned() else { return };
-        edits.push(ValueEdit::Focus(site.range.start));
+        out.focus = Some(site.range.start);
         if site.control == Control::Number {
             // A number's chip drags: up or right raises it.
             let literal = self.source[site.range.clone()].to_string();
@@ -1146,7 +1207,7 @@ impl CodeValues {
                 let at = choices.iter().position(|c| c.text == current).unwrap_or(0);
                 let rows = choices.len().min(MENU_MAX_ROWS);
                 let extra = if choices.len() > MENU_MAX_ROWS { 18.0 } else { 0.0 };
-                Some(Popup::Menu { site: index, rect: below(MENU_W, rows as f64 * MENU_ROW + 8.0 + extra), hover: Some(at), top: at.saturating_sub(MENU_MAX_ROWS / 2).min(choices.len().saturating_sub(MENU_MAX_ROWS)), armed: false, from: press, binds: false })
+                Some(Popup::Menu { site: index, rect: below(MENU_W, rows as f64 * MENU_ROW + 8.0 + extra), hover: Some(at), top: at.saturating_sub(MENU_MAX_ROWS / 2).min(choices.len().saturating_sub(MENU_MAX_ROWS)), armed: false, from: press})
             }
             Control::Number => None,
             Control::Data { values, pairs, .. } => {
@@ -1164,11 +1225,11 @@ impl CodeValues {
         };
     }
 
-    fn close(&mut self, edits: &mut Vec<ValueEdit>) {
+    fn close(&mut self, out: &mut CodeValuesResponse) {
         if let Some(gesture) = self.gesture.clone() {
             if gesture.scrub.is_none() {
                 // The gesture's last step: what is written now, done.
-                self.write(edits, gesture.last.clone(), true);
+                self.write(out, gesture.last.clone(), true);
             }
         }
         self.popup = None;
@@ -1227,12 +1288,12 @@ impl CodeValues {
                             if let Some((range, rgba)) = items.get(k).cloned() {
                                 if let Some(g) = self.gesture.clone() {
                                     if g.last != g.original {
-                                        self.write(&mut r.edits, g.last, true);
+                                        self.write(&mut r, g.last, true);
                                     }
                                 }
                                 let id = self.next_gesture();
                                 let written = self.source[range.clone()].to_string();
-                                r.edits.push(ValueEdit::Focus(range.start));
+                                r.focus = Some(range.start);
                                 self.gesture = Some(Gesture { id, span: range, last: written.clone(), original: written, scrub: None });
                                 let [h, s, v] = rgb_to_hsv([rgba[0], rgba[1], rgba[2]]);
                                 self.wheel.set_hsv(cx, h, s, v);
@@ -1258,24 +1319,24 @@ impl CodeValues {
                         // Each release is a step of the same gesture; the
                         // popup closing ends it.
                         let _ = done;
-                        self.write(&mut r.edits, fmt_color([cr, cg, cb, alpha]), false);
+                        self.write(&mut r, fmt_color([cr, cg, cb, alpha]), false);
                         r.redraw = true;
                     }
                 }
                 match event {
                     Event::MouseDown(e) if !rect.contains(e.abs) => {
-                        self.close(&mut r.edits);
+                        self.close(&mut r);
                         r.consumed = true;
                         r.redraw = true;
                     }
                     Event::KeyDown(k) if k.key_code == KeyCode::Escape => {
                         // Back to the colour as it was, and closed.
-                        self.revert(&mut r.edits);
+                        self.revert(&mut r);
                         r.consumed = true;
                         r.redraw = true;
                     }
                     Event::KeyDown(k) if k.key_code == KeyCode::ReturnKey => {
-                        self.close(&mut r.edits);
+                        self.close(&mut r);
                         r.consumed = true;
                         r.redraw = true;
                     }
@@ -1287,7 +1348,7 @@ impl CodeValues {
                 }
                 return r;
             }
-            Some(Popup::Menu { site, rect, hover, top, armed, from, binds }) => {
+            Some(Popup::Menu { site, rect, hover, top, armed, from }) => {
                 let choices = self.menu_choices(site);
                 let row_at = |abs: DVec2| -> Option<usize> {
                     if !rect.contains(abs) {
@@ -1296,9 +1357,9 @@ impl CodeValues {
                     let row = ((abs.y - rect.pos.y - 4.0) / MENU_ROW).floor();
                     (row >= 0.0).then(|| top + row as usize).filter(|i| *i < choices.len() && *i < top + MENU_MAX_ROWS)
                 };
-                let choose = |this: &mut Self, i: usize, edits: &mut Vec<ValueEdit>| {
+                let choose = |this: &mut Self, i: usize, out: &mut CodeValuesResponse| {
                     if let Some(choice) = choices.get(i) {
-                        this.write(edits, choice.text.clone(), true);
+                        this.write(out, choice.text.clone(), true);
                     }
                     this.popup = None;
                     this.gesture = None;
@@ -1308,13 +1369,13 @@ impl CodeValues {
                         let armed = armed || (e.abs - from).length() > 4.0;
                         let over = row_at(e.abs);
                         if armed != matches!(self.popup, Some(Popup::Menu { armed: true, .. })) {
-                            self.popup = Some(Popup::Menu { site, rect, hover, top, armed, from, binds });
+                            self.popup = Some(Popup::Menu { site, rect, hover, top, armed, from });
                         }
                         if over != hover && over.is_some() {
-                            self.popup = Some(Popup::Menu { site, rect, hover: over, top, armed, from, binds });
+                            self.popup = Some(Popup::Menu { site, rect, hover: over, top, armed, from });
                             // The value follows the pointer (a live preview).
                             if let Some(choice) = over.and_then(|i| choices.get(i)) {
-                                self.write(&mut r.edits, choice.text.clone(), false);
+                                self.write(&mut r, choice.text.clone(), false);
                             }
                             r.redraw = true;
                         }
@@ -1325,19 +1386,19 @@ impl CodeValues {
                         // nothing (the menu may lie under the pointer).
                         if armed || (e.abs - from).length() > 4.0 {
                             if let Some(i) = row_at(e.abs) {
-                                choose(self, i, &mut r.edits);
+                                choose(self, i, &mut r);
                                 r.redraw = true;
                             }
                         }
-                        if let Some(Popup::Menu { site, rect, hover, top, from, binds, .. }) = self.popup.clone() {
-                            self.popup = Some(Popup::Menu { site, rect, hover, top, armed: true, from, binds });
+                        if let Some(Popup::Menu { site, rect, hover, top, from, .. }) = self.popup.clone() {
+                            self.popup = Some(Popup::Menu { site, rect, hover, top, armed: true, from });
                         }
                         r.consumed = true;
                     }
                     Event::MouseDown(e) => {
                         if !rect.contains(e.abs) {
                             // Away: back to what was written, and closed.
-                            self.revert(&mut r.edits);
+                            self.revert(&mut r);
                         }
                         r.consumed = true;
                         r.redraw = true;
@@ -1345,7 +1406,7 @@ impl CodeValues {
                     Event::Scroll(e) if rect.contains(e.abs) => {
                         let max_top = choices.len().saturating_sub(MENU_MAX_ROWS);
                         let next = if e.scroll.y > 0.0 { (top + 1).min(max_top) } else { top.saturating_sub(1) };
-                        self.popup = Some(Popup::Menu { site, rect, hover, top: next, armed, from, binds });
+                        self.popup = Some(Popup::Menu { site, rect, hover, top: next, armed, from });
                         r.consumed = true;
                         r.redraw = true;
                     }
@@ -1356,20 +1417,20 @@ impl CodeValues {
                             KeyCode::ArrowDown => Some((cur + 1).min(n.saturating_sub(1))),
                             KeyCode::ArrowUp => Some(cur.saturating_sub(1)),
                             KeyCode::ReturnKey => {
-                                choose(self, cur, &mut r.edits);
+                                choose(self, cur, &mut r);
                                 None
                             }
                             KeyCode::Escape => {
-                                self.revert(&mut r.edits);
+                                self.revert(&mut r);
                                 None
                             }
                             _ => None,
                         };
                         if let Some(next) = next {
                             let top = if next < top { next } else if next >= top + MENU_MAX_ROWS { next + 1 - MENU_MAX_ROWS } else { top };
-                            self.popup = Some(Popup::Menu { site, rect, hover: Some(next), top, armed, from, binds });
+                            self.popup = Some(Popup::Menu { site, rect, hover: Some(next), top, armed, from });
                             if let Some(choice) = choices.get(next) {
-                                self.write(&mut r.edits, choice.text.clone(), false);
+                                self.write(&mut r, choice.text.clone(), false);
                             }
                         }
                         r.consumed = true;
@@ -1394,11 +1455,11 @@ impl CodeValues {
                     for action in actions.filter_widget_actions(uid) {
                         match action.cast::<TextInputAction>() {
                             TextInputAction::Changed(text) => {
-                                self.write(&mut r.edits, quote(&text), false);
+                                self.write(&mut r, quote(&text), false);
                                 r.redraw = true;
                             }
                             TextInputAction::Escaped => {
-                                self.revert(&mut r.edits);
+                                self.revert(&mut r);
                                 r.redraw = true;
                             }
                             // The release of the press that opened it may
@@ -1407,11 +1468,11 @@ impl CodeValues {
                                 self.words.take_key_focus(cx);
                             }
                             TextInputAction::KeyFocusLost => {
-                                self.close(&mut r.edits);
+                                self.close(&mut r);
                                 r.redraw = true;
                             }
                             TextInputAction::Returned(_, modifiers) if modifiers.logo || modifiers.control => {
-                                self.close(&mut r.edits);
+                                self.close(&mut r);
                                 r.redraw = true;
                             }
                             _ => {}
@@ -1426,7 +1487,7 @@ impl CodeValues {
                 }
                 match event {
                     Event::MouseDown(e) if !rect.contains(e.abs) => {
-                        self.close(&mut r.edits);
+                        self.close(&mut r);
                         r.consumed = true;
                         r.redraw = true;
                     }
@@ -1451,8 +1512,8 @@ impl CodeValues {
                 // Up or right raises it (across counts half).
                 let travel = (start.y - abs.y) + (abs.x - start.x) * 0.5;
                 let steps = travel / SCRUB_PX * if fine { 0.1 } else { 1.0 };
-                let text = scrubbed(base, decimals, steps);
-                self.write(&mut r.edits, text, done);
+                let text = within(&self.sites, gesture.span.start, scrubbed(base, decimals, steps), decimals);
+                self.write(&mut r, text, done);
                 if done {
                     self.gesture = None;
                 }
@@ -1482,22 +1543,7 @@ impl CodeValues {
             }
             Event::MouseDown(e) if self.fresh => {
                 if let Some((rect, index)) = self.hots.iter().find(|(rect, _)| rect.contains(e.abs) && self.clip.contains(e.abs)).copied() {
-                    if e.button.is_secondary() && !self.sites[index].binds.is_empty() {
-                        // Bind it instead: an input, a signal.
-                        let site = self.sites[index].clone();
-                        r.edits.push(ValueEdit::Focus(site.range.start));
-                        let id = self.next_gesture();
-                        let written = self.source[site.range.clone()].to_string();
-                        self.gesture = Some(Gesture { id, span: site.range.clone(), last: written.clone(), original: written, scrub: None });
-                        let rows = site.binds.len().min(MENU_MAX_ROWS);
-                        let x = rect.pos.x.min(self.clip.pos.x + self.clip.size.x - MENU_W - 4.0).max(self.clip.pos.x);
-                        let menu = Rect { pos: dvec2(x, rect.pos.y + rect.size.y + 4.0), size: dvec2(MENU_W, rows as f64 * MENU_ROW + 8.0) };
-                        self.popup = Some(Popup::Menu { site: index, rect: menu, hover: None, top: 0, armed: false, from: e.abs, binds: true });
-                        r.consumed = true;
-                        r.redraw = true;
-                        return r;
-                    }
-                    self.open(cx, index, rect, e.abs, &mut r.edits);
+                    self.open(cx, index, rect, e.abs, &mut r);
                     r.consumed = true;
                     r.redraw = true;
                 } else if e.modifiers.alt && self.clip.contains(e.abs) {
@@ -1506,7 +1552,7 @@ impl CodeValues {
                         if let Ok(base) = literal.parse::<f64>() {
                             let decimals = literal.split('.').nth(1).map_or(0, str::len);
                             let id = self.next_gesture();
-                            r.edits.push(ValueEdit::Focus(range.start));
+                            r.focus = Some(range.start);
                             self.gesture = Some(Gesture { id, span: range, last: literal.clone(), original: literal, scrub: Some((e.abs, base, decimals)) });
                             r.consumed = true;
                         }
@@ -1519,10 +1565,10 @@ impl CodeValues {
     }
 
     /// Back to what was written when the gesture began, and closed.
-    fn revert(&mut self, edits: &mut Vec<ValueEdit>) {
+    fn revert(&mut self, out: &mut CodeValuesResponse) {
         self.popup = None;
         let Some(gesture) = self.gesture.clone() else { return };
-        self.write(edits, gesture.original.clone(), true);
+        self.write(out, gesture.original.clone(), true);
         self.gesture = None;
     }
 
@@ -1543,8 +1589,8 @@ impl CodeValues {
     pub fn open_editor(&mut self, cx: &mut Cx, start: usize) -> bool {
         let Some(index) = self.site_at(start) else { return false };
         let Some((rect, _)) = self.hots.iter().find(|(_, i)| *i == index).copied() else { return false };
-        let mut edits = Vec::new();
-        self.open(cx, index, rect, rect.pos + rect.size * 0.5, &mut edits);
+        let mut out = CodeValuesResponse::default();
+        self.open(cx, index, rect, rect.pos + rect.size * 0.5, &mut out);
         true
     }
 
@@ -1616,6 +1662,31 @@ mod tests {
         assert_eq!(scrubbed(0.05, 2, -5.0), "0.00");
         assert_eq!(scrubbed(1.5, 1, 0.4), "1.5");
         assert_eq!(scrubbed(120.5, 1, 2.0), "122.5");
+    }
+
+    #[test]
+    fn typed_sites_pick_their_controls() {
+        let src = "Synth{osc: @saw cutoff: 800 fill: #ff0000 words: \"hi\" ease: @ease_out}";
+        let site = |kind: ValueKind, text: &str, choices: &[&str]| {
+            let at = src.find(text).unwrap();
+            ValueSite { kind, choices: choices.iter().map(|c| c.to_string()).collect(), span: Some((0, at..at + text.len())), range: makepad_edit_values::Range::hard(20.0, 2000.0), ..Default::default() }
+        };
+        let osc = place(src, &site(ValueKind::Choice, "@saw", &["saw", "square"])).unwrap();
+        assert!(matches!(&osc.control, Control::Choice { choices } if choices[1].text == "@square" && choices[1].label == "square"));
+        let cutoff = place(src, &site(ValueKind::Frequency, "800", &[])).unwrap();
+        assert_eq!(cutoff.control, Control::Number);
+        let at = cutoff.range.start;
+        assert_eq!(within(&[cutoff], at, "5000".into(), 0), "2000");
+        assert!(matches!(place(src, &site(ValueKind::Colour, "#ff0000", &[])).unwrap().control, Control::Color(c) if c[0] == 1.0));
+        assert_eq!(place(src, &site(ValueKind::Text, "\"hi\"", &[])).unwrap().control, Control::Words { text: "hi".into() });
+        let samples = "Env{gain: [0, 0.5, 1]}";
+        let at = samples.find('[').unwrap();
+        let gain = ValueSite { kind: ValueKind::Time, step: 0.25, span: Some((0, at..samples.len() - 1)), ..Default::default() };
+        assert!(matches!(place(samples, &gain).unwrap().control, Control::Data { axis: DataAxis::Time { per_second, .. }, .. } if per_second == 4.0));
+        let ease = place(src, &site(ValueKind::Ease, "@ease_out", &[])).unwrap();
+        assert!(matches!(&ease.control, Control::Ease { curve, choices } if curve.len() == 25 && choices.len() > 10));
+        // Not written in this file: no control.
+        assert!(place(src, &ValueSite { kind: ValueKind::Number, ..Default::default() }).is_none());
     }
 
     #[test]

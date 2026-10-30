@@ -365,6 +365,9 @@ enum Place {
     Deny(String),
 }
 
+/// How long a lane stays off a node it cancelled a lease on.
+pub const CANCEL_EXCLUDE_MS: u64 = 30 * 60 * 1000;
+
 pub struct Sched {
     machine: String,
     nodes: BTreeMap<String, NodeSt>,
@@ -375,6 +378,11 @@ pub struct Sched {
     seq: u64,
     last_grant: HashMap<String, u64>,
     sticky: HashMap<String, String>,
+    /// (lane, node) -> until (ms): a node the user cancelled that lane's lease on; not chosen
+    /// for it again for [`CANCEL_EXCLUDE_MS`], unless the request names the node
+    excluded: HashMap<(String, String), u64>,
+    /// the last tick's time (placement has no clock of its own)
+    clock: u64,
     warm: HashSet<(String, String)>,
     /// node -> the timed lease holding it (last tick)
     holds: HashMap<String, String>,
@@ -430,6 +438,9 @@ fn meets(c: &Caps, k: &str, v: &str) -> bool {
             None => matches!(lv.as_str(), "0" | "no" | "off" | "false"),
         },
         "role" => c.role().as_str() == lv,
+        // a test lease that opens windows (GUI tests, hidden presents): only nodes that present,
+        // i.e. take screen leases (106 is at slots.screen=0 while its presents time out)
+        "gui" => slots(c, Kind::Screen) > 0 || matches!(lv.as_str(), "0" | "no" | "off" | "false"),
         _ => false,
     }
 }
@@ -446,6 +457,8 @@ impl Sched {
             seq: 0,
             last_grant: HashMap::new(),
             sticky: HashMap::new(),
+            excluded: HashMap::new(),
+            clock: 0,
             warm: HashSet::new(),
             holds: HashMap::new(),
             out: Vec::new(),
@@ -568,6 +581,7 @@ impl Sched {
         let line = match (how, held) {
             ("denied", _) => format!("{} for {} denied: {why}", l.tag(), l.req.lane),
             ("expired", _) => format!("{} of {} expired: no heartbeat for {} s{}", l.tag(), l.req.lane, BEAT_EXPIRY_MS / 1000, if node.is_some() { "; cleaning up" } else { " (was queued)" }),
+            ("cancelled", _) => format!("{} of {} cancelled by user{}", l.tag(), l.req.lane, if node.is_some() { "; cleaning up" } else { " (was queued)" }),
             ("evicted", _) => format!("{} of {} ended: evicted by the user{}", l.tag(), l.req.lane, if node.is_some() { "; cleaning up" } else { "" }),
             ("overridden", _) => format!("{} of {} ended: {why}{}", l.tag(), l.req.lane, if node.is_some() { "; cleaning up" } else { "" }),
             ("holder-dead", _) => format!("{} of {} released: its holder (pid {}) ended{}", l.tag(), l.req.lane, l.req.holder.unwrap_or(0), if node.is_some() { "; cleaning up" } else { " (was queued)" }),
@@ -580,6 +594,19 @@ impl Sched {
         while self.ended.len() > KEEP_ENDED {
             self.ended.pop_front();
         }
+    }
+
+    /// The user cancels one lease: its processes stop and its slot frees (the node cleans up like
+    /// a release), it ends as `cancelled`, and the lane is kept off that node for a while. A
+    /// queued lease just leaves the queue. False: not live or queued.
+    pub fn cancel(&mut self, id: &str, now: u64) -> bool {
+        let Some(i) = self.leases.iter().position(|l| l.id == id) else { return false };
+        let (lane, node) = (self.leases[i].req.lane.clone(), if self.leases[i].state.live() { self.leases[i].node.clone() } else { None });
+        if let Some(n) = node {
+            self.excluded.insert((lane, n), now + CANCEL_EXCLUDE_MS);
+        }
+        self.end_at(i, "cancelled", Sev::Warn, "cancelled by user", now);
+        true
     }
 
     /// Release (`how` = released | holder-dead | lost | failed …); false: not live or queued.
@@ -883,7 +910,14 @@ impl Sched {
                 Some((k, _)) => vec![k],
                 None => return Place::Deny(format!("no node {n}")),
             },
-            None => self.nodes.keys().collect(),
+            None => {
+                let all: Vec<&String> = self.nodes.keys().collect();
+                let ok: Vec<&String> = all.iter().copied().filter(|n| self.excluded.get(&(l.req.lane.clone(), (*n).clone())).is_none_or(|until| *until <= self.clock)).collect();
+                if ok.is_empty() && !all.is_empty() {
+                    return Place::Wait("every node is one you cancelled this lane on (name a node to override)".into(), None, None);
+                }
+                ok
+            }
         };
         let mut never = Vec::new();
         let mut fit = Vec::new();
@@ -939,6 +973,8 @@ impl Sched {
     /// Expires silent holders, places what fits, recomputes positions and reasons; the actions
     /// for the master (grants, ends, reclaims, one event per change).
     pub fn tick(&mut self, now: u64) -> Vec<Action> {
+        self.clock = now;
+        self.excluded.retain(|_, until| *until > now);
         let expired: Vec<String> = self.leases.iter().filter(|l| now.saturating_sub(l.beat_ms) > BEAT_EXPIRY_MS).map(|l| l.id.clone()).collect();
         for id in expired {
             if let Some(i) = self.leases.iter().position(|l| l.id == id) {
@@ -1268,6 +1304,24 @@ mod tests {
         assert_eq!(state(&s, &land).0, "starting", "the landing takes a freed gate slot first");
     }
 
+    /// `--needs gui`: a test lease that opens windows goes only to nodes that present (screen
+    /// slots above 0); 106 at slots.screen=0 takes none, plain test leases still go there.
+    #[test]
+    fn gui_tests_avoid_nodes_without_screen_slots() {
+        let mut dark = caps(16, 64.0, Role::Pool);
+        dark.slots = vec![(Kind::Build, 2), (Kind::Test, 2), (Kind::Screen, 0), (Kind::Long, 2), (Kind::Gate, 1)];
+        let mut s = sched(&[("106", dark.clone())]);
+        let mut gui = req("x", Kind::Test, None);
+        gui.needs = parse_needs("gui=1");
+        let gui = s.request(gui, 0);
+        let plain = s.request(req("y", Kind::Test, None), 0);
+        s.tick(0);
+        assert_eq!(state(&s, &gui).0, "ended denied");
+        assert_eq!(state(&s, &plain).0, "starting");
+        let lit = caps(16, 64.0, Role::Pool);
+        assert!(meets(&lit, "gui", "1") && meets(&lit, "gui", "") && !meets(&dark, "gui", "yes") && meets(&dark, "gui", "0"));
+    }
+
     #[test]
     fn deny_what_never_fits() {
         let mut s = sched(&[("a", caps(8, 32.0, Role::Pool)), ("wm", caps(32, 64.0, Role::UserWm))]);
@@ -1354,6 +1408,37 @@ mod tests {
         let l = s.get(&again).unwrap();
         assert_eq!(l.node.as_deref(), Some(node.as_str()));
         assert_eq!(l.cost.disk_gb, 2.0);
+    }
+
+    #[test]
+    fn cancel_ends_one_lease_and_keeps_the_lane_off_that_node() {
+        let mut s = sched(&[("a", caps(64, 256.0, Role::Pool)), ("b", caps(64, 256.0, Role::Pool))]);
+        let x = s.request(req("lane-x", Kind::Build, Some("a")), 0);
+        let y = s.request(req("lane-y", Kind::Build, Some("a")), 0);
+        s.tick(1);
+        assert_eq!(s.get(&x).unwrap().node.as_deref(), Some("a"));
+        assert_eq!(s.get(&y).unwrap().node.as_deref(), Some("a"));
+        // cancel x: y keeps running on the same node
+        assert!(s.cancel(&x, 10));
+        let acts = s.tick(11);
+        assert!(acts.iter().any(|a| matches!(a, Action::End { id, how, .. } if *id == x && how == "cancelled")), "{acts:?}");
+        assert!(!acts.iter().any(|a| matches!(a, Action::End { id, .. } if *id == y)));
+        assert!(s.get(&y).unwrap().state.live());
+        assert!(!s.cancel(&x, 12), "already ended");
+        // lane-x asks again with no node: it is placed, but not on a
+        let again = s.request(req("lane-x", Kind::Build, None), 20);
+        s.tick(21);
+        assert_eq!(s.get(&again).unwrap().node.as_deref(), Some("b"));
+        // naming the node overrides the exclusion
+        let named = s.request(req("lane-x", Kind::Build, Some("a")), 22);
+        s.tick(23);
+        assert_eq!(s.get(&named).unwrap().node.as_deref(), Some("a"));
+        // the exclusion lapses
+        s.release(&again, "released", 30);
+        s.release(&named, "released", 30);
+        let later = s.request(req("lane-x", Kind::Build, None), CANCEL_EXCLUDE_MS + 100);
+        s.tick(CANCEL_EXCLUDE_MS + 101);
+        assert!(s.get(&later).unwrap().state.live());
     }
 
     #[test]

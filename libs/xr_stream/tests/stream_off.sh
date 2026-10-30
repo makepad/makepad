@@ -9,7 +9,9 @@
 #   live    with the server's headset on a loop (MAKEPAD_XR_REMOTE_SELFTEST=1: poses, pictures, encodes, reports)
 #           the session's picture and encode threads run; off, they end with the listener
 #   away    a headset that streams, goes idle (no poses) and leaves: the desktop UI answers a UI action
-#           within 400 ms throughout, the switch node says Streaming, then idle, then Waiting
+#           within 400 ms throughout, the desktop paints under 5 times a second while the headset
+#           gets its frames (nothing renders for them on the desktop), the switch node says Streaming,
+#           then idle, then Waiting
 #   launch  MAKEPAD_XR_STREAM=off starts with nothing listening and the switch node off
 # Grabs of the panel (closed, open waiting/streaming/raw/off) go to $XR_OFF_OUT (default <target dir>/xr-off).
 # Prints "XR-OFF-OK" or "XR-OFF-FAIL: <steps>"; exit 0 / 1.
@@ -159,15 +161,27 @@ answers() { # answers <tag>: a UI action answered (after its frame) within 400 m
   [ $(( t1 - t0 )) -lt 400 ] || bad "$1-ui" "the UI took $(( t1 - t0 )) ms"
 }
 state_is() { ui find q="$SWITCH" 2>/dev/null | head -1 | grep -q "$1"; }
-launch away MAKEPAD_XR_REMOTE_SELFTEST=1 MAKEPAD_XR_REMOTE_SELFTEST_POSES_S=8 MAKEPAD_XR_REMOTE_SELFTEST_LINK_S=16 || { echo "XR-OFF-FAIL:$fail"; exit 1; }
-ui act q="$SWITCH" show_menu wait=1 > /dev/null 2>&1
+launch away MAKEPAD_XR_REMOTE_SELFTEST=1 MAKEPAD_XR_REMOTE_SELFTEST_POSES_S=14 MAKEPAD_XR_REMOTE_SELFTEST_LINK_S=22 || { echo "XR-OFF-FAIL:$fail"; exit 1; }
 wait_for 8 state_is Streaming || bad away-live "not streaming: $(ui find q="$SWITCH" | head -1)"
+# (the panel closed: nothing of the desktop animates)
+# the desktop renders nothing for the headset's frames: its windows paint a few times a second at
+# most (the panel's own tick), not at the headset's rate
+sleep 6
+line=$("$R" app "$app_pid" log n=400 2>/dev/null | grep -o 'new XR frames [0-9]*/s[^"]*desktop painted [0-9.]*/s' | tail -1)
+xr=$(echo "$line" | sed -n 's/new XR frames \([0-9]*\)\/s.*/\1/p'); desk=$(echo "$line" | sed -n 's/.*desktop painted \([0-9]*\).*/\1/p')
+note "streaming: XR frames ${xr:-?}/s, desktop painted ${desk:-?}/s"
+if [ -z "$line" ]; then
+  note "streaming: not measured (the app draws no XR frames: no scene loaded)"
+else
+  [ -n "$desk" ] && [ "$desk" -lt 5 ] && [ "${xr:-0}" -gt 20 ] || bad away-render "XR ${xr:-?}/s, desktop ${desk:-?}/s"
+fi
+ui act q="$SWITCH" show_menu wait=1 > /dev/null 2>&1
 answers streaming
 grab away-streaming
-wait_for 10 state_is idle || bad away-idle "not idle: $(ui find q="$SWITCH" | head -1)"
+wait_for 20 state_is idle || bad away-idle "not idle: $(ui find q="$SWITCH" | head -1)"
 answers idle
 grab away-idle
-wait_for 10 state_is Waiting || bad away-gone "not waiting: $(ui find q="$SWITCH" | head -1)"
+wait_for 20 state_is Waiting || bad away-gone "not waiting: $(ui find q="$SWITCH" | head -1)"
 has_thread xr-selftest && bad away-session "the session did not end"
 answers gone
 stop_app

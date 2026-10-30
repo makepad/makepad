@@ -272,6 +272,68 @@ pub fn cli(args: &[&str]) -> Option<i32> {
     client::cli(args)
 }
 
+/// One side of a lease's `--rev`: the branch and the commit it named when the lease was ordered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevPin {
+    pub branch: String,
+    pub sha: String,
+}
+
+/// Pins `--rev <branch>[@<sha>][,<commercial branch>[@<sha>]]` once, at order time, in the lane's
+/// repo (`repo_dir`; the commercial side in its `apps/commercial`): every branch name becomes
+/// `branch@<full sha>`. The master then ships exactly those commits, so a branch that another
+/// landing moves while this lease queues or ships can neither mismatch the bundle nor pair a
+/// makepad commit with a later commercial one.
+pub fn pin_revs(repo_dir: &std::path::Path, spec: &str) -> Result<String, String> {
+    let mut out = Vec::new();
+    for (i, part) in spec.split(',').enumerate() {
+        let dir = if i == 0 { repo_dir.to_path_buf() } else { repo_dir.join("apps/commercial") };
+        if i > 1 {
+            return Err(format!("--rev `{spec}`: at most a makepad and a commercial side"));
+        }
+        let (branch, sha) = part.split_once('@').map_or((part, None), |(b, s)| (b, Some(s)));
+        if branch.is_empty() || branch.starts_with('-') || branch.contains(char::is_whitespace) {
+            return Err(format!("--rev `{spec}`: `{branch}` is not a branch name"));
+        }
+        let what = match sha {
+            Some(s) if (7..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) => format!("{s}^{{commit}}"),
+            Some(s) => return Err(format!("--rev `{spec}`: `{s}` is not a commit id")),
+            None => format!("refs/heads/{branch}^{{commit}}"),
+        };
+        let o = makepad_remote::group::command("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["rev-parse", "-q", "--verify", &what])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("git: {e}"))?;
+        let full = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        if !o.status.success() || full.len() != 40 {
+            return Err(format!("--rev: {} has no {}", dir.display(), sha.map_or(format!("branch {branch}"), |s| format!("commit {s}"))));
+        }
+        out.push(format!("{branch}@{full}"));
+    }
+    Ok(out.join(","))
+}
+
+/// The pinned sides of a `--rev` ([`pin_revs`]'s output): the makepad side and the commercial one.
+pub fn parse_pinned(spec: &str) -> Result<(RevPin, Option<RevPin>), String> {
+    let one = |p: &str| {
+        let (branch, sha) = p.split_once('@').ok_or_else(|| format!("rev `{p}` names no commit (branch@sha): the CLI pins it at order time"))?;
+        if branch.is_empty() || sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+            return Err(format!("rev `{p}` is not branch@<40-hex sha>"));
+        }
+        Ok(RevPin { branch: branch.to_string(), sha: sha.to_string() })
+    };
+    let mut it = spec.split(',');
+    let mk = one(it.next().unwrap_or(""))?;
+    let com = it.next().map(one).transpose()?;
+    if it.next().is_some() {
+        return Err(format!("rev `{spec}`: at most a makepad and a commercial side"));
+    }
+    Ok((mk, com))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

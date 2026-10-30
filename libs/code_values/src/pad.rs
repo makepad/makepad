@@ -123,7 +123,7 @@ impl CodeValues {
         let set = |this: &mut Self, st: PadState| this.popup = Some(Popup::Pad { site, rect, pad: st });
         if items.len() != 2 {
             if let Event::MouseDown(_) | Event::KeyDown(_) = event {
-                self.close(&mut r.edits);
+                self.close(&mut r);
                 r.consumed = true;
                 r.redraw = true;
             }
@@ -132,7 +132,7 @@ impl CodeValues {
         let at = to_screen(&st, area, [items[0].1, items[1].1]);
         match event {
             Event::MouseDown(e) if !rect.contains(e.abs) => {
-                self.close(&mut r.edits);
+                self.close(&mut r);
                 r.consumed = true;
                 r.redraw = true;
             }
@@ -143,10 +143,10 @@ impl CodeValues {
                     let span = items[0].0.start..items[1].0.end;
                     let text = self.source[span.clone()].to_string();
                     let id = self.next_gesture();
-                    r.edits.push(ValueEdit::Focus(span.start));
+                    r.focus = Some(span.start);
                     self.gesture = Some(Gesture { id, span, last: text.clone(), original: text, scrub: None });
                     let d = PadDrag { grab, written: [self.source[items[0].0.clone()].to_string(), self.source[items[1].0.clone()].to_string()] };
-                    self.pad_move(&mut r.edits, &st, area, &d, e.abs, e.modifiers.shift, false);
+                    self.pad_move(&mut r, &st, area, &d, e.abs, e.modifiers.shift, false);
                     st.drag = Some(d);
                     set(self, st);
                     r.redraw = true;
@@ -155,7 +155,7 @@ impl CodeValues {
             Event::MouseMove(e) => {
                 r.consumed = true;
                 if let Some(d) = st.drag.clone() {
-                    self.pad_move(&mut r.edits, &st, area, &d, e.abs, e.modifiers.shift, false);
+                    self.pad_move(&mut r, &st, area, &d, e.abs, e.modifiers.shift, false);
                     r.redraw = true;
                 } else {
                     let over = (e.abs - at).length() < 10.0;
@@ -172,7 +172,7 @@ impl CodeValues {
             Event::MouseUp(e) => {
                 r.consumed = true;
                 if let Some(d) = st.drag.take() {
-                    self.pad_move(&mut r.edits, &st, area, &d, e.abs, e.modifiers.shift, true);
+                    self.pad_move(&mut r, &st, area, &d, e.abs, e.modifiers.shift, true);
                     self.gesture = None;
                     set(self, st);
                     r.redraw = true;
@@ -195,9 +195,9 @@ impl CodeValues {
             Event::KeyDown(k) if k.key_code == KeyCode::Escape || k.key_code == KeyCode::ReturnKey => {
                 if st.drag.is_some() && k.key_code == KeyCode::Escape {
                     // Back to where the drag began, and closed.
-                    self.revert(&mut r.edits);
+                    self.revert(&mut r);
                 } else {
-                    self.close(&mut r.edits);
+                    self.close(&mut r);
                 }
                 r.consumed = true;
                 r.redraw = true;
@@ -211,7 +211,7 @@ impl CodeValues {
         r
     }
 
-    fn pad_move(&mut self, edits: &mut Vec<ValueEdit>, st: &PadState, area: Rect, d: &PadDrag, abs: DVec2, shift: bool, done: bool) {
+    fn pad_move(&mut self, r: &mut CodeValuesResponse, st: &PadState, area: Rect, d: &PadDrag, abs: DVec2, shift: bool, done: bool) {
         let Some(g) = self.gesture.clone() else { return };
         let v = from_screen(st, area, abs + d.grab);
         let span = st.hi[0] - st.lo[0];
@@ -227,7 +227,7 @@ impl CodeValues {
             self.gesture = None;
             return;
         }
-        self.write(edits, out, done);
+        self.write(r, out, done);
     }
 }
 

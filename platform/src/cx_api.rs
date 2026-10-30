@@ -1220,34 +1220,10 @@ impl Cx {
         { false }
     }
 
-    /// While a remote headset streams (`on`: its frames flow), the desktop windows paint for
-    /// their own causes at their own pacing, never for the headset's frames alone, and the heavy
-    /// views (`DrawPass::set_xr_pause`) pause on their last picture (`XrWindowHold`); `mirror`: a
-    /// window shows the headset's view (it paints from the headset's frames at most 15 a
-    /// second). Off: everything paints as always (at once, with what was held).
-    pub fn xr_hold_windows(&mut self, on: bool, mirror: bool) {
-        let changed = self.xr_window_hold.on != on;
-        let hold = &mut self.xr_window_hold;
-        hold.on = on;
-        hold.mirror = mirror;
-        if changed {
-            // the heavy views show their new state (viewed in the headset, or live again):
-            // everything draws and paints once at once
-            self.redraw_all();
-            self.xr_window_hold.input = true;
-        }
-    }
-
-    /// A remote headset streams (`xr_hold_windows`): the heavy views pause, an app shows them as
-    /// viewed in the headset (or a mirror).
-    pub fn xr_headset_streaming(&self) -> bool {
-        self.xr_window_hold.on
-    }
-
-    /// The window repaints that painted and that were held (`xr_hold_windows`), counted since
-    /// the start.
-    pub fn xr_window_counts(&self) -> (u64, u64) {
-        (self.xr_window_hold.painted, self.xr_window_hold.held)
+    /// Repaints that painted a window since the start: with a remote headset streaming, what
+    /// the desktop renders for itself (it renders nothing for the headset's frames alone).
+    pub fn window_paints(&self) -> u64 {
+        self.window_paints
     }
 
     /// Supersampling of an offscreen XR display's passes (`xr_offscreen`; a no-op elsewhere):
@@ -2268,8 +2244,8 @@ impl Cx {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn request_remote_window_present(&mut self, window_id: WindowId) {
         // an external request waits for this window's frame: it paints also while a headset
-        // streams (`XrWindowHold`)
-        self.xr_window_hold.input = true;
+        // streams
+        self.window_redrawn = true;
         if let Some(pass) = self.windows[window_id].main_pass_id {
             self.repaint_pass_and_child_passes(pass);
         }
@@ -2348,10 +2324,19 @@ impl Cx {
     }
 
     #[track_caller]
+    /// A redraw asked for: unless it is a remote headset's frame (`in_xr_update`), the windows
+    /// paint with it.
+    #[inline]
+    pub(crate) fn note_window_redraw(&mut self) {
+        if !self.in_xr_update {
+            self.window_redrawn = true;
+        }
+    }
+
     pub fn redraw_all(&mut self) {
         self.frame_requests += 1;
         crate::frame_sources::note(crate::frame_sources::Kind::Redraw, std::panic::Location::caller());
-        self.xr_window_hold.note_redraw();
+        self.note_window_redraw();
         self.new_draw_event.redraw_all = true;
     }
 
@@ -2382,7 +2367,7 @@ impl Cx {
         }
         self.frame_requests += 1;
         crate::frame_sources::note(crate::frame_sources::Kind::Redraw, std::panic::Location::caller());
-        self.xr_window_hold.note_redraw();
+        self.note_window_redraw();
         self.redraw_list_in_draw(draw_list_id);
     }
 
@@ -2406,7 +2391,7 @@ impl Cx {
         }
         self.frame_requests += 1;
         crate::frame_sources::note(crate::frame_sources::Kind::Redraw, std::panic::Location::caller());
-        self.xr_window_hold.note_redraw();
+        self.note_window_redraw();
         if self
             .new_draw_event
             .draw_lists_and_children

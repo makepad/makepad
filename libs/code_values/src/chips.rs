@@ -53,7 +53,7 @@ pub(crate) fn fit_shape(points: &[[f64; 2]]) -> Vec<[f32; 2]> {
 }
 
 /// The summary of a site's value.
-pub(crate) fn summarize(source: &str, site: &ValueSite) -> Summary {
+pub(crate) fn summarize(source: &str, site: &Site) -> Summary {
     match &site.control {
         Control::Data { values, pairs, .. } => {
             let (lo, hi) = values.iter().fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(*v as f64), hi.max(*v as f64)));
@@ -109,7 +109,7 @@ pub(crate) fn summarize(source: &str, site: &ValueSite) -> Summary {
 
 /// A short value's control as its text is now: colours, points and
 /// directions read again (a few bytes); anything else as the host gave it.
-fn live_control(source: &str, site: &ValueSite) -> Control {
+fn live_control(source: &str, site: &Site) -> Control {
     let start = site.range.start;
     let v = || vector_items(source, start).into_iter().map(|(_, v)| v as f32).collect::<Vec<f32>>();
     match &site.control {
@@ -138,8 +138,6 @@ fn axis_words(axis: &DataAxis) -> String {
     match axis {
         DataAxis::Index => "x: index".into(),
         DataAxis::Time { per_second, start } => format!("x: seconds ({}/s from {}s)", fmt_axis(*per_second), fmt_axis(*start)),
-        DataAxis::Letters => "x: one per letter".into(),
-        DataAxis::Words => "x: one per word".into(),
     }
 }
 
@@ -505,7 +503,7 @@ mod tests {
     #[test]
     fn long_lists_summarise_into_bins() {
         let values: Vec<f32> = (0..140_000).map(|k| (k % 997) as f32 * 0.01).collect();
-        let site = ValueSite { range: 0..1, control: Control::Data { values, pairs: false, name: "R_MYC".into(), axis: DataAxis::Index }, binds: Vec::new() };
+        let site = Site { range: 0..1, control: Control::Data { values, pairs: false, name: "R_MYC".into(), axis: DataAxis::Index }, limits: Default::default() };
         let s = summarize("", &site);
         assert_eq!(s.bins.len(), BINS);
         assert_eq!(s.count, 140_000);
@@ -526,12 +524,12 @@ mod tests {
     #[test]
     fn tables_summarise_as_heat_and_shapes() {
         let src = "[[0, 0, 10, 0, 10, 10], [1, 1, 2, 2, 3, 3]]";
-        let site = ValueSite { range: 0..src.len(), control: Control::Table { rows: 2, cols: 6, heads: vec![] }, binds: Vec::new() };
+        let site = Site { range: 0..src.len(), control: Control::Table { rows: 2, cols: 6, heads: vec![] }, limits: Default::default() };
         let s = summarize(src, &site);
         assert_eq!(s.heat.len(), 2);
         assert_eq!(s.shape.len(), 3);
         let src = "[{n: \"a\", v: 1}, {n: \"b\", v: 3}]";
-        let site = ValueSite { range: 0..src.len(), control: Control::Table { rows: 2, cols: 2, heads: vec![] }, binds: Vec::new() };
+        let site = Site { range: 0..src.len(), control: Control::Table { rows: 2, cols: 2, heads: vec![] }, limits: Default::default() };
         let s = summarize(src, &site);
         assert_eq!(s.heat, vec![0.0, 1.0]);
         assert!(s.shape.is_empty());

@@ -704,7 +704,7 @@ impl Desk {
         }
         for (path, value) in self.panel.held() {
             let line = match score_doc::resolve(&self.source, path) {
-                Ok(site) => source::line_col(&self.source, site.range.start).0 - 1,
+                Ok(site) => source::line_col(&self.source, site.range().start).0 - 1,
                 // Not written yet: at its node's line.
                 Err(_) => match source::outline(&self.source).node(path.split('.').next().unwrap_or("")) {
                     Some(node) => source::line_col(&self.source, node.span.start).0 - 1,

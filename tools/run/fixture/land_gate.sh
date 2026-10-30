@@ -60,8 +60,11 @@ present() { # present <name> <dir> <pkg args...>: headless cold run from a fresh
 step_present_calc() { present calc . makepad-app-calculator --no-default-features --features standalone; }
 step_present_stage() { present stage apps/commercial makepad-stage; }
 step_diff() {
-  df=$(TARGET=$T/release DIFF_TIERS="o1 base o3 counted" DIFF_CACHE=${X64_GATE_DIFF_CACHE:-$HOME/devhub/cache/diff_fast} tools/run/fixture/diff_fast.sh 2>&1 | tail -1)
-  echo "$df"; echo "$df" | grep -qE "^diff: ([0-9]+)/\1 equal" || fail="$fail diff_fast"
+  TARGET=$T/release DIFF_TIERS="o1 base o3 counted" DIFF_CACHE=${X64_GATE_DIFF_CACHE:-$HOME/devhub/cache/diff_fast} tools/run/fixture/diff_fast.sh > "$log/diff" 2>&1
+  df=$(tail -1 "$log/diff")
+  # the program count is part of the verdict (files + package programs): a gate that ran fewer says why
+  grep '^diff programs:' "$log/diff"; echo "$df"
+  echo "$df" | grep -qE "^diff: ([0-9]+)/\1 equal" || { fail="$fail diff_fast"; grep -v '^diff \(tiers\|programs\):' "$log/diff" | tail -25 | cut -c1-240; }
   sum="$sum $df"
 }
 step_x64_tests() { # SAFE1: every relax-backend / relax-codegen test on x64 (X64_GATE_KNOWN="test::name ..." = known failures)

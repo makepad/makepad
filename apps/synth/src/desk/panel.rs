@@ -30,8 +30,8 @@ use makepad_synth_panel::live::TelemetrySource;
 use makepad_widgets::*;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 /// Who holds the panel widgets' host.
 pub const OWNER: &str = "synth";
@@ -67,64 +67,23 @@ struct Shared {
     variants: std::collections::HashMap<String, makepad_synth_panel::host::Variants>,
 }
 
-/// A panel made by writers at once: each part of the score's live paths,
-/// grouped by node, written by its own short conversation with only the
-/// widget catalogue for system text; the modules checked one by one and
-/// put together.
+/// A panel being made by writers at once (the shared driver,
+/// [`makepad_editor_panel::make`]; the score's parts from
+/// [`makepad_synth_panel::make`]), and its writers' liveness.
 struct Making {
-    started: f64,
-    parts: Vec<Option<Result<String, String>>>,
-    rx: std::sync::mpsc::Receiver<(usize, Result<String, String>)>,
-    /// Text received so far per part (for the progress).
-    seen: Arc<Mutex<Vec<String>>>,
-    cancel: Arc<AtomicBool>,
+    job: panel::make::Job,
     monitor: TurnMonitor,
 }
 
-impl Drop for Making {
-    fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
-    }
-}
-
-/// Writers a panel is made by, at once: about one per this many live
-/// paths, from three to six.
-const PATHS_PER_PART: usize = 16;
-const PANEL_PARTS: (usize, usize) = (3, 6);
-
-/// What each writer is told: rules, then the widgets.
-const MAKER_SYSTEM: &str = "You write the tweaks of a score's instruments for its editor panel in Makepad Synth \
-(live-coded music in Splash). The panel's skeleton is fixed and not yours: a tree of the voices (mute, solo, level, pan, \
-the instrument switch) and the selected voice's timeline and melody variants. You write, for each instrument you are \
-given, its detailed controls, shown when it is selected: answer only with one `SynthTweaks{node: \"<instrument>\" \
-PanelModule{title: \"…\" …}}` record per instrument (Splash, as in the catalogues below): no `let`, no outer View, \
-no prose, no code fences, no comments. Inside: its pictures (SynthFilter, SynthWave, PanelEnvelope over its attack, \
-decay, sustain and release), a PanelRow of knobs for its sound, its effects' knobs, a PanelMacro for the gesture a \
-player wants, SynthKeys to try it. No SynthPicker (the tree switches instruments), no level or pan (the tree has them). \
-Bind only paths marked live, ranges around the values written. Each widget on one line, only the fields it needs.";
-
 fn maker_system() -> &'static str {
     static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    TEXT.get_or_init(|| {
-        let c = makepad_synth_panel::CATALOGUE;
-        let head = c.split("## What sounds live").next().unwrap_or("");
-        let tweaks = c.find("## An instrument's tweaks").map_or("", |at| &c[at..]);
-        format!("{MAKER_SYSTEM}\n\n{}\n{head}\n{tweaks}", makepad_value_pickers::panel::CATALOGUE)
-    })
+    TEXT.get_or_init(|| makepad_synth_panel::make::maker_system("Makepad Synth"))
 }
 
 /// A short conversation with `system`: one turn, its whole answer (what
 /// came so far into `seen[k]`).
-pub(super) fn write_with(system: &str, text: String, cancel: &AtomicBool, monitor: &TurnMonitor, seen: Option<(Arc<Mutex<Vec<String>>>, usize)>) -> Result<String, String> {
-    let mut so_far = String::new();
-    crate::writer::turn(system, &[text], cancel, monitor, &mut |piece| {
-        so_far.push_str(piece);
-        if let Some((seen, k)) = &seen {
-            if let Ok(mut seen) = seen.lock() {
-                seen[*k] = so_far.clone();
-            }
-        }
-    })
+pub(super) fn write_with(system: &str, text: String, cancel: &AtomicBool, monitor: &TurnMonitor, piece: &mut dyn FnMut(&str)) -> Result<String, String> {
+    crate::writer::turn(system, &[text], cancel, monitor, piece)
 }
 
 /// What a panel gesture did, for the status tool: a measure that it was
@@ -240,7 +199,7 @@ impl ScorePanel {
                 lines.push(source::line_col(source, ctor.span.start).0 - 1);
             }
             if let Ok(site) = score_doc::resolve(source, &path) {
-                lines.push(source::line_col(source, site.range.start).0 - 1);
+                lines.push(source::line_col(source, site.range().start).0 - 1);
             }
         }
         lines.sort_unstable();
@@ -265,9 +224,9 @@ fn number_of(text: &str) -> Option<f32> {
 
 /// How a path of the score moves the sound, and its range: what the
 /// agent's listing says beside each path.
-pub fn reach(doc: Option<&ScoreDoc>, entry: &panel::Entry) -> Option<String> {
+pub fn reach(doc: Option<&ScoreDoc>, entry: &panel::ValueSite) -> Option<String> {
     let doc = doc?;
-    let (node, field) = held::node_field(&entry.path)?;
+    let (node, field) = held::node_field(&entry.id)?;
     let ty = source_type(doc, node)?;
     let range = makepad_synth_panel::spec::spec(&ty, field)
         .or_else(|| (ty == "Shader").then(|| makepad_synth_panel::spec::spec("Synth", field)).flatten())
@@ -539,7 +498,7 @@ impl Desk {
         if splices.is_empty() {
             return;
         }
-        let mut written: Vec<panel::Splice> = Vec::new();
+        let mut written: Vec<panel::PanelEdit> = Vec::new();
         for splice in splices {
             if splice.done {
                 written.push(splice);
@@ -547,7 +506,7 @@ impl Desk {
             }
             // A step under the hand: where the playing graph reads it.
             let started = std::time::Instant::now();
-            let value = splice.text.trim().trim_start_matches('+');
+            let value = splice.splice.text.trim().trim_start_matches('+');
             let targets = self.doc.as_ref().map(|doc| targets_of(doc, &splice.path)).unwrap_or_default();
             match (targets.is_empty(), number_of(value)) {
                 (false, Some(n)) => {
@@ -584,8 +543,8 @@ impl Desk {
         // The release (or a click): written once, back to front, one step.
         let mut next = source.clone();
         for splice in &written {
-            if splice.range.end <= next.len() && next.is_char_boundary(splice.range.start) && next.is_char_boundary(splice.range.end) {
-                next.replace_range(splice.range.clone(), &splice.text);
+            if splice.splice.range.end <= next.len() && next.is_char_boundary(splice.splice.range.start) && next.is_char_boundary(splice.splice.range.end) {
+                next.replace_range(splice.splice.range.clone(), &splice.splice.text);
             }
         }
         self.panel.held.clear();
@@ -595,7 +554,7 @@ impl Desk {
         }
         if written.len() == 1 {
             let s = &written[0];
-            self.splice(cx, ui, s.range.start, s.range.end, &s.text);
+            self.splice(cx, ui, s.splice.range.start, s.splice.range.end, &s.splice.text);
         } else {
             self.set_source(cx, ui, next);
         }
@@ -701,105 +660,12 @@ impl Desk {
         self.panel.runtime.status.clear();
         let doc = self.doc.as_ref().ok_or("the score does not load")?;
         let listing = score_listing(&self.source, Some(doc));
-        // The voices' level, pan, mute and solo are the tree's: the writers
-        // make each instrument's tweaks from the rest of the live paths.
-        let is_loop = |node: &str| doc.loop_def(node).is_some();
-        let live: Vec<&str> = listing.lines().filter(|l| l.contains(" live")).filter(|l| {
-            let node = l.split(['.', ' ']).next().unwrap_or("");
-            !is_loop(node)
-        }).collect();
-        // Grouped by instrument: an effect goes with the instrument of the
-        // first voice it takes in.
-        let owner = |node: &str| -> Option<String> {
-            if doc.inst(node).is_some() {
-                return Some(node.to_string());
-            }
-            let fx = doc.fx.iter().find(|f| f.name == node)?;
-            fx.inputs.iter().find_map(|i| doc.loop_def(i).and_then(|l| l.play.clone()))
-        };
-        let mut groups: Vec<(String, String)> = Vec::new();
-        for line in &live {
-            let node = line.split(['.', ' ']).next().unwrap_or("").to_string();
-            let Some(key) = owner(&node) else { continue };
-            match groups.iter_mut().find(|(k, _)| *k == key) {
-                Some((_, text)) => {
-                    text.push_str(line);
-                    text.push('\n');
-                }
-                None => {
-                    let voices: Vec<String> = doc.loops.iter().filter(|l| l.play.as_deref() == Some(key.as_str())).map(|l| l.name.clone()).collect();
-                    groups.push((key.clone(), format!("instrument `{key}` (played by {}):\n{line}\n", voices.join(", "))));
-                }
-            }
-        }
-        // An instrument that writes few of its settings: the ones a panel
-        // would hold, at their defaults (moved first, they are added).
-        for inst in &doc.insts {
-            let Some(ty) = source_type(doc, &inst.name) else { continue };
-            if ty != "Synth" {
-                continue;
-            }
-            let written = groups.iter().find(|(k, _)| *k == inst.name).map_or(0, |(_, t)| t.lines().count().saturating_sub(1));
-            if written >= 4 {
-                continue;
-            }
-            let mut extra = String::new();
-            for key in ["cutoff", "res", "attack", "decay", "sustain", "release", "drive", "gain"] {
-                let path = format!("{}.{key}", inst.name);
-                if listing.lines().any(|l| l.starts_with(&format!("{path} "))) {
-                    continue;
-                }
-                if let Some(spec) = makepad_synth_panel::spec::spec("Synth", key) {
-                    extra.push_str(&format!("{path} (number live {}..{}) = {}  // not written yet: its preset's\n", source::fmt_num(spec.min, 4), source::fmt_num(spec.max, 4), source::fmt_num(spec.default, 4)));
-                }
-            }
-            match groups.iter_mut().find(|(k, _)| *k == inst.name) {
-                Some((_, text)) => text.push_str(&extra),
-                None => {
-                    let voices: Vec<String> = doc.loops.iter().filter(|l| l.play.as_deref() == Some(inst.name.as_str())).map(|l| l.name.clone()).collect();
-                    if !voices.is_empty() {
-                        groups.push((inst.name.clone(), format!("instrument `{}` (played by {}):\n{extra}", inst.name, voices.join(", "))));
-                    }
-                }
-            }
-        }
-        if groups.is_empty() {
-            return Err("no instrument of this score has settings that play live: the voice tree is its editor".into());
-        }
-        let total: usize = groups.iter().map(|(_, t)| t.len()).sum();
-        let k = live.len().div_ceil(PATHS_PER_PART).clamp(PANEL_PARTS.0, PANEL_PARTS.1).min(groups.len()).max(1);
-        let target = total.div_ceil(k);
-        let mut parts: Vec<String> = vec![String::new()];
-        for (_, text) in &groups {
-            if parts.last().is_some_and(|p| p.len() >= target) && parts.len() < k {
-                parts.push(String::new());
-            }
-            if let Some(last) = parts.last_mut() {
-                last.push_str(text);
-            }
-        }
-        // Every writer knows the score's nodes (what plays what).
-        let mut nodes = String::new();
-        for (name, ty) in &doc.order {
-            let plays = doc.loop_def(name).and_then(|l| l.play.clone()).map(|p| format!(" plays {p}")).unwrap_or_default();
-            nodes.push_str(&format!("{name}: {ty}{plays}\n"));
-        }
-        let label = if doc.label.is_empty() { "the score".to_string() } else { doc.label.clone() };
-        let count = parts.len();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let seen = Arc::new(Mutex::new(vec![String::new(); count]));
-        let cancel = Arc::new(AtomicBool::new(false));
+        let (texts, live) = makepad_synth_panel::make::part_texts(&listing, doc, None)?;
         let monitor = TurnMonitor::default();
-        for (i, part) in parts.into_iter().enumerate() {
-            let text = format!("The score: {label}. Its nodes:\n{nodes}\nWrite each instrument's tweaks for these paths (part {} of {count}):\n{part}", i + 1);
-            let (tx, seen) = (tx.clone(), seen.clone());
-            let (cancel, monitor) = (cancel.clone(), monitor.clone());
-            std::thread::spawn(move || {
-                let _ = tx.send((i, write_with(maker_system(), text, &cancel, &monitor, Some((seen, i)))));
-            });
-        }
-        log!("synth panel: making in {count} parts ({} live paths)", live.len());
-        self.panel.making = Some(Making { started: Cx::time_now(), parts: vec![None; count], rx, seen, cancel, monitor });
+        let writer = monitor.clone();
+        let write: panel::make::Write = Arc::new(move |text, cancel, piece| write_with(maker_system(), text, cancel, &writer, piece).map(|_| ()));
+        log!("synth panel: making in {} parts ({live} live paths)", texts.len());
+        self.panel.making = Some(Making { job: panel::make::Job::spawn(texts, Cx::time_now(), write), monitor });
         self.frame = cx.new_next_frame();
         Ok(())
     }
@@ -807,64 +673,30 @@ impl Desk {
     /// The parts as they come; once all are in, checked and written.
     fn panel_making(&mut self, cx: &mut Cx, ui: &WidgetRef, panel_ref: &WidgetRef) {
         let Some(making) = self.panel.making.as_mut() else { return };
-        while let Ok((i, result)) = making.rx.try_recv() {
-            making.parts[i] = Some(result);
-        }
-        let secs = Cx::time_now() - making.started;
-        if making.parts.iter().any(|p| p.is_none()) {
+        let all_in = making.job.pump();
+        let secs = Cx::time_now() - making.job.started;
+        if !all_in {
             // The progress: seconds and the modules written so far.
-            let seen = making.seen.lock().map(|s| s.clone()).unwrap_or_default();
-            let mut titles = Vec::new();
-            for text in &seen {
-                let mut rest = text.as_str();
-                while let Some(at) = rest.find("title: \"") {
-                    rest = &rest[at + 8..];
-                    if let Some(end) = rest.find('"') {
-                        titles.push(rest[..end].to_string());
-                    }
-                }
-            }
+            let (_, _, titles) = making.job.progress();
             let what = if titles.is_empty() { "reading the score".to_string() } else { titles.join(", ") };
             panel_ref.widget(cx, ids!(p_empty_text)).set_text(cx, &format!("Making this score's editor {:.0} s\n{what}", secs));
             self.frame = cx.new_next_frame();
             return;
         }
-        let Some(mut making) = self.panel.making.take() else { return };
-        let mut modules = Vec::new();
-        let mut dropped = Vec::new();
-        for part in making.parts.drain(..).flatten() {
-            let text = match part {
-                Ok(text) => text,
-                Err(why) => {
-                    dropped.push(why);
-                    continue;
-                }
-            };
-            let body: String = text.lines().filter(|l| !l.trim_start().starts_with("```")).collect::<Vec<_>>().join("\n");
-            let body = body.trim();
-            if body.is_empty() || !body.starts_with("SynthTweaks") {
-                continue;
-            }
-            let errors = makepad_widgets::splash::validate_splash_body(cx, body, false);
-            match errors.first() {
-                Some(error) => dropped.push(error.clone()),
-                None => modules.push(body.to_string()),
-            }
-        }
+        let Some(making) = self.panel.making.take() else { return };
+        let (modules, dropped) = making.job.modules(cx, makepad_synth_panel::make::FIRST);
         if modules.is_empty() {
             let why = dropped.first().cloned().unwrap_or_else(|| "no part was written".into());
             panel_ref.widget(cx, ids!(p_empty_text)).set_text(cx, &format!("The editor could not be made: {why}"));
             log!("synth panel: not made: {why}");
             return;
         }
-        let indented: Vec<String> = modules.iter().map(|m| m.lines().map(|l| format!("        {l}")).collect::<Vec<_>>().join("\n")).collect();
-        // The fixed skeleton: the voice tree, the selected voice's timeline
-        // and variants, then each instrument's tweaks (folded until chosen).
-        let code = format!("let editor_panel = fn() {{\n    View{{\n        flow: Down width: Fill spacing: 10\n        ScoreTree{{}}\n        SynthTrack{{}}\n{}\n    }}\n}}", indented.join("\n"));
+        // The fixed skeleton, then each instrument's tweaks (folded until chosen).
+        let code = panel::make::assemble("editor_panel", &makepad_synth_panel::make::HEAD, &modules);
         match with_panel(&self.source, &code) {
             Ok(next) => {
                 self.set_source(cx, ui, next);
-                log!("synth panel: made in {:.1} s ({} modules, {} parts left out)", secs, modules.len(), dropped.len());
+                log!("synth panel: made in {:.1} s ({} modules, {} left out)", secs, modules.len(), dropped.len());
                 self.panel.last_made = Some((secs, modules.len(), dropped.len()));
             }
             Err(why) => panel_ref.widget(cx, ids!(p_empty_text)).set_text(cx, &format!("The editor could not be made: {why}")),

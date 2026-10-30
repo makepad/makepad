@@ -62,6 +62,14 @@ const POLL: Duration = Duration::from_millis(150);
 /// bound needs one full interval, and a second one covers a lost packet.
 const FLEET_PATIENCE: Duration = Duration::from_millis(4500);
 const FLEET_POLL: Duration = Duration::from_millis(250);
+/// Set once the app shuts down: a fleet probe stops listening at its next poll.
+static FLEET_PROBES_STOPPED: AtomicBool = AtomicBool::new(false);
+
+/// Stops every running and future [`probe_fleet_inventory`] (the app is shutting down: its
+/// threads must end so a relaunch does not wait for them).
+pub fn stop_fleet_probes() {
+    FLEET_PROBES_STOPPED.store(true, Ordering::Relaxed);
+}
 
 /// Where the conversation actually runs, once the election settled.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -427,12 +435,18 @@ pub fn probe_fleet_inventory(mut update: impl FnMut(&[HubOffer])) -> Result<Vec<
     // `MAKEPAD_AI_MODEL` names the one model every app chat here must use:
     // only it is offered.
     let required = std::env::var(crate::hub::REQUIRED_MODEL_ENV).ok().map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+    if FLEET_PROBES_STOPPED.load(Ordering::Relaxed) {
+        return Err("the app is shutting down".into());
+    }
     let discovery = crate::discovery::start_listener();
     let started = Instant::now();
     let mut offers: Vec<HubOffer> = Vec::new();
     let mut probed: Vec<String> = Vec::new();
     let mut last_reason = None;
     loop {
+        if FLEET_PROBES_STOPPED.load(Ordering::Relaxed) {
+            break;
+        }
         let fresh: Vec<String> = chat_bases(&discovery).into_iter().filter(|b| !probed.contains(b)).collect();
         let mut grew = false;
         for base in &fresh {

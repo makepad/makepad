@@ -275,14 +275,6 @@ impl DrawPass {
         DrawPassId(self.0.id)
     }
 
-    /// This pass is a heavy view (a 3D viewport): while a remote headset streams
-    /// (`Cx::xr_headset_streaming`) it and the passes painting for it pause on their last
-    /// picture (the GPU goes to the headset's eyes); the rest of its window stays live. The app
-    /// shows the view's state over it (viewing in the headset, or a mirror).
-    pub fn set_xr_pause(&self, cx: &mut Cx, on: bool) {
-        cx.passes[self.draw_pass_id()].xr_pause = on;
-    }
-
     pub fn set_as_xr_pass(&self, cx: &mut Cx) {
         let cxpass = &mut cx.passes[self.draw_pass_id()];
         cxpass.parent = CxDrawPassParent::Xr;
@@ -718,10 +710,6 @@ pub struct CxDrawPass {
     /// it paints once even while orphaned (a thumbnail sheet re-executed for
     /// a texture readback). Cleared when the repaint order is computed.
     pub repaint_requested: bool,
-    /// A heavy view (a 3D viewport) that pauses while a remote headset streams
-    /// ([`DrawPass::set_xr_pause`]): it and the passes painting for it keep their last
-    /// picture; the window around it stays live.
-    pub xr_pause: bool,
     /// Set by a backend while painting this pass when something in it needs the
     /// next frame too: a shader that reads `draw_pass.time`, or a draw call it had to skip.
     pub repaint_next: bool,
@@ -846,7 +834,6 @@ impl Default for CxDrawPass {
             live_with_parent: false,
             attached_by: None,
             repaint_requested: false,
-            xr_pause: false,
             repaint_next: false,
             time_owed: false,
             painted_serial: 0,
@@ -869,75 +856,6 @@ pub fn union_rects(a: Rect, b: Rect) -> Rect {
     let x1 = (a.pos.x + a.size.x).max(b.pos.x + b.size.x);
     let y1 = (a.pos.y + a.size.y).max(b.pos.y + b.size.y);
     Rect { pos: dvec2(x0, y0), size: dvec2(x1 - x0, y1 - y0) }
-}
-
-/// The desktop windows while a remote headset streams (`Cx::xr_hold_windows`). The windows stay
-/// live at their own pacing: input and every other cause of theirs (an animation, a video, a
-/// popover) paint as always, never waiting for the headset's frames. Only what the headset's
-/// frames alone cause (redraws asked for while an `Event::XrUpdate` is handled) leaves the
-/// windows as they are, and the heavy views (`DrawPass::set_xr_pause`) pause on their last
-/// picture: the GPU's time goes to the headset's eyes. A window showing the headset's view (a
-/// mirror, `mirror`) paints from the headset's frames at most [`XrWindowHold::RATE_HZ`] a second.
-#[derive(Clone, Debug, Default)]
-pub struct XrWindowHold {
-    /// Holding (a headset streams).
-    pub(crate) on: bool,
-    /// A window shows the headset's view (it repaints from the headset's frames).
-    pub(crate) mirror: bool,
-    /// An `Event::XrUpdate` is being handled: the redraws asked for now are the headset's.
-    pub(crate) in_xr: bool,
-    /// An input event is being handled: the redraws asked for now paint at once.
-    pub(crate) in_input: bool,
-    /// Since the windows last painted: a redraw from input, one with another cause.
-    pub(crate) input: bool,
-    pub(crate) caused: bool,
-    /// When the windows last painted (s, the app's clock).
-    pub(crate) painted_at: f64,
-    /// Window repaints painted and held, for the server's stats (`Cx::xr_window_counts`).
-    pub(crate) painted: u64,
-    pub(crate) held: u64,
-}
-
-impl XrWindowHold {
-    /// The most a window showing the headset's view (a mirror) paints from its frames (frames
-    /// a second).
-    pub const RATE_HZ: f64 = 15.0;
-
-    /// Input (and a window's change of shape): what the user does to a window.
-    pub(crate) fn is_input(event: &crate::event::Event) -> bool {
-        use crate::event::Event as E;
-        matches!(event, E::MouseDown(_) | E::MouseUp(_) | E::MouseMove(_) | E::MouseLeave(_) | E::Scroll(_) | E::Pinch(_) | E::TouchUpdate(_)
-            | E::KeyDown(_) | E::KeyUp(_) | E::TextInput(_) | E::TextCopy(_) | E::TextCut(_) | E::WindowGeomChange(_) | E::WindowGotFocus(_) | E::WindowLostFocus(_)
-            | E::Drag(_) | E::Drop(_) | E::DragEnd)
-    }
-
-    /// A redraw asked for: its cause (the headset's frames, input or another).
-    pub(crate) fn note_redraw(&mut self) {
-        if self.in_input {
-            self.input = true;
-        } else if !self.in_xr {
-            self.caused = true;
-        }
-    }
-
-    /// Whether the windows paint in this repaint (`now`: s; `grab`: a screenshot or frame grab
-    /// waits for a painted window, which paints at once like input); false holds them.
-    pub(crate) fn windows_paint(&mut self, now: f64, grab: bool) -> bool {
-        let paint = !self.on || self.input || self.caused || grab || (self.mirror && now - self.painted_at >= 1.0 / Self::RATE_HZ);
-        if paint {
-            self.painted_at = now;
-            self.input = false;
-            self.caused = false;
-        }
-        paint
-    }
-
-    /// Whether a window's recordings ask for a frame now: always for its own causes; a drawing
-    /// of only the headset's frames waits (the mirror's next slot comes with the headset's next
-    /// frame).
-    pub(crate) fn wants_frame(&self) -> bool {
-        !self.on || self.input || self.caused
-    }
 }
 
 #[derive(Clone, Debug)]

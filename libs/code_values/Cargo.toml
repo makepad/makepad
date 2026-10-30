@@ -18,3 +18,7 @@ makepad-widgets = { path = "../../widgets", default-features = false, features =
 makepad-code-editor = { path = "../../code_editor" }
 # Lines and discs for the 3D value views (a point, a direction, a path).
 makepad-render-lines = { path = "../render_lines" }
+# Value sites and edits: the one editable-values layer.
+makepad-edit-values = { path = "../edit_values" }
+# Named eases and their curves.
+makepad-tween = { path = "../tween" }

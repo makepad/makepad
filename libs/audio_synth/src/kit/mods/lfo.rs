@@ -188,15 +188,13 @@ impl LfoEnv {
         LfoEnv { stage: EnvStage::Stopped, q: 0.0, e: 0.0, e_rel: 0.0 }
     }
 
+    /// Note start: skip delay, then attack, then hold when each is at its
+    /// minimum (only here: a stage reached later always runs, at least its
+    /// minimum length).
     fn attack(&mut self, p: &LfoParams) {
         self.e = 0.0;
-        self.enter(EnvStage::Delay, p);
-    }
-
-    /// Enter a stage, skipping delay / attack / hold at their minimum.
-    fn enter(&mut self, mut st: EnvStage, p: &LfoParams) {
-        self.q = 0.0;
-        if st == EnvStage::Delay && at_min(p.delay) {
+        let mut st = EnvStage::Delay;
+        if at_min(p.delay) {
             st = EnvStage::Attack;
         }
         if st == EnvStage::Attack && at_min(p.attack) {
@@ -206,6 +204,11 @@ impl LfoEnv {
         if st == EnvStage::Hold && at_min(p.hold) {
             st = EnvStage::Decay;
         }
+        self.enter(st);
+    }
+
+    fn enter(&mut self, st: EnvStage) {
+        self.q = 0.0;
         self.stage = st;
     }
 
@@ -238,11 +241,11 @@ impl LfoEnv {
         self.q += rate;
         if self.q > 1.0 {
             match self.stage {
-                EnvStage::Delay => self.enter(EnvStage::Attack, p),
-                EnvStage::Attack => self.enter(EnvStage::Hold, p),
-                EnvStage::Hold => self.enter(EnvStage::Decay, p),
-                EnvStage::Decay => self.enter(EnvStage::Sustain, p),
-                EnvStage::Release => self.enter(EnvStage::Stopped, p),
+                EnvStage::Delay => self.enter(EnvStage::Attack),
+                EnvStage::Attack => self.enter(EnvStage::Hold),
+                EnvStage::Hold => self.enter(EnvStage::Decay),
+                EnvStage::Decay => self.enter(EnvStage::Sustain),
+                EnvStage::Release => self.enter(EnvStage::Stopped),
                 _ => {}
             }
         }
@@ -497,11 +500,9 @@ impl Lfo {
             LfoShape::Noise if reseed => {
                 self.noise = CorrNoise::default();
                 let c = p.deform;
-                for _ in 0..3 {
-                    self.noise.next(c, &mut self.rng);
-                }
                 let mul = if QUIRK_NOISE_HISTORY_TIMES_PHASE { self.phase as f32 } else { 1.0 };
-                for k in (0..4).rev() {
+                // Six draws: the first three all land in h3 (two are overwritten), then h2, h1, h0.
+                for k in [3, 3, 3, 2, 1, 0] {
                     self.hist[k] = self.noise.next(c, &mut self.rng) * mul;
                 }
                 self.phase = 0.0;
@@ -512,6 +513,8 @@ impl Lfo {
                     for k in (0..4).rev() {
                         self.hist[k] = self.noise.next(0.0, &mut self.rng);
                     }
+                    // A fifth draw goes to the held value, which the smoothed type never reads.
+                    self.held = self.noise.next(0.0, &mut self.rng);
                 } else {
                     for _ in 0..3 {
                         self.held = self.noise.next(p.deform, &mut self.rng);
@@ -1044,6 +1047,78 @@ mod tests {
         l.attack(&p, &ctx, &seq, &m);
         assert!((0.0..1.0).contains(&l.phase().0));
     }
+    /// The attack draws of the noise shapes (MODULATION 5.5): Noise makes six draws (the first
+    /// three into h3), each times the start phase; smoothed S&H four fresh draws at correlation 0
+    /// into h3..h0 plus a fifth into the held value; the next wrap draws one more.
+    #[test]
+    fn noise_attack_draws() {
+        let seq = StepSeq::default();
+        let ctx = ModCtx::new(FS);
+        let m = Mseg::default_voice();
+        let seed = 7u32;
+        let fresh = || Rng::new(seed.wrapping_mul(0x9e37_79b9) ^ 0x5bd1_e995);
+        let p = LfoParams { shape: LfoShape::Noise, phase: 0.5, deform: 0.3, ..LfoParams::default() };
+        let mut l = Lfo::new(seed, false);
+        l.attack(&p, &ctx, &seq, &m);
+        let (mut rng, mut n) = (fresh(), CorrNoise::default());
+        let d: Vec<f32> = (0..6).map(|_| n.next(0.3, &mut rng) * 0.5).collect();
+        assert_eq!(l.hist, [d[5], d[4], d[3], d[2]]);
+        assert_eq!(l.phase, 0.0);
+        let p = LfoParams { shape: LfoShape::SampleHold, deform_type: 1, deform: 0.8, ..LfoParams::default() };
+        let mut l = Lfo::new(seed, false);
+        l.attack(&p, &ctx, &seq, &m);
+        let (mut rng, mut n) = (fresh(), CorrNoise::default());
+        let d: Vec<f32> = (0..6).map(|_| n.next(0.0, &mut rng)).collect();
+        assert_eq!(l.hist, [d[3], d[2], d[1], d[0]]);
+        assert_eq!(l.held, d[4]);
+        l.on_wrap(&p, &seq);
+        assert_eq!(l.hist, [d[5], d[3], d[2], d[1]]);
+    }
+
+    /// A hold at its minimum is skipped only at the note start: after an attack it runs its
+    /// minimum length (2^-8 s, ~6 blocks) at full level before the decay.
+    #[test]
+    fn minimum_hold_runs_after_an_attack() {
+        let seq = StepSeq::default();
+        let p = LfoParams { shape: LfoShape::Envelope, deform: 0.0, attack: -5.0, decay: -2.0, sustain: 0.0, ..LfoParams::default() };
+        let v = run(&p, &seq, 200);
+        let full = v.iter().filter(|o| o[2] >= 0.9999).count();
+        assert!((5..=7).contains(&full), "{full} blocks at full level");
+        let p = LfoParams { attack: -8.0, ..p };
+        let v = run(&p, &seq, 200);
+        assert!(v[0][2] < 1.0, "attack and hold skipped at the start: decaying from the first block");
+    }
+
+    /// Triangle and Saw take Sine's three deform treatments (Q12).
+    #[test]
+    fn triangle_saw_deform_treatments() {
+        let seq = StepSeq::default();
+        let ctx = ModCtx::new(FS);
+        let m = Mseg::default_voice();
+        for shape in [LfoShape::Triangle, LfoShape::Saw] {
+            for (dt, d) in [(0, 0.6f32), (1, -0.5), (1, 0.4), (2, -0.7), (2, 0.9)] {
+                let p = LfoParams { shape, deform_type: dt, deform: d, rate: 1.0, ..LfoParams::default() };
+                let mut l = Lfo::new(1, false);
+                l.attack(&p, &ctx, &seq, &m);
+                for _ in 0..37 {
+                    l.process_block(&p, &ctx, &seq, &m);
+                }
+                let ph = l.phase().0 as f32;
+                let base = match shape {
+                    LfoShape::Triangle => -1.0 + 4.0 * if ph <= 0.5 { ph } else { 1.0 - ph },
+                    _ => 1.0 - 2.0 * ph,
+                };
+                let w = match dt {
+                    0 => bend1(base, d),
+                    1 if d < -1.0 / 4.5 => bend2(base, d) / (1.0 - (d + 1.0 / 4.5) / 1.6),
+                    1 => bend2(base, d),
+                    _ => bend3(base, d) / (1.0 + 0.5 * d.abs()) - 0.06 * d,
+                };
+                assert!((l.outputs()[1] - w).abs() < 1e-5, "{shape:?} {dt} {d}: {:?} vs {w}", l.outputs());
+            }
+        }
+    }
+
     #[test]
     fn shuffle_first_step_is_shorter_and_toggle_survives_attack() {
         let mut seq = StepSeq::default();

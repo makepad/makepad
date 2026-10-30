@@ -23,13 +23,13 @@
 //!   `ask_status`, the same path a widget's AI button takes).
 //!
 //! Paths are the code's own names, resolved each time
-//! ([`EditorDoc::resolve`]), so a panel survives edits of the code
+//! ([`ValueSource::resolve`]), so a panel survives edits of the code
 //! around what it binds.
 //!
 //! A panel over several documents (an edit's, `let cut_panel`: the edit,
 //! the graphics it shows and the modules they share) is given them with
 //! [`set_docs`]; its paths name the document first
-//! ([`EditorDoc::resolve_in`]: `edit.p_open.span`, `p_open:BONE`,
+//! ([`PanelDoc::resolve_in`]: `edit.p_open.span`, `p_open:BONE`,
 //! `look.POST.bloom`), and a set (`*:LYRIC_LOOK.font`, `edit.*.cut`)
 //! reaches every member: a number moves each by as much as the control
 //! moved from where the gesture began, anything else is written to each.
@@ -48,8 +48,12 @@ use makepad_value_pickers::panel::host::{PanelHost, PanelValue};
 use std::any::Any;
 use std::rc::Rc;
 
+mod auto;
 mod doc;
-pub use doc::{fmt_num, fmt_text, Bound, DocEntry, EditorDoc, Entry, File, Kind, Site, Swatch, Value};
+pub mod make;
+pub use auto::{auto_modules, auto_panel, control as auto_control};
+pub use doc::{fmt_num, fmt_text, Bound, File, PanelDoc, Swatch, Value, ValueKind, ValueSite, ValueSource};
+use makepad_edit_values::Splice;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -103,21 +107,28 @@ pub enum Edit {
     Replace { path: String, code: String },
 }
 
-/// A text edit for the host: in file `file` (an index into the files it
-/// gave), the bytes `range` become `text`. `gesture` groups a gesture's
-/// edits into one undo step; `done` is its last (the release, or an edit
-/// outside a gesture); `live` marks a step held while the finger is down.
+/// A text edit for the host: the splice (its file an index into the
+/// files it gave). `gesture` groups a gesture's edits into one undo step;
+/// `done` is its last (the release, or an edit outside a gesture).
 #[derive(Clone, Debug, PartialEq)]
-pub struct Splice {
-    pub file: usize,
-    pub range: Range<usize>,
-    pub text: String,
+pub struct PanelEdit {
+    pub splice: Splice,
     pub gesture: u64,
     pub done: bool,
     /// The path the panel named and the site's kind (a host that patches
     /// the running document live maps these to its sinks).
     pub path: String,
-    pub kind: Kind,
+    pub kind: ValueKind,
+}
+
+/// A path resolved in one document, or why not (with the nearest paths
+/// that exist).
+fn resolve_one(doc: &dyn PanelDoc, files: &[File], path: &str) -> Result<ValueSite, String> {
+    let values = doc.values(files);
+    values.resolve(path).map_err(|why| {
+        let near = values.nearest(path);
+        if near.is_empty() { why } else { format!("{why} (paths near it: {})", near.join(", ")) }
+    })
 }
 
 /// The files `read` resolves against: (name as imported, `""` for the
@@ -137,7 +148,7 @@ impl Scene {
 
 thread_local! {
     /// The document kind the panels edit ([`register`]).
-    static DOC: RefCell<Option<Rc<dyn EditorDoc>>> = const { RefCell::new(None) };
+    static DOC: RefCell<Option<Rc<dyn PanelDoc>>> = const { RefCell::new(None) };
     static SCENE: RefCell<Scene> = RefCell::new(Scene::default());
     static EDITS: RefCell<Vec<Edit>> = const { RefCell::new(Vec::new()) };
     /// A finger is down in a panel (a gesture: its edits are held live).
@@ -155,12 +166,12 @@ thread_local! {
 }
 
 /// The document kind the panels edit ([`register`] installs it).
-pub fn install_doc(doc: Rc<dyn EditorDoc>) {
+pub fn install_doc(doc: Rc<dyn PanelDoc>) {
     DOC.with(|d| *d.borrow_mut() = Some(doc));
 }
 
 /// The installed document kind.
-fn doc() -> Rc<dyn EditorDoc> {
+fn doc() -> Rc<dyn PanelDoc> {
     DOC.with(|d| d.borrow().clone()).expect("editor_panel::register installs the document kind first")
 }
 
@@ -180,7 +191,7 @@ pub fn set_files<O: Any>(files: Vec<(String, String, O)>) {
 }
 
 /// Several documents' texts, and which is which: paths name their document
-/// first ([`EditorDoc::resolve_in`]); `table` is the document kind's own.
+/// first ([`PanelDoc::resolve_in`]); `table` is the document kind's own.
 pub fn set_docs<O: Any, T: Any>(files: Vec<(String, String, O)>, table: T) {
     let files = files.into_iter().map(|(name, text, code)| (name, text, Box::new(code) as Box<dyn Any>)).collect();
     SCENE.with(|s| *s.borrow_mut() = Scene { files, table: Some(Box::new(table)) });
@@ -192,7 +203,7 @@ pub fn bounds(files: &[File], path: &str) -> Result<Vec<Bound>, String> {
     let doc = doc();
     SCENE.with(|s| match &s.borrow().table {
         Some(table) => doc.resolve_in(files, &**table, path),
-        None => doc.resolve(files, path).map(|site| vec![Bound { site, scale: 1.0, member: String::new() }]),
+        None => resolve_one(&*doc, files, path).map(|site| vec![Bound { site, scale: 1.0, member: String::new() }]),
     })
 }
 
@@ -204,7 +215,7 @@ pub fn scene_bounds(path: &str) -> Result<Vec<Bound>, String> {
         let doc = doc();
         match &s.table {
             Some(table) => doc.resolve_in(&files, &**table, path),
-            None => doc.resolve(&files, path).map(|site| vec![Bound { site, scale: 1.0, member: String::new() }]),
+            None => resolve_one(&*doc, &files, path).map(|site| vec![Bound { site, scale: 1.0, member: String::new() }]),
         }
     })
 }
@@ -271,7 +282,7 @@ fn widget_read(path: &str) -> Option<PanelValue> {
             let doc = doc();
             match &s.table {
                 Some(table) => doc.resolve_in(&files, &**table, path).ok().and_then(|mut b| (!b.is_empty()).then(|| b.swap_remove(0).site.text)),
-                None => doc.resolve_exact(&files, path).ok().map(|site| site.text),
+                None => doc.values(&files).resolve(path).ok().map(|site| site.text),
             }
         })?,
     };
@@ -302,14 +313,14 @@ pub enum Read {
 }
 
 /// What a site holds, as `read` gives it.
-pub fn read_site(site: &Site) -> Read {
+pub fn read_site(site: &ValueSite) -> Read {
     match site.kind {
-        Kind::Number | Kind::Time | Kind::Angle | Kind::Length => {
+        kind if kind.is_numeric() => {
             let digits: String = site.text.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
             Read::Number(digits.parse::<f64>().unwrap_or(0.0))
         }
-        Kind::Bool => Read::Bool(site.text == "true"),
-        Kind::Text => Read::Text(
+        ValueKind::Bool => Read::Bool(site.text == "true"),
+        ValueKind::Text => Read::Text(
             makepad_widgets::makepad_script::syntax::parse_value(&site.text)
                 .ok()
                 .and_then(|n| match n.kind {
@@ -399,7 +410,7 @@ fn scene_module(vm: &mut ScriptVm) {
 /// (`more`, each making the isolate's prelude again, as the synth widgets
 /// do), then `scene`; and the [`EditorPanel`] widget. Once, after
 /// `makepad_widgets::script_mod`.
-pub fn register(vm: &mut ScriptVm, doc: Rc<dyn EditorDoc>, more: &[fn(&mut ScriptVm)]) {
+pub fn register(vm: &mut ScriptVm, doc: Rc<dyn PanelDoc>, more: &[fn(&mut ScriptVm)]) {
     install_doc(doc);
     ISOLATE_MODS.with(|m| {
         let mut m = m.borrow_mut();
@@ -461,7 +472,7 @@ pub fn install_host(more: impl FnOnce(PanelHost) -> PanelHost) {
             let files = scene.files();
             HELD.with(|h| {
                 for (path, text) in h.borrow().iter() {
-                    let Ok(site) = doc.resolve_exact(&files, path) else { continue };
+                    let Ok(site) = doc.values(&files).resolve(path) else { continue };
                     let (Some(was), Some(now)) = (doc.palette(&site.text).first().map(|w| w.rgba), doc.palette(text).first().map(|w| w.rgba)) else { continue };
                     if let Some(w) = out.iter_mut().find(|w| w.rgba == was) {
                         w.rgba = now;
@@ -726,42 +737,43 @@ pub fn with_let(source: &str, code: &str, anchor: &str, name: &str) -> Result<St
 /// (`/**name*/`). `reach` says what a held value does there (the host
 /// knows: `RELOAD` on the graphic desk for a value read while the scene
 /// loads; on SCORE `live` or `on release`, and the range).
-pub fn listing(files: &[File], reach: &dyn Fn(&Entry) -> Option<String>) -> String {
+pub fn listing(files: &[File], reach: &dyn Fn(&ValueSite) -> Option<String>) -> String {
     let mut out = String::new();
     let mut labelled = std::collections::HashSet::new();
-    for entry in doc().list(files) {
-        if entry.path.starts_with("editor_panel") || entry.path.starts_with("tweaker") {
+    let doc = doc();
+    for site in doc.values(files).sites() {
+        if site.id.starts_with("editor_panel") {
             continue;
         }
-        let tagged = entry.label.as_deref().is_some_and(|l| l.starts_with("tagged"));
-        if matches!(entry.kind, Kind::Expression | Kind::List | Kind::Record) && !tagged {
+        let tagged = site.label.starts_with("tagged");
+        if matches!(site.kind, ValueKind::Code | ValueKind::List | ValueKind::Record) && !tagged {
             continue;
         }
-        let value: String = entry.value.chars().take(48).collect();
-        let root = entry.path.split(['.', '[']).next().unwrap_or("").to_string();
-        let how = reach(&entry).map(|r| format!(" {r}")).unwrap_or_default();
-        let label = entry.label.clone().filter(|_| labelled.insert(root)).map(|l| format!("  // {}", l.chars().take(90).collect::<String>())).unwrap_or_default();
-        out.push_str(&format!("{} ({}{how}) = {value}{label}\n", entry.path, entry.kind.name()));
+        let value: String = site.text.chars().take(48).collect();
+        let root = site.id.split(['.', '[']).next().unwrap_or("").to_string();
+        let how = reach(&site).map(|r| format!(" {r}")).unwrap_or_default();
+        let label = Some(&site.label).filter(|l| !l.is_empty() && labelled.insert(root)).map(|l| format!("  // {}", l.chars().take(90).collect::<String>())).unwrap_or_default();
+        out.push_str(&format!("{} ({}{how}) = {value}{label}\n", site.id, site.kind.name()));
     }
     out
 }
 
 /// What an edit's panel can bind, a line each: `path (kind[, n places])
-/// = value  // label` ([`EditorDoc::list_in`]: the clips'
+/// = value  // label` ([`PanelDoc::list_in`]: the clips'
 /// times, the shared modules' paths, the paths several graphics share as
 /// `*:PATH`). Records, lists and code are left out.
 pub fn listing_docs(files: &[File], table: &dyn Any) -> String {
     let mut out = String::new();
     let mut labelled = std::collections::HashSet::new();
-    for entry in doc().list_in(files, table) {
-        if matches!(entry.kind, Kind::Expression | Kind::Record) && !entry.path.ends_with(".span") || entry.path.contains("editor_panel") || entry.path.contains("tweaker") {
+    for (site, reach) in doc().list_in(files, table) {
+        if matches!(site.kind, ValueKind::Code | ValueKind::Record) && !site.id.ends_with(".span") || site.id.contains("editor_panel") {
             continue;
         }
-        let value: String = entry.value.chars().take(48).collect();
-        let root = entry.path.split(['.', '[']).next().unwrap_or("").to_string();
-        let reach = if entry.reach > 1 { format!(", {} places", entry.reach) } else { String::new() };
-        let label = entry.label.clone().filter(|_| labelled.insert(root)).map(|l| format!("  // {}", l.chars().take(90).collect::<String>())).unwrap_or_default();
-        out.push_str(&format!("{} ({}{reach}) = {value}{label}\n", entry.path, entry.kind.name()));
+        let value: String = site.text.chars().take(48).collect();
+        let root = site.id.split(['.', '[']).next().unwrap_or("").to_string();
+        let reach = if reach > 1 { format!(", {reach} places") } else { String::new() };
+        let label = Some(&site.label).filter(|l| !l.is_empty() && labelled.insert(root)).map(|l| format!("  // {}", l.chars().take(90).collect::<String>())).unwrap_or_default();
+        out.push_str(&format!("{} ({}{reach}) = {value}{label}\n", site.id, site.kind.name()));
     }
     out
 }
@@ -870,7 +882,7 @@ impl Runtime {
     /// names nothing written yet goes to `missing(path, text)`: the host
     /// may say where it would be written (a field added to its record), as
     /// (file, range, text).
-    pub fn take(&mut self, files: &[File], missing: &dyn Fn(&str, &str) -> Option<(usize, Range<usize>, String)>) -> Vec<Splice> {
+    pub fn take(&mut self, files: &[File], missing: &dyn Fn(&str, &str) -> Option<(usize, Range<usize>, String)>) -> Vec<PanelEdit> {
         let edits: Vec<Edit> = EDITS.with(|e| std::mem::take(&mut *e.borrow_mut()));
         let pressed = PRESSED.with(|p| p.get());
         let released = RELEASED.with(|r| r.replace(false));
@@ -901,7 +913,7 @@ impl Runtime {
                         let next = doc.recolour_at(was, sites, map);
                         if next != f.text {
                             let (a, b) = common_span(f.text, &next);
-                            out.push(Splice { file: k, range: a.clone(), text: next[a.start..b].to_string(), gesture, done: !live, path: String::new(), kind: Kind::Colour });
+                            out.push(PanelEdit { splice: Splice { file: k, range: a.clone(), text: next[a.start..b].to_string() }, gesture, done: !live, path: String::new(), kind: ValueKind::Colour });
                             any = true;
                         }
                     }
@@ -920,7 +932,7 @@ impl Runtime {
                         let next = doc.recolour(f.text, map);
                         if next != f.text {
                             let (a, b) = common_span(f.text, &next);
-                            out.push(Splice { file: k, range: a.clone(), text: next[a.start..b].to_string(), gesture, done: true, path: String::new(), kind: Kind::Colour });
+                            out.push(PanelEdit { splice: Splice { file: k, range: a.clone(), text: next[a.start..b].to_string() }, gesture, done: true, path: String::new(), kind: ValueKind::Colour });
                         }
                     }
                     continue;
@@ -935,7 +947,7 @@ impl Runtime {
                             if live {
                                 self.hold(&path, &edit, text);
                             }
-                            out.push(Splice { file, range, text: written, gesture, done: !live, path, kind: Kind::Expression });
+                            out.push(PanelEdit { splice: Splice { file, range, text: written }, gesture, done: !live, path, kind: ValueKind::Code });
                         }
                         None => self.status = why,
                     }
@@ -959,7 +971,7 @@ impl Runtime {
                 changed();
             }
             for (bound, (range, text)) in bounds.into_iter().zip(texts) {
-                out.push(Splice { file: bound.site.file, range, text, gesture, done: !live, path: path.clone(), kind: bound.site.kind });
+                out.push(PanelEdit { splice: Splice { file: bound.site.file(), range, text }, gesture, done: !live, path: path.clone(), kind: bound.site.kind });
             }
         }
         if released {
@@ -974,13 +986,13 @@ impl Runtime {
                     Ok(bounds) => match self.texts(files, &path, &bounds, &edit, false) {
                         Ok(texts) => {
                             for (bound, (range, text)) in bounds.into_iter().zip(texts) {
-                                out.push(Splice { file: bound.site.file, range, text, gesture, done: true, path: path.clone(), kind: bound.site.kind });
+                                out.push(PanelEdit { splice: Splice { file: bound.site.file(), range, text }, gesture, done: true, path: path.clone(), kind: bound.site.kind });
                             }
                         }
                         Err(why) => self.status = why,
                     },
                     Err(why) => match missing(&path, &edit_text(&edit)) {
-                        Some((file, range, written)) => out.push(Splice { file, range, text: written, gesture, done: true, path, kind: Kind::Expression }),
+                        Some((file, range, written)) => out.push(PanelEdit { splice: Splice { file, range, text: written }, gesture, done: true, path, kind: ValueKind::Code }),
                         None => self.status = why,
                     },
                 }
@@ -992,17 +1004,17 @@ impl Runtime {
         // One splice per site (the last asked; done if any was), applied in
         // turn from the end of each file back: every range is in the text
         // the host gave, and none moves under another.
-        let mut merged: Vec<Splice> = Vec::new();
-        for splice in out {
-            match merged.iter_mut().find(|m| m.file == splice.file && m.range.start == splice.range.start) {
+        let mut merged: Vec<PanelEdit> = Vec::new();
+        for edit in out {
+            match merged.iter_mut().find(|m| m.splice.file == edit.splice.file && m.splice.range.start == edit.splice.range.start) {
                 Some(m) => {
-                    let done = m.done || splice.done;
-                    *m = Splice { done, ..splice };
+                    let done = m.done || edit.done;
+                    *m = PanelEdit { done, ..edit };
                 }
-                None => merged.push(splice),
+                None => merged.push(edit),
             }
         }
-        merged.sort_by(|a, b| a.file.cmp(&b.file).then(b.range.start.cmp(&a.range.start)));
+        merged.sort_by(|a, b| a.splice.file.cmp(&b.splice.file).then(b.splice.range.start.cmp(&a.splice.range.start)));
         merged
     }
 
@@ -1019,7 +1031,7 @@ impl Runtime {
     }
 
     /// What `edit` writes at each of `bounds`, through the one edit
-    /// primitive ([`EditorDoc::write`]): the literal token there and the
+    /// primitive ([`ValueSource::write`]): the literal token there and the
     /// value in its form. A number set on a set (or a roll) moves each
     /// member from where the gesture began by as much as the first moved (a
     /// clip's time by whole beats).
@@ -1032,7 +1044,7 @@ impl Runtime {
             Edit::Set { value: Json::F64(n), .. } => Some(*n),
             _ => None,
         };
-        let numeric = bounds.iter().all(|b| matches!(b.site.kind, Kind::Number | Kind::Time | Kind::Angle | Kind::Length));
+        let numeric = bounds.iter().all(|b| b.site.is_numeric());
         let snap = |from: f64, to: f64| SCENE.with(|s| s.borrow().table.as_ref().map_or(to, |t| doc.snap(&**t, path, from, to)));
         let values: Vec<Value> = match (edit, number) {
             (Edit::Set { .. }, Some(v)) if numeric && (bounds.len() > 1 || bounds.iter().any(|b| b.scale != 1.0) || doc.snaps(path)) => {
@@ -1062,14 +1074,14 @@ impl Runtime {
                             dm
                         }
                     };
-                    Value::Number(((o + b.scale * dm) * 1e4).round() / 1e4)
+                    Value::Num(((o + b.scale * dm) * 1e4).round() / 1e4)
                 }).collect()
             }
             (Edit::Set { value, .. }, _) => bounds.iter().map(|b| match value {
-                Json::Int(n) => Ok(Value::Number(*n as f64)),
-                Json::F64(n) => Ok(Value::Number(*n)),
+                Json::Int(n) => Ok(Value::Num(*n as f64)),
+                Json::F64(n) => Ok(Value::Num(*n)),
                 Json::Bool(v) => Ok(Value::Bool(*v)),
-                Json::Str(t) if b.site.kind == Kind::Text => Ok(Value::Text(t.clone())),
+                Json::Str(t) if b.site.kind == ValueKind::Text => Ok(Value::Text(t.clone())),
                 Json::Str(t) => Ok(Value::Code(t.clone())),
                 _ => Err(format!("{} cannot take that value", b.site.kind.name())),
             }).collect::<Result<_, _>>()?,
@@ -1082,18 +1094,18 @@ impl Runtime {
         // animation replaced by a constant.
         if bounds.len() == 1 && bounds[0].site.text.trim_start().starts_with("keys(") {
             let number = match &values[0] {
-                Value::Number(v) => Some(*v),
+                Value::Num(v) => Some(*v),
                 Value::Code(c) => c.trim().parse::<f64>().ok(),
                 _ => None,
             };
             if let Some(v) = number {
                 let v = &v;
                 let site = &bounds[0].site;
-                let text = files[site.file].text;
+                let text = files[site.file()].text;
                 let t = makepad_value_pickers::panel::host::playhead().map_or(0.0, |p| p.0);
                 let half = 0.5 / 60.0;
                 let v = (v * 1e4).round() / 1e4;
-                return doc.keys_set(text, site.range.clone(), t, half, v).map(|set| vec![set]).ok_or_else(|| format!("`{path}`: its keys do not read"));
+                return doc.keys_set(text, site.range(), t, half, v).map(|set| vec![set]).ok_or_else(|| format!("`{path}`: its keys do not read"));
             }
         }
         // One document: the path written and read back. Several: each
@@ -1102,15 +1114,18 @@ impl Runtime {
             if live {
                 return Ok(vec![doc.place(files, path, &values[0])?]);
             }
-            return Ok(vec![doc.write(files, path, &values[0])?]);
+            let written = doc.values(files).write(path, &values[0])?;
+            return written.into_iter().next().map(|s| vec![(s.range, s.text)]).ok_or_else(|| format!("`{path}`: nothing to write"));
         }
         bounds.iter().zip(&values).map(|(b, value)| {
             let mut site = b.site.clone();
+            let (file, mut range) = (site.file(), site.range());
             if !matches!(value, Value::Code(_)) {
-                site.range = doc.literal_token(files[site.file].text, &site.range).ok_or_else(|| format!("`{path}` is not one literal (`{}`)", site.text.trim()))?;
-                site.text = files[site.file].text[site.range.clone()].to_string();
+                range = doc.literal_token(files[file].text, &range).ok_or_else(|| format!("`{path}` is not one literal (`{}`)", site.text.trim()))?;
+                site.text = files[file].text[range.clone()].to_string();
+                site.span = Some((file, range.clone()));
             }
-            Ok((site.range.clone(), doc.form(&site, value)?))
+            Ok((range, doc.form(&site, value)?))
         }).collect()
     }
 }

@@ -46,6 +46,7 @@ makepad-audio-decode = { path = "../../libs/audio_decode" }
 # The score's editor panel (an AI-written Splash UI run beside the code) over
 # the panel kit, with the synth widgets.
 makepad-editor-panel = { path = "../../libs/editor_panel" }
+makepad-edit-values = { path = "../../libs/edit_values" }
 makepad-value-pickers = { path = "../../libs/value_pickers" }
 makepad-synth-panel = { path = "../../libs/synth_panel" }
 # Batches of songs written at once, rendered, scored, rated and learned from.

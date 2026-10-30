@@ -14,9 +14,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--prio P] [--rev <branch|sha>[,<commercial>]]
+pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--prio P] [--rev <branch>[@sha][,<commercial>[@sha]]]
         [--repo-dir D] [--watch-pid P] [-- cmd...]
-                                          hold a lease (kinds: build test screen long timed gpu inspect gate);
+                                          hold a lease (kinds: build test screen long timed gpu inspect gate;
+                                          --needs gui=1: a test that opens windows, only nodes with screen slots);
                                           with a cmd: run it there and exit with its code
   run <lane> <kind> [--node N|--needs ..] -- cmd...   ship this worktree to the node, run the cmd under a lease
   get <lane> <rel> <local-dir> [--node N] [--lease L]
@@ -24,6 +25,8 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
                                           `run` ships, `target/..`: its target; with --lease: that live lease's
                                           work, `target/..`, `tmp/..`)
   release <id>                            end a lease (says how its node cleaned up)
+  lease <id> cancel | cancel <id>         the user's cancel of ONE lease: its processes stop, its slot frees, the
+                                          lane is kept off that node for 30 min (unless it names it with --node)
   override <node> [--to <lane>]           take the node now: its leases end; to the user (dev off) or a lane
   evict <lane|agent>                      end every lease of it, clean up, block new ones; unblock <lane|agent>
   blocked                                 the lanes and agents the user blocked
@@ -36,7 +39,70 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
   desk <node> [on|off]                    the Desk Link endpoint of a JIT host (its own render, app input)
   landed <lane> | clean <lane>            delete the lane's dirs on every node and its merged Mac worktree";
 
+/// Exit code of a `run`/`lease` whose lease the user cancelled (0 ok, 1 failed, 2 usage or denied).
+/// Stderr then says `LEASE CANCELLED by user on <node>: pick another node ...`; a lane's agent
+/// reads that as: choose another node and retry, and not retry on this one unless asked.
+pub const CANCELLED_EXIT: i32 = 3;
+
+fn cancelled_notice(id: &str, node: &str) -> String {
+    format!("LEASE CANCELLED by user on {node} ({id}): pick another node (devhub nodes) and retry; don't retry on {node} unless asked. Exit code {CANCELLED_EXIT}.")
+}
+
 const BEAT: Duration = Duration::from_secs(2);
+/// How long a holder waits out an unreachable master (a restart: it takes its granted leases back
+/// from `leases.live`, and the nodes keep running them) before it gives up.
+const REATTACH_FOR: Duration = Duration::from_secs(900);
+/// After the master is back, how long its errors may still be its node links coming up.
+const SETTLE_FOR: Duration = Duration::from_secs(60);
+
+/// Calls `f` with the master's control client, through master restarts: while the master is not
+/// reachable (`up` fails) the call is tried again with backoff (0.5 s to 2 s; the master expires a
+/// silent holder after 10 s), and once it is back with a fresh client, re-attaching by the lease
+/// id. A live master's answer stands, except while its node links come back (`SETTLE_FOR`); "no
+/// lease" always stands. Said once each way on stderr.
+fn through_restarts<T>(id: &str, c: &mut Client, mut f: impl FnMut(&Client) -> Result<T, String>, up: &dyn Fn() -> Result<Client, String>) -> Result<T, String> {
+    let mut down: Option<Instant> = None;
+    let mut back: Option<Instant> = None;
+    let mut wait = Duration::from_millis(500);
+    loop {
+        let e = match f(c) {
+            Ok(v) => {
+                if down.take().is_some() {
+                    eprintln!("{id}: the master is back; re-attached");
+                }
+                return Ok(v);
+            }
+            Err(e) => e,
+        };
+        if e.starts_with("no lease") {
+            return Err(e);
+        }
+        match up() {
+            Ok(fresh) => {
+                *c = fresh;
+                match (down, back) {
+                    (None, _) => return Err(e),
+                    (Some(_), None) => back = Some(Instant::now()),
+                    (Some(_), Some(t)) if t.elapsed() > SETTLE_FOR => return Err(e),
+                    _ => {}
+                }
+            }
+            Err(why) => {
+                back = None;
+                match down {
+                    None => {
+                        eprintln!("{id}: the master is not reachable ({why}); re-attaching when it is back");
+                        down = Some(Instant::now());
+                    }
+                    Some(t) if t.elapsed() > REATTACH_FOR => return Err(format!("{e} (the master stayed unreachable for {} s)", REATTACH_FOR.as_secs())),
+                    _ => {}
+                }
+            }
+        }
+        std::thread::sleep(wait);
+        wait = (wait * 2).min(Duration::from_secs(2));
+    }
+}
 
 fn fail(e: impl std::fmt::Display) -> i32 {
     eprintln!("makepad devhub: {e}");
@@ -146,6 +212,12 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
     if req.repo_dir.is_none() {
         req.repo_dir = git(&cwd(), &["rev-parse", "--show-toplevel"]);
     }
+    // branch names become commits here, once: what ships is what was ordered, however long the
+    // lease queues and whatever other landings do to the branches meanwhile
+    if let Some(spec) = &req.rev {
+        let dir = req.repo_dir.as_deref().ok_or("--rev needs a git repo (--repo-dir)")?;
+        req.rev = Some(super::pin_revs(Path::new(dir), spec)?);
+    }
     Ok(Opts { req, watch, cmd })
 }
 
@@ -170,7 +242,8 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
         eprintln!("makepad devhub lease: {e}");
         2
     })?;
-    let id = s(&v, "id");
+    let mut id = s(&v, "id");
+    let mut client = c.clone();
     let mut last = String::new();
     let t0 = Instant::now();
     loop {
@@ -189,6 +262,10 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
             _ => {
                 let how = s(&v, "how");
                 let why = s(&v, "reason");
+                if how == "cancelled" {
+                    eprintln!("{}", cancelled_notice(&id, &s(&v, "node")));
+                    return Err(CANCELLED_EXIT);
+                }
                 eprintln!("{id} {}: {how}{}", req.kind.as_str(), if why.is_empty() { String::new() } else { format!(": {why}") });
                 return Err(if how == "denied" { 2 } else { 1 });
             }
@@ -198,8 +275,21 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
             last = line;
         }
         std::thread::sleep(BEAT);
-        match one(c, "beat", &id) {
+        match through_restarts(&id, &mut client, |c| one(c, "beat", &id), &master) {
             Ok(x) => v = x,
+            // a restarted master keeps only granted leases: a queued one asks again
+            Err(e) if e.starts_with("no lease") && state == "queued" => match one(&client, "lease", &req.to_json()) {
+                Ok(x) => {
+                    let new_id = s(&x, "id");
+                    eprintln!("{id}: the master restarted and lost the queue; asked again as {new_id}");
+                    id = new_id;
+                    v = x;
+                }
+                Err(e) => {
+                    eprintln!("makepad devhub: lease: {e}");
+                    return Err(1);
+                }
+            },
             Err(e) => {
                 eprintln!("makepad devhub: beat {id}: {e} (after {} s)", t0.elapsed().as_secs());
                 return Err(1);
@@ -224,8 +314,9 @@ fn run_there(c: &Client, held: &Held, rel: &str, cmd: &[String]) -> Result<i32, 
     let mut off = 0u64;
     let mut beat = Instant::now();
     let mut out = std::io::stdout();
+    let mut c = c.clone();
     loop {
-        let v = node_one(c, &held.node, "lease-log", &format!("lease-log {} {run} {off}", held.id))?;
+        let v = through_restarts(&held.id, &mut c, |c| node_one(c, &held.node, "lease-log", &format!("lease-log {} {run} {off}", held.id)), &master)?;
         let data = b64_decode(&s(&v, "data")).ok_or("lease-log: bad data")?;
         let _ = out.write_all(&data);
         let _ = out.flush();
@@ -238,7 +329,7 @@ fn run_there(c: &Client, held: &Held, rel: &str, cmd: &[String]) -> Result<i32, 
         }
         if beat.elapsed() >= BEAT {
             beat = Instant::now();
-            let st = one(c, "beat", &held.id)?;
+            let st = through_restarts(&held.id, &mut c, |c| one(c, "beat", &held.id), &master)?;
             if s(&st, "state") == "ended" {
                 return Err(format!("{} ended ({})", held.id, s(&st, "how")));
             }
@@ -288,6 +379,10 @@ fn lease(args: &[&str]) -> i32 {
         }
         match master().and_then(|c| one(&c, "beat", &held.id)) {
             Ok(v) if s(&v, "state") == "ended" => {
+                if s(&v, "how") == "cancelled" {
+                    eprintln!("{}", cancelled_notice(&held.id, &held.node));
+                    return CANCELLED_EXIT;
+                }
                 let why = s(&v, "reason");
                 eprintln!("{}: ended ({}){}", held.id, s(&v, "how"), if why.is_empty() { String::new() } else { format!(": {why}") });
                 return 0;
@@ -310,11 +405,21 @@ fn lease(args: &[&str]) -> i32 {
 }
 
 fn finish(c: &Client, held: &Held, r: Result<i32, String>) -> i32 {
+    // the user cancelled it: its processes were stopped, so the run's own result is just the fallout
+    if one(c, "beat", &held.id).is_ok_and(|v| s(&v, "state") == "ended" && s(&v, "how") == "cancelled") {
+        eprintln!("{}", cancelled_notice(&held.id, &held.node));
+        return CANCELLED_EXIT;
+    }
     let (exit, code) = match r {
         Ok(code) => (Some(code), code),
         Err(e) => (None, fail(e)),
     };
-    if let Some(v) = release(c, &held.id, exit) {
+    let mut c = c.clone();
+    let line = match exit {
+        Some(e) => format!("{} released exit={e}", held.id),
+        None => held.id.clone(),
+    };
+    if let Ok(v) = through_restarts(&held.id, &mut c, |c| one(c, "release", &line), &master) {
         eprintln!("{}", released_line(&v));
     }
     code
@@ -326,6 +431,7 @@ fn released_line(v: &Value) -> String {
     let at = if node.is_empty() { String::new() } else { format!("@{node}") };
     let head = format!("{} {}{at} (lane {}) {}", s(v, "id"), s(v, "kind"), s(v, "lane"), match s(v, "how").as_str() {
         "released" | "" => "released".to_string(),
+        "cancelled" => "cancelled by user".to_string(),
         how => format!("ended ({how})"),
     });
     let Some(c) = v.get("cleanup") else { return head };
@@ -747,6 +853,21 @@ fn landed(c: &Client, lane: &str) -> i32 {
     code
 }
 
+/// `lease <id> cancel`: the user's end of one lease.
+fn cancel(id: &str) -> i32 {
+    let c = match master() {
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
+    match one(&c, "cancel", id) {
+        Ok(v) => {
+            println!("{}", released_line(&v));
+            0
+        }
+        Err(e) => fail(e),
+    }
+}
+
 /// The lease words; None: not one of them.
 pub fn cli(args: &[&str]) -> Option<i32> {
     let word = *args.first()?;
@@ -759,10 +880,11 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         }
         return inspect(args.get(1)?, &args[2..]);
     }
-    if !matches!(word, "lease" | "run" | "get" | "release" | "queue" | "leases" | "nodes" | "node" | "disk" | "desk" | "landed" | "clean" | "evict" | "unblock" | "override" | "blocked") {
+    if !matches!(word, "lease" | "run" | "get" | "release" | "cancel" | "queue" | "leases" | "nodes" | "node" | "disk" | "desk" | "landed" | "clean" | "evict" | "unblock" | "override" | "blocked") {
         return None;
     }
     match args {
+        ["lease", id, "cancel"] | ["cancel", id] => return Some(cancel(id)),
         ["lease", rest @ ..] => return Some(lease(rest)),
         ["run", lane, kind, rest @ ..] => return Some(run(lane, kind, rest)),
         ["get", lane, rel, dst, rest @ ..] => return Some(get(lane, rel, dst, rest)),
@@ -860,4 +982,43 @@ pub fn cli(args: &[&str]) -> Option<i32> {
             2
         }
     })
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// A gate's holder outlives a master restart: while the master is down every call fails and
+    /// the holder waits; once it is back the same lease answers, and the gate's verdict arrives.
+    #[test]
+    fn a_holder_waits_out_a_master_restart_and_gets_the_verdict() {
+        let down = Arc::new(AtomicBool::new(true));
+        let d = down.clone();
+        // the master comes back after 1.5 s
+        let flip = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1500));
+            d.store(false, Ordering::SeqCst);
+        });
+        let up = {
+            let down = down.clone();
+            move || if down.load(Ordering::SeqCst) { Err("no devhub runs here".to_string()) } else { Ok(Client::new(makepad_remote::link::Target::Unix("/nonexistent".into()), "t")) }
+        };
+        let mut c = Client::new(makepad_remote::link::Target::Unix("/nonexistent".into()), "t");
+        let mut calls = 0;
+        let r = through_restarts("L1", &mut c, |_| {
+            calls += 1;
+            if down.load(Ordering::SeqCst) { Err("link lost: Connection refused".to_string()) } else { Ok("NODEGATE-OK") }
+        }, &up);
+        flip.join().unwrap();
+        assert_eq!(r, Ok("NODEGATE-OK"));
+        assert!(calls > 1, "the call was tried again");
+        // a live master's "no lease" stands at once
+        let r: Result<(), String> = through_restarts("L1", &mut c, |_| Err("no lease L1".into()), &up);
+        assert_eq!(r, Err("no lease L1".to_string()));
+        // a live master's other error stands at once when there was no outage
+        let r: Result<(), String> = through_restarts("L1", &mut c, |_| Err("103: lease-log: bad".into()), &up);
+        assert!(r.is_err());
+    }
 }

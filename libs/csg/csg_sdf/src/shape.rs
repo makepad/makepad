@@ -63,7 +63,7 @@ pub enum SdfNode {
     /// `of` in material `slot` of [`SdfShape::materials`] (0 is the default);
     /// the innermost Material wins. Slots through the other nodes: see
     /// [`distance_slot`].
-    Material { slot: u8, of: Box<SdfNode> },
+    Material { slot: u8, within: Option<Box<SdfNode>>, of: Box<SdfNode> },
     /// `of` placed at each of `places`: the nearest copy. `of` keeps its own
     /// key ([`SdfNode::key`]), so moving copies re-bakes nothing.
     Instance { places: Vec<SdfPlace>, of: Box<SdfNode> },
@@ -351,9 +351,16 @@ impl Out {
                 self.u8(12);
                 self.u64(m.key());
             }
-            SdfNode::Material { slot, of } => {
+            SdfNode::Material { slot, within, of } => {
                 self.u8(13);
                 self.u8(*slot);
+                match within {
+                    Some(w) => {
+                        self.u8(1);
+                        self.node(w);
+                    }
+                    None => self.u8(0),
+                }
                 self.node(of);
             }
             SdfNode::Instance { places, of } => {
@@ -500,7 +507,9 @@ fn v3(p: P3) -> Vec3d {
 }
 
 /// The distance of one node at `p` and the material slot there:
-/// - Material: the innermost wins (0 outside every Material);
+/// - Material: the innermost wins (0 outside every Material); one with a
+///   `within` region gives its slot only inside the region (distance <= 0)
+///   and its distance is always its child's;
 /// - union and smooth union: the nearer operand's (a tie keeps the earlier);
 /// - difference: the base's (a cut surface takes the base material);
 /// - intersection: the farther operand's (a tie keeps the earlier);
@@ -511,7 +520,13 @@ pub fn distance_slot(n: &SdfNode, p: Vec3d) -> (f64, u8) {
 
 fn slot_in(n: &SdfNode, p: Vec3d, inherit: u8) -> (f64, u8) {
     match n {
-        SdfNode::Material { slot, of } => slot_in(of, p, *slot),
+        SdfNode::Material { slot, within, of } => {
+            let here = match within {
+                Some(w) if distance(w, p) > 0.0 => inherit,
+                _ => *slot,
+            };
+            slot_in(of, p, here)
+        }
         SdfNode::Combine { op, blend, of } => {
             let (mut d, mut slot) = slot_in(&of[0], p, inherit);
             for c in &of[1..] {
@@ -687,7 +702,7 @@ mod tests {
             SdfNode::deform(SdfDeform::Bend { rate: 0.05 }, SdfNode::Box { size: [30.0, 4.0, 4.0], radius: 0.0 }),
             SdfNode::deform(SdfDeform::Taper { rate: -0.03 }, bar.clone()),
             SdfNode::deform(SdfDeform::Mirror { axis: 0 }, ball(3.0, [4.0, 1.0, 0.0])),
-            SdfNode::Material { slot: 2, of: Box::new(SdfNode::Bone { id: 7, rest: SdfPlace::IDENTITY, of: Box::new(SdfNode::Id { id: part_id("arm"), of: Box::new(bar) }) }) },
+            SdfNode::Material { slot: 2, within: None, of: Box::new(SdfNode::Bone { id: 7, rest: SdfPlace::IDENTITY, of: Box::new(SdfNode::Id { id: part_id("arm"), of: Box::new(bar) }) }) },
         ]
     }
 
@@ -733,8 +748,8 @@ mod tests {
 
     #[test]
     fn slots_follow_the_rules() {
-        let a = SdfNode::Material { slot: 1, of: Box::new(ball(5.0, [0.0; 3])) };
-        let b = SdfNode::Material { slot: 2, of: Box::new(ball(5.0, [8.0, 0.0, 0.0])) };
+        let a = SdfNode::Material { slot: 1, within: None, of: Box::new(ball(5.0, [0.0; 3])) };
+        let b = SdfNode::Material { slot: 2, within: None, of: Box::new(ball(5.0, [8.0, 0.0, 0.0])) };
         let at = |x: f64| Vec3d::new(x, 0.0, 0.0);
         let u = SdfNode::Combine { op: SdfOp::Union, blend: 2.0, of: vec![a.clone(), b.clone()] };
         assert_eq!(distance_slot(&u, at(-1.0)).1, 1);
@@ -745,12 +760,24 @@ mod tests {
         let i = SdfNode::Combine { op: SdfOp::Intersection, blend: 0.0, of: vec![a.clone(), b.clone()] };
         assert_eq!(distance_slot(&i, at(1.0)).1, 2);
         // The innermost wins; outside every Material, 0.
-        let outer = SdfNode::Material { slot: 3, of: Box::new(SdfNode::Combine { op: SdfOp::Union, blend: 0.0, of: vec![a, ball(2.0, [-20.0, 0.0, 0.0])] }) };
+        let outer = SdfNode::Material { slot: 3, within: None, of: Box::new(SdfNode::Combine { op: SdfOp::Union, blend: 0.0, of: vec![a, ball(2.0, [-20.0, 0.0, 0.0])] }) };
         assert_eq!(distance_slot(&outer, at(0.0)).1, 1);
         assert_eq!(distance_slot(&outer, at(-20.0)).1, 3);
         assert_eq!(distance_slot(&ball(1.0, [0.0; 3]), at(0.0)).1, 0);
         // The distance is the plain one.
         assert_eq!(distance_slot(&u, at(2.0)).0, distance(&u, at(2.0)));
+    }
+
+    #[test]
+    fn a_material_within_a_region_paints_only_there() {
+        let body = ball(5.0, [0.0; 3]);
+        let region = ball(2.0, [5.0, 0.0, 0.0]);
+        let n = SdfNode::Material { slot: 4, within: Some(Box::new(region)), of: Box::new(body.clone()) };
+        for (x, slot) in [(5.0, 4), (-5.0, 0)] {
+            let (d, s) = distance_slot(&n, Vec3d::new(x, 0.0, 0.0));
+            assert_eq!(s, slot, "at x {x}");
+            assert!((d - distance(&body, Vec3d::new(x, 0.0, 0.0))).abs() < 1e-12, "the distance is the body's");
+        }
     }
 
     #[test]

@@ -580,17 +580,8 @@ pub fn path_items(source: &str, start: usize) -> Vec<Vec<(Range<usize>, f64)>> {
     }
 }
 
-/// A list the host's literals miss (colours, records, 3D keys): found in
-/// the source, with the name it is written under.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ListSite {
-    pub range: Range<usize>,
-    pub key: String,
-    pub control: Control,
-}
-
 /// The key a value at `start` is written under: `key: …` or `let KEY = …`.
-fn key_before(source: &str, start: usize) -> String {
+pub(crate) fn key_before(source: &str, start: usize) -> String {
     let before = source[..start].trim_end();
     let before = if let Some(b) = before.strip_suffix(':') {
         b
@@ -602,52 +593,6 @@ fn key_before(source: &str, start: usize) -> String {
     let before = before.trim_end();
     let from = before.rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).map_or(0, |i| i + 1);
     before[from..].to_string()
-}
-
-/// Every list of colours, records or 3D keys in `source` (outermost
-/// first; a list inside one found is not listed again), with its key.
-pub fn list_sites(source: &str) -> Vec<ListSite> {
-    let b = source.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'"' => {
-                i += 1;
-                while i < b.len() && b[i] != b'"' {
-                    i += if b[i] == b'\\' { 2 } else { 1 };
-                }
-                i += 1;
-            }
-            b'/' if b.get(i + 1) == Some(&b'/') => {
-                while i < b.len() && b[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            b'[' => {
-                // An index (`a[0]`) is not a list.
-                let prev = source[..i].trim_end().as_bytes().last().copied();
-                if prev.is_some_and(|c| is_ident(c) || c == b')' || c == b']') && !source[..i].ends_with(char::is_whitespace) {
-                    i += 1;
-                    continue;
-                }
-                if let Some(lit) = lit_at(source, i) {
-                    let range = lit.range();
-                    let key = key_before(source, i);
-                    if let Some(control) = control_of_literal(&source[range.clone()], &key) {
-                        if matches!(control, Control::Swatches { .. } | Control::Table { .. } | Control::Path3 { .. }) {
-                            out.push(ListSite { range: range.clone(), key, control });
-                            i = range.end;
-                            continue;
-                        }
-                    }
-                }
-                i += 1;
-            }
-            _ => i += 1,
-        }
-    }
-    out
 }
 
 /// A round step for a span: 1, 2 or 5 times a power of ten, about a tenth
@@ -698,41 +643,6 @@ pub fn fmt_like(value: f64, written: &str, span: f64) -> String {
     let needed = if span <= 0.0 { 0 } else { (2.0 - span.log10().floor()).clamp(0.0, 6.0) as usize };
     let places = written_places.max(needed.min(written_places.max(3)));
     fmt_places(value, places)
-}
-
-/// Write numbers back: `items` as they are in `source`, `texts` the new
-/// text of each (`None`: unchanged). The splice covers the first changed
-/// number to the last; everything between them is kept byte for byte.
-pub fn rewrite(source: &str, items: &[(Range<usize>, f64)], texts: &[Option<String>]) -> Option<(Range<usize>, String)> {
-    let first = texts.iter().position(Option::is_some)?;
-    let last = texts.iter().rposition(Option::is_some)?;
-    let mut out = String::new();
-    for k in first..=last {
-        if k > first {
-            out.push_str(&source[items[k - 1].0.end..items[k].0.start]);
-        }
-        match &texts[k] {
-            Some(t) => out.push_str(t),
-            None => out.push_str(&source[items[k].0.clone()]),
-        }
-    }
-    Some((items[first].0.start..items[last].0.end, out))
-}
-
-/// The whole vector's numbers rewritten (unchanged ones kept as written):
-/// the text for `items[0].start..items[last].end`.
-pub fn rewrite_all(source: &str, items: &[(Range<usize>, f64)], texts: &[Option<String>]) -> String {
-    let mut out = String::new();
-    for (k, (range, _)) in items.iter().enumerate() {
-        if k > 0 {
-            out.push_str(&source[items[k - 1].0.end..range.start]);
-        }
-        match texts.get(k).and_then(|t| t.as_ref()) {
-            Some(t) => out.push_str(t),
-            None => out.push_str(&source[range.clone()]),
-        }
-    }
-    out
 }
 
 pub fn len3(v: [f64; 3]) -> f64 {
@@ -829,29 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_are_found_with_their_keys() {
-        let src = "let PAL = [#ff0000, #00ff00]\nScene3D{camera: {path: [vec3(0, 1, 2), vec3(3, 4, 5)]}}\nlet R = [[1, \"a\"], [2, \"b\"]]\nlet x = PAL[0]\nlet D = [1, 2, 3]";
-        let sites = list_sites(src);
-        assert_eq!(sites.iter().map(|s| s.key.as_str()).collect::<Vec<_>>(), vec!["PAL", "path", "R"]);
-        assert!(matches!(sites[1].control, Control::Path3 { .. }));
-        assert!(matches!(sites[2].control, Control::Table { rows: 2, cols: 2, .. }));
-        assert_eq!(&src[sites[0].range.clone()], "[#ff0000, #00ff00]");
-    }
-
-    #[test]
-    fn write_back_keeps_the_formatting() {
-        let src = "vec3( 1.50,  -2 ,0.25 )";
-        let items = vector_items(src, 0);
-        // Only y changed: only its bytes.
-        let (range, text) = rewrite(src, &items, &[None, Some("-1".into()), None]).unwrap();
-        assert_eq!(&src[range.clone()], "-2");
-        assert_eq!(text, "-1");
-        // x and z changed: the run between them is kept as written.
-        let (range, text) = rewrite(src, &items, &[Some("1.75".into()), None, Some("0.5".into())]).unwrap();
-        assert_eq!(&src[range], "1.50,  -2 ,0.25");
-        assert_eq!(text, "1.75,  -2 ,0.5");
-        assert_eq!(rewrite(src, &items, &[None, None, None]), None);
-        assert_eq!(rewrite_all(src, &items, &[None, Some("3".into()), None]), "1.50,  3 ,0.25");
+    fn numbers_keep_their_written_precision() {
         assert_eq!(fmt_like(1.23456, "1.50", 4.0), "1.23");
         assert_eq!(fmt_like(2.0, "-2", 4.0), "2.00");
         assert_eq!(fmt_like(2.0, "-2", 10.0), "2.0");

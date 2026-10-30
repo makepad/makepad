@@ -61,6 +61,8 @@ pub enum JitDo {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Confirm {
     Release(String),
+    /// the user's cancel of one running lease
+    Cancel(String),
     Evict(String),
     /// (node, to lane or the user)
     Override(String, Option<String>),
@@ -73,6 +75,7 @@ impl Confirm {
     pub fn question(&self) -> String {
         match self {
             Confirm::Release(id) => format!("Release {id}? Its processes stop and its dirs are cleaned."),
+            Confirm::Cancel(id) => format!("Cancel {id}? Its processes stop and its slot frees; its lane is told to pick another node and is kept off this one for 30 min."),
             Confirm::Evict(who) => format!("Evict {who}? Every lease of it ends and it gets no new ones until unblocked."),
             Confirm::Override(n, None) => format!("Take {n}? Its leases end and it takes no new ones (dev off)."),
             Confirm::Override(n, Some(l)) => format!("Give {n} to {l}? The other leases on it end."),
@@ -83,6 +86,7 @@ impl Confirm {
     fn verb(&self) -> &'static str {
         match self {
             Confirm::Release(_) => "Release",
+            Confirm::Cancel(_) => "Cancel lease",
             Confirm::Evict(_) => "Evict",
             Confirm::Override(..) => "Take it",
             Confirm::ClearJit { force: true, .. } => "Clear anyway",
@@ -407,7 +411,7 @@ impl DevhubView {
             let li = self.drawn_leases.len();
             self.drawn_leases.push(l.clone());
             self.d.label_elided(cx, rect(row.pos.x + 48.0, row.pos.y, row.size.x - 48.0 - 136.0, row.size.y), false, tok.font.caption, fg, HAlign::Left, &lease_line(l));
-            self.small_button(cx, row, 66.0, 64.0, Hit::Release(li), if l.waiting { "Drop" } else { "Release" });
+            self.small_button(cx, row, 66.0, 64.0, Hit::Release(li), if l.waiting { "Drop" } else { "\u{d7} Cancel" });
             self.small_button(cx, row, 0.0, 62.0, Hit::Evict(li), "Evict AI");
         }
         if open {
@@ -663,7 +667,7 @@ impl DevhubView {
                     self.d.solid(cx, rect(row.pos.x, row.pos.y + 8.0, 6.0, 6.0), if l.waiting { WARN } else { OK });
                     let at = if l.node.is_empty() { String::new() } else { format!("@{} ", l.node) };
                     self.d.label_elided(cx, rect(row.pos.x + 12.0, row.pos.y, row.size.x - 150.0, row.size.y), false, tok.font.caption, fg, HAlign::Left, &format!("{at}{}", lease_line(l)));
-                    self.small_button(cx, row, 66.0, 64.0, Hit::Release(li), if l.waiting { "Drop" } else { "Release" });
+                    self.small_button(cx, row, 66.0, 64.0, Hit::Release(li), if l.waiting { "Drop" } else { "\u{d7} Cancel" });
                     self.small_button(cx, row, 0.0, 62.0, Hit::Evict(li), "Evict AI");
                 }
                 rest = self.draw_blocked(cx, rest, &st);
@@ -737,7 +741,7 @@ impl Widget for DevhubView {
                         None => return,
                     },
                     Some(Hit::Release(i)) => match lease(i) {
-                        Some(l) => DevhubAction::Ask(Confirm::Release(l.id)),
+                        Some(l) => DevhubAction::Ask(if l.waiting { Confirm::Release(l.id) } else { Confirm::Cancel(l.id) }),
                         None => return,
                     },
                     Some(Hit::Evict(i)) => match lease(i) {
