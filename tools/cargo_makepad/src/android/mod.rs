@@ -374,7 +374,10 @@ impl AndroidTarget {
         }
         return Ok(out);
     }
-    fn _sys_dir(&self) -> &'static str {
+    /// The triple the NDK sysroot uses for this ABI's library directory
+    /// (`sysroot/usr/lib/<sys_dir>`). It differs from [`Self::clang`] on armv7,
+    /// whose clang wrappers are `armv7a-linux-androideabi<api>-clang`.
+    fn sys_dir(&self) -> &'static str {
         match self {
             Self::aarch64 => "aarch64-linux-android",
             Self::x86_64 => "x86_64-linux-android",
@@ -991,7 +994,7 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AndroidVariant, ManifestArgs};
+    use super::{AndroidTarget, AndroidVariant, ManifestArgs};
 
     fn test_args<'a>(label: &'a str, url: &'a str) -> ManifestArgs<'a> {
         ManifestArgs {
@@ -1084,6 +1087,15 @@ mod tests {
         assert!(xml.contains("android:versionCode=\"42\""));
         assert!(xml.contains("android:versionName=\"2.7.3\""));
         assert!(xml.contains("android:debuggable=\"false\""));
+    }
+
+    #[test]
+    fn armv7_ndk_sysroot_dir_is_not_the_clang_prefix() {
+        assert_eq!(AndroidTarget::armv7.clang(), "armv7a-linux-androideabi");
+        assert_eq!(AndroidTarget::armv7.sys_dir(), "arm-linux-androideabi");
+        for target in [AndroidTarget::aarch64, AndroidTarget::x86_64, AndroidTarget::i686] {
+            assert_eq!(target.sys_dir(), target.clang());
+        }
     }
 
     #[test]

@@ -198,11 +198,17 @@ impl PendingDecode {
 const MAX_IMAGE_DIMENSION: usize = 16384;
 /// Hard upper bound on a decoded image or animation atlas in bytes. Browser
 /// textures have a tighter admission limit; native retains the existing 1 GiB
-/// cap (the RGBA size of a 16384x16384 image).
+/// cap (the RGBA size of a 16384x16384 image). Other 32-bit targets (e.g.,
+/// armv7 Android) get 128 MiB (32 MP): decoding holds a few buffers of up to
+/// this size at once, and several 1 GiB ones don't fit in a 32-bit address
+/// space, so an oversized image would abort the app instead of failing.
 const WEB_MAX_IMAGE_DECODED_BYTES: usize = 64 * 1024 * 1024;
+const NATIVE_32BIT_MAX_IMAGE_DECODED_BYTES: usize = 128 * 1024 * 1024;
 const NATIVE_MAX_IMAGE_DECODED_BYTES: usize = 1024 * 1024 * 1024;
 const MAX_IMAGE_DECODED_BYTES: usize = if cfg!(target_arch = "wasm32") {
     WEB_MAX_IMAGE_DECODED_BYTES
+} else if cfg!(target_pointer_width = "32") {
+    NATIVE_32BIT_MAX_IMAGE_DECODED_BYTES
 } else {
     NATIVE_MAX_IMAGE_DECODED_BYTES
 };
@@ -1556,9 +1562,28 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), target_pointer_width = "64"))]
     fn native_decoded_image_policy_remains_one_gibibyte() {
         assert_eq!(MAX_IMAGE_DECODED_BYTES, NATIVE_MAX_IMAGE_DECODED_BYTES);
+    }
+
+    #[test]
+    #[cfg(all(not(target_arch = "wasm32"), target_pointer_width = "32"))]
+    fn native_32bit_decoded_image_policy_is_128_mebibytes() {
+        assert_eq!(MAX_IMAGE_DECODED_BYTES, NATIVE_32BIT_MAX_IMAGE_DECODED_BYTES);
+    }
+
+    #[test]
+    fn native_32bit_decoded_image_policy_boundaries() {
+        let limit = NATIVE_32BIT_MAX_IMAGE_DECODED_BYTES;
+        assert_eq!(
+            checked_pixel_count_with_limit(8192, 4096, limit).unwrap(),
+            8192 * 4096
+        );
+        assert!(checked_pixel_count_with_limit(8192, 4097, limit).is_err());
+        assert!(checked_pixel_count_with_limit(16384, 16384, limit).is_err());
+        assert!(animation_atlas_layout_with_limit(32, 1024, 1024, limit).is_ok());
+        assert!(animation_atlas_layout_with_limit(33, 1024, 1024, limit).is_err());
     }
 
     fn single_frame_gif() -> Vec<u8> {
