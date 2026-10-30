@@ -575,12 +575,12 @@ impl Widget for CalendarControlGroup {
             Event::TouchUpdate(e) => e.touches.first().map(|t| {
                 (
                     t.abs,
-                    if t.state == TouchState::Stop {
+                    if matches!(t.state, TouchState::Stop | TouchState::Cancel) {
                         0.0
                     } else {
                         1.0
                     },
-                    if t.state == TouchState::Stop {
+                    if matches!(t.state, TouchState::Stop | TouchState::Cancel) {
                         0.12
                     } else {
                         0.07
