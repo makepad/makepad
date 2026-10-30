@@ -639,6 +639,10 @@ impl TabBar {
         self.tabs.get(&tab_id).map(|(tab, _)| (Self::tab_node_name(tab_id), tab.clone()))
     }
 
+    pub fn tab_widget(&self, tab_id: LiveId) -> Option<WidgetRef> {
+        self.tabs.get(&tab_id).map(|(tab, _)| tab.clone())
+    }
+
     /// The tabs as widgets, for whoever enumerates children (the Dock).
     pub fn tab_refs(&self) -> impl Iterator<Item = (LiveId, WidgetRef)> + '_ {
         self.tabs
