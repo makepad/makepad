@@ -8,7 +8,7 @@ use {
     std::any::Any,
     std::cell::RefCell,
     std::collections::{HashMap, VecDeque},
-    std::sync::atomic::{AtomicU64, AtomicU8, Ordering},
+    std::sync::atomic::{AtomicU64, Ordering},
 };
 
 static SCRIPT_ASYNC_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -42,18 +42,137 @@ pub enum SplashTheme {
     Skeleton,
 }
 
-static SPLASH_THEME: AtomicU8 = AtomicU8::new(0);
-
-pub fn set_splash_theme(theme: SplashTheme) {
-    SPLASH_THEME.store(theme as u8, Ordering::Relaxed);
+/// Host-trusted Splash code that isolates run on top of the host's theme, in
+/// the two phases a desktop stylesheet has: `theme` right after the isolate
+/// picks its theme (for the host's own tokens), `widgets` right after it
+/// registers its widgets (to restyle them).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SplashThemeScript {
+    pub theme: String,
+    pub widgets: String,
 }
 
-fn splash_theme() -> SplashTheme {
-    match SPLASH_THEME.load(Ordering::Relaxed) {
-        1 => SplashTheme::Light,
-        2 => SplashTheme::Skeleton,
-        _ => SplashTheme::Dark,
+thread_local! {
+    /// The host's theme for its isolates, which live with it on the UI thread.
+    static SPLASH_THEME: std::cell::Cell<SplashTheme> = const { std::cell::Cell::new(SplashTheme::Dark) };
+    static SPLASH_THEME_SCRIPT: RefCell<Option<std::rc::Rc<SplashThemeScript>>> = const { RefCell::new(None) };
+    /// Bumped whenever the host's theme or its script changes, so that running
+    /// isolates know to check whether they must restyle.
+    static SPLASH_THEME_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Sets the theme this thread's Splash isolates use. Running ones restyle to it
+/// on their next draw, unless pinned to a theme of their own (`Splash::set_theme`).
+pub fn set_splash_theme(theme: SplashTheme) {
+    if SPLASH_THEME.with(|current| current.replace(theme)) != theme {
+        SPLASH_THEME_GENERATION.with(|generation| generation.set(generation.get() + 1));
     }
+}
+
+/// Sets the host's [`SplashThemeScript`]. Running isolates restyle to it on
+/// their next draw, just as they do for a new [`set_splash_theme`].
+pub fn set_splash_theme_script(script: SplashThemeScript) {
+    let is_new = SPLASH_THEME_SCRIPT.with(|current| {
+        let mut current = current.borrow_mut();
+        let is_new = current.as_deref() != Some(&script);
+        if is_new {
+            *current = Some(std::rc::Rc::new(script));
+        }
+        is_new
+    });
+    if is_new {
+        SPLASH_THEME_GENERATION.with(|generation| generation.set(generation.get() + 1));
+    }
+}
+
+pub(crate) fn splash_theme() -> SplashTheme {
+    SPLASH_THEME.with(|theme| theme.get())
+}
+
+pub(crate) fn splash_theme_script() -> Option<std::rc::Rc<SplashThemeScript>> {
+    SPLASH_THEME_SCRIPT.with(|script| script.borrow().clone())
+}
+
+pub(crate) fn splash_theme_generation() -> u64 {
+    SPLASH_THEME_GENERATION.with(|generation| generation.get())
+}
+
+/// Puts an isolate on `theme` and registers its widgets there, with the
+/// host's `script` (if any) around that registration. Runs at boot, and again
+/// in reload mode when a running isolate restyles.
+pub(crate) fn style_isolate(
+    vm: &mut ScriptVm,
+    theme: SplashTheme,
+    script: Option<&SplashThemeScript>,
+    host_io_only: bool,
+) {
+    // Set directly: evaluating the same `script!` again on a restyle errors in the VM.
+    let name = match theme {
+        SplashTheme::Dark => id!(dark),
+        SplashTheme::Light => id!(light),
+        SplashTheme::Skeleton => id!(skeleton),
+    };
+    let themes = vm.module(id!(themes));
+    let picked = vm.bx.heap.value(themes, name.into(), NoTrap);
+    let modules = vm.bx.heap.modules;
+    vm.bx.heap.set_value_def(modules, id!(theme).into(), picked);
+    if let Some(script) = script {
+        eval_theme_script(vm, "theme", &script.theme);
+    }
+    crate::widgets_mod_with_host_io(vm, host_io_only);
+    if let Some(script) = script {
+        eval_theme_script(vm, "widgets", &script.widgets);
+    }
+}
+
+/// Styles a running isolate again: [`style_isolate`] in reload mode, then a
+/// desktop stylesheet's widgets, if it has one, as the sheet's own restyle does.
+pub(crate) fn restyle_isolate(
+    vm: &mut ScriptVm,
+    theme: SplashTheme,
+    script: Option<&SplashThemeScript>,
+    host_io_only: bool,
+) {
+    // The app's code has run by now, and this registration reads objects it
+    // can reach, so cap it (far above what registering takes) against a spin.
+    let host_mods = {
+        let state = vm.host.cx_mut().global::<CxWidgetAsync>();
+        state.host_isolate_mods.get(&state.current_vm_id).cloned().unwrap_or_default()
+    };
+    let budget = vm.bx.run_budget.replace(ScriptRunBudget::from_durations(
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(2),
+        512,
+    ));
+    vm.with_reload(|vm| {
+        style_isolate(vm, theme, script, host_io_only);
+        if !host_io_only {
+            crate::desktop_style::apply_widgets(vm);
+        }
+        // Widget registration replaces mod.widgets. Restore only this isolate's
+        // boot-time host mods, last as at boot, after its stripped/jail/host namespace.
+        for install in host_mods {
+            install(vm);
+        }
+    });
+    vm.bx.run_budget = budget;
+}
+
+fn eval_theme_script(vm: &mut ScriptVm, phase: &str, code: &str) {
+    if code.is_empty() {
+        return;
+    }
+    vm.eval(ScriptMod {
+        cargo_manifest_path: String::new(),
+        module_path: format!("splash_theme_{phase}"),
+        file: format!("splash_theme/{phase}.splash"),
+        line: 0,
+        column: 0,
+        // A script's last statement is its value, which an assignment there
+        // never stores; ending the script on an empty statement avoids that.
+        code: format!("{code}\n;"),
+        values: vec![],
+    });
 }
 
 thread_local! {
@@ -83,7 +202,8 @@ thread_local! {
 /// An isolate takes its mods at allocation, so a registration only reaches
 /// isolates allocated after it: register before the first mount. Registering the
 /// same mod twice installs it twice, which is wasteful but harmless — the second
-/// pass rebinds the same names.
+/// pass rebinds the same names. The isolate replays its allocation-time mods in
+/// reload mode when its host theme changes, restoring their widget definitions.
 ///
 /// Host mods install last: after the ambient-authority strip (`fs`, `run`, `res`,
 /// `cx.quit`) and after the jailed `fs` and brokered `host` re-registrations. A
@@ -160,6 +280,7 @@ pub fn gc_dead_splash_isolates(cx: &mut Cx) {
         // bare `ScriptValue`. Same reason `gc_bridge` above runs first.
         state.heap_to_vm.retain(|_, v| *v != vm_id);
         state.ui_handle_types.remove(&vm_id);
+        state.host_isolate_mods.remove(&vm_id);
         state.vm_root_uids.remove(&vm_id);
         state.done.retain(|d| d.vm_id != vm_id);
         state.widget_to_script_calls.retain(|r| r.vm_id != vm_id);
@@ -271,6 +392,8 @@ struct CxWidgetAsync {
     pending_script_to_widget_returns: HashMap<(SplashVmId, usize), ScriptToWidgetReturn>,
     thread_map: HashMap<(SplashVmId, usize), (WidgetUid, ScriptAsyncId)>,
     ui_handle_types: HashMap<SplashVmId, ScriptHandleType>,
+    /// The host mods each isolate received at boot, replayed after a theme restyle.
+    host_isolate_mods: HashMap<SplashVmId, Vec<fn(&mut ScriptVm)>>,
     global_ui_root_uid: WidgetUid,
     /// Maps a heap identity (see [`ScriptObjectRef::heap_key`]) to the isolate VM
     /// that owns it. Only isolate heaps are inserted, and an entry is removed the
@@ -412,6 +535,15 @@ pub trait CxSplashVmExt {
     /// Allocate an isolate whose external I/O must use the host service bridge.
     fn alloc_splash_vm_with_host_io(&mut self) -> SplashVmId;
     fn alloc_splash_vm_with_io(&mut self, network_enabled: bool, host_io_only: bool) -> SplashVmId;
+    /// Like [`alloc_splash_vm_with_io`](Self::alloc_splash_vm_with_io), but
+    /// `Some(theme)` pins the isolate to that stock theme, without the host's
+    /// [`SplashThemeScript`]. `None` takes the host's theme and script.
+    fn alloc_splash_vm_with_theme(
+        &mut self,
+        network_enabled: bool,
+        host_io_only: bool,
+        theme: Option<SplashTheme>,
+    ) -> SplashVmId;
     fn with_script_vm_id<R>(&mut self, vm_id: SplashVmId, f: impl FnOnce(&mut ScriptVm) -> R) -> R;
     fn with_script_vm_id_thread<R>(
         &mut self,
@@ -520,6 +652,15 @@ impl CxSplashVmExt for Cx {
     }
 
     fn alloc_splash_vm_with_io(&mut self, network_enabled: bool, host_io_only: bool) -> SplashVmId {
+        self.alloc_splash_vm_with_theme(network_enabled, host_io_only, None)
+    }
+
+    fn alloc_splash_vm_with_theme(
+        &mut self,
+        network_enabled: bool,
+        host_io_only: bool,
+        theme: Option<SplashTheme>,
+    ) -> SplashVmId {
         // A nested Splash cannot acquire authority its parent does not have.
         let host_io_only = host_io_only || self.script_data.std.host_io_only();
         let network_enabled = network_enabled && !host_io_only;
@@ -546,7 +687,7 @@ impl CxSplashVmExt for Cx {
         let outer_std = std::mem::replace(&mut self.script_data.std, std);
         let outer_vm = self.script_vm.take();
         self.script_vm = Some(Box::new(ScriptVmBase::new()));
-        let bx = {
+        let (bx, host_mods) = {
             let bx = self.script_vm.take().unwrap();
             let mut vm = ScriptVm {
                 host: self,
@@ -554,16 +695,8 @@ impl CxSplashVmExt for Cx {
             };
             crate::makepad_draw::makepad_platform::script::script_mod(&mut vm);
             crate::theme_mod(&mut vm);
-            match splash_theme() {
-                SplashTheme::Light => {
-                    vm.eval(crate::makepad_script::script! { mod.theme = mod.themes.light });
-                }
-                SplashTheme::Skeleton => {
-                    vm.eval(crate::makepad_script::script! { mod.theme = mod.themes.skeleton });
-                }
-                SplashTheme::Dark => {}
-            }
-            crate::widgets_mod_with_host_io(&mut vm, host_io_only);
+            let script = theme.is_none().then(splash_theme_script).flatten();
+            style_isolate(&mut vm, theme.unwrap_or_else(splash_theme), script.as_deref(), host_io_only);
             // Splash isolates run untrusted-ish mini-app script; strip the
             // ambient-authority modules from the isolate's namespace entirely:
             // filesystem access (`fs`), child processes (`run`), and the resource
@@ -596,10 +729,10 @@ impl CxSplashVmExt for Cx {
             // free to register another.
             let host_mods: Vec<fn(&mut ScriptVm)> =
                 HOST_ISOLATE_MODS.with(|g| g.borrow().clone());
-            for install in host_mods {
+            for install in &host_mods {
                 install(&mut vm);
             }
-            vm.bx
+            (vm.bx, host_mods)
         };
         let mut std = std::mem::replace(&mut self.script_data.std, outer_std);
         if host_io_only {
@@ -616,6 +749,7 @@ impl CxSplashVmExt for Cx {
         // the dead one.
         state.dead_heaps.remove(&heap_key);
         state.heap_to_vm.insert(heap_key, id);
+        state.host_isolate_mods.insert(id, host_mods);
         state.isolated_vms.vms.insert(
             id,
             IsolatedSplashVm {
