@@ -3756,6 +3756,8 @@ pub struct OpenglBuffer {
     pub retained_publication: Option<crate::retained_instances::RetainedInstances>,
     pub retained_count: usize,
     pub charge: Option<crate::retained_instances::RetainedAllocation>,
+    /// What the uniform buffer holds now, so an upload that wouldn't change it can be skipped.
+    uniform_bytes: Vec<u8>,
 }
 
 impl OpenglBuffer {
@@ -3932,6 +3934,10 @@ impl OpenglBuffer {
         }
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer(gl);
+        } else if self.uniform_bytes == data {
+            // Every draw list uploads each frame, and glBufferData reallocates the buffer
+            // even when nothing changed, which costs the GL driver a lot of CPU.
+            return;
         }
         unsafe {
             (gl.glBindBuffer)(gl_sys::UNIFORM_BUFFER, self.gl_buffer.unwrap());
@@ -3945,6 +3951,8 @@ impl OpenglBuffer {
             #[cfg(debug_assertions)]
             crate::gl_log_error!(gl);
         }
+        self.uniform_bytes.clear();
+        self.uniform_bytes.extend_from_slice(data);
     }
 
     pub fn update_index_buffer(&mut self, gl: &LibGl, data: &[u32]) {
