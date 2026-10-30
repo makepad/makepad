@@ -12,6 +12,8 @@ pub mod glyph_raster_image;
 pub mod image;
 pub mod intern;
 pub mod layouter;
+pub mod line_break;
+mod line_break_data;
 pub mod loader;
 pub mod msdfer;
 pub mod num;

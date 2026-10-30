@@ -23,7 +23,7 @@ unicode-bidi = { version = "0.3", path = "../libs/unicode/unicode-bidi" }
 ab_glyph_rasterizer = { version = "0.1.8", path = "../libs/ab_glyph_rasterizer"}
 sdfer = { path = "../libs/sdfer", version = "0.2.1" }
 fxhash = { version = "0.2.1", path = "../libs/fxhash" }
-unicode-linebreak = { version = "0.1.5", path = "../libs/unicode/unicode-linebreak" }
+unicode-script = { version = "0.5.8", path = "../libs/unicode/unicode-script" }
 unicode-segmentation = { version = "1.12.0", path = "../libs/unicode/unicode-segmentation" }
 makepad-zune-png = { version = "0.5.2", path = "../libs/zune/zune-png" }
 makepad-zune-jpeg = { version = "0.5.15", path = "../libs/zune/zune-jpeg" }

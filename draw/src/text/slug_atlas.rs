@@ -51,6 +51,8 @@ pub enum SlugGlyphCacheResult {
     },
     Deferred,
     Unavailable,
+    /// The glyph has no outline, like a space, so there's nothing to draw.
+    Empty,
 }
 
 pub struct SlugAtlas {
@@ -66,6 +68,7 @@ pub struct SlugAtlas {
     uploaded_generation: u64,
     cached_glyphs: FxHashMap<SlugGlyphKey, CachedSlugGlyphInfo>,
     missing_glyphs: FxHashSet<SlugGlyphKey>,
+    empty_glyphs: FxHashSet<SlugGlyphKey>,
     needs_reset: bool,
 }
 
@@ -100,6 +103,7 @@ impl SlugAtlas {
             uploaded_generation: 0,
             cached_glyphs: FxHashMap::default(),
             missing_glyphs: FxHashSet::default(),
+            empty_glyphs: FxHashSet::default(),
             needs_reset: false,
         }
     }
@@ -118,6 +122,7 @@ impl SlugAtlas {
         self.band_data.clear();
         self.cached_glyphs.clear();
         self.missing_glyphs.clear();
+        self.empty_glyphs.clear();
         self.curve_uploaded_floats = 0;
         self.band_uploaded_floats = 0;
         self.curve_dirty = true;
@@ -161,6 +166,9 @@ impl SlugAtlas {
                 glyph: cached.info,
             };
         }
+        if self.empty_glyphs.contains(&key) {
+            return SlugGlyphCacheResult::Empty;
+        }
         if self.missing_glyphs.contains(&key) {
             return SlugGlyphCacheResult::Unavailable;
         }
@@ -169,8 +177,8 @@ impl SlugAtlas {
         }
 
         let Some(outline) = font.glyph_outline(glyph_id) else {
-            self.missing_glyphs.insert(key);
-            return SlugGlyphCacheResult::Unavailable;
+            self.empty_glyphs.insert(key);
+            return SlugGlyphCacheResult::Empty;
         };
         let Some(info) = self.build_glyph(font, &outline) else {
             self.missing_glyphs.insert(key);
@@ -756,7 +764,7 @@ mod tests {
                 SlugGlyphCacheResult::Deferred => {
                     panic!("unexpected deferred result for {ch:?}");
                 }
-                SlugGlyphCacheResult::Unavailable => {
+                SlugGlyphCacheResult::Unavailable | SlugGlyphCacheResult::Empty => {
                     panic!("unexpected unavailable result for {ch:?}");
                 }
             }

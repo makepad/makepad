@@ -15,6 +15,7 @@ use {
         rc::Rc,
         sync::Mutex,
     },
+    unicode_script::{Script, UnicodeScript},
     unicode_segmentation::UnicodeSegmentation,
 };
 
@@ -110,8 +111,9 @@ pub struct Shaper {
     cache_lru_order: BTreeMap<u64, ShapeParams>,
 }
 
-/// A shaping cache entry, tracked with its position in the least-recently-used
-/// order (the tick under which it is registered in `Shaper::cache_lru_order`).
+/// A shaping cache entry, tracked with the tick it was last used at.
+///
+/// Hits only update `last_used`, so its registration in `Shaper::cache_lru_order` can be older.
 #[derive(Debug)]
 struct CachedShape {
     result: Rc<ShapedText>,
@@ -136,27 +138,40 @@ impl Shaper {
     }
 
     pub fn get_or_shape(&mut self, params: ShapeParams) -> Rc<ShapedText> {
+        self.get_or_shape_with(params, |_, _| None)
+    }
+
+    /// Like [`Self::get_or_shape`], but `get_shaped_text` gets the first try at what isn't cached.
+    pub(crate) fn get_or_shape_with(
+        &mut self,
+        params: ShapeParams,
+        get_shaped_text: impl FnOnce(&mut Self, &ShapeParams) -> Option<Rc<ShapedText>>,
+    ) -> Rc<ShapedText> {
         if self.cache_size == 0 {
-            return Rc::new(self.shape(params));
+            return get_shaped_text(self, &params).unwrap_or_else(|| Rc::new(self.shape(params)));
         }
         if let Some(entry) = self.cached_results.get_mut(&params) {
             // Refresh recency so the hot working set of words survives
             // eviction while scrolling through varied text.
-            if let Some(key) = self.cache_lru_order.remove(&entry.last_used) {
-                self.cache_tick += 1;
-                entry.last_used = self.cache_tick;
-                self.cache_lru_order.insert(entry.last_used, key);
-            }
+            self.cache_tick += 1;
+            entry.last_used = self.cache_tick;
             return entry.result.clone();
         }
         while self.cached_results.len() >= self.cache_size {
-            let Some((_, key)) = self.cache_lru_order.pop_first() else {
+            let Some((tick, key)) = self.cache_lru_order.pop_first() else {
                 break;
             };
+            if let Some(entry) = self.cached_results.get(&key) {
+                // It was used since we registered it, so it goes back in under its last use.
+                if entry.last_used != tick {
+                    self.cache_lru_order.insert(entry.last_used, key);
+                    continue;
+                }
+            }
             self.cached_results.remove(&key);
         }
         let cache_key = params.clone();
-        let result = Rc::new(self.shape(params));
+        let result = get_shaped_text(self, &params).unwrap_or_else(|| Rc::new(self.shape(params)));
         self.cache_tick += 1;
         self.cache_lru_order.insert(self.cache_tick, cache_key.clone());
         self.cached_results.insert(
@@ -167,6 +182,37 @@ impl Shaper {
             },
         );
         result
+    }
+
+    /// Returns whether `params` is in the cache, without counting that as a use.
+    pub(crate) fn is_cached(&self, params: &ShapeParams) -> bool {
+        self.cached_results.contains_key(params)
+    }
+
+    /// Shapes `params.text` so its pieces can take their glyphs from it, unless they can't.
+    ///
+    /// They can't if the text might go right to left or needs a fallback font, since a piece could
+    /// then shape differently on its own.
+    pub(crate) fn shape_with_pieces(&mut self, params: ShapeParams) -> Option<ShapedText> {
+        let font = params.fonts.first()?.clone();
+        let text: &str = &params.text;
+        // Text fonts have ASCII, and the check after shaping catches one that doesn't.
+        let has_glyphs = || {
+            font.with_ttf_parser_face(|face| {
+                text.chars().all(|c| {
+                    c.is_ascii() || face.glyph_index(c).is_some_and(|glyph_id| glyph_id.0 != 0)
+                })
+            })
+        };
+        if !is_definitely_ltr(text) || !has_glyphs() {
+            return None;
+        }
+        let shaped_text = self.shape(params);
+        shaped_text
+            .glyphs
+            .iter()
+            .all(|glyph| glyph.id != 0 && Rc::ptr_eq(&glyph.font, &font))
+            .then_some(shaped_text)
     }
 
     fn shape(&mut self, params: ShapeParams) -> ShapedText {
@@ -306,6 +352,11 @@ impl Shaper {
         let (font, remaining_fonts) = fonts.split_first().unwrap();
         let mut glyphs = self.reusable_glyphs.pop().unwrap_or_default();
         self.shape_step(text, font, features, direction, start, end, &mut glyphs);
+        if !glyphs.iter().any(|glyph| glyph.id == 0) {
+            out_glyphs.append(&mut glyphs);
+            self.reusable_glyphs.push(glyphs);
+            return;
+        }
 
         // Collect glyph groups (runs of glyphs sharing a cluster) in the order
         // produced by the shaper, which is the visual order for `direction`.
@@ -457,18 +508,27 @@ impl Shaper {
         }
         let glyph_buffer = font.shape(&self.cached_rb_features, unicode_buffer);
         let units_per_em = font.units_per_em();
+        // HarfBuzz keeps a script in its own direction, even under an override like LRO before
+        // Hebrew, so the order of the clusters it returns tells us which way the glyphs go.
+        let glyph_infos = glyph_buffer.glyph_infos();
+        let direction = match (glyph_infos.first(), glyph_infos.last()) {
+            (Some(first), Some(last)) if first.cluster > last.cluster => Direction::Rtl,
+            (Some(first), Some(last)) if first.cluster < last.cluster => Direction::Ltr,
+            _ => direction,
+        };
         out_glyphs.extend(
-            glyph_buffer
-                .glyph_infos()
+            glyph_infos
                 .iter()
                 .zip(glyph_buffer.glyph_positions())
                 .map(|(glyph_info, glyph_position)| ShapedGlyph {
                     font: font.clone(),
                     id: glyph_info.glyph_id as u16,
                     cluster: glyph_info.cluster as usize,
+                    direction,
                     advance_in_ems: glyph_position.x_advance as f32 / units_per_em,
                     offset_in_ems: glyph_position.x_offset as f32 / units_per_em,
                     y_offset_in_ems: glyph_position.y_offset as f32 / units_per_em,
+                    is_unsafe_to_break: glyph_info.unsafe_to_break(),
                 }),
         );
 
@@ -491,7 +551,7 @@ pub struct Settings {
     pub cache_size: usize,
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShapeParams {
     pub text: Substr,
     pub fonts: Rc<[Rc<Font>]>,
@@ -503,6 +563,13 @@ pub struct ShapeParams {
     pub diagnostics: Rc<FontDiagnostics>,
 }
 
+// The text alone tells keys apart well enough, and the rest takes longer to hash than it saves.
+impl Hash for ShapeParams {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.text.hash(state);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ShapedText {
     pub text: Substr,
@@ -510,14 +577,61 @@ pub struct ShapedText {
     pub glyphs: Vec<ShapedGlyph>,
 }
 
+impl ShapedText {
+    /// Returns `piece`, at `start` in a text from [`Shaper::shape_with_pieces`], shaped on its own.
+    ///
+    /// That's our glyphs for it where HarfBuzz says breaking the text at both of its ends is safe
+    /// and it has our script. Elsewhere it returns `None`.
+    pub(crate) fn get_piece(&self, piece: &Substr, start: usize) -> Option<ShapedText> {
+        let end = start + piece.len();
+        let start_index = self.glyphs.partition_point(|glyph| glyph.cluster < start);
+        let end_index = self.glyphs.partition_point(|glyph| glyph.cluster < end);
+        let is_safe_to_break_at = |index: usize, cluster: usize| {
+            cluster == 0
+                || cluster == self.text.len()
+                || self.glyphs.get(index).is_some_and(|glyph| {
+                    glyph.cluster == cluster && !glyph.is_unsafe_to_break
+                })
+        };
+        if !is_safe_to_break_at(start_index, start)
+            || !is_safe_to_break_at(end_index, end)
+            || guess_script(piece) != guess_script(&self.text)
+        {
+            return None;
+        }
+        let glyphs: Vec<ShapedGlyph> = self.glyphs[start_index..end_index]
+            .iter()
+            .map(|glyph| ShapedGlyph {
+                cluster: glyph.cluster - start,
+                ..glyph.clone()
+            })
+            .collect();
+        Some(ShapedText {
+            text: piece.clone(),
+            width_in_ems: glyphs.iter().map(|glyph| glyph.advance_in_ems).sum(),
+            glyphs,
+        })
+    }
+}
+
+/// Returns the script HarfBuzz picks for `text`, from the first char that has one of its own.
+fn guess_script(text: &str) -> Option<Script> {
+    text.chars()
+        .map(|c| c.script())
+        .find(|script| !matches!(script, Script::Common | Script::Inherited | Script::Unknown))
+}
+
 #[derive(Clone, Debug)]
 pub struct ShapedGlyph {
     pub font: Rc<Font>,
     pub id: GlyphId,
     pub cluster: usize,
+    pub direction: Direction,
     pub advance_in_ems: f32,
     pub offset_in_ems: f32,
     pub y_offset_in_ems: f32,
+    /// Whether the text before and after this glyph's cluster could shape differently on their own.
+    pub is_unsafe_to_break: bool,
 }
 
 #[cfg(test)]

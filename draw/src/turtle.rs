@@ -4861,20 +4861,14 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                                 .total_resolved_delta_to(walk.deferred_before_count),
                         )
                     };
-                    let rank = distribution_rank(
-                        &self.finished_walks[turtle_walks_start..walks_end],
-                        flow_index,
-                    );
-                    let distributed = if in_flow {
-                        group.map_or(0.0, |group| group.offset(distribute, rank))
-                    } else {
-                        0.0
-                    };
                     let main = delta
                         + if use_start {
                             start_dx
-                        } else if role == RowAlignRole::Shiftable {
-                            distributed
+                        } else if in_flow && role == RowAlignRole::Shiftable {
+                            group.map_or(0.0, |group| {
+                                let walks = &self.finished_walks[turtle_walks_start..walks_end];
+                                group.offset(distribute, distribution_rank(walks, flow_index))
+                            })
                         } else {
                             0.0
                         };
@@ -4926,14 +4920,13 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                                 walk.align_role,
                             )
                         };
-                        let rank = distribution_rank(
-                            &self.finished_walks[row_start..row_end],
-                            flow_index,
-                        );
                         let dx = if use_start {
                             start_dx
                         } else if in_flow && role == RowAlignRole::Shiftable {
-                            group.map_or(0.0, |group| group.offset(distribute, rank))
+                            group.map_or(0.0, |group| {
+                                let walks = &self.finished_walks[row_start..row_end];
+                                group.offset(distribute, distribution_rank(walks, flow_index))
+                            })
                         } else {
                             0.0
                         };
@@ -4988,20 +4981,14 @@ impl<'a, 'b> Cx2d<'a, 'b> {
                                 .total_resolved_delta_to(walk.deferred_before_count),
                         )
                     };
-                    let rank = distribution_rank(
-                        &self.finished_walks[turtle_walks_start..walks_end],
-                        flow_index,
-                    );
-                    let distributed = if in_flow {
-                        group.map_or(0.0, |group| group.offset(distribute, rank))
-                    } else {
-                        0.0
-                    };
                     let main = delta
                         + if use_start {
                             start_dy
-                        } else if role == RowAlignRole::Shiftable {
-                            distributed
+                        } else if in_flow && role == RowAlignRole::Shiftable {
+                            group.map_or(0.0, |group| {
+                                let walks = &self.finished_walks[turtle_walks_start..walks_end];
+                                group.offset(distribute, distribution_rank(walks, flow_index))
+                            })
                         } else {
                             0.0
                         };
@@ -5191,6 +5178,12 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             *clip_min = rect.pos;
             *clip_max = rect.pos + rect.size;
         }
+    }
+
+    /// Removes a clip rect from [`Self::push_clip_rect_tracked`] instead of popping it, so it clips nothing.
+    pub fn remove_clip_rect_at(&mut self, index: usize) {
+        debug_assert!(matches!(self.align_list[index], AlignEntry::BeginClip(..)));
+        self.align_list[index] = AlignEntry::Unset;
     }
 
     // Returns the end of the align list of the finished walk with the given index.

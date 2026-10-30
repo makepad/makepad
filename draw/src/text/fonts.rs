@@ -25,10 +25,8 @@ impl LazyFontRequests {
         family_id: FontFamilyId,
         lazy_family: LazyFontFamily,
         text: &str,
-        has_missing_glyph: bool,
     ) -> bool {
-        has_missing_glyph
-            && text.chars().any(|ch| lazy_family.contains(ch))
+        text.chars().any(|ch| lazy_family.contains(ch))
             && self.requested.insert((family_id, lazy_family))
     }
 
@@ -270,10 +268,13 @@ impl Fonts {
         id: FontFamilyId,
         family: LazyFontFamily,
         text: &str,
-        has_missing_glyph: bool,
     ) -> bool {
-        self.lazy_font_requests
-            .take_for_glyph_miss(id, family, text, has_missing_glyph)
+        let is_new_request = self.lazy_font_requests.take_for_glyph_miss(id, family, text);
+        if is_new_request {
+            // The family expects this font from now on, so its fonts aren't all loaded anymore.
+            self.layouter.font_family_generation += 1;
+        }
+        is_new_request
     }
 
     pub fn is_font_family_complete(
@@ -290,6 +291,13 @@ impl Fonts {
                     && def.font_ids.len() == expected_member_count
             })
             .unwrap_or(false)
+    }
+
+    /// Returns whether a family we laid out text with is still waiting for some of its fonts.
+    ///
+    /// That text changes once they arrive, which we only notice the next time the family is used.
+    pub fn is_font_family_loading(&self, id: FontFamilyId) -> bool {
+        self.layouter.loader.is_font_family_loading(id)
     }
 
     /// Records that `id`'s resource could not be read; true the first time,
@@ -332,6 +340,11 @@ impl Fonts {
         definition: FontFamilyDefinition,
     ) {
         self.layouter.set_font_family_definition(id, definition);
+    }
+
+    /// See [`Layouter::font_family_generation`].
+    pub fn font_family_generation(&self) -> u64 {
+        self.layouter.font_family_generation()
     }
 
     pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
@@ -465,32 +478,27 @@ mod tests {
         assert!(!requests.take_for_glyph_miss(
             family_id,
             LazyFontFamily::Cjk,
-            "\u{4f60}",
-            false,
+            "abc",
         ));
         assert!(requests.take_for_glyph_miss(
             family_id,
             LazyFontFamily::Cjk,
             "\u{4f60}",
-            true,
         ));
         assert!(!requests.take_for_glyph_miss(
             family_id,
             LazyFontFamily::Cjk,
             "\u{597d}",
-            true,
         ));
         assert!(requests.take_for_glyph_miss(
             family_id,
             LazyFontFamily::Emoji,
             "\u{1f600}",
-            true,
         ));
         assert!(!requests.take_for_glyph_miss(
             family_id,
             LazyFontFamily::Emoji,
             "\u{1f680}",
-            true,
         ));
     }
 }
