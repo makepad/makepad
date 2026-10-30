@@ -20,6 +20,8 @@ pub struct Loader {
     shaper: Rc<RefCell<Shaper>>,
     rasterizer: Rc<RefCell<rasterizer::Rasterizer>>,
     pub(crate) font_family_definitions: FxHashMap<FontFamilyId, FontFamilyDefinition>,
+    // How many of those still wait for some of their fonts.
+    loading_font_family_count: usize,
     font_definitions: FxHashMap<FontId, FontDefinition>,
     font_family_cache: FxHashMap<FontFamilyId, Rc<FontFamily>>,
     font_cache: FxHashMap<FontId, Rc<Font>>,
@@ -31,6 +33,7 @@ impl Loader {
             shaper: Rc::new(RefCell::new(Shaper::new(settings.shaper))),
             rasterizer: Rc::new(RefCell::new(Rasterizer::new(settings.rasterizer))),
             font_family_definitions: FxHashMap::default(),
+            loading_font_family_count: 0,
             font_definitions: FxHashMap::default(),
             font_family_cache: FxHashMap::default(),
             font_cache: FxHashMap::default(),
@@ -62,18 +65,19 @@ impl Loader {
             !self.is_font_family_known(id),
             "can't redefine a font family that is already known"
         );
-        self.font_family_definitions.insert(id, definition);
+        self.insert_font_family_definition(id, definition);
     }
 
+    /// Returns whether the family changed, so text laid out with it may come out different.
     pub fn set_font_family_definition(
         &mut self,
         id: FontFamilyId,
         definition: FontFamilyDefinition,
-    ) {
+    ) -> bool {
         // Skip cache eviction if the definition is unchanged.
         if let Some(existing) = self.font_family_definitions.get(&id) {
             if *existing == definition {
-                return;
+                return false;
             }
         }
         if let Some(cached) = self.font_family_cache.get(&id) {
@@ -82,11 +86,25 @@ impl Loader {
                 && definition.expected_member_count == definition.font_ids.len()
                 && cached.diagnostics() == &definition.diagnostics
             {
-                return;
+                return false;
             }
         }
         self.font_family_cache.remove(&id);
-        self.font_family_definitions.insert(id, definition);
+        self.insert_font_family_definition(id, definition);
+        true
+    }
+
+    fn insert_font_family_definition(&mut self, id: FontFamilyId, definition: FontFamilyDefinition) {
+        self.loading_font_family_count += usize::from(definition.is_loading());
+        if let Some(old) = self.font_family_definitions.insert(id, definition) {
+            self.loading_font_family_count -= usize::from(old.is_loading());
+        }
+    }
+
+    /// Returns whether a family still waits for some of its fonts.
+    pub fn is_font_family_loading(&self, id: FontFamilyId) -> bool {
+        self.loading_font_family_count > 0
+            && self.font_family_definitions.get(&id).is_some_and(FontFamilyDefinition::is_loading)
     }
 
     pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {
@@ -174,6 +192,12 @@ pub struct FontFamilyDefinition {
     pub font_ids: Vec<FontId>,
     pub expected_member_count: usize,
     pub diagnostics: FontDiagnostics,
+}
+
+impl FontFamilyDefinition {
+    fn is_loading(&self) -> bool {
+        self.font_ids.len() < self.expected_member_count
+    }
 }
 
 #[derive(Clone, Debug)]

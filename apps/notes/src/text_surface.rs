@@ -845,6 +845,7 @@ impl NotesTextSurface {
                         }
                         row.text = text.substr(row.text.start_in_parent()..end);
                         row.width_in_lpxs = part.width_in_lpxs + indent;
+                        row.hanging_width_in_lpxs = part.hanging_width_in_lpxs;
                         row.ascender_in_lpxs = row.ascender_in_lpxs.max(part.ascender_in_lpxs);
                         row.descender_in_lpxs = row.descender_in_lpxs.min(part.descender_in_lpxs);
                     } else {
@@ -895,9 +896,12 @@ impl NotesTextSurface {
         }
         self.laidout = Some(LaidoutText {
             text,
+            has_missing_glyph: rows.iter().flat_map(|row| &row.glyphs).any(|glyph| glyph.id == 0),
             rows,
             size_in_lpxs: TextSize::new(width as f32, y),
             is_truncated: false,
+            line_break_before_next_run: Default::default(),
+            is_trailing_glue_reserved: false,
         });
     }
 }

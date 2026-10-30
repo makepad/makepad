@@ -387,7 +387,7 @@ impl LabelCache {
                 for family in [LazyFontFamily::Cjk, LazyFontFamily::Emoji] {
                     requested |= fonts
                         .borrow_mut()
-                        .take_lazy_font_request(key.family, family, text, true);
+                        .take_lazy_font_request(key.family, family, text);
                 }
                 if requested {
                     draw.text_style.ensure_fonts_loaded(cx);
