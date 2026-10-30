@@ -1725,6 +1725,17 @@ impl Dock {
         }
     }
 
+    fn set_tab_bar_hidden(&mut self, cx: &mut Cx, tabs_id: LiveId, hidden: bool) {
+        if let Some(DockItem::Tabs { hide_tab_bar, .. }) = self.dock_items.get_mut(&tabs_id) {
+            if *hide_tab_bar == hidden {
+                return;
+            }
+            self.needs_save = true;
+            *hide_tab_bar = hidden;
+            self.area.redraw(cx);
+        }
+    }
+
     fn redraw_tab(&mut self, cx: &mut Cx, tab_id: LiveId) {
         for (tabs_id, item) in self.dock_items.iter_mut() {
             match item {
@@ -2906,6 +2917,15 @@ impl DockRef {
         dock.replace_tab(cx, tab_item_id, new_kind, new_name, select)
     }
 
+    /// Hides or shows the given tab bar, whose active tab then fills the whole panel while it's hidden.
+    ///
+    /// Like any hidden tab bar, it isn't a drop target, and presses in it never make its tab current.
+    pub fn set_tab_bar_hidden(&self, cx: &mut Cx, tabs_id: LiveId, hidden: bool) {
+        if let Some(mut dock) = self.borrow_mut() {
+            dock.set_tab_bar_hidden(cx, tabs_id, hidden);
+        }
+    }
+
     pub fn set_tab_title(&self, cx: &mut Cx, tab: LiveId, title: String) {
         if let Some(mut dock) = self.borrow_mut() {
             dock.set_tab_title(cx, tab, title);
@@ -3773,5 +3793,29 @@ mod tests {
         layout.insert(reused, DockItem::tabs(Vec::new(), 0, false));
 
         assert!(!preserve_item_for_layout(&layout, reused, LiveId(2)));
+    }
+
+    #[test]
+    fn hiding_a_tab_bar_keeps_its_tabs() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (dock, bodies) = dock_with_tabs(&mut cx);
+        let is_hidden = |dock: &DockRef| matches!(
+            dock.borrow().unwrap().dock_items.get(&id!(root)),
+            Some(DockItem::Tabs { hide_tab_bar: true, .. })
+        );
+        dock.set_tab_bar_hidden(&mut cx, id!(root), true);
+        assert!(is_hidden(&dock));
+        assert!(dock.check_and_clear_need_save());
+        assert_intact(&dock, &bodies, id!(first));
+
+        // Hiding it again, or a tab or missing item, changes nothing.
+        dock.set_tab_bar_hidden(&mut cx, id!(root), true);
+        dock.set_tab_bar_hidden(&mut cx, id!(first), true);
+        dock.set_tab_bar_hidden(&mut cx, id!(missing), true);
+        assert!(!dock.check_and_clear_need_save());
+
+        dock.set_tab_bar_hidden(&mut cx, id!(root), false);
+        assert!(!is_hidden(&dock));
+        assert!(dock.check_and_clear_need_save());
     }
 }
