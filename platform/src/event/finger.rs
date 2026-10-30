@@ -3006,6 +3006,28 @@ mod tests {
     }
 
     #[test]
+    fn scrolling_blocked_outside_a_drawn_area_still_reaches_a_scrollable_flush_with_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let draw_list = DrawList::new(&mut cx);
+        // A page filling a modal on a 1080px wide phone at a 2.625 dpi factor. The modal's rect is
+        // rounded to f32 like a drawn area's, while the page's keeps every digit.
+        let width = 1080.0 / 2.625 - 30.0;
+        let [modal, page, wider_page] = [
+            Rect { pos: dvec2(15.0, 30.0), size: dvec2(width as f32 as f64, 804.0) },
+            Rect { pos: dvec2(15.0, 83.5), size: dvec2(width, 750.5) },
+            Rect { pos: dvec2(15.0, 83.5), size: dvec2(width + 1.0, 750.5) },
+        ]
+        .map(|rect| {
+            let list = &mut cx.draw_lists[draw_list.id()];
+            list.rect_areas.push(CxRectArea { rect, draw_clip: (dvec2(0.0, 0.0), dvec2(1000.0, 1000.0)) });
+            Area::Rect(RectArea { draw_list_id: draw_list.id(), rect_id: list.rect_areas.len() - 1, redraw_id: list.redraw_id })
+        });
+        cx.block_scrolling_except_within(modal);
+        assert!(cx.is_scrolling_allowed_within(&page));
+        assert!(!cx.is_scrolling_allowed_within(&wider_page));
+    }
+
+    #[test]
     fn a_drag_scroll_belongs_to_the_scrollable_that_claimed_it_first() {
         let nest = Nest::new();
         let (inner, outer) = (nest.area(INNER), nest.area(OUTER));
