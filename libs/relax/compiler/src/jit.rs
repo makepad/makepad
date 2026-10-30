@@ -7812,6 +7812,7 @@ pub(crate) fn records_due() -> bool {
 /// thread waits for is one batch, never the whole backlog (OWNERARCH.DESIGN.md §6.1, step 4).
 pub(crate) fn drain_records_bounded() {
     debug_assert!(!owner::is_owner());
+    let mut batches = 0u32;
     loop {
         let _job = compile_job();
         let more = owner::publish(|| {
@@ -7826,6 +7827,14 @@ pub(crate) fn drain_records_bounded() {
             !SPEC_STOP.load(Ordering::SeqCst) && !up.is_null() && unsafe { (&mut *up).record_cache_batch(RECORD_BATCH) }
         });
         if !more { break; }
+        batches += 1;
+    }
+    if crate::run::VERBOSE.load(Ordering::Relaxed) {
+        use crate::cache::warm_count as wc;
+        let (why, len) = (wc::N[wc::DRAIN_WHY].load(Ordering::Relaxed), wc::N[wc::DRAIN_LEN].load(Ordering::Relaxed));
+        if batches > 0 || len > 0 {
+            eprintln!("makepad-run cache: record drain: {batches} batches of {RECORD_BATCH}; stopped {why} (1 spec stop, 2 no unit, 3 cache out, 4 other unit, 5 ran), backlog {len}, waiting {} (t={:.0} ms)", PENDING_RECORDS.load(Ordering::Relaxed), crate::clock::ms_since_start());
+        }
     }
 }
 

@@ -3754,6 +3754,9 @@ fn ledger_current(p: &Store, present: &HashSet<String>, memo: &mut HashMap<(u8, 
             }
         });
         if now != h {
+            if crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("makepad-run cache: stale code store: crate {c}: late input {} `{name}` changed (stored {h:032x}, now {now:032x})", if k == crate::sip::LATE_FILE { "file" } else { "env" });
+            }
             return false;
         }
     }
@@ -4964,6 +4967,9 @@ impl FrontImages {
             ("identity: parser options", rec.parse_options == crate::crate_image::parse_options(options)),
         ];
         if let Some((w, _)) = checks.iter().find(|x| !x.1) {
+            if crate::preload::trace() && *w == "identity: parser options" {
+                eprintln!("boot-trace: {}: recorded parser options {:032x}, now {:032x}; options now: {:?}", c.name, rec.parse_options, crate::crate_image::parse_options(options), options);
+            }
             if crate::preload::trace() && w.starts_with("identity: dependency") {
                 eprintln!("boot-trace: {}: recorded dependencies {:?}, now {:?}", c.name, rec.deps, c.image_dep_names);
             }
