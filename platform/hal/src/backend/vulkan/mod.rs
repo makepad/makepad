@@ -583,6 +583,7 @@ impl Backend for Vulkan {
     /// stop in dependency order -- compiles; the queue (its submits, presents and retirements,
     /// which hand completions on); the completions (fence waits, frees) -- each joined.
     fn before_exit(&mut self) {
+        self.dev.save_pipeline_cache();
         self.flush();
         if let Some(queue) = self.queue.as_ref() { self.windows.clear(queue); }
         self.compiler.stop();
@@ -898,6 +899,11 @@ impl Gpu for Vulkan {
         if self.pipe.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) { return self.pipe.remove(&(sid, id.index)).is_some_and(|p| !p.announced); } false
     }
     fn frame(&mut self, s: &mut Session, sid: u32, target: Id, kind: u32, packet: u32, view: &CmdView, now: u64) -> Option<exec::SubmittedFrame> {
+        // pipelines were made and none for two seconds: the cache goes to its file (compile worker)
+        if self.dev.pipelines_made.load(std::sync::atomic::Ordering::Relaxed) > 0 && now.saturating_sub(self.dev.pipeline_made_ns.load(std::sync::atomic::Ordering::Relaxed)) > 2_000_000_000 {
+            let dev = self.dev.clone();
+            self.compiler.push(move || dev.save_pipeline_cache());
+        }
         #[cfg(target_os = "android")]
         if kind & !target::FLAGS == target::WINDOW && kind & (target::PICK | target::BADGES | target::REPLAY) == 0 {
             self.media.native_frame(s, target, packet, view);
