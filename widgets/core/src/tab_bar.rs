@@ -634,7 +634,7 @@ impl TabBar {
         LiveId::from_str_with_lut(&name).unwrap_or_else(|_| LiveId::from_str(&name))
     }
 
-    /// A tab's tree name and widget, for the Dock that hosts this bar.
+    /// A tab's tree name and widget.
     pub fn tab_ref(&self, tab_id: LiveId) -> Option<(LiveId, WidgetRef)> {
         self.tabs.get(&tab_id).map(|(tab, _)| (Self::tab_node_name(tab_id), tab.clone()))
     }
