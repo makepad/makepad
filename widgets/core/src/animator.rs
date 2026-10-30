@@ -834,6 +834,11 @@ impl Animator {
         cx.new_next_frame();
     }
 
+    #[inline]
+    pub fn has_deferred(&self) -> bool {
+        !self.deferred.is_empty()
+    }
+
     /// Replay any cut/play ops deferred while the VM was held, now that it's
     /// free, returning their apply values for the caller to `script_apply`.
     /// Returns empty (a no-op) when nothing is queued; if the VM is somehow
@@ -973,11 +978,10 @@ impl Animator {
         act: &mut AnimatorAction,
     ) -> Option<ScriptValue> {
         if let Event::NextFrame(nf) = event {
-            if !nf.set.contains(&self.next_frame) {
+            if self.tracks.is_empty() {
                 return None;
             }
-
-            if self.tracks.is_empty() {
+            if !nf.set.contains(&self.next_frame) {
                 return None;
             }
 

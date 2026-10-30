@@ -1966,7 +1966,8 @@ impl Event {
         if let Some(hit) = self.cancelled_press_hit(cx, area) {
             return hit;
         }
-        if !area.is_valid(cx) {
+        // Nothing below handles a NextFrame.
+        if matches!(self, Event::NextFrame(_)) || !area.is_valid(cx) {
             return Hit::Nothing;
         }
         match self {

@@ -1176,6 +1176,10 @@ pub struct NextFrame(pub u64);
 
 impl NextFrame {
     pub fn is_event(&self, event: &Event) -> Option<NextFrameEvent> {
+        // Ids start at 1, so the default id never fires.
+        if self.0 == 0 {
+            return None;
+        }
         if let Event::NextFrame(ne) = event {
             if ne.set.contains(&self) {
                 return Some(ne.clone());
