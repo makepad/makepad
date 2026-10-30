@@ -1732,6 +1732,12 @@ impl Dock {
             }
             self.needs_save = true;
             *hide_tab_bar = hidden;
+            // A hidden bar doesn't draw its tabs, so they'd keep stale states like hover. We drop them instead.
+            if hidden {
+                if let Some(tab_bar) = self.tab_bars.get_mut(&tabs_id) {
+                    tab_bar.tab_bar.clear_tabs();
+                }
+            }
             self.area.redraw(cx);
         }
     }
@@ -2809,6 +2815,14 @@ impl DockRef {
         }
     }
 
+    /// Closes the given tab but keeps its body, which creating a tab with the same ID later reuses.
+    pub fn close_tab_preserving_item(&self, cx: &mut Cx, tab_id: LiveId) {
+        if let Some(mut dock) = self.borrow_mut() {
+            dock.close_tab(cx, tab_id, true);
+            dock.dock_items.remove(&tab_id);
+        }
+    }
+
     pub fn accept_drag(&self, cx: &mut Cx, dh: DragHitEvent, dr: DragResponse) {
         if let Some(mut dock) = self.borrow_mut() {
             if let Some(pos) = dock.find_drop_position(cx, dh.abs) {
@@ -3817,5 +3831,33 @@ mod tests {
         dock.set_tab_bar_hidden(&mut cx, id!(root), false);
         assert!(!is_hidden(&dock));
         assert!(dock.check_and_clear_need_save());
+    }
+
+    #[test]
+    fn creating_a_tab_again_reuses_its_preserved_body() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let dock = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = initial_style_test_dock(vm);
+            Dock::script_from_value(vm, value)
+        });
+        let dock = WidgetRef::new_with_inner(Box::new(dock)).as_dock();
+        let body = dock.item(id!(second));
+        body.set_text(&mut cx, "preserved content");
+        dock.close_tab_preserving_item(&mut cx, id!(second));
+        assert!(dock.find_tab_bar_of_tab(id!(second)).is_none());
+        assert!(!dock.borrow().unwrap().dock_items.contains_key(&id!(second)));
+
+        let created = dock.create_tab(
+            &mut cx,
+            id!(work_tabs),
+            id!(second),
+            id!(Body),
+            "second".into(),
+            id!(CloseableTab),
+            None,
+        );
+        assert!(created.is_some_and(|created| created == body));
+        assert_eq!(dock.item(id!(second)).text(), "preserved content");
     }
 }
