@@ -527,12 +527,53 @@ fn mouse_dragging_code_selects_it_and_scrolls_nothing(app: TestApp) {
 fn touch_dragging_from_a_button_above_code_never_clicks_it(app: TestApp) {
     open_code_modal(&app);
     let [page] = offsets(&app, ["code_page"]);
-    app.locator(Selector::id("code_button")).touch_drag_by_and_hold(0.0, -60.0);
-    assert_eq!(offsets(&app, ["code_clicks", "code_page"]), [0.0, page]);
-
     // A touch that stays put is still a tap.
     app.locator(Selector::id("code_button")).touch_drag_by(0.0, 0.0);
     wait_for(&app, "code_clicks", 1.0);
+
+    // A drag takes the press from the button and drags its page instead.
+    app.locator(Selector::id("code_button")).touch_drag_by_and_hold(0.0, -60.0);
+    let [clicks, page_after] = offsets(&app, ["code_clicks", "code_page"]);
+    assert_eq!(clicks, 1.0);
+    assert!(page_after >= page + 40.0, "the page followed the finger ({page} -> {page_after})");
+}
+
+#[makepad_test]
+fn touch_dragging_from_a_button_drags_its_page_and_never_clicks_it(app: TestApp) {
+    let [page] = offsets(&app, ["tap_page"]);
+    app.locator(Selector::id("tap_button")).touch_drag_by(0.0, 0.0);
+    wait_for(&app, "tap_clicks", 1.0);
+
+    app.locator(Selector::id("tap_button")).touch_drag_by_and_hold(0.0, -60.0);
+    let [clicks, page_after] = offsets(&app, ["tap_clicks", "tap_page"]);
+    assert_eq!(clicks, 1.0);
+    assert!(page_after >= page + 40.0, "the page followed the finger ({page} -> {page_after})");
+}
+
+#[makepad_test]
+fn touch_dragging_from_a_tappable_row_drags_its_page_and_never_taps_it(app: TestApp) {
+    let [page] = offsets(&app, ["tap_page"]);
+    app.locator(Selector::id("tap_row")).touch_drag_by(0.0, 0.0);
+    wait_for(&app, "tap_row_taps", 1.0);
+
+    app.locator(Selector::id("tap_row")).touch_drag_by_and_hold(0.0, -60.0);
+    let [taps, page_after] = offsets(&app, ["tap_row_taps", "tap_page"]);
+    assert_eq!(taps, 1.0);
+    assert!(page_after >= page + 40.0, "the page followed the finger ({page} -> {page_after})");
+}
+
+#[makepad_test]
+fn touch_dragging_sideways_from_a_button_leaves_its_page_alone(app: TestApp) {
+    let [page] = offsets(&app, ["tap_page"]);
+    app.locator(Selector::id("tap_button")).touch_drag_by_and_hold(60.0, -4.0);
+    assert_eq!(offsets(&app, ["tap_page"]), [page]);
+}
+
+#[makepad_test]
+fn mouse_dragging_from_a_button_leaves_its_page_alone(app: TestApp) {
+    let [page] = offsets(&app, ["tap_page"]);
+    app.locator(Selector::id("tap_button")).drag_by(0.0, -60.0);
+    assert_eq!(offsets(&app, ["tap_page"]), [page]);
 }
 
 #[makepad_test]

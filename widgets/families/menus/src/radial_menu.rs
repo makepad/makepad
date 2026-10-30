@@ -2292,6 +2292,9 @@ impl RadialMenu {
                     self.touch = None;
                     self.open_with(cx, fe.abs, true);
                 }
+                if self.open.is_some() {
+                    cx.claim_finger_drag(fe.digit_id);
+                }
             }
             Hit::FingerMove(fe) => self.pointer_at(cx, fe.abs),
             Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => self.pointer_at(cx, fe.abs),

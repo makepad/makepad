@@ -217,6 +217,28 @@ script_mod! {
                                         Label{height: 30 text: "Under 12"}
                                     }
                                     open_code_modal := Button{text: "OpenCodeModal"}
+                                    // A page whose rows are tappable, like a list of search results.
+                                    tap_page := ScrollYView{
+                                        width: Fill
+                                        height: 160
+                                        flow: Down
+                                        tap_top := Label{height: 30 text: "TapTop"}
+                                        tap_button := Button{text: "TapButton"}
+                                        tap_row := View{
+                                            width: Fill
+                                            height: 40
+                                            cursor: MouseCursor.Hand
+                                            Label{text: "TapRow"}
+                                        }
+                                        Label{height: 30 text: "Tap 1"}
+                                        Label{height: 30 text: "Tap 2"}
+                                        Label{height: 30 text: "Tap 3"}
+                                        Label{height: 30 text: "Tap 4"}
+                                        Label{height: 30 text: "Tap 5"}
+                                        Label{height: 30 text: "Tap 6"}
+                                        Label{height: 30 text: "Tap 7"}
+                                        Label{height: 30 text: "Tap 8"}
+                                    }
                                 }
                                 stack_box := View{
                                     width: 200
@@ -467,6 +489,10 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     code_clicks: usize,
+    #[rust]
+    tap_clicks: usize,
+    #[rust]
+    tap_row_taps: usize,
 }
 
 impl App {
@@ -527,14 +553,19 @@ impl App {
             },
             None => (-1.0, -1.0),
         };
+        let tap_page = ui.widget(cx, ids!(tap_page));
+        let tap_page_y = -offset(cx, &tap_page, &ui.widget(cx, ids!(tap_top))).y;
         format!(
             "page={page_y:.0} log={log:.0} short={short:.0} inner={inner_y:.0} carousel={carousel_x:.0} \
              outer={outer:.0} nested={nested:.0} nested_short={nested_short:.0} strip={strip_x:.0} \
              code={code_y:.0} fit={fit:.1} fit_travel={fit_travel:.0} under={under_y:.0} \
              swipe={swipe_x:.0} stack_depth={stack_depth} panel={panel:.0} panel_list={panel_list:.0} \
              modal={modal_y:.0} modal_list={modal_list:.0} code_page={code_page_y:.0} \
-             code_x={code_view_x:.0} code_sel={code_sel} code_clicks={}",
-            self.code_clicks
+             code_x={code_view_x:.0} code_sel={code_sel} code_clicks={} \
+             tap_page={tap_page_y:.0} tap_clicks={} tap_row_taps={}",
+            self.code_clicks,
+            self.tap_clicks,
+            self.tap_row_taps,
         )
     }
 }
@@ -566,6 +597,12 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(code_button)).clicked(actions) {
             self.code_clicks += 1;
+        }
+        if self.ui.button(cx, ids!(tap_button)).clicked(actions) {
+            self.tap_clicks += 1;
+        }
+        if self.ui.view(cx, ids!(tap_row)).finger_up(actions).is_some_and(|fe| fe.is_over && fe.was_tap()) {
+            self.tap_row_taps += 1;
         }
     }
 }

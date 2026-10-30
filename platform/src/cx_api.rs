@@ -1795,9 +1795,15 @@ impl Cx {
     }
 
     /// The way `digit_id`'s drag may go once it has traveled the tap distance, or `None` until then.
-    /// A drag that only one scroller takes is never held back.
+    /// A drag that only one scroller takes is never held back, unless [`Cx::lock_drag_direction`] picked its way.
     pub fn lock_scroll_drag(&mut self, digit_id: DigitId, travel: Vec2d) -> Option<ScrollDirection> {
         self.fingers.lock_scroll_drag(digit_id, travel)
+    }
+
+    /// The way `digit_id`'s drag goes once it has traveled the tap distance, kept for the rest of its press, or `None`
+    /// until then. A drag scroller asks while a widget inside it (like a button) still holds the press.
+    pub fn lock_drag_direction(&mut self, digit_id: DigitId, travel: Vec2d) -> Option<ScrollDirection> {
+        self.fingers.lock_drag_direction(digit_id, travel)
     }
 
     pub fn start_timeout(&mut self, delay: f64) -> Timer {

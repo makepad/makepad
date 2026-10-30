@@ -1054,7 +1054,8 @@ impl ScrollBar {
         }
 
         let axis = self.axis.vec_index();
-        // We can share a press that only nested drag scrollers hold, along an axis none of them took.
+        // We can share a press that only nested drag scrollers hold, along an axis none of them took,
+        // and a touch that widgets inside us hold, which we take from them once it's a drag our way.
         let joins = self.scrollable()
             && match event {
                 Event::MouseDown(e) => {
@@ -1075,7 +1076,7 @@ impl ScrollBar {
                         .peekable();
                     held.peek().is_some()
                         && held.all(|t| {
-                            cx.fingers.can_join_scroll_drag(live_id_num!(touch, t.uid).into(), axis, scroll_area)
+                            cx.fingers.can_take_over_press(live_id_num!(touch, t.uid).into(), axis, scroll_area)
                         })
                 }
                 _ => false,
@@ -1122,10 +1123,18 @@ impl ScrollBar {
                     // stands down, settling from rest.
                     let mut from = samples.last().unwrap().abs;
                     if !self.drag_claimed {
-                        // A drag we share with a scroller along the other axis keeps to the way it started out,
-                        // so it doesn't need to be mostly along our axis below.
+                        // A drag we share with a scroller along the other axis, or one a widget inside us holds,
+                        // keeps to the way it started out, so it doesn't need to be mostly along our axis below.
                         let is_shared = cx.fingers.is_scroll_drag_shared(e.digit_id);
-                        match cx.lock_scroll_drag(e.digit_id, e.abs - e.abs_start) {
+                        // A widget inside us, like a button, keeps the press until it turns out to be a drag our way.
+                        let is_held_by_widget = cx.fingers.is_press_held_by_widget(e.digit_id, scroll_area);
+                        let travel = e.abs - e.abs_start;
+                        let direction = if is_held_by_widget {
+                            cx.lock_drag_direction(e.digit_id, travel)
+                        } else {
+                            cx.lock_scroll_drag(e.digit_id, travel)
+                        };
+                        match direction {
                             None => {
                                 push_sample(samples, new_abs, e.time);
                                 return;
@@ -1133,7 +1142,6 @@ impl ScrollBar {
                             Some(direction) if !direction.allows(axis) => return self.stand_down(cx),
                             Some(_) => {}
                         }
-                        let travel = e.abs - e.abs_start;
                         let (along, across) = match self.axis {
                             ScrollAxis::Horizontal => (travel.x.abs(), travel.y.abs()),
                             ScrollAxis::Vertical => (travel.y.abs(), travel.x.abs()),
@@ -1141,7 +1149,7 @@ impl ScrollBar {
                         // Touch only: a mouse drag scrolls from its first move,
                         // as it always has.
                         let slop = touch_drag_slop(TAP_COUNT_DISTANCE, e.device.is_touch());
-                        if e.device.is_touch() && (along < slop || (along < across && !is_shared)) {
+                        if e.device.is_touch() && (along < slop || (along < across && !is_shared && !is_held_by_widget)) {
                             push_sample(samples, new_abs, e.time);
                             return;
                         }
@@ -1314,12 +1322,10 @@ impl ScrollBar {
             match event.hits(cx, self.draw_bg.area()) {
                 Hit::FingerDown(fe) if fe.is_primary_hit() => {
                     self.animator_play(cx, ids!(hover.drag));
+                    cx.claim_finger_drag(fe.digit_id);
                     let rel = fe.abs - fe.rect.pos;
                     let rel = match self.axis {
-                        ScrollAxis::Horizontal => {
-                            cx.claim_finger_drag(fe.digit_id);
-                            rel.x
-                        }
+                        ScrollAxis::Horizontal => rel.x,
                         ScrollAxis::Vertical => rel.y,
                     };
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
