@@ -618,7 +618,8 @@ are not registered in the restricted isolate. Script callbacks run within the
 same per-call budget as other entries into an isolate. Splash installs its own context while dispatching/drawing
 children, so native widget behavior cannot accidentally borrow host authority.
 Per-Splash stylesheet re-evaluation is disabled in this mode; restricted
-isolates retain the trusted boot theme chosen with `set_splash_theme`.
+isolates take the trusted theme chosen with `set_splash_theme` (and the host's
+`set_splash_theme_script`), and restyle when the host changes it.
 
 The host may still explicitly supply a private jailed filesystem through
 `set_sandbox_dir`. For information-flow enforcement, either label all data in
