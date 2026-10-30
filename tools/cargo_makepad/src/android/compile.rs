@@ -360,9 +360,11 @@ fn main_java(url: &str, host: bool) -> String {
                 box.setOrientation(android.widget.LinearLayout.VERTICAL);
                 box.setGravity(android.view.Gravity.CENTER);
                 box.setBackgroundColor(0xFF14161F);
-                final android.widget.ProgressBar spin = new android.widget.ProgressBar(this);
-                spin.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(0xFFFF8C1A));
-                box.addView(spin, new android.widget.LinearLayout.LayoutParams(130, 130));
+                // No indeterminate spinner: its animated vector invalidated the window every vsync,
+                // and this window draws in software -- a full-screen buffer lock, clear and draw per
+                // frame took a whole core from the loader's compiles on a Snapdragon 685 (the
+                // Android main thread was busy 16.7 s of a 17 s warm start). The bar below and the
+                // text change only when the loader's status does, four times a second.
                 final android.widget.ProgressBar bar = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
                 bar.setMax(1000);
                 bar.setProgressTintList(android.content.res.ColorStateList.valueOf(0xFFFF8C1A));
@@ -381,18 +383,23 @@ fn main_java(url: &str, host: bool) -> String {
                 l1.setPadding(0, 30, 0, 6);
                 addContentView(box, new android.view.ViewGroup.LayoutParams(-1, -1));
                 final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
-                h.post(new Runnable(){ public void run(){
+                l2.setVisibility(android.view.View.GONE);
+                h.post(new Runnable(){
+                    String shown = ""; int progress = -1;
+                    public void run(){
                     String[] s = dev.makepad.run.RunActivity.status().split("\\|", 6);
                     if (s[0].equals("ready")) { ((android.view.ViewGroup) box.getParent()).removeView(box); return; }
-                    if (s[0].equals("failed")) { l1.setText("could not start"); l2.setText(s.length > 5 ? s[5] : ""); return; }
+                    if (s[0].equals("failed")) { l1.setText("could not start"); l2.setText(s.length > 5 ? s[5] : ""); l2.setVisibility(android.view.View.VISIBLE); return; }
                     String phase = s.length > 1 && !s[1].isEmpty() ? s[1] : "starting";
                     long done = s.length > 2 ? Long.parseLong(s[2]) : 0, total = s.length > 3 ? Long.parseLong(s[3]) : 0;
                     String fns = s.length > 4 ? s[4] : "0";
                     long f = Long.parseLong(fns);
-                    l1.setText(f > 0 ? phase + " \u00b7 " + java.text.NumberFormat.getIntegerInstance(java.util.Locale.US).format(f) + " fns" : phase);
-                    l2.setVisibility(android.view.View.GONE);
-                    bar.setProgress(total > 0 ? (int)(1000 * done / total) : 0);
-                    h.postDelayed(this, 100);
+                    String text = f > 0 ? phase + " \u00b7 " + java.text.NumberFormat.getIntegerInstance(java.util.Locale.US).format(f) + " fns" : phase;
+                    // (a view set to what it shows still invalidates the window)
+                    if (!text.equals(shown)) { shown = text; l1.setText(text); }
+                    int p = total > 0 ? (int)(1000 * done / total) : 0;
+                    if (p != progress) { progress = p; bar.setProgress(p); }
+                    h.postDelayed(this, 250);
                 }});
             }
         "#
