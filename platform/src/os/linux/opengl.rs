@@ -1110,28 +1110,8 @@ impl Cx {
                         } else {
                             (gl.glBindTexture)(expected_target, 0);
                         }
-
-                        if let Some(loc) = shgl.textures[i].loc {
-                            (gl.glUniform1i)(loc, i as i32);
-                        }
-                        if let Some(gl_bind_sampler) = gl.glBindSampler {
-                            // Do not bind sampler objects for OES external textures;
-                            // per GL ES spec, using sampler objects with external textures
-                            // is undefined behavior.
-                            let is_oes = matches!(
-                                sh.mapping.textures[i].tex_type,
-                                TextureType::TextureVideo
-                            );
-                            let sampler = if is_oes {
-                                0
-                            } else {
-                                shgl.samplers
-                                    .get(i)
-                                    .and_then(|sampler| sampler.sampler)
-                                    .unwrap_or(0)
-                            };
-                            gl_bind_sampler(i as u32, sampler);
-                        }
+                        // Each sampler uniform's unit is set once at link, and since we never create
+                        // sampler objects (see `opengl_create_samplers`), every unit stays on sampler 0.
                     }
                     if trace_draw {
                         crate::trace!(
@@ -2075,6 +2055,14 @@ impl GlShader {
                 GlShader::set_uniform_array(gl, &uniforms.const_table_uniform, &zeros);
             }
 
+            // Each sampler always reads the texture unit matching its slot, so we set that once here.
+            let textures = Self::opengl_get_texture_slots(gl, program, &mapping.textures);
+            for (unit, texture) in textures.iter().enumerate() {
+                if let Some(loc) = texture.loc {
+                    (gl.glUniform1i)(loc, unit as i32);
+                }
+            }
+
             (gl.glUseProgram)(0);
 
             Self {
@@ -2093,7 +2081,7 @@ impl GlShader {
                     mapping.instances.total_slots,
                     &mapping.instances.inputs,
                 ),
-                textures: Self::opengl_get_texture_slots(gl, program, &mapping.textures),
+                textures,
                 samplers: Self::opengl_create_samplers(gl, mapping),
                 xr_depth_texture: Self::opengl_get_uniform(gl, program, "xr_depth_texture"),
                 uniforms,
