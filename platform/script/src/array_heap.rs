@@ -183,6 +183,30 @@ impl ScriptHeap {
         ptr
     }
 
+    /// Byte-array twin of `new_string_with_preflight`: `len` (exact or an upper
+    /// bound) is charged to the allocation budget before the buffer exists.
+    pub(crate) fn new_array_u8_with_preflight<F: FnOnce(&mut Vec<u8>)>(
+        &mut self,
+        len: usize,
+        operation: &'static str,
+        cb: F,
+    ) -> ScriptArray {
+        let ptr = self.new_array();
+        if self.is_allocation_poison_array(ptr) || !self.charge_allocation(len, operation) {
+            return ptr;
+        }
+        let mut data = Vec::with_capacity(len);
+        cb(&mut data);
+        debug_assert!(
+            data.len() <= len,
+            "preflighted byte array exceeded its declared bound"
+        );
+        let array = &mut self.arrays[ptr];
+        array.tag.set_dirty();
+        array.storage = ScriptArrayStorage::U8(data);
+        ptr
+    }
+
     pub fn array_mut(
         &mut self,
         array: ScriptArray,

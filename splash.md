@@ -592,6 +592,13 @@ host.request("network.http", {url: "https://example.com/data"}, fn(result) {
 })
 ```
 
+A host can return binary data, such as an image, as base64 text:
+`text.decode_base64()` gives the U8 byte array that
+`Image.load_image_from_data_async(bytes)` accepts (or `nil` if the text is not
+valid base64) in one native call, and `bytes.to_base64()` encodes the other way.
+Decoding takes only the standard alphabet (padding optional, ASCII whitespace
+skipped), so strip any `data:...;base64,` prefix first.
+
 `network.http` is an example host-defined service, not a built-in transport.
 The embedding host drains `take_splash_host_requests()`, authorizes the request
 using its trusted `app_tag`/`heap_key`, and responds through

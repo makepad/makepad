@@ -1,3 +1,4 @@
+use crate::base64;
 use crate::function::*;
 use crate::heap::*;
 use crate::makepad_live_id::*;
@@ -554,6 +555,37 @@ impl ScriptArrayData {
                         .into();
                 }
                 script_err_unexpected!(vm.bx.threads.cur_ref().trap, "unexpected array type")
+            },
+        );
+
+        // bytes.to_base64() -> string (standard alphabet, padded); self must be a U8 byte array
+        native.add_type_method(
+            heap,
+            ScriptValueType::REDUX_ARRAY,
+            id!(to_base64),
+            &[],
+            |vm, args| {
+                if let Some(arr) = script_value!(vm, args.self).as_array() {
+                    let ScriptArrayStorage::U8(bytes) = vm.bx.heap.array_storage(arr) else {
+                        return script_err_type_mismatch!(
+                            vm.bx.threads.cur_ref().trap,
+                            "to_base64 requires U8 byte array, got different array storage type"
+                        );
+                    };
+                    let len = base64::encoded_len(bytes.len());
+                    return vm
+                        .bx
+                        .heap
+                        .new_string_with_preflight(len, "encoding base64", |heap, out| {
+                            if let ScriptArrayStorage::U8(bytes) = heap.array_storage(arr) {
+                                base64::encode_into(bytes, out);
+                            }
+                        });
+                }
+                script_err_unexpected!(
+                    vm.bx.threads.cur_ref().trap,
+                    "to_base64 called on non-array value"
+                )
             },
         );
 

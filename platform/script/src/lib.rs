@@ -44,6 +44,7 @@ pub mod native;
 pub mod apply;
 pub mod array;
 pub mod array_heap;
+mod base64;
 pub mod function;
 pub mod gc;
 pub mod handle;
