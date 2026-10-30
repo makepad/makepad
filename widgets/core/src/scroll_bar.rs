@@ -1202,6 +1202,12 @@ impl ScrollBar {
                 _ => (),
             },
             Hit::FingerUp(fe) if fe.is_primary_hit() => match &mut self.scroll_state {
+                ScrollState::Drag { .. } if fe.cancelled && cx.fingers.press_taken_away(fe.digit_id) => {
+                    // Cancellation releases the held stretch without starting a flick.
+                    self.caught_fling = None;
+                    self.drag_claimed = false;
+                    self.stop_drag(cx, dispatch_action);
+                }
                 ScrollState::Drag { samples } => {
                     // The press's release settles the fate of any fling it caught:
                     // only a qualifying same-direction flick below adds it back.
