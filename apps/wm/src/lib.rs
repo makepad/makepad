@@ -4012,11 +4012,17 @@ impl App {
         }
         // MAKEPAD_WM_BACKDROP names the procedural background to start on;
         // the warp desktop's own is the warp grid.
+        // No procedural layer on the phone: its desk paints its own wallpaper over the whole
+        // screen (mobile_surface.rs draw_wallpaper, opaque), so the layer under it is never seen,
+        // and on an Adreno 610 the warp grid alone was 44 ms of GPU a frame (13 fps; 28 without).
+        // MAKEPAD_WM_BACKDROP=plain asks for the same anywhere; a named kind still overrides.
+        let mobile = self.state_mut().style.target.mobile();
+        let plain = mobile || std::env::var("MAKEPAD_WM_BACKDROP").is_ok_and(|n| n == "plain");
         let choice = backdrop::env_kind()
             .filter(|_| index == 0 && !classic)
-            .or_else(|| (index == 0 && !classic).then_some(backdrop::Kind::WarpGrid))
+            .or_else(|| (index == 0 && !classic && !plain).then_some(backdrop::Kind::WarpGrid))
             .map(backdrop::Choice::Procedural)
-            .unwrap_or_else(|| choices[index % choices.len()].clone());
+            .unwrap_or_else(|| if plain && index == 0 { backdrop::Choice::Plain } else { choices[index % choices.len()].clone() });
         let kind = match &choice {
             backdrop::Choice::Procedural(kind) => Some(*kind),
             _ => None,
