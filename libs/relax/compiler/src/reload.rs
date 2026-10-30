@@ -4434,8 +4434,10 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
     let mut tick: u32 = 0;
     // a WM dock app: only a devhub sync of landed work may change its code (`DockGate`)
     let mut dock = DockGate::from_env();
-    // the edits ledger as the last round saw it (`virtual_quiet`)
+    // the edits ledger as the last round saw it (`virtual_quiet`), and which files are a mounted
+    // store's (asked once per watch set: the lookup normalizes the path and walks the mounts)
     let mut ledger = crate::vfs::edits_ledger_stamp();
+    let mut virt: Vec<bool> = Vec::new();
     let mut startup_scan = true;
     let mut restart_required = false;
     let mut revision = 0;
@@ -4588,13 +4590,14 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         let now_ledger = crate::vfs::edits_ledger_stamp();
         let virtual_quiet = now_ledger == ledger && !synced;
         ledger = now_ledger;
+        if rewatched || virt.len() != files.len() { virt = files.iter().map(|f| crate::vfs::is_virtual(&f.0)).collect(); }
         let t_round = std::time::Instant::now();
         let mut changed: Vec<usize> = Vec::new();
         let mut scanned = 0;
         if all {
             scanned = files.len();
             for (k, f) in files.iter_mut().enumerate() {
-                if virtual_quiet && crate::vfs::is_virtual(&f.0) { continue; }
+                if virtual_quiet && virt[k] { continue; }
                 if stamp(&f.0) != f.2 {
                     changed.push(k);
                 }
@@ -4607,7 +4610,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         } else {
             scanned = hot.len();
             for &k in &hot {
-                if virtual_quiet && crate::vfs::is_virtual(&files[k].0) { continue; }
+                if virtual_quiet && virt[k] { continue; }
                 if stamp(&files[k].0) != files[k].2 {
                     changed.push(k);
                 }
