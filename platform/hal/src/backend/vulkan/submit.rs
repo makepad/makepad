@@ -107,10 +107,23 @@ impl Drop for Slot {
 pub(super) struct Spare {
     slots: Mutex<Vec<Slot>>,
     arenas: Mutex<Arenas>,
+    /// batches made and not yet dropped (completed or abandoned): at `IN_FLIGHT_MAX` the
+    /// renderer waits for room (`Batch::new`) instead of recording ahead of the submit worker
+    in_flight: Mutex<usize>,
+    room: std::sync::Condvar,
 }
 pub(super) type Spares = Arc<Spare>;
 /// More frames than this in flight at once are not kept for reuse.
 const SPARE_SLOTS: usize = 256;
+/// Batches recorded and not yet completed at once; the renderer waits for room at this many
+/// (every target frame of a beat is a batch: a window frame with its effect passes is a few).
+/// Without the bound a submit worker slower than the renderer queued seconds of frames, and the
+/// backlog fed itself: every batch took a fresh slot, descriptor pools and arena (a Snapdragon
+/// 685 swipe: 1,439 slots made in 27 s, none reused, each frame shown 21 s after its recording).
+const IN_FLIGHT_MAX: usize = 8;
+/// The longest one wait for room: the worker may itself wait on the host freeing GPU memory
+/// (`submit_until_room`), which needs the renderer running.
+const IN_FLIGHT_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// The smallest upload arena; arenas grow by powers of two up to `ARENA_MAX`.
 const ARENA_MIN: u64 = 256 * 1024;
@@ -285,6 +298,19 @@ impl Batch {
     /// A batch on a reset slot. `queries`: timestamps it writes (0: none; 2: its own start and
     /// end; more: a profiled frame's passes, `prof`).
     pub fn new(dev: Arc<Device>, spares: &Spares, queries: u32, reserve: u64) -> Result<Self, String> {
+        {
+            let mut n = lock(&spares.in_flight);
+            if *n >= IN_FLIGHT_MAX {
+                crate::profile::count("vk batch waited for room");
+                let waited = std::time::Instant::now();
+                while *n >= IN_FLIGHT_MAX {
+                    let (guard, timeout) = spares.room.wait_timeout(n, IN_FLIGHT_WAIT.saturating_sub(waited.elapsed())).unwrap_or_else(|e| e.into_inner());
+                    n = guard;
+                    if timeout.timed_out() && *n >= IN_FLIGHT_MAX { crate::profile::count("vk batch waited for room: timed out"); break; }
+                }
+            }
+            *n += 1;
+        }
         let spare = lock(&spares.slots).pop();
         if spare.is_none() { crate::profile::count("vk batch slot made"); }
         let mut b = Self { dev, spares: spares.clone(), reusable: false, pool: vk::CommandPool::null(), cb: vk::CommandBuffer::null(), fence: vk::Fence::null(),
@@ -622,7 +648,10 @@ impl Batch {
     /// its FrameDone follows the present (or the frame's end: superseded by a newer frame,
     /// swapchain replaced, worker closing, SHOW_TRIES exhausted -- then it is not presented).
     fn show(self, present: Present, tries: u32, later: super::device::Later, complete: Arc<Worker>, mailbox: Mailbox) {
+        // (profiled: the acquire, copy and present of one frame on the submit worker)
+        let at = if crate::profile::on() { crate::clock_ns() } else { 0 };
         let shown = present.chain.show(&present.image);
+        if at != 0 { crate::profile::since(crate::profile::Metric::ToPresent, at); }
         crate::profile::count(match &shown {
             Ok(Shown::Presented) => "vk show: presented",
             Ok(Shown::Dropped) => "vk show: dropped",
@@ -818,6 +847,9 @@ fn hand_over(scanout: (Arc<dyn super::surface::FramePresenter>, Arc<Image>, Toke
 
 impl Drop for Batch {
     fn drop(&mut self) { unsafe {
+        // room for the renderer's next batch, whatever this one's end
+        { let mut n = lock(&self.spares.in_flight); *n = n.saturating_sub(1); }
+        self.spares.room.notify_all();
         // a batch dropped before it completed (never submitted): its timed passes answer nothing
         if let Some(prof) = self.prof.take() { prof.finish(&self.dev, vk::QueryPool::null(), true); }
         for framebuffer in self.framebuffers.drain(..) { self.dev.raw.destroy_framebuffer(framebuffer, None); }
