@@ -1118,7 +1118,7 @@ public class MakepadActivity
 
     private boolean isPhysicalTextKeyboard(InputDevice device) {
         return device != null
-            && device.isEnabled()
+            && (Build.VERSION.SDK_INT < 27 || device.isEnabled())
             && !device.isVirtual()
             && device.supportsSource(InputDevice.SOURCE_KEYBOARD)
             && device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC;
