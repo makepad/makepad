@@ -826,25 +826,47 @@ impl Cx {
 
                 // lets check if our vao is still valid
                 if draw_item.os.vao.is_none() {
-                    draw_item.os.vao = Some(CxOsDrawCallVao {
-                        vao: None,
-                        shader_id: None,
-                        inst_vb: None,
-                        geom_vb: None,
-                        geom_ib: None,
-                    });
+                    draw_item.os.vao = Some(CxOsDrawCallVao::default());
                 }
 
                 let vao = draw_item.os.vao.as_mut().unwrap();
+                let shader_id = Some(draw_call.draw_shader_id.index);
+                let (geom_vb, geom_ib) = (geometry.os.vb.gl_buffer, geometry.os.ib.gl_buffer);
                 if vao.inst_vb != draw_item.os.inst_vb.gl_buffer
-                    || vao.geom_vb != geometry.os.vb.gl_buffer
-                    || vao.geom_ib != geometry.os.ib.gl_buffer
-                    || vao.shader_id != Some(draw_call.draw_shader_id.index)
+                    || vao.geom_vb != geom_vb
+                    || vao.geom_ib != geom_ib
+                    || vao.shader_id != shader_id
                 {
-                    if let Some(vao) = vao.vao.take() {
-                        unsafe { (gl.glDeleteVertexArrays)(1, &vao) };
+                    // Every VAO we kept points at this item's instance buffer, so they're only reusable while it stays the same.
+                    let inst_vb_changed = vao.inst_vb != draw_item.os.inst_vb.gl_buffer;
+                    if let Some(current) = vao.vao.take() {
+                        if inst_vb_changed {
+                            unsafe { (gl.glDeleteVertexArrays)(1, &current) };
+                        } else {
+                            vao.spares.push(SpareVao { shader_id: vao.shader_id, geom_vb: vao.geom_vb, geom_ib: vao.geom_ib, vao: current });
+                        }
                     }
-
+                    if inst_vb_changed {
+                        for spare in vao.spares.drain(..) {
+                            unsafe { (gl.glDeleteVertexArrays)(1, &spare.vao) };
+                        }
+                    }
+                    let reusable = vao.spares.iter().position(|spare| {
+                        spare.shader_id == shader_id && spare.geom_vb == geom_vb && spare.geom_ib == geom_ib
+                    });
+                    if let Some(index) = reusable {
+                        vao.vao = Some(vao.spares.remove(index).vao);
+                        vao.shader_id = shader_id;
+                        vao.inst_vb = draw_item.os.inst_vb.gl_buffer;
+                        vao.geom_vb = geom_vb;
+                        vao.geom_ib = geom_ib;
+                    }
+                    while vao.spares.len() > MAX_SPARE_VAOS {
+                        let oldest = vao.spares.remove(0);
+                        unsafe { (gl.glDeleteVertexArrays)(1, &oldest.vao) };
+                    }
+                }
+                if vao.vao.is_none() {
                     vao.vao = Some(unsafe {
                         let mut vao = 0u32;
                         (gl.glGenVertexArrays)(1, &mut vao);
@@ -2767,12 +2789,29 @@ pub struct CxOsDrawCallVao {
     pub inst_vb: Option<u32>,
     pub geom_vb: Option<u32>,
     pub geom_ib: Option<u32>,
+    /// VAOs this draw item built for other shaders. List rows scrolling in and out shift which shader
+    /// each draw item gets, so it often switches back and can reuse one instead of rebuilding it.
+    pub spares: Vec<SpareVao>,
 }
+
+#[derive(Clone)]
+pub struct SpareVao {
+    shader_id: Option<usize>,
+    geom_vb: Option<u32>,
+    geom_ib: Option<u32>,
+    vao: u32,
+}
+
+/// How many spare VAOs a draw item keeps, which bounds the GL objects a long list can hold onto.
+const MAX_SPARE_VAOS: usize = 3;
 
 impl CxOsDrawCallVao {
     pub fn free(self, gl: &LibGl) {
         if let Some(vao) = self.vao {
             unsafe { (gl.glDeleteVertexArrays)(1, &vao) };
+        }
+        for spare in self.spares {
+            unsafe { (gl.glDeleteVertexArrays)(1, &spare.vao) };
         }
     }
 }
