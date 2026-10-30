@@ -981,7 +981,10 @@ impl Animator {
             if self.tracks.is_empty() {
                 return None;
             }
-            if !nf.set.contains(&self.next_frame) {
+            // We may have missed the frame we asked for, so any later one counts too.
+            if !nf.set.contains(&self.next_frame)
+                && !nf.set.iter().any(|frame| frame.0 > self.next_frame.0)
+            {
                 return None;
             }
 

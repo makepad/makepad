@@ -1,4 +1,4 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt};
+use crate::{makepad_derive_widget::*, makepad_draw::*, next_frame_gate::NextFrameGates, widget::*, widget_tree::CxWidgetExt};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -35,6 +35,8 @@ pub struct PageFlip {
     templates: ComponentMap<LiveId, ScriptObjectRef>,
     #[rust]
     pages: ComponentMap<LiveId, WidgetRef>,
+    #[rust]
+    page_frame_gates: NextFrameGates,
 }
 
 impl ScriptHook for PageFlip {
@@ -90,6 +92,9 @@ impl ScriptHook for PageFlip {
                     self.pages.insert(*page_id, page);
                 }
             }
+        }
+        if apply.is_reload() {
+            self.page_frame_gates.mark_all_wanting_frame();
         }
 
         vm.cx_mut().widget_tree_mark_dirty(self.uid);
@@ -167,10 +172,17 @@ impl Widget for PageFlip {
                 cx.group_widget_actions(uid, item_uid, |cx| page.handle_event(cx, event, scope));
             }
         } else {
-            for (_page_id, page) in self.pages.iter() {
+            for (page_id, page) in self.pages.iter() {
                 let item_uid = page.widget_uid();
-                cx.group_widget_actions(uid, item_uid, |cx| page.handle_event(cx, event, scope));
+                let is_visible = self.visible && *page_id == self.active_page;
+                self.page_frame_gates.get_or_insert(item_uid).deliver_event(cx, event, is_visible, |cx| {
+                    cx.group_widget_actions(uid, item_uid, |cx| page.handle_event(cx, event, scope));
+                });
             }
+            let pages = &self.pages;
+            self.page_frame_gates.prune(pages.len(), |uid| {
+                pages.values().any(|page| page.widget_uid() == uid)
+            });
         }
     }
 
@@ -178,6 +190,7 @@ impl Widget for PageFlip {
         if !self.visible { return DrawStep::done(); }
         let active_page = self.active_page;
         if let Some(page) = self.page(cx, active_page) {
+            self.page_frame_gates.get_or_insert(page.widget_uid()).mark_drawn(cx);
             if self.draw_state.begin_with(cx, &(), |cx, _| page.walk(cx)) {
                 self.begin(cx, walk);
             }
