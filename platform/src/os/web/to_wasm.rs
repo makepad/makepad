@@ -239,6 +239,7 @@ impl From<WTouchPoint> for TouchPoint {
                 0 => TouchState::Stable,
                 1 => TouchState::Start,
                 2 => TouchState::Move,
+                4 => TouchState::Cancel,
                 _ => TouchState::Stop,
             },
             time: v.time,

@@ -734,6 +734,11 @@ impl App {
                 TouchState::Start => PhonePointerPhase::Down,
                 TouchState::Move => PhonePointerPhase::Move,
                 TouchState::Stop => PhonePointerPhase::Up,
+                // Only the owned touch can be a `Cancel` here, since we pick up others on their `Start`.
+                TouchState::Cancel => {
+                    self.cancel_phone_input(cx);
+                    return true;
+                }
                 TouchState::Stable => return owned.is_some() || !self.state_mut().phone.accepts_app_input(),
             };
             // The touch's own clock mapped onto the frame clock, once per
