@@ -617,10 +617,15 @@ impl Options {
             spec_ttl_ms,
             tier1_calls,
             core_hint,
-            spec_hot,
+            // run-time scheduling knobs, filled in from the machine's state at session start
+            // (lib.rs session_from_env: on battery, online cores): they decide when bodies are
+            // compiled, not what code they compile to -- hashing them made a cache written on
+            // mains, or with other cores online, a stranger to the next launch (every record
+            // rejected: "identity: parser options")
+            spec_hot: _,
             sandbox_opt,
             inline_src,
-            spec_jobs,
+            spec_jobs: _,
             inline_leaf,
             opt,
             a64,
@@ -771,14 +776,10 @@ impl Options {
         h.u64(*tier1_calls as u64);
         h.str("core_hint");
         match core_hint { Some(v) => { h.u8(1); h.u64(*v as u64); }, None => h.u8(0) }
-        h.str("spec_hot");
-        match spec_hot { Some(v) => { h.u8(1); h.u64(*v as u64); }, None => h.u8(0) }
         h.str("sandbox_opt");
         match sandbox_opt { Some(v) => { h.u8(1); h.u64(*v as u64); }, None => h.u8(0) }
         h.str("inline_src");
         match inline_src { Some(v) => { h.u8(1); h.u64(*v as u64); }, None => h.u8(0) }
-        h.str("spec_jobs");
-        match spec_jobs { Some(v) => { h.u8(1); h.u64(*v as u64); }, None => h.u8(0) }
         h.str("inline_leaf");
         h.u64(inline_leaf.0 as u64); h.u64(inline_leaf.1 as u64);
         h.str("opt");
