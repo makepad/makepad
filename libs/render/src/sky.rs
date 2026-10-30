@@ -568,7 +568,7 @@ fn linear_rgb(y_lum: f32, x: f32, yc: f32) -> Vec3f {
 
 /// CIE XYZ to linear Rec.709 (the sRGB primaries, D65 white), each channel
 /// clipped at 0 as the sky model's colours are: the one matrix the sky and
-/// the HDRI generator's colours (`hdri::spectrum`, `hdri::studio`) share.
+/// a generated sky's colours share.
 pub fn xyz_to_linear_rgb(xyz: [f32; 3]) -> Vec3f {
     let [x, y, z] = xyz;
     vec3f(

@@ -23,16 +23,6 @@ makepad-raytrace = { path = "../raytrace" }
 makepad-fast-inflate = { path = "../fast_inflate" }
 # Basis Universal (UASTC in KTX2) textures and their transcoders; in-repo.
 makepad-texcomp = { path = "../texcomp" }
-# EXR read/write for the HDRI generator (hdri/image.rs, hdri/export.rs), and
-# half floats for its half-precision EXR option; both in-repo. makepad-half is
-# a workspace.exclude crate (a vendored `half`), which a path dependency may
-# still use, as widgets/core does with libs/tween.
-makepad-openexr = { path = "../openexr" }
-makepad-half = { path = "../vulkan/makepad-half" }
-# The shape core flattens splines and SVG paths (hdri/shape.rs). libs/tween is
-# workspace-excluded (root Cargo.toml) and builds as a path dependency, as it
-# already does for makepad-widgets-core; it has no dependencies of its own.
-makepad-tween = { path = "../tween" }
 
 # Example-only: the ao_render probe software-rasterises props so the baked AO
 # can be judged by eye without a Cx or the app. Dev-only, so the shipped crate

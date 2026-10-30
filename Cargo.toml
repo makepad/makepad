@@ -78,7 +78,6 @@ workspace.members = [
     # The tiled-RTS map generator, shared by the importer and the sandbox.
     "libs/rtsmap",
     "libs/texcomp",
-    "libs/skyline",
     "libs/ai/hub_ui",
     "libs/ai/hub_panel",
     "libs/ai/services",
