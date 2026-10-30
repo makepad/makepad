@@ -250,6 +250,10 @@ impl Tooltip {
         self.anchor = None;
     }
 
+    pub fn is_open(&self) -> bool {
+        self.opened
+    }
+
     pub fn anchor(&self) -> Option<TooltipAnchor> {
         self.anchor
     }
