@@ -4012,11 +4012,14 @@ impl App {
         }
         // MAKEPAD_WM_BACKDROP names the procedural background to start on;
         // the warp desktop's own is the warp grid.
+        // MAKEPAD_WM_BACKDROP=plain: the theme's gradient, no procedural layer (a phone-class
+        // GPU: the warp grid alone is 44 ms a frame on an Adreno 610, the whole desk 75 ms)
+        let plain = std::env::var("MAKEPAD_WM_BACKDROP").is_ok_and(|n| n == "plain");
         let choice = backdrop::env_kind()
             .filter(|_| index == 0 && !classic)
-            .or_else(|| (index == 0 && !classic).then_some(backdrop::Kind::WarpGrid))
+            .or_else(|| (index == 0 && !classic && !plain).then_some(backdrop::Kind::WarpGrid))
             .map(backdrop::Choice::Procedural)
-            .unwrap_or_else(|| choices[index % choices.len()].clone());
+            .unwrap_or_else(|| if plain && index == 0 { backdrop::Choice::Plain } else { choices[index % choices.len()].clone() });
         let kind = match &choice {
             backdrop::Choice::Procedural(kind) => Some(*kind),
             _ => None,
